@@ -1,0 +1,21 @@
+# Bugfix provenance for the review cells in
+# tests/rolloutspec/machines/instance/cells-delete.yaml.
+# Selectors match the cells file exactly: empty variants, windows or
+# transition match all. Every PR number below was confirmed present in
+# this repo's history before it was cited.
+history:
+  - {state: Delete/Drain, event: pod.servingOff, variants: [source], windows: [], transition: "", prs: ["#960"]}
+  - {state: Delete/Drain, event: pod.deleted, variants: [source], windows: [before], transition: "", prs: ["#1043"]}
+  - {state: Delete/Drain, event: pod.deleted, variants: [source], windows: [boundary], transition: T-delete-done, prs: ["#1043"]}
+  - {state: Delete/Drain, event: pod.deleted, variants: [source], windows: [after], transition: T-delete-done, prs: ["#1043", "#1044"]}
+  - {state: Delete/Drain, event: pod.stuckTerminating, variants: [], windows: [before], transition: "", prs: ["#826"]}
+  - {state: Delete/Drain, event: pod.stuckTerminating, variants: [], windows: [], transition: T-delete-force, prs: ["#826"]}
+  - {state: Delete/Drain, event: pod.nodeLost, variants: [], windows: [], transition: "", prs: ["#826"]}
+  - {state: Delete/Drain, event: spec.replicasUp, variants: [], windows: [before], transition: "", prs: ["#1044"]}
+  - {state: Delete/Drain, event: spec.replicasUp, variants: [], windows: [boundary], transition: T-delete-done, prs: ["#1044"]}
+  - {state: Delete/Drain, event: spec.replicasUp, variants: [], windows: [after], transition: T-delete-done, prs: ["#1044", "#1008"]}
+  - {state: Delete/Drain, event: spec.replicasDown, variants: [], windows: [], transition: "", prs: ["#1044"]}
+  - {state: Delete/Drain, event: spec.pauseTrue, variants: [], windows: [], transition: "", prs: ["#1279"]}
+  - {state: Delete/Drain, event: spec.pauseFreeze, variants: [], windows: [], transition: "", prs: ["#1279"]}
+  - {state: Delete/Drain, event: spec.teardown, variants: [], windows: [], transition: "", prs: ["#827", "#826"]}
+  - {state: Delete/Drain, event: api.notFound, variants: [], windows: [], transition: "", prs: ["#960", "#826"]}

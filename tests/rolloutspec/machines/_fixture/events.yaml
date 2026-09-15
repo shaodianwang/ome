@@ -1,0 +1,8 @@
+events:
+  - id: pod.ready
+    family: pod
+    variants: [source, target]
+    description: a pod reports the Ready condition
+  - id: timer.deadline
+    family: timer
+    description: the current step's deadline elapses

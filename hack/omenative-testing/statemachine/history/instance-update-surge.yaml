@@ -1,0 +1,77 @@
+# Bugfix provenance for the review cells in
+# tests/rolloutspec/machines/instance/cells-update-surge.yaml.
+# Selectors match cells the same way grid expansion does: an empty
+# variants / windows / transition matches all of them.
+history:
+  # --- Update/Surge ------------------------------------------------------
+  - {state: Update/Surge, event: pod.containersReady, variants: [target], windows: [], transition: "", prs: ["#1151"]}
+  - {state: Update/Surge, event: pod.deleted, variants: [source], windows: [before], transition: "", prs: ["#1000"]}
+  - {state: Update/Surge, event: pod.waiting, variants: [ImagePullBackOff, ErrImagePull, InvalidImageName, CreateContainerConfigError], windows: [], transition: "", prs: ["#715"]}
+  - {state: Update/Surge, event: pod.waiting, variants: [CreateContainerError], windows: [], transition: "", prs: ["#1274"]}
+  - {state: Update/Surge, event: pod.containerRestart, variants: [], windows: [], transition: "", prs: ["#1000"]}
+  - {state: Update/Surge, event: pod.ready, variants: [target], windows: [before], transition: "", prs: ["#1151", "#1371"]}
+  - {state: Update/Surge, event: pod.ready, variants: [target], windows: [boundary], transition: T-surge-target-ready, prs: ["#1151"]}
+  - {state: Update/Surge, event: pod.ready, variants: [target], windows: [boundary], transition: T-surge-abandon-superseded, prs: ["#720"]}
+  - {state: Update/Surge, event: pod.ready, variants: [target], windows: [boundary], transition: T-surge-abandon-strategy, prs: ["#1423"]}
+  - {state: Update/Surge, event: pod.ready, variants: [target], windows: [after], transition: T-surge-abandon-strategy, prs: ["#1423"]}
+  - {state: Update/Surge, event: pod.ready, variants: [target], windows: [after], transition: T-surge-deadline, prs: ["#715"]}
+  - {state: Update/Surge, event: pod.ready, variants: [target], windows: [after], transition: T-surge-stuck, prs: ["#715"]}
+  - {state: Update/Surge, event: spec.revision, variants: [], windows: [before], transition: "", prs: ["#720"]}
+  - {state: Update/Surge, event: spec.revision, variants: [], windows: [boundary], transition: T-surge-target-ready, prs: ["#720", "#1423"]}
+  - {state: Update/Surge, event: spec.revision, variants: [], windows: [after], transition: T-surge-target-ready, prs: ["#720"]}
+  - {state: Update/Surge, event: spec.revision, variants: [], windows: [boundary], transition: T-surge-abandon-superseded, prs: ["#720"]}
+  - {state: Update/Surge, event: spec.revision, variants: [], windows: [boundary], transition: T-surge-abandon-strategy, prs: ["#1423"]}
+  - {state: Update/Surge, event: spec.revision, variants: [], windows: [boundary], transition: T-surge-deadline, prs: ["#905"]}
+  - {state: Update/Surge, event: spec.revision, variants: [], windows: [after], transition: T-surge-deadline, prs: ["#905", "#715"]}
+  - {state: Update/Surge, event: spec.revision, variants: [], windows: [boundary], transition: T-surge-stuck, prs: ["#905"]}
+  - {state: Update/Surge, event: spec.revision, variants: [], windows: [after], transition: T-surge-stuck, prs: ["#905", "#715"]}
+  - {state: Update/Surge, event: spec.annotationOnly, variants: [], windows: [], transition: "", prs: ["#635", "#1367"]}
+  - {state: Update/Surge, event: spec.strategy, variants: [], windows: [], transition: "", prs: ["#1423"]}
+  - {state: Update/Surge, event: spec.pauseTrue, variants: [], windows: [], transition: "", prs: ["#1279", "#1289"]}
+  - {state: Update/Surge, event: spec.pauseFreeze, variants: [], windows: [], transition: "", prs: ["#1279"]}
+  - {state: Update/Surge, event: spec.unpause, variants: [], windows: [], transition: "", prs: ["#1279"]}
+  - {state: Update/Surge, event: spec.migrateRequest, variants: [], windows: [], transition: "", prs: ["#1106"]}
+  - {state: Update/Surge, event: timer.operationDeadline, variants: [], windows: [before], transition: "", prs: ["#788", "#715"]}
+  - {state: Update/Surge, event: timer.minReady, variants: [], windows: [], transition: "", prs: ["#1371"]}
+  - {state: Update/Surge, event: api.conflict, variants: [], windows: [], transition: "", prs: ["#872"]}
+
+  # --- Update/SurgeDrain -------------------------------------------------
+  - {state: Update/SurgeDrain, event: pod.servingOff, variants: [source], windows: [], transition: "", prs: ["#787"]}
+  - {state: Update/SurgeDrain, event: pod.deleted, variants: [target], windows: [boundary], transition: T-surgedrain-gang-complete, prs: ["#1142", "#1128"]}
+  - {state: Update/SurgeDrain, event: pod.deleted, variants: [target], windows: [after], transition: T-surgedrain-gang-complete, prs: ["#1142"]}
+  - {state: Update/SurgeDrain, event: spec.revision, variants: [], windows: [], transition: "", prs: ["#720"]}
+  - {state: Update/SurgeDrain, event: spec.annotationOnly, variants: [], windows: [], transition: "", prs: ["#635", "#1367"]}
+  - {state: Update/SurgeDrain, event: spec.strategy, variants: [], windows: [], transition: "", prs: ["#1423"]}
+  - {state: Update/SurgeDrain, event: spec.pauseTrue, variants: [], windows: [], transition: "", prs: ["#1279", "#1289"]}
+  - {state: Update/SurgeDrain, event: spec.pauseFreeze, variants: [], windows: [], transition: "", prs: ["#1279"]}
+  - {state: Update/SurgeDrain, event: spec.unpause, variants: [], windows: [], transition: "", prs: ["#1279"]}
+  - {state: Update/SurgeDrain, event: spec.migrateRequest, variants: [], windows: [], transition: "", prs: ["#1106"]}
+  - {state: Update/SurgeDrain, event: timer.minReady, variants: [], windows: [], transition: "", prs: ["#1371"]}
+  - {state: Update/SurgeDrain, event: api.conflict, variants: [], windows: [], transition: "", prs: ["#872"]}
+
+  # --- Update/SurgeDrainSettle -------------------------------------------
+  - {state: Update/SurgeDrainSettle, event: pod.servingOff, variants: [source], windows: [], transition: "", prs: ["#787"]}
+  - {state: Update/SurgeDrainSettle, event: spec.revision, variants: [], windows: [], transition: "", prs: ["#720"]}
+  - {state: Update/SurgeDrainSettle, event: spec.annotationOnly, variants: [], windows: [], transition: "", prs: ["#635", "#1367"]}
+  - {state: Update/SurgeDrainSettle, event: spec.strategy, variants: [], windows: [], transition: "", prs: ["#1423"]}
+  - {state: Update/SurgeDrainSettle, event: spec.pauseTrue, variants: [], windows: [], transition: "", prs: ["#1279", "#1289"]}
+  - {state: Update/SurgeDrainSettle, event: spec.pauseFreeze, variants: [], windows: [], transition: "", prs: ["#1279"]}
+  - {state: Update/SurgeDrainSettle, event: spec.unpause, variants: [], windows: [], transition: "", prs: ["#1279"]}
+  - {state: Update/SurgeDrainSettle, event: spec.migrateRequest, variants: [], windows: [], transition: "", prs: ["#1106"]}
+  - {state: Update/SurgeDrainSettle, event: timer.drainSettle, variants: [], windows: [], transition: "", prs: ["#787"]}
+  - {state: Update/SurgeDrainSettle, event: ctrl.crash, variants: [], windows: [], transition: "", prs: ["#787"]}
+  - {state: Update/SurgeDrainSettle, event: api.conflict, variants: [], windows: [], transition: "", prs: ["#872"]}
+  - {state: Update/Surge, event: pod.stuckTerminating, variants: [], windows: [], transition: "", prs: ["#1378"]}
+  - {state: Update/Surge, event: pod.phaseTerminal, variants: [Failed], windows: [], transition: "", prs: ["#1494"]}
+  - {state: Update/Surge, event: timer.forceDelete, variants: [], windows: [], transition: "", prs: ["#1378"]}
+  - {state: Update/Surge, event: config.changed, variants: [], windows: [], transition: "", prs: ["#1378"]}
+  - {state: Update/SurgeDrain, event: pod.stuckTerminating, variants: [], windows: [], transition: "", prs: ["#1378"]}
+  - {state: Update/SurgeDrain, event: pod.nodeLost, variants: [], windows: [], transition: "", prs: ["#1378"]}
+  - {state: Update/SurgeDrain, event: pod.phaseTerminal, variants: [Failed], windows: [], transition: "", prs: ["#1494"]}
+  - {state: Update/SurgeDrain, event: timer.forceDelete, variants: [], windows: [], transition: "", prs: ["#1378"]}
+  - {state: Update/SurgeDrain, event: config.changed, variants: [], windows: [], transition: "", prs: ["#1378"]}
+  - {state: Update/SurgeDrainSettle, event: pod.stuckTerminating, variants: [], windows: [], transition: "", prs: ["#1378"]}
+  - {state: Update/SurgeDrainSettle, event: pod.nodeLost, variants: [], windows: [], transition: "", prs: ["#1378"]}
+  - {state: Update/SurgeDrainSettle, event: pod.phaseTerminal, variants: [Failed], windows: [], transition: "", prs: ["#1494"]}
+  - {state: Update/SurgeDrainSettle, event: timer.forceDelete, variants: [], windows: [], transition: "", prs: ["#1378"]}
+  - {state: Update/SurgeDrainSettle, event: config.changed, variants: [], windows: [], transition: "", prs: ["#1378"]}

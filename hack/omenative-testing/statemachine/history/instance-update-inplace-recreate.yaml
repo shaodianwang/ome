@@ -1,0 +1,33 @@
+# Provenance for the review cells in
+# tests/rolloutspec/machines/instance/cells-update-inplace-recreate.yaml.
+# Selector fields match a cell the same way a cell selector matches a grid
+# key: an empty variants, windows or transition matches all.
+history:
+  - {state: Update/InPlace, event: pod.containersReady, variants: [source], windows: [before], transition: "", prs: ["#1130"]}
+  - {state: Update/InPlace, event: pod.containersReady, variants: [source], windows: [], transition: T-inplace-ready, prs: ["#1130", "#717"]}
+  - {state: Update/InPlace, event: pod.containerRestart, variants: [], windows: [], transition: "", prs: ["#1278"]}
+  - {state: Update/InPlace, event: spec.revision, variants: [], windows: [before], transition: "", prs: ["#1130"]}
+  - {state: Update/InPlace, event: spec.strategy, variants: [], windows: [], transition: "", prs: ["#1423"]}
+  - {state: Update/InPlace, event: spec.pauseTrue, variants: [], windows: [], transition: "", prs: ["#1279", "#1289"]}
+  - {state: Update/InPlace, event: spec.pauseFreeze, variants: [], windows: [], transition: "", prs: ["#1279", "#1289"]}
+  - {state: Update/InPlace, event: timer.minReady, variants: [], windows: [], transition: "", prs: ["#1371"]}
+  - {state: Update/InPlace, event: api.conflict, variants: [], windows: [], transition: "", prs: ["#872", "#1130"]}
+  - {state: Update/Drain, event: pod.containersReady, variants: [source], windows: [], transition: "", prs: ["#1387"]}
+  - {state: Update/Drain, event: pod.ready, variants: [source], windows: [before], transition: "", prs: ["#1387"]}
+  - {state: Update/Drain, event: pod.ready, variants: [source], windows: [], transition: T-drain-ready, prs: ["#1387", "#1371"]}
+  - {state: Update/Drain, event: pod.servingOn, variants: [source], windows: [], transition: "", prs: ["#1387"]}
+  - {state: Update/Drain, event: spec.strategy, variants: [], windows: [], transition: "", prs: ["#1423"]}
+  - {state: Update/Drain, event: spec.pauseTrue, variants: [], windows: [], transition: "", prs: ["#1279", "#1289"]}
+  - {state: Update/Drain, event: spec.pauseFreeze, variants: [], windows: [], transition: "", prs: ["#1279", "#1289"]}
+  - {state: Update/Drain, event: timer.minReady, variants: [], windows: [], transition: "", prs: ["#1371"]}
+  - {state: Update/Drain, event: api.conflict, variants: [], windows: [], transition: "", prs: ["#872"]}
+  - {state: Update/InPlace, event: pod.stuckTerminating, variants: [], windows: [], transition: "", prs: ["#1378"]}
+  - {state: Update/InPlace, event: pod.nodeLost, variants: [], windows: [], transition: "", prs: ["#1378"]}
+  - {state: Update/InPlace, event: timer.forceDelete, variants: [], windows: [], transition: "", prs: ["#1378"]}
+  - {state: Update/InPlace, event: config.changed, variants: [], windows: [], transition: "", prs: ["#1378"]}
+  - {state: Update/Drain, event: pod.stuckTerminating, variants: [], windows: [], transition: "", prs: ["#1378"]}
+  - {state: Update/Drain, event: pod.nodeLost, variants: [], windows: [], transition: "", prs: ["#1378"]}
+  - {state: Update/Drain, event: timer.forceDelete, variants: [], windows: [], transition: "", prs: ["#1378"]}
+  - {state: Update/Drain, event: config.changed, variants: [], windows: [], transition: "", prs: ["#1378"]}
+  - {state: Update/InPlace, event: pod.phaseTerminal, variants: [], windows: [], transition: "", prs: ["#1494"]}
+  - {state: Update/Drain, event: pod.phaseTerminal, variants: [], windows: [], transition: "", prs: ["#1494"]}

@@ -1,0 +1,3 @@
+machine: instance
+scope: one Instance of one OMENative Component, as persisted in InferenceReplica status.instanceStatuses[]
+frozen: false

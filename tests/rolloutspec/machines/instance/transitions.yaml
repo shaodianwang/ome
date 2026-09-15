@@ -1,0 +1,1095 @@
+# Each guard states, in one line, the condition the named file actually
+# checks before the write that leaves the source state. A transition whose
+# "to" is Empty removes the InstanceStatus row.
+transitions:
+  # --- Empty -------------------------------------------------------------
+  - id: T-empty-create
+    from: Empty
+    event: spec.replicasUp
+    guard: the index is planned, pods are missing, and no RetryBlock denies the revision the attempt would pin
+    to: Create/CreatePods
+    effects: [Phase Creating with a Create CreatePods operation committed before any pod create, pods created]
+    decided_in: pkg/controller/v1beta1/workload/ops/create.go
+  - id: T-empty-create-retry
+    from: Empty
+    event: timer.retryAt
+    guard: the RetryBlock that denied the create is due and no authorized attempt at that revision is in flight
+    to: Create/CreatePods
+    effects: [Phase Creating with a Create CreatePods operation committed, pods created]
+    decided_in: pkg/controller/v1beta1/workload/ops/create.go
+  - id: T-empty-unpause
+    from: Empty
+    event: spec.unpause
+    guard: a standard pause plans nothing past the restart pass, so a planned index with no row stays Empty until pause is cleared and the Create pass runs again
+    to: Create/CreatePods
+    effects: [Phase Creating with a Create CreatePods operation committed, pods created]
+    decided_in: pkg/controller/v1beta1/workload/ops/create.go
+  - id: T-empty-gang-surge-target
+    from: Empty
+    event: spec.revision
+    guard: a gang surge source claimed this free index as its replacement and the slot is still empty
+    to: Update/GangSurgeTarget
+    effects: [Phase Creating with the gang surge-target marker stamped at Incarnation one, the index pinned in the plan]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_status.go
+  - id: T-empty-migrate-target
+    from: Empty
+    event: spec.migrateRequest
+    guard: the migration record allocated this index as its surge and the pair stamp is being established
+    to: Migrate/SurgeTarget
+    effects: [Phase Creating with the Migrate pin carrying the request uuid and a sibling pointer at the source]
+    decided_in: pkg/controller/v1beta1/workload/ops/migrate.go
+
+  # --- Pending -----------------------------------------------------------
+  - id: T-pending-create
+    from: Pending
+    event: spec.unpause
+    guard: pause is cleared so the Create pass runs again, pods are missing, and no RetryBlock denies the revision
+    to: Create/CreatePods
+    effects: [Phase Creating with a Create CreatePods operation committed, pods created]
+    decided_in: pkg/controller/v1beta1/workload/ops/create.go
+  - id: T-pending-promote
+    from: Pending
+    event: pod.containersReady
+    variant: source
+    guard: the Create pass finds the pod set complete and every pod ContainersReady, so its ready action promotes without stamping Creating first
+    to: Ready
+    effects: [Phase Ready with ReadySince stamped and the operation left nil, RunningRevision set when the pods carry the target revision hash]
+    decided_in: pkg/controller/v1beta1/workload/ops/create.go
+  - id: T-pending-stuck-failed
+    from: Pending
+    event: pod.waiting
+    guard: a leftover pod whose revision-hash label disagrees with the Component's current revision stays in a terminal waiting reason past the stuck-pod grace, and the pod set is not fully serving
+    to: Failed
+    effects: [Phase Failed with the stuck pod's termination on LastFailure and no operation, since an operation-less row is never disposed]
+    decided_in: pkg/controller/v1beta1/workload/escalation.go
+  - id: T-pending-gang-restart
+    from: Pending
+    event: timer.retryAt
+    guard: a gang row whose recorded pod count is complete but whose live pods are fewer, and whose RetryBlock has come due so the rebuild gate no longer denies; the same test is unsatisfiable at one expected pod
+    to: Restart/Drain
+    effects: [Operation Restart Drain stamped, the surviving pods drained and deleted before the rebuild at a bumped incarnation]
+    decided_in: pkg/controller/v1beta1/workload/ops/restart.go
+  - id: T-pending-terminal-restart
+    from: Pending
+    event: pod.phaseTerminal
+    guard: a gang row whose recorded pod count is complete but whose live pods are fewer once terminal-phase pods are excluded, with at least one survivor and the rebuild gate admitting
+    to: Restart/Drain
+    effects: [Operation Restart Drain stamped, the surviving pods drained and deleted before the rebuild at a bumped incarnation]
+    decided_in: pkg/controller/v1beta1/workload/ops/restart.go
+  - id: T-pending-scaledown
+    from: Pending
+    event: spec.replicasDown
+    guard: the index is beyond the desired set and the scale-down wave admits it
+    to: Delete/Drain
+    effects: [Phase Deleting and the Delete Drain operation committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/ops/delete_batch.go
+  - id: T-pending-teardown
+    from: Pending
+    event: spec.teardown
+    guard: the owner carries a deletionTimestamp so every observed index is treated as a scale-down extra
+    to: Delete/Drain
+    effects: [Phase Deleting and the Delete Drain operation committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/reconcile.go
+  - id: T-pending-stuckgrace
+    from: Pending
+    event: timer.stuckPodGrace
+    guard: the grace elapsed on a leftover pod whose revision-hash label disagrees with the Component current revision while it holds a terminal waiting reason, and the pod set is not fully serving
+    to: Failed
+    effects: [Phase Failed with the stuck pod termination on LastFailure and no operation, since an operation-less row is never disposed]
+    decided_in: pkg/controller/v1beta1/workload/escalation.go
+  - id: T-pending-teardown-deadline
+    from: Pending
+    event: timer.teardownDeadline
+    guard: the owner is Terminating, the configured teardown deadline has passed since its deletionTimestamp, and the teardown finalizer is still held
+    to: Empty
+    effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
+    decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+
+  # --- Ready -------------------------------------------------------------
+  - id: T-ready-surge
+    from: Ready
+    event: spec.revision
+    guard: strategy SurgeThenDrain, the coordination gate and the per-Component surge budget both admit a fresh start
+    to: Update/Surge
+    effects: [Phase Updating with the Surge step pinned to the rolling revision, replacement pod or gang created, any due RetryBlock flipped to RetryInProgress]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_surge.go
+  - id: T-ready-inplace
+    from: Ready
+    event: spec.revision
+    guard: a single-pod Instance under InPlaceIfPossible or InPlaceOnly whose diff against the running revision is regular-container images only
+    to: Update/InPlace
+    effects: [Phase Updating with the InPlace step, the image-transition marker written before the patch]
+    decided_in: pkg/controller/v1beta1/workload/ops/update.go
+  - id: T-ready-recreate
+    from: Ready
+    event: spec.revision
+    guard: strategy RecreatePod, or an in-place strategy whose diff is not image-only or whose Instance is multi-pod, with the unavailability budget and the gate admitting
+    to: Update/Drain
+    effects: [Incarnation bumped, Phase Updating with the Drain step and the revision-pair cause recorded, source serving gate off]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_recreate.go
+  - id: T-ready-inplaceonly-reject
+    from: Ready
+    event: spec.revision
+    guard: a single-pod Instance under InPlaceOnly whose diff exceeds container images
+    to: Ready
+    effects: [InPlaceUpdateNotPossible warning event, the update pass returns an error and no operation is stamped]
+    decided_in: pkg/controller/v1beta1/workload/ops/update.go
+  - id: T-ready-restart
+    from: Ready
+    event: pod.deleted
+    variant: source
+    guard: policy RecreateInstanceOnPodRestart and the live pod count is below the Instance's desired pod count
+    to: Restart/Drain
+    effects: [Incarnation bumped, Phase Restarting with the Restart Drain operation and the trigger reason recorded]
+    decided_in: pkg/controller/v1beta1/workload/ops/restart.go
+  - id: T-ready-restart-crash
+    from: Ready
+    event: pod.containerRestart
+    guard: policy RecreateInstanceOnPodRestart and the runner container started or terminated after ReadySince
+    to: Restart/Drain
+    effects: [Incarnation bumped, Phase Restarting, the failing pod's termination captured into LastFailure before the drain]
+    decided_in: pkg/controller/v1beta1/workload/ops/restart.go
+  - id: T-ready-demote
+    from: Ready
+    event: pod.deleted
+    variant: source
+    guard: paused, policy not RecreateInstanceOnPodRestart, no operation, and the live read confirms no pod backs the row
+    to: Pending
+    effects: [Phase Pending with counters, revisions and Incarnation preserved, InstanceDemoted warning event]
+    decided_in: pkg/controller/v1beta1/workload/ops/demote.go
+  - id: T-ready-stuck-failed
+    from: Ready
+    event: pod.waiting
+    guard: a pod whose revision-hash label disagrees with the Component's current revision stays in a terminal waiting reason past the stuck-pod grace, and the pod set is not fully serving
+    to: Failed
+    effects: [Phase Failed with the stuck pod's termination on LastFailure]
+    decided_in: pkg/controller/v1beta1/workload/escalation.go
+  - id: T-ready-migrate
+    from: Ready
+    event: spec.migrateRequest
+    guard: migration mode allows it, the source is steady Ready with a recorded running revision, and the from-node, capacity and overlay checks pass
+    to: Migrate/CreateSurge
+    effects: [record advanced to SurgePending with the allocated surge index, Phase Migrating with the Migrate pin, Started ledger row persisted]
+    decided_in: pkg/controller/v1beta1/workload/ops/migrate.go
+  - id: T-ready-scaledown
+    from: Ready
+    event: spec.replicasDown
+    guard: the index is beyond the new desired set and the scale-down wave admits it within its pod budget
+    to: Delete/Drain
+    effects: [Phase Deleting and the Delete Drain operation committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/ops/delete_batch.go
+  - id: T-ready-teardown
+    from: Ready
+    event: spec.teardown
+    guard: the owner carries a deletionTimestamp so every observed index is treated as a scale-down extra
+    to: Delete/Drain
+    effects: [Phase Deleting and the Delete Drain operation committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/reconcile.go
+  - id: T-ready-restart-podterminal
+    from: Ready
+    event: pod.phaseTerminal
+    guard: policy RecreateInstanceOnPodRestart and a pod of the Instance reaches a terminal phase - Failed, which the Ready-phase restart detector reads as an explicit phase check, or Succeeded, which drops the pod out of the live count that detector compares against the desired one; phase Unknown is neither
+    to: Restart/Drain
+    effects: [Incarnation bumped, Phase Restarting with the Restart Drain operation, the terminated pod's termination captured into LastFailure before the drain]
+    decided_in: pkg/controller/v1beta1/workload/ops/restart.go
+  - id: T-ready-gangwidth-create
+    from: Ready
+    event: spec.gangWidth
+    variant: grow
+    guard: policy not RecreateInstanceOnPodRestart, so the Create pass owns the shortfall; the widened runner set leaves ordinals missing at an unchanged revision hash
+    to: Create/CreatePods
+    effects: [Phase Creating with a Create CreatePods operation stamped over the Ready row, only the missing ordinals created, Incarnation and RunningRevision untouched, PodGroup MinMember raised on the same pass]
+    decided_in: pkg/controller/v1beta1/workload/ops/create.go
+  - id: T-ready-gangwidth-restart
+    from: Ready
+    event: spec.gangWidth
+    variant: grow
+    guard: policy RecreateInstanceOnPodRestart, so the restart detector reads the live pod count as below the widened expectation and claims the row ahead of the Create pass
+    to: Restart/Drain
+    effects: [Incarnation bumped, Phase Restarting, the whole gang drained and deleted before it is rebuilt at the new width]
+    decided_in: pkg/controller/v1beta1/workload/ops/restart.go
+  - id: T-ready-rollback-surge
+    from: Ready
+    event: spec.rollbackTarget
+    guard: the roll target resolves to the stored revision, or back to the rendered template when the override is cleared, and strategy SurgeThenDrain with the gate and the surge budget admitting a fresh start
+    to: Update/Surge
+    effects: [Phase Updating with the Surge step pinned to the resolved roll target, replacement pod or gang created; the rendered template is still reported as UpdateRevision]
+    decided_in: pkg/controller/v1beta1/inferencereplica/reconciler.go
+  - id: T-ready-rollback-inplace
+    from: Ready
+    event: spec.rollbackTarget
+    guard: the roll target resolves to the stored revision, or back to the rendered template when the override is cleared, on a single-pod Instance under an in-place strategy whose diff against the running revision is regular-container images only
+    to: Update/InPlace
+    effects: [Phase Updating with the InPlace step at the resolved roll target, the image-transition marker written before the patch]
+    decided_in: pkg/controller/v1beta1/inferencereplica/reconciler.go
+  - id: T-ready-rollback-recreate
+    from: Ready
+    event: spec.rollbackTarget
+    guard: the roll target resolves to the stored revision, or back to the rendered template when the override is cleared, under a recreate-resolved strategy with the unavailability budget and the gate admitting
+    to: Update/Drain
+    effects: [Incarnation bumped, Phase Updating with the Drain step at the resolved roll target and the revision-pair cause recorded, source serving gate off]
+    decided_in: pkg/controller/v1beta1/inferencereplica/reconciler.go
+  - id: T-ready-stuckgrace
+    from: Ready
+    event: timer.stuckPodGrace
+    guard: the grace elapsed on a pod whose revision-hash label disagrees with the Component current revision while it holds a terminal waiting reason, and the pod set is not fully serving
+    to: Failed
+    effects: [Phase Failed with the stuck pod termination on LastFailure]
+    decided_in: pkg/controller/v1beta1/workload/escalation.go
+  - id: T-ready-teardown-deadline
+    from: Ready
+    event: timer.teardownDeadline
+    guard: the owner is Terminating, the configured teardown deadline has passed since its deletionTimestamp, and the teardown finalizer is still held
+    to: Empty
+    effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
+    decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+
+  # --- Failed ------------------------------------------------------------
+  - id: T-failed-corrective
+    from: Failed
+    event: spec.revision
+    guard: no pod of the Instance remains, so the Create pass re-materializes it, and no RetryBlock denies the corrective revision
+    to: Create/CreatePods
+    effects: [Phase Creating with a Create CreatePods operation pinned to the corrective revision]
+    decided_in: pkg/controller/v1beta1/workload/ops/create.go
+  - id: T-failed-corrective-surge
+    from: Failed
+    event: spec.revision
+    guard: strategy SurgeThenDrain and the corrective revision is a different RetryBlock subject than the held one
+    to: Update/Surge
+    effects: [the surge re-commits to the current target so the held revision is superseded]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_surge.go
+  - id: T-failed-corrective-recreate
+    from: Failed
+    event: spec.revision
+    guard: a recreate-resolved strategy and the corrective revision is a different RetryBlock subject than the held one
+    to: Update/Drain
+    effects: [Incarnation bumped, Phase Updating with the Drain step at the corrective revision]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_recreate.go
+  - id: T-failed-corrective-inplace
+    from: Failed
+    event: spec.revision
+    guard: an in-place-resolved strategy and the corrective revision is a different RetryBlock subject than the held one
+    to: Update/InPlace
+    effects: [Phase Updating with the InPlace step at the corrective revision]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_inplace.go
+  - id: T-failed-retry
+    from: Failed
+    event: timer.retryAt
+    guard: the Backoff RetryBlock for the same revision is due, no authorized attempt is in flight, and no pod of the Instance remains
+    to: Create/CreatePods
+    effects: [Phase Creating with a Create CreatePods operation, the block flipped to RetryInProgress when the attempt starts]
+    decided_in: pkg/controller/v1beta1/workload/ops/retryblock_gate.go
+  - id: T-failed-retry-surge
+    from: Failed
+    event: timer.retryAt
+    guard: the Backoff RetryBlock for the same target is due and strategy SurgeThenDrain re-drives the Instance
+    to: Update/Surge
+    effects: [Phase Updating with the Surge step, the block flipped to RetryInProgress when the attempt starts]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_surge.go
+  - id: T-failed-retry-recreate
+    from: Failed
+    event: timer.retryAt
+    guard: the Backoff RetryBlock for the same target is due and a recreate-resolved strategy re-drives the Instance
+    to: Update/Drain
+    effects: [Incarnation bumped, Phase Updating with the Drain step, the block flipped to RetryInProgress]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_recreate.go
+  - id: T-failed-retry-inplace
+    from: Failed
+    event: timer.retryAt
+    guard: the Backoff RetryBlock for the same target is due and an in-place-resolved strategy re-drives the Instance
+    to: Update/InPlace
+    effects: [Phase Updating with the InPlace step, the block flipped to RetryInProgress]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_inplace.go
+  - id: T-failed-gang-surge-reset
+    from: Failed
+    event: pod.deleted
+    variant: target
+    guard: a failed gang surge source whose replacement pods are gone and whose cleanup marker is claimed
+    to: Ready
+    effects: [replacement index finalized and its row removed, source reset to Ready on its running revision, the failed revision's RetryBlock charged toward Held only when the source's LastFailure reason is workload-caused and otherwise entered into Backoff at the current rung with AttemptsStarted unchanged, so no number of environment-caused waves reaches Held, GangSurgeAbandoned warning event]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_gang.go
+  - id: T-failed-adopt-revision
+    from: Failed
+    event: pod.containersReady
+    variant: source
+    guard: RunningRevision is empty, every pod spec-matches the target and is ContainersReady, so the update trigger selects the AdoptRevision backfill instead of a roll
+    to: Ready
+    effects: [Phase Ready on the target revision with the operation cleared and that revision's RetryBlock pruned]
+    decided_in: pkg/controller/v1beta1/workload/ops/update.go
+  - id: T-failed-recycle-resurge
+    from: Failed
+    event: pod.deleted
+    variant: target
+    guard: a single-pod surge target that failed with CreateContainerError on a node the disposition excluded has been recycled, leaving the surge slot empty, and no RetryBlock denies the target because the reason is not workload-caused
+    to: Update/Surge
+    effects: [Phase Updating with the Surge step restamped at the same target, a fresh replacement pod created away from the excluded node]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_surge.go
+  - id: T-failed-restart
+    from: Failed
+    event: pod.deleted
+    variant: source
+    guard: policy RecreateInstanceOnPodRestart, a multi-pod Instance with at least one surviving member below the desired count and terminal-phase pods counted as lost rather than live, no preserved Update or Migrate operation, and no RetryBlock denying the rebuild; a Restart parked at Failed is a spent attempt rather than an owner, so the gang may re-arm as a whole under a fresh deadline
+    to: Restart/Drain
+    effects: [Incarnation bumped, Phase Restarting with the gang-member-lost reason recorded, a gang that never ran a revision carrying the interrupted attempt's Operation.TargetRevision onto the rebuild so the per-revision Service selects the new pods]
+    decided_in: pkg/controller/v1beta1/workload/ops/restart.go
+  - id: T-failed-reset
+    from: Failed
+    event: spec.resetInstances
+    guard: the operator named this Instance, no pod of it is still in the serving rotation, and the preserved operation is one the reset owns - none, a Create, or a Restart
+    to: Failed
+    effects: [every live-listed pod deleted with the expectation recorded before each delete, the preserved operation cleared through the MutateInstance seam, Phase and LastFailure untouched so the row is left in the fresh-start shape the Create pass rebuilds, InstancesReset event, the annotation consumed only after those effects commit]
+    decided_in: pkg/controller/v1beta1/inferencereplica/reset_instances.go
+  - id: T-failed-recycle-rebuild
+    from: Failed
+    event: pod.phaseTerminal
+    guard: no operation is preserved and the Instance's remaining pods are in a terminal phase, so the missing-pod diff reads their names as free and the Create pass claims the row as a fresh start
+    to: Create/CreatePods
+    effects: [the dead occupants deleted with expectations recorded first and a TerminalPodRecycled warning, the targets recreated on a later pass under a fresh Create CreatePods operation]
+    decided_in: pkg/controller/v1beta1/workload/ops/terminal_recycle.go
+  - id: T-failed-scaledown
+    from: Failed
+    event: spec.replicasDown
+    guard: the index is beyond the new desired set and the scale-down wave admits it
+    to: Delete/Drain
+    effects: [Phase Deleting and the Delete Drain operation committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/ops/delete_batch.go
+  - id: T-failed-teardown
+    from: Failed
+    event: spec.teardown
+    guard: the owner carries a deletionTimestamp so every observed index is treated as a scale-down extra
+    to: Delete/Drain
+    effects: [Phase Deleting and the Delete Drain operation committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/reconcile.go
+  - id: T-failed-teardown-deadline
+    from: Failed
+    event: timer.teardownDeadline
+    guard: the owner is Terminating, the configured teardown deadline has passed since its deletionTimestamp, and the teardown finalizer is still held
+    to: Empty
+    effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
+    decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+
+  # --- Create/CreatePods -------------------------------------------------
+  - id: T-create-ready
+    from: Create/CreatePods
+    event: pod.containersReady
+    variant: source
+    guard: the pod set is complete and every pod ContainersReady; the serving gate is written before the promotion commits
+    to: Ready
+    effects: [Phase Ready with ReadySince stamped, operation cleared, RunningRevision set when the pods carry the target revision hash, that revision's RetryBlock pruned]
+    decided_in: pkg/controller/v1beta1/workload/ops/create.go
+  - id: T-create-deadline
+    from: Create/CreatePods
+    event: timer.operationDeadline
+    guard: the operation deadline elapsed and no pod of the attempt is held by an admission scheduling gate
+    to: Failed
+    effects: [the disposition classifies the attempt and records a RetryBlock or a relocation directive, then clears the operation and stamps Failed in one write]
+    decided_in: pkg/controller/v1beta1/workload/disposition.go
+  - id: T-create-stuck
+    from: Create/CreatePods
+    event: pod.waiting
+    guard: a pod held a terminal waiting reason past the stuck-pod grace and the pod set is not fully serving
+    to: Failed
+    effects: [the disposition classifies the attempt and clears the operation, stamping the waiting reason on LastFailure]
+    decided_in: pkg/controller/v1beta1/workload/disposition.go
+  - id: T-create-retire-superseded
+    from: Create/CreatePods
+    event: spec.revision
+    guard: the attempt's pinned revision is no longer the target, or an unpinned attempt's pod label proves it belongs to another revision
+    to: Failed
+    effects: [Phase Failed with the operation cleared so the next pass starts a fresh attempt at the current target]
+    decided_in: pkg/controller/v1beta1/workload/ops/create.go
+  - id: T-create-gang-restart
+    from: Create/CreatePods
+    event: pod.deleted
+    variant: source
+    guard: policy RecreateInstanceOnPodRestart, a multi-pod Instance whose Create step is committed, at least one member alive but fewer than expected, and no RetryBlock denying the rebuild
+    to: Restart/Drain
+    effects: [the restart pass runs ahead of Create and takes ownership, Incarnation bumped, Phase Restarting with the gang-member-lost reason recorded]
+    decided_in: pkg/controller/v1beta1/workload/ops/restart.go
+  - id: T-create-recycle-terminal
+    from: Create/CreatePods
+    event: pod.phaseTerminal
+    guard: a pod in a terminal phase occupies one of the attempt's target names, the attempt's own deadline has not elapsed, and its outstanding expectations are satisfied
+    to: Create/CreatePods
+    effects: [the dead occupant deleted with the expectation recorded before the delete, the recycle counted on the operation and paced by the same-target retry ladder, the dead pod's diagnostics captured onto LastFailure, TerminalPodRecycled warning, the target recreated on a later pass once the delete is observed]
+    decided_in: pkg/controller/v1beta1/workload/ops/terminal_recycle.go
+  - id: T-create-scaledown
+    from: Create/CreatePods
+    event: spec.replicasDown
+    guard: an in-flight Create pins nothing in the plan, so the index falls out when replicas drop and the scale-down wave admits it
+    to: Delete/Drain
+    effects: [the Create operation replaced by a Delete Drain operation and Phase Deleting, committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/ops/delete_batch.go
+  - id: T-create-teardown
+    from: Create/CreatePods
+    event: spec.teardown
+    guard: the owner carries a deletionTimestamp so every observed index is treated as a scale-down extra
+    to: Delete/Drain
+    effects: [Phase Deleting and the Delete Drain operation committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/reconcile.go
+  - id: T-create-stuckgrace
+    from: Create/CreatePods
+    event: timer.stuckPodGrace
+    guard: the grace elapsed on a pod of the attempt that holds a terminal waiting reason, and the pod set is not fully serving
+    to: Failed
+    effects: [the disposition classifies the attempt and clears the operation, stamping the waiting reason on LastFailure]
+    decided_in: pkg/controller/v1beta1/workload/escalation.go
+  - id: T-create-teardown-deadline
+    from: Create/CreatePods
+    event: timer.teardownDeadline
+    guard: the owner is Terminating, the configured teardown deadline has passed since its deletionTimestamp, and the teardown finalizer is still held
+    to: Empty
+    effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
+    decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+
+  # --- Update/Surge ------------------------------------------------------
+  - id: T-surge-target-ready
+    from: Update/Surge
+    event: pod.ready
+    variant: target
+    guard: every replacement pod is serving, PodReady, and has stayed Ready for the minReadySeconds window while the source is still in rotation
+    to: Update/SurgeDrain
+    effects: [step advanced to SurgeDrain, source serving gate off under the surge-drain writer key]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_surge.go
+  - id: T-surge-source-lost-promote
+    from: Update/Surge
+    event: pod.deleted
+    variant: source
+    guard: the source pods are gone while the replacement is ContainersReady, so the whole drain block is skipped and the promote is reached directly
+    to: Ready
+    effects: [replacement marked serving, ActiveOrdinal advanced to the replacement slot, Phase Ready on the pinned revision with the operation cleared; the PodReady and minReadySeconds waits are skipped because they apply only while the source is still in rotation]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_surge.go
+  - id: T-surge-abandon-superseded
+    from: Update/Surge
+    event: spec.revision
+    guard: the in-flight surge is pinned to a revision the desired state no longer asks for and its replacement is not yet runtime-ready
+    to: Ready
+    effects: [replacement pods deleted, source reset to Ready on its running revision so the next pass re-enters through the gates]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_surge.go
+  - id: T-surge-abandon-strategy
+    from: Update/Surge
+    event: spec.strategy
+    guard: the strategy was edited away from SurgeThenDrain and the replacement is not yet runtime-ready
+    to: Ready
+    effects: [replacement pods deleted, source reset to Ready on its running revision so the roll restarts under the new strategy]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_surge.go
+  - id: T-surge-deadline
+    from: Update/Surge
+    event: timer.operationDeadline
+    guard: the operation deadline elapsed and no pod of the attempt is held by an admission scheduling gate
+    to: Failed
+    effects: [a single-pod surge is disposed and its operation cleared; a gang surge keeps the operation so the abandon path can consume it]
+    decided_in: pkg/controller/v1beta1/workload/escalation.go
+  - id: T-surge-stuck
+    from: Update/Surge
+    event: pod.waiting
+    guard: a replacement pod held a terminal waiting reason past the stuck-pod grace and the pod set is not fully serving
+    to: Failed
+    effects: [the replacement's waiting reason is recorded on LastFailure and a workload-caused reason holds its revision]
+    decided_in: pkg/controller/v1beta1/workload/escalation.go
+  - id: T-surge-force-clock
+    from: Update/Surge
+    event: timer.forceDelete
+    guard: a force-delete policy is configured and a Terminating pod of the Instance is past its deletion deadline plus the overdue slack while its node is gone or has been unreachable past the threshold; the sweep runs at the top of the update pass, ahead of every mode and its expectations gate, because the unobserved delete is exactly what those expectations are blocked on
+    to: Update/Surge
+    effects: [pod force-deleted with grace zero under a UID precondition, Warning event and a ledger row recorded, the step left to progress on the resulting absence]
+    decided_in: pkg/controller/v1beta1/workload/ops/force_delete.go
+  - id: T-surge-scaledown
+    from: Update/Surge
+    event: spec.replicasDown
+    guard: a single-pod surge source carries no SurgeIndex, so it is not pinned as a handoff pair and falls out of the plan when replicas drop; a gang source and its target stay pinned
+    to: Delete/Drain
+    effects: [the Update operation replaced by a Delete Drain operation and Phase Deleting, committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/ops/delete_batch.go
+  - id: T-surge-teardown
+    from: Update/Surge
+    event: spec.teardown
+    guard: the owner carries a deletionTimestamp so every observed index is treated as a scale-down extra
+    to: Delete/Drain
+    effects: [Phase Deleting and the Delete Drain operation committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/reconcile.go
+  - id: T-surge-stuckgrace
+    from: Update/Surge
+    event: timer.stuckPodGrace
+    guard: the grace elapsed on a replacement pod that holds a terminal waiting reason, and the pod set is not fully serving
+    to: Failed
+    effects: [the replacement waiting reason is recorded on LastFailure and a workload-caused reason holds its revision]
+    decided_in: pkg/controller/v1beta1/workload/escalation.go
+  - id: T-surge-teardown-deadline
+    from: Update/Surge
+    event: timer.teardownDeadline
+    guard: the owner is Terminating, the configured teardown deadline has passed since its deletionTimestamp, and the teardown finalizer is still held
+    to: Empty
+    effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
+    decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+
+  # --- Update/SurgeDrain -------------------------------------------------
+  - id: T-surgedrain-settle
+    from: Update/SurgeDrain
+    event: pod.servingOff
+    variant: source
+    guard: a single-pod source is out of the per-revision routed Service and the configured settle grace is positive
+    to: Update/SurgeDrainSettle
+    effects: [step advanced to SurgeDrainSettle with LastProgressAt as the durable start of the settle window]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_status.go
+  - id: T-surgedrain-promote
+    from: Update/SurgeDrain
+    event: pod.deleted
+    variant: source
+    guard: a single-pod source with a zero settle grace whose pods are gone
+    to: Ready
+    effects: [ActiveOrdinal advanced to the replacement slot, Phase Ready on the pinned revision, operation cleared, that revision's RetryBlock pruned]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_surge.go
+  - id: T-surgedrain-gang-complete
+    from: Update/SurgeDrain
+    event: pod.deleted
+    variant: source
+    guard: a gang source whose pods are gone and whose replacement index has been promoted Ready on the pinned revision
+    to: Empty
+    effects: [source resources finalized and its status row removed, the replacement index becomes the Instance]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_gang.go
+  - id: T-surgedrain-deadline
+    from: Update/SurgeDrain
+    event: timer.operationDeadline
+    guard: the operation deadline elapsed and no pod of the attempt is held by an admission scheduling gate
+    to: Failed
+    effects: [a single-pod source carries no SurgeIndex so the attempt is disposable, the disposition records a RetryBlock or relocation directive and clears the operation; a gang source keeps the operation for the abandon path]
+    decided_in: pkg/controller/v1beta1/workload/disposition.go
+  - id: T-surgedrain-stuck
+    from: Update/SurgeDrain
+    event: pod.waiting
+    guard: a pod of the attempt held a terminal waiting reason past the stuck-pod grace; the source is already out of rotation, so the fully-serving guard cannot suppress the escalation
+    to: Failed
+    effects: [a single-pod source carries no SurgeIndex so the attempt is disposed and its operation cleared; a gang source keeps the operation for the abandon path]
+    decided_in: pkg/controller/v1beta1/workload/escalation.go
+  - id: T-surgedrain-force-clock
+    from: Update/SurgeDrain
+    event: timer.forceDelete
+    guard: a force-delete policy is configured and a Terminating pod of the Instance is past its deletion deadline plus the overdue slack while its node is gone or has been unreachable past the threshold; the sweep runs at the top of the update pass, ahead of every mode and its expectations gate
+    to: Update/SurgeDrain
+    effects: [the wedged source pod force-deleted with grace zero under a UID precondition, Warning event and a ledger row recorded, the promote left to complete on the resulting absence]
+    decided_in: pkg/controller/v1beta1/workload/ops/force_delete.go
+  - id: T-surgedrain-scaledown
+    from: Update/SurgeDrain
+    event: spec.replicasDown
+    guard: a single-pod surge source carries no SurgeIndex, so it is not pinned as a handoff pair and falls out of the plan when replicas drop; a gang source and its target stay pinned
+    to: Delete/Drain
+    effects: [the Update operation replaced by a Delete Drain operation and Phase Deleting, committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/ops/delete_batch.go
+  - id: T-surgedrain-teardown
+    from: Update/SurgeDrain
+    event: spec.teardown
+    guard: the owner carries a deletionTimestamp so every observed index is treated as a scale-down extra
+    to: Delete/Drain
+    effects: [Phase Deleting and the Delete Drain operation committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/reconcile.go
+  - id: T-surgedrain-stuckgrace
+    from: Update/SurgeDrain
+    event: timer.stuckPodGrace
+    guard: the grace elapsed on a pod of the attempt that holds a terminal waiting reason; the source is already out of rotation, so the fully-serving guard cannot suppress the escalation
+    to: Failed
+    effects: [a single-pod source carries no SurgeIndex so the attempt is disposed and its operation cleared; a gang source keeps the operation for the abandon path]
+    decided_in: pkg/controller/v1beta1/workload/escalation.go
+  - id: T-surgedrain-teardown-deadline
+    from: Update/SurgeDrain
+    event: timer.teardownDeadline
+    guard: the owner is Terminating, the configured teardown deadline has passed since its deletionTimestamp, and the teardown finalizer is still held
+    to: Empty
+    effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
+    decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+
+  # --- Update/SurgeDrainSettle -------------------------------------------
+  - id: T-settle-ready
+    from: Update/SurgeDrainSettle
+    event: timer.drainSettle
+    guard: the settle grace has elapsed since LastProgressAt and the source pods have been deleted
+    to: Ready
+    effects: [ActiveOrdinal advanced to the replacement slot, Phase Ready on the pinned revision, operation cleared, that revision's RetryBlock pruned]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_surge.go
+  - id: T-settle-deadline
+    from: Update/SurgeDrainSettle
+    event: timer.operationDeadline
+    guard: the operation deadline elapsed and no pod of the attempt is held by an admission scheduling gate; the state is single-pod only and carries no SurgeIndex, so the attempt is always disposable
+    to: Failed
+    effects: [the disposition records a RetryBlock or relocation directive, then clears the operation and stamps Failed in one write]
+    decided_in: pkg/controller/v1beta1/workload/disposition.go
+  - id: T-settle-stuck
+    from: Update/SurgeDrainSettle
+    event: pod.waiting
+    guard: a pod held a terminal waiting reason past the stuck-pod grace with the source out of rotation; the state is single-pod only and carries no SurgeIndex, so the attempt is always disposable
+    to: Failed
+    effects: [the disposition records a RetryBlock or relocation directive, then clears the operation and stamps Failed in one write]
+    decided_in: pkg/controller/v1beta1/workload/escalation.go
+  - id: T-settle-force-clock
+    from: Update/SurgeDrainSettle
+    event: timer.forceDelete
+    guard: a force-delete policy is configured and the settling source is past its deletion deadline plus the overdue slack while its node is gone or has been unreachable past the threshold; the sweep runs at the top of the update pass, ahead of every mode and its expectations gate
+    to: Update/SurgeDrainSettle
+    effects: [the wedged source pod force-deleted with grace zero under a UID precondition, Warning event and a ledger row recorded, the promote left to complete on the resulting absence]
+    decided_in: pkg/controller/v1beta1/workload/ops/force_delete.go
+  - id: T-settle-scaledown
+    from: Update/SurgeDrainSettle
+    event: spec.replicasDown
+    guard: a settling source carries no SurgeIndex, so it is not pinned as a handoff pair and falls out of the plan when replicas drop
+    to: Delete/Drain
+    effects: [the Update operation replaced by a Delete Drain operation and Phase Deleting, committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/ops/delete_batch.go
+  - id: T-settle-teardown
+    from: Update/SurgeDrainSettle
+    event: spec.teardown
+    guard: the owner carries a deletionTimestamp so every observed index is treated as a scale-down extra
+    to: Delete/Drain
+    effects: [Phase Deleting and the Delete Drain operation committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/reconcile.go
+  - id: T-settle-stuckgrace
+    from: Update/SurgeDrainSettle
+    event: timer.stuckPodGrace
+    guard: the grace elapsed on a pod that holds a terminal waiting reason with the source out of rotation; the state is single-pod only and carries no SurgeIndex, so the attempt is always disposable
+    to: Failed
+    effects: [the disposition records a RetryBlock or relocation directive, then clears the operation and stamps Failed in one write]
+    decided_in: pkg/controller/v1beta1/workload/escalation.go
+  - id: T-settle-teardown-deadline
+    from: Update/SurgeDrainSettle
+    event: timer.teardownDeadline
+    guard: the owner is Terminating, the configured teardown deadline has passed since its deletionTimestamp, and the teardown finalizer is still held
+    to: Empty
+    effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
+    decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+
+  # --- Update/GangSurgeTarget --------------------------------------------
+  - id: T-gangtarget-ready
+    from: Update/GangSurgeTarget
+    event: pod.deleted
+    variant: source
+    guard: the paired source is on the SurgeDrain step with its pods gone, and this marker still matches the claim for the pinned revision
+    to: Ready
+    effects: [Phase Ready on the pinned revision with the marker operation cleared, that revision's RetryBlock pruned]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_gang.go
+  - id: T-gangtarget-cleanup-failed
+    from: Update/GangSurgeTarget
+    event: timer.operationDeadline
+    guard: the paired source escalated to Failed on this surge before the replacement was promoted
+    to: Update/GangSurgeTargetCleanup
+    effects: [the marker's step advanced to the cleanup claim so it keeps ownership of its pods and PodGroup]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_gang.go
+  - id: T-gangtarget-cleanup-superseded
+    from: Update/GangSurgeTarget
+    event: spec.revision
+    guard: the source's pinned surge revision is superseded while the replacement gang is incomplete or not runtime-ready
+    to: Update/GangSurgeTargetCleanup
+    effects: [the marker's step advanced to the cleanup claim; no RetryBlock is recorded because a spec change is not a failure]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_gang.go
+  - id: T-gangtarget-deadline
+    from: Update/GangSurgeTarget
+    event: timer.operationDeadline
+    guard: the marker's own operation deadline elapsed with phase Creating and no pod admission-gated; a gang step is never disposable, so the stamp preserves the operation
+    to: Failed
+    effects: [Phase Failed on the marker, LastFailure carrying the blamed pod's workload-caused waiting reason when one exists and the DeadlineExceeded diagnostic otherwise, so the cause survives the teardown that deletes the pod; the source's claim predicates match on revision and step, never phase, so the surge machine keeps driving]
+    decided_in: pkg/controller/v1beta1/workload/escalation.go
+  - id: T-gangtarget-stuck-failed
+    from: Update/GangSurgeTarget
+    event: pod.waiting
+    guard: a replacement pod held a terminal waiting reason past the stuck-pod grace, the replacement set is not fully serving, and a gang step is never disposable
+    to: Failed
+    effects: [Phase Failed on the marker with the waiting reason on LastFailure and the operation preserved; the claim predicates ignore phase, so this is diagnostic]
+    decided_in: pkg/controller/v1beta1/workload/escalation.go
+  - id: T-gangtarget-teardown
+    from: Update/GangSurgeTarget
+    event: spec.teardown
+    guard: the owner carries a deletionTimestamp so every observed index is treated as a scale-down extra
+    to: Delete/Drain
+    effects: [Phase Deleting and the Delete Drain operation committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/reconcile.go
+  - id: T-gangtarget-stuckgrace
+    from: Update/GangSurgeTarget
+    event: timer.stuckPodGrace
+    guard: the grace elapsed on a replacement pod that holds a terminal waiting reason, the replacement set is not fully serving, and a gang step is never disposable
+    to: Failed
+    effects: [Phase Failed on the marker with the waiting reason on LastFailure and the operation preserved; the claim predicates ignore phase, so this is diagnostic]
+    decided_in: pkg/controller/v1beta1/workload/escalation.go
+  - id: T-gangtarget-teardown-deadline
+    from: Update/GangSurgeTarget
+    event: timer.teardownDeadline
+    guard: the owner is Terminating, the configured teardown deadline has passed since its deletionTimestamp, and the teardown finalizer is still held
+    to: Empty
+    effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
+    decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+
+  # --- Update/GangSurgeTargetCleanup -------------------------------------
+  - id: T-gangcleanup-done
+    from: Update/GangSurgeTargetCleanup
+    event: pod.deleted
+    variant: target
+    guard: every pod of the retired replacement is gone and its instance resources are finalized
+    to: Empty
+    effects: [the marker row removed and the source reset to Ready in one transaction, expectations forgotten, the RetryBlock recorded when the retirement was a failure and charged toward Held only when the source's LastFailure reason is workload-caused, otherwise paced at the current rung with AttemptsStarted unchanged]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_gang.go
+  - id: T-gangcleanup-deadline
+    from: Update/GangSurgeTargetCleanup
+    event: timer.operationDeadline
+    guard: the marker's own operation deadline elapsed with phase Creating and no pod admission-gated; a gang step is never disposable, so the stamp preserves the operation
+    to: Failed
+    effects: [Phase Failed on the marker, LastFailure carrying the blamed pod's workload-caused waiting reason when one exists and the DeadlineExceeded diagnostic otherwise, so the abandon tail charges the ladder on the real cause; the cleanup claim matches on revision and step, never phase, so the retirement still completes]
+    decided_in: pkg/controller/v1beta1/workload/escalation.go
+  - id: T-gangcleanup-stuck-failed
+    from: Update/GangSurgeTargetCleanup
+    event: pod.waiting
+    guard: a retired replacement pod held a terminal waiting reason past the stuck-pod grace, the set is not fully serving, and a gang step is never disposable
+    to: Failed
+    effects: [Phase Failed on the marker with the waiting reason on LastFailure and the operation preserved; the cleanup claim ignores phase, so this is diagnostic]
+    decided_in: pkg/controller/v1beta1/workload/escalation.go
+  - id: T-gangcleanup-teardown
+    from: Update/GangSurgeTargetCleanup
+    event: spec.teardown
+    guard: the owner carries a deletionTimestamp so every observed index is treated as a scale-down extra
+    to: Delete/Drain
+    effects: [Phase Deleting and the Delete Drain operation committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/reconcile.go
+  - id: T-gangcleanup-stuckgrace
+    from: Update/GangSurgeTargetCleanup
+    event: timer.stuckPodGrace
+    guard: the grace elapsed on a retired replacement pod that holds a terminal waiting reason, the set is not fully serving, and a gang step is never disposable
+    to: Failed
+    effects: [Phase Failed on the marker with the waiting reason on LastFailure and the operation preserved; the cleanup claim ignores phase, so this is diagnostic]
+    decided_in: pkg/controller/v1beta1/workload/escalation.go
+  - id: T-gangcleanup-teardown-deadline
+    from: Update/GangSurgeTargetCleanup
+    event: timer.teardownDeadline
+    guard: the owner is Terminating, the configured teardown deadline has passed since its deletionTimestamp, and the teardown finalizer is still held
+    to: Empty
+    effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
+    decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+
+  # --- Update/InPlace ----------------------------------------------------
+  - id: T-inplace-ready
+    from: Update/InPlace
+    event: pod.containersReady
+    variant: source
+    guard: every changed container reports the target image at runtime, the transition marker is cleared, serving is back on, and any minReadySeconds window has elapsed
+    to: Ready
+    effects: [revision hash and pairing labels restamped on the live pod, Phase Ready on the target revision with the operation cleared]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_inplace.go
+  - id: T-inplace-fallback
+    from: Update/InPlace
+    event: spec.revision
+    guard: the mode is re-resolved every pass and the new diff against the running revision is no longer image-only under InPlaceIfPossible
+    to: Update/Drain
+    effects: [Incarnation bumped and the operation restamped with the Drain step, which is what makes recreate's idempotency check fall through]
+    decided_in: pkg/controller/v1beta1/workload/ops/update.go
+  - id: T-inplace-retarget
+    from: Update/InPlace
+    event: spec.revision
+    guard: the new diff is still image-only, so the mode re-resolves to in-place and the stamp falls through its idempotency guard on the changed target revision
+    to: Update/InPlace
+    effects: [operation restamped at the new target with a fresh deadline, the image-transition marker rewritten to the new expected images]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_inplace.go
+  - id: T-inplace-strategy-surge
+    from: Update/InPlace
+    event: spec.strategy
+    guard: the strategy was edited to SurgeThenDrain; the surge-owned guard protects only a surge-step row, so the mode re-resolves and dispatches over the in-flight in-place step
+    to: Update/Surge
+    effects: [operation restamped with the Surge step, replacement pod created at the alternate ordinal]
+    decided_in: pkg/controller/v1beta1/workload/ops/update.go
+  - id: T-inplace-strategy-recreate
+    from: Update/InPlace
+    event: spec.strategy
+    guard: the strategy was edited to RecreatePod, so the mode re-resolves to recreate over the in-flight in-place step
+    to: Update/Drain
+    effects: [Incarnation bumped and the operation restamped with the Drain step, which is what makes recreate's idempotency check fall through]
+    decided_in: pkg/controller/v1beta1/workload/ops/update.go
+  - id: T-inplace-deadline
+    from: Update/InPlace
+    event: timer.operationDeadline
+    guard: the operation deadline elapsed and no pod is held by an admission scheduling gate
+    to: Failed
+    effects: [the disposition classifies the attempt and clears the operation]
+    decided_in: pkg/controller/v1beta1/workload/disposition.go
+  - id: T-inplace-stuck
+    from: Update/InPlace
+    event: pod.waiting
+    guard: the patched pod held a terminal waiting reason past the stuck-pod grace and the pod set is not fully serving
+    to: Failed
+    effects: [the disposition classifies the attempt; a workload-caused reason holds the target revision]
+    decided_in: pkg/controller/v1beta1/workload/disposition.go
+  - id: T-inplace-force-clock
+    from: Update/InPlace
+    event: timer.forceDelete
+    guard: a force-delete policy is configured and the patched pod, deleted from outside since an in-place roll issues no deletes of its own, is past its deletion deadline plus the overdue slack while its node is gone or has been unreachable past the threshold
+    to: Update/InPlace
+    effects: [the wedged pod force-deleted with grace zero under a UID precondition, Warning event and a ledger row recorded, the roll left with an empty pod set its own deadline still bounds]
+    decided_in: pkg/controller/v1beta1/workload/ops/force_delete.go
+  - id: T-inplace-scaledown
+    from: Update/InPlace
+    event: spec.replicasDown
+    guard: an in-place update pins nothing in the plan, so the index falls out when replicas drop and the scale-down wave admits it
+    to: Delete/Drain
+    effects: [the Update operation replaced by a Delete Drain operation and Phase Deleting, committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/ops/delete_batch.go
+  - id: T-inplace-teardown
+    from: Update/InPlace
+    event: spec.teardown
+    guard: the owner carries a deletionTimestamp so every observed index is treated as a scale-down extra
+    to: Delete/Drain
+    effects: [Phase Deleting and the Delete Drain operation committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/reconcile.go
+  - id: T-inplace-stuckgrace
+    from: Update/InPlace
+    event: timer.stuckPodGrace
+    guard: the grace elapsed on the patched pod while it holds a terminal waiting reason, and the pod set is not fully serving
+    to: Failed
+    effects: [the disposition classifies the attempt; a workload-caused reason holds the target revision]
+    decided_in: pkg/controller/v1beta1/workload/escalation.go
+  - id: T-inplace-teardown-deadline
+    from: Update/InPlace
+    event: timer.teardownDeadline
+    guard: the owner is Terminating, the configured teardown deadline has passed since its deletionTimestamp, and the teardown finalizer is still held
+    to: Empty
+    effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
+    decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+
+  # --- Update/Drain ------------------------------------------------------
+  - id: T-drain-ready
+    from: Update/Drain
+    event: pod.ready
+    variant: source
+    guard: old-incarnation pods are gone, the bumped-incarnation set is complete and serving, every pod is PodReady, and any minReadySeconds window has elapsed
+    to: Ready
+    effects: [Phase Ready on the target revision with the operation cleared and that revision's RetryBlock pruned]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_recreate.go
+  - id: T-drain-retarget
+    from: Update/Drain
+    event: spec.revision
+    guard: the recreate stamp's idempotency guard requires the same TargetRevision, so a changed target falls through and reopens the roll on the same state
+    to: Update/Drain
+    effects: [Incarnation bumped again and the operation restamped at the new target, so the drain and delete phase restarts against the previous incarnation]
+    decided_in: pkg/controller/v1beta1/workload/ops/update_recreate.go
+  - id: T-drain-strategy-surge
+    from: Update/Drain
+    event: spec.strategy
+    guard: the strategy was edited to SurgeThenDrain; the surge-owned guard protects only a surge-step row, so the mode re-resolves and dispatches over the in-flight recreate
+    to: Update/Surge
+    effects: [operation restamped with the Surge step, replacement pod created at the alternate ordinal while the recreate's incarnation bump stands]
+    decided_in: pkg/controller/v1beta1/workload/ops/update.go
+  - id: T-drain-strategy-inplace
+    from: Update/Drain
+    event: spec.strategy
+    guard: the strategy was edited to an in-place mode on a single-pod Instance whose diff against the running revision is image-only, so the mode re-resolves over the in-flight recreate
+    to: Update/InPlace
+    effects: [operation restamped with the InPlace step at the same target while the recreate's incarnation bump stands]
+    decided_in: pkg/controller/v1beta1/workload/ops/update.go
+  - id: T-drain-deadline
+    from: Update/Drain
+    event: timer.operationDeadline
+    guard: the operation deadline elapsed and no pod is held by an admission scheduling gate
+    to: Failed
+    effects: [a single-pod recreate is disposed and its operation cleared; a multi-pod recreate keeps the operation]
+    decided_in: pkg/controller/v1beta1/workload/escalation.go
+  - id: T-drain-stuck
+    from: Update/Drain
+    event: pod.waiting
+    guard: a pod held a terminal waiting reason past the stuck-pod grace and the pod set is not fully serving
+    to: Failed
+    effects: [the stuck pod's termination is recorded on LastFailure before the recreate deletes it]
+    decided_in: pkg/controller/v1beta1/workload/escalation.go
+  - id: T-drain-force-clock
+    from: Update/Drain
+    event: timer.forceDelete
+    guard: a force-delete policy is configured and an old-incarnation pod Phase A deleted is past its deletion deadline plus the overdue slack while its node is gone or has been unreachable past the threshold; the sweep runs at the top of the update pass, ahead of every mode and its expectations gate
+    to: Update/Drain
+    effects: [the wedged pod force-deleted with grace zero under a UID precondition, Warning event and a ledger row recorded, Phase A left to complete on the resulting absence so the stable name frees up for Phase B]
+    decided_in: pkg/controller/v1beta1/workload/ops/force_delete.go
+  - id: T-drain-scaledown
+    from: Update/Drain
+    event: spec.replicasDown
+    guard: a recreate roll pins nothing in the plan, so the index falls out when replicas drop and the scale-down wave admits it
+    to: Delete/Drain
+    effects: [the Update operation replaced by a Delete Drain operation and Phase Deleting, committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/ops/delete_batch.go
+  - id: T-drain-teardown
+    from: Update/Drain
+    event: spec.teardown
+    guard: the owner carries a deletionTimestamp so every observed index is treated as a scale-down extra
+    to: Delete/Drain
+    effects: [Phase Deleting and the Delete Drain operation committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/reconcile.go
+  - id: T-drain-stuckgrace
+    from: Update/Drain
+    event: timer.stuckPodGrace
+    guard: the grace elapsed on a pod that holds a terminal waiting reason, and the pod set is not fully serving
+    to: Failed
+    effects: [the stuck pod termination is recorded on LastFailure before the recreate deletes it]
+    decided_in: pkg/controller/v1beta1/workload/escalation.go
+  - id: T-drain-teardown-deadline
+    from: Update/Drain
+    event: timer.teardownDeadline
+    guard: the owner is Terminating, the configured teardown deadline has passed since its deletionTimestamp, and the teardown finalizer is still held
+    to: Empty
+    effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
+    decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+
+  # --- Restart/Drain -----------------------------------------------------
+  - id: T-restart-ready
+    from: Restart/Drain
+    event: pod.containersReady
+    variant: source
+    guard: old-incarnation pods are gone on a live read, the bumped-incarnation set is complete, and every pod is ContainersReady
+    to: Ready
+    effects: [serving gate written on the fresh pods, Phase Ready with ReadySince restamped and the operation cleared]
+    decided_in: pkg/controller/v1beta1/workload/ops/restart.go
+  - id: T-restart-deadline
+    from: Restart/Drain
+    event: timer.operationDeadline
+    guard: the operation deadline elapsed and no pod is held by an admission scheduling gate
+    to: Failed
+    effects: [Phase Failed with the operation preserved, since a Restart attempt is never disposed, and LastFailure carrying the blamed pod's workload-caused waiting reason when one exists and the DeadlineExceeded diagnostic otherwise]
+    decided_in: pkg/controller/v1beta1/workload/escalation.go
+  - id: T-restart-stuck
+    from: Restart/Drain
+    event: pod.waiting
+    guard: a recreated pod held a terminal waiting reason past the stuck-pod grace and the pod set is not fully serving
+    to: Failed
+    effects: [Phase Failed with the waiting reason on LastFailure and the operation preserved]
+    decided_in: pkg/controller/v1beta1/workload/escalation.go
+  - id: T-restart-recycle-terminal
+    from: Restart/Drain
+    event: pod.phaseTerminal
+    guard: a bumped-incarnation pod reached a terminal phase on one of the rebuild's target names, the attempt's own deadline has not elapsed, and its outstanding expectations are satisfied
+    to: Restart/Drain
+    effects: [the dead occupant deleted with the expectation recorded before the delete, the recycle counted on the operation and paced by the same-target retry ladder, the dead pod's diagnostics captured onto LastFailure, TerminalPodRecycled warning, the name recreated on a later pass once the delete is observed]
+    decided_in: pkg/controller/v1beta1/workload/ops/terminal_recycle.go
+  - id: T-restart-scaledown
+    from: Restart/Drain
+    event: spec.replicasDown
+    guard: a restart pins nothing in the plan, so the index falls out when replicas drop and the scale-down wave admits it
+    to: Delete/Drain
+    effects: [the Restart operation replaced by a Delete Drain operation and Phase Deleting, committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/ops/delete_batch.go
+  - id: T-restart-teardown
+    from: Restart/Drain
+    event: spec.teardown
+    guard: the owner carries a deletionTimestamp so every observed index is treated as a scale-down extra
+    to: Delete/Drain
+    effects: [Phase Deleting and the Delete Drain operation committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/reconcile.go
+  - id: T-restart-stuckgrace
+    from: Restart/Drain
+    event: timer.stuckPodGrace
+    guard: the grace elapsed on a recreated pod that holds a terminal waiting reason, and the pod set is not fully serving
+    to: Failed
+    effects: [Phase Failed with the waiting reason on LastFailure and the operation preserved]
+    decided_in: pkg/controller/v1beta1/workload/escalation.go
+  - id: T-restart-teardown-deadline
+    from: Restart/Drain
+    event: timer.teardownDeadline
+    guard: the owner is Terminating, the configured teardown deadline has passed since its deletionTimestamp, and the teardown finalizer is still held
+    to: Empty
+    effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
+    decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+
+  # --- Migrate/CreateSurge -----------------------------------------------
+  - id: T-migrate-complete
+    from: Migrate/CreateSurge
+    event: pod.deleted
+    variant: source
+    guard: the surge is promoted Ready on the source's running revision and the source's pods and resources are gone
+    to: Empty
+    effects: [source status row removed under the ownership guard, Completed ledger row persisted, record stamped Completed last so a crash re-runs the tail]
+    decided_in: pkg/controller/v1beta1/workload/ops/migrate.go
+  - id: T-migrate-deadline
+    from: Migrate/CreateSurge
+    event: timer.migrationDeadline
+    guard: the migration record passed its deadline and the source's live pods are not all runtime-ready
+    to: Failed
+    effects: [Migrate pin cleared, source-drain hold released on every source pod, Phase Failed with a migration-expired LastFailure, record closed]
+    decided_in: pkg/controller/v1beta1/workload/ops/migrate_expire.go
+  - id: T-migrate-deadline-restore
+    from: Migrate/CreateSurge
+    event: timer.migrationDeadline
+    guard: the migration record passed its deadline and every live source pod is runtime-ready
+    to: Ready
+    effects: [Migrate pin cleared, source-drain hold released so the source returns to rotation, RunningRevision untouched, record closed]
+    decided_in: pkg/controller/v1beta1/workload/ops/migrate_expire.go
+  - id: T-migrate-teardown
+    from: Migrate/CreateSurge
+    event: spec.teardown
+    guard: teardown deletes a mid-migration pair like everything else, so the migration exclusion does not apply
+    to: Delete/Drain
+    effects: [Phase Deleting and the Delete Drain operation committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/reconcile.go
+  - id: T-migrate-force-delete
+    from: Migrate/CreateSurge
+    event: timer.forceDelete
+    guard: a force-delete policy is configured and a source pod is past its deletion deadline plus the overdue slack while its node is gone or has been unreachable past the threshold; both clocks are required and whichever lands last is the trigger
+    to: Migrate/CreateSurge
+    effects: [source pod force-deleted with grace zero under a UID precondition, Warning event and a ledger row recorded, the migration drain left to complete on the resulting absence]
+    decided_in: pkg/controller/v1beta1/workload/ops/force_delete.go
+  - id: T-migrate-teardown-deadline
+    from: Migrate/CreateSurge
+    event: timer.teardownDeadline
+    guard: the owner is Terminating, the configured teardown deadline has passed since its deletionTimestamp, and the teardown finalizer is still held
+    to: Empty
+    effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
+    decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+
+  # --- Migrate/SurgeTarget -----------------------------------------------
+  - id: T-migratetarget-promote
+    from: Migrate/SurgeTarget
+    event: pod.deleted
+    variant: source
+    guard: the surge passed its rotation and availability gates and the source's pods are drained and deleted
+    to: Ready
+    effects: [Phase Ready on the source's running revision with the Migrate pin cleared]
+    decided_in: pkg/controller/v1beta1/workload/ops/migrate.go
+  - id: T-migratetarget-expired
+    from: Migrate/SurgeTarget
+    event: timer.migrationDeadline
+    guard: the migration record passed its deadline, so the pin is dropped and the unpinned index leaves the plan
+    to: Delete/Drain
+    effects: [Migrate pin cleared, the index becomes a scale-down extra and the next wave commits Phase Deleting with a Delete Drain operation]
+    decided_in: pkg/controller/v1beta1/workload/ops/migrate_expire.go
+  - id: T-migratetarget-teardown
+    from: Migrate/SurgeTarget
+    event: spec.teardown
+    guard: teardown deletes a mid-migration pair like everything else, so the migration exclusion does not apply
+    to: Delete/Drain
+    effects: [Phase Deleting and the Delete Drain operation committed in one status transaction]
+    decided_in: pkg/controller/v1beta1/workload/reconcile.go
+  - id: T-migratetarget-teardown-deadline
+    from: Migrate/SurgeTarget
+    event: timer.teardownDeadline
+    guard: the owner is Terminating, the configured teardown deadline has passed since its deletionTimestamp, and the teardown finalizer is still held
+    to: Empty
+    effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
+    decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+
+  # --- Delete/Drain ------------------------------------------------------
+  - id: T-delete-done
+    from: Delete/Drain
+    event: pod.deleted
+    variant: source
+    guard: every pod of the index is gone and its instance resources are finalized, with the wave's completion guard still matching
+    to: Empty
+    effects: [status row removed, expectations forgotten, scale-down duration recorded]
+    decided_in: pkg/controller/v1beta1/workload/ops/delete_batch.go
+  - id: T-delete-force
+    from: Delete/Drain
+    event: pod.stuckTerminating
+    guard: a force-delete policy is configured, the pod is past its grace plus slack, carries no foreign finalizer, and its node is gone or has been unreachable longer than the threshold
+    to: Delete/Drain
+    effects: [pod force-deleted with grace zero and a ledger row recorded]
+    decided_in: pkg/controller/v1beta1/workload/ops/force_delete.go
+  - id: T-delete-force-clock
+    from: Delete/Drain
+    event: timer.forceDelete
+    guard: a force-delete policy is configured and the pod is past its deletion deadline plus the overdue slack while its node is gone or has been unreachable past the threshold; both clocks are required and whichever lands last is the trigger, and the wake is scheduled for exactly that boundary
+    to: Delete/Drain
+    effects: [pod force-deleted with grace zero under a UID precondition, Warning event and a ledger row recorded, the wave left to complete on the resulting absence]
+    decided_in: pkg/controller/v1beta1/workload/ops/force_delete.go
+  - id: T-delete-teardown-deadline
+    from: Delete/Drain
+    event: timer.teardownDeadline
+    guard: the owner is Terminating, the configured teardown deadline has passed since its deletionTimestamp, and the teardown finalizer is still held
+    to: Empty
+    effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
+    decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go

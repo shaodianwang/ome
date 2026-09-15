@@ -1,0 +1,77 @@
+# Bugfix provenance for the review cells in
+# tests/rolloutspec/machines/instance/cells-create.yaml.
+# Selectors match cells the same way grid expansion does: an empty
+# variants / windows / transition matches all of them.
+history:
+  - state: Create/CreatePods
+    event: pod.waiting
+    variants: [ImagePullBackOff, ErrImagePull, InvalidImageName, CreateContainerConfigError]
+    windows: [before]
+    transition: ""
+    prs: ["#1013"]
+  - state: Create/CreatePods
+    event: spec.revision
+    variants: []
+    windows: [before]
+    transition: ""
+    prs: ["#1013"]
+  - state: Create/CreatePods
+    event: spec.revision
+    variants: []
+    windows: [boundary, after]
+    transition: ""
+    prs: ["#1013"]
+  - state: Create/CreatePods
+    event: spec.replicasDown
+    variants: []
+    windows: [before]
+    transition: ""
+    prs: ["#1044"]
+  - state: Create/CreatePods
+    event: spec.replicasDown
+    variants: []
+    windows: [boundary, after]
+    transition: ""
+    prs: ["#1044"]
+  - state: Create/CreatePods
+    event: spec.pauseTrue
+    variants: []
+    windows: []
+    transition: ""
+    prs: ["#1279", "#762"]
+  - state: Create/CreatePods
+    event: spec.pauseFreeze
+    variants: []
+    windows: []
+    transition: ""
+    prs: ["#1279"]
+  - state: Create/CreatePods
+    event: spec.unpause
+    variants: []
+    windows: []
+    transition: ""
+    prs: ["#762"]
+  - state: Create/CreatePods
+    event: timer.operationDeadline
+    variants: []
+    windows: [before]
+    transition: ""
+    prs: ["#1013", "#1491"]
+  - state: Create/CreatePods
+    event: api.conflict
+    variants: []
+    windows: []
+    transition: ""
+    prs: ["#872"]
+  - state: Create/CreatePods
+    event: api.quotaDenied
+    variants: []
+    windows: []
+    transition: ""
+    prs: ["#1147"]
+  - state: Create/CreatePods
+    event: pod.phaseTerminal
+    variants: []
+    windows: []
+    transition: ""
+    prs: ["#1494"]

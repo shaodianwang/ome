@@ -1,0 +1,72 @@
+# Bugfix provenance for the review cells in
+# tests/rolloutspec/machines/instance/cells-restart.yaml.
+# Selectors match the cells file exactly: an empty variants, windows or
+# transition matches all of them. Every PR number below was confirmed
+# present in this repo's history before it was cited.
+history:
+  - state: Restart/Drain
+    event: pod.deleted
+    variants: [source]
+    windows: [before]
+    transition: ""
+    prs: ["#1000"]
+  - state: Restart/Drain
+    event: pod.waiting
+    variants: [ImagePullBackOff, ErrImagePull, InvalidImageName, CreateContainerConfigError, CreateContainerError, CrashLoopBackOff, RunContainerError]
+    windows: [before]
+    transition: ""
+    prs: ["#1172"]
+  - state: Restart/Drain
+    event: pod.containerRestart
+    variants: []
+    windows: []
+    transition: ""
+    prs: ["#1278"]
+  - state: Restart/Drain
+    event: spec.replicasUp
+    variants: []
+    windows: []
+    transition: ""
+    prs: ["#1448"]
+  - state: Restart/Drain
+    event: spec.pauseTrue
+    variants: []
+    windows: []
+    transition: ""
+    prs: ["#1279", "#1289"]
+  - state: Restart/Drain
+    event: spec.pauseFreeze
+    variants: []
+    windows: []
+    transition: ""
+    prs: ["#1279", "#1289"]
+  - state: Restart/Drain
+    event: pod.waiting
+    variants: [DeadlineExceeded]
+    windows: []
+    transition: ""
+    prs: ["#1494"]
+  - state: Restart/Drain
+    event: pod.evicted
+    variants: []
+    windows: []
+    transition: ""
+    prs: ["#1494"]
+  - state: Restart/Drain
+    event: pod.phaseTerminal
+    variants: []
+    windows: []
+    transition: ""
+    prs: ["#1494"]
+  - state: Restart/Drain
+    event: timer.operationDeadline
+    variants: []
+    windows: [before]
+    transition: ""
+    prs: ["#1491", "#1494"]
+  - state: Restart/Drain
+    event: pod.containersReady
+    variants: [source]
+    windows: [after]
+    transition: T-restart-deadline
+    prs: ["#1494"]

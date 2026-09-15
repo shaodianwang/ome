@@ -1,0 +1,791 @@
+# Cells for Restart/Drain — repair under RecreateInstanceOnPodRestart at the
+# Instance's running revision. One persisted step spans all three phases of
+# the repair: drain plus delete of the old incarnation (A), recreate at the
+# bumped incarnation (B), and the serving flip before promotion (C). Which
+# phase an event lands in is therefore a guard on this state, never a state
+# of its own.
+#
+# A shrink that puts a restarting index beyond the desired set stamps
+# Delete/Drain over Restart/Drain (T-restart-scaledown): the extras scan
+# excludes only Migrate-owned rows and the delete admission overwrites
+# whatever phase it finds.
+cells:
+  # --- pod, source generation ---------------------------------------------
+  - state: Restart/Drain
+    event: pod.scheduled
+    variants: [source]
+    outcome: ignore
+    note: the pass re-derives its phase from the live pod set on every wake-up, so a fresh pod binding to a node is progress toward the readiness wait rather than a step boundary
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: pod.containersReady
+    variants: [source]
+    windows: [before]
+    outcome: transition
+    to: Ready
+    guard: old-incarnation pods are gone on the live read, the bumped-incarnation set is complete, and every pod is ContainersReady
+    note: Phase C writes the serving gate on the fresh pods, then promotes with ReadySince restamped and the operation cleared; neither PodReady nor the minReadySeconds window is waited for (ops/restart.go)
+    invariants: [one.operation.per.instance]
+    placement: perm
+    coverage: {perm: [], unit: [TestRestart_ConvergesAcrossPasses, TestRestart_CreatesNewPodAtBumpedIncarnation], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: pod.containersReady
+    variants: [source]
+    transition: T-restart-recycle-terminal
+    outcome: defer
+    note: the recycle returns before the recreate, so the promote is not evaluated on the pass that issues the delete; readiness on the surviving members is re-read once the dead name is free and its pod rebuilt
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: pod.containersReady
+    variants: [source]
+    transition: T-restart-ready
+    outcome: ignore
+    note: the promote consumed the readiness and cleared the operation, so a repeated report finds a Ready row and writes nothing
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: pod.containersReady
+    variants: [source]
+    windows: [boundary]
+    transition: T-restart-deadline
+    outcome: transition
+    to: Ready
+    note: the restart pass runs before the end-of-pass escalation, so a promote landing in the same reconcile clears the operation and the buffered Failed stamp no-ops on the cleared operation (workload/deadline.go)
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: pod.containersReady
+    variants: [source]
+    windows: [after]
+    transition: T-restart-deadline
+    outcome: ignore
+    note: the row is Failed with the Restart operation preserved, and no promote reads a healthy pod set from there, so recovery belongs to the Failed machine - a gang short of a member re-arms the whole Restart over the spent attempt, while a complete single-pod set waits for a corrective revision or a due block
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: decided
+  - state: Restart/Drain
+    event: pod.containersReady
+    variants: [source]
+    windows: [boundary]
+    transition: T-restart-stuck
+    outcome: transition
+    to: Ready
+    note: same ordering as the deadline race — the promote clears the operation before the stuck-pod stamp is applied, and the fully-serving guard skips the stamp for a healthy pod set (workload/escalation.go)
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: pod.containersReady
+    variants: [source]
+    windows: [after]
+    transition: T-restart-stuck
+    outcome: ignore
+    note: the row is Failed with the Restart operation preserved and nothing re-promotes it from the pod side
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: pod.containersReady
+    variants: [source]
+    transition: T-restart-teardown
+    outcome: ignore
+    note: the teardown branch runs the scale-down pipeline alone, so no restart pass observes the readiness (workload/reconcile.go)
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: pod.containersReady
+    variants: [source]
+    windows: [boundary, after]
+    transition: T-restart-scaledown
+    outcome: ignore
+    note: the index has left the planned set, so the scale-down wave claims it whatever its pods report; a completed recreate no longer keeps it alive
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: pod.ready
+    variants: [source]
+    outcome: ignore
+    note: the promote reads ContainersReady only (query.AllPodsRuntimeReady), so full PodReady adds no step to the repair
+    placement: kind
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: pod.servingOn
+    variants: [source]
+    outcome: ignore
+    note: Phase C owns the flip and skips a pod that already serves; an old-incarnation pod that reappears in rotation is marked not-serving again by Phase A
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: pod.servingOff
+    variants: [source]
+    outcome: ignore
+    note: Phase A's own drain write; the pass then polls the per-revision routed Service endpoints before deleting, and a fresh pod that drops out of rotation is marked serving again by Phase C
+    placement: perm
+    coverage: {perm: [], unit: [TestRestart_DrainOldPod_FlipsServingFalse], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: pod.deleted
+    variants: [source]
+    windows: [before]
+    outcome: ignore
+    note: the in-flight restart owns the pod set — Phase A counts the deletion as drain progress and Phase B recreates any missing pod at the bumped incarnation; the loss-below-Ready trigger excludes Phase Restarting, so no second restart is armed
+    placement: perm
+    coverage: {perm: [], unit: [TestRestart_DeletesOldPodOnceDrained, TestRestart_ConvergesAcrossPasses], kind: []}
+    status: review
+  - state: Restart/Drain
+    event: pod.deleted
+    variants: [source]
+    windows: [boundary, after]
+    outcome: ignore
+    note: the transition's own write owns the row, and a loss seen at or after it is evaluated against the state that landed — a Ready row arms a fresh restart, and a Failed row arms one too when a gang member is missing, because a preserved Restart operation is a spent attempt rather than an owner
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: pod.waiting
+    variants: [ImagePullBackOff, ErrImagePull, InvalidImageName, CreateContainerConfigError, CreateContainerError, CrashLoopBackOff, RunContainerError]
+    windows: [before]
+    outcome: escalate
+    to: Failed
+    guard: the reason is in the terminal waiting set, the pod has held it past StuckPodGrace, and the pod set is not fully serving
+    note: the fast escalation stamps Phase Failed with the waiting reason and the pod's termination detail on LastFailure and preserves the operation, since a Restart attempt is never disposed (workload/escalation.go, status_aggregate.go)
+    placement: perm
+    coverage: {perm: [], unit: [TestRestart_CapturesLastFailureBeforeDrain], kind: []}
+    status: review
+  - state: Restart/Drain
+    event: pod.waiting
+    variants: [ImagePullBackOff, ErrImagePull, InvalidImageName, CreateContainerConfigError, CreateContainerError, CrashLoopBackOff, RunContainerError]
+    windows: [boundary, after]
+    outcome: ignore
+    note: the stamp is idempotent and the escalation pass skips an already-Failed row, so repeated evidence writes nothing
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: pod.waiting
+    variants: [DeadlineExceeded]
+    outcome: defer
+    guard: the pod is still Running
+    note: DeadlineExceeded is outside the terminal waiting set, so the fast escalation ignores it and the step holds. Once the container death drives the pod to phase Failed the recycle claims it instead - the name is freed and rebuilt - so the operation deadline is the only exit for a pod that keeps the reason while still Running (workload/escalation.go, ops/terminal_recycle.go)
+    placement: sim
+    coverage: {perm: [], unit: [TestEscalation_RestartDeadlineExceededWaiting_NoFastFail], kind: []}
+    status: decided
+  - state: Restart/Drain
+    event: pod.containerRestart
+    outcome: ignore
+    note: restart evidence is read only for a Ready row, a Restarting row re-selects unconditionally, and the promote restamps ReadySince so a container restart during the recreate never reads as a post-Ready failure
+    placement: perm
+    coverage: {perm: [], unit: [TestDetectRestartTrigger_RunnerRestartAfterReady, TestDetectRestartTrigger_BootRestartsForgiven], kind: []}
+    status: review
+  - state: Restart/Drain
+    event: pod.uidRotated
+    outcome: ignore
+    note: the pass partitions pods by the incarnation label and addresses the recreate by name, so a pod that reappears under a new UID is reclassified on the next wake-up — an old-incarnation reappearance is drained and deleted, a bumped-incarnation one satisfies the recreate
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: pod.stuckTerminating
+    outcome: defer
+    note: Phase A blocks on the live old-pod check until the object disappears, and the force-delete sweep is wired into the scale-down, migration and update drains but not into this one, so the operation deadline is this state's single exit
+    placement: kind
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: pod.nodeLost
+    outcome: defer
+    note: pods on a lost node stay Terminating and hold Phase A on the same drain check; node-death evidence is consulted by the delete, migration and update drains, not by the repair
+    placement: kind
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: pod.schedulingGated
+    outcome: defer
+    note: a gated pod parks the operation deadline and the escalation pass skips a gated Instance, so the recreate waits for admission with no clock running
+    placement: perm
+    coverage: {perm: [], unit: [TestReconcileGatedDeadlines_RestartsOnUngate], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: pod.evicted
+    outcome: transition
+    to: Restart/Drain
+    guard: the evicted pod carries the bumped incarnation and the attempt's deadline has not elapsed; an evicted old-incarnation pod is simply drained and deleted by Phase A
+    note: an eviction leaves the pod in phase Failed, so the recycle in ops/terminal_recycle.go treats it as absent, deletes the dead occupant with the expectation recorded first and frees the name for Phase B to rebuild on a later pass; the attempt's own deadline still bounds how many recycles it gets
+    placement: sim
+    coverage: {perm: [], unit: [TestRestart_RecyclesEvictedNewIncarnationPod], kind: []}
+    status: decided
+
+  # --- operator edits ------------------------------------------------------
+  - state: Restart/Drain
+    event: spec.revision
+    outcome: defer
+    guard: the recreate stamps the Instance's running revision, so the fresh pods come back on the revision the repair started from
+    note: the new target is taken up by the update pass once the promote lands Ready; while the pods are gone the repair still rebuilds the running revision rather than adopting the target (revisionHashForInstance)
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: spec.annotationOnly
+    outcome: ignore
+    note: an excluded annotation or label leaves the revision hash alone, and the repair reads only the Instance's running revision
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: spec.strategy
+    outcome: ignore
+    note: the repair path never consults lifecycle.updateStrategy; the edited strategy applies to the next update the Instance takes from Ready
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: spec.replicasUp
+    outcome: ignore
+    note: the repair keeps this index while the Create pass materializes the other fresh indices from a plan that excludes every restart selection (planExcludingRestartSelections)
+    placement: perm
+    coverage: {perm: [], unit: [TestReconcile_ScaleUpDuringRestart_CreatesFreshIndices, TestReconcile_ScaleUpDuringRestart_ExcludesRestartSelectedCreateOwner], kind: []}
+    status: review
+  - state: Restart/Drain
+    event: spec.replicasDown
+    windows: [before]
+    outcome: transition
+    to: Delete/Drain
+    guard: the index falls beyond the desired set and the scale-down wave admits it within its pod budget
+    note: scale-down is selected ahead of the restart pass and the delete admission stamps Deleting with a Delete Drain operation over the restart's
+    placement: perm
+    coverage: {perm: [], unit: [TestPlan_ScaleDownPrecedesRestart], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: spec.replicasDown
+    windows: [boundary, after]
+    outcome: ignore
+    note: a shrink seen at or after the transition's write is re-evaluated against the state that landed
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: spec.pauseTrue
+    outcome: ignore
+    note: a standard pause plans scale-down and repair only, so the restart keeps converging at the running revision while updates and creates are held; the operation deadline is parked and the escalation pass is suspended for the paused reconcile
+    placement: perm
+    coverage: {perm: [], unit: [TestPlan_Paused_RepairRunsFleetChangesDoNot], kind: []}
+    status: review
+  - state: Restart/Drain
+    event: spec.pauseFreeze
+    outcome: defer
+    note: a frozen pause truncates the plan after the truth pass, so the repair holds at whatever phase it reached — including with the old pods already deleted and nothing serving — with its deadline parked and escalation suspended until pause is cleared
+    placement: perm
+    coverage: {perm: [], unit: [TestPlan_Paused_RepairRunsFleetChangesDoNot], kind: []}
+    status: review
+  - state: Restart/Drain
+    event: spec.unpause
+    outcome: ignore
+    note: the restart pass is planned again and resumes at the same step from its durable operation, and the parked deadline is re-armed from the current time on the first ungated pass
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: spec.teardown
+    windows: [before]
+    outcome: transition
+    to: Delete/Drain
+    guard: the owner carries a deletionTimestamp so every observed index is treated as a scale-down extra
+    note: the teardown branch runs the scale-down pipeline alone — no pause gate, no repair, no escalation (workload/reconcile.go)
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: spec.teardown
+    windows: [boundary, after]
+    outcome: ignore
+    note: the delete operation owns the row once its stamp lands, and teardown is re-asserted on every pass regardless
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: spec.migrateRequest
+    outcome: defer
+    note: the migrate pass requires a steady source — Phase Ready, no operation, a recorded running revision — so a request against a restarting Instance stays an unallocated record and is re-picked after the promote
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: spec.partition
+    outcome: ignore
+    note: rollingUpdate.partition holds update dispatch for the selected Instances; repair is never partitioned
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  # --- timers --------------------------------------------------------------
+  - state: Restart/Drain
+    event: timer.operationDeadline
+    windows: [before]
+    outcome: escalate
+    to: Failed
+    guard: the deadline elapsed, no pod of the Instance is held by an admission scheduling gate, and the pod set is not fully serving
+    note: a Restart attempt is not disposable, so the stamp keeps the operation and records on LastFailure the blamed pod's workload-caused waiting reason when one exists, falling back to the bare DeadlineExceeded diagnostic when none does, because the teardown that follows deletes the blamed pods. The preserved operation no longer parks the row for good, because a Restart parked at Failed is read as a spent attempt, so the gang-member-loss trigger may re-arm the whole gang under a fresh deadline, while the single-pod path still recovers through the Create pass
+    placement: perm
+    coverage: {perm: [], unit: [TestEscalation_RestartDeadlineElapsed_FailsInstance], kind: []}
+    status: decided
+  - state: Restart/Drain
+    event: timer.operationDeadline
+    windows: [boundary, after]
+    outcome: ignore
+    note: the escalation pass skips an already-Failed row, and the stamp no-ops against a slot whose operation the promote cleared
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: timer.minReady
+    outcome: ignore
+    note: the promote is ContainersReady-only with no availability wait, so the minReadySeconds window cannot gate this step
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: timer.expectationsTTL
+    outcome: ignore
+    note: the lapsed expectation releases the satisfied-guard that holds the delete and create batches, and the next pass re-derives the outstanding work from the live pod read
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  # --- controller and apiserver -------------------------------------------
+  - state: Restart/Drain
+    event: ctrl.crash
+    outcome: ignore
+    note: phase, operation and the bumped Incarnation are durable in status, so the next manager re-enters at the same step; the emptied expectation cache reports satisfied and the pass re-derives its phase from the live pod set
+    placement: kind
+    coverage: {perm: [], unit: [TestRestart_ConvergesAcrossPasses], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: ctrl.staleRead
+    outcome: ignore
+    note: the pass lists the Instance's pods through the cached client but re-checks the old set live before recreating and reads endpoints live during the drain, so a lagging cache costs a requeue rather than a double create
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: api.conflict
+    outcome: ignore
+    note: every status write goes through the adapter's conflict retry, and each phase of the repair is idempotent on re-entry
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: api.alreadyExists
+    outcome: ignore
+    note: a pod create that races the cache is tolerated and the target counts as present, so the recreate converges without a second object
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: api.notFound
+    outcome: ignore
+    note: a pod delete that reports NotFound counts as drained and the pass continues; an owner that has disappeared ends the reconcile through the owner-gone sentinel
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: api.quotaDenied
+    outcome: defer
+    note: the rejected pod create fails the pass, the reconcile requeues with backoff, and the unparked operation deadline bounds the retrying
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  # --- pod, newly expressible inputs ---------------------------------------
+  - state: Restart/Drain
+    event: pod.unschedulable
+    variants: [source]
+    outcome: defer
+    note: nothing reads PodScheduled=False, so an unplaceable recreated pod holds Phase C on the runtime-ready check with its clock running, and the operation deadline is the only exit (ops/restart.go, escalation.go)
+    placement: kind
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: pod.containersNotReady
+    variants: [source]
+    outcome: defer
+    note: Phase C re-reads the bumped-incarnation set on every wake-up and promotes only when all of it is ContainersReady, so a regression withholds the promote until the deadline; a regression landing at or after a transition's write is re-evaluated against the state that landed (ops/restart.go)
+    placement: kind
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: pod.terminating
+    variants: [source]
+    outcome: defer
+    note: Phase A skips re-deleting a pod that already carries a deletionTimestamp and keeps returning until the old object is gone from the live list; a bumped-incarnation pod that starts terminating counts as present for Phase B and not runtime-ready for Phase C, so the promote waits for it to disappear and be recreated (ops/restart.go)
+    placement: kind
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: pod.phaseTerminal
+    variants: [Failed, Succeeded]
+    windows: [before]
+    outcome: transition
+    to: Restart/Drain
+    guard: the dead pod carries the bumped incarnation and holds one of the rebuild's target names, the attempt's deadline has not elapsed, and its outstanding expectations are satisfied; a terminal pod at the old incarnation is drained and deleted by Phase A like any other
+    note: query.ExcludeTerminalPods makes the dead pod absent for Phase B's name diff and for the survivor count, so the recycle deletes it - expectation recorded before the delete, diagnostics captured onto LastFailure, TerminalPodRecycled warning - and returns before the recreate; the name is rebuilt on a later pass, paced inside the attempt by the same-target retry ladder (ops/terminal_recycle.go)
+    placement: unit
+    coverage: {perm: [], unit: [TestRestart_RecyclesSucceededNewIncarnationPod, TestRestart_RecyclesTerminalNewIncarnationPod, TestRestart_TerminalNewIncarnationPodIsNotPromoted], kind: []}
+    status: decided
+  - state: Restart/Drain
+    event: pod.phaseTerminal
+    variants: [Failed, Succeeded]
+    windows: [boundary, after]
+    outcome: defer
+    note: the recycle writes no phase or step, so a re-observed terminal phase lands on the same row and is either paced by the ladder or already satisfied by the delete in flight
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: decided
+  - state: Restart/Drain
+    event: pod.phaseTerminal
+    variants: [Unknown]
+    outcome: DECIDE
+    note: query.IsTerminalPod is PodFailed or PodSucceeded only, so an Unknown pod at the bumped incarnation keeps its name and its object, Phase B counts the target as present and Phase C never sees a runtime-ready set; the repair waits out the operation deadline. Unknown means the node stopped reporting rather than the pod dying, so recycling it would delete a name a returning kubelet may still be running - decide whether it should route to the force-delete sweep, which proves node death, instead of to the recycle.
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: decided
+  - state: Restart/Drain
+    event: pod.admitted
+    outcome: ignore
+    note: the gate-exit edge re-arms the parked operation deadline at now plus instanceReadyTimeout and the escalation pass stops skipping the row, so the recreate resumes on a fresh clock rather than a spent one (workload/deadline.go)
+    placement: perm
+    coverage: {perm: [], unit: [TestReconcileGatedDeadlines_RestartsOnUngate], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: pod.containersReady
+    variants: [source]
+    windows: [boundary]
+    transition: T-restart-stuckgrace
+    outcome: transition
+    to: Ready
+    note: same ordering as the other escalation races — the restart pass runs before the end-of-pass escalation, so the promote clears the operation and the fully-serving guard skips the stamp for a healthy pod set (workload/escalation.go)
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: pod.containersReady
+    variants: [source]
+    windows: [after]
+    transition: T-restart-stuckgrace
+    outcome: ignore
+    note: the row is Failed with the Restart operation preserved and nothing re-promotes it from the pod side
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: pod.containersReady
+    variants: [source]
+    windows: [boundary, after]
+    transition: T-restart-teardown-deadline
+    outcome: ignore
+    note: the finalizer release deletes the owner and every InstanceStatus row with it, so no pass is left to observe the readiness (inferencereplica/teardown.go)
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  # --- gang ----------------------------------------------------------------
+  - state: Restart/Drain
+    event: gang.podGroup
+    variants: [Terminating]
+    outcome: defer
+    note: the PodGroup pass runs ahead of the workload dispatcher and returns a plain scale-down requeue on a terminating group, so the restart pass and the escalation pass are both skipped entirely until the name is free (inferencereplica/reconciler.go, podgroup/podgroup.go)
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: gang.podGroup
+    variants: [OwnershipConflict]
+    outcome: defer
+    note: a group held by another owner is neither updated nor deleted; the PodGroup pass fails the reconcile before the dispatcher runs, so the row holds with its clock running and no pass reaches the escalation that would fail it (podgroup/podgroup.go)
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: gang.podGroup
+    variants: [Deleted]
+    outcome: ignore
+    note: the PodGroup pass re-creates the deterministic group from the plan before the restart pass runs, and the surviving pods keep the group label, so the gang is re-announced without a step of its own (gang/gang.go)
+    placement: kind
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  # GAP: the event's meaning is that the PodGroup blocks or fails the gang,
+  # and nothing in the repair path can observe it.
+  - state: Restart/Drain
+    event: gang.podGroup
+    variants: [Unschedulable, ScheduleTimeout, PhaseFailed]
+    outcome: ignore
+    note: PodGroup status has no readers and the watch predicate admits only generation and metadata changes, so a gang the coscheduler has given up on never enqueues; the recreated pods stay Pending and the operation deadline is the only exit (gang/gang.go, workload/watches.go)
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  # --- endpoints -----------------------------------------------------------
+  - state: Restart/Drain
+    event: endpoint.rotationIn
+    variants: [source]
+    outcome: defer
+    note: Phase A polls the per-revision routed Service's EndpointSlices live before deleting, so an old pod that is still or again a ready endpoint holds the drain; a fresh pod entering rotation is the consequence of Phase C's serving flip and is not read back (ops/restart.go, workload/drain)
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: endpoint.rotationOut
+    variants: [source]
+    outcome: ignore
+    note: absence from the ready endpoint set is the level Phase A polls for, so it releases the delete rather than being a step of its own; a fresh pod dropping out of rotation is re-marked serving by Phase C (ops/restart.go, workload/drain)
+    placement: perm
+    coverage: {perm: [], unit: [TestRestart_DeletesOldPodOnceDrained], kind: []}
+    status: current
+
+  # --- operator edits, newly expressible -----------------------------------
+  - state: Restart/Drain
+    event: spec.gangWidth
+    variants: [grow]
+    outcome: ignore
+    note: Phase B enumerates the desired pod names from the live plan, so the wider set is filled at the bumped incarnation on the next pass, and the PodGroup pass raises MinMember ahead of it (ops/create.go expectedPodNamesForInstance, podgroup/podgroup.go)
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  # GAP: a narrower width is supposed to retire the pods beyond it, and the
+  # repair leaves them running and routable.
+  - state: Restart/Drain
+    event: spec.gangWidth
+    variants: [shrink]
+    outcome: ignore
+    note: a shrink seen before Phase B converges cleanly because Phase A deletes every old-incarnation pod, but one seen after it leaves the extra bumped-incarnation pods live — Phase A deletes only old incarnations, Phase B only fills missing names, and Phase C then waits on those extras and marks them serving (ops/restart.go)
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: spec.gangWidth
+    variants: [runnerSetChanged]
+    outcome: ignore
+    note: the width half behaves as grow or shrink above, including the stranded-extras case; the shape flip also mints a revision and moves the pod-group label, so the recreated pods carry the new shape under the running revision's hash while the survivors keep the old one (ops/restart.go, ops/render.go)
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: spec.rollbackTarget
+    outcome: defer
+    note: the override moves the Component's roll target only; the recreate labels its pods with the Instance's running revision, so the rollback is taken up by the update pass once the promote lands Ready (ops/restart.go revisionHashForInstance)
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: spec.policyTuning
+    variants: [restartPolicy]
+    windows: [before]
+    outcome: transition
+    to: Create/CreatePods
+    guard: the policy no longer selects RecreateInstanceOnPodRestart
+    note: the restart pass is planned only under that policy, so the flip drops it and stops excluding the index from the Create pass, which stamps Phase Creating with a fresh Create operation over the Restart — or promotes the row straight to Ready when the live pod set is already complete and runtime-ready (plan_decision.go, ops/create.go)
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: spec.policyTuning
+    variants: [restartPolicy]
+    windows: [boundary, after]
+    outcome: ignore
+    note: the transition's own write owns the row, and the policy is re-read against the state that landed
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: spec.policyTuning
+    variants: [instanceReadyTimeout]
+    outcome: ignore
+    note: the Restart operation's deadline is stamped once at entry and preserved by the skip-write guard, so a new value reaches this row only through the gate-exit re-arm; the PodGroup's clamped ScheduleTimeoutSeconds is re-reconciled from it on the same pass (ops/restart.go, workload/deadline.go, podgroup/podgroup.go)
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: spec.policyTuning
+    variants: [minReadySeconds]
+    outcome: ignore
+    note: the promote reads ContainersReady only and waits out no availability window, so the new value cannot gate this step (ops/restart.go)
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: spec.policyTuning
+    variants: [gracePeriod]
+    outcome: ignore
+    note: the in-place grace is consumed only by the surge settle window; the restart drain polls the per-revision routed Service's endpoints instead of waiting out a clock (ops/update_surge.go, ops/restart.go)
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: spec.policyTuning
+    variants: [markNotReady]
+    outcome: ignore
+    note: the knob is consulted on the in-place path only; Phase A marks every serving old pod not-serving unconditionally before it deletes (ops/restart.go, ops/update_inplace.go)
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: spec.policyTuning
+    variants: [migrationPolicy]
+    outcome: ignore
+    note: the mode gates the disposition's relocation branch, and a Restart attempt is never disposed, so the repair never reaches it (workload/disposition.go, workload/escalation.go)
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  # --- operator configuration ----------------------------------------------
+  - state: Restart/Drain
+    event: config.changed
+    variants: [updateRetry, scaleDownInterval, autoMigrateBudget]
+    outcome: ignore
+    note: none of the three is read on the repair path — the retry gate is consulted before an attempt starts, the scale-down cadence belongs to the delete pipeline, and a Restart attempt is never disposed so the auto-migrate budget is never consulted (ops/restart.go, workload/disposition.go)
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: config.changed
+    variants: [stuckPodGrace]
+    outcome: ignore
+    note: the grace is re-read from config on every reconcile, so a shortened value can arm the fast escalation against pods the previous pass tolerated and a zero or negative value disables that path outright; neither is a step of this state (workload/escalation.go, workload/status_aggregate.go)
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: config.changed
+    variants: [forceDelete]
+    outcome: ignore
+    note: the force-delete conditions are wired into the scale-down and migration drains only, so retuning them changes nothing about a restart drain blocked on its live old-pod check (workload/force_delete.go, ops/restart.go)
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: config.changed
+    variants: [teardownDeadline]
+    outcome: ignore
+    note: the deadline re-times the finalizer-release arrow, which becomes reachable only once the owner carries a deletionTimestamp (inferencereplica/teardown.go)
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  # --- controller ticks ----------------------------------------------------
+  - state: Restart/Drain
+    event: ctrl.resync
+    outcome: ignore
+    note: the restart pass is level-triggered — a tick re-lists the pods live, re-derives the phase, and the Restarting stamp's skip-write guard keeps an unchanged row from being written at all (ops/restart.go)
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  # --- apiserver rejections ------------------------------------------------
+  # GAP: a 422 is permanent, and the repair cannot tell it from a transient
+  # failure — nor can any clock end the retrying while the pass keeps erroring.
+  - state: Restart/Drain
+    event: api.invalid
+    outcome: defer
+    note: no branch classifies Invalid, so the failed pod create errors the pass and the reconcile requeues with backoff forever; an errored pass also returns before the end-of-pass escalation runs, so the operation deadline never gets the chance to fail the row (ops/create.go, workload/reconcile.go)
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: api.throttled
+    outcome: defer
+    note: a shed request is propagated verbatim and the reconcile retries under the controller's rate limiter; the operation deadline keeps running but is only consumed by a pass that completes without error (ops/create.go, workload/reconcile.go)
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: api.namespaceTerminating
+    outcome: defer
+    note: the rejection is retried like any other create failure; the row is resolved by the namespace GC deleting the owner, which routes it into the teardown branch, rather than by any classification on the repair path (ops/create.go, workload/reconcile.go)
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  # --- timers, newly expressible -------------------------------------------
+  - state: Restart/Drain
+    event: timer.stuckPodGrace
+    windows: [before]
+    outcome: escalate
+    to: Failed
+    guard: a recreated pod has held a terminal waiting reason since its creation past the configured grace and the pod set is not fully serving
+    note: the fast path fails the Instance without waiting out the operation deadline, recording the waiting reason and the pod's termination detail on LastFailure and preserving the operation, since a Restart attempt is never disposed (workload/escalation.go)
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: timer.stuckPodGrace
+    windows: [boundary, after]
+    outcome: ignore
+    note: the escalation pass skips an already-Failed row, and the stamp no-ops against a slot whose operation the promote cleared
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  # GAP: the scale-down, migration and update drains all reach the force-delete
+  # sweep; the restart drain is the one drain that still cannot.
+  - state: Restart/Drain
+    event: timer.forceDelete
+    outcome: ignore
+    note: the sweep is called from the delete wave, the migration expiry and the top of the update pass, and Phase A is none of them, so an elapsed overdue-slack or node-unreachable clock leaves it blocked on the same live old-pod check until the operation deadline fails the row (ops/force_delete.go, ops/restart.go)
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: timer.teardownDeadline
+    windows: [before]
+    outcome: transition
+    to: Empty
+    guard: the owner is Terminating, the configured teardown deadline has passed since its deletionTimestamp, and the teardown finalizer is still held
+    note: reachable only when the teardown branch never got its Delete stamp onto this row; the finalizer release purges the owner and every InstanceStatus row it carried in one delete, leaving surviving pods to background GC (inferencereplica/teardown.go)
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: timer.teardownDeadline
+    windows: [boundary, after]
+    outcome: ignore
+    note: the row is gone with the owner, so a later expiry has nothing to act on
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  # --- kubelet admission and slow readiness ---------------------------------
+  - state: Restart/Drain
+    event: pod.admissionRejected
+    windows: [before]
+    outcome: transition
+    to: Restart/Drain
+    guard: the rejected pod carries the bumped incarnation and holds one of the rebuild's target names, the attempt's deadline has not elapsed, and its outstanding expectations are satisfied
+    note: a rejection is phase Failed, so query.ExcludeTerminalPods drops it from Phase B's name diff and ops/terminal_recycle.go deletes it before the recreate; terminalPodTermination captures the pod-level status.reason onto LastFailure, so a rebuild that keeps being refused for capacity says so instead of reporting a bare PodFailed. A rejected pod at the old incarnation is drained and deleted by Phase A like any other
+    placement: kind
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: pod.admissionRejected
+    windows: [boundary, after]
+    outcome: defer
+    note: the recycle writes no phase or step, so a re-observed rejection lands on the same row and is either paced by the ladder or already satisfied by the delete in flight
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Restart/Drain
+    event: pod.runningNotReady
+    variants: [source]
+    outcome: defer
+    note: Phase C re-reads the bumped-incarnation set every wake-up and promotes only when all of it is ContainersReady, and no pass reads a readiness wait as evidence, so a pod that runs but never passes its probes holds the repair to the operation deadline (pkg/controller/v1beta1/workload/ops/restart.go, pkg/controller/v1beta1/workload/deadline.go)
+    placement: kind
+    coverage: {perm: [], unit: [], kind: []}
+    status: current

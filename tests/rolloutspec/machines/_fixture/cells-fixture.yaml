@@ -1,0 +1,52 @@
+cells:
+  - state: Idle
+    event: pod.ready
+    variants: [source]
+    windows: [before]
+    outcome: transition
+    to: Working
+    invariants: [ready.count.matches.pods]
+    placement: unit
+    coverage: {perm: [], unit: [TestExpandFixtureGrid], kind: []}
+    status: decided
+  - state: Idle
+    event: pod.ready
+    variants: [source]
+    windows: [boundary, after]
+    outcome: ignore
+    note: the transition already consumed this pod's readiness
+    placement: unit
+    coverage: {perm: [], unit: [TestExpandFixtureGridKeyOrder], kind: []}
+    status: decided
+  - state: Idle
+    event: pod.ready
+    variants: [target]
+    outcome: ignore
+    note: no target pod exists while Idle
+    placement: unit
+    coverage: {perm: [], unit: [TestExpandVariantQualifiedNotApplicable], kind: []}
+    status: decided
+  - state: Working
+    event: pod.ready
+    outcome: ignore
+    note: readiness is re-read on the next pass; no step change
+    placement: unit
+    coverage: {perm: [], unit: [TestValidateFixtureIsClean], kind: []}
+    status: decided
+  - state: Working
+    event: timer.deadline
+    windows: [before]
+    outcome: transition
+    to: Idle
+    invariants: [op.cleared.on.leave]
+    placement: unit
+    coverage: {perm: [], unit: [TestSelects], kind: []}
+    status: decided
+  - state: Working
+    event: timer.deadline
+    windows: [boundary, after]
+    outcome: ignore
+    note: the deadline has already been consumed by the transition
+    placement: unit
+    coverage: {perm: [], unit: [TestVocabularies], kind: []}
+    status: decided

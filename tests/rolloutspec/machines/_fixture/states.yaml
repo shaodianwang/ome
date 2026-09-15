@@ -1,0 +1,11 @@
+states:
+  - id: Idle
+    phase: Ready
+    decided_in: tests/rolloutspec/doc.go
+    not_applicable:
+      timer.deadline: no operation is in flight while Idle
+  - id: Working
+    phase: Updating
+    op: {type: Update, step: Surge}
+    applies: {strategies: [SurgeThenDrain], shape: [single]}
+    decided_in: tests/rolloutspec/doc.go

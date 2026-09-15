@@ -1,0 +1,83 @@
+# Variant vocabulary for the pod and endpoint families: "source" names the
+# pods of the generation that is leaving (the Instance's current pods, or the
+# paired source Instance's pods when the row is a surge replacement);
+# "target" names the pods of the replacement generation. Both variants
+# therefore read the same way from either side of a surge or migration pair.
+#
+# pod.admissionRejected is the pod-level status.reason family: a rejection
+# the kubelet writes on the Pod object itself. Neither pod.waiting (a
+# container-level waiting reason) nor pod.phaseTerminal (a phase and
+# nothing else) can carry it, so a pod refused before any container ran
+# reads as an ordinary Failed pod through both of those columns.
+#
+# The spec family is every writer of the InferenceReplica spec, not one
+# actor: the ISVC controller writes most of it, an autoscaler writes
+# spec.replicas through the scale subresource, and the canary executor writes
+# the pacing fields. It also carries the operator mailbox verbs
+# (spec.migrateRequest, spec.resetInstances, spec.releaseHeldRevision): each
+# is an annotation the reconciler consumes after its effects commit, and each
+# is excluded from the pod-template revision hash so writing one is never a
+# spec.annotationOnly.
+events:
+  - {id: pod.scheduled, family: pod, variants: [source, target], description: the pod is bound to a node}
+  - {id: pod.unschedulable, family: pod, variants: [source, target], description: "PodScheduled=False with reason Unschedulable, including topology-spread and gang anti-affinity failures"}
+  - {id: pod.containersReady, family: pod, variants: [source, target], description: the pod reports ContainersReady=True}
+  - {id: pod.containersNotReady, family: pod, variants: [source, target], description: the pod's ContainersReady regresses from True to False while it still runs}
+  - {id: pod.ready, family: pod, variants: [source, target], description: the pod reports Ready=True with all readiness gates satisfied}
+  - {id: pod.servingOn, family: pod, variants: [source, target], description: the pod's serving readiness gate flips to True}
+  - {id: pod.servingOff, family: pod, variants: [source, target], description: the pod's serving readiness gate flips to False}
+  - {id: pod.terminating, family: pod, variants: [source, target], description: the pod's deletionTimestamp is set and the pod still exists}
+  - {id: pod.deleted, family: pod, variants: [source, target], description: the pod object is gone from the apiserver}
+  - {id: pod.phaseTerminal, family: pod, variants: [Failed, Succeeded, Unknown], description: the pod phase reaches a terminal value}
+  - {id: pod.waiting, family: pod, variants: [ImagePullBackOff, ErrImagePull, InvalidImageName, CreateContainerConfigError, CreateContainerError, CrashLoopBackOff, RunContainerError, DeadlineExceeded], description: a container of the pod cannot start or has died with the named reason}
+  - {id: pod.admissionRejected, family: pod, variants: [UnexpectedAdmissionError, OutOfResource], description: "the kubelet refused to admit the pod after scheduling; OutOfResource stands for the OutOfcpu, OutOfmemory, OutOfpods and OutOf<extended-resource> rejections, which arrive as a pod status.reason with phase Failed"}
+  - {id: pod.containerRestart, family: pod, description: "a container terminates and restarts after the Instance had already become Ready"}
+  - {id: pod.runningNotReady, family: pod, variants: [source, target], description: "the pod is Running but has not become Ready within the grace, its containers restarting or failing readiness under their own weight"}
+  - {id: pod.uidRotated, family: pod, description: a pod with the same name reappears under a new UID}
+  - {id: pod.stuckTerminating, family: pod, description: a pod carries deletionTimestamp past its grace period without disappearing}
+  - {id: pod.nodeLost, family: pod, variants: [NodeGone, UnreachableTaint, NodeNotReady], description: the node hosting a pod is removed or stops reporting healthy}
+  - {id: pod.schedulingGated, family: pod, description: a pod is held by a scheduling gate such as a queue admission}
+  - {id: pod.admitted, family: pod, description: the pod's scheduling gate is removed and it may now be scheduled}
+  - {id: pod.evicted, family: pod, description: a pod is evicted through the eviction API or by kubelet pressure}
+  - {id: gang.podGroup, family: gang, variants: [Terminating, OwnershipConflict, Deleted, Unschedulable, ScheduleTimeout, PhaseFailed], description: "the Instance's PodGroup is unusable or cannot get the whole gang scheduled"}
+  - {id: endpoint.rotationIn, family: endpoint, variants: [source, target], description: "the pod's EndpointSlice endpoint becomes Ready"}
+  - {id: endpoint.rotationOut, family: endpoint, variants: [source, target], description: "the pod's EndpointSlice endpoint becomes absent or not Ready"}
+  - {id: spec.revision, family: spec, description: the Instance's pod template changes so a new ControllerRevision is the target}
+  - {id: spec.annotationOnly, family: spec, description: the only edit is to annotations or labels that do not define the revision}
+  - {id: spec.strategy, family: spec, description: lifecycle.updateStrategy changes}
+  - {id: spec.gangWidth, family: spec, variants: [grow, shrink, runnerSetChanged], description: desired pod count per Instance changes without a revision change}
+  - {id: spec.replicasUp, family: spec, description: desired replicas increase}
+  - {id: spec.replicasDown, family: spec, description: desired replicas decrease}
+  - {id: spec.pauseTrue, family: spec, description: paused=true with the default pause mode}
+  - {id: spec.pauseFreeze, family: spec, description: paused=true with pauseMode=Freeze}
+  - {id: spec.unpause, family: spec, description: paused is cleared and the rollout may continue}
+  - {id: spec.teardown, family: spec, variants: [deleted, ownerRotated], description: "the owning InferenceReplica is gone: deleted outright, or replaced by one whose UID no longer matches"}
+  - {id: spec.migrateRequest, family: spec, description: an operator asks this Instance to migrate via the migration request annotation}
+  - {id: spec.resetInstances, family: spec, variants: [all, indexList], description: "an operator asks the controller to reset named Failed Instances - every Failed row, or an explicit index list - by deleting their pods and clearing the preserved operation"}
+  - {id: spec.releaseHeldRevision, family: spec, description: an operator releases the Held RetryBlock for a revision so a fresh attempt at it is admitted again}
+  - {id: spec.partition, family: spec, description: rollingUpdate.partition changes}
+  - {id: spec.rollbackTarget, family: spec, variants: [set, clear], description: the rollout target is pinned to an older stored ControllerRevision or released again}
+  - {id: spec.policyTuning, family: spec, variants: [restartPolicy, migrationPolicy, instanceReadyTimeout, minReadySeconds, gracePeriod, markNotReady], description: a lifecycle knob outside the pod template changes}
+  - {id: config.changed, family: config, variants: [updateRetry, stuckPodGrace, forceDelete, teardownDeadline, scaleDownInterval, autoMigrateBudget], description: the named operator configuration value changes while the Instance has work in flight}
+  - {id: gate.allow, family: coordination, description: the rollout gate lets this Instance start updating its pods}
+  - {id: gate.deny, family: coordination, variants: [Plan, Pairing, Ratio, Sequential, Budget, RetryBlock, Held], description: the rollout gate holds this Instance back from starting an update}
+  - {id: timer.operationDeadline, family: timer, description: "the deadline for the Instance's in-flight operation elapses"}
+  - {id: timer.minReady, family: timer, description: the minReadySeconds window after Ready elapses}
+  # Quoted: a plain scalar inside a flow mapping may not contain brackets.
+  - {id: timer.retryAt, family: timer, description: "retryBlocks[].nextRetryAt elapses"}
+  - {id: timer.expectationsTTL, family: timer, description: a pod create or delete stays unobserved until the controller stops waiting for it}
+  - {id: timer.migrationDeadline, family: timer, description: an accepted migration has not finished by the time its deadline elapses}
+  - {id: timer.drainSettle, family: timer, description: the post-drain settle window elapses}
+  - {id: timer.stuckPodGrace, family: timer, description: "a pod is still not running when its stuck-pod grace period since creation elapses"}
+  - {id: timer.forceDelete, family: timer, variants: [overdueSlack, nodeUnreachable], description: "the wait before force-deleting a stuck pod elapses for the named reason"}
+  - {id: timer.teardownDeadline, family: timer, description: "the teardown deadline since the owner's deletionTimestamp elapses"}
+  - {id: ctrl.crash, family: controller, description: the controller process restarts and loses everything it held only in memory}
+  - {id: ctrl.staleRead, family: controller, description: the controller reads state older than a write it has already made}
+  - {id: ctrl.resync, family: controller, description: "a reconcile arrives with nothing changed (periodic requeue, informer resync)"}
+  - {id: api.conflict, family: apiserver, description: a write fails with 409 Conflict}
+  - {id: api.alreadyExists, family: apiserver, description: a create fails with 409 AlreadyExists}
+  - {id: api.notFound, family: apiserver, description: a read or write fails with 404 NotFound}
+  - {id: api.quotaDenied, family: apiserver, description: a create is rejected by a ResourceQuota}
+  - {id: api.invalid, family: apiserver, description: "a write is rejected as invalid (422)"}
+  - {id: api.throttled, family: apiserver, variants: [TooManyRequests, ServiceUnavailable], description: the apiserver sheds the request}
+  - {id: api.namespaceTerminating, family: apiserver, description: a create is rejected because the namespace is terminating}

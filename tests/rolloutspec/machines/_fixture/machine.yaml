@@ -1,0 +1,8 @@
+machine: _fixture
+scope: two-state fixture for the loader, expander, and validator tests; not a real machine; decided_in paths and coverage names are placeholders naming this package's own tests, not real references
+frozen: true
+invariants:
+  - id: ready.count.matches.pods
+    statement: the recorded ready count never exceeds the number of pods reporting Ready
+  - id: op.cleared.on.leave
+    statement: leaving a state that carries an operation clears that operation

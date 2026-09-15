@@ -1,0 +1,180 @@
+# Provenance sidecar for cells-update-gang.yaml (instance machine,
+# Update/GangSurgeTarget and Update/GangSurgeTargetCleanup). Every cell
+# marked status: review has one entry here; the selector fields mirror the
+# cell's selector exactly. PR numbers live here because nothing under pkg/
+# may cite one.
+history:
+  - state: Update/GangSurgeTarget
+    event: pod.ready
+    variants: [target]
+    windows: []
+    transition: ""
+    prs: ["#601", "#1128"]
+  - state: Update/GangSurgeTarget
+    event: pod.deleted
+    variants: [source]
+    windows: [before]
+    transition: ""
+    prs: ["#1104", "#1142", "#762"]
+  - state: Update/GangSurgeTarget
+    event: pod.deleted
+    variants: [source]
+    windows: [boundary, after]
+    transition: T-gangtarget-ready
+    prs: ["#1104", "#762"]
+  - state: Update/GangSurgeTarget
+    event: pod.deleted
+    variants: [target]
+    windows: [before]
+    transition: ""
+    prs: ["#1000", "#526", "#1100", "#618"]
+  - state: Update/GangSurgeTarget
+    event: pod.deleted
+    variants: [target]
+    windows: [boundary, after]
+    transition: T-gangtarget-ready
+    prs: ["#1000"]
+  - state: Update/GangSurgeTarget
+    event: pod.waiting
+    variants: [ImagePullBackOff, ErrImagePull, InvalidImageName, CreateContainerConfigError, CreateContainerError, CrashLoopBackOff, RunContainerError]
+    windows: []
+    transition: ""
+    prs: ["#713", "#1100", "#715", "#1274"]
+  - state: Update/GangSurgeTarget
+    event: spec.revision
+    variants: []
+    windows: [before]
+    transition: ""
+    prs: ["#792", "#720", "#1142"]
+  - state: Update/GangSurgeTarget
+    event: spec.revision
+    variants: []
+    windows: [boundary, after]
+    transition: T-gangtarget-cleanup-superseded
+    prs: ["#792", "#1142"]
+  - state: Update/GangSurgeTarget
+    event: spec.strategy
+    variants: []
+    windows: []
+    transition: ""
+    prs: ["#1423"]
+  - state: Update/GangSurgeTarget
+    event: spec.replicasDown
+    variants: []
+    windows: []
+    transition: ""
+    prs: ["#1142", "#1128"]
+  - state: Update/GangSurgeTarget
+    event: spec.migrateRequest
+    variants: []
+    windows: []
+    transition: ""
+    prs: ["#1106"]
+  - state: Update/GangSurgeTarget
+    event: timer.operationDeadline
+    variants: []
+    windows: [before]
+    transition: ""
+    prs: ["#713", "#711", "#1100"]
+  - state: Update/GangSurgeTarget
+    event: ctrl.crash
+    variants: []
+    windows: []
+    transition: ""
+    prs: ["#1100", "#762", "#1104"]
+  - state: Update/GangSurgeTarget
+    event: ctrl.staleRead
+    variants: []
+    windows: []
+    transition: ""
+    prs: ["#1104", "#762"]
+  - state: Update/GangSurgeTarget
+    event: api.conflict
+    variants: []
+    windows: []
+    transition: ""
+    prs: ["#1104", "#762"]
+  - state: Update/GangSurgeTargetCleanup
+    event: pod.containersReady
+    variants: [target]
+    windows: []
+    transition: ""
+    prs: ["#1142", "#713"]
+  - state: Update/GangSurgeTargetCleanup
+    event: pod.deleted
+    variants: [target]
+    windows: [before]
+    transition: ""
+    prs: ["#762", "#1104", "#713", "#1100"]
+  - state: Update/GangSurgeTargetCleanup
+    event: pod.deleted
+    variants: [target]
+    windows: [boundary, after]
+    transition: T-gangcleanup-done
+    prs: ["#1104", "#762"]
+  - state: Update/GangSurgeTargetCleanup
+    event: spec.revision
+    variants: []
+    windows: []
+    transition: ""
+    prs: ["#1142", "#792"]
+  - state: Update/GangSurgeTargetCleanup
+    event: spec.replicasDown
+    variants: []
+    windows: []
+    transition: ""
+    prs: ["#1142", "#1128"]
+  - state: Update/GangSurgeTargetCleanup
+    event: spec.migrateRequest
+    variants: []
+    windows: []
+    transition: ""
+    prs: ["#1106"]
+  - state: Update/GangSurgeTargetCleanup
+    event: ctrl.crash
+    variants: []
+    windows: []
+    transition: ""
+    prs: ["#1100", "#762"]
+  - state: Update/GangSurgeTargetCleanup
+    event: ctrl.staleRead
+    variants: []
+    windows: []
+    transition: ""
+    prs: ["#1104", "#762"]
+  - state: Update/GangSurgeTargetCleanup
+    event: api.conflict
+    variants: []
+    windows: []
+    transition: ""
+    prs: ["#1104", "#762"]
+  - state: Update/GangSurgeTarget
+    event: pod.stuckTerminating
+    variants: []
+    windows: []
+    transition: ""
+    prs: ["#1378"]
+  - state: Update/GangSurgeTarget
+    event: pod.phaseTerminal
+    variants: []
+    windows: []
+    transition: ""
+    prs: ["#1494"]
+  - state: Update/GangSurgeTarget
+    event: timer.forceDelete
+    variants: []
+    windows: []
+    transition: ""
+    prs: ["#1378"]
+  - state: Update/GangSurgeTargetCleanup
+    event: pod.stuckTerminating
+    variants: []
+    windows: []
+    transition: ""
+    prs: ["#1378"]
+  - state: Update/GangSurgeTargetCleanup
+    event: timer.forceDelete
+    variants: []
+    windows: []
+    transition: ""
+    prs: ["#1378"]

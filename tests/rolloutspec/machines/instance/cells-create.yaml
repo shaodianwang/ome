@@ -1,0 +1,725 @@
+# Cells for Create/CreatePods — the write-ahead marker an Instance carries
+# from the moment its Creating status commits until the pass promotes it to
+# Ready, retires it, or the escalation pass fails it.
+#
+# Two properties shape most of the outcomes below. First, the Create pass is
+# the last op pass to run and it is its own detector: it re-lists pods every
+# reconcile and acts on the diff, so an event that merely changes the pod set
+# is absorbed inside the same attempt instead of moving the row. Second, the
+# promote fires on ContainersReady alone (query.AllPodsRuntimeReady) with no
+# PodReady and no minReadySeconds wait, so the readiness events that gate the
+# surge paths are inert here.
+#
+# Two edges leave this state under another pass's ownership: a shrink makes
+# the index a scale-down extra even mid-create (T-create-scaledown), and a
+# gang that keeps a survivor is claimed by the restart pass, which runs
+# before Create (T-create-gang-restart).
+cells:
+  - state: Create/CreatePods
+    event: pod.scheduled
+    variants: [source]
+    outcome: ignore
+    note: binding is a counter observation; the pass still waits for the whole set to report ContainersReady, and the only side effect is that an ungated pod restarts the parked operation deadline from admission
+    placement: perm
+    coverage: {perm: [], unit: [TestReconcileGatedDeadlines_RestartsOnUngate], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: pod.containersReady
+    variants: [source]
+    windows: [before]
+    outcome: transition
+    to: Ready
+    guard: the observation completes the set — every expected pod exists and every one of them reports ContainersReady; a partial set leaves the row in CreatePods and requeues
+    note: the promote writes the serving gate on each pod first, then commits Phase Ready with the operation cleared, stamping RunningRevision only when every pod carries the target revision hash
+    placement: kind
+    coverage: {perm: [], unit: [TestCreate_AllPodsReady_FlipsServingAndMarksReady, TestCreate_AllPodsExistButNotReady_HoldsCreating], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: pod.containersReady
+    variants: [source]
+    windows: [boundary, after]
+    outcome: ignore
+    note: the Ready mutation is idempotent and returns no-change once the row is already Ready with no operation, so a repeat observation of the same readiness writes nothing
+    placement: perm
+    coverage: {perm: [], unit: [TestCreate_BatchedReadyPromotionsUseOneMutationBatch], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: pod.ready
+    variants: [source]
+    outcome: ignore
+    note: the create promote keys on ContainersReady, never on PodReady; PodReady cannot even become true until the promote itself releases the serving readiness gate, so this event always trails the transition it looks like it should drive
+    placement: kind
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: pod.servingOn
+    variants: [source]
+    outcome: ignore
+    note: the promote is what flips the gate, so observing it back is a no-op; a pod already serving is skipped when the next pass re-walks the set
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: pod.servingOff
+    variants: [source]
+    outcome: ignore
+    note: a freshly created pod is rendered with the lifecycle hold in place, so the gate is already off; another writer re-adding a hold is simply re-cleared when the pass promotes
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: pod.deleted
+    variants: [source]
+    windows: [before]
+    outcome: transition
+    to: Restart/Drain
+    guard: RecreateInstanceOnPodRestart, a multi-pod Instance that still has a surviving member, and no RetryBlock denying the rebuild revision
+    note: partial gang loss hands the whole Instance to the restart pass, which runs ahead of Create and which the create gate defers to; every other shape — single pod, total loss, or a policy without instance recreate — stays in this state and the missing pod is re-created inside the same attempt at the same operation and deadline
+    placement: unit
+    coverage: {perm: [], unit: [TestCreate_RecreateInstance_DefersPartialGangToRestart, TestCreate_NonRecreatePolicy_SelfHealsMissingPod, TestCreate_PartialPods_CreatesOnlyMissing], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: pod.deleted
+    variants: [source]
+    windows: [boundary, after]
+    outcome: ignore
+    note: the restart hand-off is re-derived from the live pod read on every pass, so a deletion observed while it commits changes nothing; the row either already carries the Restart operation or the next pass re-selects it
+    placement: perm
+    coverage: {perm: [], unit: [TestCreate_RecreateInstance_DefersInterruptedGangMaterialization], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: pod.waiting
+    variants: [ImagePullBackOff, ErrImagePull, InvalidImageName, CreateContainerConfigError]
+    windows: [before]
+    outcome: escalate
+    to: Failed
+    guard: the pod has held the reason past the stuck-pod grace and the pod set is not fully serving; a shorter dwell keeps the attempt polling
+    note: a Create attempt is always disposable, so the fast escalator routes it through the disposition, which records a RetryBlock against the attempt's pinned revision and clears the operation in one write; the pin is what keeps a corrective revision from being charged for the bad one
+    invariants: [one.operation.per.instance]
+    placement: perm
+    coverage: {perm: [], unit: [TestDispose_WorkloadCaused_EachReason, TestDispose_PinnedCreateUsesAttemptRevisionAfterCorrectiveEdit, TestEscalateStuckPodFailures_DisposesSinglePodWorkloadCaused], kind: []}
+    status: review
+
+  - state: Create/CreatePods
+    event: pod.waiting
+    variants: [ImagePullBackOff, ErrImagePull, InvalidImageName, CreateContainerConfigError]
+    windows: [boundary, after]
+    outcome: ignore
+    note: the escalation pass skips a row that already reads Failed, so the same wedged pod raises the operator event exactly once
+    placement: perm
+    coverage: {perm: [], unit: [TestExpireOperations_AlreadyFailedNoOp], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: pod.waiting
+    variants: [CreateContainerError, CrashLoopBackOff, RunContainerError]
+    windows: [before]
+    outcome: escalate
+    to: Failed
+    guard: the pod has held the reason past the stuck-pod grace and the pod set is not fully serving
+    note: these reasons are terminal but ambiguous between a bad revision and bad hardware, so the disposition never blames the revision — it records a relocation directive when migration is automatic, the attempt sits on one resolvable node and the budget allows, and otherwise disposes terminal; either way the operation is cleared and the row stamps Failed
+    placement: perm
+    coverage: {perm: [], unit: [TestExpireOperations_SinglePodCrashLoopRecordsDirective, TestDispose_RelocationDirective_GPUCase, TestDispose_Terminal], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: pod.waiting
+    variants: [CreateContainerError, CrashLoopBackOff, RunContainerError]
+    windows: [boundary, after]
+    outcome: ignore
+    note: an already-Failed row is skipped by the escalation pass and a relocation directive is deduplicated on replay, so a repeat observation adds nothing
+    placement: perm
+    coverage: {perm: [], unit: [TestDispose_RelocationDirective_ReplayDedup], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: pod.waiting
+    variants: [DeadlineExceeded]
+    outcome: defer
+    note: this reason is not in the terminal waiting set the fast escalator matches, so there is no fast path; the pod keeps its name slot, the pass cannot replace it, and the attempt runs out on the operation deadline instead
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: pod.containerRestart
+    outcome: ignore
+    note: restart evidence is Ready-gated — a container that dies while the Instance is still forming is the ordinary boot path, and the trigger only compares restarts against ReadySince, which this row has not stamped yet
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: pod.uidRotated
+    outcome: defer
+    note: the pass addresses pods by name, so a same-name replacement is adopted on the next list; only a rotation that lands between this pass's list and its serving-gate write trips the identity guard, which fails the promote and retries it on the requeue
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: pod.stuckTerminating
+    outcome: defer
+    note: the pod read is not filtered on deletionTimestamp, so a wedged terminating pod still occupies its name slot and the pass sees nothing missing to create; there is no force-delete path outside the scale-down pipeline, so the attempt converges only when the pod finally goes or the operation deadline elapses
+    placement: kind
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: pod.nodeLost
+    outcome: defer
+    note: node loss produces no fast evidence of its own; the pass keeps polling and the operation deadline is what ends the attempt, at which point the disposition may record a relocation directive so the rebuild is steered off the suspect node
+    placement: perm
+    coverage: {perm: [], unit: [TestDispose_RelocationDirective_GPUCase], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: pod.schedulingGated
+    outcome: defer
+    note: a pod queued by an external admission authority is waiting, not stuck — the parking step zeroes the operation deadline on the gate-enter and the escalation pass skips the row outright, so the attempt can queue indefinitely without failing
+    placement: perm
+    coverage: {perm: [], unit: [TestReconcileGatedDeadlines_ParksGatedInstance, TestGatedInstance_NotFailedByDeadlineBackstop, TestEscalation_AdmissionGatedInstance_DeadlineSkipped], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: pod.evicted
+    outcome: ignore
+    note: eviction resolves into the same two shapes as a plain deletion — once the object is gone the freed name is re-created inside the same attempt, and a gang that keeps a survivor hands off to the restart pass; while the evicted object lingers it holds its slot and the attempt waits
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: spec.revision
+    windows: [before]
+    outcome: transition
+    to: Failed
+    guard: the attempt's pinned revision is no longer the target, or an unpinned attempt's pod label proves it belongs to another revision
+    note: the update trigger declines any row below Ready, so a retarget cannot be executed as an update here; the Create pass retires the attempt to Failed with the operation cleared and requeues, and the next pass starts a fresh attempt at the current target — an attempt whose pin still matches is untouched and finishes
+    invariants: [one.operation.per.instance]
+    placement: perm
+    coverage: {perm: [], unit: [TestCreate_BatchesSupersededAttemptRetirement, TestCreate_CorrectiveEditDuringPartialGangDoesNotMixRevisions, TestCreate_CorrectiveEditDoesNotAdoptUnpinnedPartialGang], kind: []}
+    status: review
+
+  - state: Create/CreatePods
+    event: spec.revision
+    windows: [boundary, after]
+    outcome: ignore
+    note: the retirement mutation is preconditioned on the incarnation and the exact operation id and target, so it no-ops once the row has left Creating or the attempt has been replaced
+    placement: perm
+    coverage: {perm: [], unit: [TestCreate_AdoptsUnpinnedAttemptWithoutPods], kind: []}
+    status: review
+
+  - state: Create/CreatePods
+    event: spec.annotationOnly
+    outcome: ignore
+    note: excluded annotations and labels are outside the hashed template, so the target revision is unchanged and the attempt keeps its pin
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: spec.strategy
+    outcome: ignore
+    note: the Create pass renders and promotes identically under every update strategy; the new strategy first matters on the first update after this Instance reaches Ready
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: spec.replicasUp
+    outcome: ignore
+    note: new indices are materialized as their own rows and this attempt is untouched; the per-pass scale-up pod batch may hold the new indices for a later wave, which never stalls an attempt already committed
+    placement: unit
+    coverage: {perm: [], unit: [TestCreate_BatchedFreshStartsHonorConfiguredCapAndCommitBeforePods, TestCreate_BatchedWavesAdvancePastOversizedGangAndConverge], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: spec.replicasDown
+    windows: [before]
+    outcome: transition
+    to: Delete/Drain
+    guard: the index is beyond the new desired set and the scale-down wave admits it
+    note: scale-down selection runs before every other pass and does not exempt a Creating row, so an index that leaves the desired set mid-create is drained and removed rather than finished; a wave that defers the victim leaves the row in CreatePods untouched for that pass
+    placement: unit
+    coverage: {perm: [], unit: [TestPlan_ScaleDown_SelectsExtras, TestReconcileFreshScaleDownAdmissionEndsThePass], kind: []}
+    status: review
+
+  - state: Create/CreatePods
+    event: spec.replicasDown
+    windows: [boundary, after]
+    outcome: ignore
+    note: the scale-down admission and the Delete stamp land in one status transaction, and a deferred victim receives no lifecycle mutation at all, so there is no half-applied shape for a late observation to act on
+    placement: perm
+    coverage: {perm: [], unit: [TestExecuteActiveScaleDownExcludesDeferredExtrasFromEscalation], kind: []}
+    status: review
+
+  - state: Create/CreatePods
+    event: spec.pauseTrue
+    outcome: defer
+    note: a standard pause truncates the plan after the restart pass, so the Create pass neither creates the remaining pods nor promotes the ones that came up; the row keeps its operation, its deadline is parked for the whole pause, and the escalation pass is suspended so the attempt cannot time out while held
+    placement: unit
+    coverage: {perm: [], unit: [TestPlan_Paused_RepairRunsFleetChangesDoNot, TestPlan_Create_AlwaysPlannedUnlessPaused], kind: []}
+    status: review
+
+  - state: Create/CreatePods
+    event: spec.pauseFreeze
+    outcome: defer
+    note: freeze truncates the plan one pass earlier than a standard pause, after scale-down, so on top of the parked create the restart pass no longer repairs a gang that loses a member mid-materialization
+    placement: unit
+    coverage: {perm: [], unit: [TestPlan_Paused_RepairRunsFleetChangesDoNot], kind: []}
+    status: review
+
+  - state: Create/CreatePods
+    event: spec.unpause
+    outcome: ignore
+    note: the same attempt resumes — the operation and its pinned revision were never cleared, the remaining pods are created and the set is promoted as usual, and the parked deadline is re-armed from the unpause rather than from the original start, so the hold does not eat the attempt's budget
+    placement: perm
+    coverage: {perm: [], unit: [TestReconcileGatedDeadlines_RestartsOnUngate], kind: []}
+    status: review
+
+  - state: Create/CreatePods
+    event: spec.teardown
+    windows: [before]
+    outcome: transition
+    to: Delete/Drain
+    guard: the owner carries a deletionTimestamp, so the planned index set is treated as empty and every observed index becomes a scale-down extra
+    note: teardown bypasses the pause gate and every op pass including escalation; the mid-create row is drained by the scale-down pipeline like any other, and its pods are deleted rather than allowed to finish coming up
+    placement: unit
+    coverage: {perm: [], unit: [TestReconcile_Teardown_DeletesEveryObservedInstance, TestReconcile_Teardown_IgnoresPaused], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: spec.teardown
+    windows: [boundary, after]
+    outcome: ignore
+    note: teardown is re-derived from the owner's deletionTimestamp on every reconcile and the Delete stamp is idempotent, so a late observation re-enters the same branch with nothing left to do
+    placement: unit
+    coverage: {perm: [], unit: [TestReconcile_Teardown_PodlessInstances_RemovedAndDone], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: spec.migrateRequest
+    outcome: defer
+    note: a fresh migration record refuses to stamp Migrating unless the source is a steady Ready with a recorded running revision, precisely so a mid-create stamp cannot deadlock the Create pass; the record stays Accepted, ownership is not taken, and the pass falls through so the attempt can converge first
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: spec.partition
+    outcome: ignore
+    note: the partition hold is evaluated only inside the update selection, so it can hold a revision roll but never a materialization; a held index still gets its pods created and promoted
+    placement: unit
+    coverage: {perm: [], unit: [TestPlan_Update_HeldByPartition], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: timer.operationDeadline
+    windows: [before]
+    outcome: escalate
+    to: Failed
+    guard: the deadline elapsed, no pod of the attempt is held by an admission scheduling gate, and the pod set is not fully serving
+    note: the broad backstop for an attempt that never converges; a Create attempt is always disposable, so the disposition classifies it — RetryBlock against the pinned revision for a workload-caused pod, a relocation directive for a single-node ambiguous failure, terminal otherwise — and clears the operation so the next pass can start fresh. An attempt the disposition leaves un-disposed still records the blamed pod's workload-caused waiting reason on LastFailure when one exists, so the cause survives the teardown that deletes the pod, and falls back to the bare DeadlineExceeded diagnostic only when none does
+    invariants: [one.operation.per.instance]
+    placement: perm
+    coverage: {perm: [], unit: [TestEscalation_DeadlineElapsedBelowDesiredServing_StillEscalates, TestExpireOperations_GangCreateDisposed], kind: []}
+    status: decided
+
+  - state: Create/CreatePods
+    event: timer.operationDeadline
+    windows: [boundary, after]
+    outcome: ignore
+    note: the deadline stamp no-ops on a row that is already Failed or whose operation has since been cleared, so a promote that landed first keeps the Instance Ready and the elapsed deadline is simply dropped
+    placement: perm
+    coverage: {perm: [], unit: [TestExpireOperations_AlreadyFailedNoOp, TestExpireOperations_NoOperationUntouched, TestExpireOperations_ExactBoundary], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: timer.minReady
+    outcome: ignore
+    note: the create promote fires on ContainersReady and waits on no availability window, so the window elapsing changes nothing here; minReadySeconds first gates this Instance when a later surge treats it as a replacement
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: timer.expectationsTTL
+    outcome: ignore
+    note: an expired expectation reads as satisfied, which only removes a throttle — the next pass re-lists, creates whatever is genuinely missing, and tolerates AlreadyExists when the watch was merely late
+    placement: sim
+    coverage: {perm: [], unit: [TestCreate_IdempotentOnAlreadyExists], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: ctrl.crash
+    outcome: ignore
+    note: the operation is committed before any pod create precisely so a crash is recoverable from status alone; the rebuilt pass re-lists pods, creates only the missing ones and promotes from observation, and the lost expectation cache costs nothing but a throttle
+    placement: kind
+    coverage: {perm: [], unit: [TestCreate_RecreateInstance_DefersInterruptedGangMaterialization], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: ctrl.staleRead
+    outcome: defer
+    note: outstanding create expectations hold the pod create until the watch catches up, so a lagging cache does not produce a duplicate; if the expectation is already gone the duplicate create is absorbed as AlreadyExists instead
+    placement: sim
+    coverage: {perm: [], unit: [TestCreate_IdempotentOnAlreadyExists], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: api.conflict
+    outcome: defer
+    note: every status and readiness-gate write re-reads its object inside a conflict-retry loop, so a losing write is re-applied against fresh state; an exhausted loop returns the error, the committed Creating row and its created pods are left in place, and the attempt continues on the requeue
+    placement: sim
+    coverage: {perm: [], unit: [TestCreate_BatchedCreatingPersistenceFailureCreatesNoPods, TestCreate_BatchedReadyPersistenceFailureRestoresFailFastServingPrefix], kind: []}
+    status: review
+
+  - state: Create/CreatePods
+    event: api.alreadyExists
+    outcome: ignore
+    note: a create that races the watch cache is tolerated — the expectation is released and the pod already in the apiserver is adopted by name, because the name is derived from the index, runner and ordinal rather than generated
+    placement: sim
+    coverage: {perm: [], unit: [TestCreate_IdempotentOnAlreadyExists], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: api.notFound
+    outcome: ignore
+    note: a missing owner is reported as owner-gone and ends the pass without any further write, which is the correct outcome while the owner is being collected; a pod read that 404s is simply absent from the next list and re-created
+    placement: perm
+    coverage: {perm: [], unit: [TestCreate_BatchedMissingStatusOwnerCreatesNoPods], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: api.quotaDenied
+    outcome: defer
+    note: the rejected pod create is returned as a typed create error naming the pod, the committed Creating row and any pods already created are left alone, the remaining unattempted rows are rolled back, and the attempt is retried on the error requeue; the deadline keeps running unless the pod is admission-gated
+    placement: perm
+    coverage: {perm: [], unit: [TestCreate_BatchedPodCreateFailureStopsAndRollsBackUnattemptedInstances, TestCreate_BatchedPodCreateFailureRestoresPriorUnattemptedStatus], kind: []}
+    status: review
+
+  # GAP: an infeasible pod is indistinguishable from a slow one here, so a gang
+  # that can never land still burns the whole InstanceReadyTimeout before the
+  # row is failed.
+  - state: Create/CreatePods
+    event: pod.unschedulable
+    variants: [source]
+    outcome: defer
+    note: no decision input reads the PodScheduled condition — podreadiness/readiness.go only preserves it while patching — so the pass keeps polling on the create requeue and the attempt ends on the operation deadline, where the disposition classifies it terminal because an unscheduled pod names no node to relocate off
+    placement: kind
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: pod.containersNotReady
+    variants: [source]
+    outcome: defer
+    note: the promote needs every pod ContainersReady, so a regression only re-opens the wait inside the same attempt; inferencereplica/watches.go enqueues on the flip, ops/create.go re-lists and finds the set incomplete, and the operation deadline stays the bound
+    placement: kind
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  # GAP: a doomed pod both blocks and can satisfy this state — nothing filters
+  # deletionTimestamp, so the same pod either holds its slot against a re-create
+  # or completes the promote on its way out.
+  - state: Create/CreatePods
+    event: pod.terminating
+    variants: [source]
+    outcome: defer
+    note: ops/create.go lists the Instance's pods without filtering deletionTimestamp, so a terminating pod still occupies its name slot and nothing is re-created until it is gone, and query.AllPodsRuntimeReady ignores deletionTimestamp too, so a terminating-but-ContainersReady pod can complete the promote
+    placement: kind
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: pod.phaseTerminal
+    variants: [Failed, Succeeded]
+    windows: [before]
+    outcome: transition
+    to: Create/CreatePods
+    guard: the dead pod occupies one of the attempt's target names, the attempt's deadline has not elapsed, and its outstanding expectations are satisfied
+    note: query.IsTerminalPod makes a dead pod absent for the missing-pod diff, so the target reads as missing and ops/terminal_recycle.go deletes the occupant - expectation recorded before the delete - with the dead pod's diagnostics captured onto LastFailure and a TerminalPodRecycled warning; the create itself is withheld this pass and the name is rebuilt once the delete is observed. Repeat recycles inside one attempt follow the same-target retry ladder from Operation.RetryCount, and past the deadline nothing is recycled because escalation owns the attempt
+    placement: unit
+    coverage: {perm: [], unit: [TestCreate_RecycleRefusedPastDeadline, TestCreate_RecycleWithoutPolicyIsImmediate, TestCreate_RecyclesSucceededTerminalPod, TestCreate_RecyclesTerminalPodThenRecreates, TestCreate_RecyclesWholeTerminalGangTogether, TestCreate_TerminalPodIsMissing], kind: []}
+    status: decided
+  - state: Create/CreatePods
+    event: pod.phaseTerminal
+    variants: [Failed, Succeeded]
+    windows: [boundary, after]
+    outcome: defer
+    note: the recycle is a pod delete that leaves phase and step where they are, so a re-observed terminal phase lands on the same row and is either paced by the ladder or satisfied by the delete already in flight
+    placement: unit
+    coverage: {perm: [], unit: [TestCreate_RecyclePacedByRetryLadder, TestCreate_RecyclesSucceededTerminalPod], kind: []}
+    status: decided
+  # GAP: phase Unknown is not terminal for query.IsTerminalPod, so a pod on a
+  # partitioned node still holds its name and the attempt waits out its deadline.
+  - state: Create/CreatePods
+    event: pod.phaseTerminal
+    variants: [Unknown]
+    outcome: defer
+    note: the recycle predicate is PodFailed or PodSucceeded only, and no other pass reads phase, so an Unknown pod keeps its name slot, never reports ContainersReady, and the attempt runs out on the operation deadline (workload/query/discover.go)
+    placement: kind
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: pod.admitted
+    outcome: ignore
+    note: deadline.go ReconcileGatedDeadlines restarts the parked deadline at now plus InstanceReadyTimeout on the gate-exit edge, so admission only re-arms the clock the gate-enter zeroed and the row stays in CreatePods
+    placement: perm
+    coverage: {perm: [], unit: [TestReconcileGatedDeadlines_RestartsOnUngate], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: gang.podGroup
+    variants: [Terminating]
+    outcome: defer
+    note: inferencereplica/reconciler.go turns ErrPodGroupTerminating into a scale-down-interval requeue ahead of workload.Reconcile, so the pass creates no pod and does not even reach the escalation pass; the attempt resumes once the predecessor PodGroup is collected
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  # GAP: the conflict never resolves on its own and the deadline cannot fire
+  # while the pass returns early, so the row wedges in Creating indefinitely.
+  - state: Create/CreatePods
+    event: gang.podGroup
+    variants: [OwnershipConflict]
+    outcome: defer
+    note: podgroup.go refuses to touch a foreign-owned PodGroup and inferencereplica/reconciler.go returns that error before workload.Reconcile, so the attempt neither creates pods nor reaches the escalation pass that would expire it
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: gang.podGroup
+    variants: [Deleted]
+    outcome: ignore
+    note: EnsurePodGroups runs before any pod create on every pass and inferencereplica/watches.go podGroupPredicate admits the delete event, so the deterministic name is re-created ahead of the next pod write
+    placement: kind
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  # GAP: the gang scheduler's own verdict is invisible to this machine — an
+  # infeasible or failed PodGroup is indistinguishable from a slow one.
+  - state: Create/CreatePods
+    event: gang.podGroup
+    variants: [Unschedulable, ScheduleTimeout, PhaseFailed]
+    outcome: defer
+    note: PodGroup status has no reader and inferencereplica/watches.go podGroupPredicate admits only generation, label, annotation, ownerRef, finalizer and deletionTimestamp changes, so a status-only update does not even enqueue; the pods stay Pending and the operation deadline is the only exit
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: endpoint.rotationIn
+    variants: [source]
+    outcome: ignore
+    note: ops/create.go reads no EndpointSlice — the drain helpers are wired into the update, restart, migrate and delete passes only — so rotation into the routed Service is a consequence of the promote's serving-gate write, never an input to it
+    placement: kind
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: endpoint.rotationOut
+    variants: [source]
+    outcome: ignore
+    note: rotation out is equally unread by the Create pass; a pod that leaves the routed Service while the Instance is forming changes nothing because the promote keys on ContainersReady
+    placement: kind
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: spec.gangWidth
+    variants: [grow]
+    outcome: ignore
+    note: width is absent from the hashed payload, so the attempt keeps its pin; the next pass raises PodGroup MinMember before pods and ops/create.go creates only the newly missing ordinals inside the same operation and deadline
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  # GAP: nothing owns an intra-Instance extra while the row is transient, so a
+  # shrink can hold the promote open until the deadline instead of converging.
+  - state: Create/CreatePods
+    event: spec.gangWidth
+    variants: [shrink]
+    outcome: defer
+    note: scale-down works on Instance indices and ops/cleanup.go wreckage skips transient phases and keys on the revision hash, which width does not change, so the surplus ordinal's pod is never deleted — yet query.AllPodsRuntimeReady covers every pod of the index, so an unready surplus pod blocks the promote
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: spec.gangWidth
+    variants: [runnerSetChanged]
+    outcome: n/a
+    reason: adding or removing a Runner changes the rendered worker template, which is hashed, so the shape flip reaches this state as spec.revision rather than as an unhashed width change
+    status: current
+
+  - state: Create/CreatePods
+    event: spec.policyTuning
+    variants: [instanceReadyTimeout]
+    outcome: ignore
+    note: ops/create.go stamps Operation.Deadline once at operation entry and never re-stamps it, so a retuned timeout leaves the in-flight clock alone; it first applies to the next operation, to the gate-exit re-arm in deadline.go, and to the PodGroup ScheduleTimeoutSeconds the next ensure clamps
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: spec.policyTuning
+    variants: [restartPolicy, migrationPolicy, minReadySeconds, gracePeriod, markNotReady]
+    outcome: ignore
+    note: none of these knobs is read while a Create attempt is in flight — restartPolicy gates the gang-loss hand-off in ops/restart.go from the next pass on, migrationPolicy only the disposition branch at failure time, and minReadySeconds, gracePeriod and markNotReady belong to availability and drain paths the create promote never runs
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: spec.rollbackTarget
+    windows: [before]
+    outcome: transition
+    to: Failed
+    guard: the roll target moves to a revision the in-flight attempt is not pinned to; an attempt already pinned to that revision, or a rollback naming a ControllerRevision that has been collected, leaves the row untouched
+    note: inferencereplica/reconciler.go resolves Pacing.RollbackToRevision into the roll target handed to the ops passes, and ops/create.go retires any Creating attempt whose Operation.TargetRevision is not that target — the same retirement the superseded arrow describes, reached without a spec hash change
+    invariants: [one.operation.per.instance]
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: spec.rollbackTarget
+    windows: [boundary, after]
+    outcome: ignore
+    note: the retirement mutation is preconditioned on the incarnation, the operation id and the attempt's target, so it no-ops once the row has left Creating or the attempt has been replaced
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: config.changed
+    outcome: ignore
+    note: lifecycle config is resolved per pass from the short-TTL cache in inferencereplica/reconciler.go and consulted only at the next decision point, so no knob rewrites a committed attempt; a shortened stuckPodGrace lets the very next pass escalate a pod that was already wedged, while teardownDeadline, forceDelete, scaleDownInterval, updateRetry and autoMigrateBudget matter only on paths a Creating row reaches later
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: ctrl.resync
+    outcome: ignore
+    note: the Create pass is its own detector — every tick of the create requeue interval re-lists pods and re-derives the same missing set and promote decision — so a reconcile with nothing changed writes nothing
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  # GAP: a 422 is permanent, yet nothing classifies it — the attempt is retried
+  # until the operation deadline and then stamped DeadlineExceeded.
+  - state: Create/CreatePods
+    event: api.invalid
+    outcome: defer
+    note: ops/create.go wraps every non-AlreadyExists create failure as a typed pod-create error, so an Invalid rejection is retried on controller-runtime backoff exactly like a transient one, with the committed Creating row and any pods already created left in place
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: api.throttled
+    outcome: defer
+    note: a shed request propagates verbatim out of the create loop, the unattempted rows are rolled back and the pass is retried on controller-runtime backoff; the operation deadline keeps running through the shedding unless a pod of the attempt is admission-gated
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  # GAP: no create can ever succeed in a terminating namespace, so the attempt
+  # burns the full deadline and lands on DeadlineExceeded instead of the cause.
+  - state: Create/CreatePods
+    event: api.namespaceTerminating
+    outcome: defer
+    note: the rejection takes the same typed pod-create error path as any other create failure in ops/create.go and is retried on backoff, with no reader of the terminating cause
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: timer.stuckPodGrace
+    windows: [before]
+    outcome: escalate
+    to: Failed
+    guard: a pod of the attempt already holds one of the terminal waiting reasons when the grace elapses and the pod set is not fully serving; the elapsed grace by itself only arms the check
+    note: the grace is measured from pod creationTimestamp in status_aggregate.go PodStuckPullFailure, and escalation.go routes a disposable Create attempt through the disposition, which records a RetryBlock against the pinned revision or a relocation directive and clears the operation in one write
+    invariants: [one.operation.per.instance]
+    placement: perm
+    coverage: {perm: [], unit: [TestEscalateStuckPodFailures_DisposesSinglePodWorkloadCaused], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: timer.stuckPodGrace
+    windows: [boundary, after]
+    outcome: ignore
+    note: escalation.go skips a row that already reads Failed and a disposed attempt no longer carries an operation, so a later grace tick on the same wedged pod writes nothing
+    placement: perm
+    coverage: {perm: [], unit: [TestExpireOperations_AlreadyFailedNoOp], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: timer.forceDelete
+    outcome: ignore
+    note: escalateStuckTerminating is called only from the scale-down batch and the migration expiry, so neither the overdue-slack nor the node-unreachable clock is evaluated for a row whose operation is a Create; a wedged pod keeps its name slot until the attempt expires
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: timer.teardownDeadline
+    windows: [before]
+    outcome: transition
+    to: Empty
+    guard: the owner carries a deletionTimestamp, the configured teardown deadline has elapsed since it, and the teardown finalizer is still held; with no deadline configured teardown holds strictly instead and the row stays in CreatePods
+    note: inferencereplica/teardown.go warns TeardownDeadlineExceeded and releases the finalizer, so the owner object and every InstanceStatus row it carried are purged in one delete and the mid-create pods are left to background GC
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  - state: Create/CreatePods
+    event: timer.teardownDeadline
+    windows: [boundary, after]
+    outcome: ignore
+    note: the finalizer release is idempotent and the owner is gone once it lands, so a late observation of the elapsed deadline finds no object left to act on
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+
+  # --- kubelet admission and slow readiness ---------------------------------
+  - state: Create/CreatePods
+    event: pod.admissionRejected
+    windows: [before]
+    outcome: transition
+    to: Create/CreatePods
+    guard: the rejected pod holds one of the attempt's target names, the attempt's deadline has not elapsed, and its outstanding expectations are satisfied
+    note: a rejection is phase Failed, so query.IsTerminalPod reads the name as missing and ops/terminal_recycle.go deletes the occupant with the expectation recorded first; terminalPodTermination captures the pod-level status.reason onto LastFailure, so the kubelet's refusal is legible rather than a bare PodFailed. The create is withheld this pass and the name is rebuilt once the delete is observed, paced inside the attempt by the same-target retry ladder
+    placement: kind
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Create/CreatePods
+    event: pod.admissionRejected
+    windows: [boundary, after]
+    outcome: defer
+    note: the recycle is a pod delete that leaves phase and step where they are, so a re-observed rejection lands on the same row and is either paced by the ladder or satisfied by the delete already in flight
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Create/CreatePods
+    event: pod.runningNotReady
+    variants: [source]
+    outcome: defer
+    note: nothing reads a readiness wait as evidence; the promote needs every pod ContainersReady and simply keeps returning, so the attempt's operation deadline is the only exit and the failure it records is DeadlineExceeded rather than anything about the probe (pkg/controller/v1beta1/workload/ops/create.go, pkg/controller/v1beta1/workload/deadline.go)
+    placement: kind
+    coverage: {perm: [], unit: [], kind: []}
+    status: current

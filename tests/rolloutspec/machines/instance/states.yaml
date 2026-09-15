@@ -1,0 +1,326 @@
+# One state per distinct persisted (Phase, Operation.Type, Operation.Step)
+# an InstanceStatus row can carry. A row whose id names a role rather than
+# the step literal (Migrate/SurgeTarget) says so in its note.
+states:
+  - id: Empty
+    phase: ""
+    applies: {strategies: [SurgeThenDrain, RecreatePod, InPlaceIfPossible, InPlaceOnly], shape: [single, gang]}
+    decided_in: pkg/controller/v1beta1/workload/plan_decision.go
+    note: no status row exists for the index, or the row is the fresh-empty slot the status writer's append path hands out
+    not_applicable:
+      pod.scheduled: no pod is attributed to an index with no status row
+      pod.containersReady: no pod is attributed to an index with no status row
+      pod.ready: no pod is attributed to an index with no status row
+      pod.servingOn: no pod is attributed to an index with no status row
+      pod.servingOff: no pod is attributed to an index with no status row
+      pod.deleted: no pod is attributed to an index with no status row
+      pod.waiting: no pod is attributed to an index with no status row
+      pod.admissionRejected: no pod is attributed to an index with no status row
+      pod.runningNotReady: no pod is attributed to an index with no status row
+      pod.containerRestart: no pod is attributed to an index with no status row
+      pod.uidRotated: no pod is attributed to an index with no status row
+      pod.stuckTerminating: no pod is attributed to an index with no status row
+      pod.nodeLost: no pod is attributed to an index with no status row
+      pod.schedulingGated: no pod is attributed to an index with no status row
+      pod.evicted: no pod is attributed to an index with no status row
+      pod.terminating: no pod is attributed to an index with no status row
+      pod.unschedulable: no pod is attributed to an index with no status row
+      pod.containersNotReady: no pod is attributed to an index with no status row
+      pod.phaseTerminal: no pod is attributed to an index with no status row
+      pod.admitted: no pod is attributed to an index with no status row
+      endpoint.rotationIn: no pod is attributed to an index with no status row
+      endpoint.rotationOut: no pod is attributed to an index with no status row
+      timer.stuckPodGrace: no pod is attributed to an index with no status row
+      timer.forceDelete: no pod is attributed to an index with no status row
+      timer.operationDeadline: no operation is in flight
+      timer.minReady: no pod has become Ready
+      timer.expectationsTTL: no expectation has been seeded for an index that was never created
+      spec.resetInstances: the reset verb addresses an Instance through its status row, and an index with no row is answered as no such instance
+      timer.migrationDeadline: no operation pins this index to a migration record
+      timer.drainSettle: the settle timer runs only for a SurgeThenDrain source in the settle step
+      gate.allow: the coordination update gate is consulted only for an Instance the update trigger selected
+      gate.deny: the coordination update gate is consulted only for an Instance the update trigger selected
+  - id: Pending
+    phase: Pending
+    applies: {strategies: [SurgeThenDrain, RecreatePod, InPlaceIfPossible, InPlaceOnly], shape: [single, gang]}
+    decided_in: pkg/controller/v1beta1/workload/ops/demote.go
+    note: status-only demotion of a Ready row with no live pods and no operation; written by the truth pass, which runs on paused reconciles only
+    not_applicable:
+      spec.resetInstances: the reset verb addresses Failed Instances only, so a row in any other phase is skipped before anything about it is read
+      timer.operationDeadline: no operation is in flight
+      timer.migrationDeadline: no operation pins this index to a migration record
+      timer.drainSettle: the settle timer runs only for a SurgeThenDrain source in the settle step
+      gate.allow: the update trigger declines below Ready, so the coordination gate is never consulted for this row
+      gate.deny: the update trigger declines below Ready, so the coordination gate is never consulted for this row
+      pod.ready[target]: no replacement generation exists outside a surge or migration pair
+      pod.scheduled[target]: no replacement generation exists outside a surge or migration pair
+      pod.containersReady[target]: no replacement generation exists outside a surge or migration pair
+      pod.servingOn[target]: no replacement generation exists outside a surge or migration pair
+      pod.servingOff[target]: no replacement generation exists outside a surge or migration pair
+      pod.deleted[target]: no replacement generation exists outside a surge or migration pair
+      pod.terminating[target]: no replacement generation exists outside a surge or migration pair
+      pod.unschedulable[target]: no replacement generation exists outside a surge or migration pair
+      pod.containersNotReady[target]: no replacement generation exists outside a surge or migration pair
+      pod.runningNotReady[target]: no replacement generation exists outside a surge or migration pair
+      endpoint.rotationIn[target]: no replacement generation exists outside a surge or migration pair
+      endpoint.rotationOut[target]: no replacement generation exists outside a surge or migration pair
+  - id: Ready
+    phase: Ready
+    applies: {strategies: [SurgeThenDrain, RecreatePod, InPlaceIfPossible, InPlaceOnly], shape: [single, gang]}
+    decided_in: pkg/controller/v1beta1/workload/ops/create.go
+    note: every pod runtime-ready and serving with the operation cleared; ReadySince anchors the post-Ready restart evidence and the minReadySeconds window may still be open
+    not_applicable:
+      spec.resetInstances: the reset verb addresses Failed Instances only, so a row in any other phase is skipped before anything about it is read
+      timer.operationDeadline: no operation is in flight
+      timer.migrationDeadline: no operation pins this index to a migration record
+      timer.drainSettle: the settle timer runs only for a SurgeThenDrain source in the settle step
+      pod.ready[target]: no replacement generation exists outside a surge or migration pair
+      pod.scheduled[target]: no replacement generation exists outside a surge or migration pair
+      pod.containersReady[target]: no replacement generation exists outside a surge or migration pair
+      pod.servingOn[target]: no replacement generation exists outside a surge or migration pair
+      pod.servingOff[target]: no replacement generation exists outside a surge or migration pair
+      pod.deleted[target]: no replacement generation exists outside a surge or migration pair
+      pod.terminating[target]: no replacement generation exists outside a surge or migration pair
+      pod.unschedulable[target]: no replacement generation exists outside a surge or migration pair
+      pod.containersNotReady[target]: no replacement generation exists outside a surge or migration pair
+      pod.runningNotReady[target]: no replacement generation exists outside a surge or migration pair
+      endpoint.rotationIn[target]: no replacement generation exists outside a surge or migration pair
+      endpoint.rotationOut[target]: no replacement generation exists outside a surge or migration pair
+  - id: Failed
+    phase: Failed
+    applies: {strategies: [SurgeThenDrain, RecreatePod, InPlaceIfPossible, InPlaceOnly], shape: [single, gang]}
+    decided_in: pkg/controller/v1beta1/workload/escalation.go
+    note: the escalation pass stamped the failure; a disposable single-pod Create or Update attempt also had its operation cleared, while a gang surge and a multi-pod recreate keep theirs for the owning machine to consume. A kept Restart operation has no owning machine waiting on it - it records a spent attempt, which the gang-member-loss trigger re-arms over and the operator reset mailbox clears outright
+    not_applicable:
+      timer.migrationDeadline: a migration record that failed its Instance is already terminal
+      timer.drainSettle: the settle timer runs only for a SurgeThenDrain source in the settle step
+  - id: Create/CreatePods
+    phase: Creating
+    op: {type: Create, step: CreatePods}
+    applies: {strategies: [SurgeThenDrain, RecreatePod, InPlaceIfPossible, InPlaceOnly], shape: [single, gang]}
+    decided_in: pkg/controller/v1beta1/workload/ops/create.go
+    note: write-ahead marker committed before any pod create; the attempt pins its target revision so a failure is charged to the right RetryBlock subject
+    not_applicable:
+      spec.resetInstances: the reset verb addresses Failed Instances only, so a row in any other phase is skipped before anything about it is read
+      spec.releaseHeldRevision: the retry gate is consulted before an attempt starts, never during one, so a released block cannot reach a row with an operation in flight
+      timer.retryAt: the retry gate is consulted before an attempt starts, never during one
+      timer.migrationDeadline: no operation pins this index to a migration record
+      timer.drainSettle: the settle timer runs only for a SurgeThenDrain source in the settle step
+      gate.allow: the Create pass does not consult the coordination update gate
+      gate.deny: the Create pass does not consult the coordination update gate
+      pod.ready[target]: no replacement generation exists outside a surge or migration pair
+      pod.scheduled[target]: no replacement generation exists outside a surge or migration pair
+      pod.containersReady[target]: no replacement generation exists outside a surge or migration pair
+      pod.servingOn[target]: no replacement generation exists outside a surge or migration pair
+      pod.servingOff[target]: no replacement generation exists outside a surge or migration pair
+      pod.deleted[target]: no replacement generation exists outside a surge or migration pair
+      pod.terminating[target]: no replacement generation exists outside a surge or migration pair
+      pod.unschedulable[target]: no replacement generation exists outside a surge or migration pair
+      pod.containersNotReady[target]: no replacement generation exists outside a surge or migration pair
+      pod.runningNotReady[target]: no replacement generation exists outside a surge or migration pair
+      endpoint.rotationIn[target]: no replacement generation exists outside a surge or migration pair
+      endpoint.rotationOut[target]: no replacement generation exists outside a surge or migration pair
+  - id: Update/Surge
+    phase: Updating
+    op: {type: Update, step: Surge}
+    applies: {strategies: [SurgeThenDrain], shape: [single, gang]}
+    decided_in: pkg/controller/v1beta1/workload/ops/update_surge.go
+    note: the source while its replacement is created; a single-pod source surges into the alternate ordinal slot, a gang source carries SurgeIndex pointing at the replacement index and keeps Step=Surge so the surge budget counts it
+    not_applicable:
+      spec.resetInstances: the reset verb addresses Failed Instances only, so a row in any other phase is skipped before anything about it is read
+      spec.releaseHeldRevision: the retry gate is consulted before an attempt starts, never during one, so a released block cannot reach a row with an operation in flight
+      timer.retryAt: the retry gate is consulted before an attempt starts, never during one
+      timer.migrationDeadline: no operation pins this index to a migration record
+      timer.drainSettle: the settle timer is stamped only on entry to the settle step
+      gate.allow: the coordination update gate is consulted before a fresh Update dispatch, not mid-operation
+      gate.deny: the coordination update gate is consulted before a fresh Update dispatch, not mid-operation
+  - id: Update/SurgeDrain
+    phase: Updating
+    op: {type: Update, step: SurgeDrain}
+    applies: {strategies: [SurgeThenDrain], shape: [single, gang]}
+    decided_in: pkg/controller/v1beta1/workload/ops/update_status.go
+    note: the replacement is Ready and in rotation; the source's serving gate is off and its pods are draining out of the per-revision routed Service
+    not_applicable:
+      spec.resetInstances: the reset verb addresses Failed Instances only, so a row in any other phase is skipped before anything about it is read
+      spec.releaseHeldRevision: the retry gate is consulted before an attempt starts, never during one, so a released block cannot reach a row with an operation in flight
+      timer.retryAt: the retry gate is consulted before an attempt starts, never during one
+      timer.migrationDeadline: no operation pins this index to a migration record
+      timer.drainSettle: the settle timer is stamped only on entry to the settle step
+      gate.allow: the coordination update gate is consulted before a fresh Update dispatch, not mid-operation
+      gate.deny: the coordination update gate is consulted before a fresh Update dispatch, not mid-operation
+  - id: Update/SurgeDrainSettle
+    phase: Updating
+    op: {type: Update, step: SurgeDrainSettle}
+    applies: {strategies: [SurgeThenDrain], shape: [single]}
+    decided_in: pkg/controller/v1beta1/workload/ops/update_status.go
+    note: the source is out of rotation and kept alive for the configured grace period so persistent connections age out; entered only when that grace is positive
+    not_applicable:
+      spec.resetInstances: the reset verb addresses Failed Instances only, so a row in any other phase is skipped before anything about it is read
+      spec.releaseHeldRevision: the retry gate is consulted before an attempt starts, never during one, so a released block cannot reach a row with an operation in flight
+      timer.retryAt: the retry gate is consulted before an attempt starts, never during one
+      timer.migrationDeadline: no operation pins this index to a migration record
+      timer.minReady: the replacement passed its minReadySeconds window before the source left rotation
+      gang.podGroup: a single-pod Instance has no PodGroup
+      gate.allow: the coordination update gate is consulted before a fresh Update dispatch, not mid-operation
+      gate.deny: the coordination update gate is consulted before a fresh Update dispatch, not mid-operation
+  - id: Update/GangSurgeTarget
+    phase: Creating
+    op: {type: Update, step: GangSurgeTarget}
+    applies: {strategies: [SurgeThenDrain], shape: [gang]}
+    decided_in: pkg/controller/v1beta1/workload/ops/update_status.go
+    note: the replacement gang's own index; the marker pins the index in the plan so its PodGroup is created and scale-down leaves it alone, and its whole lifecycle is driven by the source's gang surge
+    not_applicable:
+      spec.resetInstances: the reset verb addresses Failed Instances only, so a row in any other phase is skipped before anything about it is read
+      spec.releaseHeldRevision: the retry gate is consulted before an attempt starts, never during one, so a released block cannot reach a row with an operation in flight
+      timer.retryAt: the retry gate is consulted before an attempt starts, never during one
+      timer.migrationDeadline: no operation pins this index to a migration record
+      timer.drainSettle: the settle timer runs only for a SurgeThenDrain source in the settle step
+      gate.allow: the update trigger skips a gang surge-target marker, so the coordination gate is never consulted for it
+      gate.deny: the update trigger skips a gang surge-target marker, so the coordination gate is never consulted for it
+  - id: Update/GangSurgeTargetCleanup
+    phase: Creating
+    op: {type: Update, step: GangSurgeTargetCleanup}
+    applies: {strategies: [SurgeThenDrain], shape: [gang]}
+    decided_in: pkg/controller/v1beta1/workload/ops/update_gang.go
+    note: a retired replacement gang; the marker keeps ownership of its pods and PodGroup until they are gone and the row is removed together with the source's reset
+    not_applicable:
+      spec.resetInstances: the reset verb addresses Failed Instances only, so a row in any other phase is skipped before anything about it is read
+      spec.releaseHeldRevision: the retry gate is consulted before an attempt starts, never during one, so a released block cannot reach a row with an operation in flight
+      timer.retryAt: the retry gate is consulted before an attempt starts, never during one
+      timer.migrationDeadline: no operation pins this index to a migration record
+      timer.drainSettle: the settle timer runs only for a SurgeThenDrain source in the settle step
+      timer.minReady: no pod of a retired replacement is expected to become Ready
+      gate.allow: the update trigger skips a gang surge-target marker, so the coordination gate is never consulted for it
+      gate.deny: the update trigger skips a gang surge-target marker, so the coordination gate is never consulted for it
+  - id: Update/InPlace
+    phase: Updating
+    op: {type: Update, step: InPlace}
+    applies: {strategies: [InPlaceIfPossible, InPlaceOnly], shape: [single]}
+    decided_in: pkg/controller/v1beta1/workload/ops/update_inplace.go
+    note: container images patched on the live pod at the same Incarnation and UID; completion is proven from container status images, not from Ready alone
+    not_applicable:
+      spec.resetInstances: the reset verb addresses Failed Instances only, so a row in any other phase is skipped before anything about it is read
+      spec.releaseHeldRevision: the retry gate is consulted before an attempt starts, never during one, so a released block cannot reach a row with an operation in flight
+      timer.retryAt: the retry gate is consulted before an attempt starts, never during one
+      timer.migrationDeadline: no operation pins this index to a migration record
+      timer.drainSettle: the settle timer runs only for a SurgeThenDrain source in the settle step
+      gate.allow: the coordination update gate is consulted before a fresh Update dispatch, not mid-operation
+      gate.deny: the coordination update gate is consulted before a fresh Update dispatch, not mid-operation
+      gang.podGroup: a single-pod Instance has no PodGroup
+      pod.ready[target]: no replacement generation exists outside a surge or migration pair
+      pod.scheduled[target]: no replacement generation exists outside a surge or migration pair
+      pod.containersReady[target]: no replacement generation exists outside a surge or migration pair
+      pod.servingOn[target]: no replacement generation exists outside a surge or migration pair
+      pod.servingOff[target]: no replacement generation exists outside a surge or migration pair
+      pod.deleted[target]: no replacement generation exists outside a surge or migration pair
+      pod.terminating[target]: no replacement generation exists outside a surge or migration pair
+      pod.unschedulable[target]: no replacement generation exists outside a surge or migration pair
+      pod.containersNotReady[target]: no replacement generation exists outside a surge or migration pair
+      pod.runningNotReady[target]: no replacement generation exists outside a surge or migration pair
+      endpoint.rotationIn[target]: no replacement generation exists outside a surge or migration pair
+      endpoint.rotationOut[target]: no replacement generation exists outside a surge or migration pair
+  - id: Update/Drain
+    phase: Updating
+    op: {type: Update, step: Drain}
+    applies: {strategies: [RecreatePod, InPlaceIfPossible, InPlaceOnly], shape: [single, gang]}
+    decided_in: pkg/controller/v1beta1/workload/ops/update_recreate.go
+    note: the recreate roll; one step spans drain plus delete of the old incarnation, recreate at the bumped incarnation, and the serving flip before promotion, so those three are guards on this state
+    not_applicable:
+      spec.resetInstances: the reset verb addresses Failed Instances only, so a row in any other phase is skipped before anything about it is read
+      spec.releaseHeldRevision: the retry gate is consulted before an attempt starts, never during one, so a released block cannot reach a row with an operation in flight
+      timer.retryAt: the retry gate is consulted before an attempt starts, never during one
+      timer.migrationDeadline: no operation pins this index to a migration record
+      timer.drainSettle: the settle timer runs only for a SurgeThenDrain source in the settle step
+      gate.allow: the coordination update gate is consulted before a fresh Update dispatch, not mid-operation
+      gate.deny: the coordination update gate is consulted before a fresh Update dispatch, not mid-operation
+      pod.ready[target]: no replacement generation exists outside a surge or migration pair
+      pod.scheduled[target]: no replacement generation exists outside a surge or migration pair
+      pod.containersReady[target]: no replacement generation exists outside a surge or migration pair
+      pod.servingOn[target]: no replacement generation exists outside a surge or migration pair
+      pod.servingOff[target]: no replacement generation exists outside a surge or migration pair
+      pod.deleted[target]: no replacement generation exists outside a surge or migration pair
+      pod.terminating[target]: no replacement generation exists outside a surge or migration pair
+      pod.unschedulable[target]: no replacement generation exists outside a surge or migration pair
+      pod.containersNotReady[target]: no replacement generation exists outside a surge or migration pair
+      pod.runningNotReady[target]: no replacement generation exists outside a surge or migration pair
+      endpoint.rotationIn[target]: no replacement generation exists outside a surge or migration pair
+      endpoint.rotationOut[target]: no replacement generation exists outside a surge or migration pair
+  - id: Restart/Drain
+    phase: Restarting
+    op: {type: Restart, step: Drain}
+    applies: {strategies: [SurgeThenDrain, RecreatePod, InPlaceIfPossible, InPlaceOnly], shape: [single, gang]}
+    decided_in: pkg/controller/v1beta1/workload/ops/restart.go
+    note: repair under RecreateInstanceOnPodRestart at the Instance's running revision; one step spans drain plus delete of the old incarnation, recreate at the bumped incarnation, and the serving flip before promotion
+    not_applicable:
+      spec.resetInstances: the reset verb addresses Failed Instances only, so a row in any other phase is skipped before anything about it is read
+      spec.releaseHeldRevision: the retry gate is consulted before an attempt starts, never during one, so a released block cannot reach a row with an operation in flight
+      timer.retryAt: the retry gate is consulted before an attempt starts, never during one
+      timer.migrationDeadline: no operation pins this index to a migration record
+      timer.drainSettle: the settle timer runs only for a SurgeThenDrain source in the settle step
+      gate.allow: the restart pass does not consult the coordination update gate
+      gate.deny: the restart pass does not consult the coordination update gate
+      pod.ready[target]: no replacement generation exists outside a surge or migration pair
+      pod.scheduled[target]: no replacement generation exists outside a surge or migration pair
+      pod.containersReady[target]: no replacement generation exists outside a surge or migration pair
+      pod.servingOn[target]: no replacement generation exists outside a surge or migration pair
+      pod.servingOff[target]: no replacement generation exists outside a surge or migration pair
+      pod.deleted[target]: no replacement generation exists outside a surge or migration pair
+      pod.terminating[target]: no replacement generation exists outside a surge or migration pair
+      pod.unschedulable[target]: no replacement generation exists outside a surge or migration pair
+      pod.containersNotReady[target]: no replacement generation exists outside a surge or migration pair
+      pod.runningNotReady[target]: no replacement generation exists outside a surge or migration pair
+      endpoint.rotationIn[target]: no replacement generation exists outside a surge or migration pair
+      endpoint.rotationOut[target]: no replacement generation exists outside a surge or migration pair
+  - id: Migrate/CreateSurge
+    phase: Migrating
+    op: {type: Migrate, step: CreateSurge}
+    applies: {strategies: [SurgeThenDrain, RecreatePod, InPlaceIfPossible, InPlaceOnly], shape: [single, gang]}
+    decided_in: pkg/controller/v1beta1/workload/ops/migrate.go
+    note: the migration source for the whole migration; the operation is a pin that never changes step, so the record's phase (SurgePending, SurgeReady, Draining) is a guard on this state rather than a state of its own
+    not_applicable:
+      spec.resetInstances: the reset verb addresses Failed Instances only, so a row in any other phase is skipped before anything about it is read
+      spec.releaseHeldRevision: the retry gate governs revision rollouts, not placement moves
+      timer.retryAt: the retry gate governs revision rollouts, not placement moves
+      timer.drainSettle: the settle timer runs only for a SurgeThenDrain source in the settle step
+      gate.allow: the update trigger skips a Migrate-owned row, so the coordination gate is never consulted for it
+      gate.deny: the update trigger skips a Migrate-owned row, so the coordination gate is never consulted for it
+  - id: Migrate/SurgeTarget
+    phase: Creating
+    op: {type: Migrate, step: CreateSurge}
+    applies: {strategies: [SurgeThenDrain, RecreatePod, InPlaceIfPossible, InPlaceOnly], shape: [single, gang]}
+    decided_in: pkg/controller/v1beta1/workload/ops/migrate.go
+    note: the migration replacement at a fresh index, running the source's revision with the anti-affinity overlay; it carries the same step literal as the source and is told apart by its phase and by the sibling pointer on the pin
+    not_applicable:
+      spec.resetInstances: the reset verb addresses Failed Instances only, so a row in any other phase is skipped before anything about it is read
+      spec.releaseHeldRevision: the retry gate governs revision rollouts, not placement moves
+      timer.retryAt: the retry gate governs revision rollouts, not placement moves
+      timer.drainSettle: the settle timer runs only for a SurgeThenDrain source in the settle step
+      gate.allow: the update trigger skips a Migrate-owned row, so the coordination gate is never consulted for it
+      gate.deny: the update trigger skips a Migrate-owned row, so the coordination gate is never consulted for it
+  - id: Delete/Drain
+    phase: Deleting
+    op: {type: Delete, step: Drain}
+    applies: {strategies: [SurgeThenDrain, RecreatePod, InPlaceIfPossible, InPlaceOnly], shape: [single, gang]}
+    decided_in: pkg/controller/v1beta1/workload/ops/delete_batch.go
+    note: a scale-down or teardown wave admitted this index; phase and operation are committed in one transaction and the row is removed once its pods and resources are gone
+    not_applicable:
+      spec.resetInstances: the reset verb addresses Failed Instances only, so a row in any other phase is skipped before anything about it is read
+      spec.releaseHeldRevision: the retry gate governs attempts to create, not to delete
+      timer.retryAt: the retry gate governs attempts to create, not to delete
+      timer.minReady: no pod of a draining index will become Ready
+      timer.migrationDeadline: no operation pins this index to a migration record
+      timer.drainSettle: the settle timer runs only for a SurgeThenDrain source in the settle step
+      gate.allow: the scale-down pass does not consult the coordination update gate
+      gate.deny: the scale-down pass does not consult the coordination update gate
+      pod.ready[target]: no replacement generation exists outside a surge or migration pair
+      pod.scheduled[target]: no replacement generation exists outside a surge or migration pair
+      pod.containersReady[target]: no replacement generation exists outside a surge or migration pair
+      pod.servingOn[target]: no replacement generation exists outside a surge or migration pair
+      pod.servingOff[target]: no replacement generation exists outside a surge or migration pair
+      pod.deleted[target]: no replacement generation exists outside a surge or migration pair
+      pod.terminating[target]: no replacement generation exists outside a surge or migration pair
+      pod.unschedulable[target]: no replacement generation exists outside a surge or migration pair
+      pod.containersNotReady[target]: no replacement generation exists outside a surge or migration pair
+      pod.runningNotReady[target]: no replacement generation exists outside a surge or migration pair
+      endpoint.rotationIn[target]: no replacement generation exists outside a surge or migration pair
+      endpoint.rotationOut[target]: no replacement generation exists outside a surge or migration pair

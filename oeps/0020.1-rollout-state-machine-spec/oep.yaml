@@ -1,0 +1,32 @@
+title: "Rollout state-machine specification: exhaustive state x event tables"
+oep-number: "0020.1"
+authors:
+  - "@slin1237"
+status: provisional
+creation-date: 2026-09-14
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+# Follows OEP-0020 (the test-framework OEP). OEP-0020 fixed the *apparatus*
+# (envtest multi-cluster, perf harness, conflict gate, KIND hygiene); this
+# follow-up fixes the *oracle*: a written, exhaustive statement of what every
+# OMENative rollout state machine must do for every event in every state, from
+# which the perm corpus, the unit tables, and the KIND specs are derived.
+see-also:
+  - "/oeps/0020-integration-test-framework-v2" # the harness this OEP feeds cases into
+  - "/oeps/0007-omenative-workload-strategy"    # the per-Instance lifecycle the instance machine formalizes
+  - "/oeps/0007.1-omenative-coordinated-rollout" # the coordination phases the group machine formalizes (its state table has drifted; see Motivation)
+  - "/oeps/0015.1-canary-executor"               # the canary step machine
+  - "/oeps/0017-unified-rollout-v2"              # groups[] + the rollout run the run machine formalizes
+  - "/oeps/0017.1-rollout-policy"                # run pinning / repin, an event family in the run machine
+
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"

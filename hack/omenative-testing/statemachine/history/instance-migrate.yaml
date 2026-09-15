@@ -1,0 +1,41 @@
+# Provenance for the review cells in
+# tests/rolloutspec/machines/instance/cells-migrate.yaml.
+# Selectors mirror the cell they annotate exactly; empty variants, windows
+# and transition match everything, as in a cell selector.
+#
+# What each number changed, for the reader who does not want to open them:
+#   #832  the owner's status.migrations record became the authority (accept
+#         mailbox, record-driven dispatch, pair identity guards)
+#   #869  the audit ledger's writes became compare-and-swap
+#   #871  both escalation paths skip a Migrate-pinned row
+#   #878  migration terminality: stuck-Terminating escalation inside the
+#         drive, the expiry wedge exception, the absent-surge-slot resume
+#   #1106 migration and update surges serialized on one Instance
+#   #1122 a promoted surge resumes instead of re-promoting after a crash
+#   #1147 a quota-blocked surge create is polled, not failed
+history:
+  - {state: Migrate/CreateSurge, event: pod.stuckTerminating, variants: [], windows: [], transition: "", prs: ["#878"]}
+  - {state: Migrate/CreateSurge, event: pod.waiting, variants: [], windows: [], transition: "", prs: ["#871", "#878"]}
+  - {state: Migrate/CreateSurge, event: spec.revision, variants: [], windows: [], transition: "", prs: ["#1106"]}
+  - {state: Migrate/CreateSurge, event: spec.migrateRequest, variants: [], windows: [], transition: "", prs: ["#832"]}
+  - {state: Migrate/CreateSurge, event: timer.operationDeadline, variants: [], windows: [], transition: "", prs: ["#871", "#878"]}
+  - {state: Migrate/CreateSurge, event: timer.migrationDeadline, variants: [], windows: [before], transition: "", prs: ["#878"]}
+  - {state: Migrate/CreateSurge, event: timer.migrationDeadline, variants: [], windows: [], transition: T-migrate-complete, prs: ["#878"]}
+  - {state: Migrate/CreateSurge, event: timer.migrationDeadline, variants: [], windows: [], transition: T-migrate-deadline, prs: ["#878"]}
+  - {state: Migrate/CreateSurge, event: timer.migrationDeadline, variants: [], windows: [], transition: T-migrate-deadline-restore, prs: ["#878"]}
+  - {state: Migrate/CreateSurge, event: ctrl.crash, variants: [], windows: [], transition: "", prs: ["#878", "#1122"]}
+  - {state: Migrate/CreateSurge, event: ctrl.staleRead, variants: [], windows: [], transition: "", prs: ["#832"]}
+  - {state: Migrate/CreateSurge, event: api.conflict, variants: [], windows: [], transition: "", prs: ["#869"]}
+  - {state: Migrate/CreateSurge, event: api.quotaDenied, variants: [], windows: [], transition: "", prs: ["#1147"]}
+  - {state: Migrate/SurgeTarget, event: pod.deleted, variants: [source], windows: [], transition: T-migratetarget-promote, prs: ["#1122"]}
+  - {state: Migrate/SurgeTarget, event: pod.waiting, variants: [], windows: [], transition: "", prs: ["#871", "#878"]}
+  - {state: Migrate/SurgeTarget, event: spec.revision, variants: [], windows: [], transition: "", prs: ["#1106"]}
+  - {state: Migrate/SurgeTarget, event: spec.migrateRequest, variants: [], windows: [], transition: "", prs: ["#832"]}
+  - {state: Migrate/SurgeTarget, event: timer.operationDeadline, variants: [], windows: [], transition: "", prs: ["#871", "#878"]}
+  - {state: Migrate/SurgeTarget, event: timer.migrationDeadline, variants: [], windows: [before], transition: "", prs: ["#878"]}
+  - {state: Migrate/SurgeTarget, event: timer.migrationDeadline, variants: [], windows: [], transition: T-migratetarget-promote, prs: ["#878", "#1122"]}
+  - {state: Migrate/SurgeTarget, event: timer.migrationDeadline, variants: [], windows: [], transition: T-migratetarget-expired, prs: ["#878"]}
+  - {state: Migrate/SurgeTarget, event: ctrl.crash, variants: [], windows: [], transition: "", prs: ["#878", "#1122"]}
+  - {state: Migrate/SurgeTarget, event: ctrl.staleRead, variants: [], windows: [], transition: "", prs: ["#832"]}
+  - {state: Migrate/SurgeTarget, event: api.conflict, variants: [], windows: [], transition: "", prs: ["#869"]}
+  - {state: Migrate/SurgeTarget, event: api.quotaDenied, variants: [], windows: [], transition: "", prs: ["#1147"]}

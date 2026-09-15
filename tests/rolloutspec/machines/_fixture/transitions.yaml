@@ -1,0 +1,15 @@
+transitions:
+  - id: idle-to-working
+    from: Idle
+    event: pod.ready
+    variant: source
+    guard: a source pod reports Ready
+    to: Working
+    decided_in: tests/rolloutspec/doc.go
+  - id: working-to-idle
+    from: Working
+    event: timer.deadline
+    guard: the step deadline elapses
+    to: Idle
+    effects: [clear the operation]
+    decided_in: tests/rolloutspec/doc.go

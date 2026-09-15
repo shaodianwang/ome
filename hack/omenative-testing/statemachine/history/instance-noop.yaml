@@ -1,0 +1,36 @@
+# Bugfix provenance for the review cells in
+# tests/rolloutspec/machines/instance/cells-noop.yaml
+# (states Empty, Pending, Ready). Selectors match the cells file exactly:
+# empty variants, windows or transition match all. Every PR number below
+# was confirmed present in this repo's history before it was cited.
+history:
+  - {state: Empty, event: spec.annotationOnly, variants: [], windows: [], transition: "", prs: ["#635", "#1367", "#1442", "#1449"]}
+  - {state: Empty, event: spec.replicasUp, variants: [], windows: [], transition: T-empty-create, prs: ["#1448"]}
+  - {state: Empty, event: spec.pauseTrue, variants: [], windows: [], transition: "", prs: ["#1279", "#1289"]}
+  - {state: Empty, event: spec.pauseFreeze, variants: [], windows: [], transition: "", prs: ["#1279"]}
+  - {state: Empty, event: spec.unpause, variants: [], windows: [], transition: "", prs: ["#1279", "#1289"]}
+  - {state: Pending, event: pod.containersReady, variants: [source], windows: [], transition: "", prs: ["#1289"]}
+  - {state: Pending, event: pod.servingOn, variants: [source], windows: [], transition: "", prs: ["#872"]}
+  - {state: Pending, event: pod.servingOff, variants: [source], windows: [], transition: "", prs: ["#872"]}
+  - {state: Pending, event: pod.deleted, variants: [source], windows: [], transition: "", prs: ["#1289", "#1279"]}
+  - {state: Pending, event: spec.annotationOnly, variants: [], windows: [], transition: "", prs: ["#635", "#1367", "#1442", "#1449"]}
+  - {state: Pending, event: spec.replicasDown, variants: [], windows: [], transition: "", prs: ["#1044"]}
+  - {state: Pending, event: spec.pauseTrue, variants: [], windows: [], transition: "", prs: ["#1279", "#1289"]}
+  - {state: Pending, event: spec.pauseFreeze, variants: [], windows: [], transition: "", prs: ["#1279"]}
+  - {state: Pending, event: spec.unpause, variants: [], windows: [], transition: "", prs: ["#1279", "#1289"]}
+  - {state: Pending, event: ctrl.staleRead, variants: [], windows: [], transition: "", prs: ["#1289"]}
+  - {state: Ready, event: pod.servingOn, variants: [source], windows: [], transition: "", prs: ["#872"]}
+  - {state: Ready, event: pod.servingOff, variants: [source], windows: [], transition: "", prs: ["#872"]}
+  - {state: Ready, event: pod.deleted, variants: [source], windows: [], transition: T-ready-demote, prs: ["#1289", "#1279"]}
+  - {state: Ready, event: pod.containerRestart, variants: [], windows: [], transition: "", prs: ["#1278"]}
+  - {state: Ready, event: spec.revision, variants: [], windows: [], transition: T-ready-stuck-failed, prs: ["#905", "#901"]}
+  - {state: Ready, event: spec.annotationOnly, variants: [], windows: [], transition: "", prs: ["#635", "#1367", "#1442", "#1449"]}
+  - {state: Ready, event: spec.replicasUp, variants: [], windows: [], transition: "", prs: ["#1448", "#1489"]}
+  - {state: Ready, event: spec.replicasDown, variants: [], windows: [], transition: "", prs: ["#1044"]}
+  - {state: Ready, event: spec.pauseTrue, variants: [], windows: [], transition: "", prs: ["#1279", "#1289"]}
+  - {state: Ready, event: spec.pauseFreeze, variants: [], windows: [], transition: "", prs: ["#1279"]}
+  - {state: Ready, event: spec.unpause, variants: [], windows: [], transition: "", prs: ["#1279"]}
+  - {state: Ready, event: gate.deny, variants: [Held], windows: [], transition: "", prs: ["#901"]}
+  - {state: Ready, event: ctrl.staleRead, variants: [], windows: [], transition: "", prs: ["#1289"]}
+  - {state: Pending, event: pod.phaseTerminal, variants: [Failed, Succeeded], windows: [], transition: "", prs: ["#1494"]}
+  - {state: Ready, event: pod.phaseTerminal, variants: [Failed, Succeeded], windows: [], transition: "", prs: ["#1494"]}

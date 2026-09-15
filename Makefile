@@ -278,6 +278,29 @@ vet: ## 🔍 Run go vet against code
 	@$(GO_CMD) vet -structtag=false -unsafeptr=false ./...
 	@echo "✅ Vet checks passed"
 
+ROLLOUTSPEC_OUT := hack/omenative-testing/statemachine/out
+ROLLOUTSPEC_HISTORY_DIR := hack/omenative-testing/statemachine/history
+MACHINE ?= instance
+ROLLOUTSPEC_HISTORY_ARGS = $(foreach f,$(wildcard $(ROLLOUTSPEC_HISTORY_DIR)/$(MACHINE).yaml $(ROLLOUTSPEC_HISTORY_DIR)/$(MACHINE)-*.yaml),--history $(f))
+
+.PHONY: rolloutspec-render
+rolloutspec-render: ## 🗺️ Render a rollout state machine (MACHINE=instance) to grid JSON, Mermaid, markdown, and an HTML heatmap
+	@echo "🗺️  Rendering rollout state machine $(MACHINE)..."
+	@mkdir -p $(ROLLOUTSPEC_OUT)
+	@$(GO_CMD) run ./hack/omenative-testing/statemachine/cmd/rolloutspec-grid --machine $(MACHINE) --format json \
+		$(ROLLOUTSPEC_HISTORY_ARGS) \
+		--out $(ROLLOUTSPEC_OUT)/$(MACHINE).grid.json
+	@$(GO_CMD) run ./hack/omenative-testing/statemachine/cmd/rolloutspec-grid --machine $(MACHINE) --format mermaid --out $(ROLLOUTSPEC_OUT)/$(MACHINE).mmd
+	@$(GO_CMD) run ./hack/omenative-testing/statemachine/cmd/rolloutspec-grid --machine $(MACHINE) --format markdown --out $(ROLLOUTSPEC_OUT)/$(MACHINE).md
+	@python3 hack/omenative-testing/statemachine/heatmap.py --grid $(ROLLOUTSPEC_OUT)/$(MACHINE).grid.json --out $(ROLLOUTSPEC_OUT)/$(MACHINE).html
+	@echo "✅ Wrote $(ROLLOUTSPEC_OUT)/$(MACHINE).grid.json, .mmd, .md, .html"
+
+.PHONY: rolloutspec-check
+rolloutspec-check: rolloutspec-render ## 🔎 Check a rollout state machine (MACHINE=instance) against its history sidecars and its tests
+	@echo "🔎 Checking rollout state machine $(MACHINE)..."
+	@python3 hack/omenative-testing/statemachine/check_history.py --grid $(ROLLOUTSPEC_OUT)/$(MACHINE).grid.json $(ROLLOUTSPEC_HISTORY_ARGS)
+	@python3 hack/omenative-testing/statemachine/check_coverage.py --grid $(ROLLOUTSPEC_OUT)/$(MACHINE).grid.json --repo .
+
 .PHONY: tidy
 tidy: ## 📦 Run go mod tidy
 	@echo "📦 Tidying Go modules..."
@@ -613,6 +636,9 @@ CMD_PACKAGES_NO_XET := $(filter-out github.com/ome-projects/ome/cmd/ome-agent,$(
 PKG_PACKAGES      := $(shell go list ./pkg/... | grep -v -E '(pkg/testing|pkg/openapi|pkg/client|pkg/xet)')
 INTERNAL_PACKAGES := $(shell go list ./internal/...)
 INTERNAL_PACKAGES_NO_XET := $(filter-out github.com/ome-projects/ome/internal/ome-agent/replica%,$(INTERNAL_PACKAGES))
+# The rollout state-machine tables and their build gate live under tests/ but
+# run in the unit lane: the gate must fail a PR that leaves a cell undecided.
+ROLLOUTSPEC_PACKAGES := $(shell go list ./tests/rolloutspec/...)
 
 # Centralized Environment
 TEST_ENV = \
@@ -647,6 +673,7 @@ test: fmt vet manifests envtest xet-build ## 🧪 Run all tests with coverage
 	$(call run_go_test,$(CMD_PACKAGES),cmd)
 	$(call run_go_test,$(PKG_PACKAGES),pkg)
 	$(call run_go_test,$(INTERNAL_PACKAGES),internal)
+	$(call run_go_test,$(ROLLOUTSPEC_PACKAGES),rolloutspec)
 	@echo "\n🎉 All tests completed successfully!"
 
 .PHONY: test-no-xet
@@ -655,6 +682,7 @@ test-no-xet: fmt vet manifests envtest test-no-xet-deps ## 🧪 Run tests exclud
 	$(call run_go_test,$(CMD_PACKAGES_NO_XET),cmd,-no-xet)
 	$(call run_go_test,$(PKG_PACKAGES),pkg,-no-xet)
 	$(call run_go_test,$(INTERNAL_PACKAGES_NO_XET),internal,-no-xet)
+	$(call run_go_test,$(ROLLOUTSPEC_PACKAGES),rolloutspec,-no-xet)
 	@echo "\n🎉 All tests completed successfully (excluding XET-linked ome-agent packages)!"
 
 .PHONY: test-meta-internal
@@ -806,13 +834,15 @@ integration-test: fmt vet manifests envtest dep-crds xet-build test-kindutil-uni
 	@# which registers Gomega's fail handler with ginkgo.RunSpecs.
 	@#
 	@# Excluded packages:
-	@#   - tests/integration/kindutil/* AND tests/perf/*  — plain testing.T
-	@#     packages, NOT Ginkgo suites (they do not import ginkgo, so its
-	@#     flags are unregistered). -ginkgo.trace below would error with
-	@#     `flag provided but not defined: -ginkgo.trace` and fail the
-	@#     binary before any test runs. The Docker-free kindutil tests run via
-	@#     test-kindutil-unit; tests/perf/* runs in its own CI step via the
-	@#     `test-perf` target (the scale harness + rangespec check).
+	@#   - tests/integration/kindutil/*, tests/perf/* AND tests/rolloutspec —
+	@#     plain testing.T packages, NOT Ginkgo suites (they do not import
+	@#     ginkgo, so its flags are unregistered). -ginkgo.trace below would
+	@#     error with `flag provided but not defined: -ginkgo.trace` and fail
+	@#     the binary before any test runs. The Docker-free kindutil tests run
+	@#     via test-kindutil-unit; tests/perf/* runs in its own CI step via the
+	@#     `test-perf` target (the scale harness + rangespec check);
+	@#     tests/rolloutspec (the rollout state-machine build gate) runs in
+	@#     the unit lane via ROLLOUTSPEC_PACKAGES.
 	@#   - tests/integration/.../*_kind  — KIND-backed suites (real
 	@#     kubelet via Docker): omenative_coordination_kind, irmanaged_kind,
 	@#     rawdeployment_kind, omenative_perm_kind. Run locally via the
@@ -833,7 +863,7 @@ integration-test: fmt vet manifests envtest dep-crds xet-build test-kindutil-uni
 	@# Timeout: go test defaults to 10m PER PACKAGE. 20m gives headroom
 	@# without masking a genuine deadlock — any real loop bug would
 	@# still hang past 20m.
-	@PKGS=$$(go list ./tests/... | grep -v -E '/kindutil($$|/)|_kind$$|/tests/perf/|/integration/multicluster$$') ; \
+	@PKGS=$$(go list ./tests/... | grep -v -E '/kindutil($$|/)|_kind$$|/tests/perf/|/tests/rolloutspec$$|/integration/multicluster$$') ; \
 		$(TEST_ENV) go test -v -timeout=20m $$PKGS $(if $(GINKGO_VERBOSE),-ginkgo.v) -ginkgo.trace
 	@# The multicluster suite owns three envtest control planes. Run it after the
 	@# package-parallel suites so periodic cross-apiserver assertions get a
