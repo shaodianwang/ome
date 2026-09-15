@@ -86,6 +86,23 @@ const (
 	// changed.
 	EventReasonRetryBlockReleaseSkipped EventReason = "RetryBlockReleaseSkipped"
 
+	// EventReasonInstancesReset fires when the operator reset annotation
+	// (ome.io/reset-instances) tears down Failed Instances for rebuild:
+	// their pods are deleted and the preserved Operation cleared so the
+	// ordinary Create/Restart passes recreate them. Names the indices.
+	EventReasonInstancesReset EventReason = "InstancesReset"
+
+	// EventReasonInstancesResetSkipped fires when the reset annotation
+	// names Instances that cannot be reset — not Phase=Failed, no such
+	// index, or nothing left to tear down. The annotation is still
+	// consumed; the event lists each index with the reason it was skipped.
+	EventReasonInstancesResetSkipped EventReason = "InstancesResetSkipped"
+
+	// EventReasonInstancesResetRejected fires when the reset annotation
+	// value is malformed (neither "all" nor a comma-separated list of
+	// non-negative indices). Nothing is reset; the annotation is consumed.
+	EventReasonInstancesResetRejected EventReason = "InstancesResetRejected"
+
 	// EventReasonInstanceDemoted fires when the truth pass demotes a
 	// Ready Instance with no live pods and no in-flight operation to
 	// Pending. Status-only; recovery stays with the ordinary passes.

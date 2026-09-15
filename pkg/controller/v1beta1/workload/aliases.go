@@ -141,6 +141,9 @@ const (
 	EventReasonRetryHeld                     = types.EventReasonRetryHeld
 	EventReasonRetryBlockReleased            = types.EventReasonRetryBlockReleased
 	EventReasonRetryBlockReleaseSkipped      = types.EventReasonRetryBlockReleaseSkipped
+	EventReasonInstancesReset                = types.EventReasonInstancesReset
+	EventReasonInstancesResetSkipped         = types.EventReasonInstancesResetSkipped
+	EventReasonInstancesResetRejected        = types.EventReasonInstancesResetRejected
 	EventReasonInstanceDemoted               = types.EventReasonInstanceDemoted
 	EventReasonPodForceDeleted               = types.EventReasonPodForceDeleted
 	EventReasonPodDeleteBlockedByFinalizer   = types.EventReasonPodDeleteBlockedByFinalizer
