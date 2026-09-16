@@ -5,8 +5,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 from typing import Any
+
+# A bare "#123" autolinks against whichever repository renders the body, so an
+# OME commit subject promoted into a GitOps PR would point at the wrong repo.
+_ISSUE_REFERENCE = re.compile(r"(?<![0-9A-Za-z/#-])#(\d+)(?![0-9A-Za-z])")
 
 
 class CompareError(ValueError):
@@ -15,6 +20,17 @@ class CompareError(ValueError):
 
 def _markdown_text(value: str) -> str:
     return value.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+
+
+def _link_references(value: str, repository: str) -> str:
+    """Bind "#123" to `repository` so it survives rendering in another repo."""
+    return _ISSUE_REFERENCE.sub(
+        lambda match: (
+            f"[#{match.group(1)}]"
+            f"(https://github.com/{repository}/pull/{match.group(1)})"
+        ),
+        value,
+    )
 
 
 def render_changeset(
@@ -76,7 +92,9 @@ def render_changeset(
         )
         if not complete:
             raise CompareError("GitHub comparison contains an incomplete commit")
-        subject = _markdown_text(message.splitlines()[0])
+        subject = _link_references(
+            _markdown_text(message.splitlines()[0]), repository
+        )
         lines.append(f"- [`{sha[:8]}`]({url}) {subject}")
 
     omitted = total - shown
