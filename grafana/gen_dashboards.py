@@ -405,9 +405,10 @@ def scheduler():
     p.append(panel("timeseries", "Attempts by result",
                    [target(f'sum by (result) (rate(scheduler_schedule_attempts_total{{{s}}}[5m]))',
                            "{{result}}")], (0, y, 12, 8), unit="reqps", stacked=True,
-                   desc="result = scheduled | unschedulable | error. A rising "
-                        "'unschedulable' share is the fleet running out of placeable "
-                        "topology, not the scheduler being slow."))
+                   desc="result = scheduled | unschedulable | error. The 'unschedulable' "
+                        "series also counts benign gang admission yields, so a steady "
+                        "share of it is normal on a cluster creating gangs. Genuine "
+                        "starvation is no_fit in the Gang admission row."))
     p.append(panel("timeseries", "Pending pods by queue",
                    [target(f'sum by (queue) (scheduler_pending_pods{{{s}}})', "{{queue}}")],
                    (12, y, 12, 8), stacked=True,
@@ -417,12 +418,44 @@ def scheduler():
     p.append(panel("timeseries", "Unschedulable rate", [target(
         f'sum(rate(scheduler_schedule_attempts_total{{{s},result="unschedulable"}}[5m]))')],
         (0, y + 8, 12, 7), unit="reqps",
-        desc="Sustained non-zero means gangs are repeatedly failing to find a domain."))
+        desc="Non-zero whenever gangs are being created: each two-phase admission yield "
+             "lands here — a leader that arrives before its worker returns Unschedulable "
+             "and rebinds milliseconds later. This does NOT mean gangs are failing to "
+             "find a domain. Compare against no_fit in the Gang admission row before "
+             "reading it as capacity starvation."))
     p.append(panel("timeseries", "Attempts per pod (p99)", [target(
         f'histogram_quantile(0.99, sum by (le) (rate(scheduler_pod_scheduling_attempts_bucket{{{s}}}[5m])))')],
         (12, y + 8, 12, 7),
         desc="How many tries a pod needs before it lands. Climbing = churn/contention."))
     y += 15
+
+    p.append(row("Gang admission — yielding, or actually starving?", y)); y += 1
+    p.append(panel("timeseries", "Domain placement decisions", [target(
+        f'sum by (result) (rate(ome_scheduler_gang_pin_total{{{s}}}[5m]))', "{{result}}")],
+        (0, y, 12, 7), unit="reqps", stacked=True,
+        desc="pinned/adopted are successful placements. no_fit means the planner "
+             "examined every domain and none could hold the remaining members. "
+             "stale_replan/topology_replan are re-plans of an existing commitment."))
+    p.append(panel("timeseries", "Starvation rate (no_fit)", [target(
+        f'sum(rate(ome_scheduler_gang_pin_total{{{s},result="no_fit"}}[5m]))')],
+        (12, y, 12, 7), unit="reqps",
+        desc="Alert on this, not on 'Unschedulable rate'. Sustained non-zero means "
+             "gangs genuinely cannot find a domain."))
+    p.append(panel("timeseries", "Pinned groups", [target(
+        f'sum(ome_scheduler_pinned_groups{{{s}}})')], (0, y + 7, 12, 7),
+        desc="Gangs holding a domain capacity reservation. A floor that climbs and "
+             "never returns means pins are leaking."))
+    p.append(panel("timeseries", "Permit gate, activations, unwinds", [
+        target(f'sum by (result) (rate(ome_scheduler_gang_gate_total{{{s}}}[5m]))',
+               "gate {{result}}"),
+        target(f'sum by (trigger) (rate(ome_scheduler_gang_activation_total{{{s}}}[5m]))',
+               "activation {{trigger}}"),
+        target(f'sum(rate(ome_scheduler_gang_unwind_total{{{s}}}[5m]))', "unwind"),
+    ], (12, y + 7, 12, 7), unit="reqps",
+        desc="gate wait/admit should stay balanced. activations are the retries that "
+             "clear a yield. unwind counts gangs torn down after a member failed to "
+             "schedule (gate timeout or bind failure)."))
+    y += 14
 
     p.append(row("Latency — how fast, and which hook is slow", y)); y += 1
     p.append(panel("timeseries", "End-to-end placement latency", [
@@ -471,12 +504,12 @@ def scheduler():
                    [target(f'sum by (pod) (go_goroutines{{{s}}})', "{{pod}}")], (16, y, 8, 7)))
     y += 7
 
-    # OEP-0022 defines gang/topology metrics ("largest gang that still fits" per
-    # domain, gate-timeout counts) whose metric names are not yet settled in-tree.
-    # Ship a note telling the operator how to discover and add them, rather than
-    # shipping panels whose queries are guesses and would read "No data".
+    # A few OEP-0022 gang/topology metrics ("largest gang that still fits" per
+    # domain, gate-timeout counts) have no settled name in-tree, so the Gang
+    # admission row cannot chart them. Ship a note telling the operator how to
+    # discover them rather than panels whose queries are guesses reading "No data".
     p.append({
-        "type": "text", "title": "Gang & topology metrics — not yet wired",
+        "type": "text", "title": "Scraping, and the gang metrics still missing",
         "gridPos": {"x": 0, "y": y, "w": 24, "h": 6},
         "options": {"mode": "markdown", "content": (
             "**If the scheduling rows are empty, the scheduler is not being scraped.** "
@@ -486,10 +519,16 @@ def scheduler():
             "port, so the pod template usually needs `prometheus.io/scrape: \"true\"`, "
             "`prometheus.io/scheme: \"https\"`, `prometheus.io/port: \"10259\"`, plus RBAC "
             "for the `/metrics` non-resource URL.\n\n"
-            "OEP-0022 describes OME-specific scheduler metrics — the per-domain "
-            "**largest gang that still fits**, gate-timeout counts, and the "
-            "bookkeeping-drift signal. Their metric names are not defined in-tree yet, "
-            "so this dashboard does not guess at them.\n\n"
+            "The Gang admission row plots the `ome_scheduler_*` metrics the gangpack "
+            "plugin exports today. Three signals OEP-0022 describes are still absent "
+            "from the binary and so cannot be charted: the per-domain **largest gang "
+            "that still fits**, a gate-**timeout** count (`gang_unwind_total` counts the "
+            "resulting teardown, not the timeout itself), and the bookkeeping-drift "
+            "signal.\n\n"
+            "Note that `scheduler_schedule_attempts_total{result=\"unschedulable\"}` "
+            "counts gang admission yields alongside real failures — a leader that "
+            "arrives before its worker returns Unschedulable and rebinds milliseconds "
+            "later. Read `gang_pin_total{result=\"no_fit\"}` for genuine starvation.\n\n"
             "To find what this build actually exports, run in **Explore**:\n\n"
             "```\ngroup by (__name__) ({cluster=\"$cluster\", pod=~\"ome-scheduler.*\"})\n```\n\n"
             "Anything not prefixed `scheduler_`, `go_`, `process_`, or "

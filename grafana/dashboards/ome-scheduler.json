@@ -751,7 +751,7 @@
         },
         "overrides": []
       },
-      "description": "result = scheduled | unschedulable | error. A rising 'unschedulable' share is the fleet running out of placeable topology, not the scheduler being slow.",
+      "description": "result = scheduled | unschedulable | error. The 'unschedulable' series also counts benign gang admission yields, so a steady share of it is normal on a cluster creating gangs. Genuine starvation is no_fit in the Gang admission row.",
       "options": {
         "legend": {
           "displayMode": "list",
@@ -875,7 +875,7 @@
         },
         "overrides": []
       },
-      "description": "Sustained non-zero means gangs are repeatedly failing to find a domain.",
+      "description": "Non-zero whenever gangs are being created: each two-phase admission yield lands here \u2014 a leader that arrives before its worker returns Unschedulable and rebinds milliseconds later. This does NOT mean gangs are failing to find a domain. Compare against no_fit in the Gang admission row before reading it as capacity starvation.",
       "options": {
         "legend": {
           "displayMode": "hidden",
@@ -949,10 +949,285 @@
     },
     {
       "type": "row",
-      "title": "Latency \u2014 how fast, and which hook is slow",
+      "title": "Gang admission \u2014 yielding, or actually starving?",
       "gridPos": {
         "x": 0,
         "y": 33,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Domain placement decisions",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 34,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (result) (rate(ome_scheduler_gang_pin_total{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"}[5m]))",
+          "refId": "O",
+          "legendFormat": "{{result}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "description": "pinned/adopted are successful placements. no_fit means the planner examined every domain and none could hold the remaining members. stale_replan/topology_replan are re-plans of an existing commitment.",
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Starvation rate (no_fit)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 34,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(ome_scheduler_gang_pin_total{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\",result=\"no_fit\"}[5m]))",
+          "refId": "P"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "description": "Alert on this, not on 'Unschedulable rate'. Sustained non-zero means gangs genuinely cannot find a domain.",
+      "options": {
+        "legend": {
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Pinned groups",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 41,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(ome_scheduler_pinned_groups{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"})",
+          "refId": "Q"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "description": "Gangs holding a domain capacity reservation. A floor that climbs and never returns means pins are leaking.",
+      "options": {
+        "legend": {
+          "displayMode": "hidden",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Permit gate, activations, unwinds",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 41,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (result) (rate(ome_scheduler_gang_gate_total{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"}[5m]))",
+          "refId": "R",
+          "legendFormat": "gate {{result}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (trigger) (rate(ome_scheduler_gang_activation_total{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"}[5m]))",
+          "refId": "S",
+          "legendFormat": "activation {{trigger}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum(rate(ome_scheduler_gang_unwind_total{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"}[5m]))",
+          "refId": "T",
+          "legendFormat": "unwind"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "description": "gate wait/admit should stay balanced. activations are the retries that clear a yield. unwind counts gangs torn down after a member failed to schedule (gate timeout or bind failure).",
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Latency \u2014 how fast, and which hook is slow",
+      "gridPos": {
+        "x": 0,
+        "y": 48,
         "w": 24,
         "h": 1
       },
@@ -968,7 +1243,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 34,
+        "y": 49,
         "w": 12,
         "h": 8
       },
@@ -979,7 +1254,7 @@
             "uid": "${datasource}"
           },
           "expr": "histogram_quantile(0.50, sum by (le) (rate(scheduler_pod_scheduling_duration_seconds_bucket{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"}[5m])))",
-          "refId": "O",
+          "refId": "U",
           "legendFormat": "p50"
         },
         {
@@ -988,7 +1263,7 @@
             "uid": "${datasource}"
           },
           "expr": "histogram_quantile(0.99, sum by (le) (rate(scheduler_pod_scheduling_duration_seconds_bucket{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"}[5m])))",
-          "refId": "P",
+          "refId": "V",
           "legendFormat": "p99"
         }
       ],
@@ -1038,7 +1313,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 34,
+        "y": 49,
         "w": 12,
         "h": 8
       },
@@ -1049,7 +1324,7 @@
             "uid": "${datasource}"
           },
           "expr": "histogram_quantile(0.99, sum by (le) (rate(scheduler_scheduling_attempt_duration_seconds_bucket{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"}[5m])))",
-          "refId": "Q"
+          "refId": "W"
         }
       ],
       "fieldConfig": {
@@ -1098,7 +1373,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 42,
+        "y": 57,
         "w": 12,
         "h": 8
       },
@@ -1109,7 +1384,7 @@
             "uid": "${datasource}"
           },
           "expr": "histogram_quantile(0.99, sum by (extension_point, le) (rate(scheduler_framework_extension_point_duration_seconds_bucket{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"}[5m])))",
-          "refId": "R",
+          "refId": "X",
           "legendFormat": "{{extension_point}}"
         }
       ],
@@ -1159,7 +1434,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 42,
+        "y": 57,
         "w": 12,
         "h": 8
       },
@@ -1170,7 +1445,7 @@
             "uid": "${datasource}"
           },
           "expr": "histogram_quantile(0.99, sum by (plugin, le) (rate(scheduler_plugin_execution_duration_seconds_bucket{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"}[5m])))",
-          "refId": "S",
+          "refId": "Y",
           "legendFormat": "{{plugin}}"
         }
       ],
@@ -1216,7 +1491,7 @@
       "title": "Preemption & queue churn",
       "gridPos": {
         "x": 0,
-        "y": 50,
+        "y": 65,
         "w": 24,
         "h": 1
       },
@@ -1232,7 +1507,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 51,
+        "y": 66,
         "w": 8,
         "h": 7
       },
@@ -1243,7 +1518,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum(rate(scheduler_preemption_attempts_total{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"}[5m]))",
-          "refId": "T"
+          "refId": "Z"
         }
       ],
       "fieldConfig": {
@@ -1291,7 +1566,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 51,
+        "y": 66,
         "w": 8,
         "h": 7
       },
@@ -1302,7 +1577,7 @@
             "uid": "${datasource}"
           },
           "expr": "histogram_quantile(0.99, sum by (le) (rate(scheduler_preemption_victims_bucket{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"}[5m])))",
-          "refId": "U"
+          "refId": "A"
         }
       ],
       "fieldConfig": {
@@ -1350,7 +1625,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 51,
+        "y": 66,
         "w": 8,
         "h": 7
       },
@@ -1361,7 +1636,7 @@
             "uid": "${datasource}"
           },
           "expr": "topk(10, sum by (event) (rate(scheduler_queue_incoming_pods_total{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"}[5m])))",
-          "refId": "V",
+          "refId": "B",
           "legendFormat": "{{event}}"
         }
       ],
@@ -1407,7 +1682,7 @@
       "title": "Process",
       "gridPos": {
         "x": 0,
-        "y": 58,
+        "y": 73,
         "w": 24,
         "h": 1
       },
@@ -1423,7 +1698,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 59,
+        "y": 74,
         "w": 8,
         "h": 7
       },
@@ -1434,7 +1709,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum by (pod) (rate(process_cpu_seconds_total{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"}[5m]))",
-          "refId": "W",
+          "refId": "C",
           "legendFormat": "{{pod}}"
         }
       ],
@@ -1484,7 +1759,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 59,
+        "y": 74,
         "w": 8,
         "h": 7
       },
@@ -1495,7 +1770,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum by (pod) (process_resident_memory_bytes{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"})",
-          "refId": "X",
+          "refId": "D",
           "legendFormat": "{{pod}}"
         }
       ],
@@ -1545,7 +1820,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 59,
+        "y": 74,
         "w": 8,
         "h": 7
       },
@@ -1556,7 +1831,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum by (pod) (go_goroutines{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"})",
-          "refId": "Y",
+          "refId": "E",
           "legendFormat": "{{pod}}"
         }
       ],
@@ -1597,16 +1872,16 @@
     },
     {
       "type": "text",
-      "title": "Gang & topology metrics \u2014 not yet wired",
+      "title": "Scraping, and the gang metrics still missing",
       "gridPos": {
         "x": 0,
-        "y": 66,
+        "y": 81,
         "w": 24,
         "h": 6
       },
       "options": {
         "mode": "markdown",
-        "content": "**If the scheduling rows are empty, the scheduler is not being scraped.** Pod-level health above comes from kube-state-metrics, which watches the pods from outside; the `scheduler_*` rows need the scheduler's own /metrics endpoint scraped. A Kubernetes scheduler serves it on a secure port, so the pod template usually needs `prometheus.io/scrape: \"true\"`, `prometheus.io/scheme: \"https\"`, `prometheus.io/port: \"10259\"`, plus RBAC for the `/metrics` non-resource URL.\n\nOEP-0022 describes OME-specific scheduler metrics \u2014 the per-domain **largest gang that still fits**, gate-timeout counts, and the bookkeeping-drift signal. Their metric names are not defined in-tree yet, so this dashboard does not guess at them.\n\nTo find what this build actually exports, run in **Explore**:\n\n```\ngroup by (__name__) ({cluster=\"$cluster\", pod=~\"ome-scheduler.*\"})\n```\n\nAnything not prefixed `scheduler_`, `go_`, `process_`, or `leader_election_` is OME-specific. Add those panels here and to `grafana/gen_dashboards.py`."
+        "content": "**If the scheduling rows are empty, the scheduler is not being scraped.** Pod-level health above comes from kube-state-metrics, which watches the pods from outside; the `scheduler_*` rows need the scheduler's own /metrics endpoint scraped. A Kubernetes scheduler serves it on a secure port, so the pod template usually needs `prometheus.io/scrape: \"true\"`, `prometheus.io/scheme: \"https\"`, `prometheus.io/port: \"10259\"`, plus RBAC for the `/metrics` non-resource URL.\n\nThe Gang admission row plots the `ome_scheduler_*` metrics the gangpack plugin exports today. Three signals OEP-0022 describes are still absent from the binary and so cannot be charted: the per-domain **largest gang that still fits**, a gate-**timeout** count (`gang_unwind_total` counts the resulting teardown, not the timeout itself), and the bookkeeping-drift signal.\n\nNote that `scheduler_schedule_attempts_total{result=\"unschedulable\"}` counts gang admission yields alongside real failures \u2014 a leader that arrives before its worker returns Unschedulable and rebinds milliseconds later. Read `gang_pin_total{result=\"no_fit\"}` for genuine starvation.\n\nTo find what this build actually exports, run in **Explore**:\n\n```\ngroup by (__name__) ({cluster=\"$cluster\", pod=~\"ome-scheduler.*\"})\n```\n\nAnything not prefixed `scheduler_`, `go_`, `process_`, or `leader_election_` is OME-specific. Add those panels here and to `grafana/gen_dashboards.py`."
       }
     }
   ]
