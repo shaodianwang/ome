@@ -11,13 +11,25 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
 )
 
-// SeededMaxDecodedInstances is the ColumnarV2 row bound the seeded
-// omenativeStatus block declares. The in-process test managers derive their
-// per-Instance status decoder from it, and qualification specs that store a
-// ColumnarV2 payload directly encode under the same bound.
-const SeededMaxDecodedInstances = 10000
+// The seeded omenativeStatus block: the per-Instance representation the
+// seeded manager targets and the ColumnarV2 row bound it decodes under.
+// Both match the chart default.
+const (
+	SeededInstanceStatusEncoding        = irstatus.EncodingColumnarV2
+	SeededMaxDecodedInstances    uint64 = 20000
+)
+
+// OMENativeStatusConfigJSON returns the omenativeStatus block that every
+// seeded inferenceservice-config carries. Suites that build the ConfigMap
+// themselves include it under controllerconfig.OMENativeStatusConfigName.
+func OMENativeStatusConfigJSON() string {
+	return fmt.Sprintf(`{"instanceStatusEncoding":%q,"maxDecodedInstances":%d}`,
+		SeededInstanceStatusEncoding, SeededMaxDecodedInstances)
+}
 
 // SeedDefaultConfigMaps creates the ConfigMap the controllers read at
 // reconcile time:
@@ -25,10 +37,9 @@ const SeededMaxDecodedInstances = 10000
 //   - inferenceservice-config — keys: ingress, deploy, lifecycle, omeAgent,
 //     rollout, omenativeStatus. The ISVC reconciler reads ingress + deploy +
 //     rollout; the BaseModel PVC path reads omeAgent; the InferenceReplica
-//     reconciler reads lifecycle; the manager binary requires omenativeStatus
-//     at startup (the DenseV1 target the chart ships, with a decode bound so a
-//     stored ColumnarV2 payload is decoded and converted rather than failing
-//     closed).
+//     reconciler reads lifecycle and omenativeStatus; the manager binary
+//     requires omenativeStatus at startup (ColumnarV2 with the chart's
+//     bound here, matching the chart default).
 //
 // Values are minimal-viable defaults that satisfy each helper's
 // validation:
@@ -106,10 +117,7 @@ func SeedDefaultConfigMaps(ctx context.Context, c client.Client) error {
   "maxPinnedPlanBytes": 16384,
   "defaultReadyTimeout": "15m"
 }`,
-		"omenativeStatus": fmt.Sprintf(`{
-  "instanceStatusEncoding": "DenseV1",
-  "maxDecodedInstances": %d
-}`, SeededMaxDecodedInstances),
+		controllerconfig.OMENativeStatusConfigName: OMENativeStatusConfigJSON(),
 	}); err != nil {
 		return fmt.Errorf("seed inferenceservice-config: %w", err)
 	}

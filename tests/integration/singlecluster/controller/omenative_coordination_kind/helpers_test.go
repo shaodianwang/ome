@@ -81,7 +81,16 @@ func freshInferenceReplica(g gomega.Gomega, namespace, isvcName string, componen
 // ISVC Component from its InferenceReplica.
 // Fails g (retryable inside Eventually) when the IR isn't present yet.
 func instanceStatuses(g gomega.Gomega, namespace, isvcName string, component v1beta1.ComponentType) []v1beta1.OMENativeInstanceStatus {
-	return freshInferenceReplica(g, namespace, isvcName, component).Status.InstanceStatuses
+	return decodedInstanceStatuses(g, freshInferenceReplica(g, namespace, isvcName, component))
+}
+
+// decodedInstanceStatuses returns the logical per-instance rows of a fetched
+// InferenceReplica, whichever representation the stored object carries.
+// Fails g when the stored representation does not decode.
+func decodedInstanceStatuses(g gomega.Gomega, ir *v1beta1.InferenceReplica) []v1beta1.OMENativeInstanceStatus {
+	rows, err := util.DecodedInstanceStatuses(ir)
+	g.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred(), "decode instance statuses of InferenceReplica %s/%s", ir.Namespace, ir.Name)
+	return rows
 }
 
 // migrationEntries reads status.migrations for one ISVC Component from

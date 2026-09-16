@@ -24,6 +24,7 @@ import (
 	mcfake "github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded/fake"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	inferencereplica "github.com/ome-projects/ome/pkg/controller/v1beta1/inferencereplica"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/tests/integration/components"
 	"github.com/ome-projects/ome/tests/integration/kindutil"
@@ -184,17 +185,18 @@ func StandardOMESetup(opts SetupOpts) kindutil.ManagerSetup {
 			if err != nil {
 				return fmt.Errorf("load lifecycle scale settings: %w", err)
 			}
-			decoder, err := components.InstanceStatusDecoderFromConfig(ctx, clientset)
+			statusConfig, err := controllerconfig.NewOMENativeStatusConfig(clientset)
 			if err != nil {
-				return fmt.Errorf("load status representation settings: %w", err)
+				return fmt.Errorf("load omenativeStatus configuration: %w", err)
 			}
 			return (&inferencereplica.Reconciler{
 				Client:                   mgr.GetClient(),
 				Clientset:                clientset,
 				Log:                      ctrl.Log.WithName("InferenceReplica"),
 				APIReader:                mgr.GetAPIReader(),
+				InstanceStatusDecoder:    irstatus.NewDecoder(statusConfig.DecodeBound()),
+				InstanceStatusTarget:     statusConfig.InstanceStatusEncoding,
 				Recorder:                 mgr.GetEventRecorderFor("InferenceReplica"),
-				InstanceStatusDecoder:    decoder,
 				ScaleUpPodBatchSize:      podBatchSizes.ScaleUp,
 				ScaleDownPodBatchSize:    podBatchSizes.ScaleDown,
 				ScaleDownRequeueInterval: podBatchSizes.ScaleDownRequeueInterval,

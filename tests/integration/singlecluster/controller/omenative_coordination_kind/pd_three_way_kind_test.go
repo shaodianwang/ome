@@ -300,7 +300,7 @@ var _ = ginkgo.Describe("OMENative PD three-way + mixed-mode topologies (KIND)",
 		decIR := &v1beta1.InferenceReplica{}
 		err := k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: "pdx6-isvc-decoder"}, decIR)
 		if err == nil {
-			Expect(decIR.Status.InstanceStatuses).To(BeEmpty(),
+			Expect(decodedInstanceStatuses(Default, decIR)).To(BeEmpty(),
 				"Decoder OMENative state must be empty when running under Raw — non-empty means the OMENative dispatcher leaked")
 		} else {
 			Expect(apierrors.IsNotFound(err)).To(BeTrue(),

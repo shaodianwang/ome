@@ -378,7 +378,7 @@ var _ = ginkgo.Describe("OMENative bounded scale-down (KIND)", ginkgo.Ordered, f
 			ir := freshInferenceReplica(g, ns.Name, isvcName, v1beta1.EngineComponent)
 			g.Expect(ir.Spec.Replicas).NotTo(BeNil())
 			g.Expect(*ir.Spec.Replicas).To(Equal(int32(5)))
-			g.Expect(deleteOwnedInstanceIndices(ir.Status.InstanceStatuses)).
+			g.Expect(deleteOwnedInstanceIndices(decodedInstanceStatuses(g, ir))).
 				To(Equal([]int32{3, 4}), "desired rebound must not cancel durable Delete ownership")
 			for _, index := range []int32{3, 4} {
 				pod := &corev1.Pod{}

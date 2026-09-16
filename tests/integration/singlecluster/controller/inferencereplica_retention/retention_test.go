@@ -105,7 +105,9 @@ func liveRevisionNames(ir *v1beta1.InferenceReplica) map[string]struct{} {
 			live[name] = struct{}{}
 		}
 	}
-	for _, inst := range ir.Status.InstanceStatuses {
+	rows, err := util.DecodedInstanceStatuses(ir)
+	Expect(err).NotTo(HaveOccurred())
+	for _, inst := range rows {
 		for _, name := range []string{inst.RunningRevision, inst.TargetRevision} {
 			if name != "" {
 				live[name] = struct{}{}

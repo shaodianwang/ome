@@ -323,9 +323,10 @@ var _ = ginkgo.Describe("behavior - RetryBlock same-target containment", ginkgo.
 			g.Expect(cur.Status.UpdateRevision).NotTo(Equal(v1Rev))
 			g.Expect(cur.Status.CurrentRevision).To(Equal(cur.Status.UpdateRevision),
 				"rollout must converge on the corrected revision")
-			g.Expect(cur.Status.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cur.Status.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
-			g.Expect(cur.Status.InstanceStatuses[0].RunningRevision).To(Equal(cur.Status.UpdateRevision))
+			rows := decodedInstanceStatuses(g, cur)
+			g.Expect(rows).To(HaveLen(1))
+			g.Expect(rows[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(rows[0].RunningRevision).To(Equal(cur.Status.UpdateRevision))
 			g.Expect(findRetryBlock(cur.Status.RetryBlocks, cur.Status.UpdateRevision)).To(BeNil(),
 				"the corrected revision must carry no RetryBlock")
 

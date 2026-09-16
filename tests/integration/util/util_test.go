@@ -85,6 +85,10 @@ var _ = ginkgo.Describe("util.SeedDefaultConfigMaps", func() {
 		// seed is what keeps suite behavior chart-equivalent.
 		Expect(cm.Data).To(HaveKey("rollout"))
 		Expect(cm.Data["rollout"]).To(MatchJSON(`{"maxPinnedPlanBytes":16384,"defaultReadyTimeout":"15m"}`))
+		// The omenativeStatus block is required by the InferenceReplica
+		// reconciler at startup; the seed targets the chart default.
+		Expect(cm.Data).To(HaveKey("omenativeStatus"))
+		Expect(cm.Data["omenativeStatus"]).To(MatchJSON(`{"instanceStatusEncoding":"ColumnarV2","maxDecodedInstances":20000}`))
 		// The deploy block must round-trip the chart-equivalent replica and
 		// update-strategy defaults the ISVC defaulter reads at admission.
 		// Without the updateStrategy block an OMENative component is stamped

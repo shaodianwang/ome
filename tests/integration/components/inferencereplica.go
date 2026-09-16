@@ -9,6 +9,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	inferencereplica "github.com/ome-projects/ome/pkg/controller/v1beta1/inferencereplica"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
 )
 
 // InferenceReplicaOption mutates the IR reconciler before it is
@@ -52,9 +53,9 @@ func SetupInferenceReplica(ctx context.Context, mgr ctrl.Manager, opts ...Infere
 	if err != nil {
 		return fmt.Errorf("SetupInferenceReplica: load lifecycle scale settings: %w", err)
 	}
-	decoder, err := InstanceStatusDecoderFromConfig(ctx, clientset)
+	statusConfig, err := controllerconfig.NewOMENativeStatusConfig(clientset)
 	if err != nil {
-		return fmt.Errorf("SetupInferenceReplica: load status representation settings: %w", err)
+		return fmt.Errorf("SetupInferenceReplica: load omenativeStatus configuration: %w", err)
 	}
 
 	r := &inferencereplica.Reconciler{
@@ -62,8 +63,9 @@ func SetupInferenceReplica(ctx context.Context, mgr ctrl.Manager, opts ...Infere
 		Clientset:                clientset,
 		Log:                      ctrl.Log.WithName("InferenceReplica"),
 		APIReader:                mgr.GetAPIReader(),
+		InstanceStatusDecoder:    irstatus.NewDecoder(statusConfig.DecodeBound()),
+		InstanceStatusTarget:     statusConfig.InstanceStatusEncoding,
 		Recorder:                 mgr.GetEventRecorderFor("InferenceReplica"),
-		InstanceStatusDecoder:    decoder,
 		MaxConcurrentReconciles:  cfg.maxConcurrentReconciles,
 		ScaleUpPodBatchSize:      podBatchSizes.ScaleUp,
 		ScaleDownPodBatchSize:    podBatchSizes.ScaleDown,

@@ -151,10 +151,9 @@ func admitDerivedOn(member cluster, namespace, name string) {
 		}
 		g.Expect(client.IgnoreAlreadyExists(member.client.Create(member.ctx, ir))).To(gomega.Succeed())
 		g.Expect(member.client.Get(member.ctx, types.NamespacedName{Namespace: namespace, Name: irName}, ir)).To(gomega.Succeed())
-		ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		g.Expect(util.WriteDenseInstanceStatuses(member.ctx, member.client, ir, []v1beta1.OMENativeInstanceStatus{
 			{Index: 0, Phase: v1beta1.OMENativeInstanceReady, Admitted: true},
-		}
-		g.Expect(member.client.Status().Update(member.ctx, ir)).To(gomega.Succeed())
+		})).To(gomega.Succeed())
 	}, eventuallyTimeout, eventuallyPoll).Should(gomega.Succeed())
 }
 

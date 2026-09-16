@@ -23,6 +23,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/tests/integration/util"
 )
 
 const fixtureReplicas int32 = 2000
@@ -172,12 +173,19 @@ func getInferenceReplica(key client.ObjectKey) *v1beta1.InferenceReplica {
 	return ir
 }
 
+// applyCompactPersistence clears the pod-derived row fields the compact write
+// omits and keeps the fixture in its dense representation.
 func applyCompactPersistence(status *v1beta1.InferenceReplicaStatus) {
-	for i := range status.InstanceStatuses {
-		status.InstanceStatuses[i].ReadyPodCount = 0
-		status.InstanceStatuses[i].ScheduledPodCount = 0
-		status.InstanceStatuses[i].NodesOccupied = nil
+	ginkgo.GinkgoHelper()
+
+	rows, err := util.DecodedInstanceStatuses(&v1beta1.InferenceReplica{Status: *status})
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	for i := range rows {
+		rows[i].ReadyPodCount = 0
+		rows[i].ScheduledPodCount = 0
+		rows[i].NodesOccupied = nil
 	}
+	util.InstallDenseInstanceStatuses(status, rows)
 }
 
 func assertCompactStatus(got, legacy v1beta1.InferenceReplicaStatus) {
@@ -394,9 +402,9 @@ func fixtureInferenceReplica(name string, podsPerInstance int32) *v1beta1.Infere
 		},
 	}
 
-	ir.Status.InstanceStatuses = make([]v1beta1.OMENativeInstanceStatus, 0, replicas)
+	rows := make([]v1beta1.OMENativeInstanceStatus, 0, replicas)
 	for index := int32(0); index < replicas; index++ {
-		row := v1beta1.OMENativeInstanceStatus{
+		rows = append(rows, v1beta1.OMENativeInstanceStatus{
 			Index:             index,
 			Incarnation:       1,
 			Phase:             v1beta1.OMENativeInstanceReady,
@@ -408,9 +416,9 @@ func fixtureInferenceReplica(name string, podsPerInstance int32) *v1beta1.Infere
 			ScheduledPodCount: podsPerInstance,
 			Admitted:          true,
 			NodesOccupied:     fixtureNodes(index, podsPerInstance),
-		}
-		ir.Status.InstanceStatuses = append(ir.Status.InstanceStatuses, row)
+		})
 	}
+	util.InstallDenseInstanceStatuses(&ir.Status, rows)
 	return ir
 }
 

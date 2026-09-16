@@ -130,6 +130,7 @@ func seedOperatorConfig() {
 			controllerconfig.AutoscalerPolicyConfigName: fmt.Sprintf(
 				`{"metricProviders":{%q:{"serverAddress":"http://prometheus.example.com:9090"}}}`,
 				boundProvider),
+			controllerconfig.OMENativeStatusConfigName: util.OMENativeStatusConfigJSON(),
 		},
 	})).To(gomega.Succeed())
 }

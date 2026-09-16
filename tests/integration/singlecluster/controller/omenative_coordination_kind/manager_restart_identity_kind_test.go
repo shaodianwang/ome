@@ -184,14 +184,16 @@ var _ = ginkgo.Describe("OMENative manager-restart identity stability (KIND)", g
 			singleIR := freshInferenceReplica(g, ns.Name, singleName, v1beta1.EngineComponent)
 			g.Expect(revisionOf(singleIR)).To(Equal(singleRevBefore),
 				"the single-pod engine's revision lineage must not move on a restart with no spec change")
-			g.Expect(singleIR.Status.InstanceStatuses).To(HaveLen(1))
-			g.Expect(singleIR.Status.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			singleRows := decodedInstanceStatuses(g, singleIR)
+			g.Expect(singleRows).To(HaveLen(1))
+			g.Expect(singleRows[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 
 			gangIR := freshInferenceReplica(g, ns.Name, gangName, v1beta1.EngineComponent)
 			g.Expect(revisionOf(gangIR)).To(Equal(gangRevBefore),
 				"the gang engine's revision lineage must not move on a restart with no spec change")
-			g.Expect(gangIR.Status.InstanceStatuses).To(HaveLen(1))
-			g.Expect(gangIR.Status.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			gangRows := decodedInstanceStatuses(g, gangIR)
+			g.Expect(gangRows).To(HaveLen(1))
+			g.Expect(gangRows[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 
 			g.Expect(snapshotControllerRevisions(g, ns.Name)).To(Equal(crsBefore),
 				"the restart must mint zero new ControllerRevisions and must not delete/recreate an existing one")

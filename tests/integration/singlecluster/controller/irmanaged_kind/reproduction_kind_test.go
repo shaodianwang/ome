@@ -67,10 +67,11 @@ var _ = ginkgo.Describe("IR-managed OMENative rollout", ginkgo.Ordered, func() {
 		ginkgo.By("asserting surge semantics on the IR: ActiveOrdinal 0->1, Incarnation unchanged")
 		ir, ok := engineIR(ns.Name, name)
 		Expect(ok).To(BeTrue(), "engine InferenceReplica must exist")
-		Expect(ir.Status.InstanceStatuses).To(HaveLen(1))
-		Expect(ir.Status.InstanceStatuses[0].ActiveOrdinal).To(Equal(int32(1)),
+		rows := decodedInstanceStatuses(Default, ir)
+		Expect(rows).To(HaveLen(1))
+		Expect(rows[0].ActiveOrdinal).To(Equal(int32(1)),
 			"surge must advance ActiveOrdinal to the alternate slot")
-		Expect(ir.Status.InstanceStatuses[0].Incarnation).To(Equal(int64(1)),
+		Expect(rows[0].Incarnation).To(Equal(int64(1)),
 			"surge must NOT bump Incarnation (that is the recreate counter)")
 	})
 
@@ -104,10 +105,11 @@ var _ = ginkgo.Describe("IR-managed OMENative rollout", ginkgo.Ordered, func() {
 		ginkgo.By("asserting recreate semantics on the IR: ActiveOrdinal stays 0, Incarnation bumps")
 		ir, ok := engineIR(ns.Name, name)
 		Expect(ok).To(BeTrue(), "engine InferenceReplica must exist")
-		Expect(ir.Status.InstanceStatuses).To(HaveLen(1))
-		Expect(ir.Status.InstanceStatuses[0].ActiveOrdinal).To(Equal(int32(0)),
+		rows := decodedInstanceStatuses(Default, ir)
+		Expect(rows).To(HaveLen(1))
+		Expect(rows[0].ActiveOrdinal).To(Equal(int32(0)),
 			"recreate reuses ordinal 0 (no surge)")
-		Expect(ir.Status.InstanceStatuses[0].Incarnation).To(BeNumerically(">=", int64(2)),
+		Expect(rows[0].Incarnation).To(BeNumerically(">=", int64(2)),
 			"recreate must bump Incarnation")
 	})
 

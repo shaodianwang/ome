@@ -19,6 +19,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	workloadgang "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/gang"
 	"github.com/ome-projects/ome/pkg/utils"
@@ -141,10 +142,22 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 // validateWiring rejects a mis-wired reconciler at setup. The
 // authoritative (live) reader is a correctness dependency — see
-// workload/types AuthoritativeReader.
+// workload/types AuthoritativeReader. The status write target has no
+// default, so a reconciler constructed without one must not register.
 func (r *Reconciler) validateWiring() error {
 	if r.APIReader == nil {
 		return fmt.Errorf("inferencereplica: APIReader (AuthoritativeReader) must be wired")
 	}
-	return nil
+	switch r.InstanceStatusTarget {
+	case irstatus.EncodingDenseV1:
+		return nil
+	case irstatus.EncodingColumnarV2:
+		if r.InstanceStatusDecoder.MaxDecodedInstances() == 0 {
+			return fmt.Errorf("inferencereplica: a %s InstanceStatusTarget requires the maxDecodedInstances bound on InstanceStatusDecoder", irstatus.EncodingColumnarV2)
+		}
+		return nil
+	default:
+		return fmt.Errorf("inferencereplica: InstanceStatusTarget must be %s or %s from the omenativeStatus configuration, got %q",
+			irstatus.EncodingDenseV1, irstatus.EncodingColumnarV2, r.InstanceStatusTarget)
+	}
 }

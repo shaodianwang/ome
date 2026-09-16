@@ -209,6 +209,11 @@ func createCluster(withKueue bool) cluster {
 // cluster's createCluster has returned: the scheme is then fully registered and
 // stable, so the manager's cache informers read it without racing an Init.
 func startControlPlaneManager(c *cluster) {
+	// The control plane carries the same inferenceservice-config the manager
+	// binary requires: placement decodes member InferenceReplica rows under
+	// its omenativeStatus bound.
+	gomega.Expect(util.SeedDefaultConfigMaps(c.ctx, c.client)).To(gomega.Succeed(), "seed control-plane inferenceservice-config")
+
 	var cm, quotaCM *components.ClusterManager
 	err := c.fwk.StartManager(c.ctx, c.cfg, func(setupCtx context.Context, mgr ctrl.Manager) error {
 		m, err := components.SetupWorkloadCluster(setupCtx, mgr,

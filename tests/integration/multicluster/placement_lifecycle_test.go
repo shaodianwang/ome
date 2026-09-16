@@ -12,6 +12,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/placement"
 	ometesting "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
+	"github.com/ome-projects/ome/tests/integration/util"
 )
 
 // These specs (S8-S11) drive the single-mode placement lifecycle beyond the
@@ -296,8 +297,7 @@ func upsertEngineIRStatusOn(member cluster, namespace, name string, instances []
 		}
 		g.Expect(client.IgnoreAlreadyExists(member.client.Create(member.ctx, ir))).To(gomega.Succeed())
 		g.Expect(member.client.Get(member.ctx, types.NamespacedName{Namespace: namespace, Name: irName}, ir)).To(gomega.Succeed())
-		ir.Status.InstanceStatuses = instances
-		g.Expect(member.client.Status().Update(member.ctx, ir)).To(gomega.Succeed())
+		g.Expect(util.WriteDenseInstanceStatuses(member.ctx, member.client, ir, instances)).To(gomega.Succeed())
 	}, eventuallyTimeout, eventuallyPoll).Should(gomega.Succeed())
 }
 

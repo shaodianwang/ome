@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/tests/integration/util"
 	perflabels "github.com/ome-projects/ome/tests/perf/multicluster/runner/labels"
 )
 
@@ -196,10 +197,9 @@ func (r *Reconciler) markAdmitted(ctx context.Context, derived *v1beta1.Inferenc
 		if err := r.client.Get(ctx, types.NamespacedName{Namespace: ir.Namespace, Name: ir.Name}, ir); err != nil {
 			return err
 		}
-		ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		if err := util.WriteDenseInstanceStatuses(ctx, r.client, ir, []v1beta1.OMENativeInstanceStatus{
 			{Index: 0, Phase: v1beta1.OMENativeInstanceReady, Admitted: true},
-		}
-		if err := r.client.Status().Update(ctx, ir); err != nil {
+		}); err != nil {
 			return err
 		}
 	}
@@ -216,36 +216,31 @@ func (r *Reconciler) allComponentsAdmitted(ctx context.Context, isvc *v1beta1.In
 		return false, nil
 	}
 	for _, comp := range declared {
-		st, err := r.componentIRStatus(ctx, isvc.Namespace, isvc.Name, comp)
+		rows, err := r.componentInstanceStatuses(ctx, isvc.Namespace, isvc.Name, comp)
 		if err != nil {
 			return false, err
 		}
-		if !hasAdmittedInstance(st) {
+		if !hasAdmittedInstance(rows) {
 			return false, nil
 		}
 	}
 	return true, nil
 }
 
-// componentIRStatus reads one component's InferenceReplica status, returning
-// (nil, nil) when the IR does not exist yet (treated as "no admitted instance").
-func (r *Reconciler) componentIRStatus(ctx context.Context, namespace, isvcName string, comp v1beta1.ComponentType) (*v1beta1.InferenceReplicaStatus, error) {
-	ir := &v1beta1.InferenceReplica{}
+// componentInstanceStatuses reads one component's decoded InferenceReplica
+// rows, returning (nil, nil) when the IR does not exist yet (treated as "no
+// admitted instance").
+func (r *Reconciler) componentInstanceStatuses(ctx context.Context, namespace, isvcName string, comp v1beta1.ComponentType) ([]v1beta1.OMENativeInstanceStatus, error) {
 	key := types.NamespacedName{Namespace: namespace, Name: componentIRName(isvcName, comp)}
-	if err := r.client.Get(ctx, key, ir); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, nil
-		}
-		return nil, err
+	rows, err := util.GetInstanceStatuses(ctx, r.client, key)
+	if apierrors.IsNotFound(err) {
+		return nil, nil
 	}
-	return &ir.Status, nil
+	return rows, err
 }
 
-func hasAdmittedInstance(st *v1beta1.InferenceReplicaStatus) bool {
-	if st == nil {
-		return false
-	}
-	for _, inst := range st.InstanceStatuses {
+func hasAdmittedInstance(rows []v1beta1.OMENativeInstanceStatus) bool {
+	for _, inst := range rows {
 		if inst.Admitted {
 			return true
 		}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/ome-projects/ome/tests/integration/components"
 	"github.com/ome-projects/ome/tests/integration/framework"
+	"github.com/ome-projects/ome/tests/integration/util"
 )
 
 // SetupInferenceService smoke test: registering the reconciler must
@@ -20,6 +21,10 @@ var _ = ginkgo.Describe("components.SetupInferenceService", func() {
 		s, err := framework.NewSuite(&framework.Framework{})
 		Expect(err).NotTo(HaveOccurred())
 		ginkgo.DeferCleanup(func() { _ = s.Fwk.Teardown() })
+
+		// The reconciler reads the omenativeStatus block at setup, as the
+		// manager binary does, so the config must exist before registration.
+		Expect(util.SeedDefaultConfigMaps(s.Ctx, s.Client)).To(Succeed())
 
 		mgrSetup := func(ctx context.Context, mgr ctrl.Manager) error {
 			return components.SetupInferenceService(ctx, mgr)

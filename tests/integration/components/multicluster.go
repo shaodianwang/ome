@@ -7,6 +7,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -283,7 +284,7 @@ func WithWinnerLostGracePeriod(d time.Duration) PlacementOption {
 // cluster Manager returned by SetupWorkloadCluster. Mirrors the cmd/manager
 // wiring on the control-plane role. This is the control-plane-only half of the
 // pair; member clusters run SetupWorkloadCluster alone (or nothing).
-func SetupPlacement(_ context.Context, mgr ctrl.Manager, clusters *ClusterManager, opts ...PlacementOption) error {
+func SetupPlacement(ctx context.Context, mgr ctrl.Manager, clusters *ClusterManager, opts ...PlacementOption) error {
 	if clusters == nil {
 		return fmt.Errorf("SetupPlacement: nil cluster manager (call SetupWorkloadCluster first)")
 	}
@@ -292,10 +293,22 @@ func SetupPlacement(_ context.Context, mgr ctrl.Manager, clusters *ClusterManage
 		o(cfg)
 	}
 
+	clientset, err := kubernetes.NewForConfig(mgr.GetConfig())
+	if err != nil {
+		return fmt.Errorf("SetupPlacement: build clientset: %w", err)
+	}
+	// Placement reads member InferenceReplica rows through the decoder; an
+	// unwired decoder fails closed on ColumnarV2 objects.
+	instanceStatusDecoder, err := InstanceStatusDecoderFromConfig(clientset)
+	if err != nil {
+		return fmt.Errorf("SetupPlacement: load omenativeStatus configuration: %w", err)
+	}
+
 	r := &placement.Reconciler{
 		Client:                mgr.GetClient(),
 		Scheme:                mgr.GetScheme(),
 		Log:                   ctrl.Log.WithName("Placement"),
+		InstanceStatusDecoder: instanceStatusDecoder,
 		Clusters:              clusters,
 		Requeue:               cfg.requeue,
 		ControlPlaneID:        cfg.controlPlaneID,

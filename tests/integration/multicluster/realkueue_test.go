@@ -101,12 +101,12 @@ var _ = ginkgo.Describe("Real-Kueue member admission (smoke)", ginkgo.Ordered, f
 	engineAdmitted := func(ns, isvcName string) bool {
 		// The authoritative per-instance status now lives on the component's
 		// InferenceReplica (<isvcName>-engine), not the ISVC's LifecycleStatus.
-		ir := &v1beta1.InferenceReplica{}
-		if err := member1Cluster.client.Get(member1Cluster.ctx,
-			types.NamespacedName{Namespace: ns, Name: isvcName + "-" + string(v1beta1.EngineComponent)}, ir); err != nil {
+		rows, err := util.GetInstanceStatuses(member1Cluster.ctx, member1Cluster.client,
+			types.NamespacedName{Namespace: ns, Name: isvcName + "-" + string(v1beta1.EngineComponent)})
+		if err != nil {
 			return false
 		}
-		for _, is := range ir.Status.InstanceStatuses {
+		for _, is := range rows {
 			if is.Admitted {
 				return true
 			}

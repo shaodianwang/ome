@@ -109,9 +109,10 @@ var _ = ginkgo.Describe("Runtime-owned runner shape", ginkgo.Ordered, func() {
 			if ir.Spec.Lifecycle.UpdateStrategy != nil {
 				g.Expect(ir.Spec.Lifecycle.UpdateStrategy.Type).To(Equal(v1beta1.UpdateStrategySurgeThenDrain))
 			}
-			g.Expect(ir.Status.InstanceStatuses).To(HaveLen(1))
-			if len(ir.Status.InstanceStatuses) == 1 {
-				status := ir.Status.InstanceStatuses[0]
+			rows := decodedInstanceStatuses(g, ir)
+			g.Expect(rows).To(HaveLen(1))
+			if len(rows) == 1 {
+				status := rows[0]
 				g.Expect(status.Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 				g.Expect(status.PodCount).To(Equal(int32(3)))
 				g.Expect(status.ReadyPodCount).To(BeZero())

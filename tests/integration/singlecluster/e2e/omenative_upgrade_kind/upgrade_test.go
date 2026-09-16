@@ -38,12 +38,12 @@ var _ = ginkgo.Describe("OMENative operator-upgrade identity stability (deployed
 
 		ginkgo.By("waiting for both fixtures to become Ready under the PREVIOUS manager version")
 		Eventually(func(g Gomega) {
-			single := freshIR(g, singleName, v1beta1.EngineComponent).Status.InstanceStatuses
+			single := decodedInstanceStatuses(g, freshIR(g, singleName, v1beta1.EngineComponent))
 			g.Expect(single).To(HaveLen(1))
 			g.Expect(single[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 			g.Expect(snapshotPods(g, singleName)).To(HaveLen(1))
 
-			gang := freshIR(g, gangName, v1beta1.EngineComponent).Status.InstanceStatuses
+			gang := decodedInstanceStatuses(g, freshIR(g, gangName, v1beta1.EngineComponent))
 			g.Expect(gang).To(HaveLen(1))
 			g.Expect(gang[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 			g.Expect(snapshotPods(g, gangName)).To(HaveLen(2), "the leader+worker gang must materialize two pods")
@@ -104,14 +104,16 @@ var _ = ginkgo.Describe("OMENative operator-upgrade identity stability (deployed
 			singleIR := freshIR(g, singleName, v1beta1.EngineComponent)
 			g.Expect(revisionOf(singleIR)).To(Equal(singleRevBefore),
 				"the single-pod engine's revision lineage must not move on an upgrade with no spec change")
-			g.Expect(singleIR.Status.InstanceStatuses).To(HaveLen(1))
-			g.Expect(singleIR.Status.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			singleRows := decodedInstanceStatuses(g, singleIR)
+			g.Expect(singleRows).To(HaveLen(1))
+			g.Expect(singleRows[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 
 			gangIR := freshIR(g, gangName, v1beta1.EngineComponent)
 			g.Expect(revisionOf(gangIR)).To(Equal(gangRevBefore),
 				"the gang engine's revision lineage must not move on an upgrade with no spec change")
-			g.Expect(gangIR.Status.InstanceStatuses).To(HaveLen(1))
-			g.Expect(gangIR.Status.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			gangRows := decodedInstanceStatuses(g, gangIR)
+			g.Expect(gangRows).To(HaveLen(1))
+			g.Expect(gangRows[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 
 			g.Expect(mergeCRs(snapshotControllerRevisions(g, singleName), snapshotControllerRevisions(g, gangName))).To(Equal(crsBefore),
 				"the upgrade must mint zero new ControllerRevisions and must not delete/recreate an existing one")

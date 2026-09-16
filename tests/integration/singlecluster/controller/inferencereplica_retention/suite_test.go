@@ -20,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/tests/integration/components"
 	"github.com/ome-projects/ome/tests/integration/framework"
@@ -64,9 +65,10 @@ var _ = ginkgo.BeforeSuite(func() {
 			Namespace: constants.OMENamespace,
 		},
 		Data: map[string]string{
-			"lifecycle": fmt.Sprintf(
+			controllerconfig.LifecycleConfigName: fmt.Sprintf(
 				`{"scaleUpPodBatchSize":100,"scaleDownPodBatchSize":100,"revisionHistoryLimit":%d}`,
 				configuredRetentionLimit),
+			controllerconfig.OMENativeStatusConfigName: util.OMENativeStatusConfigJSON(),
 		},
 	})).To(gomega.Succeed())
 

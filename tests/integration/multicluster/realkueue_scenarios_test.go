@@ -14,6 +14,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/placement"
 	ometesting "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 	"github.com/ome-projects/ome/tests/integration/framework"
+	"github.com/ome-projects/ome/tests/integration/util"
 )
 
 // These specs (S1–S7) drive the control-plane → member placement race end to end
@@ -216,13 +217,12 @@ var _ = ginkgo.Describe("Real-Kueue placement scenarios", ginkgo.Ordered, func()
 		gomega.Eventually(func(g gomega.Gomega) {
 			// The authoritative per-instance status now lives on the component's
 			// InferenceReplica (<isvcName>-engine), not the ISVC's LifecycleStatus.
-			ir := &v1beta1.InferenceReplica{}
-			g.Expect(member2Cluster.client.Get(member2Cluster.ctx,
-				types.NamespacedName{Namespace: isvcNS, Name: isvcName + "-" + string(v1beta1.EngineComponent)}, ir)).
-				To(gomega.Succeed(), "engine InferenceReplica status must be written for the gated instance")
-			g.Expect(ir.Status.InstanceStatuses).NotTo(gomega.BeEmpty(),
+			rows, err := util.GetInstanceStatuses(member2Cluster.ctx, member2Cluster.client,
+				types.NamespacedName{Namespace: isvcNS, Name: isvcName + "-" + string(v1beta1.EngineComponent)})
+			g.Expect(err).NotTo(gomega.HaveOccurred(), "engine InferenceReplica status must be written for the gated instance")
+			g.Expect(rows).NotTo(gomega.BeEmpty(),
 				"a gated instance must still record an InstanceStatus (the null-deadline write path)")
-			for _, is := range ir.Status.InstanceStatuses {
+			for _, is := range rows {
 				g.Expect(is.Admitted).To(gomega.BeFalse(), "member2's instance must stay un-admitted under zero quota")
 			}
 		}, eventuallyTimeout, eventuallyPoll).Should(gomega.Succeed())

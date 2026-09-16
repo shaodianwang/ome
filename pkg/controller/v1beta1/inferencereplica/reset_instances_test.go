@@ -27,6 +27,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
@@ -52,11 +53,12 @@ func newResetFixture(t *testing.T, ir *v1beta1.InferenceReplica, pods []*corev1.
 	c := b.Build()
 	rec := record.NewFakeRecorder(16)
 	r := &Reconciler{
-		Client:       c,
-		APIReader:    c,
-		Log:          logf.Log.WithName("test"),
-		Recorder:     rec,
-		Expectations: workload.NewExpectations(),
+		Client:               c,
+		APIReader:            c,
+		Log:                  logf.Log.WithName("test"),
+		Recorder:             rec,
+		Expectations:         workload.NewExpectations(),
+		InstanceStatusTarget: irstatus.EncodingDenseV1,
 	}
 	fresh := &v1beta1.InferenceReplica{}
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(ir), fresh); err != nil {

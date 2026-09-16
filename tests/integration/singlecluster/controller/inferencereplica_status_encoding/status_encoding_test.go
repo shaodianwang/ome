@@ -502,6 +502,7 @@ func newReconciler(writer client.Client, recorder record.EventRecorder) *inferen
 		Log:                   ctrl.Log.WithName("ir-status-encoding"),
 		Recorder:              recorder,
 		InstanceStatusDecoder: irstatus.NewDecoder(decodeLimit),
+		InstanceStatusTarget:  irstatus.EncodingDenseV1,
 	}
 }
 

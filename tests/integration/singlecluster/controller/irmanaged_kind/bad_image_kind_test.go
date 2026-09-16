@@ -79,8 +79,9 @@ var _ = ginkgo.Describe("IR-managed OMENative bad-image failure", ginkgo.Ordered
 		Eventually(func(g Gomega) {
 			ir, ok := engineIR(ns.Name, name)
 			g.Expect(ok).To(BeTrue(), "engine IR must exist after the bump")
-			g.Expect(ir.Status.InstanceStatuses).To(HaveLen(1))
-			g.Expect(ir.Status.InstanceStatuses[0].Phase).
+			rows := decodedInstanceStatuses(g, ir)
+			g.Expect(rows).To(HaveLen(1))
+			g.Expect(rows[0].Phase).
 				To(Equal(v1beta1.OMENativeInstanceFailed),
 					"IR aggregator must escalate Instance to Phase=Failed when surge pod stuck in ImagePullBackOff past grace")
 		}).WithTimeout(3 * time.Minute).WithPolling(kindPollInterval).Should(Succeed())
@@ -92,8 +93,9 @@ var _ = ginkgo.Describe("IR-managed OMENative bad-image failure", ginkgo.Ordered
 		Eventually(func(g Gomega) {
 			ir, ok := engineIR(ns.Name, name)
 			g.Expect(ok).To(BeTrue())
-			g.Expect(ir.Status.InstanceStatuses).To(HaveLen(1))
-			g.Expect(ir.Status.InstanceStatuses[0].PodCount).To(BeNumerically(">=", int32(1)),
+			rows := decodedInstanceStatuses(g, ir)
+			g.Expect(rows).To(HaveLen(1))
+			g.Expect(rows[0].PodCount).To(BeNumerically(">=", int32(1)),
 				"v1 pod (and likely the wedged surge pod) must still be present — no auto-rollback")
 		}).WithTimeout(kindShortTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})

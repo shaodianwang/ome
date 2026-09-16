@@ -82,7 +82,7 @@ func SetupInferenceService(ctx context.Context, mgr ctrl.Manager, opts ...Infere
 		translator = tr
 	}
 	trafficReconciler := traffic.NewReconciler(mgr.GetClient(), mgr.GetScheme(), translator)
-	decoder, err := InstanceStatusDecoderFromConfig(ctx, clientset)
+	decoder, err := InstanceStatusDecoderFromConfig(clientset)
 	if err != nil {
 		return fmt.Errorf("SetupInferenceService: load status representation settings: %w", err)
 	}

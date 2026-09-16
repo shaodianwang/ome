@@ -67,6 +67,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/traffic"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/traffic/translators"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/tests/integration/util"
@@ -461,6 +462,10 @@ func startManager(ctx context.Context, restCfg *rest.Config, rec *recorder.Recor
 	if err != nil {
 		return nil, fmt.Errorf("loading lifecycle scale settings: %w", err)
 	}
+	statusConfig, err := controllerconfig.NewOMENativeStatusConfig(clientset)
+	if err != nil {
+		return nil, fmt.Errorf("loading omenativeStatus configuration: %w", err)
+	}
 
 	// InferenceReplica reconciler — the pod lifecycle controller, the
 	// subject the OMENative harness measures. Constructed directly (not via
@@ -472,6 +477,8 @@ func startManager(ctx context.Context, restCfg *rest.Config, rec *recorder.Recor
 		Clientset:                clientset,
 		Log:                      ctrl.Log.WithName("InferenceReplica"),
 		APIReader:                countingReader,
+		InstanceStatusDecoder:    irstatus.NewDecoder(statusConfig.DecodeBound()),
+		InstanceStatusTarget:     statusConfig.InstanceStatusEncoding,
 		Recorder:                 mgr.GetEventRecorderFor("InferenceReplica"),
 		Expectations:             workload.NewExpectations(),
 		MaxConcurrentReconciles:  *irConcurrency,
@@ -511,8 +518,13 @@ func setupInferenceService(mgr ctrl.Manager, countingClient client.Client) error
 	translator := traffic.Translator(translators.NewNoop())
 	trafficReconciler := traffic.NewReconciler(countingClient, mgr.GetScheme(), translator)
 
+	statusConfig, err := controllerconfig.NewOMENativeStatusConfig(clientset)
+	if err != nil {
+		return fmt.Errorf("load omenativeStatus configuration: %w", err)
+	}
 	r := &v1beta1isvc.InferenceServiceReconciler{
 		Client:                  countingClient,
+		InstanceStatusDecoder:   irstatus.NewDecoder(statusConfig.DecodeBound()),
 		Clientset:               clientset,
 		Log:                     ctrl.Log.WithName("InferenceService"),
 		Scheme:                  mgr.GetScheme(),

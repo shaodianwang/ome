@@ -147,6 +147,11 @@ func startControlPlane(ctx context.Context, name string) cluster {
 // exists, because the WorkloadCluster reconciler connects to them on its first
 // pass.
 func startControlPlaneManager(c *cluster) {
+	// The control plane carries the same inferenceservice-config the manager
+	// binary requires: placement decodes member InferenceReplica rows under
+	// its omenativeStatus bound.
+	gomega.Expect(util.SeedDefaultConfigMaps(c.ctx, c.client)).To(gomega.Succeed(), "seed control-plane inferenceservice-config")
+
 	var cm *components.ClusterManager
 	mgr, stop, err := kindutil.StartManager(c.ctx, c.cfg, kindutil.BaseScheme(), func(setupCtx context.Context, mgr ctrl.Manager) error {
 		m, err := components.SetupWorkloadCluster(setupCtx, mgr,

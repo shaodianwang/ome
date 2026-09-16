@@ -19,6 +19,7 @@ import (
 	v1beta1testing "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 	"github.com/ome-projects/ome/tests/integration/kindfix"
 	"github.com/ome-projects/ome/tests/integration/kindutil"
+	"github.com/ome-projects/ome/tests/integration/util"
 )
 
 // irFixture bundles the cluster-scoped CBM + CSR and the namespaced
@@ -150,6 +151,15 @@ func engineIR(namespace, isvcName string) (*v1beta1.InferenceReplica, bool) {
 	return ir, true
 }
 
+// decodedInstanceStatuses returns the logical per-instance rows of a fetched
+// InferenceReplica, whichever representation the stored object carries.
+// Fails g when the stored representation does not decode.
+func decodedInstanceStatuses(g gomega.Gomega, ir *v1beta1.InferenceReplica) []v1beta1.OMENativeInstanceStatus {
+	rows, err := util.DecodedInstanceStatuses(ir)
+	g.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred(), "decode instance statuses of InferenceReplica %s/%s", ir.Namespace, ir.Name)
+	return rows
+}
+
 // engineOMENative returns the ISVC's engine OMENative lifecycle status,
 // or nil when not yet populated.
 func engineOMENative(isvc *v1beta1.InferenceService) *v1beta1.LifecycleStatus {
@@ -213,7 +223,11 @@ func dumpDiag(tick int, ns, isvcName string) {
 			ir.Name, ir.Generation, s.ObservedGeneration, s.Replicas, s.ReadyReplicas, s.UpdatedReplicas,
 			s.UpdatedReadyReplicas, s.ServingReplicas, s.AvailableReplicas, s.CurrentRevision, s.UpdateRevision)
 		fmt.Fprintf(w, "    IR Ready cond: %s\n", metaReadyCond(s.Conditions))
-		for _, is := range s.InstanceStatuses {
+		rows, err := util.DecodedInstanceStatuses(ir)
+		if err != nil {
+			fmt.Fprintf(w, "    instance statuses: DECODE ERR %v\n", err)
+		}
+		for _, is := range rows {
 			op := "nil"
 			if is.Operation != nil {
 				op = fmt.Sprintf("{type=%s step=%s target=%s}", is.Operation.Type, is.Operation.Step, is.Operation.TargetRevision)

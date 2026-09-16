@@ -76,8 +76,9 @@ var _ = ginkgo.Describe("InferenceReplica pause circuit breaker", ginkgo.Ordered
 			g.Expect(listOMENativePods(g, ns.Name, isvcName)).To(BeEmpty())
 			ir := freshInferenceReplica(g, ns.Name, isvcName, v1beta1.EngineComponent)
 			g.Expect(ir.Spec.Paused).To(BeTrue())
-			g.Expect(ir.Status.InstanceStatuses).To(HaveLen(1))
-			g.Expect(ir.Status.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstancePending),
+			rows := decodedInstanceStatuses(g, ir)
+			g.Expect(rows).To(HaveLen(1))
+			g.Expect(rows[0].Phase).To(Equal(v1beta1.OMENativeInstancePending),
 				"the demotion must hold for the whole paused window")
 		}, 2*workloadops.CreateRequeueInterval, kindPollInterval).Should(Succeed())
 

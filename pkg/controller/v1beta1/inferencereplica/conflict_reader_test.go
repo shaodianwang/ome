@@ -10,6 +10,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 )
 
@@ -42,10 +43,11 @@ func TestRetryClosuresReReadThroughLiveReader(t *testing.T) {
 		live := &countingReader{Reader: fake.NewClientBuilder().WithScheme(scheme).
 			WithObjects(ir).WithStatusSubresource(&v1beta1.InferenceReplica{}).Build()}
 		return &Reconciler{
-			Client:       cached,
-			APIReader:    live,
-			Log:          ctrl.Log.WithName("test"),
-			Expectations: workload.NewExpectations(),
+			Client:               cached,
+			APIReader:            live,
+			Log:                  ctrl.Log.WithName("test"),
+			Expectations:         workload.NewExpectations(),
+			InstanceStatusTarget: irstatus.EncodingDenseV1,
 		}, live, ir
 	}
 

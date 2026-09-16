@@ -34,12 +34,15 @@ import (
 	zaplog "go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/placement"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workloadcluster"
 	"github.com/ome-projects/ome/tests/integration/components"
+	"github.com/ome-projects/ome/tests/integration/util"
 	"github.com/ome-projects/ome/tests/perf/internal/opcount"
 	"github.com/ome-projects/ome/tests/perf/multicluster/runner/admitter"
 	"github.com/ome-projects/ome/tests/perf/multicluster/runner/clusters"
@@ -305,8 +308,27 @@ func startControlPlane(ctx context.Context, topo *clusters.Topology, cfg *config
 		// Placement Reconciler, wired directly. Local (control-plane) client
 		// op-counted into localCounts; the per-cluster remote clients op-counted
 		// into remoteCounts via the counting ClusterClients wrapper.
+		// The control plane carries the same inferenceservice-config the manager
+		// binary requires; placement decodes member rows under its bound. The
+		// manager cache is not started yet, so the seed uses a direct client.
+		directClient, err := client.New(mgr.GetConfig(), client.Options{Scheme: mgr.GetScheme()})
+		if err != nil {
+			return fmt.Errorf("build direct client: %w", err)
+		}
+		if err := util.SeedDefaultConfigMaps(setupCtx, directClient); err != nil {
+			return fmt.Errorf("seed inferenceservice-config: %w", err)
+		}
+		clientset, err := kubernetes.NewForConfig(mgr.GetConfig())
+		if err != nil {
+			return fmt.Errorf("build clientset: %w", err)
+		}
+		instanceStatusDecoder, err := components.InstanceStatusDecoderFromConfig(clientset)
+		if err != nil {
+			return fmt.Errorf("load omenativeStatus configuration: %w", err)
+		}
 		r := &placement.Reconciler{
 			Client:                  opcount.NewClient(mgr.GetClient(), localCounts),
+			InstanceStatusDecoder:   instanceStatusDecoder,
 			Scheme:                  mgr.GetScheme(),
 			Log:                     ctrl.Log.WithName("Placement"),
 			Clusters:                countingclusters.New(clusterMgr, remoteCounts),

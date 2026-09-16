@@ -74,7 +74,7 @@ var _ = ginkgo.Describe("permutation — multi-pod InPlaceIfPossible falls back 
 				"engine CurrentRevision must be promoted before the bump")
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 		ir := freshInferenceReplica(Default, ns.Name, "perm-mp-ip", v1beta1.EngineComponent)
-		v1Incarnation := ir.Status.InstanceStatuses[0].Incarnation
+		v1Incarnation := decodedInstanceStatuses(Default, ir)[0].Incarnation
 
 		// Bump engine image. Multi-pod reads Leader.PodSpec +
 		// Worker.PodSpec (engine.go:339-348) — bump BOTH so the gang

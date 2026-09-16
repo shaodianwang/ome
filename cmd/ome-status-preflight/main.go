@@ -1,7 +1,10 @@
-// Command ome-status-preflight is the read-only operator check that runs
-// before and after an InferenceReplica status representation transition. It
-// reads every cluster named in an inventory file and reports go or no-go; it
-// never writes to a cluster. See docs/omenative-status-representation.md.
+// Command ome-status-preflight is the operator tooling around an
+// InferenceReplica status representation transition. Its root command is the
+// read-only go/no-go check that runs before and after a transition: it reads
+// every cluster named in an inventory file and never writes. Its repair
+// subcommand is the explicit break-glass writer for one object's stored
+// per-Instance representation, dry-run unless --apply is given. See
+// docs/omenative-status-representation.md.
 package main
 
 import (
@@ -17,6 +20,7 @@ import (
 	// a context using one of them fails to authenticate at all.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus/statusrepair"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus/transitionpreflight"
 )
 
@@ -28,11 +32,17 @@ func main() {
 	defer stop()
 
 	cmd := transitionpreflight.NewCommand(os.Stdout, os.Stderr)
+	cmd.AddCommand(statusrepair.NewCommand(os.Stdout, os.Stderr))
 	if err := cmd.ExecuteContext(ctx); err != nil {
-		if errors.Is(err, transitionpreflight.ErrNoGo) {
+		switch {
+		case errors.Is(err, transitionpreflight.ErrNoGo):
 			os.Exit(1)
+		case statusrepair.IsRefusal(err):
+			fmt.Fprintf(os.Stderr, "refused: %v\n", err)
+			os.Exit(1)
+		default:
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(2)
 		}
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(2)
 	}
 }

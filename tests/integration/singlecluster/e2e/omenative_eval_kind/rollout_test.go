@@ -137,9 +137,11 @@ var _ = ginkgo.Describe("rollout — SurgeThenDrain holds the surge budget", fun
 			g.Expect(ir.Status.ServingReplicas).To(Equal(int32(replicas)))
 			g.Expect(ir.Status.UpdatedReplicas).To(Equal(int32(replicas)))
 			g.Expect(ir.Status.UpdatedReadyReplicas).To(Equal(int32(replicas)))
-			g.Expect(ir.Status.InstanceStatuses).To(HaveLen(replicas))
+			rows, err := util.DecodedInstanceStatuses(&ir)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(rows).To(HaveLen(replicas))
 			instanceIndexes := make([]int32, 0, replicas)
-			for _, status := range ir.Status.InstanceStatuses {
+			for _, status := range rows {
 				instanceIndexes = append(instanceIndexes, status.Index)
 				g.Expect(status.Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 				g.Expect(status.RunningRevision).To(Equal(lifecycle.CurrentRevision))

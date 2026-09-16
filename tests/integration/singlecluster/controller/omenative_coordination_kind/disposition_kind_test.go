@@ -182,9 +182,10 @@ var _ = ginkgo.Describe("OMENative deadline disposition holds workload-caused fa
 				"the fixed image must produce a NEW target revision")
 			g.Expect(ir.Status.CurrentRevision).To(Equal(ir.Status.UpdateRevision),
 				"rollout must converge on the corrected revision")
-			g.Expect(ir.Status.InstanceStatuses).To(HaveLen(1))
-			g.Expect(ir.Status.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
-			g.Expect(ir.Status.InstanceStatuses[0].RunningRevision).To(Equal(ir.Status.UpdateRevision))
+			rows := decodedInstanceStatuses(g, ir)
+			g.Expect(rows).To(HaveLen(1))
+			g.Expect(rows[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(rows[0].RunningRevision).To(Equal(ir.Status.UpdateRevision))
 			g.Expect(findRetryBlock(ir.Status.RetryBlocks, ir.Status.UpdateRevision)).To(BeNil(),
 				"the corrected revision must carry no RetryBlock")
 			g.Expect(autoRecoverEntries(loadLedger(g, ns.Name, isvcName), "engine")).To(BeEmpty(),

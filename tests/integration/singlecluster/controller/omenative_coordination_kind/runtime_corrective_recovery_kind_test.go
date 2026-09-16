@@ -138,8 +138,9 @@ var _ = ginkgo.Describe("behavior - runtime corrective roll-forward recovery", g
 	ginkgo.It("converges Ready on the runtime-supplied image", func() {
 		Eventually(func(g Gomega) {
 			cur := freshInferenceReplica(g, ns.Name, name, v1beta1.EngineComponent)
-			g.Expect(cur.Status.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cur.Status.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			rows := decodedInstanceStatuses(g, cur)
+			g.Expect(rows).To(HaveLen(1))
+			g.Expect(rows[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 			g.Expect(cur.Status.CurrentRevision).NotTo(BeEmpty())
 			g.Expect(enginePodsWithImageIn(g, ns.Name, name, goodImage)).To(HaveLen(1),
 				"the engine pod must run the runtime-supplied image")
@@ -181,9 +182,10 @@ var _ = ginkgo.Describe("behavior - runtime corrective roll-forward recovery", g
 			g.Expect(cur.Status.UpdateRevision).NotTo(Equal(v1Rev))
 			g.Expect(cur.Status.CurrentRevision).To(Equal(cur.Status.UpdateRevision),
 				"rollout must converge on the corrective revision")
-			g.Expect(cur.Status.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cur.Status.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
-			g.Expect(cur.Status.InstanceStatuses[0].RunningRevision).To(Equal(cur.Status.UpdateRevision))
+			rows := decodedInstanceStatuses(g, cur)
+			g.Expect(rows).To(HaveLen(1))
+			g.Expect(rows[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(rows[0].RunningRevision).To(Equal(cur.Status.UpdateRevision))
 			g.Expect(enginePodsWithImageIn(g, ns.Name, name, badImage)).To(BeEmpty(),
 				"dead surge wreckage must be cleaned up")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
@@ -232,8 +234,9 @@ var _ = ginkgo.Describe("behavior - runtime corrective roll-back recovery", gink
 	ginkgo.It("converges Ready then holds the bad runtime revision", func() {
 		Eventually(func(g Gomega) {
 			cur := freshInferenceReplica(g, ns.Name, name, v1beta1.EngineComponent)
-			g.Expect(cur.Status.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cur.Status.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			rows := decodedInstanceStatuses(g, cur)
+			g.Expect(rows).To(HaveLen(1))
+			g.Expect(rows[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 			g.Expect(cur.Status.CurrentRevision).NotTo(BeEmpty())
 			v1Rev = cur.Status.CurrentRevision
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
@@ -271,8 +274,9 @@ var _ = ginkgo.Describe("behavior - runtime corrective roll-back recovery", gink
 			cur := freshInferenceReplica(g, ns.Name, name, v1beta1.EngineComponent)
 			g.Expect(cur.Status.CurrentRevision).To(Equal(cur.Status.UpdateRevision),
 				"the reverted target must reconcile to a converged rollout")
-			g.Expect(cur.Status.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cur.Status.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady),
+			rows := decodedInstanceStatuses(g, cur)
+			g.Expect(rows).To(HaveLen(1))
+			g.Expect(rows[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady),
 				"the instance must leave Failed after the revert")
 			g.Expect(enginePodsWithImageIn(g, ns.Name, name, badImage)).To(BeEmpty(),
 				"the dead surge pod must be deleted even though no update is needed")
@@ -285,8 +289,9 @@ var _ = ginkgo.Describe("behavior - runtime corrective roll-back recovery", gink
 		// No further churn: the recovered state is stable.
 		Consistently(func(g Gomega) {
 			cur := freshInferenceReplica(g, ns.Name, name, v1beta1.EngineComponent)
-			g.Expect(cur.Status.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cur.Status.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			rows := decodedInstanceStatuses(g, cur)
+			g.Expect(rows).To(HaveLen(1))
+			g.Expect(rows[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 		}).WithTimeout(15 * time.Second).WithPolling(500 * time.Millisecond).Should(Succeed())
 	})
 })
@@ -339,8 +344,9 @@ var _ = ginkgo.Describe("behavior - runtime corrective gang roll-back recovery",
 	ginkgo.It("converges the gang Ready on the runtime-supplied image", func() {
 		Eventually(func(g Gomega) {
 			cur := freshInferenceReplica(g, ns.Name, name, v1beta1.EngineComponent)
-			g.Expect(cur.Status.InstanceStatuses).To(HaveLen(1))
-			g.Expect(cur.Status.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			rows := decodedInstanceStatuses(g, cur)
+			g.Expect(rows).To(HaveLen(1))
+			g.Expect(rows[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 			g.Expect(cur.Status.CurrentRevision).NotTo(BeEmpty())
 			g.Expect(enginePodsWithImageIn(g, ns.Name, name, goodImage)).To(HaveLen(2),
 				"leader + worker must run the runtime-supplied image")
@@ -380,9 +386,10 @@ var _ = ginkgo.Describe("behavior - runtime corrective gang roll-back recovery",
 			cur := freshInferenceReplica(g, ns.Name, name, v1beta1.EngineComponent)
 			g.Expect(cur.Status.CurrentRevision).To(Equal(cur.Status.UpdateRevision),
 				"the reverted target must reconcile to a converged rollout")
-			g.Expect(cur.Status.InstanceStatuses).To(HaveLen(1),
+			rows := decodedInstanceStatuses(g, cur)
+			g.Expect(rows).To(HaveLen(1),
 				"the gang surge-target marker must be cleaned up, not leaked as a permanent Failed entry")
-			g.Expect(cur.Status.InstanceStatuses[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
+			g.Expect(rows[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 			g.Expect(enginePodsWithImageIn(g, ns.Name, name, badImage)).To(BeEmpty(),
 				"the crashed replacement gang's pods must be deleted")
 			g.Expect(enginePodsWithImageIn(g, ns.Name, name, goodImage)).To(HaveLen(2),

@@ -66,9 +66,10 @@ The shape that reached that budget in practice was **not** the healthy uniform
 one. After a whole-cluster power loss, one IR with 4,000 single-Pod Instances
 settled at 2,812 Ready, 814 Restarting with an in-flight Restart operation, and
 374 Failed with a preserved Restart operation; every one of the 4,000 rows
-carried a `lastFailure` record whose message was about 140 bytes—a
+carried a `lastFailure` record of about 130 bytes as stored—a
 `DeadlineExceeded: Restart/Drain exceeded InstanceReadyTimeout` message or a
-kubelet reason—and the rows split 3,999/1 across two revisions. In compact
+kubelet reason, plus the reason and time—and the rows split 3,999/1 across two
+revisions. In compact
 JSON, the whole object measured 1,572,914 bytes against etcd's default
 1,572,864-byte request limit; the status alone was 1,554,415 bytes, of which
 `lastFailure` records were 523,539 and `operation` records 341,575. In that
@@ -567,17 +568,19 @@ catalog; tests enumerate that catalog, record its maximum message length, and
 reject dynamic payload suffixes.
 
 The checked-in operational runbook includes an operator-side, non-resident
-repair helper. An operator supplies a complete known-good DenseV1 or
-ColumnarV2 Instance representation obtained from a trusted backup or
-investigation. Through the repair-only adapter entry point, the helper performs
-an uncached live GET for resourceVersion and unrelated status, does not decode
-the corrupt Instance payload, validates and decodes the replacement
-independently, then runs those trusted logical rows through the configured
-strict-smaller selector. It replaces only the Instance representation in one
-status update with a resourceVersion precondition. It never clears rows, derives
-missing durable history from Pods, or partially accepts a corrupt payload. Tests
-cover stale resourceVersion, invalid replacement, both input encodings and the
-selected output, preservation of unrelated status, and resumption of the same
+repair helper. An operator supplies a complete known-good DenseV1 Instance
+representation obtained from a trusted backup or investigation; a ColumnarV2
+backup is decoded to rows first, so the helper accepts exactly one input shape
+and refuses a replacement that carries a marker or columns. Through the
+repair-only adapter entry point, the helper performs an uncached live GET for
+resourceVersion and unrelated status, does not decode the corrupt Instance
+payload, validates the replacement independently, then runs those trusted
+logical rows through the configured strict-smaller selector. It replaces only
+the Instance representation in one status update with a resourceVersion
+precondition. It never clears rows, derives missing durable history from Pods,
+or partially accepts a corrupt payload. Tests cover stale resourceVersion,
+invalid replacement (including a marker or columns), the selected output under
+each target, preservation of unrelated status, and resumption of the same
 logical decision after repair.
 
 ## Compatibility and Rollout
@@ -590,20 +593,22 @@ V2 adds a required target and a ColumnarV2 decode bound to
 ```yaml
 omenativeStatus:
   instanceStatusEncoding: ColumnarV2
-  maxDecodedInstances: <operator-set limit>
+  maxDecodedInstances: <profile ceiling; the chart ships 20000>
 ```
 
 `instanceStatusEncoding` accepts `DenseV1` or `ColumnarV2`. `DenseV1` writes the
-current list and is the downgrade target. `ColumnarV2` compares complete status
+current list and is the rollback target. `ColumnarV2` compares complete status
 candidates and writes columns only when they are strictly smaller; otherwise it
 writes DenseV1. This is a write target, not a third lifecycle policy.
 
-The chart renders `DenseV1` by default; merging or installing the v2-capable
-binary therefore cannot activate columns. The binary has no target-encoding
-default. Missing or unknown target values abort setup before controllers or
-webhooks register; unknown configuration fields, duplicate JSON fields, and
-trailing data are also rejected. Readiness alone is not treated as a
-reconciliation gate.
+The chart ships `ColumnarV2` with an explicit bound, so installing the chart
+activates columns: the manager rewrites each IR it reconciles as ColumnarV2
+when the columns are strictly smaller and leaves it dense otherwise. A fleet
+that cannot accept the raw API change yet pins `DenseV1` through the same
+chart value. The binary has no target-encoding default. Missing or unknown
+target values abort setup before controllers or webhooks register; unknown
+configuration fields, duplicate JSON fields, and trailing data are also
+rejected. Readiness alone is not treated as a reconciliation gate.
 
 Every v2-capable manager performs an OpenAPI v3 schema preflight before creating
 the controller manager or registering controllers and webhooks, even while its
@@ -616,37 +621,43 @@ standard discovery access grant only GET on the OpenAPI non-resource URLs.
 This makes the schema-first rollout an executable barrier rather than a runbook
 assumption.
 
-`maxDecodedInstances` has no binary or chart default. Any present value must be
-positive in either target mode, and ColumnarV2 requires it to be present. It may
-be absent while the target is DenseV1 and the authoritative pre-activation
-audit proves that no ColumnarV2 object exists. If a DenseV1-target manager
-unexpectedly observes columns without a bound, that IR fails closed before
-effects. Helm rendering rejects every present zero or negative value and
-ColumnarV2 without a value.
+`maxDecodedInstances` has no binary default; the chart ships an explicit value
+(`20000`, sized below). Any present value must be positive in either target
+mode, and ColumnarV2 requires it to be present. It may be absent while the
+target is DenseV1 and the authoritative pre-activation audit proves that no
+ColumnarV2 object exists. If a DenseV1-target manager unexpectedly observes
+columns without a bound, that IR fails closed before effects. Helm rendering
+rejects every present zero or negative value and ColumnarV2 without a value.
 
 A v2-capable manager loads these values once at process startup. Silently
 guessing either value would turn a missing rollout step into cluster-dependent
-behavior. Target changes stop every OME manager and status writer under the
-managed-fleet v2-reader barrier described below; approved v2-capable read-only
-consumers may remain. Bound changes stop every reader and writer because the
-bound controls whether an existing payload can be decoded. Ordinary rolling
-changes to either value are forbidden. While every reader and writer is stopped,
-the preflight may approve one new fleet-wide bound only after a non-expanding
-scan proves every stored ColumnarV2 cardinality fits it. Lowering below any
-object fails. Old- and new-bound processes never overlap.
+behavior. A target change to DenseV1 is the procedural rollback described
+below: flip the value, roll the same image, and wait for every conversion to
+finish before any older binary runs. A fleet with readers of the raw field
+outside the manager takes the stopped-fleet path instead; approved v2-capable
+read-only consumers may remain. Bound changes stop every reader and writer
+because the bound controls whether an existing payload can be decoded; an
+ordinary rolling change of the bound is forbidden. While every reader and
+writer is stopped, the preflight may approve one new fleet-wide bound only
+after a non-expanding scan proves every stored ColumnarV2 cardinality fits it.
+Lowering below any object fails. Old- and new-bound processes never overlap.
 
 The existing chart checksum identifies the rendered configuration and triggers
-the DenseV1 binary rollout. Operators must change this block only through the
+the manager rollout. Operators must change this block only through the
 versioned deployment path; an in-place ConfigMap edit is not an activation
 mechanism. The transition preflight checks the running image and configuration
-digests before the global stop and again after restart. This is operational
+digests before and after a stopped-fleet change. This is operational
 evidence, not a new manager-side epoch or status field.
 
 The limit is the deployment profile's supported ceiling for transient logical
 rows in one IR, including surge, migration, replacement, and retained terminal
 rows—not only desired replicas. The owner of each Helm or GitOps profile must
-choose and test a finite ceiling for that profile. A profile without such a
-ceiling cannot select ColumnarV2. The encoder checks the limit before writing:
+choose and test a finite ceiling for that profile; the chart's `20000` is four
+times the largest fixture this repository qualifies the codec against (the
+5,000-row ladder), which covers a full surge of that fixture with room for
+retained rows, but it is a starting point sized to fixtures, not a measured
+ceiling for any production profile. A profile without such a ceiling cannot
+select ColumnarV2. The encoder checks the limit before writing:
 an oversized DenseV1 candidate stays DenseV1, while a stored ColumnarV2 object
 above the limit fails closed. Every local and remote reader must receive the
 same bound before conversion. Operators must not lower or remove it until
@@ -689,84 +700,108 @@ therefore reads a ColumnarV2 object as an empty `instanceStatuses` list and can
 make a destructive decision before an API rejection protects the object. This
 applies to remote readers such as placement as well as the local IR writer.
 
-DenseV1 target mode is the pre-activation bridge. Existing and v2-capable
-managers may overlap only while every writer emits the current dense format:
+Activation is ordered, and the binary enforces the order rather than a
+runbook assuming it:
 
 1. Install the additive CRD schema for `instanceStatusEncoding` and the fully
    typed `instanceStatusColumns` in every served cluster; keep the DenseV1
-   schema.
-2. Install explicit `DenseV1` and `maxDecodedInstances` configuration for every
-   local and remote role that reads or writes IR status.
-3. Roll every reader and writer—including workload-cluster managers and
-   control-plane placement readers—to the approved v2 image digest. Old and new
-   processes may overlap in this step because every writer remains DenseV1.
-4. Freeze cluster/scope membership, reader/writer workload specifications,
-   autoscaling, and rollback automation. Delete or disable retained pre-v2
-   templates and update every launcher or rollback path to the approved v2
-   image. Run the preflight to prove the declared-inventory reader barrier,
-   compatible schemas, known-consumer signoff, and zero column payloads.
-5. Scale every OME manager and every other IR status writer in the managed fleet
-   to zero and stop every non-manager status-writer process. **All** OME
-   controllers hosted by those managers stop; matching `failurePolicy: Fail`
-   admission requests are rejected, and no OME healing or rollout proceeds.
-   Unmatched API operations and existing serving traffic continue. Approved
-   v2-capable read-only non-manager consumers may remain. The preflight must
-   observe zero managers and status writers before configuration changes.
-6. Keep OME manager Deployment replicas and any manager autoscalers pinned at
-   zero while applying the ColumnarV2 configuration and restart templates for
-   every stopped reader and writer. Serving ISVC/IR desired replicas and Pods
-   remain untouched. Run the stopped-state preflight again; only after every
-   restart path resolves to the approved v2 image, target, and bound may
-   operators restore manager replicas. The runbook and drill must prove that
-   manager Pods remain admissible after the fleet-wide OME control-plane outage.
-7. Initial informer population enqueues every IR and converts each eligible
-   object in one atomic status update. Run the inventory-wide preflight again,
-   then release the freeze.
+   schema. A manager that starts before the schema is served fails its
+   startup preflight and exits.
+2. Roll the schema-checking manager with the shipped block, `ColumnarV2` with
+   an explicit bound. The chart runs the manager with leader election, so the
+   Deployment rollout is a serial handoff: the outgoing leader keeps writing
+   what it wrote before it terminates, and the new leader converts each IR it
+   visits to ColumnarV2 when the columns are strictly smaller. Old and new
+   managers never write the same object concurrently.
+
+The first ColumnarV2 write is the commit point. From then on the procedural
+downgrade rule below is mandatory: the build that predates the representation
+union must never run against these objects again until every one is dense. In
+particular, a Deployment rollback to that build—an image rollback, or an
+autoscaler or GitOps re-sync of a retained old template—is exactly the
+destructive path, because that build reads every ColumnarV2 object as an IR
+with no Instances.
+
+Downgrade is procedural, not a fleet stop:
+
+1. Set the target to `DenseV1` and roll the **same** v2-capable image. The
+   manager converts every ColumnarV2 object it reconciles back to DenseV1 at
+   the start of that object's reconcile, with its logical rows unchanged and
+   no lifecycle effect on that pass.
+2. Wait for the conversions to finish. Two signals show completion: the
+   `ome_omenative_ir_status_conversions_total{from="columnar_v2",to="dense_v1"}`
+   counter stops rising once initial informer population has visited every
+   IR, and the transition preflight reports zero ColumnarV2 objects in every
+   managed scope. The preflight is the proof and the counter is the hint,
+   because only a complete paginated LIST can show that no ColumnarV2 object
+   remains.
+3. Only then roll the manager image back to a build without the schema.
+   Remove the additive CRD fields only in a later schema rollout.
+
+Any residual column, unreachable cluster, or failed page blocks step 3.
+DenseV1 re-expansion may receive the same size rejection that V2 avoids. In
+that case, restore the ColumnarV2 target and stay on a v2-capable binary. This
+proposal does not promise rollback when the old representation no longer fits.
+Accordingly, `disable-supported: false` means the OEP does not promise
+unconditional return to a DenseV1-only binary; successful reverse conversion
+is the required evidence for a particular fleet.
+
+The stopped-fleet transition remains the recommended path for a fleet with
+readers of the raw field outside the manager: a control-plane placement reader
+on an older build, scripts, exporters, or any client in the known-consumer
+inventory that indexes `instanceStatuses` directly. Leader election serializes
+only the manager's own handoff and says nothing about those readers. Such a
+fleet pins `DenseV1` through the chart value first, then:
+
+1. Rolls every reader and writer—including workload-cluster managers and
+   control-plane placement readers—to the approved v2 image digest. Old and
+   new processes may overlap in this step because every writer remains
+   DenseV1.
+2. Freezes cluster/scope membership, reader/writer workload specifications,
+   autoscaling, and rollback automation; deletes or disables retained pre-v2
+   templates and updates every launcher or rollback path to the approved v2
+   image; and runs the preflight to prove the declared-inventory reader
+   barrier, compatible schemas, known-consumer signoff, and zero column
+   payloads.
+3. Scales every OME manager and every other IR status writer in the managed
+   fleet to zero and stops every non-manager status-writer process. **All**
+   OME controllers hosted by those managers stop; matching
+   `failurePolicy: Fail` admission requests are rejected, and no OME healing
+   or rollout proceeds. Unmatched API operations and existing serving traffic
+   continue. Approved v2-capable read-only non-manager consumers may remain.
+   The preflight must observe zero managers and status writers before the
+   configuration changes.
+4. Applies the ColumnarV2 configuration and restart templates while manager
+   replicas and any manager autoscalers stay pinned at zero; serving ISVC/IR
+   desired replicas and Pods remain untouched. Re-runs the stopped-state
+   preflight and restores manager replicas only after every restart path
+   resolves to the approved v2 image, target, and bound. The runbook and drill
+   must prove that manager Pods remain admissible after the fleet-wide OME
+   control-plane outage.
+5. Lets initial informer population convert each eligible object in one
+   atomic status update, re-runs the inventory-wide preflight, and releases
+   the freeze.
 
 Any membership drift, unreachable cluster, failed page, remaining old process,
-or failed restart before step 6 restores replicas aborts safely on the DenseV1
-bridge. Starting the first ColumnarV2-target process is the activation commit
-point because it may immediately persist columns. A failure after that point
-keeps the freeze in place: stop every partially started writer, then either fix
-and resume the approved v2 ColumnarV2 fleet or start the v2 fleet in DenseV1
-target mode, reverse-convert every object, and prove global zero columns before
-any DenseV1-only binary starts. Here and below, “global” means every scope in
-the attested managed-fleet inventory. No binary can infer that an unaware
-reader is absent merely by reading an IR; the global stop is the compatibility
-barrier.
-The marker and payload still change atomically, so a crash leaves one complete
-representation.
+or failed restart before step 4 restores replicas aborts safely on the DenseV1
+bridge. A failure after the first ColumnarV2 write keeps the freeze in place:
+stop every partially started writer, then either fix and resume the approved
+ColumnarV2 fleet or restart the v2 fleet in DenseV1 target mode and prove
+global zero columns before any DenseV1-only binary starts. Here and above,
+“global” means every scope in the attested managed-fleet inventory. No binary
+can infer that an unaware reader is absent merely by reading an IR; for these
+fleets the global stop is the compatibility barrier. The marker and payload
+still change atomically, so a crash leaves one complete representation.
 
-Downgrade to an OEP-0007.4-compatible DenseV1-only binary reverses that process:
+Two writers with different targets must never run against the same objects:
+they would reverse and forward convert the same object indefinitely. The
+leader-elected rollout of one manager Deployment is not such an overlap; two
+Deployments, or a manager and an external writer, with different targets are.
 
-1. Freeze the same inventory, pin OME manager Deployment replicas and any
-   manager autoscalers at zero, globally stop the v2 fleet, and require a
-   stopped-state preflight. Serving ISVC/IR desired replicas and Pods remain
-   untouched.
-2. While the fleet remains stopped, apply DenseV1-target templates for the same
-   v2 image. Re-run the stopped-state preflight, then restore replicas.
-3. Let initial informer population rewrite every ColumnarV2 object, including
-   logical no-ops. Direct paginated LISTs must then prove zero markers and column
-   payloads in every managed scope.
-4. Stop the fleet again and require another stopped-state preflight. Apply every
-   DenseV1-only restart template while manager replicas remain zero, verify the
-   image and all-dense object set, then restore manager replicas.
-5. Reverify the all-dense fleet and release the freeze. Remove the additive CRD
-   fields only in a later schema rollout.
-
-Any unreachable cluster, failed page, residual column, reappearing ColumnarV2
-writer, or failed rewrite blocks downgrade. DenseV1 re-expansion may receive the
-same size rejection that V2 avoids. In that case, globally stop the failed
-Dense-target fleet and restore the last approved ColumnarV2 configuration; stay
-on a v2-capable binary. This proposal does not promise rollback when the old
-representation no longer fits. Accordingly, `disable-supported: false` means
-the OEP does not promise unconditional return to a DenseV1-only binary;
-successful reverse conversion is the required evidence for a particular fleet.
-
-Changing target encoding through an ordinary rolling update is forbidden:
-overlapping DenseV1-target and ColumnarV2-target writers can reverse and forward
-convert the same object indefinitely. Operators that cannot accept the complete
-OME control-plane pause remain on DenseV1.
+DenseV1 is retained as the rollback target. Its removal is a later milestone
+that first requires every consumer of the raw field, in this repository and in
+every fleet's known-consumer inventory, to move to the decoded view; until then
+the `DenseV1` target must remain selectable and qualified.
 
 ### Raw API contract
 
@@ -783,8 +818,10 @@ codec boundary. API comments are updated to describe the representation union.
 V2 provides no reconstructed status copy or new public diagnostic endpoint.
 Either would duplicate the O(N) rows this OEP removes. Any incompatible client
 in a manager fleet's visible IR scope blocks ColumnarV2 activation for that
-whole scope. Only physically disjoint reader/writer fleets with independent
-configuration may choose different targets. Otherwise the client must implement
+whole scope: because the chart ships ColumnarV2, such a fleet must pin
+`DenseV1` through the chart value until the client is moved. Only physically
+disjoint reader/writer fleets with independent configuration may choose
+different targets. Otherwise the client must implement
 the ColumnarV2 wire contract. Generated clients preserve the fields but do not
 decode them. Release notes treat this as an opt-in raw status API break, not as
 an invisible implementation detail.
@@ -969,13 +1006,14 @@ invariant has an injected failure and required evidence:
 
 | Area | Required evidence |
 | --- | --- |
-| Schema and config | Unmarked DenseV1 and valid ColumnarV2 decode; the full-schema OpenAPI preflight succeeds in both target modes; binary-first, forbidden discovery, old/minimal/incompatible schema, invalid union, missing target, and invalid bound fail closed; the chart renders DenseV1. |
+| Schema and config | Unmarked DenseV1 and valid ColumnarV2 decode; the full-schema OpenAPI preflight succeeds in both target modes; binary-first, forbidden discovery, old/minimal/incompatible schema, invalid union, missing target, and invalid bound fail closed; the chart renders ColumnarV2 with its explicit bound by default and DenseV1 when the value is overridden. |
 | Reader barrier | DenseV1-only and v2-capable managers may overlap only on DenseV1; any declared incompatible reader or stale restart template blocks activation, including a retained template that can resurrect the old binary. |
-| Target stop | A target change remains blocked until every declared manager and writer is stopped and every restart path has the approved image and configuration digests. |
+| Target stop | On the stopped-fleet path, a target change remains blocked until every declared manager and writer is stopped and every restart path has the approved image and configuration digests. |
 | Bound change | Rolling, missing, lowered, and undersized bounds fail; a stopped fleet accepts a reviewed bound only when every stored cardinality fits, with validated-backup repair as the alternative. |
 | Frozen apply | Membership or workload drift invalidates evidence; manager replicas remain zero through configuration, serving ISVC/IR Pods remain untouched, the admission outage is observed, and manager restart succeeds. |
 | Partial activation | Failure after the first column commit keeps old binaries stopped and proves both v2 resume and v2-driven reverse conversion; crashes before and after either conversion leave one complete representation. |
 | Downgrade | Direct paginated reads prove zero columns; 413, an unreachable cluster, a failed page, a residual object, or a reappearing ColumnarV2 writer blocks old-binary startup without changing the prior authoritative status. |
+| Procedural downgrade | Under a DenseV1 target every ColumnarV2 object converts on its first reconcile with no lifecycle effect on that pass; the conversions counter and the preflight both show completion; an unchanged object is never rewritten after it converges under either target; a previous-version binary started before completion is the destructive case the reader-barrier fixture proves. |
 
 The generated full CRD, chart copy, Go deepcopy/OpenAPI, and Rust client must
 match the artifact matrix above, while the regenerated minimal CRD must remain
@@ -1012,8 +1050,8 @@ the etcd request limit after a whole-cluster power loss:
 | 814 | Restarting | in-flight Restart `operation` plus `lastFailure` |
 | 374 | Failed | preserved Restart `operation` plus `lastFailure` |
 
-Every row carries a `lastFailure` record whose message is about 140 bytes, and
-the rows split 3,999/1 across two revisions. The measured DenseV1 reference is
+Every row carries a `lastFailure` record of about 130 bytes as stored, and the
+rows split 3,999/1 across two revisions. The measured DenseV1 reference is
 1,572,914 object bytes and 1,554,415 status bytes in compact JSON, with
 523,539 bytes of `lastFailure` and 341,575 bytes of `operation`. Fidelity is
 part of the fixture: with the row counts above, its DenseV1 complete request
@@ -1101,8 +1139,9 @@ DenseV1 decode baseline deserializes a complete dense API object and records its
 source encoding; the ColumnarV2 measurement deserializes a complete columnar
 object, validates it, and expands rows on that freshly fetched object.
 
-The chart-default DenseV1 path has a hard-fail before/after qualification step;
-an advisory small-workload performance lane is not evidence for this gate. A
+The DenseV1-target path, the rollback target, has a hard-fail before/after
+qualification step; an advisory small-workload performance lane is not evidence
+for this gate. A
 new runner builds the recorded main merge-base and capability-head
 manager images, then drives identical accepted 2,000- and 5,000-row DenseV1
 inputs through fresh managers on the same stable worker. The artifact records
@@ -1233,11 +1272,12 @@ one reviewable invariant and leaves the cluster in a valid state:
    OMENative scenario harness.
 6. The final capability PR enables config-controlled ColumnarV2 candidate
    selection at the existing writer boundary, adds the ColumnarV2 configuration
-   value, and adds the complete repair entry point. CI may select ColumnarV2
-   only in isolated qualification clusters. The exact head commit and image
-   digest must pass every Alpha gate before merge. The shipped chart remains
-   DenseV1; production activation occurs only through the stopped-fleet
-   transition.
+   value, and adds the repair entry point for a validated DenseV1 replacement.
+   The exact head commit and image digest must pass every Alpha gate before
+   merge. The shipped chart selects ColumnarV2 with an explicit bound;
+   activation follows the CRD-first order above, and the procedural downgrade
+   rule is the mandatory rollback mechanism, with the stopped-fleet transition
+   recommended for fleets with external readers of the raw field.
 
 A slice may be divided further when generated code, test infrastructure, or
 operational tooling would obscure its production change. No intermediate PR
@@ -1256,8 +1296,9 @@ dual-target KIND and harness runs, 2,000/5,000 size and performance gates, the
 `mass-failure` fixture gate (a selected request under the request limit, with
 its headroom measured and reported), real-apiserver faults, transition and
 repair tooling, consumer signoff, and both successful and 413-blocked downgrade
-drills. Passing Alpha permits a controlled canary activation; merge or install
-alone remains DenseV1.
+drills. Passing Alpha is the gate for shipping the ColumnarV2 chart default;
+the first fleet installed on it is the controlled canary, and a fleet that
+cannot yet accept the raw API change pins `DenseV1` through the chart value.
 
 **Beta** requires three consecutive authoritative main runs with no behavioral
 test retry, no codec errors, no representation oscillation, no added object
@@ -1314,10 +1355,12 @@ decode-limit default.
    status field, or endpoint would either restore O(N) persisted rows or create
    a second API and ownership contract solely to hide the opt-in raw API change.
 6. **Add a zero-control-plane-downtime `Preserve` mode.** Rejected for this
-   proposal: DenseV1 target mode safely bridges the binary rollout, and a
-   non-overlapping maintenance window prevents format oscillation with less
-   state and fewer rollback paths. Deployments that cannot accept the documented
-   OME control-plane outage remain on DenseV1.
+   proposal: the leader-elected manager rollout already serializes the
+   manager's own handoff, the procedural downgrade rule covers rollback, and
+   for fleets with external readers of the raw field an explicit `DenseV1`
+   bridge plus a non-overlapping maintenance window prevents format
+   oscillation with less state and fewer rollback paths than a third mode.
+   Deployments that cannot accept either path remain on DenseV1.
 
 ## Open Questions
 
