@@ -18,6 +18,9 @@ spec:
     maxReplicas: 2
     annotations: { ome.io/deploymentMode: OMENative }
   rollout:
+    # Two canary groups make no cross-group ordering promise; without this
+    # admission rejects the shape before the case under test is reached.
+    groupOrdering: Concurrent
     groups:
         # Independent units may each carry a run (see p317/p318), but two runs on
         # ONE unit would each believe they own its revision, step counter and

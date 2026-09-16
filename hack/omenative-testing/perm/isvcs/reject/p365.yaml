@@ -1,0 +1,38 @@
+# p365: REJECT two canary groups that never declared groupOrdering: Concurrent  mode=canary expect=reject reason=GroupOrderingNotHonored Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=5 ceil_r=3 topo=pd
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p365 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+  decoder:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+  rollout:
+    # The p317 shape with the declaration removed. groups[] promises that group
+    # N completes before N+1, and the engine enforces that only for a run of
+    # single-Component blueGreen groups — two canary units would run at the same
+    # time and the promise would be dropped on the floor. Rejecting is what
+    # keeps p317 honest: the ladders there run concurrently because the spec
+    # ASKED for concurrency, not because ordering was quietly unimplemented
+    # -> GroupOrderingNotHonored.
+    groups:
+        - components: [router]
+          canary:
+            steps:
+              - { capacity: "50%", traffic: 50, pause: {  } }
+              - { capacity: "100%", traffic: 100 }
+        - components: [engine, decoder]
+          canary:
+            steps:
+              - { capacity: "50%", traffic: 50, pause: { duration: "20s" } }
+              - { capacity: "100%", traffic: 100 }

@@ -11074,7 +11074,7 @@ func schema_pkg_apis_ome_v1beta1_RolloutSpec(ref common.ReferenceCallback) commo
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "RolloutSpec is the single rollout surface for an InferenceService: an ordered list of rollout groups. There is no coordination-vs-canary fork — sequencing is the list order, and canary is one progression a group may choose.",
+				Description: "RolloutSpec is the single rollout surface for an InferenceService: a list of rollout groups. There is no coordination-vs-canary fork — canary is one progression a group may choose, and whether list order sequences the groups is GroupOrdering.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"groups": {
@@ -11084,7 +11084,7 @@ func schema_pkg_apis_ome_v1beta1_RolloutSpec(ref common.ReferenceCallback) commo
 							},
 						},
 						SchemaProps: spec.SchemaProps{
-							Description: "Groups is the ORDERED list of rollout groups. Sequence is the list position: group N reaches completion before group N+1 begins. Components listed together in one group roll together (a coupled unit); Components not listed in any group roll independently (the default). To roll Components one-at-a-time, put each in its own group, in order — a group needs only its components; the progression may be omitted and defaults to blueGreen.\n\nCross-group sequencing is enforced only for a run of single-Component blueGreen groups (the classic one-at-a-time shape). Admission rejects any other multi-group list — a rollingUpdate, canary, or multi-Component group in an ordered list would run concurrently, and an ordering the engine does not enforce is rejected rather than accepted. The rejection applies on create and on any update that changes spec.rollout, so stored objects keep reconciling until their rollout is next edited.\n\nOnly meaningful for OMENative-managed Components.",
+							Description: "Groups is the ORDERED list of rollout groups. Sequence is the list position: group N reaches completion before group N+1 begins. Components listed together in one group roll together (a coupled unit); Components not listed in any group roll independently (the default). To roll Components one-at-a-time, put each in its own group, in order — a group needs only its components; the progression may be omitted and defaults to blueGreen.\n\nCross-group sequencing is enforced only for a run of single-Component blueGreen groups (the classic one-at-a-time shape). Under the default groupOrdering: Sequential, admission rejects any other multi-group list — a rollingUpdate, canary, or multi-Component group in an ordered list would run concurrently, and an ordering the engine does not enforce is rejected rather than accepted. The rejection applies on create and on any update that changes spec.rollout, so stored objects keep reconciling until their rollout is next edited. Set groupOrdering: Concurrent to declare that the groups are independent and the list order promises nothing.\n\nOnly meaningful for OMENative-managed Components.",
 							Type:        []string{"array"},
 							Items: &spec.SchemaOrArray{
 								Schema: &spec.Schema{
@@ -11094,6 +11094,13 @@ func schema_pkg_apis_ome_v1beta1_RolloutSpec(ref common.ReferenceCallback) commo
 									},
 								},
 							},
+						},
+					},
+					"groupOrdering": {
+						SchemaProps: spec.SchemaProps{
+							Description: "GroupOrdering declares what groups[] list order means. Sequential (the default) promises group N completes before group N+1 begins, and is admitted only for the shape that actually enforces it. Concurrent declares the groups independent: they roll at the same time on their disjoint Components, each with its own progression, gates, and rollback. Concurrent is what lets one InferenceService run, say, a router canary and an engine canary as unrelated rollouts.\n\nChanging this does not change how the engine executes a list it could not sequence — that was always concurrent. It changes whether such a list is an error or a declaration of intent.",
+							Type:        []string{"string"},
+							Format:      "",
 						},
 					},
 					"pairingProtocol": {

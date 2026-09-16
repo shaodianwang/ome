@@ -5,6 +5,7 @@ import (
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
@@ -73,7 +74,12 @@ var _ = ginkgo.Describe("behavior — per-unit canary runs", ginkgo.Ordered, fun
 		// would drag the router past its hold.
 		Eventually(func(g Gomega) {
 			cur := freshISVC(g, ns.Name, isvcName)
-			cur.Spec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{
+			// Concurrent is load-bearing, not decoration: two canary groups
+			// promise an order the engine never enforces, and admission
+			// rejects the shape without it. This suite runs the reconciler
+			// with no webhook, so the spec below would otherwise be one no
+			// real cluster would accept.
+			cur.Spec.Rollout = &v1beta1.RolloutSpec{GroupOrdering: ptr.To(v1beta1.RolloutGroupOrderingConcurrent), Groups: []v1beta1.RolloutGroup{
 				{
 					Components: []v1beta1.ComponentType{v1beta1.RouterComponent},
 					Canary: &v1beta1.GroupCanary{Steps: []v1beta1.RolloutGroupStep{

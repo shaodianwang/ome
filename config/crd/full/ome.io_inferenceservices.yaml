@@ -26829,6 +26829,11 @@ spec:
                   type: object
                 rollout:
                   properties:
+                    groupOrdering:
+                      enum:
+                        - Sequential
+                        - Concurrent
+                      type: string
                     groups:
                       items:
                         properties:

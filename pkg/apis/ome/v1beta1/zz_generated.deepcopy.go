@@ -4670,6 +4670,11 @@ func (in *RolloutSpec) DeepCopyInto(out *RolloutSpec) {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
+	if in.GroupOrdering != nil {
+		in, out := &in.GroupOrdering, &out.GroupOrdering
+		*out = new(RolloutGroupOrdering)
+		**out = **in
+	}
 	if in.PairingProtocol != nil {
 		in, out := &in.PairingProtocol, &out.PairingProtocol
 		*out = new(string)

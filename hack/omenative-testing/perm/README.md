@@ -345,9 +345,15 @@ header skips the watcher/rollout entirely:
 Current cases: canary group missing its unit entrypoint (p320 — `[decoder]`
 without the engine), soak on a canary group (p321), soak on a non-collapsing
 rollout (p322), maintainRatio on a canary group (p323), a canary group splitting
-a declared P/D pair (p329 — `[router, engine]`), and two canary groups driving
-the same unit (p364). Run them like any other case:
-`python3 batch.py --conc 4 p320-p323 p329 p364`.
+a declared P/D pair (p329 — `[router, engine]`), two canary groups driving
+the same unit (p364), and two canary groups that never declared
+`groupOrdering: Concurrent` (p365). Run them like any other case:
+`python3 batch.py --conc 4 p320-p323 p329 p364 p365`.
+
+p365 is the negative twin of p317/p318: those declare `Concurrent` and their
+units roll at the same time *because the spec asked for it*. Strip the
+declaration and the same shape is denied, so the concurrency in p317/p318 can
+never be mistaken for ordering that was quietly unimplemented.
 
 **Concurrency is bounded by the controller, not the cluster.** The OME manager
 runs `MaxConcurrentReconciles=1` (controller-runtime default) behind leader

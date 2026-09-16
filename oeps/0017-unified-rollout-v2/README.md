@@ -166,7 +166,12 @@ the new revision) that the spec currently, wrongly, splits per-Component.
   groups.
 - **Sequencing** : the order in which groups roll, expressed by **position in the
   `groups[]` list**, not a flag. *Consequence:* group N completes before group N+1
-  begins; the last group has no `soak` (nothing follows it).
+  begins; the last group has no `soak` (nothing follows it). Sequencing is only
+  enforced for a run of single-Component `blueGreen` groups, so any other
+  multi-group list is rejected unless it sets **`groupOrdering: Concurrent`**,
+  which declares the groups independent and drops the ordering promise. That is
+  the shape for one unit per group — e.g. a router canary and an engine canary
+  on one InferenceService, each with its own ladder, gates and rollback.
 - **Per-pod swap** : `spec.<comp>.lifecycle.updateStrategy`
   (`SurgeThenDrain|RecreatePod|InPlace*` + `rollingUpdate.{partition,maxSurge,maxUnavailable}`).
   The layer *beneath* progression: how an individual Component's pods are
