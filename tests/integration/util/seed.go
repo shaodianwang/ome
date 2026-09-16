@@ -36,10 +36,11 @@ const SeededMaxDecodedInstances = 10000
 //     (NewIngressConfig errors otherwise) and DisableIngressCreation=true
 //     to keep the controller from materializing routes
 //   - deploy.defaultDeploymentMode = RawDeployment (the safe default;
-//     NewDeployConfig errors on empty), plus the deploy.replicas admission
-//     defaults (min=1, max engine/decoder=3, router=2 — the values the
-//     chart ships) so defaulter-dependent specs see chart-equivalent
-//     behavior
+//     NewDeployConfig errors on empty), plus the deploy.replicas and
+//     deploy.updateStrategy admission defaults (the values the chart ships)
+//     so defaulter-dependent specs see chart-equivalent behavior. Without
+//     the updateStrategy block an OMENative component is stamped with no
+//     rollout budget at all, since the binary carries none
 //   - lifecycle scaleUpPodBatchSize and scaleDownPodBatchSize bound OMENative
 //     create and delete work in Pod-equivalent units while keeping each
 //     Instance or gang atomic
@@ -79,6 +80,11 @@ func SeedDefaultConfigMaps(ctx context.Context, c client.Client) error {
       "decoder": 3,
       "router": 2
     }
+  },
+  "updateStrategy": {
+    "router":  {"type": "SurgeThenDrain", "maxSurge": "25%", "maxUnavailable": "25%"},
+    "engine":  {"type": "SurgeThenDrain", "maxSurge": "25%", "maxUnavailable": "25%"},
+    "decoder": {"type": "SurgeThenDrain", "maxSurge": "25%", "maxUnavailable": "25%"}
   }
 }`,
 		"lifecycle": `{

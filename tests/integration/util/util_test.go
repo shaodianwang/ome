@@ -85,13 +85,20 @@ var _ = ginkgo.Describe("util.SeedDefaultConfigMaps", func() {
 		// seed is what keeps suite behavior chart-equivalent.
 		Expect(cm.Data).To(HaveKey("rollout"))
 		Expect(cm.Data["rollout"]).To(MatchJSON(`{"maxPinnedPlanBytes":16384,"defaultReadyTimeout":"15m"}`))
-		// The deploy block must round-trip the chart-equivalent replica
-		// defaults the ISVC defaulter reads at admission.
+		// The deploy block must round-trip the chart-equivalent replica and
+		// update-strategy defaults the ISVC defaulter reads at admission.
+		// Without the updateStrategy block an OMENative component is stamped
+		// with no rollout budget at all, since the binary carries none.
 		Expect(cm.Data["deploy"]).To(MatchJSON(`{
 			"defaultDeploymentMode": "RawDeployment",
 			"replicas": {
 				"defaultMinReplicas": 1,
 				"defaultMaxReplicas": {"engine": 3, "decoder": 3, "router": 2}
+			},
+			"updateStrategy": {
+				"router":  {"type": "SurgeThenDrain", "maxSurge": "25%", "maxUnavailable": "25%"},
+				"engine":  {"type": "SurgeThenDrain", "maxSurge": "25%", "maxUnavailable": "25%"},
+				"decoder": {"type": "SurgeThenDrain", "maxSurge": "25%", "maxUnavailable": "25%"}
 			}
 		}`))
 	})

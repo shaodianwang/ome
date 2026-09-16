@@ -123,7 +123,8 @@ var _ = ginkgo.Describe("ISVC admission matrix: OMENative lifecycle defaults", f
 		Expect(lc.UpdateStrategy.Type).To(Equal(v1beta1.UpdateStrategySurgeThenDrain))
 		Expect(lc.UpdateStrategy.RollingUpdate).NotTo(BeNil())
 		Expect(lc.UpdateStrategy.RollingUpdate.MaxSurge).To(HaveValue(Equal(intstr.FromString("25%"))))
-		Expect(lc.UpdateStrategy.RollingUpdate.MaxUnavailable).To(HaveValue(Equal(intstr.FromString("25%"))))
+		Expect(lc.UpdateStrategy.RollingUpdate.MaxUnavailable).To(BeNil(),
+			"SurgeThenDrain is gated on MaxSurge and never reads MaxUnavailable, so the defaulter leaves it unset")
 		Expect(lc.InstanceReadyTimeout).NotTo(BeNil())
 		Expect(lc.InstanceReadyTimeout.Duration).To(Equal(30 * time.Minute))
 		Expect(lc.MigrationPolicy).NotTo(BeNil())

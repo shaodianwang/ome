@@ -162,11 +162,10 @@ var _ = ginkgo.Describe("InferenceService defaulter webhook", func() {
 		Expect(got.Spec.Engine.Lifecycle.UpdateStrategy).NotTo(BeNil())
 		ru := got.Spec.Engine.Lifecycle.UpdateStrategy.RollingUpdate
 		Expect(ru).NotTo(BeNil(), "omitted rollingUpdate must be defaulted, not left nil (would resolve to uncapped BudgetNoLimit)")
-		want := intstr.FromString("25%")
 		Expect(ru.MaxSurge).NotTo(BeNil())
-		Expect(*ru.MaxSurge).To(Equal(want), "MaxSurge must default to 25%")
-		Expect(ru.MaxUnavailable).NotTo(BeNil())
-		Expect(*ru.MaxUnavailable).To(Equal(want), "MaxUnavailable must default to 25%")
+		Expect(*ru.MaxSurge).To(Equal(intstr.FromString("25%")), "MaxSurge must come from the configured default")
+		Expect(ru.MaxUnavailable).To(BeNil(),
+			"the configured strategy is SurgeThenDrain, which never reads MaxUnavailable, so stamping it would leave an unread bound in every spec")
 	})
 
 	ginkgo.It("engine minReplicas=5 with maxReplicas omitted → admitted with maxReplicas clamped to 5", func() {
