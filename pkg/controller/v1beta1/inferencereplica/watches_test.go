@@ -479,22 +479,50 @@ func TestEndpointSliceToIR(t *testing.T) {
 	}
 }
 
+// TestPodGroupPredicate_FiltersOnlyStatusChurn: the watch admits the
+// gang scheduler's phase, which is what tells an Instance its group has
+// to be rebuilt, alongside metadata, spec and deletion changes — and
+// still drops the running member tallies that move continuously while a
+// gang converges.
 func TestPodGroupPredicate_FiltersOnlyStatusChurn(t *testing.T) {
 	p := podGroupPredicate()
 	oldObj := &schedulingv1alpha1.PodGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "group", Namespace: "prod", Generation: 1},
-		Spec:       schedulingv1alpha1.PodGroupSpec{MinMember: 1},
+		Spec:       schedulingv1alpha1.PodGroupSpec{MinMember: 2},
+		Status:     schedulingv1alpha1.PodGroupStatus{Phase: schedulingv1alpha1.PodGroupScheduling},
 	}
 	statusOnly := oldObj.DeepCopy()
 	statusOnly.ResourceVersion = "2"
-	statusOnly.Status.Phase = schedulingv1alpha1.PodGroupRunning
 	statusOnly.Status.Running = 1
 
 	if !p.Create(event.CreateEvent{Object: statusOnly}) {
 		t.Fatal("create event must enqueue reconciliation")
 	}
 	if p.Update(event.UpdateEvent{ObjectOld: oldObj, ObjectNew: statusOnly}) {
-		t.Fatal("status-only update must not enqueue reconciliation")
+		t.Fatal("member-tally churn must not enqueue reconciliation")
+	}
+	if p.Update(event.UpdateEvent{ObjectOld: statusOnly, ObjectNew: statusOnly.DeepCopy()}) {
+		t.Fatal("an identical status must not enqueue reconciliation")
+	}
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*schedulingv1alpha1.PodGroup)
+	}{
+		{"a failed gang", func(pg *schedulingv1alpha1.PodGroup) {
+			pg.Status.Phase = schedulingv1alpha1.PodGroupFailed
+			pg.Status.Failed = 2
+		}},
+		{"an admitted gang", func(pg *schedulingv1alpha1.PodGroup) {
+			pg.Status.Phase = schedulingv1alpha1.PodGroupRunning
+			pg.Status.Running = 2
+		}},
+	} {
+		verdict := statusOnly.DeepCopy()
+		tc.mutate(verdict)
+		if !p.Update(event.UpdateEvent{ObjectOld: statusOnly, ObjectNew: verdict}) {
+			t.Errorf("%s must enqueue reconciliation: the row acts on it", tc.name)
+		}
 	}
 
 	metadataDrift := statusOnly.DeepCopy()
@@ -504,7 +532,7 @@ func TestPodGroupPredicate_FiltersOnlyStatusChurn(t *testing.T) {
 	}
 
 	specDrift := statusOnly.DeepCopy()
-	specDrift.Spec.MinMember = 2
+	specDrift.Spec.MinMember = 3
 	specDrift.Generation = 2
 	if !p.Update(event.UpdateEvent{ObjectOld: statusOnly, ObjectNew: specDrift}) {
 		t.Fatal("generation update must enqueue reconciliation")

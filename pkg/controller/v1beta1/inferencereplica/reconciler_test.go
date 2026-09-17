@@ -351,7 +351,13 @@ func (r *firstStaleInferenceReplicaReader) Get(ctx context.Context, key client.O
 	return r.Reader.Get(ctx, key, obj, opts...)
 }
 
-func TestReconcile_TerminatingPodGroupUsesConfiguredPoll(t *testing.T) {
+// TestReconcile_TerminatingPodGroupHoldsWithoutPods: a deterministic
+// PodGroup name still occupied by an object being collected withholds
+// that Instance's members and records the wait on its operation, so an
+// operator sees why the gang has not started instead of a silent poll.
+//
+// Cells: instance/Create/CreatePods/gang.podGroup[Terminating]/before
+func TestReconcile_TerminatingPodGroupHoldsWithoutPods(t *testing.T) {
 	ir := baselineIR("llama-engine", "prod", 1)
 	ir.Spec.Runners = []v1beta1.Runner{
 		{Name: v1beta1.RunnerNameLeader, Size: 1, Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "leader", Image: "test:v1"}}}}},
@@ -370,12 +376,12 @@ func TestReconcile_TerminatingPodGroupUsesConfiguredPoll(t *testing.T) {
 	r.APIReader = c
 	r.GangSchedulingAvailable = true
 
-	result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)})
-	if err != nil {
-		t.Fatalf("reconcile terminating PodGroup: %v", err)
-	}
-	if result.Requeue || result.RequeueAfter != testScaleDownRequeueInterval {
-		t.Fatalf("terminating PodGroup must use the configured poll interval, got %+v", result)
+	// Two passes: the first commits the Create marker the hold is recorded
+	// on, the second observes that marker and parks it.
+	for pass := 0; pass < 2; pass++ {
+		if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)}); err != nil {
+			t.Fatalf("reconcile terminating PodGroup (pass %d): %v", pass, err)
+		}
 	}
 	pods := &corev1.PodList{}
 	if err := c.List(context.Background(), pods, client.InNamespace(ir.Namespace)); err != nil {
@@ -383,6 +389,17 @@ func TestReconcile_TerminatingPodGroupUsesConfiguredPoll(t *testing.T) {
 	}
 	if len(pods.Items) != 0 {
 		t.Fatalf("created %d pods while their PodGroup name was terminating", len(pods.Items))
+	}
+	got := &v1beta1.InferenceReplica{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(ir), got); err != nil {
+		t.Fatalf("get InferenceReplica: %v", err)
+	}
+	if len(got.Status.InstanceStatuses) != 1 {
+		t.Fatalf("instance statuses: got %d want 1", len(got.Status.InstanceStatuses))
+	}
+	op := got.Status.InstanceStatuses[0].Operation
+	if op == nil || op.Waiting != workload.WaitingReasonPodGroupTerminating {
+		t.Fatalf("Operation.Waiting: got %+v want %q", op, workload.WaitingReasonPodGroupTerminating)
 	}
 }
 

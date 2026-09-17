@@ -30,9 +30,15 @@ import (
 //     lasts. The message reaches operators once, through the event the
 //     caller emits on entry.
 
-// MarkExternalHold records token as the operation's Waiting token,
-// reporting whether this call is the transition INTO the hold (the edge
-// a caller announces).
+// MarkExternalHold records token as the operation's Waiting token.
+//
+// It reports two things about the row the write landed on: entered, the
+// transition INTO the hold (the edge a caller announces), and held,
+// whether the row carries THIS token afterwards. held is the honest
+// answer to "is my authority the one reporting this row's wait" —
+// eligibility is judged on the fresh row, so a caller cannot derive it
+// from its own pass-start observation, and treating a refused mark as a
+// hold would suppress another authority's escalation.
 //
 // evidence, when supplied, lands on LastFailure in the same write so the
 // authority's explanation survives for `kubectl describe`. It is
@@ -49,33 +55,33 @@ import (
 //
 // A no-op when the slot is gone, has no operation, is refused by
 // writable, or already carries a different authority's token.
-func MarkExternalHold(ctx context.Context, input ReconcileInput, idx int32, token string, evidence *InstanceTermination, writable func(*InstanceOperation) bool) (bool, error) {
-	entered := false
-	err := input.MutateInstance(ctx, idx, func(s *InstanceStatus) bool {
+func MarkExternalHold(ctx context.Context, input ReconcileInput, idx int32, token string, evidence *InstanceTermination, writable func(*InstanceOperation) bool) (entered, held bool, err error) {
+	err = input.MutateInstance(ctx, idx, func(s *InstanceStatus) bool {
 		if s.Phase == "" || s.Operation == nil {
 			return false
 		}
 		if writable != nil && !writable(s.Operation) {
 			return false
 		}
-		held := s.Operation.Waiting
-		if held != "" && held != token {
+		current := s.Operation.Waiting
+		if current != "" && current != token {
 			return false
 		}
-		if held == token && sameHoldEvidence(s.LastFailure, evidence) {
+		held = true
+		if current == token && sameHoldEvidence(s.LastFailure, evidence) {
 			return false
 		}
 		op := *s.Operation
 		op.Waiting = token
 		s.Operation = &op
-		entered = held == ""
+		entered = current == ""
 		if evidence != nil {
 			captured := *evidence
 			s.LastFailure = &captured
 		}
 		return true
 	})
-	return entered, err
+	return entered, held, err
 }
 
 // ClearExternalHold releases token once its authority reports the wait

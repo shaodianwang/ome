@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -398,11 +400,19 @@ func TestEnsurePodGroupsWithState_DeleteOwnedReboundSkipsEnsure(t *testing.T) {
 	}
 }
 
+// TestEnsurePodGroupsWithState_ForeignCollisionAndTerminatingGate: a
+// deterministic name this owner cannot write — held by another
+// controller, or by an object being collected — is classified onto the
+// Instance that wanted it and costs the rest of the Component nothing.
+// The pass keeps going, ensures every other planned gang, and leaves the
+// blocked row to the escalation pass.
+//
+// Cells: instance/Create/CreatePods/gang.podGroup[OwnershipConflict]/before, instance/Create/CreatePods/gang.podGroup[Terminating]/before
 func TestEnsurePodGroupsWithState_ForeignCollisionAndTerminatingGate(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		mutate  func(*schedulingv1alpha1.PodGroup)
-		wantErr error
+		name      string
+		mutate    func(*schedulingv1alpha1.PodGroup)
+		wantState workload.GangState
 	}{
 		{
 			name: "foreign",
@@ -410,7 +420,7 @@ func TestEnsurePodGroupsWithState_ForeignCollisionAndTerminatingGate(t *testing.
 				foreign := newOwner("prod", "foreign")
 				pg.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(foreign, testOwnerGVK)}
 			},
-			wantErr: podgroup.ErrPodGroupOwnershipConflict,
+			wantState: workload.GangStateOwnershipConflict,
 		},
 		{
 			name: "terminating owned",
@@ -418,7 +428,7 @@ func TestEnsurePodGroupsWithState_ForeignCollisionAndTerminatingGate(t *testing.
 				now := metav1.Now()
 				pg.DeletionTimestamp = &now
 			},
-			wantErr: ErrPodGroupTerminating,
+			wantState: workload.GangStateTerminating,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -433,13 +443,161 @@ func TestEnsurePodGroupsWithState_ForeignCollisionAndTerminatingGate(t *testing.
 			base := newGangClient(t, owner)
 			input, _ := inputWithConditionStore(owner, true, 1, true, "custom-scheduler")
 			input.AuthoritativePods = &workload.ComponentPodSnapshot{ByInstance: map[int32][]*corev1.Pod{}}
-			plan := planFor(workload.ComponentEngine, []int32{0}, true, 1, 5*time.Minute)
+			input.Gangs = workload.NewGangObservations()
+			plan := planFor(workload.ComponentEngine, []int32{0, 1}, true, 1, 5*time.Minute)
 			_, err := EnsurePodGroupsWithState(context.Background(), workload.Deps{Client: base}, input, plan,
 				PodGroupReconcileState{Inventory: inv})
-			if !errors.Is(err, tc.wantErr) {
-				t.Fatalf("error: got %v want %v", err, tc.wantErr)
+			if err != nil {
+				t.Fatalf("EnsurePodGroupsWithState: got %v want the blocked name classified, not an error", err)
+			}
+			if got := input.Gangs.For(0); got.State != tc.wantState {
+				t.Errorf("instance 0 gang state: got %q want %q", got.State, tc.wantState)
+			}
+			if !input.Gangs.BlocksPods(0) {
+				t.Errorf("instance 0 must not accept pods while its PodGroup name is unusable")
+			}
+			sibling := &schedulingv1alpha1.PodGroup{}
+			if err := base.Get(context.Background(), client.ObjectKey{
+				Namespace: "prod", Name: query.PodGroupName("llama", workload.ComponentEngine, 1),
+			}, sibling); err != nil {
+				t.Errorf("sibling gang: got %v want it ensured despite the blocked name", err)
+			}
+			if input.Gangs.BlocksPods(1) {
+				t.Errorf("instance 1 must keep reconciling: %+v", input.Gangs.For(1))
 			}
 		})
+	}
+}
+
+// TestGang_FailedPodGroupIsResetNotEscalated: the gang scheduler's
+// Failed verdict is absorbing — its controller stops reconciling the
+// object and this pass only reconciles labels, ownership and size — so
+// the group is deleted and rebuilt under the same deterministic name.
+// The row itself is untouched and members are withheld until the
+// replacement exists; an operator learns of it from one event.
+//
+// Cells: instance/Create/CreatePods/gang.podGroup[PhaseFailed]/before
+func TestGang_FailedPodGroupIsResetNotEscalated(t *testing.T) {
+	owner := newOwner("prod", "llama")
+	pg := inventoryPodGroup(t, owner, "llama", 0)
+	pg.Status.Phase = schedulingv1alpha1.PodGroupFailed
+	inv := newPodGroupInventory(owner.GetUID(), true)
+	inv.byName[pg.Name] = pg
+	inv.ownedName[pg.Name] = pg
+	base := newGangClient(t, owner, pg)
+	recorder := record.NewFakeRecorder(8)
+	input, _ := inputWithConditionStore(owner, true, 1, true, "custom-scheduler")
+	input.AuthoritativePods = &workload.ComponentPodSnapshot{ByInstance: map[int32][]*corev1.Pod{}}
+	input.Gangs = workload.NewGangObservations()
+	plan := planFor(workload.ComponentEngine, []int32{0}, true, 1, 5*time.Minute)
+
+	if _, err := EnsurePodGroupsWithState(context.Background(), workload.Deps{Client: base, Recorder: recorder},
+		input, plan, PodGroupReconcileState{Inventory: inv}); err != nil {
+		t.Fatalf("EnsurePodGroupsWithState: %v", err)
+	}
+	if got := input.Gangs.For(0); got.State != workload.GangStateFailed {
+		t.Errorf("gang state: got %q want %q", got.State, workload.GangStateFailed)
+	}
+	if !input.Gangs.BlocksPods(0) {
+		t.Errorf("members must be withheld until the replacement group exists")
+	}
+	gone := &schedulingv1alpha1.PodGroup{}
+	err := base.Get(context.Background(), client.ObjectKeyFromObject(pg), gone)
+	if !apierrors.IsNotFound(err) && (err != nil || gone.DeletionTimestamp == nil) {
+		t.Fatalf("failed PodGroup: got err=%v obj=%+v want deleted", err, gone)
+	}
+	select {
+	case ev := <-recorder.Events:
+		if !strings.Contains(ev, string(workload.EventReasonPodGroupReset)) || !strings.Contains(ev, "Failed") {
+			t.Errorf("event: got %q want a PodGroupReset naming the failure", ev)
+		}
+	default:
+		t.Error("no event: the reset is the only trace an operator gets")
+	}
+
+	// Next pass: the group is gone, so the ensure builds a fresh one and
+	// nothing withholds members any more.
+	fresh, err := ObservePodGroups(context.Background(), base, owner)
+	if err != nil {
+		t.Fatalf("ObservePodGroups: %v", err)
+	}
+	input.Gangs = workload.NewGangObservations()
+	if _, err := EnsurePodGroupsWithState(context.Background(), workload.Deps{Client: base, Recorder: recorder},
+		input, plan, PodGroupReconcileState{Inventory: fresh}); err != nil {
+		t.Fatalf("EnsurePodGroupsWithState (rebuild): %v", err)
+	}
+	if input.Gangs.BlocksPods(0) {
+		t.Errorf("rebuilt gang: got blocked want its members admitted, %+v", input.Gangs.For(0))
+	}
+	rebuilt := &schedulingv1alpha1.PodGroup{}
+	if err := base.Get(context.Background(), client.ObjectKeyFromObject(pg), rebuilt); err != nil {
+		t.Fatalf("rebuilt PodGroup: %v", err)
+	}
+	if rebuilt.Status.Phase == schedulingv1alpha1.PodGroupFailed {
+		t.Errorf("rebuilt PodGroup still carries the absorbing verdict")
+	}
+}
+
+// TestGang_FailedPodGroupResetWaitsForTerminalMemberRecycle: the gang
+// controller derives a group's phase from its members, so rebuilding
+// around a dead one would hand the replacement the same verdict. The
+// create pass recycles the pod first; the reset lands on the pass after.
+//
+// Cells: instance/Create/CreatePods/gang.podGroup[PhaseFailed]/before
+func TestGang_FailedPodGroupResetWaitsForTerminalMemberRecycle(t *testing.T) {
+	owner := newOwner("prod", "llama")
+	pg := inventoryPodGroup(t, owner, "llama", 0)
+	pg.Status.Phase = schedulingv1alpha1.PodGroupFailed
+	dead := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name:      "llama-engine-0-leader-0",
+		Namespace: "prod",
+		Labels:    map[string]string{query.LabelPodGroup: pg.Name},
+	}, Status: corev1.PodStatus{Phase: corev1.PodFailed}}
+
+	newPass := func(pods ...*corev1.Pod) (*PodGroupInventory, workload.ReconcileInput, *record.FakeRecorder, client.Client) {
+		inv := newPodGroupInventory(owner.GetUID(), true)
+		inv.byName[pg.Name] = pg
+		inv.ownedName[pg.Name] = pg
+		base := newGangClient(t, owner, pg)
+		input, _ := inputWithConditionStore(owner, true, 1, true, "custom-scheduler")
+		input.AuthoritativePods = &workload.ComponentPodSnapshot{Pods: pods}
+		input.Gangs = workload.NewGangObservations()
+		return inv, input, record.NewFakeRecorder(8), base
+	}
+	plan := planFor(workload.ComponentEngine, []int32{0}, true, 1, 5*time.Minute)
+
+	inv, input, recorder, base := newPass(dead)
+	if _, err := EnsurePodGroupsWithState(context.Background(), workload.Deps{Client: base, Recorder: recorder},
+		input, plan, PodGroupReconcileState{Inventory: inv}); err != nil {
+		t.Fatalf("EnsurePodGroupsWithState: %v", err)
+	}
+	if inv.DeleteAccepted(pg.Name) {
+		t.Errorf("group deleted while a dead member still occupies its name")
+	}
+	select {
+	case ev := <-recorder.Events:
+		t.Errorf("event: got %q want none until the member is recycled", ev)
+	default:
+	}
+	if !input.Gangs.BlocksPods(0) {
+		t.Errorf("members must stay withheld while the group is failed")
+	}
+
+	inv, input, recorder, base = newPass()
+	if _, err := EnsurePodGroupsWithState(context.Background(), workload.Deps{Client: base, Recorder: recorder},
+		input, plan, PodGroupReconcileState{Inventory: inv}); err != nil {
+		t.Fatalf("EnsurePodGroupsWithState (recycled): %v", err)
+	}
+	if !inv.DeleteAccepted(pg.Name) {
+		t.Errorf("group must be reset once its dead member is gone")
+	}
+	select {
+	case ev := <-recorder.Events:
+		if !strings.Contains(ev, string(workload.EventReasonPodGroupReset)) {
+			t.Errorf("event: got %q want a PodGroupReset", ev)
+		}
+	default:
+		t.Error("no event: the reset is the only trace an operator gets")
 	}
 }
 

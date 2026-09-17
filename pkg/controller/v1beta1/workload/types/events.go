@@ -156,6 +156,16 @@ const (
 	EventReasonMigrationFromNodeMismatch     EventReason = "MigrationFromNodeMismatch"
 	EventReasonMigrationNodeAffinityConflict EventReason = "MigrationNodeAffinityConflict"
 
+	// EventReasonPodGroupReset is a Warning fired when an Instance's
+	// PodGroup is deleted so a fresh one can be built, because the gang
+	// scheduler has ruled the existing group Failed. That verdict is
+	// absorbing — the group keeps it for as long as the object lives, and
+	// the controller reconciles only its labels, ownership and size — so
+	// the name has to be rebuilt for the gang to be admitted again. The
+	// event carries the group's own explanation, which is the only place
+	// it survives: the Instance is never failed for it.
+	EventReasonPodGroupReset EventReason = "PodGroupReset"
+
 	// EventReasonMaybeNoGangScheduler is a soft Warning fired the first
 	// time a multi-pod Instance's PodGroup is created under a pod
 	// template whose `spec.schedulerName` is unset or equals the

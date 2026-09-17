@@ -14,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -37,8 +38,8 @@ const perRevisionServiceInfix = "-rev-"
 // headless Service name (`<isvc>-<component>-headless`).
 const headlessServiceSuffix = "-headless"
 
-// podGroupPredicate ignores scheduler status churn while preserving changes
-// that can affect reconciliation or complete terminal cleanup.
+// podGroupPredicate ignores gang-scheduler status churn while preserving
+// changes that can affect reconciliation or complete terminal cleanup.
 func podGroupPredicate() predicate.Predicate {
 	return predicate.Funcs{
 		CreateFunc: func(event.CreateEvent) bool { return true },
@@ -51,11 +52,26 @@ func podGroupPredicate() predicate.Predicate {
 				!equality.Semantic.DeepEqual(e.ObjectOld.GetAnnotations(), e.ObjectNew.GetAnnotations()) ||
 				!equality.Semantic.DeepEqual(e.ObjectOld.GetOwnerReferences(), e.ObjectNew.GetOwnerReferences()) ||
 				!equality.Semantic.DeepEqual(e.ObjectOld.GetFinalizers(), e.ObjectNew.GetFinalizers()) ||
-				!equality.Semantic.DeepEqual(e.ObjectOld.GetDeletionTimestamp(), e.ObjectNew.GetDeletionTimestamp())
+				!equality.Semantic.DeepEqual(e.ObjectOld.GetDeletionTimestamp(), e.ObjectNew.GetDeletionTimestamp()) ||
+				podGroupVerdictChanged(e.ObjectOld, e.ObjectNew)
 		},
 		DeleteFunc:  func(event.DeleteEvent) bool { return true },
 		GenericFunc: func(event.GenericEvent) bool { return false },
 	}
+}
+
+// podGroupVerdictChanged reports whether a status update carries the one
+// reading an Instance acts on: the gang scheduler's phase, which is what
+// says a group has to be rebuilt. Everything else on the status is
+// running member tallies nothing consults, and admitting those would
+// wake the owner on every member transition.
+func podGroupVerdictChanged(oldObj, newObj client.Object) bool {
+	before, okOld := oldObj.(*schedulingv1alpha1.PodGroup)
+	after, okNew := newObj.(*schedulingv1alpha1.PodGroup)
+	if !okOld || !okNew {
+		return false
+	}
+	return before.Status.Phase != after.Status.Phase
 }
 
 // EndpointSliceToIR maps an EndpointSlice for an OMENative drain Service

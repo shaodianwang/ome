@@ -139,7 +139,8 @@ func disposeRejectedAttempt(ctx context.Context, deps workload.Deps, input workl
 // than on the quota message, which names current usage and the pod that
 // lost the race and so differs on every pass.
 func markCapacityBlocked(ctx context.Context, input workload.ReconcileInput, idx int32) (bool, error) {
-	return workload.MarkExternalHold(ctx, input, idx, workload.RejectionReasonQuotaExceeded, nil, nil)
+	entered, _, err := workload.MarkExternalHold(ctx, input, idx, workload.RejectionReasonQuotaExceeded, nil, nil)
+	return entered, err
 }
 
 // clearCapacityBlock releases the quota waiting token once the create

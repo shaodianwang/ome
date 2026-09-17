@@ -56,6 +56,20 @@ import (
 //     ENVIRONMENT cause — the evidence names the scheduler's message and
 //     no revision is held. Unconfigured, the hold simply lasts.
 //
+//   - GANG path: what only the Instance's PodGroup can say, since a gang
+//     is admitted as a unit. A deterministic name held by another
+//     controller ends the attempt: nothing this controller does frees
+//     it. It is an ENVIRONMENT cause and holds no revision. A name still
+//     being collected parks the clock instead and never escalates — the
+//     gang is announced again once the old object is gone — and a group
+//     the gang scheduler has failed ends nothing at all, because the
+//     PodGroup pass rebuilds it. Rows whose outcome another state
+//     machine owns (Delete, Migrate), rows with no attempt in flight,
+//     and a gang-surge SOURCE (whose attempt lives under the surge
+//     index) are left alone on every gang reading. Whether a gang can be
+//     PLACED is not read here — that arrives on the member pods and
+//     takes the SCHEDULER-HOLD path above.
+//
 // The FAST and BROAD paths skip operations whose state machine owns its
 // own terminal handling:
 //
@@ -140,12 +154,46 @@ func escalateFromEvidence(ctx context.Context, deps Deps, input ReconcileInput, 
 		// scheduler cannot place must not burn it; the hold is scoped to
 		// the row whose OWN pod is unplaceable (ev.Unschedulable), so a
 		// serving source is never held or failed for its surge's fate.
-		held, herr := reconcileSchedulerHold(ctx, input, s, ev, serving)
+		// GANG PATH: a gang is admitted as a unit, so its PodGroup carries
+		// facts no single member does — whether the deterministic name is
+		// usable by this owner at all, and whether the group has to be
+		// rebuilt. A name being collected parks the clock; a name held by
+		// another controller ends the attempt, because nothing this
+		// controller does frees it. A failed group is neither: the
+		// PodGroup pass resets it and the row just waits.
+		gang := gangReadingFor(input, s)
+		// Releases run before any mark, so a row that stops waiting on one
+		// authority and starts waiting on another does it inside one pass.
+		// Left unheld for even one pass, the parking step reads the empty
+		// token as admission and restarts a whole InstanceReadyTimeout.
+		if rerr := releaseSchedulerHold(ctx, input, s, ev, serving); rerr != nil {
+			return fmt.Errorf("release scheduler hold (instance=%d): %w", s.Index, rerr)
+		}
+		if rerr := releaseGangHold(ctx, input, s, gang, serving); rerr != nil {
+			return fmt.Errorf("release gang hold (instance=%d): %w", s.Index, rerr)
+		}
+		held, herr := recordSchedulerHold(ctx, input, s, ev, serving)
 		if herr != nil {
 			return fmt.Errorf("record scheduler hold (instance=%d): %w", s.Index, herr)
 		}
+		gangHeld, gerr := recordGangHold(ctx, input, s, gang, serving)
+		if gerr != nil {
+			return fmt.Errorf("record gang hold (instance=%d): %w", s.Index, gerr)
+		}
 		if serving {
 			continue
+		}
+		if reason := gangTerminalReason(gang.State); reason != "" && gangVerdictActionable(s.Operation) {
+			escalateGangFailure(input, buf, s, gang, reason, now)
+			continue
+		}
+		if gangHeld {
+			// Parked until the object at the gang's name is collected,
+			// which resolves without anyone acting. A genuinely wedged
+			// sibling pod still escalates through the fast path below.
+			if ev.StuckPod == nil {
+				continue
+			}
 		}
 		if held {
 			if !unschedulableGraceElapsed(ev.UnschedulableSince, now, input.UnschedulableGrace) {
@@ -353,4 +401,20 @@ func anyPodAdmissionGated(pods []*corev1.Pod) bool {
 		}
 	}
 	return false
+}
+
+// gangReadingFor returns the PodGroup reading that governs one row.
+//
+// A gang-surge SOURCE gets none. Its own group is the one its serving
+// pods already belong to, while the attempt in flight builds members
+// under the SURGE index — which carries its own reading and its own
+// hold. Judging the source on its own group would hold, or end, a row
+// whose replacement is the thing actually being waited on. The empty
+// reading still lets the release step retire a token the row took
+// before it became a surge source.
+func gangReadingFor(input ReconcileInput, s InstanceStatus) GangObservation {
+	if s.Operation != nil && s.Operation.SurgeIndex != nil {
+		return GangObservation{}
+	}
+	return input.Gangs.For(s.Index)
 }

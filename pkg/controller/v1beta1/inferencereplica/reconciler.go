@@ -649,11 +649,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// on DesiredSpec.GangSchedulingAvailable, stamps GangSchedulingUnavailable,
 	// and returns. Runs before the revision/dispatch so the gang is announced
 	// ahead of pod creation.
+	// A name this owner cannot write is classified onto the Instance that
+	// wanted it rather than returned here, so one unusable PodGroup never
+	// stalls the whole Component.
 	effectiveTopology, gerr := workloadgang.EnsurePodGroupsWithState(ctx, deps, input, plan, podGroupState)
 	if gerr != nil {
-		if errors.Is(gerr, workloadgang.ErrPodGroupTerminating) {
-			return scaleDownRequeueResult(r.ScaleDownRequeueInterval), nil
-		}
 		return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: ensure pod groups (component=%s): %w", ir.Spec.Component, gerr)
 	}
 	plan.InstanceTopologyKeys = effectiveTopology

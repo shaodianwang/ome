@@ -10,6 +10,7 @@ package gang
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -102,13 +103,20 @@ func EnsureSurgePodGroupWithState(deps workload.Deps, state PodGroupReconcileSta
 		}
 		if inv != nil {
 			existing, found := inv.ByName(name)
+			// Classify before writing, for the same reason the top-level
+			// pass does: the surge index may not be pinned in the plan yet,
+			// so this is the first place the row's PodGroup is read at all
+			// and the only chance to record why its members are withheld.
+			input.Gangs.Record(inst.Index,
+				podgroup.ObserveGang(name, existing, found, input.OwnerObject.GetUID()))
 			key, reconciled, err := podgroup.EnsurePodGroupForPodsFromObservation(ctx, deps.Client,
 				input.OwnerObject, input.OwnerGVK, input.Key.OwnerName, plan, inst,
 				pods, existing, found)
 			if err == nil {
 				inv.recordReconciled(reconciled)
+				return key, nil
 			}
-			return key, err
+			return "", unusableNameError(err)
 		}
 		return podgroup.EnsurePodGroupForPodsWithReader(ctx, deps.Client, reader, input.OwnerObject, input.OwnerGVK, input.Key.OwnerName, plan, inst, pods)
 	}
@@ -265,10 +273,50 @@ func EnsurePodGroupsWithState(ctx context.Context, deps workload.Deps, input wor
 		}
 		name := query.PodGroupName(input.Key.OwnerName, plan.Component, inst.Index)
 		existing, found := inv.ByName(name)
+		// Classify what the object says about this gang before touching
+		// it. A name this owner cannot write is a fact about one Instance,
+		// not about the Component: recording it here lets the pass finish
+		// the other gangs, keeps members off the unusable name, and hands
+		// the row itself to the escalation pass.
+		obs := podgroup.ObserveGang(name, existing, found, input.OwnerObject.GetUID())
+		input.Gangs.Record(inst.Index, obs)
+		if obs.State == workload.GangStateFailed && resettableIndex(input.ObservedState.InstanceStatuses, inst.Index) {
+			// The gang scheduler's Failed verdict is absorbing: its
+			// controller stops reconciling the object, and this pass only
+			// reconciles labels, ownership and size — so the group can never
+			// be admitted again under that name. Delete it and let the next
+			// pass build a fresh one. Members are withheld meanwhile, and
+			// the row is untouched: a failure that resets itself must not
+			// end an attempt, or the reset and the rebuild would chase each
+			// other through Failed forever.
+			//
+			// A dead member still on the name holds the reset back. The
+			// group's phase is derived from its members, so rebuilding
+			// around one would hand the replacement the same verdict; the
+			// create pass recycles it first and the reset lands on the
+			// pass after.
+			if anyTerminalMember(podsByGroup[name]) {
+				continue
+			}
+			if derr := inv.DeleteOwnedName(ctx, deps.Client, name); derr != nil {
+				return nil, fmt.Errorf("EnsurePodGroups: reset instance %d: %w", inst.Index, derr)
+			}
+			warnPodGroupReset(deps.Recorder, input, plan.Component, obs)
+			continue
+		}
 		key, reconciled, err := podgroup.EnsurePodGroupForPodsFromObservation(ctx, deps.Client,
 			input.OwnerObject, input.OwnerGVK, input.Key.OwnerName, plan, inst,
 			podsByGroup[name], existing, found)
 		if err != nil {
+			if errors.Is(err, podgroup.ErrPodGroupTerminating) ||
+				errors.Is(err, podgroup.ErrPodGroupOwnershipConflict) {
+				// No topology override is published for this index. The only
+				// consumers of one are the renderer and the PodGroup builder,
+				// and neither runs for an index whose members are withheld;
+				// an absent entry also reads as the Component's desired key,
+				// which is what a fresh gang at this name would get anyway.
+				continue
+			}
 			return nil, fmt.Errorf("EnsurePodGroups: instance %d: %w", inst.Index, err)
 		}
 		inv.recordReconciled(reconciled)
@@ -283,6 +331,59 @@ func EnsurePodGroupsWithState(ctx context.Context, deps workload.Deps, input wor
 		maybeWarnNoGangScheduler(deps.Recorder, input, plan.Component, input.DesiredSpec.PodSpec, input.DesiredSpec.WorkerPodSpec)
 	}
 	return effectiveTopology, nil
+}
+
+// unusableNameError re-spells the two reasons a deterministic name
+// cannot be written as the workload-level sentinel, so the op that
+// invoked this callback can defer to the escalation pass without
+// importing the optional gang-scheduling API. Anything else is a real
+// failure and travels unchanged.
+func unusableNameError(err error) error {
+	if errors.Is(err, podgroup.ErrPodGroupTerminating) ||
+		errors.Is(err, podgroup.ErrPodGroupOwnershipConflict) {
+		return fmt.Errorf("%w: %w", workload.ErrGangNameUnusable, err)
+	}
+	return err
+}
+
+// warnPodGroupReset announces the one rebuild an operator would
+// otherwise have no trace of: the Instance is never failed for a failed
+// group, so this event is where the gang scheduler's own explanation
+// survives.
+func warnPodGroupReset(rec record.EventRecorder, input workload.ReconcileInput, component workload.ComponentType, obs workload.GangObservation) {
+	target := eventTarget(input)
+	if rec == nil || target == nil {
+		return
+	}
+	rec.Eventf(target, corev1.EventTypeWarning, string(workload.EventReasonPodGroupReset),
+		"OMENative component=%s: deleting PodGroup %s so the gang can be admitted again (%s)",
+		component, obs.Name, obs.Message)
+}
+
+// resettableIndex reports whether this owner may rebuild the group at
+// idx. A teardown belongs to DeleteBatch and a migration to its record;
+// deleting the group under either would pull the gang contract out from
+// under pods the other machine is still driving.
+func resettableIndex(observed []workload.InstanceStatus, idx int32) bool {
+	for i := range observed {
+		if observed[i].Index == idx {
+			return !workload.GangRowOwnedElsewhere(observed[i].Operation)
+		}
+	}
+	return true
+}
+
+// anyTerminalMember reports whether the group still holds a member the
+// kubelet has finished with. Such a pod occupies its stable name until
+// the create pass recycles it, and the gang controller derives the
+// group's phase from exactly these.
+func anyTerminalMember(pods []*corev1.Pod) bool {
+	for _, pod := range pods {
+		if pod != nil && pod.DeletionTimestamp == nil && pod.Status.Phase == corev1.PodFailed {
+			return true
+		}
+	}
+	return false
 }
 
 func terminalOwnedIndices(observed []workload.InstanceStatus, explicit map[int32]struct{}) map[int32]struct{} {

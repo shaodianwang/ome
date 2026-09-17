@@ -892,6 +892,15 @@ func findInstanceStatus(observed []workload.InstanceStatus, idx int32) *workload
 // unclassified (transient) rejection stays a *podCreateError, which callers
 // propagate.
 func createMissingPods(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, idx int32, targets []podTarget, target query.RevisionID) (int, error) {
+	// A gang whose deterministic PodGroup name this owner cannot write —
+	// held by another controller, or by an object still being collected —
+	// gets no members: every pod is stamped with that name, so creating
+	// one would enlist it in a group this owner does not control. Nothing
+	// created means no progress, which is exactly the wait the caller
+	// reports; the escalation pass owns the row's fate.
+	if input.Gangs.BlocksPods(idx) {
+		return 0, nil
+	}
 	created := 0
 	revisionHash := target.Hash()
 	// Prime the gang's peer-DNS host list once. It's identical for every

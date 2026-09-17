@@ -34,21 +34,21 @@ func TestExternalHold_OneOwnerPerToken(t *testing.T) {
 	ctx := context.Background()
 	input, row := holdFixture(&types.InstanceOperation{Type: types.InstanceOperationCreate})
 
-	entered, err := types.MarkExternalHold(ctx, input, 0, types.WaitingReasonUnschedulable, nil, nil)
-	if err != nil || !entered {
-		t.Fatalf("mark unschedulable: entered=%v err=%v want true, nil", entered, err)
+	entered, held, err := types.MarkExternalHold(ctx, input, 0, types.WaitingReasonUnschedulable, nil, nil)
+	if err != nil || !entered || !held {
+		t.Fatalf("mark unschedulable: entered=%v held=%v err=%v want true, true, nil", entered, held, err)
 	}
 	if row.Operation.Waiting != types.WaitingReasonUnschedulable {
 		t.Fatalf("Waiting: got %q want %q", row.Operation.Waiting, types.WaitingReasonUnschedulable)
 	}
 
 	// A quota refusal arrives while the scheduler hold stands.
-	entered, err = types.MarkExternalHold(ctx, input, 0, types.RejectionReasonQuotaExceeded, nil, nil)
+	entered, held, err = types.MarkExternalHold(ctx, input, 0, types.RejectionReasonQuotaExceeded, nil, nil)
 	if err != nil {
 		t.Fatalf("mark quota: %v", err)
 	}
-	if entered {
-		t.Errorf("mark quota: entered=true want false (the token has an owner)")
+	if entered || held {
+		t.Errorf("mark quota: entered=%v held=%v want false, false (the token has an owner)", entered, held)
 	}
 	if row.Operation.Waiting != types.WaitingReasonUnschedulable {
 		t.Errorf("Waiting: got %q want the scheduler hold untouched", row.Operation.Waiting)
@@ -89,11 +89,11 @@ func TestExternalHold_EdgeTriggered(t *testing.T) {
 		}
 	}
 
-	if entered, err := types.MarkExternalHold(ctx, input, 0, types.WaitingReasonUnschedulable, evidence("0/3 nodes"), nil); err != nil || !entered {
-		t.Fatalf("first mark: entered=%v err=%v want true, nil", entered, err)
+	if entered, held, err := types.MarkExternalHold(ctx, input, 0, types.WaitingReasonUnschedulable, evidence("0/3 nodes"), nil); err != nil || !entered || !held {
+		t.Fatalf("first mark: entered=%v held=%v err=%v want true, true, nil", entered, held, err)
 	}
-	if entered, err := types.MarkExternalHold(ctx, input, 0, types.WaitingReasonUnschedulable, evidence("0/9 nodes"), nil); err != nil || entered {
-		t.Fatalf("re-mark with a churned message: entered=%v err=%v want false, nil", entered, err)
+	if entered, held, err := types.MarkExternalHold(ctx, input, 0, types.WaitingReasonUnschedulable, evidence("0/9 nodes"), nil); err != nil || entered || !held {
+		t.Fatalf("re-mark with a churned message: entered=%v held=%v err=%v want false, true, nil", entered, held, err)
 	}
 	if got := row.LastFailure; got == nil || got.Message != "0/3 nodes" {
 		t.Errorf("LastFailure: got %+v want the message from hold start", got)
@@ -103,8 +103,8 @@ func TestExternalHold_EdgeTriggered(t *testing.T) {
 	// transition moved, so this is a new episode.
 	fresh := evidence("0/3 nodes")
 	fresh.Time = metav1.NewTime(at.Add(1))
-	if entered, err := types.MarkExternalHold(ctx, input, 0, types.WaitingReasonUnschedulable, fresh, nil); err != nil || entered {
-		t.Fatalf("re-mark at a new transition: entered=%v err=%v want false, nil", entered, err)
+	if entered, held, err := types.MarkExternalHold(ctx, input, 0, types.WaitingReasonUnschedulable, fresh, nil); err != nil || entered || !held {
+		t.Fatalf("re-mark at a new transition: entered=%v held=%v err=%v want false, true, nil", entered, held, err)
 	}
 	if got := row.LastFailure; got == nil || !got.Time.Equal(&fresh.Time) {
 		t.Errorf("LastFailure.Time: got %+v want the new hold start", got)
@@ -143,14 +143,14 @@ func TestExternalHold_WritableIsRecheckedOnTheFreshRow(t *testing.T) {
 		return op != nil && op.Type != types.InstanceOperationDelete
 	}
 
-	entered, err := types.MarkExternalHold(ctx, input, 0, types.WaitingReasonUnschedulable,
+	entered, held, err := types.MarkExternalHold(ctx, input, 0, types.WaitingReasonUnschedulable,
 		&types.InstanceTermination{PodName: "engine-0-default-0", Reason: types.WaitingReasonUnschedulable},
 		notDeleting)
 	if err != nil {
 		t.Fatalf("MarkExternalHold: %v", err)
 	}
-	if entered {
-		t.Errorf("entered: got true want false (the fresh row is a teardown)")
+	if entered || held {
+		t.Errorf("entered=%v held=%v want false, false (the fresh row is a teardown)", entered, held)
 	}
 	if fresh.Operation.Waiting != "" {
 		t.Errorf("Waiting: got %q want unset on a teardown", fresh.Operation.Waiting)

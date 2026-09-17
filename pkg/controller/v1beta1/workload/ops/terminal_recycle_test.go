@@ -547,3 +547,40 @@ func TestRestart_RecyclesTerminalNewIncarnationPod(t *testing.T) {
 		t.Fatalf("expected one fresh pod at incarnation 2, got %+v", got)
 	}
 }
+
+// TestCreate_TerminalMemberRecycledWhileGangBlocked: a gang whose
+// PodGroup name is unusable withholds NEW members, but a dead one still
+// occupying its stable name must be cleared regardless — the group's
+// phase is derived from its members, so the name cannot be rebuilt
+// around one, and nothing else in the pass would remove it.
+//
+// Cells: instance/Create/CreatePods/gang.podGroup[PhaseFailed]/before
+func TestCreate_TerminalMemberRecycledWhileGangBlocked(t *testing.T) {
+	resetExpectations(t)
+	isvc := minimalISVC("llama-70b", "prod", 1)
+	dead := rejectedPod(podForInstance(isvc, 0, false, false))
+	c := newFakeClient(t, isvc, dead)
+	deps := workload.Deps{Client: c, Recorder: record.NewFakeRecorder(16)}
+	plan := buildPlanSinglePodEngine(1)
+
+	input := buildTestInput(isvc, c, workload.ComponentEngine)
+	input.Gangs = workload.NewGangObservations()
+	input.Gangs.Record(0, workload.GangObservation{
+		Name:    "llama-70b-engine-0",
+		State:   workload.GangStateFailed,
+		Message: "PodGroup llama-70b-engine-0 reported phase Failed",
+	})
+	if !input.Gangs.BlocksPods(0) {
+		t.Fatalf("fixture: the gang must be blocking new members")
+	}
+
+	if _, err := ops.Create(context.Background(), deps, input, plan, nil); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if podExists(c, dead) {
+		t.Fatalf("terminal member %s must be recycled even while its gang is blocked", dead.Name)
+	}
+	if got := listPods(t, c, "prod"); len(got) != 0 {
+		t.Fatalf("no member may be created against an unusable gang name, got %d pod(s)", len(got))
+	}
+}

@@ -63,12 +63,16 @@ type (
 	ForceDeletePolicy       = types.ForceDeletePolicy
 	DispositionDeps         = types.DispositionDeps
 	APIPacing               = types.APIPacing
+	GangState               = types.GangState
+	GangObservation         = types.GangObservation
+	GangObservations        = types.GangObservations
 )
 
 type InstanceMutationSnapshot = types.InstanceMutationSnapshot
 type ComponentPodSnapshot = types.ComponentPodSnapshot
 
 var (
+	ErrGangNameUnusable           = types.ErrGangNameUnusable
 	ErrStatusOwnerGone            = types.ErrStatusOwnerGone
 	ErrStatusMutationPrecondition = types.ErrStatusMutationPrecondition
 )
@@ -155,6 +159,7 @@ const (
 	EventReasonRateLimited                   = types.EventReasonRateLimited
 	EventReasonMigrationFromNodeMismatch     = types.EventReasonMigrationFromNodeMismatch
 	EventReasonMigrationNodeAffinityConflict = types.EventReasonMigrationNodeAffinityConflict
+	EventReasonPodGroupReset                 = types.EventReasonPodGroupReset
 	EventReasonMaybeNoGangScheduler          = types.EventReasonMaybeNoGangScheduler
 	EventReasonGangSplitRisk                 = types.EventReasonGangSplitRisk
 
@@ -179,7 +184,21 @@ const (
 
 	WaitingReasonUnschedulable   = types.WaitingReasonUnschedulable
 	RejectionReasonQuotaExceeded = types.RejectionReasonQuotaExceeded
+
+	WaitingReasonPodGroupTerminating = types.WaitingReasonPodGroupTerminating
+	PodGroupOwnershipConflictReason  = types.PodGroupOwnershipConflictReason
+
+	GangStateNone              = types.GangStateNone
+	GangStateTerminating       = types.GangStateTerminating
+	GangStateOwnershipConflict = types.GangStateOwnershipConflict
+	GangStateFailed            = types.GangStateFailed
 )
+
+// NewGangObservations returns an empty per-Instance PodGroup
+// classification collector for one Component reconcile.
+func NewGangObservations() *GangObservations {
+	return types.NewGangObservations()
+}
 
 // NewExpectations returns a fresh Expectations cache.
 func NewExpectations() *Expectations {
@@ -237,7 +256,7 @@ func OperationCapacityBlocked(op *InstanceOperation) bool {
 // MarkExternalHold re-exports types.MarkExternalHold: the single writer
 // for InstanceOperation.Waiting, shared by every authority that can
 // stall an operation from outside.
-func MarkExternalHold(ctx context.Context, input ReconcileInput, idx int32, token string, evidence *InstanceTermination, writable func(*InstanceOperation) bool) (bool, error) {
+func MarkExternalHold(ctx context.Context, input ReconcileInput, idx int32, token string, evidence *InstanceTermination, writable func(*InstanceOperation) bool) (entered, held bool, err error) {
 	return types.MarkExternalHold(ctx, input, idx, token, evidence, writable)
 }
 
@@ -251,6 +270,12 @@ func ClearExternalHold(ctx context.Context, input ReconcileInput, idx int32, tok
 // whether an operation is parked on the scheduler-hold Waiting token.
 func OperationUnschedulable(op *InstanceOperation) bool {
 	return types.OperationUnschedulable(op)
+}
+
+// OperationGangHeld re-exports types.OperationGangHeld: whether an
+// operation is parked on one of the gang-scheduling waits.
+func OperationGangHeld(op *InstanceOperation) bool {
+	return types.OperationGangHeld(op)
 }
 
 // OperationExternallyHeld re-exports types.OperationExternallyHeld: the

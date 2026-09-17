@@ -226,12 +226,22 @@ type ReconcileInput struct {
 	StuckPodGrace time.Duration
 
 	// UnschedulableGrace is how long a pod may carry
-	// PodScheduled=False/Unschedulable before the escalation pass fails
-	// its Instance as environment-caused. Operator config
+	// PodScheduled=False/Unschedulable — or an Instance's PodGroup report
+	// that the gang has no placement — before the escalation pass fails
+	// that Instance as environment-caused. Operator config
 	// (lifecycle.unschedulableGracePeriod); zero or negative disables that
-	// escalation entirely, leaving the scheduler hold to park the
+	// escalation entirely, leaving the hold to park the
 	// InstanceReadyTimeout clock for as long as it lasts.
 	UnschedulableGrace time.Duration
+
+	// Gangs carries what each multi-pod Instance's PodGroup says about
+	// its gang, recorded by the PodGroup pass that runs ahead of the
+	// dispatcher. The pod-create choke point reads it to keep members off
+	// a group name this owner cannot use, and the escalation pass reads
+	// it as the gang's own failure evidence. Nil is safe (every method
+	// no-ops): a caller that wires no observation simply sees a gang that
+	// reports nothing.
+	Gangs *GangObservations
 
 	// Pacing collects the wake-up the apiserver itself asked for while
 	// refusing writes during this pass. The op entry points report

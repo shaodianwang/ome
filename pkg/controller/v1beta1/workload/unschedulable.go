@@ -85,9 +85,9 @@ func unschedulableTermination(pod *corev1.Pod, message string, since metav1.Time
 //
 // Both go through the shared external-hold writer, which owns the
 // precedence between authorities and the edge trigger.
-func recordUnschedulableHold(ctx context.Context, input ReconcileInput, idx int32, termination *InstanceTermination) error {
-	_, err := MarkExternalHold(ctx, input, idx, WaitingReasonUnschedulable, termination, schedulerHoldWritable)
-	return err
+func recordUnschedulableHold(ctx context.Context, input ReconcileInput, idx int32, termination *InstanceTermination) (bool, error) {
+	_, held, err := MarkExternalHold(ctx, input, idx, WaitingReasonUnschedulable, termination, schedulerHoldWritable)
+	return held, err
 }
 
 // schedulerHoldWritable reports whether this code may own the
@@ -117,26 +117,36 @@ func clearUnschedulableHold(ctx context.Context, input ReconcileInput, idx int32
 	return ClearExternalHold(ctx, input, idx, WaitingReasonUnschedulable)
 }
 
-// reconcileSchedulerHold brings the Instance's Waiting token in line
-// with what the scheduler says this pass and reports whether the hold is
-// active. A fully-serving pod set never counts as held: its bookkeeping
-// may be stale, but a stray unplaceable pod cannot stop a workload that
-// is already in rotation.
-func reconcileSchedulerHold(ctx context.Context, input ReconcileInput, s InstanceStatus, ev InstanceEvidence, serving bool) (bool, error) {
-	if ev.Unschedulable == nil || serving {
-		if !OperationUnschedulable(s.Operation) {
-			return false, nil
-		}
-		return false, clearUnschedulableHold(ctx, input, s.Index)
+// releaseSchedulerHold drops the token when the scheduler's verdict no
+// longer applies. A fully-serving pod set counts as released: its
+// bookkeeping may be stale, but a stray unplaceable pod cannot stop a
+// workload that is already in rotation.
+//
+// Every authority releases before any of them marks, so a row can hand
+// over from one wait to another within a single pass instead of
+// spending one unheld — which would restart a whole
+// InstanceReadyTimeout window.
+func releaseSchedulerHold(ctx context.Context, input ReconcileInput, s InstanceStatus, ev InstanceEvidence, serving bool) error {
+	if ev.Unschedulable != nil && !serving {
+		return nil
 	}
-	if !schedulerHoldWritable(s.Operation) {
-		// No attempt in flight, or one already parked on another
-		// authority's token. Either way this is not a hold this code owns,
-		// so it neither records nor escalates it.
+	if !OperationUnschedulable(s.Operation) {
+		return nil
+	}
+	return clearUnschedulableHold(ctx, input, s.Index)
+}
+
+// recordSchedulerHold marks the hold and reports whether the row carries
+// the scheduler token afterwards. Eligibility is judged on the FRESH row
+// inside the writer, never on the pass-start copy: a release earlier in
+// this same pass may have freed the token, and refusing on the stale
+// copy would leave the row unheld until the next reconcile.
+func recordSchedulerHold(ctx context.Context, input ReconcileInput, s InstanceStatus, ev InstanceEvidence, serving bool) (bool, error) {
+	if ev.Unschedulable == nil || serving {
 		return false, nil
 	}
 	termination := unschedulableTermination(ev.Unschedulable, ev.UnschedulableMessage, ev.UnschedulableSince)
-	return true, recordUnschedulableHold(ctx, input, s.Index, termination)
+	return recordUnschedulableHold(ctx, input, s.Index, termination)
 }
 
 // escalateSchedulerHold ends an attempt whose pod outlasted the

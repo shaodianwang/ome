@@ -244,6 +244,14 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 		if deps.EnsureGangPodGroup != nil {
 			effectiveTopology, pgErr := deps.EnsureGangPodGroup(ctx, input, plan, surgeInst)
 			if pgErr != nil {
+				if errors.Is(pgErr, workload.ErrGangNameUnusable) {
+					// The surge's PodGroup name is held by another controller
+					// or by an object still being collected. That is
+					// classified evidence about one row, not a pass failure:
+					// the escalation pass owns what happens to it, and
+					// erroring out here would stall every other Instance too.
+					return false, nil
+				}
 				return false, fmt.Errorf("ensure surge gang PodGroup (instance=%d): %w", surgeIdx, pgErr)
 			}
 			renderPlan.InstanceTopologyKeys = cloneInstanceTopologyKeys(plan.InstanceTopologyKeys)

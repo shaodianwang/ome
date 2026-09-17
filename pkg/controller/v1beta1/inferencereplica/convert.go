@@ -165,10 +165,15 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 		// pass. Zero (unconfigured) disables fast escalation; the
 		// InstanceReadyTimeout backstop still fires.
 		StuckPodGrace: graces.StuckPod,
-		// Scheduler-hold escalation window. Zero (unconfigured) leaves an
-		// unplaceable pod parking the deadline until an operator acts.
+		// Scheduler-hold escalation window, shared by the pod-level and
+		// gang-level holds. Zero (unconfigured) leaves an unplaceable pod
+		// or gang parking the deadline until an operator acts.
 		UnschedulableGrace: graces.Unschedulable,
-		Clock:              r.Clock,
+		// Per-Instance PodGroup classification for this pass. The PodGroup
+		// pass fills it before the dispatcher; the pod-create choke point
+		// and the escalation pass read it back.
+		Gangs: workload.NewGangObservations(),
+		Clock: r.Clock,
 		// WarnInstanceFailed bridges the workload escalation pass to the
 		// reconciler's event recorder so the operator sees the
 		// per-Instance Failed escalation against the EventTarget (parent
