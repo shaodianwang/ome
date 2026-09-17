@@ -82,9 +82,10 @@ const ratioGateRequeueInterval = 3 * time.Second
 //  8. Escalation — the terminal-failure pass (escalation.go): stuck-pod
 //     and elapsed-deadline evidence from the snapshot decides the
 //     Phase=Failed transition through the disposition classification.
-//     Runs after eligible non-error op-pass returns. A scale-down admission
-//     or completion commit ends the pass; an active wave excludes every extra
-//     index while retained Instances remain eligible for escalation.
+//     Runs after every eligible op-pass return, errored or not. A
+//     scale-down admission or completion commit ends the pass; an active
+//     wave excludes every extra index while retained Instances remain
+//     eligible for escalation.
 //
 // target may be nil when DesiredSpec.PodSpec is nil (MinReplicas=0).
 // Restart / Update passes short-circuit on nil target; Create returns
@@ -154,24 +155,37 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 // can fail while its operation keeps polling. The supersede-prune shares the
 // Escalate gate (both are end-of-pass bookkeeping suspended while paused, and
 // Teardown never reaches Execute).
+//
+// An errored op pass does NOT suspend that bookkeeping. Both end-of-pass
+// steps are per-Instance and re-derive their own evidence from the
+// snapshot, so one Instance's failed operation — a rejected write, a
+// throttled apiserver — would otherwise freeze every other Instance's
+// deadline clock and leak superseded RetryBlocks for as long as the
+// failure persists. The op error is the pass's primary failure: it is
+// reported first and an end-of-pass error is appended to it, never
+// substituted for it.
 func Execute(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot, d Decision) (ctrl.Result, error) {
 	res, statusCommitBoundary, err := executeActions(ctx, deps, input, plan, target, snapshot, d)
-	if err != nil || !d.Escalate || statusCommitBoundary {
+	if !d.Escalate || statusCommitBoundary {
 		return res, err
 	}
-	if eerr := escalateFromEvidence(ctx, deps, input, plan, target, snapshot, scaleDownExtras(d)); eerr != nil {
-		return ctrl.Result{}, eerr
+	endOfPass := escalateFromEvidence(ctx, deps, input, plan, target, snapshot, scaleDownExtras(d))
+	if endOfPass == nil {
+		endOfPass = pruneSupersededRetryBlocks(ctx, input, target)
 	}
-	if perr := pruneSupersededRetryBlocks(ctx, input, target); perr != nil {
-		return ctrl.Result{}, perr
+	if endOfPass == nil {
+		return res, err
 	}
-	return res, nil
+	if err == nil {
+		return ctrl.Result{}, endOfPass
+	}
+	return res, errors.Join(err, endOfPass)
 }
 
 // executeActions runs the op-pass pipeline (steps 1-7 of the chain documented
 // on Reconcile) for the Decision's selected actions, in order. The bool result
-// marks a scale-down status-commit boundary. Other early returns preserve the
-// existing end-of-pass escalation and pruning behavior.
+// marks a scale-down status-commit boundary — the only return that suppresses
+// the caller's end-of-pass escalation and prune.
 func executeActions(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot, d Decision) (ctrl.Result, bool, error) {
 	for actionIndex, action := range d.Actions {
 		switch action.Kind {

@@ -1,6 +1,6 @@
 // escalation.go — the terminal-failure escalation pass. Reconcile runs
-// it once at the end of every eligible non-teardown, non-paused,
-// non-error reconcile: per Instance it consumes the snapshot's failure evidence
+// it once at the end of every eligible non-teardown, non-paused
+// reconcile: per Instance it consumes the snapshot's failure evidence
 // (stuck pod / elapsed Operation deadline) and decides the Failed
 // transition through the shared disposition classification
 // (disposition.go). The Failed DECISION lives here, next to the rest of

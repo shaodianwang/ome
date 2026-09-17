@@ -718,3 +718,92 @@ func TestEscalation_AdmissionGatedInstance_DeadlineSkipped(t *testing.T) {
 		t.Errorf("WarnInstanceFailed: got %v want none", rec.warns)
 	}
 }
+
+// TestEscalation_DrainingPodDoesNotMaskStuckReplacement pins
+// podSetFullyServing's deleting-pod rule from three sides. A completed
+// surge leaves the drained source next to its serving replacement, so a
+// deleting pod must not disqualify an otherwise healthy set (a); but it
+// proves nothing on its own, so it cannot cover the desired count (b),
+// and it cannot vouch for a replacement the set is actually waiting on
+// (c). Only (a) suppresses escalation.
+//
+// Cells: instance/Update/SurgeDrain/pod.terminating[source]/before, instance/Update/SurgeDrain/pod.phaseTerminal[Failed]/before, instance/Update/SurgeDrain/timer.operationDeadline/before
+func TestEscalation_DrainingPodDoesNotMaskStuckReplacement(t *testing.T) {
+	now := time.Now()
+	deleting := func(pod *corev1.Pod) *corev1.Pod {
+		ts := metav1.NewTime(now.Add(-time.Minute))
+		pod.DeletionTimestamp = &ts
+		pod.Finalizers = []string{"ome.io/test"}
+		return pod
+	}
+	terminalPod := func(name string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              name,
+				CreationTimestamp: metav1.NewTime(now.Add(-time.Hour)),
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodFailed,
+				Conditions: []corev1.PodCondition{
+					{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+					{Type: "ome.io/serving", Status: corev1.ConditionTrue},
+				},
+			},
+		}
+	}
+	surgeDrainInstance := func() []workload.InstanceStatus {
+		return []workload.InstanceStatus{{
+			Index:    0,
+			Phase:    workload.InstancePhaseUpdating,
+			PodCount: 1,
+			Operation: &workload.InstanceOperation{
+				Type:           workload.InstanceOperationUpdate,
+				Step:           workload.UpdateStepSurgeDrain,
+				TargetRevision: "own-engine-newhash",
+				Deadline:       metav1.NewTime(now.Add(-time.Hour)),
+			},
+		}}
+	}
+
+	cases := []struct {
+		name     string
+		pods     []*corev1.Pod
+		escalate bool
+	}{
+		{
+			name:     "drained source beside its serving replacement",
+			pods:     []*corev1.Pod{deleting(servingPod("engine-0-default-0")), servingPod("engine-0-default-1")},
+			escalate: false,
+		},
+		{
+			name:     "deleting pod alone cannot cover the desired count",
+			pods:     []*corev1.Pod{deleting(servingPod("engine-0-default-0"))},
+			escalate: true,
+		},
+		{
+			name:     "drain in flight beside a terminal replacement",
+			pods:     []*corev1.Pod{deleting(servingPod("engine-0-default-0")), terminalPod("engine-0-default-1")},
+			escalate: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input, rec := escalationFixture(surgeDrainInstance())
+			if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+				map[int32][]*corev1.Pod{0: tc.pods}); err != nil {
+				t.Fatalf("escalation pass: %v", err)
+			}
+			failed := rec.store[0].Phase == workload.InstancePhaseFailed
+			if failed != tc.escalate {
+				t.Fatalf("Phase: got %q (escalated=%v) want escalated=%v", rec.store[0].Phase, failed, tc.escalate)
+			}
+			want := 0
+			if tc.escalate {
+				want = 1
+			}
+			if len(rec.warns) != want {
+				t.Errorf("WarnInstanceFailed: got %v want %d call(s)", rec.warns, want)
+			}
+		})
+	}
+}
