@@ -37,12 +37,15 @@ func EffectivePartition(isvc *v1beta1.InferenceService, component v1beta1.Compon
 	// Rolled back: hold NOTHING via partition (0). The component is driven back
 	// onto the stable revision by the IR's RollbackToRevision target, not by the
 	// partition; a non-zero partition here would fight that revert.
-	if cs := rollout.CanaryStatusFor(&isvc.Status, component); cs != nil && cs.RolledBackRevisionHash != "" {
+	// The group's run state is keyed by its primary; a member of the group's
+	// other unit must read the same state to stay in step with it.
+	cs := rollout.GroupCanaryStatusFor(isvc, component)
+	if cs != nil && cs.RolledBackRevisionHash != "" {
 		zero := int32(0)
 		return &zero, true
 	}
 	idx := int32(0)
-	if cs := rollout.CanaryStatusFor(&isvc.Status, component); cs != nil {
+	if cs != nil {
 		idx = cs.CurrentStep
 	}
 	// Status is an unvalidated subresource: clamp a negative step (an external

@@ -110,21 +110,27 @@ func readyCapacityCount(readyPods int32, readyInstances *int32) int32 {
 // recorded targets there is nothing to prove the unit idle, so it reports
 // true and the caller's other guards decide.
 func unitRetargeted(in ReconcileInputs) bool {
-	if in.ISVC == nil || in.ISVC.Status.Rollout == nil || in.ISVC.Status.Rollout.ActiveRun == nil {
+	return groupRetargeted(in.ISVC, in.Group, in.Component)
+}
+
+// groupRetargeted is unitRetargeted over an explicit group; fallback stands in
+// for the group's members when the group is unknown.
+func groupRetargeted(isvc *v1beta1.InferenceService, group *v1beta1.RolloutGroup, fallback v1beta1.ComponentType) bool {
+	if isvc == nil || isvc.Status.Rollout == nil || isvc.Status.Rollout.ActiveRun == nil {
 		return true
 	}
-	targets := in.ISVC.Status.Rollout.ActiveRun.TargetRevisions
+	targets := isvc.Status.Rollout.ActiveRun.TargetRevisions
 	if len(targets) == 0 {
 		return true
 	}
 	members := map[v1beta1.ComponentType]bool{}
-	if in.Group != nil {
-		for _, c := range in.Group.Components {
+	if group != nil {
+		for _, c := range group.Components {
 			members[c] = true
 		}
 	}
 	if len(members) == 0 {
-		members[in.Component] = true
+		members[fallback] = true
 	}
 	seen := false
 	for i := range targets {

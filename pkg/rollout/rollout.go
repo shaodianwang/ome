@@ -71,3 +71,34 @@ func CanaryGroup(isvc *v1beta1.InferenceService) *v1beta1.RolloutGroup {
 	}
 	return nil
 }
+
+// PrimaryOf is the Component a group's step machine and traffic weight run
+// through: router, else engine, else decoder among the group's members, else
+// the first member. A group's canary run state is stored under this Component.
+func PrimaryOf(g *v1beta1.RolloutGroup) v1beta1.ComponentType {
+	if g == nil || len(g.Components) == 0 {
+		return ""
+	}
+	for _, preferred := range []v1beta1.ComponentType{v1beta1.RouterComponent, v1beta1.EngineComponent, v1beta1.DecoderComponent} {
+		for _, c := range g.Components {
+			if c == preferred {
+				return c
+			}
+		}
+	}
+	return g.Components[0]
+}
+
+// GroupCanaryStatusFor returns the run state of the canary group that drives
+// component, or nil when no canary group covers it. The state is keyed by the
+// group's primary, which is not the member's own unit when one group covers
+// both units: a P/D pair rolled through a router-primary group reads the
+// router's step, and reading its own unit would find nothing and stay at the
+// first step's capacity while the primary advances.
+func GroupCanaryStatusFor(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) *v1beta1.CanaryStatus {
+	g := CanaryGroupFor(isvc, component)
+	if g == nil {
+		return nil
+	}
+	return CanaryStatusFor(&isvc.Status, PrimaryOf(g))
+}
