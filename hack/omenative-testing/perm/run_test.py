@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import copy
+import json
 import subprocess
 import sys
 import time
@@ -9,6 +10,7 @@ from unittest import mock
 
 import batch
 import generate_cases
+import irstatus
 import run
 
 HERE = Path(__file__).parent.resolve()
@@ -120,6 +122,139 @@ class InitialRolloutSettlementTest(unittest.TestCase):
                 settled, detail = run._initial_rollout_settled(
                     pods, {"engine": 1}, {"engine": 1}, {"engine"}, items)
                 self.assertFalse(settled, detail)
+
+
+def _normalized(rows):
+    """Rows as the Go codec serializes them: default-valued fields absent."""
+    def strip(value):
+        if isinstance(value, dict):
+            return {k: strip(v) for k, v in value.items() if v not in (None, 0, "", False, [], {})}
+        if isinstance(value, list):
+            return [strip(v) for v in value]
+        return value
+    return strip(rows)
+
+
+class ColumnarStatusDecodingTest(unittest.TestCase):
+    """The harness decodes ColumnarV2 exactly as the Go codec does; the golden
+    file is written by goldengen from that codec."""
+
+    def test_golden_rows_match_the_go_codec(self):
+        goldens = json.loads((HERE / "testdata" / "columnar_golden.json").read_text())
+        self.assertTrue(goldens)
+        for golden in goldens:
+            with self.subTest(golden["name"]):
+                status = {"instanceStatusEncoding": "ColumnarV2",
+                          "instanceStatusColumns": golden["columns"]}
+                self.assertEqual(_normalized(golden["rows"]),
+                                 _normalized(irstatus.instance_statuses(status)))
+
+    def test_dense_rows_pass_through_unchanged(self):
+        rows = [{"index": 0, "phase": "Ready"}]
+        self.assertIs(rows, irstatus.instance_statuses({"instanceStatuses": rows}))
+
+    def test_status_without_rows_is_none(self):
+        self.assertIsNone(irstatus.instance_statuses({}))
+        self.assertIsNone(irstatus.instance_statuses(None))
+
+    def test_union_violations_are_rejected(self):
+        columns = {"members": "0", "phases": [{"value": "Ready", "indexes": "0"}]}
+        statuses = {
+            "columns without marker": {"instanceStatusColumns": columns},
+            "marker without columns": {"instanceStatusEncoding": "ColumnarV2"},
+            "both representations": {"instanceStatusEncoding": "ColumnarV2",
+                                     "instanceStatusColumns": columns,
+                                     "instanceStatuses": [{"index": 0}]},
+            "unknown marker": {"instanceStatusEncoding": "DenseV9", "instanceStatuses": []},
+        }
+        for name, status in statuses.items():
+            with self.subTest(name):
+                with self.assertRaises(irstatus.DecodeError):
+                    irstatus.instance_statuses(status)
+
+    def test_index_set_grammar(self):
+        self.assertEqual([0, 1, 2, 5, 7, 8], irstatus.parse_index_set("0-2,5,7-8"))
+        for raw in ("", "01", "1-1", "2-1", "0,", "3,2", "0-2,3", "0,1", "a", "0--1", None):
+            with self.subTest(raw=raw):
+                with self.assertRaises(irstatus.DecodeError):
+                    irstatus.parse_index_set(raw)
+
+    def test_structural_violations_are_rejected(self):
+        base = {"members": "0-1", "phases": [{"value": "Ready", "indexes": "0-1"}]}
+        cases = {
+            "phase coverage gap": {**base, "phases": [{"value": "Ready", "indexes": "0"}]},
+            "overlapping groups": {**base, "phases": [{"value": "Failed", "indexes": "0-1"},
+                                                      {"value": "Ready", "indexes": "1"}]},
+            "groups out of order": {**base, "phases": [{"value": "Ready", "indexes": "0"},
+                                                       {"value": "Failed", "indexes": "1"}]},
+            "empty optional column": {**base, "runningRevisions": []},
+            "non-member index": {**base, "admitted": "2"},
+            "zero incarnation": {**base, "incarnations": [{"value": 0, "indexes": "0"}]},
+            "zero count": {**base, "podCounts": [{"value": 0, "indexes": "0"}]},
+            "ascending rowOrder spelled out": {**base, "rowOrder": [0, 1]},
+            "rowOrder not a permutation": {**base, "rowOrder": [1, 1]},
+            "entry without record": {**base, "entries": [{"index": 0}]},
+            "entries out of order": {**base, "entries": [{"index": 1, "operation": {"type": "Create"}},
+                                                         {"index": 0, "operation": {"type": "Create"}}]},
+        }
+        for name, columns in cases.items():
+            with self.subTest(name):
+                with self.assertRaises(irstatus.DecodeError):
+                    irstatus.decode_columns(columns)
+
+    def test_row_order_and_defaults_expand(self):
+        columns = {
+            "members": "0-2",
+            "rowOrder": [2, 0, 1],
+            "phases": [{"value": "Ready", "indexes": "0,2"}, {"value": "Updating", "indexes": "1"}],
+            "runningRevisions": [{"value": "rev-a", "indexes": "0-2"}],
+            "incarnations": [{"value": 3, "indexes": "1"}],
+            "admitted": "0-1",
+            "activeOrdinalOne": "2",
+            "entries": [{"index": 1, "operation": {"type": "Update"}}],
+        }
+        rows = irstatus.decode_columns(columns)
+        self.assertEqual([2, 0, 1], [row["index"] for row in rows])
+        by_index = {row["index"]: row for row in rows}
+        self.assertEqual({"index": 0, "phase": "Ready", "runningRevision": "rev-a", "admitted": True},
+                         by_index[0])
+        self.assertEqual({"index": 1, "phase": "Updating", "runningRevision": "rev-a",
+                          "incarnation": 3, "admitted": True, "operation": {"type": "Update"}},
+                         by_index[1])
+        self.assertEqual({"index": 2, "phase": "Ready", "runningRevision": "rev-a", "activeOrdinal": 1},
+                         by_index[2])
+
+
+class ColumnarSettlementTest(unittest.TestCase):
+    """The settle check reads rows through the decoder, so an object stored as
+    ColumnarV2 settles exactly like a dense one."""
+
+    @staticmethod
+    def columnar(item):
+        rows = item["status"].pop("instanceStatuses")
+        indexes = "0" if len(rows) == 1 else f"0-{len(rows) - 1}"
+        item["status"]["instanceStatusEncoding"] = "ColumnarV2"
+        item["status"]["instanceStatusColumns"] = {
+            "members": indexes,
+            "phases": [{"value": rows[0]["phase"], "indexes": indexes}],
+        }
+        return item
+
+    def test_columnar_object_settles(self):
+        pods = {"engine-0": pod("engine", 0), "engine-1": pod("engine", 1)}
+        item = self.columnar(inference_replica("engine", 2))
+        settled, detail = run._initial_rollout_settled(
+            pods, {"engine": 1}, {"engine": 2}, {"engine"}, [item])
+        self.assertTrue(settled, detail)
+
+    def test_undecodable_object_names_the_reason(self):
+        pods = {"engine": pod("engine", 0)}
+        item = inference_replica("engine", 1)
+        item["status"]["instanceStatusColumns"] = {"members": "0"}
+        settled, detail = run._initial_rollout_settled(
+            pods, {"engine": 1}, {"engine": 1}, {"engine"}, [item])
+        self.assertFalse(settled)
+        self.assertIn("undecodable", detail)
 
 
 class CanaryCommandStateTest(unittest.TestCase):

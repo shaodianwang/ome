@@ -1,0 +1,1731 @@
+[
+  {
+    "name": "uniform-3",
+    "columns": {
+      "members": "0-2",
+      "phases": [
+        {
+          "value": "Ready",
+          "indexes": "0-2"
+        }
+      ],
+      "runningRevisions": [
+        {
+          "value": "example-engine-2f32f6fe",
+          "indexes": "0-2"
+        }
+      ],
+      "incarnations": [
+        {
+          "value": 1,
+          "indexes": "0-2"
+        }
+      ],
+      "podCounts": [
+        {
+          "value": 1,
+          "indexes": "0-2"
+        }
+      ],
+      "servingPodCounts": [
+        {
+          "value": 1,
+          "indexes": "0-2"
+        }
+      ],
+      "availablePodCounts": [
+        {
+          "value": 1,
+          "indexes": "0-2"
+        }
+      ],
+      "admitted": "0-2"
+    },
+    "rows": [
+      {
+        "index": 0,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 1,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 2,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      }
+    ]
+  },
+  {
+    "name": "uniform-50",
+    "columns": {
+      "members": "0-49",
+      "phases": [
+        {
+          "value": "Ready",
+          "indexes": "0-49"
+        }
+      ],
+      "runningRevisions": [
+        {
+          "value": "example-engine-2f32f6fe",
+          "indexes": "0-49"
+        }
+      ],
+      "incarnations": [
+        {
+          "value": 1,
+          "indexes": "0-49"
+        }
+      ],
+      "podCounts": [
+        {
+          "value": 1,
+          "indexes": "0-49"
+        }
+      ],
+      "servingPodCounts": [
+        {
+          "value": 1,
+          "indexes": "0-49"
+        }
+      ],
+      "availablePodCounts": [
+        {
+          "value": 1,
+          "indexes": "0-49"
+        }
+      ],
+      "admitted": "0-49"
+    },
+    "rows": [
+      {
+        "index": 0,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 1,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 2,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 3,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 4,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 5,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 6,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 7,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 8,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 9,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 10,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 11,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 12,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 13,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 14,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 15,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 16,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 17,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 18,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 19,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 20,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 21,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 22,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 23,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 24,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 25,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 26,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 27,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 28,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 29,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 30,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 31,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 32,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 33,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 34,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 35,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 36,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 37,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 38,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 39,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 40,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 41,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 42,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 43,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 44,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 45,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 46,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 47,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 48,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 49,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      }
+    ]
+  },
+  {
+    "name": "representative-40",
+    "columns": {
+      "members": "0-39",
+      "phases": [
+        {
+          "value": "Ready",
+          "indexes": "0-6,8-26,28-39"
+        },
+        {
+          "value": "Updating",
+          "indexes": "7,27"
+        }
+      ],
+      "runningRevisions": [
+        {
+          "value": "example-engine-2f32f6fe",
+          "indexes": "0-2,4-12,14-22,24-32,34-39"
+        },
+        {
+          "value": "example-engine-9b1c0d2e",
+          "indexes": "3,13,23,33"
+        }
+      ],
+      "targetRevisions": [
+        {
+          "value": "example-engine-9b1c0d2e",
+          "indexes": "7,27"
+        }
+      ],
+      "incarnations": [
+        {
+          "value": 1,
+          "indexes": "0,3,6,9,12,15,18,21,24,27,30,33,36,39"
+        },
+        {
+          "value": 2,
+          "indexes": "1,4,7,10,13,16,19,22,25,28,31,34,37"
+        },
+        {
+          "value": 3,
+          "indexes": "2,5,8,11,14,17,20,23,26,29,32,35,38"
+        }
+      ],
+      "podCounts": [
+        {
+          "value": 1,
+          "indexes": "0-39"
+        }
+      ],
+      "servingPodCounts": [
+        {
+          "value": 1,
+          "indexes": "0-6,8-26,28-39"
+        }
+      ],
+      "availablePodCounts": [
+        {
+          "value": 1,
+          "indexes": "0-6,8-26,28-39"
+        }
+      ],
+      "admitted": "1-39",
+      "activeOrdinalOne": "3,7,11,15,19,23,27,31,35,39"
+    },
+    "rows": [
+      {
+        "index": 0,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1
+      },
+      {
+        "index": 1,
+        "incarnation": 2,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 2,
+        "incarnation": 3,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 3,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-9b1c0d2e",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true,
+        "activeOrdinal": 1
+      },
+      {
+        "index": 4,
+        "incarnation": 2,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 5,
+        "incarnation": 3,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 6,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 7,
+        "incarnation": 2,
+        "phase": "Updating",
+        "runningRevision": "example-engine-2f32f6fe",
+        "targetRevision": "example-engine-9b1c0d2e",
+        "podCount": 1,
+        "admitted": true,
+        "activeOrdinal": 1
+      },
+      {
+        "index": 8,
+        "incarnation": 3,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 9,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 10,
+        "incarnation": 2,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 11,
+        "incarnation": 3,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true,
+        "activeOrdinal": 1
+      },
+      {
+        "index": 12,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 13,
+        "incarnation": 2,
+        "phase": "Ready",
+        "runningRevision": "example-engine-9b1c0d2e",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 14,
+        "incarnation": 3,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 15,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true,
+        "activeOrdinal": 1
+      },
+      {
+        "index": 16,
+        "incarnation": 2,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 17,
+        "incarnation": 3,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 18,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 19,
+        "incarnation": 2,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true,
+        "activeOrdinal": 1
+      },
+      {
+        "index": 20,
+        "incarnation": 3,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 21,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 22,
+        "incarnation": 2,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 23,
+        "incarnation": 3,
+        "phase": "Ready",
+        "runningRevision": "example-engine-9b1c0d2e",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true,
+        "activeOrdinal": 1
+      },
+      {
+        "index": 24,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 25,
+        "incarnation": 2,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 26,
+        "incarnation": 3,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 27,
+        "incarnation": 1,
+        "phase": "Updating",
+        "runningRevision": "example-engine-2f32f6fe",
+        "targetRevision": "example-engine-9b1c0d2e",
+        "podCount": 1,
+        "admitted": true,
+        "activeOrdinal": 1
+      },
+      {
+        "index": 28,
+        "incarnation": 2,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 29,
+        "incarnation": 3,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 30,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 31,
+        "incarnation": 2,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true,
+        "activeOrdinal": 1
+      },
+      {
+        "index": 32,
+        "incarnation": 3,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 33,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-9b1c0d2e",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 34,
+        "incarnation": 2,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 35,
+        "incarnation": 3,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true,
+        "activeOrdinal": 1
+      },
+      {
+        "index": 36,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 37,
+        "incarnation": 2,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 38,
+        "incarnation": 3,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 39,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true,
+        "activeOrdinal": 1
+      }
+    ]
+  },
+  {
+    "name": "full-feature",
+    "columns": {
+      "members": "0-3,5,7,20,2147483647",
+      "rowOrder": [
+        5,
+        0,
+        1,
+        2,
+        3,
+        20,
+        7,
+        2147483647
+      ],
+      "phases": [
+        {
+          "value": "Creating",
+          "indexes": "1"
+        },
+        {
+          "value": "Deleting",
+          "indexes": "2147483647"
+        },
+        {
+          "value": "Failed",
+          "indexes": "7"
+        },
+        {
+          "value": "Migrating",
+          "indexes": "20"
+        },
+        {
+          "value": "Pending",
+          "indexes": "0"
+        },
+        {
+          "value": "Ready",
+          "indexes": "5"
+        },
+        {
+          "value": "Restarting",
+          "indexes": "3"
+        },
+        {
+          "value": "Updating",
+          "indexes": "2"
+        }
+      ],
+      "runningRevisions": [
+        {
+          "value": "example-engine-2f32f6fe",
+          "indexes": "2-3,5,20"
+        },
+        {
+          "value": "example-engine-9b1c0d2e",
+          "indexes": "7,2147483647"
+        }
+      ],
+      "targetRevisions": [
+        {
+          "value": "example-engine-2f32f6fe",
+          "indexes": "1"
+        },
+        {
+          "value": "example-engine-9b1c0d2e",
+          "indexes": "2"
+        }
+      ],
+      "incarnations": [
+        {
+          "value": -1,
+          "indexes": "2"
+        },
+        {
+          "value": 1,
+          "indexes": "0,20"
+        },
+        {
+          "value": 2,
+          "indexes": "3"
+        },
+        {
+          "value": 3,
+          "indexes": "5"
+        },
+        {
+          "value": 4,
+          "indexes": "7"
+        },
+        {
+          "value": 9223372036854775807,
+          "indexes": "2147483647"
+        }
+      ],
+      "podCounts": [
+        {
+          "value": 8,
+          "indexes": "2-3,5,20"
+        },
+        {
+          "value": 2147483647,
+          "indexes": "2147483647"
+        }
+      ],
+      "servingPodCounts": [
+        {
+          "value": 1,
+          "indexes": "2147483647"
+        },
+        {
+          "value": 4,
+          "indexes": "2"
+        },
+        {
+          "value": 8,
+          "indexes": "5,20"
+        }
+      ],
+      "availablePodCounts": [
+        {
+          "value": 8,
+          "indexes": "5,20"
+        },
+        {
+          "value": 2147483647,
+          "indexes": "2147483647"
+        }
+      ],
+      "admitted": "2-3,5,7,20",
+      "activeOrdinalOne": "5,7",
+      "entries": [
+        {
+          "index": 1,
+          "operation": {
+            "id": "op-create",
+            "type": "Create",
+            "step": "WaitReady",
+            "startedAt": "2026-03-04T05:06:07Z",
+            "lastProgressAt": "2026-03-04T05:07:07Z",
+            "deadline": "2026-03-04T06:06:07Z",
+            "retryCount": 1,
+            "targetRevision": "example-engine-9b1c0d2e",
+            "reason": "rollout"
+          }
+        },
+        {
+          "index": 2,
+          "operation": {
+            "id": "op-update",
+            "type": "Update",
+            "step": "Drain",
+            "startedAt": "2026-03-04T05:06:07Z",
+            "lastProgressAt": "2026-03-04T05:07:07Z",
+            "deadline": "2026-03-04T06:06:07Z",
+            "retryCount": 1,
+            "targetRevision": "example-engine-9b1c0d2e",
+            "reason": "rollout"
+          }
+        },
+        {
+          "index": 3,
+          "operation": {
+            "id": "op-restart",
+            "type": "Restart",
+            "step": "DeletePods",
+            "startedAt": "2026-03-04T05:06:07Z",
+            "lastProgressAt": "2026-03-04T05:07:07Z",
+            "deadline": "2026-03-04T06:06:07Z",
+            "retryCount": 1,
+            "targetRevision": "example-engine-9b1c0d2e",
+            "reason": "rollout"
+          },
+          "lastFailure": {
+            "podName": "example-engine-3-2",
+            "containerName": "ome-container",
+            "reason": "Error",
+            "exitCode": 143,
+            "message": "exit status 143",
+            "time": "2026-03-04T05:06:07Z"
+          }
+        },
+        {
+          "index": 5,
+          "conditions": [
+            {
+              "type": "AllPodsReady",
+              "status": "True",
+              "observedGeneration": 3,
+              "lastTransitionTime": "2026-03-04T05:06:07Z",
+              "reason": "Ready",
+              "message": "Ready observed"
+            },
+            {
+              "type": "AllPodsAvailable",
+              "status": "True",
+              "observedGeneration": 3,
+              "lastTransitionTime": "2026-03-04T05:06:07Z",
+              "reason": "Available",
+              "message": "Available observed"
+            }
+          ],
+          "readySince": "2026-03-04T04:06:07Z"
+        },
+        {
+          "index": 7,
+          "conditions": [
+            {
+              "type": "Failed",
+              "status": "True",
+              "observedGeneration": 3,
+              "lastTransitionTime": "2026-03-04T05:06:07Z",
+              "reason": "PodFailed",
+              "message": "PodFailed observed"
+            }
+          ],
+          "lastFailure": {
+            "podName": "example-engine-7-0",
+            "reason": "PodFailed",
+            "time": "2026-03-04T05:06:07Z"
+          }
+        },
+        {
+          "index": 20,
+          "operation": {
+            "id": "op-migrate",
+            "type": "Migrate",
+            "step": "SurgeReady",
+            "startedAt": "2026-03-04T05:06:07Z",
+            "lastProgressAt": "2026-03-04T05:07:07Z",
+            "deadline": "2026-03-04T06:06:07Z",
+            "retryCount": 1,
+            "targetRevision": "example-engine-9b1c0d2e",
+            "reason": "rollout",
+            "surgeIndex": 21,
+            "fromNode": "node-a",
+            "hintTargetNodes": [
+              "node-c",
+              "node-b"
+            ],
+            "requestUUID": "9c0d1e2f-0000-4000-8000-000000000001"
+          }
+        },
+        {
+          "index": 2147483647,
+          "operation": {
+            "id": "op-delete",
+            "type": "Delete",
+            "step": "Drain",
+            "startedAt": "2026-03-04T05:06:07Z",
+            "lastProgressAt": "2026-03-04T05:07:07Z",
+            "deadline": "2026-03-04T06:06:07Z",
+            "retryCount": 1,
+            "targetRevision": "example-engine-9b1c0d2e",
+            "reason": "rollout"
+          }
+        }
+      ]
+    },
+    "rows": [
+      {
+        "index": 5,
+        "incarnation": 3,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 8,
+        "servingPodCount": 8,
+        "availablePodCount": 8,
+        "admitted": true,
+        "conditions": [
+          {
+            "type": "AllPodsReady",
+            "status": "True",
+            "observedGeneration": 3,
+            "lastTransitionTime": "2026-03-04T05:06:07Z",
+            "reason": "Ready",
+            "message": "Ready observed"
+          },
+          {
+            "type": "AllPodsAvailable",
+            "status": "True",
+            "observedGeneration": 3,
+            "lastTransitionTime": "2026-03-04T05:06:07Z",
+            "reason": "Available",
+            "message": "Available observed"
+          }
+        ],
+        "readySince": "2026-03-04T04:06:07Z",
+        "activeOrdinal": 1
+      },
+      {
+        "index": 0,
+        "incarnation": 1,
+        "phase": "Pending"
+      },
+      {
+        "index": 1,
+        "phase": "Creating",
+        "targetRevision": "example-engine-2f32f6fe",
+        "operation": {
+          "id": "op-create",
+          "type": "Create",
+          "step": "WaitReady",
+          "startedAt": "2026-03-04T05:06:07Z",
+          "lastProgressAt": "2026-03-04T05:07:07Z",
+          "deadline": "2026-03-04T06:06:07Z",
+          "retryCount": 1,
+          "targetRevision": "example-engine-9b1c0d2e",
+          "reason": "rollout"
+        }
+      },
+      {
+        "index": 2,
+        "incarnation": -1,
+        "phase": "Updating",
+        "runningRevision": "example-engine-2f32f6fe",
+        "targetRevision": "example-engine-9b1c0d2e",
+        "podCount": 8,
+        "servingPodCount": 4,
+        "admitted": true,
+        "operation": {
+          "id": "op-update",
+          "type": "Update",
+          "step": "Drain",
+          "startedAt": "2026-03-04T05:06:07Z",
+          "lastProgressAt": "2026-03-04T05:07:07Z",
+          "deadline": "2026-03-04T06:06:07Z",
+          "retryCount": 1,
+          "targetRevision": "example-engine-9b1c0d2e",
+          "reason": "rollout"
+        }
+      },
+      {
+        "index": 3,
+        "incarnation": 2,
+        "phase": "Restarting",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 8,
+        "admitted": true,
+        "operation": {
+          "id": "op-restart",
+          "type": "Restart",
+          "step": "DeletePods",
+          "startedAt": "2026-03-04T05:06:07Z",
+          "lastProgressAt": "2026-03-04T05:07:07Z",
+          "deadline": "2026-03-04T06:06:07Z",
+          "retryCount": 1,
+          "targetRevision": "example-engine-9b1c0d2e",
+          "reason": "rollout"
+        },
+        "lastFailure": {
+          "podName": "example-engine-3-2",
+          "containerName": "ome-container",
+          "reason": "Error",
+          "exitCode": 143,
+          "message": "exit status 143",
+          "time": "2026-03-04T05:06:07Z"
+        }
+      },
+      {
+        "index": 20,
+        "incarnation": 1,
+        "phase": "Migrating",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 8,
+        "servingPodCount": 8,
+        "availablePodCount": 8,
+        "admitted": true,
+        "operation": {
+          "id": "op-migrate",
+          "type": "Migrate",
+          "step": "SurgeReady",
+          "startedAt": "2026-03-04T05:06:07Z",
+          "lastProgressAt": "2026-03-04T05:07:07Z",
+          "deadline": "2026-03-04T06:06:07Z",
+          "retryCount": 1,
+          "targetRevision": "example-engine-9b1c0d2e",
+          "reason": "rollout",
+          "surgeIndex": 21,
+          "fromNode": "node-a",
+          "hintTargetNodes": [
+            "node-c",
+            "node-b"
+          ],
+          "requestUUID": "9c0d1e2f-0000-4000-8000-000000000001"
+        }
+      },
+      {
+        "index": 7,
+        "incarnation": 4,
+        "phase": "Failed",
+        "runningRevision": "example-engine-9b1c0d2e",
+        "admitted": true,
+        "conditions": [
+          {
+            "type": "Failed",
+            "status": "True",
+            "observedGeneration": 3,
+            "lastTransitionTime": "2026-03-04T05:06:07Z",
+            "reason": "PodFailed",
+            "message": "PodFailed observed"
+          }
+        ],
+        "activeOrdinal": 1,
+        "lastFailure": {
+          "podName": "example-engine-7-0",
+          "reason": "PodFailed",
+          "time": "2026-03-04T05:06:07Z"
+        }
+      },
+      {
+        "index": 2147483647,
+        "incarnation": 9223372036854775807,
+        "phase": "Deleting",
+        "runningRevision": "example-engine-9b1c0d2e",
+        "podCount": 2147483647,
+        "servingPodCount": 1,
+        "availablePodCount": 2147483647,
+        "operation": {
+          "id": "op-delete",
+          "type": "Delete",
+          "step": "Drain",
+          "startedAt": "2026-03-04T05:06:07Z",
+          "lastProgressAt": "2026-03-04T05:07:07Z",
+          "deadline": "2026-03-04T06:06:07Z",
+          "retryCount": 1,
+          "targetRevision": "example-engine-9b1c0d2e",
+          "reason": "rollout"
+        }
+      }
+    ]
+  },
+  {
+    "name": "reversed-row-order",
+    "columns": {
+      "members": "0-11",
+      "rowOrder": [
+        11,
+        10,
+        9,
+        8,
+        7,
+        6,
+        5,
+        4,
+        3,
+        2,
+        1,
+        0
+      ],
+      "phases": [
+        {
+          "value": "Ready",
+          "indexes": "0-6,8-11"
+        },
+        {
+          "value": "Updating",
+          "indexes": "7"
+        }
+      ],
+      "runningRevisions": [
+        {
+          "value": "example-engine-2f32f6fe",
+          "indexes": "0-2,4-11"
+        },
+        {
+          "value": "example-engine-9b1c0d2e",
+          "indexes": "3"
+        }
+      ],
+      "targetRevisions": [
+        {
+          "value": "example-engine-9b1c0d2e",
+          "indexes": "7"
+        }
+      ],
+      "incarnations": [
+        {
+          "value": 1,
+          "indexes": "0,3,6,9"
+        },
+        {
+          "value": 2,
+          "indexes": "1,4,7,10"
+        },
+        {
+          "value": 3,
+          "indexes": "2,5,8,11"
+        }
+      ],
+      "podCounts": [
+        {
+          "value": 1,
+          "indexes": "0-11"
+        }
+      ],
+      "servingPodCounts": [
+        {
+          "value": 1,
+          "indexes": "0-6,8-11"
+        }
+      ],
+      "availablePodCounts": [
+        {
+          "value": 1,
+          "indexes": "0-6,8-11"
+        }
+      ],
+      "admitted": "1-11",
+      "activeOrdinalOne": "3,7,11"
+    },
+    "rows": [
+      {
+        "index": 11,
+        "incarnation": 3,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true,
+        "activeOrdinal": 1
+      },
+      {
+        "index": 10,
+        "incarnation": 2,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 9,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 8,
+        "incarnation": 3,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 7,
+        "incarnation": 2,
+        "phase": "Updating",
+        "runningRevision": "example-engine-2f32f6fe",
+        "targetRevision": "example-engine-9b1c0d2e",
+        "podCount": 1,
+        "admitted": true,
+        "activeOrdinal": 1
+      },
+      {
+        "index": 6,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 5,
+        "incarnation": 3,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 4,
+        "incarnation": 2,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 3,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-9b1c0d2e",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true,
+        "activeOrdinal": 1
+      },
+      {
+        "index": 2,
+        "incarnation": 3,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 1,
+        "incarnation": 2,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1,
+        "admitted": true
+      },
+      {
+        "index": 0,
+        "incarnation": 1,
+        "phase": "Ready",
+        "runningRevision": "example-engine-2f32f6fe",
+        "podCount": 1,
+        "servingPodCount": 1,
+        "availablePodCount": 1
+      }
+    ]
+  }
+]

@@ -57,6 +57,12 @@ echo "--- perm corpus parse (Go) ---"
 go test -count=1 -run 'TestGeneratedCorpusParses' \
   ./tests/integration/singlecluster/controller/omenative_perm_kind/
 
+# Harness decoder contract: the committed ColumnarV2 golden file must be
+# what the current codec and fixtures produce, so the harness's Python
+# decoder is always tested against the live encoding.
+echo "--- perm ColumnarV2 golden is current (Go) ---"
+go test -count=1 ./hack/omenative-testing/perm/goldengen/
+
 # The mks-cpu pod's external interface is IPv6. kube-apiserver
 # auto-detects it as the external host, then refuses to start because
 # the IPv6 host doesn't match the IPv4 service-cluster IP range envtest

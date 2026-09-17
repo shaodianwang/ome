@@ -68,6 +68,7 @@ import uuid
 from collections import defaultdict
 from pathlib import Path
 
+import irstatus
 import runtime_fixtures
 
 # Env-driven so the harness isn't pinned to one cluster (see batch.py).
@@ -774,6 +775,15 @@ def _inv_new(case_id, hdr):
     }
 
 
+def _instance_rows(ir_status):
+    """Decoded per-Instance rows of an InferenceReplica status for a case
+    log; none when the status carries no rows or does not decode."""
+    try:
+        return irstatus.instance_statuses(ir_status) or []
+    except irstatus.DecodeError:
+        return []
+
+
 def _inv_hit(inv, hits, streak_key, viol_key, sustain, now, detail):
     """One tick's observation of a violating condition. Fires (records a
     violation) only once the streak reaches `sustain` consecutive ticks."""
@@ -811,7 +821,13 @@ def _inv_check_status_truth(inv, pod_state, pods_per_inst, hits, now):
             existing[(p["comp"], p.get("inst", "0"))].append(p)
     for it in items:
         comp = (it.get("spec") or {}).get("component", "?")
-        insts = (it.get("status") or {}).get("instanceStatuses")
+        try:
+            insts = irstatus.instance_statuses(it.get("status") or {})
+        except irstatus.DecodeError as e:
+            key = ("A", "undecodable-status", comp, "-")
+            _inv_hit(inv, hits, key, key, INV_SUSTAIN_A, now,
+                     f"{comp}: per-Instance status undecodable: {e}")
+            continue
         if insts is None:
             continue   # pre-IR-status build — field absent
         inv["ir_seen"] = True
@@ -1991,7 +2007,10 @@ def _initial_ir_settled(items, expected, configured):
         update = status.get("updateRevision") or ""
         if not current or current != update:
             return False, f"{component}: currentRevision and updateRevision have not converged"
-        instances = status.get("instanceStatuses")
+        try:
+            instances = irstatus.instance_statuses(status)
+        except irstatus.DecodeError as e:
+            return False, f"{component}: per-Instance status undecodable: {e}"
         if not isinstance(instances, list) or len(instances) != desired:
             actual = len(instances) if isinstance(instances, list) else 0
             return False, f"{component}: instanceStatuses {actual}/{desired}"
@@ -2199,7 +2218,7 @@ def _print_failure_snapshot(case_id, hdr, ctx):
                     "operation": instance.get("operation"),
                     "lastFailure": instance.get("lastFailure"),
                 }
-                for instance in ir_status.get("instanceStatuses", [])
+                for instance in _instance_rows(ir_status)
             ],
         })
 
