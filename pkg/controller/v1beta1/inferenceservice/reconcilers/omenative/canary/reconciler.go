@@ -98,6 +98,50 @@ func readyCapacityCount(readyPods int32, readyInstances *int32) int32 {
 	return readyPods
 }
 
+// unitRetargeted reports whether ANY Component in this canary unit has a
+// target distinct from its stable revision in the active run.
+//
+// It is per-UNIT, not per-Component, because a unit's revision identity is its
+// primary's: a [router, engine] group whose router is unchanged but whose
+// engine retargeted still has work to do, and suppressing it there would skip
+// a real rollout (see TestDispatch_SecondaryOnlyTargetStartsCanary).
+//
+// Conservative on missing information: with no active run, no group, or no
+// recorded targets there is nothing to prove the unit idle, so it reports
+// true and the caller's other guards decide.
+func unitRetargeted(in ReconcileInputs) bool {
+	if in.ISVC == nil || in.ISVC.Status.Rollout == nil || in.ISVC.Status.Rollout.ActiveRun == nil {
+		return true
+	}
+	targets := in.ISVC.Status.Rollout.ActiveRun.TargetRevisions
+	if len(targets) == 0 {
+		return true
+	}
+	members := map[v1beta1.ComponentType]bool{}
+	if in.Group != nil {
+		for _, c := range in.Group.Components {
+			members[c] = true
+		}
+	}
+	if len(members) == 0 {
+		members[in.Component] = true
+	}
+	seen := false
+	for i := range targets {
+		t := &targets[i]
+		if !members[t.Component] {
+			continue
+		}
+		seen = true
+		if t.Revision != t.StableRevision {
+			return true
+		}
+	}
+	// Every member recorded revision == stableRevision: this unit is idle.
+	// If the run recorded none of them, fall back to arming.
+	return !seen
+}
+
 func readyCanaryCapacity(in ReconcileInputs) int32 {
 	return readyCapacityCount(in.PerRevisionPods[in.CanaryRevisionHash], in.ReadyCanaryInstances)
 }
@@ -272,8 +316,19 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	// one when the component is already fully converged on the target revision —
 	// or when the target isn't known yet. Without a run identity, adding a canary
 	// to an already-rolled-out ISVC remains a no-op rather than a phantom rollout.
+	//
+	// The unitRetargeted clause is what keeps an IDLE unit out. A run is opened
+	// for the whole ISVC, so every group in the pinned plan is handed a
+	// TargetID even when only one unit retargeted — which disables the
+	// convergence check above for the units that did not. Arming one of those
+	// walks a full ladder, burns the unit's analysis budget on a no-op, and can
+	// reach a rollback (and its sticky reject) for a rollout that never
+	// happened. Matches OEP-0017.2's p317 case, where the unit that was not
+	// retargeted must sit the run out entirely.
 	if cs == nil {
-		if in.CanaryRevisionHash == "" || (in.TargetID == "" && readyCanaryCapacity(in) >= in.DesiredReplicas) {
+		if in.CanaryRevisionHash == "" ||
+			(in.TargetID == "" && readyCanaryCapacity(in) >= in.DesiredReplicas) ||
+			!unitRetargeted(in) {
 			if in.CanaryRevisionHash != "" && in.DesiredReplicas > 0 {
 				setPhase(in.ISVC, in.Component, v1beta1.RolloutPhaseStable)
 			}
