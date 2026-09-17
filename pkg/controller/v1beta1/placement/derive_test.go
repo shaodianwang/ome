@@ -92,7 +92,7 @@ func TestDeriveISVC_StripsGitOpsAnnotations(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "svc", Namespace: "prod", UID: "uid-123",
 			Annotations: map[string]string{
-				"argocd.argoproj.io/tracking-id":     "hub-app:ome.io/InferenceService:prod/svc",
+				"argocd.argoproj.io/tracking-id":     "source-app:ome.io/InferenceService:prod/svc",
 				"argocd.argoproj.io/sync-options":    "Prune=false",
 				"argocd.argoproj.io/compare-options": "IgnoreExtraneous",
 				"argocd.argoproj.io/sync-wave":       "1",
@@ -125,7 +125,7 @@ func TestDeriveISVC_StripsGitOpsAnnotations(t *testing.T) {
 	assert.Equal(t, "cluster-local", d.Annotations[constants.NetworkVisibility],
 		"unrelated annotations still ride along")
 	// The source is untouched: DeriveISVC works on a deep copy.
-	assert.Equal(t, "hub-app:ome.io/InferenceService:prod/svc",
+	assert.Equal(t, "source-app:ome.io/InferenceService:prod/svc",
 		src.Annotations["argocd.argoproj.io/tracking-id"])
 }
 

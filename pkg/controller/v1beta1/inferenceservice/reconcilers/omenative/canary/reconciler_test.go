@@ -46,7 +46,7 @@ func twoStep() []v1beta1.RolloutGroupStep {
 
 // pinActiveRun pins the ISVC's current spec.rollout as its active rollout run
 // (the state the run layer produces at run open), so Dispatch derives
-// RunActive=true and EffectiveCanaryGroup reads the pinned plan. A pinned plan
+// RunActive=true and rollout.CanaryGroups reads the pinned plan. A pinned plan
 // is inert to later spec edits — re-pin after mutating spec.rollout when the
 // edit should take effect.
 func pinActiveRun(isvc *v1beta1.InferenceService) *v1beta1.InferenceService {
@@ -1847,7 +1847,7 @@ func TestReconcile_SecondaryOnlyRetargetArms(t *testing.T) {
 	isvc := canaryISVC(twoStep(), nil)
 	runWithTargets(isvc,
 		v1beta1.RolloutRunTarget{Component: v1beta1.RouterComponent, Revision: "same", StableRevision: "same"},
-		v1beta1.RolloutRunTarget{Component: v1beta1.EngineComponent, Revision: "enew", StableRevision: "eold"},
+		v1beta1.RolloutRunTarget{Component: v1beta1.EngineComponent, Revision: "e-new", StableRevision: "e-old"},
 	)
 	in := baseInputs(isvc, map[string]int32{"same": 4})
 	in.Component = v1beta1.RouterComponent

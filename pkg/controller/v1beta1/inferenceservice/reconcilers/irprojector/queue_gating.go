@@ -47,7 +47,7 @@ func applyQuotaGovernance(p Params) Params {
 // are not symmetric: gating a pod that need not be gated delays it, while
 // ungating one that holds silicon runs it against no budget at all, invisibly.
 // A cluster that names no accelerator resources has told the manager nothing it
-// can act on, so it keeps the behavior it had before the flag existed.
+// can act on, so every Component stays governed.
 func quotaGoverned(p Params) bool {
 	if len(p.QuotaAcceleratorResources) == 0 {
 		return true

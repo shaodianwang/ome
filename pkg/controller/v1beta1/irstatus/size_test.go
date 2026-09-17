@@ -15,8 +15,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus/irstatustest"
 )
 
-// The OEP's numeric release gates. Each is asserted below; changing one is an
-// OEP review, not a test edit.
+// The codec's numeric release gates. Each is asserted below.
 const (
 	// steadyStateGateBytes caps the complete selected status of the steady
 	// and representative fixtures at 2,000 and 5,000 rows: 256 KiB, a quarter
@@ -25,10 +24,6 @@ const (
 	// etcdDefaultRequestLimitBytes is etcd's default --max-request-bytes; the
 	// mass-failure selected status must sit strictly below it.
 	etcdDefaultRequestLimitBytes = 1572864
-	// massFailureIncidentObjectBytes is the measured DenseV1 size of the
-	// incident object; the fixture's dense status may not be smaller, so
-	// DenseV1 sits at the limit as that object did.
-	massFailureIncidentObjectBytes = 1572914
 	// steadyRepresentationCeilingPercent and
 	// representativeRepresentationCeilingPercent cap the columnar per-Instance
 	// representation relative to the dense rows of the same fixture.
@@ -182,7 +177,7 @@ func TestSteadyStateSizeGates(t *testing.T) {
 }
 
 // rowFamilyBytes attributes the serialized dense rows to the record families
-// the OEP measures separately: lastFailure records and operation records,
+// measured separately: lastFailure records and operation records,
 // each counted with its key, and the healthy-row remainder.
 type rowFamilyBytes struct{ lastFailure, operation, remainder int }
 
@@ -201,9 +196,9 @@ func measureRowFamilies(t testing.TB, rows []v1beta1.OMENativeInstanceStatus) ro
 	return families
 }
 
-// The mass-failure fixture must keep the incident's shape, its DenseV1 status
-// must sit at or above the incident object's size, and its selected status
-// must sit strictly below the request limit; the headroom is reported.
+// The mass-failure fixture must keep its shape, its DenseV1 status must exceed
+// etcd's default request limit, and its selected status must sit strictly
+// below that limit; the headroom is reported.
 func TestMassFailureRequestLimitGate(t *testing.T) {
 	t.Parallel()
 	rows := massFailureRows()
@@ -248,8 +243,8 @@ func TestMassFailureRequestLimitGate(t *testing.T) {
 	t.Logf("mass failure attribution: lastFailure %d B (%.1f B/record), operation %d B (%.1f B/record), healthy rows %d B (%.1f B/row); per-row dense %.1f B, per-row columnar %.1f B",
 		families.lastFailure, float64(families.lastFailure)/float64(len(rows)), families.operation, float64(families.operation)/float64(operations),
 		families.remainder, float64(families.remainder)/float64(len(rows)), float64(sizes.denseRows)/float64(len(rows)), float64(sizes.columnar)/float64(len(rows)))
-	if sizes.denseStatus < massFailureIncidentObjectBytes {
-		t.Errorf("mass failure: DenseV1 status %d B is smaller than the incident object's %d B; the fixture no longer sits at the limit", sizes.denseStatus, massFailureIncidentObjectBytes)
+	if sizes.denseStatus <= etcdDefaultRequestLimitBytes {
+		t.Errorf("mass failure: DenseV1 status %d B does not exceed etcd's default request limit %d B; the fixture is too small to need ColumnarV2", sizes.denseStatus, etcdDefaultRequestLimitBytes)
 	}
 	if sizes.selected != EncodingColumnarV2 {
 		t.Fatalf("mass failure: selected %s, want ColumnarV2 for complete sizes %d vs %d", sizes.selected, sizes.denseStatus, sizes.columnarStatus)
@@ -272,7 +267,7 @@ func TestSelectedRepresentationNeverLargerThanDenseV1(t *testing.T) {
 		sizeFixture{name: "uniform/1", rows: uniformRows(1)},
 		sizeFixture{name: "uniform/100", rows: uniformRows(100)},
 		sizeFixture{name: "uniform/1000", rows: uniformRows(1000)},
-		sizeFixture{name: "oepExample/500", rows: oepExampleRows()},
+		sizeFixture{name: "wireExample/500", rows: wireExampleRows()},
 		sizeFixture{name: "fullFeature/8", rows: fullFeatureRows()},
 		sizeFixture{name: "adversarial/2000", rows: adversarialRows(2000)},
 	)

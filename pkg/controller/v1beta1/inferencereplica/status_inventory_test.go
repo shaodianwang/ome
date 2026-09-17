@@ -19,8 +19,8 @@ import (
 // The executable consumer inventory for InferenceReplica per-Instance status.
 //
 // Three type-aware sweeps over every production package (pkg, cmd, internal,
-// scheduler; generated files and tests excluded) pin the OEP-0007.5 reader
-// and writer boundaries:
+// scheduler; generated files and tests excluded) pin the per-Instance status
+// reader and writer boundaries:
 //
 //   - field reads: every use of InferenceReplicaStatus.InstanceStatuses,
 //     InstanceStatusColumns, and InstanceStatusEncoding outside the codec

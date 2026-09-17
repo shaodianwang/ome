@@ -440,7 +440,7 @@ func TestBuildApplyInstanceMutations_DuplicateIndexMutationsCompose(t *testing.T
 }
 
 // TestBuildApplyInstanceMutations_TwoThousandEntriesOneWrite guards the
-// high-scale contract that motivated the adapter: appending a full 2,000-slot
+// adapter's high-scale contract: appending a full 2,000-slot
 // scale-up wave still performs one status update, not one full-IR rewrite per
 // Instance. It also exercises the indexed slot lookup used by large batches.
 func TestBuildApplyInstanceMutations_TwoThousandEntriesOneWrite(t *testing.T) {

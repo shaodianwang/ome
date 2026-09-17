@@ -55,16 +55,16 @@ func TestWeights(t *testing.T) {
 		{
 			name: "heterogeneous hardware weighted by capacity factor",
 			homes: []Home{
-				{Cluster: "gb300", Allocated: 100, Ready: 100, Factor: factor("2")},
-				{Cluster: "tpu", Allocated: 100, Ready: 100, Factor: factor("1")},
+				{Cluster: "fast", Allocated: 100, Ready: 100, Factor: factor("2")},
+				{Cluster: "slow", Allocated: 100, Ready: 100, Factor: factor("1")},
 			},
 			want: []int32{2, 1},
 		},
 		{
 			name: "fractional factor kept exact via milli scale",
 			homes: []Home{
-				{Cluster: "gb300", Allocated: 100, Ready: 100, Factor: factor("1")},
-				{Cluster: "tpu", Allocated: 100, Ready: 100, Factor: factor("0.5")},
+				{Cluster: "fast", Allocated: 100, Ready: 100, Factor: factor("1")},
+				{Cluster: "slow", Allocated: 100, Ready: 100, Factor: factor("0.5")},
 			},
 			want: []int32{2, 1},
 		},
@@ -258,8 +258,8 @@ func TestWeights_ProbeGatesOnlyWhenItReachedAVerdict(t *testing.T) {
 			want: []int32{7, 3},
 		},
 		{
-			// The green-status black hole: ready replicas, unreachable path.
-			// Readiness alone would have kept this home at 70%.
+			// Ready replicas behind an unreachable path: readiness alone would
+			// have kept this home at 70%.
 			name: "unreachable home is gated despite being ready",
 			homes: []Home{
 				{Cluster: "a", Allocated: 7, Ready: 7, Reachable: ptr(false)},

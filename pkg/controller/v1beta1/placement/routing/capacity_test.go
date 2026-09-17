@@ -354,7 +354,7 @@ func TestCapacityConfig_ValidateFormats(t *testing.T) {
 		// Report needs no format-specific settings, so an option here is either
 		// a typo or a misunderstanding; either way it must not be ignored.
 		{"options rejected for Report", func(c *CapacityConfig) {
-			c.Options = map[string]string{"unitsPerReplica": "4"}
+			c.Options = map[string]string{"example": "1"}
 		}, true},
 	}
 	for _, tt := range tests {
@@ -373,9 +373,9 @@ func TestCapacityConfig_ValidateFormats(t *testing.T) {
 }
 
 func TestCapacityFormatRegistry_DefaultBuildCarriesOnlyTheBuiltIn(t *testing.T) {
-	// The deletion contract: a build without the optional tree registers
-	// exactly the built-in format. If this fails under a plain `go test`, an
-	// optional format has leaked into the default build.
+	// A build that registers no additional formats carries exactly the
+	// built-in one. Any other name here means an out-of-tree format registered
+	// itself in this test binary.
 	got := RegisteredCapacityFormats()
 	if len(got) != 1 || got[0] != string(FormatReport) {
 		t.Fatalf("default build registered %v, want only %q", got, FormatReport)
@@ -422,7 +422,8 @@ func TestCapacityPoller_QuorumToleratesAMisbehavingReporter(t *testing.T) {
 		want     *int32
 	}{
 		{
-			// The case that motivated this: one router lost its watch.
+			// One reporter returning zero while the rest are healthy must not
+			// set the ceiling.
 			name:     "a single zero among healthy readings is ignored",
 			readings: []int32{0, 7, 7, 7, 7},
 			want:     ptr(int32(7)),

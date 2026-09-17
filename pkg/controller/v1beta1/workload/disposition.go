@@ -437,8 +437,7 @@ func recordRelocationDirective(ctx context.Context, deps Deps, input ReconcileIn
 // failInstanceClearingOperation delegates to the shared writer in the
 // types package (types.FailInstanceClearingOperation) — one
 // implementation for the dispositions here and the apiserver-rejection
-// path in workload/ops. Kept as a package-local name so the call sites
-// below read unchanged.
+// path in workload/ops.
 func failInstanceClearingOperation(ctx context.Context, input ReconcileInput, idx int32, termination *InstanceTermination) error {
 	return types.FailInstanceClearingOperation(ctx, input, idx, termination)
 }

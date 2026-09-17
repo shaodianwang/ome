@@ -133,7 +133,7 @@ quotaManager:
     #
     # It lives here rather than on the AcceleratorQuota because it describes the
     # cluster, not the budget. A leaf is a tenant, and a tenant is not confined
-    # to a namespace — dozens routinely share one — so which namespaces exist to
+    # to a namespace — many tenants can share one — so which namespaces exist to
     # serve from is a property of the install. Two clusters in a fleet may
     # enroll different sets; the projection carries none.
     #
@@ -160,7 +160,7 @@ quotaManager:
     # and workloads simply stay pending.
     #
     # So the list tracks what pods actually request: ephemeral-storage is here
-    # because the sidecars that mount models request it.
+    # because model-mounting sidecars and init containers commonly request it.
     #
     # These are not a budget. They are a ceiling set high enough not to be one:
     # the accelerator entry is what actually limits a tenant. Kueue has no
@@ -183,16 +183,18 @@ quotaManager:
     # The units differ, which is easy to miss: cpu is held in MILLI-units, so
     # its ceiling is a thousand times lower than memory's for the same digits.
     #
-    # Scale to size against: one 4-chip TPU node is ~224 cpu, ~0.28Ti memory and
-    # ~0.157Ti ephemeral-storage, so
+    # Scale to size against the largest cluster that will enroll: each ceiling
+    # must stay well above the per-resource sum of every enrolled node's
+    # allocatable amount. As a worked example, a host with ~224 cpu, ~0.28Ti
+    # memory and ~0.157Ti ephemeral-storage gives
     #
     #     32 nodes    7k cpu     0.01Pi mem    0.005Pi eph
-    #   7500 nodes  1.68M cpu    2.07Pi mem    1.15Pi  eph
+    #   1000 nodes  224k cpu    0.27Pi mem    0.15Pi  eph
     #
-    # The defaults are ~9x the 7500-node figure — unreachable in practice, and
-    # far enough from the ceiling that a Cohort can hold ~500 sibling leaves
-    # before the subtree sum is at risk. The sums are per-resource, so
-    # ephemeral-storage gets that same headroom from memory's ceiling.
+    # The defaults sit far above that, and far enough from the int64 ceiling
+    # that a Cohort can hold ~500 sibling leaves before the subtree sum is at
+    # risk. The sums are per-resource, so ephemeral-storage gets that same
+    # headroom from memory's ceiling.
     #
     # Override any key on its own; Helm merges the map, so setting cpu leaves
     # the rest at their defaults. Emptying the map disables materialization and

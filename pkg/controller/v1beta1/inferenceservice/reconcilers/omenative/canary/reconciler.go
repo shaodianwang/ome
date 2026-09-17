@@ -329,8 +329,8 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	// convergence check above for the units that did not. Arming one of those
 	// walks a full ladder, burns the unit's analysis budget on a no-op, and can
 	// reach a rollback (and its sticky reject) for a rollout that never
-	// happened. Matches OEP-0017.2's p317 case, where the unit that was not
-	// retargeted must sit the run out entirely.
+	// happened. The unit that was not retargeted must sit the run out
+	// entirely.
 	if cs == nil {
 		if in.CanaryRevisionHash == "" ||
 			(in.TargetID == "" && readyCanaryCapacity(in) >= in.DesiredReplicas) ||

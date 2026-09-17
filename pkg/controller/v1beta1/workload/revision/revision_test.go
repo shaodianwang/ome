@@ -523,14 +523,14 @@ func TestRevisionHash_LocalQueueAnnotationDoesNotDriftHash(t *testing.T) {
 			name: "annotated where there was none",
 			annotations: map[string]string{
 				"ome.io/deploymentMode": "OMENative",
-				"ome.io/local-queue":    "dedicated.team-a",
+				"ome.io/local-queue":    "team-a",
 			},
 		},
 		{
 			name: "re-pointed at another queue",
 			annotations: map[string]string{
 				"ome.io/deploymentMode": "OMENative",
-				"ome.io/local-queue":    "dedicated.team-b",
+				"ome.io/local-queue":    "team-b",
 			},
 		},
 	} {
@@ -549,7 +549,7 @@ func TestRevisionHash_LocalQueueAnnotationDoesNotDriftHash(t *testing.T) {
 // just relocates the drift.
 func TestRevisionHash_OnlyLocalQueueAnnotationEqualsNoMeta(t *testing.T) {
 	ps := basicPodSpecForRevision()
-	only := &metav1.ObjectMeta{Annotations: map[string]string{"ome.io/local-queue": "dedicated.team-a"}}
+	only := &metav1.ObjectMeta{Annotations: map[string]string{"ome.io/local-queue": "team-a"}}
 
 	hNil, _, _ := Hash(ps, nil, nil, "")
 	hOnly, _, _ := Hash(ps, only, nil, "")
@@ -584,17 +584,17 @@ func TestRevisionHash_PlacementMarkersDoNotDriftHash(t *testing.T) {
 			meta: &metav1.ObjectMeta{
 				Labels: map[string]string{
 					"app":                     "llama",
-					"ome.io/placement-origin": "3b6514b9-91dd-4caf-ad46-2315dd9feade",
+					"ome.io/placement-origin": "11111111-1111-4111-8111-111111111111",
 				},
 				Annotations: map[string]string{"ome.io/deploymentMode": "OMENative"},
 			},
 		},
 		{
-			name: "control-plane identity added when a second hub appears",
+			name: "control-plane identity added when a second control plane appears",
 			meta: &metav1.ObjectMeta{
 				Labels: map[string]string{
 					"app":                            "llama",
-					"ome.io/placement-origin":        "3b6514b9-91dd-4caf-ad46-2315dd9feade",
+					"ome.io/placement-origin":        "11111111-1111-4111-8111-111111111111",
 					"ome.io/placement-control-plane": "control-plane-a",
 				},
 				Annotations: map[string]string{"ome.io/deploymentMode": "OMENative"},
@@ -629,7 +629,7 @@ func TestRevisionHash_OnlyPlacementMarkersEqualNoMeta(t *testing.T) {
 	ps := basicPodSpecForRevision()
 	only := &metav1.ObjectMeta{
 		Labels: map[string]string{
-			"ome.io/placement-origin":        "3b6514b9-91dd-4caf-ad46-2315dd9feade",
+			"ome.io/placement-origin":        "11111111-1111-4111-8111-111111111111",
 			"ome.io/placement-control-plane": "control-plane-a",
 		},
 	}

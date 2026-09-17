@@ -353,9 +353,8 @@ const (
 	// behind a balancer without making recovery from a low reading slow.
 	DefaultCapacitySamples = 10
 
-	// DefaultCapacityQuorum tolerates exactly one misbehaving reporter, the
-	// case that motivated corroboration. Raise it if more than one reporter can
-	// plausibly be wrong at the same time.
+	// DefaultCapacityQuorum tolerates exactly one misbehaving reporter. Raise
+	// it if more than one reporter can plausibly be wrong at the same time.
 	DefaultCapacityQuorum = 2
 )
 

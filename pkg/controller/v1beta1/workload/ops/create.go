@@ -889,8 +889,8 @@ func findInstanceStatus(observed []workload.InstanceStatus, idx int32) *workload
 // Every create path in the engine funnels through here, so this is where
 // an apiserver rejection is READ rather than passed up opaquely. The
 // classified outcome is returned as a *podRejectionError; only an
-// unclassified (transient) rejection stays the *podCreateError callers
-// have always propagated.
+// unclassified (transient) rejection stays a *podCreateError, which callers
+// propagate.
 func createMissingPods(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, idx int32, targets []podTarget, target query.RevisionID) (int, error) {
 	created := 0
 	revisionHash := target.Hash()

@@ -48,18 +48,18 @@ func UniformRows(n int) []v1beta1.OMENativeInstanceStatus {
 	return rows
 }
 
-// The mass-failure fixture is a 4,000-row single-pod fleet after a
-// whole-fleet Pod loss: 2,812 Ready, 814 Restarting with an in-flight Restart,
-// 374 Failed with a preserved Restart, a lastFailure on every row, and one row
-// on a second revision. Phases are spread over the index space by a fixed
-// permutation so the index sets fragment as they would in a real fleet.
+// The mass-failure fixture is a synthetic worst case: 4,000 single-pod rows
+// split into 2,812 Ready, 814 Restarting with an in-flight Restart and 374
+// Failed with a preserved Restart, a lastFailure on every row, and one row on
+// a second revision. Phases are spread over the index space by a fixed
+// permutation so the index sets fragment rather than form one range.
 //
 // The records are the controller's own. A recovered row keeps the Pod-level
 // record its Pod left when it died with its node (name, PodFailed, time; no
 // container detail survived); a parked row carries the deadline record stamped
 // when its Restart's Drain step exceeded InstanceReadyTimeout. The service
-// name has production length so revisions and Pod names weigh what real ones
-// do; the resulting dense status sits at the API request limit.
+// name is long enough that revisions and Pod names carry realistic weight;
+// the resulting dense status exceeds etcd's default request limit.
 const (
 	MassFailureRowCount        = 4000
 	MassFailureReadyCount      = 2812
@@ -218,10 +218,10 @@ func FullFeatureRows() []v1beta1.OMENativeInstanceStatus {
 	}
 }
 
-// OEPExampleRows reproduces the OEP wire-shape example: 500 Ready rows on
+// WireExampleRows is the documented wire-shape example: 500 Ready rows on
 // one revision, two reincarnated rows, three rows on ordinal one, and one
 // preserved failure.
-func OEPExampleRows() []v1beta1.OMENativeInstanceStatus {
+func WireExampleRows() []v1beta1.OMENativeInstanceStatus {
 	rows := UniformRows(500)
 	rows[9].Incarnation = 2
 	rows[115].Incarnation = 2

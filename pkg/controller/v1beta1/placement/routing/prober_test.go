@@ -22,7 +22,7 @@ import (
 // that deliberately do not exist.
 func testProbeConfig() ProbeConfig {
 	return ProbeConfig{
-		Path:             "/health_deep",
+		Path:             "/healthz/deep",
 		Method:           http.MethodGet,
 		AcceptStatuses:   []int{200},
 		GateStatuses:     []int{500, 502, 503},
@@ -195,7 +195,7 @@ func TestProber_ProbeOneClassifiesRealResponses(t *testing.T) {
 	var code atomic.Int32
 	code.Store(200)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/health_deep" {
+		if r.URL.Path != "/healthz/deep" {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}

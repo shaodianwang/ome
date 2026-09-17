@@ -439,9 +439,9 @@ func TestCreate_Throttled_HonorsServerDelay(t *testing.T) {
 	}
 }
 
-// TestCreate_Conflict_StaysAnOpaqueError: an unclassified rejection keeps
-// today's behavior — the error surfaces and controller-runtime's own
-// backoff owns the retry.
+// TestCreate_Conflict_StaysAnOpaqueError: an unclassified rejection is not
+// interpreted — the error surfaces and controller-runtime's own backoff
+// owns the retry.
 func TestCreate_Conflict_StaysAnOpaqueError(t *testing.T) {
 	c, isvc, input, plan, target, recorder, _ := rejectionFixture(t, 1, func(podName string) error {
 		return apierrors.NewConflict(schema.GroupResource{Resource: "pods"}, podName, errors.New("object was modified"))

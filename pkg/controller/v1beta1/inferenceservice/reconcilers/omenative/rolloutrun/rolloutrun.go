@@ -5,7 +5,7 @@
 // status.rollout.activeRun in the same in-memory status the executors' step
 // state lives in — one status flush carries both, so the pinned plan and the
 // step counters can never be observed out of sync. Executors consume the
-// pinned plan (v1beta1.EffectiveRollout); spec and policy edits are inert
+// pinned plan (rollout.Effective); spec and policy edits are inert
 // mid-run and take effect at the next open. Failure to resolve a plan PARKS
 // the rollout (condition + held update gates) — it never falls back to the
 // default progression, because silently removing a declared gate is the

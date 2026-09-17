@@ -186,8 +186,8 @@ func main() {
 		"Comma-separated namespaces this cluster serves budgeted workloads from, e.g. "+
 			"\"ml-serving,ml-batch\". Every leaf gets a LocalQueue named after it in each of them, and "+
 			"every rendered ClusterQueue selects exactly this set. It is deploy config because it "+
-			"describes the cluster rather than the budget: a leaf is a tenant, and dozens of tenants "+
-			"routinely share one namespace, so where workloads run is a property of the install. Empty "+
+			"describes the cluster rather than the budget: a leaf is a tenant, and many tenants "+
+			"can share one namespace, so where workloads run is a property of the install. Empty "+
 			"disables materialization — a ClusterQueue selecting nothing admits nothing and says so "+
 			"nowhere. Workload mode only. Changing it needs a restart.")
 	flag.StringVar(&opts.fieldManager, "field-manager", opts.fieldManager,

@@ -10,8 +10,9 @@ import (
 // into dense rows in the stored row order. Every check that can fail runs
 // before the row slice is allocated: index sets are scanned with
 // overflow-checked arithmetic, members is bounded by maxInstances, every
-// other set and list is bounded by the member count, and coverage,
-// disjointness, value domains, and canonical order are checked on ranges.
+// other set and list is bounded by the member count, and coverage, that
+// the sets are disjoint, value domains, and canonical order are checked on
+// ranges.
 // On error no rows are returned. maxInstances has no default; zero fails.
 func DecodeColumns(columns *v1beta1.InstanceStatusColumns, maxInstances uint64) ([]v1beta1.OMENativeInstanceStatus, error) {
 	if columns == nil {

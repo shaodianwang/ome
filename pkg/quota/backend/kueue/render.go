@@ -234,7 +234,7 @@ func namespaceSelector(namespaces []string) *metav1ac.LabelSelectorApplyConfigur
 // Named after the leaf, because the name is the tenant: a workload reaches its
 // budget by carrying that name in kueue.x-k8s.io/queue-name, and Kueue offers no
 // way to name a ClusterQueue directly — spec.queueName is a LocalQueueName
-// resolved in the workload's own namespace. Several dozen leaves therefore
+// resolved in the workload's own namespace. Many leaves may therefore
 // coexist in one namespace, each with its own pointer.
 //
 // The full cross product is the honest shape rather than over-materialization:

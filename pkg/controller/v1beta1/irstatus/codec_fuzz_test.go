@@ -17,7 +17,7 @@ const fuzzLimit = 4096
 // is a catalogued error or a bounded, canonical, re-encodable row set.
 func FuzzDecodeColumns(f *testing.F) {
 	seeds := [][]v1beta1.OMENativeInstanceStatus{
-		uniformRows(1), uniformRows(64), fullFeatureRows(), oepExampleRows(), representativeRows(300),
+		uniformRows(1), uniformRows(64), fullFeatureRows(), wireExampleRows(), representativeRows(300),
 	}
 	for _, rows := range seeds {
 		columns, err := EncodeColumns(rows, fuzzLimit)

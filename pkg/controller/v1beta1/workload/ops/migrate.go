@@ -522,8 +522,7 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 				return d, accepted, ferr
 			}
 			// A classified-but-transient rejection (out of quota, throttled)
-			// is exactly the blocked-create wait below, now named rather
-			// than inferred.
+			// is handled as the blocked-create wait below.
 			blockedPod := ""
 			var createErr *podCreateError
 			switch {

@@ -42,7 +42,7 @@ type Options struct {
 	//
 	// It is deploy config rather than a field on the CR because it describes the
 	// cluster, not the budget. A leaf is a tenant, and a tenant is not confined
-	// to a namespace — several dozen of them routinely share one — so the set of
+	// to a namespace — many tenants can share one — so the set of
 	// places workloads run is a property of the install.
 	EnrolledNamespaces []string
 }

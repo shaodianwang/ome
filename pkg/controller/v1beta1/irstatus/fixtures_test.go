@@ -30,7 +30,7 @@ func representativeRows(n int) []v1beta1.OMENativeInstanceStatus {
 	return irstatustest.RepresentativeRows(n)
 }
 func fullFeatureRows() []v1beta1.OMENativeInstanceStatus { return irstatustest.FullFeatureRows() }
-func oepExampleRows() []v1beta1.OMENativeInstanceStatus  { return irstatustest.OEPExampleRows() }
+func wireExampleRows() []v1beta1.OMENativeInstanceStatus { return irstatustest.WireExampleRows() }
 
 func logicalStatus(rows []v1beta1.OMENativeInstanceStatus) *v1beta1.InferenceReplicaStatus {
 	return irstatustest.LogicalStatus(rows)

@@ -20,7 +20,7 @@ func TestRoundTripPreservesEveryRetainedField(t *testing.T) {
 	t.Parallel()
 	fixtures := map[string][]v1beta1.OMENativeInstanceStatus{
 		"full feature":   fullFeatureRows(),
-		"oep example":    oepExampleRows(),
+		"wire example":   wireExampleRows(),
 		"representative": representativeRows(1000),
 		"uniform":        uniformRows(2000),
 		"mass failure":   massFailureRows(),
@@ -143,9 +143,9 @@ func TestEncodeCanonicalOrderAndMerging(t *testing.T) {
 	assertRowsEqual(t, rows, mustDecode(t, columns, testLimit))
 }
 
-func TestEncodeMatchesOEPWireExample(t *testing.T) {
+func TestEncodeMatchesWireExample(t *testing.T) {
 	t.Parallel()
-	columns := mustEncode(t, oepExampleRows(), testLimit)
+	columns := mustEncode(t, wireExampleRows(), testLimit)
 	admitted := "0-499"
 	activeOrdinalOne := "6,43,175"
 	exitCode := int32(143)

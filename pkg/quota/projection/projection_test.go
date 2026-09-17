@@ -353,8 +353,7 @@ func TestForIsDeterministicAndDoesNotMutate(t *testing.T) {
 // returns them in is part of the contract, not a presentation detail.
 //
 // Sorting by name alone satisfies this only when every parent happens to sort
-// before its children, which is why it survived a fleet named org/team-a and
-// failed on one named sim-tenants/sim-serving.
+// before its children; a parent whose name sorts after its child's breaks it.
 func TestForOrdersParentsBeforeChildren(t *testing.T) {
 	tests := []struct {
 		name  string
