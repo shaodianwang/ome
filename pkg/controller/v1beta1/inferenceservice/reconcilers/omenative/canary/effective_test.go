@@ -1,6 +1,7 @@
 package canary
 
 import (
+	"context"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -57,5 +58,32 @@ func TestEffectivePartition_MembersFollowTheGroupRollback(t *testing.T) {
 		if !ok || p == nil || *p != 0 {
 			t.Errorf("%s: partition during the group's rollback = %v, want 0", c, p)
 		}
+	}
+}
+
+// With no stable revision there is nothing to shift traffic from, so a unit
+// seen for the first time does not arm a ladder: a fresh service rolls out
+// and reads Stable rather than parking on its first step's gate.
+func TestReconcile_NoStableRevisionDoesNotArm(t *testing.T) {
+	isvc := canaryISVC(twoStep(), nil)
+	runWithTargets(isvc,
+		v1beta1.RolloutRunTarget{Component: v1beta1.EngineComponent, Revision: "new"},
+	)
+	in := baseInputs(isvc, map[string]int32{"new": 4})
+	in.StableRevisionHash = ""
+	in.TargetID = "creation-target"
+
+	res, err := Reconcile(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Active {
+		t.Fatal("a unit with no stable revision must not arm a canary")
+	}
+	if cs := rollout.CanaryStatusFor(&isvc.Status, v1beta1.EngineComponent); cs != nil {
+		t.Fatalf("no canary state may be written without a stable revision, got %+v", cs)
+	}
+	if phaseOf(isvc) != v1beta1.RolloutPhaseStable {
+		t.Fatalf("phase = %q, want Stable", phaseOf(isvc))
 	}
 }

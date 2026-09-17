@@ -139,3 +139,15 @@ func TestBindRunLeavesAnIdleUnitWithoutState(t *testing.T) {
 		t.Fatalf("the retargeted router unit must be bound to the run, got %+v", cs)
 	}
 }
+
+// A unit whose run records no stable revision has nothing to shift traffic
+// from: its first rollout is not a canary. Binding must not create state for
+// it; the step machine arms later only if a stable revision becomes known.
+func TestBindRunSkipsAUnitWithoutAStableRevision(t *testing.T) {
+	isvc := twoUnitRunFixture()
+	isvc.Status.Rollout.ActiveRun.TargetRevisions[0].StableRevision = ""
+	BindRun(isvc, rollout.CanaryGroups(isvc)[0], false)
+	if cs := rollout.CanaryStatusFor(&isvc.Status, v1beta1.RouterComponent); cs != nil {
+		t.Fatalf("a unit with no stable revision was handed run state: %+v", cs)
+	}
+}

@@ -145,7 +145,14 @@ func Reconcile(ctx context.Context, in Inputs) (Outcome, error) {
 		if retargeted(isvc, active, targets) {
 			retargeting = true
 			for _, target := range active.TargetRevisions {
-				stableOverrides[target.Component] = target.StableRevision
+				// An unknown stable stays unknown only for a component that
+				// moved. A component still on its pinned revision is on its
+				// stable; carrying the unknown would make it look retargeted
+				// and arm a ladder it has no work for.
+				moved := targets[target.Component].target != "" && targets[target.Component].target != target.Revision
+				if target.StableRevision != "" || moved {
+					stableOverrides[target.Component] = target.StableRevision
+				}
 			}
 			closeRun(isvc, active, v1beta1.RolloutRunSuperseded, now)
 			recordRunClosed(isvc, v1beta1.RolloutRunSuperseded)
@@ -431,7 +438,19 @@ func closedOutcome(isvc *v1beta1.InferenceService, active *v1beta1.RolloutRun, t
 		if g.Canary != nil {
 			cs := rollout.CanaryStatusFor(&isvc.Status, primaryOfGroup(g))
 			if cs == nil {
-				return "", false
+				// A unit with no stable revision to shift from never arms; it
+				// is done once every member rests on the pinned revision.
+				for _, comp := range g.Components {
+					pinnedRev := pinnedFor[comp]
+					if pinnedRev == "" {
+						continue
+					}
+					obs := targets[comp]
+					if obs.current != pinnedRev || obs.target != pinnedRev || (obs.replicas > 0 && obs.updated < obs.replicas) {
+						return "", false
+					}
+				}
+				continue
 			}
 			if cs.RolledBackRevisionHash != "" {
 				if primaryPhase(isvc, g) == v1beta1.RolloutPhaseRolledBack {

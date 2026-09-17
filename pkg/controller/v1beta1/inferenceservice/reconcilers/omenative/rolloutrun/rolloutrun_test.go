@@ -658,3 +658,91 @@ func TestPreserveNewerRunKeepsFresherPin(t *testing.T) {
 		t.Fatal("a fresher close must not be resurrected by a stale open copy")
 	}
 }
+
+// twoUnitRun pins a run over two canary groups, one per unit, whose stable
+// revisions were unknown when it opened (the shape a run has at creation).
+func twoUnitRun(isvc *v1beta1.InferenceService, routerRev, engineRev string) {
+	groups := []v1beta1.RolloutRunGroup{
+		{Source: v1beta1.RolloutPlanSourceInline, Group: v1beta1.RolloutGroup{
+			Components: []v1beta1.ComponentType{v1beta1.RouterComponent}, Canary: canaryBody(50, 100)}},
+		{Source: v1beta1.RolloutPlanSourceInline, Group: v1beta1.RolloutGroup{
+			Components: []v1beta1.ComponentType{v1beta1.EngineComponent}, Canary: canaryBody(25, 100)}},
+	}
+	concurrent := v1beta1.RolloutGroupOrderingConcurrent
+	isvc.Spec.Rollout = &v1beta1.RolloutSpec{GroupOrdering: &concurrent, Groups: []v1beta1.RolloutGroup{groups[0].Group, groups[1].Group}}
+	isvc.Status.Rollout = &v1beta1.RolloutStatus{ActiveRun: &v1beta1.RolloutRun{
+		RunID:    "creation",
+		OpenedAt: metav1.NewTime(time.Unix(900, 0)),
+		PinnedAt: metav1.NewTime(time.Unix(900, 0)),
+		TargetRevisions: []v1beta1.RolloutRunTarget{
+			{Component: v1beta1.RouterComponent, Revision: routerRev},
+			{Component: v1beta1.EngineComponent, Revision: engineRev},
+		},
+		Plan: v1beta1.RolloutRunPlan{Groups: groups},
+	}}
+}
+
+func routerIR(current, target string) *v1beta1.InferenceReplica {
+	return &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Name: "llm-a-router", Namespace: "ns", Generation: 1},
+		Status: v1beta1.InferenceReplicaStatus{
+			ObservedGeneration: 1,
+			CurrentRevision:    current,
+			UpdateRevision:     target,
+			Replicas:           1,
+			UpdatedReplicas:    1,
+		},
+	}
+}
+
+// A retarget of one unit supersedes the open run and carries its stable
+// revisions forward. An unknown stable stays unknown only for the component
+// that moved; a component that stayed put is on the revision it targets, and
+// that is its stable. Carrying the unknown would make the idle unit look
+// retargeted and arm its ladder.
+func TestRetargetKeepsUnmovedComponentStableKnown(t *testing.T) {
+	isvc := isvcFixture(v1beta1.RolloutGroup{})
+	isvc.Spec.Router = &v1beta1.RouterSpec{}
+	twoUnitRun(isvc, "rrrrrrrr", "aaaaaaaa")
+	in := testInputs(t, isvc, routerIR("llm-a-router-rrrrrrrr", "llm-a-router-ssssssss"), irFixture(oldRev, oldRev))
+
+	if _, err := Reconcile(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	active := isvc.Status.Rollout.ActiveRun
+	if active == nil || active.RunID == "creation" {
+		t.Fatalf("the router retarget must open a fresh run, got %+v", active)
+	}
+	got := map[v1beta1.ComponentType]v1beta1.RolloutRunTarget{}
+	for _, target := range active.TargetRevisions {
+		got[target.Component] = target
+	}
+	if got[v1beta1.RouterComponent].Revision != "ssssssss" || got[v1beta1.RouterComponent].StableRevision != "" {
+		t.Fatalf("moved router keeps its unknown stable: %+v", got[v1beta1.RouterComponent])
+	}
+	if got[v1beta1.EngineComponent].Revision != "aaaaaaaa" || got[v1beta1.EngineComponent].StableRevision != "aaaaaaaa" {
+		t.Fatalf("unmoved engine must record its current revision as stable: %+v", got[v1beta1.EngineComponent])
+	}
+}
+
+// A run opened with no stable revision (creation) whose canary unit never
+// armed must still close once the unit converges; otherwise the creation
+// plan stays pinned and later spec edits are ignored.
+func TestCreationRunClosesWithoutCanaryState(t *testing.T) {
+	isvc := isvcFixture(v1beta1.RolloutGroup{})
+	isvc.Spec.Router = &v1beta1.RouterSpec{}
+	twoUnitRun(isvc, "rrrrrrrr", "aaaaaaaa")
+	engine := irFixture(oldRev, oldRev)
+	engine.Status.Replicas, engine.Status.UpdatedReplicas = 1, 1
+	in := testInputs(t, isvc, routerIR("llm-a-router-rrrrrrrr", "llm-a-router-rrrrrrrr"), engine)
+
+	if _, err := Reconcile(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	if isvc.Status.Rollout.ActiveRun != nil {
+		t.Fatalf("a converged run with no canary state must close, still active: %+v", isvc.Status.Rollout.ActiveRun)
+	}
+	if last := isvc.Status.Rollout.LastRun; last == nil || last.Outcome != v1beta1.RolloutRunCompleted {
+		t.Fatalf("last run = %+v, want Completed", last)
+	}
+}

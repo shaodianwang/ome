@@ -331,8 +331,12 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	// reach a rollback (and its sticky reject) for a rollout that never
 	// happened. The unit that was not retargeted must sit the run out
 	// entirely.
+	//
+	// An empty StableRevisionHash means there is nothing to shift traffic
+	// from: the unit's first rollout is not a canary, so it rolls out and
+	// reads Stable instead of parking on its first step's gate.
 	if cs == nil {
-		if in.CanaryRevisionHash == "" ||
+		if in.CanaryRevisionHash == "" || in.StableRevisionHash == "" ||
 			(in.TargetID == "" && readyCanaryCapacity(in) >= in.DesiredReplicas) ||
 			!unitRetargeted(in) {
 			if in.CanaryRevisionHash != "" && in.DesiredReplicas > 0 {
