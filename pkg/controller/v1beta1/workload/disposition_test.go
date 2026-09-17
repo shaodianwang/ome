@@ -1185,3 +1185,130 @@ func TestDispose_Terminal_SuppressesRepeatWarnForSameFailure(t *testing.T) {
 		t.Errorf("dispose with different prior reason: got %d warns want 1 (not debounced)", len(rec.warns))
 	}
 }
+
+// runningNotReadyOnNode builds the readiness-limbo shape the KIND
+// auto-migrate fixture produces: phase Running on a named node, every
+// container started, and a ContainersReady=False the kubelet never
+// flips because the fault is node-scoped rather than a waiting reason.
+func runningNotReadyOnNode(name, node string, since time.Time) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec:       corev1.PodSpec{NodeName: node},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{{
+				Type:               corev1.ContainersReady,
+				Status:             corev1.ConditionFalse,
+				Reason:             "ContainersNotReady",
+				Message:            "containers with unready status: [ome-container]",
+				LastTransitionTime: metav1.NewTime(since),
+			}},
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  "ome-container",
+				Ready: false,
+				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			}},
+		},
+	}
+}
+
+// TestDispose_RunningNotReadyRelocatesFirst pins the ordering a
+// node-scoped fault depends on: a pod that runs yet never reports ready
+// is AMBIGUOUS between the revision and the node it landed on, so a
+// single-node Auto attempt with budget records a relocation directive
+// and blames no revision. The readiness detail is EVIDENCE — it names
+// the container on the failure record and travels with the directive —
+// and must never promote the attempt into the workload-caused branch,
+// which would hold the revision and leave the suspect node in service.
+func TestDispose_RunningNotReadyRelocatesFirst(t *testing.T) {
+	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	fc := clocktesting.NewFakeClock(t0)
+	deps := workload.Deps{Client: fakeLedgerClient(t), Clock: fc}
+	dd := workload.DispositionDeps{
+		AutoMigrateMaxAttempts: 3,
+		MigrationMode:          workload.MigrationModeAuto,
+	}
+	insts := []workload.InstanceStatus{{
+		Index: 0,
+		Phase: workload.InstancePhaseCreating,
+		Operation: &workload.InstanceOperation{
+			Type:           workload.InstanceOperationCreate,
+			TargetRevision: "rev-x",
+		},
+	}}
+	input, rec := dispositionFixtureInput(fc, &insts, "rev-x", nil, ledgerOwnerCM())
+	pod := runningNotReadyOnNode("engine-0-default-0", "node-a", t0.Add(-time.Minute))
+
+	outcome, err := workload.DisposeExpiredAttempt(context.Background(), deps, input, dd, insts[0],
+		[]*corev1.Pod{pod}, "DeadlineExceeded: Create/CreatePods exceeded InstanceReadyTimeout")
+	if err != nil {
+		t.Fatalf("DisposeExpiredAttempt: %v", err)
+	}
+	if outcome != workload.DispositionRelocationDirective {
+		t.Fatalf("outcome: got %v want DispositionRelocationDirective (relocation gets the first try)", outcome)
+	}
+	if len(rec.blockCalls) != 0 {
+		t.Errorf("MutateRetryBlock calls: got %+v want none (the node is the suspect, not the revision)", rec.blockCalls)
+	}
+	if len(rec.commits) != 1 || rec.commits[0].after.Phase != workload.InstancePhaseFailed {
+		t.Fatalf("commit: got %+v want a single Failed commit", rec.commits)
+	}
+	got := rec.commits[0].after.LastFailure
+	if got == nil || got.Reason != "ContainersNotReady" {
+		t.Fatalf("LastFailure.Reason: got %+v want ContainersNotReady", got)
+	}
+	if got.ContainerName != "ome-container" {
+		t.Errorf("LastFailure.ContainerName: got %q want the unready container", got.ContainerName)
+	}
+	if !strings.Contains(got.Message, "containers with unready status") {
+		t.Errorf("LastFailure.Message: got %q want the readiness condition message", got.Message)
+	}
+}
+
+// TestDispose_UnschedulableCannotSuppressRelocation: an unplaceable pod
+// was never assigned a node, so it can name no suspect to steer off.
+// The scheduler hold therefore disposes terminal rather than consuming
+// a relocation attempt on a placement that never happened.
+func TestDispose_UnschedulableCannotSuppressRelocation(t *testing.T) {
+	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	fc := clocktesting.NewFakeClock(t0)
+	deps := workload.Deps{Client: fakeLedgerClient(t), Clock: fc}
+	dd := workload.DispositionDeps{
+		AutoMigrateMaxAttempts: 3,
+		MigrationMode:          workload.MigrationModeAuto,
+	}
+	insts := []workload.InstanceStatus{{
+		Index: 0,
+		Phase: workload.InstancePhaseCreating,
+		Operation: &workload.InstanceOperation{
+			Type:           workload.InstanceOperationCreate,
+			TargetRevision: "rev-x",
+		},
+	}}
+	input, rec := dispositionFixtureInput(fc, &insts, "rev-x", nil, ledgerOwnerCM())
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "engine-0-default-0"},
+		Status: corev1.PodStatus{Phase: corev1.PodPending, Conditions: []corev1.PodCondition{{
+			Type:               corev1.PodScheduled,
+			Status:             corev1.ConditionFalse,
+			Reason:             "Unschedulable",
+			Message:            "0/3 nodes are available: 3 Insufficient nvidia.com/gpu",
+			LastTransitionTime: metav1.NewTime(t0.Add(-time.Hour)),
+		}}},
+	}
+
+	outcome, err := workload.DisposeExpiredAttempt(context.Background(), deps, input, dd, insts[0],
+		[]*corev1.Pod{pod}, "Unschedulable: 0/3 nodes are available: 3 Insufficient nvidia.com/gpu")
+	if err != nil {
+		t.Fatalf("DisposeExpiredAttempt: %v", err)
+	}
+	if outcome != workload.DispositionTerminal {
+		t.Errorf("outcome: got %v want DispositionTerminal (no node to steer off)", outcome)
+	}
+	if len(rec.blockCalls) != 0 {
+		t.Errorf("MutateRetryBlock calls: got %+v want none", rec.blockCalls)
+	}
+	if got := rec.commits[0].after.LastFailure; got == nil || got.Reason != "Unschedulable" {
+		t.Errorf("LastFailure.Reason: got %+v want Unschedulable", got)
+	}
+}

@@ -18,11 +18,12 @@ import (
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // escalateFromEvidence walks every observed InstanceStatus and escalates
-// terminal failures from the snapshot's evidence. Two paths converge on
-// Phase=Failed, and they don't fight — whichever fires first wins and
+// terminal failures from the snapshot's evidence. Three paths converge
+// on Phase=Failed, and they don't fight — whichever fires first wins and
 // the other no-ops on the already-Failed Instance:
 //
 //   - FAST path: a pod stuck in a terminal kubelet waiting state
@@ -48,17 +49,28 @@ import (
 //     owns their clock, and a queued wait must not count against the
 //     timeout.
 //
-// BOTH paths skip operations whose state machine owns its own terminal
-// handling:
+//   - SCHEDULER-HOLD path: a pod the scheduler reports it cannot place
+//     is queued on cluster capacity, not stuck, so it parks the clock
+//     through the Waiting token rather than counting against it. Only
+//     input.UnschedulableGrace ends that wait, and it ends it as an
+//     ENVIRONMENT cause — the evidence names the scheduler's message and
+//     no revision is held. Unconfigured, the hold simply lasts.
+//
+// The FAST and BROAD paths skip operations whose state machine owns its
+// own terminal handling:
 //
 //   - Migrate (either pair side): timeout authority is the owner's
 //     status.migrations record, consumed by the dispatcher's
 //     migration-expiry pass. Stamping here would mark a healthy serving
-//     source Failed while the record keeps driving the pair.
+//     source Failed while the record keeps driving the pair. The
+//     scheduler hold still runs for them — it is scoped to the row whose
+//     OWN pod is unplaceable, so it can only reach a replacement.
 //   - Delete: DeleteBatch owns progress, stuck-Terminating escalation,
 //     and completion. Its durable ownership must survive an elapsed
 //     generic operation deadline, including when the index is planned
-//     again while deletion finishes.
+//     again while deletion finishes. The SCHEDULER-HOLD path skips it
+//     as well: a paced teardown of a never-placed pod would otherwise
+//     be failed out from under the batch still driving it.
 //
 // FAILED-WHILE-SERVING GUARD: an Instance whose blamed pod set is fully
 // healthy — every live (non-deleting) pod ContainersReady AND in the
@@ -114,19 +126,48 @@ func escalateFromEvidence(ctx context.Context, deps Deps, input ReconcileInput, 
 		if s.Phase == InstancePhaseFailed {
 			continue
 		}
+		ev := snapshot.EvidenceFor(ctx, s.Index, now, input.StuckPodGrace)
+		pods := podsForStuckCheck(s, byIdx)
+		desired := DesiredFor(desiredByIdx, s.Index, s.PodCount)
+		serving := podSetFullyServing(pods, desired)
+		// SCHEDULER HOLD: a pod with no placement is waiting on cluster
+		// capacity. Record the hold so the deadline parks, and let only
+		// the operator's grace end it — as an environment cause, since no
+		// corrected revision can conjure a node.
+		//
+		// Runs for EVERY operation type, Migrate included. A migration
+		// stamps a deadline on both pair rows, and a replacement the
+		// scheduler cannot place must not burn it; the hold is scoped to
+		// the row whose OWN pod is unplaceable (ev.Unschedulable), so a
+		// serving source is never held or failed for its surge's fate.
+		held, herr := reconcileSchedulerHold(ctx, input, s, ev, serving)
+		if herr != nil {
+			return fmt.Errorf("record scheduler hold (instance=%d): %w", s.Index, herr)
+		}
+		if serving {
+			continue
+		}
+		if held {
+			if !unschedulableGraceElapsed(ev.UnschedulableSince, now, input.UnschedulableGrace) {
+				// Parked. A genuinely wedged sibling pod still escalates
+				// through the fast path below; the hold itself does not.
+				if ev.StuckPod == nil {
+					continue
+				}
+			} else {
+				if ferr := escalateSchedulerHold(ctx, deps, input, dd, buf, s, pods, desired, ev, now); ferr != nil {
+					return fmt.Errorf("escalate scheduler hold (instance=%d): %w", s.Index, ferr)
+				}
+				continue
+			}
+		}
 		if s.Operation != nil {
 			switch s.Operation.Type {
 			case InstanceOperationMigrate, InstanceOperationDelete:
 				continue
 			}
 		}
-		ev := snapshot.EvidenceFor(ctx, s.Index, now, input.StuckPodGrace)
 		if ev.StuckPod == nil && !ev.DeadlinePassed {
-			continue
-		}
-		pods := podsForStuckCheck(s, byIdx)
-		desired := DesiredFor(desiredByIdx, s.Index, s.PodCount)
-		if podSetFullyServing(pods, desired) {
 			continue
 		}
 		// FAST path.
@@ -178,14 +219,14 @@ func escalateFromEvidence(ctx context.Context, deps Deps, input ReconcileInput, 
 		if s.Operation != nil && s.Operation.SurgeIndex != nil && anyPodAdmissionGated(byIdx[*s.Operation.SurgeIndex]) {
 			continue
 		}
-		// Same rationale, no pod to read it from: a create admission
-		// refused for lack of quota leaves nothing to carry a scheduling
-		// gate, so the wait is recorded on the Operation instead — on the
-		// surge row for a gang surge, whose source this check follows the
-		// same way the gate check above follows the SurgeIndex bucket. The
-		// parking step zeroes that deadline; one stamped before the park
-		// landed must not expire either.
-		if instanceCapacityBlocked(&s, input.ObservedState.InstanceStatuses) {
+		// Same rationale for the waits no pod can carry a gate for: a
+		// create admission refused for lack of quota leaves no pod at
+		// all, and a scheduler hold records itself on the Operation. Both
+		// live on the surge row for a gang surge, whose source this check
+		// follows the same way the gate check above follows the
+		// SurgeIndex bucket. The parking step zeroes that deadline; one
+		// stamped before the park landed must not expire either.
+		if instanceHeldExternally(&s, input.ObservedState.InstanceStatuses) {
 			continue
 		}
 		op := s.Operation
@@ -201,11 +242,19 @@ func escalateFromEvidence(ctx context.Context, deps Deps, input ReconcileInput, 
 		idx := s.Index
 		// The teardown that follows deletes the blamed pods, so revision-scoped
 		// evidence must survive on LastFailure: a workload-caused waiting reason
-		// names the cause more precisely than the elapsed timeout, and it is what
-		// the gang abandon charges the revision's retry ladder on.
+		// — or a pod that ran every container yet never reported ready — names
+		// the cause more precisely than the elapsed timeout, and it is what the
+		// gang abandon charges the revision's retry ladder on.
 		termination := deadlineTermination(now, op)
 		if pod, reason := firstWorkloadCausedPod(pods); pod != nil {
 			termination = PodTerminationWithReason(pod, reason, metav1.NewTime(now))
+		} else if pod, _ := firstRunningNotReadyPod(pods, attemptTargetRevision(input, s)); pod != nil {
+			// Evidence only: a pod that runs yet never reports ready leaves
+			// no container-level diagnostics, so without this the record is
+			// the bare elapsed timeout. It does not change who is blamed —
+			// the gang abandon reads the reason and this one is not in the
+			// workload-caused set.
+			termination = types.ContainersNotReadyTermination(pod, metav1.NewTime(now))
 		}
 		buf.add(idx, deadlineFailedMutation(termination), func() {
 			input.WarnInstanceFailed(idx, "", deadlineFailureMessage(op))

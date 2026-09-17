@@ -492,6 +492,17 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 	// makes the PodGroup → then the surge gang's pods are created here.
 
 	desired := expectedPodNamesForInstance(input, plan, surgeInst)
+	// A surge pod the kubelet refused to admit never ran and never will,
+	// yet it still holds its name, so the migration can never hand over.
+	// Free it so the surge is placed again before the record's deadline.
+	// The bookkeeping belongs to the SOURCE, which owns the Migrate
+	// operation; the pods and their expectations bucket on the surge.
+	if recycling, rerr := recycleAdmissionRejectedTargets(ctx, deps, input, sourceIdx, surgeIdx,
+		workload.InstanceOperationMigrate, surgePods, desired); rerr != nil {
+		return false, accepted, fmt.Errorf("recycle rejected migration surge pod (instance=%d): %w", surgeIdx, rerr)
+	} else if recycling {
+		return false, accepted, nil
+	}
 	existingByName := query.IndexPodsByName(surgePods)
 	missing := make([]podTarget, 0, len(desired))
 	for _, t := range desired {

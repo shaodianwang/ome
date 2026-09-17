@@ -361,7 +361,7 @@ func processStartActions(
 		}
 		// A dead pod on a stable name must be gone before the name can be
 		// reused; the create waits for a later pass.
-		recycling, err := recycleTerminalPods(ctx, deps, input, action.instance.Index, workload.InstanceOperationCreate, action.terminal)
+		recycling, err := recycleTerminalPods(ctx, deps, input, action.instance.Index, action.instance.Index, workload.InstanceOperationCreate, action.terminal)
 		if err != nil {
 			rollbackErr := rollbackStartActions(ctx, input, actions[i+1:])
 			return true, errors.Join(err, rollbackErr)

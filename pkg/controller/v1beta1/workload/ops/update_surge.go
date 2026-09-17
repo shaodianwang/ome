@@ -369,15 +369,24 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 			break
 		}
 	}
+	targets := []podTarget{{
+		Name:    query.PodName(input.Key.OwnerName, plan.Component, inst.Index, runner.Name, newOrdinal),
+		Runner:  runner,
+		Ordinal: newOrdinal,
+	}}
+	// A replacement the kubelet refused to admit never ran and never
+	// will, yet it still holds the surge name. Free it now rather than
+	// polling its readiness to the operation deadline.
+	if recycling, rerr := recycleAdmissionRejectedTargets(ctx, deps, input, inst.Index, inst.Index,
+		workload.InstanceOperationUpdate, surgePods, targets); rerr != nil {
+		return false, fmt.Errorf("recycle rejected surge target (instance=%d): %w", inst.Index, rerr)
+	} else if recycling {
+		return false, nil
+	}
 	if len(surgePods) == 0 && !staleAtSurgeSlot {
 		if !deps.ExpectationsCache().Satisfied(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, inst.Index) {
 			return false, nil
 		}
-		targets := []podTarget{{
-			Name:    query.PodName(input.Key.OwnerName, plan.Component, inst.Index, runner.Name, newOrdinal),
-			Runner:  runner,
-			Ordinal: newOrdinal,
-		}}
 		if _, err := createMissingPods(ctx, deps, input, plan, inst, inst.Index, targets, query.RevisionFromName(surgeTargetName)); err != nil {
 			if createRejectionHandled(err) {
 				return false, nil

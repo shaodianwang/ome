@@ -129,27 +129,17 @@ func disposeRejectedAttempt(ctx context.Context, deps workload.Deps, input workl
 }
 
 // markCapacityBlocked records an admission quota refusal as the
-// operation's waiting token. The token is what parks the
+// operation's waiting token, reporting the transition INTO the hold so
+// the caller announces the episode once. The token is what parks the
 // InstanceReadyTimeout clock (see workload.ReconcileGatedDeadlines): the
 // Instance is queued behind capacity an operator controls, not stuck.
 //
-// Edge-triggered on the blocked STATE, not on the message: a quota
-// message names the current usage and the pod that lost the race, so it
-// differs on every pass. Storing it would rewrite status and re-announce
-// the same episode for as long as the namespace stays full. The message
-// reaches operators once, through the event the caller emits when this
-// reports entered=true.
+// The shared external-hold writer owns the precedence — no overwriting
+// another authority's token, edge-triggered on the held state rather
+// than on the quota message, which names current usage and the pod that
+// lost the race and so differs on every pass.
 func markCapacityBlocked(ctx context.Context, input workload.ReconcileInput, idx int32) (bool, error) {
-	entered := false
-	err := input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
-		if s.Phase == "" || s.Operation == nil || workload.OperationCapacityBlocked(s.Operation) {
-			return false
-		}
-		s.Operation.Waiting = workload.RejectionReasonQuotaExceeded
-		entered = true
-		return true
-	})
-	return entered, err
+	return workload.MarkExternalHold(ctx, input, idx, workload.RejectionReasonQuotaExceeded, nil, nil)
 }
 
 // clearCapacityBlock releases the quota waiting token once the create
@@ -158,18 +148,8 @@ func markCapacityBlocked(ctx context.Context, input workload.ReconcileInput, idx
 // created, is the signal: an Instance whose targets all came back
 // AlreadyExists creates nothing yet is plainly no longer blocked.
 //
-// Edge-triggered off the observation, so a pass that was never blocked
-// writes nothing.
+// Scoped to the quota token by the shared writer, so a create finishing
+// cleanly cannot release a scheduler hold that is still real.
 func clearCapacityBlock(ctx context.Context, input workload.ReconcileInput, idx int32) error {
-	observed := findInstanceStatus(input.ObservedState.InstanceStatuses, idx)
-	if observed == nil || !workload.OperationCapacityBlocked(observed.Operation) {
-		return nil
-	}
-	return input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
-		if s.Phase == "" || s.Operation == nil || !workload.OperationCapacityBlocked(s.Operation) {
-			return false
-		}
-		s.Operation.Waiting = ""
-		return true
-	})
+	return workload.ClearExternalHold(ctx, input, idx, workload.RejectionReasonQuotaExceeded)
 }

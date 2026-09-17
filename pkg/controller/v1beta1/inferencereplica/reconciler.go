@@ -353,10 +353,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// safe: the workload layer Holds on the first same-target failure.
 	retryPolicy := r.resolveUpdateRetryPolicy(log)
 
-	// Resolve the stuck-pod grace period from the operator lifecycle config.
-	// Zero (absent/invalid config) fails safe: the escalator skips fast
-	// escalation this pass and only the InstanceReadyTimeout backstop fires.
-	stuckPodGrace := r.resolveStuckPodGrace(log)
+	// Resolve the escalation windows from the operator lifecycle config.
+	// A zero field (absent/invalid config) fails safe by disabling that
+	// escalation: the stuck-pod fast path leaves the row to the
+	// InstanceReadyTimeout backstop, and an unplaceable pod only parks
+	// the clock instead of being failed on a window nobody configured.
+	graces := r.resolveLifecycleGraces(log)
 
 	// Resolve the auto-migrate relocation budget from the operator lifecycle
 	// config. Zero (absent/invalid config) fails safe: the deadline
@@ -374,7 +376,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// the ISVC-side coordination reconciler.
 	coordDefaults := r.resolveCoordinationGroupDefaults(log)
 
-	input := r.buildReconcileInput(ctx, ir, parent, retryPolicy, forceDeletePolicy, stuckPodGrace, autoMigrateBudget, coordDefaults)
+	input := r.buildReconcileInput(ctx, ir, parent, retryPolicy, forceDeletePolicy, graces, autoMigrateBudget, coordDefaults)
 	input.ScaleUpPodBatchSize = r.ScaleUpPodBatchSize
 	input.ScaleDownPodBatchSize = r.ScaleDownPodBatchSize
 	input.ScaleDownRequeueInterval = r.ScaleDownRequeueInterval
@@ -917,34 +919,64 @@ func terminalFinalizationOwned(observed workload.WorkloadObservedState) map[int3
 	return owned
 }
 
-// resolveStuckPodGrace loads lifecycle.stuckPodGracePeriod from the
-// operator ConfigMap. Parse failure or absent config resolves to 0 —
-// the escalator skips fast escalation this pass (the
-// InstanceReadyTimeout backstop still fires) — with one V(1) log.
-func (r *Reconciler) resolveStuckPodGrace(log logr.Logger) time.Duration {
+// lifecycleGraces are the escalation windows one reconcile resolves
+// from the operator ConfigMap. Every field is zero when unconfigured,
+// which each consumer reads as "this escalation does not exist"; there
+// are no in-code defaults behind them.
+type lifecycleGraces struct {
+	// StuckPod bounds a pod parked in a terminal kubelet waiting state.
+	// Zero skips fast escalation; the InstanceReadyTimeout backstop still
+	// fires.
+	StuckPod time.Duration
+	// Unschedulable bounds a pod the scheduler cannot place. Zero leaves
+	// the hold parking the clock until an operator resolves it.
+	Unschedulable time.Duration
+}
+
+// resolveLifecycleGraces loads both escalation windows from the operator
+// ConfigMap in one read. Absent, invalid, or unloadable config resolves
+// the affected window to 0 — that escalation is then disabled — with one
+// V(1) log naming the cause; unconfigured is never an error, and there
+// is never a silent in-code fallback window.
+func (r *Reconciler) resolveLifecycleGraces(log logr.Logger) lifecycleGraces {
+	cfg, err := r.loadLifecycleConfig(log, "escalation graces")
+	if cfg == nil || err != nil {
+		return lifecycleGraces{}
+	}
+	var graces lifecycleGraces
+	if graces.StuckPod, err = cfg.ToGracePeriod(); err != nil {
+		log.V(1).Info("stuck-pod grace invalid; skipping fast escalation this pass", "error", err.Error())
+	}
+	if graces.Unschedulable, err = cfg.ToUnschedulableGracePeriod(); err != nil {
+		log.V(1).Info("unschedulable grace invalid; scheduler-hold escalation disabled this pass", "error", err.Error())
+	}
+	if graces.StuckPod == 0 {
+		log.V(1).Info("stuck-pod grace unconfigured (no lifecycle.stuckPodGracePeriod); skipping fast escalation this pass")
+	}
+	if graces.Unschedulable == 0 {
+		log.V(1).Info("unschedulable grace unconfigured (no lifecycle.unschedulableGracePeriod); scheduler-hold escalation disabled this pass")
+	}
+	return graces
+}
+
+// loadLifecycleConfig fetches the lifecycle block through the shared
+// short-TTL cache, logging once at V(1) and returning nil when it cannot
+// be read. purpose names the caller in that log so an operator can tell
+// which resolver went unconfigured.
+func (r *Reconciler) loadLifecycleConfig(log logr.Logger, purpose string) (*controllerconfig.LifecycleConfig, error) {
 	if r.Clientset == nil {
-		log.V(1).Info("stuck-pod grace unresolved: no clientset wired; skipping fast escalation this pass")
-		return 0
+		log.V(1).Info("lifecycle config unresolved: no clientset wired", "purpose", purpose)
+		return nil, nil
 	}
 	cfg, err := controllerconfig.NewLifecycleConfigCached(r.ConfigCache, r.Clientset)
 	if err != nil {
-		log.V(1).Info("stuck-pod grace unresolved: lifecycle config load failed; skipping fast escalation this pass", "error", err.Error())
-		return 0
+		log.V(1).Info("lifecycle config load failed", "purpose", purpose, "error", err.Error())
+		return nil, err
 	}
 	if cfg == nil {
-		log.V(1).Info("stuck-pod grace unconfigured (no lifecycle block in inferenceservice-config); skipping fast escalation this pass")
-		return 0
+		log.V(1).Info("no lifecycle block in inferenceservice-config", "purpose", purpose)
 	}
-	grace, err := cfg.ToGracePeriod()
-	if err != nil {
-		log.V(1).Info("stuck-pod grace invalid; skipping fast escalation this pass", "error", err.Error())
-		return 0
-	}
-	if grace == 0 {
-		log.V(1).Info("stuck-pod grace unconfigured (no lifecycle.stuckPodGracePeriod); skipping fast escalation this pass")
-		return 0
-	}
-	return grace
+	return cfg, nil
 }
 
 // resolveAutoMigrateBudget loads lifecycle.autoMigrate.maxAttempts from

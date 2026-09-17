@@ -649,7 +649,7 @@ func TestCreate_MidBatchFailureRollsBackAPINormalizedStatus(t *testing.T) {
 		Expectations:         workload.NewExpectations(),
 		InstanceStatusTarget: irstatus.EncodingDenseV1,
 	}
-	input := r.buildReconcileInput(context.Background(), ir, nil, nil, nil, 0, 0, coordination.GroupDefaults{})
+	input := r.buildReconcileInput(context.Background(), ir, nil, nil, nil, lifecycleGraces{}, 0, coordination.GroupDefaults{})
 	podBatchSize := int32(3)
 	input.ScaleUpPodBatchSize = &podBatchSize
 	plan, err := workload.BuildPlan(input.Key.Component, input.DesiredSpec, input.ObservedState)
@@ -803,7 +803,7 @@ func TestBuildReconcileInput_AtomicInstanceAndRetryBlockMutationOneWrite(t *test
 	wantBlock := *storedBefore.Status.RetryBlocks[0].DeepCopy()
 	wantBlock.State = v1beta1.RetryBlockRetryInProgress
 	r := &Reconciler{Client: c, APIReader: c, InstanceStatusTarget: irstatus.EncodingDenseV1}
-	input := r.buildReconcileInput(context.Background(), ir, nil, nil, nil, 0, 0, coordination.GroupDefaults{})
+	input := r.buildReconcileInput(context.Background(), ir, nil, nil, nil, lifecycleGraces{}, 0, coordination.GroupDefaults{})
 	g.Expect(input.ApplyInstanceMutationsWithRetryBlock).NotTo(gomega.BeNil(),
 		"the production IR input must expose the atomic status capability")
 

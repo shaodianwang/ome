@@ -359,7 +359,7 @@ func Restart(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 	// A new-incarnation pod that died (rejected at admission, evicted) is
 	// absent: it holds the stable name but will never run. Recycle it so
 	// the name frees up; its target is created on a later pass.
-	recycling, err := recycleTerminalPods(ctx, deps, input, inst.Index, workload.InstanceOperationRestart, terminalTargetPods(newPods, desired))
+	recycling, err := recycleTerminalPods(ctx, deps, input, inst.Index, inst.Index, workload.InstanceOperationRestart, terminalTargetPods(newPods, desired))
 	if err != nil {
 		return false, fmt.Errorf("Restart: recycle terminal pods (instance=%d): %w", inst.Index, err)
 	}

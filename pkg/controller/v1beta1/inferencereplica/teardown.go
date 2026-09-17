@@ -125,11 +125,11 @@ func (r *Reconciler) reconcileTeardown(ctx context.Context, log logr.Logger, ir 
 	// index set is treated as empty); the input/plan only need to be
 	// well-formed so Delete can read Key/Component/InstanceReadyTimeout.
 	// The same-target update retry policy is nil: the Update pass never
-	// runs in teardown, and neither does the escalation pass (zero grace
-	// / zero relocation budget — wedge escalation belongs to the Delete
-	// pipeline's lifecycle.forceDelete). Coordination group defaults are
+	// runs in teardown, and neither does the escalation pass (zero
+	// escalation windows / zero relocation budget — wedge escalation
+	// belongs to the Delete pipeline's lifecycle.forceDelete). Coordination group defaults are
 	// likewise irrelevant: teardown never consults the update gate.
-	input := r.buildReconcileInput(ctx, ir, parent, nil, forceDeletePolicy, 0, 0, coordination.GroupDefaults{})
+	input := r.buildReconcileInput(ctx, ir, parent, nil, forceDeletePolicy, lifecycleGraces{}, 0, coordination.GroupDefaults{})
 	input.Teardown = true
 	input.ScaleDownPodBatchSize = r.ScaleDownPodBatchSize
 	input.ScaleDownRequeueInterval = r.ScaleDownRequeueInterval

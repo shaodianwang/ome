@@ -225,6 +225,14 @@ type ReconcileInput struct {
 	// escalation (the InstanceReadyTimeout backstop still fires).
 	StuckPodGrace time.Duration
 
+	// UnschedulableGrace is how long a pod may carry
+	// PodScheduled=False/Unschedulable before the escalation pass fails
+	// its Instance as environment-caused. Operator config
+	// (lifecycle.unschedulableGracePeriod); zero or negative disables that
+	// escalation entirely, leaving the scheduler hold to park the
+	// InstanceReadyTimeout clock for as long as it lasts.
+	UnschedulableGrace time.Duration
+
 	// Pacing collects the wake-up the apiserver itself asked for while
 	// refusing writes during this pass. The op entry points report
 	// progress as (done, error) and have no result channel of their own,

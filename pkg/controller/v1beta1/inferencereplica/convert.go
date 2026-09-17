@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -104,8 +103,8 @@ func IRGVK() schema.GroupVersionKind { return irGVK }
 // likewise resolved ONCE per reconcile by the caller; nil means
 // unconfigured and the escalation is disabled entirely.
 //
-// stuckPodGrace and autoMigrateBudget feed the workload escalation pass:
-// the stuck-pod fast-escalation window (zero disables it) and the
+// graces and autoMigrateBudget feed the workload escalation pass: the
+// escalation windows (a zero field disables that escalation) and the
 // relocation budget of the terminal-failure disposition (zero disables
 // the relocation branch). Both resolved ONCE per reconcile by the caller
 // from the operator lifecycle config.
@@ -114,7 +113,7 @@ func IRGVK() schema.GroupVersionKind { return irGVK }
 // fill-ins (from the coordination config), likewise resolved ONCE per
 // reconcile by the caller; the zero value means unconfigured and each
 // knob uses its documented unconfigured behavior.
-func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.InferenceReplica, parent *v1beta1.InferenceService, updateRetryPolicy *workloadtypes.RetryPolicy, forceDeletePolicy *workloadtypes.ForceDeletePolicy, stuckPodGrace time.Duration, autoMigrateBudget int32, coordDefaults coordination.GroupDefaults) workload.ReconcileInput {
+func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.InferenceReplica, parent *v1beta1.InferenceService, updateRetryPolicy *workloadtypes.RetryPolicy, forceDeletePolicy *workloadtypes.ForceDeletePolicy, graces lifecycleGraces, autoMigrateBudget int32, coordDefaults coordination.GroupDefaults) workload.ReconcileInput {
 	desired := desiredFromIR(ir)
 	// The parent annotation is the operator-facing source of truth whenever the
 	// parent is readable. This deliberately overrides both stale true and stale
@@ -165,8 +164,11 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 		// Stuck-pod fast-escalation window for the workload escalation
 		// pass. Zero (unconfigured) disables fast escalation; the
 		// InstanceReadyTimeout backstop still fires.
-		StuckPodGrace: stuckPodGrace,
-		Clock:         r.Clock,
+		StuckPodGrace: graces.StuckPod,
+		// Scheduler-hold escalation window. Zero (unconfigured) leaves an
+		// unplaceable pod parking the deadline until an operator acts.
+		UnschedulableGrace: graces.Unschedulable,
+		Clock:              r.Clock,
 		// WarnInstanceFailed bridges the workload escalation pass to the
 		// reconciler's event recorder so the operator sees the
 		// per-Instance Failed escalation against the EventTarget (parent

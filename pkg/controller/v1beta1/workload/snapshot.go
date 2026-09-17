@@ -5,6 +5,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // InstanceEvidence is the per-instance observed failure evidence for one
@@ -22,6 +23,25 @@ type InstanceEvidence struct {
 	// DeadlinePassed reports whether the instance is in a transient phase
 	// with an in-flight Operation whose Deadline lies in the past.
 	DeadlinePassed bool
+	// Unschedulable is the first live pod of the instance's OWN bucket
+	// the scheduler reports it cannot place. Nil when every pod is
+	// scheduled, gone, or deleting.
+	//
+	// Own-bucket, unlike StuckPod: a hold names the row that has to wait,
+	// and attributing a replacement's lack of placement to the serving
+	// source would both misreport the source and, past the grace, fail
+	// it. A sibling reaches the hold through the deadline parking's
+	// SurgeIndex hop instead.
+	//
+	// Independent of the stuck-pod grace: the hold is recorded from the
+	// first observation and only its ESCALATION waits out a window.
+	Unschedulable *corev1.Pod
+	// UnschedulableMessage is the scheduler's own explanation of which
+	// constraint had no placement ("" when it gave none).
+	UnschedulableMessage string
+	// UnschedulableSince is when PodScheduled last transitioned — the
+	// start of the hold, which the escalation window is measured from.
+	UnschedulableSince metav1.Time
 }
 
 // ObservedSnapshot owns the decision-epoch observations for one reconcile.
@@ -121,10 +141,10 @@ func (s *ObservedSnapshot) CachedPods(ctx context.Context) (map[int32][]*corev1.
 // escalation pass blames them (podsForStuckCheck: a gang Update surge is
 // inspected through its replacement gang, a Migrate pair through
 // own-plus-sibling). A non-positive grace disables stuck-pod evidence
-// entirely (fast escalation off; the deadline backstop still reports). A
-// pod-read error yields deadline-only evidence, so a transient read
-// failure never fabricates a stuck signal. now/grace are supplied by the
-// caller (clock seam).
+// entirely (fast escalation off; the deadline backstop and the scheduler
+// hold still report). A pod-read error yields deadline-only evidence, so
+// a transient read failure never fabricates a stuck signal. now/grace
+// are supplied by the caller (clock seam).
 func (s *ObservedSnapshot) EvidenceFor(ctx context.Context, idx int32, now time.Time, grace time.Duration) InstanceEvidence {
 	var ev InstanceEvidence
 	var inst *InstanceStatus
@@ -137,16 +157,17 @@ func (s *ObservedSnapshot) EvidenceFor(ctx context.Context, idx int32, now time.
 	if inst != nil {
 		ev.DeadlinePassed = operationDeadlinePassed(inst, now)
 	}
-	if grace <= 0 {
-		return ev
-	}
 	cached, err := s.CachedPods(ctx)
 	if err != nil {
 		return ev
 	}
+	ev.Unschedulable, ev.UnschedulableMessage, ev.UnschedulableSince = firstUnschedulablePod(cached[idx])
 	pods := cached[idx]
 	if inst != nil {
 		pods = podsForStuckCheck(*inst, cached)
+	}
+	if grace <= 0 {
+		return ev
 	}
 	if pod, reason := FirstStuckPodForInstance(pods, now, grace); pod != nil {
 		ev.StuckPod = pod

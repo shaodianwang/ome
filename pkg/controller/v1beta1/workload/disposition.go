@@ -135,10 +135,11 @@ func DisposeExpiredAttempt(ctx context.Context, deps Deps, input ReconcileInput,
 			// Writer ordering: RetryBlock upsert lands BEFORE the mutation
 			// that clears the failed attempt's Operation. Crash-safe: a
 			// re-entered disposition (block landed, clear didn't) refreshes
-			// the block via the writer's wave dedup without recounting. The
-			// evidence here is workload-caused by construction, so the wave
-			// charges the ladder.
-			if err := RecordUpdateFailureInRetryBlock(ctx, input, targetRev, matched, true); err != nil {
+			// the block via the writer's wave dedup without recounting.
+			// Whether the wave charges the ladder is read off the matched
+			// reason rather than asserted here, so this branch and the gang
+			// abandon answer that question from the same set.
+			if err := RecordUpdateFailureInRetryBlock(ctx, input, targetRev, matched, IsWorkloadCausedReason(matched)); err != nil {
 				return DispositionHeldRevision, fmt.Errorf("record retry block for disposed attempt (instance=%d rev=%s): %w", inst.Index, targetRev, err)
 			}
 			termination := PodTerminationWithReason(pod, matched, now)
@@ -155,18 +156,14 @@ func DisposeExpiredAttempt(ctx context.Context, deps Deps, input ReconcileInput,
 		// UpdateRevision) — nothing to hold; dispose terminal below.
 	}
 
-	// Branch 2: relocatable — record the directive, then fall through
-	// to the unconditional terminal backstop.
-	directiveRecorded := false
+	// Branch 2: relocatable — the attempt's pods occupy exactly one
+	// resolvable node, so the rebuild can be steered off it. The
+	// directive is written below, once the evidence the backstop derives
+	// is available to travel with it.
+	relocationNode := ""
 	if causePod == nil &&
 		migrationModeAllowsRelocation(dd.MigrationMode) && dd.AutoMigrateMaxAttempts > 0 {
-		if node := singleLiveNode(pods); node != "" {
-			recorded, err := recordRelocationDirective(ctx, deps, input, dd, inst, node)
-			if err != nil {
-				return DispositionTerminal, err
-			}
-			directiveRecorded = recorded
-		}
+		relocationNode = singleLiveNode(pods)
 	}
 
 	// Terminal backstop (branches 2 and 3): clear the Operation + stamp
@@ -183,6 +180,7 @@ func DisposeExpiredAttempt(ctx context.Context, deps Deps, input ReconcileInput,
 		Message: reason,
 		Time:    now,
 	}
+	limboDetail := ""
 	if causePod != nil {
 		// Workload-caused evidence without a resolvable revision still
 		// carries the wedged pod's diagnostics into LastFailure.
@@ -191,6 +189,21 @@ func DisposeExpiredAttempt(ctx context.Context, deps Deps, input ReconcileInput,
 		// Ambiguous runtime-start failures still identify the exact failed
 		// pod so operation-specific cleanup can remove only that object.
 		termination = PodTerminationWithReason(pod, shortReason, now)
+	} else if pod, _ := firstRunningNotReadyPod(pods, attemptTargetRevision(input, inst)); pod != nil {
+		// Readiness limbo: the branch above chose the disposition, this
+		// only says what an operator will read. Without it the record is
+		// the bare elapsed timeout and says nothing about the probe.
+		termination = types.ContainersNotReadyTermination(pod, now)
+		limboDetail = termination.Message
+	}
+
+	directiveRecorded := false
+	if relocationNode != "" {
+		recorded, rerr := recordRelocationDirective(ctx, deps, input, dd, inst, relocationNode, limboDetail)
+		if rerr != nil {
+			return DispositionTerminal, rerr
+		}
+		directiveRecorded = recorded
 	}
 	outcome := DispositionTerminal
 	detail := "attempt disposed terminal (no workload-caused evidence, relocation unavailable); operation-specific recovery decides whether another attempt is safe"
@@ -231,9 +244,17 @@ func migrationModeAllowsRelocation(mode MigrationMode) bool {
 	return mode == MigrationModeAuto || mode == MigrationModeSurge
 }
 
-// firstWorkloadCausedPod returns the first live (non-deleting) pod with
-// a workload-caused container or init-container waiting reason
-// (IsWorkloadCausedReason), plus the matched reason.
+// firstWorkloadCausedPod returns the first live (non-deleting) pod whose
+// failure is deterministically scoped to the revision, plus the matched
+// reason: a workload-caused container or init-container waiting reason
+// (IsWorkloadCausedReason).
+//
+// Readiness limbo is deliberately NOT in this set. A pod that runs yet
+// never reports ready is ambiguous between the revision and the node it
+// landed on, so it must reach the relocation branch first, exactly as an
+// attempt with no evidence at all does. It contributes EVIDENCE for
+// whichever branch runs (firstRunningNotReadyPod), never the branch
+// choice.
 func firstWorkloadCausedPod(pods []*corev1.Pod) (*corev1.Pod, string) {
 	for _, pod := range pods {
 		if pod == nil || pod.DeletionTimestamp != nil {
@@ -257,6 +278,68 @@ func firstWorkloadCausedPod(pods []*corev1.Pod) (*corev1.Pod, string) {
 		}
 	}
 	return nil, ""
+}
+
+// firstRunningNotReadyPod returns the first live pod in readiness limbo
+// — running every container yet never reporting ContainersReady. Pure
+// evidence: it names what to record, never which branch to take.
+//
+// Scoped to attemptRev when the pods say which revision they belong to.
+// A single-pod surge shares its Instance index with the source it is
+// replacing, so the set holds both; blaming a source whose own probes
+// happen to be flapping charges nothing (its revision is superseded) and
+// leaves the attempt to expire again on every pass.
+//
+// Suppressed whenever ANY live pod in the scoped set has a container
+// parked in a waiting state: the kubelet has named a failure there, and
+// that name owns the blame. Several of those names (CrashLoopBackOff,
+// RunContainerError) are deliberately ambiguous between the revision and
+// the node, and a not-ready sibling must not be what decides to hold the
+// revision instead of relocating.
+func firstRunningNotReadyPod(pods []*corev1.Pod, attemptRev string) (*corev1.Pod, string) {
+	var limbo *corev1.Pod
+	for _, pod := range pods {
+		if pod == nil || pod.DeletionTimestamp != nil {
+			continue
+		}
+		if !podOnAttemptRevision(pod, attemptRev) {
+			continue
+		}
+		if types.PodHasWaitingContainer(pod) {
+			return nil, ""
+		}
+		if limbo == nil && types.PodRunningNotReady(pod) {
+			limbo = pod
+		}
+	}
+	if limbo == nil {
+		return nil, ""
+	}
+	return limbo, types.ReasonContainersNotReady
+}
+
+// attemptTargetRevision resolves the revision an attempt is converging
+// toward: the pin its operation carries, else the owner's current
+// UpdateRevision (an unpinned Create renders from that).
+func attemptTargetRevision(input ReconcileInput, inst InstanceStatus) string {
+	if inst.Operation != nil && inst.Operation.TargetRevision != "" {
+		return inst.Operation.TargetRevision
+	}
+	return input.ObservedState.UpdateRevision
+}
+
+// podOnAttemptRevision reports whether a pod may be read as the
+// attempt's own. A pod carrying no revision-hash label, or an attempt
+// with no resolvable target, leaves the scope open — the label is the
+// only evidence of ownership, and without it every pod stays a
+// candidate.
+func podOnAttemptRevision(pod *corev1.Pod, attemptRev string) bool {
+	target := query.RevisionFromName(attemptRev)
+	podRev := query.RevisionFromPod(pod)
+	if target.IsZero() || podRev.IsZero() {
+		return true
+	}
+	return podRev.Same(target)
 }
 
 func firstPodWaitingForReason(pods []*corev1.Pod, reason string) *corev1.Pod {
@@ -339,7 +422,7 @@ func singleLiveNode(pods []*corev1.Pod) string {
 // never selects it. Best-effort: a nil closure or a failed write is
 // V(1)-logged and never fails the disposition — the relocation itself
 // is ledger-driven.
-func recordRelocationDirective(ctx context.Context, deps Deps, input ReconcileInput, dd DispositionDeps, inst InstanceStatus, fromNode string) (recorded bool, err error) {
+func recordRelocationDirective(ctx context.Context, deps Deps, input ReconcileInput, dd DispositionDeps, inst InstanceStatus, fromNode, detail string) (recorded bool, err error) {
 	owner := dispositionLedgerOwner(input)
 	ledger, err := audit.LoadLedgerForOwner(ctx, deps.Reader(), owner)
 	if err != nil {
@@ -404,7 +487,7 @@ func recordRelocationDirective(ctx context.Context, deps Deps, input ReconcileIn
 			Phase:          MigrationPhaseRelocated,
 			Attempt:        attempts + 1,
 			Reason:         audit.ReasonAutoRecover,
-			Message:        fmt.Sprintf("relocation directive recorded; rebuild steered off node %s", fromNode),
+			Message:        relocationRecordMessage(fromNode, detail),
 			StartedAt:      nowT,
 			Deadline:       nowT,
 			CompletedAt:    &completedAt,
@@ -466,4 +549,16 @@ func dispositionEventTarget(input ReconcileInput) client.Object {
 		return input.EventTarget
 	}
 	return input.OwnerObject
+}
+
+// relocationRecordMessage is the operator-facing summary on a relocation
+// directive's visibility record. detail, when the disposition derived
+// any, names what actually went wrong on the suspect node — otherwise
+// the record says only where the rebuild is steered away from.
+func relocationRecordMessage(fromNode, detail string) string {
+	base := fmt.Sprintf("relocation directive recorded; rebuild steered off node %s", fromNode)
+	if detail == "" {
+		return base
+	}
+	return base + " (" + detail + ")"
 }

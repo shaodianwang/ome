@@ -176,6 +176,9 @@ const (
 
 	ReasonPodGroupCRDNotInstalled = types.ReasonPodGroupCRDNotInstalled
 	ReasonGangSchedulingAvailable = types.ReasonGangSchedulingAvailable
+
+	WaitingReasonUnschedulable   = types.WaitingReasonUnschedulable
+	RejectionReasonQuotaExceeded = types.RejectionReasonQuotaExceeded
 )
 
 // NewExpectations returns a fresh Expectations cache.
@@ -229,6 +232,38 @@ func IsWorkloadCausedReason(reason string) bool {
 // The deadline-parking step and the escalation pass both read it.
 func OperationCapacityBlocked(op *InstanceOperation) bool {
 	return types.OperationCapacityBlocked(op)
+}
+
+// MarkExternalHold re-exports types.MarkExternalHold: the single writer
+// for InstanceOperation.Waiting, shared by every authority that can
+// stall an operation from outside.
+func MarkExternalHold(ctx context.Context, input ReconcileInput, idx int32, token string, evidence *InstanceTermination, writable func(*InstanceOperation) bool) (bool, error) {
+	return types.MarkExternalHold(ctx, input, idx, token, evidence, writable)
+}
+
+// ClearExternalHold re-exports types.ClearExternalHold: releases a
+// waiting token, and only for the authority that set it.
+func ClearExternalHold(ctx context.Context, input ReconcileInput, idx int32, token string) error {
+	return types.ClearExternalHold(ctx, input, idx, token)
+}
+
+// OperationUnschedulable re-exports types.OperationUnschedulable:
+// whether an operation is parked on the scheduler-hold Waiting token.
+func OperationUnschedulable(op *InstanceOperation) bool {
+	return types.OperationUnschedulable(op)
+}
+
+// OperationExternallyHeld re-exports types.OperationExternallyHeld: the
+// union of the waits outside the workload's control (quota refusal,
+// scheduler hold) that park the InstanceReadyTimeout clock.
+func OperationExternallyHeld(op *InstanceOperation) bool {
+	return types.OperationExternallyHeld(op)
+}
+
+// PodUnschedulable re-exports types.PodUnschedulable: the scheduler's
+// message and the start of the hold for a pod it cannot place.
+func PodUnschedulable(pod *corev1.Pod) (string, metav1.Time, bool) {
+	return types.PodUnschedulable(pod)
 }
 
 // RecordUpdateFailureInRetryBlock re-exports the shared RetryBlock

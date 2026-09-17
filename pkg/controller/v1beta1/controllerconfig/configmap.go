@@ -553,6 +553,13 @@ type LifecycleConfig struct {
 	// string ("60s"); absence or parse failure disables fast escalation
 	// this pass (the InstanceReadyTimeout backstop remains).
 	StuckPodGracePeriod string `json:"stuckPodGracePeriod,omitempty"`
+	// UnschedulableGracePeriod is how long a pod may carry
+	// PodScheduled=False/Unschedulable before its Instance is failed as
+	// environment-caused. A duration string ("10m"), measured from the
+	// condition's last transition. There is intentionally NO in-code
+	// default: absence means the escalation does not exist and an
+	// unplaceable pod only parks the InstanceReadyTimeout clock.
+	UnschedulableGracePeriod string `json:"unschedulableGracePeriod,omitempty"`
 	// AutoMigrate configures the deadline-disposition relocation budget.
 	// Absence disables the relocation branch.
 	AutoMigrate *AutoMigrateConfig `json:"autoMigrate,omitempty"`
@@ -761,6 +768,24 @@ func (c *LifecycleConfig) ToGracePeriod() (time.Duration, error) {
 	}
 	if d <= 0 {
 		return 0, fmt.Errorf("invalid lifecycle.stuckPodGracePeriod: must be > 0, got %s", d)
+	}
+	return d, nil
+}
+
+// ToUnschedulableGracePeriod validates and parses
+// UnschedulableGracePeriod. A nil receiver or absent key is NOT an error
+// — it means the scheduler-hold escalation is unconfigured, which the
+// caller distinguishes from invalid by the returned zero value.
+func (c *LifecycleConfig) ToUnschedulableGracePeriod() (time.Duration, error) {
+	if c == nil || c.UnschedulableGracePeriod == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(c.UnschedulableGracePeriod)
+	if err != nil {
+		return 0, fmt.Errorf("invalid lifecycle.unschedulableGracePeriod %q: %w", c.UnschedulableGracePeriod, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("invalid lifecycle.unschedulableGracePeriod: must be > 0, got %s", d)
 	}
 	return d, nil
 }

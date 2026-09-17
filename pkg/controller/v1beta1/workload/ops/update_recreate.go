@@ -133,6 +133,15 @@ func recreateUpdate(ctx context.Context, deps workload.Deps, input workload.Reco
 	newInst.Incarnation = newInc
 
 	desired := expectedPodNamesForInstance(input, plan, newInst)
+	// A rebuilt pod the kubelet refused to admit never ran and never
+	// will, yet it still holds its name. Free it now rather than polling
+	// its readiness to the operation deadline.
+	if recycling, rerr := recycleAdmissionRejectedTargets(ctx, deps, input, inst.Index, inst.Index,
+		workload.InstanceOperationUpdate, newPods, desired); rerr != nil {
+		return false, fmt.Errorf("recycle rejected replacement (instance=%d): %w", inst.Index, rerr)
+	} else if recycling {
+		return false, nil
+	}
 	existingByName := query.IndexPodsByName(newPods)
 	missing := make([]podTarget, 0, len(desired))
 	for _, t := range desired {

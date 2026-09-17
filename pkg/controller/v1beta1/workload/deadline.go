@@ -71,11 +71,12 @@ func PodAdmissionGated(pod *corev1.Pod) bool {
 //   - a pod still carrying an admission scheduling gate (e.g. Kueue) —
 //     supplied by the caller in `gated`, which maps Instance index ->
 //     "any of its pods is gated";
-//   - an operation parked on the capacity-blocked waiting token
-//     (instanceCapacityBlocked): admission refused the create for lack of
-//     quota, so there is no pod to carry a gate and the create path
-//     records the wait on the Operation instead — on the surge row for a
-//     gang surge, which the source is held by in turn.
+//   - an operation parked on an external waiting token
+//     (instanceHeldExternally): admission refused the create for lack of
+//     quota, or the scheduler found no placement for the pods. Neither
+//     wait can be read off a scheduling gate — the quota refusal leaves
+//     no pod at all — so it is recorded on the Operation instead, on the
+//     surge row for a gang surge, which the source is held by in turn.
 //
 // For each transient-phase Instance with an in-flight Operation:
 //   - held    -> PARK: zero the deadline (the "never expires" sentinel
@@ -95,7 +96,7 @@ func ReconcileGatedDeadlines(ctx context.Context, input ReconcileInput, instance
 		if s.Operation == nil || !isTransientPhase(s.Phase) {
 			continue
 		}
-		held := gated[s.Index] || instanceCapacityBlocked(s, instances)
+		held := gated[s.Index] || instanceHeldExternally(s, instances)
 		switch {
 		case held && !s.Operation.Deadline.IsZero():
 			if err := setInstanceDeadline(ctx, input, s.Index, metav1.Time{}); err != nil {
@@ -110,18 +111,20 @@ func ReconcileGatedDeadlines(ctx context.Context, input ReconcileInput, instance
 	return nil
 }
 
-// instanceCapacityBlocked reports whether s's operation is waiting on
-// capacity — its own waiting token, or the one on the surge row its
-// Operation.SurgeIndex points at. The surge indirection matters because a
-// gang surge creates pods under the SURGE index while the governing
-// operation and its deadline live on the SOURCE: without it, the source's
-// clock would keep running through a wait its own replacement is stuck
-// in. Mirrors how an admission-gated surge bucket parks its source.
-func instanceCapacityBlocked(s *InstanceStatus, statuses []InstanceStatus) bool {
+// instanceHeldExternally reports whether s's operation is waiting on
+// something outside the workload's control — quota the apiserver refused
+// it, or a placement the scheduler could not find. It reads its own
+// waiting token, or the one on the surge row its Operation.SurgeIndex
+// points at. The surge indirection matters because a gang surge creates
+// pods under the SURGE index while the governing operation and its
+// deadline live on the SOURCE: without it, the source's clock would keep
+// running through a wait its own replacement is stuck in. Mirrors how an
+// admission-gated surge bucket parks its source.
+func instanceHeldExternally(s *InstanceStatus, statuses []InstanceStatus) bool {
 	if s == nil || s.Operation == nil {
 		return false
 	}
-	if OperationCapacityBlocked(s.Operation) {
+	if OperationExternallyHeld(s.Operation) {
 		return true
 	}
 	if s.Operation.SurgeIndex == nil {
@@ -129,7 +132,7 @@ func instanceCapacityBlocked(s *InstanceStatus, statuses []InstanceStatus) bool 
 	}
 	for i := range statuses {
 		if statuses[i].Index == *s.Operation.SurgeIndex {
-			return OperationCapacityBlocked(statuses[i].Operation)
+			return OperationExternallyHeld(statuses[i].Operation)
 		}
 	}
 	return false

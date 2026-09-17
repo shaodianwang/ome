@@ -498,6 +498,14 @@ ome:
       # this field disables fast escalation (the InstanceReadyTimeout backstop
       # still fires).
       stuckPodGracePeriod: 60s
+      # unschedulableGracePeriod is how long a pod may sit with
+      # PodScheduled=False/Unschedulable — measured from that condition's last
+      # transition — before its Instance is failed as environment-caused (the
+      # scheduler message is recorded; the revision is never blamed). While the
+      # pod is unschedulable the InstanceReadyTimeout clock is parked either
+      # way. Removing this field disables the escalation, so an unplaceable pod
+      # waits for an operator instead.
+      unschedulableGracePeriod: 15m
       # autoMigrate configures the deadline-disposition relocation budget.
       # Removing this block disables the relocation branch.
       autoMigrate:

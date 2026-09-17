@@ -321,6 +321,64 @@ func IsTerminalPod(pod *corev1.Pod) bool {
 	return pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded
 }
 
+const (
+	// ReasonUnexpectedAdmissionError is the kubelet's pod-level reason
+	// when it refuses a pod the scheduler already placed on its node for
+	// any cause other than a specific resource shortfall.
+	ReasonUnexpectedAdmissionError = "UnexpectedAdmissionError"
+	// outOfResourceReasonPrefix is how the kubelet names a refusal for a
+	// specific resource shortfall: "OutOf" concatenated with the resource
+	// ("OutOfcpu", "OutOfmemory", "OutOfpods", "OutOfnvidia.com/gpu").
+	// Matched by prefix because extended-resource names are
+	// cluster-defined and cannot be enumerated.
+	outOfResourceReasonPrefix = "OutOf"
+)
+
+// PodAdmissionRejected reports whether the kubelet refused to admit the
+// pod after the scheduler had already placed it, and returns the reason
+// it recorded.
+//
+// ENVIRONMENT-CAUSED: the node's own picture of its capacity disagreed
+// with what the scheduler assumed, which says nothing about the pod
+// template. No container ever ran, yet the object still holds its stable
+// name, so the owning operation must delete it before that name can be
+// used again.
+func PodAdmissionRejected(pod *corev1.Pod) (string, bool) {
+	if pod == nil || pod.Status.Phase != corev1.PodFailed {
+		return "", false
+	}
+	reason := pod.Status.Reason
+	if reason == ReasonUnexpectedAdmissionError || isOutOfResourceReason(reason) {
+		return reason, true
+	}
+	return "", false
+}
+
+// isOutOfResourceReason matches the kubelet's OutOf<resource> family
+// without swallowing every other reason that opens with the same
+// letters. The suffix has to look like the resource name the kubelet
+// concatenated: non-empty, starting with a lowercase letter, and built
+// only from characters a (possibly domain-qualified) resource name may
+// contain, as in nvidia.com/gpu.
+func isOutOfResourceReason(reason string) bool {
+	resource, ok := strings.CutPrefix(reason, outOfResourceReasonPrefix)
+	if !ok || resource == "" {
+		return false
+	}
+	if resource[0] < 'a' || resource[0] > 'z' {
+		return false
+	}
+	for _, r := range resource {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+		case r == '-', r == '.', r == '/', r == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // ExcludeTerminalPods returns the pods that are not terminal — the set a
 // presence or liveness decision may count. Nil entries are dropped too.
 func ExcludeTerminalPods(pods []*corev1.Pod) []*corev1.Pod {

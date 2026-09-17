@@ -106,6 +106,9 @@ data:
   {{- with .stuckPodGracePeriod }}
   {{- $fields = append $fields (dict "stuckPodGracePeriod" .) }}
   {{- end }}
+  {{- with .unschedulableGracePeriod }}
+  {{- $fields = append $fields (dict "unschedulableGracePeriod" .) }}
+  {{- end }}
   {{- with .autoMigrate }}
   {{- $fields = append $fields (dict "autoMigrate" (dict "maxAttempts" .maxAttempts)) }}
   {{- end }}

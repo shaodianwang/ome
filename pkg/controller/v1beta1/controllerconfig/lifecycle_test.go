@@ -510,6 +510,82 @@ func TestLifecycleConfig_ToGracePeriod(t *testing.T) {
 	}
 }
 
+// TestLifecycleConfig_ToUnschedulableGracePeriod pins the validation
+// contract for the scheduler-hold escalation window: a configured
+// duration parses, an absent key yields zero (unconfigured, not an
+// error), and any non-positive or unparsable value is an error the
+// caller treats as unconfigured.
+func TestLifecycleConfig_ToUnschedulableGracePeriod(t *testing.T) {
+	t.Run("configured value parses", func(t *testing.T) {
+		cfg := &LifecycleConfig{UnschedulableGracePeriod: "10m"}
+		grace, err := cfg.ToUnschedulableGracePeriod()
+		require.NoError(t, err)
+		assert.Equal(t, 10*time.Minute, grace)
+	})
+
+	t.Run("nil receiver yields zero, no error", func(t *testing.T) {
+		var cfg *LifecycleConfig
+		grace, err := cfg.ToUnschedulableGracePeriod()
+		require.NoError(t, err)
+		assert.Equal(t, time.Duration(0), grace)
+	})
+
+	t.Run("absent key yields zero, no error", func(t *testing.T) {
+		cfg := &LifecycleConfig{UnschedulableGracePeriod: ""}
+		grace, err := cfg.ToUnschedulableGracePeriod()
+		require.NoError(t, err)
+		assert.Equal(t, time.Duration(0), grace)
+	})
+
+	invalid := []struct {
+		name  string
+		value string
+	}{
+		{"invalid duration", "not-a-duration"},
+		{"zero duration", "0s"},
+		{"negative duration", "-5s"},
+	}
+	for _, tt := range invalid {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &LifecycleConfig{UnschedulableGracePeriod: tt.value}
+			grace, err := cfg.ToUnschedulableGracePeriod()
+			assert.Error(t, err)
+			assert.Equal(t, time.Duration(0), grace)
+		})
+	}
+}
+
+// TestNewLifecycleConfig_UnschedulableGracePeriod pins the load
+// contract for the unschedulableGracePeriod key: present + valid
+// parses, absent leaves the field empty (no error).
+func TestNewLifecycleConfig_UnschedulableGracePeriod(t *testing.T) {
+	load := func(t *testing.T, lifecycle string) *LifecycleConfig {
+		t.Helper()
+		clientset := fake.NewSimpleClientset()
+		configMap := &v1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      constants.InferenceServiceConfigMapName,
+				Namespace: constants.OMENamespace,
+			},
+			Data: map[string]string{LifecycleConfigName: lifecycle},
+		}
+		_, err := clientset.CoreV1().ConfigMaps(constants.OMENamespace).Create(context.TODO(), configMap, metav1.CreateOptions{})
+		require.NoError(t, err)
+		cfg, err := NewLifecycleConfig(clientset)
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+		return cfg
+	}
+
+	t.Run("valid unschedulableGracePeriod key", func(t *testing.T) {
+		assert.Equal(t, "10m", load(t, `{"unschedulableGracePeriod":"10m"}`).UnschedulableGracePeriod)
+	})
+
+	t.Run("lifecycle key without unschedulableGracePeriod yields empty field", func(t *testing.T) {
+		assert.Equal(t, "", load(t, `{}`).UnschedulableGracePeriod)
+	})
+}
+
 // TestAutoMigrateConfig_Validate pins the validation contract: the
 // chart default converts cleanly, zero/negative maxAttempts is an error.
 func TestAutoMigrateConfig_Validate(t *testing.T) {
