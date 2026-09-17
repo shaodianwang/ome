@@ -10,6 +10,11 @@
 #   1. A delete-owned row takes the whole scale-down pool before any fresh
 #      victim, and while the wave is in progress the pass returns at the
 #      scale-down step, so no Restart, Migrate, Update or Create work runs.
+#      That early return suppresses op work only: the end-of-pass escalation
+#      and the superseded-RetryBlock prune still run, so a retained Instance
+#      whose deadline elapses is failed while the wave drains. Only a
+#      scale-down admission or completion status commit ends the pass before
+#      them, and an errored op pass does not.
 #   2. The escalation pass skips any row whose operation is Delete, and the
 #      stuck-pod check refuses Phase=Deleting outright, so nothing in this
 #      state can reach Failed. The operation deadline the admission stamps is
@@ -125,7 +130,7 @@ cells:
   - state: Delete/Drain
     event: pod.containerRestart
     outcome: ignore
-    note: "restart triggers are explicitly blind to Deleting, which the trigger classifies as mid-flight through another pass's own drain. Even under RecreateInstanceOnPodRestart the restart pass is unreachable while a scale-down wave is in progress, because the pass returns at the scale-down step"
+    note: "restart triggers are explicitly blind to Deleting, which the trigger classifies as mid-flight through another pass's own drain. Even under RecreateInstanceOnPodRestart the restart pass is unreachable while a scale-down wave is in progress, because the pass returns at the scale-down step - an early return that withholds op work only, leaving the end-of-pass escalation and prune to run for the retained rows"
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -221,7 +226,7 @@ cells:
     event: spec.replicasUp
     windows: [before]
     outcome: defer
-    note: "the drain rebound. A delete-owned row takes the whole scale-down pool whether or not its index is back in the plan, and the pass returns at the scale-down step, so the Create that would re-materialize the index cannot run. The drain is never cancelled"
+    note: "the drain rebound. A delete-owned row takes the whole scale-down pool whether or not its index is back in the plan, and the pass returns at the scale-down step, so the Create that would re-materialize the index cannot run. The drain is never cancelled, and the retained rows the wave excludes keep being escalated on their own evidence meanwhile"
     invariants: [owned.wave.before.fresh]
     placement: perm
     coverage: {perm: [], unit: [TestReconcileDeleteOwnedReboundFinishesBeforeRecreate], kind: []}
@@ -419,9 +424,9 @@ cells:
     event: pod.unschedulable
     variants: [source]
     outcome: ignore
-    note: "nothing in the scale-down pass reads PodScheduled; a pod that never bound is trivially drained and deleted like any other member, and force_delete.go classifies it evidenceUnscheduled so it is never force-deleted for want of a node whose death could be proven"
+    note: "a Delete-owned row never takes the scheduler hold - DeleteBatch owns a teardown's progress, its stuck-Terminating escalation and its completion, and may pace a removal longer than any grace, so recording a hold there (still less failing the row once the grace elapsed) would contradict that ownership, and a pod on its way out has nowhere it needs to be placed. The pod is trivially drained and deleted like any other member, and force_delete.go classifies it evidenceUnscheduled so it is never force-deleted for want of a node whose death could be proven"
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestEscalation_UnschedulableDeleteRowIsLeftToDeleteBatch], kind: []}
     status: current
 
   - state: Delete/Drain
@@ -464,20 +469,20 @@ cells:
     event: gang.podGroup
     variants: [Terminating]
     outcome: defer
-    note: "FinalizeObservedPodGroup in podgroup.go reports incomplete while the owned PodGroup still carries a deletionTimestamp, and delete_batch.go retains the row on an incomplete finalization, so the wave polls until the object is authoritatively gone"
+    note: "a Delete-owned row never takes the gang waiting token - DeleteBatch owns a teardown's progress and paces its own removal past any wait, and a gang on its way out has nothing left to announce. The wait here is the finalization poll instead: FinalizeObservedPodGroup in podgroup.go reports incomplete while the owned PodGroup still carries a deletionTimestamp, and delete_batch.go retains the row on an incomplete finalization until the object is authoritatively gone"
     invariants: [row.removed.only.after.pods.gone]
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestEscalation_GangHoldKeepsOffTeardowns], kind: []}
+    status: decided
 
   - state: Delete/Drain
     event: gang.podGroup
     variants: [OwnershipConflict, Deleted, Unschedulable, ScheduleTimeout, PhaseFailed]
     outcome: ignore
-    note: "none of these blocks a teardown: FinalizeOwnedName in gang/inventory.go reports complete for an absent PodGroup and for one controlled by another UID, which OME never touches, and PodGroup status is read nowhere, so an unschedulable, timed-out or failed gang is irrelevant to an index already being deleted"
+    note: "none of these blocks a teardown, and none produces a verdict on a Delete-owned row: the ownership conflict raises no Failed stamp because the row's outcome belongs to DeleteBatch, the failed group is never reset for the same reason - deleting it would pull the gang contract out from under pods the batch is still draining - and FinalizeOwnedName in gang/inventory.go reports complete for an absent PodGroup and for one controlled by another UID, which OME never touches. Unschedulable and ScheduleTimeout are not readings the vendored gang scheduler writes at all, and a pod on its way out has nowhere it needs to be placed"
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestEscalation_GangTerminalKeepsOffRowsOwnedElsewhere], kind: []}
+    status: decided
 
   - state: Delete/Drain
     event: endpoint.rotationOut
@@ -571,7 +576,7 @@ cells:
   - state: Delete/Drain
     event: api.invalid
     outcome: defer
-    note: "no IsInvalid check exists in workload/ or inferencereplica/, so a 422 on the status batch or the audit ledger write returns as an opaque error into controller-runtime backoff; the escalation pass that would fail the row skips Delete-owned rows, so the drain retries indefinitely"
+    note: "the rejection classifier is reached only from a pod create or an in-place pod patch, and the drain issues neither, so a 422 on the status batch or the audit ledger write returns as an opaque error into controller-runtime backoff; the escalation pass that would fail the row skips Delete-owned rows, so the drain retries indefinitely"
     placement: sim
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -579,7 +584,7 @@ cells:
   - state: Delete/Drain
     event: api.throttled
     outcome: defer
-    note: "shedding is absorbed as a plain error: the pod delete rolls its expectation back before returning (delete_batch.go), so the next pass re-reads and re-issues, though RetryAfterSeconds is never honored and controller-runtime backoff sets the pace instead"
+    note: "shedding is absorbed as a plain error: the pod delete rolls its expectation back before returning (delete_batch.go), so the next pass re-reads and re-issues. The pass pacing that honors a server Retry-After is fed by the create path only, and the drain issues no create, so controller-runtime backoff sets the pace instead"
     invariants: [delete.by.observed.uid]
     placement: sim
     coverage: {perm: [], unit: [], kind: []}
@@ -776,7 +781,7 @@ cells:
   - state: Delete/Drain
     event: pod.admissionRejected
     outcome: ignore
-    note: the pod phase and its reason are never read on this path and escalation skips every Delete-owned row, so a refused pod is simply one more object that must be deleted and observed absent before the row can go (pkg/controller/v1beta1/workload/escalation.go)
+    note: the terminal recycle that frees a refused pod's name belongs to the paths that place a replacement, and a teardown places none, so a refused pod is simply one more object that must be deleted and observed absent before the row can go; escalation skips every Delete-owned row either way (pkg/controller/v1beta1/workload/escalation.go)
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
     status: current

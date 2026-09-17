@@ -522,10 +522,10 @@ cells:
   - state: Update/GangSurgeTarget
     event: api.quotaDenied
     outcome: defer
-    note: the create error aborts the pass and the surge is retried on the requeue; the deadline keeps running because a quota rejection leaves no pod to gate on, so a lasting denial ends in the stuck or deadline escalation
+    note: a refused gang-member create is classified as capacity-blocked and the QuotaExceeded waiting token is recorded on the surge row; the source's own deadline parks through it, because the governing operation and its clock live on the source while the pods are created under the surge index, and the parking step follows that SurgeIndex. A quota rejection leaves no pod to carry a scheduling gate, which is exactly why the wait is recorded on the Operation instead. The token is released on the first pass whose creates all land
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
-    status: current
+    status: decided
 
   # The marker's own escalation edges. Both stamp Phase Failed with the
   # operation preserved (a gang Update attempt is never disposable), and
@@ -640,15 +640,15 @@ cells:
     outcome: n/a
     reason: the paired source gang was bound to nodes before the marker was stamped, and no pass creates a source pod while the surge is in flight
     status: current
-  # GAP: an infeasible gang is indistinguishable from a slow one.
   - state: Update/GangSurgeTarget
     event: pod.unschedulable
     variants: [target]
-    outcome: ignore
-    note: nothing reads PodScheduled or the FailedScheduling event, so a replacement gang the scheduler cannot place waits out the full operation deadline before the escalation pass in pkg/controller/v1beta1/workload/escalation.go stamps the row
+    outcome: defer
+    guard: the row is not fully serving and its operation carries no other authority's waiting token; the hold lasts while lifecycle.unschedulableGracePeriod is unconfigured or unelapsed, and past it the attempt is failed environment-caused
+    note: the escalation pass reads PodScheduled=False/Unschedulable off the replacement gang and records the Unschedulable waiting token, which parks the operation deadline rather than letting a gang that cannot be placed burn the whole InstanceReadyTimeout. One unplaceable member holds the whole Instance - a gang converges as a unit - and it is chosen by name so the recorded pod does not change from pass to pass. Past the configured grace the row is stamped Failed with the scheduler's message and no RetryBlock, keeping its operation, since a gang Update attempt is never disposable and the abandon path consumes the continuation
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestEscalation_UnschedulableGangPastGraceKeepsItsOperation, TestEscalation_UnschedulableGangHoldIsOrderIndependent, TestReconcileGatedDeadlines_ParksGangSurgeSourceOnMemberRejection], kind: []}
+    status: decided
   - state: Update/GangSurgeTarget
     event: pod.containersNotReady
     variants: [source]
@@ -698,42 +698,52 @@ cells:
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
     status: current
-  # GAP: the terminating sentinel loses its deliberate requeue on this path.
   - state: Update/GangSurgeTarget
     event: gang.podGroup
     variants: [Terminating]
     outcome: defer
-    note: the surge's own ensure in pkg/controller/v1beta1/workload/ops/update_gang.go wraps ErrPodGroupTerminating into an opaque error, so the pass falls into controller-runtime backoff instead of the scale-down requeue the top-level pass gives the same sentinel
-    placement: sim
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
-  # GAP: an unresolvable name collision has no diagnostic of its own.
+    guard: the surge attempt is in flight, its pod set is not fully serving, and no other authority already holds the waiting token
+    note: the surge's own ensure classifies the name before writing - it may be the first place this index's PodGroup is read at all, since the surge index is not always pinned in the plan yet - and re-spells the sentinel as classified evidence about one row rather than a pass failure, so the other Instances keep reconciling. Members are withheld, and the escalation pass records the PodGroupTerminating token on the SURGE row; the source's deadline parks through it, because the governing operation and its clock live on the source while the pods are built under the surge index and the parking step follows that SurgeIndex. The source is never judged on its own group - its reading is deliberately empty while it carries a SurgeIndex, so the row whose replacement is being waited on is not held for it
+    invariants: [podgroup.before.pods]
+    placement: unit
+    coverage: {perm: [], unit: [TestReconcileGatedDeadlines_ParksGangTerminatingSurgeSource, TestEscalation_GangReadingSkipsSurgeSource, TestGangSurgeCreate_BlockedPodGroupEnsureDefersToEscalation], kind: []}
+    status: decided
   - state: Update/GangSurgeTarget
     event: gang.podGroup
     variants: [OwnershipConflict]
-    outcome: defer
-    note: ErrPodGroupOwnershipConflict from pkg/controller/v1beta1/workload/podgroup/podgroup.go aborts the pass with no event and no condition, so the replacement gang never gets pods and the row ends at its operation deadline
-    placement: sim
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    outcome: escalate
+    to: Failed
+    guard: the surge attempt is in flight to end and its pod set is not fully serving
+    note: a replacement gang's deterministic name held by another controller is never freed by anything this controller does, so the surge row ends on it - LastFailure carries PodGroupOwnershipConflict naming the foreign controller, Phase goes Failed and the Operation is preserved for the abandon path. ENVIRONMENT-CAUSED, so no RetryBlock is charged. Members are withheld meanwhile, and the surge's ensure defers to the escalation pass instead of erroring out, so a collision on one index leaves every other Instance in the Component reconciling
+    placement: unit
+    coverage: {perm: [], unit: [TestGangSurgeCreate_BlockedPodGroupNameWithholdsMembers], kind: []}
+    status: decided
   - state: Update/GangSurgeTarget
     event: gang.podGroup
     variants: [Deleted]
     outcome: ignore
-    note: the surge re-ensures the PodGroup before it creates any missing member and the top-level pass in pkg/controller/v1beta1/workload/gang/gang.go re-ensures it for the pinned index, so a deleted group is restored ahead of the pods that reference it
+    note: the surge re-ensures the PodGroup before it creates any missing member and the top-level pass in pkg/controller/v1beta1/workload/gang/gang.go re-ensures it for the pinned index, so a deleted group is restored ahead of the pods that reference it and the members withheld on the previous pass are placed; any gang waiting token the row was carrying is released in the same pass
     invariants: [podgroup.before.pods]
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
-  # GAP: a gang the coscheduler has given up on is invisible.
+    coverage: {perm: [], unit: [TestGangSurgeCreate_UnblockedGangStillCreates], kind: []}
+    status: decided
   - state: Update/GangSurgeTarget
     event: gang.podGroup
-    variants: [Unschedulable, ScheduleTimeout, PhaseFailed]
-    outcome: ignore
-    note: PodGroup status has no reader anywhere and podGroupPredicate in pkg/controller/v1beta1/inferencereplica/watches.go drops status-only updates, so a failed or timed-out gang does not even enqueue a reconcile
+    variants: [PhaseFailed]
+    outcome: defer
+    guard: the surge index is pinned in the plan, which is what brings it under the top-level PodGroup pass that owns the reset
+    note: the gang scheduler's Failed phase is absorbing, so the replacement group is deleted and rebuilt on a later pass with one PodGroupReset warning carrying its failure message; members are withheld until it exists. The surge row is untouched - no phase change, no waiting token, no RetryBlock - and a member still phase Failed holds the reset back until the recycle frees its name. The surge's own ensure only classifies the reading; the delete-and-rebuild belongs to the top-level pass
     placement: sim
     coverage: {perm: [], unit: [], kind: []}
-    status: current
+    status: decided
+  - state: Update/GangSurgeTarget
+    event: gang.podGroup
+    variants: [Unschedulable, ScheduleTimeout]
+    outcome: defer
+    note: neither reading exists on the PodGroup the controller watches - the vendored gang scheduler writes no Unknown phase and no ScheduleStartTime - so there is no group-level verdict on placement. A replacement gang the scheduler cannot place reaches this row on its MEMBER PODS, as PodScheduled=False with reason Unschedulable, and the pod-level hold parks the clock on that (see pod.unschedulable)
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: decided
   - state: Update/GangSurgeTarget
     event: endpoint.rotationIn
     outcome: ignore
@@ -844,28 +854,31 @@ cells:
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
     status: current
-  # GAP: an unsatisfiable write is retried until the deadline kills the row.
   - state: Update/GangSurgeTarget
     event: api.invalid
-    outcome: defer
-    note: no site classifies a 422, so a rejected replacement-pod create or status write returns an opaque error from pkg/controller/v1beta1/workload/ops/create.go and is retried on controller-runtime backoff while the operation deadline keeps running
-    placement: sim
+    outcome: escalate
+    to: Failed
+    guard: the rejected write is a replacement-pod create, whose object is a faithful render of the pinned surge target; a 422 on a status write is not classified and stays an opaque error
+    note: a 422 on a gang member's create is permanent, so the surge row is disposed on the first rejection instead of at the deadline - LastFailure carries InvalidPodSpec plus the apiserver's explanation, a RetryBlock is recorded against the pinned surge target, and the operation is cleared with Phase=Failed. The disposal lands on the surge row, which is the index the create was issued under; the source keeps serving and its claim predicates read revision and step, never phase
+    placement: unit
     coverage: {perm: [], unit: [], kind: []}
-    status: current
+    status: decided
   - state: Update/GangSurgeTarget
     event: api.throttled
     outcome: defer
-    note: the shed request propagates verbatim out of the create path in pkg/controller/v1beta1/workload/ops/create.go and the only retry is controller-runtime backoff; RetryAfterSeconds is never honored and the deadline keeps running
-    placement: sim
+    note: a shed create is classified as throttled and writes nothing - no failure accounting, no deadline change. The server's Retry-After is deposited on the pass pacing, which floors the requeue so the gang surge wakes no earlier than the apiserver asked; the deadline keeps running through the shedding
+    placement: unit
     coverage: {perm: [], unit: [], kind: []}
-    status: current
+    status: decided
   - state: Update/GangSurgeTarget
     event: api.namespaceTerminating
-    outcome: defer
-    note: the rejection is an opaque create error on this path, and the owner's own deletionTimestamp follows shortly so the teardown branch in pkg/controller/v1beta1/inferencereplica/teardown.go supersedes the surge
-    placement: sim
+    outcome: escalate
+    to: Failed
+    guard: the rejected write is a replacement-pod create
+    note: no member can be created in a terminating namespace, so the surge row is disposed on the first rejection with NamespaceTerminating plus the apiserver's message on LastFailure and the operation cleared. Environment-caused, so no revision is blamed; the owner's own deletionTimestamp follows shortly and the teardown branch in pkg/controller/v1beta1/inferencereplica/teardown.go supersedes the surge
+    placement: unit
     coverage: {perm: [], unit: [], kind: []}
-    status: current
+    status: decided
   - state: Update/GangSurgeTarget
     event: timer.forceDelete
     outcome: ignore
@@ -1473,7 +1486,7 @@ cells:
     event: gang.podGroup
     variants: [Unschedulable, ScheduleTimeout, PhaseFailed]
     outcome: ignore
-    note: PodGroup status has no reader and podGroupPredicate in pkg/controller/v1beta1/inferencereplica/watches.go drops status-only updates; a gang being retired has nothing to learn from them anyway
+    note: the PodGroup pass skips a terminal-owned index before it reads the object at all, so the retired group is neither classified nor reset whatever its phase says; Unschedulable and ScheduleTimeout are not readings the vendored gang scheduler writes in any case, and a gang being retired has nothing to learn from them
     placement: sim
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -1530,14 +1543,14 @@ cells:
   - state: Update/GangSurgeTargetCleanup
     event: api.invalid
     outcome: defer
-    note: no site classifies a 422, so a rejected pod delete or status write returns an opaque error and is retried on controller-runtime backoff with no event and no bound other than the operation deadline
+    note: the rejection classifier is reached only from a pod create or an in-place pod patch, and the retirement issues neither, so a rejected pod delete or status write returns an opaque error and is retried on controller-runtime backoff with no event and no bound other than the operation deadline
     placement: sim
     coverage: {perm: [], unit: [], kind: []}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: api.throttled
     outcome: defer
-    note: the shed request propagates verbatim and the only retry is controller-runtime backoff; RetryAfterSeconds is never honored, so the retirement simply resumes on a later pass
+    note: the retirement issues no create, so its shed deletes and status writes miss the create-path pacing and propagate verbatim; the only retry is controller-runtime backoff and the retirement simply resumes on a later pass
     placement: sim
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -1631,14 +1644,22 @@ cells:
     status: current
 
   # --- kubelet admission and slow readiness ------------------------------
-  # GAP: a replacement gang the kubelet keeps refusing for capacity converges
-  # only through the deadline escalation, which records DeadlineExceeded and
-  # loses the pod-level reason that would name the missing resource.
   - state: Update/GangSurgeTarget
     event: pod.admissionRejected
-    outcome: ignore
-    note: the restart trigger declines a row whose non-Create operation is preserved and the terminal-pod recycle belongs to the Create and Restart passes, so no pass replaces a refused replacement pod; the readiness gate rejects it outright and the row converges only through the stuck or deadline escalation (pkg/controller/v1beta1/workload/ops/update.go, pkg/controller/v1beta1/workload/ops/terminal_recycle.go)
-    placement: kind
+    windows: [before]
+    outcome: transition
+    to: Update/GangSurgeTarget
+    guard: the rejected pod holds one of the surge gang's target names, the operation deadline has not elapsed, and the surge bucket's outstanding expectations are satisfied
+    note: a member the node refused never ran, so the gang could never complete while it held its name; the shared terminal recycle frees it immediately instead of holding the surge to the operation deadline. The bookkeeping - retry pacing, LastFailure carrying the kubelet's pod-level reason - lands on the source, which owns the operation, while the delete and its expectation bucket on the surge index. Environment-caused, so no RetryBlock is charged, and the create is withheld until the delete is observed (pkg/controller/v1beta1/workload/ops/update_gang.go, pkg/controller/v1beta1/workload/ops/terminal_recycle.go)
+    placement: unit
+    coverage: {perm: [], unit: [TestGangSurgeCreate_AdmissionRejectedTargetIsRecycled, TestGangSurgeCreate_RecycleWaitsOnTheSurgeBucketExpectations], kind: []}
+    status: decided
+  - state: Update/GangSurgeTarget
+    event: pod.admissionRejected
+    windows: [boundary, after]
+    outcome: defer
+    note: the recycle is a pod delete that leaves phase and step where they are, so a re-observed rejection lands on the same row and is either paced by the ladder or satisfied by the delete already in flight
+    placement: perm
     coverage: {perm: [], unit: [], kind: []}
     status: current
   - state: Update/GangSurgeTargetCleanup
@@ -1660,9 +1681,9 @@ cells:
     event: pod.runningNotReady
     variants: [target]
     outcome: defer
-    note: AllPodsRuntimeReady is recomputed from a live list every pass and nothing reads how long a member has been trying, so one member failing its probes keeps the whole gang's drain gate closed until the operation deadline (pkg/controller/v1beta1/workload/ops/update_gang.go, pkg/controller/v1beta1/workload/deadline.go)
+    note: AllPodsRuntimeReady is recomputed from a live list every pass and how long a member has been trying drives no decision, so one member failing its probes keeps the whole gang's drain gate closed until the operation deadline. At that deadline the readiness wait is evidence - the record names the first such member, its first unready container and the readiness condition's message under reason ContainersNotReady - but it decides no branch, because readiness limbo is ambiguous between the revision and the node and charges no ladder (pkg/controller/v1beta1/workload/ops/update_gang.go, pkg/controller/v1beta1/workload/deadline.go)
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestEscalation_GangDeadlineWithRunningNotReadyPods_NamesTheProbe], kind: []}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: pod.runningNotReady

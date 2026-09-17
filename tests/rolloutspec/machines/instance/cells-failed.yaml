@@ -552,7 +552,7 @@ cells:
   - state: Failed
     event: api.quotaDenied
     outcome: ignore
-    note: a quota rejection lands on the attempt that already stamped Creating or Updating, so it is charged to that state; the Failed row is left untouched and re-attempts on the next admitted pass
+    note: a quota rejection lands on the attempt that already stamped Creating or Updating, which is where it is classified and where the QuotaExceeded waiting token is recorded, so it is charged to that state; the Failed row is left untouched and re-attempts on the next admitted pass
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -572,13 +572,10 @@ cells:
     placement: kind
     coverage: {perm: [], unit: [], kind: []}
     status: current
-  # GAP: nothing in workload/ reads PodScheduled, so an Instance wedged on
-  # an unsatisfiable placement is only ever failed by the deadline clock,
-  # and the pod it leaves behind keeps blocking the no-pods retry path.
   - state: Failed
     event: pod.unschedulable
     outcome: ignore
-    note: no pass reads PodScheduled or the FailedScheduling event, and escalation.go skips an already-Failed row, so an unschedulable pod only keeps occupying its pod name
+    note: the escalation pass skips an already-Failed row before it reads any evidence, so the scheduler hold is never recorded here and the grace never arms; an unschedulable pod only keeps occupying its pod name until the recycle that re-materializes the index frees it
     invariants: [failed.is.sticky]
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
@@ -646,37 +643,47 @@ cells:
     event: gang.podGroup
     variants: [Terminating]
     outcome: defer
-    note: EnsurePodGroups runs ahead of the dispatcher for every planned multi-pod Instance including a Failed one, and inferencereplica/reconciler.go turns ErrPodGroupTerminating into a plain poll requeue, so no pass touches the row until the name is free
+    note: the PodGroup pass classifies every planned multi-pod index including a Failed one, so the name being collected withholds the members a fresh attempt would place and the group is announced again once the object is gone. No waiting token is recorded - the escalation pass skips a row already stamped Failed before it reads any evidence, and a Failed row carries no operation to park a clock on
+    invariants: [failed.is.sticky]
     placement: unit
     coverage: {perm: [], unit: [], kind: []}
-    status: current
+    status: decided
   - state: Failed
     event: gang.podGroup
     variants: [OwnershipConflict]
     outcome: defer
-    note: podgroup.go refuses to update or delete a PodGroup owned by another UID and the error aborts the Component pass in inferencereplica/reconciler.go, so the row is re-driven only under controller-runtime backoff
+    note: the collision is recorded and the members a fresh attempt would place are withheld, but no verdict is raised here - the escalation pass skips an already-Failed row, and the terminal gang stamp needs an attempt in flight to end. The name is freed only by an operator, and the PodGroup pass finishes the Component's other gangs rather than aborting on it
+    invariants: [failed.is.sticky]
     placement: unit
     coverage: {perm: [], unit: [], kind: []}
-    status: current
+    status: decided
   - state: Failed
     event: gang.podGroup
     variants: [Deleted]
     outcome: ignore
-    note: the ensure pass re-creates the missing PodGroup from the plan on the next reconcile; the Failed row's own phase and operation are untouched by it
+    note: the ensure pass re-creates the missing PodGroup from the plan in the same pass; the Failed row's own phase and operation are untouched by it
     placement: unit
     coverage: {perm: [], unit: [], kind: []}
     status: current
-  # GAP: PodGroup .Status has zero readers and podGroupPredicate admits
-  # only generation and meta changes, so a gang the scheduler has already
-  # given up on never even enqueues a reconcile.
   - state: Failed
     event: gang.podGroup
-    variants: [Unschedulable, ScheduleTimeout, PhaseFailed]
+    variants: [PhaseFailed]
+    outcome: defer
+    guard: the index is planned and carries no Delete or Migrate operation, so its group belongs to this machine
+    note: a Failed row's group is reset like any other - the gang scheduler's Failed phase is absorbing, so the PodGroup pass deletes the object, builds a fresh one on the next reconcile and emits one PodGroupReset warning with the group's own failure message. The row's phase and its preserved operation are untouched, and members stay withheld until the replacement exists; a member pod still phase Failed holds the reset back until the recycle removes it
+    invariants: [failed.is.sticky]
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: decided
+  - state: Failed
+    event: gang.podGroup
+    variants: [Unschedulable, ScheduleTimeout]
     outcome: ignore
-    note: the controller writes ScheduleTimeoutSeconds in podgroup.go but never observes the PodGroup status that reports it firing, so gang-level failure reaches the row only as stuck pods the deadline clock already charged
+    note: the controller writes ScheduleTimeoutSeconds onto the group but the vendored gang scheduler reports neither an Unknown phase nor a ScheduleStartTime, so there is no group-level reading to act on. An unplaceable gang reaches the controller on its member pods instead, and a Failed row has no operation for that hold to park either
+    invariants: [failed.is.sticky]
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
-    status: current
+    status: decided
   - state: Failed
     event: endpoint.rotationIn
     outcome: ignore
@@ -824,30 +831,24 @@ cells:
     placement: unit
     coverage: {perm: [], unit: [], kind: []}
     status: current
-  # GAP: a 422 is not transient. With no classification the identical
-  # rejected write is retried forever under blind backoff, producing no
-  # progress and no operator-facing signal.
   - state: Failed
     event: api.invalid
     outcome: defer
-    note: no IsInvalid check exists in workload/ or inferencereplica/, so the rejection leaves the pass through the generic error path and controller-runtime backoff redelivers it unchanged
+    note: the rejection classifier is reached only from a pod create or an in-place pod patch, and a Failed row issues neither - the create that re-materializes the index stamps Creating first and is classified there - so a 422 on an abandon or retry-block status write leaves the pass through the generic error path and controller-runtime backoff redelivers it unchanged
     placement: sim
     coverage: {perm: [], unit: [], kind: []}
     status: current
   - state: Failed
     event: api.throttled
     outcome: defer
-    note: ops/create.go propagates a shed request verbatim and nothing reads RetryAfterSeconds, so the re-attempt cadence is controller-runtime backoff rather than the server's hint; the Failed row itself is untouched
+    note: a shed pod create is paced by the server's Retry-After, but that create belongs to the Creating attempt it stamps first; a shed status write issued while the row reads Failed is not classified, so its cadence is controller-runtime backoff and the Failed row itself is untouched
     placement: sim
     coverage: {perm: [], unit: [], kind: []}
     status: current
-  # GAP: a terminating namespace is terminal for every create in it.
-  # Without the NamespaceTerminatingCause classification the pass retries
-  # under backoff instead of short-circuiting to teardown.
   - state: Failed
     event: api.namespaceTerminating
     outcome: defer
-    note: the NamespaceTerminatingCause check lives only on the ISVC side, so in workload/ the rejection is an ordinary error and the row is re-driven under backoff until the owner is itself collected
+    note: the NamespaceTerminatingCause check runs on a pod create, and the create that re-materializes this index stamps Creating first, so the refusal is classified and disposed on that state; a write issued while the row still reads Failed is an ordinary error and the row is re-driven under backoff until the owner is itself collected
     placement: sim
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -895,7 +896,7 @@ cells:
     outcome: transition
     to: Create/CreatePods
     guard: no operation is preserved, so the Create pass reads the row as a fresh start, and the rejected pods hold the index's target names
-    note: a rejection is phase Failed, so query.IsTerminalPod reads the occupant as absent and ops/terminal_recycle.go deletes it; terminalPodTermination replaces the bare PodFailed placeholder with the pod-level status.reason, which is the one place the kubelet's refusal reaches LastFailure verbatim. The index is re-materialized under a fresh Create CreatePods operation once the deletes are observed
+    note: a rejection is phase Failed, so query.IsTerminalPod reads the occupant as absent and ops/terminal_recycle.go deletes it; terminalPodTermination replaces the bare PodFailed placeholder with the pod-level status.reason, so the kubelet's refusal reaches LastFailure verbatim. Environment-caused - no RetryBlock is charged - and the index is re-materialized under a fresh Create CreatePods operation once the deletes are observed
     placement: kind
     coverage: {perm: [], unit: [], kind: []}
     status: current

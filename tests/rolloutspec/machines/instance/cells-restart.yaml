@@ -401,20 +401,21 @@ cells:
   - state: Restart/Drain
     event: api.quotaDenied
     outcome: defer
-    note: the rejected pod create fails the pass, the reconcile requeues with backoff, and the unparked operation deadline bounds the retrying
+    note: the refused Phase B create is classified as capacity-blocked, so the operation carries the QuotaExceeded waiting token and the InstanceReadyTimeout deadline parks while it is held rather than counting a wait an operator controls against the repair. The pass ends quietly on the repair requeue, and the token is released on the first pass whose creates all land
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
-    status: current
+    status: decided
 
   # --- pod, newly expressible inputs ---------------------------------------
   - state: Restart/Drain
     event: pod.unschedulable
     variants: [source]
     outcome: defer
-    note: nothing reads PodScheduled=False, so an unplaceable recreated pod holds Phase C on the runtime-ready check with its clock running, and the operation deadline is the only exit (ops/restart.go, escalation.go)
+    guard: the row is not fully serving and its operation carries no other authority's waiting token; the hold lasts while lifecycle.unschedulableGracePeriod is unconfigured or unelapsed, and past it the attempt is failed environment-caused
+    note: an unplaceable recreated pod holds Phase C on the runtime-ready check, and the escalation pass records the Unschedulable waiting token on the Restart operation, which parks the clock so the repair is not failed for a placement the cluster cannot give it. The scheduler's message reaches LastFailure once per hold. Past the configured grace the attempt is failed with that message and no RetryBlock, since an unplaceable pod proves nothing about the pod template (ops/restart.go, escalation.go)
     placement: kind
     coverage: {perm: [], unit: [], kind: []}
-    status: current
+    status: decided
   - state: Restart/Drain
     event: pod.containersNotReady
     variants: [source]
@@ -503,36 +504,48 @@ cells:
     event: gang.podGroup
     variants: [Terminating]
     outcome: defer
-    note: the PodGroup pass runs ahead of the workload dispatcher and returns a plain scale-down requeue on a terminating group, so the restart pass and the escalation pass are both skipped entirely until the name is free (inferencereplica/reconciler.go, podgroup/podgroup.go)
+    guard: the repair is in flight, the pod set is not fully serving, and no other authority already holds the operation's waiting token
+    note: the deterministic name is still occupied by an object being collected, so Phase B withholds every member rather than enlisting a rebuilt pod in a group this owner does not yet control. The escalation pass records the PodGroupTerminating waiting token, which parks the InstanceReadyTimeout clock, and the group is announced again on the pass after the old object is gone; the wait resolves itself and never escalates (inferencereplica/reconciler.go, podgroup/podgroup.go)
+    invariants: [podgroup.before.pods]
     placement: unit
     coverage: {perm: [], unit: [], kind: []}
-    status: current
+    status: decided
   - state: Restart/Drain
     event: gang.podGroup
     variants: [OwnershipConflict]
-    outcome: defer
-    note: a group held by another owner is neither updated nor deleted; the PodGroup pass fails the reconcile before the dispatcher runs, so the row holds with its clock running and no pass reaches the escalation that would fail it (podgroup/podgroup.go)
+    outcome: escalate
+    to: Failed
+    guard: the repair is in flight to end and the pod set is not fully serving
+    note: a group held by another owner is neither updated nor deleted, and nothing this controller does frees the name, so the repair ends on it - LastFailure carries PodGroupOwnershipConflict naming the foreign controller, Phase goes Failed and the Operation is preserved. ENVIRONMENT-CAUSED, so no RetryBlock is recorded, and the verdict is scoped to this row while the PodGroup pass finishes the other gangs (podgroup/podgroup.go)
     placement: unit
     coverage: {perm: [], unit: [], kind: []}
-    status: current
+    status: decided
   - state: Restart/Drain
     event: gang.podGroup
     variants: [Deleted]
     outcome: ignore
-    note: the PodGroup pass re-creates the deterministic group from the plan before the restart pass runs, and the surviving pods keep the group label, so the gang is re-announced without a step of its own (gang/gang.go)
+    note: the PodGroup pass re-creates the deterministic group from the plan before the restart pass runs, and the surviving pods keep the group label, so the gang is re-announced without a step of its own; a gang waiting token the row was carrying is released in the same pass (gang/gang.go)
+    invariants: [podgroup.before.pods]
     placement: kind
     coverage: {perm: [], unit: [], kind: []}
-    status: current
-  # GAP: the event's meaning is that the PodGroup blocks or fails the gang,
-  # and nothing in the repair path can observe it.
+    status: decided
   - state: Restart/Drain
     event: gang.podGroup
-    variants: [Unschedulable, ScheduleTimeout, PhaseFailed]
-    outcome: ignore
-    note: PodGroup status has no readers and the watch predicate admits only generation and metadata changes, so a gang the coscheduler has given up on never enqueues; the recreated pods stay Pending and the operation deadline is the only exit (gang/gang.go, workload/watches.go)
+    variants: [PhaseFailed]
+    outcome: defer
+    guard: the index is planned and its outcome belongs to this machine
+    note: the gang scheduler's Failed phase is absorbing, so the PodGroup pass deletes the group and builds a fresh one on the next reconcile, withholding the rebuild's members meanwhile and emitting one PodGroupReset warning with the group's own failure message. The repair row is untouched - no phase change, no waiting token, no RetryBlock - and a member pod still phase Failed holds the reset back until Phase A's recycle removes it (gang/gang.go)
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: decided
+  - state: Restart/Drain
+    event: gang.podGroup
+    variants: [Unschedulable, ScheduleTimeout]
+    outcome: defer
+    note: neither reading exists on the PodGroup the controller watches - the vendored gang scheduler writes no Unknown phase and no ScheduleStartTime - so there is no group-level clock to consult. A rebuilt gang that cannot be placed reaches the repair on its MEMBER PODS, as PodScheduled=False with reason Unschedulable, and the pod-level scheduler hold parks the clock on that (see pod.unschedulable)
     placement: sim
     coverage: {perm: [], unit: [], kind: []}
-    status: current
+    status: decided
 
   # --- endpoints -----------------------------------------------------------
   - state: Restart/Drain
@@ -691,29 +704,31 @@ cells:
     status: current
 
   # --- apiserver rejections ------------------------------------------------
-  # GAP: a 422 is permanent, and the repair cannot tell it from a transient
-  # failure — nor can any clock end the retrying while the pass keeps erroring.
   - state: Restart/Drain
     event: api.invalid
-    outcome: defer
-    note: no branch classifies Invalid, so the failed pod create errors the pass and the reconcile requeues with backoff forever; an errored pass also returns before the end-of-pass escalation runs, so the operation deadline never gets the chance to fail the row (ops/create.go, workload/reconcile.go)
-    placement: sim
+    outcome: escalate
+    to: Failed
+    guard: the rejected write is the Phase B pod create, whose object is a faithful render of the revision the repair is rebuilding on
+    note: a 422 on the rebuild create is permanent, so the repair ends here instead of erroring every pass - LastFailure carries InvalidPodSpec plus the apiserver's explanation, a RetryBlock is recorded against the revision the attempt pinned, and the operation is cleared with Phase=Failed. An unclassified rejection instead returns the pass error, which changes nothing about the other rows - the end-of-pass escalation and the superseded-RetryBlock prune run after every eligible pass, errored or not, so one row's failed write never freezes another's deadline clock (ops/create.go, workload/reconcile.go)
+    placement: unit
     coverage: {perm: [], unit: [], kind: []}
-    status: current
+    status: review
   - state: Restart/Drain
     event: api.throttled
     outcome: defer
-    note: a shed request is propagated verbatim and the reconcile retries under the controller's rate limiter; the operation deadline keeps running but is only consumed by a pass that completes without error (ops/create.go, workload/reconcile.go)
-    placement: sim
+    note: a shed create is classified as throttled and writes nothing; the server's Retry-After is deposited on the pass pacing, which floors the requeue so the repair wakes no earlier than the apiserver asked. The pass ends quietly rather than erroring, and the operation deadline is evaluated as usual and keeps running - an errored pass would be evaluated the same way, since the end-of-pass escalation runs after every eligible pass whatever the op returned (ops/create.go, workload/reconcile.go)
+    placement: unit
     coverage: {perm: [], unit: [], kind: []}
-    status: current
+    status: review
   - state: Restart/Drain
     event: api.namespaceTerminating
-    outcome: defer
-    note: the rejection is retried like any other create failure; the row is resolved by the namespace GC deleting the owner, which routes it into the teardown branch, rather than by any classification on the repair path (ops/create.go, workload/reconcile.go)
-    placement: sim
+    outcome: escalate
+    to: Failed
+    guard: the rejected write is the Phase B pod create
+    note: no rebuild can succeed in a terminating namespace, so the repair ends on the first rejection with NamespaceTerminating plus the apiserver's message on LastFailure and the operation cleared. Environment-caused, so the revision keeps a clean retry ladder; the namespace GC deleting the owner is what removes the row (ops/create.go, workload/reconcile.go)
+    placement: unit
     coverage: {perm: [], unit: [], kind: []}
-    status: current
+    status: decided
 
   # --- timers, newly expressible -------------------------------------------
   - state: Restart/Drain
@@ -769,7 +784,7 @@ cells:
     outcome: transition
     to: Restart/Drain
     guard: the rejected pod carries the bumped incarnation and holds one of the rebuild's target names, the attempt's deadline has not elapsed, and its outstanding expectations are satisfied
-    note: a rejection is phase Failed, so query.ExcludeTerminalPods drops it from Phase B's name diff and ops/terminal_recycle.go deletes it before the recreate; terminalPodTermination captures the pod-level status.reason onto LastFailure, so a rebuild that keeps being refused for capacity says so instead of reporting a bare PodFailed. A rejected pod at the old incarnation is drained and deleted by Phase A like any other
+    note: a rejection is phase Failed, so query.ExcludeTerminalPods drops it from Phase B's name diff and ops/terminal_recycle.go deletes it before the recreate; terminalPodTermination captures the pod-level status.reason onto LastFailure, so a rebuild that keeps being refused for capacity says so instead of reporting a bare PodFailed. Environment-caused throughout - the node's capacity accounting refused a pod the revision renders correctly, so no RetryBlock is charged. A rejected pod at the old incarnation is drained and deleted by Phase A like any other
     placement: kind
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -785,7 +800,7 @@ cells:
     event: pod.runningNotReady
     variants: [source]
     outcome: defer
-    note: Phase C re-reads the bumped-incarnation set every wake-up and promotes only when all of it is ContainersReady, and no pass reads a readiness wait as evidence, so a pod that runs but never passes its probes holds the repair to the operation deadline (pkg/controller/v1beta1/workload/ops/restart.go, pkg/controller/v1beta1/workload/deadline.go)
+    note: Phase C re-reads the bumped-incarnation set every wake-up and promotes only when all of it is ContainersReady, so a pod that runs but never passes its probes holds the repair to the operation deadline. At that deadline the readiness wait is evidence - the record names the pod, its first unready container and the readiness condition's message under reason ContainersNotReady rather than a bare DeadlineExceeded - but it decides no branch, because readiness limbo is ambiguous between the revision and the node and charges no ladder (pkg/controller/v1beta1/workload/ops/restart.go, pkg/controller/v1beta1/workload/deadline.go)
     placement: kind
     coverage: {perm: [], unit: [], kind: []}
     status: current

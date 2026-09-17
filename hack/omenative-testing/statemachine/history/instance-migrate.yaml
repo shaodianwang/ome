@@ -26,7 +26,7 @@ history:
   - {state: Migrate/CreateSurge, event: ctrl.crash, variants: [], windows: [], transition: "", prs: ["#878", "#1122"]}
   - {state: Migrate/CreateSurge, event: ctrl.staleRead, variants: [], windows: [], transition: "", prs: ["#832"]}
   - {state: Migrate/CreateSurge, event: api.conflict, variants: [], windows: [], transition: "", prs: ["#869"]}
-  - {state: Migrate/CreateSurge, event: api.quotaDenied, variants: [], windows: [], transition: "", prs: ["#1147"]}
+  - {state: Migrate/CreateSurge, event: api.quotaDenied, variants: [], windows: [], transition: "", prs: ["#1147", "#1501"]}
   - {state: Migrate/SurgeTarget, event: pod.deleted, variants: [source], windows: [], transition: T-migratetarget-promote, prs: ["#1122"]}
   - {state: Migrate/SurgeTarget, event: pod.waiting, variants: [], windows: [], transition: "", prs: ["#871", "#878"]}
   - {state: Migrate/SurgeTarget, event: spec.revision, variants: [], windows: [], transition: "", prs: ["#1106"]}
@@ -38,4 +38,24 @@ history:
   - {state: Migrate/SurgeTarget, event: ctrl.crash, variants: [], windows: [], transition: "", prs: ["#878", "#1122"]}
   - {state: Migrate/SurgeTarget, event: ctrl.staleRead, variants: [], windows: [], transition: "", prs: ["#832"]}
   - {state: Migrate/SurgeTarget, event: api.conflict, variants: [], windows: [], transition: "", prs: ["#869"]}
-  - {state: Migrate/SurgeTarget, event: api.quotaDenied, variants: [], windows: [], transition: "", prs: ["#1147"]}
+  - {state: Migrate/SurgeTarget, event: api.quotaDenied, variants: [], windows: [], transition: "", prs: ["#1147", "#1501"]}
+
+  # --- apiserver-rejection classification and scheduler-hold evidence ------
+  - {state: Migrate/CreateSurge, event: api.invalid, variants: [], windows: [], transition: "", prs: ["#1501"]}
+  - {state: Migrate/CreateSurge, event: api.throttled, variants: [], windows: [], transition: "", prs: ["#1501"]}
+  - {state: Migrate/CreateSurge, event: api.namespaceTerminating, variants: [], windows: [], transition: "", prs: ["#1501"]}
+  - {state: Migrate/SurgeTarget, event: api.invalid, variants: [], windows: [], transition: "", prs: ["#1501"]}
+  - {state: Migrate/SurgeTarget, event: api.throttled, variants: [], windows: [], transition: "", prs: ["#1501"]}
+  - {state: Migrate/SurgeTarget, event: api.namespaceTerminating, variants: [], windows: [], transition: "", prs: ["#1501"]}
+  - {state: Migrate/CreateSurge, event: pod.unschedulable, variants: [], windows: [], transition: "", prs: ["#1503"]}
+  - {state: Migrate/SurgeTarget, event: pod.unschedulable, variants: [], windows: [], transition: "", prs: ["#1503"]}
+  - {state: Migrate/CreateSurge, event: pod.admissionRejected, variants: [], windows: [before], transition: "", prs: ["#1503"]}
+  - {state: Migrate/SurgeTarget, event: pod.admissionRejected, variants: [], windows: [before], transition: "", prs: ["#1503"]}
+
+  # --- PodGroup status as a decision input --------------------------------
+  - {state: Migrate/CreateSurge, event: gang.podGroup, variants: [PhaseFailed], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Migrate/CreateSurge, event: gang.podGroup, variants: [Terminating, OwnershipConflict], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Migrate/CreateSurge, event: gang.podGroup, variants: [Unschedulable, ScheduleTimeout], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Migrate/SurgeTarget, event: gang.podGroup, variants: [PhaseFailed], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Migrate/SurgeTarget, event: gang.podGroup, variants: [Terminating, OwnershipConflict], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Migrate/SurgeTarget, event: gang.podGroup, variants: [Unschedulable, ScheduleTimeout], windows: [], transition: "", prs: ["#1506"]}

@@ -327,11 +327,11 @@ cells:
     windows: [before]
     outcome: escalate
     to: Failed
-    guard: the deadline elapsed, no pod of the attempt is held by an admission scheduling gate, and the pod set is not fully serving
-    note: the broad backstop for an attempt that never converges; a Create attempt is always disposable, so the disposition classifies it — RetryBlock against the pinned revision for a workload-caused pod, a relocation directive for a single-node ambiguous failure, terminal otherwise — and clears the operation so the next pass can start fresh. An attempt the disposition leaves un-disposed still records the blamed pod's workload-caused waiting reason on LastFailure when one exists, so the cause survives the teardown that deletes the pod, and falls back to the bare DeadlineExceeded diagnostic only when none does
+    guard: the deadline elapsed, the operation carries no external waiting token and no pod of the attempt is held by an admission scheduling gate, and the pod set is not fully serving
+    note: the broad backstop for an attempt that never converges; a Create attempt is always disposable, so the disposition classifies it — RetryBlock against the pinned revision for a workload-caused pod, a relocation directive for a single-node ambiguous failure, terminal otherwise — and clears the operation so the next pass can start fresh. An attempt the disposition leaves un-disposed still records the blamed pod's workload-caused waiting reason on LastFailure when one exists, so the cause survives the teardown that deletes the pod. Where no container named a failure but a pod ran every container without ever reporting ContainersReady, the evidence names that pod, its first unready container and the readiness condition's own message under reason ContainersNotReady; the branch is unchanged by it, since readiness limbo is ambiguous between the revision and the node and so charges no ladder. Only an attempt with neither kind of evidence falls back to the bare DeadlineExceeded diagnostic. An op pass that errors elsewhere in the Component does not suppress this stamp - the end-of-pass escalation runs after every eligible pass and re-derives its evidence per Instance from the snapshot, so a rejected or shed write on another row cannot hold this one past its timeout
     invariants: [one.operation.per.instance]
     placement: perm
-    coverage: {perm: [], unit: [TestEscalation_DeadlineElapsedBelowDesiredServing_StillEscalates, TestExpireOperations_GangCreateDisposed], kind: []}
+    coverage: {perm: [], unit: [TestEscalation_DeadlineElapsedBelowDesiredServing_StillEscalates, TestExpireOperations_GangCreateDisposed, TestEscalation_DeadlineWithRunningNotReadyPod_NamesTheProbe, TestEscalation_DeadlineWithCrashLoopPod_KeepsAmbiguousBlame, TestExecuteErroredSiblingKeepsRelocationFirstTry], kind: []}
     status: decided
 
   - state: Create/CreatePods
@@ -402,22 +402,20 @@ cells:
   - state: Create/CreatePods
     event: api.quotaDenied
     outcome: defer
-    note: the rejected pod create is returned as a typed create error naming the pod, the committed Creating row and any pods already created are left alone, the remaining unattempted rows are rolled back, and the attempt is retried on the error requeue; the deadline keeps running unless the pod is admission-gated
+    note: a ResourceQuota refusal is classified as capacity-blocked rather than returned opaquely - the committed Creating row and any pods already created are left alone, the operation carries the QuotaExceeded waiting token, and the InstanceReadyTimeout deadline parks while that token is held. The token is released on the first pass whose creates all land, which re-arms the deadline from that moment; the pass itself ends quietly on the create requeue instead of escalating controller-runtime backoff
     placement: perm
     coverage: {perm: [], unit: [TestCreate_BatchedPodCreateFailureStopsAndRollsBackUnattemptedInstances, TestCreate_BatchedPodCreateFailureRestoresPriorUnattemptedStatus], kind: []}
-    status: review
+    status: decided
 
-  # GAP: an infeasible pod is indistinguishable from a slow one here, so a gang
-  # that can never land still burns the whole InstanceReadyTimeout before the
-  # row is failed.
   - state: Create/CreatePods
     event: pod.unschedulable
     variants: [source]
     outcome: defer
-    note: no decision input reads the PodScheduled condition — podreadiness/readiness.go only preserves it while patching — so the pass keeps polling on the create requeue and the attempt ends on the operation deadline, where the disposition classifies it terminal because an unscheduled pod names no node to relocate off
+    guard: the row is not fully serving and its operation carries no other authority's waiting token; the hold lasts while lifecycle.unschedulableGracePeriod is unconfigured or unelapsed, and past it the attempt is failed environment-caused
+    note: the escalation pass reads PodScheduled=False/Unschedulable off the live pods and records the Unschedulable waiting token on the operation, which parks the InstanceReadyTimeout clock; the scheduler's own message lands on LastFailure once per hold, edge-triggered on the held state so message churn writes nothing. The pod with no placement is chosen by name, so a gang with several records the same one every pass. Past the configured grace - measured from the PodScheduled transition, not from pod creation - the attempt is failed with the scheduler's message and no RetryBlock, because no revision can conjure a node. The token is released once the pod is placed or gone
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestPodUnschedulable, TestEscalation_UnschedulablePodRecordsHold, TestEscalation_UnschedulableHoldIsEdgeTriggered, TestEscalation_UnschedulableHoldClearedOnSchedule, TestEscalation_UnschedulablePastGraceFailsEnvironmentCaused, TestEscalation_UnschedulableWithoutGraceNeverEscalates, TestEscalation_UnschedulableGraceRunsFromCondition, TestReconcileGatedDeadlines_ParksUnschedulableInstance, TestEscalation_UnschedulableHoldIgnoresMessageChurn, TestEscalation_UnschedulableYieldsToAnotherWaitingToken, TestEscalation_UnschedulableGraceWarnsAfterAHoldWasRecorded, TestEscalation_UnschedulableHoldClearedWhenPodDeleted, TestEscalation_UnschedulableSupersededLeftoverIsSilent, TestEscalation_GangUnschedulableReachesUsOnMemberPods, TestEscalation_PodHoldWinsOverGangHold], kind: []}
+    status: decided
 
   - state: Create/CreatePods
     event: pod.containersNotReady
@@ -483,41 +481,52 @@ cells:
     event: gang.podGroup
     variants: [Terminating]
     outcome: defer
-    note: inferencereplica/reconciler.go turns ErrPodGroupTerminating into a scale-down-interval requeue ahead of workload.Reconcile, so the pass creates no pod and does not even reach the escalation pass; the attempt resumes once the predecessor PodGroup is collected
+    guard: the attempt is in flight, the pod set is not fully serving, and no other authority already holds the operation's waiting token
+    note: the deterministic name is still occupied by an object being collected, so no member may be created against it - every pod is stamped with that name and would enlist in a group this owner does not yet control. The PodGroup pass classifies the name before writing anything and the create choke point withholds the whole set, while the escalation pass records the PodGroupTerminating waiting token, which parks the InstanceReadyTimeout clock. The wait resolves itself - the group is announced again on the pass after the old object is gone - so it never escalates. A pod-level Unschedulable hold takes the token first when both apply, because that one is the wait an operator has configured a grace for
+    invariants: [podgroup.before.pods]
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestReconcile_TerminatingPodGroupHoldsWithoutPods, TestEscalation_GangTerminatingParksWithoutEscalating, TestEscalation_GangHoldIsEdgeTriggered, TestEscalation_GangHoldTakesOverFromClearedPodToken, TestEnsurePodGroupsWithState_ForeignCollisionAndTerminatingGate], kind: []}
+    status: decided
 
-  # GAP: the conflict never resolves on its own and the deadline cannot fire
-  # while the pass returns early, so the row wedges in Creating indefinitely.
   - state: Create/CreatePods
     event: gang.podGroup
     variants: [OwnershipConflict]
-    outcome: defer
-    note: podgroup.go refuses to touch a foreign-owned PodGroup and inferencereplica/reconciler.go returns that error before workload.Reconcile, so the attempt neither creates pods nor reaches the escalation pass that would expire it
+    outcome: escalate
+    to: Failed
+    guard: an attempt is in flight to end and the pod set is not fully serving
+    note: a deterministic name held by a controller that is not this owner is the one PodGroup state nothing here resolves, so the attempt ends on it - LastFailure carries PodGroupOwnershipConflict naming the foreign controller, Phase goes Failed and the Operation is preserved for the abandon path. ENVIRONMENT-CAUSED - no corrected pod template frees a name someone else owns - so no RetryBlock is recorded. The verdict is scoped to this row - the PodGroup pass records the collision and finishes the other gangs rather than aborting the Component - and the warning is withheld on a row already Failed for this reason, so an unresolved collision announces itself once
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestEscalation_GangOwnershipConflictFailsOnlyItsRow, TestEnsurePodGroupsWithState_ForeignCollisionAndTerminatingGate], kind: []}
+    status: decided
 
   - state: Create/CreatePods
     event: gang.podGroup
     variants: [Deleted]
     outcome: ignore
-    note: EnsurePodGroups runs before any pod create on every pass and inferencereplica/watches.go podGroupPredicate admits the delete event, so the deterministic name is re-created ahead of the next pod write
+    note: EnsurePodGroups runs before any pod create on every pass and inferencereplica/watches.go podGroupPredicate admits the delete event, so the deterministic name is re-created in the same pass, ahead of the pods that reference it; any gang waiting token the row was carrying is released in the same pass, before another authority's mark, so a row handing over from one wait to another never spends a pass unheld
+    invariants: [podgroup.before.pods]
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestEscalation_GangHoldClearedOnceCollected], kind: []}
+    status: decided
 
-  # GAP: the gang scheduler's own verdict is invisible to this machine — an
-  # infeasible or failed PodGroup is indistinguishable from a slow one.
   - state: Create/CreatePods
     event: gang.podGroup
-    variants: [Unschedulable, ScheduleTimeout, PhaseFailed]
+    variants: [PhaseFailed]
     outcome: defer
-    note: PodGroup status has no reader and inferencereplica/watches.go podGroupPredicate admits only generation, label, annotation, ownerRef, finalizer and deletionTimestamp changes, so a status-only update does not even enqueue; the pods stay Pending and the operation deadline is the only exit
-    placement: sim
+    guard: the index is planned and its outcome belongs to this machine - a Delete or Migrate operation owns its own group and is skipped
+    note: the gang scheduler's Failed phase is absorbing - its controller stops reconciling the object and the PodGroup pass only reconciles labels, ownership and size - so the group can never be admitted again under that name. The pass deletes it and builds a fresh one on the next reconcile, withholding members meanwhile, and emits one PodGroupReset warning carrying the group's own failure message. The row itself is untouched - no phase change, no waiting token, no RetryBlock - because a failure that resets itself must not end an attempt, or the reset and the rebuild would chase each other through Failed forever. A member pod still phase Failed holds the reset back - the group's phase is derived from its members, so rebuilding around one would earn the replacement the same verdict - and the create pass recycles that pod first
+    placement: unit
+    coverage: {perm: [], unit: [TestEscalation_GangFailedNeitherHoldsNorEnds, TestCreate_TerminalMemberRecycledWhileGangBlocked, TestGang_FailedPodGroupIsResetNotEscalated, TestGang_FailedPodGroupResetWaitsForTerminalMemberRecycle], kind: []}
+    status: decided
+
+  - state: Create/CreatePods
+    event: gang.podGroup
+    variants: [Unschedulable, ScheduleTimeout]
+    outcome: defer
+    note: neither reading exists on the PodGroup the controller watches - the vendored gang scheduler writes no Unknown phase and no ScheduleStartTime, and PodGroupStatus distinguishes only "fewer members than minMember exist yet" from "they exist and are being placed", which is the ordinary shape of a healthy gang coming up. A gang that cannot be placed reaches this controller on its MEMBER PODS instead, as PodScheduled=False with reason Unschedulable written by the coscheduling plugin, and the pod-level scheduler hold parks the clock on that (see pod.unschedulable)
+    placement: unit
     coverage: {perm: [], unit: [], kind: []}
-    status: current
+    status: decided
 
   - state: Create/CreatePods
     event: endpoint.rotationIn
@@ -619,33 +628,32 @@ cells:
     coverage: {perm: [], unit: [], kind: []}
     status: current
 
-  # GAP: a 422 is permanent, yet nothing classifies it — the attempt is retried
-  # until the operation deadline and then stamped DeadlineExceeded.
   - state: Create/CreatePods
     event: api.invalid
-    outcome: defer
-    note: ops/create.go wraps every non-AlreadyExists create failure as a typed pod-create error, so an Invalid rejection is retried on controller-runtime backoff exactly like a transient one, with the committed Creating row and any pods already created left in place
-    placement: sim
+    outcome: escalate
+    to: Failed
+    guard: the rejected write is a pod create, whose object is a faithful render of the attempt's target revision
+    note: a 422 on a pod create is permanent - the same revision reproduces it byte for byte - so the attempt ends here rather than at the deadline. The rejection classifies as workload-caused - LastFailure carries InvalidPodSpec plus the apiserver's own explanation, a RetryBlock is recorded against the attempt's target revision before the operation is cleared, and Phase goes Failed in one write. A corrected revision is admitted immediately; the held one is not
+    placement: unit
     coverage: {perm: [], unit: [], kind: []}
-    status: current
+    status: decided
 
   - state: Create/CreatePods
     event: api.throttled
     outcome: defer
-    note: a shed request propagates verbatim out of the create loop, the unattempted rows are rolled back and the pass is retried on controller-runtime backoff; the operation deadline keeps running through the shedding unless a pod of the attempt is admission-gated
-    placement: sim
+    note: a shed create is classified as throttled and nothing is written - no failure accounting, no deadline change. The server's Retry-After is deposited on the pass pacing, which floors the requeue, so the attempt wakes on the server's own schedule rather than on controller-runtime backoff; the operation deadline keeps running through the shedding unless a pod of the attempt is admission-gated
+    placement: unit
     coverage: {perm: [], unit: [], kind: []}
-    status: current
+    status: decided
 
-  # GAP: no create can ever succeed in a terminating namespace, so the attempt
-  # burns the full deadline and lands on DeadlineExceeded instead of the cause.
   - state: Create/CreatePods
     event: api.namespaceTerminating
-    outcome: defer
-    note: the rejection takes the same typed pod-create error path as any other create failure in ops/create.go and is retried on backoff, with no reader of the terminating cause
-    placement: sim
+    outcome: escalate
+    to: Failed
+    note: no create can succeed in a terminating namespace, so the attempt ends on the first rejection instead of burning the deadline. The rejection classifies as environment-caused - LastFailure carries NamespaceTerminating plus the apiserver's message, the operation is cleared and Phase goes Failed - and no revision is blamed, so the retry ladder stays clean for the same revision in a healthy namespace
+    placement: unit
     coverage: {perm: [], unit: [], kind: []}
-    status: current
+    status: decided
 
   - state: Create/CreatePods
     event: timer.stuckPodGrace
@@ -703,9 +711,9 @@ cells:
     outcome: transition
     to: Create/CreatePods
     guard: the rejected pod holds one of the attempt's target names, the attempt's deadline has not elapsed, and its outstanding expectations are satisfied
-    note: a rejection is phase Failed, so query.IsTerminalPod reads the name as missing and ops/terminal_recycle.go deletes the occupant with the expectation recorded first; terminalPodTermination captures the pod-level status.reason onto LastFailure, so the kubelet's refusal is legible rather than a bare PodFailed. The create is withheld this pass and the name is rebuilt once the delete is observed, paced inside the attempt by the same-target retry ladder
+    note: a rejection is phase Failed, so query.IsTerminalPod reads the name as missing and ops/terminal_recycle.go deletes the occupant with the expectation recorded first; terminalPodTermination captures the pod-level status.reason onto LastFailure, so the kubelet's refusal is legible rather than a bare PodFailed. The create is withheld this pass and the name is rebuilt once the delete is observed, paced inside the attempt by the same-target retry ladder. Environment-caused throughout - the node's capacity accounting refused a pod the revision renders correctly, so no RetryBlock is charged
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestQueryPodAdmissionRejected], kind: []}
     status: current
   - state: Create/CreatePods
     event: pod.admissionRejected
@@ -719,7 +727,7 @@ cells:
     event: pod.runningNotReady
     variants: [source]
     outcome: defer
-    note: nothing reads a readiness wait as evidence; the promote needs every pod ContainersReady and simply keeps returning, so the attempt's operation deadline is the only exit and the failure it records is DeadlineExceeded rather than anything about the probe (pkg/controller/v1beta1/workload/ops/create.go, pkg/controller/v1beta1/workload/deadline.go)
+    note: a readiness wait is evidence, never a decision input - the promote needs every pod ContainersReady and simply keeps returning, so the attempt's operation deadline is the only exit. What changes is what that exit records - the deadline disposition names the limbo pod, its first unready container and the readiness condition's message under reason ContainersNotReady instead of a bare DeadlineExceeded. The blame is unaffected - readiness limbo is ambiguous between the revision and the node, so it is excluded from the workload-caused set and the relocation branch still runs first where its conditions hold. A pod set with any container parked in a waiting state suppresses the classification outright, because the kubelet already named that failure (pkg/controller/v1beta1/workload/ops/create.go, pkg/controller/v1beta1/workload/deadline.go)
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestPodRunningNotReady, TestEscalation_DeadlineWithRunningNotReadyPod_NamesTheProbe, TestEscalation_RunningNotReadyBeforeDeadline_Untouched], kind: []}
     status: current

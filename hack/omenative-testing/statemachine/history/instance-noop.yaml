@@ -34,3 +34,21 @@ history:
   - {state: Ready, event: ctrl.staleRead, variants: [], windows: [], transition: "", prs: ["#1289"]}
   - {state: Pending, event: pod.phaseTerminal, variants: [Failed, Succeeded], windows: [], transition: "", prs: ["#1494"]}
   - {state: Ready, event: pod.phaseTerminal, variants: [Failed, Succeeded], windows: [], transition: "", prs: ["#1494"]}
+
+  # --- PodGroup status as a decision input --------------------------------
+  - {state: Empty, event: gang.podGroup, variants: [OwnershipConflict], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Empty, event: gang.podGroup, variants: [PhaseFailed], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Empty, event: gang.podGroup, variants: [Terminating], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Empty, event: gang.podGroup, variants: [Unschedulable, ScheduleTimeout], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Pending, event: gang.podGroup, variants: [OwnershipConflict], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Pending, event: gang.podGroup, variants: [PhaseFailed], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Pending, event: gang.podGroup, variants: [Terminating], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Pending, event: gang.podGroup, variants: [Unschedulable, ScheduleTimeout], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Ready, event: gang.podGroup, variants: [OwnershipConflict], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Ready, event: gang.podGroup, variants: [PhaseFailed], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Ready, event: gang.podGroup, variants: [Terminating], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Ready, event: gang.podGroup, variants: [Unschedulable, ScheduleTimeout], windows: [], transition: "", prs: ["#1506"]}
+
+  # --- end-of-pass work after an errored operation pass -------------------
+  - {state: Ready, event: api.invalid, variants: [], windows: [], transition: "", prs: ["#1507"]}
+  - {state: Ready, event: api.throttled, variants: [], windows: [], transition: "", prs: ["#1507"]}

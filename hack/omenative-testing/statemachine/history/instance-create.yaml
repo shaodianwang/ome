@@ -56,7 +56,7 @@ history:
     variants: []
     windows: [before]
     transition: ""
-    prs: ["#1013", "#1491"]
+    prs: ["#1013", "#1491", "#1507"]
   - state: Create/CreatePods
     event: api.conflict
     variants: []
@@ -68,10 +68,24 @@ history:
     variants: []
     windows: []
     transition: ""
-    prs: ["#1147"]
+    prs: ["#1147", "#1501"]
   - state: Create/CreatePods
     event: pod.phaseTerminal
     variants: []
     windows: []
     transition: ""
     prs: ["#1494"]
+
+  # --- apiserver-rejection classification and scheduler-hold evidence ------
+  - {state: Create/CreatePods, event: api.invalid, variants: [], windows: [], transition: "", prs: ["#1501"]}
+  - {state: Create/CreatePods, event: api.throttled, variants: [], windows: [], transition: "", prs: ["#1501"]}
+  - {state: Create/CreatePods, event: api.namespaceTerminating, variants: [], windows: [], transition: "", prs: ["#1501"]}
+  - {state: Create/CreatePods, event: pod.unschedulable, variants: [source], windows: [], transition: "", prs: ["#1503"]}
+
+  # --- PodGroup status as a decision input --------------------------------
+  - {state: Create/CreatePods, event: gang.podGroup, variants: [Deleted], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Create/CreatePods, event: gang.podGroup, variants: [OwnershipConflict], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Create/CreatePods, event: gang.podGroup, variants: [PhaseFailed], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Create/CreatePods, event: gang.podGroup, variants: [Terminating], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Create/CreatePods, event: gang.podGroup, variants: [Unschedulable, ScheduleTimeout], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Create/CreatePods, event: pod.unschedulable, variants: [source], windows: [], transition: "", prs: ["#1506"]}

@@ -70,3 +70,19 @@ history:
     windows: [after]
     transition: T-restart-deadline
     prs: ["#1494"]
+
+  # --- apiserver-rejection classification and scheduler-hold evidence ------
+  - {state: Restart/Drain, event: api.quotaDenied, variants: [], windows: [], transition: "", prs: ["#1501"]}
+  - {state: Restart/Drain, event: api.invalid, variants: [], windows: [], transition: "", prs: ["#1501"]}
+  - {state: Restart/Drain, event: api.throttled, variants: [], windows: [], transition: "", prs: ["#1501"]}
+  - {state: Restart/Drain, event: api.namespaceTerminating, variants: [], windows: [], transition: "", prs: ["#1501"]}
+  - {state: Restart/Drain, event: pod.unschedulable, variants: [source], windows: [], transition: "", prs: ["#1503"]}
+
+  # --- PodGroup status as a decision input --------------------------------
+  - {state: Restart/Drain, event: gang.podGroup, variants: [Deleted], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Restart/Drain, event: gang.podGroup, variants: [OwnershipConflict], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Restart/Drain, event: gang.podGroup, variants: [PhaseFailed], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Restart/Drain, event: gang.podGroup, variants: [Terminating], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Restart/Drain, event: gang.podGroup, variants: [Unschedulable, ScheduleTimeout], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Restart/Drain, event: api.invalid, variants: [], windows: [], transition: "", prs: ["#1507"]}
+  - {state: Restart/Drain, event: api.throttled, variants: [], windows: [], transition: "", prs: ["#1507"]}

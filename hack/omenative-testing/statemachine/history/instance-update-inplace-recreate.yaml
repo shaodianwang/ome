@@ -31,3 +31,20 @@ history:
   - {state: Update/Drain, event: config.changed, variants: [], windows: [], transition: "", prs: ["#1378"]}
   - {state: Update/InPlace, event: pod.phaseTerminal, variants: [], windows: [], transition: "", prs: ["#1494"]}
   - {state: Update/Drain, event: pod.phaseTerminal, variants: [], windows: [], transition: "", prs: ["#1494"]}
+
+  # --- apiserver-rejection classification and scheduler-hold evidence ------
+  - {state: Update/InPlace, event: api.invalid, variants: [], windows: [], transition: "", prs: ["#1501"]}
+  - {state: Update/Drain, event: api.quotaDenied, variants: [], windows: [], transition: "", prs: ["#1501"]}
+  - {state: Update/Drain, event: api.invalid, variants: [], windows: [], transition: "", prs: ["#1501"]}
+  - {state: Update/Drain, event: api.throttled, variants: [], windows: [], transition: "", prs: ["#1501"]}
+  - {state: Update/Drain, event: api.namespaceTerminating, variants: [], windows: [], transition: "", prs: ["#1501"]}
+  - {state: Update/InPlace, event: pod.unschedulable, variants: [source], windows: [], transition: "", prs: ["#1503"]}
+  - {state: Update/Drain, event: pod.unschedulable, variants: [source], windows: [], transition: "", prs: ["#1503"]}
+  - {state: Update/Drain, event: pod.admissionRejected, variants: [], windows: [before], transition: "", prs: ["#1503"]}
+
+  # --- PodGroup status as a decision input --------------------------------
+  - {state: Update/Drain, event: gang.podGroup, variants: [OwnershipConflict], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Update/Drain, event: gang.podGroup, variants: [PhaseFailed], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Update/Drain, event: gang.podGroup, variants: [Terminating], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Update/Drain, event: gang.podGroup, variants: [Unschedulable, ScheduleTimeout], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Update/Drain, event: api.invalid, variants: [], windows: [], transition: "", prs: ["#1507"]}

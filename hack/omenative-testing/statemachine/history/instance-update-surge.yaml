@@ -31,7 +31,7 @@ history:
   - {state: Update/Surge, event: spec.pauseFreeze, variants: [], windows: [], transition: "", prs: ["#1279"]}
   - {state: Update/Surge, event: spec.unpause, variants: [], windows: [], transition: "", prs: ["#1279"]}
   - {state: Update/Surge, event: spec.migrateRequest, variants: [], windows: [], transition: "", prs: ["#1106"]}
-  - {state: Update/Surge, event: timer.operationDeadline, variants: [], windows: [before], transition: "", prs: ["#788", "#715"]}
+  - {state: Update/Surge, event: timer.operationDeadline, variants: [], windows: [before], transition: "", prs: ["#788", "#715", "#1507"]}
   - {state: Update/Surge, event: timer.minReady, variants: [], windows: [], transition: "", prs: ["#1371"]}
   - {state: Update/Surge, event: api.conflict, variants: [], windows: [], transition: "", prs: ["#872"]}
 
@@ -75,3 +75,34 @@ history:
   - {state: Update/SurgeDrainSettle, event: pod.phaseTerminal, variants: [Failed], windows: [], transition: "", prs: ["#1494"]}
   - {state: Update/SurgeDrainSettle, event: timer.forceDelete, variants: [], windows: [], transition: "", prs: ["#1378"]}
   - {state: Update/SurgeDrainSettle, event: config.changed, variants: [], windows: [], transition: "", prs: ["#1378"]}
+
+  # --- apiserver-rejection classification and scheduler-hold evidence ------
+  - {state: Update/Surge, event: api.quotaDenied, variants: [], windows: [], transition: "", prs: ["#1501"]}
+  - {state: Update/Surge, event: api.invalid, variants: [], windows: [], transition: "", prs: ["#1501"]}
+  - {state: Update/Surge, event: api.throttled, variants: [], windows: [], transition: "", prs: ["#1501"]}
+  - {state: Update/Surge, event: api.namespaceTerminating, variants: [], windows: [], transition: "", prs: ["#1501"]}
+  - {state: Update/SurgeDrain, event: api.quotaDenied, variants: [], windows: [], transition: "", prs: ["#1501"]}
+  - {state: Update/SurgeDrain, event: api.invalid, variants: [], windows: [], transition: "", prs: ["#1501"]}
+  - {state: Update/SurgeDrain, event: api.throttled, variants: [], windows: [], transition: "", prs: ["#1501"]}
+  - {state: Update/SurgeDrain, event: api.namespaceTerminating, variants: [], windows: [], transition: "", prs: ["#1501"]}
+  - {state: Update/SurgeDrainSettle, event: api.quotaDenied, variants: [], windows: [], transition: "", prs: ["#1501"]}
+  - {state: Update/SurgeDrainSettle, event: api.invalid, variants: [], windows: [], transition: "", prs: ["#1501"]}
+  - {state: Update/SurgeDrainSettle, event: api.throttled, variants: [], windows: [], transition: "", prs: ["#1501"]}
+  - {state: Update/SurgeDrainSettle, event: api.namespaceTerminating, variants: [], windows: [], transition: "", prs: ["#1501"]}
+  - {state: Update/Surge, event: pod.unschedulable, variants: [], windows: [], transition: "", prs: ["#1503"]}
+  - {state: Update/SurgeDrain, event: pod.unschedulable, variants: [], windows: [], transition: "", prs: ["#1503"]}
+  - {state: Update/SurgeDrainSettle, event: pod.unschedulable, variants: [], windows: [], transition: "", prs: ["#1503"]}
+  - {state: Update/Surge, event: pod.admissionRejected, variants: [], windows: [before], transition: "", prs: ["#1503"]}
+
+  # --- PodGroup status as a decision input --------------------------------
+  - {state: Update/Surge, event: gang.podGroup, variants: [PhaseFailed], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Update/Surge, event: gang.podGroup, variants: [Terminating, OwnershipConflict], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Update/Surge, event: gang.podGroup, variants: [Unschedulable, ScheduleTimeout], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Update/SurgeDrain, event: gang.podGroup, variants: [PhaseFailed], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Update/SurgeDrain, event: gang.podGroup, variants: [Terminating, OwnershipConflict], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Update/SurgeDrain, event: gang.podGroup, variants: [Unschedulable, ScheduleTimeout], windows: [], transition: "", prs: ["#1506"]}
+
+  # --- end-of-pass work after an errored operation pass -------------------
+  - {state: Update/SurgeDrain, event: timer.operationDeadline, variants: [], windows: [before], transition: "", prs: ["#1507"]}
+  - {state: Update/Surge, event: api.invalid, variants: [], windows: [], transition: "", prs: ["#1507"]}
+  - {state: Update/Surge, event: api.throttled, variants: [], windows: [], transition: "", prs: ["#1507"]}

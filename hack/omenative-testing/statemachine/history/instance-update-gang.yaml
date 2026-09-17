@@ -178,3 +178,19 @@ history:
     windows: []
     transition: ""
     prs: ["#1378"]
+
+  # --- apiserver-rejection classification and scheduler-hold evidence ------
+  - {state: Update/GangSurgeTarget, event: api.quotaDenied, variants: [], windows: [], transition: "", prs: ["#1501"]}
+  - {state: Update/GangSurgeTarget, event: api.invalid, variants: [], windows: [], transition: "", prs: ["#1501"]}
+  - {state: Update/GangSurgeTarget, event: api.throttled, variants: [], windows: [], transition: "", prs: ["#1501"]}
+  - {state: Update/GangSurgeTarget, event: api.namespaceTerminating, variants: [], windows: [], transition: "", prs: ["#1501"]}
+  - {state: Update/GangSurgeTarget, event: pod.unschedulable, variants: [target], windows: [], transition: "", prs: ["#1503"]}
+  - {state: Update/GangSurgeTarget, event: pod.admissionRejected, variants: [], windows: [before], transition: "", prs: ["#1503"]}
+
+  # --- PodGroup status as a decision input --------------------------------
+  - {state: Update/GangSurgeTarget, event: gang.podGroup, variants: [Deleted], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Update/GangSurgeTarget, event: gang.podGroup, variants: [OwnershipConflict], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Update/GangSurgeTarget, event: gang.podGroup, variants: [PhaseFailed], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Update/GangSurgeTarget, event: gang.podGroup, variants: [Terminating], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Update/GangSurgeTarget, event: gang.podGroup, variants: [Unschedulable, ScheduleTimeout], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Update/GangSurgeTarget, event: pod.unschedulable, variants: [target], windows: [], transition: "", prs: ["#1506"]}

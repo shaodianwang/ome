@@ -19,3 +19,7 @@ history:
   - {state: Delete/Drain, event: spec.pauseFreeze, variants: [], windows: [], transition: "", prs: ["#1279"]}
   - {state: Delete/Drain, event: spec.teardown, variants: [], windows: [], transition: "", prs: ["#827", "#826"]}
   - {state: Delete/Drain, event: api.notFound, variants: [], windows: [], transition: "", prs: ["#960", "#826"]}
+
+  # --- PodGroup status as a decision input --------------------------------
+  - {state: Delete/Drain, event: gang.podGroup, variants: [OwnershipConflict, Deleted, Unschedulable, ScheduleTimeout, PhaseFailed], windows: [], transition: "", prs: ["#1506"]}
+  - {state: Delete/Drain, event: gang.podGroup, variants: [Terminating], windows: [], transition: "", prs: ["#1506"]}

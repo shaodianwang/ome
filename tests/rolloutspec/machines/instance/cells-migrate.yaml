@@ -233,14 +233,12 @@ cells:
     status: current
   - state: Migrate/CreateSurge
     event: pod.unschedulable
-    outcome: ignore
-    note: nothing in the workload layer reads PodScheduled or the scheduler's failure
-      event, so an unschedulable surge is indistinguishable from one still being
-      scheduled and simply never passes the runtime-ready gate; the record Deadline
-      bounds the wait
+    outcome: defer
+    guard: the row is not fully serving and its operation carries no other authority's waiting token; the hold lasts while lifecycle.unschedulableGracePeriod is unconfigured or unelapsed, and past it the attempt is failed environment-caused
+    note: the escalation pass reads PodScheduled=False/Unschedulable and records the Unschedulable waiting token, which parks the operation deadline; the migration record's own Deadline is the timeout authority for the move either way, so the hold is visibility rather than a new bound. The hold is scoped to the row whose OWN pod has no placement, so a serving source is never held for its replacement's fate. Past the configured grace the row is failed with the scheduler's message and no RetryBlock, which is the one path by which a scheduler hold ends a Migrate-pinned row before its record expires
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestEscalation_UnschedulableMigrationSurgeHoldsTheSurgeRow, TestEscalation_UnschedulableMigrationSurgePastGraceFails], kind: []}
+    status: decided
   - state: Migrate/CreateSurge
     event: pod.containersNotReady
     variants: [target]
@@ -308,35 +306,34 @@ cells:
     event: gang.podGroup
     variants: [Terminating, OwnershipConflict]
     outcome: defer
-    note: the PodGroup pass runs before the dispatcher, so a surge PodGroup name still
-      held by a terminating object requeues the whole reconcile at the scale-down
-      interval and one held by a foreign owner returns an error into backoff; either
-      way the drive does not run that pass while the record Deadline keeps running
+    note: a Migrate-owned row takes no gang waiting token and receives no terminal verdict - the migration record is the timeout authority for both pair rows, so nothing read off a PodGroup may park its clock or flip its phase. The name being unusable still withholds members, so the drive makes no progress on it and the record Deadline is what ends the move
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestEscalation_GangTerminalKeepsOffRowsOwnedElsewhere], kind: []}
+    status: decided
   - state: Migrate/CreateSurge
     event: gang.podGroup
     variants: [Deleted]
     outcome: ignore
-    note: the surge index stays pinned in the plan, so the next pass's PodGroup pass
-      re-creates the group from the plan before the drive runs; pods already created
-      keep their pod-group label
+    note: the surge index stays pinned in the plan, so the PodGroup pass re-creates the group from the plan before the drive runs; pods already created keep their pod-group label
     placement: unit
     coverage: {perm: [], unit: [], kind: []}
     status: current
-  # GAP: the event means the PodGroup blocks or fails the gang, and the
-  # controller cannot observe any of these three.
   - state: Migrate/CreateSurge
     event: gang.podGroup
-    variants: [Unschedulable, ScheduleTimeout, PhaseFailed]
-    outcome: ignore
-    note: PodGroup status has no reader and the watch predicate drops status-only
-      updates, so a gang the coscheduler has already given up on looks exactly like one
-      still waiting and the surge stalls to the record Deadline
+    variants: [PhaseFailed]
+    outcome: defer
+    note: a Migrate-owned row's group is never reset - deleting it would pull the gang contract out from under pods the migration record is still driving - so the absorbing Failed phase stands while the members it would place stay withheld, and the record Deadline is what ends the move
     placement: sim
     coverage: {perm: [], unit: [], kind: []}
-    status: current
+    status: decided
+  - state: Migrate/CreateSurge
+    event: gang.podGroup
+    variants: [Unschedulable, ScheduleTimeout]
+    outcome: ignore
+    note: neither reading exists on the PodGroup - the vendored gang scheduler writes no Unknown phase and no ScheduleStartTime - so there is no group-level verdict to observe. A surge gang that cannot be placed reaches the controller on its member pods instead, where the pod-level hold records it for visibility while the record Deadline still governs the move
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: decided
   - state: Migrate/CreateSurge
     event: endpoint.rotationIn
     variants: [target]
@@ -708,12 +705,10 @@ cells:
   - state: Migrate/CreateSurge
     event: api.quotaDenied
     outcome: defer
-    note: a blocked surge pod create is polled to the record Deadline with a warning
-      naming the pod, not failed on the first rejection; only a record with no
-      deadline turns the rejection into an error
+    note: a quota refusal is classified as capacity-blocked and named as such - the QuotaExceeded waiting token is recorded on the surge row and the operation deadline parks - and the surge create is still polled to the record Deadline with a warning naming the pod, not failed on the first rejection; only a record with no deadline turns the rejection into an error
     placement: perm
     coverage: {perm: [], unit: [TestMigrate_SurgePodCreateBlockUsesMigrationDeadline, TestMigrate_SurgePodCreateBlockRetries, TestMigrate_SurgePodCreateBlockRequiresBoundedRetry], kind: []}
-    status: review
+    status: decided
   - state: Migrate/CreateSurge
     event: ctrl.resync
     outcome: ignore
@@ -723,37 +718,31 @@ cells:
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
     status: current
-  # GAP: a permanently invalid write is retried as if it were transient.
   - state: Migrate/CreateSurge
     event: api.invalid
-    outcome: defer
-    note: nothing classifies a 422 — on the surge create path it is wrapped as a
-      blocked create and polled with a warning to the record Deadline exactly like a
-      quota rejection, and on a status write it returns into controller-runtime
-      backoff, so an unsatisfiable write burns the whole migration window
-    placement: sim
+    outcome: escalate
+    to: Failed
+    guard: the rejected write is the surge pod create; a 422 on a status write is not classified and stays an opaque error
+    note: a 422 on the surge create is permanent, so the migration request is closed on the first rejection rather than idling to its record Deadline - the same early-fail the node-affinity conflict gate applies - with the apiserver's own explanation naming the rejected pod on the failure reason. The revision is NOT blamed and no RetryBlock is recorded, because the surge pod carries the request's placement overlay and the rejection may indict the overlay rather than anything the revision asked for
+    placement: unit
     coverage: {perm: [], unit: [], kind: []}
-    status: current
+    status: decided
   - state: Migrate/CreateSurge
     event: api.throttled
     outcome: defer
-    note: a shed create is polled to the record Deadline like any other blocked create
-      and a shed status write returns into controller-runtime backoff; the advertised
-      retry-after is never read, so the retry cadence is the requeue cadence
-    placement: sim
+    note: a shed create is classified as throttled and writes nothing; the server's Retry-After is deposited on the pass pacing, which floors the requeue so the drive wakes no earlier than the apiserver asked, and the create is still polled to the record Deadline like any other blocked create. A shed status write is not classified and returns into controller-runtime backoff
+    placement: unit
     coverage: {perm: [], unit: [], kind: []}
-    status: current
-  # GAP: a create that can never succeed is polled as if it were blocked.
+    status: decided
   - state: Migrate/CreateSurge
     event: api.namespaceTerminating
-    outcome: defer
-    note: the rejection is not told apart from a transient create failure, so the
-      surge create is polled with a warning until the record Deadline even though no
-      pod can be created in a terminating namespace; in practice the owner's own
-      deletion reaches the row as teardown first
-    placement: sim
+    outcome: escalate
+    to: Failed
+    guard: the rejected write is the surge pod create
+    note: no surge pod can be created in a terminating namespace, so the migration request is closed on the first rejection instead of being polled to its record Deadline, with NamespaceTerminating and the apiserver's message naming the rejected pod. Environment-caused, so no revision is blamed; in practice the owner's own deletion reaches the row as teardown shortly after
+    placement: unit
     coverage: {perm: [], unit: [], kind: []}
-    status: current
+    status: decided
 
   # --- Migrate/SurgeTarget: pod lifecycle -------------------------------
   - state: Migrate/SurgeTarget
@@ -955,14 +944,12 @@ cells:
     status: current
   - state: Migrate/SurgeTarget
     event: pod.unschedulable
-    outcome: ignore
-    note: nothing in the workload layer reads PodScheduled or the scheduler's failure
-      event, so an own pod the overlay's anti-affinity made unplaceable looks exactly
-      like one still being scheduled; the record Deadline is what ends the wait, and
-      expiry then unpins the index
+    outcome: defer
+    guard: the row is not fully serving and its operation carries no other authority's waiting token; the hold lasts while lifecycle.unschedulableGracePeriod is unconfigured or unelapsed, and past it the attempt is failed environment-caused
+    note: an own pod the overlay's anti-affinity made unplaceable is read as such - the escalation pass records the Unschedulable waiting token on this row, which parks its operation deadline while the migration record's Deadline stays the timeout authority for the move. Past the configured grace the row is failed with the scheduler's message and no RetryBlock, because the shortage of placements is the environment's, not the revision's
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
-    status: current
+    status: decided
   - state: Migrate/SurgeTarget
     event: pod.containersNotReady
     variants: [target]
@@ -1028,34 +1015,34 @@ cells:
     event: gang.podGroup
     variants: [Terminating, OwnershipConflict]
     outcome: defer
-    note: this row's PodGroup is created by the pass that runs before the dispatcher, so
-      a name still held by a terminating object requeues the whole reconcile at the
-      scale-down interval and one held by a foreign owner returns an error into
-      backoff; the gang's pods are not rendered until it resolves
+    note: same reading from the replacement side - a Migrate-owned row takes no gang waiting token and receives no terminal verdict, because the migration record is the timeout authority for both pair rows. The unusable name still withholds this gang's members, so nothing is rendered until it resolves or the record Deadline ends the move
     placement: unit
     coverage: {perm: [], unit: [], kind: []}
-    status: current
+    status: decided
   - state: Migrate/SurgeTarget
     event: gang.podGroup
     variants: [Deleted]
     outcome: ignore
-    note: the index stays pinned while the record lives, so the next pass re-creates
-      the group from the plan before the drive renders any missing member
+    note: the index stays pinned while the record lives, so the PodGroup pass re-creates the group from the plan before the drive renders any missing member
     placement: unit
     coverage: {perm: [], unit: [], kind: []}
     status: current
-  # GAP: the event means the PodGroup blocks or fails the gang, and the
-  # controller cannot observe any of these three.
   - state: Migrate/SurgeTarget
     event: gang.podGroup
-    variants: [Unschedulable, ScheduleTimeout, PhaseFailed]
-    outcome: ignore
-    note: PodGroup status has no reader and the watch predicate drops status-only
-      updates, so a gang surge the coscheduler has already timed out on is
-      indistinguishable from one still waiting and stalls to the record Deadline
+    variants: [PhaseFailed]
+    outcome: defer
+    note: a Migrate-owned row's group is never reset, so the absorbing Failed phase stands while the members it would place stay withheld; the record Deadline is what ends the move and expiry then unpins the index
     placement: sim
     coverage: {perm: [], unit: [], kind: []}
-    status: current
+    status: decided
+  - state: Migrate/SurgeTarget
+    event: gang.podGroup
+    variants: [Unschedulable, ScheduleTimeout]
+    outcome: ignore
+    note: neither reading exists on the PodGroup - the vendored gang scheduler writes no Unknown phase and no ScheduleStartTime - so a group-level timeout is not something this controller can observe. An unplaceable replacement gang arrives on its member pods, where the pod-level hold records it while the record Deadline still governs
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: decided
   - state: Migrate/SurgeTarget
     event: endpoint.rotationIn
     variants: [target]
@@ -1395,11 +1382,10 @@ cells:
   - state: Migrate/SurgeTarget
     event: api.quotaDenied
     outcome: defer
-    note: a blocked own-pod create is polled to the record Deadline with a warning
-      naming the pod; a gang keeps retrying only the members still missing
+    note: a quota refusal is classified as capacity-blocked - the QuotaExceeded waiting token is recorded on this row and its operation deadline parks - and the own-pod create is still polled to the record Deadline with a warning naming the pod; a gang keeps retrying only the members still missing
     placement: perm
     coverage: {perm: [], unit: [TestMigrate_GangPartialCreateBlockRetriesMissingMembers, TestMigrate_GangCreateBlockBeforeFirstMember], kind: []}
-    status: review
+    status: decided
   - state: Migrate/SurgeTarget
     event: ctrl.resync
     outcome: ignore
@@ -1409,51 +1395,67 @@ cells:
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
     status: current
-  # GAP: a permanently invalid write is retried as if it were transient.
   - state: Migrate/SurgeTarget
     event: api.invalid
-    outcome: defer
-    note: nothing classifies a 422 — on the own-pod create path it is wrapped as a
-      blocked create and polled with a warning to the record Deadline exactly like a
-      quota rejection, and on a status write it returns into controller-runtime
-      backoff, so an unsatisfiable write burns the whole migration window
-    placement: sim
+    outcome: escalate
+    to: Failed
+    guard: the rejected write is the own-pod create; a 422 on a status write is not classified and stays an opaque error
+    note: a 422 on the replacement's own create is permanent, so this row is disposed and the migration request is closed rather than polled to its record Deadline. The revision is NOT blamed and no RetryBlock is recorded, because the replacement carries the request's placement overlay and the rejection may indict the overlay rather than anything the revision asked for
+    placement: unit
     coverage: {perm: [], unit: [], kind: []}
-    status: current
+    status: decided
   - state: Migrate/SurgeTarget
     event: api.throttled
     outcome: defer
-    note: a shed create is polled to the record Deadline like any other blocked create
-      and a shed status write returns into controller-runtime backoff; the advertised
-      retry-after is never read, so the retry cadence is the requeue cadence
-    placement: sim
+    note: a shed create is classified as throttled and writes nothing; the server's Retry-After is deposited on the pass pacing, which floors the requeue, and the create is still polled to the record Deadline like any other blocked create. A shed status write is not classified and returns into controller-runtime backoff
+    placement: unit
     coverage: {perm: [], unit: [], kind: []}
-    status: current
-  # GAP: a create that can never succeed is polled as if it were blocked.
+    status: decided
   - state: Migrate/SurgeTarget
     event: api.namespaceTerminating
-    outcome: defer
-    note: the rejection is not told apart from a transient create failure, so the
-      own-pod create is polled with a warning until the record Deadline even though no
-      pod can be created in a terminating namespace; in practice the owner's own
-      deletion reaches the row as teardown first
-    placement: sim
+    outcome: escalate
+    to: Failed
+    guard: the rejected write is the own-pod create
+    note: no replacement pod can be created in a terminating namespace, so the request is closed on the first rejection instead of being polled to its record Deadline, with NamespaceTerminating and the apiserver's message naming the rejected pod. Environment-caused, so no revision is blamed; in practice the owner's own deletion reaches the row as teardown shortly after
+    placement: unit
     coverage: {perm: [], unit: [], kind: []}
-    status: current
+    status: decided
 
   # --- Migrate pair: kubelet admission and slow readiness ----------------
   - state: Migrate/CreateSurge
     event: pod.admissionRejected
-    outcome: ignore
-    note: the restart trigger and both escalation paths skip a Migrate-pinned row and no migration step recycles a dead pod, so a refused surge pod stalls the gates to the record Deadline and a refused source pod is one more pod for the delete loop; the pod-level reason is never lifted onto the row
-    placement: kind
+    windows: [before]
+    outcome: transition
+    to: Migrate/CreateSurge
+    guard: the rejected pod holds one of the surge's target names, the record Deadline has not elapsed, and the surge bucket's outstanding expectations are satisfied
+    note: a surge pod the kubelet refused never ran and never will, yet it still holds its name, so the migration could never hand over while it stayed; the shared terminal recycle frees it so the surge is placed again before the record's Deadline. The bookkeeping - retry pacing and the kubelet's pod-level reason on LastFailure - belongs to the source, which owns the Migrate operation, while the delete and its expectations bucket on the surge index. Environment-caused, so no RetryBlock is charged. A refused SOURCE pod is still just one more pod for the delete loop
+    placement: unit
+    coverage: {perm: [], unit: [TestMigrateSurge_AdmissionRejectedTargetIsRecycled], kind: []}
+    status: decided
+  - state: Migrate/CreateSurge
+    event: pod.admissionRejected
+    windows: [boundary, after]
+    outcome: defer
+    note: the recycle is a pod delete that changes neither the record phase nor the pin, so a re-observed rejection lands on the same row and is either paced by the ladder or satisfied by the delete already in flight
+    placement: perm
     coverage: {perm: [], unit: [], kind: []}
     status: current
   - state: Migrate/SurgeTarget
     event: pod.admissionRejected
-    outcome: ignore
-    note: same reading from the replacement side - a refused own pod is neither replaced nor stamped and stalls the surge gates to the record Deadline, which is the only bound on a move the kubelet will keep refusing
-    placement: kind
+    windows: [before]
+    outcome: transition
+    to: Migrate/SurgeTarget
+    guard: the rejected pod holds one of this row's target names, the record Deadline has not elapsed, and its outstanding expectations are satisfied
+    note: same reading from the replacement side - a refused own pod is deleted and its name rebuilt through the shared terminal recycle, so the move is retried inside the record's window instead of stalling the surge gates until it expires
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: decided
+  - state: Migrate/SurgeTarget
+    event: pod.admissionRejected
+    windows: [boundary, after]
+    outcome: defer
+    note: the recycle writes no record phase, so a re-observed rejection lands on the same row and is either paced by the ladder or satisfied by the delete already in flight
+    placement: perm
     coverage: {perm: [], unit: [], kind: []}
     status: current
   - state: Migrate/CreateSurge
