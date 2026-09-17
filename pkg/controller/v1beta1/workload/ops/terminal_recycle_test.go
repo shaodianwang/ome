@@ -161,7 +161,7 @@ func TestCreate_RecyclesTerminalPodThenRecreates(t *testing.T) {
 // terminal phase inside the same attempt — the ladder paces it, so the
 // pass defers instead of recycling twice.
 //
-// Cells: instance/Create/CreatePods/pod.phaseTerminal[Succeeded]/before, instance/Create/CreatePods/pod.phaseTerminal[Succeeded]/boundary, instance/Create/CreatePods/pod.phaseTerminal[Succeeded]/after
+// Cells: instance/Create/CreatePods/pod.phaseTerminal[Succeeded]/before, instance/Create/CreatePods/pod.phaseTerminal[Succeeded]/after@T-create-recycle-terminal
 func TestCreate_RecyclesSucceededTerminalPod(t *testing.T) {
 	resetExpectations(t)
 	clk := clocktesting.NewFakeClock(time.Now().Truncate(time.Second))
@@ -345,7 +345,7 @@ func creatingStatusWithRecycles(n int32, lastProgress, deadline time.Time) v1bet
 // initialDelay × multiplier^(n-1), capped at maxDelay, measured from the
 // previous recycle.
 //
-// Cells: instance/Create/CreatePods/pod.phaseTerminal[Failed]/boundary, instance/Create/CreatePods/pod.phaseTerminal[Failed]/after
+// Cells: instance/Create/CreatePods/pod.phaseTerminal[Failed]/after@T-create-recycle-terminal
 func TestCreate_RecyclePacedByRetryLadder(t *testing.T) {
 	policy := &workload.RetryPolicy{MaxAttempts: 5, InitialDelay: 20 * time.Second, MaxDelay: time.Minute, Multiplier: 2}
 	cases := []struct {

@@ -1178,7 +1178,7 @@ func TestCreateFreshIndices_CreatesAbsentSkipsUpdating(t *testing.T) {
 // brand-new indices created alongside it, and the Ready row keeps its
 // phase, its incarnation and its pod.
 //
-// Cells: instance/Ready/spec.replicasUp/before, instance/Ready/spec.replicasUp/boundary, instance/Ready/spec.replicasUp/after
+// Cells: instance/Ready/spec.replicasUp/before
 func TestCreateFreshIndices_ReadyIndexUntouchedByScaleUp(t *testing.T) {
 	resetExpectations(t)
 	isvc := minimalISVC("llama-70b", "prod", 2)

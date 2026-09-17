@@ -68,7 +68,7 @@ func retryGateFixture(t *testing.T, t0 time.Time) (*workload.ReconcileInput, wor
 // TestDetectUpdate_RetryBlockHeld_Denies: a Held block for the current
 // target denies the trigger with no wake-up and no writes of any kind.
 //
-// Cells: instance/Failed/gate.deny[Held]/before, instance/Failed/gate.deny[Held]/boundary, instance/Failed/gate.deny[Held]/after
+// Cells: instance/Failed/gate.deny[Held]/before
 func TestDetectUpdate_RetryBlockHeld_Denies(t *testing.T) {
 	t0 := time.Now()
 	input, plan, tcr, calls, c, isvc := retryGateFixture(t, t0)

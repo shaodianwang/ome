@@ -92,7 +92,7 @@ func persistCalls(calls []retryBlockCall) []retryBlockCall {
 // the operator warning stays the ONE emitted at the Held transition
 // (the writer's dedup); repeated denied passes add nothing.
 //
-// Cells: instance/Failed/gate.deny[Held]/before, instance/Failed/gate.deny[Held]/boundary, instance/Failed/gate.deny[Held]/after
+// Cells: instance/Failed/gate.deny[Held]/before
 func TestCreate_RetryBlockHeld_DeniesFreshStart(t *testing.T) {
 	t0 := time.Now()
 	input, plan, tcr, calls, c, isvc := createGateFixture(t, t0, disposedFreshStart())

@@ -634,7 +634,7 @@ func TestEscalation_RestartDeadlineElapsed_FailsInstance(t *testing.T) {
 // operation deadline. A terminal reason on the same shape does escalate,
 // which is what makes the negative meaningful.
 //
-// Cells: instance/Restart/Drain/pod.waiting[DeadlineExceeded]/before, instance/Restart/Drain/pod.waiting[DeadlineExceeded]/boundary, instance/Restart/Drain/pod.waiting[DeadlineExceeded]/after
+// Cells: instance/Restart/Drain/pod.waiting[DeadlineExceeded]/before
 func TestEscalation_RestartDeadlineExceededWaiting_NoFastFail(t *testing.T) {
 	now := time.Now()
 	for _, tc := range []struct {
