@@ -425,6 +425,8 @@ func TestRestart_PodVanished_PreservesPriorLastFailure(t *testing.T) {
 // DetectRestartTrigger must return a rich, operator-readable reason for a
 // failed pod (container + terminated reason + exit code), not the bare
 // "pod X Failed" — and the Restart event carries it.
+//
+// Cells: instance/Ready/pod.phaseTerminal[Failed]/before
 func TestDetectRestartTrigger_RichReasonForFailedPod(t *testing.T) {
 	resetExpectations(t)
 	isvc, ir := isvcReadyAtIncarnation("llama-70b", "prod", 1)
@@ -565,6 +567,7 @@ func TestDetectRestartTrigger_GangMemberLossAfterPodCountRefresh(t *testing.T) {
 	}
 }
 
+// Cells: instance/Failed/pod.deleted[source]/before
 func TestDetectRestartTrigger_GangMemberLossBelowReady(t *testing.T) {
 	// The production shape: a Create-owned Instance at a frozen incarnation
 	// whose RunningRevision already equals its target.

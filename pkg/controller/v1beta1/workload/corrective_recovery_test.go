@@ -778,6 +778,8 @@ func TestCorrectiveRecovery_Gang_RollBack_MidWreckage(t *testing.T) {
 // current main: the final abandon left the source Ready on v1 with no
 // wreckage, so a target equal to v1 needs no work. The gang undo path
 // is only broken at the dirty (mid-wreckage) timing.
+//
+// Cells: instance/Failed/gate.deny[Held]/before, instance/Failed/gate.deny[Held]/boundary, instance/Failed/gate.deny[Held]/after
 func TestCorrectiveRecovery_Gang_RollBack_PostHeld(t *testing.T) {
 	h := newRecoveryHarness(t, true)
 	h.driveToReadyOnV1()

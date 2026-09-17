@@ -43,6 +43,7 @@ func gangInstancePlan(size int) workload.InstancePlan {
 	return inst
 }
 
+// Cells: instance/Ready/pod.phaseTerminal[Failed]/before, instance/Ready/pod.phaseTerminal[Succeeded]/before
 func TestDetectRestartTrigger_TerminalPodsAreAbsent(t *testing.T) {
 	plan := workload.ComponentPlan{Component: workload.ComponentEngine, RestartPolicy: workload.RestartPolicyRecreateInstance}
 	createOwned := workload.InstanceStatus{
@@ -107,9 +108,57 @@ func TestDetectRestartTrigger_TerminalPodsAreAbsent(t *testing.T) {
 	}
 }
 
+// A Pending row is a demoted Ready row: its recorded pod count is the
+// proof the gang was once complete, so a terminal member leaves it below
+// desired with a survivor and the rebuild fires. A single-pod Pending row
+// has no survivor and stays with Create.
+//
+// Cells: instance/Pending/pod.phaseTerminal[Failed]/before, instance/Pending/pod.phaseTerminal[Succeeded]/before
+func TestDetectRestartTrigger_PendingRowWithTerminalMember(t *testing.T) {
+	plan := workload.ComponentPlan{Component: workload.ComponentEngine, RestartPolicy: workload.RestartPolicyRecreateInstance}
+	pending := func(podCount int32) workload.InstanceStatus {
+		return workload.InstanceStatus{
+			Index: 0, Incarnation: 74, Phase: workload.InstancePhasePending, PodCount: podCount,
+			RunningRevision: gangLossRevision, TargetRevision: gangLossRevision,
+		}
+	}
+	cases := []struct {
+		name string
+		size int
+		pods []*corev1.Pod
+		want bool
+	}{{
+		name: "failed member leaves a survivor", size: 2,
+		pods: gangPodsWithPhases(corev1.PodFailed, corev1.PodRunning),
+		want: true,
+	}, {
+		name: "succeeded member leaves a survivor", size: 2,
+		pods: gangPodsWithPhases(corev1.PodSucceeded, corev1.PodRunning),
+		want: true,
+	}, {
+		name: "single-pod row has no survivor", size: 1,
+		pods: gangPodsWithPhases(corev1.PodFailed),
+		want: false,
+	}}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input := gangLossInput(pending(int32(tc.size)))
+			needs, reason := ops.DetectRestartTriggerWithPods(input, plan, gangInstancePlan(tc.size), tc.pods)
+			if needs != tc.want {
+				t.Fatalf("needsRestart = %v (reason %q), want %v", needs, reason, tc.want)
+			}
+			if needs && !strings.Contains(reason, "gang member lost") {
+				t.Fatalf("reason must name the loss; got %q", reason)
+			}
+		})
+	}
+}
+
 // A pod that died at admission is a missing target: Create commits the
 // Instance as Creating for it. No live pod can appear while the dead one
 // still occupies the stable name.
+//
+// Cells: instance/Create/CreatePods/pod.phaseTerminal[Failed]/before
 func TestCreate_TerminalPodIsMissing(t *testing.T) {
 	resetExpectations(t)
 	isvc := minimalISVC("llama-70b", "prod", 1)
@@ -146,6 +195,8 @@ func TestCreate_TerminalPodIsMissing(t *testing.T) {
 // Restart Phase B/C: a new-incarnation pod that died is a missing target,
 // never a Ready one — even when it still carries a stale ContainersReady
 // condition. The Instance stays Restarting instead of promoting.
+//
+// Cells: instance/Restart/Drain/pod.phaseTerminal[Failed]/before
 func TestRestart_TerminalNewIncarnationPodIsNotPromoted(t *testing.T) {
 	resetExpectations(t)
 	isvc, ir := isvcReadyAtIncarnation("llama-70b", "prod", 1)

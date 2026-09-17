@@ -1174,6 +1174,54 @@ func TestCreateFreshIndices_CreatesAbsentSkipsUpdating(t *testing.T) {
 	}
 }
 
+// A scale-up never disturbs a Ready Instance: the added replicas are
+// brand-new indices created alongside it, and the Ready row keeps its
+// phase, its incarnation and its pod.
+//
+// Cells: instance/Ready/spec.replicasUp/before, instance/Ready/spec.replicasUp/boundary, instance/Ready/spec.replicasUp/after
+func TestCreateFreshIndices_ReadyIndexUntouchedByScaleUp(t *testing.T) {
+	resetExpectations(t)
+	isvc := minimalISVC("llama-70b", "prod", 2)
+	ir := seedInstanceStatuses(isvc, v1beta1.OMENativeInstanceStatus{
+		Index:           0,
+		Incarnation:     3,
+		Phase:           v1beta1.OMENativeInstanceReady,
+		RunningRevision: "llama-70b-engine-currentrev",
+	})
+	pod0 := podForInstance(isvc, 0, true /* ready */, true /* serving */)
+	c := newFakeClient(t, isvc, ir, pod0)
+	input := buildTestInput(isvc, c, workload.ComponentEngine)
+	plan := buildPlanSinglePodEngine(2)
+	target := &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-currentrev", Namespace: "prod"},
+	}
+
+	if _, err := ops.CreateFreshIndices(context.Background(), workload.Deps{Client: c}, input, plan, target); err != nil {
+		t.Fatalf("CreateFreshIndices: %v", err)
+	}
+
+	before := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0)
+	if before == nil || before.Phase != v1beta1.OMENativeInstanceReady ||
+		before.Incarnation != 3 || before.Operation != nil {
+		t.Fatalf("the Ready index must be left exactly as it was, got %+v", before)
+	}
+	fresh := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 1)
+	if fresh == nil || fresh.Operation == nil || fresh.Operation.Type != v1beta1.InstanceOperationCreate {
+		t.Fatalf("the added index must open its own Create, got %+v", fresh)
+	}
+	pods := &corev1.PodList{}
+	if err := c.List(context.Background(), pods, client.InNamespace("prod")); err != nil {
+		t.Fatalf("list pods: %v", err)
+	}
+	got := map[string]bool{}
+	for _, p := range pods.Items {
+		got[p.Name] = true
+	}
+	if len(pods.Items) != 2 || !got[pod0.Name] || !got["llama-70b-engine-1-default-0"] {
+		t.Fatalf("expected the Ready pod plus one fresh pod, got %v", got)
+	}
+}
+
 // CreateFreshIndices must be a no-op when the only Instance is mid-update
 // — pure rollouts must not trigger any create work.
 func TestCreateFreshIndices_NoOpWhenOnlyIndexUpdating(t *testing.T) {

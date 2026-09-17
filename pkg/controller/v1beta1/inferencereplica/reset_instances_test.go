@@ -191,6 +191,8 @@ func assertInstanceUntouched(t *testing.T, g *gomega.WithT, c client.Client, ir 
 // Instances are skipped untouched, the annotation is consumed, one
 // InstancesReset event names the indices reset, and the delete
 // expectations are recorded so the Create pass waits for the watch.
+//
+// Cells: instance/Failed/spec.resetInstances[all]/before
 func TestConsumeResetInstances_All_ResetsEveryFailedInstance(t *testing.T) {
 	g := gomega.NewWithT(t)
 	seed := resetIR(constants.ResetInstancesAll)
@@ -237,6 +239,8 @@ func TestConsumeResetInstances_All_ResetsEveryFailedInstance(t *testing.T) {
 // TestConsumeResetInstances_ExplicitList_ResetsOnlyNamed pins the index
 // form: only the named Failed Instance is reset; the other Failed one
 // keeps its pods and its Operation.
+//
+// Cells: instance/Failed/spec.resetInstances[indexList]/before
 func TestConsumeResetInstances_ExplicitList_ResetsOnlyNamed(t *testing.T) {
 	g := gomega.NewWithT(t)
 	seed := resetIR("2")
@@ -261,6 +265,8 @@ func TestConsumeResetInstances_ExplicitList_ResetsOnlyNamed(t *testing.T) {
 // TestConsumeResetInstances_RepairOwnedTargets_Reset pins the scope of
 // the verb: attempts parked by the repair passes — a Restart and a
 // Create — are both reset like an Operation-free Instance would be.
+//
+// Cells: instance/Failed/spec.resetInstances[all]/before, instance/Failed/spec.resetInstances[indexList]/before
 func TestConsumeResetInstances_RepairOwnedTargets_Reset(t *testing.T) {
 	g := gomega.NewWithT(t)
 	seed := resetIR("1,2")

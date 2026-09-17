@@ -77,6 +77,8 @@ func singleInstancePlan(idx, pods int32) workload.ComponentPlan {
 // path), fires WarnInstanceFailed once, and records a DeadlineExceeded
 // LastFailure. Single-pod Update / Create expiries take the deadline
 // disposition instead — see the disposition tests.
+//
+// Cells: instance/Update/Surge/timer.operationDeadline/before
 func TestExpireOperations_ExpiredDeadlineFailsInstance(t *testing.T) {
 	now := time.Now()
 	surgeIdx := int32(2)

@@ -38,6 +38,26 @@ func rejectedPod(pod *corev1.Pod) *corev1.Pod {
 	return pod
 }
 
+// succeededPod marks pod as a container that ran to completion: phase
+// Succeeded. Nothing will run in it again, so it is as dead as a Failed
+// one while it holds its stable name.
+func succeededPod(pod *corev1.Pod) *corev1.Pod {
+	pod.Status.Phase = corev1.PodSucceeded
+	pod.Status.Reason = "Completed"
+	pod.Status.Conditions = nil
+	return pod
+}
+
+// evictedPod marks pod as evicted: the kubelet (or the eviction API)
+// leaves phase Failed with the Evicted pod-level reason.
+func evictedPod(pod *corev1.Pod) *corev1.Pod {
+	pod.Status.Phase = corev1.PodFailed
+	pod.Status.Reason = "Evicted"
+	pod.Status.Message = "The node was low on resource: memory"
+	pod.Status.Conditions = nil
+	return pod
+}
+
 func drainEvents(rec *record.FakeRecorder) []string {
 	var events []string
 	for {
@@ -64,6 +84,11 @@ func listPods(t *testing.T, c client.Client, ns string) []corev1.Pod {
 	return pods.Items
 }
 
+// The Create attempt owns the recycle of a dead occupant of one of its
+// target names: the delete lands this pass and the name is rebuilt on
+// the next.
+//
+// Cells: instance/Create/CreatePods/pod.phaseTerminal[Failed]/before
 func TestCreate_RecyclesTerminalPodThenRecreates(t *testing.T) {
 	resetExpectations(t)
 	isvc := minimalISVC("llama-70b", "prod", 1)
@@ -131,6 +156,176 @@ func TestCreate_RecyclesTerminalPodThenRecreates(t *testing.T) {
 	}
 }
 
+// A Succeeded pod is recycled exactly like a Failed one: it holds the
+// target name and never runs again. The second half pins the re-observed
+// terminal phase inside the same attempt — the ladder paces it, so the
+// pass defers instead of recycling twice.
+//
+// Cells: instance/Create/CreatePods/pod.phaseTerminal[Succeeded]/before, instance/Create/CreatePods/pod.phaseTerminal[Succeeded]/boundary, instance/Create/CreatePods/pod.phaseTerminal[Succeeded]/after
+func TestCreate_RecyclesSucceededTerminalPod(t *testing.T) {
+	resetExpectations(t)
+	clk := clocktesting.NewFakeClock(time.Now().Truncate(time.Second))
+	isvc := minimalISVC("llama-70b", "prod", 1)
+	dead := succeededPod(podForInstance(isvc, 0, false, false))
+	c := newFakeClient(t, isvc, dead)
+	deps := workload.Deps{Client: c}
+	plan := buildPlanSinglePodEngine(1)
+	policy := &workload.RetryPolicy{MaxAttempts: 5, InitialDelay: 20 * time.Second, MaxDelay: time.Minute, Multiplier: 2}
+	run := func() {
+		t.Helper()
+		input := buildTestInput(isvc, c, workload.ComponentEngine)
+		input.Clock = clk
+		input.UpdateRetryPolicy = policy
+		if _, err := ops.Create(context.Background(), deps, input, plan, nil); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+	}
+
+	run()
+	if podExists(c, dead) {
+		t.Fatalf("the Succeeded occupant of %s must be deleted", dead.Name)
+	}
+	if got := listPods(t, c, "prod"); len(got) != 0 {
+		t.Fatalf("no replacement may be created in the recycle pass, got %d pod(s)", len(got))
+	}
+	s := instanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
+	if s.Phase != v1beta1.OMENativeInstanceCreating || s.Operation == nil ||
+		s.Operation.Type != v1beta1.InstanceOperationCreate || s.Operation.RetryCount != 1 {
+		t.Fatalf("status after recycling a Succeeded pod: %+v", s)
+	}
+
+	// Re-observed within the ladder's delay: the row stays put and
+	// nothing is recycled or created.
+	if err := c.Create(context.Background(), succeededPod(podForInstance(isvc, 0, false, false))); err != nil {
+		t.Fatalf("re-seed the terminal occupant: %v", err)
+	}
+	workload.DefaultExpectations.Forget("prod", "llama-70b", workload.ComponentEngine, 0)
+	clk.Step(10 * time.Second)
+	run()
+	if got := listPods(t, c, "prod"); len(got) != 1 || !query.IsTerminalPod(&got[0]) {
+		t.Fatalf("the paced pass must neither recycle nor create, got %+v", got)
+	}
+	if s := instanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]; s.Operation.RetryCount != 1 {
+		t.Fatalf("RetryCount must not move while paced, got %d", s.Operation.RetryCount)
+	}
+}
+
+// Restart Phase B recycles a Succeeded new-incarnation pod like a Failed
+// one: the attempt keeps its bumped incarnation and rebuilds the name.
+//
+// Cells: instance/Restart/Drain/pod.phaseTerminal[Succeeded]/before
+func TestRestart_RecyclesSucceededNewIncarnationPod(t *testing.T) {
+	assertRestartRecyclesDeadPod(t, succeededPod)
+}
+
+// An evicted pod is a terminal pod with the Evicted reason, so Restart's
+// rebuild reaps and recreates it at the same bumped incarnation.
+//
+// Cells: instance/Restart/Drain/pod.evicted/before
+func TestRestart_RecyclesEvictedNewIncarnationPod(t *testing.T) {
+	assertRestartRecyclesDeadPod(t, evictedPod)
+}
+
+// assertRestartRecyclesDeadPod drives a Restart attempt whose bumped-
+// incarnation pod died in the way kill marks it: the dead occupant is
+// deleted while the attempt stays in flight, and the next pass rebuilds
+// the name at the same incarnation.
+func assertRestartRecyclesDeadPod(t *testing.T, kill func(*corev1.Pod) *corev1.Pod) {
+	t.Helper()
+	resetExpectations(t)
+	isvc, ir := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	ir.Status.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
+		Index:           0,
+		Incarnation:     2,
+		Phase:           v1beta1.OMENativeInstanceRestarting,
+		RunningRevision: "llama-70b-engine-" + testRevisionHash,
+		Operation: &v1beta1.InstanceOperation{
+			ID: "restart-0-1", Type: v1beta1.InstanceOperationRestart, Step: "Drain", Reason: "x",
+			StartedAt: metav1.Now(), LastProgressAt: metav1.Now(), Deadline: metav1.NewTime(time.Now().Add(time.Hour)),
+		},
+	}
+	dead := kill(podAtIncarnation(isvc, 0, 2, false, false))
+	c := newFakeClient(t, isvc, ir, dead)
+	deps := workload.Deps{Client: c}
+
+	input := buildTestInput(isvc, c, workload.ComponentEngine)
+	plan := buildPlanSinglePodEngineForRestart(c, isvc)
+	done, err := ops.Restart(context.Background(), deps, input, plan, plan.Instances[0], "trigger")
+	if err != nil {
+		t.Fatalf("Restart pass 1: %v", err)
+	}
+	if done || podExists(c, dead) {
+		t.Fatalf("Restart must delete the dead pod and stay in flight (done=%v exists=%v)", done, podExists(c, dead))
+	}
+	s := instanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
+	if s.Phase != v1beta1.OMENativeInstanceRestarting || s.Incarnation != 2 ||
+		s.Operation == nil || s.Operation.Type != v1beta1.InstanceOperationRestart || s.Operation.RetryCount != 1 {
+		t.Fatalf("status after recycle: %+v", s)
+	}
+
+	workload.DefaultExpectations.Forget("prod", "llama-70b", workload.ComponentEngine, 0)
+	input = buildTestInput(isvc, c, workload.ComponentEngine)
+	plan = buildPlanSinglePodEngineForRestart(c, isvc)
+	if _, err := ops.Restart(context.Background(), deps, input, plan, plan.Instances[0], "trigger"); err != nil {
+		t.Fatalf("Restart pass 2: %v", err)
+	}
+	got := listPods(t, c, "prod")
+	if len(got) != 1 || got[0].Labels[query.LabelInstanceIncarnation] != "2" || query.IsTerminalPod(&got[0]) {
+		t.Fatalf("expected one fresh pod at incarnation 2, got %+v", got)
+	}
+}
+
+// A Failed row with no preserved operation is a fresh start for Create:
+// the dead pods holding the index's names are recycled and the row is
+// committed as a new Create attempt.
+//
+// Cells: instance/Failed/pod.phaseTerminal[Failed]/before, instance/Failed/pod.phaseTerminal[Succeeded]/before
+func TestCreate_FreshStartRecyclesTerminalPodOnFailedRow(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		kill func(*corev1.Pod) *corev1.Pod
+	}{
+		{name: "failed pod", kill: rejectedPod},
+		{name: "succeeded pod", kill: succeededPod},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetExpectations(t)
+			isvc := minimalISVC("llama-70b", "prod", 1)
+			ir := instanceIR(isvc, workload.ComponentEngine, v1beta1.OMENativeInstanceStatus{
+				Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceFailed,
+				RunningRevision: "llama-70b-engine-" + testRevisionHash,
+			})
+			dead := tc.kill(podForInstance(isvc, 0, false, false))
+			c := newFakeClient(t, isvc, ir, dead)
+			deps := workload.Deps{Client: c}
+			plan := buildPlanSinglePodEngine(1)
+
+			input := buildTestInput(isvc, c, workload.ComponentEngine)
+			if _, err := ops.Create(context.Background(), deps, input, plan, nil); err != nil {
+				t.Fatalf("Create pass 1: %v", err)
+			}
+			if podExists(c, dead) {
+				t.Fatalf("the dead occupant of %s must be recycled on the fresh start", dead.Name)
+			}
+			s := instanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
+			if s.Phase != v1beta1.OMENativeInstanceCreating || s.Operation == nil ||
+				s.Operation.Type != v1beta1.InstanceOperationCreate {
+				t.Fatalf("the Failed row must be committed as a Create attempt, got %+v", s)
+			}
+
+			workload.DefaultExpectations.Forget("prod", "llama-70b", workload.ComponentEngine, 0)
+			input = buildTestInput(isvc, c, workload.ComponentEngine)
+			if _, err := ops.Create(context.Background(), deps, input, plan, nil); err != nil {
+				t.Fatalf("Create pass 2: %v", err)
+			}
+			got := listPods(t, c, "prod")
+			if len(got) != 1 || got[0].Name != dead.Name || query.IsTerminalPod(&got[0]) {
+				t.Fatalf("expected exactly the rebuilt %s, got %+v", dead.Name, got)
+			}
+		})
+	}
+}
+
 // creatingStatusWithRecycles seeds a Creating status whose Create attempt
 // has already recycled n times, the last one at lastProgress.
 func creatingStatusWithRecycles(n int32, lastProgress, deadline time.Time) v1beta1.OMENativeInstanceStatus {
@@ -149,6 +344,8 @@ func creatingStatusWithRecycles(n int32, lastProgress, deadline time.Time) v1bet
 // Repeated recycles within one attempt follow the update retry ladder:
 // initialDelay × multiplier^(n-1), capped at maxDelay, measured from the
 // previous recycle.
+//
+// Cells: instance/Create/CreatePods/pod.phaseTerminal[Failed]/boundary, instance/Create/CreatePods/pod.phaseTerminal[Failed]/after
 func TestCreate_RecyclePacedByRetryLadder(t *testing.T) {
 	policy := &workload.RetryPolicy{MaxAttempts: 5, InitialDelay: 20 * time.Second, MaxDelay: time.Minute, Multiplier: 2}
 	cases := []struct {
@@ -204,6 +401,8 @@ func TestCreate_RecyclePacedByRetryLadder(t *testing.T) {
 
 // Without a configured policy there is no ladder: the recycle happens on
 // the next pass regardless of how many came before.
+//
+// Cells: instance/Create/CreatePods/pod.phaseTerminal[Failed]/before
 func TestCreate_RecycleWithoutPolicyIsImmediate(t *testing.T) {
 	resetExpectations(t)
 	clk := clocktesting.NewFakeClock(time.Now())
@@ -226,6 +425,8 @@ func TestCreate_RecycleWithoutPolicyIsImmediate(t *testing.T) {
 
 // Past the attempt's deadline nothing is recycled: escalation owns the
 // attempt from there.
+//
+// Cells: instance/Create/CreatePods/pod.phaseTerminal[Failed]/before
 func TestCreate_RecycleRefusedPastDeadline(t *testing.T) {
 	resetExpectations(t)
 	clk := clocktesting.NewFakeClock(time.Now())
@@ -249,6 +450,8 @@ func TestCreate_RecycleRefusedPastDeadline(t *testing.T) {
 // A gang whose every member died is total loss and Create's to rebuild: all
 // dead members are deleted in one pass and recreated together on the next,
 // at the same incarnation.
+//
+// Cells: instance/Create/CreatePods/pod.phaseTerminal[Failed]/before
 func TestCreate_RecyclesWholeTerminalGangTogether(t *testing.T) {
 	resetExpectations(t)
 	isvc := minimalISVC("llama-70b", "prod", 1)
@@ -294,6 +497,8 @@ func TestCreate_RecyclesWholeTerminalGangTogether(t *testing.T) {
 
 // Restart Phase B: a new-incarnation member that died is recycled and
 // recreated at the same bumped incarnation within the same attempt.
+//
+// Cells: instance/Restart/Drain/pod.phaseTerminal[Failed]/before
 func TestRestart_RecyclesTerminalNewIncarnationPod(t *testing.T) {
 	resetExpectations(t)
 	isvc, ir := isvcReadyAtIncarnation("llama-70b", "prod", 1)

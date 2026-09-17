@@ -188,6 +188,8 @@ func recordRetryBlockCalls(input *workload.ReconcileInput, existing []workload.R
 // phase: once the surge gang's pods are gone, abandon drops the surge
 // marker and resets the source to Ready on its running revision with the
 // failed Operation cleared — so the next reconcile fires a fresh surge.
+//
+// Cells: instance/Failed/pod.deleted[target]/before
 func TestAbandonFailedGangSurge_ResetsSourceAfterPodsGone(t *testing.T) {
 	legacyResetExpectations(t)
 	const isvc, ns = "gang-a", "test-ns"
@@ -251,6 +253,8 @@ func TestAbandonFailedGangSurge_ResetsSourceAfterPodsGone(t *testing.T) {
 // counted Backoff wave: AttemptsStarted=1, NextRetryAt = now + initial
 // delay off the fake clock, evidence stamped — all landed in the SAME
 // pass that cleared the failed attempt's Operation.
+//
+// Cells: instance/Failed/pod.deleted[target]/before
 func TestAbandonFailedGangSurge_RecordsRetryBlockWithPolicy(t *testing.T) {
 	legacyResetExpectations(t)
 	const isvc, ns = "gang-a", "test-ns"

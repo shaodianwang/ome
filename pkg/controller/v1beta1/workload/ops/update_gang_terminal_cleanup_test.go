@@ -271,6 +271,7 @@ func TestAbandonFailedGangSurge_PersistsCleanupMarkerAcrossRemovalFailure(t *tes
 	}
 }
 
+// Cells: instance/Failed/pod.deleted[target]/before
 func TestAbandonFailedGangSurge_AtomicallyRemovesMarkerAndResetsSource(t *testing.T) {
 	legacyResetExpectations(t)
 	const isvcName, namespace = "gang-abandon-atomic", "test-ns"

@@ -117,6 +117,8 @@ func TestEscalation_DeadlineElapsedButServing_NoFailedStamp(t *testing.T) {
 // the guard's bound: pods serving but FEWER than desired do not prove
 // health — the deadline expiry still fires (a partially-serving gang
 // that never converged is exactly what InstanceReadyTimeout bounds).
+//
+// Cells: instance/Create/CreatePods/timer.operationDeadline/before
 func TestEscalation_DeadlineElapsedBelowDesiredServing_StillEscalates(t *testing.T) {
 	now := time.Now()
 	insts := []workload.InstanceStatus{{
@@ -582,6 +584,98 @@ func TestEscalation_GangSurgeSource_GatedAttemptPods_DeadlineSkipped(t *testing.
 	}
 	if len(rec.blocks) != 0 {
 		t.Errorf("RetryBlock: got %v want none", rec.blocks)
+	}
+}
+
+// A Restart attempt whose Operation.Deadline elapsed is not disposable:
+// the stamp lands Phase=Failed with the Operation PRESERVED (a Restart
+// parked at Failed is a spent attempt the gang trigger may re-arm) and a
+// bare DeadlineExceeded LastFailure when no pod names a better cause.
+//
+// Cells: instance/Restart/Drain/timer.operationDeadline/before
+func TestEscalation_RestartDeadlineElapsed_FailsInstance(t *testing.T) {
+	now := time.Now()
+	insts := []workload.InstanceStatus{{
+		Index:       0,
+		Incarnation: 2,
+		Phase:       workload.InstancePhaseRestarting,
+		PodCount:    1,
+		Operation: &workload.InstanceOperation{
+			Type:     workload.InstanceOperationRestart,
+			Step:     "Drain",
+			Deadline: metav1.NewTime(now.Add(-time.Minute)),
+		},
+	}}
+	input, rec := escalationFixture(insts)
+
+	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+		map[int32][]*corev1.Pod{0: {waitingPod("engine-0-default-0", "PodInitializing", "node-a", now.Add(-time.Hour))}}); err != nil {
+		t.Fatalf("escalation pass: %v", err)
+	}
+
+	got := rec.store[0]
+	if got.Phase != workload.InstancePhaseFailed {
+		t.Errorf("Phase: got %q want Failed", got.Phase)
+	}
+	if got.Operation == nil || got.Operation.Type != workload.InstanceOperationRestart {
+		t.Errorf("Operation: got %+v want the Restart attempt preserved", got.Operation)
+	}
+	if got.LastFailure == nil || got.LastFailure.Reason != workload.DeadlineExceededReason {
+		t.Errorf("LastFailure: got %+v want Reason=%s", got.LastFailure, workload.DeadlineExceededReason)
+	}
+	if len(rec.warns) != 1 {
+		t.Errorf("WarnInstanceFailed: got %v want one call", rec.warns)
+	}
+}
+
+// DeadlineExceeded is outside the terminal waiting set, so the fast
+// escalation never fires on it: a Restart whose pod holds that reason
+// past the stuck-pod grace keeps its step and waits out its own
+// operation deadline. A terminal reason on the same shape does escalate,
+// which is what makes the negative meaningful.
+//
+// Cells: instance/Restart/Drain/pod.waiting[DeadlineExceeded]/before, instance/Restart/Drain/pod.waiting[DeadlineExceeded]/boundary, instance/Restart/Drain/pod.waiting[DeadlineExceeded]/after
+func TestEscalation_RestartDeadlineExceededWaiting_NoFastFail(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		reason string
+		want   workload.InstancePhase
+	}{
+		{reason: workload.DeadlineExceededReason, want: workload.InstancePhaseRestarting},
+		{reason: "CrashLoopBackOff", want: workload.InstancePhaseFailed},
+	} {
+		t.Run(tc.reason, func(t *testing.T) {
+			insts := []workload.InstanceStatus{{
+				Index:       0,
+				Incarnation: 2,
+				Phase:       workload.InstancePhaseRestarting,
+				PodCount:    1,
+				Operation: &workload.InstanceOperation{
+					Type:     workload.InstanceOperationRestart,
+					Step:     "Drain",
+					Deadline: metav1.NewTime(now.Add(30 * time.Minute)),
+				},
+			}}
+			input, rec := escalationFixture(insts)
+			input.StuckPodGrace = time.Second
+
+			if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+				map[int32][]*corev1.Pod{0: {waitingPod("engine-0-default-0", tc.reason, "node-a", now.Add(-time.Hour))}}); err != nil {
+				t.Fatalf("escalation pass: %v", err)
+			}
+
+			if rec.store[0].Phase != tc.want {
+				t.Errorf("Phase: got %q want %q", rec.store[0].Phase, tc.want)
+			}
+			if tc.want == workload.InstancePhaseRestarting {
+				if rec.store[0].Operation == nil {
+					t.Errorf("Operation: got nil want the in-flight Restart untouched")
+				}
+				if len(rec.warns) != 0 {
+					t.Errorf("WarnInstanceFailed: got %v want none", rec.warns)
+				}
+			}
+		})
 	}
 }
 

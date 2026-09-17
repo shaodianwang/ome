@@ -679,6 +679,8 @@ func TestForceDelete_ActionRecordsOnce_NoDoubleLedgerOnReplay(t *testing.T) {
 // it must not widen it: a Terminating pod on a long-dead node goes, a
 // Terminating pod on a Ready node stays (the kubelet is merely slow),
 // and a pod nobody deleted is never even classified.
+//
+// Cells: instance/Update/Surge/timer.forceDelete[nodeUnreachable]/before, instance/Update/SurgeDrain/timer.forceDelete[nodeUnreachable]/before, instance/Update/SurgeDrainSettle/timer.forceDelete[nodeUnreachable]/before, instance/Update/InPlace/timer.forceDelete[nodeUnreachable]/before, instance/Update/Drain/timer.forceDelete[nodeUnreachable]/before
 func TestForceDeletePods_SweepsOnlyActionableTerminatingPods(t *testing.T) {
 	var deletes []recordedDeleteOpts
 	funcs := fdDeleteRecorder(&deletes)
@@ -760,5 +762,59 @@ func TestForceDeletePods_NodeReadError_Propagates(t *testing.T) {
 	}
 	if len(deletes) != 0 {
 		t.Errorf("deletes on unreadable evidence: got %d want 0", len(deletes))
+	}
+}
+
+// Every update mode tears pods down and then waits for them to go away,
+// so the update pass runs the force-delete sweep over the Instance's pods
+// before it dispatches a mode: a source pod left Terminating on a dead
+// node is cleared whatever step the roll is parked at, and the wait that
+// would never end is unblocked.
+//
+// Cells: instance/Update/Surge/timer.forceDelete[nodeUnreachable]/before, instance/Update/SurgeDrain/timer.forceDelete[nodeUnreachable]/before, instance/Update/SurgeDrainSettle/timer.forceDelete[nodeUnreachable]/before, instance/Update/InPlace/timer.forceDelete[nodeUnreachable]/before, instance/Update/Drain/timer.forceDelete[nodeUnreachable]/before, instance/Update/Surge/timer.forceDelete[overdueSlack]/before, instance/Update/SurgeDrain/timer.forceDelete[overdueSlack]/before, instance/Update/SurgeDrainSettle/timer.forceDelete[overdueSlack]/before, instance/Update/InPlace/timer.forceDelete[overdueSlack]/before, instance/Update/Drain/timer.forceDelete[overdueSlack]/before
+func TestUpdateWithPods_ForceDeletesStuckTerminatingSource(t *testing.T) {
+	for _, step := range []string{
+		workload.UpdateStepSurge,
+		workload.UpdateStepSurgeDrain,
+		updateStepSurgeDrainSettle,
+		updateStepInPlace,
+		updateStepDrain,
+	} {
+		t.Run(step, func(t *testing.T) {
+			f := newMidSurgeFixture(t, step, true /* surgeReady */, false /* sourceServing */)
+			if err := f.client.Create(context.Background(), fdNodeUnreachable("dead-node", 10*time.Minute)); err != nil {
+				t.Fatalf("seed dead node: %v", err)
+			}
+
+			// The live view the dispatcher would hand the pass: the source
+			// is Terminating past its grace on the dead node. The stored
+			// object carries no deletionTimestamp, which is how the fake
+			// client represents a pod the apiserver has not yet collected.
+			stuck := f.sourcePod.DeepCopy()
+			dt := metav1.NewTime(time.Now().Add(-10 * time.Minute))
+			stuck.DeletionTimestamp = &dt
+			stuck.Spec.NodeName = "dead-node"
+
+			rec := record.NewFakeRecorder(16)
+			input := legacyTestInput(f.isvc, f.client, workload.ComponentEngine)
+			input.ForceDelete = fdPolicy()
+			zeroGrace := int32(0)
+			plan := legacyComponentPlan(workload.UpdateStrategySurgeThenDrain,
+				&workload.InPlaceUpdateStrategy{GracePeriodSeconds: &zeroGrace})
+
+			if _, err := UpdateWithPods(context.Background(), workload.Deps{Client: f.client, Recorder: rec},
+				input, plan, plan.Instances[0], f.targetCR, f.targetSpec,
+				[]*corev1.Pod{stuck, f.surgePod}); err != nil {
+				t.Fatalf("UpdateWithPods: %v", err)
+			}
+
+			events := fdDrainEvents(rec)
+			if n := fdCountEvents(events, workload.EventReasonPodForceDeleted); n != 1 {
+				t.Fatalf("PodForceDeleted events: got %d want 1 (events=%v)", n, events)
+			}
+			if err := f.client.Get(context.Background(), client.ObjectKeyFromObject(stuck), &corev1.Pod{}); !apierrors.IsNotFound(err) {
+				t.Fatalf("the wedged source must be gone after the pass; get returned %v", err)
+			}
+		})
 	}
 }

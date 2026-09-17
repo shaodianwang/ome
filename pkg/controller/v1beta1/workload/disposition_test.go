@@ -1113,6 +1113,8 @@ func TestExpireOperations_SinglePodCrashLoopRecordsDirective(t *testing.T) {
 // RetryBlock on the owner's UpdateRevision + Operation cleared + Failed
 // (a Failed-no-Operation gang create rebuilds via the ordinary trigger
 // through the RetryBlock gate).
+//
+// Cells: instance/Create/CreatePods/timer.operationDeadline/before
 func TestExpireOperations_GangCreateDisposed(t *testing.T) {
 	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
 	fc := clocktesting.NewFakeClock(t0)
