@@ -14,8 +14,8 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 
 
-CHARTS = ("ome-crd", "ome-resources", "ome-scheduler")
-IMAGES = ("ome-manager", "ome-agent", "ome-scheduler")
+CHARTS = ("ome-crd", "ome-resources", "ome-scheduler", "ome-quota-manager")
+IMAGES = ("ome-manager", "ome-agent", "ome-scheduler", "ome-quota-manager")
 # Keep chart-version structure separate from revision validation. Chart
 # packaging has emitted both a bare revision and Git describe's ``g``-prefixed
 # spelling, and the abbreviation length is not part of the version contract.

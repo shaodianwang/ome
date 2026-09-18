@@ -1,0 +1,29 @@
+release:
+  sourceRevision: ""
+  # Install ome-crd before installing any other component chart.
+  charts:
+    ome-crd:
+      repository: ""
+      version: ""
+    ome-resources:
+      repository: ""
+      version: ""
+    ome-scheduler:
+      repository: ""
+      version: ""
+    ome-quota-manager:
+      repository: ""
+      version: ""
+  images:
+    ome-manager:
+      repository: ""
+      tag: ""
+    ome-agent:
+      repository: ""
+      tag: ""
+    ome-scheduler:
+      repository: ""
+      tag: ""
+    ome-quota-manager:
+      repository: ""
+      tag: ""

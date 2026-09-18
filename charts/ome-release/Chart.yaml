@@ -1,0 +1,8 @@
+apiVersion: v2
+name: ome-release
+description: Immutable marker for a qualified OME control-plane release
+type: application
+version: 0.0.0
+appVersion: "development"
+annotations:
+  ome.io/source-revision: "development"

@@ -242,6 +242,22 @@ IMAGES = [
 
 CHARTS = ["ome-crd", "ome-resources", "ome-isvc", "muse", "ome-scheduler", "ome-quota-manager"]
 
+# The atomic marker is the Kargo-facing contract for an OME control-plane
+# release. Keep this deliberately narrower than CHARTS: only components that
+# must advance together belong in the marker.
+RELEASE_MARKER_CHARTS = (
+    "ome-crd",
+    "ome-resources",
+    "ome-scheduler",
+    "ome-quota-manager",
+)
+RELEASE_MARKER_IMAGES = (
+    "ome-manager",
+    "ome-agent",
+    "ome-scheduler",
+    "ome-quota-manager",
+)
+
 # Charts whose published values carry an image ref, so their publish step has to
 # wait for that image to exist in the prod registry. Mirrors the per-chart
 # stamping blocks in push_chart.sh; a chart that stamps but is missing here
@@ -1164,6 +1180,34 @@ def _push_chart_step(chart: str, depends_on: str | list[str] = "test") -> str:
               - "PROD_ECR_AUTH_TOKEN"
             command: |
               sh .buildkite/push_chart.sh {chart}
+            artifact_paths:
+              - ".buildkite/artifacts/chart-versions/{chart}"
+            agents:
+              queue: "{BUILD_QUEUE}"
+            plugins:
+{_tw_docker_plugin(CF_DOCKER_PLUGIN_RUNTIME_IMAGE, indent=14)}
+        """
+    )
+
+
+def _release_marker_step() -> str:
+    """Publish the Kargo-facing marker after the pipeline's final wait gate."""
+    return textwrap.dedent(
+        f"""\
+          - label: ":helm: Publish qualified OME release marker"
+            key: "chart-ome-release"
+            if: build.branch == "main"
+{_gh_status("chart-ome-release")}
+{_auto_retry()}
+            secrets:
+              - "PROD_ECR_AUTH_TOKEN"
+            env:
+              AWS_ACCOUNT_ID: "{PROD_AWS_ACCOUNT_ID}"
+              ECR_REGISTRY: "{PROD_ECR_REGISTRY}"
+              OME_RELEASE_CHARTS: "{' '.join(RELEASE_MARKER_CHARTS)}"
+              OME_RELEASE_IMAGES: "{' '.join(RELEASE_MARKER_IMAGES)}"
+            command: |
+              sh .buildkite/push_release_marker.sh
             agents:
               queue: "{BUILD_QUEUE}"
             plugins:
@@ -1217,6 +1261,10 @@ def generate_pipeline() -> str:
     # which only exists in the pipeline when that switch is on.
     if BRANCH == "main" and GKE_UPGRADE_ENABLED and GKE_KIND_ENABLED:
         pipeline += "\n" + _gke_upgrade_identity_step()
+    # The marker has no explicit dependencies, so Buildkite's wait barrier
+    # orders it after every preceding step and group. Soft-failing diagnostics
+    # still complete before the marker but do not block it.
+    pipeline += "\n  - wait\n\n" + textwrap.indent(_release_marker_step(), "  ")
     return pipeline
 
 

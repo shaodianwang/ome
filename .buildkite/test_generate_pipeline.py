@@ -248,6 +248,25 @@ class TestChartImageOrdering(unittest.TestCase):
         self.assertEqual(unknown, set(), f"{sorted(unknown)} are not in CHARTS")
 
 
+class TestReleaseMarkerEmission(unittest.TestCase):
+    def test_marker_step_is_after_the_final_wait_gate(self):
+        yaml_text = gp.generate_pipeline()
+        self.assertEqual(yaml_text.count('key: "chart-ome-release"'), 1)
+        wait_index = yaml_text.rfind("  - wait\n")
+        marker_index = yaml_text.rfind('key: "chart-ome-release"')
+        self.assertGreater(wait_index, 0)
+        self.assertGreater(marker_index, wait_index)
+
+    def test_component_chart_steps_export_version_artifacts(self):
+        for chart in gp.RELEASE_MARKER_CHARTS:
+            with self.subTest(chart=chart):
+                yaml_text = gp._push_chart_step(chart)
+                self.assertIn(
+                    f'".buildkite/artifacts/chart-versions/{chart}"',
+                    yaml_text,
+                )
+
+
 class TestImageBuildEmission(unittest.TestCase):
     def test_wrapper_and_generated_build_job_have_automatic_retries(self):
         yaml_text = gp._build_image_step(
@@ -521,3 +540,38 @@ class TestMulticlusterKindGroup(PipelineTestCase):
             self.assertEqual(
                 len(owners), 1, f"{name} matched by {owners or 'no shard'}"
             )
+
+
+class TestReleaseContentsMatchDiscovery(unittest.TestCase):
+    """The marker and the daily discovery path must mean the same release."""
+
+    def _daily_candidate(self):
+        path = Path(gp.__file__).resolve().parent / "daily_candidate.py"
+        spec = importlib.util.spec_from_file_location("daily_candidate_under_test", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_marker_contents_match_candidate_and_published_components(self):
+        # Two hardcoded answers to "what is a complete OME release". Adding a
+        # chart to one only makes the marker and the discovery path promote
+        # different things under the same name.
+        candidate = self._daily_candidate()
+        self.assertEqual(
+            tuple(gp.RELEASE_MARKER_CHARTS), tuple(candidate.CHARTS)
+        )
+        self.assertEqual(
+            tuple(gp.RELEASE_MARKER_IMAGES), tuple(candidate.IMAGES)
+        )
+
+        unknown = set(gp.RELEASE_MARKER_CHARTS) - set(gp.CHARTS)
+        self.assertEqual(unknown, set(), f"{sorted(unknown)} are not in CHARTS")
+
+        built = {ecr_name for _, ecr_name, _ in gp.IMAGES}
+        unknown = {
+            f"{image}" for image in gp.RELEASE_MARKER_IMAGES
+            if image not in built and f"ome/{image}" not in built
+        }
+        self.assertEqual(
+            unknown, set(), f"{sorted(unknown)} are published by no build step"
+        )

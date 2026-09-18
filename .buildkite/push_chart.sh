@@ -100,3 +100,10 @@ else
   ecr_login_for prod helm registry login --username AWS --password-stdin "$PROD_ECR_REGISTRY"
   echo "branch=${BUILDKITE_BRANCH:-?} is not main; logins OK, skipping push"
 fi
+
+# Buildkite uploads this file after the command succeeds. The release-marker
+# step downloads it from this exact chart step, so it can only qualify a
+# version whose required registry operations completed.
+VERSION_ARTIFACT=".buildkite/artifacts/chart-versions/${CHART}"
+mkdir -p "$(dirname "$VERSION_ARTIFACT")"
+printf '%s\n' "$CHART_VERSION" >"$VERSION_ARTIFACT"
