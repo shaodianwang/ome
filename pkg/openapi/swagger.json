@@ -7515,7 +7515,7 @@
           "$ref": "#/definitions/v1beta1.TrafficMapProbe"
         },
         "weight": {
-          "description": "Weight is the home's final, normalized, capacity-planned, health-gated traffic share as a relative non-negative integer (matching Gateway API and Envoy weighted-cluster semantics). A consumer either applies it verbatim or divides by the sum of weights for a percentage. When every home is unhealthy the controller writes equal weights rather than all-zero, so traffic is never black-holed.",
+          "description": "Weight is the home's final, normalized, capacity-planned, health-gated traffic share as a relative non-negative integer (matching Gateway API and Envoy weighted-cluster semantics). A consumer either applies it verbatim or divides by the sum of weights for a percentage. The default all-unhealthy policy writes equal weights. An explicitly configured all-probe-failed drain instead writes an authoritative all-zero table.",
           "type": "integer",
           "format": "int32",
           "default": 0

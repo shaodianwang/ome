@@ -140,6 +140,7 @@ ome:
         #   timeout: 3s
         #   failureThreshold: 3
         #   successThreshold: 2
+        #   allFailedPolicy: PreserveTraffic # set Drain to preserve all-zero weights
   # autoscalerPolicy is the single gate for the reusable AutoscalerPolicy
   # feature: the manager's policy RBAC, the policy validating webhook, and the
   # autoscalerPolicy config block all install together on this one value —

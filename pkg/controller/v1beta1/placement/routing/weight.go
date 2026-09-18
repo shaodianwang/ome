@@ -106,6 +106,12 @@ func (h Home) serving() bool {
 // inputs: a prober bug or a control-plane partition marks every home down at
 // once, and spreading traffic beats dropping it.
 func Weights(homes []Home) []int32 {
+	return weights(homes, AllFailedPolicyPreserveTraffic)
+}
+
+// weights applies the configured policy only when every home has a conclusive
+// failing probe verdict. Unknown probe state must never authorize a full drain.
+func weights(homes []Home, allFailedPolicy AllFailedPolicy) []int32 {
 	weights := make([]int32, len(homes))
 	if len(homes) == 0 {
 		return weights
@@ -126,8 +132,11 @@ func Weights(homes []Home) []int32 {
 	}
 
 	if g == 0 {
+		if allFailedPolicy == AllFailedPolicyDrain && allProbesFailed(homes) {
+			return weights
+		}
 		// Every home is zero — equal-weight fallback so traffic is never
-		// black-holed.
+		// black-holed unless a complete probe failure explicitly selected Drain.
 		for i := range weights {
 			weights[i] = 1
 		}
@@ -138,6 +147,18 @@ func Weights(homes []Home) []int32 {
 		weights[i] = int32(raw[i] / g)
 	}
 	return weights
+}
+
+func allProbesFailed(homes []Home) bool {
+	if len(homes) == 0 {
+		return false
+	}
+	for i := range homes {
+		if homes[i].Reachable == nil || *homes[i].Reachable {
+			return false
+		}
+	}
+	return true
 }
 
 // factorMilli returns the capacity factor scaled by 1000 (the resource.Quantity

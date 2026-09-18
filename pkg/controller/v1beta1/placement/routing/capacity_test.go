@@ -243,6 +243,9 @@ func TestProbeConfig_Validate(t *testing.T) {
 		{"timeout >= period rejected", func(c *ProbeConfig) { c.Timeout = c.Period }, true},
 		{"zero failure threshold rejected", func(c *ProbeConfig) { c.FailureThreshold = 0 }, true},
 		{"zero success threshold rejected", func(c *ProbeConfig) { c.SuccessThreshold = 0 }, true},
+		{"missing all-failed policy rejected", func(c *ProbeConfig) { c.AllFailedPolicy = "" }, true},
+		{"unknown all-failed policy rejected", func(c *ProbeConfig) { c.AllFailedPolicy = "DropEverything" }, true},
+		{"drain all-failed policy is valid", func(c *ProbeConfig) { c.AllFailedPolicy = AllFailedPolicyDrain }, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

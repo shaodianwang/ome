@@ -21,12 +21,14 @@ const TrafficMapRoutable = "Routable"
 // Reasons for the Routable condition. NotPlaced and NoAddressableHome accompany
 // Routable=False and an empty table; AllHomesUnready accompanies Routable=True,
 // because the weight fallback still spreads traffic across homes that are
-// addressable but not yet ready rather than black-holing it.
+// addressable but not yet ready. AllHomesProbeFailed accompanies Routable=False
+// when an explicitly configured probe policy preserves the all-zero result.
 const (
-	TrafficMapReasonRoutable          = "Routable"
-	TrafficMapReasonNotPlaced         = "NotPlaced"
-	TrafficMapReasonNoAddressableHome = "NoAddressableHome"
-	TrafficMapReasonAllHomesUnready   = "AllHomesUnready"
+	TrafficMapReasonRoutable            = "Routable"
+	TrafficMapReasonNotPlaced           = "NotPlaced"
+	TrafficMapReasonNoAddressableHome   = "NoAddressableHome"
+	TrafficMapReasonAllHomesUnready     = "AllHomesUnready"
+	TrafficMapReasonAllHomesProbeFailed = "AllHomesProbeFailed"
 )
 
 // CapacitySource names which input produced an entry's Allocated count.
@@ -149,9 +151,9 @@ type TrafficMapEntry struct {
 	// Weight is the home's final, normalized, capacity-planned, health-gated
 	// traffic share as a relative non-negative integer (matching Gateway API and
 	// Envoy weighted-cluster semantics). A consumer either applies it verbatim or
-	// divides by the sum of weights for a percentage. When every home is unhealthy
-	// the controller writes equal weights rather than all-zero, so traffic is
-	// never black-holed.
+	// divides by the sum of weights for a percentage. The default all-unhealthy
+	// policy writes equal weights. An explicitly configured all-probe-failed drain
+	// instead writes an authoritative all-zero table.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	Weight int32 `json:"weight"`

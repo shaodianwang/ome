@@ -536,6 +536,19 @@ func TestBuildHTTPRoute_UnweightedFallsBackToEqual(t *testing.T) {
 	assert.Equal(t, int32(1), *refs[1].Weight)
 }
 
+func TestBuildHTTPRoute_AuthoritativeAllZeroIsPreserved(t *testing.T) {
+	p := NewGatewayAPIPublisher(nil, baseConfig())
+	target := Target{GlobalHost: "h", WeightsAuthoritative: true, Homes: []Home{
+		{Cluster: "cluster-a", BackendHost: "a.example"},
+		{Cluster: "cluster-b", BackendHost: "b.example"},
+	}}
+
+	refs := p.buildHTTPRoute(testISVC(), target).Spec.Rules[0].BackendRefs
+	require.Len(t, refs, 2)
+	assert.Equal(t, int32(0), *refs[0].Weight)
+	assert.Equal(t, int32(0), *refs[1].Weight)
+}
+
 func TestPublish_RouteUpdateFailureKeepsOldBackendService(t *testing.T) {
 	s := pubScheme(t)
 	c := fakeclient.NewClientBuilder().WithScheme(s).Build()

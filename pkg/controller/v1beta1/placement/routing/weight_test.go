@@ -305,6 +305,25 @@ func TestWeights_ProbeGatesOnlyWhenItReachedAVerdict(t *testing.T) {
 	}
 }
 
+func TestWeights_DrainOnAllProbeFailures(t *testing.T) {
+	homes := []Home{
+		{Cluster: "a", Allocated: 7, Ready: 7, Reachable: ptr(false)},
+		{Cluster: "b", Allocated: 3, Ready: 3, Reachable: ptr(false)},
+	}
+
+	assertWeightsWithPolicy(t, homes, AllFailedPolicyDrain, []int32{0, 0})
+	assertWeightsWithPolicy(t, homes, AllFailedPolicyPreserveTraffic, []int32{1, 1})
+}
+
+func TestWeights_DrainRequiresAConclusiveFailureFromEveryHome(t *testing.T) {
+	homes := []Home{
+		{Cluster: "a", Allocated: 7, Ready: 0, Reachable: ptr(false)},
+		{Cluster: "b", Allocated: 3, Ready: 0},
+	}
+
+	assertWeightsWithPolicy(t, homes, AllFailedPolicyDrain, []int32{1, 1})
+}
+
 func TestEffectiveAllocated(t *testing.T) {
 	// The caller records this as the entry's allocation provenance, so it has to
 	// agree with what Weights actually used.
@@ -337,6 +356,19 @@ func assertWeights(t *testing.T, homes []Home, want []int32) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("Weights() = %v, want %v", got, want)
+		}
+	}
+}
+
+func assertWeightsWithPolicy(t *testing.T, homes []Home, policy AllFailedPolicy, want []int32) {
+	t.Helper()
+	got := weights(homes, policy)
+	if len(got) != len(want) {
+		t.Fatalf("weights() length = %d, want %d (%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("weights() = %v, want %v", got, want)
 		}
 	}
 }

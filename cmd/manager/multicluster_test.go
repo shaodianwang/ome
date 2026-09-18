@@ -69,6 +69,13 @@ func TestResolveMCWiringFullConfig(t *testing.T) {
 		},
 		"routing": {
 			"enabled": true,
+			"probe": {
+				"path": "/v1/models", "method": "GET",
+				"acceptStatuses": [200], "gateStatuses": [503],
+				"period": "10s", "timeout": "3s",
+				"failureThreshold": 3, "successThreshold": 2,
+				"allFailedPolicy": "Drain"
+			},
 			"publisher": {
 				"name": "test-publisher",
 				"options": {"key": "value"}
@@ -115,6 +122,7 @@ func TestResolveMCWiringFullConfig(t *testing.T) {
 
 	// Routing.
 	assert.True(t, w.routing.Enabled)
+	assert.Equal(t, placementrouting.AllFailedPolicyDrain, w.routing.Probe.AllFailedPolicy)
 	assert.Equal(t, "test-publisher", w.routing.Publisher.Name)
 	assert.Equal(t, map[string]string{"key": "value"}, w.routing.Publisher.Options)
 }

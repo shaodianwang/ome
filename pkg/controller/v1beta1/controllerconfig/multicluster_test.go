@@ -77,6 +77,17 @@ func TestNewMultiClusterConfig(t *testing.T) {
 						"backendPort": 8080
 					},
 					"routing": {
+						"probe": {
+							"path": "/v1/models",
+							"method": "GET",
+							"acceptStatuses": [200],
+							"gateStatuses": [503],
+							"period": "10s",
+							"timeout": "3s",
+							"failureThreshold": 3,
+							"successThreshold": 2,
+							"allFailedPolicy": "Drain"
+						},
 						"publisher": {
 							"name": "test-publisher",
 							"options": {"key": "value"}
@@ -117,6 +128,7 @@ func TestNewMultiClusterConfig(t *testing.T) {
 				assert.Equal(t, "ome-routes", ep.RouteNamespace)
 				assert.Equal(t, 8080, ep.BackendPort)
 
+				assert.Equal(t, "Drain", cfg.Routing.Probe.AllFailedPolicy)
 				assert.Equal(t, "test-publisher", cfg.Routing.Publisher.Name)
 				assert.Equal(t, map[string]string{"key": "value"}, cfg.Routing.Publisher.Options)
 			},

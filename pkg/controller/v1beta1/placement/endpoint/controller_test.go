@@ -133,6 +133,7 @@ func TestReconcile_TrafficMapPublisherUsesExistingLifecycle(t *testing.T) {
 		{Cluster: "cluster-a", Endpoint: "https://a.example", BackendHost: "a.example", Weight: 70},
 		{Cluster: "cluster-b", Endpoint: "https://b.example:8443", BackendHost: "b.example", Weight: 0},
 	}, publisher.published[0].Homes)
+	assert.True(t, publisher.published[0].WeightsAuthoritative)
 
 	got := &v1beta1.InferenceService{}
 	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(isvc), got))
@@ -499,6 +500,7 @@ func TestResolveTarget(t *testing.T) {
 		require.Len(t, tgt.Homes, 2)
 		assert.Equal(t, int32(1), tgt.Homes[0].Weight, "home a takes the TrafficMap weight, not its 5 ready replicas")
 		assert.Equal(t, int32(3), tgt.Homes[1].Weight, "home b takes the TrafficMap weight, not its 2 ready replicas")
+		assert.True(t, tgt.WeightsAuthoritative)
 	})
 
 	t.Run("home absent from the TrafficMap keeps its reactive weight", func(t *testing.T) {
@@ -520,6 +522,7 @@ func TestResolveTarget(t *testing.T) {
 		require.Len(t, tgt.Homes, 2)
 		assert.Equal(t, int32(9), tgt.Homes[0].Weight, "home a takes its TrafficMap weight")
 		assert.Equal(t, int32(2), tgt.Homes[1].Weight, "home b, absent from the map, keeps its reactive weight")
+		assert.False(t, tgt.WeightsAuthoritative, "a partial map cannot authorize an all-zero route")
 	})
 }
 

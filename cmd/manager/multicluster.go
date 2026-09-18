@@ -129,6 +129,7 @@ func resolveMCWiring(mc *controllerconfig.MultiClusterConfig) mcWiring {
 				Timeout:          rt.Probe.TimeoutDuration(),
 				FailureThreshold: rt.Probe.FailureThreshold,
 				SuccessThreshold: rt.Probe.SuccessThreshold,
+				AllFailedPolicy:  placementrouting.AllFailedPolicy(rt.Probe.AllFailedPolicy),
 			},
 			Capacity: placementrouting.CapacityConfig{
 				Path:    rt.Capacity.Path,

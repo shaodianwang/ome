@@ -218,6 +218,47 @@ func TestReconcile_AllHomesUnreadyIsRoutableButDegraded(t *testing.T) {
 	assert.Equal(t, v1beta1.TrafficMapReasonAllHomesUnready, cond.Reason)
 }
 
+func TestBuildSpec_AllProbeFailuresCanDrainEveryHome(t *testing.T) {
+	isvc := splitISVC([]string{"a", "b"}, []int32{7, 3}, []int32{7, 3})
+	p := &Prober{
+		Config: ProbeConfig{Path: "/health", AllFailedPolicy: AllFailedPolicyDrain},
+		state: map[key]*homeProbeState{
+			{Map: types.NamespacedName{Name: testName, Namespace: testNS}, Cluster: "a"}: {
+				gated: true, lastResult: v1beta1.ProbeResultFailing,
+			},
+			{Map: types.NamespacedName{Name: testName, Namespace: testNS}, Cluster: "b"}: {
+				gated: true, lastResult: v1beta1.ProbeResultFailing,
+			},
+		},
+	}
+
+	spec, status, reason := buildSpec(isvc, p, nil)
+	require.Len(t, spec.Entries, 2)
+	assert.Equal(t, int32(0), spec.Entries[0].Weight)
+	assert.Equal(t, int32(0), spec.Entries[1].Weight)
+	assert.Equal(t, metav1.ConditionFalse, status)
+	assert.Equal(t, v1beta1.TrafficMapReasonAllHomesProbeFailed, reason)
+}
+
+func TestBuildSpec_DrainRequiresEveryProbeToFail(t *testing.T) {
+	isvc := splitISVC([]string{"a", "b"}, []int32{7, 3}, []int32{0, 0})
+	p := &Prober{
+		Config: ProbeConfig{Path: "/health", AllFailedPolicy: AllFailedPolicyDrain},
+		state: map[key]*homeProbeState{
+			{Map: types.NamespacedName{Name: testName, Namespace: testNS}, Cluster: "a"}: {
+				gated: true, lastResult: v1beta1.ProbeResultFailing,
+			},
+		},
+	}
+
+	spec, status, reason := buildSpec(isvc, p, nil)
+	require.Len(t, spec.Entries, 2)
+	assert.Equal(t, int32(1), spec.Entries[0].Weight)
+	assert.Equal(t, int32(1), spec.Entries[1].Weight)
+	assert.Equal(t, metav1.ConditionTrue, status)
+	assert.Equal(t, v1beta1.TrafficMapReasonAllHomesUnready, reason)
+}
+
 func TestReconcile_ServingHomeReportsRoutable(t *testing.T) {
 	isvc := splitISVC([]string{"a"}, []int32{3}, []int32{3})
 	r, c := newReconciler(t, Config{Enabled: true}, isvc)

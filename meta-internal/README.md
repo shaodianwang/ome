@@ -120,6 +120,10 @@ The API stores `xds_auto.cluster_weight`; it does not mutate EDS membership.
 The target must already be a statically authored route arm, and its SMC tier
 must already contain usable service endpoints.
 
+TrafficMap weights are applied verbatim. With the routing probe's explicit
+all-failed `Drain` policy, this includes publishing zero for every target; probe
+recovery republishes the newly computed capacity weights.
+
 Selecting `routing.publisher.name: xds` replaces the default Gateway API
 publisher; the two publishers do not run side by side.
 

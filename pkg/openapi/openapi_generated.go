@@ -13350,7 +13350,7 @@ func schema_pkg_apis_ome_v1beta1_TrafficMapEntry(ref common.ReferenceCallback) c
 					},
 					"weight": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Weight is the home's final, normalized, capacity-planned, health-gated traffic share as a relative non-negative integer (matching Gateway API and Envoy weighted-cluster semantics). A consumer either applies it verbatim or divides by the sum of weights for a percentage. When every home is unhealthy the controller writes equal weights rather than all-zero, so traffic is never black-holed.",
+							Description: "Weight is the home's final, normalized, capacity-planned, health-gated traffic share as a relative non-negative integer (matching Gateway API and Envoy weighted-cluster semantics). A consumer either applies it verbatim or divides by the sum of weights for a percentage. The default all-unhealthy policy writes equal weights. An explicitly configured all-probe-failed drain instead writes an authoritative all-zero table.",
 							Default:     0,
 							Type:        []string{"integer"},
 							Format:      "int32",

@@ -168,7 +168,7 @@ func (p *Prober) Start(ctx context.Context) error {
 	p.Log.Info("starting end-to-end health probing",
 		"path", p.Config.Path, "method", p.Config.Method, "period", p.Config.Period,
 		"timeout", p.Config.Timeout, "failureThreshold", p.Config.FailureThreshold,
-		"successThreshold", p.Config.SuccessThreshold)
+		"successThreshold", p.Config.SuccessThreshold, "allFailedPolicy", p.Config.AllFailedPolicy)
 
 	t := time.NewTicker(p.Config.Period)
 	defer t.Stop()

@@ -336,6 +336,10 @@ type ProbeConfig struct {
 	// SuccessThreshold is the number of consecutive passes before a gated home
 	// is restored.
 	SuccessThreshold int `json:"successThreshold,omitempty"`
+
+	// AllFailedPolicy controls whether a conclusive failure from every home
+	// preserves traffic or drains every route arm.
+	AllFailedPolicy string `json:"allFailedPolicy,omitempty"`
 }
 
 // PeriodDuration parses Period. An unparsable value yields 0, which the

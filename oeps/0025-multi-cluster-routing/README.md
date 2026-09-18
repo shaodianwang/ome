@@ -279,8 +279,10 @@ control plane makes no outbound call at all.
      not run" gates **nothing**, since that condition is uniform across homes and
      would zero the fleet at once.
    - **Hysteresis is mandatory:** N consecutive failures to gate, M to recover. The
-     prober is fleet-correlated, so the all-zero guard — equal weights rather than
-     black-holing — is load-bearing here and must not be removed.
+     prober is fleet-correlated, so the default `PreserveTraffic` all-failed
+     policy uses equal weights rather than black-holing. An operator may instead
+     select `Drain` for an installation where fresh, conclusive failures from
+     every home must produce an intentional all-zero table.
 
 Both optional variables are read by **one** shared per-home observer rather than
 two clients (same surface, same credentials, same failure modes), but they stay
@@ -383,9 +385,10 @@ selected by config.
 
 - **Gateway API HTTPRoute** (retargeted from today's status-reading path): one
   HTTPRoute, one `backendRef` per home (an ExternalName Service aliasing the home
-  endpoint, as today), `weight` per entry. When all weights are 0 it must **not**
-  black-hole — it falls back to equal weight, matching today's guard in
-  `gatewayapi.go`.
+  endpoint, as today), `weight` per entry. TrafficMap weights are authoritative
+  and are applied verbatim, including an all-zero result selected by the probe's
+  `Drain` policy. Legacy placement-only publication retains its equal-weight
+  fallback.
 - **SMG** (optional): SMG consumes `TrafficMap` **natively** — a watcher inside
   SMG populates its worker registry and splits by entry weight. Because we own
   that codebase this is a native reflector mirroring its existing pod
@@ -460,7 +463,8 @@ workload clusters.
   ISVC deletion → GC'd; quota change → weights recomputed;
   `observedISVCGeneration` tracks the source. A home failing N probes →
   `healthy:false`, weight 0, survivors renormalize; **every** home failing →
-  equal-weight fallback, never all-zero (the correlated-prober case).
+  equal-weight fallback under `PreserveTraffic`, or all-zero under the explicit
+  `Drain` policy.
 - **Publisher (envtest).** `spec` → one HTTPRoute with weighted backendRefs; entry
   removed → backendRef dropped and stale ExternalName Service deleted;
   `status.programmed` set; finalizer removes the route on map deletion.
@@ -495,8 +499,11 @@ workload clusters.
   that did not previously exist.** Outbound calls to every home on a timer: new
   credentials, new egress, new timeouts, and — if the probe is deep — real serving
   capacity consumed on the homes being checked. It also makes the prober
-  fleet-correlated. Fail-open, hysteresis and the all-zero guard are mitigations,
-  not a full fix: a prober returning confidently wrong answers defeats all three.
+  fleet-correlated. Fail-open and hysteresis are mitigations, not a full fix: a
+  prober returning confidently wrong answers can still drain a home. Selecting
+  the all-failed `Drain` policy accepts the additional risk of a fleet-wide
+  false-positive in exchange for never routing to a set of confirmed failing
+  homes.
 
 ## Alternatives
 

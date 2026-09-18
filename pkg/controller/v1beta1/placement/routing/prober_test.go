@@ -30,6 +30,7 @@ func testProbeConfig() ProbeConfig {
 		Timeout:          500 * time.Millisecond,
 		FailureThreshold: 3,
 		SuccessThreshold: 2,
+		AllFailedPolicy:  AllFailedPolicyPreserveTraffic,
 	}
 }
 

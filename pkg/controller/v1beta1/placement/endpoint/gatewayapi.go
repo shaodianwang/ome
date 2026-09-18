@@ -357,8 +357,8 @@ func (p *GatewayAPIPublisher) buildHTTPRoute(isvc *v1beta1.InferenceService, tar
 	// with 0 ready gets 0 — no traffic until it is serving). When no home carries
 	// a weight (Single/All, or a Split placement before any home is ready) every
 	// weight is zero; Gateway API sends no traffic if ALL backendRef weights are
-	// zero, so fall back to equal weight (1 each) rather than black-holing the
-	// route.
+	// zero, so legacy inputs fall back to equal weight (1 each). TrafficMap
+	// weights are authoritative and can intentionally keep every arm at zero.
 	var totalWeight int32
 	for _, h := range homes {
 		totalWeight += h.Weight
@@ -366,7 +366,7 @@ func (p *GatewayAPIPublisher) buildHTTPRoute(isvc *v1beta1.InferenceService, tar
 	refs := make([]gatewayapiv1.HTTPBackendRef, 0, len(homes))
 	for _, h := range homes {
 		weight := int32(1)
-		if totalWeight > 0 {
+		if totalWeight > 0 || target.WeightsAuthoritative {
 			weight = h.Weight
 		}
 		ref := gatewayapiv1.HTTPBackendRef{

@@ -119,6 +119,31 @@ func TestPublishZeroesRemovedTargetsBeforePositiveWeights(t *testing.T) {
 		got.Annotations[targetsAnnotation])
 }
 
+func TestPublishPropagatesAllZeroAndRecovery(t *testing.T) {
+	isvc := testISVC("model-a")
+	weights := &recordingPublisher{}
+	p, _ := newTestPublisher(t, weights, isvc)
+	target := testTarget()
+	for i := range target.Homes {
+		target.Homes[i].Weight = 0
+	}
+
+	require.NoError(t, p.Publish(context.Background(), isvc, target))
+	assert.Equal(t, []weightedTarget{
+		{name: "model-a.team-a.home-a.mks", weight: 0},
+		{name: "model-a.team-a.home-b.mks", weight: 0},
+	}, weights.published)
+
+	weights.published = nil
+	target.Homes[0].Weight = 30
+	target.Homes[1].Weight = 70
+	require.NoError(t, p.Publish(context.Background(), isvc, target))
+	assert.Equal(t, []weightedTarget{
+		{name: "model-a.team-a.home-a.mks", weight: 70},
+		{name: "model-a.team-a.home-b.mks", weight: 30},
+	}, weights.published)
+}
+
 func TestPublishEmptyTargetHoldsPriorTargetsAtZero(t *testing.T) {
 	isvc := testISVC("model-a")
 	isvc.Annotations = map[string]string{targetsAnnotation: `["a.mks","b.mks"]`}

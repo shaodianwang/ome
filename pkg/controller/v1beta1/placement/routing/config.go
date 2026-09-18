@@ -114,7 +114,23 @@ type ProbeConfig struct {
 	// SuccessThreshold is the number of consecutive passes before a gated home
 	// is restored.
 	SuccessThreshold int
+
+	// AllFailedPolicy controls what happens after every home has independently
+	// crossed the probe failure threshold. PreserveTraffic retains the existing
+	// equal-weight fallback; Drain preserves the all-zero result so the publisher
+	// removes every route arm. It has no effect while any home is passing or has
+	// no conclusive verdict.
+	AllFailedPolicy AllFailedPolicy
 }
+
+// AllFailedPolicy controls whether a complete, conclusive probe failure is
+// allowed to remove every route arm.
+type AllFailedPolicy string
+
+const (
+	AllFailedPolicyPreserveTraffic AllFailedPolicy = "PreserveTraffic"
+	AllFailedPolicyDrain           AllFailedPolicy = "Drain"
+)
 
 // IsEnabled reports whether probing is configured. Path is the switch: without
 // a target there is nothing to probe and the health gate stays readyReplicas.
@@ -165,6 +181,12 @@ func (p ProbeConfig) Validate() error {
 	}
 	if p.SuccessThreshold <= 0 {
 		return fmt.Errorf("routing.probe.successThreshold must be positive when routing.probe.path is set")
+	}
+	switch p.AllFailedPolicy {
+	case AllFailedPolicyPreserveTraffic, AllFailedPolicyDrain:
+	default:
+		return fmt.Errorf("routing.probe.allFailedPolicy %q must be %q or %q when routing.probe.path is set",
+			p.AllFailedPolicy, AllFailedPolicyPreserveTraffic, AllFailedPolicyDrain)
 	}
 	return nil
 }

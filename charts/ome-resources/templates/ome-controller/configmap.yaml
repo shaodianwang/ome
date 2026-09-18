@@ -184,7 +184,8 @@ data:
           "period": {{ .period | quote }},
           "timeout": {{ .timeout | quote }},
           "failureThreshold": {{ .failureThreshold | default 0 }},
-          "successThreshold": {{ .successThreshold | default 0 }}
+          "successThreshold": {{ .successThreshold | default 0 }},
+          "allFailedPolicy": {{ .allFailedPolicy | quote }}
         }{{- end }}{{- with .Values.ome.multicluster.config.routing.publisher }},
         "publisher": {
           "name": {{ .name | quote }},

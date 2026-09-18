@@ -160,7 +160,7 @@ func (r *Reconciler) trafficMapTarget(ctx context.Context, isvc *v1beta1.Inferen
 		})
 	}
 	sort.Slice(homes, func(i, j int) bool { return homes[i].Cluster < homes[j].Cluster })
-	return Target{Service: tm.Spec.Service, Homes: homes}, true, nil
+	return Target{Service: tm.Spec.Service, Homes: homes, WeightsAuthoritative: true}, true, nil
 }
 
 // resolveTarget builds the publication Target from status.placement. ok is false
@@ -185,8 +185,13 @@ func (r *Reconciler) resolveTarget(isvc *v1beta1.InferenceService, weights map[s
 		// Placed but no home is addressable yet — nothing concrete to point at.
 		return Target{}, false, nil
 	}
-	applyTrafficMapWeights(homes, weights)
-	return Target{Service: isvc.Name, GlobalHost: host, Homes: homes}, true, nil
+	weightsAuthoritative := applyTrafficMapWeights(homes, weights)
+	return Target{
+		Service:              isvc.Name,
+		GlobalHost:           host,
+		Homes:                homes,
+		WeightsAuthoritative: weightsAuthoritative,
+	}, true, nil
 }
 
 // trafficMapWeights returns the per-cluster apply-verbatim weights the routing
@@ -215,16 +220,22 @@ func (r *Reconciler) trafficMapWeights(ctx context.Context, isvc *v1beta1.Infere
 // weights onto the serving homes, replacing the reactive ready-replica weight
 // homesFromPlacement seeds. A home absent from the map — or a nil map, when no
 // TrafficMap exists — keeps its reactive weight, so publication degrades to the
-// live ready-replica split when routing is off or the map lags placement.
-func applyTrafficMapWeights(homes []Home, weights map[string]int32) {
+// live ready-replica split when routing is off or the map lags placement. The
+// return value is true only when every current home had an explicit map entry;
+// only that complete table may authorize an all-zero route.
+func applyTrafficMapWeights(homes []Home, weights map[string]int32) bool {
 	if weights == nil {
-		return
+		return false
 	}
+	complete := true
 	for i := range homes {
 		if w, ok := weights[homes[i].Cluster]; ok {
 			homes[i].Weight = w
+		} else {
+			complete = false
 		}
 	}
+	return complete
 }
 
 // homesFromPlacement extracts the serving homes — admitted candidates that

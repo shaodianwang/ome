@@ -437,6 +437,7 @@ routing_probe_args=(
   --set-string ome.multicluster.config.routing.probe.timeout=3s
   --set ome.multicluster.config.routing.probe.failureThreshold=3
   --set ome.multicluster.config.routing.probe.successThreshold=2
+  --set-string ome.multicluster.config.routing.probe.allFailedPolicy=Drain
 )
 routing_probe_config="$("${helm_bin}" template ome-resources "${chart_dir}" \
   --namespace ome \
@@ -450,7 +451,8 @@ for expected in \
   '"period": "10s"' \
   '"timeout": "3s"' \
   '"failureThreshold": 3' \
-  '"successThreshold": 2'; do
+  '"successThreshold": 2' \
+  '"allFailedPolicy": "Drain"'; do
   grep -Fq "${expected}" <<<"${routing_probe_config}" ||
     fail "routing probe setting was not rendered: ${expected}"
 done

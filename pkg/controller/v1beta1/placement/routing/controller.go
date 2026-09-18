@@ -162,6 +162,8 @@ func routableMessage(reason string, entries int) string {
 		return "placed, but no admitted home reports an addressable endpoint"
 	case v1beta1.TrafficMapReasonAllHomesUnready:
 		return fmt.Sprintf("%d home(s) addressable but none passing the health gate; traffic spread equally rather than dropped", entries)
+	case v1beta1.TrafficMapReasonAllHomesProbeFailed:
+		return fmt.Sprintf("%d home(s) have conclusive probe failures; all route weights are zero", entries)
 	default:
 		return fmt.Sprintf("%d home(s) serving", entries)
 	}
@@ -227,14 +229,14 @@ func buildSpec(isvc *v1beta1.InferenceService, probe *Prober, capacity *Capacity
 			Reported:  capacity.Reported(mapKey, c.Cluster),
 		}
 	}
-	weights := Weights(homes)
+	computedWeights := weights(homes, probeAllFailedPolicy(probe))
 
 	entries := make([]v1beta1.TrafficMapEntry, len(cands))
 	for i, c := range cands {
 		entries[i] = v1beta1.TrafficMapEntry{
 			Cluster:  c.Cluster,
 			Endpoint: c.Endpoint.DeepCopy(),
-			Weight:   weights[i],
+			Weight:   computedWeights[i],
 			// Healthy is the gate the weight actually used, so it must fold in
 			// reachability too: an entry reading Healthy=true beside Weight=0
 			// would be unexplainable.
@@ -249,16 +251,29 @@ func buildSpec(isvc *v1beta1.InferenceService, probe *Prober, capacity *Capacity
 			Probe: probe.Provenance(mapKey, c.Cluster),
 		}
 	}
+	status := metav1.ConditionTrue
 	reason := v1beta1.TrafficMapReasonRoutable
 	if !slices.ContainsFunc(entries, func(e v1beta1.TrafficMapEntry) bool { return e.Healthy }) {
-		reason = v1beta1.TrafficMapReasonAllHomesUnready
+		if slices.ContainsFunc(entries, func(e v1beta1.TrafficMapEntry) bool { return e.Weight > 0 }) {
+			reason = v1beta1.TrafficMapReasonAllHomesUnready
+		} else {
+			status = metav1.ConditionFalse
+			reason = v1beta1.TrafficMapReasonAllHomesProbeFailed
+		}
 	}
 	return v1beta1.TrafficMapSpec{
 		Service:                isvc.Name,
 		Mode:                   placementMode(isvc),
 		Entries:                entries,
 		ObservedISVCGeneration: isvc.Generation,
-	}, metav1.ConditionTrue, reason
+	}, status, reason
+}
+
+func probeAllFailedPolicy(probe *Prober) AllFailedPolicy {
+	if probe == nil {
+		return AllFailedPolicyPreserveTraffic
+	}
+	return probe.Config.AllFailedPolicy
 }
 
 // allocationSource names which input produced the entry's allocation. Endpoint
