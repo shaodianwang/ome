@@ -5,16 +5,17 @@ A cell in a machine table carries no PR numbers: nothing under pkg/ may.
 The provenance lives in a sidecar under history/, and `status: review` on
 the cell is the marker that says provenance exists. A `status: decided`
 cell may also carry a sidecar entry, when an owner's decision came from a
-merged PR, but it is not required to. The two halves can drift apart in
-one direction, and that drift is silent:
+merged PR or from a review session, but it is not required to. The two
+halves can drift apart in one direction, and that drift is silent:
 
   * a review cell with no sidecar entry claims a bugfix history nobody can
     look up.
 
-A sidecar entry must select at least one `review` or `decided` cell: one
-that selects only cells with some other status cites PRs the reviewer will
-never see, because the heatmap only shows history on review and decided
-cells.
+A sidecar entry must carry a reference - `prs`, or a `decision` string for
+provenance that is not a merged change - and must select at least one
+`review` or `decided` cell: one that selects only cells with some other
+status cites references the reviewer will never see, because the heatmap
+only shows history on review and decided cells.
 
 The renderer already rejects a sidecar entry that selects no grid cell at
 all. This check is the stricter pair of that one.
@@ -81,6 +82,8 @@ def check(grid, entries):
         if cell.get("status") == REVIEW and not cell.get("history"):
             problems.append(f"review cell with no history entry: {cell['id']}")
     for path, i, entry in entries:
+        if not (entry.get("prs") or entry.get("decision")):
+            problems.append(f"{path}[{i}]: history entry carries no prs and no decision reference")
         state = entry.get("state", "")
         event = entry.get("event", "")
         hit = any(

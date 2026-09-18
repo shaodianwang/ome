@@ -26,7 +26,7 @@ def cell(state, event, variant="", window="before", transition="", status="revie
     }
 
 
-def entry(state, event, variants=(), windows=(), transition="", prs=("#1",)):
+def entry(state, event, variants=(), windows=(), transition="", prs=("#1",), decision=""):
     return {
         "state": state,
         "event": event,
@@ -34,6 +34,7 @@ def entry(state, event, variants=(), windows=(), transition="", prs=("#1",)):
         "windows": list(windows),
         "transition": transition,
         "prs": list(prs),
+        "decision": decision,
     }
 
 
@@ -79,6 +80,17 @@ class CheckTest(unittest.TestCase):
 
     def test_decided_cell_needs_no_history(self):
         self.assertEqual(check_history.check([cell("A", "e", status="decided")], []), [])
+
+    def test_decision_reference_stands_in_for_prs(self):
+        grid = [cell("A", "e", status="decided", history=["owner-review"])]
+        e = entry("A", "e", prs=(), decision="owner-review")
+        self.assertEqual(check_history.check(grid, [("f", 0, e)]), [])
+
+    def test_entry_without_any_reference_is_reported(self):
+        grid = [cell("A", "e", history=["#1"])]
+        problems = check_history.check(grid, [("f", 0, entry("A", "e", prs=()))])
+        self.assertEqual(len(problems), 1)
+        self.assertIn("no prs and no decision reference", problems[0])
 
 
 class MainTest(unittest.TestCase):

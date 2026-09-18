@@ -25,8 +25,8 @@ cells:
     windows: [before]
     outcome: transition
     to: Ready
-    guard: old-incarnation pods are gone on the live read, the bumped-incarnation set is complete, and every pod is ContainersReady
-    note: Phase C writes the serving gate on the fresh pods, then promotes with ReadySince restamped and the operation cleared; neither PodReady nor the minReadySeconds window is waited for (ops/restart.go)
+    guard: old-incarnation pods are gone on the live read, the bumped-incarnation set is complete, every pod is PodReady, and the minReadySeconds window has elapsed
+    note: Phase C writes the serving gate on the fresh pods, then promotes with ReadySince restamped and the operation cleared once the rebuilt set clears the one promote bar every path shares (ops/restart.go)
     invariants: [one.operation.per.instance]
     placement: perm
     coverage: {perm: [], unit: [TestRestart_ConvergesAcrossPasses, TestRestart_CreatesNewPodAtBumpedIncarnation], kind: []}
@@ -142,7 +142,7 @@ cells:
     note: the in-flight restart owns the pod set — Phase A counts the deletion as drain progress and Phase B recreates any missing pod at the bumped incarnation; the loss-below-Ready trigger excludes Phase Restarting, so no second restart is armed
     placement: perm
     coverage: {perm: [], unit: [TestRestart_DeletesOldPodOnceDrained, TestRestart_ConvergesAcrossPasses], kind: []}
-    status: review
+    status: decided
   - state: Restart/Drain
     event: pod.deleted
     variants: [source]
@@ -162,7 +162,7 @@ cells:
     note: the fast escalation stamps Phase Failed with the waiting reason and the pod's termination detail on LastFailure and preserves the operation, since a Restart attempt is never disposed (workload/escalation.go, status_aggregate.go)
     placement: perm
     coverage: {perm: [], unit: [TestRestart_CapturesLastFailureBeforeDrain], kind: []}
-    status: review
+    status: decided
   - state: Restart/Drain
     event: pod.waiting
     variants: [ImagePullBackOff, ErrImagePull, InvalidImageName, CreateContainerConfigError, CreateContainerError, CrashLoopBackOff, RunContainerError]
@@ -187,7 +187,7 @@ cells:
     note: restart evidence is read only for a Ready row, a Restarting row re-selects unconditionally, and the promote restamps ReadySince so a container restart during the recreate never reads as a post-Ready failure
     placement: perm
     coverage: {perm: [], unit: [TestDetectRestartTrigger_RunnerRestartAfterReady, TestDetectRestartTrigger_BootRestartsForgiven], kind: []}
-    status: review
+    status: decided
   - state: Restart/Drain
     event: pod.uidRotated
     outcome: ignore
@@ -255,7 +255,7 @@ cells:
     note: the repair keeps this index while the Create pass materializes the other fresh indices from a plan that excludes every restart selection (planExcludingRestartSelections)
     placement: perm
     coverage: {perm: [], unit: [TestReconcile_ScaleUpDuringRestart_CreatesFreshIndices, TestReconcile_ScaleUpDuringRestart_ExcludesRestartSelectedCreateOwner], kind: []}
-    status: review
+    status: decided
   - state: Restart/Drain
     event: spec.replicasDown
     windows: [before]
@@ -280,18 +280,18 @@ cells:
     note: a standard pause plans scale-down and repair only, so the restart keeps converging at the running revision while updates and creates are held; the operation deadline is parked and the escalation pass is suspended for the paused reconcile
     placement: perm
     coverage: {perm: [], unit: [TestPlan_Paused_RepairRunsFleetChangesDoNot], kind: []}
-    status: review
+    status: decided
   - state: Restart/Drain
     event: spec.pauseFreeze
     outcome: defer
-    note: a frozen pause truncates the plan after the truth pass, so the repair holds at whatever phase it reached — including with the old pods already deleted and nothing serving — with its deadline parked and escalation suspended until pause is cleared
+    note: freeze suspends the repair pass, but the step already under way still runs to its boundary — pods the repair deleted are recreated at the bumped incarnation — so no Instance is left with nothing serving; the hold lands after that, carrying Operation.Waiting=Paused with its deadline parked
     placement: perm
     coverage: {perm: [], unit: [TestPlan_Paused_RepairRunsFleetChangesDoNot], kind: []}
-    status: review
+    status: decided
   - state: Restart/Drain
     event: spec.unpause
     outcome: ignore
-    note: the restart pass is planned again and resumes at the same step from its durable operation, and the parked deadline is re-armed from the current time on the first ungated pass
+    note: the restart pass is planned again and resumes at the same step from its durable operation; the Paused waiting token is released and a parked deadline re-arms with a full window measured from the unpause
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -455,8 +455,9 @@ cells:
   - state: Restart/Drain
     event: pod.phaseTerminal
     variants: [Unknown]
-    outcome: DECIDE
-    note: query.IsTerminalPod is PodFailed or PodSucceeded only, so an Unknown pod at the bumped incarnation keeps its name and its object, Phase B counts the target as present and Phase C never sees a runtime-ready set; the repair waits out the operation deadline. Unknown means the node stopped reporting rather than the pod dying, so recycling it would delete a name a returning kubelet may still be running - decide whether it should route to the force-delete sweep, which proves node death, instead of to the recycle.
+    outcome: defer
+    guard: node death is proven - the Node object is gone, or has carried an unreachable taint or a NotReady condition past the threshold - and a force-delete policy is configured; with neither, the row holds instead of acting
+    note: an Unknown pod is never recycled by name, because the node has stopped reporting rather than the pod having died and a returning kubelet may still be running it. It is routed to the force-delete sweep instead, the same authority pod.nodeLost answers to, which deletes it only on proven node death under a configured force-delete policy; until then the operation carries a NodeUnknown waiting token with its deadline parked, so the hold is visible rather than silently spending the attempt's budget, and the rebuild resumes on the resulting absence
     placement: sim
     coverage: {perm: [], unit: [], kind: []}
     status: decided
@@ -712,14 +713,14 @@ cells:
     note: a 422 on the rebuild create is permanent, so the repair ends here instead of erroring every pass - LastFailure carries InvalidPodSpec plus the apiserver's explanation, a RetryBlock is recorded against the revision the attempt pinned, and the operation is cleared with Phase=Failed. An unclassified rejection instead returns the pass error, which changes nothing about the other rows - the end-of-pass escalation and the superseded-RetryBlock prune run after every eligible pass, errored or not, so one row's failed write never freezes another's deadline clock (ops/create.go, workload/reconcile.go)
     placement: unit
     coverage: {perm: [], unit: [], kind: []}
-    status: review
+    status: decided
   - state: Restart/Drain
     event: api.throttled
     outcome: defer
     note: a shed create is classified as throttled and writes nothing; the server's Retry-After is deposited on the pass pacing, which floors the requeue so the repair wakes no earlier than the apiserver asked. The pass ends quietly rather than erroring, and the operation deadline is evaluated as usual and keeps running - an errored pass would be evaluated the same way, since the end-of-pass escalation runs after every eligible pass whatever the op returned (ops/create.go, workload/reconcile.go)
     placement: unit
     coverage: {perm: [], unit: [], kind: []}
-    status: review
+    status: decided
   - state: Restart/Drain
     event: api.namespaceTerminating
     outcome: escalate

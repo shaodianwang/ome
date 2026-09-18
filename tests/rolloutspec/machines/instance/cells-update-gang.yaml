@@ -68,7 +68,7 @@ cells:
     note: the source's pass releases its drain only on the whole gang, and the marker row is not rewritten by it
     placement: kind
     coverage: {perm: [], unit: [TestGangSurgeUpdate_HoldsSourceDrainUntilReplacementPodReady], kind: []}
-    status: review
+    status: decided
   - state: Update/GangSurgeTarget
     event: pod.servingOn
     variants: [source]
@@ -112,7 +112,7 @@ cells:
     invariants: [one.operation.per.instance]
     placement: kind
     coverage: {perm: [], unit: [TestGangSurge_PromoteEmitsCompletedEvent, TestGangSurge_ResumesPromotedTargetWithPodlessSource], kind: []}
-    status: review
+    status: decided
   - state: Update/GangSurgeTarget
     event: pod.deleted
     variants: [source]
@@ -122,7 +122,7 @@ cells:
     note: the promote write is landing; a further source pod disappearance adds nothing, and the authoritative pair guard rejects the write if either side drifted
     placement: kind
     coverage: {perm: [], unit: [TestPromoteGangSurgeTarget_RejectsAuthoritativePairDrift], kind: []}
-    status: review
+    status: decided
   - state: Update/GangSurgeTarget
     event: pod.deleted
     variants: [source]
@@ -163,7 +163,7 @@ cells:
     invariants: [podgroup.before.pods]
     placement: kind
     coverage: {perm: [], unit: [TestGangSurgeUpdate_EnsuresPodGroupBeforeSurgePods, TestGangSurge_PromotedPinnedTargetRecreatesMissingPodsBeforeNewerRevision], kind: []}
-    status: review
+    status: decided
   - state: Update/GangSurgeTarget
     event: pod.deleted
     variants: [target]
@@ -173,7 +173,7 @@ cells:
     note: once the promote lands the index is an ordinary Ready Instance with no operation, so the restart pass owns a missing member from that point on
     placement: kind
     coverage: {perm: [], unit: [], kind: []}
-    status: review
+    status: decided
   - state: Update/GangSurgeTarget
     event: pod.deleted
     variants: [target]
@@ -212,7 +212,7 @@ cells:
     note: all seven are terminal waiting reasons, so the escalation pass stamps BOTH the source (its blame bucket is the replacement gang) and this marker Failed with the operation preserved; the source's Failed is what drives the abandon path. Unlike a single-pod surge, a gang target is never recycled in place
     placement: kind
     coverage: {perm: [], unit: [], kind: []}
-    status: review
+    status: decided
   - state: Update/GangSurgeTarget
     event: pod.waiting
     variants: [DeadlineExceeded]
@@ -273,7 +273,7 @@ cells:
     note: the in-flight surge is ABANDONED, not retargeted — the marker's step advances to the cleanup claim and no RetryBlock is recorded, because a spec change is not a failure of the retired revision
     placement: kind
     coverage: {perm: [], unit: [TestGangSurge_PromotedPinnedTargetRecreatesMissingPodsBeforeNewerRevision], kind: []}
-    status: review
+    status: decided
   - state: Update/GangSurgeTarget
     event: spec.revision
     windows: [boundary, after]
@@ -282,7 +282,7 @@ cells:
     note: the cleanup claim is being stamped; a further revision move does not re-open the retired replacement, and the fresh roll re-enters from the source once it is reset to Ready
     placement: kind
     coverage: {perm: [], unit: [TestGangSurge_CleanupMarkerRemainsTerminalWhenDesiredRevisionReturns], kind: []}
-    status: review
+    status: decided
   - state: Update/GangSurgeTarget
     event: spec.revision
     windows: [boundary, after]
@@ -320,10 +320,10 @@ cells:
   - state: Update/GangSurgeTarget
     event: spec.strategy
     outcome: ignore
-    note: the surge machine stays in control across a strategy edit — the source's status is surge-owned so the dispatcher re-enters the gang surge, and unlike the single-pod path the gang branch has no strategy-abandon check at all
+    note: the strategy is pinned for the life of the operation, so the gang surge stays in control and finishes under SurgeThenDrain; the edit reaches the pair at its next admitted attempt
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
-    status: review
+    status: decided
   - state: Update/GangSurgeTarget
     event: spec.replicasUp
     outcome: ignore
@@ -338,7 +338,7 @@ cells:
     invariants: [marker.pinned.while.referenced]
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
-    status: review
+    status: decided
   - state: Update/GangSurgeTarget
     event: spec.pauseTrue
     outcome: defer
@@ -416,7 +416,7 @@ cells:
     note: a fresh migration record is not driven while any surge is in flight, and the source's Surge step is counted, so the request waits for the gang surge to resolve
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
-    status: review
+    status: decided
   - state: Update/GangSurgeTarget
     event: spec.partition
     outcome: ignore
@@ -447,7 +447,7 @@ cells:
     note: the modeled edge is the source's escalation driving the abandon path, which claims the cleanup marker so it keeps ownership of its pods and PodGroup. The marker's OWN deadline additionally stamps this row Failed with the operation preserved (T-gangtarget-deadline)
     placement: kind
     coverage: {perm: [], unit: [TestAbandonFailedGangSurge_PersistsCleanupMarkerAcrossRemovalFailure], kind: []}
-    status: review
+    status: decided
   - state: Update/GangSurgeTarget
     event: timer.operationDeadline
     windows: [boundary, after]
@@ -490,21 +490,21 @@ cells:
     note: the durable anchor is the pair — the source's SurgeIndex plus this marker row — so a restart resumes the surge; a marker lost between the two writes is re-established before any pod effect, and a marker restored over an incomplete replacement is restored straight into the cleanup claim
     placement: kind
     coverage: {perm: [], unit: [TestGangSurge_RestoresMissingTargetMarkerBeforeEffects, TestGangSurge_RestartAfterTargetStampFailureRestoresCleanupBeforeRedirects], kind: []}
-    status: review
+    status: decided
   - state: Update/GangSurgeTarget
     event: ctrl.staleRead
     outcome: ignore
     note: every destructive step reads the replacement and source pods live, and each status write is fenced on the authoritative snapshot of BOTH lifecycle identities, so a lagging cache cannot claim an occupied target or delete a live one
     placement: sim
     coverage: {perm: [], unit: [TestGangSurge_StaleSnapshotDoesNotClaimOccupiedTarget, TestGangSurge_CachedTargetMissingAuthoritativelyRestoresBeforeEffects], kind: []}
-    status: review
+    status: decided
   - state: Update/GangSurgeTarget
     event: api.conflict
     outcome: defer
     note: a precondition or owner-gone failure on the paired status write returns without effect and the pass retries on the requeue; the pair guard is re-evaluated against the fresh snapshot each attempt
     placement: sim
     coverage: {perm: [], unit: [TestStartGangSurge_WriteFailureLeavesPairUnchanged, TestStartGangSurge_RejectsAuthoritativeDrift], kind: []}
-    status: review
+    status: decided
   - state: Update/GangSurgeTarget
     event: api.alreadyExists
     outcome: ignore
@@ -1057,7 +1057,7 @@ cells:
     note: the cleanup claim is terminal — a retired pod becoming ready does not revive the replacement, because the claim predicates match on revision and step and never on health
     placement: kind
     coverage: {perm: [], unit: [TestGangSurge_CleanupMarkerRemainsTerminalWhenDesiredRevisionReturns], kind: []}
-    status: review
+    status: decided
   - state: Update/GangSurgeTargetCleanup
     event: pod.ready
     variants: [source]
@@ -1126,7 +1126,7 @@ cells:
     invariants: [marker.owns.its.pods.until.removed]
     placement: kind
     coverage: {perm: [], unit: [TestAbandonFailedGangSurge_AtomicallyRemovesMarkerAndResetsSource, TestAbandonFailedGangSurge_ResetsSourceAfterPodsGone, TestAbandonFailedGangSurge_RecordsRetryBlockWithPolicy], kind: []}
-    status: review
+    status: decided
   - state: Update/GangSurgeTargetCleanup
     event: pod.deleted
     variants: [target]
@@ -1136,7 +1136,7 @@ cells:
     note: the removal is landing; the pair guard rejects the write if either identity drifted, and a marker already absent from the authoritative snapshot counts as removed rather than as an error
     placement: kind
     coverage: {perm: [], unit: [TestGangSurge_PodlessSourcePersistsTerminalMarkerBeforeFinalization], kind: []}
-    status: review
+    status: decided
   - state: Update/GangSurgeTargetCleanup
     event: pod.deleted
     variants: [target]
@@ -1202,7 +1202,7 @@ cells:
     note: the cleanup claim is terminal even when the desired revision moves BACK to the one this replacement was pinned to; the fresh roll re-enters through the source after it is reset, so the retired gang is never adopted
     placement: kind
     coverage: {perm: [], unit: [TestGangSurge_CleanupMarkerRemainsTerminalWhenDesiredRevisionReturns], kind: []}
-    status: review
+    status: decided
   - state: Update/GangSurgeTargetCleanup
     event: spec.annotationOnly
     outcome: ignore
@@ -1231,7 +1231,7 @@ cells:
     invariants: [marker.pinned.while.referenced]
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
-    status: review
+    status: decided
   - state: Update/GangSurgeTargetCleanup
     event: spec.pauseTrue
     outcome: defer
@@ -1289,7 +1289,7 @@ cells:
     note: a fresh migration record is not driven while a surge is counted in flight, and the source still carries its Surge step until the retirement resets it
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
-    status: review
+    status: decided
   - state: Update/GangSurgeTargetCleanup
     event: spec.partition
     outcome: ignore
@@ -1317,21 +1317,21 @@ cells:
     note: the marker is the durable record of the retirement; a restart that finds it missing while the source still claims the index restores it straight into the cleanup claim rather than as active work
     placement: kind
     coverage: {perm: [], unit: [TestGangSurge_RestartAfterTargetStampFailureRestoresCleanupBeforeRedirects, TestAbandonFailedGangSurge_PersistsCleanupMarkerAcrossRemovalFailure], kind: []}
-    status: review
+    status: decided
   - state: Update/GangSurgeTargetCleanup
     event: ctrl.staleRead
     outcome: ignore
     note: the retirement lists the retired index's pods live and fences both status writes on the authoritative snapshot, so a stale cached cleanup view can never delete pods that belong to a live claim
     placement: sim
     coverage: {perm: [], unit: [TestGangSurge_StaleCachedCleanupDoesNotDeletePods], kind: []}
-    status: review
+    status: decided
   - state: Update/GangSurgeTargetCleanup
     event: api.conflict
     outcome: defer
     note: a precondition or owner-gone failure on the paired removal-and-reset write returns without effect, leaving the marker in place; the pass retries on the requeue against a fresh snapshot
     placement: sim
     coverage: {perm: [], unit: [TestAbandonFailedGangSurge_PersistsCleanupMarkerAcrossRemovalFailure], kind: []}
-    status: review
+    status: decided
   - state: Update/GangSurgeTargetCleanup
     event: api.alreadyExists
     outcome: n/a

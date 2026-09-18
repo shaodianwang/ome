@@ -35,6 +35,10 @@ history:
   - {state: Update/Surge, event: spec.revision, variants: [], windows: [boundary], transition: "", prs: ["#720", "#1423"]}
 ```
 
+An entry whose provenance is not a merged change — an owner's review session,
+say — carries a `decision: <reference>` string instead of, or alongside, `prs`;
+every entry must carry at least one of the two.
+
 An entry matches a grid cell when its `state` and `event` match exactly and its
 `variants`/`windows`/`transition` selector matches (empty means "all"), the same
 rule an authored cell in the machine tables uses. An entry that matches no grid
@@ -43,7 +47,8 @@ picks up `history/<machine>.yaml` and `history/<machine>-*.yaml` next to this
 README, if they exist.
 
 `check_history.py` is the stricter pair of that check: it reads a rendered grid
-JSON plus the sidecars and fails when a `review` cell has no sidecar entry, or
+JSON plus the sidecars and fails when a `review` cell has no sidecar entry, when
+a sidecar entry carries neither `prs` nor a `decision` reference, or
 when a sidecar entry selects only cells that are neither `review` nor `decided`
 (its PRs would then never reach a reviewer, since the heatmap only shows
 history on those two statuses). A `decided` cell may cite a merged PR as

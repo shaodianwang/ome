@@ -51,7 +51,7 @@ transitions:
     from: Pending
     event: pod.containersReady
     variant: source
-    guard: the Create pass finds the pod set complete and every pod ContainersReady, so its ready action promotes without stamping Creating first
+    guard: the Create pass finds the pod set complete and every pod PodReady past its minReadySeconds window, so its ready action promotes without stamping Creating first
     to: Ready
     effects: [Phase Ready with ReadySince stamped and the operation left nil, RunningRevision set when the pods carry the target revision hash]
     decided_in: pkg/controller/v1beta1/workload/ops/create.go
@@ -164,6 +164,14 @@ transitions:
     to: Failed
     effects: [Phase Failed with the stuck pod's termination on LastFailure]
     decided_in: pkg/controller/v1beta1/workload/escalation.go
+  - id: T-ready-crashloop-restart
+    from: Ready
+    event: pod.waiting
+    guard: a pod of a Ready row with no operation holds a terminal waiting reason past lifecycle.stuckPodGracePeriod while its revision-hash label still matches the Component's current revision, whatever the restart policy says, and the coordination gate, the unavailability budget and the RetryBlock for that revision all admit a fresh attempt
+    to: Restart/Drain
+    effects: [Incarnation bumped, Phase Restarting with the crash-loop reason recorded on LastFailure, the rebuild paced by the per-Component budget and gated by the revision's RetryBlock]
+    decided_in: pkg/controller/v1beta1/workload/ops/restart.go
+
   - id: T-ready-migrate
     from: Ready
     event: spec.migrateRequest
@@ -374,7 +382,7 @@ transitions:
     from: Create/CreatePods
     event: pod.containersReady
     variant: source
-    guard: the pod set is complete and every pod ContainersReady; the serving gate is written before the promotion commits
+    guard: the pod set is complete and every pod is PodReady past its minReadySeconds window; the serving gate is written before the promotion commits
     to: Ready
     effects: [Phase Ready with ReadySince stamped, operation cleared, RunningRevision set when the pods carry the target revision hash, that revision's RetryBlock pruned]
     decided_in: pkg/controller/v1beta1/workload/ops/create.go
@@ -396,8 +404,8 @@ transitions:
     from: Create/CreatePods
     event: spec.revision
     guard: the attempt's pinned revision is no longer the target, or an unpinned attempt's pod label proves it belongs to another revision
-    to: Failed
-    effects: [Phase Failed with the operation cleared so the next pass starts a fresh attempt at the current target]
+    to: Create/CreatePods
+    effects: [the half-built attempt retired and replaced by a fresh Create CreatePods operation pinned to the current target, with no Failed phase, no failure event and no RetryBlock, because a superseded spec is not a failure of the retired revision; the pods of the retired attempt are cleaned up under the new operation]
     decided_in: pkg/controller/v1beta1/workload/ops/create.go
   - id: T-create-gang-restart
     from: Create/CreatePods
@@ -456,9 +464,9 @@ transitions:
     from: Update/Surge
     event: pod.deleted
     variant: source
-    guard: the source pods are gone while the replacement is ContainersReady, so the whole drain block is skipped and the promote is reached directly
+    guard: the source pods are gone while the replacement is PodReady past its minReadySeconds window, so the whole drain block is skipped and the promote is reached directly
     to: Ready
-    effects: [replacement marked serving, ActiveOrdinal advanced to the replacement slot, Phase Ready on the pinned revision with the operation cleared; the PodReady and minReadySeconds waits are skipped because they apply only while the source is still in rotation]
+    effects: [replacement marked serving, ActiveOrdinal advanced to the replacement slot, Phase Ready on the pinned revision with the operation cleared; losing the source skips the drain block, never the promote bar]
     decided_in: pkg/controller/v1beta1/workload/ops/update_surge.go
   - id: T-surge-abandon-superseded
     from: Update/Surge
@@ -466,13 +474,6 @@ transitions:
     guard: the in-flight surge is pinned to a revision the desired state no longer asks for and its replacement is not yet runtime-ready
     to: Ready
     effects: [replacement pods deleted, source reset to Ready on its running revision so the next pass re-enters through the gates]
-    decided_in: pkg/controller/v1beta1/workload/ops/update_surge.go
-  - id: T-surge-abandon-strategy
-    from: Update/Surge
-    event: spec.strategy
-    guard: the strategy was edited away from SurgeThenDrain and the replacement is not yet runtime-ready
-    to: Ready
-    effects: [replacement pods deleted, source reset to Ready on its running revision so the roll restarts under the new strategy]
     decided_in: pkg/controller/v1beta1/workload/ops/update_surge.go
   - id: T-surge-deadline
     from: Update/Surge
@@ -766,7 +767,7 @@ transitions:
     from: Update/InPlace
     event: pod.containersReady
     variant: source
-    guard: every changed container reports the target image at runtime, the transition marker is cleared, serving is back on, and any minReadySeconds window has elapsed
+    guard: every changed container reports the target image at runtime, the transition marker is cleared, serving is back on, the pod is PodReady, and the minReadySeconds window has elapsed
     to: Ready
     effects: [revision hash and pairing labels restamped on the live pod, Phase Ready on the target revision with the operation cleared]
     decided_in: pkg/controller/v1beta1/workload/ops/update_inplace.go
@@ -784,20 +785,15 @@ transitions:
     to: Update/InPlace
     effects: [operation restamped at the new target with a fresh deadline, the image-transition marker rewritten to the new expected images]
     decided_in: pkg/controller/v1beta1/workload/ops/update_inplace.go
-  - id: T-inplace-strategy-surge
+  - id: T-inplace-podlost-recreate
     from: Update/InPlace
-    event: spec.strategy
-    guard: the strategy was edited to SurgeThenDrain; the surge-owned guard protects only a surge-step row, so the mode re-resolves and dispatches over the in-flight in-place step
-    to: Update/Surge
-    effects: [operation restamped with the Surge step, replacement pod created at the alternate ordinal]
-    decided_in: pkg/controller/v1beta1/workload/ops/update.go
-  - id: T-inplace-strategy-recreate
-    from: Update/InPlace
-    event: spec.strategy
-    guard: the strategy was edited to RecreatePod, so the mode re-resolves to recreate over the in-flight in-place step
+    event: pod.deleted
+    variant: source
+    guard: the roll's only pod is gone, so there is nothing left to patch and the mode re-resolves to recreate on the same pass
     to: Update/Drain
-    effects: [Incarnation bumped and the operation restamped with the Drain step, which is what makes recreate's idempotency check fall through]
+    effects: [the operation restamped with the Drain step at the same target revision, deadline and operation identity, the replacement rendered at the target revision]
     decided_in: pkg/controller/v1beta1/workload/ops/update.go
+
   - id: T-inplace-deadline
     from: Update/InPlace
     event: timer.operationDeadline
@@ -817,7 +813,7 @@ transitions:
     event: timer.forceDelete
     guard: a force-delete policy is configured and the patched pod, deleted from outside since an in-place roll issues no deletes of its own, is past its deletion deadline plus the overdue slack while its node is gone or has been unreachable past the threshold
     to: Update/InPlace
-    effects: [the wedged pod force-deleted with grace zero under a UID precondition, Warning event and a ledger row recorded, the roll left with an empty pod set its own deadline still bounds]
+    effects: [the wedged pod force-deleted with grace zero under a UID precondition, Warning event and a ledger row recorded, the resulting empty pod set re-resolving the roll to recreate]
     decided_in: pkg/controller/v1beta1/workload/ops/force_delete.go
   - id: T-inplace-scaledown
     from: Update/InPlace
@@ -864,20 +860,6 @@ transitions:
     to: Update/Drain
     effects: [Incarnation bumped again and the operation restamped at the new target, so the drain and delete phase restarts against the previous incarnation]
     decided_in: pkg/controller/v1beta1/workload/ops/update_recreate.go
-  - id: T-drain-strategy-surge
-    from: Update/Drain
-    event: spec.strategy
-    guard: the strategy was edited to SurgeThenDrain; the surge-owned guard protects only a surge-step row, so the mode re-resolves and dispatches over the in-flight recreate
-    to: Update/Surge
-    effects: [operation restamped with the Surge step, replacement pod created at the alternate ordinal while the recreate's incarnation bump stands]
-    decided_in: pkg/controller/v1beta1/workload/ops/update.go
-  - id: T-drain-strategy-inplace
-    from: Update/Drain
-    event: spec.strategy
-    guard: the strategy was edited to an in-place mode on a single-pod Instance whose diff against the running revision is image-only, so the mode re-resolves over the in-flight recreate
-    to: Update/InPlace
-    effects: [operation restamped with the InPlace step at the same target while the recreate's incarnation bump stands]
-    decided_in: pkg/controller/v1beta1/workload/ops/update.go
   - id: T-drain-deadline
     from: Update/Drain
     event: timer.operationDeadline
@@ -933,7 +915,7 @@ transitions:
     from: Restart/Drain
     event: pod.containersReady
     variant: source
-    guard: old-incarnation pods are gone on a live read, the bumped-incarnation set is complete, and every pod is ContainersReady
+    guard: old-incarnation pods are gone on a live read, the bumped-incarnation set is complete, and every pod is PodReady past its minReadySeconds window
     to: Ready
     effects: [serving gate written on the fresh pods, Phase Ready with ReadySince restamped and the operation cleared]
     decided_in: pkg/controller/v1beta1/workload/ops/restart.go
@@ -1010,6 +992,14 @@ transitions:
     to: Ready
     effects: [Migrate pin cleared, source-drain hold released so the source returns to rotation, RunningRevision untouched, record closed]
     decided_in: pkg/controller/v1beta1/workload/ops/migrate_expire.go
+  - id: T-migrate-surge-terminal
+    from: Migrate/CreateSurge
+    event: pod.waiting
+    guard: a surge pod holds a terminal waiting reason past the stuck-pod grace, which the record consumes as early failure evidence
+    to: Ready
+    effects: [the record closed Failed, the surge index torn down, the source restored to Ready on its untouched RunningRevision with the source-drain hold released; the source is never stamped directly and the record deadline remains the backstop]
+    decided_in: pkg/controller/v1beta1/workload/ops/migrate.go
+
   - id: T-migrate-teardown
     from: Migrate/CreateSurge
     event: spec.teardown
@@ -1048,6 +1038,14 @@ transitions:
     to: Delete/Drain
     effects: [Migrate pin cleared, the index becomes a scale-down extra and the next wave commits Phase Deleting with a Delete Drain operation]
     decided_in: pkg/controller/v1beta1/workload/ops/migrate_expire.go
+  - id: T-migratetarget-terminal
+    from: Migrate/SurgeTarget
+    event: pod.waiting
+    guard: a pod of this surge holds a terminal waiting reason past the stuck-pod grace, which the record consumes as early failure evidence
+    to: Delete/Drain
+    effects: [the record closed Failed and the pin cleared, so the unpinned index leaves the plan and the scale-down pipeline tears it down; the paired source is restored through the record rather than stamped here]
+    decided_in: pkg/controller/v1beta1/workload/ops/migrate.go
+
   - id: T-migratetarget-teardown
     from: Migrate/SurgeTarget
     event: spec.teardown

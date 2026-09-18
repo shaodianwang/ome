@@ -64,7 +64,7 @@ cells:
       perm: []
       unit: [TestAbandonFailedGangSurge_AtomicallyRemovesMarkerAndResetsSource]
       kind: []
-    status: review
+    status: decided
   - state: Failed
     event: pod.ready
     variants: [source]
@@ -167,12 +167,12 @@ cells:
       perm: []
       unit: [TestAbandonFailedGangSurge_PersistsCleanupMarkerAcrossRemovalFailure]
       kind: []
-    status: review
+    status: decided
   - state: Failed
     event: pod.waiting
     variants: [ImagePullBackOff, ErrImagePull, InvalidImageName, CreateContainerConfigError, CrashLoopBackOff, RunContainerError, DeadlineExceeded]
     outcome: ignore
-    note: the escalation pass skips an already-Failed row so the operator-facing event fires once per escalation; the reason that caused the stamp is already on LastFailure
+    note: a Failed row takes no new edge on fresh pod evidence; the single effect is an evidence refresh, one LastFailure overwrite when the recorded reason is the generic deadline and the pod now names a concrete cause. No second event, no change to the RetryBlock, and the phase is untouched
     invariants: [failed.is.sticky]
     placement: perm
     coverage:
@@ -192,7 +192,7 @@ cells:
       perm: []
       unit: [TestSurgeUpdate_RecyclesFailedCreateContainerTargetThenRetries, TestSurgeUpdate_FailedCreateContainerTargetParksWithoutRelocationAuthorization, TestSurgeUpdate_FailedCreateContainerTargetRequiresServingSource]
       kind: []
-    status: review
+    status: decided
   - state: Failed
     event: pod.containerRestart
     outcome: ignore
@@ -260,7 +260,7 @@ cells:
       perm: []
       unit: [TestDetectUpdateTrigger_PhaseFailedRetriggersOnMismatch, TestDetectUpdate_NewRevisionPassesGate, TestDetectUpdate_FailedContinuationPassesGate, TestPatchInstanceStatusSurgingForUpdate_FailedStickyOnSameTarget, TestPlan_Update_CleanupOnly_RollBackWreckage, TestCorrectiveRecovery_SinglePod_RollForward, TestCorrectiveRecovery_Gang_RollForward, TestCorrectiveRecovery_SinglePod_RollBack]
       kind: []
-    status: review
+    status: decided
   - state: Failed
     event: spec.revision
     windows: [boundary, after]
@@ -275,7 +275,7 @@ cells:
     note: excluded annotations and labels are kept out of the revision hash, so the target is unchanged and nothing re-drives the row
     placement: unit
     coverage: {perm: [], unit: [], kind: []}
-    status: review
+    status: decided
   - state: Failed
     event: spec.strategy
     outcome: defer
@@ -285,7 +285,7 @@ cells:
       perm: []
       unit: [TestUpdateWithPods_StrategyFlipAtUncommittedSurge_RollsUnderNewStrategy]
       kind: []
-    status: review
+    status: decided
   - state: Failed
     event: spec.replicasUp
     outcome: ignore
@@ -323,7 +323,7 @@ cells:
       perm: []
       unit: [TestPlan_Paused_RepairRunsFleetChangesDoNot, TestReconcile_PausedSkipsCreate, TestReconcile_PausedStillScalesDown]
       kind: []
-    status: review
+    status: decided
   - state: Failed
     event: spec.pauseFreeze
     outcome: ignore
@@ -333,7 +333,7 @@ cells:
       perm: []
       unit: [TestPlan_Paused_RepairRunsFleetChangesDoNot]
       kind: []
-    status: review
+    status: decided
   - state: Failed
     event: spec.unpause
     outcome: defer
@@ -460,7 +460,7 @@ cells:
       perm: []
       unit: [TestPlan_Update_StartingFresh_FailedByOperationType, TestReconcile_FailedUpdateHoldsMaxUnavailableBudget, TestReconcile_FailedRestart_RecreateBypassesCoordGate]
       kind: []
-    status: review
+    status: decided
   - state: Failed
     event: timer.operationDeadline
     outcome: ignore

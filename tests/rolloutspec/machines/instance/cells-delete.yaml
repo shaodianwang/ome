@@ -70,7 +70,7 @@ cells:
     guard: "every pod of the index drained, and the index has no outstanding delete expectation"
     placement: perm
     coverage: {perm: [], unit: [TestDeleteBatchDrainReadFailureStopsBeforeDelete], kind: []}
-    status: review
+    status: decided
 
   - state: Delete/Drain
     event: pod.deleted
@@ -81,7 +81,7 @@ cells:
     invariants: [row.removed.only.after.pods.gone]
     placement: perm
     coverage: {perm: [], unit: [TestDeleteBatchIncompleteResourceFinalizationRetainsStatus, TestDeleteBatchResourceFinalizationFailureRetainsStatus], kind: []}
-    status: review
+    status: decided
 
   - state: Delete/Drain
     event: pod.deleted
@@ -95,7 +95,7 @@ cells:
     invariants: [row.removed.only.after.pods.gone]
     placement: perm
     coverage: {perm: [], unit: [TestDeleteBatchCompletionFinalizesThenRemovesOnce, TestCompleteDeleteBatchRejectsConcurrentPhaseDrift], kind: []}
-    status: review
+    status: decided
 
   - state: Delete/Drain
     event: pod.deleted
@@ -106,7 +106,7 @@ cells:
     note: "the row is gone and its expectations entry was forgotten in the same commit, so a late pod-deletion event for the removed index finds nothing to advance. The commit is a pass boundary and the next reconcile replans from the post-removal status"
     placement: perm
     coverage: {perm: [], unit: [TestReconcileDeleteOwnedReboundFinishesBeforeRecreate], kind: []}
-    status: review
+    status: decided
 
   - state: Delete/Drain
     event: pod.deleted
@@ -151,7 +151,7 @@ cells:
     note: "evidence not yet actionable. No configured force-delete policy means the escalation does not exist and no node is ever read; inside the pod's own grace plus slack, on a node still posting Ready, or on unreachable evidence younger than the threshold, the pass acts on nothing and requeues at the exact policy boundary instead of inventing a cadence. A pod pinned by foreign finalizers gets one Warning per pod UID and is never force-deleted"
     placement: kind
     coverage: {perm: [], unit: [TestForceDelete_NilPolicy_NoNodeReadsNoAction, TestForceDelete_WithinOwnGrace_NodeGone_Untouched, TestForceDelete_Overdue_NodeReady_Untouched, TestForceDelete_Overdue_EvidenceYoungerThanThreshold_Untouched, TestForceDelete_ForeignFinalizer_ReportOnceNoSpam, TestForceDeleteRequeueTracksExactPolicyBoundaries], kind: []}
-    status: review
+    status: decided
 
   - state: Delete/Drain
     event: pod.stuckTerminating
@@ -163,7 +163,7 @@ cells:
     invariants: [delete.by.observed.uid]
     placement: kind
     coverage: {perm: [], unit: [TestForceDelete_Overdue_OldUnreachableTaint_DeletedWithOptions, TestForceDelete_Overdue_NodeGone_Deleted, TestForceDelete_StaleTaintOnRecoveredNode_ReadyTrueVetoes, TestForceDelete_PreconditionConflictAndNotFound_Success, TestForceDelete_ActionRecordsOnce_NoDoubleLedgerOnReplay], kind: []}
-    status: review
+    status: decided
 
   - state: Delete/Drain
     event: pod.stuckTerminating
@@ -178,7 +178,7 @@ cells:
     note: "node death is not consumed as an event of its own. It becomes actionable only through the Terminating pod that sits on the node, whose evidence is aged from the taint's own TimeAdded or the condition's own LastTransitionTime and read through the live reader, so nothing has to be remembered across restarts. A pod that is not Terminating on a lost node is left to the ordinary drain"
     placement: kind
     coverage: {perm: [], unit: [], kind: []}
-    status: review
+    status: decided
 
   - state: Delete/Drain
     event: pod.schedulingGated
@@ -230,7 +230,7 @@ cells:
     invariants: [owned.wave.before.fresh]
     placement: perm
     coverage: {perm: [], unit: [TestReconcileDeleteOwnedReboundFinishesBeforeRecreate], kind: []}
-    status: review
+    status: decided
 
   - state: Delete/Drain
     event: spec.replicasUp
@@ -241,7 +241,7 @@ cells:
     invariants: [owned.wave.before.fresh]
     placement: perm
     coverage: {perm: [], unit: [TestReconcileDeleteOwnedReboundFinishesBeforeRecreate], kind: []}
-    status: review
+    status: decided
 
   - state: Delete/Drain
     event: spec.replicasUp
@@ -251,7 +251,7 @@ cells:
     note: "with the row gone the index is created fresh from Empty at the target revision. The drained Instance is never resurrected, so the rebound costs a full create rather than a cancelled drain"
     placement: perm
     coverage: {perm: [], unit: [TestReconcileDeleteOwnedReboundFinishesBeforeRecreate], kind: []}
-    status: review
+    status: decided
 
   - state: Delete/Drain
     event: spec.replicasUp
@@ -270,7 +270,7 @@ cells:
     invariants: [owned.wave.before.fresh]
     placement: unit
     coverage: {perm: [], unit: [TestSelectDeleteBatchDeleteOwnedOrderingAndFreshClosure, TestDeleteBatchDeferredMembersDoNotBlockEligiblePeer], kind: []}
-    status: review
+    status: decided
 
   - state: Delete/Drain
     event: spec.pauseTrue
@@ -278,7 +278,7 @@ cells:
     note: "pause is an operator circuit breaker for lifecycle operations, not for capacity. Scale-down is selected before the pause checks, so an admitted drain keeps running and a deliberate replica reduction still releases capacity while paused"
     placement: unit
     coverage: {perm: [], unit: [TestPlan_Paused_RepairRunsFleetChangesDoNot, TestReconcile_PausedStillScalesDown], kind: []}
-    status: review
+    status: decided
 
   - state: Delete/Drain
     event: spec.pauseFreeze
@@ -286,7 +286,7 @@ cells:
     note: "freeze truncates the plan after the truth pass, and scale-down is selected before it, so a frozen pause does not hold an in-flight drain either. The pods of a draining index already have serving off, so letting the drain finish is the lower-risk end state and is what the code does"
     placement: unit
     coverage: {perm: [], unit: [TestPlan_Paused_RepairRunsFleetChangesDoNot], kind: []}
-    status: review
+    status: decided
 
   - state: Delete/Drain
     event: spec.unpause
@@ -303,7 +303,7 @@ cells:
     invariants: [row.removed.only.after.pods.gone]
     placement: perm
     coverage: {perm: [], unit: [TestReconcile_Teardown_DeletesEveryObservedInstance, TestReconcile_Teardown_PodlessInstances_RemovedAndDone, TestReconcile_Teardown_IgnoresPaused], kind: []}
-    status: review
+    status: decided
 
   - state: Delete/Drain
     event: spec.migrateRequest
@@ -355,11 +355,11 @@ cells:
   - state: Delete/Drain
     event: timer.operationDeadline
     outcome: ignore
-    note: "admission stamps a deadline from the Instance-ready timeout, but nothing consumes it. The escalation pass skips every row whose operation is Delete and the stuck-pod check refuses Phase=Deleting, so an overdue drain is neither failed nor warned about; it keeps polling at the scale-down interval and the force-delete policy is the only unwedger. A deadline that could expire but can never fire is worth an owner decision even though the current behavior is unambiguous"
+    note: "the deadline is consumed for visibility only. An overdue drain raises one Warning and carries a DrainOverdue condition on the InferenceReplica, and nothing else moves - the row stays Deleting, the delete batch keeps ownership of the index, no phase flip and no RetryBlock follow, and force-deleting the wedged pod stays gated on a configured policy plus node-death evidence"
     invariants: [one.operation.per.instance]
     placement: perm
     coverage: {perm: [], unit: [TestReconcileDeleteOwnedReboundFinishesBeforeRecreate, TestExecuteActiveScaleDownExcludesDeferredExtrasFromEscalation], kind: []}
-    status: current
+    status: decided
 
   - state: Delete/Drain
     event: timer.expectationsTTL
@@ -410,7 +410,7 @@ cells:
     note: "absence is the goal, so every NotFound is success. A missing pod means the wedge is already collected, a missing Node is the strongest force-delete evidence there is, and a missing per-revision Service makes the drain read trivially complete, which is safe only because the orphan sweep is timed to the pass on which the draining pod finally disappears. A missing owner surfaces as owner-gone and replans"
     placement: perm
     coverage: {perm: [], unit: [TestForceDelete_PreconditionConflictAndNotFound_Success, TestDeleteBatchAdmissionOwnerGoneReplansBeforeExternalEffects], kind: []}
-    status: review
+    status: decided
 
   - state: Delete/Drain
     event: api.quotaDenied

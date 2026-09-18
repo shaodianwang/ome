@@ -12,9 +12,10 @@ import (
 
 // historyEntry is one record of a history sidecar file: a cell selector
 // (state and event match exactly; variants, windows, and transition follow
-// the same empty-means-all rule as an authored Cell) plus the PRs that
-// touched every grid cell it selects. file records which sidecar it came
-// from, for error messages; it is not part of the sidecar's own schema.
+// the same empty-means-all rule as an authored Cell) plus the references
+// that decided every grid cell it selects. file records which sidecar it
+// came from, for error messages; it is not part of the sidecar's own
+// schema.
 type historyEntry struct {
 	State      string   `json:"state"`
 	Event      string   `json:"event"`
@@ -22,7 +23,19 @@ type historyEntry struct {
 	Windows    []string `json:"windows"`
 	Transition string   `json:"transition"`
 	PRs        []string `json:"prs"`
-	file       string
+	// Decision is a non-PR provenance reference, for a cell an owner
+	// decided outside any merged change.
+	Decision string `json:"decision"`
+	file     string
+}
+
+// refs renders the entry's provenance as the flat list the grid carries:
+// its PRs, then its decision reference when it has one.
+func (h historyEntry) refs() []string {
+	if h.Decision == "" {
+		return h.PRs
+	}
+	return append(append([]string{}, h.PRs...), h.Decision)
 }
 
 type historyFile struct {
@@ -50,8 +63,8 @@ func loadHistory(paths []string) ([]historyEntry, error) {
 	return entries, nil
 }
 
-// applyHistory fills each grid entry's History with the PRs of every
-// sidecar entry that selects it, matching state and event exactly and
+// applyHistory fills each grid entry's History with the references of
+// every sidecar entry that selects it, matching state and event exactly and
 // variant/window/transition by the same rule as an authored Cell. An entry
 // that selects no grid cell at all is a typo in its selector, not a
 // legitimately empty match, so it fails the run instead of vanishing
@@ -69,7 +82,7 @@ func applyHistory(env *envelope, entries []historyEntry) error {
 				continue
 			}
 			if rolloutspec.Selects(h.Variants, h.Windows, h.Transition, key) {
-				g.History = appendUniquePRs(g.History, h.PRs)
+				g.History = appendUniqueRefs(g.History, h.refs())
 				matched[ei] = true
 			}
 		}
@@ -88,16 +101,16 @@ func applyHistory(env *envelope, entries []historyEntry) error {
 	return nil
 }
 
-// appendUniquePRs appends every pr not already present in existing,
-// preserving first-seen order: a narrow and a broad sidecar entry both
-// listing the same PR against one cell is the normal case, not a
+// appendUniqueRefs appends every reference not already present in
+// existing, preserving first-seen order: a narrow and a broad sidecar entry
+// both citing the same reference against one cell is the normal case, not a
 // duplicate to keep.
-func appendUniquePRs(existing []string, prs []string) []string {
+func appendUniqueRefs(existing []string, refs []string) []string {
 	seen := make(map[string]bool, len(existing))
 	for _, p := range existing {
 		seen[p] = true
 	}
-	for _, p := range prs {
+	for _, p := range refs {
 		if seen[p] {
 			continue
 		}

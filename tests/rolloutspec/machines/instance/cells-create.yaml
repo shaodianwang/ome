@@ -30,11 +30,11 @@ cells:
     windows: [before]
     outcome: transition
     to: Ready
-    guard: the observation completes the set — every expected pod exists and every one of them reports ContainersReady; a partial set leaves the row in CreatePods and requeues
-    note: the promote writes the serving gate on each pod first, then commits Phase Ready with the operation cleared, stamping RunningRevision only when every pod carries the target revision hash
+    guard: the observation completes the set — every expected pod exists, every one of them is PodReady, and the minReadySeconds window has elapsed; a partial or not-yet-available set leaves the row in CreatePods and requeues
+    note: the promote writes the serving gate on each pod first, then commits Phase Ready with the operation cleared, stamping RunningRevision only when every pod carries the target revision hash. Create shares the one promote bar with every other path
     placement: kind
     coverage: {perm: [], unit: [TestCreate_AllPodsReady_FlipsServingAndMarksReady, TestCreate_AllPodsExistButNotReady_HoldsCreating], kind: []}
-    status: current
+    status: decided
 
   - state: Create/CreatePods
     event: pod.containersReady
@@ -50,10 +50,10 @@ cells:
     event: pod.ready
     variants: [source]
     outcome: ignore
-    note: the create promote keys on ContainersReady, never on PodReady; PodReady cannot even become true until the promote itself releases the serving readiness gate, so this event always trails the transition it looks like it should drive
+    note: PodReady is half of the promote bar the create shares with every other path; it commits nothing on its own, because the set must also be complete and past its minReadySeconds window
     placement: kind
     coverage: {perm: [], unit: [], kind: []}
-    status: current
+    status: decided
 
   - state: Create/CreatePods
     event: pod.servingOn
@@ -106,7 +106,7 @@ cells:
     invariants: [one.operation.per.instance]
     placement: perm
     coverage: {perm: [], unit: [TestDispose_WorkloadCaused_EachReason, TestDispose_PinnedCreateUsesAttemptRevisionAfterCorrectiveEdit, TestEscalateStuckPodFailures_DisposesSinglePodWorkloadCaused], kind: []}
-    status: review
+    status: decided
 
   - state: Create/CreatePods
     event: pod.waiting
@@ -201,22 +201,22 @@ cells:
     event: spec.revision
     windows: [before]
     outcome: transition
-    to: Failed
+    to: Create/CreatePods
     guard: the attempt's pinned revision is no longer the target, or an unpinned attempt's pod label proves it belongs to another revision
-    note: the update trigger declines any row below Ready, so a retarget cannot be executed as an update here; the Create pass retires the attempt to Failed with the operation cleared and requeues, and the next pass starts a fresh attempt at the current target — an attempt whose pin still matches is untouched and finishes
+    note: a superseded spec is not a failure of the retired revision, so the half-built attempt is retired straight into a fresh Create at the new target — the operation is replaced in one write with no Failed phase, no failure event and no RetryBlock, for a single pod and for a gang alike. An attempt whose pin still matches is untouched and finishes
     invariants: [one.operation.per.instance]
     placement: perm
     coverage: {perm: [], unit: [TestCreate_BatchesSupersededAttemptRetirement, TestCreate_CorrectiveEditDuringPartialGangDoesNotMixRevisions, TestCreate_CorrectiveEditDoesNotAdoptUnpinnedPartialGang], kind: []}
-    status: review
+    status: decided
 
   - state: Create/CreatePods
     event: spec.revision
     windows: [boundary, after]
     outcome: ignore
-    note: the retirement mutation is preconditioned on the incarnation and the exact operation id and target, so it no-ops once the row has left Creating or the attempt has been replaced
+    note: the replacement mutation is preconditioned on the incarnation and the exact operation id and target, so it no-ops once the attempt has already been replaced, and a further move is picked up by the fresh attempt on the next pass
     placement: perm
     coverage: {perm: [], unit: [TestCreate_AdoptsUnpinnedAttemptWithoutPods], kind: []}
-    status: review
+    status: decided
 
   - state: Create/CreatePods
     event: spec.annotationOnly
@@ -251,7 +251,7 @@ cells:
     note: scale-down selection runs before every other pass and does not exempt a Creating row, so an index that leaves the desired set mid-create is drained and removed rather than finished; a wave that defers the victim leaves the row in CreatePods untouched for that pass
     placement: unit
     coverage: {perm: [], unit: [TestPlan_ScaleDown_SelectsExtras, TestReconcileFreshScaleDownAdmissionEndsThePass], kind: []}
-    status: review
+    status: decided
 
   - state: Create/CreatePods
     event: spec.replicasDown
@@ -260,31 +260,31 @@ cells:
     note: the scale-down admission and the Delete stamp land in one status transaction, and a deferred victim receives no lifecycle mutation at all, so there is no half-applied shape for a late observation to act on
     placement: perm
     coverage: {perm: [], unit: [TestExecuteActiveScaleDownExcludesDeferredExtrasFromEscalation], kind: []}
-    status: review
+    status: decided
 
   - state: Create/CreatePods
     event: spec.pauseTrue
-    outcome: defer
-    note: a standard pause truncates the plan after the restart pass, so the Create pass neither creates the remaining pods nor promotes the ones that came up; the row keeps its operation, its deadline is parked for the whole pause, and the escalation pass is suspended so the attempt cannot time out while held
+    outcome: ignore
+    note: pause blocks new operations and new steps, never a step already under way, so a half-built set is completed at its pinned revision and promoted; holding a complete set unpromoted would leave the Instance with nothing serving, which is exactly what a pause may not do. The hold applies to the next operation
     placement: unit
     coverage: {perm: [], unit: [TestPlan_Paused_RepairRunsFleetChangesDoNot, TestPlan_Create_AlwaysPlannedUnlessPaused], kind: []}
-    status: review
+    status: decided
 
   - state: Create/CreatePods
     event: spec.pauseFreeze
-    outcome: defer
-    note: freeze truncates the plan one pass earlier than a standard pause, after scale-down, so on top of the parked create the restart pass no longer repairs a gang that loses a member mid-materialization
+    outcome: ignore
+    note: the in-flight create finishes at its pinned revision exactly as under a standard pause; what freeze adds is that the restart pass no longer repairs a gang that loses a member mid-materialization
     placement: unit
     coverage: {perm: [], unit: [TestPlan_Paused_RepairRunsFleetChangesDoNot], kind: []}
-    status: review
+    status: decided
 
   - state: Create/CreatePods
     event: spec.unpause
     outcome: ignore
-    note: the same attempt resumes — the operation and its pinned revision were never cleared, the remaining pods are created and the set is promoted as usual, and the parked deadline is re-armed from the unpause rather than from the original start, so the hold does not eat the attempt's budget
+    note: the same attempt resumes — the operation and its pinned revision were never cleared — and a deadline parked by a hold re-arms with a full window measured from the unpause rather than from the original start, so the hold does not eat the attempt's budget
     placement: perm
     coverage: {perm: [], unit: [TestReconcileGatedDeadlines_RestartsOnUngate], kind: []}
-    status: review
+    status: decided
 
   - state: Create/CreatePods
     event: spec.teardown
@@ -381,7 +381,7 @@ cells:
     note: every status and readiness-gate write re-reads its object inside a conflict-retry loop, so a losing write is re-applied against fresh state; an exhausted loop returns the error, the committed Creating row and its created pods are left in place, and the attempt continues on the requeue
     placement: sim
     coverage: {perm: [], unit: [TestCreate_BatchedCreatingPersistenceFailureCreatesNoPods, TestCreate_BatchedReadyPersistenceFailureRestoresFailFastServingPrefix], kind: []}
-    status: review
+    status: decided
 
   - state: Create/CreatePods
     event: api.alreadyExists
@@ -458,17 +458,15 @@ cells:
     placement: unit
     coverage: {perm: [], unit: [TestCreate_RecyclePacedByRetryLadder, TestCreate_RecyclesSucceededTerminalPod], kind: []}
     status: decided
-  # GAP: phase Unknown is not terminal for query.IsTerminalPod, so a pod on a
-  # partitioned node still holds its name and the attempt waits out its deadline.
   - state: Create/CreatePods
     event: pod.phaseTerminal
     variants: [Unknown]
     outcome: defer
-    note: the recycle predicate is PodFailed or PodSucceeded only, and no other pass reads phase, so an Unknown pod keeps its name slot, never reports ContainersReady, and the attempt runs out on the operation deadline (workload/query/discover.go)
+    guard: node death is proven - the Node object is gone, or has carried an unreachable taint or a NotReady condition past the threshold - and a force-delete policy is configured; with neither, the row holds instead of acting
+    note: an Unknown pod is never recycled by name, because the node has stopped reporting rather than the pod having died and a returning kubelet may still be running it. It is routed to the force-delete sweep instead, the same authority pod.nodeLost answers to, which deletes it only on proven node death under a configured force-delete policy; until then the operation carries a NodeUnknown waiting token with its deadline parked, so the hold is visible rather than silently spending the attempt's budget, and the rebuild resumes on the resulting absence
     placement: kind
     coverage: {perm: [], unit: [], kind: []}
-    status: current
-
+    status: decided
   - state: Create/CreatePods
     event: pod.admitted
     outcome: ignore

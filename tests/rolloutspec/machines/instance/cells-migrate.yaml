@@ -170,14 +170,31 @@ cells:
     status: current
   - state: Migrate/CreateSurge
     event: pod.waiting
-    outcome: ignore
-    note: both escalation paths skip a Migrate-pinned row, so a wedged surge
-      container never stamps Failed on the serving source; the record Deadline is
-      the only timeout that can end the migration
+    windows: [before]
+    outcome: transition
+    to: Ready
+    guard: a surge pod holds a terminal waiting reason past the stuck-pod grace
+    note: terminal kubelet evidence on the surge fails the migration early, and it
+      does so through the record rather than as a direct stamp on the source - the
+      record is closed Failed, the surge index is torn down, and the source is
+      restored to Ready on its untouched RunningRevision with its drain hold
+      released. The record Deadline stays the backstop for everything this evidence
+      does not cover
     invariants: [record.is.timeout.authority]
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
-    status: review
+    status: decided
+  - state: Migrate/CreateSurge
+    event: pod.waiting
+    windows: [boundary, after]
+    outcome: ignore
+    note: the record write is the single authority and it is idempotent - an
+      already-terminal record is not reopened and a restored source is not restored
+      twice
+    invariants: [record.is.timeout.authority]
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: decided
   - state: Migrate/CreateSurge
     event: pod.containerRestart
     outcome: ignore
@@ -205,7 +222,7 @@ cells:
       down a serving surge. A wedged surge pod is not covered by this loop
     placement: kind
     coverage: {perm: [], unit: [TestMigrate_SourceStuckTerminating_EscalationRuns, TestMigrateExpiry_SourceWedgedUnconfigured_Parks], kind: []}
-    status: review
+    status: decided
   - state: Migrate/CreateSurge
     event: pod.nodeLost
     outcome: ignore
@@ -385,7 +402,7 @@ cells:
     invariants: [one.operation.per.instance]
     placement: unit
     coverage: {perm: [], unit: [], kind: []}
-    status: review
+    status: decided
   - state: Migrate/CreateSurge
     event: spec.annotationOnly
     outcome: ignore
@@ -463,7 +480,7 @@ cells:
       and its annotation dropped
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
-    status: review
+    status: decided
   - state: Migrate/CreateSurge
     event: spec.partition
     outcome: ignore
@@ -527,7 +544,7 @@ cells:
     invariants: [record.is.timeout.authority]
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
-    status: review
+    status: decided
   - state: Migrate/CreateSurge
     event: timer.minReady
     outcome: ignore
@@ -557,7 +574,7 @@ cells:
     invariants: [record.is.timeout.authority]
     placement: perm
     coverage: {perm: [], unit: [TestMigrateExpiry_SourcePodsDead_SourceFailed, TestMigrateExpiry_DrainingIncomplete_Expired], kind: []}
-    status: review
+    status: decided
   - state: Migrate/CreateSurge
     event: timer.migrationDeadline
     transition: T-migrate-complete
@@ -568,7 +585,7 @@ cells:
       Completed rather than Failed
     placement: perm
     coverage: {perm: [], unit: [TestMigrateExpiry_DrainingComplete_DrivenToCompleted, TestMigrateExpiry_NoPrematureExpiry_CompletesBeforeDeadline], kind: []}
-    status: review
+    status: decided
   - state: Migrate/CreateSurge
     event: timer.migrationDeadline
     transition: T-migrate-deadline
@@ -578,7 +595,7 @@ cells:
       record and the Failed stamp is re-derived from the same live observation
     placement: perm
     coverage: {perm: [], unit: [TestMigrateExpiry_MirrorPersistFails_RetriesUntilTerminal], kind: []}
-    status: review
+    status: decided
   - state: Migrate/CreateSurge
     event: timer.migrationDeadline
     transition: T-migrate-deadline-restore
@@ -589,7 +606,7 @@ cells:
       rotation
     placement: perm
     coverage: {perm: [], unit: [TestMigrateExpiry_CrashWindow_DrainKeysAppliedAtSurgeReady_UnDrained, TestMigrateExpiry_SurgeReadyButNotInRotation_Expires], kind: []}
-    status: review
+    status: decided
   - state: Migrate/CreateSurge
     event: timer.migrationDeadline
     transition: T-migrate-teardown
@@ -665,7 +682,7 @@ cells:
     invariants: [record.written.last]
     placement: kind
     coverage: {perm: [], unit: [TestMigrate_ResumeAfterCrash_PreStamp, TestMigrate_ResumeAfterCrash_Draining, TestMigrate_CompletionTailCrashRecoversBeforeDeadline], kind: []}
-    status: review
+    status: decided
   - state: Migrate/CreateSurge
     event: ctrl.staleRead
     outcome: defer
@@ -675,7 +692,7 @@ cells:
     invariants: [pair.identity.guarded]
     placement: sim
     coverage: {perm: [], unit: [TestMigrate_DrainRejectsAuthoritativePairDrift, TestMigrate_InitialPairStampRejectsAuthoritativeDrift, TestMigrate_PromotionRejectsPairDriftAfterDrainClaim], kind: []}
-    status: review
+    status: decided
   - state: Migrate/CreateSurge
     event: api.conflict
     outcome: defer
@@ -684,7 +701,7 @@ cells:
       pair preconditions are re-evaluated on the retry
     placement: sim
     coverage: {perm: [], unit: [], kind: []}
-    status: review
+    status: decided
   - state: Migrate/CreateSurge
     event: api.alreadyExists
     outcome: ignore
@@ -841,7 +858,7 @@ cells:
     invariants: [pair.identity.guarded]
     placement: kind
     coverage: {perm: [], unit: [TestMigrate_EntryLifecycle_SinglePod, TestMigrate_GangPromotionTailCompletesFromRetainedSource], kind: []}
-    status: review
+    status: decided
   - state: Migrate/SurgeTarget
     event: pod.deleted
     variants: [source]
@@ -884,14 +901,29 @@ cells:
     status: current
   - state: Migrate/SurgeTarget
     event: pod.waiting
-    outcome: ignore
-    note: escalation skips this Migrate-pinned row, so a wedged own container never
-      stamps Failed; the record Deadline is the only timeout, and expiry unpins the
-      index so the scale-down pipeline removes it
+    windows: [before]
+    outcome: transition
+    to: Delete/Drain
+    guard: a pod of this surge holds a terminal waiting reason past the stuck-pod grace
+    note: terminal kubelet evidence fails the migration early through the record
+      rather than stamping this row Failed - the record is closed Failed and the pin
+      cleared, so the unpinned index leaves the plan and the scale-down pipeline
+      tears it down while the paired source is restored by the same record write.
+      The record Deadline stays the backstop
     invariants: [record.is.timeout.authority]
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
-    status: review
+    status: decided
+  - state: Migrate/SurgeTarget
+    event: pod.waiting
+    windows: [boundary, after]
+    outcome: ignore
+    note: the record write is the single authority, and clearing an already-cleared
+      pin is a no-op
+    invariants: [record.is.timeout.authority]
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: decided
   - state: Migrate/SurgeTarget
     event: pod.containerRestart
     outcome: ignore
@@ -1094,7 +1126,7 @@ cells:
     invariants: [one.operation.per.instance]
     placement: unit
     coverage: {perm: [], unit: [], kind: []}
-    status: review
+    status: decided
   - state: Migrate/SurgeTarget
     event: spec.annotationOnly
     outcome: ignore
@@ -1170,7 +1202,7 @@ cells:
       operation in flight, so it waits for the promotion or for its own deadline
     placement: perm
     coverage: {perm: [], unit: [TestMigrate_DeferWithoutOwnership_LeavesRecordAccepted], kind: []}
-    status: review
+    status: decided
   - state: Migrate/SurgeTarget
     event: spec.partition
     outcome: ignore
@@ -1234,7 +1266,7 @@ cells:
     invariants: [record.is.timeout.authority]
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
-    status: review
+    status: decided
   - state: Migrate/SurgeTarget
     event: timer.minReady
     outcome: ignore
@@ -1265,7 +1297,7 @@ cells:
     invariants: [record.is.timeout.authority]
     placement: perm
     coverage: {perm: [], unit: [TestMigrateExpiry_SurgeReadyButNotInRotation_Expires, TestMigrateExpiry_DrainingIncomplete_Expired], kind: []}
-    status: review
+    status: decided
   - state: Migrate/SurgeTarget
     event: timer.migrationDeadline
     transition: T-migratetarget-promote
@@ -1275,7 +1307,7 @@ cells:
       this row untouched
     placement: perm
     coverage: {perm: [], unit: [TestMigrateExpiry_CompletedTailCrash_ClosedCompleted, TestMigrateExpiry_CompletedTailCrashRejectsStatusDrift], kind: []}
-    status: review
+    status: decided
   - state: Migrate/SurgeTarget
     event: timer.migrationDeadline
     transition: T-migratetarget-expired
@@ -1285,7 +1317,7 @@ cells:
       already-terminal record is not reopened
     placement: perm
     coverage: {perm: [], unit: [TestMigrateExpiry_AcceptedNeverAllocated], kind: []}
-    status: review
+    status: decided
   - state: Migrate/SurgeTarget
     event: timer.migrationDeadline
     transition: T-migratetarget-teardown
@@ -1344,7 +1376,7 @@ cells:
       one pass so its PodGroup exists before its pods render
     placement: kind
     coverage: {perm: [], unit: [TestMigrate_ResumeAfterCrash_PreStamp, TestMigrate_GangResume_SurgeSlotUnstamped_RequeuesBeforePods], kind: []}
-    status: review
+    status: decided
   - state: Migrate/SurgeTarget
     event: ctrl.staleRead
     outcome: defer
@@ -1354,7 +1386,7 @@ cells:
     invariants: [pair.identity.guarded]
     placement: sim
     coverage: {perm: [], unit: [TestMigrate_CompletionRecoveryRejectsAuthoritativeTargetDrift, TestMigrate_GangPromotionTailRejectsDifferentRevision], kind: []}
-    status: review
+    status: decided
   - state: Migrate/SurgeTarget
     event: api.conflict
     outcome: defer
@@ -1362,7 +1394,7 @@ cells:
       compare-and-swap that re-reads and re-applies, so a conflict costs a pass
     placement: sim
     coverage: {perm: [], unit: [], kind: []}
-    status: review
+    status: decided
   - state: Migrate/SurgeTarget
     event: api.alreadyExists
     outcome: ignore
@@ -1490,3 +1522,87 @@ cells:
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
     status: current
+
+  # --- Migrate: terminal kubelet evidence closes the record early ---------
+  - state: Migrate/CreateSurge
+    event: pod.deleted
+    variants: [source]
+    windows: [boundary]
+    transition: T-migrate-surge-terminal
+    outcome: ignore
+    note: the restore write is preconditioned on both rows carrying the expected identity, so a source pod disappearing as it lands is rejected and re-derived rather than half-applied
+    invariants: [pair.identity.guarded]
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: decided
+  - state: Migrate/CreateSurge
+    event: pod.deleted
+    variants: [source]
+    windows: [after]
+    transition: T-migrate-surge-terminal
+    outcome: ignore
+    note: the row is Ready on its untouched running revision with the pin cleared, so pod loss is owned by the ordinary repair from there
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: decided
+  - state: Migrate/CreateSurge
+    event: timer.migrationDeadline
+    windows: [boundary]
+    transition: T-migrate-surge-terminal
+    outcome: ignore
+    note: the record is being closed Failed on the surge's own evidence, and expiry does not reopen a record that is already terminal
+    invariants: [record.is.timeout.authority]
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: decided
+  - state: Migrate/CreateSurge
+    event: timer.migrationDeadline
+    windows: [after]
+    transition: T-migrate-surge-terminal
+    outcome: ignore
+    note: the record is terminal and the source is back at Ready, so the deadline that remained the backstop has nothing left to end
+    invariants: [record.is.timeout.authority]
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: decided
+  - state: Migrate/SurgeTarget
+    event: pod.deleted
+    variants: [source]
+    windows: [boundary]
+    transition: T-migratetarget-terminal
+    outcome: ignore
+    note: the pin is being cleared on the record's terminal evidence; a source pod disappearing as that lands does not promote a surge the record has already failed
+    invariants: [pair.identity.guarded]
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: decided
+  - state: Migrate/SurgeTarget
+    event: pod.deleted
+    variants: [source]
+    windows: [after]
+    transition: T-migratetarget-terminal
+    outcome: ignore
+    note: the unpinned index is on Delete/Drain and the paired source was restored through the record, so neither side reads this loss
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: decided
+  - state: Migrate/SurgeTarget
+    event: timer.migrationDeadline
+    windows: [boundary]
+    transition: T-migratetarget-terminal
+    outcome: ignore
+    note: the record is being closed Failed on the surge's own evidence, and expiry does not reopen a record that is already terminal
+    invariants: [record.is.timeout.authority]
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: decided
+  - state: Migrate/SurgeTarget
+    event: timer.migrationDeadline
+    windows: [after]
+    transition: T-migratetarget-terminal
+    outcome: ignore
+    note: the pin is already cleared and the index is being torn down, so the deadline that remained the backstop has nothing left to end
+    invariants: [record.is.timeout.authority]
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: decided

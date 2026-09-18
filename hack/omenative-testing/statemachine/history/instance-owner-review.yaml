@@ -1,0 +1,253 @@
+# Provenance for the instance-machine cells an owner decided in the review
+# session of 2026-09-17. These cells carry no merged change behind them: the
+# ones the owner confirmed were already implemented, and the ones the owner
+# changed are implemented by the PRs that follow this table. The reference
+# below is the session itself. Selectors match the cells files exactly: an
+# empty variants, windows or transition matches all of them.
+history:
+
+  # --- cells-create.yaml ---
+  - {state: Create/CreatePods, event: pod.containersReady, variants: [source], windows: [before], transition: "", decision: owner-review-2026-09-17}
+  - {state: Create/CreatePods, event: pod.ready, variants: [source], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Create/CreatePods, event: pod.waiting, variants: [ImagePullBackOff, ErrImagePull, InvalidImageName, CreateContainerConfigError], windows: [before], transition: "", decision: owner-review-2026-09-17}
+  - {state: Create/CreatePods, event: spec.revision, variants: [], windows: [before], transition: "", decision: owner-review-2026-09-17}
+  - {state: Create/CreatePods, event: spec.revision, variants: [], windows: [boundary, after], transition: "", decision: owner-review-2026-09-17}
+  - {state: Create/CreatePods, event: spec.replicasDown, variants: [], windows: [before], transition: "", decision: owner-review-2026-09-17}
+  - {state: Create/CreatePods, event: spec.replicasDown, variants: [], windows: [boundary, after], transition: "", decision: owner-review-2026-09-17}
+  - {state: Create/CreatePods, event: spec.pauseTrue, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Create/CreatePods, event: spec.pauseFreeze, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Create/CreatePods, event: spec.unpause, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Create/CreatePods, event: pod.phaseTerminal, variants: [Unknown], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Create/CreatePods, event: api.conflict, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+
+  # --- cells-delete.yaml ---
+  - {state: Delete/Drain, event: pod.servingOff, variants: [source], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Delete/Drain, event: pod.deleted, variants: [source], windows: [before], transition: "", decision: owner-review-2026-09-17}
+  - {state: Delete/Drain, event: pod.deleted, variants: [source], windows: [boundary], transition: "T-delete-done", decision: owner-review-2026-09-17}
+  - {state: Delete/Drain, event: pod.deleted, variants: [source], windows: [after], transition: "T-delete-done", decision: owner-review-2026-09-17}
+  - {state: Delete/Drain, event: pod.stuckTerminating, variants: [], windows: [before], transition: "", decision: owner-review-2026-09-17}
+  - {state: Delete/Drain, event: pod.stuckTerminating, variants: [], windows: [], transition: "T-delete-force", decision: owner-review-2026-09-17}
+  - {state: Delete/Drain, event: pod.nodeLost, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Delete/Drain, event: spec.replicasUp, variants: [], windows: [before], transition: "", decision: owner-review-2026-09-17}
+  - {state: Delete/Drain, event: spec.replicasUp, variants: [], windows: [boundary], transition: "T-delete-done", decision: owner-review-2026-09-17}
+  - {state: Delete/Drain, event: spec.replicasUp, variants: [], windows: [after], transition: "T-delete-done", decision: owner-review-2026-09-17}
+  - {state: Delete/Drain, event: spec.replicasDown, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Delete/Drain, event: spec.pauseTrue, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Delete/Drain, event: spec.pauseFreeze, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Delete/Drain, event: spec.teardown, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Delete/Drain, event: timer.operationDeadline, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Delete/Drain, event: api.notFound, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+
+  # --- cells-failed.yaml ---
+  - {state: Failed, event: pod.containersReady, variants: [target], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Failed, event: pod.deleted, variants: [target], windows: [boundary, after], transition: "", decision: owner-review-2026-09-17}
+  - {state: Failed, event: pod.waiting, variants: [CreateContainerError], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Failed, event: spec.revision, variants: [], windows: [before], transition: "", decision: owner-review-2026-09-17}
+  - {state: Failed, event: spec.annotationOnly, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Failed, event: spec.strategy, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Failed, event: spec.pauseTrue, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Failed, event: spec.pauseFreeze, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Failed, event: gate.deny, variants: [Plan, Pairing, Ratio, Sequential, Budget], windows: [], transition: "", decision: owner-review-2026-09-17}
+
+  # --- cells-migrate.yaml ---
+  - {state: Migrate/CreateSurge, event: pod.waiting, variants: [], windows: [before], transition: "", decision: owner-review-2026-09-17}
+  - {state: Migrate/CreateSurge, event: pod.waiting, variants: [], windows: [boundary, after], transition: "", decision: owner-review-2026-09-17}
+  - {state: Migrate/CreateSurge, event: pod.stuckTerminating, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Migrate/CreateSurge, event: spec.revision, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Migrate/CreateSurge, event: spec.migrateRequest, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Migrate/CreateSurge, event: timer.operationDeadline, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Migrate/CreateSurge, event: timer.migrationDeadline, variants: [], windows: [before], transition: "", decision: owner-review-2026-09-17}
+  - {state: Migrate/CreateSurge, event: timer.migrationDeadline, variants: [], windows: [], transition: "T-migrate-complete", decision: owner-review-2026-09-17}
+  - {state: Migrate/CreateSurge, event: timer.migrationDeadline, variants: [], windows: [], transition: "T-migrate-deadline", decision: owner-review-2026-09-17}
+  - {state: Migrate/CreateSurge, event: timer.migrationDeadline, variants: [], windows: [], transition: "T-migrate-deadline-restore", decision: owner-review-2026-09-17}
+  - {state: Migrate/CreateSurge, event: ctrl.crash, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Migrate/CreateSurge, event: ctrl.staleRead, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Migrate/CreateSurge, event: api.conflict, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Migrate/SurgeTarget, event: pod.deleted, variants: [source], windows: [], transition: "T-migratetarget-promote", decision: owner-review-2026-09-17}
+  - {state: Migrate/SurgeTarget, event: pod.waiting, variants: [], windows: [before], transition: "", decision: owner-review-2026-09-17}
+  - {state: Migrate/SurgeTarget, event: pod.waiting, variants: [], windows: [boundary, after], transition: "", decision: owner-review-2026-09-17}
+  - {state: Migrate/SurgeTarget, event: spec.revision, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Migrate/SurgeTarget, event: spec.migrateRequest, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Migrate/SurgeTarget, event: timer.operationDeadline, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Migrate/SurgeTarget, event: timer.migrationDeadline, variants: [], windows: [before], transition: "", decision: owner-review-2026-09-17}
+  - {state: Migrate/SurgeTarget, event: timer.migrationDeadline, variants: [], windows: [], transition: "T-migratetarget-promote", decision: owner-review-2026-09-17}
+  - {state: Migrate/SurgeTarget, event: timer.migrationDeadline, variants: [], windows: [], transition: "T-migratetarget-expired", decision: owner-review-2026-09-17}
+  - {state: Migrate/SurgeTarget, event: ctrl.crash, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Migrate/SurgeTarget, event: ctrl.staleRead, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Migrate/SurgeTarget, event: api.conflict, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Migrate/CreateSurge, event: pod.deleted, variants: [source], windows: [boundary], transition: "T-migrate-surge-terminal", decision: owner-review-2026-09-17}
+  - {state: Migrate/CreateSurge, event: pod.deleted, variants: [source], windows: [after], transition: "T-migrate-surge-terminal", decision: owner-review-2026-09-17}
+  - {state: Migrate/CreateSurge, event: timer.migrationDeadline, variants: [], windows: [boundary], transition: "T-migrate-surge-terminal", decision: owner-review-2026-09-17}
+  - {state: Migrate/CreateSurge, event: timer.migrationDeadline, variants: [], windows: [after], transition: "T-migrate-surge-terminal", decision: owner-review-2026-09-17}
+  - {state: Migrate/SurgeTarget, event: pod.deleted, variants: [source], windows: [boundary], transition: "T-migratetarget-terminal", decision: owner-review-2026-09-17}
+  - {state: Migrate/SurgeTarget, event: pod.deleted, variants: [source], windows: [after], transition: "T-migratetarget-terminal", decision: owner-review-2026-09-17}
+  - {state: Migrate/SurgeTarget, event: timer.migrationDeadline, variants: [], windows: [boundary], transition: "T-migratetarget-terminal", decision: owner-review-2026-09-17}
+  - {state: Migrate/SurgeTarget, event: timer.migrationDeadline, variants: [], windows: [after], transition: "T-migratetarget-terminal", decision: owner-review-2026-09-17}
+
+  # --- cells-noop.yaml ---
+  - {state: Empty, event: spec.annotationOnly, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Empty, event: spec.replicasUp, variants: [], windows: [], transition: "T-empty-create", decision: owner-review-2026-09-17}
+  - {state: Empty, event: spec.pauseTrue, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Empty, event: spec.pauseFreeze, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Empty, event: spec.unpause, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Pending, event: pod.containersReady, variants: [source], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Pending, event: pod.ready, variants: [source], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Pending, event: pod.servingOn, variants: [source], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Pending, event: pod.servingOff, variants: [source], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Pending, event: pod.deleted, variants: [source], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Pending, event: spec.annotationOnly, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Pending, event: spec.replicasDown, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Pending, event: spec.pauseTrue, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Pending, event: spec.pauseFreeze, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Pending, event: spec.unpause, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Pending, event: ctrl.staleRead, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Ready, event: pod.servingOn, variants: [source], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Ready, event: pod.servingOff, variants: [source], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Ready, event: pod.deleted, variants: [source], windows: [], transition: "T-ready-demote", decision: owner-review-2026-09-17}
+  - {state: Ready, event: pod.waiting, variants: [], windows: [before], transition: "", decision: owner-review-2026-09-17}
+  - {state: Ready, event: pod.waiting, variants: [], windows: [boundary, after], transition: "", decision: owner-review-2026-09-17}
+  - {state: Ready, event: pod.containerRestart, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Ready, event: spec.revision, variants: [], windows: [], transition: "T-ready-stuck-failed", decision: owner-review-2026-09-17}
+  - {state: Ready, event: spec.annotationOnly, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Ready, event: spec.replicasDown, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Ready, event: spec.pauseTrue, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Ready, event: spec.pauseFreeze, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Ready, event: spec.unpause, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Ready, event: gate.deny, variants: [Held], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Ready, event: ctrl.staleRead, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Ready, event: timer.stuckPodGrace, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Ready, event: api.invalid, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Ready, event: api.throttled, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Ready, event: pod.deleted, variants: [source], windows: [boundary], transition: "T-ready-crashloop-restart", decision: owner-review-2026-09-17}
+  - {state: Ready, event: pod.deleted, variants: [source], windows: [after], transition: "T-ready-crashloop-restart", decision: owner-review-2026-09-17}
+  - {state: Ready, event: spec.revision, variants: [], windows: [boundary], transition: "T-ready-crashloop-restart", decision: owner-review-2026-09-17}
+  - {state: Ready, event: spec.revision, variants: [], windows: [after], transition: "T-ready-crashloop-restart", decision: owner-review-2026-09-17}
+
+  # --- cells-restart.yaml ---
+  - {state: Restart/Drain, event: pod.deleted, variants: [source], windows: [before], transition: "", decision: owner-review-2026-09-17}
+  - {state: Restart/Drain, event: pod.waiting, variants: [ImagePullBackOff, ErrImagePull, InvalidImageName, CreateContainerConfigError, CreateContainerError, CrashLoopBackOff, RunContainerError], windows: [before], transition: "", decision: owner-review-2026-09-17}
+  - {state: Restart/Drain, event: pod.containerRestart, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Restart/Drain, event: spec.replicasUp, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Restart/Drain, event: spec.pauseTrue, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Restart/Drain, event: spec.pauseFreeze, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Restart/Drain, event: pod.phaseTerminal, variants: [Unknown], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Restart/Drain, event: api.invalid, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Restart/Drain, event: api.throttled, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+
+  # --- cells-update-gang.yaml ---
+  - {state: Update/GangSurgeTarget, event: pod.ready, variants: [target], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/GangSurgeTarget, event: pod.deleted, variants: [source], windows: [before], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/GangSurgeTarget, event: pod.deleted, variants: [source], windows: [boundary, after], transition: "T-gangtarget-ready", decision: owner-review-2026-09-17}
+  - {state: Update/GangSurgeTarget, event: pod.deleted, variants: [target], windows: [before], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/GangSurgeTarget, event: pod.deleted, variants: [target], windows: [boundary, after], transition: "T-gangtarget-ready", decision: owner-review-2026-09-17}
+  - {state: Update/GangSurgeTarget, event: pod.waiting, variants: [ImagePullBackOff, ErrImagePull, InvalidImageName, CreateContainerConfigError, CreateContainerError, CrashLoopBackOff, RunContainerError], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/GangSurgeTarget, event: spec.revision, variants: [], windows: [before], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/GangSurgeTarget, event: spec.revision, variants: [], windows: [boundary, after], transition: "T-gangtarget-cleanup-superseded", decision: owner-review-2026-09-17}
+  - {state: Update/GangSurgeTarget, event: spec.strategy, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/GangSurgeTarget, event: spec.replicasDown, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/GangSurgeTarget, event: spec.migrateRequest, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/GangSurgeTarget, event: timer.operationDeadline, variants: [], windows: [before], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/GangSurgeTarget, event: ctrl.crash, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/GangSurgeTarget, event: ctrl.staleRead, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/GangSurgeTarget, event: api.conflict, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/GangSurgeTargetCleanup, event: pod.containersReady, variants: [target], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/GangSurgeTargetCleanup, event: pod.deleted, variants: [target], windows: [before], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/GangSurgeTargetCleanup, event: pod.deleted, variants: [target], windows: [boundary, after], transition: "T-gangcleanup-done", decision: owner-review-2026-09-17}
+  - {state: Update/GangSurgeTargetCleanup, event: spec.revision, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/GangSurgeTargetCleanup, event: spec.replicasDown, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/GangSurgeTargetCleanup, event: spec.migrateRequest, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/GangSurgeTargetCleanup, event: ctrl.crash, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/GangSurgeTargetCleanup, event: ctrl.staleRead, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/GangSurgeTargetCleanup, event: api.conflict, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+
+  # --- cells-update-inplace-recreate.yaml ---
+  - {state: Update/InPlace, event: pod.containersReady, variants: [source], windows: [before], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/InPlace, event: pod.containersReady, variants: [source], windows: [], transition: "T-inplace-ready", decision: owner-review-2026-09-17}
+  - {state: Update/InPlace, event: pod.ready, variants: [source], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/InPlace, event: pod.deleted, variants: [source], windows: [before], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/InPlace, event: pod.deleted, variants: [source], windows: [boundary, after], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/InPlace, event: pod.containerRestart, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/InPlace, event: pod.evicted, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/InPlace, event: spec.revision, variants: [], windows: [before], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/InPlace, event: spec.strategy, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/InPlace, event: spec.pauseTrue, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/InPlace, event: spec.pauseFreeze, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/InPlace, event: spec.unpause, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/InPlace, event: timer.minReady, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/InPlace, event: api.conflict, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Drain, event: pod.containersReady, variants: [source], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Drain, event: pod.ready, variants: [source], windows: [before], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Drain, event: pod.ready, variants: [source], windows: [], transition: "T-drain-ready", decision: owner-review-2026-09-17}
+  - {state: Update/Drain, event: pod.servingOn, variants: [source], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Drain, event: spec.strategy, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Drain, event: spec.pauseTrue, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Drain, event: spec.pauseFreeze, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Drain, event: spec.unpause, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Drain, event: timer.minReady, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Drain, event: api.conflict, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Drain, event: api.invalid, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/InPlace, event: pod.containersReady, variants: [source], windows: [boundary], transition: "T-inplace-podlost-recreate", decision: owner-review-2026-09-17}
+  - {state: Update/InPlace, event: pod.containersReady, variants: [source], windows: [after], transition: "T-inplace-podlost-recreate", decision: owner-review-2026-09-17}
+  - {state: Update/InPlace, event: spec.revision, variants: [], windows: [boundary], transition: "T-inplace-podlost-recreate", decision: owner-review-2026-09-17}
+  - {state: Update/InPlace, event: spec.revision, variants: [], windows: [after], transition: "T-inplace-podlost-recreate", decision: owner-review-2026-09-17}
+
+  # --- cells-update-surge.yaml ---
+  - {state: Update/Surge, event: pod.containersReady, variants: [target], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Surge, event: pod.servingOff, variants: [source], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Surge, event: pod.deleted, variants: [source], windows: [before], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Surge, event: pod.waiting, variants: [ImagePullBackOff, ErrImagePull, InvalidImageName, CreateContainerConfigError], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Surge, event: pod.waiting, variants: [CreateContainerError], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Surge, event: pod.containerRestart, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Surge, event: endpoint.rotationOut, variants: [source], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Surge, event: pod.ready, variants: [target], windows: [before], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Surge, event: pod.ready, variants: [target], windows: [boundary], transition: "T-surge-target-ready", decision: owner-review-2026-09-17}
+  - {state: Update/Surge, event: pod.ready, variants: [target], windows: [boundary], transition: "T-surge-abandon-superseded", decision: owner-review-2026-09-17}
+  - {state: Update/Surge, event: pod.ready, variants: [target], windows: [after], transition: "T-surge-deadline", decision: owner-review-2026-09-17}
+  - {state: Update/Surge, event: pod.ready, variants: [target], windows: [after], transition: "T-surge-stuck", decision: owner-review-2026-09-17}
+  - {state: Update/Surge, event: spec.revision, variants: [], windows: [before], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Surge, event: spec.revision, variants: [], windows: [boundary], transition: "T-surge-target-ready", decision: owner-review-2026-09-17}
+  - {state: Update/Surge, event: spec.revision, variants: [], windows: [after], transition: "T-surge-target-ready", decision: owner-review-2026-09-17}
+  - {state: Update/Surge, event: spec.revision, variants: [], windows: [boundary], transition: "T-surge-abandon-superseded", decision: owner-review-2026-09-17}
+  - {state: Update/Surge, event: spec.revision, variants: [], windows: [boundary], transition: "T-surge-deadline", decision: owner-review-2026-09-17}
+  - {state: Update/Surge, event: spec.revision, variants: [], windows: [after], transition: "T-surge-deadline", decision: owner-review-2026-09-17}
+  - {state: Update/Surge, event: spec.revision, variants: [], windows: [boundary], transition: "T-surge-stuck", decision: owner-review-2026-09-17}
+  - {state: Update/Surge, event: spec.revision, variants: [], windows: [after], transition: "T-surge-stuck", decision: owner-review-2026-09-17}
+  - {state: Update/Surge, event: spec.annotationOnly, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Surge, event: spec.strategy, variants: [], windows: [before], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Surge, event: spec.strategy, variants: [], windows: [boundary, after], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Surge, event: spec.pauseTrue, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Surge, event: spec.pauseFreeze, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Surge, event: spec.unpause, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Surge, event: spec.migrateRequest, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Surge, event: timer.operationDeadline, variants: [], windows: [before], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Surge, event: timer.minReady, variants: [], windows: [before], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Surge, event: timer.minReady, variants: [], windows: [boundary, after], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Surge, event: api.conflict, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Surge, event: api.invalid, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Surge, event: api.throttled, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/SurgeDrain, event: pod.servingOff, variants: [source], windows: [before], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/SurgeDrain, event: pod.servingOff, variants: [source], windows: [boundary, after], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/SurgeDrain, event: pod.deleted, variants: [target], windows: [boundary], transition: "T-surgedrain-gang-complete", decision: owner-review-2026-09-17}
+  - {state: Update/SurgeDrain, event: pod.deleted, variants: [target], windows: [after], transition: "T-surgedrain-gang-complete", decision: owner-review-2026-09-17}
+  - {state: Update/SurgeDrain, event: spec.revision, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/SurgeDrain, event: spec.annotationOnly, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/SurgeDrain, event: spec.strategy, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/SurgeDrain, event: spec.pauseTrue, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/SurgeDrain, event: spec.pauseFreeze, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/SurgeDrain, event: spec.unpause, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/SurgeDrain, event: spec.migrateRequest, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/SurgeDrain, event: timer.operationDeadline, variants: [], windows: [before], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/SurgeDrain, event: timer.minReady, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/SurgeDrain, event: api.conflict, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/SurgeDrainSettle, event: pod.servingOff, variants: [source], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/SurgeDrainSettle, event: spec.revision, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/SurgeDrainSettle, event: spec.annotationOnly, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/SurgeDrainSettle, event: spec.strategy, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/SurgeDrainSettle, event: spec.pauseTrue, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/SurgeDrainSettle, event: spec.pauseFreeze, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/SurgeDrainSettle, event: spec.unpause, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/SurgeDrainSettle, event: spec.migrateRequest, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/SurgeDrainSettle, event: timer.drainSettle, variants: [], windows: [before], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/SurgeDrainSettle, event: timer.drainSettle, variants: [], windows: [boundary, after], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/SurgeDrainSettle, event: ctrl.crash, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/SurgeDrainSettle, event: api.conflict, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
