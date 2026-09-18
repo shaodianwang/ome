@@ -196,6 +196,11 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 	}
 	runner := inst.Runners[0]
 
+	// One EndpointSlice read per routed Service for the whole pass: the
+	// rotation report and the drain gate below ask about the same
+	// Services and must not disagree halfway through.
+	drainer := drain.NewBatcher(deps.Reader(), input.Key.Namespace)
+
 	// Where ActiveOrdinal lives today (0 by default). The surge pod
 	// goes to the opposite slot.
 	var oldOrdinal int32
@@ -350,6 +355,14 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 			instanceKey(input.Key.Component, inst.Index), surgeTargetName, newOrdinal)
 	}
 
+	// The cycle keeps the source in rotation until the drain step, so a
+	// source out of rotation while the step is still Surge was taken out
+	// by something else and the Instance is serving nothing. Name that on
+	// the operation before the phases below roll on.
+	if err := reconcileSourceRotationReport(ctx, drainer, input, plan, inst.Index, status, oldPods); err != nil {
+		return false, err
+	}
+
 	// Phase 1: create surge pod if missing. The created pod's
 	// ome.io/revision-hash label is stamped from surgeTargetName so it
 	// matches the in-flight commitment — the pinned-target equivalent of
@@ -480,7 +493,7 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 			if serviceName == "" {
 				continue
 			}
-			drained, err := drain.IsPodDrained(ctx, deps.Reader(), input.Key.Namespace, serviceName, pod)
+			drained, err := drainer.IsPodDrained(ctx, serviceName, pod)
 			if err != nil {
 				return false, fmt.Errorf("check drain (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 			}

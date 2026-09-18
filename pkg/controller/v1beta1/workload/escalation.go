@@ -180,7 +180,12 @@ func escalateFromEvidence(ctx context.Context, deps Deps, input ReconcileInput, 
 		if gerr != nil {
 			return fmt.Errorf("record gang hold (instance=%d): %w", s.Index, gerr)
 		}
-		if serving {
+		// The hold arms above judge on pod health alone, so a row whose
+		// pods are healthy still hands a stale token back whatever it is
+		// reporting about its rotation. The FAILED-WHILE-SERVING exemption
+		// is the stricter question — is this Instance actually capacity —
+		// and a surge that has reported its source out of rotation is not.
+		if podSetIsCapacity(s, pods, desired) {
 			continue
 		}
 		if reason := gangTerminalReason(gang.State); reason != "" && gangVerdictActionable(s.Operation) {
@@ -362,6 +367,19 @@ func (b *failureStampBuffer) flush(ctx context.Context) error {
 	}
 	b.muts, b.warns = nil, nil
 	return nil
+}
+
+// podSetIsCapacity reports whether the Instance is healthy capacity,
+// which is what buys it the FAILED-WHILE-SERVING exemption.
+//
+// Pod conditions alone do not settle that during a surge. Until the
+// drain step the source is what holds the Instance's traffic, and a
+// surge whose source has been taken out of rotation by someone else says
+// so on its operation: the pods can read fully serving while nothing is
+// in rotation, and a replacement wedged in that state must escalate
+// rather than be exempted by a source that is not serving.
+func podSetIsCapacity(s InstanceStatus, pods []*corev1.Pod, desired int32) bool {
+	return podSetFullyServing(pods, desired) && !types.OperationSourceUnrouted(s.Operation)
 }
 
 // podSetFullyServing reports whether the pod set is fully healthy in the

@@ -366,6 +366,19 @@ func Restart(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 	if recycling {
 		return false, nil
 	}
+	// A pod whose node stopped reporting it is not dead evidence: the
+	// name stays occupied until the force-delete sweep proves the node
+	// gone, and the repair reports that wait instead of polling a name no
+	// kubelet is answering for. The policy boundary that wait ends on
+	// needs no plumbing here: an unfinished Restart requeues at
+	// RestartRequeueInterval, well inside any node-death threshold.
+	holding, _, err := recoverUnknownPhaseTargets(ctx, deps, input, inst.Index, newPods, desired)
+	if err != nil {
+		return false, fmt.Errorf("Restart: recover unknown-phase pods (instance=%d): %w", inst.Index, err)
+	}
+	if holding {
+		return false, nil
+	}
 	existingByName := query.IndexPodsByName(query.ExcludeTerminalPods(newPods))
 	missing := make([]podTarget, 0)
 	for _, target := range desired {

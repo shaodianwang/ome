@@ -188,6 +188,8 @@ const (
 	WaitingReasonPodGroupTerminating = types.WaitingReasonPodGroupTerminating
 	PodGroupOwnershipConflictReason  = types.PodGroupOwnershipConflictReason
 
+	WaitingReasonSourceUnrouted = types.WaitingReasonSourceUnrouted
+
 	GangStateNone              = types.GangStateNone
 	GangStateTerminating       = types.GangStateTerminating
 	GangStateOwnershipConflict = types.GangStateOwnershipConflict

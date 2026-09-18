@@ -90,6 +90,13 @@ func markRetryBlockAttemptStarted(rb *workload.RetryBlock) workload.RetryBlockDi
 // patchInstanceStatusUpdating idempotently stamps Phase=Updating with the
 // Update operation in Step=InPlace at targetRev. Skip-write requires
 // Step==InPlace so a previous recreate-step write doesn't short-circuit.
+//
+// An attempt already in flight toward this exact target keeps its
+// identity and its deadline; only the step moves. The update mode is
+// re-resolved on every pass, so a roll can change mechanism mid-flight
+// without the attempt ending — and an attempt that restarted its clock
+// on each of those turns would never be bounded by InstanceReadyTimeout
+// at all.
 func patchInstanceStatusUpdating(ctx context.Context, input workload.ReconcileInput, idx int32, targetRev string, timeout time.Duration) error {
 	now := metav1.NewTime(input.Now())
 	err := input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
@@ -98,6 +105,15 @@ func patchInstanceStatusUpdating(ctx context.Context, input workload.ReconcileIn
 			s.Operation.Step == updateStepInPlace &&
 			s.TargetRevision == targetRev {
 			return false
+		}
+		if s.Phase == workload.InstancePhaseUpdating &&
+			s.Operation != nil && s.Operation.Type == workload.InstanceOperationUpdate &&
+			s.Operation.TargetRevision == targetRev && s.TargetRevision == targetRev {
+			op := *s.Operation
+			op.Step = updateStepInPlace
+			op.LastProgressAt = now
+			s.Operation = &op
+			return true
 		}
 		s.Phase = workload.InstancePhaseUpdating
 		s.TargetRevision = targetRev
@@ -159,6 +175,40 @@ func patchInstanceStatusRecreatingForUpdate(ctx context.Context, input workload.
 		return observedIncarnation, err
 	}
 	return observedIncarnation, flipRetryBlockOnAttemptStart(ctx, input, targetRev)
+}
+
+// reResolveInPlaceToRecreate converts an in-flight in-place roll into the
+// recreate roll for the same target: Incarnation bumped so the rebuilt
+// pod is distinguishable, Step moved to Drain so the recreate's
+// idempotency guard recognizes its own state. Reports whether it
+// converted anything.
+//
+// The Operation is edited, not replaced. Identity and deadline belong to
+// the attempt, and the attempt has not ended — it is converging to the
+// same target by another mechanism — so a new id would make the row read
+// as a retry and a new deadline would hand it a second full window.
+func reResolveInPlaceToRecreate(ctx context.Context, input workload.ReconcileInput, idx int32, targetRev string) (bool, error) {
+	converted := false
+	err := input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
+		if s.Phase != workload.InstancePhaseUpdating || s.Operation == nil ||
+			s.Operation.Type != workload.InstanceOperationUpdate ||
+			s.Operation.Step != updateStepInPlace {
+			return false
+		}
+		if s.Incarnation == 0 {
+			s.Incarnation = 1
+		}
+		s.Incarnation++
+		s.TargetRevision = targetRev
+		op := *s.Operation
+		op.Step = updateStepDrain
+		op.TargetRevision = targetRev
+		op.LastProgressAt = metav1.NewTime(input.Now())
+		s.Operation = &op
+		converted = true
+		return true
+	})
+	return converted, err
 }
 
 // (patchInstanceStatusReadyOnRevision lives in create.go — the in-place,

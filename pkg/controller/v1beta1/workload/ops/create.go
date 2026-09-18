@@ -166,7 +166,25 @@ func createFilteredBatched(
 	keep func(idx int32) bool,
 	byInstance map[int32][]*corev1.Pod,
 ) (ctrl.Result, error) {
-	allReady := true
+	// A pod in phase Unknown still occupies its stable name, so the
+	// missing-pod diff below reads that target as present and nothing else
+	// in the pass would free it. Route it the same way the rebuild paths
+	// do — node-death evidence decides when the name is freed, and the
+	// attempt reports the wait meanwhile — before any Instance is selected.
+	// A held Instance is dropped from the selection below, which would
+	// otherwise leave the pass looking converged: not-converged keeps the
+	// ordinary poll, and nodeDeathAt carries the exact policy boundary,
+	// because the node this waits on emits no event to wake anyone on.
+	held, nodeDeathAt, err := recoverUnknownPhaseInstances(ctx, deps, input, plan, keep, byInstance)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if len(held) > 0 {
+		admitted := keep
+		keep = func(idx int32) bool { return admitted(idx) && !held[idx] }
+	}
+
+	allReady := len(held) == 0
 	var retryBlockWait time.Duration
 	actions := make([]createPassAction, 0, len(plan.Instances))
 	retirements := make([]workload.InstanceMutation, 0)
@@ -320,6 +338,9 @@ func createFilteredBatched(
 	}
 	if retryBlockWait > 0 && (res.RequeueAfter == 0 || retryBlockWait < res.RequeueAfter) {
 		res.RequeueAfter = retryBlockWait
+	}
+	if wait := until(input.Now(), nodeDeathAt); wait > 0 && (res.RequeueAfter == 0 || wait < res.RequeueAfter) {
+		res.RequeueAfter = wait
 	}
 	// A server-suggested throttle delay is a floor, not a preference:
 	// waking earlier just re-earns the 429.

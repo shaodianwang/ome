@@ -27,6 +27,32 @@ import (
 // runtime image semantics and would defeat the zero-downtime
 // contract.
 func inPlaceUpdate(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, target *appsv1.ControllerRevision, targetSpec *corev1.PodSpec, pods []*corev1.Pod) (bool, error) {
+	// An in-place step patches pods it does not create, so an empty pod
+	// set has no repair anywhere in the pipeline: the update pass owns the
+	// index, so the Create pass is skipped and fresh-index creation
+	// excludes an Updating row, and the restart trigger declines below
+	// Ready. Re-resolve the roll to recreate instead, which does render a
+	// replacement at the target revision.
+	if len(pods) == 0 {
+		// An empty set is evidence only once this Instance's own creates
+		// and deletes have been observed. Before that it can be a read
+		// that predates them, and re-resolving on one would bump the
+		// Incarnation out from under a pod that does exist.
+		if !deps.ExpectationsCache().Satisfied(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, inst.Index) {
+			return false, nil
+		}
+		reresolved, err := reResolveInPlaceToRecreate(ctx, input, inst.Index, target.Name)
+		if err != nil {
+			return false, fmt.Errorf("re-resolve in-place roll to recreate (instance=%d): %w", inst.Index, err)
+		}
+		if reresolved {
+			recordWarning(deps.Recorder, eventTarget(input), workload.EventReasonInPlaceUpdateNotPossible,
+				"OMENative %s lost the pod its in-place update to revision %s was patching; recreating instead",
+				instanceKey(input.Key.Component, inst.Index), target.Name)
+		}
+		return recreateUpdate(ctx, deps, input, plan, inst, target, pods)
+	}
+
 	// In-place keeps the same Incarnation — only the container image rolls.
 	wasNotUpdating := true
 	if s := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index); s != nil && s.Phase == workload.InstancePhaseUpdating {
