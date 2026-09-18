@@ -145,6 +145,22 @@ func workerWithAdmittedURL(t *testing.T, s *runtime.Scheme, host string) client.
 	return w
 }
 
+func workerWithReadyURL(t *testing.T, s *runtime.Scheme, host string, ready int32) client.WithWatch {
+	t.Helper()
+	derived := isvcWithInstances(v1beta1.EngineComponent, true)
+	derived.Namespace, derived.Name = "prod", "svc"
+	derived.Labels = map[string]string{PlacementOriginLabel: "uid-1"}
+	derived.Status.URL = &apis.URL{Scheme: "https", Host: host}
+	admitted := make([]bool, ready)
+	for i := range admitted {
+		admitted[i] = true
+	}
+	engineIR := irWithInstances(v1beta1.EngineComponent, admitted...)
+	engineIR.Status.ReadyReplicas = ready
+	return fakeclient.NewClientBuilder().WithScheme(s).
+		WithStatusSubresource(&v1beta1.InferenceService{}).WithObjects(derived, engineIR).Build()
+}
+
 func cpStatusURL(t *testing.T, cp client.Client) *apis.URL {
 	t.Helper()
 	o := &v1beta1.InferenceService{}
@@ -1328,8 +1344,8 @@ func candidatesByCluster(cs []v1beta1.CandidatePlacement) map[string]v1beta1.Can
 // home's own endpoint.
 func TestReconcile_AllModeKeepsEveryAdmittedHome(t *testing.T) {
 	s := testScheme(t)
-	wa := workerWithAdmittedURL(t, s, "svc.a.example")
-	wb := workerWithAdmittedURL(t, s, "svc.b.example")
+	wa := workerWithReadyURL(t, s, "svc.a.example", 2)
+	wb := workerWithReadyURL(t, s, "svc.b.example", 1)
 	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
 		"a": workloadcluster.NewNeverCachingClient(wa),
 		"b": workloadcluster.NewNeverCachingClient(wb),
@@ -1352,9 +1368,13 @@ func TestReconcile_AllModeKeepsEveryAdmittedHome(t *testing.T) {
 	require.Contains(t, by, "a")
 	require.Contains(t, by, "b")
 	assert.Equal(t, v1beta1.CandidatePhaseAdmitted, by["a"].Phase)
+	assert.Equal(t, int32(2), by["a"].AdmittedReplicas)
+	assert.Equal(t, int32(2), by["a"].ReadyReplicas)
 	require.NotNil(t, by["a"].Endpoint)
 	assert.Equal(t, "svc.a.example", by["a"].Endpoint.Host)
 	assert.Equal(t, v1beta1.CandidatePhaseAdmitted, by["b"].Phase)
+	assert.Equal(t, int32(1), by["b"].AdmittedReplicas)
+	assert.Equal(t, int32(1), by["b"].ReadyReplicas)
 	require.NotNil(t, by["b"].Endpoint)
 	assert.Equal(t, "svc.b.example", by["b"].Endpoint.Host)
 }
@@ -1836,12 +1856,12 @@ func TestReconcile_SplitRacingWhileAllGated(t *testing.T) {
 func TestSplitScaleComponentsAndAccounting(t *testing.T) {
 	// Engine-only ISVC -> just the engine.
 	eng := srcISVCSplit("gpu=gb300", 3)
-	assert.Equal(t, []v1beta1.ComponentType{v1beta1.EngineComponent}, splitScaleComponents(eng))
+	assert.Equal(t, []v1beta1.ComponentType{v1beta1.EngineComponent}, placementScaleComponents(eng))
 
 	// PD ISVC (engine + decoder) -> both are scaled components.
 	pd := srcISVCSplit("gpu=gb300", 3)
 	pd.Spec.Decoder = &v1beta1.DecoderSpec{}
-	assert.Equal(t, []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, splitScaleComponents(pd))
+	assert.Equal(t, []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, placementScaleComponents(pd))
 
 	// A PD replica is admitted only when BOTH components admit that instance, so
 	// the count is the MIN across components: 3 engine + 2 decoder = 2 pairs.
@@ -1854,9 +1874,9 @@ func TestSplitScaleComponentsAndAccounting(t *testing.T) {
 		v1beta1.DecoderComponent: &ds,
 	}
 	comps := []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}
-	assert.Equal(t, int32(2), splitAdmittedReplicas(comps, statuses), "min admitted = complete pairs")
-	assert.Equal(t, int32(1), splitReadyReplicas(comps, statuses), "min ready across components")
+	assert.Equal(t, int32(2), placementAdmittedReplicas(comps, statuses), "min admitted = complete pairs")
+	assert.Equal(t, int32(1), placementReadyReplicas(comps, statuses), "min ready across components")
 
 	// Engine-only accounting is just the engine's counts.
-	assert.Equal(t, int32(3), splitAdmittedReplicas([]v1beta1.ComponentType{v1beta1.EngineComponent}, statuses))
+	assert.Equal(t, int32(3), placementAdmittedReplicas([]v1beta1.ComponentType{v1beta1.EngineComponent}, statuses))
 }

@@ -531,6 +531,8 @@ func placementTargetExists(pl *v1beta1.PlacementStatus, clusters []v1beta1.Workl
 }
 
 func (r *Reconciler) reconcileAll(ctx context.Context, isvc *v1beta1.InferenceService, candidates []string) (ctrl.Result, error) {
+	scaleComps := placementScaleComponents(isvc)
+
 	// A candidate that cannot be observed this pass keeps its last-published
 	// state. The WorkloadCluster API can remain Ready while a newly elected
 	// process is still rebuilding its local remote-client registry.
@@ -598,7 +600,11 @@ func (r *Reconciler) reconcileAll(ctx context.Context, isvc *v1beta1.InferenceSe
 		if AllComponentsAdmitted(derived, statuses) {
 			admitted++
 			cands = append(cands, v1beta1.CandidatePlacement{
-				Cluster: c, Phase: v1beta1.CandidatePhaseAdmitted, Endpoint: endpointFor(derived),
+				Cluster:          c,
+				Phase:            v1beta1.CandidatePhaseAdmitted,
+				Endpoint:         endpointFor(derived),
+				AdmittedReplicas: placementAdmittedReplicas(scaleComps, statuses),
+				ReadyReplicas:    placementReadyReplicas(scaleComps, statuses),
 			})
 			continue
 		}
@@ -656,7 +662,7 @@ func (r *Reconciler) reconcileSplit(ctx context.Context, isvc *v1beta1.Inference
 	if sp := isvc.Spec.Placement.Split; sp != nil {
 		maxPer, minPer, spread = sp.MaxReplicasPerCluster, sp.MinReplicasPerCluster, sp.Spread
 	}
-	scaleComps := splitScaleComponents(isvc)
+	scaleComps := placementScaleComponents(isvc)
 
 	// Phase 1 — observe each candidate's current derived: admitted + ready replica
 	// counts and the home endpoint. Observing BEFORE (re)apportioning is what lets
@@ -715,8 +721,8 @@ func (r *Reconciler) reconcileSplit(ctx context.Context, isvc *v1beta1.Inference
 			markUnreadable(c, o)
 			continue
 		}
-		o.admitted = splitAdmittedReplicas(scaleComps, statuses)
-		o.ready = splitReadyReplicas(scaleComps, statuses)
+		o.admitted = placementAdmittedReplicas(scaleComps, statuses)
+		o.ready = placementReadyReplicas(scaleComps, statuses)
 		o.endpoint = endpointFor(derived)
 		admitted[c] = o.admitted
 		if minPer > 0 && o.admitted > 0 && o.admitted < minPer {
@@ -873,12 +879,12 @@ func splitDesiredReplicas(isvc *v1beta1.InferenceService) int32 {
 	return 0
 }
 
-// splitScaleComponents are the replica-scaled components whose admitted/ready
-// counts define a Split home's replica count: Engine and, for a PD service, the
-// Decoder — a replica is the coordinated pair. Router is excluded (a shared
-// front-end, not per-replica). Falls back to the first declared component when
-// neither Engine nor Decoder is present (unusual for Split).
-func splitScaleComponents(isvc *v1beta1.InferenceService) []v1beta1.ComponentType {
+// placementScaleComponents are the replica-scaled components whose
+// admitted/ready counts define a home's replica count: Engine and, for a PD
+// service, the Decoder — a replica is the coordinated pair. Router is excluded
+// (a shared front-end, not per-replica). Falls back to the first declared
+// component when neither Engine nor Decoder is present.
+func placementScaleComponents(isvc *v1beta1.InferenceService) []v1beta1.ComponentType {
 	var cs []v1beta1.ComponentType
 	if isvc.Spec.Engine != nil {
 		cs = append(cs, v1beta1.EngineComponent)
@@ -894,11 +900,11 @@ func splitScaleComponents(isvc *v1beta1.InferenceService) []v1beta1.ComponentTyp
 	return cs
 }
 
-// splitAdmittedReplicas is a home's admitted replica count: the MIN admitted
-// instances across the scaled components, since a PD replica is admitted only
-// when BOTH its engine and decoder instances are (an engine-only home is just
-// the engine count). Zero when no scaled component is declared.
-func splitAdmittedReplicas(comps []v1beta1.ComponentType, statuses map[v1beta1.ComponentType]*v1beta1.InferenceReplicaStatus) int32 {
+// placementAdmittedReplicas is a home's admitted replica count: the MIN
+// admitted instances across the scaled components, since a PD replica is
+// admitted only when BOTH its engine and decoder instances are (an engine-only
+// home is just the engine count). Zero when no scaled component is declared.
+func placementAdmittedReplicas(comps []v1beta1.ComponentType, statuses map[v1beta1.ComponentType]*v1beta1.InferenceReplicaStatus) int32 {
 	if len(comps) == 0 {
 		return 0
 	}
@@ -911,9 +917,10 @@ func splitAdmittedReplicas(comps []v1beta1.ComponentType, statuses map[v1beta1.C
 	return mn
 }
 
-// splitReadyReplicas is a home's ready replica count (the endpoint weight): the
-// MIN ReadyReplicas across the scaled components, for the same pairing reason.
-func splitReadyReplicas(comps []v1beta1.ComponentType, statuses map[v1beta1.ComponentType]*v1beta1.InferenceReplicaStatus) int32 {
+// placementReadyReplicas is a home's ready replica count (the endpoint weight):
+// the MIN ReadyReplicas across the scaled components, for the same pairing
+// reason.
+func placementReadyReplicas(comps []v1beta1.ComponentType, statuses map[v1beta1.ComponentType]*v1beta1.InferenceReplicaStatus) int32 {
 	if len(comps) == 0 {
 		return 0
 	}

@@ -2933,14 +2933,14 @@ func schema_pkg_apis_ome_v1beta1_CandidatePlacement(ref common.ReferenceCallback
 					},
 					"admittedReplicas": {
 						SchemaProps: spec.SchemaProps{
-							Description: "AdmittedReplicas is how many replicas this home's Kueue has admitted (only meaningful in Split, where a home serves a fraction of the desired count). It drives global accounting — the control plane sums it across homes to decide whether the desired count is met. Zero/unset outside Split.",
+							Description: "AdmittedReplicas is how many replicas this home's Kueue has admitted. In Split it also drives global accounting: the control plane sums it across homes to decide whether the desired count is met.",
 							Type:        []string{"integer"},
 							Format:      "int32",
 						},
 					},
 					"readyReplicas": {
 						SchemaProps: spec.SchemaProps{
-							Description: "ReadyReplicas is how many of this home's replicas are serving traffic. In Split it is the weight an external LB uses to split traffic across homes (traffic follows where the replicas actually landed). Zero/unset outside Split.",
+							Description: "ReadyReplicas is how many of this home's replicas are serving traffic. It is the health gate and weight an external LB uses to distribute traffic across homes.",
 							Type:        []string{"integer"},
 							Format:      "int32",
 						},
