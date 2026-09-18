@@ -931,6 +931,30 @@ def ci_steps() -> str:
             plugins:
 {_tw_docker_plugin(CI_IMAGE, indent=14)}
 
+          - label: ":mag: Rollout Spec Check"
+            key: "rolloutspec-check"
+{_gh_status("rolloutspec-check")}
+{_infra_retry()}
+            # The Go well-formedness test only proves the machine tables
+            # parse and expand. These checkers resolve them against the
+            # rest of the tree: every history sidecar entry has to select a
+            # real grid cell, and every coverage name / `// Cells:` id has
+            # to resolve to a Go test that exists. A mistyped cell id or a
+            # renamed test passes the build without them.
+            #
+            # Same image as the unit-test lane, which is a Go image without
+            # python3; the checkers are python3 + PyYAML. Kept out of that
+            # lane so a spec typo reports as its own status rather than
+            # hiding behind the unit tests, and so it fails in seconds.
+            command: |
+              apt-get update
+              apt-get install -y --no-install-recommends python3 python3-yaml
+              make rolloutspec-check MACHINE=instance
+            agents:
+              queue: "{DEFAULT_QUEUE}"
+            plugins:
+{_tw_docker_plugin(CI_IMAGE, indent=14)}
+
           - label: ":test_tube: Integration Tests"
             key: "integration-test"
 {_gh_status("integration-test")}

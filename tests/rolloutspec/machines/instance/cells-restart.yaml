@@ -114,7 +114,7 @@ cells:
     event: pod.ready
     variants: [source]
     outcome: ignore
-    note: the promote reads ContainersReady only (query.AllPodsRuntimeReady), so full PodReady adds no step to the repair
+    note: PodReady is one guard of the promote bar the repair shares with every other path; it commits nothing on its own, because the bumped set must also be complete, serving and past its minReadySeconds window
     placement: kind
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -349,11 +349,11 @@ cells:
     status: current
   - state: Restart/Drain
     event: timer.minReady
-    outcome: ignore
-    note: the promote is ContainersReady-only with no availability wait, so the minReadySeconds window cannot gate this step
+    outcome: defer
+    note: the elapsed window releases the last promote guard but commits nothing by itself; the next pass re-checks that the bumped set is complete, serving and PodReady before stamping Ready
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
-    status: current
+    status: decided
   - state: Restart/Drain
     event: timer.expectationsTTL
     outcome: ignore
@@ -632,7 +632,7 @@ cells:
     event: spec.policyTuning
     variants: [minReadySeconds]
     outcome: ignore
-    note: the promote reads ContainersReady only and waits out no availability window, so the new value cannot gate this step (ops/restart.go)
+    note: the promote re-reads the window from the live plan on every pass (ops/restart.go), so a change re-aims the availability wait the repair already waits out; the edit itself stamps nothing
     placement: unit
     coverage: {perm: [], unit: [], kind: []}
     status: current

@@ -6,9 +6,9 @@
 # the last op pass to run and it is its own detector: it re-lists pods every
 # reconcile and acts on the diff, so an event that merely changes the pod set
 # is absorbed inside the same attempt instead of moving the row. Second, the
-# promote fires on ContainersReady alone (query.AllPodsRuntimeReady) with no
-# PodReady and no minReadySeconds wait, so the readiness events that gate the
-# surge paths are inert here.
+# promote clears the one bar every path shares: the pod set is complete, every
+# pod is PodReady, and the minReadySeconds window has elapsed. Each of those is
+# only one guard of the bar, so none of them commits the promote on its own.
 #
 # Two edges leave this state under another pass's ownership: a shrink makes
 # the index a scale-down extra even mid-create (T-create-scaledown), and a
@@ -345,11 +345,11 @@ cells:
 
   - state: Create/CreatePods
     event: timer.minReady
-    outcome: ignore
-    note: the create promote fires on ContainersReady and waits on no availability window, so the window elapsing changes nothing here; minReadySeconds first gates this Instance when a later surge treats it as a replacement
+    outcome: defer
+    note: the elapsed window releases the last promote guard but commits nothing by itself; the next pass re-checks that the set is complete and every pod PodReady before stamping Ready
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
-    status: current
+    status: decided
 
   - state: Create/CreatePods
     event: timer.expectationsTTL
@@ -659,7 +659,7 @@ cells:
     outcome: escalate
     to: Failed
     guard: a pod of the attempt already holds one of the terminal waiting reasons when the grace elapses and the pod set is not fully serving; the elapsed grace by itself only arms the check
-    note: the grace is measured from pod creationTimestamp in status_aggregate.go PodStuckPullFailure, and escalation.go routes a disposable Create attempt through the disposition, which records a RetryBlock against the pinned revision or a relocation directive and clears the operation in one write
+    note: the grace is measured from pod creationTimestamp by the stuck-pod evidence in status_aggregate.go, which reports a pod held in a terminal kubelet waiting reason past it, and escalation.go routes a disposable Create attempt through the disposition, which records a RetryBlock against the pinned revision or a relocation directive and clears the operation in one write
     invariants: [one.operation.per.instance]
     placement: perm
     coverage: {perm: [], unit: [TestEscalateStuckPodFailures_DisposesSinglePodWorkloadCaused], kind: []}

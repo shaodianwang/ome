@@ -787,7 +787,7 @@ cells:
     event: config.changed
     variants: [stuckPodGrace]
     outcome: ignore
-    note: the grace feeds PodStuckPullFailure in status_aggregate.go and escalation.go skips an already-Failed row, so shortening or lengthening it cannot re-charge this row
+    note: the grace bounds the stuck-pod evidence in status_aggregate.go — a pod held in a terminal kubelet waiting reason past it — and escalation.go skips an already-Failed row, so shortening or lengthening it cannot re-charge this row
     invariants: [failed.is.sticky]
     placement: unit
     coverage: {perm: [], unit: [], kind: []}

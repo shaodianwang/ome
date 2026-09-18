@@ -539,8 +539,10 @@ cells:
     event: timer.operationDeadline
     outcome: ignore
     note: the Instance operation deadline is stamped but never consumed for a
-      migration — both escalation paths skip the pin so a healthy serving source is
-      not failed while the record still drives the pair
+      migration — the fast and broad escalation paths skip the pin so a healthy
+      serving source is not failed while the record still drives the pair; only a
+      scheduler hold on this row's own pod ends an attempt, and it runs off its own
+      grace rather than this clock
     invariants: [record.is.timeout.authority]
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
@@ -1261,8 +1263,10 @@ cells:
   - state: Migrate/SurgeTarget
     event: timer.operationDeadline
     outcome: ignore
-    note: the operation deadline stamped on this row is never consumed — escalation
-      skips the Migrate pin, and the record Deadline is what ends the migration
+    note: the operation deadline stamped on this row is never consumed — the fast and
+      broad escalation paths skip the Migrate pin, and the record Deadline is what
+      ends the migration; a scheduler hold on this row's own pod runs off its own
+      grace rather than this clock
     invariants: [record.is.timeout.authority]
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
