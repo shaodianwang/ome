@@ -222,6 +222,41 @@ func TestProber_ProbeOneClassifiesRealResponses(t *testing.T) {
 	}
 }
 
+func TestProber_ProbeOneJoinsEndpointAndProbePaths(t *testing.T) {
+	gotPaths := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPaths <- r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	p := newTestProber(t, testProbeConfig())
+	for _, tt := range []struct {
+		name     string
+		endpoint string
+		wantPath string
+	}{
+		{name: "no trailing slash", endpoint: srv.URL, wantPath: "/healthz/deep"},
+		{name: "trailing slash", endpoint: srv.URL + "/", wantPath: "/healthz/deep"},
+		{name: "endpoint path", endpoint: srv.URL + "/team/service/", wantPath: "/team/service/healthz/deep"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			verdict, msg := p.probeOne(context.Background(), Target{
+				Map:     testMap,
+				Cluster: "cluster-a",
+				URL:     tt.endpoint,
+			})
+			if verdict != VerdictPass {
+				t.Fatalf("probeOne() = %v (%s), want VerdictPass", verdict, msg)
+			}
+			gotPath := <-gotPaths
+			if gotPath != tt.wantPath {
+				t.Fatalf("request path = %q, want %q", gotPath, tt.wantPath)
+			}
+		})
+	}
+}
+
 func TestProber_UnreachableEndpointIsAFailureNotAnError(t *testing.T) {
 	// A transport error means the path did not carry a request a client would
 	// have sent — that is the home's failure, and it is exactly the

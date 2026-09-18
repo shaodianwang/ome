@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"sync"
 	"time"
@@ -242,12 +243,15 @@ const probeConcurrency = 16
 // we could not even construct is our own defect, not the home's, and is
 // reported inconclusive so a misconfigured prober cannot gate the fleet.
 func (p *Prober) probeOne(ctx context.Context, tgt Target) (Verdict, string) {
-	url := tgt.URL + p.Config.Path
+	probeURL, err := url.JoinPath(tgt.URL, p.Config.Path)
+	if err != nil {
+		return VerdictInconclusive, fmt.Sprintf("probe could not run: %v", err)
+	}
 
 	rctx, cancel := context.WithTimeout(ctx, p.Config.Timeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(rctx, p.Config.Method, url, nil)
+	req, err := http.NewRequestWithContext(rctx, p.Config.Method, probeURL, nil)
 	if err != nil {
 		return VerdictInconclusive, fmt.Sprintf("probe could not run: %v", err)
 	}
