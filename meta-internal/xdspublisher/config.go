@@ -1,12 +1,13 @@
 //go:build meta_internal
 
 // Package xdspublisher contains the deployment-specific TrafficMap adapter for
-// the internal native xDS publisher. A Buck/Ligen composition supplies the
-// generated client through RegisterClusterWeightPublisher.
+// the internal xDS automation service.
 package xdspublisher
 
 import (
+	"context"
 	"fmt"
+	"net/url"
 	"strings"
 	"text/template"
 	"time"
@@ -21,15 +22,26 @@ const (
 	// Name is the value selected at routing.publisher.name.
 	Name = "xds"
 
-	optTargetTemplate = "targetTemplate"
-	optResyncInterval = "resyncInterval"
-	optOncall         = "oncall"
-	optACL            = "acl"
+	optTargetTemplate     = "targetTemplate"
+	optResyncInterval     = "resyncInterval"
+	optURLTemplate        = "urlTemplate"
+	optRequestTimeout     = "requestTimeout"
+	optTLSCertFile        = "tlsCertFile"
+	optTLSKeyFile         = "tlsKeyFile"
+	optTLSCAFile          = "tlsCAFile"
+	optOncall             = "oncall"
+	optACL                = "acl"
+	clusterURLPlaceholder = "{cluster}"
 )
 
 var acceptedOptions = map[string]struct{}{
 	optTargetTemplate: {},
 	optResyncInterval: {},
+	optURLTemplate:    {},
+	optRequestTimeout: {},
+	optTLSCertFile:    {},
+	optTLSKeyFile:     {},
+	optTLSCAFile:      {},
 	optOncall:         {},
 	optACL:            {},
 }
@@ -37,6 +49,11 @@ var acceptedOptions = map[string]struct{}{
 type config struct {
 	targetTemplate *template.Template
 	resyncInterval time.Duration
+	urlTemplate    string
+	requestTimeout time.Duration
+	tlsCertFile    string
+	tlsKeyFile     string
+	tlsCAFile      string
 	oncall         string
 	acl            *string
 }
@@ -51,51 +68,57 @@ type Publisher struct {
 
 var _ placementendpoint.EndpointPublisher = (*Publisher)(nil)
 
-// ClusterWeightPublisher is the narrow native surface used by the adapter.
+// ClusterWeightPublisher is the narrow service surface used by the adapter.
 type ClusterWeightPublisher interface {
-	PublishWeight(cluster string, weight uint32) error
-	ClearWeight(cluster string) error
+	PublishWeight(ctx context.Context, cluster string, weight uint32) error
+	ClearWeight(ctx context.Context, cluster string) error
 }
 
-// ClusterWeightPublisherFactory constructs the native client.
-type ClusterWeightPublisherFactory func(oncall string, acl *string) (ClusterWeightPublisher, error)
+type clusterWeightPublisherFactory func(config) (ClusterWeightPublisher, error)
 
-// RegisterClusterWeightPublisher installs the xDS adapter only in a binary
-// whose composition can provide the generated internal client.
-func RegisterClusterWeightPublisher(factory ClusterWeightPublisherFactory) error {
-	if factory == nil {
-		return fmt.Errorf("xDS cluster-weight publisher factory must not be nil")
+func init() {
+	if err := routing.RegisterTrafficMapPublisher(Name, newTrafficMapPublisher); err != nil {
+		panic(fmt.Sprintf("register %s TrafficMap publisher: %v", Name, err))
 	}
-	return routing.RegisterTrafficMapPublisher(Name, func(
-		config routing.PublisherConfig,
-		kubeClient client.Client,
-		apiReader client.Reader,
-	) (*routing.TrafficMapPublisher, error) {
-		publisher, err := newPublisher(config, kubeClient, apiReader, factory)
-		if err != nil {
-			return nil, err
-		}
-		return &routing.TrafficMapPublisher{
-			Publisher:      publisher,
-			ResyncInterval: publisher.config.resyncInterval,
-		}, nil
-	})
+}
+
+func newTrafficMapPublisher(
+	publisherConfig routing.PublisherConfig,
+	kubeClient client.Client,
+	apiReader client.Reader,
+) (*routing.TrafficMapPublisher, error) {
+	publisher, err := newPublisher(
+		publisherConfig,
+		kubeClient,
+		apiReader,
+		newHTTPClusterWeightPublisher,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &routing.TrafficMapPublisher{
+		Publisher:      publisher,
+		ResyncInterval: publisher.config.resyncInterval,
+	}, nil
 }
 
 func newPublisher(
 	publisherConfig routing.PublisherConfig,
 	kubeClient client.Client,
 	apiReader client.Reader,
-	factory ClusterWeightPublisherFactory,
+	factory clusterWeightPublisherFactory,
 ) (*Publisher, error) {
 	if kubeClient == nil {
 		return nil, fmt.Errorf("Kubernetes client must not be nil")
+	}
+	if factory == nil {
+		return nil, fmt.Errorf("xDS cluster-weight publisher factory must not be nil")
 	}
 	cfg, err := parseConfig(publisherConfig.Options)
 	if err != nil {
 		return nil, err
 	}
-	weights, err := factory(cfg.oncall, cfg.acl)
+	weights, err := factory(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -153,13 +176,66 @@ func parseConfig(options map[string]string) (config, error) {
 	if err != nil {
 		return config{}, err
 	}
+	requestTimeout, err := parsePositiveDuration(options, optRequestTimeout)
+	if err != nil {
+		return config{}, err
+	}
+
+	urlTemplate, err := required(optURLTemplate)
+	if err != nil {
+		return config{}, err
+	}
+	if err := validateURLTemplate(urlTemplate); err != nil {
+		return config{}, fmt.Errorf("routing.publisher.options[%q]: %w", optURLTemplate, err)
+	}
+	tlsCertFile, err := required(optTLSCertFile)
+	if err != nil {
+		return config{}, err
+	}
+	tlsKeyFile, err := required(optTLSKeyFile)
+	if err != nil {
+		return config{}, err
+	}
+	tlsCAFile, err := required(optTLSCAFile)
+	if err != nil {
+		return config{}, err
+	}
 
 	return config{
 		targetTemplate: targetTemplate,
 		resyncInterval: resyncInterval,
+		urlTemplate:    urlTemplate,
+		requestTimeout: requestTimeout,
+		tlsCertFile:    tlsCertFile,
+		tlsKeyFile:     tlsKeyFile,
+		tlsCAFile:      tlsCAFile,
 		oncall:         oncall,
 		acl:            acl,
 	}, nil
+}
+
+func validateURLTemplate(raw string) error {
+	if strings.Count(raw, clusterURLPlaceholder) != 1 {
+		return fmt.Errorf("must contain exactly one %q placeholder", clusterURLPlaceholder)
+	}
+	const probeCluster = "ome-cluster-placeholder"
+	parsed, err := url.Parse(strings.Replace(raw, clusterURLPlaceholder, probeCluster, 1))
+	if err != nil {
+		return fmt.Errorf("must be a valid URL: %w", err)
+	}
+	if parsed.Scheme != "https" || parsed.Host == "" {
+		return fmt.Errorf("must be an absolute HTTPS URL")
+	}
+	if parsed.User != nil {
+		return fmt.Errorf("must not contain user information")
+	}
+	if parsed.Fragment != "" {
+		return fmt.Errorf("must not contain a fragment")
+	}
+	if !strings.Contains(parsed.Path, probeCluster) {
+		return fmt.Errorf("%q must occur in the URL path", clusterURLPlaceholder)
+	}
+	return nil
 }
 
 func parsePositiveDuration(options map[string]string, key string) (time.Duration, error) {

@@ -28,6 +28,10 @@ is the case that matters for a consumer of this repository. A deployment that
 *does* opt in removes both, and the tag then matches no files and turns into a
 no-op rather than an error.
 
+The repository's `ome-manager` Make target and internal manager Dockerfile opt
+in explicitly. A deployment removing this tree must also remove that tagged
+registration file and the Dockerfile's `COPY meta-internal/` instruction.
+
 Verify either way with:
 
 ```sh
@@ -108,17 +112,19 @@ twice.
 This extension implements the existing `placement/endpoint.EndpointPublisher`
 contract. The shared endpoint reconciler continues to own the
 InferenceService/TrafficMap watches and finalizer; this package only translates
-TrafficMap homes into calls to the native cluster-weight API:
+TrafficMap homes into calls to the xDS automation HTTP API:
 
-```go
-p, err := publisher.NewClusterWeightPublisher(oncall, acl)
-err = p.PublishWeight(cluster, weight)
-err = p.ClearWeight(cluster)
+```http
+PUT /api/v1/clusters/{cluster}/weight
+{"weight": 10, "createIfMissing": {"oncall": "ome"}}
+
+DELETE /api/v1/clusters/{cluster}/weight
 ```
 
-The API stores `xds_auto.cluster_weight`; it does not mutate EDS membership.
-The target must already be a statically authored route arm, and its SMC tier
-must already contain usable service endpoints.
+The service stores `xds_auto.cluster_weight` on its namespaced configuration
+tier (`cluster` becomes `xds_auto:cluster`), creating that tier when necessary.
+It does not mutate EDS membership or create a route arm, so the target must
+already exist in the xDS route graph.
 
 TrafficMap weights are applied verbatim. With the routing probe's explicit
 all-failed `Drain` policy, this includes publishing zero for every target; probe
@@ -145,32 +151,31 @@ routing:
       acl: ome-xds-publisher       # optional
       targetTemplate: '{{.EndpointHostname}}'
       resyncInterval: 1m
+      urlTemplate: 'https://xds-automation.mrpc.fbinfra.net/api/v1/clusters/{cluster}/weight'
+      requestTimeout: 30s
+      tlsCertFile: /var/facebook/x509_identities/server.pem
+      tlsKeyFile: /var/facebook/x509_identities/server.pem
+      tlsCAFile: /var/facebook/rootcanal/ca.pem
 ```
 
 The target template receives `Namespace`, `Service`, `Cluster`, `Endpoint`,
 `EndpointHost`, `EndpointHostname`, and `EndpointPort`. It must render a bare
 cluster name. A `;fallback=` suffix is canonicalized to its primary tier.
+`{cluster}` in `urlTemplate` is replaced with the path-escaped result.
 
-The Ligen-generated package is not a Go module. A checked-in `.go` import would
-make `go mod tidy` attempt to resolve it publicly, so the binding lives in
-`native_meta_xds.go.in`. A deployment-owned Buck composition must materialize
-it as `native_meta_xds_generated.go`, provide the Ligen dependency, and supply
-both `meta_internal` and `meta_xds`. Only that composition registers
-`publisher.name: xds`; the normal OME image and a plain `-tags meta_internal`
-build do not advertise an unusable publisher.
+The client presents the configured workload certificate directly to the remote
+proxy and trusts only the configured CA bundle. It deliberately ignores ambient
+HTTP proxy settings because a proxy would terminate mutual TLS under another
+identity. The client certificate is reloaded for each new TLS connection so
+workload certificate rotation does not require a manager restart. Every call is
+bounded by both the reconcile context and `requestTimeout`; periodic
+reconciliation retries transient failures. The configured certificate, key,
+and CA files must be mounted in the controller container.
 
-The composing Go target must use `cgo = True` and depend on
-`//mrpc/xds/automation:cluster_weight_publisher-go_serialized` when OME is
-mirrored into the fbcode cell (or the cell-qualified `fbcode//mrpc/...` label
-from another registered cell), matching the D119218279 smoke test. No xDS-owned
-source change is required. OME is not currently a Buck project, so adding a
-BUCK file here alone is insufficient: the internal build must first place OME
-and its transitive Go dependencies in the shared Buck graph.
-
-The native API is synchronous and exposes no context or deadline. Periodic
-reconciliation repairs drift, but callers should not enable the adapter until
-the native implementation's timeout behavior is acceptable. Disable it in two
-steps: first set `routing.enabled: false` while keeping `publisher.name: xds`,
-then remove the publisher configuration after the endpoint finalizers drain.
-Likewise, drain the currently selected backend before switching between xDS and
-Gateway API; the shared finalizer invokes only the publisher selected at startup.
+The internal manager image compiles this package with `meta_internal`; no
+fbsource mirror, Ligen binding, or alternate OME build graph is required.
+Disable it in two steps: first set `routing.enabled: false` while keeping
+`publisher.name: xds`, then remove the publisher configuration after the
+endpoint finalizers drain. Likewise, drain the currently selected backend
+before switching between xDS and Gateway API; the shared finalizer invokes only
+the publisher selected at startup.

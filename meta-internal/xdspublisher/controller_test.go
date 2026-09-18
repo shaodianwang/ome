@@ -27,7 +27,7 @@ type recordingPublisher struct {
 	clearFailures   map[string]error
 }
 
-func (p *recordingPublisher) PublishWeight(target string, weight uint32) error {
+func (p *recordingPublisher) PublishWeight(_ context.Context, target string, weight uint32) error {
 	p.published = append(p.published, weightedTarget{name: target, weight: weight})
 	if err := p.publishFailures[target]; err != nil {
 		delete(p.publishFailures, target)
@@ -36,7 +36,7 @@ func (p *recordingPublisher) PublishWeight(target string, weight uint32) error {
 	return nil
 }
 
-func (p *recordingPublisher) ClearWeight(target string) error {
+func (p *recordingPublisher) ClearWeight(_ context.Context, target string) error {
 	p.cleared = append(p.cleared, target)
 	if err := p.clearFailures[target]; err != nil {
 		delete(p.clearFailures, target)
@@ -161,7 +161,7 @@ func TestPublishEmptyTargetHoldsPriorTargetsAtZero(t *testing.T) {
 func TestPartialPublishLeavesAttemptedTargetsJournaled(t *testing.T) {
 	isvc := testISVC("model-a")
 	weights := &recordingPublisher{publishFailures: map[string]error{
-		"model-a.team-a.home-b.mks": errors.New("native publisher unavailable"),
+		"model-a.team-a.home-b.mks": errors.New("HTTP publisher unavailable"),
 	}}
 	p, c := newTestPublisher(t, weights, isvc)
 

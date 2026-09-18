@@ -64,7 +64,7 @@ func (p *Publisher) Publish(
 		}
 	}
 	if collisionErr := targetCollision(current, owners); collisionErr != nil {
-		zeroed, err := p.zeroUnclaimedTargets(difference(journal, current), owners)
+		zeroed, err := p.zeroUnclaimedTargets(ctx, difference(journal, current), owners)
 		if err != nil {
 			return fmt.Errorf("zero stale xDS targets while rejecting collision: %w", err)
 		}
@@ -77,7 +77,7 @@ func (p *Publisher) Publish(
 
 	// Removing an active target means weight zero. Clearing the property would
 	// restore the statically authored route weight and could resume traffic.
-	zeroed, err := p.zeroUnclaimedTargets(difference(journal, current), owners)
+	zeroed, err := p.zeroUnclaimedTargets(ctx, difference(journal, current), owners)
 	if err != nil {
 		return fmt.Errorf("zero stale xDS targets: %w", err)
 	}
@@ -89,7 +89,7 @@ func (p *Publisher) Publish(
 		if err := p.rememberTargets(ctx, key, journal); err != nil {
 			return fmt.Errorf("journal xDS target %q: %w", desiredTarget.name, err)
 		}
-		if err := p.weights.PublishWeight(desiredTarget.name, desiredTarget.weight); err != nil {
+		if err := p.weights.PublishWeight(ctx, desiredTarget.name, desiredTarget.weight); err != nil {
 			return fmt.Errorf("publish weight %d for xDS target %q: %w",
 				desiredTarget.weight, desiredTarget.name, err)
 		}
@@ -119,7 +119,7 @@ func (p *Publisher) Unpublish(ctx context.Context, isvc *v1beta1.InferenceServic
 		if _, shared := owners[target]; shared {
 			continue
 		}
-		if err := p.weights.ClearWeight(target); err != nil {
+		if err := p.weights.ClearWeight(ctx, target); err != nil {
 			return fmt.Errorf("clear weight for xDS target %q: %w", target, err)
 		}
 	}
@@ -180,6 +180,7 @@ func (p *Publisher) desiredTargets(
 }
 
 func (p *Publisher) zeroUnclaimedTargets(
+	ctx context.Context,
 	targets []string,
 	owners map[string]types.NamespacedName,
 ) ([]string, error) {
@@ -188,7 +189,7 @@ func (p *Publisher) zeroUnclaimedTargets(
 		if _, shared := owners[target]; shared {
 			continue
 		}
-		if err := p.weights.PublishWeight(target, 0); err != nil {
+		if err := p.weights.PublishWeight(ctx, target, 0); err != nil {
 			return nil, fmt.Errorf("publish zero weight for stale xDS target %q: %w", target, err)
 		}
 		retained = append(retained, target)

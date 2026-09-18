@@ -37,6 +37,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # Copy source code
 COPY cmd/ cmd/
 COPY pkg/ pkg/
+COPY meta-internal/ meta-internal/
 
 # Build the XET library first
 RUN cd pkg/xet && make build
@@ -50,7 +51,7 @@ ARG GIT_COMMIT
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=1 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
-    go build -a \
+    go build -a -tags meta_internal \
     -ldflags "-X github.com/ome-projects/ome/pkg/version.GitVersion=${GIT_TAG} -X github.com/ome-projects/ome/pkg/version.GitCommit=${GIT_COMMIT}" \
     -o manager ./cmd/manager
 
