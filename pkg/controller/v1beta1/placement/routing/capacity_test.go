@@ -198,6 +198,7 @@ func TestCapacityConfig_Validate(t *testing.T) {
 		{"disabled is valid", func(c *CapacityConfig) { *c = CapacityConfig{} }, false},
 		{"relative path rejected", func(c *CapacityConfig) { c.Path = "capacity" }, true},
 		{"missing method rejected", func(c *CapacityConfig) { c.Method = "" }, true},
+		{"unsafe method rejected", func(c *CapacityConfig) { c.Method = "DELETE" }, true},
 		{"zero period rejected", func(c *CapacityConfig) { c.Period = 0 }, true},
 		{"zero timeout rejected", func(c *CapacityConfig) { c.Timeout = 0 }, true},
 		// Overlapping requests would pile up until the effective poll rate
@@ -207,6 +208,8 @@ func TestCapacityConfig_Validate(t *testing.T) {
 		{"zero maxAge rejected", func(c *CapacityConfig) { c.MaxAge = 0 }, true},
 		// Every report would age out before the next poll, flapping the ceiling.
 		{"maxAge < period rejected", func(c *CapacityConfig) { c.MaxAge = c.Period / 2 }, true},
+		{"maxAge shorter than quorum window rejected", func(c *CapacityConfig) { c.MaxAge = c.Period }, true},
+		{"maxAge equal to quorum window accepted", func(c *CapacityConfig) { c.MaxAge = time.Duration(c.quorum()) * c.Period }, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -233,8 +236,14 @@ func TestProbeConfig_Validate(t *testing.T) {
 		{"disabled is valid", func(c *ProbeConfig) { *c = ProbeConfig{} }, false},
 		{"relative path rejected", func(c *ProbeConfig) { c.Path = "health" }, true},
 		{"missing method rejected", func(c *ProbeConfig) { c.Method = "" }, true},
+		{"unsafe method rejected", func(c *ProbeConfig) { c.Method = "CONNECT" }, true},
 		{"missing accept statuses rejected", func(c *ProbeConfig) { c.AcceptStatuses = nil }, true},
 		{"missing gate statuses rejected", func(c *ProbeConfig) { c.GateStatuses = nil }, true},
+		{"invalid accept status rejected", func(c *ProbeConfig) { c.AcceptStatuses = []int{99} }, true},
+		{"invalid gate status rejected", func(c *ProbeConfig) { c.GateStatuses = []int{600} }, true},
+		{"authentication failure cannot gate", func(c *ProbeConfig) { c.GateStatuses = []int{401} }, true},
+		{"authorization failure cannot gate", func(c *ProbeConfig) { c.GateStatuses = []int{403} }, true},
+		{"overload cannot gate", func(c *ProbeConfig) { c.GateStatuses = []int{429} }, true},
 		// An ambiguous status has no defined verdict, so the policy would
 		// depend on list order rather than on the operator's intent.
 		{"status in both lists rejected", func(c *ProbeConfig) { c.GateStatuses = append(c.GateStatuses, 200) }, true},
@@ -257,6 +266,46 @@ func TestProbeConfig_Validate(t *testing.T) {
 			}
 			if !tt.wantErr && err != nil {
 				t.Fatalf("Validate() = %v, want nil", err)
+			}
+		})
+	}
+}
+
+func TestConfig_ValidateHonorsInstallationGate(t *testing.T) {
+	tests := []struct {
+		name   string
+		config Config
+	}{
+		{
+			name: "invalid probe is inert",
+			config: Config{Probe: func() ProbeConfig {
+				probe := testProbeConfig()
+				probe.Method = "DELETE"
+				return probe
+			}()},
+		},
+		{
+			name: "unavailable capacity format is inert",
+			config: Config{Capacity: func() CapacityConfig {
+				capacity := testCapacityConfig()
+				capacity.Format = CapacityFormat("Unavailable")
+				return capacity
+			}()},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			disabled := tt.config
+			disabled.Enabled = false
+			if err := disabled.Validate(); err != nil {
+				t.Fatalf("disabled Validate() = %v, want nil", err)
+			}
+
+			enabled := tt.config
+			enabled.Enabled = true
+			if err := enabled.Validate(); err == nil {
+				t.Fatal("enabled Validate() = nil, want staged configuration error")
 			}
 		})
 	}

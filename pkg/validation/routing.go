@@ -3,6 +3,7 @@ package validation
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
@@ -82,6 +83,9 @@ func validateRoutingProbe(probe *v1beta1.RoutingProbeSpec) error {
 	for _, status := range probe.GateStatuses {
 		if err := validateHTTPStatus("spec.routing.probe.gateStatuses", status); err != nil {
 			return err
+		}
+		if status == 401 || status == 403 || status == 429 {
+			return fmt.Errorf("spec.routing.probe.gateStatuses must not contain %d", status)
 		}
 		if _, found := accepted[status]; found {
 			return fmt.Errorf("spec.routing.probe status %d is in both acceptStatuses and gateStatuses", status)
@@ -177,6 +181,14 @@ func validateRoutingCapacity(capacity *v1beta1.RoutingCapacitySpec) error {
 	if capacity.MaxAge.Duration < capacity.Period.Duration {
 		return fmt.Errorf("spec.routing.capacity.maxAge (%s) must be at least period (%s)",
 			capacity.MaxAge.Duration, capacity.Period.Duration)
+	}
+	if capacity.Quorum > 1 {
+		intervals := time.Duration(capacity.Quorum)
+		wholePeriods := capacity.MaxAge.Duration / capacity.Period.Duration
+		if wholePeriods < intervals {
+			return fmt.Errorf("spec.routing.capacity.maxAge (%s) must span at least quorum (%d) period intervals",
+				capacity.MaxAge.Duration, capacity.Quorum)
+		}
 	}
 	return nil
 }

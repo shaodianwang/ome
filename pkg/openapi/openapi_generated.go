@@ -13600,7 +13600,7 @@ func schema_pkg_apis_ome_v1beta1_TrafficMapCapacity(ref common.ReferenceCallback
 					},
 					"source": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Source names which input produced Allocated. Without it an operator reading an unexpected weight cannot tell \"the home reported less capacity\" from \"the endpoint source was configured but failed open and the plan was used\" — the same number with opposite remediations.",
+							Description: "Source names which input produced Allocated. FallbackReason separately distinguishes an intentionally control-plane-only allocation from a configured endpoint source that could not supply a usable ceiling.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -13610,6 +13610,13 @@ func schema_pkg_apis_ome_v1beta1_TrafficMapCapacity(ref common.ReferenceCallback
 							Description: "Reported is the home's own servable-capacity figure, recorded whenever the endpoint source answered — including when it was at or above the plan and therefore did not lower Allocated. Keeping it visible in that case is what makes the ceiling auditable: Allocated alone cannot show that a report was received and found non-binding.",
 							Type:        []string{"integer"},
 							Format:      "int32",
+						},
+					},
+					"fallbackReason": {
+						SchemaProps: spec.SchemaProps{
+							Description: "FallbackReason explains why a configured endpoint capacity source did not produce an applied ceiling and the control-plane allocation was retained. Empty means capacity polling is disabled or its latest result was usable.",
+							Type:        []string{"string"},
+							Format:      "",
 						},
 					},
 				},
@@ -13779,14 +13786,21 @@ func schema_pkg_apis_ome_v1beta1_TrafficMapProbe(ref common.ReferenceCallback) c
 				Properties: map[string]spec.Schema{
 					"result": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Result is the most recent probe verdict. Only a sustained Failing gates the weight; Unknown never does.",
+							Description: "Result is the most recent probe attempt's verdict. Failing gates only after the configured threshold. Unknown does not change the previous gate.",
 							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"gated": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Gated is the current hysteresis gate. It remains true through an Unknown attempt until enough consecutive passing attempts reopen the home.",
+							Type:        []string{"boolean"},
 							Format:      "",
 						},
 					},
 					"lastProbeTime": {
 						SchemaProps: spec.SchemaProps{
-							Description: "LastProbeTime is when the probe last reached a verdict, so a stalled prober is visible rather than being read as a steady pass.",
+							Description: "LastProbeTime is when the latest probe attempt completed, so a stalled prober is visible rather than being read as a steady pass.",
 							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
 						},
 					},

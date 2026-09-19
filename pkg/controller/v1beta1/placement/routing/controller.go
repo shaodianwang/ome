@@ -353,8 +353,8 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&v1beta1.InferenceService{}, builder.WithPredicates(routingTableChange)).
 		Owns(&v1beta1.TrafficMap{})
 
-	probing := r.Prober != nil && r.Prober.Config.IsEnabled()
-	polling := r.Capacity != nil && r.Capacity.Config.IsEnabled()
+	probing := r.Config.IsEnabled() && r.Prober != nil && r.Prober.Config.IsEnabled()
+	polling := r.Config.IsEnabled() && r.Capacity != nil && r.Capacity.Config.IsEnabled()
 	if probing || polling {
 		events := make(chan event.GenericEvent, probeEventBuffer)
 		// Both observers read the same routing tables, so they share one target

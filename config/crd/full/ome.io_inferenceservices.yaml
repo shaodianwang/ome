@@ -31507,6 +31507,8 @@ spec:
                           rule: '!has(self.timeout) || duration(self.timeout) > duration(''0s'')'
                         - message: timeout must be shorter than period
                           rule: '!has(self.period) || !has(self.timeout) || duration(self.timeout) < duration(self.period)'
+                        - message: gateStatuses must not contain 401, 403, or 429
+                          rule: '!has(self.gateStatuses) || !self.gateStatuses.exists(s, s == 401 || s == 403 || s == 429)'
                     publisher:
                       properties:
                         options:

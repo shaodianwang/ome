@@ -42,13 +42,32 @@ func TestTrafficMapCapacity_ReportedDistinguishesZeroFromAbsent(t *testing.T) {
 	}
 }
 
+func TestTrafficMapCapacity_FallbackReasonRoundTrips(t *testing.T) {
+	in := TrafficMapCapacity{
+		Allocated:      7,
+		FallbackReason: "capacity endpoint returned HTTP 503",
+	}
+	raw, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("Marshal capacity fallback: %v", err)
+	}
+	var out TrafficMapCapacity
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("Unmarshal capacity fallback: %v", err)
+	}
+	if out != in {
+		t.Fatalf("capacity fallback round trip:\n got %+v\nwant %+v", out, in)
+	}
+}
+
 func TestTrafficMapProbe_RoundTrips(t *testing.T) {
-	// ConsecutiveFailures is load-bearing for hysteresis, so it has to survive a
-	// round trip even when the result is Failing but the gate has not tripped.
+	// An inconclusive attempt does not reopen a previously gated home, so the
+	// latest result and current gate must survive independently.
 	in := TrafficMapProbe{
-		Result:              ProbeResultFailing,
-		ConsecutiveFailures: 2,
-		Message:             "502 Bad Gateway",
+		Result:              ProbeResultUnknown,
+		Gated:               true,
+		ConsecutiveFailures: 3,
+		Message:             "HTTP 429 (not in accept or gate list)",
 	}
 	raw, err := json.Marshal(in)
 	if err != nil {

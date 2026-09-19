@@ -183,13 +183,10 @@ func setupMultiCluster(mgr manager.Manager, clientSet kubernetes.Interface, opti
 	if err := validateDispatcherMode(w.dispatcherMode); err != nil {
 		return err
 	}
-	// A half-configured probe is worse than none: it reads as enabled while
-	// behaving arbitrarily. Validate after resolution so the check sees the
-	// parsed durations rather than the raw strings.
-	if err := w.routing.Probe.Validate(); err != nil {
-		return fmt.Errorf("invalid multi-cluster configuration: %w", err)
-	}
-	if err := w.routing.Capacity.Validate(); err != nil {
+	// Validate after resolution so the check sees parsed durations. A disabled
+	// installation may retain staged observer settings without loading their
+	// optional plugins until routing is enabled again.
+	if err := w.routing.Validate(); err != nil {
 		return fmt.Errorf("invalid multi-cluster configuration: %w", err)
 	}
 

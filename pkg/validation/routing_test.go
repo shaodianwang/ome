@@ -109,6 +109,9 @@ func TestValidateRoutingProbe(t *testing.T) {
 		{name: "missing gated statuses", mutate: func(p *v1beta1.RoutingProbeSpec) { p.GateStatuses = nil }, wantContain: "gateStatuses is required"},
 		{name: "invalid accepted status", mutate: func(p *v1beta1.RoutingProbeSpec) { p.AcceptStatuses = []int32{99} }, wantContain: "invalid HTTP status"},
 		{name: "invalid gated status", mutate: func(p *v1beta1.RoutingProbeSpec) { p.GateStatuses = []int32{600} }, wantContain: "invalid HTTP status"},
+		{name: "authentication failure cannot gate", mutate: func(p *v1beta1.RoutingProbeSpec) { p.GateStatuses = []int32{401} }, wantContain: "must not contain 401"},
+		{name: "authorization failure cannot gate", mutate: func(p *v1beta1.RoutingProbeSpec) { p.GateStatuses = []int32{403} }, wantContain: "must not contain 403"},
+		{name: "overload cannot gate", mutate: func(p *v1beta1.RoutingProbeSpec) { p.GateStatuses = []int32{429} }, wantContain: "must not contain 429"},
 		{name: "overlapping statuses", mutate: func(p *v1beta1.RoutingProbeSpec) { p.GateStatuses = append(p.GateStatuses, 200) }, wantContain: "both acceptStatuses and gateStatuses"},
 		{name: "zero period", mutate: func(p *v1beta1.RoutingProbeSpec) { p.Period.Duration = 0 }, wantContain: "period must be positive"},
 		{name: "zero timeout", mutate: func(p *v1beta1.RoutingProbeSpec) { p.Timeout.Duration = 0 }, wantContain: "timeout must be positive"},
@@ -170,6 +173,7 @@ func TestValidateRoutingCapacity(t *testing.T) {
 		{name: "quorum above samples", mutate: func(c *v1beta1.RoutingCapacitySpec) { c.Quorum = c.Samples + 1 }, wantContain: "must not exceed"},
 		{name: "zero max age", mutate: func(c *v1beta1.RoutingCapacitySpec) { c.MaxAge.Duration = 0 }, wantContain: "maxAge must be positive"},
 		{name: "max age below period", mutate: func(c *v1beta1.RoutingCapacitySpec) { c.MaxAge.Duration = c.Period.Duration - time.Second }, wantContain: "must be at least"},
+		{name: "max age shorter than quorum window", mutate: func(c *v1beta1.RoutingCapacitySpec) { c.MaxAge.Duration = c.Period.Duration }, wantContain: "must span at least"},
 	}
 
 	for _, tt := range tests {

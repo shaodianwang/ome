@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -36,6 +37,9 @@ func ResolveConfig(
 		return Config{}, err
 	}
 	if spec == nil || spec.Routing == nil {
+		if err := resolved.Validate(); err != nil {
+			return Config{}, err
+		}
 		return resolved, nil
 	}
 	routingSpec := spec.Routing
@@ -43,15 +47,15 @@ func ResolveConfig(
 	if routingSpec.Enabled != nil && !*routingSpec.Enabled {
 		resolved.Enabled = false
 	}
+	if !resolved.Enabled {
+		return resolved, nil
+	}
 
 	if routingSpec.Probe != nil {
 		if routingSpec.Probe.Disabled {
 			resolved.Probe = ProbeConfig{}
 		} else {
 			resolved.Probe = probeConfigFromSpec(routingSpec.Probe)
-			if err := resolved.Probe.Validate(); err != nil {
-				return Config{}, fmt.Errorf("spec.%w", err)
-			}
 		}
 	}
 	if routingSpec.Capacity != nil {
@@ -59,10 +63,16 @@ func ResolveConfig(
 			resolved.Capacity = CapacityConfig{}
 		} else {
 			resolved.Capacity = capacityConfigFromSpec(routingSpec.Capacity)
-			if err := resolved.Capacity.Validate(); err != nil {
-				return Config{}, fmt.Errorf("spec.%w", err)
-			}
 		}
+	}
+	if err := resolved.Validate(); err != nil {
+		var configErr *configValidationError
+		if errors.As(err, &configErr) &&
+			((configErr.section == "probe" && routingSpec.Probe != nil) ||
+				(configErr.section == "capacity" && routingSpec.Capacity != nil)) {
+			return Config{}, fmt.Errorf("spec.%w", err)
+		}
+		return Config{}, err
 	}
 
 	if routingSpec.Publisher == nil || len(routingSpec.Publisher.Options) == 0 {

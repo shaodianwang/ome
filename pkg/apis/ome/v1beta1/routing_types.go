@@ -46,6 +46,7 @@ type RoutingSpec struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.period) || duration(self.period) > duration('0s')",message="period must be positive"
 // +kubebuilder:validation:XValidation:rule="!has(self.timeout) || duration(self.timeout) > duration('0s')",message="timeout must be positive"
 // +kubebuilder:validation:XValidation:rule="!has(self.period) || !has(self.timeout) || duration(self.timeout) < duration(self.period)",message="timeout must be shorter than period"
+// +kubebuilder:validation:XValidation:rule="!has(self.gateStatuses) || !self.gateStatuses.exists(s, s == 401 || s == 403 || s == 429)",message="gateStatuses must not contain 401, 403, or 429"
 type RoutingProbeSpec struct {
 	// Disabled explicitly disables probing. No other field may be set when true.
 	// +optional

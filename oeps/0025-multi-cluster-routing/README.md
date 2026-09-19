@@ -362,16 +362,19 @@ control plane makes no outbound call at all.
    uniform (`a_h = 1` per healthy home). In `Single`, one weighted entry; the map
    still exists so cutover on a failed winner is expressible.
 
-2. **`c_h` — per-replica capacity factor** *(always present; defaults to `1.0`)*.
+2. **`c_h` — per-replica capacity factor** *(always available; an omitted field
+   has the semantic identity value `1.0`)*.
    Replicas are not fungible across accelerators: 100 replicas on each of two
    types is not 50/50 if one serves 2× the tokens/sec. Precedence: an explicit
    `spec.routing.capacityFactors[home]` value — the accurate source, since the
    ratio is workload-specific (model × runtime × precision), not a hardware
    constant — then an opt-in `AcceleratorClass` default, then `1.0`. The
    deprecated `spec.placement.capacityFactors` alias is read only when the new
-   field is absent. **Never auto-derived from TFLOPS**: raw FLOPS is not a
-   reliable throughput proxy across vendors. Affects *weighting only*, not
-   placement.
+   field is absent. The controller applies the identity when no factor is set;
+   the CRD does not server-default the generated TrafficMap field because doing
+   so would make the API server and controller repeatedly add and remove it.
+   **Never auto-derived from TFLOPS**: raw FLOPS is not a reliable throughput
+   proxy across vendors. Affects *weighting only*, not placement.
 
 3. **`r_h` — ready replicas** *(always; the health gate)*. Binary in v1:
    `r_h == 0 → weight 0`. *Failure mode avoided:* a proportional gate
@@ -495,16 +498,21 @@ is what makes capacity-aware weights and a gateway-neutral contract possible.
     `weight` (int32, 0–1,000,000), `healthy` (bool). The upper bound matches the
     Gateway API backend weight contract; larger exact ratios are proportionally
     compressed without turning a positive arm into zero.
-  - `capacity.allocated` / `.ready` (int32), `.factor` (quantity, default `1.0`):
-    weight provenance — `weight ∝ allocated × factor`, health-gated.
+  - `capacity.allocated` / `.ready` (int32), `.factor` (quantity, semantic
+    default `1.0` when omitted): weight provenance —
+    `weight ∝ allocated × factor`, health-gated.
   - `capacity.source` (enum `ControlPlane|Endpoint`, default `ControlPlane`):
     which input produced `allocated`. *Rationale:* without it an operator cannot
     distinguish "the home reported less capacity" from "the override failed open"
     — same number, opposite remediations.
-  - `probe` (optional, present only when probing is configured): last result,
-    observation time, consecutive-failure count. *Rationale:* `healthy:false`
-    alone does not say whether readiness or reachability failed, and those point
-    at different teams.
+  - `capacity.fallbackReason` (string, optional): why a configured endpoint
+    source did not produce a usable ceiling and the control-plane allocation was
+    retained. Empty means polling is disabled or its latest result was usable.
+  - `probe` (optional, present only when probing is configured): latest attempt
+    result, current hysteresis gate, attempt time, and consecutive-failure count.
+    `result: Unknown` leaves the prior `gated` value unchanged. *Rationale:*
+    `healthy:false` alone does not say whether readiness or reachability failed,
+    and those point at different teams.
 - `spec.observedISVCGeneration` (int64) for staleness detection.
 - `status.programmed` (bool), `status.gatewayRef`,
   `status.observedTrafficMapGeneration` (int64), `status.conditions[]`.
@@ -831,9 +839,9 @@ from the then-current main branch rather than as a GitHub stack:
   input is also exercised alone, so enabling one never activates the other.
 - **Unit (capacity ceiling).** `reported > plan` → plan wins; `reported < plan` →
   reported wins; absent or stale → plan wins, `capacity.source` stays
-  `ControlPlane`, fallback condition set. Two ISVCs with different formats,
-  periods, and quorum settings retain independent sample windows; changing one
-  capacity block clears only that ISVC's window.
+  `ControlPlane`, `capacity.fallbackReason` is set. Two ISVCs with different
+  formats, periods, and quorum settings retain independent sample windows;
+  changing one capacity block clears only that ISVC's window.
 - **Unit (probe status policy).** `429`/`401`/`403` do not gate; `5xx` and
   transport errors do; "probe could not run" gates nothing even when it affects
   every home; the gate flips exactly at the Nth failure and recovers exactly at

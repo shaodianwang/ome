@@ -36,10 +36,34 @@ type Config struct {
 	Publisher PublisherConfig
 }
 
+type configValidationError struct {
+	section string
+	err     error
+}
+
+func (e *configValidationError) Error() string { return e.err.Error() }
+func (e *configValidationError) Unwrap() error { return e.err }
+
 // IsEnabled reports whether TrafficMap generation is on. When false the routing
 // controller publishes nothing and releases what it already owns.
 func (c Config) IsEnabled() bool {
 	return c.Enabled
+}
+
+// Validate checks the operator-level routing policy before controllers start.
+// A disabled installation cannot run either observer, so staged observer and
+// format-plugin settings are intentionally inert until routing is enabled.
+func (c Config) Validate() error {
+	if !c.Enabled {
+		return nil
+	}
+	if err := c.Probe.Validate(); err != nil {
+		return &configValidationError{section: "probe", err: err}
+	}
+	if err := c.Capacity.Validate(); err != nil {
+		return &configValidationError{section: "capacity", err: err}
+	}
+	return nil
 }
 
 // PublisherConfig selects one compiled-in TrafficMap publisher backend.
@@ -151,11 +175,29 @@ func (p ProbeConfig) Validate() error {
 	if p.Method == "" {
 		return fmt.Errorf("routing.probe.method is required when routing.probe.path is set")
 	}
+	switch p.Method {
+	case "GET", "HEAD", "POST":
+	default:
+		return fmt.Errorf("routing.probe.method %q must be GET, HEAD, or POST", p.Method)
+	}
 	if len(p.AcceptStatuses) == 0 {
 		return fmt.Errorf("routing.probe.acceptStatuses is required when routing.probe.path is set")
 	}
 	if len(p.GateStatuses) == 0 {
 		return fmt.Errorf("routing.probe.gateStatuses is required when routing.probe.path is set")
+	}
+	for _, status := range p.AcceptStatuses {
+		if status < 100 || status > 599 {
+			return fmt.Errorf("routing.probe.acceptStatuses contains invalid HTTP status %d", status)
+		}
+	}
+	for _, status := range p.GateStatuses {
+		if status < 100 || status > 599 {
+			return fmt.Errorf("routing.probe.gateStatuses contains invalid HTTP status %d", status)
+		}
+		if status == 401 || status == 403 || status == 429 {
+			return fmt.Errorf("routing.probe.gateStatuses must not contain %d", status)
+		}
 	}
 	for _, s := range p.AcceptStatuses {
 		for _, g := range p.GateStatuses {
@@ -318,6 +360,11 @@ func (c CapacityConfig) Validate() error {
 	if c.Method == "" {
 		return fmt.Errorf("routing.capacity.method is required when routing.capacity.path is set")
 	}
+	switch c.Method {
+	case "GET", "HEAD", "POST":
+	default:
+		return fmt.Errorf("routing.capacity.method %q must be GET, HEAD, or POST", c.Method)
+	}
 	if c.Period <= 0 {
 		return fmt.Errorf("routing.capacity.period must be positive when routing.capacity.path is set")
 	}
@@ -343,6 +390,14 @@ func (c CapacityConfig) Validate() error {
 		// A quorum larger than the window can never be reached, so no reading
 		// would ever lower a ceiling and the input would silently do nothing.
 		return fmt.Errorf("routing.capacity.quorum (%d) must not exceed routing.capacity.samples (%d)", q, n)
+	}
+	if q := c.quorum(); q > 1 {
+		intervals := time.Duration(q)
+		wholePeriods := c.MaxAge / c.Period
+		if wholePeriods < intervals {
+			return fmt.Errorf("routing.capacity.maxAge (%s) must span at least quorum (%d) routing.capacity.period intervals",
+				c.MaxAge, q)
+		}
 	}
 	if c.MaxAge < c.Period {
 		// Every report would age out before the next poll, so the ceiling would

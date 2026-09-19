@@ -183,12 +183,17 @@ type TrafficMapEntry struct {
 // home. The probe targets the entry's Endpoint — the URL a client uses — so it
 // covers the whole serving path rather than pod readiness inside the home.
 type TrafficMapProbe struct {
-	// Result is the most recent probe verdict. Only a sustained Failing gates
-	// the weight; Unknown never does.
+	// Result is the most recent probe attempt's verdict. Failing gates only after
+	// the configured threshold. Unknown does not change the previous gate.
 	// +optional
 	Result ProbeResult `json:"result,omitempty"`
 
-	// LastProbeTime is when the probe last reached a verdict, so a stalled
+	// Gated is the current hysteresis gate. It remains true through an Unknown
+	// attempt until enough consecutive passing attempts reopen the home.
+	// +optional
+	Gated bool `json:"gated,omitempty"`
+
+	// LastProbeTime is when the latest probe attempt completed, so a stalled
 	// prober is visible rather than being read as a steady pass.
 	// +optional
 	LastProbeTime *metav1.Time `json:"lastProbeTime,omitempty"`
@@ -227,13 +232,11 @@ type TrafficMapCapacity struct {
 	// multiplicative identity, i.e. no scaling. It is operator-supplied config,
 	// never derived from raw hardware FLOPS.
 	// +optional
-	// +kubebuilder:default="1"
 	Factor *resource.Quantity `json:"factor,omitempty"`
 
-	// Source names which input produced Allocated. Without it an operator
-	// reading an unexpected weight cannot tell "the home reported less capacity"
-	// from "the endpoint source was configured but failed open and the plan was
-	// used" — the same number with opposite remediations.
+	// Source names which input produced Allocated. FallbackReason separately
+	// distinguishes an intentionally control-plane-only allocation from a
+	// configured endpoint source that could not supply a usable ceiling.
 	// +optional
 	// +kubebuilder:default=ControlPlane
 	Source CapacitySource `json:"source,omitempty"`
@@ -246,6 +249,12 @@ type TrafficMapCapacity struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	Reported *int32 `json:"reported,omitempty"`
+
+	// FallbackReason explains why a configured endpoint capacity source did not
+	// produce an applied ceiling and the control-plane allocation was retained.
+	// Empty means capacity polling is disabled or its latest result was usable.
+	// +optional
+	FallbackReason string `json:"fallbackReason,omitempty"`
 }
 
 // TrafficMapStatus reports whether the active publisher has realized this map

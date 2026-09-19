@@ -41,6 +41,113 @@ func TestResolveConfigEnabled(t *testing.T) {
 	}
 }
 
+func TestResolveConfigValidationFollowsEffectiveEnablement(t *testing.T) {
+	trueValue, falseValue := true, false
+	stagedCapacity := func() *v1beta1.RoutingCapacitySpec {
+		capacity := validRoutingCapacitySpec()
+		capacity.Format = "Unavailable"
+		return capacity
+	}
+	stagedPublisher := &v1beta1.RoutingPublisherSpec{Options: map[string]string{
+		"routingClass": "staged",
+	}}
+
+	tests := []struct {
+		name            string
+		global          Config
+		routing         *v1beta1.RoutingSpec
+		wantEnabled     bool
+		wantErrContains string
+		wantResolver    bool
+	}{
+		{
+			name: "disabled installation skips invalid global observer plugin",
+			global: func() Config {
+				cfg := testGlobalRoutingConfig()
+				cfg.Enabled = false
+				cfg.Capacity.Format = CapacityFormat("Unavailable")
+				return cfg
+			}(),
+		},
+		{
+			name: "enabled installation validates inherited global observer plugin",
+			global: func() Config {
+				cfg := testGlobalRoutingConfig()
+				cfg.Capacity.Format = CapacityFormat("Unavailable")
+				return cfg
+			}(),
+			wantEnabled:     true,
+			wantErrContains: "routing.capacity.format \"Unavailable\" is not registered",
+		},
+		{
+			name:        "per-ISVC opt-out skips staged observer and publisher semantics",
+			global:      testGlobalRoutingConfig(),
+			routing:     &v1beta1.RoutingSpec{Enabled: &falseValue, Capacity: stagedCapacity(), Publisher: stagedPublisher},
+			wantEnabled: false,
+		},
+		{
+			name: "inline true cannot bypass disabled installation",
+			global: func() Config {
+				cfg := testGlobalRoutingConfig()
+				cfg.Enabled = false
+				return cfg
+			}(),
+			routing:     &v1beta1.RoutingSpec{Enabled: &trueValue, Capacity: stagedCapacity(), Publisher: stagedPublisher},
+			wantEnabled: false,
+		},
+		{
+			name:            "enabled policy validates observer before publisher semantics",
+			global:          testGlobalRoutingConfig(),
+			routing:         &v1beta1.RoutingSpec{Enabled: &trueValue, Capacity: stagedCapacity(), Publisher: stagedPublisher},
+			wantEnabled:     true,
+			wantErrContains: "spec.routing.capacity.format \"Unavailable\" is not registered",
+		},
+		{
+			name:         "enabled valid policy resolves publisher semantics",
+			global:       testGlobalRoutingConfig(),
+			routing:      &v1beta1.RoutingSpec{Enabled: &trueValue, Publisher: stagedPublisher},
+			wantEnabled:  true,
+			wantResolver: true,
+		},
+		{
+			name:            "generic API shape remains mandatory while opted out",
+			global:          testGlobalRoutingConfig(),
+			routing:         &v1beta1.RoutingSpec{Enabled: &falseValue, Capacity: &v1beta1.RoutingCapacitySpec{Path: "/capacity"}, Publisher: stagedPublisher},
+			wantErrContains: "method is required",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resolverCalled := false
+			got, err := ResolveConfig(tt.global, routingISVCSpec(tt.routing),
+				func(globalOptions, inlineOptions map[string]string) (map[string]string, error) {
+					resolverCalled = true
+					for key, value := range inlineOptions {
+						globalOptions[key] = value
+					}
+					return globalOptions, nil
+				})
+			if tt.wantErrContains != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErrContains)
+				assert.False(t, resolverCalled)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantEnabled, got.Enabled)
+			assert.Equal(t, tt.wantResolver, resolverCalled)
+			if tt.wantResolver {
+				assert.Equal(t, "staged", got.Publisher.Options["routingClass"])
+			} else {
+				assert.Equal(t, tt.global.Publisher.Options, got.Publisher.Options,
+					"disabled routing must retain global publisher semantics without applying staged options")
+			}
+		})
+	}
+}
+
 func TestResolveConfigObserverBlocks(t *testing.T) {
 	global := testGlobalRoutingConfig()
 
@@ -82,7 +189,7 @@ func TestResolveConfigObserverBlocks(t *testing.T) {
 				Timeout: metav1.Duration{Duration: 8 * time.Second},
 				Samples: 7,
 				Quorum:  3,
-				MaxAge:  metav1.Duration{Duration: 4 * time.Minute},
+				MaxAge:  metav1.Duration{Duration: 10 * time.Minute},
 			},
 		}), nil)
 		require.NoError(t, err)
@@ -106,7 +213,7 @@ func TestResolveConfigObserverBlocks(t *testing.T) {
 			Timeout: 8 * time.Second,
 			Samples: 7,
 			Quorum:  3,
-			MaxAge:  4 * time.Minute,
+			MaxAge:  10 * time.Minute,
 		}, got.Capacity)
 	})
 
@@ -331,7 +438,7 @@ func testGlobalRoutingConfig() Config {
 			Timeout: 5 * time.Second,
 			Samples: 6,
 			Quorum:  2,
-			MaxAge:  3 * time.Minute,
+			MaxAge:  5 * time.Minute,
 		},
 		Publisher: PublisherConfig{
 			Name: "publisher",
@@ -340,5 +447,18 @@ func testGlobalRoutingConfig() Config {
 				"routingClass": "global",
 			},
 		},
+	}
+}
+
+func validRoutingCapacitySpec() *v1beta1.RoutingCapacitySpec {
+	return &v1beta1.RoutingCapacitySpec{
+		Path:    "/capacity",
+		Method:  "GET",
+		Format:  string(FormatReport),
+		Period:  metav1.Duration{Duration: 30 * time.Second},
+		Timeout: metav1.Duration{Duration: 3 * time.Second},
+		Samples: 10,
+		Quorum:  2,
+		MaxAge:  metav1.Duration{Duration: time.Minute},
 	}
 }

@@ -36,4 +36,12 @@ func TestTrafficMapCRD_EntryWeightBounds(t *testing.T) {
 	if weight.Maximum == nil || *weight.Maximum != 1_000_000 {
 		t.Errorf("spec.entries[].weight maximum = %v, want 1000000", weight.Maximum)
 	}
+	entry := *entries.Items.Schema
+	capacity := requireSchemaProperty(t, entry, "capacity")
+	factor := requireSchemaProperty(t, capacity, "factor")
+	if factor.Default != nil {
+		t.Errorf("spec.entries[].capacity.factor default = %s, want none to avoid defaulting/update churn", factor.Default.Raw)
+	}
+	probe := requireSchemaProperty(t, entry, "probe")
+	requireSchemaProperty(t, probe, "gated")
 }

@@ -17,6 +17,7 @@ const (
 	routingPeriodPositiveRule  = "!has(self.period) || duration(self.period) > duration('0s')"
 	routingTimeoutPositiveRule = "!has(self.timeout) || duration(self.timeout) > duration('0s')"
 	routingTimeoutPeriodRule   = "!has(self.period) || !has(self.timeout) || duration(self.timeout) < duration(self.period)"
+	routingProbeSafeGateRule   = "!has(self.gateStatuses) || !self.gateStatuses.exists(s, s == 401 || s == 403 || s == 429)"
 
 	routingCapacityDisabledRule = "!(has(self.disabled) && self.disabled) || (!has(self.path) && !has(self.method) && !has(self.format) && !has(self.options) && !has(self.period) && !has(self.timeout) && !has(self.samples) && !has(self.quorum) && !has(self.maxAge))"
 	routingCapacityCompleteRule = "(has(self.disabled) && self.disabled) || (has(self.path) && has(self.method) && has(self.format) && has(self.period) && has(self.timeout) && has(self.samples) && has(self.quorum) && has(self.maxAge))"
@@ -56,6 +57,7 @@ func TestInferenceServiceCRD_RoutingValidationRules(t *testing.T) {
 		routingPeriodPositiveRule,
 		routingTimeoutPositiveRule,
 		routingTimeoutPeriodRule,
+		routingProbeSafeGateRule,
 	)
 
 	capacity := requireSchemaProperty(t, routing, "capacity")
