@@ -23,7 +23,7 @@ import (
 const testProbeResponseBytes int64 = 64
 
 var (
-	testMap      = types.NamespacedName{Name: "llama", Namespace: "team-a"}
+	testMap      = types.NamespacedName{Name: "model-service", Namespace: "team-a"}
 	testOwnerUID = types.UID("isvc-uid")
 	testProbeNow = time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)
 )

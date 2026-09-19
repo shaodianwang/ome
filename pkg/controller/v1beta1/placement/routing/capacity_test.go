@@ -18,7 +18,7 @@ import (
 
 const testCapacityMaxResponseBytes int64 = 1 << 20
 
-var capacityTestMap = types.NamespacedName{Name: "llama", Namespace: "team-a"}
+var capacityTestMap = types.NamespacedName{Name: "model-service", Namespace: "team-a"}
 
 func testCapacityConfig() CapacityConfig {
 	return CapacityConfig{
