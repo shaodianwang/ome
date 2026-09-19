@@ -7,6 +7,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	gatewayapiv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -116,6 +117,13 @@ func resolveMCWiring(mc *controllerconfig.MultiClusterConfig) mcWiring {
 		},
 		routing: placementrouting.Config{
 			Enabled: rt.Enabled,
+			Observer: placementrouting.ObserverConfig{
+				MaxConcurrentReconciles: rt.Observer.MaxConcurrentReconciles,
+				MaxConcurrentRequests:   rt.Observer.MaxConcurrentRequests,
+				MaxResponseBytes:        rt.Observer.MaxResponseBytes,
+				MinPeriod:               rt.Observer.MinPeriodDuration(),
+				MaxSamples:              rt.Observer.MaxSamples,
+			},
 			Publisher: placementrouting.PublisherConfig{
 				Name:    rt.Publisher.Name,
 				Options: rt.Publisher.Options,
@@ -340,10 +348,49 @@ func setupMultiCluster(mgr manager.Manager, clientSet kubernetes.Interface, opti
 		return fmt.Errorf("create PlacementEndpoint controller: %w", err)
 	}
 
-	// Both observed inputs talk to the same homes with the same credentials, so
-	// they share one HTTP client: two would mean two transports and two auth
-	// paths for one conversation.
-	observerClient := placementrouting.NewObserverClient()
+	var (
+		prober   *placementrouting.Prober
+		capacity *placementrouting.CapacityPoller
+	)
+	if w.routing.IsEnabled() {
+		// One process-wide executor bounds all probe and capacity HTTP work. Its
+		// queue is derived from the same operator-supplied request limit, keeping
+		// both running and waiting observations explicitly bounded.
+		executor, err := placementrouting.NewObserverExecutor(
+			w.routing.Observer.MaxConcurrentRequests,
+			w.routing.Observer.MaxConcurrentRequests,
+		)
+		if err != nil {
+			return fmt.Errorf("create routing observer executor: %w", err)
+		}
+		if err := mgr.Add(executor); err != nil {
+			return fmt.Errorf("add routing observer executor: %w", err)
+		}
+
+		// Both observed inputs talk to the same homes with the same credentials,
+		// so they share one redirect-refusing HTTP client and transport.
+		observerClient := placementrouting.NewObserverClient()
+		prober, err = placementrouting.NewProber(
+			executor,
+			observerClient,
+			clock.RealClock{},
+			w.routing.Observer.MaxResponseBytes,
+			ctrl.Log.WithName("controllers").WithName("PlacementRoutingProbe"),
+		)
+		if err != nil {
+			return fmt.Errorf("create routing endpoint prober: %w", err)
+		}
+		capacity, err = placementrouting.NewCapacityPoller(
+			w.routing.Capacity,
+			executor,
+			observerClient,
+			w.routing.Observer.MaxResponseBytes,
+			ctrl.Log.WithName("controllers").WithName("PlacementRoutingCapacity"),
+		)
+		if err != nil {
+			return fmt.Errorf("create routing capacity poller: %w", err)
+		}
+	}
 
 	// Project placement into the capacity-aware TrafficMap the publisher consumes.
 	// Always wired: when disabled the controller is a no-op that reaps any
@@ -355,13 +402,13 @@ func setupMultiCluster(mgr manager.Manager, clientSet kubernetes.Interface, opti
 		// the first poll.
 		"capacityFormats", placementrouting.RegisteredCapacityFormats())
 	if err := (&placementrouting.Reconciler{
-		Client: mgr.GetClient(),
-		Log:    ctrl.Log.WithName("controllers").WithName("PlacementRouting"),
-		Config: w.routing,
-		Prober: placementrouting.NewProber(w.routing.Probe, observerClient,
-			ctrl.Log.WithName("controllers").WithName("PlacementRoutingProbe")),
-		Capacity: placementrouting.NewCapacityPoller(w.routing.Capacity, observerClient,
-			ctrl.Log.WithName("controllers").WithName("PlacementRoutingCapacity")),
+		Client:                    mgr.GetClient(),
+		APIReader:                 mgr.GetAPIReader(),
+		Log:                       ctrl.Log.WithName("controllers").WithName("PlacementRouting"),
+		Config:                    w.routing,
+		Prober:                    prober,
+		Capacity:                  capacity,
+		WaitForPublisherFinalizer: useTrafficMap,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("create PlacementRouting controller: %w", err)
 	}

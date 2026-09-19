@@ -26,13 +26,12 @@ const MultiClusterConfigName = "multicluster"
 // decide which controllers run and the manager's identity, so they are
 // deploy-time decisions (a restart), not hot-tunable config.
 //
-// Every field degrades gracefully when omitted. Durations are stored as strings
-// and parsed by the *Duration() accessors, which yield 0 on an empty or
-// unparsable value; a zero handed to the workloadcluster/placement options
-// makes those packages apply their OWN in-package default. So the default for
-// each knob stays single-sourced in the package that owns it — never duplicated
-// as a literal here — and an absent "multicluster" block reproduces the
-// built-in behavior exactly.
+// An absent "multicluster" block reproduces the disabled built-in behavior.
+// Optional durations are stored as strings and parsed by the *Duration()
+// accessors, which yield 0 on an empty or unparsable value; a zero handed to the
+// workloadcluster/placement options makes those packages apply their own
+// in-package default. Routing observer limits are different: they bound shared
+// process resources and are required explicitly whenever routing is enabled.
 //
 // A knob that is stated but unusable is a startup error, not a silent fallback:
 // Validate gates the loaded config before any controller is wired.
@@ -199,6 +198,11 @@ type RoutingConfig struct {
 	// so enabling or disabling the feature is reversible without stranding objects.
 	Enabled bool `json:"enabled,omitempty"`
 
+	// Observer bounds controller concurrency, outbound requests, response size,
+	// polling frequency, and retained capacity samples. Every field is required
+	// when routing is enabled.
+	Observer RoutingObserverConfig `json:"observer,omitempty"`
+
 	// Probe configures the optional active end-to-end health probe. Absent (no
 	// path) means no probing and the health gate stays readyReplicas > 0.
 	Probe ProbeConfig `json:"probe,omitempty"`
@@ -213,6 +217,28 @@ type RoutingConfig struct {
 	// backend must be drained by disabling routing before its name is removed.
 	// Options are validated by the selected backend at manager startup.
 	Publisher TrafficMapPublisherConfig `json:"publisher,omitempty"`
+}
+
+// RoutingObserverConfig sets process-wide limits for routing observations.
+//
+// +kubebuilder:object:generate=false
+type RoutingObserverConfig struct {
+	// MaxConcurrentReconciles caps TrafficMap reconciles running in parallel.
+	MaxConcurrentReconciles int `json:"maxConcurrentReconciles,omitempty"`
+	// MaxConcurrentRequests caps in-flight probe and capacity HTTP requests.
+	MaxConcurrentRequests int `json:"maxConcurrentRequests,omitempty"`
+	// MaxResponseBytes bounds the body read from one observed endpoint.
+	MaxResponseBytes int64 `json:"maxResponseBytes,omitempty"`
+	// MinPeriod is the shortest permitted probe or capacity cadence.
+	MinPeriod string `json:"minPeriod,omitempty"`
+	// MaxSamples caps the effective per-home capacity history window.
+	MaxSamples int `json:"maxSamples,omitempty"`
+}
+
+// MinPeriodDuration parses MinPeriod, yielding zero when it is absent or
+// malformed so the routing package can reject an enabled invalid config.
+func (c RoutingObserverConfig) MinPeriodDuration() time.Duration {
+	return parseDurationOrZero(c.MinPeriod)
 }
 
 // TrafficMapPublisherConfig selects one backend compiled into the manager.
@@ -235,10 +261,10 @@ type CapacityConfig struct {
 	// Method is the HTTP method for the capacity request.
 	Method string `json:"method,omitempty"`
 
-	// Format names the response shape the home answers with. Empty means
-	// "Report", the built-in servable-count object. Other formats come from
-	// optional packages compiled into the binary; naming one this build does
-	// not carry is a startup error rather than a silent fallback.
+	// Format names the response shape the home answers with. "Report" selects
+	// the built-in servable-count object. Other formats come from optional
+	// packages compiled into the binary; naming one this build does not carry is
+	// a startup error rather than a silent fallback.
 	Format string `json:"format,omitempty"`
 
 	// Options carries settings specific to the selected format, interpreted by
@@ -246,13 +272,11 @@ type CapacityConfig struct {
 	Options map[string]string `json:"options,omitempty"`
 
 	// Samples is how many recent readings the applied ceiling is derived from.
-	// Zero uses the routing package's default.
 	Samples int `json:"samples,omitempty"`
 
 	// Quorum is how many readings must corroborate a lower value before it is
 	// applied -- the ceiling is the Quorum-th smallest, not the smallest, so a
-	// single misbehaving reporter cannot set it. Zero uses the routing
-	// package's default.
+	// single misbehaving reporter cannot set it.
 	Quorum int `json:"quorum,omitempty"`
 
 	// Period is how often each home is polled, as a duration string.
@@ -409,6 +433,7 @@ func (c MultiClusterConfig) Validate() error {
 		"endpoint.gatewayBackend.endpointSlices.addressRefreshInterval": c.Endpoint.GatewayBackend.EndpointSlices.AddressRefreshInterval,
 		"routing.probe.period":                                          c.Routing.Probe.Period,
 		"routing.probe.timeout":                                         c.Routing.Probe.Timeout,
+		"routing.observer.minPeriod":                                    c.Routing.Observer.MinPeriod,
 		"routing.capacity.period":                                       c.Routing.Capacity.Period,
 		"routing.capacity.timeout":                                      c.Routing.Capacity.Timeout,
 		"routing.capacity.maxAge":                                       c.Routing.Capacity.MaxAge,

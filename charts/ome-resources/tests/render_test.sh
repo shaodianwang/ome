@@ -424,8 +424,51 @@ for expected in \
     fail "gateway backend setting was not rendered: ${expected}"
 done
 
+for expected in \
+  '"maxConcurrentReconciles": 8' \
+  '"maxConcurrentRequests": 16' \
+  '"maxResponseBytes": 65536' \
+  '"minPeriod": "1s"' \
+  '"maxSamples": 100'; do
+  grep -Fq "${expected}" <<<"${controller_config}" ||
+    fail "default routing observer setting was not rendered: ${expected}"
+done
+
+routing_observer_args=(
+  --set ome.multicluster.config.routing.observer.maxConcurrentReconciles=4
+  --set ome.multicluster.config.routing.observer.maxConcurrentRequests=12
+  --set ome.multicluster.config.routing.observer.maxResponseBytes=131072
+  --set-string ome.multicluster.config.routing.observer.minPeriod=2s
+  --set ome.multicluster.config.routing.observer.maxSamples=64
+)
+routing_observer_config="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  "${routing_observer_args[@]}" \
+  --show-only templates/ome-controller/configmap.yaml)"
+for expected in \
+  '"maxConcurrentReconciles": 4' \
+  '"maxConcurrentRequests": 12' \
+  '"maxResponseBytes": 131072' \
+  '"minPeriod": "2s"' \
+  '"maxSamples": 64'; do
+  grep -Fq "${expected}" <<<"${routing_observer_config}" ||
+    fail "routing observer override was not rendered: ${expected}"
+done
+routing_observer_controller="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  "${routing_observer_args[@]}" \
+  --show-only templates/ome-controller/deployment.yaml)"
+routing_observer_checksum="$(grep -m1 'checksum/config:' <<<"${routing_observer_controller}" | awk '{print $2}')"
+[[ -n "${routing_observer_checksum}" ]] ||
+  fail "routing observer controller checksum was not rendered"
+[[ "${default_controller_checksum}" != "${routing_observer_checksum}" ]] ||
+  fail "changing routing observer limits did not roll the controller checksum"
+
 if grep -Fq '"probe"' <<<"${controller_config}"; then
   fail "routing probe was rendered when disabled"
+fi
+if grep -Fq '"capacity": {' <<<"${controller_config}"; then
+  fail "routing capacity was rendered when disabled"
 fi
 
 routing_probe_args=(
@@ -466,6 +509,44 @@ routing_probe_checksum="$(grep -m1 'checksum/config:' <<<"${routing_probe_contro
   fail "routing probe controller checksum was not rendered"
 [[ "${default_controller_checksum}" != "${routing_probe_checksum}" ]] ||
   fail "enabling the routing probe did not roll the controller checksum"
+
+routing_capacity_args=(
+  --set-string ome.multicluster.config.routing.capacity.path=/capacity
+  --set-string ome.multicluster.config.routing.capacity.method=GET
+  --set-string ome.multicluster.config.routing.capacity.format=Report
+  --set ome.multicluster.config.routing.capacity.samples=20
+  --set ome.multicluster.config.routing.capacity.quorum=3
+  --set-string ome.multicluster.config.routing.capacity.period=5s
+  --set-string ome.multicluster.config.routing.capacity.timeout=2s
+  --set-string ome.multicluster.config.routing.capacity.maxAge=30s
+)
+routing_capacity_config="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  "${routing_capacity_args[@]}" \
+  --show-only templates/ome-controller/configmap.yaml)"
+for expected in \
+  '"path": "/capacity"' \
+  '"method": "GET"' \
+  '"format": "Report"' \
+  '"options": {}' \
+  '"samples": 20' \
+  '"quorum": 3' \
+  '"period": "5s"' \
+  '"timeout": "2s"' \
+  '"maxAge": "30s"'; do
+  grep -Fq "${expected}" <<<"${routing_capacity_config}" ||
+    fail "routing capacity setting was not rendered: ${expected}"
+done
+
+routing_capacity_controller="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  "${routing_capacity_args[@]}" \
+  --show-only templates/ome-controller/deployment.yaml)"
+routing_capacity_checksum="$(grep -m1 'checksum/config:' <<<"${routing_capacity_controller}" | awk '{print $2}')"
+[[ -n "${routing_capacity_checksum}" ]] ||
+  fail "routing capacity controller checksum was not rendered"
+[[ "${default_controller_checksum}" != "${routing_capacity_checksum}" ]] ||
+  fail "enabling routing capacity did not roll the controller checksum"
 
 if grep -Fq '"publisher"' <<<"${controller_config}"; then
   fail "TrafficMap publisher was rendered when disabled"

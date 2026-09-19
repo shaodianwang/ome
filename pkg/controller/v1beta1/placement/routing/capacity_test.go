@@ -3,9 +3,12 @@ package routing
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,12 +16,19 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
+const testCapacityMaxResponseBytes int64 = 1 << 20
+
+var capacityTestMap = types.NamespacedName{Name: "llama", Namespace: "team-a"}
+
 func testCapacityConfig() CapacityConfig {
 	return CapacityConfig{
 		Path:    "/capacity",
 		Method:  http.MethodGet,
+		Format:  FormatReport,
 		Period:  time.Second,
 		Timeout: 500 * time.Millisecond,
+		Samples: 10,
+		Quorum:  2,
 		MaxAge:  30 * time.Second,
 	}
 }
@@ -32,7 +42,28 @@ func singleSampleConfig() CapacityConfig {
 }
 
 func newTestPoller(cfg CapacityConfig) *CapacityPoller {
-	return NewCapacityPoller(cfg, NewObserverClient(), logr.Discard())
+	executor, err := NewObserverExecutor(1, 1)
+	if err != nil {
+		panic(err)
+	}
+	return newTestPollerWithExecutor(cfg, executor)
+}
+
+func newTestPollerWithExecutor(cfg CapacityConfig, executor *ObserverExecutor) *CapacityPoller {
+	poller, err := NewCapacityPoller(cfg, executor, NewObserverClient(), testCapacityMaxResponseBytes, logr.Discard())
+	if err != nil {
+		panic(err)
+	}
+	return poller
+}
+
+func testCapacityTarget(cluster, endpoint string) Target {
+	return Target{
+		OwnerUID: "owner-uid",
+		Map:      capacityTestMap,
+		Cluster:  cluster,
+		URL:      endpoint,
+	}
 }
 
 // capacityServer serves a fixed body, so each test states exactly the report
@@ -56,11 +87,42 @@ func freshReport(servable int32) string {
 	return string(b)
 }
 
+func TestNewCapacityPollerRequiresRuntimeDependenciesAndLimit(t *testing.T) {
+	executor, err := NewObserverExecutor(1, 1)
+	if err != nil {
+		t.Fatalf("NewObserverExecutor() error = %v", err)
+	}
+	tests := []struct {
+		name       string
+		executor   *ObserverExecutor
+		client     *http.Client
+		maxBytes   int64
+		wantErrSub string
+	}{
+		{"nil executor", nil, NewObserverClient(), 1, "executor is nil"},
+		{"nil client", executor, nil, 1, "client is nil"},
+		{"zero response bound", executor, NewObserverClient(), 0, "must be positive"},
+		{"negative response bound", executor, NewObserverClient(), -1, "must be positive"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewCapacityPoller(testCapacityConfig(), tt.executor, tt.client, tt.maxBytes, logr.Discard())
+			if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
+				t.Fatalf("NewCapacityPoller() error = %v, want containing %q", err, tt.wantErrSub)
+			}
+		})
+	}
+
+	if _, err := NewCapacityPoller(CapacityConfig{}, executor, NewObserverClient(), 1, logr.Discard()); err != nil {
+		t.Fatalf("disabled NewCapacityPoller() error = %v, want valid dependencies accepted", err)
+	}
+}
+
 func TestCapacityPoller_AcceptsAFreshReport(t *testing.T) {
 	srv := capacityServer(t, http.StatusOK, freshReport(3))
 	p := newTestPoller(testCapacityConfig())
 
-	got, reason := p.pollOne(context.Background(), Target{Map: testMap, Cluster: "cluster-a", URL: srv.URL})
+	got, reason := p.pollOne(context.Background(), testCapacityTarget("cluster-a", srv.URL))
 	if got == nil {
 		t.Fatalf("pollOne returned no report: %s", reason)
 	}
@@ -78,7 +140,7 @@ func TestCapacityPoller_AcceptsAReportOfZero(t *testing.T) {
 	srv := capacityServer(t, http.StatusOK, freshReport(0))
 	p := newTestPoller(testCapacityConfig())
 
-	got, reason := p.pollOne(context.Background(), Target{Map: testMap, Cluster: "cluster-a", URL: srv.URL})
+	got, reason := p.pollOne(context.Background(), testCapacityTarget("cluster-a", srv.URL))
 	if got == nil {
 		t.Fatalf("a report of zero was discarded: %s", reason)
 	}
@@ -92,6 +154,7 @@ func TestCapacityPoller_FailsOpenOnEveryBadAnswer(t *testing.T) {
 	// would turn a control-plane-to-data-plane blip into a fleet-wide cutoff,
 	// and a malformed or stale number must never be able to black-hole a home.
 	stale, _ := json.Marshal(CapacityReport{Servable: 2, ObservedAt: time.Now().Add(-time.Hour)})
+	future, _ := json.Marshal(CapacityReport{Servable: 2, ObservedAt: time.Now().Add(time.Hour)})
 	negative, _ := json.Marshal(CapacityReport{Servable: -1, ObservedAt: time.Now()})
 	noStamp, _ := json.Marshal(CapacityReport{Servable: 2})
 
@@ -103,6 +166,7 @@ func TestCapacityPoller_FailsOpenOnEveryBadAnswer(t *testing.T) {
 		{"non-200 response", http.StatusServiceUnavailable, freshReport(2)},
 		{"unparsable body", http.StatusOK, "not json"},
 		{"stale report beyond maxAge", http.StatusOK, string(stale)},
+		{"future report timestamp", http.StatusOK, string(future)},
 		{"negative servable count", http.StatusOK, string(negative)},
 		{"report with no observedAt stamp", http.StatusOK, string(noStamp)},
 	}
@@ -110,7 +174,7 @@ func TestCapacityPoller_FailsOpenOnEveryBadAnswer(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			srv := capacityServer(t, tt.status, tt.body)
 			p := newTestPoller(testCapacityConfig())
-			got, reason := p.pollOne(context.Background(), Target{Map: testMap, Cluster: "cluster-a", URL: srv.URL})
+			got, reason := p.pollOne(context.Background(), testCapacityTarget("cluster-a", srv.URL))
 			if got != nil {
 				t.Fatalf("report = %d, want nil (fail open to the plan)", *got)
 			}
@@ -127,7 +191,7 @@ func TestCapacityPoller_UnreachableEndpointFallsOpen(t *testing.T) {
 	srv.Close()
 
 	p := newTestPoller(testCapacityConfig())
-	got, reason := p.pollOne(context.Background(), Target{Map: testMap, Cluster: "cluster-a", URL: url})
+	got, reason := p.pollOne(context.Background(), testCapacityTarget("cluster-a", url))
 	if got != nil {
 		t.Fatalf("report = %d from an unreachable endpoint, want nil", *got)
 	}
@@ -138,21 +202,22 @@ func TestCapacityPoller_UnreachableEndpointFallsOpen(t *testing.T) {
 
 func TestCapacityPoller_ReportedIsNilWhenPollingIsOff(t *testing.T) {
 	off := newTestPoller(CapacityConfig{})
-	if r := off.Reported(testMap, "cluster-a"); r != nil {
+	tgt := testCapacityTarget("cluster-a", "https://cluster-a.example")
+	if r := off.Reported(tgt); r != nil {
 		t.Fatalf("Reported with polling off = %d, want nil", *r)
 	}
-	if reason := off.FellOpen(testMap, "cluster-a"); reason != "" {
+	if reason := off.FellOpen(tgt); reason != "" {
 		t.Fatalf("FellOpen with polling off = %q, want empty", reason)
 	}
 	var nilPoller *CapacityPoller
-	if r := nilPoller.Reported(testMap, "cluster-a"); r != nil {
+	if r := nilPoller.Reported(tgt); r != nil {
 		t.Fatalf("Reported on nil poller = %d, want nil", *r)
 	}
 }
 
-func TestCapacityPoller_NotifiesOnlyWhenTheCeilingChanges(t *testing.T) {
+func TestCapacityPoller_NotifiesWhenCeilingOrFallbackReasonChanges(t *testing.T) {
 	p := newTestPoller(singleSampleConfig())
-	tgt := Target{Map: testMap, Cluster: "cluster-a"}
+	tgt := testCapacityTarget("cluster-a", "https://cluster-a.example")
 	two, three := int32(2), int32(3)
 
 	if !p.record(tgt, &two, "") {
@@ -172,19 +237,115 @@ func TestCapacityPoller_NotifiesOnlyWhenTheCeilingChanges(t *testing.T) {
 	if p.record(tgt, nil, "capacity endpoint unreachable") {
 		t.Fatal("still-absent report triggered a redundant reconcile")
 	}
+	if !p.record(tgt, nil, "capacity report is stale") {
+		t.Fatal("a changed fallback reason must trigger a reconcile even while the ceiling remains nil")
+	}
+	if reason := p.FellOpen(tgt); reason != "capacity report is stale" {
+		t.Fatalf("FellOpen() = %q, want latest failure reason", reason)
+	}
+}
+
+func TestCapacityPoller_FirstAcceptedSampleExplainsPendingQuorum(t *testing.T) {
+	p := newTestPoller(testCapacityConfig())
+	tgt := testCapacityTarget("cluster-a", "https://cluster-a.example")
+	two := int32(2)
+
+	if !p.record(tgt, &two, "") {
+		t.Fatal("first below-quorum sample did not report its new fallback reason")
+	}
+	if got := p.Reported(tgt); got != nil {
+		t.Fatalf("Reported() = %d, want nil before quorum", *got)
+	}
+	if reason := p.FellOpen(tgt); !strings.Contains(reason, "awaiting quorum (1/2 accepted samples)") {
+		t.Fatalf("FellOpen() = %q, want a nonempty pending-quorum reason", reason)
+	}
+}
+
+func TestCapacityPoller_StateIdentityIncludesOwnerMapClusterAndURL(t *testing.T) {
+	p := newTestPoller(singleSampleConfig())
+	tgt := testCapacityTarget("cluster-a", "https://cluster-a.example/base")
+	two := int32(2)
+	p.record(tgt, &two, "")
+
+	tests := []struct {
+		name   string
+		mutate func(*Target)
+	}{
+		{"owner UID", func(other *Target) { other.OwnerUID = "replacement-owner" }},
+		{"map namespace", func(other *Target) { other.Map.Namespace = "other-namespace" }},
+		{"map name", func(other *Target) { other.Map.Name = "other-map" }},
+		{"cluster", func(other *Target) { other.Cluster = "cluster-b" }},
+		{"URL", func(other *Target) { other.URL = "https://other.example/base" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			other := tgt
+			tt.mutate(&other)
+			if got := p.Reported(other); got != nil {
+				t.Fatalf("Reported() for different %s = %d, want nil", tt.name, *got)
+			}
+		})
+	}
+
+	equivalent := tgt
+	equivalent.URL = "https://cluster-a.example/base/"
+	if got := p.Reported(equivalent); got == nil || *got != 2 {
+		t.Fatalf("Reported() for canonically equivalent URL = %v, want 2", got)
+	}
+}
+
+func TestCapacityPoller_LateGenerationCannotOverwriteCurrentState(t *testing.T) {
+	p := newTestPoller(singleSampleConfig())
+	tgt := testCapacityTarget("cluster-a", "https://cluster-a.example")
+	first := p.prepare([]Target{tgt})
+	second := p.prepare([]Target{tgt})
+	if len(first) != 1 || len(second) != 1 {
+		t.Fatalf("prepared work lengths = %d, %d; want 1, 1", len(first), len(second))
+	}
+
+	two, nine := int32(2), int32(9)
+	if !p.recordCurrent(second[0].key, second[0].generation, &nine, "") {
+		t.Fatal("current generation was not recorded")
+	}
+	if p.recordCurrent(first[0].key, first[0].generation, &two, "") {
+		t.Fatal("late predecessor generation was accepted")
+	}
+	if got := p.Reported(tgt); got == nil || *got != 9 {
+		t.Fatalf("Reported() after late predecessor = %v, want current value 9", got)
+	}
 }
 
 func TestCapacityPoller_ForgetsHomesThatAreNoLongerTargets(t *testing.T) {
 	p := newTestPoller(singleSampleConfig())
-	tgt := Target{Map: testMap, Cluster: "cluster-a"}
+	tgt := testCapacityTarget("cluster-a", "https://cluster-a.example")
 	two := int32(2)
 	p.record(tgt, &two, "")
-	if r := p.Reported(testMap, "cluster-a"); r == nil || *r != 2 {
+	if r := p.Reported(tgt); r == nil || *r != 2 {
 		t.Fatalf("Reported = %v before forget, want 2", r)
 	}
 	p.forget(nil)
-	if r := p.Reported(testMap, "cluster-a"); r != nil {
+	if r := p.Reported(tgt); r != nil {
 		t.Fatalf("Reported after forget = %d, want nil", *r)
+	}
+}
+
+func TestCapacityPoller_ForgetRemovesOnlyOneTrafficMap(t *testing.T) {
+	p := newTestPoller(singleSampleConfig())
+	first := testCapacityTarget("cluster-a", "https://cluster-a.example")
+	second := testCapacityTarget("cluster-b", "https://cluster-b.example")
+	second.Map = types.NamespacedName{Namespace: "other", Name: "service"}
+	one := int32(1)
+	two := int32(2)
+	p.record(first, &one, "")
+	p.record(second, &two, "")
+
+	p.Forget(first.Map)
+
+	if got := p.Reported(first); got != nil {
+		t.Fatalf("first Reported after Forget = %d, want nil", *got)
+	}
+	if got := p.Reported(second); got == nil || *got != two {
+		t.Fatalf("second Reported after Forget = %v, want %d", got, two)
 	}
 }
 
@@ -198,7 +359,10 @@ func TestCapacityConfig_Validate(t *testing.T) {
 		{"disabled is valid", func(c *CapacityConfig) { *c = CapacityConfig{} }, false},
 		{"relative path rejected", func(c *CapacityConfig) { c.Path = "capacity" }, true},
 		{"missing method rejected", func(c *CapacityConfig) { c.Method = "" }, true},
+		{"missing format rejected", func(c *CapacityConfig) { c.Format = "" }, true},
 		{"unsafe method rejected", func(c *CapacityConfig) { c.Method = "DELETE" }, true},
+		{"zero samples rejected", func(c *CapacityConfig) { c.Samples = 0 }, true},
+		{"zero quorum rejected", func(c *CapacityConfig) { c.Quorum = 0 }, true},
 		{"zero period rejected", func(c *CapacityConfig) { c.Period = 0 }, true},
 		{"zero timeout rejected", func(c *CapacityConfig) { c.Timeout = 0 }, true},
 		// Overlapping requests would pile up until the effective poll rate
@@ -337,28 +501,46 @@ func TestAllocationSource(t *testing.T) {
 
 func TestCapacityPoller_BodyIsBounded(t *testing.T) {
 	// A home streaming an unbounded body must not be able to exhaust
-	// control-plane memory.
+	// control-plane memory, and truncation must not be mistaken for decoding.
+	body := freshReport(2)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		chunk := make([]byte, 4096)
-		for i := range chunk {
-			chunk[i] = 'a'
-		}
-		for range 64 {
-			if _, err := w.Write(chunk); err != nil {
-				return
-			}
-		}
+		_, _ = w.Write([]byte(body))
 	}))
 	defer srv.Close()
 
-	p := newTestPoller(testCapacityConfig())
-	got, reason := p.pollOne(context.Background(), Target{Map: testMap, Cluster: "cluster-a", URL: srv.URL})
+	executor, err := NewObserverExecutor(1, 1)
+	if err != nil {
+		t.Fatalf("NewObserverExecutor() error = %v", err)
+	}
+	p, err := NewCapacityPoller(testCapacityConfig(), executor, NewObserverClient(), int64(len(body)-1), logr.Discard())
+	if err != nil {
+		t.Fatalf("NewCapacityPoller() error = %v", err)
+	}
+	got, reason := p.pollOne(context.Background(), testCapacityTarget("cluster-a", srv.URL))
 	if got != nil {
 		t.Fatalf("oversized body produced a report %d, want nil", *got)
 	}
-	if reason == "" {
-		t.Fatal("oversized body produced no reason")
+	if !strings.Contains(reason, "exceeds configured limit") {
+		t.Fatalf("oversized body reason = %q, want configured-limit error", reason)
+	}
+}
+
+func TestCapacityPoller_AcceptsBodyAtConfiguredLimit(t *testing.T) {
+	body := freshReport(2)
+	srv := capacityServer(t, http.StatusOK, string(body))
+	executor, err := NewObserverExecutor(1, 1)
+	if err != nil {
+		t.Fatalf("NewObserverExecutor() error = %v", err)
+	}
+	p, err := NewCapacityPoller(testCapacityConfig(), executor, NewObserverClient(), int64(len(body)), logr.Discard())
+	if err != nil {
+		t.Fatalf("NewCapacityPoller() error = %v", err)
+	}
+
+	got, reason := p.pollOne(context.Background(), testCapacityTarget("cluster-a", srv.URL))
+	if got == nil || *got != 2 {
+		t.Fatalf("report at exact limit = %v, want 2; reason = %q", got, reason)
 	}
 }
 
@@ -367,27 +549,207 @@ func TestCapacityPoller_PollAllRecordsPerHome(t *testing.T) {
 	full := capacityServer(t, http.StatusOK, freshReport(8))
 	scarce := capacityServer(t, http.StatusOK, freshReport(1))
 
-	p := newTestPoller(singleSampleConfig())
+	executor, _, _ := startTestObserverExecutor(t, 2, 2)
+	p := newTestPollerWithExecutor(singleSampleConfig(), executor)
 	p.Targets = func(context.Context) ([]Target, error) {
 		return []Target{
-			{Map: testMap, Cluster: "cluster-a", URL: full.URL},
-			{Map: testMap, Cluster: "cluster-b", URL: scarce.URL},
+			testCapacityTarget("cluster-a", full.URL),
+			testCapacityTarget("cluster-b", scarce.URL),
 		}, nil
 	}
 	var notified []types.NamespacedName
-	p.OnChange = func(nn types.NamespacedName) { notified = append(notified, nn) }
+	p.OnChange = func(_ context.Context, nn types.NamespacedName) error {
+		notified = append(notified, nn)
+		return nil
+	}
 
-	p.pollAll(context.Background())
+	if err := p.pollAll(context.Background()); err != nil {
+		t.Fatalf("pollAll() error = %v", err)
+	}
 
-	if r := p.Reported(testMap, "cluster-a"); r == nil || *r != 8 {
+	if r := p.Reported(testCapacityTarget("cluster-a", full.URL)); r == nil || *r != 8 {
 		t.Fatalf("cluster-a reported = %v, want 8", r)
 	}
-	if r := p.Reported(testMap, "cluster-b"); r == nil || *r != 1 {
+	if r := p.Reported(testCapacityTarget("cluster-b", scarce.URL)); r == nil || *r != 1 {
 		t.Fatalf("cluster-b reported = %v, want 1", r)
 	}
 	// Both homes changed, but they share one map, so one reconcile covers them.
 	if len(notified) != 1 {
 		t.Fatalf("notified %d times (%v), want 1 for the shared map", len(notified), notified)
+	}
+}
+
+func TestCapacityPoller_PollAllNotifiesForPendingQuorumFallback(t *testing.T) {
+	srv := capacityServer(t, http.StatusOK, freshReport(3))
+	executor, _, _ := startTestObserverExecutor(t, 1, 1)
+	p := newTestPollerWithExecutor(testCapacityConfig(), executor)
+	tgt := testCapacityTarget("cluster-a", srv.URL)
+	p.Targets = func(context.Context) ([]Target, error) { return []Target{tgt}, nil }
+	notified := 0
+	p.OnChange = func(context.Context, types.NamespacedName) error {
+		notified++
+		return nil
+	}
+
+	if err := p.pollAll(context.Background()); err != nil {
+		t.Fatalf("pollAll() error = %v", err)
+	}
+	if got := p.Reported(tgt); got != nil {
+		t.Fatalf("Reported() = %d, want nil before quorum", *got)
+	}
+	if reason := p.FellOpen(tgt); reason == "" {
+		t.Fatal("FellOpen() is empty after an accepted sample below quorum")
+	}
+	if notified != 1 {
+		t.Fatalf("OnChange called %d times, want 1 for the new fallback reason", notified)
+	}
+}
+
+func TestCapacityPoller_TargetDiscoveryFailureFallsOpenAndNotifies(t *testing.T) {
+	srv := capacityServer(t, http.StatusOK, freshReport(3))
+	executor, _, _ := startTestObserverExecutor(t, 1, 1)
+	p := newTestPollerWithExecutor(singleSampleConfig(), executor)
+	tgt := testCapacityTarget("cluster-a", srv.URL)
+	p.Targets = func(context.Context) ([]Target, error) { return []Target{tgt}, nil }
+	var notified []types.NamespacedName
+	p.OnChange = func(_ context.Context, mapKey types.NamespacedName) error {
+		notified = append(notified, mapKey)
+		return nil
+	}
+
+	if err := p.pollAll(context.Background()); err != nil {
+		t.Fatalf("initial pollAll() error = %v", err)
+	}
+	if got := p.Reported(tgt); got == nil || *got != 3 {
+		t.Fatalf("initial Reported() = %v, want 3", got)
+	}
+	notified = nil
+	p.Targets = func(context.Context) ([]Target, error) {
+		return nil, errors.New("cache unavailable")
+	}
+
+	if err := p.pollAll(context.Background()); err != nil {
+		t.Fatalf("failed-discovery pollAll() error = %v", err)
+	}
+	if got := p.Reported(tgt); got != nil {
+		t.Fatalf("Reported() after target discovery failure = %d, want nil", *got)
+	}
+	if got := p.FellOpen(tgt); got != "capacity target discovery failed" {
+		t.Fatalf("FellOpen() = %q, want target-discovery failure", got)
+	}
+	if !slices.Equal(notified, []types.NamespacedName{tgt.Map}) {
+		t.Fatalf("notifications = %v, want %v", notified, []types.NamespacedName{tgt.Map})
+	}
+}
+
+func TestCapacityPoller_RepeatedStaleReportDoesNotRenotify(t *testing.T) {
+	report := CapacityReport{Servable: 3, ObservedAt: time.Now().Add(-time.Minute)}
+	body, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("marshal report: %v", err)
+	}
+	srv := capacityServer(t, http.StatusOK, string(body))
+	executor, _, _ := startTestObserverExecutor(t, 1, 1)
+	p := newTestPollerWithExecutor(singleSampleConfig(), executor)
+	tgt := testCapacityTarget("cluster-a", srv.URL)
+	p.Targets = func(context.Context) ([]Target, error) { return []Target{tgt}, nil }
+	notified := 0
+	p.OnChange = func(context.Context, types.NamespacedName) error {
+		notified++
+		return nil
+	}
+
+	if err := p.pollAll(context.Background()); err != nil {
+		t.Fatalf("first pollAll() error = %v", err)
+	}
+	if err := p.pollAll(context.Background()); err != nil {
+		t.Fatalf("second pollAll() error = %v", err)
+	}
+	if notified != 1 {
+		t.Fatalf("OnChange called %d times, want once for a stable stale-report reason", notified)
+	}
+}
+
+func TestCapacityPoller_PollAllSubmitsThroughExecutor(t *testing.T) {
+	srv := capacityServer(t, http.StatusOK, freshReport(3))
+	executor, err := NewObserverExecutor(1, 1)
+	if err != nil {
+		t.Fatalf("NewObserverExecutor() error = %v", err)
+	}
+	p := newTestPollerWithExecutor(singleSampleConfig(), executor)
+	tgt := testCapacityTarget("cluster-a", srv.URL)
+	p.Targets = func(context.Context) ([]Target, error) { return []Target{tgt}, nil }
+	notified := 0
+	p.OnChange = func(context.Context, types.NamespacedName) error {
+		notified++
+		return nil
+	}
+
+	if err := p.pollAll(context.Background()); err != nil {
+		t.Fatalf("pollAll() error = %v", err)
+	}
+	if got := p.Reported(tgt); got != nil {
+		t.Fatalf("Reported() = %d without a running executor, want nil", *got)
+	}
+	if reason := p.FellOpen(tgt); !strings.Contains(reason, ErrObserverExecutorNotRunning.Error()) {
+		t.Fatalf("FellOpen() = %q, want executor submission failure", reason)
+	}
+	if notified != 1 {
+		t.Fatalf("OnChange called %d times, want 1 for executor failure", notified)
+	}
+}
+
+func TestCapacityPoller_PollAllDeliversEveryChangedMap(t *testing.T) {
+	srv := capacityServer(t, http.StatusOK, freshReport(3))
+	executor, _, _ := startTestObserverExecutor(t, 2, 2)
+	p := newTestPollerWithExecutor(singleSampleConfig(), executor)
+	first := testCapacityTarget("cluster-a", srv.URL)
+	first.Map = types.NamespacedName{Namespace: "prod", Name: "a"}
+	second := testCapacityTarget("cluster-b", srv.URL)
+	second.Map = types.NamespacedName{Namespace: "prod", Name: "b"}
+	p.Targets = func(context.Context) ([]Target, error) {
+		return []Target{second, first}, nil
+	}
+
+	var notified []types.NamespacedName
+	p.OnChange = func(_ context.Context, mapKey types.NamespacedName) error {
+		notified = append(notified, mapKey)
+		return nil
+	}
+	if err := p.pollAll(context.Background()); err != nil {
+		t.Fatalf("pollAll() error = %v", err)
+	}
+	want := []types.NamespacedName{first.Map, second.Map}
+	if !slices.Equal(notified, want) {
+		t.Fatalf("notifications = %v, want every changed map in deterministic order %v", notified, want)
+	}
+}
+
+func TestCapacityPoller_NotificationHonorsCancellation(t *testing.T) {
+	srv := capacityServer(t, http.StatusOK, freshReport(3))
+	executor, _, _ := startTestObserverExecutor(t, 2, 2)
+	p := newTestPollerWithExecutor(singleSampleConfig(), executor)
+	first := testCapacityTarget("cluster-a", srv.URL)
+	first.Map = types.NamespacedName{Namespace: "prod", Name: "a"}
+	second := testCapacityTarget("cluster-b", srv.URL)
+	second.Map = types.NamespacedName{Namespace: "prod", Name: "b"}
+	p.Targets = func(context.Context) ([]Target, error) {
+		return []Target{first, second}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	called := 0
+	p.OnChange = func(notifyCtx context.Context, _ types.NamespacedName) error {
+		called++
+		cancel()
+		return notifyCtx.Err()
+	}
+	err := p.pollAll(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("pollAll() error = %v, want context.Canceled", err)
+	}
+	if called != 1 {
+		t.Fatalf("OnChange called %d times after cancellation, want 1", called)
 	}
 }
 
@@ -397,7 +759,7 @@ func TestCapacityConfig_ValidateFormats(t *testing.T) {
 		mutate  func(*CapacityConfig)
 		wantErr bool
 	}{
-		{"default format is Report", func(c *CapacityConfig) { c.Format = "" }, false},
+		{"format is required", func(c *CapacityConfig) { c.Format = "" }, true},
 		{"explicit Report is valid", func(c *CapacityConfig) { c.Format = FormatReport }, false},
 		// A format this build does not carry is a startup error, not a silent
 		// fallback: ignoring it would drop the operator's intent and leave the
@@ -452,12 +814,12 @@ func TestRegisterCapacityFormat_RejectsDuplicatesAndIncompletePlugins(t *testing
 // nil when the plan still stands.
 func feed(cfg CapacityConfig, readings ...int32) *int32 {
 	p := newTestPoller(cfg)
-	tgt := Target{Map: testMap, Cluster: "cluster-a"}
+	tgt := testCapacityTarget("cluster-a", "https://cluster-a.example")
 	for _, r := range readings {
 		v := r
 		p.record(tgt, &v, "")
 	}
-	return p.Reported(testMap, "cluster-a")
+	return p.Reported(tgt)
 }
 
 func TestCapacityPoller_QuorumToleratesAMisbehavingReporter(t *testing.T) {
@@ -467,7 +829,7 @@ func TestCapacityPoller_QuorumToleratesAMisbehavingReporter(t *testing.T) {
 	// round-robin balancer and a window at least as long as the replica count,
 	// hold it there permanently. The quorum is what makes a low reading need
 	// corroboration.
-	cfg := testCapacityConfig() // Samples 10, Quorum 2 by default
+	cfg := testCapacityConfig() // Samples 10, Quorum 2.
 	tests := []struct {
 		name     string
 		readings []int32
@@ -564,26 +926,26 @@ func TestCapacityPoller_FailedPollReleasesTheWindow(t *testing.T) {
 	cfg := testCapacityConfig()
 	cfg.Samples, cfg.Quorum = 4, 2
 	p := newTestPoller(cfg)
-	tgt := Target{Map: testMap, Cluster: "cluster-a"}
+	tgt := testCapacityTarget("cluster-a", "https://cluster-a.example")
 	for _, v := range []int32{2, 2} {
 		x := v
 		p.record(tgt, &x, "")
 	}
-	if got := p.Reported(testMap, "cluster-a"); got == nil || *got != 2 {
+	if got := p.Reported(tgt); got == nil || *got != 2 {
 		t.Fatalf("ceiling = %v before the failure, want 2", got)
 	}
 	p.record(tgt, nil, "capacity endpoint unreachable")
-	if got := p.Reported(testMap, "cluster-a"); got != nil {
+	if got := p.Reported(tgt); got != nil {
 		t.Fatalf("ceiling = %d after a failed poll, want nil (fail open)", *got)
 	}
 	// And the old low readings must not come back with the next success.
 	nine := int32(9)
 	p.record(tgt, &nine, "")
-	if got := p.Reported(testMap, "cluster-a"); got != nil {
+	if got := p.Reported(tgt); got != nil {
 		t.Fatalf("ceiling = %d from one reading after recovery, want nil until corroborated", *got)
 	}
 	p.record(tgt, &nine, "")
-	if got := p.Reported(testMap, "cluster-a"); got == nil || *got != 9 {
+	if got := p.Reported(tgt); got == nil || *got != 9 {
 		t.Fatalf("ceiling = %v after recovery, want 9 (stale lows must not persist)", got)
 	}
 }
@@ -594,7 +956,7 @@ func TestCapacityConfig_QuorumAndSamplesValidation(t *testing.T) {
 		mutate  func(*CapacityConfig)
 		wantErr bool
 	}{
-		{"unset uses package defaults", func(*CapacityConfig) {}, false},
+		{"configured values are valid", func(*CapacityConfig) {}, false},
 		{"explicit values are valid", func(c *CapacityConfig) { c.Samples, c.Quorum = 5, 3 }, false},
 		{"negative samples rejected", func(c *CapacityConfig) { c.Samples = -1 }, true},
 		{"negative quorum rejected", func(c *CapacityConfig) { c.Quorum = -1 }, true},

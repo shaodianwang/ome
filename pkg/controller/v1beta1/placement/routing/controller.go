@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"time"
 
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -16,6 +18,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -24,6 +27,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	placementcontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/placement"
+	placementendpoint "github.com/ome-projects/ome/pkg/controller/v1beta1/placement/endpoint"
 )
 
 // +kubebuilder:rbac:groups=ome.io,resources=inferenceservices,verbs=get;list;watch
@@ -36,16 +40,17 @@ import (
 // garbage-collected with the ISVC. It recomputes the routing table whenever
 // placement or per-home capacity changes.
 //
-// The map exists for as long as the ISVC does, even when nothing is routable:
-// an empty table plus a Routable=False reason. Absence would be
-// unattributable — feature off, not placed, no addressable home and a wedged
-// controller all look the same — and deleting on degradation would drop the
-// capacity provenance at the moment it is most wanted. Only the feature toggle
-// reaps. It writes spec and the Routable condition; the publisher owns the
-// rest of status.
+// While routing remains selected, the map exists even when nothing is
+// routable: an empty table plus a Routable=False reason. When routing becomes
+// ineligible, a TrafficMap-backed publisher may hold the map through its
+// finalizer until external state is withdrawn. The routing controller writes
+// spec and Routable; the publisher owns the rest of status.
 type Reconciler struct {
 	client.Client
-	Log logr.Logger
+	// APIReader confirms cache misses before state is forgotten. A transient
+	// informer miss must not discard probe hysteresis for a live service.
+	APIReader client.Reader
+	Log       logr.Logger
 	// Config gates generation. When disabled the controller reaps what it owns.
 	Config Config
 	// Prober supplies the optional end-to-end reachability verdict ANDed into
@@ -56,40 +61,118 @@ type Reconciler struct {
 	// planned allocation. Nil, or configured off, means the plan stands and
 	// every entry records CapacitySourceControlPlane.
 	Capacity *CapacityPoller
+	// WaitForPublisherFinalizer coordinates removal with publishers whose
+	// external state is derived exclusively from TrafficMap. Compatibility
+	// publishers can continue from placement and do not participate.
+	WaitForPublisherFinalizer bool
 }
 
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	isvc := &v1beta1.InferenceService{}
-	if err := r.Get(ctx, req.NamespacedName, isvc); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+	isvc, found, err := r.getInferenceService(ctx, req.NamespacedName)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !found {
+		r.Prober.Forget(req.NamespacedName)
+		r.Capacity.Forget(req.NamespacedName)
+		return ctrl.Result{}, nil
 	}
 
-	// Feature off: reap any TrafficMap we previously generated so toggling the
-	// feature is reversible without stranding objects.
-	if !r.Config.IsEnabled() {
+	// A TrafficMap-backed publisher uses its finalizer as the teardown handshake:
+	// retain the map until external state is withdrawn and the source is released.
+	if !routingEnabled(r.Config, isvc) || !placementcontroller.IsPlacementEligible(isvc) {
+		r.Prober.Forget(req.NamespacedName)
+		r.Capacity.Forget(req.NamespacedName)
 		return ctrl.Result{}, r.reap(ctx, isvc)
 	}
 
 	// Deleting: the TrafficMap's owner reference garbage-collects it with the
 	// ISVC, so there is nothing to do.
 	if !isvc.DeletionTimestamp.IsZero() {
+		r.Prober.Forget(req.NamespacedName)
+		r.Capacity.Forget(req.NamespacedName)
 		return ctrl.Result{}, nil
 	}
 
-	// TrafficMap is the projection of multi-cluster placement. Leave any
-	// existing map untouched here; the endpoint publisher observes the same
-	// eligibility transition and cleans up its external state and finalizer.
-	if !placementcontroller.IsPlacementEligible(isvc) {
-		return ctrl.Result{}, nil
+	probePolicy, err := ResolveProbePolicy(r.Config, &isvc.Spec)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("resolve probe policy: %w", err)
+	}
+	targets := targetsForInferenceService(isvc, probePolicy.PolicyDigest)
+	persisted, err := r.ownedTrafficMap(ctx, isvc)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	var requeueAfter time.Duration
+	if r.Prober != nil {
+		requeueAfter, err = r.Prober.Reconcile(ctx, ProbeReconcileRequest{
+			OwnerUID:  isvc.UID,
+			Map:       req.NamespacedName,
+			Policy:    probePolicy,
+			Targets:   targets,
+			Persisted: persisted,
+		})
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("reconcile endpoint probes: %w", err)
+		}
+	} else if probePolicy.IsEnabled() {
+		return ctrl.Result{}, fmt.Errorf("endpoint probing is enabled but no prober is configured")
 	}
 
 	// Unroutable is a state of the map, not a reason to remove it: build the
 	// table (possibly empty) and let the condition carry the explanation.
-	spec, status, reason := buildSpec(isvc, r.Prober, r.Capacity)
+	spec, status, reason := buildSpec(isvc, probePolicy, r.Prober, r.Capacity)
 	if err := r.apply(ctx, isvc, spec); err != nil {
 		return ctrl.Result{}, err
 	}
-	return ctrl.Result{}, r.setRoutable(ctx, isvc, status, reason)
+	if err := r.setRoutable(ctx, isvc, status, reason); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{
+		Requeue:      probePolicy.IsEnabled() && len(targets) > 0 && requeueAfter == 0,
+		RequeueAfter: requeueAfter,
+	}, nil
+}
+
+func (r *Reconciler) getInferenceService(
+	ctx context.Context,
+	key types.NamespacedName,
+) (*v1beta1.InferenceService, bool, error) {
+	isvc := &v1beta1.InferenceService{}
+	if err := r.Get(ctx, key, isvc); err == nil {
+		return isvc, true, nil
+	} else if !apierrors.IsNotFound(err) {
+		return nil, false, err
+	}
+	if r.APIReader == nil {
+		return nil, false, fmt.Errorf("confirm InferenceService cache miss: API reader is not configured")
+	}
+	live := &v1beta1.InferenceService{}
+	if err := r.APIReader.Get(ctx, key, live); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("confirm InferenceService cache miss: %w", err)
+	}
+	return live, true, nil
+}
+
+func (r *Reconciler) ownedTrafficMap(
+	ctx context.Context,
+	isvc *v1beta1.InferenceService,
+) (*v1beta1.TrafficMap, error) {
+	tm := &v1beta1.TrafficMap{}
+	key := types.NamespacedName{Name: isvc.Name, Namespace: isvc.Namespace}
+	if err := r.Get(ctx, key, tm); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if !controlledByInferenceService(tm, isvc) {
+		return nil, fmt.Errorf("TrafficMap %s exists but is not controlled by InferenceService UID %q", key, isvc.UID)
+	}
+	return tm, nil
 }
 
 // apply creates or updates the ISVC's TrafficMap to carry the desired spec,
@@ -108,6 +191,10 @@ func (r *Reconciler) apply(ctx context.Context, isvc *v1beta1.InferenceService, 
 		tm := &v1beta1.TrafficMap{ObjectMeta: metav1.ObjectMeta{Name: isvc.Name, Namespace: isvc.Namespace}}
 		var err error
 		op, err = controllerutil.CreateOrUpdate(ctx, r.Client, tm, func() error {
+			if (tm.UID != "" || tm.ResourceVersion != "") && !controlledByInferenceService(tm, isvc) {
+				return fmt.Errorf("TrafficMap %s exists but is not controlled by InferenceService UID %q",
+					client.ObjectKeyFromObject(tm), isvc.UID)
+			}
 			if err := controllerutil.SetControllerReference(isvc, tm, r.Scheme()); err != nil {
 				return err
 			}
@@ -142,7 +229,7 @@ func (r *Reconciler) setRoutable(ctx context.Context, isvc *v1beta1.InferenceSer
 			// Gone, or not ours to annotate: nothing to report on.
 			return client.IgnoreNotFound(err)
 		}
-		if !metav1.IsControlledBy(tm, isvc) {
+		if !controlledByInferenceService(tm, isvc) {
 			return nil
 		}
 		cond := metav1.Condition{
@@ -186,15 +273,31 @@ func routableMessage(reason string, status metav1.ConditionStatus, entries int) 
 // exists or when the object is not controlled by this ISVC (never delete
 // something we did not generate).
 func (r *Reconciler) reap(ctx context.Context, isvc *v1beta1.InferenceService) error {
+	if r.WaitForPublisherFinalizer &&
+		controllerutil.ContainsFinalizer(isvc, placementendpoint.EndpointFinalizer) {
+		return nil
+	}
 	tm := &v1beta1.TrafficMap{}
 	key := types.NamespacedName{Name: isvc.Name, Namespace: isvc.Namespace}
 	if err := r.Get(ctx, key, tm); err != nil {
 		return client.IgnoreNotFound(err)
 	}
-	if !metav1.IsControlledBy(tm, isvc) || !tm.DeletionTimestamp.IsZero() {
+	if !controlledByInferenceService(tm, isvc) || !tm.DeletionTimestamp.IsZero() {
 		return nil
 	}
 	return client.IgnoreNotFound(r.Delete(ctx, tm))
+}
+
+func controlledByInferenceService(
+	tm *v1beta1.TrafficMap,
+	isvc *v1beta1.InferenceService,
+) bool {
+	if tm == nil || isvc == nil || isvc.UID == "" {
+		return false
+	}
+	owner := metav1.GetControllerOf(tm)
+	return owner != nil && owner.APIVersion == v1beta1.SchemeGroupVersion.String() &&
+		owner.Kind == "InferenceService" && owner.Name == isvc.Name && owner.UID == isvc.UID
 }
 
 // buildSpec projects an ISVC's placement into the desired TrafficMap spec, plus
@@ -203,10 +306,14 @@ func (r *Reconciler) reap(ctx context.Context, isvc *v1beta1.InferenceService) e
 // from "unknown".
 //
 // The prober is an optional overlay on an otherwise pure projection of the
-// ISVC. Passing nil yields the plan alone, which is what the watch predicate
-// compares so it reacts only to ISVC changes that alter the table; probe
-// verdicts arrive on their own path and enqueue directly.
-func buildSpec(isvc *v1beta1.InferenceService, probe *Prober, capacity *CapacityPoller) (v1beta1.TrafficMapSpec, metav1.ConditionStatus, string) {
+// ISVC. Passing nil yields the plan alone, which the watch predicate uses to
+// detect source changes. Probe scheduling itself is reconciliation-driven.
+func buildSpec(
+	isvc *v1beta1.InferenceService,
+	probePolicy ResolvedProbePolicy,
+	probe *Prober,
+	capacity *CapacityPoller,
+) (v1beta1.TrafficMapSpec, metav1.ConditionStatus, string) {
 	empty := v1beta1.TrafficMapSpec{
 		Service:                isvc.Name,
 		Mode:                   placementMode(isvc),
@@ -223,9 +330,10 @@ func buildSpec(isvc *v1beta1.InferenceService, probe *Prober, capacity *Capacity
 
 	// Index-aligned: homes feed the weight computation, entries carry the result
 	// plus provenance, both in the same cluster-sorted order.
-	mapKey := types.NamespacedName{Name: isvc.Name, Namespace: isvc.Namespace}
 	homes := make([]Home, len(cands))
+	targets := make([]Target, len(cands))
 	for i, c := range cands {
+		targets[i] = targetForCandidate(isvc, c, probePolicy.PolicyDigest)
 		// A nil factor is the identity 1.0; a per-cluster override scales the home's
 		// share for heterogeneous hardware. A nil reachability verdict does not
 		// gate — probing off, or no verdict yet.
@@ -234,11 +342,11 @@ func buildSpec(isvc *v1beta1.InferenceService, probe *Prober, capacity *Capacity
 			Allocated: c.AdmittedReplicas,
 			Ready:     c.ReadyReplicas,
 			Factor:    capacityFactor(isvc, c.Cluster),
-			Reachable: probe.Reachable(mapKey, c.Cluster),
-			Reported:  capacity.Reported(mapKey, c.Cluster),
+			Reachable: probe.Reachable(targets[i]),
+			Reported:  capacity.Reported(targets[i]),
 		}
 	}
-	computedWeights := weights(homes, probeAllFailedPolicy(probe))
+	computedWeights := weights(homes, probeAllFailedPolicy(probePolicy))
 
 	entries := make([]v1beta1.TrafficMapEntry, len(cands))
 	for i, c := range cands {
@@ -252,13 +360,14 @@ func buildSpec(isvc *v1beta1.InferenceService, probe *Prober, capacity *Capacity
 			// fleet-wide probe failure.
 			Healthy: c.ReadyReplicas > 0 && (homes[i].Reachable == nil || *homes[i].Reachable),
 			Capacity: &v1beta1.TrafficMapCapacity{
-				Allocated: homes[i].EffectiveAllocated(),
-				Ready:     c.ReadyReplicas,
-				Factor:    homes[i].Factor,
-				Source:    allocationSource(homes[i]),
-				Reported:  homes[i].Reported,
+				Allocated:      homes[i].EffectiveAllocated(),
+				Ready:          c.ReadyReplicas,
+				Factor:         homes[i].Factor,
+				Source:         allocationSource(homes[i]),
+				Reported:       homes[i].Reported,
+				FallbackReason: capacity.FellOpen(targets[i]),
 			},
-			Probe: probe.Provenance(mapKey, c.Cluster),
+			Probe: probe.Provenance(targets[i]),
 		}
 	}
 	hasPositiveWeight := slices.ContainsFunc(entries, func(e v1beta1.TrafficMapEntry) bool { return e.Weight > 0 })
@@ -285,11 +394,43 @@ func buildSpec(isvc *v1beta1.InferenceService, probe *Prober, capacity *Capacity
 	}, status, reason
 }
 
-func probeAllFailedPolicy(probe *Prober) AllFailedPolicy {
-	if probe == nil {
+func probeAllFailedPolicy(policy ResolvedProbePolicy) AllFailedPolicy {
+	if !policy.IsEnabled() {
 		return AllFailedPolicyPreserveTraffic
 	}
-	return probe.Config.AllFailedPolicy
+	return policy.Probe.AllFailedPolicy
+}
+
+func targetForCandidate(
+	isvc *v1beta1.InferenceService,
+	candidate *v1beta1.CandidatePlacement,
+	policyDigest string,
+) Target {
+	return Target{
+		OwnerUID:     isvc.UID,
+		Map:          types.NamespacedName{Name: isvc.Name, Namespace: isvc.Namespace},
+		Cluster:      candidate.Cluster,
+		URL:          candidate.Endpoint.String(),
+		PolicyDigest: policyDigest,
+	}
+}
+
+func targetsForInferenceService(isvc *v1beta1.InferenceService, policyDigest string) []Target {
+	if isvc.Status.Placement == nil || isvc.Status.Placement.Phase != v1beta1.PlacementPhasePlaced {
+		return nil
+	}
+	candidates := servingCandidates(isvc)
+	targets := make([]Target, 0, len(candidates))
+	for _, candidate := range candidates {
+		target := targetForCandidate(isvc, candidate, policyDigest)
+		endpoint, err := CanonicalEndpoint(target.URL)
+		if err != nil {
+			continue
+		}
+		target.URL = endpoint
+		targets = append(targets, target)
+	}
+	return targets
 }
 
 // allocationSource names which input produced the entry's allocation. Endpoint
@@ -365,73 +506,84 @@ func placementMode(isvc *v1beta1.InferenceService) v1beta1.PlacementMode {
 	return isvc.Spec.Placement.Mode
 }
 
-// probeEventBuffer bounds the queue of probe-driven reconcile triggers. Events
-// are coalesced by the workqueue anyway, so a bounded buffer only ever drops
-// duplicates of work already pending.
-const probeEventBuffer = 256
-
 // SetupWithManager wires the controller: reconcile ISVCs, reacting only to
 // events that can change the generated table, and own the TrafficMaps it writes
 // so a drifted or deleted map is corrected.
 //
-// When probing is configured it also registers the prober as a manager runnable
-// and feeds its gate flips back in as reconcile triggers. A probe verdict is
-// not an ISVC change, so without that channel a newly unreachable home would
-// wait for unrelated ISVC churn before its weight dropped — which would defeat
-// the fast-cutoff goal the probe exists to serve.
+// Capacity observations run on their global cadence and feed changed ceilings
+// through a lossless channel. Probe observations run inside reconciliation and
+// use their returned absolute deadline as RequeueAfter.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	b := ctrl.NewControllerManagedBy(mgr).
 		Named(RoutingControllerName).
 		For(&v1beta1.InferenceService{}, builder.WithPredicates(routingTableChange)).
 		Owns(&v1beta1.TrafficMap{})
+	if r.Config.Observer.MaxConcurrentReconciles > 0 {
+		b = b.WithOptions(controller.Options{
+			MaxConcurrentReconciles: r.Config.Observer.MaxConcurrentReconciles,
+		})
+	}
 
-	probing := r.Config.IsEnabled() && r.Prober != nil && r.Prober.Config.IsEnabled()
 	polling := r.Config.IsEnabled() && r.Capacity != nil && r.Capacity.Config.IsEnabled()
-	if probing || polling {
-		events := make(chan event.GenericEvent, probeEventBuffer)
-		// Both observers read the same routing tables, so they share one target
-		// view rather than each keeping its own.
+	if polling {
+		events := make(chan event.GenericEvent)
 		targets := func(ctx context.Context) ([]Target, error) {
 			var maps v1beta1.TrafficMapList
 			if err := mgr.GetClient().List(ctx, &maps); err != nil {
 				return nil, err
 			}
-			return TargetsFromTrafficMaps(maps.Items), nil
+			var services v1beta1.InferenceServiceList
+			if err := mgr.GetClient().List(ctx, &services); err != nil {
+				return nil, err
+			}
+			return capacityTargets(maps.Items, services.Items, r.Config), nil
 		}
-		notify := func(kind string) func(types.NamespacedName) {
-			return func(nn types.NamespacedName) {
-				// The TrafficMap shares the ISVC's name and namespace, so the
-				// stub addresses the right reconcile key without a lookup.
-				obj := &v1beta1.InferenceService{}
-				obj.Name, obj.Namespace = nn.Name, nn.Namespace
-				select {
-				case events <- event.GenericEvent{Object: obj}:
-				default:
-					// Full buffer means a reconcile for this map is already
-					// queued; dropping a duplicate trigger loses nothing.
-					r.Log.V(1).Info("observer event buffer full, trigger coalesced",
-						"source", kind, "trafficmap", nn.String())
-				}
+		r.Capacity.Targets = targets
+		r.Capacity.OnChange = func(ctx context.Context, nn types.NamespacedName) error {
+			// The TrafficMap shares the ISVC's name and namespace, so the stub
+			// addresses the right reconcile key without a lookup.
+			obj := &v1beta1.InferenceService{}
+			obj.Name, obj.Namespace = nn.Name, nn.Namespace
+			select {
+			case events <- event.GenericEvent{Object: obj}:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
 			}
 		}
-		if probing {
-			r.Prober.Targets = targets
-			r.Prober.OnChange = notify("probe")
-			if err := mgr.Add(r.Prober); err != nil {
-				return fmt.Errorf("add end-to-end health prober: %w", err)
-			}
-		}
-		if polling {
-			r.Capacity.Targets = targets
-			r.Capacity.OnChange = notify("capacity")
-			if err := mgr.Add(r.Capacity); err != nil {
-				return fmt.Errorf("add endpoint capacity poller: %w", err)
-			}
+		if err := mgr.Add(r.Capacity); err != nil {
+			return fmt.Errorf("add endpoint capacity poller: %w", err)
 		}
 		b = b.WatchesRawSource(source.Channel(events, &handler.EnqueueRequestForObject{}))
 	}
 
 	return b.Complete(r)
+}
+
+func capacityTargets(
+	maps []v1beta1.TrafficMap,
+	services []v1beta1.InferenceService,
+	config Config,
+) []Target {
+	eligibleOwners := make(map[types.NamespacedName]types.UID, len(services))
+	for i := range services {
+		isvc := &services[i]
+		if !isvc.DeletionTimestamp.IsZero() || !routingEnabled(config, isvc) ||
+			!placementcontroller.IsPlacementEligible(isvc) || isvc.Status.Placement == nil ||
+			isvc.Status.Placement.Phase != v1beta1.PlacementPhasePlaced {
+			continue
+		}
+		eligibleOwners[client.ObjectKeyFromObject(isvc)] = isvc.UID
+	}
+
+	all := TargetsFromTrafficMaps(maps)
+	targets := make([]Target, 0, len(all))
+	for _, target := range all {
+		if eligibleOwners[target.Map] == target.OwnerUID {
+			targets = append(targets, target)
+		}
+	}
+	return targets
 }
 
 // routingTableChange admits ISVC events that can change the generated TrafficMap:
@@ -451,15 +603,41 @@ var routingTableChange = predicate.Funcs{
 		if placementcontroller.IsPlacementEligible(oldISVC) != placementcontroller.IsPlacementEligible(newISVC) {
 			return true
 		}
+		if routingOptedOut(oldISVC) != routingOptedOut(newISVC) {
+			return true
+		}
+		if controllerutil.ContainsFinalizer(oldISVC, placementendpoint.EndpointFinalizer) !=
+			controllerutil.ContainsFinalizer(newISVC, placementendpoint.EndpointFinalizer) {
+			return true
+		}
+		if !equality.Semantic.DeepEqual(routingProbeSpec(oldISVC), routingProbeSpec(newISVC)) {
+			return true
+		}
 		// The condition is part of what we write, so a change in status or reason
 		// has to wake us even when the table itself is byte-identical — an ISVC
 		// going NotPlaced -> NoAddressableHome keeps an empty table but must
 		// re-explain itself.
-		oldSpec, oldStatus, oldReason := buildSpec(oldISVC, nil, nil)
-		newSpec, newStatus, newReason := buildSpec(newISVC, nil, nil)
+		oldSpec, oldStatus, oldReason := buildSpec(oldISVC, ResolvedProbePolicy{}, nil, nil)
+		newSpec, newStatus, newReason := buildSpec(newISVC, ResolvedProbePolicy{}, nil, nil)
 		if oldStatus != newStatus || oldReason != newReason {
 			return true
 		}
 		return !equality.Semantic.DeepEqual(oldSpec, newSpec)
 	},
+}
+
+func routingEnabled(config Config, isvc *v1beta1.InferenceService) bool {
+	return config.IsEnabled() && !routingOptedOut(isvc)
+}
+
+func routingOptedOut(isvc *v1beta1.InferenceService) bool {
+	return isvc != nil && isvc.Spec.Routing != nil &&
+		isvc.Spec.Routing.Enabled != nil && !*isvc.Spec.Routing.Enabled
+}
+
+func routingProbeSpec(isvc *v1beta1.InferenceService) *v1beta1.RoutingProbeSpec {
+	if isvc == nil || isvc.Spec.Routing == nil {
+		return nil
+	}
+	return isvc.Spec.Routing.Probe
 }

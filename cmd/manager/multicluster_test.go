@@ -69,12 +69,24 @@ func TestResolveMCWiringFullConfig(t *testing.T) {
 		},
 		"routing": {
 			"enabled": true,
+			"observer": {
+				"maxConcurrentReconciles": 8,
+				"maxConcurrentRequests": 16,
+				"maxResponseBytes": 65536,
+				"minPeriod": "1s",
+				"maxSamples": 100
+			},
 			"probe": {
 				"path": "/v1/models", "method": "GET",
 				"acceptStatuses": [200], "gateStatuses": [503],
 				"period": "10s", "timeout": "3s",
 				"failureThreshold": 3, "successThreshold": 2,
 				"allFailedPolicy": "Drain"
+			},
+			"capacity": {
+				"path": "/capacity", "method": "GET", "format": "Report",
+				"samples": 20, "quorum": 3,
+				"period": "5s", "timeout": "2s", "maxAge": "30s"
 			},
 			"publisher": {
 				"name": "test-publisher",
@@ -122,9 +134,23 @@ func TestResolveMCWiringFullConfig(t *testing.T) {
 
 	// Routing.
 	assert.True(t, w.routing.Enabled)
+	assert.Equal(t, 8, w.routing.Observer.MaxConcurrentReconciles)
+	assert.Equal(t, 16, w.routing.Observer.MaxConcurrentRequests)
+	assert.Equal(t, int64(65536), w.routing.Observer.MaxResponseBytes)
+	assert.Equal(t, time.Second, w.routing.Observer.MinPeriod)
+	assert.Equal(t, 100, w.routing.Observer.MaxSamples)
 	assert.Equal(t, placementrouting.AllFailedPolicyDrain, w.routing.Probe.AllFailedPolicy)
+	assert.Equal(t, "/capacity", w.routing.Capacity.Path)
+	assert.Equal(t, "GET", w.routing.Capacity.Method)
+	assert.Equal(t, placementrouting.FormatReport, w.routing.Capacity.Format)
+	assert.Equal(t, 20, w.routing.Capacity.Samples)
+	assert.Equal(t, 3, w.routing.Capacity.Quorum)
+	assert.Equal(t, 5*time.Second, w.routing.Capacity.Period)
+	assert.Equal(t, 2*time.Second, w.routing.Capacity.Timeout)
+	assert.Equal(t, 30*time.Second, w.routing.Capacity.MaxAge)
 	assert.Equal(t, "test-publisher", w.routing.Publisher.Name)
 	assert.Equal(t, map[string]string{"key": "value"}, w.routing.Publisher.Options)
+	require.NoError(t, w.routing.Validate())
 }
 
 // TestResolveMCWiringSafetyRequeueDependsOnCache pins the one non-trivial bit of

@@ -136,7 +136,7 @@ func (r *Reconciler) isActive() bool {
 // valid empty target, allowing a stateful publisher to hold retired homes at
 // zero instead of restoring a static fallback.
 func (r *Reconciler) trafficMapTarget(ctx context.Context, isvc *v1beta1.InferenceService) (Target, bool, error) {
-	if !placementcontroller.IsPlacementEligible(isvc) {
+	if !placementcontroller.IsPlacementEligible(isvc) || routingOptedOut(isvc) {
 		return Target{}, false, nil
 	}
 	tm := &v1beta1.TrafficMap{}
@@ -162,6 +162,10 @@ func (r *Reconciler) trafficMapTarget(ctx context.Context, isvc *v1beta1.Inferen
 	}
 	sort.Slice(homes, func(i, j int) bool { return homes[i].Cluster < homes[j].Cluster })
 	return Target{Service: tm.Spec.Service, Homes: homes, WeightsAuthoritative: true}, true, nil
+}
+
+func routingOptedOut(isvc *v1beta1.InferenceService) bool {
+	return isvc.Spec.Routing != nil && isvc.Spec.Routing.Enabled != nil && !*isvc.Spec.Routing.Enabled
 }
 
 // resolveTarget builds the publication Target from status.placement. ok is false
@@ -330,24 +334,76 @@ func requeueOnConflict(err error) (ctrl.Result, error) {
 
 // SetupWithManager wires the controller: reconcile ISVCs, but only react to
 // events that can change a publication decision — placement-status changes,
-// deletions, and the global-host annotation — plus TrafficMap spec changes, so a
-// weight-only update (which does not touch ISVC status) still re-publishes.
-// Routine ISVC spec churn does not re-publish on every reconcile.
+// deletions, and the global-host annotation — plus TrafficMap publication-input
+// changes. Routine ISVC and TrafficMap provenance churn does not re-publish.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// Named explicitly so it doesn't collide with the placement controller
 	// (both do For(&InferenceService{})).
 	return ctrl.NewControllerManagedBy(mgr).
 		Named(PlacementEndpointControllerName).
 		For(&v1beta1.InferenceService{}, builder.WithPredicates(placementPublishChange)).
-		// A TrafficMap is named after and owner-ref'd to its ISVC, so map a spec
-		// change back to that ISVC. Generation-gated: a weight change bumps the
-		// spec generation, while any future status write does not, so the publisher
-		// re-runs on new weights but not on its own status echo.
+		// A TrafficMap is named after and owner-ref'd to its ISVC, so map a
+		// publication-input change back to that ISVC.
 		Watches(&v1beta1.TrafficMap{},
 			handler.EnqueueRequestForOwner(mgr.GetScheme(), mgr.GetRESTMapper(),
 				&v1beta1.InferenceService{}, handler.OnlyControllerOwner()),
-			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+			builder.WithPredicates(trafficMapPublishChange)).
 		Complete(r)
+}
+
+// trafficMapPublishChange admits TrafficMap events that can change the
+// publisher's desired target. Entry order and routing provenance do not affect
+// publication; service, cluster, endpoint, and weight do.
+var trafficMapPublishChange = predicate.Funcs{
+	CreateFunc: func(event.CreateEvent) bool { return true },
+	DeleteFunc: func(event.DeleteEvent) bool { return true },
+	UpdateFunc: func(e event.UpdateEvent) bool {
+		oldTrafficMap, ok1 := e.ObjectOld.(*v1beta1.TrafficMap)
+		newTrafficMap, ok2 := e.ObjectNew.(*v1beta1.TrafficMap)
+		if !ok1 || !ok2 || oldTrafficMap == nil || newTrafficMap == nil {
+			return true // unexpected type: fail safe
+		}
+		return !trafficMapPublicationEqual(oldTrafficMap, newTrafficMap)
+	},
+}
+
+type trafficMapPublicationEntry struct {
+	cluster  string
+	endpoint string
+	weight   int32
+}
+
+func trafficMapPublicationEqual(a, b *v1beta1.TrafficMap) bool {
+	if a.Spec.Service != b.Spec.Service || len(a.Spec.Entries) != len(b.Spec.Entries) {
+		return false
+	}
+	return slices.Equal(trafficMapPublicationEntries(a), trafficMapPublicationEntries(b))
+}
+
+func trafficMapPublicationEntries(tm *v1beta1.TrafficMap) []trafficMapPublicationEntry {
+	entries := make([]trafficMapPublicationEntry, 0, len(tm.Spec.Entries))
+	for i := range tm.Spec.Entries {
+		entry := &tm.Spec.Entries[i]
+		endpoint := ""
+		if entry.Endpoint != nil {
+			endpoint = entry.Endpoint.String()
+		}
+		entries = append(entries, trafficMapPublicationEntry{
+			cluster:  entry.Cluster,
+			endpoint: endpoint,
+			weight:   entry.Weight,
+		})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].cluster != entries[j].cluster {
+			return entries[i].cluster < entries[j].cluster
+		}
+		if entries[i].endpoint != entries[j].endpoint {
+			return entries[i].endpoint < entries[j].endpoint
+		}
+		return entries[i].weight < entries[j].weight
+	})
+	return entries
 }
 
 // placementPublishChange admits ISVC events that can change what the publisher
@@ -363,6 +419,9 @@ var placementPublishChange = predicate.Funcs{
 			return true // unexpected type: fail safe
 		}
 		if placementcontroller.IsPlacementEligible(oldISVC) != placementcontroller.IsPlacementEligible(newISVC) {
+			return true
+		}
+		if routingOptedOut(oldISVC) != routingOptedOut(newISVC) {
 			return true
 		}
 		if !placementEqual(oldISVC.Status.Placement, newISVC.Status.Placement) {

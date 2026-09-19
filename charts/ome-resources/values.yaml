@@ -69,9 +69,10 @@ ome:
     placementControlPlaneID: ""
     # config holds the multi-cluster TUNABLES, rendered into the
     # inferenceservice-config ConfigMap's "multicluster" block (NOT manager
-    # flags, so an edit applies on the next config load, not a restart). Every
-    # field is optional: leave a duration "" or a number 0 to use the manager's
-    # built-in default. Durations are Go duration strings ("1m", "30s", "250ms").
+    # flags, so an edit applies on the next config load, not a restart). Most
+    # fields are optional: leave a duration "" or a number 0 to use the manager's
+    # built-in default. Routing observer limits are explicit and required when
+    # routing is enabled. Durations are Go duration strings ("1m", "30s", "250ms").
     config:
       # workloadCluster: remote-cluster connection/transport + the status funnel.
       workloadCluster:
@@ -119,6 +120,14 @@ ome:
       # TrafficMap a gateway consumes. Alpha; default off.
       routing:
         enabled: false          # generate TrafficMaps for placed InferenceServices
+        # observer bounds the controller and HTTP resources consumed by all
+        # per-InferenceService probe and capacity policies.
+        observer:
+          maxConcurrentReconciles: 8
+          maxConcurrentRequests: 16
+          maxResponseBytes: 65536
+          minPeriod: 1s
+          maxSamples: 100
         publisher: []
         # publisher replaces the default Gateway API backend with an optional
         # adapter compiled into the manager. To remove a stateful publisher,
@@ -141,6 +150,19 @@ ome:
         #   failureThreshold: 3
         #   successThreshold: 2
         #   allFailedPolicy: PreserveTraffic # set Drain to preserve all-zero weights
+        capacity: {}
+        # capacity polls each TrafficMap entry's client-facing endpoint for a
+        # reported servable count, applied only as a ceiling on planned capacity.
+        # capacity:
+        #   path: /capacity
+        #   method: GET
+        #   format: Report
+        #   options: {}
+        #   samples: 10
+        #   quorum: 2
+        #   period: 10s
+        #   timeout: 3s
+        #   maxAge: 30s
   # autoscalerPolicy is the single gate for the reusable AutoscalerPolicy
   # feature: the manager's policy RBAC, the policy validating webhook, and the
   # autoscalerPolicy config block all install together on this one value —

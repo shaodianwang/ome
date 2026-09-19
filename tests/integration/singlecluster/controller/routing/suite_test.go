@@ -48,13 +48,13 @@ var _ = ginkgo.BeforeSuite(func() {
 
 	mgrSetup := func(_ context.Context, mgr ctrl.Manager) error {
 		// Generation on: the controller must produce TrafficMaps for Placed
-		// ISVCs so the specs can assert the projection. Unplacing an ISVC does
-		// not reap its map here; it empties the map and records why on the
-		// Routable condition. Only disabling the feature reaps.
+		// ISVCs so the specs can assert the projection. A placement-status
+		// transition out of Placed empties the map and records why on Routable.
 		return (&routing.Reconciler{
-			Client: mgr.GetClient(),
-			Log:    ctrl.Log.WithName("PlacementRouting"),
-			Config: routing.Config{Enabled: true},
+			Client:    mgr.GetClient(),
+			APIReader: mgr.GetAPIReader(),
+			Log:       ctrl.Log.WithName("PlacementRouting"),
+			Config:    routing.Config{Enabled: true},
 		}).SetupWithManager(mgr)
 	}
 	gomega.Expect(suiteFwk.StartManager(suiteCtx, s.Cfg, mgrSetup)).To(gomega.Succeed())

@@ -37,6 +37,7 @@ func TestNewMultiClusterConfig(t *testing.T) {
 				assert.Equal(t, 0, cfg.Placement.MaxConcurrentReconciles)
 				assert.Equal(t, "", cfg.Placement.DispatcherMode)
 				assert.Equal(t, "", cfg.Endpoint.GlobalGateway)
+				assert.Equal(t, RoutingObserverConfig{}, cfg.Routing.Observer)
 				assert.Equal(t, "", cfg.Routing.Publisher.Name)
 			},
 		},
@@ -77,6 +78,14 @@ func TestNewMultiClusterConfig(t *testing.T) {
 						"backendPort": 8080
 					},
 					"routing": {
+						"enabled": true,
+						"observer": {
+							"maxConcurrentReconciles": 8,
+							"maxConcurrentRequests": 16,
+							"maxResponseBytes": 65536,
+							"minPeriod": "1s",
+							"maxSamples": 100
+						},
 						"probe": {
 							"path": "/v1/models",
 							"method": "GET",
@@ -128,6 +137,12 @@ func TestNewMultiClusterConfig(t *testing.T) {
 				assert.Equal(t, "ome-routes", ep.RouteNamespace)
 				assert.Equal(t, 8080, ep.BackendPort)
 
+				assert.True(t, cfg.Routing.Enabled)
+				assert.Equal(t, 8, cfg.Routing.Observer.MaxConcurrentReconciles)
+				assert.Equal(t, 16, cfg.Routing.Observer.MaxConcurrentRequests)
+				assert.Equal(t, int64(65536), cfg.Routing.Observer.MaxResponseBytes)
+				assert.Equal(t, time.Second, cfg.Routing.Observer.MinPeriodDuration())
+				assert.Equal(t, 100, cfg.Routing.Observer.MaxSamples)
 				assert.Equal(t, "Drain", cfg.Routing.Probe.AllFailedPolicy)
 				assert.Equal(t, "test-publisher", cfg.Routing.Publisher.Name)
 				assert.Equal(t, map[string]string{"key": "value"}, cfg.Routing.Publisher.Options)
@@ -204,6 +219,13 @@ func TestMultiClusterConfig_ValidateRejectsMalformedKnobs(t *testing.T) {
 			name: "non-positive duration",
 			cfg:  MultiClusterConfig{Placement: PlacementConfig{GCInterval: "0s"}},
 			want: "placement.gcInterval",
+		},
+		{
+			name: "malformed observer minimum period",
+			cfg: MultiClusterConfig{Routing: RoutingConfig{
+				Observer: RoutingObserverConfig{MinPeriod: "1 second"},
+			}},
+			want: "routing.observer.minPeriod",
 		},
 		{
 			name: "gateway configured without a backend port",

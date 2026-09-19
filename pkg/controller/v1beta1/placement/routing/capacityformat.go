@@ -12,9 +12,9 @@ import (
 type CapacityFormat string
 
 // FormatReport is the built-in shape: an absolute servable count plus an
-// observedAt stamp the home sets itself. It is the default, the only format
-// this repository guarantees, and the one a producer should emit unless it
-// needs a different shape.
+// observedAt stamp the home sets itself. It is the only format this repository
+// guarantees and the one a producer should select unless it needs a different
+// shape.
 const FormatReport CapacityFormat = "Report"
 
 // CapacityFormatPlugin is one response shape the poller can read.

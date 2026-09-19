@@ -179,9 +179,9 @@ var _ = ginkgo.Describe("TrafficMap routing controller", func() {
 			s.Status.Placement.Phase = v1beta1.PlacementPhaseRacing
 		})
 
-		// The map is not reaped on unplacement: it is emptied and the Routable
-		// condition carries the reason, so a consumer distinguishes "known and
-		// unroutable" from "unknown". Only disabling the feature reaps.
+		// A status demotion does not make the source ineligible: the map is
+		// emptied and Routable carries the reason, so a consumer distinguishes
+		// "known and unroutable" from "unknown".
 		gomega.Eventually(func(g gomega.Gomega) {
 			tm := getTrafficMap(g, isvcNS, name)
 			g.Expect(tm.Spec.Entries).To(gomega.BeEmpty(),

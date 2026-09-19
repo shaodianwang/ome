@@ -175,7 +175,14 @@ data:
         }
       },
       "routing": {
-        "enabled": {{ .Values.ome.multicluster.config.routing.enabled | default false }}{{- with .Values.ome.multicluster.config.routing.probe }},
+        "enabled": {{ .Values.ome.multicluster.config.routing.enabled | default false }},
+        "observer": {
+          "maxConcurrentReconciles": {{ .Values.ome.multicluster.config.routing.observer.maxConcurrentReconciles | default 0 }},
+          "maxConcurrentRequests": {{ .Values.ome.multicluster.config.routing.observer.maxConcurrentRequests | default 0 }},
+          "maxResponseBytes": {{ .Values.ome.multicluster.config.routing.observer.maxResponseBytes | default 0 }},
+          "minPeriod": {{ .Values.ome.multicluster.config.routing.observer.minPeriod | default "" | quote }},
+          "maxSamples": {{ .Values.ome.multicluster.config.routing.observer.maxSamples | default 0 }}
+        }{{- with .Values.ome.multicluster.config.routing.probe }},
         "probe": {
           "path": {{ .path | quote }},
           "method": {{ .method | quote }},
@@ -186,6 +193,17 @@ data:
           "failureThreshold": {{ .failureThreshold | default 0 }},
           "successThreshold": {{ .successThreshold | default 0 }},
           "allFailedPolicy": {{ .allFailedPolicy | quote }}
+        }{{- end }}{{- with .Values.ome.multicluster.config.routing.capacity }},
+        "capacity": {
+          "path": {{ .path | quote }},
+          "method": {{ .method | quote }},
+          "format": {{ .format | default "" | quote }},
+          "options": {{ .options | default dict | toJson }},
+          "samples": {{ .samples | default 0 }},
+          "quorum": {{ .quorum | default 0 }},
+          "period": {{ .period | quote }},
+          "timeout": {{ .timeout | quote }},
+          "maxAge": {{ .maxAge | quote }}
         }{{- end }}{{- with .Values.ome.multicluster.config.routing.publisher }},
         "publisher": {
           "name": {{ .name | quote }},

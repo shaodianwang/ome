@@ -17,6 +17,11 @@ type Config struct {
 	// disabling the feature is reversible without stranding objects.
 	Enabled bool
 
+	// Observer bounds the controller and HTTP work shared by the optional probe
+	// and capacity inputs. Every limit is required when routing is enabled so an
+	// installation cannot accidentally run an unbounded observer.
+	Observer ObserverConfig
+
 	// Probe configures the active end-to-end health probe. Zero-valued (no path)
 	// means no probing, and the health gate stays readyReplicas > 0.
 	Probe ProbeConfig
@@ -57,11 +62,70 @@ func (c Config) Validate() error {
 	if !c.Enabled {
 		return nil
 	}
+	if err := c.Observer.Validate(); err != nil {
+		return &configValidationError{section: "observer", err: err}
+	}
 	if err := c.Probe.Validate(); err != nil {
 		return &configValidationError{section: "probe", err: err}
 	}
+	if c.Probe.IsEnabled() && c.Probe.Period < c.Observer.MinPeriod {
+		return &configValidationError{section: "probe", err: fmt.Errorf(
+			"routing.probe.period (%s) must be at least routing.observer.minPeriod (%s)",
+			c.Probe.Period, c.Observer.MinPeriod)}
+	}
 	if err := c.Capacity.Validate(); err != nil {
 		return &configValidationError{section: "capacity", err: err}
+	}
+	if c.Capacity.IsEnabled() && c.Capacity.Period < c.Observer.MinPeriod {
+		return &configValidationError{section: "capacity", err: fmt.Errorf(
+			"routing.capacity.period (%s) must be at least routing.observer.minPeriod (%s)",
+			c.Capacity.Period, c.Observer.MinPeriod)}
+	}
+	if c.Capacity.IsEnabled() && c.Capacity.samples() > c.Observer.MaxSamples {
+		return &configValidationError{section: "capacity", err: fmt.Errorf(
+			"routing.capacity.samples (%d) must not exceed routing.observer.maxSamples (%d)",
+			c.Capacity.samples(), c.Observer.MaxSamples)}
+	}
+	return nil
+}
+
+// ObserverConfig sets process-wide resource limits for routing observations.
+// Values have no in-code defaults; deployment configuration owns the limits.
+//
+// +kubebuilder:object:generate=false
+type ObserverConfig struct {
+	// MaxConcurrentReconciles caps TrafficMap reconciles running in parallel.
+	MaxConcurrentReconciles int
+
+	// MaxConcurrentRequests caps in-flight probe and capacity HTTP requests.
+	MaxConcurrentRequests int
+
+	// MaxResponseBytes bounds the body read from one observed endpoint.
+	MaxResponseBytes int64
+
+	// MinPeriod is the shortest permitted probe or capacity polling period.
+	MinPeriod time.Duration
+
+	// MaxSamples caps the effective per-home capacity history window.
+	MaxSamples int
+}
+
+// Validate rejects absent or non-positive observer limits.
+func (c ObserverConfig) Validate() error {
+	if c.MaxConcurrentReconciles <= 0 {
+		return fmt.Errorf("routing.observer.maxConcurrentReconciles must be positive when routing is enabled")
+	}
+	if c.MaxConcurrentRequests <= 0 {
+		return fmt.Errorf("routing.observer.maxConcurrentRequests must be positive when routing is enabled")
+	}
+	if c.MaxResponseBytes <= 0 {
+		return fmt.Errorf("routing.observer.maxResponseBytes must be positive when routing is enabled")
+	}
+	if c.MinPeriod <= 0 {
+		return fmt.Errorf("routing.observer.minPeriod must be positive when routing is enabled")
+	}
+	if c.MaxSamples <= 0 {
+		return fmt.Errorf("routing.observer.maxSamples must be positive when routing is enabled")
 	}
 	return nil
 }
@@ -282,10 +346,9 @@ type CapacityConfig struct {
 	// Method is the HTTP method for the capacity request.
 	Method string
 
-	// Format names the response shape the home answers with. Empty means
-	// FormatReport, the built-in shape. Other formats come from optional
-	// packages compiled into the binary; naming one this build does not carry
-	// is a startup error, not a silent fallback.
+	// Format names the response shape the home answers with. Other formats come
+	// from optional packages compiled into the binary; naming one this build
+	// does not carry is a startup error, not a silent fallback.
 	Format CapacityFormat
 
 	// Options carries format-specific settings, interpreted by the selected
@@ -301,7 +364,6 @@ type CapacityConfig struct {
 	Timeout time.Duration
 
 	// Samples is how many recent readings the applied ceiling is derived from.
-	// Zero uses DefaultCapacitySamples.
 	//
 	// The control plane polls one address per home, so behind a load balancer
 	// successive polls may sample different reporters. Keeping only the latest
@@ -315,7 +377,7 @@ type CapacityConfig struct {
 
 	// Quorum is how many readings in the window must corroborate a lower value
 	// before it is applied: the ceiling is the Quorum-th smallest reading, not
-	// the smallest. Zero uses DefaultCapacityQuorum.
+	// the smallest.
 	//
 	// It tolerates Quorum-1 misbehaving reporters. That is the difference
 	// between believing a pessimist and believing a bug: one router that has
@@ -340,11 +402,8 @@ func (c CapacityConfig) IsEnabled() bool {
 	return c.Path != ""
 }
 
-// resolvedFormat returns the configured format, treating empty as FormatReport.
+// resolvedFormat returns the explicitly configured response format.
 func (c CapacityConfig) resolvedFormat() CapacityFormat {
-	if c.Format == "" {
-		return FormatReport
-	}
 	return c.Format
 }
 
@@ -359,6 +418,9 @@ func (c CapacityConfig) Validate() error {
 	}
 	if c.Method == "" {
 		return fmt.Errorf("routing.capacity.method is required when routing.capacity.path is set")
+	}
+	if c.Format == "" {
+		return fmt.Errorf("routing.capacity.format is required when routing.capacity.path is set")
 	}
 	switch c.Method {
 	case "GET", "HEAD", "POST":
@@ -380,11 +442,11 @@ func (c CapacityConfig) Validate() error {
 		// would pin a home's ceiling indefinitely.
 		return fmt.Errorf("routing.capacity.maxAge must be positive when routing.capacity.path is set")
 	}
-	if c.Samples < 0 {
-		return fmt.Errorf("routing.capacity.samples must not be negative")
+	if c.Samples <= 0 {
+		return fmt.Errorf("routing.capacity.samples must be positive when routing.capacity.path is set")
 	}
-	if c.Quorum < 0 {
-		return fmt.Errorf("routing.capacity.quorum must not be negative")
+	if c.Quorum <= 0 {
+		return fmt.Errorf("routing.capacity.quorum must be positive when routing.capacity.path is set")
 	}
 	if q, n := c.quorum(), c.samples(); q > n {
 		// A quorum larger than the window can never be reached, so no reading
@@ -420,26 +482,8 @@ func (c CapacityConfig) Validate() error {
 	return nil
 }
 
-// Defaults for the capacity sampling window. They live here, in the package
-// that owns the behavior, rather than in the config loader -- the same
-// single-sourcing the other control-plane tuning knobs use. These are algorithm
-// parameters with a safe universal choice, unlike a probe path or a gateway
-// host, which name a specific deployment and so have no default at all.
-const (
-	// DefaultCapacitySamples smooths over enough polls to see several reporters
-	// behind a balancer without making recovery from a low reading slow.
-	DefaultCapacitySamples = 10
-
-	// DefaultCapacityQuorum tolerates exactly one misbehaving reporter. Raise
-	// it if more than one reporter can plausibly be wrong at the same time.
-	DefaultCapacityQuorum = 2
-)
-
 // samples is the effective window length.
 func (c CapacityConfig) samples() int {
-	if c.Samples <= 0 {
-		return DefaultCapacitySamples
-	}
 	return c.Samples
 }
 
@@ -450,8 +494,5 @@ func (c CapacityConfig) samples() int {
 // operator a different corroboration guarantee than the one they configured --
 // and they would have no way to notice.
 func (c CapacityConfig) quorum() int {
-	if c.Quorum <= 0 {
-		return DefaultCapacityQuorum
-	}
 	return c.Quorum
 }

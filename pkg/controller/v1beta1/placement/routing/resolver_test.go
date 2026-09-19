@@ -34,7 +34,11 @@ func TestResolveConfigEnabled(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := ResolveConfig(Config{Enabled: tt.globalEnabled}, tt.spec, nil)
+			global := Config{Enabled: tt.globalEnabled}
+			if global.Enabled {
+				global.Observer = testGlobalRoutingConfig().Observer
+			}
+			got, err := ResolveConfig(global, tt.spec, nil)
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantEnabled, got.Enabled)
 		})
@@ -412,13 +416,276 @@ func TestResolveConfigMutationIsolation(t *testing.T) {
 	}, second.Publisher.Options)
 }
 
+func TestResolveProbePolicyEnablementAndInheritance(t *testing.T) {
+	trueValue, falseValue := true, false
+	global := testGlobalRoutingConfig()
+	tests := []struct {
+		name        string
+		global      Config
+		spec        *v1beta1.InferenceServiceSpec
+		wantEnabled bool
+		wantProbe   ProbeConfig
+	}{
+		{
+			name:        "nil spec inherits global probe",
+			global:      global,
+			wantEnabled: true,
+			wantProbe:   global.Probe,
+		},
+		{
+			name:        "nil inline enablement inherits global probe",
+			global:      global,
+			spec:        routingISVCSpec(&v1beta1.RoutingSpec{}),
+			wantEnabled: true,
+			wantProbe:   global.Probe,
+		},
+		{
+			name:        "inline true retains global probe",
+			global:      global,
+			spec:        routingISVCSpec(&v1beta1.RoutingSpec{Enabled: &trueValue}),
+			wantEnabled: true,
+			wantProbe:   global.Probe,
+		},
+		{
+			name:      "inline false opts out",
+			global:    global,
+			spec:      routingISVCSpec(&v1beta1.RoutingSpec{Enabled: &falseValue}),
+			wantProbe: global.Probe,
+		},
+		{
+			name: "inline true cannot bypass global routing gate",
+			global: func() Config {
+				cfg := global
+				cfg.Enabled = false
+				return cfg
+			}(),
+			spec:      routingISVCSpec(&v1beta1.RoutingSpec{Enabled: &trueValue}),
+			wantProbe: global.Probe,
+		},
+		{
+			name:   "unconfigured probe remains disabled",
+			global: Config{Enabled: true},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ResolveProbePolicy(tt.global, tt.spec)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantEnabled, got.Enabled)
+			assert.Equal(t, tt.wantEnabled, got.IsEnabled())
+			assert.Equal(t, tt.wantProbe, got.Probe)
+			if tt.wantEnabled {
+				assert.Regexp(t, `^sha256:[0-9a-f]{64}$`, got.PolicyDigest)
+			} else {
+				assert.Empty(t, got.PolicyDigest)
+			}
+		})
+	}
+}
+
+func TestResolveProbePolicyInlineReplacementAndDisable(t *testing.T) {
+	global := testGlobalRoutingConfig()
+	inline := validRoutingProbeSpec()
+	inline.Path = "/deep-ready"
+	inline.Method = "HEAD"
+	inline.AcceptStatuses = []int32{201, 202}
+	inline.GateStatuses = []int32{502, 504}
+	inline.Period = metav1.Duration{Duration: 3 * time.Minute}
+	inline.Timeout = metav1.Duration{Duration: 9 * time.Second}
+	inline.FailureThreshold = 4
+	inline.SuccessThreshold = 5
+	inline.AllFailedPolicy = v1beta1.RoutingAllFailedPolicyDrain
+
+	got, err := ResolveProbePolicy(global, routingISVCSpec(&v1beta1.RoutingSpec{Probe: inline}))
+	require.NoError(t, err)
+	assert.True(t, got.IsEnabled())
+	assert.Equal(t, ProbeConfig{
+		Path:             "/deep-ready",
+		Method:           "HEAD",
+		AcceptStatuses:   []int{201, 202},
+		GateStatuses:     []int{502, 504},
+		Period:           3 * time.Minute,
+		Timeout:          9 * time.Second,
+		FailureThreshold: 4,
+		SuccessThreshold: 5,
+		AllFailedPolicy:  AllFailedPolicyDrain,
+	}, got.Probe)
+	assert.Regexp(t, `^sha256:[0-9a-f]{64}$`, got.PolicyDigest)
+
+	disabled, err := ResolveProbePolicy(global, routingISVCSpec(&v1beta1.RoutingSpec{
+		Probe: &v1beta1.RoutingProbeSpec{Disabled: true},
+	}))
+	require.NoError(t, err)
+	assert.False(t, disabled.IsEnabled())
+	assert.Equal(t, ProbeConfig{}, disabled.Probe)
+	assert.Empty(t, disabled.PolicyDigest)
+}
+
+func TestResolveProbePolicyIgnoresUnrelatedInlineBlocks(t *testing.T) {
+	global := testGlobalRoutingConfig()
+	wantGlobal := cloneConfig(global)
+	inline := validRoutingProbeSpec()
+	inline.Path = "/inline-ready"
+
+	got, err := ResolveProbePolicy(global, routingISVCSpec(&v1beta1.RoutingSpec{
+		Probe: inline,
+		Capacity: &v1beta1.RoutingCapacitySpec{
+			Path:   "/invalid-capacity-without-method",
+			Format: "Unavailable",
+		},
+		Publisher: &v1beta1.RoutingPublisherSpec{Options: map[string]string{
+			"": strings.Repeat("x", v1beta1.MaxRoutingPublisherOptionValueBytes+1),
+		}},
+	}))
+	require.NoError(t, err)
+	assert.True(t, got.IsEnabled())
+	assert.Equal(t, "/inline-ready", got.Probe.Path)
+	assert.Equal(t, wantGlobal.Capacity, global.Capacity)
+	assert.Equal(t, wantGlobal.Publisher, global.Publisher)
+	assert.Equal(t, wantGlobal, global)
+}
+
+func TestResolveProbePolicyValidationScope(t *testing.T) {
+	global := testGlobalRoutingConfig()
+
+	_, err := ResolveProbePolicy(global, routingISVCSpec(&v1beta1.RoutingSpec{
+		Probe: &v1beta1.RoutingProbeSpec{Path: "/partial"},
+	}))
+	require.EqualError(t, err, "spec.routing.probe.method is required")
+
+	_, err = ResolveProbePolicy(global, routingISVCSpec(&v1beta1.RoutingSpec{
+		Probe: &v1beta1.RoutingProbeSpec{Disabled: true, Path: "/conflicting"},
+	}))
+	require.EqualError(t, err,
+		"spec.routing.probe.disabled must not be combined with probe configuration fields")
+
+	invalidGlobal := global
+	invalidGlobal.Probe.Method = "DELETE"
+	_, err = ResolveProbePolicy(invalidGlobal, nil)
+	require.EqualError(t, err,
+		"routing.probe.method \"DELETE\" must be GET, HEAD, or POST")
+
+	invalidGlobal.Enabled = false
+	got, err := ResolveProbePolicy(invalidGlobal, nil)
+	require.NoError(t, err)
+	assert.False(t, got.IsEnabled())
+	assert.Empty(t, got.PolicyDigest)
+}
+
+func TestResolveProbePolicyEnforcesObserverMinimumPeriod(t *testing.T) {
+	global := testGlobalRoutingConfig()
+	global.Observer.MinPeriod = 2 * time.Minute
+
+	_, err := ResolveProbePolicy(global, nil)
+	require.EqualError(t, err,
+		"routing.probe.period (1m0s) must be at least routing.observer.minPeriod (2m0s)")
+
+	inline := validRoutingProbeSpec()
+	inline.Period = metav1.Duration{Duration: 90 * time.Second}
+	inline.Timeout = metav1.Duration{Duration: time.Second}
+	_, err = ResolveProbePolicy(global, routingISVCSpec(&v1beta1.RoutingSpec{Probe: inline}))
+	require.EqualError(t, err,
+		"spec.routing.probe.period (1m30s) must be at least routing.observer.minPeriod (2m0s)")
+
+	inline.Period = metav1.Duration{Duration: 2 * time.Minute}
+	got, err := ResolveProbePolicy(global, routingISVCSpec(&v1beta1.RoutingSpec{Probe: inline}))
+	require.NoError(t, err)
+	assert.True(t, got.IsEnabled())
+}
+
+func TestResolveProbePolicyDigestIsCanonicalAndComplete(t *testing.T) {
+	base := testGlobalRoutingConfig()
+	base.Probe.AcceptStatuses = []int{204, 200}
+	base.Probe.GateStatuses = []int{503, 500}
+	wantAccept := append([]int(nil), base.Probe.AcceptStatuses...)
+	wantGate := append([]int(nil), base.Probe.GateStatuses...)
+
+	resolved, err := ResolveProbePolicy(base, nil)
+	require.NoError(t, err)
+	assert.Equal(t, wantAccept, base.Probe.AcceptStatuses)
+	assert.Equal(t, wantGate, base.Probe.GateStatuses)
+	assert.Equal(t, wantAccept, resolved.Probe.AcceptStatuses)
+	assert.Equal(t, wantGate, resolved.Probe.GateStatuses)
+	assert.Regexp(t, `^sha256:[0-9a-f]{64}$`, resolved.PolicyDigest)
+
+	reordered := base
+	reordered.Probe.AcceptStatuses = []int{200, 204, 200}
+	reordered.Probe.GateStatuses = []int{500, 503, 503}
+	reorderedResolved, err := ResolveProbePolicy(reordered, nil)
+	require.NoError(t, err)
+	assert.Equal(t, resolved.PolicyDigest, reorderedResolved.PolicyDigest,
+		"set ordering and duplicate representations must not change the digest")
+
+	mutations := map[string]func(*ProbeConfig){
+		"path": func(probe *ProbeConfig) {
+			probe.Path = "/other"
+		},
+		"method": func(probe *ProbeConfig) {
+			probe.Method = "HEAD"
+		},
+		"accept statuses": func(probe *ProbeConfig) {
+			probe.AcceptStatuses = []int{200, 201}
+		},
+		"gate statuses": func(probe *ProbeConfig) {
+			probe.GateStatuses = []int{500, 502}
+		},
+		"period": func(probe *ProbeConfig) {
+			probe.Period += time.Second
+		},
+		"timeout": func(probe *ProbeConfig) {
+			probe.Timeout += time.Second
+		},
+		"failure threshold": func(probe *ProbeConfig) {
+			probe.FailureThreshold++
+		},
+		"success threshold": func(probe *ProbeConfig) {
+			probe.SuccessThreshold++
+		},
+		"all failed policy": func(probe *ProbeConfig) {
+			probe.AllFailedPolicy = AllFailedPolicyDrain
+		},
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			changed := base
+			changed.Probe = cloneProbeConfig(base.Probe)
+			mutate(&changed.Probe)
+			got, err := ResolveProbePolicy(changed, nil)
+			require.NoError(t, err)
+			assert.NotEqual(t, resolved.PolicyDigest, got.PolicyDigest)
+		})
+	}
+}
+
 func routingISVCSpec(routing *v1beta1.RoutingSpec) *v1beta1.InferenceServiceSpec {
 	return &v1beta1.InferenceServiceSpec{Routing: routing}
+}
+
+func validRoutingProbeSpec() *v1beta1.RoutingProbeSpec {
+	return &v1beta1.RoutingProbeSpec{
+		Path:             "/ready",
+		Method:           "GET",
+		AcceptStatuses:   []int32{200},
+		GateStatuses:     []int32{500},
+		Period:           metav1.Duration{Duration: time.Minute},
+		Timeout:          metav1.Duration{Duration: time.Second},
+		FailureThreshold: 2,
+		SuccessThreshold: 2,
+		AllFailedPolicy:  v1beta1.RoutingAllFailedPolicyPreserveTraffic,
+	}
 }
 
 func testGlobalRoutingConfig() Config {
 	return Config{
 		Enabled: true,
+		Observer: ObserverConfig{
+			MaxConcurrentReconciles: 2,
+			MaxConcurrentRequests:   4,
+			MaxResponseBytes:        64 * 1024,
+			MinPeriod:               100 * time.Millisecond,
+			MaxSamples:              10,
+		},
 		Probe: ProbeConfig{
 			Path:             "/health",
 			Method:           "GET",

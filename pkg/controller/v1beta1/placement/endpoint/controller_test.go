@@ -63,6 +63,10 @@ func updateEvent(old, nw *v1beta1.InferenceService) event.UpdateEvent {
 	return event.UpdateEvent{ObjectOld: old, ObjectNew: nw}
 }
 
+func trafficMapUpdateEvent(old, nw *v1beta1.TrafficMap) event.UpdateEvent {
+	return event.UpdateEvent{ObjectOld: old, ObjectNew: nw}
+}
+
 type recordingEndpointPublisher struct {
 	published   []Target
 	unpublished int
@@ -170,6 +174,38 @@ func TestReconcile_TrafficMapPublisherSupportsLegacyPlacementAnnotation(t *testi
 
 func TestReconcile_TrafficMapPublisherSkipsOrdinaryISVC(t *testing.T) {
 	isvc := placedISVC("cluster-a", "placement.example")
+	isvc.Finalizers = []string{EndpointFinalizer}
+	tm := &v1beta1.TrafficMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "prod"},
+		Spec: v1beta1.TrafficMapSpec{Service: "svc", Entries: []v1beta1.TrafficMapEntry{{
+			Cluster: "cluster-a", Endpoint: apis.HTTPS("a.example"), Weight: 1,
+		}}},
+	}
+	s := pubScheme(t)
+	c := fakeclient.NewClientBuilder().WithScheme(s).
+		WithStatusSubresource(&v1beta1.InferenceService{}).
+		WithObjects(isvc, tm).Build()
+	publisher := &recordingEndpointPublisher{}
+	active := true
+	r := &Reconciler{
+		Client: c, Log: log.Log, Publisher: publisher,
+		Active: &active, UseTrafficMap: true,
+	}
+
+	reconcile(t, r)
+
+	assert.Empty(t, publisher.published)
+	assert.Equal(t, 1, publisher.unpublished)
+	got := &v1beta1.InferenceService{}
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(isvc), got))
+	assert.NotContains(t, got.Finalizers, EndpointFinalizer)
+}
+
+func TestReconcile_TrafficMapPublisherWithdrawsOnRoutingOptOut(t *testing.T) {
+	isvc := placedISVC("cluster-a", "placement.example")
+	isvc.Spec.Placement = &v1beta1.PlacementSpec{Requirements: "gpu=tpu"}
+	disabled := false
+	isvc.Spec.Routing = &v1beta1.RoutingSpec{Enabled: &disabled}
 	isvc.Finalizers = []string{EndpointFinalizer}
 	tm := &v1beta1.TrafficMap{
 		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "prod"},
@@ -624,6 +660,15 @@ func TestPlacementPublishChange(t *testing.T) {
 		assert.True(t, placementPublishChange.Update(updateEvent(old, nw)))
 	})
 
+	t.Run("routing opt-out transition passes", func(t *testing.T) {
+		old := base.DeepCopy()
+		old.Spec.Placement = &v1beta1.PlacementSpec{Requirements: "gpu=tpu"}
+		nw := old.DeepCopy()
+		disabled := false
+		nw.Spec.Routing = &v1beta1.RoutingSpec{Enabled: &disabled}
+		assert.True(t, placementPublishChange.Update(updateEvent(old, nw)))
+	})
+
 	t.Run("deletion entering passes", func(t *testing.T) {
 		old := base.DeepCopy()
 		nw := base.DeepCopy()
@@ -643,5 +688,158 @@ func TestPlacementPublishChange(t *testing.T) {
 		nw.Status.Placement = old.Status.Placement.DeepCopy()
 		nw.Status.Placement.Candidates[0].ReadyReplicas = 2
 		assert.True(t, placementPublishChange.Update(updateEvent(old, nw)))
+	})
+}
+
+func TestTrafficMapPublishChange(t *testing.T) {
+	base := &v1beta1.TrafficMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "prod", Generation: 1},
+		Spec: v1beta1.TrafficMapSpec{
+			Service: "svc",
+			Mode:    v1beta1.PlacementModeSplit,
+			Entries: []v1beta1.TrafficMapEntry{
+				{
+					Cluster:  "cluster-a",
+					Endpoint: apis.HTTPS("a.example"),
+					Weight:   3,
+					Healthy:  true,
+				},
+				{
+					Cluster:  "cluster-b",
+					Endpoint: apis.HTTPS("b.example:8443"),
+					Weight:   7,
+					Healthy:  true,
+				},
+			},
+			ObservedISVCGeneration: 4,
+		},
+	}
+
+	t.Run("create and delete pass", func(t *testing.T) {
+		assert.True(t, trafficMapPublishChange.Create(event.CreateEvent{Object: base}))
+		assert.True(t, trafficMapPublishChange.Delete(event.DeleteEvent{Object: base}))
+	})
+
+	nonPublicationChanges := []struct {
+		name   string
+		mutate func(*v1beta1.TrafficMap)
+	}{
+		{
+			name: "entry order",
+			mutate: func(tm *v1beta1.TrafficMap) {
+				tm.Spec.Entries[0], tm.Spec.Entries[1] = tm.Spec.Entries[1], tm.Spec.Entries[0]
+			},
+		},
+		{
+			name: "metadata",
+			mutate: func(tm *v1beta1.TrafficMap) {
+				tm.Generation++
+				tm.Labels = map[string]string{"unrelated": "metadata"}
+			},
+		},
+		{
+			name: "routing intent provenance",
+			mutate: func(tm *v1beta1.TrafficMap) {
+				tm.Spec.Mode = v1beta1.PlacementModeAll
+				tm.Spec.ObservedISVCGeneration++
+			},
+		},
+		{
+			name: "health provenance",
+			mutate: func(tm *v1beta1.TrafficMap) {
+				tm.Spec.Entries[0].Healthy = false
+			},
+		},
+		{
+			name: "capacity provenance",
+			mutate: func(tm *v1beta1.TrafficMap) {
+				tm.Spec.Entries[0].Capacity = &v1beta1.TrafficMapCapacity{Allocated: 11}
+			},
+		},
+		{
+			name: "probe provenance",
+			mutate: func(tm *v1beta1.TrafficMap) {
+				probeTime := metav1.Now()
+				tm.Spec.Entries[0].Probe = &v1beta1.TrafficMapProbe{
+					Result:              v1beta1.ProbeResultFailing,
+					Gated:               true,
+					LastProbeTime:       &probeTime,
+					ConsecutiveFailures: 2,
+					Message:             "probe failed",
+				}
+			},
+		},
+		{
+			name: "publisher status",
+			mutate: func(tm *v1beta1.TrafficMap) {
+				tm.Status.Programmed = true
+			},
+		},
+	}
+	for _, tt := range nonPublicationChanges {
+		t.Run(tt.name+" is dropped", func(t *testing.T) {
+			old := base.DeepCopy()
+			nw := base.DeepCopy()
+			tt.mutate(nw)
+			assert.False(t, trafficMapPublishChange.Update(trafficMapUpdateEvent(old, nw)))
+		})
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*v1beta1.TrafficMap)
+	}{
+		{
+			name: "service change passes",
+			mutate: func(tm *v1beta1.TrafficMap) {
+				tm.Spec.Service = "other-service"
+			},
+		},
+		{
+			name: "cluster change passes",
+			mutate: func(tm *v1beta1.TrafficMap) {
+				tm.Spec.Entries[0].Cluster = "cluster-c"
+			},
+		},
+		{
+			name: "endpoint change passes",
+			mutate: func(tm *v1beta1.TrafficMap) {
+				tm.Spec.Entries[0].Endpoint = apis.HTTPS("new.example")
+			},
+		},
+		{
+			name: "weight change passes",
+			mutate: func(tm *v1beta1.TrafficMap) {
+				tm.Spec.Entries[0].Weight++
+			},
+		},
+		{
+			name: "entry addition passes",
+			mutate: func(tm *v1beta1.TrafficMap) {
+				tm.Spec.Entries = append(tm.Spec.Entries, v1beta1.TrafficMapEntry{
+					Cluster: "cluster-c", Endpoint: apis.HTTPS("c.example"), Weight: 5,
+				})
+			},
+		},
+		{
+			name: "entry removal passes",
+			mutate: func(tm *v1beta1.TrafficMap) {
+				tm.Spec.Entries = tm.Spec.Entries[:1]
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			old := base.DeepCopy()
+			nw := base.DeepCopy()
+			tt.mutate(nw)
+			assert.True(t, trafficMapPublishChange.Update(trafficMapUpdateEvent(old, nw)))
+		})
+	}
+
+	t.Run("unexpected update type passes", func(t *testing.T) {
+		assert.True(t, trafficMapPublishChange.Update(event.UpdateEvent{
+			ObjectOld: &corev1.Service{}, ObjectNew: &corev1.Service{},
+		}))
 	})
 }
