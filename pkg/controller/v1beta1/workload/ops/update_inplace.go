@@ -277,10 +277,15 @@ func inPlaceUpdate(ctx context.Context, deps workload.Deps, input workload.Recon
 		}
 	}
 
-	// Promotion releases this Instance's unavailability budget slot, so under
-	// a minReadySeconds window it waits until every patched pod has stayed
-	// Ready for that long. A zero window keeps the runtime-image gate above.
-	if plan.MinReadySeconds > 0 && !podsAvailable(livePods, plan.MinReadySeconds, input.Now()) {
+	// The shared promote bar with the in-place extra: on top of PodReady past
+	// the availability window, every container whose image the roll changed
+	// must report the target image at runtime. Promotion releases this
+	// Instance's unavailability budget slot, so a pod the serving-gate flip
+	// has not yet carried back into rotation holds it.
+	promotable, wait := query.PodSetPromotable(livePods, plan.MinReadySeconds, input.Now(),
+		func(pod *corev1.Pod) bool { return podRuntimeImageChangesMatch(pod, runningSpec, targetSpec) })
+	if !promotable {
+		input.PromoteWindow.Observe(wait)
 		return false, nil
 	}
 	if err := patchInstanceStatusReadyOnRevision(ctx, input, inst.Index, target.Name); err != nil {

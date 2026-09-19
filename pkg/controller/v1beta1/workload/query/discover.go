@@ -9,6 +9,7 @@ import (
 	"context"
 	"strconv"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -407,6 +408,52 @@ func AllPodsRuntimeReady(pods []*corev1.Pod) bool {
 		}
 	}
 	return true
+}
+
+// PodSetPromotable reports whether a pod set clears the one bar every path
+// stamping an Instance Ready shares: the set is non-empty, no pod is
+// terminal, every pod is PodReady — the readiness gates the controller
+// writes are folded by kubelet into that condition, so a PodReady pod is
+// eligible for its Service — and every pod has held Ready for the
+// Component's minReadySeconds window. A window <= 0 reduces the bar to
+// PodReady. Each extra predicate is an additional per-path requirement on
+// every pod (the in-place roll confirms its runtime images there).
+//
+// The duration is how long until the last pod inside its window clears it,
+// so a caller waiting on the window wakes when it elapses instead of
+// polling; it is 0 when the set is promotable and when something other than
+// the window holds it back. A pod that goes ContainersReady=false and back
+// inside the window moves the Ready condition's lastTransitionTime, so the
+// window restarts from that latest transition and the set is not promotable
+// until the flapping pod has held Ready for a full window.
+func PodSetPromotable(pods []*corev1.Pod, minReadySeconds int32, now time.Time, extra ...func(*corev1.Pod) bool) (bool, time.Duration) {
+	if len(pods) == 0 {
+		return false, 0
+	}
+	var wait time.Duration
+	for _, pod := range pods {
+		if IsTerminalPod(pod) || !podreadiness.IsContainersReady(pod) {
+			return false, 0
+		}
+		for _, satisfied := range extra {
+			if !satisfied(pod) {
+				return false, 0
+			}
+		}
+		available, remaining := podreadiness.IsPodAvailable(pod, minReadySeconds, now)
+		if available {
+			continue
+		}
+		if remaining <= 0 {
+			// Not PodReady, or Ready with no provable age: no later instant
+			// is known to promote this set.
+			return false, 0
+		}
+		if remaining > wait {
+			wait = remaining
+		}
+	}
+	return wait == 0, wait
 }
 
 // PodSetFullyServing reports whether the pod set is fully healthy in

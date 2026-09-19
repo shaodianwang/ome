@@ -208,10 +208,11 @@ func TestUpdateWithPods_StrategyFlipAtStepSurge_HoldsSourceInRotation(t *testing
 	}
 }
 
-// syncFakeKubeletImages advances every pod's runtime container status to the
-// images currently in its spec — the fake-kubelet step the in-place path's
-// runtime-image proof waits on.
-func (f *midSurgeFixture) syncFakeKubeletImages(t *testing.T) {
+// syncFakeKubelet advances every pod's runtime container status to the images
+// currently in its spec — the step the in-place path's runtime-image proof
+// waits on — and folds a satisfied serving gate into PodReady, which is what
+// the shared promote bar reads.
+func (f *midSurgeFixture) syncFakeKubelet(t *testing.T) {
 	t.Helper()
 	for _, pod := range []*corev1.Pod{f.sourcePod, f.surgePod} {
 		fresh, found := f.livePod(t, pod)
@@ -227,6 +228,13 @@ func (f *midSurgeFixture) syncFakeKubeletImages(t *testing.T) {
 			})
 		}
 		fresh.Status.ContainerStatuses = statuses
+		if podreadiness.IsServing(fresh) && !podreadiness.IsPodReady(fresh) {
+			fresh.Status.Conditions = append(fresh.Status.Conditions, corev1.PodCondition{
+				Type:               corev1.PodReady,
+				Status:             corev1.ConditionTrue,
+				LastTransitionTime: metav1.Now(),
+			})
+		}
 		if err := f.client.Status().Update(context.Background(), fresh); err != nil {
 			t.Fatalf("advance runtime status for %s: %v", fresh.Name, err)
 		}
@@ -273,7 +281,7 @@ func TestUpdateWithPods_StrategyFlipAtStepSurge_ConvergesToOnePod(t *testing.T) 
 			const maxPasses = 12
 			var done bool
 			for pass := 0; pass < maxPasses && !done; pass++ {
-				f.syncFakeKubeletImages(t)
+				f.syncFakeKubelet(t)
 				done = f.run(t, tc.strategy)
 			}
 			if !done {
@@ -304,7 +312,7 @@ func TestUpdateWithPods_StrategyFlipAtUncommittedSurge_RollsUnderNewStrategy(t *
 	const maxPasses = 12
 	var done bool
 	for pass := 0; pass < maxPasses && !done; pass++ {
-		f.syncFakeKubeletImages(t)
+		f.syncFakeKubelet(t)
 		done = f.run(t, workload.UpdateStrategyInPlaceIfPossible)
 	}
 	if !done {

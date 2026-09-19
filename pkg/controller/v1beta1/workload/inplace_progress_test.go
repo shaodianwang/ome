@@ -82,9 +82,12 @@ func TestReconcile_InPlaceMetadataUpdateProgressesWithinMaxUnavailable(t *testin
 			query.LabelRevisionHash:               "oldhash",
 		}
 	}
+	// A steady-state serving pod: kubelet has folded the satisfied serving
+	// gate into PodReady, which is what the shared promote bar reads.
 	readyConditions := []corev1.PodCondition{
 		{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
 		{Type: query.ServingConditionType, Status: corev1.ConditionTrue},
+		{Type: corev1.PodReady, Status: corev1.ConditionTrue},
 	}
 	podFor := func(index string) *corev1.Pod {
 		return &corev1.Pod{

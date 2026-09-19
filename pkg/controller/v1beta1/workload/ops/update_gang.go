@@ -289,17 +289,17 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 		return false, fmt.Errorf("list source gang pods (instance=%d): %w", sourceIdx, err)
 	}
 	if len(sourcePods) > 0 {
-		// Do not drain until kubelet has incorporated the serving gate into
-		// PodReady; this preserves overlap with the source.
-		for _, pod := range surgePods {
-			if !podreadiness.IsPodReady(pod) {
-				return false, nil
-			}
+		// Do not drain until the whole replacement gang clears the shared
+		// promote bar: kubelet has incorporated the serving gate into PodReady
+		// and the gang has held Ready for the availability window. That
+		// preserves overlap with the source, whose budget slot is held
+		// meanwhile. Past Step=Surge the source is already draining.
+		window := plan.MinReadySeconds
+		if !surgeWindowApplies(src) {
+			window = 0
 		}
-		// Nor, while the source is still in rotation, until the whole
-		// replacement gang has stayed Ready for the minReadySeconds window;
-		// the surge budget slot is held meanwhile.
-		if surgeWindowApplies(src) && !podsAvailable(surgePods, plan.MinReadySeconds, input.Now()) {
+		if promotable, wait := query.PodSetPromotable(surgePods, window, input.Now()); !promotable {
+			input.PromoteWindow.Observe(wait)
 			return false, nil
 		}
 	}

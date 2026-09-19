@@ -145,12 +145,16 @@ func TestRestartPass_IsolatesInstanceStatusWriteFailure(t *testing.T) {
 		t.Fatalf("instance 1 must have its replacement pod at incarnation 2")
 	}
 
-	_, err = h.stepResult()
-	if err == nil || !strings.Contains(err.Error(), "restart instance 0") {
-		t.Fatalf("the pass must keep failing on instance 0; got %v", err)
+	// Two more passes for instance 1's promote: one writes the serving gate
+	// on the replacement, the next observes kubelet folding it into PodReady.
+	for pass := 0; pass < 2; pass++ {
+		_, err = h.stepResult()
+		if err == nil || !strings.Contains(err.Error(), "restart instance 0") {
+			t.Fatalf("the pass must keep failing on instance 0; got %v", err)
+		}
 	}
 	if s := h.instance(1); s == nil || s.Phase != workload.InstancePhaseReady || s.Operation != nil || !h.atIncarnation(1, 2) {
-		h.dumpState("after second failing pass")
+		h.dumpState("after the failing passes")
 		t.Fatalf("instance 1 must complete its restart while instance 0 keeps failing; got %+v", s)
 	}
 	if pods := h.podsOf(0); len(pods) != 0 {

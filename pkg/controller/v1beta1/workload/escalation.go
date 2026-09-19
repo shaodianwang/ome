@@ -312,6 +312,12 @@ func escalateFromEvidence(ctx context.Context, deps Deps, input ReconcileInput, 
 			// the gang abandon reads the reason and this one is not in the
 			// workload-caused set.
 			termination = types.ContainersNotReadyTermination(pod, metav1.NewTime(now))
+		} else if pod := firstGateNotFoldedPod(pods, attemptTargetRevision(input, s)); pod != nil {
+			// Evidence only, same standing: a pod whose probes passed but
+			// whose readiness gate never folded into Ready is invisible to
+			// its Service, and that is what the record must say instead of
+			// the bare elapsed timeout.
+			termination = types.GateNotFoldedTermination(pod, metav1.NewTime(now))
 		}
 		buf.add(idx, deadlineFailedMutation(termination), func() {
 			input.WarnInstanceFailed(idx, "", deadlineFailureMessage(op))

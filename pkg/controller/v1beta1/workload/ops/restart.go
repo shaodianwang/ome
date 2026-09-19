@@ -416,7 +416,9 @@ func Restart(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		return false, nil
 	}
 
-	// Phase C: flip serving, promote Ready.
+	// Phase C: flip serving, then hold at the shared promote bar. The gate
+	// write comes first because the rebuilt pods carry the lifecycle hold, so
+	// PodReady cannot become true until it is released.
 	if !query.AllPodsRuntimeReady(newPods) {
 		return false, nil
 	}
@@ -429,6 +431,10 @@ func Restart(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		if err := podreadiness.MarkPodServing(ctx, deps.Client, deps.Reader(), pod, podreadiness.WriterLifecycle, podreadiness.KeyLifecycleInstanceReady); err != nil {
 			return false, fmt.Errorf("mark serving (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
 		}
+	}
+	if promotable, wait := query.PodSetPromotable(newPods, plan.MinReadySeconds, input.Now()); !promotable {
+		input.PromoteWindow.Observe(wait)
+		return false, nil
 	}
 
 	if err := patchInstanceStatusReady(ctx, input, inst.Index); err != nil {

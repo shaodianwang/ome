@@ -47,6 +47,21 @@ func withContainersReady(p *corev1.Pod, ready bool) *corev1.Pod {
 	return p
 }
 
+// withPodReady stamps the kubelet-owned Ready condition — what kubelet
+// writes once every readiness gate is satisfied, and what the promote bar
+// reads.
+func withPodReady(p *corev1.Pod, ready bool) *corev1.Pod {
+	status := corev1.ConditionFalse
+	if ready {
+		status = corev1.ConditionTrue
+	}
+	p.Status.Conditions = append(p.Status.Conditions, corev1.PodCondition{
+		Type:   corev1.PodReady,
+		Status: status,
+	})
+	return p
+}
+
 func withServing(p *corev1.Pod, serving bool) *corev1.Pod {
 	status := corev1.ConditionFalse
 	if serving {
@@ -121,6 +136,16 @@ func TestManagedByOMENativePredicate_UpdateFieldDiff(t *testing.T) {
 			name:     "ContainersReady flip passes",
 			old:      withContainersReady(managedPod(), false),
 			new:      withContainersReady(managedPod(), true),
+			wantPass: true,
+		},
+		{
+			// Kubelet folds the serving gate into Ready in a status write of
+			// its own: ContainersReady and the gate are already what they
+			// were, so this flip is the only evidence that the pod became
+			// eligible for its Service — and the promote bar waits on it.
+			name:     "PodReady flip passes",
+			old:      withPodReady(withServing(withContainersReady(managedPod(), true), true), false),
+			new:      withPodReady(withServing(withContainersReady(managedPod(), true), true), true),
 			wantPass: true,
 		},
 		{

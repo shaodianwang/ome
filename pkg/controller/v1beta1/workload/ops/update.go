@@ -12,7 +12,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
@@ -32,22 +31,6 @@ func updateDrainKey(idx int32, incarnation int64) string {
 // in flight. Exported so the dispatcher's requeue cadence stays in
 // lockstep with the per-Instance state machine.
 const UpdateRequeueInterval = 5 * time.Second
-
-// podsAvailable reports whether every pod has been Ready for the
-// Component's minReadySeconds window (podreadiness.IsPodAvailable). A zero
-// window reduces to every pod being PodReady. Rollouts pace on this rather
-// than on Ready: a drain or promotion that ran the moment a pod flipped
-// Ready would release its budget slot before the pod proved it stays up.
-// The in-flight Update keeps the dispatcher polling at UpdateRequeueInterval
-// until the window elapses.
-func podsAvailable(pods []*corev1.Pod, minReadySeconds int32, now time.Time) bool {
-	for _, pod := range pods {
-		if available, _ := podreadiness.IsPodAvailable(pod, minReadySeconds, now); !available {
-			return false
-		}
-	}
-	return true
-}
 
 // surgeWindowApplies reports whether the minReadySeconds window still gates a
 // surge: the Operation has not advanced past Step=Surge, so the source is in
@@ -490,11 +473,12 @@ func evaluateUpdateTriggerPods(pods []*corev1.Pod, targetSpec *corev1.PodSpec) U
 	// Spec-match alone proves nothing about health: a wedged pod (e.g.
 	// ImagePullBackOff) spec-matches the very revision that broke it, and
 	// the adoption stamp prunes that revision's RetryBlock — Ready is
-	// only stamped on proof. Require the same runtime-readiness the
-	// canonical Ready promotions gate on before adopting; unproven pods
-	// are simply left alone (a corrective target re-triggers via the
-	// per-pod diff above, and pods that later become ready are adopted
-	// on a subsequent pass).
+	// only stamped on proof. Require runtime readiness before adopting;
+	// unproven pods are simply left alone (a corrective target re-triggers
+	// via the per-pod diff above, and pods that later become ready are
+	// adopted on a subsequent pass). This backfills the revision an already
+	// running pod set carries, so it is not one of the promote paths and
+	// does not consult the availability window.
 	if !query.AllPodsRuntimeReady(pods) {
 		return UpdateTriggerDecision{}
 	}

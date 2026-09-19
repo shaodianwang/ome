@@ -459,18 +459,18 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 	}
 
 	if len(oldPods) > 0 {
-		// Keep the source in rotation until kubelet has incorporated the
-		// replacement's serving gate into PodReady.
-		for _, pod := range surgePods {
-			if !podreadiness.IsPodReady(pod) {
-				return false, nil
-			}
+		// Keep the source in rotation until the replacement clears the shared
+		// promote bar: kubelet has incorporated its serving gate into PodReady
+		// and it has held Ready for the availability window. The surge stays in
+		// flight (budget slot held) for the whole wait. Past Step=Surge the
+		// source is already draining and a replacement that flaps Ready must
+		// not hold it out of service for another window.
+		window := plan.MinReadySeconds
+		if !surgeWindowApplies(findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)) {
+			window = 0
 		}
-		// ...and, while the source is still in rotation, until the
-		// replacement has stayed Ready for the minReadySeconds window. The
-		// surge stays in flight (budget slot held) for the whole wait.
-		if surgeWindowApplies(findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)) &&
-			!podsAvailable(surgePods, plan.MinReadySeconds, input.Now()) {
+		if promotable, wait := query.PodSetPromotable(surgePods, window, input.Now()); !promotable {
+			input.PromoteWindow.Observe(wait)
 			return false, nil
 		}
 		// Transition Step Surge → Drain once. Subsequent passes idempotency-

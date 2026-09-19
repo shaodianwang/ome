@@ -195,6 +195,12 @@ func DisposeExpiredAttempt(ctx context.Context, deps Deps, input ReconcileInput,
 		// the bare elapsed timeout and says nothing about the probe.
 		termination = types.ContainersNotReadyTermination(pod, now)
 		limboDetail = termination.Message
+	} else if pod := firstGateNotFoldedPod(pods, attemptTargetRevision(input, inst)); pod != nil {
+		// Gate limbo: the probes passed but a readiness gate keeps the pod
+		// out of its Service, so no promote can fire. Same standing as the
+		// limbo above — evidence, not a branch.
+		termination = types.GateNotFoldedTermination(pod, now)
+		limboDetail = termination.Message
 	}
 
 	directiveRecorded := false
@@ -316,6 +322,30 @@ func firstRunningNotReadyPod(pods []*corev1.Pod, attemptRev string) (*corev1.Pod
 		return nil, ""
 	}
 	return limbo, types.ReasonContainersNotReady
+}
+
+// firstGateNotFoldedPod returns the first live pod whose containers are
+// ready but whose Ready condition never followed, under the same scoping and
+// suppression rules as firstRunningNotReadyPod: revision-scoped when the pods
+// say which revision they belong to, and suppressed outright when the kubelet
+// has named a waiting reason on any pod of the scoped set.
+func firstGateNotFoldedPod(pods []*corev1.Pod, attemptRev string) *corev1.Pod {
+	var limbo *corev1.Pod
+	for _, pod := range pods {
+		if pod == nil || pod.DeletionTimestamp != nil {
+			continue
+		}
+		if !podOnAttemptRevision(pod, attemptRev) {
+			continue
+		}
+		if types.PodHasWaitingContainer(pod) {
+			return nil
+		}
+		if limbo == nil && types.PodGateNotFolded(pod) {
+			limbo = pod
+		}
+	}
+	return limbo
 }
 
 // attemptTargetRevision resolves the revision an attempt is converging

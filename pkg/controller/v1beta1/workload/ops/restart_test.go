@@ -11,6 +11,7 @@ import (
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
+	clocktesting "k8s.io/utils/clock/testing"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -314,9 +315,11 @@ func TestRestart_ConvergesAcrossPasses(t *testing.T) {
 	t.Fatalf("Restart did not converge after %d passes", maxPasses)
 }
 
-// makeNewPodReady is a test helper that synthesizes ContainersReady=True
-// on the named pod if it exists and carries the given incarnation label.
-// It mimics what kubelet would write once the runtime is up.
+// makeNewPodReady is the fake kubelet a pass loop needs: on the named pod,
+// if it exists and carries the given incarnation label, it synthesizes
+// ContainersReady=True once the runtime is up and folds the controller's
+// serving gate into PodReady=True once that gate is satisfied — the order
+// kubelet writes them in, and the order the promote bar reads them in.
 func makeNewPodReady(t *testing.T, c client.Client, ns, name string, incarnation int64) {
 	t.Helper()
 	pod := &corev1.Pod{}
@@ -326,18 +329,28 @@ func makeNewPodReady(t *testing.T, c client.Client, ns, name string, incarnation
 	if got := pod.Labels[query.LabelInstanceIncarnation]; got != fmt.Sprintf("%d", incarnation) {
 		return
 	}
-	for _, cond := range pod.Status.Conditions {
-		if cond.Type == corev1.ContainersReady && cond.Status == corev1.ConditionTrue {
-			return
-		}
+	changed := false
+	if !podreadiness.IsContainersReady(pod) {
+		pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+			Type:               corev1.ContainersReady,
+			Status:             corev1.ConditionTrue,
+			LastTransitionTime: metav1.Now(),
+		})
+		changed = true
 	}
-	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
-		Type:               corev1.ContainersReady,
-		Status:             corev1.ConditionTrue,
-		LastTransitionTime: metav1.Now(),
-	})
+	if podreadiness.IsServing(pod) && !podreadiness.IsPodReady(pod) {
+		pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+			Type:               corev1.PodReady,
+			Status:             corev1.ConditionTrue,
+			LastTransitionTime: metav1.Now(),
+		})
+		changed = true
+	}
+	if !changed {
+		return
+	}
 	if err := c.Status().Update(context.Background(), pod); err != nil {
-		t.Fatalf("synthesize ContainersReady: %v", err)
+		t.Fatalf("synthesize kubelet readiness: %v", err)
 	}
 }
 
@@ -927,5 +940,98 @@ func TestDetectRestartTrigger_NilReadySinceStaysSilent(t *testing.T) {
 
 	if needs, reason := ops.DetectRestartTriggerWithPods(input, plan, plan.Instances[0], []*corev1.Pod{pod}); needs {
 		t.Fatalf("nil ReadySince must not trigger; got reason %q", reason)
+	}
+}
+
+// TestRestart_PromotionWaitsForPodReadyAndWindow: Phase C writes the serving
+// gate on the rebuilt pod, then holds the Ready stamp at the shared promote
+// bar — first until kubelet folds that gate into PodReady, then until the pod
+// has held Ready for the Component's minReadySeconds window. The wait is
+// reported as the window's remainder so the pass wakes on it.
+//
+// Cells: instance/Restart/Drain/pod.containersReady[source]/before, instance/Restart/Drain/pod.ready[source]/before
+func TestRestart_PromotionWaitsForPodReadyAndWindow(t *testing.T) {
+	resetExpectations(t)
+	isvc, ir := isvcReadyAtIncarnation("llama-70b", "prod", 2)
+	ir.Status.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
+		Index:       0,
+		Incarnation: 2,
+		Phase:       v1beta1.OMENativeInstanceRestarting,
+		Operation: &v1beta1.InstanceOperation{
+			Type: v1beta1.InstanceOperationRestart, Step: "Drain", StartedAt: metav1.Now(),
+		},
+	}
+	// Phase A and B are done: the old incarnation is gone and the rebuilt pod
+	// is up but still held out of rotation by the lifecycle gate.
+	pod := podAtIncarnation(isvc, 0, 2, true /* ready */, false /* serving */)
+	c := newFakeClient(t, isvc, ir, pod)
+
+	start := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	clk := clocktesting.NewFakeClock(start)
+	plan := buildPlanSinglePodEngineForRestart(c, isvc)
+	plan.MinReadySeconds = 20
+
+	restart := func() (bool, *workload.PromoteWindow) {
+		t.Helper()
+		input := buildTestInput(isvc, c, workload.ComponentEngine)
+		input.Clock = clk
+		window := &workload.PromoteWindow{}
+		input.PromoteWindow = window
+		done, err := ops.Restart(context.Background(), workload.Deps{Client: c, Clock: clk}, input, plan, plan.Instances[0], "pod Failed")
+		if err != nil {
+			t.Fatalf("Restart: %v", err)
+		}
+		return done, window
+	}
+
+	done, _ := restart()
+	if done {
+		t.Fatal("promoted on ContainersReady: the pod is not PodReady yet")
+	}
+	live := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), live); err != nil {
+		t.Fatalf("get rebuilt pod: %v", err)
+	}
+	if !podreadiness.IsServing(live) {
+		t.Fatal("Phase C must write the serving gate before waiting on PodReady")
+	}
+	if s := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0); s == nil || s.Phase != v1beta1.OMENativeInstanceRestarting {
+		t.Fatalf("row left Restart before the promote bar: %+v", s)
+	}
+
+	// Kubelet folds the gate into PodReady 5s into the 20s window.
+	makeNewPodReady(t, c, isvc.Namespace, pod.Name, 2)
+	live = &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), live); err != nil {
+		t.Fatalf("get PodReady pod: %v", err)
+	}
+	for i := range live.Status.Conditions {
+		if live.Status.Conditions[i].Type == corev1.PodReady {
+			live.Status.Conditions[i].LastTransitionTime = metav1.NewTime(start.Add(-5 * time.Second))
+		}
+	}
+	if err := c.Status().Update(context.Background(), live); err != nil {
+		t.Fatalf("age the Ready transition: %v", err)
+	}
+
+	done, window := restart()
+	if done {
+		t.Fatal("promoted inside the minReadySeconds window")
+	}
+	if got, want := window.Pending(), 15*time.Second; got != want {
+		t.Fatalf("reported window remainder: got %s, want %s", got, want)
+	}
+
+	clk.SetTime(start.Add(15 * time.Second))
+	done, window = restart()
+	if !done {
+		t.Fatal("expected the promote once the pod was PodReady past its window")
+	}
+	if got := window.Pending(); got != 0 {
+		t.Fatalf("promoted pass still reported a wait: %s", got)
+	}
+	s := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0)
+	if s == nil || s.Phase != v1beta1.OMENativeInstanceReady || s.Operation != nil {
+		t.Fatalf("promote: got %+v, want Phase=Ready with no operation", s)
 	}
 }

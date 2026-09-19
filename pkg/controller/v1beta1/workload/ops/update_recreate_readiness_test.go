@@ -15,6 +15,8 @@ import (
 // for kubelet to fold the serving gate into PodReady. Promotion releases the
 // Instance's unavailability budget slot, so promoting before the pod is
 // routable would let the next Instance drain first.
+//
+// Cells: instance/Update/Drain/pod.containersReady[source]/before, instance/Update/Drain/pod.ready[source]/boundary@T-drain-ready
 func TestRecreateUpdate_WaitsForPodReadyAfterEnablingServing(t *testing.T) {
 	tests := []struct {
 		name      string

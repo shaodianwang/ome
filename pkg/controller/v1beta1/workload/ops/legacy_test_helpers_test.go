@@ -164,6 +164,26 @@ func legacyPodForInstance(isvc *v1beta1.InferenceService, instanceIdx int32, rea
 	return pod
 }
 
+// legacyFoldServingIntoPodReady is the fake kubelet a unit fixture lacks:
+// once the controller's serving gate is satisfied, kubelet folds it into the
+// pod's Ready condition, which is what the shared promote bar reads. readyAt
+// is the Ready transition the minReadySeconds window measures from.
+func legacyFoldServingIntoPodReady(t *testing.T, c client.Client, pod *corev1.Pod, readyAt time.Time) {
+	t.Helper()
+	live := &corev1.Pod{}
+	if err := c.Get(context.Background(), client.ObjectKeyFromObject(pod), live); err != nil {
+		t.Fatalf("get pod before folding PodReady: %v", err)
+	}
+	live.Status.Conditions = append(live.Status.Conditions, corev1.PodCondition{
+		Type:               corev1.PodReady,
+		Status:             corev1.ConditionTrue,
+		LastTransitionTime: metav1.NewTime(readyAt),
+	})
+	if err := c.Status().Update(context.Background(), live); err != nil {
+		t.Fatalf("fold serving gate into PodReady: %v", err)
+	}
+}
+
 // legacyPodAtIncarnation extends legacyPodForInstance to stamp a
 // specific incarnation label.
 func legacyPodAtIncarnation(isvc *v1beta1.InferenceService, instanceIdx int32, incarnation int64, ready, serving bool) *corev1.Pod {
@@ -400,10 +420,16 @@ func legacyTargetSpecImage(image string) *corev1.PodSpec {
 
 // legacyRunningPodAtRevision shapes a pod the controller would
 // consider running at revName — labeled with the appropriate
-// incarnation, image, runtime-ready + serving.
+// incarnation, image, runtime-ready + serving, and PodReady because
+// kubelet has folded that satisfied gate into the Ready condition.
 func legacyRunningPodAtRevision(isvc *v1beta1.InferenceService, instIdx int32, incarnation int64, image string) *corev1.Pod {
 	pod := legacyPodAtIncarnation(isvc, instIdx, incarnation, true /* ready */, true /* serving */)
 	pod.Spec.Containers = []corev1.Container{{Name: "main", Image: image}}
+	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+		Type:               corev1.PodReady,
+		Status:             corev1.ConditionTrue,
+		LastTransitionTime: metav1.Now(),
+	})
 	return pod
 }
 

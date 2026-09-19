@@ -124,8 +124,13 @@ type createStartAction struct {
 }
 
 type createReadyAction struct {
-	instance       workload.InstancePlan
-	existing       []*corev1.Pod
+	instance workload.InstancePlan
+	existing []*corev1.Pod
+	// promote is false while the pod set is below the shared promote bar:
+	// the action then only writes the serving gate, because a fresh pod
+	// carries the lifecycle hold and cannot reach PodReady until it is
+	// released. The Ready stamp waits for the pass that observes PodReady.
+	promote        bool
 	wasReady       bool
 	statusChanges  bool
 	markedServing  []*corev1.Pod
@@ -253,6 +258,9 @@ func createFilteredBatched(
 			continue
 		}
 
+		// ContainersReady permits writing the serving gate; the Ready stamp
+		// itself waits for the shared promote bar, which the gate write is a
+		// precondition of (kubelet folds it into PodReady).
 		if !query.AllPodsRuntimeReady(existing) {
 			allReady = false
 			continue
@@ -260,10 +268,23 @@ func createFilteredBatched(
 
 		observed := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)
 		wasReady := observed != nil && observed.Phase == workload.InstancePhaseReady
+		promotable, wait := query.PodSetPromotable(existing, plan.MinReadySeconds, input.Now())
 		action := &createReadyAction{
 			instance: inst,
 			existing: existing,
+			promote:  promotable,
 			wasReady: wasReady,
+		}
+		if !promotable {
+			// A set waiting out its availability window needs no poll: it
+			// becomes promotable at a computable instant. One still waiting
+			// for kubelet to fold the gate into PodReady has no such instant.
+			input.PromoteWindow.Observe(wait)
+			if wait == 0 {
+				allReady = false
+			}
+			actions = append(actions, createPassAction{ready: action})
+			continue
 		}
 		var mutation workload.InstanceMutation
 		if target != nil && existingPodsMatchTargetRevision(existing, target) {
@@ -338,6 +359,9 @@ func createFilteredBatched(
 	}
 	if retryBlockWait > 0 && (res.RequeueAfter == 0 || retryBlockWait < res.RequeueAfter) {
 		res.RequeueAfter = retryBlockWait
+	}
+	if wait := input.PromoteWindow.Pending(); wait > 0 && (res.RequeueAfter == 0 || wait < res.RequeueAfter) {
+		res.RequeueAfter = wait
 	}
 	if wait := until(input.Now(), nodeDeathAt); wait > 0 && (res.RequeueAfter == 0 || wait < res.RequeueAfter) {
 		res.RequeueAfter = wait
@@ -453,7 +477,12 @@ func processReadyActions(ctx context.Context, deps workload.Deps, input workload
 				action.markedServing = append(action.markedServing, pod)
 			}
 		}
-		completed = append(completed, action)
+		// Below the promote bar the gate write above is the whole action:
+		// there is no status mutation to commit until a later pass observes
+		// the set PodReady past its availability window.
+		if action.promote {
+			completed = append(completed, action)
+		}
 	}
 	return commitReadyActions(ctx, deps, input, completed)
 }
@@ -516,6 +545,12 @@ func rollbackReadyStatuses(ctx context.Context, input workload.ReconcileInput, a
 	return nil
 }
 
+// rollbackReadyServing takes back the serving-gate writes an action issued
+// before it failed part-way, so a pod is not left in rotation for an Instance
+// the pass could not record. Only the gate writes this pass made are undone:
+// a promoted Instance's pods were already in rotation before the pass (the
+// promote bar reads PodReady, which the gate is a precondition of), so for
+// those callers this is a no-op.
 func rollbackReadyServing(ctx context.Context, deps workload.Deps, actions []*createReadyAction) error {
 	var rollbackErrs []error
 	for _, action := range actions {

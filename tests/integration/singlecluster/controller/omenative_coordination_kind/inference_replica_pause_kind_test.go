@@ -40,6 +40,13 @@ var _ = ginkgo.Describe("InferenceReplica pause circuit breaker", ginkgo.Ordered
 			originalUID = pods[0].UID
 			ir := freshInferenceReplica(g, ns.Name, isvcName, v1beta1.EngineComponent)
 			g.Expect(ir.Status.ReadyReplicas).To(Equal(int32(1)))
+			// The pod serves as soon as its gate is written, but the Instance
+			// is promoted only once PodReady and the availability window
+			// agree; pausing before that promote would park an open Create
+			// attempt, which is not the shape this spec exercises.
+			insts := instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent)
+			g.Expect(insts).To(HaveLen(1))
+			g.Expect(insts[0].Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("pausing the parent InferenceService and waiting for the annotation to project onto the IR")

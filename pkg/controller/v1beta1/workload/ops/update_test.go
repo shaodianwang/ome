@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -225,9 +226,12 @@ func TestUpdate_InPlace_RestampsRevisionHashLabel(t *testing.T) {
 
 // TestUpdate_InPlaceConverges_MarksReadyWithRunningRevision pins the
 // in-place terminator: when the pod is already on the target image,
-// runtime-ready, and NOT yet serving (because a previous pass drained
-// it), Update flips serving=True and stamps Phase=Ready with the new
-// RunningRevision.
+// runtime-ready, and NOT yet serving (because a previous pass drained it),
+// Update flips serving=True and then holds at the promote bar until kubelet
+// folds that gate into PodReady; the pass that observes PodReady stamps
+// Phase=Ready with the new RunningRevision.
+//
+// Cells: instance/Update/InPlace/pod.containersReady[source]/before, instance/Update/InPlace/pod.containersReady[source]/boundary@T-inplace-ready
 func TestUpdate_InPlaceConverges_MarksReadyWithRunningRevision(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
@@ -267,14 +271,24 @@ func TestUpdate_InPlaceConverges_MarksReadyWithRunningRevision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Update: %v", err)
 	}
-	if !done {
-		t.Fatalf("expected done=true: pod is ready on target image")
+	if done {
+		t.Fatalf("expected done=false: the gate was only just written, so the pod is not PodReady yet")
 	}
 
 	got := &corev1.Pod{}
 	_ = c.Get(context.Background(), client.ObjectKeyFromObject(pod), got)
 	if !podreadiness.IsServing(got) {
 		t.Errorf("serving should have been flipped True after in-place convergence")
+	}
+
+	legacyFoldServingIntoPodReady(t, c, pod, time.Now())
+	input = legacyTestInput(isvc, c, workload.ComponentEngine)
+	done, err = Update(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
+	if err != nil {
+		t.Fatalf("Update after PodReady: %v", err)
+	}
+	if !done {
+		t.Fatalf("expected done=true: the pod is PodReady on the target image")
 	}
 
 	s := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
@@ -471,9 +485,14 @@ func TestUpdate_InPlace_InjectedSidecar_Converges(t *testing.T) {
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
 	legacyStampPodRevisionHash(t, c, pod, tcr.Name)
 
+	if _, err := Update(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	legacyFoldServingIntoPodReady(t, c, pod, time.Now())
+	input = legacyTestInput(isvc, c, workload.ComponentEngine)
 	done, err := Update(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
 	if err != nil {
-		t.Fatalf("Update: %v", err)
+		t.Fatalf("Update after PodReady: %v", err)
 	}
 	if !done {
 		t.Fatalf("expected done=true: pod is on the target image; the sidecar must not block convergence")

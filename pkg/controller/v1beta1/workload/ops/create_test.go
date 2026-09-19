@@ -13,6 +13,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	clocktesting "k8s.io/utils/clock/testing"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -363,6 +365,20 @@ func resetExpectations(t *testing.T) {
 	workload.DefaultExpectations = workload.NewExpectations()
 }
 
+// promotablePodForInstance is podForInstance in the state the shared promote
+// bar accepts: ContainersReady, the serving gate satisfied, and kubelet's
+// PodReady folded from that gate — the state a pass that wrote the gate
+// leaves behind for the next one.
+func promotablePodForInstance(isvc *v1beta1.InferenceService, instanceIdx int32) *corev1.Pod {
+	pod := podForInstance(isvc, instanceIdx, true /* ready */, true /* serving */)
+	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+		Type:               corev1.PodReady,
+		Status:             corev1.ConditionTrue,
+		LastTransitionTime: metav1.NewTime(time.Now()),
+	})
+	return pod
+}
+
 // podForInstance fabricates a pod matching what Render() would
 // produce for the given (ISVC, instance) pair. The `ready` knob
 // synthesizes ContainersReady=True, not PodReady=True — PodReady
@@ -497,6 +513,11 @@ func TestCreate_AllPodsExistButNotReady_HoldsCreating(t *testing.T) {
 	}
 }
 
+// TestCreate_AllPodsReady_FlipsServingAndMarksReady: ContainersReady buys the
+// serving-gate write and nothing more — the Ready stamp waits for the pass
+// that observes kubelet folding that gate into PodReady.
+//
+// Cells: instance/Create/CreatePods/pod.containersReady[source]/before, instance/Create/CreatePods/pod.ready[source]/before
 func TestCreate_AllPodsReady_FlipsServingAndMarksReady(t *testing.T) {
 	resetExpectations(t)
 	isvc := minimalISVC("llama-70b", "prod", 1)
@@ -509,8 +530,11 @@ func TestCreate_AllPodsReady_FlipsServingAndMarksReady(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if result.RequeueAfter != 0 {
-		t.Errorf("expected no Requeue when all pods Ready, got %+v", result)
+	if result.RequeueAfter == 0 {
+		t.Errorf("expected a requeue while the pod is not PodReady yet, got %+v", result)
+	}
+	if insts := instanceStatusesOnIR(c, isvc, workload.ComponentEngine); len(insts) != 0 {
+		t.Errorf("Ready stamped before the pod became PodReady: %+v", insts)
 	}
 
 	// Pod should have ome.io/serving=True now.
@@ -520,6 +544,15 @@ func TestCreate_AllPodsReady_FlipsServingAndMarksReady(t *testing.T) {
 	}
 	if !podreadiness.IsServing(got) {
 		t.Errorf("pod %s ome.io/serving not flipped: conditions=%+v", got.Name, got.Status.Conditions)
+	}
+
+	makeNewPodReady(t, c, isvc.Namespace, pod.Name, 1)
+	result, err = ops.Create(context.Background(), workload.Deps{Client: c}, input, plan, nil)
+	if err != nil {
+		t.Fatalf("Create after PodReady: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Errorf("expected no Requeue once the pod cleared the promote bar, got %+v", result)
 	}
 
 	// InstanceStatus should be Ready with Operation=nil.
@@ -774,11 +807,11 @@ func TestCreate_PromoteRecordsRunningRevision(t *testing.T) {
 	target := &appsv1.ControllerRevision{
 		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-deadbeef", Namespace: "prod"},
 	}
-	// Pre-seed a runtime-ready, serving pod so reconcileInstance jumps
+	// Pre-seed a pod past the promote bar so reconcileInstance jumps
 	// straight to the promote step. The pod's rev-hash matches target's
 	// suffix — the production-normal case (createMissingPods stamps the
 	// label from revisionHashFromTarget(target)).
-	pod := podForInstance(isvc, 0, true /* ready */, true /* serving */)
+	pod := promotablePodForInstance(isvc, 0)
 	pod.Labels[query.LabelRevisionHash] = query.RevisionHashFromControllerRevisionName(target.Name)
 	c := newFakeClient(t, isvc, pod)
 	input := buildTestInput(isvc, c, workload.ComponentEngine)
@@ -824,10 +857,10 @@ func TestCreate_PromoteSkipsRunningRevisionForOffTargetPods(t *testing.T) {
 		Phase:           v1beta1.OMENativeInstanceCreating,
 		RunningRevision: priorRev,
 	})
-	// Pre-seed a runtime-ready, serving pod labeled with the PRIOR
-	// revision's hash (not target's). reconcileInstance will find the
-	// pod, see it's runtime-ready, and reach the promote step.
-	pod := podForInstance(isvc, 0, true /* ready */, true /* serving */)
+	// Pre-seed a pod past the promote bar, labeled with the PRIOR
+	// revision's hash (not target's), so reconcileInstance finds it and
+	// reaches the promote step.
+	pod := promotablePodForInstance(isvc, 0)
 	pod.Labels[query.LabelRevisionHash] = query.RevisionHashFromControllerRevisionName(priorRev)
 	c := newFakeClient(t, isvc, ir, pod)
 	input := buildTestInput(isvc, c, workload.ComponentEngine)
@@ -860,7 +893,7 @@ func TestCreate_PromoteSkipsRunningRevisionForOffTargetPods(t *testing.T) {
 func TestCreate_PromoteWithNilTargetSkipsRunningRevision(t *testing.T) {
 	resetExpectations(t)
 	isvc := minimalISVC("llama-70b", "prod", 1)
-	pod := podForInstance(isvc, 0, true, true)
+	pod := promotablePodForInstance(isvc, 0)
 	c := newFakeClient(t, isvc, pod)
 	input := buildTestInput(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngine(1)
@@ -1336,5 +1369,59 @@ func TestCreateFreshIndices_PreservesSurgeTargetMarker(t *testing.T) {
 				t.Errorf("surge target marker must be preserved; got %+v", s)
 			}
 		})
+	}
+}
+
+// TestCreate_PromotionWaitsOutTheWindowAndRequeuesAtItsRemainder: a set that
+// is PodReady but still inside the Component's minReadySeconds window is not
+// promoted, and the pass requeues at what is left of the window — computed
+// from the Ready transition, not from the create poll interval.
+//
+// Cells: instance/Create/CreatePods/pod.ready[source]/before, instance/Create/CreatePods/pod.containersReady[source]/before
+func TestCreate_PromotionWaitsOutTheWindowAndRequeuesAtItsRemainder(t *testing.T) {
+	resetExpectations(t)
+	isvc := minimalISVC("llama-70b", "prod", 1)
+	start := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	pod := promotablePodForInstance(isvc, 0)
+	for i := range pod.Status.Conditions {
+		if pod.Status.Conditions[i].Type == corev1.PodReady {
+			pod.Status.Conditions[i].LastTransitionTime = metav1.NewTime(start.Add(-5 * time.Second))
+		}
+	}
+	c := newFakeClient(t, isvc, pod)
+	clk := clocktesting.NewFakeClock(start)
+	plan := buildPlanSinglePodEngine(1)
+	plan.MinReadySeconds = 20
+
+	create := func() ctrl.Result {
+		t.Helper()
+		input := buildTestInput(isvc, c, workload.ComponentEngine)
+		input.Clock = clk
+		// The dispatcher owns one sink per pass; wire one so the remainder
+		// this pass deposits reaches its own requeue.
+		input.PromoteWindow = &workload.PromoteWindow{}
+		result, err := ops.Create(context.Background(), workload.Deps{Client: c, Clock: clk}, input, plan, nil)
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		return result
+	}
+
+	result := create()
+	if got, want := result.RequeueAfter, 15*time.Second; got != want {
+		t.Fatalf("requeue inside the window: got %s, want the window remainder %s", got, want)
+	}
+	if insts := instanceStatusesOnIR(c, isvc, workload.ComponentEngine); len(insts) != 0 {
+		t.Fatalf("promoted inside the window: %+v", insts)
+	}
+
+	clk.SetTime(start.Add(15 * time.Second))
+	result = create()
+	if result.RequeueAfter != 0 {
+		t.Fatalf("requeue after the window elapsed: got %s, want none", result.RequeueAfter)
+	}
+	s := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0)
+	if s == nil || s.Phase != v1beta1.OMENativeInstanceReady {
+		t.Fatalf("promote after the window: got %+v, want Phase=Ready", s)
 	}
 }

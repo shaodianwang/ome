@@ -15,6 +15,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -137,7 +138,18 @@ func (w *failingPodStatusWriter) Patch(ctx context.Context, obj client.Object, p
 	return w.SubResourceWriter.Patch(ctx, obj, patch, opts...)
 }
 
+// newReadyBatchFixture seeds `replicas` mid-Create Instances whose pods all
+// clear the shared promote bar, so one pass promotes the whole batch.
 func newReadyBatchFixture(t *testing.T, name string, replicas int32) (*v1beta1.InferenceService, client.Client, workload.ReconcileInput) {
+	t.Helper()
+	return newBatchFixture(t, name, replicas, replicas)
+}
+
+// newBatchFixture is newReadyBatchFixture with the first `promotable`
+// Instances past the promote bar and the rest only ContainersReady — the
+// state a pass finds when it still owes those Instances their serving-gate
+// write, which is the write the promote bar waits on.
+func newBatchFixture(t *testing.T, name string, replicas, promotable int32) (*v1beta1.InferenceService, client.Client, workload.ReconcileInput) {
 	t.Helper()
 	isvc := minimalISVC(name, "prod", int(replicas))
 	statuses := make([]v1beta1.OMENativeInstanceStatus, 0, replicas)
@@ -152,7 +164,11 @@ func newReadyBatchFixture(t *testing.T, name string, replicas int32) (*v1beta1.I
 				StartedAt: metav1.Now(),
 			},
 		})
-		objects = append(objects, podForInstance(isvc, idx, true, false))
+		if idx < promotable {
+			objects = append(objects, promotablePodForInstance(isvc, idx))
+			continue
+		}
+		objects = append(objects, podForInstance(isvc, idx, true /* ready */, false /* serving */))
 	}
 	objects = append(objects, instanceIR(isvc, workload.ComponentEngine, statuses...))
 	c := newFakeClient(t, objects...)
@@ -580,7 +596,7 @@ func TestCreate_BatchedAtomicCreatingFailureDoesNotBlockReadyInstances(t *testin
 		Phase:       v1beta1.OMENativeInstanceCreating,
 		Operation:   &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationCreate},
 	})
-	pod := podForInstance(isvc, 0, true, false)
+	pod := promotablePodForInstance(isvc, 0)
 	base := newFakeClient(t, isvc, ir, pod)
 	input := buildTestInput(isvc, base, workload.ComponentEngine)
 	input.ObservedState.RetryBlocks = []workload.RetryBlock{{TargetRevision: target.Name, State: workload.RetryBlockBackoff}}
@@ -630,7 +646,7 @@ func TestCreate_BatchedActionsPreservePlanOrder(t *testing.T) {
 		Phase:       v1beta1.OMENativeInstanceCreating,
 		Operation:   &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationCreate},
 	})
-	readyPod := podForInstance(isvc, 1, true, false)
+	readyPod := promotablePodForInstance(isvc, 1)
 	base := newFakeClient(t, isvc, ir, readyPod)
 	input := buildTestInput(isvc, base, workload.ComponentEngine)
 	recorder := newBatchMutationRecorder(input.ObservedState.InstanceStatuses)
@@ -718,8 +734,8 @@ func TestCreate_BatchedReadyFailurePreservesNoOpPrefix(t *testing.T) {
 			Operation:   &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationCreate},
 		},
 	)
-	pod0 := podForInstance(isvc, 0, true, false)
-	pod1 := podForInstance(isvc, 1, true, false)
+	pod0 := promotablePodForInstance(isvc, 0)
+	pod1 := promotablePodForInstance(isvc, 1)
 	base := newFakeClient(t, isvc, ir, pod0, pod1)
 	input := buildTestInput(isvc, base, workload.ComponentEngine)
 	recorder := newBatchMutationRecorder(input.ObservedState.InstanceStatuses)
@@ -1333,18 +1349,23 @@ func TestCreate_BatchedWavesAdvancePastOversizedGangAndConverge(t *testing.T) {
 	if !reflect.DeepEqual(recorder.batches, wantCreatingBatches) {
 		t.Fatalf("Creating waves: got %v, want %v", recorder.batches, wantCreatingBatches)
 	}
-	pods := &corev1.PodList{}
-	if err := c.List(context.Background(), pods, client.InNamespace(isvc.Namespace)); err != nil {
-		t.Fatalf("list Pods before Ready pass: %v", err)
-	}
-	for i := range pods.Items {
-		makeNewPodReady(t, c, isvc.Namespace, pods.Items[i].Name, 1)
-	}
-
-	syncObserved()
-	result, err := ops.Create(context.Background(), workload.Deps{Client: c}, input, plan, nil)
-	if err != nil {
-		t.Fatalf("Ready pass: %v", err)
+	// Two more passes to promote: the first writes the serving gate on every
+	// pod, the second observes kubelet folding it into PodReady.
+	var result ctrl.Result
+	for pass := 0; pass < 2; pass++ {
+		pods := &corev1.PodList{}
+		if err := c.List(context.Background(), pods, client.InNamespace(isvc.Namespace)); err != nil {
+			t.Fatalf("list Pods before Ready pass %d: %v", pass+1, err)
+		}
+		for i := range pods.Items {
+			makeNewPodReady(t, c, isvc.Namespace, pods.Items[i].Name, 1)
+		}
+		syncObserved()
+		var err error
+		result, err = ops.Create(context.Background(), workload.Deps{Client: c}, input, plan, nil)
+		if err != nil {
+			t.Fatalf("Ready pass %d: %v", pass+1, err)
+		}
 	}
 	if result.RequeueAfter != 0 {
 		t.Fatalf("converged Ready pass requeued: %+v", result)
@@ -1574,7 +1595,9 @@ func TestCreate_BatchedReadyOnRevisionPromotesAndPrunesOnce(t *testing.T) {
 
 func TestCreate_BatchedServingMarkFailureStopsAtFailedInstance(t *testing.T) {
 	resetExpectations(t)
-	isvc, base, input := newReadyBatchFixture(t, "batch-serving-failure", 3)
+	// Only instance 0 is past the promote bar; instances 1 and 2 still owe
+	// their serving-gate write, and instance 1's is the one that fails.
+	isvc, base, input := newBatchFixture(t, "batch-serving-failure", 3, 1)
 	recorder := newBatchMutationRecorder(input.ObservedState.InstanceStatuses)
 	input.MutateInstance = unexpectedPerInstanceMutation
 	input.ApplyInstanceMutations = recorder.apply
@@ -1612,6 +1635,11 @@ func TestCreate_BatchedServingMarkFailureStopsAtFailedInstance(t *testing.T) {
 	}
 }
 
+// TestCreate_BatchedReadyPersistenceFailureRestoresFailFastServingPrefix: a
+// failed Ready batch leaves every Instance where it was. Each of these pods
+// was already in rotation before the pass — the promote bar requires the
+// serving gate to be satisfied already — so the restored prefix is the empty
+// one: the batch has no gate write of its own to take back.
 func TestCreate_BatchedReadyPersistenceFailureRestoresFailFastServingPrefix(t *testing.T) {
 	resetExpectations(t)
 	isvc, c, input := newReadyBatchFixture(t, "batch-ready-failure", 3)
@@ -1642,9 +1670,8 @@ func TestCreate_BatchedReadyPersistenceFailureRestoresFailFastServingPrefix(t *t
 		if getErr := c.Get(context.Background(), key, pod); getErr != nil {
 			t.Fatalf("get pod %d: %v", idx, getErr)
 		}
-		wantServing := idx == 0
-		if got := podreadiness.IsServing(pod); got != wantServing {
-			t.Errorf("pod %d serving after Ready batch failure: got %t, want %t", idx, got, wantServing)
+		if !podreadiness.IsServing(pod) {
+			t.Errorf("pod %d left rotation after the Ready batch failed", idx)
 		}
 		if status := recorder.statuses[idx]; status.Phase != workload.InstancePhaseCreating {
 			t.Errorf("instance %d after failed Ready batch: got %+v, want Creating", idx, status)
@@ -1685,10 +1712,8 @@ func TestCreate_BatchedRetryBlockPruneFailureRestoresFailFastPrefix(t *testing.T
 	}
 	for idx := int32(0); idx < 3; idx++ {
 		wantPhase := workload.InstancePhaseCreating
-		wantServing := false
 		if idx == 0 {
 			wantPhase = workload.InstancePhaseReady
-			wantServing = true
 		}
 		if status := recorder.statuses[idx]; status.Phase != wantPhase {
 			t.Errorf("instance %d after prune failure: got %+v, want phase %s", idx, status, wantPhase)
@@ -1701,8 +1726,10 @@ func TestCreate_BatchedRetryBlockPruneFailureRestoresFailFastPrefix(t *testing.T
 		if getErr := c.Get(context.Background(), key, pod); getErr != nil {
 			t.Fatalf("get pod %d: %v", idx, getErr)
 		}
-		if got := podreadiness.IsServing(pod); got != wantServing {
-			t.Errorf("pod %d serving after prune failure: got %t, want %t", idx, got, wantServing)
+		// Every pod was already in rotation before the pass: the promote bar
+		// reads PodReady, which the serving gate is a precondition of.
+		if !podreadiness.IsServing(pod) {
+			t.Errorf("pod %d left rotation after the prune failed", idx)
 		}
 	}
 	select {
@@ -1714,4 +1741,70 @@ func TestCreate_BatchedRetryBlockPruneFailureRestoresFailFastPrefix(t *testing.T
 
 func unexpectedPerInstanceMutation(_ context.Context, idx int32, _ func(*workload.InstanceStatus) bool) error {
 	return fmt.Errorf("unexpected per-Instance status mutation for index %d", idx)
+}
+
+// gatePodAtOrdinal builds one pod of a multi-pod Instance that is
+// ContainersReady but still held out of rotation — the state whose only
+// remaining pass action is the serving-gate write.
+func gatePodAtOrdinal(isvc *v1beta1.InferenceService, instanceIdx, ordinal int32) *corev1.Pod {
+	pod := podForInstance(isvc, instanceIdx, true /* ready */, false /* serving */)
+	pod.Name = query.PodName(isvc.Name, workload.ComponentEngine, instanceIdx, "default", ordinal)
+	pod.Labels = testPodLabels(isvc.Name, workload.ComponentEngine, instanceIdx, "default", 1, ordinal)
+	pod.Labels[query.LabelRevisionHash] = testRevisionHash
+	return pod
+}
+
+// TestCreate_BatchedServingRollbackUndoesGateWritesWhenReadyBatchFails: an
+// Instance below the promote bar contributes a serving-gate write and no
+// status mutation. When a later pod of that Instance cannot be written and
+// the Ready batch for the promoted Instance also fails, the gate writes the
+// pass already made are taken back, so no pod is left in rotation for an
+// Instance the pass could not record.
+//
+// Cells: instance/Create/CreatePods/api.conflict/before, instance/Create/CreatePods/pod.containersReady[source]/before
+func TestCreate_BatchedServingRollbackUndoesGateWritesWhenReadyBatchFails(t *testing.T) {
+	resetExpectations(t)
+	isvc := minimalISVC("batch-serving-rollback", "prod", 2)
+	// Instance 0 is already Ready and past the bar, so its promote is a
+	// no-change mutation that batches with instance 1's gate-only action.
+	ready := promotablePodForInstance(isvc, 0)
+	gateFirst := gatePodAtOrdinal(isvc, 1, 0)
+	gateSecond := gatePodAtOrdinal(isvc, 1, 1)
+	ir := instanceIR(isvc, workload.ComponentEngine,
+		v1beta1.OMENativeInstanceStatus{Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady},
+		v1beta1.OMENativeInstanceStatus{
+			Index: 1, Incarnation: 1, Phase: v1beta1.OMENativeInstanceCreating,
+			Operation: &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationCreate, StartedAt: metav1.Now()},
+		},
+	)
+	base := newFakeClient(t, isvc, ir, ready, gateFirst, gateSecond)
+	input := buildTestInput(isvc, base, workload.ComponentEngine)
+	recorder := newBatchMutationRecorder(input.ObservedState.InstanceStatuses)
+	readyErr := errors.New("Ready status unavailable")
+	recorder.fail = readyErr
+	input.ApplyInstanceMutations = recorder.apply
+	input.MutateInstance = unexpectedPerInstanceMutation
+	markErr := errors.New("serving status unavailable")
+	c := &failingPodStatusClient{Client: base, podName: gateSecond.Name, err: markErr}
+
+	plan := buildPlanSinglePodEngine(2)
+	plan.Instances[1].Runners = []workload.RunnerPlan{{Name: "default", Size: 2}}
+
+	_, err := ops.Create(context.Background(), workload.Deps{Client: c}, input, plan, nil)
+	if !errors.Is(err, readyErr) {
+		t.Fatalf("Create error: got %v, want the Ready batch failure", err)
+	}
+	live := &corev1.Pod{}
+	if getErr := base.Get(context.Background(), client.ObjectKeyFromObject(gateFirst), live); getErr != nil {
+		t.Fatalf("get gate-written pod: %v", getErr)
+	}
+	if podreadiness.IsServing(live) {
+		t.Error("pod left in rotation for an Instance the pass could not record")
+	}
+	if getErr := base.Get(context.Background(), client.ObjectKeyFromObject(ready), live); getErr != nil {
+		t.Fatalf("get promoted-Instance pod: %v", getErr)
+	}
+	if !podreadiness.IsServing(live) {
+		t.Error("a pod that was already in rotation before the pass must stay in it")
+	}
 }

@@ -202,6 +202,10 @@ func managedByOMENativePredicate() predicate.Predicate {
 //
 //   - Status.Phase — Instance phase aggregation.
 //   - ContainersReady condition — CountReadyPods / AllPodsRuntimeReady.
+//   - PodReady condition — the bar every path stamps Ready on
+//     (query.PodSetPromotable). Kubelet folds the serving gate into it in a
+//     status write that touches nothing else, so without this the promote
+//     waits for the next poll instead of the observation.
 //   - ome.io/serving condition — CountServingPods / RatioBalanced gate.
 //   - ContainerStatuses / InitContainerStatuses — terminal-failure
 //     detection (CrashLoopBackOff / ImagePullBackOff escalation).
@@ -238,6 +242,9 @@ func podReconcileRelevantChanged(oldPod, newPod *corev1.Pod) bool {
 		return true
 	}
 	if podreadiness.IsContainersReady(oldPod) != podreadiness.IsContainersReady(newPod) {
+		return true
+	}
+	if podreadiness.IsPodReady(oldPod) != podreadiness.IsPodReady(newPod) {
 		return true
 	}
 	if podreadiness.IsServing(oldPod) != podreadiness.IsServing(newPod) {

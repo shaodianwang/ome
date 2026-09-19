@@ -63,6 +63,7 @@ type (
 	ForceDeletePolicy       = types.ForceDeletePolicy
 	DispositionDeps         = types.DispositionDeps
 	APIPacing               = types.APIPacing
+	PromoteWindow           = types.PromoteWindow
 	GangState               = types.GangState
 	GangObservation         = types.GangObservation
 	GangObservations        = types.GangObservations

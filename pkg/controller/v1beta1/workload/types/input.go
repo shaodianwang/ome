@@ -252,6 +252,14 @@ type ReconcileInput struct {
 	// call an op directly.
 	Pacing *APIPacing
 
+	// PromoteWindow collects the shortest minReadySeconds remainder a
+	// promote is waiting out this pass, for the same reason Pacing exists:
+	// the window elapsing produces no watch event, so the waiting path
+	// deposits the remainder here and the dispatcher folds it into the
+	// pass's requeue. Reconcile allocates one per pass; nil is safe (every
+	// method no-ops) for adapters and tests that call an op directly.
+	PromoteWindow *PromoteWindow
+
 	// Disposition carries the operator-config inputs the terminal-failure
 	// disposition (DisposeExpiredAttempt) branches on. The zero value
 	// fails safe (no relocation, terminal branch for non-workload-caused

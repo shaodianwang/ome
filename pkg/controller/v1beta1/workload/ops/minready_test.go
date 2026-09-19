@@ -39,6 +39,8 @@ func podReadyAt(pod *corev1.Pod, readyAt time.Time) {
 // rotation and the Operation at Step=Surge (budget slot held); once the
 // window elapses — inclusive at the exact boundary — the same pass drains
 // and deletes the source.
+//
+// Cells: instance/Update/Surge/pod.ready[target]/boundary@T-surge-target-ready
 func TestSurgeUpdate_HoldsSourceDrainForMinReadySeconds(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc, ir := surgeISVCReady("llama-70b", "prod", 1)
@@ -177,6 +179,8 @@ func TestGangSurgeUpdate_HoldsSourceDrainForMinReadySeconds(t *testing.T) {
 // gone and the recreated pod serving and PodReady, promotion (which clears
 // the Operation and releases the unavailability budget slot) waits until
 // the pod has been Ready for the window.
+//
+// Cells: instance/Update/Drain/timer.minReady/before, instance/Update/Drain/pod.ready[source]/boundary@T-drain-ready
 func TestRecreateUpdate_PromotionWaitsForMinReadySeconds(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
@@ -318,6 +322,8 @@ func (f convergedInPlaceFixture) podServing(t *testing.T) bool {
 // been Ready for the window. The waiting passes must not drain the pod
 // again — an EndpointSlice that still lists it as ready would then park the
 // rollout at the drain check forever — so the pod stays serving throughout.
+//
+// Cells: instance/Update/InPlace/timer.minReady/before, instance/Update/InPlace/pod.ready[source]/before
 func TestInPlaceUpdate_PromotionWaitsForMinReadySeconds(t *testing.T) {
 	f := newConvergedInPlaceFixture(t)
 	f.plan.MinReadySeconds = 20
@@ -410,5 +416,47 @@ func TestSurgeUpdate_WindowGatesOnlyStepSurge(t *testing.T) {
 	}
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(oldPod), &corev1.Pod{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("drained source must be deleted without waiting out the window again: %v", err)
+	}
+}
+
+// TestInPlaceUpdate_PromotionKeepsTheRuntimeImageCheck: the in-place roll
+// carries one requirement on top of the shared promote bar — every container
+// whose image the roll changed must report the target image at runtime. A pod
+// that is PodReady with no window left still waits while its runtime reports
+// the image it was rolled off.
+//
+// Cells: instance/Update/InPlace/pod.containersReady[source]/before, instance/Update/InPlace/pod.containersReady[source]/boundary@T-inplace-ready
+func TestInPlaceUpdate_PromotionKeepsTheRuntimeImageCheck(t *testing.T) {
+	f := newConvergedInPlaceFixture(t)
+	clk := clocktesting.NewFakeClock(minReadyWindowStart)
+
+	setRuntimeImage := func(image string) {
+		t.Helper()
+		live := &corev1.Pod{}
+		if err := f.client.Get(context.Background(), client.ObjectKeyFromObject(f.pod), live); err != nil {
+			t.Fatalf("get converged pod: %v", err)
+		}
+		live.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "main", Image: image}}
+		if err := f.client.Status().Update(context.Background(), live); err != nil {
+			t.Fatalf("set runtime image %q: %v", image, err)
+		}
+	}
+
+	setRuntimeImage("llama:v1")
+	if f.update(t, clk) {
+		t.Fatal("promoted while the runtime still reported the pre-roll image")
+	}
+	s := legacyInstanceStatusesOnIR(f.client, f.isvc, workload.ComponentEngine)[0]
+	if s.Phase != v1beta1.OMENativeInstanceUpdating {
+		t.Fatalf("row left Update on a stale runtime image: phase=%q", s.Phase)
+	}
+
+	setRuntimeImage("llama:v2")
+	if !f.update(t, clk) {
+		t.Fatal("expected the promote once the runtime reported the target image")
+	}
+	s = legacyInstanceStatusesOnIR(f.client, f.isvc, workload.ComponentEngine)[0]
+	if s.Phase != v1beta1.OMENativeInstanceReady || s.RunningRevision != f.tcr.Name {
+		t.Fatalf("promote: phase=%q runningRevision=%q", s.Phase, s.RunningRevision)
 	}
 }

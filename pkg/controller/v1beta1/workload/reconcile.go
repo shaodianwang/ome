@@ -101,6 +101,12 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 	if input.Pacing == nil {
 		input.Pacing = &APIPacing{}
 	}
+	// One promote-window sink per pass, for the same reason: a pod crossing
+	// its minReadySeconds window raises no watch event, so a promote waiting
+	// on it deposits the remainder here and wakes the pass below.
+	if input.PromoteWindow == nil {
+		input.PromoteWindow = &PromoteWindow{}
+	}
 
 	// Teardown mode: the owner is being deleted. The planned index set is
 	// treated as empty so every observed Instance is a scale-down extra
@@ -143,6 +149,7 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 		return ctrl.Result{}, perr
 	}
 	res, err := Execute(ctx, deps, input, plan, target, snapshot, decision)
+	res = foldRetryAfter(res, input.PromoteWindow.Pending())
 	return floorRetryAfter(res, input.Pacing.Throttle()), err
 }
 
