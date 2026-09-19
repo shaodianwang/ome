@@ -27,13 +27,14 @@ func OperationUnschedulable(op *InstanceOperation) bool {
 // OperationExternallyHeld reports whether an operation is parked on any
 // wait outside the workload's control: admission refusing its create for
 // lack of quota, the scheduler finding no placement for its pods, the
-// gang scheduler unable to admit its PodGroup, or a node that stopped
-// reporting a pod whose name the operation needs. Each is a wait an
-// operator or another controller resolves, so the InstanceReadyTimeout
-// clock must not run through any of them.
+// gang scheduler unable to admit its PodGroup, a node that stopped
+// reporting a pod whose name the operation needs, or an operator pause
+// holding the attempt at a step boundary. Each is a wait an operator or
+// another controller resolves, so the InstanceReadyTimeout clock must
+// not run through any of them.
 func OperationExternallyHeld(op *InstanceOperation) bool {
 	return OperationCapacityBlocked(op) || OperationUnschedulable(op) ||
-		OperationGangHeld(op) || OperationNodeUnknown(op)
+		OperationGangHeld(op) || OperationNodeUnknown(op) || OperationPaused(op)
 }
 
 // PodUnschedulable reports whether a live pod is one the scheduler

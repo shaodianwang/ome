@@ -466,6 +466,13 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 			input.PromoteWindow.Observe(wait)
 			return false, nil
 		}
+		// The drain is the next STEP, and a paused Component starts no
+		// step: the replacement has reached the promote bar and waits
+		// there while the source keeps serving, which is the one place in
+		// the cycle where a hold costs the Instance nothing at all.
+		if plan.Paused && surgeStepIs(input, inst.Index, updateStepSurge) {
+			return false, nil
+		}
 		// Transition Step Surge → Drain once. Subsequent passes idempotency-
 		// skip inside the helper.
 		if err := patchInstanceStatusSurgeStepDrain(ctx, input, inst.Index); err != nil {
@@ -493,6 +500,13 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 			if !drained {
 				return false, nil
 			}
+		}
+		// The settle is the next STEP, and a paused Component starts no
+		// step: the drain it was on has reached its boundary — the source
+		// is confirmed out of rotation with the replacement serving — so
+		// the pair simply waits here.
+		if plan.Paused && surgeStepIs(input, inst.Index, updateStepSurgeDrain) {
+			return false, nil
 		}
 		settled, err := waitForSurgeDrainSettle(ctx, input, plan, inst.Index)
 		if err != nil {
@@ -539,6 +553,18 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 }
 
 func waitForSurgeDrainSettle(ctx context.Context, input workload.ReconcileInput, plan workload.ComponentPlan, idx int32) (bool, error) {
+	status := findInstanceStatus(input.ObservedState.InstanceStatuses, idx)
+	settling := status != nil && status.Operation != nil &&
+		status.Operation.Step == updateStepSurgeDrainSettle
+	// The grace measures how long live connections have had to age out
+	// under a controller that is driving the roll, so a held pair does
+	// not spend it: the source stays alive and out of rotation while the
+	// replacement serves, and nothing is written for as long as the hold
+	// lasts.
+	if settling && plan.Paused {
+		return false, nil
+	}
+
 	grace := 30 * time.Second
 	if strategy := plan.UpdateStrategy.InPlaceUpdateStrategy; strategy != nil && strategy.GracePeriodSeconds != nil {
 		grace = time.Duration(*strategy.GracePeriodSeconds) * time.Second
@@ -547,8 +573,14 @@ func waitForSurgeDrainSettle(ctx context.Context, input workload.ReconcileInput,
 		return true, nil
 	}
 
-	status := findInstanceStatus(input.ObservedState.InstanceStatuses, idx)
-	if status == nil || status.Operation == nil || status.Operation.Step != updateStepSurgeDrainSettle {
+	if settling && settleGraceMustRestart(status, grace, input.Now()) {
+		if err := patchInstanceStatusSurgeSettleRearm(ctx, input, idx); err != nil {
+			return false, fmt.Errorf("re-arm surge settle grace (instance=%d): %w", idx, err)
+		}
+		return false, nil
+	}
+
+	if !settling {
 		if err := patchInstanceStatusSurgeStepSettle(ctx, input, idx); err != nil {
 			return false, fmt.Errorf("transition surge step to settle (instance=%d): %w", idx, err)
 		}
@@ -558,6 +590,38 @@ func waitForSurgeDrainSettle(ctx context.Context, input workload.ReconcileInput,
 		return false, nil
 	}
 	return !input.Now().Before(status.Operation.LastProgressAt.Add(grace)), nil
+}
+
+// settleGraceMustRestart reports whether a settling pair's interval has
+// to start over before it can complete.
+//
+// It asks about the hold rather than about who placed it, so the answer
+// does not change with which authority happens to own the row: an
+// operator pause and a wait that superseded one leave the same pair
+// sitting with the same unspent grace. A row resuming from a pause
+// restarts unconditionally, because the release is when the wait begins
+// again and the time the hold consumed is not credited to it. A row
+// still parked on another authority's wait restarts only once the
+// interval would otherwise have expired underneath it, which keeps a
+// long wait to one write per interval rather than one per pass.
+func settleGraceMustRestart(s *workload.InstanceStatus, grace time.Duration, now time.Time) bool {
+	if s == nil || s.Operation == nil || !workload.OperationExternallyHeld(s.Operation) {
+		return false
+	}
+	return workload.OperationPaused(s.Operation) ||
+		s.Operation.LastProgressAt.IsZero() ||
+		!now.Before(s.Operation.LastProgressAt.Add(grace))
+}
+
+// surgeStepIs reports whether the Instance's in-flight surge attempt is
+// on step. A row with no surge step recorded is on the entry step: the
+// stamp that opens the cycle writes it there.
+func surgeStepIs(input workload.ReconcileInput, idx int32, step string) bool {
+	s := findInstanceStatus(input.ObservedState.InstanceStatuses, idx)
+	if s == nil || s.Operation == nil || !isSurgeUpdateStep(s.Operation.Step) {
+		return step == updateStepSurge
+	}
+	return s.Operation.Step == step
 }
 
 // partitionPodsBySurgeOrdinal buckets pods by the LabelPodOrdinal label

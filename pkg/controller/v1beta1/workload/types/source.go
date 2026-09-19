@@ -84,14 +84,16 @@ type WorkloadDesiredSpec struct {
 	// means "no pacing constraint" (treated as allowed).
 	Pacing *WorkloadPacing
 
-	// Paused, when true, stops the reconciler from starting or advancing
-	// Update, Create, and Migration operations. The RestartPolicy keeps
-	// repairing existing Instances unless PauseFreeze is also set.
+	// Paused, when true, stops the reconciler from starting a new Update,
+	// Create, or Migration operation and from starting a new step of one
+	// already in flight, which runs the step it is on to that step's
+	// boundary. The RestartPolicy keeps repairing existing Instances
+	// unless PauseFreeze is also set.
 	Paused bool
 
-	// PauseFreeze deepens Paused to a full stop: the restart pass is
-	// suspended too, so no Instance repair runs. Meaningless unless
-	// Paused is true.
+	// PauseFreeze deepens Paused onto the restart pass: no repair starts,
+	// and one already under way only finishes its step. Meaningless
+	// unless Paused is true.
 	PauseFreeze bool
 
 	// GangSchedulingAvailable is true when the scheduler-plugins

@@ -224,6 +224,13 @@ func escalateFromEvidence(ctx context.Context, deps Deps, input ReconcileInput, 
 				continue
 			}
 		}
+		// An attempt an operator is holding is not stalled, it was told
+		// to wait. Neither path may end it: the deadline is parked for
+		// the length of the hold, and a pod parked in a terminal waiting
+		// state is waiting on the unpause rather than on a verdict.
+		if OperationPaused(s.Operation) {
+			continue
+		}
 		if ev.StuckPod == nil && !ev.DeadlinePassed {
 			continue
 		}

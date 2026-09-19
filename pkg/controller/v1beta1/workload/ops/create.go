@@ -75,6 +75,70 @@ func CreateFreshIndices(ctx context.Context, deps workload.Deps, input workload.
 	})
 }
 
+// CreateCommittedIndices runs the Create pass for ONLY the Instance
+// indices whose committed create this pass would FINISH. It is the pass
+// a paused Component runs: the set a committed create started
+// materializing is completed and promoted, while an index that never
+// opened one stays empty until the pause is cleared.
+//
+// No-op (returns ctrl.Result{}, nil) when no index qualifies.
+func CreateCommittedIndices(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, target *appsv1.ControllerRevision) (ctrl.Result, error) {
+	if !HasCommittedCreate(input, plan, target) {
+		return ctrl.Result{}, nil
+	}
+	observed := input.ObservedState.InstanceStatuses
+	return createFiltered(ctx, deps, input, plan, target, func(idx int32) bool {
+		return createFinishableAt(findInstanceStatus(observed, idx), target)
+	})
+}
+
+// HasCommittedCreate reports whether any planned index carries a create
+// this pass would finish rather than replace. The decision layer asks it
+// to decide whether the pass is worth planning and the pass asks it again
+// to decide whether it has work, so both read one predicate.
+func HasCommittedCreate(input workload.ReconcileInput, plan workload.ComponentPlan, target *appsv1.ControllerRevision) bool {
+	for _, inst := range plan.Instances {
+		if createFinishableAt(findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index), target) {
+			return true
+		}
+	}
+	return false
+}
+
+// createFinishableAt reports whether the row carries a create the pass
+// would FINISH: the Creating phase and the Create operation the
+// write-ahead stamp records before the first pod of the set is created,
+// on an attempt the retirement rule would leave in place.
+//
+// The distinction matters because the pass does not only finish an
+// attempt. One whose pods it OWNS — a first materialization, which is
+// what an empty RunningRevision marks — committed to a revision the
+// Component no longer converges to is retired and replaced by a fresh
+// attempt at the current target, with a new identity, a new deadline and
+// re-rendered pods. That is a new operation, so a paused Component
+// leaves such a row alone and retires it on the unpause. An attempt
+// naming no revision is in the same position: the retirement rule tells
+// it apart from one to finish by weighing pod evidence, which is not a
+// question a hold should be answering.
+//
+// A row that was serving before — a promoted Instance rebuilding a
+// member it lost — is never retired, whatever revision its attempt
+// names, so a pause finishes it: the pass adds the missing pods under
+// the same operation, and holding it instead would leave the Instance
+// short of its set for the length of the hold.
+func createFinishableAt(s *workload.InstanceStatus, target *appsv1.ControllerRevision) bool {
+	if s == nil || s.Phase != workload.InstancePhaseCreating ||
+		s.Operation == nil || s.Operation.Type != workload.InstanceOperationCreate {
+		return false
+	}
+	// Nothing to retarget to, so nothing can be retired: every committed
+	// set is one to finish.
+	if target == nil {
+		return true
+	}
+	return !createAttemptOwnsPods(s) || s.Operation.TargetRevision == target.Name
+}
+
 // surgeFreeIndex reports whether the Instance at idx has NO in-flight
 // surge state — i.e. its ObservedState entry is absent (never created)
 // or mid-Create (Phase=Creating with no operation, or a Create one).

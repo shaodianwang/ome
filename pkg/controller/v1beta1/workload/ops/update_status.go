@@ -310,6 +310,22 @@ func patchInstanceStatusSurgeStepSettle(ctx context.Context, input workload.Reco
 	})
 }
 
+// patchInstanceStatusSurgeSettleRearm restarts the connection-settle
+// interval from now for an attempt already on the settle step. A hold
+// ages no connections, so the interval a released hold resumes into is a
+// full one rather than the remainder of the one it interrupted.
+func patchInstanceStatusSurgeSettleRearm(ctx context.Context, input workload.ReconcileInput, idx int32) error {
+	now := metav1.NewTime(input.Now())
+	return input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
+		if s.Operation == nil || s.Operation.Type != workload.InstanceOperationUpdate ||
+			s.Operation.Step != updateStepSurgeDrainSettle {
+			return false
+		}
+		s.Operation.LastProgressAt = now
+		return true
+	})
+}
+
 // patchInstanceStatusReadyOnRevisionWithOrdinal is the surge-promote
 // terminator: clears Operation, advances ActiveOrdinal to the new slot,
 // stamps RunningRevision=rev and Phase=Ready. Distinct from

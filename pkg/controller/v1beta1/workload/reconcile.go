@@ -174,6 +174,15 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 // substituted for it.
 func Execute(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot, d Decision) (ctrl.Result, error) {
 	res, statusCommitBoundary, err := executeActions(ctx, deps, input, plan, target, snapshot, d)
+	// The pause hold is recorded after the actions, so the answer every
+	// step read this pass is the one the pass acted on, and the row is
+	// marked held only once the step it was on has had its turn.
+	if perr := reconcilePauseHolds(ctx, input, plan); perr != nil {
+		if err == nil {
+			return res, perr
+		}
+		err = errors.Join(err, perr)
+	}
 	if !d.Escalate || statusCommitBoundary {
 		return res, err
 	}
@@ -268,7 +277,7 @@ func executeActions(ctx context.Context, deps Deps, input ReconcileInput, plan C
 					// Instance's restart failed or was held this pass: a
 					// stalled repair must not starve an unrelated scale-up.
 					freshPlan := planExcludingRestartSelections(plan, action.Restarts)
-					createResult, ferr := workloadops.CreateFreshIndices(ctx, deps, input, freshPlan, target)
+					createResult, ferr := createPass(ctx, deps, input, freshPlan, target, createScopeFresh)
 					if ferr != nil {
 						restartErrs = append(restartErrs, fmt.Errorf("workload.Reconcile: create fresh indices during restart: %w", ferr))
 						return createResult, false, errors.Join(restartErrs...)
@@ -368,7 +377,7 @@ func executeActions(ctx context.Context, deps Deps, input ReconcileInput, plan C
 
 		// 6. Create pass.
 		case ActionCreate:
-			res, cerr := workloadops.Create(ctx, deps, input, plan, target)
+			res, cerr := createPass(ctx, deps, input, plan, target, createScopeFull)
 			if cerr != nil {
 				return res, false, cerr
 			}
@@ -376,9 +385,37 @@ func executeActions(ctx context.Context, deps Deps, input ReconcileInput, plan C
 		}
 	}
 
-	// Only a paused Decision ends without a Create action: scale-down
-	// (if any) has run, nothing else may.
+	// Only a paused Decision with no committed create ends without a
+	// Create action: scale-down (if any) has run, nothing else may.
 	return ctrl.Result{}, false, nil
+}
+
+// createScope names how much of the Create pass a caller asks for.
+type createScope int
+
+const (
+	// createScopeFull materializes every planned index — the Create
+	// pass at its own position in the pipeline.
+	createScopeFull createScope = iota
+	// createScopeFresh materializes only surge-free indices, so a
+	// scale-up is not starved behind another Instance's in-flight
+	// rollout or held repair.
+	createScopeFresh
+)
+
+// createPass runs the Create pass at the requested scope. A paused
+// Component narrows either scope to the indices whose create is already
+// committed: the pause finishes a materialization under way and begins
+// none, whichever caller reaches the pass.
+func createPass(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision, scope createScope) (ctrl.Result, error) {
+	switch {
+	case plan.Paused:
+		return workloadops.CreateCommittedIndices(ctx, deps, input, plan, target)
+	case scope == createScopeFresh:
+		return workloadops.CreateFreshIndices(ctx, deps, input, plan, target)
+	default:
+		return workloadops.Create(ctx, deps, input, plan, target)
+	}
 }
 
 func hasActionKind(actions []PlannedAction, kind ActionKind) bool {
@@ -609,7 +646,7 @@ func executeUpdatePass(ctx context.Context, deps Deps, input ReconcileInput, pla
 		// now so a concurrent scale-up isn't starved behind the
 		// in-flight rollout. The full Create pass still owns
 		// surge-sensitive (touched) indices once the rollout drains.
-		if _, ferr := workloadops.CreateFreshIndices(ctx, deps, input, plan, target); ferr != nil {
+		if _, ferr := createPass(ctx, deps, input, plan, target, createScopeFresh); ferr != nil {
 			return ctrl.Result{}, false, ferr
 		}
 	}

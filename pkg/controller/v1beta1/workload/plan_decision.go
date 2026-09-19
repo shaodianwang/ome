@@ -168,15 +168,17 @@ type PlannedAction struct {
 // op's internal effect sequence.
 type Decision struct {
 	// Actions are the selected pass-level actions,
-	// first-precedence-first. A paused plan truncates the list after
-	// the restart pass: a deliberate replica reduction still releases
-	// capacity and the RestartPolicy keeps repairing existing
-	// Instances, but no Migration, Update, or Create operation is
-	// started or advanced. A frozen pause (PauseFreeze) truncates
-	// after the truth pass — repair is suspended too. The truth pass
-	// (ActionDemote) is status-only, selected only while paused (in
-	// every depth): pause suspends lifecycle operations, never status
-	// truth, while unpaused reconciles leave the correction to Create.
+	// first-precedence-first. A paused plan drops the Migration
+	// actions and narrows Update and Create to the attempts already in
+	// flight: a deliberate replica reduction still releases capacity,
+	// the RestartPolicy keeps repairing existing Instances, and an open
+	// attempt runs its current step to the step's boundary, but nothing
+	// new starts. A frozen pause (PauseFreeze) narrows the restart pass
+	// the same way — no repair starts, one under way finishes its step.
+	// The truth pass (ActionDemote) is status-only, selected only while
+	// paused (in every depth): pause suspends lifecycle operations,
+	// never status truth, while unpaused reconciles leave the correction
+	// to Create.
 	Actions []PlannedAction
 
 	// RequeueAfter is the earliest not-yet-due Backoff RetryBlock
@@ -235,68 +237,83 @@ func Plan(ctx context.Context, input ReconcileInput, plan ComponentPlan, target 
 		}
 	}
 
-	// Paused is an operator circuit breaker: scale-down above still
-	// releases capacity, and the restart pass below keeps repairing
-	// existing Instances at their current revision (RunningRevision —
-	// repair can never advance a rollout), but no Migration, Update, or
-	// Create work is planned. PauseFreeze suspends the restart pass
-	// too. Pod and spec watches enqueue the workload again after
+	// Paused is an operator circuit breaker over WHAT MAY BEGIN:
+	// scale-down above still releases capacity, the restart pass below
+	// keeps repairing existing Instances at their current revision
+	// (RunningRevision — repair can never advance a rollout), and an
+	// attempt already in flight still runs the step it is on to that
+	// step's boundary. What a pause withholds is the next operation and
+	// the next step, so a pause never leaves an Instance mid-step — dark
+	// between a delete and its recreate, or half-materialized — for the
+	// length of the hold. PauseFreeze deepens the hold onto the restart
+	// pass: no repair starts, and one already under way only finishes
+	// its step. Pod and spec watches enqueue the workload again after
 	// unpause; no periodic requeue is needed while the desired state is
 	// intentionally held.
-	if plan.Paused && plan.PauseFreeze {
-		return d, nil
-	}
 	if !plan.Paused {
 		d.Escalate = true
 	}
 
-	// Restart selection.
-	restarts, rerr := planRestartSelections(ctx, input, plan, snapshot)
-	if rerr != nil {
-		return Decision{}, rerr
-	}
-	if len(restarts) > 0 {
-		d.Actions = append(d.Actions, PlannedAction{Kind: ActionRestart, Restarts: restarts})
-	}
-
-	// A standard pause plans nothing beyond repair.
-	if plan.Paused {
-		return d, nil
-	}
-
-	// Migration expiry selection — the deadline consumer. Planned
-	// BEFORE the drive pass so an expired record is consumed before it
-	// can be driven (re-stamped) again, and regardless of MigrationMode
-	// so a mode flip to Never can never strand a non-terminal record.
-	if workloadops.HasExpiredMigrationCandidate(input.ObservedState.Migrations, input.Now()) {
-		d.Actions = append(d.Actions, PlannedAction{Kind: ActionMigrateExpiry})
+	// Restart selection. A frozen pause suspends the pass, so the
+	// selection is only worth computing — it costs a live pod read —
+	// when a repair is already under way to finish.
+	if !plan.PauseFreeze || anyRestartContinuation(input) {
+		restarts, rerr := planRestartSelections(ctx, input, plan, snapshot)
+		if rerr != nil {
+			return Decision{}, rerr
+		}
+		if plan.PauseFreeze {
+			restarts = restartContinuations(input, restarts)
+		}
+		if len(restarts) > 0 {
+			d.Actions = append(d.Actions, PlannedAction{Kind: ActionRestart, Restarts: restarts})
+		}
 	}
 
-	// Migration drive selection. Work comes from the owner's
-	// status.migrations records: the oldest non-terminal Manual record
-	// is driven, one per pass. Terminal records and Auto records (born
-	// terminal) are excluded structurally — records, never work. Skip
-	// when mode is Never.
-	if plan.MigrationMode != MigrationModeNever {
-		if rec := NextManualMigration(input.ObservedState.Migrations); rec != nil {
-			// A fresh migration adds one surge Instance. Let an existing update
-			// surge finish first so the two operations do not stack extra capacity.
-			// Allocated migrations always resume from their durable record.
-			allocated := rec.SurgeInstance != nil && *rec.SurgeInstance >= 0
-			if allocated || CurrentSurgeInFlight(input.ObservedState.InstanceStatuses) == 0 {
-				d.Actions = append(d.Actions, PlannedAction{Kind: ActionMigrate, Migration: &MigrationSelection{Record: *rec}})
+	if !plan.Paused {
+		// Migration expiry selection — the deadline consumer. Planned
+		// BEFORE the drive pass so an expired record is consumed before it
+		// can be driven (re-stamped) again, and regardless of MigrationMode
+		// so a mode flip to Never can never strand a non-terminal record.
+		if workloadops.HasExpiredMigrationCandidate(input.ObservedState.Migrations, input.Now()) {
+			d.Actions = append(d.Actions, PlannedAction{Kind: ActionMigrateExpiry})
+		}
+
+		// Migration drive selection. Work comes from the owner's
+		// status.migrations records: the oldest non-terminal Manual record
+		// is driven, one per pass. Terminal records and Auto records (born
+		// terminal) are excluded structurally — records, never work. Skip
+		// when mode is Never.
+		if plan.MigrationMode != MigrationModeNever {
+			if rec := NextManualMigration(input.ObservedState.Migrations); rec != nil {
+				// A fresh migration adds one surge Instance. Let an existing update
+				// surge finish first so the two operations do not stack extra capacity.
+				// Allocated migrations always resume from their durable record.
+				allocated := rec.SurgeInstance != nil && *rec.SurgeInstance >= 0
+				if allocated || CurrentSurgeInFlight(input.ObservedState.InstanceStatuses) == 0 {
+					d.Actions = append(d.Actions, PlannedAction{Kind: ActionMigrate, Migration: &MigrationSelection{Record: *rec}})
+				}
 			}
 		}
 	}
 
 	// Update selection. A nil target short-circuits the pass
-	// (DesiredSpec.PodSpec nil / MinReplicas=0).
-	if target != nil {
+	// (DesiredSpec.PodSpec nil / MinReplicas=0). While paused only an
+	// attempt already in flight is selected, so the executor's budget
+	// and gate layers decide nothing: a held Component starts nothing
+	// for them to pace.
+	if target != nil && (!plan.Paused || anyUpdateContinuation(input, plan)) {
 		sel, retryBlockWait, uerr := planUpdateSelection(ctx, input, plan, target, snapshot)
 		if uerr != nil {
 			return Decision{}, uerr
 		}
-		d.RequeueAfter = retryBlockWait
+		if plan.Paused {
+			// A RetryBlock wake-up paces a fresh re-trigger, which a pause
+			// withholds; the unpause is the wake-up that matters here.
+			sel.Items = pausedUpdateContinuations(input, sel.Items)
+		} else {
+			d.RequeueAfter = retryBlockWait
+		}
 		if len(sel.Items) > 0 {
 			d.Actions = append(d.Actions, PlannedAction{Kind: ActionUpdate, Update: &sel})
 		}
@@ -304,10 +321,99 @@ func Plan(ctx context.Context, input ReconcileInput, plan ComponentPlan, target 
 
 	// Create — always planned on a non-paused reconcile: the op is the
 	// pass's own detector (it lists and diffs per planned Instance) and
-	// a nil target returns immediately.
-	d.Actions = append(d.Actions, PlannedAction{Kind: ActionCreate})
+	// a nil target returns immediately. While paused it is planned only
+	// for an index whose committed create the pass would finish, and
+	// Execute narrows the pass to those: an index with no row stays
+	// empty, but a set already being materialized is completed and
+	// promoted rather than held incomplete with the Instance short of it.
+	if !plan.Paused || workloadops.HasCommittedCreate(input, plan, target) {
+		d.Actions = append(d.Actions, PlannedAction{Kind: ActionCreate})
+	}
 
 	return d, nil
+}
+
+// pausedUpdateContinuations keeps the update items a paused Component may
+// still run: an attempt already in flight, resuming on the step it is
+// already on. A fresh start, a revision backfill, and a wreckage cleanup
+// are new work and wait for the unpause.
+//
+// A gang SurgeThenDrain cycle is excluded whole. It spans two rows — the
+// source and the replacement-gang marker it pins — and keeps the source
+// serving from its first pass to its last, so parking it costs the
+// Instance no capacity and closes no step half-open.
+func pausedUpdateContinuations(input ReconcileInput, items []UpdateItem) []UpdateItem {
+	kept := items[:0]
+	for _, item := range items {
+		if item.StartingFresh || item.AdoptRevision || item.CleanupOnly {
+			continue
+		}
+		s := findObservedInstanceStatus(input.ObservedState.InstanceStatuses, item.Instance.Index)
+		if s == nil || gangSurgeRow(s) {
+			continue
+		}
+		kept = append(kept, item)
+	}
+	return kept
+}
+
+// anyUpdateContinuation reports whether any planned index carries an
+// in-flight Update attempt a paused Component would still advance.
+func anyUpdateContinuation(input ReconcileInput, plan ComponentPlan) bool {
+	for _, inst := range plan.Instances {
+		s := findObservedInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)
+		if s == nil || gangSurgeRow(s) {
+			continue
+		}
+		if s.Operation != nil && s.Operation.Type == InstanceOperationUpdate {
+			return true
+		}
+	}
+	return false
+}
+
+// gangSurgeRow reports whether the row belongs to a gang SurgeThenDrain
+// cycle: the source that pins a replacement index, or the replacement
+// marker itself.
+func gangSurgeRow(s *InstanceStatus) bool {
+	op := s.Operation
+	if op == nil || op.Type != InstanceOperationUpdate {
+		return false
+	}
+	return op.SurgeIndex != nil ||
+		op.Step == UpdateStepGangSurgeTarget ||
+		op.Step == UpdateStepGangSurgeTargetCleanup
+}
+
+// anyRestartContinuation reports whether any row carries an in-flight
+// Restart attempt.
+func anyRestartContinuation(input ReconcileInput) bool {
+	for i := range input.ObservedState.InstanceStatuses {
+		if restartInFlight(&input.ObservedState.InstanceStatuses[i]) {
+			return true
+		}
+	}
+	return false
+}
+
+// restartContinuations keeps only the selections that advance a repair
+// already under way. A frozen pause starts no repair, but the pods an
+// open one deleted must still be recreated at the bumped Incarnation
+// rather than stay missing for the length of the hold.
+func restartContinuations(input ReconcileInput, restarts []RestartSelection) []RestartSelection {
+	kept := restarts[:0]
+	for _, sel := range restarts {
+		if restartInFlight(findObservedInstanceStatus(input.ObservedState.InstanceStatuses, sel.Instance.Index)) {
+			kept = append(kept, sel)
+		}
+	}
+	return kept
+}
+
+// restartInFlight reports whether the row is mid-repair.
+func restartInFlight(s *InstanceStatus) bool {
+	return s != nil && s.Phase == InstancePhaseRestarting &&
+		s.Operation != nil && s.Operation.Type == InstanceOperationRestart
 }
 
 // planRestartSelections selects the per-Instance restart triggers:

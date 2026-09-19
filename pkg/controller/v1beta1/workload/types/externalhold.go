@@ -19,7 +19,10 @@ import (
 //   - A token is never overwritten by a different one. The authority
 //     that got there first owns the wait being reported, and replacing
 //     its token would tell an operator the row is queued behind
-//     something it is not.
+//     something it is not. The one ordered pair is the operator pause:
+//     it reports a decision to stop rolling forward rather than a fact
+//     about the Instance, so an authority with a fact to report takes
+//     the row from it (see supersedes).
 //   - A token is only released by the authority that set it. Clearing
 //     unconditionally would let one authority's completion re-arm a
 //     deadline another authority is still holding.
@@ -64,7 +67,7 @@ func MarkExternalHold(ctx context.Context, input ReconcileInput, idx int32, toke
 			return false
 		}
 		current := s.Operation.Waiting
-		if current != "" && current != token {
+		if current != "" && current != token && !supersedes(token, current) {
 			return false
 		}
 		held = true
@@ -74,7 +77,7 @@ func MarkExternalHold(ctx context.Context, input ReconcileInput, idx int32, toke
 		op := *s.Operation
 		op.Waiting = token
 		s.Operation = &op
-		entered = current == ""
+		entered = current != token
 		if evidence != nil {
 			captured := *evidence
 			s.LastFailure = &captured
@@ -82,6 +85,18 @@ func MarkExternalHold(ctx context.Context, input ReconcileInput, idx int32, toke
 		return true
 	})
 	return entered, held, err
+}
+
+// supersedes reports whether token may take the row from the incumbent
+// current. Exactly one pair is ordered, and it is ordered because the
+// two are not the same kind of statement: an operator pause reports a
+// decision to stop rolling forward, while every other token reports
+// something about the Instance — its quota was refused, it has no
+// placement, it is serving nothing. The fact is what an operator needs
+// to see, so it takes the row; the pause goes on holding the rollout
+// either way. Everything else is first-writer-wins.
+func supersedes(token, current string) bool {
+	return current == WaitingReasonPaused && token != WaitingReasonPaused
 }
 
 // ClearExternalHold releases token once its authority reports the wait

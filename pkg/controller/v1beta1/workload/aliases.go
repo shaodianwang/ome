@@ -284,9 +284,20 @@ func OperationGangHeld(op *InstanceOperation) bool {
 	return types.OperationGangHeld(op)
 }
 
+// WaitingReasonPaused re-exports types.WaitingReasonPaused: the token an
+// operator pause records while it holds an attempt at a step boundary.
+const WaitingReasonPaused = types.WaitingReasonPaused
+
+// OperationPaused re-exports types.OperationPaused: whether an operation
+// is parked on the operator-pause hold.
+func OperationPaused(op *InstanceOperation) bool {
+	return types.OperationPaused(op)
+}
+
 // OperationExternallyHeld re-exports types.OperationExternallyHeld: the
 // union of the waits outside the workload's control (quota refusal,
-// scheduler hold) that park the InstanceReadyTimeout clock.
+// scheduler hold, operator pause) that park the InstanceReadyTimeout
+// clock.
 func OperationExternallyHeld(op *InstanceOperation) bool {
 	return types.OperationExternallyHeld(op)
 }

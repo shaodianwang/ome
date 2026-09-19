@@ -104,9 +104,18 @@ func unroutedSource(ctx context.Context, drainer *drain.Batcher, input workload.
 // operation's Waiting token. An operation parked on a DIFFERENT wait
 // keeps it: that token's writer owns what the row reports it is queued
 // behind, and unlike this report those waits also park the deadline.
+//
+// An operator pause is the exception, and the only one. It is the one
+// wait that says nothing about the Instance — it reports a decision to
+// stop rolling forward, while this reports that the Instance is serving
+// nothing right now — so the louder fact takes the row. The hold itself
+// does not end: the pause still plans no further step, and on the
+// adapter that parks deadlines for a paused Component the clock stays
+// parked with it.
 func sourceUnroutedWritable(op *workload.InstanceOperation) bool {
 	if op == nil || op.Type != workload.InstanceOperationUpdate {
 		return false
 	}
-	return op.Waiting == "" || workload.OperationSourceUnrouted(op)
+	return op.Waiting == "" || workload.OperationSourceUnrouted(op) ||
+		workload.OperationPaused(op)
 }
