@@ -59,6 +59,10 @@ func TestInferenceServiceCRD_RoutingValidationRules(t *testing.T) {
 		routingTimeoutPeriodRule,
 		routingProbeSafeGateRule,
 	)
+	gateStatuses := requireSchemaProperty(t, probe, "gateStatuses")
+	if gateStatuses.MaxItems == nil || *gateStatuses.MaxItems != 500 {
+		t.Errorf("spec.routing.probe.gateStatuses maxItems = %v, want 500", gateStatuses.MaxItems)
+	}
 
 	capacity := requireSchemaProperty(t, routing, "capacity")
 	requireSchemaRules(t, "spec.routing.capacity", capacity,

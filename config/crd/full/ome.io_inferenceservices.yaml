@@ -31474,6 +31474,7 @@ spec:
                             maximum: 599
                             minimum: 100
                             type: integer
+                          maxItems: 500
                           minItems: 1
                           type: array
                           x-kubernetes-list-type: set

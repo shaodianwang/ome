@@ -75,6 +75,7 @@ type RoutingProbeSpec struct {
 	// neither status list is inconclusive.
 	// +listType=set
 	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=500
 	// +kubebuilder:validation:items:Minimum=100
 	// +kubebuilder:validation:items:Maximum=599
 	// +optional
