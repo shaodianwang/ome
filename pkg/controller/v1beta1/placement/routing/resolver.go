@@ -31,8 +31,23 @@ type ResolvedProbePolicy struct {
 	PolicyDigest string
 }
 
+// ResolvedCapacityPolicy is one InferenceService's effective capacity polling
+// policy. Enabled requires both the operator-level routing gate and a configured
+// effective capacity source. PolicyDigest identifies every setting that can
+// affect capacity observations and is empty when Enabled is false.
+type ResolvedCapacityPolicy struct {
+	Enabled      bool
+	Capacity     CapacityConfig
+	PolicyDigest string
+}
+
 // IsEnabled reports whether this policy should run endpoint probes.
 func (p ResolvedProbePolicy) IsEnabled() bool {
+	return p.Enabled
+}
+
+// IsEnabled reports whether this policy should poll endpoint capacity.
+func (p ResolvedCapacityPolicy) IsEnabled() bool {
 	return p.Enabled
 }
 
@@ -127,6 +142,128 @@ func probePolicyDigest(probe ProbeConfig) (string, error) {
 	}
 	sum := sha256.Sum256(payload)
 	return fmt.Sprintf("sha256:%x", sum), nil
+}
+
+// ResolveCapacityPolicy resolves only the capacity portion of an
+// InferenceService's routing policy. Probe and publisher overrides are
+// independent and do not participate in capacity resolution.
+func ResolveCapacityPolicy(global Config, spec *v1beta1.InferenceServiceSpec) (ResolvedCapacityPolicy, error) {
+	capacity := cloneCapacityConfig(global.Capacity)
+	routingEnabled := global.Enabled
+	var inline *v1beta1.RoutingCapacitySpec
+	if spec != nil && spec.Routing != nil {
+		routing := spec.Routing
+		if routing.Enabled != nil && !*routing.Enabled {
+			routingEnabled = false
+		}
+		inline = routing.Capacity
+	}
+
+	if inline != nil {
+		if err := validation.ValidateRouting(&v1beta1.InferenceServiceSpec{
+			Routing: &v1beta1.RoutingSpec{Capacity: inline},
+		}); err != nil {
+			return ResolvedCapacityPolicy{}, err
+		}
+		if inline.Disabled {
+			capacity = CapacityConfig{}
+		} else {
+			capacity = capacityConfigFromSpec(inline)
+		}
+	}
+
+	if !routingEnabled {
+		return ResolvedCapacityPolicy{Capacity: capacity}, nil
+	}
+	if err := capacity.Validate(); err != nil {
+		if inline != nil {
+			return ResolvedCapacityPolicy{}, fmt.Errorf("spec.%w", err)
+		}
+		return ResolvedCapacityPolicy{}, err
+	}
+	if !capacity.IsEnabled() {
+		return ResolvedCapacityPolicy{Capacity: capacity}, nil
+	}
+	if global.Observer.MinPeriod > 0 && capacity.Period < global.Observer.MinPeriod {
+		err := fmt.Errorf("routing.capacity.period (%s) must be at least routing.observer.minPeriod (%s)",
+			capacity.Period, global.Observer.MinPeriod)
+		if inline != nil {
+			return ResolvedCapacityPolicy{}, fmt.Errorf("spec.%w", err)
+		}
+		return ResolvedCapacityPolicy{}, err
+	}
+	if global.Observer.MaxSamples > 0 && capacity.samples() > global.Observer.MaxSamples {
+		err := fmt.Errorf("routing.capacity.samples (%d) must not exceed routing.observer.maxSamples (%d)",
+			capacity.samples(), global.Observer.MaxSamples)
+		if inline != nil {
+			return ResolvedCapacityPolicy{}, fmt.Errorf("spec.%w", err)
+		}
+		return ResolvedCapacityPolicy{}, err
+	}
+
+	digest, err := capacityPolicyDigest(capacity)
+	if err != nil {
+		return ResolvedCapacityPolicy{}, err
+	}
+	return ResolvedCapacityPolicy{
+		Enabled:      true,
+		Capacity:     capacity,
+		PolicyDigest: digest,
+	}, nil
+}
+
+type capacityPolicyOption struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+type capacityPolicyDigestPayload struct {
+	Version            int                    `json:"version"`
+	Path               string                 `json:"path"`
+	Method             string                 `json:"method"`
+	Format             CapacityFormat         `json:"format"`
+	Options            []capacityPolicyOption `json:"options"`
+	PeriodNanoseconds  int64                  `json:"periodNanoseconds"`
+	TimeoutNanoseconds int64                  `json:"timeoutNanoseconds"`
+	Samples            int                    `json:"samples"`
+	Quorum             int                    `json:"quorum"`
+	MaxAgeNanoseconds  int64                  `json:"maxAgeNanoseconds"`
+}
+
+func capacityPolicyDigest(capacity CapacityConfig) (string, error) {
+	payload, err := json.Marshal(capacityPolicyDigestPayload{
+		Version:            1,
+		Path:               capacity.Path,
+		Method:             capacity.Method,
+		Format:             capacity.Format,
+		Options:            canonicalCapacityOptions(capacity.Options),
+		PeriodNanoseconds:  int64(capacity.Period),
+		TimeoutNanoseconds: int64(capacity.Timeout),
+		Samples:            capacity.Samples,
+		Quorum:             capacity.Quorum,
+		MaxAgeNanoseconds:  int64(capacity.MaxAge),
+	})
+	if err != nil {
+		return "", fmt.Errorf("encode capacity policy digest: %w", err)
+	}
+	sum := sha256.Sum256(payload)
+	return fmt.Sprintf("sha256:%x", sum), nil
+}
+
+func canonicalCapacityOptions(options map[string]string) []capacityPolicyOption {
+	if len(options) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(options))
+	for key := range options {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	canonical := make([]capacityPolicyOption, 0, len(keys))
+	for _, key := range keys {
+		canonical = append(canonical, capacityPolicyOption{Key: key, Value: options[key]})
+	}
+	return canonical
 }
 
 func canonicalStatuses(statuses []int) []int {
@@ -224,7 +361,7 @@ func ResolveConfig(
 func cloneConfig(in Config) Config {
 	out := in
 	out.Probe = cloneProbeConfig(in.Probe)
-	out.Capacity.Options = cloneStringMap(in.Capacity.Options)
+	out.Capacity = cloneCapacityConfig(in.Capacity)
 	out.Publisher.Options = cloneStringMap(in.Publisher.Options)
 	return out
 }
@@ -233,6 +370,12 @@ func cloneProbeConfig(in ProbeConfig) ProbeConfig {
 	out := in
 	out.AcceptStatuses = cloneInts(in.AcceptStatuses)
 	out.GateStatuses = cloneInts(in.GateStatuses)
+	return out
+}
+
+func cloneCapacityConfig(in CapacityConfig) CapacityConfig {
+	out := in
+	out.Options = cloneStringMap(in.Options)
 	return out
 }
 

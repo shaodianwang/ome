@@ -390,10 +390,9 @@ type CapacityConfig struct {
 	// It is also the lag before a genuine drop is believed: Quorum polls.
 	Quorum int
 
-	// MaxAge is how old a report's observedAt stamp may be and still be
-	// applied. Beyond it the poller falls open to the plan, so a home whose
-	// reporter froze releases its ceiling instead of holding a stale one
-	// forever.
+	// MaxAge is the exclusive upper age bound for a report's observedAt stamp.
+	// At or beyond it the poller falls open to the plan, so a home whose reporter
+	// froze releases its ceiling instead of holding a stale one forever.
 	MaxAge time.Duration
 }
 

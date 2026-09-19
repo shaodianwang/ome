@@ -21,13 +21,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	placementcontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/placement"
 	placementendpoint "github.com/ome-projects/ome/pkg/controller/v1beta1/placement/endpoint"
+	"github.com/ome-projects/ome/pkg/validation"
 )
 
 // +kubebuilder:rbac:groups=ome.io,resources=inferenceservices,verbs=get;list;watch
@@ -93,45 +92,109 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		r.Capacity.Forget(req.NamespacedName)
 		return ctrl.Result{}, nil
 	}
+	if err := validation.ValidateRouting(&isvc.Spec); err != nil {
+		return ctrl.Result{}, fmt.Errorf("validate routing policy: %w", err)
+	}
 
 	probePolicy, err := ResolveProbePolicy(r.Config, &isvc.Spec)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("resolve probe policy: %w", err)
 	}
-	targets := targetsForInferenceService(isvc, probePolicy.PolicyDigest)
+	capacityPolicy, err := ResolveCapacityPolicy(r.Config, &isvc.Spec)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("resolve capacity policy: %w", err)
+	}
+	probeTargets := targetsForInferenceService(isvc, probePolicy.PolicyDigest)
+	capacityTargets := targetsForInferenceService(isvc, "")
 	persisted, err := r.ownedTrafficMap(ctx, isvc)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	var requeueAfter time.Duration
+	if probePolicy.IsEnabled() && r.Prober == nil {
+		return ctrl.Result{}, fmt.Errorf("endpoint probing is enabled but no prober is configured")
+	}
+	if capacityPolicy.IsEnabled() && r.Capacity == nil {
+		return ctrl.Result{}, fmt.Errorf("capacity polling is enabled but no poller is configured")
+	}
 	if r.Prober != nil {
-		requeueAfter, err = r.Prober.Reconcile(ctx, ProbeReconcileRequest{
+		_, err = r.Prober.Reconcile(ctx, ProbeReconcileRequest{
 			OwnerUID:  isvc.UID,
 			Map:       req.NamespacedName,
 			Policy:    probePolicy,
-			Targets:   targets,
+			Targets:   probeTargets,
 			Persisted: persisted,
 		})
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("reconcile endpoint probes: %w", err)
 		}
-	} else if probePolicy.IsEnabled() {
-		return ctrl.Result{}, fmt.Errorf("endpoint probing is enabled but no prober is configured")
+	}
+	if r.Capacity != nil {
+		_, err = r.Capacity.Reconcile(ctx, CapacityReconcileRequest{
+			OwnerUID: isvc.UID,
+			Map:      req.NamespacedName,
+			Policy:   capacityPolicy,
+			Targets:  capacityTargets,
+		})
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("reconcile endpoint capacity: %w", err)
+		}
 	}
 
 	// Unroutable is a state of the map, not a reason to remove it: build the
 	// table (possibly empty) and let the condition carry the explanation.
-	spec, status, reason := buildSpec(isvc, probePolicy, r.Prober, r.Capacity)
+	spec, status, reason := buildSpec(isvc, probePolicy, capacityPolicy, r.Prober, r.Capacity)
 	if err := r.apply(ctx, isvc, spec); err != nil {
 		return ctrl.Result{}, err
 	}
 	if err := r.setRoutable(ctx, isvc, status, reason); err != nil {
 		return ctrl.Result{}, err
 	}
-	return ctrl.Result{
-		Requeue:      probePolicy.IsEnabled() && len(targets) > 0 && requeueAfter == 0,
-		RequeueAfter: requeueAfter,
-	}, nil
+	var probeRequeueAfter time.Duration
+	if r.Prober != nil && probePolicy.IsEnabled() && len(probeTargets) > 0 {
+		probeRequeueAfter = r.Prober.nextDelay(
+			isvc.UID, req.NamespacedName, probeTargets, r.Prober.Clock.Now(),
+		)
+	}
+	var capacityRequeueAfter time.Duration
+	if r.Capacity != nil && capacityPolicy.IsEnabled() && len(capacityTargets) > 0 {
+		capacityRequeueAfter = r.Capacity.nextDelay(
+			isvc.UID, req.NamespacedName, capacityTargets, capacityPolicy, r.Capacity.Clock.Now(),
+		)
+	}
+	return observationRequeueResult(
+		probePolicy.IsEnabled(), len(probeTargets), probeRequeueAfter,
+		capacityPolicy.IsEnabled(), len(capacityTargets), capacityRequeueAfter,
+	), nil
+}
+
+func observationRequeueResult(
+	probeEnabled bool,
+	probeTargets int,
+	probeAfter time.Duration,
+	capacityEnabled bool,
+	capacityTargets int,
+	capacityAfter time.Duration,
+) ctrl.Result {
+	var requeueAfter time.Duration
+	for _, schedule := range []struct {
+		enabled bool
+		targets int
+		after   time.Duration
+	}{
+		{enabled: probeEnabled, targets: probeTargets, after: probeAfter},
+		{enabled: capacityEnabled, targets: capacityTargets, after: capacityAfter},
+	} {
+		if !schedule.enabled || schedule.targets == 0 {
+			continue
+		}
+		if schedule.after <= 0 {
+			return ctrl.Result{Requeue: true}
+		}
+		if requeueAfter == 0 || schedule.after < requeueAfter {
+			requeueAfter = schedule.after
+		}
+	}
+	return ctrl.Result{RequeueAfter: requeueAfter}
 }
 
 func (r *Reconciler) getInferenceService(
@@ -305,12 +368,13 @@ func controlledByInferenceService(
 // table rather than no table, so a consumer can tell "known and unroutable"
 // from "unknown".
 //
-// The prober is an optional overlay on an otherwise pure projection of the
-// ISVC. Passing nil yields the plan alone, which the watch predicate uses to
-// detect source changes. Probe scheduling itself is reconciliation-driven.
+// Probe and capacity observations are optional overlays on an otherwise pure
+// projection of the ISVC. Nil observers with disabled policies yield the plan
+// alone, which the watch predicate uses to detect source changes.
 func buildSpec(
 	isvc *v1beta1.InferenceService,
 	probePolicy ResolvedProbePolicy,
+	capacityPolicy ResolvedCapacityPolicy,
 	probe *Prober,
 	capacity *CapacityPoller,
 ) (v1beta1.TrafficMapSpec, metav1.ConditionStatus, string) {
@@ -332,8 +396,11 @@ func buildSpec(
 	// plus provenance, both in the same cluster-sorted order.
 	homes := make([]Home, len(cands))
 	targets := make([]Target, len(cands))
+	capacityFallbackReasons := make([]string, len(cands))
 	for i, c := range cands {
 		targets[i] = targetForCandidate(isvc, c, probePolicy.PolicyDigest)
+		reported, fallbackReason := capacity.observation(targets[i], capacityPolicy)
+		capacityFallbackReasons[i] = fallbackReason
 		// A nil factor is the identity 1.0; a per-cluster override scales the home's
 		// share for heterogeneous hardware. A nil reachability verdict does not
 		// gate — probing off, or no verdict yet.
@@ -343,7 +410,7 @@ func buildSpec(
 			Ready:     c.ReadyReplicas,
 			Factor:    capacityFactor(isvc, c.Cluster),
 			Reachable: probe.Reachable(targets[i]),
-			Reported:  capacity.Reported(targets[i]),
+			Reported:  reported,
 		}
 	}
 	computedWeights := weights(homes, probeAllFailedPolicy(probePolicy))
@@ -365,7 +432,7 @@ func buildSpec(
 				Factor:         homes[i].Factor,
 				Source:         allocationSource(homes[i]),
 				Reported:       homes[i].Reported,
-				FallbackReason: capacity.FellOpen(targets[i]),
+				FallbackReason: capacityFallbackReasons[i],
 			},
 			Probe: probe.Provenance(targets[i]),
 		}
@@ -510,9 +577,8 @@ func placementMode(isvc *v1beta1.InferenceService) v1beta1.PlacementMode {
 // events that can change the generated table, and own the TrafficMaps it writes
 // so a drifted or deleted map is corrected.
 //
-// Capacity observations run on their global cadence and feed changed ceilings
-// through a lossless channel. Probe observations run inside reconciliation and
-// use their returned absolute deadline as RequeueAfter.
+// Probe and capacity observations run inside reconciliation and use their
+// earliest returned delay as RequeueAfter.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	b := ctrl.NewControllerManagedBy(mgr).
 		Named(RoutingControllerName).
@@ -524,66 +590,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		})
 	}
 
-	polling := r.Config.IsEnabled() && r.Capacity != nil && r.Capacity.Config.IsEnabled()
-	if polling {
-		events := make(chan event.GenericEvent)
-		targets := func(ctx context.Context) ([]Target, error) {
-			var maps v1beta1.TrafficMapList
-			if err := mgr.GetClient().List(ctx, &maps); err != nil {
-				return nil, err
-			}
-			var services v1beta1.InferenceServiceList
-			if err := mgr.GetClient().List(ctx, &services); err != nil {
-				return nil, err
-			}
-			return capacityTargets(maps.Items, services.Items, r.Config), nil
-		}
-		r.Capacity.Targets = targets
-		r.Capacity.OnChange = func(ctx context.Context, nn types.NamespacedName) error {
-			// The TrafficMap shares the ISVC's name and namespace, so the stub
-			// addresses the right reconcile key without a lookup.
-			obj := &v1beta1.InferenceService{}
-			obj.Name, obj.Namespace = nn.Name, nn.Namespace
-			select {
-			case events <- event.GenericEvent{Object: obj}:
-				return nil
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
-		if err := mgr.Add(r.Capacity); err != nil {
-			return fmt.Errorf("add endpoint capacity poller: %w", err)
-		}
-		b = b.WatchesRawSource(source.Channel(events, &handler.EnqueueRequestForObject{}))
-	}
-
 	return b.Complete(r)
-}
-
-func capacityTargets(
-	maps []v1beta1.TrafficMap,
-	services []v1beta1.InferenceService,
-	config Config,
-) []Target {
-	eligibleOwners := make(map[types.NamespacedName]types.UID, len(services))
-	for i := range services {
-		isvc := &services[i]
-		if !isvc.DeletionTimestamp.IsZero() || !routingEnabled(config, isvc) ||
-			!placementcontroller.IsPlacementEligible(isvc) || isvc.Status.Placement == nil ||
-			isvc.Status.Placement.Phase != v1beta1.PlacementPhasePlaced {
-			continue
-		}
-		eligibleOwners[client.ObjectKeyFromObject(isvc)] = isvc.UID
-	}
-
-	all := TargetsFromTrafficMaps(maps)
-	targets := make([]Target, 0, len(all))
-	for _, target := range all {
-		if eligibleOwners[target.Map] == target.OwnerUID {
-			targets = append(targets, target)
-		}
-	}
-	return targets
 }
 
 // routingTableChange admits ISVC events that can change the generated TrafficMap:
@@ -613,12 +620,19 @@ var routingTableChange = predicate.Funcs{
 		if !equality.Semantic.DeepEqual(routingProbeSpec(oldISVC), routingProbeSpec(newISVC)) {
 			return true
 		}
+		if !equality.Semantic.DeepEqual(routingCapacitySpec(oldISVC), routingCapacitySpec(newISVC)) {
+			return true
+		}
 		// The condition is part of what we write, so a change in status or reason
 		// has to wake us even when the table itself is byte-identical — an ISVC
 		// going NotPlaced -> NoAddressableHome keeps an empty table but must
 		// re-explain itself.
-		oldSpec, oldStatus, oldReason := buildSpec(oldISVC, ResolvedProbePolicy{}, nil, nil)
-		newSpec, newStatus, newReason := buildSpec(newISVC, ResolvedProbePolicy{}, nil, nil)
+		oldSpec, oldStatus, oldReason := buildSpec(
+			oldISVC, ResolvedProbePolicy{}, ResolvedCapacityPolicy{}, nil, nil,
+		)
+		newSpec, newStatus, newReason := buildSpec(
+			newISVC, ResolvedProbePolicy{}, ResolvedCapacityPolicy{}, nil, nil,
+		)
 		if oldStatus != newStatus || oldReason != newReason {
 			return true
 		}
@@ -640,4 +654,11 @@ func routingProbeSpec(isvc *v1beta1.InferenceService) *v1beta1.RoutingProbeSpec 
 		return nil
 	}
 	return isvc.Spec.Routing.Probe
+}
+
+func routingCapacitySpec(isvc *v1beta1.InferenceService) *v1beta1.RoutingCapacitySpec {
+	if isvc == nil || isvc.Spec.Routing == nil {
+		return nil
+	}
+	return isvc.Spec.Routing.Capacity
 }

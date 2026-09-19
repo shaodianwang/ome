@@ -2,8 +2,10 @@ package routing
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -107,16 +109,25 @@ func ownedTrafficMap(isvc *v1beta1.InferenceService) *v1beta1.TrafficMap {
 	}
 }
 
-func testCapacityState() *CapacityPoller {
+func testCapacityState(t *testing.T) (*CapacityPoller, ResolvedCapacityPolicy) {
+	t.Helper()
+	config := controllerTestCapacityConfig()
+	digest, err := capacityPolicyDigest(config)
+	require.NoError(t, err)
 	return &CapacityPoller{
-		Config: CapacityConfig{Path: "/capacity", Samples: 1, Quorum: 1},
-		state:  map[capacityKey]*capacityState{},
-	}
+			Clock: clocktesting.NewFakeClock(capacityTestNow),
+			state: map[capacityKey]*capacityState{},
+		}, ResolvedCapacityPolicy{
+			Enabled:      true,
+			Capacity:     config,
+			PolicyDigest: digest,
+		}
 }
 
 func recordCapacity(
 	t *testing.T,
 	capacity *CapacityPoller,
+	policy ResolvedCapacityPolicy,
 	isvc *v1beta1.InferenceService,
 	candidate int,
 	reported *int32,
@@ -124,7 +135,7 @@ func recordCapacity(
 ) {
 	t.Helper()
 	target := targetForCandidate(isvc, &isvc.Status.Placement.Candidates[candidate], "")
-	require.True(t, capacity.record(target, reported, reason))
+	require.True(t, capacity.record(target, policy, reported, reason))
 }
 
 func failingProbeState(
@@ -182,6 +193,45 @@ func controllerProbeSpec(config ProbeConfig) *v1beta1.RoutingProbeSpec {
 		SuccessThreshold: int32(config.SuccessThreshold),
 		AllFailedPolicy:  v1beta1.RoutingAllFailedPolicy(config.AllFailedPolicy),
 	}
+}
+
+func controllerCapacitySpec(config CapacityConfig) *v1beta1.RoutingCapacitySpec {
+	return &v1beta1.RoutingCapacitySpec{
+		Path:    config.Path,
+		Method:  config.Method,
+		Format:  string(config.Format),
+		Options: config.Options,
+		Period:  metav1.Duration{Duration: config.Period},
+		Timeout: metav1.Duration{Duration: config.Timeout},
+		Samples: int32(config.Samples),
+		Quorum:  int32(config.Quorum),
+		MaxAge:  metav1.Duration{Duration: config.MaxAge},
+	}
+}
+
+func controllerTestCapacityConfig() CapacityConfig {
+	return CapacityConfig{
+		Path:    "/capacity",
+		Method:  http.MethodGet,
+		Format:  FormatReport,
+		Period:  2 * time.Second,
+		Timeout: time.Second,
+		Samples: 1,
+		Quorum:  1,
+		MaxAge:  10 * time.Second,
+	}
+}
+
+func newControllerCapacityPoller(
+	t *testing.T,
+	client *http.Client,
+	clk *clocktesting.FakeClock,
+) *CapacityPoller {
+	t.Helper()
+	executor, _, _ := startTestObserverExecutor(t, 1, 1)
+	poller, err := NewCapacityPoller(executor, client, clk, 1<<10, log.Log)
+	require.NoError(t, err)
+	return poller
 }
 
 func getTrafficMap(t *testing.T, c client.Client) (*v1beta1.TrafficMap, bool) {
@@ -671,6 +721,343 @@ func TestReconcile_InlineProbeDisableSkipsGlobalProbe(t *testing.T) {
 	assert.True(t, tm.Spec.Entries[0].Healthy)
 }
 
+func TestReconcile_InlineCapacityPolicyDrivesObservationAndRequeue(t *testing.T) {
+	requests := make(chan string, 1)
+	now := testProbeNow
+	body, err := json.Marshal(CapacityReport{Servable: 1, ObservedAt: now})
+	require.NoError(t, err)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requests <- request.URL.Path
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+
+	isvc := splitISVC([]string{"a"}, []int32{3}, []int32{3})
+	endpoint, err := apis.ParseURL(server.URL)
+	require.NoError(t, err)
+	isvc.Status.Placement.Candidates[0].Endpoint = endpoint
+	inline := controllerTestCapacityConfig()
+	inline.Path = "/inline-capacity"
+	inline.Period = 3 * time.Second
+	isvc.Spec.Routing = &v1beta1.RoutingSpec{Capacity: controllerCapacitySpec(inline)}
+
+	cfg := controllerTestConfig()
+	clk := clocktesting.NewFakeClock(now)
+	r, c := newReconciler(t, cfg, isvc)
+	r.Capacity = newControllerCapacityPoller(t, NewObserverClient(), clk)
+
+	result := reconcile(t, r)
+
+	assert.False(t, result.Requeue)
+	assert.Equal(t, inline.Period, result.RequeueAfter)
+	select {
+	case path := <-requests:
+		assert.Equal(t, inline.Path, path)
+	default:
+		t.Fatal("inline capacity request was not issued")
+	}
+	tm, exists := getTrafficMap(t, c)
+	require.True(t, exists)
+	require.Len(t, tm.Spec.Entries, 1)
+	require.NotNil(t, tm.Spec.Entries[0].Capacity)
+	assert.Equal(t, int32(1), tm.Spec.Entries[0].Capacity.Allocated)
+	require.NotNil(t, tm.Spec.Entries[0].Capacity.Reported)
+	assert.Equal(t, int32(1), *tm.Spec.Entries[0].Capacity.Reported)
+	assert.Equal(t, v1beta1.CapacitySourceEndpoint, tm.Spec.Entries[0].Capacity.Source)
+	assert.Empty(t, tm.Spec.Entries[0].Capacity.FallbackReason)
+}
+
+func TestReconcile_CapacityExpiryReprojectsWithoutPollingEarly(t *testing.T) {
+	now := testProbeNow
+	body, err := json.Marshal(CapacityReport{
+		Servable:   1,
+		ObservedAt: now.Add(-25 * time.Second),
+	})
+	require.NoError(t, err)
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+
+	isvc := splitISVC([]string{"a"}, []int32{3}, []int32{3})
+	endpoint, err := apis.ParseURL(server.URL)
+	require.NoError(t, err)
+	isvc.Status.Placement.Candidates[0].Endpoint = endpoint
+	cfg := controllerTestConfig()
+	cfg.Capacity = controllerTestCapacityConfig()
+	cfg.Capacity.Period = 10 * time.Second
+	cfg.Capacity.Timeout = time.Second
+	cfg.Capacity.MaxAge = 30 * time.Second
+	clk := clocktesting.NewFakeClock(now)
+	r, c := newReconciler(t, cfg, isvc)
+	r.Capacity = newControllerCapacityPoller(t, NewObserverClient(), clk)
+
+	result := reconcile(t, r)
+	assert.False(t, result.Requeue)
+	assert.Equal(t, 5*time.Second, result.RequeueAfter)
+	assert.Equal(t, int32(1), requests.Load())
+	tm, exists := getTrafficMap(t, c)
+	require.True(t, exists)
+	require.Len(t, tm.Spec.Entries, 1)
+	require.NotNil(t, tm.Spec.Entries[0].Capacity.Reported)
+	assert.Equal(t, int32(1), *tm.Spec.Entries[0].Capacity.Reported)
+
+	clk.Step(5 * time.Second)
+	result = reconcile(t, r)
+	assert.False(t, result.Requeue)
+	assert.Equal(t, 5*time.Second, result.RequeueAfter)
+	assert.Equal(t, int32(1), requests.Load(), "expiry must not move the regular poll deadline")
+	tm, exists = getTrafficMap(t, c)
+	require.True(t, exists)
+	require.Len(t, tm.Spec.Entries, 1)
+	require.NotNil(t, tm.Spec.Entries[0].Capacity)
+	assert.Equal(t, int32(3), tm.Spec.Entries[0].Capacity.Allocated)
+	assert.Nil(t, tm.Spec.Entries[0].Capacity.Reported)
+	assert.Equal(t, v1beta1.CapacitySourceControlPlane, tm.Spec.Entries[0].Capacity.Source)
+	assert.Contains(t, tm.Spec.Entries[0].Capacity.FallbackReason, "stale")
+}
+
+func TestReconcile_InvalidCapacityEndpointDoesNotBlockValidTarget(t *testing.T) {
+	now := testProbeNow
+	body, err := json.Marshal(CapacityReport{Servable: 1, ObservedAt: now})
+	require.NoError(t, err)
+	requests := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requests <- request.URL.Path
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+
+	isvc := splitISVC([]string{"invalid", "valid"}, []int32{3, 3}, []int32{3, 3})
+	isvc.Status.Placement.Candidates[0].Endpoint = &apis.URL{Host: "invalid.example"}
+	validEndpoint, err := apis.ParseURL(server.URL)
+	require.NoError(t, err)
+	isvc.Status.Placement.Candidates[1].Endpoint = validEndpoint
+	cfg := controllerTestConfig()
+	cfg.Capacity = controllerTestCapacityConfig()
+	r, c := newReconciler(t, cfg, isvc)
+	r.Capacity = newControllerCapacityPoller(t, NewObserverClient(), clocktesting.NewFakeClock(now))
+
+	result := reconcile(t, r)
+
+	assert.False(t, result.Requeue)
+	assert.Equal(t, cfg.Capacity.Period, result.RequeueAfter)
+	select {
+	case path := <-requests:
+		assert.Equal(t, cfg.Capacity.Path, path)
+	default:
+		t.Fatal("valid endpoint was not capacity-polled")
+	}
+	tm, exists := getTrafficMap(t, c)
+	require.True(t, exists)
+	require.Len(t, tm.Spec.Entries, 2)
+	require.NotNil(t, tm.Spec.Entries[0].Capacity)
+	assert.Nil(t, tm.Spec.Entries[0].Capacity.Reported)
+	assert.NotEmpty(t, tm.Spec.Entries[0].Capacity.FallbackReason)
+	require.NotNil(t, tm.Spec.Entries[1].Capacity)
+	require.NotNil(t, tm.Spec.Entries[1].Capacity.Reported)
+	assert.Equal(t, int32(1), *tm.Spec.Entries[1].Capacity.Reported)
+}
+
+func TestReconcile_InlineCapacityDisableSkipsGlobalCapacity(t *testing.T) {
+	requests := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests <- struct{}{}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	isvc := splitISVC([]string{"a"}, []int32{3}, []int32{3})
+	endpoint, err := apis.ParseURL(server.URL)
+	require.NoError(t, err)
+	isvc.Status.Placement.Candidates[0].Endpoint = endpoint
+	isvc.Spec.Routing = &v1beta1.RoutingSpec{
+		Capacity: &v1beta1.RoutingCapacitySpec{Disabled: true},
+	}
+	cfg := controllerTestConfig()
+	cfg.Capacity = controllerTestCapacityConfig()
+	r, c := newReconciler(t, cfg, isvc)
+	r.Capacity = newControllerCapacityPoller(t, NewObserverClient(), clocktesting.NewFakeClock(testProbeNow))
+
+	result := reconcile(t, r)
+
+	assert.False(t, result.Requeue)
+	assert.Zero(t, result.RequeueAfter)
+	assert.Empty(t, requests, "an explicit inline disable must suppress inherited capacity polling")
+	tm, exists := getTrafficMap(t, c)
+	require.True(t, exists)
+	require.Len(t, tm.Spec.Entries, 1)
+	require.NotNil(t, tm.Spec.Entries[0].Capacity)
+	assert.Nil(t, tm.Spec.Entries[0].Capacity.Reported)
+	assert.Equal(t, int32(3), tm.Spec.Entries[0].Capacity.Allocated)
+	assert.Equal(t, v1beta1.CapacitySourceControlPlane, tm.Spec.Entries[0].Capacity.Source)
+	assert.Empty(t, tm.Spec.Entries[0].Capacity.FallbackReason)
+}
+
+func TestReconcile_UsesEarliestObservationDeadline(t *testing.T) {
+	now := testProbeNow
+	clk := clocktesting.NewFakeClock(now)
+	capacityBody, err := json.Marshal(CapacityReport{Servable: 3, ObservedAt: now})
+	require.NoError(t, err)
+	requests := make(chan string, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requests <- request.URL.Path
+		if request.URL.Path == "/capacity" {
+			clk.Step(3 * time.Second)
+			_, _ = w.Write(capacityBody)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	isvc := splitISVC([]string{"a"}, []int32{3}, []int32{3})
+	endpoint, err := apis.ParseURL(server.URL)
+	require.NoError(t, err)
+	isvc.Status.Placement.Candidates[0].Endpoint = endpoint
+	cfg := controllerTestConfig()
+	cfg.Probe = testProbeConfig()
+	cfg.Probe.Period = 5 * time.Second
+	cfg.Capacity = controllerTestCapacityConfig()
+	cfg.Capacity.Period = 8 * time.Second
+	executor, _, _ := startTestObserverExecutor(t, 1, 1)
+	prober, err := NewProber(executor, NewObserverClient(), clk, 1<<10, log.Log)
+	require.NoError(t, err)
+	capacity, err := NewCapacityPoller(executor, NewObserverClient(), clk, 1<<10, log.Log)
+	require.NoError(t, err)
+	r, _ := newReconciler(t, cfg, isvc)
+	r.Prober = prober
+	r.Capacity = capacity
+
+	result := reconcile(t, r)
+
+	assert.False(t, result.Requeue)
+	assert.Equal(t, 2*time.Second, result.RequeueAfter,
+		"capacity work elapsed after the probe must be subtracted from the probe deadline")
+	assert.Len(t, requests, 2)
+}
+
+func TestReconcile_EnabledCapacityRequiresPoller(t *testing.T) {
+	isvc := splitISVC([]string{"a"}, []int32{3}, []int32{3})
+	cfg := controllerTestConfig()
+	cfg.Capacity = controllerTestCapacityConfig()
+	r, c := newReconciler(t, cfg, isvc)
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: client.ObjectKeyFromObject(isvc),
+	})
+
+	require.ErrorContains(t, err, "capacity polling is enabled but no poller is configured")
+	_, exists := getTrafficMap(t, c)
+	assert.False(t, exists)
+}
+
+func TestReconcile_ValidatesCompleteRoutingPolicyBeforeObservation(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*v1beta1.InferenceService)
+		wantErr string
+	}{
+		{
+			name: "duplicate capacity-factor sources",
+			mutate: func(isvc *v1beta1.InferenceService) {
+				isvc.Spec.Routing = &v1beta1.RoutingSpec{
+					CapacityFactors: map[string]resource.Quantity{"a": resource.MustParse("1")},
+				}
+				//nolint:staticcheck // exercises rejection of the deprecated compatibility field
+				isvc.Spec.Placement.CapacityFactors = map[string]resource.Quantity{"a": resource.MustParse("1")}
+			},
+			wantErr: "must not both be set",
+		},
+		{
+			name: "non-positive routing capacity factor",
+			mutate: func(isvc *v1beta1.InferenceService) {
+				isvc.Spec.Routing = &v1beta1.RoutingSpec{
+					CapacityFactors: map[string]resource.Quantity{"a": resource.MustParse("0")},
+				}
+			},
+			wantErr: "must be positive",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			isvc := splitISVC([]string{"a"}, []int32{3}, []int32{3})
+			tt.mutate(isvc)
+			r, c := newReconciler(t, controllerTestConfig(), isvc)
+
+			_, err := r.Reconcile(context.Background(), ctrl.Request{
+				NamespacedName: client.ObjectKeyFromObject(isvc),
+			})
+
+			require.ErrorContains(t, err, tt.wantErr)
+			_, exists := getTrafficMap(t, c)
+			assert.False(t, exists)
+		})
+	}
+}
+
+func TestReconcile_NotPlacedForgetsStaleCapacityTargets(t *testing.T) {
+	now := testProbeNow
+	body, err := json.Marshal(CapacityReport{Servable: 1, ObservedAt: now})
+	require.NoError(t, err)
+	requests := make(chan struct{}, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests <- struct{}{}
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+
+	isvc := splitISVC([]string{"a"}, []int32{3}, []int32{3})
+	endpoint, err := apis.ParseURL(server.URL)
+	require.NoError(t, err)
+	isvc.Status.Placement.Candidates[0].Endpoint = endpoint
+	cfg := controllerTestConfig()
+	cfg.Capacity = controllerTestCapacityConfig()
+	policy, err := ResolveCapacityPolicy(cfg, &isvc.Spec)
+	require.NoError(t, err)
+	target := targetForCandidate(isvc, &isvc.Status.Placement.Candidates[0], "")
+	clk := clocktesting.NewFakeClock(now)
+	capacity := newControllerCapacityPoller(t, NewObserverClient(), clk)
+	r, c := newReconciler(t, cfg, isvc)
+	r.Capacity = capacity
+
+	first := reconcile(t, r)
+	assert.Equal(t, cfg.Capacity.Period, first.RequeueAfter)
+	select {
+	case <-requests:
+	default:
+		t.Fatal("initial capacity request was not issued")
+	}
+	require.NotNil(t, capacity.Reported(target, policy))
+	other := splitISVC([]string{"other-home"}, []int32{4}, []int32{4})
+	other.Name = "other-service"
+	other.UID = "other-uid"
+	otherTarget := targetForCandidate(other, &other.Status.Placement.Candidates[0], "")
+	otherReported := int32(2)
+	require.True(t, capacity.record(otherTarget, policy, &otherReported, ""))
+
+	current := &v1beta1.InferenceService{}
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(isvc), current))
+	current.Status.Placement.Phase = v1beta1.PlacementPhaseRacing
+	require.NotEmpty(t, current.Status.Placement.Candidates)
+	require.NoError(t, c.Status().Update(context.Background(), current))
+	clk.Step(cfg.Capacity.Period)
+
+	result := reconcile(t, r)
+
+	assert.False(t, result.Requeue)
+	assert.Zero(t, result.RequeueAfter)
+	select {
+	case <-requests:
+		t.Fatal("a non-Placed InferenceService must not be capacity-polled")
+	default:
+	}
+	assert.Nil(t, capacity.Reported(target, policy), "stale capacity state must be forgotten after placement demotion")
+	require.NotNil(t, capacity.Reported(otherTarget, policy), "reconciling one service must not reset another service's state")
+}
+
 func TestReconcile_NotPlacedForgetsStaleProbeTargets(t *testing.T) {
 	requests := make(chan struct{}, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -729,11 +1116,11 @@ func TestReconcile_NotPlacedForgetsStaleProbeTargets(t *testing.T) {
 func TestBuildSpec_NoRoutableCapacityIsReportedPrecisely(t *testing.T) {
 	isvc := splitISVC([]string{"a", "b"}, []int32{7, 3}, []int32{7, 3})
 	zero := int32(0)
-	capacity := testCapacityState()
-	recordCapacity(t, capacity, isvc, 0, &zero, "")
-	recordCapacity(t, capacity, isvc, 1, &zero, "")
+	capacity, capacityPolicy := testCapacityState(t)
+	recordCapacity(t, capacity, capacityPolicy, isvc, 0, &zero, "")
+	recordCapacity(t, capacity, capacityPolicy, isvc, 1, &zero, "")
 
-	spec, status, reason := buildSpec(isvc, ResolvedProbePolicy{}, nil, capacity)
+	spec, status, reason := buildSpec(isvc, ResolvedProbePolicy{}, capacityPolicy, nil, capacity)
 	require.Len(t, spec.Entries, 2)
 	assert.Equal(t, int32(0), spec.Entries[0].Weight)
 	assert.Equal(t, int32(0), spec.Entries[1].Weight)
@@ -745,10 +1132,10 @@ func TestBuildSpec_NoRoutableCapacityIsReportedPrecisely(t *testing.T) {
 
 func TestBuildSpec_RecordsCapacityFallbackReason(t *testing.T) {
 	isvc := splitISVC([]string{"a"}, []int32{7}, []int32{7})
-	capacity := testCapacityState()
-	recordCapacity(t, capacity, isvc, 0, nil, "capacity request timed out")
+	capacity, capacityPolicy := testCapacityState(t)
+	recordCapacity(t, capacity, capacityPolicy, isvc, 0, nil, "capacity request timed out")
 
-	spec, status, reason := buildSpec(isvc, ResolvedProbePolicy{}, nil, capacity)
+	spec, status, reason := buildSpec(isvc, ResolvedProbePolicy{}, capacityPolicy, nil, capacity)
 
 	require.Len(t, spec.Entries, 1)
 	require.NotNil(t, spec.Entries[0].Capacity)
@@ -759,17 +1146,42 @@ func TestBuildSpec_RecordsCapacityFallbackReason(t *testing.T) {
 	assert.Equal(t, v1beta1.TrafficMapReasonRoutable, reason)
 }
 
+func TestBuildSpec_ExpiresCapacityBeforeProjection(t *testing.T) {
+	isvc := splitISVC([]string{"a"}, []int32{7}, []int32{7})
+	capacity, capacityPolicy := testCapacityState(t)
+	target := targetForCandidate(isvc, &isvc.Status.Placement.Candidates[0], "")
+	reported := int32(2)
+	observedAt := capacityTestNow.Add(-capacityPolicy.Capacity.MaxAge + time.Second)
+	require.True(t, capacity.recordAt(target, capacityPolicy, &reported, observedAt, ""))
+
+	spec, _, _ := buildSpec(isvc, ResolvedProbePolicy{}, capacityPolicy, nil, capacity)
+	require.Len(t, spec.Entries, 1)
+	require.NotNil(t, spec.Entries[0].Capacity)
+	assert.Equal(t, int32(2), spec.Entries[0].Capacity.Allocated)
+	assert.Equal(t, v1beta1.CapacitySourceEndpoint, spec.Entries[0].Capacity.Source)
+	assert.Empty(t, spec.Entries[0].Capacity.FallbackReason)
+
+	capacity.Clock.(*clocktesting.FakeClock).Step(time.Second)
+	spec, _, _ = buildSpec(isvc, ResolvedProbePolicy{}, capacityPolicy, nil, capacity)
+	require.Len(t, spec.Entries, 1)
+	require.NotNil(t, spec.Entries[0].Capacity)
+	assert.Equal(t, int32(7), spec.Entries[0].Capacity.Allocated)
+	assert.Equal(t, v1beta1.CapacitySourceControlPlane, spec.Entries[0].Capacity.Source)
+	assert.Nil(t, spec.Entries[0].Capacity.Reported)
+	assert.Contains(t, spec.Entries[0].Capacity.FallbackReason, "stale")
+}
+
 func TestBuildSpec_ProbeFailureCannotMaskZeroCapacity(t *testing.T) {
 	for _, policy := range []AllFailedPolicy{AllFailedPolicyPreserveTraffic, AllFailedPolicyDrain} {
 		t.Run(string(policy), func(t *testing.T) {
 			isvc := splitISVC([]string{"a", "b"}, []int32{7, 3}, []int32{7, 3})
 			zero := int32(0)
-			capacity := testCapacityState()
-			recordCapacity(t, capacity, isvc, 0, &zero, "")
-			recordCapacity(t, capacity, isvc, 1, &zero, "")
+			capacity, capacityPolicy := testCapacityState(t)
+			recordCapacity(t, capacity, capacityPolicy, isvc, 0, &zero, "")
+			recordCapacity(t, capacity, capacityPolicy, isvc, 1, &zero, "")
 			probe, resolved := failingProbeState(t, isvc, policy, "a", "b")
 
-			spec, status, reason := buildSpec(isvc, resolved, probe, capacity)
+			spec, status, reason := buildSpec(isvc, resolved, capacityPolicy, probe, capacity)
 			require.Len(t, spec.Entries, 2)
 			assert.Equal(t, int32(0), spec.Entries[0].Weight)
 			assert.Equal(t, int32(0), spec.Entries[1].Weight)
@@ -783,7 +1195,7 @@ func TestBuildSpec_PreserveTrafficKeepsReadyCapacityOnFleetWideProbeFailure(t *t
 	isvc := splitISVC([]string{"a", "b"}, []int32{7, 3}, []int32{7, 3})
 	p, resolved := failingProbeState(t, isvc, AllFailedPolicyPreserveTraffic, "a", "b")
 
-	spec, status, reason := buildSpec(isvc, resolved, p, nil)
+	spec, status, reason := buildSpec(isvc, resolved, ResolvedCapacityPolicy{}, p, nil)
 	require.Len(t, spec.Entries, 2)
 	assert.Equal(t, int32(7), spec.Entries[0].Weight)
 	assert.Equal(t, int32(3), spec.Entries[1].Weight)
@@ -797,7 +1209,7 @@ func TestBuildSpec_AllProbeFailuresCanDrainEveryHome(t *testing.T) {
 	isvc := splitISVC([]string{"a", "b"}, []int32{7, 3}, []int32{7, 3})
 	p, resolved := failingProbeState(t, isvc, AllFailedPolicyDrain, "a", "b")
 
-	spec, status, reason := buildSpec(isvc, resolved, p, nil)
+	spec, status, reason := buildSpec(isvc, resolved, ResolvedCapacityPolicy{}, p, nil)
 	require.Len(t, spec.Entries, 2)
 	assert.Equal(t, int32(0), spec.Entries[0].Weight)
 	assert.Equal(t, int32(0), spec.Entries[1].Weight)
@@ -809,7 +1221,7 @@ func TestBuildSpec_PreserveTrafficRequiresEveryProbeToFail(t *testing.T) {
 	isvc := splitISVC([]string{"a", "b"}, []int32{7, 3}, []int32{7, 0})
 	p, resolved := failingProbeState(t, isvc, AllFailedPolicyPreserveTraffic, "a")
 
-	spec, status, reason := buildSpec(isvc, resolved, p, nil)
+	spec, status, reason := buildSpec(isvc, resolved, ResolvedCapacityPolicy{}, p, nil)
 	require.Len(t, spec.Entries, 2)
 	assert.Equal(t, int32(0), spec.Entries[0].Weight)
 	assert.Equal(t, int32(0), spec.Entries[1].Weight)
@@ -912,18 +1324,12 @@ func TestReconcile_CapacityFactorWeightsHomes(t *testing.T) {
 }
 
 func TestReconcile_RoutingCapacityFactorWeightsHomes(t *testing.T) {
-	// The routing-level factor is the canonical field. Even if an object that
-	// bypassed admission also carries the deprecated placement alias, the
-	// projection deterministically uses routing.
+	// The routing-level factor is the canonical field.
 	isvc := splitISVC([]string{"a", "b"}, []int32{5, 5}, []int32{5, 5})
 	isvc.Spec.Routing = &v1beta1.RoutingSpec{
 		CapacityFactors: map[string]resource.Quantity{
 			"a": resource.MustParse("2"),
 		},
-	}
-	//nolint:staticcheck // compatibility coverage for deprecated spec.placement.capacityFactors
-	isvc.Spec.Placement.CapacityFactors = map[string]resource.Quantity{
-		"a": resource.MustParse("3"),
 	}
 	r, c := newReconciler(t, controllerTestConfig(), isvc)
 
@@ -958,68 +1364,33 @@ func TestReconcile_FractionalCapacityFactor(t *testing.T) {
 	assert.Equal(t, int32(2), tm.Spec.Entries[1].Weight)
 }
 
-func TestCapacityTargetsRequireLiveEligibleExactOwner(t *testing.T) {
-	newService := func(name string) *v1beta1.InferenceService {
-		isvc := splitISVC([]string{"home"}, []int32{3}, []int32{3})
-		isvc.Name = name
-		isvc.UID = types.UID(name + "-uid")
-		return isvc
-	}
-	newMap := func(isvc *v1beta1.InferenceService) v1beta1.TrafficMap {
-		return v1beta1.TrafficMap{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      isvc.Name,
-				Namespace: isvc.Namespace,
-				OwnerReferences: []metav1.OwnerReference{
-					*metav1.NewControllerRef(isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
-				},
-			},
-			Spec: v1beta1.TrafficMapSpec{
-				Service: isvc.Name,
-				Entries: []v1beta1.TrafficMapEntry{{
-					Cluster:  "home",
-					Endpoint: apis.HTTPS(isvc.Name + ".example"),
-				}},
-			},
-		}
+func TestBuildSpec_CapacityStateIsIsolatedByPolicy(t *testing.T) {
+	isvc := splitISVC([]string{"a"}, []int32{7}, []int32{7})
+	capacity, originalPolicy := testCapacityState(t)
+	zero := int32(0)
+	recordCapacity(t, capacity, originalPolicy, isvc, 0, &zero, "")
+
+	changedConfig := originalPolicy.Capacity
+	changedConfig.Period += time.Second
+	changedDigest, err := capacityPolicyDigest(changedConfig)
+	require.NoError(t, err)
+	changedPolicy := ResolvedCapacityPolicy{
+		Enabled:      true,
+		Capacity:     changedConfig,
+		PolicyDigest: changedDigest,
 	}
 
-	live := newService("live")
-	optedOut := newService("opted-out")
-	disabled := false
-	optedOut.Spec.Routing = &v1beta1.RoutingSpec{Enabled: &disabled}
-	ineligible := newService("ineligible")
-	ineligible.Spec.Placement.Requirements = ""
-	notPlaced := newService("not-placed")
-	notPlaced.Status.Placement.Phase = v1beta1.PlacementPhaseRacing
-	deleting := newService("deleting")
-	now := metav1.Now()
-	deleting.DeletionTimestamp = &now
-	uidMismatch := newService("uid-mismatch")
-	unowned := newService("unowned")
+	spec, status, reason := buildSpec(
+		isvc, ResolvedProbePolicy{}, changedPolicy, nil, capacity,
+	)
 
-	maps := []v1beta1.TrafficMap{
-		newMap(live),
-		newMap(optedOut),
-		newMap(ineligible),
-		newMap(notPlaced),
-		newMap(deleting),
-		newMap(uidMismatch),
-		newMap(unowned),
-	}
-	maps[5].OwnerReferences[0].UID = "replaced-isvc-uid"
-	maps[6].OwnerReferences = nil
-	services := []v1beta1.InferenceService{
-		*live, *optedOut, *ineligible, *notPlaced, *deleting, *uidMismatch, *unowned,
-	}
-
-	targets := capacityTargets(maps, services, controllerTestConfig())
-
-	require.Len(t, targets, 1)
-	assert.Equal(t, live.UID, targets[0].OwnerUID)
-	assert.Equal(t, client.ObjectKeyFromObject(live), targets[0].Map)
-	assert.Equal(t, "home", targets[0].Cluster)
-	assert.Equal(t, "https://live.example", targets[0].URL)
+	require.Len(t, spec.Entries, 1)
+	require.NotNil(t, spec.Entries[0].Capacity)
+	assert.Equal(t, int32(7), spec.Entries[0].Capacity.Allocated)
+	assert.Nil(t, spec.Entries[0].Capacity.Reported)
+	assert.Equal(t, "no capacity report yet", spec.Entries[0].Capacity.FallbackReason)
+	assert.Equal(t, metav1.ConditionTrue, status)
+	assert.Equal(t, v1beta1.TrafficMapReasonRoutable, reason)
 }
 
 func TestRoutingTableChangePredicate(t *testing.T) {
@@ -1075,6 +1446,12 @@ func TestRoutingTableChangePredicate(t *testing.T) {
 	t.Run("inline probe change is admitted", func(t *testing.T) {
 		nw := base.DeepCopy()
 		nw.Spec.Routing = &v1beta1.RoutingSpec{Probe: controllerProbeSpec(testProbeConfig())}
+		assert.True(t, routingTableChange.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: nw}))
+	})
+
+	t.Run("inline capacity change is admitted", func(t *testing.T) {
+		nw := base.DeepCopy()
+		nw.Spec.Routing = &v1beta1.RoutingSpec{Capacity: controllerCapacitySpec(controllerTestCapacityConfig())}
 		assert.True(t, routingTableChange.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: nw}))
 	})
 

@@ -658,6 +658,347 @@ func TestResolveProbePolicyDigestIsCanonicalAndComplete(t *testing.T) {
 	}
 }
 
+func TestResolveCapacityPolicyEnablementAndInheritance(t *testing.T) {
+	trueValue, falseValue := true, false
+	global := testGlobalRoutingConfig()
+	tests := []struct {
+		name         string
+		global       Config
+		spec         *v1beta1.InferenceServiceSpec
+		wantEnabled  bool
+		wantCapacity CapacityConfig
+	}{
+		{
+			name:         "nil spec inherits global capacity",
+			global:       global,
+			wantEnabled:  true,
+			wantCapacity: global.Capacity,
+		},
+		{
+			name:         "nil inline enablement inherits global capacity",
+			global:       global,
+			spec:         routingISVCSpec(&v1beta1.RoutingSpec{}),
+			wantEnabled:  true,
+			wantCapacity: global.Capacity,
+		},
+		{
+			name:         "inline true retains global capacity",
+			global:       global,
+			spec:         routingISVCSpec(&v1beta1.RoutingSpec{Enabled: &trueValue}),
+			wantEnabled:  true,
+			wantCapacity: global.Capacity,
+		},
+		{
+			name:         "inline false opts out",
+			global:       global,
+			spec:         routingISVCSpec(&v1beta1.RoutingSpec{Enabled: &falseValue}),
+			wantCapacity: global.Capacity,
+		},
+		{
+			name: "inline true cannot bypass global routing gate",
+			global: func() Config {
+				cfg := global
+				cfg.Enabled = false
+				return cfg
+			}(),
+			spec:         routingISVCSpec(&v1beta1.RoutingSpec{Enabled: &trueValue}),
+			wantCapacity: global.Capacity,
+		},
+		{
+			name:   "unconfigured capacity remains disabled",
+			global: Config{Enabled: true},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ResolveCapacityPolicy(tt.global, tt.spec)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantEnabled, got.Enabled)
+			assert.Equal(t, tt.wantEnabled, got.IsEnabled())
+			assert.Equal(t, tt.wantCapacity, got.Capacity)
+			if tt.wantEnabled {
+				assert.Regexp(t, `^sha256:[0-9a-f]{64}$`, got.PolicyDigest)
+			} else {
+				assert.Empty(t, got.PolicyDigest)
+			}
+		})
+	}
+}
+
+func TestResolveCapacityPolicyInlineReplacementAndDisable(t *testing.T) {
+	global := testGlobalRoutingConfig()
+	inline := validRoutingCapacitySpec()
+	inline.Path = "/deep-capacity"
+	inline.Method = "POST"
+	inline.Period = metav1.Duration{Duration: 3 * time.Minute}
+	inline.Timeout = metav1.Duration{Duration: 9 * time.Second}
+	inline.Samples = 7
+	inline.Quorum = 3
+	inline.MaxAge = metav1.Duration{Duration: 10 * time.Minute}
+
+	got, err := ResolveCapacityPolicy(global, routingISVCSpec(&v1beta1.RoutingSpec{Capacity: inline}))
+	require.NoError(t, err)
+	assert.True(t, got.IsEnabled())
+	assert.Equal(t, CapacityConfig{
+		Path:    "/deep-capacity",
+		Method:  "POST",
+		Format:  FormatReport,
+		Period:  3 * time.Minute,
+		Timeout: 9 * time.Second,
+		Samples: 7,
+		Quorum:  3,
+		MaxAge:  10 * time.Minute,
+	}, got.Capacity)
+	assert.Regexp(t, `^sha256:[0-9a-f]{64}$`, got.PolicyDigest)
+
+	disabled, err := ResolveCapacityPolicy(global, routingISVCSpec(&v1beta1.RoutingSpec{
+		Capacity: &v1beta1.RoutingCapacitySpec{Disabled: true},
+	}))
+	require.NoError(t, err)
+	assert.False(t, disabled.IsEnabled())
+	assert.Equal(t, CapacityConfig{}, disabled.Capacity)
+	assert.Empty(t, disabled.PolicyDigest)
+}
+
+func TestResolveCapacityPolicyIgnoresUnrelatedInlineBlocks(t *testing.T) {
+	global := testGlobalRoutingConfig()
+	global.Probe.Method = "DELETE"
+	wantGlobal := cloneConfig(global)
+	inline := validRoutingCapacitySpec()
+	inline.Path = "/inline-capacity"
+
+	got, err := ResolveCapacityPolicy(global, routingISVCSpec(&v1beta1.RoutingSpec{
+		Capacity: inline,
+		Probe: &v1beta1.RoutingProbeSpec{
+			Path:   "/invalid-probe-without-statuses",
+			Method: "DELETE",
+		},
+		Publisher: &v1beta1.RoutingPublisherSpec{Options: map[string]string{
+			"": strings.Repeat("x", v1beta1.MaxRoutingPublisherOptionValueBytes+1),
+		}},
+	}))
+	require.NoError(t, err)
+	assert.True(t, got.IsEnabled())
+	assert.Equal(t, "/inline-capacity", got.Capacity.Path)
+	assert.Equal(t, wantGlobal.Probe, global.Probe)
+	assert.Equal(t, wantGlobal.Publisher, global.Publisher)
+	assert.Equal(t, wantGlobal, global)
+}
+
+func TestResolveCapacityPolicyValidationScopeAndAttribution(t *testing.T) {
+	global := testGlobalRoutingConfig()
+
+	_, err := ResolveCapacityPolicy(global, routingISVCSpec(&v1beta1.RoutingSpec{
+		Capacity: &v1beta1.RoutingCapacitySpec{Path: "/partial"},
+	}))
+	require.EqualError(t, err, "spec.routing.capacity.method is required")
+
+	_, err = ResolveCapacityPolicy(global, routingISVCSpec(&v1beta1.RoutingSpec{
+		Capacity: &v1beta1.RoutingCapacitySpec{Disabled: true, Path: "/conflicting"},
+	}))
+	require.EqualError(t, err,
+		"spec.routing.capacity.disabled must not be combined with capacity configuration fields")
+
+	invalidGlobal := global
+	invalidGlobal.Capacity.Method = "DELETE"
+	_, err = ResolveCapacityPolicy(invalidGlobal, nil)
+	require.EqualError(t, err,
+		"routing.capacity.method \"DELETE\" must be GET, HEAD, or POST")
+
+	inline := validRoutingCapacitySpec()
+	inline.Format = "Unavailable"
+	_, err = ResolveCapacityPolicy(global, routingISVCSpec(&v1beta1.RoutingSpec{Capacity: inline}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(),
+		"spec.routing.capacity.format \"Unavailable\" is not registered")
+
+	inline = validRoutingCapacitySpec()
+	inline.Options = map[string]string{"unexpected": "value"}
+	_, err = ResolveCapacityPolicy(global, routingISVCSpec(&v1beta1.RoutingSpec{Capacity: inline}))
+	require.EqualError(t, err,
+		"spec.routing.capacity.options is not accepted for format \"Report\"")
+
+	falseValue := false
+	invalidInline := &v1beta1.RoutingCapacitySpec{Path: "/partial"}
+	_, err = ResolveCapacityPolicy(global, routingISVCSpec(&v1beta1.RoutingSpec{
+		Enabled:  &falseValue,
+		Capacity: invalidInline,
+	}))
+	require.EqualError(t, err, "spec.routing.capacity.method is required")
+
+	invalidGlobal.Enabled = false
+	got, err := ResolveCapacityPolicy(invalidGlobal, nil)
+	require.NoError(t, err)
+	assert.False(t, got.IsEnabled())
+	assert.Empty(t, got.PolicyDigest)
+}
+
+func TestResolveCapacityPolicyEnforcesObserverBounds(t *testing.T) {
+	t.Run("global minimum period", func(t *testing.T) {
+		global := testGlobalRoutingConfig()
+		global.Observer.MinPeriod = 3 * time.Minute
+
+		_, err := ResolveCapacityPolicy(global, nil)
+		require.EqualError(t, err,
+			"routing.capacity.period (2m0s) must be at least routing.observer.minPeriod (3m0s)")
+	})
+
+	t.Run("inline minimum period is attributed to spec", func(t *testing.T) {
+		global := testGlobalRoutingConfig()
+		global.Observer.MinPeriod = time.Minute
+		inline := validRoutingCapacitySpec()
+
+		_, err := ResolveCapacityPolicy(global, routingISVCSpec(&v1beta1.RoutingSpec{Capacity: inline}))
+		require.EqualError(t, err,
+			"spec.routing.capacity.period (30s) must be at least routing.observer.minPeriod (1m0s)")
+
+		inline.Period = metav1.Duration{Duration: time.Minute}
+		inline.MaxAge = metav1.Duration{Duration: 2 * time.Minute}
+		got, err := ResolveCapacityPolicy(global, routingISVCSpec(&v1beta1.RoutingSpec{Capacity: inline}))
+		require.NoError(t, err)
+		assert.True(t, got.IsEnabled())
+	})
+
+	t.Run("global maximum samples", func(t *testing.T) {
+		global := testGlobalRoutingConfig()
+		global.Observer.MaxSamples = global.Capacity.Samples - 1
+
+		_, err := ResolveCapacityPolicy(global, nil)
+		require.EqualError(t, err,
+			"routing.capacity.samples (6) must not exceed routing.observer.maxSamples (5)")
+	})
+
+	t.Run("inline maximum samples is attributed to spec", func(t *testing.T) {
+		global := testGlobalRoutingConfig()
+		global.Observer.MaxSamples = 9
+		inline := validRoutingCapacitySpec()
+
+		_, err := ResolveCapacityPolicy(global, routingISVCSpec(&v1beta1.RoutingSpec{Capacity: inline}))
+		require.EqualError(t, err,
+			"spec.routing.capacity.samples (10) must not exceed routing.observer.maxSamples (9)")
+
+		global.Observer.MaxSamples = 10
+		got, err := ResolveCapacityPolicy(global, routingISVCSpec(&v1beta1.RoutingSpec{Capacity: inline}))
+		require.NoError(t, err)
+		assert.True(t, got.IsEnabled())
+	})
+}
+
+func TestCapacityPolicyDigestIsCanonicalAndComplete(t *testing.T) {
+	base := CapacityConfig{
+		Path:    "/capacity",
+		Method:  "POST",
+		Format:  "Custom",
+		Options: map[string]string{"zeta": "last", "alpha": "first"},
+		Period:  2 * time.Minute,
+		Timeout: 5 * time.Second,
+		Samples: 8,
+		Quorum:  3,
+		MaxAge:  10 * time.Minute,
+	}
+
+	digest, err := capacityPolicyDigest(base)
+	require.NoError(t, err)
+	assert.Regexp(t, `^sha256:[0-9a-f]{64}$`, digest)
+	assert.Equal(t, []capacityPolicyOption{
+		{Key: "alpha", Value: "first"},
+		{Key: "zeta", Value: "last"},
+	}, canonicalCapacityOptions(base.Options))
+
+	reordered := cloneCapacityConfig(base)
+	reordered.Options = make(map[string]string, len(base.Options))
+	reordered.Options["alpha"] = "first"
+	reordered.Options["zeta"] = "last"
+	reorderedDigest, err := capacityPolicyDigest(reordered)
+	require.NoError(t, err)
+	assert.Equal(t, digest, reorderedDigest,
+		"map insertion order must not change the digest")
+
+	withoutOptions := cloneCapacityConfig(base)
+	withoutOptions.Options = nil
+	emptyOptions := cloneCapacityConfig(base)
+	emptyOptions.Options = map[string]string{}
+	nilDigest, err := capacityPolicyDigest(withoutOptions)
+	require.NoError(t, err)
+	emptyDigest, err := capacityPolicyDigest(emptyOptions)
+	require.NoError(t, err)
+	assert.Equal(t, nilDigest, emptyDigest,
+		"nil and empty option maps represent the same policy")
+
+	mutations := map[string]func(*CapacityConfig){
+		"path": func(capacity *CapacityConfig) {
+			capacity.Path = "/other"
+		},
+		"method": func(capacity *CapacityConfig) {
+			capacity.Method = "GET"
+		},
+		"format": func(capacity *CapacityConfig) {
+			capacity.Format = "Other"
+		},
+		"option key": func(capacity *CapacityConfig) {
+			capacity.Options = map[string]string{"beta": "first", "zeta": "last"}
+		},
+		"option value": func(capacity *CapacityConfig) {
+			capacity.Options["alpha"] = "changed"
+		},
+		"period": func(capacity *CapacityConfig) {
+			capacity.Period += time.Second
+		},
+		"timeout": func(capacity *CapacityConfig) {
+			capacity.Timeout += time.Second
+		},
+		"samples": func(capacity *CapacityConfig) {
+			capacity.Samples++
+		},
+		"quorum": func(capacity *CapacityConfig) {
+			capacity.Quorum++
+		},
+		"max age": func(capacity *CapacityConfig) {
+			capacity.MaxAge += time.Second
+		},
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			changed := cloneCapacityConfig(base)
+			mutate(&changed)
+			got, err := capacityPolicyDigest(changed)
+			require.NoError(t, err)
+			assert.NotEqual(t, digest, got)
+		})
+	}
+}
+
+func TestResolveCapacityPolicyMutationIsolation(t *testing.T) {
+	global := testGlobalRoutingConfig()
+	global.Enabled = false
+	global.Capacity.Format = "Global"
+	global.Capacity.Options = map[string]string{"source": "global"}
+
+	first, err := ResolveCapacityPolicy(global, nil)
+	require.NoError(t, err)
+	second, err := ResolveCapacityPolicy(global, nil)
+	require.NoError(t, err)
+	first.Capacity.Options["source"] = "first"
+	assert.Equal(t, map[string]string{"source": "global"}, global.Capacity.Options)
+	assert.Equal(t, map[string]string{"source": "global"}, second.Capacity.Options)
+
+	inline := validRoutingCapacitySpec()
+	inline.Format = "Inline"
+	inline.Options = map[string]string{"source": "inline"}
+	spec := routingISVCSpec(&v1beta1.RoutingSpec{Capacity: inline})
+	first, err = ResolveCapacityPolicy(global, spec)
+	require.NoError(t, err)
+	second, err = ResolveCapacityPolicy(global, spec)
+	require.NoError(t, err)
+	first.Capacity.Options["source"] = "first"
+	assert.Equal(t, map[string]string{"source": "inline"}, inline.Options)
+	assert.Equal(t, map[string]string{"source": "inline"}, second.Capacity.Options)
+
+	inline.Options["source"] = "source-mutated"
+	assert.Equal(t, map[string]string{"source": "inline"}, second.Capacity.Options)
+}
+
 func routingISVCSpec(routing *v1beta1.RoutingSpec) *v1beta1.InferenceServiceSpec {
 	return &v1beta1.InferenceServiceSpec{Routing: routing}
 }

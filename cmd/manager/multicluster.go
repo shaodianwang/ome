@@ -381,9 +381,9 @@ func setupMultiCluster(mgr manager.Manager, clientSet kubernetes.Interface, opti
 			return fmt.Errorf("create routing endpoint prober: %w", err)
 		}
 		capacity, err = placementrouting.NewCapacityPoller(
-			w.routing.Capacity,
 			executor,
 			observerClient,
+			clock.RealClock{},
 			w.routing.Observer.MaxResponseBytes,
 			ctrl.Log.WithName("controllers").WithName("PlacementRoutingCapacity"),
 		)
