@@ -151,6 +151,9 @@ const (
 	EventReasonInstancesResetRejected        = types.EventReasonInstancesResetRejected
 	EventReasonInstanceDemoted               = types.EventReasonInstanceDemoted
 	EventReasonPodForceDeleted               = types.EventReasonPodForceDeleted
+	EventReasonDrainOverdue                  = types.EventReasonDrainOverdue
+	EventReasonRepairHeld                    = types.EventReasonRepairHeld
+	DrainOverdueReason                       = types.DrainOverdueReason
 	EventReasonPodDeleteBlockedByFinalizer   = types.EventReasonPodDeleteBlockedByFinalizer
 	EventReasonMigrationRequestAccepted      = types.EventReasonMigrationRequestAccepted
 	EventReasonMigrationRequestRejected      = types.EventReasonMigrationRequestRejected

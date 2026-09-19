@@ -28,6 +28,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -216,7 +217,24 @@ func executeActions(ctx context.Context, deps Deps, input ReconcileInput, plan C
 		case ActionRestart:
 			anyRestarting := false
 			var restartErrs []error
+			admission := newRepairAdmission(input, plan)
+			// First denial of the pass, kept so a Component that opens
+			// nothing still reports which layer is holding it.
+			var held *RolloutHold
+			var heldIndex int32
 			for _, sel := range action.Restarts {
+				// A repair that opens a new outage is admitted like an
+				// update start; one that recovers capacity already lost,
+				// or drives an open repair, is not held by anything.
+				if sel.OpensUnavailability {
+					allowed, denial := admission.admit(ctx, plan, sel.Instance.Index)
+					if !allowed {
+						if held == nil {
+							held, heldIndex = denial, sel.Instance.Index
+						}
+						continue
+					}
+				}
 				done, rerr := workloadops.Restart(ctx, deps, input, plan, sel.Instance, sel.Reason)
 				if rerr != nil {
 					logf.FromContext(ctx).Error(rerr, "restart pass: instance failed",
@@ -228,22 +246,35 @@ func executeActions(ctx context.Context, deps Deps, input ReconcileInput, plan C
 					anyRestarting = true
 				}
 			}
-			if anyRestarting {
-				result := ctrl.Result{RequeueAfter: workloadops.RestartRequeueInterval}
+			// A held repair consumes the pass exactly as an in-flight one
+			// does. Nothing in the cluster changes while the denial
+			// stands, so no watch event is coming to re-consult on; the
+			// pass has to carry the wake-up itself.
+			if anyRestarting || held != nil {
+				interval := workloadops.RestartRequeueInterval
+				if !anyRestarting {
+					interval = ratioGateRequeueInterval
+				}
+				result := ctrl.Result{RequeueAfter: interval}
 				if hasActionKind(d.Actions[actionIndex+1:], ActionCreate) {
 					// Surge-free indices are materialized even when another
-					// Instance's restart failed this pass: a persistently
-					// failing restart must not starve an unrelated scale-up.
+					// Instance's restart failed or was held this pass: a
+					// stalled repair must not starve an unrelated scale-up.
 					freshPlan := planExcludingRestartSelections(plan, action.Restarts)
 					createResult, ferr := workloadops.CreateFreshIndices(ctx, deps, input, freshPlan, target)
 					if ferr != nil {
 						restartErrs = append(restartErrs, fmt.Errorf("workload.Reconcile: create fresh indices during restart: %w", ferr))
 						return createResult, false, errors.Join(restartErrs...)
 					}
-					result = foldRetryAfter(createResult, workloadops.RestartRequeueInterval)
+					result = foldRetryAfter(createResult, interval)
 				}
 				if len(restartErrs) > 0 {
 					return ctrl.Result{}, false, errors.Join(restartErrs...)
+				}
+				// Only when the pass opened nothing: a repair that ran is
+				// forward progress, and its held peers are ordinary pacing.
+				if !anyRestarting {
+					reportRepairHeld(deps, input, plan, heldIndex, held)
 				}
 				return result, false, nil
 			}
@@ -484,34 +515,28 @@ func executeUpdatePass(ctx context.Context, deps Deps, input ReconcileInput, pla
 			// budget the same way coordination/ratio.go's CheckSurge /
 			// CheckUnavailability project against the group budget.
 			if isSurgeStrategy {
-				if sel.SurgeBudget != BudgetNoLimit {
-					projected := sel.PriorSurgeInFlight + inFlightSurge + 1
-					if projected > sel.SurgeBudget {
-						anyGated = true
-						if hold == nil {
-							hold = &RolloutHold{
-								Gate:   RolloutHoldGateBudget,
-								Reason: fmt.Sprintf("per-Component surge budget %d exhausted (would become %d)", sel.SurgeBudget, projected),
-								Target: target.Name,
-							}
+				if projected, denied := budgetDenies(sel.SurgeBudget, sel.PriorSurgeInFlight, inFlightSurge); denied {
+					anyGated = true
+					if hold == nil {
+						hold = &RolloutHold{
+							Gate:   RolloutHoldGateBudget,
+							Reason: fmt.Sprintf("per-Component surge budget %d exhausted (would become %d)", sel.SurgeBudget, projected),
+							Target: target.Name,
 						}
-						continue
 					}
+					continue
 				}
 			} else {
-				if sel.UnavailBudget != BudgetNoLimit {
-					projected := sel.PriorUnavailInFlight + inFlightUnavail + 1
-					if projected > sel.UnavailBudget {
-						anyGated = true
-						if hold == nil {
-							hold = &RolloutHold{
-								Gate:   RolloutHoldGateBudget,
-								Reason: fmt.Sprintf("per-Component unavailability budget %d exhausted (would become %d)", sel.UnavailBudget, projected),
-								Target: target.Name,
-							}
+				if projected, denied := budgetDenies(sel.UnavailBudget, sel.PriorUnavailInFlight, inFlightUnavail); denied {
+					anyGated = true
+					if hold == nil {
+						hold = &RolloutHold{
+							Gate:   RolloutHoldGateBudget,
+							Reason: fmt.Sprintf("per-Component unavailability budget %d exhausted (would become %d)", sel.UnavailBudget, projected),
+							Target: target.Name,
 						}
-						continue
 					}
+					continue
 				}
 			}
 			if input.UpdateGate != nil && !item.CoordGateExempt {
@@ -725,4 +750,81 @@ func findObservedInstanceStatus(observed []InstanceStatus, idx int32) *InstanceS
 		}
 	}
 	return nil
+}
+
+// repairAdmission paces the restart repairs that OPEN a new
+// unavailability. A wedge is usually a property of the revision, not of
+// one Instance, so without pacing a bad image or a bad argument
+// qualifies every Ready Instance in the same pass and the Component
+// recycles itself whole. The two layers an update start answers to
+// answer here too, in the same order and against the same numbers: the
+// per-Component MaxUnavailable budget, then the cross-Component
+// coordination gate. Selections denied by either wait for a later pass;
+// a repair already in flight is anchored in prior, so the pace holds
+// across passes and not merely within one.
+//
+// Lives at the executor's position, not the plan's: the coordination
+// gate reads live peer state, so it must be consulted where the pass's
+// earlier effects have already landed.
+type repairAdmission struct {
+	budget   int32
+	prior    int32
+	inFlight int32
+	gate     func(strategy UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, RolloutHoldGate, string)
+}
+
+func newRepairAdmission(input ReconcileInput, plan ComponentPlan) *repairAdmission {
+	statuses := input.ObservedState.InstanceStatuses
+	return &repairAdmission{
+		budget: PerComponentMaxUnavailableBudget(plan.UpdateStrategy.RollingUpdate, plan.Replicas),
+		prior:  CurrentUnavailableInFlight(statuses) + CurrentRestartingInFlight(statuses),
+		gate:   input.UpdateGate,
+	}
+}
+
+// admit reports whether one more repair may open this pass, charging
+// the pass's counter when it may. A repair recreates pods in place, so
+// both layers are consulted on the unavailability arm whatever the
+// Component's update strategy is: nothing about a rebuild surges.
+//
+// A denial is returned as the hold that produced it, so the caller can
+// report which layer is holding the Component back.
+func (a *repairAdmission) admit(ctx context.Context, plan ComponentPlan, index int32) (bool, *RolloutHold) {
+	if projected, denied := budgetDenies(a.budget, a.prior, a.inFlight); denied {
+		logf.FromContext(ctx).V(1).Info("crash-loop repair denied by the unavailability budget",
+			"component", plan.Component, "instance", index,
+			"budget", a.budget, "projected", projected)
+		return false, &RolloutHold{
+			Gate:   RolloutHoldGateBudget,
+			Reason: fmt.Sprintf("per-Component unavailability budget %d exhausted (would become %d)", a.budget, projected),
+		}
+	}
+	if a.gate != nil {
+		if allowed, gate, reason := a.gate(UpdateStrategyRecreatePod, 0, a.inFlight); !allowed {
+			logf.FromContext(ctx).V(1).Info("crash-loop repair denied by the coordination gate",
+				"component", plan.Component, "instance", index, "gate", gate, "reason", reason)
+			return false, &RolloutHold{Gate: gate, Reason: reason}
+		}
+	}
+	a.inFlight++
+	return true, nil
+}
+
+// reportRepairHeld announces that a Component wedged on a crash loop
+// opened no repair this pass. The Instance and the layer both go in the
+// message: which layer decides whether the operator waits for a peer
+// Component, raises MaxUnavailable, or intervenes. Repeated denials
+// render the same message, which the event recorder aggregates rather
+// than duplicating each time the pass re-consults.
+func reportRepairHeld(deps Deps, input ReconcileInput, plan ComponentPlan, index int32, held *RolloutHold) {
+	if deps.Recorder == nil || held == nil {
+		return
+	}
+	target := dispositionEventTarget(input)
+	if target == nil {
+		return
+	}
+	deps.Recorder.Eventf(target, corev1.EventTypeWarning, string(EventReasonRepairHeld),
+		"OMENative component=%s instance=%d crash-loop repair held by %s: %s",
+		plan.Component, index, held.Gate, held.Reason)
 }

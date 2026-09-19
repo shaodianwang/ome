@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,6 +44,17 @@ const InferenceReplicaConditionReady = "Ready"
 // invisible wedge (rollout stuck at N/total) for operators + dashboards.
 const InferenceReplicaConditionRolloutStalled = "RolloutStalled"
 
+// InferenceReplicaConditionDrainOverdue is an ADVISORY condition that is
+// True while at least one Instance on its way out is past the deadline
+// of the delete operation draining it. Nothing about the scale-down
+// changes while it is True — the drain keeps running and the wedged pod
+// is removed only under a configured force-delete policy — so like
+// RolloutStalled it is not a dependent of Ready: it exists to make a
+// stalled drain visible to operators and dashboards instead of leaving
+// the elapsed deadline unreported. It clears when no Instance is
+// overdue.
+const InferenceReplicaConditionDrainOverdue = "DrainOverdue"
+
 const (
 	// ReasonInstancesFailing — RolloutStalled=True: >=1 Instance recorded a
 	// terminal failure while not yet on the target revision.
@@ -50,6 +62,15 @@ const (
 	// ReasonRolloutProgressing — RolloutStalled=False: rollout in flight with
 	// no failing Instances, or no rollout in flight.
 	ReasonRolloutProgressing = "Progressing"
+)
+
+const (
+	// ReasonDrainsOverdue — DrainOverdue=True: >=1 Instance is draining
+	// past the deadline of the delete operation that owns it.
+	ReasonDrainsOverdue = "DrainsOverdue"
+	// ReasonDrainsWithinDeadline — DrainOverdue=False: every drain in
+	// flight is inside its deadline, or none is in flight.
+	ReasonDrainsWithinDeadline = "DrainsWithinDeadline"
 )
 
 // Reason strings for the InferenceReplicaConditionReady condition. Kept
@@ -244,6 +265,11 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 		// failing Instances (e.g. new-rev CrashLoopBackOff) without affecting
 		// the Ready condition above (old-rev pods keep serving).
 		apimeta.SetStatusCondition(&fresh.Status.Conditions, computeRolloutStalledCondition(&fresh.Status))
+		// Advisory DrainOverdue condition — surfaces Instances stuck on
+		// their way out past the deadline of the delete operation
+		// draining them. Derived from the rows themselves, so it clears
+		// on its own once no Instance is overdue.
+		apimeta.SetStatusCondition(&fresh.Status.Conditions, computeDrainOverdueCondition(&fresh.Status))
 		now := r.now()
 		fresh.Status.RolloutHold = nextRolloutHold(fresh.Status.RolloutHold,
 			effectiveRolloutHold(holdObserved, hold, &fresh.Status, now), metav1.NewTime(now))
@@ -502,6 +528,12 @@ func computeRolloutStalledCondition(status *v1beta1.InferenceReplicaStatus) meta
 		if s.LastFailure == nil || s.RunningRevision == status.UpdateRevision {
 			continue
 		}
+		// An announced overdue drain is a visibility record on a row
+		// leaving the Component, not a rollout failure; it carries its
+		// own condition.
+		if s.LastFailure.Reason == workload.DrainOverdueReason {
+			continue
+		}
 		// It failed before this attempt began, so it is retrying, not stuck.
 		if op := s.Operation; op != nil && !op.StartedAt.Before(&s.LastFailure.Time) {
 			continue
@@ -520,6 +552,44 @@ func computeRolloutStalledCondition(status *v1beta1.InferenceReplicaStatus) meta
 	cond.Reason = ReasonInstancesFailing
 	cond.Message = fmt.Sprintf("%d/%d Instance(s) failing rollout to %s (%s)",
 		stalled, status.Replicas, status.UpdateRevision, summarizeFailureReasons(reasons))
+	return cond
+}
+
+// computeDrainOverdueCondition derives the advisory DrainOverdue
+// condition (see InferenceReplicaConditionDrainOverdue) from the
+// announcement records the delete pass leaves on the rows it is still
+// waiting on. True while any Instance is Deleting past the deadline of
+// the delete operation draining it, counting them so an operator sees
+// how much of the scale-down is wedged.
+//
+// Derived, not written: the row's own disappearance at the end of the
+// drain clears the condition, and nothing has to remember to retract it.
+func computeDrainOverdueCondition(status *v1beta1.InferenceReplicaStatus) metav1.Condition {
+	cond := metav1.Condition{
+		Type:               InferenceReplicaConditionDrainOverdue,
+		ObservedGeneration: status.ObservedGeneration,
+		Status:             metav1.ConditionFalse,
+		Reason:             ReasonDrainsWithinDeadline,
+		Message:            "no drain is past its deadline",
+	}
+	overdue := make([]string, 0)
+	for i := range status.InstanceStatuses {
+		s := status.InstanceStatuses[i]
+		if s.Phase != v1beta1.OMENativeInstanceDeleting || s.LastFailure == nil {
+			continue
+		}
+		if s.LastFailure.Reason != workload.DrainOverdueReason {
+			continue
+		}
+		overdue = append(overdue, strconv.Itoa(int(s.Index)))
+	}
+	if len(overdue) == 0 {
+		return cond
+	}
+	cond.Status = metav1.ConditionTrue
+	cond.Reason = ReasonDrainsOverdue
+	cond.Message = fmt.Sprintf("%d Instance(s) draining past their deadline (%s)",
+		len(overdue), strings.Join(overdue, ", "))
 	return cond
 }
 

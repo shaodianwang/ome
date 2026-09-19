@@ -158,6 +158,17 @@ func DeleteBatch(
 			result.RequeueAfter = remaining
 		}
 	}
+	// Visibility for the rows this wave is still waiting on. Runs after
+	// the drive so it reports the wave's own effects, and it changes
+	// nothing the completion below reads: the record it writes is not
+	// part of the delete identity the completion guard tests.
+	if err := announceOverdueDrains(ctx, deps, input, plan, podsByInstance); err != nil {
+		if errors.Is(err, workload.ErrStatusMutationPrecondition) || errors.Is(err, workload.ErrStatusOwnerGone) {
+			result.ImmediateRequeue = true
+			return result, nil
+		}
+		return DeleteBatchResult{}, err
+	}
 	if len(completed) == 0 {
 		return result, nil
 	}

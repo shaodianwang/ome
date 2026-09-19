@@ -1244,7 +1244,7 @@ func TestAggregateStatus_BadImageSurge_EscalatesInstanceToFailed(t *testing.T) {
 	oldPod := podForIR(ir, 0, "default", 0, true /*ready*/, true /*serving*/)
 	// Surge pod at ordinal 1 — image pulled into ImagePullBackOff.
 	// CreationTimestamp set well past the grace window so
-	// PodStuckPullFailure's age check fires.
+	// PodStuckInTerminalWaiting's age check fires.
 	surgePod := podForIR(ir, 0, "default", 1, false /*ready*/, false /*serving*/)
 	surgePod.CreationTimestamp = metav1.NewTime(time.Now().Add(-5 * time.Second))
 	surgePod.Status.ContainerStatuses = []corev1.ContainerStatus{

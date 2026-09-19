@@ -74,9 +74,15 @@ func TestReconcileDeleteOwnedReboundFinishesBeforeRecreate(t *testing.T) {
 		t.Fatalf("delete pass result = %+v", result)
 	}
 	status := store.status(0)
-	if store.writes != 0 || status == nil || status.Phase != workload.InstancePhaseDeleting ||
-		status.Operation == nil || status.Operation.Type != workload.InstanceOperationDelete || status.LastFailure != nil {
+	if status == nil || status.Phase != workload.InstancePhaseDeleting ||
+		status.Operation == nil || status.Operation.Type != workload.InstanceOperationDelete {
 		t.Fatalf("delete pass altered durable status: writes=%d status=%+v", store.writes, store.status(0))
+	}
+	// The row's drain is past its deadline, which is announced on the
+	// record and nowhere else: no failure, no phase move, no attempt
+	// spent. Everything the rest of this test drives still runs.
+	if status.LastFailure == nil || status.LastFailure.Reason != workload.DrainOverdueReason {
+		t.Fatalf("overdue drain not announced on the record: %+v", status.LastFailure)
 	}
 	if warnings != 0 {
 		t.Fatalf("delete pass emitted %d generic failure warnings", warnings)
@@ -88,6 +94,12 @@ func TestReconcileDeleteOwnedReboundFinishesBeforeRecreate(t *testing.T) {
 		t.Fatalf("resources finalized before Pods disappeared: %d", finalized)
 	}
 
+	// One write per overdue episode. Writes are counted cumulatively,
+	// so the later passes assert their own against this baseline.
+	drained := store.writes
+	if drained != 1 {
+		t.Fatalf("delete pass writes = %d, want exactly 1 (the announcement)", drained)
+	}
 	expectations.ObservedDelete(in.Key.Namespace, in.Key.OwnerName, in.Key.Component, 0)
 	store.sync(&in)
 	in.AuthoritativePods = &workload.ComponentPodSnapshot{ByInstance: map[int32][]*corev1.Pod{}}
@@ -98,7 +110,7 @@ func TestReconcileDeleteOwnedReboundFinishesBeforeRecreate(t *testing.T) {
 	if !result.Requeue || result.RequeueAfter != 0 {
 		t.Fatalf("completion pass must force a fresh plan, got %+v", result)
 	}
-	if finalized != 1 || store.writes != 1 || store.status(0) != nil {
+	if finalized != 1 || store.writes != drained+1 || store.status(0) != nil {
 		t.Fatalf("completion state = finalized:%d writes:%d status:%+v", finalized, store.writes, store.status(0))
 	}
 	pods := &corev1.PodList{}
@@ -118,7 +130,7 @@ func TestReconcileDeleteOwnedReboundFinishesBeforeRecreate(t *testing.T) {
 		t.Fatalf("recreate pass result = %+v", result)
 	}
 	status = store.status(0)
-	if status == nil || status.Phase != workload.InstancePhaseCreating || store.writes != 2 {
+	if status == nil || status.Phase != workload.InstancePhaseCreating || store.writes != drained+2 {
 		t.Fatalf("recreated status/writes = %+v/%d", status, store.writes)
 	}
 	pods = &corev1.PodList{}

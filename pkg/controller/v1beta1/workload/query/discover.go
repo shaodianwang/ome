@@ -409,6 +409,33 @@ func AllPodsRuntimeReady(pods []*corev1.Pod) bool {
 	return true
 }
 
+// PodSetFullyServing reports whether the pod set is fully healthy in
+// the rotation: at least `desired` live (non-deleting) pods, every one
+// of them ContainersReady AND carrying the serving gate. Deleting pods
+// are excluded rather than disqualifying — a completed surge leaves the
+// old pod draining next to the serving replacement. A terminal pod is
+// never live and disqualifies the set outright: it is failure evidence
+// that must reach the escalation pass even when stale conditions on it
+// still read healthy, or when a serving sibling would otherwise cover
+// the count. desired <= 0 never counts as serving (nothing is expected,
+// so nothing can prove health).
+func PodSetFullyServing(pods []*corev1.Pod, desired int32) bool {
+	if desired <= 0 {
+		return false
+	}
+	var live int32
+	for _, p := range pods {
+		if p == nil || p.DeletionTimestamp != nil {
+			continue
+		}
+		if IsTerminalPod(p) || !podreadiness.IsContainersReady(p) || !podreadiness.IsServing(p) {
+			return false
+		}
+		live++
+	}
+	return live >= desired
+}
+
 // AllTerminating reports whether every pod in the slice carries a
 // DeletionTimestamp. Used by recreate / restart Phase B to allow
 // moving on to Create even when the API server hasn't fully GC'd

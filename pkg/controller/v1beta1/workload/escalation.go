@@ -16,7 +16,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
@@ -136,8 +135,13 @@ func escalateFromEvidence(ctx context.Context, deps Deps, input ReconcileInput, 
 			continue
 		}
 		// Idempotent: skip an already-Failed Instance so the
-		// operator-facing event fires exactly once per escalation.
+		// operator-facing event fires exactly once per escalation. Its
+		// recorded evidence still gets one refresh, which takes no edge.
 		if s.Phase == InstancePhaseFailed {
+			ev := snapshot.EvidenceFor(ctx, s.Index, now, input.StuckPodGrace)
+			if t := refreshedFailureEvidence(s, ev); t != nil {
+				buf.add(s.Index, refreshFailureMutation(t), nil)
+			}
 			continue
 		}
 		ev := snapshot.EvidenceFor(ctx, s.Index, now, input.StuckPodGrace)
@@ -330,7 +334,8 @@ func singlePodSurgeAttempt(s *InstanceStatus, desiredPods int32) bool {
 // mutations nothing later in the reconcile depends on being persisted
 // first. Each buffered warn fires only after its stamp's write
 // succeeded, matching the immediate path (a failed write emits nothing;
-// the evidence re-escalates next reconcile).
+// the evidence re-escalates next reconcile). A nil warn is a mutation
+// that carries no operator-facing event of its own.
 type failureStampBuffer struct {
 	input ReconcileInput
 	muts  []InstanceMutation
@@ -355,14 +360,18 @@ func (b *failureStampBuffer) flush(ctx context.Context) error {
 			return err
 		}
 		for _, warn := range b.warns {
-			warn()
+			if warn != nil {
+				warn()
+			}
 		}
 	} else {
 		for i, m := range b.muts {
 			if err := b.input.MutateInstance(ctx, m.Index, m.Mutate); err != nil {
 				return err
 			}
-			b.warns[i]()
+			if b.warns[i] != nil {
+				b.warns[i]()
+			}
 		}
 	}
 	b.muts, b.warns = nil, nil
@@ -382,31 +391,10 @@ func podSetIsCapacity(s InstanceStatus, pods []*corev1.Pod, desired int32) bool 
 	return podSetFullyServing(pods, desired) && !types.OperationSourceUnrouted(s.Operation)
 }
 
-// podSetFullyServing reports whether the pod set is fully healthy in the
-// rotation: at least `desired` live (non-deleting) pods, every one of
-// them ContainersReady AND carrying the serving gate. Deleting pods are
-// excluded rather than disqualifying — a completed surge leaves the old
-// pod draining next to the serving replacement. A terminal pod is never
-// live and disqualifies the set outright: it is failure evidence that
-// must reach escalation even when stale conditions on it still read
-// healthy, or when a serving sibling would otherwise cover the count.
-// desired <= 0 never counts as serving (nothing is expected, so nothing
-// can prove health).
+// podSetFullyServing is query.PodSetFullyServing under the name the
+// escalation pass's guards read by.
 func podSetFullyServing(pods []*corev1.Pod, desired int32) bool {
-	if desired <= 0 {
-		return false
-	}
-	var live int32
-	for _, p := range pods {
-		if p == nil || p.DeletionTimestamp != nil {
-			continue
-		}
-		if query.IsTerminalPod(p) || !podreadiness.IsContainersReady(p) || !podreadiness.IsServing(p) {
-			return false
-		}
-		live++
-	}
-	return live >= desired
+	return query.PodSetFullyServing(pods, desired)
 }
 
 // anyPodAdmissionGated reports whether any pod still carries an

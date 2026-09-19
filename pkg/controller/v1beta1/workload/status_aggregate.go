@@ -12,90 +12,13 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/drain"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // DefaultRevisionRetention caps non-live ControllerRevisions per
 // workload (StatefulSet default; rollback headroom without unbounded
 // etcd growth).
 const DefaultRevisionRetention = 10
-
-// terminalPullFailureReasons enumerates kubelet container
-// state.Waiting reasons that cannot self-recover. Every entry below
-// has been observed in the wild as a wedge that requires either a
-// spec change (fix the image tag) or a node-level fix (registry
-// creds).
-//
-// The set covers both pull-side failures (image cannot be obtained)
-// and post-pull failures (image obtained but the container cannot
-// run or stay running). Naming retains the historical "pull" prefix
-// for backwards compatibility, but the classifier is the generic
-// terminal-waiting-reason matcher the escalator delegates to —
-// every reason that lands a container in Waiting forever without
-// hope of self-recovery belongs here.
-var terminalPullFailureReasons = map[string]struct{}{
-	"ErrImagePull":               {},
-	"ImagePullBackOff":           {},
-	"InvalidImageName":           {},
-	"CreateContainerConfigError": {},
-	"CreateContainerError":       {},
-	// CrashLoopBackOff lands when the container repeatedly exits
-	// non-zero and kubelet's restart backoff has converged on its
-	// per-pod cap (~5 minutes between attempts). Common operator-
-	// reported triggers: bad command-line args, missing config, image
-	// with broken entrypoint. Permanent until the spec changes — even
-	// if the pod briefly transitions through Running between attempts,
-	// the kubelet's stable steady-state for a wedged container is
-	// Waiting{Reason=CrashLoopBackOff}. Without terminal
-	// classification here, a bumped image that pulls cleanly but
-	// crashes immediately would sit at Phase=Updating until
-	// InstanceReadyTimeout expires.
-	"CrashLoopBackOff": {},
-	// RunContainerError signals the container runtime rejected the
-	// start (corrupt manifest, missing required shared libraries,
-	// exec-format mismatch — e.g., amd64 image on arm64 node).
-	// Permanent until the image is fixed; the controller cannot
-	// retry past a broken binary.
-	"RunContainerError": {},
-}
-
-// PodStuckPullFailure returns (true, reason) when pod has at least
-// one container in a terminal pull-failure waiting state that has
-// been stuck for ≥ grace from `now`, otherwise (false, "").
-//
-// Stuck duration is measured from CreationTimestamp (kubelet doesn't
-// expose per-state transition time). For ImagePullBackOff kubelet
-// retries at least once before flipping to BackOff (~30s on a 404),
-// so a 60s grace catches stuck pulls while ignoring the brief
-// PodInitializing / ContainerCreating / ImagePulling window.
-func PodStuckPullFailure(pod *corev1.Pod, now time.Time, grace time.Duration) (bool, string) {
-	if pod == nil {
-		return false, ""
-	}
-	if pod.CreationTimestamp.IsZero() {
-		return false, ""
-	}
-	age := now.Sub(pod.CreationTimestamp.Time)
-	if age < grace {
-		return false, ""
-	}
-	for _, cs := range pod.Status.ContainerStatuses {
-		if cs.State.Waiting == nil {
-			continue
-		}
-		if _, ok := terminalPullFailureReasons[cs.State.Waiting.Reason]; ok {
-			return true, cs.State.Waiting.Reason
-		}
-	}
-	for _, cs := range pod.Status.InitContainerStatuses {
-		if cs.State.Waiting == nil {
-			continue
-		}
-		if _, ok := terminalPullFailureReasons[cs.State.Waiting.Reason]; ok {
-			return true, cs.State.Waiting.Reason
-		}
-	}
-	return false, ""
-}
 
 // AvailablePodSet returns pod names that are Ready and non-terminating
 // in any EndpointSlice for serviceName. drain.EndpointAvailable
@@ -372,7 +295,7 @@ func FirstStuckPodForInstance(pods []*corev1.Pod, now time.Time, grace time.Dura
 		if pod.DeletionTimestamp != nil {
 			continue
 		}
-		if stuck, reason := PodStuckPullFailure(pod, now, grace); stuck {
+		if reason, stuck := types.PodStuckInTerminalWaiting(pod, now, grace); stuck {
 			return pod, reason
 		}
 	}

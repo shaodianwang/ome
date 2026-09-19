@@ -29,6 +29,11 @@ const RestartRequeueInterval = 5 * time.Second
 // suppressed because Migrate's source-pod deletion would otherwise trip
 // the "pod count below desired" trigger on the source.
 //
+// The restart policy is read here rather than by the caller: all of the
+// above is RestartPolicyRecreateInstance's, while driving an
+// open repair and the operation-free crash-loop repair
+// (crashLoopRepairReason) belong to every policy.
+//
 // Ownership: Create materializes an Instance, Restart repairs one that
 // was already materialized. Gating repair on Phase=Ready is right for a
 // single-pod Instance and backwards for a gang — a gang that loses a
@@ -77,10 +82,22 @@ func DetectRestartTriggerWithPods(input workload.ReconcileInput, plan workload.C
 	if isMigrateOwnedStatus(s) {
 		return false, ""
 	}
+	// An open Restart is driven to completion whatever the policy says:
+	// the policy governs whether a repair STARTS, and a half-drained
+	// Instance abandoned mid-repair is worse than one never repaired.
 	if s.Phase == workload.InstancePhaseRestarting {
 		return true, ""
 	}
 	expected := inst.TotalPods()
+	// A pod wedged in a terminal kubelet waiting reason cannot recover on
+	// its own and no other pass owns an operation-free Ready row, so the
+	// repair starts regardless of the restart policy.
+	if reason, wedged := crashLoopRepairReason(input, s, expected, instancePods); wedged {
+		return true, reason
+	}
+	if plan.RestartPolicy != workload.RestartPolicyRecreateInstance {
+		return false, ""
+	}
 	if s.Phase != workload.InstancePhaseReady {
 		// Below Ready only gang-member loss triggers. Pod-level failure
 		// evidence stays Ready-gated: a container that dies while the

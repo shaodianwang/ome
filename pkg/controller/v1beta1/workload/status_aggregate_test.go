@@ -9,6 +9,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // TestUniqueNodes locks the deterministic ordering + nil-preservation
@@ -103,11 +104,11 @@ func TestRolloutComplete(t *testing.T) {
 	}
 }
 
-// TestPodStuckPullFailure pins the wait-window + reason classifier:
+// TestPodStuckInTerminalWaiting pins the wait-window + reason classifier:
 // fires only on terminal kubelet waiting reasons, after grace, and
 // not on freshly-created pods (which legitimately pass through
 // transient ContainerCreating).
-func TestPodStuckPullFailure(t *testing.T) {
+func TestPodStuckInTerminalWaiting(t *testing.T) {
 	now := time.Now()
 	terminal := corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}
 	transient := corev1.ContainerStateWaiting{Reason: "ContainerCreating"}
@@ -216,7 +217,7 @@ func TestPodStuckPullFailure(t *testing.T) {
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
-			stuck, reason := workload.PodStuckPullFailure(tt.pod, now, 2*time.Second)
+			reason, stuck := workloadtypes.PodStuckInTerminalWaiting(tt.pod, now, 2*time.Second)
 			if stuck != tt.wantStuck {
 				t.Errorf("stuck: got %v want %v", stuck, tt.wantStuck)
 			}

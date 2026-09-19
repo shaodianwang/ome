@@ -220,3 +220,39 @@ func CurrentUnavailableInFlight(statuses []InstanceStatus) int32 {
 	}
 	return n
 }
+
+// CurrentRestartingInFlight counts InstanceStatuses whose pod set is
+// being rebuilt by a Restart from a prior wake-up. A Restarting
+// Instance has its pods deleted and recreated, so it is unavailable
+// capacity in exactly the sense the MaxUnavailable budget bounds, and
+// it anchors the restart pass's projection the way
+// CurrentUnavailableInFlight anchors the update pass's.
+//
+// Phase only, deliberately: a Failed row still holding its Restart
+// operation is counted by neither anchor, so a repair that failed
+// releases the budget while its Instance stays down. The RetryBlock
+// against the revision is what bounds repeated failures there, and the
+// asymmetry with the update arm — which does charge a Failed row's
+// preserved Update — stands until one accounting owns both.
+func CurrentRestartingInFlight(statuses []InstanceStatus) int32 {
+	var n int32
+	for _, s := range statuses {
+		if s.Phase == InstancePhaseRestarting {
+			n++
+		}
+	}
+	return n
+}
+
+// budgetDenies projects ONE more fresh start against a per-Component
+// budget layer and reports the projected total with the verdict. prior
+// is the in-flight count carried from earlier wake-ups, counted once;
+// inFlight is what this pass has already admitted. An uncapped layer
+// never denies.
+func budgetDenies(budget, prior, inFlight int32) (int32, bool) {
+	if budget == BudgetNoLimit {
+		return 0, false
+	}
+	projected := prior + inFlight + 1
+	return projected, projected > budget
+}

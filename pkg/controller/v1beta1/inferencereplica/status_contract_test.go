@@ -273,3 +273,62 @@ func TestPublicationCounters_DeriveFromPodsNotPhases(t *testing.T) {
 	g.Expect(counters.UpdatedReadyReplicas).To(gomega.Equal(int32(1)),
 		"UpdatedReadyReplicas requires BOTH the target revision and a Ready pod")
 }
+
+// TestDrainOverdueCondition_CountsDeletingRowsPastTheirDeadline pins the
+// advisory DrainOverdue condition: it counts the Deleting rows the
+// delete pass announced as overdue, names them, and ignores rows in any
+// other phase as well as ordinary failures.
+//
+// Cells: instance/Delete/Drain/timer.operationDeadline/before
+func TestDrainOverdueCondition_CountsDeletingRowsPastTheirDeadline(t *testing.T) {
+	g := gomega.NewWithT(t)
+	overdue := &v1beta1.InstanceTermination{Reason: workload.DrainOverdueReason, Time: metav1.Now()}
+	status := &v1beta1.InferenceReplicaStatus{
+		ObservedGeneration: 4,
+		Replicas:           4,
+		InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
+			{Index: 0, Phase: v1beta1.OMENativeInstanceDeleting, LastFailure: overdue},
+			{Index: 2, Phase: v1beta1.OMENativeInstanceDeleting, LastFailure: overdue},
+			// Draining inside its deadline: nothing announced it.
+			{Index: 3, Phase: v1beta1.OMENativeInstanceDeleting},
+			// A real failure on a row that is not leaving.
+			{Index: 4, Phase: v1beta1.OMENativeInstanceFailed,
+				LastFailure: &v1beta1.InstanceTermination{Reason: "CrashLoopBackOff"}},
+		},
+	}
+	cond := computeDrainOverdueCondition(status)
+	g.Expect(cond.Type).To(gomega.Equal(InferenceReplicaConditionDrainOverdue))
+	g.Expect(cond.Status).To(gomega.Equal(metav1.ConditionTrue))
+	g.Expect(cond.Reason).To(gomega.Equal(ReasonDrainsOverdue))
+	g.Expect(cond.ObservedGeneration).To(gomega.Equal(int64(4)))
+	g.Expect(cond.Message).To(gomega.Equal("2 Instance(s) draining past their deadline (0, 2)"))
+	g.Expect(computeDrainOverdueCondition(status).Message).To(gomega.Equal(cond.Message),
+		"the overdue summary must be byte-stable across recomputations")
+}
+
+// TestDrainOverdueCondition_ClearsWhenNoRowIsOverdue pins the clearing
+// half: with the announced rows gone the condition reads False, and an
+// announcement never makes a rollout look stalled — it records a row on
+// its way out, not a failure to reach the target revision.
+//
+// Cells: instance/Delete/Drain/timer.operationDeadline/before
+func TestDrainOverdueCondition_ClearsWhenNoRowIsOverdue(t *testing.T) {
+	g := gomega.NewWithT(t)
+	status := &v1beta1.InferenceReplicaStatus{
+		Replicas:        2,
+		CurrentRevision: "rev-a",
+		UpdateRevision:  "rev-b",
+		InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
+			{Index: 0, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: "rev-b"},
+			{Index: 1, Phase: v1beta1.OMENativeInstanceDeleting, RunningRevision: "rev-a",
+				LastFailure: &v1beta1.InstanceTermination{Reason: workload.DrainOverdueReason}},
+		},
+	}
+	g.Expect(computeRolloutStalledCondition(status).Status).To(gomega.Equal(metav1.ConditionFalse),
+		"an overdue drain is not a rollout failure")
+
+	status.InstanceStatuses = status.InstanceStatuses[:1]
+	cond := computeDrainOverdueCondition(status)
+	g.Expect(cond.Status).To(gomega.Equal(metav1.ConditionFalse))
+	g.Expect(cond.Reason).To(gomega.Equal(ReasonDrainsWithinDeadline))
+}

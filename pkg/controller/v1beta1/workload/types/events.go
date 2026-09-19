@@ -129,6 +129,22 @@ const (
 	// evidence branch, and overdue duration.
 	EventReasonPodForceDeleted EventReason = "PodForceDeleted"
 
+	// EventReasonRepairHeld fires when a crash-loop repair is denied by
+	// the per-Component unavailability budget or the coordination gate
+	// and no other repair opened in the same pass. The Component stays
+	// wedged until the denial lifts and nothing else reports that, so
+	// the pass names the Instance that is waiting and the layer it
+	// waits on.
+	EventReasonRepairHeld EventReason = "RepairHeld"
+
+	// EventReasonDrainOverdue fires once per overdue episode when a
+	// Deleting Instance's operation deadline elapses with pods still on
+	// their way out. Visibility only: the delete wave keeps the index,
+	// the phase does not move, and force-deleting a wedged pod stays
+	// gated on the configured policy. Names the Instance, the pods and
+	// how long overdue the drain is.
+	EventReasonDrainOverdue EventReason = EventReason(DrainOverdueReason)
+
 	// EventReasonPodDeleteBlockedByFinalizer fires (once per pod UID)
 	// when a Terminating pod is overdue past its deletion deadline but
 	// pinned by foreign finalizers. Report-only: OME never strips

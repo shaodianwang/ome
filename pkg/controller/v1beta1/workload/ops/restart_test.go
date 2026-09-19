@@ -66,9 +66,11 @@ func sliceWithEndpoint(namespace, sliceName, serviceName string, pod *corev1.Pod
 // buildPlanSinglePodEngineForRestart is the per-Restart-test plan builder.
 // Same shape as buildPlanSinglePodEngine in create_test.go but reads the
 // incarnation from the existing InstanceStatus so subsequent passes drive
-// the post-bump value rather than re-stamping 1.
+// the post-bump value rather than re-stamping 1, and carries the restart
+// policy the pod-churn triggers answer to.
 func buildPlanSinglePodEngineForRestart(c client.Client, isvc *v1beta1.InferenceService) workload.ComponentPlan {
 	plan := buildPlanSinglePodEngine(1)
+	plan.RestartPolicy = workload.RestartPolicyRecreateInstance
 	for _, s := range instanceStatusesOnIR(c, isvc, workload.ComponentEngine) {
 		if s.Index == 0 && s.Incarnation > 0 {
 			plan.Instances[0].Incarnation = s.Incarnation

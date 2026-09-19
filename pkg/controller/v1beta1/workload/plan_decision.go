@@ -12,6 +12,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
@@ -47,6 +48,14 @@ const (
 type RestartSelection struct {
 	Instance InstancePlan
 	Reason   string
+
+	// OpensUnavailability marks a selection that takes serving capacity
+	// offline rather than recovering capacity already lost: a fresh
+	// crash-loop repair. The executor puts exactly those to the
+	// unavailability budget and the coordination gate before they open,
+	// so a wedge shared by the whole Component repairs at the
+	// operator's pace instead of recycling every Instance at once.
+	OpensUnavailability bool
 }
 
 // MigrationSelection is the Manual migration record the migrate pass
@@ -241,24 +250,13 @@ func Plan(ctx context.Context, input ReconcileInput, plan ComponentPlan, target 
 		d.Escalate = true
 	}
 
-	// Restart selection: per-Instance pod-loss / pod-Failed triggers,
-	// evaluated against the LIVE pod read — restart is destructive and
-	// must not select from a stale cache. In-flight restarts
-	// (Phase=Restarting) re-select so their state machine advances.
-	if plan.RestartPolicy == RestartPolicyRecreateInstance {
-		liveByInstance, lerr := snapshot.LivePods(ctx)
-		if lerr != nil {
-			return Decision{}, fmt.Errorf("workload.Reconcile: list pods for restart pass (component=%s): %w", plan.Component, lerr)
-		}
-		var restarts []RestartSelection
-		for _, inst := range plan.Instances {
-			if needs, reason := workloadops.DetectRestartTriggerWithPods(input, plan, inst, liveByInstance[inst.Index]); needs {
-				restarts = append(restarts, RestartSelection{Instance: inst, Reason: reason})
-			}
-		}
-		if len(restarts) > 0 {
-			d.Actions = append(d.Actions, PlannedAction{Kind: ActionRestart, Restarts: restarts})
-		}
+	// Restart selection.
+	restarts, rerr := planRestartSelections(ctx, input, plan, snapshot)
+	if rerr != nil {
+		return Decision{}, rerr
+	}
+	if len(restarts) > 0 {
+		d.Actions = append(d.Actions, PlannedAction{Kind: ActionRestart, Restarts: restarts})
 	}
 
 	// A standard pause plans nothing beyond repair.
@@ -310,6 +308,57 @@ func Plan(ctx context.Context, input ReconcileInput, plan ComponentPlan, target 
 	d.Actions = append(d.Actions, PlannedAction{Kind: ActionCreate})
 
 	return d, nil
+}
+
+// planRestartSelections selects the per-Instance restart triggers:
+// pod loss, a Failed pod, a lost gang member, an operation-free crash
+// loop, and an open repair that must keep advancing. Selection is
+// evaluated against the LIVE pod read — restart is destructive and must
+// not select from a stale cache.
+//
+// The live read is unconditional only under the policy whose triggers
+// fire on ordinary pod churn. The two policy-independent triggers are
+// rare, so for every other policy the cached view screens for a
+// candidate first and the live read confirms it; a healthy Component
+// therefore costs no extra live List per reconcile.
+func planRestartSelections(ctx context.Context, input ReconcileInput, plan ComponentPlan, snapshot *ObservedSnapshot) ([]RestartSelection, error) {
+	if plan.RestartPolicy != RestartPolicyRecreateInstance {
+		cachedByInstance, cerr := snapshot.CachedPods(ctx)
+		if cerr != nil {
+			return nil, fmt.Errorf("workload.Reconcile: list pods to screen the restart pass (component=%s): %w", plan.Component, cerr)
+		}
+		if !anyRestartTrigger(input, plan, cachedByInstance) {
+			return nil, nil
+		}
+	}
+	liveByInstance, lerr := snapshot.LivePods(ctx)
+	if lerr != nil {
+		return nil, fmt.Errorf("workload.Reconcile: list pods for restart pass (component=%s): %w", plan.Component, lerr)
+	}
+	var restarts []RestartSelection
+	for _, inst := range plan.Instances {
+		needs, reason := workloadops.DetectRestartTriggerWithPods(input, plan, inst, liveByInstance[inst.Index])
+		if !needs {
+			continue
+		}
+		restarts = append(restarts, RestartSelection{
+			Instance:            inst,
+			Reason:              reason,
+			OpensUnavailability: workloadops.RestartOpensUnavailability(input, inst, liveByInstance[inst.Index]),
+		})
+	}
+	return restarts, nil
+}
+
+// anyRestartTrigger reports whether any planned Instance would be
+// selected against the supplied pod buckets.
+func anyRestartTrigger(input ReconcileInput, plan ComponentPlan, byInstance map[int32][]*corev1.Pod) bool {
+	for _, inst := range plan.Instances {
+		if needs, _ := workloadops.DetectRestartTriggerWithPods(input, plan, inst, byInstance[inst.Index]); needs {
+			return true
+		}
+	}
+	return false
 }
 
 // planUnbackedDemotions selects Ready Instances with no live pods and no

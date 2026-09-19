@@ -187,7 +187,7 @@ func (h *recoveryHarness) kubelet() {
 			continue
 		}
 		if pod.CreationTimestamp.IsZero() {
-			// PodStuckPullFailure measures stuck age from CreationTimestamp
+			// PodStuckInTerminalWaiting measures stuck age from CreationTimestamp
 			// against the fake clock; stamp it deterministically.
 			pod.CreationTimestamp = metav1.NewTime(h.clk.Now())
 			if err := h.c.Update(h.ctx, pod); err != nil {
