@@ -1,8 +1,8 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: ckpt-consolidation-sv3-split-tier5-42b-128k-rsbvw-ckpt150
-  namespace: prod
+  name: ckpt-example-checkpoint-b-ckpt2000
+  namespace: <namespace>
 spec:
   accessModes: [ReadWriteMany]
   storageClassName: shared-vast
@@ -14,11 +14,11 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: dl-consolidation-sv3-split-tier5-42b-128k-rsbvw-c-simolin
-  namespace: prod
+  name: dl-example-checkpoint-b-ckpt2000-example-user
+  namespace: <namespace>
   labels:
     app.kubernetes.io/component: model-downloader
-    user: simolin
+    user: example-user
 spec:
   completions: 1
   parallelism: 1
@@ -27,7 +27,7 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/component: model-downloader
-        user: simolin
+        user: example-user
     spec:
       restartPolicy: Never
       nodeSelector:
@@ -51,7 +51,7 @@ spec:
                 checkpoint \
                 --provider=manifold \
                 --local_dir=/mnt/models \
-                --s3_download_base_uri=s3://fair_llms_prod/tree/vllm_test/consolidation_sv3_split_tier5_42b_128k-rsbvw4wb/checkpoint_0000150
+                --s3_download_base_uri=s3://<bucket>/tree/<prefix>/example-checkpoint-b/checkpoint_0002000
           env:
             - {name: PYTHONUNBUFFERED, value: "1"}
             - {name: HOME, value: /tmp}
@@ -69,7 +69,7 @@ spec:
       volumes:
         - name: models
           persistentVolumeClaim:
-            claimName: ckpt-consolidation-sv3-split-tier5-42b-128k-rsbvw-ckpt150
+            claimName: ckpt-example-checkpoint-b-ckpt2000
         - name: cloud-oss
           hostPath: {path: /opt/cf/cloud_oss, type: Directory}
         - name: tls-cert

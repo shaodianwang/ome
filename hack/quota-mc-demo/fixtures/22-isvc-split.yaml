@@ -1,8 +1,8 @@
 # A service no single member has the budget for, distributed across both.
 #
-#   kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc \
+#   kubectl --kubeconfig "$HUB" \
 #     apply -f hack/quota-mc-demo/fixtures/10-tree-explicit.yaml
-#   kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc \
+#   kubectl --kubeconfig "$HUB" \
 #     apply -f hack/quota-mc-demo/fixtures/22-isvc-split.yaml
 #
 # This is the fixture the fleet exists for. Eight replicas is 32 chips — the
@@ -14,9 +14,9 @@
 # Expect 4 Running pods on each member, and the derived copy on each carrying
 # only that member's share:
 #
-#   kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 -n ome-mc-test \
+#   kubectl --kubeconfig "$MEMBER_B" -n ome-mc-test \
 #     get isvc mc-demo-split -o jsonpath='{.spec.engine.minReplicas}/{.spec.engine.maxReplicas}{"\n"}'
-#   kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc -n ome-mc-test \
+#   kubectl --kubeconfig "$HUB" -n ome-mc-test \
 #     get isvc mc-demo-split -o jsonpath='{range .status.placement.candidates[*]}{.cluster}={.readyReplicas}{"\n"}{end}'
 #
 # HOW IT GETS THERE, WHICH IS VISIBLE AND LOOKS ALARMING

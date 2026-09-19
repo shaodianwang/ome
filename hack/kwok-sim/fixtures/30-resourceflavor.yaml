@@ -15,8 +15,8 @@ metadata:
 spec:
   nodeLabels:
     cloud.google.com/gke-tpu-accelerator: tpu7x
-  # The fake nodes carry rc-1's real taint, so anything Kueue admits against
-  # this flavor has to tolerate it.
+  # The fake nodes carry the reference cluster's real taint, so anything Kueue
+  # admits against this flavor has to tolerate it.
   tolerations:
   - key: google.com/tpu
     value: present

@@ -1567,8 +1567,8 @@ HDR_VALIDATORS = {
     "infeasible": lambda v: v == 1,
     "notimpl": lambda v: v == 1,
     # GitHub issue number a notimpl=1 case is parked on. REQUIRED with notimpl:
-    # an XFAIL with no tracked issue is invisible debt (the p412-p415 recover
-    # cases XFAIL'd the exact wedge that later fired in prod — #899).
+    # an XFAIL with no tracked issue is invisible debt — nothing re-examines it
+    # until the parked bug fails for real.
     "issue": lambda v: isinstance(v, int) and v > 0,
     "floor_hard": lambda v: v == 1,   # assert the instantaneous floor min (no debounce)
     "floor_soft": lambda v: v == 1,   # opt out of the (default-hard) capacity floor
@@ -1645,7 +1645,7 @@ def validate_case_file(path):
             errs.append(f"{path}:2: inv_off={fields['inv_off']} requires an adjacent '# reason: <why>' comment on line 2")
     if fields.get("notimpl") and "issue" not in fields:
         # A notimpl XFAIL is parked debt on a KNOWN BUG — it must link the
-        # tracking issue or the debt is invisible until it fires in prod (#899).
+        # tracking issue or the debt is invisible until it fails for real.
         errs.append(f"{path}:1: notimpl=1 requires issue=<github issue number> — an XFAIL without a tracked issue is invisible debt")
     if "inv_xfail" in fields:
         # An expected invariant violation is parking, and parking needs the
@@ -1734,15 +1734,15 @@ WATCH_MAX_RESTARTS = 50  # reconnect kubectl -w on EOF up to this many times bef
 class _WatchStream:
     """kubectl -w pipe drained by a daemon thread into a queue.
 
-    The harness loops previously read the pipe with select()+buffered
-    readline(): readline() pulls a chunk into Python's userspace buffer, but
-    select() polls the OS fd, so after one line the loop sees "no more data"
-    while whole events sit unread in the buffer. Under concurrency the readiness
-    (MODIFIED) events piled up and pod_state fell minutes behind — fully-Ready
-    Instances read as not-Ready and cases false-timed-out. The pump thread does
-    a simple blocking `for line in stdout`, so the pipe is always fully drained
-    into an in-memory queue; loops read from the queue (instant when data is
-    present, blocking only when genuinely idle)."""
+    A select()+buffered readline() loop cannot drain this pipe: readline()
+    pulls a chunk into Python's userspace buffer, but select() polls the OS fd,
+    so after one line the loop sees "no more data" while whole events sit
+    unread in the buffer. Under concurrency the readiness (MODIFIED) events
+    pile up and pod_state falls minutes behind — fully-Ready Instances read as
+    not-Ready and cases false-time-out. The pump thread does a simple blocking
+    `for line in stdout`, so the pipe is always fully drained into an in-memory
+    queue; loops read from the queue (instant when data is present, blocking
+    only when genuinely idle)."""
     _EOF = object()
 
     def __init__(self, proc):
@@ -2143,7 +2143,7 @@ def _write_fail(case_id, desc, hdr, state, msg):
 
 def soften_expected_fail(hdr, verdict, checks):
     """FAIL → XFAIL for parked cases. A notimpl XFAIL carries its linked issue
-    in the verdict itself (e.g. 'XFAIL (known bug: #899)') so every sweep
+    in the verdict itself (e.g. 'XFAIL (known bug: #<issue>)') so every sweep
     summary line names the tracked bug; infeasible stays a plain XFAIL — its
     by-design rationale lives on the case's line-2 '# reason:' comment and in
     batch.py's PARKED DEBT table."""
@@ -2627,13 +2627,13 @@ def _csr_patch_readiness(csr, comps, probe):
 
 
 def _runtime_recover_stuck(case_id, yaml_file, desc, hdr, csr):
-    """Guard for the surge-budget deadlock (prod incident on t4-9b-mm-smg-shadow):
-    a prior rollout's surge pods that RUN but never become Ready — and never
-    escalate (no crash, no ImagePullBackOff, so the fast stuck-pod breaker never
-    fires) — consume the per-Component maxSurge budget, so a later CORRECTIVE
-    rollout can't start a single new-revision pod. It deadlocks at 0/N until
-    instanceReadyTimeout (~1h30m). MUST roll the corrective revision forward
-    quickly; today it does not, so this FAILs until fixed.
+    """Guard for the surge-budget deadlock: a prior rollout's surge pods that
+    RUN but never become Ready — and never escalate (no crash, no
+    ImagePullBackOff, so the fast stuck-pod breaker never fires) — consume the
+    per-Component maxSurge budget, so a later CORRECTIVE rollout can't start a
+    single new-revision pod. It deadlocks at 0/N until instanceReadyTimeout
+    (~1h30m). MUST roll the corrective revision forward quickly; the case
+    header parks this as notimpl while it does not.
 
     Reproduction: break readiness (readinessProbe -> exec:false; container stays up
     via startup/liveness) + bump a rev -> surge pods run-but-never-Ready, holding
@@ -3019,11 +3019,11 @@ def _migration_ledger_entry(case_id, req_uuid):
 
 
 def _ir_status_migrations(case_id, comp):
-    """status.migrations of the component's InferenceReplica. Post-#832 builds
-    consume the request annotation at ACCEPT and keep migration state here.
+    """status.migrations of the component's InferenceReplica. Builds that report
+    it consume the request annotation at ACCEPT and keep migration state here.
     Returns the entry list, or None when unavailable — no IR CRD, no IR for the
-    component, or an IR without the field (pre-#832 build) — so callers can
-    stay version-tolerant."""
+    component, or an IR without the field — so callers can stay
+    version-tolerant."""
     r = kubectl("-n", NS, "get", "inferencereplicas", "-l",
                 f"ome.io/inferenceservice={case_id}", "-o", "json")
     if r.returncode != 0:
@@ -3223,8 +3223,9 @@ def _migrate(case_id, yaml_file, desc, hdr):
     anno_cleared, src_gone = _anno_cleared(), _src_gone()
     if mig_mode != "Never" and ph == "Completed" and not (anno_cleared and src_gone):
         # The source drain + annotation clear finish asynchronously after the
-        # ledger flips Completed (post-#832 the annotation is already consumed
-        # at ACCEPT). Settle with a bounded poll before hard-failing on either.
+        # ledger flips Completed (on builds with IR status.migrations the
+        # annotation is already consumed at ACCEPT). Settle with a bounded poll
+        # before hard-failing on either.
         settle_budget = migrate_settle_budget(len(req_insts))
         settle_deadline = time.time() + settle_budget
         last_anno = 0.0
@@ -3240,8 +3241,7 @@ def _migrate(case_id, yaml_file, desc, hdr):
     verdict, notes, checks = "PASS", [], []
     # Peak/ceiling: a migration surges +1 (ceil = N+1 from the case header; N for
     # mig=Never). A mass fan-out — many Instances surging at once, the fleet-wipe
-    # shape — blows past the ceiling. Mirror the _partition/_rollout peak gate,
-    # which _migrate previously lacked entirely.
+    # shape — blows past the ceiling. Same peak gate as _partition/_rollout.
     mceil = {"engine": hdr.get("ceil_e", N["engine"]), "decoder": hdr.get("ceil_d", N["decoder"]),
              "router": hdr.get("ceil_r", N["router"])}
     for c in COMPS:
@@ -3258,10 +3258,10 @@ def _migrate(case_id, yaml_file, desc, hdr):
             checks.append(f"  ✓ mig=Never: request not actioned (no surge; ledger phase={ph or 'none'})")
         # Rejection must still CONSUME the request: annotation cleared + a
         # terminal Failed entry naming the policy. Hard only on builds exposing
-        # IR status.migrations (post-#832); ⓘ-soft on older builds.
+        # IR status.migrations; ⓘ-soft on builds without the field.
         mig_entries = _ir_status_migrations(case_id, mcomp)
         if mig_entries is None:
-            checks.append(f"  ⓘ pre-#832 build (no IR status.migrations) — Never-consumption checks soft: "
+            checks.append(f"  ⓘ build without IR status.migrations — Never-consumption checks soft: "
                           f"annotation {'cleared' if anno_cleared else 'still present'}, ledger phase={ph or 'none'}")
         else:
             if anno_cleared:
@@ -3302,8 +3302,9 @@ def _migrate(case_id, yaml_file, desc, hdr):
             verdict = "FAIL"
             notes.append("source lost during failed migration")
             checks.append(f"  ✗ source Instance(s) {','.join(req_insts)} not Ready after the failed migration — a failed migration must retain its source")
-        # Request consumed (post-#832 the annotation is consumed at ACCEPT):
-        # settle-poll before failing on a still-present annotation.
+        # Request consumed (on builds with IR status.migrations the annotation
+        # is consumed at ACCEPT): settle-poll before failing on a still-present
+        # annotation.
         settle_deadline = time.time() + migrate_settle_budget(len(reqs))
         last_anno = 0.0
         while not anno_cleared and time.time() < settle_deadline and not ctx["closed"]:
@@ -3321,7 +3322,7 @@ def _migrate(case_id, yaml_file, desc, hdr):
         # squatting the migration slot. Version-tolerant like the Completed path.
         mig_entries = _ir_status_migrations(case_id, mcomp)
         if mig_entries is None:
-            checks.append("  ⓘ IR status.migrations unavailable (pre-#832 build) — terminal-entry check skipped (CM ledger asserted above)")
+            checks.append("  ⓘ IR status.migrations unavailable on this build — terminal-entry check skipped (CM ledger asserted above)")
         else:
             for i, (ru, _, _) in sorted(reqs.items()):
                 ent = next((m for m in mig_entries if m.get("requestUUID") == ru), None)
@@ -3397,12 +3398,11 @@ def _migrate(case_id, yaml_file, desc, hdr):
             checks.append(f"  ✓ surge Instance {surge_inst} on a different node ({surge_node} != {from_node})")
         else:
             checks.append(f"  ⓘ surge happened (watcher inst={surge_inst}, ledger surgeInstance={ledger_surge}); node compare inconclusive")
-        # Source-drain + request-consumption hygiene: hard checks (previously
-        # ⚠-only — the exact class the expired-mid-drain and same-name-recreate
-        # bugs lived in). Gated on Completed: a FAILED migration is REQUIRED to
-        # keep its source (bounded-failure contract), so asserting src_gone
-        # there would demand the wrong behavior — and the ledger check above
-        # already reds the case.
+        # Source-drain + request-consumption hygiene: hard checks (the class the
+        # expired-mid-drain and same-name-recreate bugs live in). Gated on
+        # Completed: a FAILED migration is REQUIRED to keep its source
+        # (bounded-failure contract), so asserting src_gone there would demand
+        # the wrong behavior — and the ledger check above already reds the case.
         if ph == "Completed":
             if src_gone:
                 checks.append(f"  ✓ source Instance(s) {','.join(req_insts)} drained")
@@ -3417,13 +3417,13 @@ def _migrate(case_id, yaml_file, desc, hdr):
                 verdict = "FAIL"
                 notes.append("migration-request annotation(s) still on the ISVC")
                 checks.append("  ✗ migration-request annotation(s) still on the ISVC — request never consumed")
-            # Post-#832 the authoritative per-request state is the IR's
-            # status.migrations; assert a terminal Completed entry per request
-            # UUID. Version-tolerant: skipped (with a note) on builds without
-            # the field — the CM-ledger assertion above still gates there.
+            # The authoritative per-request state is the IR's status.migrations;
+            # assert a terminal Completed entry per request UUID.
+            # Version-tolerant: skipped (with a note) on builds without the
+            # field — the CM-ledger assertion above still gates there.
             mig_entries = _ir_status_migrations(case_id, mcomp)
             if mig_entries is None:
-                checks.append("  ⓘ IR status.migrations unavailable (pre-#832 build) — per-request IR entry check skipped (CM ledger asserted above)")
+                checks.append("  ⓘ IR status.migrations unavailable on this build — per-request IR entry check skipped (CM ledger asserted above)")
             else:
                 for i, (ru, _, _) in sorted(reqs.items()):
                     ent = next((m for m in mig_entries if m.get("requestUUID") == ru), None)
@@ -3460,12 +3460,12 @@ def _migrate(case_id, yaml_file, desc, hdr):
                 checks.append(f"  ✗ migration collision: {len(req_insts)} migrations surged only {n_surge} distinct replacement(s) "
                               f"(fresh pods {len(surge_uids)}, watcher indices {sorted(surge_seen)}, ledger surgeInstances {sorted(ledger_surges)}) — sources collapsed onto a shared replacement (fleet-wipe shape)")
         if defer_rollout:
-            # Ordering deliberately UNASSERTED: the product currently PREEMPTS
-            # — an accepted migration's requeue skips the update pass (there is
-            # no defer-then-run queue). Whether preempt or defer is the
-            # contract is an open product-design decision; until it lands this
-            # case only asserts both operations complete without wedging each
-            # other in bounded total time (migration Completed is gated above).
+            # Ordering deliberately UNASSERTED: the product PREEMPTS — an
+            # accepted migration's requeue skips the update pass (there is no
+            # defer-then-run queue). Whether preempt or defer is the contract is
+            # an open product-design decision, so this case only asserts both
+            # operations complete without wedging each other in bounded total
+            # time (migration Completed is gated above).
             if rollout_conv_ts is None:
                 verdict = "FAIL"
                 notes.append("mid-rotate migration: the in-flight rollout never converged (wedge)")
@@ -4502,8 +4502,8 @@ def _canary(case_id, yaml_file, desc, hdr):
     # Peak/ceiling: the canary surges the primary +1 while the stable revision
     # keeps serving (ceil = N+1 from the case header; NR+1 for PD router). A step
     # that over-surges — e.g. a 2N fan-out, the fleet-wipe shape — must FAIL.
-    # _canary previously had NO peak gate at all (every other handler has one);
-    # this runs before all three verdict return paths below.
+    # Same peak gate as every other handler; it runs before all three verdict
+    # return paths below.
     cceil = {"engine": hdr.get("ceil_e", N["engine"]), "decoder": hdr.get("ceil_d", N["decoder"]),
              "router": hdr.get("ceil_r", N["router"])}
     for c in COMPS:
@@ -4993,8 +4993,8 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
             checks.append(f"  ✓ partial-teardown atomicity held: every gang index ({', '.join(mn_conf)}) tore down whole (never a sustained orphan)")
     # Check E: survivor stability — surviving instances (index < min(start,target))
     # must keep their ORIGINAL pods. A survivor pod with a UID not in the pre-scale
-    # survivor set was needlessly RECREATED — the prod avocado-tier5 bug where
-    # scaling 20→10 recreated all 10 survivors instead of just deleting the tail.
+    # survivor set was needlessly RECREATED — a scale-down must delete only the
+    # tail, never rebuild the survivors it keeps.
     # Also asserted for a blocked=1 parked partial state — a fault holding the
     # tail must not cost the survivors their pods.
     if state == "CONVERGED" or blocked:
@@ -5626,7 +5626,7 @@ def run_case(case_id):
                     # stays True throughout a surge roll (AvailableReplicas never drops
                     # below N), so its LastTransitionTime predates the roll and no soak
                     # window is measurable. Report, don't fail — ordering (above) is the
-                    # hard check. (Controller-side soak precision tracked in #402.)
+                    # hard check.
                     checks.append(f"  ⚠ Sequential {a}→{b}: gap {gap:.0f}s < soak {soak}s — soak duration not verifiable for surge rolls (informational)")
                 else:
                     extra = f" (≥ soak {soak}s)" if soak > 0 else ""

@@ -82,9 +82,10 @@ CUBES="4x4x4,2x2x2"
 MODEL="demo-noop"
 SIM_NS="kwok-sim"
 OME_NS="ome"
-# The node label that identifies one TPU slice. In rc-1 a node pool is exactly
-# one slice, and unlike cloud.google.com/gke-tpu-partition-<topo>-id the key is
-# the same for every carve — so it works as one fleet-wide setting.
+# The node label that identifies one TPU slice. In the reference TPU cluster a
+# node pool is exactly one slice, and unlike
+# cloud.google.com/gke-tpu-partition-<topo>-id the key is the same for every
+# carve — so it works as one fleet-wide setting.
 TOPOLOGY_KEY="cloud.google.com/gke-nodepool"
 SKIP_BUILD=0
 NO_SCHEDULER=0

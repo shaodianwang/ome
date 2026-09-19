@@ -1,8 +1,8 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: ckpt-v17-kiki-sft-gb300x128-sktmtnb3-ckpt2000
-  namespace: prod
+  name: ckpt-example-checkpoint-a-ckpt150
+  namespace: <namespace>
 spec:
   accessModes: [ReadWriteMany]
   storageClassName: shared-vast
@@ -14,11 +14,11 @@ spec:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: dl-v17-kiki-sft-gb300x128-sktmtnb3-ckpt2000-simolin
-  namespace: prod
+  name: dl-example-checkpoint-a-ckpt150-example-user
+  namespace: <namespace>
   labels:
     app.kubernetes.io/component: model-downloader
-    user: simolin
+    user: example-user
 spec:
   completions: 1
   parallelism: 1
@@ -27,7 +27,7 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/component: model-downloader
-        user: simolin
+        user: example-user
     spec:
       restartPolicy: Never
       nodeSelector:
@@ -51,7 +51,7 @@ spec:
                 checkpoint \
                 --provider=manifold \
                 --local_dir=/mnt/models \
-                --s3_download_base_uri=s3://fair_llms_prod/tree/vllm_test/v17_kiki_sft_gb300x128-sktmtnb3/checkpoint_0002000
+                --s3_download_base_uri=s3://<bucket>/tree/<prefix>/example-checkpoint-a/checkpoint_0000150
           env:
             - {name: PYTHONUNBUFFERED, value: "1"}
             - {name: HOME, value: /tmp}
@@ -69,7 +69,7 @@ spec:
       volumes:
         - name: models
           persistentVolumeClaim:
-            claimName: ckpt-v17-kiki-sft-gb300x128-sktmtnb3-ckpt2000
+            claimName: ckpt-example-checkpoint-a-ckpt150
         - name: cloud-oss
           hostPath: {path: /opt/cf/cloud_oss, type: Directory}
         - name: tls-cert

@@ -19,13 +19,13 @@
 # workload unassignable, and it then sits pending with no quota charged and no
 # obvious reason.
 #
-# 2x2x2 is pinned because it is the one shape BOTH members have free. Measured:
-# dev-1 has 16 schedulable 2x2x2 nodes and rc-1 has 960, while 2x2x1 exists on
-# both and is schedulable on neither but dev-1 — rc-1's 256 are Ready and every
-# one of them cordoned. Pinning a shape a member lacks fails in a way that reads
-# as success: Kueue admits before the scheduler runs, so the budget is charged
-# and ADMITTED climbs while the pods sit Pending on node affinity forever. Verify
-# before demoing, on each member:
+# 2x2x2 is pinned because it is the one shape BOTH members have free: the small
+# member has a handful of schedulable 2x2x2 nodes and the large one hundreds,
+# while 2x2x1 exists on both and is schedulable on only one — the other's are
+# Ready and every one of them cordoned. Pinning a shape a member lacks fails in
+# a way that reads as success: Kueue admits before the scheduler runs, so the
+# budget is charged and ADMITTED climbs while the pods sit Pending on node
+# affinity forever. Verify before demoing, on each member:
 #
 #   kubectl get nodes -l cloud.google.com/gke-tpu-topology=2x2x2 \
 #     -o json | jq '[.items[]|select((.spec.unschedulable // false)==false)]|length'

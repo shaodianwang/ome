@@ -1,15 +1,15 @@
-# Sample model-download Job (the real dl-tier5-42b-128k-bf16-simolin, ns prod,
-# cluster cw/msl-cw-use2-2). Pulls a Manifold checkpoint into the PVC at /mnt/models.
+# Sample model-download Job. Pulls a checkpoint from the blob store into the PVC
+# at /mnt/models; names are placeholders, gen-download.sh renders real ones.
 # Prereqs (must already exist): PVC (pvc.yaml), secret inference-aqueduct-cert,
 # cloud_oss at /opt/cf/cloud_oss on the node, shared-vast SC. See README.md.
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: dl-tier5-42b-128k-bf16-simolin
-  namespace: prod
+  name: dl-example-model-example-user
+  namespace: <namespace>
   labels:
     app.kubernetes.io/component: model-downloader
-    user: simolin
+    user: example-user
 spec:
   completions: 1
   parallelism: 1
@@ -18,7 +18,7 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/component: model-downloader
-        user: simolin
+        user: example-user
     spec:
       restartPolicy: Never
       nodeSelector:
@@ -44,7 +44,7 @@ spec:
                 checkpoint \
                 --provider=manifold \
                 --local_dir=/mnt/models \
-                --s3_download_base_uri=s3://fair_llms_prod/tree/vllm_test/consolidation_sv4_1_tier5_42b_128k-gxrj1qwt/checkpoint_0000200
+                --s3_download_base_uri=s3://<bucket>/tree/<prefix>/example-model/checkpoint_0000200
           env:
             - {name: PYTHONUNBUFFERED, value: "1"}
             - {name: HOME, value: /tmp}
@@ -62,7 +62,7 @@ spec:
       volumes:
         - name: models
           persistentVolumeClaim:
-            claimName: ckpt-tier5-42b-128k-bf16
+            claimName: ckpt-example-model
         - name: cloud-oss
           hostPath: {path: /opt/cf/cloud_oss, type: Directory}
         - name: tls-cert

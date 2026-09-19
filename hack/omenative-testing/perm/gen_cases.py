@@ -259,11 +259,10 @@ HAND_WRITTEN = {"scale": {"p188", "p189"}}
 
 
 def C(folder, desc, comps, coord=None, runtime=None, meta_ann=None, **kv):
-    # NOTE: RollingUpdate.Partition IS now enforced by the OMENative rollout
-    # engine (reconcile.go HeldByPartition, #427) — Instances with index < k are
-    # held on the old revision. The old blanket `notimpl` XFAIL on this folder
-    # was removed so partition cases record real PASS/FAIL again. Individual
-    # cases can still set notimpl=1 explicitly if a specific shape is unsupported.
+    # RollingUpdate.Partition is enforced by the OMENative rollout engine
+    # (HeldByPartition): Instances with index < k are held on the old revision,
+    # so partition cases record real PASS/FAIL. Individual cases can still set
+    # notimpl=1 explicitly if a specific shape is unsupported.
     name = f"p{COUNTERS[folder]}"
     COUNTERS[folder] += 1
     CASES.append((folder, name, desc, comps, coord, kv, {"runtime": runtime, "meta_ann": meta_ann}))
@@ -368,11 +367,11 @@ for ck in ["rolling", "ratio"]:               # PD scaledown under coordination
       ceil_e=4, ceil_d=4, ceil_r=NR, topo="pd", co=ck)
 
 # ── gang scale at production shape (leader + 3 workers) ──────────────────────
-# The avocado-tier5 prod case: scaling MUST delete only the tail (scaledown) /
-# add only new indices (scaleup) and leave surviving gangs UNTOUCHED (Check E) —
-# never recreate them. Both directions, engine-only + PD (engine+decoder both
-# 3-worker gangs), across lifecycle strategies: a strategy that recreates
-# everything is a massive-outage bug. 8 replicas = the common tier5 shape.
+# Scaling MUST delete only the tail (scaledown) / add only new indices (scaleup)
+# and leave surviving gangs UNTOUCHED (Check E) — never recreate them. Both
+# directions, engine-only + PD (engine+decoder both 3-worker gangs), across
+# lifecycle strategies: a strategy that recreates everything is a
+# massive-outage bug. 8 replicas = a common production shape.
 for strat in ["SurgeThenDrain", "RecreatePod", "InPlaceIfPossible"]:
     glife = strat_life(strat)
     for to in [16, 4]:
@@ -384,8 +383,8 @@ for strat in ["SurgeThenDrain", "RecreatePod", "InPlaceIfPossible"]:
           mode="scaledown", Ne=8, Nd=8, Nr=NR, to_e=to, to_d=to, to_r=NR,
           ceil_e=max(8, to), ceil_d=max(8, to), ceil_r=NR, topo="pd-mn", co="none")
 # Missing lifecycle: no updateStrategy block -> the webhook MUST inject the
-# OMENative defaults (SurgeThenDrain + 25% budgets). Absent defaults (old OME /
-# the annotation-mode gap #621 closed) leave scaling uncapped -> outage risk.
+# OMENative defaults (SurgeThenDrain + 25% budgets), for the annotation-selected
+# mode too. Absent defaults leave scaling uncapped -> outage risk.
 C("scale", "gang engine-mn W=3 N=8->4 NO-lifecycle (webhook must default)",
   [comp("engine", 8, 3, life="")],
   mode="scaledown", Ne=8, Nd=0, Nr=0, to_e=4, ceil_e=8, ceil_d=0, ceil_r=0, topo="engine-mn", co="none")
@@ -686,8 +685,8 @@ Canalysis("operator GTE success pass", "engine", "pass",
 # error-rate decays to 0 -> passes -> promote (budget non-exhaustion).
 # notimpl=1 issue=900: the time-based decay clock (pod-serving-relative) does
 # not reliably align with the analysis sampling clock on a real cluster, so
-# the recovery isn't deterministic (#900 tracks the redesign to a controllable
-# non-timing recovery trigger). decay is whole seconds.
+# the recovery isn't deterministic (the parked fix is a controllable non-timing
+# recovery trigger). decay is whole seconds.
 Canalysis("transient breach recovers", "engine", "pass", health="breach", decay="30",
           steps=_gate2(analysis_spec(failure_limit=8, interval="15s")), notimpl=1, issue=900)
 # Manual promote overrides a pending (breaching) analysis bake -> promote.

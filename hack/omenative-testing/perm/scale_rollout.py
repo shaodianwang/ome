@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """One-time scaler for the static base rollout matrix (isvcs/rollout/p01-p65,
-committed in #432 with no live generator). Bumps N=4 engine/decoder replicas to
+a hand-committed set with no live generator). Bumps N=4 engine/decoder replicas to
 N=8 and recomputes per-Component header ceilings from each spec's actual
 maxSurge/strategy, preserving file formatting (edits replicas via text, reads
 values via yaml, rewrites the header comment). Router (NR=2) is left as-is.

@@ -1,4 +1,4 @@
-# Fleet quota + ISVC distribution, on the real three-cluster fleet
+# Fleet quota + ISVC distribution, on a real three-cluster fleet
 
 A demo runbook for OEP-0024 quota distribution and OEP-0018 placement against
 live clusters, not `kwok`. It budgets **32 `google.com/tpu` chips fleet-wide**
@@ -13,14 +13,24 @@ admitting real pods onto real accelerators, capacity derived from hardware
 nobody wrote down, and a hub reaching members over credentials the members
 issued.
 
-| | hub | member | member |
+Every command below reads the three kubeconfigs from these variables; set them
+once per shell (`status.sh` reads the same paths from `MC_DEMO_HUB` and
+`MC_DEMO_MEMBERS`):
+
+```sh
+HUB=~/.kube/<hub>            # the management cluster
+MEMBER_A=~/.kube/<member-a>  # the large workload cluster
+MEMBER_B=~/.kube/<member-b>  # the small workload cluster
+```
+
+| | hub | member A | member B |
 |---|---|---|---|
-| kubeconfig | `~/.kube/msl-mks-ome-lco-0-rc` | `~/.kube/msl-gcp-usc1-rc-1` | `~/.kube/msl-gcp-usc1-dev-1` |
-| `WorkloadCluster` name | — | `msl-gcp-usc1-rc-1-tpu` | `msl-gcp-usc1-dev-1-tpu` |
+| kubeconfig | `$HUB` | `$MEMBER_A` | `$MEMBER_B` |
+| `WorkloadCluster` name | — | `member-a-tpu` | `member-b-tpu` |
 | `ome-quota-manager` | management | workload | workload |
 | `ome-controller-manager` | `control-plane` role | default | default |
 | Kueue | — | v0.19.1 | v0.19.1 |
-| `tpu7x` allocatable | — | thousands | 256 |
+| `tpu7x` allocatable | — | large | small |
 | budgeted share | — | 16 | 16 |
 
 ## Prerequisites
@@ -37,29 +47,29 @@ A registered cluster carries no labels of its own, so without this step nothing
 is ever placed and the failure is silent.
 
 ```sh
-kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc label workloadcluster \
-  msl-gcp-usc1-rc-1-tpu  accelerator=tpu7x env=rc  --overwrite
-kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc label workloadcluster \
-  msl-gcp-usc1-dev-1-tpu accelerator=tpu7x env=dev --overwrite
+kubectl --kubeconfig "$HUB" label workloadcluster \
+  member-a-tpu accelerator=tpu7x zone=a --overwrite
+kubectl --kubeconfig "$HUB" label workloadcluster \
+  member-b-tpu accelerator=tpu7x zone=b --overwrite
 ```
 
-`accelerator` is what every fixture here requires; `env` tells the two apart so
+`accelerator` is what every fixture here requires; `zone` tells the two apart so
 one can be singled out with `clusterSelector`. The quota plane never reads
 either.
 
 > [!WARNING]
-> These objects are ArgoCD-managed (`ome-workloadclusters-msl-mks-ome-lco-0-rc`),
-> and Argo runs outside the fleet, so its sync policy is not readable from the
-> hub. A hand-applied label shows as drift and is reverted on the next sync if
-> self-heal is on — after which nothing is placed and, again, nothing reports an
-> error. Re-read the first block of `status.sh` immediately before demoing, and
-> put the labels in the GitOps source for anything past a demo window.
+> These objects are GitOps-managed, and the GitOps controller runs outside the
+> fleet, so its sync policy is not readable from the hub. A hand-applied label
+> shows as drift and is reverted on the next sync if self-heal is on — after
+> which nothing is placed and, again, nothing reports an error. Re-read the
+> first block of `status.sh` immediately before demoing, and put the labels in
+> the GitOps source for anything past a demo window.
 
 ### 2. Create the namespace on all three clusters
 
 ```sh
-for kc in msl-mks-ome-lco-0-rc msl-gcp-usc1-rc-1 msl-gcp-usc1-dev-1; do
-  kubectl --kubeconfig ~/.kube/$kc apply -f hack/quota-mc-demo/fixtures/00-namespace.yaml
+for kc in "$HUB" "$MEMBER_A" "$MEMBER_B"; do
+  kubectl --kubeconfig "$kc" apply -f hack/quota-mc-demo/fixtures/00-namespace.yaml
 done
 ```
 
@@ -83,8 +93,8 @@ whatever queue they name. It is also the blast-radius fence for step 4.
 ### 3. Install the runtime on all three clusters
 
 ```sh
-for kc in msl-mks-ome-lco-0-rc msl-gcp-usc1-rc-1 msl-gcp-usc1-dev-1; do
-  kubectl --kubeconfig ~/.kube/$kc apply -f hack/quota-mc-demo/fixtures/01-runtime.yaml
+for kc in "$HUB" "$MEMBER_A" "$MEMBER_B"; do
+  kubectl --kubeconfig "$kc" apply -f hack/quota-mc-demo/fixtures/01-runtime.yaml
 done
 ```
 
@@ -100,8 +110,8 @@ step — but check it, because it is the single setting the admission half of th
 demo rests on and its absence is silent.
 
 ```sh
-for kc in msl-gcp-usc1-rc-1 msl-gcp-usc1-dev-1; do
-  kubectl --kubeconfig ~/.kube/$kc -n kueue-system get cm kueue-manager-config \
+for kc in "$MEMBER_A" "$MEMBER_B"; do
+  kubectl --kubeconfig "$kc" -n kueue-system get cm kueue-manager-config \
     -o jsonpath='{.data.controller_manager_config\.yaml}' | sed -n '/^integrations:/,/^[a-z]/p'
 done
 ```
@@ -141,7 +151,7 @@ controller keeps serving the old one until it is restarted — so check the pod 
 younger than the edit, not just that the ConfigMap looks right.
 
 > [!NOTE]
-> `kueue-manager-config` is ArgoCD-managed on these clusters. Change it in the
+> `kueue-manager-config` is GitOps-managed on these clusters. Change it in the
 > GitOps source; a hand patch shows as drift and self-heal reverts it.
 
 ## The demo
@@ -151,7 +161,7 @@ younger than the edit, not just that the ConfigMap looks right.
 Author the tree on the hub. Nothing else moves.
 
 ```sh
-kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc \
+kubectl --kubeconfig "$HUB" \
   apply -f hack/quota-mc-demo/fixtures/10-tree-explicit.yaml
 hack/quota-mc-demo/status.sh
 ```
@@ -159,7 +169,7 @@ hack/quota-mc-demo/status.sh
 ```
 root                     Cohort        32          the fleet total, authored here
 └── mc-demo              Cohort        32          grouping, travels budget-less
-    └── mc-demo.serving  ClusterQueue  32          Explicit: rc-1 16, dev-1 16
+    └── mc-demo.serving  ClusterQueue  32          Explicit: member-a 16, member-b 16
 ```
 
 What to point at, in order:
@@ -187,14 +197,14 @@ What to point at, in order:
 Then swap the policy to show the capacity read is live rather than fixtured:
 
 ```sh
-kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc \
+kubectl --kubeconfig "$HUB" \
   apply -f hack/quota-mc-demo/fixtures/11-tree-proportional.yaml
 ```
 
 Same shape, no policy named, so the hub's configured `Proportional` default
 applies and the 32 splits against what each member actually reported —
-overwhelmingly toward rc-1. **Put `10-tree-explicit.yaml` back before Part 2**:
-dev-1's proportional share cannot fund even one 4-chip replica, so every
+overwhelmingly toward member A. **Put `10-tree-explicit.yaml` back before Part
+2**: member B's proportional share cannot fund even one 4-chip replica, so every
 placement would land on one member.
 
 Worth two minutes: `12-tree-badsum.yaml` is an `Explicit` split summing to 24
@@ -212,7 +222,7 @@ no column carries, which is why `status.sh` prints a projection-state section:
 
 ```
 -- projection state per cluster (a message here means it did NOT land)
-  mc-demo.serving -> msl-gcp-usc1-rc-1-tpu: STALLED: budget google.com/tpu/tpu7x is 32 but its per-cluster shares sum to 24
+  mc-demo.serving -> member-a-tpu: STALLED: budget google.com/tpu/tpu7x is 32 but its per-cluster shares sum to 24
 ```
 
 > [!WARNING]
@@ -235,7 +245,7 @@ fixes the leaf in place and the next pass projects normally.
 ### Part 2 — ISVC distribution, admitted
 
 ```sh
-kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc \
+kubectl --kubeconfig "$HUB" \
   apply -f hack/quota-mc-demo/fixtures/20-isvc-fits.yaml
 hack/quota-mc-demo/status.sh
 ```
@@ -249,7 +259,7 @@ Expect on each member: a derived InferenceService in `ome-mc-test`, 2 pods
 ### Part 3 — ISVC distribution, not admitted
 
 ```sh
-kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc \
+kubectl --kubeconfig "$HUB" \
   apply -f hack/quota-mc-demo/fixtures/21-isvc-exceeds.yaml
 ```
 
@@ -257,9 +267,9 @@ kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc \
 pods are created on each member; Kueue funds four and holds the fifth.
 
 ```sh
-kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 -n ome-mc-test \
+kubectl --kubeconfig "$MEMBER_B" -n ome-mc-test \
   get pods -o custom-columns=NAME:.metadata.name,PHASE:.status.phase,GATES:.spec.schedulingGates[*].name
-kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 get aq mc-demo.serving -o wide
+kubectl --kubeconfig "$MEMBER_B" get aq mc-demo.serving -o wide
 ```
 
 `ADMITTED` pins at exactly 16 and stays there. The point worth landing: **from
@@ -275,9 +285,9 @@ they admit with nothing re-applied.
 ### Part 4 — one service across the whole fleet
 
 ```sh
-kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc -n ome-mc-test \
+kubectl --kubeconfig "$HUB" -n ome-mc-test \
   delete isvc mc-demo-fits mc-demo-exceeds --ignore-not-found
-kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc \
+kubectl --kubeconfig "$HUB" \
   apply -f hack/quota-mc-demo/fixtures/22-isvc-split.yaml
 ```
 
@@ -296,12 +306,12 @@ mechanism, not a fault.
 `01-runtime.yaml` is a sleep container: it claims chips so quota has something to
 count, and never touches the accelerator. `40-runtime-tpu-jax.yaml` is the real
 thing — JAX on live `tpu7x` silicon behind an OpenAI-shaped API. Verified on
-dev-1.
+member B.
 
 ```sh
-kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 apply -f hack/quota-mc-demo/fixtures/40-runtime-tpu-jax.yaml
-kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 apply -f hack/quota-mc-demo/fixtures/41-isvc-tpu-jax.yaml
-kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 -n ome-mc-test port-forward svc/mc-demo-jax 8080:8080
+kubectl --kubeconfig "$MEMBER_B" apply -f hack/quota-mc-demo/fixtures/40-runtime-tpu-jax.yaml
+kubectl --kubeconfig "$MEMBER_B" apply -f hack/quota-mc-demo/fixtures/41-isvc-tpu-jax.yaml
+kubectl --kubeconfig "$MEMBER_B" -n ome-mc-test port-forward svc/mc-demo-jax 8080:8080
 ```
 
 ```console
@@ -315,7 +325,7 @@ matmul on a TPU device per request. **There is no model** — the response text
 describes the mesh it ran on. Real chips, real JAX, no weights.
 
 Serving an actual LLM is deliberately out of scope. The production path on this
-fleet is the internal `msl-tpu-kernel` vLLM fork at `tensor-parallel-size=16`
+fleet is the production TPU serving image at `tensor-parallel-size=16`
 with 500–800Gi of memory, a Ray leader/worker bootstrap, an XLA warm-cache
 tarball and a checkpoint mounted from a per-cluster GCS bucket over the gcsfuse
 CSI driver. One replica is 16 chips — an entire member's share — so it cannot
@@ -348,12 +358,12 @@ Three things this fixture pair pins down, each of which fails quietly if dropped
 ## Cleanup
 
 ```sh
-kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc -n ome-mc-test delete isvc --all
-kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc delete acceleratorquota mc-demo.serving mc-demo root
+kubectl --kubeconfig "$HUB" -n ome-mc-test delete isvc --all
+kubectl --kubeconfig "$HUB" delete acceleratorquota mc-demo.serving mc-demo root
 
 # only if the real-TPU pair was applied; it holds 8 chips until removed
-kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 -n ome-mc-test delete isvc mc-demo-jax --ignore-not-found
-kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 -n ome-mc-test delete servingruntime mc-demo-tpu-jax --ignore-not-found
+kubectl --kubeconfig "$MEMBER_B" -n ome-mc-test delete isvc mc-demo-jax --ignore-not-found
+kubectl --kubeconfig "$MEMBER_B" -n ome-mc-test delete servingruntime mc-demo-tpu-jax --ignore-not-found
 ```
 
 Delete the leaf before its ancestors, and note that the order is not advice: the
@@ -431,7 +441,7 @@ reason. The TPU topology label is deliberately not selected — the two members
 carve their fleets differently and the shapes they have free are not the same.
 
 **Why 16/16 rather than a proportional split.** See
-`fixtures/10-tree-explicit.yaml`. In short: the members are three orders of
-magnitude apart, so proportional over 32 chips starves the small one below one
+`fixtures/10-tree-explicit.yaml`. In short: the members are far apart in
+capacity, so proportional over 32 chips starves the small one below one
 replica. 16/16 is also self-evidently not what the hardware would produce, which
 is what makes the numbers on the members prove which policy ran.

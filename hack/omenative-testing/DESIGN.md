@@ -67,9 +67,8 @@ at any depth (flat layout still works).
 
 - **P1** — categorize existing 96 into `rollout/` (pure move, `topo=` stamp;
   **done**) + scale-up: default N 2→3–4, W 1→2, add a few N=6–8 gang cases.
-- **P2** — migration mode + `migration/` cases. Closes the biggest gap: #418
-  (gang migrate op) and #419 (IR-path migration wiring) finally get e2e
-  coverage. The playground previously could not trigger migration.
+- **P2** — migration mode + `migration/` cases. Closes the biggest gap: the
+  gang migrate operation and the IR-path migration wiring get e2e coverage.
 - **P3** — restart mode + `restart/` cases (pod-kill trigger).
 - **P4** — `partition/`, `scale/`, `edge/`: Partition canary, scale-down, X-2
   re-bump, mixed-strategy groups, IntOrString %-budgets, ReadyPolicy,

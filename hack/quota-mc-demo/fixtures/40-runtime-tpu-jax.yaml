@@ -1,7 +1,7 @@
 # A real TPU serving runtime: JAX on live tpu7x chips, behind an OpenAI-shaped
 # HTTP API. Namespaced to ome-mc-test, applied to a MEMBER.
 #
-#   kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 \
+#   kubectl --kubeconfig "$MEMBER_B" \
 #     apply -f hack/quota-mc-demo/fixtures/40-runtime-tpu-jax.yaml
 #
 # WHAT IS AND IS NOT REAL HERE
@@ -16,12 +16,12 @@
 # not a language model.
 #
 # Serving an actual LLM here would not be minimal and would not fit the demo.
-# The production path on this fleet is the internal msl-tpu-kernel vLLM fork with
-# tensor-parallel-size=16, 500-800Gi of memory, a Ray leader/worker bootstrap, an
-# XLA warm-cache tarball and a checkpoint mounted from a per-cluster GCS bucket
-# over the gcsfuse CSI driver. One replica of that is 16 chips -- an entire
-# member's budget under 10-tree-explicit.yaml -- so it could not demonstrate a
-# quota ceiling at all.
+# The production path on this fleet is the production TPU serving image at
+# tensor-parallel-size=16, with 500-800Gi of memory, a Ray leader/worker
+# bootstrap, an XLA warm-cache tarball and a checkpoint mounted from a
+# per-cluster GCS bucket over the gcsfuse CSI driver. One replica of that is 16
+# chips -- an entire member's budget under 10-tree-explicit.yaml -- so it could
+# not demonstrate a quota ceiling at all.
 #
 # WHY 2x2x2 AND NOT A SINGLE POD
 #

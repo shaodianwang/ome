@@ -1,10 +1,10 @@
-# OME on kind + kwok, with simulated rc-1 TPU nodes
+# OME on kind + kwok, with simulated TPU nodes
 
-A local cluster that behaves like `msl-gcp-usc1-rc-1` for anything you can answer
-by looking at where pods land: a real OME control plane — manager, webhooks,
-`ome-scheduler` and `ome-quota-manager` — driving
-[kwok](https://kwok.sigs.k8s.io)-simulated `tpu7x` nodes that carry rc-1's real
-labels, taints and capacity.
+A local cluster that behaves like the reference TPU cluster for anything you can
+answer by looking at where pods land: a real OME control plane — manager,
+webhooks, `ome-scheduler` and `ome-quota-manager` — driving
+[kwok](https://kwok.sigs.k8s.io)-simulated `tpu7x` nodes that carry that
+cluster's real labels, taints and capacity.
 
 There is no kubelet behind those nodes. Placement, topology, gang co-location,
 packing and saturation are faithful. Anything that needs a container to actually
@@ -116,8 +116,9 @@ that is would otherwise depend on the order of past runs.
 ## Node shapes
 
 The unit is a **cube**: one tpu7x sub-block, 64 chips, 16 nodes of
-`tpu7x-standard-4t` at 4 chips each. rc-1 carves each cube into node pools by
-slice topology, and every node in a pool advertises that pool's topology:
+`tpu7x-standard-4t` at 4 chips each. The reference TPU cluster carves each cube
+into node pools by slice topology, and every node in a pool advertises that
+pool's topology:
 
 | carve   | chips/slice | nodes/pool | pools/cube |
 |---------|------------:|-----------:|-----------:|
@@ -130,11 +131,11 @@ slice topology, and every node in a pool advertises that pool's topology:
 The default `--cubes 4x4x4,2x2x2` is two cubes = **32 nodes**: cube 1 kept whole
 as a single 16-node `4x4x4` pool, cube 2 split into eight 2-node `2x2x2` pools.
 One entry per cube, so `--cubes 4x4x4,4x4x4,2x2x2,2x2x1` is four cubes / 64
-nodes. rc-1 itself is 2044 TPU nodes across 32 `4x4x4`, 80 `2x2x2` and 16
-`2x2x1` sub-blocks; a few hundred fake nodes is comfortable, thousands is not
-(kind's IPAM hands each node a real `/24` out of `10.244.0.0/16`).
+nodes. A production cluster has thousands of TPU nodes; a few hundred fake nodes
+is comfortable, thousands is not (kind's IPAM hands each node a real `/24` out
+of `10.244.0.0/16`).
 
-Each node reproduces rc-1's shape: `google.com/tpu: 4`, 224 CPU, ~944Gi,
+Each node reproduces the reference cluster's shape: `google.com/tpu: 4`, 224 CPU, ~944Gi,
 `node.kubernetes.io/instance-type=tpu7x-standard-4t`, the
 `google.com/tpu=present:NoSchedule` taint, and the label set OME and the GKE
 schedulers key on — `cloud.google.com/gke-tpu-accelerator`, `-tpu-topology`,
@@ -167,8 +168,8 @@ Nothing downloads, and the ISVC controller gates on model readiness only for
 *sharded* models.
 
 **3. Toleration plus topology nodeSelector on the runtime.** Fake nodes carry
-rc-1's real `google.com/tpu=present:NoSchedule` taint, so an untolerated pod
-sees zero capacity.
+the reference cluster's real `google.com/tpu=present:NoSchedule` taint, so an
+untolerated pod sees zero capacity.
 
 **4. A slice-co-location mechanism** — see the next section. A multi-host TPU
 session spans one slice, so the whole gang has to land in one pool, and there
@@ -241,11 +242,11 @@ ISVC would carry.
 
 `plugin` drops `engineConfig.topologyKey` altogether and relies on the chart's
 fleet-wide `scheduler.plugin.topologyKey`. That works here only because
-`cloud.google.com/gke-nodepool` is one slice in rc-1 *and* is the same key for
-every carve; `cloud.google.com/gke-tpu-partition-<topo>-id` is the more literal
-"same slice" key but is topology-shaped, so a mixed-shape pool would need the
-per-PodGroup annotation. In this mode the PodGroup carries no annotation, which
-is the divergence from production.
+`cloud.google.com/gke-nodepool` is one slice in the reference cluster *and* is
+the same key for every carve; `cloud.google.com/gke-tpu-partition-<topo>-id` is
+the more literal "same slice" key but is topology-shaped, so a mixed-shape pool
+would need the per-PodGroup annotation. In this mode the PodGroup carries no
+annotation, which is the divergence from production.
 
 `OMEGangPack` is fail-closed on topology: with neither the annotation nor the
 plugin setting it refuses to place anything —
@@ -749,13 +750,13 @@ Things `up.sh` does that are not obvious, if you are reproducing it by hand:
   partially); the Kueue CRDs are required for `ome-quota-manager`, which cannot
   attribute capacity to a flavor it cannot read.
 
-## Refreshing the node shape from rc-1
+## Refreshing the node shape
 
 The capacity and label set in `gen-tpu-nodes.sh` are transcribed from a live
-rc-1 node. To re-derive them:
+node of the reference TPU cluster. To re-derive them:
 
 ```sh
-export KUBECONFIG=~/.kube/msl-gcp-usc1-rc-1
+export KUBECONFIG=<path to a tpu7x cluster kubeconfig>
 NODE=$(kubectl get nodes -l cloud.google.com/gke-tpu-topology=4x4x4 \
         -o jsonpath='{.items[0].metadata.name}')
 kubectl get node "$NODE" -o json | jq '{labels: .metadata.labels, taints: .spec.taints,

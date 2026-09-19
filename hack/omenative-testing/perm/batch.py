@@ -251,8 +251,8 @@ def summarize(cases):
         for r in fails:
             emit(f"  {r[0]}  {r[1]}  {r[6]}")
     # Parked-debt ledger: printed even when every such case XFAIL-passes — an
-    # XFAIL is tracked debt, not a green light. Silent XFAILs are how the
-    # p412-p415 recover wedge shipped to prod (#899).
+    # XFAIL is tracked debt, not a green light, and a silent XFAIL is how a
+    # parked bug ships unnoticed.
     debt = parked_debt_rows(cases)
     if debt:
         verdicts = {r[0]: r[1] for r in rows}

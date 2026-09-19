@@ -1,6 +1,6 @@
 # The not-admitted case: a service that asks for more than its share.
 #
-#   kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc \
+#   kubectl --kubeconfig "$HUB" \
 #     apply -f hack/quota-mc-demo/fixtures/21-isvc-exceeds.yaml
 #
 # Five replicas is 5 pods = 20 chips per member, against a 16-chip share. The
@@ -11,13 +11,13 @@
 # mc-demo.serving's ADMITTED pinned at exactly 16 of 16 — the ceiling holding,
 # not an error.
 #
-#   kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 -n ome-mc-test get pods
-#   kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 -n ome-mc-test get workloads
-#   kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 get aq mc-demo.serving -o wide
+#   kubectl --kubeconfig "$MEMBER_B" -n ome-mc-test get pods
+#   kubectl --kubeconfig "$MEMBER_B" -n ome-mc-test get workloads
+#   kubectl --kubeconfig "$MEMBER_B" get aq mc-demo.serving -o wide
 #
 # The gated pod carries Kueue's scheduling gate; that is the whole mechanism:
 #
-#   kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 -n ome-mc-test \
+#   kubectl --kubeconfig "$MEMBER_B" -n ome-mc-test \
 #     get pods -o custom-columns=NAME:.metadata.name,GATES:.spec.schedulingGates[*].name
 #
 # WHAT THE FAILURE LOOKS LIKE FROM THE HUB, AND WHY THAT MATTERS
@@ -34,7 +34,7 @@
 # 8 + 8 = 16 — and three stay gated. Delete mc-demo-fits and watch them admit
 # without anything being re-applied:
 #
-#   kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc -n ome-mc-test delete isvc mc-demo-fits
+#   kubectl --kubeconfig "$HUB" -n ome-mc-test delete isvc mc-demo-fits
 #
 # A NOTE ON PARTIAL ADMISSION
 #

@@ -1,8 +1,8 @@
 # One replica of the real-TPU runtime, applied DIRECTLY to a member.
 #
-#   kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 \
+#   kubectl --kubeconfig "$MEMBER_B" \
 #     apply -f hack/quota-mc-demo/fixtures/40-runtime-tpu-jax.yaml
-#   kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 \
+#   kubectl --kubeconfig "$MEMBER_B" \
 #     apply -f hack/quota-mc-demo/fixtures/41-isvc-tpu-jax.yaml
 #
 # No spec.placement, on purpose: this is the local proof that the runtime works
@@ -14,7 +14,7 @@
 #
 # Call it. Measured responses, not illustrations:
 #
-#   kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 -n ome-mc-test \
+#   kubectl --kubeconfig "$MEMBER_B" -n ome-mc-test \
 #     port-forward svc/mc-demo-jax 8080:8080
 #
 #   curl -s localhost:8080/health

@@ -19,7 +19,7 @@ spec:
     groups:
         # No decoder declared, so the engine unit is the engine alone. The group
         # names it and nothing else — an engine-only ladder on a router-fronted
-        # tier, which the entrypoint rule used to make unexpressible.
+        # tier, a shape the entrypoint rule must accept.
         - components: [engine]
           canary:
             steps:

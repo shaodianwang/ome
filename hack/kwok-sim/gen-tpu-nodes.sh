@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Emit kwok-simulated GKE TPU nodes that mirror the shape of msl-gcp-usc1-rc-1.
+# Emit kwok-simulated GKE TPU nodes that mirror the shape of the reference TPU cluster.
 #
 # The unit of capacity is a CUBE: one tpu7x sub-block, 64 chips, 16 nodes of
 # tpu7x-standard-4t (4 chips each). A cube is carved into node pools by slice
@@ -65,9 +65,9 @@ hash8() { hash32 "$1" | cut -c1-8; }
 CHIPS_PER_NODE=4
 NODES_PER_CUBE=16
 
-# tpu7x-standard-4t, as reported by the rc-1 node pools. pods=32 is the 4x4x4
-# pool's max-pods; the 2x2x2 pools allow 110. The smaller number everywhere is
-# the conservative choice for a scheduling simulator.
+# tpu7x-standard-4t, as reported by the reference cluster's node pools. pods=32
+# is the 4x4x4 pool's max-pods; the 2x2x2 pools allow 110. The smaller number
+# everywhere is the conservative choice for a scheduling simulator.
 emit_status() { # $1 = node name, $2 = ip
   cat <<YAML
 status:

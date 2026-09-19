@@ -5,7 +5,7 @@
 # name, so it edits that leaf in place. Applied to a hub with no tree it is
 # refused instead, for a parentRef "mc-demo" that does not resolve.
 #
-#   kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc \
+#   kubectl --kubeconfig "$HUB" \
 #     apply -f hack/quota-mc-demo/fixtures/12-tree-badsum.yaml
 #
 # 16 + 8 is 24 against a nominal of 32. Observed on the live fleet:
@@ -24,11 +24,11 @@
 #
 # Read the reason on the hub. It is the only place it exists:
 #
-#   kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc \
+#   kubectl --kubeconfig "$HUB" \
 #     get aq -o json | jq -r '.items[] | .metadata.name as $n
 #       | (.status.clusters // [])[] | "\($n) -> \(.cluster): \(.message // "ok")"'
 #
-#   mc-demo.serving -> msl-gcp-usc1-dev-1-tpu: budget google.com/tpu/tpu7x is 32
+#   mc-demo.serving -> member-b-tpu: budget google.com/tpu/tpu7x is 32
 #     but its per-cluster shares sum to 24
 #
 # WHAT MAKES IT WORTH DEMOING
@@ -71,7 +71,7 @@ spec:
     resourceFlavor: tpu7x
     nominal: 32
     perCluster:
-    - cluster: msl-gcp-usc1-rc-1-tpu
+    - cluster: member-a-tpu
       nominal: 16
-    - cluster: msl-gcp-usc1-dev-1-tpu
+    - cluster: member-b-tpu
       nominal: 8

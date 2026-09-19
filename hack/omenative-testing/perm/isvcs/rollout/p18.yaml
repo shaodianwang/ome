@@ -14,5 +14,5 @@ spec:
         type: InPlaceOnly
         # in-place needs maxUnavailable>=1: the patch marks the pod not-ready
         # (consumes the unavailable budget). maxSurge:0 is correct — in-place
-        # never surges. both-zero is unstartable and rejected at admission (#410).
+        # never surges. both-zero is unstartable and rejected at admission.
         rollingUpdate: { maxSurge: 0, maxUnavailable: 1 }

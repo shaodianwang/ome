@@ -29,7 +29,7 @@ CSR_MN = (HERE / "runtime" / "csr-multinode.yaml").read_text() # gang base
 
 TOPOS = ["engine", "pd", "engine-mn", "pd-mn"]
 # Hand-written cases parked in the generated folder (p416 = the break=stuck
-# surge-budget-deadlock guard, #719): the regen sweep must preserve them.
+# surge-budget-deadlock guard): the regen sweep must preserve them.
 HAND_WRITTEN = {"p416"}
 BEHAVIORS = [  # (tag, autoSync, expect, edit)
     ("roll",   "true",  "roll",   "material"),

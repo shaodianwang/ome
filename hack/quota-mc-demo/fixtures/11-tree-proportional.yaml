@@ -5,7 +5,7 @@
 #       └── mc-demo.serving  ClusterQueue  32 chips
 #                                          Proportional (the manager's default)
 #
-#   kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc \
+#   kubectl --kubeconfig "$HUB" \
 #     apply -f hack/quota-mc-demo/fixtures/11-tree-proportional.yaml
 #
 # No node names a policy, so the hub's configured default applies — it runs with
@@ -13,22 +13,22 @@
 # allocatable capacity each member reported on its OWN root, not against
 # anything authored here. Read the denominators first:
 #
-#   kubectl --kubeconfig ~/.kube/msl-gcp-usc1-rc-1  get aq root -o jsonpath='{.status.capacity}'
-#   kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 get aq root -o jsonpath='{.status.capacity}'
+#   kubectl --kubeconfig "$MEMBER_A" get aq root -o jsonpath='{.status.capacity}'
+#   kubectl --kubeconfig "$MEMBER_B" get aq root -o jsonpath='{.status.capacity}'
 #
 # then read what the hub resolved:
 #
-#   kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc \
+#   kubectl --kubeconfig "$HUB" \
 #     get aq mc-demo.serving -o jsonpath='{.status.budgets[0].perCluster}'
 #
 # This is the fixture that proves the capacity read is live rather than
 # fixtured: the shares move when nodes are cordoned or a pool is added, and no
 # number here says anything about hardware.
 #
-# It is NOT the fixture to run the ISVC demos against. rc-1's allocatable dwarfs
-# dev-1's, so 32 chips apportion to roughly 30 and 2 — dev-1's share cannot fund
-# even one 4-chip replica of mc-demo-tpu, and every placement lands on one
-# member. Use 10-tree-explicit.yaml for those.
+# It is NOT the fixture to run the ISVC demos against. member-a's allocatable
+# dwarfs member-b's, so 32 chips apportion to roughly 30 and 2 — member-b's
+# share cannot fund even one 4-chip replica of mc-demo-tpu, and every placement
+# lands on one member. Use 10-tree-explicit.yaml for those.
 #
 # Shares are snapshotted at reconcile and held between passes, so they do not
 # drift under you mid-demo. They will move on the next resync (the hub runs

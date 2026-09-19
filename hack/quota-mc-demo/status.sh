@@ -3,12 +3,12 @@
 #
 #   hack/quota-mc-demo/status.sh
 #
-# Override any cluster with the env vars below; the defaults are the kubeconfigs
-# this demo was written against.
+# Point the env vars below at the hub and member kubeconfigs (the defaults are
+# placeholders): MC_DEMO_HUB, MC_DEMO_MEMBERS (space-separated), MC_DEMO_NS.
 set -uo pipefail
 
-HUB="${MC_DEMO_HUB:-$HOME/.kube/msl-mks-ome-lco-0-rc}"
-MEMBERS="${MC_DEMO_MEMBERS:-$HOME/.kube/msl-gcp-usc1-rc-1 $HOME/.kube/msl-gcp-usc1-dev-1}"
+HUB="${MC_DEMO_HUB:-$HOME/.kube/<hub>}"
+MEMBERS="${MC_DEMO_MEMBERS:-$HOME/.kube/<member-a> $HOME/.kube/<member-b>}"
 NS="${MC_DEMO_NS:-ome-mc-test}"
 
 h() { printf '\n\033[1m== %s ==\033[0m\n' "$1"; }

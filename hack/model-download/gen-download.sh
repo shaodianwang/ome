@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Generate a PVC + Manifold download Job for a given checkpoint URI.
+# Generate a PVC + blob-store download Job for a given checkpoint URI.
 # Input is a manifold:// URI; the job's --s3_download_base_uri uses the same path
 # with the scheme swapped to s3:// (download.py + --provider=manifold). download.py
 # appends "/checkpoint" itself, so a trailing "/checkpoint" in the input is stripped
 # from the base URI. Typical input:
-#   manifold://fair_llms_prod/tree/vllm_test/<model-id>/checkpoint_0000150/checkpoint
+#   manifold://<bucket>/tree/<prefix>/<model-id>/checkpoint_0000150/checkpoint
 # PRINTS YAML TO STDOUT ONLY — it never touches a cluster. Review, then apply
-# yourself. See README.md for prerequisites (Aqueduct cert secret, cloud_oss, SC).
+# yourself. See README.md for prerequisites (identity cert secret, cloud_oss, SC).
 #
 #   ./gen-download.sh <checkpoint-uri> [flags] > /tmp/dl.yaml
-#   kubectl --context cw/msl-cw-use2-2 -n prod apply -f /tmp/dl.yaml   # you run this
+#   kubectl --context <cluster-context> -n <namespace> apply -f /tmp/dl.yaml   # you run this
 #
 # Flags:
 #   --name <pvc-name>     PVC name (default: auto-derived from the URI, ckpt-<slug>)
@@ -54,7 +54,7 @@ slug() { echo "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-
 trunc() { echo "$1" | cut -c1-"$2" | sed -E 's/-+$//'; }
 
 # Derive names from the URI path. Inputs look like
-#   manifold://fair_llms_prod/tree/vllm_test/<model-id>/checkpoint_0000150/checkpoint
+#   manifold://<bucket>/tree/<prefix>/<model-id>/checkpoint_0000150/checkpoint
 # i.e. a trailing literal "checkpoint" may follow the numbered "checkpoint_NNNN".
 # Scan for the checkpoint_NNNN segment (anywhere); model-id is the segment before it.
 path="${URI#*://}"; path="${path%/}"                # strip scheme://, trailing slash

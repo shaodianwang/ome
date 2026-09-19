@@ -3,7 +3,7 @@
 #   root                     Cohort        32 chips, the fleet total
 #   └── mc-demo              Cohort        32 chips, travels budget-less
 #       └── mc-demo.serving  ClusterQueue  32 chips
-#                                          Explicit: rc-1 16, dev-1 16
+#                                          Explicit: member-a 16, member-b 16
 #
 # The leaf is named by its path — the dot-joined chain from the top tier down,
 # root omitted. That name is the tenant, the ClusterQueue, and the LocalQueue in
@@ -12,7 +12,7 @@
 #
 # Applied on the HUB only:
 #
-#   kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc \
+#   kubectl --kubeconfig "$HUB" \
 #     apply -f hack/quota-mc-demo/fixtures/10-tree-explicit.yaml
 #
 # The reserved root is declared here. A workload cluster's own controller
@@ -23,10 +23,10 @@
 #
 # WHY EXPLICIT AND NOT PROPORTIONAL
 #
-# The two members are wildly unequal — rc-1 reports thousands of allocatable
-# chips, dev-1 reports 256 — so Proportional over a 32-chip total gives dev-1
-# barely more than one chip and rc-1 the rest. That is a correct split and a
-# useless demo: dev-1 could not fund a single 4-chip replica, and every ISVC
+# The two members are wildly unequal — member-a reports far more allocatable
+# chips than member-b — so Proportional over a 32-chip total gives member-b
+# barely more than one chip and member-a the rest. That is a correct split and a
+# useless demo: member-b could not fund a single 4-chip replica, and every ISVC
 # fixture would land entirely on one member. See 11-tree-proportional.yaml for
 # the same tree with the capacity read left to do the work.
 #
@@ -88,7 +88,7 @@ spec:
     resourceFlavor: tpu7x
     nominal: 32
     perCluster:
-    - cluster: msl-gcp-usc1-rc-1-tpu
+    - cluster: member-a-tpu
       nominal: 16
-    - cluster: msl-gcp-usc1-dev-1-tpu
+    - cluster: member-b-tpu
       nominal: 16

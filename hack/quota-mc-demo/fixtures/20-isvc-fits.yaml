@@ -1,6 +1,6 @@
 # The admitted case: a service that fits inside every member's share.
 #
-#   kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc \
+#   kubectl --kubeconfig "$HUB" \
 #     apply -f hack/quota-mc-demo/fixtures/20-isvc-fits.yaml
 #
 # All mode places on EVERY candidate that admits it; there is no winner and no
@@ -12,13 +12,13 @@
 # Running, and mc-demo.serving's ADMITTED at 8 of 16.
 #
 #   hack/quota-mc-demo/status.sh
-#   kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 get aq mc-demo.serving -o wide
-#   kubectl --kubeconfig ~/.kube/msl-gcp-usc1-dev-1 -n ome-mc-test get pods
+#   kubectl --kubeconfig "$MEMBER_B" get aq mc-demo.serving -o wide
+#   kubectl --kubeconfig "$MEMBER_B" -n ome-mc-test get pods
 #
 # On the hub, status.placement.cluster is EMPTY — All mode has no single winner,
 # so status.placement.candidates is the whole answer:
 #
-#   kubectl --kubeconfig ~/.kube/msl-mks-ome-lco-0-rc -n ome-mc-test \
+#   kubectl --kubeconfig "$HUB" -n ome-mc-test \
 #     get isvc mc-demo-fits -o jsonpath='{range .status.placement.candidates[*]}{.cluster}={.readyReplicas}{"\n"}{end}'
 #
 # Three things on this object are load-bearing and easy to drop:
