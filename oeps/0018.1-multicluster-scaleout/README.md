@@ -43,8 +43,8 @@
 admits the whole thing wins, the losers are deleted. That works only while the
 desired replica count fits in a single cluster. It does not for a service that
 needs **more replicas than any one cluster can hold**: e.g. 1000 pods ≈ 125
-replicas of an 8-pod tensor-parallel gang, which no single GPU cluster in our
-fleet has room for. This OEP generalizes 0018's fan-out + race from **binary to
+replicas of an 8-pod tensor-parallel gang, which no single GPU cluster of
+ordinary size has room for. This OEP generalizes 0018's fan-out + race from **binary to
 fractional**: clone the ISVC with a replica count to every candidate cluster;
 each cluster's Kueue admits **as many replicas as fit**; **keep every cluster
 that admitted ≥1** (do not delete the partial winners); sum admitted replicas
@@ -257,7 +257,7 @@ and a shared fabric. A cross-cluster (cross-region, cross-provider) link is
 WAN-class: milliseconds of RTT, no shared fabric, no RDMA. Place two ranks of one
 gang on two clusters and the collective doesn't just slow down — the NCCL/ICI
 bring-up fails outright, exactly the multi-host-slice split failure mode OME
-already hit and fixed for TPU gangs (per-gang slice affinity). So the boundary
+guards against for TPU gangs (per-gang slice affinity). So the boundary
 is physical: **the replica is the smallest unit we may
 relocate; the gang is indivisible.**
 
