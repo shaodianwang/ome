@@ -3,10 +3,10 @@
 ## Status and decision
 
 **Provisional.** This OEP diagnoses a shipped correctness bug (`status.url` is
-wrong or incomplete on every production cluster we run) and proposes a fix. The
-diagnosis and evidence are settled; the status *schema* shape (one canonical URL
-vs. a list) and which endpoint is "canonical" are the open design decisions —
-see [Open questions](#open-questions).
+wrong or incomplete on real shared-host and multi-gateway clusters) and proposes
+a fix. The diagnosis and evidence are settled; the status *schema* shape (one
+canonical URL vs. a list) and which endpoint is "canonical" are the open design
+decisions — see [Open questions](#open-questions).
 
 ## Summary
 
@@ -16,7 +16,7 @@ the service. Today it is derived from a code path (`createRawURL` →
 **completely separate** from the code path that builds the actual Gateway API
 routes (`httproute_builder.gatewaysForRoute` + `gatewayHostnameForDomain` +
 `pathPrefix`). Two independent renderers of "the URL" guarantee drift, and they
-have drifted: on the clusters we run, `status.url` is either **non-routable** or
+have drifted: on real clusters, `status.url` is either **non-routable** or
 **missing the endpoint the caller actually wants**.
 
 This OEP proposes (1) deriving status URLs from the *same* builder that produces
@@ -29,31 +29,32 @@ and a single `url` field structurally cannot represent that.
 
 ### The failure mode (what breaks today)
 
-Two distinct, live-verified failures. Both were captured by comparing
-`status.url` against the actual `HTTPRoute` (hostnames + path matches)
-and the `Gateway` listeners on the cluster.
+Two distinct, live-verified failures, captured on three real clusters — two
+shared-host clusters (A and B) and one multi-gateway cluster (C) — by comparing
+`status.url` against the actual `HTTPRoute` (hostnames + path matches) and the
+`Gateway` listeners on each cluster.
 
 **Failure 1 — shared-host/path clusters: `status.url` is non-routable.**
-On the prod and dev clusters, the ingress config is
+On the shared-host clusters (A and B), the ingress config is
 `perISVCSubdomain: false` with `sharedHostPrefix: "llm"`. Routing is
-shared-host + path-prefix. For isvc `prod/my-model`:
+shared-host + path-prefix. For isvc `team-b/my-model`:
 
 | | value |
 |---|---|
-| `status.url` | `https://my-model.prod.int-gw-https.example.com` |
+| `status.url` | `https://my-model.team-b.int-gw-https.example.com` |
 | actual `HTTPRoute` host | `llm.int-gw-https.example.com` |
-| actual `HTTPRoute` path | `PathPrefix: /prod/my-model/` |
-| real reachable URL | `https://llm.int-gw-https.example.com/prod/my-model/` |
+| actual `HTTPRoute` path | `PathPrefix: /team-b/my-model/` |
+| real reachable URL | `https://llm.int-gw-https.example.com/team-b/my-model/` |
 | gateway listeners that exist | `int-gw-https`, `ext-gw-https`, `int-gw-tls`, `ext-gw-tls` |
 
-The advertised host `my-model.prod.int-gw-https…` is a
+The advertised host `my-model.team-b.int-gw-https…` is a
 per-ISVC subdomain that **has no gateway listener** and the URL **omits the
-`/prod/<isvc>/` path prefix the route requires**. A caller who copies
+`/team-b/<isvc>/` path prefix the route requires**. A caller who copies
 `status.url` gets a URL that does not resolve and would not route even if it did.
 `status.url` is simply wrong on these clusters — for every isvc.
 
 **Failure 2 — multi-gateway clusters: `status.url` hides the endpoint callers
-need.** On the TPU cluster, the config is `perISVCSubdomain: true` with a
+need.** On cluster C, the config is `perISVCSubdomain: true` with a
 cluster-default primary (internal) gateway, a cluster-default **additional
 (external)** gateway, and per-namespace int/ext gateway pairs
 (`namespaceIngressGateways` for several namespaces). For isvc
@@ -61,8 +62,8 @@ cluster-default primary (internal) gateway, a cluster-default **additional
 
 | | value |
 |---|---|
-| `status.url` | `https://gpt-oss-20b.team-a.int-gw-https.tpu.example.com` |
-| actual `HTTPRoute` hostnames | `…int-gw-https…` **and** `gpt-oss-20b.team-a.ext-gw-https.tpu.example.com` |
+| `status.url` | `https://gpt-oss-20b.team-a.int-gw-https.cluster-c.example.com` |
+| actual `HTTPRoute` hostnames | `…int-gw-https…` **and** `gpt-oss-20b.team-a.ext-gw-https.cluster-c.example.com` |
 | actual `HTTPRoute` parentRefs | `team-a-int-gw-https` **and** `team-a-ext-gw-https` |
 
 Here `status.url` is *reachable* (the internal host is real) but exposes only the
@@ -89,8 +90,8 @@ different inputs:
 
 A comment in `httproute_builder.go` asserts the route host and the status host
 "can't drift" — but that invariant only holds in the `perISVCSubdomain: true`
-branch. In the `perISVCSubdomain: false` branch (prod, dev) the two diverge
-completely (Failure 1), and in the multi-gateway case (TPU) status is a strict
+branch. In the `perISVCSubdomain: false` branch (clusters A and B) the two diverge
+completely (Failure 1), and in the multi-gateway case (cluster C) status is a strict
 subset of the routes (Failure 2). **Two renderers of the same fact is the root
 cause; one renderer is the fix.**
 
@@ -120,7 +121,7 @@ the same URL-construction code; see [Design Details](#design-details)):
    route is attached to N gateways (internal + external + per-namespace), status
    exposes all N, tagged so a consumer can pick the external one.
    *Rationale:* Failure 2 — the external endpoint exists on the route but is
-   invisible in the API; multi-gateway is now the default on TPU.
+   invisible in the API; multi-gateway routes are the default on cluster C.
 3. **Single source of truth.** Status URLs are derived from the *same* builder
    logic that produces the `HTTPRoute` hosts + paths, so they cannot drift.
    *Rationale:* the root cause is two renderers; anything less than merging them
@@ -132,7 +133,7 @@ the same URL-construction code; see [Design Details](#design-details)):
 ### Non-Goals
 
 - **Changing routing behavior.** The `HTTPRoute` objects are correct (they carry
-  both hosts and both parentRefs — verified on TPU). This OEP changes only what
+  both hosts and both parentRefs — verified on cluster C). This OEP changes only what
   `status` *reports*, plus the shared derivation. No change to `gatewaysForRoute`
   routing semantics.
 - **Adding gateway configuration.** Per-namespace / additional gateways already
@@ -152,12 +153,12 @@ the same URL-construction code; see [Design Details](#design-details)):
 Defined before use, with the consequence baked in:
 
 - **Subdomain routing** (`perISVCSubdomain: true`): each isvc gets its own host,
-  `<isvc>.<ns>.<domain>`, path `/`. The host identifies the service. Used on the
-  TPU cluster.
+  `<isvc>.<ns>.<domain>`, path `/`. The host identifies the service. Used on
+  cluster C.
 - **Shared-host / path routing** (`perISVCSubdomain: false`): all isvcs share one
   host, `<sharedHostPrefix>.<domain>`, and are disambiguated by a path prefix
   `/<ns>/<isvc>/` (an Envoy `urlRewrite` filter strips it before forwarding).
-  Used on the prod and dev clusters. **The path is
+  Used on clusters A and B. **The path is
   load-bearing: drop it and the request does not route.**
 - **Primary (internal) gateway** (`omeIngressGateway` + `ingressDomain`): the
   default gateway every route attaches to; by convention the in-datacenter
@@ -181,9 +182,9 @@ Cross-cluster snapshot, showing `status.url` against the real route:
 
 | Cluster | mode | gateways (OME config) | real reachable URL | `status.url` today | correct? |
 |---|---|---|---|---|---|
-| TPU | subdomain | int + ext (cluster-default **and** per-ns) | `…int…` **and** `…ext…` host | `…int…` only | reachable, **external missing** |
-| prod | shared-host/path | int only | `llm.int-gw-https…/<ns>/<isvc>/` | `<isvc>.<ns>.int-gw-https…` (subdomain, no path) | **non-routable** |
-| dev | shared-host/path | int only | `llm.int-gw-https…/<ns>/<isvc>/` | `<isvc>.<ns>.int-gw-https…` | **non-routable** |
+| C | subdomain | int + ext (cluster-default **and** per-ns) | `…int…` **and** `…ext…` host | `…int…` only | reachable, **external missing** |
+| A | shared-host/path | int only | `llm.int-gw-https…/<ns>/<isvc>/` | `<isvc>.<ns>.int-gw-https…` (subdomain, no path) | **non-routable** |
+| B | shared-host/path | int only | `llm.int-gw-https…/<ns>/<isvc>/` | `<isvc>.<ns>.int-gw-https…` | **non-routable** |
 
 Consider a cluster that exposes an internet-facing gateway alongside the shared
 internal one (e.g. `ext-gateway-https`) at the infrastructure layer, while its
@@ -229,7 +230,7 @@ operator labeled it. Today that is the int-gw, so the field's *meaning* is
 unchanged — it just becomes correct.
 
 *Rationale:* the alternative (promote the external endpoint to `status.url` when
-one exists) makes the field's meaning **cluster-dependent** — prod/dev have no
+one exists) makes the field's meaning **cluster-dependent** — clusters A and B have no
 external gateway, so `url` would mean different things per cluster — and breaks
 the two properties worth keeping: `status.url` is always populated and stable. A
 consumer that specifically wants the external endpoint selects it explicitly via
@@ -326,7 +327,7 @@ type IngressGatewaySpec struct {
 
 - **Why a free-form string, not a closed enum.** *Rationale:* the endpoint
   taxonomy must be exactly as open as the gateway config that produces it. OME
-  already lets an operator add arbitrary gateways in config (TPU has `int`/`ext`
+  already lets an operator add arbitrary gateways in config (cluster C has `int`/`ext`
   today; an `exp` gateway is a pure config change). A closed
   `Internal|External|ClusterLocal` enum would turn "add a gateway class" into a
   CRD-schema + client change, and would force the controller to *guess* scope
@@ -415,9 +416,9 @@ a behavior change for any consumer that (incorrectly) parsed the old value.
   added; `IngressGatewaySpec.Class` added; `status.url` corrected in both routing
   modes; scheme hardcodes removed; unit + drift-guard tests green. Correctness
   fix ships on by default (it replaces wrong values).
-- **Beta:** integration coverage across the config matrix; TPU/prod/dev spot-
-  checked live (`status.url` reachable; external endpoint present in
-  `status.addresses` on TPU).
+- **Beta:** integration coverage across the config matrix; clusters A, B and C
+  spot-checked live (`status.url` reachable; external endpoint present in
+  `status.addresses` on C).
 - **Stable:** OEP-0018 `PlacementStatus.Endpoint` consumes the corrected
   `status.url`; operators have set `class` on their gateways; docs updated.
 
@@ -426,7 +427,7 @@ a behavior change for any consumer that (incorrectly) parsed the old value.
 - **Status schema growth.** A new list field on an already-large status. Mitigated
   by keeping it `+optional` and small (one entry per gateway; typically 1–2).
 - **Behavior change on shared-host clusters.** Any consumer that parsed the
-  (wrong) subdomain `status.url` on prod/dev will see it change. This is
+  (wrong) subdomain `status.url` on shared-host clusters will see it change. This is
   unavoidable — the old value never worked — but must be announced.
 - **Class is declared, not verified.** The `class` on an endpoint is whatever the
   operator wrote in gateway config; OME cannot verify an `"external"`-labeled
