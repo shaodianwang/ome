@@ -1473,8 +1473,8 @@
         <!-- aggregate strip -->
         <div class="stat-grid" style="grid-template-columns:repeat(4,1fr)">
           <div class="stat"><div class="label">Total GPUs</div><div class="val">7,168</div><div class="meta"><span class="trend up">5,312 used</span> · 1,856 free</div></div>
-          <div class="stat"><div class="label">TPU chips</div><div class="val">8,704</div><div class="meta">38 / 52 slices in use</div></div>
-          <div class="stat"><div class="label">RDMA islands</div><div class="val">14</div><div class="meta"><span style="color:var(--green)">12 healthy</span> · 2 pressure</div></div>
+          <div class="stat"><div class="label">TPU chips</div><div class="val">1,536</div><div class="meta">8 / 12 slices in use</div></div>
+          <div class="stat"><div class="label">RDMA islands</div><div class="val">4</div><div class="meta"><span style="color:var(--green)">3 healthy</span> · 1 pressure</div></div>
           <div class="stat"><div class="label">Pending in Kueue</div><div class="val" style="color:var(--amber)">11</div><div class="meta">awaiting capacity across 3 clusters</div></div>
         </div>
 
@@ -1483,8 +1483,8 @@
           <div class="cap-section-head">
             <div class="cl-logo" style="background:#0f2547;color:#7fb3ff;border:1px solid #1d3a63">DC</div>
             <h2>On-prem · RDMA fabric</h2>
-            <span class="meta mono">H100 · RoCE v2 · 14 islands · 4,608 nodes</span>
-            <div class="right"><span class="pill amber"><span class="pdot"></span>2 islands under pressure</span></div>
+            <span class="meta mono">H100 · RoCE v2 · 4 islands · 1,024 nodes</span>
+            <div class="right"><span class="pill amber"><span class="pdot"></span>1 island under pressure</span></div>
           </div>
           <div class="island-grid">
             <!-- each island: 8x8 grid of GPU cells -->
@@ -1561,8 +1561,8 @@
           <div class="cap-section-head">
             <div class="cl-logo" style="background:#0c2a16;color:#6fd99c;border:1px solid #1c4a30">G</div>
             <h2>GCP · TPU slices</h2>
-            <span class="meta mono">v5e &amp; v5p · 52 slices · 8,704 chips</span>
-            <div class="right"><span class="pill green"><span class="pdot"></span>14 slices free</span></div>
+            <span class="meta mono">v5e &amp; v5p · 12 slices · 1,536 chips</span>
+            <div class="right"><span class="pill green"><span class="pdot"></span>4 slices free</span></div>
           </div>
           <div class="slice-grid">
             <div class="slice">

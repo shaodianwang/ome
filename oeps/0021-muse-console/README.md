@@ -116,9 +116,9 @@ OEP about a *layer*, not a new system.
 ### Risks (named so they are reviewable)
 
 - **R1 — Read-plane scale/footprint.** Watching Nodes (and Pods, if we are not
-  careful) across many clusters can blow up cache memory. We have already been
-  burned: the manager once OOMed by caching all Pods cluster-wide on a very large
-  cluster. Mitigation in Design Details (scope the cache; do not cache Pods).
+  careful) across many clusters can blow up cache memory: caching all Pods
+  cluster-wide on a very large cluster is enough to OOM a manager. Mitigation in
+  Design Details (scope the cache; do not cache Pods).
 - **R2 — The capacity model is heterogeneous and not in the API.** RDMA islands
   and TPU slices come from provider-specific labels/CRDs, not standard Node fields.
   This is the one genuinely new, hard piece; getting the normalization wrong makes
