@@ -30,8 +30,9 @@ type Home struct {
 	// quota-admitted count).
 	Allocated int32
 
-	// Ready is the home's live ready-replica count — the binary health signal.
-	// Zero gates the home's weight to 0 (unless every home is unhealthy).
+	// Ready is the home's live ready-replica count. It caps the count basis of
+	// the weight, so partial readiness changes traffic proportionally. Zero gates
+	// the home's weight to 0.
 	Ready int32
 
 	// Factor is the per-replica relative serving capacity of the home's
@@ -88,72 +89,82 @@ func (h Home) EffectiveAllocated() int32 {
 	return *h.Reported
 }
 
-// serving reports whether the home may carry traffic at all: it must have ready
-// replicas, must not be probe-gated, and must have something left to serve after
-// the reported ceiling.
-func (h Home) serving() bool {
-	if h.Ready <= 0 || h.EffectiveAllocated() <= 0 {
-		return false
+// RoutableReplicas is the capacity that is both allocated and currently ready.
+// Readiness may lower an allocation but never raise it.
+func (h Home) RoutableReplicas() int32 {
+	allocated := h.EffectiveAllocated()
+	if h.Ready < 0 {
+		return 0
 	}
-	return h.Reachable == nil || *h.Reachable
+	if h.Ready < allocated {
+		return h.Ready
+	}
+	return allocated
 }
 
 // Weights computes the final, apply-verbatim traffic weights for a set of
 // serving homes, index-aligned with homes.
 //
-// For each home: raw_h = effectiveAllocated_h * factor_h, gated to 0 when the
-// home has no ready replicas or its probe says it is unreachable. The raw values
+// For each home: raw_h = min(effectiveAllocated_h, ready_h) * factor_h, gated to
+// 0 when its probe says it is unreachable. The raw values
 // are then reduced to their smallest whole-number ratio, yielding relative
 // non-negative integers matching Gateway API and Envoy weighted-cluster
 // semantics — a consumer applies them verbatim or divides by their sum for a
 // percentage. A ratio that cannot fit the strictest built-in publisher limit is
 // scaled proportionally into that range while preserving every positive arm.
 //
-// When every home would be zero — all unhealthy, all unreachable, or nothing
-// allocated — all homes are given equal weight 1, so traffic is never
-// black-holed. That fallback is what bounds the blast radius of the observed
-// inputs: a prober bug or a control-plane partition marks every home down at
-// once, and spreading traffic beats dropping it.
+// An all-zero capacity result remains all-zero. PreserveTraffic may ignore only
+// probe gates, and only when every home has a conclusive failing verdict; the
+// fallback still honors admitted, ready, and reported capacity.
 func Weights(homes []Home) []int32 {
 	return weights(homes, AllFailedPolicyPreserveTraffic)
 }
 
-// weights applies the configured policy only when every home has a conclusive
-// failing probe verdict. Unknown probe state must never authorize a full drain.
+// weights applies PreserveTraffic only when every home has a conclusive failing
+// probe verdict. Unknown probe state never authorizes the fallback, and Drain
+// preserves the all-zero result.
 func weights(homes []Home, allFailedPolicy AllFailedPolicy) []int32 {
-	weights := make([]int32, len(homes))
 	if len(homes) == 0 {
-		return weights
+		return []int32{}
 	}
 
+	raw, gcd := rawWeights(homes, false)
+	if gcd.Sign() != 0 {
+		return normalizeRawWeights(raw, gcd)
+	}
+	if allFailedPolicy != AllFailedPolicyPreserveTraffic || !allProbesFailed(homes) {
+		return make([]int32, len(homes))
+	}
+
+	// Every probe conclusively failed, so PreserveTraffic may ignore only that
+	// signal. Recompute from the remaining capacity gates; an unready,
+	// unadmitted, or zero-reported-capacity home stays at zero.
+	raw, gcd = rawWeights(homes, true)
+	if gcd.Sign() == 0 {
+		return make([]int32, len(homes))
+	}
+	return normalizeRawWeights(raw, gcd)
+}
+
+// rawWeights returns each home's unnormalized capacity and their GCD. When
+// ignoreProbeGates is true, admitted, ready, and reported capacity still apply.
+func rawWeights(homes []Home, ignoreProbeGates bool) ([]*big.Int, *big.Int) {
 	// raw_h in milli-units: allocated * (factor scaled by 1000). Arbitrary-
 	// precision integers keep both the Quantity conversion and multiplication
 	// safe before the ratio is reduced to TrafficMap's int32 representation.
 	raw := make([]*big.Int, len(homes))
-	g := new(big.Int)
+	gcd := new(big.Int)
 	for i := range homes {
 		raw[i] = new(big.Int)
 		h := &homes[i]
-		if !h.serving() {
-			continue // health-gated, probe-gated, or nothing to serve → weight 0
+		capacity := h.RoutableReplicas()
+		if capacity <= 0 || (!ignoreProbeGates && h.Reachable != nil && !*h.Reachable) {
+			continue
 		}
-		raw[i].Mul(big.NewInt(int64(h.EffectiveAllocated())), factorMilli(h.Factor))
-		g = new(big.Int).GCD(nil, nil, g, raw[i])
+		raw[i].Mul(big.NewInt(int64(capacity)), factorMilli(h.Factor))
+		gcd = new(big.Int).GCD(nil, nil, gcd, raw[i])
 	}
-
-	if g.Sign() == 0 {
-		if allFailedPolicy == AllFailedPolicyDrain && allProbesFailed(homes) {
-			return weights
-		}
-		// Every home is zero — equal-weight fallback so traffic is never
-		// black-holed unless a complete probe failure explicitly selected Drain.
-		for i := range weights {
-			weights[i] = 1
-		}
-		return weights
-	}
-
-	return normalizeRawWeights(raw, g)
+	return raw, gcd
 }
 
 func allProbesFailed(homes []Home) bool {

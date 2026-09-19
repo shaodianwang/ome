@@ -146,19 +146,55 @@ func workerWithAdmittedURL(t *testing.T, s *runtime.Scheme, host string) client.
 }
 
 func workerWithReadyURL(t *testing.T, s *runtime.Scheme, host string, ready int32) client.WithWatch {
+	return workerWithReplicaCounts(t, s, host, ready, ready)
+}
+
+func workerWithReplicaCounts(t *testing.T, s *runtime.Scheme, host string, admitted, ready int32) client.WithWatch {
 	t.Helper()
 	derived := isvcWithInstances(v1beta1.EngineComponent, true)
 	derived.Namespace, derived.Name = "prod", "svc"
 	derived.Labels = map[string]string{PlacementOriginLabel: "uid-1"}
 	derived.Status.URL = &apis.URL{Scheme: "https", Host: host}
-	admitted := make([]bool, ready)
-	for i := range admitted {
-		admitted[i] = true
+	instances := make([]bool, admitted)
+	for i := range instances {
+		instances[i] = true
 	}
-	engineIR := irWithInstances(v1beta1.EngineComponent, admitted...)
+	engineIR := irWithInstances(v1beta1.EngineComponent, instances...)
 	engineIR.Status.ReadyReplicas = ready
 	return fakeclient.NewClientBuilder().WithScheme(s).
 		WithStatusSubresource(&v1beta1.InferenceService{}).WithObjects(derived, engineIR).Build()
+}
+
+func workerWithPDReplicaCounts(
+	t *testing.T,
+	s *runtime.Scheme,
+	host string,
+	engineAdmitted, engineReady, decoderAdmitted, decoderReady int32,
+) client.WithWatch {
+	t.Helper()
+	derived := isvcWithInstances(v1beta1.EngineComponent, true)
+	declareComponent(derived, v1beta1.DecoderComponent)
+	derived.Namespace, derived.Name = "prod", "svc"
+	derived.Labels = map[string]string{PlacementOriginLabel: "uid-1"}
+	derived.Status.URL = &apis.URL{Scheme: "https", Host: host}
+
+	engineInstances := make([]bool, engineAdmitted)
+	for i := range engineInstances {
+		engineInstances[i] = true
+	}
+	engineIR := irWithInstances(v1beta1.EngineComponent, engineInstances...)
+	engineIR.Status.ReadyReplicas = engineReady
+
+	decoderInstances := make([]bool, decoderAdmitted)
+	for i := range decoderInstances {
+		decoderInstances[i] = true
+	}
+	decoderIR := irWithInstances(v1beta1.DecoderComponent, decoderInstances...)
+	decoderIR.Status.ReadyReplicas = decoderReady
+
+	return fakeclient.NewClientBuilder().WithScheme(s).
+		WithStatusSubresource(&v1beta1.InferenceService{}).
+		WithObjects(derived, engineIR, decoderIR).Build()
 }
 
 func cpStatusURL(t *testing.T, cp client.Client) *apis.URL {
@@ -247,6 +283,45 @@ func TestReconcile_FirstAdmittedWinsAndDeletesLosers(t *testing.T) {
 	assert.True(t, hasDerived(t, wb), "winner b's derived kept")
 }
 
+func TestReconcile_SinglePublishesWinnerReplicaCounts(t *testing.T) {
+	s := testScheme(t)
+	worker := workerWithReplicaCounts(t, s, "svc.a.example", 4, 2)
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(worker),
+	}}
+	r, cp := newPlacer(s, clusters, srcISVC("gpu=gb300"),
+		readyWC("a", map[string]string{"gpu": "gb300"}))
+
+	_, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err)
+
+	placement := cpPlacement(t, cp)
+	require.NotNil(t, placement)
+	require.Len(t, placement.Candidates, 1)
+	assert.Equal(t, int32(4), placement.Candidates[0].AdmittedReplicas)
+	assert.Equal(t, int32(2), placement.Candidates[0].ReadyReplicas)
+}
+
+func TestReconcile_SinglePublishesPDReplicaMinimum(t *testing.T) {
+	s := testScheme(t)
+	worker := workerWithPDReplicaCounts(t, s, "svc.a.example", 4, 3, 2, 1)
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(worker),
+	}}
+	isvc := srcISVC("gpu=gb300")
+	isvc.Spec.Decoder = &v1beta1.DecoderSpec{}
+	r, cp := newPlacer(s, clusters, isvc, readyWC("a", map[string]string{"gpu": "gb300"}))
+
+	_, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err)
+
+	placement := cpPlacement(t, cp)
+	require.NotNil(t, placement)
+	require.Len(t, placement.Candidates, 1)
+	assert.Equal(t, int32(2), placement.Candidates[0].AdmittedReplicas)
+	assert.Equal(t, int32(1), placement.Candidates[0].ReadyReplicas)
+}
+
 func TestReconcile_StickyWinner(t *testing.T) {
 	s := testScheme(t)
 	wa := emptyWorker(s)
@@ -273,6 +348,34 @@ func TestReconcile_StickyWinner(t *testing.T) {
 	assert.Equal(t, v1beta1.PlacementPhasePlaced, p.Phase)
 	assert.False(t, hasDerived(t, wa), "sticky winner must NOT fan out to a")
 	assert.True(t, hasDerived(t, wb))
+}
+
+func TestReconcile_SingleRefreshesStickyWinnerReplicaCounts(t *testing.T) {
+	s := testScheme(t)
+	worker := workerWithReplicaCounts(t, s, "svc.a.example", 5, 3)
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(worker),
+	}}
+	isvc := srcISVC("gpu=gb300")
+	isvc.Finalizers = []string{PlacementFinalizer}
+	isvc.Status.Placement = &v1beta1.PlacementStatus{
+		Cluster: "a",
+		Phase:   v1beta1.PlacementPhasePlaced,
+		Candidates: []v1beta1.CandidatePlacement{{
+			Cluster: "a", Phase: v1beta1.CandidatePhaseAdmitted,
+			AdmittedReplicas: 1, ReadyReplicas: 1,
+		}},
+	}
+	r, cp := newPlacer(s, clusters, isvc, readyWC("a", map[string]string{"gpu": "gb300"}))
+
+	_, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err)
+
+	placement := cpPlacement(t, cp)
+	require.NotNil(t, placement)
+	require.Len(t, placement.Candidates, 1)
+	assert.Equal(t, int32(5), placement.Candidates[0].AdmittedReplicas)
+	assert.Equal(t, int32(3), placement.Candidates[0].ReadyReplicas)
 }
 
 // When the winner's derived is gone on a CONNECTED winner cluster, the

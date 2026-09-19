@@ -140,10 +140,10 @@ type ProbeConfig struct {
 	SuccessThreshold int
 
 	// AllFailedPolicy controls what happens after every home has independently
-	// crossed the probe failure threshold. PreserveTraffic retains the existing
-	// equal-weight fallback; Drain preserves the all-zero result so the publisher
-	// removes every route arm. It has no effect while any home is passing or has
-	// no conclusive verdict.
+	// crossed the probe failure threshold. PreserveTraffic ignores only the probe
+	// gates and recomputes from ready capacity; Drain preserves the all-zero result
+	// so the publisher removes every route arm. It has no effect while any home is
+	// passing or has no conclusive verdict.
 	AllFailedPolicy AllFailedPolicy
 }
 

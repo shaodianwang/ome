@@ -411,7 +411,7 @@ func (r *Reconciler) reconcileSingle(ctx context.Context, isvc *v1beta1.Inferenc
 				return ctrl.Result{}, err
 			}
 			r.deleteLosers(ctx, isvc, candidates, winner)
-			return r.writePlacement(ctx, isvc, placedResult(winner, derived, isvc))
+			return r.writePlacement(ctx, isvc, placedResult(winner, derived, isvc, statuses))
 
 		case winnerDerivedAbsent:
 			// The winner is connected but its derived is gone. Distinguish a
@@ -454,7 +454,7 @@ func (r *Reconciler) reconcileSingle(ctx context.Context, isvc *v1beta1.Inferenc
 
 	// Race: the first placed candidate whose derived ISVC reports an admitted
 	// instance wins.
-	winner, err := r.findWinner(ctx, isvc, placed)
+	winner, winnerDerived, winnerStatuses, err := r.findWinner(ctx, isvc, placed)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -484,11 +484,7 @@ func (r *Reconciler) reconcileSingle(ctx context.Context, isvc *v1beta1.Inferenc
 	// Winner: sweep the losers (every candidate cluster except the winner;
 	// each delete is origin-guarded so only our derived copies are removed).
 	r.deleteLosers(ctx, isvc, candidates, winner)
-	wd, _, err := r.getDerived(ctx, winner, isvc)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	return r.writePlacement(ctx, isvc, placedResult(winner, wd, isvc))
+	return r.writePlacement(ctx, isvc, placedResult(winner, winnerDerived, isvc, winnerStatuses))
 }
 
 // placementMode returns the ISVC's placement cardinality, defaulting to Single
@@ -1025,7 +1021,11 @@ func connectedSet(clusters ClusterClients) map[string]bool {
 // deterministic tie-break, not literally "first in wall-clock time". A candidate
 // whose derived or IR status cannot be read this pass is skipped, so one
 // unreachable cluster cannot deny the race to its healthy peers.
-func (r *Reconciler) findWinner(ctx context.Context, isvc *v1beta1.InferenceService, placed []string) (string, error) {
+func (r *Reconciler) findWinner(
+	ctx context.Context,
+	isvc *v1beta1.InferenceService,
+	placed []string,
+) (string, *v1beta1.InferenceService, map[v1beta1.ComponentType]*v1beta1.InferenceReplicaStatus, error) {
 	for _, c := range placed {
 		derived, ok, err := r.getDerived(ctx, c, isvc)
 		if err != nil {
@@ -1047,10 +1047,10 @@ func (r *Reconciler) findWinner(ctx context.Context, isvc *v1beta1.InferenceServ
 			continue
 		}
 		if AllComponentsAdmitted(derived, statuses) {
-			return c, nil
+			return c, derived, statuses, nil
 		}
 	}
-	return "", nil
+	return "", nil, nil, nil
 }
 
 // deleteLosers best-effort deletes THIS ISVC's derived copy on each cluster in
@@ -1388,15 +1388,26 @@ func endpointFor(derived *v1beta1.InferenceService) *apis.URL {
 // the winner's derived has no URL this pass (transient worker-status gap), the
 // last-published URL (from the in-memory isvc) is kept rather than cleared, so
 // an external LB watching status.url does not see a spurious deroute.
-func placedResult(winner string, derived, isvc *v1beta1.InferenceService) placementResult {
+func placedResult(
+	winner string,
+	derived, isvc *v1beta1.InferenceService,
+	statuses map[v1beta1.ComponentType]*v1beta1.InferenceReplicaStatus,
+) placementResult {
 	u := endpointFor(derived)
 	if u == nil {
 		u = isvc.Status.URL // keep last-known endpoint
 	}
+	components := placementScaleComponents(isvc)
 	return placementResult{
 		winner: winner, phase: v1beta1.PlacementPhasePlaced,
-		candidates: []v1beta1.CandidatePlacement{{Cluster: winner, Phase: v1beta1.CandidatePhaseAdmitted, Endpoint: u}},
-		url:        u,
+		candidates: []v1beta1.CandidatePlacement{{
+			Cluster:          winner,
+			Phase:            v1beta1.CandidatePhaseAdmitted,
+			Endpoint:         u,
+			AdmittedReplicas: placementAdmittedReplicas(components, statuses),
+			ReadyReplicas:    placementReadyReplicas(components, statuses),
+		}},
+		url: u,
 	}
 }
 
@@ -1609,6 +1620,14 @@ func placementEligibleIndexExtractor(obj client.Object) []string {
 func declaresPlacementRequirement(isvc *v1beta1.InferenceService) bool {
 	requirements, clusterSelector := placementInputs(isvc)
 	return requirements != "" || clusterSelector != ""
+}
+
+// IsPlacementEligible reports whether an InferenceService participates in the
+// multi-cluster placement flow. Consumers of status.placement use this same
+// predicate so ordinary, single-cluster InferenceServices do not accidentally
+// acquire multi-cluster artifacts.
+func IsPlacementEligible(isvc *v1beta1.InferenceService) bool {
+	return declaresPlacementRequirement(isvc)
 }
 
 // registerPlacementEligibleIndex installs placementEligibleIndexField on the

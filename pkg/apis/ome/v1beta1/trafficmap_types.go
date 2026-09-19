@@ -8,7 +8,7 @@ import (
 
 // TrafficMapProgrammed is the condition type reporting whether the active
 // publisher has realized this TrafficMap onto a concrete data plane (e.g. a
-// Gateway API HTTPRoute). Its status mirrors spec.programmed.
+// Gateway API HTTPRoute).
 const TrafficMapProgrammed = "Programmed"
 
 // TrafficMapRoutable is the condition type reporting whether this map carries a
@@ -19,15 +19,15 @@ const TrafficMapProgrammed = "Programmed"
 const TrafficMapRoutable = "Routable"
 
 // Reasons for the Routable condition. NotPlaced and NoAddressableHome accompany
-// Routable=False and an empty table; AllHomesUnready accompanies Routable=True,
-// because the weight fallback still spreads traffic across homes that are
-// addressable but not yet ready. AllHomesProbeFailed accompanies Routable=False
-// when an explicitly configured probe policy preserves the all-zero result.
+// an empty table. AllHomesUnready and NoRoutableCapacity accompany an all-zero
+// table. AllHomesProbeFailed accompanies either the all-zero Drain policy or a
+// positive PreserveTraffic fallback among homes with ready capacity.
 const (
 	TrafficMapReasonRoutable            = "Routable"
 	TrafficMapReasonNotPlaced           = "NotPlaced"
 	TrafficMapReasonNoAddressableHome   = "NoAddressableHome"
 	TrafficMapReasonAllHomesUnready     = "AllHomesUnready"
+	TrafficMapReasonNoRoutableCapacity  = "NoRoutableCapacity"
 	TrafficMapReasonAllHomesProbeFailed = "AllHomesProbeFailed"
 )
 
@@ -76,8 +76,8 @@ const (
 //
 // One TrafficMap exists per routed ISVC, named after it and owned by it (so it
 // is garbage-collected with the ISVC), for as long as that ISVC is routed --
-// including while no home is routable, when the table is empty and the
-// Routable condition says why. The routing controller owns spec and the
+// including while no home is routable, when the table is empty or all-zero and
+// the Routable condition says why. The routing controller owns spec and the
 // Routable condition; the publisher owns the rest of status.
 // +genclient
 // +k8s:openapi-gen=true
@@ -152,21 +152,22 @@ type TrafficMapEntry struct {
 	// traffic share as a relative integer from 0 through 1,000,000. The upper
 	// bound matches the Gateway API backendRef weight limit, so a publisher can
 	// apply it verbatim; another consumer may divide by the sum of weights for a
-	// percentage. The default all-unhealthy policy writes equal weights. An
-	// explicitly configured all-probe-failed drain instead writes an authoritative
-	// all-zero table.
+	// percentage. Unready and zero-capacity homes always have weight 0. When every
+	// probe conclusively fails, PreserveTraffic may retain capacity-derived
+	// weights for ready homes; Drain writes an authoritative all-zero table.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=1000000
 	Weight int32 `json:"weight"`
 
-	// Healthy is the health-gate result for this home (readyReplicas > 0). An
-	// unhealthy home is weighted 0 (unless every home is unhealthy).
+	// Healthy is the readiness-plus-probe result for this home. An unready home is
+	// always weighted 0; a probe-unhealthy home may retain a positive weight only
+	// under a fleet-wide PreserveTraffic fallback.
 	// +optional
 	Healthy bool `json:"healthy"`
 
 	// Capacity is the provenance of Weight: weight is proportional to
-	// allocated * factor, gated to 0 when the home has no ready replicas.
+	// min(allocated, ready) * factor, then gated by the active probe.
 	// +optional
 	Capacity *TrafficMapCapacity `json:"capacity,omitempty"`
 
@@ -214,21 +215,21 @@ type TrafficMapProbe struct {
 
 // TrafficMapCapacity records why an entry's weight is what it is.
 type TrafficMapCapacity struct {
-	// Allocated is the number of replicas this home is intended to run for the
-	// ISVC — the Split apportionment intersected with what the home's
-	// AcceleratorQuota admitted. It is the count basis of the weight.
+	// Allocated is the effective allocation ceiling for this home: the
+	// control-plane-admitted count, optionally lowered by a capacity report.
+	// Ready independently caps it when computing Weight.
 	// +optional
 	Allocated int32 `json:"allocated,omitempty"`
 
-	// Ready is the home's live ready-replica count — the health signal. Zero
-	// means the entry is health-gated to weight 0.
+	// Ready is the home's live ready-replica count. It caps Allocated when
+	// computing Weight; zero health-gates the entry to weight 0.
 	// +optional
 	Ready int32 `json:"ready,omitempty"`
 
 	// Factor is the per-replica relative serving capacity of this home's
 	// accelerator (baseline "1", higher = faster), so heterogeneous hardware is
 	// weighted by capacity rather than raw replica count: weight is proportional
-	// to allocated * factor. Defaults to "1" (homogeneous) when unset — the
+	// to min(allocated, ready) * factor. Defaults to "1" (homogeneous) when unset — the
 	// multiplicative identity, i.e. no scaling. It is operator-supplied config,
 	// never derived from raw hardware FLOPS.
 	// +optional
@@ -279,7 +280,8 @@ type TrafficMapStatus struct {
 	// +optional
 	ObservedTrafficMapGeneration int64 `json:"observedTrafficMapGeneration,omitempty"`
 
-	// Conditions carry the Programmed condition.
+	// Conditions carry the routing controller's Routable condition and the
+	// publisher's Programmed condition.
 	// +optional
 	// +listType=map
 	// +listMapKey=type

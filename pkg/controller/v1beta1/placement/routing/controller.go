@@ -23,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	placementcontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/placement"
 )
 
 // +kubebuilder:rbac:groups=ome.io,resources=inferenceservices,verbs=get;list;watch
@@ -72,6 +73,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// Deleting: the TrafficMap's owner reference garbage-collects it with the
 	// ISVC, so there is nothing to do.
 	if !isvc.DeletionTimestamp.IsZero() {
+		return ctrl.Result{}, nil
+	}
+
+	// TrafficMap is the projection of multi-cluster placement. Leave any
+	// existing map untouched here; the endpoint publisher observes the same
+	// eligibility transition and cleans up its external state and finalizer.
+	if !placementcontroller.IsPlacementEligible(isvc) {
 		return ctrl.Result{}, nil
 	}
 
@@ -141,7 +149,7 @@ func (r *Reconciler) setRoutable(ctx context.Context, isvc *v1beta1.InferenceSer
 			Type:               v1beta1.TrafficMapRoutable,
 			Status:             status,
 			Reason:             reason,
-			Message:            routableMessage(reason, len(tm.Spec.Entries)),
+			Message:            routableMessage(reason, status, len(tm.Spec.Entries)),
 			ObservedGeneration: tm.Generation,
 		}
 		if !apimeta.SetStatusCondition(&tm.Status.Conditions, cond) {
@@ -154,15 +162,20 @@ func (r *Reconciler) setRoutable(ctx context.Context, isvc *v1beta1.InferenceSer
 // routableMessage renders the operator-facing explanation for a Routable reason.
 // The entry count is included because "empty" and "degraded" are different
 // problems and the reason alone does not distinguish how many homes exist.
-func routableMessage(reason string, entries int) string {
+func routableMessage(reason string, status metav1.ConditionStatus, entries int) string {
 	switch reason {
 	case v1beta1.TrafficMapReasonNotPlaced:
 		return "InferenceService is not Placed; no homes to route to yet"
 	case v1beta1.TrafficMapReasonNoAddressableHome:
 		return "placed, but no admitted home reports an addressable endpoint"
 	case v1beta1.TrafficMapReasonAllHomesUnready:
-		return fmt.Sprintf("%d home(s) addressable but none passing the health gate; traffic spread equally rather than dropped", entries)
+		return fmt.Sprintf("%d home(s) addressable but none has ready replicas; all route weights are zero", entries)
+	case v1beta1.TrafficMapReasonNoRoutableCapacity:
+		return fmt.Sprintf("%d home(s) addressable but none has positive routable capacity; all route weights are zero", entries)
 	case v1beta1.TrafficMapReasonAllHomesProbeFailed:
+		if status == metav1.ConditionTrue {
+			return fmt.Sprintf("%d home(s) have conclusive probe failures; preserving traffic among homes with ready capacity", entries)
+		}
 		return fmt.Sprintf("%d home(s) have conclusive probe failures; all route weights are zero", entries)
 	default:
 		return fmt.Sprintf("%d home(s) serving", entries)
@@ -189,10 +202,6 @@ func (r *Reconciler) reap(ctx context.Context, isvc *v1beta1.InferenceService) e
 // table rather than no table, so a consumer can tell "known and unroutable"
 // from "unknown".
 //
-// AllHomesUnready is reported with status True: every home is addressable, and
-// the weight fallback spreads traffic across them rather than black-holing it,
-// so the map IS routable — just degraded.
-//
 // The prober is an optional overlay on an otherwise pure projection of the
 // ISVC. Passing nil yields the plan alone, which is what the watch predicate
 // compares so it reacts only to ISVC changes that alter the table; probe
@@ -207,7 +216,7 @@ func buildSpec(isvc *v1beta1.InferenceService, probe *Prober, capacity *Capacity
 	if pl == nil || pl.Phase != v1beta1.PlacementPhasePlaced {
 		return empty, metav1.ConditionFalse, v1beta1.TrafficMapReasonNotPlaced
 	}
-	cands := servingCandidates(pl)
+	cands := servingCandidates(isvc)
 	if len(cands) == 0 {
 		return empty, metav1.ConditionFalse, v1beta1.TrafficMapReasonNoAddressableHome
 	}
@@ -237,9 +246,10 @@ func buildSpec(isvc *v1beta1.InferenceService, probe *Prober, capacity *Capacity
 			Cluster:  c.Cluster,
 			Endpoint: c.Endpoint.DeepCopy(),
 			Weight:   computedWeights[i],
-			// Healthy is the gate the weight actually used, so it must fold in
-			// reachability too: an entry reading Healthy=true beside Weight=0
-			// would be unexplainable.
+			// Healthy reports readiness plus probe evidence. Capacity remains
+			// independent: a healthy home can have weight zero when its admitted or
+			// reported capacity is zero, while PreserveTraffic may ignore only a
+			// fleet-wide probe failure.
 			Healthy: c.ReadyReplicas > 0 && (homes[i].Reachable == nil || *homes[i].Reachable),
 			Capacity: &v1beta1.TrafficMapCapacity{
 				Allocated: homes[i].EffectiveAllocated(),
@@ -251,15 +261,21 @@ func buildSpec(isvc *v1beta1.InferenceService, probe *Prober, capacity *Capacity
 			Probe: probe.Provenance(mapKey, c.Cluster),
 		}
 	}
-	status := metav1.ConditionTrue
-	reason := v1beta1.TrafficMapReasonRoutable
-	if !slices.ContainsFunc(entries, func(e v1beta1.TrafficMapEntry) bool { return e.Healthy }) {
-		if slices.ContainsFunc(entries, func(e v1beta1.TrafficMapEntry) bool { return e.Weight > 0 }) {
-			reason = v1beta1.TrafficMapReasonAllHomesUnready
-		} else {
-			status = metav1.ConditionFalse
+	hasPositiveWeight := slices.ContainsFunc(entries, func(e v1beta1.TrafficMapEntry) bool { return e.Weight > 0 })
+	status := metav1.ConditionFalse
+	reason := v1beta1.TrafficMapReasonNoRoutableCapacity
+	if hasPositiveWeight {
+		status = metav1.ConditionTrue
+		reason = v1beta1.TrafficMapReasonRoutable
+		if allProbesFailed(homes) {
 			reason = v1beta1.TrafficMapReasonAllHomesProbeFailed
 		}
+	} else if !slices.ContainsFunc(homes, func(h Home) bool { return h.Ready > 0 }) {
+		reason = v1beta1.TrafficMapReasonAllHomesUnready
+	} else if !slices.ContainsFunc(homes, func(h Home) bool { return h.RoutableReplicas() > 0 }) {
+		reason = v1beta1.TrafficMapReasonNoRoutableCapacity
+	} else if allProbesFailed(homes) {
+		reason = v1beta1.TrafficMapReasonAllHomesProbeFailed
 	}
 	return v1beta1.TrafficMapSpec{
 		Service:                isvc.Name,
@@ -289,13 +305,29 @@ func allocationSource(h Home) v1beta1.CapacitySource {
 
 // servingCandidates returns the admitted candidates that report an addressable
 // endpoint — the serving homes — sorted by cluster for a deterministic table.
-func servingCandidates(pl *v1beta1.PlacementStatus) []*v1beta1.CandidatePlacement {
+func servingCandidates(isvc *v1beta1.InferenceService) []*v1beta1.CandidatePlacement {
+	pl := isvc.Status.Placement
+	if pl == nil {
+		return nil
+	}
 	var cs []*v1beta1.CandidatePlacement
 	for i := range pl.Candidates {
 		c := &pl.Candidates[i]
 		if c.Phase == v1beta1.CandidatePhaseAdmitted && c.Endpoint != nil && c.Endpoint.Host != "" {
 			cs = append(cs, c)
 		}
+	}
+	// Annotation-based Single placement can carry only its top-level winner and
+	// endpoint. Treat it as one serving candidate.
+	if len(cs) == 0 && placementMode(isvc) == v1beta1.PlacementModeSingle &&
+		pl.Cluster != "" && pl.Endpoint != nil && pl.Endpoint.Host != "" {
+		cs = append(cs, &v1beta1.CandidatePlacement{
+			Cluster:          pl.Cluster,
+			Phase:            v1beta1.CandidatePhaseAdmitted,
+			Endpoint:         pl.Endpoint.DeepCopy(),
+			AdmittedReplicas: 1,
+			ReadyReplicas:    1,
+		})
 	}
 	sort.Slice(cs, func(i, j int) bool { return cs[i].Cluster < cs[j].Cluster })
 	return cs
@@ -324,11 +356,11 @@ func capacityFactor(isvc *v1beta1.InferenceService, cluster string) *resource.Qu
 	return nil
 }
 
-// placementMode returns the ISVC's declared placement mode, or empty when none
-// is set (so a consumer reads routing intent without reading the ISVC).
+// placementMode returns the ISVC's declared placement mode, defaulting legacy
+// annotation-based placement to Single.
 func placementMode(isvc *v1beta1.InferenceService) v1beta1.PlacementMode {
 	if isvc.Spec.Placement == nil {
-		return ""
+		return v1beta1.PlacementModeSingle
 	}
 	return isvc.Spec.Placement.Mode
 }
@@ -414,6 +446,9 @@ var routingTableChange = predicate.Funcs{
 			return true // unexpected type: fail safe
 		}
 		if oldISVC.DeletionTimestamp.IsZero() != newISVC.DeletionTimestamp.IsZero() {
+			return true
+		}
+		if placementcontroller.IsPlacementEligible(oldISVC) != placementcontroller.IsPlacementEligible(newISVC) {
 			return true
 		}
 		// The condition is part of what we write, so a change in status or reason

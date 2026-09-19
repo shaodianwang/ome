@@ -113,8 +113,9 @@ type RoutingProbeSpec struct {
 type RoutingAllFailedPolicy string
 
 const (
-	// RoutingAllFailedPolicyPreserveTraffic keeps the existing equal-weight
-	// fallback when every serving home fails its probe.
+	// RoutingAllFailedPolicyPreserveTraffic ignores only the probe gate when every
+	// serving home fails its probe. Admitted, ready, and reported capacity still
+	// determine the fallback weights.
 	RoutingAllFailedPolicyPreserveTraffic RoutingAllFailedPolicy = "PreserveTraffic"
 
 	// RoutingAllFailedPolicyDrain preserves all-zero weights when every serving

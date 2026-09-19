@@ -21,6 +21,7 @@ import (
 	gatewayapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	placementcontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/placement"
 )
 
 // placedISVC builds a control-plane ISVC whose placement reports a winner with
@@ -100,7 +101,7 @@ func TestReconcile_PlacedPublishesAndFinalizes(t *testing.T) {
 
 func TestReconcile_TrafficMapPublisherUsesExistingLifecycle(t *testing.T) {
 	isvc := placedISVC("cluster-a", "placement.example")
-	isvc.Spec.Placement = &v1beta1.PlacementSpec{}
+	isvc.Spec.Placement = &v1beta1.PlacementSpec{Requirements: "gpu=tpu"}
 	tm := &v1beta1.TrafficMap{
 		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "prod"},
 		Spec: v1beta1.TrafficMapSpec{Entries: []v1beta1.TrafficMapEntry{
@@ -140,9 +141,65 @@ func TestReconcile_TrafficMapPublisherUsesExistingLifecycle(t *testing.T) {
 	assert.Contains(t, got.Finalizers, EndpointFinalizer)
 }
 
+func TestReconcile_TrafficMapPublisherSupportsLegacyPlacementAnnotation(t *testing.T) {
+	isvc := placedISVC("cluster-a", "placement.example")
+	isvc.Annotations = map[string]string{"ome.io/accelerator-requirements": "gpu=tpu"}
+	tm := &v1beta1.TrafficMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "prod"},
+		Spec: v1beta1.TrafficMapSpec{Service: "svc", Entries: []v1beta1.TrafficMapEntry{{
+			Cluster: "cluster-a", Endpoint: apis.HTTPS("a.example"), Weight: 1,
+		}}},
+	}
+	s := pubScheme(t)
+	c := fakeclient.NewClientBuilder().WithScheme(s).
+		WithStatusSubresource(&v1beta1.InferenceService{}).
+		WithObjects(isvc, tm).Build()
+	publisher := &recordingEndpointPublisher{}
+	active := true
+	r := &Reconciler{
+		Client: c, Log: log.Log, Publisher: publisher,
+		Active: &active, UseTrafficMap: true,
+	}
+
+	reconcile(t, r)
+
+	require.Len(t, publisher.published, 1)
+	require.Len(t, publisher.published[0].Homes, 1)
+	assert.Equal(t, "cluster-a", publisher.published[0].Homes[0].Cluster)
+}
+
+func TestReconcile_TrafficMapPublisherSkipsOrdinaryISVC(t *testing.T) {
+	isvc := placedISVC("cluster-a", "placement.example")
+	isvc.Finalizers = []string{EndpointFinalizer}
+	tm := &v1beta1.TrafficMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "prod"},
+		Spec: v1beta1.TrafficMapSpec{Service: "svc", Entries: []v1beta1.TrafficMapEntry{{
+			Cluster: "cluster-a", Endpoint: apis.HTTPS("a.example"), Weight: 1,
+		}}},
+	}
+	s := pubScheme(t)
+	c := fakeclient.NewClientBuilder().WithScheme(s).
+		WithStatusSubresource(&v1beta1.InferenceService{}).
+		WithObjects(isvc, tm).Build()
+	publisher := &recordingEndpointPublisher{}
+	active := true
+	r := &Reconciler{
+		Client: c, Log: log.Log, Publisher: publisher,
+		Active: &active, UseTrafficMap: true,
+	}
+
+	reconcile(t, r)
+
+	assert.Empty(t, publisher.published)
+	assert.Equal(t, 1, publisher.unpublished)
+	got := &v1beta1.InferenceService{}
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(isvc), got))
+	assert.NotContains(t, got.Finalizers, EndpointFinalizer)
+}
+
 func TestReconcile_TrafficMapPublisherDoesNotFallBackWithoutMap(t *testing.T) {
 	isvc := placedISVC("cluster-a", "placement.example")
-	isvc.Spec.Placement = &v1beta1.PlacementSpec{}
+	isvc.Spec.Placement = &v1beta1.PlacementSpec{Requirements: "gpu=tpu"}
 	s := pubScheme(t)
 	c := fakeclient.NewClientBuilder().WithScheme(s).
 		WithStatusSubresource(&v1beta1.InferenceService{}).
@@ -554,6 +611,16 @@ func TestPlacementPublishChange(t *testing.T) {
 		old := base.DeepCopy()
 		nw := base.DeepCopy()
 		nw.Annotations = map[string]string{GlobalHostAnnotation: "pinned.example"}
+		assert.True(t, placementPublishChange.Update(updateEvent(old, nw)))
+	})
+
+	t.Run("placement eligibility removal passes", func(t *testing.T) {
+		old := base.DeepCopy()
+		old.Annotations = map[string]string{
+			placementcontroller.AcceleratorRequirementsAnnotation: "gpu=tpu",
+		}
+		nw := old.DeepCopy()
+		delete(nw.Annotations, placementcontroller.AcceleratorRequirementsAnnotation)
 		assert.True(t, placementPublishChange.Update(updateEvent(old, nw)))
 	})
 

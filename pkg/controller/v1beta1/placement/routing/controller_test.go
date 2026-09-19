@@ -52,7 +52,10 @@ func splitISVC(clusters []string, admitted, ready []int32) *v1beta1.InferenceSer
 	return &v1beta1.InferenceService{
 		ObjectMeta: metav1.ObjectMeta{Name: testName, Namespace: testNS, UID: "uid-1", Generation: 7},
 		Spec: v1beta1.InferenceServiceSpec{
-			Placement: &v1beta1.PlacementSpec{Mode: v1beta1.PlacementModeSplit},
+			Placement: &v1beta1.PlacementSpec{
+				Mode:         v1beta1.PlacementModeSplit,
+				Requirements: "gpu=tpu",
+			},
 		},
 		Status: v1beta1.InferenceServiceStatus{
 			Placement: &v1beta1.PlacementStatus{
@@ -135,6 +138,111 @@ func TestReconcile_UnhealthyHomeGatedToZero(t *testing.T) {
 	assert.False(t, tm.Spec.Entries[1].Healthy)
 }
 
+func TestReconcile_AllModeWeightsFollowReadyReplicas(t *testing.T) {
+	isvc := splitISVC([]string{"a", "b"}, []int32{9, 1}, []int32{9, 1})
+	isvc.Spec.Placement.Mode = v1beta1.PlacementModeAll
+	r, c := newReconciler(t, Config{Enabled: true}, isvc)
+
+	reconcile(t, r)
+
+	tm, ok := getTrafficMap(t, c)
+	require.True(t, ok)
+	require.Len(t, tm.Spec.Entries, 2)
+	assert.Equal(t, int32(9), tm.Spec.Entries[0].Weight)
+	assert.Equal(t, int32(1), tm.Spec.Entries[1].Weight)
+	assert.Equal(t, int32(9), tm.Spec.Entries[0].Capacity.Allocated)
+	assert.Equal(t, int32(1), tm.Spec.Entries[1].Capacity.Allocated)
+}
+
+func TestReconcile_SingleModeUsesReadyReplicasAndReadinessGate(t *testing.T) {
+	isvc := splitISVC([]string{"a"}, []int32{9}, []int32{9})
+	isvc.Spec.Placement.Mode = v1beta1.PlacementModeSingle
+	r, c := newReconciler(t, Config{Enabled: true}, isvc)
+
+	reconcile(t, r)
+
+	tm, ok := getTrafficMap(t, c)
+	require.True(t, ok)
+	require.Len(t, tm.Spec.Entries, 1)
+	assert.Equal(t, int32(1), tm.Spec.Entries[0].Weight)
+	assert.Equal(t, int32(9), tm.Spec.Entries[0].Capacity.Allocated)
+	assert.True(t, tm.Spec.Entries[0].Healthy)
+
+	isvc.Status.Placement.Candidates[0].ReadyReplicas = 0
+	require.NoError(t, c.Status().Update(context.Background(), isvc))
+	reconcile(t, r)
+	tm, ok = getTrafficMap(t, c)
+	require.True(t, ok)
+	assert.False(t, tm.Spec.Entries[0].Healthy)
+}
+
+func TestReconcile_SplitWeightsFollowReadyReplicas(t *testing.T) {
+	isvc := splitISVC([]string{"a", "b"}, []int32{9, 9}, []int32{4, 2})
+	r, c := newReconciler(t, Config{Enabled: true}, isvc)
+
+	reconcile(t, r)
+
+	tm, ok := getTrafficMap(t, c)
+	require.True(t, ok)
+	require.Len(t, tm.Spec.Entries, 2)
+	assert.Equal(t, int32(2), tm.Spec.Entries[0].Weight)
+	assert.Equal(t, int32(1), tm.Spec.Entries[1].Weight)
+	assert.Equal(t, int32(9), tm.Spec.Entries[0].Capacity.Allocated)
+	assert.Equal(t, int32(9), tm.Spec.Entries[1].Capacity.Allocated)
+}
+
+func TestReconcile_NonPlacementISVCDoesNotCreateTrafficMap(t *testing.T) {
+	isvc := splitISVC([]string{"a"}, []int32{3}, []int32{3})
+	isvc.Spec.Placement = nil
+	r, c := newReconciler(t, Config{Enabled: true}, isvc)
+
+	reconcile(t, r)
+
+	_, exists := getTrafficMap(t, c)
+	assert.False(t, exists)
+}
+
+func TestReconcile_NonPlacementISVCRetainsExistingTrafficMap(t *testing.T) {
+	isvc := splitISVC([]string{"a"}, []int32{3}, []int32{3})
+	isvc.Spec.Placement = nil
+	existing := &v1beta1.TrafficMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: testName, Namespace: testNS,
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
+			},
+		},
+		Spec: v1beta1.TrafficMapSpec{Service: "last-known"},
+	}
+	r, c := newReconciler(t, Config{Enabled: true}, isvc, existing)
+
+	reconcile(t, r)
+
+	tm, exists := getTrafficMap(t, c)
+	require.True(t, exists)
+	assert.Equal(t, "last-known", tm.Spec.Service)
+}
+
+func TestReconcile_LegacyAnnotationPlacementCreatesSingleModeMap(t *testing.T) {
+	isvc := splitISVC([]string{"a"}, []int32{3}, []int32{3})
+	isvc.Spec.Placement = nil
+	isvc.Annotations = map[string]string{"ome.io/accelerator-requirements": "gpu=tpu"}
+	isvc.Status.Placement.Cluster = "legacy-home"
+	isvc.Status.Placement.Endpoint = apis.HTTPS("legacy.example")
+	isvc.Status.Placement.Candidates = nil
+	r, c := newReconciler(t, Config{Enabled: true}, isvc)
+
+	reconcile(t, r)
+
+	tm, exists := getTrafficMap(t, c)
+	require.True(t, exists)
+	assert.Equal(t, v1beta1.PlacementModeSingle, tm.Spec.Mode)
+	require.Len(t, tm.Spec.Entries, 1)
+	assert.Equal(t, "legacy-home", tm.Spec.Entries[0].Cluster)
+	assert.Equal(t, "legacy.example", tm.Spec.Entries[0].Endpoint.Host)
+	assert.Equal(t, int32(1), tm.Spec.Entries[0].Weight)
+}
+
 func TestReconcile_DisabledReapsExistingTrafficMap(t *testing.T) {
 	isvc := splitISVC([]string{"a"}, []int32{3}, []int32{3})
 	// Pre-existing owned TrafficMap that should be reaped when the feature is off.
@@ -197,9 +305,7 @@ func TestReconcile_NoAddressableHomeKeepsEmptyTrafficMap(t *testing.T) {
 	assert.Equal(t, v1beta1.TrafficMapReasonNoAddressableHome, cond.Reason)
 }
 
-// Every home addressable but none ready is Routable=TRUE: the weight fallback
-// spreads traffic rather than dropping it, so the map is degraded, not dead.
-func TestReconcile_AllHomesUnreadyIsRoutableButDegraded(t *testing.T) {
+func TestReconcile_AllHomesUnreadyIsUnroutable(t *testing.T) {
 	isvc := splitISVC([]string{"a", "b"}, []int32{3, 3}, []int32{0, 0})
 	r, c := newReconciler(t, Config{Enabled: true}, isvc)
 
@@ -210,12 +316,89 @@ func TestReconcile_AllHomesUnreadyIsRoutableButDegraded(t *testing.T) {
 	require.Len(t, tm.Spec.Entries, 2)
 	for _, e := range tm.Spec.Entries {
 		assert.False(t, e.Healthy)
-		assert.Equal(t, int32(1), e.Weight, "equal-weight fallback, not black-holed")
+		assert.Equal(t, int32(0), e.Weight, "an unready home must not receive traffic")
 	}
 	cond := routableCond(tm)
 	require.NotNil(t, cond)
-	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
 	assert.Equal(t, v1beta1.TrafficMapReasonAllHomesUnready, cond.Reason)
+}
+
+func TestBuildSpec_NoRoutableCapacityIsReportedPrecisely(t *testing.T) {
+	isvc := splitISVC([]string{"a", "b"}, []int32{7, 3}, []int32{7, 3})
+	zero := int32(0)
+	mapKey := types.NamespacedName{Name: testName, Namespace: testNS}
+	capacity := &CapacityPoller{
+		Config: CapacityConfig{Path: "/capacity"},
+		state: map[key]*capacityState{
+			{Map: mapKey, Cluster: "a"}: {reported: &zero},
+			{Map: mapKey, Cluster: "b"}: {reported: &zero},
+		},
+	}
+
+	spec, status, reason := buildSpec(isvc, nil, capacity)
+	require.Len(t, spec.Entries, 2)
+	assert.Equal(t, int32(0), spec.Entries[0].Weight)
+	assert.Equal(t, int32(0), spec.Entries[1].Weight)
+	assert.True(t, spec.Entries[0].Healthy)
+	assert.True(t, spec.Entries[1].Healthy)
+	assert.Equal(t, metav1.ConditionFalse, status)
+	assert.Equal(t, v1beta1.TrafficMapReasonNoRoutableCapacity, reason)
+}
+
+func TestBuildSpec_ProbeFailureCannotMaskZeroCapacity(t *testing.T) {
+	for _, policy := range []AllFailedPolicy{AllFailedPolicyPreserveTraffic, AllFailedPolicyDrain} {
+		t.Run(string(policy), func(t *testing.T) {
+			isvc := splitISVC([]string{"a", "b"}, []int32{7, 3}, []int32{7, 3})
+			zero := int32(0)
+			mapKey := types.NamespacedName{Name: testName, Namespace: testNS}
+			capacity := &CapacityPoller{
+				Config: CapacityConfig{Path: "/capacity"},
+				state: map[key]*capacityState{
+					{Map: mapKey, Cluster: "a"}: {reported: &zero},
+					{Map: mapKey, Cluster: "b"}: {reported: &zero},
+				},
+			}
+			probe := &Prober{
+				Config: ProbeConfig{Path: "/health", AllFailedPolicy: policy},
+				state: map[key]*homeProbeState{
+					{Map: mapKey, Cluster: "a"}: {gated: true, lastResult: v1beta1.ProbeResultFailing},
+					{Map: mapKey, Cluster: "b"}: {gated: true, lastResult: v1beta1.ProbeResultFailing},
+				},
+			}
+
+			spec, status, reason := buildSpec(isvc, probe, capacity)
+			require.Len(t, spec.Entries, 2)
+			assert.Equal(t, int32(0), spec.Entries[0].Weight)
+			assert.Equal(t, int32(0), spec.Entries[1].Weight)
+			assert.Equal(t, metav1.ConditionFalse, status)
+			assert.Equal(t, v1beta1.TrafficMapReasonNoRoutableCapacity, reason)
+		})
+	}
+}
+
+func TestBuildSpec_PreserveTrafficKeepsReadyCapacityOnFleetWideProbeFailure(t *testing.T) {
+	isvc := splitISVC([]string{"a", "b"}, []int32{7, 3}, []int32{7, 3})
+	p := &Prober{
+		Config: ProbeConfig{Path: "/health", AllFailedPolicy: AllFailedPolicyPreserveTraffic},
+		state: map[key]*homeProbeState{
+			{Map: types.NamespacedName{Name: testName, Namespace: testNS}, Cluster: "a"}: {
+				gated: true, lastResult: v1beta1.ProbeResultFailing,
+			},
+			{Map: types.NamespacedName{Name: testName, Namespace: testNS}, Cluster: "b"}: {
+				gated: true, lastResult: v1beta1.ProbeResultFailing,
+			},
+		},
+	}
+
+	spec, status, reason := buildSpec(isvc, p, nil)
+	require.Len(t, spec.Entries, 2)
+	assert.Equal(t, int32(7), spec.Entries[0].Weight)
+	assert.Equal(t, int32(3), spec.Entries[1].Weight)
+	assert.False(t, spec.Entries[0].Healthy)
+	assert.False(t, spec.Entries[1].Healthy)
+	assert.Equal(t, metav1.ConditionTrue, status)
+	assert.Equal(t, v1beta1.TrafficMapReasonAllHomesProbeFailed, reason)
 }
 
 func TestBuildSpec_AllProbeFailuresCanDrainEveryHome(t *testing.T) {
@@ -240,10 +423,10 @@ func TestBuildSpec_AllProbeFailuresCanDrainEveryHome(t *testing.T) {
 	assert.Equal(t, v1beta1.TrafficMapReasonAllHomesProbeFailed, reason)
 }
 
-func TestBuildSpec_DrainRequiresEveryProbeToFail(t *testing.T) {
-	isvc := splitISVC([]string{"a", "b"}, []int32{7, 3}, []int32{0, 0})
+func TestBuildSpec_PreserveTrafficRequiresEveryProbeToFail(t *testing.T) {
+	isvc := splitISVC([]string{"a", "b"}, []int32{7, 3}, []int32{7, 0})
 	p := &Prober{
-		Config: ProbeConfig{Path: "/health", AllFailedPolicy: AllFailedPolicyDrain},
+		Config: ProbeConfig{Path: "/health", AllFailedPolicy: AllFailedPolicyPreserveTraffic},
 		state: map[key]*homeProbeState{
 			{Map: types.NamespacedName{Name: testName, Namespace: testNS}, Cluster: "a"}: {
 				gated: true, lastResult: v1beta1.ProbeResultFailing,
@@ -253,10 +436,10 @@ func TestBuildSpec_DrainRequiresEveryProbeToFail(t *testing.T) {
 
 	spec, status, reason := buildSpec(isvc, p, nil)
 	require.Len(t, spec.Entries, 2)
-	assert.Equal(t, int32(1), spec.Entries[0].Weight)
-	assert.Equal(t, int32(1), spec.Entries[1].Weight)
-	assert.Equal(t, metav1.ConditionTrue, status)
-	assert.Equal(t, v1beta1.TrafficMapReasonAllHomesUnready, reason)
+	assert.Equal(t, int32(0), spec.Entries[0].Weight)
+	assert.Equal(t, int32(0), spec.Entries[1].Weight)
+	assert.Equal(t, metav1.ConditionFalse, status)
+	assert.Equal(t, v1beta1.TrafficMapReasonNoRoutableCapacity, reason)
 }
 
 func TestReconcile_ServingHomeReportsRoutable(t *testing.T) {
@@ -300,7 +483,7 @@ func TestReconcile_RoutableDoesNotClobberProgrammed(t *testing.T) {
 	assert.Equal(t, v1beta1.TrafficMapReasonNotPlaced, routableCond(tm).Reason)
 }
 
-func TestReconcile_UpdatesExistingTrafficMapOnCapacityChange(t *testing.T) {
+func TestReconcile_UpdatesExistingTrafficMapOnReadyReplicaChange(t *testing.T) {
 	isvc := splitISVC([]string{"a", "b"}, []int32{5, 5}, []int32{5, 5})
 	r, c := newReconciler(t, Config{Enabled: true}, isvc)
 	reconcile(t, r)
@@ -309,7 +492,7 @@ func TestReconcile_UpdatesExistingTrafficMapOnCapacityChange(t *testing.T) {
 	assert.Equal(t, int32(1), tm.Spec.Entries[0].Weight)
 	assert.Equal(t, int32(1), tm.Spec.Entries[1].Weight)
 
-	// Home "a" scales up: 8 vs 2 -> 4:1.
+	// Home "a" becomes ready at 8 vs 2 -> 4:1.
 	cur := &v1beta1.InferenceService{}
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: testName, Namespace: testNS}, cur))
 	cur.Status.Placement.Candidates[0].AdmittedReplicas = 8
@@ -441,5 +624,13 @@ func TestRoutingTableChangePredicate(t *testing.T) {
 			CapacityFactors: map[string]resource.Quantity{"a": resource.MustParse("2")},
 		}
 		assert.True(t, routingTableChange.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: nw}))
+	})
+
+	t.Run("placement eligibility removal is admitted", func(t *testing.T) {
+		old := base.DeepCopy()
+		old.Spec.Placement.Mode = v1beta1.PlacementModeSingle
+		nw := old.DeepCopy()
+		nw.Spec.Placement.Requirements = ""
+		assert.True(t, routingTableChange.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: nw}))
 	})
 }

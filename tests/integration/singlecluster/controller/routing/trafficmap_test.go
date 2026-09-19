@@ -35,7 +35,10 @@ var _ = ginkgo.Describe("TrafficMap routing controller", func() {
 
 	ginkgo.It("generates an owner-ref'd TrafficMap for a Placed single-home ISVC", func() {
 		name := uniqueName("svc")
-		isvc := createISVC(isvcNS, name, nil)
+		isvc := createISVC(isvcNS, name, &v1beta1.PlacementSpec{
+			Mode:         v1beta1.PlacementModeSingle,
+			Requirements: "accelerator=test",
+		})
 		placeISVC(isvc, candidate("cluster-a", "cluster-a.example.com", 2, 2))
 
 		var tm *v1beta1.TrafficMap
@@ -66,7 +69,8 @@ var _ = ginkgo.Describe("TrafficMap routing controller", func() {
 		// cluster-a's replicas each serve twice a baseline replica, so with equal
 		// admitted counts a's share is double b's: a 2:1 split.
 		isvc := createISVC(isvcNS, name, &v1beta1.PlacementSpec{
-			Mode: v1beta1.PlacementModeSplit,
+			Mode:         v1beta1.PlacementModeSplit,
+			Requirements: "accelerator=test",
 			CapacityFactors: map[string]resource.Quantity{
 				"cluster-a": resource.MustParse("2"),
 			},
@@ -100,7 +104,8 @@ var _ = ginkgo.Describe("TrafficMap routing controller", func() {
 	ginkgo.It("health-gates an unready home to weight 0 and re-weights the survivor", func() {
 		name := uniqueName("svc")
 		isvc := createISVC(isvcNS, name, &v1beta1.PlacementSpec{
-			Mode: v1beta1.PlacementModeSplit,
+			Mode:         v1beta1.PlacementModeSplit,
+			Requirements: "accelerator=test",
 			CapacityFactors: map[string]resource.Quantity{
 				"cluster-a": resource.MustParse("2"),
 			},
@@ -132,9 +137,36 @@ var _ = ginkgo.Describe("TrafficMap routing controller", func() {
 		}).Should(gomega.Succeed())
 	})
 
+	ginkgo.It("publishes all-zero weights when every home is unready", func() {
+		name := uniqueName("svc")
+		isvc := createISVC(isvcNS, name, &v1beta1.PlacementSpec{
+			Mode:         v1beta1.PlacementModeSplit,
+			Requirements: "accelerator=test",
+		})
+		placeISVC(isvc,
+			candidate("cluster-a", "cluster-a.example.com", 2, 0),
+			candidate("cluster-b", "cluster-b.example.com", 2, 0))
+
+		gomega.Eventually(func(g gomega.Gomega) {
+			tm := getTrafficMap(g, isvcNS, name)
+			g.Expect(tm.Spec.Entries).To(gomega.HaveLen(2))
+			for _, entry := range tm.Spec.Entries {
+				g.Expect(entry.Weight).To(gomega.BeZero())
+				g.Expect(entry.Healthy).To(gomega.BeFalse())
+			}
+			cond := apimeta.FindStatusCondition(tm.Status.Conditions, v1beta1.TrafficMapRoutable)
+			g.Expect(cond).NotTo(gomega.BeNil())
+			g.Expect(cond.Status).To(gomega.Equal(metav1.ConditionFalse))
+			g.Expect(cond.Reason).To(gomega.Equal(v1beta1.TrafficMapReasonAllHomesUnready))
+		}).Should(gomega.Succeed())
+	})
+
 	ginkgo.It("keeps an emptied TrafficMap that explains itself when the ISVC leaves Placed", func() {
 		name := uniqueName("svc")
-		isvc := createISVC(isvcNS, name, nil)
+		isvc := createISVC(isvcNS, name, &v1beta1.PlacementSpec{
+			Mode:         v1beta1.PlacementModeSingle,
+			Requirements: "accelerator=test",
+		})
 		placeISVC(isvc, candidate("cluster-a", "cluster-a.example.com", 1, 1))
 
 		ginkgo.By("waiting for the TrafficMap to be generated with a routable home")

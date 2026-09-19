@@ -62,7 +62,8 @@ type homeProbeState struct {
 // network partition, marks every home down at once. Two things bound that. A
 // probe that could not run at all is inconclusive rather than a failure, so a
 // broken prober does not gate anything; and when every home is gated the weight
-// function falls back to equal weights rather than black-holing traffic.
+// function may ignore only the probe gates while retaining the ready-capacity
+// weights. Unready or zero-capacity homes remain at zero.
 type Prober struct {
 	Config ProbeConfig
 	Log    logr.Logger

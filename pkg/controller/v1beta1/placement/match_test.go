@@ -159,4 +159,5 @@ func TestDeclaresPlacementRequirement_StructAndAnnotations(t *testing.T) {
 	assert.False(t, declaresPlacementRequirement(isvcPlacement(&v1beta1.PlacementSpec{Mode: v1beta1.PlacementModeAll})))
 	assert.False(t, declaresPlacementRequirement(isvcPlacement(nil)))
 	assert.True(t, declaresPlacementRequirement(isvcReq("gpu=gb300", "")))
+	assert.True(t, IsPlacementEligible(isvcReq("gpu=gb300", "")))
 }

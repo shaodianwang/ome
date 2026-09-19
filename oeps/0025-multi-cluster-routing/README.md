@@ -36,8 +36,9 @@ for a gateway to consume; implicit cutoff; and control-plane readiness that is
 not serving readiness.
 
 `TrafficMap` is one namespaced object per ISVC, owned by it, written by a new
-control-plane routing controller, consumed by a pluggable publisher. Weight =
-capacity allocation (Split apportionment ∩ quota-admitted count), gated by health.
+control-plane routing controller, consumed by a pluggable publisher. Each weight
+is `min(admitted, ready, optional reported capacity) * factor`, with probe policy
+applied separately.
 Installation configuration enables the feature, chooses the publisher, and
 provides transport credentials. An optional inline `spec.routing` changes one
 ISVC's behavior without changing that ConfigMap or constructing another
@@ -47,11 +48,10 @@ publisher.
 
 ### The failure modes we are fixing
 
-- **Weight drift under autoscaling (the reactive-weight anti-pattern).** A home
-  scaling 2→8 silently quadruples its share mid-flight though the plan never said
-  it should carry more; a home mid-cold-start is under-weighted exactly when it
-  was provisioned to take load. The router chases runtime state instead of
-  enforcing intent.
+- **Weights lag runtime serving capacity.** An admitted allocation can remain
+  unchanged while pods become unready during rollout or graceful termination.
+  Continuing to send the planned share to that home overloads the remaining
+  ready pods and delays traffic removal from terminating replicas.
 - **Gateway coupling.** Re-deriving the split from every ISVC couples the data
   plane to the ISVC schema and smears the routing table across every status,
   making per-namespace RBAC for "who may see the routing table" awkward.
@@ -71,9 +71,10 @@ publisher.
   only if actually paired (same failure domain, interconnect-reachable, bound to
   each other). The components recover at different rates, so the skew is widest
   exactly when the number is most load-bearing; where a replica takes tens of
-  minutes to become servable that window is hours, not seconds, and the binary
-  gate hides it completely — 1 of 50 decoders ready still passes `ready > 0` and
-  holds the full planned share.
+  minutes to become servable that window is hours, not seconds. Capping each
+  home's weight by its ready count prevents 1 of 50 ready decoders from retaining
+  the full planned share, while the count remains an upper bound until the
+  runtime reports stronger pairing evidence.
 
 ### Why now
 
@@ -88,9 +89,10 @@ piece is the projection and the contract.
    owner-referenced, generated from `status.placement` + quota allocation.
    *Rationale:* a stable single-object contract a gateway can watch without
    knowing the ISVC schema.
-2. **Capacity-planned, health-gated weights** — track the intended allocation,
-   drop to 0 only when a home has no ready replicas. *Rationale:* enforce the
-   plan, but never black-hole traffic onto a dead home.
+2. **Runtime-ready, capacity-bounded weights** — use the minimum of admitted,
+   ready, and optional reported capacity, then apply the configured factor and
+   probe gate. *Rationale:* never route above the plan or to capacity that cannot
+   currently serve.
 3. **A gateway-neutral publisher.** Contract independent of any one data plane;
    retarget the existing Gateway API publisher; deployment-specific backends and
    SMG are optional. *Rationale:* upstreamable contract, pluggable data plane —
@@ -146,12 +148,12 @@ piece is the projection and the contract.
 - **Home.** A workload cluster serving a share of an ISVC — a `Candidate` that
   reached `Placed`/`Admitted` and reported an addressable `endpoint`. One home =
   one routing target.
-- **Capacity allocation (`a_h`).** Replicas a home is *intended* to run: in
-  `Split`, `admittedReplicas` bounded by `spec.placement.split` and intersected
-  with what quota admits; uniform in `Single`/`All`. The weight's numerator.
-- **Health gate.** Per home: `readyReplicas > 0`, optionally ANDed with a probe
-  result. Failing it contributes weight 0 regardless of allocation — the mechanism
-  that cuts traffic to a down home.
+- **Capacity allocation (`a_h`).** The home's quota-admitted replica count,
+  optionally lowered by endpoint-reported capacity. It is an upper bound on the
+  weight's numerator.
+- **Routable capacity.** `min(a_h, readyReplicas)`. An unready home is always
+  zero. A failed probe normally gates this value to zero; `PreserveTraffic` may
+  ignore only probe gates after every home reports a conclusive probe failure.
 - **Capacity source.** Where `a_h` comes from: `ControlPlane` (default) reads
   `status.placement`; `Endpoint` asks the home and uses the answer as a
   **ceiling** on the plan.
@@ -221,7 +223,7 @@ policies, while publisher options are a safe overlay on one shared client.
 | Source shape | Effective behavior |
 |---|---|
 | Global `routing.enabled: false` | Routing is off for every ISVC. Inline fields cannot bypass the installation gate. |
-| `spec.routing` absent | Inherit all installation defaults. Existing ISVCs therefore keep their pre-upgrade behavior. |
+| `spec.routing` absent | Inherit all installation defaults. The runtime-ready weight formula still applies; no per-ISVC observer or publisher override is introduced. |
 | `spec.routing.enabled` absent | Inherit the installation's enabled behavior. The API uses a nullable boolean so absent and false remain distinct. |
 | `spec.routing.enabled: false` | Opt this ISVC out. Stop observations, request unpublish, and reap its `TrafficMap` only after the publisher finalizer is gone and applied-target status is empty; other inline fields may remain staged but are inactive. |
 | `spec.routing.enabled: true` | Opt in when the installation gate is on; it cannot override global `routing.enabled: false`. |
@@ -304,16 +306,16 @@ spec:
   entries:                     # the routing table, controller-generated
     - cluster: cluster-a
       endpoint: https://llama-3-70b.team-a.cluster-a.example.com
-      weight: 70               # capacity-planned, health-gated
+      weight: 7                # normalized capacity ratio
       healthy: true
       capacity:                # provenance: why the weight is what it is
         allocated: 7           # intended replicas on this home
         ready: 7               # live ready replicas
         factor: "1.0"          # per-replica relative capacity c_h
         source: ControlPlane   # which input produced `allocated`
-    - cluster: cluster-b       # second home, 3 replicas → weight 30
+    - cluster: cluster-b       # second home, 3 replicas → weight 3
       endpoint: https://llama-3-70b.team-a.cluster-b.example.com
-      weight: 30
+      weight: 3
       healthy: true
       capacity: {allocated: 3, ready: 3, factor: "1.0", source: ControlPlane}
   observedISVCGeneration: 42   # the ISVC generation this table came from
@@ -345,8 +347,9 @@ make that explicit.
 ### How a weight is computed: the five variables
 
 ```
-raw_h    = a_h × c_h        # planned serving capacity
-raw_h    = 0                # unless healthy_h
+base_h   = min(a_h, r_h, optional reported_h)
+raw_h    = base_h × c_h
+raw_h    = 0                # when the probe gate is closed
 weight_h = normalize(raw_h) # relative ints, per Gateway API
 ```
 
@@ -355,12 +358,11 @@ present; two are observed from the home and are **individually optional and off
 by default** — enabling one never enables the other, and with both off the
 control plane makes no outbound call at all.
 
-1. **`a_h` — capacity allocation** *(always; the weight's numerator)*. In
-   `Split`, the apportioned `admittedReplicas` intersected with what quota
-   admits, so traffic follows the *plan* (7:3 above) rather than live readiness —
-   a home scaling 7→9 under a spike does **not** steal a larger share. In `All`,
-   uniform (`a_h = 1` per healthy home). In `Single`, one weighted entry; the map
-   still exists so cutover on a failed winner is expressible.
+1. **`a_h` — admitted capacity** *(always; an upper bound on the numerator)*.
+   Placement and quota determine how many replicas a home may serve. Readiness
+   and an optional endpoint report can lower this number but never raise it. In
+   `Single`, normalization still yields one weighted entry while capacity is
+   positive; the map exists so cutoff on a failed winner is expressible.
 
 2. **`c_h` — per-replica capacity factor** *(always available; an omitted field
    has the semantic identity value `1.0`)*.
@@ -376,11 +378,10 @@ control plane makes no outbound call at all.
    **Never auto-derived from TFLOPS**: raw FLOPS is not a reliable throughput
    proxy across vendors. Affects *weighting only*, not placement.
 
-3. **`r_h` — ready replicas** *(always; the health gate)*. Binary in v1:
-   `r_h == 0 → weight 0`. *Failure mode avoided:* a proportional gate
-   (`weight ∝ ready/allocated`) swings on every transient readiness dip,
-   reintroducing the drift we are removing. *Cost accepted:* a home at 1/7 ready
-   keeps its full 70% share and may briefly overload.
+3. **`r_h` — ready replicas** *(always; part of routable capacity)*. The base
+   count uses `min(a_h, r_h)`, so partial readiness reduces the share and
+   `r_h == 0` always produces weight 0. Admitted capacity remains a ceiling, so
+   readiness can remove traffic but cannot grant more than placement allowed.
 
 4. **Reported capacity — a ceiling on `a_h`** *(optional, off by default)*.
    Polled from a capacity endpoint the home exposes: `a_h = min(plan_h, reported_h)`.
@@ -419,7 +420,7 @@ control plane makes no outbound call at all.
      it does, never a silent fallback to the plan: a dropped setting and a
      satisfied one are indistinguishable from the resulting weight.
 
-5. **Probe result — ANDed into the health gate** *(optional, off by default)*. A
+5. **Probe result — ANDed into `healthy`** *(optional, off by default)*. A
    periodic request to the entry's `endpoint`, the same URL a client uses.
    - **Why:** a router's report about itself cannot include anything *above* it —
      ingress gateway, DNS, certificate, route object — which is the entire
@@ -436,9 +437,10 @@ control plane makes no outbound call at all.
      would zero the fleet at once.
    - **Hysteresis is mandatory:** N consecutive failures to gate, M to recover. The
      prober is fleet-correlated, so the default `PreserveTraffic` all-failed
-     policy uses equal weights rather than black-holing. An operator may instead
-     select `Drain` for an installation where fresh, conclusive failures from
-     every home must produce an intentional all-zero table.
+     policy ignores only the probe gates and recomputes from current ready
+     capacity. An operator may instead select `Drain` for an installation where
+     fresh, conclusive failures from every home must produce an intentional
+     all-zero table. Neither policy revives an unready or zero-capacity home.
 
 The two logical observers share one transport and bounded request executor (same
 surface, same credentials, same failure modes), but they stay separately toggled:
@@ -462,9 +464,9 @@ sharing transport is not bundling the features.
 5. **The shared publisher programs the data plane.** It reads `entries` rather
    than re-deriving from `status.placement`, receives the ISVC's resolved safe
    options for that call, and writes `status.programmed`.
-6. **Cutoff.** A home losing all ready replicas — or, where probing is enabled,
-   failing N consecutive probes — flips `healthy:false`/`weight:0` in the next
-   reconcile; the publisher reprograms and the gateway stops sending to it.
+6. **Cutoff.** A home losing all ready replicas flips `healthy:false`/`weight:0`
+   in the next reconcile. A home failing N consecutive probes does the same while
+   another home still passes; a fleet-wide failure follows `allFailedPolicy`.
 
 ### Why a CRD and not just ISVC status
 
@@ -474,7 +476,7 @@ is whether to consolidate them.
 | Dimension | Reuse `status.placement` only | New `TrafficMap` CRD (derived) |
 |---|---|---|
 | Gateway coupling | Watches **all** ISVCs, re-derives split | Watches **one** object kind per service |
-| Capacity-aware weights | No — ready-replicas only | Yes — allocation ∩ quota, health-gated |
+| Capacity-aware weights | No — ready-replicas only | Yes — admitted ∩ ready ∩ reported capacity, probe-gated |
 | Stable contract / RBAC | Smeared across ISVC status | One object, own RBAC, own webhook |
 | Extra machinery | None | +1 CRD, +1 controller writing a machine `spec` |
 | Where routing "why" lives | Nowhere consolidated | `entries[].capacity` provenance |
@@ -500,7 +502,7 @@ is what makes capacity-aware weights and a gateway-neutral contract possible.
     compressed without turning a positive arm into zero.
   - `capacity.allocated` / `.ready` (int32), `.factor` (quantity, semantic
     default `1.0` when omitted): weight provenance —
-    `weight ∝ allocated × factor`, health-gated.
+    `weight ∝ min(allocated, ready) × factor`, then probe-gated.
   - `capacity.source` (enum `ControlPlane|Endpoint`, default `ControlPlane`):
     which input produced `allocated`. *Rationale:* without it an operator cannot
     distinguish "the home reported less capacity" from "the override failed open"
@@ -558,8 +560,9 @@ sibling status.
   authority for deletion, zeroing, or ownership. *Rationale:* if a user can edit
   the cleanup journal, the operator's privileged publisher becomes a confused
   deputy against another service's target.
-- **Created only for multi-cluster ISVCs** (those with `spec.placement`) and only
-  when both the installation gate and the ISVC's resolved enablement are true. A
+- **Created only for placement-eligible ISVCs** (those with a non-empty placement
+  requirement or cluster selector) and only when both the installation gate and
+  the ISVC's resolved enablement are true. A
   `Single`-mode ISVC gets a one-entry map so winner-cutover is expressible; a
   non-placement ISVC gets none. On per-ISVC or installation-wide disable, the
   routing controller stops observations but keeps the `TrafficMap` until the
@@ -578,10 +581,12 @@ sibling status.
   `capacity.ready` and the factors with it — the very fields that say *what* went
   away. Kubernetes makes the same call: a selector `Service` keeps its
   `EndpointSlice` when no pod is ready.
-- **An empty map must say why**, or we trade "absent and ambiguous" for "present
-  and ambiguous". The router owns a `Routable` condition — `True` when at least
-  one entry is addressable, else `False` with reason `NotPlaced`,
-  `NoAddressableHome`, or `AllHomesUnready`. `status.conditions` is a
+- **An empty or all-zero map must say why**, or we trade "absent and ambiguous"
+  for "present and ambiguous". The router owns a `Routable` condition — `True`
+  when at least one entry has positive weight, else `False` with reason
+  `NotPlaced`, `NoAddressableHome`, `AllHomesUnready`, `NoRoutableCapacity`, or
+  `AllHomesProbeFailed`. A PreserveTraffic fallback is `Routable=True` with
+  reason `AllHomesProbeFailed`. `status.conditions` is a
   `listType=map` keyed on `type`, so `Routable` and the publisher's `Programmed`
   coexist under server-side apply — but they are two writers on one subresource
   and each must patch only its own condition.
@@ -669,9 +674,9 @@ only as that sequence's last step.
 - **Gateway API HTTPRoute** (retargeted from today's status-reading path): one
   HTTPRoute, one `backendRef` per home (an ExternalName Service aliasing the home
   endpoint, as today), `weight` per entry. TrafficMap weights are authoritative
-  and are applied verbatim, including an all-zero result selected by the probe's
-  `Drain` policy. Legacy placement-only publication retains its equal-weight
-  fallback.
+  and are applied verbatim, including all-zero results caused by readiness,
+  capacity, or the probe's `Drain` policy. Legacy placement-only publication
+  retains its equal-weight fallback.
 - **External runtime weights** (optional, deployment-specific): render one
   target per home from the entry and its safe per-ISVC mapping options, then call
   the globally configured automation endpoint. This publisher changes
@@ -829,14 +834,15 @@ from the then-current main branch rather than as a GitHub stack:
   only produces identical weights; both fields set is rejected. Generated CRDs,
   clients, deepcopy code, and OpenAPI all expose the new field and deprecate the
   alias without deleting it.
-- **Unit (weight math).** Table-driven: `Split` 7:3 both healthy → 70/30; one home
-  `ready:0` → 100/0; all `ready:0` → equal-weight fallback (no black-hole); `All`
-  → uniform minus unhealthy; `Single` → one entry.
-- **Unit + controller (compatibility).** With `spec.routing` absent, the resolved
-  configuration and generated entries match the installation defaults exactly;
-  with no global capacity source or probe, the controller issues **zero** outbound
-  requests. Existing manifests therefore retain behavior after upgrade. Each
-  input is also exercised alone, so enabling one never activates the other.
+- **Unit (weight math).** Table-driven: admitted `7:3`, ready `4:3` → `4:3`;
+  one home `ready:0` → `100/0`; all `ready:0` → all-zero; `All` also follows
+  ready counts; `Single` → one entry.
+- **Unit + controller (compatibility).** With `spec.routing` absent, observer and
+  publisher settings inherit the installation defaults exactly; with no global
+  capacity source or probe, the controller issues **zero** outbound requests.
+  The runtime-ready weight formula applies independently of inline routing
+  configuration. Each observed input is also exercised alone, so enabling one
+  never activates the other.
 - **Unit (capacity ceiling).** `reported > plan` → plan wins; `reported < plan` →
   reported wins; absent or stale → plan wins, `capacity.source` stays
   `ControlPlane`, `capacity.fallbackReason` is set. Two ISVCs with different
@@ -863,7 +869,7 @@ from the then-current main branch rather than as a GitHub stack:
   `observedISVCGeneration` tracks the source.
   Predicate-level tests cover each transition independently. A home failing N
   probes → `healthy:false`, weight 0, survivors renormalize; **every** home
-  failing → equal-weight fallback under `PreserveTraffic`, or all-zero under the
+  failing → ready-capacity weights under `PreserveTraffic`, or all-zero under the
   explicit `Drain` policy. Per-ISVC opt-out unpublishes and removes its map while
   leaving other ISVCs active; inline true cannot bypass a disabled global gate.
 - **Publisher isolation and safety.** Construct the publisher once, exercise two
@@ -903,8 +909,9 @@ from the then-current main branch rather than as a GitHub stack:
   Run two ISVCs with different inline probe paths and publisher mappings, change
   one object, and prove the other's schedule, targets, and weights do not move.
 - **Upgrade and live E2E.** Deploy the new manager over an installation whose
-  ISVC omits `spec.routing`; verify its TrafficMap and publisher output remain
-  unchanged. Then add an inline probe to that ISVC, observe the configured path
+  ISVC omits `spec.routing`; verify inherited observer/publisher settings and
+  confirm weights follow current ready capacity. Then add an inline probe to
+  that ISVC, observe the configured path
   (without a doubled slash), verify non-zero healthy weights, and confirm the
   published backend values match. For a stateful weighted backend, separately
   verify `1/1 → 1/0 → 0/1 → 1/1` without restarting its data-plane proxy.
@@ -915,7 +922,7 @@ from the then-current main branch rather than as a GitHub stack:
 - **Alpha.** CRD + generator + Gateway API publisher behind the Helm toggle
   (default off); top-level `spec.routing` with deterministic inheritance and
   validation; one shared publisher and workqueue-scheduled observation path;
-  `Split`/`All`/`Single` weight math + binary gate. Unit + envtest.
+  `Split`/`All`/`Single` runtime-ready weight math. Unit + envtest.
 - **Beta.** SMG publisher; multi-cluster integration suite gating cutoff and
   capacity-aware weights; documented consumption contract; scale test at TBD ISVC
   count. The active-probe **capability** available behind its own toggle (default
@@ -942,7 +949,9 @@ from the then-current main branch rather than as a GitHub stack:
   global-only/per-ISVC-safe registry keeps the core API gateway-neutral, but an
   unsupported key is found by the selected publisher rather than OpenAPI alone.
   A precise condition and fail-before-side-effect validation are required.
-- **The binary gate can overload a barely-ready home** (accepted; Open Question #1).
+- **Readiness changes can move traffic shares during a rollout.** This is
+  intentional: the map tracks capacity that can currently serve while admitted
+  replicas remain the upper bound.
 - **The observed inputs add a control-plane → data-plane dependency in a direction
   that did not previously exist.** Outbound calls to every home on a timer: new
   credentials, new egress, new timeouts, and — if the probe is deep — real serving
@@ -990,13 +999,10 @@ from the then-current main branch rather than as a GitHub stack:
    always, with a `Routable=False` reason.** Deleting on degradation made the
    object vanish at peak diagnostic value and made a never-created map
    indistinguishable from a broken controller.
-1. **Proportional vs. binary health gate.** Should v2 scale by a bounded
-   `min(ready/allocated, 1)`, or does that reintroduce reactive drift?
-   **Partially answered by endpoint-reported capacity:** where it is enabled, the
-   barely-ready case is handled by lowering `allocated` rather than scaling the
-   gate — the benefit without per-reconcile drift, since the ceiling moves on the
-   home's settled view. Open for homes on the control-plane default; leaning
-   binary there.
+1. ~~Proportional vs. binary readiness.~~ **Resolved: use runtime-ready capacity.**
+   The numerator is `min(admitted, ready, optional reported capacity)`, so a
+   readiness drop reduces traffic immediately while the admitted allocation
+   prevents readiness from raising a home's share beyond the placement plan.
 2. **Allocation denominator when quota is disabled.** Is the `Split` apportionment
    alone the right `allocated`, or should it fall back to ready-replicas?
 3. ~~How SMG consumes `TrafficMap`.~~ **Resolved: native CRD watch inside SMG**,

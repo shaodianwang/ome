@@ -569,8 +569,7 @@ type CandidatePlacement struct {
 	AdmittedReplicas int32 `json:"admittedReplicas,omitempty"`
 
 	// ReadyReplicas is how many of this home's replicas are serving traffic. It
-	// is the health gate and weight an external LB uses to distribute traffic
-	// across homes.
+	// is the live count basis and health gate for routing across homes.
 	// +optional
 	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
 

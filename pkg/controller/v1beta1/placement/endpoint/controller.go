@@ -20,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	placementcontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/placement"
 )
 
 // Reconciler watches InferenceServices and their TrafficMaps on the control
@@ -135,7 +136,7 @@ func (r *Reconciler) isActive() bool {
 // valid empty target, allowing a stateful publisher to hold retired homes at
 // zero instead of restoring a static fallback.
 func (r *Reconciler) trafficMapTarget(ctx context.Context, isvc *v1beta1.InferenceService) (Target, bool, error) {
-	if isvc.Spec.Placement == nil {
+	if !placementcontroller.IsPlacementEligible(isvc) {
 		return Target{}, false, nil
 	}
 	tm := &v1beta1.TrafficMap{}
@@ -350,15 +351,19 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 }
 
 // placementPublishChange admits ISVC events that can change what the publisher
-// programs: any create/delete, and updates that change status.placement (winner,
-// phase, or endpoint) or the global-host annotation. Other spec/status churn is
-// dropped so the publisher is not re-driven needlessly.
+// programs: any create/delete, and updates that change placement eligibility,
+// status.placement (winner, phase, or endpoint), or the global-host annotation.
+// Other spec/status churn is dropped so the publisher is not re-driven
+// needlessly.
 var placementPublishChange = predicate.Funcs{
 	UpdateFunc: func(e event.UpdateEvent) bool {
 		oldISVC, ok1 := e.ObjectOld.(*v1beta1.InferenceService)
 		newISVC, ok2 := e.ObjectNew.(*v1beta1.InferenceService)
 		if !ok1 || !ok2 {
 			return true // unexpected type: fail safe
+		}
+		if placementcontroller.IsPlacementEligible(oldISVC) != placementcontroller.IsPlacementEligible(newISVC) {
+			return true
 		}
 		if !placementEqual(oldISVC.Status.Placement, newISVC.Status.Placement) {
 			return true
