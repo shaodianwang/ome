@@ -16,15 +16,13 @@ import (
 
 // IR-managed OMENative rollout specs.
 //
-// Regression coverage for the bug where, on the IR-managed path (the
-// production default), a spec change wedged the rollout:
-// the Instance pinned at Phase=Updating, readyReplicas stuck at 0, ISVC
-// Ready stuck False. Root cause: the InferenceReplica controller never
-// fed pod create/delete observations into the Expectations cache its
-// workload dispatcher reads, so the surge/recreate destructive-step
-// gates (ExpectationsCache().Satisfied()) only released on the 2-minute
-// TTL. Fixed by wiring a pod event handler (inferencereplica/watches.go)
-// onto the IR controller's own Expectations instance.
+// On the IR-managed path a spec change must roll through promptly: the
+// Instance leaves Phase=Updating, readyReplicas recovers, and the ISVC
+// returns to Ready=True. That holds only while the InferenceReplica
+// controller's pod event handler (inferencereplica/watches.go) feeds pod
+// create/delete observations into the Expectations cache its workload
+// dispatcher reads; otherwise the surge/recreate destructive-step gates
+// (ExpectationsCache().Satisfied()) release only on the expectations TTL.
 var _ = ginkgo.Describe("IR-managed OMENative rollout", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 
@@ -37,11 +35,11 @@ var _ = ginkgo.Describe("IR-managed OMENative rollout", ginkgo.Ordered, func() {
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	// IRM-1: the core regression. Single-replica engine, default
+	// IRM-1: the core regression guard. Single-replica engine, default
 	// SurgeThenDrain. An env-var bump must surge to the alternate ordinal
 	// and CONVERGE — readyReplicas back to 1, currentRevision catches up,
-	// ISVC Ready True. Before the fix this stalled at readyReplicas=0 for
-	// minutes (Instance stuck Phase=Updating behind the expectations gate).
+	// ISVC Ready True — rather than parking at readyReplicas=0 with the
+	// Instance stuck Phase=Updating behind the expectations gate.
 	ginkgo.It("IRM-1 SurgeThenDrain env-var bump converges (readyReplicas recovers, no Incarnation bump)", func() {
 		name := "irm-surge-isvc"
 		fix := newIRFixture(ns.Name, withISVCName(name), withEngineReplicas(1), withEngineImage("fake-serving:v1"))
@@ -75,8 +73,8 @@ var _ = ginkgo.Describe("IR-managed OMENative rollout", ginkgo.Ordered, func() {
 			"surge must NOT bump Incarnation (that is the recreate counter)")
 	})
 
-	// IRM-2: same bug surface on the RecreatePod path (its old-pod delete
-	// also gates on the expectations cache). An env-var bump must recreate
+	// IRM-2: the same gate on the RecreatePod path (its old-pod delete
+	// also waits on the expectations cache). An env-var bump must recreate
 	// the pod at the SAME ordinal (0) with a bumped Incarnation and
 	// converge. Distinguishes the recreate semantics from surge (IRM-1).
 	ginkgo.It("IRM-2 RecreatePod env-var bump converges (readyReplicas recovers, Incarnation bumps)", func() {
@@ -114,9 +112,9 @@ var _ = ginkgo.Describe("IR-managed OMENative rollout", ginkgo.Ordered, func() {
 	})
 
 	// IRM-DIAG: env-gated (KIND_DIAG=1) full-snapshot dump for debugging a
-	// wedged rollout. Not an assertion — always passes. Kept so the rich
-	// per-tick diagnostic (pods + IR status + routed slices) is one env
-	// var away when a future regression needs root-causing.
+	// wedged rollout. Not an assertion — always passes. Keeps the rich
+	// per-tick diagnostic (pods + IR status + routed slices) one env var
+	// away when a stalled rollout needs diagnosing.
 	ginkgo.It("IRM-DIAG single-replica env-var bump: capture full snapshot", func() {
 		if os.Getenv("KIND_DIAG") == "" {
 			ginkgo.Skip("set KIND_DIAG=1 to run the diagnostic snapshot loop")

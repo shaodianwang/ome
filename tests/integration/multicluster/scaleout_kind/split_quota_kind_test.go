@@ -9,7 +9,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
-// Fractional placement against real Kueue quota — the subject of OEP-0018.1.
+// Fractional placement against real Kueue quota.
 //
 // Only here does quota mean anything: every spec grants an exact per-member
 // budget, so "spreads because one cluster is too small" is a fact about

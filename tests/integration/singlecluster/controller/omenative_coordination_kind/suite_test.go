@@ -78,13 +78,12 @@ func TestOMENativeCoordinationKindController(t *testing.T) {
 		// controller contract under test, not coscheduling behavior.
 		CRDPaths: kindfix.GangCRDPaths(),
 		Scheme:   kindfix.GangScheme(),
-		// OMENative is driven exclusively through the IR-managed path now
-		// (the legacy omenative-direct path was retired). The cross-Component
+		// OMENative is driven through the IR-managed path: the cross-Component
 		// coordination this suite exercises (Sequential / BlueGreen /
-		// RatioBalanced / soak) runs on the IR path: the inferencereplica
-		// controller wires the same coordination.EvaluateUpdateGate decision
-		// site the direct path used. WireInferenceReplica starts that
-		// controller so projected InferenceReplica CRs turn into pods + status.
+		// RatioBalanced / soak) runs in the inferencereplica controller at the
+		// coordination.EvaluateUpdateGate decision site. WireInferenceReplica
+		// starts that controller so projected InferenceReplica CRs turn into
+		// pods + status.
 		Setup: setupOMENativeCoordinationManager,
 	})
 

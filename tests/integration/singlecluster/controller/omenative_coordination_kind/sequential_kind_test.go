@@ -28,22 +28,15 @@ var _ = ginkgo.Describe("behavior — Sequential coordination", ginkgo.Ordered, 
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	// PIt: PARKED — the assertion below is now ROBUST (it samples the
-	// authoritative per-Component CurrentRevision and requires the
-	// decoder-done-while-engine-still-v1 window), but it exposes a REAL
-	// product bug: Sequential ordering is not reliably enforced. ~1 in 3
-	// runs the engine rolls CONCURRENTLY with the decoder (no intermediate
-	// window; both CurrentRevisions advance together). This is the SAME
-	// root cause as the Sequential.Soak bypass (sequential_soak_kind): the
+	// The assertion samples the authoritative per-Component CurrentRevision
+	// and requires the decoder-done-while-engine-still-v1 window. The
 	// Sequential gate (CheckSequentialGate / state.go) derives "which
-	// Component is in flight" from LAGGING status, so after the decoder
-	// converges there is a window where the engine is not yet observed
-	// in-flight and the gate returns "group idle", letting the engine roll
-	// early. The original spec passed vacuously (its CompositePhase signal
-	// never surfaced decoder.*/engine.* — it stays "Idle"), hiding this.
-	// Un-park once the Sequential-gate reliability fix lands (shared with
-	// sequential_soak_kind). DO NOT revert to a CompositePhase-based or
-	// guarded assertion.
+	// Component is in flight" from status, so the window between the decoder
+	// converging and the engine being observed in flight is exactly where
+	// the gate must keep holding the engine. A CompositePhase-based or
+	// guarded assertion would pass vacuously here (the CompositePhase signal
+	// stays "Idle" and never surfaces decoder.*/engine.*), so do not fall
+	// back to one.
 	ginkgo.It("Sequential rolls components in declared order (decoder → engine)", func() {
 		maxUnavail := intstr.FromInt(1)
 		fix := newCoordFixture(ns.Name, WithISVCName("seq-d2"),
@@ -94,11 +87,9 @@ var _ = ginkgo.Describe("behavior — Sequential coordination", ginkgo.Ordered, 
 		// CompositePhase is deliberately NOT the signal: for this
 		// single-replica Sequential scenario it never surfaces the
 		// decoder.*/engine.* sub-phases — it stays "Idle" the entire
-		// rollout, which is exactly why the original guarded assertion
-		// (`if decoderActive >= 0 && engineActive >= 0`) passed vacuously,
-		// never checking the contract. The CompositePhase-surfacing gap is
-		// a separate follow-up; this spec asserts the ordering off the
-		// authoritative per-Component CurrentRevision instead.
+		// rollout, so an assertion guarded on it would pass vacuously,
+		// never checking the contract. This spec asserts the ordering off
+		// the authoritative per-Component CurrentRevision instead.
 		sawDecoderDoneWhileEngineV1 := false
 		var lastDecRev, lastEngRev string
 		stop := util.StartSampler(suiteCtx, kindPollInterval, func(_ Gomega) {
@@ -153,8 +144,8 @@ var _ = ginkgo.Describe("behavior — Sequential coordination", ginkgo.Ordered, 
 		// fully rolled to v2 while the engine was still on v1. If the two
 		// Components rolled concurrently (Sequential gate broken) this
 		// window would not exist — both CurrentRevisions would advance
-		// together. A missed observation is now a real failure, not the
-		// silent skip the original guarded assertion allowed.
+		// together. A missed observation is a real failure, never a
+		// silent skip.
 		Expect(sawDecoderDoneWhileEngineV1).To(BeTrue(),
 			"never observed decoder rolled-off-v1 while engine still on v1 — "+
 				"Sequential ordering not enforced (Components rolled concurrently). "+

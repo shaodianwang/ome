@@ -192,9 +192,9 @@ var _ = ginkgo.Describe("OMENative Migration (KIND)", ginkgo.Ordered, func() {
 		// This is the actual point of migration: move the Instance off
 		// its source node. The controller stamps NodeAffinity excluding
 		// sourceNode, so on the 2-node suite cluster the surge must
-		// schedule onto the other node. (A single-node cluster left the
-		// surge Pending forever — the original reason these specs only
-		// pinned the state machine and not the node move.)
+		// schedule onto the other node. (On a single-node cluster the surge
+		// would stay Pending forever, so the node move is only assertable
+		// with a second worker.)
 		var surgeIdx int32
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, "mig-isvc")

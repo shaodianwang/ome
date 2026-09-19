@@ -127,20 +127,14 @@ var _ = ginkgo.Describe("InferenceService + FineTunedWeight", ginkgo.Ordered, fu
 			g.Expect(*e.FineTunedWeightSpec.ModelType).To(Equal("LoRA"))
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 
-		// NOTE: a Deployment is NOT produced today even though the
-		// modelconfig ConfigMap is correctly populated. Root cause:
-		// utils.ReconcileBaseModel (reconciliation.go:51-66) calls
-		// GetBaseModel(isvc.Spec.Model.Name) directly without
-		// checking Spec.Model.Kind, so when Kind=FineTunedWeight
-		// the lookup tries to find a BaseModel/ClusterBaseModel
-		// with the FTW's name and fails:
-		//
-		//   "No BaseModel or ClusterBaseModel with the name: <ftw>"
-		//
-		// The modelconfig sub-reconciler has the proper FTW branch
-		// (modelconfig_reconciler.go:260-302); the main reconcile
-		// loop does not. Filing separately. Spec asserts current
-		// behavior (no Deployment) so it doesn't lie about coverage.
+		// NOTE: a Deployment is NOT produced even though the modelconfig
+		// ConfigMap is correctly populated. utils.ReconcileBaseModel
+		// resolves isvc.Spec.Model.Name as a BaseModel/ClusterBaseModel
+		// without consulting Spec.Model.Kind, so with Kind=FineTunedWeight
+		// the lookup fails with "No BaseModel or ClusterBaseModel with the
+		// name: <ftw>". Only the modelconfig sub-reconciler follows the FTW
+		// branch. The spec asserts the current behavior (no Deployment) so
+		// it does not overstate coverage.
 		Consistently(func(g Gomega) {
 			deps := &appsv1.DeploymentList{}
 			g.Expect(k8sClient.List(suiteCtx, deps, client.InNamespace(ns.Name))).To(Succeed())

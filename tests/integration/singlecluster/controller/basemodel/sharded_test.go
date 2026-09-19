@@ -78,9 +78,8 @@ var _ = ginkgo.Describe("Sharded BaseModel cache flow", ginkgo.Ordered, func() {
 		// state=Importing on every reconcile, and the post-Ready
 		// reconcile path doesn't pass a transition that would re-flip
 		// state to Ready. The Ready *condition* stays True throughout,
-		// which is the truth source consumers should rely on.
-		// Status.State revert looks like a controller bug — tracking
-		// separately.
+		// which is the truth source consumers should rely on, so the
+		// spec asserts the condition rather than Status.State.
 		Eventually(func(g Gomega) {
 			got := &v1beta1.ClusterBaseModel{}
 			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "sharded-llama-7b"}, got)).To(Succeed())

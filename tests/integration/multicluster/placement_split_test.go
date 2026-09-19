@@ -20,8 +20,7 @@ import (
 // what the control plane sums against the floor, TRIM pins each kept home's
 // request to its admitted share, an unneeded home is swept, and Balanced spread
 // requests an even share everywhere. The sources declare their candidacy via
-// the structured spec.placement block (requirements + mode), not the legacy
-// annotations.
+// the structured spec.placement block (requirements + mode).
 var _ = ginkgo.Describe("Multi-cluster placement split mode", func() {
 	const (
 		// acceleratorLabel/Value is the capability both members advertise and the

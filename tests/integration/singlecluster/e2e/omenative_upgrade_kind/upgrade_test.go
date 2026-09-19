@@ -13,7 +13,7 @@ import (
 // suite) cannot: a manager built from DIFFERENT code — OME_UPGRADE_FROM_IMAGE
 // vs. the current commit — must not disturb a single live pod, node
 // assignment, or revision record for workloads whose spec never changed.
-// This is exactly the incident class where revision-hash inputs drift
+// This is the failure class where revision-hash inputs drift
 // across manager versions and roll an entire fleet on an otherwise no-op
 // upgrade.
 //

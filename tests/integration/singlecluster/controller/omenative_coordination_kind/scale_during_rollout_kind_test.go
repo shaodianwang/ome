@@ -12,7 +12,7 @@ import (
 
 // scale-out of brand-new instance indices during an in-flight rollout.
 //
-// Pins the scale-during-rollout starvation fix: with instance-0 mid-
+// Pins the scale-during-rollout starvation guard: with instance-0 mid-
 // update (a revision bump in flight), a concurrent scale-up of engine
 // MinReplicas 1 → 3 must materialize the brand-new gangs (indices 1,2)
 // immediately instead of serializing them behind instance-0's rollout.

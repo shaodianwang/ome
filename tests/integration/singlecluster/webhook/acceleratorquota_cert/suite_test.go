@@ -1,5 +1,5 @@
 // Package acceleratorquota_cert hosts integration tests for ome-quota-manager's
-// internal webhook certificate management (OEP-0024).
+// internal webhook certificate management.
 //
 // The claim under test is an installation claim — "the admission path works with
 // no cert-manager in the cluster" — and it can only be checked against a real

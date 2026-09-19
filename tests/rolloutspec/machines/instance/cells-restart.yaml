@@ -335,7 +335,7 @@ cells:
     outcome: escalate
     to: Failed
     guard: the deadline elapsed, no pod of the Instance is held by an admission scheduling gate, and the pod set is not fully serving
-    note: a Restart attempt is not disposable, so the stamp keeps the operation and records on LastFailure the blamed pod's workload-caused waiting reason when one exists, falling back to the bare DeadlineExceeded diagnostic when none does, because the teardown that follows deletes the blamed pods. The preserved operation no longer parks the row for good, because a Restart parked at Failed is read as a spent attempt, so the gang-member-loss trigger may re-arm the whole gang under a fresh deadline, while the single-pod path still recovers through the Create pass
+    note: a Restart attempt is not disposable, so the stamp keeps the operation and records on LastFailure the blamed pod's workload-caused waiting reason when one exists, falling back to the bare DeadlineExceeded diagnostic when none does, because the teardown that follows deletes the blamed pods. The preserved operation does not park the row for good, because a Restart parked at Failed is read as a spent attempt, so the gang-member-loss trigger may re-arm the whole gang under a fresh deadline, while the single-pod path still recovers through the Create pass
     placement: perm
     coverage: {perm: [], unit: [TestEscalation_RestartDeadlineElapsed_FailsInstance], kind: []}
     status: decided

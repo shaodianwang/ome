@@ -45,7 +45,7 @@ const (
 	// in this suite is judged against.
 	etcdDefaultRequestLimitBytes = 1572864
 
-	// steadyStateGateBytes is the OEP's 256 KiB release gate on the complete
+	// steadyStateGateBytes is the 256 KiB release gate on the complete
 	// selected request and persisted object of the steady fixtures.
 	steadyStateGateBytes = 256 * 1024
 )

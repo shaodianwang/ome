@@ -38,8 +38,8 @@ var _ = ginkgo.Describe("Sharded BaseModel hf_quant_config.json detection", gink
 				},
 				Metadata: sharded.ModelMetadataInputs{
 					ConfigJSON: []byte(`{
-						"model_type": "llama4x_text",
-						"architectures": ["Llama4xForCausalLM"],
+						"model_type": "llama4_text",
+						"architectures": ["Llama4ForCausalLM"],
 						"max_position_embeddings": 32768
 					}`),
 					HFQuantConfigJSON: []byte(`{
@@ -55,7 +55,7 @@ var _ = ginkgo.Describe("Sharded BaseModel hf_quant_config.json detection", gink
 		}
 
 		cbm := v1beta1testing.MakeClusterBaseModel("sharded-quant-nvfp4").
-			StorageURI("oci://n/test/b/models/o/llama4x-nvfp4").
+			StorageURI("oci://n/test/b/models/o/llama4-nvfp4").
 			Distribution(v1beta1.DistributionSharded).
 			ModelFormat("safetensors").Obj()
 		Expect(k8sClient.Create(suiteCtx, cbm)).To(Succeed())

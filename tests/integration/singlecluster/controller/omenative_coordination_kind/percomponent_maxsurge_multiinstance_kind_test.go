@@ -24,13 +24,13 @@ import (
 //
 // The sibling spec (percomponent_surge_kind_test.go) covers
 // RollingUpdate policy + 2-Instance engine; this spec covers two
-// additional scenarios the original did not exercise:
+// scenarios the sibling does not exercise:
 //
 //   - BlueGreen policy.
 //   - 3-Instance engine, which forces the gate to deny on TWO
 //     successive within-wake-up dispatch attempts (Instance 1 and 2)
-//     after granting Instance 0. The original 2-Instance setup only
-//     stressed the single-deny case.
+//     after granting Instance 0. The sibling's 2-Instance setup only
+//     stresses the single-deny case.
 //
 // Each spec asserts via 100ms-tick sampler that alive(engine) NEVER
 // exceeds minReplicas+MaxSurge, AND that the surge path was actually
@@ -158,7 +158,7 @@ func runPerComponentMaxSurgeMultiInstance(namespace, isvcName string, policy v1b
 	// Sanity: the rollout must have actually exercised the surge
 	// gate. alive==ceiling means the gate let exactly one Instance
 	// surge (correct); alive>ceiling means it let multiple surge
-	// in parallel (the bug); alive<=replicas means no surge fired
+	// in parallel (a budget violation); alive<=replicas means no surge fired
 	// at all (test would pass for the wrong reason). Fail loudly so
 	// a regression in dispatch routing doesn't masquerade as a fix.
 	maxAliveMu.Lock()

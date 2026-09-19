@@ -19,10 +19,10 @@ import (
 // and refuses to advance the Component's CurrentRevision.
 //
 // This spec pins both halves of the per-Instance contract — no coord
-// group is wired (the original fixture used a single-Component
-// RollingUpdate group which ValidateGroupShape rejects with
-// "RollingUpdate requires at least 2 components"; the env-reject
-// behavior is per-Instance and independent of coordination policy):
+// group is wired (a single-Component RollingUpdate group is rejected by
+// ValidateGroupShape with "RollingUpdate requires at least 2 components",
+// and the env-reject behavior is per-Instance and independent of
+// coordination policy):
 //
 //   - InPlaceUpdateNotPossible event is recorded.
 //   - Engine CurrentRevision does NOT advance off v1.

@@ -1,5 +1,5 @@
 // Package acceleratorquota hosts integration tests for the fleet-quota status
-// controller (OEP-0024): it assembles the AcceleratorQuota tree and reports each
+// controller: it assembles the AcceleratorQuota tree and reports each
 // node's position and Ready/Degraded condition.
 //
 // These run against a real apiserver, which is the point. The unit tests use a

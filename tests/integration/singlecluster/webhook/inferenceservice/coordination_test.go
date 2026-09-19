@@ -16,7 +16,7 @@ import (
 	"github.com/ome-projects/ome/pkg/validation"
 )
 
-// Coordination admission specs for the unified rollout v2 spec
+// Coordination admission specs for the rollout spec
 // (spec.rollout.groups[]). Each test sends a Create or Update through
 // the apiserver and asserts the validating webhook's decision. The
 // validator's rejection-reason constants (validation.Reason*) are
@@ -24,16 +24,15 @@ import (
 // loudly here instead of silently changing the operator-facing error
 // string.
 //
-// v2 mapping: the old spec.rollout.coordination.groups[] (Policy + Pacing
-// + Order + Soak) collapsed into spec.rollout.groups[], a presence-based
-// one-of progression (blueGreen | rollingUpdate | canary; at most one — a
-// group that names none defaults to blueGreen). BlueGreen and
-// RollingUpdate are the coordination-style progressions; Sequential is now
-// expressed as multiple single-Component groups; Independent is the absence
-// of a group. RatioBalanced pacing became the group-level MaintainRatio
-// guard. Several v1 Sequential/Independent/RollingUpdate-single-component
-// admission rejections have no v2 equivalent — those specs are skipped with
-// a note (see the per-spec comments).
+// Shape of the spec: spec.rollout.groups[] is a presence-based one-of
+// progression (blueGreen | rollingUpdate | canary; at most one — a group
+// that names none defaults to blueGreen). BlueGreen and RollingUpdate are
+// the coordination-style progressions; sequencing across Components is
+// expressed as multiple single-Component groups in list order; independence
+// is the absence of a group; MaintainRatio is the group-level ratio guard.
+// Specs written against admission rules this shape cannot express
+// (Sequential-policy and single-Component-group rejections) are skipped
+// with a note stating the current rule.
 //
 // Defaulter-side tests (MaxSurge/MaxUnavailable/MaintainRatio fills) live in
 // tests/integration/singlecluster/webhook/inferenceservice_defaulter/. The
@@ -232,31 +231,28 @@ var _ = ginkgo.Describe("InferenceService webhook validation — spec.rollout.gr
 		Expect(err).To(HaveOccurred(), "CRD MinItems=1 or webhook should reject")
 	})
 
-	// W-6: Sequential-without-order is gone. v2 has no
-	// Sequential policy — cross-Component sequencing is expressed as
-	// multiple single-Component groups in list order, so there is no
-	// "Sequential requires order" rejection to assert. Skipped.
+	// W-6: there is no Sequential policy — cross-Component sequencing is
+	// expressed as multiple single-Component groups in list order, so there
+	// is no "Sequential requires order" rejection to assert. Skipped.
 	ginkgo.It("W-6 rejects Sequential without order → SequentialRequiresOrder", func() {
-		ginkgo.Skip("Sequential policy removed; sequencing is now group list order, no SequentialRequiresOrder check")
+		ginkgo.Skip("no Sequential policy: sequencing is group list order, so there is no SequentialRequiresOrder check")
 	})
 
-	// W-7: Sequential-with-one-component is gone. A
-	// single-Component group is a valid (degenerate) v2 shape; there is
-	// no SequentialRequiresMultipleComponents rejection in v2. Skipped.
+	// W-7: a single-Component group is a valid (degenerate) shape; there
+	// is no SequentialRequiresMultipleComponents rejection. Skipped.
 	ginkgo.It("W-7 rejects Sequential with 1 Component → SequentialRequiresMultipleComponents", func() {
-		ginkgo.Skip("Sequential policy removed; a single-Component group is valid, no SequentialRequiresMultipleComponents check")
+		ginkgo.Skip("a single-Component group is valid; there is no SequentialRequiresMultipleComponents check")
 	})
 
-	// W-8: Sequential-incomplete-order is gone. v2 Order is
-	// just a surge sequence and may be a partial subset of components;
-	// there is no SequentialIncompleteOrder rejection. Skipped.
+	// W-8: Order is a surge sequence and may be a partial subset of
+	// components; there is no SequentialIncompleteOrder rejection. Skipped.
 	ginkgo.It("W-8 rejects Sequential order missing one Component → SequentialIncompleteOrder", func() {
-		ginkgo.Skip("Sequential policy removed; Order is now an optional surge subset, no SequentialIncompleteOrder check")
+		ginkgo.Skip("Order is an optional surge subset; there is no SequentialIncompleteOrder check")
 	})
 
-	// W-9: an Order entry not in components[] is a typo. v2 keeps the
-	// order⊆components rule (validateOrderSubset) on any group with an
-	// Order, independent of the progression. It is enforced at BOTH layers — the
+	// W-9: an Order entry not in components[] is a typo. The
+	// order⊆components rule (validateOrderSubset) applies to any group with
+	// an Order, independent of the progression. It is enforced at BOTH layers — the
 	// CRD CEL rule and the webhook (InvalidCoordinationOrder). Against a real
 	// apiserver the CEL rule fires first, so the create is rejected with the CEL
 	// message; the webhook reason is exercised by the validation unit test.
@@ -271,10 +267,9 @@ var _ = ginkgo.Describe("InferenceService webhook validation — spec.rollout.gr
 		Expect(err.Error()).To(ContainSubstring("order must reference only Components listed in this group"))
 	})
 
-	// W-10: RollingUpdate-with-one-component is gone. v2's
-	// rollingUpdate progression is valid on a single-Component group, so
-	// there is no RollingUpdateRequiresMultipleComponents rejection.
-	// Skipped.
+	// W-10: the rollingUpdate progression is valid on a single-Component
+	// group, so there is no RollingUpdateRequiresMultipleComponents
+	// rejection. Skipped.
 	ginkgo.It("W-10 rejects RollingUpdate with 1 Component → RollingUpdateRequiresMultipleComponents", func() {
 		ginkgo.Skip("single-Component rollingUpdate group is valid, no RollingUpdateRequiresMultipleComponents check")
 	})
@@ -461,7 +456,7 @@ var _ = ginkgo.Describe("InferenceService webhook validation — spec.rollout.gr
 	})
 
 	// W-18a: maintainRatio with the tolerance omitted is a valid spelling —
-	// the CRD no longer requires the field, and the operator-configured
+	// the CRD leaves the field optional, and the operator-configured
 	// default applies at resolution.
 	ginkgo.It("W-18a accepts maintainRatio with tolerance omitted (CRD optional)", func() {
 		isvc := coordISVC("coord-w18a", v1beta1.RolloutGroup{

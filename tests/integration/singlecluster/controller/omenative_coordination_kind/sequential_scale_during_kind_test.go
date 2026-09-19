@@ -20,9 +20,9 @@ import (
 // invariant: the rollout converges to 4 engine pods on v2 without
 // the gate refusing to advance forever.
 //
-// This pins the "scale during rollout" regression class — earlier
-// implementations could deadlock the engine in scale-up because the
-// gate was looking at the old replica count.
+// This pins the "scale during rollout" invariant: the gate must judge
+// the engine against its new replica count, or a scale-up during the
+// rollout would deadlock the engine's turn behind a stale count.
 var _ = ginkgo.Describe("permutation — Sequential + scale-up during rollout", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 	ginkgo.BeforeEach(func() {

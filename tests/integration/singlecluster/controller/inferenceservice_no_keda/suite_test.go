@@ -1,9 +1,9 @@
 // Package inferenceservicenokeda boots the InferenceService controller with
 // the KEDA CRD absent, guarding the conditional ScaledObject watch in
-// SetupWithManager. The old unconditional watch made StartManager hang on the
+// SetupWithManager. An unconditional watch would make StartManager hang on the
 // ScaledObject cache sync (crash-looping the controller for every ISVC) when
-// keda.sh/v1alpha1 is absent; the fix lets it start clean. All other optional
-// bundles are installed so KEDA is the only variable.
+// keda.sh/v1alpha1 is absent, so the manager must start clean without it. All
+// other optional bundles are installed so KEDA is the only variable.
 package inferenceservicenokeda
 
 import (
@@ -67,9 +67,10 @@ var _ = ginkgo.BeforeSuite(func() {
 	)
 
 	mgrSetup := func(ctx context.Context, mgr ctrl.Manager) error {
-		// Scheme registered but CRD not installed, mirroring production
-		// (scheme always registered, CRD may be absent) — the exact condition
-		// that used to hang cache sync. A regression re-fails at StartManager.
+		// Scheme registered but CRD not installed, mirroring a real deployment
+		// (scheme always registered, CRD may be absent) — the condition under
+		// which an unconditional watch hangs cache sync. A regression re-fails
+		// at StartManager.
 		if err := kedav1.AddToScheme(mgr.GetScheme()); err != nil {
 			return err
 		}

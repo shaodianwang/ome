@@ -65,8 +65,8 @@ func translateCoordGroupToV2(g v1beta1.RolloutCoordinationGroup) []v1beta1.Rollo
 		// Fan out into one single-Component group per component, in Order.
 		// The controller collapses this back to Sequential semantics. Use
 		// Order when present (Sequential requires it); fall back to
-		// Components so a malformed-but-historically-accepted literal still
-		// produces deterministic groups.
+		// Components so a literal that omits Order still produces
+		// deterministic groups.
 		order := g.Order
 		if len(order) == 0 {
 			order = g.Components
@@ -398,11 +398,11 @@ func newCoordFixture(namespace string, opts ...FixtureOption) *coordFixture {
 		opt(o)
 	}
 	// Default CBM/CSR names derive from the ISVC name so each test
-	// gets unique cluster-scoped resources by default. Sharing the
-	// same default across Ordered tests previously caused DeferCleanup
-	// races where Test2 saw Test1's mid-delete CBM and reconcile
-	// surfaced "ClusterBaseModel not found". Tests that want explicit
-	// names still use WithCBMName / WithCSRName.
+	// gets unique cluster-scoped resources by default. A default shared
+	// across Ordered tests would race DeferCleanup: the next test could
+	// see the previous test's mid-delete CBM and reconcile would surface
+	// "ClusterBaseModel not found". Tests that want explicit names use
+	// WithCBMName / WithCSRName.
 	if o.cbmName == "" {
 		o.cbmName = o.isvcName + "-cbm"
 	}

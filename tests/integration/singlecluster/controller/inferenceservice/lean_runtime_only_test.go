@@ -64,16 +64,11 @@ var _ = ginkgo.Describe("InferenceService lean path (runtime only, no model)", g
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
-	// Regression: previously the controller stamped
+	// A lean ISVC loads no model, so the modelStatus writer must be skipped
+	// entirely when spec.model is nil: a stamped
 	// status.modelStatus.{transitionStatus=InProgress,
-	// modelRevisionStates.targetModelState=Pending} on every lean ISVC
-	// because PropagateModelStatus ran unconditionally. The block never
-	// advanced past "InProgress" because no model was being loaded — it
-	// just lied to operators inspecting status. Fix: skip the modelStatus
-	// writer entirely when spec.model is nil.
-	//
-	// Repro: a runtime-only ISVC saw `status.modelStatus.transitionStatus
-	// = "InProgress"` stuck forever despite Ready=True.
+	// modelRevisionStates.targetModelState=Pending} could never advance and
+	// would report a load in progress to operators despite Ready=True.
 	ginkgo.It("ISVC without spec.model leaves status.modelStatus unset (no 'InProgress' lie)", func() {
 		csr := v1beta1testing.MakeClusterServingRuntime("lean-runtime-status").
 			SupportsModelFormat("safetensors", true, 10).
@@ -95,7 +90,7 @@ var _ = ginkgo.Describe("InferenceService lean path (runtime only, no model)", g
 		ginkgo.By("waiting for the controller to observe the lean ISVC at least once")
 		// Use the produced Service as the synchronization signal — once
 		// we see it, we know UpdateComponentStatus has run, which is
-		// the precise codepath that used to leak modelStatus values.
+		// the codepath that owns the modelStatus block.
 		Eventually(func(g Gomega) {
 			services := &corev1.ServiceList{}
 			g.Expect(k8sClient.List(suiteCtx, services, client.InNamespace(ns.Name))).To(Succeed())
@@ -111,9 +106,9 @@ var _ = ginkgo.Describe("InferenceService lean path (runtime only, no model)", g
 
 		ginkgo.By("asserting modelStatus is NOT populated with misleading 'InProgress' state")
 		// Use Consistently: even after the controller runs UpdateComponentStatus
-		// repeatedly, modelStatus must remain untouched. With the kubebuilder
-		// `default=UpToDate` marker removed and the controller guard in place,
-		// the field stays at its zero value.
+		// repeatedly, modelStatus must remain untouched. The field carries no
+		// kubebuilder default and the writer is guarded, so it stays at its
+		// zero value.
 		Consistently(func(g Gomega) {
 			got := &v1beta1.InferenceService{}
 			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "lean-status-isvc", Namespace: ns.Name}, got)).To(Succeed())
@@ -132,14 +127,13 @@ var _ = ginkgo.Describe("InferenceService lean path (runtime only, no model)", g
 		}, util.ShortTimeout, util.PollInterval).Should(Succeed())
 	})
 
-	// Regression guard for the with-model path: removing the
-	// kubebuilder default + guarding the writer must not break the
-	// lifecycle for ISVCs that DO declare a model. The controller still
-	// drives Pending → InProgress → UpToDate. We can only observe up to
-	// Pending/InProgress in envtest (no real kubelet to mark pods
-	// Ready), so we assert that the lifecycle starts moving — that's
-	// enough to catch a regression where modelStatus stops being
-	// populated entirely for valid model ISVCs.
+	// Regression guard for the with-model path: the nil-model guard on the
+	// writer must not suppress the lifecycle for ISVCs that DO declare a
+	// model. The controller drives Pending → InProgress → UpToDate. We can
+	// only observe up to Pending/InProgress in envtest (no real kubelet to
+	// mark pods Ready), so we assert that the lifecycle starts moving —
+	// enough to catch a regression where modelStatus stops being populated
+	// entirely for valid model ISVCs.
 	ginkgo.It("ISVC with spec.model still populates status.modelStatus lifecycle", func() {
 		cbm := v1beta1testing.MakeClusterBaseModel("lean-cbm-regression").
 			StorageURI("oci://n/test/b/models/o/llama").

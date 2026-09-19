@@ -1,5 +1,5 @@
 // Package acceleratorquota hosts integration tests for the AcceleratorQuota
-// validating webhook (OEP-0024).
+// validating webhook.
 //
 // These drive real admission through a real apiserver, which the unit tests
 // cannot: those call Handle directly with a fake client, so they prove the

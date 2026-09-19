@@ -38,29 +38,16 @@ var _ = ginkgo.Describe("behavior — Sequential.Soak wall-clock", ginkgo.Ordere
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	// PARKED — real product bug (racy soak arming) + fragile test.
-	//
-	// Root cause: the soak gate reads its timestamp from the prior
-	// Component's Available-condition LastTransitionTime (not the group
-	// Phase's). The gate LOGIC is correct — sequential_gate_test.go proves
-	// it denies engine when handed a fresh decoder-Available timestamp.
-	// What remains broken is soak ARMING: both the action-side
-	// CheckSequentialGate and the status-side state.go soak re-derive
-	// "previous Component completed" + its anchor from LAGGING status
-	// every reconcile. After the decoder converges there is a window where
-	// the engine is not yet observed RolloutInFlight (gen-skew cleared,
-	// revision-skew not yet stamped), so the gate returns "Sequential
-	// group idle" and the engine slips through with NO soak. For a short
-	// (15s) soak the race fires often → converges in ~6-9s; a 60s soak has
-	// enough margin to survive the race → passes. So the assertion below
-	// is ALSO wrong: total wall-clock conflates "soak enforced" with
-	// "rollout was slow" and false-passes under load.
-	//
-	// Proper fix (own effort): persist a soak-arming anchor in the group
-	// status the moment the Awaiting window is first entered (set once,
-	// not re-derived), gate both surfaces against it, and rewrite this
-	// spec to assert on the engine pod's creationTimestamp >= decoder
-	// ready time + soak (a deterministic signal immune to rollout speed).
+	// The soak gate anchors on the prior Component's Available-condition
+	// LastTransitionTime (not the group Phase's); both the action-side
+	// CheckSequentialGate and the status-side soak re-derive "previous
+	// Component completed" plus that anchor from status every reconcile, so
+	// the gate must keep holding the engine across the window between the
+	// decoder converging and the engine being observed RolloutInFlight — a
+	// gate that reads that window as "group idle" lets the engine through
+	// with no soak. The wall-clock bound is one-sided: a bypass shows up as
+	// a fast convergence, while a slow rollout can satisfy the bound without
+	// the gate holding.
 	ginkgo.It("Sequential.Soak holds the next Component for the configured duration", func() {
 		const soakDuration = 15 * time.Second
 		fix := newCoordFixture(ns.Name, WithISVCName("soak-g4"),

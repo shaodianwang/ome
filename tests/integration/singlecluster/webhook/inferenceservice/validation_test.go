@@ -626,12 +626,10 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 	})
 
 	ginkgo.It("multi-node: rejects Sequential coordination with multi-pod engine and no Order (SequentialMultiPodRequiresOrder)", func() {
-		// The Sequential coordination policy is removed. Cross-Component
-		// sequencing is now expressed as multiple single-Component groups in list
-		// order, so a "Sequential group without Order" is no longer expressible —
-		// there is no Order-on-Sequential rule. This rejection no longer fires;
-		// skip until/if a v2 multi-pod sequencing guard is reintroduced.
-		ginkgo.Skip("Sequential policy removed; SequentialMultiPodRequiresOrder no longer applies")
+		// Cross-Component sequencing is expressed as multiple single-Component
+		// groups in list order, so a "Sequential group without Order" is not
+		// expressible and there is no Order-on-Sequential rule to reject it.
+		ginkgo.Skip("no Order-on-Sequential rule: a Sequential group without Order is not expressible")
 	})
 
 	ginkgo.It("multi-node: rejects lean multi-pod ISVC with no runner images (MultiPodLeanModelNeedsRunner)", func() {
@@ -713,14 +711,13 @@ var _ = ginkgo.Describe("InferenceService webhook validation", func() {
 	// Sequential serializes Components, so the cross-Component ratio
 	// RatioBalanced is supposed to enforce is undefined.
 	ginkgo.It("rejects Sequential + RatioBalanced pacing (SequentialIncompatibleWithRatioBalanced / W-1)", func() {
-		// The Sequential policy and per-group Pacing are removed. A group
-		// no longer carries a (Sequential) policy, and RatioBalanced pacing
-		// became the group-level MaintainRatio guard — which is meaningful on any
-		// multi-Component group. The "Sequential is incompatible with
-		// RatioBalanced" combination is therefore not expressible in v2, and
-		// ReasonSequentialIncompatibleWithRatioBalanced is no longer returned by
-		// any validator. Skip until/if an equivalent v2 guard is introduced.
-		ginkgo.Skip("Sequential policy + per-group Pacing removed; SequentialIncompatibleWithRatioBalanced no longer applies")
+		// A group carries neither a Sequential policy nor per-group Pacing;
+		// RatioBalanced pacing is the group-level MaintainRatio guard, which is
+		// meaningful on any multi-Component group. The "Sequential is
+		// incompatible with RatioBalanced" combination is therefore not
+		// expressible, and no validator returns
+		// ReasonSequentialIncompatibleWithRatioBalanced.
+		ginkgo.Skip("Sequential + RatioBalanced is not expressible: groups carry no Sequential policy or per-group Pacing")
 	})
 
 	// W-2: maxSurge=0 AND maxUnavailable=0 deadlocks any

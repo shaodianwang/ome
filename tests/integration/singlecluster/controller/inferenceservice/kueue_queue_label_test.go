@@ -23,9 +23,9 @@ import (
 // written the way the multi-cluster placer writes it, onto
 // spec.<component>.labels.
 //
-// The engine holds TPU rather than the one vendor OME recognized on its own
-// before the flag existed, so the spec fails if the decision is ever taken on a
-// built-in default instead of on the configured list.
+// The engine holds TPU rather than a vendor resource OME could recognize on
+// its own, so the decision must come from the flag alone: the spec fails if it
+// is ever taken on a built-in default instead of on the configured list.
 var _ = ginkgo.Describe("InferenceService Kueue queue-name label", ginkgo.Ordered, func() {
 	const queue = "team-a"
 	var ns *corev1.Namespace

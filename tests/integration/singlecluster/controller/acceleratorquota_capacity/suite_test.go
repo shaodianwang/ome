@@ -1,5 +1,5 @@
 // Package acceleratorquota_capacity hosts integration tests for deriving a
-// cluster's own accelerator capacity onto the reserved root (OEP-0024).
+// cluster's own accelerator capacity onto the reserved root.
 //
 // The unit tests drive a fake client, so what only a real apiserver can show is
 // exactly what is new here: that Nodes and ResourceFlavors really list, and that

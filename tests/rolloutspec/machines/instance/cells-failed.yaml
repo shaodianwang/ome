@@ -430,7 +430,7 @@ cells:
     event: gate.deny
     variants: [Held]
     outcome: defer
-    note: a Held block has no time bound, so the row stays Failed until a different target revision supersedes the block or an operator releases it through the release-held mailbox. Only workload-caused evidence charges the ladder that reaches Held, so an environment-caused gang wave can no longer land here however often it repeats - it re-enters Backoff at the current rung with AttemptsStarted unchanged. The gate itself is consulted only for a fresh start, which after an operator reset a parked row is again
+    note: a Held block has no time bound, so the row stays Failed until a different target revision supersedes the block or an operator releases it through the release-held mailbox. Only workload-caused evidence charges the ladder that reaches Held, so an environment-caused gang wave cannot land here however often it repeats - it re-enters Backoff at the current rung with AttemptsStarted unchanged. The gate itself is consulted only for a fresh start, which after an operator reset a parked row is again
     invariants: [retryblock.gates.fresh.attempts]
     placement: unit
     coverage:
@@ -604,7 +604,7 @@ cells:
     outcome: transition
     to: Create/CreatePods
     guard: no operation is preserved, so the Create pass reads the row as a fresh start, and the dead pods hold the index's target names
-    note: query.IsTerminalPod makes a dead pod absent for the missing-pod diff, so the names read as missing and ops/terminal_recycle.go deletes the occupants with expectations recorded first and a TerminalPodRecycled warning; the index is re-materialized under a fresh Create CreatePods operation once those deletes are observed, which is what unblocks the no-pods retry guard and the Create backfill this row used to be stuck behind. A row with a preserved operation is still parked until the reset mailbox or a corrective revision clears it
+    note: query.IsTerminalPod makes a dead pod absent for the missing-pod diff, so the names read as missing and ops/terminal_recycle.go deletes the occupants with expectations recorded first and a TerminalPodRecycled warning; the index is re-materialized under a fresh Create CreatePods operation once those deletes are observed, which is what clears the no-pods retry guard and lets the Create backfill proceed. A row with a preserved operation is still parked until the reset mailbox or a corrective revision clears it
     placement: unit
     coverage:
       perm: []
