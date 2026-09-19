@@ -43,7 +43,7 @@ Delivery happens in four phases, each useful on its own: **Phase A** is placemen
 
 **Current alpha implementation boundary.** The code currently implements topology-aware placement, `Permit` gating for one PodGroup at a time, standalone-pod domain scoring, and replica spreading (the per-service Preferred/Required policy below). Partner-gang placement (prefill/decode co-location), custom queue ordering, topology-aware preemption, and the protection layer remain design targets in this provisional OEP. Until partner reservations are implemented, the scheduler deliberately fails closed when it sees the configured placement-group label; producers must omit that label rather than assuming co-location is active.
 
-**Scope: any accelerator.** The model is deliberately fabric-agnostic. A *domain* is whatever the configured topology label groups — an NVLink clique on GB200, a multi-host TPU slice on GKE, an RDMA island or rack elsewhere, or nothing at all for plain CPU work (which then carries no co-location constraint and is the trivial case). A pool can set one topology label in plugin configuration; a PodGroup may override it through a configurable annotation key when one scheduler serves several fabrics. Neither the metadata key nor the label value is baked into the plugin binary, so one build serves GPU, TPU, and CPU pools. **TPU is in v1**: forcing every gang member into a single slice-domain is exactly what stops a multi-host TPU gang from splitting across two slices — a failure OME has hit in production. Read-only inspection of a production 2x2x2 pool verified `cloud.google.com/gke-tpu-partition-2x2x2-id=<slice-id>` as the unique slice label. The key is topology-shaped, so each fleet and TPU shape must verify its own unique-per-slice label instead of assuming that 2x2x2 key. The one real fabric difference lives *within* a domain (see [Placement](#placement-how-a-gang-gets-scheduled)): an NVLink clique is all-to-all, so any free node in it is interchangeable, whereas a TPU slice is a torus, so a gang that uses less than a full slice needs a contiguous sub-slice. Version 1 places whole-domain gangs — the common serving case for GPU and TPU alike — and treats finer, shape-aware sub-domain placement as another level of the topology hierarchy (see [Multi-level topology](#additional-placement-features)).
+**Scope: any accelerator.** The model is deliberately fabric-agnostic. A *domain* is whatever the configured topology label groups — an NVLink clique on GB200, a multi-host TPU slice on GKE, an RDMA island or rack elsewhere, or nothing at all for plain CPU work (which then carries no co-location constraint and is the trivial case). A pool can set one topology label in plugin configuration; a PodGroup may override it through a configurable annotation key when one scheduler serves several fabrics. Neither the metadata key nor the label value is baked into the plugin binary, so one build serves GPU, TPU, and CPU pools. **TPU is in v1**: forcing every gang member into a single slice-domain is exactly what stops a multi-host TPU gang from splitting across two slices — a failure mode seen on real multi-host TPU pools. On a GKE 2x2x2 pool, `cloud.google.com/gke-tpu-partition-2x2x2-id=<slice-id>` is the unique slice label. The key is topology-shaped, so each fleet and TPU shape must verify its own unique-per-slice label instead of assuming that 2x2x2 key. The one real fabric difference lives *within* a domain (see [Placement](#placement-how-a-gang-gets-scheduled)): an NVLink clique is all-to-all, so any free node in it is interchangeable, whereas a TPU slice is a torus, so a gang that uses less than a full slice needs a contiguous sub-slice. Version 1 places whole-domain gangs — the common serving case for GPU and TPU alike — and treats finer, shape-aware sub-domain placement as another level of the topology hierarchy (see [Multi-level topology](#additional-placement-features)).
 
 ## Motivation
 
@@ -61,7 +61,7 @@ Third, fragmentation is expensive. If small jobs are scattered across many domai
 
 The default Kubernetes scheduler cannot handle this. It places one pod at a time and has no concept of a group, so it can strand a gang half-placed. Its scoring spreads pods out by design, which is exactly what fragments domains. And on managed platforms such as GKE, EKS, and OKE, its configuration cannot be changed. That is why a second scheduler is needed.
 
-This is not hypothetical. On our own prod fleet we have watched a large multi-node gang strand tens of pods `Pending` because no domain had enough contiguous free nodes — while OME had already created the PodGroup that says "these go together." The default scheduler ignored it and placed pods one at a time until the domain ran out. Goals R1 and R3 below are that failure, named.
+This is not hypothetical: on real production fleets, large multi-node gangs have stranded tens of pods `Pending` because no domain had enough contiguous free nodes — while OME had already created the PodGroup that says "these go together." The default scheduler ignores the group and places pods one at a time until the domain runs out. Goals R1 and R3 below are that failure, named.
 
 ### Goals
 
@@ -241,7 +241,7 @@ Rolling updates of a gang need the new copy to have a guaranteed landing spot be
 
 #### Two facts worth writing down
 
-The cluster autoscaler cannot understand our placement rules — it simulates with the default scheduler's logic — so autoscaling decisions for gang pods would be wrong. Our fleets are statically provisioned, so this is a documented limitation, not a gap. And the scheduler never moves a running pod; OME moves services, the scheduler only places what OME creates.
+The cluster autoscaler cannot understand our placement rules — it simulates with the default scheduler's logic — so autoscaling decisions for gang pods would be wrong. The fleets this scheduler targets are statically provisioned, so this is a documented limitation, not a gap. And the scheduler never moves a running pod; OME moves services, the scheduler only places what OME creates.
 
 ### Phase B: quota — adopt Kueue
 
@@ -316,7 +316,7 @@ func main() {
 }
 ```
 
-Pulling in the Kubernetes code requires a known block of Go module redirects; we copy it from the upstream `scheduler-plugins` project rather than writing it by hand. The Kubernetes version we build against is pinned to the version our clusters run (see [Graduation Criteria](#graduation-criteria)).
+Pulling in the Kubernetes code requires a known block of Go module redirects; we copy it from the upstream `scheduler-plugins` project rather than writing it by hand. The Kubernetes version we build against is pinned to the version the target clusters run (see [Graduation Criteria](#graduation-criteria)).
 
 **Image and deployment.** A single static binary in a minimal container. It runs as an ordinary Deployment in the `ome-system` namespace with 2 replicas. Only one replica is active at a time; the second takes over automatically if the first dies. This failover uses a mechanism called leader election, on our own dedicated lock so we never interfere with the platform's scheduler. Two replicas are for availability, not speed — one active scheduler is far more than fast enough for our load (see [Test Plan](#test-plan)).
 
@@ -429,7 +429,7 @@ A deliberate attempt to break this design found the following. Each item states 
 
 Rollback at every step is one field: `schedulerName` back to the default. No infrastructure to tear down.
 
-**Version policy.** Our binary is built against a specific Kubernetes version and must stay in step with the clusters: the same minor version, or at most one behind, never ahead. The plugin interfaces genuinely change between Kubernetes versions, so version bumps are deliberate, reviewed changes with the full test suite behind them — not routine dependency updates. CI runs the test tiers above against every Kubernetes version our fleets run, and we support two versions at a time to cover fleet upgrade windows.
+**Version policy.** Our binary is built against a specific Kubernetes version and must stay in step with the clusters: the same minor version, or at most one behind, never ahead. The plugin interfaces genuinely change between Kubernetes versions, so version bumps are deliberate, reviewed changes with the full test suite behind them — not routine dependency updates. CI runs the test tiers above against every supported Kubernetes version, and two versions are supported at a time to cover fleet upgrade windows.
 
 ## Drawbacks
 
