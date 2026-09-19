@@ -50,7 +50,7 @@ correct gate parameters differ by more than an order of magnitude:
 
 | | router | engine (vLLM on TPU) |
 |---|---|---|
-| pod ready, backends warm | ~23 s (p50 over 111 router pods on a dev cluster) | 40–90 min (weight load + XLA compile) |
+| pod ready, backends warm | ~23 s (p50 across the router pods of a dev cluster) | 40–90 min (weight load + XLA compile) |
 | sensible `readyTimeout` | 10 m | 180 m |
 | useful gates | routing overhead, pool health, per-revision 5xx | request-failure rate, e2e p95 vs the stable revision |
 | cost of a spurious revert | seconds to re-roll | 40–90 min of recompute |
@@ -61,7 +61,7 @@ the router reverts every engine rollout before the first replica is Ready.
 
 Today an operator has two bad options, and we have run both:
 
-1. **Gate only the router** (`components: [router]`). An argo-gitops change
+1. **Gate only the router** (`components: [router]`). A GitOps change
    that touches both specs then rolls the **engine ungated**. Observed
    directly: with `components: [router]`, bumping a label that alters both pod
    templates sent the router through its gated ladder while the engine was
@@ -137,7 +137,7 @@ spec:
     groups:
       - components: [router]
         policyRef:
-          name: meta-router-standard
+          name: router-standard
           progression: canary
       - components: [engine, decoder]
         policyRef:
@@ -191,7 +191,7 @@ Three rules change. Each is stated with what breaks if it is wrong.
    *Why that is sound, and the objection it has to answer:* the current rule's
    stated reason is that a group without the entrypoint "only shifts traffic on
    an internal Service, so the operator's steps never move real traffic." That
-   is true of the `traffic` field and false of `capacity`. The meta-router
+   is true of the `traffic` field and false of `capacity`. The router
    discovers engine endpoints by label selector with no revision term, so a
    step that puts 10% of engine replicas on the new revision does move ~10% of
    requests onto it — the split is capacity-driven and mediated by the router's
@@ -227,7 +227,7 @@ others mirror it.
 
 `status.canary` is **retained and kept populated** for the single-unit case,
 aliasing the entrypoint unit's run. *Rationale:* it is the field every existing
-consumer reads, including the argo-gitops rollout tooling and the canary
+consumer reads, including the GitOps rollout tooling and the canary
 runbook's `jq .status.canary`. Removing it in the same change that adds
 concurrency would break readers for a reason unrelated to the feature. When two
 units run concurrently, `status.canary` reflects the ISVC entrypoint's unit
@@ -278,10 +278,9 @@ do not propose it for components that are not.
 ### Traffic and capacity
 
 `capacity` is per-Component and load-bearing. `traffic` is documented as "not
-per-Component" and is, as of 2026-09-12, **inert**: no HTTPRoute in the
-inference namespace of the production clusters carries weighted or
-per-revision backendRefs, though 94 per-revision Services exist. The realised
-share tracks pod count.
+per-Component" and is, as of 2026-09-12, **inert**: on the clusters surveyed no
+HTTPRoute carries weighted or per-revision backendRefs, even though per-revision
+Services exist. The realised share tracks pod count.
 
 This OEP does not fix that. It does mean per-unit runs are coherent without it:
 each unit's exposure is its own capacity percentage, and the units do not
