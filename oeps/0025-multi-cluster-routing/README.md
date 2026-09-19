@@ -9,8 +9,13 @@ table that a gateway-neutral publisher programs onto a real data plane — the
 routing *projection* of placement + quota, as OEP-0024's distributor projects
 budgets onto Kueue. A weight is a function of five variables: three computed by
 the control plane, and two observed from the home — reported capacity and an
-end-to-end probe — that are **individually optional and off by default**. Opt-in
-via Helm; SMG is one optional backend, not a hard dependency.
+end-to-end probe — that are **individually optional and off by default**. The
+installation supplies a global gate, defaults, and one shared publisher;
+`spec.routing`, a sibling of `spec.placement`, lets one ISVC replace its probe or
+capacity policy inline and override only publisher options declared safe for
+tenant use. No per-ISVC profile object, publisher process, or polling goroutine
+is introduced. Opt-in via Helm; deployment-specific publishers and SMG are
+optional backends, not hard dependencies.
 
 > Status: provisional / alpha. Visible `TBD`s mark still-open decisions; dates
 > are absolute so staleness shows.
@@ -33,6 +38,10 @@ not serving readiness.
 `TrafficMap` is one namespaced object per ISVC, owned by it, written by a new
 control-plane routing controller, consumed by a pluggable publisher. Weight =
 capacity allocation (Split apportionment ∩ quota-admitted count), gated by health.
+Installation configuration enables the feature, chooses the publisher, and
+provides transport credentials. An optional inline `spec.routing` changes one
+ISVC's behavior without changing that ConfigMap or constructing another
+publisher.
 
 ## Motivation
 
@@ -83,9 +92,10 @@ piece is the projection and the contract.
    drop to 0 only when a home has no ready replicas. *Rationale:* enforce the
    plan, but never black-hole traffic onto a dead home.
 3. **A gateway-neutral publisher.** Contract independent of any one data plane;
-   retarget the existing Gateway API publisher; SMG optional. *Rationale:*
-   upstreamable contract, pluggable data plane — matching the `endpoint` package,
-   which already anticipates "backends added later".
+   retarget the existing Gateway API publisher; deployment-specific backends and
+   SMG are optional. *Rationale:* upstreamable contract, pluggable data plane —
+   matching the `endpoint` package, which already anticipates "backends added
+   later".
 4. **Fast, explicit cutoff** — a home losing all ready replicas reflects as
    weight 0 within one reconcile and the publisher reprograms.
 5. **Opt-in** via Helm; disabled means exactly today's behavior.
@@ -94,6 +104,17 @@ piece is the projection and the contract.
    plane holds the *plan* and the endpoint holds the *truth*, so trusting only one
    is wrong in one of the failure modes above — but *requiring* both makes every
    install pay for a data-plane dependency it may not need.
+7. **Inline, per-ISVC routing behavior.** `spec.routing` is a top-level sibling
+   of `spec.placement`; a model owner can change probe, reported-capacity, and
+   safe publisher behavior with the ISVC itself. *Rationale:* model paths and
+   capacity contracts vary by runtime, and coupling those changes to an
+   installation ConfigMap creates an unnecessary second rollout.
+8. **One installation-selected publisher, shared by every ISVC.** The publisher
+   name, network endpoint, TLS material, and credentials remain operator-owned;
+   only options that the selected publisher explicitly marks per-ISVC-safe may
+   vary. *Rationale:* one ISVC must not redirect OME's privileged identity, and
+   per-ISVC publisher instances would multiply connection pools and cleanup
+   owners for no routing benefit.
 
 ### Non-Goals
 
@@ -111,6 +132,12 @@ piece is the projection and the contract.
   does **not** make it redundant.
 - **Specifying a gateway data plane.** SMG's image and deployment topology are
   Helm/GitOps concerns; its `TrafficMap` watcher lives in the SMG repo.
+- **Selecting a different publisher implementation per ISVC.** One installation
+  has one publisher lifecycle and one credential boundary. A workload may change
+  safe mapping behavior, not choose another backend or another network target.
+- **One background loop or goroutine per ISVC.** Per-ISVC periods are data in
+  one leader-owned controller workqueue; they do not create per-object
+  background loops.
 
 ## Proposal
 
@@ -133,14 +160,135 @@ piece is the projection and the contract.
   unlike `readyReplicas`, which is observed from inside.
 - **TrafficMap.** The per-ISVC CRD holding the table: per home, endpoint + weight
   + the provenance of that weight.
-- **Publisher.** Programs exactly one concrete data plane from a `TrafficMap`.
-  Pluggable; one active per install.
+- **Installation default.** The operator-owned probe, capacity, or safe publisher
+  behavior used when the corresponding block is absent from `spec.routing`.
+- **Inline override.** A complete per-ISVC probe or capacity block that replaces
+  its installation default. It is not field-merged with the ConfigMap.
+- **Publisher.** The single implementation selected for an installation, with
+  one shared instance per manager process rather than one per ISVC. Leader
+  election leaves one active mutator. Its transport and credentials are global;
+  each publish call receives immutable effective options for that ISVC.
 
-### The one API type: `TrafficMap`
+### Routing policy lives beside placement
 
-The control plane owns and writes it; humans read it but never edit it —
-deliberately analogous to OEP-0024's distributor projecting a quota tree onto
-native Kueue objects.
+Placement answers *where the workload runs*. Routing answers *how traffic is
+measured and published after placement*. Nesting routing under placement would
+make a data-plane policy look like a placement algorithm input, and copying the
+source object to a workload cluster could accidentally start another routing
+loop. Therefore, the source ISVC carries the two as siblings:
+
+```yaml
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata:
+  name: llama-3-70b
+spec:
+  placement:
+    mode: Split
+    split:
+      replicas: 10
+  routing:
+    enabled: true                    # optional; false opts this ISVC out
+    capacityFactors:
+      cluster-a: "2"
+      cluster-b: "1"
+    probe:                           # complete block: replaces the global probe
+      path: /v1/models
+      method: GET
+      acceptStatuses: [200]
+      gateStatuses: [404, 500, 502, 503, 504]
+      period: 10s
+      timeout: 3s
+      failureThreshold: 3
+      successThreshold: 2
+      allFailedPolicy: PreserveTraffic
+    capacity:
+      disabled: true                 # explicitly ignore a configured global poller
+    publisher:
+      options:                     # key-wise overlay of safe options only
+        routingClass: premium      # illustrative; the publisher defines its keys
+```
+
+`spec.routing` is control-plane-only. Fan-out removes it from derived workload
+ISVCs, as it removes other directives whose owner is the control plane; a member
+cluster must never probe homes or publish a second global route.
+
+#### Resolution rules
+
+The resolution rule is intentionally asymmetric: probe and capacity are atomic
+policies, while publisher options are a safe overlay on one shared client.
+
+| Source shape | Effective behavior |
+|---|---|
+| Global `routing.enabled: false` | Routing is off for every ISVC. Inline fields cannot bypass the installation gate. |
+| `spec.routing` absent | Inherit all installation defaults. Existing ISVCs therefore keep their pre-upgrade behavior. |
+| `spec.routing.enabled` absent | Inherit the installation's enabled behavior. The API uses a nullable boolean so absent and false remain distinct. |
+| `spec.routing.enabled: false` | Opt this ISVC out. Stop observations, request unpublish, and reap its `TrafficMap` only after the publisher finalizer is gone and applied-target status is empty; other inline fields may remain staged but are inactive. |
+| `spec.routing.enabled: true` | Opt in when the installation gate is on; it cannot override global `routing.enabled: false`. |
+| `spec.routing: {}` or one nested block absent | Inherit the installation default for each absent block. |
+| `probe: {disabled: true}` | Turn probing off for this ISVC, even when the global default enables it. No other probe field may coexist with `disabled: true`. |
+| Complete inline `probe` block | Replace the global probe **as a whole**. No field-by-field merge. |
+| `capacity: {disabled: true}` | Turn endpoint capacity polling off for this ISVC. No other capacity field may coexist with `disabled: true`. |
+| Complete inline `capacity` block | Replace the global capacity policy **as a whole**. No field-by-field merge. |
+| `publisher.options` absent | Inherit all global publisher behavior options. |
+| `publisher.options` present | Overlay named, publisher-declared safe keys; omitted safe keys inherit. Publisher name and protected transport/authentication options remain global. |
+
+An empty present probe or capacity block is invalid, not shorthand for disabled.
+A partial block is also invalid. This makes an inline policy self-contained: once
+an ISVC supplies a probe, a later ConfigMap edit cannot silently change that
+probe's method, threshold, or cadence. The API rejects `disabled: true` combined
+with operational fields.
+
+Publisher options differ because the implementation-specific surface is an
+extensible string map. Each registered publisher classifies its keys as either:
+
+1. **Global-only:** implementation name, remote endpoint or URL template,
+   request transport settings, TLS material, identity, and credentials. These
+   keys are not legal in an ISVC.
+2. **Per-ISVC-safe:** routing target or tier mapping and other behavior the
+   publisher can scope to one ISVC. Deployment-specific documentation defines
+   the concrete keys; its network endpoint, resync cadence, and client identity
+   remain global.
+
+The per-ISVC map overlays only category (2). An unknown or global-only key fails
+closed for that ISVC before any external request; it never becomes an arbitrary
+option passed to a privileged client. The selected publisher name is deliberately
+absent from the ISVC API. If a previously programmed ISVC is updated with an
+invalid override, the publisher retains its last known-good applied state and
+reports `Programmed=False`; it does not derive destructive cleanup from invalid
+input.
+
+`spec.placement.capacityFactors` predates this separation but controls routing,
+not placement. `spec.routing.capacityFactors` is the primary field. During the
+compatibility window, the controller honors the placement field only when the
+new field is absent; admission rejects an object that sets both, rather than
+silently choosing one. Migration copies the map to `spec.routing` and removes
+the deprecated alias.
+
+#### `RoutingSpec` schema (v1)
+
+- `enabled` (nullable bool): absent inherits installation enablement; false opts
+  this ISVC out; true still requires the global gate.
+- `capacityFactors` (`map[string]Quantity`): per-home relative serving factors,
+  keyed by WorkloadCluster name.
+- `probe` (optional object): `disabled`, or the complete path, method, accepted
+  and gating statuses, period, timeout, failure threshold, success threshold,
+  and all-failed policy. Inline methods are limited to `GET`, `HEAD`, and `POST`;
+  an ISVC cannot make the controller issue destructive or tunneling methods with
+  its network identity.
+- `capacity` (optional object): `disabled`, or the complete path, method, format,
+  format options, sample window, quorum, period, timeout, and maximum report age.
+  Its inline method has the same safe-method restriction.
+- `publisher.options` (`map[string]string`): a key-wise overlay restricted to
+  safe keys declared by the globally selected publisher. There is no per-ISVC
+  publisher name, endpoint, TLS, or credential field.
+
+### The routing projection resource: `TrafficMap`
+
+`RoutingSpec` extends the existing ISVC resource; `TrafficMap` is the one new
+resource kind. The control plane owns and writes it; humans read it but never
+edit it — deliberately analogous to OEP-0024's distributor projecting a quota
+tree onto native Kueue objects.
 
 ```yaml
 apiVersion: ome.io/v1beta1
@@ -179,9 +327,12 @@ status:                        # written by the publisher, not the generator
 Two writers, one object:
 
 - The **routing controller** owns `spec` — recomputes `entries` whenever
-  `status.placement` or the home's quota allocation changes.
-- The **publisher** owns `status` — programs the data plane and reports
-  `Programmed`.
+  `status.placement` or the home's quota allocation changes — and patches only
+  the TrafficMap's `Routable` condition.
+- The **publisher** patches the TrafficMap's `Programmed`, `gatewayRef`, and
+  observed-generation fields. Separately, it patches only
+  `InferenceService.status.routing.publisher` for durable applied state. It does
+  not replace either object's sibling status or conditions.
 
 *Anticipated objection — "a machine-written `spec` is unusual; spec is user
 intent."* True, and we considered a status-only shape (Alternatives). The
@@ -214,11 +365,13 @@ control plane makes no outbound call at all.
 2. **`c_h` — per-replica capacity factor** *(always present; defaults to `1.0`)*.
    Replicas are not fungible across accelerators: 100 replicas on each of two
    types is not 50/50 if one serves 2× the tokens/sec. Precedence: an explicit
-   per-home factor on the ISVC — the accurate source, since the ratio is
-   workload-specific (model × runtime × precision), not a hardware constant —
-   then an opt-in `AcceleratorClass` default, then `1.0`. **Never auto-derived
-   from TFLOPS**: raw FLOPS is not a reliable throughput proxy across vendors.
-   Affects *weighting only*, not placement.
+   `spec.routing.capacityFactors[home]` value — the accurate source, since the
+   ratio is workload-specific (model × runtime × precision), not a hardware
+   constant — then an opt-in `AcceleratorClass` default, then `1.0`. The
+   deprecated `spec.placement.capacityFactors` alias is read only when the new
+   field is absent. **Never auto-derived from TFLOPS**: raw FLOPS is not a
+   reliable throughput proxy across vendors. Affects *weighting only*, not
+   placement.
 
 3. **`r_h` — ready replicas** *(always; the health gate)*. Binary in v1:
    `r_h == 0 → weight 0`. *Failure mode avoided:* a proportional gate
@@ -284,24 +437,29 @@ control plane makes no outbound call at all.
      select `Drain` for an installation where fresh, conclusive failures from
      every home must produce an intentional all-zero table.
 
-Both optional variables are read by **one** shared per-home observer rather than
-two clients (same surface, same credentials, same failure modes), but they stay
-separately toggled: sharing a client is not bundling the features.
+The two logical observers share one transport and bounded request executor (same
+surface, same credentials, same failure modes), but they stay separately toggled:
+sharing transport is not bundling the features.
+
 ### End-to-end flow
 
 1. **Placement + quota run (existing).** `status.placement.candidates[]` carries
    each home's `endpoint`, `admittedReplicas`, `readyReplicas`.
-2. **Routing controller generates `TrafficMap`.** Watches the ISVC and the
+2. **The controller resolves routing policy.** The installation gate wins
+   first; absent ISVC blocks inherit defaults, complete probe/capacity blocks
+   replace them, and safe publisher keys overlay their defaults. Resolution is a
+   pure per-reconcile value, not mutable publisher state.
+3. **Routing controller generates `TrafficMap`.** Watches the source ISVC and the
    relevant quota allocation, computes the weights, writes `spec`. One per ISVC,
    owner-referenced for GC.
-3. **Observation refines the inputs (optional, off by default).** Where
-   configured: poll capacity and clamp `a_h` to the reported ceiling; probe each
-   `endpoint` and AND the result into the gate. Either input failing to answer
-   falls back to the control-plane value and records why.
-4. **Publisher programs the data plane.** Reads `entries` (rather than
-   re-deriving from `status.placement`) and reconciles one HTTPRoute with a
-   weighted backendRef per home; writes `status.programmed`.
-5. **Cutoff.** A home losing all ready replicas — or, where probing is enabled,
+4. **Observation refines the inputs (optional, off by default).** The shared
+   routing controller workqueue polls capacity and probes each endpoint according
+   to that ISVC's resolved periods. Either input failing to answer falls back to
+   the control-plane value and records why.
+5. **The shared publisher programs the data plane.** It reads `entries` rather
+   than re-deriving from `status.placement`, receives the ISVC's resolved safe
+   options for that call, and writes `status.programmed`.
+6. **Cutoff.** A home losing all ready replicas — or, where probing is enabled,
    failing N consecutive probes — flips `healthy:false`/`weight:0` in the next
    reconcile; the publisher reprograms and the gateway stops sending to it.
 
@@ -334,7 +492,9 @@ is what makes capacity-aware weights and a gateway-neutral contract possible.
   ISVC.
 - `spec.entries[]` (`listMapKey: cluster`): one per serving home —
   - `cluster` (string, required), `endpoint` (URL, required),
-    `weight` (int32 ≥0), `healthy` (bool).
+    `weight` (int32, 0–1,000,000), `healthy` (bool). The upper bound matches the
+    Gateway API backend weight contract; larger exact ratios are proportionally
+    compressed without turning a positive arm into zero.
   - `capacity.allocated` / `.ready` (int32), `.factor` (quantity, default `1.0`):
     weight provenance — `weight ∝ allocated × factor`, health-gated.
   - `capacity.source` (enum `ControlPlane|Endpoint`, default `ControlPlane`):
@@ -349,18 +509,59 @@ is what makes capacity-aware weights and a gateway-neutral contract possible.
 - `status.programmed` (bool), `status.gatewayRef`,
   `status.observedTrafficMapGeneration` (int64), `status.conditions[]`.
 
+The source ISVC carries the state needed to reverse publisher side effects:
+
+```yaml
+status:
+  routing:
+    publisher:
+      name: gatewayapi
+      appliedTargets: [team-a/llama-3-70b]
+      optionsDigest: sha256:0123456789abcdef
+      transition:                       # present only during an external mutation
+        phase: Prepared
+        operation: Apply
+        targets: [team-a/llama-3-70b]
+        payload: '<publisher-defined canonical mutation>'
+```
+
+`name` identifies the implementation whose cleanup semantics apply;
+`appliedTargets` contains its canonical target identifiers; `optionsDigest`
+identifies the effective safe behavior that produced them; and `transition` is a
+bounded, write-ahead record containing the operation, canonical targets, and the
+complete publisher-defined canonical payload needed to replay or compensate for
+one in-flight mutation idempotently — including its weight and effective options,
+not only a non-reversible digest. This status survives until the ISVC's publisher
+finalizer is removed. RBAC reserves the ISVC status subresource for controller
+identities, and the publisher patches only this subtree rather than replacing
+sibling status.
+
 ### Ownership & lifecycle
 
 - **One `TrafficMap` per ISVC**, `metadata.name == isvc.name`, namespaced to it.
   *Rationale:* mirrors HTTPRoute-per-service; trivial ownership, GC and RBAC;
   scales linearly with ISVC count, no single hot object.
-- **Owner-referenced** (`controller: true`) → GC'd with the ISVC. The publisher
-  removes programmed data-plane objects via a finalizer, so a route never
-  outlives its map.
+- **Owner-referenced** (`controller: true`) → GC'd with the ISVC. Publisher
+  cleanup runs under the ISVC finalizer, so publisher-owned state cannot outlive
+  the finalized ISVC.
+- **Applied publisher state is controller-owned.** The publisher records exact
+  targets in `InferenceService.status.routing.publisher`, which survives until
+  finalizer cleanup. A normal, user-editable metadata annotation is **not** an
+  authority for deletion, zeroing, or ownership. *Rationale:* if a user can edit
+  the cleanup journal, the operator's privileged publisher becomes a confused
+  deputy against another service's target.
 - **Created only for multi-cluster ISVCs** (those with `spec.placement`) and only
-  when routing is enabled. A `Single`-mode ISVC gets a one-entry map so
-  winner-cutover is expressible; a non-placement ISVC gets none.
-- **The map exists for the whole life of the ISVC, even with zero entries.**
+  when both the installation gate and the ISVC's resolved enablement are true. A
+  `Single`-mode ISVC gets a one-entry map so winner-cutover is expressible; a
+  non-placement ISVC gets none. On per-ISVC or installation-wide disable, the
+  routing controller stops observations but keeps the `TrafficMap` until the
+  endpoint controller has removed its publisher finalizer **and** cleared
+  both `status.routing.publisher.appliedTargets` **and** its pending `transition`;
+  only then does it reap the map and observer state. This handshake prevents
+  deletion from erasing the publisher's desired input while cleanup is still in
+  progress.
+- **The map exists for the whole enabled routing lifetime, even with zero
+  entries.**
   Emptiness is a *state of the map*, never its absence. *Rationale:* absence is
   unattributable — feature off, ISVC not placed, no addressable home, and a wedged
   controller all look identical. Worse, deleting on degradation removes the object
@@ -376,12 +577,86 @@ is what makes capacity-aware weights and a gateway-neutral contract possible.
   `listType=map` keyed on `type`, so `Routable` and the publisher's `Programmed`
   coexist under server-side apply — but they are two writers on one subresource
   and each must patch only its own condition.
+- **A policy change resets only affected observations.** Changing a probe block
+  discards that ISVC's old hysteresis counters and starts inconclusive; changing
+  a capacity block discards its sample window and falls open to the plan until
+  the new quorum is met. Reusing observations across different paths, formats,
+  or thresholds would make the new policy inherit evidence it never collected.
+- **Publisher mapping changes reconcile old state first.** The controller reads
+  its applied-target record, validates the entire transition, and persists a
+  write-ahead transition record **before** each external mutation. It drains or
+  removes targets no longer desired according to the publisher's semantics, and
+  only then publishes new targets. After a successful mutation it compacts the
+  applied state and clears or advances the transition. If the response or status
+  write is lost, a retry uses the persisted intent; it never guesses from a new
+  desired configuration.
+- **Legacy applied state is migration input, not authority.** Before upgrading, an
+  operator should clean the legacy annotation through the old publisher. If an
+  in-place migration is required, global configuration must authorize exact
+  `(namespace/name, canonical-target)` pairs that may be copied. A target listed
+  for one ISVC cannot be claimed by another. A malformed, mismatched, or unlisted
+  annotation value causes no external mutation and reports a migration-blocked
+  condition; the controller never treats arbitrary annotation text as a target.
 
 ### Publisher contract (pluggable, gateway-neutral)
 
 A `Publisher` reads a `TrafficMap`, reconciles exactly one data-plane
-realization, and reports `status.programmed`. Exactly one is active per install,
-selected by config.
+realization, and reports `status.programmed`. Global config selects exactly one
+implementation for the installation; each manager process constructs one shared
+instance, and leader election permits one active mutator. The instance owns one
+transport and connection pool; each call receives the effective, immutable
+options for the reconciled ISVC, so concurrent reconciles cannot leak one
+service's tier mapping into another.
+
+Before a publisher mutates external state, it must:
+
+1. Reject unknown and global-only per-ISVC option keys.
+2. Render and canonicalize target names. Every publisher that exposes a
+   target-affecting per-ISVC option must enforce an operator-owned target scope
+   (for example, an allowed namespace or anchored prefix). A template is not
+   permission to name an arbitrary target; missing or malformed scope
+   configuration always fails closed before any external request.
+3. Reject duplicate targets within one map and collisions with another ISVC's
+   controller-owned claims.
+4. Persist enough applied state to undo every successful mutation after a
+   restart, deletion, or option change.
+
+The endpoint publisher controller sets `MaxConcurrentReconciles=1` as a
+non-tunable correctness invariant. Target claim lookup uses the uncached API
+reader, and claim persistence uses API-server conflict detection before any
+external call. Lookup, persistence, and external mutation are therefore
+serialized on the elected leader; two first-time reconciles cannot both observe
+an unclaimed target and publish it, even when the ordinary controller cache lags.
+Observation work may remain concurrent because it cannot claim or mutate
+publisher targets.
+
+A publisher that relies on this serialized external-target journal declares
+itself stateful. Manager startup rejects a stateful publisher when leader election
+is disabled; process-local `MaxConcurrentReconciles=1` is not presented as a
+cross-process lock. A future mode that intentionally runs multiple active
+publisher processes must first replace this invariant with an atomic per-target
+claim object.
+
+If the globally selected publisher name differs from
+`status.routing.publisher.name` while `appliedTargets` is non-empty **or a
+transition is pending**, the new publisher does **not** guess how to clean another
+implementation's state and does not publish on top of it. It reports a
+publisher-mismatch condition instructing the operator to restore the old
+publisher, disable routing and wait for cleanup, then perform the configured
+publisher switch.
+
+Stateful backends must also define **drain** and **unpublish** separately. Drain
+keeps the target under controller ownership at weight zero; unpublish removes
+the override or object. They are not interchangeable: in a runtime-weight
+backend, writing zero stops traffic, while deleting the runtime value restores
+the statically authored fallback weight and may resume it. Therefore, removing a
+target from an active mapping drains it before new targets are published and
+retains the zeroed target in applied state while its consuming route may still
+exist. The v1 publisher cannot observe that external route, so it does not
+release one retired target independently: retired targets remain owned at zero
+until whole-ISVC disable or deletion, after the operator has completed the
+documented external-route teardown. Finalizer-driven unpublish may clear them
+only as that sequence's last step.
 
 - **Gateway API HTTPRoute** (retargeted from today's status-reading path): one
   HTTPRoute, one `backendRef` per home (an ExternalName Service aliasing the home
@@ -389,6 +664,13 @@ selected by config.
   and are applied verbatim, including an all-zero result selected by the probe's
   `Drain` policy. Legacy placement-only publication retains its equal-weight
   fallback.
+- **External runtime weights** (optional, deployment-specific): render one
+  target per home from the entry and its safe per-ISVC mapping options, then call
+  the globally configured automation endpoint. This publisher changes
+  **weights only** — it does not create client discovery, deploy proxy tasks, or
+  author the consuming weighted route. Those are explicit data-plane
+  prerequisites; concrete option names and transport details belong with that
+  publisher's implementation documentation.
 - **SMG** (optional): SMG consumes `TrafficMap` **natively** — a watcher inside
   SMG populates its worker registry and splits by entry weight. Because we own
   that codebase this is a native reflector mirroring its existing pod
@@ -396,24 +678,71 @@ selected by config.
   consumer, so the "publisher" is a no-op beyond marking `status.programmed`; the
   contract is identical.
 
+Changing the global publisher name is deliberately not a live per-ISVC
+transition. For a stateful publisher the operator first disables routing, waits
+until the old publisher's finalizers and applied-state records are clean, changes
+the name, and then re-enables routing. This keeps one cleanup owner throughout
+the transition.
+
 ### Enabling routing, and the no-magic-values rule
 
 Per the repo's hard constraint (no behavioral value baked into the binary):
 
 - A Helm toggle gates the routing controller and publisher; **default off**, and
-  off means today's behavior.
-- The active publisher (`gatewayapi` | `smg`), the gateway ref, the backend port
-  and any host template come from the operator ConfigMap / Helm values — **no
-  in-code fallbacks**. Absent config degrades gracefully (routing simply not
-  programmed) rather than injecting a default gateway name or host.
-- The two observed inputs are config-driven end to end and **default to absent**:
-  the capacity source, and the probe's path, method, accepted status codes,
-  period, timeout and thresholds. There is **no in-code probe path and no in-code
-  status list** — an unconfigured probe does not run, rather than silently
-  probing a guessed `/health`. *Rationale:* a guessed path is the
+  off means today's behavior. It is a hard upper bound: an ISVC cannot opt in
+  when the installation is off. When it is on, an optional
+  `spec.routing.enabled: false` opts one ISVC out without changing other
+  services.
+- The active publisher (`gatewayapi` or an optional deployment-specific
+  backend), gateway or remote publisher endpoint, backend port, request
+  transport, TLS material, and credentials come from the operator ConfigMap /
+  Helm values — **no in-code fallbacks and no per-ISVC override**. Absent required
+  config degrades gracefully (routing is not programmed and reports why) rather
+  than guessing a destination.
+- Global probe and capacity blocks are defaults, not mandatory profiles. An
+  inline block is stored with the ISVC and takes effect from its watch event; it
+  requires neither a ConfigMap edit nor a manager restart.
+- Control-plane installations do not install the catalog-dependent general ISVC
+  validator. Cross-field routing invariants that CEL can express therefore live
+  in the CRD schema, and the per-reconcile resolver repeats the complete
+  validation before returning effective configuration. Publisher-specific
+  semantic validation remains with the selected publisher and runs before side
+  effects.
+- The two observed inputs default to absent. Whether supplied globally or
+  inline, the capacity source and probe path, method, status codes, period,
+  timeout, and thresholds remain explicit. There is **no in-code probe path and
+  no in-code status list** — an unconfigured probe does not run, rather than
+  silently probing a guessed `/health`. *Rationale:* a guessed path is the
   hardcoded-magic-value failure mode in a health-check costume, and its specific
   harm is that it appears to work — a shallow probe against a wrong-but-live path
   returns 200 forever.
+
+### Shared workqueue scheduling and bounded concurrency
+
+Per-ISVC policy changes the data, **not** the controller topology. The elected
+leader owns the routing controller and one shared HTTP transport. A reconcile
+runs the observations due for that ISVC, persists or caches their per-home due
+times, then returns `RequeueAfter` for the earliest next probe or capacity poll.
+Controller-runtime's delayed workqueue schedules the object; no ISVC gets a
+ticker or long-lived goroutine of its own.
+
+A policy update recalculates that object's deadline, and deletion drops its
+observation state. The global operator fields
+`routing.observer.maxConcurrentReconciles` and
+`routing.observer.maxConcurrentRequests` bound ISVC-level work and the shared
+fixed-size request executor, respectively; their Helm values are explicit, and
+an enabled observer rejects missing or non-positive values instead of using an
+in-code fallback. Operator-owned `routing.observer.minPeriod` and
+`routing.observer.maxSamples` bound tenant-supplied cadence and capacity-window
+cost; an inline value outside those limits fails closed. The executor pulls due
+homes from a job channel. It must not start one goroutine per target and park
+excess work behind a semaphore — that still creates O(targets) goroutines.
+Per-request context deadlines may differ by ISVC, but both active requests and
+worker goroutines remain bounded as ISVCs are added.
+
+Publisher resync follows the same rule: the shared endpoint controller uses its
+globally configured cadence and delayed workqueue. It does not start a publisher
+loop for every ISVC.
 
 ### Where it runs
 
@@ -427,7 +756,9 @@ workload clusters.
 - **OEP-0018 placement.** Downstream of it; consumes
   `status.placement.candidates[]` and changes nothing about the race, GC, or
   apportionment. Placement is cluster-granular, so entries are too — one per home,
-  never per pod.
+  never per pod. Per-home capacity factors move to `spec.routing` because they
+  affect only traffic share; the old placement field remains a deprecated read
+  alias for one compatibility window.
 - **OEP-0024 quota.** `AcceleratorQuota` is the capacity denominator: `allocated`
   is bounded by what the home's ClusterQueue admitted. With quota disabled,
   allocation falls back to the `Split` apportionment alone (Open Question #2).
@@ -440,42 +771,143 @@ workload clusters.
 - **Large failure domains.** `TrafficMap` cuts a *home* fast. Cutting a
   *sub-cluster* failure domain is a level below and out of scope.
 
+### Implementation sequence
+
+This change should land as sequential, independently reviewed PRs, each branched
+from the then-current main branch rather than as a GitHub stack:
+
+1. **API and resolver.** Add top-level `RoutingSpec`, the deprecated
+   `placement.capacityFactors` compatibility path, validation/defaulting,
+   generated artifacts, and a pure global-plus-inline resolver. Strip routing
+   from derived ISVCs. With `spec.routing` absent, this PR must not change
+   runtime behavior. This is an API foundation: apart from the capacity-factor
+   compatibility read, observer and publisher overrides remain inert until the
+   following PRs wire them to side-effecting code.
+2. **Shared observation scheduling.** Change probe and capacity lookup from one
+   installation-wide policy to per-target effective policy, using the routing
+   controller's delayed workqueue, one shared transport, and bounded request
+   concurrency. Reset only the observation state whose policy changes.
+3. **Shared publisher overrides and lifecycle.** Keep one publisher instance;
+   pass effective safe options per reconcile, enforce the option/target scope,
+   serialize its reconciler, move applied-target authority into
+   `InferenceService.status.routing.publisher`, safely migrate or reject legacy
+   annotation state, convert the existing TrafficMap status writer to
+   field-isolated patches, and make target changes drain old state before
+   publishing new state. Endpoint predicates must observe routing enablement and
+   publisher-option changes; routing predicates must observe publisher-finalizer
+   and applied-target cleanup transitions so the disable handshake cannot stall.
+4. **Rollout and E2E.** Exercise inheritance first on an existing service, then
+   add its inline probe and target mapping. Verify the TrafficMap-to-publisher
+   path before testing data-plane weight shifts. Rollback removes the inline
+   block to restore global defaults; a global publisher change follows the
+   disable-clean-switch-enable sequence above.
+
 ## Test Plan
 
+- **API/defaulting.** Round-trip `spec.routing` as a sibling of `placement`;
+  verify a derived workload-cluster ISVC contains no routing block. Validate that
+  `disabled: true` is exclusive with operational fields and an empty or partial
+  inline probe/capacity block is rejected. Verify the selected publisher's
+  resolver rejects a publisher name or protected endpoint/TLS/credential option
+  before any external mutation; the opaque map cannot express those as typed
+  first-class ISVC fields.
+- **Resolution matrix.** Table-drive global gate × global default × inline shape:
+  global off always wins; absent ISVC enablement preserves global behavior;
+  explicit ISVC false opts out and cleans up; absent nested blocks inherit;
+  complete probe/capacity blocks replace atomically; explicit disabled turns one
+  input off; safe publisher keys overlay while omitted keys inherit. Mutating the
+  returned effective options for ISVC A must not alter global defaults or ISVC B.
+- **Capacity-factor migration.** New field only works; deprecated placement alias
+  only produces identical weights; both fields set is rejected. Generated CRDs,
+  clients, deepcopy code, and OpenAPI all expose the new field and deprecate the
+  alias without deleting it.
 - **Unit (weight math).** Table-driven: `Split` 7:3 both healthy → 70/30; one home
   `ready:0` → 100/0; all `ready:0` → equal-weight fallback (no black-hole); `All`
   → uniform minus unhealthy; `Single` → one entry.
-- **Unit + controller (default-off parity).** With no capacity source and no probe
-  configured, `entries[]` match the pre-existing control-plane path for the same
-  inputs and the controller issues **zero** outbound requests; each toggle is also
-  exercised alone, so enabling one never activates the other. *Rationale:*
-  "optional and off by default" is a claim that rots silently — this test is what
-  fails when someone wires a probe into the default path.
+- **Unit + controller (compatibility).** With `spec.routing` absent, the resolved
+  configuration and generated entries match the installation defaults exactly;
+  with no global capacity source or probe, the controller issues **zero** outbound
+  requests. Existing manifests therefore retain behavior after upgrade. Each
+  input is also exercised alone, so enabling one never activates the other.
 - **Unit (capacity ceiling).** `reported > plan` → plan wins; `reported < plan` →
   reported wins; absent or stale → plan wins, `capacity.source` stays
-  `ControlPlane`, fallback condition set. A report on one home must not change
-  another home's `allocated`, only its normalized share.
+  `ControlPlane`, fallback condition set. Two ISVCs with different formats,
+  periods, and quorum settings retain independent sample windows; changing one
+  capacity block clears only that ISVC's window.
 - **Unit (probe status policy).** `429`/`401`/`403` do not gate; `5xx` and
   transport errors do; "probe could not run" gates nothing even when it affects
   every home; the gate flips exactly at the Nth failure and recovers exactly at
-  the Mth success.
+  the Mth success. Two ISVCs with different paths and thresholds do not share
+  counters; changing or disabling a probe clears its prior gate.
+- **Unit (shared scheduling).** With a fake clock, differently-perioded ISVCs
+  return the correct `RequeueAfter`; updates replace deadlines; deleted targets
+  lose state; publisher requeues are per object. Assert the controller's
+  concurrency and fixed request-worker count match the two global observer
+  settings and stay within those bounds as target count grows. Missing or
+  non-positive settings fail validation when observation is enabled. The
+  implementation must not launch one blocked goroutine per target. Do not assert
+  a fragile process-wide goroutine count — assert there is no per-object runnable
+  or ticker and the executor creates at most its fixed worker bound.
 - **Controller (envtest).** `status.placement` transitions → `spec` converges;
+  routing-policy-only changes enqueue; publisher-finalizer, applied-target, and
+  pending-transition cleanup changes enqueue the waiting routing reconciler;
   ISVC deletion → GC'd; quota change → weights recomputed;
-  `observedISVCGeneration` tracks the source. A home failing N probes →
-  `healthy:false`, weight 0, survivors renormalize; **every** home failing →
-  equal-weight fallback under `PreserveTraffic`, or all-zero under the explicit
-  `Drain` policy.
-- **Publisher (envtest).** `spec` → one HTTPRoute with weighted backendRefs; entry
-  removed → backendRef dropped and stale ExternalName Service deleted;
-  `status.programmed` set; finalizer removes the route on map deletion.
+  `observedISVCGeneration` tracks the source.
+  Predicate-level tests cover each transition independently. A home failing N
+  probes → `healthy:false`, weight 0, survivors renormalize; **every** home
+  failing → equal-weight fallback under `PreserveTraffic`, or all-zero under the
+  explicit `Drain` policy. Per-ISVC opt-out unpublishes and removes its map while
+  leaving other ISVCs active; inline true cannot bypass a disabled global gate.
+- **Publisher isolation and safety.** Construct the publisher once, exercise two
+  ISVCs with different immutable safe options, and prove each outbound request
+  uses only its own effective mapping. Assert the controller configuration keeps
+  publisher reconciles at one worker, then race two same-target enqueue events
+  and prove the serialized, uncached claim rejects the second even when the
+  informer cache is stale. A stateful publisher with leader election disabled is
+  rejected at startup. Unknown/protected keys, missing or malformed target scope,
+  out-of-scope targets, duplicates, and cross-ISVC collisions produce no external
+  mutation and set a precise `Programmed=False` reason.
+- **Publisher lifecycle (envtest + fake backend).** `TrafficMap.spec` programs the
+  expected targets; a target-mapping update persists transition intent, drains
+  old targets before publishing new ones, and survives failure/restart at every
+  mutation boundary, including a successful external write followed by a lost
+  response or failed status patch; recovery replays the persisted canonical
+  payload rather than deriving a mutation from newer desired state. A retired
+  target remains owned at zero until whole-ISVC disable/deletion. Tampering with
+  ordinary annotations cannot cause a zero or delete. ISVC deletion and global
+  disable retain the finalizer until both applied targets and the pending
+  transition are empty. Exercise drain (`weight=0`) separately from unpublish
+  (remove override/static fallback).
+- **Applied-state migration and status ownership.** Pre-upgrade cleanup leaves no
+  legacy state. In-place migration copies only an exact allowlisted
+  `(namespace/name, target)` pair; a target authorized for another ISVC, or any
+  malformed, injected, or unlisted annotation, causes no external call. A
+  publisher-name mismatch with outstanding targets or a pending transition
+  blocks both cleanup and new publication. Concurrent placement, routing, and
+  publisher status updates prove the publisher patch changes only
+  `status.routing.publisher` and its own `Programmed` condition—no sibling status
+  or condition is lost.
+- **Gateway API publisher (envtest).** `spec` → one HTTPRoute with weighted
+  backendRefs; entry removed → backendRef dropped and stale ExternalName Service
+  deleted; `status.programmed` set; finalizer removes the route on map deletion.
 - **Integration (multi-cluster harness, OEP-0020).** fan-out → admit → map
   generated → gateway programmed → kill a home → weight→0 within one reconcile.
+  Run two ISVCs with different inline probe paths and publisher mappings, change
+  one object, and prove the other's schedule, targets, and weights do not move.
+- **Upgrade and live E2E.** Deploy the new manager over an installation whose
+  ISVC omits `spec.routing`; verify its TrafficMap and publisher output remain
+  unchanged. Then add an inline probe to that ISVC, observe the configured path
+  (without a doubled slash), verify non-zero healthy weights, and confirm the
+  published backend values match. For a stateful weighted backend, separately
+  verify `1/1 → 1/0 → 0/1 → 1/1` without restarting its data-plane proxy.
 - **Leak-free fixtures** (`example.com`, generic cluster names).
 
 ## Graduation Criteria
 
 - **Alpha.** CRD + generator + Gateway API publisher behind the Helm toggle
-  (default off). `Split`/`All`/`Single` weight math + binary gate. Unit + envtest.
+  (default off); top-level `spec.routing` with deterministic inheritance and
+  validation; one shared publisher and workqueue-scheduled observation path;
+  `Split`/`All`/`Single` weight math + binary gate. Unit + envtest.
 - **Beta.** SMG publisher; multi-cluster integration suite gating cutoff and
   capacity-aware weights; documented consumption contract; scale test at TBD ISVC
   count. The active-probe **capability** available behind its own toggle (default
@@ -494,6 +926,14 @@ workload clusters.
   subset — mitigated by the default-off toggle.
 - **Two objects can disagree transiently.** The map can lag placement by a
   reconcile; `observedISVCGeneration` makes the lag observable, not absent.
+- **Two configuration layers require explicit resolution.** Global defaults plus
+  inline behavior are more code than an installation-only ConfigMap. Atomic
+  probe/capacity replacement and a published resolution matrix bound the cost;
+  field-wise merging would make the effective policy too difficult to audit.
+- **Publisher option maps are less self-describing than typed fields.** The
+  global-only/per-ISVC-safe registry keeps the core API gateway-neutral, but an
+  unsupported key is found by the selected publisher rather than OpenAPI alone.
+  A precise condition and fail-before-side-effect validation are required.
 - **The binary gate can overload a barely-ready home** (accepted; Open Question #1).
 - **The observed inputs add a control-plane → data-plane dependency in a direction
   that did not previously exist.** Outbound calls to every home on a timer: new
@@ -520,6 +960,21 @@ workload clusters.
    abuse a well-known type. Rejected.
 5. **DNS-weight / external global LB only.** Viable as a later *publisher*
    backend, but DNS TTL cutoff is too slow for the fast-cutoff goal. Not v1.
+6. **`profileRef` from each ISVC to a routing ConfigMap.** Centralizes policy but
+   makes every model-specific path or threshold change a second-resource rollout
+   and lets a shared profile edit change many services at once. Rejected as the
+   primary API; installation defaults still cover the deliberate shared case.
+7. **Field-wise merge of inline probe/capacity blocks.** Saves repeated fields,
+   but an ISVC that overrides only `path` still changes when an operator edits
+   the global timeout or failure threshold. Rejected: a present policy is complete
+   and reviewable in one object.
+8. **One publisher or observer loop per ISVC.** Mechanically simple, but creates
+   unbounded tickers, transports, credentials, and shutdown paths as the fleet
+   grows. Rejected in favor of one publisher instance and one bounded shared
+   controller workqueue.
+9. **Allow the ISVC to select the publisher or its remote endpoint.** Flexible,
+   but lets a workload redirect OME's privileged identity and leaves cross-backend
+   cleanup ambiguous. Rejected; those values remain installation-owned.
 
 ## Open Questions
 
@@ -586,6 +1041,15 @@ workload clusters.
     probes per period, each potentially a real inference request. Does the shared
     path warrant a per-home probe amortized across ISVCs? `TBD` — depends on
     ISVC-per-home counts we have not measured.
+11. ~~Where model-specific routing configuration lives.~~ **Resolved: inline at
+    top-level `spec.routing`, with installation defaults.** A reference-only
+    profile makes an ISVC edit depend on a second resource; field-wise merge
+    makes the effective policy depend on both. Whole-block replacement keeps the
+    selected behavior visible on the object.
+12. ~~Whether per-ISVC behavior needs per-ISVC publishers or loops.~~ **Resolved:
+    no.** The installation selects one publisher implementation and the leader
+    uses one controller-runtime workqueue. Per-ISVC configuration is immutable
+    input to a reconcile, not controller topology.
 
 ## See also
 
@@ -595,11 +1059,11 @@ workload clusters.
   Gateway API HTTPRoute), `pkg/apis/ome/v1beta1/inference_service_status.go`
   (`PlacementStatus` / `CandidatePlacement`).
 
-**Next action:** the two observed inputs are independently shippable and should be
-sequenced by dependency, not by value. Active health probing is
-control-plane-only and can land once its status policy and thresholds are settled
-(Open Questions #7, #8). Endpoint-reported capacity is **blocked** on a pair-aware
-capacity surface existing on the data plane, so it follows — and Open Question #9
-must be agreed with the data-plane owners before that work starts, since it
-determines what the endpoint has to compute. Open Question #2 still gates the
-generator's weight math. Owner: @fanyang-real.
+**Next action:** land the API/resolver compatibility PR first, then the shared
+workqueue observation path, then publisher option isolation and controller-owned
+applied state.
+Only after those three invariants pass their transition tests should an operator
+move an existing service from inherited defaults to inline configuration.
+Endpoint-reported capacity remains **blocked** on a pair-aware data-plane surface;
+Open Questions #2, #7, and #8 still gate its production guidance. Owner:
+@fanyang-real.
