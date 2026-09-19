@@ -82,22 +82,20 @@ mid-update is in one of `Surge`, `GangSurgeTarget`, `SurgeDrain`,
 (`pkg/controller/v1beta1/workload/types/types.go:117-132`,
 `workload/ops/update_status.go:19-38`), and a pod kill or a spec edit landing in
 each is a different behavior. The bugfix history is a list of exactly such cells:
-a re-bump during an in-flight surge (#720, #1423), scale-up while restarts
-converge (#1448), `CreateContainerError` on a surge target (#1274), a gang member
-lost below Ready (#1000), a late-joining RatioBalanced member (#1138), a partial
-bump under the Sequential gate (#1141), promotion before the recreated pod was
-Ready (#1387). None of these is a new *configuration*; each is a known event in a
-state the corpus could not aim at.
+a re-bump during an in-flight surge, scale-up while restarts converge,
+`CreateContainerError` on a surge target, a gang member lost below Ready, a
+late-joining RatioBalanced member, a partial bump under the Sequential gate,
+promotion before the recreated pod was Ready. None of these is a new
+*configuration*; each is a known event in a state the corpus could not aim at.
 
 **Failure mode 2 — behavior is decided by accretion.** No artifact says what
 should happen when event E hits state S. Each bugfix decides one cell in
 isolation, so adjacent cells can be decided inconsistently and nobody can tell.
-Two concrete series: the revision-hash exclusions were corrected four times
-(#635, #1367, #1442, #1449), each time because one more ambient annotation or
-label turned out to change the hash and trigger a roll; and pause semantics were
-settled in two PRs one day apart (#1279 "pause keeps repair running", #1289
-"truthful phase under pause") that resolve different cells of the same
-"pause × Instance state" row. Since 2026-06-01, 120 commits touched
+Two concrete series: the revision-hash exclusions were corrected four times,
+each time because one more ambient annotation or label turned out to change the
+hash and trigger a roll; and pause semantics were settled in two fixes one day
+apart ("pause keeps repair running", then "truthful phase under pause") that
+resolve different cells of the same "pause × Instance state" row. Since 2026-06-01, 120 commits touched
 `pkg/controller/v1beta1/workload` and 93 touched
 `pkg/controller/v1beta1/inferenceservice/reconcilers/omenative`; of the 120 most
 recent commits across the two trees, 67 carry the `[Bugfix]` tag. That rate is
@@ -297,7 +295,7 @@ three cells:
 1. **before** — the event arrives in S1 while G is false.
 2. **boundary** — the event arrives after G became true but before the
    controller's write for the transition landed. This is the race window:
-   promote-before-PodReady (#1387), the Sequential zero-time overlap (#843), the
+   promote-before-PodReady, the Sequential zero-time overlap, the
    Expectations observer/dispatcher mismatch, the stale-cache `AlreadyExists` on
    a retried create all live here.
 3. **after** — the event arrives in S2, immediately.
@@ -438,7 +436,7 @@ Event families, about 40 events in total:
   container restart, deleted, UID rotated, stuck `Terminating`, node lost,
   scheduling-gated, evicted.
 - **operator** (spec and annotations): revision bump (new hash), annotation-only
-  edit (must *not* roll; the #635/#1367/#1442/#1449 series), strategy switch,
+  edit (must *not* roll; the revision-hash exclusion series), strategy switch,
   replicas up, replicas down, `pause=true`, `pause=freeze`, unpause, teardown,
   migrate request, partition change.
 - **coordination**: `gate.allow`, `gate.deny(gate)` for the seven hold gates.
