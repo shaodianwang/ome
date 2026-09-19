@@ -94,6 +94,9 @@ spec:
                           type: string
                         message:
                           type: string
+                        policyDigest:
+                          pattern: ^sha256:[0-9a-f]{64}$
+                          type: string
                         result:
                           enum:
                           - Passing

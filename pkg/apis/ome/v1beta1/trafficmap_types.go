@@ -184,6 +184,13 @@ type TrafficMapEntry struct {
 // home. The probe targets the entry's Endpoint — the URL a client uses — so it
 // covers the whole serving path rather than pod readiness inside the home.
 type TrafficMapProbe struct {
+	// PolicyDigest identifies the effective probe policy that produced this
+	// observation. A controller may restore hysteresis state after a restart only
+	// when this digest and the entry identity still match.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
+	PolicyDigest string `json:"policyDigest,omitempty"`
+
 	// Result is the most recent probe attempt's verdict. Failing gates only after
 	// the configured threshold. Unknown does not change the previous gate.
 	// +optional

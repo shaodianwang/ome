@@ -511,10 +511,13 @@ is what makes capacity-aware weights and a gateway-neutral contract possible.
     source did not produce a usable ceiling and the control-plane allocation was
     retained. Empty means polling is disabled or its latest result was usable.
   - `probe` (optional, present only when probing is configured): latest attempt
-    result, current hysteresis gate, attempt time, and consecutive-failure count.
+    result, current hysteresis gate, attempt time, consecutive-failure count, and
+    a `sha256:<64 lowercase hex>` digest of the complete effective probe policy.
     `result: Unknown` leaves the prior `gated` value unchanged. *Rationale:*
     `healthy:false` alone does not say whether readiness or reachability failed,
-    and those point at different teams.
+    and those point at different teams. The digest makes persisted hysteresis
+    attributable to the policy that produced it without duplicating that policy
+    into every entry.
 - `spec.observedISVCGeneration` (int64) for staleness detection.
 - `status.programmed` (bool), `status.gatewayRef`,
   `status.observedTrafficMapGeneration` (int64), `status.conditions[]`.
@@ -595,6 +598,11 @@ sibling status.
   a capacity block discards its sample window and falls open to the plan until
   the new quorum is met. Reusing observations across different paths, formats,
   or thresholds would make the new policy inherit evidence it never collected.
+- **Restart hydration requires an exact identity match.** Persisted probe state
+  is reusable only when the TrafficMap owner UID, map namespace/name, entry
+  cluster and endpoint, and probe policy digest all match the current target and
+  resolved policy. Missing or mismatched identity starts inconclusive and
+  ungated instead of importing an unrelated gate or hysteresis counter.
 - **Publisher mapping changes reconcile old state first.** The controller reads
   its applied-target record, validates the entire transition, and persists a
   write-ahead transition record **before** each external mutation. It drains or

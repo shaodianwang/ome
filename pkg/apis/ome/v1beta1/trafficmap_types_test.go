@@ -64,6 +64,7 @@ func TestTrafficMapProbe_RoundTrips(t *testing.T) {
 	// An inconclusive attempt does not reopen a previously gated home, so the
 	// latest result and current gate must survive independently.
 	in := TrafficMapProbe{
+		PolicyDigest:        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 		Result:              ProbeResultUnknown,
 		Gated:               true,
 		ConsecutiveFailures: 3,

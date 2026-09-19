@@ -9,7 +9,7 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-func TestTrafficMapCRD_EntryWeightBounds(t *testing.T) {
+func TestTrafficMapCRD_EntrySchema(t *testing.T) {
 	path := filepath.Join("..", "..", "..", "..", "config", "crd", "full", "ome.io_trafficmaps.yaml")
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -44,4 +44,8 @@ func TestTrafficMapCRD_EntryWeightBounds(t *testing.T) {
 	}
 	probe := requireSchemaProperty(t, entry, "probe")
 	requireSchemaProperty(t, probe, "gated")
+	policyDigest := requireSchemaProperty(t, probe, "policyDigest")
+	if got, want := policyDigest.Pattern, `^sha256:[0-9a-f]{64}$`; got != want {
+		t.Errorf("spec.entries[].probe.policyDigest pattern = %q, want %q", got, want)
+	}
 }

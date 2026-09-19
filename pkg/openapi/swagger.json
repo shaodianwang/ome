@@ -7765,6 +7765,10 @@
           "description": "Message explains the current Result — the observed status code, the transport error, or why the probe could not run.",
           "type": "string"
         },
+        "policyDigest": {
+          "description": "PolicyDigest identifies the effective probe policy that produced this observation. A controller may restore hysteresis state after a restart only when this digest and the entry identity still match.",
+          "type": "string"
+        },
         "result": {
           "description": "Result is the most recent probe attempt's verdict. Failing gates only after the configured threshold. Unknown does not change the previous gate.",
           "type": "string"

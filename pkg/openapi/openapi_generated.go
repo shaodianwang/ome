@@ -13791,6 +13791,13 @@ func schema_pkg_apis_ome_v1beta1_TrafficMapProbe(ref common.ReferenceCallback) c
 				Description: "TrafficMapProbe records what the active end-to-end probe observed for one home. The probe targets the entry's Endpoint — the URL a client uses — so it covers the whole serving path rather than pod readiness inside the home.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
+					"policyDigest": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PolicyDigest identifies the effective probe policy that produced this observation. A controller may restore hysteresis state after a restart only when this digest and the entry identity still match.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 					"result": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Result is the most recent probe attempt's verdict. Failing gates only after the configured threshold. Unknown does not change the previous gate.",
