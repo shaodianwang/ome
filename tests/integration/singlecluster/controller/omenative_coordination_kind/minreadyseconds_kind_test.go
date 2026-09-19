@@ -55,12 +55,6 @@ var _ = ginkgo.Describe("behavior — MinReadySeconds paces SurgeThenDrain", gin
 					MaxSurge:       &maxSurge,
 					MaxUnavailable: &maxUnavail,
 				},
-				// A short post-drain settle keeps the spec's wall-clock
-				// dominated by the window under test, not the connection
-				// grace that the settle exists for.
-				InPlaceUpdateStrategy: &v1beta1.InPlaceUpdateStrategy{
-					GracePeriodSeconds: ptr.To(int32(5)),
-				},
 			},
 		}
 		applyFixture(Default, fix)

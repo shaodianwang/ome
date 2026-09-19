@@ -37,6 +37,12 @@ type ComponentPlan struct {
 	// Instance becoming Ready.
 	InstanceReadyTimeout time.Duration
 
+	// GangScheduleTimeout bounds the per-PodGroup schedule timeout that a
+	// multi-pod Instance derives from InstanceReadyTimeout. Operator
+	// config (lifecycle.gangScheduleTimeout); nil means unconfigured and
+	// the derived value reaches the scheduler unclamped.
+	GangScheduleTimeout *GangScheduleTimeoutClamp
+
 	// MinReadySeconds is how long a newly Ready pod must stay Ready before
 	// it is Available. Rollout drains and promotions wait on Available
 	// pods, so the per-Component budgets stay held for the window. 0 means

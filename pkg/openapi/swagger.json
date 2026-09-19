@@ -3130,14 +3130,9 @@
       }
     },
     "v1beta1.InPlaceUpdateStrategy": {
-      "description": "InPlaceUpdateStrategy tunes per-pod lifecycle drain timing.",
+      "description": "InPlaceUpdateStrategy tunes the per-pod in-place update sequence.",
       "type": "object",
       "properties": {
-        "gracePeriodSeconds": {
-          "description": "GracePeriodSeconds is the time OMENative waits between marking the pod not-ready and applying an in-place mutation. SurgeThenDrain also waits this long after EndpointSlice removal before deleting the old pod, allowing persistent load-balancer connections to drain while its workers remain available.",
-          "type": "integer",
-          "format": "int32"
-        },
         "markNotReadyDuringLifecycle": {
           "description": "MarkNotReadyDuringLifecycle, when true, flips ome.io/serving=False on the pod before the in-place mutation so EndpointSlice drains traffic first. Defaults to true.",
           "type": "boolean"

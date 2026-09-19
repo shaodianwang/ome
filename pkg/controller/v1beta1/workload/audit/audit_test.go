@@ -42,8 +42,32 @@ func mkAllocatedRecord(uuid string, phase types.MigrationPhase, startedOffset, a
 	return r
 }
 
+// testAuditPolicy is the capacity policy the capacity tests admit
+// against. The caps live in operator config, so every test states the
+// ones it is pinning rather than reading them back from the package.
+var testAuditPolicy = &types.MigrationAuditPolicy{MaxInFlight: 3, MaxPerWindow: 10, Window: time.Hour}
+
+const (
+	testMaxInFlight  = 3
+	testMaxPerWindow = 10
+	testWindow       = time.Hour
+)
+
+// TestValidateCapacity_UnconfiguredRejects pins the unset path: with no
+// operator-configured caps there is nothing bounding destructive
+// migration churn, so nothing is admitted.
+func TestValidateCapacity_UnconfiguredRejects(t *testing.T) {
+	ok, reason := ValidateCapacity(nil, nil, "u-new", fixedNow)
+	if ok {
+		t.Fatalf("an unconfigured capacity policy must admit nothing")
+	}
+	if reason == "" {
+		t.Errorf("rejection reason must name the missing configuration")
+	}
+}
+
 func TestValidateCapacity_NoRecordsAllowed(t *testing.T) {
-	ok, reason := ValidateCapacity(nil, "u-new", fixedNow)
+	ok, reason := ValidateCapacity(testAuditPolicy, nil, "u-new", fixedNow)
 	if !ok || reason != "" {
 		t.Errorf("no records should admit; got ok=%v reason=%q", ok, reason)
 	}
@@ -60,7 +84,7 @@ func TestValidateCapacity_InFlightCapTrips(t *testing.T) {
 		mkAllocatedRecord("u3", types.MigrationPhaseDraining, -1*time.Minute, -1*time.Minute),
 		mkRecord("u4", types.MigrationPhaseAccepted, -time.Second),
 	}
-	ok, reason := ValidateCapacity(records, "u4", fixedNow)
+	ok, reason := ValidateCapacity(testAuditPolicy, records, "u4", fixedNow)
 	if ok {
 		t.Fatalf("expected reject when in-flight cap reached; got ok=true")
 	}
@@ -78,7 +102,7 @@ func TestValidateCapacity_QueuedDoesNotCountAsInFlight(t *testing.T) {
 		mkRecord("u3", types.MigrationPhaseAccepted, -3*time.Minute),
 		mkRecord("u4", types.MigrationPhaseAccepted, -time.Second),
 	}
-	ok, reason := ValidateCapacity(records, "u4", fixedNow)
+	ok, reason := ValidateCapacity(testAuditPolicy, records, "u4", fixedNow)
 	if !ok {
 		t.Errorf("queued (unallocated) records must not consume in-flight capacity: %s", reason)
 	}
@@ -92,7 +116,7 @@ func TestValidateCapacity_OwnRecordExcluded(t *testing.T) {
 		mkAllocatedRecord("u2", types.MigrationPhaseSurgeReady, -5*time.Minute, -4*time.Minute),
 		mkRecord("u3", types.MigrationPhaseAccepted, -time.Second),
 	}
-	ok, reason := ValidateCapacity(records, "u3", fixedNow)
+	ok, reason := ValidateCapacity(testAuditPolicy, records, "u3", fixedNow)
 	if !ok {
 		t.Errorf("a request's own record must not count against it: %s", reason)
 	}
@@ -108,7 +132,7 @@ func TestValidateCapacity_TerminalDoesNotCountAsInFlight(t *testing.T) {
 		mkAllocatedRecord("u2", types.MigrationPhaseFailed, -25*time.Hour, -25*time.Hour),
 		mkRecord("u3", types.MigrationPhaseRelocated, -20*time.Hour),
 	}
-	ok, _ := ValidateCapacity(records, "u-new", fixedNow)
+	ok, _ := ValidateCapacity(testAuditPolicy, records, "u-new", fixedNow)
 	if !ok {
 		t.Errorf("terminal records must not consume in-flight capacity")
 	}
@@ -120,8 +144,8 @@ func TestValidateCapacity_TerminalDoesNotCountAsInFlight(t *testing.T) {
 // AllocatedAt) — even a burst of fresh Auto records admits new Manual
 // work. Auto churn is bounded separately by maxAttempts per instance.
 func TestValidateCapacity_AutoRecordsCountTowardNeitherCap(t *testing.T) {
-	records := make([]types.MigrationRecord, 0, DefaultPerHourCap+DefaultInFlightCap)
-	for i := 0; i < DefaultPerHourCap+DefaultInFlightCap; i++ {
+	records := make([]types.MigrationRecord, 0, testMaxPerWindow+testMaxInFlight)
+	for i := 0; i < testMaxPerWindow+testMaxInFlight; i++ {
 		completed := metav1.NewTime(fixedNow.Add(-time.Duration(i+1) * time.Minute))
 		records = append(records, types.MigrationRecord{
 			RequestUUID:    "u-auto-" + strconv.Itoa(i),
@@ -134,22 +158,22 @@ func TestValidateCapacity_AutoRecordsCountTowardNeitherCap(t *testing.T) {
 			CompletedAt:    &completed,
 		})
 	}
-	ok, reason := ValidateCapacity(records, "u-new", fixedNow)
+	ok, reason := ValidateCapacity(testAuditPolicy, records, "u-new", fixedNow)
 	if !ok {
 		t.Errorf("Auto records must count toward neither cap: %s", reason)
 	}
 }
 
 func TestValidateCapacity_PerHourCapTrips(t *testing.T) {
-	// DefaultPerHourCap records (any phase) whose AllocatedAt lies inside
+	// testMaxPerWindow records (any phase) whose AllocatedAt lies inside
 	// the trailing window: per-hour cap reached even though nothing is in
 	// flight (all terminal).
-	records := make([]types.MigrationRecord, 0, DefaultPerHourCap)
-	for i := 0; i < DefaultPerHourCap; i++ {
+	records := make([]types.MigrationRecord, 0, testMaxPerWindow)
+	for i := 0; i < testMaxPerWindow; i++ {
 		off := -time.Duration(i+1) * time.Minute
 		records = append(records, mkAllocatedRecord("u-recent-"+strconv.Itoa(i), types.MigrationPhaseCompleted, off, off))
 	}
-	ok, reason := ValidateCapacity(records, "u-new", fixedNow)
+	ok, reason := ValidateCapacity(testAuditPolicy, records, "u-new", fixedNow)
 	if ok {
 		t.Fatalf("expected reject when per-hour cap reached; got ok=true")
 	}
@@ -161,12 +185,12 @@ func TestValidateCapacity_PerHourCapTrips(t *testing.T) {
 func TestValidateCapacity_OlderThanWindowDoesNotCount(t *testing.T) {
 	// Records whose execution started before the trailing window don't
 	// count toward the per-hour cap.
-	records := make([]types.MigrationRecord, 0, DefaultPerHourCap)
-	for i := 0; i < DefaultPerHourCap; i++ {
-		off := -(CapacityRateWindow + 30*time.Minute + time.Duration(i)*time.Minute)
+	records := make([]types.MigrationRecord, 0, testMaxPerWindow)
+	for i := 0; i < testMaxPerWindow; i++ {
+		off := -(testWindow + 30*time.Minute + time.Duration(i)*time.Minute)
 		records = append(records, mkAllocatedRecord("u-old-"+strconv.Itoa(i), types.MigrationPhaseCompleted, off, off))
 	}
-	ok, _ := ValidateCapacity(records, "u-new", fixedNow)
+	ok, _ := ValidateCapacity(testAuditPolicy, records, "u-new", fixedNow)
 	if !ok {
 		t.Errorf("records allocated before the window should not consume per-hour capacity")
 	}
@@ -189,7 +213,7 @@ func TestValidateCapacity_BurstAcceptedExecutedSlowly(t *testing.T) {
 		records = append(records, mkRecord("u-queued-"+strconv.Itoa(i), types.MigrationPhaseAccepted, -30*time.Minute))
 	}
 	records = append(records, mkRecord("u-next", types.MigrationPhaseAccepted, -30*time.Minute))
-	ok, reason := ValidateCapacity(records, "u-next", fixedNow)
+	ok, reason := ValidateCapacity(testAuditPolicy, records, "u-next", fixedNow)
 	if !ok {
 		t.Errorf("a burst-accepted, slowly-executed batch must not trip the per-hour cap: %s", reason)
 	}
@@ -204,7 +228,7 @@ func TestValidateCapacity_QueuedBurstDoesNotTripCaps(t *testing.T) {
 	for i := 0; i < 11; i++ {
 		records = append(records, mkRecord("u-burst-"+strconv.Itoa(i), types.MigrationPhaseAccepted, -time.Duration(i+1)*time.Minute))
 	}
-	ok, reason := ValidateCapacity(records, "u-burst-10", fixedNow)
+	ok, reason := ValidateCapacity(testAuditPolicy, records, "u-burst-10", fixedNow)
 	if !ok {
 		t.Errorf("queued-Accepted records must be unbounded (execution not started); got rejection: %s", reason)
 	}

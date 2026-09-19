@@ -25,7 +25,7 @@ CRD field paths (pkg/apis/ome/v1beta1/lifecycle_types.go):
   lifecycle.migrationPolicy.mode     Auto | Surge | Never  (+progressDeadlineSeconds>=30, maxAutoRetries 0-10)
   lifecycle.updateStrategy.type      SurgeThenDrain | RecreatePod | InPlaceIfPossible | InPlaceOnly
   ...rollingUpdate.{maxSurge,maxUnavailable}  int OR "NN%" ; ...rollingUpdate.partition  int
-  ...inPlaceUpdateStrategy.{gracePeriodSeconds,markNotReadyDuringLifecycle}
+  ...inPlaceUpdateStrategy.markNotReadyDuringLifecycle
 """
 import math
 import subprocess
@@ -52,7 +52,7 @@ def flow(v):
 
 
 def lifecycle(strat="SurgeThenDrain", surge=1, unavail=0, partition=None,
-              restart=None, ready=None, grace=None, marknr=None, mig=None):
+              restart=None, ready=None, marknr=None, mig=None):
     us = {"type": strat}
     ru = {}
     if surge is not None:
@@ -64,8 +64,6 @@ def lifecycle(strat="SurgeThenDrain", surge=1, unavail=0, partition=None,
     if ru:
         us["rollingUpdate"] = ru
     ip = {}
-    if grace is not None:
-        ip["gracePeriodSeconds"] = grace
     if marknr is not None:
         ip["markNotReadyDuringLifecycle"] = marknr
     if ip:
@@ -419,9 +417,9 @@ for topo in ["engine-mn", "pd-mn"]:
     for rpol in [None, "AllPodReady"]:
         C("edge", f"ReadyPolicy={rpol or 'default'} {topo}", comps_for(topo, lifecycle(ready=rpol)),
           **nds(topo), **ceils(topo, N + 1), topo=topo, co="none")
-for grace, marknr in [(0, None), (10, None), (None, False), (10, False)]:
-    C("edge", f"in-place grace={grace} markNotReady={marknr} engine InPlaceIfPossible",
-      comps_for("engine", lifecycle(strat="InPlaceIfPossible", surge=0, unavail=1, grace=grace, marknr=marknr)),
+for marknr in [None, False]:
+    C("edge", f"in-place markNotReady={marknr} engine InPlaceIfPossible",
+      comps_for("engine", lifecycle(strat="InPlaceIfPossible", surge=0, unavail=1, marknr=marknr)),
       **nds("engine"), **ceils("engine", N), topo="engine", co="none")
 for topo in ["engine", "engine-mn"]:
     C("edge", f"InPlaceOnly {topo}", comps_for(topo, lifecycle(strat="InPlaceOnly", surge=0, unavail=1)),

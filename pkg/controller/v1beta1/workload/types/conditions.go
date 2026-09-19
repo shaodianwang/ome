@@ -20,6 +20,13 @@ const (
 	// without blocking — but partial-gang placement is possible and
 	// the runtime may hang.
 	ConditionGangSchedulingUnavailable ConditionType = "GangSchedulingUnavailable"
+
+	// ConditionMigrationPolicyUnconfigured is True when a migration
+	// request is waiting because the operator configured no migration
+	// capacity policy, so the pass has no bound to judge it against. It
+	// reports the last capacity judgment made for a pending request:
+	// the pass that judges one under a configured policy sets it False.
+	ConditionMigrationPolicyUnconfigured ConditionType = "MigrationPolicyUnconfigured"
 )
 
 const (
@@ -30,4 +37,11 @@ const (
 	// ReasonGangSchedulingAvailable stamps Status=False (CRD present,
 	// or Component is single-pod).
 	ReasonGangSchedulingAvailable ConditionReason = "GangSchedulingAvailable"
+	// ReasonMigrationCapacityUnconfigured stamps the
+	// MigrationPolicyUnconfigured condition when a request waits for a
+	// capacity policy the operator has not supplied.
+	ReasonMigrationCapacityUnconfigured ConditionReason = "MigrationCapacityUnconfigured"
+	// ReasonMigrationCapacityConfigured stamps Status=False: the pass
+	// judged a request against the operator's caps.
+	ReasonMigrationCapacityConfigured ConditionReason = "MigrationCapacityConfigured"
 )

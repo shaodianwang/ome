@@ -8,9 +8,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func intPtr(v int) *int       { return &v }
-func int32Ptr(v int32) *int32 { return &v }
-func boolPtr(v bool) *bool    { return &v }
+func intPtr(v int) *int    { return &v }
+func boolPtr(v bool) *bool { return &v }
 func restartPolicyPtr(v RestartPolicy) *RestartPolicy {
 	return &v
 }
@@ -130,7 +129,6 @@ func TestBuildPlan_SinglePod_DefaultsFromDefaulter(t *testing.T) {
 		UpdateStrategy: &UpdateStrategy{
 			Type: UpdateStrategyInPlaceIfPossible,
 			InPlaceUpdateStrategy: &InPlaceUpdateStrategy{
-				GracePeriodSeconds:          int32Ptr(30),
 				MarkNotReadyDuringLifecycle: boolPtr(true),
 			},
 		},
@@ -153,7 +151,6 @@ func TestBuildPlan_SinglePod_DefaultsFromDefaulter(t *testing.T) {
 		UpdateStrategy: UpdateStrategy{
 			Type: UpdateStrategyInPlaceIfPossible,
 			InPlaceUpdateStrategy: &InPlaceUpdateStrategy{
-				GracePeriodSeconds:          int32Ptr(30),
 				MarkNotReadyDuringLifecycle: boolPtr(true),
 			},
 		},
@@ -187,8 +184,8 @@ func TestBuildPlan_SinglePod_InlineDefaultsWhenWebhookSkipped(t *testing.T) {
 		t.Errorf("UpdateStrategy.Type: got %q want SurgeThenDrain (default)", plan.UpdateStrategy.Type)
 	}
 	if plan.UpdateStrategy.InPlaceUpdateStrategy == nil ||
-		plan.UpdateStrategy.InPlaceUpdateStrategy.GracePeriodSeconds == nil ||
-		*plan.UpdateStrategy.InPlaceUpdateStrategy.GracePeriodSeconds != 30 {
+		plan.UpdateStrategy.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle == nil ||
+		!*plan.UpdateStrategy.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle {
 		t.Errorf("gracePeriodSeconds: got %+v want 30", plan.UpdateStrategy.InPlaceUpdateStrategy)
 	}
 	if plan.InstanceReadyTimeout != 30*time.Minute {

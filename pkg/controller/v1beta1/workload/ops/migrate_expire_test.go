@@ -184,7 +184,7 @@ func TestMigrateExpiry_GangWedgeRegression(t *testing.T) {
 	}
 
 	// Capacity slot freed structurally (terminal records don't count).
-	if ok, reason := audit.ValidateCapacity(f.records, "mig-retry", clk.Now()); !ok {
+	if ok, reason := audit.ValidateCapacity(fixtureMigrationAudit(), f.records, "mig-retry", clk.Now()); !ok {
 		t.Fatalf("capacity must be free after expiry: %s", reason)
 	}
 

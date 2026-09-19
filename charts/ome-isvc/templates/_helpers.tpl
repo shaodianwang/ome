@@ -416,7 +416,7 @@ Args:  dict "block" .prefill | .decode | .engine | .router
 {{- $ip := and $us $us.inPlaceUpdateStrategy -}}
 {{- $mp := $lc.migrationPolicy -}}
 {{- $hasRU := and $ru (or (hasKey $ru "partition") (hasKey $ru "maxUnavailable") (hasKey $ru "maxSurge")) -}}
-{{- $hasIP := and $ip (or (hasKey $ip "gracePeriodSeconds") (hasKey $ip "markNotReadyDuringLifecycle")) -}}
+{{- $hasIP := and $ip (hasKey $ip "markNotReadyDuringLifecycle") -}}
 {{- $hasUS := and $us (or $us.type $hasRU $hasIP) -}}
 {{- $hasMP := and $mp $mp.mode -}}
 {{- $hasAny := or $lc.restartPolicy $lc.readyPolicy $lc.instanceReadyTimeout $hasUS $hasMP -}}
@@ -444,9 +444,6 @@ lifecycle:
     {{- end }}
     {{- if $hasIP }}
     inPlaceUpdateStrategy:
-      {{- if hasKey $ip "gracePeriodSeconds" }}
-      gracePeriodSeconds: {{ $ip.gracePeriodSeconds }}
-      {{- end }}
       {{- if hasKey $ip "markNotReadyDuringLifecycle" }}
       markNotReadyDuringLifecycle: {{ $ip.markNotReadyDuringLifecycle }}
       {{- end }}

@@ -107,14 +107,14 @@ func TestSurgeUpdate_PausedHoldsAtTheSurgeStepBoundary(t *testing.T) {
 	}
 }
 
-// TestSurgeUpdate_PausedFinishesTheDrainAndHoldsBeforeSettle: a pause
-// taken while the drain step is under way lets it reach its boundary —
-// the source leaves rotation, which is where it was already headed — and
-// stops there: the settle is a new step, so the source stays alive and
-// the promote waits.
+// TestSurgeUpdate_PausedDrainDeletesAndPromotes: a pause taken while the
+// drain step is under way does not freeze the operation in flight — it
+// starts no NEW one. The drain runs to completion: the source leaves
+// rotation, is deleted, and the row promotes onto the replacement's
+// slot, which served throughout.
 //
 // Cells: instance/Update/SurgeDrain/spec.pauseTrue/before
-func TestSurgeUpdate_PausedFinishesTheDrainAndHoldsBeforeSettle(t *testing.T) {
+func TestSurgeUpdate_PausedDrainDeletesAndPromotes(t *testing.T) {
 	isvc, c, input, plan, target, oldPod, surgePod := pausedSurgeFixture(t)
 	if err := patchInstanceStatusSurgeStepDrain(context.Background(), input, 0); err != nil {
 		t.Fatalf("pre-stamp drain: %v", err)
@@ -127,99 +127,39 @@ func TestSurgeUpdate_PausedFinishesTheDrainAndHoldsBeforeSettle(t *testing.T) {
 	}
 	plan.Paused = true
 
-	done, err := surgeUpdate(context.Background(), legacyTestDeps(c), input, plan,
-		plan.Instances[0], target, []*corev1.Pod{oldPod, surgePod})
-	if err != nil {
+	if _, err := surgeUpdate(context.Background(), legacyTestDeps(c), input, plan,
+		plan.Instances[0], target, []*corev1.Pod{oldPod, surgePod}); err != nil {
 		t.Fatalf("surgeUpdate paused at drain: %v", err)
 	}
-	if done {
-		t.Fatalf("a held drain must not report the roll complete")
-	}
+
 	freshOld := &corev1.Pod{}
-	if err := c.Get(context.Background(), client.ObjectKeyFromObject(oldPod), freshOld); err != nil {
-		t.Fatalf("source deleted while paused: %v", err)
+	err := c.Get(context.Background(), client.ObjectKeyFromObject(oldPod), freshOld)
+	if err == nil && freshOld.DeletionTimestamp == nil {
+		t.Fatalf("the drain must delete its source under a pause too; got %+v", freshOld.ObjectMeta)
+	}
+	if err != nil && !apierrors.IsNotFound(err) {
+		t.Fatalf("read source: %v", err)
 	}
 	if podreadiness.IsServing(freshOld) {
-		t.Errorf("the drain step did not reach its boundary: the source is still in rotation")
+		t.Errorf("the source left rotation before the delete")
+	}
+
+	// The promote lands on the pass that observes the source gone.
+	input.ObservedState.InstanceStatuses[0].Operation = &workload.InstanceOperation{
+		Type: workload.InstanceOperationUpdate, Step: updateStepSurgeDrain, TargetRevision: target.Name,
+	}
+	done, err := surgeUpdate(context.Background(), legacyTestDeps(c), input, plan,
+		plan.Instances[0], target, []*corev1.Pod{surgePod})
+	if err != nil {
+		t.Fatalf("surgeUpdate promote pass: %v", err)
+	}
+	if !done {
+		t.Fatalf("the promote must complete the roll once the source is gone")
 	}
 	status := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
-	if status.Operation == nil || status.Operation.Step != updateStepSurgeDrain {
-		t.Errorf("step under pause: got %+v want %s (the settle is a new step)", status.Operation, updateStepSurgeDrain)
-	}
-}
-
-// TestWaitForSurgeDrainSettle_PausedParksGraceAndRearmsOnRelease: the
-// settle grace measures how long connections have had to age out, so a
-// hold parks it rather than spending it unwatched, and the release
-// starts a full interval from the unpause instead of crediting the hold.
-//
-// Cells: instance/Update/SurgeDrainSettle/spec.pauseTrue/before, instance/Update/SurgeDrainSettle/spec.unpause/before
-func TestWaitForSurgeDrainSettle_PausedParksGraceAndRearmsOnRelease(t *testing.T) {
-	legacyResetExpectations(t)
-	isvc, ir := surgeISVCReady("llama-70b", "prod", 1)
-	c := legacyNewFakeClient(t, isvc, ir)
-	input := legacyTestInput(isvc, c, workload.ComponentEngine)
-	now := minReadyWindowStart
-	clk := clocktesting.NewFakeClock(now)
-	input.Clock = clk
-	plan := surgePlan()
-	grace := int32(30)
-	plan.UpdateStrategy.InPlaceUpdateStrategy.GracePeriodSeconds = &grace
-
-	// Persist an attempt already on the settle step, then observe it
-	// held: the grace started an hour before this pass runs.
-	if err := patchInstanceStatusSurgingForUpdate(context.Background(), input, 0, "rev-x",
-		workload.UpdateStrategySurgeThenDrain, plan.InstanceReadyTimeout); err != nil {
-		t.Fatalf("pre-stamp surge: %v", err)
-	}
-	if err := patchInstanceStatusSurgeStepSettle(context.Background(), input, 0); err != nil {
-		t.Fatalf("pre-stamp settle: %v", err)
-	}
-	status := &input.ObservedState.InstanceStatuses[0]
-	status.Phase = workload.InstancePhaseUpdating
-	status.Operation = &workload.InstanceOperation{
-		Type:           workload.InstanceOperationUpdate,
-		Step:           updateStepSurgeDrainSettle,
-		TargetRevision: "rev-x",
-		Waiting:        workload.WaitingReasonPaused,
-		LastProgressAt: metav1.NewTime(now),
-	}
-	release := now.Add(time.Hour)
-	clk.SetTime(release)
-
-	plan.Paused = true
-	settled, err := waitForSurgeDrainSettle(context.Background(), input, plan, 0)
-	if err != nil {
-		t.Fatalf("settle while paused: %v", err)
-	}
-	if settled {
-		t.Fatalf("an elapsed grace must not complete while the pair is held")
-	}
-
-	plan.Paused = false
-	settled, err = waitForSurgeDrainSettle(context.Background(), input, plan, 0)
-	if err != nil {
-		t.Fatalf("settle on release: %v", err)
-	}
-	if settled {
-		t.Fatalf("the release must re-arm the grace, not spend the hold's time on it")
-	}
-	rearmed := legacyInstanceStatuses(c, isvc, workload.ComponentEngine)[0].Operation
-	if rearmed == nil || !rearmed.LastProgressAt.Time.Equal(release) {
-		t.Fatalf("grace start after release: got %+v want %v", rearmed, release)
-	}
-
-	// The re-armed interval runs from the release, so the row settles a
-	// full grace later and not before.
-	status.Operation.Waiting = ""
-	status.Operation.LastProgressAt = metav1.NewTime(release)
-	clk.SetTime(release.Add(time.Duration(grace-1) * time.Second))
-	if settled, err = waitForSurgeDrainSettle(context.Background(), input, plan, 0); err != nil || settled {
-		t.Fatalf("inside the re-armed grace: settled=%v err=%v", settled, err)
-	}
-	clk.SetTime(release.Add(time.Duration(grace) * time.Second))
-	if settled, err = waitForSurgeDrainSettle(context.Background(), input, plan, 0); err != nil || !settled {
-		t.Fatalf("at the end of the re-armed grace: settled=%v err=%v", settled, err)
+	if status.Phase != v1beta1.OMENativeInstanceReady || status.ActiveOrdinal != 1 {
+		t.Fatalf("promote under pause: got phase=%s activeOrdinal=%d want Ready on ordinal 1",
+			status.Phase, status.ActiveOrdinal)
 	}
 }
 
@@ -323,76 +263,5 @@ func TestSurgeUpdate_PausedSourceOutOfRotationTakesTheToken(t *testing.T) {
 	}
 	if got.LastFailure == nil || got.LastFailure.PodName != oldPod.Name {
 		t.Errorf("evidence = %+v, want the unrouted source named", got.LastFailure)
-	}
-}
-
-// TestWaitForSurgeDrainSettle_HeldByAnotherAuthorityRestartsTheGrace: the
-// re-arm asks about the hold, not about who owns the row. A pair held
-// through a pause while another authority reports the wait has spent
-// just as little of its grace, so it resumes into a full interval rather
-// than completing the moment the hold ends.
-//
-// Cells: instance/Update/SurgeDrainSettle/spec.pauseTrue/before, instance/Update/SurgeDrainSettle/spec.unpause/before
-func TestWaitForSurgeDrainSettle_HeldByAnotherAuthorityRestartsTheGrace(t *testing.T) {
-	legacyResetExpectations(t)
-	isvc, ir := surgeISVCReady("llama-70b", "prod", 1)
-	c := legacyNewFakeClient(t, isvc, ir)
-	input := legacyTestInput(isvc, c, workload.ComponentEngine)
-	now := minReadyWindowStart
-	clk := clocktesting.NewFakeClock(now)
-	input.Clock = clk
-	plan := surgePlan()
-	grace := int32(30)
-	plan.UpdateStrategy.InPlaceUpdateStrategy.GracePeriodSeconds = &grace
-
-	if err := patchInstanceStatusSurgingForUpdate(context.Background(), input, 0, "rev-x",
-		workload.UpdateStrategySurgeThenDrain, plan.InstanceReadyTimeout); err != nil {
-		t.Fatalf("pre-stamp surge: %v", err)
-	}
-	if err := patchInstanceStatusSurgeStepSettle(context.Background(), input, 0); err != nil {
-		t.Fatalf("pre-stamp settle: %v", err)
-	}
-	status := &input.ObservedState.InstanceStatuses[0]
-	status.Phase = workload.InstancePhaseUpdating
-	status.Operation = &workload.InstanceOperation{
-		Type:           workload.InstanceOperationUpdate,
-		Step:           updateStepSurgeDrainSettle,
-		TargetRevision: "rev-x",
-		// The quota refusal got to the row first, so the pause never
-		// owned the token.
-		Waiting:        workload.RejectionReasonQuotaExceeded,
-		LastProgressAt: metav1.NewTime(now),
-	}
-	release := now.Add(time.Hour)
-	clk.SetTime(release)
-
-	plan.Paused = true
-	if settled, err := waitForSurgeDrainSettle(context.Background(), input, plan, 0); err != nil || settled {
-		t.Fatalf("while paused: settled=%v err=%v", settled, err)
-	}
-
-	plan.Paused = false
-	settled, err := waitForSurgeDrainSettle(context.Background(), input, plan, 0)
-	if err != nil {
-		t.Fatalf("settle on release: %v", err)
-	}
-	if settled {
-		t.Fatalf("the grace elapsed under the hold and was spent; it must start over")
-	}
-	rearmed := legacyInstanceStatuses(c, isvc, workload.ComponentEngine)[0].Operation
-	if rearmed == nil || !rearmed.LastProgressAt.Time.Equal(release) {
-		t.Fatalf("grace start after the hold: got %+v want %v", rearmed, release)
-	}
-
-	// Inside the restarted interval the row is quiet: a wait that lasts
-	// costs one write per interval, not one per pass.
-	status.Operation.LastProgressAt = metav1.NewTime(release)
-	clk.SetTime(release.Add(time.Duration(grace-1) * time.Second))
-	before := readRV(t, c, isvc)
-	if settled, err = waitForSurgeDrainSettle(context.Background(), input, plan, 0); err != nil || settled {
-		t.Fatalf("inside the restarted interval: settled=%v err=%v", settled, err)
-	}
-	if after := readRV(t, c, isvc); after != before {
-		t.Errorf("a held settle wrote inside its interval: rv %s -> %s", before, after)
 	}
 }

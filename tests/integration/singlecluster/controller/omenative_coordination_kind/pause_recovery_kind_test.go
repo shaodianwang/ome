@@ -7,7 +7,6 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/tests/integration/util"
 )
@@ -118,7 +117,7 @@ var _ = ginkgo.Describe("behavior — pause keeps gang repair running", ginkgo.O
 				"no pod may reach the v2 revision while paused")
 			ir := freshInferenceReplica(g, ns.Name, name, v1beta1.EngineComponent)
 			g.Expect(ir.Spec.Paused).To(BeTrue())
-		}, 2*workloadops.CreateRequeueInterval, kindPollInterval).Should(Succeed())
+		}, kindSteadyStateWindow, kindPollInterval).Should(Succeed())
 
 		ginkgo.By("unpausing resumes the rollout to v2")
 		setPauseAnnotation(name, "")
@@ -177,7 +176,7 @@ var _ = ginkgo.Describe("behavior — pause keeps gang repair running", ginkgo.O
 				}
 			}
 			g.Expect(live).To(Equal(1), "the survivor stays; the lost member stays lost while frozen")
-		}, 2*workloadops.CreateRequeueInterval, kindPollInterval).Should(Succeed())
+		}, kindSteadyStateWindow, kindPollInterval).Should(Succeed())
 
 		ginkgo.By("downgrading freeze to plain pause resumes repair while still paused")
 		setPauseAnnotation(name, "true")

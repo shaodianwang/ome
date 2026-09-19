@@ -84,7 +84,10 @@ type recoveryHarness struct {
 	// on every pass — while other indices round-trip normally.
 	mutateErr map[int32]error
 
-	blocks          []workload.RetryBlock
+	blocks []workload.RetryBlock
+	// requeue is the dispatcher cadence the harness runs under; a test
+	// pinning the unconfigured path zeroes it.
+	requeue         workload.RequeueIntervals
 	currentRevision string
 	heldWarnings    []string
 
@@ -118,6 +121,7 @@ func newRecoveryHarness(t *testing.T, multiPod bool) *recoveryHarness {
 		clk:      clocktesting.NewFakeClock(time.Now()),
 		multiPod: multiPod,
 		replicas: 1,
+		requeue:  testRequeueIntervals,
 	}
 	h.revV1 = h.ensureRevision(recoveryPodSpec(goodImage))
 	h.revBad = h.ensureRevision(recoveryPodSpec(badImage))
@@ -321,6 +325,7 @@ func (h *recoveryHarness) buildInput() workload.ReconcileInput {
 		RemoveInstance:    h.removeInstance(),
 		UpdateRetryPolicy: &workload.RetryPolicy{MaxAttempts: 2, InitialDelay: 20 * time.Second, MaxDelay: time.Minute, Multiplier: 2},
 		StuckPodGrace:     30 * time.Second,
+		Requeue:           h.requeue,
 		Clock:             h.clk,
 		WarnRetryHeld: func(rev string, attempts int32, reason string) {
 			h.heldWarnings = append(h.heldWarnings, fmt.Sprintf("%s attempts=%d %s", rev, attempts, reason))

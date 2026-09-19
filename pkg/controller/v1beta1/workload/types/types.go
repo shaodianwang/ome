@@ -131,6 +131,14 @@ const UpdateStepGangSurgeTargetCleanup = "GangSurgeTargetCleanup"
 // ready and whose source pods are being drained.
 const UpdateStepSurgeDrain = "SurgeDrain"
 
+// UpdateStepSurgeDrainSettle is READ for compatibility and never
+// written: a row persisted at this step by an earlier build has its
+// drain confirmed, so the pass that observes it deletes the source and
+// promotes. The surge machine keeps the source alive for no window of
+// its own — the pod's terminationGracePeriodSeconds and preStop are
+// what carry in-flight work.
+const UpdateStepSurgeDrainSettle = "SurgeDrainSettle"
+
 // InstanceOperation is the durable recovery anchor written before any
 // destructive action against an Instance and cleared on completion.
 // Mirrors the CRD InstanceOperation field-for-field.
@@ -356,9 +364,7 @@ type UpdateStrategy struct {
 	// Component.
 	RollingUpdate *RollingUpdate
 
-	// InPlaceUpdateStrategy tunes lifecycle drain timing. Its grace period
-	// also provides the post-unroute connection-settle window before a
-	// SurgeThenDrain source pod is deleted.
+	// InPlaceUpdateStrategy tunes lifecycle drain timing.
 	InPlaceUpdateStrategy *InPlaceUpdateStrategy
 }
 
@@ -385,12 +391,6 @@ type RollingUpdate struct {
 // InPlaceUpdateStrategy tunes the per-pod in-place update sequence.
 // Workload-owned mirror of v1beta1.InPlaceUpdateStrategy.
 type InPlaceUpdateStrategy struct {
-	// GracePeriodSeconds is the time OMENative waits between marking
-	// the pod not-ready and applying an in-place mutation. SurgeThenDrain
-	// also waits this long after EndpointSlice removal before deletion so
-	// persistent load-balancer connections can drain while workers live.
-	GracePeriodSeconds *int32
-
 	// MarkNotReadyDuringLifecycle, when true, flips ome.io/serving=False
 	// on the pod before the in-place mutation so EndpointSlice drains
 	// traffic first.

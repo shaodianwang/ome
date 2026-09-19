@@ -207,6 +207,14 @@ func cloneTestInstanceStatus(status workload.InstanceStatus) workload.InstanceSt
 // the dispatcher reads. Tests pad observed state + plan as needed.
 const testScaleDownRequeueInterval = 37 * time.Second
 
+// testRequeueIntervals is the dispatcher cadence these tests run under,
+// standing in for the operator config a deployed chart supplies. A test
+// pinning the unconfigured path clears ReconcileInput.Requeue.
+var testRequeueIntervals = workload.RequeueIntervals{
+	Operation: 5 * time.Second,
+	Gate:      3 * time.Second,
+}
+
 func minimalInput(t *testing.T) workload.ReconcileInput {
 	t.Helper()
 	isvc := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{
@@ -222,6 +230,7 @@ func minimalInput(t *testing.T) workload.ReconcileInput {
 			OwnerName: "llama-70b",
 		},
 		ScaleDownRequeueInterval: testScaleDownRequeueInterval,
+		Requeue:                  testRequeueIntervals,
 		DesiredSpec: workload.WorkloadDesiredSpec{
 			Replicas: 1,
 			PodSpec: &corev1.PodSpec{Containers: []corev1.Container{
@@ -340,6 +349,83 @@ func TestReconcile_NilTarget_DrivesCreate(t *testing.T) {
 	_, err := workload.Reconcile(context.Background(), deps, in, plan, nil)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
+	}
+}
+
+// TestReconcile_UnconfiguredCadenceUsesBackoff pins the unset path at
+// the dispatcher: a pass that still has Instances coming up and no
+// operator cadence asks for the controller's rate-limited backoff
+// rather than an interval the binary invented, while the configured
+// cadence produces an explicit wake-up.
+func TestReconcile_UnconfiguredCadenceUsesBackoff(t *testing.T) {
+	scheme := makeScheme(t)
+	plan := minimalPlan()
+	target := &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-v1", Namespace: "prod"},
+	}
+
+	configured := fake.NewClientBuilder().WithScheme(scheme).Build()
+	res, err := workload.Reconcile(context.Background(), workload.Deps{Client: configured}, minimalInput(t), plan, target)
+	if err != nil {
+		t.Fatalf("Reconcile with a configured cadence: %v", err)
+	}
+	if res.RequeueAfter != testRequeueIntervals.Operation {
+		t.Fatalf("configured cadence: got RequeueAfter %v want %v", res.RequeueAfter, testRequeueIntervals.Operation)
+	}
+
+	unconfigured := fake.NewClientBuilder().WithScheme(scheme).Build()
+	in := minimalInput(t)
+	in.Requeue = workload.RequeueIntervals{}
+	res, err = workload.Reconcile(context.Background(), workload.Deps{Client: unconfigured}, in, plan, target)
+	if err != nil {
+		t.Fatalf("Reconcile with no configured cadence: %v", err)
+	}
+	if res.RequeueAfter != 0 {
+		t.Fatalf("unconfigured cadence: got RequeueAfter %v want 0", res.RequeueAfter)
+	}
+	if !res.Requeue { //nolint:staticcheck // the bare backoff is what this asserts
+		t.Fatalf("a converging pass with no cadence must ride the rate-limited backoff; got %+v", res)
+	}
+}
+
+// TestReconcile_HeldWorkWakesThePass pins the held-work sink at the
+// dispatcher: work an op pass held on operator configuration — which no
+// watch event announces — leaves a wake-up on the pass result even when
+// every other pass is steady and asks for none.
+func TestReconcile_HeldWorkWakesThePass(t *testing.T) {
+	scheme := makeScheme(t)
+	plan := minimalPlan()
+
+	for _, tc := range []struct {
+		name      string
+		cadence   time.Duration
+		wantAfter time.Duration
+	}{
+		{name: "configured cadence", cadence: 5 * time.Second, wantAfter: 5 * time.Second},
+		{name: "unconfigured cadence rides the backoff"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := fake.NewClientBuilder().WithScheme(scheme).Build()
+			in := minimalInput(t)
+			in.Requeue = workload.RequeueIntervals{}
+			// Nothing for the passes to do: the held work is the only
+			// reason to come back.
+			in.DesiredSpec.Replicas = 0
+			wake := &workload.PassWake{}
+			wake.Observe(tc.cadence)
+			in.PassWake = wake
+
+			res, err := workload.Reconcile(context.Background(), workload.Deps{Client: c}, in, plan, nil)
+			if err != nil {
+				t.Fatalf("Reconcile: %v", err)
+			}
+			if res.RequeueAfter != tc.wantAfter {
+				t.Fatalf("RequeueAfter: got %v want %v", res.RequeueAfter, tc.wantAfter)
+			}
+			if tc.wantAfter == 0 && !res.Requeue { //nolint:staticcheck // the bare backoff is what this asserts
+				t.Fatalf("held work with no cadence must ride the rate-limited backoff; got %+v", res)
+			}
+		})
 	}
 }
 

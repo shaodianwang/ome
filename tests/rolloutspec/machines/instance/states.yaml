@@ -37,7 +37,6 @@ states:
       timer.expectationsTTL: no expectation has been seeded for an index that was never created
       spec.resetInstances: the reset verb addresses an Instance through its status row, and an index with no row is answered as no such instance
       timer.migrationDeadline: no operation pins this index to a migration record
-      timer.drainSettle: the settle timer runs only for a SurgeThenDrain source in the settle step
       gate.allow: the coordination update gate is consulted only for an Instance the update trigger selected
       gate.deny: the coordination update gate is consulted only for an Instance the update trigger selected
   - id: Pending
@@ -49,7 +48,6 @@ states:
       spec.resetInstances: the reset verb addresses Failed Instances only, so a row in any other phase is skipped before anything about it is read
       timer.operationDeadline: no operation is in flight
       timer.migrationDeadline: no operation pins this index to a migration record
-      timer.drainSettle: the settle timer runs only for a SurgeThenDrain source in the settle step
       gate.allow: the update trigger declines below Ready, so the coordination gate is never consulted for this row
       gate.deny: the update trigger declines below Ready, so the coordination gate is never consulted for this row
       pod.ready[target]: no replacement generation exists outside a surge or migration pair
@@ -73,7 +71,6 @@ states:
       spec.resetInstances: the reset verb addresses Failed Instances only, so a row in any other phase is skipped before anything about it is read
       timer.operationDeadline: no operation is in flight
       timer.migrationDeadline: no operation pins this index to a migration record
-      timer.drainSettle: the settle timer runs only for a SurgeThenDrain source in the settle step
       pod.ready[target]: no replacement generation exists outside a surge or migration pair
       pod.scheduled[target]: no replacement generation exists outside a surge or migration pair
       pod.containersReady[target]: no replacement generation exists outside a surge or migration pair
@@ -93,7 +90,6 @@ states:
     note: the escalation pass stamped the failure; a disposable single-pod Create or Update attempt also had its operation cleared, while a gang surge and a multi-pod recreate keep theirs for the owning machine to consume. A kept Restart operation has no owning machine waiting on it - it records a spent attempt, which the gang-member-loss trigger re-arms over and the operator reset mailbox clears outright
     not_applicable:
       timer.migrationDeadline: a migration record that failed its Instance is already terminal
-      timer.drainSettle: the settle timer runs only for a SurgeThenDrain source in the settle step
   - id: Create/CreatePods
     phase: Creating
     op: {type: Create, step: CreatePods}
@@ -105,7 +101,6 @@ states:
       spec.releaseHeldRevision: the retry gate is consulted before an attempt starts, never during one, so a released block cannot reach a row with an operation in flight
       timer.retryAt: the retry gate is consulted before an attempt starts, never during one
       timer.migrationDeadline: no operation pins this index to a migration record
-      timer.drainSettle: the settle timer runs only for a SurgeThenDrain source in the settle step
       gate.allow: the Create pass does not consult the coordination update gate
       gate.deny: the Create pass does not consult the coordination update gate
       pod.ready[target]: no replacement generation exists outside a surge or migration pair
@@ -131,7 +126,6 @@ states:
       spec.releaseHeldRevision: the retry gate is consulted before an attempt starts, never during one, so a released block cannot reach a row with an operation in flight
       timer.retryAt: the retry gate is consulted before an attempt starts, never during one
       timer.migrationDeadline: no operation pins this index to a migration record
-      timer.drainSettle: the settle timer is stamped only on entry to the settle step
       gate.allow: the coordination update gate is consulted before a fresh Update dispatch, not mid-operation
       gate.deny: the coordination update gate is consulted before a fresh Update dispatch, not mid-operation
   - id: Update/SurgeDrain
@@ -145,22 +139,6 @@ states:
       spec.releaseHeldRevision: the retry gate is consulted before an attempt starts, never during one, so a released block cannot reach a row with an operation in flight
       timer.retryAt: the retry gate is consulted before an attempt starts, never during one
       timer.migrationDeadline: no operation pins this index to a migration record
-      timer.drainSettle: the settle timer is stamped only on entry to the settle step
-      gate.allow: the coordination update gate is consulted before a fresh Update dispatch, not mid-operation
-      gate.deny: the coordination update gate is consulted before a fresh Update dispatch, not mid-operation
-  - id: Update/SurgeDrainSettle
-    phase: Updating
-    op: {type: Update, step: SurgeDrainSettle}
-    applies: {strategies: [SurgeThenDrain], shape: [single]}
-    decided_in: pkg/controller/v1beta1/workload/ops/update_status.go
-    note: the source is out of rotation and kept alive for the configured grace period so persistent connections age out; entered only when that grace is positive
-    not_applicable:
-      spec.resetInstances: the reset verb addresses Failed Instances only, so a row in any other phase is skipped before anything about it is read
-      spec.releaseHeldRevision: the retry gate is consulted before an attempt starts, never during one, so a released block cannot reach a row with an operation in flight
-      timer.retryAt: the retry gate is consulted before an attempt starts, never during one
-      timer.migrationDeadline: no operation pins this index to a migration record
-      timer.minReady: the replacement passed its minReadySeconds window before the source left rotation
-      gang.podGroup: a single-pod Instance has no PodGroup
       gate.allow: the coordination update gate is consulted before a fresh Update dispatch, not mid-operation
       gate.deny: the coordination update gate is consulted before a fresh Update dispatch, not mid-operation
   - id: Update/GangSurgeTarget
@@ -174,7 +152,6 @@ states:
       spec.releaseHeldRevision: the retry gate is consulted before an attempt starts, never during one, so a released block cannot reach a row with an operation in flight
       timer.retryAt: the retry gate is consulted before an attempt starts, never during one
       timer.migrationDeadline: no operation pins this index to a migration record
-      timer.drainSettle: the settle timer runs only for a SurgeThenDrain source in the settle step
       gate.allow: the update trigger skips a gang surge-target marker, so the coordination gate is never consulted for it
       gate.deny: the update trigger skips a gang surge-target marker, so the coordination gate is never consulted for it
   - id: Update/GangSurgeTargetCleanup
@@ -188,7 +165,6 @@ states:
       spec.releaseHeldRevision: the retry gate is consulted before an attempt starts, never during one, so a released block cannot reach a row with an operation in flight
       timer.retryAt: the retry gate is consulted before an attempt starts, never during one
       timer.migrationDeadline: no operation pins this index to a migration record
-      timer.drainSettle: the settle timer runs only for a SurgeThenDrain source in the settle step
       timer.minReady: no pod of a retired replacement is expected to become Ready
       gate.allow: the update trigger skips a gang surge-target marker, so the coordination gate is never consulted for it
       gate.deny: the update trigger skips a gang surge-target marker, so the coordination gate is never consulted for it
@@ -203,7 +179,6 @@ states:
       spec.releaseHeldRevision: the retry gate is consulted before an attempt starts, never during one, so a released block cannot reach a row with an operation in flight
       timer.retryAt: the retry gate is consulted before an attempt starts, never during one
       timer.migrationDeadline: no operation pins this index to a migration record
-      timer.drainSettle: the settle timer runs only for a SurgeThenDrain source in the settle step
       gate.allow: the coordination update gate is consulted before a fresh Update dispatch, not mid-operation
       gate.deny: the coordination update gate is consulted before a fresh Update dispatch, not mid-operation
       gang.podGroup: a single-pod Instance has no PodGroup
@@ -230,7 +205,6 @@ states:
       spec.releaseHeldRevision: the retry gate is consulted before an attempt starts, never during one, so a released block cannot reach a row with an operation in flight
       timer.retryAt: the retry gate is consulted before an attempt starts, never during one
       timer.migrationDeadline: no operation pins this index to a migration record
-      timer.drainSettle: the settle timer runs only for a SurgeThenDrain source in the settle step
       gate.allow: the coordination update gate is consulted before a fresh Update dispatch, not mid-operation
       gate.deny: the coordination update gate is consulted before a fresh Update dispatch, not mid-operation
       pod.ready[target]: no replacement generation exists outside a surge or migration pair
@@ -256,7 +230,6 @@ states:
       spec.releaseHeldRevision: the retry gate is consulted before an attempt starts, never during one, so a released block cannot reach a row with an operation in flight
       timer.retryAt: the retry gate is consulted before an attempt starts, never during one
       timer.migrationDeadline: no operation pins this index to a migration record
-      timer.drainSettle: the settle timer runs only for a SurgeThenDrain source in the settle step
       gate.allow: the restart pass does not consult the coordination update gate
       gate.deny: the restart pass does not consult the coordination update gate
       pod.ready[target]: no replacement generation exists outside a surge or migration pair
@@ -281,7 +254,6 @@ states:
       spec.resetInstances: the reset verb addresses Failed Instances only, so a row in any other phase is skipped before anything about it is read
       spec.releaseHeldRevision: the retry gate governs revision rollouts, not placement moves
       timer.retryAt: the retry gate governs revision rollouts, not placement moves
-      timer.drainSettle: the settle timer runs only for a SurgeThenDrain source in the settle step
       gate.allow: the update trigger skips a Migrate-owned row, so the coordination gate is never consulted for it
       gate.deny: the update trigger skips a Migrate-owned row, so the coordination gate is never consulted for it
   - id: Migrate/SurgeTarget
@@ -294,7 +266,6 @@ states:
       spec.resetInstances: the reset verb addresses Failed Instances only, so a row in any other phase is skipped before anything about it is read
       spec.releaseHeldRevision: the retry gate governs revision rollouts, not placement moves
       timer.retryAt: the retry gate governs revision rollouts, not placement moves
-      timer.drainSettle: the settle timer runs only for a SurgeThenDrain source in the settle step
       gate.allow: the update trigger skips a Migrate-owned row, so the coordination gate is never consulted for it
       gate.deny: the update trigger skips a Migrate-owned row, so the coordination gate is never consulted for it
   - id: Delete/Drain
@@ -309,7 +280,6 @@ states:
       timer.retryAt: the retry gate governs attempts to create, not to delete
       timer.minReady: no pod of a draining index will become Ready
       timer.migrationDeadline: no operation pins this index to a migration record
-      timer.drainSettle: the settle timer runs only for a SurgeThenDrain source in the settle step
       gate.allow: the scale-down pass does not consult the coordination update gate
       gate.deny: the scale-down pass does not consult the coordination update gate
       pod.ready[target]: no replacement generation exists outside a surge or migration pair

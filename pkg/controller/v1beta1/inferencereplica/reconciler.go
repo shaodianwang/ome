@@ -330,10 +330,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// failing the reconcile.
 	parent := r.resolveParent(ctx, ir)
 
+	// Resolve the operator lifecycle tunables ONCE per reconcile. A zero
+	// field (absent/invalid config) fails safe by disabling that window
+	// or bound: the stuck-pod fast path leaves the row to the
+	// InstanceReadyTimeout backstop, an unplaceable pod only parks the
+	// clock instead of being failed on a window nobody configured, and a
+	// pass with work left rides the rate-limited backoff.
+	settings := r.resolveLifecycleSettings(log)
+
 	// Operator release mailbox for Held RetryBlocks. Consumed before the
 	// workload input is built so this pass's ObservedState already
 	// excludes a just-released block.
-	if requeue, rerr := r.consumeReleaseHeldRequest(ctx, log, ir, parent); rerr != nil {
+	if requeue, rerr := r.consumeReleaseHeldRequest(ctx, log, ir, parent, settings.RetryBlockHistoryLimit); rerr != nil {
 		return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: consume release-held request: %w", rerr)
 	} else if requeue {
 		return ctrl.Result{Requeue: true}, nil
@@ -353,13 +361,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// safe: the workload layer Holds on the first same-target failure.
 	retryPolicy := r.resolveUpdateRetryPolicy(log)
 
-	// Resolve the escalation windows from the operator lifecycle config.
-	// A zero field (absent/invalid config) fails safe by disabling that
-	// escalation: the stuck-pod fast path leaves the row to the
-	// InstanceReadyTimeout backstop, and an unplaceable pod only parks
-	// the clock instead of being failed on a window nobody configured.
-	graces := r.resolveLifecycleGraces(log)
-
 	// Resolve the auto-migrate relocation budget from the operator lifecycle
 	// config. Zero (absent/invalid config) fails safe: the deadline
 	// disposition's relocation branch is disabled and non-workload-caused
@@ -376,7 +377,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// the ISVC-side coordination reconciler.
 	coordDefaults := r.resolveCoordinationGroupDefaults(log)
 
-	input := r.buildReconcileInput(ctx, ir, parent, retryPolicy, forceDeletePolicy, graces, autoMigrateBudget, coordDefaults)
+	input := r.buildReconcileInput(ctx, ir, parent, retryPolicy, forceDeletePolicy, settings, autoMigrateBudget, coordDefaults)
 	input.ScaleUpPodBatchSize = r.ScaleUpPodBatchSize
 	input.ScaleDownPodBatchSize = r.ScaleDownPodBatchSize
 	input.ScaleDownRequeueInterval = r.ScaleDownRequeueInterval
@@ -416,7 +417,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// from ComponentPlan (Never rejects at accept instead of parking).
 	migrationTimeout := workload.InstanceReadyTimeoutOrDefault(input.DesiredSpec.Lifecycle.InstanceReadyTimeout)
 	migrationMode := workload.MigrationModeOrDefault(input.DesiredSpec.Lifecycle.MigrationPolicy)
-	if serr := r.syncMigrationEntries(ctx, log, ir, parent, migrationTimeout); serr != nil {
+	// The horizon the status-record trim ages against. Zero
+	// (unconfigured) ages out nothing.
+	var recordWindow time.Duration
+	if settings.MigrationAudit != nil {
+		recordWindow = settings.MigrationAudit.Window
+	}
+	if serr := r.syncMigrationEntries(ctx, log, ir, parent, migrationTimeout, recordWindow); serr != nil {
 		return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: sync migration entries: %w", serr)
 	}
 	if requeue, merr := r.consumeMigrationRequests(ctx, log, ir, parent, migrationMode, migrationTimeout); merr != nil {
@@ -495,6 +502,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: build plan (ir=%s/%s): %w",
 			ir.Namespace, ir.Name, perr)
 	}
+	// Gang admission bound for this Component's PodGroups. Nil
+	// (unconfigured) leaves the derived timeout unclamped.
+	plan.GangScheduleTimeout = settings.GangScheduleTimeout
 	if !scaleDownPodObservationRequired(input, plan) {
 		obsmetrics.SetScaleDownActivePods(ir.Namespace, ir.Spec.ParentRef.Name, string(ir.Spec.Component), 0)
 		obsmetrics.SetScaleDownDeferredInstances(ir.Namespace, ir.Spec.ParentRef.Name, string(ir.Spec.Component), 0)
@@ -919,11 +929,11 @@ func terminalFinalizationOwned(observed workload.WorkloadObservedState) map[int3
 	return owned
 }
 
-// lifecycleGraces are the escalation windows one reconcile resolves
-// from the operator ConfigMap. Every field is zero when unconfigured,
-// which each consumer reads as "this escalation does not exist"; there
-// are no in-code defaults behind them.
-type lifecycleGraces struct {
+// lifecycleSettings are the tunables one reconcile resolves from the
+// operator ConfigMap. Every field is zero when unconfigured, which each
+// consumer reads as "this window does not exist"; there are no in-code
+// defaults behind them.
+type lifecycleSettings struct {
 	// StuckPod bounds a pod parked in a terminal kubelet waiting state.
 	// Zero skips fast escalation; the InstanceReadyTimeout backstop still
 	// fires.
@@ -931,32 +941,69 @@ type lifecycleGraces struct {
 	// Unschedulable bounds a pod the scheduler cannot place. Zero leaves
 	// the hold parking the clock until an operator resolves it.
 	Unschedulable time.Duration
+	// GangScheduleTimeout bounds the PodGroup schedule timeout derived
+	// from InstanceReadyTimeout. Nil passes the derived value through to
+	// the scheduler.
+	GangScheduleTimeout *workload.GangScheduleTimeoutClamp
+	// MigrationAudit bounds migration admission and the status-record
+	// horizon. Nil holds every migration request and ages out no record.
+	MigrationAudit *workload.MigrationAuditPolicy
+	// Requeue is the dispatcher's wake-up cadence. Zero fields leave a
+	// pass with work left to the controller's rate-limited backoff.
+	Requeue workload.RequeueIntervals
+	// RetryBlockHistoryLimit caps the RetryBlocks kept for superseded
+	// revisions. Nil keeps every historical block.
+	RetryBlockHistoryLimit *int32
 }
 
-// resolveLifecycleGraces loads both escalation windows from the operator
-// ConfigMap in one read. Absent, invalid, or unloadable config resolves
-// the affected window to 0 — that escalation is then disabled — with one
-// V(1) log naming the cause; unconfigured is never an error, and there
-// is never a silent in-code fallback window.
-func (r *Reconciler) resolveLifecycleGraces(log logr.Logger) lifecycleGraces {
-	cfg, err := r.loadLifecycleConfig(log, "escalation graces")
+// resolveLifecycleSettings loads the tunables from the operator ConfigMap
+// in one read. Absent, invalid, or unloadable config resolves the
+// affected field to 0 — that window is then disabled — with one V(1) log
+// naming the cause; unconfigured is never an error, and there is never a
+// silent in-code fallback value.
+func (r *Reconciler) resolveLifecycleSettings(log logr.Logger) lifecycleSettings {
+	cfg, err := r.loadLifecycleConfig(log, "lifecycle settings")
 	if cfg == nil || err != nil {
-		return lifecycleGraces{}
+		return lifecycleSettings{}
 	}
-	var graces lifecycleGraces
-	if graces.StuckPod, err = cfg.ToGracePeriod(); err != nil {
+	var settings lifecycleSettings
+	if settings.StuckPod, err = cfg.ToGracePeriod(); err != nil {
 		log.V(1).Info("stuck-pod grace invalid; skipping fast escalation this pass", "error", err.Error())
 	}
-	if graces.Unschedulable, err = cfg.ToUnschedulableGracePeriod(); err != nil {
+	if settings.Unschedulable, err = cfg.ToUnschedulableGracePeriod(); err != nil {
 		log.V(1).Info("unschedulable grace invalid; scheduler-hold escalation disabled this pass", "error", err.Error())
 	}
-	if graces.StuckPod == 0 {
+	if settings.StuckPod == 0 {
 		log.V(1).Info("stuck-pod grace unconfigured (no lifecycle.stuckPodGracePeriod); skipping fast escalation this pass")
 	}
-	if graces.Unschedulable == 0 {
+	if settings.Unschedulable == 0 {
 		log.V(1).Info("unschedulable grace unconfigured (no lifecycle.unschedulableGracePeriod); scheduler-hold escalation disabled this pass")
 	}
-	return graces
+	if settings.GangScheduleTimeout, err = cfg.GangScheduleTimeout.ToClamp(); err != nil {
+		log.V(1).Info("gang schedule timeout invalid; the derived timeout is unclamped this pass", "error", err.Error())
+	}
+	if settings.MigrationAudit, err = cfg.Audit.ToPolicy(); err != nil {
+		log.V(1).Info("migration audit policy invalid; no migration is admitted this pass", "error", err.Error())
+	}
+	if settings.Requeue, err = cfg.Requeue.ToIntervals(); err != nil {
+		log.V(1).Info("requeue cadence invalid; passes fall back to rate-limited backoff", "error", err.Error())
+	}
+	if settings.RetryBlockHistoryLimit, err = cfg.ToRetryBlockHistoryLimit(); err != nil {
+		log.V(1).Info("retry-block history limit invalid; historical blocks are kept this pass", "error", err.Error())
+	}
+	if settings.GangScheduleTimeout == nil {
+		log.V(1).Info("gang schedule timeout unconfigured (no lifecycle.gangScheduleTimeout); the timeout derived from InstanceReadyTimeout reaches the scheduler unclamped")
+	}
+	if settings.MigrationAudit == nil {
+		log.V(1).Info("migration capacity unconfigured (no lifecycle.audit); migration requests are held until it is set and terminal records are not aged out")
+	}
+	if settings.Requeue.Operation == 0 || settings.Requeue.Gate == 0 {
+		log.V(1).Info("requeue cadence unconfigured (no lifecycle.requeue); a pass with work left requeues on rate-limited backoff")
+	}
+	if settings.RetryBlockHistoryLimit == nil {
+		log.V(1).Info("retry-block history unconfigured (no lifecycle.retryBlockHistoryLimit); blocks for superseded revisions are kept")
+	}
+	return settings
 }
 
 // loadLifecycleConfig fetches the lifecycle block through the shared

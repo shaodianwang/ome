@@ -28,9 +28,13 @@ func updateDrainKey(idx int32, incarnation int64) string {
 // share the same per-revision routed Service lookup.
 
 // UpdateRequeueInterval is the wait between passes while an Update is
-// in flight. Exported so the dispatcher's requeue cadence stays in
-// lockstep with the per-Instance state machine.
-const UpdateRequeueInterval = 5 * time.Second
+// in flight, from the operator's lifecycle.requeue.operation. Exported
+// so the dispatcher's requeue cadence stays in lockstep with the
+// per-Instance state machine. Zero means unconfigured: the caller
+// requeues on the controller's rate-limited backoff instead.
+func UpdateRequeueInterval(input workload.ReconcileInput) time.Duration {
+	return input.Requeue.Operation
+}
 
 // surgeWindowApplies reports whether the minReadySeconds window still gates a
 // surge: the Operation has not advanced past Step=Surge, so the source is in

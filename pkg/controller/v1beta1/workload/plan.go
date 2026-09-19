@@ -133,10 +133,6 @@ func updateStrategyWithDefaults(s *UpdateStrategy) UpdateStrategy {
 	if out.InPlaceUpdateStrategy == nil {
 		out.InPlaceUpdateStrategy = &InPlaceUpdateStrategy{}
 	}
-	if out.InPlaceUpdateStrategy.GracePeriodSeconds == nil {
-		grace := int32(30)
-		out.InPlaceUpdateStrategy.GracePeriodSeconds = &grace
-	}
 	if out.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle == nil {
 		mark := true
 		out.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle = &mark

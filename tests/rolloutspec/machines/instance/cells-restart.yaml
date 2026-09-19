@@ -638,14 +638,6 @@ cells:
     status: current
   - state: Restart/Drain
     event: spec.policyTuning
-    variants: [gracePeriod]
-    outcome: ignore
-    note: the in-place grace is consumed only by the surge settle window; the restart drain polls the per-revision routed Service's endpoints instead of waiting out a clock (ops/update_surge.go, ops/restart.go)
-    placement: unit
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
-  - state: Restart/Drain
-    event: spec.policyTuning
     variants: [markNotReady]
     outcome: ignore
     note: the knob is consulted on the in-place path only; Phase A marks every serving old pod not-serving unconditionally before it deletes (ops/restart.go, ops/update_inplace.go)

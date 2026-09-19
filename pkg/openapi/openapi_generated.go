@@ -5708,16 +5708,9 @@ func schema_pkg_apis_ome_v1beta1_InPlaceUpdateStrategy(ref common.ReferenceCallb
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "InPlaceUpdateStrategy tunes per-pod lifecycle drain timing.",
+				Description: "InPlaceUpdateStrategy tunes the per-pod in-place update sequence.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
-					"gracePeriodSeconds": {
-						SchemaProps: spec.SchemaProps{
-							Description: "GracePeriodSeconds is the time OMENative waits between marking the pod not-ready and applying an in-place mutation. SurgeThenDrain also waits this long after EndpointSlice removal before deleting the old pod, allowing persistent load-balancer connections to drain while its workers remain available.",
-							Type:        []string{"integer"},
-							Format:      "int32",
-						},
-					},
 					"markNotReadyDuringLifecycle": {
 						SchemaProps: spec.SchemaProps{
 							Description: "MarkNotReadyDuringLifecycle, when true, flips ome.io/serving=False on the pod before the in-place mutation so EndpointSlice drains traffic first. Defaults to true.",

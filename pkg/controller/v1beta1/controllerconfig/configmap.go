@@ -560,6 +560,24 @@ type LifecycleConfig struct {
 	// default: absence means the escalation does not exist and an
 	// unplaceable pod only parks the InstanceReadyTimeout clock.
 	UnschedulableGracePeriod string `json:"unschedulableGracePeriod,omitempty"`
+	// GangScheduleTimeout bounds the per-PodGroup schedule timeout a
+	// multi-pod Instance derives from its Component's
+	// InstanceReadyTimeout. Absence means the escalation does not exist —
+	// there are intentionally NO in-code bounds: the derived timeout
+	// reaches the scheduler unclamped.
+	GangScheduleTimeout *GangScheduleTimeoutConfig `json:"gangScheduleTimeout,omitempty"`
+	// Audit bounds migration admission against the owner's migration
+	// records, and how far back terminal records are kept in status.
+	// Absence means the caps do not exist, and since they are the only
+	// bound on destructive migration churn, a migration request is held
+	// (deferred, warned, and surfaced as a condition) until they are
+	// supplied — there are intentionally NO in-code caps.
+	Audit *AuditConfig `json:"audit,omitempty"`
+	// Requeue is the per-pass wake-up cadence of the OMENative
+	// dispatcher. Absence means no cadence: a pass that still has work
+	// requeues on the controller's rate-limited backoff instead of a
+	// baked-in interval.
+	Requeue *RequeueConfig `json:"requeue,omitempty"`
 	// AutoMigrate configures the deadline-disposition relocation budget.
 	// Absence disables the relocation branch.
 	AutoMigrate *AutoMigrateConfig `json:"autoMigrate,omitempty"`
@@ -600,6 +618,13 @@ type LifecycleConfig struct {
 	// means unconfigured: without a per-ISVC annotation the retention sweep
 	// prunes nothing, never a silent fallback to a baked-in number.
 	RevisionHistoryLimit *int32 `json:"revisionHistoryLimit,omitempty"`
+	// RetryBlockHistoryLimit caps how many RetryBlocks for SUPERSEDED
+	// target revisions an InferenceReplica keeps as historical failure
+	// evidence; the block for the current target is never pruned. There
+	// is intentionally NO in-code default — the value is supplied via the
+	// inferenceservice-config ConfigMap (Helm chart / GitOps). Absent
+	// means unconfigured: every historical block is kept.
+	RetryBlockHistoryLimit *int32 `json:"retryBlockHistoryLimit,omitempty"`
 }
 
 // PodBatchSizes contains the process-scoped OMENative scale settings loaded
@@ -651,6 +676,146 @@ type ForceDeleteConfig struct {
 	// LastTransitionTime, or the Node object gone) before the
 	// escalation may act.
 	NodeUnreachableThreshold string `json:"nodeUnreachableThreshold"`
+}
+
+// GangScheduleTimeoutConfig bounds the PodGroup ScheduleTimeoutSeconds
+// derived from a Component's InstanceReadyTimeout. Both fields are
+// duration strings ("60s", "10m") and are REQUIRED when the block is
+// present — there are no in-code bounds.
+//
+// +kubebuilder:object:generate=false
+type GangScheduleTimeoutConfig struct {
+	// Min is the floor the derived timeout is raised to. It is also what
+	// an Instance whose Component sets no usable InstanceReadyTimeout
+	// gets.
+	Min string `json:"min"`
+	// Max is the ceiling the derived timeout is lowered to, so gang
+	// admission releases an infeasible attempt on a cluster-wide
+	// schedule.
+	Max string `json:"max"`
+}
+
+// ToClamp validates the config and converts it to the workload-side
+// GangScheduleTimeoutClamp. A nil receiver (absent block) yields
+// (nil, nil) — unconfigured, the derived timeout is passed through. Any
+// violation — either field missing, unparsable, non-positive, or min
+// above max — is an error; callers treat an invalid clamp as
+// unconfigured, never patch it up with fallback bounds.
+func (c *GangScheduleTimeoutConfig) ToClamp() (*workloadtypes.GangScheduleTimeoutClamp, error) {
+	if c == nil {
+		return nil, nil
+	}
+	minTimeout, err := time.ParseDuration(c.Min)
+	if err != nil {
+		return nil, fmt.Errorf("invalid lifecycle.gangScheduleTimeout: min %q: %w", c.Min, err)
+	}
+	if minTimeout <= 0 {
+		return nil, fmt.Errorf("invalid lifecycle.gangScheduleTimeout: min must be > 0, got %s", minTimeout)
+	}
+	maxTimeout, err := time.ParseDuration(c.Max)
+	if err != nil {
+		return nil, fmt.Errorf("invalid lifecycle.gangScheduleTimeout: max %q: %w", c.Max, err)
+	}
+	if maxTimeout <= 0 {
+		return nil, fmt.Errorf("invalid lifecycle.gangScheduleTimeout: max must be > 0, got %s", maxTimeout)
+	}
+	if maxTimeout < minTimeout {
+		return nil, fmt.Errorf("invalid lifecycle.gangScheduleTimeout: max %s must be >= min %s", maxTimeout, minTimeout)
+	}
+	return &workloadtypes.GangScheduleTimeoutClamp{Min: minTimeout, Max: maxTimeout}, nil
+}
+
+// AuditConfig bounds migration EXECUTION on one owner. All three fields
+// are REQUIRED when the block is present — there are no in-code caps.
+//
+// +kubebuilder:object:generate=false
+type AuditConfig struct {
+	// MaxInFlightMigrations caps EXECUTING migration records on the owner
+	// — non-terminal with an allocated surge. Queued intent is not
+	// counted: the dispatcher executes serially and a queued record holds
+	// no resources.
+	MaxInFlightMigrations int32 `json:"maxInFlightMigrations"`
+	// MaxMigrationsPerWindow caps migration records of any phase whose
+	// surge was allocated inside the trailing Window.
+	MaxMigrationsPerWindow int32 `json:"maxMigrationsPerWindow"`
+	// Window is the trailing window MaxMigrationsPerWindow counts over,
+	// as a duration string ("1h"). Terminal migration records completed
+	// longer ago than this are pruned from the owner's status, which is
+	// what keeps that list bounded by construction.
+	Window string `json:"window"`
+}
+
+// ToPolicy validates the config and converts it to the workload-side
+// MigrationAuditPolicy. A nil receiver (absent block) yields (nil, nil)
+// — unconfigured, and the caller holds migration requests instead of
+// admitting them. Any violation —
+// a non-positive cap, or a missing, unparsable, or non-positive window
+// — is an error; callers treat an invalid policy as unconfigured, never
+// patch it up with fallback caps.
+func (c *AuditConfig) ToPolicy() (*workloadtypes.MigrationAuditPolicy, error) {
+	if c == nil {
+		return nil, nil
+	}
+	if c.MaxInFlightMigrations <= 0 {
+		return nil, fmt.Errorf("invalid lifecycle.audit: maxInFlightMigrations must be > 0, got %d", c.MaxInFlightMigrations)
+	}
+	if c.MaxMigrationsPerWindow <= 0 {
+		return nil, fmt.Errorf("invalid lifecycle.audit: maxMigrationsPerWindow must be > 0, got %d", c.MaxMigrationsPerWindow)
+	}
+	window, err := time.ParseDuration(c.Window)
+	if err != nil {
+		return nil, fmt.Errorf("invalid lifecycle.audit: window %q: %w", c.Window, err)
+	}
+	if window <= 0 {
+		return nil, fmt.Errorf("invalid lifecycle.audit: window must be > 0, got %s", window)
+	}
+	return &workloadtypes.MigrationAuditPolicy{
+		MaxInFlight:  c.MaxInFlightMigrations,
+		MaxPerWindow: c.MaxMigrationsPerWindow,
+		Window:       window,
+	}, nil
+}
+
+// RequeueConfig is the OMENative dispatcher's wake-up cadence. Both
+// fields are duration strings ("5s", "3s") and are REQUIRED when the
+// block is present — there are no in-code intervals.
+//
+// +kubebuilder:object:generate=false
+type RequeueConfig struct {
+	// Operation is the wait between passes while a Create, Update,
+	// Restart, or Migrate operation is in flight.
+	Operation string `json:"operation"`
+	// Gate is the wait while a rollout gate denies the pass. Typically
+	// shorter than Operation: the peer Component that releases the gate
+	// may catch up on the very next reconcile.
+	Gate string `json:"gate"`
+}
+
+// ToIntervals validates the config and converts it to the workload-side
+// RequeueIntervals. A nil receiver (absent block) yields the zero value
+// — unconfigured, and every pass falls back to the controller's
+// rate-limited backoff. Any violation — either field missing,
+// unparsable, or non-positive — is an error; callers treat an invalid
+// block as unconfigured, never patch it up with fallback intervals.
+func (c *RequeueConfig) ToIntervals() (workloadtypes.RequeueIntervals, error) {
+	if c == nil {
+		return workloadtypes.RequeueIntervals{}, nil
+	}
+	operation, err := time.ParseDuration(c.Operation)
+	if err != nil {
+		return workloadtypes.RequeueIntervals{}, fmt.Errorf("invalid lifecycle.requeue: operation %q: %w", c.Operation, err)
+	}
+	if operation <= 0 {
+		return workloadtypes.RequeueIntervals{}, fmt.Errorf("invalid lifecycle.requeue: operation must be > 0, got %s", operation)
+	}
+	gate, err := time.ParseDuration(c.Gate)
+	if err != nil {
+		return workloadtypes.RequeueIntervals{}, fmt.Errorf("invalid lifecycle.requeue: gate %q: %w", c.Gate, err)
+	}
+	if gate <= 0 {
+		return workloadtypes.RequeueIntervals{}, fmt.Errorf("invalid lifecycle.requeue: gate must be > 0, got %s", gate)
+	}
+	return workloadtypes.RequeueIntervals{Operation: operation, Gate: gate}, nil
 }
 
 // TeardownConfig configures the finalizer-gated IR teardown deadline.
@@ -806,7 +971,7 @@ func (c *LifecycleConfig) ToScaleUpPodBatchSize() (*int32, error) {
 	if c == nil {
 		return nil, nil
 	}
-	return positivePodBatchSize("scaleUpPodBatchSize", c.ScaleUpPodBatchSize)
+	return positiveInt32Field("scaleUpPodBatchSize", c.ScaleUpPodBatchSize)
 }
 
 // ToScaleDownPodBatchSize validates the configured delete Pod-equivalent batch
@@ -817,7 +982,7 @@ func (c *LifecycleConfig) ToScaleDownPodBatchSize() (*int32, error) {
 	if c == nil {
 		return nil, nil
 	}
-	return positivePodBatchSize("scaleDownPodBatchSize", c.ScaleDownPodBatchSize)
+	return positiveInt32Field("scaleDownPodBatchSize", c.ScaleDownPodBatchSize)
 }
 
 // ToScaleDownRequeueInterval validates the configured destructive-work polling
@@ -855,7 +1020,19 @@ func (c *LifecycleConfig) ToRevisionHistoryLimit() (*int32, error) {
 	return &limit, nil
 }
 
-func positivePodBatchSize(field string, configured *int32) (*int32, error) {
+// ToRetryBlockHistoryLimit validates the configured historical
+// RetryBlock cap. A nil LifecycleConfig or absent field means
+// unconfigured (nil, nil) — the caller keeps every historical block
+// rather than fabricating a bound. Explicit zero or negative values are
+// invalid; callers treat invalid config as unconfigured.
+func (c *LifecycleConfig) ToRetryBlockHistoryLimit() (*int32, error) {
+	if c == nil {
+		return nil, nil
+	}
+	return positiveInt32Field("retryBlockHistoryLimit", c.RetryBlockHistoryLimit)
+}
+
+func positiveInt32Field(field string, configured *int32) (*int32, error) {
 	if configured == nil {
 		return nil, nil
 	}

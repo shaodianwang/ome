@@ -286,10 +286,6 @@ func defaultOMENativeComponent(ext *v1beta1.ComponentExtensionSpec, shape compon
 	if spec.UpdateStrategy.InPlaceUpdateStrategy == nil {
 		spec.UpdateStrategy.InPlaceUpdateStrategy = &v1beta1.InPlaceUpdateStrategy{}
 	}
-	if spec.UpdateStrategy.InPlaceUpdateStrategy.GracePeriodSeconds == nil {
-		grace := int32(30)
-		spec.UpdateStrategy.InPlaceUpdateStrategy.GracePeriodSeconds = &grace
-	}
 	if spec.UpdateStrategy.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle == nil {
 		mark := true
 		spec.UpdateStrategy.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle = &mark

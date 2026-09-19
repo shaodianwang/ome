@@ -1020,8 +1020,8 @@ func TestCreate_BatchedGlobalAPIFailureStopsFurtherPodCreates(t *testing.T) {
 	}
 	// The server's suggested delay is a floor. A 1s suggestion is already
 	// satisfied by the ordinary create interval, so the pass keeps it.
-	if result.RequeueAfter != ops.CreateRequeueInterval || result.RequeueAfter < time.Second {
-		t.Fatalf("RequeueAfter: got %v, want %v (>= the server's suggested 1s)", result.RequeueAfter, ops.CreateRequeueInterval)
+	if result.RequeueAfter != testRequeueIntervals.Operation || result.RequeueAfter < time.Second {
+		t.Fatalf("RequeueAfter: got %v, want %v (>= the server's suggested 1s)", result.RequeueAfter, testRequeueIntervals.Operation)
 	}
 	if !reflect.DeepEqual(attempted, []int32{0, 1}) {
 		t.Fatalf("Pod-create attempts after API overload: got %v, want [0 1]", attempted)

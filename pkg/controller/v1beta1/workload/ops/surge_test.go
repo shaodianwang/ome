@@ -10,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	clocktesting "k8s.io/utils/clock/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -83,7 +84,6 @@ func makeCR(t *testing.T, c client.Client, isvc *v1beta1.InferenceService, name 
 // surgePlan builds the single-Instance ComponentPlan a SurgeThenDrain
 // test consumes.
 func surgePlan() workload.ComponentPlan {
-	zeroGrace := int32(0)
 	return workload.ComponentPlan{
 		Component: workload.ComponentEngine,
 		Replicas:  1,
@@ -95,65 +95,63 @@ func surgePlan() workload.ComponentPlan {
 		InstanceReadyTimeout: 30 * time.Minute,
 		UpdateStrategy: workload.UpdateStrategy{
 			Type: workload.UpdateStrategySurgeThenDrain,
-			InPlaceUpdateStrategy: &workload.InPlaceUpdateStrategy{
-				GracePeriodSeconds: &zeroGrace,
-			},
 		},
 	}
 }
 
-func TestWaitForSurgeDrainSettle(t *testing.T) {
+// TestSurgeUpdate_PersistedSettleStepDeletesTheSource pins the
+// compatibility read: Step=SurgeDrainSettle means the row's drain is
+// confirmed, so the pass that observes it deletes the source. The step
+// is read only, never written.
+//
+// Cells: instance/Update/SurgeDrain/pod.servingOff[source]/before
+func TestSurgeUpdate_PersistedSettleStepDeletesTheSource(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc, ir := surgeISVCReady("llama-70b", "prod", 1)
-	c := legacyNewFakeClient(t, isvc, ir)
+	// Source drained out of rotation, replacement serving: the shape a
+	// row carrying that step is in.
+	oldPod := surgePodAtOrdinal(isvc, 0, 1, 0, true, false)
+	surgePod := surgePodAtOrdinal(isvc, 0, 1, 1, true, true)
+	target := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{
+		Name: "llama-70b-engine-rev-v2hash", Namespace: isvc.Namespace,
+	}}
+	surgePod.Labels[query.LabelRevisionHash] = query.RevisionHashFromControllerRevisionName(target.Name)
+	podReadyAt(surgePod, minReadyWindowStart.Add(-time.Minute))
+	c := legacyNewFakeClient(t, isvc, ir, oldPod, surgePod, target)
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
+	input.Clock = clocktesting.NewFakeClock(minReadyWindowStart)
 	plan := surgePlan()
-	grace := int32(30)
-	plan.UpdateStrategy.InPlaceUpdateStrategy.GracePeriodSeconds = &grace
-	if err := patchInstanceStatusSurgingForUpdate(context.Background(), input, 0, "rev-x", workload.UpdateStrategySurgeThenDrain, plan.InstanceReadyTimeout); err != nil {
-		t.Fatalf("stamp surge: %v", err)
+	if err := patchInstanceStatusSurgingForUpdate(context.Background(), input, 0, target.Name,
+		workload.UpdateStrategySurgeThenDrain, plan.InstanceReadyTimeout); err != nil {
+		t.Fatalf("pre-stamp surge: %v", err)
 	}
-	if err := patchInstanceStatusSurgeStepDrain(context.Background(), input, 0); err != nil {
-		t.Fatalf("stamp drain: %v", err)
+	persisted := func(s *workload.InstanceStatus) bool {
+		op := *s.Operation
+		op.Step = updateStepSurgeDrainSettle
+		s.Operation = &op
+		return true
 	}
-
-	status := &input.ObservedState.InstanceStatuses[0]
-	status.Phase = workload.InstancePhaseUpdating
-	status.Operation = &workload.InstanceOperation{
-		Type:           workload.InstanceOperationUpdate,
-		Step:           updateStepSurgeDrain,
-		TargetRevision: "rev-x",
-		LastProgressAt: metav1.Now(),
+	if err := input.MutateInstance(context.Background(), 0, persisted); err != nil {
+		t.Fatalf("pre-stamp persisted settle step: %v", err)
 	}
-
-	settled, err := waitForSurgeDrainSettle(context.Background(), input, plan, 0)
-	if err != nil {
-		t.Fatalf("start settle: %v", err)
-	}
-	if settled {
-		t.Fatalf("new settle phase must not allow immediate deletion")
-	}
-	fresh := &v1beta1.InferenceService{}
-	if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
-		t.Fatalf("read settle status: %v", err)
-	}
-	insts := legacyInstanceStatusesOnIR(c, fresh, workload.ComponentEngine)
-	if len(insts) == 0 {
-		t.Fatalf("expected instance 0 on IR")
-	}
-	got := insts[0].Operation
-	if got == nil || got.Step != updateStepSurgeDrainSettle {
-		t.Fatalf("step after EndpointSlice drain: got %+v, want %s", got, updateStepSurgeDrainSettle)
+	input.ObservedState.InstanceStatuses[0].Phase = workload.InstancePhaseUpdating
+	input.ObservedState.InstanceStatuses[0].Operation = &workload.InstanceOperation{
+		Type: workload.InstanceOperationUpdate, Step: updateStepSurgeDrainSettle,
+		TargetRevision: target.Name,
 	}
 
-	status.Operation.Step = updateStepSurgeDrainSettle
-	status.Operation.LastProgressAt = metav1.NewTime(time.Now().Add(-31 * time.Second))
-	settled, err = waitForSurgeDrainSettle(context.Background(), input, plan, 0)
-	if err != nil {
-		t.Fatalf("finish settle: %v", err)
+	if _, err := surgeUpdate(context.Background(), legacyTestDeps(c), input, plan,
+		plan.Instances[0], target, []*corev1.Pod{oldPod, surgePod}); err != nil {
+		t.Fatalf("surgeUpdate on a persisted settle row: %v", err)
 	}
-	if !settled {
-		t.Fatalf("settle phase should complete after grace period")
+
+	fresh := &corev1.Pod{}
+	err := c.Get(context.Background(), client.ObjectKeyFromObject(oldPod), fresh)
+	if err == nil && fresh.DeletionTimestamp == nil {
+		t.Fatalf("a persisted settle row must delete its drained source, got %+v", fresh.ObjectMeta)
+	}
+	if err != nil && !apierrors.IsNotFound(err) {
+		t.Fatalf("read source: %v", err)
 	}
 }
 

@@ -503,6 +503,12 @@ ome:
       # has NO built-in default: removing this field disables pruning
       # entirely for ISVCs without the annotation (revisions accumulate).
       revisionHistoryLimit: 10
+      # retryBlockHistoryLimit caps how many RetryBlocks for SUPERSEDED target
+      # revisions an InferenceReplica keeps as historical failure evidence; the
+      # block for the current target is never pruned, and the oldest historical
+      # block (by lastFailureAt) goes first. The OME binary has NO built-in
+      # cap: removing this field keeps every historical block.
+      retryBlockHistoryLimit: 3
       # updateRetry bounds automatic same-target update retries (RetryBlock).
       # A rollout that fails toward an UNCHANGED target revision backs off
       # exponentially (initialDelay * multiplier^(attempt-1), capped at
@@ -528,6 +534,41 @@ ome:
       # way. Removing this field disables the escalation, so an unplaceable pod
       # waits for an operator instead.
       unschedulableGracePeriod: 15m
+      # gangScheduleTimeout bounds the PodGroup scheduleTimeoutSeconds a
+      # multi-pod Instance derives from its Component's instanceReadyTimeout,
+      # so gang admission releases an infeasible attempt on a cluster-wide
+      # schedule. min also covers Components whose instanceReadyTimeout is
+      # unusable as a gang deadline. Both fields are required when the block
+      # is present. The OME binary has NO built-in bounds: removing this block
+      # passes the derived timeout to the scheduler unclamped.
+      gangScheduleTimeout:
+        min: 60s
+        max: 600s
+      # audit bounds migration EXECUTION on one InferenceService: how many
+      # migrations may be executing at once, how many may be started inside
+      # the trailing window, and the window itself. The window also bounds
+      # status.migrations — terminal records completed longer ago than this
+      # are pruned. All three fields are required when the block is present.
+      # The OME binary has NO built-in caps, and the caps are the only bound
+      # on destructive migration churn: with this block removed a migration
+      # request is HELD — deferred with a warning event and a
+      # MigrationPolicyUnconfigured condition, and admitted as soon as the
+      # block is set — instead of executing unbounded.
+      audit:
+        maxInFlightMigrations: 3
+        maxMigrationsPerWindow: 10
+        window: 1h
+      # requeue is the OMENative dispatcher's wake-up cadence: operation
+      # paces the passes that re-check an in-flight Create, Update, Restart,
+      # or Migrate, and gate paces a pass a rollout gate is denying (shorter,
+      # because the peer Component that releases it may catch up on the next
+      # reconcile). Both fields are required when the block is present. The
+      # OME binary has NO built-in intervals: removing this block leaves a
+      # pass with work left to Pod/EndpointSlice/PodGroup watch events and the
+      # controller's rate-limited backoff.
+      requeue:
+        operation: 5s
+        gate: 3s
       # autoMigrate configures the deadline-disposition relocation budget.
       # Removing this block disables the relocation branch.
       autoMigrate:

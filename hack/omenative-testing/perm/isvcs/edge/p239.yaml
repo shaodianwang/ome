@@ -1,4 +1,4 @@
-# p239: in-place grace=10 markNotReady=None engine InPlaceIfPossible  Ne=8 Nd=0 Nr=0 ceil_e=8 ceil_d=0 ceil_r=0 co=none topo=engine
+# p239: in-place markNotReady=False engine InPlaceIfPossible  Ne=8 Nd=0 Nr=0 ceil_e=8 ceil_d=0 ceil_r=0 co=none topo=engine
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p239 }
@@ -9,4 +9,4 @@ spec:
     minReplicas: 8
     maxReplicas: 8
     annotations: { ome.io/deploymentMode: OMENative }
-    lifecycle: { updateStrategy: { type: "InPlaceIfPossible", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 }, inPlaceUpdateStrategy: { gracePeriodSeconds: 10 } } }
+    lifecycle: { updateStrategy: { type: "InPlaceIfPossible", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 }, inPlaceUpdateStrategy: { markNotReadyDuringLifecycle: false } } }

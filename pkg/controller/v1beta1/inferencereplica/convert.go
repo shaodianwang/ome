@@ -103,17 +103,17 @@ func IRGVK() schema.GroupVersionKind { return irGVK }
 // likewise resolved ONCE per reconcile by the caller; nil means
 // unconfigured and the escalation is disabled entirely.
 //
-// graces and autoMigrateBudget feed the workload escalation pass: the
-// escalation windows (a zero field disables that escalation) and the
-// relocation budget of the terminal-failure disposition (zero disables
-// the relocation branch). Both resolved ONCE per reconcile by the caller
-// from the operator lifecycle config.
+// settings and autoMigrateBudget carry the operator lifecycle tunables:
+// the escalation and settle windows (a zero field disables that window)
+// and the relocation budget of the terminal-failure disposition (zero
+// disables the relocation branch). Both resolved ONCE per reconcile by
+// the caller from the operator lifecycle config.
 //
 // coordDefaults carries the operator-configured group resolution
 // fill-ins (from the coordination config), likewise resolved ONCE per
 // reconcile by the caller; the zero value means unconfigured and each
 // knob uses its documented unconfigured behavior.
-func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.InferenceReplica, parent *v1beta1.InferenceService, updateRetryPolicy *workloadtypes.RetryPolicy, forceDeletePolicy *workloadtypes.ForceDeletePolicy, graces lifecycleGraces, autoMigrateBudget int32, coordDefaults coordination.GroupDefaults) workload.ReconcileInput {
+func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.InferenceReplica, parent *v1beta1.InferenceService, updateRetryPolicy *workloadtypes.RetryPolicy, forceDeletePolicy *workloadtypes.ForceDeletePolicy, settings lifecycleSettings, autoMigrateBudget int32, coordDefaults coordination.GroupDefaults) workload.ReconcileInput {
 	desired := desiredFromIR(ir)
 	// The parent annotation is the operator-facing source of truth whenever the
 	// parent is readable. This deliberately overrides both stale true and stale
@@ -132,7 +132,7 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 	if parent != nil {
 		eventTarget = parent
 	}
-	applyInstanceMutationsWithRetryBlock := buildApplyInstanceMutationsWithRetryBlockFromReader(r.statusWriter(), r.liveReader(), ir)
+	applyInstanceMutationsWithRetryBlock := buildApplyInstanceMutationsWithRetryBlockFromReader(r.statusWriter(), r.liveReader(), ir, settings.RetryBlockHistoryLimit)
 	input := workload.ReconcileInput{
 		OwnerObject:                          ir,
 		OwnerGVK:                             irGVK,
@@ -148,7 +148,7 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 		// Same-target RetryBlock persistence + policy. The
 		// closure is always wired on the IR-managed path — the policy
 		// alone decides Backoff vs fail-safe Held.
-		MutateRetryBlock:  buildMutateRetryBlock(r.statusWriter(), r.liveReader(), ir),
+		MutateRetryBlock:  buildMutateRetryBlock(r.statusWriter(), r.liveReader(), ir, settings.RetryBlockHistoryLimit),
 		UpdateRetryPolicy: updateRetryPolicy,
 		// Migration-record persistence: the executor advances
 		// status.migrations phases through this seam (same RMW +
@@ -164,11 +164,17 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 		// Stuck-pod fast-escalation window for the workload escalation
 		// pass. Zero (unconfigured) disables fast escalation; the
 		// InstanceReadyTimeout backstop still fires.
-		StuckPodGrace: graces.StuckPod,
+		StuckPodGrace: settings.StuckPod,
 		// Scheduler-hold escalation window, shared by the pod-level and
 		// gang-level holds. Zero (unconfigured) leaves an unplaceable pod
 		// or gang parking the deadline until an operator acts.
-		UnschedulableGrace: graces.Unschedulable,
+		UnschedulableGrace: settings.Unschedulable,
+		// Migration admission caps. Nil (unconfigured) holds requests:
+		// the caps are the only bound on destructive migration churn.
+		MigrationAudit: settings.MigrationAudit,
+		// Dispatcher wake-up cadence. Zero fields (unconfigured) leave a
+		// pass with work left to the rate-limited backoff.
+		Requeue: settings.Requeue,
 		// Per-Instance PodGroup classification for this pass. The PodGroup
 		// pass fills it before the dispatcher; the pod-create choke point
 		// and the escalation pass read it back.
@@ -571,7 +577,9 @@ func buildMutateInstance(writer statusWriter, reads client.Reader, ir *v1beta1.I
 // callers and callers that also transition a RetryBlock on the same conflict,
 // no-op, and in-memory-mirror semantics.
 func buildApplyInstanceMutations(writer statusWriter, ir *v1beta1.InferenceReplica) func(ctx context.Context, muts []workloadtypes.InstanceMutation) error {
-	return instanceOnlyMutationAdapter(buildApplyInstanceMutationsWithRetryBlock(writer, ir))
+	// Instance-only mutations never transition a RetryBlock, so the
+	// retention prune is unreachable from here.
+	return instanceOnlyMutationAdapter(buildApplyInstanceMutationsWithRetryBlock(writer, ir, nil))
 }
 
 func instanceOnlyMutationAdapter(apply func(context.Context, []workloadtypes.InstanceMutation, string, func(*workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition) error) func(context.Context, []workloadtypes.InstanceMutation) error {
@@ -598,15 +606,15 @@ type committedInstanceMutation struct {
 // ErrStatusOwnerGone so callers can suppress the corresponding external
 // effect. Committed values are mirrored onto the caller's IR so later work in
 // the same reconcile observes exactly the persisted state.
-func buildApplyInstanceMutationsWithRetryBlock(writer statusWriter, ir *v1beta1.InferenceReplica) func(ctx context.Context, muts []workloadtypes.InstanceMutation, targetRevision string, mutateRetryBlock func(*workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition) error {
-	return buildApplyInstanceMutationsWithRetryBlockFromReader(writer, irstatus.NewReader(writer.Client, writer.decoder), ir)
+func buildApplyInstanceMutationsWithRetryBlock(writer statusWriter, ir *v1beta1.InferenceReplica, historyLimit *int32) func(ctx context.Context, muts []workloadtypes.InstanceMutation, targetRevision string, mutateRetryBlock func(*workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition) error {
+	return buildApplyInstanceMutationsWithRetryBlockFromReader(writer, irstatus.NewReader(writer.Client, writer.decoder), ir, historyLimit)
 }
 
 // buildApplyInstanceMutationsWithRetryBlockFromReader uses an authoritative
 // reader for conflict retries and the client for status writes. The split is
 // required for adjacent writes in one reconcile: the informer cache may not
 // observe the first write before the next mutation starts.
-func buildApplyInstanceMutationsWithRetryBlockFromReader(writer statusWriter, reads client.Reader, ir *v1beta1.InferenceReplica) func(ctx context.Context, muts []workloadtypes.InstanceMutation, targetRevision string, mutateRetryBlock func(*workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition) error {
+func buildApplyInstanceMutationsWithRetryBlockFromReader(writer statusWriter, reads client.Reader, ir *v1beta1.InferenceReplica, historyLimit *int32) func(ctx context.Context, muts []workloadtypes.InstanceMutation, targetRevision string, mutateRetryBlock func(*workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition) error {
 	key := client.ObjectKeyFromObject(ir)
 	ownerUID := ir.UID
 	return func(ctx context.Context, muts []workloadtypes.InstanceMutation, targetRevision string, mutateRetryBlock func(*workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition) error {
@@ -783,7 +791,7 @@ func buildApplyInstanceMutationsWithRetryBlockFromReader(writer statusWriter, re
 					}
 				}
 				if retryBlockChanged {
-					fresh.Status.RetryBlocks = pruneRetryBlocks(blocks, fresh.Status.UpdateRevision)
+					fresh.Status.RetryBlocks = pruneRetryBlocks(blocks, fresh.Status.UpdateRevision, historyLimit)
 					expected, expectedFound := retryBlockForRevision(fresh.Status.RetryBlocks, targetRevision)
 					retryBlockPostcondition = func(blocks []v1beta1.RetryBlock) bool {
 						actual, found := retryBlockForRevision(blocks, targetRevision)
@@ -1038,13 +1046,6 @@ func buildPromoteCurrentRevision(writer statusWriter, reads client.Reader, ir *v
 	}
 }
 
-// maxHistoricalRetryBlocks caps how many RetryBlocks for superseded
-// revisions are retained as historical evidence. A config-free constant
-// is acceptable here because it is a bookkeeping bound, not behavior
-// (spec: pruned oldest-first; the block for the CURRENT UpdateRevision
-// is never pruned).
-const maxHistoricalRetryBlocks = 3
-
 // buildMutateRetryBlock wraps the workload-typed RetryBlock mutate
 // callback with an IR-typed apiserver round-trip — the
 // ReconcileInput.MutateRetryBlock capability. Same shape as
@@ -1058,7 +1059,7 @@ const maxHistoricalRetryBlocks = 3
 // post-write state.
 //
 // Owner disappearance or replacement returns ErrStatusOwnerGone.
-func buildMutateRetryBlock(writer statusWriter, reads client.Reader, ir *v1beta1.InferenceReplica) func(ctx context.Context, targetRevision string, mutate func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
+func buildMutateRetryBlock(writer statusWriter, reads client.Reader, ir *v1beta1.InferenceReplica, historyLimit *int32) func(ctx context.Context, targetRevision string, mutate func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
 	key := client.ObjectKeyFromObject(ir)
 	ownerUID := ir.UID
 	return func(ctx context.Context, targetRevision string, mutate func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
@@ -1109,7 +1110,7 @@ func buildMutateRetryBlock(writer statusWriter, reads client.Reader, ir *v1beta1
 			default: // RetryBlockUnchanged
 				return nil
 			}
-			fresh.Status.RetryBlocks = pruneRetryBlocks(blocks, fresh.Status.UpdateRevision)
+			fresh.Status.RetryBlocks = pruneRetryBlocks(blocks, fresh.Status.UpdateRevision, historyLimit)
 			if err := updateInferenceReplicaStatus(ctx, writer, fresh, source); err != nil {
 				if apierrors.IsNotFound(err) {
 					return workloadtypes.ErrStatusOwnerGone
@@ -1140,17 +1141,21 @@ func buildMutateRetryBlock(writer statusWriter, reads client.Reader, ir *v1beta1
 // pruneRetryBlocks applies the RetryBlock retention rule: the block
 // whose TargetRevision == updateRevision (the current rollout target)
 // is NEVER pruned; the remaining historical blocks are capped at
-// maxHistoricalRetryBlocks, oldest-pruned by LastFailureAt with a nil
-// LastFailureAt sorting oldest. Survivors keep their original relative
-// order so the listType=map patch surface stays minimal.
-func pruneRetryBlocks(blocks []v1beta1.RetryBlock, updateRevision string) []v1beta1.RetryBlock {
+// historyLimit, oldest-pruned by LastFailureAt with a nil LastFailureAt
+// sorting oldest. Survivors keep their original relative order so the
+// listType=map patch surface stays minimal. A nil limit is
+// unconfigured: every historical block is kept.
+func pruneRetryBlocks(blocks []v1beta1.RetryBlock, updateRevision string, historyLimit *int32) []v1beta1.RetryBlock {
+	if historyLimit == nil {
+		return blocks
+	}
 	var otherIdx []int
 	for i := range blocks {
 		if updateRevision == "" || blocks[i].TargetRevision != updateRevision {
 			otherIdx = append(otherIdx, i)
 		}
 	}
-	excess := len(otherIdx) - maxHistoricalRetryBlocks
+	excess := len(otherIdx) - int(*historyLimit)
 	if excess <= 0 {
 		return blocks
 	}

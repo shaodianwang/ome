@@ -15,64 +15,74 @@ import (
 )
 
 type (
-	ComponentType           = types.ComponentType
-	InstancePhase           = types.InstancePhase
-	UpdateStrategyType      = types.UpdateStrategyType
-	RestartPolicy           = types.RestartPolicy
-	MigrationMode           = types.MigrationMode
-	InstanceOperationType   = types.InstanceOperationType
-	InstanceOperation       = types.InstanceOperation
-	InstanceStatus          = types.InstanceStatus
-	InstanceMutation        = types.InstanceMutation
-	InstanceTermination     = types.InstanceTermination
-	Key                     = types.Key
-	ReconcileInput          = types.ReconcileInput
-	MigrationRecord         = types.MigrationRecord
-	MigrationTrigger        = types.MigrationTrigger
-	MigrationPhase          = types.MigrationPhase
-	WorkloadDesiredSpec     = types.WorkloadDesiredSpec
-	WorkloadObservedState   = types.WorkloadObservedState
-	WorkloadAggregateStatus = types.WorkloadAggregateStatus
-	WorkloadPacing          = types.WorkloadPacing
-	PacingDecisions         = types.PacingDecisions
-	Runner                  = types.Runner
-	ComponentPlan           = types.ComponentPlan
-	InstancePlan            = types.InstancePlan
-	MigrationOverlay        = types.MigrationOverlay
-	RunnerPlan              = types.RunnerPlan
-	Deps                    = types.Deps
-	RenderHook              = types.RenderHook
-	Expectations            = types.Expectations
-	EventReason             = types.EventReason
-	ConditionType           = types.ConditionType
-	ConditionReason         = types.ConditionReason
-	Lifecycle               = types.Lifecycle
-	UpdateStrategy          = types.UpdateStrategy
-	RollingUpdate           = types.RollingUpdate
-	InPlaceUpdateStrategy   = types.InPlaceUpdateStrategy
-	InstanceReadyPolicy     = types.InstanceReadyPolicy
-	MigrationPolicy         = types.MigrationPolicy
-	ComponentTrafficTarget  = types.ComponentTrafficTarget
-	RetryBlock              = types.RetryBlock
-	RetryBlockState         = types.RetryBlockState
-	RetryBlockDisposition   = types.RetryBlockDisposition
-	RolloutHold             = types.RolloutHold
-	RolloutHoldGate         = types.RolloutHoldGate
-	RetryPolicy             = types.RetryPolicy
-	DemotionSelection       = types.DemotionSelection
-	ForceDeletePolicy       = types.ForceDeletePolicy
-	DispositionDeps         = types.DispositionDeps
-	APIPacing               = types.APIPacing
-	PromoteWindow           = types.PromoteWindow
-	GangState               = types.GangState
-	GangObservation         = types.GangObservation
-	GangObservations        = types.GangObservations
+	ComponentType            = types.ComponentType
+	InstancePhase            = types.InstancePhase
+	UpdateStrategyType       = types.UpdateStrategyType
+	RestartPolicy            = types.RestartPolicy
+	MigrationMode            = types.MigrationMode
+	InstanceOperationType    = types.InstanceOperationType
+	InstanceOperation        = types.InstanceOperation
+	InstanceStatus           = types.InstanceStatus
+	InstanceMutation         = types.InstanceMutation
+	InstanceTermination      = types.InstanceTermination
+	Key                      = types.Key
+	ReconcileInput           = types.ReconcileInput
+	MigrationRecord          = types.MigrationRecord
+	MigrationTrigger         = types.MigrationTrigger
+	MigrationPhase           = types.MigrationPhase
+	WorkloadDesiredSpec      = types.WorkloadDesiredSpec
+	WorkloadObservedState    = types.WorkloadObservedState
+	WorkloadAggregateStatus  = types.WorkloadAggregateStatus
+	WorkloadPacing           = types.WorkloadPacing
+	PacingDecisions          = types.PacingDecisions
+	Runner                   = types.Runner
+	ComponentPlan            = types.ComponentPlan
+	InstancePlan             = types.InstancePlan
+	MigrationOverlay         = types.MigrationOverlay
+	RunnerPlan               = types.RunnerPlan
+	Deps                     = types.Deps
+	RenderHook               = types.RenderHook
+	Expectations             = types.Expectations
+	EventReason              = types.EventReason
+	ConditionType            = types.ConditionType
+	ConditionReason          = types.ConditionReason
+	Lifecycle                = types.Lifecycle
+	UpdateStrategy           = types.UpdateStrategy
+	RollingUpdate            = types.RollingUpdate
+	InPlaceUpdateStrategy    = types.InPlaceUpdateStrategy
+	InstanceReadyPolicy      = types.InstanceReadyPolicy
+	MigrationPolicy          = types.MigrationPolicy
+	ComponentTrafficTarget   = types.ComponentTrafficTarget
+	RetryBlock               = types.RetryBlock
+	RetryBlockState          = types.RetryBlockState
+	RetryBlockDisposition    = types.RetryBlockDisposition
+	RolloutHold              = types.RolloutHold
+	RolloutHoldGate          = types.RolloutHoldGate
+	RetryPolicy              = types.RetryPolicy
+	DemotionSelection        = types.DemotionSelection
+	ForceDeletePolicy        = types.ForceDeletePolicy
+	GangScheduleTimeoutClamp = types.GangScheduleTimeoutClamp
+	MigrationAuditPolicy     = types.MigrationAuditPolicy
+	RequeueIntervals         = types.RequeueIntervals
+	DispositionDeps          = types.DispositionDeps
+	APIPacing                = types.APIPacing
+	PromoteWindow            = types.PromoteWindow
+	PassWake                 = types.PassWake
+	GangState                = types.GangState
+	GangObservation          = types.GangObservation
+	GangObservations         = types.GangObservations
 )
 
 type InstanceMutationSnapshot = types.InstanceMutationSnapshot
 type ComponentPodSnapshot = types.ComponentPodSnapshot
 
 var (
+	// PassRequeue is re-exported so the dispatcher and the ops passes
+	// resolve a pass wake-up through one implementation.
+	PassRequeue      = types.PassRequeue
+	FoldPassRequeue  = types.FoldPassRequeue
+	FloorPassRequeue = types.FloorPassRequeue
+
 	ErrGangNameUnusable           = types.ErrGangNameUnusable
 	ErrStatusOwnerGone            = types.ErrStatusOwnerGone
 	ErrStatusMutationPrecondition = types.ErrStatusMutationPrecondition
@@ -161,6 +171,7 @@ const (
 	EventReasonUnsupportedSchemaVersion      = types.EventReasonUnsupportedSchemaVersion
 	EventReasonMigrationCompleted            = types.EventReasonMigrationCompleted
 	EventReasonRateLimited                   = types.EventReasonRateLimited
+	EventReasonMigrationPolicyUnconfigured   = types.EventReasonMigrationPolicyUnconfigured
 	EventReasonMigrationFromNodeMismatch     = types.EventReasonMigrationFromNodeMismatch
 	EventReasonMigrationNodeAffinityConflict = types.EventReasonMigrationNodeAffinityConflict
 	EventReasonPodGroupReset                 = types.EventReasonPodGroupReset
@@ -181,7 +192,10 @@ const (
 	RetryBlockPersist   = types.RetryBlockPersist
 	RetryBlockRemove    = types.RetryBlockRemove
 
-	ConditionGangSchedulingUnavailable = types.ConditionGangSchedulingUnavailable
+	ConditionGangSchedulingUnavailable   = types.ConditionGangSchedulingUnavailable
+	ConditionMigrationPolicyUnconfigured = types.ConditionMigrationPolicyUnconfigured
+	ReasonMigrationCapacityUnconfigured  = types.ReasonMigrationCapacityUnconfigured
+	ReasonMigrationCapacityConfigured    = types.ReasonMigrationCapacityConfigured
 
 	ReasonPodGroupCRDNotInstalled = types.ReasonPodGroupCRDNotInstalled
 	ReasonGangSchedulingAvailable = types.ReasonGangSchedulingAvailable

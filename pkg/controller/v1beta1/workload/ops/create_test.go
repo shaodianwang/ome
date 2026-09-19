@@ -128,6 +128,14 @@ func testPodLabels(isvc string, component workload.ComponentType, instanceIdx in
 // workload.ReconcileInput. MutateInstance round-trips through the
 // fake client's Status().Update so tests can assert on the persisted
 // ISVC.Status.
+// testRequeueIntervals is the dispatcher cadence the ops tests run
+// under, standing in for the operator config a deployed chart supplies.
+// A test pinning the unconfigured path clears ReconcileInput.Requeue.
+var testRequeueIntervals = workload.RequeueIntervals{
+	Operation: 5 * time.Second,
+	Gate:      3 * time.Second,
+}
+
 func buildTestInput(isvc *v1beta1.InferenceService, c client.Client, component workload.ComponentType) workload.ReconcileInput {
 	// Delegate to the production converter rather than re-listing fields:
 	// a field the reconciler reads but the helper forgets to copy is a
@@ -155,6 +163,7 @@ func buildTestInput(isvc *v1beta1.InferenceService, c client.Client, component w
 			InstanceStatuses: instances,
 		},
 		MutateInstance: testMutateInstance(c, isvc, component),
+		Requeue:        testRequeueIntervals,
 	}
 }
 
@@ -422,6 +431,48 @@ func TestCreate_NilClient(t *testing.T) {
 	_, err := ops.Create(context.Background(), workload.Deps{}, workload.ReconcileInput{}, plan, nil)
 	if err == nil {
 		t.Fatal("expected error for nil client")
+	}
+}
+
+// TestCreate_UnconfiguredCadenceUsesBackoff pins the unset path: with
+// no operator cadence a pass that is still converging asks for the
+// controller's rate-limited backoff instead of an interval the binary
+// invented, and an explicit wait — here a promote window still open —
+// supersedes that backoff.
+func TestCreate_UnconfiguredCadenceUsesBackoff(t *testing.T) {
+	resetExpectations(t)
+	isvc := minimalISVC("llama-70b", "prod", 2)
+	c := newFakeClient(t, isvc)
+	input := buildTestInput(isvc, c, workload.ComponentEngine)
+	input.Requeue = workload.RequeueIntervals{}
+	plan := buildPlanSinglePodEngine(2)
+
+	result, err := ops.Create(context.Background(), workload.Deps{Client: c}, input, plan, nil)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Fatalf("RequeueAfter: got %v want 0 (no configured cadence to wait)", result.RequeueAfter)
+	}
+	if !result.Requeue { //nolint:staticcheck // the bare backoff is what this asserts
+		t.Fatalf("a converging pass with no cadence must ride the rate-limited backoff; got %+v", result)
+	}
+
+	// An explicit wait wins over the bare backoff.
+	resetExpectations(t)
+	explicit := buildTestInput(isvc, c, workload.ComponentEngine)
+	explicit.Requeue = workload.RequeueIntervals{}
+	explicit.PromoteWindow = &workload.PromoteWindow{}
+	explicit.PromoteWindow.Observe(90 * time.Second)
+	result, err = ops.Create(context.Background(), workload.Deps{Client: c}, explicit, plan, nil)
+	if err != nil {
+		t.Fatalf("Create with a pending promote window: %v", err)
+	}
+	if result.RequeueAfter != 90*time.Second {
+		t.Fatalf("RequeueAfter: got %v want 90s (the explicit wait)", result.RequeueAfter)
+	}
+	if result.Requeue { //nolint:staticcheck // an explicit wait must not also set the bare flag
+		t.Errorf("an explicit wait must supersede the bare backoff; got %+v", result)
 	}
 }
 

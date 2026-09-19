@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/clock"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -54,6 +55,15 @@ type migFixture struct {
 	// stuckPodGrace, when set, arms the terminal-waiting evidence read
 	// on the ReconcileInput (mirrors the adapter's config plumbing).
 	stuckPodGrace time.Duration
+	// migrationAudit is the capacity policy migration admission runs
+	// against; the constructors set the stand-in for a chart-configured
+	// deployment. A test pinning the unconfigured path clears it.
+	migrationAudit *workload.MigrationAuditPolicy
+	// conditions captures every Component condition the pass stamps, in
+	// write order, when a test wires the capture.
+	conditions *[]metav1.Condition
+	// wake collects the wake-up a pass deposits for work it held.
+	wake *workload.PassWake
 	// recorder, when set, captures the events a pass emits.
 	recorder *record.FakeRecorder
 	// finalizeInstanceResources models per-Instance cleanup owned by the IR
@@ -70,6 +80,13 @@ func (f *migFixture) deps() workload.Deps {
 		d.Recorder = f.recorder
 	}
 	return d
+}
+
+// fixtureMigrationAudit is the migration capacity policy the fixtures
+// admit against, standing in for the operator config a deployed chart
+// supplies. Capacity-specific expectations state their own numbers.
+func fixtureMigrationAudit() *workload.MigrationAuditPolicy {
+	return &workload.MigrationAuditPolicy{MaxInFlight: 3, MaxPerWindow: 10, Window: time.Hour}
 }
 
 // mkMigRecord is the shape the accept pass writes: Accepted, Manual,
@@ -201,6 +218,17 @@ func (f *migFixture) input(t *testing.T) workload.ReconcileInput {
 	in.Clock = f.clk
 	in.ForceDelete = f.forceDelete
 	in.StuckPodGrace = f.stuckPodGrace
+	in.MigrationAudit = f.migrationAudit
+	if f.conditions != nil {
+		in.WriteAggregateCondition = func(_ context.Context, cond metav1.Condition) error {
+			*f.conditions = append(*f.conditions, cond)
+			return nil
+		}
+	}
+	if f.wake == nil {
+		f.wake = &workload.PassWake{}
+	}
+	in.PassWake = f.wake
 	if f.finalizeInstanceResources != nil {
 		in.FinalizeInstanceResources = f.finalizeInstanceResources
 		in.ApplyInstanceMutationsWithRetryBlock = f.applyInstanceMutationsWithRetryBlock
@@ -551,7 +579,8 @@ func newSinglePodMigFixture(t *testing.T) *migFixture {
 	})
 	return &migFixture{
 		c: c, isvc: isvc, component: workload.ComponentEngine,
-		plan: legacyComponentPlan(workload.UpdateStrategySurgeThenDrain, nil),
+		plan:           legacyComponentPlan(workload.UpdateStrategySurgeThenDrain, nil),
+		migrationAudit: fixtureMigrationAudit(),
 	}
 }
 
@@ -640,7 +669,7 @@ func newMultiInstanceMigFixture(t *testing.T, n int32) *migFixture {
 			Runners: []workload.RunnerPlan{{Name: "default", Size: 1}},
 		})
 	}
-	return &migFixture{c: c, isvc: isvc, component: workload.ComponentEngine, plan: plan}
+	return &migFixture{c: c, isvc: isvc, component: workload.ComponentEngine, plan: plan, migrationAudit: fixtureMigrationAudit()}
 }
 
 // newGangMigFixture: instance 0 is a 3-pod gang (leader + 2 workers)
@@ -719,6 +748,7 @@ func newGangMigFixtureWithWorkerSpec(t *testing.T, workerSpec *corev1.PodSpec) *
 	return &migFixture{
 		c: c, isvc: isvc, component: workload.ComponentEngine,
 		plan: plan, gangSched: true,
+		migrationAudit: fixtureMigrationAudit(),
 	}
 }
 
@@ -1585,6 +1615,94 @@ func TestMigrate_DeferWithoutOwnership_LeavesRecordAccepted(t *testing.T) {
 	if rec.Phase != workload.MigrationPhaseAccepted || rec.SurgeInstance != nil {
 		t.Errorf("deferred record must stay Accepted with no surge; got %+v", *rec)
 	}
+}
+
+// countEventsWithReason counts drained events carrying reason.
+func countEventsWithReason(events []string, reason workload.EventReason) int {
+	n := 0
+	for _, ev := range events {
+		if strings.Contains(ev, string(reason)) {
+			n++
+		}
+	}
+	return n
+}
+
+// TestMigrate_UnconfiguredCapacityDefersAndResumes pins the unset path:
+// with no operator capacity policy the pass has no bound to judge the
+// request against, so it holds the request without taking ownership —
+// the record stays Accepted, one Warning names the missing key, and the
+// same record proceeds once the caps exist.
+func TestMigrate_UnconfiguredCapacityDefersAndResumes(t *testing.T) {
+	f := newSinglePodMigFixture(t)
+	f.migrationAudit = nil
+	f.recorder = record.NewFakeRecorder(16)
+	var conditions []metav1.Condition
+	f.conditions = &conditions
+	const uuid = "mig-unconfigured"
+	f.records = []workload.MigrationRecord{mkMigRecord(uuid, 0, "node-a")}
+
+	done, accepted := f.pass(t, uuid)
+	if done || accepted {
+		t.Fatalf("an unconfigured policy must defer without ownership: done=%v accepted=%v", done, accepted)
+	}
+	rec := f.record(t, uuid)
+	if rec.Phase != workload.MigrationPhaseAccepted || rec.SurgeInstance != nil || rec.CompletedAt != nil {
+		t.Fatalf("held record must stay queued Accepted; got %+v", *rec)
+	}
+	if !strings.Contains(rec.Message, "lifecycle.audit") {
+		t.Errorf("held record Message = %q, want the missing configuration named", rec.Message)
+	}
+	events := migWedgeEvents(t, f)
+	if got := countEventsWithReason(events, workload.EventReasonMigrationPolicyUnconfigured); got != 1 {
+		t.Fatalf("held request must warn once; got %d in %v", got, events)
+	}
+	if got := countEventsWithReason(events, workload.EventReasonRateLimited); got != 0 {
+		t.Errorf("a missing policy is not a cap breach; got %d RateLimited events", got)
+	}
+	if cond := lastConditionOfType(conditions, workload.ConditionMigrationPolicyUnconfigured); cond == nil ||
+		cond.Status != metav1.ConditionTrue {
+		t.Fatalf("the hold must raise the MigrationPolicyUnconfigured condition; got %+v", conditions)
+	}
+	// The hold owes the pass a wake-up: nothing in the cluster announces
+	// the operator writing the missing key.
+	if woke := f.wake.Fold(ctrl.Result{}); woke.RequeueAfter == 0 && !woke.Requeue { //nolint:staticcheck // either spelling is a wake
+		t.Fatalf("a held record must leave the pass a wake-up; got %+v", woke)
+	}
+
+	// A second pass under the same unconfigured policy re-defers without
+	// a second Warning: the hold is edge-triggered off the record.
+	if done, accepted = f.pass(t, uuid); done || accepted {
+		t.Fatalf("second pass must keep deferring: done=%v accepted=%v", done, accepted)
+	}
+	if got := countEventsWithReason(migWedgeEvents(t, f), workload.EventReasonMigrationPolicyUnconfigured); got != 0 {
+		t.Errorf("the hold must warn once per hold, not once per pass; got %d", got)
+	}
+
+	// Configuring the caps admits the very same record.
+	f.migrationAudit = fixtureMigrationAudit()
+	if _, accepted = f.pass(t, uuid); !accepted {
+		t.Fatalf("a configured policy must admit the held record")
+	}
+	rec = f.record(t, uuid)
+	if rec.Phase == workload.MigrationPhaseFailed || rec.SurgeInstance == nil {
+		t.Fatalf("resumed record must allocate a surge, not fail; got %+v", *rec)
+	}
+	if cond := lastConditionOfType(conditions, workload.ConditionMigrationPolicyUnconfigured); cond == nil ||
+		cond.Status != metav1.ConditionFalse {
+		t.Fatalf("a pass judging under configured caps must clear the condition; got %+v", conditions)
+	}
+}
+
+// lastConditionOfType returns the most recently written condition of
+// condType, or nil when the pass never wrote one.
+func lastConditionOfType(conditions []metav1.Condition, condType workload.ConditionType) *metav1.Condition {
+	for i := len(conditions) - 1; i >= 0; i-- {
+		if conditions[i].Type == string(condType) {
+			return &conditions[i]
+		}
+	}
+	return nil
 }
 
 // assertRecordFailed asserts the record is terminal-Failed carrying the

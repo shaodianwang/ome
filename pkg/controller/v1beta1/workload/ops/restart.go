@@ -17,10 +17,14 @@ import (
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
-// RestartRequeueInterval is the wait between passes while a Restart
-// is in flight. Exported so the dispatcher's pacing stays in
-// lockstep.
-const RestartRequeueInterval = 5 * time.Second
+// RestartRequeueInterval is the wait between passes while a Restart is
+// in flight, from the operator's lifecycle.requeue.operation. Exported
+// so the dispatcher's pacing stays in lockstep. Zero means
+// unconfigured: the caller requeues on the controller's rate-limited
+// backoff instead.
+func RestartRequeueInterval(input workload.ReconcileInput) time.Duration {
+	return input.Requeue.Operation
+}
 
 // DetectRestartTrigger fires when the Instance is mid-restart, when
 // Phase=Ready and a pod is Failed / the live pod count is below

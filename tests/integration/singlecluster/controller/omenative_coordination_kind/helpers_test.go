@@ -1,6 +1,7 @@
 package omenative_coordination_kind
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"time"
@@ -157,14 +158,19 @@ const fastUpdateRetryWithStuckPodGraceLifecycleJSON = `{"updateRetry":{"maxAttem
 // plus a short stuck-pod grace (terminal kubelet waiting states escalate
 // in seconds, not the production minutes) and a small relocation budget
 // (lifecycle.autoMigrate.maxAttempts=2) so the disposition's relocation
-// branch is enabled.
-const fastDispositionLifecycleJSON = `{"updateRetry":{"maxAttempts":2,"initialDelay":"5s","maxDelay":"20s","multiplier":2.0},"stuckPodGracePeriod":"10s","autoMigrate":{"maxAttempts":2}}`
+// branch is enabled. The migration capacity caps come along so a
+// relocation the disposition starts is admitted.
+const fastDispositionLifecycleJSON = `{"updateRetry":{"maxAttempts":2,"initialDelay":"5s","maxDelay":"20s","multiplier":2.0},"stuckPodGracePeriod":"10s","autoMigrate":{"maxAttempts":2},"audit":{"maxInFlightMigrations":3,"maxMigrationsPerWindow":10,"window":"1h"}}`
 
-// configureLifecycleConfig patches the suite-level inferenceservice-config
-// ConfigMap's lifecycle key with value and registers a DeferCleanup that
-// restores the prior state (removing the key when it was absent, which is
-// the fail-safe default every other spec runs under: Held on first
-// same-target failure, no fast escalation, no relocation budget). The
+// configureLifecycleConfig merges value over the suite-level
+// inferenceservice-config ConfigMap's lifecycle key and registers a
+// DeferCleanup that restores the prior state (removing the key when it
+// was absent, which is the fail-safe default every other spec runs
+// under: Held on first same-target failure, no fast escalation, no
+// relocation budget). Merging — rather than replacing — keeps a spec
+// that tunes one window running on the same requeue cadence and
+// capacity caps as the rest of the suite; a spec that means to change a
+// baseline key simply states it. The
 // KIND manager wires the IR reconciler with ConfigCacheTTL=0 (never
 // caches — see kindfix.StandardOMESetup), so the edit applies on the very
 // next reconcile. The suite runs specs serially, so a per-spec ConfigMap
@@ -192,10 +198,28 @@ func configureLifecycleConfig(value string) {
 			"patch inferenceservice-config lifecycle key")
 	}
 
-	setLifecycleKey(value, false)
+	setLifecycleKey(mergeLifecycleJSON(prev, value), false)
 	ginkgo.DeferCleanup(func() {
 		setLifecycleKey(prev, !hadPrev)
 	})
+}
+
+// mergeLifecycleJSON overlays the spec's lifecycle keys on the suite
+// baseline, top level only — a block a spec states replaces the
+// baseline's block of the same name wholesale.
+func mergeLifecycleJSON(base, overlay string) string {
+	merged := map[string]json.RawMessage{}
+	if base != "" {
+		gomega.Expect(json.Unmarshal([]byte(base), &merged)).To(gomega.Succeed(), "parse baseline lifecycle config")
+	}
+	spec := map[string]json.RawMessage{}
+	gomega.Expect(json.Unmarshal([]byte(overlay), &spec)).To(gomega.Succeed(), "parse spec lifecycle config")
+	for k, v := range spec {
+		merged[k] = v
+	}
+	out, err := json.Marshal(merged)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "render merged lifecycle config")
+	return string(out)
 }
 
 // configureFastUpdateRetry seeds the seconds-scale updateRetry policy.

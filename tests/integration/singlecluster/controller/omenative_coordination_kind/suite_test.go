@@ -30,9 +30,14 @@ var (
 
 // The suite uses a small destructive-work budget so scale-down behavior is
 // exercised in bounded waves without requiring a large Pod population. The
-// interval preserves the production polling cadence; Pod and EndpointSlice
-// watches normally wake the controller sooner.
-const kindLifecycleConfig = `{"scaleUpPodBatchSize":100,"scaleDownPodBatchSize":2,"scaleDownRequeueInterval":"5s"}`
+// intervals and caps preserve the production cadence the chart ships, so
+// spec timing matches a deployed controller; Pod and EndpointSlice watches
+// normally wake the controller sooner.
+const kindLifecycleConfig = `{"scaleUpPodBatchSize":100,"scaleDownPodBatchSize":2,"scaleDownRequeueInterval":"5s",` +
+	`"requeue":{"operation":"5s","gate":"3s"},` +
+	`"gangScheduleTimeout":{"min":"60s","max":"600s"},` +
+	`"revisionHistoryLimit":10,"retryBlockHistoryLimit":3,` +
+	`"audit":{"maxInFlightMigrations":3,"maxMigrationsPerWindow":10,"window":"1h"}}`
 
 func setupOMENativeCoordinationManager(ctx context.Context, mgr ctrl.Manager) error {
 	directClient, err := client.New(mgr.GetConfig(), client.Options{Scheme: mgr.GetScheme()})

@@ -555,6 +555,167 @@ func TestLifecycleConfig_ToUnschedulableGracePeriod(t *testing.T) {
 	}
 }
 
+// TestGangScheduleTimeoutConfig_ToClamp pins the validation contract for
+// the gang admission bounds: a configured pair parses, an absent block
+// yields a nil clamp (the derived timeout passes through), and any
+// missing, unparsable, non-positive, or inverted bound is an error the
+// caller treats as unconfigured.
+func TestGangScheduleTimeoutConfig_ToClamp(t *testing.T) {
+	t.Run("configured pair parses", func(t *testing.T) {
+		clamp, err := (&GangScheduleTimeoutConfig{Min: "60s", Max: "10m"}).ToClamp()
+		require.NoError(t, err)
+		require.NotNil(t, clamp)
+		assert.Equal(t, time.Minute, clamp.Min)
+		assert.Equal(t, 10*time.Minute, clamp.Max)
+	})
+
+	t.Run("absent block yields nil, no error", func(t *testing.T) {
+		var cfg *GangScheduleTimeoutConfig
+		clamp, err := cfg.ToClamp()
+		require.NoError(t, err)
+		assert.Nil(t, clamp)
+	})
+
+	invalid := []struct {
+		name string
+		cfg  GangScheduleTimeoutConfig
+	}{
+		{"missing min", GangScheduleTimeoutConfig{Max: "10m"}},
+		{"missing max", GangScheduleTimeoutConfig{Min: "60s"}},
+		{"unparsable min", GangScheduleTimeoutConfig{Min: "soon", Max: "10m"}},
+		{"unparsable max", GangScheduleTimeoutConfig{Min: "60s", Max: "later"}},
+		{"zero min", GangScheduleTimeoutConfig{Min: "0s", Max: "10m"}},
+		{"negative max", GangScheduleTimeoutConfig{Min: "60s", Max: "-1m"}},
+		{"max below min", GangScheduleTimeoutConfig{Min: "10m", Max: "60s"}},
+	}
+	for _, tt := range invalid {
+		t.Run(tt.name, func(t *testing.T) {
+			clamp, err := tt.cfg.ToClamp()
+			assert.Error(t, err)
+			assert.Nil(t, clamp)
+		})
+	}
+}
+
+// TestAuditConfig_ToPolicy pins the validation contract for the
+// migration capacity caps: a configured block parses, an absent block
+// yields a nil policy (admission rejects), and any non-positive cap or
+// bad window is an error the caller treats as unconfigured.
+func TestAuditConfig_ToPolicy(t *testing.T) {
+	t.Run("configured block parses", func(t *testing.T) {
+		policy, err := (&AuditConfig{MaxInFlightMigrations: 3, MaxMigrationsPerWindow: 10, Window: "1h"}).ToPolicy()
+		require.NoError(t, err)
+		require.NotNil(t, policy)
+		assert.Equal(t, int32(3), policy.MaxInFlight)
+		assert.Equal(t, int32(10), policy.MaxPerWindow)
+		assert.Equal(t, time.Hour, policy.Window)
+	})
+
+	t.Run("absent block yields nil, no error", func(t *testing.T) {
+		var cfg *AuditConfig
+		policy, err := cfg.ToPolicy()
+		require.NoError(t, err)
+		assert.Nil(t, policy)
+	})
+
+	invalid := []struct {
+		name string
+		cfg  AuditConfig
+	}{
+		{"zero in-flight cap", AuditConfig{MaxMigrationsPerWindow: 10, Window: "1h"}},
+		{"negative in-flight cap", AuditConfig{MaxInFlightMigrations: -1, MaxMigrationsPerWindow: 10, Window: "1h"}},
+		{"zero per-window cap", AuditConfig{MaxInFlightMigrations: 3, Window: "1h"}},
+		{"missing window", AuditConfig{MaxInFlightMigrations: 3, MaxMigrationsPerWindow: 10}},
+		{"unparsable window", AuditConfig{MaxInFlightMigrations: 3, MaxMigrationsPerWindow: 10, Window: "hourly"}},
+		{"non-positive window", AuditConfig{MaxInFlightMigrations: 3, MaxMigrationsPerWindow: 10, Window: "-1h"}},
+	}
+	for _, tt := range invalid {
+		t.Run(tt.name, func(t *testing.T) {
+			policy, err := tt.cfg.ToPolicy()
+			assert.Error(t, err)
+			assert.Nil(t, policy)
+		})
+	}
+}
+
+// TestRequeueConfig_ToIntervals pins the validation contract for the
+// dispatcher cadence: a configured pair parses, an absent block yields
+// the zero value (passes fall back to rate-limited backoff), and any
+// missing, unparsable, or non-positive interval is an error the caller
+// treats as unconfigured.
+func TestRequeueConfig_ToIntervals(t *testing.T) {
+	t.Run("configured pair parses", func(t *testing.T) {
+		intervals, err := (&RequeueConfig{Operation: "5s", Gate: "3s"}).ToIntervals()
+		require.NoError(t, err)
+		assert.Equal(t, 5*time.Second, intervals.Operation)
+		assert.Equal(t, 3*time.Second, intervals.Gate)
+	})
+
+	t.Run("absent block yields the zero value, no error", func(t *testing.T) {
+		var cfg *RequeueConfig
+		intervals, err := cfg.ToIntervals()
+		require.NoError(t, err)
+		assert.Zero(t, intervals.Operation)
+		assert.Zero(t, intervals.Gate)
+	})
+
+	invalid := []struct {
+		name string
+		cfg  RequeueConfig
+	}{
+		{"missing operation", RequeueConfig{Gate: "3s"}},
+		{"missing gate", RequeueConfig{Operation: "5s"}},
+		{"unparsable operation", RequeueConfig{Operation: "soon", Gate: "3s"}},
+		{"unparsable gate", RequeueConfig{Operation: "5s", Gate: "later"}},
+		{"zero operation", RequeueConfig{Operation: "0s", Gate: "3s"}},
+		{"negative gate", RequeueConfig{Operation: "5s", Gate: "-3s"}},
+	}
+	for _, tt := range invalid {
+		t.Run(tt.name, func(t *testing.T) {
+			intervals, err := tt.cfg.ToIntervals()
+			assert.Error(t, err)
+			assert.Zero(t, intervals.Operation)
+			assert.Zero(t, intervals.Gate)
+		})
+	}
+}
+
+// TestLifecycleConfig_ToRetryBlockHistoryLimit pins the validation
+// contract for the historical RetryBlock cap: a configured value
+// parses, an absent field yields nil (every block kept), and a
+// non-positive value is an error the caller treats as unconfigured.
+func TestLifecycleConfig_ToRetryBlockHistoryLimit(t *testing.T) {
+	t.Run("configured value parses", func(t *testing.T) {
+		limit := int32(3)
+		got, err := (&LifecycleConfig{RetryBlockHistoryLimit: &limit}).ToRetryBlockHistoryLimit()
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.Equal(t, int32(3), *got)
+	})
+
+	t.Run("nil receiver yields nil, no error", func(t *testing.T) {
+		var cfg *LifecycleConfig
+		got, err := cfg.ToRetryBlockHistoryLimit()
+		require.NoError(t, err)
+		assert.Nil(t, got)
+	})
+
+	t.Run("absent field yields nil, no error", func(t *testing.T) {
+		got, err := (&LifecycleConfig{}).ToRetryBlockHistoryLimit()
+		require.NoError(t, err)
+		assert.Nil(t, got)
+	})
+
+	for _, value := range []int32{0, -1} {
+		t.Run(fmt.Sprintf("non-positive %d is invalid", value), func(t *testing.T) {
+			v := value
+			got, err := (&LifecycleConfig{RetryBlockHistoryLimit: &v}).ToRetryBlockHistoryLimit()
+			assert.Error(t, err)
+			assert.Nil(t, got)
+		})
+	}
+}
+
 // TestNewLifecycleConfig_UnschedulableGracePeriod pins the load
 // contract for the unschedulableGracePeriod key: present + valid
 // parses, absent leaves the field empty (no error).

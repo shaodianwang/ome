@@ -25,9 +25,13 @@ import (
 )
 
 // MigrateRequeueInterval is the wait between Migrate passes while a
-// surge migration is in flight. Exported so the dispatcher's pacing
-// stays in lockstep.
-const MigrateRequeueInterval = 5 * time.Second
+// surge migration is in flight, from the operator's
+// lifecycle.requeue.operation. Exported so the dispatcher's pacing
+// stays in lockstep. Zero means unconfigured: the caller requeues on
+// the controller's rate-limited backoff instead.
+func MigrateRequeueInterval(input workload.ReconcileInput) time.Duration {
+	return input.Requeue.Operation
+}
 
 // ledgerOwnerObject / ledgerOwnerGVK resolve the object that owns the
 // migration audit-ledger ConfigMap. The IR caller sets input.LedgerOwner
@@ -225,7 +229,25 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		// per-hour = AllocatedAt inside the trailing window. Queued
 		// Accepted records are unbounded by design (serial dispatch;
 		// they hold nothing).
-		if ok, reason := audit.ValidateCapacity(input.ObservedState.Migrations, requestUUID, deps.Now()); !ok {
+		// An unconfigured policy is not a cap breach: there is no bound to
+		// judge the request against, so the pass holds it WITHOUT taking
+		// ownership. The record stays Accepted and a later pass admits it
+		// once the operator supplies the caps.
+		if input.MigrationAudit == nil {
+			if err := holdMigrationForUnconfiguredCapacity(ctx, deps, input, entry, requestUUID); err != nil {
+				return false, false, fmt.Errorf("Migrate: hold for unconfigured capacity (uuid=%s): %w", requestUUID, err)
+			}
+			// The operator writing the missing key raises no event the
+			// controller watches, so the pass owes itself a wake-up: the
+			// record would otherwise sit until unrelated work or the
+			// resync happens by.
+			input.PassWake.Observe(MigrateRequeueInterval(input))
+			return false, false, nil
+		}
+		if err := writeMigrationCapacityCondition(ctx, input, false); err != nil {
+			return false, false, fmt.Errorf("Migrate: clear capacity condition (uuid=%s): %w", requestUUID, err)
+		}
+		if ok, reason := audit.ValidateCapacity(input.MigrationAudit, input.ObservedState.Migrations, requestUUID, deps.Now()); !ok {
 			recordWarning(deps.Recorder, eventTarget(input), workload.EventReasonRateLimited,
 				"OMENative migration uuid=%s rejected: %s", requestUUID, reason)
 			d, ferr := failMigration(ctx, deps, input, ledger, req, requestUUID, reason)
@@ -1188,6 +1210,72 @@ func validateFromNode(ctx context.Context, deps workload.Deps, input workload.Re
 		return "request.FromNode=" + fromNode + " does not match observed source node=" + observed, false, nil
 	}
 	return "", false, nil
+}
+
+// migrationCapacityUnconfiguredMessage is what a held request carries on
+// its record while it waits for the operator's caps. Persisting it makes
+// the hold edge-triggered: the Warning fires on the pass that starts the
+// hold, not on every pass of it.
+const migrationCapacityUnconfiguredMessage = "waiting for migration capacity policy (no lifecycle.audit configured)"
+
+// holdMigrationForUnconfiguredCapacity records that the request is
+// waiting for caps the operator has not supplied: the record keeps its
+// Accepted phase and carries the reason, a Warning fires once per hold,
+// and the Component condition makes the hold visible without events.
+func holdMigrationForUnconfiguredCapacity(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, entry *workload.MigrationRecord, uuid string) error {
+	if err := writeMigrationCapacityCondition(ctx, input, true); err != nil {
+		return err
+	}
+	if entry != nil && entry.Message == migrationCapacityUnconfiguredMessage {
+		return nil
+	}
+	// The closure's own answer is the edge: a record that already reads
+	// as held under a stale observation must not re-warn.
+	opened := false
+	if err := input.MutateMigration(ctx, uuid, func(m *workload.MigrationRecord) bool {
+		if m.Phase.Terminal() || m.Message == migrationCapacityUnconfiguredMessage {
+			return false
+		}
+		m.Message = migrationCapacityUnconfiguredMessage
+		opened = true
+		return true
+	}); err != nil {
+		return fmt.Errorf("record capacity hold: %w", err)
+	}
+	if !opened {
+		return nil
+	}
+	recordWarning(deps.Recorder, eventTarget(input), workload.EventReasonMigrationPolicyUnconfigured,
+		"OMENative migration uuid=%s held: %s", uuid, migrationCapacityUnconfiguredMessage)
+	return nil
+}
+
+// writeMigrationCapacityCondition stamps the Component-scoped
+// MigrationPolicyUnconfigured condition with the pass's capacity
+// verdict: True while a request waits for caps nobody configured, False
+// once a pass judges one against the operator's caps.
+func writeMigrationCapacityCondition(ctx context.Context, input workload.ReconcileInput, unconfigured bool) error {
+	var generation int64
+	if input.OwnerObject != nil {
+		generation = input.OwnerObject.GetGeneration()
+	}
+	cond := metav1.Condition{
+		Type:               string(workload.ConditionMigrationPolicyUnconfigured),
+		Status:             metav1.ConditionFalse,
+		Reason:             string(workload.ReasonMigrationCapacityConfigured),
+		Message:            "Migration capacity policy is configured",
+		LastTransitionTime: metav1.Now(),
+		ObservedGeneration: generation,
+	}
+	if unconfigured {
+		cond.Status = metav1.ConditionTrue
+		cond.Reason = string(workload.ReasonMigrationCapacityUnconfigured)
+		cond.Message = "lifecycle.audit is not configured; migration requests wait instead of executing"
+	}
+	if input.WriteAggregateCondition == nil {
+		return nil
+	}
+	return input.WriteAggregateCondition(ctx, cond)
 }
 
 // failMigration terminates the request: a terminal Failed audit row

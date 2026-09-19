@@ -16,7 +16,6 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
-	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
 )
@@ -196,8 +195,8 @@ func TestReconcile_InPlaceMetadataUpdateProgressesWithinMaxUnavailable(t *testin
 	if err != nil {
 		t.Fatalf("first Reconcile: %v", err)
 	}
-	if result.RequeueAfter != workloadops.UpdateRequeueInterval {
-		t.Errorf("first Reconcile requeue: got %v want %v", result.RequeueAfter, workloadops.UpdateRequeueInterval)
+	if result.RequeueAfter != testRequeueIntervals.Operation {
+		t.Errorf("first Reconcile requeue: got %v want %v", result.RequeueAfter, testRequeueIntervals.Operation)
 	}
 	assertStatus(0, v1beta1.OMENativeInstanceUpdating, runningName)
 	assertStatus(1, v1beta1.OMENativeInstanceReady, runningName)

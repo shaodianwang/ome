@@ -183,8 +183,8 @@ func TestCreate_InvalidPodSpec_FailsOnlyTheRejectedInstance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v (a permanent rejection is disposed, not returned)", err)
 	}
-	if result.RequeueAfter != ops.CreateRequeueInterval {
-		t.Errorf("RequeueAfter: got %v want %v", result.RequeueAfter, ops.CreateRequeueInterval)
+	if result.RequeueAfter != testRequeueIntervals.Operation {
+		t.Errorf("RequeueAfter: got %v want %v", result.RequeueAfter, testRequeueIntervals.Operation)
 	}
 
 	rejected := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0)
@@ -273,8 +273,8 @@ func TestCreate_QuotaExceeded_WaitsWithoutFailing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v (a quota refusal is a wait, not an error)", err)
 	}
-	if result.RequeueAfter != ops.CreateRequeueInterval {
-		t.Errorf("RequeueAfter: got %v want %v", result.RequeueAfter, ops.CreateRequeueInterval)
+	if result.RequeueAfter != testRequeueIntervals.Operation {
+		t.Errorf("RequeueAfter: got %v want %v", result.RequeueAfter, testRequeueIntervals.Operation)
 	}
 
 	s := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0)

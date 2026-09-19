@@ -46,18 +46,6 @@ history:
   - {state: Update/SurgeDrain, event: timer.minReady, variants: [], windows: [], transition: "", prs: ["#1371"]}
   - {state: Update/SurgeDrain, event: api.conflict, variants: [], windows: [], transition: "", prs: ["#872"]}
 
-  # --- Update/SurgeDrainSettle -------------------------------------------
-  - {state: Update/SurgeDrainSettle, event: pod.servingOff, variants: [source], windows: [], transition: "", prs: ["#787"]}
-  - {state: Update/SurgeDrainSettle, event: spec.revision, variants: [], windows: [], transition: "", prs: ["#720"]}
-  - {state: Update/SurgeDrainSettle, event: spec.annotationOnly, variants: [], windows: [], transition: "", prs: ["#635", "#1367"]}
-  - {state: Update/SurgeDrainSettle, event: spec.strategy, variants: [], windows: [], transition: "", prs: ["#1423"]}
-  - {state: Update/SurgeDrainSettle, event: spec.pauseTrue, variants: [], windows: [], transition: "", prs: ["#1279", "#1289"]}
-  - {state: Update/SurgeDrainSettle, event: spec.pauseFreeze, variants: [], windows: [], transition: "", prs: ["#1279"]}
-  - {state: Update/SurgeDrainSettle, event: spec.unpause, variants: [], windows: [], transition: "", prs: ["#1279"]}
-  - {state: Update/SurgeDrainSettle, event: spec.migrateRequest, variants: [], windows: [], transition: "", prs: ["#1106"]}
-  - {state: Update/SurgeDrainSettle, event: timer.drainSettle, variants: [], windows: [], transition: "", prs: ["#787"]}
-  - {state: Update/SurgeDrainSettle, event: ctrl.crash, variants: [], windows: [], transition: "", prs: ["#787"]}
-  - {state: Update/SurgeDrainSettle, event: api.conflict, variants: [], windows: [], transition: "", prs: ["#872"]}
   - {state: Update/Surge, event: pod.stuckTerminating, variants: [], windows: [], transition: "", prs: ["#1378"]}
   - {state: Update/Surge, event: pod.phaseTerminal, variants: [Failed], windows: [], transition: "", prs: ["#1494"]}
   - {state: Update/Surge, event: timer.forceDelete, variants: [], windows: [], transition: "", prs: ["#1378"]}
@@ -67,11 +55,6 @@ history:
   - {state: Update/SurgeDrain, event: pod.phaseTerminal, variants: [Failed], windows: [], transition: "", prs: ["#1494"]}
   - {state: Update/SurgeDrain, event: timer.forceDelete, variants: [], windows: [], transition: "", prs: ["#1378"]}
   - {state: Update/SurgeDrain, event: config.changed, variants: [], windows: [], transition: "", prs: ["#1378"]}
-  - {state: Update/SurgeDrainSettle, event: pod.stuckTerminating, variants: [], windows: [], transition: "", prs: ["#1378"]}
-  - {state: Update/SurgeDrainSettle, event: pod.nodeLost, variants: [], windows: [], transition: "", prs: ["#1378"]}
-  - {state: Update/SurgeDrainSettle, event: pod.phaseTerminal, variants: [Failed], windows: [], transition: "", prs: ["#1494"]}
-  - {state: Update/SurgeDrainSettle, event: timer.forceDelete, variants: [], windows: [], transition: "", prs: ["#1378"]}
-  - {state: Update/SurgeDrainSettle, event: config.changed, variants: [], windows: [], transition: "", prs: ["#1378"]}
 
   # --- apiserver-rejection classification and scheduler-hold evidence ------
   - {state: Update/Surge, event: api.quotaDenied, variants: [], windows: [], transition: "", prs: ["#1501"]}
@@ -82,13 +65,8 @@ history:
   - {state: Update/SurgeDrain, event: api.invalid, variants: [], windows: [], transition: "", prs: ["#1501"]}
   - {state: Update/SurgeDrain, event: api.throttled, variants: [], windows: [], transition: "", prs: ["#1501"]}
   - {state: Update/SurgeDrain, event: api.namespaceTerminating, variants: [], windows: [], transition: "", prs: ["#1501"]}
-  - {state: Update/SurgeDrainSettle, event: api.quotaDenied, variants: [], windows: [], transition: "", prs: ["#1501"]}
-  - {state: Update/SurgeDrainSettle, event: api.invalid, variants: [], windows: [], transition: "", prs: ["#1501"]}
-  - {state: Update/SurgeDrainSettle, event: api.throttled, variants: [], windows: [], transition: "", prs: ["#1501"]}
-  - {state: Update/SurgeDrainSettle, event: api.namespaceTerminating, variants: [], windows: [], transition: "", prs: ["#1501"]}
   - {state: Update/Surge, event: pod.unschedulable, variants: [], windows: [], transition: "", prs: ["#1503"]}
   - {state: Update/SurgeDrain, event: pod.unschedulable, variants: [], windows: [], transition: "", prs: ["#1503"]}
-  - {state: Update/SurgeDrainSettle, event: pod.unschedulable, variants: [], windows: [], transition: "", prs: ["#1503"]}
   - {state: Update/Surge, event: pod.admissionRejected, variants: [], windows: [before], transition: "", prs: ["#1503"]}
 
   # --- PodGroup status as a decision input --------------------------------

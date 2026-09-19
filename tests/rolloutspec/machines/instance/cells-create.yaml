@@ -593,9 +593,9 @@ cells:
 
   - state: Create/CreatePods
     event: spec.policyTuning
-    variants: [restartPolicy, migrationPolicy, minReadySeconds, gracePeriod, markNotReady]
+    variants: [restartPolicy, migrationPolicy, minReadySeconds, markNotReady]
     outcome: ignore
-    note: none of these knobs is read while a Create attempt is in flight — restartPolicy gates the gang-loss hand-off in ops/restart.go from the next pass on, migrationPolicy only the disposition branch at failure time, and minReadySeconds, gracePeriod and markNotReady belong to availability and drain paths the create promote never runs
+    note: none of these knobs is read while a Create attempt is in flight — restartPolicy gates the gang-loss hand-off in ops/restart.go from the next pass on, migrationPolicy only the disposition branch at failure time, and minReadySeconds and markNotReady belong to availability and drain paths the create promote never runs
     placement: unit
     coverage: {perm: [], unit: [], kind: []}
     status: current

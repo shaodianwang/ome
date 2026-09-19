@@ -127,9 +127,17 @@ func (r *Reconciler) reconcileTeardown(ctx context.Context, log logr.Logger, ir 
 	// The same-target update retry policy is nil: the Update pass never
 	// runs in teardown, and neither does the escalation pass (zero
 	// escalation windows / zero relocation budget — wedge escalation
-	// belongs to the Delete pipeline's lifecycle.forceDelete). Coordination group defaults are
-	// likewise irrelevant: teardown never consults the update gate.
-	input := r.buildReconcileInput(ctx, ir, parent, nil, forceDeletePolicy, lifecycleGraces{}, 0, coordination.GroupDefaults{})
+	// belongs to the Delete pipeline's lifecycle.forceDelete). The rest
+	// of the zero lifecycleSettings is safe for the same reason: the
+	// surge settle window and gang bounds belong to passes teardown does
+	// not run, the migration caps gate admission of work a deleting IR
+	// accepts none of, the retry-block history cap only prunes on a
+	// RetryBlock write teardown never makes, and the requeue cadence is
+	// not the Delete pipeline's — it paces itself with
+	// ScaleDownRequeueInterval plus the force-delete and teardown
+	// deadlines, set below. Coordination group defaults are likewise
+	// irrelevant: teardown never consults the update gate.
+	input := r.buildReconcileInput(ctx, ir, parent, nil, forceDeletePolicy, lifecycleSettings{}, 0, coordination.GroupDefaults{})
 	input.Teardown = true
 	input.ScaleDownPodBatchSize = r.ScaleDownPodBatchSize
 	input.ScaleDownRequeueInterval = r.ScaleDownRequeueInterval

@@ -532,8 +532,8 @@ cells:
     outcome: ignore
     note: none of these knobs is re-read for an in-flight migration — the record
       Deadline was stamped from instanceReadyTimeout at accept, the restart and
-      relocation triggers decline for a migrate-owned status, and the settle window
-      belongs to the update path; minReadySeconds is the exception, retiming the surge
+      relocation triggers decline for a migrate-owned status, and the in-place
+      windows belong to the update path; minReadySeconds is the exception, retiming the surge
       availability gate from the next pass on
     placement: unit
     coverage: {perm: [], unit: [], kind: []}

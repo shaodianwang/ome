@@ -792,8 +792,8 @@ func TestReconcile_Create_ConfiguredBatchSizeCapsPods(t *testing.T) {
 		NamespacedName: types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
 	})
 	g.Expect(err).NotTo(gomega.HaveOccurred())
-	g.Expect(result.RequeueAfter).NotTo(gomega.BeZero(),
-		"deferred Instances must cause a follow-up reconcile")
+	g.Expect(result.Requeue || result.RequeueAfter > 0).To(gomega.BeTrue(),
+		"deferred Instances must cause a follow-up reconcile; with no configured cadence that is the rate-limited requeue")
 
 	pods := &corev1.PodList{}
 	g.Expect(c.List(context.Background(), pods, client.InNamespace(ir.Namespace))).To(gomega.Succeed())

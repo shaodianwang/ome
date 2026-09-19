@@ -496,10 +496,11 @@ func buildAppendMigration(writer statusWriter, reads client.Reader, ir *v1beta1.
 //     entry presence gates. SurgeInstance carries over when the row
 //     recorded a real index; the -1 accept sentinel imports as unset
 //     (fresh allocation path).
-//  2. TRIM: terminal entries whose CompletedAt is older than the
-//     capacity rate window are pruned (bounded-by-construction status;
-//     full history stays in the ledger + events). Non-terminal entries
-//     are never trimmed; terminal entries lacking CompletedAt are kept.
+//  2. TRIM: terminal entries whose CompletedAt is older than
+//     recordWindow are pruned (bounded-by-construction status; full
+//     history stays in the ledger + events). A zero window is
+//     unconfigured and trims nothing. Non-terminal entries are never
+//     trimmed; terminal entries lacking CompletedAt are kept.
 //     INVARIANT: status may forget only what the ledger remembers — an
 //     aged terminal entry whose UUID has no terminal ledger row is
 //     retained (logged at V(1), once per pass with the count), because
@@ -511,7 +512,7 @@ func buildAppendMigration(writer statusWriter, reads client.Reader, ir *v1beta1.
 // caller's in-memory IR. Ledger read is best-effort — an unreadable
 // ledger defers the import AND the trim (nothing may be forgotten
 // against an unknown ledger) to the next pass.
-func (r *Reconciler) syncMigrationEntries(ctx context.Context, log logr.Logger, ir *v1beta1.InferenceReplica, parent *v1beta1.InferenceService, instanceReadyTimeout time.Duration) error {
+func (r *Reconciler) syncMigrationEntries(ctx context.Context, log logr.Logger, ir *v1beta1.InferenceReplica, parent *v1beta1.InferenceService, instanceReadyTimeout, recordWindow time.Duration) error {
 	if r.Client == nil || ir == nil {
 		return nil
 	}
@@ -548,12 +549,14 @@ func (r *Reconciler) syncMigrationEntries(ctx context.Context, log logr.Logger, 
 
 		// Trim aged-out terminal entries — but only those the ledger
 		// also records terminally (see the invariant in the func doc).
-		cutoff := r.now().Add(-audit.CapacityRateWindow)
+		// A zero window is unconfigured: nothing ages out, because there
+		// is no operator-stated horizon to age against.
+		cutoff := r.now().Add(-recordWindow)
 		trimBlocked = 0
 		kept := fresh.Status.Migrations[:0]
 		for i := range fresh.Status.Migrations {
 			e := fresh.Status.Migrations[i]
-			if e.Phase.Terminal() && e.CompletedAt != nil && e.CompletedAt.Time.Before(cutoff) {
+			if recordWindow > 0 && e.Phase.Terminal() && e.CompletedAt != nil && e.CompletedAt.Time.Before(cutoff) {
 				if ledger.HasCompletedOrFailedRequest(e.RequestUUID) {
 					changed = true
 					continue

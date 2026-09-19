@@ -768,9 +768,9 @@ cells:
     status: current
   - state: Failed
     event: spec.policyTuning
-    variants: [migrationPolicy, instanceReadyTimeout, minReadySeconds, gracePeriod, markNotReady]
+    variants: [migrationPolicy, instanceReadyTimeout, minReadySeconds, markNotReady]
     outcome: ignore
-    note: none of these is hashed and none is re-read for a row that already failed — the relocation mode and the operation deadline were resolved at attempt time, and the minReady, settle and mark-not-ready windows belong to promotions and in-place lifecycles a Failed row does not have
+    note: none of these is hashed and none is re-read for a row that already failed — the relocation mode and the operation deadline were resolved at attempt time, and the minReady and mark-not-ready windows belong to promotions and in-place lifecycles a Failed row does not have
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
     status: current

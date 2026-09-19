@@ -680,7 +680,7 @@ func TestForceDelete_ActionRecordsOnce_NoDoubleLedgerOnReplay(t *testing.T) {
 // Terminating pod on a Ready node stays (the kubelet is merely slow),
 // and a pod nobody deleted is never even classified.
 //
-// Cells: instance/Update/Surge/timer.forceDelete[nodeUnreachable]/before, instance/Update/SurgeDrain/timer.forceDelete[nodeUnreachable]/before, instance/Update/SurgeDrainSettle/timer.forceDelete[nodeUnreachable]/before, instance/Update/InPlace/timer.forceDelete[nodeUnreachable]/before, instance/Update/Drain/timer.forceDelete[nodeUnreachable]/before
+// Cells: instance/Update/Surge/timer.forceDelete[nodeUnreachable]/before, instance/Update/SurgeDrain/timer.forceDelete[nodeUnreachable]/before, instance/Update/InPlace/timer.forceDelete[nodeUnreachable]/before, instance/Update/Drain/timer.forceDelete[nodeUnreachable]/before
 func TestForceDeletePods_SweepsOnlyActionableTerminatingPods(t *testing.T) {
 	var deletes []recordedDeleteOpts
 	funcs := fdDeleteRecorder(&deletes)
@@ -771,7 +771,7 @@ func TestForceDeletePods_NodeReadError_Propagates(t *testing.T) {
 // node is cleared whatever step the roll is parked at, and the wait that
 // would never end is unblocked.
 //
-// Cells: instance/Update/Surge/timer.forceDelete[nodeUnreachable]/before, instance/Update/SurgeDrain/timer.forceDelete[nodeUnreachable]/before, instance/Update/SurgeDrainSettle/timer.forceDelete[nodeUnreachable]/before, instance/Update/InPlace/timer.forceDelete[nodeUnreachable]/before, instance/Update/Drain/timer.forceDelete[nodeUnreachable]/before, instance/Update/Surge/timer.forceDelete[overdueSlack]/before, instance/Update/SurgeDrain/timer.forceDelete[overdueSlack]/before, instance/Update/SurgeDrainSettle/timer.forceDelete[overdueSlack]/before, instance/Update/InPlace/timer.forceDelete[overdueSlack]/before, instance/Update/Drain/timer.forceDelete[overdueSlack]/before
+// Cells: instance/Update/Surge/timer.forceDelete[nodeUnreachable]/before, instance/Update/SurgeDrain/timer.forceDelete[nodeUnreachable]/before, instance/Update/InPlace/timer.forceDelete[nodeUnreachable]/before, instance/Update/Drain/timer.forceDelete[nodeUnreachable]/before, instance/Update/Surge/timer.forceDelete[overdueSlack]/before, instance/Update/SurgeDrain/timer.forceDelete[overdueSlack]/before, instance/Update/InPlace/timer.forceDelete[overdueSlack]/before, instance/Update/Drain/timer.forceDelete[overdueSlack]/before
 func TestUpdateWithPods_ForceDeletesStuckTerminatingSource(t *testing.T) {
 	for _, step := range []string{
 		workload.UpdateStepSurge,
@@ -798,9 +798,7 @@ func TestUpdateWithPods_ForceDeletesStuckTerminatingSource(t *testing.T) {
 			rec := record.NewFakeRecorder(16)
 			input := legacyTestInput(f.isvc, f.client, workload.ComponentEngine)
 			input.ForceDelete = fdPolicy()
-			zeroGrace := int32(0)
-			plan := legacyComponentPlan(workload.UpdateStrategySurgeThenDrain,
-				&workload.InPlaceUpdateStrategy{GracePeriodSeconds: &zeroGrace})
+			plan := legacyComponentPlan(workload.UpdateStrategySurgeThenDrain, nil)
 
 			if _, err := UpdateWithPods(context.Background(), workload.Deps{Client: f.client, Recorder: rec},
 				input, plan, plan.Instances[0], f.targetCR, f.targetSpec,

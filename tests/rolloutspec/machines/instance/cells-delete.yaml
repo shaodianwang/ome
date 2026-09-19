@@ -526,7 +526,7 @@ cells:
   - state: Delete/Drain
     event: spec.policyTuning
     outcome: ignore
-    note: "no lifecycle knob reaches a draining row: restartPolicy, migrationPolicy, minReadySeconds, gracePeriod and markNotReady all gate passes that are unreachable while the wave runs, and instanceReadyTimeout is consumed only once, when admitDeleteBatch in delete_batch.go stamps the operation deadline nothing later consumes"
+    note: "no lifecycle knob reaches a draining row: restartPolicy, migrationPolicy, minReadySeconds and markNotReady all gate passes that are unreachable while the wave runs, and instanceReadyTimeout is consumed only once, when admitDeleteBatch in delete_batch.go stamps the operation deadline nothing later consumes"
     invariants: [one.operation.per.instance]
     placement: unit
     coverage: {perm: [], unit: [], kind: []}

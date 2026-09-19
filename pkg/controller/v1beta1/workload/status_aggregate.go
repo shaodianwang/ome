@@ -15,11 +15,6 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
-// DefaultRevisionRetention caps non-live ControllerRevisions per
-// workload (StatefulSet default; rollback headroom without unbounded
-// etcd growth).
-const DefaultRevisionRetention = 10
-
 // AvailablePodSet returns pod names that are Ready and non-terminating
 // in any EndpointSlice for serviceName. drain.EndpointAvailable
 // excludes terminating-but-Ready endpoints — they're not getting new

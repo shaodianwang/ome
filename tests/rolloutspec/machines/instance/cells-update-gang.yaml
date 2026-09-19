@@ -816,9 +816,9 @@ cells:
     status: current
   - state: Update/GangSurgeTarget
     event: spec.policyTuning
-    variants: [restartPolicy, migrationPolicy, gracePeriod, markNotReady]
+    variants: [restartPolicy, migrationPolicy, markNotReady]
     outcome: ignore
-    note: none of the four reaches a marker — the restart trigger in pkg/controller/v1beta1/workload/ops/update.go declines a row with a preserved non-Create operation, a gang Update attempt is never disposable, the gang surge has no settle step, and it always clears the serving gate before deleting a source pod
+    note: none of the four reaches a marker — the restart trigger in pkg/controller/v1beta1/workload/ops/update.go declines a row with a preserved non-Create operation, a gang Update attempt is never disposable, no surge keeps a window of its own, and it always clears the serving gate before deleting a source pod
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
     status: current

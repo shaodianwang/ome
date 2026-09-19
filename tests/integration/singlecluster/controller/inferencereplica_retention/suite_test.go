@@ -66,7 +66,8 @@ var _ = ginkgo.BeforeSuite(func() {
 		},
 		Data: map[string]string{
 			controllerconfig.LifecycleConfigName: fmt.Sprintf(
-				`{"scaleUpPodBatchSize":100,"scaleDownPodBatchSize":100,"revisionHistoryLimit":%d}`,
+				`{"scaleUpPodBatchSize":100,"scaleDownPodBatchSize":100,"revisionHistoryLimit":%d,`+
+					`"requeue":{"operation":"5s","gate":"3s"}}`,
 				configuredRetentionLimit),
 			controllerconfig.OMENativeStatusConfigName: util.OMENativeStatusConfigJSON(),
 		},

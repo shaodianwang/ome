@@ -22,12 +22,13 @@ import (
 // two pods on one slot, with the source held out of rotation by a surge drain
 // entry only its deletion would have released.
 //
-// The window is opened deterministically rather than raced. SurgeThenDrain
-// parks at its settle step for gracePeriodSeconds after the source leaves the
-// EndpointSlice, so a long grace gives the edit a wide, reliable window to land
-// in. The spec gates the edit on the Instance actually reporting that step, and
-// re-checks the source afterwards, so a surge that finished early fails loudly
-// instead of passing vacuously.
+// The window the edit lands in is the drain itself: the row records
+// Step=SurgeDrain once the replacement clears the promote bar, and holds
+// there while the source is unrouted and its EndpointSlice convergence is
+// polled. The spec gates the edit on that step with the source still alive,
+// and re-checks the source afterwards, so a surge that finished early fails
+// loudly instead of passing vacuously. The source then leaves on an ordinary
+// graceful delete — its own terminationGracePeriodSeconds, never a force.
 var _ = ginkgo.Describe("behavior — update strategy edited mid-surge", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 	ginkgo.BeforeEach(func() {
@@ -43,21 +44,15 @@ var _ = ginkgo.Describe("behavior — update strategy edited mid-surge", ginkgo.
 		const isvcName = "strat-switch-kss1"
 		sourcePod := isvcName + "-engine-0-default-0"
 		replacementPod := isvcName + "-engine-0-default-1"
-		settleGrace := int32(120)
 
 		fix := newCoordFixture(ns.Name,
 			WithISVCName(isvcName),
 			WithoutDecoder(),
 			WithEngineImage("fake-serving:v1"))
 
-		// SurgeThenDrain honors gracePeriodSeconds as the settle wait between
-		// unrouting the source and deleting it.
 		fix.ISVC.Spec.Engine.Lifecycle = &v1beta1.LifecycleSpec{
 			UpdateStrategy: &v1beta1.UpdateStrategy{
 				Type: v1beta1.UpdateStrategySurgeThenDrain,
-				InPlaceUpdateStrategy: &v1beta1.InPlaceUpdateStrategy{
-					GracePeriodSeconds: &settleGrace,
-				},
 			},
 		}
 
@@ -79,16 +74,17 @@ var _ = ginkgo.Describe("behavior — update strategy edited mid-surge", ginkgo.
 			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		ginkgo.By("waiting for the settle window: replacement serving, source drained but alive")
+		ginkgo.By("waiting for the drain: replacement serving, source unrouted but alive")
 		var replacementUID string
 		Eventually(func(g Gomega) {
-			// The Instance parks here for gracePeriodSeconds. Gating on the step
-			// itself, rather than on pod shape alone, is what makes the edit
-			// below land inside the window instead of racing it.
+			// The row holds on this step while the source's EndpointSlice
+			// convergence is polled. Gating on the step itself, rather than on
+			// pod shape alone, is what makes the edit below land inside the
+			// drain instead of racing it.
 			insts := instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent)
 			g.Expect(insts).To(HaveLen(1))
 			g.Expect(insts[0].Operation).NotTo(BeNil())
-			g.Expect(insts[0].Operation.Step).To(Equal("SurgeDrainSettle"))
+			g.Expect(insts[0].Operation.Step).To(Equal("SurgeDrain"))
 
 			replacement := &corev1.Pod{}
 			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
@@ -97,8 +93,8 @@ var _ = ginkgo.Describe("behavior — update strategy edited mid-surge", ginkgo.
 			g.Expect(podIsReady(replacement)).To(BeTrue())
 			replacementUID = string(replacement.UID)
 
-			// The source has left rotation but the settle wait keeps it alive:
-			// the surge is past its point of no return.
+			// The source has left rotation and is still alive: the surge is
+			// past its point of no return.
 			source := &corev1.Pod{}
 			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
 				Namespace: ns.Name, Name: sourcePod,
@@ -107,26 +103,34 @@ var _ = ginkgo.Describe("behavior — update strategy edited mid-surge", ginkgo.
 			g.Expect(podIsReady(source)).To(BeFalse())
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		ginkgo.By("editing the strategy to InPlaceIfPossible inside the settle window")
+		ginkgo.By("editing the strategy to InPlaceIfPossible inside the drain")
 		Eventually(func(g Gomega) {
 			cur := freshISVC(g, ns.Name, isvcName)
 			cur.Spec.Engine.Lifecycle.UpdateStrategy.Type = v1beta1.UpdateStrategyInPlaceIfPossible
 			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
-		// Proves the edit landed while the cycle was still in its settle step.
-		// Without this the spec would pass vacuously if the surge had already
-		// finished on its own.
+		// Proves the edit landed while the source was still up. Without this
+		// the spec would pass vacuously if the surge had already finished on
+		// its own.
 		Expect(k8sClient.Get(suiteCtx, client.ObjectKey{
 			Namespace: ns.Name, Name: sourcePod,
 		}, &corev1.Pod{})).To(Succeed(),
-			"source was already deleted before the edit landed; the settle window was missed")
+			"source was already deleted before the edit landed; the drain window was missed")
 
 		ginkgo.By("expecting the surge cycle to finish rather than hand over mid-flight")
 		Eventually(func(g Gomega) {
+			source := &corev1.Pod{}
 			err := k8sClient.Get(suiteCtx, client.ObjectKey{
 				Namespace: ns.Name, Name: sourcePod,
-			}, &corev1.Pod{})
+			}, source)
+			if err == nil && source.DeletionTimestamp != nil {
+				// Whenever the going pod is observable it must be leaving on
+				// its own termination grace: a zero here would mean the drain
+				// force-deleted it.
+				g.Expect(source.DeletionGracePeriodSeconds).NotTo(HaveValue(BeZero()),
+					"the drained source must be deleted gracefully, never forced")
+			}
 			g.Expect(err).To(HaveOccurred(),
 				"drained source survived: it is held out of rotation by a surge drain entry "+
 					"that only its deletion releases, and the Instance is left at two pods")

@@ -37,13 +37,6 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
-// ratioGateRequeueInterval is short enough that a peer Component
-// catching up next reconcile unblocks this one promptly; long
-// enough not to spam the apiserver. Unlike the Create, Restart, Migrate, and
-// Update intervals or the configured scale-down cadence and deadlines, this
-// pacing is dispatcher-owned.
-const ratioGateRequeueInterval = 3 * time.Second
-
 // Reconcile drives one workload (one Component of one owner) toward its
 // desired state. The caller constructs a fully populated ReconcileInput
 // + Deps + plan + target and calls Reconcile once per per-Component
@@ -107,6 +100,12 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 	if input.PromoteWindow == nil {
 		input.PromoteWindow = &PromoteWindow{}
 	}
+	// One held-work sink per pass, for the same reason: an operator
+	// supplying a missing configuration key raises no watch event, so a
+	// pass that held work on it deposits its wake-up here.
+	if input.PassWake == nil {
+		input.PassWake = &PassWake{}
+	}
 
 	// Teardown mode: the owner is being deleted. The planned index set is
 	// treated as empty so every observed Instance is a scale-down extra
@@ -149,8 +148,8 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 		return ctrl.Result{}, perr
 	}
 	res, err := Execute(ctx, deps, input, plan, target, snapshot, decision)
-	res = foldRetryAfter(res, input.PromoteWindow.Pending())
-	return floorRetryAfter(res, input.Pacing.Throttle()), err
+	res = input.PassWake.Fold(FoldPassRequeue(res, input.PromoteWindow.Pending()))
+	return FloorPassRequeue(res, input.Pacing.Throttle()), err
 }
 
 // Execute applies the Decision: the op-pass action loop, then — when
@@ -267,11 +266,11 @@ func executeActions(ctx context.Context, deps Deps, input ReconcileInput, plan C
 			// stands, so no watch event is coming to re-consult on; the
 			// pass has to carry the wake-up itself.
 			if anyRestarting || held != nil {
-				interval := workloadops.RestartRequeueInterval
+				interval := workloadops.RestartRequeueInterval(input)
 				if !anyRestarting {
-					interval = ratioGateRequeueInterval
+					interval = input.Requeue.Gate
 				}
-				result := ctrl.Result{RequeueAfter: interval}
+				result := PassRequeue(interval)
 				if hasActionKind(d.Actions[actionIndex+1:], ActionCreate) {
 					// Surge-free indices are materialized even when another
 					// Instance's restart failed or was held this pass: a
@@ -282,7 +281,10 @@ func executeActions(ctx context.Context, deps Deps, input ReconcileInput, plan C
 						restartErrs = append(restartErrs, fmt.Errorf("workload.Reconcile: create fresh indices during restart: %w", ferr))
 						return createResult, false, errors.Join(restartErrs...)
 					}
-					result = foldRetryAfter(createResult, interval)
+					// The create pass may carry an earlier explicit wake-up;
+					// the restart's own cadence must survive an all-ready
+					// create that asks for none.
+					result = PassRequeue(interval, createResult.RequeueAfter)
 				}
 				if len(restartErrs) > 0 {
 					return ctrl.Result{}, false, errors.Join(restartErrs...)
@@ -346,7 +348,7 @@ func executeActions(ctx context.Context, deps Deps, input ReconcileInput, plan C
 			}
 			if !done && accepted {
 				// Mid-flight: requeue at the per-op interval.
-				return ctrl.Result{RequeueAfter: workloadops.MigrateRequeueInterval}, false, nil
+				return PassRequeue(workloadops.MigrateRequeueInterval(input)), false, nil
 			}
 			if done {
 				// Migrate just removed the source InstanceStatus and
@@ -381,7 +383,7 @@ func executeActions(ctx context.Context, deps Deps, input ReconcileInput, plan C
 			if cerr != nil {
 				return res, false, cerr
 			}
-			return foldRetryAfter(res, d.RequeueAfter), false, nil
+			return FoldPassRequeue(res, d.RequeueAfter), false, nil
 		}
 	}
 
@@ -448,8 +450,7 @@ func scaleDownPollResult(input ReconcileInput, policyRequeueAfter time.Duration,
 	if policyDeadlineDue {
 		return ctrl.Result{Requeue: true}
 	}
-	result := foldRetryAfter(ctrl.Result{}, input.ScaleDownRequeueInterval)
-	return foldRetryAfter(result, policyRequeueAfter)
+	return FoldPassRequeue(ctrl.Result{}, input.ScaleDownRequeueInterval, policyRequeueAfter)
 }
 
 func scaleDownExtras(d Decision) map[int32]struct{} {
@@ -651,10 +652,10 @@ func executeUpdatePass(ctx context.Context, deps Deps, input ReconcileInput, pla
 		}
 	}
 	if anyUpdating {
-		return foldRetryAfter(ctrl.Result{RequeueAfter: workloadops.UpdateRequeueInterval}, retryBlockWait), true, nil
+		return PassRequeue(workloadops.UpdateRequeueInterval(input), retryBlockWait), true, nil
 	}
 	if anyGated {
-		return foldRetryAfter(ctrl.Result{RequeueAfter: ratioGateRequeueInterval}, retryBlockWait), true, nil
+		return PassRequeue(input.Requeue.Gate, retryBlockWait), true, nil
 	}
 	// All Updates that ran returned done=true (steady-state for those
 	// instances). Requeue without running Create so the next pass
@@ -689,38 +690,6 @@ func hasDeleteOwnedInstance(statuses []InstanceStatus) bool {
 		}
 	}
 	return false
-}
-
-// foldRetryAfter folds a RetryBlock re-evaluation wake-up into res.
-// Additive only: an immediate requeue or an already-earlier
-// RequeueAfter wins; otherwise take the min. Never removes a wake-up.
-func foldRetryAfter(res ctrl.Result, retryAfter time.Duration) ctrl.Result {
-	if retryAfter <= 0 {
-		return res
-	}
-	if res.Requeue && res.RequeueAfter == 0 {
-		// Immediate requeue is sooner than any positive retryAfter.
-		return res
-	}
-	if res.RequeueAfter == 0 || retryAfter < res.RequeueAfter {
-		res.RequeueAfter = retryAfter
-	}
-	return res
-}
-
-// floorRetryAfter raises res's wake-up to at least retryAfter. Used for a
-// delay the apiserver itself asked for: unlike foldRetryAfter's min, a
-// server-suggested Retry-After is a FLOOR — waking sooner just re-earns
-// the rejection. An immediate requeue is left alone; the caller's own
-// reasons to come straight back outrank a pacing hint.
-func floorRetryAfter(res ctrl.Result, retryAfter time.Duration) ctrl.Result {
-	if retryAfter <= 0 || res.Requeue {
-		return res
-	}
-	if retryAfter > res.RequeueAfter {
-		res.RequeueAfter = retryAfter
-	}
-	return res
 }
 
 // liveObservePods performs the selector-scoped live-role List.

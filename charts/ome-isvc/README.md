@@ -427,7 +427,6 @@ deployments:
             partition: 0           # canary hold: skip indices < partition
             maxUnavailable: 1      # max Instances allowed non-Ready during rollout
           inPlaceUpdateStrategy:
-            gracePeriodSeconds: 30          # wait between marking not-ready and mutating
             markNotReadyDuringLifecycle: true  # drain via EndpointSlice before mutating
         readyPolicy: None         # None (single-pod default) | AllPodReady (multi-pod default)
         instanceReadyTimeout: 30m # Go-style duration string
@@ -443,7 +442,6 @@ When `lifecycle:` is omitted, the controller defaulter stamps:
 | -------------------------------------------------- | ----------------------- | --------------------------------- |
 | `restartPolicy`                                    | `None`                  | `RecreateInstanceOnPodRestart`    |
 | `updateStrategy.type`                              | `SurgeThenDrain`        | `SurgeThenDrain`                  |
-| `updateStrategy.inPlaceUpdateStrategy.gracePeriodSeconds` | `30`             | `30`                              |
 | `updateStrategy.inPlaceUpdateStrategy.markNotReadyDuringLifecycle` | `true`  | `true`                            |
 | `readyPolicy`                                      | `None`                  | `AllPodReady`                     |
 | `instanceReadyTimeout`                             | `30m`                   | `30m`                             |
@@ -461,8 +459,7 @@ Every key is optional and emitted only when set. Specifically:
 - `updateStrategy:` emits only if `type`, `rollingUpdate.*`, or
   `inPlaceUpdateStrategy.*` is set.
 - `rollingUpdate:` emits only if `partition` or `maxUnavailable` is set.
-- `inPlaceUpdateStrategy:` emits only if `gracePeriodSeconds` or
-  `markNotReadyDuringLifecycle` is set.
+- `inPlaceUpdateStrategy:` emits only if `markNotReadyDuringLifecycle` is set.
 - `migrationPolicy:` emits only if `mode` is set.
 
 This avoids producing empty `lifecycle: {}` / `updateStrategy: {}` maps

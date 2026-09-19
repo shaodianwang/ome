@@ -30,12 +30,11 @@ const (
 	// by step name alone (the surge contributes an extra pod alive —
 	// the unavailability gate doesn't apply; the surge gate does).
 	updateStepSurgeDrain = workload.UpdateStepSurgeDrain
-	// updateStepSurgeDrainSettle is entered after EndpointSlice confirms
-	// the old pod is ineligible for new traffic. The controller
-	// keeps the pod alive in this step so persistent load-balancer
-	// connections can age out while both the router and its workers are
-	// still available, then deletes it after the configured grace period.
-	updateStepSurgeDrainSettle = "SurgeDrainSettle"
+	// updateStepSurgeDrainSettle is read for compatibility and never
+	// written: a row an earlier build persisted here had its drain
+	// confirmed, and the surge machine treats it exactly like
+	// SurgeDrain — the source is deleted on the pass that observes it.
+	updateStepSurgeDrainSettle = workload.UpdateStepSurgeDrainSettle
 )
 
 // UpdateStepInPlace is the exported alias for the in-place step name.
@@ -53,8 +52,8 @@ const UpdateStepSurge = updateStepSurge
 // UpdateStepSurgeDrain is the exported alias for the surge-drain step name.
 const UpdateStepSurgeDrain = updateStepSurgeDrain
 
-// UpdateStepSurgeDrainSettle is the exported alias for the post-unroute
-// connection-settle step.
+// UpdateStepSurgeDrainSettle is the exported alias for the step value
+// an earlier build persisted; it is read, never written.
 const UpdateStepSurgeDrainSettle = updateStepSurgeDrainSettle
 
 func isSurgeUpdateStep(step string) bool {
@@ -287,40 +286,6 @@ func patchInstanceStatusSurgeStepDrain(ctx context.Context, input workload.Recon
 			return false
 		}
 		s.Operation.Step = updateStepSurgeDrain
-		s.Operation.LastProgressAt = now
-		return true
-	})
-}
-
-// patchInstanceStatusSurgeStepSettle records the instant EndpointSlice
-// convergence was first observed. LastProgressAt is the durable start of the
-// connection-settle interval, so controller restarts do not shorten the wait.
-func patchInstanceStatusSurgeStepSettle(ctx context.Context, input workload.ReconcileInput, idx int32) error {
-	now := metav1.NewTime(input.Now())
-	return input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
-		if s.Operation == nil || s.Operation.Type != workload.InstanceOperationUpdate {
-			return false
-		}
-		if s.Operation.Step == updateStepSurgeDrainSettle {
-			return false
-		}
-		s.Operation.Step = updateStepSurgeDrainSettle
-		s.Operation.LastProgressAt = now
-		return true
-	})
-}
-
-// patchInstanceStatusSurgeSettleRearm restarts the connection-settle
-// interval from now for an attempt already on the settle step. A hold
-// ages no connections, so the interval a released hold resumes into is a
-// full one rather than the remainder of the one it interrupted.
-func patchInstanceStatusSurgeSettleRearm(ctx context.Context, input workload.ReconcileInput, idx int32) error {
-	now := metav1.NewTime(input.Now())
-	return input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
-		if s.Operation == nil || s.Operation.Type != workload.InstanceOperationUpdate ||
-			s.Operation.Step != updateStepSurgeDrainSettle {
-			return false
-		}
 		s.Operation.LastProgressAt = now
 		return true
 	})

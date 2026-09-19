@@ -1,0 +1,15 @@
+# Provenance for the instance-machine cells an owner decided in the review
+# session of 2026-09-19, which removed the surge settle window: a drained
+# source is deleted on the pass its drain converges, and the pod's own
+# terminationGracePeriodSeconds and preStop carry the in-flight work. The
+# Update/SurgeDrainSettle state and its cells left the table with it.
+# Selectors match the cells files exactly: an empty variants, windows or
+# transition matches all of them.
+history:
+
+  # --- cells-update-surge.yaml ---
+  - {state: Update/SurgeDrain, event: pod.servingOff, variants: [source], windows: [before], transition: "", decision: owner-review-2026-09-19}
+  - {state: Update/SurgeDrain, event: pod.servingOff, variants: [source], windows: [boundary, after], transition: "", decision: owner-review-2026-09-19}
+  - {state: Update/SurgeDrain, event: endpoint.rotationOut, variants: [source], windows: [before], transition: "", decision: owner-review-2026-09-19}
+  - {state: Update/SurgeDrain, event: endpoint.rotationOut, variants: [source], windows: [boundary, after], transition: "", decision: owner-review-2026-09-19}
+  - {state: Update/SurgeDrain, event: spec.pauseTrue, variants: [], windows: [], transition: "", decision: owner-review-2026-09-19}

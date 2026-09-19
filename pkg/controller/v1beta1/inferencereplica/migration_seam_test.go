@@ -171,7 +171,7 @@ func TestSyncMigrationEntries_SameNameReplacementAborts(t *testing.T) {
 	before := &v1beta1.InferenceReplica{}
 	g.Expect(c.Get(context.Background(), key, before)).To(gomega.Succeed())
 
-	err := r.syncMigrationEntries(context.Background(), r.Log, original, nil, migrationTestTimeout)
+	err := r.syncMigrationEntries(context.Background(), r.Log, original, nil, migrationTestTimeout, migrationTestRecordWindow)
 	g.Expect(errors.Is(err, workload.ErrStatusOwnerGone)).To(gomega.BeTrue())
 
 	got := &v1beta1.InferenceReplica{}
@@ -362,7 +362,7 @@ func TestSyncMigrationEntries_UpgradeImport(t *testing.T) {
 	cm := ledgerCMForOwner(t, parent.Name, parent.Namespace, ledger)
 	r, c, _, ir, parent := newConsumeFixture(t, ir, parent, cm)
 
-	g.Expect(r.syncMigrationEntries(context.Background(), r.Log, ir, parent, migrationTestTimeout)).To(gomega.Succeed())
+	g.Expect(r.syncMigrationEntries(context.Background(), r.Log, ir, parent, migrationTestTimeout, migrationTestRecordWindow)).To(gomega.Succeed())
 
 	fresh := &v1beta1.InferenceReplica{}
 	key := types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace}
@@ -400,7 +400,7 @@ func TestSyncMigrationEntries_UpgradeImport(t *testing.T) {
 
 	// Idempotent: second pass adds nothing.
 	rvBefore := fresh.ResourceVersion
-	g.Expect(r.syncMigrationEntries(context.Background(), r.Log, ir, parent, migrationTestTimeout)).To(gomega.Succeed())
+	g.Expect(r.syncMigrationEntries(context.Background(), r.Log, ir, parent, migrationTestTimeout, migrationTestRecordWindow)).To(gomega.Succeed())
 	after := &v1beta1.InferenceReplica{}
 	g.Expect(c.Get(context.Background(), key, after)).To(gomega.Succeed())
 	g.Expect(after.Status.Migrations).To(gomega.HaveLen(2))
@@ -416,7 +416,7 @@ func TestSyncMigrationEntries_UpgradeImport(t *testing.T) {
 // non-terminal entries (however old) are kept.
 func TestSyncMigrationEntries_TrimsAgedTerminal(t *testing.T) {
 	g := gomega.NewWithT(t)
-	old := metav1.NewTime(migrationTestNow.Add(-audit.CapacityRateWindow - time.Hour))
+	old := metav1.NewTime(migrationTestNow.Add(-migrationTestRecordWindow - time.Hour))
 	recent := metav1.NewTime(migrationTestNow.Add(-time.Minute))
 
 	mk := func(uuid string, phase v1beta1.MigrationPhase, completedAt *metav1.Time) v1beta1.MigrationStatus {
@@ -462,7 +462,7 @@ func TestSyncMigrationEntries_TrimsAgedTerminal(t *testing.T) {
 	cm := ledgerCMForOwner(t, parent.Name, parent.Namespace, ledger)
 	r, c, _, ir, parent := newConsumeFixture(t, ir, parent, cm)
 
-	g.Expect(r.syncMigrationEntries(context.Background(), r.Log, ir, parent, migrationTestTimeout)).To(gomega.Succeed())
+	g.Expect(r.syncMigrationEntries(context.Background(), r.Log, ir, parent, migrationTestTimeout, migrationTestRecordWindow)).To(gomega.Succeed())
 
 	fresh := &v1beta1.InferenceReplica{}
 	g.Expect(c.Get(context.Background(), types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace}, fresh)).To(gomega.Succeed())
@@ -489,7 +489,7 @@ func TestSyncMigrationEntries_TrimsAgedTerminal(t *testing.T) {
 // HasCompletedOrFailedRequest.
 func TestSyncMigrationEntries_TrimRequiresLedgerTerminal_NoResurrection(t *testing.T) {
 	g := gomega.NewWithT(t)
-	old := metav1.NewTime(migrationTestNow.Add(-audit.CapacityRateWindow - time.Hour))
+	old := metav1.NewTime(migrationTestNow.Add(-migrationTestRecordWindow - time.Hour))
 	rowTime := old.Time.UTC().Format(time.RFC3339)
 
 	// Ledger: only the Started row — the terminal mirror never landed.
@@ -512,7 +512,7 @@ func TestSyncMigrationEntries_TrimRequiresLedgerTerminal_NoResurrection(t *testi
 	// particular NEVER resurrected as an Accepted import (a trim that
 	// freed the UUID would let the import re-synthesize it Accepted in
 	// the same pass).
-	g.Expect(r.syncMigrationEntries(context.Background(), r.Log, ir, parent, migrationTestTimeout)).To(gomega.Succeed())
+	g.Expect(r.syncMigrationEntries(context.Background(), r.Log, ir, parent, migrationTestTimeout, migrationTestRecordWindow)).To(gomega.Succeed())
 	fresh := &v1beta1.InferenceReplica{}
 	g.Expect(c.Get(context.Background(), key, fresh)).To(gomega.Succeed())
 	g.Expect(fresh.Status.Migrations).To(gomega.HaveLen(1))
@@ -528,7 +528,7 @@ func TestSyncMigrationEntries_TrimRequiresLedgerTerminal_NoResurrection(t *testi
 
 	// Pass 2: the trim proceeds and the import does NOT resurrect —
 	// HasCompletedOrFailedRequest blocks the Started row.
-	g.Expect(r.syncMigrationEntries(context.Background(), r.Log, ir, parent, migrationTestTimeout)).To(gomega.Succeed())
+	g.Expect(r.syncMigrationEntries(context.Background(), r.Log, ir, parent, migrationTestTimeout, migrationTestRecordWindow)).To(gomega.Succeed())
 	after := &v1beta1.InferenceReplica{}
 	g.Expect(c.Get(context.Background(), key, after)).To(gomega.Succeed())
 	g.Expect(after.Status.Migrations).To(gomega.BeEmpty(),

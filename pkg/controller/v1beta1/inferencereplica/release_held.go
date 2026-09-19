@@ -38,7 +38,7 @@ import (
 // Exhausted conflict retries on the annotation delete return
 // requeue=true; the request re-answers next pass. Events land on the
 // parent ISVC when resolvable (the user-facing stream), else the IR.
-func (r *Reconciler) consumeReleaseHeldRequest(ctx context.Context, log logr.Logger, ir *v1beta1.InferenceReplica, parent *v1beta1.InferenceService) (requeue bool, err error) {
+func (r *Reconciler) consumeReleaseHeldRequest(ctx context.Context, log logr.Logger, ir *v1beta1.InferenceReplica, parent *v1beta1.InferenceService, retryBlockHistoryLimit *int32) (requeue bool, err error) {
 	val, present := ir.Annotations[constants.ReleaseHeldRevisionAnnotationKey]
 	if !present {
 		return false, nil
@@ -68,7 +68,7 @@ func (r *Reconciler) consumeReleaseHeldRequest(ctx context.Context, log logr.Log
 		}
 	default:
 		rev := match.TargetRevision
-		if rerr := buildMutateRetryBlock(r.statusWriter(), r.liveReader(), ir)(ctx, rev, func(*workload.RetryBlock) workload.RetryBlockDisposition {
+		if rerr := buildMutateRetryBlock(r.statusWriter(), r.liveReader(), ir, retryBlockHistoryLimit)(ctx, rev, func(*workload.RetryBlock) workload.RetryBlockDisposition {
 			return workload.RetryBlockRemove
 		}); rerr != nil {
 			// Annotation NOT consumed: the request re-drives the removal

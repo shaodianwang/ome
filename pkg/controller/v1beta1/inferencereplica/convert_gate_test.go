@@ -118,7 +118,7 @@ func TestBuildReconcileInput_WiresSequentialGate(t *testing.T) {
 
 	parent := mkSequentialParent()
 
-	input := r.buildReconcileInput(context.Background(), engineIR, parent, nil, nil, lifecycleGraces{}, 0, coordination.GroupDefaults{})
+	input := r.buildReconcileInput(context.Background(), engineIR, parent, nil, nil, lifecycleSettings{}, 0, coordination.GroupDefaults{})
 	g.Expect(input.UpdateGate).NotTo(gomega.BeNil(),
 		"UpdateGate must be wired on the IR path when the parent declares coordination")
 
@@ -154,7 +154,7 @@ func TestBuildReconcileInput_SequentialReleasesActiveComponent(t *testing.T) {
 
 	parent := mkSequentialParent()
 
-	input := r.buildReconcileInput(context.Background(), engineIR, parent, nil, nil, lifecycleGraces{}, 0, coordination.GroupDefaults{})
+	input := r.buildReconcileInput(context.Background(), engineIR, parent, nil, nil, lifecycleSettings{}, 0, coordination.GroupDefaults{})
 	g.Expect(input.UpdateGate).NotTo(gomega.BeNil())
 
 	allowed, _, _ := input.UpdateGate(workload.UpdateStrategySurgeThenDrain, 0, 0)
@@ -171,7 +171,7 @@ func TestBuildReconcileInput_NilParentLeavesGateNil(t *testing.T) {
 	r, _ := newReconciler(t)
 	engineIR := baselineIR("llama-engine", "default", 1)
 
-	input := r.buildReconcileInput(context.Background(), engineIR, nil, nil, nil, lifecycleGraces{}, 0, coordination.GroupDefaults{})
+	input := r.buildReconcileInput(context.Background(), engineIR, nil, nil, nil, lifecycleSettings{}, 0, coordination.GroupDefaults{})
 	g.Expect(input.UpdateGate).To(gomega.BeNil(),
 		"no parent ⇒ no coordination to enforce ⇒ gate stays nil")
 }
@@ -192,7 +192,7 @@ func TestBuildReconcileInput_WiresMigrationWhenParentSet(t *testing.T) {
 	}}
 
 	parent := mkSequentialParent() // any non-nil ISVC named "llama"
-	input := r.buildReconcileInput(context.Background(), engineIR, parent, nil, nil, lifecycleGraces{}, 0, coordination.GroupDefaults{})
+	input := r.buildReconcileInput(context.Background(), engineIR, parent, nil, nil, lifecycleSettings{}, 0, coordination.GroupDefaults{})
 
 	g.Expect(input.MutateMigration).NotTo(gomega.BeNil(),
 		"MutateMigration must be wired on the IR path")
@@ -208,7 +208,7 @@ func TestBuildReconcileInput_WiresMigrationWhenParentSet(t *testing.T) {
 
 	// Nil parent ⇒ ledger falls back to the IR (workload-side owner
 	// resolution); the migration seam stays wired.
-	nilInput := r.buildReconcileInput(context.Background(), engineIR, nil, nil, nil, lifecycleGraces{}, 0, coordination.GroupDefaults{})
+	nilInput := r.buildReconcileInput(context.Background(), engineIR, nil, nil, nil, lifecycleSettings{}, 0, coordination.GroupDefaults{})
 	g.Expect(nilInput.MutateMigration).NotTo(gomega.BeNil())
 	g.Expect(nilInput.AppendMigration).NotTo(gomega.BeNil())
 	g.Expect(nilInput.LedgerOwner).To(gomega.BeNil())
@@ -305,7 +305,7 @@ func TestBuildReconcileInput_GateReadsFreshPeerStatus(t *testing.T) {
 	// serving (4/4), which is the lagged irprojector rollup.
 	parent := mkRatioParent(25, 4, 4)
 
-	input := r.buildReconcileInput(context.Background(), engineIR, parent, nil, nil, lifecycleGraces{}, 0, coordination.GroupDefaults{})
+	input := r.buildReconcileInput(context.Background(), engineIR, parent, nil, nil, lifecycleSettings{}, 0, coordination.GroupDefaults{})
 	g.Expect(input.UpdateGate).NotTo(gomega.BeNil())
 
 	allowed, gate, reason := input.UpdateGate(workload.UpdateStrategySurgeThenDrain, 0, 0)
@@ -336,7 +336,7 @@ func TestBuildReconcileInput_GateFreshPeerReleasesWhenBalanced(t *testing.T) {
 	// gate prefers the fresh peer IR): decoder projected at 3/4.
 	parent := mkRatioParent(25, 4, 3)
 
-	input := r.buildReconcileInput(context.Background(), engineIR, parent, nil, nil, lifecycleGraces{}, 0, coordination.GroupDefaults{})
+	input := r.buildReconcileInput(context.Background(), engineIR, parent, nil, nil, lifecycleSettings{}, 0, coordination.GroupDefaults{})
 	g.Expect(input.UpdateGate).NotTo(gomega.BeNil())
 
 	allowed, _, reason := input.UpdateGate(workload.UpdateStrategySurgeThenDrain, 0, 0)
@@ -367,7 +367,7 @@ func TestBuildReconcileInput_RatioRecoveryStartsFromAuthoritativeZero(t *testing
 	parent := mkRatioParent(25, 4, 1)
 	maxSurge := intstr.FromInt32(4)
 	parent.Spec.Rollout.Groups[0].RollingUpdate.MaxSurge = &maxSurge
-	input := r.buildReconcileInput(context.Background(), engineIR, parent, nil, nil, lifecycleGraces{}, 0, coordination.GroupDefaults{})
+	input := r.buildReconcileInput(context.Background(), engineIR, parent, nil, nil, lifecycleSettings{}, 0, coordination.GroupDefaults{})
 	g.Expect(input.UpdateGate).NotTo(gomega.BeNil())
 
 	allowed, _, reason := input.UpdateGate(workload.UpdateStrategySurgeThenDrain, 0, 0)
@@ -412,7 +412,7 @@ func TestBuildReconcileInput_SequentialGateReadsFreshPeerStatus(t *testing.T) {
 	setObservedGen(parent, v1beta1.DecoderComponent, 2)
 	setObservedGen(parent, v1beta1.EngineComponent, 2)
 
-	input := r.buildReconcileInput(context.Background(), engineIR, parent, nil, nil, lifecycleGraces{}, 0, coordination.GroupDefaults{})
+	input := r.buildReconcileInput(context.Background(), engineIR, parent, nil, nil, lifecycleSettings{}, 0, coordination.GroupDefaults{})
 	g.Expect(input.UpdateGate).NotTo(gomega.BeNil())
 
 	allowed, _, reason := input.UpdateGate(workload.UpdateStrategySurgeThenDrain, 0, 0)
@@ -435,11 +435,11 @@ func TestBuildReconcileInput_ThreadsGangSchedulingAvailable(t *testing.T) {
 	engineIR := baselineIR("llama-engine", "default", 1)
 
 	r.GangSchedulingAvailable = true
-	g.Expect(r.buildReconcileInput(context.Background(), engineIR, nil, nil, nil, lifecycleGraces{}, 0, coordination.GroupDefaults{}).DesiredSpec.GangSchedulingAvailable).To(gomega.BeTrue(),
+	g.Expect(r.buildReconcileInput(context.Background(), engineIR, nil, nil, nil, lifecycleSettings{}, 0, coordination.GroupDefaults{}).DesiredSpec.GangSchedulingAvailable).To(gomega.BeTrue(),
 		"DesiredSpec.GangSchedulingAvailable must follow the controller flag (true) so EnsurePodGroups runs")
 
 	r.GangSchedulingAvailable = false
-	g.Expect(r.buildReconcileInput(context.Background(), engineIR, nil, nil, nil, lifecycleGraces{}, 0, coordination.GroupDefaults{}).DesiredSpec.GangSchedulingAvailable).To(gomega.BeFalse(),
+	g.Expect(r.buildReconcileInput(context.Background(), engineIR, nil, nil, nil, lifecycleSettings{}, 0, coordination.GroupDefaults{}).DesiredSpec.GangSchedulingAvailable).To(gomega.BeFalse(),
 		"flag false ⇒ DesiredSpec false ⇒ EnsurePodGroups skips (CRD absent / degradation surface)")
 }
 
@@ -503,7 +503,7 @@ func TestBuildReconcileInput_ParentPauseAnnotationIsAuthoritative(t *testing.T) 
 			engineIR := baselineIR("llama-engine", "default", 1)
 			engineIR.Spec.Paused = tc.irPaused
 			engineIR.Spec.PauseMode = tc.irPauseMode
-			desired := r.buildReconcileInput(context.Background(), engineIR, tc.parent, nil, nil, lifecycleGraces{}, 0, coordination.GroupDefaults{}).DesiredSpec
+			desired := r.buildReconcileInput(context.Background(), engineIR, tc.parent, nil, nil, lifecycleSettings{}, 0, coordination.GroupDefaults{}).DesiredSpec
 			if desired.Paused != tc.wantPaused {
 				t.Fatalf("DesiredSpec.Paused: got %v want %v", desired.Paused, tc.wantPaused)
 			}
@@ -570,7 +570,7 @@ func TestBuildReconcileInput_GateUsesFreshIRStatus(t *testing.T) {
 	}
 	pinRun(parent)
 
-	input := r.buildReconcileInput(context.Background(), engineIR, parent, nil, nil, lifecycleGraces{}, 0, coordination.GroupDefaults{})
+	input := r.buildReconcileInput(context.Background(), engineIR, parent, nil, nil, lifecycleSettings{}, 0, coordination.GroupDefaults{})
 	g.Expect(input.UpdateGate).NotTo(gomega.BeNil())
 
 	allowed, _, reason := input.UpdateGate(workload.UpdateStrategyRecreatePod, 0, 0)

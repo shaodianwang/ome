@@ -82,7 +82,7 @@ func TestConsumeReleaseHeld_FullNameReleasesHeldBlock(t *testing.T) {
 	g := gomega.NewWithT(t)
 	r, c, rec, ir := newReleaseFixture(t, releaseIR("llama-engine-aaaaaaaa"))
 
-	requeue, err := r.consumeReleaseHeldRequest(context.Background(), r.Log, ir, nil)
+	requeue, err := r.consumeReleaseHeldRequest(context.Background(), r.Log, ir, nil, nil)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(requeue).To(gomega.BeFalse())
 
@@ -113,7 +113,7 @@ func TestConsumeReleaseHeld_BareHashMatches(t *testing.T) {
 	g := gomega.NewWithT(t)
 	r, c, rec, ir := newReleaseFixture(t, releaseIR("aaaaaaaa"))
 
-	requeue, err := r.consumeReleaseHeldRequest(context.Background(), r.Log, ir, nil)
+	requeue, err := r.consumeReleaseHeldRequest(context.Background(), r.Log, ir, nil, nil)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(requeue).To(gomega.BeFalse())
 
@@ -134,7 +134,7 @@ func TestConsumeReleaseHeld_NonHeldMatch_NoOpConsumed(t *testing.T) {
 	g := gomega.NewWithT(t)
 	r, c, rec, ir := newReleaseFixture(t, releaseIR("llama-engine-bbbbbbbb"))
 
-	requeue, err := r.consumeReleaseHeldRequest(context.Background(), r.Log, ir, nil)
+	requeue, err := r.consumeReleaseHeldRequest(context.Background(), r.Log, ir, nil, nil)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(requeue).To(gomega.BeFalse())
 
@@ -159,7 +159,7 @@ func TestConsumeReleaseHeld_UnknownRevision_NoOpConsumed(t *testing.T) {
 	g := gomega.NewWithT(t)
 	r, c, rec, ir := newReleaseFixture(t, releaseIR("llama-engine-cccccccc"))
 
-	requeue, err := r.consumeReleaseHeldRequest(context.Background(), r.Log, ir, nil)
+	requeue, err := r.consumeReleaseHeldRequest(context.Background(), r.Log, ir, nil, nil)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(requeue).To(gomega.BeFalse())
 
@@ -183,7 +183,7 @@ func TestConsumeReleaseHeld_NoAnnotation_NoOp(t *testing.T) {
 	r, c, rec, fresh0 := newReleaseFixture(t, ir)
 	rv := fresh0.ResourceVersion
 
-	requeue, err := r.consumeReleaseHeldRequest(context.Background(), r.Log, fresh0, nil)
+	requeue, err := r.consumeReleaseHeldRequest(context.Background(), r.Log, fresh0, nil, nil)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(requeue).To(gomega.BeFalse())
 
@@ -202,7 +202,7 @@ func TestConsumeReleaseHeld_ParentIsEventTarget(t *testing.T) {
 	r, c, rec, ir := newReleaseFixture(t, releaseIR("llama-engine-aaaaaaaa"))
 	parent := migrationParent(nil, false)
 
-	requeue, err := r.consumeReleaseHeldRequest(context.Background(), r.Log, ir, parent)
+	requeue, err := r.consumeReleaseHeldRequest(context.Background(), r.Log, ir, parent, nil)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(requeue).To(gomega.BeFalse())
 

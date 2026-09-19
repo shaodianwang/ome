@@ -14,7 +14,6 @@ import (
 
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
@@ -126,7 +125,7 @@ func TestReconcileDeleteOwnedReboundFinishesBeforeRecreate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("recreate pass: %v", err)
 	}
-	if result.RequeueAfter != ops.CreateRequeueInterval {
+	if result.RequeueAfter != testRequeueIntervals.Operation {
 		t.Fatalf("recreate pass result = %+v", result)
 	}
 	status = store.status(0)

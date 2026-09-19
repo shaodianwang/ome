@@ -9,7 +9,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
-	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
@@ -186,8 +185,28 @@ func TestRestartPass_NoErrors_RequeuesAndCreatesFreshIndices(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	if res.Requeue || res.RequeueAfter != workloadops.RestartRequeueInterval {
+	if res.Requeue || res.RequeueAfter != testRequeueIntervals.Operation { //nolint:staticcheck // a configured cadence must not also set the bare flag
 		t.Fatalf("the restart pass must requeue at the restart interval; got %+v", res)
+	}
+
+	// The same pass with no configured cadence still carries a wake-up:
+	// a restart the pass opened has nothing in the cluster to announce
+	// its next step, and a fresh create that asks for no wake of its own
+	// must not erase it.
+	unconfigured := newRestartHarness(t, 2)
+	unconfigured.requeue = workload.RequeueIntervals{}
+	unconfigured.losePods(0, 1)
+	unconfigured.replicas = 3
+	unconfigured.setTarget(unconfigured.revV1, goodImage)
+	res, err = unconfigured.stepResult()
+	if err != nil {
+		t.Fatalf("Reconcile with no configured cadence: %v", err)
+	}
+	if res.RequeueAfter != 0 {
+		t.Fatalf("unconfigured cadence: got RequeueAfter %v want 0", res.RequeueAfter)
+	}
+	if !res.Requeue { //nolint:staticcheck // the bare backoff is what this asserts
+		t.Fatalf("a restart pass with no cadence must still wake; got %+v", res)
 	}
 	for _, idx := range []int32{0, 1} {
 		if s := h.instance(idx); s == nil || s.Phase != workload.InstancePhaseRestarting ||

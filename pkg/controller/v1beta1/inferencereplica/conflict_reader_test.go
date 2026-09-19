@@ -93,7 +93,7 @@ func TestRetryClosuresReReadThroughLiveReader(t *testing.T) {
 
 	t.Run("MutateRetryBlock", func(t *testing.T) {
 		r, live, ir := newFixture(t)
-		err := buildMutateRetryBlock(r.statusWriter(), r.APIReader, ir)(ctx, "llama-engine-abc123",
+		err := buildMutateRetryBlock(r.statusWriter(), r.APIReader, ir, nil)(ctx, "llama-engine-abc123",
 			func(*workload.RetryBlock) workload.RetryBlockDisposition {
 				return workload.RetryBlockRemove
 			})

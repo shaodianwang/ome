@@ -647,8 +647,6 @@ func TestDefaultOMENativeComponent(t *testing.T) {
 		require.NotNil(t, spec.UpdateStrategy)
 		assert.Equal(t, v1beta1.UpdateStrategySurgeThenDrain, spec.UpdateStrategy.Type)
 		require.NotNil(t, spec.UpdateStrategy.InPlaceUpdateStrategy)
-		require.NotNil(t, spec.UpdateStrategy.InPlaceUpdateStrategy.GracePeriodSeconds)
-		assert.Equal(t, int32(30), *spec.UpdateStrategy.InPlaceUpdateStrategy.GracePeriodSeconds)
 		require.NotNil(t, spec.UpdateStrategy.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle)
 		assert.True(t, *spec.UpdateStrategy.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle)
 
@@ -712,22 +710,18 @@ func TestDefaultOMENativeComponent(t *testing.T) {
 
 	t.Run("OMENative + partial UpdateStrategy — only nil leaves filled", func(t *testing.T) {
 		customType := v1beta1.UpdateStrategyRecreatePod
-		customGrace := int32(60)
 		ext := &v1beta1.ComponentExtensionSpec{
 			Annotations: omenativeMode,
 			Lifecycle: &v1beta1.LifecycleSpec{
 				UpdateStrategy: &v1beta1.UpdateStrategy{
-					Type: customType,
-					InPlaceUpdateStrategy: &v1beta1.InPlaceUpdateStrategy{
-						GracePeriodSeconds: &customGrace,
-					},
+					Type:                  customType,
+					InPlaceUpdateStrategy: &v1beta1.InPlaceUpdateStrategy{},
 				},
 			},
 		}
 		defaultOMENativeComponent(ext, podShapeMulti, nil, testUpdateStrategyDefaults())
 
 		assert.Equal(t, v1beta1.UpdateStrategyRecreatePod, ext.Lifecycle.UpdateStrategy.Type)
-		assert.Equal(t, int32(60), *ext.Lifecycle.UpdateStrategy.InPlaceUpdateStrategy.GracePeriodSeconds)
 		// MarkNotReadyDuringLifecycle was nil → defaulted to true
 		require.NotNil(t, ext.Lifecycle.UpdateStrategy.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle)
 		assert.True(t, *ext.Lifecycle.UpdateStrategy.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle)

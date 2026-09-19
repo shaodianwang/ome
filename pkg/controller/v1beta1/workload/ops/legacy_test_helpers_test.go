@@ -222,6 +222,8 @@ func legacyTestInput(isvc *v1beta1.InferenceService, c client.Client, component 
 			InstanceStatuses: legacyInstanceStatuses(c, isvc, component),
 		},
 		MutateInstance: legacyMutateInstance(c, isvc, component),
+		// The dispatcher cadence a chart-configured deployment supplies.
+		Requeue: workload.RequeueIntervals{Operation: 5 * time.Second, Gate: 3 * time.Second},
 	}
 }
 

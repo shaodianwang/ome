@@ -20,8 +20,12 @@ import (
 )
 
 // CreateRequeueInterval is how long to wait before re-checking pod
-// readiness when an Instance is still coming up.
-const CreateRequeueInterval = 5 * time.Second
+// readiness when an Instance is still coming up, from the operator's
+// lifecycle.requeue.operation. Zero means unconfigured: the caller
+// requeues on the controller's rate-limited backoff instead.
+func CreateRequeueInterval(input workload.ReconcileInput) time.Duration {
+	return input.Requeue.Operation
+}
 
 // createStepCreatePods is the write-ahead marker for a committed Instance
 // materialization. The status mutation is persisted before any Pod create.
@@ -453,25 +457,24 @@ func createFilteredBatched(
 		i = j
 	}
 
-	res := ctrl.Result{}
-	if !allReady {
-		res.RequeueAfter = CreateRequeueInterval
-	}
-	if retryBlockWait > 0 && (res.RequeueAfter == 0 || retryBlockWait < res.RequeueAfter) {
-		res.RequeueAfter = retryBlockWait
-	}
-	if wait := input.PromoteWindow.Pending(); wait > 0 && (res.RequeueAfter == 0 || wait < res.RequeueAfter) {
-		res.RequeueAfter = wait
-	}
-	if wait := until(input.Now(), nodeDeathAt); wait > 0 && (res.RequeueAfter == 0 || wait < res.RequeueAfter) {
-		res.RequeueAfter = wait
+	// One wake-up for the pass: the earliest of the cadence (only while
+	// Instances are still coming up) and every explicit wait collected
+	// above. PassRequeue owns the precedence — an explicit wait always
+	// beats the bare rate-limited backoff. A pass with everything Ready
+	// and nothing due asks for no wake-up at all and waits on watches.
+	var res ctrl.Result
+	promoteWait := input.PromoteWindow.Pending()
+	nodeDeathWait := until(input.Now(), nodeDeathAt)
+	if !allReady || retryBlockWait > 0 || promoteWait > 0 || nodeDeathWait > 0 {
+		cadence := time.Duration(0)
+		if !allReady {
+			cadence = CreateRequeueInterval(input)
+		}
+		res = workload.PassRequeue(cadence, retryBlockWait, promoteWait, nodeDeathWait)
 	}
 	// A server-suggested throttle delay is a floor, not a preference:
 	// waking earlier just re-earns the 429.
-	if throttle := input.Pacing.Throttle(); throttle > res.RequeueAfter {
-		res.RequeueAfter = throttle
-	}
-	return res, nil
+	return workload.FloorPassRequeue(res, input.Pacing.Throttle()), nil
 }
 
 func processStartActions(

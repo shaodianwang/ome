@@ -9,7 +9,6 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/tests/integration/util"
 )
@@ -87,7 +86,7 @@ var _ = ginkgo.Describe("InferenceReplica pause circuit breaker", ginkgo.Ordered
 			g.Expect(rows).To(HaveLen(1))
 			g.Expect(rows[0].Phase).To(Equal(v1beta1.OMENativeInstancePending),
 				"the demotion must hold for the whole paused window")
-		}, 2*workloadops.CreateRequeueInterval, kindPollInterval).Should(Succeed())
+		}, kindSteadyStateWindow, kindPollInterval).Should(Succeed())
 
 		ginkgo.By("removing the parent InferenceService pause annotation")
 		Eventually(func(g Gomega) {

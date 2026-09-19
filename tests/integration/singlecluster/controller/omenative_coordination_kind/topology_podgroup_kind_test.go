@@ -9,7 +9,6 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
-	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/tests/integration/util"
@@ -97,7 +96,7 @@ var _ = ginkgo.Describe("OMENative multi-pod topology contract", ginkgo.Ordered,
 			}
 			g.Expect(got).To(ConsistOf(uids),
 				"toggling topologySpread must not roll or recreate any pod")
-		}, 2*workloadops.CreateRequeueInterval, kindPollInterval).Should(Succeed())
+		}, kindSteadyStateWindow, kindPollInterval).Should(Succeed())
 	})
 
 	ginkgo.It("uses the configured topology key for initial and surge PodGroups and worker affinity", func() {

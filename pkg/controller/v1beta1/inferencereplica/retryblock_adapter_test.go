@@ -9,6 +9,7 @@ import (
 	"github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
@@ -34,7 +35,7 @@ func TestBuildMutateRetryBlock_PersistCreatesBlock(t *testing.T) {
 	ir := baselineIR("llama-engine", "prod", 1)
 	r, c := newReconciler(t, ir)
 
-	mutate := buildMutateRetryBlock(r.statusWriter(), r.Client, ir)
+	mutate := buildMutateRetryBlock(r.statusWriter(), r.Client, ir, nil)
 	g.Expect(mutate(context.Background(), "rev-a", func(b *workload.RetryBlock) workload.RetryBlockDisposition {
 		g.Expect(b.TargetRevision).To(gomega.Equal("rev-a"),
 			"an absent block must be handed to the callback as a zero block with TargetRevision set")
@@ -78,7 +79,7 @@ func TestBuildMutateRetryBlock_RemoveDeletes(t *testing.T) {
 	r, c := newReconciler(t, ir)
 	key := types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace}
 
-	mutate := buildMutateRetryBlock(r.statusWriter(), r.Client, ir)
+	mutate := buildMutateRetryBlock(r.statusWriter(), r.Client, ir, nil)
 	g.Expect(mutate(context.Background(), "rev-a", func(_ *workload.RetryBlock) workload.RetryBlockDisposition {
 		return workload.RetryBlockRemove
 	})).To(gomega.Succeed())
@@ -116,7 +117,7 @@ func TestBuildMutateRetryBlock_UnchangedWritesNothing(t *testing.T) {
 	before := &v1beta1.InferenceReplica{}
 	g.Expect(c.Get(context.Background(), key, before)).To(gomega.Succeed())
 
-	mutate := buildMutateRetryBlock(r.statusWriter(), r.Client, ir)
+	mutate := buildMutateRetryBlock(r.statusWriter(), r.Client, ir, nil)
 	g.Expect(mutate(context.Background(), "rev-a", func(b *workload.RetryBlock) workload.RetryBlockDisposition {
 		// Even a callback that scribbles on the block writes nothing when
 		// it reports Unchanged.
@@ -142,7 +143,7 @@ func TestBuildMutateRetryBlock_SameNameReplacementAborts(t *testing.T) {
 	r, c := newReconciler(t, replacement)
 	called := false
 
-	mutate := buildMutateRetryBlock(r.statusWriter(), r.Client, original)
+	mutate := buildMutateRetryBlock(r.statusWriter(), r.Client, original, nil)
 	err := mutate(context.Background(), "rev-a", func(*workload.RetryBlock) workload.RetryBlockDisposition {
 		called = true
 		return workload.RetryBlockRemove
@@ -157,7 +158,7 @@ func TestBuildMutateRetryBlock_SameNameReplacementAborts(t *testing.T) {
 
 // TestBuildMutateRetryBlock_RetentionPrunesOldest pins the retention
 // rule: historical blocks (TargetRevision != Status.UpdateRevision) are
-// capped at maxHistoricalRetryBlocks, pruned oldest-first by
+// capped at the configured retryBlockHistoryLimit, pruned oldest-first by
 // LastFailureAt with nil LastFailureAt sorting oldest — while the block
 // for the CURRENT UpdateRevision is NEVER pruned, even when it is the
 // oldest block in the list.
@@ -176,10 +177,10 @@ func TestBuildMutateRetryBlock_RetentionPrunesOldest(t *testing.T) {
 	r, c := newReconciler(t, ir)
 
 	// Persisting a 4th historical block pushes the historical count to 4
-	// (> cap 3): the oldest historical — rev-old-nil, nil LastFailureAt —
-	// must be pruned; rev-current must survive despite being older than
-	// everything else.
-	mutate := buildMutateRetryBlock(r.statusWriter(), r.Client, ir)
+	// (> the configured cap of 3): the oldest historical — rev-old-nil,
+	// nil LastFailureAt — must be pruned; rev-current must survive
+	// despite being older than everything else.
+	mutate := buildMutateRetryBlock(r.statusWriter(), r.Client, ir, ptr.To(int32(3)))
 	g.Expect(mutate(context.Background(), "rev-old-3", func(b *workload.RetryBlock) workload.RetryBlockDisposition {
 		b.State = workload.RetryBlockHeld
 		b.AttemptsStarted = 3
@@ -197,6 +198,40 @@ func TestBuildMutateRetryBlock_RetentionPrunesOldest(t *testing.T) {
 		"nil-LastFailureAt historical block prunes first; the UpdateRevision block survives even as the oldest")
 	g.Expect(ir.Status.RetryBlocks).To(gomega.Equal(got.Status.RetryBlocks),
 		"the pruned slice must be mirrored back onto the in-memory IR")
+}
+
+// TestBuildMutateRetryBlock_UnconfiguredRetentionKeepsHistory pins the
+// unset path: with no operator-configured history limit every
+// historical block survives, rather than being pruned to a depth the
+// binary picked.
+func TestBuildMutateRetryBlock_UnconfiguredRetentionKeepsHistory(t *testing.T) {
+	g := gomega.NewWithT(t)
+	ir := baselineIR("llama-engine", "prod", 1)
+	ir.Status.UpdateRevision = "rev-current"
+	ir.Status.RetryBlocks = []v1beta1.RetryBlock{
+		{TargetRevision: "rev-current", State: v1beta1.RetryBlockBackoff, AttemptsStarted: 1},
+		{TargetRevision: "rev-old-nil", State: v1beta1.RetryBlockHeld, AttemptsStarted: 3},
+		{TargetRevision: "rev-old-1", State: v1beta1.RetryBlockHeld, AttemptsStarted: 3, LastFailureAt: mt(9, 0)},
+		{TargetRevision: "rev-old-2", State: v1beta1.RetryBlockHeld, AttemptsStarted: 3, LastFailureAt: mt(10, 0)},
+	}
+	r, c := newReconciler(t, ir)
+
+	mutate := buildMutateRetryBlock(r.statusWriter(), r.Client, ir, nil)
+	g.Expect(mutate(context.Background(), "rev-old-3", func(b *workload.RetryBlock) workload.RetryBlockDisposition {
+		b.State = workload.RetryBlockHeld
+		b.AttemptsStarted = 3
+		b.LastFailureAt = mt(11, 0)
+		return workload.RetryBlockPersist
+	})).To(gomega.Succeed())
+
+	got := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(), types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace}, got)).To(gomega.Succeed())
+	var revs []string
+	for _, b := range got.Status.RetryBlocks {
+		revs = append(revs, b.TargetRevision)
+	}
+	g.Expect(revs).To(gomega.ConsistOf("rev-current", "rev-old-nil", "rev-old-1", "rev-old-2", "rev-old-3"),
+		"no configured history limit must prune nothing")
 }
 
 // TestRetryBlocksFromIR_RoundTrip pins the observed-state mirror:

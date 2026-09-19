@@ -181,8 +181,14 @@ const (
 	// of idling to its Deadline. Closed the same way an expiry closes it —
 	// surge unpinned for the scale-down pipeline, source restored from
 	// observation — so the event names the pod and the reason.
-	EventReasonMigrationSurgeWedged          EventReason = "MigrationSurgeWedged"
-	EventReasonRateLimited                   EventReason = "RateLimited"
+	EventReasonMigrationSurgeWedged EventReason = "MigrationSurgeWedged"
+	EventReasonRateLimited          EventReason = "RateLimited"
+	// EventReasonMigrationPolicyUnconfigured is a Warning fired when a
+	// migration request is held because the operator configured no
+	// migration capacity policy. Distinct from RateLimited: no cap was
+	// breached, there is no cap to judge against, and the request waits
+	// rather than failing.
+	EventReasonMigrationPolicyUnconfigured   EventReason = "MigrationPolicyUnconfigured"
 	EventReasonMigrationSurgeCreateBlocked   EventReason = "MigrationSurgeCreateBlocked"
 	EventReasonMigrationFromNodeMismatch     EventReason = "MigrationFromNodeMismatch"
 	EventReasonMigrationNodeAffinityConflict EventReason = "MigrationNodeAffinityConflict"

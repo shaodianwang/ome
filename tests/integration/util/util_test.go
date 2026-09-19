@@ -2,9 +2,11 @@ package util_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -12,6 +14,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 	"github.com/ome-projects/ome/tests/integration/framework"
 	"github.com/ome-projects/ome/tests/integration/util"
 )
@@ -79,7 +83,25 @@ var _ = ginkgo.Describe("util.SeedDefaultConfigMaps", func() {
 		Expect(cm.Data).To(HaveKey("deploy"))
 		Expect(cm.Data).To(HaveKey("omeAgent"))
 		Expect(cm.Data).To(HaveKey("lifecycle"))
-		Expect(cm.Data["lifecycle"]).To(MatchJSON(`{"scaleUpPodBatchSize":100,"scaleDownPodBatchSize":100,"revisionHistoryLimit":10}`))
+		// The lifecycle block is asserted through the parsers the manager
+		// itself uses, not against a literal: every knob here is
+		// config-only (the binary carries no default), so what matters is
+		// that the seed round-trips to the chart values the suites expect.
+		lifecycle := &controllerconfig.LifecycleConfig{}
+		Expect(json.Unmarshal([]byte(cm.Data["lifecycle"]), lifecycle)).To(Succeed())
+		Expect(lifecycle.ToScaleUpPodBatchSize()).To(HaveValue(Equal(int32(100))))
+		Expect(lifecycle.ToScaleDownPodBatchSize()).To(HaveValue(Equal(int32(100))))
+		Expect(lifecycle.ToRevisionHistoryLimit()).To(HaveValue(Equal(int32(10))))
+		Expect(lifecycle.ToRetryBlockHistoryLimit()).To(HaveValue(Equal(int32(3))))
+		Expect(lifecycle.GangScheduleTimeout.ToClamp()).To(HaveValue(Equal(workloadtypes.GangScheduleTimeoutClamp{
+			Min: time.Minute, Max: 10 * time.Minute,
+		})))
+		Expect(lifecycle.Audit.ToPolicy()).To(HaveValue(Equal(workloadtypes.MigrationAuditPolicy{
+			MaxInFlight: 3, MaxPerWindow: 10, Window: time.Hour,
+		})))
+		Expect(lifecycle.Requeue.ToIntervals()).To(Equal(workloadtypes.RequeueIntervals{
+			Operation: 5 * time.Second, Gate: 3 * time.Second,
+		}))
 		// The rollout block must round-trip the chart defaults: the canary
 		// capacity-gate escalation timeout has no in-code fallback, so the
 		// seed is what keeps suite behavior chart-equivalent.

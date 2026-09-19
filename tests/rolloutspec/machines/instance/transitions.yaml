@@ -526,19 +526,11 @@ transitions:
     decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
 
   # --- Update/SurgeDrain -------------------------------------------------
-  - id: T-surgedrain-settle
-    from: Update/SurgeDrain
-    event: pod.servingOff
-    variant: source
-    guard: a single-pod source is out of the per-revision routed Service and the configured settle grace is positive
-    to: Update/SurgeDrainSettle
-    effects: [step advanced to SurgeDrainSettle with LastProgressAt as the durable start of the settle window]
-    decided_in: pkg/controller/v1beta1/workload/ops/update_status.go
   - id: T-surgedrain-promote
     from: Update/SurgeDrain
     event: pod.deleted
     variant: source
-    guard: a single-pod source with a zero settle grace whose pods are gone
+    guard: the drain converged and the delete was issued, so the single-pod source's pods are gone
     to: Ready
     effects: [ActiveOrdinal advanced to the replacement slot, Phase Ready on the pinned revision, operation cleared, that revision's RetryBlock pruned]
     decided_in: pkg/controller/v1beta1/workload/ops/update_surge.go
@@ -594,64 +586,6 @@ transitions:
     decided_in: pkg/controller/v1beta1/workload/escalation.go
   - id: T-surgedrain-teardown-deadline
     from: Update/SurgeDrain
-    event: timer.teardownDeadline
-    guard: the owner is Terminating, the configured teardown deadline has passed since its deletionTimestamp, and the teardown finalizer is still held
-    to: Empty
-    effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
-    decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
-
-  # --- Update/SurgeDrainSettle -------------------------------------------
-  - id: T-settle-ready
-    from: Update/SurgeDrainSettle
-    event: timer.drainSettle
-    guard: the settle grace has elapsed since LastProgressAt and the source pods have been deleted
-    to: Ready
-    effects: [ActiveOrdinal advanced to the replacement slot, Phase Ready on the pinned revision, operation cleared, that revision's RetryBlock pruned]
-    decided_in: pkg/controller/v1beta1/workload/ops/update_surge.go
-  - id: T-settle-deadline
-    from: Update/SurgeDrainSettle
-    event: timer.operationDeadline
-    guard: the operation deadline elapsed and no pod of the attempt is held by an admission scheduling gate; the state is single-pod only and carries no SurgeIndex, so the attempt is always disposable
-    to: Failed
-    effects: [the disposition records a RetryBlock or relocation directive, then clears the operation and stamps Failed in one write]
-    decided_in: pkg/controller/v1beta1/workload/disposition.go
-  - id: T-settle-stuck
-    from: Update/SurgeDrainSettle
-    event: pod.waiting
-    guard: a pod held a terminal waiting reason past the stuck-pod grace with the source out of rotation; the state is single-pod only and carries no SurgeIndex, so the attempt is always disposable
-    to: Failed
-    effects: [the disposition records a RetryBlock or relocation directive, then clears the operation and stamps Failed in one write]
-    decided_in: pkg/controller/v1beta1/workload/escalation.go
-  - id: T-settle-force-clock
-    from: Update/SurgeDrainSettle
-    event: timer.forceDelete
-    guard: a force-delete policy is configured and the settling source is past its deletion deadline plus the overdue slack while its node is gone or has been unreachable past the threshold; the sweep runs at the top of the update pass, ahead of every mode and its expectations gate
-    to: Update/SurgeDrainSettle
-    effects: [the wedged source pod force-deleted with grace zero under a UID precondition, Warning event and a ledger row recorded, the promote left to complete on the resulting absence]
-    decided_in: pkg/controller/v1beta1/workload/ops/force_delete.go
-  - id: T-settle-scaledown
-    from: Update/SurgeDrainSettle
-    event: spec.replicasDown
-    guard: a settling source carries no SurgeIndex, so it is not pinned as a handoff pair and falls out of the plan when replicas drop
-    to: Delete/Drain
-    effects: [the Update operation replaced by a Delete Drain operation and Phase Deleting, committed in one status transaction]
-    decided_in: pkg/controller/v1beta1/workload/ops/delete_batch.go
-  - id: T-settle-teardown
-    from: Update/SurgeDrainSettle
-    event: spec.teardown
-    guard: the owner carries a deletionTimestamp so every observed index is treated as a scale-down extra
-    to: Delete/Drain
-    effects: [Phase Deleting and the Delete Drain operation committed in one status transaction]
-    decided_in: pkg/controller/v1beta1/workload/reconcile.go
-  - id: T-settle-stuckgrace
-    from: Update/SurgeDrainSettle
-    event: timer.stuckPodGrace
-    guard: the grace elapsed on a pod that holds a terminal waiting reason with the source out of rotation; the state is single-pod only and carries no SurgeIndex, so the attempt is always disposable
-    to: Failed
-    effects: [the disposition records a RetryBlock or relocation directive, then clears the operation and stamps Failed in one write]
-    decided_in: pkg/controller/v1beta1/workload/escalation.go
-  - id: T-settle-teardown-deadline
-    from: Update/SurgeDrainSettle
     event: timer.teardownDeadline
     guard: the owner is Terminating, the configured teardown deadline has passed since its deletionTimestamp, and the teardown finalizer is still held
     to: Empty

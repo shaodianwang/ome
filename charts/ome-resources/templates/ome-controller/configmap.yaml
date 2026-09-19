@@ -100,6 +100,9 @@ data:
   {{- if hasKey . "revisionHistoryLimit" }}
   {{- $fields = append $fields (dict "revisionHistoryLimit" .revisionHistoryLimit) }}
   {{- end }}
+  {{- if hasKey . "retryBlockHistoryLimit" }}
+  {{- $fields = append $fields (dict "retryBlockHistoryLimit" .retryBlockHistoryLimit) }}
+  {{- end }}
   {{- with .updateRetry }}
   {{- $fields = append $fields (dict "updateRetry" (dict "maxAttempts" .maxAttempts "initialDelay" .initialDelay "maxDelay" .maxDelay "multiplier" .multiplier)) }}
   {{- end }}
@@ -108,6 +111,15 @@ data:
   {{- end }}
   {{- with .unschedulableGracePeriod }}
   {{- $fields = append $fields (dict "unschedulableGracePeriod" .) }}
+  {{- end }}
+  {{- with .gangScheduleTimeout }}
+  {{- $fields = append $fields (dict "gangScheduleTimeout" (dict "min" .min "max" .max)) }}
+  {{- end }}
+  {{- with .audit }}
+  {{- $fields = append $fields (dict "audit" (dict "maxInFlightMigrations" .maxInFlightMigrations "maxMigrationsPerWindow" .maxMigrationsPerWindow "window" .window)) }}
+  {{- end }}
+  {{- with .requeue }}
+  {{- $fields = append $fields (dict "requeue" (dict "operation" .operation "gate" .gate)) }}
   {{- end }}
   {{- with .autoMigrate }}
   {{- $fields = append $fields (dict "autoMigrate" (dict "maxAttempts" .maxAttempts)) }}

@@ -1,14 +1,26 @@
-# p243: InPlaceOnly engine-mn  Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 co=none topo=engine-mn
+# p243: mixed-strategy RollingUpdate group: engine=InPlaceIfPossible decoder=SurgeThenDrain  Ne=8 Nd=8 Nr=2 ceil_e=8 ceil_d=9 ceil_r=2 co=rolling topo=pd
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p243 }
 spec:
   model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
-  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
   engine:
     minReplicas: 8
     maxReplicas: 8
     annotations: { ome.io/deploymentMode: OMENative }
-    leader: {}
-    worker: { size: 1 }
-    lifecycle: { updateStrategy: { type: "InPlaceOnly", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
+    lifecycle: { updateStrategy: { type: "InPlaceIfPossible", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
+  decoder:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine, decoder]
+          rollingUpdate: {}

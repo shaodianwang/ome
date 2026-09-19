@@ -11,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	kubefake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/record"
 	clocktesting "k8s.io/utils/clock/testing"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -29,6 +30,28 @@ import (
 var migrationTestNow = time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
 
 const migrationTestTimeout = 42 * time.Minute
+
+// migrationTestRecordWindow is the status-record horizon the seam tests
+// age terminal records against, standing in for the operator config a
+// deployed chart supplies.
+const migrationTestRecordWindow = time.Hour
+
+// withMigrationCapacityConfig wires a fake clientset serving an
+// inferenceservice-config ConfigMap whose lifecycle block carries the
+// migration capacity caps, so a reconcile-level test admits migrations
+// the way a chart-configured deployment does.
+func withMigrationCapacityConfig(r *Reconciler) {
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "inferenceservice-config",
+			Namespace: "ome",
+		},
+		Data: map[string]string{
+			"lifecycle": `{"audit":{"maxInFlightMigrations":3,"maxMigrationsPerWindow":10,"window":"1h"}}`,
+		},
+	}
+	r.Clientset = kubefake.NewSimpleClientset(cm)
+}
 
 // validMigrationRequestJSON renders a schema-v1 request for component
 // at instance idx from node "node-a", carrying placement hints.

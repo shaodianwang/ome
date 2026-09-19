@@ -93,12 +93,9 @@ func newMidSurgeFixture(t *testing.T, step string, surgeReady, sourceServing boo
 // run drives one UpdateWithPods pass under strategy, returning the pass's
 // done flag. The ReconcileInput is rebuilt per pass because its ObservedState
 // is a snapshot — production re-reads it every reconcile.
-// GracePeriodSeconds=0 keeps the surge settle step from adding a wait the
-// assertions would have to sleep through.
 func (f *midSurgeFixture) run(t *testing.T, strategy workload.UpdateStrategyType) bool {
 	t.Helper()
-	zeroGrace := int32(0)
-	plan := legacyComponentPlan(strategy, &workload.InPlaceUpdateStrategy{GracePeriodSeconds: &zeroGrace})
+	plan := legacyComponentPlan(strategy, nil)
 	input := legacyTestInput(f.isvc, f.client, workload.ComponentEngine)
 	done, err := UpdateWithPods(context.Background(), legacyTestDeps(f.client), input, plan,
 		plan.Instances[0], f.targetCR, f.targetSpec, f.survivingPods(t))

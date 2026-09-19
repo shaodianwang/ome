@@ -439,19 +439,14 @@ func MigrationModeToWorkload(v v1beta1.MigrationPolicyMode) workload.MigrationMo
 }
 
 // UpdateStrategyToWorkload converts a v1beta1.UpdateStrategy to a
-// workload.UpdateStrategy. The nested InPlaceUpdateStrategy and
-// RollingUpdate pointers are deep-copied so the returned struct can
-// be mutated independently of the source.
+// workload.UpdateStrategy. The nested strategy pointers are deep-copied
+// so the returned struct can be mutated independently of the source.
 func UpdateStrategyToWorkload(v v1beta1.UpdateStrategy) workload.UpdateStrategy {
 	out := workload.UpdateStrategy{
 		Type: UpdateStrategyTypeToWorkload(v.Type),
 	}
 	if v.InPlaceUpdateStrategy != nil {
 		out.InPlaceUpdateStrategy = &workload.InPlaceUpdateStrategy{}
-		if v.InPlaceUpdateStrategy.GracePeriodSeconds != nil {
-			g := *v.InPlaceUpdateStrategy.GracePeriodSeconds
-			out.InPlaceUpdateStrategy.GracePeriodSeconds = &g
-		}
 		if v.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle != nil {
 			m := *v.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle
 			out.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle = &m

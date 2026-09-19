@@ -57,7 +57,7 @@ events:
   - {id: spec.releaseHeldRevision, family: spec, description: an operator releases the Held RetryBlock for a revision so a fresh attempt at it is admitted again}
   - {id: spec.partition, family: spec, description: rollingUpdate.partition changes}
   - {id: spec.rollbackTarget, family: spec, variants: [set, clear], description: the rollout target is pinned to an older stored ControllerRevision or released again}
-  - {id: spec.policyTuning, family: spec, variants: [restartPolicy, migrationPolicy, instanceReadyTimeout, minReadySeconds, gracePeriod, markNotReady], description: a lifecycle knob outside the pod template changes}
+  - {id: spec.policyTuning, family: spec, variants: [restartPolicy, migrationPolicy, instanceReadyTimeout, minReadySeconds, markNotReady], description: a lifecycle knob outside the pod template changes}
   - {id: config.changed, family: config, variants: [updateRetry, stuckPodGrace, forceDelete, teardownDeadline, scaleDownInterval, autoMigrateBudget], description: the named operator configuration value changes while the Instance has work in flight}
   - {id: gate.allow, family: coordination, description: the rollout gate lets this Instance start updating its pods}
   - {id: gate.deny, family: coordination, variants: [Plan, Pairing, Ratio, Sequential, Budget, RetryBlock, Held], description: the rollout gate holds this Instance back from starting an update}
@@ -67,7 +67,6 @@ events:
   - {id: timer.retryAt, family: timer, description: "retryBlocks[].nextRetryAt elapses"}
   - {id: timer.expectationsTTL, family: timer, description: a pod create or delete stays unobserved until the controller stops waiting for it}
   - {id: timer.migrationDeadline, family: timer, description: an accepted migration has not finished by the time its deadline elapses}
-  - {id: timer.drainSettle, family: timer, description: the post-drain settle window elapses}
   - {id: timer.stuckPodGrace, family: timer, description: "a pod is still not running when its stuck-pod grace period since creation elapses"}
   - {id: timer.forceDelete, family: timer, variants: [overdueSlack, nodeUnreachable], description: "the wait before force-deleting a stuck pod elapses for the named reason"}
   - {id: timer.teardownDeadline, family: timer, description: "the teardown deadline since the owner's deletionTimestamp elapses"}

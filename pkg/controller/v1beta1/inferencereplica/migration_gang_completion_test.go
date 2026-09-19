@@ -203,6 +203,7 @@ func TestReconcile_GangMigrationCompletesAfterSourcePlanRelease(t *testing.T) {
 		}}},
 	}
 	r, c := newReconciler(t, ir)
+	withMigrationCapacityConfig(r)
 	r.GangSchedulingAvailable = true
 	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)}
 	ctx := context.Background()

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"slices"
-	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -159,11 +158,10 @@ func podHasWaitingReason(pod *corev1.Pod, reason string) bool {
 //	                   for PodReady.
 //	Phase 2 (Drain):   Op.Step=SurgeDrain. Mark the old pod serving=False
 //	                   (leaves rotation). Wait drain.IsPodDrained on the
-//	                   per-revision routed Service.
-//	Phase 3 (Settle):  Op.Step=SurgeDrainSettle. Keep the old pod alive
-//	                   for the configured grace period so persistent
-//	                   connections age out, then delete it.
-//	Phase 4 (Promote): Old pod gone. Advance InstanceStatus.
+//	                   per-revision routed Service, then delete the old
+//	                   pod — its own termination grace and preStop carry
+//	                   the in-flight work it still owes.
+//	Phase 3 (Promote): Old pod gone. Advance InstanceStatus.
 //	                   ActiveOrdinal to the new slot, set Phase=Ready,
 //	                   RunningRevision=target, clear Operation.
 //
@@ -501,20 +499,11 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 				return false, nil
 			}
 		}
-		// The settle is the next STEP, and a paused Component starts no
-		// step: the drain it was on has reached its boundary — the source
-		// is confirmed out of rotation with the replacement serving — so
-		// the pair simply waits here.
-		if plan.Paused && surgeStepIs(input, inst.Index, updateStepSurgeDrain) {
-			return false, nil
-		}
-		settled, err := waitForSurgeDrainSettle(ctx, input, plan, inst.Index)
-		if err != nil {
-			return false, err
-		}
-		if !settled {
-			return false, nil
-		}
+		// The source is out of rotation with the replacement serving:
+		// delete it now and let its own terminationGracePeriodSeconds and
+		// preStop cover the in-flight work and load-balancer propagation
+		// it still owes, exactly as any other pod deletion does. The
+		// promote happens on the pass that observes it gone.
 		if !deps.ExpectationsCache().Satisfied(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, inst.Index) {
 			return false, nil
 		}
@@ -550,67 +539,6 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 		"OMENative %s surge to revision %s complete (activeOrdinal=%d)",
 		instanceKey(input.Key.Component, inst.Index), surgeTargetName, newOrdinal)
 	return true, nil
-}
-
-func waitForSurgeDrainSettle(ctx context.Context, input workload.ReconcileInput, plan workload.ComponentPlan, idx int32) (bool, error) {
-	status := findInstanceStatus(input.ObservedState.InstanceStatuses, idx)
-	settling := status != nil && status.Operation != nil &&
-		status.Operation.Step == updateStepSurgeDrainSettle
-	// The grace measures how long live connections have had to age out
-	// under a controller that is driving the roll, so a held pair does
-	// not spend it: the source stays alive and out of rotation while the
-	// replacement serves, and nothing is written for as long as the hold
-	// lasts.
-	if settling && plan.Paused {
-		return false, nil
-	}
-
-	grace := 30 * time.Second
-	if strategy := plan.UpdateStrategy.InPlaceUpdateStrategy; strategy != nil && strategy.GracePeriodSeconds != nil {
-		grace = time.Duration(*strategy.GracePeriodSeconds) * time.Second
-	}
-	if grace <= 0 {
-		return true, nil
-	}
-
-	if settling && settleGraceMustRestart(status, grace, input.Now()) {
-		if err := patchInstanceStatusSurgeSettleRearm(ctx, input, idx); err != nil {
-			return false, fmt.Errorf("re-arm surge settle grace (instance=%d): %w", idx, err)
-		}
-		return false, nil
-	}
-
-	if !settling {
-		if err := patchInstanceStatusSurgeStepSettle(ctx, input, idx); err != nil {
-			return false, fmt.Errorf("transition surge step to settle (instance=%d): %w", idx, err)
-		}
-		return false, nil
-	}
-	if status.Operation.LastProgressAt.IsZero() {
-		return false, nil
-	}
-	return !input.Now().Before(status.Operation.LastProgressAt.Add(grace)), nil
-}
-
-// settleGraceMustRestart reports whether a settling pair's interval has
-// to start over before it can complete.
-//
-// It asks about the hold rather than about who placed it, so the answer
-// does not change with which authority happens to own the row: an
-// operator pause and a wait that superseded one leave the same pair
-// sitting with the same unspent grace. A row resuming from a pause
-// restarts unconditionally, because the release is when the wait begins
-// again and the time the hold consumed is not credited to it. A row
-// still parked on another authority's wait restarts only once the
-// interval would otherwise have expired underneath it, which keeps a
-// long wait to one write per interval rather than one per pass.
-func settleGraceMustRestart(s *workload.InstanceStatus, grace time.Duration, now time.Time) bool {
-	if s == nil || s.Operation == nil || !workload.OperationExternallyHeld(s.Operation) {
-		return false
-	}
-	return workload.OperationPaused(s.Operation) ||
-		s.Operation.LastProgressAt.IsZero() ||
-		!now.Before(s.Operation.LastProgressAt.Add(grace))
 }
 
 // surgeStepIs reports whether the Instance's in-flight surge attempt is
