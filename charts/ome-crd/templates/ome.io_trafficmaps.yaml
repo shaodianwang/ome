@@ -100,6 +100,7 @@ spec:
                       type: object
                     weight:
                       format: int32
+                      maximum: 1000000
                       minimum: 0
                       type: integer
                   required:

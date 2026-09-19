@@ -71,6 +71,8 @@ type PlacementSpec struct {
 	// absent from the map (or the whole field unset) uses the identity factor 1.
 	// This is a routing weight only — it does not influence placement or how many
 	// replicas a cluster admits.
+	//
+	// Deprecated: use spec.routing.capacityFactors.
 	// +optional
 	CapacityFactors map[string]resource.Quantity `json:"capacityFactors,omitempty"`
 }

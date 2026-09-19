@@ -329,6 +329,7 @@ func TestReconcile_CapacityFactorWeightsHomes(t *testing.T) {
 	// Two homes with equal admitted+ready replicas: without factors they would
 	// weight 1:1. A per-cluster factor of 2 on "a" doubles its share -> 2:1.
 	isvc := splitISVC([]string{"a", "b"}, []int32{5, 5}, []int32{5, 5})
+	//nolint:staticcheck // compatibility coverage for deprecated spec.placement.capacityFactors
 	isvc.Spec.Placement.CapacityFactors = map[string]resource.Quantity{
 		"a": resource.MustParse("2"),
 	}
@@ -352,10 +353,39 @@ func TestReconcile_CapacityFactorWeightsHomes(t *testing.T) {
 	assert.Nil(t, tm.Spec.Entries[1].Capacity.Factor, "home absent from map uses the identity factor")
 }
 
+func TestReconcile_RoutingCapacityFactorWeightsHomes(t *testing.T) {
+	// The routing-level factor is the canonical field. Even if an object that
+	// bypassed admission also carries the deprecated placement alias, the
+	// projection deterministically uses routing.
+	isvc := splitISVC([]string{"a", "b"}, []int32{5, 5}, []int32{5, 5})
+	isvc.Spec.Routing = &v1beta1.RoutingSpec{
+		CapacityFactors: map[string]resource.Quantity{
+			"a": resource.MustParse("2"),
+		},
+	}
+	//nolint:staticcheck // compatibility coverage for deprecated spec.placement.capacityFactors
+	isvc.Spec.Placement.CapacityFactors = map[string]resource.Quantity{
+		"a": resource.MustParse("3"),
+	}
+	r, c := newReconciler(t, Config{Enabled: true}, isvc)
+
+	reconcile(t, r)
+
+	tm, ok := getTrafficMap(t, c)
+	require.True(t, ok)
+	require.Len(t, tm.Spec.Entries, 2)
+	assert.Equal(t, int32(2), tm.Spec.Entries[0].Weight)
+	assert.Equal(t, int32(1), tm.Spec.Entries[1].Weight)
+	require.NotNil(t, tm.Spec.Entries[0].Capacity)
+	require.NotNil(t, tm.Spec.Entries[0].Capacity.Factor)
+	assert.Equal(t, "2", tm.Spec.Entries[0].Capacity.Factor.String())
+}
+
 func TestReconcile_FractionalCapacityFactor(t *testing.T) {
 	// "500m" halves a home's per-replica capacity: a(4 replicas)*0.5 vs b(4)*1
 	// -> 2:4 -> reduced 1:2.
 	isvc := splitISVC([]string{"a", "b"}, []int32{4, 4}, []int32{4, 4})
+	//nolint:staticcheck // compatibility coverage for deprecated spec.placement.capacityFactors
 	isvc.Spec.Placement.CapacityFactors = map[string]resource.Quantity{
 		"a": resource.MustParse("500m"),
 	}
@@ -400,7 +430,16 @@ func TestRoutingTableChangePredicate(t *testing.T) {
 
 	t.Run("capacity factor change is admitted", func(t *testing.T) {
 		nw := base.DeepCopy()
+		//nolint:staticcheck // compatibility coverage for deprecated spec.placement.capacityFactors
 		nw.Spec.Placement.CapacityFactors = map[string]resource.Quantity{"a": resource.MustParse("2")}
+		assert.True(t, routingTableChange.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: nw}))
+	})
+
+	t.Run("routing capacity factor change is admitted", func(t *testing.T) {
+		nw := base.DeepCopy()
+		nw.Spec.Routing = &v1beta1.RoutingSpec{
+			CapacityFactors: map[string]resource.Quantity{"a": resource.MustParse("2")},
+		}
 		assert.True(t, routingTableChange.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: nw}))
 	})
 }

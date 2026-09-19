@@ -9,7 +9,15 @@
 // writes the results onto a TrafficMap.
 package routing
 
-import "k8s.io/apimachinery/pkg/api/resource"
+import (
+	"math/big"
+
+	"k8s.io/apimachinery/pkg/api/resource"
+)
+
+// maxTrafficMapWeight is the strictest limit among the built-in TrafficMap
+// consumers. Gateway API BackendRef.Weight rejects values above this bound.
+const maxTrafficMapWeight = 1_000_000
 
 // Home is the capacity input for one serving home's weight.
 type Home struct {
@@ -98,7 +106,8 @@ func (h Home) serving() bool {
 // are then reduced to their smallest whole-number ratio, yielding relative
 // non-negative integers matching Gateway API and Envoy weighted-cluster
 // semantics — a consumer applies them verbatim or divides by their sum for a
-// percentage.
+// percentage. A ratio that cannot fit the strictest built-in publisher limit is
+// scaled proportionally into that range while preserving every positive arm.
 //
 // When every home would be zero — all unhealthy, all unreachable, or nothing
 // allocated — all homes are given equal weight 1, so traffic is never
@@ -117,21 +126,22 @@ func weights(homes []Home, allFailedPolicy AllFailedPolicy) []int32 {
 		return weights
 	}
 
-	// raw_h in milli-units: allocated * (factor scaled by 1000). Milli keeps a
-	// fractional factor (e.g. 0.5) exact without floating point; the shared 1000
-	// scale cancels in the ratio reduction below.
-	raw := make([]int64, len(homes))
-	var g int64
+	// raw_h in milli-units: allocated * (factor scaled by 1000). Arbitrary-
+	// precision integers keep both the Quantity conversion and multiplication
+	// safe before the ratio is reduced to TrafficMap's int32 representation.
+	raw := make([]*big.Int, len(homes))
+	g := new(big.Int)
 	for i := range homes {
+		raw[i] = new(big.Int)
 		h := &homes[i]
 		if !h.serving() {
 			continue // health-gated, probe-gated, or nothing to serve → weight 0
 		}
-		raw[i] = int64(h.EffectiveAllocated()) * factorMilli(h.Factor)
-		g = gcd(g, raw[i])
+		raw[i].Mul(big.NewInt(int64(h.EffectiveAllocated())), factorMilli(h.Factor))
+		g = new(big.Int).GCD(nil, nil, g, raw[i])
 	}
 
-	if g == 0 {
+	if g.Sign() == 0 {
 		if allFailedPolicy == AllFailedPolicyDrain && allProbesFailed(homes) {
 			return weights
 		}
@@ -143,10 +153,7 @@ func weights(homes []Home, allFailedPolicy AllFailedPolicy) []int32 {
 		return weights
 	}
 
-	for i := range raw {
-		weights[i] = int32(raw[i] / g)
-	}
-	return weights
+	return normalizeRawWeights(raw, g)
 }
 
 func allProbesFailed(homes []Home) bool {
@@ -163,25 +170,66 @@ func allProbesFailed(homes []Home) bool {
 
 // factorMilli returns the capacity factor scaled by 1000 (the resource.Quantity
 // milli scale). Nil or non-positive resolves to 1000 — the identity factor 1.0.
-func factorMilli(q *resource.Quantity) int64 {
+// It avoids Quantity.MilliValue because that method may overflow int64.
+func factorMilli(q *resource.Quantity) *big.Int {
 	if q == nil {
-		return 1000
+		return big.NewInt(1000)
 	}
-	m := q.MilliValue()
-	if m <= 0 {
-		return 1000
+	if q.Sign() <= 0 {
+		return big.NewInt(1000)
 	}
-	return m
+
+	quantity := q.DeepCopy()
+	decimal := quantity.AsDec()
+	milliExponent := int64(3) - int64(decimal.Scale())
+	milli := new(big.Int).Set(decimal.UnscaledBig())
+	if milliExponent >= 0 {
+		return milli.Mul(milli, powerOfTen(milliExponent))
+	}
+
+	divisor := powerOfTen(-milliExponent)
+	return ceilPositiveQuotient(milli, divisor)
 }
 
-// gcd is the greatest common divisor, treating 0 as the identity so it composes
-// over a running fold that skips zero-weight homes.
-func gcd(a, b int64) int64 {
-	for b != 0 {
-		a, b = b, a%b
+// normalizeRawWeights first reduces the exact ratio by its GCD. If the reduced
+// ratio cannot fit a built-in publisher, it scales every arm proportionally so
+// the largest maps exactly to the supported limit, rounding positive arms
+// upward so no serving home disappears. Exact representable ratios stay exact;
+// unrepresentable ratios remain ordered, non-negative, and routable.
+func normalizeRawWeights(raw []*big.Int, gcd *big.Int) []int32 {
+	weights := make([]int32, len(raw))
+	max := new(big.Int)
+	for i := range raw {
+		raw[i].Quo(raw[i], gcd)
+		if raw[i].Cmp(max) > 0 {
+			max.Set(raw[i])
+		}
 	}
-	if a < 0 {
-		return -a
+
+	limit := big.NewInt(maxTrafficMapWeight)
+	for i := range raw {
+		if raw[i].Sign() == 0 {
+			continue
+		}
+		if max.Cmp(limit) <= 0 {
+			weights[i] = int32(raw[i].Int64())
+			continue
+		}
+		scaled := new(big.Int).Mul(raw[i], limit)
+		weights[i] = int32(ceilPositiveQuotient(scaled, max).Int64())
 	}
-	return a
+	return weights
+}
+
+func ceilPositiveQuotient(numerator, denominator *big.Int) *big.Int {
+	quotient, remainder := new(big.Int), new(big.Int)
+	quotient.QuoRem(numerator, denominator, remainder)
+	if remainder.Sign() > 0 {
+		quotient.Add(quotient, big.NewInt(1))
+	}
+	return quotient
+}
+
+func powerOfTen(exponent int64) *big.Int {
+	return new(big.Int).Exp(big.NewInt(10), big.NewInt(exponent), nil)
 }

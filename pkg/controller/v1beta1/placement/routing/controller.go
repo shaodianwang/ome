@@ -302,13 +302,22 @@ func servingCandidates(pl *v1beta1.PlacementStatus) []*v1beta1.CandidatePlacemen
 }
 
 // capacityFactor returns the per-replica relative serving capacity the ISVC
-// declares for a workload cluster, or nil when none is set. Nil is the identity
-// factor 1.0 — the weight computation treats a nil or non-positive factor as 1.
+// declares for a workload cluster, or nil when none is set. spec.routing is
+// canonical; the placement field is a compatibility alias used only when the
+// routing map is absent. Nil is the identity factor 1.0 — the weight computation
+// treats a nil or non-positive factor as 1.
 func capacityFactor(isvc *v1beta1.InferenceService, cluster string) *resource.Quantity {
-	if isvc.Spec.Placement == nil || isvc.Spec.Placement.CapacityFactors == nil {
+	var factors map[string]resource.Quantity
+	if isvc.Spec.Routing != nil && isvc.Spec.Routing.CapacityFactors != nil {
+		factors = isvc.Spec.Routing.CapacityFactors
+	} else if isvc.Spec.Placement != nil {
+		//nolint:staticcheck // compatibility read for deprecated spec.placement.capacityFactors
+		factors = isvc.Spec.Placement.CapacityFactors
+	}
+	if factors == nil {
 		return nil
 	}
-	if q, ok := isvc.Spec.Placement.CapacityFactors[cluster]; ok {
+	if q, ok := factors[cluster]; ok {
 		qc := q.DeepCopy()
 		return &qc
 	}

@@ -170,6 +170,10 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutSpec":                      schema_pkg_apis_ome_v1beta1_RolloutSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutStatus":                    schema_pkg_apis_ome_v1beta1_RolloutStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RouterSpec":                       schema_pkg_apis_ome_v1beta1_RouterSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RoutingCapacitySpec":              schema_pkg_apis_ome_v1beta1_RoutingCapacitySpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RoutingProbeSpec":                 schema_pkg_apis_ome_v1beta1_RoutingProbeSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RoutingPublisherSpec":             schema_pkg_apis_ome_v1beta1_RoutingPublisherSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RoutingSpec":                      schema_pkg_apis_ome_v1beta1_RoutingSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.Runner":                           schema_pkg_apis_ome_v1beta1_Runner(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RunnerSpec":                       schema_pkg_apis_ome_v1beta1_RunnerSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ScaleTargetRef":                   schema_pkg_apis_ome_v1beta1_ScaleTargetRef(ref),
@@ -6392,11 +6396,17 @@ func schema_pkg_apis_ome_v1beta1_InferenceServiceSpec(ref common.ReferenceCallba
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementSpec"),
 						},
 					},
+					"routing": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Routing configures cross-cluster traffic distribution for this InferenceService. Unset fields inherit the operator-level routing configuration. Only consulted on the control-plane cluster; ignored in single-cluster deployments. Alpha; the API may change without notice.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RoutingSpec"),
+						},
+					},
 				},
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorSelector", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DecoderSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EngineSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelRef", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RouterSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ScalingPolicy", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeRef", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficSpec"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorSelector", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DecoderSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EngineSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelRef", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RouterSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RoutingSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ScalingPolicy", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeRef", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficSpec"},
 	}
 }
 
@@ -9188,7 +9198,7 @@ func schema_pkg_apis_ome_v1beta1_PlacementSpec(ref common.ReferenceCallback) com
 					},
 					"capacityFactors": {
 						SchemaProps: spec.SchemaProps{
-							Description: "CapacityFactors overrides the per-replica relative serving capacity of named workload clusters, keyed by WorkloadCluster name. It weights traffic for heterogeneous hardware where one cluster's replica serves more (or less) than another's: a home's routed share scales with its admitted replicas times this factor. A quantity of \"2\" means each replica on that cluster carries twice the share of a factor-1 replica; \"500m\" means half. A cluster absent from the map (or the whole field unset) uses the identity factor 1. This is a routing weight only — it does not influence placement or how many replicas a cluster admits.",
+							Description: "CapacityFactors overrides the per-replica relative serving capacity of named workload clusters, keyed by WorkloadCluster name. It weights traffic for heterogeneous hardware where one cluster's replica serves more (or less) than another's: a home's routed share scales with its admitted replicas times this factor. A quantity of \"2\" means each replica on that cluster carries twice the share of a factor-1 replica; \"500m\" means half. A cluster absent from the map (or the whole field unset) uses the identity factor 1. This is a routing weight only — it does not influence placement or how many replicas a cluster admits.\n\nDeprecated: use spec.routing.capacityFactors.",
 							Type:        []string{"object"},
 							AdditionalProperties: &spec.SchemaOrBool{
 								Allows: true,
@@ -11774,6 +11784,289 @@ func schema_pkg_apis_ome_v1beta1_RouterSpec(ref common.ReferenceCallback) common
 	}
 }
 
+func schema_pkg_apis_ome_v1beta1_RoutingCapacitySpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "RoutingCapacitySpec configures polling each serving home for its current servable capacity.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"disabled": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Disabled explicitly disables capacity polling. No other field may be set when true.",
+							Type:        []string{"boolean"},
+							Format:      "",
+						},
+					},
+					"path": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Path is appended to each serving home's endpoint and must start with \"/\".",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"method": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Method is the HTTP method used by the capacity request.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"format": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Format names the response shape returned by the capacity endpoint.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"options": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Options contains format-specific settings interpreted by the configured capacity format.",
+							Type:        []string{"object"},
+							AdditionalProperties: &spec.SchemaOrBool{
+								Allows: true,
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
+					"period": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Period is how often each serving home is polled.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Duration"),
+						},
+					},
+					"timeout": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Timeout bounds one capacity request and must be shorter than Period.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Duration"),
+						},
+					},
+					"samples": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Samples is the number of recent readings in the capacity window.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"quorum": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Quorum is the number of readings required to corroborate a lower capacity.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"maxAge": {
+						SchemaProps: spec.SchemaProps{
+							Description: "MaxAge is the maximum accepted age of a capacity report.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Duration"),
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/apis/meta/v1.Duration"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_RoutingProbeSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "RoutingProbeSpec configures an active end-to-end health probe for each serving home's externally addressable endpoint.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"disabled": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Disabled explicitly disables probing. No other field may be set when true.",
+							Type:        []string{"boolean"},
+							Format:      "",
+						},
+					},
+					"path": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Path is appended to each serving home's endpoint and must start with \"/\".",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"method": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Method is the HTTP method used by the probe.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"acceptStatuses": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "set",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "AcceptStatuses are response codes counted as a successful probe.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: 0,
+										Type:    []string{"integer"},
+										Format:  "int32",
+									},
+								},
+							},
+						},
+					},
+					"gateStatuses": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "set",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "GateStatuses are response codes counted as a failed probe. A code in neither status list is inconclusive.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: 0,
+										Type:    []string{"integer"},
+										Format:  "int32",
+									},
+								},
+							},
+						},
+					},
+					"period": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Period is how often each serving home is probed.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Duration"),
+						},
+					},
+					"timeout": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Timeout bounds one probe request and must be shorter than Period.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Duration"),
+						},
+					},
+					"failureThreshold": {
+						SchemaProps: spec.SchemaProps{
+							Description: "FailureThreshold is the number of consecutive failures required to gate a serving home.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"successThreshold": {
+						SchemaProps: spec.SchemaProps{
+							Description: "SuccessThreshold is the number of consecutive successes required to restore a gated serving home.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"allFailedPolicy": {
+						SchemaProps: spec.SchemaProps{
+							Description: "AllFailedPolicy controls the result when every serving home has crossed the failure threshold.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/apis/meta/v1.Duration"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_RoutingPublisherSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "RoutingPublisherSpec provides per-InferenceService behavior options to the single publisher selected by the operator.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"options": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Options are interpreted and validated by the operator-selected publisher.",
+							Type:        []string{"object"},
+							AdditionalProperties: &spec.SchemaOrBool{
+								Allows: true,
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_RoutingSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "RoutingSpec configures cross-cluster traffic distribution for an InferenceService. Fields that are unset inherit the operator-level routing configuration.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"enabled": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Enabled overrides routing for this InferenceService. Nil inherits the operator-level setting; false opts this InferenceService out. True opts in only when routing is enabled for the installation and cannot bypass a disabled installation gate.",
+							Type:        []string{"boolean"},
+							Format:      "",
+						},
+					},
+					"capacityFactors": {
+						SchemaProps: spec.SchemaProps{
+							Description: "CapacityFactors overrides the per-replica relative serving capacity of named workload clusters. Every quantity must be greater than zero. A cluster absent from the map uses the identity factor 1.",
+							Type:        []string{"object"},
+							AdditionalProperties: &spec.SchemaOrBool{
+								Allows: true,
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Ref: ref("k8s.io/apimachinery/pkg/api/resource.Quantity"),
+									},
+								},
+							},
+						},
+					},
+					"probe": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Probe overrides the operator-level endpoint health probe. The block is a complete replacement; set disabled to explicitly turn probing off.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RoutingProbeSpec"),
+						},
+					},
+					"capacity": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Capacity overrides the operator-level endpoint capacity poll. The block is a complete replacement; set disabled to explicitly turn polling off.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RoutingCapacitySpec"),
+						},
+					},
+					"publisher": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Publisher supplies behavior options to the operator-selected publisher. Publisher identity, transport, and credentials remain operator-level configuration.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RoutingPublisherSpec"),
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RoutingCapacitySpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RoutingProbeSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RoutingPublisherSpec", "k8s.io/apimachinery/pkg/api/resource.Quantity"},
+	}
+}
+
 func schema_pkg_apis_ome_v1beta1_Runner(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -13350,7 +13643,7 @@ func schema_pkg_apis_ome_v1beta1_TrafficMapEntry(ref common.ReferenceCallback) c
 					},
 					"weight": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Weight is the home's final, normalized, capacity-planned, health-gated traffic share as a relative non-negative integer (matching Gateway API and Envoy weighted-cluster semantics). A consumer either applies it verbatim or divides by the sum of weights for a percentage. The default all-unhealthy policy writes equal weights. An explicitly configured all-probe-failed drain instead writes an authoritative all-zero table.",
+							Description: "Weight is the home's final, normalized, capacity-planned, health-gated traffic share as a relative integer from 0 through 1,000,000. The upper bound matches the Gateway API backendRef weight limit, so a publisher can apply it verbatim; another consumer may divide by the sum of weights for a percentage. The default all-unhealthy policy writes equal weights. An explicitly configured all-probe-failed drain instead writes an authoritative all-zero table.",
 							Default:     0,
 							Type:        []string{"integer"},
 							Format:      "int32",

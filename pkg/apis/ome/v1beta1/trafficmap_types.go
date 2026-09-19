@@ -149,13 +149,15 @@ type TrafficMapEntry struct {
 	Endpoint *apis.URL `json:"endpoint,omitempty"`
 
 	// Weight is the home's final, normalized, capacity-planned, health-gated
-	// traffic share as a relative non-negative integer (matching Gateway API and
-	// Envoy weighted-cluster semantics). A consumer either applies it verbatim or
-	// divides by the sum of weights for a percentage. The default all-unhealthy
-	// policy writes equal weights. An explicitly configured all-probe-failed drain
-	// instead writes an authoritative all-zero table.
+	// traffic share as a relative integer from 0 through 1,000,000. The upper
+	// bound matches the Gateway API backendRef weight limit, so a publisher can
+	// apply it verbatim; another consumer may divide by the sum of weights for a
+	// percentage. The default all-unhealthy policy writes equal weights. An
+	// explicitly configured all-probe-failed drain instead writes an authoritative
+	// all-zero table.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1000000
 	Weight int32 `json:"weight"`
 
 	// Healthy is the health-gate result for this home (readyReplicas > 0). An

@@ -3527,6 +3527,10 @@
           "description": "Router defines the router spec",
           "$ref": "#/definitions/v1beta1.RouterSpec"
         },
+        "routing": {
+          "description": "Routing configures cross-cluster traffic distribution for this InferenceService. Unset fields inherit the operator-level routing configuration. Only consulted on the control-plane cluster; ignored in single-cluster deployments. Alpha; the API may change without notice.",
+          "$ref": "#/definitions/v1beta1.RoutingSpec"
+        },
         "runtime": {
           "description": "Runtime defines the serving runtime environment that will be used to execute the model. It is an inference service spec template that determines how the service should be deployed. Runtime is optional - if not defined, the operator will automatically select the best runtime based on the model's size, architecture, format, quantization, and framework.",
           "$ref": "#/definitions/v1beta1.ServingRuntimeRef"
@@ -5142,7 +5146,7 @@
       "type": "object",
       "properties": {
         "capacityFactors": {
-          "description": "CapacityFactors overrides the per-replica relative serving capacity of named workload clusters, keyed by WorkloadCluster name. It weights traffic for heterogeneous hardware where one cluster's replica serves more (or less) than another's: a home's routed share scales with its admitted replicas times this factor. A quantity of \"2\" means each replica on that cluster carries twice the share of a factor-1 replica; \"500m\" means half. A cluster absent from the map (or the whole field unset) uses the identity factor 1. This is a routing weight only — it does not influence placement or how many replicas a cluster admits.",
+          "description": "CapacityFactors overrides the per-replica relative serving capacity of named workload clusters, keyed by WorkloadCluster name. It weights traffic for heterogeneous hardware where one cluster's replica serves more (or less) than another's: a home's routed share scales with its admitted replicas times this factor. A quantity of \"2\" means each replica on that cluster carries twice the share of a factor-1 replica; \"500m\" means half. A cluster absent from the map (or the whole field unset) uses the identity factor 1. This is a routing weight only — it does not influence placement or how many replicas a cluster admits.\n\nDeprecated: use spec.routing.capacityFactors.",
           "type": "object",
           "additionalProperties": {
             "$ref": "#/definitions/resource.Quantity"
@@ -6619,6 +6623,161 @@
         }
       }
     },
+    "v1beta1.RoutingCapacitySpec": {
+      "description": "RoutingCapacitySpec configures polling each serving home for its current servable capacity.",
+      "type": "object",
+      "properties": {
+        "disabled": {
+          "description": "Disabled explicitly disables capacity polling. No other field may be set when true.",
+          "type": "boolean"
+        },
+        "format": {
+          "description": "Format names the response shape returned by the capacity endpoint.",
+          "type": "string"
+        },
+        "maxAge": {
+          "description": "MaxAge is the maximum accepted age of a capacity report.",
+          "$ref": "#/definitions/v1.Duration"
+        },
+        "method": {
+          "description": "Method is the HTTP method used by the capacity request.",
+          "type": "string"
+        },
+        "options": {
+          "description": "Options contains format-specific settings interpreted by the configured capacity format.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "default": ""
+          }
+        },
+        "path": {
+          "description": "Path is appended to each serving home's endpoint and must start with \"/\".",
+          "type": "string"
+        },
+        "period": {
+          "description": "Period is how often each serving home is polled.",
+          "$ref": "#/definitions/v1.Duration"
+        },
+        "quorum": {
+          "description": "Quorum is the number of readings required to corroborate a lower capacity.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "samples": {
+          "description": "Samples is the number of recent readings in the capacity window.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "timeout": {
+          "description": "Timeout bounds one capacity request and must be shorter than Period.",
+          "$ref": "#/definitions/v1.Duration"
+        }
+      }
+    },
+    "v1beta1.RoutingProbeSpec": {
+      "description": "RoutingProbeSpec configures an active end-to-end health probe for each serving home's externally addressable endpoint.",
+      "type": "object",
+      "properties": {
+        "acceptStatuses": {
+          "description": "AcceptStatuses are response codes counted as a successful probe.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "int32",
+            "default": 0
+          },
+          "x-kubernetes-list-type": "set"
+        },
+        "allFailedPolicy": {
+          "description": "AllFailedPolicy controls the result when every serving home has crossed the failure threshold.",
+          "type": "string"
+        },
+        "disabled": {
+          "description": "Disabled explicitly disables probing. No other field may be set when true.",
+          "type": "boolean"
+        },
+        "failureThreshold": {
+          "description": "FailureThreshold is the number of consecutive failures required to gate a serving home.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "gateStatuses": {
+          "description": "GateStatuses are response codes counted as a failed probe. A code in neither status list is inconclusive.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "int32",
+            "default": 0
+          },
+          "x-kubernetes-list-type": "set"
+        },
+        "method": {
+          "description": "Method is the HTTP method used by the probe.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Path is appended to each serving home's endpoint and must start with \"/\".",
+          "type": "string"
+        },
+        "period": {
+          "description": "Period is how often each serving home is probed.",
+          "$ref": "#/definitions/v1.Duration"
+        },
+        "successThreshold": {
+          "description": "SuccessThreshold is the number of consecutive successes required to restore a gated serving home.",
+          "type": "integer",
+          "format": "int32"
+        },
+        "timeout": {
+          "description": "Timeout bounds one probe request and must be shorter than Period.",
+          "$ref": "#/definitions/v1.Duration"
+        }
+      }
+    },
+    "v1beta1.RoutingPublisherSpec": {
+      "description": "RoutingPublisherSpec provides per-InferenceService behavior options to the single publisher selected by the operator.",
+      "type": "object",
+      "properties": {
+        "options": {
+          "description": "Options are interpreted and validated by the operator-selected publisher.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "default": ""
+          }
+        }
+      }
+    },
+    "v1beta1.RoutingSpec": {
+      "description": "RoutingSpec configures cross-cluster traffic distribution for an InferenceService. Fields that are unset inherit the operator-level routing configuration.",
+      "type": "object",
+      "properties": {
+        "capacity": {
+          "description": "Capacity overrides the operator-level endpoint capacity poll. The block is a complete replacement; set disabled to explicitly turn polling off.",
+          "$ref": "#/definitions/v1beta1.RoutingCapacitySpec"
+        },
+        "capacityFactors": {
+          "description": "CapacityFactors overrides the per-replica relative serving capacity of named workload clusters. Every quantity must be greater than zero. A cluster absent from the map uses the identity factor 1.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/resource.Quantity"
+          }
+        },
+        "enabled": {
+          "description": "Enabled overrides routing for this InferenceService. Nil inherits the operator-level setting; false opts this InferenceService out. True opts in only when routing is enabled for the installation and cannot bypass a disabled installation gate.",
+          "type": "boolean"
+        },
+        "probe": {
+          "description": "Probe overrides the operator-level endpoint health probe. The block is a complete replacement; set disabled to explicitly turn probing off.",
+          "$ref": "#/definitions/v1beta1.RoutingProbeSpec"
+        },
+        "publisher": {
+          "description": "Publisher supplies behavior options to the operator-selected publisher. Publisher identity, transport, and credentials remain operator-level configuration.",
+          "$ref": "#/definitions/v1beta1.RoutingPublisherSpec"
+        }
+      }
+    },
     "v1beta1.Runner": {
       "description": "Runner is one logical pod role within an Instance.\n\nSingle-pod Instances declare one Runner named \"default\" with Size=1. Multi-node Instances declare \"leader\" (Size=1) + \"worker\" (Size\u003e=1).\n\nThe revision hash includes every Runner's Template; a worker-only image bump still triggers a coordinated rollout across the whole Instance because tensor-parallel weights require leader+workers to move together.",
       "type": "object",
@@ -7515,7 +7674,7 @@
           "$ref": "#/definitions/v1beta1.TrafficMapProbe"
         },
         "weight": {
-          "description": "Weight is the home's final, normalized, capacity-planned, health-gated traffic share as a relative non-negative integer (matching Gateway API and Envoy weighted-cluster semantics). A consumer either applies it verbatim or divides by the sum of weights for a percentage. The default all-unhealthy policy writes equal weights. An explicitly configured all-probe-failed drain instead writes an authoritative all-zero table.",
+          "description": "Weight is the home's final, normalized, capacity-planned, health-gated traffic share as a relative integer from 0 through 1,000,000. The upper bound matches the Gateway API backendRef weight limit, so a publisher can apply it verbatim; another consumer may divide by the sum of weights for a percentage. The default all-unhealthy policy writes equal weights. An explicitly configured all-probe-failed drain instead writes an authoritative all-zero table.",
           "type": "integer",
           "format": "int32",
           "default": 0

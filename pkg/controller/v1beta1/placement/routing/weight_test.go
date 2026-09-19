@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"math"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -118,6 +119,39 @@ func TestWeights(t *testing.T) {
 			},
 			want: []int32{2, 1},
 		},
+		{
+			name: "ratio at the publisher limit remains exact",
+			homes: []Home{
+				{Cluster: "large", Allocated: 1, Ready: 1, Factor: factor("1000000")},
+				{Cluster: "baseline", Allocated: 1, Ready: 1, Factor: factor("1")},
+			},
+			want: []int32{maxTrafficMapWeight, 1},
+		},
+		{
+			name: "ratio one above the publisher limit is proportionally bounded",
+			homes: []Home{
+				{Cluster: "large", Allocated: 1, Ready: 1, Factor: factor("1000001")},
+				{Cluster: "baseline", Allocated: 1, Ready: 1, Factor: factor("1")},
+			},
+			want: []int32{maxTrafficMapWeight, 1},
+		},
+		{
+			name: "ratio beyond the publisher limit is safely compressed",
+			homes: []Home{
+				{Cluster: "large", Allocated: 1, Ready: 1, Factor: factor("3000000000")},
+				{Cluster: "gated", Allocated: 1, Ready: 0, Factor: factor("9000000000")},
+				{Cluster: "baseline", Allocated: 1, Ready: 1, Factor: factor("1")},
+			},
+			want: []int32{maxTrafficMapWeight, 0, 1},
+		},
+		{
+			name: "factor and allocation multiplication cannot overflow",
+			homes: []Home{
+				{Cluster: "large", Allocated: math.MaxInt32, Ready: 1, Factor: factor("9223372036854775807")},
+				{Cluster: "baseline", Allocated: 1, Ready: 1, Factor: factor("1")},
+			},
+			want: []int32{maxTrafficMapWeight, 1},
+		},
 	}
 
 	for _, tt := range tests {
@@ -132,24 +166,6 @@ func TestWeights(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestGCD(t *testing.T) {
-	tests := []struct {
-		a, b, want int64
-	}{
-		{0, 0, 0},
-		{0, 5, 5},
-		{5, 0, 5},
-		{12, 8, 4},
-		{100000, 50000, 50000},
-		{7, 3, 1},
-	}
-	for _, tt := range tests {
-		if got := gcd(tt.a, tt.b); got != tt.want {
-			t.Errorf("gcd(%d, %d) = %d, want %d", tt.a, tt.b, got, tt.want)
-		}
 	}
 }
 
