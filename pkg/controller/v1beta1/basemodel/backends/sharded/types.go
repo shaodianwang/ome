@@ -1,10 +1,8 @@
 // Package sharded is the BaseModel controller's sharded backend: the
 // modelcache abstraction (Client interface, Provider, Registry) plus
-// the cluster_cache HTTP client that implements it. The two used to
-// live in separate packages (pkg/modelcache, pkg/modelcache/providers/
-// clustercache) but the abstraction never had more than one production
-// implementation, so the split bought nothing and cost an extra
-// package boundary. The interface stays — it's still useful for tests.
+// the cluster_cache HTTP client that implements it. Both live in one
+// package because the abstraction has a single production
+// implementation; the interface exists so tests can substitute a fake.
 package sharded
 
 import (

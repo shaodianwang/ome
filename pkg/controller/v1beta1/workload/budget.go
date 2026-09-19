@@ -231,9 +231,8 @@ func CurrentUnavailableInFlight(statuses []InstanceStatus) int32 {
 // Phase only, deliberately: a Failed row still holding its Restart
 // operation is counted by neither anchor, so a repair that failed
 // releases the budget while its Instance stays down. The RetryBlock
-// against the revision is what bounds repeated failures there, and the
-// asymmetry with the update arm — which does charge a Failed row's
-// preserved Update — stands until one accounting owns both.
+// against the revision is what bounds repeated failures there. The
+// update arm differs: it does charge a Failed row's preserved Update.
 func CurrentRestartingInFlight(statuses []InstanceStatus) int32 {
 	var n int32
 	for _, s := range statuses {

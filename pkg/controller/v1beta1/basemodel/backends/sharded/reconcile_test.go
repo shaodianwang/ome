@@ -33,12 +33,11 @@ func (s *stubClient) InspectSource(ctx context.Context, src Source) (*SourceInsp
 	return s.inspectSourceFunc(ctx, src)
 }
 
-// TestReconcileMetadataMarksFailedOnUnparseableSource pins the
-// behavior change: providers that return ErrSourceUnparseable must
-// drive the ClusterBaseModel to state=Failed with reason
-// MetadataUnparseable and an empty ctrl.Result (no 5s requeue loop).
-// The previous behavior was to retry indefinitely as MetadataPending,
-// which silently wedged any ISVC pointing at an unparseable model.
+// TestReconcileMetadataMarksFailedOnUnparseableSource pins that
+// providers returning ErrSourceUnparseable drive the ClusterBaseModel to
+// state=Failed with reason MetadataUnparseable and an empty ctrl.Result
+// (no 5s requeue loop). Retrying indefinitely as MetadataPending would
+// silently wedge any ISVC pointing at an unparseable model.
 func TestReconcileMetadataMarksFailedOnUnparseableSource(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 
@@ -116,9 +115,8 @@ func findCondition(conditions []metav1.Condition, t string) *metav1.Condition {
 	return nil
 }
 
-// TestReconcileReadyModelDoesNotRegressToImporting pins the fix for
-// the production regression where every poll after a Sharded model
-// reached Ready overwrote state back to Importing. The Ready=True
+// TestReconcileReadyModelDoesNotRegressToImporting pins that a Sharded
+// model which reached Ready stays Ready across polls. The Ready=True
 // reconcile branch must not call applyInitialModelStatus (which
 // unconditionally forces state=Importing); a no-touch stamp is the
 // correct shape — preserve conditions and state, only bump

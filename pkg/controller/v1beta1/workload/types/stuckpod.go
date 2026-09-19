@@ -7,9 +7,9 @@ import (
 )
 
 // terminalWaitingReasons enumerates kubelet container state.Waiting
-// reasons that cannot self-recover. Every entry below has been observed
-// in the wild as a wedge that requires either a spec change (fix the
-// image tag) or a node-level fix (registry creds).
+// reasons that cannot self-recover. Every entry below is a wedge that
+// requires either a spec change (fix the image tag) or a node-level fix
+// (registry creds).
 //
 // The set covers both pull-side failures (image cannot be obtained) and
 // post-pull failures (image obtained but the container cannot run or

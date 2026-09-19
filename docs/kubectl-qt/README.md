@@ -419,7 +419,7 @@ would break the alignment the tree depends on.
 > [!NOTE]
 > There is no `-n/--namespace`, and no namespace selector of any kind.
 > AcceleratorQuota is cluster-scoped, and a leaf's tenant is its own name rather
-> than a namespace it binds — dozens of tenants routinely share one namespace, so
+> than a namespace it binds — many tenants can share one namespace, so
 > a namespace names no single leaf to select. Use `--node` to select a subtree.
 
 `--max-depth` defaults to off on purpose. The depth limit is operator

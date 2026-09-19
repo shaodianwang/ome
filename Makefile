@@ -183,8 +183,8 @@ manifests: controller-gen yq ## 📄 Generate WebhookConfiguration, ClusterRole 
 	@# with no properties. CRD pruning then silently drops every key under
 	@# .spec.runners[].template.metadata on Update — including the per-Component
 	@# annotations + labels the IR projector stamps from the parent ISVC. Without
-	@# this fix, no-image-bump rollout triggers (annotation-only ISVC edits) never
-	@# reach the pod template and the revision hash never flips.
+	@# these properties, no-image-bump rollout triggers (annotation-only ISVC
+	@# edits) never reach the pod template and the revision hash never flips.
 	@$(YQ) '.spec.versions[0].schema.openAPIV3Schema.properties.spec.properties.runners.items.properties.template.properties.metadata.properties = {"annotations": {"type": "object", "additionalProperties": {"type": "string"}}, "labels": {"type": "object", "additionalProperties": {"type": "string"}}}' -i config/crd/full/ome.io_inferencereplicas.yaml
 	@echo "  • Setting protocol defaults..."
 	@$(YQ) '.spec.versions[0].schema.openAPIV3Schema.properties.spec.properties | .. | select(has("protocol")) | path' config/crd/full/ome.io_inferenceservices.yaml -o j | jq -r '. | map(select(numbers)="["+tostring+"]") | join(".")' | awk '{print "."$$0".protocol.default"}' | xargs -n1 -I{} $(YQ) '{} = "TCP"' -i config/crd/full/ome.io_inferenceservices.yaml
@@ -828,8 +828,7 @@ integration-test: fmt vet manifests envtest dep-crds xet-build test-kindutil-uni
 	@# cmd/ome-agent, which links the xet staticlib via cgo
 	@# (-L pkg/xet/target/release); TEST_ENV puts that same path on
 	@# LD_LIBRARY_PATH/DYLD_LIBRARY_PATH so the built binary also loads.
-	@# Most test packages under tests/ are Ginkgo suites (per
-	@# .claude/integration-test-framework-design.md §7). Each Ginkgo
+	@# Most test packages under tests/ are Ginkgo suites. Each Ginkgo
 	@# package has a single TestXxx(t) entry that calls util.RunSuite
 	@# which registers Gomega's fail handler with ginkgo.RunSpecs.
 	@#
@@ -847,7 +846,7 @@ integration-test: fmt vet manifests envtest dep-crds xet-build test-kindutil-uni
 	@#     kubelet via Docker): omenative_coordination_kind, irmanaged_kind,
 	@#     rawdeployment_kind, omenative_perm_kind. Run locally via the
 	@#     `make test-kind*` targets; not wired into envtest CI because
-	@#     mks-cpu agents don't expose a Docker daemon. The `_kind$$` filter
+	@#     its agents don't expose a Docker daemon. The `_kind$$` filter
 	@#     below excludes ANY such suite, so a newly added KIND suite is
 	@#     dropped automatically instead of hanging the envtest run.
 	@#
@@ -953,7 +952,7 @@ test-perf: ## 🏎️  Perf CI step (separate from integration-test): harness un
 	@echo "🧪 Running perf-harness unit tests (plain testing.T, no ginkgo flags)..."
 	@$(TEST_ENV) go test -timeout=10m ./tests/perf/...
 	@# CI agents are constrained, so run the small ci/ scenarios (the large
-	@# baselines do not converge in the recorder window on an mks-cpu pod).
+	@# baselines do not converge in the recorder window on a CI pod).
 	@$(MAKE) test-perf-isvc \
 		PERF_GENERATOR=tests/perf/inferenceservice/configs/ci/generator.yaml \
 		PERF_RANGESPEC=tests/perf/inferenceservice/configs/ci/rangespec.yaml
@@ -1055,7 +1054,7 @@ test-kind-irmanaged: xet-build dep-crds ## 🧪 Run KIND-backed IR-managed OMENa
 		echo "❌ docker is not reachable. KIND tests need a running Docker daemon."; \
 		exit 1; \
 	}
-	@# Exercises the IR-managed path (the production default since #320),
+	@# Exercises the IR-managed path (the production default),
 	@# which test-kind's omenative_coordination_kind suite deliberately disables. Uses
 	@# its OWN cluster (ome-irmanaged-kind) with the inferencereplica
 	@# controller registered + IR-managed enabled. On a resource-constrained

@@ -271,14 +271,14 @@ func TestEscalation_GangHoldKeepsOffTeardowns(t *testing.T) {
 	}
 }
 
-// TestEscalation_GangUnschedulableReachesUsOnMemberPods: the gang
+// TestEscalation_GangUnschedulableArrivesOnMemberPods: the gang
 // scheduler reports an unplaceable gang by rejecting its MEMBERS, so the
 // Instance is held on the pod-level scheduler token with the
 // coscheduling explanation preserved — nothing has to read it off the
 // PodGroup, whose status cannot express it.
 //
 // Cells: instance/Create/CreatePods/pod.unschedulable[source]/before
-func TestEscalation_GangUnschedulableReachesUsOnMemberPods(t *testing.T) {
+func TestEscalation_GangUnschedulableArrivesOnMemberPods(t *testing.T) {
 	now := time.Now()
 	input, rec := escalationFixture(creatingGang(now.Add(30 * time.Minute)))
 	input.Gangs = workload.NewGangObservations()

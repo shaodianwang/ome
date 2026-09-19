@@ -10,7 +10,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 )
 
-// wedgedButGatedPod is the shape the failed-while-serving guard used to
+// wedgedButGatedPod is the shape the failed-while-serving guard must not
 // read as healthy capacity: conditions still say ContainersReady and the
 // serving gate is still True, while the container is parked in a
 // terminal waiting reason.

@@ -1265,10 +1265,9 @@ func TestShardedBaseModelDeletionShortCircuitsConfigMapWait(t *testing.T) {
 			WithObjects(baseModel).
 			Build()
 
-		// Simulate the production scenario: many nodes left a stale entry
-		// from a prior PerNode lifecycle (or the model was always Sharded
-		// and model-agent never marked them deleted — either way the wait
-		// never converged before this fix).
+		// Simulate many nodes leaving a stale entry from a prior PerNode
+		// lifecycle (or the model was always Sharded and model-agent never
+		// marked them deleted); either way the wait must still converge.
 		modelKey := constants.GetModelConfigMapKey("default", "sharded-delete-me", false)
 		entry, _ := json.Marshal(shared.ModelEntry{Status: shared.ModelStatusReady})
 		for i := 1; i <= 5; i++ {

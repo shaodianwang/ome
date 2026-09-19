@@ -50,7 +50,7 @@ func runningNotReadyPod(name string, since time.Time) *corev1.Pod {
 // TestPodRunningNotReady pins the detector: only a Running pod whose
 // containers have all started yet never report ContainersReady counts.
 // A pod with a container parked in a waiting state is a kubelet wedge
-// the existing evidence already classifies, not this shape.
+// the stuck-pod evidence classifies, not this shape.
 //
 // Cells: instance/Create/CreatePods/pod.runningNotReady[source]/before
 func TestPodRunningNotReady(t *testing.T) {
