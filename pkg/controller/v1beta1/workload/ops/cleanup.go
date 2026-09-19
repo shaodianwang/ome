@@ -2,12 +2,14 @@ package ops
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
@@ -110,8 +112,9 @@ func alienRevisionPods(s *workload.InstanceStatus, targetName string, pods []*co
 //     replacement gang, drops its marker, records the failure on the
 //     superseded revision's RetryBlock, resets the source Ready on its
 //     running revision);
-//   - alien-revision pods → direct delete, the same eviction the
-//     superseded-surge redirect applies to a not-yet-promoted surge pod.
+//   - alien-revision pods → taken out of rotation, then deleted on a later
+//     pass, the same eviction the superseded-surge redirect applies to a
+//     not-yet-promoted surge pod.
 //
 // The serving source is never touched: no serving-gate flip, no status
 // stamp — after the debris is gone the Create pass re-proves readiness
@@ -138,21 +141,66 @@ func CleanupWreckage(ctx context.Context, deps workload.Deps, input workload.Rec
 	if len(aliens) == 0 {
 		return true, nil
 	}
-	if !deps.ExpectationsCache().Satisfied(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, inst.Index) {
+	return deleteSupersededRevisionPods(ctx, deps, input, inst.Index, aliens, target.Name)
+}
+
+// deleteSupersededRevisionPods evicts an Instance's pods keyed to a revision
+// it is not converging to — the wreckage sweep's aliens, and the pods a
+// retired Create attempt still holds the names of. A pod that is still
+// routed is taken out of rotation and left for the next pass: deleting it in
+// the same pass gives the endpoint controllers no window to act on the
+// withdrawal, and a bare delete drops the connections it is carrying.
+// Deletes are counted on the expectations cache before they are issued, and
+// compensated when the apiserver refuses, so the next pass reads a pod set
+// it can trust.
+//
+// done=false whenever there is still work here: outstanding expectations,
+// a pod just unrouted, or pods deleted that the next pass has to re-read.
+func deleteSupersededRevisionPods(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, idx int32, pods []*corev1.Pod, targetName string) (bool, error) {
+	cache := deps.ExpectationsCache()
+	ns, owner, component := input.Key.Namespace, input.Key.OwnerName, input.Key.Component
+	if !cache.Satisfied(ns, owner, component, idx) {
 		return false, nil
 	}
-	for _, pod := range aliens {
-		deps.ExpectationsCache().ExpectDeletes(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, inst.Index, 1)
+	unrouted := false
+	for _, pod := range pods {
+		if !podreadiness.IsServing(pod) {
+			continue
+		}
+		if err := podreadiness.MarkPodNotServing(ctx, deps.Client, deps.Reader(), pod,
+			podreadiness.WriterDeleteDrain, deleteDrainKey(idx)); err != nil {
+			// A pod that has vanished, or come back under a new UID, is out
+			// of rotation by other means already; the delete resolves it.
+			if !apierrors.IsNotFound(err) && !errors.Is(err, podreadiness.ErrPodIdentityChanged) {
+				return false, fmt.Errorf("unroute superseded-revision pod %s/%s: %w", pod.Namespace, pod.Name, err)
+			}
+			continue
+		}
+		unrouted = true
+	}
+	// Deleting in the pass that unrouted gives the endpoint controllers no
+	// window to act on the withdrawal, so a pod that was still carrying
+	// traffic goes on the next pass. One that was already out of rotation
+	// has nothing to wait for and goes now.
+	if unrouted {
+		return false, nil
+	}
+	deleted := 0
+	for _, pod := range pods {
+		cache.ExpectDeletes(ns, owner, component, idx, 1)
 		if err := deps.Client.Delete(ctx, pod); err != nil {
-			deps.ExpectationsCache().ObservedDelete(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, inst.Index)
+			cache.ObservedDelete(ns, owner, component, idx)
 			if apierrors.IsNotFound(err) {
 				continue
 			}
 			return false, fmt.Errorf("delete superseded-revision pod %s/%s: %w", pod.Namespace, pod.Name, err)
 		}
+		deleted++
 	}
-	recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonSupersededWreckageCleaned,
-		"OMENative %s deleted %d superseded-revision pod(s); current target %s",
-		instanceKey(input.Key.Component, inst.Index), len(aliens), target.Name)
+	if deleted > 0 {
+		recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonSupersededWreckageCleaned,
+			"OMENative %s deleted %d superseded-revision pod(s); current target %s",
+			instanceKey(component, idx), deleted, targetName)
+	}
 	return false, nil
 }

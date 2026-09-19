@@ -58,7 +58,7 @@ func inPlaceUpdate(ctx context.Context, deps workload.Deps, input workload.Recon
 	if s := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index); s != nil && s.Phase == workload.InstancePhaseUpdating {
 		wasNotUpdating = false
 	}
-	if err := patchInstanceStatusUpdating(ctx, input, inst.Index, target.Name, plan.InstanceReadyTimeout); err != nil {
+	if err := patchInstanceStatusUpdating(ctx, input, inst.Index, target.Name, plan.UpdateStrategy.Type, plan.InstanceReadyTimeout); err != nil {
 		return false, fmt.Errorf("patch status Updating (instance=%d): %w", inst.Index, err)
 	}
 	if wasNotUpdating {

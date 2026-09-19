@@ -92,6 +92,13 @@ func TestUpdateWithPods_InPlaceRollLosingItsOnlyPodReResolvesToRecreate(t *testi
 	if s.Incarnation <= 1 {
 		t.Errorf("Incarnation: got %d want a bump (the recreate's new materialization)", s.Incarnation)
 	}
+	// The pin follows the mechanism the attempt moved to: later passes read
+	// it instead of the live plan, so leaving it on in-place would send the
+	// next one back to the patch this pod loss just ruled out.
+	if s.Operation.Strategy != string(v1beta1.UpdateStrategyRecreatePod) {
+		t.Errorf("Operation.Strategy: got %q want %q (the mechanism it re-resolved to)",
+			s.Operation.Strategy, v1beta1.UpdateStrategyRecreatePod)
+	}
 	for _, d := range blocked {
 		if d == workload.RetryBlockPersist {
 			t.Errorf("a re-resolution must charge no RetryBlock")

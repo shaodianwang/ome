@@ -180,13 +180,22 @@ var _ = ginkgo.Describe("InferenceService OMENative status contracts", ginkgo.Or
 
 	ginkgo.It("performs zero ISVC writes when a reconcile observes an unchanged IR rollup", func() {
 		// Let the projection converge fully before capturing the baseline.
-		var baselineRV string
+		// EngineReady=True is committed by the IR projector's own write,
+		// and the reconciler's outer status flush is a SECOND write in the
+		// same pass. Capturing the baseline on the condition alone can
+		// therefore snapshot the ResourceVersion between the two, and the
+		// trailing write then reads as the churn this spec forbids. Wait
+		// for the ResourceVersion to hold still instead.
+		var baselineRV, previousRV string
 		Eventually(func(g Gomega) {
 			fresh := &v1beta1.InferenceService{}
 			g.Expect(k8sClient.Get(suiteCtx, isvcKey, fresh)).To(Succeed())
 			cond := fresh.Status.GetCondition(v1beta1.EngineReady)
 			g.Expect(cond).NotTo(BeNil())
 			g.Expect(cond.Status).To(Equal(corev1.ConditionTrue))
+			seen := previousRV
+			previousRV = fresh.ResourceVersion
+			g.Expect(fresh.ResourceVersion).To(Equal(seen), "the ISVC is still settling")
 			baselineRV = fresh.ResourceVersion
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 

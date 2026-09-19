@@ -20,14 +20,13 @@ import (
 // that is already inside the SurgeThenDrain state machine.
 //
 // UpdateStrategy is not part of the ControllerRevision payload, so editing
-// it does not retarget the roll: the same target revision keeps rolling
-// under a different mechanism. UpdateWithPods re-resolves the mode from the
-// live plan on every pass, and the mode it lands on has no knowledge of the
-// pods, ordinal slot, or serving-gate holds the previous mode left behind.
+// it does not retarget the roll — and the strategy is pinned on the
+// operation, so an attempt already under way keeps the mechanism it opened
+// with. A mode that took over mid-flight would have no knowledge of the
+// pods, ordinal slot, or serving-gate holds the surge left behind.
 //
-// Each test runs the identical fixture twice: once with SurgeThenDrain
-// retained (the control, which pins today's correct behavior) and once with
-// the strategy flipped mid-flight.
+// Each test runs the identical fixture under the retained strategy (the
+// control) and under each flip, and expects the same outcome from both.
 
 // midSurgeFixture is one Instance inside a SurgeThenDrain roll from
 // runningImage to targetImage: a source pod at ordinal 0 and a replacement
@@ -157,6 +156,7 @@ func seedInFlightUpdateOperation(t *testing.T, c client.Client, isvc *v1beta1.In
 			Type:           v1beta1.InstanceOperationUpdate,
 			Step:           step,
 			TargetRevision: targetRev,
+			Strategy:       string(v1beta1.UpdateStrategySurgeThenDrain),
 			StartedAt:      metav1.Now(),
 			LastProgressAt: metav1.Now(),
 		}
@@ -295,20 +295,40 @@ func TestUpdateWithPods_StrategyFlipAtStepSurge_ConvergesToOnePod(t *testing.T) 
 	}
 }
 
-// TestUpdateWithPods_StrategyFlipAtUncommittedSurge_RollsUnderNewStrategy pins
-// the escape hatch: a surge whose replacement has not come up is uncommitted,
-// so editing the strategy away from SurgeThenDrain must actually take effect.
-// This is the lever for a Component whose surge cannot fit — on a full rack
-// there is no room for the extra pod, and switching to a mode that reuses the
-// pod in place is the way out. Holding the Instance on the surge machine
-// instead would leave the roll wedged until instanceReadyTimeout.
+// TestUpdateWithPods_StrategyFlipAtUncommittedSurge_FinishesOnItsPin pins
+// WHEN the edit takes effect: at the Instance's next attempt, not this one.
 //
-// The Instance must converge on the source pod at its original ordinal slot,
-// rolled to the target revision, with the abandoned replacement reclaimed.
-func TestUpdateWithPods_StrategyFlipAtUncommittedSurge_RollsUnderNewStrategy(t *testing.T) {
+// The replacement has not come up yet, so the surge looks uncommitted — but
+// its capacity is already spent, its ordinal slot already taken, and the
+// source is held in rotation by the surge's own writer key. Unwinding all of
+// that mid-flight is how a mode that never learned the slot exists ends up
+// stranding a pod. The attempt therefore finishes on SurgeThenDrain, and the
+// edited strategy is what the Instance's next roll resolves against.
+//
+// Cells: instance/Update/Surge/spec.strategy/before
+func TestUpdateWithPods_StrategyFlipAtUncommittedSurge_FinishesOnItsPin(t *testing.T) {
 	f := newMidSurgeFixture(t, workload.UpdateStepSurge,
 		false /* surgeReady */, true /* sourceServing */)
 
+	for pass := 0; pass < 3; pass++ {
+		f.syncFakeKubelet(t)
+		if done := f.run(t, workload.UpdateStrategyInPlaceIfPossible); done {
+			t.Fatalf("the roll reported done while its replacement was still unready")
+		}
+	}
+	if _, found := f.livePod(t, f.surgePod); !found {
+		t.Fatalf("the replacement was reclaimed: the edit unwound capacity the surge had already spent")
+	}
+	held := legacyInstanceStatusesOnIR(f.client, f.isvc, workload.ComponentEngine)[0]
+	if held.Operation == nil || !isSurgeUpdateStep(held.Operation.Step) {
+		t.Fatalf("Operation = %+v, want the surge still in control", held.Operation)
+	}
+	if held.Operation.Strategy != string(v1beta1.UpdateStrategySurgeThenDrain) {
+		t.Errorf("Operation.Strategy = %q, want the pin the attempt opened with", held.Operation.Strategy)
+	}
+
+	// The replacement comes up and the cycle completes on its own mechanism.
+	f.markSurgePodReady(t)
 	const maxPasses = 12
 	var done bool
 	for pass := 0; pass < maxPasses && !done; pass++ {
@@ -316,19 +336,10 @@ func TestUpdateWithPods_StrategyFlipAtUncommittedSurge_RollsUnderNewStrategy(t *
 		done = f.run(t, workload.UpdateStrategyInPlaceIfPossible)
 	}
 	if !done {
-		t.Fatalf("rollout did not converge in %d passes after the strategy edit", maxPasses)
+		t.Fatalf("the surge did not finish its cycle in %d passes", maxPasses)
 	}
-
-	if _, found := f.livePod(t, f.surgePod); found {
-		t.Errorf("abandoned replacement survived; the surge budget it holds is never released")
-	}
-	source, found := f.livePod(t, f.sourcePod)
-	if !found {
-		t.Fatalf("source pod was reclaimed; the Instance has nothing left serving")
-	}
-	if got := source.Spec.Containers[0].Image; got != f.targetSpec.Containers[0].Image {
-		t.Errorf("source image = %q, want %q: the strategy edit did not roll the Instance",
-			got, f.targetSpec.Containers[0].Image)
+	if _, found := f.livePod(t, f.sourcePod); found {
+		t.Errorf("the drained source survived: the surge cycle did not complete")
 	}
 
 	status := legacyInstanceStatusesOnIR(f.client, f.isvc, workload.ComponentEngine)[0]
@@ -336,8 +347,34 @@ func TestUpdateWithPods_StrategyFlipAtUncommittedSurge_RollsUnderNewStrategy(t *
 		t.Errorf("final status = {phase:%s running:%s}, want {phase:Ready running:%s}",
 			status.Phase, status.RunningRevision, f.targetCR.Name)
 	}
-	if status.ActiveOrdinal != 0 {
-		t.Errorf("ActiveOrdinal = %d, want 0: the roll stayed on the source's slot", status.ActiveOrdinal)
+	// With the attempt over, nothing pins a strategy any more: the next roll
+	// resolves against the edited one.
+	next := effectiveUpdateStrategy(&workload.InstanceStatus{
+		Phase:     workload.InstancePhase(status.Phase),
+		Operation: legacyFromV1beta1Op(status.Operation),
+	}, workload.UpdateStrategyInPlaceIfPossible)
+	if next != workload.UpdateStrategyInPlaceIfPossible {
+		t.Errorf("next attempt resolves to %q, want the edited InPlaceIfPossible", next)
+	}
+}
+
+// markSurgePodReady advances the replacement to ContainersReady + PodReady,
+// the state the promote bar reads.
+func (f *midSurgeFixture) markSurgePodReady(t *testing.T) {
+	t.Helper()
+	fresh, found := f.livePod(t, f.surgePod)
+	if !found {
+		t.Fatalf("replacement pod is gone")
+	}
+	for _, condition := range []corev1.PodConditionType{corev1.ContainersReady, corev1.PodReady} {
+		fresh.Status.Conditions = append(fresh.Status.Conditions, corev1.PodCondition{
+			Type:               condition,
+			Status:             corev1.ConditionTrue,
+			LastTransitionTime: metav1.Now(),
+		})
+	}
+	if err := f.client.Status().Update(context.Background(), fresh); err != nil {
+		t.Fatalf("mark replacement ready: %v", err)
 	}
 }
 

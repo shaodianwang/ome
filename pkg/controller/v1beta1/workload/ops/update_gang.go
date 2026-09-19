@@ -170,7 +170,7 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 
 	if !surging {
 		surgeIdx = workload.AllocateSurgeIndex(input.ObservedState.InstanceStatuses)
-		claimed, err := startGangSurge(ctx, input, src, surgeIdx, surgeTargetName, plan.InstanceReadyTimeout)
+		claimed, err := startGangSurge(ctx, input, src, surgeIdx, surgeTargetName, plan.UpdateStrategy.Type, plan.InstanceReadyTimeout)
 		if err != nil {
 			return false, fmt.Errorf("claim gang surge pair (source=%d target=%d): %w", sourceIdx, surgeIdx, err)
 		}
@@ -186,6 +186,7 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 				Step:           updateStepSurge,
 				SurgeIndex:     &si,
 				TargetRevision: surgeTargetName,
+				Strategy:       plan.UpdateStrategy.Type,
 			}
 		}
 		recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonRecreateUpdateStarted,

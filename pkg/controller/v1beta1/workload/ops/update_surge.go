@@ -228,31 +228,30 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 		return false, err
 	}
 
-	// Uncommitted-surge redirect (level-triggered "desired wins"): the in-flight
-	// surge is committed to something the desired state no longer asks for — a
-	// superseded target revision, or SurgeThenDrain itself once the strategy is
-	// edited away from it — AND is not about to promote (surge pod not yet
-	// Ready). Abandon JUST the stuck surge pod — the source at oldOrdinal keeps
-	// serving, so capacity never drops — and reset the Instance to Ready on its
-	// running revision. The NEXT reconcile re-enters through the normal gated
-	// path under whatever the desired state now is, so maxSurge /
-	// maxUnavailable / ratio / canary all re-apply. Without this, a surge that
-	// never becomes Ready and never escalates pins itself to a dead rev and
-	// holds the maxSurge budget until instanceReadyTimeout, and a strategy edit
-	// made to escape a surge that cannot fit on a full cluster is ignored. A
-	// surge that IS about to promote (Ready) skips this and keeps the X-2 pin
-	// below so its promote stamps the rev its pods actually run. Only
-	// Step=Surge — later surge steps are past the point of no return (source
-	// already draining) and finish their cycle.
+	// Uncommitted-surge redirect (level-triggered "desired wins"): the
+	// in-flight surge is committed to a target revision the desired state no
+	// longer asks for AND is not about to promote (surge pod not yet Ready).
+	// Abandon JUST the stuck surge pod — the source at oldOrdinal keeps
+	// serving, so capacity never drops — and reset the Instance to Ready on
+	// its running revision. The NEXT reconcile re-enters through the normal
+	// gated path, so maxSurge / maxUnavailable / ratio / canary all re-apply.
+	// Without this, a surge that never becomes Ready and never escalates pins
+	// itself to a dead rev and holds the maxSurge budget until
+	// instanceReadyTimeout. A surge that IS about to promote (Ready) skips
+	// this and keeps the X-2 pin below so its promote stamps the rev its pods
+	// actually run. Only Step=Surge — later surge steps are past the point of
+	// no return (source already draining) and finish their cycle.
+	//
+	// A strategy edit is NOT a redirect: the strategy is pinned for the life
+	// of the operation, so the surge finishes its cycle and the edit reaches
+	// the Instance at its next admitted attempt.
 	supersededTarget := status != nil && status.Operation != nil &&
 		status.Operation.TargetRevision != "" && status.Operation.TargetRevision != target.Name
-	strategyLeftSurge := plan.UpdateStrategy.Type != "" &&
-		plan.UpdateStrategy.Type != workload.UpdateStrategySurgeThenDrain
 	if s := status; s != nil &&
 		s.Phase != workload.InstancePhaseFailed && s.Operation != nil &&
 		s.Operation.Type == workload.InstanceOperationUpdate &&
 		s.Operation.Step == updateStepSurge &&
-		(supersededTarget || strategyLeftSurge) &&
+		supersededTarget &&
 		!(len(surgePods) > 0 && query.AllPodsRuntimeReady(surgePods)) {
 		if len(surgePods) > 0 {
 			if !deps.ExpectationsCache().Satisfied(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, inst.Index) {
@@ -284,15 +283,9 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 		if err := patchInstanceStatusReadyOnRevision(ctx, input, inst.Index, s.RunningRevision); err != nil {
 			return false, fmt.Errorf("reset abandoned surge source (instance=%d): %w", inst.Index, err)
 		}
-		if strategyLeftSurge && !supersededTarget {
-			recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonRecreateUpdateStarted,
-				"OMENative %s abandoned uncommitted surge to %s; rolling under %s instead",
-				instanceKey(input.Key.Component, inst.Index), abandonedRev, plan.UpdateStrategy.Type)
-		} else {
-			recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonRecreateUpdateStarted,
-				"OMENative %s abandoned superseded surge to %s; re-surging toward %s",
-				instanceKey(input.Key.Component, inst.Index), abandonedRev, target.Name)
-		}
+		recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonRecreateUpdateStarted,
+			"OMENative %s abandoned superseded surge to %s; re-surging toward %s",
+			instanceKey(input.Key.Component, inst.Index), abandonedRev, target.Name)
 		return false, nil
 	}
 
@@ -346,7 +339,7 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 		isSurgeUpdateStep(s.Operation.Step) {
 		wasNotSurging = false
 	}
-	if err := patchInstanceStatusSurgingForUpdate(ctx, input, inst.Index, surgeTargetName, plan.InstanceReadyTimeout); err != nil {
+	if err := patchInstanceStatusSurgingForUpdate(ctx, input, inst.Index, surgeTargetName, plan.UpdateStrategy.Type, plan.InstanceReadyTimeout); err != nil {
 		return false, fmt.Errorf("stamp surge step (instance=%d): %w", inst.Index, err)
 	}
 	if wasNotSurging {

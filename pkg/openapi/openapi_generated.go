@@ -6683,6 +6683,13 @@ func schema_pkg_apis_ome_v1beta1_InstanceOperation(ref common.ReferenceCallback)
 							Format:      "",
 						},
 					},
+					"strategy": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Strategy is the update strategy the operation runs under, pinned when the operation opens. UpdateStrategy is not part of the revision payload, so editing it retargets nothing: an attempt keeps the mechanism it started with — a patch already under way is not re-dispatched as a recreate, a surge already spent is not unwound — and the edit reaches the Instance at its next admitted attempt. Set only when Type=Update.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 					"surgeIndex": {
 						SchemaProps: spec.SchemaProps{
 							Description: "SurgeIndex is the Instance index allocated for a surge replacement. Set only when Type=Migrate.",

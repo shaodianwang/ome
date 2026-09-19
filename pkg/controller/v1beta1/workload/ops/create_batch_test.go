@@ -1491,8 +1491,14 @@ func TestCreate_BatchesSupersededAttemptRetirement(t *testing.T) {
 	}
 	for idx := int32(0); idx < replicas; idx++ {
 		status := recorder.statuses[idx]
-		if status.Phase != workload.InstancePhaseFailed || status.Operation != nil {
-			t.Errorf("instance %d after retirement: got %+v", idx, status)
+		op := status.Operation
+		if status.Phase != workload.InstancePhaseCreating || op == nil {
+			t.Errorf("instance %d after retirement: got %+v, want Creating under a fresh attempt", idx, status)
+			continue
+		}
+		if op.ID == fmt.Sprintf("create-%d", idx) || op.TargetRevision != target.Name {
+			t.Errorf("instance %d replacement attempt: got {id:%s target:%s}, want a new id pinned to %s",
+				idx, op.ID, op.TargetRevision, target.Name)
 		}
 	}
 	pods := &corev1.PodList{}

@@ -45,7 +45,7 @@ func recreateUpdate(ctx context.Context, deps workload.Deps, input workload.Reco
 	// a revision-pair reason vs a termination reason). "from" is the
 	// recorded RunningRevision; empty on the first-ever rollout.
 	cause := recreateRevisionCause(input, inst.Index, target.Name)
-	newInc, err := patchInstanceStatusRecreatingForUpdate(ctx, input, inst.Index, target.Name, cause, plan.InstanceReadyTimeout)
+	newInc, err := patchInstanceStatusRecreatingForUpdate(ctx, input, inst.Index, target.Name, cause, plan.UpdateStrategy.Type, plan.InstanceReadyTimeout)
 	if err != nil {
 		return false, fmt.Errorf("bump Incarnation (instance=%d): %w", inst.Index, err)
 	}

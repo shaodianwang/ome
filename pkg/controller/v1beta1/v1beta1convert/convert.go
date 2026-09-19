@@ -213,6 +213,7 @@ func InstanceOperationToWorkload(v *v1beta1.InstanceOperation) *workload.Instanc
 		TargetRevision: v.TargetRevision,
 		Reason:         v.Reason,
 		Waiting:        v.Waiting,
+		Strategy:       UpdateStrategyTypeToWorkload(v1beta1.UpdateStrategyType(v.Strategy)),
 		FromNode:       v.FromNode,
 		RequestUUID:    v.RequestUUID,
 	}
@@ -245,6 +246,7 @@ func InstanceOperationFromWorkload(w *workload.InstanceOperation) *v1beta1.Insta
 		TargetRevision: w.TargetRevision,
 		Reason:         w.Reason,
 		Waiting:        w.Waiting,
+		Strategy:       string(UpdateStrategyTypeFromWorkload(w.Strategy)),
 		FromNode:       w.FromNode,
 		RequestUUID:    w.RequestUUID,
 	}

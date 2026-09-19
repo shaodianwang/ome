@@ -79,7 +79,7 @@ func TestStartGangSurge_ClaimsPairInOneWrite(t *testing.T) {
 	}
 	input := gangSurgeRecoveryInput("owner-a", "atomic-claim", "test-ns", store, cloneTerminalStatus(source))
 
-	claimed, err := startGangSurge(context.Background(), input, &source, 1, targetRevision, time.Minute)
+	claimed, err := startGangSurge(context.Background(), input, &source, 1, targetRevision, workload.UpdateStrategySurgeThenDrain, time.Minute)
 	if err != nil || !claimed {
 		t.Fatalf("atomic claim: claimed=%v err=%v", claimed, err)
 	}
@@ -135,7 +135,7 @@ func TestStartGangSurge_RejectsAuthoritativeDrift(t *testing.T) {
 			store := &terminalMutationStore{ownerUID: test.ownerUID, statuses: statuses}
 			input := gangSurgeRecoveryInput("owner-a", "guarded-claim", "test-ns", store, cloneTerminalStatus(source))
 
-			claimed, err := startGangSurge(context.Background(), input, &source, 1, targetRevision, time.Minute)
+			claimed, err := startGangSurge(context.Background(), input, &source, 1, targetRevision, workload.UpdateStrategySurgeThenDrain, time.Minute)
 			if err != nil || claimed || store.writes != 0 {
 				t.Fatalf("guarded claim: claimed=%v writes=%d err=%v", claimed, store.writes, err)
 			}
@@ -165,7 +165,7 @@ func TestStartGangSurge_WriteFailureLeavesPairUnchanged(t *testing.T) {
 	}
 	input := gangSurgeRecoveryInput("owner-a", "failed-claim", "test-ns", store, cloneTerminalStatus(source))
 
-	claimed, err := startGangSurge(context.Background(), input, &source, 1, targetRevision, time.Minute)
+	claimed, err := startGangSurge(context.Background(), input, &source, 1, targetRevision, workload.UpdateStrategySurgeThenDrain, time.Minute)
 	if !errors.Is(err, writeErr) || claimed || store.writes != 0 {
 		t.Fatalf("failed claim: claimed=%v writes=%d err=%v", claimed, store.writes, err)
 	}

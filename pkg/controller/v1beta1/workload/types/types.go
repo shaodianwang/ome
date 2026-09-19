@@ -170,6 +170,14 @@ type InstanceOperation struct {
 	// operation being replaced.
 	Waiting string
 
+	// Strategy is the update strategy the operation runs under, pinned
+	// when the operation opens and read in place of the live plan for as
+	// long as it lives. UpdateStrategy is not part of the revision
+	// payload, so an edit retargets nothing: the attempt keeps its
+	// mechanism, and the edit reaches the Instance at its next admitted
+	// attempt. Update-only.
+	Strategy UpdateStrategyType
+
 	// Migrate-only fields. The Operation is a pin: SurgeIndex correlates
 	// the source/surge pair and RequestUUID keys the authoritative
 	// status.migrations record.

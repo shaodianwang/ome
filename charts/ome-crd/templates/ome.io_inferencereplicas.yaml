@@ -3949,6 +3949,8 @@ spec:
                                 type: string
                               step:
                                 type: string
+                              strategy:
+                                type: string
                               surgeIndex:
                                 format: int32
                                 type: integer
@@ -4229,6 +4231,8 @@ spec:
                             format: date-time
                             type: string
                           step:
+                            type: string
+                          strategy:
                             type: string
                           surgeIndex:
                             format: int32

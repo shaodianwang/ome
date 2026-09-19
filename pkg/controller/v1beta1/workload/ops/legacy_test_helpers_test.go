@@ -360,6 +360,10 @@ func legacyToV1beta1Termination(t *workload.InstanceTermination) *v1beta1.Instan
 	return out
 }
 
+// legacyFromV1beta1Op / legacyToV1beta1Op mirror the production converter
+// by hand: the internal test package cannot import v1beta1convert without a
+// cycle. Every field the state machines read has to be listed, or a fixture
+// silently loses the one under test.
 func legacyFromV1beta1Op(op *v1beta1.InstanceOperation) *workload.InstanceOperation {
 	if op == nil {
 		return nil
@@ -372,6 +376,7 @@ func legacyFromV1beta1Op(op *v1beta1.InstanceOperation) *workload.InstanceOperat
 		LastProgressAt: op.LastProgressAt,
 		Deadline:       op.Deadline,
 		TargetRevision: op.TargetRevision,
+		Strategy:       workload.UpdateStrategyType(op.Strategy),
 		Reason:         op.Reason,
 		Waiting:        op.Waiting,
 		RequestUUID:    op.RequestUUID,
@@ -396,6 +401,7 @@ func legacyToV1beta1Op(op *workload.InstanceOperation) *v1beta1.InstanceOperatio
 		LastProgressAt: op.LastProgressAt,
 		Deadline:       op.Deadline,
 		TargetRevision: op.TargetRevision,
+		Strategy:       string(op.Strategy),
 		Reason:         op.Reason,
 		Waiting:        op.Waiting,
 		RequestUUID:    op.RequestUUID,

@@ -58,7 +58,7 @@ func TestSurgeUpdate_HoldsSourceDrainForMinReadySeconds(t *testing.T) {
 	input.Clock = clk
 	plan := surgePlan()
 	plan.MinReadySeconds = 20
-	if err := patchInstanceStatusSurgingForUpdate(context.Background(), input, 0, target.Name, plan.InstanceReadyTimeout); err != nil {
+	if err := patchInstanceStatusSurgingForUpdate(context.Background(), input, 0, target.Name, workload.UpdateStrategySurgeThenDrain, plan.InstanceReadyTimeout); err != nil {
 		t.Fatalf("pre-stamp: %v", err)
 	}
 
@@ -397,7 +397,7 @@ func TestSurgeUpdate_WindowGatesOnlyStepSurge(t *testing.T) {
 	plan.MinReadySeconds = 20
 	stamp := legacyTestInput(isvc, c, workload.ComponentEngine)
 	stamp.Clock = clk
-	if err := patchInstanceStatusSurgingForUpdate(context.Background(), stamp, 0, target.Name, plan.InstanceReadyTimeout); err != nil {
+	if err := patchInstanceStatusSurgingForUpdate(context.Background(), stamp, 0, target.Name, workload.UpdateStrategySurgeThenDrain, plan.InstanceReadyTimeout); err != nil {
 		t.Fatalf("pre-stamp surge: %v", err)
 	}
 	if err := patchInstanceStatusSurgeStepDrain(context.Background(), stamp, 0); err != nil {

@@ -372,6 +372,16 @@ type InstanceOperation struct {
 	// +optional
 	Waiting string `json:"waiting,omitempty"`
 
+	// Strategy is the update strategy the operation runs under, pinned
+	// when the operation opens. UpdateStrategy is not part of the revision
+	// payload, so editing it retargets nothing: an attempt keeps the
+	// mechanism it started with — a patch already under way is not
+	// re-dispatched as a recreate, a surge already spent is not unwound —
+	// and the edit reaches the Instance at its next admitted attempt.
+	// Set only when Type=Update.
+	// +optional
+	Strategy string `json:"strategy,omitempty"`
+
 	// SurgeIndex is the Instance index allocated for a surge replacement.
 	// Set only when Type=Migrate.
 	// +optional

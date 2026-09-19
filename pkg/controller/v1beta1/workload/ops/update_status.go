@@ -97,7 +97,7 @@ func markRetryBlockAttemptStarted(rb *workload.RetryBlock) workload.RetryBlockDi
 // without the attempt ending — and an attempt that restarted its clock
 // on each of those turns would never be bounded by InstanceReadyTimeout
 // at all.
-func patchInstanceStatusUpdating(ctx context.Context, input workload.ReconcileInput, idx int32, targetRev string, timeout time.Duration) error {
+func patchInstanceStatusUpdating(ctx context.Context, input workload.ReconcileInput, idx int32, targetRev string, strategy workload.UpdateStrategyType, timeout time.Duration) error {
 	now := metav1.NewTime(input.Now())
 	err := input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
 		if s.Phase == workload.InstancePhaseUpdating &&
@@ -122,6 +122,7 @@ func patchInstanceStatusUpdating(ctx context.Context, input workload.ReconcileIn
 			Type:           workload.InstanceOperationUpdate,
 			Step:           updateStepInPlace,
 			TargetRevision: targetRev,
+			Strategy:       strategy,
 			StartedAt:      now,
 			LastProgressAt: now,
 			Deadline:       metav1.NewTime(now.Add(timeout)),
@@ -141,7 +142,7 @@ func patchInstanceStatusUpdating(ctx context.Context, input workload.ReconcileIn
 // status from a pod-failure Restart. Returns the post-write Incarnation.
 // The idempotency guard requires Step==Drain so a prior in-place pass at
 // the same target doesn't block the bump.
-func patchInstanceStatusRecreatingForUpdate(ctx context.Context, input workload.ReconcileInput, idx int32, targetRev, reason string, timeout time.Duration) (int64, error) {
+func patchInstanceStatusRecreatingForUpdate(ctx context.Context, input workload.ReconcileInput, idx int32, targetRev, reason string, strategy workload.UpdateStrategyType, timeout time.Duration) (int64, error) {
 	var observedIncarnation int64
 	err := input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
 		if s.Phase == workload.InstancePhaseUpdating &&
@@ -164,6 +165,7 @@ func patchInstanceStatusRecreatingForUpdate(ctx context.Context, input workload.
 			Type:           workload.InstanceOperationUpdate,
 			Step:           updateStepDrain,
 			TargetRevision: targetRev,
+			Strategy:       strategy,
 			Reason:         reason,
 			StartedAt:      now,
 			LastProgressAt: now,
@@ -203,6 +205,7 @@ func reResolveInPlaceToRecreate(ctx context.Context, input workload.ReconcileInp
 		op := *s.Operation
 		op.Step = updateStepDrain
 		op.TargetRevision = targetRev
+		op.Strategy = workload.UpdateStrategyRecreatePod
 		op.LastProgressAt = metav1.NewTime(input.Now())
 		s.Operation = &op
 		converted = true
@@ -227,7 +230,7 @@ func reResolveInPlaceToRecreate(ctx context.Context, input workload.ReconcileInp
 // require Type==Update so a prior recreate / in-place write at the
 // same target doesn't short-circuit (those writes use the same
 // TargetRevision but a different Step namespace).
-func patchInstanceStatusSurgingForUpdate(ctx context.Context, input workload.ReconcileInput, idx int32, targetRev string, timeout time.Duration) error {
+func patchInstanceStatusSurgingForUpdate(ctx context.Context, input workload.ReconcileInput, idx int32, targetRev string, strategy workload.UpdateStrategyType, timeout time.Duration) error {
 	now := metav1.NewTime(input.Now())
 	err := input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
 		// Already surging toward this target — no-op. The Phase check
@@ -253,6 +256,7 @@ func patchInstanceStatusSurgingForUpdate(ctx context.Context, input workload.Rec
 			Type:           workload.InstanceOperationUpdate,
 			Step:           updateStepSurge,
 			TargetRevision: targetRev,
+			Strategy:       strategy,
 			StartedAt:      now,
 			LastProgressAt: now,
 			Deadline:       metav1.NewTime(now.Add(timeout)),
@@ -340,10 +344,10 @@ func patchInstanceStatusReadyOnRevisionWithOrdinal(ctx context.Context, input wo
 // makes CurrentSurgeInFlight / the coordination CheckSurge gate count it
 // against MaxSurge; the SurgeIndex pointer distinguishes a gang surge
 // (new index) from a single-pod surge (ActiveOrdinal toggle). Idempotent.
-func patchInstanceStatusGangSurging(ctx context.Context, input workload.ReconcileInput, idx, surgeIdx int32, targetRev string, timeout time.Duration) error {
+func patchInstanceStatusGangSurging(ctx context.Context, input workload.ReconcileInput, idx, surgeIdx int32, targetRev string, strategy workload.UpdateStrategyType, timeout time.Duration) error {
 	now := metav1.NewTime(input.Now())
 	err := input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
-		return stampGangSurgeSource(s, idx, surgeIdx, targetRev, timeout, now)
+		return stampGangSurgeSource(s, idx, surgeIdx, targetRev, strategy, timeout, now)
 	})
 	if err != nil {
 		return err
@@ -365,7 +369,7 @@ func patchInstanceStatusGangSurgeTarget(ctx context.Context, input workload.Reco
 	})
 }
 
-func stampGangSurgeSource(s *workload.InstanceStatus, idx, surgeIdx int32, targetRev string, timeout time.Duration, now metav1.Time) bool {
+func stampGangSurgeSource(s *workload.InstanceStatus, idx, surgeIdx int32, targetRev string, strategy workload.UpdateStrategyType, timeout time.Duration, now metav1.Time) bool {
 	if s.Phase == workload.InstancePhaseUpdating && s.Operation != nil &&
 		s.Operation.Type == workload.InstanceOperationUpdate &&
 		s.Operation.Step == updateStepSurge && s.Operation.SurgeIndex != nil &&
@@ -381,6 +385,7 @@ func stampGangSurgeSource(s *workload.InstanceStatus, idx, surgeIdx int32, targe
 		Step:           updateStepSurge,
 		SurgeIndex:     &k,
 		TargetRevision: targetRev,
+		Strategy:       strategy,
 		StartedAt:      now,
 		LastProgressAt: now,
 		Deadline:       metav1.NewTime(now.Add(timeout)),
@@ -413,13 +418,14 @@ func startGangSurge(
 	source *workload.InstanceStatus,
 	surgeIdx int32,
 	targetRev string,
+	strategy workload.UpdateStrategyType,
 	timeout time.Duration,
 ) (bool, error) {
 	if source == nil {
 		return false, nil
 	}
 	if input.ApplyInstanceMutationsWithRetryBlock == nil {
-		if err := patchInstanceStatusGangSurging(ctx, input, source.Index, surgeIdx, targetRev, timeout); err != nil {
+		if err := patchInstanceStatusGangSurging(ctx, input, source.Index, surgeIdx, targetRev, strategy, timeout); err != nil {
 			return false, err
 		}
 		if err := patchInstanceStatusGangSurgeTarget(ctx, input, surgeIdx, targetRev, timeout); err != nil {
@@ -434,7 +440,7 @@ func startGangSurge(
 	now := metav1.NewTime(input.Now())
 	sourceIdentity := captureTerminalInstanceIdentity(source)
 	desiredSource := cloneTerminalStatusValue(*source)
-	stampGangSurgeSource(&desiredSource, source.Index, surgeIdx, targetRev, timeout, now)
+	stampGangSurgeSource(&desiredSource, source.Index, surgeIdx, targetRev, strategy, timeout, now)
 	desiredSourceIdentity := captureTerminalInstanceIdentity(&desiredSource)
 	desiredTarget := workload.InstanceStatus{Index: surgeIdx}
 	stampGangSurgeTarget(&desiredTarget, surgeIdx, targetRev, timeout, now)
@@ -444,7 +450,7 @@ func startGangSurge(
 	sourceMutation := workload.InstanceMutation{
 		Index: source.Index,
 		Mutate: func(status *workload.InstanceStatus) bool {
-			return stampGangSurgeSource(status, source.Index, surgeIdx, targetRev, timeout, now)
+			return stampGangSurgeSource(status, source.Index, surgeIdx, targetRev, strategy, timeout, now)
 		},
 		BatchPrecondition: func(snapshot workload.InstanceMutationSnapshot) bool {
 			if snapshot.OwnerUID != ownerUID {

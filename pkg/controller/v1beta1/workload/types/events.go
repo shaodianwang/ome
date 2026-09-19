@@ -26,6 +26,13 @@ const (
 	// parked until quota frees up.
 	EventReasonInstanceQuotaBlocked EventReason = "InstanceQuotaBlocked"
 
+	// EventReasonCreateAttemptSuperseded fires when the target revision
+	// moves while a Create attempt is still building: the attempt is
+	// replaced by a fresh one pinned to the new target. Normal, not a
+	// failure — the retired revision never got the chance to fail. Names
+	// the superseded revision and the one the replacement is pinned to.
+	EventReasonCreateAttemptSuperseded EventReason = "CreateAttemptSuperseded"
+
 	// In-place update (workload/ops/update.go).
 	EventReasonInPlaceUpdateStarted     EventReason = "InPlaceUpdateStarted"
 	EventReasonInPlaceUpdateCompleted   EventReason = "InPlaceUpdateCompleted"

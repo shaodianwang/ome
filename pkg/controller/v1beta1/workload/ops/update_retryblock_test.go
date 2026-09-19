@@ -305,7 +305,7 @@ func TestPatchSurgingForUpdate_FlipsBackoffOnAttemptStart(t *testing.T) {
 			{TargetRevision: tcr.Name, State: workload.RetryBlockBackoff, AttemptsStarted: 1, NextRetryAt: &next},
 		}
 
-		if err := patchInstanceStatusSurgingForUpdate(context.Background(), *input, 0, tcr.Name, 30*time.Minute); err != nil {
+		if err := patchInstanceStatusSurgingForUpdate(context.Background(), *input, 0, tcr.Name, workload.UpdateStrategySurgeThenDrain, 30*time.Minute); err != nil {
 			t.Fatalf("stamp: %v", err)
 		}
 		if len(*calls) != 1 {
@@ -327,7 +327,7 @@ func TestPatchSurgingForUpdate_FlipsBackoffOnAttemptStart(t *testing.T) {
 		t0 := time.Now()
 		input, _, tcr, calls, _, _ := retryGateFixture(t, t0)
 
-		if err := patchInstanceStatusSurgingForUpdate(context.Background(), *input, 0, tcr.Name, 30*time.Minute); err != nil {
+		if err := patchInstanceStatusSurgingForUpdate(context.Background(), *input, 0, tcr.Name, workload.UpdateStrategySurgeThenDrain, 30*time.Minute); err != nil {
 			t.Fatalf("stamp: %v", err)
 		}
 		for _, call := range *calls {

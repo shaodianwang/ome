@@ -240,6 +240,7 @@ func fromV1beta1Op(op *v1beta1.InstanceOperation) *workload.InstanceOperation {
 		Deadline:       op.Deadline,
 		RetryCount:     op.RetryCount,
 		TargetRevision: op.TargetRevision,
+		Strategy:       workload.UpdateStrategyType(op.Strategy),
 		Reason:         op.Reason,
 		Waiting:        op.Waiting,
 		FromNode:       op.FromNode,
@@ -268,6 +269,7 @@ func toV1beta1Op(op *workload.InstanceOperation) *v1beta1.InstanceOperation {
 		Deadline:       op.Deadline,
 		RetryCount:     op.RetryCount,
 		TargetRevision: op.TargetRevision,
+		Strategy:       string(op.Strategy),
 		Reason:         op.Reason,
 		Waiting:        op.Waiting,
 		FromNode:       op.FromNode,
@@ -634,10 +636,8 @@ func TestCreate_CorrectiveEditDuringPartialGangDoesNotMixRevisions(t *testing.T)
 	if len(pods.Items) != 1 {
 		t.Fatalf("superseded partial Create must not mix revisions: got %d pods, want the one prior-revision survivor", len(pods.Items))
 	}
-	s := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0)
-	if s == nil || s.Phase != v1beta1.OMENativeInstanceFailed || s.Operation != nil {
-		t.Fatalf("superseded pinned Create must retire; got %+v", s)
-	}
+	requireRetiredIntoFreshAttempt(t, findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0),
+		"create-0-1", target.Name)
 }
 
 func TestCreate_CorrectiveEditDoesNotAdoptUnpinnedPartialGang(t *testing.T) {
@@ -679,10 +679,8 @@ func TestCreate_CorrectiveEditDoesNotAdoptUnpinnedPartialGang(t *testing.T) {
 	if len(pods.Items) != 1 {
 		t.Fatalf("unpinned partial Create must not mix revisions: got %d pods, want the one prior-revision survivor", len(pods.Items))
 	}
-	s := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0)
-	if s == nil || s.Phase != v1beta1.OMENativeInstanceFailed || s.Operation != nil {
-		t.Fatalf("superseded unpinned Create must retire; got %+v", s)
-	}
+	requireRetiredIntoFreshAttempt(t, findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0),
+		"create-0-1", target.Name)
 }
 
 func TestCreate_CorrectiveEditRetiresFullyMaterializedGatedGang(t *testing.T) {
@@ -720,10 +718,8 @@ func TestCreate_CorrectiveEditRetiresFullyMaterializedGatedGang(t *testing.T) {
 	if !result.Requeue {
 		t.Fatalf("superseded gated Create must requeue immediately: %+v", result)
 	}
-	s := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0)
-	if s == nil || s.Phase != v1beta1.OMENativeInstanceFailed || s.Operation != nil {
-		t.Fatalf("superseded gated Create must retire; got %+v", s)
-	}
+	requireRetiredIntoFreshAttempt(t, findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0),
+		"create-0-1", target.Name)
 	pods := &corev1.PodList{}
 	if err := c.List(context.Background(), pods, client.InNamespace("prod")); err != nil {
 		t.Fatalf("list pods: %v", err)

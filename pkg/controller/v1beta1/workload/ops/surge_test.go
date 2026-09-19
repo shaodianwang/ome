@@ -110,7 +110,7 @@ func TestWaitForSurgeDrainSettle(t *testing.T) {
 	plan := surgePlan()
 	grace := int32(30)
 	plan.UpdateStrategy.InPlaceUpdateStrategy.GracePeriodSeconds = &grace
-	if err := patchInstanceStatusSurgingForUpdate(context.Background(), input, 0, "rev-x", plan.InstanceReadyTimeout); err != nil {
+	if err := patchInstanceStatusSurgingForUpdate(context.Background(), input, 0, "rev-x", workload.UpdateStrategySurgeThenDrain, plan.InstanceReadyTimeout); err != nil {
 		t.Fatalf("stamp surge: %v", err)
 	}
 	if err := patchInstanceStatusSurgeStepDrain(context.Background(), input, 0); err != nil {
@@ -186,7 +186,7 @@ func TestPatchInstanceStatusSurgingForUpdate_IdempotentOnSurgeDrainStep(t *testi
 	c := legacyNewFakeClient(t, isvc, ir)
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 
-	if err := patchInstanceStatusSurgingForUpdate(context.Background(), input, 0, "rev-x", 30*time.Second); err != nil {
+	if err := patchInstanceStatusSurgingForUpdate(context.Background(), input, 0, "rev-x", workload.UpdateStrategySurgeThenDrain, 30*time.Second); err != nil {
 		t.Fatalf("stamp Surge: %v", err)
 	}
 	if err := patchInstanceStatusSurgeStepDrain(context.Background(), input, 0); err != nil {
@@ -196,7 +196,7 @@ func TestPatchInstanceStatusSurgingForUpdate_IdempotentOnSurgeDrainStep(t *testi
 	beforeOpID := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0].Operation.ID
 
 	// Re-invoke with the same target — must be a no-op.
-	if err := patchInstanceStatusSurgingForUpdate(context.Background(), input, 0, "rev-x", 30*time.Second); err != nil {
+	if err := patchInstanceStatusSurgingForUpdate(context.Background(), input, 0, "rev-x", workload.UpdateStrategySurgeThenDrain, 30*time.Second); err != nil {
 		t.Fatalf("re-stamp Surge (idempotency check): %v", err)
 	}
 	afterRV := readRV(t, c, isvc)
@@ -230,7 +230,7 @@ func TestPatchInstanceStatusSurgingForUpdate_FailedStickyOnSameTarget(t *testing
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 
 	// Enter a surge toward rev-x, then have the escalator flip it to Failed.
-	if err := patchInstanceStatusSurgingForUpdate(context.Background(), input, 0, "rev-x", 30*time.Second); err != nil {
+	if err := patchInstanceStatusSurgingForUpdate(context.Background(), input, 0, "rev-x", workload.UpdateStrategySurgeThenDrain, 30*time.Second); err != nil {
 		t.Fatalf("stamp Surge: %v", err)
 	}
 	if err := input.MutateInstance(context.Background(), 0, func(s *workload.InstanceStatus) bool {
@@ -243,7 +243,7 @@ func TestPatchInstanceStatusSurgingForUpdate_FailedStickyOnSameTarget(t *testing
 	beforeOpID := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0].Operation.ID
 
 	// Same target: must be a no-op — Phase stays Failed, no RV churn, no new op.
-	if err := patchInstanceStatusSurgingForUpdate(context.Background(), input, 0, "rev-x", 30*time.Second); err != nil {
+	if err := patchInstanceStatusSurgingForUpdate(context.Background(), input, 0, "rev-x", workload.UpdateStrategySurgeThenDrain, 30*time.Second); err != nil {
 		t.Fatalf("re-stamp Surge on Failed (same target): %v", err)
 	}
 	if got := readRV(t, c, isvc); got != beforeRV {
@@ -258,7 +258,7 @@ func TestPatchInstanceStatusSurgingForUpdate_FailedStickyOnSameTarget(t *testing
 	}
 
 	// Different target (corrective edit): must re-stamp Updating toward it.
-	if err := patchInstanceStatusSurgingForUpdate(context.Background(), input, 0, "rev-good", 30*time.Second); err != nil {
+	if err := patchInstanceStatusSurgingForUpdate(context.Background(), input, 0, "rev-good", workload.UpdateStrategySurgeThenDrain, 30*time.Second); err != nil {
 		t.Fatalf("re-stamp Surge toward corrective target: %v", err)
 	}
 	s = legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
@@ -1087,7 +1087,7 @@ func TestSurgeUpdate_Phase1WaitsForSurgeReady(t *testing.T) {
 	plan := surgePlan()
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
 	// Pre-stamp Step=Surge so we test the "waiting" branch, not the entry.
-	if err := patchInstanceStatusSurgingForUpdate(context.Background(), input, 0, tcr.Name, plan.InstanceReadyTimeout); err != nil {
+	if err := patchInstanceStatusSurgingForUpdate(context.Background(), input, 0, tcr.Name, workload.UpdateStrategySurgeThenDrain, plan.InstanceReadyTimeout); err != nil {
 		t.Fatalf("pre-stamp: %v", err)
 	}
 
@@ -1126,7 +1126,7 @@ func TestSurgeUpdate_HoldsSourceDrainUntilReplacementPodReady(t *testing.T) {
 	c := legacyNewFakeClient(t, isvc, ir, oldPod, surgePod, target)
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	plan := surgePlan()
-	if err := patchInstanceStatusSurgingForUpdate(context.Background(), input, 0, target.Name, plan.InstanceReadyTimeout); err != nil {
+	if err := patchInstanceStatusSurgingForUpdate(context.Background(), input, 0, target.Name, workload.UpdateStrategySurgeThenDrain, plan.InstanceReadyTimeout); err != nil {
 		t.Fatalf("pre-stamp: %v", err)
 	}
 
@@ -1201,7 +1201,7 @@ func TestSurgeUpdate_Phase3PromotesAndAdvancesActiveOrdinal(t *testing.T) {
 		t.Fatalf("restamp surge pod rev-hash: %v", err)
 	}
 	// Status reflects mid-surge state at Step=Drain.
-	if err := patchInstanceStatusSurgingForUpdate(context.Background(), input, 0, tcr.Name, plan.InstanceReadyTimeout); err != nil {
+	if err := patchInstanceStatusSurgingForUpdate(context.Background(), input, 0, tcr.Name, workload.UpdateStrategySurgeThenDrain, plan.InstanceReadyTimeout); err != nil {
 		t.Fatalf("pre-stamp surge: %v", err)
 	}
 	if err := patchInstanceStatusSurgeStepDrain(context.Background(), input, 0); err != nil {

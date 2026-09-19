@@ -283,7 +283,7 @@ cells:
     placement: perm
     coverage:
       perm: []
-      unit: [TestUpdateWithPods_StrategyFlipAtUncommittedSurge_RollsUnderNewStrategy]
+      unit: [TestUpdateWithPods_FailedRowPicksUpTheEditedStrategy]
       kind: []
     status: decided
   - state: Failed

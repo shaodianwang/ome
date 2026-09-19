@@ -203,10 +203,21 @@ cells:
     outcome: transition
     to: Create/CreatePods
     guard: the attempt's pinned revision is no longer the target, or an unpinned attempt's pod label proves it belongs to another revision
-    note: a superseded spec is not a failure of the retired revision, so the half-built attempt is retired straight into a fresh Create at the new target — the operation is replaced in one write with no Failed phase, no failure event and no RetryBlock, for a single pod and for a gang alike. An attempt whose pin still matches is untouched and finishes
+    note: a superseded spec is not a failure of the retired revision, so the half-built attempt is retired straight into a fresh Create at the new target — the operation is replaced in one write with no Failed phase, no failure event and no RetryBlock, for a single pod and for a gang alike. An attempt whose pin still matches is untouched and finishes, and so is one that is fully materialized and runtime-ready — it is one promote from serving and its pods are already routed, so it promotes and the update machinery rolls it. The replacement is a fresh attempt, so the new target's RetryBlock gates it — while that target is denied the retirement defers and the old attempt stays in place
     invariants: [one.operation.per.instance]
     placement: perm
-    coverage: {perm: [], unit: [TestCreate_BatchesSupersededAttemptRetirement, TestCreate_CorrectiveEditDuringPartialGangDoesNotMixRevisions, TestCreate_CorrectiveEditDoesNotAdoptUnpinnedPartialGang], kind: []}
+    coverage:
+      perm: []
+      unit:
+        - TestCreate_SupersededAttempt_ReplacedByFreshAttempt
+        - TestCreate_FreshAttemptRecreatesRetiredPodsAtItsRevision
+        - TestCreate_RuntimeReadyAttemptPromotesRatherThanRetiring
+        - TestCreate_RetargetOntoBlockedRevisionDefersRetirement
+        - TestCreate_PromotedInstanceRepairIsNotRetired
+        - TestCreate_BatchesSupersededAttemptRetirement
+        - TestCreate_CorrectiveEditDuringPartialGangDoesNotMixRevisions
+        - TestCreate_CorrectiveEditDoesNotAdoptUnpinnedPartialGang
+      kind: []
     status: decided
 
   - state: Create/CreatePods

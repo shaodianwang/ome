@@ -514,3 +514,25 @@ func TestInstanceStatusSliceRoundtrip_EmptyPreserved(t *testing.T) {
 		t.Fatalf("expected len 0; got=%d", len(got))
 	}
 }
+
+// The pinned strategy has to survive both directions: the update pass reads
+// it back from status to decide the mode of an attempt already under way, so
+// a field that drops in conversion silently un-pins every operation.
+func TestInstanceOperationStrategyRoundtrip(t *testing.T) {
+	cases := []v1beta1.UpdateStrategyType{
+		v1beta1.UpdateStrategySurgeThenDrain,
+		v1beta1.UpdateStrategyRecreatePod,
+		v1beta1.UpdateStrategyInPlaceIfPossible,
+		v1beta1.UpdateStrategyInPlaceOnly,
+		"",
+	}
+	for _, in := range cases {
+		t.Run(string(in), func(t *testing.T) {
+			op := &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationUpdate, Strategy: string(in)}
+			got := InstanceOperationFromWorkload(InstanceOperationToWorkload(op))
+			if got.Strategy != op.Strategy {
+				t.Fatalf("round-trip mismatch: in=%q got=%q", op.Strategy, got.Strategy)
+			}
+		})
+	}
+}

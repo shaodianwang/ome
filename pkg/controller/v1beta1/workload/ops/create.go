@@ -192,7 +192,7 @@ func createFilteredBatched(
 	allReady := len(held) == 0
 	var retryBlockWait time.Duration
 	actions := make([]createPassAction, 0, len(plan.Instances))
-	retirements := make([]workload.InstanceMutation, 0)
+	retirements := make([]retiredCreateAttempt, 0)
 	selectedPods := int32(0)
 	// Keep each wave as a stable Instance-order prefix. Once an eligible gang
 	// does not fit, it leads the next wave instead of being bypassed by smaller
@@ -204,12 +204,39 @@ func createFilteredBatched(
 			continue
 		}
 		existing := byInstance[inst.Index]
-		if mutation, ok := retireSupersededCreateMutation(input, inst.Index, existing, target); ok {
-			retirements = append(retirements, mutation)
+		missing := missingPodTargets(input, plan, inst, existing)
+		// An attempt that is fully materialized and runtime-ready is one
+		// promote away from serving: its pods are already routed, so retiring
+		// it now drops live traffic and throws away a warmed accelerator. Let
+		// it promote; the update machinery then rolls the Instance to the new
+		// target through a surge, without a gap.
+		onePromoteAway := len(missing) == 0 && len(existing) > 0 && query.AllPodsRuntimeReady(existing)
+		if retired, ok := retireSupersededCreateMutation(input, inst.Index, existing, target, plan.InstanceReadyTimeout); ok && !onePromoteAway {
+			// Replacing an attempt starts a fresh one, so the new target's
+			// RetryBlock gates it as it gates a first attempt. Retire only
+			// once the replacement would be allowed to build: otherwise the
+			// old attempt is torn down and nothing takes its place.
+			if wait, denied := retargetDeniedByRetryBlock(input, inst.Index, target); denied {
+				if wait > 0 && (retryBlockWait == 0 || wait < retryBlockWait) {
+					retryBlockWait = wait
+				}
+				allReady = false
+				continue
+			}
+			retirements = append(retirements, retired)
 			allReady = false
 			continue
 		}
-		missing := missingPodTargets(input, plan, inst, existing)
+		// A replacement attempt owns whatever the attempt it retired left
+		// behind: those pods hold the names it needs and carry a revision
+		// it is not converging to.
+		if stale := retiredAttemptPods(input, inst.Index, existing, target); len(stale) > 0 {
+			if _, err := deleteSupersededRevisionPods(ctx, deps, input, inst.Index, stale, target.Name); err != nil {
+				return ctrl.Result{}, err
+			}
+			allReady = false
+			continue
+		}
 		if len(missing) > 0 {
 			allowed, treatedReady, retryAfter := allowCreateForMissingInstance(input, plan, inst, existing, target)
 			if retryAfter > 0 && (retryBlockWait == 0 || retryAfter < retryBlockWait) {
@@ -304,12 +331,21 @@ func createFilteredBatched(
 		actions = append(actions, createPassAction{ready: action})
 	}
 	if len(retirements) > 0 {
-		ownerPresent, err := applyInstanceMutationsWithOutcome(ctx, input, retirements)
+		mutations := make([]workload.InstanceMutation, 0, len(retirements))
+		for _, retired := range retirements {
+			mutations = append(mutations, retired.mutation)
+		}
+		ownerPresent, err := applyInstanceMutationsWithOutcome(ctx, input, mutations)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("batch retire superseded Create attempts: %w", err)
 		}
 		if !ownerPresent {
 			return ctrl.Result{}, nil
+		}
+		for _, retired := range retirements {
+			recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonCreateAttemptSuperseded,
+				"OMENative %s retired the Create attempt pinned to %s and restarted it at %s",
+				instanceKey(plan.Component, retired.index), retired.from, target.Name)
 		}
 		return ctrl.Result{Requeue: true}, nil
 	}
@@ -769,20 +805,72 @@ func allowCreateForMissingInstance(input workload.ReconcileInput, plan workload.
 	return true, false, 0
 }
 
-// retireSupersededCreateMutation ends a Create when the live target changes.
-// An unpinned attempt is retired only when a pod label proves that the attempt
-// belongs to another revision.
-func retireSupersededCreateMutation(input workload.ReconcileInput, idx int32, existing []*corev1.Pod, target *appsv1.ControllerRevision) (workload.InstanceMutation, bool) {
+// createAttemptOwnsPods reports whether an Instance's pods belong to a Create
+// attempt that the Create pass may retire and rebuild. A recorded
+// RunningRevision excludes the row: its pods belong to a serving
+// materialization that a repair pass happens to be rebuilding, and rolling
+// those to a new revision is the update machinery's business. Retiring one
+// here would announce a retirement the pod cleanup then declines forever.
+func createAttemptOwnsPods(status *workload.InstanceStatus) bool {
+	return status != nil && status.Phase == workload.InstancePhaseCreating &&
+		status.RunningRevision == "" &&
+		status.Operation != nil && status.Operation.Type == workload.InstanceOperationCreate
+}
+
+// retargetDeniedByRetryBlock reports whether the revision a retirement would
+// pin its replacement to is currently denied, and how long until it is due.
+// The in-flight question is asked exactly as the first-attempt gate asks it —
+// an in-flight Create may carry no TargetRevision at all, so a
+// revision-scoped reading would answer "nobody is attempting this" and let a
+// second attempt start at a one-at-a-time revision. Only the row being
+// retired is excluded: it is pinned to the revision being left behind, and
+// counting it would deny its own retarget forever.
+func retargetDeniedByRetryBlock(input workload.ReconcileInput, idx int32, target *appsv1.ControllerRevision) (time.Duration, bool) {
+	block := workload.FindRetryBlock(input.ObservedState.RetryBlocks, target.Name)
+	if block == nil {
+		return 0, false
+	}
+	others := make([]workload.InstanceStatus, 0, len(input.ObservedState.InstanceStatuses))
+	for _, s := range input.ObservedState.InstanceStatuses {
+		if s.Index != idx {
+			others = append(others, s)
+		}
+	}
+	attemptInFlight := anyInFlightUpdateAt(others, target.Name) || anyInFlightCreateAttempt(others)
+	denied, wait := evaluateRetryBlockGate(block, input.Now(), attemptInFlight)
+	return wait, denied
+}
+
+// retiredCreateAttempt is one superseded Create attempt: the status write
+// that replaces it and the revision it was pinned to, so the pass can name
+// both revisions once the write lands.
+type retiredCreateAttempt struct {
+	index    int32
+	from     string
+	mutation workload.InstanceMutation
+}
+
+// retireSupersededCreateMutation replaces a Create attempt pinned to some
+// revision other than the current target with a fresh attempt at that
+// target: new operation identity, the target pinned, the deadline re-armed,
+// all in the same write. A spec move is not a failure of the retired revision, so
+// the row never passes through Failed and no RetryBlock is recorded against
+// the revision it was building.
+//
+// An unpinned attempt is retired only when a pod label proves that the
+// attempt belongs to another revision. The mutation is preconditioned on the
+// retired attempt's exact identity, so it no-ops once the replacement has
+// landed.
+func retireSupersededCreateMutation(input workload.ReconcileInput, idx int32, existing []*corev1.Pod, target *appsv1.ControllerRevision, timeout time.Duration) (retiredCreateAttempt, bool) {
 	if target == nil {
-		return workload.InstanceMutation{}, false
+		return retiredCreateAttempt{}, false
 	}
 	status := findInstanceStatus(input.ObservedState.InstanceStatuses, idx)
-	if status == nil || status.Phase != workload.InstancePhaseCreating ||
-		status.Operation == nil || status.Operation.Type != workload.InstanceOperationCreate {
-		return workload.InstanceMutation{}, false
+	if !createAttemptOwnsPods(status) {
+		return retiredCreateAttempt{}, false
 	}
 	if status.Operation.TargetRevision == target.Name {
-		return workload.InstanceMutation{}, false
+		return retiredCreateAttempt{}, false
 	}
 	if status.Operation.TargetRevision == "" {
 		targetRevision := query.RevisionOf(target)
@@ -795,23 +883,90 @@ func retireSupersededCreateMutation(input workload.ReconcileInput, idx int32, ex
 			}
 		}
 		if !provenDifferent {
-			return workload.InstanceMutation{}, false
+			return retiredCreateAttempt{}, false
 		}
 	}
 
 	expectedIncarnation := status.Incarnation
 	expectedID := status.Operation.ID
 	expectedTarget := status.Operation.TargetRevision
-	return workload.InstanceMutation{Index: idx, Mutate: func(current *workload.InstanceStatus) bool {
+	now := metav1.NewTime(input.Now())
+	replacement := workload.InstanceOperation{
+		ID:             replacementCreateOperationID(idx, target, now),
+		Type:           workload.InstanceOperationCreate,
+		Step:           createStepCreatePods,
+		StartedAt:      now,
+		LastProgressAt: now,
+		Deadline:       metav1.NewTime(now.Add(timeout)),
+		TargetRevision: target.Name,
+	}
+	from := expectedTarget
+	if from == "" {
+		from = query.RevisionFromPod(firstRevisionLabeledPod(existing)).String()
+	}
+	mutation := workload.InstanceMutation{Index: idx, Mutate: func(current *workload.InstanceStatus) bool {
 		if current.Incarnation != expectedIncarnation || current.Phase != workload.InstancePhaseCreating ||
 			current.Operation == nil || current.Operation.Type != workload.InstanceOperationCreate ||
 			current.Operation.ID != expectedID || current.Operation.TargetRevision != expectedTarget {
 			return false
 		}
-		current.Phase = workload.InstancePhaseFailed
-		current.Operation = nil
+		op := replacement
+		current.Operation = &op
 		return true
-	}}, true
+	}}
+	return retiredCreateAttempt{index: idx, from: from, mutation: mutation}, true
+}
+
+// replacementCreateOperationID names the attempt that replaces a superseded
+// one. The pinned revision is part of the identity because a replacement
+// written in the same second as the attempt it retires would otherwise be
+// indistinguishable from it, and every precondition in this pass reads the
+// operation id.
+func replacementCreateOperationID(idx int32, target *appsv1.ControllerRevision, now metav1.Time) string {
+	return fmt.Sprintf("create-%d-%d-%s", idx, now.Unix(), query.RevisionOf(target).Hash())
+}
+
+// firstRevisionLabeledPod returns the first pod carrying a revision-hash
+// label, or nil when none does.
+func firstRevisionLabeledPod(pods []*corev1.Pod) *corev1.Pod {
+	for _, pod := range pods {
+		if !query.RevisionFromPod(pod).IsZero() {
+			return pod
+		}
+	}
+	return nil
+}
+
+// retiredAttemptPods returns the live pods an Instance's in-flight Create
+// attempt cannot converge: they carry a revision other than the one the
+// attempt is pinned to, which is what a retired attempt leaves behind.
+// Restricted to an Instance that has never been promoted — a recorded
+// RunningRevision means the pods belong to a serving materialization, and
+// rolling those is the update machinery's business, not Create's.
+func retiredAttemptPods(input workload.ReconcileInput, idx int32, existing []*corev1.Pod, target *appsv1.ControllerRevision) []*corev1.Pod {
+	if target == nil {
+		return nil
+	}
+	status := findInstanceStatus(input.ObservedState.InstanceStatuses, idx)
+	if !createAttemptOwnsPods(status) || status.Operation.TargetRevision != target.Name {
+		return nil
+	}
+	pinned := query.RevisionOf(target)
+	if pinned.IsZero() {
+		return nil
+	}
+	var stale []*corev1.Pod
+	for _, pod := range existing {
+		if pod == nil || pod.DeletionTimestamp != nil {
+			continue
+		}
+		rev := query.RevisionFromPod(pod)
+		if rev.IsZero() || rev.Same(pinned) {
+			continue
+		}
+		stale = append(stale, pod)
+	}
+	return stale
 }
 
 // earliestPodCreation returns the oldest CreationTimestamp across the

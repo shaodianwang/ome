@@ -92,16 +92,18 @@ func UpdateWithPods(ctx context.Context, deps workload.Deps, input workload.Reco
 	}
 
 	// UpdateStrategy is not part of the revision payload, so a strategy edit
-	// retargets nothing: the same roll continues under a different mechanism,
-	// and the mode resolved below can differ from the one that opened the
-	// Operation. Only SurgeThenDrain leaves state another mode cannot see —
-	// a second pod at the alternate ordinal slot, the ActiveOrdinal advance
-	// that ends the cycle, and a drain hold on the source released only by
-	// the source's deletion. Dispatching another mode over that drains or
-	// deletes the source while its replacement is still coming up, and
-	// strands the surge pod. Keep the surge machine in control; it decides
-	// whether to unwind (still uncommitted) or finish the cycle.
-	if isSurgeOwnedStatus(findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)) {
+	// retargets nothing — and every mode leaves state the others cannot see:
+	// a patch already applied to a live pod, a second pod at the alternate
+	// ordinal slot, a drain hold released only by the source's deletion.
+	// An attempt therefore runs to its end on the mechanism it opened with,
+	// and the edit reaches this Instance at its next admitted attempt.
+	observed := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)
+	plan.UpdateStrategy.Type = effectiveUpdateStrategy(observed, plan.UpdateStrategy.Type)
+
+	// A surge-owned status resumes on the surge machine whatever the plan
+	// says: it holds the ordinal slot and the source's drain hold, which no
+	// other mode knows how to release.
+	if isSurgeOwnedStatus(observed) {
 		return surgeUpdate(ctx, deps, input, plan, inst, target, pods)
 	}
 
@@ -118,7 +120,8 @@ func UpdateWithPods(ctx context.Context, deps workload.Deps, input workload.Reco
 
 	multiPod := inst.TotalPods() > 1
 	// Strategy on the plan is the workload-mirror UpdateStrategyType;
-	// the chooser compares against the workload constants directly.
+	// the chooser compares against the workload constants directly. It is
+	// the attempt's pinned strategy once one is in flight.
 	strategy := plan.UpdateStrategy.Type
 	mode, err := chooseUpdateModeForInstance(strategy, runningSpec, targetSpec, multiPod)
 	if err != nil {
@@ -526,6 +529,20 @@ func isSurgeOwnedStatus(s *workload.InstanceStatus) bool {
 	return s != nil && s.Phase != workload.InstancePhaseFailed &&
 		s.Operation != nil && s.Operation.Type == workload.InstanceOperationUpdate &&
 		isSurgeUpdateStep(s.Operation.Step)
+}
+
+// effectiveUpdateStrategy returns the strategy an attempt runs under: the
+// one pinned on the operation in flight, or the desired one when no attempt
+// owns the Instance. A Failed row holds no attempt — editing the strategy is
+// the operator's way out of a mode that cannot make progress — so its
+// preserved operation does not pin anything.
+func effectiveUpdateStrategy(s *workload.InstanceStatus, desired workload.UpdateStrategyType) workload.UpdateStrategyType {
+	if s == nil || s.Phase == workload.InstancePhaseFailed ||
+		s.Operation == nil || s.Operation.Type != workload.InstanceOperationUpdate ||
+		s.Operation.Strategy == "" {
+		return desired
+	}
+	return s.Operation.Strategy
 }
 
 // isGangSurgeTargetMarker reports whether s is a gang surge-target marker —
