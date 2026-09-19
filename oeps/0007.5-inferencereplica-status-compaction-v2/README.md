@@ -62,24 +62,24 @@ incarnation 1, one set of counters, and `admitted: true`. That repetition is
 stored and transmitted on every IR status update. A single large update can
 still reach the API-server or etcd request budget even after write batching.
 
-The shape that reached that budget in practice was **not** the healthy uniform
-one. After a whole-cluster power loss, one IR with 4,000 single-Pod Instances
-settled at 2,812 Ready, 814 Restarting with an in-flight Restart operation, and
-374 Failed with a preserved Restart operation; every one of the 4,000 rows
-carried a `lastFailure` record of about 130 bytes as stored—a
+The shape that reaches that budget is **not** the healthy uniform one. The
+reference mass-failure sample is one IR with 4,000 single-Pod Instances after
+every Pod restarts at once, as a whole-cluster power loss produces: it settles
+at 2,812 Ready, 814 Restarting with an in-flight Restart operation, and 374
+Failed with a preserved Restart operation; every one of the 4,000 rows carries
+a `lastFailure` record of about 130 bytes as stored—a
 `DeadlineExceeded: Restart/Drain exceeded InstanceReadyTimeout` message or a
 kubelet reason, plus the reason and time—and the rows split 3,999/1 across two
-revisions. In compact
-JSON, the whole object measured 1,572,914 bytes against etcd's default
-1,572,864-byte request limit; the status alone was 1,554,415 bytes, of which
-`lastFailure` records were 523,539 and `operation` records 341,575. In that
-shape the sparse per-Instance entries, not the repeated healthy rows, dominate
-the bytes. Every status write that grew the object was rejected with
-`etcdserver: request is too large`, and only writes that shrank it succeeded,
-so the controller could not record any lifecycle transition: 331 Instances
-whose Pods were healthy stayed idle because the row change that puts an
-Instance into service could never be persisted. The Test Plan pins this shape
-as the `mass-failure` fixture.
+revisions. In compact JSON, the whole object measures 1,572,914 bytes against
+etcd's default 1,572,864-byte request limit; the status alone is 1,554,415
+bytes, of which `lastFailure` records are 523,539 and `operation` records
+341,575. In that shape the sparse per-Instance entries, not the repeated
+healthy rows, dominate the bytes. Every status write that grows the object is
+rejected with `etcdserver: request is too large`, and only writes that shrink
+it succeed, so the controller cannot record any lifecycle transition: 331
+Instances whose Pods are healthy stay idle because the row change that puts an
+Instance into service can never be persisted. The Test Plan pins this shape as
+the `mass-failure` fixture.
 
 Simply deleting the remaining rows is unsafe. Create, Update, Restart,
 Migrate, and Delete persist intent before changing Pods and must recover while
@@ -862,7 +862,7 @@ the qualification PR must state it.
    in-flight Create or Restart reaches a terminal phase, the operation deletes
    and recreates it instead of waiting on a Pod that cannot become Ready.
    Without it, a mass failure parks Instances in Restarting or Failed with a
-   preserved operation—814 and 374 in the incident—and each parked row keeps
+   preserved operation—814 and 374 in the reference sample—and each parked row keeps
    its roughly 290-byte `operation` entry for as long as it stays parked. V2
    composes with this change: recycling keeps the sparse-entry population
    transient, which is what makes the `mass-failure` headroom a peak rather
@@ -875,8 +875,8 @@ the qualification PR must state it.
    the resulting write removes records and adds none, and a shrinking write is
    the only status write an IR at the limit still accepts. A ColumnarV2
    conversion is also a shrinking write on this shape, so it should be
-   accepted on an IR already at the limit for the same reason the incident's
-   shrinking writes were; the `mass-failure` real-apiserver run is where that
+   accepted on an IR already at the limit for the same reason any shrinking
+   write is; the `mass-failure` real-apiserver run is where that
    is proven. The annotation remains the break-glass path for fleets still on
    DenseV1 and for objects whose sparse entries alone exceed the limit, where
    no representation helps. It is distinct from the corruption-repair helper
@@ -1041,8 +1041,8 @@ only the column payload—at 0, 1, 100, 1,000, 2,000, and 5,000 Instances for:
 
 One further fixture is required at exactly 4,000 single-Pod Instances rather
 than at the count ladder above, because its counts are the measured ones. The
-`mass-failure` fixture reproduces the shape from the Motivation that reached
-the etcd request limit after a whole-cluster power loss:
+`mass-failure` fixture reproduces the reference sample from the Motivation, the
+shape that sits at the etcd request limit:
 
 | Rows | Phase | Sparse entry |
 | ---: | --- | --- |
@@ -1056,7 +1056,7 @@ rows split 3,999/1 across two revisions. The measured DenseV1 reference is
 523,539 bytes of `lastFailure` and 341,575 bytes of `operation`. Fidelity is
 part of the fixture: with the row counts above, its DenseV1 complete request
 must be no smaller than the measured 1,572,914 bytes, so DenseV1 sits at the
-limit exactly as the incident object did, and the artifact records whether a
+limit exactly as the reference object does, and the artifact records whether a
 real API server accepts that seed. A variant that DenseV1 stores comfortably
 is a different fixture and proves nothing about this regime.
 
@@ -1372,17 +1372,17 @@ decode-limit default.
    ColumnarV2 stores per Instance, and to a first approximation an in-flight
    operation on all 4,000 rows—about 290 bytes each—would add roughly 0.8 MB
    and exceed the request limit under either representation; put differently,
-   4,000 rows fit under ColumnarV2 only because 2,812 of them carried no
+   4,000 rows fit under ColumnarV2 only because 2,812 of them carry no
    operation. Three answers are on the table, and each costs something this
    OEP currently promises:
    - **Cap `lastFailure.message` at write time.** A cap applied before the
      logical row is formed keeps the codec lossless with respect to the row,
      but the row becomes lossy with respect to what the Pod reported.
      Tradeoff: it bounds the one free-text field, yet 140-byte messages, not
-     multi-kilobyte ones, produced the incident, so a cap loose enough to keep
+     multi-kilobyte ones, produced the reference sample, so a cap loose enough to keep
      diagnostics useful may save nothing on this shape.
    - **Age failure records out once the Instance is Ready again.** The 2,812
-     Ready rows carried 2,812 records—on the order of 370 KB if records are
+     Ready rows carry 2,812 records—on the order of 370 KB if records are
      uniformly sized. Tradeoff: OEP-0007.4 keeps `lastFailure` durable so
      timeout and migration recovery can read it after a manager restart;
      whether any gate reads the last failure of a now-Ready Instance is
