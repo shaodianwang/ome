@@ -141,7 +141,7 @@ Five concrete failure modes, each anchored to current code:
 - **G1.** One declarative, control-plane source of truth for fleet capacity
   budgets: `AcceleratorQuota`, per tenant, per `(resource, ResourceFlavor)` pair.
 - **G1a.** Tenancy that survives contact with a real fleet: a handful of serving
-  namespaces — often exactly one — hosting dozens of tenants. A tenant is
+  namespaces — often exactly one — hosting many tenants. A tenant is
   identified by a value the workload carries, never by the namespace it runs in,
   and the tree alone decides which values are legal and which leaf each charges.
 - **G2.** Deterministic materialization of a budget into **native Kueue** objects
@@ -310,7 +310,7 @@ Below this object there is **no OME CRD** — the workload-mode controller write
 A leaf has to answer one question — *which workloads charge this budget?* — and the
 answer cannot be "the ones in these namespaces". Real fleets do not partition
 tenants by namespace: a handful of serving namespaces, often exactly one, host
-dozens of tenants. Under that shape a namespace carries no tenant information at
+many tenants. Under that shape a namespace carries no tenant information at
 all and cannot be the resolver's lookup key.
 
 Workload-carried tenancy is also not new here. `SetPodLabelsFromAnnotations`
@@ -323,7 +323,7 @@ So **a leaf's tenant is its own name.** There is no tenancy field on the CR at a
 
 - The resolver reads the operator-configured tenant key from a workload's labels,
   then its annotations, and charges the leaf whose `metadata.name` equals that
-  value — `dedicated.content-understanding` under the path convention in *Identity*.
+  value — `dedicated.team-a` under the path convention in *Identity*.
 - **Tenant uniqueness therefore costs nothing to enforce, and needs no check at
   all.** `AcceleratorQuota` is cluster-scoped, so the apiserver already guarantees
   one leaf per name. The per-namespace uniqueness check this replaces goes away
@@ -363,18 +363,18 @@ A dozen tenants, as authored:
 ```
 root (Cohort)
 ├── dedicated (Cohort)
-│   ├── dedicated.content-understanding  (ClusterQueue)
-│   ├── dedicated.business-agent         (ClusterQueue)
-│   └── dedicated.maiba                  (ClusterQueue)
+│   ├── dedicated.team-a    (ClusterQueue)
+│   ├── dedicated.team-b    (ClusterQueue)
+│   └── dedicated.team-c    (ClusterQueue)
 ├── shared (Cohort)
-│   ├── shared.pool                      (ClusterQueue)   # the group's own workloads
-│   ├── shared.avocado-9b                (ClusterQueue)
-│   └── shared.avocado-t5                (ClusterQueue)
-└── msl (Cohort)
-    ├── msl.fair-research                (ClusterQueue)
-    ├── msl.par-product                  (ClusterQueue)
-    ├── msl.tbd-infra                    (ClusterQueue)
-    └── msl.tbd-research                 (ClusterQueue)
+│   ├── shared.pool         (ClusterQueue)   # the group's own workloads
+│   ├── shared.model-a      (ClusterQueue)
+│   └── shared.model-b      (ClusterQueue)
+└── research (Cohort)
+    ├── research.team-d     (ClusterQueue)
+    ├── research.team-e     (ClusterQueue)
+    ├── research.infra      (ClusterQueue)
+    └── research.eval       (ClusterQueue)
 ```
 
 Every leaf carries exactly one name, which is at once its tenant, its
@@ -872,8 +872,8 @@ admission cannot serialize (see *Assembling the tree from `parentRef`*).
   each of its `LocalQueue`s.
 
   **Nodes SHOULD be named by their path** — the dot-joined chain of ancestors from
-  the top tier down to the node, `root` omitted: `dedicated.content-understanding`,
-  `msl.fair-research`. This is a convention on an author-written name, **not** a
+  the top tier down to the node, `root` omitted: `dedicated.team-a`,
+  `research.team-d`. This is a convention on an author-written name, **not** a
   string the controller computes, and that distinction is the whole of it. A
   computed path would rename a node the instant it is re-parented, and a rename is
   a delete and recreate — taking the live `ClusterQueue` and everything admitted
@@ -889,8 +889,8 @@ admission cannot serialize (see *Assembling the tree from `parentRef`*).
   that first, and the existing cap rejects it at admission.
 
   Because names are fleet-unique, reusing a short label under two parents is
-  impossible by construction rather than by check: `dedicated.maiba` and `msl.maiba`
-  are two distinct CRs, and a bare `maiba` written twice would collide on the second
+  impossible by construction rather than by check: `dedicated.team-c` and `research.team-c`
+  are two distinct CRs, and a bare `team-c` written twice would collide on the second
   `apply`. `status.parent` records the resolved edge; there is no separate `path`
   field, because under this convention the name is the path.
 - **Disjoint subtrees.** Sibling subtrees MUST NOT overlap: no node and no
@@ -1565,7 +1565,7 @@ here.
    option (a), for the full comparison. It is genuinely the simpler data path, and
    *Drawbacks* names the condition under which we would go back to it.
 6. **Namespace-bound tenancy, with tenants migrated one per namespace.** The
-   original shape of this proposal. *Rejected:* it asks dozens of teams to
+   original shape of this proposal. *Rejected:* it asks every team to
    re-home their workloads before quota can ship, the migration is theirs and not
    ours, and it does not help at all where the single serving namespace is imposed
    from outside. It also regresses against the DAC path, which already tenants by
