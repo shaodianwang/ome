@@ -189,28 +189,8 @@ func expireMigrationRecord(ctx context.Context, deps workload.Deps, input worklo
 
 	blocker := migrationExpiryBlocker(rec.Phase)
 
-	if allocated {
-		// Surge: clear the pin only. Its status slot (Phase=Creating,
-		// or whatever it reached) stays — unpinned, the next pass's
-		// plan drops the index and the scale-down batch pipeline tears
-		// it down.
-		if err := clearMigrateOperation(ctx, input, *rec.SurgeInstance, uuid); err != nil {
-			return false, fmt.Errorf("clear surge Migrate op (instance=%d): %w", *rec.SurgeInstance, err)
-		}
-		// Source: clear the pin and restore the phase from live
-		// observation.
-		if source != nil {
-			if err := restoreSourceFromObservation(ctx, deps, input, plan, rec.SourceInstance, uuid); err != nil {
-				return false, fmt.Errorf("restore source (instance=%d): %w", rec.SourceInstance, err)
-			}
-		}
-	}
-
-	if err := mirrorTerminalMigrationLedger(ctx, deps, input, plan, rec, audit.PhaseFailed, blocker); err != nil {
-		return false, err
-	}
-
-	if err := closeMigrationRecord(ctx, input, uuid, workload.MigrationPhaseFailed, blocker); err != nil {
+	if err := failMigrationThroughRecord(ctx, deps, input, plan, rec, blocker,
+		migrationExpiredReason, "migration expired; source pods unhealthy"); err != nil {
 		return false, err
 	}
 
@@ -223,6 +203,50 @@ func expireMigrationRecord(ctx context.Context, deps workload.Deps, input worklo
 			"OMENative migration uuid=%s expired: %s", uuid, blocker)
 	}
 	return true, nil
+}
+
+// failMigrationThroughRecord closes rec Failed THROUGH THE RECORD, the
+// single terminal-failure path for a migration whose pair is already
+// stamped:
+//
+//  1. the surge pin is cleared so the next pass's plan drops the index
+//     and the bounded scale-down pipeline tears it down,
+//  2. the source is restored from live observation with the drive's
+//     drain hold released — never a direct Failed stamp,
+//  3. the terminal audit row is mirrored (HARD: a mirror failure aborts
+//     before the record write so the pass retries), and
+//  4. the record's terminal write lands LAST, the crash anchor that
+//     makes every step above re-runnable.
+//
+// blocker is both the record's outcome message and the ledger outcome.
+// sourceFailureReason / sourceFailureMessage describe the source only
+// when observation finds it unhealthy. An Accepted record with no
+// allocated surge has no pair to unwind, so only the ledger and the
+// record are written.
+func failMigrationThroughRecord(
+	ctx context.Context,
+	deps workload.Deps,
+	input workload.ReconcileInput,
+	plan workload.ComponentPlan,
+	rec *workload.MigrationRecord,
+	blocker, sourceFailureReason, sourceFailureMessage string,
+) error {
+	uuid := rec.RequestUUID
+	if rec.SurgeInstance != nil && *rec.SurgeInstance >= 0 {
+		if err := clearMigrateOperation(ctx, input, *rec.SurgeInstance, uuid); err != nil {
+			return fmt.Errorf("clear surge Migrate op (instance=%d): %w", *rec.SurgeInstance, err)
+		}
+		if findInstanceStatus(input.ObservedState.InstanceStatuses, rec.SourceInstance) != nil {
+			if err := restoreSourceFromObservation(ctx, deps, input, plan, rec.SourceInstance, uuid,
+				sourceFailureReason, sourceFailureMessage); err != nil {
+				return fmt.Errorf("restore source (instance=%d): %w", rec.SourceInstance, err)
+			}
+		}
+	}
+	if err := mirrorTerminalMigrationLedger(ctx, deps, input, plan, rec, audit.PhaseFailed, blocker); err != nil {
+		return err
+	}
+	return closeMigrationRecord(ctx, input, uuid, workload.MigrationPhaseFailed, blocker)
 }
 
 // migrationTailReady reports whether an expired Draining record is one
@@ -289,8 +313,9 @@ func migrationTailReady(ctx context.Context, deps workload.Deps, input workload.
 // removes the drive's source-drain serving key from every live source
 // pod, and sets the source's Phase from what actually runs: live
 // source pods all runtime-ready → Ready (RunningRevision untouched —
-// it served throughout); else Failed with a LastFailure so the
-// source's own escalation machinery takes over. Never a blind stamp.
+// it served throughout); else Failed with a LastFailure carrying
+// failureReason / failureMessage, so the source's own escalation
+// machinery takes over. Never a blind stamp.
 //
 // The un-drain is unconditional — keyed on live pod state, not the
 // record's phase, and applied whichever Phase the observation decides.
@@ -306,7 +331,7 @@ func migrationTailReady(ctx context.Context, deps workload.Deps, input workload.
 // the key is absent) and tolerates deleted pods — this is a drain-hold
 // release, not a promotion: the hold dies with the pod, and nothing
 // downstream assumes the pod is in rotation.
-func restoreSourceFromObservation(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, sourceIdx int32, uuid string) error {
+func restoreSourceFromObservation(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, sourceIdx int32, uuid, failureReason, failureMessage string) error {
 	sourcePods, err := query.LiveListPodsForInstance(ctx, deps.Reader(), input.Key.Namespace, input.Key.OwnerName, plan.Component, sourceIdx)
 	if err != nil {
 		return fmt.Errorf("list source pods: %w", err)
@@ -337,8 +362,8 @@ func restoreSourceFromObservation(ctx context.Context, deps workload.Deps, input
 			s.Phase = want
 			if !healthy {
 				s.LastFailure = &workload.InstanceTermination{
-					Reason:  migrationExpiredReason,
-					Message: "migration expired; source pods unhealthy",
+					Reason:  failureReason,
+					Message: failureMessage,
 					Time:    now,
 				}
 			}

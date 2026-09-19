@@ -395,6 +395,30 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		}
 		return true, accepted, nil
 	}
+	// A surge wedged in a terminal kubelet waiting reason can never take
+	// over, so the move ends on that evidence rather than idling to the
+	// record's Deadline. It ends THROUGH THE RECORD — the same close an
+	// expiry drives — so the source is restored from observation instead
+	// of being stamped from here, and a record already terminal is not
+	// reopened (the terminal check at the top of this pass).
+	//
+	// Ahead of the pair confirmation on purpose: the close needs only the
+	// record and the surge pods, and its own writes are identity-guarded,
+	// so a crash part-way through the unwind — which leaves the pair
+	// unconfirmable — is re-derived on the next pass instead of waiting
+	// out the Deadline. Live source pods are required because the restore
+	// puts the source back in rotation: a source already drained and
+	// deleted has nothing to restore, so that shape stays with the
+	// Deadline backstop.
+	if entry.SurgeInstance != nil && *entry.SurgeInstance >= 0 && len(sourcePods) > 0 {
+		if blocker, wedged := surgeWedgeBlocker(input, surgePods); wedged {
+			if err := failMigrationOnWedgedSurge(ctx, deps, input, plan, entry, surgeIdx, blocker); err != nil {
+				return false, accepted, fmt.Errorf("Migrate: fail on wedged surge (uuid=%s): %w", requestUUID, err)
+			}
+			return true, accepted, nil
+		}
+	}
+
 	if input.ApplyInstanceMutationsWithRetryBlock != nil && !pairConfirmedForEffects {
 		targetRevision := ""
 		if source != nil {

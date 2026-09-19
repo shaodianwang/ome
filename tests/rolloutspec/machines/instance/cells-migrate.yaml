@@ -170,22 +170,38 @@ cells:
     status: current
   - state: Migrate/CreateSurge
     event: pod.waiting
+    variants: [ImagePullBackOff, ErrImagePull, InvalidImageName, CreateContainerConfigError, CreateContainerError, CrashLoopBackOff, RunContainerError]
     windows: [before]
     outcome: transition
     to: Ready
-    guard: a surge pod holds a terminal waiting reason past the stuck-pod grace
+    guard: a surge pod holds a terminal waiting reason past the stuck-pod grace and
+      the source still has live pods to restore
     note: terminal kubelet evidence on the surge fails the migration early, and it
       does so through the record rather than as a direct stamp on the source - the
       record is closed Failed, the surge index is torn down, and the source is
       restored to Ready on its untouched RunningRevision with its drain hold
-      released. The record Deadline stays the backstop for everything this evidence
-      does not cover
+      released. A migration that is actually completing still wins - the completion
+      tail is read first - and a source already drained and deleted has nothing to
+      restore to rotation, so that shape is left to the record Deadline, which stays
+      the backstop for everything this evidence does not cover
     invariants: [record.is.timeout.authority]
     placement: perm
+    coverage: {perm: [], unit: [TestMigrate_SurgeWedgedInImagePull_FailsThroughRecord, TestMigrate_SurgeCrashLoop_ClosesOnlyPastTheGrace, TestMigrate_SurgeWedgedWhileDraining_RestoresRotation, TestMigrate_SurgeWedgedAfterSourceGone_LeavesTheDeadline], kind: []}
+    status: decided
+  - state: Migrate/CreateSurge
+    event: pod.waiting
+    variants: [DeadlineExceeded]
+    outcome: ignore
+    note: DeadlineExceeded is outside the terminal waiting set every reader of this
+      evidence shares, so it is not early-failure evidence; a surge holding it makes
+      no progress through the drive's gates and the record Deadline ends the move
+    invariants: [record.is.timeout.authority]
+    placement: sim
     coverage: {perm: [], unit: [], kind: []}
     status: decided
   - state: Migrate/CreateSurge
     event: pod.waiting
+    variants: [ImagePullBackOff, ErrImagePull, InvalidImageName, CreateContainerConfigError, CreateContainerError, CrashLoopBackOff, RunContainerError]
     windows: [boundary, after]
     outcome: ignore
     note: the record write is the single authority and it is idempotent - an
@@ -193,7 +209,7 @@ cells:
       twice
     invariants: [record.is.timeout.authority]
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestMigrate_SurgeWedgeCloseIsIdempotent, TestMigrate_SurgeWedgeDoesNotReopenTerminalRecord], kind: []}
     status: decided
   - state: Migrate/CreateSurge
     event: pod.containerRestart
@@ -644,11 +660,12 @@ cells:
     event: timer.stuckPodGrace
     outcome: ignore
     note: the fast escalator skips a Migrate-pinned row outright, so the stuck-pod
-      grace never arms here; the drive's own escalation over wedged source pods runs
-      on the force-delete clocks instead
+      grace never arms on this row's OWN pods; the drive's own escalation over wedged
+      source pods runs on the force-delete clocks instead. The same grace read
+      against the SURGE pods is what closes the record early
     invariants: [record.is.timeout.authority]
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestMigrate_WedgedSourcePodLeavesTheMigrationDriving], kind: []}
     status: current
   - state: Migrate/CreateSurge
     event: timer.forceDelete
@@ -903,28 +920,44 @@ cells:
     status: current
   - state: Migrate/SurgeTarget
     event: pod.waiting
+    variants: [ImagePullBackOff, ErrImagePull, InvalidImageName, CreateContainerConfigError, CreateContainerError, CrashLoopBackOff, RunContainerError]
     windows: [before]
     outcome: transition
     to: Delete/Drain
-    guard: a pod of this surge holds a terminal waiting reason past the stuck-pod grace
+    guard: a pod of this surge holds a terminal waiting reason past the stuck-pod
+      grace and the paired source still has live pods to restore
     note: terminal kubelet evidence fails the migration early through the record
       rather than stamping this row Failed - the record is closed Failed and the pin
       cleared, so the unpinned index leaves the plan and the scale-down pipeline
-      tears it down while the paired source is restored by the same record write.
-      The record Deadline stays the backstop
+      tears it down while the paired source is restored by the same record write. A
+      migration that is actually completing still wins, and once the paired source is
+      drained and deleted there is nothing to restore, so that shape is left to the
+      record Deadline, which stays the backstop
     invariants: [record.is.timeout.authority]
     placement: perm
+    coverage: {perm: [], unit: [TestMigrate_SurgeWedgedInImagePull_FailsThroughRecord, TestMigrate_GangSurgeMemberWedged_FailsThroughRecord, TestMigrate_SurgeWedgedWhileDraining_RestoresRotation, TestMigrate_SurgeWedgedAfterSourceGone_LeavesTheDeadline], kind: []}
+    status: decided
+  - state: Migrate/SurgeTarget
+    event: pod.waiting
+    variants: [DeadlineExceeded]
+    outcome: ignore
+    note: DeadlineExceeded is outside the terminal waiting set every reader of this
+      evidence shares, so it is not early-failure evidence; a member holding it
+      withholds the surge gates and the record Deadline ends the move
+    invariants: [record.is.timeout.authority]
+    placement: sim
     coverage: {perm: [], unit: [], kind: []}
     status: decided
   - state: Migrate/SurgeTarget
     event: pod.waiting
+    variants: [ImagePullBackOff, ErrImagePull, InvalidImageName, CreateContainerConfigError, CreateContainerError, CrashLoopBackOff, RunContainerError]
     windows: [boundary, after]
     outcome: ignore
     note: the record write is the single authority, and clearing an already-cleared
       pin is a no-op
     invariants: [record.is.timeout.authority]
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestMigrate_SurgeWedgeCloseIsIdempotent], kind: []}
     status: decided
   - state: Migrate/SurgeTarget
     event: pod.containerRestart
@@ -1343,12 +1376,12 @@ cells:
   - state: Migrate/SurgeTarget
     event: timer.stuckPodGrace
     outcome: ignore
-    note: the fast escalator skips a Migrate-pinned row outright, so the stuck-pod
-      grace never arms here; a wedged own pod waits for expiry to unpin the index and
-      for the scale-down pipeline's own escalation to take it over
+    note: the fast escalator skips a Migrate-pinned row outright, so no escalation
+      arms here; the migration pass reads the same grace over this row's pods
+      instead, and a wedge past it closes the record rather than stamping the row
     invariants: [record.is.timeout.authority]
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestMigrate_SurgeCrashLoop_ClosesOnlyPastTheGrace], kind: []}
     status: current
   - state: Migrate/SurgeTarget
     event: timer.forceDelete

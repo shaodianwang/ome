@@ -22,6 +22,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/clock"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -50,15 +51,24 @@ type migFixture struct {
 	// forceDelete, when set, arms the stuck-Terminating escalation on
 	// the ReconcileInput (mirrors the adapter's config plumbing).
 	forceDelete *workload.ForceDeletePolicy
+	// stuckPodGrace, when set, arms the terminal-waiting evidence read
+	// on the ReconcileInput (mirrors the adapter's config plumbing).
+	stuckPodGrace time.Duration
+	// recorder, when set, captures the events a pass emits.
+	recorder *record.FakeRecorder
 	// finalizeInstanceResources models per-Instance cleanup owned by the IR
 	// adapter. When set, the fixture also wires the guarded batch status writer.
 	finalizeInstanceResources func(context.Context, int32) (bool, error)
 }
 
-// deps builds the fixture's workload.Deps (clock included when set).
+// deps builds the fixture's workload.Deps (clock and recorder included
+// when set).
 func (f *migFixture) deps() workload.Deps {
 	d := legacyTestDeps(f.c)
 	d.Clock = f.clk
+	if f.recorder != nil {
+		d.Recorder = f.recorder
+	}
 	return d
 }
 
@@ -190,6 +200,7 @@ func (f *migFixture) input(t *testing.T) workload.ReconcileInput {
 	in.DesiredSpec.GangSchedulingAvailable = f.gangSched
 	in.Clock = f.clk
 	in.ForceDelete = f.forceDelete
+	in.StuckPodGrace = f.stuckPodGrace
 	if f.finalizeInstanceResources != nil {
 		in.FinalizeInstanceResources = f.finalizeInstanceResources
 		in.ApplyInstanceMutationsWithRetryBlock = f.applyInstanceMutationsWithRetryBlock

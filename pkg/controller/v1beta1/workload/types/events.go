@@ -173,7 +173,15 @@ const (
 	// Failed, the pair's Migrate ops are cleared, the surge is torn
 	// down by the ordinary scale-down batch pipeline, and the source
 	// phase is restored from observation.
-	EventReasonMigrationExpired              EventReason = "MigrationExpired"
+	EventReasonMigrationExpired EventReason = "MigrationExpired"
+	// EventReasonMigrationSurgeWedged fires when a surge pod of an
+	// in-flight migration is parked in a terminal kubelet waiting reason
+	// past the stuck-pod grace: a replacement that cannot start can never
+	// take over, so the record is closed Failed on that evidence instead
+	// of idling to its Deadline. Closed the same way an expiry closes it —
+	// surge unpinned for the scale-down pipeline, source restored from
+	// observation — so the event names the pod and the reason.
+	EventReasonMigrationSurgeWedged          EventReason = "MigrationSurgeWedged"
 	EventReasonRateLimited                   EventReason = "RateLimited"
 	EventReasonMigrationSurgeCreateBlocked   EventReason = "MigrationSurgeCreateBlocked"
 	EventReasonMigrationFromNodeMismatch     EventReason = "MigrationFromNodeMismatch"
