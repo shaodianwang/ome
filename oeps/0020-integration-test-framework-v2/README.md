@@ -81,7 +81,7 @@ of Kueue's MultiKueue implementation against OME's multi-cluster controllers)
 found the multi-cluster code ships at client-go default rate limits (5 QPS / 10
 burst), placement at
 `MaxConcurrentReconciles` 1, and a 30s status poll — exactly the class of scaling
-choice a perf harness exists to catch *before* it reaches a 3-cluster production
+choice a perf harness exists to catch *before* it reaches a multi-cluster production
 fleet. Without a gate, a 2× reconcile-latency regression merges green and is
 discovered by an operator, not by CI.
 
