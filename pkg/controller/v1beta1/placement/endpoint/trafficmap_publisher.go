@@ -109,9 +109,9 @@ type TrafficMapPublisherReconciler struct {
 	Log           logr.Logger
 	Publisher     TrafficMapPublisher
 	GlobalOptions map[string]string
-	// RequeueAfter is the per-object resync period. Stateful publishers require
-	// a positive value so a map blocked by another map's claim is retried after
-	// that claim is released.
+	// RequeueAfter is the per-object resync period. Active stateful publishers
+	// require a positive value so a map blocked by another map's claim is retried
+	// after that claim is released.
 	RequeueAfter time.Duration
 	// Active is the installation-level gate. The routing controller owns map
 	// deletion; an inactive publisher waits for that deletion and only finalizes.
@@ -842,6 +842,20 @@ func (r *TrafficMapPublisherReconciler) successResult() ctrl.Result {
 // source InferenceService changes to the same namespace/name. The one-worker
 // invariant serializes the uncached claim scan, claim write, and external call.
 func (r *TrafficMapPublisherReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := r.validateSetup(); err != nil {
+		return err
+	}
+	return ctrl.NewControllerManagedBy(mgr).
+		Named(TrafficMapPublisherControllerName).
+		For(&v1beta1.TrafficMap{}).
+		Watches(&v1beta1.InferenceService{},
+			handler.EnqueueRequestsFromMapFunc(enqueueOwnedTrafficMap),
+			builder.WithPredicates(trafficMapPublisherOwnerChange)).
+		WithOptions(trafficMapPublisherControllerOptions()).
+		Complete(r)
+}
+
+func (r *TrafficMapPublisherReconciler) validateSetup() error {
 	if r.Publisher == nil {
 		return fmt.Errorf("TrafficMap publisher is not configured")
 	}
@@ -854,17 +868,10 @@ func (r *TrafficMapPublisherReconciler) SetupWithManager(mgr ctrl.Manager) error
 	if r.Publisher.Stateful() && !r.LeaderElectionEnabled {
 		return fmt.Errorf("stateful TrafficMap publisher %q requires leader election", r.Publisher.Name())
 	}
-	if r.Publisher.Stateful() && r.RequeueAfter <= 0 {
+	if r.Active && r.Publisher.Stateful() && r.RequeueAfter <= 0 {
 		return fmt.Errorf("stateful TrafficMap publisher %q requires a positive resync period", r.Publisher.Name())
 	}
-	return ctrl.NewControllerManagedBy(mgr).
-		Named(TrafficMapPublisherControllerName).
-		For(&v1beta1.TrafficMap{}).
-		Watches(&v1beta1.InferenceService{},
-			handler.EnqueueRequestsFromMapFunc(enqueueOwnedTrafficMap),
-			builder.WithPredicates(trafficMapPublisherOwnerChange)).
-		WithOptions(trafficMapPublisherControllerOptions()).
-		Complete(r)
+	return nil
 }
 
 func trafficMapPublisherControllerOptions() controller.Options {

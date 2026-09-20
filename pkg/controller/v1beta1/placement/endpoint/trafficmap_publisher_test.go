@@ -701,7 +701,7 @@ func TestTrafficMapPublisherRetriesAfterSuccessStatusWriteFails(t *testing.T) {
 	assert.True(t, current.Status.Programmed)
 }
 
-func TestTrafficMapPublisherFinalizesWithoutOwner(t *testing.T) {
+func TestTrafficMapPublisherFinalizesWhenInactiveWithoutOwner(t *testing.T) {
 	_, trafficMap := publisherTestObjects()
 	now := metav1.Now()
 	trafficMap.DeletionTimestamp = &now
@@ -728,6 +728,7 @@ func TestTrafficMapPublisherFinalizesWithoutOwner(t *testing.T) {
 		Finalizers: []string{EndpointFinalizer},
 	}}
 	reconciler, kubeClient := newTrafficMapPublisherReconciler(t, publisher, trafficMap, legacyOwner)
+	reconciler.Active = false
 
 	_, err := reconcileTrafficMapPublisher(t, reconciler, trafficMap)
 	require.Error(t, err)
@@ -967,19 +968,27 @@ func TestTrafficMapPublisherHelpers(t *testing.T) {
 	assert.Equal(t, types.NamespacedName{Namespace: "team-a", Name: "model"}, requests[0].NamespacedName)
 }
 
-func TestStatefulTrafficMapPublisherRequiresLeaderElection(t *testing.T) {
+func TestTrafficMapPublisherSetupValidation(t *testing.T) {
 	publisher := &recordingTrafficMapPublisher{name: "example-publisher", stateful: true}
 	kubeClient := newTrafficMapPublisherClient(t)
 	reconciler := &TrafficMapPublisherReconciler{
-		Client: kubeClient, APIReader: kubeClient, Publisher: publisher,
+		Client: kubeClient, APIReader: kubeClient, Publisher: publisher, Active: true,
 	}
 
-	err := reconciler.SetupWithManager(nil)
+	err := reconciler.validateSetup()
 	require.ErrorContains(t, err, "requires leader election")
 
 	reconciler.LeaderElectionEnabled = true
-	err = reconciler.SetupWithManager(nil)
+	err = reconciler.validateSetup()
 	require.ErrorContains(t, err, "requires a positive resync period")
+
+	reconciler.Active = false
+	reconciler.LeaderElectionEnabled = false
+	err = reconciler.validateSetup()
+	require.ErrorContains(t, err, "requires leader election")
+
+	reconciler.LeaderElectionEnabled = true
+	require.NoError(t, reconciler.validateSetup())
 }
 
 func TestTrafficMapPublisherOwnerPredicate(t *testing.T) {
