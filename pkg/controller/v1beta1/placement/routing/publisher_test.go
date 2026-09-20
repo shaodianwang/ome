@@ -33,7 +33,7 @@ func (*testTrafficMapPublisher) Plan(
 ) (placementendpoint.TrafficMapPublishPlan, error) {
 	return testTrafficMapPublishPlan{}, nil
 }
-func (*testTrafficMapPublisher) Drain(context.Context, []string) error {
+func (*testTrafficMapPublisher) Drain(context.Context, types.NamespacedName, []string) error {
 	return nil
 }
 func (*testTrafficMapPublisher) Apply(

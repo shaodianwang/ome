@@ -46,7 +46,9 @@ func (p *statusOwnershipPublisher) Plan(
 ) (placementendpoint.TrafficMapPublishPlan, error) {
 	return statusOwnershipPlan{claims: append([]string(nil), p.claims...)}, nil
 }
-func (*statusOwnershipPublisher) Drain(context.Context, []string) error { return nil }
+func (*statusOwnershipPublisher) Drain(context.Context, types.NamespacedName, []string) error {
+	return nil
+}
 func (p *statusOwnershipPublisher) Apply(
 	_ context.Context,
 	_ placementendpoint.TrafficMapPublishPlan,

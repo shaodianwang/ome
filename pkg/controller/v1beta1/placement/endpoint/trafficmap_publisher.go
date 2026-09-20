@@ -44,6 +44,7 @@ const (
 
 const (
 	trafficMapPublisherReasonProgrammed       = "Programmed"
+	trafficMapPublisherReasonWithdrawn        = "Withdrawn"
 	trafficMapPublisherReasonInvalidOwner     = "InvalidOwner"
 	trafficMapPublisherReasonInvalidOptions   = "InvalidOptions"
 	trafficMapPublisherReasonInvalidPlan      = "InvalidPlan"
@@ -65,10 +66,13 @@ type TrafficMapPublishPlan interface {
 	Claims() []string
 }
 
-// TrafficMapPublishResult reports the concrete Kubernetes object, if any, that
-// realizes a successfully applied plan.
+// TrafficMapPublishResult reports the outcome of a successfully applied plan.
 type TrafficMapPublishResult struct {
 	GatewayRef *v1beta1.TrafficMapGatewayRef
+	// Withdrawn reports that Apply successfully removed or withheld publication.
+	// The controller records the generation and options digest while keeping the
+	// durable claim journal, but reports Programmed=False with no GatewayRef.
+	Withdrawn bool
 }
 
 // TrafficMapPublisher realizes TrafficMaps through one shared publisher
@@ -76,8 +80,9 @@ type TrafficMapPublishResult struct {
 // immutable per-reconcile values but perform no external mutation.
 //
 // Drain keeps retired claims owned at zero while Apply realizes the current
-// plan. Unpublish removes every external override named by a deletion journal;
-// it must need neither the TrafficMap nor its owner to remain readable.
+// plan. The source key lets a publisher verify target ownership without reading
+// the owner. Unpublish removes every external override named by a deletion
+// journal; it must need neither the TrafficMap nor its owner to remain readable.
 type TrafficMapPublisher interface {
 	Name() string
 	// Stateful reports whether publication creates effects that require a claim
@@ -90,7 +95,7 @@ type TrafficMapPublisher interface {
 		trafficMap *v1beta1.TrafficMap,
 		effectiveOptions map[string]string,
 	) (TrafficMapPublishPlan, error)
-	Drain(ctx context.Context, claims []string) error
+	Drain(ctx context.Context, key types.NamespacedName, claims []string) error
 	Apply(ctx context.Context, plan TrafficMapPublishPlan) (TrafficMapPublishResult, error)
 	Unpublish(
 		ctx context.Context,
@@ -261,7 +266,7 @@ func (r *TrafficMapPublisherReconciler) Reconcile(ctx context.Context, req ctrl.
 	expectedClaims := publisherClaimUnion(previousClaims, desiredClaims)
 	staleClaims := publisherClaimDifference(previousClaims, desiredClaims)
 	if len(staleClaims) != 0 {
-		if err := r.Publisher.Drain(ctx, slices.Clone(staleClaims)); err != nil {
+		if err := r.Publisher.Drain(ctx, client.ObjectKeyFromObject(trafficMap), slices.Clone(staleClaims)); err != nil {
 			return r.retryFailure(ctx, trafficMap, trafficMapPublisherReasonDrainFailed, err)
 		}
 	}
@@ -662,20 +667,30 @@ func (r *TrafficMapPublisherReconciler) markProgrammed(
 				errTrafficMapPublisherJournalChanged, len(liveClaims),
 			)
 		}
-		status.Programmed = true
+		status.Programmed = !result.Withdrawn
 		status.ObservedTrafficMapGeneration = generation
-		status.GatewayRef = copyTrafficMapGatewayRef(result.GatewayRef)
+		if result.Withdrawn {
+			status.GatewayRef = nil
+		} else {
+			status.GatewayRef = copyTrafficMapGatewayRef(result.GatewayRef)
+		}
 		if status.Publisher == nil || status.Publisher.PublisherName != r.Publisher.Name() {
 			status.Publisher = &v1beta1.TrafficMapPublisherStatus{PublisherName: r.Publisher.Name()}
 		}
 		status.Publisher.ObservedOptionsDigest = digest
-		apimeta.SetStatusCondition(&status.Conditions, metav1.Condition{
+		condition := metav1.Condition{
 			Type:               v1beta1.TrafficMapProgrammed,
 			Status:             metav1.ConditionTrue,
 			Reason:             trafficMapPublisherReasonProgrammed,
 			Message:            fmt.Sprintf("TrafficMap is programmed by publisher %q", r.Publisher.Name()),
 			ObservedGeneration: generation,
-		})
+		}
+		if result.Withdrawn {
+			condition.Status = metav1.ConditionFalse
+			condition.Reason = trafficMapPublisherReasonWithdrawn
+			condition.Message = fmt.Sprintf("TrafficMap publication is withdrawn by publisher %q", r.Publisher.Name())
+		}
+		apimeta.SetStatusCondition(&status.Conditions, condition)
 		return nil
 	})
 }
@@ -754,6 +769,21 @@ func (r *TrafficMapPublisherReconciler) patchPublisherStatus(
 	desired := live.DeepCopy()
 	if err := mutate(&desired.Status); err != nil {
 		return err
+	}
+	// A restored object may carry publisher fields without this controller's
+	// server-side-apply ownership. Explicitly patch zero-value transitions before
+	// applying the sparse status projection so withdrawal cannot leave stale
+	// programmed state or a stale GatewayRef behind.
+	if (live.Status.Programmed && !desired.Status.Programmed) ||
+		(live.Status.GatewayRef != nil && desired.Status.GatewayRef == nil) {
+		narrowed := live.DeepCopy()
+		narrowed.Status.Programmed = desired.Status.Programmed
+		narrowed.Status.GatewayRef = copyTrafficMapGatewayRef(desired.Status.GatewayRef)
+		if err := r.Status().Patch(ctx, narrowed,
+			client.MergeFromWithOptions(live, client.MergeFromWithOptimisticLock{})); err != nil {
+			return err
+		}
+		desired.ResourceVersion = narrowed.ResourceVersion
 	}
 	// Apply even when the typed values are unchanged so this controller remains
 	// the declared owner of its sparse status projection after a restart.

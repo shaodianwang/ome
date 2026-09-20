@@ -261,7 +261,7 @@ func TestDrainPublishesZeroForClaims(t *testing.T) {
 	weights := &recordingPublisher{}
 	p := newTestPublisher(weights)
 
-	require.NoError(t, p.Drain(context.Background(), []string{"b.example", "a.example"}))
+	require.NoError(t, p.Drain(context.Background(), types.NamespacedName{}, []string{"b.example", "a.example"}))
 	assert.Equal(t, []weightedTarget{
 		{name: "a.example", weight: 0},
 		{name: "b.example", weight: 0},
@@ -272,7 +272,7 @@ func TestApplyAndDrainStopOnFailure(t *testing.T) {
 	weights := &recordingPublisher{publishFailures: map[string]error{"a.example": errors.New("unavailable")}}
 	p := newTestPublisher(weights)
 
-	err := p.Drain(context.Background(), []string{"a.example", "b.example"})
+	err := p.Drain(context.Background(), types.NamespacedName{}, []string{"a.example", "b.example"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "a.example")
 	assert.Equal(t, []weightedTarget{{name: "a.example", weight: 0}}, weights.published)
@@ -319,7 +319,7 @@ func TestDrainAndUnpublishValidateAllClaimsBeforeMutation(t *testing.T) {
 			weights := &recordingPublisher{}
 			p := newTestPublisher(weights)
 
-			require.Error(t, p.Drain(context.Background(), tt.claims))
+			require.Error(t, p.Drain(context.Background(), types.NamespacedName{}, tt.claims))
 			assert.Empty(t, weights.published)
 
 			require.Error(t, p.Unpublish(

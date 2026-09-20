@@ -126,7 +126,7 @@ func (*Publisher) Plan(
 
 // Drain implements endpoint.TrafficMapPublisher. A stale override remains
 // explicitly held at zero until the TrafficMap journal is finalized.
-func (p *Publisher) Drain(ctx context.Context, claims []string) error {
+func (p *Publisher) Drain(ctx context.Context, _ types.NamespacedName, claims []string) error {
 	validated, err := validateClaims(claims)
 	if err != nil {
 		return fmt.Errorf("validate stale xDS target claims: %w", err)

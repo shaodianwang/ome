@@ -38,7 +38,7 @@ type recordingTrafficMapPublisher struct {
 	events    []string
 	resolve   func(map[string]string, map[string]string) (map[string]string, error)
 	plan      func(*v1beta1.InferenceService, *v1beta1.TrafficMap, map[string]string) (TrafficMapPublishPlan, error)
-	drain     func(context.Context, []string) error
+	drain     func(context.Context, types.NamespacedName, []string) error
 	apply     func(context.Context, TrafficMapPublishPlan) (TrafficMapPublishResult, error)
 	unpublish func(context.Context, types.NamespacedName, v1beta1.TrafficMapPublisherStatus) error
 }
@@ -67,10 +67,14 @@ func (p *recordingTrafficMapPublisher) Plan(
 	}
 	return testTrafficMapPublishPlan{claims: p.claims}, nil
 }
-func (p *recordingTrafficMapPublisher) Drain(ctx context.Context, claims []string) error {
+func (p *recordingTrafficMapPublisher) Drain(
+	ctx context.Context,
+	key types.NamespacedName,
+	claims []string,
+) error {
 	p.events = append(p.events, "drain:"+strings.Join(claims, ","))
 	if p.drain != nil {
-		return p.drain(ctx, claims)
+		return p.drain(ctx, key, claims)
 	}
 	return nil
 }
@@ -265,8 +269,9 @@ func TestTrafficMapPublisherPreclaimsBeforeDrainAndApply(t *testing.T) {
 		require.NotNil(t, current.Status.Publisher)
 		assert.Equal(t, []string{"retired", "target-a", "target-z"}, current.Status.Publisher.ClaimedTargets)
 	}
-	publisher.drain = func(_ context.Context, claims []string) error {
+	publisher.drain = func(_ context.Context, key types.NamespacedName, claims []string) error {
 		assertPreclaimed()
+		assert.Equal(t, client.ObjectKeyFromObject(trafficMap), key)
 		assert.Equal(t, []string{"retired"}, claims)
 		return nil
 	}
@@ -302,6 +307,48 @@ func TestTrafficMapPublisherPreclaimsBeforeDrainAndApply(t *testing.T) {
 	programmed := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
 	require.NotNil(t, programmed)
 	assert.Equal(t, metav1.ConditionTrue, programmed.Status)
+}
+
+func TestTrafficMapPublisherWithdrawnResultRecordsConvergence(t *testing.T) {
+	owner, trafficMap := publisherTestObjects()
+	trafficMap.Finalizers = []string{TrafficMapPublisherFinalizer}
+	trafficMap.Status.Programmed = true
+	trafficMap.Status.ObservedTrafficMapGeneration = trafficMap.Generation - 1
+	trafficMap.Status.GatewayRef = &v1beta1.TrafficMapGatewayRef{
+		Group: "networking.example.com", Kind: "GlobalRoute", Namespace: "routes", Name: "old",
+	}
+	trafficMap.Status.Publisher = &v1beta1.TrafficMapPublisherStatus{
+		PublisherName: "example-publisher", ClaimedTargets: []string{"target"},
+	}
+	publisher := &recordingTrafficMapPublisher{
+		name: "example-publisher", stateful: true, claims: []string{"target"},
+		apply: func(context.Context, TrafficMapPublishPlan) (TrafficMapPublishResult, error) {
+			return TrafficMapPublishResult{
+				GatewayRef: &v1beta1.TrafficMapGatewayRef{
+					Group: "networking.example.com", Kind: "GlobalRoute", Namespace: "routes", Name: "ignored",
+				},
+				Withdrawn: true,
+			}, nil
+		},
+	}
+	reconciler, kubeClient := newTrafficMapPublisherReconciler(t, publisher, owner, trafficMap)
+
+	_, err := reconcileTrafficMapPublisher(t, reconciler, trafficMap)
+	require.NoError(t, err)
+
+	current := getPublisherTrafficMap(t, kubeClient, trafficMap)
+	assert.False(t, current.Status.Programmed)
+	assert.Nil(t, current.Status.GatewayRef)
+	assert.Equal(t, trafficMap.Generation, current.Status.ObservedTrafficMapGeneration)
+	require.NotNil(t, current.Status.Publisher)
+	assert.Equal(t, []string{"target"}, current.Status.Publisher.ClaimedTargets,
+		"successful withdrawal retains the durable claim until finalization")
+	assert.NotEmpty(t, current.Status.Publisher.ObservedOptionsDigest)
+	programmed := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
+	require.NotNil(t, programmed)
+	assert.Equal(t, metav1.ConditionFalse, programmed.Status)
+	assert.Equal(t, trafficMapPublisherReasonWithdrawn, programmed.Reason)
+	assert.Equal(t, trafficMap.Generation, programmed.ObservedGeneration)
 }
 
 func TestTrafficMapPublisherRejectsUnsafeClaimsBeforeEffects(t *testing.T) {
@@ -616,7 +663,8 @@ func TestTrafficMapPublisherDrainFailureKeepsClaimsForRetry(t *testing.T) {
 	drainAttempts := 0
 	publisher := &recordingTrafficMapPublisher{
 		name: "example-publisher", stateful: true, claims: []string{"current"},
-		drain: func(context.Context, []string) error {
+		drain: func(_ context.Context, key types.NamespacedName, _ []string) error {
+			assert.Equal(t, client.ObjectKeyFromObject(trafficMap), key)
 			drainAttempts++
 			if drainAttempts == 1 {
 				return errors.New("temporary drain failure")
