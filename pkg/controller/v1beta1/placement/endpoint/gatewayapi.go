@@ -119,6 +119,28 @@ func (p *GatewayAPIPublisher) validateIO() error {
 	return nil
 }
 
+// deleteObservedObject fences deletion to the exact object version returned by
+// the API reader. Kubernetes objects without server identity cannot be deleted
+// safely because a same-key replacement may already exist.
+func (p *GatewayAPIPublisher) deleteObservedObject(ctx context.Context, object client.Object) error {
+	key := client.ObjectKeyFromObject(object)
+	uid := object.GetUID()
+	if uid == "" {
+		return fmt.Errorf("delete observed %T %s: UID is empty", object, key)
+	}
+	resourceVersion := object.GetResourceVersion()
+	if resourceVersion == "" {
+		return fmt.Errorf("delete observed %T %s: resourceVersion is empty", object, key)
+	}
+	if err := p.client.Delete(ctx, object, client.Preconditions{
+		UID:             &uid,
+		ResourceVersion: &resourceVersion,
+	}); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	return nil
+}
+
 // resourceBaseName is the stable base every published resource name is built
 // from. A shared RouteNamespace co-locates resources from many source
 // namespaces, so the base carries a digest of the fully-qualified source key
@@ -229,7 +251,7 @@ func (p *GatewayAPIPublisher) Unpublish(ctx context.Context, isvc *v1beta1.Infer
 	case !p.ownsResource(existing, isvc):
 		errs = append(errs, fmt.Errorf("global HTTPRoute %s/%s belongs to another InferenceService", ns, p.routeName(isvc)))
 	default:
-		if err := p.client.Delete(ctx, existing); err != nil && !apierrors.IsNotFound(err) {
+		if err := p.deleteObservedObject(ctx, existing); err != nil {
 			errs = append(errs, fmt.Errorf("delete global HTTPRoute %s/%s: %w", ns, p.routeName(isvc), err))
 		}
 	}
@@ -285,12 +307,7 @@ func (p *GatewayAPIPublisher) deleteClaimedHTTPRoute(
 		}
 	}
 	if route.DeletionTimestamp.IsZero() {
-		uid := route.UID
-		resourceVersion := route.ResourceVersion
-		if err := p.client.Delete(ctx, route, client.Preconditions{
-			UID:             &uid,
-			ResourceVersion: &resourceVersion,
-		}); err != nil && !apierrors.IsNotFound(err) {
+		if err := p.deleteObservedObject(ctx, route); err != nil {
 			return fmt.Errorf("delete claimed HTTPRoute %s/%s: %w", routeKey.Namespace, routeKey.Name, err)
 		}
 	}
@@ -367,7 +384,7 @@ func (p *GatewayAPIPublisher) deleteSourceResources(
 	}
 	for i := range owned {
 		s := &owned[i]
-		if err := p.client.Delete(ctx, s); err != nil && !apierrors.IsNotFound(err) {
+		if err := p.deleteObservedObject(ctx, s); err != nil {
 			errs = append(errs, fmt.Errorf("delete global backend Service %s/%s: %w", s.Namespace, s.Name, err))
 		}
 	}
@@ -441,7 +458,7 @@ func (p *GatewayAPIPublisher) pruneServices(ctx context.Context, isvc *v1beta1.I
 		if _, keep := desired[s.Name]; keep {
 			continue
 		}
-		if err := p.client.Delete(ctx, s); err != nil && !apierrors.IsNotFound(err) {
+		if err := p.deleteObservedObject(ctx, s); err != nil {
 			return fmt.Errorf("delete stale global backend Service %s/%s: %w", s.Namespace, s.Name, err)
 		}
 	}

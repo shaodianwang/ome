@@ -43,7 +43,7 @@ func placedISVC(cluster, backendHost string) *v1beta1.InferenceService {
 func newReconciler(t *testing.T, cfg Config, objs ...client.Object) (*Reconciler, client.Client) {
 	t.Helper()
 	s := pubScheme(t)
-	c := fakeclient.NewClientBuilder().WithScheme(s).
+	c := newGatewayFakeClientBuilder(t, s).
 		WithStatusSubresource(&v1beta1.InferenceService{}).
 		WithObjects(objs...).Build()
 	return &Reconciler{

@@ -10,7 +10,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	gatewayapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -18,7 +17,7 @@ import (
 
 func TestGatewayAPITrafficMapWithdrawalWaitsForRouteDeletion(t *testing.T) {
 	scheme := pubScheme(t)
-	c := fakeclient.NewClientBuilder().WithScheme(scheme).Build()
+	c := newGatewayFakeClientBuilder(t, scheme).Build()
 	cfg := baseConfig()
 	cfg.GlobalHostTemplate = ""
 	p := NewGatewayAPITrafficMapPublisher(c, c, cfg)
@@ -54,7 +53,7 @@ func TestGatewayAPITrafficMapWithdrawalWaitsForRouteDeletion(t *testing.T) {
 
 func TestGatewayAPITrafficMapUnpublishWaitsForRouteDeletion(t *testing.T) {
 	scheme := pubScheme(t)
-	c := fakeclient.NewClientBuilder().WithScheme(scheme).Build()
+	c := newGatewayFakeClientBuilder(t, scheme).Build()
 	p := NewGatewayAPITrafficMapPublisher(c, c, baseConfig())
 	owner := testISVC()
 	trafficMap := gatewayTrafficMap(owner, gatewayTrafficMapEntry("cluster-a", "a.example", 5))

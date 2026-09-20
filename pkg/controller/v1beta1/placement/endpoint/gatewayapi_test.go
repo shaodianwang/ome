@@ -3,7 +3,9 @@ package endpoint
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -26,6 +28,28 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 )
+
+var gatewayFakeUIDCounter atomic.Uint64
+
+func newGatewayFakeClientBuilder(t *testing.T, scheme *runtime.Scheme) *fakeclient.ClientBuilder {
+	t.Helper()
+	return fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, object client.Object, opts ...client.CreateOption) error {
+				setGatewayFakeObjectIdentity(object)
+				return c.Create(ctx, object, opts...)
+			},
+		})
+}
+
+func setGatewayFakeObjectIdentity(objects ...client.Object) {
+	for _, object := range objects {
+		if object.GetUID() == "" {
+			object.SetUID(types.UID("gateway-test-" + strconv.FormatUint(gatewayFakeUIDCounter.Add(1), 10)))
+		}
+	}
+}
 
 func pubScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
@@ -443,7 +467,7 @@ func TestPublish_GatewayBackendCreatesEndpointSlicesAndTLSPolicy(t *testing.T) {
 
 func TestPublish_GatewayBackendUpdatesAddressesAndPrunesStaleFamily(t *testing.T) {
 	s := pubScheme(t)
-	c := fakeclient.NewClientBuilder().WithScheme(s).Build()
+	c := newGatewayFakeClientBuilder(t, s).Build()
 	resolver := staticBackendAddressResolver{
 		"cluster-a": {
 			{Address: "192.0.2.10", Type: discoveryv1.AddressTypeIPv4},
@@ -494,7 +518,7 @@ func TestPublish_GatewayBackendIsIdempotent(t *testing.T) {
 
 func TestPublish_DisablingEndpointSlicesKeepsExternalNameTLSRouting(t *testing.T) {
 	s := pubScheme(t)
-	c := fakeclient.NewClientBuilder().WithScheme(s).Build()
+	c := newGatewayFakeClientBuilder(t, s).Build()
 	cfg := gatewayBackendConfig()
 	p := NewGatewayAPIPublisher(c, cfg, WithBackendAddressResolver(staticBackendAddressResolver{
 		"cluster-a": {{Address: "192.0.2.10", Type: discoveryv1.AddressTypeIPv4}},
@@ -560,7 +584,7 @@ func TestPublish_Idempotent(t *testing.T) {
 
 func TestPublish_HomeLeavesGCsStaleService(t *testing.T) {
 	s := pubScheme(t)
-	c := fakeclient.NewClientBuilder().WithScheme(s).Build()
+	c := newGatewayFakeClientBuilder(t, s).Build()
 	p := NewGatewayAPIPublisher(c, baseConfig())
 	isvc := testISVC()
 
@@ -583,7 +607,7 @@ func TestPublish_HomeLeavesGCsStaleService(t *testing.T) {
 
 func TestPublish_WinnerMovesClustersInSingle(t *testing.T) {
 	s := pubScheme(t)
-	c := fakeclient.NewClientBuilder().WithScheme(s).Build()
+	c := newGatewayFakeClientBuilder(t, s).Build()
 	p := NewGatewayAPIPublisher(c, baseConfig())
 	isvc := testISVC()
 
@@ -605,7 +629,7 @@ func TestPublish_WinnerMovesClustersInSingle(t *testing.T) {
 
 func TestUnpublish_DeletesRouteAndAllServices(t *testing.T) {
 	s := pubScheme(t)
-	c := fakeclient.NewClientBuilder().WithScheme(s).Build()
+	c := newGatewayFakeClientBuilder(t, s).Build()
 	p := NewGatewayAPIPublisher(c, baseConfig())
 	isvc := testISVC()
 	require.NoError(t, p.Publish(context.Background(), isvc, Target{GlobalHost: "h", Homes: []Home{
@@ -625,7 +649,7 @@ func TestUnpublish_DeletesRouteAndAllServices(t *testing.T) {
 
 func TestUnpublish_DeletesGatewayBackendResources(t *testing.T) {
 	s := pubScheme(t)
-	c := fakeclient.NewClientBuilder().WithScheme(s).Build()
+	c := newGatewayFakeClientBuilder(t, s).Build()
 	p := NewGatewayAPIPublisher(c, gatewayBackendConfig(), WithBackendAddressResolver(staticBackendAddressResolver{
 		"cluster-a": {{Address: "2001:db8::10", Type: discoveryv1.AddressTypeIPv6}},
 	}))
@@ -737,6 +761,7 @@ func TestDeleteClaimedHTTPRouteIsIdempotent(t *testing.T) {
 	isvc := testISVC()
 	p := NewGatewayAPIPublisher(nil, baseConfig())
 	route := p.buildHTTPRoute(isvc, oneHome("h", "cluster-a", "a.example"))
+	setGatewayFakeObjectIdentity(route)
 	c := fakeclient.NewClientBuilder().WithScheme(s).WithObjects(route).Build()
 	p = NewGatewayAPIPublisher(c, baseConfig())
 	routeKey := types.NamespacedName{Namespace: route.Namespace, Name: route.Name}
@@ -755,6 +780,7 @@ func TestDeleteClaimedHTTPRouteWaitsForFinalizersWithZeroWeights(t *testing.T) {
 	route := p.buildHTTPRoute(isvc, oneHome("h", "cluster-a", "a.example"))
 	route.Finalizers = []string{"example.com/hold"}
 	route.Spec.Rules[0].BackendRefs[0].Weight = nil
+	setGatewayFakeObjectIdentity(route)
 	c := fakeclient.NewClientBuilder().WithScheme(s).WithObjects(route).Build()
 	p = NewGatewayAPIPublisher(c, baseConfig())
 	routeKey := client.ObjectKeyFromObject(route)
@@ -827,6 +853,217 @@ func TestDeleteClaimedHTTPRouteFencesConcurrentReplacement(t *testing.T) {
 	assert.Equal(t, int32(9), *foreign.Spec.Rules[0].BackendRefs[0].Weight)
 }
 
+func TestDeleteObservedObjectRequiresServerIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		uid               types.UID
+		resourceVersion   string
+		expectedErrorText string
+	}{
+		{
+			name:              "missing UID",
+			resourceVersion:   "1",
+			expectedErrorText: "UID is empty",
+		},
+		{
+			name:              "missing resource version",
+			uid:               types.UID("service-uid"),
+			expectedErrorText: "resourceVersion is empty",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			deleteCalls := 0
+			c := fakeclient.NewClientBuilder().
+				WithScheme(pubScheme(t)).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Delete: func(context.Context, client.WithWatch, client.Object, ...client.DeleteOption) error {
+						deleteCalls++
+						return nil
+					},
+				}).
+				Build()
+			p := NewGatewayAPIPublisher(c, baseConfig())
+			service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{
+				Namespace:       "prod",
+				Name:            "backend",
+				UID:             tc.uid,
+				ResourceVersion: tc.resourceVersion,
+			}}
+
+			err := p.deleteObservedObject(context.Background(), service)
+			require.ErrorContains(t, err, tc.expectedErrorText)
+			assert.Zero(t, deleteCalls)
+		})
+	}
+}
+
+func TestDeleteObservedObjectTreatsNotFoundAsSuccess(t *testing.T) {
+	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{
+		Namespace:       "prod",
+		Name:            "backend",
+		UID:             types.UID("service-uid"),
+		ResourceVersion: "7",
+	}}
+	deleteCalls := 0
+	c := fakeclient.NewClientBuilder().
+		WithScheme(pubScheme(t)).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Delete: func(_ context.Context, _ client.WithWatch, object client.Object, opts ...client.DeleteOption) error {
+				deleteCalls++
+				deleteOptions := (&client.DeleteOptions{}).ApplyOptions(opts)
+				require.NotNil(t, deleteOptions.Preconditions)
+				require.Equal(t, service.UID, *deleteOptions.Preconditions.UID)
+				require.Equal(t, service.ResourceVersion, *deleteOptions.Preconditions.ResourceVersion)
+				return apierrors.NewNotFound(schema.GroupResource{Resource: "services"}, object.GetName())
+			},
+		}).
+		Build()
+	p := NewGatewayAPIPublisher(c, baseConfig())
+
+	require.NoError(t, p.deleteObservedObject(context.Background(), service))
+	assert.Equal(t, 1, deleteCalls)
+}
+
+func TestGatewayDeletionCallSitesFenceConcurrentReplacement(t *testing.T) {
+	type invokeFunc func(context.Context, *GatewayAPIPublisher, *v1beta1.InferenceService) error
+	for _, tc := range []struct {
+		name       string
+		objectKind string
+		invoke     invokeFunc
+	}{
+		{
+			name:       "legacy route cleanup",
+			objectKind: "HTTPRoute",
+			invoke: func(ctx context.Context, p *GatewayAPIPublisher, isvc *v1beta1.InferenceService) error {
+				return p.Unpublish(ctx, isvc)
+			},
+		},
+		{
+			name:       "Service cleanup",
+			objectKind: "Service",
+			invoke: func(ctx context.Context, p *GatewayAPIPublisher, isvc *v1beta1.InferenceService) error {
+				return p.deleteSourceResources(ctx, p.routeNamespace(isvc), client.ObjectKeyFromObject(isvc))
+			},
+		},
+		{
+			name:       "Service prune",
+			objectKind: "Service",
+			invoke: func(ctx context.Context, p *GatewayAPIPublisher, isvc *v1beta1.InferenceService) error {
+				return p.pruneServices(ctx, isvc, map[string]struct{}{})
+			},
+		},
+		{
+			name:       "EndpointSlice cleanup",
+			objectKind: "EndpointSlice",
+			invoke: func(ctx context.Context, p *GatewayAPIPublisher, isvc *v1beta1.InferenceService) error {
+				return p.deleteGatewayBackendResourcesForSource(ctx, p.routeNamespace(isvc), client.ObjectKeyFromObject(isvc))
+			},
+		},
+		{
+			name:       "EndpointSlice prune",
+			objectKind: "EndpointSlice",
+			invoke: func(ctx context.Context, p *GatewayAPIPublisher, isvc *v1beta1.InferenceService) error {
+				return p.pruneGatewayBackendResourcesForSource(
+					ctx, p.routeNamespace(isvc), client.ObjectKeyFromObject(isvc),
+					map[string]struct{}{}, map[string]struct{}{},
+				)
+			},
+		},
+		{
+			name:       "BackendTLSPolicy cleanup",
+			objectKind: "BackendTLSPolicy",
+			invoke: func(ctx context.Context, p *GatewayAPIPublisher, isvc *v1beta1.InferenceService) error {
+				return p.deleteGatewayBackendResourcesForSource(ctx, p.routeNamespace(isvc), client.ObjectKeyFromObject(isvc))
+			},
+		},
+		{
+			name:       "BackendTLSPolicy prune",
+			objectKind: "BackendTLSPolicy",
+			invoke: func(ctx context.Context, p *GatewayAPIPublisher, isvc *v1beta1.InferenceService) error {
+				return p.pruneGatewayBackendResourcesForSource(
+					ctx, p.routeNamespace(isvc), client.ObjectKeyFromObject(isvc),
+					map[string]struct{}{}, map[string]struct{}{},
+				)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isvc := testISVC()
+			renderer := NewGatewayAPIPublisher(nil, baseConfig())
+			labels := renderer.serviceLabels(isvc, "cluster-a")
+			var observed client.Object
+			switch tc.objectKind {
+			case "HTTPRoute":
+				observed = renderer.buildHTTPRoute(isvc, oneHome("svc.global.example", "cluster-a", "backend.example"))
+			case "Service":
+				observed = &corev1.Service{ObjectMeta: metav1.ObjectMeta{
+					Namespace: isvc.Namespace, Name: "backend", Labels: labels,
+				}}
+			case "EndpointSlice":
+				observed = &discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{
+					Namespace: isvc.Namespace, Name: "backend-ipv4", Labels: labels,
+				}}
+			case "BackendTLSPolicy":
+				observed = &gatewayapiv1.BackendTLSPolicy{ObjectMeta: metav1.ObjectMeta{
+					Namespace: isvc.Namespace, Name: "backend", Labels: labels,
+				}}
+			default:
+				t.Fatalf("unknown resource kind %q", tc.objectKind)
+			}
+			observed.SetUID(types.UID("observed-uid"))
+			observed.SetResourceVersion("1")
+			key := client.ObjectKeyFromObject(observed)
+			deleteCalls := 0
+			c := fakeclient.NewClientBuilder().
+				WithScheme(pubScheme(t)).
+				WithObjects(observed).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Delete: func(ctx context.Context, c client.WithWatch, object client.Object, opts ...client.DeleteOption) error {
+						deleteCalls++
+						deleteOptions := (&client.DeleteOptions{}).ApplyOptions(opts)
+						require.NotNil(t, deleteOptions.Preconditions)
+						require.NotNil(t, deleteOptions.Preconditions.UID)
+						require.NotNil(t, deleteOptions.Preconditions.ResourceVersion)
+						assert.Equal(t, object.GetUID(), *deleteOptions.Preconditions.UID)
+						assert.Equal(t, object.GetResourceVersion(), *deleteOptions.Preconditions.ResourceVersion)
+
+						current := object.DeepCopyObject().(client.Object)
+						require.NoError(t, c.Get(ctx, key, current))
+						require.NoError(t, c.Delete(ctx, current))
+						replacement := current.DeepCopyObject().(client.Object)
+						replacement.SetUID(types.UID("replacement-uid"))
+						replacement.SetResourceVersion("")
+						replacementLabels := map[string]string{}
+						for label, value := range replacement.GetLabels() {
+							replacementLabels[label] = value
+						}
+						replacementLabels[PlacementEndpointISVCLabel] = "other"
+						replacement.SetLabels(replacementLabels)
+						require.NoError(t, c.Create(ctx, replacement))
+						return apierrors.NewConflict(
+							schema.GroupResource{Resource: "gateway-publications"},
+							object.GetName(),
+							errors.New("delete preconditions no longer match"),
+						)
+					},
+				}).
+				Build()
+			p := NewGatewayAPIPublisher(c, baseConfig())
+
+			err := tc.invoke(context.Background(), p, isvc)
+			require.Error(t, err)
+			var statusError *apierrors.StatusError
+			require.ErrorAs(t, err, &statusError)
+			assert.True(t, apierrors.IsConflict(statusError))
+			assert.Equal(t, 1, deleteCalls)
+			live := observed.DeepCopyObject().(client.Object)
+			require.NoError(t, c.Get(context.Background(), key, live))
+			assert.Equal(t, types.UID("replacement-uid"), live.GetUID())
+			assert.Equal(t, "other", live.GetLabels()[PlacementEndpointISVCLabel])
+		})
+	}
+}
+
 func TestDeleteSourceResourcesUsesExactNamespaceAndLabels(t *testing.T) {
 	s := pubScheme(t)
 	sourceKey := types.NamespacedName{Namespace: "prod", Name: "svc"}
@@ -848,6 +1085,7 @@ func TestDeleteSourceResourcesUsesExactNamespaceAndLabels(t *testing.T) {
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: "elsewhere", Name: "owned-elsewhere", Labels: ownedLabels}},
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: "routes", Name: "unlabeled-service"}},
 	}
+	setGatewayFakeObjectIdentity(objects...)
 	c := fakeclient.NewClientBuilder().WithScheme(s).WithObjects(objects...).Build()
 	p := NewGatewayAPIPublisher(c, baseConfig())
 
@@ -903,6 +1141,7 @@ func TestGatewayCleanupUsesLiveAPIReader(t *testing.T) {
 			Namespace: routeKey.Namespace, Name: "owned-policy", Labels: labels(),
 		}},
 	}
+	setGatewayFakeObjectIdentity(objects...)
 	live := fakeclient.NewClientBuilder().WithScheme(s).WithObjects(objects...).Build()
 	stale := blindGatewayCacheClient{Client: live}
 	p := NewGatewayAPIPublisher(
@@ -995,7 +1234,7 @@ func TestPublish_RouteUpdateFailureKeepsOldBackendService(t *testing.T) {
 
 func TestPublish_SharedRouteNamespaceIsolatesSameNameSources(t *testing.T) {
 	s := pubScheme(t)
-	c := fakeclient.NewClientBuilder().WithScheme(s).Build()
+	c := newGatewayFakeClientBuilder(t, s).Build()
 	cfg := baseConfig()
 	cfg.RouteNamespace = "ome-gateways"
 	p := NewGatewayAPIPublisher(c, cfg)

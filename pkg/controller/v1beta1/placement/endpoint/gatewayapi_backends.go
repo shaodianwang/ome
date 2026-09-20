@@ -329,7 +329,7 @@ func (p *GatewayAPIPublisher) pruneGatewayBackendResourcesForSource(
 			if _, keep := desiredSlices[slices[i].Name]; keep {
 				continue
 			}
-			if err := p.client.Delete(ctx, &slices[i]); err != nil && !apierrors.IsNotFound(err) {
+			if err := p.deleteObservedObject(ctx, &slices[i]); err != nil {
 				errs = append(errs, fmt.Errorf("delete stale global backend EndpointSlice %s/%s: %w", slices[i].Namespace, slices[i].Name, err))
 			}
 		}
@@ -342,7 +342,7 @@ func (p *GatewayAPIPublisher) pruneGatewayBackendResourcesForSource(
 			if _, keep := desiredPolicies[policies[i].Name]; keep {
 				continue
 			}
-			if err := p.client.Delete(ctx, &policies[i]); err != nil && !apierrors.IsNotFound(err) {
+			if err := p.deleteObservedObject(ctx, &policies[i]); err != nil {
 				errs = append(errs, fmt.Errorf("delete stale global BackendTLSPolicy %s/%s: %w", policies[i].Namespace, policies[i].Name, err))
 			}
 		}

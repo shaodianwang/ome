@@ -567,6 +567,7 @@ func TestGatewayAPITrafficMapMigratesLegacyBackendResourcesAfterRouteSwitch(t *t
 	legacyRoute := legacy.buildHTTPRoute(owner, target)
 
 	objects := []client.Object{legacyService, legacySlices[0], legacyPolicy, legacyRoute}
+	setGatewayFakeObjectIdentity(objects...)
 	kubeClient := fakeclient.NewClientBuilder().WithScheme(pubScheme(t)).WithObjects(objects...).Build()
 	publisher := NewGatewayAPITrafficMapPublisher(
 		kubeClient,
@@ -644,7 +645,7 @@ func TestGatewayAPITrafficMapMigratesLegacyBackendResourcesAfterRouteSwitch(t *t
 
 func TestGatewayAPITrafficMapApplyPreservesEmptyAndAllZeroMaps(t *testing.T) {
 	scheme := pubScheme(t)
-	c := fakeclient.NewClientBuilder().WithScheme(scheme).Build()
+	c := newGatewayFakeClientBuilder(t, scheme).Build()
 	p := NewGatewayAPITrafficMapPublisher(c, c, baseConfig())
 	owner := testISVC()
 
@@ -682,7 +683,7 @@ func TestGatewayAPITrafficMapApplyPreservesEmptyAndAllZeroMaps(t *testing.T) {
 
 func TestGatewayAPITrafficMapApplyWithdrawsWhenHostIsRemoved(t *testing.T) {
 	scheme := pubScheme(t)
-	c := fakeclient.NewClientBuilder().WithScheme(scheme).Build()
+	c := newGatewayFakeClientBuilder(t, scheme).Build()
 	cfg := baseConfig()
 	cfg.GlobalHostTemplate = ""
 	p := NewGatewayAPITrafficMapPublisher(c, c, cfg)
@@ -712,7 +713,7 @@ func TestGatewayAPITrafficMapApplyWithdrawsWhenHostIsRemoved(t *testing.T) {
 
 func TestGatewayAPITrafficMapApplyWithdrawsWhenConfigIsDisabled(t *testing.T) {
 	scheme := pubScheme(t)
-	c := fakeclient.NewClientBuilder().WithScheme(scheme).Build()
+	c := newGatewayFakeClientBuilder(t, scheme).Build()
 	owner := testISVC()
 	trafficMap := gatewayTrafficMap(owner, gatewayTrafficMapEntry("cluster-a", "a.example", 5))
 
@@ -1003,7 +1004,7 @@ func TestGatewayAPITrafficMapDrainValidatesAllClaimsBeforeMutation(t *testing.T)
 
 func TestGatewayAPITrafficMapUnpublishUsesOnlyJournalAndSourceKey(t *testing.T) {
 	scheme := pubScheme(t)
-	c := fakeclient.NewClientBuilder().WithScheme(scheme).Build()
+	c := newGatewayFakeClientBuilder(t, scheme).Build()
 	p := NewGatewayAPITrafficMapPublisher(c, c, baseConfig())
 	owner := testISVC()
 	trafficMap := gatewayTrafficMap(owner, gatewayTrafficMapEntry("cluster-a", "a.example", 3))
@@ -1025,7 +1026,7 @@ func TestGatewayAPITrafficMapUnpublishUsesOnlyJournalAndSourceKey(t *testing.T) 
 
 func TestGatewayAPITrafficMapCleanupUsesUncachedReader(t *testing.T) {
 	scheme := pubScheme(t)
-	live := fakeclient.NewClientBuilder().WithScheme(scheme).Build()
+	live := newGatewayFakeClientBuilder(t, scheme).Build()
 	cfg := baseConfig()
 	owner := testISVC()
 	trafficMap := gatewayTrafficMap(owner, gatewayTrafficMapEntry("cluster-a", "a.example", 3))
