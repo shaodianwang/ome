@@ -1,0 +1,39 @@
+# A Failed Instance is beyond the desired set when the replica count drops.
+# Being Failed buys it nothing: the scale-down wave admits it like any other
+# extra and commits Phase Deleting with the Delete Drain operation in one
+# status transaction.
+scenario: failed-scaledown
+arrows:
+  - T-failed-scaledown
+  - T-delete-done
+cells:
+  - instance/Failed/spec.replicasDown/before
+initial:
+  spec:
+    replicas: 2
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+    - {index: 1, phase: Failed, runningRevision: current}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+    - {index: 1, node: node-1}
+timeline:
+  - tick: 1
+    note: one Instance serves and the second is parked at Failed
+  - tick: 2
+    note: the operator halves the replica count, retiring the Failed Instance
+    events:
+      - spec.replicasDown: {to: 1}
+  - tick: 3
+    note: the drain deletes the Failed Instance's pod
+  - tick: 4
+    note: the pod is gone and the row leaves the owner's status
+    events:
+      - pod.deleted[source]: {pod: {index: 1}}

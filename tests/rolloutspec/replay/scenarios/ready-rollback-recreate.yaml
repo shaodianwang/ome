@@ -1,0 +1,52 @@
+# A forward RecreatePod roll to v2 completes, and the rollout is then pinned
+# back to the stored v1 revision. The pin becomes the roll target and the
+# recreate machinery drains the Instance onto it at a bumped Incarnation,
+# while the owner keeps reporting the rendered v2 as its update revision.
+scenario: ready-rollback-recreate
+arrows:
+  - T-ready-recreate
+  - T-drain-ready
+  - T-ready-rollback-recreate
+cells:
+  - instance/Ready/spec.rollbackTarget[set]/before
+intentional: >-
+  the source is deleted only once the per-revision routed Service has
+  dropped its endpoint, which is the drain the step waits on
+initial:
+  spec:
+    replicas: 1
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start on v1
+  - tick: 2
+    note: the pod becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the pod template changes and the strategy rebuilds in place of surging
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the source leaves rotation
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the source is gone, so the rebuild may start
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 6
+    note: the rebuilt pod reports Ready and enters rotation, so the Instance is Ready on v2
+    events:
+      - pod.ready[target]: {pod: {index: 0}}
+      - endpoint.rotationIn[target]: {pod: {index: 0}}
+  - tick: 7
+    note: the roll is pinned back to the stored v1 revision, so the recreate drains the Instance onto it
+    events:
+      - spec.rollbackTarget[set]: {image: registry.example.com/runtime:v1}

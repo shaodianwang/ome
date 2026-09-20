@@ -1,0 +1,55 @@
+# A forward in-place roll to v2 completes, and the rollout is then pinned
+# back to the stored v1 revision. The pin resolves to a diff that is regular
+# container images only on a single-pod Instance, so the roll backwards runs
+# in place like the roll forwards did.
+scenario: ready-rollback-inplace
+arrows:
+  - T-ready-inplace
+  - T-inplace-ready
+  - T-ready-rollback-inplace
+cells:
+  - instance/Ready/spec.rollbackTarget[set]/before
+intentional: >-
+  the in-place patch waits for the source to leave its per-revision routed
+  Service, which is the drain the strategy performs before rewriting a
+  running pod
+initial:
+  spec:
+    replicas: 1
+    strategy: InPlaceIfPossible
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start on v1
+  - tick: 2
+    note: the pod becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: only the image changed, so the update is eligible to run in place
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the source leaves rotation and reports Ready, so the transition marker is written
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+      - pod.ready[target]: {pod: {index: 0}}
+  - tick: 5
+    note: the image patch lands while the source is out of rotation
+  - tick: 6
+    note: the kubelet has rolled the container, so the runtime reports the new image and the marker is cleared
+    events:
+      - pod.ready[target]: {pod: {index: 0}}
+  - tick: 7
+    note: the pod returns to rotation on v2 and the Instance promotes
+    events:
+      - endpoint.rotationIn[target]: {pod: {index: 0}}
+  - tick: 8
+    note: the roll is pinned back to the stored v1 revision, which is an image-only diff away from the running one
+    events:
+      - spec.rollbackTarget[set]: {image: registry.example.com/runtime:v1}

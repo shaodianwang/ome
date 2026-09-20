@@ -1,0 +1,28 @@
+# A revision is already in Backoff when the index is planned, so the first
+# pass creates nothing: the RetryBlock denies the attempt the Create pass
+# would have pinned. timer.retryAt resolves the block's own nextRetryAt, so
+# the walk states no duration the seeded block has not already fixed.
+scenario: T-empty-create-retry
+arrows:
+  - T-empty-create-retry
+cells:
+  - instance/Empty/timer.retryAt/boundary@T-empty-create-retry
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    updateRetry: {maxAttempts: 3, initialDelay: 2m, maxDelay: 10m, multiplier: 2}
+  retryBlocks:
+    - {revision: current, state: Backoff, attemptsStarted: 1, nextRetryAt: 2m, reason: ImagePullBackOff}
+timeline:
+  - tick: 1
+    note: the index is planned but the revision is in Backoff, so no row is allocated
+  - tick: 2
+    note: the block comes due and the Create pass opens the attempt it was denying
+    events:
+      - timer.retryAt: {slack: 1s}

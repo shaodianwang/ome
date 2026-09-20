@@ -1,0 +1,45 @@
+# A surge replacement wedges and the roll is disposed into Backoff rather
+# than held outright, because a retry budget is configured. When the block
+# comes due the surge re-drives the Instance at the same target.
+scenario: failed-retry-surge
+arrows:
+  - T-ready-surge
+  - T-surge-stuck
+  - T-failed-retry-surge
+cells:
+  - instance/Failed/timer.retryAt/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 3, initialDelay: 2m, maxDelay: 10m, multiplier: 2}
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement is still booting two minutes on, which is longer than the grace but proves nothing on its own
+    events:
+      - clock.advance: 2m
+  - tick: 5
+    note: the pull wedges on a replacement already older than the grace, so the escalation disposes the surge
+    events:
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 0, ordinal: 1}, message: "manifest unknown"}
+  - tick: 6
+    note: the block comes due and the surge re-drives the Instance at the same target
+    events:
+      - timer.retryAt: {slack: 1s}

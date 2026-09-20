@@ -1,0 +1,39 @@
+# A Ready Instance holding no operation wedges on the revision it is
+# supposed to be running. No other pass owns that row, so the crash-loop
+# repair opens a Restart at a bumped incarnation whatever the restart
+# policy says — the pod is wedged, not merely restarting.
+scenario: ready-crashloop-restart
+arrows:
+  - T-empty-create
+  - T-create-ready
+  - T-ready-crashloop-restart
+cells:
+  - instance/Ready/pod.waiting[CrashLoopBackOff]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: cold start opens the attempt on the Component's current revision
+  - tick: 2
+    note: the pod becomes Ready and enters rotation, so the Instance promotes
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the pod runs for two minutes, which is longer than the grace but proves nothing on its own
+    events:
+      - clock.advance: 2m
+  - tick: 4
+    note: the pod falls into a crash loop on its own revision and stops serving, so the repair opens a Restart
+    events:
+      - pod.servingOff[source]: {pod: {index: 0}}
+      - pod.waiting[CrashLoopBackOff]: {pod: {index: 0}, message: "back-off restarting failed container"}

@@ -1,0 +1,58 @@
+# An Instance that has already rolled to v2 while the Component's current
+# revision is still v1 — the ordinary mid-rollout shape — wedges on its
+# image. Its pod's revision hash disagrees with the Component's current
+# revision, so there is no revision for a repair to rebuild on and the
+# wedged-pod edge stamps Failed instead of opening a Restart.
+scenario: ready-stuck-failed
+arrows:
+  - T-empty-create
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-promote
+  - T-ready-stuck-failed
+cells:
+  - instance/Ready/pod.waiting[ImagePullBackOff]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: cold start on v1, which is the Component's current revision for the whole walk
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the template moves to v2, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement is serving and in rotation beside the source
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 5
+    note: the source leaves rotation, so the drain has converged
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 6
+    note: the drained source is gone and the Instance is Ready on v2 ahead of the Component
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 7
+    note: the rolled pod is two minutes old, longer than the grace
+    events:
+      - clock.advance: 2m
+  - tick: 8
+    note: the rolled pod wedges, and because its hash disagrees with the Component's current revision the escalation stamps Failed
+    events:
+      - pod.servingOff[target]: {pod: {index: 0, ordinal: 1}}
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 0, ordinal: 1}, message: "manifest unknown"}

@@ -1,0 +1,57 @@
+# The same off-current wedge as ready-stuck-failed, observed from the other
+# side: the waiting reason lands on a pod younger than the grace, so nothing
+# escalates until the grace itself elapses. timer.stuckPodGrace resolves the
+# deadline from the pod's creationTimestamp and the configured grace.
+scenario: ready-stuckgrace
+arrows:
+  - T-empty-create
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-promote
+  - T-ready-stuckgrace
+cells:
+  - instance/Ready/timer.stuckPodGrace/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 5m
+timeline:
+  - tick: 1
+    note: cold start on v1, which is the Component's current revision for the whole walk
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the template moves to v2, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement is serving and in rotation beside the source
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 5
+    note: the source leaves rotation, so the drain has converged
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 6
+    note: the drained source is gone and the Instance is Ready on v2 ahead of the Component
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 7
+    note: the rolled pod wedges, but it is younger than the grace, so nothing escalates
+    events:
+      - pod.servingOff[target]: {pod: {index: 0, ordinal: 1}}
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 0, ordinal: 1}, message: "manifest unknown"}
+  - tick: 8
+    note: the grace elapses and the off-current wedge is stamped Failed
+    events:
+      - timer.stuckPodGrace: {slack: 1s}

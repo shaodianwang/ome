@@ -131,6 +131,7 @@ cells:
       perm: []
       unit: [TestDetectRestartTrigger_GangMemberLossBelowReady]
       kind: []
+      replay: [failed-restart]
     status: decided
   - state: Failed
     event: pod.deleted
@@ -155,6 +156,7 @@ cells:
       perm: []
       unit: [TestAbandonFailedGangSurge_ResetsSourceAfterPodsGone, TestAbandonFailedGangSurge_AtomicallyRemovesMarkerAndResetsSource, TestAbandonFailedGangSurge_RecordsRetryBlockWithPolicy]
       kind: []
+      replay: [failed-gang-surge-reset, failed-recycle-resurge]
     status: decided
   - state: Failed
     event: pod.deleted
@@ -260,6 +262,7 @@ cells:
       perm: []
       unit: [TestDetectUpdateTrigger_PhaseFailedRetriggersOnMismatch, TestDetectUpdate_NewRevisionPassesGate, TestDetectUpdate_FailedContinuationPassesGate, TestPatchInstanceStatusSurgingForUpdate_FailedStickyOnSameTarget, TestPlan_Update_CleanupOnly_RollBackWreckage, TestCorrectiveRecovery_SinglePod_RollForward, TestCorrectiveRecovery_Gang_RollForward, TestCorrectiveRecovery_SinglePod_RollBack]
       kind: []
+      replay: [failed-corrective-create, failed-corrective-inplace, failed-corrective-recreate, failed-corrective-surge]
     status: decided
   - state: Failed
     event: spec.revision
@@ -305,6 +308,7 @@ cells:
       perm: []
       unit: [TestPlan_ScaleDown_SelectsExtras, TestPlan_FullPrecedenceOrder]
       kind: []
+      replay: [failed-scaledown]
     status: current
   - state: Failed
     event: spec.replicasDown
@@ -356,6 +360,7 @@ cells:
       perm: []
       unit: [TestReconcile_Teardown_IgnoresPaused]
       kind: []
+      replay: [failed-teardown]
     status: current
   - state: Failed
     event: spec.teardown
@@ -491,7 +496,7 @@ cells:
     coverage:
       perm: []
       unit: [TestDetectUpdate_RetryBlockDue_AllowsWithoutFlip, TestDetectUpdate_RetryBlockDueBoundaryExact, TestCreate_RetryBlockBackoffDue_AllowsAndFlips, TestPatchSurgingForUpdate_FlipsBackoffOnAttemptStart]
-      replay: [T-failed-retry]
+      replay: [T-failed-retry, failed-retry-inplace, failed-retry-recreate, failed-retry-surge]
       kind: []
     status: current
   - state: Failed
@@ -611,6 +616,7 @@ cells:
       perm: []
       unit: [TestCreate_FreshStartRecyclesTerminalPodOnFailedRow, TestDetectRestartTrigger_RichReasonForFailedPod]
       kind: []
+      replay: [failed-recycle-rebuild]
     status: decided
   - state: Failed
     event: pod.phaseTerminal

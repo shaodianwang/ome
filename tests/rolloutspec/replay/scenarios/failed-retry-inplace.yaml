@@ -1,0 +1,48 @@
+# An in-place patch wedges on the new image and the roll is disposed into
+# Backoff rather than held outright, because a retry budget is configured.
+# When the block comes due the roll re-drives in place at the same target.
+scenario: failed-retry-inplace
+arrows:
+  - T-ready-inplace
+  - T-inplace-stuck
+  - T-failed-retry-inplace
+cells:
+  - instance/Failed/timer.retryAt/before
+initial:
+  spec:
+    replicas: 1
+    strategy: InPlaceIfPossible
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 3, initialDelay: 2m, maxDelay: 10m, multiplier: 2}
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: only the image changed, so the update is eligible to run in place
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the pod leaves rotation and two minutes pass, which is longer than the grace
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+      - clock.advance: 2m
+  - tick: 5
+    note: the new image cannot be pulled, and the same pass issues the image patch and restamps the revision label
+    events:
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 0}, message: "manifest unknown"}
+  - tick: 6
+    note: the wedged pod now carries the target revision, so the escalation charges that revision and disposes the roll
+  - tick: 7
+    note: the block comes due and the roll re-drives in place at the same target
+    events:
+      - timer.retryAt: {slack: 1s}

@@ -1,0 +1,35 @@
+# The same widening as T-ready-gangwidth-restart, under a restart policy
+# that does not claim the row: with the restart detector out of the way the
+# Create pass owns the shortfall, so only the missing ordinal is created and
+# the Incarnation and RunningRevision are untouched.
+scenario: T-ready-gangwidth-create
+arrows:
+  - T-empty-create
+  - T-create-ready
+  - T-ready-gangwidth-create
+cells:
+  - instance/Ready/spec.gangWidth[grow]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    restartPolicy: None
+    topologyKey: topology.example.com/fabric-domain
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass materializes the whole gang at once
+  - tick: 2
+    note: both members report Ready, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+  - tick: 3
+    note: the gang is widened by one worker at an unchanged revision, and the Create pass stamps Creating over the Ready row for the missing ordinal alone
+    events:
+      - spec.gangWidth[grow]: {to: 2}

@@ -161,7 +161,7 @@ cells:
     guard: the reason is in the terminal waiting set, the pod has held it past StuckPodGrace, and the pod set is not fully serving
     note: the fast escalation stamps Phase Failed with the waiting reason and the pod's termination detail on LastFailure and preserves the operation, since a Restart attempt is never disposed (workload/escalation.go, status_aggregate.go)
     placement: perm
-    coverage: {perm: [], unit: [TestRestart_CapturesLastFailureBeforeDrain], kind: []}
+    coverage: {perm: [], unit: [TestRestart_CapturesLastFailureBeforeDrain], kind: [], replay: [restart-stuck]}
     status: decided
   - state: Restart/Drain
     event: pod.waiting
@@ -264,7 +264,7 @@ cells:
     guard: the index falls beyond the desired set and the scale-down wave admits it within its pod budget
     note: scale-down is selected ahead of the restart pass and the delete admission stamps Deleting with a Delete Drain operation over the restart's
     placement: perm
-    coverage: {perm: [], unit: [TestPlan_ScaleDownPrecedesRestart], kind: []}
+    coverage: {perm: [], unit: [TestPlan_ScaleDownPrecedesRestart], kind: [], replay: [restart-scaledown]}
     status: current
   - state: Restart/Drain
     event: spec.replicasDown
@@ -303,7 +303,7 @@ cells:
     guard: the owner carries a deletionTimestamp so every observed index is treated as a scale-down extra
     note: the teardown branch runs the scale-down pipeline alone — no pause gate, no repair, no escalation (workload/reconcile.go)
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [restart-teardown]}
     status: current
   - state: Restart/Drain
     event: spec.teardown
@@ -337,7 +337,7 @@ cells:
     guard: the deadline elapsed, no pod of the Instance is held by an admission scheduling gate, and the pod set is not fully serving
     note: a Restart attempt is not disposable, so the stamp keeps the operation and records on LastFailure the blamed pod's workload-caused waiting reason when one exists, falling back to the bare DeadlineExceeded diagnostic when none does, because the teardown that follows deletes the blamed pods. Two readiness limbos are named rather than left bare — a pod that ran every container without ever reporting ContainersReady is recorded under reason ContainersNotReady, and a pod whose containers all report ready but whose Ready condition never follows a readiness gate it declares is recorded under reason ReadinessGateNotSatisfied with the unsatisfied gates. Both are evidence only and select no branch, since either limbo is ambiguous between the revision and the node. The preserved operation does not park the row for good, because a Restart parked at Failed is read as a spent attempt, so the gang-member-loss trigger may re-arm the whole gang under a fresh deadline, while the single-pod path still recovers through the Create pass
     placement: perm
-    coverage: {perm: [], unit: [TestEscalation_RestartDeadlineElapsed_FailsInstance], kind: []}
+    coverage: {perm: [], unit: [TestEscalation_RestartDeadlineElapsed_FailsInstance], kind: [], replay: [restart-deadline]}
     status: decided
   - state: Restart/Drain
     event: timer.operationDeadline
@@ -441,7 +441,7 @@ cells:
     guard: the dead pod carries the bumped incarnation and holds one of the rebuild's target names, the attempt's deadline has not elapsed, and its outstanding expectations are satisfied; a terminal pod at the old incarnation is drained and deleted by Phase A like any other
     note: query.ExcludeTerminalPods makes the dead pod absent for Phase B's name diff and for the survivor count, so the recycle deletes it - expectation recorded before the delete, diagnostics captured onto LastFailure, TerminalPodRecycled warning - and returns before the recreate; the name is rebuilt on a later pass, paced inside the attempt by the same-target retry ladder (ops/terminal_recycle.go)
     placement: unit
-    coverage: {perm: [], unit: [TestRestart_RecyclesSucceededNewIncarnationPod, TestRestart_RecyclesTerminalNewIncarnationPod, TestRestart_TerminalNewIncarnationPodIsNotPromoted], kind: []}
+    coverage: {perm: [], unit: [TestRestart_RecyclesSucceededNewIncarnationPod, TestRestart_RecyclesTerminalNewIncarnationPod, TestRestart_TerminalNewIncarnationPodIsNotPromoted], kind: [], replay: [restart-recycle-terminal]}
     status: decided
   - state: Restart/Drain
     event: pod.phaseTerminal
@@ -756,7 +756,7 @@ cells:
     guard: a recreated pod has held a terminal waiting reason since its creation past the configured grace and the pod set is not fully serving
     note: the fast path fails the Instance without waiting out the operation deadline, recording the waiting reason and the pod's termination detail on LastFailure and preserving the operation, since a Restart attempt is never disposed (workload/escalation.go)
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [restart-stuckgrace]}
     status: current
   - state: Restart/Drain
     event: timer.stuckPodGrace

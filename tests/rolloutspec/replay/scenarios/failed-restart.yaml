@@ -1,0 +1,33 @@
+# A Failed gang loses one of its two members. A Restart parked at Failed is a
+# spent attempt rather than an owner, so with a survivor still holding
+# capacity the gang re-arms as a whole at a bumped incarnation instead of
+# being left short.
+scenario: failed-restart
+arrows:
+  - T-failed-restart
+cells:
+  - instance/Failed/pod.deleted[source]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    restartPolicy: RecreateInstanceOnPodRestart
+    topologyKey: topology.example.com/fabric-domain
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Failed, runningRevision: current}
+  pods:
+    - {index: 0, runner: leader, node: node-0}
+    - {index: 0, runner: worker, node: node-0}
+timeline:
+  - tick: 1
+    note: the gang is parked at Failed with both members present
+  - tick: 2
+    note: the worker is lost, leaving one survivor below the desired count, so the gang re-arms as a whole
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}

@@ -1,0 +1,55 @@
+# A replacement gang never becomes Ready and both halves of the pair are
+# stamped Failed. The operator then rolls the template back to the revision
+# the source is already running, which is zero revision distance: the update
+# machinery is unreachable, so the wreckage pass abandons the failed surge
+# instead. Once the replacement's members are gone the source is reset Ready
+# on its running revision.
+scenario: failed-gang-surge-reset
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-deadline
+  - T-failed-gang-surge-reset
+cells:
+  - instance/Failed/pod.deleted[target]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    updateRetry: {maxAttempts: 3, initialDelay: 2m, maxDelay: 10m, multiplier: 2}
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the replacement is still not Ready when the deadline elapses, so both halves of the pair are stamped Failed with their operations preserved
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 6
+    note: the template is rolled back to the revision the source already runs, so the wreckage pass abandons the failed surge and deletes its members
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v1}
+  - tick: 7
+    note: the retired replacement's members are gone, so the marker row is removed and the source is reset Ready on its running revision
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}

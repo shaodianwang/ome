@@ -1,0 +1,32 @@
+# The owner is deleted while the Instance is still being created. Teardown
+# reads the planned index set as empty, so the half-built Instance becomes a
+# scale-down extra and its Create operation is replaced by a Delete Drain in
+# one status transaction.
+scenario: create-teardown
+arrows:
+  - T-empty-create
+  - T-create-teardown
+  - T-delete-done
+cells:
+  - instance/Create/CreatePods/spec.teardown[deleted]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+timeline:
+  - tick: 1
+    note: cold start opens a Create attempt on the planned index
+  - tick: 2
+    note: the owner is deleted before the attempt finished, so the mid-create row is drained
+    events:
+      - spec.teardown[deleted]: {}
+  - tick: 3
+    note: the half-built pod is gone and the row leaves the owner's status
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}

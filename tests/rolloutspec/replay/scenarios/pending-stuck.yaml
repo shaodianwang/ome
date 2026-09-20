@@ -1,0 +1,34 @@
+# A leftover pod carrying a revision hash the Component no longer targets
+# wedges on its image while the row is still forming. With no operation in
+# flight there is no attempt to dispose, so the escalation writes the plain
+# Failed stamp and records the pod's termination on LastFailure.
+scenario: pending-stuck
+arrows:
+  - T-pending-stuck-failed
+cells:
+  - instance/Pending/pod.waiting[ImagePullBackOff]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v2
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+  rows:
+    - {index: 0, phase: Pending, runningRevision: current}
+  pods:
+    - {index: 0, node: node-0, previousImage: registry.example.com/runtime:v1}
+timeline:
+  - tick: 1
+    note: the row is forming on a pod the Component's current revision no longer claims
+  - tick: 2
+    note: the leftover pod is two minutes old, longer than the grace, but that proves nothing on its own
+    events:
+      - clock.advance: 2m
+  - tick: 3
+    note: the pull wedges on a pod already older than the grace, so the escalation stamps Failed on the pass that reads the reason
+    events:
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 0}, message: "manifest unknown"}

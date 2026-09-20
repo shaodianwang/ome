@@ -1,0 +1,10 @@
+tick=1 note the row is forming on a pod the Component's current revision no longer claims
+tick=1 pass result=after:5s
+tick=2 note the leftover pod is two minutes old, longer than the grace, but that proves nothing on its own
+tick=2 apply clock.advance by=2m0s now=t+2m0s
+tick=2 pass result=after:5s
+tick=3 note the pull wedges on a pod already older than the grace, so the escalation stamps Failed on the pass that reads the reason
+tick=3 apply pod.waiting[ImagePullBackOff] pod=svc-a-engine-0-default-0 reason=ImagePullBackOff now=t+2m0s
+tick=3 row=0 write incarnation=1 phase=Failed runningRevision=svc-a-engine-6f8b1e6c readySince=nil op=nil lastFailure={pod=svc-a-engine-0-default-0 reason=ImagePullBackOff container=main message=manifest unknown} precondition=ok
+tick=3 warn instanceFailed index=0 pod=svc-a-engine-0-default-0 reason=ImagePullBackOff
+tick=3 pass result=after:5s

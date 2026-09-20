@@ -435,6 +435,24 @@ Effects the driver does not record:
   pod classifies as `foreign-finalizers` and the sweep declines it before
   it ever reads a Node.
 
+- The gang-member-loss rebuild of a row below Ready. Outside
+  `Phase=Failed` the trigger reads the row's recorded `PodCount` before
+  it compares live pods against the expectation, and `PodCount` is the
+  same publication-path counter the migration tail needs, so the two
+  Pending restart arrows cannot be reached. The same trigger from a
+  Failed row skips that check and is driven (`failed-restart`).
+
+- The operator reset mailbox. `spec.resetInstances` is decided in the IR
+  adapter, outside `workload.Reconcile`, and has no applier, so the reset
+  arrow out of Failed is out of the replay lane.
+
+- The `AdoptRevision` backfill. Its spec-match test compares a live pod's
+  `PodSpec` against the unrendered desired template, while the renderer
+  adds `Hostname`, `Subdomain` and the serving readiness gate to every
+  pod it writes — so no pod the engine produced can match, and the
+  trigger takes the ordinary roll instead. `failed-runtime-ready-resurge`
+  records what the engine does on that route.
+
 Reads, which are never traced at all: EndpointSlices, Services,
 ControllerRevisions, and Nodes. No Node objects exist in the fake
 cluster, so a pod whose node the sweep did reach would classify as

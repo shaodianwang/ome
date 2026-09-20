@@ -306,7 +306,7 @@ cells:
     guard: the owner carries a deletionTimestamp, so the planned index set is treated as empty and every observed index becomes a scale-down extra
     note: teardown bypasses the pause gate and every op pass including escalation; the mid-create row is drained by the scale-down pipeline like any other, and its pods are deleted rather than allowed to finish coming up
     placement: unit
-    coverage: {perm: [], unit: [TestReconcile_Teardown_DeletesEveryObservedInstance, TestReconcile_Teardown_IgnoresPaused], kind: []}
+    coverage: {perm: [], unit: [TestReconcile_Teardown_DeletesEveryObservedInstance, TestReconcile_Teardown_IgnoresPaused], kind: [], replay: [create-teardown]}
     status: current
 
   - state: Create/CreatePods

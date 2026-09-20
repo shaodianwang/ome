@@ -1,0 +1,34 @@
+# The owner is deleted while an Instance is parked at Failed. Teardown reads
+# the planned index set as empty, so the Failed row is a scale-down extra and
+# is committed to Phase Deleting with the Delete Drain operation.
+scenario: failed-teardown
+arrows:
+  - T-failed-teardown
+  - T-delete-done
+cells:
+  - instance/Failed/spec.teardown[deleted]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+  rows:
+    - {index: 0, phase: Failed, runningRevision: current}
+  pods:
+    - {index: 0, node: node-0}
+timeline:
+  - tick: 1
+    note: the Instance is parked at Failed with its pod still present
+  - tick: 2
+    note: the owner is deleted, so the Failed Instance is drained like any other
+    events:
+      - spec.teardown[deleted]: {}
+  - tick: 3
+    note: the pod is gone and the row leaves the owner's status
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}

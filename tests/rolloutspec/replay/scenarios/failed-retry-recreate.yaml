@@ -1,0 +1,53 @@
+# A RecreatePod rebuild wedges and the roll is disposed into Backoff rather
+# than held outright, because a retry budget is configured. When the block
+# comes due the recreate re-drives the Instance at the same target.
+scenario: failed-retry-recreate
+arrows:
+  - T-ready-recreate
+  - T-drain-stuck
+  - T-failed-retry-recreate
+cells:
+  - instance/Failed/timer.retryAt/before
+initial:
+  spec:
+    replicas: 1
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 3, initialDelay: 2m, maxDelay: 10m, multiplier: 2}
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the pod template changes and the strategy rebuilds in place of surging
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the pod leaves rotation, so the rebuild may start
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the old pod is gone and Phase B rebuilds it at the bumped incarnation
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 6
+    note: the rebuilt pod is still booting two minutes on, which is longer than the grace
+    events:
+      - clock.advance: 2m
+  - tick: 7
+    note: the rebuilt pod wedges on the target image and the roll is disposed
+    events:
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 0}, message: "manifest unknown"}
+  - tick: 8
+    note: the block comes due and the recreate re-drives the Instance at the same target
+    events:
+      - timer.retryAt: {slack: 1s}

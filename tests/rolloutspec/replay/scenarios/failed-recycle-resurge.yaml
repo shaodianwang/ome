@@ -1,0 +1,48 @@
+# A single-pod surge replacement fails with CreateContainerError, which the
+# disposition reads as a node problem rather than a bad revision: it records
+# no RetryBlock against the target. Once the dead replacement is recycled the
+# surge slot is empty, so the ordinary surge path stamps a fresh attempt at
+# the same target. The relocation half of the arrow is not in the trace: the
+# fake cluster carries no Node objects, so the disposition reports relocation
+# unavailable and excludes nothing.
+scenario: failed-recycle-resurge
+arrows:
+  - T-ready-surge
+  - T-failed-recycle-resurge
+cells:
+  - instance/Failed/pod.deleted[target]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement lands on a node and sits there two minutes, longer than the grace
+    events:
+      - pod.scheduled[target]: {pod: {index: 0, ordinal: 1}}
+      - clock.advance: 2m
+  - tick: 5
+    note: the replacement cannot have its container created, which the disposition blames on the node rather than the revision
+    events:
+      - pod.waiting[CreateContainerError]: {pod: {index: 0, ordinal: 1}, message: "failed to create containerd task"}
+  - tick: 6
+    note: the dead replacement is recycled, leaving the surge slot empty
+    events:
+      - pod.deleted[target]: {pod: {index: 0, ordinal: 1}}

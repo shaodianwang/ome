@@ -1,0 +1,32 @@
+# A Failed row holding no operation has its last pod die in a terminal phase.
+# The missing-pod diff reads the dead occupant's name as free, so the recycle
+# deletes it and the Create pass claims the row as a fresh start.
+scenario: failed-recycle-rebuild
+arrows:
+  - T-failed-recycle-rebuild
+cells:
+  - instance/Failed/pod.phaseTerminal[Failed]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Failed, runningRevision: current}
+  pods:
+    - {index: 0, node: node-0}
+timeline:
+  - tick: 1
+    note: the Instance is parked at Failed with its pod still present
+  - tick: 2
+    note: the surviving pod dies in a terminal phase, so the dead occupant is recycled
+    events:
+      - pod.phaseTerminal[Failed]: {pod: {index: 0}}
+  - tick: 3
+    note: the recycle delete is observed, freeing the target name
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}

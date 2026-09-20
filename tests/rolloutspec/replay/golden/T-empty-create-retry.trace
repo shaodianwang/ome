@@ -1,0 +1,9 @@
+tick=1 note the index is planned but the revision is in Backoff, so no row is allocated
+tick=1 pass result=after:2m0s
+tick=2 note the block comes due and the Create pass opens the attempt it was denying
+tick=2 apply timer.retryAt to=t+2m1s now=t+2m1s
+tick=2 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+2m1s lastProgressAt=t+2m1s deadline=t+32m1s} precondition=ok
+tick=2 retryblock target=svc-a-engine-882059bb persist {state=Backoff attempts=1 nextRetryAt=t+2m0s reason=ImagePullBackOff}→{state=RetryInProgress attempts=1 nextRetryAt=t+2m0s reason=ImagePullBackOff}
+tick=2 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 1 pod(s) requested
+tick=2 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=1 ordinal=0
+tick=2 pass result=after:5s
