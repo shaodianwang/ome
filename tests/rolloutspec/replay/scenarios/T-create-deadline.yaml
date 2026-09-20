@@ -1,0 +1,28 @@
+# The attempt never becomes Ready and its own deadline elapses. The
+# escalation pass is what ends it, so the row lands in Failed with the
+# operation preserved as the terminal record.
+scenario: T-create-deadline
+arrows:
+  - T-create-deadline
+cells:
+  - instance/Create/CreatePods/timer.operationDeadline/boundary@T-create-deadline
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 2m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the Create pass opens the attempt and materializes the pod
+  - tick: 2
+    note: the pod is running but has not become Ready
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the operation deadline elapses with the pod still not Ready
+    events:
+      - timer.operationDeadline: {slack: 1s}

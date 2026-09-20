@@ -1,0 +1,40 @@
+tick=1 note cold start
+tick=1 row=0 write created incarnation=1 phase=Creating op=op#1{type=Create step=CreatePods target=rev#1 started=t+0s deadline=t+30m0s} precondition=ok
+tick=1 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 1 pod(s) requested
+tick=1 pod create name=svc-a-engine-0-default-0 revision=rev#1 incarnation=1 ordinal=0
+tick=1 pass result=after:5s
+tick=2 note the pod becomes Ready and enters rotation
+tick=2 apply pod.ready[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 apply endpoint.rotationIn[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 pod status-patch name=svc-a-engine-0-default-0 serving=absent→True
+tick=2 row=0 write phase=Creating→Ready runningRevision=nil→rev#1 readySince=nil→t+0s op=op#1→nil precondition=ok
+tick=2 event Normal InstanceReady OMENative component=engine instance=0 is Ready (1 pod(s) serving)
+tick=2 pass result=none
+tick=3 note the pod template changes and the strategy rebuilds in place of surging
+tick=3 apply spec.revision image=registry.example.com/runtime:v2 generation=1 now=t+0s
+tick=3 gate consult strategy=RecreatePod surge=0 unavail=0 verdict=allow
+tick=3 row=0 write incarnation=1→2 phase=Ready→Updating targetRevision=nil→rev#2 op=nil→op#2{type=Update step=Drain target=rev#2 reason=revision rev#1 -> rev#2 strategy=RecreatePod started=t+0s deadline=t+30m0s} precondition=ok
+tick=3 event Normal RecreateUpdateStarted OMENative component=engine instance=0 recreate (revision rev#1 -> rev#2, incarnation=2)
+tick=3 pod status-patch name=svc-a-engine-0-default-0 serving=True→False
+tick=3 pod delete name=svc-a-engine-0-default-0 grace=default
+tick=3 hold cleared
+tick=3 pass result=after:5s
+tick=4 note the source leaves rotation
+tick=4 apply endpoint.rotationOut[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=4 row=0 write no-op precondition=no-change
+tick=4 hold cleared
+tick=4 pass result=after:5s
+tick=5 note the source is gone, so the rebuild may start
+tick=5 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=5 row=0 write no-op precondition=no-change
+tick=5 pod create name=svc-a-engine-0-default-0 revision=rev#2 incarnation=2 ordinal=0
+tick=5 hold cleared
+tick=5 pass result=after:5s
+tick=6 note the rebuilt pod reports Ready
+tick=6 apply pod.ready[target] pod=svc-a-engine-0-default-0 now=t+0s
+tick=6 row=0 write no-op precondition=no-change
+tick=6 pod status-patch name=svc-a-engine-0-default-0 serving=absent→True
+tick=6 row=0 write phase=Updating→Ready runningRevision=rev#1→rev#2 targetRevision=rev#2→nil op=op#2→nil precondition=ok
+tick=6 event Normal RecreateUpdateCompleted OMENative component=engine instance=0 recreate to revision rev#2 complete
+tick=6 hold cleared
+tick=6 pass result=requeue

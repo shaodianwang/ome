@@ -1,0 +1,27 @@
+# A ResourceQuota refuses the attempt's pod. The workload is correct and
+# waiting on capacity someone else controls, so the refusal parks the
+# operation's deadline instead of spending it: the clock runs well past the
+# readiness ceiling and the row stays in flight.
+scenario: quota-hold-parks-deadline
+cells:
+  - instance/Create/CreatePods/api.quotaDenied/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 2m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: every pod create of this pass is refused for lack of quota
+    events:
+      - api.quotaDenied: {verb: create, resource: pods, count: 2}
+  - tick: 2
+    note: the hold still stands after the readiness ceiling would have elapsed
+    events:
+      - clock.advance: 5m
+  - tick: 3
+    note: quota frees up and the same attempt materializes its pod

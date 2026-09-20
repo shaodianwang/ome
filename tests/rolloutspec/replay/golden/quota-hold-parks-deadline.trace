@@ -1,0 +1,21 @@
+tick=1 note every pod create of this pass is refused for lack of quota
+tick=1 apply api.quotaDenied verb=create resource=pods count=2 now=t+0s
+tick=1 row=0 write created incarnation=1 phase=Creating op=op#1{type=Create step=CreatePods target=rev#1 started=t+0s deadline=t+2m0s} precondition=ok
+tick=1 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 1 pod(s) requested
+tick=1 pod create-rejected name=svc-a-engine-0-default-0 rejection=api.quotaDenied
+tick=1 row=0 write op#1.waiting=nil→QuotaExceeded precondition=ok
+tick=1 event Normal InstanceQuotaBlocked OMENative component=engine instance=0 waiting on capacity: pods "svc-a" is forbidden: exceeded quota: compute-resources, requested: pods=1, used: pods=4, limited: pods=4
+tick=1 pass result=after:5s
+tick=1 row=0 write op#1.deadline=t+2m0s→nil precondition=ok
+tick=2 note the hold still stands after the readiness ceiling would have elapsed
+tick=2 apply clock.advance by=5m0s now=t+5m0s
+tick=2 row=0 write no-op precondition=no-change
+tick=2 pod create-rejected name=svc-a-engine-0-default-0 rejection=api.quotaDenied
+tick=2 row=0 write no-op precondition=no-change
+tick=2 pass result=after:5s
+tick=3 note quota frees up and the same attempt materializes its pod
+tick=3 row=0 write no-op precondition=no-change
+tick=3 pod create name=svc-a-engine-0-default-0 revision=rev#1 incarnation=1 ordinal=0
+tick=3 row=0 write op#1.waiting=QuotaExceeded→nil precondition=ok
+tick=3 pass result=after:5s
+tick=3 row=0 write op#1.deadline=nil→t+7m0s precondition=ok

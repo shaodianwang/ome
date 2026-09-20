@@ -1,0 +1,42 @@
+# RecreatePod takes the Instance offline to roll it: the source drains and
+# is deleted, then the replacement is created at a bumped Incarnation.
+scenario: T-ready-recreate
+arrows:
+  - T-ready-recreate
+  - T-drain-ready
+cells:
+  - instance/Ready/spec.revision/boundary@T-ready-recreate
+  - instance/Update/Drain/pod.deleted[source]/boundary@T-drain-ready
+initial:
+  spec:
+    replicas: 1
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the pod template changes and the strategy rebuilds in place of surging
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the source leaves rotation
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the source is gone, so the rebuild may start
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 6
+    note: the rebuilt pod reports Ready
+    events:
+      - pod.ready[target]: {pod: {index: 0}}

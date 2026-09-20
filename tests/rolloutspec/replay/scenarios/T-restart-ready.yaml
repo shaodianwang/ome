@@ -1,0 +1,41 @@
+# A post-Ready pod failure under RecreateInstanceOnPodRestart: the repair
+# drains and rebuilds the Instance, and the row returns to Ready on the
+# same revision once the rebuilt pod reports Ready.
+scenario: T-restart-ready
+arrows:
+  - T-ready-restart-podterminal
+  - T-restart-ready
+cells:
+  - instance/Ready/pod.phaseTerminal[Failed]/boundary@T-ready-restart-podterminal
+  - instance/Restart/Drain/pod.ready[target]/boundary@T-restart-ready
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the pod dies after the Instance was already Ready
+    events:
+      - pod.phaseTerminal[Failed]: {pod: {index: 0}}
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 4
+    note: the failed pod is gone
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the rebuilt pod reports Ready
+    events:
+      - pod.ready[target]: {pod: {index: 0}}

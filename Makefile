@@ -833,15 +833,18 @@ integration-test: fmt vet manifests envtest dep-crds xet-build test-kindutil-uni
 	@# which registers Gomega's fail handler with ginkgo.RunSpecs.
 	@#
 	@# Excluded packages:
-	@#   - tests/integration/kindutil/*, tests/perf/* AND tests/rolloutspec —
-	@#     plain testing.T packages, NOT Ginkgo suites (they do not import
-	@#     ginkgo, so its flags are unregistered). -ginkgo.trace below would
-	@#     error with `flag provided but not defined: -ginkgo.trace` and fail
-	@#     the binary before any test runs. The Docker-free kindutil tests run
-	@#     via test-kindutil-unit; tests/perf/* runs in its own CI step via the
-	@#     `test-perf` target (the scale harness + rangespec check);
-	@#     tests/rolloutspec (the rollout state-machine build gate) runs in
-	@#     the unit lane via ROLLOUTSPEC_PACKAGES.
+	@#   - tests/integration/kindutil/*, tests/perf/* AND tests/rolloutspec
+	@#     with its subpackages — plain testing.T packages, NOT Ginkgo suites
+	@#     (they do not import ginkgo, so its flags are unregistered).
+	@#     -ginkgo.trace below would error with `flag provided but not
+	@#     defined: -ginkgo.trace` and fail the binary before any test runs.
+	@#     The Docker-free kindutil tests run via test-kindutil-unit;
+	@#     tests/perf/* runs in its own CI step via the `test-perf` target
+	@#     (the scale harness + rangespec check); tests/rolloutspec and
+	@#     everything under it — the rollout state-machine build gate and the
+	@#     replay behavior lock — run in the unit lane via
+	@#     ROLLOUTSPEC_PACKAGES, which is `./tests/rolloutspec/...`, so the
+	@#     exclusion has to cover the subtree and not just the root package.
 	@#   - tests/integration/.../*_kind  — KIND-backed suites (real
 	@#     kubelet via Docker): omenative_coordination_kind, irmanaged_kind,
 	@#     rawdeployment_kind, omenative_perm_kind. Run locally via the
@@ -862,7 +865,7 @@ integration-test: fmt vet manifests envtest dep-crds xet-build test-kindutil-uni
 	@# Timeout: go test defaults to 10m PER PACKAGE. 20m gives headroom
 	@# without masking a genuine deadlock — any real loop bug would
 	@# still hang past 20m.
-	@PKGS=$$(go list ./tests/... | grep -v -E '/kindutil($$|/)|_kind$$|/tests/perf/|/tests/rolloutspec$$|/integration/multicluster$$') ; \
+	@PKGS=$$(go list ./tests/... | grep -v -E '/kindutil($$|/)|_kind$$|/tests/perf/|/tests/rolloutspec($$|/)|/integration/multicluster$$') ; \
 		$(TEST_ENV) go test -v -timeout=20m $$PKGS $(if $(GINKGO_VERBOSE),-ginkgo.v) -ginkgo.trace
 	@# The multicluster suite owns three envtest control planes. Run it after the
 	@# package-parallel suites so periodic cross-apiserver assertions get a

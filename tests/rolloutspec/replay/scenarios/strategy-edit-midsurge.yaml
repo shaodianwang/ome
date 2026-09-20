@@ -1,0 +1,51 @@
+# The operator switches the update strategy while a SurgeThenDrain
+# replacement is already in flight. The attempt keeps the mechanism it
+# opened under — the edit reaches the Instance at its next admitted
+# attempt — so the surge finishes as a surge and nothing recreates the
+# source under the new strategy.
+scenario: strategy-edit-midsurge
+arrows:
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-promote
+cells:
+  - instance/Update/Surge/spec.strategy/before
+  - instance/Update/SurgeDrain/spec.strategy/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the strategy is switched to RecreatePod while the surge is in flight
+    events:
+      - spec.strategy: {strategy: RecreatePod}
+  - tick: 5
+    note: the replacement is serving and in rotation beside the source
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 6
+    note: the source leaves rotation, so the drain has converged
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 7
+    note: the drained source is gone and the surge promotes
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}

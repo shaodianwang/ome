@@ -1,0 +1,41 @@
+# A deliberate replica reduction. The extra Instance is admitted into a
+# Delete operation before any pod effect, drains, and its row leaves the
+# owner's status only once its pod is authoritatively gone.
+scenario: T-ready-scaledown
+arrows:
+  - T-ready-scaledown
+  - T-delete-done
+cells:
+  - instance/Ready/spec.replicasDown/boundary@T-ready-scaledown
+  - instance/Delete/Drain/pod.deleted[source]/boundary@T-delete-done
+initial:
+  spec:
+    replicas: 2
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+    - {index: 1, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+    - {index: 1, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: the operator halves the replica count
+    events:
+      - spec.replicasDown: {to: 1}
+  - tick: 2
+    note: the retired Instance leaves rotation
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 1}}
+  - tick: 3
+    note: its pod is gone
+    events:
+      - pod.deleted[source]: {pod: {index: 1}}
+  - tick: 4
+    note: the wave completes and the row is removed

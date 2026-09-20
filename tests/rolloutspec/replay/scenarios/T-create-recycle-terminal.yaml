@@ -1,0 +1,29 @@
+# A pod of the attempt dies in a terminal phase while the create is still
+# in flight. The attempt is intact: the dead occupant of the target name is
+# deleted and recreated, rather than the Instance failing.
+scenario: T-create-recycle-terminal
+arrows:
+  - T-create-recycle-terminal
+cells:
+  - instance/Create/CreatePods/pod.phaseTerminal[Failed]/boundary@T-create-recycle-terminal
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    updateRetry: {maxAttempts: 3, initialDelay: 10s, maxDelay: 2m, multiplier: 2}
+timeline:
+  - tick: 1
+    note: the Create pass opens the attempt and materializes the pod
+  - tick: 2
+    note: the pod lands in a terminal phase before it ever became Ready
+    events:
+      - pod.phaseTerminal[Failed]: {pod: {index: 0}}
+  - tick: 3
+    note: the recycle delete is observed, freeing the target name
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
