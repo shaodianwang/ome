@@ -13,6 +13,8 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -28,6 +30,8 @@ import (
 	placementendpoint "github.com/ome-projects/ome/pkg/controller/v1beta1/placement/endpoint"
 	"github.com/ome-projects/ome/pkg/validation"
 )
+
+const trafficMapRoutableStatusFieldOwner = "ome-trafficmap-routing"
 
 // +kubebuilder:rbac:groups=ome.io,resources=inferenceservices,verbs=get;list;watch
 // +kubebuilder:rbac:groups=ome.io,resources=trafficmaps,verbs=get;list;watch;create;update;patch;delete
@@ -278,17 +282,15 @@ func (r *Reconciler) apply(ctx context.Context, isvc *v1beta1.InferenceService, 
 // setRoutable writes the routing controller's Routable condition onto the
 // ISVC's TrafficMap, explaining an empty or degraded table.
 //
-// It re-reads and retries on conflict rather than patching blind: the publisher
-// owns Programmed on the same subresource, so a lost update here would silently
-// drop whichever condition wrote second. SetStatusCondition keys on type, so the
-// two writers do not collide, and it leaves LastTransitionTime alone when the
-// status has not actually changed — no write amplification on a steady map.
+// It re-reads and retries on conflict rather than patching blind. Routable is a
+// list-map entry with its own server-side-apply field manager, so it coexists
+// with the publisher's independently owned Programmed condition.
 func (r *Reconciler) setRoutable(ctx context.Context, isvc *v1beta1.InferenceService,
 	status metav1.ConditionStatus, reason string) error {
 	key := types.NamespacedName{Name: isvc.Name, Namespace: isvc.Namespace}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		tm := &v1beta1.TrafficMap{}
-		if err := r.Get(ctx, key, tm); err != nil {
+		if err := r.APIReader.Get(ctx, key, tm); err != nil {
 			// Gone, or not ours to annotate: nothing to report on.
 			return client.IgnoreNotFound(err)
 		}
@@ -302,11 +304,40 @@ func (r *Reconciler) setRoutable(ctx context.Context, isvc *v1beta1.InferenceSer
 			Message:            routableMessage(reason, status, len(tm.Spec.Entries)),
 			ObservedGeneration: tm.Generation,
 		}
-		if !apimeta.SetStatusCondition(&tm.Status.Conditions, cond) {
-			return nil // unchanged; skip the write
-		}
-		return r.Status().Update(ctx, tm)
+		apimeta.SetStatusCondition(&tm.Status.Conditions, cond)
+		return r.Status().Apply(ctx, trafficMapRoutableStatusApply(tm),
+			client.FieldOwner(trafficMapRoutableStatusFieldOwner), client.ForceOwnership)
 	})
+}
+
+func trafficMapRoutableStatusApply(trafficMap *v1beta1.TrafficMap) runtime.ApplyConfiguration {
+	status := map[string]any{}
+	if routable := apimeta.FindStatusCondition(
+		trafficMap.Status.Conditions, v1beta1.TrafficMapRoutable,
+	); routable != nil {
+		status["conditions"] = []any{trafficMapRoutableConditionApply(*routable)}
+	}
+	apply := &unstructured.Unstructured{Object: map[string]any{"status": status}}
+	apply.SetAPIVersion(v1beta1.SchemeGroupVersion.String())
+	apply.SetKind("TrafficMap")
+	apply.SetNamespace(trafficMap.Namespace)
+	apply.SetName(trafficMap.Name)
+	apply.SetResourceVersion(trafficMap.ResourceVersion)
+	return client.ApplyConfigurationFromUnstructured(apply)
+}
+
+func trafficMapRoutableConditionApply(condition metav1.Condition) map[string]any {
+	apply := map[string]any{
+		"type":               condition.Type,
+		"status":             string(condition.Status),
+		"observedGeneration": condition.ObservedGeneration,
+		"reason":             condition.Reason,
+		"message":            condition.Message,
+	}
+	if !condition.LastTransitionTime.IsZero() {
+		apply["lastTransitionTime"] = condition.LastTransitionTime.UTC().Format(time.RFC3339)
+	}
+	return apply
 }
 
 // routableMessage renders the operator-facing explanation for a Routable reason.
@@ -580,6 +611,9 @@ func placementMode(isvc *v1beta1.InferenceService) v1beta1.PlacementMode {
 // Probe and capacity observations run inside reconciliation and use their
 // earliest returned delay as RequeueAfter.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.APIReader == nil {
+		return fmt.Errorf("TrafficMap routing API reader is not configured")
+	}
 	b := ctrl.NewControllerManagedBy(mgr).
 		Named(RoutingControllerName).
 		For(&v1beta1.InferenceService{}, builder.WithPredicates(routingTableChange)).
@@ -623,6 +657,9 @@ var routingTableChange = predicate.Funcs{
 		if !equality.Semantic.DeepEqual(routingCapacitySpec(oldISVC), routingCapacitySpec(newISVC)) {
 			return true
 		}
+		if !equality.Semantic.DeepEqual(routingPublisherSpec(oldISVC), routingPublisherSpec(newISVC)) {
+			return true
+		}
 		// The condition is part of what we write, so a change in status or reason
 		// has to wake us even when the table itself is byte-identical — an ISVC
 		// going NotPlaced -> NoAddressableHome keeps an empty table but must
@@ -661,4 +698,11 @@ func routingCapacitySpec(isvc *v1beta1.InferenceService) *v1beta1.RoutingCapacit
 		return nil
 	}
 	return isvc.Spec.Routing.Capacity
+}
+
+func routingPublisherSpec(isvc *v1beta1.InferenceService) *v1beta1.RoutingPublisherSpec {
+	if isvc == nil || isvc.Spec.Routing == nil {
+		return nil
+	}
+	return isvc.Spec.Routing.Publisher
 }

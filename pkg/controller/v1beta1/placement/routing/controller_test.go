@@ -1243,31 +1243,29 @@ func TestReconcile_ServingHomeReportsRoutable(t *testing.T) {
 	assert.Equal(t, v1beta1.TrafficMapReasonRoutable, cond.Reason)
 }
 
-// The publisher owns Programmed on the same subresource, so writing Routable
-// must not drop it.
-func TestReconcile_RoutableDoesNotClobberProgrammed(t *testing.T) {
-	isvc := splitISVC([]string{"a"}, []int32{3}, []int32{3})
-	r, c := newReconciler(t, controllerTestConfig(), isvc)
-	reconcile(t, r)
-	tm, ok := getTrafficMap(t, c)
+func TestRoutableStatusApplyIsFieldIsolated(t *testing.T) {
+	tm := &v1beta1.TrafficMap{ObjectMeta: metav1.ObjectMeta{
+		Name: testName, Namespace: testNS, ResourceVersion: "17",
+	}}
+	tm.Status.Conditions = []metav1.Condition{
+		{Type: v1beta1.TrafficMapRoutable, Status: metav1.ConditionTrue, Reason: "Routable"},
+		{Type: v1beta1.TrafficMapProgrammed, Status: metav1.ConditionTrue, Reason: "Published"},
+	}
+
+	apply, ok := trafficMapRoutableStatusApply(tm).(interface{ UnstructuredContent() map[string]any })
 	require.True(t, ok)
+	content := apply.UnstructuredContent()
+	metadata := content["metadata"].(map[string]any)
+	assert.Equal(t, "17", metadata["resourceVersion"])
+	status := content["status"].(map[string]any)
+	conditions := status["conditions"].([]any)
+	require.Len(t, conditions, 1)
+	assert.Equal(t, v1beta1.TrafficMapRoutable, conditions[0].(map[string]any)["type"])
+}
 
-	apimeta.SetStatusCondition(&tm.Status.Conditions, metav1.Condition{
-		Type: v1beta1.TrafficMapProgrammed, Status: metav1.ConditionTrue,
-		Reason: "Published", Message: "publisher realized the map",
-	})
-	require.NoError(t, c.Status().Update(context.Background(), tm))
-
-	// A later pass that flips the ISVC unroutable must rewrite only our condition.
-	isvc.Status.Placement.Phase = v1beta1.PlacementPhaseRacing
-	require.NoError(t, c.Status().Update(context.Background(), isvc))
-	reconcile(t, r)
-
-	tm, ok = getTrafficMap(t, c)
-	require.True(t, ok)
-	assert.NotNil(t, apimeta.FindStatusCondition(tm.Status.Conditions, v1beta1.TrafficMapProgrammed),
-		"the publisher's condition must survive a Routable write")
-	assert.Equal(t, v1beta1.TrafficMapReasonNotPlaced, routableCond(tm).Reason)
+func TestSetupWithManagerRequiresAPIReader(t *testing.T) {
+	err := (&Reconciler{}).SetupWithManager(nil)
+	require.ErrorContains(t, err, "API reader is not configured")
 }
 
 func TestReconcile_UpdatesExistingTrafficMapOnReadyReplicaChange(t *testing.T) {
@@ -1452,6 +1450,14 @@ func TestRoutingTableChangePredicate(t *testing.T) {
 	t.Run("inline capacity change is admitted", func(t *testing.T) {
 		nw := base.DeepCopy()
 		nw.Spec.Routing = &v1beta1.RoutingSpec{Capacity: controllerCapacitySpec(controllerTestCapacityConfig())}
+		assert.True(t, routingTableChange.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: nw}))
+	})
+
+	t.Run("inline publisher change is admitted", func(t *testing.T) {
+		nw := base.DeepCopy()
+		nw.Spec.Routing = &v1beta1.RoutingSpec{Publisher: &v1beta1.RoutingPublisherSpec{
+			Options: map[string]string{"target": "edge"},
+		}}
 		assert.True(t, routingTableChange.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: nw}))
 	})
 
