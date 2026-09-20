@@ -1,0 +1,35 @@
+# A multi-pod Instance is widened by one worker. The width is not part of
+# the revision payload, so the target hash does not move; what moves is the
+# expected pod count. Under the multi-pod default policy the restart
+# detector reads the live count as short of the widened expectation and
+# claims the row ahead of the Create pass.
+scenario: T-ready-gangwidth-restart
+arrows:
+  - T-empty-create
+  - T-create-ready
+  - T-ready-gangwidth-restart
+cells:
+  - instance/Ready/spec.gangWidth[grow]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass materializes the whole gang at once
+  - tick: 2
+    note: both members report Ready, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+  - tick: 3
+    note: the gang is widened by one worker at an unchanged revision, and the restart detector claims the row on the shortfall
+    events:
+      - spec.gangWidth[grow]: {to: 2}

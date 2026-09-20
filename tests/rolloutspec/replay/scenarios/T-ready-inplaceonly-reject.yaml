@@ -1,0 +1,35 @@
+# An environment edit under InPlaceOnly. The strategy may only rewrite
+# container images on a running pod, so a diff that reaches past them has
+# nowhere to go: the pass warns and errors out instead of stamping an
+# operation, and the Instance stays Ready on the old revision.
+scenario: T-ready-inplaceonly-reject
+arrows:
+  - T-empty-create
+  - T-create-ready
+  - T-ready-inplaceonly-reject
+cells:
+  - instance/Ready/spec.revision/boundary@T-ready-inplaceonly-reject
+initial:
+  spec:
+    replicas: 1
+    strategy: InPlaceOnly
+    image: registry.example.com/runtime:v1
+    env: {LOG_LEVEL: info}
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod becomes Ready and enters rotation on the first revision
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the edit rewrites the environment rather than the image, so the in-place-only update has no eligible mechanism and refuses the revision
+    events:
+      - spec.revision: {env: {LOG_LEVEL: debug}}
+  - tick: 4
+    note: the refusal is not a one-pass verdict — the next pass reads the same ineligible diff and refuses it again

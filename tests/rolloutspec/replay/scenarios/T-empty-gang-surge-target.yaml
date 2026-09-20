@@ -1,0 +1,37 @@
+# A gang cannot surge inside its own index — every member ordinal is taken —
+# so a template change makes the source claim the next free index as its
+# whole replacement. The claimed slot is stamped as a gang surge target
+# before any of its members exist, and its PodGroup is announced ahead of
+# them so the scheduler admits the replacement gang as a unit.
+scenario: T-empty-gang-surge-target
+arrows:
+  - T-empty-create
+  - T-create-ready
+  - T-empty-gang-surge-target
+cells:
+  - instance/Empty/spec.revision/boundary@T-empty-gang-surge-target
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}

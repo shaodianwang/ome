@@ -3,6 +3,7 @@ package replay
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -111,6 +112,16 @@ type driver struct {
 	podUIDs int
 	// migrations is the owner's persisted status.migrations list.
 	migrations []types.MigrationRecord
+	// migrationRequests counts the requests the scenario has made, so an
+	// unnamed one gets a stable identity.
+	migrationRequests int
+	// teardown marks every pass from the owner's deletion onward: the
+	// planned index set reads as empty and every Instance is a
+	// scale-down extra.
+	teardown bool
+	// rollbackImage pins the roll to the stored revision that image's
+	// template minted. Empty rolls toward the rendered template.
+	rollbackImage string
 }
 
 func newDriver(ctx context.Context, s *Scenario, opts Options) (*driver, error) {
@@ -228,15 +239,52 @@ func (d *driver) key() types.Key {
 	}
 }
 
-// podTemplate renders the container template for one image.
+// containerName resolves the single container the template renders. The
+// scenario's name wins over the fixture default, because the restart
+// trigger identifies the runner container by the name production renders
+// it under.
+func (d *driver) containerName() string {
+	if d.spec.ContainerName != "" {
+		return d.spec.ContainerName
+	}
+	return d.opts.ContainerName
+}
+
+// podTemplate renders the container template for one image. Everything
+// outside the image comes from the driver's mutable spec, so a template
+// edit that is not an image rewrite mints a revision the in-place
+// strategies are not allowed to converge on.
 func (d *driver) podTemplate(image string) *corev1.PodSpec {
 	if image == "" {
 		image = "registry.example.com/runtime:v1"
 	}
-	return &corev1.PodSpec{Containers: []corev1.Container{{
-		Name:  d.opts.ContainerName,
-		Image: image,
-	}}}
+	return &corev1.PodSpec{
+		SchedulerName: d.spec.SchedulerName,
+		Containers: []corev1.Container{{
+			Name:  d.containerName(),
+			Image: image,
+			Env:   sortedEnv(d.spec.Env),
+		}},
+	}
+}
+
+// sortedEnv renders the scenario's environment in key order, because the
+// template is hashed and a map iteration would mint a different revision
+// on every run.
+func sortedEnv(env map[string]string) []corev1.EnvVar {
+	if len(env) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(env))
+	for name := range env {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]corev1.EnvVar, 0, len(names))
+	for _, name := range names {
+		out = append(out, corev1.EnvVar{Name: name, Value: env[name]})
+	}
+	return out
 }
 
 // desiredSpec projects the driver's mutable spec onto the engine's input.
@@ -269,15 +317,29 @@ func (d *driver) desiredSpec() (types.WorkloadDesiredSpec, error) {
 		}
 		lifecycle.InstanceReadyTimeout = &metav1.Duration{Duration: timeout}
 	}
-	return types.WorkloadDesiredSpec{
-		Replicas:        d.spec.Replicas,
-		MinReadySeconds: d.spec.MinReadySeconds,
-		Runners:         []types.Runner{{Name: DefaultRunner, Size: 1}},
-		PodSpec:         d.podTemplate(d.spec.Image),
-		Lifecycle:       lifecycle,
-		Paused:          d.spec.Paused,
-		PauseFreeze:     d.spec.PauseFreeze,
-	}, nil
+	if d.spec.MigrationMode != "" {
+		lifecycle.MigrationPolicy = &types.MigrationPolicy{Mode: types.MigrationMode(d.spec.MigrationMode)}
+	}
+	desired := types.WorkloadDesiredSpec{
+		Replicas:                d.spec.Replicas,
+		MinReadySeconds:         d.spec.MinReadySeconds,
+		Runners:                 []types.Runner{{Name: DefaultRunner, Size: 1}},
+		PodSpec:                 d.podTemplate(d.spec.Image),
+		Lifecycle:               lifecycle,
+		Paused:                  d.spec.Paused,
+		PauseFreeze:             d.spec.PauseFreeze,
+		GangSchedulingAvailable: d.spec.GangScheduling,
+	}
+	// A worker count is what makes the Component multi-pod: the plan
+	// splits an Instance into one leader and that many workers, which is
+	// the unit a gang is scheduled in.
+	if d.spec.Workers > 0 {
+		desired.MultiPod = true
+		desired.Runners = []types.Runner{{Name: RunnerLeader, Size: 1}, {Name: RunnerWorker, Size: d.spec.Workers}}
+		desired.WorkerPodSpec = d.podTemplate(d.spec.Image)
+		desired.TopologyKey = d.spec.TopologyKey
+	}
+	return desired, nil
 }
 
 // ensureRevision mints (or reuses) the ControllerRevision for an image,
@@ -509,17 +571,38 @@ func (d *driver) runTick(ctx context.Context, tick Tick) error {
 	if err != nil {
 		return err
 	}
-	target, err := d.ensureRevision(ctx, d.spec.Image)
+	specTarget, err := d.ensureRevision(ctx, d.spec.Image)
 	if err != nil {
 		return err
 	}
 	if d.currentRevision == "" {
-		d.currentRevision = target.Name
+		d.currentRevision = specTarget.Name
+	}
+	// A pinned rollback overrides the rendered template with the stored
+	// revision's payload and makes that revision the ROLL target, while
+	// UpdateRevision keeps reporting the spec target. The forward-roll
+	// machinery then drains the current pods onto the pinned revision.
+	target := specTarget
+	if d.rollbackImage != "" {
+		pinned, perr := d.ensureRevision(ctx, d.rollbackImage)
+		if perr != nil {
+			return perr
+		}
+		payload, perr := revision.PayloadFromControllerRevision(pinned)
+		if perr != nil {
+			return fmt.Errorf("replay: rollback revision payload: %w", perr)
+		}
+		if payload == nil || payload.PodSpec == nil {
+			return fmt.Errorf("replay: rollback revision %s carries no pod template", pinned.Name)
+		}
+		desired.PodSpec = payload.PodSpec
+		desired.WorkerPodSpec = payload.WorkerPodSpec
+		target = pinned
 	}
 
 	observed := types.WorkloadObservedState{
 		CurrentRevision:  d.currentRevision,
-		UpdateRevision:   target.Name,
+		UpdateRevision:   specTarget.Name,
 		InstanceStatuses: d.store.Rows(),
 		RetryBlocks:      d.store.RetryBlocks(),
 		Migrations:       append([]types.MigrationRecord(nil), d.migrations...),
@@ -539,6 +622,9 @@ func (d *driver) runTick(ctx context.Context, tick Tick) error {
 		Recorder:     d.recorder,
 		Expectations: d.expectations,
 		Clock:        d.clock,
+	}
+	if err := d.reconcileGangs(ctx, &deps, input, plan); err != nil {
+		return err
 	}
 	// Pausing parks every in-flight deadline before the dispatcher runs, so
 	// a pause that lands mid-operation cannot spend the operation's clock
@@ -661,6 +747,7 @@ func (d *driver) buildInput(desired types.WorkloadDesiredSpec, observed types.Wo
 		UnschedulableGrace:       unschedulableGrace,
 		Requeue:                  types.RequeueIntervals{Operation: requeueOperation, Gate: requeueGate},
 		Gangs:                    types.NewGangObservations(),
+		Teardown:                 d.teardown,
 		Clock:                    d.clock,
 		Disposition: types.DispositionDeps{
 			PodSpec: desired.PodSpec,
@@ -692,6 +779,17 @@ func (d *driver) buildInput(desired types.WorkloadDesiredSpec, observed types.Wo
 			return types.ReconcileInput{}, err
 		}
 		input.ForceDelete = &types.ForceDeletePolicy{OverdueSlack: slack, NodeUnreachableThreshold: threshold}
+	}
+	if policy := d.cfg.MigrationAudit; policy != nil {
+		window, err := ParseDuration("config.migrationAudit.window", policy.Window)
+		if err != nil {
+			return types.ReconcileInput{}, err
+		}
+		input.MigrationAudit = &types.MigrationAuditPolicy{
+			MaxInFlight:  policy.MaxInFlight,
+			MaxPerWindow: policy.MaxPerWindow,
+			Window:       window,
+		}
 	}
 
 	d.store.Install(&input)

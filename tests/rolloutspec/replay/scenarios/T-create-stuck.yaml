@@ -1,0 +1,31 @@
+# A create attempt whose pod cannot pull its image. The escalation measures
+# the wedge from the pod's creationTimestamp, so the reason has to land on a
+# pod that is already older than the stuck-pod grace for the fast path to
+# fire on the same pass that observes it.
+scenario: T-create-stuck
+arrows:
+  - T-empty-create
+  - T-create-stuck
+cells:
+  - instance/Create/CreatePods/pod.waiting[ImagePullBackOff]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod is still booting two minutes on, which is longer than the grace but proves nothing on its own
+    events:
+      - clock.advance: 2m
+  - tick: 3
+    note: the pull wedges on a pod already older than the grace, so the escalation disposes the attempt on the pass that first reads the reason
+    events:
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 0}, message: "manifest unknown"}

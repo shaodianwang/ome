@@ -20,6 +20,14 @@ const ClockAdvance = "clock.advance"
 // value a pod reference omitting the field resolves to.
 const DefaultRunner = "default"
 
+// RunnerLeader and RunnerWorker are the Runner names of a multi-pod
+// Instance. The plan splits an Instance into one leader and the worker
+// count the scenario asks for.
+const (
+	RunnerLeader = "leader"
+	RunnerWorker = "worker"
+)
+
 // Vocabulary is the behavior table a scenario is checked against. The
 // caller builds it from the machine definition so a scenario cannot name
 // an event, variant, arrow or cell the table does not declare. A zero
@@ -78,6 +86,17 @@ type SpecState struct {
 	// A spec.revision event rewrites it, which mints a new revision the
 	// way an ordinary template edit does.
 	Image string `json:"image,omitempty"`
+	// ContainerName names the single container of the rendered pod
+	// template, overriding the fixture default. The restart trigger reads
+	// restart evidence off the runner container alone, and identifies it
+	// by the name production renders it under, so a scenario driving a
+	// container restart has to render that name.
+	ContainerName string `json:"containerName,omitempty"`
+	// Env is the environment the rendered container carries. It is part
+	// of the pod template and therefore of the revision, and unlike the
+	// image it is not an in-place-eligible diff — which is what makes an
+	// InPlaceOnly rejection reachable.
+	Env map[string]string `json:"env,omitempty"`
 	// MaxUnavailable and MaxSurge are the rolling-update budgets, as an
 	// int-or-percent string ("1", "25%"). Empty leaves the engine default.
 	MaxUnavailable string `json:"maxUnavailable,omitempty"`
@@ -88,6 +107,29 @@ type SpecState struct {
 	MarkNotReady         *bool  `json:"markNotReady,omitempty"`
 	Paused               bool   `json:"paused,omitempty"`
 	PauseFreeze          bool   `json:"pauseFreeze,omitempty"`
+	// Workers is the per-Instance worker-pod count. A positive value
+	// makes the Component multi-pod — one "leader" Runner and a "worker"
+	// Runner of this size — which is the shape a gang is scheduled in.
+	// A spec.gangWidth event rewrites it.
+	Workers int32 `json:"workers,omitempty"`
+	// TopologyKey is the node-label key a gang's workers are co-located
+	// on. A multi-pod Component without one renders workers with no
+	// co-location affinity, which the engine warns about once per
+	// process — a one-shot a replay cannot reproduce, so a gang scenario
+	// declares the key.
+	TopologyKey string `json:"topologyKey,omitempty"`
+	// SchedulerName is the scheduler the rendered pods ask for. A gang
+	// announced to a Component whose pods name no gang-aware scheduler
+	// draws a Warning the engine emits once per process, which a replay
+	// cannot reproduce twice.
+	SchedulerName string `json:"schedulerName,omitempty"`
+	// GangScheduling advertises the scheduler-plugins PodGroup CRD as
+	// installed, which is what makes a multi-pod Instance's PodGroup be
+	// announced before its first member.
+	GangScheduling bool `json:"gangScheduling,omitempty"`
+	// MigrationMode is lifecycle.migrationPolicy.mode. Empty leaves the
+	// engine default.
+	MigrationMode string `json:"migrationMode,omitempty"`
 }
 
 // ConfigState carries the operator configuration the engine reads through
@@ -102,6 +144,17 @@ type ConfigState struct {
 	UnschedulableGrace       string       `json:"unschedulableGrace,omitempty"`
 	UpdateRetry              *RetrySpec   `json:"updateRetry,omitempty"`
 	ForceDelete              *ForceDelete `json:"forceDelete,omitempty"`
+	// MigrationAudit bounds migration admission. Unset leaves the
+	// engine unconfigured, which holds every request rather than
+	// admitting it unbounded.
+	MigrationAudit *MigrationAudit `json:"migrationAudit,omitempty"`
+}
+
+// MigrationAudit is the migration admission budget.
+type MigrationAudit struct {
+	MaxInFlight  int32  `json:"maxInFlight"`
+	MaxPerWindow int32  `json:"maxPerWindow"`
+	Window       string `json:"window"`
 }
 
 // RetrySpec is the same-target update retry budget.
@@ -196,6 +249,10 @@ type EventArgs struct {
 	Count     int     `json:"count,omitempty"`
 	Container string  `json:"container,omitempty"`
 	Message   string  `json:"message,omitempty"`
+	// Env rewrites the rendered container's environment. It is the
+	// template edit a spec.revision makes when the edit is not an image
+	// rewrite.
+	Env map[string]string `json:"env,omitempty"`
 	// Verb and Resource scope an injected apiserver rejection.
 	Verb     string `json:"verb,omitempty"`
 	Resource string `json:"resource,omitempty"`
@@ -206,6 +263,16 @@ type EventArgs struct {
 	Slack string `json:"slack,omitempty"`
 	// Strategy is the new lifecycle.updateStrategy of a spec.strategy edit.
 	Strategy string `json:"strategy,omitempty"`
+	// Instance names the Instance index a migration request is made
+	// against.
+	Instance *int32 `json:"instance,omitempty"`
+	// FromNode is the node a migration request moves its source off.
+	FromNode string `json:"fromNode,omitempty"`
+	// UUID identifies a migration request. Empty numbers the request in
+	// the order the scenario makes them.
+	UUID string `json:"uuid,omitempty"`
+	// Reason is the requester-supplied reason on a migration request.
+	Reason string `json:"reason,omitempty"`
 }
 
 // PodRef addresses one pod by the coordinates its stable name is built
@@ -288,15 +355,22 @@ var eventArgKeys = map[string][]string{
 	"pod.phaseTerminal":       {"pod"},
 	"pod.waiting":             {"pod", "container", "message"},
 	"pod.unschedulable":       {"pod"},
+	"pod.containerRestart":    {"pod", "container", "message"},
 	"endpoint.rotationIn":     {"pod"},
 	"endpoint.rotationOut":    {"pod"},
 	"api.quotaDenied":         {"verb", "resource", "count"},
 	"api.invalid":             {"verb", "resource", "count"},
-	"spec.revision":           {"image"},
+	"spec.revision":           {"image", "env"},
 	"spec.strategy":           {"strategy"},
 	"spec.replicasUp":         {"to"},
 	"spec.replicasDown":       {"to"},
+	"spec.gangWidth":          {"to"},
+	"spec.rollbackTarget":     {"image"},
+	"spec.migrateRequest":     {"instance", "fromNode", "uuid", "reason"},
+	"gang.podGroup":           {"instance"},
 	"timer.operationDeadline": {"slack"},
+	"timer.stuckPodGrace":     {"slack"},
+	"timer.retryAt":           {"slack"},
 }
 
 // Key renders the event the way a timeline and a trace both spell it.

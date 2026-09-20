@@ -18,6 +18,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
@@ -117,6 +118,8 @@ func kindOf(obj client.Object) string {
 	switch obj.(type) {
 	case *corev1.Pod:
 		return "pod"
+	case *schedulingv1alpha1.PodGroup:
+		return "podgroup"
 	case *discoveryv1.EndpointSlice:
 		return "endpointslice"
 	case *corev1.Service:
@@ -142,10 +145,10 @@ func (d *driver) traced(obj client.Object) bool {
 
 func tracedKind(obj client.Object) bool {
 	switch obj.(type) {
-	case *corev1.Pod:
+	case *corev1.Pod, *schedulingv1alpha1.PodGroup:
 		return true
 	default:
-		return obj.GetObjectKind().GroupVersionKind().Kind == "PodGroup"
+		return false
 	}
 }
 
@@ -164,6 +167,14 @@ func (d *driver) interceptors() interceptor.Funcs {
 		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 			if pod, ok := obj.(*corev1.Pod); ok {
 				pod.Finalizers = append(pod.Finalizers, podLifecycleFinalizer)
+				// The apiserver stamps creationTimestamp on admission and
+				// the fake client does not. Every age the engine measures
+				// off a pod — the stuck-pod grace above all — reads zero
+				// without one, so a pod that never got one can never be
+				// stuck however far the clock moves.
+				if pod.CreationTimestamp.IsZero() {
+					pod.CreationTimestamp = metav1.NewTime(d.clock.Now())
+				}
 				// The apiserver assigns a UID on admission and the engine
 				// refuses to act on a pod without one; the fake client
 				// assigns none, so the driver stands in for that.

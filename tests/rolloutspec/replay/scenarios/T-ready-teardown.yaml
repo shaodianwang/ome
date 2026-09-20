@@ -1,0 +1,41 @@
+# The owner is deleted while its Instance is serving. From that pass on the
+# planned index set reads as empty, so the Instance is a scale-down extra
+# and runs the scale-down pipeline: nothing else — no pause gate, no
+# escalation, no op pass — runs at all.
+scenario: T-ready-teardown
+arrows:
+  - T-empty-create
+  - T-create-ready
+  - T-ready-teardown
+  - T-delete-done
+cells:
+  - instance/Ready/spec.teardown[deleted]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the owner's deletion begins, so the serving Instance becomes a scale-down extra and is drained
+    events:
+      - spec.teardown[deleted]: {}
+  - tick: 4
+    note: the pod leaves rotation, which is the drain the delete waits on
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the drained pod is gone and the teardown has nothing left to remove
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}

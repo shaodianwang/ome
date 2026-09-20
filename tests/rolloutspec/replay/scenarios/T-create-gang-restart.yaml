@@ -1,0 +1,30 @@
+# One member of a gang under construction is lost while a sibling is still
+# alive. Partial loss is not something the Create pass repairs: under the
+# multi-pod default policy the restart pass runs ahead of it, claims the row
+# and rebuilds the whole Instance, because a gang is only meaningful whole.
+scenario: T-create-gang-restart
+arrows:
+  - T-empty-create
+  - T-create-gang-restart
+cells:
+  - instance/Create/CreatePods/pod.deleted[source]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: the worker is lost while the leader still runs, so the restart pass claims the half-formed gang ahead of Create
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}

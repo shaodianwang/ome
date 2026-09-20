@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -13,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	types "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // eventApplier turns one timeline event into the cluster or spec change
@@ -36,6 +38,7 @@ func init() {
 		"pod.phaseTerminal":       applyPhaseTerminal,
 		"pod.waiting":             applyPodWaiting,
 		"pod.unschedulable":       applyUnschedulable,
+		"pod.containerRestart":    applyContainerRestart,
 		"endpoint.rotationIn":     applyRotation(true),
 		"endpoint.rotationOut":    applyRotation(false),
 		"api.quotaDenied":         applyRejection(quotaDenied),
@@ -47,7 +50,14 @@ func init() {
 		"spec.pauseTrue":          applyPause(true, false),
 		"spec.pauseFreeze":        applyPause(true, true),
 		"spec.unpause":            applyPause(false, false),
+		"spec.teardown":           applyTeardown,
+		"spec.gangWidth":          applyGangWidth,
+		"spec.rollbackTarget":     applyRollbackTarget,
+		"spec.migrateRequest":     applyMigrateRequest,
+		"gang.podGroup":           applyPodGroup,
 		"timer.operationDeadline": applyOperationDeadline,
+		"timer.stuckPodGrace":     applyStuckPodGrace,
+		"timer.retryAt":           applyRetryAt,
 	}
 }
 
@@ -221,7 +231,7 @@ func applyPodWaiting(ctx context.Context, d *driver, ev TimelineEvent) (string, 
 	}
 	container := ev.Args.Container
 	if container == "" {
-		container = d.opts.ContainerName
+		container = d.containerName()
 	}
 	name := d.podName(ref)
 	return "pod=" + name + " reason=" + ev.Variant, d.patchPod(ctx, name, func(pod *corev1.Pod) {
@@ -236,6 +246,53 @@ func applyPodWaiting(ctx context.Context, d *driver, ev TimelineEvent) (string, 
 			}},
 		}}
 	})
+}
+
+// applyContainerRestart is the kubelet restarting a container in place:
+// the pod keeps its UID and stays Running, and the only evidence is on the
+// container status — a bumped restart count, the previous run's
+// termination, and a current run that began after it. The restart trigger
+// reads that evidence off the runner container and dates it against the
+// Instance's ReadySince.
+func applyContainerRestart(ctx context.Context, d *driver, ev TimelineEvent) (string, error) {
+	ref, err := requirePod(ev)
+	if err != nil {
+		return "", err
+	}
+	container := ev.Args.Container
+	if container == "" {
+		container = d.containerName()
+	}
+	reason := ev.Args.Message
+	if reason == "" {
+		reason = "Error"
+	}
+	name := d.podName(ref)
+	found := false
+	if err := d.patchPod(ctx, name, func(pod *corev1.Pod) {
+		now := metav1.NewTime(d.clock.Now())
+		for i := range pod.Status.ContainerStatuses {
+			cs := &pod.Status.ContainerStatuses[i]
+			if cs.Name != container {
+				continue
+			}
+			found = true
+			cs.RestartCount++
+			cs.LastTerminationState = corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+				ExitCode:   1,
+				Reason:     reason,
+				FinishedAt: now,
+			}}
+			cs.State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: now}}
+			cs.Ready = true
+		}
+	}); err != nil {
+		return "", err
+	}
+	if !found {
+		return "", fmt.Errorf("replay: pod.containerRestart: pod %s reports no container %q to restart", name, container)
+	}
+	return "pod=" + name + " container=" + container + " reason=" + reason, nil
 }
 
 func applyUnschedulable(ctx context.Context, d *driver, ev TimelineEvent) (string, error) {
@@ -318,15 +375,39 @@ func invalidPodSpec(resource, name string) error {
 	)
 }
 
+// applySpecRevision edits the pod template, which mints a new target
+// revision. An image rewrite is the in-place-eligible edit; an environment
+// rewrite is the one an in-place strategy is not allowed to converge on,
+// and the two are spelled apart so a scenario says which kind of edit it
+// is making.
 func applySpecRevision(ctx context.Context, d *driver, ev TimelineEvent) (string, error) {
-	if ev.Args.Image == "" {
-		return "", fmt.Errorf("replay: spec.revision needs the new image")
+	if ev.Args.Image == "" && ev.Args.Env == nil {
+		return "", fmt.Errorf("replay: spec.revision needs a template edit: the new image, the new env, or both")
 	}
-	d.spec.Image = ev.Args.Image
+	detail := ""
+	if ev.Args.Image != "" {
+		d.spec.Image = ev.Args.Image
+		detail += "image=" + ev.Args.Image + " "
+	}
+	if ev.Args.Env != nil {
+		d.spec.Env = ev.Args.Env
+		detail += "env=" + renderEnv(ev.Args.Env) + " "
+	}
 	if err := d.bumpGeneration(ctx); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("image=%s generation=%d", ev.Args.Image, d.owner.Generation), nil
+	return fmt.Sprintf("%sgeneration=%d", detail, d.owner.Generation), nil
+}
+
+// renderEnv spells an environment edit in key order, so a trace line does
+// not depend on map iteration.
+func renderEnv(env map[string]string) string {
+	vars := sortedEnv(env)
+	parts := make([]string, 0, len(vars))
+	for _, v := range vars {
+		parts = append(parts, v.Name+":"+v.Value)
+	}
+	return "[" + strings.Join(parts, " ") + "]"
 }
 
 // applySpecStrategy rewrites lifecycle.updateStrategy. The strategy is not
@@ -352,6 +433,95 @@ func applyReplicas(ctx context.Context, d *driver, ev TimelineEvent) (string, er
 		return "", err
 	}
 	return fmt.Sprintf("replicas=%d generation=%d", d.spec.Replicas, d.owner.Generation), nil
+}
+
+// applyTeardown begins owner deletion. From here the planned index set
+// reads as empty, so every Instance is a scale-down extra and nothing but
+// the scale-down pipeline runs.
+func applyTeardown(_ context.Context, d *driver, ev TimelineEvent) (string, error) {
+	if ev.Variant != "" && ev.Variant != "deleted" {
+		return "", fmt.Errorf("replay: spec.teardown[%s]: the driver models the owner's own deletion, not an owner replaced under a new UID", ev.Variant)
+	}
+	d.teardown = true
+	return "teardown=true", nil
+}
+
+// applyGangWidth changes the per-Instance worker count without touching
+// the pod template, so the Instance's expected pod set moves at an
+// unchanged revision hash.
+func applyGangWidth(ctx context.Context, d *driver, ev TimelineEvent) (string, error) {
+	if ev.Args.To == nil {
+		return "", fmt.Errorf("replay: %s needs the new worker count", ev.Key())
+	}
+	if *ev.Args.To < 1 {
+		return "", fmt.Errorf("replay: %s: a gang keeps at least one worker beside its leader", ev.Key())
+	}
+	d.spec.Workers = *ev.Args.To
+	if err := d.bumpGeneration(ctx); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("workers=%d generation=%d", d.spec.Workers, d.owner.Generation), nil
+}
+
+// applyRollbackTarget pins the roll to a stored revision, named by the
+// image whose template minted it, or releases the pin. The pinned
+// revision overrides the rendered template and becomes the roll target;
+// what the owner reports as its update revision stays the spec target.
+func applyRollbackTarget(ctx context.Context, d *driver, ev TimelineEvent) (string, error) {
+	switch ev.Variant {
+	case "set":
+		if ev.Args.Image == "" {
+			return "", fmt.Errorf("replay: spec.rollbackTarget[set] needs the image of the stored revision to roll back to")
+		}
+		d.rollbackImage = ev.Args.Image
+	case "clear":
+		if ev.Args.Image != "" {
+			return "", fmt.Errorf("replay: spec.rollbackTarget[clear] releases the pin and takes no image")
+		}
+		d.rollbackImage = ""
+	default:
+		return "", fmt.Errorf("replay: spec.rollbackTarget needs a variant: set or clear")
+	}
+	if err := d.bumpGeneration(ctx); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("rollbackTo=%s generation=%d", orNil(d.rollbackImage), d.owner.Generation), nil
+}
+
+// applyMigrateRequest is the operator's migration mailbox, consumed: the
+// adapter answers a request annotation by appending an Accepted record to
+// the owner's status, and that record is the only thing the engine's
+// migrate pass reads.
+func applyMigrateRequest(_ context.Context, d *driver, ev TimelineEvent) (string, error) {
+	if ev.Args.Instance == nil {
+		return "", fmt.Errorf("replay: spec.migrateRequest needs the Instance index to migrate")
+	}
+	d.migrationRequests++
+	uuid := ev.Args.UUID
+	if uuid == "" {
+		uuid = fmt.Sprintf("migration-%d", d.migrationRequests)
+	}
+	for i := range d.migrations {
+		if d.migrations[i].RequestUUID == uuid {
+			return "", fmt.Errorf("replay: spec.migrateRequest: uuid %s is already recorded", uuid)
+		}
+	}
+	timeout, err := ParseDuration("spec.instanceReadyTimeout", d.spec.InstanceReadyTimeout)
+	if err != nil {
+		return "", err
+	}
+	now := metav1.NewTime(d.clock.Now())
+	d.migrations = append(d.migrations, types.MigrationRecord{
+		RequestUUID:    uuid,
+		Trigger:        types.MigrationTriggerManual,
+		SourceInstance: *ev.Args.Instance,
+		FromNode:       ev.Args.FromNode,
+		Reason:         ev.Args.Reason,
+		Phase:          types.MigrationPhaseAccepted,
+		StartedAt:      now,
+		Deadline:       metav1.NewTime(now.Add(timeout)),
+	})
+	return fmt.Sprintf("uuid=%s instance=%d fromNode=%s", d.norm.uid(uuid), *ev.Args.Instance, orNil(ev.Args.FromNode)), nil
 }
 
 func applyPause(paused, freeze bool) eventApplier {
@@ -383,16 +553,90 @@ func applyOperationDeadline(_ context.Context, d *driver, ev TimelineEvent) (str
 	if earliest.IsZero() {
 		return "", fmt.Errorf("replay: timer.operationDeadline: no in-flight operation carries a deadline")
 	}
-	if ev.Args.Slack == "" {
-		return "", fmt.Errorf("replay: timer.operationDeadline needs a slack: how far past the deadline the pass observes it is the scenario's choice")
-	}
-	slack, err := ParseDuration("timer.operationDeadline.slack", ev.Args.Slack)
+	return d.advanceOnto("timer.operationDeadline", earliest, ev)
+}
+
+// applyStuckPodGrace advances the clock onto the earliest instant at which
+// a pod wedged in a terminal waiting reason has held it for the configured
+// stuck-pod grace. The deadline is the pod's own creationTimestamp plus the
+// configured grace, so the scenario names neither.
+func applyStuckPodGrace(ctx context.Context, d *driver, ev TimelineEvent) (string, error) {
+	grace, err := ParseDuration("config.stuckPodGrace", d.cfg.StuckPodGrace)
 	if err != nil {
 		return "", err
 	}
-	target := earliest.Add(slack)
-	now := d.clock.Now()
-	if target.Before(now) {
+	if grace <= 0 {
+		return "", fmt.Errorf("replay: timer.stuckPodGrace: config.stuckPodGrace is not set, so no grace elapses")
+	}
+	pods, err := query.ListOMENativePodsByName(ctx, d.cli, d.opts.Namespace, d.opts.OwnerName, d.opts.Component, false)
+	if err != nil {
+		return "", fmt.Errorf("replay: timer.stuckPodGrace: list pods: %w", err)
+	}
+	var earliest time.Time
+	for _, pod := range pods {
+		if !waitingTerminally(pod) || pod.CreationTimestamp.IsZero() {
+			continue
+		}
+		due := pod.CreationTimestamp.Time.Add(grace)
+		if earliest.IsZero() || due.Before(earliest) {
+			earliest = due
+		}
+	}
+	if earliest.IsZero() {
+		return "", fmt.Errorf("replay: timer.stuckPodGrace: no pod holds a terminal waiting reason, so no grace is running")
+	}
+	return d.advanceOnto("timer.stuckPodGrace", earliest, ev)
+}
+
+// applyRetryAt advances the clock onto the earliest RetryBlock retry
+// instant the owner carries.
+func applyRetryAt(_ context.Context, d *driver, ev TimelineEvent) (string, error) {
+	var earliest time.Time
+	for _, block := range d.store.RetryBlocks() {
+		if block.NextRetryAt == nil || block.NextRetryAt.IsZero() {
+			continue
+		}
+		if earliest.IsZero() || block.NextRetryAt.Time.Before(earliest) {
+			earliest = block.NextRetryAt.Time
+		}
+	}
+	if earliest.IsZero() {
+		return "", fmt.Errorf("replay: timer.retryAt: no RetryBlock carries a nextRetryAt")
+	}
+	return d.advanceOnto("timer.retryAt", earliest, ev)
+}
+
+// waitingTerminally reports whether any of a pod's containers is parked in
+// a waiting reason it cannot get itself out of — the set the stuck-pod
+// grace runs against.
+func waitingTerminally(pod *corev1.Pod) bool {
+	for _, statuses := range [][]corev1.ContainerStatus{pod.Status.ContainerStatuses, pod.Status.InitContainerStatuses} {
+		for _, cs := range statuses {
+			if cs.State.Waiting != nil && types.IsTerminalWaitingReason(cs.State.Waiting.Reason) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// advanceOnto moves the clock onto a deadline the engine's own state
+// carries, plus the slack the scenario names. Every timer event works this
+// way: a deterministic harness can only express a timer as a clock move,
+// and how far past a deadline an observation lands is a property of the
+// scenario rather than a default the harness is entitled to invent — so the
+// duration never has to be spelled out in the timeline, and a config change
+// moves the deadline without rewriting the scenario.
+func (d *driver) advanceOnto(event string, deadline time.Time, ev TimelineEvent) (string, error) {
+	if ev.Args.Slack == "" {
+		return "", fmt.Errorf("replay: %s needs a slack: how far past the deadline the pass observes it is the scenario's choice", event)
+	}
+	slack, err := ParseDuration(event+".slack", ev.Args.Slack)
+	if err != nil {
+		return "", err
+	}
+	target := deadline.Add(slack)
+	if target.Before(d.clock.Now()) {
 		return "already-elapsed", nil
 	}
 	d.clock.SetTime(target)

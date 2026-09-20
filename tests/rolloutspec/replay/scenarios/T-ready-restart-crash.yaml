@@ -1,0 +1,39 @@
+# A runner container dies and the kubelet restarts it in place: the pod keeps
+# its UID and stays Running, so the only evidence is on the container status.
+# Under RecreateInstanceOnPodRestart the Instance is rebuilt anyway, because
+# the process group formed at Ready has lost a member. The template renders
+# the runner under the name production renders it under, which is the name
+# the trigger looks for.
+scenario: T-ready-restart-crash
+arrows:
+  - T-empty-create
+  - T-create-ready
+  - T-ready-restart-crash
+cells:
+  - instance/Ready/pod.containerRestart/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    containerName: ome-container
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod reports Ready, which stamps the ReadySince the restart trigger dates evidence against
+    events:
+      - pod.ready: {pod: {index: 0}}
+  - tick: 3
+    note: a minute of steady serving, so the restart that follows is unambiguously after Ready
+    events:
+      - clock.advance: 1m
+  - tick: 4
+    note: the runner container dies and comes back under the same pod, and the policy rebuilds the Instance around the loss
+    events:
+      - pod.containerRestart: {pod: {index: 0}, message: OOMKilled}

@@ -1,0 +1,37 @@
+# An operator asks a serving Instance to move off its node. The adapter
+# answers the request by recording it on the owner, and that record is the
+# only thing the migrate pass reads: it allocates a surge index and stamps
+# the pair before anything is created.
+scenario: T-ready-migrate
+arrows:
+  - T-empty-create
+  - T-create-ready
+  - T-ready-migrate
+  - T-empty-migrate-target
+cells:
+  - instance/Ready/spec.migrateRequest/before
+  - instance/Empty/spec.migrateRequest/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation, so the row records a running revision on a known node
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the operator asks the Instance off node-0, and the migrate pass admits the request and establishes the pair
+    events:
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}

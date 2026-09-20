@@ -491,6 +491,7 @@ cells:
     coverage:
       perm: []
       unit: [TestDetectUpdate_RetryBlockDue_AllowsWithoutFlip, TestDetectUpdate_RetryBlockDueBoundaryExact, TestCreate_RetryBlockBackoffDue_AllowsAndFlips, TestPatchSurgingForUpdate_FlipsBackoffOnAttemptStart]
+      replay: [T-failed-retry]
       kind: []
     status: current
   - state: Failed

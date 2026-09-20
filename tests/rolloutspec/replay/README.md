@@ -92,6 +92,123 @@ plan and the target ControllerRevision from it through the production
 `spec.revision` event is an image rewrite and the new hash follows from
 the engine's own hashing.
 
+## Pod age
+
+Every pod the driver admits — created by the engine or seeded by
+`initial.pods` — is stamped with the driver clock's reading as its
+`creationTimestamp`, because the apiserver stamps one and the fake client
+does not. The stuck-pod escalation measures a wedged pod's dwell from that
+stamp and treats a pod without one as never stuck, so a scenario that wants
+the fast escalation has to age the pod: either advance the clock before the
+waiting reason lands (`T-create-stuck`) or use `timer.stuckPodGrace`
+afterwards (`T-create-stuckgrace`).
+
+## The runner container
+
+`initial.spec.containerName` names the single container the template
+renders; it defaults to the fixture's own name. The restart trigger reads
+restart evidence off the runner container alone and identifies it by the
+name production renders it under, so a scenario driving
+`pod.containerRestart` has to render that name
+(`T-ready-restart-crash`). `pod.containerRestart` bumps the container's
+restart count, files the previous run's termination on `lastState` and
+starts the current run at the clock's reading — the kubelet's in-place
+restart, where the pod keeps its UID and stays Running and the only
+evidence is on the container status.
+
+`initial.spec.env` renders the container's environment. It is part of the
+pod template and therefore of the revision, and unlike the image it is not
+a diff the in-place strategies may converge on, which is what makes an
+`InPlaceOnly` rejection reachable.
+
+## Spec events
+
+`initial.spec` is the driver's mutable owner spec and a spec event is a
+field write on it; every tick rebuilds the plan and the target revision
+from what it says.
+
+- `spec.revision` edits the pod template: `image:` rewrites the container
+  image (the in-place-eligible diff), `env:` rewrites its environment (a
+  diff the in-place strategies refuse), and an edit must name at least one
+  of them.
+- `spec.teardown[deleted]` begins owner deletion. From that pass on the
+  planned index set reads as empty, so every Instance is a scale-down
+  extra and nothing else runs. The `ownerRotated` variant — an owner
+  replaced under a new UID — is not modelled and fails the run rather than
+  quietly reading as an ordinary deletion.
+- `spec.migrateRequest` records an operator migration request on the owner
+  (`{instance, fromNode, reason, uuid}`; an unnamed request is numbered).
+  That record is the only thing the migrate pass reads, so recording it is
+  the whole of consuming the request annotation. It needs
+  `config.migrationAudit`, without which the engine holds every request.
+- `spec.rollbackTarget[set]` pins the roll to a stored revision, named by
+  the `image:` whose template minted it; `[clear]` releases the pin. A pin
+  overrides the rendered template with the stored payload and becomes the
+  roll target, while the owner keeps reporting the rendered template as
+  its update revision.
+- `spec.gangWidth[grow|shrink]` rewrites `to:` as the per-Instance worker
+  count. The width is outside the revision payload, so the expected pod
+  set moves at an unchanged target hash.
+
+`initial.spec.workers` makes the Component multi-pod: one `leader` Runner
+and a `worker` Runner of that size, which is the unit a gang is scheduled
+in. A multi-pod scenario also sets `topologyKey`, because a gang rendered
+without one trips a Warning the engine emits once per process — a one-shot
+no replay can reproduce twice, and therefore not something a golden may
+carry.
+
+## Gangs
+
+`initial.spec.gangScheduling` advertises the scheduler-plugins PodGroup CRD
+as installed. The driver then runs the same PodGroup pass the adapter runs
+ahead of the dispatcher: one observation of the owner's groups, a group
+announced for every multi-pod Instance in the plan before any of its
+members is created, the classification of each group recorded into
+`input.Gangs`, and the inline surge prerequisite the gang-surge op reaches
+back through. PodGroup creates and deletes appear in the trace by name, so
+a golden shows the announce-before-pods ordering; the group's spec does
+not.
+
+`gang.podGroup[<state>]` writes what a group says onto the object itself,
+so the classification the engine reads is the one it derives:
+`Terminating` (deleted behind a finalizer), `Deleted`, `OwnershipConflict`
+(the controller reference rewritten to another owner) and `PhaseFailed`.
+The `Unschedulable` and `ScheduleTimeout` variants have no writer: whether
+a gang can be PLACED never reaches the engine through the PodGroup — it
+arrives on the member pods' `PodScheduled=False/Unschedulable`
+conditions, which `pod.unschedulable` already writes.
+
+A gang scenario also sets `schedulerName`, for the same reason it sets
+`topologyKey`: a gang announced for pods that name no gang-aware scheduler
+draws a once-per-process Warning, and a one-shot cannot be in a golden.
+
+## Timer events
+
+A deterministic harness can only express a timer as a clock move, so every
+`timer.*` event resolves the deadline it is named for out of the state the
+engine itself carries and moves the clock onto it, plus the `slack` the
+scenario names. The slack is required: how far past a deadline an
+observation lands is a property of the walk, not a default the harness may
+invent. A deadline already behind the clock records `already-elapsed` and
+moves nothing.
+
+| event | deadline it resolves |
+|---|---|
+| `timer.operationDeadline` | the earliest in-flight `Operation.Deadline` |
+| `timer.stuckPodGrace` | the earliest `pod.creationTimestamp + config.stuckPodGrace` over the pods holding a terminal waiting reason |
+| `timer.retryAt` | the earliest `retryBlocks[].nextRetryAt` |
+
+Because the deadline is read rather than written, a scenario states no
+duration that config already fixes: `T-create-stuckgrace` sets
+`config.stuckPodGrace` once and `T-failed-retry` never restates the backoff
+its `config.updateRetry` policy computed. An event fired with nothing to
+resolve — no in-flight deadline, no wedged pod, no due block — fails the
+run rather than silently doing nothing.
+
+`timer.teardownDeadline` has no applier. It is decided entirely in the IR
+adapter's teardown pass, outside `workload.Reconcile`, so the driver cannot
+reach the arrows that fire on it (see **Unlocked paths**).
+
 ## Trace format
 
 ```
@@ -231,14 +348,15 @@ or determinism forced a change, and they are the ones to review.
 The table events the driver can stage are the ones the scenarios here need:
 `pod.scheduled`, `pod.containersReady`, `pod.ready`, `pod.servingOn/Off`,
 `pod.terminating`, `pod.deleted`, `pod.phaseTerminal`, `pod.waiting`,
-`pod.unschedulable`, `endpoint.rotationIn/Out`, `api.quotaDenied`,
+`pod.unschedulable`, `pod.containerRestart`, `endpoint.rotationIn/Out`, `api.quotaDenied`,
 `api.invalid`, `spec.revision`, `spec.replicasUp/Down`,
-`spec.pauseTrue/pauseFreeze/unpause`, `spec.strategy`,
-`timer.operationDeadline`, and `clock.advance`. A scenario naming any other declared event fails to load
+`spec.pauseTrue/pauseFreeze/unpause`, `spec.strategy`, `spec.teardown`,
+`spec.migrateRequest`, `spec.rollbackTarget`, `spec.gangWidth`,
+`gang.podGroup`,
+`timer.operationDeadline`, `timer.stuckPodGrace`, `timer.retryAt`, and
+`clock.advance`. A scenario naming any other declared event fails to load
 with that as the reason, so the gap is always visible rather than silent.
 
-Gang (multi-pod) Instances, migration and teardown are not driven yet;
-the driver renders single-pod Instances only.
 
 ## Sensitivity (the recorded mutation check)
 
@@ -269,13 +387,10 @@ reach or does not observe.
 
 Callbacks and deps left unwired:
 
-- `FinalizeInstanceResources` — per-Instance resource teardown; only gang
-  Instances have any, and gangs are not modelled.
+- `FinalizeInstanceResources` — per-Instance resource teardown.
 - `Deps.RenderHook` — production wires it unconditionally to inject peer
   env vars. In-place eligibility diffs on env, so this is the most
   consequential omission on the list.
-- `Deps.EnsureGangPodGroup` — the PodGroup-before-pods choke point for a
-  gang surge.
 - `ScaleUpPodBatchSize` / `ScaleDownPodBatchSize` — left nil, so every
   pass is unbounded and the batch-budget branches never run.
 - `AuthoritativePods` — no preloaded observation, so every destructive
@@ -288,6 +403,14 @@ Effects the driver does not record:
   the ledger the audit package writes is not.
 - PodGroup detail. A PodGroup create or delete is traced by name; its
   spec (minMember, topology key, schedule timeout) is not.
+- Warnings the engine emits once per process (`GangSplitRisk`,
+  `MaybeNoGangScheduler`). Their dedup outlives a run, so the same
+  scenario would trace them on its first replay and not on its second; a
+  gang scenario declares `topologyKey` and `schedulerName` to stay out of
+  both shapes rather than record a line that cannot repeat.
+- The owner's teardown deadline. `timer.teardownDeadline` and the arrows
+  that fire on it are decided in the IR adapter's teardown pass, which
+  removes the finalizer; `workload.Reconcile` never sees it.
 - Timestamps on aggregate conditions and on `LastFailure`, because the
   engine stamps both from the wall clock (see Follow-ups).
 

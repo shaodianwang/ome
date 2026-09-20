@@ -1,0 +1,53 @@
+# A forward roll to v2 completes, and the rollout is then pinned back to the
+# stored v1 revision. The pin overrides the rendered template with the stored
+# payload and becomes the roll target, so the ordinary SurgeThenDrain
+# machinery rolls the Instance backwards; what the owner reports as its
+# update revision stays the rendered v2.
+scenario: T-ready-rollback-surge
+arrows:
+  - T-empty-create
+  - T-create-ready
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-promote
+  - T-ready-rollback-surge
+cells:
+  - instance/Ready/spec.rollbackTarget[set]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start on v1
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the template moves to v2, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement is serving and in rotation beside the source
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 5
+    note: the source leaves rotation, so the drain has converged
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 6
+    note: the drained source is gone and the Instance is Ready on v2
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 7
+    note: the roll is pinned back to the stored v1 revision, which is a fresh surge away from the running one
+    events:
+      - spec.rollbackTarget[set]: {image: registry.example.com/runtime:v1}

@@ -1,0 +1,27 @@
+# The deterministic PodGroup name of a gang under construction turns out to
+# be held by another controller. Nothing this controller does can resolve
+# that, so the members are withheld from the name and the escalation pass
+# fails the Instance on the gang's own evidence.
+scenario: gang-podgroup-ownership-conflict
+cells:
+  - instance/Create/CreatePods/gang.podGroup[OwnershipConflict]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: the group's controller reference is rewritten to another owner, which is a name this controller may not write
+    events:
+      - gang.podGroup[OwnershipConflict]: {instance: 0}

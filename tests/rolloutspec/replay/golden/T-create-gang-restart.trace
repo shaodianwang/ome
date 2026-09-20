@@ -1,0 +1,15 @@
+tick=1 note the gang's PodGroup is announced before its first member, and the Create pass materializes both
+tick=1 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=1 podgroup create name=svc-a-engine-0
+tick=1 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-3363fef6 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 2 pod(s) requested
+tick=1 pod create name=svc-a-engine-0-leader-0 revision=3363fef6 incarnation=1 ordinal=0
+tick=1 pod create name=svc-a-engine-0-worker-0 revision=3363fef6 incarnation=1 ordinal=0
+tick=1 pass result=after:5s
+tick=2 note the worker is lost while the leader still runs, so the restart pass claims the half-formed gang ahead of Create
+tick=2 apply pod.deleted[source] pod=svc-a-engine-0-worker-0 now=t+0s
+tick=2 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=2 row=0 write incarnation=2 phase=Restarting runningRevision=nil readySince=nil op=op#2{type=Restart step=Drain target=svc-a-engine-3363fef6 reason=gang member lost: 1 of 2 pods present started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=2 event Warning RestartTriggered OMENative component=engine instance=0 restart triggered: gang member lost: 1 of 2 pods present (incarnation=2)
+tick=2 pod delete name=svc-a-engine-0-leader-0 grace=default
+tick=2 pass result=after:5s

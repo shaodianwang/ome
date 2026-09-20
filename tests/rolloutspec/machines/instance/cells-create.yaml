@@ -82,7 +82,7 @@ cells:
     guard: RecreateInstanceOnPodRestart, a multi-pod Instance that still has a surviving member, and no RetryBlock denying the rebuild revision
     note: partial gang loss hands the whole Instance to the restart pass, which runs ahead of Create and which the create gate defers to; every other shape — single pod, total loss, or a policy without instance recreate — stays in this state and the missing pod is re-created inside the same attempt at the same operation and deadline
     placement: unit
-    coverage: {perm: [], unit: [TestCreate_RecreateInstance_DefersPartialGangToRestart, TestCreate_NonRecreatePolicy_SelfHealsMissingPod, TestCreate_PartialPods_CreatesOnlyMissing], kind: []}
+    coverage: {perm: [], unit: [TestCreate_RecreateInstance_DefersPartialGangToRestart, TestCreate_NonRecreatePolicy_SelfHealsMissingPod, TestCreate_PartialPods_CreatesOnlyMissing], kind: [], replay: [T-create-gang-restart]}
     status: current
 
   - state: Create/CreatePods
@@ -105,7 +105,7 @@ cells:
     note: a Create attempt is always disposable, so the fast escalator routes it through the disposition, which records a RetryBlock against the attempt's pinned revision and clears the operation in one write; the pin is what keeps a corrective revision from being charged for the bad one
     invariants: [one.operation.per.instance]
     placement: perm
-    coverage: {perm: [], unit: [TestDispose_WorkloadCaused_EachReason, TestDispose_PinnedCreateUsesAttemptRevisionAfterCorrectiveEdit, TestEscalateStuckPodFailures_DisposesSinglePodWorkloadCaused], kind: []}
+    coverage: {perm: [], unit: [TestDispose_WorkloadCaused_EachReason, TestDispose_PinnedCreateUsesAttemptRevisionAfterCorrectiveEdit, TestEscalateStuckPodFailures_DisposesSinglePodWorkloadCaused], kind: [], replay: [T-create-stuck]}
     status: decided
 
   - state: Create/CreatePods
@@ -506,7 +506,7 @@ cells:
     guard: an attempt is in flight to end and the pod set is not fully serving
     note: a deterministic name held by a controller that is not this owner is the one PodGroup state nothing here resolves, so the attempt ends on it - LastFailure carries PodGroupOwnershipConflict naming the foreign controller, Phase goes Failed and the Operation is preserved for the abandon path. ENVIRONMENT-CAUSED - no corrected pod template frees a name someone else owns - so no RetryBlock is recorded. The verdict is scoped to this row - the PodGroup pass records the collision and finishes the other gangs rather than aborting the Component - and the warning is withheld on a row already Failed for this reason, so an unresolved collision announces itself once
     placement: unit
-    coverage: {perm: [], unit: [TestEscalation_GangOwnershipConflictFailsOnlyItsRow, TestEnsurePodGroupsWithState_ForeignCollisionAndTerminatingGate], kind: []}
+    coverage: {perm: [], unit: [TestEscalation_GangOwnershipConflictFailsOnlyItsRow, TestEnsurePodGroupsWithState_ForeignCollisionAndTerminatingGate], kind: [], replay: [gang-podgroup-ownership-conflict]}
     status: decided
 
   - state: Create/CreatePods
@@ -674,7 +674,7 @@ cells:
     note: the grace is measured from pod creationTimestamp by the stuck-pod evidence in status_aggregate.go, which reports a pod held in a terminal kubelet waiting reason past it, and escalation.go routes a disposable Create attempt through the disposition, which records a RetryBlock against the pinned revision or a relocation directive and clears the operation in one write
     invariants: [one.operation.per.instance]
     placement: perm
-    coverage: {perm: [], unit: [TestEscalateStuckPodFailures_DisposesSinglePodWorkloadCaused], kind: []}
+    coverage: {perm: [], unit: [TestEscalateStuckPodFailures_DisposesSinglePodWorkloadCaused], kind: [], replay: [T-create-stuckgrace]}
     status: current
 
   - state: Create/CreatePods
