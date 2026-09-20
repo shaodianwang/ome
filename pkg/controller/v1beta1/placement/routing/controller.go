@@ -27,6 +27,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	placementcontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/placement"
+	placementendpoint "github.com/ome-projects/ome/pkg/controller/v1beta1/placement/endpoint"
 	"github.com/ome-projects/ome/pkg/validation"
 )
 
@@ -362,15 +363,33 @@ func routableMessage(reason string, status metav1.ConditionStatus, entries int) 
 // exists or when the object is not controlled by this ISVC (never delete
 // something we did not generate).
 func (r *Reconciler) reap(ctx context.Context, isvc *v1beta1.InferenceService) error {
+	if r.APIReader == nil {
+		return fmt.Errorf("reap TrafficMap: API reader is not configured")
+	}
 	tm := &v1beta1.TrafficMap{}
 	key := types.NamespacedName{Name: isvc.Name, Namespace: isvc.Namespace}
-	if err := r.Get(ctx, key, tm); err != nil {
+	if err := r.APIReader.Get(ctx, key, tm); err != nil {
 		return client.IgnoreNotFound(err)
 	}
 	if !controlledByInferenceService(tm, isvc) || !tm.DeletionTimestamp.IsZero() {
 		return nil
 	}
+	// Give the inactive publisher a chance to restore its finalizer before the
+	// deletion request can erase a durable cleanup journal.
+	if trafficMapNeedsPublisherFinalizerRepair(tm) {
+		return nil
+	}
 	return client.IgnoreNotFound(r.Delete(ctx, tm))
+}
+
+func trafficMapNeedsPublisherFinalizerRepair(trafficMap *v1beta1.TrafficMap) bool {
+	return trafficMapHasPublisherClaims(trafficMap) &&
+		!controllerutil.ContainsFinalizer(trafficMap, placementendpoint.TrafficMapPublisherFinalizer)
+}
+
+func trafficMapHasPublisherClaims(trafficMap *v1beta1.TrafficMap) bool {
+	return trafficMap != nil && trafficMap.Status.Publisher != nil &&
+		len(trafficMap.Status.Publisher.ClaimedTargets) != 0
 }
 
 func controlledByInferenceService(

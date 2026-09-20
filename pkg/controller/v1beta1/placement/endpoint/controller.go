@@ -2,6 +2,8 @@ package endpoint
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net"
 	"slices"
 	"sort"
@@ -25,7 +27,10 @@ import (
 // plane and realizes the Gateway API publication lifecycle.
 type Reconciler struct {
 	client.Client
-	Log logr.Logger
+	// APIReader provides the authoritative TrafficMap view used to serialize
+	// legacy endpoint effects behind TrafficMap publisher cleanup.
+	APIReader client.Reader
+	Log       logr.Logger
 	// Publisher is the Gateway API traffic backend. Required.
 	Publisher EndpointPublisher
 	// Config supplies the config-driven host/gateway/port/namespace inputs.
@@ -48,12 +53,26 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 		return ctrl.Result{}, err
 	}
+	handoffPending, err := r.legacyTrafficMapHandoffPending(ctx, req.NamespacedName)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if handoffPending {
+		return ctrl.Result{}, nil
+	}
 
 	// Backend not configured: tear down anything already published — it carries no
 	// OwnerReferences, so dropping the finalizer without unpublishing leaks it —
 	// and release the object, deleted or not.
 	if !r.Config.IsEnabled() {
 		if controllerutil.ContainsFinalizer(isvc, EndpointFinalizer) {
+			handoffPending, err := r.legacyTrafficMapHandoffPending(ctx, client.ObjectKeyFromObject(isvc))
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if handoffPending {
+				return ctrl.Result{}, nil
+			}
 			if err := r.Publisher.Unpublish(ctx, isvc); err != nil {
 				return ctrl.Result{}, err
 			}
@@ -69,7 +88,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return r.reconcileDelete(ctx, isvc)
 	}
 
-	target, ok, err := r.resolveTarget(isvc, r.trafficMapWeights(ctx, isvc))
+	target, ok, err := r.resolveTarget(isvc, nil)
 	if err != nil {
 		// An invalid global-host template is an operator configuration error;
 		// surface it and retry on the next change rather than hot-looping.
@@ -86,6 +105,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	if err := r.ensureFinalizer(ctx, isvc); err != nil {
 		return requeueOnConflict(err)
+	}
+	handoffPending, err = r.legacyTrafficMapHandoffPending(ctx, client.ObjectKeyFromObject(isvc))
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if handoffPending {
+		return ctrl.Result{}, nil
 	}
 	if err := r.Publisher.Publish(ctx, isvc, target); err != nil {
 		return ctrl.Result{}, err
@@ -133,26 +159,31 @@ func (r *Reconciler) resolveTarget(isvc *v1beta1.InferenceService, weights map[s
 	}, true, nil
 }
 
-// trafficMapWeights returns the per-cluster apply-verbatim weights the routing
-// controller published for the ISVC in its TrafficMap, keyed by cluster, or nil
-// when no TrafficMap exists (routing disabled, or not yet generated). The
-// TrafficMap is an optional input: a missing map — or a read that fails — leaves
-// the reactive ready-replica weights in place, so the publisher works unchanged
-// when routing is off.
-func (r *Reconciler) trafficMapWeights(ctx context.Context, isvc *v1beta1.InferenceService) map[string]int32 {
+// legacyTrafficMapHandoffPending reads the authoritative handoff state for the
+// legacy publisher. A publisher finalizer or durable publisher-owned status
+// blocks all legacy effects. TrafficMap weights belong exclusively to the
+// TrafficMap publisher path; the legacy path always uses placement weights.
+func (r *Reconciler) legacyTrafficMapHandoffPending(
+	ctx context.Context,
+	key types.NamespacedName,
+) (bool, error) {
+	if r.APIReader == nil {
+		return false, errors.New("endpoint publisher API reader is not configured")
+	}
 	tm := &v1beta1.TrafficMap{}
-	if err := r.Get(ctx, types.NamespacedName{Name: isvc.Name, Namespace: isvc.Namespace}, tm); err != nil {
-		if !apierrors.IsNotFound(err) {
-			r.Log.V(1).Info("endpoint: TrafficMap read failed, using reactive weights",
-				"isvc", client.ObjectKeyFromObject(isvc).String(), "err", err.Error())
+	if err := r.APIReader.Get(ctx, key, tm); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
 		}
-		return nil
+		return false, fmt.Errorf("read TrafficMap handoff state for %s: %w", key, err)
 	}
-	weights := make(map[string]int32, len(tm.Spec.Entries))
-	for _, e := range tm.Spec.Entries {
-		weights[e.Cluster] = e.Weight
-	}
-	return weights
+	return trafficMapBlocksLegacyPublisher(tm), nil
+}
+
+func trafficMapBlocksLegacyPublisher(trafficMap *v1beta1.TrafficMap) bool {
+	return trafficMap != nil &&
+		(controllerutil.ContainsFinalizer(trafficMap, TrafficMapPublisherFinalizer) ||
+			publisherStatusNeedsFinalizer(trafficMap.Status, true))
 }
 
 // applyTrafficMapWeights overlays the TrafficMap's capacity-aware, health-gated
@@ -220,6 +251,13 @@ func (r *Reconciler) reconcileUnpublish(ctx context.Context, isvc *v1beta1.Infer
 		// Never published; nothing to clean and no finalizer to drop.
 		return ctrl.Result{}, nil
 	}
+	handoffPending, err := r.legacyTrafficMapHandoffPending(ctx, client.ObjectKeyFromObject(isvc))
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if handoffPending {
+		return ctrl.Result{}, nil
+	}
 	if err := r.Publisher.Unpublish(ctx, isvc); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -232,6 +270,13 @@ func (r *Reconciler) reconcileUnpublish(ctx context.Context, isvc *v1beta1.Infer
 
 func (r *Reconciler) reconcileDelete(ctx context.Context, isvc *v1beta1.InferenceService) (ctrl.Result, error) {
 	if !controllerutil.ContainsFinalizer(isvc, EndpointFinalizer) {
+		return ctrl.Result{}, nil
+	}
+	handoffPending, err := r.legacyTrafficMapHandoffPending(ctx, client.ObjectKeyFromObject(isvc))
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if handoffPending {
 		return ctrl.Result{}, nil
 	}
 	if err := r.Publisher.Unpublish(ctx, isvc); err != nil {
@@ -271,6 +316,9 @@ func requeueOnConflict(err error) (ctrl.Result, error) {
 // deletions, and the global-host annotation — plus TrafficMap publication-input
 // changes. Routine ISVC and TrafficMap provenance churn does not re-publish.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.APIReader == nil {
+		return fmt.Errorf("endpoint publisher API reader is not configured")
+	}
 	// Named explicitly so it doesn't collide with the placement controller
 	// (both do For(&InferenceService{})).
 	return ctrl.NewControllerManagedBy(mgr).
@@ -296,6 +344,10 @@ var trafficMapPublishChange = predicate.Funcs{
 		newTrafficMap, ok2 := e.ObjectNew.(*v1beta1.TrafficMap)
 		if !ok1 || !ok2 || oldTrafficMap == nil || newTrafficMap == nil {
 			return true // unexpected type: fail safe
+		}
+		if trafficMapBlocksLegacyPublisher(oldTrafficMap) != trafficMapBlocksLegacyPublisher(newTrafficMap) ||
+			oldTrafficMap.DeletionTimestamp.IsZero() != newTrafficMap.DeletionTimestamp.IsZero() {
+			return true
 		}
 		return !trafficMapPublicationEqual(oldTrafficMap, newTrafficMap)
 	},

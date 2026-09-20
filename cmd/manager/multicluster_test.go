@@ -235,6 +235,169 @@ func TestValidateDispatcherMode(t *testing.T) {
 	}
 }
 
+func TestResolveTrafficMapPublisherMode(t *testing.T) {
+	tests := []struct {
+		name     string
+		routing  placementrouting.Config
+		expected trafficMapPublisherMode
+	}{
+		{
+			name:    "built-in active",
+			routing: placementrouting.Config{Enabled: true},
+			expected: trafficMapPublisherMode{
+				useBuiltInGateway: true,
+				trafficMapActive:  true,
+			},
+		},
+		{
+			name:    "built-in inactive keeps legacy endpoint publication",
+			routing: placementrouting.Config{},
+			expected: trafficMapPublisherMode{
+				useBuiltInGateway: true,
+				useLegacyGateway:  true,
+			},
+		},
+		{
+			name: "explicit built-in active",
+			routing: placementrouting.Config{
+				Enabled: true,
+				Publisher: placementrouting.PublisherConfig{
+					Name: placementendpoint.GatewayAPITrafficMapPublisherName,
+				},
+			},
+			expected: trafficMapPublisherMode{
+				useBuiltInGateway: true,
+				trafficMapActive:  true,
+			},
+		},
+		{
+			name: "explicit built-in inactive keeps legacy endpoint publication",
+			routing: placementrouting.Config{
+				Publisher: placementrouting.PublisherConfig{
+					Name: placementendpoint.GatewayAPITrafficMapPublisherName,
+				},
+			},
+			expected: trafficMapPublisherMode{
+				useBuiltInGateway: true,
+				useLegacyGateway:  true,
+			},
+		},
+		{
+			name: "custom active",
+			routing: placementrouting.Config{
+				Enabled:   true,
+				Publisher: placementrouting.PublisherConfig{Name: "custom"},
+			},
+			expected: trafficMapPublisherMode{trafficMapActive: true},
+		},
+		{
+			name: "custom inactive has cleanup only",
+			routing: placementrouting.Config{
+				Publisher: placementrouting.PublisherConfig{Name: "custom"},
+			},
+			expected: trafficMapPublisherMode{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, resolveTrafficMapPublisherMode(tt.routing))
+		})
+	}
+}
+
+func TestGatewayTrafficMapResyncInterval(t *testing.T) {
+	tests := []struct {
+		name            string
+		publisherResync time.Duration
+		endpointSlices  placementendpoint.GatewayBackendEndpointSliceConfig
+		expected        time.Duration
+	}{
+		{
+			name:            "EndpointSlices disabled",
+			publisherResync: 2 * time.Minute,
+			endpointSlices: placementendpoint.GatewayBackendEndpointSliceConfig{
+				AddressRefreshInterval: time.Minute,
+			},
+			expected: 2 * time.Minute,
+		},
+		{
+			name:            "address refresh is earlier",
+			publisherResync: 2 * time.Minute,
+			endpointSlices: placementendpoint.GatewayBackendEndpointSliceConfig{
+				Enabled:                true,
+				AddressRefreshInterval: time.Minute,
+			},
+			expected: time.Minute,
+		},
+		{
+			name:            "publisher resync is earlier",
+			publisherResync: 30 * time.Second,
+			endpointSlices: placementendpoint.GatewayBackendEndpointSliceConfig{
+				Enabled:                true,
+				AddressRefreshInterval: time.Minute,
+			},
+			expected: 30 * time.Second,
+		},
+		{
+			name: "configured address refresh is the only positive cadence",
+			endpointSlices: placementendpoint.GatewayBackendEndpointSliceConfig{
+				Enabled:                true,
+				AddressRefreshInterval: time.Minute,
+			},
+			expected: time.Minute,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := placementendpoint.Config{
+				GatewayBackend: placementendpoint.GatewayBackendConfig{EndpointSlices: tt.endpointSlices},
+			}
+			assert.Equal(t, tt.expected, gatewayTrafficMapResyncInterval(tt.publisherResync, cfg))
+		})
+	}
+}
+
+func TestNewGatewayTrafficMapPublisher(t *testing.T) {
+	kubeClient := fakeclient.NewClientBuilder().Build()
+	apiReader := fakeclient.NewClientBuilder().Build()
+	endpointConfig := placementendpoint.Config{
+		GatewayBackend: placementendpoint.GatewayBackendConfig{
+			EndpointSlices: placementendpoint.GatewayBackendEndpointSliceConfig{
+				Enabled:                true,
+				AddressRefreshInterval: time.Minute,
+			},
+		},
+	}
+	publisherConfig := placementrouting.PublisherConfig{
+		Name:           placementendpoint.GatewayAPITrafficMapPublisherName,
+		ResyncInterval: 2 * time.Minute,
+	}
+
+	got, err := newGatewayTrafficMapPublisher(
+		kubeClient,
+		apiReader,
+		publisherConfig,
+		endpointConfig,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, placementendpoint.GatewayAPITrafficMapPublisherName, got.Publisher.Name())
+	assert.Empty(t, got.GlobalOptions)
+	assert.Equal(t, time.Minute, got.ResyncInterval)
+
+	publisherConfig.Options = map[string]string{"unsupported": "value"}
+	_, err = newGatewayTrafficMapPublisher(
+		kubeClient,
+		apiReader,
+		publisherConfig,
+		endpointConfig,
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not accept global options")
+}
+
 func TestNewTrafficMapPublisherReconciler(t *testing.T) {
 	kubeClient := fakeclient.NewClientBuilder().Build()
 	apiReader := fakeclient.NewClientBuilder().Build()
@@ -255,4 +418,9 @@ func TestNewTrafficMapPublisherReconciler(t *testing.T) {
 	assert.Equal(t, 2*time.Minute, got.RequeueAfter)
 	assert.True(t, got.Active)
 	assert.True(t, got.LeaderElectionEnabled)
+
+	inactive := newTrafficMapPublisherReconciler(kubeClient, apiReader, selected, false, true)
+	assert.Zero(t, inactive.RequeueAfter)
+	assert.False(t, inactive.Active)
+	assert.True(t, inactive.LeaderElectionEnabled)
 }

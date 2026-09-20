@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	clocktesting "k8s.io/utils/clock/testing"
@@ -27,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	placementendpoint "github.com/ome-projects/ome/pkg/controller/v1beta1/placement/endpoint"
 )
 
 const (
@@ -85,6 +87,26 @@ func newReconciler(t *testing.T, cfg Config, objs ...client.Object) (*Reconciler
 		WithStatusSubresource(&v1beta1.InferenceService{}, &v1beta1.TrafficMap{}).
 		WithObjects(objs...).Build()
 	return &Reconciler{Client: c, APIReader: c, Log: log.Log, Config: cfg}, c
+}
+
+// trafficMapBlindClient simulates a stale informer cache while the API reader
+// still exposes the authoritative TrafficMap cleanup journal.
+type trafficMapBlindClient struct {
+	client.Client
+}
+
+func (c trafficMapBlindClient) Get(
+	ctx context.Context,
+	key client.ObjectKey,
+	object client.Object,
+	opts ...client.GetOption,
+) error {
+	if _, ok := object.(*v1beta1.TrafficMap); ok {
+		return apierrors.NewNotFound(schema.GroupResource{
+			Group: v1beta1.SchemeGroupVersion.Group, Resource: "trafficmaps",
+		}, key.Name)
+	}
+	return c.Client.Get(ctx, key, object, opts...)
 }
 
 func reconcile(t *testing.T, r *Reconciler) ctrl.Result {
@@ -379,6 +401,69 @@ func TestReconcile_DisabledReapsExistingTrafficMap(t *testing.T) {
 
 	_, ok := getTrafficMap(t, c)
 	assert.False(t, ok, "disabled controller should reap the TrafficMap it owns")
+}
+
+func TestReconcile_DisabledDefersReapUntilClaimFinalizerIsRepaired(t *testing.T) {
+	isvc := splitISVC([]string{"a"}, []int32{3}, []int32{3})
+	existing := &v1beta1.TrafficMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testName,
+			Namespace: testNS,
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
+			},
+		},
+		Status: v1beta1.TrafficMapStatus{Publisher: &v1beta1.TrafficMapPublisherStatus{
+			PublisherName:  "gatewayapi",
+			ClaimedTargets: []string{"v1:httproute:prod/svc-global"},
+		}},
+	}
+	r, apiClient := newReconciler(t, Config{Enabled: false}, isvc, existing)
+	r.Client = trafficMapBlindClient{Client: apiClient}
+
+	reconcile(t, r)
+
+	deferred, exists := getTrafficMap(t, apiClient)
+	require.True(t, exists)
+	assert.True(t, deferred.DeletionTimestamp.IsZero(), "a claimed map cannot be deleted before finalizer repair")
+	assert.Equal(t, existing.Status.Publisher.ClaimedTargets, deferred.Status.Publisher.ClaimedTargets)
+
+	deferred.Finalizers = append(deferred.Finalizers, placementendpoint.TrafficMapPublisherFinalizer)
+	require.NoError(t, apiClient.Update(context.Background(), deferred))
+	reconcile(t, r)
+
+	terminating, exists := getTrafficMap(t, apiClient)
+	require.True(t, exists, "the repaired finalizer retains the map for publisher cleanup")
+	assert.False(t, terminating.DeletionTimestamp.IsZero())
+	require.NotNil(t, terminating.Status.Publisher)
+	assert.Equal(t, existing.Status.Publisher.ClaimedTargets, terminating.Status.Publisher.ClaimedTargets)
+}
+
+func TestReconcile_DisabledReapsPublisherStatusWithoutClaims(t *testing.T) {
+	isvc := splitISVC([]string{"a"}, []int32{3}, []int32{3})
+	existing := &v1beta1.TrafficMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testName,
+			Namespace: testNS,
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
+			},
+		},
+		Status: v1beta1.TrafficMapStatus{
+			Publisher:                    &v1beta1.TrafficMapPublisherStatus{PublisherName: "stateless"},
+			Programmed:                   true,
+			ObservedTrafficMapGeneration: 7,
+			GatewayRef: &v1beta1.TrafficMapGatewayRef{
+				Group: "gateway.networking.k8s.io", Kind: "HTTPRoute", Name: "svc-global",
+			},
+		},
+	}
+	r, c := newReconciler(t, Config{Enabled: false}, isvc, existing)
+
+	reconcile(t, r)
+
+	_, exists := getTrafficMap(t, c)
+	assert.False(t, exists, "status without target claims must not require finalizer repair")
 }
 
 func TestReconcile_UnownedTrafficMapIsNeverMutated(t *testing.T) {

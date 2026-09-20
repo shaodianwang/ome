@@ -10,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"knative.dev/pkg/apis"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -47,10 +48,73 @@ func newReconciler(t *testing.T, cfg Config, objs ...client.Object) (*Reconciler
 		WithObjects(objs...).Build()
 	return &Reconciler{
 		Client:    c,
+		APIReader: c,
 		Log:       log.Log,
 		Publisher: NewGatewayAPIPublisher(c, cfg),
 		Config:    cfg,
 	}, c
+}
+
+type recordingEndpointPublisher struct {
+	published   []Target
+	unpublished int
+}
+
+func (p *recordingEndpointPublisher) Publish(_ context.Context, _ *v1beta1.InferenceService, target Target) error {
+	p.published = append(p.published, cloneGatewayAPITarget(target))
+	return nil
+}
+
+func (p *recordingEndpointPublisher) Unpublish(context.Context, *v1beta1.InferenceService) error {
+	p.unpublished++
+	return nil
+}
+
+func (*recordingEndpointPublisher) Name() string { return "recording" }
+
+// trafficMapBlindClient simulates an informer cache that has not observed a
+// TrafficMap which is already visible through the direct API reader.
+type trafficMapBlindClient struct {
+	client.Client
+}
+
+func (c trafficMapBlindClient) Get(
+	ctx context.Context,
+	key client.ObjectKey,
+	object client.Object,
+	opts ...client.GetOption,
+) error {
+	if _, ok := object.(*v1beta1.TrafficMap); ok {
+		return apierrors.NewNotFound(schema.GroupResource{
+			Group: v1beta1.SchemeGroupVersion.Group, Resource: "trafficmaps",
+		}, key.Name)
+	}
+	return c.Client.Get(ctx, key, object, opts...)
+}
+
+// trafficMapAppearingReader simulates a TrafficMap publisher acquiring its
+// durable handoff state between the legacy reconciler's initial check and its
+// external publish or unpublish call.
+type trafficMapAppearingReader struct {
+	client.Reader
+	trafficMapReads int
+}
+
+func (r *trafficMapAppearingReader) Get(
+	ctx context.Context,
+	key client.ObjectKey,
+	object client.Object,
+	opts ...client.GetOption,
+) error {
+	if _, ok := object.(*v1beta1.TrafficMap); ok {
+		r.trafficMapReads++
+		if r.trafficMapReads == 1 {
+			return apierrors.NewNotFound(schema.GroupResource{
+				Group: v1beta1.SchemeGroupVersion.Group, Resource: "trafficmaps",
+			}, key.Name)
+		}
+	}
+	return r.Reader.Get(ctx, key, object, opts...)
 }
 
 func reconcile(t *testing.T, r *Reconciler) {
@@ -96,7 +160,7 @@ func TestReconcile_GatewayBackendSchedulesAddressRefresh(t *testing.T) {
 	publisher := NewGatewayAPIPublisher(c, cfg, WithBackendAddressResolver(staticBackendAddressResolver{
 		"cluster-a": {{Address: "192.0.2.10", Type: "IPv4"}},
 	}))
-	r := &Reconciler{Client: c, Log: log.Log, Publisher: publisher, Config: cfg}
+	r := &Reconciler{Client: c, APIReader: c, Log: log.Log, Publisher: publisher, Config: cfg}
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "svc", Namespace: "prod"},
@@ -148,10 +212,11 @@ func TestReconcile_UnplacedTearsDownAndDropsFinalizer(t *testing.T) {
 	assert.False(t, controllerutil.ContainsFinalizer(got, EndpointFinalizer), "finalizer dropped after teardown")
 }
 
-func TestReconcile_PublishesTrafficMapWeights(t *testing.T) {
+func TestReconcile_LegacyPublisherIgnoresTrafficMapWeights(t *testing.T) {
 	// A Split ISVC with two admitted homes whose reactive ready-replica ratio is
 	// 5:2, plus a TrafficMap the routing controller published carrying a
-	// capacity-aware 1:3 split. The route must honor the TrafficMap.
+	// capacity-aware 1:3 split. Once the publisher handoff is released, the
+	// legacy route must use the reactive placement weights.
 	isvc := &v1beta1.InferenceService{
 		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "prod", UID: "uid-1"},
 		Status: v1beta1.InferenceServiceStatus{Placement: &v1beta1.PlacementStatus{
@@ -183,8 +248,124 @@ func TestReconcile_PublishesTrafficMapWeights(t *testing.T) {
 	require.NotNil(t, refs[0].Weight)
 	require.NotNil(t, refs[1].Weight)
 	// backendRefs are cluster-sorted: a then b.
-	assert.Equal(t, int32(1), *refs[0].Weight, "home a takes the TrafficMap weight, not its 5 ready replicas")
-	assert.Equal(t, int32(3), *refs[1].Weight, "home b takes the TrafficMap weight, not its 2 ready replicas")
+	assert.Equal(t, int32(5), *refs[0].Weight)
+	assert.Equal(t, int32(2), *refs[1].Weight)
+}
+
+func TestReconcile_AuthoritativeTrafficMapStateBlocksLegacyEffects(t *testing.T) {
+	tests := []struct {
+		name       string
+		trafficMap *v1beta1.TrafficMap
+	}{
+		{
+			name: "publisher finalizer",
+			trafficMap: &v1beta1.TrafficMap{ObjectMeta: metav1.ObjectMeta{
+				Name: "svc", Namespace: "prod", Finalizers: []string{TrafficMapPublisherFinalizer},
+			}},
+		},
+		{
+			name: "durable publisher status",
+			trafficMap: &v1beta1.TrafficMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "prod"},
+				Status: v1beta1.TrafficMapStatus{Publisher: &v1beta1.TrafficMapPublisherStatus{
+					PublisherName: "gatewayapi", ClaimedTargets: []string{"v1:httproute:prod/svc-global"},
+				}},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			isvc := placedISVC("cluster-a", "svc.prod.cloud-a.example")
+			r, apiClient := newReconciler(t, baseConfig(), isvc, tt.trafficMap)
+			publisher := &recordingEndpointPublisher{}
+			r.Client = trafficMapBlindClient{Client: apiClient}
+			r.APIReader = apiClient
+			r.Publisher = publisher
+
+			reconcile(t, r)
+
+			assert.Empty(t, publisher.published)
+			assert.Zero(t, publisher.unpublished)
+			got := &v1beta1.InferenceService{}
+			require.NoError(t, apiClient.Get(context.Background(), client.ObjectKeyFromObject(isvc), got))
+			assert.NotContains(t, got.Finalizers, EndpointFinalizer)
+		})
+	}
+}
+
+func TestReconcile_RechecksTrafficMapImmediatelyBeforeEffects(t *testing.T) {
+	trafficMap := &v1beta1.TrafficMap{ObjectMeta: metav1.ObjectMeta{
+		Name: "svc", Namespace: "prod", Finalizers: []string{TrafficMapPublisherFinalizer},
+	}}
+
+	t.Run("publish", func(t *testing.T) {
+		isvc := placedISVC("cluster-a", "svc.prod.cloud-a.example")
+		r, apiClient := newReconciler(t, baseConfig(), isvc, trafficMap.DeepCopy())
+		publisher := &recordingEndpointPublisher{}
+		reader := &trafficMapAppearingReader{Reader: apiClient}
+		r.APIReader = reader
+		r.Publisher = publisher
+
+		reconcile(t, r)
+
+		assert.Empty(t, publisher.published)
+		assert.Equal(t, 2, reader.trafficMapReads)
+	})
+
+	t.Run("unpublish", func(t *testing.T) {
+		isvc := placedISVC("cluster-a", "svc.prod.cloud-a.example")
+		isvc.Finalizers = []string{EndpointFinalizer}
+		cfg := baseConfig()
+		cfg.GlobalGateway = ""
+		r, apiClient := newReconciler(t, cfg, isvc, trafficMap.DeepCopy())
+		publisher := &recordingEndpointPublisher{}
+		reader := &trafficMapAppearingReader{Reader: apiClient}
+		r.APIReader = reader
+		r.Publisher = publisher
+
+		reconcile(t, r)
+
+		assert.Zero(t, publisher.unpublished)
+		assert.Equal(t, 2, reader.trafficMapReads)
+		got := &v1beta1.InferenceService{}
+		require.NoError(t, apiClient.Get(context.Background(), client.ObjectKeyFromObject(isvc), got))
+		assert.Contains(t, got.Finalizers, EndpointFinalizer)
+	})
+}
+
+func TestReconcile_ReleasedTerminatingTrafficMapUsesReactiveWeights(t *testing.T) {
+	isvc := &v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "prod", UID: "uid-1"},
+		Status: v1beta1.InferenceServiceStatus{Placement: &v1beta1.PlacementStatus{
+			Phase: v1beta1.PlacementPhasePlaced,
+			Candidates: []v1beta1.CandidatePlacement{
+				{Cluster: "a", Phase: v1beta1.CandidatePhaseAdmitted, Endpoint: apis.HTTPS("a.example"), ReadyReplicas: 5},
+				{Cluster: "b", Phase: v1beta1.CandidatePhaseAdmitted, Endpoint: apis.HTTPS("b.example"), ReadyReplicas: 2},
+			},
+		}},
+	}
+	now := metav1.Now()
+	trafficMap := &v1beta1.TrafficMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "svc", Namespace: "prod", DeletionTimestamp: &now,
+			Finalizers: []string{"example.com/unrelated-cleanup"},
+		},
+		Spec: v1beta1.TrafficMapSpec{Entries: []v1beta1.TrafficMapEntry{
+			{Cluster: "a", Weight: 1}, {Cluster: "b", Weight: 3},
+		}},
+	}
+	r, _ := newReconciler(t, baseConfig(), isvc, trafficMap)
+	publisher := &recordingEndpointPublisher{}
+	r.Publisher = publisher
+
+	reconcile(t, r)
+
+	require.Len(t, publisher.published, 1)
+	require.Len(t, publisher.published[0].Homes, 2)
+	assert.Equal(t, int32(5), publisher.published[0].Homes[0].Weight)
+	assert.Equal(t, int32(2), publisher.published[0].Homes[1].Weight)
+	assert.False(t, publisher.published[0].WeightsAuthoritative)
 }
 
 func TestReconcile_PendingNeverPublishes(t *testing.T) {
@@ -584,12 +765,6 @@ func TestTrafficMapPublishChange(t *testing.T) {
 				}
 			},
 		},
-		{
-			name: "publisher status",
-			mutate: func(tm *v1beta1.TrafficMap) {
-				tm.Status.Programmed = true
-			},
-		},
 	}
 	for _, tt := range nonPublicationChanges {
 		t.Run(tt.name+" is dropped", func(t *testing.T) {
@@ -599,6 +774,50 @@ func TestTrafficMapPublishChange(t *testing.T) {
 			assert.False(t, trafficMapPublishChange.Update(trafficMapUpdateEvent(old, nw)))
 		})
 	}
+
+	t.Run("handoff entering passes", func(t *testing.T) {
+		old := base.DeepCopy()
+		nw := base.DeepCopy()
+		nw.Status.Programmed = true
+		assert.True(t, trafficMapPublishChange.Update(trafficMapUpdateEvent(old, nw)))
+	})
+
+	t.Run("handoff release passes while an unrelated finalizer keeps deletion pending", func(t *testing.T) {
+		old := base.DeepCopy()
+		now := metav1.Now()
+		old.DeletionTimestamp = &now
+		old.Finalizers = []string{TrafficMapPublisherFinalizer, "example.com/unrelated-cleanup"}
+		old.Status.Publisher = &v1beta1.TrafficMapPublisherStatus{
+			PublisherName: "gatewayapi", ClaimedTargets: []string{"v1:httproute:prod/svc-global"},
+		}
+		nw := old.DeepCopy()
+		nw.Finalizers = []string{"example.com/unrelated-cleanup"}
+		nw.Status.Publisher = nil
+
+		assert.True(t, trafficMapPublishChange.Update(trafficMapUpdateEvent(old, nw)))
+	})
+
+	t.Run("publisher status churn while handoff remains pending is dropped", func(t *testing.T) {
+		old := base.DeepCopy()
+		old.Finalizers = []string{TrafficMapPublisherFinalizer}
+		old.Status.Publisher = &v1beta1.TrafficMapPublisherStatus{
+			PublisherName: "gatewayapi", ClaimedTargets: []string{"v1:httproute:prod/svc-global"},
+		}
+		nw := old.DeepCopy()
+		nw.Status.Programmed = true
+		nw.Status.ObservedTrafficMapGeneration = 2
+
+		assert.False(t, trafficMapPublishChange.Update(trafficMapUpdateEvent(old, nw)))
+	})
+
+	t.Run("deletion transition passes", func(t *testing.T) {
+		old := base.DeepCopy()
+		nw := base.DeepCopy()
+		now := metav1.Now()
+		nw.DeletionTimestamp = &now
+
+		assert.True(t, trafficMapPublishChange.Update(trafficMapUpdateEvent(old, nw)))
+	})
 
 	tests := []struct {
 		name   string
@@ -657,4 +876,9 @@ func TestTrafficMapPublishChange(t *testing.T) {
 			ObjectOld: &corev1.Service{}, ObjectNew: &corev1.Service{},
 		}))
 	})
+}
+
+func TestSetupWithManagerRequiresAPIReader(t *testing.T) {
+	err := (&Reconciler{}).SetupWithManager(nil)
+	require.ErrorContains(t, err, "API reader is not configured")
 }
