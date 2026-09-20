@@ -1,3 +1,4 @@
+{{- $routingPublisher := .Values.ome.multicluster.config.routing.publisher | default dict -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -218,9 +219,9 @@ data:
           "maxAge": {{ .maxAge | quote }}
         }{{- end }},
         "publisher": {
-          "name": {{ .Values.ome.multicluster.config.routing.publisher.name | default "" | quote }},
-          "resyncInterval": {{ .Values.ome.multicluster.config.routing.publisher.resyncInterval | default "" | quote }},
-          "options": {{ .Values.ome.multicluster.config.routing.publisher.options | default dict | toJson }}
+          "name": {{ $routingPublisher.name | default "" | quote }},
+          "resyncInterval": {{ $routingPublisher.resyncInterval | default "1m" | quote }},
+          "options": {{ $routingPublisher.options | default dict | toJson }}
         }
       }
     }

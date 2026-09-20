@@ -248,6 +248,12 @@ routing outside this chart must set `routing.publisher.resyncInterval`
 explicitly. Cleanup while disabled is event-driven and does not require a
 resync interval.
 
+Earlier chart releases represented an unset publisher as `publisher: []`.
+During an upgrade, the chart accepts that legacy value (and `publisher: null`)
+and normalizes it to the built-in Gateway API publisher with the chart's
+one-minute resync interval. New values files should use the mapping form shown
+in `values.yaml` so the selected publisher and cadence remain explicit.
+
 Upgrading from the legacy InferenceService-owned Gateway publisher requires a
 drain by the old binary:
 

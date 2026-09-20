@@ -9,6 +9,48 @@ fail() {
   exit 1
 }
 
+assert_default_trafficmap_publisher() {
+  local rendered_config="$1"
+  local scenario="$2"
+  local multicluster_json
+  local compact_multicluster_json
+
+  multicluster_json="$(awk '
+    /^  multicluster: \|-$/ { capture = 1; next }
+    capture && /^  [[:alnum:]_-]+: \|-$/ { exit }
+    capture { sub(/^    /, ""); print }
+  ' <<<"${rendered_config}")"
+  compact_multicluster_json="$(tr -d '[:space:]' <<<"${multicluster_json}")"
+  grep -Fq '"publisher":{"name":"","resyncInterval":"1m","options":{}}' \
+    <<<"${compact_multicluster_json}" ||
+    fail "${scenario} did not normalize to the default TrafficMap publisher"
+}
+
+render_legacy_publisher_default() {
+  local legacy_value="$1"
+  local fixture_name="$2"
+  local fixture_dir="${legacy_chart_fixtures}/${fixture_name}"
+
+  cp -R "${chart_dir}" "${fixture_dir}"
+  awk -v legacy_value="${legacy_value}" '
+    /^        publisher:$/ {
+      print "        publisher: " legacy_value
+      replacing = 1
+      replacements++
+      next
+    }
+    replacing && /^        probe:/ { replacing = 0 }
+    !replacing { print }
+    END { if (replacements != 1) exit 1 }
+  ' "${fixture_dir}/values.yaml" >"${fixture_dir}/values.yaml.next" ||
+    fail "could not construct ${fixture_name} publisher values fixture"
+  mv "${fixture_dir}/values.yaml.next" "${fixture_dir}/values.yaml"
+
+  "${helm_bin}" template ome-resources "${fixture_dir}" \
+    --namespace ome \
+    --show-only templates/ome-controller/configmap.yaml
+}
+
 rendered="$("${helm_bin}" template ome-resources "${chart_dir}" --namespace ome)"
 controller="$("${helm_bin}" template ome-resources "${chart_dir}" \
   --namespace ome \
@@ -556,6 +598,16 @@ for expected in \
   grep -Fq "${expected}" <<<"${controller_config}" ||
     fail "default TrafficMap publisher setting was not rendered: ${expected}"
 done
+assert_default_trafficmap_publisher "${controller_config}" "default values"
+
+legacy_chart_fixtures="$(mktemp -d "${TMPDIR:-/tmp}/ome-resources-legacy-publisher.XXXXXX")"
+trap 'rm -rf -- "${legacy_chart_fixtures}"' EXIT
+
+legacy_publisher_list_config="$(render_legacy_publisher_default '[]' list)"
+assert_default_trafficmap_publisher "${legacy_publisher_list_config}" "legacy publisher list"
+
+legacy_publisher_null_config="$(render_legacy_publisher_default 'null' null)"
+assert_default_trafficmap_publisher "${legacy_publisher_null_config}" "null publisher"
 
 routing_publisher_args=(
   --set-string ome.multicluster.config.routing.publisher.name=test-publisher
