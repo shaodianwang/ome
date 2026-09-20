@@ -240,6 +240,9 @@ func TestInferenceReplicaFetchInventory(t *testing.T) {
 	approve("pkg/controller/v1beta1/inferencereplica/release_held.go", "Reconciler.consumeReleaseHeldRequest", "Get", 1, passThroughSpecMetadata+" (annotation consumption)")
 	approve("pkg/controller/v1beta1/inferencereplica/reset_instances.go", "Reconciler.consumeResetInstancesRequest", "Get", 1, passThroughSpecMetadata+" (annotation consumption)")
 
+	// Replay harness pass-through reads.
+	approve("pkg/controller/v1beta1/workload/replay/driver.go", "driver.bumpGeneration", "Get", 1, passThroughSpecMetadata+" (replay owner generation bump)")
+
 	// ISVC-side raw accessors and their callers.
 	approve("pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector/irstatus_read.go", "ComponentIR", "Get", 1, passThroughTopLevelStatus+" (raw accessor for callers that inspect no rows)")
 	approve("pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector/status.go", "aggregateOneComponent", "Get", 1, passThroughTopLevelStatus+" (counters, revisions, RolloutHold, Conditions mirrored onto the ISVC)")
