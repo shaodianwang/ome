@@ -1,0 +1,31 @@
+title: "Rollout engine: behavior lock before restructure"
+oep-number: "0020.2"
+authors:
+  - "@slin1237"
+status: provisional
+creation-date: 2026-09-19
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+# Follows OEP-0020.1, which wrote the instance machine down as tables and
+# decided its cells. This follow-up does two things in strict order: first it
+# locks what pkg/controller/v1beta1/workload does today with a deterministic
+# replay harness, closes coverage on decided cells and makes the KIND lane's
+# red trustworthy; only then does it restructure the engine's root and ops
+# layers around row ownership and event columns. The package layout is
+# unchanged and no per-step files are introduced.
+see-also:
+  - "/oeps/0020.1-rollout-state-machine-spec"   # the tables this OEP derives its scenarios and oracle from
+  - "/oeps/0020-integration-test-framework-v2"  # the KIND and envtest apparatus
+  - "/oeps/0007-omenative-workload-strategy"    # the per-Instance lifecycle being restructured
+
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"
