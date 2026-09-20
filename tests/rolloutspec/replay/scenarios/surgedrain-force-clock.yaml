@@ -1,0 +1,52 @@
+# The promote is waiting for the drained source to disappear and its node
+# has stopped reporting, so the handoff would never finish. The sweep at the
+# top of the update pass is what completes it.
+scenario: surgedrain-force-clock
+arrows:
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-force-clock
+cells:
+  - instance/Update/SurgeDrain/timer.forceDelete[overdueSlack]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    forceDelete: {overdueSlack: 1m, nodeUnreachableThreshold: 5m}
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source is bound to node-0, becomes Ready and enters rotation
+    events:
+      - pod.scheduled[source]: {pod: {index: 0, ordinal: 0}}
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement is serving and in rotation, so the step advances and the source's serving gate is flipped off
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 5
+    note: the source leaves the routed Service, so the drain converges and the source is deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 6
+    note: node-0's kubelet stops acknowledging the deletion, so the source the promote is waiting on stays with nothing holding it
+    events:
+      - pod.stuckTerminating: {pod: {index: 0, ordinal: 0}}
+  - tick: 7
+    note: the overdue clock lands and the sweep force-deletes the wedged source
+    events:
+      - timer.forceDelete[overdueSlack]: {slack: 1s}
+  - tick: 8
+    note: the promote completes on the resulting absence

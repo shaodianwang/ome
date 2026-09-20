@@ -162,7 +162,7 @@ cells:
     guard: "pod overdue past its own deletion deadline, no foreign finalizer, node gone or provably unreachable past the threshold"
     invariants: [delete.by.observed.uid]
     placement: kind
-    coverage: {perm: [], unit: [TestForceDelete_Overdue_OldUnreachableTaint_DeletedWithOptions, TestForceDelete_Overdue_NodeGone_Deleted, TestForceDelete_StaleTaintOnRecoveredNode_ReadyTrueVetoes, TestForceDelete_PreconditionConflictAndNotFound_Success, TestForceDelete_ActionRecordsOnce_NoDoubleLedgerOnReplay], kind: []}
+    coverage: {perm: [], unit: [TestForceDelete_Overdue_OldUnreachableTaint_DeletedWithOptions, TestForceDelete_Overdue_NodeGone_Deleted, TestForceDelete_StaleTaintOnRecoveredNode_ReadyTrueVetoes, TestForceDelete_PreconditionConflictAndNotFound_Success, TestForceDelete_ActionRecordsOnce_NoDoubleLedgerOnReplay], kind: [], replay: [delete-force]}
     status: decided
 
   - state: Delete/Drain
@@ -643,7 +643,7 @@ cells:
     guard: "pod overdue past its own deletion deadline plus the slack, no foreign finalizer, and node-death evidence at least the threshold old"
     invariants: [delete.by.observed.uid]
     placement: kind
-    coverage: {perm: [], unit: [TestForceDelete_Overdue_OldUnreachableTaint_DeletedWithOptions, TestForceDelete_Overdue_NodeGone_Deleted], kind: []}
+    coverage: {perm: [], unit: [TestForceDelete_Overdue_OldUnreachableTaint_DeletedWithOptions, TestForceDelete_Overdue_NodeGone_Deleted], kind: [], replay: [delete-force-clock]}
     status: current
 
   - state: Delete/Drain

@@ -110,6 +110,10 @@ type driver struct {
 	quiet bool
 	// podUIDs numbers the identities the driver assigns on admission.
 	podUIDs int
+	// terminating holds, by pod name, the deletions the driver is keeping
+	// open — the instant each landed on the injected clock, and whether a
+	// dead kubelet is what keeps the object from leaving.
+	terminating map[string]*podTeardown
 	// migrations is the owner's persisted status.migrations list.
 	migrations []types.MigrationRecord
 	// migrationRequests counts the requests the scenario has made, so an
@@ -152,6 +156,7 @@ func newDriver(ctx context.Context, s *Scenario, opts Options) (*driver, error) 
 		expectations: types.NewExpectationsWithClock(clk),
 		spec:         s.Initial.Spec,
 		cfg:          s.Initial.Config,
+		terminating:  map[string]*podTeardown{},
 	}
 	d.recorder = &traceRecorder{trace: d.trace}
 

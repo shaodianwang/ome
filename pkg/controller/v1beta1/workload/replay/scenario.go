@@ -351,6 +351,7 @@ var eventArgKeys = map[string][]string{
 	"pod.servingOn":           {"pod"},
 	"pod.servingOff":          {"pod"},
 	"pod.terminating":         {"pod"},
+	"pod.stuckTerminating":    {"pod"},
 	"pod.deleted":             {"pod"},
 	"pod.phaseTerminal":       {"pod"},
 	"pod.waiting":             {"pod", "container", "message"},
@@ -372,6 +373,7 @@ var eventArgKeys = map[string][]string{
 	"timer.stuckPodGrace":     {"slack"},
 	"timer.retryAt":           {"slack"},
 	"timer.migrationDeadline": {"slack"},
+	"timer.forceDelete":       {"slack"},
 }
 
 // Key renders the event the way a timeline and a trace both spell it.

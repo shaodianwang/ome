@@ -29,6 +29,24 @@ import (
 // then absent — instead of collapsing them into one.
 const podLifecycleFinalizer = "replay.workload.ome.io/pod-lifecycle"
 
+// podTeardown is a deletion the driver is holding open, as the engine has
+// to see it. The fake client stamps a deletion timestamp off the wall
+// clock, which no deadline measured on the injected clock can be compared
+// against, so the driver records the instant the delete landed and the
+// grace the request carried, and presents both on every read.
+//
+// kubeletStuck is the pod whose kubelet has stopped acknowledging the
+// deletion: no finalizer holds it, nothing will ever remove it, and only a
+// grace-zero delete gets the object out of the apiserver. It is the shape
+// the force-delete escalation exists for, and the one shape a finalizer
+// cannot stand in for — a finalizer-pinned pod classifies as
+// foreign-finalizers and is report-only.
+type podTeardown struct {
+	at           time.Time
+	grace        int64
+	kubeletStuck bool
+}
+
 // sliceNameFor is the single EndpointSlice the driver keeps per Service.
 // One slice per Service is enough: the drain and rotation checks read
 // endpoints, not slice topology.
@@ -162,10 +180,172 @@ func (d *driver) staging(write func() error) error {
 	return write()
 }
 
+// deleteObject performs one delete against the fake apiserver. A pod held
+// Terminating by a dead kubelet is held by the driver rather than by a
+// finalizer, so only a grace-zero delete — the escalation's own — takes
+// the object out; a graceful delete on it changes nothing, exactly as it
+// changes nothing on a real cluster where the object is already on its way
+// out. Every other delete goes to the client untouched, and a pod that
+// survives it has the instant it began terminating recorded.
+func (d *driver) deleteObject(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+	pod, isPod := obj.(*corev1.Pod)
+	if !isPod {
+		return c.Delete(ctx, obj, opts...)
+	}
+	if hold := d.terminating[pod.Name]; hold != nil && hold.kubeletStuck {
+		if !zeroGrace(opts) {
+			return nil
+		}
+		return d.reapStuckPod(ctx, pod.Name)
+	}
+	if err := c.Delete(ctx, obj, opts...); err != nil {
+		return err
+	}
+	return d.recordTeardown(ctx, c, pod.Name, opts)
+}
+
+// recordTeardown notes what a pod that outlived its delete is terminating
+// against: the deletion instant on the injected clock, which the apiserver
+// computes as the request time plus the grace the pod is owed, and the
+// grace itself. A pod the delete really removed has nothing to record.
+func (d *driver) recordTeardown(ctx context.Context, c client.WithWatch, name string, opts []client.DeleteOption) error {
+	stored := &corev1.Pod{}
+	key := client.ObjectKey{Namespace: d.opts.Namespace, Name: name}
+	if err := c.Get(ctx, key, stored); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if stored.DeletionTimestamp == nil || d.terminating[name] != nil {
+		return nil
+	}
+	grace := graceSeconds(opts, podGracePeriod(stored))
+	d.terminating[name] = &podTeardown{
+		at:    d.clock.Now().Add(time.Duration(grace) * time.Second),
+		grace: grace,
+	}
+	return nil
+}
+
+// reapStuckPod completes the removal of a wedged pod: the escalation's
+// grace-zero delete is what a real apiserver honors past a dead kubelet,
+// so the object leaves exactly as the scenario's own pod.deleted would
+// take it out.
+func (d *driver) reapStuckPod(ctx context.Context, name string) error {
+	delete(d.terminating, name)
+	return d.staging(func() error { return d.removePodNow(ctx, name) })
+}
+
+// showTeardown presents a pod's deletion the way the apiserver would. A
+// pod whose kubelet has stopped acknowledging it carries no finalizer,
+// because it is the driver and not a finalizer that keeps the object from
+// leaving — and a finalizer is exactly the evidence that would make the
+// escalation decline it.
+func (d *driver) showTeardown(pod *corev1.Pod) {
+	hold := d.terminating[pod.Name]
+	if hold == nil {
+		return
+	}
+	at := metav1.NewTime(hold.at)
+	pod.DeletionTimestamp = &at
+	grace := hold.grace
+	pod.DeletionGracePeriodSeconds = &grace
+	if hold.kubeletStuck {
+		pod.Finalizers = withoutLifecycleFinalizer(pod.Finalizers)
+	}
+}
+
+// hideTeardown puts the stored deletion metadata back on an object read
+// through showTeardown, so a whole-object write carries what the fake
+// apiserver holds rather than what the driver displayed — the deletion
+// timestamp is immutable there, and the finalizer is what keeps the object
+// alive at all.
+func (d *driver) hideTeardown(ctx context.Context, c client.Reader, obj client.Object) {
+	pod, ok := obj.(*corev1.Pod)
+	if !ok || d.terminating[pod.Name] == nil {
+		return
+	}
+	stored := &corev1.Pod{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(pod), stored); err != nil {
+		return
+	}
+	pod.DeletionTimestamp = stored.DeletionTimestamp
+	pod.DeletionGracePeriodSeconds = stored.DeletionGracePeriodSeconds
+	pod.Finalizers = stored.Finalizers
+}
+
+func withoutLifecycleFinalizer(finalizers []string) []string {
+	kept := make([]string, 0, len(finalizers))
+	for _, f := range finalizers {
+		if f != podLifecycleFinalizer {
+			kept = append(kept, f)
+		}
+	}
+	if len(kept) == 0 {
+		return nil
+	}
+	return kept
+}
+
+// graceSeconds reads the grace a delete request names, falling back to the
+// pod's own when it names none.
+func graceSeconds(opts []client.DeleteOption, fallback int64) int64 {
+	if grace := requestedGrace(opts); grace != nil {
+		return *grace
+	}
+	return fallback
+}
+
+// zeroGrace reports whether a delete asks for immediate removal, which is
+// the request a wedged pod only ever leaves the apiserver on.
+func zeroGrace(opts []client.DeleteOption) bool {
+	grace := requestedGrace(opts)
+	return grace != nil && *grace == 0
+}
+
+func requestedGrace(opts []client.DeleteOption) *int64 {
+	options := &client.DeleteOptions{}
+	for _, opt := range opts {
+		opt.ApplyToDelete(options)
+	}
+	return options.GracePeriodSeconds
+}
+
+// podGracePeriod is the termination grace the pod itself asks for. A
+// fixture that names none terminates at the instant of the request, which
+// is what a scenario's overdue slack is then measured from.
+func podGracePeriod(pod *corev1.Pod) int64 {
+	if pod.Spec.TerminationGracePeriodSeconds == nil {
+		return 0
+	}
+	return *pod.Spec.TerminationGracePeriodSeconds
+}
+
 func (d *driver) interceptors() interceptor.Funcs {
 	return interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if err := c.Get(ctx, key, obj, opts...); err != nil {
+				return err
+			}
+			if pod, ok := obj.(*corev1.Pod); ok {
+				d.showTeardown(pod)
+			}
+			return nil
+		},
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if err := c.List(ctx, list, opts...); err != nil {
+				return err
+			}
+			if pods, ok := list.(*corev1.PodList); ok {
+				for i := range pods.Items {
+					d.showTeardown(&pods.Items[i])
+				}
+			}
+			return nil
+		},
 		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 			if pod, ok := obj.(*corev1.Pod); ok {
+				// Pod names are stable and reused, so a successor starts
+				// from no teardown of its own.
+				delete(d.terminating, pod.Name)
 				pod.Finalizers = append(pod.Finalizers, podLifecycleFinalizer)
 				// The apiserver stamps creationTimestamp on admission and
 				// the fake client does not. Every age the engine measures
@@ -218,7 +398,7 @@ func (d *driver) interceptors() interceptor.Funcs {
 				}
 				return err
 			}
-			if err := c.Delete(ctx, obj, opts...); err != nil {
+			if err := d.deleteObject(ctx, c, obj, opts...); err != nil {
 				if d.traced(obj) {
 					d.trace.object(kindOf(obj), "delete-failed", obj.GetName(), "err="+err.Error())
 				}
@@ -230,7 +410,10 @@ func (d *driver) interceptors() interceptor.Funcs {
 			return nil
 		},
 		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
-			return d.recordWrite(ctx, obj, "update", "update", func() error { return c.Update(ctx, obj, opts...) })
+			return d.recordWrite(ctx, obj, "update", "update", func() error {
+				d.hideTeardown(ctx, c, obj)
+				return c.Update(ctx, obj, opts...)
+			})
 		},
 		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 			return d.recordWrite(ctx, obj, "patch", "patch", func() error { return c.Patch(ctx, obj, patch, opts...) })
@@ -507,6 +690,9 @@ func (d *driver) removePod(ctx context.Context, name string) error {
 }
 
 func (d *driver) removePodNow(ctx context.Context, name string) error {
+	// The object is about to leave the apiserver, so whatever the driver
+	// was holding its deletion open with goes with it.
+	delete(d.terminating, name)
 	pod := &corev1.Pod{}
 	key := client.ObjectKey{Namespace: d.opts.Namespace, Name: name}
 	if err := d.cli.Get(ctx, key, pod); err != nil {

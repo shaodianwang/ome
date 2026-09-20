@@ -103,6 +103,34 @@ the fast escalation has to age the pod: either advance the clock before the
 waiting reason lands (`T-create-stuck`) or use `timer.stuckPodGrace`
 afterwards (`T-create-stuckgrace`).
 
+## Terminating pods, and the one whose kubelet is gone
+
+The driver holds every deleted pod as a Terminating object, and records the
+instant the delete landed on the **injected** clock: the fake client stamps
+a deletion timestamp off the wall clock, which no deadline the engine
+measures can be compared against. The recorded instant is the request time
+plus the grace the pod is owed, as the apiserver computes it; a fixture that
+names no `terminationGracePeriodSeconds` is therefore overdue from the
+instant of the request.
+
+Ordinarily the object is held by the driver's finalizer, which is the
+scenario's own hand releasing it (`pod.deleted`). `pod.stuckTerminating` is
+the other way a pod stays: the kubelet behind it is gone, so the pod carries
+its deletion timestamp with **no** finalizer on it and nothing will ever
+remove it. That distinction is the whole of the force-delete predicate — a
+Terminating pod that still carries a finalizer classifies as
+`foreign-finalizers` and is only ever reported, never force-deleted.
+
+Such a pod leaves the fake apiserver on exactly two events: the scenario's
+own `pod.deleted`, or a delete with `gracePeriodSeconds: 0`, which is the
+escalation's. A graceful delete on it changes nothing, as it changes nothing
+on a real cluster where the object is already on its way out.
+
+The escalation's other half is node-death evidence, and the fake cluster
+holds no Node objects, so a pod the scenario has scheduled (`pod.scheduled`)
+classifies as `node-gone`. The unreachable-taint and NotReady branches need
+Nodes seeded first and are not driven (see **Unlocked paths**).
+
 ## The runner container
 
 `initial.spec.containerName` names the single container the template
@@ -198,6 +226,7 @@ moves nothing.
 | `timer.stuckPodGrace` | the earliest `pod.creationTimestamp + config.stuckPodGrace` over the pods holding a terminal waiting reason |
 | `timer.retryAt` | the earliest `retryBlocks[].nextRetryAt` |
 | `timer.migrationDeadline` | the earliest `Deadline` over the non-terminal migration records |
+| `timer.forceDelete[overdueSlack]` | the earliest `pod.deletionTimestamp + config.forceDelete.overdueSlack` over the Terminating pods |
 
 Because the deadline is read rather than written, a scenario states no
 duration that config already fixes: `T-create-stuckgrace` sets
@@ -211,12 +240,12 @@ run rather than silently doing nothing.
 adapter's teardown pass, outside `workload.Reconcile`, so the driver cannot
 reach the arrows that fire on it (see **Unlocked paths**).
 
-`timer.forceDelete` has no applier either, and the sweep it names is out of
-reach for a second reason: the driver stamps a finalizer on every pod, which
-is what lets a scenario hold one in Terminating, and a Terminating pod with
-finalizers classifies as `foreign-finalizers` — report-only, never
-actionable. Reaching the sweep needs a Terminating pod the driver does not
-pin plus node-death evidence (see **Unlocked paths**).
+`timer.forceDelete[overdueSlack]` resolves the earliest
+`pod.deletionTimestamp + config.forceDelete.overdueSlack` over the
+Terminating pods. The `nodeUnreachable` variant has no deadline to resolve
+and is rejected: the fake cluster holds no Node objects, so a scheduled
+pod's node reads as gone rather than as unreachable for a measurable time,
+and there is no interval to age (see **Unlocked paths**).
 
 ## Trace format
 
@@ -326,6 +355,8 @@ or determinism forced a change, and they are the ones to review.
    finalizer on every pod, so the engine's delete leaves a Terminating
    object and the scenario's `pod.deleted` is what removes it. That is the
    real sequence, and it is what lets a scenario hold a pod in Terminating.
+   `pod.stuckTerminating` is the second hold, the one with no finalizer
+   behind it (see **Terminating pods** above).
 7. **`clock.advance` is the one event outside the table's vocabulary.** It
    is harness control, not an observation. `timer.operationDeadline` is a
    table event and is implemented as a clock move onto the earliest
@@ -335,7 +366,8 @@ or determinism forced a change, and they are the ones to review.
    in creation order and normalized to `uid#N`.
 9. **Expectations are confirmed by the driver, not by an informer.** A pod
    create is observed as soon as the object exists; a delete is observed
-   when the scenario's `pod.deleted` removes it.
+   when the object leaves the apiserver, whether the scenario's
+   `pod.deleted` took it out or the force-delete sweep did.
 10. **The deadline park/rearm step is modelled, the rest of the aggregate
     pass is not.** The adapter parks every in-flight deadline before the
     dispatcher when paused, and parks or rearms admission-held deadlines
@@ -356,14 +388,16 @@ or determinism forced a change, and they are the ones to review.
 
 The table events the driver can stage are the ones the scenarios here need:
 `pod.scheduled`, `pod.containersReady`, `pod.ready`, `pod.servingOn/Off`,
-`pod.terminating`, `pod.deleted`, `pod.phaseTerminal`, `pod.waiting`,
+`pod.terminating`, `pod.stuckTerminating`, `pod.deleted`,
+`pod.phaseTerminal`, `pod.waiting`,
 `pod.unschedulable`, `pod.containerRestart`, `endpoint.rotationIn/Out`, `api.quotaDenied`,
 `api.invalid`, `spec.revision`, `spec.replicasUp/Down`,
 `spec.pauseTrue/pauseFreeze/unpause`, `spec.strategy`, `spec.teardown`,
 `spec.migrateRequest`, `spec.rollbackTarget`, `spec.gangWidth`,
 `gang.podGroup`,
 `timer.operationDeadline`, `timer.stuckPodGrace`, `timer.retryAt`,
-`timer.migrationDeadline`, and `clock.advance`. A scenario naming any other declared event fails to load
+`timer.migrationDeadline`, `timer.forceDelete[overdueSlack]`,
+and `clock.advance`. A scenario naming any other declared event fails to load
 with that as the reason, so the gap is always visible rather than silent.
 
 
@@ -430,10 +464,18 @@ Effects the driver does not record:
   completion arrows are out of reach. Everything the record decides before
   that gate — early wedge evidence, the deadline, teardown — is reachable.
 
-- The stuck-Terminating force-delete sweep, and the arrows that fire on
-  it. Every pod the driver admits carries its finalizer, so a Terminating
-  pod classifies as `foreign-finalizers` and the sweep declines it before
-  it ever reads a Node.
+- The force-delete sweep in the migration drain, and
+  `T-migrate-force-delete` with it. It sits behind `surgeTailGatesPassed`,
+  which reads the same publication-path counters the migration completion
+  tail needs (above), so a replayed migration parks at `SurgePending` and
+  never reaches the source drain the sweep runs in. The sweep itself is
+  driven from the scale-down wave and from the top of the update pass.
+
+- The force-delete escalation's other two evidence branches,
+  `node-unreachable-taint` and `node-not-ready`. Both age from a Node
+  object's own taint or condition, and the fake cluster holds none, so a
+  scheduled pod's node classifies as `node-gone`. Driving them needs a Node
+  applier the scenarios here do not call for.
 
 - The gang-member-loss rebuild of a row below Ready. Outside
   `Phase=Failed` the trigger reads the row's recorded `PodCount` before
@@ -454,10 +496,7 @@ Effects the driver does not record:
   records what the engine does on that route.
 
 Reads, which are never traced at all: EndpointSlices, Services,
-ControllerRevisions, and Nodes. No Node objects exist in the fake
-cluster, so a pod whose node the sweep did reach would classify as
-`node-gone` rather than proving an unreachable node — a scenario that
-needs the unreachable-node branch has to seed Nodes first.
+ControllerRevisions, and Nodes.
 
 Two apiserver behaviors are absent: there is no conflict retry (the fake
 client raises no 409, so the adapter's `RetryOnConflict` loop is never

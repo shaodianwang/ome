@@ -243,6 +243,31 @@ func TestApplyOperationDeadlineNeedsASlack(t *testing.T) {
 	}
 }
 
+// TestApplyStuckTerminatingNeedsADeletionInFlight keeps the event an
+// observation about a deletion already issued rather than a way to conjure
+// one: a pod nobody has deleted has nothing to be stuck at.
+func TestApplyStuckTerminatingNeedsADeletionInFlight(t *testing.T) {
+	d := &driver{opts: DefaultOptions(), terminating: map[string]*podTeardown{}}
+	_, err := applyStuckTerminating(context.Background(), d, TimelineEvent{
+		ID:   "pod.stuckTerminating",
+		Args: EventArgs{Pod: &PodRef{Index: 0}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "is not Terminating") {
+		t.Fatalf("expected the not-Terminating error, got %v", err)
+	}
+}
+
+// TestApplyForceDeleteNeedsAConfiguredPolicy holds the same line for the
+// clock: the overdue slack is the operator's value, so an unconfigured
+// escalation has no deadline to move onto.
+func TestApplyForceDeleteNeedsAConfiguredPolicy(t *testing.T) {
+	d := &driver{opts: DefaultOptions()}
+	_, err := applyForceDelete(context.Background(), d, TimelineEvent{ID: "timer.forceDelete"})
+	if err == nil || !strings.Contains(err.Error(), "config.forceDelete is not set") {
+		t.Fatalf("expected the unconfigured-policy error, got %v", err)
+	}
+}
+
 // TestRemoveInstanceForgetsTheExpectation pins the adapter behavior the
 // driver stands in for: a row that left the owner status takes its
 // create/delete expectation with it, so a later Instance reusing the index

@@ -34,6 +34,7 @@ func init() {
 		"pod.servingOn":           applyServing(corev1.ConditionTrue),
 		"pod.servingOff":          applyServing(corev1.ConditionFalse),
 		"pod.terminating":         applyPodTerminating,
+		"pod.stuckTerminating":    applyStuckTerminating,
 		"pod.deleted":             applyPodDeleted,
 		"pod.phaseTerminal":       applyPhaseTerminal,
 		"pod.waiting":             applyPodWaiting,
@@ -59,6 +60,7 @@ func init() {
 		"timer.stuckPodGrace":     applyStuckPodGrace,
 		"timer.retryAt":           applyRetryAt,
 		"timer.migrationDeadline": applyMigrationDeadline,
+		"timer.forceDelete":       applyForceDelete,
 	}
 }
 
@@ -177,6 +179,32 @@ func applyPodTerminating(ctx context.Context, d *driver, ev TimelineEvent) (stri
 		return "", fmt.Errorf("replay: terminate pod %s: %w", name, err)
 	}
 	return "pod=" + name, nil
+}
+
+// applyStuckTerminating is the kubelet behind an already-deleted pod
+// going away: the pod keeps its deletion timestamp, loses the finalizer
+// that was standing in for a kubelet's acknowledgement, and never
+// disappears on its own again. That is the object the force-delete
+// escalation exists for — a Terminating pod still carrying a finalizer is
+// classified foreign-finalizers and only ever reported.
+//
+// It is an observation about a deletion already in flight, so a pod nobody
+// has deleted has nothing to be stuck at and fails the run.
+func applyStuckTerminating(ctx context.Context, d *driver, ev TimelineEvent) (string, error) {
+	ref, err := requirePod(ev)
+	if err != nil {
+		return "", err
+	}
+	name := d.podName(ref)
+	hold := d.terminating[name]
+	if hold == nil {
+		return "", fmt.Errorf("replay: pod.stuckTerminating: pod %s is not Terminating, so no deletion is wedged on it", name)
+	}
+	if hold.kubeletStuck {
+		return "", fmt.Errorf("replay: pod.stuckTerminating: pod %s is already held by a dead kubelet", name)
+	}
+	hold.kubeletStuck = true
+	return fmt.Sprintf("pod=%s deletionDeadline=%s", name, d.norm.at(hold.at)), nil
 }
 
 func applyPodDeleted(ctx context.Context, d *driver, ev TimelineEvent) (string, error) {
@@ -626,6 +654,47 @@ func applyMigrationDeadline(_ context.Context, d *driver, ev TimelineEvent) (str
 		return "", fmt.Errorf("replay: timer.migrationDeadline: no in-flight migration record carries a deadline")
 	}
 	return d.advanceOnto("timer.migrationDeadline", earliest, ev)
+}
+
+// applyForceDelete advances the clock onto the earliest instant at which a
+// Terminating pod is past its own deletion deadline plus the configured
+// overdue slack. That is the first half of the force-delete predicate, read
+// off the same pod field the engine classifies on, so the scenario restates
+// neither the slack nor the deletion instant.
+//
+// The node half is evidence rather than a clock the driver can move: the
+// fake cluster holds no Node objects, so a scheduled pod's node reads as
+// gone the moment the overdue clock lands, and there is no unreachable
+// interval to age.
+func applyForceDelete(ctx context.Context, d *driver, ev TimelineEvent) (string, error) {
+	if ev.Variant == "nodeUnreachable" {
+		return "", fmt.Errorf("replay: timer.forceDelete[nodeUnreachable]: the driver seeds no Node objects, so a pod's node reads as gone rather than as unreachable for a measurable time")
+	}
+	if d.cfg.ForceDelete == nil {
+		return "", fmt.Errorf("replay: timer.forceDelete: config.forceDelete is not set, so no force-delete clock runs")
+	}
+	slack, err := ParseDuration("config.forceDelete.overdueSlack", d.cfg.ForceDelete.OverdueSlack)
+	if err != nil {
+		return "", err
+	}
+	pods, err := query.ListOMENativePodsByName(ctx, d.cli, d.opts.Namespace, d.opts.OwnerName, d.opts.Component, false)
+	if err != nil {
+		return "", fmt.Errorf("replay: timer.forceDelete: list pods: %w", err)
+	}
+	var earliest time.Time
+	for _, pod := range pods {
+		if pod.DeletionTimestamp == nil {
+			continue
+		}
+		due := pod.DeletionTimestamp.Add(slack)
+		if earliest.IsZero() || due.Before(earliest) {
+			earliest = due
+		}
+	}
+	if earliest.IsZero() {
+		return "", fmt.Errorf("replay: timer.forceDelete: no pod is Terminating, so no overdue clock is running")
+	}
+	return d.advanceOnto("timer.forceDelete", earliest, ev)
 }
 
 // waitingTerminally reports whether any of a pod's containers is parked in

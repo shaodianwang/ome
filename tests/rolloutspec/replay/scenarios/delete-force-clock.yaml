@@ -1,0 +1,47 @@
+# The retired Instance's pod is deleted, then its kubelet stops
+# acknowledging the deletion. Nothing holds the object except a node that no
+# longer exists, so the wave is blocked on a disappearance that will never
+# come; the overdue clock is what turns the evidence actionable.
+scenario: delete-force-clock
+arrows:
+  - T-ready-scaledown
+  - T-delete-force-clock
+  - T-delete-done
+cells:
+  - instance/Delete/Drain/timer.forceDelete[overdueSlack]/boundary@T-delete-force-clock
+initial:
+  spec:
+    replicas: 2
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+    forceDelete: {overdueSlack: 1m, nodeUnreachableThreshold: 5m}
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+    - {index: 1, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true, node: node-0}
+    - {index: 1, ready: true, serving: true, routed: true, node: node-1}
+timeline:
+  - tick: 1
+    note: the operator halves the replica count, and the retired Instance is admitted into a Delete operation
+    events:
+      - spec.replicasDown: {to: 1}
+  - tick: 2
+    note: the retired Instance leaves rotation, so the wave deletes its pod
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 1}}
+  - tick: 3
+    note: the kubelet on node-1 stops acknowledging the deletion, which leaves the object behind with no finalizer on it; inside the pod's own deadline plus the slack the sweep acts on nothing and the wave keeps waiting on its own cadence
+    events:
+      - pod.stuckTerminating: {pod: {index: 1}}
+  - tick: 4
+    note: the overdue clock lands on a pod whose node is gone, so the sweep force-deletes it with grace zero under its observed UID
+    events:
+      - timer.forceDelete[overdueSlack]: {slack: 1s}
+  - tick: 5
+    note: the wave completes on the resulting absence and the row is removed

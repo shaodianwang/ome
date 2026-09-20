@@ -1,0 +1,21 @@
+tick=1 note the operator halves the replica count, and the retired Instance is admitted into a Delete operation
+tick=1 apply spec.replicasDown replicas=1 generation=1 now=t+0s
+tick=1 row=1 write incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 pass result=requeue
+tick=2 note the retired Instance leaves rotation, so the wave deletes its pod
+tick=2 apply endpoint.rotationOut[source] pod=svc-a-engine-1-default-0 now=t+0s
+tick=2 row=1 write no-op precondition=no-change
+tick=2 pod status-patch name=svc-a-engine-1-default-0 serving=True→False
+tick=2 pod delete name=svc-a-engine-1-default-0 grace=default uidPrecondition=set
+tick=2 pass result=after:30s
+tick=3 note five minutes on the pod is still there, and the reason arrives with the clock already well past its deadline plus the slack, so the stuck pod is force-deleted on the pass that reads it
+tick=3 apply clock.advance by=5m0s now=t+5m0s
+tick=3 apply pod.stuckTerminating pod=svc-a-engine-1-default-0 deletionDeadline=t+0s now=t+5m0s
+tick=3 row=1 write no-op precondition=no-change
+tick=3 pod delete name=svc-a-engine-1-default-0 grace=0 uidPrecondition=set
+tick=3 event Warning PodForceDeleted OMENative component=engine instance=1: force-deleted stuck-Terminating pod svc-a-engine-1-default-0 on node node-1 (evidence=node-gone, 5m0s past the pod's own deletion deadline)
+tick=3 pass result=after:30s
+tick=4 note the wave completes on the resulting absence and the row is removed
+tick=4 row=1 write no-op precondition=no-change
+tick=4 row=1 remove incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=4 pass result=requeue

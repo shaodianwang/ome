@@ -1,0 +1,44 @@
+# The same wedge as delete-force-clock, observed from the other side: the
+# overdue clock has long since passed by the time the kubelet's silence is
+# observed, so the stuck pod itself is the trigger and the sweep acts on the
+# pass that first reads it.
+scenario: delete-force
+arrows:
+  - T-ready-scaledown
+  - T-delete-force
+  - T-delete-done
+cells:
+  - instance/Delete/Drain/pod.stuckTerminating/boundary@T-delete-force
+initial:
+  spec:
+    replicas: 2
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+    forceDelete: {overdueSlack: 1m, nodeUnreachableThreshold: 5m}
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+    - {index: 1, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true, node: node-0}
+    - {index: 1, ready: true, serving: true, routed: true, node: node-1}
+timeline:
+  - tick: 1
+    note: the operator halves the replica count, and the retired Instance is admitted into a Delete operation
+    events:
+      - spec.replicasDown: {to: 1}
+  - tick: 2
+    note: the retired Instance leaves rotation, so the wave deletes its pod
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 1}}
+  - tick: 3
+    note: five minutes on the pod is still there, and the reason arrives with the clock already well past its deadline plus the slack, so the stuck pod is force-deleted on the pass that reads it
+    events:
+      - clock.advance: 5m
+      - pod.stuckTerminating: {pod: {index: 1}}
+  - tick: 4
+    note: the wave completes on the resulting absence and the row is removed

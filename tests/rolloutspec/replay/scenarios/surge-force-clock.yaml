@@ -1,0 +1,42 @@
+# The source is lost while the replacement is still coming up: its node
+# stops reporting and the pod object never goes away. The surge is not
+# waiting on that pod, but the sweep at the top of the update pass clears it
+# anyway, so the step is not left reading a pod nothing runs.
+scenario: surge-force-clock
+arrows:
+  - T-ready-surge
+  - T-surge-force-clock
+cells:
+  - instance/Update/Surge/timer.forceDelete[overdueSlack]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    forceDelete: {overdueSlack: 1m, nodeUnreachableThreshold: 5m}
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source is bound to node-0, becomes Ready and enters rotation
+    events:
+      - pod.scheduled[source]: {pod: {index: 0, ordinal: 0}}
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: node-0 goes away under the source and its kubelet never confirms the deletion, so the source is left Terminating with nothing holding it; losing its endpoint while the replacement is not serving yet is what the surge records as SourceUnrouted
+    events:
+      - pod.terminating: {pod: {index: 0, ordinal: 0}}
+      - pod.stuckTerminating: {pod: {index: 0, ordinal: 0}}
+  - tick: 5
+    note: the overdue clock lands and the sweep force-deletes the wedged source before the surge runs, leaving the step where it was
+    events:
+      - timer.forceDelete[overdueSlack]: {slack: 1s}
