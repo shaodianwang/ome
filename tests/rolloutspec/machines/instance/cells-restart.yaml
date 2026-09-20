@@ -277,7 +277,7 @@ cells:
   - state: Restart/Drain
     event: spec.pauseTrue
     outcome: ignore
-    note: a standard pause plans scale-down and repair only, so the restart keeps converging at the running revision while updates and creates are held. Repair is not what an ordinary pause holds, so the attempt takes no Paused token and its clock keeps running with it; the escalation pass is suspended for the paused reconcile, so the elapsed deadline is consumed only once the pause is cleared
+    note: a standard pause plans scale-down and repair only, so the restart keeps converging at the running revision while updates and creates are held. Repair is not what an ordinary pause holds, so the attempt takes no Paused token and its clock keeps running with it; a pause suspends the escalation pass's repair half only, so the elapsed deadline is consumed once the pause is cleared while the hold authorities go on recording and releasing what they observe throughout
     placement: perm
     coverage: {perm: [], unit: [TestPlan_Paused_RepairRunsFleetChangesDoNot], kind: []}
     status: decided
@@ -411,7 +411,7 @@ cells:
     event: pod.unschedulable
     variants: [source]
     outcome: defer
-    guard: the row is not fully serving and its operation carries no other authority's waiting token; the hold lasts while lifecycle.unschedulableGracePeriod is unconfigured or unelapsed, and past it the attempt is failed environment-caused
+    guard: the row is not fully serving and its operation carries no other authority's waiting token except an operator pause, which a fact about the Instance takes the row from; the hold lasts while lifecycle.unschedulableGracePeriod is unconfigured or unelapsed, and past it the attempt is failed environment-caused
     note: an unplaceable recreated pod holds Phase C on the runtime-ready check, and the escalation pass records the Unschedulable waiting token on the Restart operation, which parks the clock so the repair is not failed for a placement the cluster cannot give it. The scheduler's message reaches LastFailure once per hold. Past the configured grace the attempt is failed with that message and no RetryBlock, since an unplaceable pod proves nothing about the pod template (ops/restart.go, escalation.go)
     placement: kind
     coverage: {perm: [], unit: [TestEscalation_UnschedulableRestartHoldsThenFailsPastGrace], kind: []}
@@ -505,7 +505,7 @@ cells:
     event: gang.podGroup
     variants: [Terminating]
     outcome: defer
-    guard: the repair is in flight, the pod set is not fully serving, and no other authority already holds the operation's waiting token
+    guard: the repair is in flight, the pod set is not fully serving, and no other authority except an operator pause already holds the operation's waiting token
     note: the deterministic name is still occupied by an object being collected, so Phase B withholds every member rather than enlisting a rebuilt pod in a group this owner does not yet control. The escalation pass records the PodGroupTerminating waiting token, which parks the InstanceReadyTimeout clock, and the group is announced again on the pass after the old object is gone; the wait resolves itself and never escalates (inferencereplica/reconciler.go, podgroup/podgroup.go)
     invariants: [podgroup.before.pods]
     placement: unit

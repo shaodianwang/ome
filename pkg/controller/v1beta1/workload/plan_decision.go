@@ -190,10 +190,12 @@ type Decision struct {
 	RequeueAfter time.Duration
 
 	// Escalate gates the terminal-failure escalation pass
-	// (escalation.go). False while paused: escalation is suspended with the
-	// rest of the lifecycle machinery (deadlines are parked by the adapter
-	// while paused). The executor separately guards status-commit boundaries
-	// and excludes deferred scale-down extras.
+	// (escalation.go). False while paused: the repair decisions are
+	// suspended with the rest of the lifecycle machinery, and the executor
+	// runs the pass's evidence half alone so the hold authorities keep
+	// reporting what they see (deadlines are parked by the adapter while
+	// paused). The executor separately guards status-commit boundaries and
+	// excludes deferred scale-down extras.
 	Escalate bool
 }
 

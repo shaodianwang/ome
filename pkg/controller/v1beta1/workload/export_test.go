@@ -18,6 +18,12 @@ func EscalateFromEvidenceForTest(ctx context.Context, deps Deps, input Reconcile
 	return escalateFromEvidence(ctx, deps, input, plan, target, snapshot, nil)
 }
 
+// ReconcileExternalHoldsForTest invokes the escalation pass's evidence
+// half directly — the half a paused Component runs on its own.
+func ReconcileExternalHoldsForTest(ctx context.Context, input ReconcileInput, plan ComponentPlan, snapshot *ObservedSnapshot) error {
+	return reconcileExternalHolds(ctx, input, plan, snapshot, nil)
+}
+
 // PruneSupersededRetryBlocksForTest invokes the RetryBlock
 // supersede-prune directly. target is the reconcile's roll target
 // ControllerRevision (nil is valid — no roll-target revision to keep).

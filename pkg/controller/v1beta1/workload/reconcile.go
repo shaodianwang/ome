@@ -79,7 +79,9 @@ import (
 //     Runs after every eligible op-pass return, errored or not. A
 //     scale-down admission or completion commit ends the pass; an active
 //     wave excludes every extra index while retained Instances remain
-//     eligible for escalation.
+//     eligible for escalation. A paused Component runs the pass's
+//     evidence half only (holdevidence.go): the hold authorities still
+//     record and release, no repair follows.
 //
 // target may be nil when DesiredSpec.PodSpec is nil (MinReplicas=0).
 // Restart / Update passes short-circuit on nil target; Create returns
@@ -152,16 +154,14 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 	return FloorPassRequeue(res, input.Pacing.Throttle()), err
 }
 
-// Execute applies the Decision: the op-pass action loop, then — when
-// Decision.Escalate allows it — the escalation pass and the RetryBlock
-// supersede-prune. A scale-down status commit is a pass boundary because it
-// invalidates the plan. While an admitted wave is polling, escalation still
-// runs for retained Instances but excludes every scale-down extra; deferred
-// victims must receive no lifecycle mutation before admission. Other operation
-// requeues retain the existing escalation behavior so a wedged surge or gang
-// can fail while its operation keeps polling. The supersede-prune shares the
-// Escalate gate (both are end-of-pass bookkeeping suspended while paused, and
-// Teardown never reaches Execute).
+// Execute applies the Decision: the op-pass action loop, then the
+// end-of-pass bookkeeping (endOfPassBookkeeping). A scale-down status commit
+// is a pass boundary because it invalidates the plan. While an admitted wave
+// is polling, escalation still runs for retained Instances but excludes every
+// scale-down extra; deferred victims must receive no lifecycle mutation before
+// admission. Other operation requeues retain the existing escalation behavior
+// so a wedged surge or gang can fail while its operation keeps polling.
+// Teardown never reaches Execute.
 //
 // An errored op pass does NOT suspend that bookkeeping. Both end-of-pass
 // steps are per-Instance and re-derive their own evidence from the
@@ -182,13 +182,10 @@ func Execute(ctx context.Context, deps Deps, input ReconcileInput, plan Componen
 		}
 		err = errors.Join(err, perr)
 	}
-	if !d.Escalate || statusCommitBoundary {
+	if statusCommitBoundary {
 		return res, err
 	}
-	endOfPass := escalateFromEvidence(ctx, deps, input, plan, target, snapshot, scaleDownExtras(d))
-	if endOfPass == nil {
-		endOfPass = pruneSupersededRetryBlocks(ctx, input, target)
-	}
+	endOfPass := endOfPassBookkeeping(ctx, deps, input, plan, target, snapshot, d)
 	if endOfPass == nil {
 		return res, err
 	}
@@ -196,6 +193,30 @@ func Execute(ctx context.Context, deps Deps, input ReconcileInput, plan Componen
 		return ctrl.Result{}, endOfPass
 	}
 	return res, errors.Join(err, endOfPass)
+}
+
+// endOfPassBookkeeping runs the end-of-pass steps the Decision allows.
+//
+// Unpaused: the full escalation pass — evidence, holds and the repair
+// decisions that read them — followed by the RetryBlock supersede-prune.
+//
+// Paused: the evidence half alone. A pause freezes repair, not
+// observation: the authorities that report a FACT about an Instance —
+// the scheduler has no placement, the gang's name is being collected —
+// must still record and release their holds, or the row reports an
+// operator's decision while the deadline parks on nothing anyone can act
+// on, and the external-hold precedence that hands a paused row to a
+// fact-bearing authority is never reached. No repair follows from what
+// this half finds, and the supersede-prune stays suspended with it: both
+// are work a pause withholds rather than observations it hides.
+func endOfPassBookkeeping(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot, d Decision) error {
+	if !d.Escalate {
+		return reconcileExternalHolds(ctx, input, plan, snapshot, scaleDownExtras(d))
+	}
+	if err := escalateFromEvidence(ctx, deps, input, plan, target, snapshot, scaleDownExtras(d)); err != nil {
+		return err
+	}
+	return pruneSupersededRetryBlocks(ctx, input, target)
 }
 
 // executeActions runs the op-pass pipeline (steps 1-7 of the chain documented

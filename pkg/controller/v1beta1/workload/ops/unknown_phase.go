@@ -56,11 +56,17 @@ func unknownPhaseTargetPods(existing []*corev1.Pod, targets []podTarget) []*core
 // anyone is waiting to rebuild. An operation already parked on a
 // DIFFERENT external wait keeps it — that token's writer owns what the
 // row reports it is queued behind.
+//
+// An operator pause is the exception, and the only one. It reports a
+// decision to stop rolling forward rather than a fact about the
+// Instance, so a name a silent node still holds takes the row from it.
+// The pause goes on holding the rollout either way.
 func nodeUnknownHoldWritable(op *workload.InstanceOperation) bool {
 	if op == nil || op.Type == workload.InstanceOperationDelete {
 		return false
 	}
-	return op.Waiting == "" || workload.OperationNodeUnknown(op)
+	return op.Waiting == "" || workload.OperationNodeUnknown(op) ||
+		workload.OperationPaused(op)
 }
 
 // recoverUnknownPhaseTargets routes every target name held in phase

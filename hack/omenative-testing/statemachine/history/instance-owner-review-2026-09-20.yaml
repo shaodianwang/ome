@@ -1,0 +1,40 @@
+# Provenance for the instance-machine cells corrected in the owner review
+# session of 2026-09-20, which reconciled two decisions that had been
+# written into the table as if only one of them applied: a global pause
+# freezes REPAIR, and a fact-bearing hold authority (the scheduler's
+# Unschedulable verdict, a PodGroup name being collected, a name a silent
+# node still holds) TAKES a paused row. The engine wrote those holds only
+# from the repair pass, so on a paused row they were never recorded and
+# the precedence was never reached. The cells below now state the
+# corrected behavior: under a pause the hold authorities keep recording
+# and releasing, and only the repair they would otherwise decide is
+# withheld.
+# Selectors match the cells files exactly: an empty variants, windows or
+# transition matches all of them.
+history:
+
+  # --- cells-create.yaml ---
+  - {state: Create/CreatePods, event: pod.unschedulable, variants: [source], windows: [], transition: "", decision: owner-review-2026-09-20}
+  - {state: Create/CreatePods, event: gang.podGroup, variants: [Terminating], windows: [], transition: "", decision: owner-review-2026-09-20}
+
+  # --- cells-migrate.yaml ---
+  - {state: Migrate/CreateSurge, event: pod.unschedulable, variants: [], windows: [], transition: "", decision: owner-review-2026-09-20}
+  - {state: Migrate/SurgeTarget, event: pod.unschedulable, variants: [], windows: [], transition: "", decision: owner-review-2026-09-20}
+
+  # --- cells-restart.yaml ---
+  - {state: Restart/Drain, event: pod.unschedulable, variants: [source], windows: [], transition: "", decision: owner-review-2026-09-20}
+  - {state: Restart/Drain, event: gang.podGroup, variants: [Terminating], windows: [], transition: "", decision: owner-review-2026-09-20}
+  - {state: Restart/Drain, event: spec.pauseTrue, variants: [], windows: [], transition: "", decision: owner-review-2026-09-20}
+
+  # --- cells-update-gang.yaml ---
+  - {state: Update/GangSurgeTarget, event: pod.unschedulable, variants: [target], windows: [], transition: "", decision: owner-review-2026-09-20}
+  - {state: Update/GangSurgeTarget, event: gang.podGroup, variants: [Terminating], windows: [], transition: "", decision: owner-review-2026-09-20}
+
+  # --- cells-update-inplace-recreate.yaml ---
+  - {state: Update/InPlace, event: pod.unschedulable, variants: [source], windows: [], transition: "", decision: owner-review-2026-09-20}
+  - {state: Update/Drain, event: pod.unschedulable, variants: [source], windows: [], transition: "", decision: owner-review-2026-09-20}
+  - {state: Update/Drain, event: gang.podGroup, variants: [Terminating], windows: [], transition: "", decision: owner-review-2026-09-20}
+
+  # --- cells-update-surge.yaml ---
+  - {state: Update/Surge, event: pod.unschedulable, variants: [], windows: [], transition: "", decision: owner-review-2026-09-20}
+  - {state: Update/SurgeDrain, event: pod.unschedulable, variants: [], windows: [], transition: "", decision: owner-review-2026-09-20}

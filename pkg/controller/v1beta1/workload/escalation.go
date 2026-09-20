@@ -6,6 +6,10 @@
 // (disposition.go). The Failed DECISION lives here, next to the rest of
 // the transition decisions; the adapter-side status aggregator owns
 // only counters + conditions and never writes a transition field.
+//
+// The pass opens with the evidence half (holdevidence.go), which records
+// and releases the external holds. That half is the only one a paused
+// Component runs: a pause freezes repair, not observation.
 package workload
 
 import (
@@ -144,46 +148,12 @@ func escalateFromEvidence(ctx context.Context, deps Deps, input ReconcileInput, 
 			}
 			continue
 		}
-		ev := snapshot.EvidenceFor(ctx, s.Index, now, input.StuckPodGrace)
-		pods := podsForStuckCheck(s, byIdx)
-		desired := DesiredFor(desiredByIdx, s.Index, s.PodCount)
-		serving := podSetFullyServing(pods, desired)
-		// SCHEDULER HOLD: a pod with no placement is waiting on cluster
-		// capacity. Record the hold so the deadline parks, and let only
-		// the operator's grace end it — as an environment cause, since no
-		// corrected revision can conjure a node.
-		//
-		// Runs for EVERY operation type, Migrate included. A migration
-		// stamps a deadline on both pair rows, and a replacement the
-		// scheduler cannot place must not burn it; the hold is scoped to
-		// the row whose OWN pod is unplaceable (ev.Unschedulable), so a
-		// serving source is never held or failed for its surge's fate.
-		// GANG PATH: a gang is admitted as a unit, so its PodGroup carries
-		// facts no single member does — whether the deterministic name is
-		// usable by this owner at all, and whether the group has to be
-		// rebuilt. A name being collected parks the clock; a name held by
-		// another controller ends the attempt, because nothing this
-		// controller does frees it. A failed group is neither: the
-		// PodGroup pass resets it and the row just waits.
-		gang := gangReadingFor(input, s)
-		// Releases run before any mark, so a row that stops waiting on one
-		// authority and starts waiting on another does it inside one pass.
-		// Left unheld for even one pass, the parking step reads the empty
-		// token as admission and restarts a whole InstanceReadyTimeout.
-		if rerr := releaseSchedulerHold(ctx, input, s, ev, serving); rerr != nil {
-			return fmt.Errorf("release scheduler hold (instance=%d): %w", s.Index, rerr)
-		}
-		if rerr := releaseGangHold(ctx, input, s, gang, serving); rerr != nil {
-			return fmt.Errorf("release gang hold (instance=%d): %w", s.Index, rerr)
-		}
-		held, herr := recordSchedulerHold(ctx, input, s, ev, serving)
+		reading, herr := reconcileInstanceHolds(ctx, input, s, snapshot, byIdx, desiredByIdx, now)
 		if herr != nil {
-			return fmt.Errorf("record scheduler hold (instance=%d): %w", s.Index, herr)
+			return herr
 		}
-		gangHeld, gerr := recordGangHold(ctx, input, s, gang, serving)
-		if gerr != nil {
-			return fmt.Errorf("record gang hold (instance=%d): %w", s.Index, gerr)
-		}
+		ev, pods, desired := reading.ev, reading.pods, reading.desired
+		gang, held, gangHeld := reading.gang, reading.held, reading.gangHeld
 		// The hold arms above judge on pod health alone, so a row whose
 		// pods are healthy still hands a stale token back whatever it is
 		// reporting about its rotation. The FAILED-WHILE-SERVING exemption

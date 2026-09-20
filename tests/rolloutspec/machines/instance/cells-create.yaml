@@ -423,7 +423,7 @@ cells:
     event: pod.unschedulable
     variants: [source]
     outcome: defer
-    guard: the row is not fully serving and its operation carries no other authority's waiting token; the hold lasts while lifecycle.unschedulableGracePeriod is unconfigured or unelapsed, and past it the attempt is failed environment-caused
+    guard: the row is not fully serving and its operation carries no other authority's waiting token except an operator pause, which a fact about the Instance takes the row from; the hold lasts while lifecycle.unschedulableGracePeriod is unconfigured or unelapsed, and past it the attempt is failed environment-caused
     note: the escalation pass reads PodScheduled=False/Unschedulable off the live pods and records the Unschedulable waiting token on the operation, which parks the InstanceReadyTimeout clock; the scheduler's own message lands on LastFailure once per hold, edge-triggered on the held state so message churn writes nothing. The pod with no placement is chosen by name, so a gang with several records the same one every pass. Past the configured grace - measured from the PodScheduled transition, not from pod creation - the attempt is failed with the scheduler's message and no RetryBlock, because no revision can conjure a node. The token is released once the pod is placed or gone
     placement: kind
     coverage: {perm: [], unit: [TestPodUnschedulable, TestEscalation_UnschedulablePodRecordsHold, TestEscalation_UnschedulableHoldIsEdgeTriggered, TestEscalation_UnschedulableHoldClearedOnSchedule, TestEscalation_UnschedulablePastGraceFailsEnvironmentCaused, TestEscalation_UnschedulableWithoutGraceNeverEscalates, TestEscalation_UnschedulableGraceRunsFromCondition, TestReconcileGatedDeadlines_ParksUnschedulableInstance, TestEscalation_UnschedulableHoldIgnoresMessageChurn, TestEscalation_UnschedulableYieldsToAnotherWaitingToken, TestEscalation_UnschedulableGraceWarnsAfterAHoldWasRecorded, TestEscalation_UnschedulableHoldClearedWhenPodDeleted, TestEscalation_UnschedulableSupersededLeftoverIsSilent, TestEscalation_GangUnschedulableArrivesOnMemberPods, TestEscalation_PodHoldWinsOverGangHold], kind: []}
@@ -491,7 +491,7 @@ cells:
     event: gang.podGroup
     variants: [Terminating]
     outcome: defer
-    guard: the attempt is in flight, the pod set is not fully serving, and no other authority already holds the operation's waiting token
+    guard: the attempt is in flight, the pod set is not fully serving, and no other authority except an operator pause already holds the operation's waiting token
     note: the deterministic name is still occupied by an object being collected, so no member may be created against it - every pod is stamped with that name and would enlist in a group this owner does not yet control. The PodGroup pass classifies the name before writing anything and the create choke point withholds the whole set, while the escalation pass records the PodGroupTerminating waiting token, which parks the InstanceReadyTimeout clock. The wait resolves itself - the group is announced again on the pass after the old object is gone - so it never escalates. A pod-level Unschedulable hold takes the token first when both apply, because that one is the wait an operator has configured a grace for
     invariants: [podgroup.before.pods]
     placement: unit

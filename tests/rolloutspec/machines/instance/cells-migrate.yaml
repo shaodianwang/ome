@@ -271,7 +271,7 @@ cells:
   - state: Migrate/CreateSurge
     event: pod.unschedulable
     outcome: defer
-    guard: the row is not fully serving and its operation carries no other authority's waiting token; the hold lasts while lifecycle.unschedulableGracePeriod is unconfigured or unelapsed, and past it the attempt is failed environment-caused
+    guard: the row is not fully serving and its operation carries no other authority's waiting token except an operator pause, which a fact about the Instance takes the row from; the hold lasts while lifecycle.unschedulableGracePeriod is unconfigured or unelapsed, and past it the attempt is failed environment-caused
     note: the escalation pass reads PodScheduled=False/Unschedulable and records the Unschedulable waiting token, which parks the operation deadline; the migration record's own Deadline is the timeout authority for the move either way, so the hold is visibility rather than a new bound. The hold is scoped to the row whose OWN pod has no placement, so a serving source is never held for its replacement's fate. Past the configured grace the row is failed with the scheduler's message and no RetryBlock, which is the one path by which a scheduler hold ends a Migrate-pinned row before its record expires
     placement: perm
     coverage: {perm: [], unit: [TestEscalation_UnschedulableMigrationSurgeHoldsTheSurgeRow, TestEscalation_UnschedulableMigrationSurgePastGraceFails], kind: []}
@@ -1023,7 +1023,7 @@ cells:
   - state: Migrate/SurgeTarget
     event: pod.unschedulable
     outcome: defer
-    guard: the row is not fully serving and its operation carries no other authority's waiting token; the hold lasts while lifecycle.unschedulableGracePeriod is unconfigured or unelapsed, and past it the attempt is failed environment-caused
+    guard: the row is not fully serving and its operation carries no other authority's waiting token except an operator pause, which a fact about the Instance takes the row from; the hold lasts while lifecycle.unschedulableGracePeriod is unconfigured or unelapsed, and past it the attempt is failed environment-caused
     note: an own pod the overlay's anti-affinity made unplaceable is read as such - the escalation pass records the Unschedulable waiting token on this row, which parks its operation deadline while the migration record's Deadline stays the timeout authority for the move. Past the configured grace the row is failed with the scheduler's message and no RetryBlock, because the shortage of placements is the environment's, not the revision's
     placement: perm
     coverage: {perm: [], unit: [TestEscalation_UnschedulableMigrationSurgeHoldsTheSurgeRow, TestEscalation_UnschedulableMigrationSurgePastGraceFails], kind: []}

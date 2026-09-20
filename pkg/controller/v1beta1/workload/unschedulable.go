@@ -103,11 +103,18 @@ func recordUnschedulableHold(ctx context.Context, input ReconcileInput, idx int3
 // it: that token's writer owns both the token and the authority it
 // names, and overwriting it would misreport what the workload is queued
 // behind.
+//
+// An operator pause is the exception, and the only one. It is the one
+// wait that says nothing about the Instance — it reports a decision to
+// stop rolling forward, while this reports that the cluster has nowhere
+// to put a pod — so the fact takes the row. The pause is not ended by
+// that: it still plans no further step, and the deadline stays parked on
+// whichever token the row carries.
 func schedulerHoldWritable(op *InstanceOperation) bool {
 	if op == nil || op.Type == InstanceOperationDelete {
 		return false
 	}
-	return op.Waiting == "" || OperationUnschedulable(op)
+	return op.Waiting == "" || OperationUnschedulable(op) || OperationPaused(op)
 }
 
 // clearUnschedulableHold releases the token once the pod is placed or

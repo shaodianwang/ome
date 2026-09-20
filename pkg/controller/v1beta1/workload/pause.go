@@ -25,6 +25,11 @@ import (
 // pause reports nothing and still does its work, which is not planning
 // the next step.
 //
+// Those authorities keep speaking for the length of the pause: a pause
+// freezes repair, not observation, so the evidence half of the
+// end-of-pass bookkeeping (holdevidence.go) runs on a paused Component
+// and this precedence is reached there.
+//
 // Edge-triggered through MarkExternalHold / ClearExternalHold: a Component
 // paused for hours writes on the way in and on the way out, not per pass.
 func reconcilePauseHolds(ctx context.Context, input ReconcileInput, plan ComponentPlan) error {

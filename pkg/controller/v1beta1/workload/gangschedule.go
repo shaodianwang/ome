@@ -50,11 +50,16 @@ func gangTerminalReason(state GangState) string {
 // Waiting token: the row's outcome must be this machine's, and an
 // operation parked on another authority's token keeps it so the row
 // reports the wait it actually entered first.
+//
+// An operator pause is the exception, and the only one. It reports a
+// decision to stop rolling forward rather than a fact about the
+// Instance, so a gang name that cannot be used yet takes the row from
+// it. The pause goes on holding the rollout either way.
 func gangHoldWritable(op *InstanceOperation) bool {
 	if op == nil || types.GangRowOwnedElsewhere(op) {
 		return false
 	}
-	return op.Waiting == "" || OperationGangHeld(op)
+	return op.Waiting == "" || OperationGangHeld(op) || OperationPaused(op)
 }
 
 // gangVerdictActionable reports whether a terminal PodGroup verdict may

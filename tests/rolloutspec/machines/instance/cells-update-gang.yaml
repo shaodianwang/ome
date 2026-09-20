@@ -342,7 +342,7 @@ cells:
   - state: Update/GangSurgeTarget
     event: spec.pauseTrue
     outcome: defer
-    note: a standard pause plans nothing past the restart pass, so the source stops driving the surge; the marker keeps its pods and its claim, escalation is suspended with the rest of the lifecycle, and the attempt carries Operation.Waiting=Paused with its deadline parked. A gang SurgeThenDrain cycle is held whole rather than run to a step boundary — it spans the source and this marker and keeps the source serving from its first pass to its last, so parking it costs the Instance no capacity
+    note: a standard pause plans nothing past the restart pass, so the source stops driving the surge; the marker keeps its pods and its claim, the escalation pass's repair half is suspended with the rest of the lifecycle while its hold authorities keep recording and releasing what they observe, and the attempt carries Operation.Waiting=Paused with its deadline parked - until an authority with a fact to report takes the token over. A gang SurgeThenDrain cycle is held whole rather than run to a step boundary — it spans the source and this marker and keeps the source serving from its first pass to its last, so parking it costs the Instance no capacity
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -644,7 +644,7 @@ cells:
     event: pod.unschedulable
     variants: [target]
     outcome: defer
-    guard: the row is not fully serving and its operation carries no other authority's waiting token; the hold lasts while lifecycle.unschedulableGracePeriod is unconfigured or unelapsed, and past it the attempt is failed environment-caused
+    guard: the row is not fully serving and its operation carries no other authority's waiting token except an operator pause, which a fact about the Instance takes the row from; the hold lasts while lifecycle.unschedulableGracePeriod is unconfigured or unelapsed, and past it the attempt is failed environment-caused
     note: the escalation pass reads PodScheduled=False/Unschedulable off the replacement gang and records the Unschedulable waiting token, which parks the operation deadline rather than letting a gang that cannot be placed burn the whole InstanceReadyTimeout. One unplaceable member holds the whole Instance - a gang converges as a unit - and it is chosen by name so the recorded pod does not change from pass to pass. Past the configured grace the row is stamped Failed with the scheduler's message and no RetryBlock, keeping its operation, since a gang Update attempt is never disposable and the abandon path consumes the continuation
     placement: perm
     coverage: {perm: [], unit: [TestEscalation_UnschedulableGangPastGraceKeepsItsOperation, TestEscalation_UnschedulableGangHoldIsOrderIndependent, TestReconcileGatedDeadlines_ParksGangSurgeSourceOnMemberRejection], kind: []}
@@ -702,7 +702,7 @@ cells:
     event: gang.podGroup
     variants: [Terminating]
     outcome: defer
-    guard: the surge attempt is in flight, its pod set is not fully serving, and no other authority already holds the waiting token
+    guard: the surge attempt is in flight, its pod set is not fully serving, and no other authority except an operator pause already holds the waiting token
     note: the surge's own ensure classifies the name before writing - it may be the first place this index's PodGroup is read at all, since the surge index is not always pinned in the plan yet - and re-spells the sentinel as classified evidence about one row rather than a pass failure, so the other Instances keep reconciling. Members are withheld, and the escalation pass records the PodGroupTerminating token on the SURGE row; the source's deadline parks through it, because the governing operation and its clock live on the source while the pods are built under the surge index and the parking step follows that SurgeIndex. The source is never judged on its own group - its reading is deliberately empty while it carries a SurgeIndex, so the row whose replacement is being waited on is not held for it
     invariants: [podgroup.before.pods]
     placement: unit
