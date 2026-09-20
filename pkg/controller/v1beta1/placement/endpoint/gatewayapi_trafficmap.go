@@ -435,12 +435,26 @@ func (p *GatewayAPITrafficMapPublisher) Unpublish(
 		return fmt.Errorf("validate Gateway API cleanup journal: %w", err)
 	}
 
-	var errs []error
+	var routeErrs []error
+	routeNamespaces := make(map[string]struct{}, len(routeKeys))
 	for _, routeKey := range routeKeys {
+		routeNamespaces[routeKey.Namespace] = struct{}{}
 		if err := p.publisher.deleteClaimedHTTPRoute(ctx, routeKey, sourceKey); err != nil {
-			errs = append(errs, err)
+			routeErrs = append(routeErrs, err)
 		}
-		if err := p.publisher.deleteSourceResources(ctx, routeKey.Namespace, sourceKey); err != nil {
+	}
+	if len(routeErrs) != 0 {
+		return errors.Join(routeErrs...)
+	}
+
+	var errs []error
+	namespaces := make([]string, 0, len(routeNamespaces))
+	for routeNamespace := range routeNamespaces {
+		namespaces = append(namespaces, routeNamespace)
+	}
+	sort.Strings(namespaces)
+	for _, routeNamespace := range namespaces {
+		if err := p.publisher.deleteSourceResources(ctx, routeNamespace, sourceKey); err != nil {
 			errs = append(errs, err)
 		}
 	}

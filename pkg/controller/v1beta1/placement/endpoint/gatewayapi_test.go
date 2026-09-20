@@ -20,6 +20,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	gatewayapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -745,6 +746,85 @@ func TestDeleteClaimedHTTPRouteIsIdempotent(t *testing.T) {
 	require.NoError(t, p.deleteClaimedHTTPRoute(context.Background(), routeKey, sourceKey))
 	err := c.Get(context.Background(), routeKey, &gatewayapiv1.HTTPRoute{})
 	assert.True(t, apierrors.IsNotFound(err))
+}
+
+func TestDeleteClaimedHTTPRouteWaitsForFinalizersWithZeroWeights(t *testing.T) {
+	s := pubScheme(t)
+	isvc := testISVC()
+	p := NewGatewayAPIPublisher(nil, baseConfig())
+	route := p.buildHTTPRoute(isvc, oneHome("h", "cluster-a", "a.example"))
+	route.Finalizers = []string{"example.com/hold"}
+	route.Spec.Rules[0].BackendRefs[0].Weight = nil
+	c := fakeclient.NewClientBuilder().WithScheme(s).WithObjects(route).Build()
+	p = NewGatewayAPIPublisher(c, baseConfig())
+	routeKey := client.ObjectKeyFromObject(route)
+	sourceKey := client.ObjectKeyFromObject(isvc)
+
+	err := p.deleteClaimedHTTPRoute(context.Background(), routeKey, sourceKey)
+	require.ErrorContains(t, err, "deletion is pending")
+	live := &gatewayapiv1.HTTPRoute{}
+	require.NoError(t, c.Get(context.Background(), routeKey, live))
+	require.NotNil(t, live.DeletionTimestamp)
+	assert.Equal(t, []string{"example.com/hold"}, live.Finalizers)
+	require.NotNil(t, live.Spec.Rules[0].BackendRefs[0].Weight)
+	assert.Zero(t, *live.Spec.Rules[0].BackendRefs[0].Weight)
+
+	live.Finalizers = nil
+	require.NoError(t, c.Update(context.Background(), live))
+	require.NoError(t, p.deleteClaimedHTTPRoute(context.Background(), routeKey, sourceKey))
+	assert.True(t, apierrors.IsNotFound(c.Get(context.Background(), routeKey, &gatewayapiv1.HTTPRoute{})))
+}
+
+func TestDeleteClaimedHTTPRouteFencesConcurrentReplacement(t *testing.T) {
+	s := pubScheme(t)
+	isvc := testISVC()
+	p := NewGatewayAPIPublisher(nil, baseConfig())
+	route := p.buildHTTPRoute(isvc, oneHome("h", "cluster-a", "a.example"))
+	route.UID = types.UID("owned-route-uid")
+	route.ResourceVersion = "1"
+	routeKey := client.ObjectKeyFromObject(route)
+	sourceKey := client.ObjectKeyFromObject(isvc)
+
+	deleteCalls := 0
+	c := fakeclient.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(route).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Delete: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+				deleteCalls++
+				deleteOptions := (&client.DeleteOptions{}).ApplyOptions(opts)
+				require.NotNil(t, deleteOptions.Preconditions)
+				require.NotNil(t, deleteOptions.Preconditions.UID)
+				require.NotNil(t, deleteOptions.Preconditions.ResourceVersion)
+				assert.Equal(t, obj.GetUID(), *deleteOptions.Preconditions.UID)
+				assert.Equal(t, obj.GetResourceVersion(), *deleteOptions.Preconditions.ResourceVersion)
+
+				foreign := &gatewayapiv1.HTTPRoute{}
+				require.NoError(t, cl.Get(ctx, routeKey, foreign))
+				foreign.UID = types.UID("foreign-route-uid")
+				foreign.Labels[PlacementEndpointISVCLabel] = "other"
+				foreign.Spec.Rules[0].BackendRefs[0].Weight = ptr.To(int32(9))
+				require.NoError(t, cl.Update(ctx, foreign))
+				return apierrors.NewConflict(
+					gatewayapiv1.Resource("httproutes"),
+					obj.GetName(),
+					apierrors.NewBadRequest("delete preconditions no longer match"),
+				)
+			},
+		}).
+		Build()
+	p = NewGatewayAPIPublisher(c, baseConfig())
+
+	err := p.deleteClaimedHTTPRoute(context.Background(), routeKey, sourceKey)
+	require.Error(t, err)
+	assert.True(t, apierrors.IsConflict(errors.Unwrap(err)))
+	assert.Equal(t, 1, deleteCalls)
+	foreign := &gatewayapiv1.HTTPRoute{}
+	require.NoError(t, c.Get(context.Background(), routeKey, foreign))
+	assert.Equal(t, types.UID("foreign-route-uid"), foreign.UID)
+	assert.Equal(t, "other", foreign.Labels[PlacementEndpointISVCLabel])
+	require.NotNil(t, foreign.Spec.Rules[0].BackendRefs[0].Weight)
+	assert.Equal(t, int32(9), *foreign.Spec.Rules[0].BackendRefs[0].Weight)
 }
 
 func TestDeleteSourceResourcesUsesExactNamespaceAndLabels(t *testing.T) {

@@ -226,18 +226,7 @@ func (p *GatewayAPIPublisher) zeroClaimedHTTPRoute(
 	if err != nil || route == nil {
 		return err
 	}
-	changed := false
-	for ruleIndex := range route.Spec.Rules {
-		for backendIndex := range route.Spec.Rules[ruleIndex].BackendRefs {
-			weight := route.Spec.Rules[ruleIndex].BackendRefs[backendIndex].Weight
-			if weight != nil && *weight == 0 {
-				continue
-			}
-			route.Spec.Rules[ruleIndex].BackendRefs[backendIndex].Weight = ptr.To(int32(0))
-			changed = true
-		}
-	}
-	if !changed {
+	if !zeroHTTPRouteBackendWeights(route) {
 		return nil
 	}
 	if err := p.client.Update(ctx, route); err != nil {
@@ -261,10 +250,44 @@ func (p *GatewayAPIPublisher) deleteClaimedHTTPRoute(
 	if err != nil || route == nil {
 		return err
 	}
-	if err := p.client.Delete(ctx, route); err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("delete claimed HTTPRoute %s/%s: %w", routeKey.Namespace, routeKey.Name, err)
+	if zeroHTTPRouteBackendWeights(route) {
+		if err := p.client.Update(ctx, route); err != nil {
+			return fmt.Errorf("zero claimed HTTPRoute %s/%s before deletion: %w",
+				routeKey.Namespace, routeKey.Name, err)
+		}
 	}
-	return nil
+	if route.DeletionTimestamp.IsZero() {
+		uid := route.UID
+		resourceVersion := route.ResourceVersion
+		if err := p.client.Delete(ctx, route, client.Preconditions{
+			UID:             &uid,
+			ResourceVersion: &resourceVersion,
+		}); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete claimed HTTPRoute %s/%s: %w", routeKey.Namespace, routeKey.Name, err)
+		}
+	}
+	remaining := &gatewayapiv1.HTTPRoute{}
+	if err := p.apiReader.Get(ctx, routeKey, remaining); apierrors.IsNotFound(err) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("confirm claimed HTTPRoute %s/%s deletion: %w", routeKey.Namespace, routeKey.Name, err)
+	}
+	return fmt.Errorf("claimed HTTPRoute %s/%s deletion is pending", routeKey.Namespace, routeKey.Name)
+}
+
+func zeroHTTPRouteBackendWeights(route *gatewayapiv1.HTTPRoute) bool {
+	changed := false
+	for ruleIndex := range route.Spec.Rules {
+		for backendIndex := range route.Spec.Rules[ruleIndex].BackendRefs {
+			weight := route.Spec.Rules[ruleIndex].BackendRefs[backendIndex].Weight
+			if weight != nil && *weight == 0 {
+				continue
+			}
+			route.Spec.Rules[ruleIndex].BackendRefs[backendIndex].Weight = ptr.To(int32(0))
+			changed = true
+		}
+	}
+	return changed
 }
 
 func (p *GatewayAPIPublisher) getClaimedHTTPRoute(

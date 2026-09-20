@@ -248,11 +248,21 @@ var _ = ginkgo.Describe("Gateway API TrafficMap publisher", func() {
 		ownedServiceKeys := gatewayServiceKeys(gatewayServicesForSource(namespace, key))
 		gomega.Expect(ownedServiceKeys).To(gomega.HaveLen(2))
 
-		const holdFinalizer = "example.com/gateway-publisher-test-hold"
+		const (
+			holdFinalizer      = "example.com/gateway-publisher-test-hold"
+			routeHoldFinalizer = "example.com/gateway-route-test-hold"
+		)
 		gomega.Eventually(func(g gomega.Gomega) {
 			current := getTrafficMap(g, namespace, name)
 			if !slices.Contains(current.Finalizers, holdFinalizer) {
 				current.Finalizers = append(current.Finalizers, holdFinalizer)
+			}
+			g.Expect(k8sClient.Update(suiteCtx, current)).To(gomega.Succeed())
+		}).Should(gomega.Succeed())
+		gomega.Eventually(func(g gomega.Gomega) {
+			current := getGatewayHTTPRoute(routeKey)
+			if !slices.Contains(current.Finalizers, routeHoldFinalizer) {
+				current.Finalizers = append(current.Finalizers, routeHoldFinalizer)
 			}
 			g.Expect(k8sClient.Update(suiteCtx, current)).To(gomega.Succeed())
 		}).Should(gomega.Succeed())
@@ -267,6 +277,35 @@ var _ = ginkgo.Describe("Gateway API TrafficMap publisher", func() {
 		}).Should(gomega.Succeed())
 		gomega.Eventually(func(g gomega.Gomega) {
 			g.Expect(getTrafficMap(g, namespace, name).DeletionTimestamp.IsZero()).To(gomega.BeFalse())
+		}).Should(gomega.Succeed())
+
+		ginkgo.By("keeping the journal while a foreign finalizer delays route deletion")
+		_, err = reconciler.Reconcile(suiteCtx, ctrl.Request{NamespacedName: key})
+		gomega.Expect(err).To(gomega.MatchError(gomega.ContainSubstring("deletion is pending")))
+		trafficMap = getTrafficMap(gomega.Default, namespace, name)
+		gomega.Expect(trafficMap.Finalizers).To(gomega.ContainElement(
+			placementendpoint.TrafficMapPublisherFinalizer,
+		))
+		gomega.Expect(trafficMap.Status.Publisher).NotTo(gomega.BeNil())
+		route = getGatewayHTTPRoute(routeKey)
+		gomega.Expect(route.DeletionTimestamp).NotTo(gomega.BeNil())
+		gomega.Expect(route.Finalizers).To(gomega.ContainElement(routeHoldFinalizer))
+		for _, rule := range route.Spec.Rules {
+			for _, backend := range rule.BackendRefs {
+				gomega.Expect(backend.Weight).NotTo(gomega.BeNil())
+				gomega.Expect(*backend.Weight).To(gomega.BeZero())
+			}
+		}
+		for _, serviceKey := range ownedServiceKeys {
+			gomega.Expect(k8sClient.Get(suiteCtx, serviceKey, &corev1.Service{})).To(gomega.Succeed(),
+				"subordinate resources must remain until every claimed route is gone")
+		}
+		gomega.Eventually(func(g gomega.Gomega) {
+			current := getGatewayHTTPRoute(routeKey)
+			current.Finalizers = slices.DeleteFunc(current.Finalizers, func(value string) bool {
+				return value == routeHoldFinalizer
+			})
+			g.Expect(k8sClient.Update(suiteCtx, current)).To(gomega.Succeed())
 		}).Should(gomega.Succeed())
 
 		gomega.Eventually(func(g gomega.Gomega) {
