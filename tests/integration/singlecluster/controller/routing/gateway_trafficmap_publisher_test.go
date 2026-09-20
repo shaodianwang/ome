@@ -99,8 +99,7 @@ var _ = ginkgo.Describe("Gateway API TrafficMap publisher", func() {
 		}
 		gomega.Expect(k8sClient.Create(suiteCtx, foreignRoute)).To(gomega.Succeed())
 		_, err = reconciler.Reconcile(suiteCtx, ctrl.Request{NamespacedName: key})
-		gomega.Expect(err).To(gomega.HaveOccurred())
-		gomega.Expect(err.Error()).To(gomega.ContainSubstring("belongs to another source"))
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		trafficMap = getTrafficMap(gomega.Default, namespace, name)
 		gomega.Expect(trafficMap.Finalizers).To(gomega.ContainElement(
 			placementendpoint.TrafficMapPublisherFinalizer,
@@ -115,7 +114,7 @@ var _ = ginkgo.Describe("Gateway API TrafficMap publisher", func() {
 		failed := apimeta.FindStatusCondition(trafficMap.Status.Conditions, v1beta1.TrafficMapProgrammed)
 		gomega.Expect(failed).NotTo(gomega.BeNil())
 		gomega.Expect(failed.Status).To(gomega.Equal(metav1.ConditionFalse))
-		gomega.Expect(failed.Reason).To(gomega.Equal("ApplyFailed"))
+		gomega.Expect(failed.Reason).To(gomega.Equal("ClaimRejected"))
 		gomega.Expect(gatewayServicesForSource(namespace, key)).To(gomega.BeEmpty())
 		unchangedForeign := getGatewayHTTPRoute(routeKey)
 		gomega.Expect(unchangedForeign.Spec).To(gomega.Equal(foreignRoute.Spec))

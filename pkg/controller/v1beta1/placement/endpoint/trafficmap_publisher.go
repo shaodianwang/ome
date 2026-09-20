@@ -104,6 +104,13 @@ type TrafficMapPublisher interface {
 	) error
 }
 
+// trafficMapPublisherPreflighter is an optional in-package hook for publishers
+// that must validate shared external state after their durable claims are
+// persisted but before any drain or apply mutation.
+type trafficMapPublisherPreflighter interface {
+	Preflight(context.Context, TrafficMapPublishPlan) error
+}
+
 // TrafficMapPublisherReconciler owns the Kubernetes lifecycle around one
 // explicitly selected publisher. Stateful publishers are serialized because
 // the uncached claim scan and resource-version-guarded status write form their
@@ -262,6 +269,15 @@ func (r *TrafficMapPublisherReconciler) Reconcile(ctx context.Context, req ctrl.
 			return r.reject(ctx, trafficMap, trafficMapPublisherReasonClaimRejected, terminal.err)
 		}
 		return r.retryFailure(ctx, trafficMap, trafficMapPublisherReasonClaimRejected, err)
+	}
+	if preflighter, ok := r.Publisher.(trafficMapPublisherPreflighter); ok {
+		if err := preflighter.Preflight(ctx, plan); err != nil {
+			var terminal *terminalPublisherError
+			if errors.As(err, &terminal) {
+				return r.reject(ctx, trafficMap, trafficMapPublisherReasonClaimRejected, terminal.err)
+			}
+			return r.retryFailure(ctx, trafficMap, trafficMapPublisherReasonClaimRejected, err)
+		}
 	}
 	expectedClaims := publisherClaimUnion(previousClaims, desiredClaims)
 	staleClaims := publisherClaimDifference(previousClaims, desiredClaims)

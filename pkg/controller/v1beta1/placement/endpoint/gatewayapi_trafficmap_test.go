@@ -2,14 +2,17 @@ package endpoint
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -61,6 +64,76 @@ func (c staleGatewayAPIReadClient) List(
 	return nil
 }
 
+type failingGatewayAPIReader struct {
+	client.Reader
+	getErr    error
+	listErr   error
+	getCalls  int
+	listCalls int
+}
+
+func (r *failingGatewayAPIReader) Get(
+	ctx context.Context,
+	key client.ObjectKey,
+	obj client.Object,
+	opts ...client.GetOption,
+) error {
+	r.getCalls++
+	if r.getErr != nil {
+		return r.getErr
+	}
+	return r.Reader.Get(ctx, key, obj, opts...)
+}
+
+func (r *failingGatewayAPIReader) List(
+	ctx context.Context,
+	list client.ObjectList,
+	opts ...client.ListOption,
+) error {
+	r.listCalls++
+	if r.listErr != nil {
+		return r.listErr
+	}
+	return r.Reader.List(ctx, list, opts...)
+}
+
+func gatewayCollisionRoute(
+	namespace,
+	name,
+	hostname string,
+	parent gatewayapiv1.ParentReference,
+) *gatewayapiv1.HTTPRoute {
+	return &gatewayapiv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
+		Spec: gatewayapiv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayapiv1.CommonRouteSpec{
+				ParentRefs: []gatewayapiv1.ParentReference{parent},
+			},
+			Hostnames: []gatewayapiv1.Hostname{gatewayapiv1.Hostname(hostname)},
+		},
+	}
+}
+
+func gatewayTrafficMapWithJournal(
+	owner *v1beta1.InferenceService,
+	routeKey types.NamespacedName,
+	entries ...v1beta1.TrafficMapEntry,
+) *v1beta1.TrafficMap {
+	trafficMap := gatewayTrafficMap(owner, entries...)
+	trafficMap.UID = types.UID("map-" + owner.Name)
+	trafficMap.Generation = 1
+	trafficMap.Finalizers = []string{TrafficMapPublisherFinalizer}
+	trafficMap.OwnerReferences = []metav1.OwnerReference{
+		*metav1.NewControllerRef(owner, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
+	}
+	trafficMap.Spec.ObservedISVCGeneration = owner.Generation
+	trafficMap.Status.Publisher = &v1beta1.TrafficMapPublisherStatus{
+		PublisherName:  GatewayAPITrafficMapPublisherName,
+		ClaimedTargets: []string{gatewayAPIHTTPRouteClaim(routeKey)},
+	}
+	return trafficMap
+}
+
 func TestGatewayAPITrafficMapPublisherIdentityAndOptions(t *testing.T) {
 	p := NewGatewayAPITrafficMapPublisher(nil, nil, baseConfig())
 
@@ -77,6 +150,292 @@ func TestGatewayAPITrafficMapPublisherIdentityAndOptions(t *testing.T) {
 	_, err = p.ResolveOptions(map[string]string{"unused": "value"}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "global options: unused")
+}
+
+func TestGatewayAPITrafficMapPreflightRejectsExactGatewayHostnameCollisions(t *testing.T) {
+	const hostname = "shared.global.example"
+	explicitGatewayNamespace := gatewayapiv1.Namespace("ome-system")
+	desiredNamespace := gatewayapiv1.Namespace("prod")
+	tests := []struct {
+		name   string
+		config Config
+		route  *gatewayapiv1.HTTPRoute
+	}{
+		{
+			name:   "foreign route",
+			config: baseConfig(),
+			route: gatewayCollisionRoute("foreign", "occupied", hostname, gatewayapiv1.ParentReference{
+				Name: "global-gw", Namespace: &explicitGatewayNamespace,
+			}),
+		},
+		{
+			name:   "terminating route",
+			config: baseConfig(),
+			route: gatewayCollisionRoute("foreign", "terminating", hostname, gatewayapiv1.ParentReference{
+				Name: "global-gw", Namespace: &explicitGatewayNamespace,
+			}),
+		},
+		{
+			name:   "bare existing parent matches explicit configured parent",
+			config: baseConfig(),
+			route: gatewayCollisionRoute("ome-system", "bare-parent", hostname, gatewayapiv1.ParentReference{
+				Name: "global-gw",
+			}),
+		},
+		{
+			name: "explicit existing parent matches bare configured parent",
+			config: func() Config {
+				cfg := baseConfig()
+				cfg.GlobalGateway = "global-gw"
+				return cfg
+			}(),
+			route: gatewayCollisionRoute("foreign", "explicit-parent", hostname, gatewayapiv1.ParentReference{
+				Name: "global-gw", Namespace: &desiredNamespace,
+			}),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			owner := testISVC()
+			owner.Annotations = map[string]string{GlobalHostAnnotation: hostname}
+			if tt.name == "terminating route" {
+				now := metav1.Now()
+				tt.route.DeletionTimestamp = &now
+				tt.route.Finalizers = []string{"test.example/finalizer"}
+			}
+			c := fakeclient.NewClientBuilder().WithScheme(pubScheme(t)).WithObjects(tt.route).Build()
+			publisher := NewGatewayAPITrafficMapPublisher(c, c, tt.config)
+			plan, err := publisher.Plan(owner, gatewayTrafficMap(owner), nil)
+			require.NoError(t, err)
+
+			err = publisher.Preflight(context.Background(), plan)
+			var terminal *terminalPublisherError
+			require.ErrorAs(t, err, &terminal)
+			assert.ErrorContains(t, terminal.err, "already published")
+		})
+	}
+}
+
+func TestGatewayAPITrafficMapPreflightAllowsDistinctTargets(t *testing.T) {
+	const hostname = "shared.global.example"
+	gatewayNamespace := gatewayapiv1.Namespace("ome-system")
+	routes := []client.Object{
+		gatewayCollisionRoute("foreign", "different-host", "other.global.example", gatewayapiv1.ParentReference{
+			Name: "global-gw", Namespace: &gatewayNamespace,
+		}),
+		gatewayCollisionRoute("foreign", "different-gateway", hostname, gatewayapiv1.ParentReference{
+			Name: "other-gw", Namespace: &gatewayNamespace,
+		}),
+	}
+	owner := testISVC()
+	owner.Annotations = map[string]string{GlobalHostAnnotation: hostname}
+	c := fakeclient.NewClientBuilder().WithScheme(pubScheme(t)).WithObjects(routes...).Build()
+	publisher := NewGatewayAPITrafficMapPublisher(c, c, baseConfig())
+	plan, err := publisher.Plan(owner, gatewayTrafficMap(owner), nil)
+	require.NoError(t, err)
+	require.NoError(t, publisher.Preflight(context.Background(), plan))
+}
+
+func TestGatewayAPITrafficMapPreflightVerifiesDesiredRouteOwnership(t *testing.T) {
+	owner := testISVC()
+	foreign := gatewayCollisionRoute("prod", "svc-global", "unrelated.example", gatewayapiv1.ParentReference{
+		Name: "other-gateway",
+	})
+	c := fakeclient.NewClientBuilder().WithScheme(pubScheme(t)).WithObjects(foreign).Build()
+	publisher := NewGatewayAPITrafficMapPublisher(c, c, baseConfig())
+	plan, err := publisher.Plan(owner, gatewayTrafficMap(owner), nil)
+	require.NoError(t, err)
+
+	err = publisher.Preflight(context.Background(), plan)
+	var terminal *terminalPublisherError
+	require.ErrorAs(t, err, &terminal)
+	assert.ErrorContains(t, terminal.err, "belongs to another source")
+}
+
+func TestGatewayAPITrafficMapPreflightUsesUncachedReader(t *testing.T) {
+	const hostname = "shared.global.example"
+	gatewayNamespace := gatewayapiv1.Namespace("ome-system")
+	collision := gatewayCollisionRoute("foreign", "occupied", hostname, gatewayapiv1.ParentReference{
+		Name: "global-gw", Namespace: &gatewayNamespace,
+	})
+	live := fakeclient.NewClientBuilder().WithScheme(pubScheme(t)).WithObjects(collision).Build()
+	owner := testISVC()
+	owner.Annotations = map[string]string{GlobalHostAnnotation: hostname}
+	publisher := NewGatewayAPITrafficMapPublisher(staleGatewayAPIReadClient{Client: live}, live, baseConfig())
+	plan, err := publisher.Plan(owner, gatewayTrafficMap(owner), nil)
+	require.NoError(t, err)
+
+	err = publisher.Preflight(context.Background(), plan)
+	var terminal *terminalPublisherError
+	require.ErrorAs(t, err, &terminal)
+	assert.ErrorContains(t, terminal.err, "already published")
+}
+
+func TestGatewayAPITrafficMapPreflightSkipsWithdrawal(t *testing.T) {
+	reader := &failingGatewayAPIReader{
+		getErr:  errors.New("unexpected get"),
+		listErr: errors.New("unexpected list"),
+	}
+	cfg := baseConfig()
+	cfg.BackendPort = 0
+	owner := testISVC()
+	publisher := NewGatewayAPITrafficMapPublisher(nil, reader, cfg)
+	plan, err := publisher.Plan(owner, gatewayTrafficMap(owner), nil)
+	require.NoError(t, err)
+
+	require.NoError(t, publisher.Preflight(context.Background(), plan))
+	assert.Zero(t, reader.getCalls)
+	assert.Zero(t, reader.listCalls)
+}
+
+func TestGatewayAPITrafficMapPreflightReadFailuresAreRetryable(t *testing.T) {
+	tests := []struct {
+		name    string
+		getErr  error
+		listErr error
+		want    string
+	}{
+		{name: "get", getErr: errors.New("get failed"), want: "get failed"},
+		{name: "list", listErr: errors.New("list failed"), want: "list failed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			live := fakeclient.NewClientBuilder().WithScheme(pubScheme(t)).Build()
+			reader := &failingGatewayAPIReader{Reader: live, getErr: tt.getErr, listErr: tt.listErr}
+			owner := testISVC()
+			publisher := NewGatewayAPITrafficMapPublisher(live, reader, baseConfig())
+			plan, err := publisher.Plan(owner, gatewayTrafficMap(owner), nil)
+			require.NoError(t, err)
+
+			err = publisher.Preflight(context.Background(), plan)
+			require.ErrorContains(t, err, tt.want)
+			var terminal *terminalPublisherError
+			assert.False(t, errors.As(err, &terminal))
+		})
+	}
+}
+
+func TestGatewayAPITrafficMapHostnameChangeCollisionPreservesPublishedRoute(t *testing.T) {
+	const (
+		oldHostname = "h1.global.example"
+		newHostname = "h2.global.example"
+	)
+	cfg := baseConfig()
+	owner := testISVC()
+	owner.Generation = 1
+	owner.Annotations = map[string]string{GlobalHostAnnotation: newHostname}
+	renderer := NewGatewayAPITrafficMapPublisher(nil, nil, cfg)
+	routeKey := types.NamespacedName{
+		Namespace: renderer.publisher.routeNamespace(owner),
+		Name:      renderer.publisher.routeName(owner),
+	}
+	trafficMap := gatewayTrafficMapWithJournal(owner, routeKey,
+		gatewayTrafficMapEntry("cluster-a", "new-backend.example", 99),
+	)
+	trafficMap.Status.Programmed = true
+	trafficMap.Status.ObservedTrafficMapGeneration = trafficMap.Generation
+	oldRoute := renderer.publisher.buildHTTPRoute(owner, Target{
+		GlobalHost:           oldHostname,
+		WeightsAuthoritative: true,
+		Homes: []Home{{
+			Cluster: "cluster-a", BackendHost: "old-backend.example", Weight: 37,
+		}},
+	})
+	gatewayNamespace := gatewayapiv1.Namespace("ome-system")
+	occupied := gatewayCollisionRoute("foreign", "occupied-h2", newHostname, gatewayapiv1.ParentReference{
+		Name: "global-gw", Namespace: &gatewayNamespace,
+	})
+	scheme := pubScheme(t)
+	kubeClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&v1beta1.TrafficMap{}).
+		WithObjects(owner, trafficMap, oldRoute, occupied).
+		Build()
+	publisher := NewGatewayAPITrafficMapPublisher(kubeClient, kubeClient, cfg)
+	reconciler := &TrafficMapPublisherReconciler{
+		Client: kubeClient, APIReader: kubeClient, Log: logr.Discard(), Publisher: publisher, Active: true,
+	}
+
+	_, err := reconcileTrafficMapPublisher(t, reconciler, trafficMap)
+	require.NoError(t, err)
+
+	current := getPublisherTrafficMap(t, kubeClient, trafficMap)
+	condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionFalse, condition.Status)
+	assert.Equal(t, trafficMapPublisherReasonClaimRejected, condition.Reason)
+	require.NotNil(t, current.Status.Publisher)
+	assert.Equal(t, []string{gatewayAPIHTTPRouteClaim(routeKey)}, current.Status.Publisher.ClaimedTargets)
+
+	gotRoute := &gatewayapiv1.HTTPRoute{}
+	require.NoError(t, kubeClient.Get(context.Background(), routeKey, gotRoute))
+	assert.Equal(t, []gatewayapiv1.Hostname{oldHostname}, gotRoute.Spec.Hostnames)
+	require.Len(t, gotRoute.Spec.Rules, 1)
+	require.Len(t, gotRoute.Spec.Rules[0].BackendRefs, 1)
+	assert.Equal(t, int32(37), *gotRoute.Spec.Rules[0].BackendRefs[0].Weight,
+		"the old route must not be drained or updated before collision rejection")
+	routes := &gatewayapiv1.HTTPRouteList{}
+	require.NoError(t, kubeClient.List(context.Background(), routes))
+	assert.Len(t, routes.Items, 2, "collision rejection must not create another HTTPRoute")
+	assert.True(t, apierrors.IsNotFound(kubeClient.Get(context.Background(), types.NamespacedName{
+		Namespace: routeKey.Namespace,
+		Name:      renderer.publisher.serviceName(owner, "cluster-a"),
+	}, &corev1.Service{})), "collision rejection must not apply backend Services")
+}
+
+func TestGatewayAPITrafficMapLegacyDuplicateRoutesBothReportCollision(t *testing.T) {
+	const hostname = "duplicate.global.example"
+	cfg := baseConfig()
+	renderer := NewGatewayAPITrafficMapPublisher(nil, nil, cfg)
+	owners := []*v1beta1.InferenceService{
+		{ObjectMeta: metav1.ObjectMeta{
+			Name: "svc-a", Namespace: "prod", UID: "owner-a", Generation: 1,
+			Annotations: map[string]string{GlobalHostAnnotation: hostname},
+		}},
+		{ObjectMeta: metav1.ObjectMeta{
+			Name: "svc-b", Namespace: "prod", UID: "owner-b", Generation: 1,
+			Annotations: map[string]string{GlobalHostAnnotation: hostname},
+		}},
+	}
+	objects := make([]client.Object, 0, 6)
+	maps := make([]*v1beta1.TrafficMap, 0, len(owners))
+	for _, owner := range owners {
+		routeKey := types.NamespacedName{
+			Namespace: renderer.publisher.routeNamespace(owner),
+			Name:      renderer.publisher.routeName(owner),
+		}
+		trafficMap := gatewayTrafficMapWithJournal(owner, routeKey)
+		route := renderer.publisher.buildHTTPRoute(owner, Target{
+			GlobalHost: hostname, WeightsAuthoritative: true,
+		})
+		maps = append(maps, trafficMap)
+		objects = append(objects, owner, trafficMap, route)
+	}
+	scheme := pubScheme(t)
+	kubeClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&v1beta1.TrafficMap{}).
+		WithObjects(objects...).
+		Build()
+	publisher := NewGatewayAPITrafficMapPublisher(kubeClient, kubeClient, cfg)
+	reconciler := &TrafficMapPublisherReconciler{
+		Client: kubeClient, APIReader: kubeClient, Log: logr.Discard(), Publisher: publisher, Active: true,
+	}
+
+	for _, trafficMap := range maps {
+		_, err := reconcileTrafficMapPublisher(t, reconciler, trafficMap)
+		require.NoError(t, err)
+		current := getPublisherTrafficMap(t, kubeClient, trafficMap)
+		condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
+		require.NotNil(t, condition)
+		assert.Equal(t, metav1.ConditionFalse, condition.Status)
+		assert.Equal(t, trafficMapPublisherReasonClaimRejected, condition.Reason)
+		require.NotNil(t, current.Status.Publisher)
+		assert.Equal(t, []string{gatewayAPIHTTPRouteClaim(types.NamespacedName{
+			Namespace: "prod", Name: trafficMap.Name + resourceSuffix,
+		})}, current.Status.Publisher.ClaimedTargets,
+			"legacy route-only journals remain valid while both duplicates are diagnosed")
+	}
 }
 
 func TestGatewayAPITrafficMapPlanIsImmutableAndAppliesWeights(t *testing.T) {

@@ -8,12 +8,14 @@ import (
 	"sort"
 	"strings"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gatewayapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 )
 
 const (
@@ -39,6 +41,7 @@ type GatewayAPITrafficMapPublisher struct {
 }
 
 var _ TrafficMapPublisher = (*GatewayAPITrafficMapPublisher)(nil)
+var _ trafficMapPublisherPreflighter = (*GatewayAPITrafficMapPublisher)(nil)
 
 // NewGatewayAPITrafficMapPublisher constructs the TrafficMap-owned Gateway API
 // adapter. The client addresses the cluster that hosts the shared Gateway.
@@ -232,6 +235,107 @@ func newGatewayAPIWithdrawalPlan(
 	routeKey types.NamespacedName,
 ) *gatewayAPITrafficMapPlan {
 	return &gatewayAPITrafficMapPlan{owner: owner, target: target, routeKey: routeKey}
+}
+
+// Preflight rejects an HTTPRoute hostname collision before Drain or Apply can
+// change external state. The shared Gateway is a semantic target: two distinct
+// catch-all routes for the same hostname are resolved by route precedence, not
+// combined, so allowing both would silently leave one TrafficMap ineffective.
+func (p *GatewayAPITrafficMapPublisher) Preflight(ctx context.Context, plan TrafficMapPublishPlan) error {
+	if p == nil || p.publisher == nil {
+		return errors.New("Gateway API publisher is not configured")
+	}
+	gatewayPlan, ok := plan.(*gatewayAPITrafficMapPlan)
+	if !ok || gatewayPlan == nil || gatewayPlan.owner == nil {
+		return fmt.Errorf("Gateway API publisher received plan of type %T", plan)
+	}
+	if !gatewayPlan.publish {
+		return nil
+	}
+	if err := p.publisher.validateIO(); err != nil {
+		return err
+	}
+
+	desiredRoute := &gatewayapiv1.HTTPRoute{}
+	err := p.publisher.apiReader.Get(ctx, gatewayPlan.routeKey, desiredRoute)
+	switch {
+	case apierrors.IsNotFound(err):
+		// The exact desired route is available.
+	case err != nil:
+		return fmt.Errorf("read desired global HTTPRoute %s: %w", gatewayPlan.routeKey, err)
+	case !p.publisher.ownsResource(desiredRoute, gatewayPlan.owner):
+		return &terminalPublisherError{err: fmt.Errorf(
+			"global HTTPRoute %s belongs to another source", gatewayPlan.routeKey)}
+	}
+
+	routes := &gatewayapiv1.HTTPRouteList{}
+	if err := p.publisher.apiReader.List(ctx, routes); err != nil {
+		return fmt.Errorf("list HTTPRoutes for Gateway hostname ownership: %w", err)
+	}
+	gatewayKey := effectiveGatewayAPIKey(p.publisher.config.GlobalGateway, gatewayPlan.routeKey.Namespace)
+	for i := range routes.Items {
+		route := &routes.Items[i]
+		routeKey := client.ObjectKeyFromObject(route)
+		if routeKey == gatewayPlan.routeKey {
+			// Never exclude the desired key solely by name: an unrelated object at
+			// that key is a collision even when its hostname happens to differ.
+			if !p.publisher.ownsResource(route, gatewayPlan.owner) {
+				return &terminalPublisherError{err: fmt.Errorf(
+					"global HTTPRoute %s belongs to another source", routeKey)}
+			}
+			continue
+		}
+		if gatewayAPIHTTPRoutePublishes(route, gatewayKey, gatewayPlan.target.GlobalHost) {
+			return &terminalPublisherError{err: fmt.Errorf(
+				"Gateway hostname %q on %s is already published by HTTPRoute %s",
+				gatewayPlan.target.GlobalHost, gatewayKey, routeKey)}
+		}
+	}
+	return nil
+}
+
+func effectiveGatewayAPIKey(globalGateway, routeNamespace string) types.NamespacedName {
+	namespace, name := splitGatewayRef(globalGateway)
+	if namespace == "" {
+		namespace = routeNamespace
+	}
+	return types.NamespacedName{Namespace: namespace, Name: name}
+}
+
+func gatewayAPIHTTPRoutePublishes(
+	route *gatewayapiv1.HTTPRoute,
+	gatewayKey types.NamespacedName,
+	hostname string,
+) bool {
+	if route == nil {
+		return false
+	}
+	hostMatched := false
+	for _, candidate := range route.Spec.Hostnames {
+		if string(candidate) == hostname {
+			hostMatched = true
+			break
+		}
+	}
+	if !hostMatched {
+		return false
+	}
+	for _, parent := range route.Spec.ParentRefs {
+		if parent.Group != nil && *parent.Group != gatewayapiv1.Group(gatewayapiv1.GroupVersion.Group) {
+			continue
+		}
+		if parent.Kind != nil && *parent.Kind != gatewayapiv1.Kind(constants.GatewayKind) {
+			continue
+		}
+		namespace := route.Namespace
+		if parent.Namespace != nil && *parent.Namespace != "" {
+			namespace = string(*parent.Namespace)
+		}
+		if (types.NamespacedName{Namespace: namespace, Name: string(parent.Name)}) == gatewayKey {
+			return true
+		}
+	}
+	return false
 }
 
 // Drain implements TrafficMapPublisher. Retired routes remain claimed and

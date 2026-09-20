@@ -695,7 +695,9 @@ only as that sequence's last step.
   endpoint, as today), `weight` per entry. TrafficMap weights are authoritative
   and are applied verbatim, including all-zero results caused by readiness,
   capacity, or the probe's `Drain` policy. Legacy placement-only publication
-  retains its equal-weight fallback.
+  retains its equal-weight fallback. Before mutation, the adapter reads live
+  HTTPRoutes and rejects another route with the same exact hostname attached to
+  the same effective Gateway.
 - **External runtime weights** (optional, deployment-specific): render one
   target per home from the entry and its safe per-ISVC mapping options, then call
   the globally configured automation endpoint. This publisher changes

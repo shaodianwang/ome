@@ -43,6 +43,22 @@ type recordingTrafficMapPublisher struct {
 	unpublish func(context.Context, types.NamespacedName, v1beta1.TrafficMapPublisherStatus) error
 }
 
+type preflightingTrafficMapPublisher struct {
+	*recordingTrafficMapPublisher
+	preflight func(context.Context, TrafficMapPublishPlan) error
+}
+
+func (p *preflightingTrafficMapPublisher) Preflight(
+	ctx context.Context,
+	plan TrafficMapPublishPlan,
+) error {
+	p.events = append(p.events, "preflight")
+	if p.preflight != nil {
+		return p.preflight(ctx, plan)
+	}
+	return nil
+}
+
 func (p *recordingTrafficMapPublisher) Name() string { return p.name }
 func (p *recordingTrafficMapPublisher) Stateful() bool {
 	return p.stateful
@@ -307,6 +323,61 @@ func TestTrafficMapPublisherPreclaimsBeforeDrainAndApply(t *testing.T) {
 	programmed := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
 	require.NotNil(t, programmed)
 	assert.Equal(t, metav1.ConditionTrue, programmed.Status)
+}
+
+func TestTrafficMapPublisherPreflightRunsAfterPreclaimBeforeEffects(t *testing.T) {
+	tests := []struct {
+		name      string
+		preflight error
+		wantError bool
+	}{
+		{
+			name:      "terminal rejection",
+			preflight: &terminalPublisherError{err: errors.New("hostname collision")},
+		},
+		{
+			name:      "retryable read failure",
+			preflight: errors.New("live route list failed"),
+			wantError: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			owner, trafficMap := publisherTestObjects()
+			trafficMap.Finalizers = []string{TrafficMapPublisherFinalizer}
+			trafficMap.Status.Publisher = &v1beta1.TrafficMapPublisherStatus{
+				PublisherName: "example-publisher", ClaimedTargets: []string{"retired"},
+			}
+			base := &recordingTrafficMapPublisher{
+				name: "example-publisher", stateful: true, claims: []string{"target-a"},
+			}
+			publisher := &preflightingTrafficMapPublisher{recordingTrafficMapPublisher: base}
+			reconciler, kubeClient := newTrafficMapPublisherReconciler(t, publisher, owner, trafficMap)
+			publisher.preflight = func(_ context.Context, plan TrafficMapPublishPlan) error {
+				assert.Equal(t, []string{"target-a"}, plan.Claims())
+				current := getPublisherTrafficMap(t, kubeClient, trafficMap)
+				require.NotNil(t, current.Status.Publisher)
+				assert.Equal(t, []string{"retired", "target-a"}, current.Status.Publisher.ClaimedTargets,
+					"the durable claim must precede preflight")
+				return tt.preflight
+			}
+
+			_, err := reconcileTrafficMapPublisher(t, reconciler, trafficMap)
+			if tt.wantError {
+				require.ErrorContains(t, err, tt.preflight.Error())
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, []string{"preflight"}, publisher.events,
+				"a failed preflight must precede and prevent Drain and Apply")
+
+			current := getPublisherTrafficMap(t, kubeClient, trafficMap)
+			condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
+			require.NotNil(t, condition)
+			assert.Equal(t, metav1.ConditionFalse, condition.Status)
+			assert.Equal(t, trafficMapPublisherReasonClaimRejected, condition.Reason)
+		})
+	}
 }
 
 func TestTrafficMapPublisherWithdrawnResultRecordsConvergence(t *testing.T) {
