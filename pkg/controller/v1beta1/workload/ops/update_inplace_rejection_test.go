@@ -26,6 +26,8 @@ import (
 // (Operation cleared, Phase=Failed) and the revision is held for retry,
 // instead of the patch being retried on blind backoff until the
 // operation deadline reports a misleading timeout.
+//
+// Cells: instance/Update/InPlace/api.invalid/before
 func TestUpdateInPlace_InvalidPatch_DisposesAndHoldsRevision(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)

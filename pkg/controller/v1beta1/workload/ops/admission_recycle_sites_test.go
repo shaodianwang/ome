@@ -308,7 +308,7 @@ func TestGangSurgeCreate_AdmissionRejectedTargetIsRecycled(t *testing.T) {
 // record deadline; the recycle frees it so the surge is placed again
 // inside the window, with the kubelet's reason on the source's evidence.
 //
-// Cells: instance/Migrate/CreateSurge/pod.admissionRejected[UnexpectedAdmissionError]/before
+// Cells: instance/Migrate/CreateSurge/pod.admissionRejected[UnexpectedAdmissionError]/before, instance/Migrate/SurgeTarget/pod.admissionRejected[UnexpectedAdmissionError]/before
 func TestMigrateSurge_AdmissionRejectedTargetIsRecycled(t *testing.T) {
 	f := newSinglePodMigFixture(t)
 	const uuid = "mig-surge-admission-rejected"

@@ -201,7 +201,7 @@ cells:
       no progress through the drive's gates and the record Deadline ends the move
     invariants: [record.is.timeout.authority]
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestMigrate_DeadlineExceededIsNotEarlyFailureEvidence], kind: []}
     status: decided
   - state: Migrate/CreateSurge
     event: pod.waiting
@@ -361,7 +361,7 @@ cells:
     outcome: defer
     note: a Migrate-owned row's group is never reset - deleting it would pull the gang contract out from under pods the migration record is still driving - so the absorbing Failed phase stands while the members it would place stay withheld, and the record Deadline is what ends the move
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestEscalation_GangReadingsOnAMigrationPair], kind: []}
     status: decided
   - state: Migrate/CreateSurge
     event: gang.podGroup
@@ -369,7 +369,7 @@ cells:
     outcome: ignore
     note: neither reading exists on the PodGroup - the vendored gang scheduler writes no Unknown phase and no ScheduleStartTime - so there is no group-level verdict to observe. A surge gang that cannot be placed reaches the controller on its member pods instead, where the pod-level hold records it for visibility while the record Deadline still governs the move
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestObserveGang_SchedulingPhasesReportNothing], kind: []}
     status: decided
   - state: Migrate/CreateSurge
     event: endpoint.rotationIn
@@ -421,7 +421,7 @@ cells:
       surge and an update surge never stack on one Instance
     invariants: [one.operation.per.instance]
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestMigrate_RevisionRetargetIsDeclinedWhileTheRecordDrives], kind: []}
     status: decided
   - state: Migrate/CreateSurge
     event: spec.annotationOnly
@@ -500,7 +500,7 @@ cells:
       it never touches the in-flight pair; a re-delivery of the same uuid is deduped
       and its annotation dropped
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestMigrate_SecondRequestQueuesBehindTheInFlightPair], kind: []}
     status: decided
   - state: Migrate/CreateSurge
     event: spec.partition
@@ -570,7 +570,7 @@ cells:
       grace rather than this clock
     invariants: [record.is.timeout.authority]
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestEscalation_MigrationPairIgnoresTheInstanceOperationDeadline], kind: []}
     status: decided
   - state: Migrate/CreateSurge
     event: timer.minReady
@@ -728,7 +728,7 @@ cells:
       compare-and-swap that re-reads and re-applies, so a conflict costs a pass; the
       pair preconditions are re-evaluated on the retry
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestMigrate_StatusConflictCostsAPassAndReDerives], kind: []}
     status: decided
   - state: Migrate/CreateSurge
     event: api.alreadyExists
@@ -770,14 +770,14 @@ cells:
     guard: the rejected write is the surge pod create; a 422 on a status write is not classified and stays an opaque error
     note: a 422 on the surge create is permanent, so the migration request is closed on the first rejection rather than idling to its record Deadline - the same early-fail the node-affinity conflict gate applies - with the apiserver's own explanation naming the rejected pod on the failure reason. The revision is NOT blamed and no RetryBlock is recorded, because the surge pod carries the request's placement overlay and the rejection may indict the overlay rather than anything the revision asked for
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestMigrateSurge_RejectionDispositions, TestMigrateSurge_InvalidPodSpec_FailsTheMigration], kind: []}
     status: decided
   - state: Migrate/CreateSurge
     event: api.throttled
     outcome: defer
     note: a shed create is classified as throttled and writes nothing; the server's Retry-After is deposited on the pass pacing, which floors the requeue so the drive wakes no earlier than the apiserver asked, and the create is still polled to the record Deadline like any other blocked create. A shed status write is not classified and returns into controller-runtime backoff
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestMigrateSurge_RejectionDispositions], kind: []}
     status: decided
   - state: Migrate/CreateSurge
     event: api.namespaceTerminating
@@ -786,7 +786,7 @@ cells:
     guard: the rejected write is the surge pod create
     note: no surge pod can be created in a terminating namespace, so the migration request is closed on the first rejection instead of being polled to its record Deadline, with NamespaceTerminating and the apiserver's message naming the rejected pod. Environment-caused, so no revision is blamed; in practice the owner's own deletion reaches the row as teardown shortly after
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestMigrateSurge_RejectionDispositions], kind: []}
     status: decided
 
   # --- Migrate/SurgeTarget: pod lifecycle -------------------------------
@@ -957,7 +957,7 @@ cells:
       withholds the surge gates and the record Deadline ends the move
     invariants: [record.is.timeout.authority]
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestMigrate_DeadlineExceededIsNotEarlyFailureEvidence], kind: []}
     status: decided
   - state: Migrate/SurgeTarget
     event: pod.waiting
@@ -1026,7 +1026,7 @@ cells:
     guard: the row is not fully serving and its operation carries no other authority's waiting token; the hold lasts while lifecycle.unschedulableGracePeriod is unconfigured or unelapsed, and past it the attempt is failed environment-caused
     note: an own pod the overlay's anti-affinity made unplaceable is read as such - the escalation pass records the Unschedulable waiting token on this row, which parks its operation deadline while the migration record's Deadline stays the timeout authority for the move. Past the configured grace the row is failed with the scheduler's message and no RetryBlock, because the shortage of placements is the environment's, not the revision's
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestEscalation_UnschedulableMigrationSurgeHoldsTheSurgeRow, TestEscalation_UnschedulableMigrationSurgePastGraceFails], kind: []}
     status: decided
   - state: Migrate/SurgeTarget
     event: pod.containersNotReady
@@ -1095,7 +1095,7 @@ cells:
     outcome: defer
     note: same reading from the replacement side - a Migrate-owned row takes no gang waiting token and receives no terminal verdict, because the migration record is the timeout authority for both pair rows. The unusable name still withholds this gang's members, so nothing is rendered until it resolves or the record Deadline ends the move
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestEscalation_GangReadingsOnAMigrationPair], kind: []}
     status: decided
   - state: Migrate/SurgeTarget
     event: gang.podGroup
@@ -1111,7 +1111,7 @@ cells:
     outcome: defer
     note: a Migrate-owned row's group is never reset, so the absorbing Failed phase stands while the members it would place stay withheld; the record Deadline is what ends the move and expiry then unpins the index
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestEscalation_GangReadingsOnAMigrationPair], kind: []}
     status: decided
   - state: Migrate/SurgeTarget
     event: gang.podGroup
@@ -1119,7 +1119,7 @@ cells:
     outcome: ignore
     note: neither reading exists on the PodGroup - the vendored gang scheduler writes no Unknown phase and no ScheduleStartTime - so a group-level timeout is not something this controller can observe. An unplaceable replacement gang arrives on its member pods, where the pod-level hold records it while the record Deadline still governs
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestObserveGang_SchedulingPhasesReportNothing], kind: []}
     status: decided
   - state: Migrate/SurgeTarget
     event: endpoint.rotationIn
@@ -1171,7 +1171,7 @@ cells:
       new revision rolls once the record is terminal
     invariants: [one.operation.per.instance]
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestMigrate_RevisionRetargetIsDeclinedWhileTheRecordDrives], kind: []}
     status: decided
   - state: Migrate/SurgeTarget
     event: spec.annotationOnly
@@ -1317,7 +1317,7 @@ cells:
       grace rather than this clock
     invariants: [record.is.timeout.authority]
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestEscalation_MigrationPairIgnoresTheInstanceOperationDeadline], kind: []}
     status: decided
   - state: Migrate/SurgeTarget
     event: timer.minReady
@@ -1445,7 +1445,7 @@ cells:
     note: status writes retry under conflict and the audit ledger write is a
       compare-and-swap that re-reads and re-applies, so a conflict costs a pass
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestMigrate_StatusConflictCostsAPassAndReDerives], kind: []}
     status: decided
   - state: Migrate/SurgeTarget
     event: api.alreadyExists
@@ -1486,14 +1486,14 @@ cells:
     guard: the rejected write is the own-pod create; a 422 on a status write is not classified and stays an opaque error
     note: a 422 on the replacement's own create is permanent, so this row is disposed and the migration request is closed rather than polled to its record Deadline. The revision is NOT blamed and no RetryBlock is recorded, because the replacement carries the request's placement overlay and the rejection may indict the overlay rather than anything the revision asked for
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestMigrateSurge_RejectionDispositions], kind: []}
     status: decided
   - state: Migrate/SurgeTarget
     event: api.throttled
     outcome: defer
     note: a shed create is classified as throttled and writes nothing; the server's Retry-After is deposited on the pass pacing, which floors the requeue, and the create is still polled to the record Deadline like any other blocked create. A shed status write is not classified and returns into controller-runtime backoff
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestMigrateSurge_RejectionDispositions], kind: []}
     status: decided
   - state: Migrate/SurgeTarget
     event: api.namespaceTerminating
@@ -1502,7 +1502,7 @@ cells:
     guard: the rejected write is the own-pod create
     note: no replacement pod can be created in a terminating namespace, so the request is closed on the first rejection instead of being polled to its record Deadline, with NamespaceTerminating and the apiserver's message naming the rejected pod. Environment-caused, so no revision is blamed; in practice the owner's own deletion reaches the row as teardown shortly after
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestMigrateSurge_RejectionDispositions], kind: []}
     status: decided
 
   # --- Migrate pair: kubelet admission and slow readiness ----------------
@@ -1532,7 +1532,7 @@ cells:
     guard: the rejected pod holds one of this row's target names, the record Deadline has not elapsed, and its outstanding expectations are satisfied
     note: same reading from the replacement side - a refused own pod is deleted and its name rebuilt through the shared terminal recycle, so the move is retried inside the record's window instead of stalling the surge gates until it expires
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestMigrateSurge_AdmissionRejectedTargetIsRecycled], kind: []}
     status: decided
   - state: Migrate/SurgeTarget
     event: pod.admissionRejected
@@ -1585,7 +1585,7 @@ cells:
     note: the restore write is preconditioned on both rows carrying the expected identity, so a source pod disappearing as it lands is rejected and re-derived rather than half-applied
     invariants: [pair.identity.guarded]
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestMigrate_SourcePodLossAroundTheWedgeClose], kind: []}
     status: decided
   - state: Migrate/CreateSurge
     event: pod.deleted
@@ -1595,7 +1595,7 @@ cells:
     outcome: ignore
     note: the row is Ready on its untouched running revision with the pin cleared, so pod loss is owned by the ordinary repair from there
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestMigrate_SourcePodLossAroundTheWedgeClose], kind: []}
     status: decided
   - state: Migrate/CreateSurge
     event: timer.migrationDeadline
@@ -1605,7 +1605,7 @@ cells:
     note: the record is being closed Failed on the surge's own evidence, and expiry does not reopen a record that is already terminal
     invariants: [record.is.timeout.authority]
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestMigrate_MigrationDeadlineAroundTheWedgeClose], kind: []}
     status: decided
   - state: Migrate/CreateSurge
     event: timer.migrationDeadline
@@ -1615,7 +1615,7 @@ cells:
     note: the record is terminal and the source is back at Ready, so the deadline that remained the backstop has nothing left to end
     invariants: [record.is.timeout.authority]
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestMigrate_MigrationDeadlineAroundTheWedgeClose], kind: []}
     status: decided
   - state: Migrate/SurgeTarget
     event: pod.deleted
@@ -1626,7 +1626,7 @@ cells:
     note: the pin is being cleared on the record's terminal evidence; a source pod disappearing as that lands does not promote a surge the record has already failed
     invariants: [pair.identity.guarded]
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestMigrate_SourcePodLossAroundTheWedgeClose], kind: []}
     status: decided
   - state: Migrate/SurgeTarget
     event: pod.deleted
@@ -1636,7 +1636,7 @@ cells:
     outcome: ignore
     note: the unpinned index is on Delete/Drain and the paired source was restored through the record, so neither side reads this loss
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestMigrate_SourcePodLossAroundTheWedgeClose], kind: []}
     status: decided
   - state: Migrate/SurgeTarget
     event: timer.migrationDeadline
@@ -1646,7 +1646,7 @@ cells:
     note: the record is being closed Failed on the surge's own evidence, and expiry does not reopen a record that is already terminal
     invariants: [record.is.timeout.authority]
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestMigrate_MigrationDeadlineAroundTheWedgeClose], kind: []}
     status: decided
   - state: Migrate/SurgeTarget
     event: timer.migrationDeadline
@@ -1656,5 +1656,5 @@ cells:
     note: the pin is already cleared and the index is being torn down, so the deadline that remained the backstop has nothing left to end
     invariants: [record.is.timeout.authority]
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestMigrate_MigrationDeadlineAroundTheWedgeClose], kind: []}
     status: decided

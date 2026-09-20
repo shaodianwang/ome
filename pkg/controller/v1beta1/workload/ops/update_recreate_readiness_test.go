@@ -16,7 +16,7 @@ import (
 // Instance's unavailability budget slot, so promoting before the pod is
 // routable would let the next Instance drain first.
 //
-// Cells: instance/Update/Drain/pod.containersReady[source]/before, instance/Update/Drain/pod.ready[source]/boundary@T-drain-ready
+// Cells: instance/Update/Drain/pod.containersReady[source]/before, instance/Update/Drain/pod.ready[source]/boundary@T-drain-ready, instance/Update/Drain/pod.servingOn[source]/before
 func TestRecreateUpdate_WaitsForPodReadyAfterEnablingServing(t *testing.T) {
 	tests := []struct {
 		name      string

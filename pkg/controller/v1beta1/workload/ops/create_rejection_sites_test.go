@@ -110,6 +110,8 @@ func TestRestartPhaseB_QuotaExceeded_WaitsWithoutFailing(t *testing.T) {
 // clean and deposits the server's suggested delay on the pass pacing, so
 // the dispatcher's requeue is floored by it instead of the error path
 // escalating a backoff the server never asked for.
+//
+// Cells: instance/Update/Drain/api.throttled[TooManyRequests]/before
 func TestRecreatePhaseB_Throttled_HonorsServerDelay(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
@@ -153,6 +155,127 @@ func TestRecreatePhaseB_Throttled_HonorsServerDelay(t *testing.T) {
 	}
 	if s.Operation != nil && workload.OperationCapacityBlocked(legacyFromV1beta1Op(s.Operation)) {
 		t.Errorf("Operation.Waiting: got %q want unset (throttling writes no status)", s.Operation.Waiting)
+	}
+}
+
+// recreatePhaseBFixture seeds a recreate whose Phase A is done: the
+// Instance is Updating at the bumped incarnation with no pods left, so
+// the pass's only work is the Phase B rebuild create. Returns the base
+// client (unwrapped, for reading status back), the pass input and the
+// target revision.
+func recreatePhaseBFixture(t *testing.T) (client.Client, *v1beta1.InferenceService, workload.ReconcileInput, *appsv1.ControllerRevision, *corev1.PodSpec) {
+	t.Helper()
+	legacyResetExpectations(t)
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	isvc.Spec.Engine.ComponentExtensionSpec.Lifecycle = &v1beta1.LifecycleSpec{
+		UpdateStrategy: &v1beta1.UpdateStrategy{Type: v1beta1.UpdateStrategyRecreatePod},
+	}
+	targetSpec := legacyTargetSpecImage("example.com/app:v2")
+	base := legacyNewFakeClient(t, isvc, ir)
+	tcr := legacyEnsureTargetCR(t, base, isvc, targetSpec)
+	ir.Status.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
+		Index:       0,
+		Incarnation: 2,
+		Phase:       v1beta1.OMENativeInstanceUpdating,
+		Operation: &v1beta1.InstanceOperation{
+			Type: v1beta1.InstanceOperationUpdate, Step: updateStepDrain, TargetRevision: tcr.Name,
+		},
+	}
+	if err := base.Status().Update(context.Background(), ir); err != nil {
+		t.Fatalf("seed Phase B status: %v", err)
+	}
+	input := legacyTestInput(isvc, base, workload.ComponentEngine)
+	input.ObservedState.UpdateRevision = tcr.Name
+	return base, isvc, input, tcr, targetSpec
+}
+
+// TestRecreatePhaseB_QuotaExceeded_WaitsWithoutFailing: the recreate has
+// already drained and deleted the old incarnation, so a quota wall in
+// front of the rebuild leaves the row serving nothing. It is still a
+// wait, not a failure: the pass ends clean and the quota lands as the
+// operation's waiting token, which is what parks the deadline clock
+// while the namespace has no room.
+//
+// Cells: instance/Update/Drain/api.quotaDenied/before
+func TestRecreatePhaseB_QuotaExceeded_WaitsWithoutFailing(t *testing.T) {
+	base, isvc, input, tcr, targetSpec := recreatePhaseBFixture(t)
+	c := rejectPodCreates(t, base, siteQuotaError())
+	plan := legacyComponentPlan(workload.UpdateStrategyRecreatePod, nil)
+
+	done, err := Update(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, targetSpec)
+	if err != nil {
+		t.Fatalf("Update: %v (a quota refusal is a wait, not an error)", err)
+	}
+	if done {
+		t.Fatal("Update reported done while blocked on quota")
+	}
+
+	s := legacyInstanceStatusesOnIR(base, isvc, workload.ComponentEngine)[0]
+	if s.Phase != v1beta1.OMENativeInstanceUpdating {
+		t.Fatalf("Phase: got %q want Updating (the recreate is still in flight)", s.Phase)
+	}
+	if s.Operation == nil || !workload.OperationCapacityBlocked(legacyFromV1beta1Op(s.Operation)) {
+		t.Fatalf("Operation: got %+v want the quota waiting token recorded", s.Operation)
+	}
+}
+
+// TestRecreatePhaseB_RejectionDispositions: the rebuild create meets the
+// same classified rejections a fresh create does. A 422 is a statement
+// about the revision, so the attempt ends with the revision blamed; a
+// terminating namespace ends it with the revision blameless, since no
+// corrected pod spec would be admitted either.
+//
+// Cells: instance/Update/Drain/api.invalid/before, instance/Update/Drain/api.namespaceTerminating/before
+func TestRecreatePhaseB_RejectionDispositions(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		reject     error
+		wantReason string
+		wantBlocks int
+	}{
+		{
+			name:       "invalid pod spec",
+			reject:     siteInvalidError(),
+			wantReason: workload.RejectionReasonInvalidPodSpec,
+			wantBlocks: 1,
+		},
+		{
+			name:       "namespace terminating",
+			reject:     siteNamespaceTerminatingError("engine-pod"),
+			wantReason: workload.RejectionReasonNamespaceTerminating,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base, isvc, input, tcr, targetSpec := recreatePhaseBFixture(t)
+			blocks := &[]string{}
+			input.MutateRetryBlock = func(_ context.Context, rev string, mutate func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
+				b := workload.RetryBlock{TargetRevision: rev}
+				if d := mutate(&b); d != workload.RetryBlockUnchanged {
+					*blocks = append(*blocks, rev)
+				}
+				return nil
+			}
+			c := rejectPodCreates(t, base, tc.reject)
+			plan := legacyComponentPlan(workload.UpdateStrategyRecreatePod, nil)
+
+			if _, err := Update(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, targetSpec); err != nil {
+				t.Fatalf("Update: %v (a classified rejection is disposed, not returned)", err)
+			}
+
+			s := legacyInstanceStatusesOnIR(base, isvc, workload.ComponentEngine)[0]
+			if s.Phase != v1beta1.OMENativeInstanceFailed {
+				t.Fatalf("Phase: got %q want Failed", s.Phase)
+			}
+			if s.Operation != nil {
+				t.Errorf("Operation: got %+v want cleared", s.Operation)
+			}
+			if s.LastFailure == nil || s.LastFailure.Reason != tc.wantReason {
+				t.Errorf("LastFailure: got %+v want reason %s", s.LastFailure, tc.wantReason)
+			}
+			if len(*blocks) != tc.wantBlocks {
+				t.Errorf("RetryBlock writes: got %+v want %d", *blocks, tc.wantBlocks)
+			}
+		})
 	}
 }
 

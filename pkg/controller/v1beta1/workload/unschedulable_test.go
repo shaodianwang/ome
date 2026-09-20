@@ -369,7 +369,7 @@ func migrationPair(deadline time.Time) []workload.InstanceStatus {
 // source is left untouched, since stamping a wait onto a healthy
 // serving replica would be a status lie.
 //
-// Cells: instance/Migrate/CreateSurge/pod.unschedulable[target]/before
+// Cells: instance/Migrate/CreateSurge/pod.unschedulable[target]/before, instance/Migrate/SurgeTarget/pod.unschedulable[source]/before
 func TestEscalation_UnschedulableMigrationSurgeHoldsTheSurgeRow(t *testing.T) {
 	now := time.Now()
 	input, rec := escalationFixture(migrationPair(now.Add(30 * time.Minute)))
@@ -417,7 +417,7 @@ func TestEscalation_UnschedulableMigrationSurgeHoldsTheSurgeRow(t *testing.T) {
 // terminal authority — and no revision is blamed for a cluster with no
 // room. The serving source keeps its phase.
 //
-// Cells: instance/Migrate/CreateSurge/pod.unschedulable[target]/before
+// Cells: instance/Migrate/CreateSurge/pod.unschedulable[target]/before, instance/Migrate/SurgeTarget/pod.unschedulable[source]/before
 func TestEscalation_UnschedulableMigrationSurgePastGraceFails(t *testing.T) {
 	now := time.Now()
 	input, rec := escalationFixture(migrationPair(now.Add(30 * time.Minute)))
