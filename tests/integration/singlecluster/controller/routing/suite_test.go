@@ -38,7 +38,9 @@ var (
 var _ = ginkgo.BeforeSuite(func() {
 	framework.SetupTestLogger()
 
-	s, err := framework.NewSuite(&framework.Framework{})
+	s, err := framework.NewSuite(&framework.Framework{
+		OptionalCRDs: []framework.OptionalCRDBundle{framework.GatewayAPI},
+	})
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	suiteFwk = s.Fwk
