@@ -802,7 +802,7 @@ scheduler-plugins-crds: ## Vendor sigs.k8s.io/scheduler-plugins CRDs (scheduling
 	echo "✅ Vendored scheduler-plugins CRDs to $(DEP_CRDS_DIR)/scheduler-plugins/"
 
 .PHONY: kueue-crds
-kueue-crds: ## Vendor sigs.k8s.io/kueue CRDs (kueue.x-k8s.io — ResourceFlavor, ClusterQueue, LocalQueue, Workload, … for the OEP-0018 real-Kueue envtest harness)
+kueue-crds: ## Vendor sigs.k8s.io/kueue CRDs (kueue.x-k8s.io — ResourceFlavor, ClusterQueue, LocalQueue, Workload, … for the real-Kueue multi-cluster envtest harness)
 	@mkdir -p $(DEP_CRDS_DIR)/kueue
 	@# Sourced from $(KUEUE_CRD_VERSION), not the go.mod pin: the suites must
 	@# validate against the schema the fleet's apiserver enforces. When that
@@ -967,7 +967,7 @@ test-perf: ## 🏎️  Perf CI step (separate from integration-test): harness un
 		PERF_MC_RANGESPEC=tests/perf/multicluster/configs/ci/rangespec.yaml
 
 .PHONY: mc-realkueue
-mc-realkueue: envtest dep-crds ## 🧪 Run the OEP-0018 real-Kueue multi-cluster validation suite (opt-in, envtest)
+mc-realkueue: envtest dep-crds ## 🧪 Run the real-Kueue multi-cluster validation suite (opt-in, envtest)
 	@echo "🧪 Running real-Kueue multi-cluster validation (OME_MC_REALKUEUE=1)..."
 	@# Heavy: 1 control-plane + 2 member envtest apiservers in one process, each
 	@# member running a full OME manager + Kueue's admission stack (core controllers
