@@ -55,6 +55,7 @@ func NewGatewayAPITrafficMapPublisher(
 	gatewayOptions := append([]GatewayAPIPublisherOption(nil), opts...)
 	gatewayOptions = append(gatewayOptions, withGatewayAPIReader(apiReader))
 	gatewayOptions = append(gatewayOptions, withStrictResourceOwnership())
+	gatewayOptions = append(gatewayOptions, withTrafficMapBackendNaming())
 	return &GatewayAPITrafficMapPublisher{
 		publisher: NewGatewayAPIPublisher(c, cfg, gatewayOptions...),
 	}
@@ -184,6 +185,10 @@ func (p *GatewayAPITrafficMapPublisher) Plan(
 	for _, entry := range trafficMap.Spec.Entries {
 		if entry.Cluster == "" {
 			return nil, errors.New("TrafficMap entry cluster must not be empty")
+		}
+		if problems := validation.IsDNS1123Subdomain(entry.Cluster); len(problems) != 0 {
+			return nil, fmt.Errorf("TrafficMap entry cluster %q is invalid: %s",
+				entry.Cluster, strings.Join(problems, "; "))
 		}
 		if _, duplicate := seenClusters[entry.Cluster]; duplicate {
 			return nil, fmt.Errorf("TrafficMap contains more than one entry for cluster %q", entry.Cluster)

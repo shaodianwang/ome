@@ -32,14 +32,16 @@ var _ = ginkgo.Describe("Gateway API TrafficMap publisher", func() {
 			ObjectMeta: metav1.ObjectMeta{Name: namespace},
 		})).To(gomega.Succeed())
 
-		name := uniqueName("svc")
+		name := uniqueName("svc") + ".edge"
+		clusterA := "cluster.a"
+		clusterB := "cluster.b"
 		isvc := createISVC(namespace, name, &v1beta1.PlacementSpec{
 			Mode:         v1beta1.PlacementModeSplit,
 			Requirements: "accelerator=test",
 		})
 		placeISVC(isvc,
-			candidate("cluster-a", "a.routing.example.com", 2, 2),
-			candidate("cluster-b", "b.routing.example.com", 1, 1),
+			candidate(clusterA, "a.routing.example.com", 2, 2),
+			candidate(clusterB, "b.routing.example.com", 1, 1),
 		)
 
 		key := types.NamespacedName{Namespace: namespace, Name: name}
@@ -47,10 +49,10 @@ var _ = ginkgo.Describe("Gateway API TrafficMap publisher", func() {
 			trafficMap := getTrafficMap(g, namespace, name)
 			entries := entriesByCluster(g, trafficMap)
 			g.Expect(entries).To(gomega.HaveLen(2))
-			g.Expect(entries).To(gomega.HaveKey("cluster-a"))
-			g.Expect(entries).To(gomega.HaveKey("cluster-b"))
-			g.Expect(entries["cluster-a"].Weight).To(gomega.Equal(int32(2)))
-			g.Expect(entries["cluster-b"].Weight).To(gomega.Equal(int32(1)))
+			g.Expect(entries).To(gomega.HaveKey(clusterA))
+			g.Expect(entries).To(gomega.HaveKey(clusterB))
+			g.Expect(entries[clusterA].Weight).To(gomega.Equal(int32(2)))
+			g.Expect(entries[clusterB].Weight).To(gomega.Equal(int32(1)))
 			routable := apimeta.FindStatusCondition(trafficMap.Status.Conditions, v1beta1.TrafficMapRoutable)
 			g.Expect(routable).NotTo(gomega.BeNil())
 			g.Expect(routable.Status).To(gomega.Equal(metav1.ConditionTrue))
@@ -160,8 +162,8 @@ var _ = ginkgo.Describe("Gateway API TrafficMap publisher", func() {
 		services := gatewayServicesForSource(namespace, key)
 		gomega.Expect(services).To(gomega.HaveLen(2))
 		serviceByCluster := indexGatewayServicesByCluster(services)
-		gomega.Expect(serviceByCluster).To(gomega.HaveKey("cluster-a"))
-		gomega.Expect(serviceByCluster).To(gomega.HaveKey("cluster-b"))
+		gomega.Expect(serviceByCluster).To(gomega.HaveKey(clusterA))
+		gomega.Expect(serviceByCluster).To(gomega.HaveKey(clusterB))
 		for _, service := range services {
 			gomega.Expect(service.Labels).To(gomega.HaveKeyWithValue(
 				placementendpoint.ManagedByLabel, placementendpoint.ManagedByValue,
@@ -173,23 +175,23 @@ var _ = ginkgo.Describe("Gateway API TrafficMap publisher", func() {
 				placementendpoint.PlacementEndpointISVCNamespaceLabel, namespace,
 			))
 		}
-		gomega.Expect(serviceByCluster["cluster-a"].Spec.ExternalName).To(gomega.Equal("a.routing.example.com"))
-		gomega.Expect(serviceByCluster["cluster-b"].Spec.ExternalName).To(gomega.Equal("b.routing.example.com"))
+		gomega.Expect(serviceByCluster[clusterA].Spec.ExternalName).To(gomega.Equal("a.routing.example.com"))
+		gomega.Expect(serviceByCluster[clusterB].Spec.ExternalName).To(gomega.Equal("b.routing.example.com"))
 		assertGatewayBackendWeights(route, map[gatewayapiv1.ObjectName]int32{
-			gatewayapiv1.ObjectName(serviceByCluster["cluster-a"].Name): 2,
-			gatewayapiv1.ObjectName(serviceByCluster["cluster-b"].Name): 1,
+			gatewayapiv1.ObjectName(serviceByCluster[clusterA].Name): 2,
+			gatewayapiv1.ObjectName(serviceByCluster[clusterB].Name): 1,
 		})
 
 		ginkgo.By("authoritatively changing a weight and pruning a removed home")
 		previousGeneration := trafficMap.Generation
-		removedServiceKey := client.ObjectKeyFromObject(serviceByCluster["cluster-b"])
-		placeISVC(isvc, candidate("cluster-a", "a.routing.example.com", 1, 1))
-		waitForTrafficMapEntries(namespace, name, previousGeneration, map[string]int32{"cluster-a": 1})
+		removedServiceKey := client.ObjectKeyFromObject(serviceByCluster[clusterB])
+		placeISVC(isvc, candidate(clusterA, "a.routing.example.com", 1, 1))
+		waitForTrafficMapEntries(namespace, name, previousGeneration, map[string]int32{clusterA: 1})
 		trafficMap = reconcileGatewayTrafficMap(reconciler, key)
 		route = getGatewayHTTPRoute(routeKey)
 		services = gatewayServicesForSource(namespace, key)
 		gomega.Expect(services).To(gomega.HaveLen(1))
-		gomega.Expect(services[0].Labels[placementendpoint.PlacementClusterLabel]).To(gomega.Equal("cluster-a"))
+		gomega.Expect(services[0].Labels[placementendpoint.PlacementClusterLabel]).To(gomega.Equal(clusterA))
 		assertGatewayBackendWeights(route, map[gatewayapiv1.ObjectName]int32{
 			gatewayapiv1.ObjectName(services[0].Name): 1,
 		})
@@ -201,23 +203,23 @@ var _ = ginkgo.Describe("Gateway API TrafficMap publisher", func() {
 		ginkgo.By("preserving all-zero weights as an authoritative no-traffic state")
 		previousGeneration = trafficMap.Generation
 		placeISVC(isvc,
-			candidate("cluster-a", "a.routing.example.com", 2, 0),
-			candidate("cluster-b", "b.routing.example.com", 1, 0),
+			candidate(clusterA, "a.routing.example.com", 2, 0),
+			candidate(clusterB, "b.routing.example.com", 1, 0),
 		)
 		waitForTrafficMapEntries(namespace, name, previousGeneration, map[string]int32{
-			"cluster-a": 0,
-			"cluster-b": 0,
+			clusterA: 0,
+			clusterB: 0,
 		})
 		reconcileGatewayTrafficMap(reconciler, key)
 		route = getGatewayHTTPRoute(routeKey)
 		services = gatewayServicesForSource(namespace, key)
 		gomega.Expect(services).To(gomega.HaveLen(2))
 		serviceByCluster = indexGatewayServicesByCluster(services)
-		gomega.Expect(serviceByCluster).To(gomega.HaveKey("cluster-a"))
-		gomega.Expect(serviceByCluster).To(gomega.HaveKey("cluster-b"))
+		gomega.Expect(serviceByCluster).To(gomega.HaveKey(clusterA))
+		gomega.Expect(serviceByCluster).To(gomega.HaveKey(clusterB))
 		assertGatewayBackendWeights(route, map[gatewayapiv1.ObjectName]int32{
-			gatewayapiv1.ObjectName(serviceByCluster["cluster-a"].Name): 0,
-			gatewayapiv1.ObjectName(serviceByCluster["cluster-b"].Name): 0,
+			gatewayapiv1.ObjectName(serviceByCluster[clusterA].Name): 0,
+			gatewayapiv1.ObjectName(serviceByCluster[clusterB].Name): 0,
 		})
 
 		ginkgo.By("retaining an empty route while pruning every backend resource")
@@ -237,12 +239,12 @@ var _ = ginkgo.Describe("Gateway API TrafficMap publisher", func() {
 		trafficMap = getTrafficMap(gomega.Default, namespace, name)
 		previousGeneration = trafficMap.Generation
 		placeISVC(isvc,
-			candidate("cluster-a", "a.routing.example.com", 1, 1),
-			candidate("cluster-b", "b.routing.example.com", 1, 1),
+			candidate(clusterA, "a.routing.example.com", 1, 1),
+			candidate(clusterB, "b.routing.example.com", 1, 1),
 		)
 		waitForTrafficMapEntries(namespace, name, previousGeneration, map[string]int32{
-			"cluster-a": 1,
-			"cluster-b": 1,
+			clusterA: 1,
+			clusterB: 1,
 		})
 		reconcileGatewayTrafficMap(reconciler, key)
 		ownedServiceKeys := gatewayServiceKeys(gatewayServicesForSource(namespace, key))

@@ -31,7 +31,7 @@ func TestGatewayAPITrafficMapWithdrawalWaitsForRouteDeletion(t *testing.T) {
 	_, err = p.Apply(context.Background(), publishPlan)
 	require.NoError(t, err)
 	routeKey := types.NamespacedName{Namespace: "prod", Name: "svc-global"}
-	serviceKey := types.NamespacedName{Namespace: "prod", Name: "svc-global-cluster-a"}
+	serviceKey := types.NamespacedName{Namespace: "prod", Name: p.publisher.serviceName(owner, "cluster-a")}
 	addGatewayRouteTestFinalizer(t, c, routeKey)
 
 	delete(owner.Annotations, GlobalHostAnnotation)
@@ -63,8 +63,8 @@ func TestGatewayAPITrafficMapUnpublishWaitsForRouteDeletion(t *testing.T) {
 	_, err = p.Apply(context.Background(), plan)
 	require.NoError(t, err)
 
-	routeKey := types.NamespacedName{Namespace: "prod", Name: "svc-global"}
-	serviceKey := types.NamespacedName{Namespace: "prod", Name: "svc-global-cluster-a"}
+	routeKey := types.NamespacedName{Namespace: "prod", Name: p.publisher.routeName(owner)}
+	serviceKey := types.NamespacedName{Namespace: "prod", Name: p.publisher.serviceName(owner, "cluster-a")}
 	addGatewayRouteTestFinalizer(t, c, routeKey)
 	journal := v1beta1.TrafficMapPublisherStatus{
 		PublisherName:  p.Name(),

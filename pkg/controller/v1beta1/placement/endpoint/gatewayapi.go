@@ -31,6 +31,14 @@ const (
 	// the per-cluster ingress resources OME's normal ingress reconciler emits
 	// ("<isvc>", "<isvc>-engine", ...) so the two never collide.
 	resourceSuffix = "-global"
+
+	// TrafficMap backend names use a digest of the structured source identity.
+	// The prefix is an internal naming-protocol discriminator, not a routing
+	// value. Keeping the base short enough for an address-family suffix avoids a
+	// second lossy transformation for EndpointSlices.
+	trafficMapBackendNamePrefix = "tmb-"
+	trafficMapBackendHashLength = 52
+	trafficMapBackendNameDomain = "gateway-api-trafficmap-backend/v2"
 )
 
 // GatewayAPIPublisher implements EndpointPublisher by programming, on the
@@ -48,11 +56,12 @@ const (
 // garbage-collected — and the route's backendRefs track the current set.
 // Teardown removes the route and every per-home backing resource.
 type GatewayAPIPublisher struct {
-	client          client.Client
-	apiReader       client.Reader
-	config          Config
-	addressResolver BackendAddressResolver
-	strictOwnership bool
+	client                 client.Client
+	apiReader              client.Reader
+	config                 Config
+	addressResolver        BackendAddressResolver
+	strictOwnership        bool
+	trafficMapBackendNames bool
 }
 
 var _ EndpointPublisher = (*GatewayAPIPublisher)(nil)
@@ -70,6 +79,12 @@ func WithBackendAddressResolver(resolver BackendAddressResolver) GatewayAPIPubli
 // existing resource. TrafficMap claims use this mode to reject collisions.
 func withStrictResourceOwnership() GatewayAPIPublisherOption {
 	return func(p *GatewayAPIPublisher) { p.strictOwnership = true }
+}
+
+// withTrafficMapBackendNaming selects collision-resistant child-resource names
+// for the TrafficMap lifecycle. HTTPRoute naming remains lifecycle-independent.
+func withTrafficMapBackendNaming() GatewayAPIPublisherOption {
+	return func(p *GatewayAPIPublisher) { p.trafficMapBackendNames = true }
 }
 
 // withGatewayAPIReader supplies the uncached reader used for collision checks
@@ -129,6 +144,16 @@ func boundedResourceName(name string) string {
 	return bounded
 }
 
+// trafficMapBackendResourceName hashes a NUL-delimited identity tuple. Kubernetes
+// source keys and cluster names cannot contain NUL, so tuple boundaries remain
+// unambiguous without depending on punctuation that is valid inside a name.
+func trafficMapBackendResourceName(isvc *v1beta1.InferenceService, cluster string) string {
+	parts := []string{trafficMapBackendNameDomain, isvc.Namespace, isvc.Name, cluster}
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	digest := fmt.Sprintf("%x", sum[:])
+	return trafficMapBackendNamePrefix + digest[:trafficMapBackendHashLength]
+}
+
 // routeName is the HTTPRoute name for an InferenceService.
 func (p *GatewayAPIPublisher) routeName(isvc *v1beta1.InferenceService) string {
 	return boundedResourceName(p.resourceBaseName(isvc) + resourceSuffix)
@@ -136,6 +161,9 @@ func (p *GatewayAPIPublisher) routeName(isvc *v1beta1.InferenceService) string {
 
 // serviceName is the per-home ExternalName Service name for a cluster.
 func (p *GatewayAPIPublisher) serviceName(isvc *v1beta1.InferenceService, cluster string) string {
+	if p.trafficMapBackendNames {
+		return trafficMapBackendResourceName(isvc, cluster)
+	}
 	return boundedResourceName(p.resourceBaseName(isvc) + resourceSuffix + "-" + cluster)
 }
 

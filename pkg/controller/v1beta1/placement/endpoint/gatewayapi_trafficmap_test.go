@@ -11,11 +11,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/utils/ptr"
 	"knative.dev/pkg/apis"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -475,10 +477,169 @@ func TestGatewayAPITrafficMapPlanIsImmutableAndAppliesWeights(t *testing.T) {
 	assert.Equal(t, "platform", route.Labels["team"])
 	require.Len(t, route.Spec.Rules, 1)
 	require.Len(t, route.Spec.Rules[0].BackendRefs, 2)
-	assert.Equal(t, gatewayapiv1.ObjectName("svc-global-cluster-a"), route.Spec.Rules[0].BackendRefs[0].Name)
+	assert.Equal(t, gatewayapiv1.ObjectName(p.publisher.serviceName(owner, "cluster-a")), route.Spec.Rules[0].BackendRefs[0].Name)
 	assert.Equal(t, int32(7), *route.Spec.Rules[0].BackendRefs[0].Weight)
-	assert.Equal(t, gatewayapiv1.ObjectName("svc-global-cluster-b"), route.Spec.Rules[0].BackendRefs[1].Name)
+	assert.Equal(t, gatewayapiv1.ObjectName(p.publisher.serviceName(owner, "cluster-b")), route.Spec.Rules[0].BackendRefs[1].Name)
 	assert.Equal(t, int32(0), *route.Spec.Rules[0].BackendRefs[1].Weight)
+}
+
+func TestGatewayAPITrafficMapBackendNamesUseStructuredIdentities(t *testing.T) {
+	legacy := NewGatewayAPIPublisher(nil, baseConfig())
+	trafficMap := NewGatewayAPITrafficMapPublisher(nil, nil, baseConfig())
+	assert.Equal(t, "svc-global", legacy.routeName(testISVC()))
+	assert.Equal(t, "svc-global-cluster-a", legacy.serviceName(testISVC(), "cluster-a"))
+
+	dotted := testISVC()
+	dotted.Name = "9model.team"
+	cluster := "cluster.us"
+	backendName := trafficMap.publisher.serviceName(dotted, cluster)
+	assert.Empty(t, validation.IsDNS1035Label(backendName))
+	assert.LessOrEqual(t, len(backendName+ipv4EndpointSliceSuffix), validation.DNS1035LabelMaxLength)
+	assert.Equal(t, backendName, trafficMap.publisher.serviceName(dotted, cluster), "names are deterministic")
+	assert.Equal(t, legacy.routeName(dotted), trafficMap.publisher.routeName(dotted),
+		"TrafficMap route keys retain the durable legacy naming contract")
+	_, err := trafficMap.Plan(dotted, gatewayTrafficMap(dotted,
+		gatewayTrafficMapEntry(cluster, "backend.example", 1),
+	), nil)
+	require.NoError(t, err)
+	maximal := testISVC()
+	maximal.Name = strings.Repeat("s", 63)
+	maximalCluster := strings.Repeat("c", 63)
+	maximalBackendName := trafficMap.publisher.serviceName(maximal, maximalCluster)
+	assert.Empty(t, validation.IsDNS1035Label(maximalBackendName))
+	for _, suffix := range []string{ipv4EndpointSliceSuffix, ipv6EndpointSliceSuffix} {
+		derivedName := maximalBackendName + suffix
+		assert.Empty(t, validation.IsDNS1123Label(derivedName))
+		assert.LessOrEqual(t, len(derivedName), validation.DNS1123LabelMaxLength)
+	}
+	_, err = trafficMap.Plan(maximal, gatewayTrafficMap(maximal,
+		gatewayTrafficMapEntry(maximalCluster, "backend.example", 1),
+	), nil)
+	require.NoError(t, err)
+
+	numeric := testISVC()
+	numeric.Name = "9model"
+	letterPrefixed := testISVC()
+	letterPrefixed.Name = "a9model"
+	assert.Equal(t, legacy.routeName(numeric), trafficMap.publisher.routeName(numeric))
+	assert.Equal(t, legacy.routeName(letterPrefixed), trafficMap.publisher.routeName(letterPrefixed))
+	assert.Equal(t, trafficMap.publisher.routeName(numeric), trafficMap.publisher.routeName(letterPrefixed),
+		"the legacy-compatible route collision remains visible to durable claim ownership")
+	assert.NotEqual(t,
+		trafficMap.publisher.serviceName(numeric, "cluster-a"),
+		trafficMap.publisher.serviceName(letterPrefixed, "cluster-a"),
+	)
+
+	first := testISVC()
+	first.Name = "model"
+	second := testISVC()
+	second.Name = "model-global-blue"
+	assert.Equal(t,
+		legacy.serviceName(first, "blue-global-west"),
+		legacy.serviceName(second, "west"),
+		"the legacy flattened tuples demonstrate the collision fixture",
+	)
+	assert.NotEqual(t,
+		trafficMap.publisher.serviceName(first, "blue-global-west"),
+		trafficMap.publisher.serviceName(second, "west"),
+	)
+}
+
+func TestGatewayAPITrafficMapMigratesLegacyBackendResourcesAfterRouteSwitch(t *testing.T) {
+	cfg := gatewayBackendConfig()
+	owner := testISVC()
+	home := Home{Cluster: "cluster-a", BackendHost: "backend.example", Weight: 5}
+	target := Target{
+		GlobalHost:           "svc.prod.global.example",
+		Homes:                []Home{home},
+		WeightsAuthoritative: true,
+	}
+	addresses := []BackendAddress{{Address: "192.0.2.10", Type: discoveryv1.AddressTypeIPv4}}
+	resolver := staticBackendAddressResolver{home.Cluster: addresses}
+
+	legacy := NewGatewayAPIPublisher(nil, cfg, WithBackendAddressResolver(resolver))
+	legacyServiceName := legacy.serviceName(owner, home.Cluster)
+	legacyService := legacy.buildExternalNameService(owner, legacyServiceName, home)
+	legacySlices, err := legacy.buildEndpointSlices(owner, legacyServiceName, home, addresses)
+	require.NoError(t, err)
+	require.Len(t, legacySlices, 1)
+	legacyPolicy := legacy.buildBackendTLSPolicy(owner, legacyServiceName, home)
+	legacyRoute := legacy.buildHTTPRoute(owner, target)
+
+	objects := []client.Object{legacyService, legacySlices[0], legacyPolicy, legacyRoute}
+	kubeClient := fakeclient.NewClientBuilder().WithScheme(pubScheme(t)).WithObjects(objects...).Build()
+	publisher := NewGatewayAPITrafficMapPublisher(
+		kubeClient,
+		kubeClient,
+		cfg,
+		WithBackendAddressResolver(resolver),
+	)
+	plan, err := publisher.Plan(owner, gatewayTrafficMap(owner,
+		gatewayTrafficMapEntry(home.Cluster, home.BackendHost, home.Weight),
+	), nil)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"v1:httproute:prod/svc-global"}, plan.Claims())
+	assert.Equal(t, "svc-global", legacyRoute.Name)
+
+	v2ServiceName := publisher.publisher.serviceName(owner, home.Cluster)
+	require.NotEqual(t, legacyServiceName, v2ServiceName)
+	v2Slices, err := publisher.publisher.buildEndpointSlices(owner, v2ServiceName, home, addresses)
+	require.NoError(t, err)
+	require.Len(t, v2Slices, 1)
+
+	publisher.publisher.client = routeUpdateFailClient{Client: kubeClient}
+	_, err = publisher.Apply(context.Background(), plan)
+	require.ErrorContains(t, err, "route update failed")
+
+	routeKey := client.ObjectKeyFromObject(legacyRoute)
+	currentRoute := &gatewayapiv1.HTTPRoute{}
+	require.NoError(t, kubeClient.Get(context.Background(), routeKey, currentRoute))
+	require.Len(t, currentRoute.Spec.Rules[0].BackendRefs, 1)
+	assert.Equal(t, gatewayapiv1.ObjectName(legacyServiceName), currentRoute.Spec.Rules[0].BackendRefs[0].Name)
+	for _, object := range []client.Object{
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: owner.Namespace, Name: legacyServiceName}},
+		&discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{Namespace: owner.Namespace, Name: legacySlices[0].Name}},
+		&gatewayapiv1.BackendTLSPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: owner.Namespace, Name: legacyPolicy.Name}},
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: owner.Namespace, Name: v2ServiceName}},
+		&discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{Namespace: owner.Namespace, Name: v2Slices[0].Name}},
+		&gatewayapiv1.BackendTLSPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: owner.Namespace, Name: v2ServiceName}},
+	} {
+		require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(object), object),
+			"both generations remain until the route switches")
+	}
+
+	publisher.publisher.client = kubeClient
+	_, err = publisher.Apply(context.Background(), plan)
+	require.NoError(t, err)
+	require.NoError(t, kubeClient.Get(context.Background(), routeKey, currentRoute))
+	require.Len(t, currentRoute.Spec.Rules[0].BackendRefs, 1)
+	assert.Equal(t, gatewayapiv1.ObjectName(v2ServiceName), currentRoute.Spec.Rules[0].BackendRefs[0].Name)
+	v2Service := &corev1.Service{}
+	require.NoError(t, kubeClient.Get(context.Background(), types.NamespacedName{
+		Namespace: owner.Namespace,
+		Name:      v2ServiceName,
+	}, v2Service))
+	v2Slice := &discoveryv1.EndpointSlice{}
+	require.NoError(t, kubeClient.Get(context.Background(), types.NamespacedName{
+		Namespace: owner.Namespace,
+		Name:      v2Slices[0].Name,
+	}, v2Slice))
+	assert.Equal(t, v2ServiceName, v2Slice.Labels[discoveryv1.LabelServiceName])
+	v2Policy := &gatewayapiv1.BackendTLSPolicy{}
+	require.NoError(t, kubeClient.Get(context.Background(), types.NamespacedName{
+		Namespace: owner.Namespace,
+		Name:      v2ServiceName,
+	}, v2Policy))
+	require.Len(t, v2Policy.Spec.TargetRefs, 1)
+	assert.Equal(t, gatewayapiv1.ObjectName(v2ServiceName), v2Policy.Spec.TargetRefs[0].Name)
+	for _, object := range []client.Object{
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: owner.Namespace, Name: legacyServiceName}},
+		&discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{Namespace: owner.Namespace, Name: legacySlices[0].Name}},
+		&gatewayapiv1.BackendTLSPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: owner.Namespace, Name: legacyPolicy.Name}},
+	} {
+		assert.True(t, apierrors.IsNotFound(kubeClient.Get(context.Background(), client.ObjectKeyFromObject(object), object)),
+			"legacy children are pruned only after the route references v2")
+	}
 }
 
 func TestGatewayAPITrafficMapApplyPreservesEmptyAndAllZeroMaps(t *testing.T) {
@@ -504,7 +665,7 @@ func TestGatewayAPITrafficMapApplyPreservesEmptyAndAllZeroMaps(t *testing.T) {
 	require.Len(t, route.Spec.Rules, 1)
 	assert.Empty(t, route.Spec.Rules[0].BackendRefs)
 	assert.True(t, apierrors.IsNotFound(c.Get(context.Background(),
-		types.NamespacedName{Namespace: "prod", Name: "svc-global-cluster-a"}, &corev1.Service{})))
+		types.NamespacedName{Namespace: "prod", Name: p.publisher.serviceName(owner, "cluster-a")}, &corev1.Service{})))
 
 	allZero, err := p.Plan(owner, gatewayTrafficMap(owner,
 		gatewayTrafficMapEntry("cluster-a", "a.example", 0),
@@ -546,7 +707,7 @@ func TestGatewayAPITrafficMapApplyWithdrawsWhenHostIsRemoved(t *testing.T) {
 	assert.True(t, apierrors.IsNotFound(c.Get(context.Background(),
 		types.NamespacedName{Namespace: "prod", Name: "svc-global"}, &gatewayapiv1.HTTPRoute{})))
 	assert.True(t, apierrors.IsNotFound(c.Get(context.Background(),
-		types.NamespacedName{Namespace: "prod", Name: "svc-global-cluster-a"}, &corev1.Service{})))
+		types.NamespacedName{Namespace: "prod", Name: p.publisher.serviceName(owner, "cluster-a")}, &corev1.Service{})))
 }
 
 func TestGatewayAPITrafficMapApplyWithdrawsWhenConfigIsDisabled(t *testing.T) {
@@ -597,28 +758,30 @@ func TestGatewayAPITrafficMapApplyRejectsUnownedResourcesBeforeMutation(t *testi
 		require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc-global"}, got))
 		assert.Equal(t, []gatewayapiv1.Hostname{"foreign.example"}, got.Spec.Hostnames)
 		assert.True(t, apierrors.IsNotFound(c.Get(context.Background(),
-			types.NamespacedName{Namespace: "prod", Name: "svc-global-cluster-a"}, &corev1.Service{})),
+			types.NamespacedName{Namespace: "prod", Name: p.publisher.serviceName(owner, "cluster-a")}, &corev1.Service{})),
 			"strict preflight must reject the route before creating a backend Service")
 	})
 
 	t.Run("service", func(t *testing.T) {
 		scheme := pubScheme(t)
+		p := NewGatewayAPITrafficMapPublisher(nil, nil, baseConfig())
+		serviceName := p.publisher.serviceName(owner, "cluster-a")
 		foreign := &corev1.Service{
-			ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: "svc-global-cluster-a"},
+			ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: serviceName},
 			Spec: corev1.ServiceSpec{
 				Type:         corev1.ServiceTypeExternalName,
 				ExternalName: "foreign.example",
 			},
 		}
 		c := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(foreign).Build()
-		p := NewGatewayAPITrafficMapPublisher(c, c, baseConfig())
+		p = NewGatewayAPITrafficMapPublisher(c, c, baseConfig())
 		plan, err := p.Plan(owner, trafficMap, nil)
 		require.NoError(t, err)
 
 		_, err = p.Apply(context.Background(), plan)
 		require.ErrorContains(t, err, "belongs to another source")
 		got := &corev1.Service{}
-		require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc-global-cluster-a"}, got))
+		require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: serviceName}, got))
 		assert.Equal(t, "foreign.example", got.Spec.ExternalName)
 		assert.True(t, apierrors.IsNotFound(c.Get(context.Background(),
 			types.NamespacedName{Namespace: "prod", Name: "svc-global"}, &gatewayapiv1.HTTPRoute{})),
@@ -652,7 +815,7 @@ func TestGatewayAPITrafficMapPlanRejectsInvalidInputs(t *testing.T) {
 		{name: "weight above Gateway limit", entries: []v1beta1.TrafficMapEntry{gatewayTrafficMapEntry("cluster-a", "a.example", maxGatewayAPIBackendWeight+1)}, want: "must be between"},
 		{name: "invalid backend hostname", entries: []v1beta1.TrafficMapEntry{gatewayTrafficMapEntry("cluster-a", "UPPER.example", 1)}, want: "backend hostname"},
 		{name: "IP backend hostname", entries: []v1beta1.TrafficMapEntry{gatewayTrafficMapEntry("cluster-a", "192.0.2.1", 1)}, want: "must not be an IP address"},
-		{name: "invalid generated service name", entries: []v1beta1.TrafficMapEntry{gatewayTrafficMapEntry("INVALID", "a.example", 1)}, want: "invalid backend Service name"},
+		{name: "invalid cluster name", entries: []v1beta1.TrafficMapEntry{gatewayTrafficMapEntry("INVALID", "a.example", 1)}, want: "cluster \"INVALID\" is invalid"},
 		{name: "cluster cannot fit label", entries: []v1beta1.TrafficMapEntry{gatewayTrafficMapEntry(strings.Repeat("a", 64), "a.example", 1)}, want: "label"},
 	}
 	for _, tt := range tests {
@@ -662,11 +825,12 @@ func TestGatewayAPITrafficMapPlanRejectsInvalidInputs(t *testing.T) {
 		})
 	}
 	collisionSuffix := strings.Repeat("a", 54)
-	_, err = p.Plan(owner, gatewayTrafficMap(owner,
+	plan, err := p.Plan(owner, gatewayTrafficMap(owner,
 		gatewayTrafficMapEntry("c13303-"+collisionSuffix, "a.example", 1),
 		gatewayTrafficMapEntry("c82303-"+collisionSuffix, "b.example", 1),
 	), nil)
-	require.ErrorContains(t, err, "generate the same backend Service name")
+	require.NoError(t, err)
+	assert.Len(t, plan.(*gatewayAPITrafficMapPlan).target.Homes, 2)
 
 	_, err = p.Plan(owner, gatewayTrafficMap(owner), map[string]string{"unexpected": "value"})
 	require.ErrorContains(t, err, "effective options")
@@ -856,7 +1020,7 @@ func TestGatewayAPITrafficMapUnpublishUsesOnlyJournalAndSourceKey(t *testing.T) 
 	assert.True(t, apierrors.IsNotFound(c.Get(context.Background(),
 		types.NamespacedName{Namespace: "prod", Name: "svc-global"}, &gatewayapiv1.HTTPRoute{})))
 	assert.True(t, apierrors.IsNotFound(c.Get(context.Background(),
-		types.NamespacedName{Namespace: "prod", Name: "svc-global-cluster-a"}, &corev1.Service{})))
+		types.NamespacedName{Namespace: "prod", Name: p.publisher.serviceName(owner, "cluster-a")}, &corev1.Service{})))
 }
 
 func TestGatewayAPITrafficMapCleanupUsesUncachedReader(t *testing.T) {
@@ -885,7 +1049,7 @@ func TestGatewayAPITrafficMapCleanupUsesUncachedReader(t *testing.T) {
 	assert.True(t, apierrors.IsNotFound(live.Get(context.Background(),
 		types.NamespacedName{Namespace: "prod", Name: "svc-global"}, &gatewayapiv1.HTTPRoute{})))
 	assert.True(t, apierrors.IsNotFound(live.Get(context.Background(),
-		types.NamespacedName{Namespace: "prod", Name: "svc-global-cluster-a"}, &corev1.Service{})))
+		types.NamespacedName{Namespace: "prod", Name: publisher.publisher.serviceName(owner, "cluster-a")}, &corev1.Service{})))
 }
 
 func TestGatewayAPITrafficMapUnpublishValidatesWholeJournalBeforeMutation(t *testing.T) {
