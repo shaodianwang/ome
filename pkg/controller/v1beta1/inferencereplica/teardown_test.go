@@ -1203,6 +1203,69 @@ func TestTeardown_DeadlineExceeded_WarnsAndReleases(t *testing.T) {
 	}
 }
 
+// TestTeardown_DeadlineExceeded_ReleasesFromEveryInstanceState walks the
+// deadline release from every persisted (Phase, Operation) an Instance row
+// can carry. The release is decided before the row is read at all — it is
+// the owner's own deadline, not an Instance's — so each state must end the
+// same way: the Warning, the finalizer released, and the row purged with
+// the owner in one delete.
+//
+// Arrows: T-pending-teardown-deadline, T-ready-teardown-deadline, T-failed-teardown-deadline, T-create-teardown-deadline, T-surge-teardown-deadline, T-surgedrain-teardown-deadline, T-gangtarget-teardown-deadline, T-gangcleanup-teardown-deadline, T-inplace-teardown-deadline, T-drain-teardown-deadline, T-restart-teardown-deadline, T-migrate-teardown-deadline, T-migratetarget-teardown-deadline, T-delete-teardown-deadline
+func TestTeardown_DeadlineExceeded_ReleasesFromEveryInstanceState(t *testing.T) {
+	op := func(opType v1beta1.InstanceOperationType, step string) *v1beta1.InstanceOperation {
+		return &v1beta1.InstanceOperation{ID: "op-" + step, Type: opType, Step: step}
+	}
+	for _, tc := range []struct {
+		state string
+		phase v1beta1.OMENativeInstancePhase
+		op    *v1beta1.InstanceOperation
+	}{
+		{state: "Pending", phase: v1beta1.OMENativeInstancePending},
+		{state: "Ready", phase: v1beta1.OMENativeInstanceReady},
+		{state: "Failed", phase: v1beta1.OMENativeInstanceFailed},
+		{state: "Create/CreatePods", phase: v1beta1.OMENativeInstanceCreating, op: op(v1beta1.InstanceOperationCreate, "CreatePods")},
+		{state: "Update/Surge", phase: v1beta1.OMENativeInstanceUpdating, op: op(v1beta1.InstanceOperationUpdate, workload.UpdateStepSurge)},
+		{state: "Update/SurgeDrain", phase: v1beta1.OMENativeInstanceUpdating, op: op(v1beta1.InstanceOperationUpdate, workload.UpdateStepSurgeDrain)},
+		{state: "Update/GangSurgeTarget", phase: v1beta1.OMENativeInstanceCreating, op: op(v1beta1.InstanceOperationUpdate, workload.UpdateStepGangSurgeTarget)},
+		{state: "Update/GangSurgeTargetCleanup", phase: v1beta1.OMENativeInstanceCreating, op: op(v1beta1.InstanceOperationUpdate, workload.UpdateStepGangSurgeTargetCleanup)},
+		{state: "Update/InPlace", phase: v1beta1.OMENativeInstanceUpdating, op: op(v1beta1.InstanceOperationUpdate, "InPlace")},
+		{state: "Update/Drain", phase: v1beta1.OMENativeInstanceUpdating, op: op(v1beta1.InstanceOperationUpdate, "Drain")},
+		{state: "Restart/Drain", phase: v1beta1.OMENativeInstanceRestarting, op: op(v1beta1.InstanceOperationRestart, "Drain")},
+		{state: "Migrate/CreateSurge", phase: v1beta1.OMENativeInstanceMigrating, op: op(v1beta1.InstanceOperationMigrate, "CreateSurge")},
+		{state: "Migrate/SurgeTarget", phase: v1beta1.OMENativeInstanceCreating, op: op(v1beta1.InstanceOperationMigrate, "CreateSurge")},
+		{state: "Delete/Drain", phase: v1beta1.OMENativeInstanceDeleting, op: op(v1beta1.InstanceOperationDelete, "Drain")},
+	} {
+		t.Run(tc.state, func(t *testing.T) {
+			base := time.Now()
+			ir := terminatingIR("llama-engine", "prod", 1, base.Add(-time.Hour))
+			ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+				{Index: 0, Incarnation: 1, Phase: tc.phase, Operation: tc.op},
+			}
+			survivor := podForIR(ir, 0, "default", 0, false, false)
+			r, c := newReconciler(t, ir, survivor)
+			r.Clock = clocktesting.NewFakeClock(base)
+			withLifecycleConfig(r, `{"teardown":{"deadline":"30m"}}`)
+			rec := record.NewFakeRecorder(32)
+			r.Recorder = rec
+
+			if _, err := r.Reconcile(context.Background(), ctrl.Request{
+				NamespacedName: types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
+			}); err != nil {
+				t.Fatalf("Reconcile: %v", err)
+			}
+			if err := c.Get(context.Background(), client.ObjectKeyFromObject(ir), &v1beta1.InferenceReplica{}); !apierrors.IsNotFound(err) {
+				t.Errorf("owner and its %s row must be purged past the deadline; get returned %v", tc.state, err)
+			}
+			if err := c.Get(context.Background(), client.ObjectKeyFromObject(survivor), &corev1.Pod{}); err != nil {
+				t.Errorf("survivor pod is background GC's problem after release, must not be touched: %v", err)
+			}
+			if got := eventsContaining(drainEvents(rec), ReasonTeardownDeadlineExceeded); len(got) != 1 {
+				t.Errorf("expected one TeardownDeadlineExceeded warning, got %v", got)
+			}
+		})
+	}
+}
+
 // TestTeardown_DeadlinePrecedesResourceObservationErrors proves the absolute
 // deadline remains an escape hatch when authoritative resource observation is
 // degraded. Pod observation contributes only a bounded diagnostic, and the

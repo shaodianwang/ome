@@ -42,6 +42,10 @@ type transitionOut struct {
 	Guard     string `json:"guard"`
 	To        string `json:"to"`
 	DecidedIn string `json:"decidedIn"`
+	// Lane is resolved, never blank: workload for an edge the replay
+	// lane drives, adapter for one only a tagged adapter test can.
+	Lane string `json:"lane"`
+	Why  string `json:"why"`
 }
 
 // gridEntry flattens one expanded grid cell with the fields of the
@@ -115,6 +119,7 @@ func buildEnvelope(m *rolloutspec.Machine, g *rolloutspec.Grid) envelope {
 	for _, t := range m.Transitions {
 		env.Transitions = append(env.Transitions, transitionOut{
 			ID: t.ID, From: t.From, On: t.Event, Variant: t.Variant, Guard: t.Guard, To: t.To, DecidedIn: t.DecidedIn,
+			Lane: t.LaneOf(), Why: t.Why,
 		})
 	}
 	for _, gc := range g.Cells {

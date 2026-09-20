@@ -81,6 +81,26 @@ resolves both directions against something real:
 func TestSurgeHandoffPromotesOnTargetReady(t *testing.T) {
 ```
 
+## Transition lanes and the `// Arrows:` tag
+
+A transition carries a `lane`. The default, `workload`, means the replay
+harness drives it and `tests/rolloutspec/replay` owns its coverage.
+`lane: adapter` marks an edge whose guard reads an input only the
+InferenceReplica adapter produces — the owner teardown deadline, the
+published pod counters, the `spec.resetInstances` mailbox — and states that
+input in `why`. No replay scenario can reach one, so it is covered by a Go
+test that names it in an `// Arrows:` comment above the test function,
+ids comma-separated, in the same place a `// Cells:` comment goes:
+
+```go
+// Arrows: T-migratetarget-promote, T-migrate-complete
+func TestReconcile_GangMigrationCompletesAfterSourcePlanRelease(t *testing.T) {
+```
+
+`check_coverage.py` gates both directions: every adapter-lane transition
+must be named by at least one test, every cited id must be a declared
+transition, and a workload-lane arrow may not be cited at all.
+
 Both checks run together against a rendered grid:
 
     make rolloutspec-check MACHINE=instance

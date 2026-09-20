@@ -23,6 +23,15 @@ scenario file under tests/rolloutspec/replay/scenarios, the same way a
 a scenario's cited ids are real grid coordinates — is gated in Go by the
 replay suite's TestCellCitationsResolve.
 
+Transitions are checked the same way, in the lane the replay harness
+cannot reach. An `lane: adapter` transition is decided on an input only
+the InferenceReplica adapter produces, so no replay scenario can drive
+it; instead a Go test names it in an `// Arrows: <id>, <id>` comment
+above the test function. Every adapter-lane transition must be named by
+at least one such test, every cited arrow must be a declared transition,
+and a workload-lane arrow may not be cited at all — the replay lane's
+own coverage test owns those.
+
 The third output is informational: per machine, how many decided cells
 carry coverage and which ones do not. That is the remaining work, not a
 failure — the frozen contract in the rolloutspec validator is what turns
@@ -56,6 +65,8 @@ REPLAY_SCENARIO_DIR = "tests/rolloutspec/replay/scenarios"
 COVERAGE_KINDS = ("unit", "perm", "kind", "replay")
 
 CELLS_COMMENT = re.compile(r"^\s*//\s*Cells:(.*)$")
+ARROWS_COMMENT = re.compile(r"^\s*//\s*Arrows:(.*)$")
+ADAPTER_LANE = "adapter"
 GO_FUNC = re.compile(r"^func\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", re.MULTILINE)
 
 
@@ -69,6 +80,14 @@ def parse_cells_comment(line):
     An empty list means the line is a Cells comment that cites nothing.
     """
     m = CELLS_COMMENT.match(line)
+    if not m:
+        return None
+    return [part.strip() for part in m.group(1).split(",") if part.strip()]
+
+
+def parse_arrows_comment(line):
+    """Return the arrow ids an `// Arrows:` line cites, or None."""
+    m = ARROWS_COMMENT.match(line)
     if not m:
         return None
     return [part.strip() for part in m.group(1).split(",") if part.strip()]
@@ -102,6 +121,45 @@ def cell_refs(repo):
             rel = path.relative_to(base).as_posix()
             out.extend((rel, lineno, cid) for cid in ids)
     return out
+
+
+def arrow_refs(repo):
+    """Collect (path, line number, arrow id) for every `// Arrows:` citation."""
+    out = []
+    base = Path(repo)
+    for path in sorted(base.joinpath(CELL_REF_ROOT).rglob("*_test.go")):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            ids = parse_arrows_comment(line)
+            if not ids:
+                continue
+            rel = path.relative_to(base).as_posix()
+            out.extend((rel, lineno, aid) for aid in ids)
+    return out
+
+
+def check_arrows(transitions, refs):
+    """Return the violations between adapter-lane transitions and their tests."""
+    problems = []
+    lanes = {t["id"]: t.get("lane") or "workload" for t in transitions}
+    cited = set()
+    for path, lineno, aid in refs:
+        if aid not in lanes:
+            problems.append(f"{path}:{lineno}: Arrows comment references unknown transition {aid}")
+            continue
+        if lanes[aid] != ADAPTER_LANE:
+            problems.append(
+                f"{path}:{lineno}: Arrows comment names {aid}, which is a workload-lane "
+                f"transition; the replay lane owns its coverage"
+            )
+            continue
+        cited.add(aid)
+    for aid, lane in sorted(lanes.items()):
+        if lane == ADAPTER_LANE and aid not in cited:
+            problems.append(
+                f"{aid}: adapter-lane transition is named by no Go test in an // Arrows: comment"
+            )
+    return problems
 
 
 def check(grid, funcs, refs, scenarios=()):
@@ -152,9 +210,9 @@ def report(grid):
     return out
 
 
-def load_grid(path):
+def load_envelope(path):
     with open(path) as fh:
-        return json.load(fh)["grid"]
+        return json.load(fh)
 
 
 def main(argv=None):
@@ -163,13 +221,15 @@ def main(argv=None):
     parser.add_argument("--repo", required=True, help="repository root to scan for Go tests")
     args = parser.parse_args(argv)
 
-    grid = load_grid(args.grid)
+    envelope = load_envelope(args.grid)
+    grid = envelope["grid"]
     problems = check(
         grid,
         go_test_funcs(args.repo),
         cell_refs(args.repo),
         replay_scenarios(args.repo),
     )
+    problems += check_arrows(envelope.get("transitions") or [], arrow_refs(args.repo))
 
     for machine, counts in sorted(report(grid).items()):
         total = counts["covered"] + len(counts["uncovered"])
@@ -185,7 +245,7 @@ def main(argv=None):
     if problems:
         print(f"{len(problems)} coverage mismatch(es)", file=sys.stderr)
         return 1
-    print("cell coverage names and Cells comments resolve")
+    print("cell coverage names, Cells comments and adapter-lane Arrows comments resolve")
     return 0
 
 

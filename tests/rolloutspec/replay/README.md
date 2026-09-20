@@ -26,12 +26,27 @@ Four gates run here:
 |---|---|
 | `TestReplayMatchesGolden` | every scenario still produces its recorded trace |
 | `TestReplayIsDeterministic` | ten replays of each scenario are byte-identical |
-| `TestArrowCoverage` | every cited arrow exists; reports how much of the table is driven |
+| `TestArrowCoverage` | every cited arrow exists and is workload-lane; reports how much of the table is driven |
 | `TestCellCitationsResolve` | every cited cell is a key of the expanded grid |
 
 A scenario is loaded through `tests/rolloutspec`, so an event, variant,
 arrow or cell the instance table does not declare fails the load. The
 scenario vocabulary and the table cannot drift.
+
+## Lanes: which arrows this directory is responsible for
+
+A transition of the instance table carries a `lane`. The default,
+`workload`, means its guard reads only what `workload.Reconcile`
+receives, so a scenario here can drive it and `TestArrowCoverage` counts
+it toward the Part 1 exit. `lane: adapter` marks an edge decided on
+something only the InferenceReplica adapter produces — the owner
+teardown deadline, the published `PodCount` / `AvailablePodCount`, the
+`spec.resetInstances` mailbox — which no driver that runs the engine
+alone can honestly reach. Those 20 arrows are covered by Go tests in
+`pkg/controller/v1beta1/inferencereplica` that name them in an
+`// Arrows:` comment, gated by `rolloutspec-check`; a scenario here that
+claims one fails `TestArrowCoverage`. The **Unlocked paths** entries
+below explain, per arrow, which adapter input is missing.
 
 A scenario counts as coverage for the cells it drives: the cell names the
 scenario in `coverage.replay`, `rolloutspec-check` resolves that name to a
@@ -401,26 +416,47 @@ and `clock.advance`. A scenario naming any other declared event fails to load
 with that as the reason, so the gap is always visible rather than silent.
 
 
-## Sensitivity (the recorded mutation check)
+## Mutation check
 
-Run against this scenario set, on the goldens recorded above.
+The lock is only worth its runtime if a behavior change fails a golden.
+The procedure, run once under this trace format on the goldens recorded
+above:
 
-| mutation | result |
+1. Edit one predicate in the engine to the wrong constant answer.
+2. `go test ./tests/rolloutspec/replay/ -count=1 -run TestReplayMatchesGolden -v`
+   and record every scenario that fails.
+3. `git checkout` the file. Nothing here is committed mutated.
+
+Recorded result, over 108 scenarios:
+
+| mutation | goldens failed |
 |---|---|
-| `isSurgeUpdateStep` forced to `false` (`ops/update_status.go`) | `T-surgedrain-promote` fails |
-| `isSurgeOwnedStatus` forced to `false` (`ops/update.go`) | no golden fails |
-| `isSurgeOwnedStatus` **and** `effectiveUpdateStrategy`'s pin both disabled | `strategy-edit-midsurge` fails |
+| `isSurgeOwnedStatus` → `false` **and** `effectiveUpdateStrategy`'s pin dropped (`ops/update.go`) | 1: `strategy-edit-midsurge` |
+| `supersedes` → `false` (`types/externalhold.go`) | none |
+| `supersedes` → `true` | none |
+| the first-writer-wins guard in `MarkExternalHold` removed | none |
+| `MarkExternalHold` never marking (the control) | 3: `quota-hold-parks-deadline`, `source-unrouted-midsurge`, `surge-force-clock` |
 
-The middle row is not a coverage gap in the scenarios, it is a property of
-the engine: `effectiveUpdateStrategy` already pins the mechanism from
-`Operation.Strategy`, which every row this build writes carries, so the
-two guards are redundant for any row the harness can produce.
+Two things to read off it.
+
+**The surge guards are only sensitive as a pair.** Flipping
+`isSurgeOwnedStatus` alone changes nothing, because
+`effectiveUpdateStrategy` already pins the mechanism from
+`Operation.Strategy`, which every row this build writes carries; the two
+are redundant for any row the harness can produce.
 `isSurgeOwnedStatus` is load-bearing only for a surge row persisted
-*without* a pinned strategy — a shape an older build wrote — and the
-scenario format deliberately cannot seed an in-flight operation. The third
-row is the honest sensitivity claim: `strategy-edit-midsurge` locks that a
-strategy edit does not derail an attempt already in flight, and fails when
-the pinning is removed.
+*without* a pinned strategy, a shape an older build wrote, and the
+scenario format deliberately cannot seed an in-flight operation. With
+both disabled, `strategy-edit-midsurge` fails — it locks that a strategy
+edit does not derail an attempt already in flight.
+
+**Hold precedence is not locked; holds themselves are.** The control row
+shows three scenarios read a hold. None of them puts a SECOND authority
+on a row that already carries a token, which is the only situation the
+precedence rules decide, so both the ordered pause pair and
+first-writer-wins can be inverted with every golden still passing. The
+gap is a missing scenario, not a missing gate: a paused row that then
+has its create refused for quota would close it.
 
 ## Unlocked paths
 
@@ -451,9 +487,10 @@ Effects the driver does not record:
   scenario would trace them on its first replay and not on its second; a
   gang scenario declares `topologyKey` and `schedulerName` to stay out of
   both shapes rather than record a line that cannot repeat.
-- The owner's teardown deadline. `timer.teardownDeadline` and the arrows
-  that fire on it are decided in the IR adapter's teardown pass, which
-  removes the finalizer; `workload.Reconcile` never sees it.
+- The owner's teardown deadline. `timer.teardownDeadline` and the 14
+  arrows that fire on it are decided in the IR adapter's teardown pass,
+  which removes the finalizer; `workload.Reconcile` never sees it.
+  Adapter lane.
 - Timestamps on aggregate conditions and on `LastFailure`, because the
   engine stamps both from the wall clock (see Follow-ups).
 
@@ -463,6 +500,7 @@ Effects the driver does not record:
   migration never advances past `SurgePending` and the promote and
   completion arrows are out of reach. Everything the record decides before
   that gate — early wedge evidence, the deadline, teardown — is reachable.
+  Adapter lane.
 
 - The force-delete sweep in the migration drain, and
   `T-migrate-force-delete` with it. It sits behind `surgeTailGatesPassed`,
@@ -470,6 +508,7 @@ Effects the driver does not record:
   tail needs (above), so a replayed migration parks at `SurgePending` and
   never reaches the source drain the sweep runs in. The sweep itself is
   driven from the scale-down wave and from the top of the update pass.
+  Adapter lane.
 
 - The force-delete escalation's other two evidence branches,
   `node-unreachable-taint` and `node-not-ready`. Both age from a Node
@@ -483,10 +522,11 @@ Effects the driver does not record:
   same publication-path counter the migration tail needs, so the two
   Pending restart arrows cannot be reached. The same trigger from a
   Failed row skips that check and is driven (`failed-restart`).
+  Adapter lane.
 
 - The operator reset mailbox. `spec.resetInstances` is decided in the IR
   adapter, outside `workload.Reconcile`, and has no applier, so the reset
-  arrow out of Failed is out of the replay lane.
+  arrow out of Failed is out of the replay lane. Adapter lane.
 
 - The `AdoptRevision` backfill. Its spec-match test compares a live pod's
   `PodSpec` against the unrendered desired template, while the renderer

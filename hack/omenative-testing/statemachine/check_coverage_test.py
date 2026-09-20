@@ -113,6 +113,53 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(check_coverage.report(grid)["m"]["covered"], 1)
 
 
+def transition(tid, lane="workload"):
+    return {"id": tid, "lane": lane}
+
+
+class ParseArrowsCommentTest(unittest.TestCase):
+    def test_comma_separated_ids(self):
+        self.assertEqual(
+            check_coverage.parse_arrows_comment("// Arrows: T-a, T-b"), ["T-a", "T-b"]
+        )
+
+    def test_non_arrows_comment_is_not_a_reference(self):
+        self.assertIsNone(check_coverage.parse_arrows_comment("// Cells: m/A/e/before"))
+
+
+class CheckArrowsTest(unittest.TestCase):
+    def test_adapter_lane_arrow_with_a_test_is_clean(self):
+        problems = check_coverage.check_arrows(
+            [transition("T-a", "adapter")], [("pkg/x_test.go", 1, "T-a")]
+        )
+        self.assertEqual(problems, [])
+
+    def test_adapter_lane_arrow_without_a_test_is_reported(self):
+        problems = check_coverage.check_arrows([transition("T-a", "adapter")], [])
+        self.assertEqual(len(problems), 1)
+        self.assertIn("named by no Go test", problems[0])
+
+    def test_workload_lane_arrow_may_not_be_tagged(self):
+        problems = check_coverage.check_arrows(
+            [transition("T-a")], [("pkg/x_test.go", 3, "T-a")]
+        )
+        self.assertEqual(len(problems), 1)
+        self.assertIn("workload-lane", problems[0])
+
+    def test_unknown_arrow_is_reported(self):
+        problems = check_coverage.check_arrows(
+            [transition("T-a", "adapter")], [("pkg/x_test.go", 3, "T-typo")]
+        )
+        self.assertEqual(len(problems), 2)
+        self.assertIn("unknown transition T-typo", problems[0])
+
+    def test_missing_lane_defaults_to_workload(self):
+        problems = check_coverage.check_arrows(
+            [{"id": "T-a"}], [("pkg/x_test.go", 3, "T-a")]
+        )
+        self.assertIn("workload-lane", problems[0])
+
+
 class ScanTest(unittest.TestCase):
     def test_go_test_funcs_reads_pkg_and_tests(self):
         with tempfile.TemporaryDirectory() as d:
@@ -137,6 +184,16 @@ class ScanTest(unittest.TestCase):
             refs = check_coverage.cell_refs(root)
             self.assertEqual([r[2] for r in refs], ["m/A/e/before"])
             self.assertEqual(refs[0][1], 1)
+
+    def test_arrow_refs_scan_pkg_test_files_only(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "pkg").mkdir()
+            (root / "tests").mkdir()
+            (root / "pkg" / "x_test.go").write_text("// Arrows: T-a\nfunc TestA() {}\n")
+            (root / "tests" / "y_test.go").write_text("// Arrows: T-z\n")
+            refs = check_coverage.arrow_refs(root)
+            self.assertEqual([r[2] for r in refs], ["T-a"])
 
     def test_replay_scenarios_are_named_by_file_stem(self):
         with tempfile.TemporaryDirectory() as d:
@@ -170,6 +227,26 @@ class MainTest(unittest.TestCase):
             )
 
             grid.write_text(json.dumps({"machine": "m", "grid": [cell("A", "e", unit=["TestB"])]}))
+            self.assertEqual(
+                check_coverage.main(["--grid", str(grid), "--repo", str(repo)]), 1
+            )
+
+    def test_untagged_adapter_lane_transition_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            repo = root / "repo"
+            repo.mkdir()
+            self._repo(repo, "TestA")
+            grid = root / "g.json"
+            grid.write_text(
+                json.dumps(
+                    {
+                        "machine": "m",
+                        "transitions": [transition("T-a", "adapter")],
+                        "grid": [cell("A", "e", unit=["TestA"])],
+                    }
+                )
+            )
             self.assertEqual(
                 check_coverage.main(["--grid", str(grid), "--repo", str(repo)]), 1
             )

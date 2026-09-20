@@ -17,7 +17,9 @@ Three gates, and nothing moves until all three hold.
 1. **Replay harness** (Part 1). Drives `workload.Reconcile` over scripted event
    timelines with the fake client and mutation store the unit tests already use,
    and records every status write, event and requeue as a golden trace per
-   scenario, one scenario per transition arrow of the instance table at minimum.
+   scenario, one scenario per workload-lane transition arrow of the instance
+   table at minimum; the arrows the adapter decides are covered by tagged
+   tests in the adapter package.
 2. **Coverage and freeze** (Part 2). Coverage of the 356 decided cells closed
    from 172 to 356 and `frozen: true` set on the instance machine, so the existing
    CI gate turns a decided cell without a test into a build failure.
@@ -153,9 +155,9 @@ regression nobody can attribute.
 
 **Scenario sources**, in the order they are built:
 
-1. Hand-written, one per transition arrow of the instance table (138 arrows
-   today), each named by the arrow id and citing its cells. These are the
-   minimum for exit.
+1. Hand-written, one per workload-lane transition arrow of the instance table
+   (118 of the 138 arrows today), each named by the arrow id and citing its
+   cells. These are the minimum for exit.
 2. Translated perm cases: the 968 generated cases under
    `hack/omenative-testing/perm/isvcs` describe an initial shape and a fault
    phase; a small translator emits the engine-level scenario. Their `expect=`
@@ -163,15 +165,38 @@ regression nobody can attribute.
 3. Generated table walks (state, event, window), when the table process reaches
    the simulator projection in OEP-0020.1 Part 4. Not required for this OEP.
 
-**Exit criteria for Part 1.**
+**Lanes.** The harness drives `workload.Reconcile`, so it can only reach an
+arrow whose guard reads what that function receives. Twenty of the table's
+138 arrows are decided on an input the InferenceReplica adapter produces
+instead — the owner's teardown deadline, the `PodCount` /
+`AvailablePodCount` the status publication writes, the `spec.resetInstances`
+mailbox — and a scenario could only "reach" them by having the driver
+fabricate that input, which would lock the fabrication rather than the
+engine. Each transition therefore carries a `lane`, and the two lanes have
+separate gates: `TestArrowCoverage` counts the workload lane, while an
+adapter-lane arrow must be named by a Go test in
+`pkg/controller/v1beta1/inferencereplica` through an `// Arrows:` comment,
+which `rolloutspec-check` enforces in both directions. The adapter inputs
+each one waits on are the structural entries under **Unlocked paths** in
+`tests/rolloutspec/replay/README.md`.
 
-| criterion | measure |
-|---|---|
-| every transition arrow driven | 138 of 138, checked by a test that joins scenario headers with `transitions.yaml` |
-| goldens captured from a named commit | the commit sha recorded in `replay/README.md` |
-| runtime | the replay package under 60 seconds in the unit lane |
-| sensitivity | flipping any one ownership predicate or hold rule fails at least one golden (a mutation check run once, recorded) |
-| determinism | ten consecutive runs, identical traces |
+**Exit criteria for Part 1**, with what holds today.
+
+| criterion | measure | state |
+|---|---|---|
+| every workload-lane arrow driven | 118 arrows, checked by a test that joins scenario headers with `transitions.yaml` | 117 of 118. The one left is `T-failed-adopt-revision`, which the engine does not fire: `AdoptRevision`'s spec-match compares a live pod against the unrendered desired template, and the renderer's `Hostname`, `Subdomain` and serving gate make that comparison unsatisfiable. The fix is an engine change, landing separately; `failed-runtime-ready-resurge` records the route the engine takes instead |
+| every adapter-lane arrow covered | 20 arrows, each named by a Go test in an `// Arrows:` comment, gated by `rolloutspec-check` | 20 of 20 |
+| goldens captured from a named commit | the commit sha recorded in `replay/README.md` | `cf75eb72`, the `main` commit the work is based on; no engine code changed since |
+| runtime | the replay package under 60 seconds in the unit lane | about 11 seconds for 108 scenarios |
+| sensitivity | flipping any one ownership predicate or hold rule fails at least one golden (a mutation check run once, recorded) | partly. Recorded in `replay/README.md`: the surge ownership guards fail `strategy-edit-midsurge` when both are disabled and nothing when either is alone, because the per-operation strategy pin makes them redundant for any row the harness can produce. Hold *precedence* is not locked at all — neither the ordered pause pair nor first-writer-wins fails a golden, because no scenario puts a second authority on a held row; a control mutation that stops holds being marked fails three, so holds themselves are locked. The missing scenario is named in the README |
+| determinism | ten consecutive runs, identical traces | 108 scenarios × 10 passes, byte-identical |
+
+Part 1's exit is met once the `AdoptRevision` fix lands and its arrow is
+driven. The sensitivity row is the one judgement call left: as written it
+asks that *any* one hold rule fail a golden, and the precedence rules do
+not, so it is closed either by one scenario contending two authorities on a
+held row or by narrowing the criterion to the rules a scenario set can
+reach. The lock does not block on it.
 
 ### Part 2: close coverage and freeze
 
@@ -362,7 +387,9 @@ state than before.
 
 - Part 1: the replay package under `tests/rolloutspec/replay` runs in the unit
   lane; the arrow-coverage test, the determinism test and the golden diff are
-  gates; the mutation check is a documented one-time procedure.
+  gates, as is the `// Arrows:` resolution that covers the adapter lane; the
+  mutation check is a documented one-time procedure, recorded in
+  `tests/rolloutspec/replay/README.md`.
 - Part 2: the `rolloutspec-check` checkers plus `frozen: true`.
 - Visibility: one CI step, "Rollout Behavior Lock" (`make
   rollout-behavior-lock`), runs the checkers and then the lock's test packages
@@ -412,16 +439,28 @@ state than before.
 
 - Whether translated perm cases should ever assert their `expect=` verdict in
   the replay lane, or stay golden-only.
-- The scenario count target beyond one per arrow; the mutation check will say
-  whether one per arrow is enough sensitivity. The first mutation check showed
-  that flipping one surge ownership predicate alone is masked by the
-  per-operation strategy pin; flipping both surge guards is caught.
-Resolved: the revert reopen is fixed in the counter (Part 3 table); quarantined
-specs are listed in `KIND_QUARANTINE` with owner and expiry. The three
-trace-format questions are settled and the format above is the answer: whole
-rows, `note:` lines compared like any other, real revision names. The replay
-driver publishes endpoints in the per-revision routed Service the engine reads,
-so an endpoint hold is drivable in the replay lane.
+- The scenario count target beyond one per arrow. One per arrow is enough for
+  the surge ownership guards as a pair and for the holds themselves, and is
+  not enough for hold precedence: the rule only decides a row two authorities
+  want, and no single-arrow walk produces one. The answer is a small number of
+  contention scenarios, not a larger set generally.
 
-Next action: record goldens for the remaining arrows. Parts 2 and 3 have met
-their exit; Part 1 is the only gate still open before OEP-0020.3 may start.
+Resolved:
+
+- The revert reopen is fixed in the counter (Part 3 table); quarantined specs
+  are listed in `KIND_QUARANTINE` with owner and expiry.
+- **A row line prints the whole row, not a diff.** Fixed field order, `nil`
+  for an absent value, and a non-committing mutation recorded as its attempt
+  and verdict alone. A line is readable without folding the ones above it in.
+- **A tick's `note:` is a compared trace line**, not a comment: a walk that
+  stops reading as its notes describe fails like any other golden diff.
+- **Identities print as the engine sees them.** Real ControllerRevision names
+  and content hashes; only operation ids and object UIDs, which are minted at
+  random, are normalized, and instants render as `t+<duration>`. A hashing
+  change therefore rewrites every golden, which is the honest report.
+- The replay driver publishes endpoints in the per-revision routed Service the
+  engine reads, so an endpoint hold is drivable in the replay lane.
+
+Next action: land the `AdoptRevision` fix and drive its arrow. Parts 2 and 3
+have met their exit; Part 1 is the only gate still open before OEP-0020.3 may
+start.

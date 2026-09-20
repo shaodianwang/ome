@@ -193,6 +193,7 @@ func assertInstanceUntouched(t *testing.T, g *gomega.WithT, c client.Client, ir 
 // expectations are recorded so the Create pass waits for the watch.
 //
 // Cells: instance/Failed/spec.resetInstances[all]/before
+// Arrows: T-failed-reset
 func TestConsumeResetInstances_All_ResetsEveryFailedInstance(t *testing.T) {
 	g := gomega.NewWithT(t)
 	seed := resetIR(constants.ResetInstancesAll)

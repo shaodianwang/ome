@@ -1,6 +1,14 @@
 # Each guard states, in one line, the condition the named file actually
 # checks before the write that leaves the source state. A transition whose
 # "to" is Empty removes the InstanceStatus row.
+#
+# lane says which harness drives the edge. The default, workload, means the
+# replay lane drives it: everything its guard reads is an input
+# workload.Reconcile receives. lane: adapter marks an edge whose guard
+# depends on something only the InferenceReplica adapter produces — the
+# teardown deadline, the published pod counters, the reset annotation — and
+# its why names that input. An adapter-lane edge is covered by a tagged Go
+# test in the adapter package instead.
 transitions:
   # --- Empty -------------------------------------------------------------
   - id: T-empty-create
@@ -69,6 +77,8 @@ transitions:
     to: Restart/Drain
     effects: [Operation Restart Drain stamped, the surviving pods drained and deleted before the rebuild at a bumped incarnation]
     decided_in: pkg/controller/v1beta1/workload/ops/restart.go
+    lane: adapter
+    why: below Ready the rebuild trigger compares live pods against the row's recorded PodCount, which only the adapter's status publication writes
   - id: T-pending-terminal-restart
     from: Pending
     event: pod.phaseTerminal
@@ -76,6 +86,8 @@ transitions:
     to: Restart/Drain
     effects: [Operation Restart Drain stamped, the surviving pods drained and deleted before the rebuild at a bumped incarnation]
     decided_in: pkg/controller/v1beta1/workload/ops/restart.go
+    lane: adapter
+    why: below Ready the rebuild trigger compares live pods against the row's recorded PodCount, which only the adapter's status publication writes
   - id: T-pending-scaledown
     from: Pending
     event: spec.replicasDown
@@ -104,6 +116,8 @@ transitions:
     to: Empty
     effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
     decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+    lane: adapter
+    why: the owner's teardown deadline and the finalizer release are the adapter's teardown pass, which runs outside workload.Reconcile
 
   # --- Ready -------------------------------------------------------------
   - id: T-ready-surge
@@ -251,6 +265,8 @@ transitions:
     to: Empty
     effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
     decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+    lane: adapter
+    why: the owner's teardown deadline and the finalizer release are the adapter's teardown pass, which runs outside workload.Reconcile
 
   # --- Failed ------------------------------------------------------------
   - id: T-failed-corrective
@@ -348,6 +364,8 @@ transitions:
     to: Failed
     effects: [every live-listed pod deleted with the expectation recorded before each delete, the preserved operation cleared through the MutateInstance seam, Phase and LastFailure untouched so the row is left in the fresh-start shape the Create pass rebuilds, InstancesReset event, the annotation consumed only after those effects commit]
     decided_in: pkg/controller/v1beta1/inferencereplica/reset_instances.go
+    lane: adapter
+    why: the operator reset mailbox is the spec.resetInstances annotation, which the adapter consumes outside workload.Reconcile
   - id: T-failed-recycle-rebuild
     from: Failed
     event: pod.phaseTerminal
@@ -376,6 +394,8 @@ transitions:
     to: Empty
     effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
     decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+    lane: adapter
+    why: the owner's teardown deadline and the finalizer release are the adapter's teardown pass, which runs outside workload.Reconcile
 
   # --- Create/CreatePods -------------------------------------------------
   - id: T-create-ready
@@ -450,6 +470,8 @@ transitions:
     to: Empty
     effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
     decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+    lane: adapter
+    why: the owner's teardown deadline and the finalizer release are the adapter's teardown pass, which runs outside workload.Reconcile
 
   # --- Update/Surge ------------------------------------------------------
   - id: T-surge-target-ready
@@ -524,6 +546,8 @@ transitions:
     to: Empty
     effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
     decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+    lane: adapter
+    why: the owner's teardown deadline and the finalizer release are the adapter's teardown pass, which runs outside workload.Reconcile
 
   # --- Update/SurgeDrain -------------------------------------------------
   - id: T-surgedrain-promote
@@ -591,6 +615,8 @@ transitions:
     to: Empty
     effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
     decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+    lane: adapter
+    why: the owner's teardown deadline and the finalizer release are the adapter's teardown pass, which runs outside workload.Reconcile
 
   # --- Update/GangSurgeTarget --------------------------------------------
   - id: T-gangtarget-ready
@@ -650,6 +676,8 @@ transitions:
     to: Empty
     effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
     decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+    lane: adapter
+    why: the owner's teardown deadline and the finalizer release are the adapter's teardown pass, which runs outside workload.Reconcile
 
   # --- Update/GangSurgeTargetCleanup -------------------------------------
   - id: T-gangcleanup-done
@@ -695,6 +723,8 @@ transitions:
     to: Empty
     effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
     decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+    lane: adapter
+    why: the owner's teardown deadline and the finalizer release are the adapter's teardown pass, which runs outside workload.Reconcile
 
   # --- Update/InPlace ----------------------------------------------------
   - id: T-inplace-ready
@@ -777,6 +807,8 @@ transitions:
     to: Empty
     effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
     decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+    lane: adapter
+    why: the owner's teardown deadline and the finalizer release are the adapter's teardown pass, which runs outside workload.Reconcile
 
   # --- Update/Drain ------------------------------------------------------
   - id: T-drain-ready
@@ -843,6 +875,8 @@ transitions:
     to: Empty
     effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
     decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+    lane: adapter
+    why: the owner's teardown deadline and the finalizer release are the adapter's teardown pass, which runs outside workload.Reconcile
 
   # --- Restart/Drain -----------------------------------------------------
   - id: T-restart-ready
@@ -902,6 +936,8 @@ transitions:
     to: Empty
     effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
     decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+    lane: adapter
+    why: the owner's teardown deadline and the finalizer release are the adapter's teardown pass, which runs outside workload.Reconcile
 
   # --- Migrate/CreateSurge -----------------------------------------------
   - id: T-migrate-complete
@@ -912,6 +948,8 @@ transitions:
     to: Empty
     effects: [source status row removed under the ownership guard, Completed ledger row persisted, record stamped Completed last so a crash re-runs the tail]
     decided_in: pkg/controller/v1beta1/workload/ops/migrate.go
+    lane: adapter
+    why: the completion tail runs past the same surge availability gate, whose PodCount and AvailablePodCount only the adapter's status publication writes
   - id: T-migrate-deadline
     from: Migrate/CreateSurge
     event: timer.migrationDeadline
@@ -948,6 +986,8 @@ transitions:
     to: Migrate/CreateSurge
     effects: [source pod force-deleted with grace zero under a UID precondition, Warning event and a ledger row recorded, the migration drain left to complete on the resulting absence]
     decided_in: pkg/controller/v1beta1/workload/ops/force_delete.go
+    lane: adapter
+    why: the sweep runs in the source drain, which is behind the surge availability gate on the adapter-published PodCount and AvailablePodCount
   - id: T-migrate-teardown-deadline
     from: Migrate/CreateSurge
     event: timer.teardownDeadline
@@ -955,6 +995,8 @@ transitions:
     to: Empty
     effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
     decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+    lane: adapter
+    why: the owner's teardown deadline and the finalizer release are the adapter's teardown pass, which runs outside workload.Reconcile
 
   # --- Migrate/SurgeTarget -----------------------------------------------
   - id: T-migratetarget-promote
@@ -965,6 +1007,8 @@ transitions:
     to: Ready
     effects: [Phase Ready on the source's running revision with the Migrate pin cleared]
     decided_in: pkg/controller/v1beta1/workload/ops/migrate.go
+    lane: adapter
+    why: the surge availability gate reads the row's PodCount and AvailablePodCount, which only the adapter's status publication writes
   - id: T-migratetarget-expired
     from: Migrate/SurgeTarget
     event: timer.migrationDeadline
@@ -994,6 +1038,8 @@ transitions:
     to: Empty
     effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
     decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+    lane: adapter
+    why: the owner's teardown deadline and the finalizer release are the adapter's teardown pass, which runs outside workload.Reconcile
 
   # --- Delete/Drain ------------------------------------------------------
   - id: T-delete-done
@@ -1025,3 +1071,5 @@ transitions:
     to: Empty
     effects: [TeardownDeadlineExceeded warning, the teardown finalizer released so the owner object and every InstanceStatus row it carried are purged in one delete, surviving pods and their owner references left to background GC]
     decided_in: pkg/controller/v1beta1/inferencereplica/teardown.go
+    lane: adapter
+    why: the owner's teardown deadline and the finalizer release are the adapter's teardown pass, which runs outside workload.Reconcile

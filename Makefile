@@ -303,9 +303,10 @@ rolloutspec-check: rolloutspec-render ## 🔎 Check a rollout state machine (MAC
 
 # The packages whose tests are the rollout engine's behavior lock: the
 # machine tables and their well-formedness, the replay goldens with the
-# arrow and determinism checks, the driver, and the engine packages the
-# decided-cell tests live in. Fake-client only; no envtest or xet.
-ROLLOUT_LOCK_PACKAGES := ./tests/rolloutspec/... ./pkg/controller/v1beta1/workload/...
+# arrow and determinism checks, the driver, the engine packages the
+# decided-cell tests live in, and the adapter package holding the
+# adapter-lane arrow tests. Fake-client only; no envtest or xet.
+ROLLOUT_LOCK_PACKAGES := ./tests/rolloutspec/... ./pkg/controller/v1beta1/workload/... ./pkg/controller/v1beta1/inferencereplica/...
 
 .PHONY: rollout-behavior-lock
 rollout-behavior-lock: rolloutspec-check ## 🔒 Rollout engine behavior lock: spec checker, replay goldens, decided-cell tests

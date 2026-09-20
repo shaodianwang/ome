@@ -83,6 +83,21 @@ type Transition struct {
 	To        string   `json:"to"`
 	Effects   []string `json:"effects,omitempty"`
 	DecidedIn string   `json:"decided_in"`
+	// Lane names which harness can drive this edge. Blank means
+	// LaneWorkload: the replay lane drives it, because everything the
+	// guard reads is an input workload.Reconcile receives. LaneAdapter
+	// marks an edge whose guard depends on something only the
+	// InferenceReplica adapter produces, and Why states which input.
+	Lane string `json:"lane,omitempty"`
+	Why  string `json:"why,omitempty"`
+}
+
+// LaneOf returns the transition's lane, resolving the blank default.
+func (t Transition) LaneOf() string {
+	if t.Lane == "" {
+		return LaneWorkload
+	}
+	return t.Lane
 }
 
 // Coverage names the checks that prove a cell. Cells with placement sim
@@ -145,6 +160,12 @@ const (
 	StatusDecided = "decided"
 )
 
+// Lane values: which harness drives a transition.
+const (
+	LaneWorkload = "workload"
+	LaneAdapter  = "adapter"
+)
+
 // Placement values.
 const (
 	PlacementUnit = "unit"
@@ -163,6 +184,7 @@ var (
 	outcomes   = set(OutcomeTransition, OutcomeIgnore, OutcomeDefer, OutcomeReject, OutcomeEscalate, OutcomeNA, OutcomeDecide)
 	statuses   = set(StatusCurrent, StatusReview, StatusDecided)
 	placements = set(PlacementUnit, PlacementPerm, PlacementKind, PlacementSim)
+	lanes      = set(LaneWorkload, LaneAdapter)
 )
 
 func set(values ...string) map[string]struct{} {

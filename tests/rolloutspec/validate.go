@@ -11,7 +11,8 @@ import (
 // Validate returns every well-formedness violation in m: closed
 // vocabularies, dangling references, decided_in paths relative to
 // repoRoot, the frozen contract (no DECIDE cell, and every decided cell
-// that is not n/a names at least one check), declared invariant ids, the
+// that is not n/a names at least one check), the transition lane
+// vocabulary and the why an adapter-lane edge owes, declared invariant ids, the
 // pointer-field spellings that are
 // present-but-empty rather than absent, and that Expand succeeds. It
 // collects every violation rather than stopping at the first, so a table
@@ -119,6 +120,15 @@ func Validate(m *Machine, repoRoot string) []error {
 			fail("transition %s: unknown variant %q", t.ID, t.Variant)
 		}
 		pathExists("transition "+t.ID, t.DecidedIn)
+		if _, ok := lanes[t.LaneOf()]; !ok {
+			fail("transition %s: lane %q is not workload|adapter", t.ID, t.Lane)
+		}
+		switch {
+		case t.LaneOf() == LaneAdapter && t.Why == "":
+			fail("transition %s: an adapter-lane transition must state the adapter input it depends on in why", t.ID)
+		case t.LaneOf() == LaneWorkload && t.Why != "":
+			fail("transition %s: why states the adapter input an adapter-lane transition depends on; a workload-lane transition has none", t.ID)
+		}
 	}
 	for _, s := range m.States {
 		naKeys := make([]string, 0, len(s.NotApplicable))

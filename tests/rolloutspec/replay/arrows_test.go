@@ -10,44 +10,58 @@ import (
 // TestArrowCoverage joins the scenario headers with the machine's
 // transitions and reports how much of the table the replay lane drives.
 //
+// Only workload-lane arrows count toward the exit: an adapter-lane arrow's
+// guard reads something the adapter produces and workload.Reconcile never
+// writes, so no scenario here can reach it honestly. Those are covered by
+// tagged tests in the adapter package and are reported separately.
+//
 // It fails on a scenario naming an arrow the table does not declare —
 // caught at load, asserted here so the failure names coverage rather than
-// parsing. The exhaustive target ("every arrow driven") is the Part 1 exit
-// criterion and is skipped, with the standing count printed, until the
-// scenario set reaches it: a hard failure while the set is deliberately
-// partial would make the lane red for its whole construction.
+// parsing — and on one claiming an adapter-lane arrow, which the driver
+// cannot have reached. The exhaustive target ("every workload-lane arrow
+// driven") is the Part 1 exit criterion and is skipped, naming what is
+// still missing, until the scenario set reaches it.
 func TestArrowCoverage(t *testing.T) {
 	machine, err := rolloutspec.Load(machineName)
 	if err != nil {
 		t.Fatalf("load %s machine: %v", machineName, err)
 	}
-	declared := make(map[string]struct{}, len(machine.Transitions))
+	lane := make(map[string]string, len(machine.Transitions))
+	adapterLane := 0
 	for _, transition := range machine.Transitions {
-		declared[transition.ID] = struct{}{}
+		lane[transition.ID] = transition.LaneOf()
+		if transition.LaneOf() == rolloutspec.LaneAdapter {
+			adapterLane++
+		}
 	}
 
 	driven := map[string][]string{}
 	for _, tc := range loadScenarios(t) {
 		for _, arrow := range tc.scenario.Arrows {
-			if _, ok := declared[arrow]; !ok {
+			switch lane[arrow] {
+			case "":
 				t.Errorf("%s: arrow %q is not declared in the %s table", tc.path, arrow, machineName)
-				continue
+			case rolloutspec.LaneAdapter:
+				t.Errorf("%s: arrow %q is adapter-lane; the replay driver does not run the adapter pass that decides it",
+					tc.path, arrow)
+			default:
+				driven[arrow] = append(driven[arrow], tc.name)
 			}
-			driven[arrow] = append(driven[arrow], tc.name)
 		}
 	}
 
-	missing := make([]string, 0, len(declared))
-	for arrow := range declared {
-		if len(driven[arrow]) == 0 {
+	missing := make([]string, 0, len(lane))
+	for arrow, l := range lane {
+		if l == rolloutspec.LaneWorkload && len(driven[arrow]) == 0 {
 			missing = append(missing, arrow)
 		}
 	}
 	sort.Strings(missing)
-	t.Logf("arrows driven: %d of %d", len(driven), len(declared))
+	workloadLane := len(lane) - adapterLane
+	t.Logf("workload-lane arrows driven: %d of %d (%d adapter-lane arrows are covered in the adapter package)",
+		len(driven), workloadLane, adapterLane)
 	if len(missing) > 0 {
-		t.Skipf("%d arrows are not driven yet; the first undriven ones are %s",
-			len(missing), head(missing, 10))
+		t.Skipf("%d workload-lane arrows are not driven: %s", len(missing), missing)
 	}
 }
 
@@ -66,11 +80,4 @@ func TestCellCitationsResolve(t *testing.T) {
 		}
 	}
 	t.Logf("cells cited: %d of %d", cited, len(vocab.Cells))
-}
-
-func head(values []string, n int) []string {
-	if len(values) <= n {
-		return values
-	}
-	return values[:n]
 }
