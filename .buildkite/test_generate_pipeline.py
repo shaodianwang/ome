@@ -14,6 +14,7 @@ Run from the repo root (stdlib only; pytest also collects it):
 
 from __future__ import annotations
 
+import datetime
 import importlib.util
 import json
 import os
@@ -48,11 +49,21 @@ class PipelineTestCase(unittest.TestCase):
             (root / name).write_text(body)
         return root
 
-    def patch_generator(self, suite_dir, groups):
-        for attr, value in (("KIND_SUITE_DIR", suite_dir), ("KIND_SPEC_GROUPS", groups)):
+    def patch_generator(self, suite_dir, groups, quarantine=()):
+        for attr, value in (
+            ("KIND_SUITE_DIR", suite_dir),
+            ("KIND_SPEC_GROUPS", groups),
+            ("KIND_QUARANTINE", list(quarantine)),
+        ):
             patcher = mock.patch.object(gp, attr, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+
+    def quarantine_entry(self, spec, owner="tester", reason="known defect", expires=None):
+        """A valid entry by default; each test invalidates the one field it pins."""
+        if expires is None:
+            expires = (gp._today() + datetime.timedelta(days=14)).isoformat()
+        return {"spec": spec, "owner": owner, "reason": reason, "expires": expires}
 
 
 class TestKindSpecDiscovery(PipelineTestCase):
@@ -159,6 +170,141 @@ class TestKindSpecClassification(PipelineTestCase):
                 ("group-a", "Group A", ["gamma_kind_test.go", "alpha_kind_test.go"]),
             ],
         )
+
+
+class TestKindQuarantine(PipelineTestCase):
+    """Quarantine is the one home other than a gating group, and it expires."""
+
+    def test_quarantined_spec_leaves_its_group_and_runs_soft_fail(self):
+        suite_dir = self.make_suite_dir(["alpha", "flaky"])
+        self.patch_generator(
+            suite_dir,
+            (("group-a", "Group A", ("alpha",)),),
+            quarantine=[self.quarantine_entry("flaky_kind_test")],
+        )
+        gating = gp._gke_kind_group()
+        self.assertNotIn("flaky_kind_test.go", gating)
+        self.assertNotIn("soft_fail", gating)
+
+        quarantine = gp._kind_quarantine_group()
+        self.assertIn('key: "integration-test-kind-quarantine"', quarantine)
+        self.assertIn("soft_fail: true", quarantine)
+        self.assertIn("Quarantined KIND specs (1 file)", quarantine)
+        self.assertEqual(
+            _focus_patterns(quarantine), [gp._kind_focus(["flaky_kind_test.go"])]
+        )
+
+    def test_no_quarantine_emits_no_group(self):
+        suite_dir = self.make_suite_dir(["alpha"])
+        self.patch_generator(suite_dir, (("group-a", "Group A", ("alpha",)),))
+        self.assertEqual(gp._kind_quarantine_group(), "")
+
+    def test_unknown_spec_fails_generation(self):
+        suite_dir = self.make_suite_dir(["alpha"])
+        self.patch_generator(
+            suite_dir,
+            (("group-a", "Group A", ("alpha",)),),
+            quarantine=[self.quarantine_entry("ghost_kind_test")],
+        )
+        with self.assertRaisesRegex(
+            RuntimeError, r"quarantined KIND spec does not exist: ghost_kind_test\.go"
+        ):
+            gp._kind_spec_groups()
+
+    def test_expired_entry_fails_generation(self):
+        suite_dir = self.make_suite_dir(["alpha", "flaky"])
+        self.patch_generator(
+            suite_dir,
+            (("group-a", "Group A", ("alpha",)),),
+            quarantine=[
+                self.quarantine_entry(
+                    "flaky_kind_test",
+                    expires=(gp._today() - datetime.timedelta(days=1)).isoformat(),
+                )
+            ],
+        )
+        with self.assertRaisesRegex(
+            RuntimeError, r"KIND quarantine for flaky_kind_test expired on "
+        ):
+            gp._kind_spec_groups()
+
+    def test_entry_expiring_today_still_generates(self):
+        suite_dir = self.make_suite_dir(["alpha", "flaky"])
+        self.patch_generator(
+            suite_dir,
+            (("group-a", "Group A", ("alpha",)),),
+            quarantine=[
+                self.quarantine_entry(
+                    "flaky_kind_test", expires=gp._today().isoformat()
+                )
+            ],
+        )
+        self.assertEqual(gp._kind_quarantine_files(), ["flaky_kind_test.go"])
+
+    def test_missing_owner_or_reason_fails_generation(self):
+        suite_dir = self.make_suite_dir(["alpha", "flaky"])
+        for field in ("owner", "reason"):
+            with self.subTest(field=field):
+                entry = self.quarantine_entry("flaky_kind_test", **{field: "  "})
+                with mock.patch.object(gp, "KIND_SUITE_DIR", suite_dir), mock.patch.object(
+                    gp, "KIND_QUARANTINE", [entry]
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        rf"KIND quarantine entry for flaky_kind_test has no {field}",
+                    ):
+                        gp._kind_quarantine_files()
+
+    def test_unparseable_expiry_fails_generation(self):
+        suite_dir = self.make_suite_dir(["flaky"])
+        self.patch_generator(
+            suite_dir,
+            (),
+            quarantine=[self.quarantine_entry("flaky_kind_test", expires="soon")],
+        )
+        with self.assertRaisesRegex(RuntimeError, r"needs an expires date"):
+            gp._kind_quarantine_files()
+
+    def test_spec_in_both_a_group_and_quarantine_fails_generation(self):
+        suite_dir = self.make_suite_dir(["alpha", "flaky"])
+        self.patch_generator(
+            suite_dir,
+            (("group-a", "Group A", ("alpha", "flaky")),),
+            quarantine=[self.quarantine_entry("flaky_kind_test")],
+        )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"quarantined KIND specs are still in a gating group: "
+            r"flaky_kind_test\.go in group-a",
+        ):
+            gp._kind_spec_groups()
+
+    def test_spec_in_neither_a_group_nor_quarantine_fails_generation(self):
+        suite_dir = self.make_suite_dir(["alpha", "flaky", "orphan"])
+        self.patch_generator(
+            suite_dir,
+            (("group-a", "Group A", ("alpha",)),),
+            quarantine=[self.quarantine_entry("flaky_kind_test")],
+        )
+        with self.assertRaisesRegex(
+            RuntimeError, r"unclassified KIND specs: orphan_kind_test\.go"
+        ):
+            gp._kind_spec_groups()
+
+    def test_duplicate_quarantine_entry_fails_generation(self):
+        suite_dir = self.make_suite_dir(["flaky"])
+        self.patch_generator(
+            suite_dir,
+            (),
+            quarantine=[
+                self.quarantine_entry("flaky_kind_test"),
+                self.quarantine_entry("flaky_kind_test"),
+            ],
+        )
+        with self.assertRaisesRegex(
+            RuntimeError, r"duplicate KIND quarantine entry: flaky_kind_test\.go"
+        ):
+            gp._kind_quarantine_files()
 
 
 def _focus_patterns(yaml_text):
@@ -416,16 +562,27 @@ class TestCheckedInTreeClassification(unittest.TestCase):
     def test_checked_in_specs_are_fully_classified(self):
         groups = gp._kind_spec_groups()
         mapped = [name for _, _, files in groups for name in files]
+        mapped += gp._kind_quarantine_files()
         self.assertEqual(sorted(mapped), gp._kind_spec_files())
+
+    def test_checked_in_quarantine_is_valid_and_disjoint(self):
+        quarantined = gp._kind_quarantine_files()
+        grouped = {
+            name for _, _, files in gp._kind_spec_groups() for name in files
+        }
+        self.assertFalse(grouped & set(quarantined))
 
     def test_checked_in_focus_patterns_partition_the_suite(self):
         patterns = _focus_patterns(gp._gke_kind_group())
         groups = gp._kind_spec_groups()
         self.assertEqual(len(patterns), len(groups))
+        patterns += _focus_patterns(gp._kind_quarantine_group())
+        homes = [slug for slug, _, _ in groups] + ["quarantine"]
+        self.assertEqual(len(patterns), len(homes))
         for name in gp._kind_spec_files():
             owners = [
-                slug
-                for (slug, _, _), pattern in zip(groups, patterns)
+                home
+                for home, pattern in zip(homes, patterns)
                 if re.search(pattern, str(gp.KIND_SUITE_DIR / name))
             ]
             self.assertEqual(

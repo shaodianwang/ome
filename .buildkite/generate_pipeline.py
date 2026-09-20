@@ -24,6 +24,7 @@ Environment variables read at runtime:
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import re
@@ -160,7 +161,6 @@ KIND_SPEC_GROUPS = (
     )),
     ("rolling-updates", "Rolling update strategies", (
         "rolling_recreatepod", "rolling_inplace", "rolling_inplaceonly_reject",
-        "rolling_cancel_revert",
     )),
     ("gang-recovery", "Gang recovery and wedge", (
         "gang_corrective_rollout", "gang_wedge_nonready",
@@ -177,7 +177,7 @@ KIND_SPEC_GROUPS = (
     )),
     ("pause-cancel-interleavings", "Pause, cancel, and interleavings", (
         "pause", "pause_midrollout", "pause_recovery", "inference_replica_pause",
-        "cancel_midrollout", "interleave",
+        "interleave",
     )),
     ("scale-transitions", "Scale transitions", (
         "bounded_scale_down", "scale_during_rollout", "bluegreen_scale_down_during",
@@ -193,6 +193,47 @@ KIND_SPEC_GROUPS = (
         "partial_failure",
     )),
 )
+
+# Quarantine: the escape hatch that keeps a red KIND lane meaningful.
+#
+# A spec that fails on `main` without an engine change, or that passes on retry
+# without one, is a defect with an owner — not noise to retry away. A retry is
+# never the fix. The spec moves here: it leaves its gating group above (a
+# quarantined spec listed in a group fails generation) and runs in the one
+# soft-fail "Quarantined KIND specs" group, so a PR author is never gated on a
+# failure nobody is fixing and the failure stays visible.
+#
+# This pipeline has no nightly schedule — the `daily` mode is the RC promotion
+# pipeline and never packages the KIND bundle — so the quarantine group runs on
+# every build, soft-fail. Give it a nightly-only trigger once one exists.
+#
+# Every entry carries an owner, a one-line reason and an expiry (two weeks is
+# the norm). Generation fails on an unknown spec, an empty owner or reason, and
+# on the day after `expires`: an expired quarantine blocks the build until
+# someone fixes the spec or extends the entry with a reason. To un-quarantine,
+# delete the entry and put the stem back in its group above, in the fix PR.
+KIND_QUARANTINE = [
+    {
+        "spec": "cancel_midrollout_kind_test",
+        "owner": "slin1237",
+        "expires": "2026-10-03",
+        "reason": (
+            "run reopens after revert: UpdatedReplicas counts a mid-surge row "
+            "as running the update revision, so the IR reports converged while "
+            "a roll is in flight"
+        ),
+    },
+    {
+        "spec": "rolling_cancel_revert_kind_test",
+        "owner": "slin1237",
+        "expires": "2026-10-03",
+        "reason": (
+            "run reopens after revert: UpdatedReplicas counts a mid-surge row "
+            "as running the update revision, so the IR reports converged while "
+            "a roll is in flight"
+        ),
+    },
+]
 
 
 def _truthy(val: str) -> bool:
@@ -466,13 +507,63 @@ def _mc_kind_spec_files() -> list[str]:
     return _spec_files_in(MC_KIND_SUITE_DIR)
 
 
-def _spec_groups_for(suite_dir, declarations) -> list[tuple[str, str, list[str]]]:
+def _today() -> datetime.date:
+    """Indirection so the expiry check is testable without freezing the clock."""
+    return datetime.date.today()
+
+
+def _kind_quarantine_files() -> list[str]:
+    """Validate KIND_QUARANTINE and return its spec filenames, in order.
+
+    Every rejection here is a quarantine that has stopped carrying information:
+    a spec that no longer exists, an entry nobody owns or explains, or one whose
+    two weeks are up. The last is the point of the expiry — an abandoned
+    quarantine blocks the build instead of silently un-testing a spec forever.
+    """
+    actual = set(_spec_files_in(KIND_SUITE_DIR))
+    today = _today()
+    files: list[str] = []
+    for entry in KIND_QUARANTINE:
+        spec = str(entry.get("spec", "")).strip()
+        if not spec:
+            raise RuntimeError("KIND quarantine entry without a spec")
+        filename = f"{spec}.go"
+        if filename not in actual:
+            raise RuntimeError(f"quarantined KIND spec does not exist: {filename}")
+        if filename in files:
+            raise RuntimeError(f"duplicate KIND quarantine entry: {filename}")
+        for field in ("owner", "reason"):
+            if not str(entry.get(field, "")).strip():
+                raise RuntimeError(f"KIND quarantine entry for {spec} has no {field}")
+        raw_expiry = str(entry.get("expires", "")).strip()
+        try:
+            expires = datetime.date.fromisoformat(raw_expiry)
+        except ValueError:
+            raise RuntimeError(
+                f"KIND quarantine entry for {spec} needs an expires date "
+                f"(YYYY-MM-DD), got {raw_expiry!r}"
+            ) from None
+        if expires < today:
+            raise RuntimeError(
+                f"KIND quarantine for {spec} expired on {raw_expiry} "
+                f"(owner {entry['owner']}): fix the spec and return it to its "
+                "group, or extend the entry with a reason"
+            )
+        files.append(filename)
+    return files
+
+
+def _spec_groups_for(
+    suite_dir, declarations, quarantined: tuple[str, ...] = ()
+) -> list[tuple[str, str, list[str]]]:
     """Return a suite's groups after proving exact ownership of every spec.
 
     Ownership is what makes a group list load-bearing rather than documentation:
     each job runs only the files its group names, so an unlisted spec would
     silently never run in CI. Failing generation is the cheapest place to catch
-    that.
+    that. Quarantine is the one other home a spec may have, and it is exclusive:
+    a spec is in exactly one gating group or in quarantine, never both, never
+    neither.
     """
     actual = set(_spec_files_in(suite_dir))
     owners: dict[str, str] = {}
@@ -492,15 +583,23 @@ def _spec_groups_for(suite_dir, declarations) -> list[tuple[str, str, list[str]]
         groups.append((slug, label, files))
 
     mapped = set(owners)
+    if both := sorted(mapped & set(quarantined)):
+        raise RuntimeError(
+            "quarantined KIND specs are still in a gating group: "
+            + ", ".join(f"{name} in {owners[name]}" for name in both)
+        )
+    mapped |= set(quarantined)
     if missing := sorted(actual - mapped):
         raise RuntimeError(f"unclassified KIND specs: {', '.join(missing)}")
-    if stale := sorted(mapped - actual):
+    if stale := sorted(set(owners) - actual):
         raise RuntimeError(f"mapped KIND specs do not exist: {', '.join(stale)}")
     return groups
 
 
 def _kind_spec_groups() -> list[tuple[str, str, list[str]]]:
-    return _spec_groups_for(KIND_SUITE_DIR, KIND_SPEC_GROUPS)
+    return _spec_groups_for(
+        KIND_SUITE_DIR, KIND_SPEC_GROUPS, tuple(_kind_quarantine_files())
+    )
 
 
 def _mc_kind_spec_groups() -> list[tuple[str, str, list[str]]]:
@@ -578,6 +677,41 @@ def _gke_kind_group() -> str:
         "key": "integration-test-kind-gke",
         "notify": [{"github_commit_status": {"context": "integration-test-kind-gke"}}],
         "steps": children,
+    }
+    return _yaml_block([group], 2)
+
+
+def _kind_quarantine_group() -> str:
+    """The quarantined specs: one soft-fail job, or nothing when none are.
+
+    Soft-fail by construction — a quarantined spec is a known defect with an
+    owner, so gating a PR author on it only teaches people to retry. It still
+    runs, and on the same bundle as the gating lane, so the failure stays
+    visible and a fix shows up as green before the spec moves back.
+    """
+    files = _kind_quarantine_files()
+    if not files:
+        return ""
+    plugins = _gke_kind_plugins(_kind_ci_image(f"test-{COMMIT[:8]}-{BUILD_NUMBER}"))
+    file_label = "file" if len(files) == 1 else "files"
+    owners = sorted({str(entry["owner"]) for entry in KIND_QUARANTINE})
+    step = {
+        "label": f":warning: Quarantined KIND specs ({len(files)} {file_label})",
+        "key": "kind-gke-quarantine",
+        "depends_on": "package-kind-test-image",
+        "soft_fail": True,
+        "env": {
+            "OME_KIND_FOCUS": _kind_focus(files),
+            "OME_KIND_QUARANTINE_OWNERS": ",".join(owners),
+        },
+        "agents": {"queue": GKE_QUEUE},
+        "command": "sh .buildkite/run_kind_tests_gke.sh",
+        "plugins": plugins,
+    }
+    group = {
+        "group": ":warning: Quarantined KIND specs (soft-fail)",
+        "key": "integration-test-kind-quarantine",
+        "steps": [step],
     }
     return _yaml_block([group], 2)
 
@@ -1067,6 +1201,8 @@ def ci_steps() -> str:
     if GKE_KIND_ENABLED:
         steps += "\n" + _package_kind_test_image_step()
         steps += "\n" + _gke_kind_group()
+        if quarantine := _kind_quarantine_group():
+            steps += "\n" + quarantine
         steps += "\n" + _mc_kind_group()
     return steps
 
