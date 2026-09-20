@@ -58,6 +58,9 @@ func NewTrafficMapPublisher(
 	kubeClient client.Client,
 	apiReader client.Reader,
 ) (*TrafficMapPublisher, error) {
+	if cfg.ResyncInterval < 0 {
+		return nil, fmt.Errorf("TrafficMap publisher resync interval must not be negative")
+	}
 	if !cfg.IsEnabled() {
 		if len(cfg.Options) != 0 {
 			return nil, fmt.Errorf("TrafficMap publisher options require a publisher name")
@@ -83,9 +86,7 @@ func NewTrafficMapPublisher(
 		return nil, fmt.Errorf("TrafficMap publisher %q factory returned publisher named %q",
 			cfg.Name, publisher.Publisher.Name())
 	}
-	if publisher.ResyncInterval < 0 {
-		return nil, fmt.Errorf("TrafficMap publisher %q returned a negative resync interval", cfg.Name)
-	}
+	publisher.ResyncInterval = cfg.ResyncInterval
 	publisher.GlobalOptions = cloneStringMap(publisher.GlobalOptions)
 	return publisher, nil
 }

@@ -148,17 +148,21 @@ routing:
   enabled: true
   publisher:
     name: xds
+    resyncInterval: 1m
     options:
       oncall: ome
       acl: ome-xds-publisher       # optional
       targetTemplate: '{{.EndpointHostname}}'
-      resyncInterval: 1m
       urlTemplate: 'https://xds-automation.mrpc.fbinfra.net/api/v1/clusters/{cluster}/weight'
       requestTimeout: 30s
       tlsCertFile: /var/facebook/x509_identities/server.pem
       tlsKeyFile: /var/facebook/x509_identities/server.pem
       tlsCAFile: /var/facebook/rootcanal/ca.pem
 ```
+
+`publisher.resyncInterval` is the common TrafficMap publisher reconciliation
+backstop. It is not an xDS option and is required whenever routing is enabled.
+The transport-specific settings remain under `publisher.options`.
 
 The target template receives `Namespace`, `Service`, `Cluster`, `Endpoint`,
 `EndpointHost`, `EndpointHostname`, and `EndpointPort`. It must render a bare
@@ -188,6 +192,8 @@ with the old binary:
 
 1. Keep `publisher.name: xds`, deploy the old binary with
    `routing.enabled: false`, and leave its publisher configuration in place.
+   The old binary still expects `resyncInterval` under `publisher.options`;
+   move it to `publisher.resyncInterval` only with the new binary.
 2. Wait until every affected InferenceService has neither the
    `ome.io/placement-endpoint` finalizer nor the
    `routing.ome.io/xds-published-targets` annotation.

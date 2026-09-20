@@ -126,8 +126,9 @@ func resolveMCWiring(mc *controllerconfig.MultiClusterConfig) mcWiring {
 				MaxSamples:              rt.Observer.MaxSamples,
 			},
 			Publisher: placementrouting.PublisherConfig{
-				Name:    rt.Publisher.Name,
-				Options: rt.Publisher.Options,
+				Name:           rt.Publisher.Name,
+				Options:        rt.Publisher.Options,
+				ResyncInterval: rt.Publisher.ResyncIntervalDuration(),
 			},
 			Probe: placementrouting.ProbeConfig{
 				Path:             rt.Probe.Path,

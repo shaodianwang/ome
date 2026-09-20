@@ -39,6 +39,7 @@ func TestNewMultiClusterConfig(t *testing.T) {
 				assert.Equal(t, "", cfg.Endpoint.GlobalGateway)
 				assert.Equal(t, RoutingObserverConfig{}, cfg.Routing.Observer)
 				assert.Equal(t, "", cfg.Routing.Publisher.Name)
+				assert.Equal(t, time.Duration(0), cfg.Routing.Publisher.ResyncIntervalDuration())
 			},
 		},
 		{
@@ -99,6 +100,7 @@ func TestNewMultiClusterConfig(t *testing.T) {
 						},
 						"publisher": {
 							"name": "test-publisher",
+							"resyncInterval": "1m",
 							"options": {"key": "value"}
 						}
 					}
@@ -145,6 +147,7 @@ func TestNewMultiClusterConfig(t *testing.T) {
 				assert.Equal(t, 100, cfg.Routing.Observer.MaxSamples)
 				assert.Equal(t, "Drain", cfg.Routing.Probe.AllFailedPolicy)
 				assert.Equal(t, "test-publisher", cfg.Routing.Publisher.Name)
+				assert.Equal(t, time.Minute, cfg.Routing.Publisher.ResyncIntervalDuration())
 				assert.Equal(t, map[string]string{"key": "value"}, cfg.Routing.Publisher.Options)
 			},
 		},
@@ -228,6 +231,35 @@ func TestMultiClusterConfig_ValidateRejectsMalformedKnobs(t *testing.T) {
 			want: "routing.observer.minPeriod",
 		},
 		{
+			name: "malformed publisher resync interval",
+			cfg: MultiClusterConfig{Routing: RoutingConfig{
+				Publisher: TrafficMapPublisherConfig{ResyncInterval: "every minute"},
+			}},
+			want: "routing.publisher.resyncInterval",
+		},
+		{
+			name: "enabled publisher missing resync interval",
+			cfg: MultiClusterConfig{Routing: RoutingConfig{
+				Enabled: true,
+			}},
+			want: "routing.publisher.resyncInterval",
+		},
+		{
+			name: "enabled publisher zero resync interval",
+			cfg: MultiClusterConfig{Routing: RoutingConfig{
+				Enabled:   true,
+				Publisher: TrafficMapPublisherConfig{ResyncInterval: "0s"},
+			}},
+			want: "routing.publisher.resyncInterval",
+		},
+		{
+			name: "disabled publisher negative resync interval",
+			cfg: MultiClusterConfig{Routing: RoutingConfig{
+				Publisher: TrafficMapPublisherConfig{ResyncInterval: "-1s"},
+			}},
+			want: "routing.publisher.resyncInterval",
+		},
+		{
 			name: "gateway configured without a backend port",
 			cfg:  MultiClusterConfig{Endpoint: EndpointConfig{GlobalGateway: "infra/global-gw"}},
 			want: "endpoint.backendPort",
@@ -280,6 +312,13 @@ func TestMultiClusterConfig_ValidateRejectsMalformedKnobs(t *testing.T) {
 // blocks a legitimate config (or the graceful-degradation path).
 func TestMultiClusterConfig_ValidateAcceptsEmptyAndWellFormed(t *testing.T) {
 	require.NoError(t, MultiClusterConfig{}.Validate())
+	require.NoError(t, MultiClusterConfig{Routing: RoutingConfig{
+		Publisher: TrafficMapPublisherConfig{Name: "custom", ResyncInterval: "0s"},
+	}}.Validate(), "disabled cleanup permits an explicit zero publisher resync")
+	require.NoError(t, MultiClusterConfig{Routing: RoutingConfig{
+		Enabled:   true,
+		Publisher: TrafficMapPublisherConfig{ResyncInterval: "1m"},
+	}}.Validate(), "enabled routing accepts a positive built-in publisher resync")
 	// Endpoint publishing fully off (no gateway, no port) stays valid: that is
 	// the graceful-degradation default, not a half-finished config.
 	require.NoError(t, MultiClusterConfig{Endpoint: EndpointConfig{}}.Validate())

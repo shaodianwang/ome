@@ -216,11 +216,12 @@ data:
           "period": {{ .period | quote }},
           "timeout": {{ .timeout | quote }},
           "maxAge": {{ .maxAge | quote }}
-        }{{- end }}{{- with .Values.ome.multicluster.config.routing.publisher }},
+        }{{- end }},
         "publisher": {
-          "name": {{ .name | quote }},
-          "options": {{ .options | default dict | toJson }}
-        }{{- end }}
+          "name": {{ .Values.ome.multicluster.config.routing.publisher.name | default "" | quote }},
+          "resyncInterval": {{ .Values.ome.multicluster.config.routing.publisher.resyncInterval | default "" | quote }},
+          "options": {{ .Values.ome.multicluster.config.routing.publisher.options | default dict | toJson }}
+        }
       }
     }
 {{- if .Values.ome.autoscalerPolicy.enabled }}

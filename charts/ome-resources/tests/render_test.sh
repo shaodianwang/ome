@@ -548,12 +548,18 @@ routing_capacity_checksum="$(grep -m1 'checksum/config:' <<<"${routing_capacity_
 [[ "${default_controller_checksum}" != "${routing_capacity_checksum}" ]] ||
   fail "enabling routing capacity did not roll the controller checksum"
 
-if grep -Fq '"publisher"' <<<"${controller_config}"; then
-  fail "TrafficMap publisher was rendered when disabled"
-fi
+for expected in \
+  '"publisher": {' \
+  '"name": ""' \
+  '"resyncInterval": "1m"' \
+  '"options": {}'; do
+  grep -Fq "${expected}" <<<"${controller_config}" ||
+    fail "default TrafficMap publisher setting was not rendered: ${expected}"
+done
 
 routing_publisher_args=(
   --set-string ome.multicluster.config.routing.publisher.name=test-publisher
+  --set-string ome.multicluster.config.routing.publisher.resyncInterval=30s
   --set-json 'ome.multicluster.config.routing.publisher.options={"key":"value"}'
 )
 routing_publisher_config="$("${helm_bin}" template ome-resources "${chart_dir}" \
@@ -562,6 +568,7 @@ routing_publisher_config="$("${helm_bin}" template ome-resources "${chart_dir}" 
   --show-only templates/ome-controller/configmap.yaml)"
 for expected in \
   '"name": "test-publisher"' \
+  '"resyncInterval": "30s"' \
   '"key":"value"'; do
   grep -Fq "${expected}" <<<"${routing_publisher_config}" ||
     fail "TrafficMap publisher setting was not rendered: ${expected}"

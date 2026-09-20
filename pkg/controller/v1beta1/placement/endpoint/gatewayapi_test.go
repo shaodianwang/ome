@@ -13,9 +13,11 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	gatewayapiv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -192,8 +194,7 @@ func TestBuildHTTPRoute_BareGatewayName(t *testing.T) {
 	route := p.buildHTTPRoute(testISVC(), oneHome("h", "c", "b"))
 
 	pr := route.Spec.ParentRefs[0]
-	require.NotNil(t, pr.Namespace)
-	assert.Equal(t, "", string(*pr.Namespace), "bare gateway name yields empty (route-local) namespace")
+	assert.Nil(t, pr.Namespace, "bare gateway name uses the route-local namespace default")
 	assert.Equal(t, "global-gw", string(pr.Name))
 }
 
@@ -208,6 +209,29 @@ func (c routeUpdateFailClient) Update(ctx context.Context, obj client.Object, op
 		return errors.New("route update failed")
 	}
 	return c.Client.Update(ctx, obj, opts...)
+}
+
+// blindGatewayCacheClient simulates a controller-runtime cache that has not
+// observed resources which are already visible through the direct API reader.
+type blindGatewayCacheClient struct {
+	client.Client
+}
+
+func (c blindGatewayCacheClient) Get(
+	_ context.Context,
+	key client.ObjectKey,
+	_ client.Object,
+	_ ...client.GetOption,
+) error {
+	return apierrors.NewNotFound(schema.GroupResource{Resource: "objects"}, key.Name)
+}
+
+func (c blindGatewayCacheClient) List(
+	_ context.Context,
+	_ client.ObjectList,
+	_ ...client.ListOption,
+) error {
+	return nil
 }
 
 func TestPublish_SingleHomeCreatesResources(t *testing.T) {
@@ -226,6 +250,124 @@ func TestPublish_SingleHomeCreatesResources(t *testing.T) {
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "svc-global", Namespace: "prod"}, route))
 	assert.Equal(t, gatewayapiv1.Hostname("svc.prod.global.example"), route.Spec.Hostnames[0])
 	require.Len(t, route.Spec.Rules[0].BackendRefs, 1)
+}
+
+func TestPublish_LegacyAdoptsUnlabeledResources(t *testing.T) {
+	s := pubScheme(t)
+	isvc := testISVC()
+	target := oneHome("svc.prod.global.example", "cluster-a", "svc.prod.cloud-a.example")
+	p := NewGatewayAPIPublisher(nil, baseConfig())
+	service := p.buildExternalNameService(isvc, p.serviceName(isvc, "cluster-a"), target.Homes[0])
+	service.Labels = nil
+	service.Spec.ExternalName = "old.example"
+	route := p.buildHTTPRoute(isvc, target)
+	route.Labels = nil
+	route.Spec.Hostnames = []gatewayapiv1.Hostname{"old.example"}
+	c := fakeclient.NewClientBuilder().WithScheme(s).WithObjects(service, route).Build()
+	p = NewGatewayAPIPublisher(c, baseConfig())
+
+	require.NoError(t, p.Publish(context.Background(), isvc, target))
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(service), service))
+	assert.Equal(t, target.Homes[0].BackendHost, service.Spec.ExternalName)
+	assert.Equal(t, ManagedByValue, service.Labels[ManagedByLabel])
+	assert.Equal(t, isvc.Name, service.Labels[PlacementEndpointISVCLabel])
+	assert.Equal(t, isvc.Namespace, service.Labels[PlacementEndpointISVCNamespaceLabel])
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(route), route))
+	assert.Equal(t, []gatewayapiv1.Hostname{gatewayapiv1.Hostname(target.GlobalHost)}, route.Spec.Hostnames)
+	assert.Equal(t, ManagedByValue, route.Labels[ManagedByLabel])
+}
+
+func TestPublish_LegacyRejectsPartialSourceLabels(t *testing.T) {
+	s := pubScheme(t)
+	isvc := testISVC()
+	target := oneHome("svc.prod.global.example", "cluster-a", "svc.prod.cloud-a.example")
+	p := NewGatewayAPIPublisher(nil, baseConfig())
+	service := p.buildExternalNameService(isvc, p.serviceName(isvc, "cluster-a"), target.Homes[0])
+	service.Labels = map[string]string{PlacementEndpointISVCLabel: isvc.Name}
+	service.Spec.ExternalName = "old.example"
+	c := fakeclient.NewClientBuilder().WithScheme(s).WithObjects(service).Build()
+	p = NewGatewayAPIPublisher(c, baseConfig())
+
+	err := p.Publish(context.Background(), isvc, target)
+	require.ErrorContains(t, err, "belongs to another InferenceService")
+	live := &corev1.Service{}
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(service), live))
+	assert.Equal(t, "old.example", live.Spec.ExternalName)
+	assert.NotContains(t, live.Labels, PlacementEndpointISVCNamespaceLabel)
+	assert.True(t, apierrors.IsNotFound(c.Get(context.Background(), types.NamespacedName{
+		Namespace: p.routeNamespace(isvc), Name: p.routeName(isvc),
+	}, &gatewayapiv1.HTTPRoute{})))
+}
+
+func TestPublish_StrictOwnershipPreflightsEveryDesiredResource(t *testing.T) {
+	for _, resourceKind := range []string{"HTTPRoute", "Service", "EndpointSlice", "BackendTLSPolicy"} {
+		t.Run(resourceKind, func(t *testing.T) {
+			s := pubScheme(t)
+			isvc := testISVC()
+			target := oneHome("svc.prod.global.example", "cluster-a", "svc.prod.cloud-a.example")
+			cfg := baseConfig()
+			addresses := map[string][]BackendAddress{
+				"cluster-a": {{Address: "192.0.2.10", Type: discoveryv1.AddressTypeIPv4}},
+			}
+			if resourceKind == "EndpointSlice" || resourceKind == "BackendTLSPolicy" {
+				cfg = gatewayBackendConfig()
+			}
+			builder := NewGatewayAPIPublisher(nil, cfg)
+			serviceName := builder.serviceName(isvc, target.Homes[0].Cluster)
+			var collision client.Object
+			switch resourceKind {
+			case "HTTPRoute":
+				collision = builder.buildHTTPRoute(isvc, target)
+			case "Service":
+				collision = builder.buildExternalNameService(isvc, serviceName, target.Homes[0])
+			case "EndpointSlice":
+				slices, err := builder.buildEndpointSlices(isvc, serviceName, target.Homes[0], addresses["cluster-a"])
+				require.NoError(t, err)
+				require.Len(t, slices, 1)
+				collision = slices[0]
+			case "BackendTLSPolicy":
+				collision = builder.buildBackendTLSPolicy(isvc, serviceName, target.Homes[0])
+			}
+			collision.SetLabels(nil)
+			collisionKey := client.ObjectKeyFromObject(collision)
+			c := fakeclient.NewClientBuilder().WithScheme(s).WithObjects(collision).Build()
+			p := NewGatewayAPIPublisher(
+				c,
+				cfg,
+				WithBackendAddressResolver(staticBackendAddressResolver(addresses)),
+				withStrictResourceOwnership(),
+			)
+
+			err := p.Publish(context.Background(), isvc, target)
+			require.ErrorContains(t, err, "belongs to another source")
+			if resourceKind != "Service" {
+				assert.True(t, apierrors.IsNotFound(c.Get(context.Background(), types.NamespacedName{
+					Namespace: p.routeNamespace(isvc), Name: p.serviceName(isvc, target.Homes[0].Cluster),
+				}, &corev1.Service{})), "preflight must not create a backend Service")
+			}
+			if resourceKind != "HTTPRoute" {
+				assert.True(t, apierrors.IsNotFound(c.Get(context.Background(), types.NamespacedName{
+					Namespace: p.routeNamespace(isvc), Name: p.routeName(isvc),
+				}, &gatewayapiv1.HTTPRoute{})), "preflight must not create an HTTPRoute")
+			}
+			live := collision.DeepCopyObject().(client.Object)
+			live.SetResourceVersion("")
+			require.NoError(t, c.Get(context.Background(), collisionKey, live))
+			assert.Empty(t, live.GetLabels(), "the colliding object must not be adopted")
+		})
+	}
+}
+
+func TestGatewayPublisherRequiresClientAndAPIReader(t *testing.T) {
+	target := oneHome("svc.prod.global.example", "cluster-a", "svc.prod.cloud-a.example")
+	err := NewGatewayAPIPublisher(nil, baseConfig()).Publish(context.Background(), testISVC(), target)
+	require.ErrorContains(t, err, "client is not configured")
+
+	s := pubScheme(t)
+	c := fakeclient.NewClientBuilder().WithScheme(s).Build()
+	p := NewGatewayAPIPublisher(c, baseConfig(), withGatewayAPIReader(nil))
+	err = p.Publish(context.Background(), testISVC(), target)
+	require.ErrorContains(t, err, "API reader is not configured")
 }
 
 func TestPublish_MultiHomeCreatesPerHomeServices(t *testing.T) {
@@ -503,6 +645,214 @@ func TestUnpublish_MissingIsNoOp(t *testing.T) {
 	c := fakeclient.NewClientBuilder().WithScheme(s).Build()
 	p := NewGatewayAPIPublisher(c, baseConfig())
 	require.NoError(t, p.Unpublish(context.Background(), testISVC()))
+}
+
+func TestZeroClaimedHTTPRouteZerosEveryBackend(t *testing.T) {
+	s := pubScheme(t)
+	c := fakeclient.NewClientBuilder().WithScheme(s).Build()
+	p := NewGatewayAPIPublisher(c, baseConfig())
+	isvc := testISVC()
+	require.NoError(t, p.Publish(context.Background(), isvc, Target{GlobalHost: "h", Homes: []Home{
+		{Cluster: "cluster-a", BackendHost: "a.example", Weight: 3},
+		{Cluster: "cluster-b", BackendHost: "b.example", Weight: 1},
+	}}))
+
+	routeKey := types.NamespacedName{Namespace: "prod", Name: "svc-global"}
+	sourceKey := types.NamespacedName{Namespace: "prod", Name: "svc"}
+	route := &gatewayapiv1.HTTPRoute{}
+	require.NoError(t, c.Get(context.Background(), routeKey, route))
+	route.Spec.Rules = append(route.Spec.Rules, gatewayapiv1.HTTPRouteRule{
+		BackendRefs: []gatewayapiv1.HTTPBackendRef{{
+			BackendRef: gatewayapiv1.BackendRef{Weight: nil},
+		}},
+	})
+	require.NoError(t, c.Update(context.Background(), route))
+
+	require.NoError(t, p.zeroClaimedHTTPRoute(context.Background(), routeKey, sourceKey))
+	require.NoError(t, p.zeroClaimedHTTPRoute(context.Background(), routeKey, sourceKey), "an already drained route is a no-op")
+	require.NoError(t, c.Get(context.Background(), routeKey, route))
+	for _, rule := range route.Spec.Rules {
+		for _, backend := range rule.BackendRefs {
+			require.NotNil(t, backend.Weight)
+			assert.Zero(t, *backend.Weight)
+		}
+	}
+}
+
+func TestClaimedHTTPRouteHelpersRequireExactLabels(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		labels map[string]string
+	}{
+		{name: "unlabeled"},
+		{
+			name: "wrong managed by",
+			labels: map[string]string{
+				ManagedByLabel:                      "another-controller",
+				PlacementEndpointISVCLabel:          "svc",
+				PlacementEndpointISVCNamespaceLabel: "prod",
+			},
+		},
+		{
+			name:   "missing source",
+			labels: map[string]string{ManagedByLabel: ManagedByValue},
+		},
+		{
+			name: "foreign source",
+			labels: map[string]string{
+				ManagedByLabel:                      ManagedByValue,
+				PlacementEndpointISVCLabel:          "other",
+				PlacementEndpointISVCNamespaceLabel: "prod",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := pubScheme(t)
+			routeKey := types.NamespacedName{Namespace: "routes", Name: "claimed"}
+			sourceKey := types.NamespacedName{Namespace: "prod", Name: "svc"}
+			route := &gatewayapiv1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{Namespace: routeKey.Namespace, Name: routeKey.Name, Labels: tc.labels},
+				Spec: gatewayapiv1.HTTPRouteSpec{Rules: []gatewayapiv1.HTTPRouteRule{{
+					BackendRefs: []gatewayapiv1.HTTPBackendRef{{
+						BackendRef: gatewayapiv1.BackendRef{Weight: ptr.To(int32(7))},
+					}},
+				}}},
+			}
+			c := fakeclient.NewClientBuilder().WithScheme(s).WithObjects(route).Build()
+			p := NewGatewayAPIPublisher(c, baseConfig())
+
+			require.Error(t, p.zeroClaimedHTTPRoute(context.Background(), routeKey, sourceKey))
+			require.Error(t, p.deleteClaimedHTTPRoute(context.Background(), routeKey, sourceKey))
+			live := &gatewayapiv1.HTTPRoute{}
+			require.NoError(t, c.Get(context.Background(), routeKey, live))
+			require.NotNil(t, live.Spec.Rules[0].BackendRefs[0].Weight)
+			assert.Equal(t, int32(7), *live.Spec.Rules[0].BackendRefs[0].Weight)
+		})
+	}
+}
+
+func TestDeleteClaimedHTTPRouteIsIdempotent(t *testing.T) {
+	s := pubScheme(t)
+	isvc := testISVC()
+	p := NewGatewayAPIPublisher(nil, baseConfig())
+	route := p.buildHTTPRoute(isvc, oneHome("h", "cluster-a", "a.example"))
+	c := fakeclient.NewClientBuilder().WithScheme(s).WithObjects(route).Build()
+	p = NewGatewayAPIPublisher(c, baseConfig())
+	routeKey := types.NamespacedName{Namespace: route.Namespace, Name: route.Name}
+	sourceKey := types.NamespacedName{Namespace: isvc.Namespace, Name: isvc.Name}
+
+	require.NoError(t, p.deleteClaimedHTTPRoute(context.Background(), routeKey, sourceKey))
+	require.NoError(t, p.deleteClaimedHTTPRoute(context.Background(), routeKey, sourceKey))
+	err := c.Get(context.Background(), routeKey, &gatewayapiv1.HTTPRoute{})
+	assert.True(t, apierrors.IsNotFound(err))
+}
+
+func TestDeleteSourceResourcesUsesExactNamespaceAndLabels(t *testing.T) {
+	s := pubScheme(t)
+	sourceKey := types.NamespacedName{Namespace: "prod", Name: "svc"}
+	ownedLabels := map[string]string{
+		ManagedByLabel:                      ManagedByValue,
+		PlacementEndpointISVCLabel:          sourceKey.Name,
+		PlacementEndpointISVCNamespaceLabel: sourceKey.Namespace,
+	}
+	foreignLabels := map[string]string{
+		ManagedByLabel:                      ManagedByValue,
+		PlacementEndpointISVCLabel:          "other",
+		PlacementEndpointISVCNamespaceLabel: sourceKey.Namespace,
+	}
+	objects := []client.Object{
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: "routes", Name: "owned-service", Labels: ownedLabels}},
+		&discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{Namespace: "routes", Name: "owned-slice", Labels: ownedLabels}},
+		&gatewayapiv1.BackendTLSPolicy{ObjectMeta: metav1.ObjectMeta{Namespace: "routes", Name: "owned-policy", Labels: ownedLabels}},
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: "routes", Name: "foreign-service", Labels: foreignLabels}},
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: "elsewhere", Name: "owned-elsewhere", Labels: ownedLabels}},
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: "routes", Name: "unlabeled-service"}},
+	}
+	c := fakeclient.NewClientBuilder().WithScheme(s).WithObjects(objects...).Build()
+	p := NewGatewayAPIPublisher(c, baseConfig())
+
+	require.NoError(t, p.deleteSourceResources(context.Background(), "routes", sourceKey))
+	for _, key := range []types.NamespacedName{
+		{Namespace: "routes", Name: "owned-service"},
+		{Namespace: "routes", Name: "owned-slice"},
+		{Namespace: "routes", Name: "owned-policy"},
+	} {
+		var obj client.Object
+		switch key.Name {
+		case "owned-slice":
+			obj = &discoveryv1.EndpointSlice{}
+		case "owned-policy":
+			obj = &gatewayapiv1.BackendTLSPolicy{}
+		default:
+			obj = &corev1.Service{}
+		}
+		err := c.Get(context.Background(), key, obj)
+		assert.True(t, apierrors.IsNotFound(err), "%s deleted", key)
+	}
+	for _, key := range []types.NamespacedName{
+		{Namespace: "routes", Name: "foreign-service"},
+		{Namespace: "elsewhere", Name: "owned-elsewhere"},
+		{Namespace: "routes", Name: "unlabeled-service"},
+	} {
+		require.NoError(t, c.Get(context.Background(), key, &corev1.Service{}), "%s retained", key)
+	}
+}
+
+func TestGatewayCleanupUsesLiveAPIReader(t *testing.T) {
+	s := pubScheme(t)
+	sourceKey := types.NamespacedName{Namespace: "prod", Name: "svc"}
+	routeKey := types.NamespacedName{Namespace: sourceKey.Namespace, Name: "svc-global"}
+	labels := func() map[string]string {
+		return map[string]string{
+			ManagedByLabel:                      ManagedByValue,
+			PlacementEndpointISVCLabel:          sourceKey.Name,
+			PlacementEndpointISVCNamespaceLabel: sourceKey.Namespace,
+		}
+	}
+	objects := []client.Object{
+		&gatewayapiv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{
+			Namespace: routeKey.Namespace, Name: routeKey.Name, Labels: labels(),
+		}},
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{
+			Namespace: routeKey.Namespace, Name: "owned-service", Labels: labels(),
+		}},
+		&discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{
+			Namespace: routeKey.Namespace, Name: "owned-slice", Labels: labels(),
+		}},
+		&gatewayapiv1.BackendTLSPolicy{ObjectMeta: metav1.ObjectMeta{
+			Namespace: routeKey.Namespace, Name: "owned-policy", Labels: labels(),
+		}},
+	}
+	live := fakeclient.NewClientBuilder().WithScheme(s).WithObjects(objects...).Build()
+	stale := blindGatewayCacheClient{Client: live}
+	p := NewGatewayAPIPublisher(
+		stale,
+		baseConfig(),
+		withGatewayAPIReader(live),
+		withStrictResourceOwnership(),
+	)
+
+	require.NoError(t, p.deleteClaimedHTTPRoute(context.Background(), routeKey, sourceKey))
+	require.NoError(t, p.deleteSourceResources(context.Background(), routeKey.Namespace, sourceKey))
+	for _, object := range objects {
+		key := client.ObjectKeyFromObject(object)
+		err := live.Get(context.Background(), key, object.DeepCopyObject().(client.Object))
+		assert.True(t, apierrors.IsNotFound(err), "%T %s deleted", object, key)
+	}
+
+	foreignRoute := &gatewayapiv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{
+		Namespace: routeKey.Namespace, Name: routeKey.Name,
+	}}
+	require.NoError(t, live.Create(context.Background(), foreignRoute))
+	isvc := testISVC()
+	isvc.Namespace = sourceKey.Namespace
+	isvc.Name = sourceKey.Name
+	err := p.Publish(context.Background(), isvc,
+		oneHome("svc.prod.global.example", "cluster-a", "svc.prod.cloud-a.example"))
+	require.ErrorContains(t, err, "belongs to another source")
+	assert.True(t, apierrors.IsNotFound(live.Get(context.Background(), types.NamespacedName{
+		Namespace: routeKey.Namespace, Name: p.serviceName(isvc, "cluster-a"),
+	}, &corev1.Service{})), "live preflight must reject the route before any write")
 }
 
 func TestBuildHTTPRoute_WeightedByReadyReplicas(t *testing.T) {

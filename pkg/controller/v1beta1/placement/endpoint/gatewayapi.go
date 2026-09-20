@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -48,8 +49,10 @@ const (
 // Teardown removes the route and every per-home backing resource.
 type GatewayAPIPublisher struct {
 	client          client.Client
+	apiReader       client.Reader
 	config          Config
 	addressResolver BackendAddressResolver
+	strictOwnership bool
 }
 
 var _ EndpointPublisher = (*GatewayAPIPublisher)(nil)
@@ -63,11 +66,23 @@ func WithBackendAddressResolver(resolver BackendAddressResolver) GatewayAPIPubli
 	return func(p *GatewayAPIPublisher) { p.addressResolver = resolver }
 }
 
+// withStrictResourceOwnership requires complete publication labels on every
+// existing resource. TrafficMap claims use this mode to reject collisions.
+func withStrictResourceOwnership() GatewayAPIPublisherOption {
+	return func(p *GatewayAPIPublisher) { p.strictOwnership = true }
+}
+
+// withGatewayAPIReader supplies the uncached reader used for collision checks
+// and cleanup discovery.
+func withGatewayAPIReader(apiReader client.Reader) GatewayAPIPublisherOption {
+	return func(p *GatewayAPIPublisher) { p.apiReader = apiReader }
+}
+
 // NewGatewayAPIPublisher constructs the Gateway API backend. The client is the
 // control-plane cluster client (the global gateway and the published resources
 // live there).
 func NewGatewayAPIPublisher(c client.Client, cfg Config, opts ...GatewayAPIPublisherOption) *GatewayAPIPublisher {
-	p := &GatewayAPIPublisher{client: c, config: cfg}
+	p := &GatewayAPIPublisher{client: c, apiReader: c, config: cfg}
 	for _, opt := range opts {
 		opt(p)
 	}
@@ -75,6 +90,19 @@ func NewGatewayAPIPublisher(c client.Client, cfg Config, opts ...GatewayAPIPubli
 }
 
 func (p *GatewayAPIPublisher) Name() string { return "GatewayAPI" }
+
+func (p *GatewayAPIPublisher) validateIO() error {
+	if p == nil {
+		return errors.New("Gateway API publisher is not configured")
+	}
+	if p.client == nil {
+		return errors.New("Gateway API publisher client is not configured")
+	}
+	if p.apiReader == nil {
+		return errors.New("Gateway API publisher API reader is not configured")
+	}
+	return nil
+}
 
 // resourceBaseName is the stable base every published resource name is built
 // from. A shared RouteNamespace co-locates resources from many source
@@ -123,9 +151,17 @@ func (p *GatewayAPIPublisher) routeNamespace(isvc *v1beta1.InferenceService) str
 // Publish reconciles the per-home backing resources and the HTTPRoute so the
 // global host load-balances across exactly target.Homes.
 func (p *GatewayAPIPublisher) Publish(ctx context.Context, isvc *v1beta1.InferenceService, target Target) error {
+	if err := p.validateIO(); err != nil {
+		return err
+	}
 	addresses, err := p.resolveBackendAddresses(ctx, isvc, target)
 	if err != nil {
 		return err
+	}
+	if p.strictOwnership {
+		if err := p.preflightResourceOwnership(ctx, isvc, target, addresses); err != nil {
+			return err
+		}
 	}
 	desired, err := p.ensureServices(ctx, isvc, target)
 	if err != nil {
@@ -148,12 +184,16 @@ func (p *GatewayAPIPublisher) Publish(ctx context.Context, isvc *v1beta1.Inferen
 // owns for the ISVC. Missing resources are tolerated so a double-teardown
 // (finalizer + a re-queued unplaced pass) is a no-op.
 func (p *GatewayAPIPublisher) Unpublish(ctx context.Context, isvc *v1beta1.InferenceService) error {
+	if err := p.validateIO(); err != nil {
+		return err
+	}
 	ns := p.routeNamespace(isvc)
+	sourceKey := types.NamespacedName{Namespace: isvc.Namespace, Name: isvc.Name}
 	var errs []error
 	// Delete the route only if it is ours. A shared RouteNamespace holds routes
 	// for many sources, so a name match alone must not authorize a delete.
 	existing := &gatewayapiv1.HTTPRoute{}
-	switch err := p.client.Get(ctx, types.NamespacedName{Namespace: ns, Name: p.routeName(isvc)}, existing); {
+	switch err := p.apiReader.Get(ctx, types.NamespacedName{Namespace: ns, Name: p.routeName(isvc)}, existing); {
 	case apierrors.IsNotFound(err):
 		// nothing to remove
 	case err != nil:
@@ -165,10 +205,111 @@ func (p *GatewayAPIPublisher) Unpublish(ctx context.Context, isvc *v1beta1.Infer
 			errs = append(errs, fmt.Errorf("delete global HTTPRoute %s/%s: %w", ns, p.routeName(isvc), err))
 		}
 	}
-	if err := p.deleteGatewayBackendResources(ctx, isvc); err != nil {
+	if err := p.deleteSourceResources(ctx, ns, sourceKey); err != nil {
 		errs = append(errs, err)
 	}
-	owned, err := p.ownedServices(ctx, isvc)
+	return errors.Join(errs...)
+}
+
+// zeroClaimedHTTPRoute sets every backend weight on an explicitly claimed
+// route to zero. Exact publication labels prevent a stale claim from mutating
+// an unrelated route at the same key.
+func (p *GatewayAPIPublisher) zeroClaimedHTTPRoute(
+	ctx context.Context,
+	routeKey types.NamespacedName,
+	sourceKey types.NamespacedName,
+) error {
+	if err := p.validateIO(); err != nil {
+		return err
+	}
+	route, err := p.getClaimedHTTPRoute(ctx, routeKey, sourceKey)
+	if err != nil || route == nil {
+		return err
+	}
+	changed := false
+	for ruleIndex := range route.Spec.Rules {
+		for backendIndex := range route.Spec.Rules[ruleIndex].BackendRefs {
+			weight := route.Spec.Rules[ruleIndex].BackendRefs[backendIndex].Weight
+			if weight != nil && *weight == 0 {
+				continue
+			}
+			route.Spec.Rules[ruleIndex].BackendRefs[backendIndex].Weight = ptr.To(int32(0))
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	if err := p.client.Update(ctx, route); err != nil {
+		return fmt.Errorf("zero claimed HTTPRoute %s/%s backend weights: %w", routeKey.Namespace, routeKey.Name, err)
+	}
+	return nil
+}
+
+// deleteClaimedHTTPRoute deletes an explicitly claimed route when its complete
+// publication labels identify the expected source. Missing routes are already
+// clean.
+func (p *GatewayAPIPublisher) deleteClaimedHTTPRoute(
+	ctx context.Context,
+	routeKey types.NamespacedName,
+	sourceKey types.NamespacedName,
+) error {
+	if err := p.validateIO(); err != nil {
+		return err
+	}
+	route, err := p.getClaimedHTTPRoute(ctx, routeKey, sourceKey)
+	if err != nil || route == nil {
+		return err
+	}
+	if err := p.client.Delete(ctx, route); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete claimed HTTPRoute %s/%s: %w", routeKey.Namespace, routeKey.Name, err)
+	}
+	return nil
+}
+
+func (p *GatewayAPIPublisher) getClaimedHTTPRoute(
+	ctx context.Context,
+	routeKey types.NamespacedName,
+	sourceKey types.NamespacedName,
+) (*gatewayapiv1.HTTPRoute, error) {
+	route := &gatewayapiv1.HTTPRoute{}
+	err := p.apiReader.Get(ctx, routeKey, route)
+	if apierrors.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read claimed HTTPRoute %s/%s: %w", routeKey.Namespace, routeKey.Name, err)
+	}
+	labels := route.GetLabels()
+	managedBy, hasManagedBy := labels[ManagedByLabel]
+	sourceName, hasSourceName := labels[PlacementEndpointISVCLabel]
+	sourceNamespace, hasSourceNamespace := labels[PlacementEndpointISVCNamespaceLabel]
+	if !hasManagedBy || managedBy != ManagedByValue ||
+		!hasSourceName || sourceName != sourceKey.Name ||
+		!hasSourceNamespace || sourceNamespace != sourceKey.Namespace {
+		return nil, fmt.Errorf(
+			"claimed HTTPRoute %s/%s is not owned by source %s/%s",
+			routeKey.Namespace, routeKey.Name, sourceKey.Namespace, sourceKey.Name,
+		)
+	}
+	return route, nil
+}
+
+// deleteSourceResources removes subordinate resources selected by the complete
+// publication label set for a source within one route namespace.
+func (p *GatewayAPIPublisher) deleteSourceResources(
+	ctx context.Context,
+	routeNamespace string,
+	sourceKey types.NamespacedName,
+) error {
+	if err := p.validateIO(); err != nil {
+		return err
+	}
+	var errs []error
+	if err := p.deleteGatewayBackendResourcesForSource(ctx, routeNamespace, sourceKey); err != nil {
+		errs = append(errs, err)
+	}
+	owned, err := p.sourceServices(ctx, routeNamespace, sourceKey)
 	if err != nil {
 		errs = append(errs, err)
 		return errors.Join(errs...)
@@ -187,14 +328,26 @@ func (p *GatewayAPIPublisher) Unpublish(ctx context.Context, isvc *v1beta1.Infer
 // stale-home GC find them all regardless of how many homes there are, and never
 // reach a same-named ISVC from another namespace.
 func (p *GatewayAPIPublisher) ownedServices(ctx context.Context, isvc *v1beta1.InferenceService) ([]corev1.Service, error) {
+	return p.sourceServices(
+		ctx,
+		p.routeNamespace(isvc),
+		types.NamespacedName{Namespace: isvc.Namespace, Name: isvc.Name},
+	)
+}
+
+func (p *GatewayAPIPublisher) sourceServices(
+	ctx context.Context,
+	routeNamespace string,
+	sourceKey types.NamespacedName,
+) ([]corev1.Service, error) {
 	list := &corev1.ServiceList{}
-	if err := p.client.List(ctx, list, client.InNamespace(p.routeNamespace(isvc)),
+	if err := p.apiReader.List(ctx, list, client.InNamespace(routeNamespace),
 		client.MatchingLabels{
 			ManagedByLabel:                      ManagedByValue,
-			PlacementEndpointISVCLabel:          isvc.Name,
-			PlacementEndpointISVCNamespaceLabel: isvc.Namespace,
+			PlacementEndpointISVCLabel:          sourceKey.Name,
+			PlacementEndpointISVCNamespaceLabel: sourceKey.Namespace,
 		}); err != nil {
-		return nil, fmt.Errorf("list global backend Services for %s/%s: %w", isvc.Namespace, isvc.Name, err)
+		return nil, fmt.Errorf("list global backend Services for %s/%s: %w", sourceKey.Namespace, sourceKey.Name, err)
 	}
 	return list.Items, nil
 }
@@ -247,7 +400,7 @@ func (p *GatewayAPIPublisher) pruneServices(ctx context.Context, isvc *v1beta1.I
 func (p *GatewayAPIPublisher) applyService(ctx context.Context, isvc *v1beta1.InferenceService, name string, home Home) error {
 	desired := p.buildExternalNameService(isvc, name, home)
 	existing := &corev1.Service{}
-	err := p.client.Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, existing)
+	err := p.apiReader.Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, existing)
 	if apierrors.IsNotFound(err) {
 		if err := p.client.Create(ctx, desired); err != nil {
 			return fmt.Errorf("create global backend Service %s/%s: %w", desired.Namespace, desired.Name, err)
@@ -275,26 +428,99 @@ func (p *GatewayAPIPublisher) applyService(ctx context.Context, isvc *v1beta1.In
 	return nil
 }
 
-// ownsResource reports whether a published object carries this source's owner
-// labels. Objects published before those labels existed carry neither, and are
-// treated as ours so an upgrade still adopts and cleans them up.
+// ownsResource checks publication ownership. Compatibility mode may adopt an
+// object only when both source labels are absent; strict mode requires complete
+// publisher and source labels.
 func (p *GatewayAPIPublisher) ownsResource(obj metav1.Object, isvc *v1beta1.InferenceService) bool {
 	l := obj.GetLabels()
+	managedBy, hasManagedBy := l[ManagedByLabel]
 	name, hasName := l[PlacementEndpointISVCLabel]
 	ns, hasNS := l[PlacementEndpointISVCNamespaceLabel]
+	if p.strictOwnership {
+		return hasManagedBy && managedBy == ManagedByValue &&
+			hasName && name == isvc.Name && hasNS && ns == isvc.Namespace
+	}
 	if !hasName && !hasNS {
 		return true
 	}
-	if hasName && name != isvc.Name {
-		return false
+	return hasName && name == isvc.Name && hasNS && ns == isvc.Namespace
+}
+
+// preflightResourceOwnership checks every exact object the publish may create
+// or update before any write. Per-object update checks remain authoritative if
+// another actor creates or replaces an object after this read-only pass.
+func (p *GatewayAPIPublisher) preflightResourceOwnership(
+	ctx context.Context,
+	isvc *v1beta1.InferenceService,
+	target Target,
+	addresses map[string][]BackendAddress,
+) error {
+	route := p.buildHTTPRoute(isvc, target)
+	if err := p.requireOwnedOrAbsent(ctx, route, "HTTPRoute", isvc); err != nil {
+		return err
 	}
-	return !hasNS || ns == isvc.Namespace
+
+	homes := append([]Home(nil), target.Homes...)
+	sort.Slice(homes, func(i, j int) bool { return homes[i].Cluster < homes[j].Cluster })
+	for _, home := range homes {
+		serviceName := p.serviceName(isvc, home.Cluster)
+		service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{
+			Namespace: p.routeNamespace(isvc),
+			Name:      serviceName,
+		}}
+		if err := p.requireOwnedOrAbsent(ctx, service, "backend Service", isvc); err != nil {
+			return err
+		}
+		if p.config.GatewayBackend.EndpointSlices.Enabled {
+			slices, err := p.buildEndpointSlices(isvc, serviceName, home, addresses[home.Cluster])
+			if err != nil {
+				return err
+			}
+			for _, endpointSlice := range slices {
+				probe := &discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{
+					Namespace: endpointSlice.Namespace,
+					Name:      endpointSlice.Name,
+				}}
+				if err := p.requireOwnedOrAbsent(ctx, probe, "backend EndpointSlice", isvc); err != nil {
+					return err
+				}
+			}
+		}
+		if p.config.GatewayBackend.TLS.Enabled {
+			policy := &gatewayapiv1.BackendTLSPolicy{ObjectMeta: metav1.ObjectMeta{
+				Namespace: p.routeNamespace(isvc),
+				Name:      serviceName,
+			}}
+			if err := p.requireOwnedOrAbsent(ctx, policy, "BackendTLSPolicy", isvc); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (p *GatewayAPIPublisher) requireOwnedOrAbsent(
+	ctx context.Context,
+	object client.Object,
+	kind string,
+	isvc *v1beta1.InferenceService,
+) error {
+	key := client.ObjectKeyFromObject(object)
+	if err := p.apiReader.Get(ctx, key, object); apierrors.IsNotFound(err) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("read global %s %s/%s: %w", kind, key.Namespace, key.Name, err)
+	}
+	if !p.ownsResource(object, isvc) {
+		return fmt.Errorf("global %s %s/%s belongs to another source", kind, key.Namespace, key.Name)
+	}
+	return nil
 }
 
 func (p *GatewayAPIPublisher) applyRoute(ctx context.Context, isvc *v1beta1.InferenceService, target Target) error {
 	desired := p.buildHTTPRoute(isvc, target)
 	existing := &gatewayapiv1.HTTPRoute{}
-	err := p.client.Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, existing)
+	err := p.apiReader.Get(ctx, types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}, existing)
 	if apierrors.IsNotFound(err) {
 		if err := p.client.Create(ctx, desired); err != nil {
 			return fmt.Errorf("create global HTTPRoute %s/%s: %w", desired.Namespace, desired.Name, err)
@@ -348,6 +574,14 @@ func (p *GatewayAPIPublisher) buildHTTPRoute(isvc *v1beta1.InferenceService, tar
 	gwNS, gwName := splitGatewayRef(p.config.GlobalGateway)
 	backendNS := p.routeNamespace(isvc)
 	port := gatewayapiv1.PortNumber(p.config.BackendPort)
+	parentRef := gatewayapiv1.ParentReference{
+		Group: (*gatewayapiv1.Group)(&gatewayapiv1.GroupVersion.Group),
+		Kind:  (*gatewayapiv1.Kind)(ptr.To(constants.GatewayKind)),
+		Name:  gatewayapiv1.ObjectName(gwName),
+	}
+	if gwNS != "" {
+		parentRef.Namespace = ptr.To(gatewayapiv1.Namespace(gwNS))
+	}
 
 	homes := append([]Home(nil), target.Homes...)
 	sort.Slice(homes, func(i, j int) bool { return homes[i].Cluster < homes[j].Cluster })
@@ -399,12 +633,7 @@ func (p *GatewayAPIPublisher) buildHTTPRoute(isvc *v1beta1.InferenceService, tar
 		},
 		Spec: gatewayapiv1.HTTPRouteSpec{
 			CommonRouteSpec: gatewayapiv1.CommonRouteSpec{
-				ParentRefs: []gatewayapiv1.ParentReference{{
-					Group:     (*gatewayapiv1.Group)(&gatewayapiv1.GroupVersion.Group),
-					Kind:      (*gatewayapiv1.Kind)(ptr.To(constants.GatewayKind)),
-					Namespace: (*gatewayapiv1.Namespace)(&gwNS),
-					Name:      gatewayapiv1.ObjectName(gwName),
-				}},
+				ParentRefs: []gatewayapiv1.ParentReference{parentRef},
 			},
 			Hostnames: []gatewayapiv1.Hostname{gatewayapiv1.Hostname(target.GlobalHost)},
 			Rules: []gatewayapiv1.HTTPRouteRule{{

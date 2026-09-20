@@ -69,12 +69,14 @@ func TestTrafficMapPublisherRegistry(t *testing.T) {
 		return &TrafficMapPublisher{
 			Publisher:      &testTrafficMapPublisher{name: name},
 			GlobalOptions:  factoryGlobalOptions,
-			ResyncInterval: time.Minute,
+			ResyncInterval: 2 * time.Minute,
 		}, nil
 	}))
 
 	input := map[string]string{"key": "value"}
-	got, err := NewTrafficMapPublisher(PublisherConfig{Name: name, Options: input}, nil, nil)
+	got, err := NewTrafficMapPublisher(PublisherConfig{
+		Name: name, ResyncInterval: time.Minute, Options: input,
+	}, nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, name, got.Publisher.Name())
 	assert.Equal(t, time.Minute, got.ResyncInterval)
@@ -85,6 +87,11 @@ func TestTrafficMapPublisherRegistry(t *testing.T) {
 	assert.NotContains(t, factoryGlobalOptions, "caller", "factory-owned options must not alias the result")
 	factoryGlobalOptions["factory"] = "mutation"
 	assert.NotContains(t, got.GlobalOptions, "factory", "the result must not alias factory-owned options")
+
+	_, err = NewTrafficMapPublisher(PublisherConfig{
+		Name: name, ResyncInterval: -time.Second,
+	}, nil, nil)
+	require.ErrorContains(t, err, "resync interval must not be negative")
 
 	assert.Error(t, RegisterTrafficMapPublisher(name, func(
 		PublisherConfig, client.Client, client.Reader,
@@ -131,14 +138,6 @@ func TestNewTrafficMapPublisherValidatesFactoryResult(t *testing.T) {
 				Publisher: &testTrafficMapPublisher{name: "different"},
 			},
 			wantErr: "returned publisher named",
-		},
-		{
-			name: "negative-resync",
-			result: &TrafficMapPublisher{
-				Publisher:      &testTrafficMapPublisher{name: "negative-resync"},
-				ResyncInterval: -time.Second,
-			},
-			wantErr: "negative resync interval",
 		},
 	}
 	for _, tt := range tests {

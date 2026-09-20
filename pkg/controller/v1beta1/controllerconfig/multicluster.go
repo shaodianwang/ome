@@ -241,12 +241,25 @@ func (c RoutingObserverConfig) MinPeriodDuration() time.Duration {
 	return parseDurationOrZero(c.MinPeriod)
 }
 
-// TrafficMapPublisherConfig selects one backend compiled into the manager.
+// TrafficMapPublisherConfig configures the TrafficMap publication backend.
 //
 // +kubebuilder:object:generate=false
 type TrafficMapPublisherConfig struct {
-	Name    string            `json:"name,omitempty"`
+	// Name selects a backend compiled into the manager. Empty or "gatewayapi"
+	// uses the built-in Gateway API publisher.
+	Name string `json:"name,omitempty"`
+	// ResyncInterval is the safety cadence for reconciling publisher state.
+	// It is required when routing is enabled and has no binary default.
+	ResyncInterval string `json:"resyncInterval,omitempty"`
+	// Options are interpreted and validated only by the named publisher.
 	Options map[string]string `json:"options,omitempty"`
+}
+
+// ResyncIntervalDuration parses ResyncInterval, yielding zero when it is
+// absent or malformed so the routing package can reject an enabled invalid
+// config.
+func (c TrafficMapPublisherConfig) ResyncIntervalDuration() time.Duration {
+	return parseDurationOrZero(c.ResyncInterval)
 }
 
 // +kubebuilder:object:generate=false
@@ -458,6 +471,20 @@ func (c MultiClusterConfig) Validate() error {
 			errs = append(errs, fmt.Errorf("%s: %q must be positive", k, raw))
 		}
 	}
+	publisherResync := c.Routing.Publisher.ResyncInterval
+	if publisherResync == "" {
+		if c.Routing.Enabled {
+			errs = append(errs, errors.New("routing.publisher.resyncInterval: must be positive when routing is enabled"))
+		}
+	} else if d, err := time.ParseDuration(publisherResync); err != nil {
+		errs = append(errs, fmt.Errorf(
+			"routing.publisher.resyncInterval: %q is not a duration (use forms like \"30s\", \"5m\")",
+			publisherResync))
+	} else if d < 0 || (c.Routing.Enabled && d == 0) {
+		errs = append(errs, fmt.Errorf(
+			"routing.publisher.resyncInterval: %q must be positive when routing is enabled and non-negative otherwise",
+			publisherResync))
+	}
 	if p := c.Endpoint.BackendPort; p < 0 || p > 65535 {
 		errs = append(errs, fmt.Errorf("endpoint.backendPort: %d is not a valid port", p))
 	}
@@ -569,8 +596,9 @@ func (c PlacementConfig) DispatcherRoundTimeoutDuration() time.Duration {
 // parseDurationOrZero parses s, returning 0 when it is empty, malformed, or
 // non-positive. Callers hand the zero to a workloadcluster/placement option,
 // which then applies its own in-package default — so the fallback stays
-// single-sourced in the consuming package, not duplicated here. Only the empty
-// case reaches a running manager; Validate rejects the rest at startup.
+// single-sourced in the consuming package, not duplicated here. Validate
+// rejects malformed values at startup; explicitly supported inactive zero
+// values also resolve to zero.
 func parseDurationOrZero(s string) time.Duration {
 	if d, err := time.ParseDuration(s); err == nil && d > 0 {
 		return d

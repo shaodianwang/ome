@@ -35,9 +35,8 @@ type Config struct {
 	// enables the other.
 	Capacity CapacityConfig
 
-	// Publisher selects an optional TrafficMap publisher implementation. Empty
-	// retains the Gateway API endpoint publisher. Options are opaque here and
-	// validated by the selected publisher at manager startup.
+	// Publisher configures the TrafficMap publication backend. An empty name or
+	// "gatewayapi" selects the built-in Gateway API publisher.
 	Publisher PublisherConfig
 }
 
@@ -59,6 +58,10 @@ func (c Config) IsEnabled() bool {
 // A disabled installation cannot run either observer, so staged observer and
 // format-plugin settings are intentionally inert until routing is enabled.
 func (c Config) Validate() error {
+	if c.Publisher.ResyncInterval < 0 {
+		return &configValidationError{section: "publisher", err: fmt.Errorf(
+			"routing.publisher.resyncInterval must not be negative")}
+	}
 	if !c.Enabled {
 		return nil
 	}
@@ -85,6 +88,10 @@ func (c Config) Validate() error {
 		return &configValidationError{section: "capacity", err: fmt.Errorf(
 			"routing.capacity.samples (%d) must not exceed routing.observer.maxSamples (%d)",
 			c.Capacity.samples(), c.Observer.MaxSamples)}
+	}
+	if c.Publisher.ResyncInterval <= 0 {
+		return &configValidationError{section: "publisher", err: fmt.Errorf(
+			"routing.publisher.resyncInterval must be positive when routing is enabled")}
 	}
 	return nil
 }
@@ -134,10 +141,16 @@ func (c ObserverConfig) Validate() error {
 //
 // +kubebuilder:object:generate=false
 type PublisherConfig struct {
-	// Name is the registered publisher name. Empty retains the Gateway API
-	// publisher. To disable a stateful publisher safely, leave its name selected
-	// while disabling routing so the shared reconciler can withdraw its state.
+	// Name is the registered publisher name. Empty or "gatewayapi" selects the
+	// built-in Gateway API publisher. To disable a stateful publisher safely,
+	// leave its name selected while disabling routing so the shared reconciler
+	// can withdraw its state.
 	Name string
+
+	// ResyncInterval is the safety cadence for reconciling publisher state.
+	// Active routing requires a positive interval. Disabled cleanup is driven by
+	// object events and permits zero.
+	ResyncInterval time.Duration
 
 	// Options are interpreted and validated only by the named publisher.
 	Options map[string]string

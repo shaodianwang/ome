@@ -37,6 +37,7 @@ func TestResolveConfigEnabled(t *testing.T) {
 			global := Config{Enabled: tt.globalEnabled}
 			if global.Enabled {
 				global.Observer = testGlobalRoutingConfig().Observer
+				global.Publisher.ResyncInterval = time.Minute
 			}
 			got, err := ResolveConfig(global, tt.spec, nil)
 			require.NoError(t, err)
@@ -1049,7 +1050,8 @@ func testGlobalRoutingConfig() Config {
 			MaxAge:  5 * time.Minute,
 		},
 		Publisher: PublisherConfig{
-			Name: "publisher",
+			Name:           "publisher",
+			ResyncInterval: time.Minute,
 			Options: map[string]string{
 				"globalOnly":   "retained",
 				"routingClass": "global",

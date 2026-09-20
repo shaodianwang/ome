@@ -59,6 +59,9 @@ OME Resources and Controller
 | ome.modelCache.options | object | `{}` | Provider-specific options. For `cluster_cache`, supported keys include `timeout` and `operation_retention`. |
 | ome.modelCache.provider | string | `""` | Optional model cache provider name. Use `cluster_cache` for sharded model distribution through cluster_cache. |
 | ome.multiclusterAccess.enabled | bool | `true` | Install ServiceAccount, token Secret, and scoped RBAC for InferenceDeploymentOperator. |
+| ome.multicluster.config.routing.publisher.name | string | `""` | TrafficMap publisher name; empty or `gatewayapi` uses the built-in Gateway API publisher. |
+| ome.multicluster.config.routing.publisher.options | object | `{}` | Options interpreted by the selected publisher. |
+| ome.multicluster.config.routing.publisher.resyncInterval | string | `"1m"` | Periodic TrafficMap publication reconciliation backstop. |
 | ome.omeAgent.authType | string | `"InstancePrincipal"` |  |
 | ome.omeAgent.compartmentId | string | `"ocid1.compartment.oc1..dummy-compartment"` |  |
 | ome.omeAgent.fineTunedAdapter.cpuLimit | int | `15` |  |
@@ -235,6 +238,35 @@ OME resources in this workload cluster. The RBAC is scoped to writing derived
 to observe admission. Placement stalls in `Racing` without the
 `InferenceReplica` read: the per-component IR status is the admission signal
 that selects a winner.
+
+## TrafficMap publishing
+
+The chart configures a one-minute publisher resync interval even when the
+built-in Gateway API publisher is selected by an empty name or `gatewayapi`.
+The manager has no fallback cadence: installations that enable TrafficMap
+routing outside this chart must set `routing.publisher.resyncInterval`
+explicitly. Cleanup while disabled is event-driven and does not require a
+resync interval.
+
+Upgrading from the legacy InferenceService-owned Gateway publisher requires a
+drain by the old binary:
+
+1. Set `routing.enabled=false` and clear `endpoint.globalGateway`. Routing alone
+   does not stop legacy endpoint publication. Keep `endpoint.routeNamespace`
+   unchanged so the old publisher can locate its resources. If configured,
+   also turn off gateway-backend feature flags that require a global Gateway;
+   cleanup discovers their existing resources by source labels.
+2. Wait until every InferenceService has released the
+   `ome.io/placement-endpoint` finalizer and all legacy HTTPRoutes, Services,
+   EndpointSlices, and BackendTLSPolicies have been removed.
+3. Upgrade the manager, restore `endpoint.globalGateway`, and enable routing.
+
+To switch TrafficMap publishers, keep the old `publisher.name`, disable
+routing, and wait until its external state is gone and TrafficMaps have
+released the `ome.io/trafficmap-publisher` finalizer. Then select the new
+publisher and re-enable routing. Changing the publisher name before the drain
+can leave state that the replacement publisher cannot safely identify or
+remove.
 
 ## Default Runtime
 

@@ -128,14 +128,15 @@ ome:
           maxResponseBytes: 65536
           minPeriod: 1s
           maxSamples: 100
-        publisher: []
         # publisher replaces the default Gateway API backend with an optional
         # adapter compiled into the manager. To remove a stateful publisher,
-        # first set enabled=false and wait for it to drain.
-        # publisher:
-        #   name: example
-        #   options:
-        #     key: value
+        # first set enabled=false and wait for it to drain. The resync interval
+        # applies to both the built-in and selected publishers; the binary has
+        # no default for this safety cadence.
+        publisher:
+          name: ""              # empty or "gatewayapi" selects the built-in publisher
+          resyncInterval: 1m    # periodic reconciliation backstop while routing is enabled
+          options: {}           # interpreted only by a non-empty named publisher
         probe: []
         # probe actively checks each TrafficMap entry's client-facing endpoint.
         # Every field is required. Statuses omitted from both lists are

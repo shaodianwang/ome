@@ -23,7 +23,6 @@ const (
 	Name = "xds"
 
 	optTargetTemplate     = "targetTemplate"
-	optResyncInterval     = "resyncInterval"
 	optURLTemplate        = "urlTemplate"
 	optRequestTimeout     = "requestTimeout"
 	optTLSCertFile        = "tlsCertFile"
@@ -36,7 +35,6 @@ const (
 
 var acceptedOptions = map[string]struct{}{
 	optTargetTemplate: {},
-	optResyncInterval: {},
 	optURLTemplate:    {},
 	optRequestTimeout: {},
 	optTLSCertFile:    {},
@@ -48,7 +46,6 @@ var acceptedOptions = map[string]struct{}{
 
 type config struct {
 	targetTemplate string
-	resyncInterval time.Duration
 	urlTemplate    string
 	requestTimeout time.Duration
 	tlsCertFile    string
@@ -97,8 +94,7 @@ func newTrafficMapPublisherWithFactory(
 		return nil, err
 	}
 	return &routing.TrafficMapPublisher{
-		Publisher:      publisher,
-		ResyncInterval: publisher.config.resyncInterval,
+		Publisher: publisher,
 		GlobalOptions: map[string]string{
 			optTargetTemplate: publisher.config.targetTemplate,
 		},
@@ -167,10 +163,6 @@ func parseConfig(options map[string]string) (config, error) {
 		return config{}, err
 	}
 
-	resyncInterval, err := parsePositiveDuration(options, optResyncInterval)
-	if err != nil {
-		return config{}, err
-	}
 	requestTimeout, err := parsePositiveDuration(options, optRequestTimeout)
 	if err != nil {
 		return config{}, err
@@ -198,7 +190,6 @@ func parseConfig(options map[string]string) (config, error) {
 
 	return config{
 		targetTemplate: templateText,
-		resyncInterval: resyncInterval,
 		urlTemplate:    urlTemplate,
 		requestTimeout: requestTimeout,
 		tlsCertFile:    tlsCertFile,

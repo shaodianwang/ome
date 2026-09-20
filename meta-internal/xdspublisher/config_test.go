@@ -16,7 +16,6 @@ import (
 func validOptions() map[string]string {
 	return map[string]string{
 		optTargetTemplate: "{{.EndpointHostname}}",
-		optResyncInterval: "1m",
 		optURLTemplate:    "https://automation.example.com/api/v1/clusters/{cluster}/weight",
 		optRequestTimeout: "10s",
 		optTLSCertFile:    "/certs/client.pem",
@@ -31,7 +30,6 @@ func TestParseConfig(t *testing.T) {
 	cfg, err := parseConfig(validOptions())
 	require.NoError(t, err)
 	assert.Equal(t, "{{.EndpointHostname}}", cfg.targetTemplate)
-	assert.Equal(t, time.Minute, cfg.resyncInterval)
 	assert.Equal(t, 10*time.Second, cfg.requestTimeout)
 	assert.Equal(t, "https://automation.example.com/api/v1/clusters/{cluster}/weight", cfg.urlTemplate)
 	assert.Equal(t, "/certs/client.pem", cfg.tlsCertFile)
@@ -51,9 +49,7 @@ func TestParseConfig(t *testing.T) {
 		{"empty ACL", func(o map[string]string) { o[optACL] = " " }, "must not be empty"},
 		{"missing template", func(o map[string]string) { delete(o, optTargetTemplate) }, optTargetTemplate},
 		{"bad template", func(o map[string]string) { o[optTargetTemplate] = "{{" }, optTargetTemplate},
-		{"missing resync", func(o map[string]string) { delete(o, optResyncInterval) }, optResyncInterval},
-		{"bad resync", func(o map[string]string) { o[optResyncInterval] = "five" }, "not a duration"},
-		{"zero resync", func(o map[string]string) { o[optResyncInterval] = "0s" }, "must be positive"},
+		{"publisher resync is not an opaque option", func(o map[string]string) { o["resyncInterval"] = "1m" }, "not accepted"},
 		{"missing URL", func(o map[string]string) { delete(o, optURLTemplate) }, optURLTemplate},
 		{"HTTP URL", func(o map[string]string) { o[optURLTemplate] = "http://automation.example.com/{cluster}" }, "absolute HTTPS"},
 		{"missing URL placeholder", func(o map[string]string) { o[optURLTemplate] = "https://automation.example.com/weight" }, "exactly one"},
@@ -97,7 +93,7 @@ func TestNewPublisherBuildsHTTPClient(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.Same(t, httpPublisher, got.Publisher.(*Publisher).weights)
-	assert.Equal(t, time.Minute, got.ResyncInterval)
+	assert.Zero(t, got.ResyncInterval, "the common publisher config owns the wrapper cadence")
 	assert.Equal(t, map[string]string{
 		optTargetTemplate: "{{.EndpointHostname}}",
 	}, got.GlobalOptions)

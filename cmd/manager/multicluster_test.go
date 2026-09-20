@@ -97,6 +97,7 @@ func TestResolveMCWiringFullConfig(t *testing.T) {
 			},
 			"publisher": {
 				"name": "test-publisher",
+				"resyncInterval": "2m",
 				"options": {"key": "value"}
 			}
 		}
@@ -156,6 +157,7 @@ func TestResolveMCWiringFullConfig(t *testing.T) {
 	assert.Equal(t, 2*time.Second, w.routing.Capacity.Timeout)
 	assert.Equal(t, 30*time.Second, w.routing.Capacity.MaxAge)
 	assert.Equal(t, "test-publisher", w.routing.Publisher.Name)
+	assert.Equal(t, 2*time.Minute, w.routing.Publisher.ResyncInterval)
 	assert.Equal(t, map[string]string{"key": "value"}, w.routing.Publisher.Options)
 	require.NoError(t, w.routing.Validate())
 }
