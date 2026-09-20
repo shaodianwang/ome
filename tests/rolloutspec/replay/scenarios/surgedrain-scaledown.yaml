@@ -1,0 +1,54 @@
+# Both Instances have advanced to SurgeDrain when the operator halves the
+# replica count. A single-pod source carries no SurgeIndex, so the retired
+# index is not pinned as a handoff pair: the scale-down wave stamps Deleting
+# over its in-flight Update operation.
+scenario: surgedrain-scaledown
+arrows:
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-scaledown
+  - T-delete-done
+cells:
+  - instance/Update/SurgeDrain/spec.replicasDown/before
+initial:
+  spec:
+    replicas: 2
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+    - {index: 1, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+    - {index: 1, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: the pod template changes, so both Instances surge a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 2
+    note: both replacements are serving and in rotation, so both steps advance to SurgeDrain
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+      - pod.ready[target]: {pod: {index: 1, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 1, ordinal: 1}}
+  - tick: 3
+    note: the operator halves the replica count, so the retired index leaves the plan mid-drain
+    events:
+      - spec.replicasDown: {to: 1}
+  - tick: 4
+    note: both of the retired index's slots leave rotation, which is the drain the delete waits on
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 1, ordinal: 0}}
+      - endpoint.rotationOut[target]: {pod: {index: 1, ordinal: 1}}
+  - tick: 5
+    note: both of the retired index's slots are gone, so the row is removed with them
+    events:
+      - pod.deleted[source]: {pod: {index: 1, ordinal: 0}}
+      - pod.deleted[target]: {pod: {index: 1, ordinal: 1}}

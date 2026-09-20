@@ -209,6 +209,13 @@ run rather than silently doing nothing.
 adapter's teardown pass, outside `workload.Reconcile`, so the driver cannot
 reach the arrows that fire on it (see **Unlocked paths**).
 
+`timer.forceDelete` has no applier either, and the sweep it names is out of
+reach for a second reason: the driver stamps a finalizer on every pod, which
+is what lets a scenario hold one in Terminating, and a Terminating pod with
+finalizers classifies as `foreign-finalizers` — report-only, never
+actionable. Reaching the sweep needs a Terminating pod the driver does not
+pin plus node-death evidence (see **Unlocked paths**).
+
 ## Trace format
 
 ```
@@ -414,11 +421,16 @@ Effects the driver does not record:
 - Timestamps on aggregate conditions and on `LastFailure`, because the
   engine stamps both from the wall clock (see Follow-ups).
 
+- The stuck-Terminating force-delete sweep, and the arrows that fire on
+  it. Every pod the driver admits carries its finalizer, so a Terminating
+  pod classifies as `foreign-finalizers` and the sweep declines it before
+  it ever reads a Node.
+
 Reads, which are never traced at all: EndpointSlices, Services,
 ControllerRevisions, and Nodes. No Node objects exist in the fake
-cluster, so the force-delete escalation always takes its read-error branch
-rather than the unreachable-node branch — a scenario that needs the latter
-has to seed Nodes first.
+cluster, so a pod whose node the sweep did reach would classify as
+`node-gone` rather than proving an unreachable node — a scenario that
+needs the unreachable-node branch has to seed Nodes first.
 
 Two apiserver behaviors are absent: there is no conflict retry (the fake
 client raises no 409, so the adapter's `RetryOnConflict` loop is never

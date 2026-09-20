@@ -1,0 +1,46 @@
+# The replacement regresses into a terminal waiting reason after the step has
+# advanced to SurgeDrain. The source is already out of rotation, so the
+# fully-serving guard cannot suppress the escalation, and the replacement is
+# old enough for the stuck-pod fast path to fire on the pass that reads it.
+scenario: surgedrain-stuck
+arrows:
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-stuck
+cells:
+  - instance/Update/SurgeDrain/pod.waiting[ImagePullBackOff]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement is serving and in rotation, so the step advances and the source's serving gate is flipped off
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 5
+    note: two minutes pass with the source still published, which is longer than the grace but proves nothing on its own
+    events:
+      - clock.advance: 2m
+  - tick: 6
+    note: the replacement wedges on its image, and being older than the grace it is disposed on the pass that reads the reason
+    events:
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 0, ordinal: 1}, message: "manifest unknown"}

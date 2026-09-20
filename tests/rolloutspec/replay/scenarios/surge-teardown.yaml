@@ -1,0 +1,45 @@
+# The owner is deleted mid-surge. From that pass on the planned index set
+# reads as empty, so the surging Instance is a scale-down extra: Phase
+# Deleting and the Delete Drain operation are committed in one status
+# transaction and both ordinal slots are drained out.
+scenario: surge-teardown
+arrows:
+  - T-ready-surge
+  - T-surge-teardown
+  - T-delete-done
+cells:
+  - instance/Update/Surge/spec.teardown[deleted]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the owner's deletion begins, so the surging Instance becomes a scale-down extra
+    events:
+      - spec.teardown[deleted]: {}
+  - tick: 5
+    note: the source leaves rotation, which is the drain the delete waits on
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 6
+    note: both slots are gone, so the row is removed with them
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}
+      - pod.deleted[target]: {pod: {index: 0, ordinal: 1}}

@@ -1,0 +1,42 @@
+# The same wedge as inplace-stuck, observed from the other side: the pull
+# failure lands while the pod is still younger than the grace, so the roll
+# keeps polling until the grace itself elapses.
+scenario: inplace-stuckgrace
+arrows:
+  - T-ready-inplace
+  - T-inplace-stuckgrace
+cells:
+  - instance/Update/InPlace/timer.stuckPodGrace/before
+initial:
+  spec:
+    replicas: 1
+    strategy: InPlaceIfPossible
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 5m
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: only the image changed, so the update is eligible to run in place
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the pod leaves rotation and the new image wedges while it is still younger than the grace
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 0}, message: "manifest unknown"}
+  - tick: 5
+    note: the grace elapses, and the same pass issues the image patch and restamps the revision label
+    events:
+      - timer.stuckPodGrace: {slack: 1s}
+  - tick: 6
+    note: the wedged pod now carries the target revision, so the escalation charges that revision and disposes the roll

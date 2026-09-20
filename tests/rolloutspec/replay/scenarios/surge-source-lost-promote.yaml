@@ -1,0 +1,35 @@
+# The source disappears on the same pass the replacement first reports
+# PodReady. With no source pod left there is nothing to drain, so the whole
+# drain block is skipped and the replacement is promoted directly.
+scenario: surge-source-lost-promote
+arrows:
+  - T-ready-surge
+  - T-surge-source-lost-promote
+cells:
+  - instance/Update/Surge/pod.deleted[source]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement reports Ready in the same window the source is lost, so the promote is reached with no drain to run
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}

@@ -1,0 +1,39 @@
+# The roll's only pod disappears mid-patch. There is nothing left to patch,
+# so the mode re-resolves to recreate on the same pass: the operation keeps
+# its identity, target and deadline, its step is restamped to Drain, and the
+# replacement is rendered at the target revision.
+scenario: inplace-podlost-recreate
+arrows:
+  - T-ready-inplace
+  - T-inplace-podlost-recreate
+cells:
+  - instance/Update/InPlace/pod.deleted[source]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: InPlaceIfPossible
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: only the image changed, so the update is eligible to run in place
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the pod leaves rotation, so the transition marker is written
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the only pod is lost, so the roll re-resolves to recreate rather than polling an empty pod set
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}

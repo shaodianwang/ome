@@ -1,0 +1,36 @@
+# The patched pod never converges and the operation deadline elapses. A
+# single-pod in-place attempt is always disposable, so the disposition
+# classifies it and clears the operation in the same write.
+scenario: inplace-deadline
+arrows:
+  - T-ready-inplace
+  - T-inplace-deadline
+cells:
+  - instance/Update/InPlace/timer.operationDeadline/before
+initial:
+  spec:
+    replicas: 1
+    strategy: InPlaceIfPossible
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: only the image changed, so the update is eligible to run in place
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the pod stays published, so the pre-patch drain never releases
+  - tick: 5
+    note: the operation deadline elapses with the patch still not issued
+    events:
+      - timer.operationDeadline: {slack: 1s}

@@ -1,0 +1,39 @@
+# The same wedge as surge-stuck, observed from the other side: the pull
+# failure lands on a replacement too young to be stuck, so the surge keeps
+# polling until the grace itself elapses on it.
+scenario: surge-stuckgrace
+arrows:
+  - T-ready-surge
+  - T-surge-stuckgrace
+cells:
+  - instance/Update/Surge/timer.stuckPodGrace/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 5m
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the pull wedges immediately, but the replacement is younger than the grace, so the surge keeps polling
+    events:
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 0, ordinal: 1}, message: "manifest unknown"}
+  - tick: 5
+    note: the grace elapses on the wedged replacement and the escalation disposes the surge
+    events:
+      - timer.stuckPodGrace: {slack: 1s}

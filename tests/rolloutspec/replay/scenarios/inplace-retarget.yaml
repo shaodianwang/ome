@@ -1,0 +1,40 @@
+# A second image-only edit lands while the patch is still converging. The
+# diff is still image-only, so the mode re-resolves to in-place and the stamp
+# falls through its idempotency guard on the changed target: the operation is
+# restamped at the new target with a fresh deadline and the image-transition
+# marker is rewritten.
+scenario: inplace-retarget
+arrows:
+  - T-ready-inplace
+  - T-inplace-retarget
+cells:
+  - instance/Update/InPlace/spec.revision/boundary@T-inplace-retarget
+initial:
+  spec:
+    replicas: 1
+    strategy: InPlaceIfPossible
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: only the image changed, so the update is eligible to run in place
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the pod leaves rotation, so the transition marker is written
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 5
+    note: a further image-only edit lands before the patch converged, so the roll retargets in place
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}

@@ -1,0 +1,39 @@
+# A retarget whose diff against the running revision is no longer
+# container-images-only. The mode is re-resolved every pass, so the roll
+# falls back to recreate: the Incarnation is bumped and the operation is
+# restamped with the Drain step.
+scenario: inplace-fallback
+arrows:
+  - T-ready-inplace
+  - T-inplace-fallback
+cells:
+  - instance/Update/InPlace/spec.revision/boundary@T-inplace-fallback
+initial:
+  spec:
+    replicas: 1
+    strategy: InPlaceIfPossible
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the pod becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: only the image changed, so the update is eligible to run in place
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the pod leaves rotation, so the transition marker is written
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the environment changes too, so the diff exceeds container images and the roll re-resolves to recreate
+    events:
+      - spec.revision: {env: {OME_FEATURE_GATE: enabled}}

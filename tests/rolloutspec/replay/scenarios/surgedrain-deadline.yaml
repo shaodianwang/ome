@@ -1,0 +1,43 @@
+# The step has advanced to SurgeDrain and the source is still in the routed
+# Service, so the drain never converges and the operation deadline stamped at
+# surge entry elapses. The drained source's serving gate is already off, so
+# the fully-serving suppression cannot cover the row.
+scenario: surgedrain-deadline
+arrows:
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-deadline
+cells:
+  - instance/Update/SurgeDrain/timer.operationDeadline/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement is serving and in rotation, so the step advances and the source's serving gate is flipped off
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 5
+    note: the source stays published, so the drain does not converge
+  - tick: 6
+    note: the operation deadline elapses with the source still routed
+    events:
+      - timer.operationDeadline: {slack: 1s}

@@ -1,0 +1,38 @@
+# The replacement is bound but never becomes Ready, and the operation
+# deadline stamped at surge entry elapses. The source is still serving, but
+# the replacement is not, so nothing suppresses the escalation.
+scenario: surge-deadline
+arrows:
+  - T-ready-surge
+  - T-surge-deadline
+cells:
+  - instance/Update/Surge/timer.operationDeadline/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement is bound but reports no readiness
+    events:
+      - pod.scheduled[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 5
+    note: the operation deadline elapses with the replacement still not Ready
+    events:
+      - timer.operationDeadline: {slack: 1s}

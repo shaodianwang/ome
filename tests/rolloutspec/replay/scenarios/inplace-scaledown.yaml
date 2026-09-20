@@ -1,0 +1,44 @@
+# Both Instances are patching in place when the operator halves the replica
+# count. An in-place update pins nothing in the plan, so the retired index
+# falls out and the scale-down wave stamps Deleting over its Update
+# operation.
+scenario: inplace-scaledown
+arrows:
+  - T-ready-inplace
+  - T-inplace-scaledown
+  - T-delete-done
+cells:
+  - instance/Update/InPlace/spec.replicasDown/before
+initial:
+  spec:
+    replicas: 2
+    strategy: InPlaceIfPossible
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+    - {index: 1, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+    - {index: 1, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: only the image changed, so both Instances are eligible to run the update in place
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 2
+    note: the operator halves the replica count, so the retired index leaves the plan mid-patch
+    events:
+      - spec.replicasDown: {to: 1}
+  - tick: 3
+    note: the retired index's pod leaves rotation, which is the drain the delete waits on
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 1}}
+  - tick: 4
+    note: the drained pod is gone, so the row is removed with it
+    events:
+      - pod.deleted[source]: {pod: {index: 1}}

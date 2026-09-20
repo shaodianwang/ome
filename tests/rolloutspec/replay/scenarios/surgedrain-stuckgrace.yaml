@@ -1,0 +1,45 @@
+# The same regression as surgedrain-stuck, observed from the other side: the
+# wedge lands while the grace is still running, so the drain keeps polling
+# until the grace itself elapses on the replacement.
+scenario: surgedrain-stuckgrace
+arrows:
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-stuckgrace
+cells:
+  - instance/Update/SurgeDrain/timer.stuckPodGrace/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 5m
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement is serving and in rotation, so the step advances and the source's serving gate is flipped off
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 5
+    note: the replacement wedges on its image while it is still younger than the grace, so the drain keeps polling
+    events:
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 0, ordinal: 1}, message: "manifest unknown"}
+  - tick: 6
+    note: the grace elapses on the wedged replacement and the escalation ends the attempt
+    events:
+      - timer.stuckPodGrace: {slack: 1s}
