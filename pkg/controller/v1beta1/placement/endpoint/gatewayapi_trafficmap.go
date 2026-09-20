@@ -271,6 +271,10 @@ func (p *GatewayAPITrafficMapPublisher) Preflight(ctx context.Context, plan Traf
 	case !p.publisher.ownsResource(desiredRoute, gatewayPlan.owner):
 		return &terminalPublisherError{err: fmt.Errorf(
 			"global HTTPRoute %s belongs to another source", gatewayPlan.routeKey)}
+	default:
+		if err := requireActiveGatewayResource(desiredRoute, "HTTPRoute"); err != nil {
+			return err
+		}
 	}
 
 	routes := &gatewayapiv1.HTTPRouteList{}
@@ -295,6 +299,14 @@ func (p *GatewayAPITrafficMapPublisher) Preflight(ctx context.Context, plan Traf
 				"Gateway hostname %q on %s is already published by HTTPRoute %s",
 				gatewayPlan.target.GlobalHost, gatewayKey, routeKey)}
 		}
+	}
+
+	if err := p.publisher.preflightResourceKeys(ctx, gatewayPlan.owner, gatewayPlan.target); err != nil {
+		var ownership *gatewayResourceOwnershipError
+		if errors.As(err, &ownership) {
+			return &terminalPublisherError{err: ownership}
+		}
+		return err
 	}
 	return nil
 }

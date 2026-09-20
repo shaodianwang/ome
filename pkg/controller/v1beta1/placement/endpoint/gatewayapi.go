@@ -464,9 +464,14 @@ func (p *GatewayAPIPublisher) applyService(ctx context.Context, isvc *v1beta1.In
 	if !p.ownsResource(existing, isvc) {
 		return fmt.Errorf("global backend Service %s/%s belongs to another InferenceService", desired.Namespace, desired.Name)
 	}
+	if err := requireActiveGatewayResource(existing, "backend Service"); err != nil {
+		return err
+	}
 	// Repoint (re-placement) or label drift: update in place. Carry the live
-	// ResourceVersion and preserve the cluster-assigned spec fields we do not own.
+	// ResourceVersion and finalizers, plus cluster-assigned spec fields we do not
+	// own.
 	desired.ResourceVersion = existing.ResourceVersion
+	desired.Finalizers = append([]string(nil), existing.Finalizers...)
 	desired.Spec.ClusterIP = existing.Spec.ClusterIP
 	desired.Spec.ClusterIPs = existing.Spec.ClusterIPs
 	if equality.Semantic.DeepEqual(desired.Spec, existing.Spec) &&
@@ -550,6 +555,54 @@ func (p *GatewayAPIPublisher) preflightResourceOwnership(
 	return nil
 }
 
+// preflightResourceKeys checks every object key an active publication can use
+// without resolving backend addresses. Both possible EndpointSlice family keys
+// are reserved so this check stays independent of a changing resolver result.
+func (p *GatewayAPIPublisher) preflightResourceKeys(
+	ctx context.Context,
+	isvc *v1beta1.InferenceService,
+	target Target,
+) error {
+	route := p.buildHTTPRoute(isvc, target)
+	if err := p.requireOwnedOrAbsent(ctx, route, "HTTPRoute", isvc); err != nil {
+		return err
+	}
+
+	homes := append([]Home(nil), target.Homes...)
+	sort.Slice(homes, func(i, j int) bool { return homes[i].Cluster < homes[j].Cluster })
+	for _, home := range homes {
+		serviceName := p.serviceName(isvc, home.Cluster)
+		service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{
+			Namespace: p.routeNamespace(isvc),
+			Name:      serviceName,
+		}}
+		if err := p.requireOwnedOrAbsent(ctx, service, "backend Service", isvc); err != nil {
+			return err
+		}
+		if p.config.GatewayBackend.EndpointSlices.Enabled {
+			for _, suffix := range []string{ipv4EndpointSliceSuffix, ipv6EndpointSliceSuffix} {
+				endpointSlice := &discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{
+					Namespace: p.routeNamespace(isvc),
+					Name:      boundedResourceName(serviceName + suffix),
+				}}
+				if err := p.requireOwnedOrAbsent(ctx, endpointSlice, "backend EndpointSlice", isvc); err != nil {
+					return err
+				}
+			}
+		}
+		if p.config.GatewayBackend.TLS.Enabled {
+			policy := &gatewayapiv1.BackendTLSPolicy{ObjectMeta: metav1.ObjectMeta{
+				Namespace: p.routeNamespace(isvc),
+				Name:      serviceName,
+			}}
+			if err := p.requireOwnedOrAbsent(ctx, policy, "BackendTLSPolicy", isvc); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func (p *GatewayAPIPublisher) requireOwnedOrAbsent(
 	ctx context.Context,
 	object client.Object,
@@ -563,9 +616,26 @@ func (p *GatewayAPIPublisher) requireOwnedOrAbsent(
 		return fmt.Errorf("read global %s %s/%s: %w", kind, key.Namespace, key.Name, err)
 	}
 	if !p.ownsResource(object, isvc) {
-		return fmt.Errorf("global %s %s/%s belongs to another source", kind, key.Namespace, key.Name)
+		return &gatewayResourceOwnershipError{kind: kind, key: key}
 	}
-	return nil
+	return requireActiveGatewayResource(object, kind)
+}
+
+type gatewayResourceOwnershipError struct {
+	kind string
+	key  types.NamespacedName
+}
+
+func (e *gatewayResourceOwnershipError) Error() string {
+	return fmt.Sprintf("global %s %s/%s belongs to another source", e.kind, e.key.Namespace, e.key.Name)
+}
+
+func requireActiveGatewayResource(object metav1.Object, kind string) error {
+	timestamp := object.GetDeletionTimestamp()
+	if timestamp == nil || timestamp.IsZero() {
+		return nil
+	}
+	return fmt.Errorf("global %s %s/%s is terminating", kind, object.GetNamespace(), object.GetName())
 }
 
 func (p *GatewayAPIPublisher) applyRoute(ctx context.Context, isvc *v1beta1.InferenceService, target Target) error {
@@ -584,7 +654,11 @@ func (p *GatewayAPIPublisher) applyRoute(ctx context.Context, isvc *v1beta1.Infe
 	if !p.ownsResource(existing, isvc) {
 		return fmt.Errorf("global HTTPRoute %s/%s belongs to another InferenceService", desired.Namespace, desired.Name)
 	}
+	if err := requireActiveGatewayResource(existing, "HTTPRoute"); err != nil {
+		return err
+	}
 	desired.ResourceVersion = existing.ResourceVersion
+	desired.Finalizers = append([]string(nil), existing.Finalizers...)
 	if equality.Semantic.DeepEqual(desired.Spec, existing.Spec) &&
 		maps.Equal(desired.Labels, existing.Labels) {
 		return nil

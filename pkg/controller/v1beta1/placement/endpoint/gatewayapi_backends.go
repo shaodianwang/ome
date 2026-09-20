@@ -212,7 +212,11 @@ func (p *GatewayAPIPublisher) applyEndpointSlice(ctx context.Context, isvc *v1be
 	if !p.ownsResource(existing, isvc) {
 		return fmt.Errorf("global backend EndpointSlice %s/%s belongs to another InferenceService", desired.Namespace, desired.Name)
 	}
+	if err := requireActiveGatewayResource(existing, "backend EndpointSlice"); err != nil {
+		return err
+	}
 	desired.ResourceVersion = existing.ResourceVersion
+	desired.Finalizers = append([]string(nil), existing.Finalizers...)
 	if desired.AddressType == existing.AddressType &&
 		equality.Semantic.DeepEqual(desired.Endpoints, existing.Endpoints) &&
 		equality.Semantic.DeepEqual(desired.Ports, existing.Ports) &&
@@ -240,7 +244,11 @@ func (p *GatewayAPIPublisher) applyBackendTLSPolicy(ctx context.Context, isvc *v
 	if !p.ownsResource(existing, isvc) {
 		return fmt.Errorf("global BackendTLSPolicy %s/%s belongs to another InferenceService", desired.Namespace, desired.Name)
 	}
+	if err := requireActiveGatewayResource(existing, "BackendTLSPolicy"); err != nil {
+		return err
+	}
 	desired.ResourceVersion = existing.ResourceVersion
+	desired.Finalizers = append([]string(nil), existing.Finalizers...)
 	if equality.Semantic.DeepEqual(desired.Spec, existing.Spec) && maps.Equal(desired.Labels, existing.Labels) {
 		return nil
 	}
