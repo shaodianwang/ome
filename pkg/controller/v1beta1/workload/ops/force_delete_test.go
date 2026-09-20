@@ -22,6 +22,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
@@ -963,5 +964,61 @@ func TestDeleteBatch_OperatorConfigChangesDoNotChangeWhatTheDrainDecides(t *test
 				t.Errorf("result: got %+v want the baseline %+v", got, baseline)
 			}
 		})
+	}
+}
+
+// A gang surge target marker is an index of its own, and the update pass
+// sweeps only the pods of the row it dispatches. The marker's own pods
+// are therefore outside every sweep the source's pass runs — the clock
+// elapsing on one of them force-deletes nothing, whether the marker is
+// still building its replacement gang or already retired. Which evidence
+// would have applied does not enter into it: the pod is never a
+// candidate, so neither node death nor deletion slack reaches it.
+//
+// Cells: instance/Update/GangSurgeTarget/timer.forceDelete[nodeUnreachable]/before, instance/Update/GangSurgeTarget/timer.forceDelete[overdueSlack]/before, instance/Update/GangSurgeTargetCleanup/timer.forceDelete[nodeUnreachable]/before, instance/Update/GangSurgeTargetCleanup/timer.forceDelete[overdueSlack]/before
+func TestUpdateWithPods_MarkerPodsAreOutsideTheSourcesSweep(t *testing.T) {
+	f := newMidSurgeFixture(t, workload.UpdateStepSurge, false /* surgeReady */, true /* sourceServing */)
+	if err := f.client.Create(context.Background(), fdNodeUnreachable("dead-node", 10*time.Minute)); err != nil {
+		t.Fatalf("seed dead node: %v", err)
+	}
+
+	// A pod of the replacement gang's own index, wedged Terminating past
+	// its grace on the dead node — exactly the evidence that clears a
+	// source pod in TestUpdateWithPods_ForceDeletesStuckTerminatingSource.
+	markerPod := f.sourcePod.DeepCopy()
+	markerPod.ObjectMeta = metav1.ObjectMeta{
+		Namespace: f.sourcePod.Namespace,
+		Name:      f.sourcePod.Name + "-marker",
+		Labels:    map[string]string{},
+	}
+	for k, v := range f.sourcePod.Labels {
+		markerPod.Labels[k] = v
+	}
+	markerPod.Labels[query.LabelInstanceIdx] = "2"
+	markerPod.Spec.NodeName = "dead-node"
+	if err := f.client.Create(context.Background(), markerPod); err != nil {
+		t.Fatalf("seed marker pod: %v", err)
+	}
+	dt := metav1.NewTime(time.Now().Add(-10 * time.Minute))
+	markerPod.DeletionTimestamp = &dt
+
+	rec := record.NewFakeRecorder(16)
+	input := legacyTestInput(f.isvc, f.client, workload.ComponentEngine)
+	input.ForceDelete = fdPolicy()
+	plan := legacyComponentPlan(workload.UpdateStrategySurgeThenDrain, nil)
+
+	// The dispatcher hands the pass the pods of the row it dispatches —
+	// the source's — so the marker's wedged pod is never a candidate.
+	if _, err := UpdateWithPods(context.Background(), workload.Deps{Client: f.client, Recorder: rec},
+		input, plan, plan.Instances[0], f.targetCR, f.targetSpec,
+		[]*corev1.Pod{f.sourcePod, f.surgePod}); err != nil {
+		t.Fatalf("UpdateWithPods: %v", err)
+	}
+
+	if n := fdCountEvents(fdDrainEvents(rec), workload.EventReasonPodForceDeleted); n != 0 {
+		t.Errorf("PodForceDeleted events: got %d want 0", n)
+	}
+	if err := f.client.Get(context.Background(), client.ObjectKeyFromObject(markerPod), &corev1.Pod{}); err != nil {
+		t.Fatalf("the marker's wedged pod must survive the source's sweep; get returned %v", err)
 	}
 }

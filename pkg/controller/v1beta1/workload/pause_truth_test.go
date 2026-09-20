@@ -15,7 +15,7 @@ import (
 // Instance is deleted while the Component is paused. No pass may recreate it,
 // and the row must fall back to Pending rather than keep claiming Ready.
 //
-// Cells: instance/Ready/pod.deleted[source]/before, instance/Pending/spec.pauseTrue/before
+// Cells: instance/Ready/pod.deleted[source]/before, instance/Pending/spec.pauseTrue/before, instance/Pending/spec.unpause/before
 func TestPause_UnbackedReadyInstanceDemotesToPending(t *testing.T) {
 	h := newRecoveryHarness(t, false)
 	if !h.run(30, func() bool { return h.allReady(1) }) {

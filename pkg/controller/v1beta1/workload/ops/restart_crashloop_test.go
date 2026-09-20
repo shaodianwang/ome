@@ -6,12 +6,15 @@ package ops_test
 // whatever the restart policy says.
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -129,9 +132,11 @@ func TestDetectRestartTrigger_CrashLoopOnServingPodSetStaysSilent(t *testing.T) 
 
 // The repair answers to the same RetryBlock authority every rebuild does:
 // a revision held after repeated failures is not re-materialized on a
-// loop.
+// loop. A Held block is the one gate verdict with no time bound: it
+// denies every fresh attempt at that target until a different target
+// arrives.
 //
-// Cells: instance/Ready/pod.waiting[CrashLoopBackOff]/before
+// Cells: instance/Ready/pod.waiting[CrashLoopBackOff]/before, instance/Ready/gate.deny[Held]/before
 func TestDetectRestartTrigger_CrashLoopDeniedByHeldRetryBlock(t *testing.T) {
 	input, plan, pod := crashLoopInput(t, time.Minute)
 	input.ObservedState.RetryBlocks = []workload.RetryBlock{{
@@ -251,5 +256,160 @@ func TestDetectRestartTrigger_GangWedgedOnOneMemberOpensOneRepair(t *testing.T) 
 	}
 	if !ops.RestartOpensUnavailability(input, plan.Instances[0], pods) {
 		t.Error("the gang repair takes the Instance offline, so it must be admitted like any fresh attempt")
+	}
+}
+
+// Once the repair is stamped it owns the pod set, and the stamp is
+// idempotent: the same wedged pod re-observed on the next pass is the
+// same evidence the repair already acted on, so nothing is armed a
+// second time — no fresh incarnation, no second operation.
+//
+// Cells: instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-crashloop-restart, instance/Ready/pod.waiting[CrashLoopBackOff]/after@T-ready-crashloop-restart
+func TestRestart_ReObservedCrashLoopArmsNothingASecondTime(t *testing.T) {
+	resetExpectations(t)
+	isvc, ir := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	ir.Status.InstanceStatuses[0].RunningRevision = crashLoopRevision
+	pod := crashLoopingPod(isvc, "CrashLoopBackOff", time.Hour)
+	c := newFakeClient(t, isvc, ir, pod)
+	input := buildTestInput(isvc, c, workload.ComponentEngine)
+	input.StuckPodGrace = time.Minute
+	input.ObservedState.CurrentRevision = crashLoopRevision
+	plan := buildPlanSinglePodEngineForRestart(c, isvc)
+	plan.RestartPolicy = workload.RestartPolicyNone
+
+	// The stamp lands: the row leaves Ready at a bumped incarnation.
+	if _, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "pod CrashLoopBackOff"); err != nil {
+		t.Fatalf("Restart (stamp): %v", err)
+	}
+	armed := instanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
+	if armed.Phase != v1beta1.OMENativeInstanceRestarting || armed.Incarnation != 2 {
+		t.Fatalf("stamp: got Phase=%q Incarnation=%d want Restarting at 2", armed.Phase, armed.Incarnation)
+	}
+
+	// The same reason is read again on the next pass, off the same pod.
+	resetExpectations(t)
+	input = buildTestInput(isvc, c, workload.ComponentEngine)
+	input.StuckPodGrace = time.Minute
+	input.ObservedState.CurrentRevision = crashLoopRevision
+	plan = buildPlanSinglePodEngineForRestart(c, isvc)
+	plan.RestartPolicy = workload.RestartPolicyNone
+	if _, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "pod CrashLoopBackOff"); err != nil {
+		t.Fatalf("Restart (re-observation): %v", err)
+	}
+
+	again := instanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
+	if again.Incarnation != armed.Incarnation {
+		t.Errorf("Incarnation: got %d want %d (the stamp is idempotent)", again.Incarnation, armed.Incarnation)
+	}
+	if again.Phase != v1beta1.OMENativeInstanceRestarting {
+		t.Errorf("Phase: got %q want Restarting (the repair still owns the row)", again.Phase)
+	}
+	if again.Operation == nil || again.Operation.Type != v1beta1.InstanceOperationRestart {
+		t.Fatalf("Operation: got %+v want the one open repair", again.Operation)
+	}
+}
+
+// Losing the wedged pod in the same pass that stamps the repair only
+// completes work the repair was going to do: the drain has nothing left
+// to flip or delete, so the stamp lands unchanged. From there the
+// repair owns the pod set and recreates the missing member at the
+// bumped incarnation, which is the same answer whether the pod was lost
+// at the stamp or after it.
+//
+// Cells: instance/Ready/pod.deleted[source]/boundary@T-ready-crashloop-restart, instance/Ready/pod.deleted[source]/after@T-ready-crashloop-restart
+func TestRestart_PodLostAsTheRepairStampCommitsStillDrains(t *testing.T) {
+	resetExpectations(t)
+	isvc, ir := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	ir.Status.InstanceStatuses[0].RunningRevision = crashLoopRevision
+	// The pod the crash-loop trigger read is gone by the time the stamp
+	// commits, so the pass sees the index with no pods at all.
+	c := newFakeClient(t, isvc, ir)
+	input := buildTestInput(isvc, c, workload.ComponentEngine)
+	input.StuckPodGrace = time.Minute
+	input.ObservedState.CurrentRevision = crashLoopRevision
+	plan := buildPlanSinglePodEngineForRestart(c, isvc)
+	plan.RestartPolicy = workload.RestartPolicyNone
+
+	if _, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "pod CrashLoopBackOff"); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+
+	s := instanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
+	if s.Phase != v1beta1.OMENativeInstanceRestarting {
+		t.Errorf("Phase: got %q want Restarting (the stamp lands whatever happened to the pod)", s.Phase)
+	}
+	if s.Incarnation != 2 {
+		t.Errorf("Incarnation: got %d want 2", s.Incarnation)
+	}
+	if s.Operation == nil || s.Operation.Type != v1beta1.InstanceOperationRestart {
+		t.Fatalf("Operation: got %+v want an open repair", s.Operation)
+	}
+
+	// The repair owns the pod set from here: the next pass rebuilds the
+	// missing member at the bumped incarnation.
+	resetExpectations(t)
+	input = buildTestInput(isvc, c, workload.ComponentEngine)
+	input.StuckPodGrace = time.Minute
+	input.ObservedState.CurrentRevision = crashLoopRevision
+	plan = buildPlanSinglePodEngineForRestart(c, isvc)
+	plan.RestartPolicy = workload.RestartPolicyNone
+	if _, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "pod CrashLoopBackOff"); err != nil {
+		t.Fatalf("Restart (rebuild): %v", err)
+	}
+
+	pods := &corev1.PodList{}
+	if err := c.List(context.Background(), pods, client.InNamespace("prod")); err != nil {
+		t.Fatalf("list pods: %v", err)
+	}
+	if len(pods.Items) != 1 {
+		t.Fatalf("pods: got %d want 1 (the repair recreates the lost member)", len(pods.Items))
+	}
+	if got := pods.Items[0].Labels[query.LabelInstanceIncarnation]; got != "2" {
+		t.Errorf("new pod %s incarnation label: got %q want 2", pods.Items[0].Name, got)
+	}
+}
+
+// A new target revision arriving while the repair is stamped or open
+// waits for it: the update trigger declines any row below Ready, so the
+// roll re-enters from Ready — or from Failed — once the repair resolves.
+//
+// Cells: instance/Ready/spec.revision/boundary@T-ready-crashloop-restart, instance/Ready/spec.revision/after@T-ready-crashloop-restart
+func TestDetectUpdateTrigger_NewTargetWaitsForAnOpenCrashLoopRepair(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		step string
+	}{
+		{name: "stamp landing", step: ""},
+		{name: "repair open", step: "Drain"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetExpectations(t)
+			isvc := minimalISVC("llama-70b", "prod", 1)
+			op := &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationRestart, Reason: "pod CrashLoopBackOff"}
+			op.Step = tc.step
+			ir := instanceIR(isvc, workload.ComponentEngine, v1beta1.OMENativeInstanceStatus{
+				Index:           0,
+				Incarnation:     2,
+				Phase:           v1beta1.OMENativeInstanceRestarting,
+				RunningRevision: crashLoopRevision,
+				Operation:       op,
+			})
+			c := newFakeClient(t, isvc, ir)
+			input := buildTestInput(isvc, c, workload.ComponentEngine)
+			input.ObservedState.CurrentRevision = crashLoopRevision
+			plan := buildPlanSinglePodEngineForRestart(c, isvc)
+
+			target := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{
+				Namespace: "prod", Name: "llama-70b-engine-newtarget",
+			}}
+			trigger, _, err := ops.DetectUpdateTriggerWithPods(context.Background(), workload.Deps{Client: c},
+				input, plan, plan.Instances[0], target, input.DesiredSpec.PodSpec, nil)
+			if err != nil {
+				t.Fatalf("DetectUpdateTriggerWithPods: %v", err)
+			}
+			if trigger {
+				t.Fatalf("a row below Ready must not be rolled; the new target waits for the repair")
+			}
+		})
 	}
 }

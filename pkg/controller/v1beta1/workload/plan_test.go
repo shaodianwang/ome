@@ -486,6 +486,7 @@ func TestInstancePlanIndices_MixedHandoffsSharingTargetKeepAllParticipants(t *te
 	}
 }
 
+// Cells: instance/Update/GangSurgeTarget/spec.replicasDown/before
 func TestInstancePlanIndices_GangSurgePinsPair(t *testing.T) {
 	// replicas=2 with a gang surge in flight: source 0 (Updating, surge→3),
 	// unrelated sibling 1 (Ready), replacement 3 (GangSurgeTarget). The
@@ -505,6 +506,39 @@ func TestInstancePlanIndices_GangSurgePinsPair(t *testing.T) {
 	}
 	if !hit[0] || !hit[1] || !hit[3] {
 		t.Errorf("plan must include source 0, sibling 1, surge target 3; got %v", got)
+	}
+}
+
+// A retired replacement gang is pinned by the same rule as a live one:
+// the marker stays in the plan for as long as a source references the
+// index, so the scale-down wave cannot take the retirement away from it
+// mid-teardown. An UNREFERENCED cleanup marker is a different shape and
+// is left for the scale-down pipeline to reap.
+//
+// Cells: instance/Update/GangSurgeTargetCleanup/spec.replicasDown/before
+func TestInstancePlanIndices_GangCleanupMarkerPinnedWhileReferenced(t *testing.T) {
+	k := int32(1)
+	referenced := []InstanceStatus{
+		{Index: 0, Phase: InstancePhaseUpdating, RunningRevision: "comp-rev-v1aaaaaa",
+			Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: "Surge", SurgeIndex: &k}},
+		{Index: 1, Phase: InstancePhaseCreating,
+			Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: UpdateStepGangSurgeTargetCleanup}},
+	}
+	hit := map[int32]bool{}
+	for _, idx := range instancePlanIndices(referenced, 1) {
+		hit[idx] = true
+	}
+	if !hit[0] || !hit[1] {
+		t.Errorf("a referenced cleanup marker must stay pinned at replicas=1; got %v", instancePlanIndices(referenced, 1))
+	}
+
+	orphan := []InstanceStatus{
+		{Index: 0, Phase: InstancePhaseReady, RunningRevision: "comp-rev-v1aaaaaa"},
+		{Index: 1, Phase: InstancePhaseCreating,
+			Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: UpdateStepGangSurgeTargetCleanup}},
+	}
+	if got := instancePlanIndices(orphan, 1); len(got) != 1 || got[0] != 0 {
+		t.Errorf("an unreferenced cleanup marker must fall out for the scale-down pipeline; got %v", got)
 	}
 }
 

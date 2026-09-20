@@ -172,7 +172,7 @@ cells:
     outcome: ignore
     note: once the promote lands the index is an ordinary Ready Instance with no operation, so the restart pass owns a missing member from that point on
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestDetectRestartTrigger_PromotedGangTargetOwnsAMissingMember], kind: []}
     status: decided
   - state: Update/GangSurgeTarget
     event: pod.deleted
@@ -211,7 +211,7 @@ cells:
     guard: a replacement pod held the reason past the stuck-pod grace and the replacement pod set is not fully serving
     note: all seven are terminal waiting reasons, so the escalation pass stamps BOTH the source (its blame bucket is the replacement gang) and this marker Failed with the operation preserved; the source's Failed is what drives the abandon path. Unlike a single-pod surge, a gang target is never recycled in place
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestEscalation_WedgedGangReplacementFailsBothHalvesOfThePair], kind: []}
     status: decided
   - state: Update/GangSurgeTarget
     event: pod.waiting
@@ -240,7 +240,7 @@ cells:
     outcome: defer
     note: the stuck classifier skips pods carrying a deletionTimestamp, and the name is still occupied so no replacement pod is created; the update pass sweeps only the pods of the row it dispatches, and this marker is a different index, so the wait is bounded only by the operation deadline
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestEscalation_TerminatingMarkerPodEndsNothing], kind: []}
     status: decided
   - state: Update/GangSurgeTarget
     event: pod.nodeLost
@@ -322,7 +322,7 @@ cells:
     outcome: ignore
     note: the strategy is pinned for the life of the operation, so the gang surge stays in control and finishes under SurgeThenDrain; the edit reaches the pair at its next admitted attempt
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestEffectiveUpdateStrategy_GangSurgePairStaysOnThePinnedStrategy], kind: []}
     status: decided
   - state: Update/GangSurgeTarget
     event: spec.replicasUp
@@ -337,7 +337,7 @@ cells:
     note: the marker is pinned in the plan for as long as a source references the index, so the scale-down wave cannot pick it; the reduction takes effect once the surge resolves
     invariants: [marker.pinned.while.referenced]
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestInstancePlanIndices_GangSurgePinsPair], kind: []}
     status: decided
   - state: Update/GangSurgeTarget
     event: spec.pauseTrue
@@ -415,7 +415,7 @@ cells:
     outcome: defer
     note: a fresh migration record is not driven while any surge is in flight, and the source's Surge step is counted, so the request waits for the gang surge to resolve
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestPlan_MigrationRequestWaitsForAGangSurgeToResolve], kind: []}
     status: decided
   - state: Update/GangSurgeTarget
     event: spec.partition
@@ -524,7 +524,7 @@ cells:
     outcome: defer
     note: a refused gang-member create is classified as capacity-blocked and the QuotaExceeded waiting token is recorded on the surge row; the source's own deadline parks through it, because the governing operation and its clock live on the source while the pods are created under the surge index, and the parking step follows that SurgeIndex. A quota rejection leaves no pod to carry a scheduling gate, which is exactly why the wait is recorded on the Operation instead. The token is released on the first pass whose creates all land
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestGangSurgeCreate_QuotaExceeded_WaitsWithoutFailing], kind: []}
     status: decided
 
   # The marker's own escalation edges. Both stamp Phase Failed with the
@@ -689,7 +689,7 @@ cells:
     outcome: ignore
     note: the restart trigger in pkg/controller/v1beta1/workload/ops/update.go declines a row whose non-Create operation is preserved, so no pass recreates a terminal replacement pod and the row converges only through the stuck or deadline escalation; the gang surge path is untouched by the terminal-pod recycle, though the readiness gate it shares now rejects such a pod outright rather than reading its stale conditions as healthy
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestDetectRestartTrigger_GangSurgeMarkerIsNotRepairedOnItsOwn], kind: []}
     status: decided
   - state: Update/GangSurgeTarget
     event: pod.admitted
@@ -734,7 +734,7 @@ cells:
     guard: the surge index is pinned in the plan, which is what brings it under the top-level PodGroup pass that owns the reset
     note: the gang scheduler's Failed phase is absorbing, so the replacement group is deleted and rebuilt on a later pass with one PodGroupReset warning carrying its failure message; members are withheld until it exists. The surge row is untouched - no phase change, no waiting token, no RetryBlock - and a member still phase Failed holds the reset back until the recycle frees its name. The surge's own ensure only classifies the reading; the delete-and-rebuild belongs to the top-level pass
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestEscalation_GangFailedReadingLeavesTheSurgeMarkerUntouched], kind: []}
     status: decided
   - state: Update/GangSurgeTarget
     event: gang.podGroup
@@ -742,7 +742,7 @@ cells:
     outcome: defer
     note: neither reading exists on the PodGroup the controller watches - the vendored gang scheduler writes no Unknown phase and no ScheduleStartTime - so there is no group-level verdict on placement. A replacement gang the scheduler cannot place reaches this row on its MEMBER PODS, as PodScheduled=False with reason Unschedulable, and the pod-level hold parks the clock on that (see pod.unschedulable)
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestObserveGang_SchedulingPhasesReportNothing], kind: []}
     status: decided
   - state: Update/GangSurgeTarget
     event: endpoint.rotationIn
@@ -861,14 +861,14 @@ cells:
     guard: the rejected write is a replacement-pod create, whose object is a faithful render of the pinned surge target; a 422 on a status write is not classified and stays an opaque error
     note: a 422 on a gang member's create is permanent, so the surge row is disposed on the first rejection instead of at the deadline - LastFailure carries InvalidPodSpec plus the apiserver's explanation, a RetryBlock is recorded against the pinned surge target, and the operation is cleared with Phase=Failed. The disposal lands on the surge row, which is the index the create was issued under; the source keeps serving and its claim predicates read revision and step, never phase
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestGangSurgeCreate_RejectionDispositions], kind: []}
     status: decided
   - state: Update/GangSurgeTarget
     event: api.throttled
     outcome: defer
     note: a shed create is classified as throttled and writes nothing - no failure accounting, no deadline change. The server's Retry-After is deposited on the pass pacing, which floors the requeue so the gang surge wakes no earlier than the apiserver asked; the deadline keeps running through the shedding
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestGangSurgeCreate_RejectionDispositions], kind: []}
     status: decided
   - state: Update/GangSurgeTarget
     event: api.namespaceTerminating
@@ -877,14 +877,14 @@ cells:
     guard: the rejected write is a replacement-pod create
     note: no member can be created in a terminating namespace, so the surge row is disposed on the first rejection with NamespaceTerminating plus the apiserver's message on LastFailure and the operation cleared. Environment-caused, so no revision is blamed; the owner's own deletionTimestamp follows shortly and the teardown branch in pkg/controller/v1beta1/inferencereplica/teardown.go supersedes the surge
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestGangSurgeCreate_RejectionDispositions], kind: []}
     status: decided
   - state: Update/GangSurgeTarget
     event: timer.forceDelete
     outcome: ignore
     note: the update pass sweeps the Terminating pods of the row it is dispatching, and the replacement gang is a different index the source's pass never lists, so pkg/controller/v1beta1/workload/ops/force_delete.go is still unreachable from this marker
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestUpdateWithPods_MarkerPodsAreOutsideTheSourcesSweep], kind: []}
     status: decided
   - state: Update/GangSurgeTarget
     event: timer.stuckPodGrace
@@ -1173,7 +1173,7 @@ cells:
     outcome: defer
     note: the retirement waits for the pod to disappear and cannot reach the force-delete sweep, which covers only the pods of the row the update pass dispatches and never this separate marker index, so the wait is bounded only by the operation deadline and, past that, by operator action
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestEscalation_TerminatingMarkerPodEndsNothing], kind: []}
     status: decided
   - state: Update/GangSurgeTargetCleanup
     event: pod.nodeLost
@@ -1230,7 +1230,7 @@ cells:
     note: the marker stays pinned while its source references the index, so the scale-down wave cannot take the retirement away from it; an UNREFERENCED marker is a different shape and is reaped by the scale-down pipeline
     invariants: [marker.pinned.while.referenced]
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestInstancePlanIndices_GangCleanupMarkerPinnedWhileReferenced], kind: []}
     status: decided
   - state: Update/GangSurgeTargetCleanup
     event: spec.pauseTrue
@@ -1288,7 +1288,7 @@ cells:
     outcome: defer
     note: a fresh migration record is not driven while a surge is counted in flight, and the source still carries its Surge step until the retirement resets it
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestPlan_MigrationRequestWaitsForAGangSurgeToResolve], kind: []}
     status: decided
   - state: Update/GangSurgeTargetCleanup
     event: spec.partition
@@ -1565,7 +1565,7 @@ cells:
     outcome: ignore
     note: the update pass sweeps the Terminating pods of the row it is dispatching, and the retired marker is a different index the source's pass never lists, so pkg/controller/v1beta1/workload/ops/force_delete.go stays unreachable, the clock elapsing on a retired pod force-deletes nothing and the marker cannot complete until an operator intervenes
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestUpdateWithPods_MarkerPodsAreOutsideTheSourcesSweep], kind: []}
     status: decided
   - state: Update/GangSurgeTargetCleanup
     event: timer.stuckPodGrace

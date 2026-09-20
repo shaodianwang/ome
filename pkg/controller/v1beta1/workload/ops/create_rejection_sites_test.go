@@ -189,14 +189,14 @@ func TestSurgeCreate_QuotaExceeded_WaitsWithoutFailing(t *testing.T) {
 	}
 }
 
-// TestGangSurgeCreate_QuotaExceeded_WaitsWithoutFailing: the gang surge
-// creates a whole replacement gang at once, so it is the most likely site
-// to exhaust a quota. It must wait like every other site rather than
-// erroring the pass — AND the wait must reach the SOURCE, whose operation
-// and deadline govern the rollout while the pods are created under the
-// surge index. The test drives the two readers that consume it (the
-// deadline park, the escalation skip) to prove the source is held.
-func TestGangSurgeCreate_QuotaExceeded_WaitsWithoutFailing(t *testing.T) {
+// gangSurgeSourceIndex is the source half of the gang surge fixture pair.
+const gangSurgeSourceIndex = int32(0)
+
+// gangSurgeRejectionFixture is a gang surge mid-flight: the source at
+// index 0 pinned to the replacement gang's marker at index 2, both on
+// the target revision, with a mutation store the pass writes through.
+func gangSurgeRejectionFixture(t *testing.T) (workload.ReconcileInput, *terminalMutationStore, int32, string) {
+	t.Helper()
 	legacyResetExpectations(t)
 	const isvcName, namespace = "gang-quota", "test-ns"
 	surgeIndex := int32(2)
@@ -259,6 +259,20 @@ func TestGangSurgeCreate_QuotaExceeded_WaitsWithoutFailing(t *testing.T) {
 		FinalizeInstanceResources:            func(context.Context, int32) (bool, error) { return true, nil },
 		ApplyInstanceMutationsWithRetryBlock: store.apply,
 	}
+	return input, store, surgeIndex, revision
+}
+
+// TestGangSurgeCreate_QuotaExceeded_WaitsWithoutFailing: the gang surge
+// creates a whole replacement gang at once, so it is the most likely site
+// to exhaust a quota. It must wait like every other site rather than
+// erroring the pass — AND the wait must reach the SOURCE, whose operation
+// and deadline govern the rollout while the pods are created under the
+// surge index. The test drives the two readers that consume it (the
+// deadline park, the escalation skip) to prove the source is held.
+//
+// Cells: instance/Update/GangSurgeTarget/api.quotaDenied/before
+func TestGangSurgeCreate_QuotaExceeded_WaitsWithoutFailing(t *testing.T) {
+	input, store, surgeIndex, revision := gangSurgeRejectionFixture(t)
 	base := legacyNewFakeClient(t)
 	deps := legacyTestDeps(rejectPodCreates(t, base, siteQuotaError()))
 	plan := legacyMultiPodComponentPlan(workload.UpdateStrategySurgeThenDrain)
@@ -290,7 +304,7 @@ func TestGangSurgeCreate_QuotaExceeded_WaitsWithoutFailing(t *testing.T) {
 	if blocked.Operation.SurgeIndex != nil {
 		t.Errorf("surge row Operation.SurgeIndex: got %v want nil (the pin lives on the source)", blocked.Operation.SurgeIndex)
 	}
-	if src := store.statuses[source.Index]; src.Operation == nil || src.Operation.SurgeIndex == nil ||
+	if src := store.statuses[gangSurgeSourceIndex]; src.Operation == nil || src.Operation.SurgeIndex == nil ||
 		*src.Operation.SurgeIndex != surgeIndex {
 		t.Errorf("source Operation: got %+v want the surge pin the readers follow", src.Operation)
 	}
@@ -462,6 +476,103 @@ func TestRestartPhaseB_RejectionDispositions(t *testing.T) {
 			}
 			if len(*blocks) != tc.wantBlocks {
 				t.Errorf("RetryBlock writes: got %+v want %d", *blocks, tc.wantBlocks)
+			}
+		})
+	}
+}
+
+// gangNamespaceTerminatingError is the apiserver refusing a gang member
+// because the namespace is on its way out.
+func gangNamespaceTerminatingError(name string) error {
+	return &apierrors.StatusError{ErrStatus: metav1.Status{
+		Status:  metav1.StatusFailure,
+		Code:    403,
+		Reason:  metav1.StatusReasonForbidden,
+		Message: `pods "` + name + `" is forbidden: unable to create new content in namespace test-ns because it is being terminated`,
+		Details: &metav1.StatusDetails{
+			Kind: "pods", Name: name,
+			Causes: []metav1.StatusCause{{Type: corev1.NamespaceTerminatingCause, Message: "namespace test-ns is being terminated"}},
+		},
+	}}
+}
+
+// TestGangSurgeCreate_RejectionDispositions: a quota refusal is the one
+// gang-member rejection worth waiting out. The permanent ones are not —
+// a 422 and a terminating namespace both dispose the surge row on the
+// first rejection rather than idling it to the deadline, and they differ
+// only in whether a revision is to blame. A 429 is neither: it is pacing,
+// and it writes nothing at all.
+//
+// Cells: instance/Update/GangSurgeTarget/api.invalid/before, instance/Update/GangSurgeTarget/api.namespaceTerminating/before, instance/Update/GangSurgeTarget/api.throttled[TooManyRequests]/before
+func TestGangSurgeCreate_RejectionDispositions(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		reject     error
+		wantFailed bool
+		wantReason string
+		wantBlocks int
+	}{
+		{
+			name:       "invalid pod spec",
+			reject:     siteInvalidError(),
+			wantFailed: true,
+			wantReason: workload.RejectionReasonInvalidPodSpec,
+			wantBlocks: 1,
+		},
+		{
+			name:       "namespace terminating",
+			reject:     gangNamespaceTerminatingError("engine-pod"),
+			wantFailed: true,
+			wantReason: workload.RejectionReasonNamespaceTerminating,
+		},
+		{
+			name:   "throttled",
+			reject: apierrors.NewTooManyRequests("apiserver is shedding load", 7),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input, store, surgeIndex, revision := gangSurgeRejectionFixture(t)
+			blocks := &[]string{}
+			input.MutateRetryBlock = func(_ context.Context, rev string, mutate func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
+				b := workload.RetryBlock{TargetRevision: rev}
+				if d := mutate(&b); d != workload.RetryBlockUnchanged {
+					*blocks = append(*blocks, rev)
+				}
+				return nil
+			}
+			base := legacyNewFakeClient(t)
+			deps := legacyTestDeps(rejectPodCreates(t, base, tc.reject))
+			plan := legacyMultiPodComponentPlan(workload.UpdateStrategySurgeThenDrain)
+			target := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: revision}}
+
+			if _, err := gangSurgeUpdate(context.Background(), deps, input, plan, plan.Instances[0], target); err != nil {
+				t.Fatalf("gangSurgeUpdate: %v (a classified rejection is disposed, not returned)", err)
+			}
+
+			marker, found := store.statuses[surgeIndex]
+			if !found {
+				t.Fatalf("surge marker missing after the rejected pass")
+			}
+			if tc.wantFailed {
+				if marker.Phase != workload.InstancePhaseFailed {
+					t.Fatalf("marker Phase: got %q want Failed (the rejection is permanent)", marker.Phase)
+				}
+				if marker.LastFailure == nil || marker.LastFailure.Reason != tc.wantReason {
+					t.Errorf("marker LastFailure: got %+v want reason %s", marker.LastFailure, tc.wantReason)
+				}
+				if marker.Operation != nil {
+					t.Errorf("marker Operation: got %+v want cleared with the disposal", marker.Operation)
+				}
+			} else {
+				if marker.Phase == workload.InstancePhaseFailed {
+					t.Errorf("marker Phase: got Failed want the surge still in flight (throttling is paced)")
+				}
+				if marker.LastFailure != nil {
+					t.Errorf("marker LastFailure: got %+v want none (throttling writes no failure accounting)", marker.LastFailure)
+				}
+			}
+			if len(*blocks) != tc.wantBlocks {
+				t.Errorf("RetryBlock writes: got %v want %d (only a bad pod spec blames the revision)", *blocks, tc.wantBlocks)
 			}
 		})
 	}

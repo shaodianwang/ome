@@ -112,7 +112,7 @@ func TestObserveGang_PhaseFailed(t *testing.T) {
 // instead, so no row of any state ever sees an Unschedulable or
 // ScheduleTimeout reading: the classifier is where that is settled.
 //
-// Cells: instance/Create/CreatePods/gang.podGroup[Unschedulable]/before, instance/Create/CreatePods/gang.podGroup[ScheduleTimeout]/before, instance/Failed/gang.podGroup[Unschedulable]/before, instance/Failed/gang.podGroup[ScheduleTimeout]/before, instance/Restart/Drain/gang.podGroup[Unschedulable]/before, instance/Restart/Drain/gang.podGroup[ScheduleTimeout]/before
+// Cells: instance/Create/CreatePods/gang.podGroup[Unschedulable]/before, instance/Create/CreatePods/gang.podGroup[ScheduleTimeout]/before, instance/Failed/gang.podGroup[Unschedulable]/before, instance/Failed/gang.podGroup[ScheduleTimeout]/before, instance/Restart/Drain/gang.podGroup[Unschedulable]/before, instance/Restart/Drain/gang.podGroup[ScheduleTimeout]/before, instance/Empty/gang.podGroup[Unschedulable]/before, instance/Empty/gang.podGroup[ScheduleTimeout]/before, instance/Pending/gang.podGroup[Unschedulable]/before, instance/Pending/gang.podGroup[ScheduleTimeout]/before, instance/Ready/gang.podGroup[Unschedulable]/before, instance/Ready/gang.podGroup[ScheduleTimeout]/before, instance/Update/GangSurgeTarget/gang.podGroup[Unschedulable]/before, instance/Update/GangSurgeTarget/gang.podGroup[ScheduleTimeout]/before
 func TestObserveGang_SchedulingPhasesReportNothing(t *testing.T) {
 	for _, phase := range []schedulingv1alpha1.PodGroupPhase{
 		schedulingv1alpha1.PodGroupPending,
