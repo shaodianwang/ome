@@ -171,6 +171,8 @@ func quotaPodError(name string) error {
 // revision reproduces it, so the rejected Instance is failed with a
 // RetryBlock against its target revision — while every other Instance in
 // the same batch is created as usual.
+//
+// Cells: instance/Create/CreatePods/api.invalid/before
 func TestCreate_InvalidPodSpec_FailsOnlyTheRejectedInstance(t *testing.T) {
 	c, isvc, input, plan, target, recorder, writes := rejectionFixture(t, 2, func(podName string) error {
 		if podName == "llama-70b-engine-0-default-0" {
@@ -225,6 +227,8 @@ func TestCreate_InvalidPodSpec_FailsOnlyTheRejectedInstance(t *testing.T) {
 // namespace is going away, which no revision can fix. The Instance is
 // failed so the operator sees why, but the revision keeps a clean retry
 // ladder.
+//
+// Cells: instance/Create/CreatePods/api.namespaceTerminating/before
 func TestCreate_NamespaceTerminating_FailsWithoutBlamingTheRevision(t *testing.T) {
 	c, isvc, input, plan, target, recorder, writes := rejectionFixture(t, 1, namespaceTerminatingPodError)
 
@@ -411,6 +415,8 @@ func TestCreate_QuotaCleared_ReleasesTheWaitingToken(t *testing.T) {
 // TestCreate_Throttled_HonorsServerDelay: a 429 carrying Retry-After is
 // the apiserver pacing us. The pass waits exactly that long and touches
 // no status — the attempt is intact.
+//
+// Cells: instance/Create/CreatePods/api.throttled[TooManyRequests]/before
 func TestCreate_Throttled_HonorsServerDelay(t *testing.T) {
 	c, isvc, input, plan, target, recorder, writes := rejectionFixture(t, 1, func(podName string) error {
 		return apierrors.NewTooManyRequests("apiserver is shedding load", 7)

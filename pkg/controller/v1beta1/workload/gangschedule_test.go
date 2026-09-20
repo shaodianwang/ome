@@ -565,3 +565,157 @@ func TestEscalation_PodHoldWinsOverGangHold(t *testing.T) {
 		t.Errorf("Phase: got %q want Creating (inside the grace)", got.Phase)
 	}
 }
+
+// TestEscalation_GangReadingsOnAFailedRowAreInert: a row already stamped
+// Failed carries no attempt for a wait to park and no verdict left to
+// raise, and the escalation pass skips it before it reads any gang
+// evidence. Every reading therefore reaches it inert — no waiting token,
+// no phase change, no warning and no RetryBlock — whichever one it is.
+// Withholding the members and resetting the group are the PodGroup
+// pass's business; the row is not where they show up.
+//
+// Cells: instance/Failed/gang.podGroup[Terminating]/before, instance/Failed/gang.podGroup[OwnershipConflict]/before, instance/Failed/gang.podGroup[PhaseFailed]/before
+func TestEscalation_GangReadingsOnAFailedRowAreInert(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		state   workload.GangState
+		message string
+	}{
+		{"terminating", workload.GangStateTerminating, "PodGroup svc-engine-0 is terminating; the gang is announced again once it is collected"},
+		{"ownership conflict", workload.GangStateOwnershipConflict, "PodGroup svc-engine-0 is controlled by StatefulSet/other, not by this owner"},
+		{"phase failed", workload.GangStateFailed, gangFailedMessage},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input, rec := escalationFixture([]workload.InstanceStatus{{
+				Index:    0,
+				Phase:    workload.InstancePhaseFailed,
+				PodCount: 2,
+			}})
+			input.Gangs = gangObservations(0, tc.state, tc.message)
+
+			if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 2), pendingGangPods()); err != nil {
+				t.Fatalf("escalation pass: %v", err)
+			}
+
+			got := rec.store[0]
+			if got.Phase != workload.InstancePhaseFailed {
+				t.Errorf("Phase: got %q want Failed (a spent row is not re-ended)", got.Phase)
+			}
+			if got.Operation != nil {
+				t.Errorf("Operation: got %+v want none (a Failed row has no clock to park)", got.Operation)
+			}
+			if len(rec.warns) != 0 {
+				t.Errorf("WarnInstanceFailed: got %v want none", rec.warns)
+			}
+			if len(rec.blocks) != 0 {
+				t.Errorf("RetryBlock: got %v want none", rec.blocks)
+			}
+		})
+	}
+}
+
+// restartingGang is a two-pod repair in flight with a live deadline —
+// the shape Phase B presents while it waits for the Instance's group.
+func restartingGang(deadline time.Time) []workload.InstanceStatus {
+	return []workload.InstanceStatus{{
+		Index:       0,
+		Incarnation: 2,
+		Phase:       workload.InstancePhaseRestarting,
+		PodCount:    2,
+		Operation: &workload.InstanceOperation{
+			Type:     workload.InstanceOperationRestart,
+			Step:     "Drain",
+			Reason:   "pod lost",
+			Deadline: metav1.NewTime(deadline),
+		},
+	}}
+}
+
+// TestEscalation_GangReadingsOnARepairRow: a repair meets the same four
+// gang readings a create does and answers them the same way — a name
+// being collected is a wait that resolves itself, a name held by another
+// controller ends the repair, the scheduler's Failed phase resets the
+// group without touching the row, and an absent object releases the
+// token the row was carrying.
+//
+// Cells: instance/Restart/Drain/gang.podGroup[Terminating]/before, instance/Restart/Drain/gang.podGroup[OwnershipConflict]/before, instance/Restart/Drain/gang.podGroup[PhaseFailed]/before, instance/Restart/Drain/gang.podGroup[Deleted]/before
+func TestEscalation_GangReadingsOnARepairRow(t *testing.T) {
+	now := time.Now()
+
+	t.Run("terminating parks the repair", func(t *testing.T) {
+		input, rec := escalationFixture(restartingGang(now.Add(30 * time.Minute)))
+		input.Gangs = gangObservations(0, workload.GangStateTerminating, gangTerminatingMessage)
+		if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 2), nil); err != nil {
+			t.Fatalf("escalation pass: %v", err)
+		}
+		got := rec.store[0]
+		if got.Phase != workload.InstancePhaseRestarting {
+			t.Errorf("Phase: got %q want Restarting", got.Phase)
+		}
+		if got.Operation == nil || got.Operation.Waiting != workload.WaitingReasonPodGroupTerminating {
+			t.Errorf("Operation.Waiting: got %+v want %q", got.Operation, workload.WaitingReasonPodGroupTerminating)
+		}
+		if !workload.OperationExternallyHeld(got.Operation) {
+			t.Errorf("Operation: got %+v want externally held so the deadline parks", got.Operation)
+		}
+		if len(rec.warns) != 0 {
+			t.Errorf("WarnInstanceFailed: got %v want none", rec.warns)
+		}
+	})
+
+	t.Run("ownership conflict ends the repair", func(t *testing.T) {
+		input, rec := escalationFixture(restartingGang(now.Add(30 * time.Minute)))
+		input.Gangs = gangObservations(0, workload.GangStateOwnershipConflict, gangConflictMessage)
+		if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 2), pendingGangPods()); err != nil {
+			t.Fatalf("escalation pass: %v", err)
+		}
+		got := rec.store[0]
+		if got.Phase != workload.InstancePhaseFailed {
+			t.Errorf("Phase: got %q want Failed", got.Phase)
+		}
+		if got.LastFailure == nil || got.LastFailure.Reason != workload.PodGroupOwnershipConflictReason {
+			t.Errorf("LastFailure.Reason: got %+v want %q", got.LastFailure, workload.PodGroupOwnershipConflictReason)
+		}
+		if got.Operation == nil {
+			t.Errorf("Operation: got none want the repair preserved for the abandon path")
+		}
+		if len(rec.blocks) != 0 {
+			t.Errorf("RetryBlock: got %v want none (environment-caused)", rec.blocks)
+		}
+	})
+
+	t.Run("the scheduler's failed phase leaves the row alone", func(t *testing.T) {
+		input, rec := escalationFixture(restartingGang(now.Add(30 * time.Minute)))
+		input.Gangs = gangObservations(0, workload.GangStateFailed, gangFailedMessage)
+		if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 2), pendingGangPods()); err != nil {
+			t.Fatalf("escalation pass: %v", err)
+		}
+		got := rec.store[0]
+		if got.Phase != workload.InstancePhaseRestarting {
+			t.Errorf("Phase: got %q want Restarting (the group is reset, not the row)", got.Phase)
+		}
+		if got.Operation == nil || got.Operation.Waiting != "" {
+			t.Errorf("Operation.Waiting: got %+v want none (a reset is not a wait)", got.Operation)
+		}
+		if len(rec.warns) != 0 || len(rec.blocks) != 0 {
+			t.Errorf("warns=%v blocks=%v want neither", rec.warns, rec.blocks)
+		}
+	})
+
+	t.Run("an absent group releases the token", func(t *testing.T) {
+		insts := restartingGang(now.Add(30 * time.Minute))
+		insts[0].Operation.Waiting = workload.WaitingReasonPodGroupTerminating
+		input, rec := escalationFixture(insts)
+		input.Gangs = gangObservations(0, workload.GangStateNone, "")
+		if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 2), pendingGangPods()); err != nil {
+			t.Fatalf("escalation pass: %v", err)
+		}
+		got := rec.store[0]
+		if got.Operation == nil || got.Operation.Waiting != "" {
+			t.Errorf("Operation.Waiting: got %+v want cleared", got.Operation)
+		}
+		if got.Phase != workload.InstancePhaseRestarting {
+			t.Errorf("Phase: got %q want Restarting", got.Phase)
+		}
+	})
+}

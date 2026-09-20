@@ -472,6 +472,8 @@ func TestConsumeResetInstances_MalformedValue_WarningConsumed(t *testing.T) {
 // simulated crash): the annotation survives and the error re-drives the
 // request. Pass two finds nothing to do — no delete, no status write,
 // no InstancesReset event — and just consumes.
+//
+// Cells: instance/Failed/spec.resetInstances[indexList]/after@T-failed-reset
 func TestConsumeResetInstances_CrashBeforeConsume_RedeliveryIsNoOp(t *testing.T) {
 	g := gomega.NewWithT(t)
 	crash := true

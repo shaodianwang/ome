@@ -52,7 +52,7 @@ cells:
     outcome: ignore
     note: PodReady is half of the promote bar the create shares with every other path; it commits nothing on its own, because the set must also be complete and past its minReadySeconds window
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestCreate_AllPodsReady_FlipsServingAndMarksReady, TestCreate_PromotionWaitsOutTheWindowAndRequeuesAtItsRemainder], kind: []}
     status: decided
 
   - state: Create/CreatePods
@@ -359,7 +359,7 @@ cells:
     outcome: defer
     note: the elapsed window releases the last promote guard but commits nothing by itself; the next pass re-checks that the set is complete and every pod PodReady before stamping Ready
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestCreate_PromotionWaitsOutTheWindowAndRequeuesAtItsRemainder], kind: []}
     status: decided
 
   - state: Create/CreatePods
@@ -476,7 +476,7 @@ cells:
     guard: node death is proven - the Node object is gone, or has carried an unreachable taint or a NotReady condition past the threshold - and a force-delete policy is configured; with neither, the row holds instead of acting
     note: an Unknown pod is never recycled by name, because the node has stopped reporting rather than the pod having died and a returning kubelet may still be running it. It is routed to the force-delete sweep instead, the same authority pod.nodeLost answers to, which deletes it only on proven node death under a configured force-delete policy; until then the operation carries a NodeUnknown waiting token with its deadline parked, so the hold is visible rather than silently spending the attempt's budget, and the rebuild resumes on the resulting absence
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestCreate_UnknownPhasePodRoutesToTheForceDeleteSweep, TestCreate_UnknownPhasePodKeepsThePassRequeuing], kind: []}
     status: decided
   - state: Create/CreatePods
     event: pod.admitted
@@ -534,7 +534,7 @@ cells:
     outcome: defer
     note: neither reading exists on the PodGroup the controller watches - the vendored gang scheduler writes no Unknown phase and no ScheduleStartTime, and PodGroupStatus distinguishes only "fewer members than minMember exist yet" from "they exist and are being placed", which is the ordinary shape of a healthy gang coming up. A gang that cannot be placed reaches this controller on its MEMBER PODS instead, as PodScheduled=False with reason Unschedulable written by the coscheduling plugin, and the pod-level scheduler hold parks the clock on that (see pod.unschedulable)
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestObserveGang_SchedulingPhasesReportNothing], kind: []}
     status: decided
 
   - state: Create/CreatePods
@@ -644,7 +644,7 @@ cells:
     guard: the rejected write is a pod create, whose object is a faithful render of the attempt's target revision
     note: a 422 on a pod create is permanent - the same revision reproduces it byte for byte - so the attempt ends here rather than at the deadline. The rejection classifies as workload-caused - LastFailure carries InvalidPodSpec plus the apiserver's own explanation, a RetryBlock is recorded against the attempt's target revision before the operation is cleared, and Phase goes Failed in one write. A corrected revision is admitted immediately; the held one is not
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestCreate_InvalidPodSpec_FailsOnlyTheRejectedInstance], kind: []}
     status: decided
 
   - state: Create/CreatePods
@@ -652,7 +652,7 @@ cells:
     outcome: defer
     note: a shed create is classified as throttled and nothing is written - no failure accounting, no deadline change. The server's Retry-After is deposited on the pass pacing, which floors the requeue, so the attempt wakes on the server's own schedule rather than on controller-runtime backoff; the operation deadline keeps running through the shedding unless a pod of the attempt is admission-gated
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestCreate_Throttled_HonorsServerDelay], kind: []}
     status: decided
 
   - state: Create/CreatePods
@@ -661,7 +661,7 @@ cells:
     to: Failed
     note: no create can succeed in a terminating namespace, so the attempt ends on the first rejection instead of burning the deadline. The rejection classifies as environment-caused - LastFailure carries NamespaceTerminating plus the apiserver's message, the operation is cleared and Phase goes Failed - and no revision is blamed, so the retry ladder stays clean for the same revision in a healthy namespace
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestCreate_NamespaceTerminating_FailsWithoutBlamingTheRevision], kind: []}
     status: decided
 
   - state: Create/CreatePods

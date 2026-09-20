@@ -67,20 +67,21 @@ type gridEntry struct {
 	Synthesized bool        `json:"synthesized"`
 }
 
-// coverageOut names the checks that prove a cell, one list per placement.
-// Every list serializes, empty rather than absent, so a consumer never has
-// to distinguish "no coverage" from "field missing".
+// coverageOut names the checks that prove a cell, one list per coverage
+// kind. Every list serializes, empty rather than absent, so a consumer
+// never has to distinguish "no coverage" from "field missing".
 type coverageOut struct {
-	Unit []string `json:"unit"`
-	Perm []string `json:"perm"`
-	Kind []string `json:"kind"`
+	Unit   []string `json:"unit"`
+	Perm   []string `json:"perm"`
+	Kind   []string `json:"kind"`
+	Replay []string `json:"replay"`
 }
 
 func coverageOf(c *rolloutspec.Coverage) coverageOut {
 	if c == nil {
-		return coverageOut{Unit: []string{}, Perm: []string{}, Kind: []string{}}
+		return coverageOut{Unit: []string{}, Perm: []string{}, Kind: []string{}, Replay: []string{}}
 	}
-	return coverageOut{Unit: nonNil(c.Unit), Perm: nonNil(c.Perm), Kind: nonNil(c.Kind)}
+	return coverageOut{Unit: nonNil(c.Unit), Perm: nonNil(c.Perm), Kind: nonNil(c.Kind), Replay: nonNil(c.Replay)}
 }
 
 func nonNil(s []string) []string {

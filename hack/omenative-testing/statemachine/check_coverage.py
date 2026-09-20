@@ -15,6 +15,14 @@ resolve to a grid cell: a mistyped or stale coordinate otherwise points a
 reader at nothing. `perm` and `kind` entries name suite specs rather than
 Go functions and are not resolved here.
 
+A replay scenario records coverage the same two ways: the cell names the
+scenario in `coverage.replay`, and the scenario names the cells it drives
+in its own `cells:` list. A `coverage.replay` name must resolve to a
+scenario file under tests/rolloutspec/replay/scenarios, the same way a
+`coverage.unit` name must resolve to a Go test. The other direction — that
+a scenario's cited ids are real grid coordinates — is gated in Go by the
+replay suite's TestCellCitationsResolve.
+
 The third output is informational: per machine, how many decided cells
 carry coverage and which ones do not. That is the remaining work, not a
 failure — the frozen contract in the rolloutspec validator is what turns
@@ -41,6 +49,11 @@ NA = "n/a"
 # tests may cite cell ids.
 TEST_ROOTS = ("pkg", "tests")
 CELL_REF_ROOT = "pkg"
+
+# Where a coverage.replay name resolves to, and the kinds of coverage a
+# decided cell may carry.
+REPLAY_SCENARIO_DIR = "tests/rolloutspec/replay/scenarios"
+COVERAGE_KINDS = ("unit", "perm", "kind", "replay")
 
 CELLS_COMMENT = re.compile(r"^\s*//\s*Cells:(.*)$")
 GO_FUNC = re.compile(r"^func\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", re.MULTILINE)
@@ -70,6 +83,12 @@ def go_test_funcs(repo):
     return names
 
 
+def replay_scenarios(repo):
+    """Collect the scenario names available to a coverage.replay entry."""
+    directory = Path(repo).joinpath(REPLAY_SCENARIO_DIR)
+    return {path.stem for path in directory.glob("*.yaml")}
+
+
 def cell_refs(repo):
     """Collect (path, line number, cell id) for every `// Cells:` citation."""
     out = []
@@ -85,17 +104,25 @@ def cell_refs(repo):
     return out
 
 
-def check(grid, funcs, refs):
+def check(grid, funcs, refs, scenarios=()):
     """Return the list of violation messages, empty when the two agree."""
     problems = []
+    scenarios = set(scenarios)
     for cell in grid:
         if cell.get("status") != DECIDED:
             continue
-        for name in (cell.get("coverage") or {}).get("unit") or []:
+        coverage = cell.get("coverage") or {}
+        for name in coverage.get("unit") or []:
             if name not in funcs:
                 problems.append(
                     f"{cell['id']}: coverage.unit names {name}, "
                     f"which is no Go test function under {_roots()}"
+                )
+        for name in coverage.get("replay") or []:
+            if name not in scenarios:
+                problems.append(
+                    f"{cell['id']}: coverage.replay names {name}, "
+                    f"which is no scenario under {REPLAY_SCENARIO_DIR}/"
                 )
     ids = {cell.get("id") for cell in grid}
     for path, lineno, cid in refs:
@@ -118,7 +145,7 @@ def report(grid):
         machine = cell["id"].split("/", 1)[0]
         bucket = out.setdefault(machine, {"covered": 0, "uncovered": []})
         coverage = cell.get("coverage") or {}
-        if any(coverage.get(kind) for kind in ("unit", "perm", "kind")):
+        if any(coverage.get(kind) for kind in COVERAGE_KINDS):
             bucket["covered"] += 1
         else:
             bucket["uncovered"].append(cell["id"])
@@ -137,7 +164,12 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     grid = load_grid(args.grid)
-    problems = check(grid, go_test_funcs(args.repo), cell_refs(args.repo))
+    problems = check(
+        grid,
+        go_test_funcs(args.repo),
+        cell_refs(args.repo),
+        replay_scenarios(args.repo),
+    )
 
     for machine, counts in sorted(report(grid).items()):
         total = counts["covered"] + len(counts["uncovered"])

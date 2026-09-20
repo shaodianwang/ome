@@ -816,3 +816,152 @@ func TestUpdateWithPods_ForceDeletesStuckTerminatingSource(t *testing.T) {
 		})
 	}
 }
+
+// A dead node is never an input of its own to the drain: it becomes
+// actionable only through a pod already Terminating on it, aged from the
+// taint's own TimeAdded. The same node under a pod nobody has deleted
+// yet buys nothing — that pod is the ordinary drain's business.
+//
+// Cells: instance/Delete/Drain/pod.nodeLost[UnreachableTaint]/before
+func TestDeleteBatch_NodeDeathActsOnlyThroughATerminatingPod(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		terminating bool
+		wantForced  bool
+	}{
+		{name: "terminating pod on the dead node", terminating: true, wantForced: true},
+		{name: "live pod on the dead node", terminating: false, wantForced: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			owner := deleteBatchOwner()
+			status := deleteOwnedStatus(0, fdNow.Add(-time.Minute))
+			pod := fdTerminatingPod("wedge-0", "dead-node", overdueTS)
+			if !tc.terminating {
+				pod.DeletionTimestamp = nil
+			}
+
+			var deletes []recordedDeleteOpts
+			funcs := fdDeleteRecorder(&deletes)
+			c := fdFakeClient(t, &funcs, fdStoredCopy(pod), fdNodeUnreachable("dead-node", 10*time.Minute))
+
+			input := deleteBatchInput(owner, []workload.InstanceStatus{status})
+			input.Clock = clocktesting.NewFakeClock(fdNow)
+			input.ForceDelete = fdPolicy()
+			input.ApplyInstanceMutationsWithRetryBlock = newDeleteMutationStore(owner, []workload.InstanceStatus{status}).apply
+
+			if _, err := DeleteBatch(context.Background(), workload.Deps{
+				Client: c, Expectations: workload.NewExpectations(),
+			}, input, deleteBatchPlan(), nil, map[int32][]*corev1.Pod{0: {pod}}); err != nil {
+				t.Fatalf("DeleteBatch: %v", err)
+			}
+
+			var forced int
+			for _, d := range deletes {
+				if d.grace != nil && *d.grace == 0 {
+					forced++
+				}
+			}
+			if tc.wantForced && forced != 1 {
+				t.Fatalf("force-deletes: got %d want 1 (%+v)", forced, deletes)
+			}
+			if !tc.wantForced {
+				if forced != 0 {
+					t.Fatalf("force-deletes: got %d want 0 (%+v)", forced, deletes)
+				}
+				if len(deletes) != 1 {
+					t.Fatalf("deletes: got %+v want the ordinary drain's one", deletes)
+				}
+			}
+		})
+	}
+}
+
+// A drain reads the operator knobs that bound work it is not doing: a
+// PodGroup is built by a create, not torn down by a delete; the
+// migration caps bound requests the wave makes none of; and the
+// RetryBlock prune never reads a Deleting row. The requeue cadence is
+// read, but only to pace the next wake-up — the explicit wait this pass
+// already holds, a node-death boundary, outranks it. None of them
+// changes what the drain decides.
+//
+// Cells: instance/Delete/Drain/config.changed[requeue]/before, instance/Delete/Drain/config.changed[gangScheduleTimeout]/before, instance/Delete/Drain/config.changed[audit]/before, instance/Delete/Drain/config.changed[retryBlockHistoryLimit]/before
+func TestDeleteBatch_OperatorConfigChangesDoNotChangeWhatTheDrainDecides(t *testing.T) {
+	// A pod already Terminating on a node whose unreachable evidence is
+	// younger than the threshold: the drain is waiting on a boundary it
+	// computed, which is the case a cadence change could distort.
+	run := func(t *testing.T, change func(*workload.ReconcileInput, *workload.ComponentPlan)) (DeleteBatchResult, []recordedDeleteOpts) {
+		t.Helper()
+		owner := deleteBatchOwner()
+		status := deleteOwnedStatus(0, fdNow.Add(-time.Minute))
+		pod := fdTerminatingPod("wedge-0", "node-a", overdueTS)
+		var deletes []recordedDeleteOpts
+		funcs := fdDeleteRecorder(&deletes)
+		c := fdFakeClient(t, &funcs, fdStoredCopy(pod), fdNodeNotReady("node-a", 2*time.Minute))
+
+		input := deleteBatchInput(owner, []workload.InstanceStatus{status})
+		input.Clock = clocktesting.NewFakeClock(fdNow)
+		input.ForceDelete = fdPolicy()
+		input.ScaleDownRequeueInterval = 30 * time.Second
+		input.ApplyInstanceMutationsWithRetryBlock = newDeleteMutationStore(owner, []workload.InstanceStatus{status}).apply
+		plan := deleteBatchPlan()
+		if change != nil {
+			change(&input, &plan)
+		}
+
+		result, err := DeleteBatch(context.Background(), workload.Deps{
+			Client: c, Expectations: workload.NewExpectations(),
+		}, input, plan, nil, map[int32][]*corev1.Pod{0: {pod}})
+		if err != nil {
+			t.Fatalf("DeleteBatch: %v", err)
+		}
+		return result, deletes
+	}
+
+	baseline, baselineDeletes := run(t, nil)
+	if len(baselineDeletes) != 0 {
+		t.Fatalf("baseline deletes: got %+v want none; the node evidence is still young", baselineDeletes)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		change func(*workload.ReconcileInput, *workload.ComponentPlan)
+	}{
+		{
+			name: "requeue cadence",
+			change: func(in *workload.ReconcileInput, _ *workload.ComponentPlan) {
+				in.ScaleDownRequeueInterval = 10 * time.Minute
+				in.Requeue = workload.RequeueIntervals{Operation: 9 * time.Minute, Gate: 8 * time.Minute}
+			},
+		},
+		{
+			name: "gang schedule clamp",
+			change: func(_ *workload.ReconcileInput, plan *workload.ComponentPlan) {
+				plan.GangScheduleTimeout = &workload.GangScheduleTimeoutClamp{Min: time.Minute, Max: 10 * time.Minute}
+			},
+		},
+		{
+			name: "migration audit caps",
+			change: func(in *workload.ReconcileInput, _ *workload.ComponentPlan) {
+				in.MigrationAudit = &workload.MigrationAuditPolicy{MaxInFlight: 1, MaxPerWindow: 2, Window: time.Hour}
+			},
+		},
+		{
+			name: "retry block history",
+			change: func(in *workload.ReconcileInput, _ *workload.ComponentPlan) {
+				in.ObservedState.RetryBlocks = []workload.RetryBlock{
+					{TargetRevision: "llama-engine-stale001", State: workload.RetryBlockHeld},
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, deletes := run(t, tc.change)
+			if len(deletes) != 0 {
+				t.Errorf("deletes: got %+v want none", deletes)
+			}
+			if got != baseline {
+				t.Errorf("result: got %+v want the baseline %+v", got, baseline)
+			}
+		})
+	}
+}

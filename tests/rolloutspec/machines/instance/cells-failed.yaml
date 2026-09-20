@@ -274,7 +274,7 @@ cells:
     outcome: ignore
     note: excluded annotations and labels are kept out of the revision hash, so the target is unchanged and nothing re-drives the row
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestFailedRow_ExcludedAnnotationEditDoesNotRedriveIt], kind: []}
     status: decided
   - state: Failed
     event: spec.strategy
@@ -396,7 +396,7 @@ cells:
     placement: unit
     coverage:
       perm: []
-      unit: []
+      unit: [TestConsumeResetInstances_CrashBeforeConsume_RedeliveryIsNoOp, TestConsumeResetInstances_AllWithNoFailed_SkipConsumed]
       kind: []
     status: decided
   - state: Failed
@@ -619,7 +619,7 @@ cells:
     note: the recycle writes no phase, and once the Create stamp lands the attempt owns the index; the failure this phase reports is already on LastFailure
     invariants: [failed.is.sticky]
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestCreate_TerminalPodReobservedAfterTheFreshStartWritesNoPhase], kind: []}
     status: decided
   # GAP: phase Unknown is not terminal for query.IsTerminalPod, so such a pod
   # survives as a name-holder that no pass will ever clear — the no-pods retry
@@ -646,7 +646,7 @@ cells:
     note: the PodGroup pass classifies every planned multi-pod index including a Failed one, so the name being collected withholds the members a fresh attempt would place and the group is announced again once the object is gone. No waiting token is recorded - the escalation pass skips a row already stamped Failed before it reads any evidence, and a Failed row carries no operation to park a clock on
     invariants: [failed.is.sticky]
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestEscalation_GangReadingsOnAFailedRowAreInert, TestEnsurePodGroupsWithState_ForeignCollisionAndTerminatingGate], kind: []}
     status: decided
   - state: Failed
     event: gang.podGroup
@@ -655,7 +655,7 @@ cells:
     note: the collision is recorded and the members a fresh attempt would place are withheld, but no verdict is raised here - the escalation pass skips an already-Failed row, and the terminal gang stamp needs an attempt in flight to end. The name is freed only by an operator, and the PodGroup pass finishes the Component's other gangs rather than aborting on it
     invariants: [failed.is.sticky]
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestEscalation_GangReadingsOnAFailedRowAreInert, TestEnsurePodGroupsWithState_ForeignCollisionAndTerminatingGate], kind: []}
     status: decided
   - state: Failed
     event: gang.podGroup
@@ -673,7 +673,7 @@ cells:
     note: a Failed row's group is reset like any other - the gang scheduler's Failed phase is absorbing, so the PodGroup pass deletes the object, builds a fresh one on the next reconcile and emits one PodGroupReset warning with the group's own failure message. The row's phase and its preserved operation are untouched, and members stay withheld until the replacement exists; a member pod still phase Failed holds the reset back until the recycle removes it
     invariants: [failed.is.sticky]
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestEscalation_GangReadingsOnAFailedRowAreInert, TestGang_FailedPodGroupIsResetNotEscalated], kind: []}
     status: decided
   - state: Failed
     event: gang.podGroup
@@ -682,7 +682,7 @@ cells:
     note: the controller writes ScheduleTimeoutSeconds onto the group but the vendored gang scheduler reports neither an Unknown phase nor a ScheduleStartTime, so there is no group-level reading to act on. An unplaceable gang reaches the controller on its member pods instead, and a Failed row has no operation for that hold to park either
     invariants: [failed.is.sticky]
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestObserveGang_SchedulingPhasesReportNothing], kind: []}
     status: decided
   - state: Failed
     event: endpoint.rotationIn
@@ -921,7 +921,7 @@ cells:
     outcome: ignore
     note: the cap bounds how many RetryBlocks for SUPERSEDED targets survive the end-of-pass prune, so a tightened value drops older history while the block this row is waiting on, which is for the current target, is never a prune candidate; with none configured nothing is pruned and the list grows with the Component's revision history
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestFailedRow_SupersedePruneKeepsTheBlockItWaitsOn], kind: []}
     status: decided
   - state: Failed
     event: config.changed
@@ -929,7 +929,7 @@ cells:
     outcome: ignore
     note: the cadence paces how soon a row with work left wakes again and is superseded by any explicit wait the pass holds, which for a Failed row is the RetryBlock's own due time; with none configured the pass rides the controller's rate-limited backoff. Neither re-dates the block nor releases it
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestFailedRow_OperatorConfigChangesLeaveItParked], kind: []}
     status: decided
   - state: Failed
     event: config.changed
@@ -937,5 +937,5 @@ cells:
     outcome: ignore
     note: neither has a reader on a row holding no attempt - the gang schedule clamp is consulted when an attempt builds a PodGroup, and the migration capacity caps bound new requests, which the escalation pass never raises for a Failed row
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestFailedRow_OperatorConfigChangesLeaveItParked], kind: []}
     status: decided

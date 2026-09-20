@@ -109,7 +109,10 @@ func TestObserveGang_PhaseFailed(t *testing.T) {
 // are the ordinary shape of a gang coming up — neither says a placement
 // is impossible. Reading either as a wait would park the deadline of
 // every gang create. The unplaceable verdict travels on the member pods
-// instead.
+// instead, so no row of any state ever sees an Unschedulable or
+// ScheduleTimeout reading: the classifier is where that is settled.
+//
+// Cells: instance/Create/CreatePods/gang.podGroup[Unschedulable]/before, instance/Create/CreatePods/gang.podGroup[ScheduleTimeout]/before, instance/Failed/gang.podGroup[Unschedulable]/before, instance/Failed/gang.podGroup[ScheduleTimeout]/before, instance/Restart/Drain/gang.podGroup[Unschedulable]/before, instance/Restart/Drain/gang.podGroup[ScheduleTimeout]/before
 func TestObserveGang_SchedulingPhasesReportNothing(t *testing.T) {
 	for _, phase := range []schedulingv1alpha1.PodGroupPhase{
 		schedulingv1alpha1.PodGroupPending,

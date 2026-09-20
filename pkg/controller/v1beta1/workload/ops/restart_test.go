@@ -3,6 +3,7 @@ package ops_test
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -949,7 +950,7 @@ func TestDetectRestartTrigger_NilReadySinceStaysSilent(t *testing.T) {
 // has held Ready for the Component's minReadySeconds window. The wait is
 // reported as the window's remainder so the pass wakes on it.
 //
-// Cells: instance/Restart/Drain/pod.containersReady[source]/before, instance/Restart/Drain/pod.ready[source]/before
+// Cells: instance/Restart/Drain/pod.containersReady[source]/before, instance/Restart/Drain/pod.ready[source]/before, instance/Restart/Drain/timer.minReady/before
 func TestRestart_PromotionWaitsForPodReadyAndWindow(t *testing.T) {
 	resetExpectations(t)
 	isvc, ir := isvcReadyAtIncarnation("llama-70b", "prod", 2)
@@ -1033,5 +1034,152 @@ func TestRestart_PromotionWaitsForPodReadyAndWindow(t *testing.T) {
 	s := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0)
 	if s == nil || s.Phase != v1beta1.OMENativeInstanceReady || s.Operation != nil {
 		t.Fatalf("promote: got %+v, want Phase=Ready with no operation", s)
+	}
+}
+
+// TestRestart_DeadlineFailedRowIsNotPromotedByAHealthyPodSet: past the
+// deadline the row reads Failed with the Restart operation preserved,
+// and nothing promotes from there — a healthy set on a spent attempt
+// raises no rebuild trigger, so the restart pass never runs on the row
+// and no Ready stamp is written. Recovery is the Failed machine's
+// business: a corrective revision or a due block.
+//
+// Cells: instance/Restart/Drain/pod.containersReady[source]/after@T-restart-deadline
+func TestRestart_DeadlineFailedRowIsNotPromotedByAHealthyPodSet(t *testing.T) {
+	resetExpectations(t)
+	isvc, ir := isvcReadyAtIncarnation("llama-70b", "prod", 2)
+	spent := v1beta1.OMENativeInstanceStatus{
+		Index:       0,
+		Incarnation: 2,
+		Phase:       v1beta1.OMENativeInstanceFailed,
+		Operation: &v1beta1.InstanceOperation{
+			ID: "restart-0-1", Type: v1beta1.InstanceOperationRestart, Step: "Drain", Reason: "pod lost",
+			StartedAt: metav1.NewTime(time.Now().Add(-2 * time.Hour)),
+			Deadline:  metav1.NewTime(time.Now().Add(-time.Hour)),
+		},
+	}
+	ir.Status.InstanceStatuses[0] = spent
+	// The rebuild came up after the deadline had already ended the attempt.
+	pod := podAtIncarnation(isvc, 0, 2, true /* ready */, true /* serving */)
+	c := newFakeClient(t, isvc, ir, pod)
+	plan := buildPlanSinglePodEngineForRestart(c, isvc)
+	input := buildTestInput(isvc, c, workload.ComponentEngine)
+
+	if needs, reason := ops.DetectRestartTriggerWithPods(input, plan, plan.Instances[0], []*corev1.Pod{pod}); needs {
+		t.Fatalf("restart trigger: got true (%q) want false; the set is complete and healthy", reason)
+	}
+	s := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0)
+	if s == nil || s.Phase != v1beta1.OMENativeInstanceFailed {
+		t.Fatalf("Phase: got %+v want Failed; nothing promotes a spent attempt", s)
+	}
+	if s.Operation == nil || s.Operation.Type != v1beta1.InstanceOperationRestart {
+		t.Errorf("Operation: got %+v want the Restart preserved for the Failed machine", s.Operation)
+	}
+}
+
+// TestRestart_OperatorConfigChangesDoNotChangeWhatItDecides: a repair
+// waiting out its promote window reads none of the knobs that belong to
+// other work — the gang clamp is applied where a PodGroup is built, the
+// migration caps bound requests a repair never raises, and the
+// RetryBlock history cap shapes a prune of superseded blocks. The
+// requeue cadence is read only to pace the next wake-up, and the window
+// remainder the pass already holds outranks it.
+//
+// Cells: instance/Restart/Drain/config.changed[gangScheduleTimeout]/before, instance/Restart/Drain/config.changed[requeue]/before, instance/Restart/Drain/config.changed[audit]/before, instance/Restart/Drain/config.changed[retryBlockHistoryLimit]/before
+func TestRestart_OperatorConfigChangesDoNotChangeWhatItDecides(t *testing.T) {
+	start := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+
+	// One pass over a repair whose rebuilt pod is PodReady but still
+	// inside the Component's minReadySeconds window.
+	run := func(t *testing.T, change func(*workload.ReconcileInput, *workload.ComponentPlan)) (bool, time.Duration, v1beta1.OMENativeInstanceStatus) {
+		t.Helper()
+		resetExpectations(t)
+		isvc, ir := isvcReadyAtIncarnation("llama-70b", "prod", 2)
+		ir.Status.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
+			Index:       0,
+			Incarnation: 2,
+			Phase:       v1beta1.OMENativeInstanceRestarting,
+			Operation: &v1beta1.InstanceOperation{
+				ID: "restart-0-1", Type: v1beta1.InstanceOperationRestart, Step: "Drain", Reason: "pod lost",
+				StartedAt: metav1.NewTime(start), LastProgressAt: metav1.NewTime(start),
+				Deadline: metav1.NewTime(start.Add(time.Hour)),
+			},
+		}
+		pod := podAtIncarnation(isvc, 0, 2, true /* ready */, true /* serving */)
+		pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+			Type: corev1.PodReady, Status: corev1.ConditionTrue,
+			LastTransitionTime: metav1.NewTime(start.Add(-5 * time.Second)),
+		})
+		c := newFakeClient(t, isvc, ir, pod)
+		clk := clocktesting.NewFakeClock(start)
+		plan := buildPlanSinglePodEngineForRestart(c, isvc)
+		plan.MinReadySeconds = 20
+		input := buildTestInput(isvc, c, workload.ComponentEngine)
+		input.Clock = clk
+		window := &workload.PromoteWindow{}
+		input.PromoteWindow = window
+		if change != nil {
+			change(&input, &plan)
+		}
+
+		done, err := ops.Restart(context.Background(), workload.Deps{Client: c, Clock: clk}, input, plan, plan.Instances[0], "pod lost")
+		if err != nil {
+			t.Fatalf("Restart: %v", err)
+		}
+		s := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0)
+		if s == nil {
+			t.Fatalf("instance 0 status: missing")
+		}
+		return done, window.Pending(), *s
+	}
+
+	baseDone, basePending, baseStatus := run(t, nil)
+	if baseDone || basePending == 0 {
+		t.Fatalf("baseline: done=%v pending=%v want a repair still waiting out its window", baseDone, basePending)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		change func(*workload.ReconcileInput, *workload.ComponentPlan)
+	}{
+		{
+			name: "gang schedule clamp",
+			change: func(_ *workload.ReconcileInput, plan *workload.ComponentPlan) {
+				plan.GangScheduleTimeout = &workload.GangScheduleTimeoutClamp{Min: time.Minute, Max: 10 * time.Minute}
+			},
+		},
+		{
+			name: "requeue cadence",
+			change: func(in *workload.ReconcileInput, _ *workload.ComponentPlan) {
+				in.Requeue = workload.RequeueIntervals{Operation: 9 * time.Minute, Gate: 8 * time.Minute}
+			},
+		},
+		{
+			name: "migration audit caps",
+			change: func(in *workload.ReconcileInput, _ *workload.ComponentPlan) {
+				in.MigrationAudit = &workload.MigrationAuditPolicy{MaxInFlight: 1, MaxPerWindow: 2, Window: time.Hour}
+			},
+		},
+		{
+			name: "retry block history",
+			change: func(in *workload.ReconcileInput, _ *workload.ComponentPlan) {
+				in.ObservedState.RetryBlocks = []workload.RetryBlock{
+					{TargetRevision: "llama-70b-engine-stale001", State: workload.RetryBlockHeld},
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			done, pending, status := run(t, tc.change)
+			if done != baseDone {
+				t.Errorf("done: got %v want %v", done, baseDone)
+			}
+			if pending != basePending {
+				t.Errorf("promote window remainder: got %v want the baseline %v", pending, basePending)
+			}
+			if !reflect.DeepEqual(status, baseStatus) {
+				t.Errorf("row: got %+v want the baseline %+v", status, baseStatus)
+			}
+		})
 	}
 }

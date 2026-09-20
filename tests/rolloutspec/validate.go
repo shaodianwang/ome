@@ -218,9 +218,9 @@ func Validate(m *Machine, repoRoot string) []error {
 }
 
 // hasCoverage reports whether a cell names at least one check, in any of
-// the three placements.
+// the coverage kinds.
 func hasCoverage(c *Coverage) bool {
-	return c != nil && (len(c.Unit) > 0 || len(c.Perm) > 0 || len(c.Kind) > 0)
+	return c != nil && (len(c.Unit) > 0 || len(c.Perm) > 0 || len(c.Kind) > 0 || len(c.Replay) > 0)
 }
 
 // splitNAKey parses "event" or "event[variant]".

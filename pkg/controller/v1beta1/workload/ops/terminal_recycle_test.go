@@ -3,6 +3,7 @@ package ops_test
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -582,5 +583,136 @@ func TestCreate_TerminalMemberRecycledWhileGangBlocked(t *testing.T) {
 	}
 	if got := listPods(t, c, "prod"); len(got) != 0 {
 		t.Fatalf("no member may be created against an unusable gang name, got %d pod(s)", len(got))
+	}
+}
+
+// A terminal pod re-observed after the fresh start has claimed the index
+// writes no phase: the Create attempt owns the row now, and the failure
+// this phase reports is already on LastFailure. The row must not fall
+// back to Failed because the same dead object is seen again.
+//
+// Cells: instance/Failed/pod.phaseTerminal[Failed]/boundary@T-failed-recycle-rebuild, instance/Failed/pod.phaseTerminal[Failed]/after@T-failed-recycle-rebuild, instance/Failed/pod.phaseTerminal[Succeeded]/boundary@T-failed-recycle-rebuild, instance/Failed/pod.phaseTerminal[Succeeded]/after@T-failed-recycle-rebuild
+func TestCreate_TerminalPodReobservedAfterTheFreshStartWritesNoPhase(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		kill func(*corev1.Pod) *corev1.Pod
+	}{
+		{name: "failed pod", kill: rejectedPod},
+		{name: "succeeded pod", kill: succeededPod},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetExpectations(t)
+			isvc := minimalISVC("llama-70b", "prod", 1)
+			ir := instanceIR(isvc, workload.ComponentEngine, v1beta1.OMENativeInstanceStatus{
+				Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceFailed,
+				RunningRevision: "llama-70b-engine-" + testRevisionHash,
+			})
+			dead := tc.kill(podForInstance(isvc, 0, false, false))
+			c := newFakeClient(t, isvc, ir, dead)
+			deps := workload.Deps{Client: c}
+			plan := buildPlanSinglePodEngine(1)
+
+			input := buildTestInput(isvc, c, workload.ComponentEngine)
+			if _, err := ops.Create(context.Background(), deps, input, plan, nil); err != nil {
+				t.Fatalf("Create pass 1: %v", err)
+			}
+			claimed := instanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
+			if claimed.Phase != v1beta1.OMENativeInstanceCreating || claimed.Operation == nil {
+				t.Fatalf("the fresh start must claim the row, got %+v", claimed)
+			}
+
+			// The same dead object is observed once more, after the stamp.
+			reobserved := tc.kill(podForInstance(isvc, 0, false, false))
+			if err := c.Create(context.Background(), reobserved); err != nil {
+				t.Fatalf("re-seed the terminal pod: %v", err)
+			}
+			workload.DefaultExpectations.Forget("prod", "llama-70b", workload.ComponentEngine, 0)
+			input = buildTestInput(isvc, c, workload.ComponentEngine)
+			if _, err := ops.Create(context.Background(), deps, input, plan, nil); err != nil {
+				t.Fatalf("Create pass 2: %v", err)
+			}
+
+			after := instanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
+			if after.Phase != v1beta1.OMENativeInstanceCreating {
+				t.Errorf("Phase: got %q want Creating; a re-observed terminal phase writes none", after.Phase)
+			}
+			if after.Operation == nil || after.Operation.Type != v1beta1.InstanceOperationCreate {
+				t.Errorf("Operation: got %+v want the Create attempt preserved", after.Operation)
+			}
+			if !reflect.DeepEqual(after.LastFailure, claimed.LastFailure) {
+				t.Errorf("LastFailure: got %+v want it unchanged at %+v", after.LastFailure, claimed.LastFailure)
+			}
+		})
+	}
+}
+
+// The recycle writes no phase and no step, so the same terminal pod
+// observed again lands on a row that still reads Restarting at the same
+// step — the pass either paces the next recycle on the ladder or finds
+// the delete it already issued is enough.
+//
+// Cells: instance/Restart/Drain/pod.phaseTerminal[Failed]/boundary@T-restart-recycle-terminal, instance/Restart/Drain/pod.phaseTerminal[Failed]/after@T-restart-recycle-terminal, instance/Restart/Drain/pod.phaseTerminal[Succeeded]/boundary@T-restart-recycle-terminal, instance/Restart/Drain/pod.phaseTerminal[Succeeded]/after@T-restart-recycle-terminal
+func TestRestart_TerminalPodReobservedKeepsPhaseAndStep(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		kill func(*corev1.Pod) *corev1.Pod
+	}{
+		{name: "failed pod", kill: rejectedPod},
+		{name: "succeeded pod", kill: succeededPod},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetExpectations(t)
+			isvc, ir := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+			ir.Status.InstanceStatuses[0] = v1beta1.OMENativeInstanceStatus{
+				Index:           0,
+				Incarnation:     2,
+				Phase:           v1beta1.OMENativeInstanceRestarting,
+				RunningRevision: "llama-70b-engine-" + testRevisionHash,
+				Operation: &v1beta1.InstanceOperation{
+					ID: "restart-0-1", Type: v1beta1.InstanceOperationRestart, Step: "Drain", Reason: "x",
+					StartedAt: metav1.Now(), LastProgressAt: metav1.Now(),
+					Deadline: metav1.NewTime(time.Now().Add(time.Hour)),
+				},
+			}
+			dead := tc.kill(podAtIncarnation(isvc, 0, 2, false, false))
+			c := newFakeClient(t, isvc, ir, dead)
+			deps := workload.Deps{Client: c}
+
+			input := buildTestInput(isvc, c, workload.ComponentEngine)
+			plan := buildPlanSinglePodEngineForRestart(c, isvc)
+			if _, err := ops.Restart(context.Background(), deps, input, plan, plan.Instances[0], "trigger"); err != nil {
+				t.Fatalf("Restart pass 1: %v", err)
+			}
+			recycled := instanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
+
+			// The same dead object is observed once more.
+			reobserved := tc.kill(podAtIncarnation(isvc, 0, 2, false, false))
+			if err := c.Create(context.Background(), reobserved); err != nil {
+				t.Fatalf("re-seed the terminal pod: %v", err)
+			}
+			workload.DefaultExpectations.Forget("prod", "llama-70b", workload.ComponentEngine, 0)
+			input = buildTestInput(isvc, c, workload.ComponentEngine)
+			plan = buildPlanSinglePodEngineForRestart(c, isvc)
+			done, err := ops.Restart(context.Background(), deps, input, plan, plan.Instances[0], "trigger")
+			if err != nil {
+				t.Fatalf("Restart pass 2: %v", err)
+			}
+			if done {
+				t.Errorf("done: got true want false; a terminal pod is not a finished repair")
+			}
+
+			after := instanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
+			if after.Phase != recycled.Phase {
+				t.Errorf("Phase: got %q want %q unchanged", after.Phase, recycled.Phase)
+			}
+			if after.Operation == nil || recycled.Operation == nil ||
+				after.Operation.Step != recycled.Operation.Step ||
+				after.Operation.ID != recycled.Operation.ID {
+				t.Errorf("Operation: got %+v want the same attempt at the same step as %+v", after.Operation, recycled.Operation)
+			}
+			if after.Incarnation != recycled.Incarnation {
+				t.Errorf("Incarnation: got %d want %d unchanged", after.Incarnation, recycled.Incarnation)
+			}
+		})
 	}
 }

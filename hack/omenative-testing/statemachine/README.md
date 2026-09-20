@@ -62,9 +62,13 @@ provenance for its decision but is not required to.
 A cell and the test that proves it name each other, and `check_coverage.py`
 resolves both directions against something real:
 
-* the cell names the check, in `coverage: {unit: [...], perm: [...], kind: [...]}`.
+* the cell names the check, in
+  `coverage: {unit: [...], perm: [...], kind: [...], replay: [...]}`.
   A `unit` entry is a Go test function name; it must exist as `func <Name>(` in
-  some `*_test.go` under `pkg/` or `tests/`. `perm` and `kind` entries name
+  some `*_test.go` under `pkg/` or `tests/`. A `replay` entry is a replay
+  scenario name and must exist as `tests/rolloutspec/replay/scenarios/<name>.yaml`;
+  that scenario's own `cells:` list is the other half of the pair, and the
+  replay suite checks those ids against the grid. `perm` and `kind` entries name
   suite specs rather than Go functions and are not resolved.
 * the test names the cells, in a `// Cells:` comment directly above the test
   function, ids comma-separated. An id is the grid coordinate

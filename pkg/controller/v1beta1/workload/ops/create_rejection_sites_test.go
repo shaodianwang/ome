@@ -62,6 +62,8 @@ func siteInvalidError() error {
 // without an error (so the dispatcher's restart interval owns the retry,
 // not controller-runtime's escalating backoff) and record the quota as
 // the operation's waiting reason rather than failing the Instance.
+//
+// Cells: instance/Restart/Drain/api.quotaDenied/before
 func TestRestartPhaseB_QuotaExceeded_WaitsWithoutFailing(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
@@ -351,5 +353,116 @@ func TestMigrateSurge_InvalidPodSpec_FailsTheMigration(t *testing.T) {
 	// rollout on an operator's bad migration request.
 	if len(*blocks) != 0 {
 		t.Errorf("RetryBlock writes: got %+v want none for an overlay-bearing surge", *blocks)
+	}
+}
+
+// siteNamespaceTerminatingError is the apiserver refusing a create
+// because the namespace is on its way out.
+func siteNamespaceTerminatingError(name string) error {
+	return &apierrors.StatusError{ErrStatus: metav1.Status{
+		Status:  metav1.StatusFailure,
+		Code:    403,
+		Reason:  metav1.StatusReasonForbidden,
+		Message: `pods "` + name + `" is forbidden: unable to create new content in namespace prod because it is being terminated`,
+		Details: &metav1.StatusDetails{
+			Kind: "pods", Name: name,
+			Causes: []metav1.StatusCause{{Type: corev1.NamespaceTerminatingCause, Message: "namespace prod is being terminated"}},
+		},
+	}}
+}
+
+// restartPhaseBRow is a repair whose Phase A is done: the old pod is
+// gone and the bumped incarnation is waiting for its rebuild create.
+func restartPhaseBRow() v1beta1.OMENativeInstanceStatus {
+	return v1beta1.OMENativeInstanceStatus{
+		Index:       0,
+		Incarnation: 2,
+		Phase:       v1beta1.OMENativeInstanceRestarting,
+		Operation: &v1beta1.InstanceOperation{
+			Type: v1beta1.InstanceOperationRestart, Step: "Recreate", Reason: "pod lost",
+		},
+	}
+}
+
+// TestRestartPhaseB_RejectionDispositions: the rebuild create meets the
+// same classified rejections a fresh create does, and the repair answers
+// them the same way — a 422 is permanent and ends the attempt with the
+// revision blamed, a terminating namespace ends it with the revision
+// blameless, and a 429 is pacing that writes nothing at all.
+//
+// Cells: instance/Restart/Drain/api.invalid/before, instance/Restart/Drain/api.namespaceTerminating/before, instance/Restart/Drain/api.throttled[TooManyRequests]/before
+func TestRestartPhaseB_RejectionDispositions(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		reject     error
+		wantFailed bool
+		wantReason string
+		wantBlocks int
+	}{
+		{
+			name:       "invalid pod spec",
+			reject:     siteInvalidError(),
+			wantFailed: true,
+			wantReason: workload.RejectionReasonInvalidPodSpec,
+			wantBlocks: 1,
+		},
+		{
+			name:       "namespace terminating",
+			reject:     siteNamespaceTerminatingError("engine-pod"),
+			wantFailed: true,
+			wantReason: workload.RejectionReasonNamespaceTerminating,
+		},
+		{
+			name:   "throttled",
+			reject: apierrors.NewTooManyRequests("apiserver is shedding load", 7),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			legacyResetExpectations(t)
+			isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+			ir.Status.InstanceStatuses[0] = restartPhaseBRow()
+			base := legacyNewFakeClient(t, isvc, ir)
+			c := rejectPodCreates(t, base, tc.reject)
+			input := legacyTestInput(isvc, base, workload.ComponentEngine)
+			// The repair pins no revision of its own, so the revision a
+			// 422 blames is the owner's current one.
+			input.ObservedState.UpdateRevision = "llama-70b-engine-newhash"
+			blocks := &[]string{}
+			input.MutateRetryBlock = func(_ context.Context, rev string, mutate func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
+				b := workload.RetryBlock{TargetRevision: rev}
+				if d := mutate(&b); d != workload.RetryBlockUnchanged {
+					*blocks = append(*blocks, rev)
+				}
+				return nil
+			}
+			plan := legacyComponentPlan(workload.UpdateStrategySurgeThenDrain, nil)
+
+			if _, err := Restart(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], "pod lost"); err != nil {
+				t.Fatalf("Restart: %v (a classified rejection is disposed, not returned)", err)
+			}
+
+			s := legacyInstanceStatusesOnIR(base, isvc, workload.ComponentEngine)[0]
+			if tc.wantFailed {
+				if s.Phase != v1beta1.OMENativeInstanceFailed {
+					t.Fatalf("Phase: got %q want Failed", s.Phase)
+				}
+				if s.LastFailure == nil || s.LastFailure.Reason != tc.wantReason {
+					t.Errorf("LastFailure: got %+v want reason %s", s.LastFailure, tc.wantReason)
+				}
+			} else {
+				if s.Phase != v1beta1.OMENativeInstanceRestarting {
+					t.Errorf("Phase: got %q want Restarting (throttling is paced, not failed)", s.Phase)
+				}
+				if s.LastFailure != nil {
+					t.Errorf("LastFailure: got %+v want none (throttling writes no status)", s.LastFailure)
+				}
+				if s.Operation == nil || s.Operation.Reason != "pod lost" {
+					t.Errorf("Operation: got %+v want the repair intact", s.Operation)
+				}
+			}
+			if len(*blocks) != tc.wantBlocks {
+				t.Errorf("RetryBlock writes: got %+v want %d", *blocks, tc.wantBlocks)
+			}
+		})
 	}
 }

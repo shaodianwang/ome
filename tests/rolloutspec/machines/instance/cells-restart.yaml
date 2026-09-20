@@ -68,7 +68,7 @@ cells:
     outcome: ignore
     note: the row is Failed with the Restart operation preserved, and no promote reads a healthy pod set from there, so recovery belongs to the Failed machine - a gang short of a member re-arms the whole Restart over the spent attempt, while a complete single-pod set waits for a corrective revision or a due block
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestRestart_DeadlineFailedRowIsNotPromotedByAHealthyPodSet], kind: []}
     status: decided
   - state: Restart/Drain
     event: pod.containersReady
@@ -352,7 +352,7 @@ cells:
     outcome: defer
     note: the elapsed window releases the last promote guard but commits nothing by itself; the next pass re-checks that the bumped set is complete, serving and PodReady before stamping Ready
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestRestart_PromotionWaitsForPodReadyAndWindow], kind: []}
     status: decided
   - state: Restart/Drain
     event: timer.expectationsTTL
@@ -403,7 +403,7 @@ cells:
     outcome: defer
     note: the refused Phase B create is classified as capacity-blocked, so the operation carries the QuotaExceeded waiting token and the InstanceReadyTimeout deadline parks while it is held rather than counting a wait an operator controls against the repair. The pass ends quietly on the repair requeue, and the token is released on the first pass whose creates all land
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestRestartPhaseB_QuotaExceeded_WaitsWithoutFailing], kind: []}
     status: decided
 
   # --- pod, newly expressible inputs ---------------------------------------
@@ -414,7 +414,7 @@ cells:
     guard: the row is not fully serving and its operation carries no other authority's waiting token; the hold lasts while lifecycle.unschedulableGracePeriod is unconfigured or unelapsed, and past it the attempt is failed environment-caused
     note: an unplaceable recreated pod holds Phase C on the runtime-ready check, and the escalation pass records the Unschedulable waiting token on the Restart operation, which parks the clock so the repair is not failed for a placement the cluster cannot give it. The scheduler's message reaches LastFailure once per hold. Past the configured grace the attempt is failed with that message and no RetryBlock, since an unplaceable pod proves nothing about the pod template (ops/restart.go, escalation.go)
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestEscalation_UnschedulableRestartHoldsThenFailsPastGrace], kind: []}
     status: decided
   - state: Restart/Drain
     event: pod.containersNotReady
@@ -450,7 +450,7 @@ cells:
     outcome: defer
     note: the recycle writes no phase or step, so a re-observed terminal phase lands on the same row and is either paced by the ladder or already satisfied by the delete in flight
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestRestart_TerminalPodReobservedKeepsPhaseAndStep], kind: []}
     status: decided
   - state: Restart/Drain
     event: pod.phaseTerminal
@@ -459,7 +459,7 @@ cells:
     guard: node death is proven - the Node object is gone, or has carried an unreachable taint or a NotReady condition past the threshold - and a force-delete policy is configured; with neither, the row holds instead of acting
     note: an Unknown pod is never recycled by name, because the node has stopped reporting rather than the pod having died and a returning kubelet may still be running it. It is routed to the force-delete sweep instead, the same authority pod.nodeLost answers to, which deletes it only on proven node death under a configured force-delete policy; until then the operation carries a NodeUnknown waiting token with its deadline parked, so the hold is visible rather than silently spending the attempt's budget, and the rebuild resumes on the resulting absence
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestRestart_UnknownPhasePodHoldsWithoutForceDeletePolicy, TestRestart_UnknownPhasePodForceDeletedOnProvenNodeDeath, TestRestart_UnknownPhasePodClearsHoldOnceGone, TestRestart_UnknownPhasePodOnLiveNodeIsNeverDeleted], kind: []}
     status: decided
   - state: Restart/Drain
     event: pod.admitted
@@ -509,7 +509,7 @@ cells:
     note: the deterministic name is still occupied by an object being collected, so Phase B withholds every member rather than enlisting a rebuilt pod in a group this owner does not yet control. The escalation pass records the PodGroupTerminating waiting token, which parks the InstanceReadyTimeout clock, and the group is announced again on the pass after the old object is gone; the wait resolves itself and never escalates (inferencereplica/reconciler.go, podgroup/podgroup.go)
     invariants: [podgroup.before.pods]
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestEscalation_GangReadingsOnARepairRow], kind: []}
     status: decided
   - state: Restart/Drain
     event: gang.podGroup
@@ -519,7 +519,7 @@ cells:
     guard: the repair is in flight to end and the pod set is not fully serving
     note: a group held by another owner is neither updated nor deleted, and nothing this controller does frees the name, so the repair ends on it - LastFailure carries PodGroupOwnershipConflict naming the foreign controller, Phase goes Failed and the Operation is preserved. ENVIRONMENT-CAUSED, so no RetryBlock is recorded, and the verdict is scoped to this row while the PodGroup pass finishes the other gangs (podgroup/podgroup.go)
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestEscalation_GangReadingsOnARepairRow], kind: []}
     status: decided
   - state: Restart/Drain
     event: gang.podGroup
@@ -528,7 +528,7 @@ cells:
     note: the PodGroup pass re-creates the deterministic group from the plan before the restart pass runs, and the surviving pods keep the group label, so the gang is re-announced without a step of its own; a gang waiting token the row was carrying is released in the same pass (gang/gang.go)
     invariants: [podgroup.before.pods]
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestEscalation_GangReadingsOnARepairRow], kind: []}
     status: decided
   - state: Restart/Drain
     event: gang.podGroup
@@ -537,7 +537,7 @@ cells:
     guard: the index is planned and its outcome belongs to this machine
     note: the gang scheduler's Failed phase is absorbing, so the PodGroup pass deletes the group and builds a fresh one on the next reconcile, withholding the rebuild's members meanwhile and emitting one PodGroupReset warning with the group's own failure message. The repair row is untouched - no phase change, no waiting token, no RetryBlock - and a member pod still phase Failed holds the reset back until Phase A's recycle removes it (gang/gang.go)
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestEscalation_GangReadingsOnARepairRow, TestGang_FailedPodGroupIsResetNotEscalated], kind: []}
     status: decided
   - state: Restart/Drain
     event: gang.podGroup
@@ -545,7 +545,7 @@ cells:
     outcome: defer
     note: neither reading exists on the PodGroup the controller watches - the vendored gang scheduler writes no Unknown phase and no ScheduleStartTime - so there is no group-level clock to consult. A rebuilt gang that cannot be placed reaches the repair on its MEMBER PODS, as PodScheduled=False with reason Unschedulable, and the pod-level scheduler hold parks the clock on that (see pod.unschedulable)
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestObserveGang_SchedulingPhasesReportNothing], kind: []}
     status: decided
 
   # --- endpoints -----------------------------------------------------------
@@ -692,7 +692,7 @@ cells:
     outcome: ignore
     note: the clamp is applied where the PodGroup is built, not where the operation is stamped, so a new bound reaches this repair through the next ensure of the Instance's group; with none configured the timeout derived from InstanceReadyTimeout is passed through unbounded, and a Component whose timeout is unusable as a gang deadline leaves the field unset for the scheduler's own default
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestRestart_OperatorConfigChangesDoNotChangeWhatItDecides], kind: []}
     status: decided
   - state: Restart/Drain
     event: config.changed
@@ -700,7 +700,7 @@ cells:
     outcome: ignore
     note: the operation cadence is re-read per pass and only paces how soon a repair with work left wakes again; with none configured the pass rides the controller's rate-limited backoff. An explicit wait the pass already holds - a promote window remainder, a RetryBlock due time - still wins over the cadence, and neither changes what the repair decides
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestRestart_OperatorConfigChangesDoNotChangeWhatItDecides], kind: []}
     status: decided
   - state: Restart/Drain
     event: config.changed
@@ -708,7 +708,7 @@ cells:
     outcome: ignore
     note: neither is read on the repair path - the migration capacity caps bound new requests a repair never raises, and the RetryBlock history cap shapes the end-of-pass prune of superseded blocks rather than anything on this row
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestRestart_OperatorConfigChangesDoNotChangeWhatItDecides], kind: []}
     status: decided
 
   # --- controller ticks ----------------------------------------------------
@@ -728,14 +728,14 @@ cells:
     guard: the rejected write is the Phase B pod create, whose object is a faithful render of the revision the repair is rebuilding on
     note: a 422 on the rebuild create is permanent, so the repair ends here instead of erroring every pass - LastFailure carries InvalidPodSpec plus the apiserver's explanation, a RetryBlock is recorded against the revision the attempt pinned, and the operation is cleared with Phase=Failed. An unclassified rejection instead returns the pass error, which changes nothing about the other rows - the end-of-pass escalation and the superseded-RetryBlock prune run after every eligible pass, errored or not, so one row's failed write never freezes another's deadline clock (ops/create.go, workload/reconcile.go)
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestRestartPhaseB_RejectionDispositions], kind: []}
     status: decided
   - state: Restart/Drain
     event: api.throttled
     outcome: defer
     note: a shed create is classified as throttled and writes nothing; the server's Retry-After is deposited on the pass pacing, which floors the requeue so the repair wakes no earlier than the apiserver asked. The pass ends quietly rather than erroring, and the operation deadline is evaluated as usual and keeps running - an errored pass would be evaluated the same way, since the end-of-pass escalation runs after every eligible pass whatever the op returned (ops/create.go, workload/reconcile.go)
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestRestartPhaseB_RejectionDispositions], kind: []}
     status: decided
   - state: Restart/Drain
     event: api.namespaceTerminating
@@ -744,7 +744,7 @@ cells:
     guard: the rejected write is the Phase B pod create
     note: no rebuild can succeed in a terminating namespace, so the repair ends on the first rejection with NamespaceTerminating plus the apiserver's message on LastFailure and the operation cleared. Environment-caused, so the revision keeps a clean retry ladder; the namespace GC deleting the owner is what removes the row (ops/create.go, workload/reconcile.go)
     placement: unit
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestRestartPhaseB_RejectionDispositions], kind: []}
     status: decided
 
   # --- timers, newly expressible -------------------------------------------

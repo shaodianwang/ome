@@ -33,6 +33,11 @@ A scenario is loaded through `tests/rolloutspec`, so an event, variant,
 arrow or cell the instance table does not declare fails the load. The
 scenario vocabulary and the table cannot drift.
 
+A scenario counts as coverage for the cells it drives: the cell names the
+scenario in `coverage.replay`, `rolloutspec-check` resolves that name to a
+file here, and `TestCellCitationsResolve` resolves the scenario's `cells:`
+ids back to the grid.
+
 ## Golden provenance
 
 Goldens were captured against the engine at `cf75eb72`
@@ -245,10 +250,6 @@ synchronously rather than racing a concurrent writer.
 
 ## Follow-ups
 
-- The `rolloutspec-check` cell-coverage checker does not read the
-  scenarios' `cells:` yet, so a cell driven only by a replay scenario still
-  counts as uncovered. Wiring replay citations into the checker is Part 2
-  work.
 - `transitions.yaml` declares **138** transitions, not the 148 OEP-0020.2
   states. The exit criterion should be restated against the count the
   table actually carries.

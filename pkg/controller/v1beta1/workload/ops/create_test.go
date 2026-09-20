@@ -1421,9 +1421,11 @@ func TestCreateFreshIndices_PreservesSurgeTargetMarker(t *testing.T) {
 // TestCreate_PromotionWaitsOutTheWindowAndRequeuesAtItsRemainder: a set that
 // is PodReady but still inside the Component's minReadySeconds window is not
 // promoted, and the pass requeues at what is left of the window — computed
-// from the Ready transition, not from the create poll interval.
+// from the Ready transition, not from the create poll interval. Once the
+// window elapses the promote still comes from the pass that re-checks the
+// whole bar, not from the timer.
 //
-// Cells: instance/Create/CreatePods/pod.ready[source]/before, instance/Create/CreatePods/pod.containersReady[source]/before
+// Cells: instance/Create/CreatePods/pod.ready[source]/before, instance/Create/CreatePods/pod.containersReady[source]/before, instance/Create/CreatePods/timer.minReady/before
 func TestCreate_PromotionWaitsOutTheWindowAndRequeuesAtItsRemainder(t *testing.T) {
 	resetExpectations(t)
 	isvc := minimalISVC("llama-70b", "prod", 1)

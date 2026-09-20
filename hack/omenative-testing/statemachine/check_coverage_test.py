@@ -7,14 +7,28 @@ from pathlib import Path
 import check_coverage
 
 
-def cell(state, event, status="decided", outcome="transition", unit=(), perm=(), kind=()):
+def cell(
+    state,
+    event,
+    status="decided",
+    outcome="transition",
+    unit=(),
+    perm=(),
+    kind=(),
+    replay=(),
+):
     return {
         "id": f"m/{state}/{event}/before",
         "state": state,
         "event": event,
         "status": status,
         "outcome": outcome,
-        "coverage": {"unit": list(unit), "perm": list(perm), "kind": list(kind)},
+        "coverage": {
+            "unit": list(unit),
+            "perm": list(perm),
+            "kind": list(kind),
+            "replay": list(replay),
+        },
     }
 
 
@@ -66,6 +80,17 @@ class CheckTest(unittest.TestCase):
         grid = [cell("A", "e", perm=["p18"], kind=["rollout converges"])]
         self.assertEqual(check_coverage.check(grid, set(), []), [])
 
+    def test_known_replay_scenario_is_clean(self):
+        grid = [cell("A", "e", replay=["T-create-ready"])]
+        self.assertEqual(check_coverage.check(grid, set(), [], {"T-create-ready"}), [])
+
+    def test_unknown_replay_scenario_is_reported(self):
+        grid = [cell("A", "e", replay=["T-gone"])]
+        problems = check_coverage.check(grid, set(), [], {"T-create-ready"})
+        self.assertEqual(len(problems), 1)
+        self.assertIn("T-gone", problems[0])
+        self.assertIn("m/A/e/before", problems[0])
+
 
 class ReportTest(unittest.TestCase):
     def test_counts_split_by_machine(self):
@@ -81,6 +106,10 @@ class ReportTest(unittest.TestCase):
 
     def test_any_placement_counts_as_covered(self):
         grid = [cell("A", "e", kind=["some kind spec"])]
+        self.assertEqual(check_coverage.report(grid)["m"]["covered"], 1)
+
+    def test_replay_scenario_counts_as_covered(self):
+        grid = [cell("A", "e", replay=["T-create-ready"])]
         self.assertEqual(check_coverage.report(grid)["m"]["covered"], 1)
 
 
@@ -108,6 +137,19 @@ class ScanTest(unittest.TestCase):
             refs = check_coverage.cell_refs(root)
             self.assertEqual([r[2] for r in refs], ["m/A/e/before"])
             self.assertEqual(refs[0][1], 1)
+
+    def test_replay_scenarios_are_named_by_file_stem(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            scenarios = root / check_coverage.REPLAY_SCENARIO_DIR
+            scenarios.mkdir(parents=True)
+            (scenarios / "T-create-ready.yaml").write_text("scenario: T-create-ready\n")
+            (scenarios / "notes.txt").write_text("not a scenario\n")
+            self.assertEqual(check_coverage.replay_scenarios(root), {"T-create-ready"})
+
+    def test_replay_scenarios_tolerate_a_missing_directory(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(check_coverage.replay_scenarios(Path(d)), set())
 
 
 class MainTest(unittest.TestCase):

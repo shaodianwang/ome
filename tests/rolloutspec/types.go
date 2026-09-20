@@ -87,10 +87,13 @@ type Transition struct {
 
 // Coverage names the checks that prove a cell. Cells with placement sim
 // carry no coverage by construction, so a report counts them as an open gap.
+// A Replay entry is a replay scenario name — the file name under
+// tests/rolloutspec/replay/scenarios without its extension.
 type Coverage struct {
-	Perm []string `json:"perm,omitempty"`
-	Unit []string `json:"unit,omitempty"`
-	Kind []string `json:"kind,omitempty"`
+	Perm   []string `json:"perm,omitempty"`
+	Unit   []string `json:"unit,omitempty"`
+	Kind   []string `json:"kind,omitempty"`
+	Replay []string `json:"replay,omitempty"`
 }
 
 // Cell is one authored decision. Empty Variants means every variant of the

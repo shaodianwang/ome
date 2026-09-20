@@ -868,3 +868,78 @@ func TestEscalation_UnschedulableGangHoldIsOrderIndependent(t *testing.T) {
 		t.Errorf("LastFailure.PodName: got %+v want the stable choice %s", got, leader.Name)
 	}
 }
+
+// restartingInstance is a repair in flight with a live deadline — the
+// shape Phase C presents while the rebuilt pod waits for placement.
+func restartingInstance(deadline time.Time) []workload.InstanceStatus {
+	return []workload.InstanceStatus{{
+		Index:       0,
+		Incarnation: 2,
+		Phase:       workload.InstancePhaseRestarting,
+		PodCount:    1,
+		Operation: &workload.InstanceOperation{
+			Type:     workload.InstanceOperationRestart,
+			Step:     "Drain",
+			Reason:   "pod lost",
+			Deadline: metav1.NewTime(deadline),
+		},
+	}}
+}
+
+// TestEscalation_UnschedulableRestartHoldsThenFailsPastGrace: a repair
+// whose rebuilt pod has no placement is held, not failed — the token
+// parks the InstanceReadyTimeout clock so the cluster's shortage is not
+// charged to the repair, and the scheduler's own message reaches
+// LastFailure. Past a configured grace the attempt ends
+// environment-caused, so no revision is blamed.
+//
+// Cells: instance/Restart/Drain/pod.unschedulable[source]/before
+func TestEscalation_UnschedulableRestartHoldsThenFailsPastGrace(t *testing.T) {
+	now := time.Now()
+
+	t.Run("held while the grace is unconfigured", func(t *testing.T) {
+		input, rec := escalationFixture(restartingInstance(now.Add(30 * time.Minute)))
+		if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+			map[int32][]*corev1.Pod{0: {unschedulablePod("engine-0-default-0", now.Add(-5*time.Minute))}}); err != nil {
+			t.Fatalf("escalation pass: %v", err)
+		}
+		got := rec.store[0]
+		if got.Phase != workload.InstancePhaseRestarting {
+			t.Errorf("Phase: got %q want Restarting (queued for placement, not failed)", got.Phase)
+		}
+		if got.Operation == nil || got.Operation.Waiting != workload.WaitingReasonUnschedulable {
+			t.Errorf("Operation.Waiting: got %+v want %q", got.Operation, workload.WaitingReasonUnschedulable)
+		}
+		if !workload.OperationExternallyHeld(got.Operation) {
+			t.Errorf("Operation: got %+v want externally held so the deadline parks", got.Operation)
+		}
+		if got.LastFailure == nil || got.LastFailure.Message != schedulerMessage {
+			t.Errorf("LastFailure: got %+v want the scheduler message", got.LastFailure)
+		}
+		if got.Operation != nil && got.Operation.Reason != "pod lost" {
+			t.Errorf("Operation.Reason: got %q want the repair cause preserved", got.Operation.Reason)
+		}
+		if len(rec.blocks) != 0 {
+			t.Errorf("RetryBlock: got %v want none", rec.blocks)
+		}
+	})
+
+	t.Run("failed past the configured grace", func(t *testing.T) {
+		input, rec := escalationFixture(restartingInstance(now.Add(30 * time.Minute)))
+		input.UnschedulableGrace = 10 * time.Minute
+		if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+			map[int32][]*corev1.Pod{0: {unschedulablePod("engine-0-default-0", now.Add(-time.Hour))}}); err != nil {
+			t.Fatalf("escalation pass: %v", err)
+		}
+		got := rec.store[0]
+		if got.Phase != workload.InstancePhaseFailed {
+			t.Errorf("Phase: got %q want Failed", got.Phase)
+		}
+		if got.LastFailure == nil || got.LastFailure.Reason != workload.WaitingReasonUnschedulable {
+			t.Errorf("LastFailure.Reason: got %+v want %q", got.LastFailure, workload.WaitingReasonUnschedulable)
+		}
+		if len(rec.blocks) != 0 {
+			t.Errorf("RetryBlock: got %v want none (environment-caused)", rec.blocks)
+		}
+	})
+}

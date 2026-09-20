@@ -177,7 +177,7 @@ cells:
     outcome: ignore
     note: "node death is not consumed as an event of its own. It becomes actionable only through the Terminating pod that sits on the node, whose evidence is aged from the taint's own TimeAdded or the condition's own LastTransitionTime and read through the live reader, so nothing has to be remembered across restarts. A pod that is not Terminating on a lost node is left to the ordinary drain"
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestDeleteBatch_NodeDeathActsOnlyThroughATerminatingPod], kind: []}
     status: decided
 
   - state: Delete/Drain
@@ -568,7 +568,7 @@ cells:
     outcome: ignore
     note: "the operation cadence is re-read per pass and only paces how soon a drain with work left wakes again; with none configured the wave rides the controller's rate-limited backoff instead. Neither spelling changes what the drain decides, and an explicit wait the pass already holds - a force-delete boundary, a node-death deadline - still wins over the cadence"
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestDeleteBatch_OperatorConfigChangesDoNotChangeWhatTheDrainDecides], kind: []}
     status: decided
 
   - state: Delete/Drain
@@ -577,7 +577,7 @@ cells:
     outcome: ignore
     note: "inert here. The gang schedule clamp is applied when a PodGroup is built rather than when one is torn down, the migration capacity caps bound new requests the delete wave makes none of, and the RetryBlock history cap shapes a prune that never reads a Deleting row"
     placement: sim
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestDeleteBatch_OperatorConfigChangesDoNotChangeWhatTheDrainDecides], kind: []}
     status: decided
 
   - state: Delete/Drain
