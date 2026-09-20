@@ -265,7 +265,22 @@ func EnsureInferenceReplica(ctx context.Context, p Params) (*v1beta1.InferenceRe
 		// optimistic-lock conflict — the projector only owns spec/metadata
 		// fields, never status. RetryOnConflict still wraps the Get→patch
 		// for the racing-create path below, which synthesizes a Conflict.
-		if err := p.Client.Patch(ctx, ir, client.MergeFrom(original)); err != nil {
+		patch := client.MergeFrom(original)
+
+		// Every write bumps the IR's generation, and a write on every pass
+		// starves each fresh-snapshot consumer downstream — ObservedGeneration
+		// never catches Generation. So a write must be attributable to a
+		// field: log the patch that justifies it. Only on the changed path;
+		// the no-op guard above returns before this point.
+		logKV := []any{"generation", original.Generation}
+		if data, dataErr := patch.Data(ir); dataErr == nil {
+			logKV = append(logKV, "patch", boundPatchForLog(data))
+		} else {
+			logKV = append(logKV, "patchRenderError", dataErr.Error())
+		}
+		logger.V(1).Info("InferenceReplica projection changed; patching", logKV...)
+
+		if err := p.Client.Patch(ctx, ir, patch); err != nil {
 			return fmt.Errorf("patch IR %s/%s: %w", p.ISVC.Namespace, name, err)
 		}
 		committed = ir
@@ -455,6 +470,22 @@ func projectionUnchanged(old, updated *v1beta1.InferenceReplica) bool {
 		equality.Semantic.DeepEqual(old.Labels, updated.Labels) &&
 		equality.Semantic.DeepEqual(old.Annotations, updated.Annotations) &&
 		equality.Semantic.DeepEqual(old.OwnerReferences, updated.OwnerReferences)
+}
+
+// maxLoggedPatchBytes bounds the rendered merge patch in the write log. It
+// guards log size only — nothing behavioral reads it, and the patch itself is
+// always applied in full — so it is a fixed constant rather than a config
+// knob.
+const maxLoggedPatchBytes = 4096
+
+// boundPatchForLog renders a merge patch for a single log field, cut to
+// maxLoggedPatchBytes with an explicit marker so a truncated line is never
+// mistaken for the whole patch.
+func boundPatchForLog(data []byte) string {
+	if len(data) <= maxLoggedPatchBytes {
+		return string(data)
+	}
+	return string(data[:maxLoggedPatchBytes]) + "...(truncated)"
 }
 
 // desiredReplicas decides the value to stamp on ir.Spec.Replicas,
