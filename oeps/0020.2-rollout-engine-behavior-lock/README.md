@@ -153,7 +153,7 @@ regression nobody can attribute.
 
 **Scenario sources**, in the order they are built:
 
-1. Hand-written, one per transition arrow of the instance table (148 arrows
+1. Hand-written, one per transition arrow of the instance table (138 arrows
    today), each named by the arrow id and citing its cells. These are the
    minimum for exit.
 2. Translated perm cases: the 968 generated cases under
@@ -273,16 +273,32 @@ event the table does not declare fails to load, so the two cannot drift.
 ### Trace format
 
 ```
-tick=1 pass result=requeue:5s
-tick=2 row=0 write phase=Updating→Ready op=Update/SurgeDrain→nil runningRevision=rev-a→rev-b   precondition=ok
-tick=2 event Normal SurgePromoted instance=0 revision=rev-b
-tick=2 pod delete name=e-0 grace=default
+tick=2 note the replacement is serving, so the step moves to the drain
+tick=2 apply endpoint.rotationOut[source] pod=svc-a-engine-0-default-0 now=t+5s
+tick=2 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#2{type=Update step=SurgeDrain target=svc-a-engine-6f8b1e6c strategy=SurgeThenDrain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=2 event Normal SurgePromoted instance=0 revision=svc-a-engine-6f8b1e6c
+tick=2 pod delete name=svc-a-engine-0-default-0 grace=default
 tick=3 pass result=none
 ```
 
-Normalization replaces operation ids, UIDs and timestamps with `op#1`, `uid#1`,
-`t+5s`. Anything else that varies between runs is a determinism bug in the
-harness or the engine and is fixed, not normalized away.
+Three rules:
+
+1. **A write prints the whole row, not a diff.** Every committed write
+   renders the row's full state after the write in one fixed field order, so
+   the first write and the twentieth read the same and no line depends on the
+   ones above it. An absent value prints as `nil`.
+2. **A tick may carry a `note:`, and the note is a compared line.** The
+   scenario states what the tick is about; the driver copies it into the trace
+   as `tick=N note <text>`. A walk that stops reading as its notes describe
+   fails like any other golden diff.
+3. **Identities print as the engine sees them.** ControllerRevision names and
+   revision hashes are verbatim: a hashing change rewrites the goldens, which
+   is the honest report. Only what nothing in the fixture names is normalized —
+   operation ids to `op#N` and object UIDs to `uid#N`, both in first-appearance
+   order, because the engine and the apiserver mint them at random. Timestamps
+   render as `t+<duration>` from the scenario start. Anything else that varies
+   between runs is a determinism bug in the harness or the engine and is fixed,
+   not normalized away.
 
 ### What the harness does not model
 
@@ -400,15 +416,12 @@ state than before.
   whether one per arrow is enough sensitivity. The first mutation check showed
   that flipping one surge ownership predicate alone is masked by the
   per-operation strategy pin; flipping both surge guards is caught.
-- Three trace-format questions for the owner before the remaining arrows are
-  recorded: whether a row write should print the whole row or only the fields
-  that changed, whether goldens may carry `note:` lines, and whether revision
-  names are normalized to `rev#N`.
-
 Resolved: the revert reopen is fixed in the counter (Part 3 table); quarantined
-specs are listed in `KIND_QUARANTINE` with owner and expiry.
+specs are listed in `KIND_QUARANTINE` with owner and expiry. The three
+trace-format questions are settled and the format above is the answer: whole
+rows, `note:` lines compared like any other, real revision names. The replay
+driver publishes endpoints in the per-revision routed Service the engine reads,
+so an endpoint hold is drivable in the replay lane.
 
-Next action: settle the three trace-format questions, then record goldens for
-the remaining 123 arrows and fix the replay driver's routed-Service labelling
-so endpoint holds can be driven in the replay lane. Parts 2 and 3 have met
+Next action: record goldens for the remaining arrows. Parts 2 and 3 have met
 their exit; Part 1 is the only gate still open before OEP-0020.3 may start.

@@ -28,11 +28,37 @@ import (
 // then absent — instead of collapsing them into one.
 const podLifecycleFinalizer = "replay.workload.ome.io/pod-lifecycle"
 
-// endpointSliceName is the single slice the driver keeps for the
-// Component's headless Service. One slice is enough: the drain and
-// rotation checks read endpoints, not slice topology.
-func (d *driver) endpointSliceName() string {
-	return query.HeadlessServiceName(d.opts.OwnerName, d.opts.Component) + "-replay"
+// sliceNameFor is the single EndpointSlice the driver keeps per Service.
+// One slice per Service is enough: the drain and rotation checks read
+// endpoints, not slice topology.
+func sliceNameFor(serviceName string) string {
+	return serviceName + "-replay"
+}
+
+// routedServiceForPod names the per-revision routed Service a pod is
+// published through, resolved exactly as the engine resolves it for the
+// same pod. A pod with no revision hash has none, and neither does a gang
+// worker: workers serve no customer traffic and are never members of the
+// routed Service.
+func (d *driver) routedServiceForPod(pod *corev1.Pod) string {
+	hash := pod.Labels[query.LabelRevisionHash]
+	if hash == "" || pod.Labels[query.LabelRunner] == "worker" {
+		return ""
+	}
+	return query.PerRevisionServiceName(d.opts.OwnerName, d.opts.Component, hash)
+}
+
+// routingViewsFor lists the Services a pod's endpoint is published in.
+// The per-revision routed Service is what the drain gate and the
+// source-rotation report read; the Component's headless Service is what
+// the status aggregate counts available pods from. A pod in rotation is
+// in both, so the driver writes both.
+func (d *driver) routingViewsFor(pod *corev1.Pod) []string {
+	views := []string{query.HeadlessServiceName(d.opts.OwnerName, d.opts.Component)}
+	if routed := d.routedServiceForPod(pod); routed != "" {
+		views = append(views, routed)
+	}
+	return views
 }
 
 // pendingRejection is an injected apiserver refusal owed to the next
@@ -264,7 +290,7 @@ func (d *driver) createDetail(obj client.Object) string {
 		return ""
 	}
 	return fmt.Sprintf("revision=%s incarnation=%s ordinal=%s",
-		d.norm.rev(pod.Labels[query.LabelRevisionHash]),
+		orNil(pod.Labels[query.LabelRevisionHash]),
 		orNil(pod.Labels[query.LabelInstanceIncarnation]),
 		orNil(pod.Labels[query.LabelPodOrdinal]))
 }
@@ -479,6 +505,12 @@ func (d *driver) removePodNow(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
+	// A pod that leaves the apiserver leaves every Service that published
+	// it; the endpoints go first, because the object the routed Service is
+	// resolved from is about to be gone.
+	if err := d.setPodRotationNow(ctx, pod, false); err != nil {
+		return err
+	}
 	pod.Finalizers = nil
 	if err := d.cli.Update(ctx, pod); err != nil {
 		return fmt.Errorf("replay: clear finalizer on pod %s: %w", name, err)
@@ -488,22 +520,62 @@ func (d *driver) removePodNow(ctx context.Context, name string) error {
 			return fmt.Errorf("replay: delete pod %s: %w", name, err)
 		}
 	}
-	if err := d.setRotationNow(ctx, name, false); err != nil {
-		return err
-	}
 	d.expectations.ObservedDelete(d.opts.Namespace, d.opts.OwnerName, d.opts.Component, index)
 	return nil
 }
 
-// setRotation adds or removes the pod's ready endpoint on the Component's
-// headless Service.
+// setRotation adds or removes the pod's ready endpoint in every Service
+// that publishes it.
 func (d *driver) setRotation(ctx context.Context, podName string, ready bool) error {
 	return d.staging(func() error { return d.setRotationNow(ctx, podName, ready) })
 }
 
 func (d *driver) setRotationNow(ctx context.Context, podName string, ready bool) error {
+	pod := &corev1.Pod{}
+	key := client.ObjectKey{Namespace: d.opts.Namespace, Name: podName}
+	if err := d.cli.Get(ctx, key, pod); err != nil {
+		return fmt.Errorf("replay: get pod %s for rotation: %w", podName, err)
+	}
+	return d.setPodRotationNow(ctx, pod, ready)
+}
+
+// setPodRotationNow takes the pod object rather than its name, for the
+// one caller that rotates a pod out as part of removing it and so cannot
+// read it back afterwards.
+func (d *driver) setPodRotationNow(ctx context.Context, pod *corev1.Pod, ready bool) error {
+	views := d.routingViewsFor(pod)
+	for _, service := range views {
+		if err := d.setEndpointNow(ctx, service, pod.Name, ready); err != nil {
+			return err
+		}
+	}
+	return d.pruneEndpointsOutsideViews(ctx, pod.Name, views)
+}
+
+// pruneEndpointsOutsideViews drops the pod from every Service that no
+// longer publishes it. An in-place roll rewrites the pod's revision
+// label, which moves it to a different per-revision routed Service; the
+// endpoint it had in the old one is stale from that moment on.
+func (d *driver) pruneEndpointsOutsideViews(ctx context.Context, podName string, views []string) error {
+	slices := &discoveryv1.EndpointSliceList{}
+	if err := d.cli.List(ctx, slices, client.InNamespace(d.opts.Namespace)); err != nil {
+		return fmt.Errorf("replay: list endpointslices: %w", err)
+	}
+	for i := range slices.Items {
+		service := slices.Items[i].Labels[discoveryv1.LabelServiceName]
+		if service == "" || contains(views, service) {
+			continue
+		}
+		if err := d.setEndpointNow(ctx, service, podName, false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *driver) setEndpointNow(ctx context.Context, serviceName, podName string, ready bool) error {
 	slice := &discoveryv1.EndpointSlice{}
-	key := client.ObjectKey{Namespace: d.opts.Namespace, Name: d.endpointSliceName()}
+	key := client.ObjectKey{Namespace: d.opts.Namespace, Name: sliceNameFor(serviceName)}
 	err := d.cli.Get(ctx, key, slice)
 	create := false
 	if err != nil {
@@ -514,9 +586,9 @@ func (d *driver) setRotationNow(ctx context.Context, podName string, ready bool)
 		slice = &discoveryv1.EndpointSlice{
 			ObjectMeta: metav1.ObjectMeta{
 				Namespace: d.opts.Namespace,
-				Name:      d.endpointSliceName(),
+				Name:      sliceNameFor(serviceName),
 				Labels: map[string]string{
-					discoveryv1.LabelServiceName: query.HeadlessServiceName(d.opts.OwnerName, d.opts.Component),
+					discoveryv1.LabelServiceName: serviceName,
 				},
 			},
 			AddressType: discoveryv1.AddressTypeIPv4,

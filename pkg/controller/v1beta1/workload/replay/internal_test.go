@@ -53,33 +53,15 @@ func TestNormalizerTokensAreFirstAppearanceOrdered(t *testing.T) {
 	}
 }
 
-// TestNormalizerRegistersNameAndHash proves a revision reads the same
-// whether a line names the object or only its hash.
-func TestNormalizerRegistersNameAndHash(t *testing.T) {
-	n := newNormalizer(traceStart)
-	n.revision("svc-a-engine-882059bb", "882059bb")
-	n.revision("svc-a-engine-6f8b1e6c", "6f8b1e6c")
-	for name, want := range map[string]string{
-		"svc-a-engine-882059bb": "rev#1",
-		"882059bb":              "rev#1",
-		"svc-a-engine-6f8b1e6c": "rev#2",
-		"6f8b1e6c":              "rev#2",
-		"svc-a-engine-unknown":  "svc-a-engine-unknown",
-	} {
-		if got := n.rev(name); got != want {
-			t.Errorf("rev(%q): got %q want %q", name, got, want)
-		}
-	}
-}
-
-// TestNormalizerTextReplacesLongestKeyFirst is the guard against a hash
-// shadowing the revision name it is a substring of: replacing "882059bb"
-// before "svc-a-engine-882059bb" would leave "svc-a-engine-rev#1".
+// TestNormalizerTextReplacesLongestKeyFirst is the guard against a short
+// identifier shadowing the longer one it is a prefix of: replacing
+// "pod-uid-1" before "pod-uid-11" would leave "uid#11".
 func TestNormalizerTextReplacesLongestKeyFirst(t *testing.T) {
 	n := newNormalizer(traceStart)
-	n.revision("svc-a-engine-882059bb", "882059bb")
-	got := n.text("revision svc-a-engine-882059bb (hash 882059bb) rolled")
-	if want := "revision rev#1 (hash rev#1) rolled"; got != want {
+	n.uid("pod-uid-1")
+	n.uid("pod-uid-11")
+	got := n.text("pod-uid-11 replaces pod-uid-1")
+	if want := "uid#2 replaces uid#1"; got != want {
 		t.Fatalf("got %q want %q", got, want)
 	}
 }
@@ -114,7 +96,6 @@ func TestNormalizerAtRendersBothDirections(t *testing.T) {
 // a changed key is recorded with both of its values, normalized.
 func TestMapDiffRecordsValues(t *testing.T) {
 	d := &driver{norm: newNormalizer(traceStart)}
-	d.norm.revision("svc-a-engine-882059bb", "882059bb")
 	got := d.mapDiff(
 		map[string]string{"keep": "same", "drop": "gone", "hash": "882059bb"},
 		map[string]string{"keep": "same", "hash": "882059bb", "add": "new"},

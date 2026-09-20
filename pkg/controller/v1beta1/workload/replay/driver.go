@@ -298,7 +298,6 @@ func (d *driver) ensureRevision(ctx context.Context, image string) (*appsv1.Cont
 	if collision {
 		return nil, fmt.Errorf("replay: revision hash collision on image %q", image)
 	}
-	d.norm.revision(target.Name, query.RevisionHashFromControllerRevisionName(target.Name))
 	return target, nil
 }
 
@@ -724,7 +723,7 @@ func (d *driver) wrapCallbacks(input *types.ReconcileInput) {
 	}
 	input.WarnRetryHeld = func(targetRevision string, attempts int32, reason string) {
 		d.trace.callback("warn retryHeld target=%s attempts=%d reason=%s",
-			d.norm.rev(targetRevision), attempts, d.norm.text(reason))
+			targetRevision, attempts, d.norm.text(reason))
 	}
 	input.RecordRolloutHold = func(hold *types.RolloutHold) {
 		if hold == nil {
@@ -732,7 +731,7 @@ func (d *driver) wrapCallbacks(input *types.ReconcileInput) {
 			return
 		}
 		d.trace.callback("hold gate=%s target=%s reason=%s",
-			hold.Gate, d.norm.rev(hold.Target), d.norm.text(hold.Reason))
+			hold.Gate, hold.Target, d.norm.text(hold.Reason))
 	}
 	// The owner's migration records are real state: the executor resumes
 	// from the phase it last persisted, so a driver that dropped the write

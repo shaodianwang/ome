@@ -10,6 +10,9 @@ cells:
   - instance/Ready/spec.revision/boundary@T-ready-surge
   - instance/Update/Surge/pod.ready[target]/boundary@T-surge-target-ready
   - instance/Update/SurgeDrain/pod.deleted[source]/boundary@T-surgedrain-promote
+intentional: >-
+  the source is deleted only once the per-revision routed Service has
+  dropped its endpoint, which is the drain the step waits on
 initial:
   spec:
     replicas: 1

@@ -44,9 +44,11 @@ Goldens were captured against the engine at `cf75eb72`
 (`[OEP] 0020.2 rollout engine behavior lock`), which is the `main` commit
 this branch is based on. The branch changes no engine code, so the
 recorded traces are the behavior of `main` at that commit. They have been
-re-recorded once since, when the driver's fidelity fixes (deadline
-parking, pod-write values, the owner generation) changed what the driver
-observed — not what the engine does.
+re-recorded since, for the trace format and for the driver's fidelity
+fixes (deadline parking, pod-write values, the owner generation, the
+per-revision routed Service). Each of those changed how a run is
+rendered, or what the driver put in front of the engine — never what the
+engine does with it.
 
 ## Changing a golden
 
@@ -63,6 +65,9 @@ scenario: T-surgedrain-promote     # file name; checked against transitions.yaml
 arrows: [T-ready-surge, T-surge-target-ready, T-surgedrain-promote]
 cells:
   - instance/Update/SurgeDrain/pod.deleted[source]/boundary@T-surgedrain-promote
+intentional: >-               # why this scenario's golden reads the way it does
+  the source is deleted only once the per-revision routed Service has
+  dropped its endpoint
 initial:
   spec:    {replicas: 1, strategy: SurgeThenDrain, image: registry.example.com/runtime:v1, instanceReadyTimeout: 30m}
   config:  {requeueOperation: 5s, requeueGate: 3s}
@@ -76,6 +81,11 @@ timeline:
       - clock.advance: 5s
 ```
 
+A tick's `note` is a plain string and is compared as a trace line, so it
+is a claim about the tick rather than a comment. `routed: true` seeds the
+pod's endpoint in both the Services that publish it (see **Endpoints**
+below).
+
 `initial.spec` is the driver's mutable owner spec: every tick rebuilds the
 plan and the target ControllerRevision from it through the production
 `workload.BuildPlan` and `revision.EnsureControllerRevision`, so a
@@ -86,32 +96,75 @@ the engine's own hashing.
 
 ```
 tick=3 note the pod template changes, so the rollout surges a replacement
-tick=3 apply spec.revision image=registry.example.com/runtime:v2 now=t+0s
+tick=3 apply spec.revision image=registry.example.com/runtime:v2 generation=1 now=t+0s
 tick=3 gate consult strategy=SurgeThenDrain surge=0 unavail=0 verdict=allow
-tick=3 row=0 write phase=Ready→Updating targetRevision=nil→rev#2 op=nil→op#2{...} precondition=ok
-tick=3 event Normal RecreateUpdateStarted OMENative component=engine instance=0 surge to revision rev#2 (newOrdinal=1)
-tick=3 pod create name=svc-a-engine-0-default-1 revision=rev#2 incarnation=1 ordinal=1
+tick=3 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#2{type=Update step=Surge target=svc-a-engine-6f8b1e6c strategy=SurgeThenDrain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=3 event Normal RecreateUpdateStarted OMENative component=engine instance=0 surge to revision svc-a-engine-6f8b1e6c (newOrdinal=1)
+tick=3 pod create name=svc-a-engine-0-default-1 revision=6f8b1e6c incarnation=1 ordinal=1
 tick=3 hold cleared
 tick=3 pass result=after:5s
 ```
 
+Three rules hold the format together:
+
+1. **A write prints the whole row, never a diff.** Every committed write
+   renders the row's full projected state after the write, in one fixed
+   field order, so the first write and the twentieth read the same and a
+   line can be understood without folding the ones above it into it. An
+   absent value prints as `nil`. The order is `incarnation`, `phase`,
+   `runningRevision`, `targetRevision`, `activeOrdinal`, the pod counters,
+   `readySince`, `op{...}`, `conditions`, `lastFailure`; the first three,
+   `readySince` and `op` are always present, the rest appear when the row
+   carries them. A mutation that did not commit has no state to report,
+   so its line carries the attempt and the verdict alone
+   (`row=0 write no-op precondition=no-change`).
+2. **A tick's `note:` is a trace line.** The scenario writes the note, the
+   driver copies it into the trace at that tick as `tick=N note <text>`,
+   and it is compared like any other golden line — so a walk that stops
+   reading as its notes describe fails.
+3. **Identities print as the engine sees them.** ControllerRevision names
+   and revision hashes are printed verbatim. Only what nothing in the
+   fixture names is normalized: operation ids to `op#N` and object UIDs
+   to `uid#N`, both in first-appearance order, because the engine and the
+   apiserver mint them at random and a golden cannot carry a value that
+   differs between runs. Instants render as `t+<duration>` from the
+   scenario start, including timestamps embedded in event messages. Pod
+   names are already deterministic and are printed verbatim. Anything
+   else that varies between runs is a determinism defect, reported rather
+   than normalized away.
+
 Line kinds: `note`, `apply` (a scenario event staged), `row` (one buffered
-status mutation, field by field, with its precondition verdict),
-`retryblock`, `event` (a Kubernetes event), `pod` / `podgroup`
-(create / patch / delete, including a rejected or failed one), the
-callback lines (`gate consult`, `hold`, `warn`, `condition`, `migration`),
-and `pass result=` closing every tick.
+status mutation with its precondition verdict), `retryblock`, `event` (a
+Kubernetes event), `pod` / `podgroup` (create / patch / delete, including
+a rejected or failed one), the callback lines (`gate consult`, `hold`,
+`warn`, `condition`, `migration`), and `pass result=` closing every tick.
 
 A row write after the `pass result=` line of a tick is the adapter's
 deadline park/rearm step, which runs after the dispatcher on every
 reconcile (and, when paused, once before it as well).
 
-Normalization: operation ids to `op#N`, UIDs to `uid#N`, revision names and
-hashes to `rev#N`, all in first-appearance order; instants to `t+<duration>`
-from the scenario start, including timestamps embedded in event messages.
-Pod names are already deterministic and are printed verbatim. Anything else
-that varies between runs is a determinism defect, reported rather than
-normalized away.
+## Endpoints: which Service a pod is published in
+
+The engine reads two endpoint views, and the driver writes both.
+
+The **per-revision routed Service** (`<owner>-<component>-rev-<hash>`) is
+what the drain gate, the in-rotation gate and the source-rotation report
+read: a pod is resolved to it by its revision-hash label, and a gang
+worker has none because workers serve no customer traffic. The
+**Component headless Service** is what the status aggregate counts
+available pods from. A pod in rotation holds an endpoint in both, and a
+rotation write sweeps it out of every Service that no longer publishes it
+— an in-place roll rewrites the revision label, which moves the pod to a
+different routed Service.
+
+This is why a drain is a real gate in a replay: a source is deleted only
+once the scenario has taken it out of the routed Service, and a source
+dropped from that Service while its surge replacement is still coming up
+produces the `SourceUnrouted` hold (`source-unrouted-midsurge`). The
+driver creates no Service object for a revision, only the slice, so a
+revision no pod was ever routed on reads as "nothing routes here" and
+drains trivially — the same answer the engine gives for a Service that
+does not exist.
 
 ## Deviations from the OEP-0020.2 design details
 
@@ -124,11 +177,12 @@ or determinism forced a change, and they are the ones to review.
    and the arrow-coverage join needs all of them. A scenario name starting
    with `T-` is still checked against `transitions.yaml`; a free name — a
    hold that drives no transition — is not, and cites cells instead.
-2. **Revisions render as `rev#N`, not `rev-a` / `rev-b`.** The driver mints
-   real ControllerRevisions through the production hasher, so their names
-   carry a content hash. Normalizing them keeps a golden from churning on
-   an unrelated hashing change while still showing a revision swap.
-3. **Row diffs name every changed field, and non-committing mutations are
+2. **Revisions render as the names the engine sees, not `rev-a` / `rev-b`.**
+   The driver mints real ControllerRevisions through the production
+   hasher, so a golden carries the content hash the engine computed. A
+   hashing change therefore rewrites every golden, which is the honest
+   report: the names the engine passes around really did change.
+3. **A row line is the whole row, and non-committing mutations are
    recorded too.** `row=0 write no-op precondition=no-change` is an
    attempted write the engine made that turned out to change nothing —
    engine behavior, and a line a refactor can move.
@@ -165,7 +219,7 @@ or determinism forced a change, and they are the ones to review.
     rejects anything else, so a mistyped argument fails the load instead
     of silently doing nothing, and `timer.operationDeadline` requires its
     slack rather than defaulting to one the harness invented.
-12. **A row diff omits `ReadyPodCount`, `ScheduledPodCount` and
+12. **A row line omits `ReadyPodCount`, `ScheduledPodCount` and
     `NodesOccupied`.** Those are materialized only on the status
     publication path, which runs outside `workload.Reconcile`, and the
     workload package's removable-field audit forbids reading them
@@ -237,8 +291,8 @@ Effects the driver does not record:
 - Timestamps on aggregate conditions and on `LastFailure`, because the
   engine stamps both from the wall clock (see Follow-ups).
 
-Reads, which are never traced at all: EndpointSlices, the headless
-Service, ControllerRevisions, and Nodes. No Node objects exist in the fake
+Reads, which are never traced at all: EndpointSlices, Services,
+ControllerRevisions, and Nodes. No Node objects exist in the fake
 cluster, so the force-delete escalation always takes its read-error branch
 rather than the unreachable-node branch — a scenario that needs the latter
 has to seed Nodes first.
@@ -250,9 +304,6 @@ synchronously rather than racing a concurrent writer.
 
 ## Follow-ups
 
-- `transitions.yaml` declares **138** transitions, not the 148 OEP-0020.2
-  states. The exit criterion should be restated against the count the
-  table actually carries.
 - A clock seam for `podreadiness` (`readiness.go:160,245`) and
   `ops/restart.go:501`, both of which read `metav1.Now()` directly. Until
   they take the injected clock, the trace deliberately omits the values

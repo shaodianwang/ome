@@ -12,6 +12,9 @@ arrows:
 cells:
   - instance/Update/Surge/spec.revision/after@T-surge-target-ready
   - instance/Update/SurgeDrain/spec.revision/before
+intentional: >-
+  the source is deleted only once the per-revision routed Service has
+  dropped its endpoint, which is the drain the step waits on
 initial:
   spec:
     replicas: 1

@@ -17,15 +17,16 @@ import (
 // trace uses.
 var rfc3339 = regexp.MustCompile(`\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})`)
 
-// normalizer replaces every identifier that is stable within one run but
-// arbitrary across builds with a token derived from first-appearance
-// order. Two runs of one scenario therefore render byte-identically while
-// a changed write still shows up as a diff.
+// normalizer replaces the identifiers nothing in the fixture names — the
+// operation ids and object UIDs the engine and the apiserver mint at
+// random — with a token derived from first-appearance order. Two runs of
+// one scenario therefore render byte-identically while a changed write
+// still shows up as a diff. Names the fixture does control, revisions
+// above all, are printed as the engine sees them.
 type normalizer struct {
 	start time.Time
 	ops   map[string]string
 	uids  map[string]string
-	revs  map[string]string
 }
 
 func newNormalizer(start time.Time) *normalizer {
@@ -33,7 +34,6 @@ func newNormalizer(start time.Time) *normalizer {
 		start: start,
 		ops:   map[string]string{},
 		uids:  map[string]string{},
-		revs:  map[string]string{},
 	}
 }
 
@@ -61,38 +61,6 @@ func (n *normalizer) uid(uid string) string {
 	return token
 }
 
-// revision registers one revision under both its object name and its
-// hash, so a trace line naming either renders the same token.
-func (n *normalizer) revision(name, hash string) string {
-	if token, ok := n.revs[name]; ok {
-		return token
-	}
-	token := fmt.Sprintf("rev#%d", n.revisionCount()+1)
-	n.revs[name] = token
-	if hash != "" {
-		n.revs[hash] = token
-	}
-	return token
-}
-
-func (n *normalizer) revisionCount() int {
-	seen := map[string]struct{}{}
-	for _, token := range n.revs {
-		seen[token] = struct{}{}
-	}
-	return len(seen)
-}
-
-func (n *normalizer) rev(nameOrHash string) string {
-	if nameOrHash == "" {
-		return ""
-	}
-	if token, ok := n.revs[nameOrHash]; ok {
-		return token
-	}
-	return nameOrHash
-}
-
 // at renders an absolute instant relative to the scenario start.
 func (n *normalizer) at(t time.Time) string {
 	if t.IsZero() {
@@ -118,7 +86,7 @@ func (n *normalizer) text(s string) string {
 	if s == "" {
 		return s
 	}
-	for _, table := range []map[string]string{n.ops, n.uids, n.revs} {
+	for _, table := range []map[string]string{n.ops, n.uids} {
 		for _, from := range sortedByLengthDesc(table) {
 			s = strings.ReplaceAll(s, from, table[from])
 		}
@@ -132,8 +100,8 @@ func (n *normalizer) text(s string) string {
 	})
 }
 
-// sortedByLengthDesc orders the replacement keys longest-first so a hash
-// that is a substring of a revision name cannot shadow it. The order is
+// sortedByLengthDesc orders the replacement keys longest-first so an
+// identifier that is a prefix of another cannot shadow it. The order is
 // total, because map iteration order is not.
 func sortedByLengthDesc(table map[string]string) []string {
 	keys := make([]string, 0, len(table))
@@ -189,10 +157,13 @@ func (t *Trace) applied(ev TimelineEvent, detail string) {
 	t.emit("%s now=%s", line, t.norm.at(t.now()))
 }
 
-// RowCommitted renders one resolved row write, field by field. A mutation
-// that did not commit has no diff by definition, so the line carries the
-// attempt and the verdict and nothing else — the attempt itself is engine
-// behavior worth locking.
+// RowCommitted renders one resolved row write as the row's whole
+// projected state, in a fixed field order. Every committed write reads
+// the same way — the first one and the twentieth — so a golden line is
+// the row at that instant rather than a delta the reader has to fold into
+// the ones above it. A mutation that did not commit left no state to
+// report, so its line carries the attempt and the verdict: the attempt
+// itself is engine behavior worth locking.
 func (t *Trace) RowCommitted(commit RowCommit) {
 	verb := "write"
 	if commit.Remove {
@@ -202,16 +173,22 @@ func (t *Trace) RowCommitted(commit RowCommit) {
 		t.emit("row=%d %s no-op precondition=%s", commit.Index, verb, commit.Outcome)
 		return
 	}
-	diff := t.rowDiff(commit.Before, commit.After)
-	if diff == "" {
-		diff = "-"
+	// A remove leaves nothing behind, so it reports the state it removed.
+	row := commit.After
+	if row == nil {
+		row = commit.Before
 	}
-	t.emit("row=%d %s %s precondition=%s", commit.Index, verb, diff, commit.Outcome)
+	if row == nil {
+		t.emit("row=%d %s - precondition=%s", commit.Index, verb, commit.Outcome)
+		return
+	}
+	t.emit("row=%d %s %s precondition=%s", commit.Index, verb,
+		strings.Join(t.rowFields(*row), " "), commit.Outcome)
 }
 
 // RetryBlockCommitted renders one resolved retry-block write.
 func (t *Trace) RetryBlockCommitted(commit RetryBlockCommit) {
-	t.emit("retryblock target=%s %s %s", t.norm.rev(commit.TargetRevision), commit.Disposition,
+	t.emit("retryblock target=%s %s %s", commit.TargetRevision, commit.Disposition,
 		t.retryBlockDiff(commit.Before, commit.After))
 }
 
@@ -231,110 +208,49 @@ func (t *Trace) callback(format string, args ...any) {
 	t.emit("%s", fmt.Sprintf(format, args...))
 }
 
-func (t *Trace) rowDiff(before, after *types.InstanceStatus) string {
-	var parts []string
-	add := func(field, from, to string) {
-		if from == to {
-			return
-		}
-		parts = append(parts, fmt.Sprintf("%s=%s→%s", field, from, to))
-	}
-	zero := types.InstanceStatus{}
-	from, to := zero, zero
-	switch {
-	case before == nil && after == nil:
-		return ""
-	case before == nil:
-		to = *after
-		parts = append(parts, "created")
-	case after == nil:
-		from = *before
-		parts = append(parts, "removed")
-	default:
-		from, to = *before, *after
-	}
-	if after == nil {
-		return strings.Join(append(parts, t.rowFields(from)...), " ")
-	}
-	if before == nil {
-		return strings.Join(append(parts, t.rowFields(to)...), " ")
-	}
-	add("incarnation", fmt.Sprint(from.Incarnation), fmt.Sprint(to.Incarnation))
-	add("phase", phaseOrNil(from.Phase), phaseOrNil(to.Phase))
-	add("runningRevision", t.norm.rev(orNil(from.RunningRevision)), t.norm.rev(orNil(to.RunningRevision)))
-	add("targetRevision", t.norm.rev(orNil(from.TargetRevision)), t.norm.rev(orNil(to.TargetRevision)))
-	add("podCount", fmt.Sprint(from.PodCount), fmt.Sprint(to.PodCount))
-	add("servingPodCount", fmt.Sprint(from.ServingPodCount), fmt.Sprint(to.ServingPodCount))
-	add("availablePodCount", fmt.Sprint(from.AvailablePodCount), fmt.Sprint(to.AvailablePodCount))
-	add("admitted", fmt.Sprint(from.Admitted), fmt.Sprint(to.Admitted))
-	add("activeOrdinal", fmt.Sprint(from.ActiveOrdinal), fmt.Sprint(to.ActiveOrdinal))
-	// ReadyPodCount, ScheduledPodCount and NodesOccupied are materialized
-	// only on the status publication path, which the driver does not run,
-	// and the workload package forbids reading them anywhere else. They are
-	// therefore outside what a row diff can honestly report.
-	add("readySince", t.norm.atMeta(from.ReadySince), t.norm.atMeta(to.ReadySince))
-	add("conditions", t.conditions(from.Conditions), t.conditions(to.Conditions))
-	add("lastFailure", t.failure(from.LastFailure), t.failure(to.LastFailure))
-	parts = append(parts, t.operationDiff(from.Operation, to.Operation)...)
-	return strings.Join(parts, " ")
-}
-
-// rowFields renders a whole row, for a create or a removal where there is
-// no counterpart to diff against.
+// rowFields renders a whole row in the order every trace line uses.
+// Incarnation, phase, running revision, readySince and the operation are
+// always present, an absent one as nil, so the shape of the line does not
+// depend on which fields a particular write touched. The rest appear when
+// the row carries them.
+//
+// ReadyPodCount, ScheduledPodCount and NodesOccupied are materialized only
+// on the status publication path, which the driver does not run, and the
+// workload package forbids reading them anywhere else. They are therefore
+// outside what a row line can honestly report.
 func (t *Trace) rowFields(row types.InstanceStatus) []string {
 	parts := []string{
 		"incarnation=" + fmt.Sprint(row.Incarnation),
 		"phase=" + phaseOrNil(row.Phase),
-	}
-	if row.RunningRevision != "" {
-		parts = append(parts, "runningRevision="+t.norm.rev(row.RunningRevision))
+		"runningRevision=" + orNil(row.RunningRevision),
 	}
 	if row.TargetRevision != "" {
-		parts = append(parts, "targetRevision="+t.norm.rev(row.TargetRevision))
+		parts = append(parts, "targetRevision="+row.TargetRevision)
 	}
 	if row.ActiveOrdinal != 0 {
 		parts = append(parts, "activeOrdinal="+fmt.Sprint(row.ActiveOrdinal))
 	}
-	if row.ReadySince != nil {
-		parts = append(parts, "readySince="+t.norm.atMeta(row.ReadySince))
+	if row.PodCount != 0 {
+		parts = append(parts, "podCount="+fmt.Sprint(row.PodCount))
 	}
-	if row.Operation != nil {
-		parts = append(parts, "op="+t.operation(row.Operation))
+	if row.ServingPodCount != 0 {
+		parts = append(parts, "servingPodCount="+fmt.Sprint(row.ServingPodCount))
+	}
+	if row.AvailablePodCount != 0 {
+		parts = append(parts, "availablePodCount="+fmt.Sprint(row.AvailablePodCount))
+	}
+	if row.Admitted {
+		parts = append(parts, "admitted=true")
+	}
+	parts = append(parts,
+		"readySince="+t.norm.atMeta(row.ReadySince),
+		"op="+t.operation(row.Operation))
+	if len(row.Conditions) > 0 {
+		parts = append(parts, "conditions="+t.conditions(row.Conditions))
 	}
 	if row.LastFailure != nil {
 		parts = append(parts, "lastFailure="+t.failure(row.LastFailure))
 	}
-	return parts
-}
-
-func (t *Trace) operationDiff(before, after *types.InstanceOperation) []string {
-	switch {
-	case before == nil && after == nil:
-		return nil
-	case before == nil:
-		return []string{"op=nil→" + t.operation(after)}
-	case after == nil:
-		return []string{"op=" + t.norm.op(before.ID) + "→nil"}
-	case before.ID != after.ID:
-		return []string{"op=" + t.norm.op(before.ID) + "→" + t.operation(after)}
-	}
-	token := t.norm.op(before.ID)
-	var parts []string
-	add := func(field, from, to string) {
-		if from != to {
-			parts = append(parts, fmt.Sprintf("%s.%s=%s→%s", token, field, from, to))
-		}
-	}
-	add("type", string(before.Type), string(after.Type))
-	add("step", orNil(before.Step), orNil(after.Step))
-	add("target", t.norm.rev(orNil(before.TargetRevision)), t.norm.rev(orNil(after.TargetRevision)))
-	add("reason", t.norm.text(orNil(before.Reason)), t.norm.text(orNil(after.Reason)))
-	add("waiting", orNil(before.Waiting), orNil(after.Waiting))
-	add("strategy", orNil(string(before.Strategy)), orNil(string(after.Strategy)))
-	add("retryCount", fmt.Sprint(before.RetryCount), fmt.Sprint(after.RetryCount))
-	add("surgeIndex", indexOrNil(before.SurgeIndex), indexOrNil(after.SurgeIndex))
-	add("deadline", t.norm.at(before.Deadline.Time), t.norm.at(after.Deadline.Time))
-	add("lastProgressAt", t.norm.at(before.LastProgressAt.Time), t.norm.at(after.LastProgressAt.Time))
 	return parts
 }
 
@@ -347,7 +263,7 @@ func (t *Trace) operation(op *types.InstanceOperation) string {
 		"step=" + orNil(op.Step),
 	}
 	if op.TargetRevision != "" {
-		parts = append(parts, "target="+t.norm.rev(op.TargetRevision))
+		parts = append(parts, "target="+op.TargetRevision)
 	}
 	if op.Reason != "" {
 		parts = append(parts, "reason="+t.norm.text(op.Reason))
@@ -364,7 +280,10 @@ func (t *Trace) operation(op *types.InstanceOperation) string {
 	if op.RetryCount != 0 {
 		parts = append(parts, "retryCount="+fmt.Sprint(op.RetryCount))
 	}
-	parts = append(parts, "started="+t.norm.at(op.StartedAt.Time), "deadline="+t.norm.at(op.Deadline.Time))
+	parts = append(parts,
+		"started="+t.norm.at(op.StartedAt.Time),
+		"lastProgressAt="+t.norm.at(op.LastProgressAt.Time),
+		"deadline="+t.norm.at(op.Deadline.Time))
 	return t.norm.op(op.ID) + "{" + strings.Join(parts, " ") + "}"
 }
 

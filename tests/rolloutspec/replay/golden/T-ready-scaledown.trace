@@ -1,6 +1,6 @@
 tick=1 note the operator halves the replica count
 tick=1 apply spec.replicasDown replicas=1 generation=1 now=t+0s
-tick=1 row=1 write phase=Ready→Deleting op=nil→op#1{type=Delete step=Drain started=t+0s deadline=t+30m0s} precondition=ok
+tick=1 row=1 write incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
 tick=1 pass result=requeue
 tick=2 note the retired Instance leaves rotation
 tick=2 apply endpoint.rotationOut[source] pod=svc-a-engine-1-default-0 now=t+0s
@@ -11,7 +11,7 @@ tick=2 pass result=after:30s
 tick=3 note its pod is gone
 tick=3 apply pod.deleted[source] pod=svc-a-engine-1-default-0 now=t+0s
 tick=3 row=1 write no-op precondition=no-change
-tick=3 row=1 remove removed incarnation=1 phase=Deleting runningRevision=rev#1 readySince=t+0s op=op#1{type=Delete step=Drain started=t+0s deadline=t+30m0s} precondition=ok
+tick=3 row=1 remove incarnation=1 phase=Deleting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Delete step=Drain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
 tick=3 pass result=requeue
 tick=4 note the wave completes and the row is removed
 tick=4 row=0 write no-op precondition=no-change

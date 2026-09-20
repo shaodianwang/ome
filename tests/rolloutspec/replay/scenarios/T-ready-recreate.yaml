@@ -7,6 +7,9 @@ arrows:
 cells:
   - instance/Ready/spec.revision/boundary@T-ready-recreate
   - instance/Update/Drain/pod.deleted[source]/boundary@T-drain-ready
+intentional: >-
+  the source is deleted only once the per-revision routed Service has
+  dropped its endpoint, which is the drain the step waits on
 initial:
   spec:
     replicas: 1

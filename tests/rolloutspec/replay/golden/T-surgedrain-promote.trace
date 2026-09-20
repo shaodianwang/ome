@@ -1,21 +1,21 @@
 tick=1 note cold start
-tick=1 row=0 write created incarnation=1 phase=Creating op=op#1{type=Create step=CreatePods target=rev#1 started=t+0s deadline=t+30m0s} precondition=ok
+tick=1 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
 tick=1 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 1 pod(s) requested
-tick=1 pod create name=svc-a-engine-0-default-0 revision=rev#1 incarnation=1 ordinal=0
+tick=1 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=1 ordinal=0
 tick=1 pass result=after:5s
 tick=2 note the source becomes Ready and enters rotation
 tick=2 apply pod.ready[source] pod=svc-a-engine-0-default-0 now=t+0s
 tick=2 apply endpoint.rotationIn[source] pod=svc-a-engine-0-default-0 now=t+0s
 tick=2 pod status-patch name=svc-a-engine-0-default-0 serving=absent→True
-tick=2 row=0 write phase=Creating→Ready runningRevision=nil→rev#1 readySince=nil→t+0s op=op#1→nil precondition=ok
+tick=2 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+0s op=nil precondition=ok
 tick=2 event Normal InstanceReady OMENative component=engine instance=0 is Ready (1 pod(s) serving)
 tick=2 pass result=none
 tick=3 note the pod template changes, so the rollout surges a replacement
 tick=3 apply spec.revision image=registry.example.com/runtime:v2 generation=1 now=t+0s
 tick=3 gate consult strategy=SurgeThenDrain surge=0 unavail=0 verdict=allow
-tick=3 row=0 write phase=Ready→Updating targetRevision=nil→rev#2 op=nil→op#2{type=Update step=Surge target=rev#2 strategy=SurgeThenDrain started=t+0s deadline=t+30m0s} precondition=ok
-tick=3 event Normal RecreateUpdateStarted OMENative component=engine instance=0 surge to revision rev#2 (newOrdinal=1)
-tick=3 pod create name=svc-a-engine-0-default-1 revision=rev#2 incarnation=1 ordinal=1
+tick=3 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#2{type=Update step=Surge target=svc-a-engine-6f8b1e6c strategy=SurgeThenDrain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=3 event Normal RecreateUpdateStarted OMENative component=engine instance=0 surge to revision svc-a-engine-6f8b1e6c (newOrdinal=1)
+tick=3 pod create name=svc-a-engine-0-default-1 revision=6f8b1e6c incarnation=1 ordinal=1
 tick=3 hold cleared
 tick=3 pass result=after:5s
 tick=4 note the replacement is serving and in rotation beside the source
@@ -23,21 +23,21 @@ tick=4 apply pod.ready[target] pod=svc-a-engine-0-default-1 now=t+0s
 tick=4 apply endpoint.rotationIn[target] pod=svc-a-engine-0-default-1 now=t+0s
 tick=4 row=0 write no-op precondition=no-change
 tick=4 pod status-patch name=svc-a-engine-0-default-1 serving=absent→True
-tick=4 row=0 write op#2.step=Surge→SurgeDrain precondition=ok
+tick=4 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#2{type=Update step=SurgeDrain target=svc-a-engine-6f8b1e6c strategy=SurgeThenDrain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
 tick=4 pod status-patch name=svc-a-engine-0-default-0 serving=True→False
-tick=4 pod delete name=svc-a-engine-0-default-0 grace=default
 tick=4 hold cleared
 tick=4 pass result=after:5s
 tick=5 note the source leaves rotation, so the drain has converged
 tick=5 apply endpoint.rotationOut[source] pod=svc-a-engine-0-default-0 now=t+0s
 tick=5 row=0 write no-op precondition=no-change
 tick=5 row=0 write no-op precondition=no-change
+tick=5 pod delete name=svc-a-engine-0-default-0 grace=default
 tick=5 hold cleared
 tick=5 pass result=after:5s
 tick=6 note the drained source is gone
 tick=6 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+0s
 tick=6 row=0 write no-op precondition=no-change
-tick=6 row=0 write phase=Updating→Ready runningRevision=rev#1→rev#2 targetRevision=rev#2→nil activeOrdinal=0→1 op=op#2→nil precondition=ok
-tick=6 event Normal RecreateUpdateCompleted OMENative component=engine instance=0 surge to revision rev#2 complete (activeOrdinal=1)
+tick=6 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-6f8b1e6c activeOrdinal=1 readySince=t+0s op=nil precondition=ok
+tick=6 event Normal RecreateUpdateCompleted OMENative component=engine instance=0 surge to revision svc-a-engine-6f8b1e6c complete (activeOrdinal=1)
 tick=6 hold cleared
 tick=6 pass result=requeue
