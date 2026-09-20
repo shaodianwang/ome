@@ -359,13 +359,17 @@ def _infra_retry(limit: int = 2, indent: int = 12) -> str:
     vanished during `go mod download`) and 2548 (helm-lint: pre-command docker
     health failed before the lint ran).
     """
-    return _retry(
-        [
-            {"exit_status": 125, "limit": limit},
-            {"signal_reason": "agent_stop", "limit": limit},
-        ],
-        indent,
-    )
+    return _retry(_infra_retry_automatic(limit), indent)
+
+
+def _infra_retry_automatic(limit: int = 2) -> list:
+    """The _infra_retry conditions as plain data, for steps assembled as
+    dicts and rendered by _yaml_block rather than as YAML text.
+    """
+    return [
+        {"exit_status": 125, "limit": limit},
+        {"signal_reason": "agent_stop", "limit": limit},
+    ]
 
 
 def _tw_docker_plugin(
@@ -633,7 +637,15 @@ def _mc_kind_group() -> str:
 
 
 def _gke_kind_group() -> str:
-    """A small set of named semantic jobs, each with its own KIND cluster."""
+    """A small set of named semantic jobs, each with its own KIND cluster.
+
+    Children carry the infra-retry preset. `kind create cluster` is the one
+    part of these jobs that fails for reasons the commit cannot cause: on a
+    contended agent the node containers take minutes to boot and the create is
+    abandoned in BeforeSuite, before any spec runs. run_kind_tests_gke.sh
+    translates exactly that shape to exit 125, so the preset picks it up while
+    still never matching exit 1 — a red spec is not retryable here, by design.
+    """
     plugins = _gke_kind_plugins(
         _kind_ci_image(f"test-{COMMIT[:8]}-{BUILD_NUMBER}")
     )
@@ -649,6 +661,7 @@ def _gke_kind_group() -> str:
                 "env": {"OME_KIND_FOCUS": focus},
                 "agents": {"queue": GKE_QUEUE},
                 "command": "sh .buildkite/run_kind_tests_gke.sh",
+                "retry": {"automatic": _infra_retry_automatic()},
                 "plugins": plugins,
             }
         )

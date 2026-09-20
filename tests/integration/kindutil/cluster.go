@@ -3,6 +3,7 @@ package kindutil
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -47,10 +48,40 @@ func envEnabled(key string) bool {
 	}
 }
 
-// clusterCreateTimeout caps how long `kind create cluster --wait`
-// may take before we give up. KIND's own --wait defaults to 60s; we
-// give it 3min to absorb cold image pulls on first-ever runs.
-const clusterCreateTimeout = 3 * time.Minute
+// envClusterCreateTimeout overrides how long `kind create cluster
+// --wait` may take before the attempt is abandoned. Parsed with
+// time.ParseDuration ("10m", "90s"); an empty, unparsable, or
+// non-positive value falls back to defaultClusterCreateTimeout.
+const envClusterCreateTimeout = "KIND_CLUSTER_CREATE_TIMEOUT"
+
+// defaultClusterCreateTimeout caps a single `kind create cluster
+// --wait` attempt. A default is acceptable here because this is test
+// scaffolding, not product behavior: no binary shipped to a user reads
+// it, and a suite that cannot name its own patience has no cluster.
+//
+// Sized for the slowest environment rather than the common one. An
+// uncontended runner boots three node containers in under 10s and
+// finishes the whole create in ~35s, so a generous cap costs nothing
+// there; a contended container runtime spends 2-3min in `Preparing
+// nodes` alone, and killing it at the 3min mark destroys a cluster
+// that was seconds from Ready. Override with KIND_CLUSTER_CREATE_TIMEOUT.
+const defaultClusterCreateTimeout = 8 * time.Minute
+
+// clusterCreateTimeout resolves the per-attempt cluster-create cap from
+// envClusterCreateTimeout, falling back to defaultClusterCreateTimeout.
+func clusterCreateTimeout() time.Duration {
+	raw := strings.TrimSpace(os.Getenv(envClusterCreateTimeout))
+	if raw == "" {
+		return defaultClusterCreateTimeout
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		fmt.Printf("createCluster: ignoring %s=%q (%v), using %s\n",
+			envClusterCreateTimeout, raw, err, defaultClusterCreateTimeout)
+		return defaultClusterCreateTimeout
+	}
+	return d
+}
 
 // KindExtraMount mirrors one entry of a KIND node's extraMounts: a host
 // directory bind-mounted into a node container at the same (or a
@@ -163,12 +194,85 @@ func clusterExists(ctx context.Context, name string) (bool, error) {
 	return false, nil
 }
 
-// createCluster runs `kind create cluster --wait` for the named cluster
-// with the requested worker count and extraMounts. A single-node cluster
-// with no extraMounts skips the config-file dance entirely for fastest
-// spinup; either a worker count or extraMounts forces a config file since
-// both require settings `kind create cluster`'s flags cannot express.
+// createCluster brings up the named cluster, retrying at most once when
+// the first attempt fails the way a starved container runtime fails
+// (see isRetriableCreateFailure). The partial cluster is deleted before
+// the second attempt, because kind refuses to create over the leftover
+// node containers with "node(s) already exist".
+//
+// Exactly one retry, and only for those signatures: any other create
+// failure — a bad config, an unreachable node image, a name collision —
+// is deterministic, and retrying it only doubles the time to the same
+// red.
 func createCluster(ctx context.Context, name string, workers int, extraMounts []KindExtraMount) error {
+	const attempts = 2
+	var err error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		var stderr string
+		stderr, err = createClusterOnce(ctx, name, workers, extraMounts)
+		if err == nil {
+			if attempt > 1 {
+				fmt.Printf("createCluster: attempt %d/%d for %q succeeded\n", attempt, attempts, name)
+			}
+			return nil
+		}
+		if attempt == attempts || !isRetriableCreateFailure(err, stderr) {
+			return err
+		}
+		fmt.Printf("createCluster: attempt %d/%d for %q failed with a starved-runtime signature, "+
+			"deleting the partial cluster and retrying once: %v\n", attempt, attempts, name, err)
+		if delErr := deleteClusterNow(ctx, name); delErr != nil {
+			return fmt.Errorf("%w (cleanup before retry also failed: %v)", err, delErr)
+		}
+	}
+	return err
+}
+
+// isRetriableCreateFailure reports whether a `kind create cluster`
+// failure is the resource-starvation kind that a second attempt can
+// plausibly clear. Two signatures, both observed on a contended CI
+// container runtime and neither implying anything about the code under
+// test:
+//
+//   - the attempt hit its own deadline and the process was killed
+//     mid-boot, typically seconds from a Ready control plane;
+//   - kind's internal node-boot deadline expired first, which it
+//     reports as not finding the systemd "Reached target ... Multi-User
+//     System" log line.
+//
+// Pure over the error and the captured stderr so the decision is
+// testable without a container runtime.
+func isRetriableCreateFailure(err error, stderr string) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	// exec kills the child when the per-attempt context expires, which
+	// surfaces as an ExitError carrying the signal rather than as the
+	// context error itself.
+	haystack := err.Error() + "\n" + stderr
+	for _, signature := range []string{
+		"signal: killed",
+		"context deadline exceeded",
+		"could not find a log line that matches",
+	} {
+		if strings.Contains(haystack, signature) {
+			return true
+		}
+	}
+	return false
+}
+
+// createClusterOnce runs a single `kind create cluster --wait` for the
+// named cluster with the requested worker count and extraMounts, and
+// returns kind's stderr alongside any error so the caller can classify
+// the failure. A single-node cluster with no extraMounts skips the
+// config-file dance entirely for fastest spinup; either a worker count
+// or extraMounts forces a config file since both require settings
+// `kind create cluster`'s flags cannot express.
+func createClusterOnce(ctx context.Context, name string, workers int, extraMounts []KindExtraMount) (string, error) {
 	args := []string{"create", "cluster", "--name", name, "--wait", "60s"}
 	if img := strings.TrimSpace(os.Getenv(envNodeImage)); img != "" {
 		args = append(args, "--image", img)
@@ -176,7 +280,7 @@ func createCluster(ctx context.Context, name string, workers int, extraMounts []
 	if workers > 0 || len(extraMounts) > 0 {
 		cfg, content, cleanup, err := writeClusterConfig(workers, extraMounts)
 		if err != nil {
-			return fmt.Errorf("createCluster: write cluster config: %w", err)
+			return "", fmt.Errorf("createCluster: write cluster config: %w", err)
 		}
 		defer cleanup()
 		args = append(args, "--config", cfg)
@@ -185,7 +289,7 @@ func createCluster(ctx context.Context, name string, workers int, extraMounts []
 		// caller cannot otherwise see once `kind create cluster` succeeds.
 		fmt.Printf("createCluster: %s --config %s:\n%s", strings.Join(args, " "), cfg, content)
 	}
-	createCtx, cancel := context.WithTimeout(ctx, clusterCreateTimeout)
+	createCtx, cancel := context.WithTimeout(ctx, clusterCreateTimeout())
 	defer cancel()
 
 	cmd := exec.CommandContext(createCtx, "kind", args...)
@@ -193,10 +297,10 @@ func createCluster(ctx context.Context, name string, workers int, extraMounts []
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("createCluster: kind create cluster --name %s: %w (stderr: %s)",
+		return stderr.String(), fmt.Errorf("createCluster: kind create cluster --name %s: %w (stderr: %s)",
 			name, err, stderr.String())
 	}
-	return nil
+	return stderr.String(), nil
 }
 
 // writeClusterConfig emits a temp KIND config-file with N worker nodes and

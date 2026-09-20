@@ -341,6 +341,35 @@ class TestGkeKindGroupEmission(PipelineTestCase):
         self.assertIn("Pair of specs (2 files)", self.yaml_text)
         self.assertIn("Single spec (1 file)", self.yaml_text)
 
+    # `kind create cluster` starving on a contended agent fails in BeforeSuite
+    # with no spec run; run_kind_tests_gke.sh reports exactly that shape as 125
+    # so the infra preset — and only the infra preset — can pick it up.
+    INFRA_RETRY_BLOCK = (
+        "        retry:\n"
+        "          automatic:\n"
+        "            - exit_status: 125\n"
+        "              limit: 2\n"
+        '            - signal_reason: "agent_stop"\n'
+        "              limit: 2"
+    )
+
+    def test_every_child_retries_only_on_infra_failure(self):
+        self.assertEqual(self.yaml_text.count(self.INFRA_RETRY_BLOCK), 2)
+
+    def test_children_never_retry_a_failing_spec(self):
+        # The doctrine: a red spec is a defect to fix or quarantine, never a
+        # retry. The any-exit wildcard, or a condition matching exit 1, would
+        # break it.
+        self.assertNotIn('exit_status: "*"', self.yaml_text)
+        self.assertNotIn("exit_status: 1\n", self.yaml_text)
+
+    def test_retry_is_a_step_level_key(self):
+        self.assertLess(
+            self.yaml_text.index("        retry:"),
+            self.yaml_text.index("        plugins:"),
+            "retry must be a step-level key, not nested under plugins",
+        )
+
     def test_focus_selects_exactly_the_owned_files(self):
         patterns = _focus_patterns(self.yaml_text)
         self.assertEqual(len(patterns), 2)

@@ -140,11 +140,37 @@ done
 
 echo "--- run precompiled suite $artifact_binary (${OME_KIND_FOCUS:-all files}) ---"
 kind_test_timeout="${OME_KIND_TIMEOUT:-90m}"
-if [ -n "${OME_KIND_FOCUS:-}" ]; then
-  "$kind_test_binary" -test.v "-test.timeout=$kind_test_timeout" -ginkgo.v \
-    "-ginkgo.focus-file=${OME_KIND_FOCUS}"
-else
-  "$kind_test_binary" -test.v "-test.timeout=$kind_test_timeout" -ginkgo.v
+suite_log="$artifact_stage/suite.log"
+suite_status_file="$artifact_stage/suite.status"
+# tee so the run stays live in the job log while also being greppable below;
+# the status goes through a file because /bin/sh has no PIPESTATUS.
+set +e
+{
+  if [ -n "${OME_KIND_FOCUS:-}" ]; then
+    "$kind_test_binary" -test.v "-test.timeout=$kind_test_timeout" -ginkgo.v \
+      "-ginkgo.focus-file=${OME_KIND_FOCUS}"
+  else
+    "$kind_test_binary" -test.v "-test.timeout=$kind_test_timeout" -ginkgo.v
+  fi
+  echo "$?" >"$suite_status_file"
+} 2>&1 | tee "$suite_log"
+set -e
+suite_status="$(cat "$suite_status_file" 2>/dev/null || echo 1)"
+
+# A `kind create cluster` that dies of agent starvation is not a test result.
+# It fails in BeforeSuite, before a single It runs, and the binary exits 1 —
+# indistinguishable from a real spec failure to Buildkite, so the KIND group's
+# infra-retry preset (exit 125 / agent_stop, deliberately never exit 1) cannot
+# see it. Translate exactly that shape to 125 and leave every other exit code
+# alone: a suite that reached even one spec keeps its own status, so "never
+# retry a red spec" still holds.
+if [ "$suite_status" -ne 0 ] \
+   && grep -q 'EnsureCluster(' "$suite_log" \
+   && grep -q 'createCluster:' "$suite_log" \
+   && ! grep -qE '^Ran [1-9][0-9]* of ' "$suite_log"; then
+  echo "--- cluster create failed in BeforeSuite with no spec run; exiting 125 for infra retry ---" >&2
+  exit 125
 fi
 
 # Cluster teardown happens in the EXIT trap (cleanup_ome_clusters).
+exit "$suite_status"
