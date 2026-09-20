@@ -1058,25 +1058,28 @@ def ci_steps() -> str:
             plugins:
 {_tw_docker_plugin(CI_IMAGE, indent=14)}
 
-          - label: ":mag: Rollout Spec Check"
-            key: "rolloutspec-check"
-{_gh_status("rolloutspec-check")}
+          - label: ":lock: Rollout Behavior Lock"
+            key: "rollout-behavior-lock"
+{_gh_status("rollout-behavior-lock")}
 {_infra_retry()}
-            # The Go well-formedness test only proves the machine tables
-            # parse and expand. These checkers resolve them against the
-            # rest of the tree: every history sidecar entry has to select a
-            # real grid cell, and every coverage name / `// Cells:` id has
-            # to resolve to a Go test that exists. A mistyped cell id or a
-            # renamed test passes the build without them.
+            # The rollout engine's behavior lock as one visible status. It
+            # runs the table checkers (every history sidecar entry selects
+            # a real grid cell; every coverage name and `// Cells:` id
+            # resolves to a Go test that exists; under `frozen: true` no
+            # decided cell is without one) and then the lock's own test
+            # packages: the machine tables, the replay goldens with their
+            # arrow and determinism checks, and the engine packages the
+            # decided-cell tests live in. The unit-test lane runs the same
+            # packages for coverage; this step exists so a golden diff or
+            # an uncovered cell reports under its own name instead of as
+            # one line among the unit tests.
             #
             # Same image as the unit-test lane, which is a Go image without
-            # python3; the checkers are python3 + PyYAML. Kept out of that
-            # lane so a spec typo reports as its own status rather than
-            # hiding behind the unit tests, and so it fails in seconds.
+            # python3; the checkers are python3 + PyYAML.
             command: |
               apt-get update
               apt-get install -y --no-install-recommends python3 python3-yaml
-              make rolloutspec-check MACHINE=instance
+              make rollout-behavior-lock MACHINE=instance
             agents:
               queue: "{DEFAULT_QUEUE}"
             plugins:

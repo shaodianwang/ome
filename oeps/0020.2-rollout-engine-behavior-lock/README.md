@@ -347,7 +347,12 @@ state than before.
 - Part 1: the replay package under `tests/rolloutspec/replay` runs in the unit
   lane; the arrow-coverage test, the determinism test and the golden diff are
   gates; the mutation check is a documented one-time procedure.
-- Part 2: the existing `rolloutspec-check` step plus `frozen: true`.
+- Part 2: the `rolloutspec-check` checkers plus `frozen: true`.
+- Visibility: one CI step, "Rollout Behavior Lock" (`make
+  rollout-behavior-lock`), runs the checkers and then the lock's test packages
+  (the tables, the replay goldens, the engine packages the decided-cell tests
+  live in) so a golden diff or an uncovered cell fails under its own name. The
+  unit lane still runs the same packages for coverage.
 - Part 3: the Buildkite generator gains a soft-fail nightly group; moving a spec
   is a one-line change with the owner and expiry in the group definition.
 ## Graduation Criteria

@@ -301,6 +301,18 @@ rolloutspec-check: rolloutspec-render ## 🔎 Check a rollout state machine (MAC
 	@python3 hack/omenative-testing/statemachine/check_history.py --grid $(ROLLOUTSPEC_OUT)/$(MACHINE).grid.json $(ROLLOUTSPEC_HISTORY_ARGS)
 	@python3 hack/omenative-testing/statemachine/check_coverage.py --grid $(ROLLOUTSPEC_OUT)/$(MACHINE).grid.json --repo .
 
+# The packages whose tests are the rollout engine's behavior lock: the
+# machine tables and their well-formedness, the replay goldens with the
+# arrow and determinism checks, the driver, and the engine packages the
+# decided-cell tests live in. Fake-client only; no envtest or xet.
+ROLLOUT_LOCK_PACKAGES := ./tests/rolloutspec/... ./pkg/controller/v1beta1/workload/...
+
+.PHONY: rollout-behavior-lock
+rollout-behavior-lock: rolloutspec-check ## 🔒 Rollout engine behavior lock: spec checker, replay goldens, decided-cell tests
+	@echo "🔒 Running the rollout engine behavior lock..."
+	@$(GO_CMD) test -count=1 $(ROLLOUT_LOCK_PACKAGES)
+	@echo "✅ Behavior lock holds: tables checked, goldens identical, decided cells covered"
+
 .PHONY: tidy
 tidy: ## 📦 Run go mod tidy
 	@echo "📦 Tidying Go modules..."

@@ -85,6 +85,11 @@ Both checks run together against a rendered grid:
 
     make rolloutspec-check MACHINE=instance
 
+CI runs them through the "Rollout Behavior Lock" step, which is the same
+checks followed by the lock's test packages:
+
+    make rollout-behavior-lock MACHINE=instance
+
 A name or id that does not resolve fails the target. The third output is a
 report, not a gate: per machine, how many decided cells carry coverage and
 which ones do not (n/a cells are left out — there is nothing to exercise).
