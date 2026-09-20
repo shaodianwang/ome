@@ -225,7 +225,7 @@ policies, while publisher options are a safe overlay on one shared client.
 | Global `routing.enabled: false` | Routing is off for every ISVC. Inline fields cannot bypass the installation gate. |
 | `spec.routing` absent | Inherit all installation defaults. The runtime-ready weight formula still applies; no per-ISVC observer or publisher override is introduced. |
 | `spec.routing.enabled` absent | Inherit the installation's enabled behavior. The API uses a nullable boolean so absent and false remain distinct. |
-| `spec.routing.enabled: false` | Opt this ISVC out. Stop observations, request unpublish, and reap its `TrafficMap` only after the publisher finalizer is gone and applied-target status is empty; other inline fields may remain staged but are inactive. |
+| `spec.routing.enabled: false` | Opt this ISVC out. Stop observations and delete its `TrafficMap`; the map's publisher finalizer keeps it terminating until every claimed target is unpublished. Other inline fields may remain staged but are inactive. |
 | `spec.routing.enabled: true` | Opt in when the installation gate is on; it cannot override global `routing.enabled: false`. |
 | `spec.routing: {}` or one nested block absent | Inherit the installation default for each absent block. |
 | `probe: {disabled: true}` | Turn probing off for this ISVC, even when the global default enables it. No other probe field may coexist with `disabled: true`. |
@@ -332,9 +332,8 @@ Two writers, one object:
   `status.placement` or the home's quota allocation changes — and patches only
   the TrafficMap's `Routable` condition.
 - The **publisher** patches the TrafficMap's `Programmed`, `gatewayRef`, and
-  observed-generation fields. Separately, it patches only
-  `InferenceService.status.routing.publisher` for durable applied state. It does
-  not replace either object's sibling status or conditions.
+  observed-generation fields plus its publisher journal. It does not replace
+  sibling status or the routing controller's `Routable` condition.
 
 *Anticipated objection — "a machine-written `spec` is unusual; spec is user
 intent."* True, and we considered a status-only shape (Alternatives). The
@@ -520,60 +519,70 @@ is what makes capacity-aware weights and a gateway-neutral contract possible.
     into every entry.
 - `spec.observedISVCGeneration` (int64) for staleness detection.
 - `status.programmed` (bool), `status.gatewayRef`,
-  `status.observedTrafficMapGeneration` (int64), `status.conditions[]`.
+  `status.observedTrafficMapGeneration` (int64), `status.publisher`, and
+  `status.conditions[]`.
 
-The source ISVC carries the state needed to reverse publisher side effects:
+The `TrafficMap` carries the state needed to reverse publisher side effects:
 
 ```yaml
 status:
-  routing:
-    publisher:
-      name: gatewayapi
-      appliedTargets: [team-a/llama-3-70b]
-      optionsDigest: sha256:0123456789abcdef
-      transition:                       # present only during an external mutation
-        phase: Prepared
-        operation: Apply
-        targets: [team-a/llama-3-70b]
-        payload: '<publisher-defined canonical mutation>'
+  publisher:
+    publisherName: ExamplePublisher
+    claimedTargets: [team-a/model-service]
+    observedOptionsDigest: sha256:0000000000000000000000000000000000000000000000000000000000000000
 ```
 
-`name` identifies the implementation whose cleanup semantics apply;
-`appliedTargets` contains its canonical target identifiers; `optionsDigest`
-identifies the effective safe behavior that produced them; and `transition` is a
-bounded, write-ahead record containing the operation, canonical targets, and the
-complete publisher-defined canonical payload needed to replay or compensate for
-one in-flight mutation idempotently — including its weight and effective options,
-not only a non-reversible digest. This status survives until the ISVC's publisher
-finalizer is removed. RBAC reserves the ISVC status subresource for controller
-identities, and the publisher patches only this subtree rather than replacing
-sibling status.
+`publisherName` identifies the implementation whose cleanup semantics apply; an
+implementation upgraded under the same name must remain able to clean canonical
+identifiers written by its prior versions.
+`claimedTargets` is a conservative write-ahead ownership set: the publisher
+atomically claims the complete canonical desired set before any external call,
+retains targets it has drained, and removes a claim only after idempotent
+unpublish succeeds. `observedOptionsDigest` identifies the effective safe
+behavior from the last successful programming pass; it may be absent while a
+first attempt has claims but has not completed. The normal `programmed` fields
+report successful realization separately from this cleanup authority.
+
+The status schema caps publisher names at 128 characters and the claim set at
+128 opaque identifiers of at most 512 characters. Before any external mutation,
+a publisher validates and canonicalizes the complete desired set and verifies
+that `existing claims ∪ desired targets` fits those bounds. If it cannot fit, the
+publisher leaves external state unchanged and reports the limit; the operator
+can disable routing, wait for cleanup, correct the mapping, and re-enable it. No
+publisher-defined request payload is stored in this shared API: retries converge
+from the latest TrafficMap through an idempotent publisher contract, while the
+conservative claim set makes every possibly touched target discoverable for
+drain and cleanup. Claim identifiers are status-visible and never contain
+credentials or secret material.
 
 ### Ownership & lifecycle
 
 - **One `TrafficMap` per ISVC**, `metadata.name == isvc.name`, namespaced to it.
   *Rationale:* mirrors HTTPRoute-per-service; trivial ownership, GC and RBAC;
   scales linearly with ISVC count, no single hot object.
-- **Owner-referenced** (`controller: true`) → GC'd with the ISVC. Publisher
-  cleanup runs under the ISVC finalizer, so publisher-owned state cannot outlive
-  the finalized ISVC.
-- **Applied publisher state is controller-owned.** The publisher records exact
-  targets in `InferenceService.status.routing.publisher`, which survives until
+- **Owner-referenced** (`controller: true`) → GC requests its deletion with the
+  ISVC. Before any external mutation, a stateful publisher adds its finalizer to
+  the TrafficMap and persists the complete claim set. Direct deletion or owner
+  GC then leaves the map terminating, with its status journal intact, until the
+  publisher has cleaned every claim and removed the finalizer. The publisher
+  reconciles TrafficMaps directly, so cleanup does not require the owner ISVC to
+  remain readable.
+- **Publisher claims are controller-owned.** The publisher records exact
+  target claims in `TrafficMap.status.publisher`, which survives until the map's
   finalizer cleanup. A normal, user-editable metadata annotation is **not** an
   authority for deletion, zeroing, or ownership. *Rationale:* if a user can edit
   the cleanup journal, the operator's privileged publisher becomes a confused
-  deputy against another service's target.
+  deputy against another service's target. ISVC status carries no duplicate
+  journal. If synchronous parent deletion is ever required, a lightweight ISVC
+  finalizer may wait for the TrafficMap to disappear, but it is only a barrier.
 - **Created only for placement-eligible ISVCs** (those with a non-empty placement
   requirement or cluster selector) and only when both the installation gate and
   the ISVC's resolved enablement are true. A
   `Single`-mode ISVC gets a one-entry map so winner-cutover is expressible; a
   non-placement ISVC gets none. On per-ISVC or installation-wide disable, the
-  routing controller stops observations but keeps the `TrafficMap` until the
-  endpoint controller has removed its publisher finalizer **and** cleared
-  both `status.routing.publisher.appliedTargets` **and** its pending `transition`;
-  only then does it reap the map and observer state. This handshake prevents
-  deletion from erasing the publisher's desired input while cleanup is still in
-  progress.
+  routing controller stops observations and deletes the `TrafficMap`. Its
+  publisher finalizer turns that delete into the cleanup request and preserves
+  the journal until unpublish completes; only then can the map disappear.
 - **The map exists for the whole enabled routing lifetime, even with zero
   entries.**
   Emptiness is a *state of the map*, never its absence. *Rationale:* absence is
@@ -603,14 +612,15 @@ sibling status.
   cluster and endpoint, and probe policy digest all match the current target and
   resolved policy. Missing or mismatched identity starts inconclusive and
   ungated instead of importing an unrelated gate or hysteresis counter.
-- **Publisher mapping changes reconcile old state first.** The controller reads
-  its applied-target record, validates the entire transition, and persists a
-  write-ahead transition record **before** each external mutation. It drains or
-  removes targets no longer desired according to the publisher's semantics, and
-  only then publishes new targets. After a successful mutation it compacts the
-  applied state and clears or advances the transition. If the response or status
-  write is lost, a retry uses the persisted intent; it never guesses from a new
-  desired configuration.
+- **Publisher mapping changes reconcile old state first.** The controller
+  validates the complete canonical desired set, preflights the bounded union,
+  and atomically persists that union as the durable claim set **before** any
+  external mutation. It drains every claimed target no longer desired and only
+  then idempotently applies the latest desired values. Retired targets remain
+  claimed while held at zero. A crash after the
+  claim write, midway through drain or apply, after a lost response, or before a
+  success-status write is safe: the retry sees every target that may have been
+  touched, drains stale claims again, and converges to the latest TrafficMap.
 - **Legacy applied state is migration input, not authority.** Before upgrading, an
   operator should clean the legacy annotation through the old publisher. If an
   in-place migration is required, global configuration must authorize exact
@@ -639,10 +649,12 @@ Before a publisher mutates external state, it must:
    configuration always fails closed before any external request.
 3. Reject duplicate targets within one map and collisions with another ISVC's
    controller-owned claims.
-4. Persist enough applied state to undo every successful mutation after a
-   restart, deletion, or option change.
+4. Add the TrafficMap finalizer, preflight `existing claims ∪ desired targets`,
+   and atomically persist that complete canonical set before the first external
+   mutation. Every mutation and cleanup call must be idempotent so a retry can
+   converge from the latest desired map.
 
-The endpoint publisher controller sets `MaxConcurrentReconciles=1` as a
+The TrafficMap publisher controller sets `MaxConcurrentReconciles=1` as a
 non-tunable correctness invariant. Target claim lookup uses the uncached API
 reader, and claim persistence uses API-server conflict detection before any
 external call. Lookup, persistence, and external mutation are therefore
@@ -659,12 +671,11 @@ publisher processes must first replace this invariant with an atomic per-target
 claim object.
 
 If the globally selected publisher name differs from
-`status.routing.publisher.name` while `appliedTargets` is non-empty **or a
-transition is pending**, the new publisher does **not** guess how to clean another
-implementation's state and does not publish on top of it. It reports a
-publisher-mismatch condition instructing the operator to restore the old
-publisher, disable routing and wait for cleanup, then perform the configured
-publisher switch.
+`TrafficMap.status.publisher.publisherName` while `claimedTargets` is non-empty,
+the new publisher does **not** guess how to clean another implementation's state
+and does not publish on top of it. It reports a publisher-mismatch condition
+instructing the operator to restore the old publisher, disable routing and wait
+for cleanup, then perform the configured publisher switch.
 
 Stateful backends must also define **drain** and **unpublish** separately. Drain
 keeps the target under controller ownership at weight zero; unpublish removes
@@ -672,7 +683,7 @@ the override or object. They are not interchangeable: in a runtime-weight
 backend, writing zero stops traffic, while deleting the runtime value restores
 the statically authored fallback weight and may resume it. Therefore, removing a
 target from an active mapping drains it before new targets are published and
-retains the zeroed target in applied state while its consuming route may still
+retains the zeroed target in its claim set while its consuming route may still
 exist. The v1 publisher cannot observe that external route, so it does not
 release one retired target independently: retired targets remain owned at zero
 until whole-ISVC disable or deletion, after the operator has completed the
@@ -699,11 +710,12 @@ only as that sequence's last step.
   consumer, so the "publisher" is a no-op beyond marking `status.programmed`; the
   contract is identical.
 
-Changing the global publisher name is deliberately not a live per-ISVC
-transition. For a stateful publisher the operator first disables routing, waits
-until the old publisher's finalizers and applied-state records are clean, changes
-the name, and then re-enables routing. This keeps one cleanup owner throughout
-the transition.
+Changing the global publisher name is deliberately not a live per-ISVC switch.
+The same rule applies to any global endpoint, authority, or namespace setting
+that changes where a canonical target must be cleaned. For a stateful publisher
+the operator first disables routing, waits until the old publisher's finalizers
+and target claims are clean, changes the configuration, and then re-enables
+routing. This keeps one cleanup owner throughout the switch.
 
 ### Enabling routing, and the no-magic-values rule
 
@@ -761,9 +773,9 @@ excess work behind a semaphore — that still creates O(targets) goroutines.
 Per-request context deadlines may differ by ISVC, but both active requests and
 worker goroutines remain bounded as ISVCs are added.
 
-Publisher resync follows the same rule: the shared endpoint controller uses its
-globally configured cadence and delayed workqueue. It does not start a publisher
-loop for every ISVC.
+Publisher resync follows the same rule: the shared TrafficMap publisher
+controller uses its globally configured cadence and delayed workqueue. It does
+not start a publisher loop for every map.
 
 ### Where it runs
 
@@ -810,13 +822,13 @@ from the then-current main branch rather than as a GitHub stack:
    concurrency. Reset only the observation state whose policy changes.
 3. **Shared publisher overrides and lifecycle.** Keep one publisher instance;
    pass effective safe options per reconcile, enforce the option/target scope,
-   serialize its reconciler, move applied-target authority into
-   `InferenceService.status.routing.publisher`, safely migrate or reject legacy
-   annotation state, convert the existing TrafficMap status writer to
-   field-isolated patches, and make target changes drain old state before
-   publishing new state. Endpoint predicates must observe routing enablement and
-   publisher-option changes; routing predicates must observe publisher-finalizer
-   and applied-target cleanup transitions so the disable handshake cannot stall.
+   serialize its reconciler, move target-claim authority into
+   `TrafficMap.status.publisher`, and safely migrate or reject legacy annotation
+   state. Reconcile TrafficMaps directly, add their publisher finalizer before
+   side effects, use field-isolated status patches, and drain old claims before
+   publishing new targets. Predicates must observe routing enablement,
+   publisher-option changes, deletion, and claim cleanup so finalization cannot
+   stall.
 4. **Rollout and E2E.** Exercise inheritance first on an existing service, then
    add its inline probe and target mapping. Verify the TrafficMap-to-publisher
    path before testing data-plane weight shifts. Rollback removes the inline
@@ -871,9 +883,10 @@ from the then-current main branch rather than as a GitHub stack:
   a fragile process-wide goroutine count — assert there is no per-object runnable
   or ticker and the executor creates at most its fixed worker bound.
 - **Controller (envtest).** `status.placement` transitions → `spec` converges;
-  routing-policy-only changes enqueue; publisher-finalizer, applied-target, and
-  pending-transition cleanup changes enqueue the waiting routing reconciler;
-  ISVC deletion → GC'd; quota change → weights recomputed;
+  routing-policy-only changes enqueue; TrafficMap deletion and publisher-claim
+  cleanup enqueue the publisher directly; direct TrafficMap deletion remains
+  blocked on its finalizer until claims are clean; quota change → weights
+  recomputed;
   `observedISVCGeneration` tracks the source.
   Predicate-level tests cover each transition independently. A home failing N
   probes → `healthy:false`, weight 0, survivors renormalize; **every** home
@@ -887,28 +900,28 @@ from the then-current main branch rather than as a GitHub stack:
   and prove the serialized, uncached claim rejects the second even when the
   informer cache is stale. A stateful publisher with leader election disabled is
   rejected at startup. Unknown/protected keys, missing or malformed target scope,
-  out-of-scope targets, duplicates, and cross-ISVC collisions produce no external
-  mutation and set a precise `Programmed=False` reason.
+  out-of-scope targets, duplicates, cross-ISVC collisions, and a claim union over
+  the API bound produce no external mutation and set a precise
+  `Programmed=False` reason.
 - **Publisher lifecycle (envtest + fake backend).** `TrafficMap.spec` programs the
-  expected targets; a target-mapping update persists transition intent, drains
-  old targets before publishing new ones, and survives failure/restart at every
-  mutation boundary, including a successful external write followed by a lost
-  response or failed status patch; recovery replays the persisted canonical
-  payload rather than deriving a mutation from newer desired state. A retired
-  target remains owned at zero until whole-ISVC disable/deletion. Tampering with
-  ordinary annotations cannot cause a zero or delete. ISVC deletion and global
-  disable retain the finalizer until both applied targets and the pending
-  transition are empty. Exercise drain (`weight=0`) separately from unpublish
-  (remove override/static fallback).
+  expected targets; a target-mapping update atomically preclaims the full new
+  set, drains old claims before publishing new ones, and survives failure or
+  restart at every mutation boundary, including a successful external write
+  followed by a lost response or failed status patch. Recovery idempotently
+  converges to the latest TrafficMap while every possibly touched target remains
+  claimed. A retired target remains claimed at zero until whole-ISVC
+  disable/deletion. Tampering with ordinary annotations cannot cause a zero or
+  delete. Direct TrafficMap deletion and global disable retain the map's
+  finalizer until all claims are unpublished. Exercise drain (`weight=0`)
+  separately from unpublish (remove override/static fallback).
 - **Applied-state migration and status ownership.** Pre-upgrade cleanup leaves no
   legacy state. In-place migration copies only an exact allowlisted
   `(namespace/name, target)` pair; a target authorized for another ISVC, or any
   malformed, injected, or unlisted annotation, causes no external call. A
-  publisher-name mismatch with outstanding targets or a pending transition
-  blocks both cleanup and new publication. Concurrent placement, routing, and
-  publisher status updates prove the publisher patch changes only
-  `status.routing.publisher` and its own `Programmed` condition—no sibling status
-  or condition is lost.
+  publisher-name mismatch with outstanding claims blocks both cleanup and new
+  publication. Concurrent routing and publisher status updates prove the
+  publisher patch changes only `TrafficMap.status.publisher` and its own
+  `Programmed` fields—no sibling status or condition is lost.
 - **Gateway API publisher (envtest).** `spec` → one HTTPRoute with weighted
   backendRefs; entry removed → backendRef dropped and stale ExternalName Service
   deleted; `status.programmed` set; finalizer removes the route on map deletion.
@@ -916,6 +929,9 @@ from the then-current main branch rather than as a GitHub stack:
   generated → gateway programmed → kill a home → weight→0 within one reconcile.
   Run two ISVCs with different inline probe paths and publisher mappings, change
   one object, and prove the other's schedule, targets, and weights do not move.
+- **Integration (kind).** With kube-controller-manager garbage collection
+  running, delete the owner ISVC and verify the TrafficMap enters deletion while
+  its publisher finalizer preserves the journal through cleanup.
 - **Upgrade and live E2E.** Deploy the new manager over an installation whose
   ISVC omits `spec.routing`; verify inherited observer/publisher settings and
   confirm weights follow current ready capacity. Then add an inline probe to
@@ -1082,8 +1098,8 @@ from the then-current main branch rather than as a GitHub stack:
   (`PlacementStatus` / `CandidatePlacement`).
 
 **Next action:** land the API/resolver compatibility PR first, then the shared
-workqueue observation path, then publisher option isolation and controller-owned
-applied state.
+workqueue observation path, then publisher option isolation and the
+TrafficMap-owned claim journal.
 Only after those three invariants pass their transition tests should an operator
 move an existing service from inherited defaults to inline configuration.
 Endpoint-reported capacity remains **blocked** on a pair-aware data-plane surface;

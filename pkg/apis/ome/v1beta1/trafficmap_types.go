@@ -18,6 +18,18 @@ const TrafficMapProgrammed = "Programmed"
 // state of the map rather than its absence.
 const TrafficMapRoutable = "Routable"
 
+const (
+	// MaxTrafficMapPublisherNameLength bounds a registered publisher identifier
+	// without constraining its implementation-specific naming scheme.
+	MaxTrafficMapPublisherNameLength = 128
+
+	// MaxTrafficMapPublisherTargets bounds the durable publisher claim set.
+	MaxTrafficMapPublisherTargets = 128
+
+	// MaxTrafficMapPublisherTargetLength bounds one opaque canonical target.
+	MaxTrafficMapPublisherTargetLength = 512
+)
+
 // Reasons for the Routable condition. NotPlaced and NoAddressableHome accompany
 // an empty table. AllHomesUnready and NoRoutableCapacity accompany an all-zero
 // table. AllHomesProbeFailed accompanies either the all-zero Drain policy or a
@@ -267,10 +279,10 @@ type TrafficMapCapacity struct {
 
 // TrafficMapStatus reports whether the active publisher has realized this map
 // onto a concrete data plane, and whether the map has anything to realize.
-// Two writers share it: the publisher owns Programmed, GatewayRef and
-// ObservedTrafficMapGeneration, and the routing controller owns the Routable
-// condition. Conditions is keyed on type, so each writer must patch only its
-// own and never rewrite the list.
+// Two writers share it: the publisher owns Programmed, GatewayRef,
+// ObservedTrafficMapGeneration, Publisher, and the Programmed condition; the
+// routing controller owns the Routable condition. Conditions is keyed on type,
+// so each writer must patch only its own fields and condition.
 type TrafficMapStatus struct {
 	// Programmed reports whether the active publisher has realized this map onto
 	// its data plane.
@@ -287,6 +299,11 @@ type TrafficMapStatus struct {
 	// +optional
 	ObservedTrafficMapGeneration int64 `json:"observedTrafficMapGeneration,omitempty"`
 
+	// Publisher records the durable target claims needed to recover or reverse
+	// data-plane mutations made while realizing this map.
+	// +optional
+	Publisher *TrafficMapPublisherStatus `json:"publisher,omitempty"`
+
 	// Conditions carry the routing controller's Routable condition and the
 	// publisher's Programmed condition.
 	// +optional
@@ -295,6 +312,38 @@ type TrafficMapStatus struct {
 	// +patchStrategy=merge
 	// +patchMergeKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
+}
+
+// TrafficMapPublisherStatus is the durable cleanup journal for one publisher.
+// Claims are persisted before external mutation and retained until their
+// targets have been cleaned up.
+type TrafficMapPublisherStatus struct {
+	// PublisherName identifies the publisher implementation whose cleanup
+	// semantics apply. An implementation upgraded under the same name must remain
+	// able to clean target identifiers written by its prior versions.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	PublisherName string `json:"publisherName"`
+
+	// ClaimedTargets are publisher-defined canonical identifiers owned by this
+	// map. The publisher records the complete claim set before mutating any target.
+	// Identifiers are status-visible and must not contain credentials or secrets.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=128
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=512
+	ClaimedTargets []string `json:"claimedTargets,omitempty"`
+
+	// ObservedOptionsDigest is the SHA-256 digest of the effective safe publisher
+	// options used by the most recent successful reconciliation. It is absent
+	// before the first successful reconciliation and does not determine target
+	// ownership.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^sha256:[0-9a-f]{64}$`
+	ObservedOptionsDigest string `json:"observedOptionsDigest,omitempty"`
 }
 
 // TrafficMapGatewayRef points at the data plane object a publisher created to

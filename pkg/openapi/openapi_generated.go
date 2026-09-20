@@ -197,6 +197,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficMapGatewayRef":             schema_pkg_apis_ome_v1beta1_TrafficMapGatewayRef(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficMapList":                   schema_pkg_apis_ome_v1beta1_TrafficMapList(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficMapProbe":                  schema_pkg_apis_ome_v1beta1_TrafficMapProbe(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficMapPublisherStatus":        schema_pkg_apis_ome_v1beta1_TrafficMapPublisherStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficMapSpec":                   schema_pkg_apis_ome_v1beta1_TrafficMapSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficMapStatus":                 schema_pkg_apis_ome_v1beta1_TrafficMapStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficSpec":                      schema_pkg_apis_ome_v1beta1_TrafficSpec(ref),
@@ -13833,6 +13834,55 @@ func schema_pkg_apis_ome_v1beta1_TrafficMapProbe(ref common.ReferenceCallback) c
 	}
 }
 
+func schema_pkg_apis_ome_v1beta1_TrafficMapPublisherStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "TrafficMapPublisherStatus is the durable cleanup journal for one publisher. Claims are persisted before external mutation and retained until their targets have been cleaned up.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"publisherName": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PublisherName identifies the publisher implementation whose cleanup semantics apply. An implementation upgraded under the same name must remain able to clean target identifiers written by its prior versions.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"claimedTargets": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "set",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "ClaimedTargets are publisher-defined canonical identifiers owned by this map. The publisher records the complete claim set before mutating any target. Identifiers are status-visible and must not contain credentials or secrets.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
+					"observedOptionsDigest": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ObservedOptionsDigest is the SHA-256 digest of the effective safe publisher options used by the most recent successful reconciliation. It is absent before the first successful reconciliation and does not determine target ownership.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+				Required: []string{"publisherName"},
+			},
+		},
+	}
+}
+
 func schema_pkg_apis_ome_v1beta1_TrafficMapSpec(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -13897,7 +13947,7 @@ func schema_pkg_apis_ome_v1beta1_TrafficMapStatus(ref common.ReferenceCallback) 
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "TrafficMapStatus reports whether the active publisher has realized this map onto a concrete data plane, and whether the map has anything to realize. Two writers share it: the publisher owns Programmed, GatewayRef and ObservedTrafficMapGeneration, and the routing controller owns the Routable condition. Conditions is keyed on type, so each writer must patch only its own and never rewrite the list.",
+				Description: "TrafficMapStatus reports whether the active publisher has realized this map onto a concrete data plane, and whether the map has anything to realize. Two writers share it: the publisher owns Programmed, GatewayRef, ObservedTrafficMapGeneration, Publisher, and the Programmed condition; the routing controller owns the Routable condition. Conditions is keyed on type, so each writer must patch only its own fields and condition.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"programmed": {
@@ -13918,6 +13968,12 @@ func schema_pkg_apis_ome_v1beta1_TrafficMapStatus(ref common.ReferenceCallback) 
 							Description: "ObservedTrafficMapGeneration is the spec generation the publisher last realized, so lag between generation and realization is observable.",
 							Type:        []string{"integer"},
 							Format:      "int64",
+						},
+					},
+					"publisher": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Publisher records the durable target claims needed to recover or reverse data-plane mutations made while realizing this map.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficMapPublisherStatus"),
 						},
 					},
 					"conditions": {
@@ -13948,7 +14004,7 @@ func schema_pkg_apis_ome_v1beta1_TrafficMapStatus(ref common.ReferenceCallback) 
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficMapGatewayRef", "k8s.io/apimachinery/pkg/apis/meta/v1.Condition"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficMapGatewayRef", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficMapPublisherStatus", "k8s.io/apimachinery/pkg/apis/meta/v1.Condition"},
 	}
 }
 
