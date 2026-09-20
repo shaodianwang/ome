@@ -178,6 +178,14 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 			}
 		}
 	}
+	// No authority names a stable revision when the plan and the new target
+	// land in one write before the IR promotes its current revision: the
+	// staged partition then blocks that promotion for as long as the canary
+	// stays unarmed. The pods still serving the non-target revision are the
+	// stable identity the step machine shifts traffic away from.
+	if stableHash == "" && revisions.fromIR {
+		stableHash = otherRevision(pods, canaryHash)
+	}
 	// Resolve the two revisions' pairing protocols through the cached client:
 	// a ControllerRevision's protocol is immutable from create, so a cache
 	// read can only lag into "" (pairs with anything) for a just-minted CR,

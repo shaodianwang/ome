@@ -59,6 +59,11 @@ var _ = ginkgo.Describe("behavior — canary global pause freeze and drain", gin
 			engCS := c.Status.Components[v1beta1.EngineComponent]
 			g.Expect(engCS.Lifecycle).NotTo(BeNil())
 			g.Expect(engCS.Lifecycle.ServingReplicas).To(Equal(int32(2)))
+			// The probe under test is the freeze, so start from a settled
+			// v1: the IR has promoted its current revision, and the plan
+			// below does not race that promotion.
+			ir := freshInferenceReplica(g, ns.Name, isvcName, v1beta1.EngineComponent)
+			g.Expect(ir.Status.CurrentRevision).NotTo(BeEmpty())
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		// Action: add a timed canary plan (step 0 holds for a fixed duration)
