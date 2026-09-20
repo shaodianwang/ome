@@ -167,7 +167,7 @@ regression nobody can attribute.
 
 | criterion | measure |
 |---|---|
-| every transition arrow driven | 148 of 148, checked by a test that joins scenario headers with `transitions.yaml` |
+| every transition arrow driven | 138 of 138, checked by a test that joins scenario headers with `transitions.yaml` |
 | goldens captured from a named commit | the commit sha recorded in `replay/README.md` |
 | runtime | the replay package under 60 seconds in the unit lane |
 | sensitivity | flipping any one ownership predicate or hold rule fails at least one golden (a mutation check run once, recorded) |
@@ -175,8 +175,12 @@ regression nobody can attribute.
 
 ### Part 2: close coverage and freeze
 
-184 decided cells have no test. By family: surge 47, in-place and recreate 36,
-migrate 30, noop rows 24, gang 18, restart 14, create 7, failed 7, delete 1.
+194 decided cells had no test when the work started. By family: surge 51,
+in-place and recreate 42, migrate 30, noop rows 24, gang 18, restart 14, create
+7, failed 7, delete 1. (The first draft of this section counted surge as 47 and
+in-place and recreate as 36 from the table's authored rows; the numbers above
+are what the checker reports as decided and uncovered, and the migrate family
+has no Drain state, so all 30 migrate cells sit on CreateSurge and SurgeTarget.)
 Each gets either a tag on an existing test that truly drives it or a new test in
 the same style as the `// Cells:` convention. When the count reaches zero the
 instance machine sets `frozen: true`; from then on the existing gate fails the
@@ -184,7 +188,22 @@ build for any decided cell without coverage, which is the durable form of this
 goal.
 
 The replay scenarios from Part 1 count as coverage where they drive the cell,
-so Parts 1 and 2 share most of their work.
+so Parts 1 and 2 share most of their work. The checker reads them from a
+`coverage.replay` list beside `coverage.unit`.
+
+**State.** Closed in four batches, one PR each (#1583 create, failed, restart,
+delete; #1586 noop and gang; #1588 in-place, recreate and migrate; #1589 surge
+and the freeze). The instance machine's `machine.yaml` carries `frozen: true`
+and `rolloutspec-check` reports every decided grid cell covered. Two allowances
+the batches made, both recorded in the PR bodies: the `gang.podGroup`
+Unschedulable and ScheduleTimeout readings are tagged on the PodGroup
+classifier test for every state, because the classifier is the single place
+that decides no row ever sees them; and `api.throttled` is covered through its
+TooManyRequests variant only. One replay-driver limit surfaced: the driver
+labels its EndpointSlice with the headless Service while the source-routed
+check reads the per-revision routed Service, so a replay scenario cannot
+produce the SourceUnrouted hold on its own. That cell is covered by a unit test
+and the driver fix is Part 1 work.
 
 ### Part 3: a KIND lane whose red means something
 
@@ -197,11 +216,25 @@ Known this week, with the state of each:
 
 | spec | cause | state |
 |---|---|---|
-| `cancel_midrollout_kind_test.go` revert reopen | `UpdatedReplicas` counts a mid-surge row as running the update revision, so the IR reports converged while a roll is in flight; a later promote opens a new run | root cause known; fix is an owner call between correcting the counter and a test-side stability gate |
-| `auto_migrate*_kind_test.go` | timing of the relocation directive against the promote | passed after the PodReady watch fix in #1537; watch |
-| Canary lifecycle and RatioBalanced groups | failed on `main` builds 4422 and 4425 | TBD, needs triage |
+| `cancel_midrollout_kind_test.go` revert reopen | `UpdatedReplicas` counts a mid-surge row as running the update revision, so the IR reports converged while a roll is in flight; a later promote opens a new run | fixed in the counter (#1582): a row whose in-flight Update is pinned off the update revision is not counted; the two quarantined specs were moved back in the same PR |
+| `auto_migrate*_kind_test.go` | timing of the relocation directive against the promote | passed after the PodReady watch fix in #1537; no recurrence in the ten-build window |
+| `canary_lifecycle_pausefreeze_kind_test.go` | an engine defect, not timing: a canary plan and a new image that land in one write before the IR promotes its current revision leave every stable-revision authority empty, and the step-0 partition then blocks that promotion for good, so the canary never arms | fixed in the canary dispatcher (#1587): the live non-target revision supplies the stable identity when nothing else names one; the spec also waits for the promotion before it applies the plan |
+| KIND cluster create on starved GKE agents | the three-minute create timeout, not a spec | create timeout configurable and retried once, the job exits 125 and the pipeline retries it as infrastructure (#1584) |
+| `Multi-cluster Kueue quota` soft-fail group | red on about 22 of 25 builds; invisible because soft-fail | reported to its owner; not in this OEP's gate |
+
+Quarantine mechanics: `KIND_QUARANTINE` in `.buildkite/generate_pipeline.py`
+lists a spec with an owner and an expiry, the generator moves it to a soft-fail
+group, and an expired entry fails pipeline generation (#1578). The list is
+empty at the time of writing.
 
 Exit: ten consecutive green `main` builds with no retries.
+
+**State: met.** `main` builds 4452 through 4473 passed consecutively with no
+retried job on any of them; the window spans the convergence fix, the canary
+fix and coverage batches A and B. The build after the window failed one perm
+case (`canary/pd` p363) on a teardown that did not converge within its bound
+after the case itself passed; it is the first instance of that failure class
+and is tracked under the Part 3 rule rather than counted against the window.
 
 ### Part 4: what the lock unblocks
 
@@ -356,12 +389,21 @@ state than before.
 
 ## Open Questions
 
-- Owner and fix choice for the revert reopen (counter versus test-side gate).
 - Whether translated perm cases should ever assert their `expect=` verdict in
   the replay lane, or stay golden-only.
 - The scenario count target beyond one per arrow; the mutation check will say
-  whether one per arrow is enough sensitivity.
-- Where quarantined KIND specs are listed so the expiry is visible.
+  whether one per arrow is enough sensitivity. The first mutation check showed
+  that flipping one surge ownership predicate alone is masked by the
+  per-operation strategy pin; flipping both surge guards is caught.
+- Three trace-format questions for the owner before the remaining arrows are
+  recorded: whether a row write should print the whole row or only the fields
+  that changed, whether goldens may carry `note:` lines, and whether revision
+  names are normalized to `rev#N`.
 
-Next action: build the replay driver and record goldens for the first ten
-arrows, then bring the trace format here for review before the remaining 138.
+Resolved: the revert reopen is fixed in the counter (Part 3 table); quarantined
+specs are listed in `KIND_QUARANTINE` with owner and expiry.
+
+Next action: settle the three trace-format questions, then record goldens for
+the remaining 123 arrows and fix the replay driver's routed-Service labelling
+so endpoint holds can be driven in the replay lane. Parts 2 and 3 have met
+their exit; Part 1 is the only gate still open before OEP-0020.3 may start.
