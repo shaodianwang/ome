@@ -783,6 +783,60 @@ func TestTakeInlineV1PublicationCountersIgnorePersistedObservationFields(t *test
 	}
 }
 
+// A row whose in-flight Update pins a revision the Component no longer
+// targets still owes a roll, so it is not updated even when it happens to
+// run the target: the surge under way promotes onto the pinned revision
+// first. Publishing it as updated would claim a convergence the Component
+// has not reached and idle a rollout that is still moving.
+//
+// Cells: instance/Update/Surge/spec.revision/before
+func TestTakeInlineV1PublicationUpdatedExcludesRowsPinnedOffTarget(t *testing.T) {
+	surging := &workload.InstanceOperation{Type: workload.InstanceOperationUpdate, TargetRevision: "rev-b"}
+	settling := &workload.InstanceOperation{Type: workload.InstanceOperationUpdate, TargetRevision: "rev-a"}
+	persisted := []workload.InstanceStatus{
+		{Index: 0, RunningRevision: "rev-a"},
+		{Index: 1, RunningRevision: "rev-a", Operation: surging},
+		{Index: 2, RunningRevision: "rev-a", Operation: settling},
+	}
+
+	tests := []struct {
+		name   string
+		target string
+		want   int32
+	}{
+		// The revert: the Component is back on rev-a, index 1 is
+		// mid-surge toward the abandoned rev-b and index 2 is
+		// finishing its roll onto rev-a.
+		{name: "target is the running revision", target: "rev-a", want: 2},
+		// index 1 runs rev-a, not the rev-b it is surging toward,
+		// so the pin does not make it updated either.
+		{name: "target is the pinned revision", target: "rev-b", want: 0},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			observation, err := workload.NewOwnedPublicationObservation(
+				append([]workload.InstanceStatus(nil), persisted...),
+				workload.NewCachedSelectorPodObservation(nil, nil),
+				nil,
+				workload.AvailabilityWindow{},
+			)
+			if err != nil {
+				t.Fatalf("NewOwnedPublicationObservation: %v", err)
+			}
+			_, got, err := observation.TakeInlineV1Publication(map[int32]int32{0: 1, 1: 1, 2: 1}, test.target)
+			if err != nil {
+				t.Fatalf("TakeInlineV1Publication: %v", err)
+			}
+			if got.UpdatedReplicas != test.want {
+				t.Errorf("UpdatedReplicas: got %d want %d", got.UpdatedReplicas, test.want)
+			}
+			if got.Replicas != 3 {
+				t.Errorf("Replicas: got %d want 3", got.Replicas)
+			}
+		})
+	}
+}
+
 // TestReconcileInput_Compiles is a compile-time pin on the
 // ReconcileInput struct shape and the MutateInstance callback
 // signature. The struct must be value-constructible with no adapter

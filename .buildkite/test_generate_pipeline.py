@@ -576,8 +576,12 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         patterns = _focus_patterns(gp._gke_kind_group())
         groups = gp._kind_spec_groups()
         self.assertEqual(len(patterns), len(groups))
-        patterns += _focus_patterns(gp._kind_quarantine_group())
-        homes = [slug for slug, _, _ in groups] + ["quarantine"]
+        homes = [slug for slug, _, _ in groups]
+        # An empty quarantine emits no group, so it is a home only when
+        # something is quarantined.
+        if quarantine := gp._kind_quarantine_group():
+            patterns += _focus_patterns(quarantine)
+            homes.append("quarantine")
         self.assertEqual(len(patterns), len(homes))
         for name in gp._kind_spec_files():
             owners = [

@@ -394,8 +394,8 @@ type ComponentCounters struct {
 func (o *ComponentObservation) TakeInlineV1Publication(desiredByIdx map[int32]int32, targetRevName string) ([]InstanceStatus, ComponentCounters, error) {
 	var counters ComponentCounters
 	target := query.RevisionFromName(targetRevName)
-	statuses, err := o.takeInlineV1Statuses(func(index int32, runningRevision string, current InstanceCounters) {
-		desired := DesiredFor(desiredByIdx, index, current.PodCount)
+	statuses, err := o.takeInlineV1Statuses(func(row *InstanceStatus, current InstanceCounters) {
+		desired := DesiredFor(desiredByIdx, row.Index, current.PodCount)
 		if InstanceMeetsThreshold(current.PodCount, current.ReadyPodCount, desired) {
 			counters.ReadyReplicas++
 		}
@@ -406,7 +406,7 @@ func (o *ComponentObservation) TakeInlineV1Publication(desiredByIdx map[int32]in
 			counters.AvailableReplicas++
 		}
 		counters.NextAvailableIn = earliestPending(counters.NextAvailableIn, current.NextAvailableIn)
-		if targetRevName != "" && query.RevisionFromName(runningRevision).Same(target) {
+		if targetRevName != "" && rowOnTargetRevision(row, target) {
 			counters.UpdatedReplicas++
 			if InstanceMeetsThreshold(current.PodCount, current.ReadyPodCount, desired) {
 				counters.UpdatedReadyReplicas++
@@ -418,6 +418,28 @@ func (o *ComponentObservation) TakeInlineV1Publication(desiredByIdx map[int32]in
 	}
 	counters.Replicas = int32(len(statuses))
 	return statuses, counters, nil
+}
+
+// rowOnTargetRevision reports whether a row counts toward UpdatedReplicas:
+// it runs the Component's UpdateRevision and has no roll left to do.
+//
+// Running the target is necessary but not sufficient. An Update operation
+// pins the revision it opened against, and a retarget while that operation
+// is in flight leaves the pin behind the Component: the row still owes a
+// roll to the new target, and a surge already under way will promote its
+// replacement onto the pinned revision first. Counting such a row as
+// updated publishes a convergence the Component has not reached, which
+// reads to consumers as an idle Component and closes a rollout that is
+// still moving.
+func rowOnTargetRevision(row *InstanceStatus, target query.RevisionID) bool {
+	if !query.RevisionFromName(row.RunningRevision).Same(target) {
+		return false
+	}
+	op := row.Operation
+	if op == nil || op.Type != InstanceOperationUpdate || op.TargetRevision == "" {
+		return true
+	}
+	return query.RevisionFromName(op.TargetRevision).Same(target)
 }
 
 // String formats InstanceCounters for debug output.

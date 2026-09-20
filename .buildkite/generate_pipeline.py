@@ -161,6 +161,7 @@ KIND_SPEC_GROUPS = (
     )),
     ("rolling-updates", "Rolling update strategies", (
         "rolling_recreatepod", "rolling_inplace", "rolling_inplaceonly_reject",
+        "rolling_cancel_revert",
     )),
     ("gang-recovery", "Gang recovery and wedge", (
         "gang_corrective_rollout", "gang_wedge_nonready",
@@ -177,7 +178,7 @@ KIND_SPEC_GROUPS = (
     )),
     ("pause-cancel-interleavings", "Pause, cancel, and interleavings", (
         "pause", "pause_midrollout", "pause_recovery", "inference_replica_pause",
-        "interleave",
+        "cancel_midrollout", "interleave",
     )),
     ("scale-transitions", "Scale transitions", (
         "bounded_scale_down", "scale_during_rollout", "bluegreen_scale_down_during",
@@ -212,28 +213,7 @@ KIND_SPEC_GROUPS = (
 # on the day after `expires`: an expired quarantine blocks the build until
 # someone fixes the spec or extends the entry with a reason. To un-quarantine,
 # delete the entry and put the stem back in its group above, in the fix PR.
-KIND_QUARANTINE = [
-    {
-        "spec": "cancel_midrollout_kind_test",
-        "owner": "slin1237",
-        "expires": "2026-10-03",
-        "reason": (
-            "run reopens after revert: UpdatedReplicas counts a mid-surge row "
-            "as running the update revision, so the IR reports converged while "
-            "a roll is in flight"
-        ),
-    },
-    {
-        "spec": "rolling_cancel_revert_kind_test",
-        "owner": "slin1237",
-        "expires": "2026-10-03",
-        "reason": (
-            "run reopens after revert: UpdatedReplicas counts a mid-surge row "
-            "as running the update revision, so the IR reports converged while "
-            "a roll is in flight"
-        ),
-    },
-]
+KIND_QUARANTINE: list[dict[str, str]] = []
 
 
 def _truthy(val: str) -> bool:

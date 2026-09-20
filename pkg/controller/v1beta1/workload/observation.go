@@ -151,7 +151,7 @@ func (o *ComponentObservation) TakeInlineV1Statuses() ([]InstanceStatus, error) 
 	return o.takeInlineV1Statuses(nil)
 }
 
-func (o *ComponentObservation) takeInlineV1Statuses(observe func(int32, string, InstanceCounters)) ([]InstanceStatus, error) {
+func (o *ComponentObservation) takeInlineV1Statuses(observe func(*InstanceStatus, InstanceCounters)) ([]InstanceStatus, error) {
 	if err := o.validatePublication(); err != nil {
 		return nil, err
 	}
@@ -173,11 +173,15 @@ func (o *ComponentObservation) validatePublication() error {
 	return nil
 }
 
-func (o *ComponentObservation) overlayInlineV1(out []InstanceStatus, observe func(int32, string, InstanceCounters)) {
+// overlayInlineV1 materializes the current Pod observation onto each owned
+// row. observe sees the row before the overlay — durable identity, revision
+// and Operation fields are already final, Pod counts come from current — and
+// must treat the row as read-only.
+func (o *ComponentObservation) overlayInlineV1(out []InstanceStatus, observe func(*InstanceStatus, InstanceCounters)) {
 	for i := range out {
 		current, _ := o.CurrentCounters(out[i].Index)
 		if observe != nil {
-			observe(out[i].Index, out[i].RunningRevision, current)
+			observe(&out[i], current)
 		}
 		out[i].PodCount = current.PodCount
 		out[i].ReadyPodCount = current.ReadyPodCount

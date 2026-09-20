@@ -1,0 +1,66 @@
+# The operator reverts to the running revision while a SurgeThenDrain
+# replacement is already Ready. Past Step=Surge the abandon no longer
+# applies, so the cycle promotes onto the pinned revision first and the
+# restored target rolls from Ready afterwards — the Instance is mid-roll
+# for the whole stretch even though it started and ended on the same
+# revision.
+scenario: revert-midsurge-ready-replacement
+arrows:
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-promote
+cells:
+  - instance/Update/SurgeDrain/spec.revision/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement is serving and in rotation beside the source
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 5
+    note: the target is reverted to the revision the source still runs, with the replacement Ready but not yet promoted
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v1}
+  - tick: 6
+    note: the source leaves rotation, so the drain has converged
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 7
+    note: the drained source is gone and the cycle promotes onto the pinned revision, not the restored one
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 8
+    note: the restored target now rolls from Ready, surging back
+  - tick: 9
+    note: the second replacement is serving beside the promoted pod
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 0}}
+  - tick: 10
+    note: the second source leaves rotation
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, ordinal: 1}}
+  - tick: 11
+    note: the second source is gone and the Instance is back on the revision it started from
+    events:
+      - pod.deleted[source]: {pod: {index: 0, ordinal: 1}}
