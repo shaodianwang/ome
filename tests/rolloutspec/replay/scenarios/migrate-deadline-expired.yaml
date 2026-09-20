@@ -1,0 +1,49 @@
+# The migration runs out of time with a source that is not runtime-ready.
+# The record's Deadline is the timeout authority: it clears the Migrate pin
+# from both halves, releases the source-drain hold and restores the source
+# from observation — which finds it unhealthy, so the source is stamped
+# Failed rather than Ready, while the unpinned surge index leaves the plan.
+scenario: migrate-deadline-expired
+arrows:
+  - T-ready-migrate
+  - T-empty-migrate-target
+  - T-migrate-deadline
+  - T-migratetarget-expired
+cells:
+  - instance/Migrate/CreateSurge/timer.migrationDeadline/before
+  - instance/Migrate/SurgeTarget/timer.migrationDeadline/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation, so the row records a running revision on a known node
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the operator asks the Instance off node-0, and the migrate pass admits the request and establishes the pair
+    events:
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+  - tick: 4
+    note: the source itself starts crash-looping; a wedged source pod leaves the migration driving rather than closing the record
+    events:
+      - pod.waiting[CrashLoopBackOff]: {pod: {index: 0}, message: "back-off restarting failed container"}
+  - tick: 5
+    note: the record's deadline elapses with the source not runtime-ready, so the move is closed and the source is failed
+    events:
+      - timer.migrationDeadline: {slack: 1s}
+  - tick: 6
+    note: the unpinned index is no longer planned, so the scale-down wave commits Phase Deleting with a Delete Drain operation on it

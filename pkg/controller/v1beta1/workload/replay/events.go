@@ -58,6 +58,7 @@ func init() {
 		"timer.operationDeadline": applyOperationDeadline,
 		"timer.stuckPodGrace":     applyStuckPodGrace,
 		"timer.retryAt":           applyRetryAt,
+		"timer.migrationDeadline": applyMigrationDeadline,
 	}
 }
 
@@ -604,6 +605,27 @@ func applyRetryAt(_ context.Context, d *driver, ev TimelineEvent) (string, error
 		return "", fmt.Errorf("replay: timer.retryAt: no RetryBlock carries a nextRetryAt")
 	}
 	return d.advanceOnto("timer.retryAt", earliest, ev)
+}
+
+// applyMigrationDeadline advances the clock onto the earliest deadline a
+// non-terminal migration record carries. The record's Deadline is the
+// migration timeout authority — distinct from the Instance operation
+// deadline stamped on the same rows, which the migrate pin makes the
+// escalation skip.
+func applyMigrationDeadline(_ context.Context, d *driver, ev TimelineEvent) (string, error) {
+	var earliest time.Time
+	for _, record := range d.migrations {
+		if record.Phase.Terminal() || record.Deadline.IsZero() {
+			continue
+		}
+		if earliest.IsZero() || record.Deadline.Time.Before(earliest) {
+			earliest = record.Deadline.Time
+		}
+	}
+	if earliest.IsZero() {
+		return "", fmt.Errorf("replay: timer.migrationDeadline: no in-flight migration record carries a deadline")
+	}
+	return d.advanceOnto("timer.migrationDeadline", earliest, ev)
 }
 
 // waitingTerminally reports whether any of a pod's containers is parked in

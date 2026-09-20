@@ -1,0 +1,51 @@
+# The owner is deleted mid-migration. Teardown treats the pair like every
+# other observed index, so the migration exclusion does not apply: both the
+# source and its surge are committed to Phase Deleting with a Delete Drain
+# operation in one status transaction.
+scenario: migrate-teardown
+arrows:
+  - T-ready-migrate
+  - T-empty-migrate-target
+  - T-migrate-teardown
+  - T-migratetarget-teardown
+  - T-delete-done
+cells:
+  - instance/Migrate/CreateSurge/spec.teardown[deleted]/before
+  - instance/Migrate/SurgeTarget/spec.teardown[deleted]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    migrationMode: Auto
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    migrationAudit: {maxInFlight: 1, maxPerWindow: 4, window: 1h}
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod is bound, becomes Ready and enters rotation, so the row records a running revision on a known node
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}, message: node-0}
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the operator asks the Instance off node-0, and the migrate pass admits the request and establishes the pair
+    events:
+      - spec.migrateRequest: {instance: 0, fromNode: node-0, reason: NodeDrain}
+  - tick: 4
+    note: the owner's deletion begins, so the whole pair is a scale-down extra
+    events:
+      - spec.teardown[deleted]: {}
+  - tick: 5
+    note: the source leaves the routed Service, which is the drain its delete waits on
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 6
+    note: both pods are gone, so both rows are removed
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+      - pod.deleted[target]: {pod: {index: 1}}

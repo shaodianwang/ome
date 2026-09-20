@@ -1,0 +1,59 @@
+# A retired replacement whose delete is refused. The stuck classifier
+# skips a pod carrying a deletionTimestamp, so the only way a wedged member
+# of a retired gang is ever read is while its delete is still being
+# rejected — which is what this scenario holds open. Every pass from the
+# refusal on closes with that delete error, which is the honest record of a
+# retirement that cannot make progress.
+scenario: gangcleanup-stuck
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-cleanup-superseded
+  - T-gangcleanup-stuck-failed
+intentional: >-
+  the table's Update/GangSurgeTargetCleanup/pod.waiting cell reads ignore
+  because the stuck classifier skips a pod carrying a deletionTimestamp, and
+  the pass that claims the cleanup issues the delete; the declared arrow
+  T-gangcleanup-stuck-failed is therefore reachable only while the delete is
+  refused, so no cell is cited for it
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: quota refuses every delete of the retired members, so the template change claims the cleanup marker without removing its pods
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}
+      - api.quotaDenied: {verb: delete, resource: pods, count: 8}
+  - tick: 6
+    note: the retired members are still alive two minutes on, so they are older than the grace
+    events:
+      - clock.advance: 2m
+  - tick: 7
+    note: a member of the retired gang holds a terminal pull failure while its delete is still refused
+    events:
+      - pod.waiting[ImagePullBackOff]: {pod: {index: 1, runner: worker}, message: "manifest unknown"}

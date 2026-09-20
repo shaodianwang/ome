@@ -1,0 +1,48 @@
+# A second template change lands while the replacement gang is still
+# incomplete. The in-flight surge is ABANDONED rather than retargeted: the
+# marker's step advances to the cleanup claim and no RetryBlock is
+# recorded, because a spec change is not a failure of the retired revision.
+scenario: gangtarget-abandon-superseded
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-cleanup-superseded
+cells:
+  - instance/Update/GangSurgeTarget/spec.revision/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    updateRetry: {maxAttempts: 3, initialDelay: 2m, maxDelay: 10m, multiplier: 2}
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the template changes again while the replacement is still incomplete, so its pinned revision is superseded
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}
+  - tick: 6
+    note: the retired replacement's members are gone, so the marker row is removed and the source is reset with no RetryBlock recorded
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}

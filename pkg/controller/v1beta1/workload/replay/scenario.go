@@ -371,6 +371,7 @@ var eventArgKeys = map[string][]string{
 	"timer.operationDeadline": {"slack"},
 	"timer.stuckPodGrace":     {"slack"},
 	"timer.retryAt":           {"slack"},
+	"timer.migrationDeadline": {"slack"},
 }
 
 // Key renders the event the way a timeline and a trace both spell it.

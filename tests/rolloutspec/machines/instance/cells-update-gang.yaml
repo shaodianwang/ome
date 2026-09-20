@@ -111,7 +111,7 @@ cells:
     note: the promote is driven by the source's pods being GONE, not by the replacement becoming Ready; it stamps Ready on the pinned revision, clears the marker operation, and prunes that revision's RetryBlock
     invariants: [one.operation.per.instance]
     placement: kind
-    coverage: {perm: [], unit: [TestGangSurge_PromoteEmitsCompletedEvent, TestGangSurge_ResumesPromotedTargetWithPodlessSource], kind: []}
+    coverage: {perm: [], unit: [TestGangSurge_PromoteEmitsCompletedEvent, TestGangSurge_ResumesPromotedTargetWithPodlessSource], kind: [], replay: [surgedrain-gang-complete]}
     status: decided
   - state: Update/GangSurgeTarget
     event: pod.deleted
@@ -211,7 +211,7 @@ cells:
     guard: a replacement pod held the reason past the stuck-pod grace and the replacement pod set is not fully serving
     note: all seven are terminal waiting reasons, so the escalation pass stamps BOTH the source (its blame bucket is the replacement gang) and this marker Failed with the operation preserved; the source's Failed is what drives the abandon path. Unlike a single-pod surge, a gang target is never recycled in place
     placement: kind
-    coverage: {perm: [], unit: [TestEscalation_WedgedGangReplacementFailsBothHalvesOfThePair], kind: []}
+    coverage: {perm: [], unit: [TestEscalation_WedgedGangReplacementFailsBothHalvesOfThePair], kind: [], replay: [gangtarget-stuck]}
     status: decided
   - state: Update/GangSurgeTarget
     event: pod.waiting
@@ -272,7 +272,7 @@ cells:
     guard: the replacement gang is incomplete or not all runtime-ready; a replacement that is already complete and runtime-ready finishes on its pinned revision instead and the next revision rolls afterwards
     note: the in-flight surge is ABANDONED, not retargeted — the marker's step advances to the cleanup claim and no RetryBlock is recorded, because a spec change is not a failure of the retired revision
     placement: kind
-    coverage: {perm: [], unit: [TestGangSurge_PromotedPinnedTargetRecreatesMissingPodsBeforeNewerRevision], kind: []}
+    coverage: {perm: [], unit: [TestGangSurge_PromotedPinnedTargetRecreatesMissingPodsBeforeNewerRevision], kind: [], replay: [gangtarget-abandon-superseded]}
     status: decided
   - state: Update/GangSurgeTarget
     event: spec.revision
@@ -368,7 +368,7 @@ cells:
     guard: the owner carries a deletionTimestamp, so the planned index set is emptied and every observed index becomes a scale-down extra
     note: teardown short-circuits the whole pipeline before the update pass runs, so the marker is admitted into the scale-down wave like any other index
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gangtarget-teardown]}
     status: current
   - state: Update/GangSurgeTarget
     event: spec.teardown
@@ -446,7 +446,7 @@ cells:
     guard: the paired source escalated to Failed on this surge before the replacement was promoted, and no replacement pod is held by an admission scheduling gate
     note: the modeled edge is the source's escalation driving the abandon path, which claims the cleanup marker so it keeps ownership of its pods and PodGroup. The marker's OWN deadline additionally stamps this row Failed with the operation preserved (T-gangtarget-deadline)
     placement: kind
-    coverage: {perm: [], unit: [TestAbandonFailedGangSurge_PersistsCleanupMarkerAcrossRemovalFailure], kind: []}
+    coverage: {perm: [], unit: [TestAbandonFailedGangSurge_PersistsCleanupMarkerAcrossRemovalFailure], kind: [], replay: [gangtarget-deadline]}
     status: decided
   - state: Update/GangSurgeTarget
     event: timer.operationDeadline
@@ -894,7 +894,7 @@ cells:
     guard: a replacement pod holds a terminal waiting reason, the replacement pod set is not fully serving, and a gang Update attempt is never disposable
     note: the fast path in pkg/controller/v1beta1/workload/escalation.go stamps Phase Failed with the operation preserved; the stamp is diagnostic because the source's claim predicates read revision and step, never phase
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gangtarget-stuckgrace]}
     status: current
   - state: Update/GangSurgeTarget
     event: timer.stuckPodGrace
@@ -1125,7 +1125,7 @@ cells:
     note: the marker row removal and the source reset are ONE status transaction, so marker absence can never be mistaken for an interrupted stamp and restored as active work; a failed revision records its RetryBlock in the same write and expectations for the index are forgotten
     invariants: [marker.owns.its.pods.until.removed]
     placement: kind
-    coverage: {perm: [], unit: [TestAbandonFailedGangSurge_AtomicallyRemovesMarkerAndResetsSource, TestAbandonFailedGangSurge_ResetsSourceAfterPodsGone, TestAbandonFailedGangSurge_RecordsRetryBlockWithPolicy], kind: []}
+    coverage: {perm: [], unit: [TestAbandonFailedGangSurge_AtomicallyRemovesMarkerAndResetsSource, TestAbandonFailedGangSurge_ResetsSourceAfterPodsGone, TestAbandonFailedGangSurge_RecordsRetryBlockWithPolicy], kind: [], replay: [gangtarget-deadline]}
     status: decided
   - state: Update/GangSurgeTargetCleanup
     event: pod.deleted
@@ -1261,7 +1261,7 @@ cells:
     guard: the owner carries a deletionTimestamp, so the planned index set is emptied and every observed index becomes a scale-down extra
     note: the teardown branch runs before any other pass, so the retired index is admitted into the scale-down wave instead of finishing its own cleanup
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gangcleanup-teardown]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: spec.teardown
@@ -1302,7 +1302,7 @@ cells:
     outcome: escalate
     note: the escalation pass stamps this row Failed with the operation preserved, because its phase is Creating with an in-flight Update and a gang Update attempt is never disposable. The retirement continues regardless — the cleanup claim matches on revision and step, not phase — so the stamp is diagnostic only (T-gangcleanup-deadline)
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gangcleanup-deadline]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: timer.expectationsTTL
@@ -1575,7 +1575,7 @@ cells:
     guard: a retired replacement pod still holds a terminal waiting reason and has not yet been marked for deletion, the set is not fully serving, and a gang Update attempt is never disposable
     note: pkg/controller/v1beta1/workload/escalation.go stamps Phase Failed with the operation preserved; once the retirement's delete lands the classifier skips the pod, so this edge is reachable only before it does
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [gangcleanup-stuckgrace]}
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: timer.stuckPodGrace

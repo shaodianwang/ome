@@ -190,7 +190,7 @@ cells:
       this evidence does not cover
     invariants: [record.is.timeout.authority]
     placement: perm
-    coverage: {perm: [], unit: [TestMigrate_SurgeWedgedInImagePull_FailsThroughRecord, TestMigrate_SurgeCrashLoop_ClosesOnlyPastTheGrace, TestMigrate_SurgeWedgedWhileDraining_RestoresRotation, TestMigrate_SurgeWedgedAfterSourceGone_LeavesTheDeadline], kind: []}
+    coverage: {perm: [], unit: [TestMigrate_SurgeWedgedInImagePull_FailsThroughRecord, TestMigrate_SurgeCrashLoop_ClosesOnlyPastTheGrace, TestMigrate_SurgeWedgedWhileDraining_RestoresRotation, TestMigrate_SurgeWedgedAfterSourceGone_LeavesTheDeadline], kind: [], replay: [migrate-surge-wedged]}
     status: decided
   - state: Migrate/CreateSurge
     event: pod.waiting
@@ -490,7 +490,7 @@ cells:
       mid-migration exclusion does not apply and Phase Deleting plus the Delete
       Drain operation are committed in one status transaction
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-teardown]}
     status: current
   - state: Migrate/CreateSurge
     event: spec.migrateRequest
@@ -600,7 +600,7 @@ cells:
       restore transition, so the surge and the source are never both failed
     invariants: [record.is.timeout.authority]
     placement: perm
-    coverage: {perm: [], unit: [TestMigrateExpiry_SourcePodsDead_SourceFailed, TestMigrateExpiry_DrainingIncomplete_Expired], kind: []}
+    coverage: {perm: [], unit: [TestMigrateExpiry_SourcePodsDead_SourceFailed, TestMigrateExpiry_DrainingIncomplete_Expired], kind: [], replay: [migrate-deadline-expired, migrate-deadline-restore]}
     status: decided
   - state: Migrate/CreateSurge
     event: timer.migrationDeadline
@@ -946,7 +946,7 @@ cells:
       Deadline, which stays the backstop
     invariants: [record.is.timeout.authority]
     placement: perm
-    coverage: {perm: [], unit: [TestMigrate_SurgeWedgedInImagePull_FailsThroughRecord, TestMigrate_GangSurgeMemberWedged_FailsThroughRecord, TestMigrate_SurgeWedgedWhileDraining_RestoresRotation, TestMigrate_SurgeWedgedAfterSourceGone_LeavesTheDeadline], kind: []}
+    coverage: {perm: [], unit: [TestMigrate_SurgeWedgedInImagePull_FailsThroughRecord, TestMigrate_GangSurgeMemberWedged_FailsThroughRecord, TestMigrate_SurgeWedgedWhileDraining_RestoresRotation, TestMigrate_SurgeWedgedAfterSourceGone_LeavesTheDeadline], kind: [], replay: [migrate-surge-wedged]}
     status: decided
   - state: Migrate/SurgeTarget
     event: pod.waiting
@@ -1239,7 +1239,7 @@ cells:
     note: teardown treats the surge index like any other observed index, so Phase
       Deleting and the Delete Drain operation are committed in one status transaction
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [], kind: [], replay: [migrate-teardown]}
     status: current
   - state: Migrate/SurgeTarget
     event: spec.migrateRequest
@@ -1348,7 +1348,7 @@ cells:
       folded into this transition rather than modeled as a state
     invariants: [record.is.timeout.authority]
     placement: perm
-    coverage: {perm: [], unit: [TestMigrateExpiry_SurgeReadyButNotInRotation_Expires, TestMigrateExpiry_DrainingIncomplete_Expired], kind: []}
+    coverage: {perm: [], unit: [TestMigrateExpiry_SurgeReadyButNotInRotation_Expires, TestMigrateExpiry_DrainingIncomplete_Expired], kind: [], replay: [migrate-deadline-expired]}
     status: decided
   - state: Migrate/SurgeTarget
     event: timer.migrationDeadline

@@ -197,11 +197,13 @@ moves nothing.
 | `timer.operationDeadline` | the earliest in-flight `Operation.Deadline` |
 | `timer.stuckPodGrace` | the earliest `pod.creationTimestamp + config.stuckPodGrace` over the pods holding a terminal waiting reason |
 | `timer.retryAt` | the earliest `retryBlocks[].nextRetryAt` |
+| `timer.migrationDeadline` | the earliest `Deadline` over the non-terminal migration records |
 
 Because the deadline is read rather than written, a scenario states no
 duration that config already fixes: `T-create-stuckgrace` sets
-`config.stuckPodGrace` once and `T-failed-retry` never restates the backoff
-its `config.updateRetry` policy computed. An event fired with nothing to
+`config.stuckPodGrace` once, `T-failed-retry` never restates the backoff its
+`config.updateRetry` policy computed, and the migrate scenarios never restate
+the `instanceReadyTimeout` the migration record's deadline was minted from. An event fired with nothing to
 resolve — no in-flight deadline, no wedged pod, no due block — fails the
 run rather than silently doing nothing.
 
@@ -360,8 +362,8 @@ The table events the driver can stage are the ones the scenarios here need:
 `spec.pauseTrue/pauseFreeze/unpause`, `spec.strategy`, `spec.teardown`,
 `spec.migrateRequest`, `spec.rollbackTarget`, `spec.gangWidth`,
 `gang.podGroup`,
-`timer.operationDeadline`, `timer.stuckPodGrace`, `timer.retryAt`, and
-`clock.advance`. A scenario naming any other declared event fails to load
+`timer.operationDeadline`, `timer.stuckPodGrace`, `timer.retryAt`,
+`timer.migrationDeadline`, and `clock.advance`. A scenario naming any other declared event fails to load
 with that as the reason, so the gap is always visible rather than silent.
 
 
@@ -420,6 +422,13 @@ Effects the driver does not record:
   removes the finalizer; `workload.Reconcile` never sees it.
 - Timestamps on aggregate conditions and on `LastFailure`, because the
   engine stamps both from the wall clock (see Follow-ups).
+
+- The migration completion tail. The surge's availability gate reads the
+  row's `PodCount` and `AvailablePodCount`, which only the status
+  publication path writes (see deviation 12 above), so a replayed
+  migration never advances past `SurgePending` and the promote and
+  completion arrows are out of reach. Everything the record decides before
+  that gate — early wedge evidence, the deadline, teardown — is reachable.
 
 - The stuck-Terminating force-delete sweep, and the arrows that fire on
   it. Every pod the driver admits carries its finalizer, so a Terminating

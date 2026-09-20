@@ -1,0 +1,53 @@
+# A retirement that cannot finish: the retired replacement's members hold
+# their finalizers, so the cleanup marker is still in flight when its own
+# operation deadline elapses. A gang step is never disposable, so the stamp
+# preserves the operation and the retirement keeps going — the cleanup
+# claim matches on revision and step, never on phase.
+scenario: gangcleanup-deadline
+arrows:
+  - T-empty-gang-surge-target
+  - T-gangtarget-cleanup-superseded
+  - T-gangcleanup-deadline
+cells:
+  - instance/Update/GangSurgeTargetCleanup/timer.operationDeadline/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the template changes, and with no free ordinal inside the gang the source claims index 1 as its replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the template changes again while the replacement is still incomplete, so the marker is claimed as a cleanup and its members are deleted
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}
+  - tick: 6
+    note: the retired members are still Terminating when the deadline elapses, so the cleanup marker is stamped Failed with its operation preserved
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 7
+    note: the members finally go, and the Failed stamp does not stop the retirement from completing
+    events:
+      - pod.deleted[target]: {pod: {index: 1, runner: leader}}
+      - pod.deleted[target]: {pod: {index: 1, runner: worker}}

@@ -6,8 +6,10 @@ scenario: surgedrain-gang-complete
 arrows:
   - T-empty-gang-surge-target
   - T-surgedrain-gang-complete
+  - T-gangtarget-ready
 cells:
   - instance/Update/SurgeDrain/pod.deleted[source]/before
+  - instance/Update/GangSurgeTarget/pod.deleted[source]/before
 intentional: >-
   the gang path drains its source by flipping the serving gate and deletes on
   the same pass; unlike the single-pod path it consults no EndpointSlice, so
