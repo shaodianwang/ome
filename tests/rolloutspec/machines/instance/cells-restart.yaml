@@ -277,7 +277,7 @@ cells:
   - state: Restart/Drain
     event: spec.pauseTrue
     outcome: ignore
-    note: a standard pause plans scale-down and repair only, so the restart keeps converging at the running revision while updates and creates are held; the operation deadline is parked and the escalation pass is suspended for the paused reconcile
+    note: a standard pause plans scale-down and repair only, so the restart keeps converging at the running revision while updates and creates are held. Repair is not what an ordinary pause holds, so the attempt takes no Paused token and its clock keeps running with it; the escalation pass is suspended for the paused reconcile, so the elapsed deadline is consumed only once the pause is cleared
     placement: perm
     coverage: {perm: [], unit: [TestPlan_Paused_RepairRunsFleetChangesDoNot], kind: []}
     status: decided
@@ -291,7 +291,7 @@ cells:
   - state: Restart/Drain
     event: spec.unpause
     outcome: ignore
-    note: the restart pass is planned again and resumes at the same step from its durable operation; the Paused waiting token is released and a parked deadline re-arms with a full window measured from the unpause
+    note: the restart pass is planned again and resumes at the same step from its durable operation; a Paused token, which only a freeze puts on a repair, is released and the deadline it parked re-arms with a full window measured from the unpause
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -335,7 +335,7 @@ cells:
     outcome: escalate
     to: Failed
     guard: the deadline elapsed, no pod of the Instance is held by an admission scheduling gate, and the pod set is not fully serving
-    note: a Restart attempt is not disposable, so the stamp keeps the operation and records on LastFailure the blamed pod's workload-caused waiting reason when one exists, falling back to the bare DeadlineExceeded diagnostic when none does, because the teardown that follows deletes the blamed pods. The preserved operation does not park the row for good, because a Restart parked at Failed is read as a spent attempt, so the gang-member-loss trigger may re-arm the whole gang under a fresh deadline, while the single-pod path still recovers through the Create pass
+    note: a Restart attempt is not disposable, so the stamp keeps the operation and records on LastFailure the blamed pod's workload-caused waiting reason when one exists, falling back to the bare DeadlineExceeded diagnostic when none does, because the teardown that follows deletes the blamed pods. Two readiness limbos are named rather than left bare — a pod that ran every container without ever reporting ContainersReady is recorded under reason ContainersNotReady, and a pod whose containers all report ready but whose Ready condition never follows a readiness gate it declares is recorded under reason ReadinessGateNotSatisfied with the unsatisfied gates. Both are evidence only and select no branch, since either limbo is ambiguous between the revision and the node. The preserved operation does not park the row for good, because a Restart parked at Failed is read as a spent attempt, so the gang-member-loss trigger may re-arm the whole gang under a fresh deadline, while the single-pod path still recovers through the Create pass
     placement: perm
     coverage: {perm: [], unit: [TestEscalation_RestartDeadlineElapsed_FailsInstance], kind: []}
     status: decided
@@ -420,7 +420,7 @@ cells:
     event: pod.containersNotReady
     variants: [source]
     outcome: defer
-    note: Phase C re-reads the bumped-incarnation set on every wake-up and promotes only when all of it is ContainersReady, so a regression withholds the promote until the deadline; a regression landing at or after a transition's write is re-evaluated against the state that landed (ops/restart.go)
+    note: Phase C re-reads the bumped-incarnation set on every wake-up and promotes only over the one bar every path shares — every pod PodReady with its minReadySeconds window elapsed — and losing ContainersReady drops a pod below the first guard of it, so a regression withholds the promote until the deadline; a regression landing at or after a transition's write is re-evaluated against the state that landed (ops/restart.go)
     placement: kind
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -624,7 +624,7 @@ cells:
     event: spec.policyTuning
     variants: [instanceReadyTimeout]
     outcome: ignore
-    note: the Restart operation's deadline is stamped once at entry and preserved by the skip-write guard, so a new value reaches this row only through the gate-exit re-arm; the PodGroup's clamped ScheduleTimeoutSeconds is re-reconciled from it on the same pass (ops/restart.go, workload/deadline.go, podgroup/podgroup.go)
+    note: the Restart operation's deadline is stamped once at entry and preserved by the skip-write guard, so a new value reaches this row only through the gate-exit re-arm; the PodGroup's ScheduleTimeoutSeconds is re-reconciled from it on the same pass, bounded by lifecycle.gangScheduleTimeout when the operator configured one and passed through unbounded when none is set (ops/restart.go, workload/deadline.go, podgroup/podgroup.go)
     placement: unit
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -686,6 +686,30 @@ cells:
     placement: unit
     coverage: {perm: [], unit: [], kind: []}
     status: current
+  - state: Restart/Drain
+    event: config.changed
+    variants: [gangScheduleTimeout]
+    outcome: ignore
+    note: the clamp is applied where the PodGroup is built, not where the operation is stamped, so a new bound reaches this repair through the next ensure of the Instance's group; with none configured the timeout derived from InstanceReadyTimeout is passed through unbounded, and a Component whose timeout is unusable as a gang deadline leaves the field unset for the scheduler's own default
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: decided
+  - state: Restart/Drain
+    event: config.changed
+    variants: [requeue]
+    outcome: ignore
+    note: the operation cadence is re-read per pass and only paces how soon a repair with work left wakes again; with none configured the pass rides the controller's rate-limited backoff. An explicit wait the pass already holds - a promote window remainder, a RetryBlock due time - still wins over the cadence, and neither changes what the repair decides
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: decided
+  - state: Restart/Drain
+    event: config.changed
+    variants: [audit, retryBlockHistoryLimit]
+    outcome: ignore
+    note: neither is read on the repair path - the migration capacity caps bound new requests a repair never raises, and the RetryBlock history cap shapes the end-of-pass prune of superseded blocks rather than anything on this row
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: decided
 
   # --- controller ticks ----------------------------------------------------
   - state: Restart/Drain
@@ -793,7 +817,7 @@ cells:
     event: pod.runningNotReady
     variants: [source]
     outcome: defer
-    note: Phase C re-reads the bumped-incarnation set every wake-up and promotes only when all of it is ContainersReady, so a pod that runs but never passes its probes holds the repair to the operation deadline. At that deadline the readiness wait is evidence - the record names the pod, its first unready container and the readiness condition's message under reason ContainersNotReady rather than a bare DeadlineExceeded - but it decides no branch, because readiness limbo is ambiguous between the revision and the node and charges no ladder (pkg/controller/v1beta1/workload/ops/restart.go, pkg/controller/v1beta1/workload/deadline.go)
+    note: Phase C re-reads the bumped-incarnation set every wake-up and promotes only over the one bar every path shares - every pod PodReady with its minReadySeconds window elapsed - so a pod that runs but never passes its probes holds the repair to the operation deadline. At that deadline the readiness wait is evidence - the record names the pod, its first unready container and the readiness condition's message under reason ContainersNotReady rather than a bare DeadlineExceeded, or names the unsatisfied readiness gates under reason ReadinessGateNotSatisfied when the containers are ready and only the gate is missing - but it decides no branch, because readiness limbo is ambiguous between the revision and the node and charges no ladder (pkg/controller/v1beta1/workload/ops/restart.go, pkg/controller/v1beta1/workload/deadline.go)
     placement: kind
     coverage: {perm: [], unit: [], kind: []}
     status: current

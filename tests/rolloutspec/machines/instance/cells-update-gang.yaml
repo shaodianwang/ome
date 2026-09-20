@@ -342,7 +342,7 @@ cells:
   - state: Update/GangSurgeTarget
     event: spec.pauseTrue
     outcome: defer
-    note: a standard pause plans nothing past the restart pass, so the source stops driving the surge; the marker keeps its pods and its claim, and escalation is suspended with the rest of the lifecycle
+    note: a standard pause plans nothing past the restart pass, so the source stops driving the surge; the marker keeps its pods and its claim, escalation is suspended with the rest of the lifecycle, and the attempt carries Operation.Waiting=Paused with its deadline parked. A gang SurgeThenDrain cycle is held whole rather than run to a step boundary — it spans the source and this marker and keeps the source serving from its first pass to its last, so parking it costs the Instance no capacity
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -802,7 +802,7 @@ cells:
     event: spec.policyTuning
     variants: [instanceReadyTimeout]
     outcome: ignore
-    note: the in-flight deadline was stamped once at operation entry and is not re-stamped, but the new value is clamped into the replacement PodGroup's ScheduleTimeoutSeconds by pkg/controller/v1beta1/workload/podgroup/podgroup.go on the next ensure
+    note: the in-flight deadline was stamped once at operation entry and is not re-stamped, but the new value reaches the replacement PodGroup's ScheduleTimeoutSeconds on the next ensure, bounded by lifecycle.gangScheduleTimeout when the operator configured one and passed through unbounded when none is set (pkg/controller/v1beta1/workload/podgroup/podgroup.go)
     placement: unit
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -843,7 +843,7 @@ cells:
   - state: Update/GangSurgeTarget
     event: config.changed
     outcome: ignore
-    note: the lifecycle block is re-read every pass in pkg/controller/v1beta1/inferencereplica/reconciler.go, so a new stuck-pod grace arms or disarms the fast escalation and a new teardown deadline arms the teardown edge; updateRetry is consumed only when the retirement records a RetryBlock, and forceDelete, scaleDownInterval and autoMigrateBudget have no reader on the gang surge path
+    note: the lifecycle block is re-read every pass in pkg/controller/v1beta1/inferencereplica/reconciler.go, so a new stuck-pod grace arms or disarms the fast escalation, a new gangScheduleTimeout bounds the next PodGroup ensure, a new requeue cadence paces the next wake-up, and a new teardown deadline arms the teardown edge; updateRetry is consumed only when the retirement records a RetryBlock, retryBlockHistoryLimit only when superseded blocks are pruned, and forceDelete, scaleDownInterval, autoMigrateBudget and audit have no reader on the gang surge path
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -1235,7 +1235,7 @@ cells:
   - state: Update/GangSurgeTargetCleanup
     event: spec.pauseTrue
     outcome: defer
-    note: pause plans no update pass, so the retirement halts with its pods and PodGroup still owned; the marker is exactly what keeps them from being reaped meanwhile
+    note: pause plans no update pass, so the retirement halts with its pods and PodGroup still owned and the attempt carrying Operation.Waiting=Paused; the marker is exactly what keeps them from being reaped meanwhile
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -1528,7 +1528,7 @@ cells:
   - state: Update/GangSurgeTargetCleanup
     event: config.changed
     outcome: ignore
-    note: the retirement reads no operator configuration of its own; a new stuck-pod grace only changes whether the diagnostic Failed stamp fires, a new update-retry policy shapes the RetryBlock written at completion, and a new teardown deadline arms the teardown edge
+    note: the retirement reads no operator configuration of its own; a new stuck-pod grace only changes whether the diagnostic Failed stamp fires, a new update-retry policy shapes the RetryBlock written at completion, a new retryBlockHistoryLimit shapes how many superseded blocks survive the prune, a new requeue cadence paces the next wake-up, and a new teardown deadline arms the teardown edge
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
     status: current

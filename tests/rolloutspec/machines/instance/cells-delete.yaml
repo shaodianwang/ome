@@ -275,7 +275,7 @@ cells:
   - state: Delete/Drain
     event: spec.pauseTrue
     outcome: ignore
-    note: "pause is an operator circuit breaker for lifecycle operations, not for capacity. Scale-down is selected before the pause checks, so an admitted drain keeps running and a deliberate replica reduction still releases capacity while paused"
+    note: "pause is an operator circuit breaker for lifecycle operations, not for capacity. Scale-down is selected before the pause checks, so an admitted drain keeps running and a deliberate replica reduction still releases capacity while paused; a Delete attempt therefore never takes the Paused token, because its clock must keep running with the work it bounds"
     placement: unit
     coverage: {perm: [], unit: [TestPlan_Paused_RepairRunsFleetChangesDoNot, TestReconcile_PausedStillScalesDown], kind: []}
     status: decided
@@ -355,7 +355,7 @@ cells:
   - state: Delete/Drain
     event: timer.operationDeadline
     outcome: ignore
-    note: "the deadline is consumed for visibility only. An overdue drain raises one Warning and carries a DrainOverdue condition on the InferenceReplica, and nothing else moves - the row stays Deleting, the delete batch keeps ownership of the index, no phase flip and no RetryBlock follow, and force-deleting the wedged pod stays gated on a configured policy plus node-death evidence"
+    note: "the deadline is consumed for visibility only. An overdue drain raises one DrainOverdue Warning per delete episode - the announcement is persisted on the row, so a new delete operation is a new episode - and carries a DrainOverdue condition on the InferenceReplica, re-derived from the rows each pass and clearing itself once no drain is overdue. Nothing else moves: the row stays Deleting, the delete batch keeps ownership of the index, no phase flip and no RetryBlock follow, the condition is excluded from RolloutStalled, and force-deleting the wedged pod stays gated on a configured policy plus node-death evidence"
     invariants: [one.operation.per.instance]
     placement: perm
     coverage: {perm: [], unit: [TestReconcileDeleteOwnedReboundFinishesBeforeRecreate, TestExecuteActiveScaleDownExcludesDeferredExtrasFromEscalation], kind: []}
@@ -561,6 +561,24 @@ cells:
     placement: sim
     coverage: {perm: [], unit: [], kind: []}
     status: current
+
+  - state: Delete/Drain
+    event: config.changed
+    variants: [requeue]
+    outcome: ignore
+    note: "the operation cadence is re-read per pass and only paces how soon a drain with work left wakes again; with none configured the wave rides the controller's rate-limited backoff instead. Neither spelling changes what the drain decides, and an explicit wait the pass already holds - a force-delete boundary, a node-death deadline - still wins over the cadence"
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: decided
+
+  - state: Delete/Drain
+    event: config.changed
+    variants: [gangScheduleTimeout, audit, retryBlockHistoryLimit]
+    outcome: ignore
+    note: "inert here. The gang schedule clamp is applied when a PodGroup is built rather than when one is torn down, the migration capacity caps bound new requests the delete wave makes none of, and the RetryBlock history cap shapes a prune that never reads a Deleting row"
+    placement: sim
+    coverage: {perm: [], unit: [], kind: []}
+    status: decided
 
   - state: Delete/Drain
     event: ctrl.resync

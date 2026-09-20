@@ -19,7 +19,7 @@ cells:
     event: pod.scheduled
     variants: [source]
     outcome: ignore
-    note: binding is a counter observation; the pass still waits for the whole set to report ContainersReady, and the only side effect is that an ungated pod restarts the parked operation deadline from admission
+    note: binding is a counter observation; the pass still waits for the whole set to clear the promote bar, and the only side effect is that an ungated pod restarts the parked operation deadline from admission
     placement: perm
     coverage: {perm: [], unit: [TestReconcileGatedDeadlines_RestartsOnUngate], kind: []}
     status: current
@@ -203,7 +203,7 @@ cells:
     outcome: transition
     to: Create/CreatePods
     guard: the attempt's pinned revision is no longer the target, or an unpinned attempt's pod label proves it belongs to another revision
-    note: a superseded spec is not a failure of the retired revision, so the half-built attempt is retired straight into a fresh Create at the new target — the operation is replaced in one write with no Failed phase, no failure event and no RetryBlock, for a single pod and for a gang alike. An attempt whose pin still matches is untouched and finishes, and so is one that is fully materialized and runtime-ready — it is one promote from serving and its pods are already routed, so it promotes and the update machinery rolls it. The replacement is a fresh attempt, so the new target's RetryBlock gates it — while that target is denied the retirement defers and the old attempt stays in place
+    note: a superseded spec is not a failure of the retired revision, so the half-built attempt is retired straight into a fresh Create at the new target — the operation is replaced in one write with no Failed phase, no failure event and no RetryBlock, for a single pod and for a gang alike. An attempt whose pin still matches is untouched and finishes, and three shapes are held back from retirement — an attempt whose pods are all runtime-ready is one promote from serving, so it promotes and the update machinery rolls it through a surge instead; a row with a recorded RunningRevision is a serving materialization being rebuilt, which is the update machinery's business and never Create's; and a retirement onto a revision the RetryBlock currently denies is deferred, because the replacement is a fresh attempt that gate would refuse, which would tear the old attempt down with nothing to take its place. The pods the retired attempt leaves behind are the fresh attempt's to clear — it takes a still-routed one out of rotation first and deletes it on a later pass, so a gang is never mixed-revision and no pod is dropped while it is still carrying traffic
     invariants: [one.operation.per.instance]
     placement: perm
     coverage:
@@ -276,7 +276,7 @@ cells:
   - state: Create/CreatePods
     event: spec.pauseTrue
     outcome: ignore
-    note: pause blocks new operations and new steps, never a step already under way, so a half-built set is completed at its pinned revision and promoted; holding a complete set unpromoted would leave the Instance with nothing serving, which is exactly what a pause may not do. The hold applies to the next operation
+    note: pause blocks new operations and new steps, never a step already under way, so a half-built set is completed at its pinned revision and promoted; holding a complete set unpromoted would leave the Instance with nothing serving, which is exactly what a pause may not do. The hold applies to the next operation, and an attempt the pass would retire rather than finish is that next operation — a first materialization committed to a revision the Component no longer converges to is left exactly where it is and retired on the unpause, since replacing it is a new attempt. A Create attempt never carries the Paused token — what the pause holds is the operation after it, not this one
     placement: unit
     coverage: {perm: [], unit: [TestPlan_Paused_RepairRunsFleetChangesDoNot, TestPlan_Create_AlwaysPlannedUnlessPaused], kind: []}
     status: decided
@@ -292,7 +292,7 @@ cells:
   - state: Create/CreatePods
     event: spec.unpause
     outcome: ignore
-    note: the same attempt resumes — the operation and its pinned revision were never cleared — and a deadline parked by a hold re-arms with a full window measured from the unpause rather than from the original start, so the hold does not eat the attempt's budget
+    note: a committed attempt the pause let finish is already done; one the pause left alone because the pass would retire it is retired on the first unpaused pass, and an index with no row at all is materialized then. A resuming attempt keeps the operation and the pinned revision it was never stripped of, and a deadline parked by a hold re-arms with a full window measured from the unpause rather than from the original start, so the hold does not eat the attempt's budget
     placement: perm
     coverage: {perm: [], unit: [TestReconcileGatedDeadlines_RestartsOnUngate], kind: []}
     status: decided
@@ -339,7 +339,7 @@ cells:
     outcome: escalate
     to: Failed
     guard: the deadline elapsed, the operation carries no external waiting token and no pod of the attempt is held by an admission scheduling gate, and the pod set is not fully serving
-    note: the broad backstop for an attempt that never converges; a Create attempt is always disposable, so the disposition classifies it — RetryBlock against the pinned revision for a workload-caused pod, a relocation directive for a single-node ambiguous failure, terminal otherwise — and clears the operation so the next pass can start fresh. An attempt the disposition leaves un-disposed still records the blamed pod's workload-caused waiting reason on LastFailure when one exists, so the cause survives the teardown that deletes the pod. Where no container named a failure but a pod ran every container without ever reporting ContainersReady, the evidence names that pod, its first unready container and the readiness condition's own message under reason ContainersNotReady; the branch is unchanged by it, since readiness limbo is ambiguous between the revision and the node and so charges no ladder. Only an attempt with neither kind of evidence falls back to the bare DeadlineExceeded diagnostic. An op pass that errors elsewhere in the Component does not suppress this stamp - the end-of-pass escalation runs after every eligible pass and re-derives its evidence per Instance from the snapshot, so a rejected or shed write on another row cannot hold this one past its timeout
+    note: the broad backstop for an attempt that never converges; a Create attempt is always disposable, so the disposition classifies it — RetryBlock against the pinned revision for a workload-caused pod, a relocation directive for a single-node ambiguous failure, terminal otherwise — and clears the operation so the next pass can start fresh. An attempt the disposition leaves un-disposed still records the blamed pod's workload-caused waiting reason on LastFailure when one exists, so the cause survives the teardown that deletes the pod. Where no container named a failure but a pod ran every container without ever reporting ContainersReady, the evidence names that pod, its first unready container and the readiness condition's own message under reason ContainersNotReady; the branch is unchanged by it, since readiness limbo is ambiguous between the revision and the node and so charges no ladder. The other readiness limbo is named the same way — a pod whose containers all run and report ContainersReady but whose Ready condition never follows, because a readiness gate it declares stays unsatisfied, is recorded under reason ReadinessGateNotSatisfied with the unsatisfied gates and the Ready condition's own message. It is equally evidence only — the gate can be one nobody owns, one a second writer holds, or the serving gate this pass has not written — so it selects no branch and relocation keeps first try. Only an attempt with none of these kinds of evidence falls back to the bare DeadlineExceeded diagnostic. An op pass that errors elsewhere in the Component does not suppress this stamp - the end-of-pass escalation runs after every eligible pass and re-derives its evidence per Instance from the snapshot, so a rejected or shed write on another row cannot hold this one past its timeout
     invariants: [one.operation.per.instance]
     placement: perm
     coverage: {perm: [], unit: [TestEscalation_DeadlineElapsedBelowDesiredServing_StillEscalates, TestExpireOperations_GangCreateDisposed, TestEscalation_DeadlineWithRunningNotReadyPod_NamesTheProbe, TestEscalation_DeadlineWithCrashLoopPod_KeepsAmbiguousBlame, TestExecuteErroredSiblingKeepsRelocationFirstTry], kind: []}
@@ -432,7 +432,7 @@ cells:
     event: pod.containersNotReady
     variants: [source]
     outcome: defer
-    note: the promote needs every pod ContainersReady, so a regression only re-opens the wait inside the same attempt; inferencereplica/watches.go enqueues on the flip, ops/create.go re-lists and finds the set incomplete, and the operation deadline stays the bound
+    note: losing ContainersReady drops the pod below the first guard of the one promote bar every path shares, so a regression only re-opens the wait inside the same attempt; inferencereplica/watches.go enqueues on the flip, ops/create.go re-lists and finds the set incomplete, and the operation deadline stays the bound
     placement: kind
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -444,7 +444,7 @@ cells:
     event: pod.terminating
     variants: [source]
     outcome: defer
-    note: ops/create.go lists the Instance's pods without filtering deletionTimestamp, so a terminating pod still occupies its name slot and nothing is re-created until it is gone, and query.AllPodsRuntimeReady ignores deletionTimestamp too, so a terminating-but-ContainersReady pod can complete the promote
+    note: ops/create.go lists the Instance's pods without filtering deletionTimestamp, so a terminating pod still occupies its name slot and nothing is re-created until it is gone, and the shared promote predicate ignores deletionTimestamp too, so a terminating pod that is still PodReady and past its window can complete the promote
     placement: kind
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -550,7 +550,7 @@ cells:
     event: endpoint.rotationOut
     variants: [source]
     outcome: ignore
-    note: rotation out is equally unread by the Create pass; a pod that leaves the routed Service while the Instance is forming changes nothing because the promote keys on ContainersReady
+    note: rotation out is equally unread by the Create pass; a pod that leaves the routed Service while the Instance is forming changes nothing because the promote keys on the pod's own PodReady condition and its minReadySeconds window, not on its endpoint
     placement: kind
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -586,7 +586,7 @@ cells:
     event: spec.policyTuning
     variants: [instanceReadyTimeout]
     outcome: ignore
-    note: ops/create.go stamps Operation.Deadline once at operation entry and never re-stamps it, so a retuned timeout leaves the in-flight clock alone; it first applies to the next operation, to the gate-exit re-arm in deadline.go, and to the PodGroup ScheduleTimeoutSeconds the next ensure clamps
+    note: ops/create.go stamps Operation.Deadline once at operation entry and never re-stamps it, so a retuned timeout leaves the in-flight clock alone; it first applies to the next operation, to the gate-exit re-arm in deadline.go, and to the PodGroup ScheduleTimeoutSeconds the next ensure derives from it — bounded by lifecycle.gangScheduleTimeout when the operator configured one, and passed through unbounded when none is set
     placement: unit
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -624,7 +624,7 @@ cells:
   - state: Create/CreatePods
     event: config.changed
     outcome: ignore
-    note: lifecycle config is resolved per pass from the short-TTL cache in inferencereplica/reconciler.go and consulted only at the next decision point, so no knob rewrites a committed attempt; a shortened stuckPodGrace lets the very next pass escalate a pod that was already wedged, while teardownDeadline, forceDelete, scaleDownInterval, updateRetry and autoMigrateBudget matter only on paths a Creating row reaches later
+    note: lifecycle config is resolved per pass from the short-TTL cache in inferencereplica/reconciler.go and consulted only at the next decision point, so no knob rewrites a committed attempt; a shortened stuckPodGrace lets the very next pass escalate a pod that was already wedged, a new requeue cadence paces the very next wake-up of an attempt still coming up, and a new gangScheduleTimeout is applied by the next PodGroup ensure. teardownDeadline, forceDelete, scaleDownInterval, updateRetry, autoMigrateBudget, audit and retryBlockHistoryLimit matter only on paths a Creating row reaches later
     placement: unit
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -736,7 +736,7 @@ cells:
     event: pod.runningNotReady
     variants: [source]
     outcome: defer
-    note: a readiness wait is evidence, never a decision input - the promote needs every pod ContainersReady and simply keeps returning, so the attempt's operation deadline is the only exit. What changes is what that exit records - the deadline disposition names the limbo pod, its first unready container and the readiness condition's message under reason ContainersNotReady instead of a bare DeadlineExceeded. The blame is unaffected - readiness limbo is ambiguous between the revision and the node, so it is excluded from the workload-caused set and the relocation branch still runs first where its conditions hold. A pod set with any container parked in a waiting state suppresses the classification outright, because the kubelet already named that failure (pkg/controller/v1beta1/workload/ops/create.go, pkg/controller/v1beta1/workload/deadline.go)
+    note: a readiness wait is evidence, never a decision input - the promote needs every pod PodReady with its minReadySeconds window elapsed and simply keeps returning, so the attempt's operation deadline is the only exit. What changes is what that exit records - the deadline disposition names the limbo pod, its first unready container and the readiness condition's message under reason ContainersNotReady instead of a bare DeadlineExceeded, and names the unsatisfied readiness gates under reason ReadinessGateNotSatisfied for the other limbo, where the containers are ready and only the gate keeps the pod out of its Service. The blame is unaffected - readiness limbo is ambiguous between the revision and the node, so it is excluded from the workload-caused set and the relocation branch still runs first where its conditions hold. A pod set with any container parked in a waiting state suppresses the classification outright, because the kubelet already named that failure (pkg/controller/v1beta1/workload/ops/create.go, pkg/controller/v1beta1/workload/deadline.go)
     placement: kind
     coverage: {perm: [], unit: [TestPodRunningNotReady, TestEscalation_DeadlineWithRunningNotReadyPod_NamesTheProbe, TestEscalation_RunningNotReadyBeforeDeadline_Untouched], kind: []}
     status: current

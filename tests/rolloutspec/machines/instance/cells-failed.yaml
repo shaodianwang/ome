@@ -172,7 +172,7 @@ cells:
     event: pod.waiting
     variants: [ImagePullBackOff, ErrImagePull, InvalidImageName, CreateContainerConfigError, CrashLoopBackOff, RunContainerError, DeadlineExceeded]
     outcome: ignore
-    note: a Failed row takes no new edge on fresh pod evidence; the single effect is an evidence refresh, one LastFailure overwrite when the recorded reason is the generic deadline and the pod now names a concrete cause. No second event, no change to the RetryBlock, and the phase is untouched
+    note: a Failed row takes no new edge on fresh pod evidence; the single effect is an evidence refresh, one LastFailure overwrite when the recorded reason is the generic deadline and the pod now names a concrete cause. The recorded time survives the overwrite - what changes is the cause, not when the row failed - and the refresh is edge-triggered by that generic reason, so a concrete cause already on the record is the first named one and is never replaced. No second event, no change to the RetryBlock, and the phase and operation are untouched
     invariants: [failed.is.sticky]
     placement: perm
     coverage:
@@ -279,7 +279,7 @@ cells:
   - state: Failed
     event: spec.strategy
     outcome: defer
-    note: a Failed row is deliberately not held on the surge machine, so editing the strategy is a usable rescue lever; the new mode is resolved by the next admitted attempt, which still waits for a due RetryBlock or a corrective revision
+    note: a Failed row is deliberately not held on the surge machine, so editing the strategy is a usable rescue lever — the strategy pinned on the preserved operation does not bind a row that holds no attempt, so the next admitted attempt reads the edited spec - it still waits for a due RetryBlock or a corrective revision
     placement: perm
     coverage:
       perm: []
@@ -475,7 +475,7 @@ cells:
   - state: Failed
     event: timer.minReady
     outcome: ignore
-    note: the availability window is read by the surge and recreate promotions; a Failed row has no promotion waiting on it
+    note: the availability window is the last guard of the one promote bar every path shares; a Failed row has no promotion waiting on it
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -915,3 +915,27 @@ cells:
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
     status: current
+  - state: Failed
+    event: config.changed
+    variants: [retryBlockHistoryLimit]
+    outcome: ignore
+    note: the cap bounds how many RetryBlocks for SUPERSEDED targets survive the end-of-pass prune, so a tightened value drops older history while the block this row is waiting on, which is for the current target, is never a prune candidate; with none configured nothing is pruned and the list grows with the Component's revision history
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: decided
+  - state: Failed
+    event: config.changed
+    variants: [requeue]
+    outcome: ignore
+    note: the cadence paces how soon a row with work left wakes again and is superseded by any explicit wait the pass holds, which for a Failed row is the RetryBlock's own due time; with none configured the pass rides the controller's rate-limited backoff. Neither re-dates the block nor releases it
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: decided
+  - state: Failed
+    event: config.changed
+    variants: [gangScheduleTimeout, audit]
+    outcome: ignore
+    note: neither has a reader on a row holding no attempt - the gang schedule clamp is consulted when an attempt builds a PodGroup, and the migration capacity caps bound new requests, which the escalation pass never raises for a Failed row
+    placement: unit
+    coverage: {perm: [], unit: [], kind: []}
+    status: decided

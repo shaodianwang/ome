@@ -58,7 +58,7 @@ events:
   - {id: spec.partition, family: spec, description: rollingUpdate.partition changes}
   - {id: spec.rollbackTarget, family: spec, variants: [set, clear], description: the rollout target is pinned to an older stored ControllerRevision or released again}
   - {id: spec.policyTuning, family: spec, variants: [restartPolicy, migrationPolicy, instanceReadyTimeout, minReadySeconds, markNotReady], description: a lifecycle knob outside the pod template changes}
-  - {id: config.changed, family: config, variants: [updateRetry, stuckPodGrace, forceDelete, teardownDeadline, scaleDownInterval, autoMigrateBudget], description: the named operator configuration value changes while the Instance has work in flight}
+  - {id: config.changed, family: config, variants: [updateRetry, stuckPodGrace, forceDelete, teardownDeadline, scaleDownInterval, autoMigrateBudget, gangScheduleTimeout, audit, requeue, retryBlockHistoryLimit], description: the named operator configuration value changes while the Instance has work in flight}
   - {id: gate.allow, family: coordination, description: the rollout gate lets this Instance start updating its pods}
   - {id: gate.deny, family: coordination, variants: [Plan, Pairing, Ratio, Sequential, Budget, RetryBlock, Held], description: the rollout gate holds this Instance back from starting an update}
   - {id: timer.operationDeadline, family: timer, description: "the deadline for the Instance's in-flight operation elapses"}

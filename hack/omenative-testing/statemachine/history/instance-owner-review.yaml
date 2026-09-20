@@ -241,3 +241,25 @@ history:
   - {state: Update/SurgeDrain, event: timer.operationDeadline, variants: [], windows: [before], transition: "", decision: owner-review-2026-09-17}
   - {state: Update/SurgeDrain, event: timer.minReady, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
   - {state: Update/SurgeDrain, event: api.conflict, variants: [], windows: [], transition: "", decision: owner-review-2026-09-17}
+
+  # --- config.changed: the rollout tunables. Each key is operator
+  # configuration with no in-code default, so the cells state both what a
+  # change does and what an absent key means.
+  - {state: Failed, event: config.changed, variants: [retryBlockHistoryLimit], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Failed, event: config.changed, variants: [requeue], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Failed, event: config.changed, variants: [gangScheduleTimeout, audit], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Delete/Drain, event: config.changed, variants: [requeue], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Delete/Drain, event: config.changed, variants: [gangScheduleTimeout, audit, retryBlockHistoryLimit], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Restart/Drain, event: config.changed, variants: [gangScheduleTimeout], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Restart/Drain, event: config.changed, variants: [requeue], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Restart/Drain, event: config.changed, variants: [audit, retryBlockHistoryLimit], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/InPlace, event: config.changed, variants: [requeue], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/InPlace, event: config.changed, variants: [gangScheduleTimeout, retryBlockHistoryLimit], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/InPlace, event: config.changed, variants: [audit], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Drain, event: config.changed, variants: [requeue], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Drain, event: config.changed, variants: [gangScheduleTimeout], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Drain, event: config.changed, variants: [audit, retryBlockHistoryLimit], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Surge, event: config.changed, variants: [requeue], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/Surge, event: config.changed, variants: [gangScheduleTimeout, audit, retryBlockHistoryLimit], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/SurgeDrain, event: config.changed, variants: [requeue], windows: [], transition: "", decision: owner-review-2026-09-17}
+  - {state: Update/SurgeDrain, event: config.changed, variants: [gangScheduleTimeout, audit, retryBlockHistoryLimit], windows: [], transition: "", decision: owner-review-2026-09-17}

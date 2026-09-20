@@ -180,10 +180,14 @@ cells:
       does so through the record rather than as a direct stamp on the source - the
       record is closed Failed, the surge index is torn down, and the source is
       restored to Ready on its untouched RunningRevision with its drain hold
-      released. A migration that is actually completing still wins - the completion
-      tail is read first - and a source already drained and deleted has nothing to
-      restore to rotation, so that shape is left to the record Deadline, which stays
-      the backstop for everything this evidence does not cover
+      released. A source that observation finds not runtime-ready is restored with
+      its own condition named on LastFailure under reason
+      MigrationClosedSourceUnhealthy, which describes the source rather than the
+      wedge; the wedge is what the record and the Warning carry. The check runs
+      after the completion tail, so a migration that is actually completing still
+      wins, and a source already drained and deleted has nothing to restore, so that
+      shape is left to the record Deadline, which stays the backstop for everything
+      this evidence does not cover
     invariants: [record.is.timeout.authority]
     placement: perm
     coverage: {perm: [], unit: [TestMigrate_SurgeWedgedInImagePull_FailsThroughRecord, TestMigrate_SurgeCrashLoop_ClosesOnlyPastTheGrace, TestMigrate_SurgeWedgedWhileDraining_RestoresRotation, TestMigrate_SurgeWedgedAfterSourceGone_LeavesTheDeadline], kind: []}
@@ -457,7 +461,8 @@ cells:
     event: spec.pauseTrue
     outcome: defer
     note: a paused plan selects neither the expiry nor the drive pass, so the pair
-      freezes with its pin held and the Instance operation deadline parked
+      freezes with its pin held; a Migrate attempt is one a pause holds, so the
+      operation carries Operation.Waiting=Paused and its deadline is parked with it
     placement: unit
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -545,7 +550,11 @@ cells:
       takes effect on the next pass without touching the record — forceDelete arms or
       disarms both the drive's stuck-Terminating escalation and expiry's wedge
       carve-out, and autoMigrateBudget bounds only new auto-migration directives, which
-      the escalation pass never raises for a Migrate-pinned row
+      the escalation pass never raises for a Migrate-pinned row. The record already in
+      flight is judged against no cap, so a new audit block bounds only the next
+      request and an absent one holds that request Accepted with a
+      MigrationPolicyUnconfigured warning and condition rather than failing it; the
+      requeue cadence only paces how often this pair is re-driven
     placement: unit
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -929,10 +938,12 @@ cells:
     note: terminal kubelet evidence fails the migration early through the record
       rather than stamping this row Failed - the record is closed Failed and the pin
       cleared, so the unpinned index leaves the plan and the scale-down pipeline
-      tears it down while the paired source is restored by the same record write. A
-      migration that is actually completing still wins, and once the paired source is
-      drained and deleted there is nothing to restore, so that shape is left to the
-      record Deadline, which stays the backstop
+      tears it down while the paired source is restored by the same record write,
+      carrying reason MigrationClosedSourceUnhealthy when observation finds it not
+      runtime-ready. A migration that is actually completing still wins, because the
+      completion tail is read first, and once the paired source is drained and
+      deleted there is nothing to restore, so that shape is left to the record
+      Deadline, which stays the backstop
     invariants: [record.is.timeout.authority]
     placement: perm
     coverage: {perm: [], unit: [TestMigrate_SurgeWedgedInImagePull_FailsThroughRecord, TestMigrate_GangSurgeMemberWedged_FailsThroughRecord, TestMigrate_SurgeWedgedWhileDraining_RestoresRotation, TestMigrate_SurgeWedgedAfterSourceGone_LeavesTheDeadline], kind: []}
@@ -1199,7 +1210,8 @@ cells:
     event: spec.pauseTrue
     outcome: defer
     note: a paused plan selects neither the expiry nor the drive pass, so this row
-      freezes half-created with its pin held and its operation deadline parked
+      freezes half-created with its pin held; a Migrate attempt is one a pause holds,
+      so the operation carries Operation.Waiting=Paused and its deadline is parked
     placement: unit
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -1287,7 +1299,10 @@ cells:
       takes effect on the next pass without touching the record — forceDelete governs
       the source-side escalation the promotion waits on, and autoMigrateBudget bounds
       only new auto-migration directives, which the escalation pass never raises for a
-      Migrate-pinned row
+      Migrate-pinned row. The record already in flight is judged against no cap, so a
+      new audit block bounds only the next request and an absent one holds that
+      request Accepted with a MigrationPolicyUnconfigured warning and condition rather
+      than failing it; the requeue cadence only paces how often this pair is re-driven
     placement: unit
     coverage: {perm: [], unit: [], kind: []}
     status: current
