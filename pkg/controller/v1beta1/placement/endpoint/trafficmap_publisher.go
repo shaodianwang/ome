@@ -30,6 +30,7 @@ import (
 	ctrlreconcile "sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	placementcontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/placement"
 )
 
 const (
@@ -173,9 +174,12 @@ func (r *TrafficMapPublisherReconciler) Reconcile(ctx context.Context, req ctrl.
 
 	owner, err := r.owner(ctx, trafficMap)
 	if err != nil {
+		if errors.Is(err, errTrafficMapPublisherOwnerRead) {
+			return r.retryFailure(ctx, trafficMap, trafficMapPublisherReasonInvalidOwner, err)
+		}
 		return r.reject(ctx, trafficMap, trafficMapPublisherReasonInvalidOwner, err)
 	}
-	if !owner.DeletionTimestamp.IsZero() || routingOptedOut(owner) {
+	if !publisherOwnerActive(owner) {
 		return r.successResult(), nil
 	}
 	if r.Publisher.Stateful() && (trafficMap.Status.Publisher == nil ||
@@ -221,9 +225,15 @@ func (r *TrafficMapPublisherReconciler) Reconcile(ctx context.Context, req ctrl.
 				fmt.Errorf("stateless TrafficMap publisher %q planned %d target claims",
 					r.Publisher.Name(), len(desiredClaims)))
 		}
-		if err := r.preflightStateless(ctx, trafficMap); err != nil {
+		if err := r.preflightStateless(ctx, trafficMap, owner); err != nil {
 			if errors.Is(err, errTrafficMapPublisherPlanStale) {
 				return ctrl.Result{Requeue: true}, nil
+			}
+			if errors.Is(err, errTrafficMapPublisherOwnerRead) {
+				return r.retryFailure(ctx, trafficMap, trafficMapPublisherReasonInvalidOwner, err)
+			}
+			if errors.Is(err, errTrafficMapPublisherSourceChanged) {
+				return r.reject(ctx, trafficMap, trafficMapPublisherReasonInvalidOwner, err)
 			}
 			if errors.Is(err, errTrafficMapPublisherChanged) {
 				return r.reject(ctx, trafficMap, trafficMapPublisherReasonPublisherChanged, err)
@@ -256,10 +266,16 @@ func (r *TrafficMapPublisherReconciler) Reconcile(ctx context.Context, req ctrl.
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	previousClaims, err := r.preclaim(ctx, trafficMap, desiredClaims)
+	previousClaims, err := r.preclaim(ctx, trafficMap, owner, desiredClaims)
 	if err != nil {
 		if errors.Is(err, errTrafficMapPublisherPlanStale) {
 			return ctrl.Result{Requeue: true}, nil
+		}
+		if errors.Is(err, errTrafficMapPublisherOwnerRead) {
+			return r.retryFailure(ctx, trafficMap, trafficMapPublisherReasonInvalidOwner, err)
+		}
+		if errors.Is(err, errTrafficMapPublisherSourceChanged) {
+			return r.reject(ctx, trafficMap, trafficMapPublisherReasonInvalidOwner, err)
 		}
 		if errors.Is(err, errTrafficMapPublisherChanged) {
 			return r.reject(ctx, trafficMap, trafficMapPublisherReasonPublisherChanged, err)
@@ -304,36 +320,88 @@ func (r *TrafficMapPublisherReconciler) owner(
 	ctx context.Context,
 	trafficMap *v1beta1.TrafficMap,
 ) (*v1beta1.InferenceService, error) {
+	key := client.ObjectKeyFromObject(trafficMap)
+	live := &v1beta1.TrafficMap{}
+	if err := r.APIReader.Get(ctx, key, live); err != nil {
+		return nil, fmt.Errorf("%w: read TrafficMap %s provenance: %w",
+			errTrafficMapPublisherOwnerRead, key, err)
+	}
+	if live.UID != trafficMap.UID {
+		return nil, fmt.Errorf("%w: TrafficMap %s was replaced while validating source provenance",
+			errTrafficMapPublisherOwnerInvalid, key)
+	}
+	return r.readTrafficMapOwner(ctx, live)
+}
+
+func (r *TrafficMapPublisherReconciler) readTrafficMapOwner(
+	ctx context.Context,
+	trafficMap *v1beta1.TrafficMap,
+) (*v1beta1.InferenceService, error) {
 	ref := metav1.GetControllerOf(trafficMap)
 	if ref == nil || ref.APIVersion != v1beta1.SchemeGroupVersion.String() ||
 		ref.Kind != "InferenceService" || ref.Name == "" || ref.UID == "" {
-		return nil, fmt.Errorf("TrafficMap %s has no valid InferenceService controller reference",
-			client.ObjectKeyFromObject(trafficMap))
+		return nil, fmt.Errorf("%w: TrafficMap %s has no valid InferenceService controller reference",
+			errTrafficMapPublisherOwnerInvalid, client.ObjectKeyFromObject(trafficMap))
 	}
 	if trafficMap.Name != ref.Name {
-		return nil, fmt.Errorf("TrafficMap name %q does not match owner name %q",
-			trafficMap.Name, ref.Name)
+		return nil, fmt.Errorf("%w: TrafficMap name %q does not match owner name %q",
+			errTrafficMapPublisherOwnerInvalid, trafficMap.Name, ref.Name)
 	}
 	if trafficMap.Spec.Service != ref.Name {
-		return nil, fmt.Errorf("TrafficMap service %q does not match owner name %q",
-			trafficMap.Spec.Service, ref.Name)
+		return nil, fmt.Errorf("%w: TrafficMap service %q does not match owner name %q",
+			errTrafficMapPublisherOwnerInvalid, trafficMap.Spec.Service, ref.Name)
 	}
 	owner := &v1beta1.InferenceService{}
-	key := types.NamespacedName{Namespace: trafficMap.Namespace, Name: ref.Name}
-	if err := r.APIReader.Get(ctx, key, owner); err != nil {
-		return nil, fmt.Errorf("read TrafficMap owner %s: %w", key, err)
+	ownerKey := types.NamespacedName{Namespace: trafficMap.Namespace, Name: ref.Name}
+	if err := r.APIReader.Get(ctx, ownerKey, owner); err != nil {
+		return nil, fmt.Errorf("%w: read TrafficMap owner %s: %w",
+			errTrafficMapPublisherOwnerRead, ownerKey, err)
 	}
 	if owner.UID != ref.UID {
-		return nil, fmt.Errorf("TrafficMap %s owner UID %q does not match InferenceService UID %q",
-			client.ObjectKeyFromObject(trafficMap), ref.UID, owner.UID)
+		return nil, fmt.Errorf("%w: TrafficMap %s owner UID %q does not match InferenceService UID %q",
+			errTrafficMapPublisherOwnerInvalid, client.ObjectKeyFromObject(trafficMap), ref.UID, owner.UID)
+	}
+	if err := validatePublisherSourceUID(trafficMap, owner.UID); err != nil {
+		return nil, err
 	}
 	if trafficMap.Spec.ObservedISVCGeneration != owner.Generation {
 		return nil, fmt.Errorf(
-			"TrafficMap observed InferenceService generation %d does not match owner generation %d",
-			trafficMap.Spec.ObservedISVCGeneration, owner.Generation,
+			"%w: TrafficMap observed InferenceService generation %d does not match owner generation %d",
+			errTrafficMapPublisherOwnerInvalid, trafficMap.Spec.ObservedISVCGeneration, owner.Generation,
 		)
 	}
 	return owner, nil
+}
+
+func publisherOwnerActive(owner *v1beta1.InferenceService) bool {
+	return owner != nil && owner.DeletionTimestamp.IsZero() &&
+		placementcontroller.IsPlacementEligible(owner) && !routingOptedOut(owner)
+}
+
+func (r *TrafficMapPublisherReconciler) validateLivePublisherOwner(
+	ctx context.Context,
+	trafficMap *v1beta1.TrafficMap,
+	expected *v1beta1.InferenceService,
+) error {
+	owner, err := r.readTrafficMapOwner(ctx, trafficMap)
+	if err != nil {
+		if errors.Is(err, errTrafficMapPublisherOwnerRead) {
+			return err
+		}
+		return fmt.Errorf("%w: %v", errTrafficMapPublisherSourceChanged, err)
+	}
+	if owner.UID != expected.UID || owner.Generation != expected.Generation {
+		return fmt.Errorf(
+			"%w: InferenceService %s identity changed from UID %q generation %d to UID %q generation %d",
+			errTrafficMapPublisherSourceChanged, client.ObjectKeyFromObject(owner),
+			expected.UID, expected.Generation, owner.UID, owner.Generation,
+		)
+	}
+	if !publisherOwnerActive(owner) {
+		return fmt.Errorf("%w: InferenceService %s is deleting, opted out, or not placement eligible",
+			errTrafficMapPublisherSourceChanged, client.ObjectKeyFromObject(owner))
+	}
+	return nil
 }
 
 func (r *TrafficMapPublisherReconciler) ensureFinalizer(
@@ -373,6 +441,7 @@ func (r *TrafficMapPublisherReconciler) ensureFinalizer(
 func (r *TrafficMapPublisherReconciler) preclaim(
 	ctx context.Context,
 	trafficMap *v1beta1.TrafficMap,
+	owner *v1beta1.InferenceService,
 	desiredClaims []string,
 ) ([]string, error) {
 	key := client.ObjectKeyFromObject(trafficMap)
@@ -380,13 +449,18 @@ func (r *TrafficMapPublisherReconciler) preclaim(
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		live := &v1beta1.TrafficMap{}
 		if err := r.APIReader.Get(ctx, key, live); err != nil {
-			return err
+			return fmt.Errorf("%w: read TrafficMap %s before claiming targets: %w",
+				errTrafficMapPublisherOwnerRead, key, err)
 		}
 		if live.UID != trafficMap.UID {
-			return fmt.Errorf("TrafficMap %s was replaced while claiming publisher targets", key)
+			return fmt.Errorf("%w: TrafficMap %s was replaced while claiming publisher targets",
+				errTrafficMapPublisherSourceChanged, key)
 		}
 		if live.Generation != trafficMap.Generation || !live.DeletionTimestamp.IsZero() {
 			return errTrafficMapPublisherPlanStale
+		}
+		if err := r.validateLivePublisherOwner(ctx, live, owner); err != nil {
+			return err
 		}
 		if !controllerutil.ContainsFinalizer(live, TrafficMapPublisherFinalizer) {
 			return errTrafficMapPublisherPlanStale
@@ -424,17 +498,23 @@ func (r *TrafficMapPublisherReconciler) preclaim(
 func (r *TrafficMapPublisherReconciler) preflightStateless(
 	ctx context.Context,
 	trafficMap *v1beta1.TrafficMap,
+	owner *v1beta1.InferenceService,
 ) error {
 	key := client.ObjectKeyFromObject(trafficMap)
 	live := &v1beta1.TrafficMap{}
 	if err := r.APIReader.Get(ctx, key, live); err != nil {
-		return err
+		return fmt.Errorf("%w: read TrafficMap %s before stateless apply: %w",
+			errTrafficMapPublisherOwnerRead, key, err)
 	}
 	if live.UID != trafficMap.UID {
-		return fmt.Errorf("TrafficMap %s was replaced while validating publisher state", key)
+		return fmt.Errorf("%w: TrafficMap %s was replaced while validating publisher state",
+			errTrafficMapPublisherSourceChanged, key)
 	}
 	if live.Generation != trafficMap.Generation || !live.DeletionTimestamp.IsZero() {
 		return errTrafficMapPublisherPlanStale
+	}
+	if err := r.validateLivePublisherOwner(ctx, live, owner); err != nil {
+		return err
 	}
 	existingClaims, _, err := publisherJournalForName(live.Status.Publisher, r.Publisher.Name())
 	if err != nil {
@@ -954,7 +1034,23 @@ var (
 	errTrafficMapPublisherPlanStale      = errors.New("TrafficMap changed while claiming publisher targets")
 	errTrafficMapPublisherJournalChanged = errors.New("TrafficMap publisher journal changed during reconciliation")
 	errTrafficMapPublisherChanged        = errors.New("TrafficMap publisher changed while claims remain")
+	errTrafficMapPublisherSourceChanged  = errors.New("TrafficMap source provenance changed during reconciliation")
+	errTrafficMapPublisherOwnerInvalid   = errors.New("TrafficMap owner binding is invalid")
+	errTrafficMapPublisherOwnerRead      = errors.New("TrafficMap owner state read failed")
 )
+
+func validatePublisherSourceUID(trafficMap *v1beta1.TrafficMap, ownerUID types.UID) error {
+	if trafficMap.Status.SourceUID == "" {
+		return fmt.Errorf("%w: TrafficMap %s source UID is not established",
+			errTrafficMapPublisherSourceChanged, client.ObjectKeyFromObject(trafficMap))
+	}
+	if trafficMap.Status.SourceUID != ownerUID {
+		return fmt.Errorf("%w: TrafficMap %s source UID %q does not match InferenceService UID %q",
+			errTrafficMapPublisherSourceChanged, client.ObjectKeyFromObject(trafficMap),
+			trafficMap.Status.SourceUID, ownerUID)
+	}
+	return nil
+}
 
 type terminalPublisherError struct {
 	err error

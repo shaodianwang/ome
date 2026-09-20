@@ -47,7 +47,7 @@ const trafficMapRoutableStatusFieldOwner = "ome-trafficmap-routing"
 // routable: an empty table plus a Routable=False reason. When routing becomes
 // ineligible, a TrafficMap-backed publisher may hold the map through its
 // finalizer until external state is withdrawn. The routing controller writes
-// spec and Routable; the publisher owns the rest of status.
+// spec, sourceUID, and Routable; the publisher owns its disjoint status fields.
 type Reconciler struct {
 	client.Client
 	// APIReader confirms cache misses before state is forgotten. A transient
@@ -224,9 +224,12 @@ func (r *Reconciler) ownedTrafficMap(
 	ctx context.Context,
 	isvc *v1beta1.InferenceService,
 ) (*v1beta1.TrafficMap, error) {
+	if r.APIReader == nil {
+		return nil, fmt.Errorf("read TrafficMap provenance: API reader is not configured")
+	}
 	tm := &v1beta1.TrafficMap{}
 	key := types.NamespacedName{Name: isvc.Name, Namespace: isvc.Namespace}
-	if err := r.Get(ctx, key, tm); err != nil {
+	if err := r.APIReader.Get(ctx, key, tm); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, nil
 		}
@@ -235,12 +238,15 @@ func (r *Reconciler) ownedTrafficMap(
 	if !controlledByInferenceService(tm, isvc) {
 		return nil, fmt.Errorf("TrafficMap %s exists but is not controlled by InferenceService UID %q", key, isvc.UID)
 	}
+	if err := validateTrafficMapSourceUID(tm, isvc); err != nil {
+		return nil, err
+	}
 	return tm, nil
 }
 
 // apply creates or updates the ISVC's TrafficMap to carry the desired spec,
-// owner-ref'd to the ISVC. It touches only spec; the status subresource (owned
-// by the publisher) is left untouched.
+// owner-ref'd to the ISVC. It touches only spec; the independently managed
+// status subresource is left untouched.
 //
 // It retries on conflict rather than surfacing the rejection: owning the
 // TrafficMap re-enqueues this reconciler on its own spec writes, and the
@@ -257,6 +263,9 @@ func (r *Reconciler) apply(ctx context.Context, isvc *v1beta1.InferenceService, 
 			if (tm.UID != "" || tm.ResourceVersion != "") && !controlledByInferenceService(tm, isvc) {
 				return fmt.Errorf("TrafficMap %s exists but is not controlled by InferenceService UID %q",
 					client.ObjectKeyFromObject(tm), isvc.UID)
+			}
+			if err := validateTrafficMapSourceUID(tm, isvc); err != nil {
+				return err
 			}
 			if err := controllerutil.SetControllerReference(isvc, tm, r.Scheme()); err != nil {
 				return err
@@ -293,6 +302,10 @@ func (r *Reconciler) setRoutable(ctx context.Context, isvc *v1beta1.InferenceSer
 		if !controlledByInferenceService(tm, isvc) {
 			return nil
 		}
+		if err := validateTrafficMapSourceUID(tm, isvc); err != nil {
+			return err
+		}
+		tm.Status.SourceUID = isvc.UID
 		cond := metav1.Condition{
 			Type:               v1beta1.TrafficMapRoutable,
 			Status:             status,
@@ -308,6 +321,9 @@ func (r *Reconciler) setRoutable(ctx context.Context, isvc *v1beta1.InferenceSer
 
 func trafficMapRoutableStatusApply(trafficMap *v1beta1.TrafficMap) runtime.ApplyConfiguration {
 	status := map[string]any{}
+	if trafficMap.Status.SourceUID != "" {
+		status["sourceUID"] = string(trafficMap.Status.SourceUID)
+	}
 	if routable := apimeta.FindStatusCondition(
 		trafficMap.Status.Conditions, v1beta1.TrafficMapRoutable,
 	); routable != nil {
@@ -374,6 +390,9 @@ func (r *Reconciler) reap(ctx context.Context, isvc *v1beta1.InferenceService) e
 	if !controlledByInferenceService(tm, isvc) || !tm.DeletionTimestamp.IsZero() {
 		return nil
 	}
+	if err := validateTrafficMapSourceUID(tm, isvc); err != nil {
+		return err
+	}
 	// Give the inactive publisher a chance to restore its finalizer before the
 	// deletion request can erase a durable cleanup journal.
 	if trafficMapNeedsPublisherFinalizerRepair(tm) {
@@ -402,6 +421,20 @@ func controlledByInferenceService(
 	owner := metav1.GetControllerOf(tm)
 	return owner != nil && owner.APIVersion == v1beta1.SchemeGroupVersion.String() &&
 		owner.Kind == "InferenceService" && owner.Name == isvc.Name && owner.UID == isvc.UID
+}
+
+func validateTrafficMapSourceUID(
+	tm *v1beta1.TrafficMap,
+	isvc *v1beta1.InferenceService,
+) error {
+	if tm == nil || isvc == nil || tm.Status.SourceUID == "" {
+		return nil
+	}
+	if tm.Status.SourceUID != isvc.UID {
+		return fmt.Errorf("TrafficMap %s source UID %q does not match InferenceService UID %q",
+			client.ObjectKeyFromObject(tm), tm.Status.SourceUID, isvc.UID)
+	}
+	return nil
 }
 
 // buildSpec projects an ISVC's placement into the desired TrafficMap spec, plus

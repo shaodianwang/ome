@@ -88,6 +88,7 @@ var _ = ginkgo.Describe("TrafficMap status ownership", func() {
 		gomega.Eventually(func(g gomega.Gomega) {
 			trafficMap := &v1beta1.TrafficMap{}
 			g.Expect(k8sClient.Get(suiteCtx, key, trafficMap)).To(gomega.Succeed())
+			g.Expect(trafficMap.Status.SourceUID).To(gomega.Equal(isvc.UID))
 			routable := apimeta.FindStatusCondition(
 				trafficMap.Status.Conditions, v1beta1.TrafficMapRoutable,
 			)
@@ -115,6 +116,7 @@ var _ = ginkgo.Describe("TrafficMap status ownership", func() {
 		gomega.Eventually(func(g gomega.Gomega) {
 			trafficMap := &v1beta1.TrafficMap{}
 			g.Expect(k8sClient.Get(suiteCtx, key, trafficMap)).To(gomega.Succeed())
+			g.Expect(trafficMap.Status.SourceUID).To(gomega.Equal(isvc.UID))
 			g.Expect(trafficMap.Status.Programmed).To(gomega.BeTrue())
 			g.Expect(trafficMap.Status.GatewayRef).NotTo(gomega.BeNil())
 			g.Expect(trafficMap.Status.GatewayRef.Name).To(gomega.Equal(name))
@@ -139,7 +141,9 @@ var _ = ginkgo.Describe("TrafficMap status ownership", func() {
 			g.Expect(owners).To(gomega.HaveKey("ome-trafficmap-routing"))
 			g.Expect(owners["ome-trafficmap-publisher"]).To(gomega.ContainSubstring("Programmed"))
 			g.Expect(owners["ome-trafficmap-publisher"]).NotTo(gomega.ContainSubstring("Routable"))
+			g.Expect(owners["ome-trafficmap-publisher"]).NotTo(gomega.ContainSubstring("sourceUID"))
 			g.Expect(owners["ome-trafficmap-routing"]).To(gomega.ContainSubstring("Routable"))
+			g.Expect(owners["ome-trafficmap-routing"]).To(gomega.ContainSubstring("sourceUID"))
 			g.Expect(owners["ome-trafficmap-routing"]).NotTo(gomega.ContainSubstring("Programmed"))
 		}).Should(gomega.Succeed())
 
@@ -150,6 +154,7 @@ var _ = ginkgo.Describe("TrafficMap status ownership", func() {
 		gomega.Expect(result).To(gomega.Equal(ctrl.Result{}))
 		gomega.Eventually(func(g gomega.Gomega) {
 			trafficMap := getTrafficMap(g, namespace, name)
+			g.Expect(trafficMap.Status.SourceUID).To(gomega.Equal(isvc.UID))
 			g.Expect(trafficMap.Status.GatewayRef).To(gomega.BeNil())
 			g.Expect(apimeta.FindStatusCondition(
 				trafficMap.Status.Conditions, v1beta1.TrafficMapRoutable,
@@ -165,6 +170,7 @@ var _ = ginkgo.Describe("TrafficMap status ownership", func() {
 		})
 		gomega.Eventually(func(g gomega.Gomega) {
 			trafficMap := getTrafficMap(g, namespace, name)
+			g.Expect(trafficMap.Status.SourceUID).To(gomega.Equal(isvc.UID))
 			routable := apimeta.FindStatusCondition(
 				trafficMap.Status.Conditions, v1beta1.TrafficMapRoutable,
 			)

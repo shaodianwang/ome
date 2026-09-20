@@ -319,7 +319,8 @@ spec:
       healthy: true
       capacity: {allocated: 3, ready: 3, factor: "1.0", source: ControlPlane}
   observedISVCGeneration: 42   # the ISVC generation this table came from
-status:                        # written by the publisher, not the generator
+status:                        # independently written by routing and publisher
+  sourceUID: 4424bd9b-9986-4de0-b17b-b3cdbd920f34
   programmed: true
   gatewayRef: {group: gateway.networking.k8s.io, kind: HTTPRoute, name: llama-3-70b}
   observedTrafficMapGeneration: 5
@@ -329,11 +330,12 @@ status:                        # written by the publisher, not the generator
 Two writers, one object:
 
 - The **routing controller** owns `spec` — recomputes `entries` whenever
-  `status.placement` or the home's quota allocation changes — and patches only
-  the TrafficMap's `Routable` condition.
+  `status.placement` or the home's quota allocation changes — plus
+  `status.sourceUID` and the TrafficMap's `Routable` condition.
 - The **publisher** patches the TrafficMap's `Programmed`, `gatewayRef`, and
   observed-generation fields plus its publisher journal. It does not replace
-  sibling status or the routing controller's `Routable` condition.
+  sibling status, `sourceUID`, or the routing controller's `Routable`
+  condition.
 
 *Anticipated objection — "a machine-written `spec` is unusual; spec is user
 intent."* True, and we considered a status-only shape (Alternatives). The
@@ -518,7 +520,7 @@ is what makes capacity-aware weights and a gateway-neutral contract possible.
     attributable to the policy that produced it without duplicating that policy
     into every entry.
 - `spec.observedISVCGeneration` (int64) for staleness detection.
-- `status.programmed` (bool), `status.gatewayRef`,
+- `status.sourceUID` (the source ISVC UID), `status.programmed` (bool), `status.gatewayRef`,
   `status.observedTrafficMapGeneration` (int64), `status.publisher`, and
   `status.conditions[]`.
 
@@ -526,6 +528,7 @@ The `TrafficMap` carries the state needed to reverse publisher side effects:
 
 ```yaml
 status:
+  sourceUID: 4424bd9b-9986-4de0-b17b-b3cdbd920f34
   publisher:
     publisherName: ExamplePublisher
     claimedTargets: [team-a/model-service]
@@ -555,6 +558,12 @@ conservative claim set makes every possibly touched target discoverable for
 drain and cleanup. Claim identifiers are status-visible and never contain
 credentials or secret material.
 
+The routing controller owns `status.sourceUID` through its isolated status
+field manager. A publisher must observe that value matching the live controller
+owner before planning or mutating new external state. Publisher finalization is
+different: the durable claim journal remains its sole cleanup authority, so
+unpublish does not require the source or its owner reference to remain readable.
+
 ### Ownership & lifecycle
 
 - **One `TrafficMap` per ISVC**, `metadata.name == isvc.name`, namespaced to it.
@@ -566,7 +575,13 @@ credentials or secret material.
   GC then leaves the map terminating, with its status journal intact, until the
   publisher has cleaned every claim and removed the finalizer. The publisher
   reconciles TrafficMaps directly, so cleanup does not require the owner ISVC to
-  remain readable.
+  remain readable. `status.sourceUID` preserves the generated map's identity if
+  orphan propagation removes its owner reference. For an older map with an
+  exact live owner and no source UID, active eligible routing first normalizes
+  its spec and then writes the UID before it may be published. Reaping can rely
+  on the exact owner reference to delete that legacy map while the UID remains
+  empty, without creating a transient publication authorization. A non-empty
+  mismatch is never overwritten or deleted.
 - **Publisher claims are controller-owned.** The publisher records exact
   target claims in `TrafficMap.status.publisher`, which survives until the map's
   finalizer cleanup. A normal, user-editable metadata annotation is **not** an
@@ -641,15 +656,19 @@ service's tier mapping into another.
 
 Before a publisher mutates external state, it must:
 
-1. Reject unknown and global-only per-ISVC option keys.
-2. Render and canonicalize target names. Every publisher that exposes a
+1. Require the routing-owned `status.sourceUID` to match the live, exact
+   controller owner. Missing or mismatched provenance fails closed before plan,
+   claim, drain, or apply. Deletion finalization remains owner-independent and
+   follows the durable claim journal.
+2. Reject unknown and global-only per-ISVC option keys.
+3. Render and canonicalize target names. Every publisher that exposes a
    target-affecting per-ISVC option must enforce an operator-owned target scope
    (for example, an allowed namespace or anchored prefix). A template is not
    permission to name an arbitrary target; missing or malformed scope
    configuration always fails closed before any external request.
-3. Reject duplicate targets within one map and collisions with another ISVC's
+4. Reject duplicate targets within one map and collisions with another ISVC's
    controller-owned claims.
-4. Add the TrafficMap finalizer, preflight `existing claims ∪ desired targets`,
+5. Add the TrafficMap finalizer, preflight `existing claims ∪ desired targets`,
    and atomically persist that complete canonical set before the first external
    mutation. Every mutation and cleanup call must be idempotent so a retry can
    converge from the latest desired map.
@@ -921,9 +940,13 @@ from the then-current main branch rather than as a GitHub stack:
   `(namespace/name, target)` pair; a target authorized for another ISVC, or any
   malformed, injected, or unlisted annotation, causes no external call. A
   publisher-name mismatch with outstanding claims blocks both cleanup and new
-  publication. Concurrent routing and publisher status updates prove the
+  publication. Active eligible routing backfills `status.sourceUID` only after
+  normalizing a map with an exact live controller owner; reaping may instead
+  delete such a legacy map while provenance is missing. Missing or mismatched
+  provenance permits no new publisher effect, and a mismatch also prevents
+  routing deletion. Concurrent routing and publisher status updates prove the
   publisher patch changes only `TrafficMap.status.publisher` and its own
-  `Programmed` fields—no sibling status or condition is lost.
+  `Programmed` fields—no source UID, sibling status, or condition is lost.
 - **Gateway API publisher (envtest).** `spec` → one HTTPRoute with weighted
   backendRefs; entry removed → backendRef dropped and stale ExternalName Service
   deleted; `status.programmed` set; finalizer removes the route on map deletion.

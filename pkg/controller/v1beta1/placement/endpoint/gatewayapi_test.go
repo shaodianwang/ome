@@ -63,6 +63,9 @@ func pubScheme(t *testing.T) *runtime.Scheme {
 func testISVC() *v1beta1.InferenceService {
 	return &v1beta1.InferenceService{
 		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "prod", UID: "uid-1"},
+		Spec: v1beta1.InferenceServiceSpec{Placement: &v1beta1.PlacementSpec{
+			Mode: v1beta1.PlacementModeSingle, Requirements: "accelerator=test",
+		}},
 	}
 }
 

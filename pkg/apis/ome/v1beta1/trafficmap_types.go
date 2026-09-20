@@ -3,6 +3,7 @@ package v1beta1
 import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"knative.dev/pkg/apis"
 )
 
@@ -89,8 +90,8 @@ const (
 // One TrafficMap exists per routed ISVC, named after it and owned by it (so it
 // is garbage-collected with the ISVC), for as long as that ISVC is routed --
 // including while no home is routable, when the table is empty or all-zero and
-// the Routable condition says why. The routing controller owns spec and the
-// Routable condition; the publisher owns the rest of status.
+// the Routable condition says why. The routing controller owns spec, SourceUID,
+// and the Routable condition; the publisher owns the rest of status.
 // +genclient
 // +k8s:openapi-gen=true
 // +kubebuilder:object:root=true
@@ -281,9 +282,16 @@ type TrafficMapCapacity struct {
 // onto a concrete data plane, and whether the map has anything to realize.
 // Two writers share it: the publisher owns Programmed, GatewayRef,
 // ObservedTrafficMapGeneration, Publisher, and the Programmed condition; the
-// routing controller owns the Routable condition. Conditions is keyed on type,
-// so each writer must patch only its own fields and condition.
+// routing controller owns SourceUID and the Routable condition. Conditions is
+// keyed on type, so each writer must patch only its own fields and condition.
 type TrafficMapStatus struct {
+	// SourceUID is the UID of the InferenceService that generated this map. The
+	// routing controller writes it through its own status field manager before a
+	// publisher may create external effects. It remains available if orphan
+	// deletion propagation removes the owner reference.
+	// +optional
+	SourceUID types.UID `json:"sourceUID,omitempty"`
+
 	// Programmed reports whether the active publisher has realized this map onto
 	// its data plane.
 	// +optional

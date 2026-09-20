@@ -34,6 +34,7 @@ func gatewayTrafficMap(owner *v1beta1.InferenceService, entries ...v1beta1.Traff
 			Service: owner.Name,
 			Entries: entries,
 		},
+		Status: v1beta1.TrafficMapStatus{SourceUID: owner.UID},
 	}
 }
 
@@ -390,14 +391,24 @@ func TestGatewayAPITrafficMapLegacyDuplicateRoutesBothReportCollision(t *testing
 	cfg := baseConfig()
 	renderer := NewGatewayAPITrafficMapPublisher(nil, nil, cfg)
 	owners := []*v1beta1.InferenceService{
-		{ObjectMeta: metav1.ObjectMeta{
-			Name: "svc-a", Namespace: "prod", UID: "owner-a", Generation: 1,
-			Annotations: map[string]string{GlobalHostAnnotation: hostname},
-		}},
-		{ObjectMeta: metav1.ObjectMeta{
-			Name: "svc-b", Namespace: "prod", UID: "owner-b", Generation: 1,
-			Annotations: map[string]string{GlobalHostAnnotation: hostname},
-		}},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "svc-a", Namespace: "prod", UID: "owner-a", Generation: 1,
+				Annotations: map[string]string{GlobalHostAnnotation: hostname},
+			},
+			Spec: v1beta1.InferenceServiceSpec{Placement: &v1beta1.PlacementSpec{
+				Mode: v1beta1.PlacementModeSingle, Requirements: "accelerator=test",
+			}},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "svc-b", Namespace: "prod", UID: "owner-b", Generation: 1,
+				Annotations: map[string]string{GlobalHostAnnotation: hostname},
+			},
+			Spec: v1beta1.InferenceServiceSpec{Placement: &v1beta1.PlacementSpec{
+				Mode: v1beta1.PlacementModeSingle, Requirements: "accelerator=test",
+			}},
+		},
 	}
 	objects := make([]client.Object, 0, 6)
 	maps := make([]*v1beta1.TrafficMap, 0, len(owners))

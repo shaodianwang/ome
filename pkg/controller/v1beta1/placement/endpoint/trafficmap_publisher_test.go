@@ -133,6 +133,263 @@ func TestTrafficMapPublisherAddsFinalizerBeforeEffects(t *testing.T) {
 	assert.Nil(t, current.Status.Publisher)
 }
 
+func TestTrafficMapPublisherRequiresMatchingSourceUIDBeforePlanning(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		sourceUID types.UID
+	}{
+		{name: "missing"},
+		{name: "mismatched", sourceUID: "other-owner-uid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			owner, trafficMap := publisherTestObjects()
+			trafficMap.Finalizers = []string{TrafficMapPublisherFinalizer}
+			trafficMap.Status.SourceUID = tc.sourceUID
+			planCalls := 0
+			publisher := &recordingTrafficMapPublisher{
+				name: "example-publisher", stateful: true, claims: []string{"target-a"},
+				plan: func(
+					*v1beta1.InferenceService,
+					*v1beta1.TrafficMap,
+					map[string]string,
+				) (TrafficMapPublishPlan, error) {
+					planCalls++
+					return testTrafficMapPublishPlan{claims: []string{"target-a"}}, nil
+				},
+			}
+			reconciler, kubeClient := newTrafficMapPublisherReconciler(t, publisher, owner, trafficMap)
+
+			_, err := reconcileTrafficMapPublisher(t, reconciler, trafficMap)
+
+			require.NoError(t, err)
+			assert.Zero(t, planCalls)
+			assert.Empty(t, publisher.events, "source provenance must gate every external mutation")
+			current := getPublisherTrafficMap(t, kubeClient, trafficMap)
+			assert.Equal(t, tc.sourceUID, current.Status.SourceUID,
+				"publisher status ownership must not create or overwrite routing provenance")
+			condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
+			require.NotNil(t, condition)
+			assert.Equal(t, trafficMapPublisherReasonInvalidOwner, condition.Reason)
+		})
+	}
+}
+
+func TestTrafficMapPublisherChecksSourceUIDThroughAPIReader(t *testing.T) {
+	owner, trafficMap := publisherTestObjects()
+	trafficMap.Finalizers = []string{TrafficMapPublisherFinalizer}
+	trafficMap.Status.SourceUID = ""
+	baseClient := newTrafficMapPublisherClient(t, owner, trafficMap)
+	stale := trafficMap.DeepCopy()
+	stale.Status.SourceUID = owner.UID
+	cacheClient := &staleTrafficMapClient{Client: baseClient, stale: stale}
+	planCalls := 0
+	publisher := &recordingTrafficMapPublisher{
+		name: "example-publisher", stateful: true, claims: []string{"target-a"},
+		plan: func(
+			*v1beta1.InferenceService,
+			*v1beta1.TrafficMap,
+			map[string]string,
+		) (TrafficMapPublishPlan, error) {
+			planCalls++
+			return testTrafficMapPublishPlan{claims: []string{"target-a"}}, nil
+		},
+	}
+	reconciler := &TrafficMapPublisherReconciler{
+		Client: cacheClient, APIReader: baseClient, Log: logr.Discard(), Publisher: publisher, Active: true,
+	}
+
+	_, err := reconcileTrafficMapPublisher(t, reconciler, trafficMap)
+
+	require.NoError(t, err)
+	assert.Zero(t, planCalls)
+	assert.Empty(t, publisher.events)
+	current := getPublisherTrafficMap(t, baseClient, trafficMap)
+	assert.Empty(t, current.Status.SourceUID)
+	condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
+	require.NotNil(t, condition)
+	assert.Equal(t, trafficMapPublisherReasonInvalidOwner, condition.Reason)
+}
+
+func TestTrafficMapPublisherRetriesInitialOwnerReadFailure(t *testing.T) {
+	owner, trafficMap := publisherTestObjects()
+	trafficMap.Finalizers = []string{TrafficMapPublisherFinalizer}
+	baseClient := newTrafficMapPublisherClient(t, owner, trafficMap)
+	reader := &failingInferenceServiceGetReader{
+		Reader: baseClient,
+		err:    apierrors.NewInternalError(errors.New("owner read failed")),
+	}
+	planCalls := 0
+	publisher := &recordingTrafficMapPublisher{
+		name: "example-publisher", stateful: true, claims: []string{"target-a"},
+		plan: func(
+			*v1beta1.InferenceService,
+			*v1beta1.TrafficMap,
+			map[string]string,
+		) (TrafficMapPublishPlan, error) {
+			planCalls++
+			return testTrafficMapPublishPlan{claims: []string{"target-a"}}, nil
+		},
+	}
+	reconciler := &TrafficMapPublisherReconciler{
+		Client: baseClient, APIReader: reader, Log: logr.Discard(), Publisher: publisher, Active: true,
+	}
+
+	_, err := reconcileTrafficMapPublisher(t, reconciler, trafficMap)
+
+	require.ErrorContains(t, err, "owner read failed")
+	assert.Zero(t, planCalls)
+	assert.Empty(t, publisher.events)
+	current := getPublisherTrafficMap(t, baseClient, trafficMap)
+	condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
+	require.NotNil(t, condition)
+	assert.Equal(t, trafficMapPublisherReasonInvalidOwner, condition.Reason)
+}
+
+func TestTrafficMapPublisherRechecksSourceAndOwnerAtPreEffectFence(t *testing.T) {
+	changes := []struct {
+		name             string
+		mutateTrafficMap func(*v1beta1.TrafficMap)
+		mutateOwner      func(*v1beta1.InferenceService)
+	}{
+		{
+			name: "source UID removed",
+			mutateTrafficMap: func(trafficMap *v1beta1.TrafficMap) {
+				trafficMap.Status.SourceUID = ""
+			},
+		},
+		{
+			name: "source UID changed",
+			mutateTrafficMap: func(trafficMap *v1beta1.TrafficMap) {
+				trafficMap.Status.SourceUID = "replacement-owner-uid"
+			},
+		},
+		{
+			name: "controller reference removed",
+			mutateTrafficMap: func(trafficMap *v1beta1.TrafficMap) {
+				trafficMap.OwnerReferences = nil
+			},
+		},
+		{
+			name: "owner began deleting",
+			mutateOwner: func(owner *v1beta1.InferenceService) {
+				now := metav1.Now()
+				owner.DeletionTimestamp = &now
+				owner.Finalizers = []string{"example.com/hold"}
+			},
+		},
+		{
+			name: "owner became ineligible",
+			mutateOwner: func(owner *v1beta1.InferenceService) {
+				owner.Spec.Placement = nil
+			},
+		},
+		{
+			name: "owner generation changed",
+			mutateOwner: func(owner *v1beta1.InferenceService) {
+				owner.Generation++
+			},
+		},
+		{
+			name: "owner opted out",
+			mutateOwner: func(owner *v1beta1.InferenceService) {
+				disabled := false
+				owner.Spec.Routing = &v1beta1.RoutingSpec{Enabled: &disabled}
+			},
+		},
+	}
+	for _, change := range changes {
+		for _, stateful := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stateful=%t", change.name, stateful), func(t *testing.T) {
+				owner, trafficMap := publisherTestObjects()
+				if stateful {
+					trafficMap.Finalizers = []string{TrafficMapPublisherFinalizer}
+				}
+				baseClient := newTrafficMapPublisherClient(t, owner, trafficMap)
+				reader := &preEffectChangingReader{
+					Reader:           baseClient,
+					mutateTrafficMap: change.mutateTrafficMap,
+					mutateOwner:      change.mutateOwner,
+				}
+				planCalls := 0
+				var claims []string
+				if stateful {
+					claims = []string{"target-a"}
+				}
+				publisher := &recordingTrafficMapPublisher{
+					name: "example-publisher", stateful: stateful, claims: claims,
+					plan: func(
+						*v1beta1.InferenceService,
+						*v1beta1.TrafficMap,
+						map[string]string,
+					) (TrafficMapPublishPlan, error) {
+						planCalls++
+						return testTrafficMapPublishPlan{claims: claims}, nil
+					},
+				}
+				reconciler := &TrafficMapPublisherReconciler{
+					Client: baseClient, APIReader: reader, Log: logr.Discard(), Publisher: publisher, Active: true,
+				}
+
+				_, err := reconcileTrafficMapPublisher(t, reconciler, trafficMap)
+
+				require.NoError(t, err)
+				assert.Equal(t, 1, planCalls, "planning is pure and follows the initial authoritative provenance check")
+				assert.Empty(t, publisher.events, "the last live provenance check must precede external effects")
+				current := getPublisherTrafficMap(t, baseClient, trafficMap)
+				assert.Equal(t, owner.UID, current.Status.SourceUID)
+				condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
+				require.NotNil(t, condition)
+				assert.Equal(t, trafficMapPublisherReasonInvalidOwner, condition.Reason)
+			})
+		}
+	}
+}
+
+func TestTrafficMapPublisherRetriesOwnerReadFailureAtPreEffectFence(t *testing.T) {
+	for _, stateful := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stateful=%t", stateful), func(t *testing.T) {
+			owner, trafficMap := publisherTestObjects()
+			if stateful {
+				trafficMap.Finalizers = []string{TrafficMapPublisherFinalizer}
+			}
+			baseClient := newTrafficMapPublisherClient(t, owner, trafficMap)
+			reader := &preEffectChangingReader{
+				Reader:   baseClient,
+				ownerErr: apierrors.NewInternalError(errors.New("owner read failed")),
+			}
+			planCalls := 0
+			var claims []string
+			if stateful {
+				claims = []string{"target-a"}
+			}
+			publisher := &recordingTrafficMapPublisher{
+				name: "example-publisher", stateful: stateful, claims: claims,
+				plan: func(
+					*v1beta1.InferenceService,
+					*v1beta1.TrafficMap,
+					map[string]string,
+				) (TrafficMapPublishPlan, error) {
+					planCalls++
+					return testTrafficMapPublishPlan{claims: claims}, nil
+				},
+			}
+			reconciler := &TrafficMapPublisherReconciler{
+				Client: baseClient, APIReader: reader, Log: logr.Discard(), Publisher: publisher, Active: true,
+			}
+
+			_, err := reconcileTrafficMapPublisher(t, reconciler, trafficMap)
+
+			require.ErrorContains(t, err, "owner read failed")
+			assert.Equal(t, 1, planCalls)
+			assert.Empty(t, publisher.events)
+			current := getPublisherTrafficMap(t, baseClient, trafficMap)
+			condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
+			require.NotNil(t, condition)
+			assert.Equal(t, trafficMapPublisherReasonInvalidOwner, condition.Reason)
+		})
+	}
+}
+
 func TestTrafficMapPublisherWaitsForLegacyEndpointCleanup(t *testing.T) {
 	owner, trafficMap := publisherTestObjects()
 	legacyOwner := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{
@@ -309,6 +566,7 @@ func TestTrafficMapPublisherPreclaimsBeforeDrainAndApply(t *testing.T) {
 		"the resolver must receive a copy of inline options")
 
 	current := getPublisherTrafficMap(t, kubeClient, trafficMap)
+	assert.Equal(t, owner.UID, current.Status.SourceUID)
 	require.NotNil(t, current.Status.Publisher)
 	assert.Equal(t, []string{"retired", "target-a", "target-z"}, current.Status.Publisher.ClaimedTargets,
 		"drained targets stay claimed until whole-map finalization")
@@ -650,14 +908,16 @@ func TestTrafficMapStatelessPublisherHonorsGlobalSwitchFence(t *testing.T) {
 func TestTrafficMapPublisherSkipsWhenInactiveOrOwnerStops(t *testing.T) {
 	falseValue := false
 	tests := []struct {
-		name          string
-		active        bool
-		ownerOptedOut bool
-		ownerDeleting bool
+		name            string
+		active          bool
+		ownerOptedOut   bool
+		ownerDeleting   bool
+		ownerIneligible bool
 	}{
 		{name: "installation disabled"},
 		{name: "owner opted out", active: true, ownerOptedOut: true},
 		{name: "owner deleting", active: true, ownerDeleting: true},
+		{name: "owner placement ineligible", active: true, ownerIneligible: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -670,18 +930,31 @@ func TestTrafficMapPublisherSkipsWhenInactiveOrOwnerStops(t *testing.T) {
 				owner.DeletionTimestamp = &now
 				owner.Finalizers = []string{"example.com/hold"}
 			}
+			if tt.ownerIneligible {
+				owner.Spec.Placement = nil
+			}
 			trafficMap.Finalizers = []string{TrafficMapPublisherFinalizer}
 			trafficMap.Status.Publisher = &v1beta1.TrafficMapPublisherStatus{
 				PublisherName: "example-publisher", ClaimedTargets: []string{"target"},
 			}
+			planCalls := 0
 			publisher := &recordingTrafficMapPublisher{
 				name: "example-publisher", stateful: true, claims: []string{"target"},
+				plan: func(
+					*v1beta1.InferenceService,
+					*v1beta1.TrafficMap,
+					map[string]string,
+				) (TrafficMapPublishPlan, error) {
+					planCalls++
+					return testTrafficMapPublishPlan{claims: []string{"target"}}, nil
+				},
 			}
 			reconciler, kubeClient := newTrafficMapPublisherReconciler(t, publisher, owner, trafficMap)
 			reconciler.Active = tt.active
 
 			_, err := reconcileTrafficMapPublisher(t, reconciler, trafficMap)
 			require.NoError(t, err)
+			assert.Zero(t, planCalls)
 			assert.Empty(t, publisher.events, "deletion is requested before publisher effects")
 			current := getPublisherTrafficMap(t, kubeClient, trafficMap)
 			assert.True(t, current.DeletionTimestamp.IsZero(), "the routing controller owns map deletion")
@@ -822,6 +1095,7 @@ func TestTrafficMapPublisherRetriesAfterSuccessStatusWriteFails(t *testing.T) {
 
 func TestTrafficMapPublisherFinalizesWhenInactiveWithoutOwner(t *testing.T) {
 	_, trafficMap := publisherTestObjects()
+	trafficMap.Status.SourceUID = ""
 	now := metav1.Now()
 	trafficMap.DeletionTimestamp = &now
 	trafficMap.Finalizers = []string{TrafficMapPublisherFinalizer}
@@ -863,6 +1137,36 @@ func TestTrafficMapPublisherFinalizesWhenInactiveWithoutOwner(t *testing.T) {
 	got := &v1beta1.TrafficMap{}
 	err = kubeClient.Get(context.Background(), client.ObjectKeyFromObject(trafficMap), got)
 	assert.True(t, apierrors.IsNotFound(err), "removing the last finalizer completes direct deletion")
+}
+
+func TestTrafficMapPublisherFinalizationIgnoresSourceUID(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		sourceUID types.UID
+	}{
+		{name: "missing"},
+		{name: "mismatched", sourceUID: "other-owner-uid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, trafficMap := publisherTestObjects()
+			now := metav1.Now()
+			trafficMap.DeletionTimestamp = &now
+			trafficMap.Finalizers = []string{TrafficMapPublisherFinalizer}
+			trafficMap.Status.SourceUID = tc.sourceUID
+			trafficMap.Status.Publisher = &v1beta1.TrafficMapPublisherStatus{
+				PublisherName: "example-publisher", ClaimedTargets: []string{"target"},
+			}
+			publisher := &recordingTrafficMapPublisher{name: "example-publisher", stateful: true}
+			reconciler, kubeClient := newTrafficMapPublisherReconciler(t, publisher, trafficMap)
+
+			_, err := reconcileTrafficMapPublisher(t, reconciler, trafficMap)
+
+			require.NoError(t, err)
+			assert.Equal(t, []string{"unpublish:target"}, publisher.events)
+			err = kubeClient.Get(context.Background(), client.ObjectKeyFromObject(trafficMap), &v1beta1.TrafficMap{})
+			assert.True(t, apierrors.IsNotFound(err), "journal cleanup must remain owner-independent")
+		})
+	}
 }
 
 func TestTrafficMapPublisherBlocksCleanupForMismatchedJournal(t *testing.T) {
@@ -1047,6 +1351,8 @@ func TestTrafficMapPublisherStatusApplyIsFieldIsolated(t *testing.T) {
 	metadata := content["metadata"].(map[string]any)
 	assert.Equal(t, "17", metadata["resourceVersion"])
 	status := content["status"].(map[string]any)
+	_, found := status["sourceUID"]
+	assert.False(t, found, "publisher SSA must not own routing source provenance")
 	conditions := status["conditions"].([]any)
 	require.Len(t, conditions, 1)
 	assert.Equal(t, v1beta1.TrafficMapProgrammed, conditions[0].(map[string]any)["type"])
@@ -1057,7 +1363,7 @@ func TestTrafficMapPublisherStatusApplyIsFieldIsolated(t *testing.T) {
 	trafficMap.Status.ObservedTrafficMapGeneration = 0
 	content = publisherApplyContent(t, trafficMapPublisherStatusApply(trafficMap))
 	status = content["status"].(map[string]any)
-	_, found := status["publisher"]
+	_, found = status["publisher"]
 	assert.False(t, found, "owned pointer fields are removed by SSA omission")
 	_, found = status["gatewayRef"]
 	assert.False(t, found, "owned pointer fields are removed by SSA omission")
@@ -1142,7 +1448,9 @@ func publisherTestObjects() (*v1beta1.InferenceService, *v1beta1.TrafficMap) {
 	controller := true
 	owner := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{
 		Name: "model", Namespace: "team-a", UID: types.UID("owner-uid"), Generation: 2,
-	}}
+	}, Spec: v1beta1.InferenceServiceSpec{Placement: &v1beta1.PlacementSpec{
+		Mode: v1beta1.PlacementModeSingle, Requirements: "accelerator=test",
+	}}}
 	trafficMap := &v1beta1.TrafficMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "model", Namespace: "team-a", UID: types.UID("map-uid"), Generation: 3,
@@ -1154,6 +1462,7 @@ func publisherTestObjects() (*v1beta1.InferenceService, *v1beta1.TrafficMap) {
 		Spec: v1beta1.TrafficMapSpec{
 			Service: "model", ObservedISVCGeneration: owner.Generation,
 		},
+		Status: v1beta1.TrafficMapStatus{SourceUID: owner.UID},
 	}
 	return owner, trafficMap
 }
@@ -1244,9 +1553,66 @@ type staleTrafficMapClient struct {
 	served bool
 }
 
+type preEffectChangingReader struct {
+	client.Reader
+	trafficMapGets   int
+	ownerGets        int
+	mutateTrafficMap func(*v1beta1.TrafficMap)
+	mutateOwner      func(*v1beta1.InferenceService)
+	ownerErr         error
+}
+
+func (r *preEffectChangingReader) Get(
+	ctx context.Context,
+	key client.ObjectKey,
+	object client.Object,
+	options ...client.GetOption,
+) error {
+	switch object.(type) {
+	case *v1beta1.TrafficMap:
+		r.trafficMapGets++
+	case *v1beta1.InferenceService:
+		r.ownerGets++
+		if r.ownerGets > 1 && r.ownerErr != nil {
+			return r.ownerErr
+		}
+	}
+	if err := r.Reader.Get(ctx, key, object, options...); err != nil {
+		return err
+	}
+	switch typed := object.(type) {
+	case *v1beta1.TrafficMap:
+		if r.trafficMapGets > 1 && r.mutateTrafficMap != nil {
+			r.mutateTrafficMap(typed)
+		}
+	case *v1beta1.InferenceService:
+		if r.ownerGets > 1 && r.mutateOwner != nil {
+			r.mutateOwner(typed)
+		}
+	}
+	return nil
+}
+
 type failInferenceServiceListReader struct {
 	client.Reader
 	err error
+}
+
+type failingInferenceServiceGetReader struct {
+	client.Reader
+	err error
+}
+
+func (r *failingInferenceServiceGetReader) Get(
+	ctx context.Context,
+	key client.ObjectKey,
+	object client.Object,
+	options ...client.GetOption,
+) error {
+	if _, ok := object.(*v1beta1.InferenceService); ok {
+		return r.err
+	}
+	return r.Reader.Get(ctx, key, object, options...)
 }
 
 func (r *failInferenceServiceListReader) List(

@@ -262,6 +262,7 @@ func TestReconcile_SplitGeneratesWeightedTrafficMap(t *testing.T) {
 
 	tm, ok := getTrafficMap(t, c)
 	require.True(t, ok, "TrafficMap should be generated")
+	assert.Equal(t, isvc.UID, tm.Status.SourceUID)
 	assert.Equal(t, testName, tm.Spec.Service)
 	assert.Equal(t, v1beta1.PlacementModeSplit, tm.Spec.Mode)
 	assert.Equal(t, int64(7), tm.Spec.ObservedISVCGeneration)
@@ -398,9 +399,38 @@ func TestReconcile_DisabledReapsExistingTrafficMap(t *testing.T) {
 	r, c := newReconciler(t, Config{Enabled: false}, isvc, existing)
 
 	reconcile(t, r)
-
 	_, ok := getTrafficMap(t, c)
 	assert.False(t, ok, "disabled controller should reap the TrafficMap it owns")
+}
+
+func TestReconcile_PlacementIneligibleReapsWithoutStamping(t *testing.T) {
+	isvc := splitISVC([]string{"a"}, []int32{3}, []int32{3})
+	isvc.Spec.Placement = nil
+	existing := &v1beta1.TrafficMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       testName,
+			Namespace:  testNS,
+			Finalizers: []string{"example.com/hold"},
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
+			},
+		},
+		Spec: v1beta1.TrafficMapSpec{
+			Service:                isvc.Name,
+			ObservedISVCGeneration: isvc.Generation,
+			Entries: []v1beta1.TrafficMapEntry{{
+				Cluster: "stale", Endpoint: apis.HTTPS("stale.example"), Weight: 1,
+			}},
+		},
+	}
+	r, c := newReconciler(t, controllerTestConfig(), isvc, existing)
+
+	reconcile(t, r)
+	terminating, exists := getTrafficMap(t, c)
+	require.True(t, exists)
+	require.NotNil(t, terminating.DeletionTimestamp)
+	assert.Empty(t, terminating.Status.SourceUID,
+		"reap must not authorize a stale spec for publication before deletion")
 }
 
 func TestReconcile_DisabledDefersReapUntilClaimFinalizerIsRepaired(t *testing.T) {
@@ -425,6 +455,7 @@ func TestReconcile_DisabledDefersReapUntilClaimFinalizerIsRepaired(t *testing.T)
 
 	deferred, exists := getTrafficMap(t, apiClient)
 	require.True(t, exists)
+	assert.Empty(t, deferred.Status.SourceUID)
 	assert.True(t, deferred.DeletionTimestamp.IsZero(), "a claimed map cannot be deleted before finalizer repair")
 	assert.Equal(t, existing.Status.Publisher.ClaimedTargets, deferred.Status.Publisher.ClaimedTargets)
 
@@ -461,9 +492,60 @@ func TestReconcile_DisabledReapsPublisherStatusWithoutClaims(t *testing.T) {
 	r, c := newReconciler(t, Config{Enabled: false}, isvc, existing)
 
 	reconcile(t, r)
-
 	_, exists := getTrafficMap(t, c)
 	assert.False(t, exists, "status without target claims must not require finalizer repair")
+}
+
+func TestReconcile_RejectsMismatchedTrafficMapSourceUID(t *testing.T) {
+	isvc := splitISVC([]string{"a"}, []int32{3}, []int32{3})
+	tm := &v1beta1.TrafficMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testName,
+			Namespace: testNS,
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
+			},
+		},
+		Spec:   v1beta1.TrafficMapSpec{Service: "existing-service"},
+		Status: v1beta1.TrafficMapStatus{SourceUID: "other-source-uid"},
+	}
+	r, c := newReconciler(t, controllerTestConfig(), isvc, tm)
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: client.ObjectKeyFromObject(isvc),
+	})
+
+	require.ErrorContains(t, err, "source UID")
+	current, exists := getTrafficMap(t, c)
+	require.True(t, exists)
+	assert.Equal(t, "existing-service", current.Spec.Service)
+	assert.Equal(t, types.UID("other-source-uid"), current.Status.SourceUID)
+}
+
+func TestReconcile_DisabledRejectsMismatchedTrafficMapSourceUID(t *testing.T) {
+	isvc := splitISVC([]string{"a"}, []int32{3}, []int32{3})
+	tm := &v1beta1.TrafficMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       testName,
+			Namespace:  testNS,
+			Finalizers: []string{"example.com/hold"},
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
+			},
+		},
+		Status: v1beta1.TrafficMapStatus{SourceUID: "other-source-uid"},
+	}
+	r, c := newReconciler(t, Config{Enabled: false}, isvc, tm)
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: client.ObjectKeyFromObject(isvc),
+	})
+
+	require.ErrorContains(t, err, "source UID")
+	current, exists := getTrafficMap(t, c)
+	require.True(t, exists)
+	assert.True(t, current.DeletionTimestamp.IsZero())
+	assert.Equal(t, types.UID("other-source-uid"), current.Status.SourceUID)
 }
 
 func TestReconcile_UnownedTrafficMapIsNeverMutated(t *testing.T) {
@@ -1281,6 +1363,7 @@ func TestRoutableStatusApplyIsFieldIsolated(t *testing.T) {
 	tm := &v1beta1.TrafficMap{ObjectMeta: metav1.ObjectMeta{
 		Name: testName, Namespace: testNS, ResourceVersion: "17",
 	}}
+	tm.Status.SourceUID = "source-uid"
 	tm.Status.Conditions = []metav1.Condition{
 		{Type: v1beta1.TrafficMapRoutable, Status: metav1.ConditionTrue, Reason: "Routable"},
 		{Type: v1beta1.TrafficMapProgrammed, Status: metav1.ConditionTrue, Reason: "Published"},
@@ -1292,6 +1375,9 @@ func TestRoutableStatusApplyIsFieldIsolated(t *testing.T) {
 	metadata := content["metadata"].(map[string]any)
 	assert.Equal(t, "17", metadata["resourceVersion"])
 	status := content["status"].(map[string]any)
+	assert.Equal(t, "source-uid", status["sourceUID"])
+	_, found := status["publisher"]
+	assert.False(t, found, "routing SSA must not own publisher status")
 	conditions := status["conditions"].([]any)
 	require.Len(t, conditions, 1)
 	assert.Equal(t, v1beta1.TrafficMapRoutable, conditions[0].(map[string]any)["type"])
@@ -1394,6 +1480,42 @@ func TestReconcile_FractionalCapacityFactor(t *testing.T) {
 	require.Len(t, tm.Spec.Entries, 2)
 	assert.Equal(t, int32(1), tm.Spec.Entries[0].Weight)
 	assert.Equal(t, int32(2), tm.Spec.Entries[1].Weight)
+}
+
+func TestReconcile_BackfillsSourceUIDAfterNormalizingExistingTrafficMap(t *testing.T) {
+	isvc := splitISVC([]string{"a"}, []int32{3}, []int32{3})
+	existing := &v1beta1.TrafficMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testName,
+			Namespace: testNS,
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
+			},
+		},
+		Spec: v1beta1.TrafficMapSpec{
+			Service: "stale-service",
+			Entries: []v1beta1.TrafficMapEntry{{
+				Cluster: "stale", Endpoint: apis.HTTPS("stale.example"), Weight: 1,
+			}},
+		},
+		Status: v1beta1.TrafficMapStatus{Publisher: &v1beta1.TrafficMapPublisherStatus{
+			PublisherName: "stateless",
+		}},
+	}
+	r, c := newReconciler(t, controllerTestConfig(), isvc, existing)
+
+	reconcile(t, r)
+
+	current, exists := getTrafficMap(t, c)
+	require.True(t, exists)
+	assert.Equal(t, isvc.Name, current.Spec.Service)
+	assert.Equal(t, isvc.Generation, current.Spec.ObservedISVCGeneration)
+	require.Len(t, current.Spec.Entries, 1)
+	assert.Equal(t, "a", current.Spec.Entries[0].Cluster)
+	assert.Equal(t, isvc.UID, current.Status.SourceUID)
+	require.NotNil(t, current.Status.Publisher)
+	assert.Equal(t, "stateless", current.Status.Publisher.PublisherName,
+		"routing status ownership must preserve publisher state while backfilling")
 }
 
 func TestBuildSpec_CapacityStateIsIsolatedByPolicy(t *testing.T) {
