@@ -27,7 +27,6 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	placementcontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/placement"
-	placementendpoint "github.com/ome-projects/ome/pkg/controller/v1beta1/placement/endpoint"
 	"github.com/ome-projects/ome/pkg/validation"
 )
 
@@ -64,10 +63,6 @@ type Reconciler struct {
 	// planned allocation. Nil, or configured off, means the plan stands and
 	// every entry records CapacitySourceControlPlane.
 	Capacity *CapacityPoller
-	// WaitForPublisherFinalizer coordinates removal with publishers whose
-	// external state is derived exclusively from TrafficMap. Compatibility
-	// publishers can continue from placement and do not participate.
-	WaitForPublisherFinalizer bool
 }
 
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -367,10 +362,6 @@ func routableMessage(reason string, status metav1.ConditionStatus, entries int) 
 // exists or when the object is not controlled by this ISVC (never delete
 // something we did not generate).
 func (r *Reconciler) reap(ctx context.Context, isvc *v1beta1.InferenceService) error {
-	if r.WaitForPublisherFinalizer &&
-		controllerutil.ContainsFinalizer(isvc, placementendpoint.EndpointFinalizer) {
-		return nil
-	}
 	tm := &v1beta1.TrafficMap{}
 	key := types.NamespacedName{Name: isvc.Name, Namespace: isvc.Namespace}
 	if err := r.Get(ctx, key, tm); err != nil {
@@ -645,10 +636,6 @@ var routingTableChange = predicate.Funcs{
 			return true
 		}
 		if routingOptedOut(oldISVC) != routingOptedOut(newISVC) {
-			return true
-		}
-		if controllerutil.ContainsFinalizer(oldISVC, placementendpoint.EndpointFinalizer) !=
-			controllerutil.ContainsFinalizer(newISVC, placementendpoint.EndpointFinalizer) {
 			return true
 		}
 		if !equality.Semantic.DeepEqual(routingProbeSpec(oldISVC), routingProbeSpec(newISVC)) {

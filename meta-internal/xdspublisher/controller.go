@@ -5,26 +5,38 @@ package xdspublisher
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"slices"
 	"sort"
 	"strings"
+	"text/template"
 
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/util/retry"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	placementendpoint "github.com/ome-projects/ome/pkg/controller/v1beta1/placement/endpoint"
 )
 
-const targetsAnnotation = "routing.ome.io/xds-published-targets"
+// legacyTargetsAnnotation belongs to the retired InferenceService-owned
+// publisher lifecycle. Its presence requires that lifecycle to finish cleanup.
+const legacyTargetsAnnotation = "routing.ome.io/xds-published-targets"
 
 type weightedTarget struct {
 	name   string
 	weight uint32
+}
+
+type publishPlan struct {
+	targets []weightedTarget
+	claims  []string
+}
+
+func (p *publishPlan) Claims() []string {
+	if p == nil {
+		return nil
+	}
+	return slices.Clone(p.claims)
 }
 
 type targetTemplateData struct {
@@ -37,138 +49,194 @@ type targetTemplateData struct {
 	EndpointPort     string
 }
 
-// Publish implements endpoint.EndpointPublisher. The shared endpoint
-// reconciler owns the watch and finalizer; this adapter owns only the external
-// SMC state that cannot be discovered through Kubernetes.
-func (p *Publisher) Publish(
-	ctx context.Context,
-	isvc *v1beta1.InferenceService,
-	target placementendpoint.Target,
-) error {
-	desired, err := p.desiredTargets(isvc, target)
-	if err != nil {
-		return err
-	}
-	key := client.ObjectKeyFromObject(isvc)
-	journal, err := p.readTargets(ctx, key)
-	if err != nil {
-		return err
-	}
-	current := targetNames(desired)
+// Stateful implements endpoint.TrafficMapPublisher.
+func (*Publisher) Stateful() bool { return true }
 
-	owners := map[string]types.NamespacedName{}
-	if len(current) != 0 || len(journal) != 0 {
-		owners, err = p.otherTargetOwners(ctx, key)
-		if err != nil {
-			return err
+// ResolveOptions implements endpoint.TrafficMapPublisher. Transport and
+// credentials are installation-wide and never enter an InferenceService or its
+// status digest. Target selection is also installation-wide because changing it
+// per object could redirect writes outside the operator-owned target scope.
+func (*Publisher) ResolveOptions(global, inline map[string]string) (map[string]string, error) {
+	if len(inline) != 0 {
+		keys := make([]string, 0, len(inline))
+		for key := range inline {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		return nil, fmt.Errorf("xDS publisher does not accept per-InferenceService options: %s",
+			strings.Join(keys, ", "))
+	}
+	for key := range global {
+		if key != optTargetTemplate {
+			return nil, fmt.Errorf("xDS publisher received unsupported global option %q", key)
 		}
 	}
-	if collisionErr := targetCollision(current, owners); collisionErr != nil {
-		zeroed, err := p.zeroUnclaimedTargets(ctx, difference(journal, current), owners)
-		if err != nil {
-			return fmt.Errorf("zero stale xDS targets while rejecting collision: %w", err)
-		}
-		retained := union(uncontestedIntersection(journal, current, owners), zeroed)
-		if err := p.rememberTargets(ctx, key, retained); err != nil {
-			return fmt.Errorf("compact xDS target journal while rejecting collision: %w", err)
-		}
-		return collisionErr
+	templateText := strings.TrimSpace(global[optTargetTemplate])
+	if templateText == "" {
+		return nil, fmt.Errorf("xDS publisher global option %q is required", optTargetTemplate)
+	}
+	if _, err := parseTargetTemplate(templateText); err != nil {
+		return nil, err
+	}
+	return map[string]string{optTargetTemplate: templateText}, nil
+}
+
+// Plan implements endpoint.TrafficMapPublisher. It rejects objects that still
+// carry state owned by the retired InferenceService lifecycle so two lifecycle
+// owners can never write or clear the same external target.
+func (*Publisher) Plan(
+	owner *v1beta1.InferenceService,
+	trafficMap *v1beta1.TrafficMap,
+	effectiveOptions map[string]string,
+) (placementendpoint.TrafficMapPublishPlan, error) {
+	if owner == nil {
+		return nil, fmt.Errorf("InferenceService owner must not be nil")
+	}
+	if trafficMap == nil {
+		return nil, fmt.Errorf("TrafficMap must not be nil")
+	}
+	if slices.Contains(owner.Finalizers, placementendpoint.EndpointFinalizer) {
+		return nil, fmt.Errorf(
+			"InferenceService %s/%s still has legacy endpoint finalizer %q; drain it with the previous publisher lifecycle before upgrading",
+			owner.Namespace, owner.Name, placementendpoint.EndpointFinalizer,
+		)
+	}
+	if _, found := owner.Annotations[legacyTargetsAnnotation]; found {
+		return nil, fmt.Errorf(
+			"InferenceService %s/%s still has legacy xDS target annotation %q; drain it with the previous publisher lifecycle before upgrading",
+			owner.Namespace, owner.Name, legacyTargetsAnnotation,
+		)
 	}
 
-	// Removing an active target means weight zero. Clearing the property would
-	// restore the statically authored route weight and could resume traffic.
-	zeroed, err := p.zeroUnclaimedTargets(ctx, difference(journal, current), owners)
+	targetTemplate, err := effectiveTargetTemplate(effectiveOptions)
 	if err != nil {
-		return fmt.Errorf("zero stale xDS targets: %w", err)
+		return nil, err
 	}
+	targets, err := desiredTargets(owner, trafficMap, targetTemplate)
+	if err != nil {
+		return nil, err
+	}
+	claims := make([]string, len(targets))
+	for i := range targets {
+		claims[i] = targets[i].name
+	}
+	sort.Strings(claims)
+	return &publishPlan{targets: targets, claims: claims}, nil
+}
 
-	// Record ownership before each external mutation so a partial publish or
-	// process restart still has enough state to clean up.
-	for _, desiredTarget := range desired {
-		journal = union(journal, []string{desiredTarget.name})
-		if err := p.rememberTargets(ctx, key, journal); err != nil {
-			return fmt.Errorf("journal xDS target %q: %w", desiredTarget.name, err)
-		}
-		if err := p.weights.PublishWeight(ctx, desiredTarget.name, desiredTarget.weight); err != nil {
-			return fmt.Errorf("publish weight %d for xDS target %q: %w",
-				desiredTarget.weight, desiredTarget.name, err)
-		}
+// Drain implements endpoint.TrafficMapPublisher. A stale override remains
+// explicitly held at zero until the TrafficMap journal is finalized.
+func (p *Publisher) Drain(ctx context.Context, claims []string) error {
+	validated, err := validateClaims(claims)
+	if err != nil {
+		return fmt.Errorf("validate stale xDS target claims: %w", err)
 	}
-	if err := p.rememberTargets(ctx, key, union(current, zeroed)); err != nil {
-		return fmt.Errorf("compact xDS target journal: %w", err)
+	for _, claim := range validated {
+		if err := p.weights.PublishWeight(ctx, claim, 0); err != nil {
+			return fmt.Errorf("publish zero weight for stale xDS target %q: %w", claim, err)
+		}
 	}
 	return nil
 }
 
-// Unpublish implements endpoint.EndpointPublisher. It restores static routing
-// by clearing every override recorded for this InferenceService.
-func (p *Publisher) Unpublish(ctx context.Context, isvc *v1beta1.InferenceService) error {
-	key := client.ObjectKeyFromObject(isvc)
-	journal, err := p.readTargets(ctx, key)
-	if err != nil {
-		return err
+// Apply implements endpoint.TrafficMapPublisher.
+func (p *Publisher) Apply(
+	ctx context.Context,
+	plan placementendpoint.TrafficMapPublishPlan,
+) (placementendpoint.TrafficMapPublishResult, error) {
+	xdsPlan, ok := plan.(*publishPlan)
+	if !ok || xdsPlan == nil {
+		return placementendpoint.TrafficMapPublishResult{}, fmt.Errorf("xDS publisher received plan of type %T", plan)
 	}
-	if len(journal) == 0 {
-		return p.rememberTargets(ctx, key, nil)
-	}
-	owners, err := p.otherTargetOwners(ctx, key)
-	if err != nil {
-		return err
-	}
-	for _, target := range journal {
-		if _, shared := owners[target]; shared {
-			continue
+	for _, target := range xdsPlan.targets {
+		if err := p.weights.PublishWeight(ctx, target.name, target.weight); err != nil {
+			return placementendpoint.TrafficMapPublishResult{}, fmt.Errorf(
+				"publish weight %d for xDS target %q: %w", target.weight, target.name, err,
+			)
 		}
+	}
+	return placementendpoint.TrafficMapPublishResult{}, nil
+}
+
+// Unpublish implements endpoint.TrafficMapPublisher. The durable TrafficMap
+// journal is the complete cleanup authority; owner and TrafficMap reads are not
+// needed for deletion recovery.
+func (p *Publisher) Unpublish(
+	ctx context.Context,
+	_ types.NamespacedName,
+	journal v1beta1.TrafficMapPublisherStatus,
+) error {
+	if journal.PublisherName != "" && journal.PublisherName != Name {
+		return fmt.Errorf("xDS publisher cannot clean journal owned by %q", journal.PublisherName)
+	}
+	targets, err := validateClaims(journal.ClaimedTargets)
+	if err != nil {
+		return fmt.Errorf("validate xDS cleanup journal: %w", err)
+	}
+	for _, target := range targets {
 		if err := p.weights.ClearWeight(ctx, target); err != nil {
 			return fmt.Errorf("clear weight for xDS target %q: %w", target, err)
 		}
 	}
-	return p.rememberTargets(ctx, key, nil)
+	return nil
 }
 
-func (p *Publisher) desiredTargets(
-	isvc *v1beta1.InferenceService,
-	target placementendpoint.Target,
-) ([]weightedTarget, error) {
-	service := target.Service
-	if service == "" {
-		service = isvc.Name
-	}
-	targets := make([]weightedTarget, 0, len(target.Homes))
-	seen := make(map[string]struct{}, len(target.Homes))
-	for _, home := range target.Homes {
-		if home.Endpoint == "" {
-			return nil, fmt.Errorf("TrafficMap entry %q has no endpoint", home.Cluster)
+func effectiveTargetTemplate(options map[string]string) (*template.Template, error) {
+	for key := range options {
+		if key != optTargetTemplate {
+			return nil, fmt.Errorf("xDS publisher effective options contain unsupported key %q", key)
 		}
-		endpointURL, err := url.Parse(home.Endpoint)
+	}
+	templateText := strings.TrimSpace(options[optTargetTemplate])
+	if templateText == "" {
+		return nil, fmt.Errorf("xDS publisher effective option %q is required", optTargetTemplate)
+	}
+	return parseTargetTemplate(templateText)
+}
+
+func desiredTargets(
+	owner *v1beta1.InferenceService,
+	trafficMap *v1beta1.TrafficMap,
+	targetTemplate *template.Template,
+) ([]weightedTarget, error) {
+	if trafficMap.Spec.Service == "" {
+		return nil, fmt.Errorf("TrafficMap service must not be empty")
+	}
+	targets := make([]weightedTarget, 0, len(trafficMap.Spec.Entries))
+	seen := make(map[string]struct{}, len(trafficMap.Spec.Entries))
+	for _, entry := range trafficMap.Spec.Entries {
+		if entry.Endpoint == nil {
+			return nil, fmt.Errorf("TrafficMap entry %q has no valid endpoint", entry.Cluster)
+		}
+		endpointURL, err := url.Parse(entry.Endpoint.String())
 		if err != nil || endpointURL.Host == "" {
-			return nil, fmt.Errorf("TrafficMap entry %q has invalid endpoint %q", home.Cluster, home.Endpoint)
+			return nil, fmt.Errorf("TrafficMap entry %q has invalid endpoint %q", entry.Cluster, entry.Endpoint.String())
+		}
+		if entry.Weight < 0 {
+			return nil, fmt.Errorf("TrafficMap entry %q has negative weight %d", entry.Cluster, entry.Weight)
 		}
 		data := targetTemplateData{
-			Namespace:        isvc.Namespace,
-			Service:          service,
-			Cluster:          home.Cluster,
-			Endpoint:         home.Endpoint,
+			Namespace:        owner.Namespace,
+			Service:          trafficMap.Spec.Service,
+			Cluster:          entry.Cluster,
+			Endpoint:         entry.Endpoint.String(),
 			EndpointHost:     endpointURL.Host,
 			EndpointHostname: endpointURL.Hostname(),
 			EndpointPort:     endpointURL.Port(),
 		}
 		var rendered bytes.Buffer
-		if err := p.config.targetTemplate.Execute(&rendered, data); err != nil {
-			return nil, fmt.Errorf("render xDS target for cluster %q: %w", home.Cluster, err)
+		if err := targetTemplate.Execute(&rendered, data); err != nil {
+			return nil, fmt.Errorf("render xDS target for cluster %q: %w", entry.Cluster, err)
 		}
 		name, err := canonicalTarget(strings.TrimSpace(rendered.String()))
 		if err != nil {
-			return nil, fmt.Errorf("render xDS target for cluster %q: %w", home.Cluster, err)
+			return nil, fmt.Errorf("render xDS target for cluster %q: %w", entry.Cluster, err)
 		}
 		if _, duplicate := seen[name]; duplicate {
 			return nil, fmt.Errorf("xDS target template maps more than one entry to %q", name)
 		}
-		if home.Weight < 0 {
-			return nil, fmt.Errorf("TrafficMap entry %q has negative weight %d", home.Cluster, home.Weight)
-		}
 		seen[name] = struct{}{}
-		targets = append(targets, weightedTarget{name: name, weight: uint32(home.Weight)})
+		targets = append(targets, weightedTarget{name: name, weight: uint32(entry.Weight)})
 	}
 	sort.Slice(targets, func(i, j int) bool {
 		if (targets[i].weight == 0) != (targets[j].weight == 0) {
@@ -177,120 +245,6 @@ func (p *Publisher) desiredTargets(
 		return targets[i].name < targets[j].name
 	})
 	return targets, nil
-}
-
-func (p *Publisher) zeroUnclaimedTargets(
-	ctx context.Context,
-	targets []string,
-	owners map[string]types.NamespacedName,
-) ([]string, error) {
-	retained := make([]string, 0, len(targets))
-	for _, target := range targets {
-		if _, shared := owners[target]; shared {
-			continue
-		}
-		if err := p.weights.PublishWeight(ctx, target, 0); err != nil {
-			return nil, fmt.Errorf("publish zero weight for stale xDS target %q: %w", target, err)
-		}
-		retained = append(retained, target)
-	}
-	return retained, nil
-}
-
-func (p *Publisher) readTargets(ctx context.Context, key types.NamespacedName) ([]string, error) {
-	latest := &v1beta1.InferenceService{}
-	if err := p.reader().Get(ctx, key, latest); err != nil {
-		return nil, err
-	}
-	return publishedTargets(latest)
-}
-
-func (p *Publisher) rememberTargets(ctx context.Context, key types.NamespacedName, targets []string) error {
-	targets = union(nil, targets)
-	var encoded []byte
-	var err error
-	if len(targets) != 0 {
-		encoded, err = json.Marshal(targets)
-		if err != nil {
-			return fmt.Errorf("encode xDS published targets: %w", err)
-		}
-	}
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		latest := &v1beta1.InferenceService{}
-		if err := p.reader().Get(ctx, key, latest); err != nil {
-			return client.IgnoreNotFound(err)
-		}
-		if len(encoded) == 0 {
-			if _, ok := latest.Annotations[targetsAnnotation]; !ok {
-				return nil
-			}
-			delete(latest.Annotations, targetsAnnotation)
-			return p.Update(ctx, latest)
-		}
-		if latest.Annotations[targetsAnnotation] == string(encoded) {
-			return nil
-		}
-		if latest.Annotations == nil {
-			latest.Annotations = map[string]string{}
-		}
-		latest.Annotations[targetsAnnotation] = string(encoded)
-		return p.Update(ctx, latest)
-	})
-}
-
-func (p *Publisher) otherTargetOwners(
-	ctx context.Context,
-	self types.NamespacedName,
-) (map[string]types.NamespacedName, error) {
-	services := &v1beta1.InferenceServiceList{}
-	if err := p.reader().List(ctx, services); err != nil {
-		return nil, fmt.Errorf("list InferenceServices for xDS target ownership: %w", err)
-	}
-	owners := make(map[string]types.NamespacedName)
-	for i := range services.Items {
-		other := &services.Items[i]
-		key := client.ObjectKeyFromObject(other)
-		if key == self {
-			continue
-		}
-		targets, err := publishedTargets(other)
-		if err != nil {
-			return nil, fmt.Errorf("read xDS target claims from InferenceService %s: %w", key.String(), err)
-		}
-		for _, target := range targets {
-			if _, exists := owners[target]; !exists {
-				owners[target] = key
-			}
-		}
-	}
-	return owners, nil
-}
-
-func (p *Publisher) reader() client.Reader {
-	if p.APIReader != nil {
-		return p.APIReader
-	}
-	return p.Client
-}
-
-func publishedTargets(isvc *v1beta1.InferenceService) ([]string, error) {
-	raw := isvc.Annotations[targetsAnnotation]
-	if raw == "" {
-		return nil, nil
-	}
-	var targets []string
-	if err := json.Unmarshal([]byte(raw), &targets); err != nil {
-		return nil, fmt.Errorf("decode %s annotation: %w", targetsAnnotation, err)
-	}
-	for i, target := range targets {
-		canonical, err := canonicalTarget(target)
-		if err != nil {
-			return nil, fmt.Errorf("invalid target in %s annotation: %w", targetsAnnotation, err)
-		}
-		targets[i] = canonical
-	}
-	sort.Strings(targets)
-	return slices.Compact(targets), nil
 }
 
 func canonicalTarget(target string) (string, error) {
@@ -307,60 +261,30 @@ func canonicalTarget(target string) (string, error) {
 	return primary, nil
 }
 
-func targetNames(targets []weightedTarget) []string {
-	names := make([]string, len(targets))
-	for i := range targets {
-		names[i] = targets[i].name
+func validateClaims(claims []string) ([]string, error) {
+	if len(claims) > v1beta1.MaxTrafficMapPublisherTargets {
+		return nil, fmt.Errorf("journal has %d targets, maximum is %d",
+			len(claims), v1beta1.MaxTrafficMapPublisherTargets)
 	}
-	return names
-}
-
-func targetCollision(targets []string, owners map[string]types.NamespacedName) error {
-	for _, target := range targets {
-		if owner, collision := owners[target]; collision {
-			return fmt.Errorf("xDS target %q is already claimed by InferenceService %s", target, owner.String())
+	validated := slices.Clone(claims)
+	for _, claim := range validated {
+		if len(claim) > v1beta1.MaxTrafficMapPublisherTargetLength {
+			return nil, fmt.Errorf("target %q has %d bytes, maximum is %d",
+				claim, len(claim), v1beta1.MaxTrafficMapPublisherTargetLength)
+		}
+		canonical, err := canonicalTarget(strings.TrimSpace(claim))
+		if err != nil {
+			return nil, err
+		}
+		if canonical != claim {
+			return nil, fmt.Errorf("target %q is not canonical", claim)
 		}
 	}
-	return nil
-}
-
-func uncontestedIntersection(
-	journal, current []string,
-	owners map[string]types.NamespacedName,
-) []string {
-	currentSet := make(map[string]struct{}, len(current))
-	for _, target := range current {
-		currentSet[target] = struct{}{}
-	}
-	var retained []string
-	for _, target := range journal {
-		if _, desired := currentSet[target]; !desired {
-			continue
-		}
-		if _, contested := owners[target]; contested {
-			continue
-		}
-		retained = append(retained, target)
-	}
-	return union(nil, retained)
-}
-
-func difference(previous, current []string) []string {
-	currentSet := make(map[string]struct{}, len(current))
-	for _, target := range current {
-		currentSet[target] = struct{}{}
-	}
-	var out []string
-	for _, target := range previous {
-		if _, keep := currentSet[target]; !keep {
-			out = append(out, target)
+	sort.Strings(validated)
+	for i := 1; i < len(validated); i++ {
+		if validated[i] == validated[i-1] {
+			return nil, fmt.Errorf("target %q appears more than once", validated[i])
 		}
 	}
-	return union(nil, out)
-}
-
-func union(a, b []string) []string {
-	out := append(append(make([]string, 0, len(a)+len(b)), a...), b...)
-	sort.Strings(out)
-	return slices.Compact(out)
+	return validated, nil
 }

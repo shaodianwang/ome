@@ -27,7 +27,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	placementendpoint "github.com/ome-projects/ome/pkg/controller/v1beta1/placement/endpoint"
 )
 
 const (
@@ -95,18 +94,6 @@ func reconcile(t *testing.T, r *Reconciler) ctrl.Result {
 	})
 	require.NoError(t, err)
 	return result
-}
-
-func ownedTrafficMap(isvc *v1beta1.InferenceService) *v1beta1.TrafficMap {
-	return &v1beta1.TrafficMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      isvc.Name,
-			Namespace: isvc.Namespace,
-			OwnerReferences: []metav1.OwnerReference{
-				*metav1.NewControllerRef(isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
-			},
-		},
-	}
 }
 
 func testCapacityState(t *testing.T) (*CapacityPoller, ResolvedCapacityPolicy) {
@@ -352,44 +339,6 @@ func TestReconcile_NonPlacementISVCDoesNotCreateTrafficMap(t *testing.T) {
 
 	_, exists := getTrafficMap(t, c)
 	assert.False(t, exists)
-}
-
-func TestReconcile_EligibilityLossWaitsForEndpointFinalizerBeforeReaping(t *testing.T) {
-	isvc := splitISVC([]string{"a"}, []int32{3}, []int32{3})
-	isvc.Spec.Placement = nil
-	isvc.Finalizers = []string{placementendpoint.EndpointFinalizer}
-	existing := ownedTrafficMap(isvc)
-	existing.Spec.Service = "last-known"
-	r, c := newReconciler(t, controllerTestConfig(), isvc, existing)
-	r.WaitForPublisherFinalizer = true
-
-	reconcile(t, r)
-
-	tm, exists := getTrafficMap(t, c)
-	require.True(t, exists, "the endpoint publisher still owns teardown")
-	assert.Equal(t, "last-known", tm.Spec.Service)
-
-	current := &v1beta1.InferenceService{}
-	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(isvc), current))
-	current.Finalizers = nil
-	require.NoError(t, c.Update(context.Background(), current))
-	reconcile(t, r)
-
-	_, exists = getTrafficMap(t, c)
-	assert.False(t, exists, "the map is reaped only after endpoint withdrawal completes")
-}
-
-func TestReconcile_CompatibilityPublisherDoesNotWaitForEndpointFinalizer(t *testing.T) {
-	isvc := splitISVC([]string{"a"}, []int32{3}, []int32{3})
-	isvc.Spec.Placement = nil
-	isvc.Finalizers = []string{placementendpoint.EndpointFinalizer}
-	existing := ownedTrafficMap(isvc)
-	r, c := newReconciler(t, controllerTestConfig(), isvc, existing)
-
-	reconcile(t, r)
-
-	_, exists := getTrafficMap(t, c)
-	assert.False(t, exists, "compatibility publishers do not use the TrafficMap teardown handshake")
 }
 
 func TestReconcile_LegacyAnnotationPlacementCreatesSingleModeMap(t *testing.T) {
@@ -1459,14 +1408,6 @@ func TestRoutingTableChangePredicate(t *testing.T) {
 			Options: map[string]string{"target": "edge"},
 		}}
 		assert.True(t, routingTableChange.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: nw}))
-	})
-
-	t.Run("endpoint finalizer release is admitted", func(t *testing.T) {
-		old := base.DeepCopy()
-		old.Finalizers = []string{placementendpoint.EndpointFinalizer}
-		nw := old.DeepCopy()
-		nw.Finalizers = nil
-		assert.True(t, routingTableChange.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: nw}))
 	})
 
 	t.Run("placement eligibility removal is admitted", func(t *testing.T) {

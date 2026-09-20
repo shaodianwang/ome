@@ -9,6 +9,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
@@ -17,6 +18,12 @@ import (
 	placementrouting "github.com/ome-projects/ome/pkg/controller/v1beta1/placement/routing"
 	workloadcluster "github.com/ome-projects/ome/pkg/controller/v1beta1/workloadcluster"
 )
+
+type managerTestTrafficMapPublisher struct {
+	placementendpoint.TrafficMapPublisher
+}
+
+func (*managerTestTrafficMapPublisher) Name() string { return "test-publisher" }
 
 // mcWiringFromJSON exercises the production config path: it seeds the
 // inferenceservice-config ConfigMap with the given "multicluster" block, loads
@@ -224,4 +231,26 @@ func TestValidateDispatcherMode(t *testing.T) {
 		require.Error(t, err, "mode %q must be rejected", bad)
 		assert.Contains(t, err.Error(), "dispatcherMode")
 	}
+}
+
+func TestNewTrafficMapPublisherReconciler(t *testing.T) {
+	kubeClient := fakeclient.NewClientBuilder().Build()
+	apiReader := fakeclient.NewClientBuilder().Build()
+	publisher := &managerTestTrafficMapPublisher{}
+	globalOptions := map[string]string{"safeOption": "value"}
+	selected := &placementrouting.TrafficMapPublisher{
+		Publisher:      publisher,
+		GlobalOptions:  globalOptions,
+		ResyncInterval: 2 * time.Minute,
+	}
+
+	got := newTrafficMapPublisherReconciler(kubeClient, apiReader, selected, true, true)
+
+	assert.Same(t, kubeClient, got.Client)
+	assert.Same(t, apiReader, got.APIReader)
+	assert.Same(t, publisher, got.Publisher)
+	assert.Equal(t, globalOptions, got.GlobalOptions)
+	assert.Equal(t, 2*time.Minute, got.RequeueAfter)
+	assert.True(t, got.Active)
+	assert.True(t, got.LeaderElectionEnabled)
 }

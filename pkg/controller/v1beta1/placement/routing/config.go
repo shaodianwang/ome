@@ -35,9 +35,9 @@ type Config struct {
 	// enables the other.
 	Capacity CapacityConfig
 
-	// Publisher selects an optional deployment-specific backend for the existing
-	// endpoint publisher. Empty retains the Gateway API backend. Options are
-	// opaque here and validated by the selected publisher at manager startup.
+	// Publisher selects an optional TrafficMap publisher implementation. Empty
+	// retains the Gateway API endpoint publisher. Options are opaque here and
+	// validated by the selected publisher at manager startup.
 	Publisher PublisherConfig
 }
 

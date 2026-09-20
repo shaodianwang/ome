@@ -9,6 +9,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/clock"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	gatewayapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
@@ -168,6 +169,25 @@ func validateDispatcherMode(mode placement.DispatcherMode) error {
 	}
 }
 
+func newTrafficMapPublisherReconciler(
+	kubeClient client.Client,
+	apiReader client.Reader,
+	publisher *placementrouting.TrafficMapPublisher,
+	active bool,
+	leaderElectionEnabled bool,
+) *placementendpoint.TrafficMapPublisherReconciler {
+	return &placementendpoint.TrafficMapPublisherReconciler{
+		Client:                kubeClient,
+		APIReader:             apiReader,
+		Log:                   ctrl.Log.WithName("controllers").WithName("TrafficMapPublisher"),
+		Publisher:             publisher.Publisher,
+		GlobalOptions:         publisher.GlobalOptions,
+		RequeueAfter:          publisher.ResyncInterval,
+		Active:                active,
+		LeaderElectionEnabled: leaderElectionEnabled,
+	}
+}
+
 // setupMultiCluster wires the multi-cluster control/transport layer onto mgr:
 // the WorkloadCluster registry/transport always, plus — on the control plane —
 // the placement (fan-out) controller, its orphan GC, and the global endpoint
@@ -310,42 +330,41 @@ func setupMultiCluster(mgr manager.Manager, clientSet kubernetes.Interface, opti
 		return fmt.Errorf("add placement GC runnable: %w", err)
 	}
 
-	// The existing endpoint reconciler owns publisher lifecycle. Gateway API is
-	// the default backend; a configured TrafficMap publisher reuses the same
-	// watch, finalizer, and publish/unpublish path.
-	var endpointPublisher placementendpoint.EndpointPublisher
-	var publisherActive *bool
-	useTrafficMap := false
-	var publisherResync time.Duration
+	// A selected TrafficMap publisher owns the TrafficMap lifecycle directly.
+	// Otherwise, retain the default Gateway API path that publishes from the
+	// InferenceService placement status.
 	if trafficMapPublisher != nil {
-		endpointPublisher = trafficMapPublisher.Publisher
-		active := w.routing.Enabled
-		publisherActive = &active
-		useTrafficMap = true
-		publisherResync = trafficMapPublisher.ResyncInterval
+		setupLog.Info("Setting up multi-cluster TrafficMap publisher", "publisher", trafficMapPublisher.Publisher.Name(),
+			"availableTrafficMapPublishers", placementrouting.RegisteredTrafficMapPublishers())
+		if err := newTrafficMapPublisherReconciler(
+			mgr.GetClient(),
+			mgr.GetAPIReader(),
+			trafficMapPublisher,
+			w.routing.Enabled,
+			options.enableLeaderElection,
+		).SetupWithManager(mgr); err != nil {
+			return fmt.Errorf("create TrafficMap publisher controller: %w", err)
+		}
 	} else {
 		// The Gateway API scheme is needed only by the default HTTPRoute backend.
 		utilruntime.Must(gatewayapiv1.Install(mgr.GetScheme()))
-		endpointPublisher = placementendpoint.NewGatewayAPIPublisher(
+		endpointPublisher := placementendpoint.NewGatewayAPIPublisher(
 			mgr.GetClient(),
 			w.endpoint,
 			placementendpoint.WithBackendAddressResolver(
 				placementendpoint.NewGatewayAddressResolver(clusterManager),
 			),
 		)
-	}
-	setupLog.Info("Setting up multi-cluster endpoint publisher", "publisher", endpointPublisher.Name(),
-		"availableTrafficMapPublishers", placementrouting.RegisteredTrafficMapPublishers())
-	if err := (&placementendpoint.Reconciler{
-		Client:        mgr.GetClient(),
-		Log:           ctrl.Log.WithName("controllers").WithName("PlacementEndpoint"),
-		Publisher:     endpointPublisher,
-		Config:        w.endpoint,
-		Active:        publisherActive,
-		UseTrafficMap: useTrafficMap,
-		RequeueAfter:  publisherResync,
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("create PlacementEndpoint controller: %w", err)
+		setupLog.Info("Setting up multi-cluster endpoint publisher", "publisher", endpointPublisher.Name(),
+			"availableTrafficMapPublishers", placementrouting.RegisteredTrafficMapPublishers())
+		if err := (&placementendpoint.Reconciler{
+			Client:    mgr.GetClient(),
+			Log:       ctrl.Log.WithName("controllers").WithName("PlacementEndpoint"),
+			Publisher: endpointPublisher,
+			Config:    w.endpoint,
+		}).SetupWithManager(mgr); err != nil {
+			return fmt.Errorf("create PlacementEndpoint controller: %w", err)
+		}
 	}
 
 	var (
@@ -402,13 +421,12 @@ func setupMultiCluster(mgr manager.Manager, clientSet kubernetes.Interface, opti
 		// the first poll.
 		"capacityFormats", placementrouting.RegisteredCapacityFormats())
 	if err := (&placementrouting.Reconciler{
-		Client:                    mgr.GetClient(),
-		APIReader:                 mgr.GetAPIReader(),
-		Log:                       ctrl.Log.WithName("controllers").WithName("PlacementRouting"),
-		Config:                    w.routing,
-		Prober:                    prober,
-		Capacity:                  capacity,
-		WaitForPublisherFinalizer: useTrafficMap,
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(),
+		Log:       ctrl.Log.WithName("controllers").WithName("PlacementRouting"),
+		Config:    w.routing,
+		Prober:    prober,
+		Capacity:  capacity,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("create PlacementRouting controller: %w", err)
 	}

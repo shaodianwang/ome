@@ -47,7 +47,7 @@ var acceptedOptions = map[string]struct{}{
 }
 
 type config struct {
-	targetTemplate *template.Template
+	targetTemplate string
 	resyncInterval time.Duration
 	urlTemplate    string
 	requestTimeout time.Duration
@@ -60,13 +60,11 @@ type config struct {
 
 // Publisher writes TrafficMap weights through the internal xDS API.
 type Publisher struct {
-	client.Client
-	APIReader client.Reader
-	config    config
-	weights   ClusterWeightPublisher
+	config  config
+	weights ClusterWeightPublisher
 }
 
-var _ placementendpoint.EndpointPublisher = (*Publisher)(nil)
+var _ placementendpoint.TrafficMapPublisher = (*Publisher)(nil)
 
 // ClusterWeightPublisher is the narrow service surface used by the adapter.
 type ClusterWeightPublisher interface {
@@ -84,33 +82,33 @@ func init() {
 
 func newTrafficMapPublisher(
 	publisherConfig routing.PublisherConfig,
-	kubeClient client.Client,
-	apiReader client.Reader,
+	_ client.Client,
+	_ client.Reader,
 ) (*routing.TrafficMapPublisher, error) {
-	publisher, err := newPublisher(
-		publisherConfig,
-		kubeClient,
-		apiReader,
-		newHTTPClusterWeightPublisher,
-	)
+	return newTrafficMapPublisherWithFactory(publisherConfig, newHTTPClusterWeightPublisher)
+}
+
+func newTrafficMapPublisherWithFactory(
+	publisherConfig routing.PublisherConfig,
+	factory clusterWeightPublisherFactory,
+) (*routing.TrafficMapPublisher, error) {
+	publisher, err := newPublisher(publisherConfig, factory)
 	if err != nil {
 		return nil, err
 	}
 	return &routing.TrafficMapPublisher{
 		Publisher:      publisher,
 		ResyncInterval: publisher.config.resyncInterval,
+		GlobalOptions: map[string]string{
+			optTargetTemplate: publisher.config.targetTemplate,
+		},
 	}, nil
 }
 
 func newPublisher(
 	publisherConfig routing.PublisherConfig,
-	kubeClient client.Client,
-	apiReader client.Reader,
 	factory clusterWeightPublisherFactory,
 ) (*Publisher, error) {
-	if kubeClient == nil {
-		return nil, fmt.Errorf("Kubernetes client must not be nil")
-	}
 	if factory == nil {
 		return nil, fmt.Errorf("xDS cluster-weight publisher factory must not be nil")
 	}
@@ -126,14 +124,12 @@ func newPublisher(
 		return nil, fmt.Errorf("xDS cluster-weight publisher factory returned nil")
 	}
 	return &Publisher{
-		Client:    kubeClient,
-		APIReader: apiReader,
-		config:    cfg,
-		weights:   weights,
+		config:  cfg,
+		weights: weights,
 	}, nil
 }
 
-// Name implements endpoint.EndpointPublisher.
+// Name implements endpoint.TrafficMapPublisher.
 func (*Publisher) Name() string { return Name }
 
 func parseConfig(options map[string]string) (config, error) {
@@ -167,9 +163,8 @@ func parseConfig(options map[string]string) (config, error) {
 	if err != nil {
 		return config{}, err
 	}
-	targetTemplate, err := template.New("xds-target").Option("missingkey=error").Parse(templateText)
-	if err != nil {
-		return config{}, fmt.Errorf("routing.publisher.options[%q]: %w", optTargetTemplate, err)
+	if _, err := parseTargetTemplate(templateText); err != nil {
+		return config{}, err
 	}
 
 	resyncInterval, err := parsePositiveDuration(options, optResyncInterval)
@@ -202,7 +197,7 @@ func parseConfig(options map[string]string) (config, error) {
 	}
 
 	return config{
-		targetTemplate: targetTemplate,
+		targetTemplate: templateText,
 		resyncInterval: resyncInterval,
 		urlTemplate:    urlTemplate,
 		requestTimeout: requestTimeout,
@@ -212,6 +207,14 @@ func parseConfig(options map[string]string) (config, error) {
 		oncall:         oncall,
 		acl:            acl,
 	}, nil
+}
+
+func parseTargetTemplate(templateText string) (*template.Template, error) {
+	targetTemplate, err := template.New("xds-target").Option("missingkey=error").Parse(templateText)
+	if err != nil {
+		return nil, fmt.Errorf("routing.publisher.options[%q]: %w", optTargetTemplate, err)
+	}
+	return targetTemplate, nil
 }
 
 func validateURLTemplate(raw string) error {

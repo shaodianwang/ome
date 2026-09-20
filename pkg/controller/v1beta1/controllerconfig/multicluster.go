@@ -212,10 +212,10 @@ type RoutingConfig struct {
 	// Independent of Probe: enabling one never enables the other.
 	Capacity CapacityConfig `json:"capacity,omitempty"`
 
-	// Publisher selects an optional compiled-in backend for the existing endpoint
-	// publisher. Empty retains the Gateway API backend. A selected stateful
-	// backend must be drained by disabling routing before its name is removed.
-	// Options are validated by the selected backend at manager startup.
+	// Publisher selects an optional compiled-in TrafficMap publisher. Empty
+	// retains the Gateway API endpoint publisher. A selected stateful backend
+	// must be drained by disabling routing before its name is removed. Options
+	// are validated by the selected backend at manager startup.
 	Publisher TrafficMapPublisherConfig `json:"publisher,omitempty"`
 }
 

@@ -18,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -46,6 +47,7 @@ const (
 	trafficMapPublisherReasonInvalidOwner     = "InvalidOwner"
 	trafficMapPublisherReasonInvalidOptions   = "InvalidOptions"
 	trafficMapPublisherReasonInvalidPlan      = "InvalidPlan"
+	trafficMapPublisherReasonLegacyActive     = "LegacyLifecycleActive"
 	trafficMapPublisherReasonClaimRejected    = "ClaimRejected"
 	trafficMapPublisherReasonDrainFailed      = "DrainFailed"
 	trafficMapPublisherReasonApplyFailed      = "ApplyFailed"
@@ -163,6 +165,20 @@ func (r *TrafficMapPublisherReconciler) Reconcile(ctx context.Context, req ctrl.
 	}
 	if !owner.DeletionTimestamp.IsZero() || routingOptedOut(owner) {
 		return r.successResult(), nil
+	}
+	if r.Publisher.Stateful() && (trafficMap.Status.Publisher == nil ||
+		trafficMap.Status.Publisher.PublisherName != r.Publisher.Name()) {
+		legacyOwners, err := r.legacyEndpointOwners(ctx)
+		if err != nil {
+			return r.retryFailure(ctx, trafficMap, trafficMapPublisherReasonLegacyActive,
+				fmt.Errorf("check legacy endpoint publication state: %w", err))
+		}
+		if legacyOwners != 0 {
+			return r.reject(ctx, trafficMap, trafficMapPublisherReasonLegacyActive, fmt.Errorf(
+				"%d InferenceService(s) retain the legacy endpoint publisher finalizer; complete their cleanup before publishing TrafficMaps",
+				legacyOwners,
+			))
+		}
 	}
 	inlineOptions := routingPublisherOptions(owner)
 	effectiveOptions, err := r.Publisher.ResolveOptions(
@@ -450,6 +466,23 @@ func (r *TrafficMapPublisherReconciler) rejectClaimCollisions(
 		}
 	}
 	return nil
+}
+
+// legacyEndpointOwners fences first adoption by a stateful TrafficMap publisher
+// from side effects owned by the InferenceService lifecycle. That lifecycle
+// adds its finalizer before publication and removes it only after cleanup.
+func (r *TrafficMapPublisherReconciler) legacyEndpointOwners(ctx context.Context) (int, error) {
+	services := &v1beta1.InferenceServiceList{}
+	if err := r.APIReader.List(ctx, services); err != nil {
+		return 0, err
+	}
+	count := 0
+	for i := range services.Items {
+		if controllerutil.ContainsFinalizer(&services.Items[i], EndpointFinalizer) {
+			count++
+		}
+	}
+	return count, nil
 }
 
 func (r *TrafficMapPublisherReconciler) finalize(
@@ -835,7 +868,10 @@ func (r *TrafficMapPublisherReconciler) SetupWithManager(mgr ctrl.Manager) error
 }
 
 func trafficMapPublisherControllerOptions() controller.Options {
-	return controller.Options{MaxConcurrentReconciles: 1}
+	return controller.Options{
+		MaxConcurrentReconciles: 1,
+		NeedLeaderElection:      ptr.To(true),
+	}
 }
 
 func enqueueOwnedTrafficMap(_ context.Context, object client.Object) []ctrlreconcile.Request {
@@ -949,6 +985,8 @@ func trafficMapPublisherFailureMessage(reason string) string {
 		return "Publisher options are invalid"
 	case trafficMapPublisherReasonInvalidPlan:
 		return "Publisher plan is invalid"
+	case trafficMapPublisherReasonLegacyActive:
+		return "Legacy endpoint publisher cleanup is incomplete"
 	case trafficMapPublisherReasonClaimRejected:
 		return "Publisher claims could not be acquired"
 	case trafficMapPublisherReasonDrainFailed:

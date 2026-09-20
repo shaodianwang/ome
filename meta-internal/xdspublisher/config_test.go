@@ -9,7 +9,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/placement/routing"
 )
@@ -31,6 +30,7 @@ func validOptions() map[string]string {
 func TestParseConfig(t *testing.T) {
 	cfg, err := parseConfig(validOptions())
 	require.NoError(t, err)
+	assert.Equal(t, "{{.EndpointHostname}}", cfg.targetTemplate)
 	assert.Equal(t, time.Minute, cfg.resyncInterval)
 	assert.Equal(t, 10*time.Second, cfg.requestTimeout)
 	assert.Equal(t, "https://automation.example.com/api/v1/clusters/{cluster}/weight", cfg.urlTemplate)
@@ -91,15 +91,16 @@ func TestNewPublisherBuildsHTTPClient(t *testing.T) {
 		return httpPublisher, nil
 	}
 
-	kubeClient := fake.NewClientBuilder().Build()
-	got, err := newPublisher(
+	got, err := newTrafficMapPublisherWithFactory(
 		routing.PublisherConfig{Options: validOptions()},
-		kubeClient,
-		kubeClient,
 		factory,
 	)
 	require.NoError(t, err)
-	assert.Same(t, httpPublisher, got.weights)
+	assert.Same(t, httpPublisher, got.Publisher.(*Publisher).weights)
+	assert.Equal(t, time.Minute, got.ResyncInterval)
+	assert.Equal(t, map[string]string{
+		optTargetTemplate: "{{.EndpointHostname}}",
+	}, got.GlobalOptions)
 	assert.Equal(t, "ome", gotConfig.oncall)
 	require.NotNil(t, gotConfig.acl)
 	assert.Equal(t, "ome-xds-publisher", *gotConfig.acl)
@@ -110,11 +111,8 @@ func TestNewPublisherReportsHTTPClientFailure(t *testing.T) {
 		return nil, errors.New("TLS unavailable")
 	}
 
-	kubeClient := fake.NewClientBuilder().Build()
 	_, err := newPublisher(
 		routing.PublisherConfig{Options: validOptions()},
-		kubeClient,
-		kubeClient,
 		factory,
 	)
 	require.Error(t, err)
@@ -122,11 +120,8 @@ func TestNewPublisherReportsHTTPClientFailure(t *testing.T) {
 }
 
 func TestNewPublisherRejectsNilFactory(t *testing.T) {
-	kubeClient := fake.NewClientBuilder().Build()
 	_, err := newPublisher(
 		routing.PublisherConfig{Options: validOptions()},
-		kubeClient,
-		kubeClient,
 		nil,
 	)
 	require.Error(t, err)

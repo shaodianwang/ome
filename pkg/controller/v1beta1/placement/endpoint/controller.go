@@ -2,11 +2,9 @@ package endpoint
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"slices"
 	"sort"
-	"time"
 
 	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -24,25 +22,14 @@ import (
 )
 
 // Reconciler watches InferenceServices and their TrafficMaps on the control
-// plane and drives the selected publisher through one shared lifecycle.
+// plane and realizes the Gateway API publication lifecycle.
 type Reconciler struct {
 	client.Client
 	Log logr.Logger
-	// Publisher is the selected traffic backend. Required.
+	// Publisher is the Gateway API traffic backend. Required.
 	Publisher EndpointPublisher
 	// Config supplies the config-driven host/gateway/port/namespace inputs.
 	Config Config
-	// Active overrides Config.IsEnabled when set. Deployment-specific
-	// publishers use it to share this reconciler without requiring Gateway API
-	// configuration.
-	Active *bool
-	// UseTrafficMap makes the generated TrafficMap, including an empty map, the
-	// publisher's exact desired input instead of overlaying its weights on the
-	// placement-derived homes used by the Gateway API compatibility path.
-	UseTrafficMap bool
-	// RequeueAfter periodically reasserts external publisher state. Zero keeps
-	// the Gateway API publisher's existing refresh behavior.
-	RequeueAfter time.Duration
 }
 
 // +kubebuilder:rbac:groups=ome.io,resources=inferenceservices,verbs=get;list;watch;update;patch
@@ -65,7 +52,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// Backend not configured: tear down anything already published — it carries no
 	// OwnerReferences, so dropping the finalizer without unpublishing leaks it —
 	// and release the object, deleted or not.
-	if !r.isActive() {
+	if !r.Config.IsEnabled() {
 		if controllerutil.ContainsFinalizer(isvc, EndpointFinalizer) {
 			if err := r.Publisher.Unpublish(ctx, isvc); err != nil {
 				return ctrl.Result{}, err
@@ -82,22 +69,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return r.reconcileDelete(ctx, isvc)
 	}
 
-	var target Target
-	var ok bool
-	var err error
-	if r.UseTrafficMap {
-		target, ok, err = r.trafficMapTarget(ctx, isvc)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-	} else {
-		target, ok, err = r.resolveTarget(isvc, r.trafficMapWeights(ctx, isvc))
-		if err != nil {
-			// An invalid global-host template is an operator configuration error;
-			// surface it and retry on the next change rather than hot-looping.
-			r.Log.Error(err, "endpoint: resolve target failed", "isvc", req.String())
-			return ctrl.Result{}, nil
-		}
+	target, ok, err := r.resolveTarget(isvc, r.trafficMapWeights(ctx, isvc))
+	if err != nil {
+		// An invalid global-host template is an operator configuration error;
+		// surface it and retry on the next change rather than hot-looping.
+		r.Log.Error(err, "endpoint: resolve target failed", "isvc", req.String())
+		return ctrl.Result{}, nil
 	}
 
 	if !ok {
@@ -115,53 +92,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 	r.Log.Info("endpoint published", "isvc", req.String(), "backend", r.Publisher.Name(),
 		"globalHost", target.GlobalHost, "homes", len(target.Homes))
-	if r.RequeueAfter > 0 {
-		return ctrl.Result{RequeueAfter: r.RequeueAfter}, nil
-	}
 	if r.Config.GatewayBackend.EndpointSlices.Enabled && r.Config.GatewayBackend.EndpointSlices.AddressRefreshInterval > 0 {
 		return ctrl.Result{RequeueAfter: r.Config.GatewayBackend.EndpointSlices.AddressRefreshInterval}, nil
 	}
 	return ctrl.Result{}, nil
-}
-
-func (r *Reconciler) isActive() bool {
-	if r.Active != nil {
-		return *r.Active
-	}
-	return r.Config.IsEnabled()
-}
-
-// trafficMapTarget resolves the exact routing table for a deployment-specific
-// publisher. A missing or empty map for a multi-cluster service is still a
-// valid empty target, allowing a stateful publisher to hold retired homes at
-// zero instead of restoring a static fallback.
-func (r *Reconciler) trafficMapTarget(ctx context.Context, isvc *v1beta1.InferenceService) (Target, bool, error) {
-	if !placementcontroller.IsPlacementEligible(isvc) || routingOptedOut(isvc) {
-		return Target{}, false, nil
-	}
-	tm := &v1beta1.TrafficMap{}
-	err := r.Get(ctx, types.NamespacedName{Name: isvc.Name, Namespace: isvc.Namespace}, tm)
-	if apierrors.IsNotFound(err) {
-		return Target{}, true, nil
-	}
-	if err != nil {
-		return Target{}, false, err
-	}
-
-	homes := make([]Home, 0, len(tm.Spec.Entries))
-	for _, entry := range tm.Spec.Entries {
-		if entry.Endpoint == nil || entry.Endpoint.Host == "" {
-			return Target{}, false, fmt.Errorf("TrafficMap entry %q has no endpoint host", entry.Cluster)
-		}
-		homes = append(homes, Home{
-			Cluster:     entry.Cluster,
-			Endpoint:    entry.Endpoint.String(),
-			BackendHost: hostOnly(entry.Endpoint.Host),
-			Weight:      entry.Weight,
-		})
-	}
-	sort.Slice(homes, func(i, j int) bool { return homes[i].Cluster < homes[j].Cluster })
-	return Target{Service: tm.Spec.Service, Homes: homes, WeightsAuthoritative: true}, true, nil
 }
 
 func routingOptedOut(isvc *v1beta1.InferenceService) bool {

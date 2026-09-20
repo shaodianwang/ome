@@ -109,10 +109,10 @@ twice.
 
 ### `xdspublisher/` — TrafficMap to the internal xDS publisher
 
-This extension implements the existing `placement/endpoint.EndpointPublisher`
-contract. The shared endpoint reconciler continues to own the
-InferenceService/TrafficMap watches and finalizer; this package only translates
-TrafficMap homes into calls to the xDS automation HTTP API:
+This extension implements the TrafficMap publisher contract. The shared
+TrafficMap publisher reconciler owns watches, target claims, status, and its
+TrafficMap finalizer; this package translates immutable publication plans into
+calls to the xDS automation HTTP API:
 
 ```http
 PUT /api/v1/clusters/{cluster}/weight
@@ -133,11 +133,13 @@ recovery republishes the newly computed capacity weights.
 Selecting `routing.publisher.name: xds` replaces the default Gateway API
 publisher; the two publishers do not run side by side.
 
-OME journals targets on the source InferenceService before each external call.
-Targets removed from an active map are held at weight zero; deletion or an
-explicit disable clears the overrides before the shared endpoint finalizer is
-released. Journals also prevent two InferenceServices in one control plane from
-claiming the same target.
+OME journals canonical targets in `TrafficMap.status.publisher.claimedTargets`
+before each external call. Targets removed from an active map are held at
+weight zero; TrafficMap deletion clears exactly the targets in that journal
+before its publisher finalizer is released. The shared reconciler also prevents
+two TrafficMaps in one control plane from claiming the same target. Because
+these external mutations are stateful, manager leader election must be enabled
+when this publisher is selected.
 
 Configuration is deliberately explicit and has no defaults:
 
@@ -163,6 +165,12 @@ The target template receives `Namespace`, `Service`, `Cluster`, `Endpoint`,
 cluster name. A `;fallback=` suffix is canonicalized to its primary tier.
 `{cluster}` in `urlTemplate` is replaced with the path-escaped result.
 
+Publisher options on individual InferenceServices are rejected. In particular,
+`targetTemplate` is installation-wide: allowing an object to replace it would
+let that object redirect writes outside the operator-owned target scope. Only
+the global target template participates in the per-TrafficMap options digest;
+transport paths, credentials, and service metadata remain manager-local.
+
 The client presents the configured workload certificate directly to the remote
 proxy and trusts only the configured CA bundle. It deliberately ignores ambient
 HTTP proxy settings because a proxy would terminate mutual TLS under another
@@ -174,8 +182,28 @@ and CA files must be mounted in the controller container.
 
 The internal manager image compiles this package with `meta_internal`; no
 fbsource mirror, Ligen binding, or alternate OME build graph is required.
-Disable it in two steps: first set `routing.enabled: false` while keeping
-`publisher.name: xds`, then remove the publisher configuration after the
-endpoint finalizers drain. Likewise, drain the currently selected backend
-before switching between xDS and Gateway API; the shared finalizer invokes only
-the publisher selected at startup.
+
+Upgrading from the InferenceService-owned publisher lifecycle requires a drain
+with the old binary:
+
+1. Keep `publisher.name: xds`, deploy the old binary with
+   `routing.enabled: false`, and leave its publisher configuration in place.
+2. Wait until every affected InferenceService has neither the
+   `ome.io/placement-endpoint` finalizer nor the
+   `routing.ome.io/xds-published-targets` annotation.
+3. Deploy the TrafficMap-owned publisher and re-enable routing.
+
+Before adopting an unjournaled TrafficMap, the shared reconciler waits until no
+InferenceService in the cluster retains the old endpoint finalizer. This
+prevents a partially drained rollout from publishing a target that an old
+lifecycle still owns. Once a TrafficMap has its new publisher journal, it
+continues to refresh while other metadata changes so a user-editable finalizer
+cannot freeze established traffic updates.
+
+The xDS adapter deliberately does not interpret, migrate, or delete the old
+annotation. It rejects a TrafficMap while that map's owner has either legacy
+marker, including an empty or malformed annotation, because only the old
+lifecycle can prove that its external overrides were cleaned. An annotation on
+another owner is not treated as a target claim. The same drain rule applies
+before switching between xDS and Gateway API: the selected publisher can
+finalize only journals it owns.

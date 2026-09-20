@@ -113,6 +113,119 @@ func TestTrafficMapPublisherAddsFinalizerBeforeEffects(t *testing.T) {
 	assert.Nil(t, current.Status.Publisher)
 }
 
+func TestTrafficMapPublisherWaitsForLegacyEndpointCleanup(t *testing.T) {
+	owner, trafficMap := publisherTestObjects()
+	legacyOwner := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{
+		Name: "legacy", Namespace: "team-b", UID: "legacy-uid",
+		Finalizers: []string{EndpointFinalizer},
+	}}
+	planCalls := 0
+	publisher := &recordingTrafficMapPublisher{
+		name: "example-publisher", stateful: true, claims: []string{"target-a"},
+		plan: func(
+			*v1beta1.InferenceService,
+			*v1beta1.TrafficMap,
+			map[string]string,
+		) (TrafficMapPublishPlan, error) {
+			planCalls++
+			return testTrafficMapPublishPlan{claims: []string{"target-a"}}, nil
+		},
+	}
+	reconciler, kubeClient := newTrafficMapPublisherReconciler(
+		t, publisher, owner, trafficMap, legacyOwner,
+	)
+	reconciler.RequeueAfter = time.Minute
+
+	result, err := reconcileTrafficMapPublisher(t, reconciler, trafficMap)
+	require.NoError(t, err)
+	assert.Equal(t, time.Minute, result.RequeueAfter)
+	assert.Zero(t, planCalls)
+	assert.Empty(t, publisher.events)
+	current := getPublisherTrafficMap(t, kubeClient, trafficMap)
+	assert.NotContains(t, current.Finalizers, TrafficMapPublisherFinalizer)
+	condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
+	require.NotNil(t, condition)
+	assert.Equal(t, trafficMapPublisherReasonLegacyActive, condition.Reason)
+
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(legacyOwner), legacyOwner))
+	legacyOwner.Finalizers = nil
+	require.NoError(t, kubeClient.Update(context.Background(), legacyOwner))
+	result, err = reconcileTrafficMapPublisher(t, reconciler, current)
+	require.NoError(t, err)
+	assert.True(t, result.Requeue)
+	assert.Equal(t, 1, planCalls)
+	assert.Empty(t, publisher.events, "publication waits for the TrafficMap finalizer write")
+	current = getPublisherTrafficMap(t, kubeClient, trafficMap)
+	assert.Contains(t, current.Finalizers, TrafficMapPublisherFinalizer)
+}
+
+func TestTrafficMapPublisherForeignJournalDoesNotBypassLegacyCleanup(t *testing.T) {
+	owner, trafficMap := publisherTestObjects()
+	trafficMap.Finalizers = []string{TrafficMapPublisherFinalizer}
+	trafficMap.Status.Publisher = &v1beta1.TrafficMapPublisherStatus{PublisherName: "other-publisher"}
+	legacyOwner := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{
+		Name: "legacy", Namespace: "team-b", UID: "legacy-uid",
+		Finalizers: []string{EndpointFinalizer},
+	}}
+	publisher := &recordingTrafficMapPublisher{
+		name: "example-publisher", stateful: true, claims: []string{"target-a"},
+	}
+	reconciler, kubeClient := newTrafficMapPublisherReconciler(
+		t, publisher, owner, trafficMap, legacyOwner,
+	)
+
+	_, err := reconcileTrafficMapPublisher(t, reconciler, trafficMap)
+	require.NoError(t, err)
+	assert.Empty(t, publisher.events)
+	current := getPublisherTrafficMap(t, kubeClient, trafficMap)
+	condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
+	require.NotNil(t, condition)
+	assert.Equal(t, trafficMapPublisherReasonLegacyActive, condition.Reason)
+}
+
+func TestTrafficMapPublisherEstablishedJournalDoesNotUseMigrationFence(t *testing.T) {
+	owner, trafficMap := publisherTestObjects()
+	trafficMap.Finalizers = []string{TrafficMapPublisherFinalizer}
+	trafficMap.Status.Publisher = &v1beta1.TrafficMapPublisherStatus{
+		PublisherName: "example-publisher", ClaimedTargets: []string{"target-a"},
+	}
+	legacyOwner := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{
+		Name: "legacy", Namespace: "team-b", UID: "legacy-uid",
+		Finalizers: []string{EndpointFinalizer},
+	}}
+	publisher := &recordingTrafficMapPublisher{
+		name: "example-publisher", stateful: true, claims: []string{"target-a"},
+	}
+	reconciler, _ := newTrafficMapPublisherReconciler(t, publisher, owner, trafficMap, legacyOwner)
+
+	_, err := reconcileTrafficMapPublisher(t, reconciler, trafficMap)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"apply"}, publisher.events)
+}
+
+func TestTrafficMapPublisherRetriesLegacyStateReadFailure(t *testing.T) {
+	owner, trafficMap := publisherTestObjects()
+	baseClient := newTrafficMapPublisherClient(t, owner, trafficMap)
+	reader := &failInferenceServiceListReader{
+		Reader: baseClient,
+		err:    errors.New("injected InferenceService list failure"),
+	}
+	publisher := &recordingTrafficMapPublisher{
+		name: "example-publisher", stateful: true, claims: []string{"target-a"},
+	}
+	reconciler := &TrafficMapPublisherReconciler{
+		Client: baseClient, APIReader: reader, Log: logr.Discard(), Publisher: publisher, Active: true,
+	}
+
+	_, err := reconcileTrafficMapPublisher(t, reconciler, trafficMap)
+	require.ErrorContains(t, err, "injected InferenceService list failure")
+	assert.Empty(t, publisher.events)
+	current := getPublisherTrafficMap(t, baseClient, trafficMap)
+	condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
+	require.NotNil(t, condition)
+	assert.Equal(t, trafficMapPublisherReasonLegacyActive, condition.Reason)
+}
+
 func TestTrafficMapPublisherPreclaimsBeforeDrainAndApply(t *testing.T) {
 	owner, trafficMap := publisherTestObjects()
 	trafficMap.Finalizers = []string{TrafficMapPublisherFinalizer}
@@ -610,7 +723,11 @@ func TestTrafficMapPublisherFinalizesWithoutOwner(t *testing.T) {
 			return nil
 		},
 	}
-	reconciler, kubeClient := newTrafficMapPublisherReconciler(t, publisher, trafficMap)
+	legacyOwner := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{
+		Name: "legacy", Namespace: "team-b", UID: "legacy-uid",
+		Finalizers: []string{EndpointFinalizer},
+	}}
+	reconciler, kubeClient := newTrafficMapPublisherReconciler(t, publisher, trafficMap, legacyOwner)
 
 	_, err := reconcileTrafficMapPublisher(t, reconciler, trafficMap)
 	require.Error(t, err)
@@ -839,7 +956,10 @@ func TestTrafficMapPublisherHelpers(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEqual(t, first, otherPublisher)
 
-	assert.Equal(t, 1, trafficMapPublisherControllerOptions().MaxConcurrentReconciles)
+	options := trafficMapPublisherControllerOptions()
+	assert.Equal(t, 1, options.MaxConcurrentReconciles)
+	require.NotNil(t, options.NeedLeaderElection)
+	assert.True(t, *options.NeedLeaderElection)
 	requests := enqueueOwnedTrafficMap(context.Background(), &v1beta1.InferenceService{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "model"},
 	})
@@ -994,6 +1114,22 @@ type staleTrafficMapClient struct {
 	client.Client
 	stale  *v1beta1.TrafficMap
 	served bool
+}
+
+type failInferenceServiceListReader struct {
+	client.Reader
+	err error
+}
+
+func (r *failInferenceServiceListReader) List(
+	ctx context.Context,
+	list client.ObjectList,
+	options ...client.ListOption,
+) error {
+	if _, ok := list.(*v1beta1.InferenceServiceList); ok {
+		return r.err
+	}
+	return r.Reader.List(ctx, list, options...)
 }
 
 func (c *staleTrafficMapClient) Get(

@@ -6,15 +6,12 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"text/template"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"knative.dev/pkg/apis"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	placementendpoint "github.com/ome-projects/ome/pkg/controller/v1beta1/placement/endpoint"
@@ -51,185 +48,318 @@ func testISVC(name string) *v1beta1.InferenceService {
 	}}
 }
 
-func testTarget() placementendpoint.Target {
-	return placementendpoint.Target{Homes: []placementendpoint.Home{
-		{Cluster: "home-b", Endpoint: "https://model-a.team-a.home-b.mks:8443", BackendHost: "model-a.team-a.home-b.mks", Weight: 30},
-		{Cluster: "home-a", Endpoint: "https://model-a.team-a.home-a.mks", BackendHost: "model-a.team-a.home-a.mks", Weight: 70},
-	}}
-}
-
-func newTestPublisher(
-	t *testing.T,
-	weights ClusterWeightPublisher,
-	objects ...client.Object,
-) (*Publisher, client.Client) {
-	t.Helper()
-	scheme := runtime.NewScheme()
-	require.NoError(t, v1beta1.AddToScheme(scheme))
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
-	return &Publisher{
-		Client:    c,
-		APIReader: c,
-		config: config{
-			targetTemplate: template.Must(template.New("target").Parse("{{.EndpointHostname}}")),
+func testTrafficMap() *v1beta1.TrafficMap {
+	return &v1beta1.TrafficMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "model-a", Namespace: "team-a"},
+		Spec: v1beta1.TrafficMapSpec{
+			Service: "model-a",
+			Entries: []v1beta1.TrafficMapEntry{
+				{
+					Cluster:  "home-b",
+					Endpoint: &apis.URL{Scheme: "https", Host: "model-a.team-a.home-b.example:8443"},
+					Weight:   30,
+				},
+				{
+					Cluster:  "home-a",
+					Endpoint: &apis.URL{Scheme: "https", Host: "model-a.team-a.home-a.example"},
+					Weight:   70,
+				},
+			},
 		},
-		weights: weights,
-	}, c
-}
-
-func TestPublishWritesWeightsAndJournalsTargets(t *testing.T) {
-	isvc := testISVC("model-a")
-	weights := &recordingPublisher{}
-	p, c := newTestPublisher(t, weights, isvc)
-
-	require.NoError(t, p.Publish(context.Background(), isvc, testTarget()))
-	assert.Equal(t, []weightedTarget{
-		{name: "model-a.team-a.home-a.mks", weight: 70},
-		{name: "model-a.team-a.home-b.mks", weight: 30},
-	}, weights.published)
-
-	got := &v1beta1.InferenceService{}
-	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(isvc), got))
-	assert.Equal(t,
-		`["model-a.team-a.home-a.mks","model-a.team-a.home-b.mks"]`,
-		got.Annotations[targetsAnnotation])
-}
-
-func TestPublishZeroesRemovedTargetsBeforePositiveWeights(t *testing.T) {
-	isvc := testISVC("model-a")
-	isvc.Annotations = map[string]string{
-		targetsAnnotation: `["model-a.team-a.home-a.mks","old.mks"]`,
 	}
-	target := testTarget()
-	target.Homes[0].Weight = 0
-	weights := &recordingPublisher{}
-	p, c := newTestPublisher(t, weights, isvc)
-
-	require.NoError(t, p.Publish(context.Background(), isvc, target))
-	assert.Equal(t, []weightedTarget{
-		{name: "old.mks", weight: 0},
-		{name: "model-a.team-a.home-b.mks", weight: 0},
-		{name: "model-a.team-a.home-a.mks", weight: 70},
-	}, weights.published)
-
-	got := &v1beta1.InferenceService{}
-	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(isvc), got))
-	assert.Equal(t,
-		`["model-a.team-a.home-a.mks","model-a.team-a.home-b.mks","old.mks"]`,
-		got.Annotations[targetsAnnotation])
 }
 
-func TestPublishPropagatesAllZeroAndRecovery(t *testing.T) {
-	isvc := testISVC("model-a")
-	weights := &recordingPublisher{}
-	p, _ := newTestPublisher(t, weights, isvc)
-	target := testTarget()
-	for i := range target.Homes {
-		target.Homes[i].Weight = 0
+func newTestPublisher(weights ClusterWeightPublisher) *Publisher {
+	return &Publisher{weights: weights}
+}
+
+func targetOptions(value string) map[string]string {
+	return map[string]string{optTargetTemplate: value}
+}
+
+func TestPublisherIdentityAndState(t *testing.T) {
+	p := newTestPublisher(&recordingPublisher{})
+	assert.Equal(t, Name, p.Name())
+	assert.True(t, p.Stateful())
+}
+
+func TestResolveOptionsKeepsOnlyGlobalTargetTemplate(t *testing.T) {
+	p := newTestPublisher(&recordingPublisher{})
+	global := targetOptions("  {{.EndpointHostname}}  ")
+
+	effective, err := p.ResolveOptions(global, nil)
+	require.NoError(t, err)
+	assert.Equal(t, targetOptions("{{.EndpointHostname}}"), effective)
+
+	global[optTargetTemplate] = "changed"
+	assert.Equal(t, "{{.EndpointHostname}}", effective[optTargetTemplate])
+}
+
+func TestResolveOptionsRejectsEveryInlineOption(t *testing.T) {
+	p := newTestPublisher(&recordingPublisher{})
+	for _, inline := range []map[string]string{
+		{optTargetTemplate: "{{.Cluster}}"},
+		{optRequestTimeout: "1s"},
+		{"unknown": "value"},
+	} {
+		_, err := p.ResolveOptions(targetOptions("{{.EndpointHostname}}"), inline)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "does not accept per-InferenceService options")
 	}
+}
 
-	require.NoError(t, p.Publish(context.Background(), isvc, target))
+func TestResolveOptionsValidatesSanitizedGlobals(t *testing.T) {
+	p := newTestPublisher(&recordingPublisher{})
+	tests := []struct {
+		name    string
+		options map[string]string
+		want    string
+	}{
+		{name: "missing", options: nil, want: "required"},
+		{name: "invalid template", options: targetOptions("{{"), want: optTargetTemplate},
+		{name: "unexpected", options: map[string]string{optTargetTemplate: "{{.Cluster}}", optOncall: "team"}, want: "unsupported"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := p.ResolveOptions(tt.options, nil)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.want)
+		})
+	}
+}
+
+func TestPlanIsImmutableAndApplyPublishesZeroBeforePositive(t *testing.T) {
+	owner := testISVC("model-a")
+	trafficMap := testTrafficMap()
+	trafficMap.Spec.Entries[1].Weight = 0
+	options := targetOptions("{{.EndpointHostname}}")
+	weights := &recordingPublisher{}
+	p := newTestPublisher(weights)
+
+	plan, err := p.Plan(owner, trafficMap, options)
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"model-a.team-a.home-a.example",
+		"model-a.team-a.home-b.example",
+	}, plan.Claims())
+
+	claims := plan.Claims()
+	claims[0] = "mutated"
+	owner.Namespace = "mutated"
+	trafficMap.Spec.Entries[0].Endpoint.Host = "mutated.example"
+	trafficMap.Spec.Entries[0].Weight = 99
+	options[optTargetTemplate] = "mutated"
+	assert.Equal(t, "model-a.team-a.home-a.example", plan.Claims()[0])
+
+	result, err := p.Apply(context.Background(), plan)
+	require.NoError(t, err)
+	assert.Zero(t, result)
 	assert.Equal(t, []weightedTarget{
-		{name: "model-a.team-a.home-a.mks", weight: 0},
-		{name: "model-a.team-a.home-b.mks", weight: 0},
-	}, weights.published)
-
-	weights.published = nil
-	target.Homes[0].Weight = 30
-	target.Homes[1].Weight = 70
-	require.NoError(t, p.Publish(context.Background(), isvc, target))
-	assert.Equal(t, []weightedTarget{
-		{name: "model-a.team-a.home-a.mks", weight: 70},
-		{name: "model-a.team-a.home-b.mks", weight: 30},
+		{name: "model-a.team-a.home-a.example", weight: 0},
+		{name: "model-a.team-a.home-b.example", weight: 30},
 	}, weights.published)
 }
 
-func TestPublishEmptyTargetHoldsPriorTargetsAtZero(t *testing.T) {
-	isvc := testISVC("model-a")
-	isvc.Annotations = map[string]string{targetsAnnotation: `["a.mks","b.mks"]`}
-	weights := &recordingPublisher{}
-	p, c := newTestPublisher(t, weights, isvc)
+func TestPlanRejectsLegacyLifecycleStateWithoutPublishing(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*v1beta1.InferenceService)
+		want   string
+	}{
+		{
+			name: "endpoint finalizer",
+			mutate: func(owner *v1beta1.InferenceService) {
+				owner.Finalizers = []string{placementendpoint.EndpointFinalizer}
+			},
+			want: placementendpoint.EndpointFinalizer,
+		},
+		{
+			name: "empty annotation",
+			mutate: func(owner *v1beta1.InferenceService) {
+				owner.Annotations = map[string]string{legacyTargetsAnnotation: ""}
+			},
+			want: legacyTargetsAnnotation,
+		},
+		{
+			name: "malformed annotation",
+			mutate: func(owner *v1beta1.InferenceService) {
+				owner.Annotations = map[string]string{legacyTargetsAnnotation: "not-json"}
+			},
+			want: legacyTargetsAnnotation,
+		},
+		{
+			name: "valid annotation",
+			mutate: func(owner *v1beta1.InferenceService) {
+				owner.Annotations = map[string]string{legacyTargetsAnnotation: `["old.example"]`}
+			},
+			want: legacyTargetsAnnotation,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			owner := testISVC("model-a")
+			tt.mutate(owner)
+			weights := &recordingPublisher{}
+			p := newTestPublisher(weights)
 
-	require.NoError(t, p.Publish(context.Background(), isvc, placementendpoint.Target{}))
-	assert.Equal(t, []weightedTarget{{name: "a.mks", weight: 0}, {name: "b.mks", weight: 0}}, weights.published)
-
-	got := &v1beta1.InferenceService{}
-	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(isvc), got))
-	assert.Equal(t, `["a.mks","b.mks"]`, got.Annotations[targetsAnnotation])
+			plan, err := p.Plan(owner, testTrafficMap(), targetOptions("{{.EndpointHostname}}"))
+			require.Error(t, err)
+			assert.Nil(t, plan)
+			assert.Contains(t, err.Error(), tt.want)
+			assert.Empty(t, weights.published)
+			assert.Empty(t, weights.cleared)
+		})
+	}
 }
 
-func TestPartialPublishLeavesAttemptedTargetsJournaled(t *testing.T) {
-	isvc := testISVC("model-a")
-	weights := &recordingPublisher{publishFailures: map[string]error{
-		"model-a.team-a.home-b.mks": errors.New("HTTP publisher unavailable"),
-	}}
-	p, c := newTestPublisher(t, weights, isvc)
+func TestPlanValidatesAndCanonicalizesTargets(t *testing.T) {
+	owner := testISVC("model-a")
+	trafficMap := testTrafficMap()
+	p := newTestPublisher(&recordingPublisher{})
 
-	err := p.Publish(context.Background(), isvc, testTarget())
-	require.Error(t, err)
-	got := &v1beta1.InferenceService{}
-	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(isvc), got))
-	assert.Equal(t,
-		`["model-a.team-a.home-a.mks","model-a.team-a.home-b.mks"]`,
-		got.Annotations[targetsAnnotation])
-}
-
-func TestUnpublishClearsJournaledTargets(t *testing.T) {
-	isvc := testISVC("model-a")
-	isvc.Annotations = map[string]string{targetsAnnotation: `["a.mks","b.mks"]`}
-	weights := &recordingPublisher{}
-	p, c := newTestPublisher(t, weights, isvc)
-
-	require.NoError(t, p.Unpublish(context.Background(), isvc))
-	assert.Equal(t, []string{"a.mks", "b.mks"}, weights.cleared)
-	got := &v1beta1.InferenceService{}
-	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(isvc), got))
-	assert.NotContains(t, got.Annotations, targetsAnnotation)
-}
-
-func TestUnpublishFailureRetainsJournal(t *testing.T) {
-	isvc := testISVC("model-a")
-	isvc.Annotations = map[string]string{targetsAnnotation: `["a.mks"]`}
-	weights := &recordingPublisher{clearFailures: map[string]error{"a.mks": errors.New("SMC unavailable")}}
-	p, c := newTestPublisher(t, weights, isvc)
-
-	require.Error(t, p.Unpublish(context.Background(), isvc))
-	got := &v1beta1.InferenceService{}
-	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(isvc), got))
-	assert.Equal(t, `["a.mks"]`, got.Annotations[targetsAnnotation])
-}
-
-func TestPublishRejectsTargetClaimedByAnotherService(t *testing.T) {
-	owner := testISVC("owner")
-	owner.Annotations = map[string]string{targetsAnnotation: `["model-a.team-a.home-a.mks"]`}
-	contender := testISVC("model-a")
-	target := testTarget()
-	target.Homes = target.Homes[1:]
-	weights := &recordingPublisher{}
-	p, _ := newTestPublisher(t, weights, owner, contender)
-
-	err := p.Publish(context.Background(), contender, target)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "already claimed")
-	assert.Empty(t, weights.published)
-}
-
-func TestDesiredTargetsValidateAndCanonicalize(t *testing.T) {
-	isvc := testISVC("model-a")
-	p, _ := newTestPublisher(t, &recordingPublisher{}, isvc)
-
-	p.config.targetTemplate = template.Must(template.New("same").Parse("same-target"))
-	_, err := p.desiredTargets(isvc, testTarget())
+	_, err := p.Plan(owner, trafficMap, targetOptions("same-target"))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "more than one entry")
 
-	p.config.targetTemplate = template.Must(template.New("scoped").Parse("scope/{{.Cluster}}"))
-	_, err = p.desiredTargets(isvc, testTarget())
+	_, err = p.Plan(owner, trafficMap, targetOptions("scope/{{.Cluster}}"))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "without a scope prefix")
 
-	p.config.targetTemplate = template.Must(template.New("fallback").Parse("{{.Cluster}};fallback=other"))
-	targets, err := p.desiredTargets(isvc, testTarget())
+	plan, err := p.Plan(owner, trafficMap, targetOptions("{{.Cluster}};fallback=other"))
 	require.NoError(t, err)
-	assert.Equal(t, []weightedTarget{{name: "home-a", weight: 70}, {name: "home-b", weight: 30}}, targets)
+	assert.Equal(t, []string{"home-a", "home-b"}, plan.Claims())
+}
+
+func TestPlanRejectsInvalidTrafficMap(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*v1beta1.TrafficMap)
+		want   string
+	}{
+		{name: "empty service", mutate: func(tm *v1beta1.TrafficMap) { tm.Spec.Service = "" }, want: "service"},
+		{name: "nil endpoint", mutate: func(tm *v1beta1.TrafficMap) { tm.Spec.Entries[0].Endpoint = nil }, want: "endpoint"},
+		{name: "empty host", mutate: func(tm *v1beta1.TrafficMap) {
+			tm.Spec.Entries[0].Endpoint = &apis.URL{Scheme: "https"}
+		}, want: "endpoint"},
+		{name: "negative weight", mutate: func(tm *v1beta1.TrafficMap) { tm.Spec.Entries[0].Weight = -1 }, want: "negative"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			trafficMap := testTrafficMap()
+			tt.mutate(trafficMap)
+			plan, err := newTestPublisher(&recordingPublisher{}).Plan(
+				testISVC("model-a"), trafficMap, targetOptions("{{.EndpointHostname}}"),
+			)
+			require.Error(t, err)
+			assert.Nil(t, plan)
+			assert.Contains(t, err.Error(), tt.want)
+		})
+	}
+}
+
+func TestDrainPublishesZeroForClaims(t *testing.T) {
+	weights := &recordingPublisher{}
+	p := newTestPublisher(weights)
+
+	require.NoError(t, p.Drain(context.Background(), []string{"b.example", "a.example"}))
+	assert.Equal(t, []weightedTarget{
+		{name: "a.example", weight: 0},
+		{name: "b.example", weight: 0},
+	}, weights.published)
+}
+
+func TestApplyAndDrainStopOnFailure(t *testing.T) {
+	weights := &recordingPublisher{publishFailures: map[string]error{"a.example": errors.New("unavailable")}}
+	p := newTestPublisher(weights)
+
+	err := p.Drain(context.Background(), []string{"a.example", "b.example"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "a.example")
+	assert.Equal(t, []weightedTarget{{name: "a.example", weight: 0}}, weights.published)
+
+	weights.publishFailures["a.example"] = errors.New("unavailable")
+	weights.published = nil
+	_, err = p.Apply(context.Background(), &publishPlan{
+		targets: []weightedTarget{{name: "a.example", weight: 1}, {name: "b.example", weight: 2}},
+		claims:  []string{"a.example", "b.example"},
+	})
+	require.Error(t, err)
+	assert.Equal(t, []weightedTarget{{name: "a.example", weight: 1}}, weights.published)
+}
+
+func TestUnpublishClearsOnlyJournaledTargets(t *testing.T) {
+	weights := &recordingPublisher{}
+	p := newTestPublisher(weights)
+	journal := v1beta1.TrafficMapPublisherStatus{
+		PublisherName:         Name,
+		ClaimedTargets:        []string{"b.example", "a.example"},
+		ObservedOptionsDigest: "sha256:not-used-for-cleanup",
+	}
+
+	require.NoError(t, p.Unpublish(
+		context.Background(),
+		types.NamespacedName{Namespace: "deleted", Name: "map"},
+		journal,
+	))
+	assert.Equal(t, []string{"a.example", "b.example"}, weights.cleared)
+}
+
+func TestDrainAndUnpublishValidateAllClaimsBeforeMutation(t *testing.T) {
+	tests := []struct {
+		name   string
+		claims []string
+	}{
+		{name: "scope prefix", claims: []string{"valid.example", "scope/invalid"}},
+		{name: "fallback suffix", claims: []string{"valid.example", "other;fallback=backup"}},
+		{name: "surrounding whitespace", claims: []string{"valid.example", " other.example "}},
+		{name: "duplicate", claims: []string{"valid.example", "valid.example"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			weights := &recordingPublisher{}
+			p := newTestPublisher(weights)
+
+			require.Error(t, p.Drain(context.Background(), tt.claims))
+			assert.Empty(t, weights.published)
+
+			require.Error(t, p.Unpublish(
+				context.Background(),
+				types.NamespacedName{},
+				v1beta1.TrafficMapPublisherStatus{PublisherName: Name, ClaimedTargets: tt.claims},
+			))
+			assert.Empty(t, weights.cleared)
+		})
+	}
+}
+
+func TestUnpublishFailureAndJournalOwnership(t *testing.T) {
+	weights := &recordingPublisher{clearFailures: map[string]error{"a.example": errors.New("unavailable")}}
+	p := newTestPublisher(weights)
+
+	err := p.Unpublish(context.Background(), types.NamespacedName{}, v1beta1.TrafficMapPublisherStatus{
+		PublisherName:  Name,
+		ClaimedTargets: []string{"a.example", "b.example"},
+	})
+	require.Error(t, err)
+	assert.Equal(t, []string{"a.example"}, weights.cleared)
+
+	weights.cleared = nil
+	err = p.Unpublish(context.Background(), types.NamespacedName{}, v1beta1.TrafficMapPublisherStatus{
+		PublisherName:  "another-publisher",
+		ClaimedTargets: []string{"a.example"},
+	})
+	require.Error(t, err)
+	assert.Empty(t, weights.cleared)
+}
+
+type foreignPlan struct{}
+
+func (foreignPlan) Claims() []string { return nil }
+
+func TestApplyRejectsForeignPlan(t *testing.T) {
+	weights := &recordingPublisher{}
+	_, err := newTestPublisher(weights).Apply(context.Background(), foreignPlan{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "plan of type")
+	assert.Empty(t, weights.published)
 }
