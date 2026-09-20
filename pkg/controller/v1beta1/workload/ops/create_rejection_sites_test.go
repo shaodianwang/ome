@@ -282,6 +282,8 @@ func TestRecreatePhaseB_RejectionDispositions(t *testing.T) {
 // TestSurgeCreate_QuotaExceeded_WaitsWithoutFailing: the per-pod surge's
 // Phase 1 create is quota-blocked. The source stays serving and the
 // rollout waits with its clock parked — it must not surface an error.
+//
+// Cells: instance/Update/Surge/api.quotaDenied/before
 func TestSurgeCreate_QuotaExceeded_WaitsWithoutFailing(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc, ir := surgeISVCReady("llama-70b", "prod", 1)

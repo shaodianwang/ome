@@ -10,6 +10,7 @@ arrows:
   - T-surge-target-ready
   - T-surgedrain-promote
 cells:
+  - instance/Update/Surge/spec.revision/after@T-surge-target-ready
   - instance/Update/SurgeDrain/spec.revision/before
 initial:
   spec:
