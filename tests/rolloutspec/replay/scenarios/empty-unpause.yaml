@@ -1,0 +1,25 @@
+# A planned index with no row, under a standard pause. Pause plans nothing
+# past the restart pass, so the slot stays Empty until pause is cleared and
+# the Create pass runs again.
+scenario: empty-unpause
+arrows:
+  - T-empty-unpause
+cells:
+  - instance/Empty/spec.unpause/boundary@T-empty-unpause
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+    paused: true
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the index is planned but pause holds the Create pass, so nothing is written
+  - tick: 2
+    note: pause is cleared and the Create pass opens the attempt
+    events:
+      - spec.unpause: {}

@@ -1,0 +1,30 @@
+# A Ready Instance under RecreateInstanceOnPodRestart loses its pod to an
+# outside deleter. The live pod count falls below the Instance's desired
+# count, so the repair opens a Restart at a bumped incarnation instead of
+# demoting the row.
+scenario: ready-pod-deleted-restart
+arrows:
+  - T-ready-restart
+cells:
+  - instance/Ready/pod.deleted[source]/boundary@T-ready-restart
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: the Ready row is steady on its one serving pod
+  - tick: 2
+    note: the pod is deleted out from under the Instance
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}

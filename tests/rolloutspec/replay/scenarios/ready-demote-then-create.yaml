@@ -1,0 +1,37 @@
+# A Ready Instance loses its only pod while the rollout is paused and the
+# restart policy repairs nothing. The row is demoted rather than repaired,
+# keeping its revisions and incarnation, and the Create pass rebuilds it
+# only once pause is cleared.
+scenario: ready-demote-then-create
+arrows:
+  - T-ready-demote
+  - T-pending-create
+cells:
+  - instance/Ready/pod.deleted[source]/boundary@T-ready-demote
+  - instance/Pending/spec.unpause/boundary@T-pending-create
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+    paused: true
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: the Ready row is steady under pause
+  - tick: 2
+    note: the only pod disappears, so the live read finds nothing backing the row
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 3
+    note: pause is cleared and the Create pass rebuilds the missing pod
+    events:
+      - spec.unpause: {}

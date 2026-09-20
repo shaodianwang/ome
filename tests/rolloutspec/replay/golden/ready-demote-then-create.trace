@@ -1,0 +1,12 @@
+tick=1 note the Ready row is steady under pause
+tick=1 pass result=none
+tick=2 note the only pod disappears, so the live read finds nothing backing the row
+tick=2 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 row=0 write incarnation=1 phase=Pending runningRevision=svc-a-engine-882059bb readySince=t+0s op=nil precondition=ok
+tick=2 event Warning InstanceDemoted Instance 0 (component=engine) demoted Ready→Pending: no live pods back the Ready phase
+tick=2 pass result=none
+tick=3 note pause is cleared and the Create pass rebuilds the missing pod
+tick=3 apply spec.unpause paused=false freeze=false generation=1 now=t+0s
+tick=3 row=0 write incarnation=1 phase=Creating runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Create step=CreatePods target=svc-a-engine-882059bb started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=3 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=1 ordinal=0
+tick=3 pass result=after:5s

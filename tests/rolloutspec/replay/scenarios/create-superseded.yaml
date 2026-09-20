@@ -1,0 +1,32 @@
+# The pod template changes while the very first Create is still in flight.
+# A superseded spec is not a failure of the retired revision, so the
+# half-built attempt is replaced by a fresh Create pinned to the new target
+# without a Failed phase, a failure event or a RetryBlock.
+scenario: create-superseded
+arrows:
+  - T-empty-create
+  - T-create-retire-superseded
+cells:
+  - instance/Create/CreatePods/spec.revision/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: cold start opens the attempt on the first revision
+  - tick: 2
+    note: the template is edited before the pod ever became Ready, so the attempt is retargeted
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 3
+    note: the next pass cleans the retired attempt's pod up under the new operation
+  - tick: 4
+    note: the retired pod is gone, so the new attempt materializes its own at the freed name
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}

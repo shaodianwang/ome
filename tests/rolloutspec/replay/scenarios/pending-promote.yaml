@@ -1,0 +1,28 @@
+# A Pending row whose pod set is already complete. The Create pass finds
+# nothing to materialize, so when the pod clears the promote bar the row
+# goes straight to Ready without being stamped Creating first.
+scenario: pending-promote
+arrows:
+  - T-pending-promote
+cells:
+  - instance/Pending/pod.containersReady[source]/boundary@T-pending-promote
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Pending, runningRevision: current}
+  pods:
+    - {index: 0, node: node-0}
+timeline:
+  - tick: 1
+    note: the pod exists but has not cleared the promote bar, so the row stays Pending
+  - tick: 2
+    note: the pod reports Ready and the row promotes with no operation stamped
+    events:
+      - pod.ready[source]: {pod: {index: 0}}

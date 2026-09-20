@@ -218,6 +218,7 @@ cells:
         - TestCreate_CorrectiveEditDuringPartialGangDoesNotMixRevisions
         - TestCreate_CorrectiveEditDoesNotAdoptUnpinnedPartialGang
       kind: []
+      replay: [create-superseded]
     status: decided
 
   - state: Create/CreatePods
@@ -261,7 +262,7 @@ cells:
     guard: the index is beyond the new desired set and the scale-down wave admits it
     note: scale-down selection runs before every other pass and does not exempt a Creating row, so an index that leaves the desired set mid-create is drained and removed rather than finished; a wave that defers the victim leaves the row in CreatePods untouched for that pass
     placement: unit
-    coverage: {perm: [], unit: [TestPlan_ScaleDown_SelectsExtras, TestReconcileFreshScaleDownAdmissionEndsThePass], kind: []}
+    coverage: {perm: [], unit: [TestPlan_ScaleDown_SelectsExtras, TestReconcileFreshScaleDownAdmissionEndsThePass], kind: [], replay: [create-scaledown]}
     status: decided
 
   - state: Create/CreatePods

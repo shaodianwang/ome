@@ -1,0 +1,34 @@
+# Replicas drop while both Instances are still being created. An in-flight
+# Create pins nothing in the plan, so the extra index falls out of the
+# desired set and its Create operation is replaced by a Delete Drain in one
+# status transaction.
+scenario: create-scaledown
+arrows:
+  - T-empty-create
+  - T-create-scaledown
+  - T-delete-done
+cells:
+  - instance/Create/CreatePods/spec.replicasDown/before
+initial:
+  spec:
+    replicas: 2
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    scaleDownRequeueInterval: 30s
+timeline:
+  - tick: 1
+    note: cold start opens a Create attempt on both planned indexes
+  - tick: 2
+    note: the operator halves the replica count before either attempt finished
+    events:
+      - spec.replicasDown: {to: 1}
+  - tick: 3
+    note: the drain deletes the retired Instance's half-built pod
+  - tick: 4
+    note: the pod is gone and the row leaves the owner's status
+    events:
+      - pod.deleted[source]: {pod: {index: 1}}

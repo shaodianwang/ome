@@ -1,0 +1,8 @@
+tick=1 note the pod exists but has not cleared the promote bar, so the row stays Pending
+tick=1 pass result=after:5s
+tick=2 note the pod reports Ready and the row promotes with no operation stamped
+tick=2 apply pod.ready[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 pod status-patch name=svc-a-engine-0-default-0 serving=absent→True
+tick=2 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+0s op=nil precondition=ok
+tick=2 event Normal InstanceReady OMENative component=engine instance=0 is Ready (1 pod(s) serving)
+tick=2 pass result=none
