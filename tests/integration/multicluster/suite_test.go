@@ -153,9 +153,13 @@ func TestMultiCluster(t *testing.T) {
 //
 // In the real-Kueue path the members ALSO need the Kueue CRD bundle (so the
 // scheme + apiserver know the Kueue types) and the Kueue pod webhook installed
-// (so StartKueue can gate queue-labeled pods). withKueue=true wires both.
-func newFramework(withKueue bool) *framework.Framework {
+// (so StartKueue can gate queue-labeled pods). The control plane also installs
+// Gateway API CRDs for routing publication specs.
+func newFramework(withKueue, withGatewayAPI bool) *framework.Framework {
 	f := &framework.Framework{}
+	if withGatewayAPI {
+		f.OptionalCRDs = append(f.OptionalCRDs, framework.GatewayAPI)
+	}
 	if withKueue {
 		// The member runs the full ISVC + InferenceReplica controllers, which
 		// unconditionally Owns(ScaledObject) (KEDA) and the ISVC path reconciles
@@ -163,11 +167,11 @@ func newFramework(withKueue bool) *framework.Framework {
 		// controllers' caches fail to start the Owns informers ("no kind is
 		// registered for v1alpha1.ScaledObject") and reconciles stall. Mirrors
 		// the singlecluster ISVC suite + kindfix.OMEScheme/OMECRDPaths.
-		f.OptionalCRDs = []framework.OptionalCRDBundle{
+		f.OptionalCRDs = append(f.OptionalCRDs,
 			framework.Kueue,
 			framework.KEDA,
 			framework.PrometheusOperator,
-		}
+		)
 		whDir, err := framework.KueueWebhookDir()
 		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "resolve Kueue webhook dir")
 		f.ExtraWebhookPaths = []string{whDir}
@@ -186,8 +190,9 @@ func newFramework(withKueue bool) *framework.Framework {
 // cluster's Init writing it.
 //
 // withKueue installs the member-side Kueue CRDs + webhook (real-Kueue path only).
-func createCluster(withKueue bool) cluster {
-	c := cluster{fwk: newFramework(withKueue)}
+// withGatewayAPI installs the portable route types used by control-plane specs.
+func createCluster(withKueue, withGatewayAPI bool) cluster {
+	c := cluster{fwk: newFramework(withKueue, withGatewayAPI)}
 
 	schemeMu.Lock()
 	cfg, err := c.fwk.Init()
@@ -309,7 +314,7 @@ var _ = ginkgo.BeforeSuite(func() {
 		go func() {
 			defer ginkgo.GinkgoRecover()
 			defer wg.Done()
-			controlCluster = createCluster(false)
+			controlCluster = createCluster(false, true)
 			if memberWithKueue {
 				// The write-conflict log observer is process-global, so the
 				// control-plane's Teardown gate also sees the members' Kueue
@@ -322,12 +327,12 @@ var _ = ginkgo.BeforeSuite(func() {
 		go func() {
 			defer ginkgo.GinkgoRecover()
 			defer wg.Done()
-			member1Cluster = createCluster(memberWithKueue)
+			member1Cluster = createCluster(memberWithKueue, false)
 		}()
 		go func() {
 			defer ginkgo.GinkgoRecover()
 			defer wg.Done()
-			member2Cluster = createCluster(memberWithKueue)
+			member2Cluster = createCluster(memberWithKueue, false)
 		}()
 		wg.Wait()
 	})
