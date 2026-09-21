@@ -185,7 +185,7 @@ func instanceLostGangMember(input workload.ReconcileInput, plan workload.Compone
 		!(s.Operation.Type == workload.InstanceOperationRestart && s.Phase == workload.InstancePhaseFailed) {
 		return "", false
 	}
-	createCommitted := s.Operation != nil && s.Operation.Step == createStepCreatePods
+	createCommitted := s.Operation != nil && s.Operation.Step == status.CreateStepCreatePods
 	publishedPods, _ := workload.AdapterPublished(s)
 	if !createCommitted && s.Phase != workload.InstancePhaseFailed && publishedPods < expected {
 		return "", false
@@ -444,7 +444,7 @@ func Restart(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		return false, nil
 	}
 
-	if err := patchInstanceStatusReady(ctx, input, inst.Index); err != nil {
+	if err := status.StampReady(ctx, input, inst.Index); err != nil {
 		return false, fmt.Errorf("patch status Ready (instance=%d): %w", inst.Index, err)
 	}
 	workload.RecordNormal(deps.Recorder, workload.EventTarget(input), workload.EventReasonRestartCompleted,

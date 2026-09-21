@@ -121,11 +121,12 @@ as its external half for the fixtures a `package x_test` file must call.
 
 **Rows are written in one place.** A row-mutation closure —
 `func(s *InstanceStatus) bool`, the callback the status adapter applies —
-may be declared only in the packages that write a row: `workload/status`,
-`workload/ops` and `workload/escalation`. The check is an allow-list of
-writers, not of readers, so a package added later is checked by default.
-Declaring the callback's *type*, which the adapter contract does, is not
-authoring one.
+may be declared only in `workload/status`. Every other package decides and
+calls a named stamp. The check is an allow-list of one writer, not of
+readers, so a package added later is checked by default. Declaring the
+callback's *type* (`types/input.go`) or taking it as a parameter (the replay
+store) is not authoring one, and a closure that does not name its parameter
+cannot write the row.
 
     python3 check_test_layout.py --repo .
 

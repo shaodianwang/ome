@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -12,7 +11,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -203,10 +201,10 @@ func selectDeleteBatch(
 	owned := make([]deleteBatchCandidate, 0)
 	fresh := make([]deleteBatchCandidate, 0, len(extras))
 	for _, original := range statuses {
-		status := cloneDeleteInstanceStatus(original)
+		row := status.CloneDeleteInstanceStatus(original)
 		candidate := deleteBatchCandidate{
-			status: status,
-			pods:   append([]*corev1.Pod(nil), podsByInstance[status.Index]...),
+			status: row,
+			pods:   append([]*corev1.Pod(nil), podsByInstance[row.Index]...),
 		}
 		sort.SliceStable(candidate.pods, func(i, j int) bool {
 			left, right := candidate.pods[i], candidate.pods[j]
@@ -222,11 +220,11 @@ func selectDeleteBatch(
 		if candidate.cost == 0 {
 			candidate.cost = 1
 		}
-		if deleteOwned(status) {
+		if deleteOwned(row) {
 			owned = append(owned, candidate)
 			continue
 		}
-		if _, ok := extraSet[status.Index]; ok {
+		if _, ok := extraSet[row.Index]; ok {
 			fresh = append(fresh, candidate)
 		}
 	}
@@ -266,38 +264,16 @@ func selectDeleteBatch(
 }
 
 func admitDeleteBatch(ctx context.Context, input workload.ReconcileInput, plan workload.ComponentPlan, candidates []deleteBatchCandidate) (bool, error) {
-	mutations := make([]workload.InstanceMutation, 0, len(candidates))
-	expected := make(map[int32]workload.InstanceStatus, len(candidates))
+	return status.StampDeletingBatch(ctx, input, plan.InstanceReadyTimeout, candidateStatuses(candidates))
+}
+
+// candidateStatuses is the rows of a wave, in selection order.
+func candidateStatuses(candidates []deleteBatchCandidate) []workload.InstanceStatus {
+	rows := make([]workload.InstanceStatus, 0, len(candidates))
 	for _, candidate := range candidates {
-		expected[candidate.status.Index] = cloneDeleteInstanceStatus(candidate.status)
-		now := metav1.NewTime(input.Now())
-		operation := workload.InstanceOperation{
-			ID:             fmt.Sprintf("delete-%d-%d", candidate.status.Index, now.Unix()),
-			Type:           workload.InstanceOperationDelete,
-			Step:           "Drain",
-			StartedAt:      now,
-			LastProgressAt: now,
-			Deadline:       workload.DeadlineAt(now, plan.InstanceReadyTimeout),
-		}
-		index := candidate.status.Index
-		incarnation := candidate.status.Incarnation
-		mutation := workload.InstanceMutation{
-			Index: index,
-			Mutate: func(status *workload.InstanceStatus) bool {
-				status.Phase = workload.InstancePhaseDeleting
-				status.Operation = cloneDeleteOperation(&operation)
-				return true
-			},
-			Postcondition: func(status *workload.InstanceStatus) bool {
-				return status != nil && status.Index == index && status.Incarnation == incarnation &&
-					status.Phase == workload.InstancePhaseDeleting && status.Operation != nil &&
-					status.Operation.ID == operation.ID && status.Operation.Type == operation.Type && status.Operation.Step == operation.Step
-			},
-		}
-		mutations = append(mutations, mutation)
+		rows = append(rows, candidate.status)
 	}
-	mutations[0].BatchPrecondition = deleteAdmissionGuard(input, expected, input.ObservedState.InstanceStatuses)
-	return applyDeleteMutationBatch(ctx, input, mutations)
+	return rows
 }
 
 func preflightDeleteOwnedBatch(ctx context.Context, input workload.ReconcileInput, candidates []deleteBatchCandidate) (map[int32]struct{}, error) {
@@ -330,7 +306,7 @@ func preflightDeleteOwnedBatch(ctx context.Context, input workload.ReconcileInpu
 				continue
 			}
 			if current.Incarnation != candidate.status.Incarnation || current.Phase != workload.InstancePhaseDeleting ||
-				!sameDeleteOperation(current.Operation, candidate.status.Operation) {
+				!status.SameDeleteOperation(current.Operation, candidate.status.Operation) {
 				return false
 			}
 		}
@@ -457,129 +433,11 @@ func earlierTime(current, candidate time.Time) time.Time {
 }
 
 func completeDeleteBatch(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, candidates []deleteBatchCandidate) (bool, error) {
-	expected := make(map[int32]workload.InstanceStatus, len(candidates))
-	mutations := make([]workload.InstanceMutation, 0, len(candidates))
-	for _, candidate := range candidates {
-		expected[candidate.status.Index] = cloneDeleteInstanceStatus(candidate.status)
-		index := candidate.status.Index
-		mutations = append(mutations, workload.InstanceMutation{
-			Index:  index,
-			Remove: true,
-			OnCommit: func(previous, _ *workload.InstanceStatus) {
-				deps.ExpectationsCache().Forget(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, index)
-				if previous != nil && previous.Operation != nil && !previous.Operation.StartedAt.IsZero() {
-					seconds := input.Now().Sub(previous.Operation.StartedAt.Time).Seconds()
-					if seconds >= 0 {
-						obsmetrics.RecordScaleDownInstanceDuration(string(input.Key.Component), seconds)
-					}
-				}
-			},
-		})
-	}
-	mutations[0].BatchPrecondition = deleteCompletionGuard(input, expected)
-	return applyDeleteMutationBatch(ctx, input, mutations)
-}
-
-func applyDeleteMutationBatch(ctx context.Context, input workload.ReconcileInput, mutations []workload.InstanceMutation) (bool, error) {
-	if len(mutations) == 0 {
-		return false, nil
-	}
-	if input.ApplyInstanceMutationsWithRetryBlock == nil {
-		return false, fmt.Errorf("DeleteBatch: owner-aware atomic status adapter is required")
-	}
-	committed := 0
-	for i := range mutations {
-		callback := mutations[i].OnCommit
-		mutations[i].OnCommit = func(previous, current *workload.InstanceStatus) {
-			committed++
-			if callback != nil {
-				callback(previous, current)
-			}
-		}
-	}
-	if err := input.ApplyInstanceMutationsWithRetryBlock(ctx, mutations, "", nil); err != nil {
-		return false, err
-	}
-	if committed != len(mutations) {
-		return false, fmt.Errorf("DeleteBatch: status adapter confirmed %d of %d mutations", committed, len(mutations))
-	}
-	return true, nil
-}
-
-func deleteAdmissionGuard(input workload.ReconcileInput, expected map[int32]workload.InstanceStatus, planned []workload.InstanceStatus) func(workload.InstanceMutationSnapshot) bool {
-	uid := input.OwnerObject.GetUID()
-	generation := input.OwnerObject.GetGeneration()
-	plannedIdentities := make(map[int32]workload.InstanceStatus, len(planned))
-	for _, status := range planned {
-		plannedIdentities[status.Index] = cloneDeleteInstanceStatus(status)
-	}
-	return func(snapshot workload.InstanceMutationSnapshot) bool {
-		if snapshot.OwnerUID != uid || snapshot.OwnerGeneration != generation {
-			return false
-		}
-		if len(snapshot.Instances) != len(plannedIdentities) {
-			return false
-		}
-		for index, plannedStatus := range plannedIdentities {
-			current, found := snapshot.Instances[index]
-			if !found || !sameDeleteCandidate(current, plannedStatus) {
-				return false
-			}
-		}
-		for index, planned := range expected {
-			current, found := snapshot.Instances[index]
-			if !found || !sameDeleteCandidate(current, planned) {
-				return false
-			}
-		}
-		return true
-	}
-}
-
-func deleteCompletionGuard(input workload.ReconcileInput, expected map[int32]workload.InstanceStatus) func(workload.InstanceMutationSnapshot) bool {
-	uid := input.OwnerObject.GetUID()
-	return func(snapshot workload.InstanceMutationSnapshot) bool {
-		if snapshot.OwnerUID != uid {
-			return false
-		}
-		for index, planned := range expected {
-			current, found := snapshot.Instances[index]
-			if !found || current.Incarnation != planned.Incarnation || current.Phase != workload.InstancePhaseDeleting ||
-				!sameDeleteOperation(current.Operation, planned.Operation) {
-				return false
-			}
-		}
-		return true
-	}
+	return status.RemoveDeletedBatch(ctx, deps, input, candidateStatuses(candidates))
 }
 
 func deleteOwned(status workload.InstanceStatus) bool {
 	return workload.Owner(&status) == workload.OwnerDelete
-}
-
-func sameDeleteCandidate(current, planned workload.InstanceStatus) bool {
-	return current.Index == planned.Index && current.Incarnation == planned.Incarnation && current.Phase == planned.Phase &&
-		reflect.DeepEqual(current.Operation, planned.Operation)
-}
-
-func sameDeleteOperation(current, planned *workload.InstanceOperation) bool {
-	return current != nil && planned != nil && current.Type == workload.InstanceOperationDelete && planned.Type == workload.InstanceOperationDelete &&
-		current.ID == planned.ID
-}
-
-func cloneDeleteInstanceStatus(status workload.InstanceStatus) workload.InstanceStatus {
-	copy := status
-	copy.Operation = cloneDeleteOperation(status.Operation)
-	return copy
-}
-
-func cloneDeleteOperation(operation *workload.InstanceOperation) *workload.InstanceOperation {
-	if operation == nil {
-		return nil
-	}
-	copy := *operation
-	copy.HintTargetNodes = append([]string(nil), operation.HintTargetNodes...)
-	return &copy
 }
 
 // What an elapsed drain deadline does.

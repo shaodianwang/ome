@@ -848,7 +848,7 @@ func TestCreate_PromoteRecordsRunningRevision(t *testing.T) {
 // hash from target (e.g., they were created by an earlier surge cycle
 // pinned to a now-superseded target), the promote MUST NOT stamp
 // RunningRevision=target.Name — that would falsely advertise the pods
-// as on target. patchInstanceStatusReady (no RunningRevision write)
+// as on target. status.StampReady (no RunningRevision write)
 // preserves whatever revision the prior op recorded, so the next
 // reconcile's detectUpdateTrigger fires a fresh surge cycle to roll
 // the pods to target.

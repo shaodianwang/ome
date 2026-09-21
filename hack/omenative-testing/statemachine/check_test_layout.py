@@ -26,15 +26,25 @@ Test layout. One production file, one test file, named for each other:
     splits a test file splits the fixture file.
 
 Row writes. A row-mutation closure — `func(s *InstanceStatus) bool`, the
-callback the status adapter applies — may be declared only in the packages
-that write a row: the status package, and the operation passes and the
-escalation pass, which still author some of their own. The reconcile root
-orchestrates and plans; it writes no row. The check is an allow-list of writers rather than a
-list of readers so that a package added later is checked by default: the
-hold pass, the evidence classifiers, the value types, the queries and the
-gang, audit and revision helpers read the row and decide from it. They do
-not write it, and a closure appearing in one of them is that separation
-breaking down.
+callback the status adapter applies — may be declared only in the status
+package. Every other package decides and calls a named stamp: the
+operation passes, the escalation pass and the reconcile root hold no
+mutation closure of their own. The check is an allow-list of one writer
+rather than a list of readers so that a package added later is checked by
+default: the hold pass, the evidence classifiers, the value types, the
+queries and the gang, audit and revision helpers read the row and decide
+from it. They do not write it, and a closure appearing in one of them is
+that separation breaking down.
+
+Two places outside the status package spell the callback's signature and
+are not writers, which the check tells apart by shape rather than by
+name. `types/input.go` declares the callback's TYPE on the adapter
+contract, and `replay/rowstore.go` — the harness's in-memory store — takes
+the callback as a PARAMETER; neither has a body, and a closure without a
+body writes nothing. A closure that does not name its parameter,
+`func(*InstanceStatus) bool { return false }`, is the no-op carrier a batch
+preflight hangs its snapshot guard on; it cannot touch a row it cannot
+refer to, so it is not a write either.
 
 Usage:
 
@@ -65,11 +75,14 @@ EXTERNAL_SUFFIX = "_external"
 FUNC_DECL = re.compile(r"^func\b", re.MULTILINE)
 
 # A row-mutation closure literal: the callback the status adapter applies to
-# one Instance row, with a body. The parameter name varies by site; the
-# trailing brace is what separates authoring the closure from declaring the
-# callback's type, which the adapter contract legitimately does anywhere.
+# one Instance row, with a body, on one line or spread over several. The
+# parameter must be named — an unnamed parameter cannot reach the row — and
+# the trailing brace is what separates authoring the closure from declaring
+# the callback's type or taking it as a parameter, which the adapter
+# contract (types/input.go) and the replay store (replay/rowstore.go)
+# legitimately do.
 ROW_MUTATION = re.compile(
-    r"func\(\s*\w+\s+\*(?:\w+\.)?InstanceStatus\s*\)\s*bool\s*\{"
+    r"func\(\s*\w+\s+\*(?:\w+\.)?InstanceStatus\s*,?\s*\)\s*bool\s*\{"
 )
 
 # Where a row-mutation closure may be declared, as repo-relative package
@@ -77,8 +90,6 @@ ROW_MUTATION = re.compile(
 # is a new package and is checked.
 ROW_WRITERS = (
     os.path.join(WORKLOAD_ROOT, "status"),
-    os.path.join(WORKLOAD_ROOT, "ops"),
-    os.path.join(WORKLOAD_ROOT, "escalation"),
 )
 
 
@@ -178,7 +189,7 @@ def check_row_writers(repo: str) -> list[str]:
                 if ROW_MUTATION.search(handle.read()):
                     violations.append(
                         f"{os.path.relpath(path, repo)}: declares a row-mutation "
-                        f"closure outside the packages that write rows "
+                        f"closure outside the package that writes rows "
                         f"({', '.join(ROW_WRITERS)})"
                     )
     return violations

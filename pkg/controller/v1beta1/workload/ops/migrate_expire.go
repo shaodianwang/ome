@@ -234,7 +234,7 @@ func failMigrationThroughRecord(
 ) error {
 	uuid := rec.RequestUUID
 	if rec.SurgeAllocated() {
-		if err := clearMigrateOperation(ctx, input, *rec.SurgeInstance, uuid); err != nil {
+		if err := status.ClearMigrationPin(ctx, input, *rec.SurgeInstance, uuid); err != nil {
 			return fmt.Errorf("clear surge Migrate op (instance=%d): %w", *rec.SurgeInstance, err)
 		}
 		if input.ObservedState.Instance(rec.SourceInstance) != nil {
@@ -343,52 +343,7 @@ func restoreSourceFromObservation(ctx context.Context, deps workload.Deps, input
 		}
 	}
 	healthy := query.AllPodsRuntimeReady(sourcePods)
-	now := metav1.NewTime(input.Now())
-	return input.MutateInstance(ctx, sourceIdx, func(s *workload.InstanceStatus) bool {
-		if s.Phase == "" {
-			// Fresh-empty slot from the append path: the status was
-			// deleted out from under us — don't resurrect.
-			return false
-		}
-		changed := false
-		if s.Operation != nil && s.Operation.Type == workload.InstanceOperationMigrate && s.Operation.RequestUUID == uuid {
-			s.Operation = nil
-			changed = true
-		}
-		want := workload.InstancePhaseReady
-		if !healthy {
-			want = workload.InstancePhaseFailed
-		}
-		if s.Phase != want {
-			s.Phase = want
-			if !healthy {
-				s.LastFailure = &workload.InstanceTermination{
-					Reason:  failureReason,
-					Message: failureMessage,
-					Time:    now,
-				}
-			}
-			changed = true
-		}
-		return changed
-	})
-}
-
-// clearMigrateOperation drops the Migrate Operation pin for uuid from
-// the instance at idx, leaving the rest of the status untouched. No-op
-// when the slot is gone or the op is absent / a different type / a
-// different request.
-func clearMigrateOperation(ctx context.Context, input workload.ReconcileInput, idx int32, uuid string) error {
-	return input.MutateInstance(ctx, idx, func(s *workload.InstanceStatus) bool {
-		if s.Phase == "" {
-			return false
-		}
-		if s.Operation == nil || s.Operation.Type != workload.InstanceOperationMigrate || s.Operation.RequestUUID != uuid {
-			return false
-		}
-		s.Operation = nil
-		return true
-	})
+	return status.StampMigrationSourceRestored(ctx, input, sourceIdx, uuid, healthy, failureReason, failureMessage)
 }
 
 // closeMigrationRecord writes the record's terminal phase + outcome

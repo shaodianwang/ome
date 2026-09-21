@@ -9,7 +9,6 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/drain"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
@@ -469,62 +468,7 @@ func claimGangSurgeDrain(
 		!status.GangSurgeActiveTargetClaimMatches(target, source.Operation.TargetRevision) {
 		return false, nil
 	}
-	if err := status.RequireOwner(input); err != nil {
-		return false, err
-	}
-
-	before := status.Capture(source)
-	after := before.WithStep(workload.UpdateStepSurgeDrain)
-	targetIdentity := status.Capture(target)
-	ownerUID := input.OwnerObject.GetUID()
-	confirmed := false
-	committed := false
-	mutation := workload.InstanceMutation{
-		Index: source.Index,
-		Mutate: func(row *workload.InstanceStatus) bool {
-			if after.Matches(*row) {
-				confirmed = true
-				return false
-			}
-			if !before.Matches(*row) {
-				return false
-			}
-			row.Operation.Step = workload.UpdateStepSurgeDrain
-			row.Operation.LastProgressAt = metav1.NewTime(input.Now())
-			return true
-		},
-		BatchPrecondition: func(snapshot workload.InstanceMutationSnapshot) bool {
-			confirmed = false
-			if snapshot.OwnerUID != ownerUID {
-				return false
-			}
-			currentSource, sourceFound := snapshot.Instances[source.Index]
-			currentTarget, targetFound := snapshot.Instances[target.Index]
-			if !sourceFound || !targetFound || !targetIdentity.Matches(currentTarget) ||
-				!status.GangSurgeActiveTargetClaimMatches(&currentTarget, source.Operation.TargetRevision) {
-				return false
-			}
-			if after.Matches(currentSource) {
-				confirmed = true
-				return true
-			}
-			return before.Matches(currentSource)
-		},
-		Postcondition: func(row *workload.InstanceStatus) bool {
-			return row != nil && after.Matches(*row)
-		},
-		OnCommit: func(_, _ *workload.InstanceStatus) {
-			committed = true
-		},
-	}
-	err := status.Apply(ctx, input, []workload.InstanceMutation{mutation})
-	if errors.Is(err, workload.ErrStatusMutationPrecondition) || errors.Is(err, workload.ErrStatusOwnerGone) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return committed || confirmed, nil
+	return status.StampGangSurgeDrainStep(ctx, input, source, target)
 }
 
 func promoteGangSurgeTarget(
@@ -540,56 +484,12 @@ func promoteGangSurgeTarget(
 		!status.GangSurgeActiveTargetClaimMatches(target, targetRevision) {
 		return false, nil
 	}
-	if err := status.RequireOwner(input); err != nil {
-		return false, err
-	}
-
-	sourceIdentity := status.Capture(source)
-	targetIdentity := status.Capture(target)
-	ownerUID := input.OwnerObject.GetUID()
-	promoted := false
-	mutation := status.ReadyOnRevisionMutation(target.Index, targetRevision, input.Now())
-	mutation.BatchPrecondition = func(snapshot workload.InstanceMutationSnapshot) bool {
-		if snapshot.OwnerUID != ownerUID {
-			return false
-		}
-		currentSource, sourceFound := snapshot.Instances[source.Index]
-		currentTarget, targetFound := snapshot.Instances[target.Index]
-		return sourceFound && targetFound &&
-			sourceIdentity.Matches(currentSource) && targetIdentity.Matches(currentTarget) &&
-			status.GangSurgeActiveTargetClaimMatches(&currentTarget, targetRevision)
-	}
-	mutation.Postcondition = func(row *workload.InstanceStatus) bool {
-		return row != nil && row.Index == target.Index &&
-			row.Incarnation == target.Incarnation &&
-			row.ActiveOrdinal == target.ActiveOrdinal &&
-			row.Phase == workload.InstancePhaseReady &&
-			row.RunningRevision == targetRevision &&
-			row.TargetRevision == "" && row.Operation == nil
-	}
-	mutation.OnCommit = func(_, _ *workload.InstanceStatus) {
-		promoted = true
-	}
-	err := status.Apply(ctx, input, []workload.InstanceMutation{mutation})
-	if errors.Is(err, workload.ErrStatusMutationPrecondition) || errors.Is(err, workload.ErrStatusOwnerGone) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	if !promoted {
-		return false, nil
-	}
-	if err := status.RetryBlockPruneOnPromote(ctx, input, targetRevision); err != nil {
-		return false, err
-	}
-	return true, nil
+	return status.StampGangSurgeTargetReady(ctx, input, source, target, targetRevision)
 }
 
-// resetGangSurgeSourceAfterTargetConflict releases a source claim without
-// changing the occupied target. The strong path guards both lifecycle
-// identities in one authoritative snapshot; compatibility adapters confirm
-// the target and source independently through their fresh mutation reads.
+// resetGangSurgeSourceAfterTargetConflict releases a source claim whose
+// target slot is occupied by something other than its own marker; the
+// occupied target is left as it is.
 func resetGangSurgeSourceAfterTargetConflict(
 	ctx context.Context,
 	input workload.ReconcileInput,
@@ -600,71 +500,7 @@ func resetGangSurgeSourceAfterTargetConflict(
 		status.GangSurgeTargetClaimMatches(target, source.Operation.TargetRevision) {
 		return false, nil
 	}
-
-	sourceIdentity := status.Capture(source)
-	targetIdentity := status.Capture(target)
-	reset := status.ReadyOnRevisionMutation(source.Index, source.RunningRevision, input.Now())
-	reset.Postcondition = func(row *workload.InstanceStatus) bool {
-		return row != nil && row.Index == source.Index &&
-			row.Incarnation == source.Incarnation &&
-			row.Phase == workload.InstancePhaseReady &&
-			row.RunningRevision == source.RunningRevision &&
-			row.TargetRevision == "" && row.Operation == nil &&
-			row.ActiveOrdinal == source.ActiveOrdinal
-	}
-
-	if input.ApplyInstanceMutationsWithRetryBlock != nil {
-		if err := status.RequireOwner(input); err != nil {
-			return false, err
-		}
-		ownerUID := input.OwnerObject.GetUID()
-		committed := false
-		reset.BatchPrecondition = func(snapshot workload.InstanceMutationSnapshot) bool {
-			if snapshot.OwnerUID != ownerUID {
-				return false
-			}
-			currentSource, sourceFound := snapshot.Instances[source.Index]
-			currentTarget, targetFound := snapshot.Instances[target.Index]
-			return sourceFound && targetFound &&
-				sourceIdentity.Matches(currentSource) && targetIdentity.Matches(currentTarget)
-		}
-		reset.OnCommit = func(_, _ *workload.InstanceStatus) {
-			committed = true
-		}
-		err := status.Apply(ctx, input, []workload.InstanceMutation{reset})
-		if errors.Is(err, workload.ErrStatusMutationPrecondition) || errors.Is(err, workload.ErrStatusOwnerGone) {
-			return false, nil
-		}
-		if err != nil {
-			return false, err
-		}
-		return committed, nil
-	}
-
-	if input.MutateInstance == nil {
-		return false, fmt.Errorf("gang surge target conflict requires a status mutation adapter")
-	}
-	targetMatched := false
-	if err := input.MutateInstance(ctx, target.Index, func(current *workload.InstanceStatus) bool {
-		targetMatched = targetIdentity.Matches(*current)
-		return false
-	}); err != nil {
-		return false, err
-	}
-	if !targetMatched {
-		return false, nil
-	}
-	sourceMatched := false
-	if err := input.MutateInstance(ctx, source.Index, func(current *workload.InstanceStatus) bool {
-		sourceMatched = sourceIdentity.Matches(*current)
-		if !sourceMatched {
-			return false
-		}
-		return reset.Mutate(current)
-	}); err != nil {
-		return false, err
-	}
-	return sourceMatched, nil
+	return status.ResetGangSurgeSource(ctx, input, source, target)
 }
 
 func cloneInstanceTopologyKeys(in map[int32]string) map[int32]string {
@@ -787,63 +623,7 @@ func transitionGangSurgeTargetCleanup(
 		!status.GangSurgeTargetClaimMatches(marker, source.Operation.TargetRevision) {
 		return false, nil
 	}
-	if err := status.RequireOwner(input); err != nil {
-		return false, err
-	}
-
-	sourceIdentity := status.Capture(source)
-	before := status.Capture(marker)
-	after := before.WithStep(workload.UpdateStepGangSurgeTargetCleanup)
-	ownerUID := input.OwnerObject.GetUID()
-	confirmed := false
-	committed := false
-	mutation := workload.InstanceMutation{
-		Index: marker.Index,
-		Mutate: func(row *workload.InstanceStatus) bool {
-			if after.Matches(*row) {
-				confirmed = true
-				return false
-			}
-			if !before.Matches(*row) {
-				return false
-			}
-			row.Operation.Step = workload.UpdateStepGangSurgeTargetCleanup
-			return true
-		},
-		BatchPrecondition: func(snapshot workload.InstanceMutationSnapshot) bool {
-			confirmed = false
-			if snapshot.OwnerUID != ownerUID {
-				return false
-			}
-			currentSource, found := snapshot.Instances[source.Index]
-			if !found || !sourceIdentity.Matches(currentSource) {
-				return false
-			}
-			currentMarker, found := snapshot.Instances[marker.Index]
-			if !found {
-				return false
-			}
-			if after.Matches(currentMarker) {
-				confirmed = true
-				return true
-			}
-			return before.Matches(currentMarker)
-		},
-		Postcondition: func(row *workload.InstanceStatus) bool {
-			return row != nil && after.Matches(*row)
-		},
-		OnCommit: func(_, _ *workload.InstanceStatus) {
-			committed = true
-		},
-	}
-	err := status.Apply(ctx, input, []workload.InstanceMutation{mutation})
-	if errors.Is(err, workload.ErrStatusMutationPrecondition) || errors.Is(err, workload.ErrStatusOwnerGone) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return committed || confirmed, nil
+	return status.StampGangSurgeTargetCleanupStep(ctx, input, source, marker)
 }
 
 func restoreGangSurgeTargetCleanup(
@@ -858,82 +638,7 @@ func restoreGangSurgeTargetCleanup(
 		source.Operation.TargetRevision != targetRevision {
 		return false, nil
 	}
-	if err := status.RequireOwner(input); err != nil {
-		return false, err
-	}
-
-	now := metav1.NewTime(input.Now())
-	desired := workload.InstanceStatus{
-		Index:          surgeIdx,
-		Incarnation:    1,
-		Phase:          workload.InstancePhaseCreating,
-		TargetRevision: targetRevision,
-		Operation: &workload.InstanceOperation{
-			ID:             fmt.Sprintf("gangsurgetarget-%d-%d", surgeIdx, now.Unix()),
-			Type:           workload.InstanceOperationUpdate,
-			Step:           workload.UpdateStepGangSurgeTargetCleanup,
-			TargetRevision: targetRevision,
-			StartedAt:      now,
-			LastProgressAt: now,
-			Deadline:       workload.DeadlineAt(now, timeout),
-		},
-	}
-	sourceIdentity := status.Capture(source)
-	ownerUID := input.OwnerObject.GetUID()
-	confirmed := false
-	committed := false
-	mutation := workload.InstanceMutation{
-		Index: surgeIdx,
-		Mutate: func(row *workload.InstanceStatus) bool {
-			if status.GangSurgeCleanupTargetClaimMatches(row, targetRevision) {
-				confirmed = true
-				return false
-			}
-			if status.GangSurgeActiveTargetClaimMatches(row, targetRevision) {
-				row.Operation.Step = workload.UpdateStepGangSurgeTargetCleanup
-				return true
-			}
-			if !status.EmptyGangSurgeTargetSlot(row) {
-				return false
-			}
-			*row = status.Clone(desired)
-			return true
-		},
-		BatchPrecondition: func(snapshot workload.InstanceMutationSnapshot) bool {
-			confirmed = false
-			if snapshot.OwnerUID != ownerUID {
-				return false
-			}
-			currentSource, found := snapshot.Instances[source.Index]
-			if !found || !sourceIdentity.Matches(currentSource) {
-				return false
-			}
-			currentTarget, found := snapshot.Instances[surgeIdx]
-			if !found {
-				return true
-			}
-			if status.GangSurgeCleanupTargetClaimMatches(&currentTarget, targetRevision) {
-				confirmed = true
-				return true
-			}
-			return status.GangSurgeActiveTargetClaimMatches(&currentTarget, targetRevision)
-		},
-		Postcondition: func(row *workload.InstanceStatus) bool {
-			return row != nil && row.Index == surgeIdx &&
-				status.GangSurgeCleanupTargetClaimMatches(row, targetRevision)
-		},
-		OnCommit: func(_, _ *workload.InstanceStatus) {
-			committed = true
-		},
-	}
-	err := status.Apply(ctx, input, []workload.InstanceMutation{mutation})
-	if errors.Is(err, workload.ErrStatusMutationPrecondition) || errors.Is(err, workload.ErrStatusOwnerGone) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return committed || confirmed, nil
+	return status.RestoreGangSurgeTargetCleanup(ctx, input, source, surgeIdx, targetRevision, timeout)
 }
 
 func finalizeAndResetAbandonedGangSurge(
@@ -955,106 +660,9 @@ func finalizeAndResetAbandonedGangSurge(
 		!status.GangSurgeTargetClaimMatches(marker, source.Operation.TargetRevision)) {
 		return false, nil
 	}
-	if err := status.RequireOwner(input); err != nil {
-		return false, err
-	}
-
-	ownerUID := input.OwnerObject.GetUID()
-	sourceIdentity := status.Capture(source)
-	if marker == nil {
-		return false, nil
-	}
-	markerIdentity := status.Capture(marker)
-	guard := func(snapshot workload.InstanceMutationSnapshot) bool {
-		if snapshot.OwnerUID != ownerUID {
-			return false
-		}
-		currentSource, found := snapshot.Instances[source.Index]
-		if !found || !sourceIdentity.Matches(currentSource) {
-			return false
-		}
-		currentMarker, found := snapshot.Instances[surgeIdx]
-		return found && markerIdentity.Matches(currentMarker)
-	}
-
-	preflight := workload.InstanceMutation{
-		Index:             source.Index,
-		Mutate:            func(*workload.InstanceStatus) bool { return false },
-		BatchPrecondition: guard,
-	}
-	if err := status.Apply(ctx, input, []workload.InstanceMutation{preflight}); err != nil {
-		if errors.Is(err, workload.ErrStatusMutationPrecondition) || errors.Is(err, workload.ErrStatusOwnerGone) {
-			return false, nil
-		}
-		return false, err
-	}
-	if sourceRunningRev != "" && workload.FindRetryBlock(input.ObservedState.RetryBlocks, sourceRunningRev) != nil {
-		if err := status.RetryBlockPruneOnPromote(ctx, input, sourceRunningRev); err != nil {
-			return false, err
-		}
-	}
-
-	if input.FinalizeInstanceResources != nil {
-		complete, err := input.FinalizeInstanceResources(ctx, surgeIdx)
-		if err != nil {
-			return false, err
-		}
-		if !complete {
-			return false, nil
-		}
-	}
-
-	committed := false
-	reset := status.ReadyOnRevisionMutation(source.Index, sourceRunningRev, input.Now())
-	reset.BatchPrecondition = guard
-	reset.Postcondition = func(row *workload.InstanceStatus) bool {
-		return row != nil && row.Index == source.Index &&
-			row.Incarnation == source.Incarnation &&
-			row.Phase == workload.InstancePhaseReady &&
-			row.RunningRevision == sourceRunningRev &&
-			row.TargetRevision == "" && row.Operation == nil &&
-			row.ActiveOrdinal == source.ActiveOrdinal
-	}
-	reset.OnCommit = func(_, _ *workload.InstanceStatus) {
-		committed = true
-		deps.ExpectationsCache().Forget(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, surgeIdx)
-	}
-	removeMarker := workload.InstanceMutation{Index: surgeIdx, Remove: true}
-
-	var retryRevision string
-	var mutateRetryBlock func(*workload.RetryBlock) workload.RetryBlockDisposition
-	heldAttempts := int32(0)
-	if input.MutateRetryBlock != nil && failedTargetRev != "" {
-		retryRevision = failedTargetRev
-		now := metav1.NewTime(input.Now())
-		mutateRetryBlock = func(block *workload.RetryBlock) workload.RetryBlockDisposition {
-			var disposition workload.RetryBlockDisposition
-			disposition, heldAttempts = workload.ApplyUpdateFailureToRetryBlock(
-				block, input.UpdateRetryPolicy, now, failureReason, workloadCaused,
-			)
-			return disposition
-		}
-	}
-	priorOnCommit := reset.OnCommit
-	reset.OnCommit = func(previous, current *workload.InstanceStatus) {
-		priorOnCommit(previous, current)
-		if heldAttempts > 0 && input.WarnRetryHeld != nil {
-			input.WarnRetryHeld(failedTargetRev, heldAttempts, failureReason)
-		}
-	}
-	err := input.ApplyInstanceMutationsWithRetryBlock(
-		ctx,
-		[]workload.InstanceMutation{reset, removeMarker},
-		retryRevision,
-		mutateRetryBlock,
+	return status.ResetGangSurgeSourceAndRemoveMarker(
+		ctx, deps, input, source, marker, surgeIdx, sourceRunningRev, failedTargetRev, failureReason, workloadCaused,
 	)
-	if errors.Is(err, workload.ErrStatusMutationPrecondition) || errors.Is(err, workload.ErrStatusOwnerGone) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return committed, nil
 }
 
 func gangSurgeTargetOwnsRemoval(row *workload.InstanceStatus, requireCleanupMarker bool) bool {

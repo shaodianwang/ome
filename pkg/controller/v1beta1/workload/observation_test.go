@@ -420,9 +420,9 @@ func TestRemovableObservationFieldsHaveNoUnauditedDirectProductionAccess(t *test
 	approve("pkg/controller/v1beta1/inferencereplica/status.go", "mirrorInstanceCounters", removableFieldAccessCounts{reads: 2, writes: 2}, "transient same-pass mirror", "NodesOccupied")
 	approve("pkg/controller/v1beta1/irstatus/encoding.go", "ClearPodDerivedObservations", write, "status persistence boundary", allFields...)
 	approve("pkg/controller/v1beta1/workload/status/precondition.go", "Clone", readWrite, "isolated status copy", "NodesOccupied")
-	approve("pkg/controller/v1beta1/workload/ops/create.go", "sameCreateTransitionOwnerState", removableFieldAccessCounts{writes: 2}, "rollback comparison normalization", allFields...)
-	approve("pkg/controller/v1beta1/workload/ops/create.go", "restoreCreateTransitionState", readWrite, "transient rollback observation preservation", "ReadyPodCount", "ScheduledPodCount")
-	approve("pkg/controller/v1beta1/workload/ops/create.go", "restoreCreateTransitionState", removableFieldAccessCounts{reads: 2, writes: 2}, "transient rollback observation preservation", "NodesOccupied")
+	approve("pkg/controller/v1beta1/workload/status/create.go", "sameCreateTransitionOwnerState", removableFieldAccessCounts{writes: 2}, "rollback comparison normalization", allFields...)
+	approve("pkg/controller/v1beta1/workload/status/create.go", "restoreCreateTransitionState", readWrite, "transient rollback observation preservation", "ReadyPodCount", "ScheduledPodCount")
+	approve("pkg/controller/v1beta1/workload/status/create.go", "restoreCreateTransitionState", removableFieldAccessCounts{reads: 2, writes: 2}, "transient rollback observation preservation", "NodesOccupied")
 
 	repoRoot := removableFieldAuditRepositoryRoot(t)
 	fields := map[string]struct{}{

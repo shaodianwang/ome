@@ -9,7 +9,8 @@
 // message — and nothing else: the recorded time stays where it is, and
 // no event, RetryBlock, phase or operation moves. Edge-triggered by the
 // recorded reason itself, which stops being the generic one the moment
-// the refresh lands.
+// the refresh lands. This file decides whether there is anything to
+// refresh; the write is status.RecordRefreshedFailure.
 package escalation
 
 import "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
@@ -36,25 +37,4 @@ func refreshedFailureEvidence(row types.InstanceStatus, rowEvidence InstanceEvid
 		return nil
 	}
 	return types.PodTerminationWithReason(rowEvidence.StuckPod, rowEvidence.StuckReason, row.LastFailure.Time)
-}
-
-// refreshFailureMutation writes the refreshed evidence onto LastFailure
-// and touches nothing else. The eligibility test is repeated inside the
-// mutation because it is evaluated against the row the write actually
-// lands on: the pass-start observation can be stale, and a row that has
-// since left Failed or recorded a concrete cause of its own must keep
-// what it has.
-func refreshFailureMutation(termination *types.InstanceTermination) func(*types.InstanceStatus) bool {
-	return func(row *types.InstanceStatus) bool {
-		if row.Phase != types.InstancePhaseFailed {
-			return false
-		}
-		if row.LastFailure == nil || row.LastFailure.Reason != DeadlineExceededReason {
-			return false
-		}
-		captured := *termination
-		captured.Time = row.LastFailure.Time
-		row.LastFailure = &captured
-		return true
-	}
 }

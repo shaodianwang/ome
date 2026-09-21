@@ -106,6 +106,34 @@ func RecordLastFailure(ctx context.Context, input types.ReconcileInput, idx int3
 	})
 }
 
+// RecordRefreshedFailure replaces a Failed row's LastFailure with
+// termination when the recorded reason is still the generic one, and
+// touches nothing else. The recorded time survives: what changes is the
+// cause, not when the row failed, and moving the stamp forward would
+// both misdate the failure and make a row that is merely wedged look
+// like it keeps failing anew.
+//
+// The eligibility test is evaluated against the row the write actually
+// lands on: the pass-start observation can be stale, and a row that has
+// since left Failed or recorded a concrete cause of its own must keep
+// what it has. A concrete reason is the FIRST named cause, and an
+// operator reading it must not have it replaced by whatever state the
+// pod happens to be in later.
+func RecordRefreshedFailure(termination *types.InstanceTermination, generic string) func(*types.InstanceStatus) bool {
+	return func(row *types.InstanceStatus) bool {
+		if row.Phase != types.InstancePhaseFailed {
+			return false
+		}
+		if row.LastFailure == nil || row.LastFailure.Reason != generic {
+			return false
+		}
+		captured := *termination
+		captured.Time = row.LastFailure.Time
+		row.LastFailure = &captured
+		return true
+	}
+}
+
 // sameFailureIdentity reports whether two termination records name the
 // same operator-relevant failure: pod, container, reason, exit code.
 // Time and Message are excluded so a re-capture differing only in when

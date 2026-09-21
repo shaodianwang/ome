@@ -37,6 +37,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
@@ -417,25 +418,6 @@ func TestDrainServiceForPod_GangWorkerNotRoutable(t *testing.T) {
 	}
 	if got := drainServiceForPod(input, plan, runnerPod("worker")); got != "" {
 		t.Errorf("gang worker must be skipped so the surge rotation gate does not wedge; got routing Service %q", got)
-	}
-}
-
-func TestMigrationSourceRemovalOwnership(t *testing.T) {
-	surge := int32(9)
-	migration := terminalStatusFixture(3)
-	migration.Phase = workload.InstancePhaseMigrating
-	migration.TargetRevision = ""
-	migration.Operation.Type = workload.InstanceOperationMigrate
-	migration.Operation.RequestUUID = "migration-a"
-	if !migrationSourceOwnsRemoval(&migration, "migration-a", surge) ||
-		migrationSourceOwnsRemoval(&migration, "migration-b", surge) ||
-		migrationSourceOwnsRemoval(&migration, "migration-a", surge+1) {
-		t.Fatal("migration source ownership did not bind request and surge identities")
-	}
-	wrongMigrationPhase := migration
-	wrongMigrationPhase.Phase = workload.InstancePhaseReady
-	if migrationSourceOwnsRemoval(&wrongMigrationPhase, "migration-a", surge) {
-		t.Fatal("migration source ownership accepted a non-migrating lifecycle")
 	}
 }
 
@@ -3795,7 +3777,7 @@ func TestMigrate_SurgeWedgeCloseResumesAfterPartialUnwind(t *testing.T) {
 
 	// The crash window: the surge pin is gone, the source restore and
 	// the record write never landed.
-	if err := clearMigrateOperation(context.Background(), f.input(t), 1, uuid); err != nil {
+	if err := status.ClearMigrationPin(context.Background(), f.input(t), 1, uuid); err != nil {
 		t.Fatalf("simulate a crash after the surge unpin: %v", err)
 	}
 	if surge := findInstanceStatusOnIRForFixture(t, f, 1); surge == nil || surge.Operation != nil {

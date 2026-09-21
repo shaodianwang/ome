@@ -47,8 +47,8 @@ func newDeleteMutationStore(owner client.Object, statuses []workload.InstanceSta
 		uid: owner.GetUID(), generation: owner.GetGeneration(),
 		statuses: make(map[int32]workload.InstanceStatus, len(statuses)),
 	}
-	for _, status := range statuses {
-		store.statuses[status.Index] = cloneDeleteInstanceStatus(status)
+	for _, row := range statuses {
+		store.statuses[row.Index] = status.CloneDeleteInstanceStatus(row)
 	}
 	return store
 }
@@ -58,8 +58,8 @@ func (s *deleteMutationStore) apply(_ context.Context, mutations []workload.Inst
 		OwnerUID: s.uid, OwnerGeneration: s.generation,
 		Instances: make(map[int32]workload.InstanceStatus, len(s.statuses)),
 	}
-	for index, status := range s.statuses {
-		snapshot.Instances[index] = cloneDeleteInstanceStatus(status)
+	for index, row := range s.statuses {
+		snapshot.Instances[index] = status.CloneDeleteInstanceStatus(row)
 	}
 	for _, mutation := range mutations {
 		if mutation.BatchPrecondition != nil && !mutation.BatchPrecondition(snapshot) {
@@ -73,25 +73,25 @@ func (s *deleteMutationStore) apply(_ context.Context, mutations []workload.Inst
 	}
 	commits := make([]commit, 0, len(mutations))
 	for _, mutation := range mutations {
-		status, found := s.statuses[mutation.Index]
+		row, found := s.statuses[mutation.Index]
 		if mutation.Remove {
 			if !found {
 				continue
 			}
-			before := cloneDeleteInstanceStatus(status)
+			before := status.CloneDeleteInstanceStatus(row)
 			delete(s.statuses, mutation.Index)
 			commits = append(commits, commit{callback: mutation.OnCommit, before: &before})
 			continue
 		}
-		before := cloneDeleteInstanceStatus(status)
+		before := status.CloneDeleteInstanceStatus(row)
 		if !found {
-			status.Index = mutation.Index
+			row.Index = mutation.Index
 		}
-		if !mutation.Mutate(&status) {
+		if !mutation.Mutate(&row) {
 			continue
 		}
-		s.statuses[mutation.Index] = cloneDeleteInstanceStatus(status)
-		after := cloneDeleteInstanceStatus(status)
+		s.statuses[mutation.Index] = status.CloneDeleteInstanceStatus(row)
+		after := status.CloneDeleteInstanceStatus(row)
 		var beforePtr *workload.InstanceStatus
 		if found {
 			beforePtr = &before
@@ -1179,7 +1179,7 @@ func TestDeleteBatchUnconfirmedCompletionKeepsExpectations(t *testing.T) {
 func TestCompleteDeleteBatchRejectsConcurrentPhaseDrift(t *testing.T) {
 	owner := deleteBatchOwner()
 	expected := deleteOwnedStatus(0, time.Now())
-	current := cloneDeleteInstanceStatus(expected)
+	current := status.CloneDeleteInstanceStatus(expected)
 	current.Phase = workload.InstancePhaseFailed
 	store := newDeleteMutationStore(owner, []workload.InstanceStatus{current})
 	expectations := workload.NewExpectations()
@@ -1603,8 +1603,8 @@ func driveImmediateDeleteConvergence(t *testing.T, instances, podCost int, budge
 
 	for {
 		observed := make([]workload.InstanceStatus, 0, len(store.statuses))
-		for _, status := range store.statuses {
-			observed = append(observed, cloneDeleteInstanceStatus(status))
+		for _, row := range store.statuses {
+			observed = append(observed, status.CloneDeleteInstanceStatus(row))
 		}
 		sort.Slice(observed, func(i, j int) bool { return observed[i].Index < observed[j].Index })
 		extras := make([]int32, 0, len(observed))

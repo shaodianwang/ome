@@ -729,7 +729,7 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 	if !promoted {
 		return false, accepted, nil
 	}
-	if source != nil && !migrationSourceOwnsRemoval(source, requestUUID, surgeIdx) {
+	if source != nil && !status.MigrationSourceOwnsRemoval(source, requestUUID, surgeIdx) {
 		return false, accepted, nil
 	}
 	removed, rerr := status.FinalizeAndRemove(ctx, deps, input, sourceIdx, source)
@@ -813,50 +813,7 @@ func establishMigrationPair(
 	if !migrationPairStampable(source, surge, requestUUID, surgeIdx) {
 		return false, nil
 	}
-	if err := status.RequireOwner(input); err != nil {
-		return false, err
-	}
-	ownerUID := input.OwnerObject.GetUID()
-	sourceGuard, sourceState := status.Guard(input, source.Index, source)
-	surgeGuard, surgeState := status.Guard(input, surgeIdx, surge)
-	confirmed := false
-	batchGuard := func(snapshot workload.InstanceMutationSnapshot) bool {
-		if snapshot.OwnerUID != ownerUID {
-			confirmed = false
-			return false
-		}
-		currentSource, sourceFound := snapshot.Instances[source.Index]
-		currentSurge, surgeFound := snapshot.Instances[surgeIdx]
-		currentSourceOwned := sourceFound && migrationSourceOwnsRemoval(&currentSource, requestUUID, surgeIdx)
-		currentSurgeOwned := surgeFound && migrationSurgeOwnsPromotion(&currentSurge, requestUUID, source.Index)
-		if (currentSourceOwned && currentSurgeOwned) ||
-			(surge == nil && currentSourceOwned && !surgeFound) {
-			confirmed = true
-			return true
-		}
-		confirmed = sourceGuard(snapshot) && sourceState.Matched && surgeGuard(snapshot)
-		if surge == nil {
-			confirmed = confirmed && surgeState.Absent
-		} else {
-			confirmed = confirmed && surgeState.Matched
-		}
-		return confirmed
-	}
-
-	sourceMutation := status.MigrationPinMutation(input, source.Index, surgeIdx, status.MigrationRoleSource, requestUUID, timeout)
-	sourceMutation.BatchPrecondition = batchGuard
-	sourceMutation.Postcondition = func(row *workload.InstanceStatus) bool {
-		return migrationSourceOwnsRemoval(row, requestUUID, surgeIdx)
-	}
-	surgeMutation := status.MigrationPinMutation(input, surgeIdx, source.Index, status.MigrationRoleSurge, requestUUID, timeout)
-	surgeMutation.Postcondition = func(row *workload.InstanceStatus) bool {
-		return migrationSurgeOwnsPromotion(row, requestUUID, source.Index)
-	}
-	err := status.Apply(ctx, input, []workload.InstanceMutation{sourceMutation, surgeMutation})
-	if errors.Is(err, workload.ErrStatusMutationPrecondition) || errors.Is(err, workload.ErrStatusOwnerGone) {
-		return false, nil
-	}
-	return confirmed, err
+	return status.StartMigration(ctx, input, source, surge, requestUUID, surgeIdx, timeout)
 }
 
 func migrationPairStampable(
@@ -868,8 +825,8 @@ func migrationPairStampable(
 	if source == nil {
 		return false
 	}
-	sourceOwned := migrationSourceOwnsRemoval(source, requestUUID, surgeIdx)
-	surgeOwned := migrationSurgeOwnsPromotion(surge, requestUUID, source.Index)
+	sourceOwned := status.MigrationSourceOwnsRemoval(source, requestUUID, surgeIdx)
+	surgeOwned := status.MigrationSurgeOwnsPromotion(surge, requestUUID, source.Index)
 	if sourceOwned {
 		return surge == nil || surgeOwned
 	}
@@ -893,7 +850,7 @@ func confirmMigrationCompletionPair(
 	surge *workload.InstanceStatus,
 ) (bool, error) {
 	if surge == nil || surge.RunningRevision == "" ||
-		!migrationPromotedSurgeMatches(surge, surge.RunningRevision) {
+		!status.MigrationPromotedSurgeMatches(surge, surge.RunningRevision) {
 		return false, nil
 	}
 	if input.ApplyInstanceMutationsWithRetryBlock == nil {
@@ -915,7 +872,7 @@ func confirmMigrationCompletionPair(
 				return false
 			}
 			currentSurge := snapshot.Instances[surge.Index]
-			confirmed = migrationPromotedSurgeMatches(&currentSurge, surge.RunningRevision)
+			confirmed = status.MigrationPromotedSurgeMatches(&currentSurge, surge.RunningRevision)
 			return confirmed
 		},
 	}
@@ -936,19 +893,15 @@ func confirmMigrationDrainPair(
 	targetRevision string,
 	allowPromoted bool,
 ) (bool, error) {
-	if !migrationSourceOwnsRemoval(source, requestUUID, surgeIdx) {
+	if !status.MigrationSourceOwnsRemoval(source, requestUUID, surgeIdx) {
 		return false, nil
 	}
-	targetMatches := func(row *workload.InstanceStatus) bool {
-		return migrationSurgeOwnsPromotion(row, requestUUID, source.Index)
-	}
-	if !targetMatches(surge) {
-		if !allowPromoted || !migrationPromotedSurgeMatches(surge, targetRevision) {
+	promoted := false
+	if !status.MigrationSurgeOwnsPromotion(surge, requestUUID, source.Index) {
+		if !allowPromoted || !status.MigrationPromotedSurgeMatches(surge, targetRevision) {
 			return false, nil
 		}
-		targetMatches = func(row *workload.InstanceStatus) bool {
-			return migrationPromotedSurgeMatches(row, targetRevision)
-		}
+		promoted = true
 	}
 	if input.ApplyInstanceMutationsWithRetryBlock == nil {
 		return true, nil
@@ -969,7 +922,7 @@ func confirmMigrationDrainPair(
 				return false
 			}
 			currentSurge := snapshot.Instances[surge.Index]
-			confirmed = targetMatches(&currentSurge)
+			confirmed = migrationDrainTargetMatches(&currentSurge, promoted, requestUUID, source.Index, targetRevision)
 			return confirmed
 		},
 	}
@@ -988,11 +941,11 @@ func promoteMigrationSurge(
 	requestUUID string,
 	targetRevision string,
 ) (bool, error) {
-	if source == nil || surge == nil || !migrationSourceOwnsRemoval(source, requestUUID, surge.Index) {
+	if source == nil || surge == nil || !status.MigrationSourceOwnsRemoval(source, requestUUID, surge.Index) {
 		return false, nil
 	}
-	active := migrationSurgeOwnsPromotion(surge, requestUUID, source.Index)
-	alreadyPromoted := migrationPromotedSurgeMatches(surge, targetRevision)
+	active := status.MigrationSurgeOwnsPromotion(surge, requestUUID, source.Index)
+	alreadyPromoted := status.MigrationPromotedSurgeMatches(surge, targetRevision)
 	if !active && !alreadyPromoted {
 		return false, nil
 	}
@@ -1017,66 +970,17 @@ func promoteMigrationSurge(
 		}
 		return true, nil
 	}
-	if err := status.RequireOwner(input); err != nil {
-		return false, err
-	}
-	sourceGuard, sourceState := status.Guard(input, source.Index, source)
-	surgeGuard, surgeState := status.Guard(input, surge.Index, surge)
-	mutation := status.ReadyOnRevisionMutation(surge.Index, targetRevision, input.Now())
-	promoted := false
-	mutation.BatchPrecondition = func(snapshot workload.InstanceMutationSnapshot) bool {
-		if !sourceGuard(snapshot) || !sourceState.Matched ||
-			!surgeGuard(snapshot) || !surgeState.Matched {
-			return false
-		}
-		currentSource := snapshot.Instances[source.Index]
-		currentSurge := snapshot.Instances[surge.Index]
-		return migrationSourceOwnsRemoval(&currentSource, requestUUID, surge.Index) &&
-			migrationSurgeOwnsPromotion(&currentSurge, requestUUID, source.Index)
-	}
-	mutation.Postcondition = func(row *workload.InstanceStatus) bool {
-		return row != nil && row.Index == surge.Index &&
-			row.Incarnation == surge.Incarnation && row.ActiveOrdinal == surge.ActiveOrdinal &&
-			migrationPromotedSurgeMatches(row, targetRevision)
-	}
-	mutation.OnCommit = func(_, _ *workload.InstanceStatus) {
-		promoted = true
-	}
-	err := status.Apply(ctx, input, []workload.InstanceMutation{mutation})
-	if errors.Is(err, workload.ErrStatusMutationPrecondition) || errors.Is(err, workload.ErrStatusOwnerGone) {
-		return false, nil
-	}
-	if err != nil || !promoted {
-		return false, err
-	}
-
-	if err := status.RetryBlockPruneOnPromote(ctx, input, targetRevision); err != nil {
-		return false, err
-	}
-	return true, nil
+	return status.StampMigrationSurgeReady(ctx, input, source, surge, requestUUID, targetRevision)
 }
 
-func migrationSourceOwnsRemoval(row *workload.InstanceStatus, requestUUID string, surgeIdx int32) bool {
-	return row != nil && row.Phase == workload.InstancePhaseMigrating &&
-		row.RunningRevision != "" && row.TargetRevision == "" && row.Operation != nil &&
-		row.Operation.Type == workload.InstanceOperationMigrate &&
-		row.Operation.RequestUUID == requestUUID &&
-		row.Operation.SurgeIndex != nil && *row.Operation.SurgeIndex == surgeIdx
-}
-
-func migrationSurgeOwnsPromotion(row *workload.InstanceStatus, requestUUID string, sourceIdx int32) bool {
-	return row != nil && row.Incarnation == 1 && row.ActiveOrdinal == 0 &&
-		row.Phase == workload.InstancePhaseCreating && row.RunningRevision == "" &&
-		row.TargetRevision == "" && row.Operation != nil &&
-		row.Operation.Type == workload.InstanceOperationMigrate &&
-		row.Operation.RequestUUID == requestUUID &&
-		row.Operation.SurgeIndex != nil && *row.Operation.SurgeIndex == sourceIdx
-}
-
-func migrationPromotedSurgeMatches(row *workload.InstanceStatus, targetRevision string) bool {
-	return row != nil && row.Incarnation == 1 && row.ActiveOrdinal == 0 &&
-		row.Phase == workload.InstancePhaseReady &&
-		row.RunningRevision == targetRevision && row.TargetRevision == "" && row.Operation == nil
+// migrationDrainTargetMatches reads the surge side of a drain pair as the
+// pass classified it: still pinned to the request, or already promoted
+// to targetRevision.
+func migrationDrainTargetMatches(row *workload.InstanceStatus, promoted bool, requestUUID string, sourceIdx int32, targetRevision string) bool {
+	if promoted {
+		return status.MigrationPromotedSurgeMatches(row, targetRevision)
+	}
+	return status.MigrationSurgeOwnsPromotion(row, requestUUID, sourceIdx)
 }
 
 // surgeTailGatesPassed reports whether the surge Instance passes the

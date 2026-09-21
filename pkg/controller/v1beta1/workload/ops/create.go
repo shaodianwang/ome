@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -29,10 +28,6 @@ import (
 func CreateRequeueInterval(input workload.ReconcileInput) time.Duration {
 	return input.Requeue.Operation
 }
-
-// createStepCreatePods is the write-ahead marker for a committed Instance
-// materialization. The status mutation is persisted before any Pod create.
-const createStepCreatePods = "CreatePods"
 
 // Create drives Create / Scale-Up toward each desired Instance.
 // Multi-pass:
@@ -328,7 +323,7 @@ func createFilteredBatched(
 			if target != nil {
 				targetRevision = target.Name
 			}
-			mutation := createStatusCreatingMutation(inst.Index, inst.Incarnation, plan.InstanceReadyTimeout, targetRevision, now)
+			mutation := status.CreatingMutation(inst.Index, inst.Incarnation, plan.InstanceReadyTimeout, targetRevision, now)
 			observed := input.ObservedState.Instance(inst.Index)
 			probe := workload.InstanceStatus{Index: inst.Index}
 			if observed != nil {
@@ -386,7 +381,7 @@ func createFilteredBatched(
 			mutation = status.ReadyOnRevisionMutation(inst.Index, target.Name, input.Now())
 			action.pruneRevision = target.Name
 		} else {
-			mutation = createStatusReadyMutation(inst.Index, input.Now())
+			mutation = status.ReadyMutation(inst.Index, input.Now())
 		}
 		probe := workload.InstanceStatus{Index: inst.Index}
 		if observed != nil {
@@ -690,55 +685,7 @@ func (transition *statusTransition) capture(previous, current *workload.Instance
 }
 
 func (transition *statusTransition) rollbackMutation() (workload.InstanceMutation, bool) {
-	if transition.current == nil {
-		return workload.InstanceMutation{}, false
-	}
-	committed := *transition.current
-	matchesCommitted := func(row *workload.InstanceStatus) bool {
-		return sameCreateTransitionOwnerState(*row, committed)
-	}
-	if transition.previous == nil {
-		return workload.InstanceMutation{
-			Index:        transition.index,
-			Remove:       true,
-			Precondition: matchesCommitted,
-		}, true
-	}
-	previous := *transition.previous
-	return workload.InstanceMutation{
-		Index: transition.index,
-		Mutate: func(row *workload.InstanceStatus) bool {
-			if !matchesCommitted(row) {
-				return false
-			}
-			restoreCreateTransitionState(row, previous)
-			return true
-		},
-	}, true
-}
-
-// sameCreateTransitionOwnerState compares the state that can authorize a
-// Create rollback. Publication-only Pod observations do not own the lifecycle
-// transition and may advance independently.
-func sameCreateTransitionOwnerState(current, committed workload.InstanceStatus) bool {
-	current.ReadyPodCount = 0
-	current.ScheduledPodCount = 0
-	current.NodesOccupied = nil
-	committed.ReadyPodCount = 0
-	committed.ScheduledPodCount = 0
-	committed.NodesOccupied = nil
-	return reflect.DeepEqual(current, committed)
-}
-
-func restoreCreateTransitionState(row *workload.InstanceStatus, previous workload.InstanceStatus) {
-	previous.ReadyPodCount = row.ReadyPodCount
-	previous.ScheduledPodCount = row.ScheduledPodCount
-	if row.NodesOccupied != nil {
-		previous.NodesOccupied = append([]string(nil), row.NodesOccupied...)
-	} else {
-		previous.NodesOccupied = nil
-	}
-	*row = previous
+	return status.CreateRollbackMutation(transition.index, transition.previous, transition.current)
 }
 
 func scaleUpPodBatchAdmits(limit *int32, selectedPods, candidatePods int32) bool {
@@ -982,34 +929,21 @@ func retireSupersededCreateMutation(input workload.ReconcileInput, idx int32, ex
 		}
 	}
 
-	expectedIncarnation := row.Incarnation
-	expectedID := row.Operation.ID
-	expectedTarget := row.Operation.TargetRevision
 	now := metav1.NewTime(input.Now())
 	replacement := workload.InstanceOperation{
 		ID:             replacementCreateOperationID(idx, target, now),
 		Type:           workload.InstanceOperationCreate,
-		Step:           createStepCreatePods,
+		Step:           status.CreateStepCreatePods,
 		StartedAt:      now,
 		LastProgressAt: now,
 		Deadline:       workload.DeadlineAt(now, timeout),
 		TargetRevision: target.Name,
 	}
-	from := expectedTarget
+	from := row.Operation.TargetRevision
 	if from == "" {
 		from = query.RevisionFromPod(firstRevisionLabeledPod(existing)).String()
 	}
-	mutation := workload.InstanceMutation{Index: idx, Mutate: func(current *workload.InstanceStatus) bool {
-		if current.Incarnation != expectedIncarnation || current.Phase != workload.InstancePhaseCreating ||
-			current.Operation == nil || current.Operation.Type != workload.InstanceOperationCreate ||
-			current.Operation.ID != expectedID || current.Operation.TargetRevision != expectedTarget {
-			return false
-		}
-		op := replacement
-		current.Operation = &op
-		return true
-	}}
-	return retiredCreateAttempt{index: idx, from: from, mutation: mutation}, true
+	return retiredCreateAttempt{index: idx, from: from, mutation: status.CreateReplacementMutation(row, replacement)}, true
 }
 
 // replacementCreateOperationID names the attempt that replaces a superseded
@@ -1287,55 +1221,6 @@ func createMissingPods(ctx context.Context, deps workload.Deps, input workload.R
 		return created, fmt.Errorf("clear quota refusal (instance=%d): %w", idx, err)
 	}
 	return created, nil
-}
-
-// createStatusCreatingMutation stamps Phase=Creating with a durable Create
-// operation. Existing nonzero incarnations are preserved across retries.
-func createStatusCreatingMutation(idx int32, incarnation int64, timeout time.Duration, targetRev string, now metav1.Time) workload.InstanceMutation {
-	return workload.InstanceMutation{Index: idx, Mutate: func(s *workload.InstanceStatus) bool {
-		if s.Phase == workload.InstancePhaseCreating &&
-			s.Operation != nil && s.Operation.Type == workload.InstanceOperationCreate &&
-			s.Incarnation > 0 {
-			if s.Operation.TargetRevision == "" && targetRev != "" {
-				op := *s.Operation
-				op.TargetRevision = targetRev
-				s.Operation = &op
-				return true
-			}
-			return false
-		}
-		if s.Incarnation == 0 {
-			s.Incarnation = incarnation
-		}
-		s.Phase = workload.InstancePhaseCreating
-		s.Operation = &workload.InstanceOperation{
-			ID:             fmt.Sprintf("create-%d-%d", idx, now.Unix()),
-			Type:           workload.InstanceOperationCreate,
-			Step:           createStepCreatePods,
-			StartedAt:      now,
-			LastProgressAt: now,
-			Deadline:       workload.DeadlineAt(now, timeout),
-			TargetRevision: targetRev,
-		}
-		return true
-	}}
-}
-
-// patchInstanceStatusReady idempotently moves to Phase=Ready, clears Operation.
-func patchInstanceStatusReady(ctx context.Context, input workload.ReconcileInput, idx int32) error {
-	mutation := createStatusReadyMutation(idx, input.Now())
-	return input.MutateInstance(ctx, mutation.Index, mutation.Mutate)
-}
-
-func createStatusReadyMutation(idx int32, now time.Time) workload.InstanceMutation {
-	return workload.InstanceMutation{Index: idx, Mutate: func(s *workload.InstanceStatus) bool {
-		if s.Phase == workload.InstancePhaseReady && s.Operation == nil {
-			return false
-		}
-		status.EnterReady(s, now)
-		s.Operation = nil
-		return true
-	}}
 }
 
 // until converts an absolute policy boundary into the delay a requeue

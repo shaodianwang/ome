@@ -399,9 +399,12 @@ measured against the final timings.
 
 ### Status: one writer
 
-`status/` holds every stamp in eight files: `decision.go` (phase, operation,
+`status/` holds every stamp in eleven files: `decision.go` (phase, operation,
 the step transitions, the promote terminator, the Failed stamps), `gangsurge.go`
-and `migration.go` (the two decisions that write a pair of rows in one batch),
+and `migration.go` (the two decisions that write a pair of rows in one batch,
+with the step, promote, reset and cleanup stamps of each), `create.go` (the
+create-attempt claim, promote, replacement and rollback), `delete.go` (the
+scale-down wave's admission and removal), `reset.go` (the operator reset),
 `evidence.go` (`LastFailure`, the capacity-refusal record, the waiting token),
 `announced.go`, `terminal.go`, `precondition.go` and `doc.go`. Two contracts:
 
@@ -702,12 +705,16 @@ state, an external test pinning the package's surface as a consumer sees it —
 nothing else.
 
 **Row writes.** A row-mutation closure — `func(s *InstanceStatus) bool`, the
-callback the status adapter applies — may be declared only in `status/`, `ops/`
-and the reconcile root. The check is an **allow-list of writers**, not a list of
-readers, so a package added later is checked by default: `holds/`, `evidence/`,
-`types/`, `query/`, `gang/`, `audit/`, `revision/`, `podgroup/`, `drain/`,
-`podreadiness/` and `replay/` are locked out today, and so is any package added
-tomorrow.
+callback the status adapter applies — may be declared only in `status/`. The
+check is an **allow-list of one writer**, not a list of readers, so a package
+added later is checked by default: the reconcile root, `ops/`, `escalation/`,
+`holds/`, `evidence/`, `types/`, `query/`, `gang/`, `audit/`, `revision/`,
+`podgroup/`, `drain/`, `podreadiness/` and `replay/` are locked out today, and
+so is any package added tomorrow. `types/input.go` declares the callback's type
+and `replay/rowstore.go` takes it as a parameter; neither has a body, and the
+check keys on the body. A closure that does not name its parameter — the no-op
+carrier a batch preflight hangs its snapshot guard on — cannot write the row
+and is not flagged.
 
 The gate was added **in step 6, once the layout was already true** — never
 earlier. A check added in step 1 would have failed every build from step 1
@@ -791,18 +798,21 @@ revision rather than name a verb.)
    release from the observation the hold pass will read next, proved by that
    trailing line disappearing from `quota-hold-parks-deadline` and nothing else
    moving.
-4. **The row-writer rule is not `status/`-only.** Step 5's premise was that
-   `status/` becomes the only writer. It is not yet true: `ops/` still authors 26
-   row-mutation closures (`update_gang.go` 11, `create.go` 5, `migrate.go` 5,
-   `delete_batch.go` 2, `migrate_expire.go` 2, `reset.go` 1) and
-   `escalation/refresh.go` authors 1, against 32 in `status/`; the reconcile
-   root authors none. The two the step named — the promote terminator and the
-   migration pin — are routed; routing the remaining 27 is production change
-   well past step 6's "move no production code". The gate therefore enforces
-   the **true** rule, an allow-list of three directories (`status/`, `ops/`,
-   `escalation/`), rather than an aspiration.
-   *Follow-up:* tighten `ROW_WRITERS` in `check_test_layout.py` to `status/`
-   alone, proved by the gate going green with all 119 goldens byte-identical.
+4. **The row-writer rule is `status/`-only.** Step 5's premise was that
+   `status/` becomes the only writer, and step 6 shipped the gate on the rule
+   that was true at the time — an allow-list of three directories, because
+   `ops/` still authored 26 row-mutation closures (`update_gang.go` 11,
+   `create.go` 5, `migrate.go` 5, `delete_batch.go` 2, `migrate_expire.go` 2,
+   `reset.go` 1) and `escalation/refresh.go` 1. Those 27 are now routed: each
+   became a named stamp in `status/` under the verb taxonomy, its precondition
+   stated once in the helper and its body moved verbatim, and the caller keeps
+   only the decision of which stamp to apply. `ROW_WRITERS` is `status/` alone,
+   the gate fails on the tree as it stood before the move (seven files) and
+   passes after it, and all 119 goldens are byte-identical across the move.
+   The two read-only predicates in `confirmMigrationDrainPair` that shared the
+   closure's shape became one named reader; the no-op preflight carriers stay
+   where they are, since a closure that does not name its parameter cannot
+   write.
 
 One more duplicate is left deliberately, and is not a follow-up:
 `sameFailureIdentity` and `status.SameEvidence` in `status/evidence.go` are **not
@@ -1048,13 +1058,10 @@ step's diff is allowed to look like.
 
 ## Open Questions
 
-The three the draft left open are answered. What remains is the four follow-ups
-in **What the table cannot express yet**, of which one is worth naming as the
-next action:
-
-- **Tighten the row-writer allow-list to `status/` alone.** 28 closures to route,
-  owner unassigned. The gate change is one tuple in `check_test_layout.py`, and
-  the goldens are the proof.
+The three the draft left open are answered. What remains is the three open
+follow-ups in **What the table cannot express yet**; the fourth — tightening
+the row-writer allow-list to `status/` alone — is done, with the goldens as
+the proof.
 
 Prerequisite outside this OEP: the `canary_retarget_rollback_kind_test`
 quarantine expires 2026-10-04, and this branch relies on a green KIND lane.

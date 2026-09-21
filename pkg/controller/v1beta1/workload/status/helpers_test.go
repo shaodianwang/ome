@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	clocktesting "k8s.io/utils/clock/testing"
@@ -238,5 +239,75 @@ func openRow(idx int32, phase types.InstancePhase) types.InstanceStatus {
 	return types.InstanceStatus{
 		Index: idx, Phase: phase,
 		Operation: &types.InstanceOperation{ID: "op-1", Type: types.InstanceOperationUpdate},
+	}
+}
+
+// gangSurgeRecoverySource is a source mid-surge: Updating toward
+// targetRevision with Step=Surge pinned to surgeIndex.
+func gangSurgeRecoverySource(surgeIndex int32, targetRevision string) types.InstanceStatus {
+	return types.InstanceStatus{
+		Index:           0,
+		Incarnation:     4,
+		Phase:           types.InstancePhaseUpdating,
+		RunningRevision: "recovery-engine-oldrev",
+		TargetRevision:  targetRevision,
+		Operation: &types.InstanceOperation{
+			ID:             "gang-update-0",
+			Type:           types.InstanceOperationUpdate,
+			Step:           types.UpdateStepSurge,
+			TargetRevision: targetRevision,
+			SurgeIndex:     &surgeIndex,
+		},
+	}
+}
+
+// gangSurgeActiveTarget is the live marker a gang surge's target slot
+// carries for targetRevision.
+func gangSurgeActiveTarget(index int32, targetRevision string) types.InstanceStatus {
+	return types.InstanceStatus{
+		Index:          index,
+		Incarnation:    1,
+		Phase:          types.InstancePhaseCreating,
+		TargetRevision: targetRevision,
+		Operation: &types.InstanceOperation{
+			ID:             "gang-target",
+			Type:           types.InstanceOperationUpdate,
+			Step:           types.UpdateStepGangSurgeTarget,
+			TargetRevision: targetRevision,
+		},
+	}
+}
+
+// gangSurgeRecoveryInput is the input a gang-surge stamp needs: the owner
+// it fences on, the rows the pass observed, and both write seams over
+// store.
+func gangSurgeRecoveryInput(
+	ownerUID k8stypes.UID,
+	isvcName string,
+	namespace string,
+	store *terminalMutationStore,
+	observed ...types.InstanceStatus,
+) types.ReconcileInput {
+	return types.ReconcileInput{
+		OwnerObject: &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+			Name: isvcName, Namespace: namespace, UID: ownerUID,
+		}},
+		Key: types.Key{
+			Namespace: namespace,
+			OwnerName: isvcName,
+			Component: types.ComponentEngine,
+		},
+		ObservedState: types.WorkloadObservedState{InstanceStatuses: observed},
+		MutateInstance: func(_ context.Context, index int32, mutate func(*types.InstanceStatus) bool) error {
+			row, found := store.statuses[index]
+			if !found {
+				row = types.InstanceStatus{Index: index}
+			}
+			if mutate(&row) {
+				store.statuses[index] = cloneTerminalStatus(row)
+			}
+			return nil
+		},
+		ApplyInstanceMutationsWithRetryBlock: store.apply,
 	}
 }

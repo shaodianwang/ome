@@ -16,9 +16,9 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
-	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
@@ -51,7 +51,7 @@ type resetSkip struct {
 // keeps serving on its old pods) is skipped untouched: draining a
 // serving source is the rollout machinery's job, not this verb's. And
 // only repair-owned parked attempts are in scope (no Operation, Create,
-// Restart — ops.ResetOwnsOperation): an Instance parked behind an
+// Restart — status.ResetOwnsOperation): an Instance parked behind an
 // Update or Migrate continuation is skipped, because the gang abandon,
 // wreckage cleanup, release-held, and migration-expiry paths own those
 // continuations and clearing one here would orphan its surge marker or
@@ -175,7 +175,7 @@ func (r *Reconciler) resetInstances(ctx context.Context, log logr.Logger, ir *v1
 	// skipped with its owner named.
 	var candidates []int32
 	classify := func(idx int32, s *v1beta1.OMENativeInstanceStatus) {
-		if !workloadops.ResetOwnsOperation(v1beta1convert.InstanceOperationToWorkload(s.Operation)) {
+		if !status.ResetOwnsOperation(v1beta1convert.InstanceOperationToWorkload(s.Operation)) {
 			skipped = append(skipped, resetSkip{index: idx, reason: "owned by " + string(s.Operation.Type)})
 			return
 		}
@@ -247,7 +247,7 @@ func (r *Reconciler) resetInstances(ctx context.Context, log logr.Logger, ir *v1
 		// The transition write itself belongs to the workload layer; the
 		// seam re-checks Phase=Failed and the Operation owner on the
 		// fresh read.
-		cleared, merr := workloadops.ClearFailedInstanceOperation(ctx, mutateInstance, idx)
+		cleared, merr := status.ClearFailedInstanceOperation(ctx, mutateInstance, idx)
 		if merr != nil {
 			return reset, skipped, fmt.Errorf("clear preserved operation (instance=%d): %w", idx, merr)
 		}

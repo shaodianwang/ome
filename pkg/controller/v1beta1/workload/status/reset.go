@@ -1,4 +1,4 @@
-package ops
+package status
 
 import (
 	"context"
@@ -28,8 +28,8 @@ func ResetOwnsOperation(op *types.InstanceOperation) bool {
 // when its attempt expired, returning the Instance to the fresh-start
 // shape — Failed with no Operation — that the Create pass rebuilds once
 // its pods are gone. Phase and LastFailure are untouched. It is the
-// operator-reset counterpart of failInstanceClearingOperation: that one
-// parks an attempt at Failed, this one releases the parked attempt.
+// operator-reset counterpart of StampFailed: that one parks an attempt
+// at Failed, this one releases the parked attempt.
 //
 // mutate is the adapter's MutateInstance seam. Reports whether a write
 // happened: a non-Failed Instance, a Failed Instance with no Operation,

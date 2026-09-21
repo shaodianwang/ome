@@ -106,9 +106,20 @@ class LayoutTest(unittest.TestCase):
 ROW_WRITE = (
     "package p\n\nfunc write() {\n\t_ = func(s *types.InstanceStatus) bool { return true }\n}\n"
 )
+ROW_WRITE_MULTILINE = (
+    "package p\n\nfunc write() {\n\t_ = func(\n\t\ts *types.InstanceStatus,\n\t) bool {\n"
+    "\t\treturn true\n\t}\n}\n"
+)
 ROW_TYPE_DECL = (
     "package p\n\ntype Input struct {\n"
     "\tMutateInstance func(idx int32, mutate func(s *InstanceStatus) bool) error\n}\n"
+)
+ROW_CALLBACK_PARAMETER = (
+    "package p\n\nfunc (s *Store) MutateInstance(idx int32, mutate func(*InstanceStatus) bool) error {\n"
+    "\treturn nil\n}\n"
+)
+ROW_NOOP_PREFLIGHT = (
+    "package p\n\nfunc confirm() {\n\t_ = func(*types.InstanceStatus) bool { return false }\n}\n"
 )
 
 
@@ -118,14 +129,23 @@ class RowWriterTest(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         return check_test_layout.check_row_writers(tmp.name)
 
-    def test_a_row_writer_package_may_author_the_closure(self):
+    def test_the_status_package_may_author_the_closure(self):
         self.assertEqual(self.violations({"status/decision.go": ROW_WRITE}), [])
-        self.assertEqual(self.violations({"ops/create.go": ROW_WRITE}), [])
-        self.assertEqual(self.violations({"escalation/refresh.go": ROW_WRITE}), [])
+        self.assertEqual(self.violations({"status/create.go": ROW_WRITE_MULTILINE}), [])
 
     def test_the_reconcile_root_may_not(self):
         (violation,) = self.violations({"reconcile.go": ROW_WRITE})
         self.assertIn("reconcile.go", violation)
+        self.assertIn("row-mutation", violation)
+
+    def test_an_operation_pass_may_not(self):
+        (violation,) = self.violations({"ops/create.go": ROW_WRITE})
+        self.assertIn("create.go", violation)
+        self.assertIn("row-mutation", violation)
+
+    def test_the_escalation_pass_may_not(self):
+        (violation,) = self.violations({"escalation/refresh.go": ROW_WRITE})
+        self.assertIn("refresh.go", violation)
         self.assertIn("row-mutation", violation)
 
     def test_a_reading_package_may_not(self):
@@ -133,8 +153,18 @@ class RowWriterTest(unittest.TestCase):
         self.assertIn("crashloop.go", violation)
         self.assertIn("row-mutation", violation)
 
+    def test_a_closure_spread_over_lines_is_still_a_closure(self):
+        (violation,) = self.violations({"ops/create.go": ROW_WRITE_MULTILINE})
+        self.assertIn("create.go", violation)
+
     def test_declaring_the_callback_type_is_not_authoring_one(self):
         self.assertEqual(self.violations({"types/input.go": ROW_TYPE_DECL}), [])
+
+    def test_taking_the_callback_as_a_parameter_is_not_authoring_one(self):
+        self.assertEqual(self.violations({"replay/rowstore.go": ROW_CALLBACK_PARAMETER}), [])
+
+    def test_a_closure_that_cannot_name_the_row_is_not_a_write(self):
+        self.assertEqual(self.violations({"ops/migrate.go": ROW_NOOP_PREFLIGHT}), [])
 
     def test_a_subpackage_of_a_writer_is_checked(self):
         self.assertTrue(self.violations({"ops/inner/x.go": ROW_WRITE}))

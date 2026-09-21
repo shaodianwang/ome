@@ -1,4 +1,4 @@
-package ops_test
+package status_test
 
 // ClearFailedInstanceOperation: the operator-reset release of a parked
 // attempt clears only a repair-owned Operation (Create / Restart) of a
@@ -11,7 +11,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
@@ -31,18 +31,18 @@ func parkedOperation(typ types.InstanceOperationType) *types.InstanceOperation {
 }
 
 func TestResetOwnsOperation(t *testing.T) {
-	if !workloadops.ResetOwnsOperation(nil) {
+	if !status.ResetOwnsOperation(nil) {
 		t.Fatalf("no Operation must be reset-owned")
 	}
 	owned := []types.InstanceOperationType{types.InstanceOperationCreate, types.InstanceOperationRestart}
 	for _, typ := range owned {
-		if !workloadops.ResetOwnsOperation(parkedOperation(typ)) {
+		if !status.ResetOwnsOperation(parkedOperation(typ)) {
 			t.Errorf("%s must be reset-owned", typ)
 		}
 	}
 	foreign := []types.InstanceOperationType{types.InstanceOperationUpdate, types.InstanceOperationMigrate, types.InstanceOperationDelete}
 	for _, typ := range foreign {
-		if workloadops.ResetOwnsOperation(parkedOperation(typ)) {
+		if status.ResetOwnsOperation(parkedOperation(typ)) {
 			t.Errorf("%s must NOT be reset-owned", typ)
 		}
 	}
@@ -98,7 +98,7 @@ func TestClearFailedInstanceOperation(t *testing.T) {
 			before := s
 			mutate, wrote := recordingMutate(&s)
 
-			cleared, err := workloadops.ClearFailedInstanceOperation(context.Background(), mutate, 3)
+			cleared, err := status.ClearFailedInstanceOperation(context.Background(), mutate, 3)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -128,7 +128,7 @@ func TestClearFailedInstanceOperation_SeamErrorPropagates(t *testing.T) {
 	boom := errors.New("re-read IR: simulated outage")
 	mutate := func(context.Context, int32, func(*types.InstanceStatus) bool) error { return boom }
 
-	cleared, err := workloadops.ClearFailedInstanceOperation(context.Background(), mutate, 3)
+	cleared, err := status.ClearFailedInstanceOperation(context.Background(), mutate, 3)
 	if !errors.Is(err, boom) {
 		t.Fatalf("seam error must propagate, got %v", err)
 	}

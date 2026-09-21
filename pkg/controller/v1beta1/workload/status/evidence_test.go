@@ -69,6 +69,36 @@ func TestSameEvidence_KeysOnTheMoment(t *testing.T) {
 	}
 }
 
+// The refresh lands only on a Failed row still carrying the generic
+// reason, and keeps the recorded time; a row that has since left Failed
+// or named a concrete cause of its own keeps what it has.
+func TestRecordRefreshedFailure_ReplacesOnlyTheGenericReasonInPlace(t *testing.T) {
+	failedAt := metav1.NewTime(time.Date(2026, time.September, 21, 0, 0, 0, 0, time.UTC))
+	const generic = "DeadlineExceeded"
+	concrete := &types.InstanceTermination{PodName: "engine-0", ContainerName: "main", Reason: "CrashLoopBackOff", Time: metav1.NewTime(failedAt.Add(time.Hour))}
+	refresh := RecordRefreshedFailure(concrete, generic)
+
+	row := types.InstanceStatus{Index: 0, Phase: types.InstancePhaseFailed, LastFailure: &types.InstanceTermination{Reason: generic, Time: failedAt}}
+	if !refresh(&row) {
+		t.Fatal("a Failed row on the generic reason must be refreshed")
+	}
+	if row.LastFailure.Reason != "CrashLoopBackOff" || row.LastFailure.PodName != "engine-0" || !row.LastFailure.Time.Equal(&failedAt) {
+		t.Fatalf("LastFailure = %+v, want the concrete cause at the original time", row.LastFailure)
+	}
+	if refresh(&row) {
+		t.Fatal("a concrete reason already on the record must not be replaced")
+	}
+
+	notFailed := types.InstanceStatus{Index: 0, Phase: types.InstancePhaseUpdating, LastFailure: &types.InstanceTermination{Reason: generic, Time: failedAt}}
+	if refresh(&notFailed) {
+		t.Fatal("a row that left Failed must keep what it has")
+	}
+	noRecord := types.InstanceStatus{Index: 0, Phase: types.InstancePhaseFailed}
+	if refresh(&noRecord) {
+		t.Fatal("a row with no record has nothing to refresh")
+	}
+}
+
 // The refusal carrier records the moment and nothing else, and both
 // edges are idempotent.
 func TestRecordCapacityRefusal_ReportsOnlyTheFirstRefusal(t *testing.T) {

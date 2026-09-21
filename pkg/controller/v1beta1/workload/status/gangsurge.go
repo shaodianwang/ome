@@ -169,6 +169,494 @@ func StartGangSurge(
 	return committed, nil
 }
 
+// StampGangSurgeDrainStep moves a gang surge's SOURCE from Step=Surge to
+// Step=SurgeDrain, fenced on both rows of the pair still being the pair
+// the pass read: the source identity, and the target still carrying the
+// live marker for the source's revision. Reports whether the source is
+// on SurgeDrain afterwards — by this write or a previous one.
+func StampGangSurgeDrainStep(
+	ctx context.Context,
+	input types.ReconcileInput,
+	source *types.InstanceStatus,
+	target *types.InstanceStatus,
+) (bool, error) {
+	if err := RequireOwner(input); err != nil {
+		return false, err
+	}
+
+	before := Capture(source)
+	after := before.WithStep(types.UpdateStepSurgeDrain)
+	targetIdentity := Capture(target)
+	ownerUID := input.OwnerObject.GetUID()
+	confirmed := false
+	committed := false
+	mutation := types.InstanceMutation{
+		Index: source.Index,
+		Mutate: func(row *types.InstanceStatus) bool {
+			if after.Matches(*row) {
+				confirmed = true
+				return false
+			}
+			if !before.Matches(*row) {
+				return false
+			}
+			row.Operation.Step = types.UpdateStepSurgeDrain
+			row.Operation.LastProgressAt = metav1.NewTime(input.Now())
+			return true
+		},
+		BatchPrecondition: func(snapshot types.InstanceMutationSnapshot) bool {
+			confirmed = false
+			if snapshot.OwnerUID != ownerUID {
+				return false
+			}
+			currentSource, sourceFound := snapshot.Instances[source.Index]
+			currentTarget, targetFound := snapshot.Instances[target.Index]
+			if !sourceFound || !targetFound || !targetIdentity.Matches(currentTarget) ||
+				!GangSurgeActiveTargetClaimMatches(&currentTarget, source.Operation.TargetRevision) {
+				return false
+			}
+			if after.Matches(currentSource) {
+				confirmed = true
+				return true
+			}
+			return before.Matches(currentSource)
+		},
+		Postcondition: func(row *types.InstanceStatus) bool {
+			return row != nil && after.Matches(*row)
+		},
+		OnCommit: func(_, _ *types.InstanceStatus) {
+			committed = true
+		},
+	}
+	err := Apply(ctx, input, []types.InstanceMutation{mutation})
+	if errors.Is(err, types.ErrStatusMutationPrecondition) || errors.Is(err, types.ErrStatusOwnerGone) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return committed || confirmed, nil
+}
+
+// StampGangSurgeTargetReady is the gang surge's promote terminator: the
+// TARGET goes Ready on targetRevision with its marker cleared, fenced on
+// the source identity, the target identity and the live marker. Success
+// at targetRevision also prunes its RetryBlock. Reports whether this
+// pass promoted.
+func StampGangSurgeTargetReady(
+	ctx context.Context,
+	input types.ReconcileInput,
+	source *types.InstanceStatus,
+	target *types.InstanceStatus,
+	targetRevision string,
+) (bool, error) {
+	if err := RequireOwner(input); err != nil {
+		return false, err
+	}
+
+	sourceIdentity := Capture(source)
+	targetIdentity := Capture(target)
+	ownerUID := input.OwnerObject.GetUID()
+	promoted := false
+	mutation := ReadyOnRevisionMutation(target.Index, targetRevision, input.Now())
+	mutation.BatchPrecondition = func(snapshot types.InstanceMutationSnapshot) bool {
+		if snapshot.OwnerUID != ownerUID {
+			return false
+		}
+		currentSource, sourceFound := snapshot.Instances[source.Index]
+		currentTarget, targetFound := snapshot.Instances[target.Index]
+		return sourceFound && targetFound &&
+			sourceIdentity.Matches(currentSource) && targetIdentity.Matches(currentTarget) &&
+			GangSurgeActiveTargetClaimMatches(&currentTarget, targetRevision)
+	}
+	mutation.Postcondition = func(row *types.InstanceStatus) bool {
+		return row != nil && row.Index == target.Index &&
+			row.Incarnation == target.Incarnation &&
+			row.ActiveOrdinal == target.ActiveOrdinal &&
+			row.Phase == types.InstancePhaseReady &&
+			row.RunningRevision == targetRevision &&
+			row.TargetRevision == "" && row.Operation == nil
+	}
+	mutation.OnCommit = func(_, _ *types.InstanceStatus) {
+		promoted = true
+	}
+	err := Apply(ctx, input, []types.InstanceMutation{mutation})
+	if errors.Is(err, types.ErrStatusMutationPrecondition) || errors.Is(err, types.ErrStatusOwnerGone) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !promoted {
+		return false, nil
+	}
+	if err := RetryBlockPruneOnPromote(ctx, input, targetRevision); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// ResetGangSurgeSource releases a source claim whose target slot turned
+// out to be occupied: the source goes back to Ready on its running
+// revision and the occupied target is not touched. The strong path
+// guards both lifecycle identities in one authoritative snapshot;
+// compatibility adapters confirm the target and source independently
+// through their fresh mutation reads. Reports whether this pass reset.
+func ResetGangSurgeSource(
+	ctx context.Context,
+	input types.ReconcileInput,
+	source *types.InstanceStatus,
+	target *types.InstanceStatus,
+) (bool, error) {
+	sourceIdentity := Capture(source)
+	targetIdentity := Capture(target)
+	reset := ReadyOnRevisionMutation(source.Index, source.RunningRevision, input.Now())
+	reset.Postcondition = func(row *types.InstanceStatus) bool {
+		return row != nil && row.Index == source.Index &&
+			row.Incarnation == source.Incarnation &&
+			row.Phase == types.InstancePhaseReady &&
+			row.RunningRevision == source.RunningRevision &&
+			row.TargetRevision == "" && row.Operation == nil &&
+			row.ActiveOrdinal == source.ActiveOrdinal
+	}
+
+	if input.ApplyInstanceMutationsWithRetryBlock != nil {
+		if err := RequireOwner(input); err != nil {
+			return false, err
+		}
+		ownerUID := input.OwnerObject.GetUID()
+		committed := false
+		reset.BatchPrecondition = func(snapshot types.InstanceMutationSnapshot) bool {
+			if snapshot.OwnerUID != ownerUID {
+				return false
+			}
+			currentSource, sourceFound := snapshot.Instances[source.Index]
+			currentTarget, targetFound := snapshot.Instances[target.Index]
+			return sourceFound && targetFound &&
+				sourceIdentity.Matches(currentSource) && targetIdentity.Matches(currentTarget)
+		}
+		reset.OnCommit = func(_, _ *types.InstanceStatus) {
+			committed = true
+		}
+		err := Apply(ctx, input, []types.InstanceMutation{reset})
+		if errors.Is(err, types.ErrStatusMutationPrecondition) || errors.Is(err, types.ErrStatusOwnerGone) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		return committed, nil
+	}
+
+	if input.MutateInstance == nil {
+		return false, fmt.Errorf("gang surge target conflict requires a status mutation adapter")
+	}
+	targetMatched := false
+	if err := input.MutateInstance(ctx, target.Index, func(current *types.InstanceStatus) bool {
+		targetMatched = targetIdentity.Matches(*current)
+		return false
+	}); err != nil {
+		return false, err
+	}
+	if !targetMatched {
+		return false, nil
+	}
+	sourceMatched := false
+	if err := input.MutateInstance(ctx, source.Index, func(current *types.InstanceStatus) bool {
+		sourceMatched = sourceIdentity.Matches(*current)
+		if !sourceMatched {
+			return false
+		}
+		return reset.Mutate(current)
+	}); err != nil {
+		return false, err
+	}
+	return sourceMatched, nil
+}
+
+// StampGangSurgeTargetCleanupStep moves a gang surge's TARGET marker
+// from its live step to Step=GangSurgeTargetCleanup: the slot is being
+// collected, not claimed. Fenced on the source identity and the marker
+// identity. Reports whether the marker is on the cleanup step afterwards
+// — by this write or a previous one.
+func StampGangSurgeTargetCleanupStep(
+	ctx context.Context,
+	input types.ReconcileInput,
+	source *types.InstanceStatus,
+	marker *types.InstanceStatus,
+) (bool, error) {
+	if err := RequireOwner(input); err != nil {
+		return false, err
+	}
+
+	sourceIdentity := Capture(source)
+	before := Capture(marker)
+	after := before.WithStep(types.UpdateStepGangSurgeTargetCleanup)
+	ownerUID := input.OwnerObject.GetUID()
+	confirmed := false
+	committed := false
+	mutation := types.InstanceMutation{
+		Index: marker.Index,
+		Mutate: func(row *types.InstanceStatus) bool {
+			if after.Matches(*row) {
+				confirmed = true
+				return false
+			}
+			if !before.Matches(*row) {
+				return false
+			}
+			row.Operation.Step = types.UpdateStepGangSurgeTargetCleanup
+			return true
+		},
+		BatchPrecondition: func(snapshot types.InstanceMutationSnapshot) bool {
+			confirmed = false
+			if snapshot.OwnerUID != ownerUID {
+				return false
+			}
+			currentSource, found := snapshot.Instances[source.Index]
+			if !found || !sourceIdentity.Matches(currentSource) {
+				return false
+			}
+			currentMarker, found := snapshot.Instances[marker.Index]
+			if !found {
+				return false
+			}
+			if after.Matches(currentMarker) {
+				confirmed = true
+				return true
+			}
+			return before.Matches(currentMarker)
+		},
+		Postcondition: func(row *types.InstanceStatus) bool {
+			return row != nil && after.Matches(*row)
+		},
+		OnCommit: func(_, _ *types.InstanceStatus) {
+			committed = true
+		},
+	}
+	err := Apply(ctx, input, []types.InstanceMutation{mutation})
+	if errors.Is(err, types.ErrStatusMutationPrecondition) || errors.Is(err, types.ErrStatusOwnerGone) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return committed || confirmed, nil
+}
+
+// RestoreGangSurgeTargetCleanup closes the resumable gap between a
+// source whose surge is being abandoned and the cleanup marker its
+// target should carry: an absent slot gets the cleanup marker, a live
+// marker is moved to the cleanup step, and an existing cleanup marker
+// is confirmed. Fenced on the source identity. Reports whether the
+// cleanup marker is in place afterwards.
+func RestoreGangSurgeTargetCleanup(
+	ctx context.Context,
+	input types.ReconcileInput,
+	source *types.InstanceStatus,
+	surgeIdx int32,
+	targetRevision string,
+	timeout time.Duration,
+) (bool, error) {
+	if err := RequireOwner(input); err != nil {
+		return false, err
+	}
+
+	now := metav1.NewTime(input.Now())
+	desired := types.InstanceStatus{
+		Index:          surgeIdx,
+		Incarnation:    1,
+		Phase:          types.InstancePhaseCreating,
+		TargetRevision: targetRevision,
+		Operation: &types.InstanceOperation{
+			ID:             fmt.Sprintf("gangsurgetarget-%d-%d", surgeIdx, now.Unix()),
+			Type:           types.InstanceOperationUpdate,
+			Step:           types.UpdateStepGangSurgeTargetCleanup,
+			TargetRevision: targetRevision,
+			StartedAt:      now,
+			LastProgressAt: now,
+			Deadline:       types.DeadlineAt(now, timeout),
+		},
+	}
+	sourceIdentity := Capture(source)
+	ownerUID := input.OwnerObject.GetUID()
+	confirmed := false
+	committed := false
+	mutation := types.InstanceMutation{
+		Index: surgeIdx,
+		Mutate: func(row *types.InstanceStatus) bool {
+			if GangSurgeCleanupTargetClaimMatches(row, targetRevision) {
+				confirmed = true
+				return false
+			}
+			if GangSurgeActiveTargetClaimMatches(row, targetRevision) {
+				row.Operation.Step = types.UpdateStepGangSurgeTargetCleanup
+				return true
+			}
+			if !EmptyGangSurgeTargetSlot(row) {
+				return false
+			}
+			*row = Clone(desired)
+			return true
+		},
+		BatchPrecondition: func(snapshot types.InstanceMutationSnapshot) bool {
+			confirmed = false
+			if snapshot.OwnerUID != ownerUID {
+				return false
+			}
+			currentSource, found := snapshot.Instances[source.Index]
+			if !found || !sourceIdentity.Matches(currentSource) {
+				return false
+			}
+			currentTarget, found := snapshot.Instances[surgeIdx]
+			if !found {
+				return true
+			}
+			if GangSurgeCleanupTargetClaimMatches(&currentTarget, targetRevision) {
+				confirmed = true
+				return true
+			}
+			return GangSurgeActiveTargetClaimMatches(&currentTarget, targetRevision)
+		},
+		Postcondition: func(row *types.InstanceStatus) bool {
+			return row != nil && row.Index == surgeIdx &&
+				GangSurgeCleanupTargetClaimMatches(row, targetRevision)
+		},
+		OnCommit: func(_, _ *types.InstanceStatus) {
+			committed = true
+		},
+	}
+	err := Apply(ctx, input, []types.InstanceMutation{mutation})
+	if errors.Is(err, types.ErrStatusMutationPrecondition) || errors.Is(err, types.ErrStatusOwnerGone) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return committed || confirmed, nil
+}
+
+// ResetGangSurgeSourceAndRemoveMarker ends an abandoned gang surge in
+// one batch: the SOURCE goes back to Ready on sourceRunningRev and the
+// TARGET's cleanup marker is removed, with the failed revision's
+// RetryBlock disposition committed in the same write. Fenced on both
+// identities, proved once before the adapter finalizes the surge index's
+// own resources and again on the write. Reports whether this pass
+// committed the reset.
+func ResetGangSurgeSourceAndRemoveMarker(
+	ctx context.Context,
+	deps types.Deps,
+	input types.ReconcileInput,
+	source *types.InstanceStatus,
+	marker *types.InstanceStatus,
+	surgeIdx int32,
+	sourceRunningRev string,
+	failedTargetRev string,
+	failureReason string,
+	workloadCaused bool,
+) (bool, error) {
+	if err := RequireOwner(input); err != nil {
+		return false, err
+	}
+
+	ownerUID := input.OwnerObject.GetUID()
+	sourceIdentity := Capture(source)
+	if marker == nil {
+		return false, nil
+	}
+	markerIdentity := Capture(marker)
+	guard := func(snapshot types.InstanceMutationSnapshot) bool {
+		if snapshot.OwnerUID != ownerUID {
+			return false
+		}
+		currentSource, found := snapshot.Instances[source.Index]
+		if !found || !sourceIdentity.Matches(currentSource) {
+			return false
+		}
+		currentMarker, found := snapshot.Instances[surgeIdx]
+		return found && markerIdentity.Matches(currentMarker)
+	}
+
+	preflight := types.InstanceMutation{
+		Index:             source.Index,
+		Mutate:            func(*types.InstanceStatus) bool { return false },
+		BatchPrecondition: guard,
+	}
+	if err := Apply(ctx, input, []types.InstanceMutation{preflight}); err != nil {
+		if errors.Is(err, types.ErrStatusMutationPrecondition) || errors.Is(err, types.ErrStatusOwnerGone) {
+			return false, nil
+		}
+		return false, err
+	}
+	if sourceRunningRev != "" && types.FindRetryBlock(input.ObservedState.RetryBlocks, sourceRunningRev) != nil {
+		if err := RetryBlockPruneOnPromote(ctx, input, sourceRunningRev); err != nil {
+			return false, err
+		}
+	}
+
+	if input.FinalizeInstanceResources != nil {
+		complete, err := input.FinalizeInstanceResources(ctx, surgeIdx)
+		if err != nil {
+			return false, err
+		}
+		if !complete {
+			return false, nil
+		}
+	}
+
+	committed := false
+	reset := ReadyOnRevisionMutation(source.Index, sourceRunningRev, input.Now())
+	reset.BatchPrecondition = guard
+	reset.Postcondition = func(row *types.InstanceStatus) bool {
+		return row != nil && row.Index == source.Index &&
+			row.Incarnation == source.Incarnation &&
+			row.Phase == types.InstancePhaseReady &&
+			row.RunningRevision == sourceRunningRev &&
+			row.TargetRevision == "" && row.Operation == nil &&
+			row.ActiveOrdinal == source.ActiveOrdinal
+	}
+	reset.OnCommit = func(_, _ *types.InstanceStatus) {
+		committed = true
+		deps.ExpectationsCache().Forget(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, surgeIdx)
+	}
+	removeMarker := types.InstanceMutation{Index: surgeIdx, Remove: true}
+
+	var retryRevision string
+	var mutateRetryBlock func(*types.RetryBlock) types.RetryBlockDisposition
+	heldAttempts := int32(0)
+	if input.MutateRetryBlock != nil && failedTargetRev != "" {
+		retryRevision = failedTargetRev
+		now := metav1.NewTime(input.Now())
+		mutateRetryBlock = func(block *types.RetryBlock) types.RetryBlockDisposition {
+			var disposition types.RetryBlockDisposition
+			disposition, heldAttempts = types.ApplyUpdateFailureToRetryBlock(
+				block, input.UpdateRetryPolicy, now, failureReason, workloadCaused,
+			)
+			return disposition
+		}
+	}
+	priorOnCommit := reset.OnCommit
+	reset.OnCommit = func(previous, current *types.InstanceStatus) {
+		priorOnCommit(previous, current)
+		if heldAttempts > 0 && input.WarnRetryHeld != nil {
+			input.WarnRetryHeld(failedTargetRev, heldAttempts, failureReason)
+		}
+	}
+	err := input.ApplyInstanceMutationsWithRetryBlock(
+		ctx,
+		[]types.InstanceMutation{reset, removeMarker},
+		retryRevision,
+		mutateRetryBlock,
+	)
+	if errors.Is(err, types.ErrStatusMutationPrecondition) || errors.Is(err, types.ErrStatusOwnerGone) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return committed, nil
+}
+
 // GangSurgeTargetMarker reports which marker state a target slot was
 // found in.
 type GangSurgeTargetMarker uint8

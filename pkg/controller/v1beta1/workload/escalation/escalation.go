@@ -171,7 +171,7 @@ func Run(ctx context.Context, in PassInput) error {
 		if row.Phase == types.InstancePhaseFailed {
 			rowEvidence := evidenceFor(input.ObservedState.InstanceStatuses, byIdx, row.Index, now, input.StuckPodGrace)
 			if t := refreshedFailureEvidence(row, rowEvidence); t != nil {
-				stamps.add(row.Index, refreshFailureMutation(t), nil)
+				stamps.add(row.Index, status.RecordRefreshedFailure(t, DeadlineExceededReason), nil)
 			}
 			continue
 		}
