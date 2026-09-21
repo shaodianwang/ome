@@ -7,11 +7,16 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"knative.dev/pkg/apis"
+	ctrl "sigs.k8s.io/controller-runtime"
+	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	placementendpoint "github.com/ome-projects/ome/pkg/controller/v1beta1/placement/endpoint"
@@ -77,19 +82,29 @@ func targetOptions(value string) map[string]string {
 	return map[string]string{optTargetTemplate: value}
 }
 
+func targetOptionsWithSelector(value, selector string) map[string]string {
+	return map[string]string{optTargetTemplate: value, optSourceSelector: selector}
+}
+
 func TestPublisherIdentityAndState(t *testing.T) {
 	p := newTestPublisher(&recordingPublisher{})
 	assert.Equal(t, Name, p.Name())
 	assert.True(t, p.Stateful())
 }
 
-func TestResolveOptionsKeepsOnlyGlobalTargetTemplate(t *testing.T) {
+func TestResolveOptionsKeepsGlobalPublicationBehavior(t *testing.T) {
 	p := newTestPublisher(&recordingPublisher{})
-	global := targetOptions("  {{.EndpointHostname}}  ")
+	global := targetOptionsWithSelector(
+		"  {{.EndpointHostname}}  ",
+		" publish=true, environment in (prod,canary) ",
+	)
 
 	effective, err := p.ResolveOptions(global, nil)
 	require.NoError(t, err)
-	assert.Equal(t, targetOptions("{{.EndpointHostname}}"), effective)
+	assert.Equal(t, targetOptionsWithSelector(
+		"{{.EndpointHostname}}",
+		"environment in (canary,prod),publish=true",
+	), effective)
 
 	global[optTargetTemplate] = "changed"
 	assert.Equal(t, "{{.EndpointHostname}}", effective[optTargetTemplate])
@@ -117,6 +132,7 @@ func TestResolveOptionsValidatesSanitizedGlobals(t *testing.T) {
 	}{
 		{name: "missing", options: nil, want: "required"},
 		{name: "invalid template", options: targetOptions("{{"), want: optTargetTemplate},
+		{name: "invalid source selector", options: targetOptionsWithSelector("{{.Cluster}}", "publish in ("), want: optSourceSelector},
 		{name: "unexpected", options: map[string]string{optTargetTemplate: "{{.Cluster}}", optOncall: "team"}, want: "unsupported"},
 	}
 	for _, tt := range tests {
@@ -126,6 +142,150 @@ func TestResolveOptionsValidatesSanitizedGlobals(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.want)
 		})
 	}
+}
+
+func TestPlanUsesSourceSelector(t *testing.T) {
+	owner := testISVC("model-a")
+	owner.Labels = map[string]string{"publish": "true", "environment": "prod"}
+	weights := &recordingPublisher{}
+	p := newTestPublisher(weights)
+
+	matching, err := p.Plan(owner, testTrafficMap(), targetOptionsWithSelector(
+		"{{.EndpointHostname}}", "publish=true,environment in (prod,canary)",
+	))
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"model-a.team-a.home-a.example",
+		"model-a.team-a.home-b.example",
+	}, matching.Claims())
+
+	nonmatching, err := p.Plan(owner, testTrafficMap(), targetOptionsWithSelector(
+		"{{.EndpointHostname}}", "publish=false",
+	))
+	require.NoError(t, err)
+	assert.Empty(t, nonmatching.Claims())
+	result, err := p.Apply(context.Background(), nonmatching)
+	require.NoError(t, err)
+	assert.True(t, result.Withdrawn)
+	assert.Empty(t, weights.published, "a fresh nonmatch must not call the external publisher")
+	assert.Empty(t, weights.cleared)
+}
+
+func TestFreshNonmatchingSourceWithdrawsThroughLifecycleWithoutExternalCalls(t *testing.T) {
+	owner := testISVC("model-a")
+	owner.Generation = 2
+	owner.Labels = map[string]string{"publish": "false"}
+	owner.Spec.Placement = &v1beta1.PlacementSpec{Requirements: "accelerator=test"}
+	trafficMap := testTrafficMap()
+	trafficMap.UID = "traffic-map-uid"
+	trafficMap.Generation = 3
+	trafficMap.Spec.ObservedISVCGeneration = owner.Generation
+	trafficMap.OwnerReferences = []metav1.OwnerReference{
+		*metav1.NewControllerRef(owner, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
+	}
+	trafficMap.Status.SourceUID = owner.UID
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1beta1.AddToScheme(scheme))
+	kubeClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&v1beta1.TrafficMap{}).
+		WithObjects(owner, trafficMap).
+		Build()
+	weights := &recordingPublisher{}
+	reconciler := &placementendpoint.TrafficMapPublisherReconciler{
+		Client:        kubeClient,
+		APIReader:     kubeClient,
+		Log:           logr.Discard(),
+		Publisher:     newTestPublisher(weights),
+		GlobalOptions: targetOptionsWithSelector("{{.EndpointHostname}}", "publish=true"),
+		Active:        true,
+	}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{
+		Namespace: trafficMap.Namespace,
+		Name:      trafficMap.Name,
+	}}
+
+	result, err := reconciler.Reconcile(context.Background(), request)
+	require.NoError(t, err)
+	assert.True(t, result.Requeue, "the first pass durably installs the lifecycle finalizer")
+	_, err = reconciler.Reconcile(context.Background(), request)
+	require.NoError(t, err)
+	assert.Empty(t, weights.published)
+	assert.Empty(t, weights.cleared)
+
+	current := &v1beta1.TrafficMap{}
+	require.NoError(t, kubeClient.Get(context.Background(), request.NamespacedName, current))
+	require.NotNil(t, current.Status.Publisher)
+	assert.Empty(t, current.Status.Publisher.ClaimedTargets)
+	assert.False(t, current.Status.Programmed)
+	programmed := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
+	require.NotNil(t, programmed)
+	assert.Equal(t, metav1.ConditionFalse, programmed.Status)
+	assert.Equal(t, "Withdrawn", programmed.Reason)
+}
+
+func TestNonmatchingSourceDrainsExistingClaimsThroughLifecycle(t *testing.T) {
+	owner := testISVC("model-a")
+	owner.Generation = 2
+	owner.Labels = map[string]string{"publish": "false"}
+	owner.Spec.Placement = &v1beta1.PlacementSpec{Requirements: "accelerator=test"}
+	trafficMap := testTrafficMap()
+	trafficMap.UID = "traffic-map-uid"
+	trafficMap.Generation = 3
+	trafficMap.Spec.ObservedISVCGeneration = owner.Generation
+	trafficMap.OwnerReferences = []metav1.OwnerReference{
+		*metav1.NewControllerRef(owner, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
+	}
+	trafficMap.Finalizers = []string{placementendpoint.TrafficMapPublisherFinalizer}
+	trafficMap.Status = v1beta1.TrafficMapStatus{
+		SourceUID:  owner.UID,
+		Programmed: true,
+		Publisher: &v1beta1.TrafficMapPublisherStatus{
+			PublisherName:  Name,
+			ClaimedTargets: []string{"old.example"},
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1beta1.AddToScheme(scheme))
+	kubeClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&v1beta1.TrafficMap{}).
+		WithObjects(owner, trafficMap).
+		Build()
+	weights := &recordingPublisher{}
+	reconciler := &placementendpoint.TrafficMapPublisherReconciler{
+		Client:        kubeClient,
+		APIReader:     kubeClient,
+		Log:           logr.Discard(),
+		Publisher:     newTestPublisher(weights),
+		GlobalOptions: targetOptionsWithSelector("{{.EndpointHostname}}", "publish=true"),
+		Active:        true,
+	}
+
+	_, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{
+		Namespace: trafficMap.Namespace,
+		Name:      trafficMap.Name,
+	}})
+	require.NoError(t, err)
+	assert.Equal(t, []weightedTarget{{name: "old.example", weight: 0}}, weights.published,
+		"a previous claim must be drained before withdrawal")
+	assert.Empty(t, weights.cleared)
+
+	current := &v1beta1.TrafficMap{}
+	require.NoError(t, kubeClient.Get(context.Background(), types.NamespacedName{
+		Namespace: trafficMap.Namespace,
+		Name:      trafficMap.Name,
+	}, current))
+	require.NotNil(t, current.Status.Publisher)
+	assert.Equal(t, []string{"old.example"}, current.Status.Publisher.ClaimedTargets,
+		"a drained claim remains owned until whole-map finalization")
+	assert.False(t, current.Status.Programmed)
+	programmed := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
+	require.NotNil(t, programmed)
+	assert.Equal(t, metav1.ConditionFalse, programmed.Status)
+	assert.Equal(t, "Withdrawn", programmed.Reason)
 }
 
 func TestPlanIsImmutableAndApplyPublishesZeroBeforePositive(t *testing.T) {
@@ -206,6 +366,45 @@ func TestPlanRejectsLegacyLifecycleStateWithoutPublishing(t *testing.T) {
 			require.Error(t, err)
 			assert.Nil(t, plan)
 			assert.Contains(t, err.Error(), tt.want)
+			assert.Empty(t, weights.published)
+			assert.Empty(t, weights.cleared)
+		})
+	}
+}
+
+func TestNonmatchingSelectorDoesNotBypassLegacyLifecycleState(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*v1beta1.InferenceService)
+		want   string
+	}{
+		{
+			name: "endpoint finalizer",
+			mutate: func(owner *v1beta1.InferenceService) {
+				owner.Finalizers = []string{placementendpoint.EndpointFinalizer}
+			},
+			want: placementendpoint.EndpointFinalizer,
+		},
+		{
+			name: "legacy annotation",
+			mutate: func(owner *v1beta1.InferenceService) {
+				owner.Annotations = map[string]string{legacyTargetsAnnotation: `["old.example"]`}
+			},
+			want: legacyTargetsAnnotation,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			owner := testISVC("model-a")
+			tc.mutate(owner)
+			weights := &recordingPublisher{}
+			plan, err := newTestPublisher(weights).Plan(
+				owner,
+				testTrafficMap(),
+				targetOptionsWithSelector("{{.EndpointHostname}}", "publish=true"),
+			)
+			require.Error(t, err)
+			assert.Nil(t, plan)
+			assert.Contains(t, err.Error(), tc.want)
 			assert.Empty(t, weights.published)
 			assert.Empty(t, weights.cleared)
 		})

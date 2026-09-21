@@ -397,6 +397,12 @@ func (r *TrafficMapPublisherReconciler) validateLivePublisherOwner(
 			expected.UID, expected.Generation, owner.UID, owner.Generation,
 		)
 	}
+	if !equality.Semantic.DeepEqual(owner.Labels, expected.Labels) ||
+		!equality.Semantic.DeepEqual(owner.Annotations, expected.Annotations) ||
+		!equality.Semantic.DeepEqual(owner.Finalizers, expected.Finalizers) {
+		return fmt.Errorf("%w: InferenceService %s publication metadata changed while planning",
+			errTrafficMapPublisherSourceChanged, client.ObjectKeyFromObject(owner))
+	}
 	if !publisherOwnerActive(owner) {
 		return fmt.Errorf("%w: InferenceService %s is deleting, opted out, or not placement eligible",
 			errTrafficMapPublisherSourceChanged, client.ObjectKeyFromObject(owner))
@@ -1026,6 +1032,7 @@ var trafficMapPublisherOwnerChange = predicate.Funcs{
 		return oldOwner.Generation != newOwner.Generation ||
 			oldOwner.DeletionTimestamp.IsZero() != newOwner.DeletionTimestamp.IsZero() ||
 			!slices.Equal(oldOwner.Finalizers, newOwner.Finalizers) ||
+			!equality.Semantic.DeepEqual(oldOwner.Labels, newOwner.Labels) ||
 			!equality.Semantic.DeepEqual(oldOwner.Annotations, newOwner.Annotations)
 	},
 }

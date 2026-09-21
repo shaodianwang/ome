@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/labels"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/placement/routing"
 )
@@ -38,6 +39,7 @@ func TestParseConfig(t *testing.T) {
 	assert.Equal(t, "ome", cfg.oncall)
 	require.NotNil(t, cfg.acl)
 	assert.Equal(t, "ome-xds-publisher", *cfg.acl)
+	assert.Empty(t, cfg.sourceSelector)
 
 	tests := []struct {
 		name   string
@@ -49,6 +51,7 @@ func TestParseConfig(t *testing.T) {
 		{"empty ACL", func(o map[string]string) { o[optACL] = " " }, "must not be empty"},
 		{"missing template", func(o map[string]string) { delete(o, optTargetTemplate) }, optTargetTemplate},
 		{"bad template", func(o map[string]string) { o[optTargetTemplate] = "{{" }, optTargetTemplate},
+		{"bad source selector", func(o map[string]string) { o[optSourceSelector] = "publish in (" }, optSourceSelector},
 		{"publisher resync is not an opaque option", func(o map[string]string) { o["resyncInterval"] = "1m" }, "not accepted"},
 		{"missing URL", func(o map[string]string) { delete(o, optURLTemplate) }, optURLTemplate},
 		{"HTTP URL", func(o map[string]string) { o[optURLTemplate] = "http://automation.example.com/{cluster}" }, "absolute HTTPS"},
@@ -69,6 +72,17 @@ func TestParseConfig(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.want)
 		})
 	}
+}
+
+func TestParseConfigCanonicalizesSourceSelector(t *testing.T) {
+	options := validOptions()
+	options[optSourceSelector] = " publish=true, environment in (prod,canary) "
+
+	cfg, err := parseConfig(options)
+	require.NoError(t, err)
+	want, err := labels.Parse(options[optSourceSelector])
+	require.NoError(t, err)
+	assert.Equal(t, want.String(), cfg.sourceSelector)
 }
 
 func TestParseConfigAllowsOmittedACL(t *testing.T) {
@@ -100,6 +114,28 @@ func TestNewPublisherBuildsHTTPClient(t *testing.T) {
 	assert.Equal(t, "ome", gotConfig.oncall)
 	require.NotNil(t, gotConfig.acl)
 	assert.Equal(t, "ome-xds-publisher", *gotConfig.acl)
+}
+
+func TestNewPublisherCarriesSourceSelectorAsGlobalBehavior(t *testing.T) {
+	options := validOptions()
+	options[optSourceSelector] = "publish=true, environment in (prod,canary)"
+	wantSelector, err := labels.Parse(options[optSourceSelector])
+	require.NoError(t, err)
+
+	var gotConfig config
+	got, err := newTrafficMapPublisherWithFactory(
+		routing.PublisherConfig{Options: options},
+		func(cfg config) (ClusterWeightPublisher, error) {
+			gotConfig = cfg
+			return &recordingPublisher{}, nil
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, wantSelector.String(), gotConfig.sourceSelector)
+	assert.Equal(t, map[string]string{
+		optTargetTemplate: "{{.EndpointHostname}}",
+		optSourceSelector: wantSelector.String(),
+	}, got.GlobalOptions)
 }
 
 func TestNewPublisherReportsHTTPClientFailure(t *testing.T) {

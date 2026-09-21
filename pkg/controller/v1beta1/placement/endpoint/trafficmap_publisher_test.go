@@ -290,6 +290,24 @@ func TestTrafficMapPublisherRechecksSourceAndOwnerAtPreEffectFence(t *testing.T)
 			},
 		},
 		{
+			name: "owner labels changed",
+			mutateOwner: func(owner *v1beta1.InferenceService) {
+				owner.Labels = map[string]string{"example.com/publish": "disabled"}
+			},
+		},
+		{
+			name: "owner annotations changed",
+			mutateOwner: func(owner *v1beta1.InferenceService) {
+				owner.Annotations = map[string]string{"example.com/publication": "changed"}
+			},
+		},
+		{
+			name: "owner finalizers changed",
+			mutateOwner: func(owner *v1beta1.InferenceService) {
+				owner.Finalizers = []string{"example.com/publication"}
+			},
+		},
+		{
 			name: "owner opted out",
 			mutateOwner: func(owner *v1beta1.InferenceService) {
 				disabled := false
@@ -1435,6 +1453,12 @@ func TestTrafficMapPublisherOwnerPredicate(t *testing.T) {
 	newAnnotation.Annotations = map[string]string{"example.com/key": "value"}
 	assert.True(t, trafficMapPublisherOwnerChange.Update(event.UpdateEvent{
 		ObjectOld: oldOwner, ObjectNew: newAnnotation,
+	}))
+
+	newLabel := oldOwner.DeepCopy()
+	newLabel.Labels = map[string]string{"example.com/key": "value"}
+	assert.True(t, trafficMapPublisherOwnerChange.Update(event.UpdateEvent{
+		ObjectOld: oldOwner, ObjectNew: newLabel,
 	}))
 
 	newFinalizer := oldOwner.DeepCopy()

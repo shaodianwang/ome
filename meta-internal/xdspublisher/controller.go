@@ -12,6 +12,7 @@ import (
 	"strings"
 	"text/template"
 
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -28,8 +29,9 @@ type weightedTarget struct {
 }
 
 type publishPlan struct {
-	targets []weightedTarget
-	claims  []string
+	targets   []weightedTarget
+	claims    []string
+	withdrawn bool
 }
 
 func (p *publishPlan) Claims() []string {
@@ -67,7 +69,7 @@ func (*Publisher) ResolveOptions(global, inline map[string]string) (map[string]s
 			strings.Join(keys, ", "))
 	}
 	for key := range global {
-		if key != optTargetTemplate {
+		if key != optTargetTemplate && key != optSourceSelector {
 			return nil, fmt.Errorf("xDS publisher received unsupported global option %q", key)
 		}
 	}
@@ -78,7 +80,15 @@ func (*Publisher) ResolveOptions(global, inline map[string]string) (map[string]s
 	if _, err := parseTargetTemplate(templateText); err != nil {
 		return nil, err
 	}
-	return map[string]string{optTargetTemplate: templateText}, nil
+	_, sourceSelector, err := parseSourceSelector(global[optSourceSelector])
+	if err != nil {
+		return nil, err
+	}
+	effective := map[string]string{optTargetTemplate: templateText}
+	if sourceSelector != "" {
+		effective[optSourceSelector] = sourceSelector
+	}
+	return effective, nil
 }
 
 // Plan implements endpoint.TrafficMapPublisher. It rejects objects that still
@@ -107,11 +117,18 @@ func (*Publisher) Plan(
 			owner.Namespace, owner.Name, legacyTargetsAnnotation,
 		)
 	}
-
 	targetTemplate, err := effectiveTargetTemplate(effectiveOptions)
 	if err != nil {
 		return nil, err
 	}
+	sourceSelector, _, err := parseSourceSelector(effectiveOptions[optSourceSelector])
+	if err != nil {
+		return nil, err
+	}
+	if !sourceSelector.Matches(labels.Set(owner.Labels)) {
+		return &publishPlan{withdrawn: true}, nil
+	}
+
 	targets, err := desiredTargets(owner, trafficMap, targetTemplate)
 	if err != nil {
 		return nil, err
@@ -148,6 +165,9 @@ func (p *Publisher) Apply(
 	if !ok || xdsPlan == nil {
 		return placementendpoint.TrafficMapPublishResult{}, fmt.Errorf("xDS publisher received plan of type %T", plan)
 	}
+	if xdsPlan.withdrawn {
+		return placementendpoint.TrafficMapPublishResult{Withdrawn: true}, nil
+	}
 	for _, target := range xdsPlan.targets {
 		if err := p.weights.PublishWeight(ctx, target.name, target.weight); err != nil {
 			return placementendpoint.TrafficMapPublishResult{}, fmt.Errorf(
@@ -183,7 +203,7 @@ func (p *Publisher) Unpublish(
 
 func effectiveTargetTemplate(options map[string]string) (*template.Template, error) {
 	for key := range options {
-		if key != optTargetTemplate {
+		if key != optTargetTemplate && key != optSourceSelector {
 			return nil, fmt.Errorf("xDS publisher effective options contain unsupported key %q", key)
 		}
 	}

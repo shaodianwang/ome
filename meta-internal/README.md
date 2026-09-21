@@ -152,6 +152,7 @@ routing:
     options:
       oncall: ome
       acl: ome-xds-publisher       # optional
+      sourceSelector: 'routing.example.com/publish=true'  # optional
       targetTemplate: '{{.EndpointHostname}}'
       urlTemplate: 'https://xds-automation.mrpc.fbinfra.net/api/v1/clusters/{cluster}/weight'
       requestTimeout: 30s
@@ -169,11 +170,23 @@ The target template receives `Namespace`, `Service`, `Cluster`, `Endpoint`,
 cluster name. A `;fallback=` suffix is canonicalized to its primary tier.
 `{cluster}` in `urlTemplate` is replaced with the path-escaped result.
 
+`sourceSelector` is an optional standard Kubernetes label selector evaluated
+against each source InferenceService. Omitted or empty matches every source for
+compatibility. A fresh nonmatching source converges to `Programmed=False` with
+reason `Withdrawn` without claiming or calling any xDS target. If it previously
+matched, the shared publisher lifecycle first drains its existing claims to
+zero and retains those claims until the whole TrafficMap is deleted. Source
+label changes enqueue publication immediately; changing the global selector
+requires the same manager restart as other ConfigMap settings. Legacy endpoint
+finalizers and target annotations still block planning even for a nonmatch, so
+selection cannot bypass the required old-lifecycle cleanup.
+
 Publisher options on individual InferenceServices are rejected. In particular,
-`targetTemplate` is installation-wide: allowing an object to replace it would
-let that object redirect writes outside the operator-owned target scope. Only
-the global target template participates in the per-TrafficMap options digest;
-transport paths, credentials, and service metadata remain manager-local.
+`targetTemplate` and `sourceSelector` are installation-wide: allowing an object
+to replace either could redirect writes outside the operator-owned target
+scope. Those two global publication settings participate in the per-TrafficMap
+options digest; transport paths, credentials, and service metadata remain
+manager-local.
 
 The client presents the configured workload certificate directly to the remote
 proxy and trusts only the configured CA bundle. It deliberately ignores ambient

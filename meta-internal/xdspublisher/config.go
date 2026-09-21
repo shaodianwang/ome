@@ -12,6 +12,7 @@ import (
 	"text/template"
 	"time"
 
+	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	placementendpoint "github.com/ome-projects/ome/pkg/controller/v1beta1/placement/endpoint"
@@ -30,6 +31,7 @@ const (
 	optTLSCAFile          = "tlsCAFile"
 	optOncall             = "oncall"
 	optACL                = "acl"
+	optSourceSelector     = "sourceSelector"
 	clusterURLPlaceholder = "{cluster}"
 )
 
@@ -42,6 +44,7 @@ var acceptedOptions = map[string]struct{}{
 	optTLSCAFile:      {},
 	optOncall:         {},
 	optACL:            {},
+	optSourceSelector: {},
 }
 
 type config struct {
@@ -53,6 +56,7 @@ type config struct {
 	tlsCAFile      string
 	oncall         string
 	acl            *string
+	sourceSelector string
 }
 
 // Publisher writes TrafficMap weights through the internal xDS API.
@@ -93,12 +97,11 @@ func newTrafficMapPublisherWithFactory(
 	if err != nil {
 		return nil, err
 	}
-	return &routing.TrafficMapPublisher{
-		Publisher: publisher,
-		GlobalOptions: map[string]string{
-			optTargetTemplate: publisher.config.targetTemplate,
-		},
-	}, nil
+	globalOptions := map[string]string{optTargetTemplate: publisher.config.targetTemplate}
+	if publisher.config.sourceSelector != "" {
+		globalOptions[optSourceSelector] = publisher.config.sourceSelector
+	}
+	return &routing.TrafficMapPublisher{Publisher: publisher, GlobalOptions: globalOptions}, nil
 }
 
 func newPublisher(
@@ -162,6 +165,10 @@ func parseConfig(options map[string]string) (config, error) {
 	if _, err := parseTargetTemplate(templateText); err != nil {
 		return config{}, err
 	}
+	_, sourceSelector, err := parseSourceSelector(options[optSourceSelector])
+	if err != nil {
+		return config{}, err
+	}
 
 	requestTimeout, err := parsePositiveDuration(options, optRequestTimeout)
 	if err != nil {
@@ -197,6 +204,7 @@ func parseConfig(options map[string]string) (config, error) {
 		tlsCAFile:      tlsCAFile,
 		oncall:         oncall,
 		acl:            acl,
+		sourceSelector: sourceSelector,
 	}, nil
 }
 
@@ -206,6 +214,19 @@ func parseTargetTemplate(templateText string) (*template.Template, error) {
 		return nil, fmt.Errorf("routing.publisher.options[%q]: %w", optTargetTemplate, err)
 	}
 	return targetTemplate, nil
+}
+
+func parseSourceSelector(raw string) (labels.Selector, string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return labels.Everything(), "", nil
+	}
+	selector, err := labels.Parse(raw)
+	if err != nil {
+		return nil, "", fmt.Errorf("routing.publisher.options[%q] must be a valid Kubernetes label selector: %w",
+			optSourceSelector, err)
+	}
+	return selector, selector.String(), nil
 }
 
 func validateURLTemplate(raw string) error {
