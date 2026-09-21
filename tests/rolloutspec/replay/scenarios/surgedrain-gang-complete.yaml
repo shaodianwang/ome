@@ -10,11 +10,11 @@ arrows:
 cells:
   - instance/Update/SurgeDrain/pod.deleted[source]/before
   - instance/Update/GangSurgeTarget/pod.deleted[source]/before
+  - instance/Update/GangSurgeTarget/endpoint.rotationOut[source]/before
 intentional: >-
-  the gang path drains its source by flipping the serving gate and deletes on
-  the same pass; unlike the single-pod path it consults no EndpointSlice, so
-  the leader is still published in the routed Service when its delete is
-  issued
+  the gang drain takes two passes, the shape the single-pod path uses: the pass
+  that clears the source's serving gate deletes nothing, and the delete waits
+  for the routed Service to stop publishing the source leader
 initial:
   spec:
     replicas: 1
@@ -44,11 +44,15 @@ timeline:
   - tick: 4
     note: the replacement's PodGroup is announced before its first member, and both members are created
   - tick: 5
-    note: the replacement gang reports Ready, so the source advances to the drain
+    note: the replacement gang reports Ready, so the source advances to the drain and leaves rotation; its pods are not deleted while the routed Service still publishes the leader
     events:
       - pod.ready[target]: {pod: {index: 1, runner: leader}}
       - pod.ready[target]: {pod: {index: 1, runner: worker}}
   - tick: 6
+    note: the leader's endpoint goes not-ready, which is the guard the drain waits on, so the whole source gang is deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 7
     note: the source's pods are gone, so its row is finalized and removed and the replacement index is the Instance
     events:
       - pod.deleted[source]: {pod: {index: 0, runner: leader}}

@@ -17,6 +17,12 @@
 # materializing, are held on the same record as a fresh start; the milder
 # states (a backoff still running, the one-at-a-time authorization) keep
 # governing the opening of an attempt only.
+#
+# Provenance for the instance-machine cells an owner decided in the review
+# session of 2026-09-20, which gave the gang surge the drain wait the
+# single-pod surge already had: the source gang's serving gate is cleared on
+# one pass and its pods are deleted on the pass that observes every routed
+# member out of the per-revision routed Service.
 # Selectors match the cells files exactly: an empty variants, windows or
 # transition matches all of them.
 history:
@@ -63,3 +69,7 @@ history:
 
   # --- cells-failed.yaml ---
   - {state: Failed, event: gate.deny, variants: [Held], windows: [], transition: "", decision: owner-review-2026-09-20}
+
+
+  # --- cells-update-gang.yaml ---
+  - {state: Update/GangSurgeTarget, event: endpoint.rotationOut, variants: [source], windows: [], transition: "", decision: owner-review-2026-09-20}

@@ -8,6 +8,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clocktesting "k8s.io/utils/clock/testing"
@@ -1533,6 +1534,112 @@ func TestGangSurgeUpdate_DrainsSourceFromRotationBeforeDelete(t *testing.T) {
 				"terminating-but-serving source lingers as a durable N+1 and "+
 				"RatioBalanced pacing breaks for gangs", pod.Name)
 		}
+	}
+}
+
+// TestGangSurgeUpdate_HoldsSourceDeleteUntilEndpointsDrop pins the other half
+// of the gang drain: clearing the serving gate only STARTS the withdrawal, and
+// until the endpoint controller has republished the source leader as not-ready
+// kube-proxy is still sending it requests. Deleting on the gate write sheds
+// those requests. The gang waits on the same per-revision routed Service the
+// single-pod surge waits on, so neither path sheds traffic.
+//
+// Cells: instance/Update/GangSurgeTarget/endpoint.rotationOut[source]/before
+func TestGangSurgeUpdate_HoldsSourceDeleteUntilEndpointsDrop(t *testing.T) {
+	legacyResetExpectations(t)
+	isvc, _ := surgeISVCReady("llama-70b", "prod", 1)
+	plan := gangSurgePlan()
+
+	v1Name := "llama-70b-engine-rev-v1hash"
+	v2Name := "llama-70b-engine-rev-v2hash"
+	v1Hash := query.RevisionHashFromControllerRevisionName(v1Name)
+	v2Hash := query.RevisionHashFromControllerRevisionName(v2Name)
+
+	ir := gangSurgeInFlightIR(isvc, v1Name, v2Name)
+	c := legacyNewFakeClient(t, isvc, ir)
+	makeCR(t, c, isvc, v2Name)
+
+	// Source gang (idx=0) alive and serving on the old revision.
+	sourceLeader := gangPodAt(isvc, 0, "leader", v1Hash, true, true)
+	if err := c.Create(context.Background(), sourceLeader); err != nil {
+		t.Fatalf("seed source leader: %v", err)
+	}
+	if err := c.Create(context.Background(), gangPodAt(isvc, 0, "worker", v1Hash, true, true)); err != nil {
+		t.Fatalf("seed source worker: %v", err)
+	}
+	// Replacement gang (idx=1) PodReady, so the drain step is free to fire.
+	for _, runner := range []string{"leader", "worker"} {
+		p := gangPodAt(isvc, 1, runner, v2Hash, true, true)
+		p.Status.Conditions = append(p.Status.Conditions, corev1.PodCondition{
+			Type: corev1.PodReady, Status: corev1.ConditionTrue,
+		})
+		if err := c.Create(context.Background(), p); err != nil {
+			t.Fatalf("seed replacement pod (%s): %v", runner, err)
+		}
+	}
+	// The source leader is published Ready in its per-revision routed Service:
+	// the data plane is still sending it traffic.
+	sourceService := query.PerRevisionServiceName("llama-70b", workload.ComponentEngine, v1Hash)
+	if err := c.Create(context.Background(),
+		legacySliceWithEndpoint("prod", "source-slice", sourceService, sourceLeader, true)); err != nil {
+		t.Fatalf("seed source endpointslice: %v", err)
+	}
+
+	input := gangInputWithRemove(isvc, c)
+	deps := legacyTestDeps(c)
+	v2 := &appsv1.ControllerRevision{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: v2Name}, v2); err != nil {
+		t.Fatalf("get v2 CR: %v", err)
+	}
+
+	livePods := func(when string) []*corev1.Pod {
+		pods, err := query.LiveListPodsForInstance(context.Background(), c, "prod", "llama-70b", workload.ComponentEngine, 0)
+		if err != nil {
+			t.Fatalf("list source gang pods (%s): %v", when, err)
+		}
+		return pods
+	}
+
+	// Pass 1: the source leaves rotation but is still an endpoint, so nothing
+	// may be deleted and the pass asks to be re-driven.
+	done, err := surgeUpdate(context.Background(), deps, input, plan, plan.Instances[0], v2, nil)
+	if err != nil {
+		t.Fatalf("gang surge drain pass: %v", err)
+	}
+	if done {
+		t.Fatalf("gang surge reported complete while the source is still routed")
+	}
+	held := livePods("routed")
+	if len(held) != 2 {
+		t.Fatalf("source gang has %d pods, want 2 held while still routed", len(held))
+	}
+	for _, pod := range held {
+		if pod.DeletionTimestamp != nil {
+			t.Errorf("source gang pod %s deleted while still published in %s — "+
+				"the requests kube-proxy is still routing to it are shed", pod.Name, sourceService)
+		}
+		if podreadiness.IsServing(pod) {
+			t.Errorf("source gang pod %s still serving=True; the drain flip must precede the wait", pod.Name)
+		}
+	}
+
+	// The endpoint controller catches up: the leader is no longer routable.
+	converged := &discoveryv1.EndpointSlice{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: "source-slice"}, converged); err != nil {
+		t.Fatalf("get source endpointslice: %v", err)
+	}
+	notReady := false
+	converged.Endpoints[0].Conditions.Ready = &notReady
+	if err := c.Update(context.Background(), converged); err != nil {
+		t.Fatalf("converge source endpointslice: %v", err)
+	}
+
+	// Pass 2: endpoints converged → the whole source gang is deleted.
+	if _, err := surgeUpdate(context.Background(), deps, input, plan, plan.Instances[0], v2, nil); err != nil {
+		t.Fatalf("gang surge delete pass: %v", err)
+	}
+	for _, pod := range livePods("drained") {
+		t.Errorf("source gang pod %s survived the pass after its endpoint dropped", pod.Name)
 	}
 }
 

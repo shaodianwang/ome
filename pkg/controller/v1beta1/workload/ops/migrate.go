@@ -1485,3 +1485,33 @@ func drainServiceForPod(input workload.ReconcileInput, plan workload.ComponentPl
 	}
 	return query.PerRevisionServiceName(input.Key.OwnerName, plan.Component, hash)
 }
+
+// podsDrainedFromRouting reports whether every pod in pods has left the
+// EndpointSlices of the per-revision routed Service it belongs to. Pods with
+// no routed Service — workers, or pods missing the revision-hash label — are
+// trivially drained (drainServiceForPod returns "" for them). The caller is a
+// destructive step: deleting a pod the data plane is still routing to sheds
+// the requests in flight to it, so the whole set gates on one answer.
+func podsDrainedFromRouting(
+	ctx context.Context,
+	drainer *drain.Batcher,
+	input workload.ReconcileInput,
+	plan workload.ComponentPlan,
+	idx int32,
+	pods []*corev1.Pod,
+) (bool, error) {
+	for _, pod := range pods {
+		serviceName := drainServiceForPod(input, plan, pod)
+		if serviceName == "" {
+			continue
+		}
+		drained, err := drainer.IsPodDrained(ctx, serviceName, pod)
+		if err != nil {
+			return false, fmt.Errorf("check drain (instance=%d, pod=%s): %w", idx, pod.Name, err)
+		}
+		if !drained {
+			return false, nil
+		}
+	}
+	return true, nil
+}

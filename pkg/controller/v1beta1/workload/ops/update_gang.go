@@ -11,6 +11,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/drain"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
@@ -28,9 +29,10 @@ func gangSurgeDrainKey(sourceIdx int32) string {
 const eventReasonGangSurgeAbandoned workload.EventReason = "GangSurgeAbandoned"
 
 // gangSurgeUpdate creates a replacement gang at a fresh Instance index, waits
-// for it to serve, then drains and finalizes the source. Source and target
-// status entries retain the pinned revision and cleanup ownership across
-// reconciles.
+// for it to serve, then drains and finalizes the source. The drain is two
+// steps: the source leaves rotation, and only once the endpoints confirm it is
+// gone are its pods deleted. Source and target status entries retain the
+// pinned revision and cleanup ownership across reconciles.
 func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, target *appsv1.ControllerRevision) (bool, error) {
 	sourceIdx := inst.Index
 	ns, owner, comp := input.Key.Namespace, input.Key.OwnerName, plan.Component
@@ -335,6 +337,20 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 				podreadiness.WriterUpdateSurgeDrain, gangSurgeDrainKey(sourceIdx)); err != nil {
 				return false, fmt.Errorf("drain source gang pod %s: %w", pod.Name, err)
 			}
+		}
+		// Flipping the gate only starts the drain: the endpoint controller has
+		// to publish the withdrawal before kube-proxy stops routing. Deleting
+		// on the same pass would kill a leader the data plane still sends
+		// requests to. Wait until every routed source pod has left its
+		// per-revision Service's EndpointSlices, then delete the whole gang.
+		// The batcher lists each Service's slices once for the gang.
+		drainer := drain.NewBatcher(deps.Reader(), ns)
+		drained, derr := podsDrainedFromRouting(ctx, drainer, input, plan, sourceIdx, sourcePods)
+		if derr != nil {
+			return false, derr
+		}
+		if !drained {
+			return false, nil
 		}
 		if !deps.ExpectationsCache().Satisfied(ns, owner, comp, sourceIdx) {
 			return false, nil

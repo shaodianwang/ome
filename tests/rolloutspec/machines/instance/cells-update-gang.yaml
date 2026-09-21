@@ -751,15 +751,15 @@ cells:
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
     status: current
-  # GAP: the gang drain deletes without proving the source left rotation.
   - state: Update/GangSurgeTarget
     event: endpoint.rotationOut
     variants: [source]
-    outcome: ignore
-    note: gangSurgeUpdate in pkg/controller/v1beta1/workload/ops/update_gang.go deletes each source pod immediately after clearing its serving gate, never calling the drain check the single-pod surge waits on, so rotation-out is never observed
+    outcome: defer
+    guard: every routed member of the source gang out of its per-revision routed Service; the workers are never published there and are trivially out
+    note: this is the guard the gang drain waits on, the same one the single-pod surge uses - drain.IsPodDrained reading the per-revision routed Service through the live reader - so the pass that clears the source's serving gate deletes nothing and the delete lands on the pass that observes the rotation-out (pkg/controller/v1beta1/workload/ops/update_gang.go)
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestGangSurgeUpdate_HoldsSourceDeleteUntilEndpointsDrop], kind: [], replay: [surgedrain-gang-complete]}
+    status: decided
   - state: Update/GangSurgeTarget
     event: endpoint.rotationOut
     variants: [target]

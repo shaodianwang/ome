@@ -486,18 +486,12 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 		}
 		// Live drain check via per-revision routed Service — the
 		// headless slice would lie because of PublishNotReadyAddresses.
-		for _, pod := range oldPods {
-			serviceName := drainServiceForPod(input, plan, pod)
-			if serviceName == "" {
-				continue
-			}
-			drained, err := drainer.IsPodDrained(ctx, serviceName, pod)
-			if err != nil {
-				return false, fmt.Errorf("check drain (instance=%d, pod=%s): %w", inst.Index, pod.Name, err)
-			}
-			if !drained {
-				return false, nil
-			}
+		drained, err := podsDrainedFromRouting(ctx, drainer, input, plan, inst.Index, oldPods)
+		if err != nil {
+			return false, err
+		}
+		if !drained {
+			return false, nil
 		}
 		// The source is out of rotation with the replacement serving:
 		// delete it now and let its own terminationGracePeriodSeconds and
