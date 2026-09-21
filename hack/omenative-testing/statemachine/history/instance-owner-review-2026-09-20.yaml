@@ -39,10 +39,21 @@
 # claim matches on revision and step, never phase.
 #
 # Provenance for the instance-machine cells an owner decided in the review
-# session of 2026-09-20, which gave the gang surge the drain wait the
-# single-pod surge already had: the source gang's serving gate is cleared on
-# one pass and its pods are deleted on the pass that observes every routed
-# member out of the per-revision routed Service.
+# session of 2026-09-20. Two decisions. The gang surge gets the drain wait
+# the single-pod surge already had: the source gang's serving gate is cleared
+# on one pass and its pods are deleted on the pass that observes every routed
+# member out of the per-revision routed Service. And a Failed row recognises
+# its pods' revision by the revision-hash label the renderer stamps, so a row
+# whose live pods already run the target is adopted onto it instead of
+# opening a second attempt against pods that already serve it.
+#
+# Provenance for the instance-machine cells an owner decided in the review
+# session of 2026-09-20, which bounded that adoption: it is the one shape
+# where every pod is on the target AND runtime-ready. An unhealthy or stuck
+# pod carrying the target revision is a row to recover, not a row to stamp,
+# so it takes the ordinary roll — the RetryBlock ladder keeps counting the
+# attempt through to Held, and the disposition's relocation directive is
+# still executed by the rebuild that recreates the pod off its suspect node.
 # Selectors match the cells files exactly: an empty variants, windows or
 # transition matches all of them.
 history:
@@ -94,3 +105,11 @@ history:
 
   # --- cells-update-gang.yaml ---
   - {state: Update/GangSurgeTarget, event: endpoint.rotationOut, variants: [source], windows: [], transition: "", decision: owner-review-2026-09-20}
+
+  # --- cells-failed.yaml ---
+  - {state: Failed, event: pod.containersReady, variants: [source], windows: [], transition: "", decision: owner-review-2026-09-20}
+
+
+  # --- cells-failed.yaml ---
+  - {state: Failed, event: pod.containersNotReady, variants: [source], windows: [], transition: "", decision: owner-review-2026-09-20}
+  - {state: Failed, event: pod.runningNotReady, variants: [], windows: [], transition: "", decision: owner-review-2026-09-20}

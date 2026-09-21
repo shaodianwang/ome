@@ -403,7 +403,7 @@ func TestDetectUpdateTrigger_NewTargetWaitsForAnOpenCrashLoopRepair(t *testing.T
 				Namespace: "prod", Name: "llama-70b-engine-newtarget",
 			}}
 			trigger, _, err := ops.DetectUpdateTriggerWithPods(context.Background(), workload.Deps{Client: c},
-				input, plan, plan.Instances[0], target, input.DesiredSpec.PodSpec, nil)
+				input, plan, plan.Instances[0], target, nil)
 			if err != nil {
 				t.Fatalf("DetectUpdateTriggerWithPods: %v", err)
 			}

@@ -907,9 +907,10 @@ func TestPlan_Update_CoordGateExempt_SurgeKeepsConsult(t *testing.T) {
 }
 
 // TestPlan_Update_AdoptRevision asserts the empty-RunningRevision
-// adoption selection: runtime-ready pods that already match the target
-// select the backfill stamp as an Item (the write itself belongs to
-// the executor — forbidMutations proves Plan never performs it).
+// adoption selection: runtime-ready pods already carrying the target
+// revision's hash select the backfill stamp as an Item (the write
+// itself belongs to the executor — forbidMutations proves Plan never
+// performs it).
 func TestPlan_Update_AdoptRevision(t *testing.T) {
 	target := updateTarget()
 	in := minimalInput(t)
@@ -919,7 +920,7 @@ func TestPlan_Update_AdoptRevision(t *testing.T) {
 	}
 	plan := minimalPlan()
 	pod := enginePod("llama-70b", "prod", 0)
-	pod.Spec = *in.DesiredSpec.PodSpec.DeepCopy()
+	pod.Labels[query.LabelRevisionHash] = query.RevisionHashFromControllerRevisionName(target.Name)
 	pod.Status.Conditions = []corev1.PodCondition{{
 		Type: corev1.ContainersReady, Status: corev1.ConditionTrue,
 	}}
@@ -933,12 +934,17 @@ func TestPlan_Update_AdoptRevision(t *testing.T) {
 		t.Errorf("update items = %+v, want a single AdoptRevision item", ua.Update.Items)
 	}
 
-	// Same shape with a NOT-runtime-ready pod: no adoption (Ready is
-	// only stamped on proof), no trigger.
+	// Same shape with a NOT-runtime-ready pod: no adoption (Ready is only
+	// stamped on proof) — the row takes the ordinary roll instead, which
+	// is the recovery its strategy resolves.
 	pod.Status.Conditions = nil
 	d = planTargetOrFail(t, in, plan, target, planSnapshot(in, map[int32][]*corev1.Pod{0: {pod}}))
-	if findAction(d, workload.ActionUpdate) != nil {
-		t.Errorf("unproven pods must not be adopted, got %v", actionKinds(d))
+	ua = findAction(d, workload.ActionUpdate)
+	if ua == nil {
+		t.Fatalf("an unproven pod set must select the ordinary roll, got %v", actionKinds(d))
+	}
+	if len(ua.Update.Items) != 1 || ua.Update.Items[0].AdoptRevision {
+		t.Errorf("update items = %+v, want a single non-adopting item", ua.Update.Items)
 	}
 }
 

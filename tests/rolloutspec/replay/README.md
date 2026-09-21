@@ -67,6 +67,12 @@ generation, the per-revision routed Service). Each of those changed how a
 run is rendered, or what the driver put in front of the engine — never
 what the engine does with it.
 
+Engine fixes the lock itself surfaced are recorded the other way round:
+they move the goldens of the scenarios that walk the fixed route, and
+only those, with the scenario's `intentional:` note and the machine cell
+rewritten in the same commit. `failed-runtime-ready-adopt` is one — the
+Failed row now adopts pods already on the target instead of re-surging.
+
 ## Changing a golden
 
 A golden diff is either the point of the change or a regression, and the
@@ -585,13 +591,6 @@ Effects the driver does not record:
 - The operator reset mailbox. `spec.resetInstances` is decided in the IR
   adapter, outside `workload.Reconcile`, and has no applier, so the reset
   arrow out of Failed is out of the replay lane. Adapter lane.
-
-- The `AdoptRevision` backfill. Its spec-match test compares a live pod's
-  `PodSpec` against the unrendered desired template, while the renderer
-  adds `Hostname`, `Subdomain` and the serving readiness gate to every
-  pod it writes — so no pod the engine produced can match, and the
-  trigger takes the ordinary roll instead. `failed-runtime-ready-resurge`
-  records what the engine does on that route.
 
 Reads, which are never traced at all: EndpointSlices, Services,
 ControllerRevisions, and Nodes.

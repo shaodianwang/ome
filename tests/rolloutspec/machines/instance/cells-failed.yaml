@@ -12,7 +12,9 @@
 #
 # Three exits are easy to miss. The update trigger's AdoptRevision backfill
 # stamps Ready-on-target from ContainersReady alone when RunningRevision is
-# empty and the pods spec-match the target (T-failed-adopt-revision); a
+# empty and the pods carry the target revision's hash — and only then: an
+# unhealthy pod set on the target is a row to recover, so it takes the
+# ordinary roll (T-failed-adopt-revision); a
 # Failed single-pod source whose wedged CreateContainerError replacement is
 # recycled re-enters the surge on the next pass (T-failed-recycle-resurge);
 # and a row whose remaining pods are all in a terminal phase has them
@@ -45,15 +47,16 @@ cells:
     variants: [source]
     outcome: transition
     to: Ready
-    guard: RunningRevision empty, every pod spec-matches the target, and no RetryBlock denies that target
-    note: the update trigger's adoption path stamps Ready-on-target from ContainersReady alone and prunes that revision's RetryBlock; a Failed row with a recorded RunningRevision is never adopted and waits for a corrective revision or a due block
+    guard: RunningRevision empty, every pod carries the target revision's hash AND is ContainersReady, and no RetryBlock denies that target
+    note: a pod's revision is its revision-hash label, which is what the renderer stamps and what every other pass reads, so the pods the engine already wrote at the target are recognised as being on it; the adoption path then stamps Ready-on-target from ContainersReady alone and prunes that revision's RetryBlock. Adoption is that one shape and nothing wider - a pod carrying another hash or no hash at all is not on the target, an on-target pod set that is not runtime-ready is a row to recover, and both take the ordinary roll, which is the retry, recreate or relocation the row's strategy and disposition resolve; a Failed row with a recorded RunningRevision is never adopted
     invariants: [ready.requires.proof]
     placement: unit
     coverage:
       perm: []
-      unit: [TestDetectUpdate_BackfillAdoptsRuntimeReadyPods, TestDetectUpdate_BackfillRefusesWedgedPods, TestPatchReadyOnRevision_PrunesBlock, TestPlan_Update_AdoptRevision]
+      unit: [TestDetectUpdate_BackfillAdoptsRuntimeReadyPods, TestDetectUpdate_BackfillAdoptsEngineRenderedPods, TestDetectUpdate_BackfillRefusesWedgedPods, TestDetectUpdate_BackfillRollsPodSetWithAForeignRevision, TestDetectUpdate_WedgedPodsReachHeld, TestDetectUpdate_StuckPodOnTargetRelocates, TestPatchReadyOnRevision_PrunesBlock, TestPlan_Update_AdoptRevision]
       kind: []
-    status: current
+      replay: [failed-runtime-ready-adopt]
+    status: decided
   - state: Failed
     event: pod.containersReady
     variants: [target]
@@ -589,12 +592,15 @@ cells:
   - state: Failed
     event: pod.containersNotReady
     variants: [source]
-    outcome: ignore
-    note: the regression moves the ready counters only, but it withdraws the AdoptRevision precondition in ops/update.go, which requires every pod ContainersReady, so the row keeps waiting for a corrective revision or a due block
+    outcome: defer
+    note: the regression moves the ready counters and withdraws the AdoptRevision precondition in ops/update.go, which requires every pod ContainersReady - so the row is not stamped Ready-on-target and is handed back to the ordinary roll instead of being left alone. The roll is what carries the recovery, and the RetryBlock gate paces it, so the row re-enters through the retry or corrective cell that owns the re-drive rather than through this event
     invariants: [ready.requires.proof]
-    placement: perm
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    placement: unit
+    coverage:
+      perm: []
+      unit: [TestDetectUpdate_BackfillRefusesWedgedPods, TestDetectUpdate_WedgedPodsReachHeld]
+      kind: []
+    status: decided
   - state: Failed
     event: pod.containersNotReady
     variants: [target]
@@ -917,11 +923,14 @@ cells:
     status: current
   - state: Failed
     event: pod.runningNotReady
-    outcome: ignore
-    note: no clock runs on a Failed row at all - isTransientPhase excludes the phase, so neither escalation path arms - and the adoption precondition is ContainersReady, which a pod failing readiness simply never satisfies; the row waits for a corrective revision, a due block or the reset mailbox whatever its pods do (pkg/controller/v1beta1/workload/deadline.go, pkg/controller/v1beta1/workload/ops/update.go)
-    placement: perm
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    outcome: defer
+    note: no clock runs on a Failed row at all - isTransientPhase excludes the phase, so neither escalation path arms - and the adoption precondition is ContainersReady, which a pod failing readiness simply never satisfies, so the row takes the ordinary roll instead of the stamp. That roll is how a node-scoped fault is answered — the disposition's terminal AutoRecover directive is executed by the rebuild, which recreates the pod under the recorded node's exclusion overlay. The re-drive is still paced by the RetryBlock gate and attributed to the retry or corrective cell (pkg/controller/v1beta1/workload/deadline.go, pkg/controller/v1beta1/workload/ops/update.go)
+    placement: unit
+    coverage:
+      perm: []
+      unit: [TestDetectUpdate_StuckPodOnTargetRelocates]
+      kind: []
+    status: decided
   - state: Failed
     event: config.changed
     variants: [retryBlockHistoryLimit]

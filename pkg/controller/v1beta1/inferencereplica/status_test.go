@@ -324,6 +324,11 @@ func TestReconcile_WakesWhenMinReadyWindowElapses(t *testing.T) {
 				PodCount: 1, ReadyPodCount: 1, ServingPodCount: 1, ActiveOrdinal: 0},
 		}
 		pod0 := podForIR(ir, 0, "default", 0, true, true)
+		// The row is steady-state on the target, which the engine reads
+		// from the pod's revision-hash label; without it the update
+		// trigger rolls the row and the wake under test never applies.
+		pod0.Labels[query.LabelRevisionHash] =
+			query.RevisionHashFromControllerRevisionName(targetRevisionNameFor(t, ir))
 		pod0.Status.Conditions = append(pod0.Status.Conditions, corev1.PodCondition{
 			Type:               corev1.PodReady,
 			Status:             corev1.ConditionTrue,

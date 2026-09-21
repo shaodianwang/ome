@@ -1985,3 +1985,26 @@ func TestTerminalFinalizationOwned_MigrationAndOrdinaryDelete(t *testing.T) {
 		})
 	}
 }
+
+// targetRevisionNameFor returns the ControllerRevision name the reconciler
+// derives from ir.Spec, by running one pass over a scratch copy that owns
+// no pods. Pod fixtures use it to carry the revision-hash label the
+// renderer stamps on every pod the engine writes.
+func targetRevisionNameFor(t *testing.T, ir *v1beta1.InferenceReplica) string {
+	t.Helper()
+	scratch := ir.DeepCopy()
+	r, c := newReconciler(t, scratch)
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: scratch.Name, Namespace: scratch.Namespace},
+	}); err != nil {
+		t.Fatalf("scratch reconcile to materialize the target revision: %v", err)
+	}
+	got := &v1beta1.InferenceReplica{}
+	if err := c.Get(context.Background(), types.NamespacedName{Name: scratch.Name, Namespace: scratch.Namespace}, got); err != nil {
+		t.Fatalf("read back the scratch IR: %v", err)
+	}
+	if got.Status.UpdateRevision == "" {
+		t.Fatalf("scratch reconcile did not record an UpdateRevision")
+	}
+	return got.Status.UpdateRevision
+}

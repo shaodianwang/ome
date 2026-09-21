@@ -7,11 +7,13 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clocktesting "k8s.io/utils/clock/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
@@ -76,7 +78,7 @@ func TestDetectUpdate_RetryBlockHeld_Denies(t *testing.T) {
 		{TargetRevision: tcr.Name, State: workload.RetryBlockHeld},
 	}
 
-	trigger, retryAfter, err := DetectUpdateTriggerWithPods(context.Background(), legacyTestDeps(c), *input, plan, plan.Instances[0], tcr, legacyTargetSpecImage("llama:v2"), nil)
+	trigger, retryAfter, err := DetectUpdateTriggerWithPods(context.Background(), legacyTestDeps(c), *input, plan, plan.Instances[0], tcr, nil)
 	if err != nil {
 		t.Fatalf("detect: %v", err)
 	}
@@ -106,7 +108,7 @@ func TestDetectUpdate_RetryBlockBackoffNotDue_DeniesWithRequeue(t *testing.T) {
 		{TargetRevision: tcr.Name, State: workload.RetryBlockBackoff, NextRetryAt: &next},
 	}
 
-	trigger, retryAfter, err := DetectUpdateTriggerWithPods(context.Background(), legacyTestDeps(c), *input, plan, plan.Instances[0], tcr, legacyTargetSpecImage("llama:v2"), nil)
+	trigger, retryAfter, err := DetectUpdateTriggerWithPods(context.Background(), legacyTestDeps(c), *input, plan, plan.Instances[0], tcr, nil)
 	if err != nil {
 		t.Fatalf("detect: %v", err)
 	}
@@ -133,7 +135,7 @@ func TestDetectUpdate_RetryBlockDue_AllowsWithoutFlip(t *testing.T) {
 		{TargetRevision: tcr.Name, State: workload.RetryBlockBackoff, AttemptsStarted: 1, NextRetryAt: &next},
 	}
 
-	trigger, retryAfter, err := DetectUpdateTriggerWithPods(context.Background(), legacyTestDeps(c), *input, plan, plan.Instances[0], tcr, legacyTargetSpecImage("llama:v2"), nil)
+	trigger, retryAfter, err := DetectUpdateTriggerWithPods(context.Background(), legacyTestDeps(c), *input, plan, plan.Instances[0], tcr, nil)
 	if err != nil {
 		t.Fatalf("detect: %v", err)
 	}
@@ -158,7 +160,7 @@ func TestDetectUpdate_RetryBlockDueBoundaryExact(t *testing.T) {
 		{TargetRevision: tcr.Name, State: workload.RetryBlockBackoff, NextRetryAt: &next},
 	}
 
-	trigger, retryAfter, err := DetectUpdateTriggerWithPods(context.Background(), legacyTestDeps(c), *input, plan, plan.Instances[0], tcr, legacyTargetSpecImage("llama:v2"), nil)
+	trigger, retryAfter, err := DetectUpdateTriggerWithPods(context.Background(), legacyTestDeps(c), *input, plan, plan.Instances[0], tcr, nil)
 	if err != nil {
 		t.Fatalf("detect: %v", err)
 	}
@@ -189,7 +191,7 @@ func TestDetectUpdate_RetryBlockInProgress_DeniesSecondAttempt(t *testing.T) {
 		Operation: &workload.InstanceOperation{Type: workload.InstanceOperationUpdate, TargetRevision: tcr.Name},
 	})
 
-	trigger, retryAfter, err := DetectUpdateTriggerWithPods(context.Background(), legacyTestDeps(c), *input, plan, plan.Instances[0], tcr, legacyTargetSpecImage("llama:v2"), nil)
+	trigger, retryAfter, err := DetectUpdateTriggerWithPods(context.Background(), legacyTestDeps(c), *input, plan, plan.Instances[0], tcr, nil)
 	if err != nil {
 		t.Fatalf("detect: %v", err)
 	}
@@ -217,7 +219,7 @@ func TestDetectUpdate_RetryBlockInProgressLeaked_SelfHeals(t *testing.T) {
 	}
 	// No instance carries an in-flight Update Operation at tcr.Name.
 
-	trigger, retryAfter, err := DetectUpdateTriggerWithPods(context.Background(), legacyTestDeps(c), *input, plan, plan.Instances[0], tcr, legacyTargetSpecImage("llama:v2"), nil)
+	trigger, retryAfter, err := DetectUpdateTriggerWithPods(context.Background(), legacyTestDeps(c), *input, plan, plan.Instances[0], tcr, nil)
 	if err != nil {
 		t.Fatalf("detect: %v", err)
 	}
@@ -243,7 +245,7 @@ func TestDetectUpdate_NewRevisionPassesGate(t *testing.T) {
 		{TargetRevision: "some-OTHER-rev", State: workload.RetryBlockHeld},
 	}
 
-	trigger, retryAfter, err := DetectUpdateTriggerWithPods(context.Background(), legacyTestDeps(c), *input, plan, plan.Instances[0], tcr, legacyTargetSpecImage("llama:v2"), nil)
+	trigger, retryAfter, err := DetectUpdateTriggerWithPods(context.Background(), legacyTestDeps(c), *input, plan, plan.Instances[0], tcr, nil)
 	if err != nil {
 		t.Fatalf("detect: %v", err)
 	}
@@ -276,7 +278,7 @@ func TestDetectUpdate_FailedContinuationPassesGate(t *testing.T) {
 		{TargetRevision: tcr.Name, State: workload.RetryBlockHeld},
 	}
 
-	trigger, retryAfter, err := DetectUpdateTriggerWithPods(context.Background(), legacyTestDeps(c), *input, plan, plan.Instances[0], tcr, legacyTargetSpecImage("llama:v2"), nil)
+	trigger, retryAfter, err := DetectUpdateTriggerWithPods(context.Background(), legacyTestDeps(c), *input, plan, plan.Instances[0], tcr, nil)
 	if err != nil {
 		t.Fatalf("detect: %v", err)
 	}
@@ -690,9 +692,9 @@ func TestPatchReadyOnRevision_PrunesBlock(t *testing.T) {
 // empty-RunningRevision backfill can encounter: Instance 0 is
 // Phase=Failed with NO Operation and NO RunningRevision, a Backoff
 // RetryBlock for the target revision is already due, and the wedged
-// attempt's pods are still present and spec-match the target. podReady
-// controls whether those pods carry ContainersReady. Returns the pod
-// separately so the caller threads it through instancePods.
+// attempt's pods are still present carrying the target revision's hash.
+// podReady controls whether those pods carry ContainersReady. Returns
+// the pod separately so the caller threads it through instancePods.
 func disposedBackfillFixture(t *testing.T, t0 time.Time, podReady bool) (*workload.ReconcileInput, workload.ComponentPlan, *appsv1.ControllerRevision, *[]retryBlockCall, client.Client, *v1beta1.InferenceService, *corev1.Pod) {
 	t.Helper()
 	legacyResetExpectations(t)
@@ -710,9 +712,10 @@ func disposedBackfillFixture(t *testing.T, t0 time.Time, podReady bool) (*worklo
 	})
 	plan := legacyComponentPlan(workload.UpdateStrategySurgeThenDrain, nil)
 
-	// The wedged attempt's pod: spec-matches the target revision (a bad
-	// image ref always spec-matches its own bad revision).
+	// The wedged attempt's pod: labelled with the target revision (a bad
+	// image ref always carries the hash of its own bad revision).
 	pod := legacyPodForInstance(isvc, 0, podReady, false)
+	pod.Labels[query.LabelRevisionHash] = query.RevisionHashFromControllerRevisionName(tcr.Name)
 	pod.Spec.Containers = []corev1.Container{{Name: "main", Image: "llama:v2"}}
 	if !podReady {
 		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
@@ -725,33 +728,199 @@ func disposedBackfillFixture(t *testing.T, t0 time.Time, podReady bool) (*worklo
 
 // TestDetectUpdate_BackfillRefusesWedgedPods: the empty-RunningRevision
 // backfill must NOT stamp Ready / prune the target's RetryBlock off a
-// spec-match alone. A deadline-disposed create (Failed, no Operation,
-// pods present in ImagePullBackOff) spec-matches the very revision that
-// wedged it; stamping Ready here would prune the block and defuse the
-// retry machinery while nothing is actually serving.
+// revision-match alone. A deadline-disposed create (Failed, no Operation,
+// pods present in a kubelet waiting reason) carries the very revision
+// that wedged it; stamping Ready here would prune the block and defuse
+// the retry machinery while nothing is actually serving. The row is not
+// left alone either: refusing the stamp hands it back to the ordinary
+// roll, which is the retry its RetryBlock paces.
+//
+// Cells: instance/Failed/pod.containersReady[source]/before, instance/Failed/pod.containersNotReady[source]/before
 func TestDetectUpdate_BackfillRefusesWedgedPods(t *testing.T) {
-	t0 := time.Now()
-	input, plan, tcr, calls, c, isvc, pod := disposedBackfillFixture(t, t0, false /* podReady */)
+	for _, reason := range []string{"ImagePullBackOff", "CrashLoopBackOff"} {
+		t.Run(reason, func(t *testing.T) {
+			t0 := time.Now()
+			input, plan, tcr, calls, c, isvc, pod := disposedBackfillFixture(t, t0, false /* podReady */)
+			pod.Status.ContainerStatuses[0].State.Waiting.Reason = reason
 
-	trigger, retryAfter, err := DetectUpdateTriggerWithPods(context.Background(), legacyTestDeps(c), *input, plan, plan.Instances[0], tcr, legacyTargetSpecImage("llama:v2"), []*corev1.Pod{pod})
+			trigger, retryAfter, err := DetectUpdateTriggerWithPods(context.Background(), legacyTestDeps(c), *input, plan, plan.Instances[0], tcr, []*corev1.Pod{pod})
+			if err != nil {
+				t.Fatalf("detect: %v", err)
+			}
+			if !trigger {
+				t.Errorf("a wedged pod on the target revision must take the ordinary retry roll")
+			}
+			if retryAfter != 0 {
+				t.Errorf("retryAfter: got %v want 0 (the block is due)", retryAfter)
+			}
+			if len(*calls) != 0 {
+				t.Errorf("MutateRetryBlock calls: got %d want 0 (detect stamps nothing; the flip belongs to attempt-stamp time)", len(*calls))
+			}
+			s := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
+			if s.Phase != v1beta1.OMENativeInstanceFailed {
+				t.Errorf("phase: got %q want still Failed (no Ready stamp without proof)", s.Phase)
+			}
+			if s.RunningRevision != "" {
+				t.Errorf("RunningRevision: got %q want empty (no backfill without proof)", s.RunningRevision)
+			}
+		})
+	}
+}
+
+// TestDetectUpdate_WedgedPodsReachHeld: the retry ladder is reachable
+// end to end from the roll a wedged on-target row keeps. Each pass
+// re-triggers, the attempt stamp flips the block, the failure charges
+// the ladder — and the count reaches Held, after which the gate denies
+// and the churn stops. An on-target row left alone instead of rolled
+// opens no further attempt, so the block would sit at Backoff forever.
+//
+// Cells: instance/Failed/pod.containersReady[source]/before, instance/Failed/timer.retryAt/before, instance/Failed/gate.deny[Held]/before
+func TestDetectUpdate_WedgedPodsReachHeld(t *testing.T) {
+	const maxAttempts = 3
+	t0 := time.Now()
+	input, plan, tcr, _, c, isvc, pod := disposedBackfillFixture(t, t0, false /* podReady */)
+	plan.UpdateStrategy.Type = workload.UpdateStrategyRecreatePod
+	clock := clocktesting.NewFakeClock(t0)
+	input.Clock = clock
+	policy := &workload.RetryPolicy{
+		MaxAttempts:  maxAttempts,
+		InitialDelay: 5 * time.Second,
+		MaxDelay:     20 * time.Second,
+		Multiplier:   2,
+	}
+	input.UpdateRetryPolicy = policy
+	// Start from the first failure wave, with the ladder persisted back
+	// into the observed state so each pass reads what the last one wrote.
+	input.ObservedState.RetryBlocks = nil
+	input.MutateRetryBlock = func(_ context.Context, rev string, mutate func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
+		b := workload.RetryBlock{TargetRevision: rev}
+		if found := workload.FindRetryBlock(input.ObservedState.RetryBlocks, rev); found != nil {
+			b = *found
+		}
+		if mutate(&b) == workload.RetryBlockRemove {
+			input.ObservedState.RetryBlocks = nil
+			return nil
+		}
+		input.ObservedState.RetryBlocks = []workload.RetryBlock{b}
+		return nil
+	}
+
+	ctx := context.Background()
+	for attempt := int32(1); attempt <= maxAttempts; attempt++ {
+		trigger, _, err := DetectUpdateTriggerWithPods(ctx, legacyTestDeps(c), *input, plan, plan.Instances[0], tcr, []*corev1.Pod{pod})
+		if err != nil {
+			t.Fatalf("detect (attempt %d): %v", attempt, err)
+		}
+		if !trigger {
+			t.Fatalf("attempt %d: the wedged row must re-trigger so the ladder can advance", attempt)
+		}
+		if _, err := patchInstanceStatusRecreatingForUpdate(ctx, *input, 0, tcr.Name,
+			recreateRevisionCause(*input, 0, tcr.Name), workload.UpdateStrategyRecreatePod, time.Hour); err != nil {
+			t.Fatalf("stamp attempt %d: %v", attempt, err)
+		}
+		// The attempt wedges on the same bad image: the disposition charges
+		// the revision's ladder and disposes the row back to Failed with the
+		// Operation cleared.
+		if err := recordUpdateFailureInRetryBlock(ctx, *input, tcr.Name, "ImagePullBackOff", true /* workloadCaused */); err != nil {
+			t.Fatalf("record failure %d: %v", attempt, err)
+		}
+		if err := input.MutateInstance(ctx, 0, func(s *workload.InstanceStatus) bool {
+			s.Phase = workload.InstancePhaseFailed
+			s.Operation = nil
+			return true
+		}); err != nil {
+			t.Fatalf("dispose attempt %d: %v", attempt, err)
+		}
+		input.ObservedState.InstanceStatuses = legacyInstanceStatuses(c, isvc, workload.ComponentEngine)
+
+		b := workload.FindRetryBlock(input.ObservedState.RetryBlocks, tcr.Name)
+		if b == nil {
+			t.Fatalf("attempt %d: no RetryBlock recorded", attempt)
+		}
+		if b.AttemptsStarted != attempt {
+			t.Fatalf("attempt %d: AttemptsStarted got %d want %d", attempt, b.AttemptsStarted, attempt)
+		}
+		// Wait out the rung so the next pass is not denied by the backoff.
+		clock.Step(policy.MaxDelay + time.Second)
+	}
+
+	b := workload.FindRetryBlock(input.ObservedState.RetryBlocks, tcr.Name)
+	if b.State != workload.RetryBlockHeld {
+		t.Fatalf("after %d charged attempts: state got %q want Held", maxAttempts, b.State)
+	}
+	if b.NextRetryAt != nil {
+		t.Errorf("Held has no time bound: NextRetryAt got %v want nil", b.NextRetryAt)
+	}
+	trigger, retryAfter, err := DetectUpdateTriggerWithPods(ctx, legacyTestDeps(c), *input, plan, plan.Instances[0], tcr, []*corev1.Pod{pod})
+	if err != nil {
+		t.Fatalf("detect after Held: %v", err)
+	}
+	if trigger {
+		t.Errorf("Held must stop the churn: no further attempt may be opened")
+	}
+	if retryAfter != 0 {
+		t.Errorf("retryAfter after Held: got %v want 0 (Held has no time bound)", retryAfter)
+	}
+}
+
+// TestDetectUpdate_StuckPodOnTargetRelocates: a node-scoped fault parks
+// the pod Running-but-unready with no kubelet waiting reason, and the
+// deadline disposition answers it with a terminal AutoRecover directive
+// — recorded as the instance's node exclusion, executed by the ordinary
+// rebuild. That rebuild is the roll this trigger opens: an on-target row
+// left alone is never recreated, so the pod keeps its node and its UID.
+//
+// Cells: instance/Failed/pod.containersReady[source]/before, instance/Failed/pod.runningNotReady[source]/before
+func TestDetectUpdate_StuckPodOnTargetRelocates(t *testing.T) {
+	const suspectNode = "node-suspect"
+	t0 := time.Now()
+	input, plan, tcr, _, c, isvc, pod := disposedBackfillFixture(t, t0, false /* podReady */)
+	// A node-scoped fault leaves the container Running: no waiting reason,
+	// just never ContainersReady.
+	pod.Status.ContainerStatuses = nil
+	pod.Status.Phase = corev1.PodRunning
+	pod.Spec.NodeName = suspectNode
+	pod.Labels[query.LabelInstanceIncarnation] = "1"
+	plan.UpdateStrategy.Type = workload.UpdateStrategyRecreatePod
+	plan.Instances[0].ExcludedNodes = []string{suspectNode}
+
+	ctx := context.Background()
+	trigger, _, err := DetectUpdateTriggerWithPods(ctx, legacyTestDeps(c), *input, plan, plan.Instances[0], tcr, []*corev1.Pod{pod})
 	if err != nil {
 		t.Fatalf("detect: %v", err)
 	}
-	if trigger {
-		t.Errorf("spec-matching pods must not trigger a fresh update")
+	if !trigger {
+		t.Fatalf("a stuck pod on the target revision must take the roll the relocation rides on")
 	}
-	if retryAfter != 0 {
-		t.Errorf("retryAfter: got %v want 0", retryAfter)
+
+	if err := c.Create(ctx, pod); err != nil {
+		t.Fatalf("seed stuck pod: %v", err)
 	}
-	if len(*calls) != 0 {
-		t.Errorf("MutateRetryBlock calls: got %d want 0 (block must survive — pods are not runtime-ready)", len(*calls))
+	deps := legacyTestDeps(c)
+	if _, err := recreateUpdate(ctx, deps, *input, plan, plan.Instances[0], tcr, []*corev1.Pod{pod}); err != nil {
+		t.Fatalf("recreate (drain pass): %v", err)
 	}
-	s := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
-	if s.Phase != v1beta1.OMENativeInstanceFailed {
-		t.Errorf("phase: got %q want still Failed (no Ready stamp without proof)", s.Phase)
+	live := &corev1.Pod{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(pod), live); !apierrors.IsNotFound(err) {
+		t.Fatalf("stuck pod must be deleted by the relocation rebuild: get err=%v", err)
 	}
-	if s.RunningRevision != "" {
-		t.Errorf("RunningRevision: got %q want empty (no backfill without proof)", s.RunningRevision)
+
+	// Next pass: the index is rebuilt at the bumped incarnation, steered
+	// off the recorded node by the exclusion overlay.
+	input.ObservedState.InstanceStatuses = legacyInstanceStatuses(c, isvc, workload.ComponentEngine)
+	legacyResetExpectations(t)
+	if _, err := recreateUpdate(ctx, deps, *input, plan, plan.Instances[0], tcr, nil); err != nil {
+		t.Fatalf("recreate (rebuild pass): %v", err)
+	}
+	rebuilt := &corev1.Pod{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(pod), rebuilt); err != nil {
+		t.Fatalf("rebuilt pod: %v", err)
+	}
+	if got := rebuilt.Labels[query.LabelInstanceIncarnation]; got != "2" {
+		t.Errorf("rebuilt pod incarnation: got %q want \"2\" (the stuck pod was replaced, not reused)", got)
+	}
+	if got := hostnameNotInValues(rebuilt); len(got) != 1 || got[0] != suspectNode {
+		t.Errorf("rebuilt pod hostname NotIn values: got %v want [%s]", got, suspectNode)
 	}
 }
 
@@ -764,12 +933,12 @@ func TestDetectUpdate_BackfillAdoptsRuntimeReadyPods(t *testing.T) {
 	t0 := time.Now()
 	input, plan, tcr, calls, c, isvc, pod := disposedBackfillFixture(t, t0, true /* podReady */)
 
-	trigger, retryAfter, err := DetectUpdateTriggerWithPods(context.Background(), legacyTestDeps(c), *input, plan, plan.Instances[0], tcr, legacyTargetSpecImage("llama:v2"), []*corev1.Pod{pod})
+	trigger, retryAfter, err := DetectUpdateTriggerWithPods(context.Background(), legacyTestDeps(c), *input, plan, plan.Instances[0], tcr, []*corev1.Pod{pod})
 	if err != nil {
 		t.Fatalf("detect: %v", err)
 	}
 	if trigger {
-		t.Errorf("runtime-ready spec-matching pods must not trigger an update")
+		t.Errorf("runtime-ready pods on the target revision must not trigger an update")
 	}
 	if retryAfter != 0 {
 		t.Errorf("retryAfter: got %v want 0", retryAfter)
@@ -786,6 +955,76 @@ func TestDetectUpdate_BackfillAdoptsRuntimeReadyPods(t *testing.T) {
 	}
 	if s.RunningRevision != tcr.Name {
 		t.Errorf("RunningRevision: got %q want %q (backfilled)", s.RunningRevision, tcr.Name)
+	}
+}
+
+// TestDetectUpdate_BackfillAdoptsEngineRenderedPods: the adoption path
+// has to recognise the pods the engine itself writes. The renderer adds
+// hostname, subdomain and the serving readiness gate on top of the
+// desired template, so the pod under test is produced by the renderer
+// rather than hand-built — a comparison that cannot see past those
+// additions leaves this path unreachable in production.
+//
+// Cells: instance/Failed/pod.containersReady[source]/before
+func TestDetectUpdate_BackfillAdoptsEngineRenderedPods(t *testing.T) {
+	t0 := time.Now()
+	input, plan, tcr, calls, c, isvc, _ := disposedBackfillFixture(t, t0, true /* podReady */)
+
+	inst := plan.Instances[0]
+	rendered, err := testRenderWithRevision(isvc, legacyTargetSpecImage("llama:v2"), nil, plan, inst,
+		inst.Runners[0], 0, query.RevisionHashFromControllerRevisionName(tcr.Name))
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	rendered.Status.Conditions = []corev1.PodCondition{{
+		Type: corev1.ContainersReady, Status: corev1.ConditionTrue, LastTransitionTime: metav1.NewTime(t0),
+	}}
+
+	trigger, _, err := DetectUpdateTriggerWithPods(context.Background(), legacyTestDeps(c), *input, plan, inst, tcr, []*corev1.Pod{rendered})
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if trigger {
+		t.Fatalf("an engine-rendered pod on the target revision must be adopted, not re-surged")
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("MutateRetryBlock calls: got %d want 1 (success-prune)", len(*calls))
+	}
+	s := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
+	if s.Phase != v1beta1.OMENativeInstanceReady || s.RunningRevision != tcr.Name {
+		t.Errorf("adoption stamp: got (phase=%q, runningRevision=%q) want (%q, %q)",
+			s.Phase, s.RunningRevision, v1beta1.OMENativeInstanceReady, tcr.Name)
+	}
+}
+
+// TestDetectUpdate_BackfillRollsPodSetWithAForeignRevision: adoption is
+// all-or-nothing over the Instance's pod set. One member on another
+// revision means the Instance is not on the target, so the row takes the
+// ordinary roll and nothing is stamped.
+//
+// Cells: instance/Failed/pod.containersReady[source]/before
+func TestDetectUpdate_BackfillRollsPodSetWithAForeignRevision(t *testing.T) {
+	t0 := time.Now()
+	input, plan, tcr, calls, c, isvc, onTarget := disposedBackfillFixture(t, t0, true /* podReady */)
+
+	foreign := onTarget.DeepCopy()
+	foreign.Name = onTarget.Name + "-peer"
+	foreign.Labels[query.LabelRevisionHash] = "0badf00d"
+
+	trigger, _, err := DetectUpdateTriggerWithPods(context.Background(), legacyTestDeps(c), *input, plan, plan.Instances[0], tcr, []*corev1.Pod{onTarget, foreign})
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if !trigger {
+		t.Errorf("a pod set with a member on another revision must take the ordinary roll")
+	}
+	if len(*calls) != 0 {
+		t.Errorf("MutateRetryBlock calls: got %d want 0 (nothing adopted, nothing pruned)", len(*calls))
+	}
+	s := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
+	if s.Phase != v1beta1.OMENativeInstanceFailed || s.RunningRevision != "" {
+		t.Errorf("row mutated: got (phase=%q, runningRevision=%q) want (%q, empty)",
+			s.Phase, s.RunningRevision, v1beta1.OMENativeInstanceFailed)
 	}
 }
 

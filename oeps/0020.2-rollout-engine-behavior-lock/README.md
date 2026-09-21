@@ -184,15 +184,16 @@ each one waits on are the structural entries under **Unlocked paths** in
 
 | criterion | measure | state |
 |---|---|---|
-| every workload-lane arrow driven | 118 arrows, checked by a test that joins scenario headers with `transitions.yaml` | 117 of 118. The one left is `T-failed-adopt-revision`, which the engine does not fire: `AdoptRevision`'s spec-match compares a live pod against the unrendered desired template, and the renderer's `Hostname`, `Subdomain` and serving gate make that comparison unsatisfiable. The fix is an engine change, landing separately; `failed-runtime-ready-resurge` records the route the engine takes instead |
+| every workload-lane arrow driven | 118 arrows, checked by a test that joins scenario headers with `transitions.yaml` | 118 of 118. The last one, `T-failed-adopt-revision`, is driven by `failed-runtime-ready-adopt`: a Failed row reads its pods' revision from the `ome.io/revision-hash` label the renderer stamps, so a row whose live pods already run the target is adopted onto it instead of opening a second attempt against them |
 | every adapter-lane arrow covered | 20 arrows, each named by a Go test in an `// Arrows:` comment, gated by `rolloutspec-check` | 20 of 20 |
 | goldens captured from a named commit | the commit sha recorded in `replay/README.md` | `cf75eb72`, the `main` commit the work started from, re-recorded onto `c990ad96` (`[Bugfix] Pause freezes repair, not hold evidence`) for the two `hold-*` traces that engine change moved |
 | runtime | the replay package under 60 seconds in the unit lane | about 11 seconds for 118 scenarios |
 | sensitivity | flipping any one ownership predicate or hold rule fails at least one golden (a mutation check run once, recorded) | met for the hold rules, partly for the surge guards. Recorded in `replay/README.md`: ten `hold-*` scenarios contend two authorities on one row, so `supersedes` now fails three goldens flipped to `false` and four flipped to `true`, and dropping the first-writer-wins guard fails those same four. Two groups stay redundant and are only sensitive as a pair — the surge ownership guards (`strategy-edit-midsurge` when both are disabled), and the per-authority `*HoldWritable` rules, which refuse exactly what the shared guard already refuses. A control that stops holds being marked fails 13 |
 | determinism | ten consecutive runs, identical traces | 118 scenarios × 10 passes, byte-identical |
 
-Part 1's exit is met once the `AdoptRevision` fix lands and its arrow is
-driven. The sensitivity row reads as met for the rules a scenario set can
+Part 1's exit is met on merge of this chain: every workload-lane arrow is
+driven and every adapter-lane arrow is named by a test. The sensitivity
+row reads as met for the rules a scenario set can
 reach: every pair of hold authorities the engine can put on one row is
 now contended in both orders, and the rules that remain insensitive
 alone are redundant with a rule that is — a fact the mutation table
@@ -461,6 +462,6 @@ Resolved:
 - The replay driver publishes endpoints in the per-revision routed Service the
   engine reads, so an endpoint hold is drivable in the replay lane.
 
-Next action: land the `AdoptRevision` fix and drive its arrow. Parts 2 and 3
-have met their exit; Part 1 is the only gate still open before OEP-0020.3 may
-start.
+All three parts have met their exit on merge of this chain, which clears the
+gate on OEP-0020.3. The status stays `provisional` until that work confirms
+the lock holds against a machine it did not grow up with.

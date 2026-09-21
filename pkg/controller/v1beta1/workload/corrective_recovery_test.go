@@ -724,7 +724,7 @@ func TestCorrectiveRecovery_SinglePod_RollBack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildPlan: %v", err)
 	}
-	dec := workloadops.EvaluateUpdateTrigger(in, plan.Instances[0], h.target, h.desired.PodSpec, nil)
+	dec := workloadops.EvaluateUpdateTrigger(in, plan.Instances[0], h.target, nil)
 	if dec.Trigger || dec.AdoptRevision || dec.RetryAfter != 0 {
 		t.Fatalf("expected the update trigger to keep declining (RunningRevision==target fast-path), got %+v", dec)
 	}

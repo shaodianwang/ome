@@ -337,7 +337,7 @@ transitions:
     from: Failed
     event: pod.containersReady
     variant: source
-    guard: RunningRevision is empty, every pod spec-matches the target and is ContainersReady, so the update trigger selects the AdoptRevision backfill instead of a roll
+    guard: RunningRevision is empty, every pod carries the target revision's hash and is ContainersReady, so the update trigger selects the AdoptRevision backfill instead of a roll
     to: Ready
     effects: [Phase Ready on the target revision with the operation cleared and that revision's RetryBlock pruned]
     decided_in: pkg/controller/v1beta1/workload/ops/update.go

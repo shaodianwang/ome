@@ -1,0 +1,39 @@
+# The route T-failed-adopt-revision is written for. A create attempt runs
+# out of deadline before its pod ever reported ready, so the row is Failed
+# with no recorded RunningRevision; when the pod then reports
+# ContainersReady the AdoptRevision backfill stamps Ready on the target
+# rather than opening a second attempt against pods that already serve it.
+scenario: failed-runtime-ready-adopt
+arrows:
+  - T-empty-create
+  - T-create-deadline
+  - T-failed-adopt-revision
+cells:
+  - instance/Failed/pod.containersReady[source]/before
+intentional: >-
+  the Failed row adopts its live pods instead of re-surging: a pod's
+  revision is its ome.io/revision-hash label, so the pods the engine
+  already wrote at the target are recognised as being on it and the row is
+  stamped Ready on that revision with the operation cleared
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod exists but reports no readiness
+  - tick: 3
+    note: the operation deadline elapses with the pod still not ready, so the attempt is disposed and RunningRevision is never recorded
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 4
+    note: the pod reports runtime readiness on the target revision, and the row is adopted onto that revision rather than re-surged
+    events:
+      - pod.containersReady[source]: {pod: {index: 0}}

@@ -567,7 +567,7 @@ func planUpdateSelection(ctx context.Context, input ReconcileInput, plan Compone
 				"component", plan.Component, "instance", inst.Index, "target", target.Name)
 			continue
 		}
-		dec := workloadops.EvaluateUpdateTrigger(input, inst, target, input.DesiredSpec.PodSpec, updateByInstance[inst.Index])
+		dec := workloadops.EvaluateUpdateTrigger(input, inst, target, updateByInstance[inst.Index])
 		if dec.AdoptRevision {
 			logf.FromContext(ctx).V(1).Info("update not selected: adopting revision in place",
 				"component", plan.Component, "instance", inst.Index, "target", target.Name)

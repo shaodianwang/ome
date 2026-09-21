@@ -10,11 +10,9 @@ tick=3 apply timer.operationDeadline to=t+30m1s now=t+30m1s
 tick=3 row=0 write incarnation=1 phase=Failed runningRevision=nil readySince=nil op=nil lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Create/CreatePods exceeded InstanceReadyTimeout} precondition=ok
 tick=3 warn instanceFailed index=0 pod=nil reason=DeadlineExceeded: Create/CreatePods exceeded InstanceReadyTimeout: attempt disposed terminal (no workload-caused evidence, relocation unavailable); operation-specific recovery decides whether another attempt is safe
 tick=3 pass result=after:5s
-tick=4 note the pod reports runtime readiness on the target revision, and the row re-surges at that same target rather than adopting it
+tick=4 note the pod reports runtime readiness on the target revision, and the row is adopted onto that revision rather than re-surged
 tick=4 apply pod.containersReady[source] pod=svc-a-engine-0-default-0 now=t+30m1s
-tick=4 gate consult strategy=SurgeThenDrain surge=0 unavail=0 verdict=allow
-tick=4 row=0 write incarnation=1 phase=Updating runningRevision=nil targetRevision=svc-a-engine-882059bb readySince=nil op=op#2{type=Update step=Surge target=svc-a-engine-882059bb strategy=SurgeThenDrain started=t+30m1s lastProgressAt=t+30m1s deadline=t+1h0m1s} lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Create/CreatePods exceeded InstanceReadyTimeout} precondition=ok
-tick=4 event Normal RecreateUpdateStarted OMENative component=engine instance=0 surge to revision svc-a-engine-882059bb (newOrdinal=1)
-tick=4 pod create name=svc-a-engine-0-default-1 revision=882059bb incarnation=1 ordinal=1
+tick=4 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+30m1s op=nil lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Create/CreatePods exceeded InstanceReadyTimeout} precondition=ok
 tick=4 hold cleared
+tick=4 pod status-patch name=svc-a-engine-0-default-0 serving=absent→True
 tick=4 pass result=after:5s

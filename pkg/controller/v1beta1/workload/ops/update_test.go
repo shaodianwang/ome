@@ -1025,7 +1025,7 @@ func TestDetectUpdateTrigger_PhaseUpdatingAlwaysTrue(t *testing.T) {
 	target := legacyTargetSpecImage("llama:v1")
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
 
-	trigger, _, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
+	trigger, _, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr)
 	if err != nil {
 		t.Fatalf("detect: %v", err)
 	}
@@ -1047,7 +1047,7 @@ func TestDetectUpdateTrigger_PhaseMigratingSuppressed(t *testing.T) {
 	target := legacyTargetSpecImage("llama:v2")
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
 
-	trigger, _, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
+	trigger, _, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr)
 	if err != nil {
 		t.Fatalf("detect: %v", err)
 	}
@@ -1073,7 +1073,7 @@ func TestDetectUpdateTrigger_OperationMigrateSuppressed(t *testing.T) {
 	target := legacyTargetSpecImage("llama:v2")
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
 
-	trigger, _, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
+	trigger, _, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr)
 	if err != nil {
 		t.Fatalf("detect: %v", err)
 	}
@@ -1104,7 +1104,7 @@ func TestDetectUpdateTrigger_GangSurgeTargetMarkerSuppressed(t *testing.T) {
 	target := legacyTargetSpecImage("llama:v2")
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
 
-	trigger, _, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
+	trigger, _, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr)
 	if err != nil {
 		t.Fatalf("detect: %v", err)
 	}
@@ -1129,7 +1129,7 @@ func TestDetectUpdateTrigger_RunningRevisionMatchesTarget(t *testing.T) {
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	plan := legacyComponentPlan(workload.UpdateStrategySurgeThenDrain, nil)
 
-	trigger, _, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
+	trigger, _, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr)
 	if err != nil {
 		t.Fatalf("detect: %v", err)
 	}
@@ -1157,7 +1157,7 @@ func TestDetectUpdateTrigger_PhaseFailedRetriggersOnMismatch(t *testing.T) {
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	plan := legacyComponentPlan(workload.UpdateStrategySurgeThenDrain, nil)
 
-	trigger, _, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
+	trigger, _, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr)
 	if err != nil {
 		t.Fatalf("detect: %v", err)
 	}
@@ -1166,49 +1166,73 @@ func TestDetectUpdateTrigger_PhaseFailedRetriggersOnMismatch(t *testing.T) {
 	}
 }
 
-// TestDetectUpdateTrigger_PodImageDiffersTriggersUpdate: no
-// RunningRevision recorded, observed pod has image v1 but target spec
-// is v2 — must trigger.
-func TestDetectUpdateTrigger_PodImageDiffersTriggersUpdate(t *testing.T) {
+// TestDetectUpdateTrigger_PodOnOtherRevisionTriggersUpdate: no
+// RunningRevision recorded and the observed pod carries a different
+// revision's hash — must trigger the ordinary roll.
+func TestDetectUpdateTrigger_PodOnOtherRevisionTriggersUpdate(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
 	pod := legacyRunningPodAtRevision(isvc, 0, 1, "llama:v1")
 	c := legacyNewFakeClient(t, isvc, ir, pod)
-	target := legacyTargetSpecImage("llama:v2")
-	tcr := legacyEnsureTargetCR(t, c, isvc, target)
+	priorCR := legacyEnsureTargetCR(t, c, isvc, legacyTargetSpecImage("llama:v1"))
+	legacyStampPodRevisionHash(t, c, pod, priorCR.Name)
+	tcr := legacyEnsureTargetCR(t, c, isvc, legacyTargetSpecImage("llama:v2"))
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	plan := legacyComponentPlan(workload.UpdateStrategySurgeThenDrain, nil)
 
-	trigger, _, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
+	trigger, _, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr)
 	if err != nil {
 		t.Fatalf("detect: %v", err)
 	}
 	if !trigger {
-		t.Errorf("pod image mismatch should trigger update")
+		t.Errorf("a pod on another revision should trigger update")
 	}
 }
 
-// TestDetectUpdateTrigger_LegacyMatchedPodsBackfillRunningRevision:
-// Status has no RunningRevision, pod already runs the target image.
-// DetectUpdateTrigger must NOT trigger an update, and as a side effect
-// should backfill RunningRevision so future reconciles take the cheap
-// fast-path.
-func TestDetectUpdateTrigger_LegacyMatchedPodsBackfillRunningRevision(t *testing.T) {
+// TestDetectUpdateTrigger_UnlabelledPodTriggersUpdate: a pod carrying no
+// revision-hash label cannot be proven on the target, so it is rolled
+// rather than adopted.
+func TestDetectUpdateTrigger_UnlabelledPodTriggersUpdate(t *testing.T) {
+	legacyResetExpectations(t)
+	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
+	pod := legacyRunningPodAtRevision(isvc, 0, 1, "llama:v1")
+	delete(pod.Labels, query.LabelRevisionHash)
+	c := legacyNewFakeClient(t, isvc, ir, pod)
+	tcr := legacyEnsureTargetCR(t, c, isvc, legacyTargetSpecImage("llama:v1"))
+	input := legacyTestInput(isvc, c, workload.ComponentEngine)
+	plan := legacyComponentPlan(workload.UpdateStrategySurgeThenDrain, nil)
+
+	trigger, _, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr)
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if !trigger {
+		t.Errorf("an unlabelled pod must not be adopted; it should trigger update")
+	}
+}
+
+// TestDetectUpdateTrigger_TargetRevisionPodsBackfillRunningRevision:
+// Status has no RunningRevision but the pods carry the target
+// revision's hash. DetectUpdateTrigger must NOT trigger an update, and
+// as a side effect should backfill RunningRevision so future reconciles
+// take the cheap fast-path.
+func TestDetectUpdateTrigger_TargetRevisionPodsBackfillRunningRevision(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc, ir := legacyISVCReadyAtIncarnation("llama-70b", "prod", 1)
 	target := legacyTargetSpecImage("llama:v1")
 	pod := legacyRunningPodAtRevision(isvc, 0, 1, "llama:v1")
 	c := legacyNewFakeClient(t, isvc, ir, pod)
 	tcr := legacyEnsureTargetCR(t, c, isvc, target)
+	legacyStampPodRevisionHash(t, c, pod, tcr.Name)
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	plan := legacyComponentPlan(workload.UpdateStrategySurgeThenDrain, nil)
 
-	trigger, _, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
+	trigger, _, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr)
 	if err != nil {
 		t.Fatalf("detect: %v", err)
 	}
 	if trigger {
-		t.Errorf("matched legacy pods must NOT trigger update")
+		t.Errorf("pods on the target revision must NOT trigger update")
 	}
 
 	// Backfill should have happened.
@@ -1230,7 +1254,7 @@ func TestDetectUpdateTrigger_PhaseCreatingNotInterruptible(t *testing.T) {
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
 	plan := legacyComponentPlan(workload.UpdateStrategySurgeThenDrain, nil)
 
-	trigger, _, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr, target)
+	trigger, _, err := DetectUpdateTrigger(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], tcr)
 	if err != nil {
 		t.Fatalf("detect: %v", err)
 	}

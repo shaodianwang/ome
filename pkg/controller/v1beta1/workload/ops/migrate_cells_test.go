@@ -224,7 +224,7 @@ func TestMigrate_RevisionRetargetIsDeclinedWhileTheRecordDrives(t *testing.T) {
 			Runners:     []workload.RunnerPlan{{Name: "default", Size: 1}},
 		}
 		trigger, retryAfter, err := DetectUpdateTriggerWithPods(context.Background(), f.deps(), in, f.plan, inst,
-			nextCR, nextSpec, migPodsForInstance(t, f, idx))
+			nextCR, migPodsForInstance(t, f, idx))
 		if err != nil {
 			t.Fatalf("DetectUpdateTriggerWithPods (instance=%d): %v", idx, err)
 		}

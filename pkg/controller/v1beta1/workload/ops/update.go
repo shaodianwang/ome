@@ -340,8 +340,8 @@ func podSpecWithoutImages(spec *corev1.PodSpec) ([]byte, error) {
 // retryAfter > 0 means the trigger was denied by a not-yet-due Backoff
 // RetryBlock for the current target; re-evaluate then. 0 otherwise
 // (including Held, which has no time bound).
-func DetectUpdateTrigger(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, target *appsv1.ControllerRevision, targetSpec *corev1.PodSpec) (trigger bool, retryAfter time.Duration, err error) {
-	return DetectUpdateTriggerWithPods(ctx, deps, input, plan, inst, target, targetSpec, nil)
+func DetectUpdateTrigger(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, target *appsv1.ControllerRevision) (trigger bool, retryAfter time.Duration, err error) {
+	return DetectUpdateTriggerWithPods(ctx, deps, input, plan, inst, target, nil)
 }
 
 // DetectUpdateTriggerWithPods is DetectUpdateTrigger with this Instance's
@@ -354,7 +354,7 @@ func DetectUpdateTrigger(ctx context.Context, deps workload.Deps, input workload
 // Composition of the pure evaluation (EvaluateUpdateTrigger) with its
 // two effects: the fallback self-list and the AdoptRevision backfill
 // write (BackfillRunningRevision).
-func DetectUpdateTriggerWithPods(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, target *appsv1.ControllerRevision, targetSpec *corev1.PodSpec, instancePods []*corev1.Pod) (trigger bool, retryAfter time.Duration, err error) {
+func DetectUpdateTriggerWithPods(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, target *appsv1.ControllerRevision, instancePods []*corev1.Pod) (trigger bool, retryAfter time.Duration, err error) {
 	dec, needPods := evaluateUpdateTriggerFast(input, inst, target)
 	if needPods {
 		pods := instancePods
@@ -365,7 +365,7 @@ func DetectUpdateTriggerWithPods(ctx context.Context, deps workload.Deps, input 
 			}
 			pods = filterPodsByInstance(all, inst.Index)
 		}
-		dec = evaluateUpdateTriggerPods(pods, targetSpec)
+		dec = evaluateUpdateTriggerPods(pods, target)
 	}
 	if dec.AdoptRevision {
 		if err := BackfillRunningRevision(ctx, input, inst.Index, target.Name); err != nil {
@@ -398,12 +398,12 @@ type UpdateTriggerDecision struct {
 // filtered to inst.Index (nil is an empty pod set); they are consulted
 // only on the empty-RunningRevision fallback path. The clock is read
 // through input.Now.
-func EvaluateUpdateTrigger(input workload.ReconcileInput, inst workload.InstancePlan, target *appsv1.ControllerRevision, targetSpec *corev1.PodSpec, instancePods []*corev1.Pod) UpdateTriggerDecision {
+func EvaluateUpdateTrigger(input workload.ReconcileInput, inst workload.InstancePlan, target *appsv1.ControllerRevision, instancePods []*corev1.Pod) UpdateTriggerDecision {
 	dec, needPods := evaluateUpdateTriggerFast(input, inst, target)
 	if !needPods {
 		return dec
 	}
-	return evaluateUpdateTriggerPods(instancePods, targetSpec)
+	return evaluateUpdateTriggerPods(instancePods, target)
 }
 
 // evaluateUpdateTriggerFast runs the status-only portion of the
@@ -469,25 +469,44 @@ func evaluateUpdateTriggerFast(input workload.ReconcileInput, inst workload.Inst
 }
 
 // evaluateUpdateTriggerPods runs the empty-RunningRevision fallback:
-// per-pod diff against the target spec, and the AdoptRevision
+// the per-pod revision check against the target, and the AdoptRevision
 // selection.
-func evaluateUpdateTriggerPods(pods []*corev1.Pod, targetSpec *corev1.PodSpec) UpdateTriggerDecision {
-	for _, pod := range pods {
-		if !podMatchesTarget(pod, targetSpec) {
-			return UpdateTriggerDecision{Trigger: true}
-		}
-	}
-	// Spec-match alone proves nothing about health: a wedged pod (e.g.
-	// ImagePullBackOff) spec-matches the very revision that broke it, and
-	// the adoption stamp prunes that revision's RetryBlock — Ready is
-	// only stamped on proof. Require runtime readiness before adopting;
-	// unproven pods are simply left alone (a corrective target re-triggers
-	// via the per-pod diff above, and pods that later become ready are
-	// adopted on a subsequent pass). This backfills the revision an already
-	// running pod set carries, so it is not one of the promote paths and
-	// does not consult the availability window.
-	if !query.AllPodsRuntimeReady(pods) {
+//
+// A pod's revision is its ome.io/revision-hash label — the identity
+// every other pass reads, and the only one that can be right here. The
+// renderer stamps hostname, subdomain and the serving readiness gate
+// onto each pod it writes, so a live pod's PodSpec never equals the
+// unrendered desired template and a spec comparison can only ever say
+// "different". A pod carrying no label cannot be proven on target and
+// is rolled.
+//
+// Exactly one shape is adopted: every pod on the target revision and
+// runtime-ready. Every other shape takes the roll, so a Failed row keeps
+// the recovery its strategy and disposition give it.
+func evaluateUpdateTriggerPods(pods []*corev1.Pod, target *appsv1.ControllerRevision) UpdateTriggerDecision {
+	// An empty pod set proves nothing in either direction; the Create
+	// and demotion passes own a row with no pods.
+	if len(pods) == 0 {
 		return UpdateTriggerDecision{}
+	}
+	if !existingPodsMatchTargetRevision(pods, target) {
+		return UpdateTriggerDecision{Trigger: true}
+	}
+	// Carrying the target revision proves nothing about health: a wedged
+	// pod (e.g. ImagePullBackOff) is labelled with the very revision that
+	// broke it, and the adoption stamp prunes that revision's RetryBlock —
+	// Ready is only stamped on proof. An unhealthy pod set on the target is
+	// a row to recover, not a row to stamp: it takes the ordinary roll, which
+	// is the retry, recreate or relocation its strategy and the disposition's
+	// node-exclusion overlay resolve. Leaving it alone would end the row's
+	// recovery — no further attempt is opened, so the RetryBlock ladder never
+	// advances and a stuck pod is never recreated off its suspect node.
+	// Adoption is the narrow case: every pod on the target AND runtime-ready.
+	// It backfills the revision an already running pod set carries, so it is
+	// not one of the promote paths and does not consult the availability
+	// window.
+	if !query.AllPodsRuntimeReady(pods) {
+		return UpdateTriggerDecision{Trigger: true}
 	}
 	return UpdateTriggerDecision{AdoptRevision: true}
 }
@@ -559,27 +578,6 @@ func isGangSurgeTargetMarker(s *workload.InstanceStatus) bool {
 		s.Operation.Type == workload.InstanceOperationUpdate &&
 		(s.Operation.Step == workload.UpdateStepGangSurgeTarget ||
 			s.Operation.Step == workload.UpdateStepGangSurgeTargetCleanup)
-}
-
-// podMatchesTarget compares pod's runtime PodSpec to target — same
-// image-stripped JSON AND matching container images. Used when
-// RunningRevision is missing.
-func podMatchesTarget(pod *corev1.Pod, target *corev1.PodSpec) bool {
-	if pod == nil || target == nil {
-		return false
-	}
-	gotStripped, err := podSpecWithoutImages(&pod.Spec)
-	if err != nil {
-		return false
-	}
-	wantStripped, err := podSpecWithoutImages(target)
-	if err != nil {
-		return false
-	}
-	if string(gotStripped) != string(wantStripped) {
-		return false
-	}
-	return podImagesMatch(pod, target)
 }
 
 // anyInFlightUpdateAt reports whether any Instance carries an in-flight
