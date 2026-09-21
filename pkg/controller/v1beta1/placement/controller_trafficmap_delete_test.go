@@ -3,6 +3,7 @@ package placement
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -16,6 +17,45 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workloadcluster"
 )
+
+func TestReconcileDelete_WaitsForEndpointCleanupBeforeDerived(t *testing.T) {
+	scheme := testScheme(t)
+	worker := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(&v1beta1.InferenceService{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "svc",
+			Namespace: "prod",
+			Labels:    map[string]string{PlacementOriginLabel: "uid-1"},
+		},
+	}).Build()
+	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(worker),
+	}}
+	isvc := srcISVC("gpu=gb300")
+	isvc.Finalizers = []string{PlacementFinalizer, EndpointFinalizer}
+	r, controlPlane := newPlacer(scheme, clusters, isvc)
+	require.NoError(t, controlPlane.Delete(context.Background(), isvc))
+
+	result, err := r.Reconcile(context.Background(), req())
+	require.NoError(t, err)
+	assert.Positive(t, result.RequeueAfter)
+	assert.True(t, hasDerived(t, worker), "backend must remain while endpoint cleanup is pending")
+	liveISVC := &v1beta1.InferenceService{}
+	require.NoError(t, controlPlane.Get(context.Background(), req().NamespacedName, liveISVC))
+	assert.Contains(t, liveISVC.Finalizers, PlacementFinalizer)
+	assert.Contains(t, liveISVC.Finalizers, EndpointFinalizer)
+
+	// The endpoint controller owns and releases its finalizer independently.
+	liveISVC.Finalizers = slices.DeleteFunc(liveISVC.Finalizers, func(finalizer string) bool {
+		return finalizer == EndpointFinalizer
+	})
+	require.NoError(t, controlPlane.Update(context.Background(), liveISVC))
+
+	_, err = r.Reconcile(context.Background(), req())
+	require.NoError(t, err)
+	assert.False(t, hasDerived(t, worker), "backend teardown may proceed after endpoint cleanup")
+	err = controlPlane.Get(context.Background(), req().NamespacedName, &v1beta1.InferenceService{})
+	assert.True(t, apierrors.IsNotFound(err), "source may disappear after both finalizers are released")
+}
 
 func TestReconcileDelete_WaitsForOrphanedTrafficMapBeforeDerived(t *testing.T) {
 	scheme := testScheme(t)

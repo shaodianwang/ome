@@ -1273,6 +1273,12 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, isvc *v1beta1.Inferenc
 	if !controllerutil.ContainsFinalizer(isvc, PlacementFinalizer) {
 		return ctrl.Result{}, nil
 	}
+	// The endpoint publisher owns this finalizer and removes it after its route is
+	// authoritatively absent. Leave both the source and derived workloads intact
+	// until then; the endpoint controller can continue reconciling independently.
+	if controllerutil.ContainsFinalizer(isvc, EndpointFinalizer) {
+		return ctrl.Result{RequeueAfter: r.requeue()}, nil
+	}
 	trafficMapRemaining, err := r.ownedTrafficMapRemaining(ctx, isvc)
 	if err != nil {
 		return ctrl.Result{}, err

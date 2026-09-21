@@ -29,6 +29,11 @@ const (
 	// PlacementFinalizer lets the controller delete the derived ISVC before the
 	// source ISVC is removed.
 	PlacementFinalizer = "ome.io/placement"
+
+	// EndpointFinalizer coordinates endpoint and placement teardown. The endpoint
+	// publisher removes it only after publication is gone; placement retains
+	// derived workloads while it remains so routing never outlives its backends.
+	EndpointFinalizer = "ome.io/placement-endpoint"
 )
 
 // LocalQueueAnnotation names the Kueue LocalQueue the derived workload's
