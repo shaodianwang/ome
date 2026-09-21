@@ -127,13 +127,16 @@ It does not mutate EDS membership or create a route arm, so the target must
 already exist in the xDS route graph.
 
 The required `weightMode` option selects the xDS wire representation.
-`normalized` divides every positive TrafficMap weight by the sum of the map's
-weights and multiplies it by the required positive `normalizedTotal`; an
-all-zero map remains all-zero. `relative` publishes the TrafficMap's integer
-ratios as numeric values and rejects `normalizedTotal`. With the routing probe's
-explicit all-failed `Drain` policy, either mode publishes zero for every target.
-Changing either option changes the publisher options digest and republishes
-each selected TrafficMap.
+`normalized` uses largest-remainder apportionment to publish nonnegative integer
+weights that sum exactly to the required positive integer `normalizedTotal`; an
+all-zero map remains all-zero. Equal remainders are resolved by canonical target
+name, so input order does not affect rounding. A small positive share can round
+to zero when the configured total is too coarse to represent it. The total must
+be from 1 through 4,294,967,295. `relative` publishes the TrafficMap's integer
+ratios directly and rejects `normalizedTotal`. With the routing probe's explicit
+all-failed `Drain` policy, either mode publishes zero for every target. Changing
+either option changes the publisher options digest and republishes each selected
+TrafficMap.
 
 Existing xDS deployments must add `weightMode` when adopting a binary with this
 option, and normalized deployments must also set `normalizedTotal`. Use

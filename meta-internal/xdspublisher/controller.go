@@ -25,7 +25,7 @@ const legacyTargetsAnnotation = "routing.ome.io/xds-published-targets"
 
 type weightedTarget struct {
 	name   string
-	weight float64
+	weight uint32
 }
 
 type publishPlan struct {
@@ -194,7 +194,7 @@ func (p *Publisher) Apply(
 	for _, target := range xdsPlan.targets {
 		if err := p.weights.PublishWeight(ctx, target.name, target.weight); err != nil {
 			return placementendpoint.TrafficMapPublishResult{}, fmt.Errorf(
-				"publish weight %g for xDS target %q: %w", target.weight, target.name, err,
+				"publish weight %d for xDS target %q: %w", target.weight, target.name, err,
 			)
 		}
 	}
@@ -242,14 +242,17 @@ func desiredTargets(
 	trafficMap *v1beta1.TrafficMap,
 	targetTemplate *template.Template,
 	weightMode string,
-	normalizedTotal float64,
+	normalizedTotal uint32,
 ) ([]weightedTarget, error) {
 	if trafficMap.Spec.Service == "" {
 		return nil, fmt.Errorf("TrafficMap service must not be empty")
 	}
+	if len(trafficMap.Spec.Entries) > v1beta1.MaxTrafficMapPublisherTargets {
+		return nil, fmt.Errorf("TrafficMap has %d entries, maximum is %d",
+			len(trafficMap.Spec.Entries), v1beta1.MaxTrafficMapPublisherTargets)
+	}
 	targets := make([]weightedTarget, 0, len(trafficMap.Spec.Entries))
 	seen := make(map[string]struct{}, len(trafficMap.Spec.Entries))
-	var totalWeight int64
 	for _, entry := range trafficMap.Spec.Entries {
 		if entry.Endpoint == nil {
 			return nil, fmt.Errorf("TrafficMap entry %q has no valid endpoint", entry.Cluster)
@@ -282,14 +285,10 @@ func desiredTargets(
 			return nil, fmt.Errorf("xDS target template maps more than one entry to %q", name)
 		}
 		seen[name] = struct{}{}
-		totalWeight += int64(entry.Weight)
-		targets = append(targets, weightedTarget{name: name, weight: float64(entry.Weight)})
+		targets = append(targets, weightedTarget{name: name, weight: uint32(entry.Weight)})
 	}
-	if weightMode == weightModeNormalized && totalWeight > 0 {
-		denominator := float64(totalWeight)
-		for i := range targets {
-			targets[i].weight = targets[i].weight / denominator * normalizedTotal
-		}
+	if weightMode == weightModeNormalized {
+		normalizeTargetWeights(targets, normalizedTotal)
 	}
 	sort.Slice(targets, func(i, j int) bool {
 		if (targets[i].weight == 0) != (targets[j].weight == 0) {
@@ -298,6 +297,59 @@ func desiredTargets(
 		return targets[i].name < targets[j].name
 	})
 	return targets, nil
+}
+
+// normalizeTargetWeights uses largest-remainder apportionment. The floor pass
+// makes every output integral; assigning the leftover units by exact remainder
+// makes the final vector sum to normalizedTotal without floating-point drift.
+// Canonical target name breaks equal-remainder ties independently of input
+// order. A positive source weight may round to zero when the configured total
+// cannot represent every source share.
+func normalizeTargetWeights(targets []weightedTarget, normalizedTotal uint32) {
+	type allocationRemainder struct {
+		targetIndex int
+		remainder   uint64
+	}
+
+	var totalWeight uint64
+	for _, target := range targets {
+		totalWeight += uint64(target.weight)
+	}
+	if totalWeight == 0 {
+		return
+	}
+
+	remainders := make([]allocationRemainder, 0, len(targets))
+	var assigned uint64
+	for i := range targets {
+		sourceWeight := targets[i].weight
+		if sourceWeight == 0 {
+			continue
+		}
+		product := uint64(sourceWeight) * uint64(normalizedTotal)
+		quotient := product / totalWeight
+		targets[i].weight = uint32(quotient)
+		assigned += quotient
+		remainders = append(remainders, allocationRemainder{
+			targetIndex: i,
+			remainder:   product % totalWeight,
+		})
+	}
+
+	sort.Slice(remainders, func(i, j int) bool {
+		if remainders[i].remainder != remainders[j].remainder {
+			return remainders[i].remainder > remainders[j].remainder
+		}
+		return targets[remainders[i].targetIndex].name < targets[remainders[j].targetIndex].name
+	})
+	remaining := uint64(normalizedTotal) - assigned
+	for _, allocation := range remainders {
+		if remaining == 0 {
+			break
+		}
+		targets[allocation.targetIndex].weight++
+		remaining--
+	}
 }
 
 func canonicalTarget(target string) (string, error) {

@@ -7,7 +7,6 @@ package xdspublisher
 import (
 	"context"
 	"fmt"
-	"math"
 	"net/url"
 	"strconv"
 	"strings"
@@ -38,8 +37,9 @@ const (
 	optNormalizedTotal    = "normalizedTotal"
 	clusterURLPlaceholder = "{cluster}"
 
-	weightModeNormalized = "normalized"
-	weightModeRelative   = "relative"
+	weightModeNormalized        = "normalized"
+	weightModeRelative          = "relative"
+	maxNormalizedTotal   uint64 = 1<<32 - 1
 )
 
 var acceptedOptions = map[string]struct{}{
@@ -80,7 +80,7 @@ var _ placementendpoint.TrafficMapPublisher = (*Publisher)(nil)
 
 // ClusterWeightPublisher is the narrow service surface used by the adapter.
 type ClusterWeightPublisher interface {
-	PublishWeight(ctx context.Context, cluster string, weight float64) error
+	PublishWeight(ctx context.Context, cluster string, weight uint32) error
 	ClearWeight(ctx context.Context, cluster string) error
 }
 
@@ -272,7 +272,7 @@ func parseWeightMode(raw string) (string, error) {
 	}
 }
 
-func parseNormalizedTotal(options map[string]string, weightMode string) (float64, string, error) {
+func parseNormalizedTotal(options map[string]string, weightMode string) (uint32, string, error) {
 	raw, found := options[optNormalizedTotal]
 	if weightMode == weightModeRelative {
 		if found {
@@ -293,11 +293,12 @@ func parseNormalizedTotal(options map[string]string, weightMode string) (float64
 			optNormalizedTotal, optWeightMode, weightModeNormalized,
 		)
 	}
-	total, err := strconv.ParseFloat(raw, 64)
-	if err != nil || math.IsNaN(total) || math.IsInf(total, 0) || total <= 0 {
-		return 0, "", fmt.Errorf("routing.publisher.options[%q] must be a finite positive number", optNormalizedTotal)
+	total, err := strconv.ParseUint(raw, 10, 32)
+	if err != nil || total == 0 {
+		return 0, "", fmt.Errorf("routing.publisher.options[%q] must be a positive integer no greater than %d",
+			optNormalizedTotal, maxNormalizedTotal)
 	}
-	return total, strconv.FormatFloat(total, 'g', -1, 64), nil
+	return uint32(total), strconv.FormatUint(total, 10), nil
 }
 
 func validateURLTemplate(raw string) error {

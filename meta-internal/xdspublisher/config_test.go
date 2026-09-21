@@ -60,11 +60,14 @@ func TestParseConfig(t *testing.T) {
 		{"bad weight mode", func(o map[string]string) { o[optWeightMode] = "percent" }, optWeightMode},
 		{"missing normalized total", func(o map[string]string) { delete(o, optNormalizedTotal) }, optNormalizedTotal},
 		{"empty normalized total", func(o map[string]string) { o[optNormalizedTotal] = " " }, optNormalizedTotal},
-		{"zero normalized total", func(o map[string]string) { o[optNormalizedTotal] = "0" }, "finite positive"},
-		{"negative normalized total", func(o map[string]string) { o[optNormalizedTotal] = "-1" }, "finite positive"},
-		{"NaN normalized total", func(o map[string]string) { o[optNormalizedTotal] = "NaN" }, "finite positive"},
-		{"infinite normalized total", func(o map[string]string) { o[optNormalizedTotal] = "+Inf" }, "finite positive"},
-		{"invalid normalized total", func(o map[string]string) { o[optNormalizedTotal] = "all" }, "finite positive"},
+		{"zero normalized total", func(o map[string]string) { o[optNormalizedTotal] = "0" }, "positive integer"},
+		{"negative normalized total", func(o map[string]string) { o[optNormalizedTotal] = "-1" }, "positive integer"},
+		{"fractional normalized total", func(o map[string]string) { o[optNormalizedTotal] = "100.5" }, "positive integer"},
+		{"exponential normalized total", func(o map[string]string) { o[optNormalizedTotal] = "1e2" }, "positive integer"},
+		{"NaN normalized total", func(o map[string]string) { o[optNormalizedTotal] = "NaN" }, "positive integer"},
+		{"infinite normalized total", func(o map[string]string) { o[optNormalizedTotal] = "+Inf" }, "positive integer"},
+		{"overflowing normalized total", func(o map[string]string) { o[optNormalizedTotal] = "4294967296" }, "positive integer"},
+		{"invalid normalized total", func(o map[string]string) { o[optNormalizedTotal] = "all" }, "positive integer"},
 		{"publisher resync is not an opaque option", func(o map[string]string) { o["resyncInterval"] = "1m" }, "not accepted"},
 		{"missing URL", func(o map[string]string) { delete(o, optURLTemplate) }, optURLTemplate},
 		{"HTTP URL", func(o map[string]string) { o[optURLTemplate] = "http://automation.example.com/{cluster}" }, "absolute HTTPS"},
@@ -110,12 +113,23 @@ func TestParseConfigCanonicalizesRelativeWeightMode(t *testing.T) {
 }
 
 func TestParseConfigCanonicalizesNormalizedTotal(t *testing.T) {
-	options := validOptions()
-	options[optNormalizedTotal] = "  1e2  "
+	for _, tt := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "leading zeros", raw: "  000100  ", want: "100"},
+		{name: "maximum", raw: "4294967295", want: "4294967295"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			options := validOptions()
+			options[optNormalizedTotal] = tt.raw
 
-	cfg, err := parseConfig(options)
-	require.NoError(t, err)
-	assert.Equal(t, "100", cfg.normalizedTotal)
+			cfg, err := parseConfig(options)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, cfg.normalizedTotal)
+		})
+	}
 }
 
 func TestParseConfigRejectsNormalizedTotalInRelativeMode(t *testing.T) {

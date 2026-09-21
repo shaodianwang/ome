@@ -5,6 +5,7 @@ package xdspublisher
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -29,7 +30,7 @@ type recordingPublisher struct {
 	clearFailures   map[string]error
 }
 
-func (p *recordingPublisher) PublishWeight(_ context.Context, target string, weight float64) error {
+func (p *recordingPublisher) PublishWeight(_ context.Context, target string, weight uint32) error {
 	p.published = append(p.published, weightedTarget{name: target, weight: weight})
 	if err := p.publishFailures[target]; err != nil {
 		delete(p.publishFailures, target)
@@ -82,7 +83,7 @@ func targetOptions(value string) map[string]string {
 	return map[string]string{
 		optTargetTemplate:  value,
 		optWeightMode:      weightModeNormalized,
-		optNormalizedTotal: "1",
+		optNormalizedTotal: "100",
 	}
 }
 
@@ -91,7 +92,7 @@ func targetOptionsWithSelector(value, selector string) map[string]string {
 		optTargetTemplate:  value,
 		optSourceSelector:  selector,
 		optWeightMode:      weightModeNormalized,
-		optNormalizedTotal: "1",
+		optNormalizedTotal: "100",
 	}
 }
 
@@ -107,7 +108,7 @@ func TestResolveOptionsKeepsGlobalPublicationBehavior(t *testing.T) {
 		"  {{.EndpointHostname}}  ",
 		" publish=true, environment in (prod,canary) ",
 	)
-	global[optNormalizedTotal] = " 1e2 "
+	global[optNormalizedTotal] = " 000100 "
 
 	effective, err := p.ResolveOptions(global, nil)
 	require.NoError(t, err)
@@ -341,7 +342,7 @@ func TestPlanIsImmutableAndApplyPublishesZeroBeforePositive(t *testing.T) {
 	assert.Zero(t, result)
 	assert.Equal(t, []weightedTarget{
 		{name: "model-a.team-a.home-a.example", weight: 0},
-		{name: "model-a.team-a.home-b.example", weight: 1},
+		{name: "model-a.team-a.home-b.example", weight: 100},
 	}, weights.published)
 }
 
@@ -349,26 +350,29 @@ func TestPlanWeightModes(t *testing.T) {
 	tests := []struct {
 		name string
 		mode string
-		want []float64
+		want []uint32
 	}{
-		{name: "normalized", mode: weightModeNormalized, want: []float64{0.7, 0.3}},
-		{name: "relative", mode: weightModeRelative, want: []float64{70, 30}},
+		{name: "normalized", mode: weightModeNormalized, want: []uint32{60, 40}},
+		{name: "relative", mode: weightModeRelative, want: []uint32{3, 2}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			trafficMap := testTrafficMap()
+			trafficMap.Spec.Entries[0].Weight = 2
+			trafficMap.Spec.Entries[1].Weight = 3
 			options := targetOptions("{{.EndpointHostname}}")
 			options[optWeightMode] = tt.mode
 			if tt.mode == weightModeRelative {
 				delete(options, optNormalizedTotal)
 			}
 			plan, err := newTestPublisher(&recordingPublisher{}).Plan(
-				testISVC("model-a"), testTrafficMap(), options,
+				testISVC("model-a"), trafficMap, options,
 			)
 			require.NoError(t, err)
 			xdsPlan := plan.(*publishPlan)
 			require.Len(t, xdsPlan.targets, 2)
 			for i := range tt.want {
-				assert.InDelta(t, tt.want[i], xdsPlan.targets[i].weight, 1e-12)
+				assert.Equal(t, tt.want[i], xdsPlan.targets[i].weight)
 			}
 		})
 	}
@@ -378,11 +382,13 @@ func TestPlanNormalizedWeightsUseConfiguredTotalOrStayZero(t *testing.T) {
 	tests := []struct {
 		name    string
 		weights []int32
-		want    []float64
+		total   string
+		want    []uint32
 	}{
-		{name: "relative values", weights: []int32{2, 3}, want: []float64{60, 40}},
-		{name: "single positive", weights: []int32{0, 7}, want: []float64{0, 100}},
-		{name: "all zero", weights: []int32{0, 0}, want: []float64{0, 0}},
+		{name: "largest remainder", weights: []int32{1, 2}, total: "100", want: []uint32{67, 33}},
+		{name: "equal remainder uses target name", weights: []int32{1, 1}, total: "1", want: []uint32{0, 1}},
+		{name: "single positive", weights: []int32{0, 7}, total: "100", want: []uint32{0, 100}},
+		{name: "all zero", weights: []int32{0, 0}, total: "100", want: []uint32{0, 0}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -391,23 +397,48 @@ func TestPlanNormalizedWeightsUseConfiguredTotalOrStayZero(t *testing.T) {
 				trafficMap.Spec.Entries[i].Weight = tt.weights[i]
 			}
 			options := targetOptions("{{.Cluster}}")
-			options[optNormalizedTotal] = "100"
+			options[optNormalizedTotal] = tt.total
 			plan, err := newTestPublisher(&recordingPublisher{}).Plan(testISVC("model-a"), trafficMap, options)
 			require.NoError(t, err)
 			xdsPlan := plan.(*publishPlan)
 			require.Len(t, xdsPlan.targets, len(tt.want))
-			total := 0.0
+			var total uint64
 			for i := range tt.want {
-				assert.InDelta(t, tt.want[i], xdsPlan.targets[i].weight, 1e-12)
-				total += xdsPlan.targets[i].weight
+				assert.Equal(t, tt.want[i], xdsPlan.targets[i].weight)
+				total += uint64(xdsPlan.targets[i].weight)
 			}
 			if tt.name == "all zero" {
 				assert.Zero(t, total)
 			} else {
-				assert.InDelta(t, 100, total, 1e-12)
+				wantTotal, err := strconv.ParseUint(tt.total, 10, 32)
+				require.NoError(t, err)
+				assert.Equal(t, wantTotal, total)
 			}
 		})
 	}
+}
+
+func TestNormalizeTargetWeightsIsOrderIndependentAndOverflowSafe(t *testing.T) {
+	orders := [][]weightedTarget{
+		{{name: "c", weight: 1}, {name: "a", weight: 1}, {name: "b", weight: 1}},
+		{{name: "b", weight: 1}, {name: "c", weight: 1}, {name: "a", weight: 1}},
+	}
+	for _, targets := range orders {
+		normalizeTargetWeights(targets, 100)
+		got := make(map[string]uint32, len(targets))
+		for _, target := range targets {
+			got[target.name] = target.weight
+		}
+		assert.Equal(t, map[string]uint32{"a": 34, "b": 33, "c": 33}, got)
+	}
+
+	const maxSourceWeight = uint32(1<<31 - 1)
+	targets := []weightedTarget{
+		{name: "a", weight: maxSourceWeight},
+		{name: "b", weight: maxSourceWeight - 1},
+	}
+	normalizeTargetWeights(targets, uint32(maxNormalizedTotal))
+	assert.Equal(t, maxNormalizedTotal, uint64(targets[0].weight)+uint64(targets[1].weight))
 }
 
 func TestPlanRejectsLegacyLifecycleStateWithoutPublishing(t *testing.T) {
@@ -531,6 +562,9 @@ func TestPlanRejectsInvalidTrafficMap(t *testing.T) {
 			tm.Spec.Entries[0].Endpoint = &apis.URL{Scheme: "https"}
 		}, want: "endpoint"},
 		{name: "negative weight", mutate: func(tm *v1beta1.TrafficMap) { tm.Spec.Entries[0].Weight = -1 }, want: "negative"},
+		{name: "too many entries", mutate: func(tm *v1beta1.TrafficMap) {
+			tm.Spec.Entries = make([]v1beta1.TrafficMapEntry, v1beta1.MaxTrafficMapPublisherTargets+1)
+		}, want: "maximum"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

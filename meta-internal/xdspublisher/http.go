@@ -24,7 +24,7 @@ type createTierSettings struct {
 }
 
 type publishWeightRequest struct {
-	Weight          float64            `json:"weight"`
+	Weight          uint32             `json:"weight"`
 	CreateIfMissing createTierSettings `json:"createIfMissing"`
 }
 
@@ -89,7 +89,7 @@ func newHTTPClusterWeightPublisher(cfg config) (ClusterWeightPublisher, error) {
 func (p *httpClusterWeightPublisher) PublishWeight(
 	ctx context.Context,
 	cluster string,
-	weight float64,
+	weight uint32,
 ) error {
 	body, err := json.Marshal(publishWeightRequest{
 		Weight:          weight,
