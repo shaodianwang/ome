@@ -53,7 +53,7 @@ func NewGatewayAPITrafficMapPublisher(
 ) *GatewayAPITrafficMapPublisher {
 	cfg.Labels = cloneGatewayAPILabels(cfg.Labels)
 	gatewayOptions := append([]GatewayAPIPublisherOption(nil), opts...)
-	gatewayOptions = append(gatewayOptions, withGatewayAPIReader(apiReader))
+	gatewayOptions = append(gatewayOptions, WithGatewayAPIReader(apiReader))
 	gatewayOptions = append(gatewayOptions, withStrictResourceOwnership())
 	gatewayOptions = append(gatewayOptions, withTrafficMapBackendNaming())
 	return &GatewayAPITrafficMapPublisher{

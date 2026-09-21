@@ -212,6 +212,42 @@ func TestReconcile_UnplacedTearsDownAndDropsFinalizer(t *testing.T) {
 	assert.False(t, controllerutil.ContainsFinalizer(got, EndpointFinalizer), "finalizer dropped after teardown")
 }
 
+func TestReconcile_UnpublishRetainsFinalizerUntilRouteIsGone(t *testing.T) {
+	r, c := newReconciler(t, baseConfig(), placedISVC("cluster-a", "svc.prod.cloud-a.example"))
+	reconcile(t, r)
+
+	routeKey := types.NamespacedName{Name: "svc-global", Namespace: "prod"}
+	serviceKey := types.NamespacedName{Name: "svc-global-cluster-a", Namespace: "prod"}
+	route := &gatewayapiv1.HTTPRoute{}
+	require.NoError(t, c.Get(context.Background(), routeKey, route))
+	route.Finalizers = []string{"example.com/hold"}
+	require.NoError(t, c.Update(context.Background(), route))
+
+	isvc := &v1beta1.InferenceService{}
+	isvcKey := types.NamespacedName{Name: "svc", Namespace: "prod"}
+	require.NoError(t, c.Get(context.Background(), isvcKey, isvc))
+	require.NoError(t, c.Delete(context.Background(), isvc))
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: isvcKey})
+	require.ErrorContains(t, err, "deletion is pending")
+	require.NoError(t, c.Get(context.Background(), isvcKey, isvc))
+	require.NotNil(t, isvc.DeletionTimestamp)
+	assert.Contains(t, isvc.Finalizers, EndpointFinalizer)
+	require.NoError(t, c.Get(context.Background(), routeKey, route))
+	require.NotNil(t, route.DeletionTimestamp)
+	require.NotNil(t, route.Spec.Rules[0].BackendRefs[0].Weight)
+	assert.Zero(t, *route.Spec.Rules[0].BackendRefs[0].Weight)
+	require.NoError(t, c.Get(context.Background(), serviceKey, &corev1.Service{}))
+
+	route.Finalizers = nil
+	require.NoError(t, c.Update(context.Background(), route))
+	_, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: isvcKey})
+	require.NoError(t, err)
+	assert.True(t, apierrors.IsNotFound(c.Get(context.Background(), routeKey, &gatewayapiv1.HTTPRoute{})))
+	assert.True(t, apierrors.IsNotFound(c.Get(context.Background(), serviceKey, &corev1.Service{})))
+	assert.True(t, apierrors.IsNotFound(c.Get(context.Background(), isvcKey, &v1beta1.InferenceService{})))
+}
+
 func TestReconcile_LegacyPublisherIgnoresTrafficMapWeights(t *testing.T) {
 	// A Split ISVC with two admitted homes whose reactive ready-replica ratio is
 	// 5:2, plus a TrafficMap the routing controller published carrying a

@@ -87,9 +87,9 @@ func withTrafficMapBackendNaming() GatewayAPIPublisherOption {
 	return func(p *GatewayAPIPublisher) { p.trafficMapBackendNames = true }
 }
 
-// withGatewayAPIReader supplies the uncached reader used for collision checks
+// WithGatewayAPIReader supplies the uncached reader used for collision checks
 // and cleanup discovery.
-func withGatewayAPIReader(apiReader client.Reader) GatewayAPIPublisherOption {
+func WithGatewayAPIReader(apiReader client.Reader) GatewayAPIPublisherOption {
 	return func(p *GatewayAPIPublisher) { p.apiReader = apiReader }
 }
 
@@ -230,35 +230,31 @@ func (p *GatewayAPIPublisher) Publish(ctx context.Context, isvc *v1beta1.Inferen
 	return p.pruneServices(ctx, isvc, desired)
 }
 
-// Unpublish deletes the HTTPRoute and every per-home resource this publisher
-// owns for the ISVC. Missing resources are tolerated so a double-teardown
-// (finalizer + a re-queued unplaced pass) is a no-op.
+// Unpublish drains and removes the HTTPRoute before deleting its per-home
+// resources. Missing resources are tolerated so repeated teardown is a no-op.
 func (p *GatewayAPIPublisher) Unpublish(ctx context.Context, isvc *v1beta1.InferenceService) error {
 	if err := p.validateIO(); err != nil {
 		return err
 	}
 	ns := p.routeNamespace(isvc)
 	sourceKey := types.NamespacedName{Namespace: isvc.Namespace, Name: isvc.Name}
-	var errs []error
+	routeKey := types.NamespacedName{Namespace: ns, Name: p.routeName(isvc)}
 	// Delete the route only if it is ours. A shared RouteNamespace holds routes
 	// for many sources, so a name match alone must not authorize a delete.
 	existing := &gatewayapiv1.HTTPRoute{}
-	switch err := p.apiReader.Get(ctx, types.NamespacedName{Namespace: ns, Name: p.routeName(isvc)}, existing); {
+	switch err := p.apiReader.Get(ctx, routeKey, existing); {
 	case apierrors.IsNotFound(err):
 		// nothing to remove
 	case err != nil:
-		errs = append(errs, fmt.Errorf("read global HTTPRoute %s/%s: %w", ns, p.routeName(isvc), err))
+		return fmt.Errorf("read global HTTPRoute %s/%s: %w", routeKey.Namespace, routeKey.Name, err)
 	case !p.ownsResource(existing, isvc):
-		errs = append(errs, fmt.Errorf("global HTTPRoute %s/%s belongs to another InferenceService", ns, p.routeName(isvc)))
+		return fmt.Errorf("global HTTPRoute %s/%s belongs to another InferenceService", routeKey.Namespace, routeKey.Name)
 	default:
-		if err := p.deleteObservedObject(ctx, existing); err != nil {
-			errs = append(errs, fmt.Errorf("delete global HTTPRoute %s/%s: %w", ns, p.routeName(isvc), err))
+		if err := p.drainAndDeleteHTTPRoute(ctx, routeKey, existing, "global"); err != nil {
+			return err
 		}
 	}
-	if err := p.deleteSourceResources(ctx, ns, sourceKey); err != nil {
-		errs = append(errs, err)
-	}
-	return errors.Join(errs...)
+	return p.deleteSourceResources(ctx, ns, sourceKey)
 }
 
 // zeroClaimedHTTPRoute sets every backend weight on an explicitly claimed
@@ -300,24 +296,35 @@ func (p *GatewayAPIPublisher) deleteClaimedHTTPRoute(
 	if err != nil || route == nil {
 		return err
 	}
+	return p.drainAndDeleteHTTPRoute(ctx, routeKey, route, "claimed")
+}
+
+// drainAndDeleteHTTPRoute removes traffic before requesting deletion and waits
+// for authoritative absence before subordinate resources may be removed.
+func (p *GatewayAPIPublisher) drainAndDeleteHTTPRoute(
+	ctx context.Context,
+	routeKey types.NamespacedName,
+	route *gatewayapiv1.HTTPRoute,
+	description string,
+) error {
 	if zeroHTTPRouteBackendWeights(route) {
 		if err := p.client.Update(ctx, route); err != nil {
-			return fmt.Errorf("zero claimed HTTPRoute %s/%s before deletion: %w",
-				routeKey.Namespace, routeKey.Name, err)
+			return fmt.Errorf("zero %s HTTPRoute %s/%s before deletion: %w",
+				description, routeKey.Namespace, routeKey.Name, err)
 		}
 	}
 	if route.DeletionTimestamp.IsZero() {
 		if err := p.deleteObservedObject(ctx, route); err != nil {
-			return fmt.Errorf("delete claimed HTTPRoute %s/%s: %w", routeKey.Namespace, routeKey.Name, err)
+			return fmt.Errorf("delete %s HTTPRoute %s/%s: %w", description, routeKey.Namespace, routeKey.Name, err)
 		}
 	}
 	remaining := &gatewayapiv1.HTTPRoute{}
 	if err := p.apiReader.Get(ctx, routeKey, remaining); apierrors.IsNotFound(err) {
 		return nil
 	} else if err != nil {
-		return fmt.Errorf("confirm claimed HTTPRoute %s/%s deletion: %w", routeKey.Namespace, routeKey.Name, err)
+		return fmt.Errorf("confirm %s HTTPRoute %s/%s deletion: %w", description, routeKey.Namespace, routeKey.Name, err)
 	}
-	return fmt.Errorf("claimed HTTPRoute %s/%s deletion is pending", routeKey.Namespace, routeKey.Name)
+	return fmt.Errorf("%s HTTPRoute %s/%s deletion is pending", description, routeKey.Namespace, routeKey.Name)
 }
 
 func zeroHTTPRouteBackendWeights(route *gatewayapiv1.HTTPRoute) bool {

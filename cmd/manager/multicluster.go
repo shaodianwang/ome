@@ -431,6 +431,7 @@ func setupMultiCluster(mgr manager.Manager, clientSet kubernetes.Interface, opti
 			placementendpoint.WithBackendAddressResolver(
 				placementendpoint.NewGatewayAddressResolver(clusterManager),
 			),
+			placementendpoint.WithGatewayAPIReader(mgr.GetAPIReader()),
 		)
 		setupLog.Info("Setting up multi-cluster legacy endpoint publisher", "publisher", endpointPublisher.Name())
 		if err := (&placementendpoint.Reconciler{

@@ -207,7 +207,7 @@ func TestGatewayAPIPublisherApplyRejectsTerminationAfterPreflight(t *testing.T) 
 				kubeClient,
 				cfg,
 				WithBackendAddressResolver(addresses),
-				withGatewayAPIReader(reader),
+				WithGatewayAPIReader(reader),
 				withStrictResourceOwnership(),
 				withTrafficMapBackendNaming(),
 			)
@@ -259,7 +259,7 @@ func TestGatewayAPIPublisherPreservesFinalizersOnOwnedUpdates(t *testing.T) {
 		kubeClient,
 		cfg,
 		WithBackendAddressResolver(addresses),
-		withGatewayAPIReader(kubeClient),
+		WithGatewayAPIReader(kubeClient),
 		withStrictResourceOwnership(),
 		withTrafficMapBackendNaming(),
 	)

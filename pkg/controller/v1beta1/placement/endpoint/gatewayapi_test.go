@@ -393,7 +393,7 @@ func TestGatewayPublisherRequiresClientAndAPIReader(t *testing.T) {
 
 	s := pubScheme(t)
 	c := fakeclient.NewClientBuilder().WithScheme(s).Build()
-	p := NewGatewayAPIPublisher(c, baseConfig(), withGatewayAPIReader(nil))
+	p := NewGatewayAPIPublisher(c, baseConfig(), WithGatewayAPIReader(nil))
 	err = p.Publish(context.Background(), testISVC(), target)
 	require.ErrorContains(t, err, "API reader is not configured")
 }
@@ -1150,7 +1150,7 @@ func TestGatewayCleanupUsesLiveAPIReader(t *testing.T) {
 	p := NewGatewayAPIPublisher(
 		stale,
 		baseConfig(),
-		withGatewayAPIReader(live),
+		WithGatewayAPIReader(live),
 		withStrictResourceOwnership(),
 	)
 
