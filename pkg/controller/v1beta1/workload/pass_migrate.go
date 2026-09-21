@@ -8,6 +8,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // executeMigratePass drives the Decision's one Manual migration record.
@@ -33,7 +34,7 @@ import (
 // pre-migration view, so the passes after it would recreate the
 // source-side index; the next reconcile rebuilds the plan from the
 // post-migration status.
-func executeMigratePass(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, record MigrationRecord) (res ctrl.Result, stop bool, err error) {
+func executeMigratePass(ctx context.Context, deps types.Deps, input types.ReconcileInput, plan types.ComponentPlan, record types.MigrationRecord) (res ctrl.Result, stop bool, err error) {
 	// Reconstruct the executor's request view from the record — the
 	// annotation was consumed at accept time.
 	request := &audit.MigrationRequest{
@@ -50,10 +51,10 @@ func executeMigratePass(ctx context.Context, deps Deps, input ReconcileInput, pl
 		return ctrl.Result{}, false, fmt.Errorf("workload.Reconcile: migrate instance %d: %w", sourceIdx, migrateErr)
 	}
 	if !done && accepted {
-		return PassRequeue(workloadops.MigrateRequeueInterval(input)), true, nil
+		return types.PassRequeue(workloadops.MigrateRequeueInterval(input)), true, nil
 	}
 	if done {
-		return RequeueNow(), true, nil
+		return types.RequeueNow(), true, nil
 	}
 	return ctrl.Result{}, false, nil
 }

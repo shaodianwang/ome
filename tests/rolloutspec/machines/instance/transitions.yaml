@@ -69,7 +69,7 @@ transitions:
     guard: a leftover pod whose revision-hash label disagrees with the Component's current revision stays in a terminal waiting reason past the stuck-pod grace, and the pod set is not fully serving
     to: Failed
     effects: [Phase Failed with the stuck pod's termination on LastFailure and no operation, since an operation-less row is never disposed]
-    decided_in: pkg/controller/v1beta1/workload/escalation.go
+    decided_in: pkg/controller/v1beta1/workload/escalation/escalation.go
   - id: T-pending-gang-restart
     from: Pending
     event: timer.retryAt
@@ -108,7 +108,7 @@ transitions:
     guard: the grace elapsed on a leftover pod whose revision-hash label disagrees with the Component current revision while it holds a terminal waiting reason, and the pod set is not fully serving
     to: Failed
     effects: [Phase Failed with the stuck pod termination on LastFailure and no operation, since an operation-less row is never disposed]
-    decided_in: pkg/controller/v1beta1/workload/escalation.go
+    decided_in: pkg/controller/v1beta1/workload/escalation/escalation.go
   - id: T-pending-teardown-deadline
     from: Pending
     event: timer.teardownDeadline
@@ -177,7 +177,7 @@ transitions:
     guard: a pod whose revision-hash label disagrees with the Component's current revision stays in a terminal waiting reason past the stuck-pod grace, and the pod set is not fully serving
     to: Failed
     effects: [Phase Failed with the stuck pod's termination on LastFailure]
-    decided_in: pkg/controller/v1beta1/workload/escalation.go
+    decided_in: pkg/controller/v1beta1/workload/escalation/escalation.go
   - id: T-ready-crashloop-restart
     from: Ready
     event: pod.waiting
@@ -257,7 +257,7 @@ transitions:
     guard: the grace elapsed on a pod whose revision-hash label disagrees with the Component current revision while it holds a terminal waiting reason, and the pod set is not fully serving
     to: Failed
     effects: [Phase Failed with the stuck pod termination on LastFailure]
-    decided_in: pkg/controller/v1beta1/workload/escalation.go
+    decided_in: pkg/controller/v1beta1/workload/escalation/escalation.go
   - id: T-ready-teardown-deadline
     from: Ready
     event: timer.teardownDeadline
@@ -412,14 +412,14 @@ transitions:
     guard: the operation deadline elapsed and no pod of the attempt is held by an admission scheduling gate
     to: Failed
     effects: [the disposition classifies the attempt and records a RetryBlock or a relocation directive, then clears the operation and stamps Failed in one write]
-    decided_in: pkg/controller/v1beta1/workload/disposition.go
+    decided_in: pkg/controller/v1beta1/workload/escalation/disposition.go
   - id: T-create-stuck
     from: Create/CreatePods
     event: pod.waiting
     guard: a pod held a terminal waiting reason past the stuck-pod grace and the pod set is not fully serving
     to: Failed
     effects: [the disposition classifies the attempt and clears the operation, stamping the waiting reason on LastFailure]
-    decided_in: pkg/controller/v1beta1/workload/disposition.go
+    decided_in: pkg/controller/v1beta1/workload/escalation/disposition.go
   - id: T-create-retire-superseded
     from: Create/CreatePods
     event: spec.revision
@@ -462,7 +462,7 @@ transitions:
     guard: the grace elapsed on a pod of the attempt that holds a terminal waiting reason, and the pod set is not fully serving
     to: Failed
     effects: [the disposition classifies the attempt and clears the operation, stamping the waiting reason on LastFailure]
-    decided_in: pkg/controller/v1beta1/workload/escalation.go
+    decided_in: pkg/controller/v1beta1/workload/escalation/escalation.go
   - id: T-create-teardown-deadline
     from: Create/CreatePods
     event: timer.teardownDeadline
@@ -503,14 +503,14 @@ transitions:
     guard: the operation deadline elapsed and no pod of the attempt is held by an admission scheduling gate
     to: Failed
     effects: [a single-pod surge is disposed and its operation cleared; a gang surge keeps the operation so the abandon path can consume it]
-    decided_in: pkg/controller/v1beta1/workload/escalation.go
+    decided_in: pkg/controller/v1beta1/workload/escalation/escalation.go
   - id: T-surge-stuck
     from: Update/Surge
     event: pod.waiting
     guard: a replacement pod held a terminal waiting reason past the stuck-pod grace and the pod set is not fully serving
     to: Failed
     effects: [the replacement's waiting reason is recorded on LastFailure and a workload-caused reason holds its revision]
-    decided_in: pkg/controller/v1beta1/workload/escalation.go
+    decided_in: pkg/controller/v1beta1/workload/escalation/escalation.go
   - id: T-surge-force-clock
     from: Update/Surge
     event: timer.forceDelete
@@ -538,7 +538,7 @@ transitions:
     guard: the grace elapsed on a replacement pod that holds a terminal waiting reason, and the pod set is not fully serving
     to: Failed
     effects: [the replacement waiting reason is recorded on LastFailure and a workload-caused reason holds its revision]
-    decided_in: pkg/controller/v1beta1/workload/escalation.go
+    decided_in: pkg/controller/v1beta1/workload/escalation/escalation.go
   - id: T-surge-teardown-deadline
     from: Update/Surge
     event: timer.teardownDeadline
@@ -572,14 +572,14 @@ transitions:
     guard: the operation deadline elapsed and no pod of the attempt is held by an admission scheduling gate
     to: Failed
     effects: [a single-pod source carries no SurgeIndex so the attempt is disposable, the disposition records a RetryBlock or relocation directive and clears the operation; a gang source keeps the operation for the abandon path]
-    decided_in: pkg/controller/v1beta1/workload/disposition.go
+    decided_in: pkg/controller/v1beta1/workload/escalation/disposition.go
   - id: T-surgedrain-stuck
     from: Update/SurgeDrain
     event: pod.waiting
     guard: a pod of the attempt held a terminal waiting reason past the stuck-pod grace; the source is already out of rotation, so the fully-serving guard cannot suppress the escalation
     to: Failed
     effects: [a single-pod source carries no SurgeIndex so the attempt is disposed and its operation cleared; a gang source keeps the operation for the abandon path]
-    decided_in: pkg/controller/v1beta1/workload/escalation.go
+    decided_in: pkg/controller/v1beta1/workload/escalation/escalation.go
   - id: T-surgedrain-force-clock
     from: Update/SurgeDrain
     event: timer.forceDelete
@@ -607,7 +607,7 @@ transitions:
     guard: the grace elapsed on a pod of the attempt that holds a terminal waiting reason; the source is already out of rotation, so the fully-serving guard cannot suppress the escalation
     to: Failed
     effects: [a single-pod source carries no SurgeIndex so the attempt is disposed and its operation cleared; a gang source keeps the operation for the abandon path]
-    decided_in: pkg/controller/v1beta1/workload/escalation.go
+    decided_in: pkg/controller/v1beta1/workload/escalation/escalation.go
   - id: T-surgedrain-teardown-deadline
     from: Update/SurgeDrain
     event: timer.teardownDeadline
@@ -647,14 +647,14 @@ transitions:
     guard: the marker's own operation deadline elapsed with phase Creating and no pod admission-gated; a gang step is never disposable, so the stamp preserves the operation
     to: Failed
     effects: [Phase Failed on the marker, LastFailure carrying the blamed pod's workload-caused waiting reason when one exists and the DeadlineExceeded diagnostic otherwise, so the cause survives the teardown that deletes the pod; the source's claim predicates match on revision and step, never phase, so the surge machine keeps driving]
-    decided_in: pkg/controller/v1beta1/workload/escalation.go
+    decided_in: pkg/controller/v1beta1/workload/escalation/escalation.go
   - id: T-gangtarget-stuck-failed
     from: Update/GangSurgeTarget
     event: pod.waiting
     guard: a replacement pod held a terminal waiting reason past the stuck-pod grace, the replacement set is not fully serving, and a gang step is never disposable
     to: Failed
     effects: [Phase Failed on the marker with the waiting reason on LastFailure and the operation preserved; the claim predicates ignore phase, so this is diagnostic]
-    decided_in: pkg/controller/v1beta1/workload/escalation.go
+    decided_in: pkg/controller/v1beta1/workload/escalation/escalation.go
   - id: T-gangtarget-teardown
     from: Update/GangSurgeTarget
     event: spec.teardown
@@ -668,7 +668,7 @@ transitions:
     guard: the grace elapsed on a replacement pod that holds a terminal waiting reason, the replacement set is not fully serving, and a gang step is never disposable
     to: Failed
     effects: [Phase Failed on the marker with the waiting reason on LastFailure and the operation preserved; the claim predicates ignore phase, so this is diagnostic]
-    decided_in: pkg/controller/v1beta1/workload/escalation.go
+    decided_in: pkg/controller/v1beta1/workload/escalation/escalation.go
   - id: T-gangtarget-teardown-deadline
     from: Update/GangSurgeTarget
     event: timer.teardownDeadline
@@ -694,14 +694,14 @@ transitions:
     guard: the marker's own operation deadline elapsed with phase Creating and no pod admission-gated; a gang step is never disposable, so the stamp preserves the operation
     to: Failed
     effects: [Phase Failed on the marker, LastFailure carrying the blamed pod's workload-caused waiting reason when one exists and the DeadlineExceeded diagnostic otherwise, so the abandon tail charges the ladder on the real cause; the cleanup claim matches on revision and step, never phase, so the retirement still completes]
-    decided_in: pkg/controller/v1beta1/workload/escalation.go
+    decided_in: pkg/controller/v1beta1/workload/escalation/escalation.go
   - id: T-gangcleanup-stuck-failed
     from: Update/GangSurgeTargetCleanup
     event: pod.waiting
     guard: a retired replacement pod held a terminal waiting reason past the stuck-pod grace while carrying no deletionTimestamp, the set is not fully serving, and a gang step is never disposable
     to: Failed
     effects: [Phase Failed on the marker with the waiting reason on LastFailure and the operation preserved; the cleanup claim ignores phase, so this is diagnostic]
-    decided_in: pkg/controller/v1beta1/workload/escalation.go
+    decided_in: pkg/controller/v1beta1/workload/escalation/escalation.go
   - id: T-gangcleanup-teardown
     from: Update/GangSurgeTargetCleanup
     event: spec.teardown
@@ -715,7 +715,7 @@ transitions:
     guard: the grace elapsed on a retired replacement pod that holds a terminal waiting reason, the set is not fully serving, and a gang step is never disposable
     to: Failed
     effects: [Phase Failed on the marker with the waiting reason on LastFailure and the operation preserved; the cleanup claim ignores phase, so this is diagnostic]
-    decided_in: pkg/controller/v1beta1/workload/escalation.go
+    decided_in: pkg/controller/v1beta1/workload/escalation/escalation.go
   - id: T-gangcleanup-teardown-deadline
     from: Update/GangSurgeTargetCleanup
     event: timer.teardownDeadline
@@ -764,14 +764,14 @@ transitions:
     guard: the operation deadline elapsed and no pod is held by an admission scheduling gate
     to: Failed
     effects: [the disposition classifies the attempt and clears the operation]
-    decided_in: pkg/controller/v1beta1/workload/disposition.go
+    decided_in: pkg/controller/v1beta1/workload/escalation/disposition.go
   - id: T-inplace-stuck
     from: Update/InPlace
     event: pod.waiting
     guard: the patched pod held a terminal waiting reason past the stuck-pod grace and the pod set is not fully serving
     to: Failed
     effects: [the disposition classifies the attempt; a workload-caused reason holds the target revision]
-    decided_in: pkg/controller/v1beta1/workload/disposition.go
+    decided_in: pkg/controller/v1beta1/workload/escalation/disposition.go
   - id: T-inplace-force-clock
     from: Update/InPlace
     event: timer.forceDelete
@@ -799,7 +799,7 @@ transitions:
     guard: the grace elapsed on the patched pod while it holds a terminal waiting reason, and the pod set is not fully serving
     to: Failed
     effects: [the disposition classifies the attempt; a workload-caused reason holds the target revision]
-    decided_in: pkg/controller/v1beta1/workload/escalation.go
+    decided_in: pkg/controller/v1beta1/workload/escalation/escalation.go
   - id: T-inplace-teardown-deadline
     from: Update/InPlace
     event: timer.teardownDeadline
@@ -832,14 +832,14 @@ transitions:
     guard: the operation deadline elapsed and no pod is held by an admission scheduling gate
     to: Failed
     effects: [a single-pod recreate is disposed and its operation cleared; a multi-pod recreate keeps the operation]
-    decided_in: pkg/controller/v1beta1/workload/escalation.go
+    decided_in: pkg/controller/v1beta1/workload/escalation/escalation.go
   - id: T-drain-stuck
     from: Update/Drain
     event: pod.waiting
     guard: a pod held a terminal waiting reason past the stuck-pod grace and the pod set is not fully serving
     to: Failed
     effects: [the stuck pod's termination is recorded on LastFailure before the recreate deletes it]
-    decided_in: pkg/controller/v1beta1/workload/escalation.go
+    decided_in: pkg/controller/v1beta1/workload/escalation/escalation.go
   - id: T-drain-force-clock
     from: Update/Drain
     event: timer.forceDelete
@@ -867,7 +867,7 @@ transitions:
     guard: the grace elapsed on a pod that holds a terminal waiting reason, and the pod set is not fully serving
     to: Failed
     effects: [the stuck pod termination is recorded on LastFailure before the recreate deletes it]
-    decided_in: pkg/controller/v1beta1/workload/escalation.go
+    decided_in: pkg/controller/v1beta1/workload/escalation/escalation.go
   - id: T-drain-teardown-deadline
     from: Update/Drain
     event: timer.teardownDeadline
@@ -893,14 +893,14 @@ transitions:
     guard: the operation deadline elapsed and no pod is held by an admission scheduling gate
     to: Failed
     effects: [Phase Failed with the operation preserved, since a Restart attempt is never disposed, and LastFailure carrying the blamed pod's workload-caused waiting reason when one exists and the DeadlineExceeded diagnostic otherwise]
-    decided_in: pkg/controller/v1beta1/workload/escalation.go
+    decided_in: pkg/controller/v1beta1/workload/escalation/escalation.go
   - id: T-restart-stuck
     from: Restart/Drain
     event: pod.waiting
     guard: a recreated pod held a terminal waiting reason past the stuck-pod grace and the pod set is not fully serving
     to: Failed
     effects: [Phase Failed with the waiting reason on LastFailure and the operation preserved]
-    decided_in: pkg/controller/v1beta1/workload/escalation.go
+    decided_in: pkg/controller/v1beta1/workload/escalation/escalation.go
   - id: T-restart-recycle-terminal
     from: Restart/Drain
     event: pod.phaseTerminal
@@ -928,7 +928,7 @@ transitions:
     guard: the grace elapsed on a recreated pod that holds a terminal waiting reason, and the pod set is not fully serving
     to: Failed
     effects: [Phase Failed with the waiting reason on LastFailure and the operation preserved]
-    decided_in: pkg/controller/v1beta1/workload/escalation.go
+    decided_in: pkg/controller/v1beta1/workload/escalation/escalation.go
   - id: T-restart-teardown-deadline
     from: Restart/Drain
     event: timer.teardownDeadline

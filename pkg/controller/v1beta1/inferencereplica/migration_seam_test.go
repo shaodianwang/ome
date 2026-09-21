@@ -12,8 +12,8 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // Tests for the status.migrations adapter seam: the MutateMigration
@@ -45,10 +45,10 @@ func TestBuildMutateMigration_PersistsAndMirrors(t *testing.T) {
 
 	mutate := buildMutateMigration(r.statusWriter(), r.Client, ir)
 	idx := int32(3)
-	g.Expect(mutate(context.Background(), "u-1", func(m *workload.MigrationRecord) bool {
-		g.Expect(m.Phase).To(gomega.Equal(workload.MigrationPhaseAccepted))
+	g.Expect(mutate(context.Background(), "u-1", func(m *workloadtypes.MigrationRecord) bool {
+		g.Expect(m.Phase).To(gomega.Equal(workloadtypes.MigrationPhaseAccepted))
 		m.SurgeInstance = &idx
-		m.Phase = workload.MigrationPhaseSurgePending
+		m.Phase = workloadtypes.MigrationPhaseSurgePending
 		m.Message = "surge allocated"
 		return true
 	})).To(gomega.Succeed())
@@ -78,7 +78,7 @@ func TestBuildMutateMigration_MissingEntryNoOp(t *testing.T) {
 
 	mutate := buildMutateMigration(r.statusWriter(), r.Client, ir)
 	called := false
-	g.Expect(mutate(context.Background(), "u-gone", func(_ *workload.MigrationRecord) bool {
+	g.Expect(mutate(context.Background(), "u-gone", func(_ *workloadtypes.MigrationRecord) bool {
 		called = true
 		return true
 	})).To(gomega.Succeed())
@@ -102,7 +102,7 @@ func TestBuildMutateMigration_UnchangedWritesNothing(t *testing.T) {
 	g.Expect(c.Get(context.Background(), key, before)).To(gomega.Succeed())
 
 	mutate := buildMutateMigration(r.statusWriter(), r.Client, ir)
-	g.Expect(mutate(context.Background(), "u-1", func(m *workload.MigrationRecord) bool {
+	g.Expect(mutate(context.Background(), "u-1", func(m *workloadtypes.MigrationRecord) bool {
 		m.Message = "scratch" // even a scribbling callback writes nothing on false
 		return false
 	})).To(gomega.Succeed())
@@ -126,11 +126,11 @@ func TestBuildMutateMigration_SameNameReplacementAborts(t *testing.T) {
 
 	called := false
 	mutate := buildMutateMigration(r.statusWriter(), r.Client, original)
-	err := mutate(context.Background(), "u-1", func(*workload.MigrationRecord) bool {
+	err := mutate(context.Background(), "u-1", func(*workloadtypes.MigrationRecord) bool {
 		called = true
 		return true
 	})
-	g.Expect(errors.Is(err, workload.ErrStatusOwnerGone)).To(gomega.BeTrue())
+	g.Expect(errors.Is(err, workloadtypes.ErrStatusOwnerGone)).To(gomega.BeTrue())
 	g.Expect(called).To(gomega.BeFalse())
 
 	got := &v1beta1.InferenceReplica{}
@@ -151,8 +151,8 @@ func TestBuildAppendMigration_SameNameReplacementAborts(t *testing.T) {
 	g.Expect(c.Get(context.Background(), key, before)).To(gomega.Succeed())
 
 	appendRec := buildAppendMigration(r.statusWriter(), r.Client, original)
-	err := appendRec(context.Background(), workload.MigrationRecord{RequestUUID: "u-2"})
-	g.Expect(errors.Is(err, workload.ErrStatusOwnerGone)).To(gomega.BeTrue())
+	err := appendRec(context.Background(), workloadtypes.MigrationRecord{RequestUUID: "u-2"})
+	g.Expect(errors.Is(err, workloadtypes.ErrStatusOwnerGone)).To(gomega.BeTrue())
 
 	got := &v1beta1.InferenceReplica{}
 	g.Expect(c.Get(context.Background(), key, got)).To(gomega.Succeed())
@@ -172,7 +172,7 @@ func TestSyncMigrationEntries_SameNameReplacementAborts(t *testing.T) {
 	g.Expect(c.Get(context.Background(), key, before)).To(gomega.Succeed())
 
 	err := r.syncMigrationEntries(context.Background(), r.Log, original, nil, migrationTestTimeout, migrationTestRecordWindow)
-	g.Expect(errors.Is(err, workload.ErrStatusOwnerGone)).To(gomega.BeTrue())
+	g.Expect(errors.Is(err, workloadtypes.ErrStatusOwnerGone)).To(gomega.BeTrue())
 
 	got := &v1beta1.InferenceReplica{}
 	g.Expect(c.Get(context.Background(), key, got)).To(gomega.Succeed())
@@ -194,12 +194,12 @@ func TestBuildAppendMigration_AppendsIdempotently(t *testing.T) {
 	appendRec := buildAppendMigration(r.statusWriter(), r.Client, ir)
 	now := metav1.NewTime(migrationTestNow.Local())
 	completed := now
-	rec := workload.MigrationRecord{
+	rec := workloadtypes.MigrationRecord{
 		RequestUUID:    "u-auto",
-		Trigger:        workload.MigrationTriggerAuto,
+		Trigger:        workloadtypes.MigrationTriggerAuto,
 		SourceInstance: 0,
 		FromNode:       "node-a",
-		Phase:          workload.MigrationPhaseRelocated,
+		Phase:          workloadtypes.MigrationPhaseRelocated,
 		Attempt:        1,
 		Reason:         audit.ReasonAutoRecover,
 		StartedAt:      now,
@@ -265,10 +265,10 @@ func TestMigrationsFromIR_RoundTrip(t *testing.T) {
 	g.Expect(records).To(gomega.HaveLen(2))
 	w := records[0]
 	g.Expect(w.RequestUUID).To(gomega.Equal("u-full"))
-	g.Expect(w.Trigger).To(gomega.Equal(workload.MigrationTriggerManual))
+	g.Expect(w.Trigger).To(gomega.Equal(workloadtypes.MigrationTriggerManual))
 	g.Expect(w.SurgeInstance).To(gomega.HaveValue(gomega.Equal(int32(2))))
 	g.Expect(w.HintTargetNodes).To(gomega.Equal([]string{"node-b", "node-c"}))
-	g.Expect(w.Phase).To(gomega.Equal(workload.MigrationPhaseDraining))
+	g.Expect(w.Phase).To(gomega.Equal(workloadtypes.MigrationPhaseDraining))
 
 	// Pointer safety: the mirror must not alias the IR's fields.
 	g.Expect(w.SurgeInstance).NotTo(gomega.BeIdenticalTo(in[0].SurgeInstance))
@@ -301,11 +301,11 @@ func TestAggregateStatus_PreservesMigrations(t *testing.T) {
 	pod0 := podForIR(ir, 0, "default", 0, true, true)
 	r, c := newReconciler(t, ir, pod0)
 
-	plan := workload.ComponentPlan{
+	plan := workloadtypes.ComponentPlan{
 		Component: v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component),
 		Replicas:  1,
-		Instances: []workload.InstancePlan{
-			{Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+		Instances: []workloadtypes.InstancePlan{
+			{Index: 0, Incarnation: 1, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}}},
 		},
 	}
 

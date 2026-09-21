@@ -10,6 +10,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // TestPlan_MigrationRequestWaitsForAGangSurgeToResolve: a fresh
@@ -22,23 +23,23 @@ import (
 // Cells: instance/Update/GangSurgeTarget/spec.migrateRequest/before, instance/Update/GangSurgeTargetCleanup/spec.migrateRequest/before
 func TestPlan_MigrationRequestWaitsForAGangSurgeToResolve(t *testing.T) {
 	for _, step := range []string{
-		workload.UpdateStepGangSurgeTarget,
-		workload.UpdateStepGangSurgeTargetCleanup,
+		types.UpdateStepGangSurgeTarget,
+		types.UpdateStepGangSurgeTargetCleanup,
 	} {
 		t.Run(step, func(t *testing.T) {
 			in := minimalInput(t)
 			forbidMutations(t, &in)
 			in.ObservedState.InstanceStatuses = gangSurgePair(time.Now(), 1, step)
-			in.ObservedState.Migrations = []workload.MigrationRecord{{
+			in.ObservedState.Migrations = []types.MigrationRecord{{
 				RequestUUID: "request-a",
-				Trigger:     workload.MigrationTriggerManual,
-				Phase:       workload.MigrationPhaseAccepted,
+				Trigger:     types.MigrationTriggerManual,
+				Phase:       types.MigrationPhaseAccepted,
 			}}
-			plan, err := workload.BuildPlan(workload.ComponentEngine, in.DesiredSpec, in.ObservedState)
+			plan, err := workload.BuildPlan(types.ComponentEngine, in.DesiredSpec, in.ObservedState)
 			if err != nil {
 				t.Fatalf("BuildPlan: %v", err)
 			}
-			plan.MigrationMode = workload.MigrationModeSurge
+			plan.MigrationMode = types.MigrationModeSurge
 
 			target := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{
 				Namespace: "prod", Name: gangPairTarget,
@@ -55,14 +56,14 @@ func TestPlan_MigrationRequestWaitsForAGangSurgeToResolve(t *testing.T) {
 			// Counter-case: the same record with no surge counted is
 			// driven, so the deferral above is the surge's doing and not
 			// a record the selector would have skipped anyway.
-			in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
-				{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: gangPairTarget},
+			in.ObservedState.InstanceStatuses = []types.InstanceStatus{
+				{Index: 0, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: gangPairTarget},
 			}
-			free, err := workload.BuildPlan(workload.ComponentEngine, in.DesiredSpec, in.ObservedState)
+			free, err := workload.BuildPlan(types.ComponentEngine, in.DesiredSpec, in.ObservedState)
 			if err != nil {
 				t.Fatalf("BuildPlan: %v", err)
 			}
-			free.MigrationMode = workload.MigrationModeSurge
+			free.MigrationMode = types.MigrationModeSurge
 			d = planTargetOrFail(t, in, free, target, planSnapshot(in, map[int32][]*corev1.Pod{0: {sourcePod}}))
 			if findAction(d, workload.ActionMigrate) == nil {
 				t.Fatalf("with no surge counted the same record must be driven; got %v", actionKinds(d))
@@ -79,21 +80,21 @@ func TestPlan_MigrationRequestWaitsForAGangSurgeToResolve(t *testing.T) {
 //
 // Cells: instance/Update/Surge/spec.migrateRequest/before, instance/Update/SurgeDrain/spec.migrateRequest/before
 func TestPlan_MigrationRequestWaitsForASurgeCycleToResolve(t *testing.T) {
-	for _, step := range []string{workload.UpdateStepSurge, workload.UpdateStepSurgeDrain} {
+	for _, step := range []string{types.UpdateStepSurge, types.UpdateStepSurgeDrain} {
 		t.Run(step, func(t *testing.T) {
 			in := minimalInput(t)
 			forbidMutations(t, &in)
 			in.ObservedState.InstanceStatuses = surgeSourceRow(time.Now(), step, 1)
-			in.ObservedState.Migrations = []workload.MigrationRecord{{
+			in.ObservedState.Migrations = []types.MigrationRecord{{
 				RequestUUID: "request-a",
-				Trigger:     workload.MigrationTriggerManual,
-				Phase:       workload.MigrationPhaseAccepted,
+				Trigger:     types.MigrationTriggerManual,
+				Phase:       types.MigrationPhaseAccepted,
 			}}
-			plan, err := workload.BuildPlan(workload.ComponentEngine, in.DesiredSpec, in.ObservedState)
+			plan, err := workload.BuildPlan(types.ComponentEngine, in.DesiredSpec, in.ObservedState)
 			if err != nil {
 				t.Fatalf("BuildPlan: %v", err)
 			}
-			plan.MigrationMode = workload.MigrationModeSurge
+			plan.MigrationMode = types.MigrationModeSurge
 
 			target := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{
 				Namespace: "prod", Name: gangPairTarget,

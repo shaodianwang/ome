@@ -12,7 +12,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // pinRun pins the ISVC's current spec.rollout as its active run: the update
@@ -122,11 +122,11 @@ func TestBuildReconcileInput_WiresSequentialGate(t *testing.T) {
 	g.Expect(input.UpdateGate).NotTo(gomega.BeNil(),
 		"UpdateGate must be wired on the IR path when the parent declares coordination")
 
-	allowed, gate, reason := input.UpdateGate(workload.UpdateStrategySurgeThenDrain, 0, 0)
+	allowed, gate, reason := input.UpdateGate(workloadtypes.UpdateStrategySurgeThenDrain, 0, 0)
 	g.Expect(allowed).To(gomega.BeFalse(),
 		"engine must be denied while decoder (first in Sequential Order) is in flight")
 	g.Expect(reason).To(gomega.ContainSubstring("Sequential waiting on decoder"))
-	g.Expect(gate).To(gomega.Equal(workload.RolloutHoldGateSequential),
+	g.Expect(gate).To(gomega.Equal(workloadtypes.RolloutHoldGateSequential),
 		"a Sequential denial must report gate=Sequential so the RolloutHold surface names the right layer")
 }
 
@@ -157,7 +157,7 @@ func TestBuildReconcileInput_SequentialReleasesActiveComponent(t *testing.T) {
 	input := r.buildReconcileInput(context.Background(), engineIR, parent, nil, nil, lifecycleSettings{}, 0, coordination.GroupDefaults{})
 	g.Expect(input.UpdateGate).NotTo(gomega.BeNil())
 
-	allowed, _, _ := input.UpdateGate(workload.UpdateStrategySurgeThenDrain, 0, 0)
+	allowed, _, _ := input.UpdateGate(workloadtypes.UpdateStrategySurgeThenDrain, 0, 0)
 	g.Expect(allowed).To(gomega.BeTrue(),
 		"engine is the active Sequential Component once decoder converged; it must be allowed")
 }
@@ -308,12 +308,12 @@ func TestBuildReconcileInput_GateReadsFreshPeerStatus(t *testing.T) {
 	input := r.buildReconcileInput(context.Background(), engineIR, parent, nil, nil, lifecycleSettings{}, 0, coordination.GroupDefaults{})
 	g.Expect(input.UpdateGate).NotTo(gomega.BeNil())
 
-	allowed, gate, reason := input.UpdateGate(workload.UpdateStrategySurgeThenDrain, 0, 0)
+	allowed, gate, reason := input.UpdateGate(workloadtypes.UpdateStrategySurgeThenDrain, 0, 0)
 	g.Expect(allowed).To(gomega.BeFalse(),
 		"engine must be held while the decoder is genuinely behind (fresh decoder serving 3/4 → "+
 			"engine surge 5/3 = 1.667 out of band); got allowed — the gate read the stale parent "+
 			"projection (decoder 4/4) instead of the decoder's fresh IR status: "+reason)
-	g.Expect(gate).To(gomega.Equal(workload.RolloutHoldGateRatio),
+	g.Expect(gate).To(gomega.Equal(workloadtypes.RolloutHoldGateRatio),
 		"a RatioBalanced denial must report gate=Ratio so the RolloutHold surface names the right layer")
 }
 
@@ -339,7 +339,7 @@ func TestBuildReconcileInput_GateFreshPeerReleasesWhenBalanced(t *testing.T) {
 	input := r.buildReconcileInput(context.Background(), engineIR, parent, nil, nil, lifecycleSettings{}, 0, coordination.GroupDefaults{})
 	g.Expect(input.UpdateGate).NotTo(gomega.BeNil())
 
-	allowed, _, reason := input.UpdateGate(workload.UpdateStrategySurgeThenDrain, 0, 0)
+	allowed, _, reason := input.UpdateGate(workloadtypes.UpdateStrategySurgeThenDrain, 0, 0)
 	g.Expect(allowed).To(gomega.BeTrue(),
 		"engine surge must be allowed once the decoder's FRESH status is balanced (4/4 → engine 5/4 = "+
 			"1.25 in band), even though the parent projection lags at 3/4: "+reason)
@@ -370,11 +370,11 @@ func TestBuildReconcileInput_RatioRecoveryStartsFromAuthoritativeZero(t *testing
 	input := r.buildReconcileInput(context.Background(), engineIR, parent, nil, nil, lifecycleSettings{}, 0, coordination.GroupDefaults{})
 	g.Expect(input.UpdateGate).NotTo(gomega.BeNil())
 
-	allowed, _, reason := input.UpdateGate(workload.UpdateStrategySurgeThenDrain, 0, 0)
+	allowed, _, reason := input.UpdateGate(workloadtypes.UpdateStrategySurgeThenDrain, 0, 0)
 	g.Expect(allowed).To(gomega.BeTrue(),
 		"positive authoritative shape at 0:0 serving must admit one recovery bootstrap: "+reason)
 
-	allowed, _, reason = input.UpdateGate(workload.UpdateStrategySurgeThenDrain, 1, 0)
+	allowed, _, reason = input.UpdateGate(workloadtypes.UpdateStrategySurgeThenDrain, 1, 0)
 	g.Expect(allowed).To(gomega.BeFalse(),
 		"same-wakeup recovery must serialize per Component even when MaxSurge permits more: "+reason)
 }
@@ -415,7 +415,7 @@ func TestBuildReconcileInput_SequentialGateReadsFreshPeerStatus(t *testing.T) {
 	input := r.buildReconcileInput(context.Background(), engineIR, parent, nil, nil, lifecycleSettings{}, 0, coordination.GroupDefaults{})
 	g.Expect(input.UpdateGate).NotTo(gomega.BeNil())
 
-	allowed, _, reason := input.UpdateGate(workload.UpdateStrategySurgeThenDrain, 0, 0)
+	allowed, _, reason := input.UpdateGate(workloadtypes.UpdateStrategySurgeThenDrain, 0, 0)
 	g.Expect(allowed).To(gomega.BeFalse(),
 		"engine must wait while the decoder is genuinely still rolling (fresh decoder IR has "+
 			"UpdateRevision != CurrentRevision); got allowed — the gate read the stale parent "+
@@ -573,7 +573,7 @@ func TestBuildReconcileInput_GateUsesFreshIRStatus(t *testing.T) {
 	input := r.buildReconcileInput(context.Background(), engineIR, parent, nil, nil, lifecycleSettings{}, 0, coordination.GroupDefaults{})
 	g.Expect(input.UpdateGate).NotTo(gomega.BeNil())
 
-	allowed, _, reason := input.UpdateGate(workload.UpdateStrategyRecreatePod, 0, 0)
+	allowed, _, reason := input.UpdateGate(workloadtypes.UpdateStrategyRecreatePod, 0, 0)
 	g.Expect(allowed).To(gomega.BeFalse(),
 		"with the IR's fresh status (engine serving 3/4 = one pod already out), the "+
 			"RatioBalanced tiebreaker must refuse a second drain; got allowed — the gate "+

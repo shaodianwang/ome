@@ -13,6 +13,8 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	workloadstatus "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // TestReadyCondition_NoReplicas_ScaledToZero pins the scaled-to-zero
@@ -190,11 +192,11 @@ func TestAggregateAndWriteStatus_ObservedGenerationFollowsGeneration(t *testing.
 	ir := baselineIR("status-c-engine", "status-c", 1)
 	ir.Generation = 4
 	r, c := newReconciler(t, ir)
-	plan := workload.ComponentPlan{
+	plan := workloadtypes.ComponentPlan{
 		Component: v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component),
 		Replicas:  1,
-		Instances: []workload.InstancePlan{{
-			Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}},
+		Instances: []workloadtypes.InstancePlan{{
+			Index: 0, Incarnation: 1, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}},
 		}},
 	}
 
@@ -252,7 +254,7 @@ func TestPublicationCounters_DeriveFromPodsNotPhases(t *testing.T) {
 			1: {pod1},
 			2: {pod2},
 		}),
-		map[string]struct{}{pod0.Name: {}}, workload.AvailabilityWindow{},
+		map[string]struct{}{pod0.Name: {}}, workloadstatus.AvailabilityWindow{},
 	)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 
@@ -282,7 +284,7 @@ func TestPublicationCounters_DeriveFromPodsNotPhases(t *testing.T) {
 // Cells: instance/Delete/Drain/timer.operationDeadline/before
 func TestDrainOverdueCondition_CountsDeletingRowsPastTheirDeadline(t *testing.T) {
 	g := gomega.NewWithT(t)
-	overdue := &v1beta1.InstanceTermination{Reason: workload.DrainOverdueReason, Time: metav1.Now()}
+	overdue := &v1beta1.InstanceTermination{Reason: workloadtypes.DrainOverdueReason, Time: metav1.Now()}
 	status := &v1beta1.InferenceReplicaStatus{
 		ObservedGeneration: 4,
 		Replicas:           4,
@@ -321,7 +323,7 @@ func TestDrainOverdueCondition_ClearsWhenNoRowIsOverdue(t *testing.T) {
 		InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
 			{Index: 0, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: "rev-b"},
 			{Index: 1, Phase: v1beta1.OMENativeInstanceDeleting, RunningRevision: "rev-a",
-				LastFailure: &v1beta1.InstanceTermination{Reason: workload.DrainOverdueReason}},
+				LastFailure: &v1beta1.InstanceTermination{Reason: workloadtypes.DrainOverdueReason}},
 		},
 	}
 	g.Expect(computeRolloutStalledCondition(status).Status).To(gomega.Equal(metav1.ConditionFalse),

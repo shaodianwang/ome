@@ -1,12 +1,12 @@
-// services.go owns the per-Component headless Service that gives
+// Package service owns the per-Component headless Service that gives
 // every workload-managed pod a stable peer-DNS FQDN of the form
 // `<pod-name>.<owner>-<component>-headless.<namespace>.svc.<cluster-domain>`.
 //
 // Functions take `types.PerComponentServiceSpec` rather than an owner
-// CRD object so the workload package stays free of the owner-CRD
-// typed import boundary. Invoked by the adapter caller before
+// CRD object so the workload tree stays free of the owner-CRD typed
+// import boundary. Invoked by the adapter caller before
 // workload.Reconcile, alongside PodMonitor and PodGroup wiring.
-package workload
+package service
 
 import (
 	"context"

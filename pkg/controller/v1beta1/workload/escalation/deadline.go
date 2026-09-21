@@ -1,11 +1,10 @@
-package workload
+package escalation
 
 import (
 	"context"
 	"fmt"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
@@ -15,7 +14,7 @@ import (
 // DeadlineExceededReason is the LastFailure.Reason stamped when an
 // Instance is failed because its in-flight Operation.Deadline elapsed
 // and no blamed pod shows a workload-caused waiting reason (that reason
-// is recorded instead — see escalateFromEvidence). Distinct from the
+// is recorded instead — see Run). Distinct from the
 // kubelet waiting-state reasons the stuck-pod escalator records so
 // operators can tell a broad-timeout backstop ("gang never became
 // Ready") from a terminal-state escalation ("pod stuck in
@@ -28,7 +27,7 @@ const DeadlineExceededReason = "DeadlineExceeded"
 // an unset field can't trip the timeout — see plan.go's
 // ResolveInstanceReadyTimeout for where the deadline window comes from,
 // and types.DeadlineAt for the unconfigured case that stamps the zero.
-func operationDeadlinePassed(s *InstanceStatus, now time.Time) bool {
+func operationDeadlinePassed(s *types.InstanceStatus, now time.Time) bool {
 	if s == nil || s.Operation == nil {
 		return false
 	}
@@ -43,16 +42,8 @@ func operationDeadlinePassed(s *InstanceStatus, now time.Time) bool {
 
 // isTransientPhase is types.TransientPhase under the name the deadline
 // backstop's guards read by.
-func isTransientPhase(p InstancePhase) bool {
+func isTransientPhase(p types.InstancePhase) bool {
 	return types.TransientPhase(p)
-}
-
-// PodAdmissionGated reports whether a pod is still held by a scheduling
-// gate — queued for admission (e.g. by Kueue) and not yet allowed to run.
-// A gated pod is waiting on an external admission authority, not stuck, so
-// the InstanceReadyTimeout clock must not run while it is gated.
-func PodAdmissionGated(pod *corev1.Pod) bool {
-	return pod != nil && len(pod.Spec.SchedulingGates) > 0
 }
 
 // ReconcileGatedDeadlines keeps InstanceReadyTimeout measured from
@@ -86,7 +77,7 @@ func PodAdmissionGated(pod *corev1.Pod) bool {
 // Edge-triggered: it writes only on the hold-enter (park) and hold-exit
 // (restart) transitions — a workload queued for hours does not churn its
 // status.
-func ReconcileGatedDeadlines(ctx context.Context, input ReconcileInput, instances []InstanceStatus, gated map[int32]bool, timeout time.Duration) error {
+func ReconcileGatedDeadlines(ctx context.Context, input types.ReconcileInput, instances []types.InstanceStatus, gated map[int32]bool, timeout time.Duration) error {
 	now := input.Now()
 	for i := range instances {
 		s := &instances[i]
@@ -117,11 +108,11 @@ func ReconcileGatedDeadlines(ctx context.Context, input ReconcileInput, instance
 // deadline live on the SOURCE: without it, the source's clock would keep
 // running through a wait its own replacement is stuck in. Mirrors how an
 // admission-gated surge bucket parks its source.
-func instanceHeldExternally(s *InstanceStatus, statuses []InstanceStatus) bool {
+func instanceHeldExternally(s *types.InstanceStatus, statuses []types.InstanceStatus) bool {
 	if s == nil || s.Operation == nil {
 		return false
 	}
-	if OperationExternallyHeld(s.Operation) {
+	if types.OperationExternallyHeld(s.Operation) {
 		return true
 	}
 	if s.Operation.SurgeIndex == nil {
@@ -129,7 +120,7 @@ func instanceHeldExternally(s *InstanceStatus, statuses []InstanceStatus) bool {
 	}
 	for i := range statuses {
 		if statuses[i].Index == *s.Operation.SurgeIndex {
-			return OperationExternallyHeld(statuses[i].Operation)
+			return types.OperationExternallyHeld(statuses[i].Operation)
 		}
 	}
 	return false
@@ -138,7 +129,7 @@ func instanceHeldExternally(s *InstanceStatus, statuses []InstanceStatus) bool {
 // deadlineFailureMessage formats the operator-facing reason passed to
 // WarnInstanceFailed. Names the operation type + step that timed out so
 // `kubectl describe` points at what was in flight.
-func deadlineFailureMessage(op *InstanceOperation) string {
+func deadlineFailureMessage(op *types.InstanceOperation) string {
 	if op == nil {
 		return DeadlineExceededReason
 	}
@@ -148,8 +139,8 @@ func deadlineFailureMessage(op *InstanceOperation) string {
 // deadlineTermination is the LastFailure record for an elapsed Operation
 // deadline with no more specific evidence: the DeadlineExceeded reason and
 // the operator-facing message naming what was in flight.
-func deadlineTermination(now time.Time, op *InstanceOperation) *InstanceTermination {
-	return &InstanceTermination{
+func deadlineTermination(now time.Time, op *types.InstanceOperation) *types.InstanceTermination {
+	return &types.InstanceTermination{
 		Reason:  DeadlineExceededReason,
 		Message: deadlineFailureMessage(op),
 		Time:    metav1.NewTime(now),

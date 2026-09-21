@@ -11,7 +11,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // countingReader records every Get so a test can assert which reader a
@@ -46,15 +46,15 @@ func TestRetryClosuresReReadThroughLiveReader(t *testing.T) {
 			Client:               cached,
 			APIReader:            live,
 			Log:                  ctrl.Log.WithName("test"),
-			Expectations:         workload.NewExpectations(),
+			Expectations:         workloadtypes.NewExpectations(),
 			InstanceStatusTarget: irstatus.EncodingDenseV1,
 		}, live, ir
 	}
 
 	t.Run("MutateInstance", func(t *testing.T) {
 		r, live, ir := newFixture(t)
-		err := buildMutateInstance(r.statusWriter(), r.APIReader, ir)(ctx, 0, func(s *workload.InstanceStatus) bool {
-			s.Phase = workload.InstancePhaseReady
+		err := buildMutateInstance(r.statusWriter(), r.APIReader, ir)(ctx, 0, func(s *workloadtypes.InstanceStatus) bool {
+			s.Phase = workloadtypes.InstancePhaseReady
 			return true
 		})
 		if err != nil {
@@ -94,8 +94,8 @@ func TestRetryClosuresReReadThroughLiveReader(t *testing.T) {
 	t.Run("MutateRetryBlock", func(t *testing.T) {
 		r, live, ir := newFixture(t)
 		err := buildMutateRetryBlock(r.statusWriter(), r.APIReader, ir, nil)(ctx, "llama-engine-abc123",
-			func(*workload.RetryBlock) workload.RetryBlockDisposition {
-				return workload.RetryBlockRemove
+			func(*workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition {
+				return workloadtypes.RetryBlockRemove
 			})
 		if err != nil {
 			t.Fatalf("mutate retry block: %v", err)

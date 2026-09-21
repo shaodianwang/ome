@@ -5,34 +5,36 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func intPtr(v int) *int    { return &v }
 func boolPtr(v bool) *bool { return &v }
-func restartPolicyPtr(v RestartPolicy) *RestartPolicy {
+func restartPolicyPtr(v types.RestartPolicy) *types.RestartPolicy {
 	return &v
 }
-func readyPolicyPtr(v InstanceReadyPolicy) *InstanceReadyPolicy {
+func readyPolicyPtr(v types.InstanceReadyPolicy) *types.InstanceReadyPolicy {
 	return &v
 }
 
 // singlePodDesired builds a single-pod WorkloadDesiredSpec for tests.
 // replicas <= 0 mirrors the production path where MinReplicas=nil/0
 // defaults to 1.
-func singlePodDesired(replicas int32, lifecycle Lifecycle) WorkloadDesiredSpec {
-	return WorkloadDesiredSpec{
+func singlePodDesired(replicas int32, lifecycle types.Lifecycle) types.WorkloadDesiredSpec {
+	return types.WorkloadDesiredSpec{
 		Replicas:  replicas,
-		Runners:   []Runner{{Name: "default", Size: 1}},
+		Runners:   []types.Runner{{Name: "default", Size: 1}},
 		Lifecycle: lifecycle,
 	}
 }
 
-func multiPodDesired(replicas, workerSize int32, lifecycle Lifecycle) WorkloadDesiredSpec {
-	return WorkloadDesiredSpec{
+func multiPodDesired(replicas, workerSize int32, lifecycle types.Lifecycle) types.WorkloadDesiredSpec {
+	return types.WorkloadDesiredSpec{
 		Replicas: replicas,
 		MultiPod: true,
-		Runners: []Runner{
+		Runners: []types.Runner{
 			{Name: "leader", Size: 1},
 			{Name: "worker", Size: workerSize},
 		},
@@ -44,8 +46,8 @@ func multiPodDesired(replicas, workerSize int32, lifecycle Lifecycle) WorkloadDe
 // layout: one leader runner of size 1 plus one worker runner of size
 // WorkerSize.
 func TestBuildPlan_MultiPodEmitsLeaderWorkerRunners(t *testing.T) {
-	desired := multiPodDesired(2, 3, Lifecycle{})
-	plan, err := BuildPlan(ComponentEngine, desired, WorkloadObservedState{})
+	desired := multiPodDesired(2, 3, types.Lifecycle{})
+	plan, err := BuildPlan(types.ComponentEngine, desired, types.WorkloadObservedState{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -59,7 +61,7 @@ func TestBuildPlan_MultiPodEmitsLeaderWorkerRunners(t *testing.T) {
 		if int(inst.Index) != i {
 			t.Errorf("Instances[%d].Index: got %d want %d", i, inst.Index, i)
 		}
-		want := []RunnerPlan{
+		want := []types.RunnerPlan{
 			{Name: "leader", Size: 1},
 			{Name: "worker", Size: 3},
 		}
@@ -73,24 +75,24 @@ func TestBuildPlan_MultiPodEmitsLeaderWorkerRunners(t *testing.T) {
 // Instances: RestartPolicy=RecreateInstance, ReadyPolicy=AllPodReady.
 // Single-pod defaults stay None for both.
 func TestBuildPlan_MultiPodDefaults(t *testing.T) {
-	desired := multiPodDesired(1, 1, Lifecycle{})
-	plan, err := BuildPlan(ComponentEngine, desired, WorkloadObservedState{})
+	desired := multiPodDesired(1, 1, types.Lifecycle{})
+	plan, err := BuildPlan(types.ComponentEngine, desired, types.WorkloadObservedState{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if plan.RestartPolicy != RestartPolicyRecreateInstance {
+	if plan.RestartPolicy != types.RestartPolicyRecreateInstance {
 		t.Errorf("RestartPolicy: got %q want RecreateInstanceOnPodRestart", plan.RestartPolicy)
 	}
-	if plan.ReadyPolicy != InstanceReadyPolicyAllPodReady {
+	if plan.ReadyPolicy != types.InstanceReadyPolicyAllPodReady {
 		t.Errorf("ReadyPolicy: got %q want AllPodReady", plan.ReadyPolicy)
 	}
 }
 
 func TestBuildPlan_ProjectsPausedCircuitBreaker(t *testing.T) {
-	desired := multiPodDesired(1, 1, Lifecycle{})
+	desired := multiPodDesired(1, 1, types.Lifecycle{})
 	desired.Paused = true
 
-	plan, err := BuildPlan(ComponentEngine, desired, WorkloadObservedState{})
+	plan, err := BuildPlan(types.ComponentEngine, desired, types.WorkloadObservedState{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -103,8 +105,8 @@ func TestBuildPlan_ProjectsPausedCircuitBreaker(t *testing.T) {
 // produces leader+worker entries; the webhook validator rejects orphan
 // leader without worker.size>0, but BuildPlan stays defensive.
 func TestBuildPlan_MultiPodWithZeroWorkerSize(t *testing.T) {
-	desired := multiPodDesired(1, 0, Lifecycle{})
-	plan, err := BuildPlan(ComponentEngine, desired, WorkloadObservedState{})
+	desired := multiPodDesired(1, 0, types.Lifecycle{})
+	plan, err := BuildPlan(types.ComponentEngine, desired, types.WorkloadObservedState{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -123,40 +125,40 @@ func TestBuildPlan_SinglePod_DefaultsFromDefaulter(t *testing.T) {
 	// Simulates a WorkloadDesiredSpec produced by an adapter whose source
 	// went through the mutating webhook defaulter — lifecycle is fully
 	// populated.
-	desired := singlePodDesired(2, Lifecycle{
-		RestartPolicy: restartPolicyPtr(RestartPolicyNone),
-		ReadyPolicy:   readyPolicyPtr(InstanceReadyPolicyNone),
-		UpdateStrategy: &UpdateStrategy{
-			Type: UpdateStrategyInPlaceIfPossible,
-			InPlaceUpdateStrategy: &InPlaceUpdateStrategy{
+	desired := singlePodDesired(2, types.Lifecycle{
+		RestartPolicy: restartPolicyPtr(types.RestartPolicyNone),
+		ReadyPolicy:   readyPolicyPtr(types.InstanceReadyPolicyNone),
+		UpdateStrategy: &types.UpdateStrategy{
+			Type: types.UpdateStrategyInPlaceIfPossible,
+			InPlaceUpdateStrategy: &types.InPlaceUpdateStrategy{
 				MarkNotReadyDuringLifecycle: boolPtr(true),
 			},
 		},
 		InstanceReadyTimeout: &metav1.Duration{Duration: 30 * time.Minute},
-		MigrationPolicy:      &MigrationPolicy{Mode: MigrationModeAuto},
+		MigrationPolicy:      &types.MigrationPolicy{Mode: types.MigrationModeAuto},
 	})
-	plan, err := BuildPlan(ComponentEngine, desired, WorkloadObservedState{})
+	plan, err := BuildPlan(types.ComponentEngine, desired, types.WorkloadObservedState{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	want := ComponentPlan{
-		Component: ComponentEngine,
+	want := types.ComponentPlan{
+		Component: types.ComponentEngine,
 		Replicas:  2,
-		Instances: []InstancePlan{
-			{Index: 0, Incarnation: 1, Runners: []RunnerPlan{{Name: "default", Size: 1}}},
-			{Index: 1, Incarnation: 1, Runners: []RunnerPlan{{Name: "default", Size: 1}}},
+		Instances: []types.InstancePlan{
+			{Index: 0, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 1, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
 		},
-		RestartPolicy: RestartPolicyNone,
-		UpdateStrategy: UpdateStrategy{
-			Type: UpdateStrategyInPlaceIfPossible,
-			InPlaceUpdateStrategy: &InPlaceUpdateStrategy{
+		RestartPolicy: types.RestartPolicyNone,
+		UpdateStrategy: types.UpdateStrategy{
+			Type: types.UpdateStrategyInPlaceIfPossible,
+			InPlaceUpdateStrategy: &types.InPlaceUpdateStrategy{
 				MarkNotReadyDuringLifecycle: boolPtr(true),
 			},
 		},
-		ReadyPolicy:          InstanceReadyPolicyNone,
+		ReadyPolicy:          types.InstanceReadyPolicyNone,
 		InstanceReadyTimeout: 30 * time.Minute,
-		MigrationMode:        MigrationModeAuto,
+		MigrationMode:        types.MigrationModeAuto,
 	}
 	if diff := cmp.Diff(want, plan); diff != "" {
 		t.Fatalf("plan mismatch (-want +got):\n%s", diff)
@@ -167,21 +169,21 @@ func TestBuildPlan_SinglePod_InlineDefaultsWhenWebhookSkipped(t *testing.T) {
 	// Simulates a pre-defaulter object — adapter projected an empty
 	// lifecycle. BuildPlan applies the same defaults inline, except for the
 	// readiness window, which is operator configuration the adapter overlays.
-	desired := singlePodDesired(1, Lifecycle{})
-	plan, err := BuildPlan(ComponentEngine, desired, WorkloadObservedState{})
+	desired := singlePodDesired(1, types.Lifecycle{})
+	plan, err := BuildPlan(types.ComponentEngine, desired, types.WorkloadObservedState{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if plan.Replicas != 1 {
 		t.Errorf("Replicas: got %d want 1", plan.Replicas)
 	}
-	if plan.RestartPolicy != RestartPolicyNone {
+	if plan.RestartPolicy != types.RestartPolicyNone {
 		t.Errorf("RestartPolicy: got %q want None", plan.RestartPolicy)
 	}
-	if plan.ReadyPolicy != InstanceReadyPolicyNone {
+	if plan.ReadyPolicy != types.InstanceReadyPolicyNone {
 		t.Errorf("ReadyPolicy: got %q want None", plan.ReadyPolicy)
 	}
-	if plan.UpdateStrategy.Type != UpdateStrategySurgeThenDrain {
+	if plan.UpdateStrategy.Type != types.UpdateStrategySurgeThenDrain {
 		t.Errorf("UpdateStrategy.Type: got %q want SurgeThenDrain (default)", plan.UpdateStrategy.Type)
 	}
 	if plan.UpdateStrategy.InPlaceUpdateStrategy == nil ||
@@ -192,7 +194,7 @@ func TestBuildPlan_SinglePod_InlineDefaultsWhenWebhookSkipped(t *testing.T) {
 	if plan.InstanceReadyTimeout != 0 {
 		t.Errorf("InstanceReadyTimeout: got %v want 0 (no per-resource window; the adapter overlays the operator's)", plan.InstanceReadyTimeout)
 	}
-	if plan.MigrationMode != MigrationModeAuto {
+	if plan.MigrationMode != types.MigrationModeAuto {
 		t.Errorf("MigrationMode: got %q want auto", plan.MigrationMode)
 	}
 }
@@ -214,8 +216,8 @@ func TestBuildPlan_ReplicaCount(t *testing.T) {
 			if tt.minRep != nil {
 				rep = int32(*tt.minRep)
 			}
-			desired := singlePodDesired(rep, Lifecycle{})
-			plan, err := BuildPlan(ComponentEngine, desired, WorkloadObservedState{})
+			desired := singlePodDesired(rep, types.Lifecycle{})
+			plan, err := BuildPlan(types.ComponentEngine, desired, types.WorkloadObservedState{})
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -242,8 +244,8 @@ func TestBuildPlan_ReplicaCount(t *testing.T) {
 func TestBuildPlan_IncarnationDefaultsToOneOnFirstReconcile(t *testing.T) {
 	// Observed state has no InstanceStatuses — every Instance gets
 	// Incarnation=1.
-	desired := singlePodDesired(3, Lifecycle{})
-	plan, err := BuildPlan(ComponentEngine, desired, WorkloadObservedState{})
+	desired := singlePodDesired(3, types.Lifecycle{})
+	plan, err := BuildPlan(types.ComponentEngine, desired, types.WorkloadObservedState{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -257,14 +259,14 @@ func TestBuildPlan_IncarnationDefaultsToOneOnFirstReconcile(t *testing.T) {
 func TestBuildPlan_IncarnationPreservedFromStatus(t *testing.T) {
 	// Observed state carries InstanceStatuses with explicit Incarnations —
 	// BuildPlan reads them back instead of resetting to 1.
-	desired := singlePodDesired(2, Lifecycle{})
-	observed := WorkloadObservedState{
-		InstanceStatuses: []InstanceStatus{
+	desired := singlePodDesired(2, types.Lifecycle{})
+	observed := types.WorkloadObservedState{
+		InstanceStatuses: []types.InstanceStatus{
 			{Index: 0, Incarnation: 4},
 			{Index: 1, Incarnation: 2},
 		},
 	}
-	plan, err := BuildPlan(ComponentEngine, desired, observed)
+	plan, err := BuildPlan(types.ComponentEngine, desired, observed)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -281,8 +283,8 @@ func TestBuildPlan_IncarnationScopedToWorkload(t *testing.T) {
 	// returns only this Component's statuses), so cross-Component leakage
 	// is impossible at the call site. The test pins the BuildPlan contract:
 	// no InstanceStatuses → default to 1 for every Instance.
-	desired := singlePodDesired(1, Lifecycle{})
-	plan, err := BuildPlan(ComponentEngine, desired, WorkloadObservedState{})
+	desired := singlePodDesired(1, types.Lifecycle{})
+	plan, err := BuildPlan(types.ComponentEngine, desired, types.WorkloadObservedState{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -292,15 +294,15 @@ func TestBuildPlan_IncarnationScopedToWorkload(t *testing.T) {
 }
 
 func TestBuildPlan_RestartPolicyExplicitWinsOverDefault(t *testing.T) {
-	desired := singlePodDesired(0, Lifecycle{
-		RestartPolicy: restartPolicyPtr(RestartPolicyRecreateInstance),
+	desired := singlePodDesired(0, types.Lifecycle{
+		RestartPolicy: restartPolicyPtr(types.RestartPolicyRecreateInstance),
 	})
-	plan, err := BuildPlan(ComponentEngine, desired, WorkloadObservedState{})
+	plan, err := BuildPlan(types.ComponentEngine, desired, types.WorkloadObservedState{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	// Single-pod defaults to None; an explicit RecreateInstance must win.
-	if plan.RestartPolicy != RestartPolicyRecreateInstance {
+	if plan.RestartPolicy != types.RestartPolicyRecreateInstance {
 		t.Errorf("RestartPolicy: got %q want RecreateInstanceOnPodRestart", plan.RestartPolicy)
 	}
 }
@@ -318,10 +320,10 @@ func TestLowestUnusedIndex(t *testing.T) {
 func TestInstancePlanIndices_MultiReplicaMigrationPreservesUnrelatedInstance(t *testing.T) {
 	// Regression: with replicas=2 and statuses {0 Ready, 1 Ready},
 	// migrating instance 0 (surge at 2) must yield plan {0, 1, 2}.
-	instances := []InstanceStatus{
-		{Index: 0, Phase: InstancePhaseMigrating},
-		{Index: 1, Phase: InstancePhaseReady},
-		{Index: 2, Phase: InstancePhaseCreating, Operation: &InstanceOperation{Type: InstanceOperationMigrate}},
+	instances := []types.InstanceStatus{
+		{Index: 0, Phase: types.InstancePhaseMigrating},
+		{Index: 1, Phase: types.InstancePhaseReady},
+		{Index: 2, Phase: types.InstancePhaseCreating, Operation: &types.InstanceOperation{Type: types.InstanceOperationMigrate}},
 	}
 	got := instancePlanIndices(instances, 2)
 	hit := map[int32]bool{}
@@ -334,9 +336,9 @@ func TestInstancePlanIndices_MultiReplicaMigrationPreservesUnrelatedInstance(t *
 }
 
 func TestInstancePlanIndices_PreservesSparseMigrationLayout(t *testing.T) {
-	instances := []InstanceStatus{
-		{Index: 0, Phase: InstancePhaseMigrating},
-		{Index: 2, Phase: InstancePhaseCreating, Operation: &InstanceOperation{Type: InstanceOperationMigrate}},
+	instances := []types.InstanceStatus{
+		{Index: 0, Phase: types.InstancePhaseMigrating},
+		{Index: 2, Phase: types.InstancePhaseCreating, Operation: &types.InstanceOperation{Type: types.InstanceOperationMigrate}},
 	}
 	got := instancePlanIndices(instances, 1)
 	// Both migration-in-flight indices must be in the plan even though
@@ -353,16 +355,16 @@ func TestInstancePlanIndices_PreservesSparseMigrationLayout(t *testing.T) {
 func TestInstancePlanIndices_MigrationReadyTargetReplacesSource(t *testing.T) {
 	const revision = "comp-rev-current"
 	targetIndex := int32(1)
-	instances := []InstanceStatus{
-		{Index: 0, Phase: InstancePhaseMigrating, RunningRevision: revision,
-			Operation: &InstanceOperation{Type: InstanceOperationMigrate, RequestUUID: "request-a", SurgeIndex: &targetIndex}},
-		{Index: targetIndex, Incarnation: 1, Phase: InstancePhaseReady, RunningRevision: revision},
+	instances := []types.InstanceStatus{
+		{Index: 0, Phase: types.InstancePhaseMigrating, RunningRevision: revision,
+			Operation: &types.InstanceOperation{Type: types.InstanceOperationMigrate, RequestUUID: "request-a", SurgeIndex: &targetIndex}},
+		{Index: targetIndex, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: revision},
 	}
 	indices := instancePlanIndices(instances, 1)
 	if diff := cmp.Diff([]int32{targetIndex}, indices); diff != "" {
 		t.Fatalf("promoted migration target must replace its source (-want +got):\n%s", diff)
 	}
-	plan := ComponentPlan{Instances: []InstancePlan{{Index: targetIndex}}}
+	plan := types.ComponentPlan{Instances: []types.InstancePlan{{Index: targetIndex}}}
 	if extras := ScaleDownExtras(instances, plan); len(extras) != 0 {
 		t.Fatalf("normal scale-down selected migration source as extra: %v", extras)
 	}
@@ -371,17 +373,17 @@ func TestInstancePlanIndices_MigrationReadyTargetReplacesSource(t *testing.T) {
 func TestInstancePlanIndices_MigrationRetiringSourceDoesNotDisplaceSteadyInstance(t *testing.T) {
 	const revision = "comp-rev-current"
 	targetIndex := int32(8)
-	instances := []InstanceStatus{
-		{Index: 0, Phase: InstancePhaseMigrating, RunningRevision: revision,
-			Operation: &InstanceOperation{Type: InstanceOperationMigrate, RequestUUID: "request-a", SurgeIndex: &targetIndex}},
-		{Index: 1, Phase: InstancePhaseReady},
-		{Index: 2, Phase: InstancePhaseReady},
-		{Index: 3, Phase: InstancePhaseReady},
-		{Index: 4, Phase: InstancePhaseReady},
-		{Index: 5, Phase: InstancePhaseReady},
-		{Index: 6, Phase: InstancePhaseReady},
-		{Index: 7, Phase: InstancePhaseCreating},
-		{Index: targetIndex, Incarnation: 1, Phase: InstancePhaseReady, RunningRevision: revision},
+	instances := []types.InstanceStatus{
+		{Index: 0, Phase: types.InstancePhaseMigrating, RunningRevision: revision,
+			Operation: &types.InstanceOperation{Type: types.InstanceOperationMigrate, RequestUUID: "request-a", SurgeIndex: &targetIndex}},
+		{Index: 1, Phase: types.InstancePhaseReady},
+		{Index: 2, Phase: types.InstancePhaseReady},
+		{Index: 3, Phase: types.InstancePhaseReady},
+		{Index: 4, Phase: types.InstancePhaseReady},
+		{Index: 5, Phase: types.InstancePhaseReady},
+		{Index: 6, Phase: types.InstancePhaseReady},
+		{Index: 7, Phase: types.InstancePhaseCreating},
+		{Index: targetIndex, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: revision},
 	}
 	want := []int32{1, 2, 3, 4, 5, 6, 7, 8}
 	if diff := cmp.Diff(want, instancePlanIndices(instances, 8)); diff != "" {
@@ -392,36 +394,36 @@ func TestInstancePlanIndices_MigrationRetiringSourceDoesNotDisplaceSteadyInstanc
 func TestInstancePlanIndices_MigrationSourceRequiresPromotedTargetProof(t *testing.T) {
 	const revision = "comp-rev-current"
 	targetIndex := int32(2)
-	source := InstanceStatus{Index: 0, Phase: InstancePhaseMigrating, RunningRevision: revision,
-		Operation: &InstanceOperation{Type: InstanceOperationMigrate, RequestUUID: "request-a", SurgeIndex: &targetIndex}}
+	source := types.InstanceStatus{Index: 0, Phase: types.InstancePhaseMigrating, RunningRevision: revision,
+		Operation: &types.InstanceOperation{Type: types.InstanceOperationMigrate, RequestUUID: "request-a", SurgeIndex: &targetIndex}}
 	tests := []struct {
 		name   string
-		target InstanceStatus
+		target types.InstanceStatus
 	}{
 		{
 			name:   "wrong revision",
-			target: InstanceStatus{Index: targetIndex, Incarnation: 1, Phase: InstancePhaseReady, RunningRevision: "comp-rev-other"},
+			target: types.InstanceStatus{Index: targetIndex, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: "comp-rev-other"},
 		},
 		{
 			name: "operation still active",
-			target: InstanceStatus{Index: targetIndex, Incarnation: 1, Phase: InstancePhaseReady, RunningRevision: revision,
-				Operation: &InstanceOperation{Type: InstanceOperationMigrate}},
+			target: types.InstanceStatus{Index: targetIndex, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: revision,
+				Operation: &types.InstanceOperation{Type: types.InstanceOperationMigrate}},
 		},
 		{
 			name: "target revision still set",
-			target: InstanceStatus{Index: targetIndex, Incarnation: 1, Phase: InstancePhaseReady,
+			target: types.InstanceStatus{Index: targetIndex, Incarnation: 1, Phase: types.InstancePhaseReady,
 				RunningRevision: revision, TargetRevision: revision},
 		},
 		{
 			name:   "incarnation does not match a fresh surge",
-			target: InstanceStatus{Index: targetIndex, Incarnation: 2, Phase: InstancePhaseReady, RunningRevision: revision},
+			target: types.InstanceStatus{Index: targetIndex, Incarnation: 2, Phase: types.InstancePhaseReady, RunningRevision: revision},
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			instances := []InstanceStatus{
+			instances := []types.InstanceStatus{
 				source,
-				{Index: 1, Phase: InstancePhaseCreating, RunningRevision: revision},
+				{Index: 1, Phase: types.InstancePhaseCreating, RunningRevision: revision},
 				test.target,
 			}
 			want := []int32{0, 1, 2}
@@ -435,13 +437,13 @@ func TestInstancePlanIndices_MigrationSourceRequiresPromotedTargetProof(t *testi
 func TestInstancePlanIndices_SharedMigrationTargetKeepsAllParticipants(t *testing.T) {
 	const revision = "comp-rev-current"
 	sharedTarget := int32(3)
-	instances := []InstanceStatus{
-		{Index: 0, Phase: InstancePhaseMigrating, RunningRevision: revision,
-			Operation: &InstanceOperation{Type: InstanceOperationMigrate, RequestUUID: "request-a", SurgeIndex: &sharedTarget}},
-		{Index: 1, Phase: InstancePhaseMigrating, RunningRevision: revision,
-			Operation: &InstanceOperation{Type: InstanceOperationMigrate, RequestUUID: "request-b", SurgeIndex: &sharedTarget}},
-		{Index: 2, Phase: InstancePhaseCreating, RunningRevision: revision},
-		{Index: sharedTarget, Incarnation: 1, Phase: InstancePhaseReady, RunningRevision: revision},
+	instances := []types.InstanceStatus{
+		{Index: 0, Phase: types.InstancePhaseMigrating, RunningRevision: revision,
+			Operation: &types.InstanceOperation{Type: types.InstanceOperationMigrate, RequestUUID: "request-a", SurgeIndex: &sharedTarget}},
+		{Index: 1, Phase: types.InstancePhaseMigrating, RunningRevision: revision,
+			Operation: &types.InstanceOperation{Type: types.InstanceOperationMigrate, RequestUUID: "request-b", SurgeIndex: &sharedTarget}},
+		{Index: 2, Phase: types.InstancePhaseCreating, RunningRevision: revision},
+		{Index: sharedTarget, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: revision},
 	}
 	want := []int32{0, 1, 2, 3}
 	if diff := cmp.Diff(want, instancePlanIndices(instances, 3)); diff != "" {
@@ -452,13 +454,13 @@ func TestInstancePlanIndices_SharedMigrationTargetKeepsAllParticipants(t *testin
 func TestInstancePlanIndices_WrongPhaseMigrationReferenceBlocksRetirement(t *testing.T) {
 	const revision = "comp-rev-current"
 	sharedTarget := int32(3)
-	instances := []InstanceStatus{
-		{Index: 0, Phase: InstancePhaseMigrating, RunningRevision: revision,
-			Operation: &InstanceOperation{Type: InstanceOperationMigrate, RequestUUID: "request-a", SurgeIndex: &sharedTarget}},
-		{Index: 1, Phase: InstancePhaseFailed, RunningRevision: revision,
-			Operation: &InstanceOperation{Type: InstanceOperationMigrate, RequestUUID: "request-stale", SurgeIndex: &sharedTarget}},
-		{Index: 2, Phase: InstancePhaseCreating, RunningRevision: revision},
-		{Index: sharedTarget, Incarnation: 1, Phase: InstancePhaseReady, RunningRevision: revision},
+	instances := []types.InstanceStatus{
+		{Index: 0, Phase: types.InstancePhaseMigrating, RunningRevision: revision,
+			Operation: &types.InstanceOperation{Type: types.InstanceOperationMigrate, RequestUUID: "request-a", SurgeIndex: &sharedTarget}},
+		{Index: 1, Phase: types.InstancePhaseFailed, RunningRevision: revision,
+			Operation: &types.InstanceOperation{Type: types.InstanceOperationMigrate, RequestUUID: "request-stale", SurgeIndex: &sharedTarget}},
+		{Index: 2, Phase: types.InstancePhaseCreating, RunningRevision: revision},
+		{Index: sharedTarget, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: revision},
 	}
 	want := []int32{0, 1, 2, 3}
 	if diff := cmp.Diff(want, instancePlanIndices(instances, 2)); diff != "" {
@@ -472,14 +474,14 @@ func TestInstancePlanIndices_MixedHandoffsSharingTargetKeepAllParticipants(t *te
 		newRevision = "comp-rev-newaaaa"
 	)
 	sharedTarget := int32(3)
-	instances := []InstanceStatus{
-		{Index: 0, Phase: InstancePhaseMigrating, RunningRevision: newRevision,
-			Operation: &InstanceOperation{Type: InstanceOperationMigrate, RequestUUID: "request-a", SurgeIndex: &sharedTarget}},
-		{Index: 1, Phase: InstancePhaseUpdating, RunningRevision: oldRevision, TargetRevision: newRevision,
-			Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: UpdateStepSurgeDrain,
+	instances := []types.InstanceStatus{
+		{Index: 0, Phase: types.InstancePhaseMigrating, RunningRevision: newRevision,
+			Operation: &types.InstanceOperation{Type: types.InstanceOperationMigrate, RequestUUID: "request-a", SurgeIndex: &sharedTarget}},
+		{Index: 1, Phase: types.InstancePhaseUpdating, RunningRevision: oldRevision, TargetRevision: newRevision,
+			Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: types.UpdateStepSurgeDrain,
 				SurgeIndex: &sharedTarget, TargetRevision: newRevision}},
-		{Index: 2, Phase: InstancePhaseCreating, RunningRevision: oldRevision},
-		{Index: sharedTarget, Incarnation: 1, Phase: InstancePhaseReady, RunningRevision: newRevision},
+		{Index: 2, Phase: types.InstancePhaseCreating, RunningRevision: oldRevision},
+		{Index: sharedTarget, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: newRevision},
 	}
 	want := []int32{0, 1, 2, 3}
 	if diff := cmp.Diff(want, instancePlanIndices(instances, 3)); diff != "" {
@@ -495,10 +497,10 @@ func TestInstancePlanIndices_GangSurgePinsPair(t *testing.T) {
 	// budget (so sibling 1 isn't dropped into scale-down) and the surge
 	// target is pinned as the transient +1.
 	k := int32(3)
-	instances := []InstanceStatus{
-		{Index: 0, Phase: InstancePhaseUpdating, Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: "Surge", SurgeIndex: &k}},
-		{Index: 1, Phase: InstancePhaseReady},
-		{Index: 3, Phase: InstancePhaseCreating, Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: UpdateStepGangSurgeTarget}},
+	instances := []types.InstanceStatus{
+		{Index: 0, Phase: types.InstancePhaseUpdating, Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: "Surge", SurgeIndex: &k}},
+		{Index: 1, Phase: types.InstancePhaseReady},
+		{Index: 3, Phase: types.InstancePhaseCreating, Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: types.UpdateStepGangSurgeTarget}},
 	}
 	got := instancePlanIndices(instances, 2)
 	hit := map[int32]bool{}
@@ -519,11 +521,11 @@ func TestInstancePlanIndices_GangSurgePinsPair(t *testing.T) {
 // Cells: instance/Update/GangSurgeTargetCleanup/spec.replicasDown/before
 func TestInstancePlanIndices_GangCleanupMarkerPinnedWhileReferenced(t *testing.T) {
 	k := int32(1)
-	referenced := []InstanceStatus{
-		{Index: 0, Phase: InstancePhaseUpdating, RunningRevision: "comp-rev-v1aaaaaa",
-			Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: "Surge", SurgeIndex: &k}},
-		{Index: 1, Phase: InstancePhaseCreating,
-			Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: UpdateStepGangSurgeTargetCleanup}},
+	referenced := []types.InstanceStatus{
+		{Index: 0, Phase: types.InstancePhaseUpdating, RunningRevision: "comp-rev-v1aaaaaa",
+			Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: "Surge", SurgeIndex: &k}},
+		{Index: 1, Phase: types.InstancePhaseCreating,
+			Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: types.UpdateStepGangSurgeTargetCleanup}},
 	}
 	hit := map[int32]bool{}
 	for _, idx := range instancePlanIndices(referenced, 1) {
@@ -533,10 +535,10 @@ func TestInstancePlanIndices_GangCleanupMarkerPinnedWhileReferenced(t *testing.T
 		t.Errorf("a referenced cleanup marker must stay pinned at replicas=1; got %v", instancePlanIndices(referenced, 1))
 	}
 
-	orphan := []InstanceStatus{
-		{Index: 0, Phase: InstancePhaseReady, RunningRevision: "comp-rev-v1aaaaaa"},
-		{Index: 1, Phase: InstancePhaseCreating,
-			Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: UpdateStepGangSurgeTargetCleanup}},
+	orphan := []types.InstanceStatus{
+		{Index: 0, Phase: types.InstancePhaseReady, RunningRevision: "comp-rev-v1aaaaaa"},
+		{Index: 1, Phase: types.InstancePhaseCreating,
+			Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: types.UpdateStepGangSurgeTargetCleanup}},
 	}
 	if got := instancePlanIndices(orphan, 1); len(got) != 1 || got[0] != 0 {
 		t.Errorf("an unreferenced cleanup marker must fall out for the scale-down pipeline; got %v", got)
@@ -551,10 +553,10 @@ func TestInstancePlanIndices_OrphanGangSurgeMarkerUnpinned(t *testing.T) {
 	// Shape: the corrective roll-back re-adopted the source back to
 	// Ready (operation cleared) while the crashed surge gang's marker
 	// is still present.
-	instances := []InstanceStatus{
-		{Index: 0, Phase: InstancePhaseReady, RunningRevision: "comp-rev-v1aaaaaa"},
-		{Index: 1, Phase: InstancePhaseFailed,
-			Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: UpdateStepGangSurgeTarget}},
+	instances := []types.InstanceStatus{
+		{Index: 0, Phase: types.InstancePhaseReady, RunningRevision: "comp-rev-v1aaaaaa"},
+		{Index: 1, Phase: types.InstancePhaseFailed,
+			Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: types.UpdateStepGangSurgeTarget}},
 	}
 	got := instancePlanIndices(instances, 1)
 	if len(got) != 1 || got[0] != 0 {
@@ -564,8 +566,8 @@ func TestInstancePlanIndices_OrphanGangSurgeMarkerUnpinned(t *testing.T) {
 	// Liveness counter-case: the SAME marker stays pinned while its
 	// source op references it — a mid-flight healthy surge is untouched.
 	k := int32(1)
-	instances[0] = InstanceStatus{Index: 0, Phase: InstancePhaseUpdating, RunningRevision: "comp-rev-v1aaaaaa",
-		Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: "Surge", SurgeIndex: &k}}
+	instances[0] = types.InstanceStatus{Index: 0, Phase: types.InstancePhaseUpdating, RunningRevision: "comp-rev-v1aaaaaa",
+		Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: "Surge", SurgeIndex: &k}}
 	got = instancePlanIndices(instances, 1)
 	hit := map[int32]bool{}
 	for _, idx := range got {
@@ -579,12 +581,12 @@ func TestInstancePlanIndices_OrphanGangSurgeMarkerUnpinned(t *testing.T) {
 func TestInstancePlanIndices_GangSurgeReadyTargetRequiresDrainProof(t *testing.T) {
 	newRev, oldRev := "comp-rev-newaaaa", "comp-rev-oldbbbb"
 	zero := int32(0)
-	statuses := func(step string) []InstanceStatus {
-		return []InstanceStatus{
-			{Index: 0, Incarnation: 1, Phase: InstancePhaseReady, RunningRevision: newRev},
-			{Index: 1, Phase: InstancePhaseUpdating, RunningRevision: oldRev, TargetRevision: newRev,
-				Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: step, SurgeIndex: &zero, TargetRevision: newRev}},
-			{Index: 2, Phase: InstancePhaseReady, RunningRevision: newRev},
+	statuses := func(step string) []types.InstanceStatus {
+		return []types.InstanceStatus{
+			{Index: 0, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: newRev},
+			{Index: 1, Phase: types.InstancePhaseUpdating, RunningRevision: oldRev, TargetRevision: newRev,
+				Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: step, SurgeIndex: &zero, TargetRevision: newRev}},
+			{Index: 2, Phase: types.InstancePhaseReady, RunningRevision: newRev},
 		}
 	}
 
@@ -595,7 +597,7 @@ func TestInstancePlanIndices_GangSurgeReadyTargetRequiresDrainProof(t *testing.T
 
 	// SurgeDrain follows target validation and is safe to release after the
 	// replacement is promoted.
-	if diff := cmp.Diff([]int32{0, 2}, instancePlanIndices(statuses(UpdateStepSurgeDrain), 2)); diff != "" {
+	if diff := cmp.Diff([]int32{0, 2}, instancePlanIndices(statuses(types.UpdateStepSurgeDrain), 2)); diff != "" {
 		t.Fatalf("validated source should leave the steady plan (-want +got):\n%s", diff)
 	}
 }
@@ -606,11 +608,11 @@ func TestInstancePlanIndices_GangSurgeSourceRequiresPromotedTargetProof(t *testi
 		newRevision = "comp-rev-newaaaa"
 	)
 	targetIndex := int32(2)
-	validSource := InstanceStatus{Index: 0, Phase: InstancePhaseUpdating,
+	validSource := types.InstanceStatus{Index: 0, Phase: types.InstancePhaseUpdating,
 		RunningRevision: oldRevision, TargetRevision: newRevision,
-		Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: UpdateStepSurgeDrain,
+		Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: types.UpdateStepSurgeDrain,
 			SurgeIndex: &targetIndex, TargetRevision: newRevision}}
-	validTarget := InstanceStatus{Index: targetIndex, Incarnation: 1, Phase: InstancePhaseReady, RunningRevision: newRevision}
+	validTarget := types.InstanceStatus{Index: targetIndex, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: newRevision}
 
 	wrongIncarnation := validTarget
 	wrongIncarnation.Incarnation = 2
@@ -619,11 +621,11 @@ func TestInstancePlanIndices_GangSurgeSourceRequiresPromotedTargetProof(t *testi
 	wrongTargetRevision := validTarget
 	wrongTargetRevision.RunningRevision = oldRevision
 	activeTarget := validTarget
-	activeTarget.Operation = &InstanceOperation{Type: InstanceOperationUpdate}
+	activeTarget.Operation = &types.InstanceOperation{Type: types.InstanceOperationUpdate}
 	pinnedTarget := validTarget
 	pinnedTarget.TargetRevision = newRevision
 	wrongPhase := validSource
-	wrongPhase.Phase = InstancePhaseFailed
+	wrongPhase.Phase = types.InstancePhaseFailed
 	missingRunningRevision := validSource
 	missingRunningRevision.RunningRevision = ""
 	missingTargetRevision := validSource
@@ -633,8 +635,8 @@ func TestInstancePlanIndices_GangSurgeSourceRequiresPromotedTargetProof(t *testi
 
 	tests := []struct {
 		name   string
-		source InstanceStatus
-		target InstanceStatus
+		source types.InstanceStatus
+		target types.InstanceStatus
 	}{
 		{name: "target incarnation", source: validSource, target: wrongIncarnation},
 		{name: "target active ordinal", source: validSource, target: wrongOrdinal},
@@ -648,9 +650,9 @@ func TestInstancePlanIndices_GangSurgeSourceRequiresPromotedTargetProof(t *testi
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			instances := []InstanceStatus{
+			instances := []types.InstanceStatus{
 				test.source,
-				{Index: 1, Phase: InstancePhaseCreating, RunningRevision: oldRevision},
+				{Index: 1, Phase: types.InstancePhaseCreating, RunningRevision: oldRevision},
 				test.target,
 			}
 			want := []int32{0, 1, 2}
@@ -667,29 +669,29 @@ func TestInstancePlanIndices_GangSurgeRetiringSourceDoesNotDisplaceSteadyInstanc
 		newRevision = "comp-rev-newaaaa"
 	)
 	targetIndex := int32(8)
-	instances := []InstanceStatus{
-		{Index: 0, Phase: InstancePhaseUpdating, RunningRevision: oldRevision, TargetRevision: newRevision,
-			Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: UpdateStepSurgeDrain,
+	instances := []types.InstanceStatus{
+		{Index: 0, Phase: types.InstancePhaseUpdating, RunningRevision: oldRevision, TargetRevision: newRevision,
+			Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: types.UpdateStepSurgeDrain,
 				SurgeIndex: &targetIndex, TargetRevision: newRevision}},
-		{Index: 1, Phase: InstancePhaseReady, RunningRevision: oldRevision},
-		{Index: 2, Phase: InstancePhaseReady, RunningRevision: oldRevision},
-		{Index: 3, Phase: InstancePhaseReady, RunningRevision: oldRevision},
-		{Index: 4, Phase: InstancePhaseReady, RunningRevision: oldRevision},
-		{Index: 5, Phase: InstancePhaseReady, RunningRevision: oldRevision},
-		{Index: 6, Phase: InstancePhaseReady, RunningRevision: oldRevision},
-		{Index: 7, Phase: InstancePhaseCreating, TargetRevision: oldRevision},
-		{Index: targetIndex, Incarnation: 1, Phase: InstancePhaseReady, RunningRevision: newRevision},
+		{Index: 1, Phase: types.InstancePhaseReady, RunningRevision: oldRevision},
+		{Index: 2, Phase: types.InstancePhaseReady, RunningRevision: oldRevision},
+		{Index: 3, Phase: types.InstancePhaseReady, RunningRevision: oldRevision},
+		{Index: 4, Phase: types.InstancePhaseReady, RunningRevision: oldRevision},
+		{Index: 5, Phase: types.InstancePhaseReady, RunningRevision: oldRevision},
+		{Index: 6, Phase: types.InstancePhaseReady, RunningRevision: oldRevision},
+		{Index: 7, Phase: types.InstancePhaseCreating, TargetRevision: oldRevision},
+		{Index: targetIndex, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: newRevision},
 	}
 	want := []int32{1, 2, 3, 4, 5, 6, 7, 8}
 	indices := instancePlanIndices(instances, 8)
 	if diff := cmp.Diff(want, indices); diff != "" {
 		t.Fatalf("retiring gang-surge source displaced a steady instance (-want +got):\n%s", diff)
 	}
-	planned := make([]InstancePlan, 0, len(indices))
+	planned := make([]types.InstancePlan, 0, len(indices))
 	for _, index := range indices {
-		planned = append(planned, InstancePlan{Index: index})
+		planned = append(planned, types.InstancePlan{Index: index})
 	}
-	if diff := cmp.Diff([]int32{0}, ScaleDownExtras(instances, ComponentPlan{Instances: planned})); diff != "" {
+	if diff := cmp.Diff([]int32{0}, ScaleDownExtras(instances, types.ComponentPlan{Instances: planned})); diff != "" {
 		t.Fatalf("normal scale-down ownership crossed the retiring update source (-want +got):\n%s", diff)
 	}
 }
@@ -700,21 +702,21 @@ func TestInstancePlanIndices_ConcurrentRetiringSourcesDoNotDisplaceSteadyInstanc
 		newRevision = "comp-rev-newaaaa"
 	)
 	targetEight, targetNine := int32(8), int32(9)
-	instances := []InstanceStatus{
-		{Index: 0, Phase: InstancePhaseUpdating, RunningRevision: oldRevision, TargetRevision: newRevision,
-			Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: UpdateStepSurgeDrain,
+	instances := []types.InstanceStatus{
+		{Index: 0, Phase: types.InstancePhaseUpdating, RunningRevision: oldRevision, TargetRevision: newRevision,
+			Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: types.UpdateStepSurgeDrain,
 				SurgeIndex: &targetEight, TargetRevision: newRevision}},
-		{Index: 1, Phase: InstancePhaseUpdating, RunningRevision: oldRevision, TargetRevision: newRevision,
-			Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: UpdateStepSurgeDrain,
+		{Index: 1, Phase: types.InstancePhaseUpdating, RunningRevision: oldRevision, TargetRevision: newRevision,
+			Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: types.UpdateStepSurgeDrain,
 				SurgeIndex: &targetNine, TargetRevision: newRevision}},
-		{Index: 2, Phase: InstancePhaseReady, RunningRevision: oldRevision},
-		{Index: 3, Phase: InstancePhaseReady, RunningRevision: oldRevision},
-		{Index: 4, Phase: InstancePhaseReady, RunningRevision: oldRevision},
-		{Index: 5, Phase: InstancePhaseReady, RunningRevision: oldRevision},
-		{Index: 6, Phase: InstancePhaseCreating, TargetRevision: oldRevision},
-		{Index: 7, Phase: InstancePhaseCreating, TargetRevision: oldRevision},
-		{Index: targetEight, Incarnation: 1, Phase: InstancePhaseReady, RunningRevision: newRevision},
-		{Index: targetNine, Incarnation: 1, Phase: InstancePhaseReady, RunningRevision: newRevision},
+		{Index: 2, Phase: types.InstancePhaseReady, RunningRevision: oldRevision},
+		{Index: 3, Phase: types.InstancePhaseReady, RunningRevision: oldRevision},
+		{Index: 4, Phase: types.InstancePhaseReady, RunningRevision: oldRevision},
+		{Index: 5, Phase: types.InstancePhaseReady, RunningRevision: oldRevision},
+		{Index: 6, Phase: types.InstancePhaseCreating, TargetRevision: oldRevision},
+		{Index: 7, Phase: types.InstancePhaseCreating, TargetRevision: oldRevision},
+		{Index: targetEight, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: newRevision},
+		{Index: targetNine, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: newRevision},
 	}
 	want := []int32{2, 3, 4, 5, 6, 7, 8, 9}
 	if diff := cmp.Diff(want, instancePlanIndices(instances, 8)); diff != "" {
@@ -728,15 +730,15 @@ func TestInstancePlanIndices_SharedUpdateTargetKeepsAllParticipants(t *testing.T
 		newRevision = "comp-rev-newaaaa"
 	)
 	sharedTarget := int32(3)
-	instances := []InstanceStatus{
-		{Index: 0, Phase: InstancePhaseUpdating, RunningRevision: oldRevision, TargetRevision: newRevision,
-			Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: UpdateStepSurgeDrain,
+	instances := []types.InstanceStatus{
+		{Index: 0, Phase: types.InstancePhaseUpdating, RunningRevision: oldRevision, TargetRevision: newRevision,
+			Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: types.UpdateStepSurgeDrain,
 				SurgeIndex: &sharedTarget, TargetRevision: newRevision}},
-		{Index: 1, Phase: InstancePhaseUpdating, RunningRevision: oldRevision, TargetRevision: newRevision,
-			Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: UpdateStepSurgeDrain,
+		{Index: 1, Phase: types.InstancePhaseUpdating, RunningRevision: oldRevision, TargetRevision: newRevision,
+			Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: types.UpdateStepSurgeDrain,
 				SurgeIndex: &sharedTarget, TargetRevision: newRevision}},
-		{Index: 2, Phase: InstancePhaseCreating, TargetRevision: oldRevision},
-		{Index: sharedTarget, Incarnation: 1, Phase: InstancePhaseReady, RunningRevision: newRevision},
+		{Index: 2, Phase: types.InstancePhaseCreating, TargetRevision: oldRevision},
+		{Index: sharedTarget, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: newRevision},
 	}
 	want := []int32{0, 1, 2, 3}
 	if diff := cmp.Diff(want, instancePlanIndices(instances, 3)); diff != "" {
@@ -747,22 +749,22 @@ func TestInstancePlanIndices_SharedUpdateTargetKeepsAllParticipants(t *testing.T
 func TestInstancePlanIndices_NonRetiringSelectionControls(t *testing.T) {
 	tests := []struct {
 		name      string
-		instances []InstanceStatus
+		instances []types.InstanceStatus
 	}{
 		{
 			name: "Ready Instance keeps priority",
-			instances: []InstanceStatus{
-				{Index: 0, Phase: InstancePhaseReady},
-				{Index: 1, Phase: InstancePhaseCreating},
-				{Index: 2, Phase: InstancePhaseReady},
+			instances: []types.InstanceStatus{
+				{Index: 0, Phase: types.InstancePhaseReady},
+				{Index: 1, Phase: types.InstancePhaseCreating},
+				{Index: 2, Phase: types.InstancePhaseReady},
 			},
 		},
 		{
 			name: "oldest non-Ready Instance remains the fallback",
-			instances: []InstanceStatus{
-				{Index: 0, Phase: InstancePhaseCreating},
-				{Index: 1, Phase: InstancePhaseCreating},
-				{Index: 2, Phase: InstancePhaseReady},
+			instances: []types.InstanceStatus{
+				{Index: 0, Phase: types.InstancePhaseCreating},
+				{Index: 1, Phase: types.InstancePhaseCreating},
+				{Index: 2, Phase: types.InstancePhaseReady},
 			},
 		},
 	}
@@ -781,8 +783,8 @@ func TestInstancePlanIndices_SinglePodSurgeNotPinnedAsPair(t *testing.T) {
 	// toggles ActiveOrdinal in place). It must NOT be treated as a gang
 	// surge pair — replicas=1, one Updating instance → plan stays {0}, no
 	// phantom surge index.
-	instances := []InstanceStatus{
-		{Index: 0, Phase: InstancePhaseUpdating, Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: "Surge"}},
+	instances := []types.InstanceStatus{
+		{Index: 0, Phase: types.InstancePhaseUpdating, Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: "Surge"}},
 	}
 	got := instancePlanIndices(instances, 1)
 	if len(got) != 1 || got[0] != 0 {
@@ -792,14 +794,14 @@ func TestInstancePlanIndices_SinglePodSurgeNotPinnedAsPair(t *testing.T) {
 
 func TestAllocateSurgeIndex(t *testing.T) {
 	// Smoke: with statuses {0, 1, 3}, surge should land at 2.
-	instances := []InstanceStatus{
+	instances := []types.InstanceStatus{
 		{Index: 0}, {Index: 1}, {Index: 3},
 	}
-	if got := AllocateSurgeIndex(instances); got != 2 {
+	if got := types.AllocateSurgeIndex(instances); got != 2 {
 		t.Errorf("got %d want 2", got)
 	}
 	// Empty status returns 0.
-	if got := AllocateSurgeIndex(nil); got != 0 {
+	if got := types.AllocateSurgeIndex(nil); got != 0 {
 		t.Errorf("empty: got %d want 0", got)
 	}
 	// Shared-surgeIndex regression: an in-flight surge slot
@@ -810,11 +812,11 @@ func TestAllocateSurgeIndex(t *testing.T) {
 	// sources at once — the full-fleet wipe. With instances {0(surge→2), 1},
 	// indices {0,1,2} are taken, so the next surge must land at 3, not 2.
 	surgeAt2 := int32(2)
-	withInflightSurge := []InstanceStatus{
-		{Index: 0, Operation: &InstanceOperation{SurgeIndex: &surgeAt2}},
+	withInflightSurge := []types.InstanceStatus{
+		{Index: 0, Operation: &types.InstanceOperation{SurgeIndex: &surgeAt2}},
 		{Index: 1},
 	}
-	if got := AllocateSurgeIndex(withInflightSurge); got != 3 {
+	if got := types.AllocateSurgeIndex(withInflightSurge); got != 3 {
 		t.Errorf("in-flight surge slot at 2 must be excluded: got %d want 3", got)
 	}
 }
@@ -830,99 +832,99 @@ func TestAllocateSurgeIndex(t *testing.T) {
 // instead.
 func TestPartitionHeldIndices(t *testing.T) {
 	p := func(v int32) *int32 { return &v }
-	planFor := func(indices ...int32) []InstancePlan {
-		out := make([]InstancePlan, 0, len(indices))
+	planFor := func(indices ...int32) []types.InstancePlan {
+		out := make([]types.InstancePlan, 0, len(indices))
 		for _, idx := range indices {
-			out = append(out, InstancePlan{Index: idx})
+			out = append(out, types.InstancePlan{Index: idx})
 		}
 		return out
 	}
 	const target = "owner-engine-target"
 	cases := []struct {
 		name     string
-		ru       *RollingUpdate
-		observed []InstanceStatus
-		planned  []InstancePlan
+		ru       *types.RollingUpdate
+		observed []types.InstanceStatus
+		planned  []types.InstancePlan
 		want     map[int32]bool
 	}{
 		{
 			name:    "nil rollingUpdate holds nothing",
 			ru:      nil,
 			planned: planFor(0, 1),
-			observed: []InstanceStatus{
-				{Index: 0, Phase: InstancePhaseReady, RunningRevision: "old"},
-				{Index: 1, Phase: InstancePhaseReady, RunningRevision: "old"},
+			observed: []types.InstanceStatus{
+				{Index: 0, Phase: types.InstancePhaseReady, RunningRevision: "old"},
+				{Index: 1, Phase: types.InstancePhaseReady, RunningRevision: "old"},
 			},
 			want: map[int32]bool{},
 		},
 		{
 			name:    "lowest old-revision Instances held, count = Partition",
-			ru:      &RollingUpdate{Partition: p(2)},
+			ru:      &types.RollingUpdate{Partition: p(2)},
 			planned: planFor(0, 1, 2),
-			observed: []InstanceStatus{
-				{Index: 0, Phase: InstancePhaseReady, RunningRevision: "old"},
-				{Index: 1, Phase: InstancePhaseReady, RunningRevision: "old"},
-				{Index: 2, Phase: InstancePhaseReady, RunningRevision: "old"},
+			observed: []types.InstanceStatus{
+				{Index: 0, Phase: types.InstancePhaseReady, RunningRevision: "old"},
+				{Index: 1, Phase: types.InstancePhaseReady, RunningRevision: "old"},
+				{Index: 2, Phase: types.InstancePhaseReady, RunningRevision: "old"},
 			},
 			want: map[int32]bool{0: true, 1: true},
 		},
 		{
 			name:    "on-target Instance is past holding; hold keys to revision, not position",
-			ru:      &RollingUpdate{Partition: p(1)},
+			ru:      &types.RollingUpdate{Partition: p(1)},
 			planned: planFor(0, 1),
-			observed: []InstanceStatus{
-				{Index: 0, Phase: InstancePhaseReady, RunningRevision: target},
-				{Index: 1, Phase: InstancePhaseReady, RunningRevision: "old"},
+			observed: []types.InstanceStatus{
+				{Index: 0, Phase: types.InstancePhaseReady, RunningRevision: target},
+				{Index: 1, Phase: types.InstancePhaseReady, RunningRevision: "old"},
 			},
 			want: map[int32]bool{1: true},
 		},
 		{
 			name:    "mid-update Instance must finish — hold falls to next old-revision Instance",
-			ru:      &RollingUpdate{Partition: p(1)},
+			ru:      &types.RollingUpdate{Partition: p(1)},
 			planned: planFor(0, 1),
-			observed: []InstanceStatus{
-				{Index: 0, Phase: InstancePhaseUpdating, RunningRevision: "old",
-					Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: "Surge"}},
-				{Index: 1, Phase: InstancePhaseReady, RunningRevision: "old"},
+			observed: []types.InstanceStatus{
+				{Index: 0, Phase: types.InstancePhaseUpdating, RunningRevision: "old",
+					Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: "Surge"}},
+				{Index: 1, Phase: types.InstancePhaseReady, RunningRevision: "old"},
 			},
 			want: map[int32]bool{1: true},
 		},
 		{
 			name:    "Failed Update continuation and gang-surge target marker are never held",
-			ru:      &RollingUpdate{Partition: p(2)},
+			ru:      &types.RollingUpdate{Partition: p(2)},
 			planned: planFor(0, 1, 2),
-			observed: []InstanceStatus{
-				{Index: 0, Phase: InstancePhaseCreating, RunningRevision: "",
-					Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: UpdateStepGangSurgeTarget}},
-				{Index: 1, Phase: InstancePhaseFailed, RunningRevision: "old",
-					Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: "Drain"}},
-				{Index: 2, Phase: InstancePhaseReady, RunningRevision: "old"},
+			observed: []types.InstanceStatus{
+				{Index: 0, Phase: types.InstancePhaseCreating, RunningRevision: "",
+					Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: types.UpdateStepGangSurgeTarget}},
+				{Index: 1, Phase: types.InstancePhaseFailed, RunningRevision: "old",
+					Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: "Drain"}},
+				{Index: 2, Phase: types.InstancePhaseReady, RunningRevision: "old"},
 			},
 			want: map[int32]bool{2: true},
 		},
 		{
 			name:    "migration surge target excluded; Migrating source stays a candidate",
-			ru:      &RollingUpdate{Partition: p(1)},
+			ru:      &types.RollingUpdate{Partition: p(1)},
 			planned: planFor(1, 5),
-			observed: []InstanceStatus{
-				{Index: 1, Phase: InstancePhaseMigrating, RunningRevision: "old",
-					Operation: &InstanceOperation{Type: InstanceOperationMigrate}},
-				{Index: 5, Phase: InstancePhaseCreating, RunningRevision: "",
-					Operation: &InstanceOperation{Type: InstanceOperationMigrate}},
+			observed: []types.InstanceStatus{
+				{Index: 1, Phase: types.InstancePhaseMigrating, RunningRevision: "old",
+					Operation: &types.InstanceOperation{Type: types.InstanceOperationMigrate}},
+				{Index: 5, Phase: types.InstancePhaseCreating, RunningRevision: "",
+					Operation: &types.InstanceOperation{Type: types.InstanceOperationMigrate}},
 			},
 			want: map[int32]bool{1: true},
 		},
 		{
 			name:     "unobserved planned Instances are not candidates",
-			ru:       &RollingUpdate{Partition: p(2)},
+			ru:       &types.RollingUpdate{Partition: p(2)},
 			planned:  planFor(0, 1),
-			observed: []InstanceStatus{{Index: 1, Phase: InstancePhaseReady, RunningRevision: "old"}},
+			observed: []types.InstanceStatus{{Index: 1, Phase: types.InstancePhaseReady, RunningRevision: "old"}},
 			want:     map[int32]bool{1: true},
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := PartitionHeldIndices(tc.ru, ReconcileInput{ObservedState: WorkloadObservedState{InstanceStatuses: tc.observed}}, tc.planned, target)
+			got := escalation.PartitionHeldIndices(tc.ru, types.ReconcileInput{ObservedState: types.WorkloadObservedState{InstanceStatuses: tc.observed}}, tc.planned, target)
 			if len(got) != len(tc.want) {
 				t.Fatalf("held = %v, want %v", got, tc.want)
 			}
@@ -944,12 +946,12 @@ func TestPartitionHeldIndices(t *testing.T) {
 func TestInstancePlanIndices_ReplicaDropKeepsMigrationPair(t *testing.T) {
 	surge := int32(3)
 	back := int32(0)
-	instances := []InstanceStatus{
-		{Index: 0, Phase: InstancePhaseMigrating,
-			Operation: &InstanceOperation{Type: InstanceOperationMigrate, SurgeIndex: &surge}},
-		{Index: 1, Phase: InstancePhaseReady},
-		{Index: 3, Phase: InstancePhaseCreating,
-			Operation: &InstanceOperation{Type: InstanceOperationMigrate, SurgeIndex: &back}},
+	instances := []types.InstanceStatus{
+		{Index: 0, Phase: types.InstancePhaseMigrating,
+			Operation: &types.InstanceOperation{Type: types.InstanceOperationMigrate, SurgeIndex: &surge}},
+		{Index: 1, Phase: types.InstancePhaseReady},
+		{Index: 3, Phase: types.InstancePhaseCreating,
+			Operation: &types.InstanceOperation{Type: types.InstanceOperationMigrate, SurgeIndex: &back}},
 	}
 	if diff := cmp.Diff([]int32{0, 3}, instancePlanIndices(instances, 1)); diff != "" {
 		t.Fatalf("replica drop must keep the in-flight migration pair and shed the Ready sibling (-want +got):\n%s", diff)
@@ -958,13 +960,13 @@ func TestInstancePlanIndices_ReplicaDropKeepsMigrationPair(t *testing.T) {
 
 func TestInstancePlanIndices_ReplicaDropKeepsGangSurgePair(t *testing.T) {
 	surge := int32(3)
-	instances := []InstanceStatus{
-		{Index: 0, Phase: InstancePhaseUpdating, TargetRevision: "comp-rev-v2bbbbbb",
-			Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: "Surge",
+	instances := []types.InstanceStatus{
+		{Index: 0, Phase: types.InstancePhaseUpdating, TargetRevision: "comp-rev-v2bbbbbb",
+			Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: "Surge",
 				SurgeIndex: &surge, TargetRevision: "comp-rev-v2bbbbbb"}},
-		{Index: 1, Phase: InstancePhaseReady},
-		{Index: 3, Phase: InstancePhaseCreating, TargetRevision: "comp-rev-v2bbbbbb",
-			Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: UpdateStepGangSurgeTarget,
+		{Index: 1, Phase: types.InstancePhaseReady},
+		{Index: 3, Phase: types.InstancePhaseCreating, TargetRevision: "comp-rev-v2bbbbbb",
+			Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: types.UpdateStepGangSurgeTarget,
 				TargetRevision: "comp-rev-v2bbbbbb"}},
 	}
 	if diff := cmp.Diff([]int32{0, 3}, instancePlanIndices(instances, 1)); diff != "" {
@@ -977,11 +979,11 @@ func TestInstancePlanIndices_MigrationTargetNotReadyKeepsSourcePinned(t *testing
 	// the source leaves the plan; a target still Creating keeps both
 	// pinned even though the source references it.
 	surge := int32(1)
-	instances := []InstanceStatus{
-		{Index: 0, Phase: InstancePhaseMigrating,
-			Operation: &InstanceOperation{Type: InstanceOperationMigrate, SurgeIndex: &surge}},
-		{Index: 1, Phase: InstancePhaseCreating,
-			Operation: &InstanceOperation{Type: InstanceOperationMigrate}},
+	instances := []types.InstanceStatus{
+		{Index: 0, Phase: types.InstancePhaseMigrating,
+			Operation: &types.InstanceOperation{Type: types.InstanceOperationMigrate, SurgeIndex: &surge}},
+		{Index: 1, Phase: types.InstancePhaseCreating,
+			Operation: &types.InstanceOperation{Type: types.InstanceOperationMigrate}},
 	}
 	if diff := cmp.Diff([]int32{0, 1}, instancePlanIndices(instances, 1)); diff != "" {
 		t.Fatalf("a not-yet-Ready migration target must keep the source pinned (-want +got):\n%s", diff)
@@ -995,41 +997,41 @@ func TestInstancePlanIndices_GangSurgeDrainReleaseDemandsExactTargetProof(t *tes
 	// the pair pinned.
 	newRev, oldRev := "comp-rev-newaaaa", "comp-rev-oldbbbb"
 	zero := int32(0)
-	source := InstanceStatus{Index: 1, Phase: InstancePhaseUpdating,
+	source := types.InstanceStatus{Index: 1, Phase: types.InstancePhaseUpdating,
 		RunningRevision: oldRev, TargetRevision: newRev,
-		Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: UpdateStepSurgeDrain,
+		Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: types.UpdateStepSurgeDrain,
 			SurgeIndex: &zero, TargetRevision: newRev}}
-	sibling := InstanceStatus{Index: 2, Phase: InstancePhaseReady, RunningRevision: newRev}
+	sibling := types.InstanceStatus{Index: 2, Phase: types.InstancePhaseReady, RunningRevision: newRev}
 
 	tests := []struct {
 		name   string
-		target InstanceStatus
+		target types.InstanceStatus
 	}{
 		{
 			name: "target promoted on a different revision",
-			target: InstanceStatus{Index: 0, Phase: InstancePhaseReady,
+			target: types.InstanceStatus{Index: 0, Phase: types.InstancePhaseReady,
 				RunningRevision: "comp-rev-otherccc"},
 		},
 		{
 			name: "target still carrying an operation",
-			target: InstanceStatus{Index: 0, Phase: InstancePhaseReady, RunningRevision: newRev,
-				Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: UpdateStepGangSurgeTarget,
+			target: types.InstanceStatus{Index: 0, Phase: types.InstancePhaseReady, RunningRevision: newRev,
+				Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: types.UpdateStepGangSurgeTarget,
 					TargetRevision: newRev}},
 		},
 		{
 			name: "target with a pending TargetRevision",
-			target: InstanceStatus{Index: 0, Phase: InstancePhaseReady,
+			target: types.InstanceStatus{Index: 0, Phase: types.InstancePhaseReady,
 				RunningRevision: newRev, TargetRevision: newRev},
 		},
 		{
 			name: "target not yet Ready",
-			target: InstanceStatus{Index: 0, Phase: InstancePhaseCreating,
+			target: types.InstanceStatus{Index: 0, Phase: types.InstancePhaseCreating,
 				RunningRevision: newRev},
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			instances := []InstanceStatus{test.target, source, sibling}
+			instances := []types.InstanceStatus{test.target, source, sibling}
 			if diff := cmp.Diff([]int32{0, 1, 2}, instancePlanIndices(instances, 2)); diff != "" {
 				t.Fatalf("unproven target must keep the drain-step source pinned (-want +got):\n%s", diff)
 			}
@@ -1043,10 +1045,10 @@ func TestInstancePlanIndices_GangSurgeDrainMissingTargetKeepsSourcePinned(t *tes
 	// state machine can recover, and the dangling reference must not
 	// materialize a phantom index.
 	missing := int32(5)
-	instances := []InstanceStatus{
-		{Index: 1, Phase: InstancePhaseUpdating,
+	instances := []types.InstanceStatus{
+		{Index: 1, Phase: types.InstancePhaseUpdating,
 			RunningRevision: "comp-rev-oldbbbb", TargetRevision: "comp-rev-newaaaa",
-			Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: UpdateStepSurgeDrain,
+			Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: types.UpdateStepSurgeDrain,
 				SurgeIndex: &missing, TargetRevision: "comp-rev-newaaaa"}},
 	}
 	if diff := cmp.Diff([]int32{1}, instancePlanIndices(instances, 1)); diff != "" {
@@ -1060,12 +1062,12 @@ func TestInstancePlanIndices_OccupiedReferencedTargetStaysPinned(t *testing.T) {
 	// occupant stay in the plan until the update state machine resets the
 	// claim — neither may fall into scale-down while the pair is ambiguous.
 	occupied := int32(1)
-	instances := []InstanceStatus{
-		{Index: 0, Phase: InstancePhaseUpdating, TargetRevision: "comp-rev-newaaaa",
-			Operation: &InstanceOperation{Type: InstanceOperationUpdate, Step: "Surge",
+	instances := []types.InstanceStatus{
+		{Index: 0, Phase: types.InstancePhaseUpdating, TargetRevision: "comp-rev-newaaaa",
+			Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: "Surge",
 				SurgeIndex: &occupied, TargetRevision: "comp-rev-newaaaa"}},
-		{Index: 1, Phase: InstancePhaseReady, RunningRevision: "comp-rev-otherccc"},
-		{Index: 2, Phase: InstancePhaseReady, RunningRevision: "comp-rev-newaaaa"},
+		{Index: 1, Phase: types.InstancePhaseReady, RunningRevision: "comp-rev-otherccc"},
+		{Index: 2, Phase: types.InstancePhaseReady, RunningRevision: "comp-rev-newaaaa"},
 	}
 	if diff := cmp.Diff([]int32{0, 1, 2}, instancePlanIndices(instances, 2)); diff != "" {
 		t.Fatalf("occupied referenced target must stay pinned at replicas=2 (-want +got):\n%s", diff)
@@ -1077,9 +1079,9 @@ func TestInstancePlanIndices_OccupiedReferencedTargetStaysPinned(t *testing.T) {
 	}
 }
 func TestBuildPlan_CarriesMinReadySeconds(t *testing.T) {
-	desired := singlePodDesired(1, Lifecycle{})
+	desired := singlePodDesired(1, types.Lifecycle{})
 	desired.MinReadySeconds = 20
-	plan, err := BuildPlan(ComponentEngine, desired, WorkloadObservedState{})
+	plan, err := BuildPlan(types.ComponentEngine, desired, types.WorkloadObservedState{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1090,7 +1092,7 @@ func TestBuildPlan_CarriesMinReadySeconds(t *testing.T) {
 	// Unset projects to 0 (Available as soon as Ready); a negative value
 	// from a hand-edited source cannot widen the window below zero.
 	desired.MinReadySeconds = -7
-	plan, err = BuildPlan(ComponentEngine, desired, WorkloadObservedState{})
+	plan, err = BuildPlan(types.ComponentEngine, desired, types.WorkloadObservedState{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1123,22 +1125,5 @@ func TestResolveInstanceReadyTimeout(t *testing.T) {
 				t.Errorf("ResolveInstanceReadyTimeout: got %v want %v", got, tt.want)
 			}
 		})
-	}
-}
-
-// TestDeadlineAt pins the unconfigured case: with no readiness window an
-// operation must open with NO deadline (the zero Time the backstop reads
-// as "never expires"), never one equal to its own start time, which the
-// very next pass would read as already elapsed.
-func TestDeadlineAt(t *testing.T) {
-	now := metav1.NewTime(time.Now().Truncate(time.Second))
-
-	if got := DeadlineAt(now, 30*time.Minute); !got.Time.Equal(now.Add(30 * time.Minute)) {
-		t.Errorf("configured window: got %v want %v", got, now.Add(30*time.Minute))
-	}
-	for _, timeout := range []time.Duration{0, -time.Minute} {
-		if got := DeadlineAt(now, timeout); !got.IsZero() {
-			t.Errorf("timeout %v: got deadline %v want the zero Time", timeout, got)
-		}
 	}
 }

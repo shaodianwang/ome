@@ -9,8 +9,8 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 func TestParseExcludedAnnotationKeys(t *testing.T) {
@@ -117,7 +117,7 @@ func TestRevisionHashStableUnderExcludedAnnotations(t *testing.T) {
 func TestRevisionHashUnchangedByIROperatorVerbAnnotations(t *testing.T) {
 	podSpec := &corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img:1"}}}
 	templateMeta := &metav1.ObjectMeta{Annotations: map[string]string{"ome.io/declared": "1"}}
-	input := workload.ReconcileInput{DesiredSpec: workload.WorkloadDesiredSpec{
+	input := workloadtypes.ReconcileInput{DesiredSpec: workloadtypes.WorkloadDesiredSpec{
 		PodSpec:               podSpec,
 		PodTemplateObjectMeta: templateMeta,
 	}}
@@ -161,7 +161,7 @@ func TestRevisionHashCacheInvalidatesWhenExcludedAnnotationsChange(t *testing.T)
 
 	podSpec := &corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "img:1"}}}
 	meta := &metav1.ObjectMeta{Annotations: map[string]string{inheritedKey: "v1beta1"}}
-	input := workload.ReconcileInput{DesiredSpec: workload.WorkloadDesiredSpec{
+	input := workloadtypes.ReconcileInput{DesiredSpec: workloadtypes.WorkloadDesiredSpec{
 		PodSpec:               podSpec,
 		PodTemplateObjectMeta: meta,
 	}}

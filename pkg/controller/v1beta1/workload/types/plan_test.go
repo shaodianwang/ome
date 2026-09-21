@@ -1,6 +1,28 @@
 package types
 
-import "testing"
+import (
+	"testing"
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+// TestDeadlineAt pins the unconfigured case: with no readiness window an
+// operation must open with NO deadline (the zero Time the backstop reads
+// as "never expires"), never one equal to its own start time, which the
+// very next pass would read as already elapsed.
+func TestDeadlineAt(t *testing.T) {
+	now := metav1.NewTime(time.Now().Truncate(time.Second))
+
+	if got := DeadlineAt(now, 30*time.Minute); !got.Time.Equal(now.Add(30 * time.Minute)) {
+		t.Errorf("configured window: got %v want %v", got, now.Add(30*time.Minute))
+	}
+	for _, timeout := range []time.Duration{0, -time.Minute} {
+		if got := DeadlineAt(now, timeout); !got.IsZero() {
+			t.Errorf("timeout %v: got deadline %v want the zero Time", timeout, got)
+		}
+	}
+}
 
 // A per-Instance topology key overrides the Component's; a row with none
 // falls back so a plan need only name the exceptions.

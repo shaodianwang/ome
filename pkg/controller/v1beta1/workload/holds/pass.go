@@ -9,6 +9,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/drain"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/evidence"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
@@ -90,6 +91,29 @@ func (r *Result) record(idx int32, token string) {
 		r.held[idx] = make(map[string]bool)
 	}
 	r.held[idx][token] = true
+}
+
+// RowsForPlan builds the pass's rows from the plan and the observed
+// statuses: a row's desired pod count is the plan's when the plan still
+// covers its index and the observed count otherwise, and excluded marks
+// the deferred scale-down victims.
+func RowsForPlan(plan types.ComponentPlan, statuses []types.InstanceStatus, excluded map[int32]struct{}) []Row {
+	desiredByIdx := status.DesiredPodCountByInstance(plan)
+	planned := make(map[int32]*types.InstancePlan, len(plan.Instances))
+	for i := range plan.Instances {
+		planned[plan.Instances[i].Index] = &plan.Instances[i]
+	}
+	rows := make([]Row, 0, len(statuses))
+	for _, row := range statuses {
+		_, skip := excluded[row.Index]
+		rows = append(rows, Row{
+			Status:   row,
+			Desired:  status.DesiredFor(desiredByIdx, row.Index, row.PodCount),
+			Instance: planned[row.Index],
+			Excluded: skip,
+		})
+	}
+	return rows
 }
 
 // Run is the hold pass: one evaluation of every authority over every

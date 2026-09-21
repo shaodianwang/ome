@@ -31,7 +31,7 @@ func PodName(isvc string, component workload.ComponentType, instanceIdx int32, r
 
 // HeadlessServiceName returns the per-Component headless service name —
 // <isvc>-<comp>-headless. Used by every op to look up the service that
-// publishes the pods it's about to mutate, and by status_aggregate to
+// publishes the pods it's about to mutate, and by status/aggregate.go to
 // scan EndpointSlices for ready endpoints.
 func HeadlessServiceName(isvc string, component workload.ComponentType) string {
 	return boundedServiceName(fmt.Sprintf("%s-%s-headless", isvc, component))

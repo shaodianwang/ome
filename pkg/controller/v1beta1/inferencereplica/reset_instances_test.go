@@ -29,8 +29,8 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // newResetFixture builds a fake-client Reconciler (with recorder and a
@@ -57,7 +57,7 @@ func newResetFixture(t *testing.T, ir *v1beta1.InferenceReplica, pods []*corev1.
 		APIReader:            c,
 		Log:                  logf.Log.WithName("test"),
 		Recorder:             rec,
-		Expectations:         workload.NewExpectations(),
+		Expectations:         workloadtypes.NewExpectations(),
 		InstanceStatusTarget: irstatus.EncodingDenseV1,
 	}
 	fresh := &v1beta1.InferenceReplica{}
@@ -226,11 +226,11 @@ func TestConsumeResetInstances_All_ResetsEveryFailedInstance(t *testing.T) {
 	assertResetAnnotationConsumed(t, g, c, ir)
 
 	events := drainEvents(rec)
-	g.Expect(eventsContaining(events, string(workload.EventReasonInstancesReset)+" ")).To(gomega.HaveLen(1))
+	g.Expect(eventsContaining(events, string(workloadtypes.EventReasonInstancesReset)+" ")).To(gomega.HaveLen(1))
 	g.Expect(eventsContaining(events, "instance(s) 1,2 ")).NotTo(gomega.BeEmpty(),
 		"the event must name the indices reset")
 	g.Expect(eventsContaining(events, "operator request")).NotTo(gomega.BeEmpty())
-	skips := eventsContaining(events, string(workload.EventReasonInstancesResetSkipped))
+	skips := eventsContaining(events, string(workloadtypes.EventReasonInstancesResetSkipped))
 	g.Expect(skips).To(gomega.HaveLen(1), "the guarded Failed instances share one skip event")
 	g.Expect(skips[0]).To(gomega.ContainSubstring("3 (owned by Update)"))
 	g.Expect(skips[0]).To(gomega.ContainSubstring("4 (still serving)"))
@@ -258,9 +258,9 @@ func TestConsumeResetInstances_ExplicitList_ResetsOnlyNamed(t *testing.T) {
 	assertResetAnnotationConsumed(t, g, c, ir)
 
 	events := drainEvents(rec)
-	g.Expect(eventsContaining(events, string(workload.EventReasonInstancesReset)+" ")).To(gomega.HaveLen(1))
+	g.Expect(eventsContaining(events, string(workloadtypes.EventReasonInstancesReset)+" ")).To(gomega.HaveLen(1))
 	g.Expect(eventsContaining(events, "instance(s) 2 ")).NotTo(gomega.BeEmpty())
-	g.Expect(eventsContaining(events, string(workload.EventReasonInstancesResetSkipped))).To(gomega.BeEmpty())
+	g.Expect(eventsContaining(events, string(workloadtypes.EventReasonInstancesResetSkipped))).To(gomega.BeEmpty())
 }
 
 // TestConsumeResetInstances_RepairOwnedTargets_Reset pins the scope of
@@ -286,7 +286,7 @@ func TestConsumeResetInstances_RepairOwnedTargets_Reset(t *testing.T) {
 
 	events := drainEvents(rec)
 	g.Expect(eventsContaining(events, "instance(s) 1,2 ")).To(gomega.HaveLen(1))
-	g.Expect(eventsContaining(events, string(workload.EventReasonInstancesResetSkipped))).To(gomega.BeEmpty())
+	g.Expect(eventsContaining(events, string(workloadtypes.EventReasonInstancesResetSkipped))).To(gomega.BeEmpty())
 }
 
 // TestConsumeResetInstances_ServingTarget_SkipConsumed pins the serving
@@ -313,8 +313,8 @@ func TestConsumeResetInstances_ServingTarget_SkipConsumed(t *testing.T) {
 	assertResetAnnotationConsumed(t, g, c, ir)
 
 	events := drainEvents(rec)
-	g.Expect(eventsContaining(events, string(workload.EventReasonInstancesReset)+" ")).To(gomega.BeEmpty())
-	skips := eventsContaining(events, string(workload.EventReasonInstancesResetSkipped))
+	g.Expect(eventsContaining(events, string(workloadtypes.EventReasonInstancesReset)+" ")).To(gomega.BeEmpty())
+	skips := eventsContaining(events, string(workloadtypes.EventReasonInstancesResetSkipped))
 	g.Expect(skips).To(gomega.HaveLen(1))
 	g.Expect(skips[0]).To(gomega.ContainSubstring("4 (still serving)"))
 }
@@ -344,8 +344,8 @@ func TestConsumeResetInstances_RolloutOwnedTarget_SkipConsumed(t *testing.T) {
 			assertResetAnnotationConsumed(t, g, c, ir)
 
 			events := drainEvents(rec)
-			g.Expect(eventsContaining(events, string(workload.EventReasonInstancesReset)+" ")).To(gomega.BeEmpty())
-			skips := eventsContaining(events, string(workload.EventReasonInstancesResetSkipped))
+			g.Expect(eventsContaining(events, string(workloadtypes.EventReasonInstancesReset)+" ")).To(gomega.BeEmpty())
+			skips := eventsContaining(events, string(workloadtypes.EventReasonInstancesResetSkipped))
 			g.Expect(skips).To(gomega.HaveLen(1))
 			g.Expect(skips[0]).To(gomega.ContainSubstring(fmt.Sprintf("3 (owned by %s)", opType)))
 		})
@@ -373,10 +373,10 @@ func TestConsumeResetInstances_MixedTargets_ResetsValidSkipsRest(t *testing.T) {
 	assertResetAnnotationConsumed(t, g, c, ir)
 
 	events := drainEvents(rec)
-	g.Expect(eventsContaining(events, string(workload.EventReasonInstancesReset)+" ")).To(gomega.HaveLen(1))
+	g.Expect(eventsContaining(events, string(workloadtypes.EventReasonInstancesReset)+" ")).To(gomega.HaveLen(1))
 	g.Expect(eventsContaining(events, "instance(s) 1 ")).NotTo(gomega.BeEmpty(),
 		"the duplicate index must collapse to one reset")
-	skips := eventsContaining(events, string(workload.EventReasonInstancesResetSkipped))
+	skips := eventsContaining(events, string(workloadtypes.EventReasonInstancesResetSkipped))
 	g.Expect(skips).To(gomega.HaveLen(1), "all skipped targets share one event")
 	g.Expect(skips[0]).To(gomega.ContainSubstring("0 (Phase=Ready)"))
 	g.Expect(skips[0]).To(gomega.ContainSubstring("42 (no such instance)"))
@@ -404,8 +404,8 @@ func TestConsumeResetInstances_NonFailedTarget_SkipConsumed(t *testing.T) {
 	assertResetAnnotationConsumed(t, g, c, ir)
 
 	events := drainEvents(rec)
-	g.Expect(eventsContaining(events, string(workload.EventReasonInstancesReset)+" ")).To(gomega.BeEmpty())
-	skips := eventsContaining(events, string(workload.EventReasonInstancesResetSkipped))
+	g.Expect(eventsContaining(events, string(workloadtypes.EventReasonInstancesReset)+" ")).To(gomega.BeEmpty())
+	skips := eventsContaining(events, string(workloadtypes.EventReasonInstancesResetSkipped))
 	g.Expect(skips).To(gomega.HaveLen(1))
 	g.Expect(skips[0]).To(gomega.ContainSubstring("0 (Phase=Ready)"))
 }
@@ -428,8 +428,8 @@ func TestConsumeResetInstances_AllWithNoFailed_SkipConsumed(t *testing.T) {
 	assertResetAnnotationConsumed(t, g, c, ir)
 
 	events := drainEvents(rec)
-	g.Expect(eventsContaining(events, string(workload.EventReasonInstancesReset)+" ")).To(gomega.BeEmpty())
-	skips := eventsContaining(events, string(workload.EventReasonInstancesResetSkipped))
+	g.Expect(eventsContaining(events, string(workloadtypes.EventReasonInstancesReset)+" ")).To(gomega.BeEmpty())
+	skips := eventsContaining(events, string(workloadtypes.EventReasonInstancesResetSkipped))
 	g.Expect(skips).To(gomega.HaveLen(1))
 	g.Expect(skips[0]).To(gomega.ContainSubstring("none is Failed"))
 }
@@ -459,10 +459,10 @@ func TestConsumeResetInstances_MalformedValue_WarningConsumed(t *testing.T) {
 			assertResetAnnotationConsumed(t, g, c, ir)
 
 			events := drainEvents(rec)
-			warnings := eventsContaining(events, string(workload.EventReasonInstancesResetRejected))
+			warnings := eventsContaining(events, string(workloadtypes.EventReasonInstancesResetRejected))
 			g.Expect(warnings).To(gomega.HaveLen(1))
 			g.Expect(warnings[0]).To(gomega.HavePrefix(corev1.EventTypeWarning))
-			g.Expect(eventsContaining(events, string(workload.EventReasonInstancesReset)+" ")).To(gomega.BeEmpty())
+			g.Expect(eventsContaining(events, string(workloadtypes.EventReasonInstancesReset)+" ")).To(gomega.BeEmpty())
 		})
 	}
 }
@@ -505,7 +505,7 @@ func TestConsumeResetInstances_CrashBeforeConsume_RedeliveryIsNoOp(t *testing.T)
 		"the effects commit before the annotation is removed")
 	g.Expect(ir.Annotations).To(gomega.HaveKey(constants.ResetInstancesAnnotationKey),
 		"an unconsumed request must not be mirrored off the in-memory IR")
-	g.Expect(eventsContaining(drainEvents(rec), string(workload.EventReasonInstancesReset)+" ")).To(gomega.HaveLen(1))
+	g.Expect(eventsContaining(drainEvents(rec), string(workloadtypes.EventReasonInstancesReset)+" ")).To(gomega.HaveLen(1))
 	afterCrash := fresh.Status.DeepCopy()
 
 	// Re-delivery after the crash: the request is still in the mailbox.
@@ -520,9 +520,9 @@ func TestConsumeResetInstances_CrashBeforeConsume_RedeliveryIsNoOp(t *testing.T)
 	assertResetAnnotationConsumed(t, g, c, ir)
 
 	events := drainEvents(rec)
-	g.Expect(eventsContaining(events, string(workload.EventReasonInstancesReset)+" ")).To(gomega.BeEmpty(),
+	g.Expect(eventsContaining(events, string(workloadtypes.EventReasonInstancesReset)+" ")).To(gomega.BeEmpty(),
 		"re-delivery must not report a second reset")
-	skips := eventsContaining(events, string(workload.EventReasonInstancesResetSkipped))
+	skips := eventsContaining(events, string(workloadtypes.EventReasonInstancesResetSkipped))
 	g.Expect(skips).To(gomega.HaveLen(1))
 	g.Expect(skips[0]).To(gomega.ContainSubstring("1 (nothing to reset)"))
 }
@@ -589,7 +589,7 @@ func TestConsumeResetInstances_ParentIsEventTarget(t *testing.T) {
 	g.Expect(requeue).To(gomega.BeFalse())
 
 	assertResetAnnotationConsumed(t, g, c, ir)
-	g.Expect(eventsContaining(drainEvents(rec), string(workload.EventReasonInstancesReset)+" ")).To(gomega.HaveLen(1))
+	g.Expect(eventsContaining(drainEvents(rec), string(workloadtypes.EventReasonInstancesReset)+" ")).To(gomega.HaveLen(1))
 }
 
 // TestParseResetInstancesValue pins the accepted and rejected value

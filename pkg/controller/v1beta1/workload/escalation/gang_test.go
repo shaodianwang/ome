@@ -1,4 +1,4 @@
-package workload_test
+package escalation_test
 
 import (
 	"context"
@@ -6,7 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clocktesting "k8s.io/utils/clock/testing"
@@ -34,21 +35,21 @@ const (
 
 // gangObservations wires one Instance's PodGroup classification into the
 // reconcile input, the way the PodGroup pass does before the dispatcher.
-func gangObservations(idx int32, state workload.GangState, message string) *workload.GangObservations {
-	g := workload.NewGangObservations()
-	g.Record(idx, workload.GangObservation{Name: "svc-engine-0", State: state, Message: message})
+func gangObservations(idx int32, state types.GangState, message string) *types.GangObservations {
+	g := types.NewGangObservations()
+	g.Record(idx, types.GangObservation{Name: "svc-engine-0", State: state, Message: message})
 	return g
 }
 
 // creatingGang is a two-pod Create attempt with a live deadline — the
 // shape a first gang rollout presents while the scheduler decides.
-func creatingGang(deadline time.Time) []workload.InstanceStatus {
-	return []workload.InstanceStatus{{
+func creatingGang(deadline time.Time) []types.InstanceStatus {
+	return []types.InstanceStatus{{
 		Index:    0,
-		Phase:    workload.InstancePhaseCreating,
+		Phase:    types.InstancePhaseCreating,
 		PodCount: 2,
-		Operation: &workload.InstanceOperation{
-			Type:     workload.InstanceOperationCreate,
+		Operation: &types.InstanceOperation{
+			Type:     types.InstanceOperationCreate,
 			Deadline: metav1.NewTime(deadline),
 		},
 	}}
@@ -75,19 +76,19 @@ func pendingGangPods() map[int32][]*corev1.Pod {
 func TestEscalation_GangTerminatingParksWithoutEscalating(t *testing.T) {
 	now := time.Now()
 	input, rec := escalationFixture(creatingGang(now.Add(30 * time.Minute)))
-	input.Gangs = gangObservations(0, workload.GangStateTerminating, gangTerminatingMessage)
+	input.Gangs = gangObservations(0, types.GangStateTerminating, gangTerminatingMessage)
 	input.UnschedulableGrace = time.Minute
 
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 2), nil); err != nil {
+	if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 2), nil); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
 	got := rec.store[0]
-	if got.Phase != workload.InstancePhaseCreating {
+	if got.Phase != types.InstancePhaseCreating {
 		t.Errorf("Phase: got %q want Creating (the predecessor object is still being collected)", got.Phase)
 	}
-	if got.Operation == nil || got.Operation.Waiting != workload.WaitingReasonPodGroupTerminating {
-		t.Errorf("Operation.Waiting: got %+v want %q", got.Operation, workload.WaitingReasonPodGroupTerminating)
+	if got.Operation == nil || got.Operation.Waiting != types.WaitingReasonPodGroupTerminating {
+		t.Errorf("Operation.Waiting: got %+v want %q", got.Operation, types.WaitingReasonPodGroupTerminating)
 	}
 	if got.LastFailure == nil || got.LastFailure.Message != gangTerminatingMessage {
 		t.Errorf("LastFailure: got %+v want the PodGroup message", got.LastFailure)
@@ -105,11 +106,11 @@ func TestEscalation_GangTerminatingParksWithoutEscalating(t *testing.T) {
 func TestEscalation_GangHoldIsEdgeTriggered(t *testing.T) {
 	now := time.Now()
 	input, rec := escalationFixture(creatingGang(now.Add(30 * time.Minute)))
-	input.Gangs = gangObservations(0, workload.GangStateTerminating, gangTerminatingMessage)
+	input.Gangs = gangObservations(0, types.GangStateTerminating, gangTerminatingMessage)
 	writes := 0
 	inner := input.MutateInstance
-	input.MutateInstance = func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
-		return inner(ctx, idx, func(s *workload.InstanceStatus) bool {
+	input.MutateInstance = func(ctx context.Context, idx int32, mutate func(*types.InstanceStatus) bool) error {
+		return inner(ctx, idx, func(s *types.InstanceStatus) bool {
 			changed := mutate(s)
 			if changed {
 				writes++
@@ -119,10 +120,10 @@ func TestEscalation_GangHoldIsEdgeTriggered(t *testing.T) {
 	}
 
 	for pass := 0; pass < 3; pass++ {
-		if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 2), nil); err != nil {
+		if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 2), nil); err != nil {
 			t.Fatalf("escalation pass %d: %v", pass, err)
 		}
-		input.ObservedState.InstanceStatuses = append([]workload.InstanceStatus(nil), rec.store...)
+		input.ObservedState.InstanceStatuses = append([]types.InstanceStatus(nil), rec.store...)
 	}
 
 	if writes != 1 {
@@ -138,19 +139,19 @@ func TestEscalation_GangHoldIsEdgeTriggered(t *testing.T) {
 func TestEscalation_GangHoldClearedOnceCollected(t *testing.T) {
 	now := time.Now()
 	insts := creatingGang(now.Add(30 * time.Minute))
-	insts[0].Operation.Waiting = workload.WaitingReasonPodGroupTerminating
+	insts[0].Operation.Waiting = types.WaitingReasonPodGroupTerminating
 	input, rec := escalationFixture(insts)
 	// The old object is gone, which is what an absent reading means.
-	input.Gangs = gangObservations(0, workload.GangStateNone, "")
+	input.Gangs = gangObservations(0, types.GangStateNone, "")
 
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 2), pendingGangPods()); err != nil {
+	if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 2), pendingGangPods()); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
 	if got := rec.store[0].Operation; got == nil || got.Waiting != "" {
 		t.Errorf("Operation.Waiting: got %+v want cleared", got)
 	}
-	if rec.store[0].Phase != workload.InstancePhaseCreating {
+	if rec.store[0].Phase != types.InstancePhaseCreating {
 		t.Errorf("Phase: got %q want Creating", rec.store[0].Phase)
 	}
 }
@@ -165,9 +166,9 @@ func TestEscalation_GangHoldClearedOnceCollected(t *testing.T) {
 func TestEscalation_GangHoldTakesOverFromClearedPodToken(t *testing.T) {
 	now := time.Now()
 	insts := creatingGang(now.Add(30 * time.Minute))
-	insts[0].Operation.Waiting = workload.WaitingReasonUnschedulable
+	insts[0].Operation.Waiting = types.WaitingReasonUnschedulable
 	input, rec := escalationFixture(insts)
-	input.Gangs = gangObservations(0, workload.GangStateTerminating, gangTerminatingMessage)
+	input.Gangs = gangObservations(0, types.GangStateTerminating, gangTerminatingMessage)
 
 	// Every member is placed now, so the pod-level hold releases its
 	// token on this same pass.
@@ -177,16 +178,16 @@ func TestEscalation_GangHoldTakesOverFromClearedPodToken(t *testing.T) {
 				{Type: corev1.PodScheduled, Status: corev1.ConditionTrue},
 			}}},
 	}}
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 2), scheduled); err != nil {
+	if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 2), scheduled); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
 	got := rec.store[0]
-	if got.Operation == nil || got.Operation.Waiting != workload.WaitingReasonPodGroupTerminating {
+	if got.Operation == nil || got.Operation.Waiting != types.WaitingReasonPodGroupTerminating {
 		t.Errorf("Operation.Waiting: got %+v want %q on the same pass the pod token cleared",
-			got.Operation, workload.WaitingReasonPodGroupTerminating)
+			got.Operation, types.WaitingReasonPodGroupTerminating)
 	}
-	if !workload.OperationExternallyHeld(got.Operation) {
+	if !types.OperationExternallyHeld(got.Operation) {
 		t.Errorf("Operation: got %+v want still externally held so the deadline stays parked", got.Operation)
 	}
 }
@@ -198,39 +199,39 @@ func TestEscalation_GangHoldTakesOverFromClearedPodToken(t *testing.T) {
 // Cells: instance/Create/CreatePods/gang.podGroup[OwnershipConflict]/before
 func TestEscalation_GangOwnershipConflictFailsOnlyItsRow(t *testing.T) {
 	now := time.Now()
-	insts := append(creatingGang(now.Add(30*time.Minute)), workload.InstanceStatus{
+	insts := append(creatingGang(now.Add(30*time.Minute)), types.InstanceStatus{
 		Index:    1,
-		Phase:    workload.InstancePhaseCreating,
+		Phase:    types.InstancePhaseCreating,
 		PodCount: 2,
-		Operation: &workload.InstanceOperation{
-			Type:     workload.InstanceOperationCreate,
+		Operation: &types.InstanceOperation{
+			Type:     types.InstanceOperationCreate,
 			Deadline: metav1.NewTime(now.Add(30 * time.Minute)),
 		},
 	})
 	input, rec := escalationFixture(insts)
-	input.Gangs = gangObservations(0, workload.GangStateOwnershipConflict, gangConflictMessage)
+	input.Gangs = gangObservations(0, types.GangStateOwnershipConflict, gangConflictMessage)
 	plan := singleInstancePlan(0, 2)
-	plan.Instances = append(plan.Instances, workload.InstancePlan{
-		Index: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 2}},
+	plan.Instances = append(plan.Instances, types.InstancePlan{
+		Index: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 2}},
 	})
 
 	pods := pendingGangPods()
 	pods[1] = pods[0]
-	if err := runEscalationPass(t, workload.Deps{}, input, plan, pods); err != nil {
+	if err := runEscalationPass(t, types.Deps{}, input, plan, pods); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
 	got := rec.store[0]
-	if got.Phase != workload.InstancePhaseFailed {
+	if got.Phase != types.InstancePhaseFailed {
 		t.Errorf("Phase: got %q want Failed", got.Phase)
 	}
-	if got.LastFailure == nil || got.LastFailure.Reason != workload.PodGroupOwnershipConflictReason {
-		t.Errorf("LastFailure.Reason: got %+v want %q", got.LastFailure, workload.PodGroupOwnershipConflictReason)
+	if got.LastFailure == nil || got.LastFailure.Reason != types.PodGroupOwnershipConflictReason {
+		t.Errorf("LastFailure.Reason: got %+v want %q", got.LastFailure, types.PodGroupOwnershipConflictReason)
 	}
 	if got.LastFailure == nil || !strings.Contains(got.LastFailure.Message, "StatefulSet/legacy") {
 		t.Errorf("LastFailure.Message: got %+v want the foreign controller named", got.LastFailure)
 	}
-	if rec.store[1].Phase != workload.InstancePhaseCreating {
+	if rec.store[1].Phase != types.InstancePhaseCreating {
 		t.Errorf("sibling Phase: got %q want Creating (the conflict is scoped to one row)", rec.store[1].Phase)
 	}
 	if len(rec.blocks) != 0 {
@@ -245,25 +246,25 @@ func TestEscalation_GangOwnershipConflictFailsOnlyItsRow(t *testing.T) {
 // Cells: instance/Delete/Drain/gang.podGroup[Terminating]/before
 func TestEscalation_GangHoldKeepsOffTeardowns(t *testing.T) {
 	now := time.Now()
-	insts := []workload.InstanceStatus{{
+	insts := []types.InstanceStatus{{
 		Index:    0,
-		Phase:    workload.InstancePhaseDeleting,
+		Phase:    types.InstancePhaseDeleting,
 		PodCount: 2,
-		Operation: &workload.InstanceOperation{
-			Type:     workload.InstanceOperationDelete,
+		Operation: &types.InstanceOperation{
+			Type:     types.InstanceOperationDelete,
 			Step:     "Drain",
 			Deadline: metav1.NewTime(now.Add(-time.Hour)),
 		},
 	}}
 	input, rec := escalationFixture(insts)
-	input.Gangs = gangObservations(0, workload.GangStateTerminating, gangTerminatingMessage)
+	input.Gangs = gangObservations(0, types.GangStateTerminating, gangTerminatingMessage)
 
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 2), pendingGangPods()); err != nil {
+	if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 2), pendingGangPods()); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
 	got := rec.store[0]
-	if got.Phase != workload.InstancePhaseDeleting {
+	if got.Phase != types.InstancePhaseDeleting {
 		t.Errorf("Phase: got %q want Deleting", got.Phase)
 	}
 	if got.Operation == nil || got.Operation.Waiting != "" {
@@ -281,31 +282,31 @@ func TestEscalation_GangHoldKeepsOffTeardowns(t *testing.T) {
 func TestEscalation_GangUnschedulableArrivesOnMemberPods(t *testing.T) {
 	now := time.Now()
 	input, rec := escalationFixture(creatingGang(now.Add(30 * time.Minute)))
-	input.Gangs = workload.NewGangObservations()
+	input.Gangs = types.NewGangObservations()
 
 	rejected := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "svc-engine-0-leader-0"},
 		Status: corev1.PodStatus{Phase: corev1.PodPending, Conditions: []corev1.PodCondition{{
 			Type:               corev1.PodScheduled,
 			Status:             corev1.ConditionFalse,
-			Reason:             workload.WaitingReasonUnschedulable,
+			Reason:             types.WaitingReasonUnschedulable,
 			Message:            coschedulingMessage,
 			LastTransitionTime: metav1.NewTime(now.Add(-5 * time.Minute)),
 		}}},
 	}
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 2),
+	if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 2),
 		map[int32][]*corev1.Pod{0: {rejected}}); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
 	got := rec.store[0]
-	if got.Operation == nil || got.Operation.Waiting != workload.WaitingReasonUnschedulable {
-		t.Errorf("Operation.Waiting: got %+v want %q", got.Operation, workload.WaitingReasonUnschedulable)
+	if got.Operation == nil || got.Operation.Waiting != types.WaitingReasonUnschedulable {
+		t.Errorf("Operation.Waiting: got %+v want %q", got.Operation, types.WaitingReasonUnschedulable)
 	}
 	if got.LastFailure == nil || got.LastFailure.Message != coschedulingMessage {
 		t.Errorf("LastFailure: got %+v want the gang scheduler's own explanation", got.LastFailure)
 	}
-	if got.Phase != workload.InstancePhaseCreating {
+	if got.Phase != types.InstancePhaseCreating {
 		t.Errorf("Phase: got %q want Creating (queued for placement, not failed)", got.Phase)
 	}
 }
@@ -319,30 +320,30 @@ func TestEscalation_GangUnschedulableArrivesOnMemberPods(t *testing.T) {
 func TestReconcileGatedDeadlines_ParksGangSurgeSourceOnMemberRejection(t *testing.T) {
 	now := time.Now()
 	surge := int32(1)
-	insts := []workload.InstanceStatus{
+	insts := []types.InstanceStatus{
 		{
 			Index: 0,
-			Phase: workload.InstancePhaseUpdating,
-			Operation: &workload.InstanceOperation{
-				Type:       workload.InstanceOperationUpdate,
-				Step:       workload.UpdateStepSurge,
+			Phase: types.InstancePhaseUpdating,
+			Operation: &types.InstanceOperation{
+				Type:       types.InstanceOperationUpdate,
+				Step:       types.UpdateStepSurge,
 				SurgeIndex: &surge,
 				Deadline:   metav1.NewTime(now.Add(10 * time.Minute)),
 			},
 		},
 		{
 			Index: 1,
-			Phase: workload.InstancePhaseCreating,
-			Operation: &workload.InstanceOperation{
-				Type:    workload.InstanceOperationUpdate,
-				Step:    workload.UpdateStepGangSurgeTarget,
-				Waiting: workload.WaitingReasonUnschedulable,
+			Phase: types.InstancePhaseCreating,
+			Operation: &types.InstanceOperation{
+				Type:    types.InstanceOperationUpdate,
+				Step:    types.UpdateStepGangSurgeTarget,
+				Waiting: types.WaitingReasonUnschedulable,
 			},
 		},
 	}
 	input, store, _ := expireFixture(insts)
 
-	if err := workload.ReconcileGatedDeadlines(context.Background(), input, insts, map[int32]bool{}, 30*time.Minute); err != nil {
+	if err := escalation.ReconcileGatedDeadlines(context.Background(), input, insts, map[int32]bool{}, 30*time.Minute); err != nil {
 		t.Fatalf("ReconcileGatedDeadlines: %v", err)
 	}
 	if !(*store)[0].Operation.Deadline.IsZero() {
@@ -358,30 +359,30 @@ func TestReconcileGatedDeadlines_ParksGangSurgeSourceOnMemberRejection(t *testin
 func TestReconcileGatedDeadlines_ParksGangTerminatingSurgeSource(t *testing.T) {
 	now := time.Now()
 	surge := int32(1)
-	insts := []workload.InstanceStatus{
+	insts := []types.InstanceStatus{
 		{
 			Index: 0,
-			Phase: workload.InstancePhaseUpdating,
-			Operation: &workload.InstanceOperation{
-				Type:       workload.InstanceOperationUpdate,
-				Step:       workload.UpdateStepSurge,
+			Phase: types.InstancePhaseUpdating,
+			Operation: &types.InstanceOperation{
+				Type:       types.InstanceOperationUpdate,
+				Step:       types.UpdateStepSurge,
 				SurgeIndex: &surge,
 				Deadline:   metav1.NewTime(now.Add(10 * time.Minute)),
 			},
 		},
 		{
 			Index: 1,
-			Phase: workload.InstancePhaseCreating,
-			Operation: &workload.InstanceOperation{
-				Type:    workload.InstanceOperationUpdate,
-				Step:    workload.UpdateStepGangSurgeTarget,
-				Waiting: workload.WaitingReasonPodGroupTerminating,
+			Phase: types.InstancePhaseCreating,
+			Operation: &types.InstanceOperation{
+				Type:    types.InstanceOperationUpdate,
+				Step:    types.UpdateStepGangSurgeTarget,
+				Waiting: types.WaitingReasonPodGroupTerminating,
 			},
 		},
 	}
 	input, store, _ := expireFixture(insts)
 
-	if err := workload.ReconcileGatedDeadlines(context.Background(), input, insts, map[int32]bool{}, 30*time.Minute); err != nil {
+	if err := escalation.ReconcileGatedDeadlines(context.Background(), input, insts, map[int32]bool{}, 30*time.Minute); err != nil {
 		t.Fatalf("ReconcileGatedDeadlines: %v", err)
 	}
 	if !(*store)[0].Operation.Deadline.IsZero() {
@@ -399,17 +400,17 @@ func TestReconcileGatedDeadlines_ParksGangTerminatingSurgeSource(t *testing.T) {
 func TestEscalation_GangFailedNeitherHoldsNorEnds(t *testing.T) {
 	now := time.Now()
 	input, rec := escalationFixture(creatingGang(now.Add(30 * time.Minute)))
-	input.Gangs = gangObservations(0, workload.GangStateFailed, gangFailedMessage)
+	input.Gangs = gangObservations(0, types.GangStateFailed, gangFailedMessage)
 
 	for pass := 0; pass < 2; pass++ {
-		if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 2), pendingGangPods()); err != nil {
+		if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 2), pendingGangPods()); err != nil {
 			t.Fatalf("escalation pass %d: %v", pass, err)
 		}
-		input.ObservedState.InstanceStatuses = append([]workload.InstanceStatus(nil), rec.store...)
+		input.ObservedState.InstanceStatuses = append([]types.InstanceStatus(nil), rec.store...)
 	}
 
 	got := rec.store[0]
-	if got.Phase != workload.InstancePhaseCreating {
+	if got.Phase != types.InstancePhaseCreating {
 		t.Errorf("Phase: got %q want Creating (the group is reset, not the row)", got.Phase)
 	}
 	if got.Operation == nil || got.Operation.Waiting != "" {
@@ -423,7 +424,7 @@ func TestEscalation_GangFailedNeitherHoldsNorEnds(t *testing.T) {
 	}
 	// The deadline the broad backstop relies on must keep running: a reset
 	// loop that never converges still has to end somewhere.
-	if workload.OperationExternallyHeld(got.Operation) {
+	if types.OperationExternallyHeld(got.Operation) {
 		t.Errorf("Operation: got %+v want not externally held", got.Operation)
 	}
 }
@@ -438,24 +439,24 @@ func TestEscalation_GangFailedNeitherHoldsNorEnds(t *testing.T) {
 func TestEscalation_GangTerminalKeepsOffRowsOwnedElsewhere(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
-		phase workload.InstancePhase
-		op    *workload.InstanceOperation
+		phase types.InstancePhase
+		op    *types.InstanceOperation
 	}{
-		{"teardown", workload.InstancePhaseDeleting, &workload.InstanceOperation{
-			Type: workload.InstanceOperationDelete, Step: "Drain"}},
-		{"migration", workload.InstancePhaseMigrating, &workload.InstanceOperation{
-			Type: workload.InstanceOperationMigrate, Step: "CreateSurge"}},
+		{"teardown", types.InstancePhaseDeleting, &types.InstanceOperation{
+			Type: types.InstanceOperationDelete, Step: "Drain"}},
+		{"migration", types.InstancePhaseMigrating, &types.InstanceOperation{
+			Type: types.InstanceOperationMigrate, Step: "CreateSurge"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			now := time.Now()
 			tc.op.Deadline = metav1.NewTime(now.Add(-time.Hour))
-			insts := []workload.InstanceStatus{{
+			insts := []types.InstanceStatus{{
 				Index: 0, Phase: tc.phase, PodCount: 2, Operation: tc.op,
 			}}
 			input, rec := escalationFixture(insts)
-			input.Gangs = gangObservations(0, workload.GangStateOwnershipConflict, gangConflictMessage)
+			input.Gangs = gangObservations(0, types.GangStateOwnershipConflict, gangConflictMessage)
 
-			if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 2), pendingGangPods()); err != nil {
+			if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 2), pendingGangPods()); err != nil {
 				t.Fatalf("escalation pass: %v", err)
 			}
 
@@ -480,44 +481,44 @@ func TestEscalation_GangTerminalKeepsOffRowsOwnedElsewhere(t *testing.T) {
 func TestEscalation_GangReadingSkipsSurgeSource(t *testing.T) {
 	now := time.Now()
 	surge := int32(1)
-	insts := []workload.InstanceStatus{
+	insts := []types.InstanceStatus{
 		{
-			Index: 0, Phase: workload.InstancePhaseUpdating, PodCount: 2,
-			Operation: &workload.InstanceOperation{
-				Type:       workload.InstanceOperationUpdate,
-				Step:       workload.UpdateStepSurge,
+			Index: 0, Phase: types.InstancePhaseUpdating, PodCount: 2,
+			Operation: &types.InstanceOperation{
+				Type:       types.InstanceOperationUpdate,
+				Step:       types.UpdateStepSurge,
 				SurgeIndex: &surge,
 				Deadline:   metav1.NewTime(now.Add(10 * time.Minute)),
 			},
 		},
 		{
-			Index: 1, Phase: workload.InstancePhaseCreating, PodCount: 2,
-			Operation: &workload.InstanceOperation{
-				Type:     workload.InstanceOperationUpdate,
-				Step:     workload.UpdateStepGangSurgeTarget,
+			Index: 1, Phase: types.InstancePhaseCreating, PodCount: 2,
+			Operation: &types.InstanceOperation{
+				Type:     types.InstanceOperationUpdate,
+				Step:     types.UpdateStepGangSurgeTarget,
 				Deadline: metav1.NewTime(now.Add(10 * time.Minute)),
 			},
 		},
 	}
 	input, rec := escalationFixture(insts)
-	g := workload.NewGangObservations()
-	g.Record(0, workload.GangObservation{Name: "svc-engine-0", State: workload.GangStateTerminating, Message: gangTerminatingMessage})
-	g.Record(1, workload.GangObservation{Name: "svc-engine-1", State: workload.GangStateTerminating, Message: gangTerminatingMessage})
+	g := types.NewGangObservations()
+	g.Record(0, types.GangObservation{Name: "svc-engine-0", State: types.GangStateTerminating, Message: gangTerminatingMessage})
+	g.Record(1, types.GangObservation{Name: "svc-engine-1", State: types.GangStateTerminating, Message: gangTerminatingMessage})
 	input.Gangs = g
 	plan := singleInstancePlan(0, 2)
-	plan.Instances = append(plan.Instances, workload.InstancePlan{
-		Index: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 2}},
+	plan.Instances = append(plan.Instances, types.InstancePlan{
+		Index: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 2}},
 	})
 
-	if err := runEscalationPass(t, workload.Deps{}, input, plan, nil); err != nil {
+	if err := runEscalationPass(t, types.Deps{}, input, plan, nil); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
 	if got := rec.store[0].Operation; got == nil || got.Waiting != "" {
 		t.Errorf("source Operation.Waiting: got %+v want none (its replacement carries the wait)", got)
 	}
-	if got := rec.store[1].Operation; got == nil || got.Waiting != workload.WaitingReasonPodGroupTerminating {
-		t.Errorf("surge Operation.Waiting: got %+v want %q", got, workload.WaitingReasonPodGroupTerminating)
+	if got := rec.store[1].Operation; got == nil || got.Waiting != types.WaitingReasonPodGroupTerminating {
+		t.Errorf("surge Operation.Waiting: got %+v want %q", got, types.WaitingReasonPodGroupTerminating)
 	}
 }
 
@@ -532,7 +533,7 @@ func TestEscalation_GangReadingSkipsSurgeSource(t *testing.T) {
 func TestEscalation_PodHoldWinsOverGangHold(t *testing.T) {
 	now := time.Now()
 	input, rec := escalationFixture(creatingGang(now.Add(30 * time.Minute)))
-	input.Gangs = gangObservations(0, workload.GangStateTerminating, gangTerminatingMessage)
+	input.Gangs = gangObservations(0, types.GangStateTerminating, gangTerminatingMessage)
 	input.UnschedulableGrace = 10 * time.Minute
 
 	rejected := &corev1.Pod{
@@ -540,28 +541,28 @@ func TestEscalation_PodHoldWinsOverGangHold(t *testing.T) {
 		Status: corev1.PodStatus{Phase: corev1.PodPending, Conditions: []corev1.PodCondition{{
 			Type:               corev1.PodScheduled,
 			Status:             corev1.ConditionFalse,
-			Reason:             workload.WaitingReasonUnschedulable,
+			Reason:             types.WaitingReasonUnschedulable,
 			Message:            coschedulingMessage,
 			LastTransitionTime: metav1.NewTime(now.Add(-time.Minute)),
 		}}},
 	}
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 2),
+	if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 2),
 		map[int32][]*corev1.Pod{0: {rejected}}); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
 	got := rec.store[0]
-	if got.Operation == nil || got.Operation.Waiting != workload.WaitingReasonUnschedulable {
+	if got.Operation == nil || got.Operation.Waiting != types.WaitingReasonUnschedulable {
 		t.Errorf("Operation.Waiting: got %+v want %q, the wait a grace can end",
-			got.Operation, workload.WaitingReasonUnschedulable)
+			got.Operation, types.WaitingReasonUnschedulable)
 	}
 	if got.LastFailure == nil || got.LastFailure.Message != coschedulingMessage {
 		t.Errorf("LastFailure: got %+v want the scheduler's own explanation", got.LastFailure)
 	}
-	if !workload.OperationExternallyHeld(got.Operation) {
+	if !types.OperationExternallyHeld(got.Operation) {
 		t.Errorf("Operation: got %+v want externally held so the deadline stays parked", got.Operation)
 	}
-	if got.Phase != workload.InstancePhaseCreating {
+	if got.Phase != types.InstancePhaseCreating {
 		t.Errorf("Phase: got %q want Creating (inside the grace)", got.Phase)
 	}
 }
@@ -578,27 +579,27 @@ func TestEscalation_PodHoldWinsOverGangHold(t *testing.T) {
 func TestEscalation_GangReadingsOnAFailedRowAreInert(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
-		state   workload.GangState
+		state   types.GangState
 		message string
 	}{
-		{"terminating", workload.GangStateTerminating, "PodGroup svc-engine-0 is terminating; the gang is announced again once it is collected"},
-		{"ownership conflict", workload.GangStateOwnershipConflict, "PodGroup svc-engine-0 is controlled by StatefulSet/other, not by this owner"},
-		{"phase failed", workload.GangStateFailed, gangFailedMessage},
+		{"terminating", types.GangStateTerminating, "PodGroup svc-engine-0 is terminating; the gang is announced again once it is collected"},
+		{"ownership conflict", types.GangStateOwnershipConflict, "PodGroup svc-engine-0 is controlled by StatefulSet/other, not by this owner"},
+		{"phase failed", types.GangStateFailed, gangFailedMessage},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			input, rec := escalationFixture([]workload.InstanceStatus{{
+			input, rec := escalationFixture([]types.InstanceStatus{{
 				Index:    0,
-				Phase:    workload.InstancePhaseFailed,
+				Phase:    types.InstancePhaseFailed,
 				PodCount: 2,
 			}})
 			input.Gangs = gangObservations(0, tc.state, tc.message)
 
-			if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 2), pendingGangPods()); err != nil {
+			if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 2), pendingGangPods()); err != nil {
 				t.Fatalf("escalation pass: %v", err)
 			}
 
 			got := rec.store[0]
-			if got.Phase != workload.InstancePhaseFailed {
+			if got.Phase != types.InstancePhaseFailed {
 				t.Errorf("Phase: got %q want Failed (a spent row is not re-ended)", got.Phase)
 			}
 			if got.Operation != nil {
@@ -616,14 +617,14 @@ func TestEscalation_GangReadingsOnAFailedRowAreInert(t *testing.T) {
 
 // restartingGang is a two-pod repair in flight with a live deadline —
 // the shape Phase B presents while it waits for the Instance's group.
-func restartingGang(deadline time.Time) []workload.InstanceStatus {
-	return []workload.InstanceStatus{{
+func restartingGang(deadline time.Time) []types.InstanceStatus {
+	return []types.InstanceStatus{{
 		Index:       0,
 		Incarnation: 2,
-		Phase:       workload.InstancePhaseRestarting,
+		Phase:       types.InstancePhaseRestarting,
 		PodCount:    2,
-		Operation: &workload.InstanceOperation{
-			Type:     workload.InstanceOperationRestart,
+		Operation: &types.InstanceOperation{
+			Type:     types.InstanceOperationRestart,
 			Step:     "Drain",
 			Reason:   "pod lost",
 			Deadline: metav1.NewTime(deadline),
@@ -644,18 +645,18 @@ func TestEscalation_GangReadingsOnARepairRow(t *testing.T) {
 
 	t.Run("terminating parks the repair", func(t *testing.T) {
 		input, rec := escalationFixture(restartingGang(now.Add(30 * time.Minute)))
-		input.Gangs = gangObservations(0, workload.GangStateTerminating, gangTerminatingMessage)
-		if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 2), nil); err != nil {
+		input.Gangs = gangObservations(0, types.GangStateTerminating, gangTerminatingMessage)
+		if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 2), nil); err != nil {
 			t.Fatalf("escalation pass: %v", err)
 		}
 		got := rec.store[0]
-		if got.Phase != workload.InstancePhaseRestarting {
+		if got.Phase != types.InstancePhaseRestarting {
 			t.Errorf("Phase: got %q want Restarting", got.Phase)
 		}
-		if got.Operation == nil || got.Operation.Waiting != workload.WaitingReasonPodGroupTerminating {
-			t.Errorf("Operation.Waiting: got %+v want %q", got.Operation, workload.WaitingReasonPodGroupTerminating)
+		if got.Operation == nil || got.Operation.Waiting != types.WaitingReasonPodGroupTerminating {
+			t.Errorf("Operation.Waiting: got %+v want %q", got.Operation, types.WaitingReasonPodGroupTerminating)
 		}
-		if !workload.OperationExternallyHeld(got.Operation) {
+		if !types.OperationExternallyHeld(got.Operation) {
 			t.Errorf("Operation: got %+v want externally held so the deadline parks", got.Operation)
 		}
 		if len(rec.warns) != 0 {
@@ -665,16 +666,16 @@ func TestEscalation_GangReadingsOnARepairRow(t *testing.T) {
 
 	t.Run("ownership conflict ends the repair", func(t *testing.T) {
 		input, rec := escalationFixture(restartingGang(now.Add(30 * time.Minute)))
-		input.Gangs = gangObservations(0, workload.GangStateOwnershipConflict, gangConflictMessage)
-		if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 2), pendingGangPods()); err != nil {
+		input.Gangs = gangObservations(0, types.GangStateOwnershipConflict, gangConflictMessage)
+		if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 2), pendingGangPods()); err != nil {
 			t.Fatalf("escalation pass: %v", err)
 		}
 		got := rec.store[0]
-		if got.Phase != workload.InstancePhaseFailed {
+		if got.Phase != types.InstancePhaseFailed {
 			t.Errorf("Phase: got %q want Failed", got.Phase)
 		}
-		if got.LastFailure == nil || got.LastFailure.Reason != workload.PodGroupOwnershipConflictReason {
-			t.Errorf("LastFailure.Reason: got %+v want %q", got.LastFailure, workload.PodGroupOwnershipConflictReason)
+		if got.LastFailure == nil || got.LastFailure.Reason != types.PodGroupOwnershipConflictReason {
+			t.Errorf("LastFailure.Reason: got %+v want %q", got.LastFailure, types.PodGroupOwnershipConflictReason)
 		}
 		if got.Operation == nil {
 			t.Errorf("Operation: got none want the repair preserved for the abandon path")
@@ -686,12 +687,12 @@ func TestEscalation_GangReadingsOnARepairRow(t *testing.T) {
 
 	t.Run("the scheduler's failed phase leaves the row alone", func(t *testing.T) {
 		input, rec := escalationFixture(restartingGang(now.Add(30 * time.Minute)))
-		input.Gangs = gangObservations(0, workload.GangStateFailed, gangFailedMessage)
-		if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 2), pendingGangPods()); err != nil {
+		input.Gangs = gangObservations(0, types.GangStateFailed, gangFailedMessage)
+		if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 2), pendingGangPods()); err != nil {
 			t.Fatalf("escalation pass: %v", err)
 		}
 		got := rec.store[0]
-		if got.Phase != workload.InstancePhaseRestarting {
+		if got.Phase != types.InstancePhaseRestarting {
 			t.Errorf("Phase: got %q want Restarting (the group is reset, not the row)", got.Phase)
 		}
 		if got.Operation == nil || got.Operation.Waiting != "" {
@@ -704,17 +705,17 @@ func TestEscalation_GangReadingsOnARepairRow(t *testing.T) {
 
 	t.Run("an absent group releases the token", func(t *testing.T) {
 		insts := restartingGang(now.Add(30 * time.Minute))
-		insts[0].Operation.Waiting = workload.WaitingReasonPodGroupTerminating
+		insts[0].Operation.Waiting = types.WaitingReasonPodGroupTerminating
 		input, rec := escalationFixture(insts)
-		input.Gangs = gangObservations(0, workload.GangStateNone, "")
-		if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 2), pendingGangPods()); err != nil {
+		input.Gangs = gangObservations(0, types.GangStateNone, "")
+		if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 2), pendingGangPods()); err != nil {
 			t.Fatalf("escalation pass: %v", err)
 		}
 		got := rec.store[0]
 		if got.Operation == nil || got.Operation.Waiting != "" {
 			t.Errorf("Operation.Waiting: got %+v want cleared", got.Operation)
 		}
-		if got.Phase != workload.InstancePhaseRestarting {
+		if got.Phase != types.InstancePhaseRestarting {
 			t.Errorf("Phase: got %q want Restarting", got.Phase)
 		}
 	})
@@ -731,17 +732,17 @@ func TestEscalation_GangReadingsOnARepairRow(t *testing.T) {
 func TestEscalation_GangFailedReadingOnAnOpLessRowIsInert(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		rows []workload.InstanceStatus
+		rows []types.InstanceStatus
 	}{
 		{"empty index", nil},
-		{"pending row", []workload.InstanceStatus{{Index: 0, Phase: workload.InstancePhasePending, PodCount: 2}}},
-		{"ready row", []workload.InstanceStatus{{Index: 0, Phase: workload.InstancePhaseReady, PodCount: 2}}},
+		{"pending row", []types.InstanceStatus{{Index: 0, Phase: types.InstancePhasePending, PodCount: 2}}},
+		{"ready row", []types.InstanceStatus{{Index: 0, Phase: types.InstancePhaseReady, PodCount: 2}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			input, rec := escalationFixture(tc.rows)
-			input.Gangs = gangObservations(0, workload.GangStateFailed, gangFailedMessage)
+			input.Gangs = gangObservations(0, types.GangStateFailed, gangFailedMessage)
 
-			if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 2), pendingGangPods()); err != nil {
+			if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 2), pendingGangPods()); err != nil {
 				t.Fatalf("escalation pass: %v", err)
 			}
 
@@ -780,9 +781,9 @@ func TestEscalation_GangFailedReadingOnAnOpLessRowIsInert(t *testing.T) {
 // Cells: instance/Migrate/CreateSurge/gang.podGroup[PhaseFailed]/before, instance/Migrate/SurgeTarget/gang.podGroup[Terminating]/before, instance/Migrate/SurgeTarget/gang.podGroup[OwnershipConflict]/before, instance/Migrate/SurgeTarget/gang.podGroup[PhaseFailed]/before
 func TestEscalation_GangReadingsOnAMigrationPair(t *testing.T) {
 	now := time.Now()
-	plan := workload.ComponentPlan{Instances: []workload.InstancePlan{
-		{Index: 0, Runners: []workload.RunnerPlan{{Name: "default", Size: 2}}},
-		{Index: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 2}}},
+	plan := types.ComponentPlan{Instances: []types.InstancePlan{
+		{Index: 0, Runners: []types.RunnerPlan{{Name: "default", Size: 2}}},
+		{Index: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 2}}},
 	}}
 
 	for _, tc := range []struct {
@@ -790,26 +791,26 @@ func TestEscalation_GangReadingsOnAMigrationPair(t *testing.T) {
 		// row is the pair index the reading lands on: 0 is the pinned
 		// source, 1 the replacement.
 		row     int32
-		state   workload.GangState
+		state   types.GangState
 		message string
 	}{
-		{"source group failed", 0, workload.GangStateFailed, gangFailedMessage},
-		{"replacement name being collected", 1, workload.GangStateTerminating, gangTerminatingMessage},
-		{"replacement name held by another controller", 1, workload.GangStateOwnershipConflict, gangConflictMessage},
-		{"replacement group failed", 1, workload.GangStateFailed, gangFailedMessage},
+		{"source group failed", 0, types.GangStateFailed, gangFailedMessage},
+		{"replacement name being collected", 1, types.GangStateTerminating, gangTerminatingMessage},
+		{"replacement name held by another controller", 1, types.GangStateOwnershipConflict, gangConflictMessage},
+		{"replacement group failed", 1, types.GangStateFailed, gangFailedMessage},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			input, rec := escalationFixture(migrationPair(now.Add(30 * time.Minute)))
 			input.Gangs = gangObservations(tc.row, tc.state, tc.message)
 
-			if err := runEscalationPass(t, workload.Deps{}, input, plan, map[int32][]*corev1.Pod{
+			if err := runEscalationPass(t, types.Deps{}, input, plan, map[int32][]*corev1.Pod{
 				0: {servingPod("engine-0-default-0")},
 			}); err != nil {
 				t.Fatalf("escalation pass: %v", err)
 			}
 
 			for _, s := range rec.store {
-				if s.Phase == workload.InstancePhaseFailed {
+				if s.Phase == types.InstancePhaseFailed {
 					t.Errorf("instance %d: got Failed want the record left in charge of the move", s.Index)
 				}
 				if s.Operation == nil || s.Operation.Waiting != "" {
@@ -835,18 +836,18 @@ func TestEscalation_GangReadingsOnAMigrationPair(t *testing.T) {
 
 // gangSurgePair is the source (index 0, Step=Surge, pinned to the marker)
 // and the replacement gang's marker at markerIndex running markerStep.
-func gangSurgePair(now time.Time, markerIndex int32, markerStep string) []workload.InstanceStatus {
-	return []workload.InstanceStatus{
+func gangSurgePair(now time.Time, markerIndex int32, markerStep string) []types.InstanceStatus {
+	return []types.InstanceStatus{
 		{
 			Index:           0,
 			Incarnation:     1,
-			Phase:           workload.InstancePhaseUpdating,
+			Phase:           types.InstancePhaseUpdating,
 			PodCount:        2,
 			RunningRevision: gangPairSource,
 			TargetRevision:  gangPairTarget,
-			Operation: &workload.InstanceOperation{
-				Type:           workload.InstanceOperationUpdate,
-				Step:           workload.UpdateStepSurge,
+			Operation: &types.InstanceOperation{
+				Type:           types.InstanceOperationUpdate,
+				Step:           types.UpdateStepSurge,
 				SurgeIndex:     &markerIndex,
 				TargetRevision: gangPairTarget,
 				StartedAt:      metav1.NewTime(now.Add(-time.Minute)),
@@ -856,11 +857,11 @@ func gangSurgePair(now time.Time, markerIndex int32, markerStep string) []worklo
 		{
 			Index:          markerIndex,
 			Incarnation:    1,
-			Phase:          workload.InstancePhaseCreating,
+			Phase:          types.InstancePhaseCreating,
 			PodCount:       2,
 			TargetRevision: gangPairTarget,
-			Operation: &workload.InstanceOperation{
-				Type:           workload.InstanceOperationUpdate,
+			Operation: &types.InstanceOperation{
+				Type:           types.InstanceOperationUpdate,
 				Step:           markerStep,
 				TargetRevision: gangPairTarget,
 				StartedAt:      metav1.NewTime(now.Add(-time.Minute)),
@@ -893,9 +894,9 @@ func TestEscalation_WedgedGangReplacementFailsBothHalvesOfThePair(t *testing.T) 
 		t.Run(reason, func(t *testing.T) {
 			now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
 			fc := clocktesting.NewFakeClock(now)
-			insts := gangSurgePair(now, 1, workload.UpdateStepGangSurgeTarget)
+			insts := gangSurgePair(now, 1, types.UpdateStepGangSurgeTarget)
 			input, _ := dispositionFixtureInput(fc, &insts, gangPairTarget, nil, ledgerOwnerCM())
-			input.ObservedState.InstanceStatuses = append([]workload.InstanceStatus(nil), insts...)
+			input.ObservedState.InstanceStatuses = append([]types.InstanceStatus(nil), insts...)
 			input.StuckPodGrace = time.Second
 
 			// The source keeps serving; the replacement gang is wedged.
@@ -908,16 +909,16 @@ func TestEscalation_WedgedGangReplacementFailsBothHalvesOfThePair(t *testing.T) 
 				1: wedged,
 			}
 
-			plan := workload.ComponentPlan{Instances: []workload.InstancePlan{
-				{Index: 0, Runners: []workload.RunnerPlan{{Name: "default", Size: 2}}},
-				{Index: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 2}}},
+			plan := types.ComponentPlan{Instances: []types.InstancePlan{
+				{Index: 0, Runners: []types.RunnerPlan{{Name: "default", Size: 2}}},
+				{Index: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 2}}},
 			}}
-			if err := runEscalationPass(t, workload.Deps{Client: fakeLedgerClient(t), Clock: fc}, input, plan, pods); err != nil {
+			if err := runEscalationPass(t, types.Deps{Client: fakeLedgerClient(t), Clock: fc}, input, plan, pods); err != nil {
 				t.Fatalf("escalation pass: %v", err)
 			}
 
 			for _, s := range insts {
-				if s.Phase != workload.InstancePhaseFailed {
+				if s.Phase != types.InstancePhaseFailed {
 					t.Errorf("instance %d Phase: got %q want Failed", s.Index, s.Phase)
 				}
 				if s.Operation == nil {
@@ -941,24 +942,24 @@ func TestEscalation_WedgedGangReplacementFailsBothHalvesOfThePair(t *testing.T) 
 // Cells: instance/Update/GangSurgeTarget/gang.podGroup[PhaseFailed]/before
 func TestEscalation_GangFailedReadingLeavesTheSurgeMarkerUntouched(t *testing.T) {
 	now := time.Now()
-	insts := gangSurgePair(now, 1, workload.UpdateStepGangSurgeTarget)
+	insts := gangSurgePair(now, 1, types.UpdateStepGangSurgeTarget)
 	input, rec := escalationFixture(insts)
-	input.Gangs = gangObservations(1, workload.GangStateFailed, gangFailedMessage)
+	input.Gangs = gangObservations(1, types.GangStateFailed, gangFailedMessage)
 
-	plan := workload.ComponentPlan{Instances: []workload.InstancePlan{
-		{Index: 0, Runners: []workload.RunnerPlan{{Name: "default", Size: 2}}},
-		{Index: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 2}}},
+	plan := types.ComponentPlan{Instances: []types.InstancePlan{
+		{Index: 0, Runners: []types.RunnerPlan{{Name: "default", Size: 2}}},
+		{Index: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 2}}},
 	}}
 	pods := map[int32][]*corev1.Pod{1: {
 		{ObjectMeta: metav1.ObjectMeta{Name: "engine-1-leader-0"}, Status: corev1.PodStatus{Phase: corev1.PodPending}},
 		{ObjectMeta: metav1.ObjectMeta{Name: "engine-1-worker-0"}, Status: corev1.PodStatus{Phase: corev1.PodPending}},
 	}}
-	if err := runEscalationPass(t, workload.Deps{}, input, plan, pods); err != nil {
+	if err := runEscalationPass(t, types.Deps{}, input, plan, pods); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
 	marker := rec.store[1]
-	if marker.Phase != workload.InstancePhaseCreating {
+	if marker.Phase != types.InstancePhaseCreating {
 		t.Errorf("marker Phase: got %q want Creating (the group resets itself)", marker.Phase)
 	}
 	if marker.Operation == nil || marker.Operation.Waiting != "" {
@@ -985,8 +986,8 @@ func TestEscalation_GangFailedReadingLeavesTheSurgeMarkerUntouched(t *testing.T)
 // Cells: instance/Update/GangSurgeTarget/pod.stuckTerminating/before, instance/Update/GangSurgeTargetCleanup/pod.stuckTerminating/before
 func TestEscalation_TerminatingMarkerPodEndsNothing(t *testing.T) {
 	for _, step := range []string{
-		workload.UpdateStepGangSurgeTarget,
-		workload.UpdateStepGangSurgeTargetCleanup,
+		types.UpdateStepGangSurgeTarget,
+		types.UpdateStepGangSurgeTargetCleanup,
 	} {
 		t.Run(step, func(t *testing.T) {
 			now := time.Now()
@@ -997,18 +998,18 @@ func TestEscalation_TerminatingMarkerPodEndsNothing(t *testing.T) {
 			deleting := waitingPod("engine-1-leader-0", "ContainerCreating", "node-a", now.Add(-time.Hour))
 			dt := metav1.NewTime(now.Add(-time.Hour))
 			deleting.DeletionTimestamp = &dt
-			plan := workload.ComponentPlan{Instances: []workload.InstancePlan{
-				{Index: 0, Runners: []workload.RunnerPlan{{Name: "default", Size: 2}}},
-				{Index: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 2}}},
+			plan := types.ComponentPlan{Instances: []types.InstancePlan{
+				{Index: 0, Runners: []types.RunnerPlan{{Name: "default", Size: 2}}},
+				{Index: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 2}}},
 			}}
 			pods := map[int32][]*corev1.Pod{1: {deleting}}
 
-			if err := runEscalationPass(t, workload.Deps{}, input, plan, pods); err != nil {
+			if err := runEscalationPass(t, types.Deps{}, input, plan, pods); err != nil {
 				t.Fatalf("escalation pass: %v", err)
 			}
 
 			marker := rec.store[1]
-			if marker.Phase != workload.InstancePhaseCreating {
+			if marker.Phase != types.InstancePhaseCreating {
 				t.Errorf("marker Phase: got %q want Creating (a pod on its way out is not a wedge)", marker.Phase)
 			}
 			if marker.Operation == nil {
@@ -1032,16 +1033,16 @@ func TestEscalation_TerminatingMarkerPodEndsNothing(t *testing.T) {
 
 // rollInFlight is one Instance with an update already stamped on it, at
 // the step the caller names.
-func rollInFlight(idx int32, step string, incarnation int64, deadline time.Time) workload.InstanceStatus {
-	return workload.InstanceStatus{
+func rollInFlight(idx int32, step string, incarnation int64, deadline time.Time) types.InstanceStatus {
+	return types.InstanceStatus{
 		Index:           idx,
 		Incarnation:     incarnation,
-		Phase:           workload.InstancePhaseUpdating,
+		Phase:           types.InstancePhaseUpdating,
 		PodCount:        1,
 		RunningRevision: "prior-rev",
-		Operation: &workload.InstanceOperation{
+		Operation: &types.InstanceOperation{
 			ID:             "update-" + step,
-			Type:           workload.InstanceOperationUpdate,
+			Type:           types.InstanceOperationUpdate,
 			Step:           step,
 			TargetRevision: updateTarget().Name,
 			Deadline:       metav1.NewTime(deadline),
@@ -1059,26 +1060,26 @@ func rollInFlight(idx int32, step string, incarnation int64, deadline time.Time)
 // Cells: instance/Update/Drain/gang.podGroup[Terminating]/before, instance/Update/Drain/gang.podGroup[OwnershipConflict]/before, instance/Update/Drain/gang.podGroup[PhaseFailed]/before
 func TestEscalation_GangReadingsOnARecreateRow(t *testing.T) {
 	now := time.Now()
-	recreatingGang := func() []workload.InstanceStatus {
+	recreatingGang := func() []types.InstanceStatus {
 		s := rollInFlight(0, "Drain", 2, now.Add(30*time.Minute))
 		s.PodCount = 2
-		return []workload.InstanceStatus{s}
+		return []types.InstanceStatus{s}
 	}
 
 	t.Run("terminating parks the recreate", func(t *testing.T) {
 		input, rec := escalationFixture(recreatingGang())
-		input.Gangs = gangObservations(0, workload.GangStateTerminating, gangTerminatingMessage)
-		if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 2), nil); err != nil {
+		input.Gangs = gangObservations(0, types.GangStateTerminating, gangTerminatingMessage)
+		if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 2), nil); err != nil {
 			t.Fatalf("escalation pass: %v", err)
 		}
 		got := rec.store[0]
-		if got.Phase != workload.InstancePhaseUpdating {
+		if got.Phase != types.InstancePhaseUpdating {
 			t.Errorf("Phase: got %q want Updating", got.Phase)
 		}
-		if got.Operation == nil || got.Operation.Waiting != workload.WaitingReasonPodGroupTerminating {
-			t.Errorf("Operation.Waiting: got %+v want %q", got.Operation, workload.WaitingReasonPodGroupTerminating)
+		if got.Operation == nil || got.Operation.Waiting != types.WaitingReasonPodGroupTerminating {
+			t.Errorf("Operation.Waiting: got %+v want %q", got.Operation, types.WaitingReasonPodGroupTerminating)
 		}
-		if !workload.OperationExternallyHeld(got.Operation) {
+		if !types.OperationExternallyHeld(got.Operation) {
 			t.Errorf("Operation: got %+v want externally held so the deadline parks", got.Operation)
 		}
 		if len(rec.warns) != 0 {
@@ -1088,16 +1089,16 @@ func TestEscalation_GangReadingsOnARecreateRow(t *testing.T) {
 
 	t.Run("ownership conflict ends the recreate", func(t *testing.T) {
 		input, rec := escalationFixture(recreatingGang())
-		input.Gangs = gangObservations(0, workload.GangStateOwnershipConflict, gangConflictMessage)
-		if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 2), pendingGangPods()); err != nil {
+		input.Gangs = gangObservations(0, types.GangStateOwnershipConflict, gangConflictMessage)
+		if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 2), pendingGangPods()); err != nil {
 			t.Fatalf("escalation pass: %v", err)
 		}
 		got := rec.store[0]
-		if got.Phase != workload.InstancePhaseFailed {
+		if got.Phase != types.InstancePhaseFailed {
 			t.Errorf("Phase: got %q want Failed", got.Phase)
 		}
-		if got.LastFailure == nil || got.LastFailure.Reason != workload.PodGroupOwnershipConflictReason {
-			t.Errorf("LastFailure.Reason: got %+v want %q", got.LastFailure, workload.PodGroupOwnershipConflictReason)
+		if got.LastFailure == nil || got.LastFailure.Reason != types.PodGroupOwnershipConflictReason {
+			t.Errorf("LastFailure.Reason: got %+v want %q", got.LastFailure, types.PodGroupOwnershipConflictReason)
 		}
 		if got.LastFailure == nil || !strings.Contains(got.LastFailure.Message, "StatefulSet/legacy") {
 			t.Errorf("LastFailure.Message: got %+v want the foreign controller named", got.LastFailure)
@@ -1112,15 +1113,15 @@ func TestEscalation_GangReadingsOnARecreateRow(t *testing.T) {
 
 	t.Run("the scheduler's failed phase leaves the row alone", func(t *testing.T) {
 		input, rec := escalationFixture(recreatingGang())
-		input.Gangs = gangObservations(0, workload.GangStateFailed, gangFailedMessage)
+		input.Gangs = gangObservations(0, types.GangStateFailed, gangFailedMessage)
 		for pass := 0; pass < 2; pass++ {
-			if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 2), pendingGangPods()); err != nil {
+			if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 2), pendingGangPods()); err != nil {
 				t.Fatalf("escalation pass %d: %v", pass, err)
 			}
-			input.ObservedState.InstanceStatuses = append([]workload.InstanceStatus(nil), rec.store...)
+			input.ObservedState.InstanceStatuses = append([]types.InstanceStatus(nil), rec.store...)
 		}
 		got := rec.store[0]
-		if got.Phase != workload.InstancePhaseUpdating {
+		if got.Phase != types.InstancePhaseUpdating {
 			t.Errorf("Phase: got %q want Updating (the group is reset, not the row)", got.Phase)
 		}
 		if got.Operation == nil || got.Operation.Waiting != "" {
@@ -1141,8 +1142,8 @@ func TestEscalation_GangReadingsOnARecreateRow(t *testing.T) {
 // surgeSourceRow is the source half of a gang surge at step: Updating,
 // pinned to the replacement gang under SurgeIndex, with the target
 // revision the attempt is committed to.
-func surgeSourceRow(now time.Time, step string, markerIndex int32) []workload.InstanceStatus {
-	rows := gangSurgePair(now, markerIndex, workload.UpdateStepGangSurgeTarget)
+func surgeSourceRow(now time.Time, step string, markerIndex int32) []types.InstanceStatus {
+	rows := gangSurgePair(now, markerIndex, types.UpdateStepGangSurgeTarget)
 	rows[0].Operation.Step = step
 	return rows
 }
@@ -1161,33 +1162,33 @@ func surgeSourceRow(now time.Time, step string, markerIndex int32) []workload.In
 // Cells: instance/Update/Surge/gang.podGroup[Terminating]/before, instance/Update/Surge/gang.podGroup[OwnershipConflict]/before, instance/Update/Surge/gang.podGroup[PhaseFailed]/before, instance/Update/SurgeDrain/gang.podGroup[Terminating]/before, instance/Update/SurgeDrain/gang.podGroup[OwnershipConflict]/before, instance/Update/SurgeDrain/gang.podGroup[PhaseFailed]/before
 func TestEscalation_GangReadingsOnASurgeSource(t *testing.T) {
 	now := time.Now()
-	plan := workload.ComponentPlan{Instances: []workload.InstancePlan{
-		{Index: 0, Runners: []workload.RunnerPlan{{Name: "default", Size: 2}}},
-		{Index: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 2}}},
+	plan := types.ComponentPlan{Instances: []types.InstancePlan{
+		{Index: 0, Runners: []types.RunnerPlan{{Name: "default", Size: 2}}},
+		{Index: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 2}}},
 	}}
 
-	for _, step := range []string{workload.UpdateStepSurge, workload.UpdateStepSurgeDrain} {
+	for _, step := range []string{types.UpdateStepSurge, types.UpdateStepSurgeDrain} {
 		for _, tc := range []struct {
 			name    string
-			state   workload.GangState
+			state   types.GangState
 			message string
 		}{
-			{"the name is being collected", workload.GangStateTerminating, gangTerminatingMessage},
-			{"the name is held by another controller", workload.GangStateOwnershipConflict, gangConflictMessage},
-			{"the scheduler failed the group", workload.GangStateFailed, gangFailedMessage},
+			{"the name is being collected", types.GangStateTerminating, gangTerminatingMessage},
+			{"the name is held by another controller", types.GangStateOwnershipConflict, gangConflictMessage},
+			{"the scheduler failed the group", types.GangStateFailed, gangFailedMessage},
 		} {
 			t.Run(step+"/"+tc.name, func(t *testing.T) {
 				input, rec := escalationFixture(surgeSourceRow(now, step, 1))
 				input.Gangs = gangObservations(0, tc.state, tc.message)
 
-				if err := runEscalationPass(t, workload.Deps{}, input, plan, map[int32][]*corev1.Pod{
+				if err := runEscalationPass(t, types.Deps{}, input, plan, map[int32][]*corev1.Pod{
 					0: {servingPod("engine-0-default-0"), servingPod("engine-0-default-1")},
 				}); err != nil {
 					t.Fatalf("escalation pass: %v", err)
 				}
 
 				got := rec.store[0]
-				if got.Phase != workload.InstancePhaseUpdating {
+				if got.Phase != types.InstancePhaseUpdating {
 					t.Errorf("Phase: got %q want Updating (the source's own group does not judge it)", got.Phase)
 				}
 				if got.Operation == nil || got.Operation.Step != step {

@@ -21,9 +21,9 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	workloadstatus "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
@@ -113,7 +113,7 @@ func IRGVK() schema.GroupVersionKind { return irGVK }
 // fill-ins (from the coordination config), likewise resolved ONCE per
 // reconcile by the caller; the zero value means unconfigured and each
 // knob uses its documented unconfigured behavior.
-func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.InferenceReplica, parent *v1beta1.InferenceService, updateRetryPolicy *workloadtypes.RetryPolicy, forceDeletePolicy *workloadtypes.ForceDeletePolicy, settings lifecycleSettings, autoMigrateBudget int32, coordDefaults coordination.GroupDefaults) workload.ReconcileInput {
+func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.InferenceReplica, parent *v1beta1.InferenceService, updateRetryPolicy *workloadtypes.RetryPolicy, forceDeletePolicy *workloadtypes.ForceDeletePolicy, settings lifecycleSettings, autoMigrateBudget int32, coordDefaults coordination.GroupDefaults) workloadtypes.ReconcileInput {
 	desired := desiredFromIR(ir)
 	// The parent annotation is the operator-facing source of truth whenever the
 	// parent is readable. This deliberately overrides both stale true and stale
@@ -133,7 +133,7 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 		eventTarget = parent
 	}
 	applyInstanceMutationsWithRetryBlock := buildApplyInstanceMutationsWithRetryBlockFromReader(r.statusWriter(), r.liveReader(), ir, settings.RetryBlockHistoryLimit)
-	input := workload.ReconcileInput{
+	input := workloadtypes.ReconcileInput{
 		OwnerObject:                          ir,
 		OwnerGVK:                             irGVK,
 		EventTarget:                          eventTarget,
@@ -178,7 +178,7 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 		// Per-Instance PodGroup classification for this pass. The PodGroup
 		// pass fills it before the dispatcher; the pod-create choke point
 		// and the escalation pass read it back.
-		Gangs: workload.NewGangObservations(),
+		Gangs: workloadtypes.NewGangObservations(),
 		Clock: r.Clock,
 		// WarnInstanceFailed bridges the workload escalation pass to the
 		// reconciler's event recorder so the operator sees the
@@ -199,7 +199,7 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 	// templates, and the disposition judges the spec's own affinity, not
 	// the rollback overlay's. MigrationMode is plan-derived and overlaid
 	// by the escalation pass.
-	input.Disposition = workload.DispositionDeps{
+	input.Disposition = workloadtypes.DispositionDeps{
 		AutoMigrateMaxAttempts: autoMigrateBudget,
 		PodSpec:                desired.PodSpec,
 		WorkerPodSpec:          desired.WorkerPodSpec,
@@ -222,9 +222,9 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 		// The gate reads peer Component status, which must be live:
 		// cross-Component coordination against a cache-lagged peer would
 		// admit a rollout the peer's real state forbids.
-		input.UpdateGate = func(strategy workload.UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, workload.RolloutHoldGate, string) {
+		input.UpdateGate = func(strategy workloadtypes.UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, workloadtypes.RolloutHoldGate, string) {
 			allowed, gate, reason := coordination.EvaluateUpdateGate(ctx, r.liveReader(), parent, ir.Spec.Component, r.Recorder, coordDefaults, strategy, inFlightSurge, inFlightUnavail)
-			return allowed, workload.RolloutHoldGate(gate), reason
+			return allowed, workloadtypes.RolloutHoldGate(gate), reason
 		}
 	}
 	// The migration audit ledger (history) lives on the user-facing
@@ -262,7 +262,7 @@ func (r *Reconciler) warnInstanceFailedFunc(ir *v1beta1.InferenceReplica, eventT
 		if r.Recorder == nil {
 			return
 		}
-		r.Recorder.Eventf(eventTarget, corev1.EventTypeWarning, string(workload.EventReasonInstanceFailed),
+		r.Recorder.Eventf(eventTarget, corev1.EventTypeWarning, string(workloadtypes.EventReasonInstanceFailed),
 			instanceFailedMsg, ir.Namespace, ir.Name, ir.Spec.Component, idx, podName, reason)
 	}
 }
@@ -282,7 +282,7 @@ func (r *Reconciler) warnRetryHeldFunc(ir *v1beta1.InferenceReplica, eventTarget
 		if r.Recorder == nil {
 			return
 		}
-		r.Recorder.Eventf(eventTarget, corev1.EventTypeWarning, string(workload.EventReasonRetryHeld),
+		r.Recorder.Eventf(eventTarget, corev1.EventTypeWarning, string(workloadtypes.EventReasonRetryHeld),
 			"InferenceReplica %s/%s component=%s update to revision %s held after %d failed attempt(s) (last failure: %s); publish a corrected revision or raise lifecycle.updateRetry limits",
 			ir.Namespace, ir.Name, ir.Spec.Component, targetRevision, attempts, reason)
 	}
@@ -332,7 +332,7 @@ func buildHeadlessServiceSpec(ir *v1beta1.InferenceReplica) workloadtypes.PerCom
 // ObjectMeta so user-intent pod-template labels/annotations land on
 // every emitted pod (matches the legacy ObjectMeta projection from
 // components/{engine,decoder,router}.go via the ISVC adapter).
-func desiredFromIR(ir *v1beta1.InferenceReplica) workload.WorkloadDesiredSpec {
+func desiredFromIR(ir *v1beta1.InferenceReplica) workloadtypes.WorkloadDesiredSpec {
 	replicas := int32(1)
 	if ir.Spec.Replicas != nil && *ir.Spec.Replicas > 0 {
 		replicas = *ir.Spec.Replicas
@@ -341,7 +341,7 @@ func desiredFromIR(ir *v1beta1.InferenceReplica) workload.WorkloadDesiredSpec {
 	// the rollout engine — see the WorkloadPacing notes in
 	// workload/types/source.go. (Pacing.RollbackToRevision IS live —
 	// handled in reconciler.go.)
-	desired := workload.WorkloadDesiredSpec{
+	desired := workloadtypes.WorkloadDesiredSpec{
 		Replicas:        replicas,
 		MinReadySeconds: ir.Spec.MinReadySeconds,
 		Runners:         runnersFromIR(ir),
@@ -361,7 +361,7 @@ func desiredFromIR(ir *v1beta1.InferenceReplica) workload.WorkloadDesiredSpec {
 		desired.PairingProtocol = *ir.Spec.PairingProtocol
 	}
 	if ir.Spec.Pacing != nil {
-		desired.Pacing = &workload.WorkloadPacing{
+		desired.Pacing = &workloadtypes.WorkloadPacing{
 			Partition:      ir.Spec.Pacing.Partition,
 			MaxUnavailable: ir.Spec.Pacing.MaxUnavailable,
 		}
@@ -399,13 +399,13 @@ func desiredFromIR(ir *v1beta1.InferenceReplica) workload.WorkloadDesiredSpec {
 // projection. The names round-trip 1:1 (RunnerNameDefault → "default",
 // RunnerNameLeader → "leader", RunnerNameWorker → "worker"); the size
 // is the per-Instance pod count for that role.
-func runnersFromIR(ir *v1beta1.InferenceReplica) []workload.Runner {
+func runnersFromIR(ir *v1beta1.InferenceReplica) []workloadtypes.Runner {
 	if len(ir.Spec.Runners) == 0 {
 		return nil
 	}
-	out := make([]workload.Runner, 0, len(ir.Spec.Runners))
+	out := make([]workloadtypes.Runner, 0, len(ir.Spec.Runners))
 	for _, r := range ir.Spec.Runners {
-		out = append(out, workload.Runner{
+		out = append(out, workloadtypes.Runner{
 			Name: string(r.Name),
 			Size: r.Size,
 		})
@@ -418,8 +418,8 @@ func runnersFromIR(ir *v1beta1.InferenceReplica) []workload.Runner {
 // the workload package writes back into the same shape via
 // WriteAggregateCondition, so reading them in here would double-stamp
 // transition timestamps.
-func observedFromIR(ir *v1beta1.InferenceReplica) workload.WorkloadObservedState {
-	return workload.WorkloadObservedState{
+func observedFromIR(ir *v1beta1.InferenceReplica) workloadtypes.WorkloadObservedState {
+	return workloadtypes.WorkloadObservedState{
 		ObservedGeneration: ir.Status.ObservedGeneration,
 		CollisionCount:     ir.Status.CollisionCount,
 		CurrentRevision:    ir.Status.CurrentRevision,
@@ -433,11 +433,11 @@ func observedFromIR(ir *v1beta1.InferenceReplica) workload.WorkloadObservedState
 // retryBlocksFromIR mirrors IR.Status.RetryBlocks onto the workload-side
 // RetryBlock shape. Field-for-field; timestamps are deep-copied so the
 // workload mirror never aliases the IR's status slice.
-func retryBlocksFromIR(ir *v1beta1.InferenceReplica) []workload.RetryBlock {
+func retryBlocksFromIR(ir *v1beta1.InferenceReplica) []workloadtypes.RetryBlock {
 	if len(ir.Status.RetryBlocks) == 0 {
 		return nil
 	}
-	out := make([]workload.RetryBlock, len(ir.Status.RetryBlocks))
+	out := make([]workloadtypes.RetryBlock, len(ir.Status.RetryBlocks))
 	for i := range ir.Status.RetryBlocks {
 		out[i] = retryBlockToWorkload(ir.Status.RetryBlocks[i])
 	}
@@ -447,10 +447,10 @@ func retryBlocksFromIR(ir *v1beta1.InferenceReplica) []workload.RetryBlock {
 // retryBlockToWorkload converts one v1beta1.RetryBlock to the workload
 // mirror. Timestamps copy pointer-safely (DeepCopy) like the
 // instance-status conversion does for its pointer fields.
-func retryBlockToWorkload(v v1beta1.RetryBlock) workload.RetryBlock {
-	return workload.RetryBlock{
+func retryBlockToWorkload(v v1beta1.RetryBlock) workloadtypes.RetryBlock {
+	return workloadtypes.RetryBlock{
 		TargetRevision:  v.TargetRevision,
-		State:           workload.RetryBlockState(v.State),
+		State:           workloadtypes.RetryBlockState(v.State),
 		AttemptsStarted: v.AttemptsStarted,
 		NextRetryAt:     v.NextRetryAt.DeepCopy(),
 		FirstFailureAt:  v.FirstFailureAt.DeepCopy(),
@@ -460,7 +460,7 @@ func retryBlockToWorkload(v v1beta1.RetryBlock) workload.RetryBlock {
 }
 
 // retryBlockFromWorkload is the inverse of retryBlockToWorkload.
-func retryBlockFromWorkload(w workload.RetryBlock) v1beta1.RetryBlock {
+func retryBlockFromWorkload(w workloadtypes.RetryBlock) v1beta1.RetryBlock {
 	return v1beta1.RetryBlock{
 		TargetRevision:  w.TargetRevision,
 		State:           v1beta1.RetryBlockState(w.State),
@@ -482,8 +482,8 @@ func retryBlockFromWorkload(w workload.RetryBlock) v1beta1.RetryBlock {
 // IR.Spec.ParentRef.Name) so pod / service names stay byte-identical
 // to the legacy shape — query.PodName / query.HeadlessServiceName /
 // revision.Name all key off this field.
-func buildKey(ir *v1beta1.InferenceReplica) workload.Key {
-	return workload.Key{
+func buildKey(ir *v1beta1.InferenceReplica) workloadtypes.Key {
+	return workloadtypes.Key{
 		Namespace:   ir.Namespace,
 		Component:   v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component),
 		OwnerName:   ir.Spec.ParentRef.Name,
@@ -509,10 +509,10 @@ func buildKey(ir *v1beta1.InferenceReplica) workload.Key {
 //
 // Owner disappearance or replacement returns ErrStatusOwnerGone so callers
 // stop before applying effects selected from the stale snapshot.
-func buildMutateInstance(writer statusWriter, reads client.Reader, ir *v1beta1.InferenceReplica) func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
+func buildMutateInstance(writer statusWriter, reads client.Reader, ir *v1beta1.InferenceReplica) func(ctx context.Context, idx int32, mutate func(*workloadtypes.InstanceStatus) bool) error {
 	key := client.ObjectKeyFromObject(ir)
 	ownerUID := ir.UID
-	return func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
+	return func(ctx context.Context, idx int32, mutate func(*workloadtypes.InstanceStatus) bool) error {
 		var committed *v1beta1.OMENativeInstanceStatus
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			committed = nil
@@ -985,7 +985,7 @@ func mirrorInstanceStatuses(ir *v1beta1.InferenceReplica, statuses []v1beta1.OME
 //
 //   - authoritative Get the IR so RolloutComplete observes per-Instance
 //     updates committed earlier in the same reconcile;
-//   - promote CurrentRevision = targetName IFF workload.RolloutComplete
+//   - promote CurrentRevision = targetName IFF status.RolloutComplete
 //     (every Instance Ready on targetName at partition 0). Partition>0
 //     never satisfies RolloutComplete, so a staged rollout does not
 //     promote — the Staged Ready reason derives downstream from the
@@ -1023,7 +1023,7 @@ func buildPromoteCurrentRevision(writer statusWriter, reads client.Reader, ir *v
 				return workloadtypes.ErrStatusMutationPrecondition
 			}
 			insts := v1beta1convert.InstanceStatusSliceToWorkload(fresh.Status.InstanceStatuses)
-			if fresh.Status.CurrentRevision == targetName || !workload.RolloutComplete(insts, targetName) {
+			if fresh.Status.CurrentRevision == targetName || !workloadstatus.RolloutComplete(insts, targetName) {
 				return nil
 			}
 			fresh.Status.CurrentRevision = targetName
@@ -1059,10 +1059,10 @@ func buildPromoteCurrentRevision(writer statusWriter, reads client.Reader, ir *v
 // post-write state.
 //
 // Owner disappearance or replacement returns ErrStatusOwnerGone.
-func buildMutateRetryBlock(writer statusWriter, reads client.Reader, ir *v1beta1.InferenceReplica, historyLimit *int32) func(ctx context.Context, targetRevision string, mutate func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
+func buildMutateRetryBlock(writer statusWriter, reads client.Reader, ir *v1beta1.InferenceReplica, historyLimit *int32) func(ctx context.Context, targetRevision string, mutate func(*workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition) error {
 	key := client.ObjectKeyFromObject(ir)
 	ownerUID := ir.UID
-	return func(ctx context.Context, targetRevision string, mutate func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
+	return func(ctx context.Context, targetRevision string, mutate func(*workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition) error {
 		var committed []v1beta1.RetryBlock
 		wrote := false
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -1086,12 +1086,12 @@ func buildMutateRetryBlock(writer statusWriter, reads client.Reader, ir *v1beta1
 					break
 				}
 			}
-			w := workload.RetryBlock{TargetRevision: targetRevision}
+			w := workloadtypes.RetryBlock{TargetRevision: targetRevision}
 			if pos != -1 {
 				w = retryBlockToWorkload(blocks[pos])
 			}
 			switch mutate(&w) {
-			case workload.RetryBlockPersist:
+			case workloadtypes.RetryBlockPersist:
 				nb := retryBlockFromWorkload(w)
 				// The subject key is fixed: a callback cannot re-scope the
 				// block to a different revision.
@@ -1101,7 +1101,7 @@ func buildMutateRetryBlock(writer statusWriter, reads client.Reader, ir *v1beta1
 				} else {
 					blocks[pos] = nb
 				}
-			case workload.RetryBlockRemove:
+			case workloadtypes.RetryBlockRemove:
 				if pos == -1 {
 					// Nothing to remove — no write.
 					return nil
@@ -1197,7 +1197,7 @@ func retryBlockOlder(a, b v1beta1.RetryBlock) bool {
 // counters. The expectations bucket keys on Key.OwnerName — the parent
 // ISVC name (buildKey), not the IR name — so Forget must use the same.
 // Owner disappearance or replacement returns ErrStatusOwnerGone.
-func buildRemoveInstance(writer statusWriter, reads client.Reader, ir *v1beta1.InferenceReplica, exp *workload.Expectations) func(ctx context.Context, idx int32) (bool, error) {
+func buildRemoveInstance(writer statusWriter, reads client.Reader, ir *v1beta1.InferenceReplica, exp *workloadtypes.Expectations) func(ctx context.Context, idx int32) (bool, error) {
 	key := client.ObjectKeyFromObject(ir)
 	ownerUID := ir.UID
 	return func(ctx context.Context, idx int32) (bool, error) {
@@ -1242,7 +1242,7 @@ func buildRemoveInstance(writer statusWriter, reads client.Reader, ir *v1beta1.I
 		if hadEntry {
 			cache := exp
 			if cache == nil {
-				cache = workload.DefaultExpectations
+				cache = workloadtypes.DefaultExpectations
 			}
 			cache.Forget(ir.Namespace, ir.Spec.ParentRef.Name, v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component), idx)
 		}

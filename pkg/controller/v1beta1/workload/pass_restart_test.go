@@ -12,6 +12,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -50,22 +51,22 @@ func TestReconcile_RestartPass_OneLiveListForManyInstances(t *testing.T) {
 		WithStatusSubresource(&v1beta1.InferenceService{}).
 		WithObjects(pods...).Build()
 	counter := &listCountingReader{Reader: c}
-	deps := workload.Deps{Client: c, APIReader: counter}
+	deps := workloadtypes.Deps{Client: c, APIReader: counter}
 
 	in := minimalInput(t)
-	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
-		{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseReady},
-		{Index: 1, Incarnation: 1, Phase: workload.InstancePhaseReady},
-		{Index: 2, Incarnation: 1, Phase: workload.InstancePhaseReady},
+	in.ObservedState.InstanceStatuses = []workloadtypes.InstanceStatus{
+		{Index: 0, Incarnation: 1, Phase: workloadtypes.InstancePhaseReady},
+		{Index: 1, Incarnation: 1, Phase: workloadtypes.InstancePhaseReady},
+		{Index: 2, Incarnation: 1, Phase: workloadtypes.InstancePhaseReady},
 	}
-	plan := workload.ComponentPlan{
-		Component:     workload.ComponentEngine,
+	plan := workloadtypes.ComponentPlan{
+		Component:     workloadtypes.ComponentEngine,
 		Replicas:      3,
-		RestartPolicy: workload.RestartPolicyRecreateInstance,
-		Instances: []workload.InstancePlan{
-			{Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
-			{Index: 1, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
-			{Index: 2, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+		RestartPolicy: workloadtypes.RestartPolicyRecreateInstance,
+		Instances: []workloadtypes.InstancePlan{
+			{Index: 0, Incarnation: 1, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 1, Incarnation: 1, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 2, Incarnation: 1, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}}},
 		},
 	}
 
@@ -99,23 +100,23 @@ func TestReconcile_RestartPass_PerInstanceSemanticsPreserved(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&v1beta1.InferenceService{}, &v1beta1.InferenceReplica{}).
 		WithObjects(objs...).Build()
-	deps := workload.Deps{Client: c, APIReader: c}
+	deps := workloadtypes.Deps{Client: c, APIReader: c}
 
 	in := minimalInput(t)
-	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
-		{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseReady},
-		{Index: 1, Incarnation: 1, Phase: workload.InstancePhaseReady},
-		{Index: 2, Incarnation: 1, Phase: workload.InstancePhaseReady},
+	in.ObservedState.InstanceStatuses = []workloadtypes.InstanceStatus{
+		{Index: 0, Incarnation: 1, Phase: workloadtypes.InstancePhaseReady},
+		{Index: 1, Incarnation: 1, Phase: workloadtypes.InstancePhaseReady},
+		{Index: 2, Incarnation: 1, Phase: workloadtypes.InstancePhaseReady},
 	}
-	in.MutateInstance = roundTripMutateInstance(c, isvc, workload.ComponentEngine)
-	plan := workload.ComponentPlan{
-		Component:     workload.ComponentEngine,
+	in.MutateInstance = roundTripMutateInstance(c, isvc, workloadtypes.ComponentEngine)
+	plan := workloadtypes.ComponentPlan{
+		Component:     workloadtypes.ComponentEngine,
 		Replicas:      3,
-		RestartPolicy: workload.RestartPolicyRecreateInstance,
-		Instances: []workload.InstancePlan{
-			{Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
-			{Index: 1, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
-			{Index: 2, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+		RestartPolicy: workloadtypes.RestartPolicyRecreateInstance,
+		Instances: []workloadtypes.InstancePlan{
+			{Index: 0, Incarnation: 1, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 1, Incarnation: 1, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 2, Incarnation: 1, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}}},
 		},
 	}
 
@@ -151,16 +152,16 @@ func TestReconcile_RestartPass_PerInstanceSemanticsPreserved(t *testing.T) {
 func TestReconcile_ScaleUpDuringRestart_CreatesFreshIndices(t *testing.T) {
 	name := "scale-during-restart"
 	targetName := name + "-engine-target"
-	f := newRestartScaleTestFixture(t, name, 3, false, workload.InstanceStatus{
-		Index: 0, Incarnation: 2, Phase: workload.InstancePhaseRestarting,
+	f := newRestartScaleTestFixture(t, name, 3, false, workloadtypes.InstanceStatus{
+		Index: 0, Incarnation: 2, Phase: workloadtypes.InstancePhaseRestarting,
 		RunningRevision: targetName,
-		Operation: &workload.InstanceOperation{
-			ID: "restart-0", Type: workload.InstanceOperationRestart, Step: "Drain",
+		Operation: &workloadtypes.InstanceOperation{
+			ID: "restart-0", Type: workloadtypes.InstanceOperationRestart, Step: "Drain",
 		},
-	}, []workload.RunnerPlan{{Name: "default", Size: 1}})
+	}, []workloadtypes.RunnerPlan{{Name: "default", Size: 1}})
 
-	result, err := workload.Reconcile(context.Background(), workload.Deps{
-		Client: f.client, APIReader: f.client, Expectations: workload.NewExpectations(),
+	result, err := workload.Reconcile(context.Background(), workloadtypes.Deps{
+		Client: f.client, APIReader: f.client, Expectations: workloadtypes.NewExpectations(),
 	}, f.input, f.plan, f.target)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -171,7 +172,7 @@ func TestReconcile_ScaleUpDuringRestart_CreatesFreshIndices(t *testing.T) {
 
 	names := podNameSet(t, f.client, f.isvc.Namespace)
 	for idx := int32(0); idx < 3; idx++ {
-		name := query.PodName(f.isvc.Name, workload.ComponentEngine, idx, "default", 0)
+		name := query.PodName(f.isvc.Name, workloadtypes.ComponentEngine, idx, "default", 0)
 		if !names[name] {
 			t.Errorf("expected pod %q to be materialized in the restart pass; got %v", name, names)
 		}
@@ -198,19 +199,19 @@ func TestReconcile_ScaleUpDuringRestart_ExcludesRestartSelectedCreateOwner(t *te
 	name := "scale-partial-gang"
 	targetName := name + "-engine-target"
 	leader := enginePod(name, "prod", 0)
-	leader.Name = query.PodName(name, workload.ComponentEngine, 0, "leader", 0)
+	leader.Name = query.PodName(name, workloadtypes.ComponentEngine, 0, "leader", 0)
 	leader.Labels[query.LabelRunner] = "leader"
-	f := newRestartScaleTestFixture(t, name, 2, false, workload.InstanceStatus{
-		Index: 0, Incarnation: 1, Phase: workload.InstancePhaseCreating, PodCount: 1,
+	f := newRestartScaleTestFixture(t, name, 2, false, workloadtypes.InstanceStatus{
+		Index: 0, Incarnation: 1, Phase: workloadtypes.InstancePhaseCreating, PodCount: 1,
 		RunningRevision: targetName, TargetRevision: targetName,
-		Operation: &workload.InstanceOperation{
-			ID: "create-0", Type: workload.InstanceOperationCreate, Step: "CreatePods",
+		Operation: &workloadtypes.InstanceOperation{
+			ID: "create-0", Type: workloadtypes.InstanceOperationCreate, Step: "CreatePods",
 			TargetRevision: targetName,
 		},
-	}, []workload.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 1}}, leader)
+	}, []workloadtypes.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 1}}, leader)
 
-	result, err := workload.Reconcile(context.Background(), workload.Deps{
-		Client: f.client, APIReader: f.client, Expectations: workload.NewExpectations(),
+	result, err := workload.Reconcile(context.Background(), workloadtypes.Deps{
+		Client: f.client, APIReader: f.client, Expectations: workloadtypes.NewExpectations(),
 	}, f.input, f.plan, f.target)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -232,11 +233,11 @@ func TestReconcile_ScaleUpDuringRestart_ExcludesRestartSelectedCreateOwner(t *te
 
 	names := podNameSet(t, f.client, f.isvc.Namespace)
 	for _, runner := range []string{"leader", "worker"} {
-		freshName := query.PodName(f.isvc.Name, workload.ComponentEngine, 1, runner, 0)
+		freshName := query.PodName(f.isvc.Name, workloadtypes.ComponentEngine, 1, runner, 0)
 		if !names[freshName] {
 			t.Errorf("expected fresh-index pod %q; got %v", freshName, names)
 		}
-		restartName := query.PodName(f.isvc.Name, workload.ComponentEngine, 0, runner, 0)
+		restartName := query.PodName(f.isvc.Name, workloadtypes.ComponentEngine, 0, runner, 0)
 		if names[restartName] {
 			t.Errorf("restart-selected index 0 must not be recreated from the stale Create observation; found %q in %v", restartName, names)
 		}
@@ -248,16 +249,16 @@ func TestReconcile_ScaleUpDuringRestart_ExcludesRestartSelectedCreateOwner(t *te
 func TestReconcile_PausedRestart_DoesNotCreateFreshIndices(t *testing.T) {
 	name := "paused-restart"
 	targetName := name + "-engine-target"
-	f := newRestartScaleTestFixture(t, name, 2, true, workload.InstanceStatus{
-		Index: 0, Incarnation: 2, Phase: workload.InstancePhaseRestarting,
+	f := newRestartScaleTestFixture(t, name, 2, true, workloadtypes.InstanceStatus{
+		Index: 0, Incarnation: 2, Phase: workloadtypes.InstancePhaseRestarting,
 		RunningRevision: targetName,
-		Operation: &workload.InstanceOperation{
-			ID: "restart-0", Type: workload.InstanceOperationRestart, Step: "Drain",
+		Operation: &workloadtypes.InstanceOperation{
+			ID: "restart-0", Type: workloadtypes.InstanceOperationRestart, Step: "Drain",
 		},
-	}, []workload.RunnerPlan{{Name: "default", Size: 1}})
+	}, []workloadtypes.RunnerPlan{{Name: "default", Size: 1}})
 
-	result, err := workload.Reconcile(context.Background(), workload.Deps{
-		Client: f.client, APIReader: f.client, Expectations: workload.NewExpectations(),
+	result, err := workload.Reconcile(context.Background(), workloadtypes.Deps{
+		Client: f.client, APIReader: f.client, Expectations: workloadtypes.NewExpectations(),
 	}, f.input, f.plan, f.target)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -267,11 +268,11 @@ func TestReconcile_PausedRestart_DoesNotCreateFreshIndices(t *testing.T) {
 	}
 
 	names := podNameSet(t, f.client, f.isvc.Namespace)
-	restartName := query.PodName(f.isvc.Name, workload.ComponentEngine, 0, "default", 0)
+	restartName := query.PodName(f.isvc.Name, workloadtypes.ComponentEngine, 0, "default", 0)
 	if !names[restartName] {
 		t.Errorf("paused reconcile must still advance the existing restart; got %v", names)
 	}
-	freshName := query.PodName(f.isvc.Name, workload.ComponentEngine, 1, "default", 0)
+	freshName := query.PodName(f.isvc.Name, workloadtypes.ComponentEngine, 1, "default", 0)
 	if names[freshName] {
 		t.Errorf("paused reconcile must not materialize absent index 1; got %v", names)
 	}
@@ -292,7 +293,7 @@ func TestReconcile_CrashLoopRepair_PacedByUnavailabilityBudget(t *testing.T) {
 	in, plan, pods := crashLoopRepairFixture(t, 3, &one)
 	c := fake.NewClientBuilder().WithScheme(makeScheme(t)).WithObjects(pods...).Build()
 	store := installRepairStore(&in)
-	deps := workload.Deps{Client: c, APIReader: c, Expectations: workload.NewExpectations()}
+	deps := workloadtypes.Deps{Client: c, APIReader: c, Expectations: workloadtypes.NewExpectations()}
 
 	if _, err := workload.Reconcile(ctx, deps, in, plan, updateTarget()); err != nil {
 		t.Fatalf("first pass: %v", err)
@@ -310,7 +311,7 @@ func TestReconcile_CrashLoopRepair_PacedByUnavailabilityBudget(t *testing.T) {
 	}
 	for _, idx := range []int32{1, 2} {
 		s := store.status(idx)
-		if s == nil || s.Phase != workload.InstancePhaseReady || s.Operation != nil {
+		if s == nil || s.Phase != workloadtypes.InstancePhaseReady || s.Operation != nil {
 			t.Fatalf("instance %d = %+v, want an untouched Ready row behind the in-flight repair", idx, s)
 		}
 	}
@@ -325,7 +326,7 @@ func TestReconcile_CrashLoopRepair_UncappedRepairsEveryWedge(t *testing.T) {
 	in, plan, pods := crashLoopRepairFixture(t, 3, nil)
 	c := fake.NewClientBuilder().WithScheme(makeScheme(t)).WithObjects(pods...).Build()
 	store := installRepairStore(&in)
-	deps := workload.Deps{Client: c, APIReader: c, Expectations: workload.NewExpectations()}
+	deps := workloadtypes.Deps{Client: c, APIReader: c, Expectations: workloadtypes.NewExpectations()}
 
 	if _, err := workload.Reconcile(ctx, deps, in, plan, updateTarget()); err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -345,17 +346,17 @@ func TestReconcile_CrashLoopRepair_HeldByCoordinationGate(t *testing.T) {
 	ctx := context.Background()
 	in, plan, pods := crashLoopRepairFixture(t, 2, nil)
 	consults := 0
-	in.UpdateGate = func(strategy workload.UpdateStrategyType, surge, unavail int32) (bool, workload.RolloutHoldGate, string) {
+	in.UpdateGate = func(strategy workloadtypes.UpdateStrategyType, surge, unavail int32) (bool, workloadtypes.RolloutHoldGate, string) {
 		consults++
-		if strategy != workload.UpdateStrategyRecreatePod {
+		if strategy != workloadtypes.UpdateStrategyRecreatePod {
 			t.Errorf("a repair rebuilds pods in place; gate consulted with strategy %q", strategy)
 		}
-		return false, workload.RolloutHoldGateRatio, "peer Component is behind"
+		return false, workloadtypes.RolloutHoldGateRatio, "peer Component is behind"
 	}
 	c := fake.NewClientBuilder().WithScheme(makeScheme(t)).WithObjects(pods...).Build()
 	store := installRepairStore(&in)
 	rec := record.NewFakeRecorder(16)
-	deps := workload.Deps{Client: c, APIReader: c, Recorder: rec, Expectations: workload.NewExpectations()}
+	deps := workloadtypes.Deps{Client: c, APIReader: c, Recorder: rec, Expectations: workloadtypes.NewExpectations()}
 
 	result, err := workload.Reconcile(ctx, deps, in, plan, updateTarget())
 	if err != nil {
@@ -387,21 +388,21 @@ func TestReconcile_CrashLoopRepair_AllDeniedRequeuesAndReports(t *testing.T) {
 	in, plan, pods := crashLoopRepairFixture(t, 3, &one)
 	// Index 0 is mid-update rather than wedged, so it spends the budget
 	// without being a restart selection of its own.
-	in.ObservedState.InstanceStatuses[0].Phase = workload.InstancePhaseUpdating
-	in.ObservedState.InstanceStatuses[0].Operation = &workload.InstanceOperation{
-		ID: "update-0", Type: workload.InstanceOperationUpdate, Step: "InPlace",
+	in.ObservedState.InstanceStatuses[0].Phase = workloadtypes.InstancePhaseUpdating
+	in.ObservedState.InstanceStatuses[0].Operation = &workloadtypes.InstanceOperation{
+		ID: "update-0", Type: workloadtypes.InstanceOperationUpdate, Step: "InPlace",
 	}
 	c := fake.NewClientBuilder().WithScheme(makeScheme(t)).WithObjects(pods...).Build()
 	store := installRepairStore(&in)
 	rec := record.NewFakeRecorder(16)
-	deps := workload.Deps{Client: c, APIReader: c, Recorder: rec, Expectations: workload.NewExpectations()}
+	deps := workloadtypes.Deps{Client: c, APIReader: c, Recorder: rec, Expectations: workloadtypes.NewExpectations()}
 
 	result, err := workload.Reconcile(ctx, deps, in, plan, updateTarget())
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 	for _, idx := range []int32{1, 2} {
-		if s := store.status(idx); s == nil || s.Phase != workload.InstancePhaseReady {
+		if s := store.status(idx); s == nil || s.Phase != workloadtypes.InstancePhaseReady {
 			t.Fatalf("instance %d = %+v, want an untouched Ready row: the budget is spent", idx, s)
 		}
 	}
@@ -434,14 +435,14 @@ func TestRestartPass_IsolatesInstanceStatusWriteFailure(t *testing.T) {
 	if strings.Contains(err.Error(), "restart instance 1") {
 		t.Fatalf("instance 1 did not fail and must not be reported; got %v", err)
 	}
-	if s := h.instance(0); s == nil || s.Phase != workload.InstancePhaseReady || s.Incarnation != 1 || s.Operation != nil {
+	if s := h.instance(0); s == nil || s.Phase != workloadtypes.InstancePhaseReady || s.Incarnation != 1 || s.Operation != nil {
 		t.Fatalf("instance 0 must be untouched while its writes are rejected; got %+v", s)
 	}
 	if pods := h.podsOf(0); len(pods) != 0 {
 		t.Fatalf("instance 0 must not be recreated before its Restarting write lands; got %d pods", len(pods))
 	}
-	if s := h.instance(1); s == nil || s.Phase != workload.InstancePhaseRestarting ||
-		s.Operation == nil || s.Operation.Type != workload.InstanceOperationRestart {
+	if s := h.instance(1); s == nil || s.Phase != workloadtypes.InstancePhaseRestarting ||
+		s.Operation == nil || s.Operation.Type != workloadtypes.InstanceOperationRestart {
 		t.Fatalf("instance 1 must start its restart in the same pass; got %+v", s)
 	}
 	if !h.atIncarnation(1, 2) {
@@ -457,7 +458,7 @@ func TestRestartPass_IsolatesInstanceStatusWriteFailure(t *testing.T) {
 			t.Fatalf("the pass must keep failing on instance 0; got %v", err)
 		}
 	}
-	if s := h.instance(1); s == nil || s.Phase != workload.InstancePhaseReady || s.Operation != nil || !h.atIncarnation(1, 2) {
+	if s := h.instance(1); s == nil || s.Phase != workloadtypes.InstancePhaseReady || s.Operation != nil || !h.atIncarnation(1, 2) {
 		h.dumpState("after the failing passes")
 		t.Fatalf("instance 1 must complete its restart while instance 0 keeps failing; got %+v", s)
 	}
@@ -499,7 +500,7 @@ func TestRestartPass_NoErrors_RequeuesAndCreatesFreshIndices(t *testing.T) {
 	// its next step, and a fresh create that asks for no wake of its own
 	// must not erase it.
 	unconfigured := newRestartHarness(t, 2)
-	unconfigured.requeue = workload.RequeueIntervals{}
+	unconfigured.requeue = workloadtypes.RequeueIntervals{}
 	unconfigured.losePods(0, 1)
 	unconfigured.replicas = 3
 	unconfigured.setTarget(unconfigured.revV1, goodImage)
@@ -514,8 +515,8 @@ func TestRestartPass_NoErrors_RequeuesAndCreatesFreshIndices(t *testing.T) {
 		t.Fatalf("a restart pass with no cadence must still wake; got %+v", res)
 	}
 	for _, idx := range []int32{0, 1} {
-		if s := h.instance(idx); s == nil || s.Phase != workload.InstancePhaseRestarting ||
-			s.Operation == nil || s.Operation.Type != workload.InstanceOperationRestart {
+		if s := h.instance(idx); s == nil || s.Phase != workloadtypes.InstancePhaseRestarting ||
+			s.Operation == nil || s.Operation.Type != workloadtypes.InstanceOperationRestart {
 			t.Fatalf("instance %d must be restarting; got %+v", idx, s)
 		}
 		if !h.atIncarnation(idx, 2) {
@@ -523,8 +524,8 @@ func TestRestartPass_NoErrors_RequeuesAndCreatesFreshIndices(t *testing.T) {
 			t.Fatalf("instance %d must have its replacement pod at incarnation 2", idx)
 		}
 	}
-	if s := h.instance(2); s == nil || s.Phase != workload.InstancePhaseCreating ||
-		s.Operation == nil || s.Operation.Type != workload.InstanceOperationCreate {
+	if s := h.instance(2); s == nil || s.Phase != workloadtypes.InstancePhaseCreating ||
+		s.Operation == nil || s.Operation.Type != workloadtypes.InstanceOperationCreate {
 		t.Fatalf("fresh index 2 must begin its Create in the restart pass; got %+v", s)
 	}
 	if pods := h.podsOf(2); len(pods) != 1 {
@@ -542,8 +543,8 @@ func newRestartScaleTestFixture(
 	name string,
 	replicas int32,
 	paused bool,
-	status workload.InstanceStatus,
-	runners []workload.RunnerPlan,
+	status workloadtypes.InstanceStatus,
+	runners []workloadtypes.RunnerPlan,
 	pods ...client.Object,
 ) *restartScaleTestFixture {
 	t.Helper()
@@ -571,24 +572,24 @@ func newRestartScaleTestFixture(
 	input.DesiredSpec.MultiPod = len(runners) > 1
 	input.DesiredSpec.Paused = paused
 	input.ObservedState.UpdateRevision = status.RunningRevision
-	input.ObservedState.InstanceStatuses = []workload.InstanceStatus{cloneTestInstanceStatus(status)}
-	input.MutateInstance = roundTripMutateInstance(c, isvc, workload.ComponentEngine)
+	input.ObservedState.InstanceStatuses = []workloadtypes.InstanceStatus{cloneTestInstanceStatus(status)}
+	input.MutateInstance = roundTripMutateInstance(c, isvc, workloadtypes.ComponentEngine)
 
-	instances := make([]workload.InstancePlan, 0, replicas)
+	instances := make([]workloadtypes.InstancePlan, 0, replicas)
 	for idx := int32(0); idx < replicas; idx++ {
 		incarnation := int64(1)
 		if idx == status.Index {
 			incarnation = status.Incarnation
 		}
-		instances = append(instances, workload.InstancePlan{
+		instances = append(instances, workloadtypes.InstancePlan{
 			Index: idx, Incarnation: incarnation,
-			Runners: append([]workload.RunnerPlan(nil), runners...),
+			Runners: append([]workloadtypes.RunnerPlan(nil), runners...),
 		})
 	}
-	plan := workload.ComponentPlan{
-		Component:            workload.ComponentEngine,
+	plan := workloadtypes.ComponentPlan{
+		Component:            workloadtypes.ComponentEngine,
 		Replicas:             replicas,
-		RestartPolicy:        workload.RestartPolicyRecreateInstance,
+		RestartPolicy:        workloadtypes.RestartPolicyRecreateInstance,
 		InstanceReadyTimeout: time.Minute,
 		Paused:               paused,
 		Instances:            instances,
@@ -615,30 +616,30 @@ func wedgedEnginePod(idx int32) *corev1.Pod {
 // crashLoopRepairFixture wires n Ready, operation-free rows whose pods
 // are all wedged on the current revision — the shape one bad argument
 // or one bad image produces across a whole Component.
-func crashLoopRepairFixture(t *testing.T, n int32, maxUnavailable *intstr.IntOrString) (workload.ReconcileInput, workload.ComponentPlan, []client.Object) {
+func crashLoopRepairFixture(t *testing.T, n int32, maxUnavailable *intstr.IntOrString) (workloadtypes.ReconcileInput, workloadtypes.ComponentPlan, []client.Object) {
 	t.Helper()
 	in := minimalInput(t)
 	in.StuckPodGrace = time.Minute
 	in.ObservedState.CurrentRevision = crashLoopRepairRevision
 	in.DesiredSpec.Replicas = n
-	plan := workload.ComponentPlan{
-		Component:     workload.ComponentEngine,
+	plan := workloadtypes.ComponentPlan{
+		Component:     workloadtypes.ComponentEngine,
 		Replicas:      n,
-		RestartPolicy: workload.RestartPolicyNone,
-		UpdateStrategy: workload.UpdateStrategy{
-			Type:          workload.UpdateStrategyRecreatePod,
-			RollingUpdate: &workload.RollingUpdate{MaxUnavailable: maxUnavailable},
+		RestartPolicy: workloadtypes.RestartPolicyNone,
+		UpdateStrategy: workloadtypes.UpdateStrategy{
+			Type:          workloadtypes.UpdateStrategyRecreatePod,
+			RollingUpdate: &workloadtypes.RollingUpdate{MaxUnavailable: maxUnavailable},
 		},
 	}
 	var pods []client.Object
 	for idx := int32(0); idx < n; idx++ {
-		in.ObservedState.InstanceStatuses = append(in.ObservedState.InstanceStatuses, workload.InstanceStatus{
-			Index: idx, Incarnation: 1, Phase: workload.InstancePhaseReady,
+		in.ObservedState.InstanceStatuses = append(in.ObservedState.InstanceStatuses, workloadtypes.InstanceStatus{
+			Index: idx, Incarnation: 1, Phase: workloadtypes.InstancePhaseReady,
 			PodCount: 1, RunningRevision: crashLoopRepairRevision,
 		})
-		plan.Instances = append(plan.Instances, workload.InstancePlan{
+		plan.Instances = append(plan.Instances, workloadtypes.InstancePlan{
 			Index: idx, Incarnation: 1,
-			Runners: []workload.RunnerPlan{{Name: "default", Size: 1}},
+			Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}},
 		})
 		pods = append(pods, wedgedEnginePod(idx))
 	}
@@ -647,13 +648,13 @@ func crashLoopRepairFixture(t *testing.T, n int32, maxUnavailable *intstr.IntOrS
 
 // installRepairStore routes every status adapter the restart pass uses
 // into one store, so a pass's repairs are observable as committed rows.
-func installRepairStore(in *workload.ReconcileInput) *testAtomicMutationStore {
+func installRepairStore(in *workloadtypes.ReconcileInput) *testAtomicMutationStore {
 	store := installTestAtomicMutationStore(in)
-	in.ApplyInstanceMutations = func(ctx context.Context, muts []workload.InstanceMutation) error {
+	in.ApplyInstanceMutations = func(ctx context.Context, muts []workloadtypes.InstanceMutation) error {
 		return store.apply(ctx, muts, "", nil)
 	}
-	in.MutateInstance = func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
-		return store.apply(ctx, []workload.InstanceMutation{{Index: idx, Mutate: mutate}}, "", nil)
+	in.MutateInstance = func(ctx context.Context, idx int32, mutate func(*workloadtypes.InstanceStatus) bool) error {
+		return store.apply(ctx, []workloadtypes.InstanceMutation{{Index: idx, Mutate: mutate}}, "", nil)
 	}
 	return store
 }
@@ -662,7 +663,7 @@ func installRepairStore(in *workload.ReconcileInput) *testAtomicMutationStore {
 func countRestarting(store *testAtomicMutationStore, n int32) int {
 	restarting := 0
 	for idx := int32(0); idx < n; idx++ {
-		if s := store.status(idx); s != nil && s.Phase == workload.InstancePhaseRestarting {
+		if s := store.status(idx); s != nil && s.Phase == workloadtypes.InstancePhaseRestarting {
 			restarting++
 		}
 	}
@@ -679,7 +680,7 @@ func assertRepairHeld(t *testing.T, rec *record.FakeRecorder, detail string) {
 		select {
 		case e := <-rec.Events:
 			events = append(events, e)
-			if strings.Contains(e, string(workload.EventReasonRepairHeld)) {
+			if strings.Contains(e, string(workloadtypes.EventReasonRepairHeld)) {
 				held++
 				if !strings.Contains(e, detail) {
 					t.Errorf("RepairHeld must name the layer holding the repair; got %q", e)
@@ -700,8 +701,8 @@ func assertRepairHeld(t *testing.T, rec *record.FakeRecorder, detail string) {
 func newRestartHarness(t *testing.T, replicas int32) *recoveryHarness {
 	t.Helper()
 	h := newRecoveryHarness(t, false)
-	policy := workload.RestartPolicyRecreateInstance
-	h.lifecycle = workload.Lifecycle{RestartPolicy: &policy}
+	policy := workloadtypes.RestartPolicyRecreateInstance
+	h.lifecycle = workloadtypes.Lifecycle{RestartPolicy: &policy}
 	h.replicas = replicas
 	h.setTarget(h.revV1, goodImage)
 	if !h.run(30, func() bool { return h.allReady(replicas) }) {

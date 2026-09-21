@@ -9,7 +9,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
 	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // executeUpdatePass runs the Update op for the Decision's selected
@@ -20,14 +22,14 @@ import (
 // completion, a finished scale-down) have landed — to observe the same
 // state the pass pipeline showed it. stop=true means the pass consumed
 // the reconcile (the caller returns res without running Create).
-func executeUpdatePass(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot, selection *UpdateSelection, retryBlockWait time.Duration) (res ctrl.Result, stop bool, err error) {
+func executeUpdatePass(ctx context.Context, deps types.Deps, input types.ReconcileInput, plan types.ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot, selection *UpdateSelection, retryBlockWait time.Duration) (res ctrl.Result, stop bool, err error) {
 	anyUpdating := false
 	anyGated := false
 	// First StartingFresh denial this pass (Budget or UpdateGate), for
 	// RecordRolloutHold — one Component has one hold slot, so the first
 	// denial found (plan order) wins, matching the gate stack's own
 	// first-denial-wins precedence.
-	var firstDenial *RolloutHold
+	var firstDenial *types.RolloutHold
 	// anyUpdateRan tracks whether ANY Update call fired this pass,
 	// including one that returned done=true: even a done Update mutates
 	// the row. Create must not run on an ObservedState an Update just
@@ -115,17 +117,17 @@ func executeUpdatePass(ctx context.Context, deps Deps, input ReconcileInput, pla
 		}
 	}
 	if anyUpdating {
-		return PassRequeue(workloadops.UpdateRequeueInterval(input), retryBlockWait), true, nil
+		return types.PassRequeue(workloadops.UpdateRequeueInterval(input), retryBlockWait), true, nil
 	}
 	if anyGated {
-		return PassRequeue(input.Requeue.Gate, retryBlockWait), true, nil
+		return types.PassRequeue(input.Requeue.Gate, retryBlockWait), true, nil
 	}
 	// All Updates that ran returned done=true (steady-state for those
 	// instances). Requeue without running Create so the next pass
 	// sees fresh ObservedState (see anyUpdateRan above). Immediate
 	// requeue is already sooner than any retryBlockWait.
 	if anyUpdateRan {
-		return RequeueNow(), true, nil
+		return types.RequeueNow(), true, nil
 	}
 	return ctrl.Result{}, false, nil
 }
@@ -142,7 +144,7 @@ func executeUpdatePass(ctx context.Context, deps Deps, input ReconcileInput, pla
 type updateAdmission struct {
 	selection *UpdateSelection
 	target    *appsv1.ControllerRevision
-	gate      func(strategy UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, RolloutHoldGate, string)
+	gate      func(strategy types.UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, types.RolloutHoldGate, string)
 
 	// inFlightSurge and inFlightUnavail are the fresh starts this pass
 	// charged to the per-Component budget, one per strategy arm.
@@ -158,12 +160,12 @@ type updateAdmission struct {
 	gateUnavail int32
 }
 
-func newUpdateAdmission(input ReconcileInput, selection *UpdateSelection, target *appsv1.ControllerRevision) *updateAdmission {
+func newUpdateAdmission(input types.ReconcileInput, selection *UpdateSelection, target *appsv1.ControllerRevision) *updateAdmission {
 	return &updateAdmission{selection: selection, target: target, gate: input.UpdateGate}
 }
 
 func (a *updateAdmission) surge() bool {
-	return a.selection.Strategy == UpdateStrategySurgeThenDrain
+	return a.selection.Strategy == types.UpdateStrategySurgeThenDrain
 }
 
 // admit reports whether item may start this pass. The per-Component
@@ -172,18 +174,18 @@ func (a *updateAdmission) surge() bool {
 // it, so the caller can report which layer is holding the Component.
 // Both layers project (prior + this pass + 1) against their budget, the
 // way the coordination group budget is projected.
-func (a *updateAdmission) admit(ctx context.Context, plan ComponentPlan, item UpdateItem) (bool, *RolloutHold) {
+func (a *updateAdmission) admit(ctx context.Context, plan types.ComponentPlan, item UpdateItem) (bool, *types.RolloutHold) {
 	if a.surge() {
-		if projected, denied := budgetDenies(a.selection.SurgeBudget, a.selection.PriorSurgeInFlight, a.inFlightSurge); denied {
-			return false, &RolloutHold{
-				Gate:   RolloutHoldGateBudget,
+		if projected, denied := escalation.BudgetDenies(a.selection.SurgeBudget, a.selection.PriorSurgeInFlight, a.inFlightSurge); denied {
+			return false, &types.RolloutHold{
+				Gate:   types.RolloutHoldGateBudget,
 				Reason: fmt.Sprintf("per-Component surge budget %d exhausted (would become %d)", a.selection.SurgeBudget, projected),
 				Target: a.target.Name,
 			}
 		}
-	} else if projected, denied := budgetDenies(a.selection.UnavailBudget, a.selection.PriorUnavailInFlight, a.inFlightUnavail); denied {
-		return false, &RolloutHold{
-			Gate:   RolloutHoldGateBudget,
+	} else if projected, denied := escalation.BudgetDenies(a.selection.UnavailBudget, a.selection.PriorUnavailInFlight, a.inFlightUnavail); denied {
+		return false, &types.RolloutHold{
+			Gate:   types.RolloutHoldGateBudget,
 			Reason: fmt.Sprintf("per-Component unavailability budget %d exhausted (would become %d)", a.selection.UnavailBudget, projected),
 			Target: a.target.Name,
 		}
@@ -197,7 +199,7 @@ func (a *updateAdmission) admit(ctx context.Context, plan ComponentPlan, item Up
 				"component", plan.Component, "instance", item.Instance.Index,
 				"target", a.target.Name, "gate", gate, "reason", reason,
 				"inFlightSurge", a.inFlightSurge, "gateUnavail", a.gateUnavail)
-			return false, &RolloutHold{Gate: gate, Reason: reason, Target: a.target.Name}
+			return false, &types.RolloutHold{Gate: gate, Reason: reason, Target: a.target.Name}
 		}
 	}
 	return true, nil

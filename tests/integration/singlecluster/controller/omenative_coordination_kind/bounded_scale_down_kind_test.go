@@ -14,8 +14,8 @@ import (
 	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 	"github.com/ome-projects/ome/tests/integration/kindutil"
 	"github.com/ome-projects/ome/tests/integration/util"
 )
@@ -219,7 +219,7 @@ var _ = ginkgo.Describe("OMENative bounded scale-down (KIND)", ginkgo.Ordered, f
 				g.Expect(status.Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 				g.Expect(boundedScaleDownPodsForInstance(g, ns.Name, isvcName, status.Index)).To(HaveLen(2))
 				pg := &schedulingv1alpha1.PodGroup{}
-				pgName := query.PodGroupName(isvcName, workload.ComponentEngine, status.Index)
+				pgName := query.PodGroupName(isvcName, workloadtypes.ComponentEngine, status.Index)
 				g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: pgName}, pg)).To(Succeed())
 				g.Expect(pg.Spec.MinMember).To(Equal(int32(2)))
 				g.Expect(pg.DeletionTimestamp).To(BeNil())
@@ -268,11 +268,11 @@ var _ = ginkgo.Describe("OMENative bounded scale-down (KIND)", ginkgo.Ordered, f
 			}
 
 			activePG := &schedulingv1alpha1.PodGroup{}
-			activePGName := query.PodGroupName(isvcName, workload.ComponentEngine, 2)
+			activePGName := query.PodGroupName(isvcName, workloadtypes.ComponentEngine, 2)
 			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: activePGName}, activePG)).To(Succeed())
 			g.Expect(activePG.DeletionTimestamp).To(BeNil(), "PodGroup must outlive terminating member Pods")
 			deferredPG := &schedulingv1alpha1.PodGroup{}
-			deferredPGName := query.PodGroupName(isvcName, workload.ComponentEngine, 1)
+			deferredPGName := query.PodGroupName(isvcName, workloadtypes.ComponentEngine, 1)
 			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: deferredPGName}, deferredPG)).To(Succeed())
 			g.Expect(deferredPG.DeletionTimestamp).To(BeNil())
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
@@ -285,7 +285,7 @@ var _ = ginkgo.Describe("OMENative bounded scale-down (KIND)", ginkgo.Ordered, f
 			g.Expect(deleteOwnedInstanceIndices(instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent))).
 				To(Equal([]int32{1}))
 
-			firstPGName := query.PodGroupName(isvcName, workload.ComponentEngine, 2)
+			firstPGName := query.PodGroupName(isvcName, workloadtypes.ComponentEngine, 2)
 			err := k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: firstPGName}, &schedulingv1alpha1.PodGroup{})
 			g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "the completed gang's PodGroup must be finalized; err=%v", err)
 
@@ -295,7 +295,7 @@ var _ = ginkgo.Describe("OMENative bounded scale-down (KIND)", ginkgo.Ordered, f
 				g.Expect(pod.DeletionTimestamp).NotTo(BeNil(), "every second-wave gang member must enter deletion")
 			}
 			secondPG := &schedulingv1alpha1.PodGroup{}
-			secondPGName := query.PodGroupName(isvcName, workload.ComponentEngine, 1)
+			secondPGName := query.PodGroupName(isvcName, workloadtypes.ComponentEngine, 1)
 			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: secondPGName}, secondPG)).To(Succeed())
 			g.Expect(secondPG.DeletionTimestamp).To(BeNil(), "the second PodGroup must remain while its member Pods exist")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
@@ -316,7 +316,7 @@ var _ = ginkgo.Describe("OMENative bounded scale-down (KIND)", ginkgo.Ordered, f
 			pgs := &schedulingv1alpha1.PodGroupList{}
 			g.Expect(k8sClient.List(suiteCtx, pgs, client.InNamespace(ns.Name))).To(Succeed())
 			g.Expect(pgs.Items).To(HaveLen(1))
-			g.Expect(pgs.Items[0].Name).To(Equal(query.PodGroupName(isvcName, workload.ComponentEngine, 0)))
+			g.Expect(pgs.Items[0].Name).To(Equal(query.PodGroupName(isvcName, workloadtypes.ComponentEngine, 0)))
 			g.Expect(pgs.Items[0].DeletionTimestamp).To(BeNil())
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})

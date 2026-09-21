@@ -8,9 +8,9 @@ import (
 	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
@@ -72,7 +72,7 @@ var _ = ginkgo.Describe("OMENative multi-pod topology contract", ginkgo.Ordered,
 
 			for idx := int32(0); idx < 2; idx++ {
 				pg := &schedulingv1alpha1.PodGroup{}
-				name := query.PodGroupName(isvcName, workload.ComponentEngine, idx)
+				name := query.PodGroupName(isvcName, workloadtypes.ComponentEngine, idx)
 				g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: name}, pg)).To(Succeed())
 				g.Expect(pg.Annotations).To(HaveKeyWithValue(query.AnnotationTopologyKey, corev1.LabelHostname),
 					"the topology contract is unchanged by spreading")
@@ -112,7 +112,7 @@ var _ = ginkgo.Describe("OMENative multi-pod topology contract", ginkgo.Ordered,
 		applyFixture(Default, fix)
 		deferFixtureCleanup(fix)
 
-		initialPodGroup := query.PodGroupName(isvcName, workload.ComponentEngine, 0)
+		initialPodGroup := query.PodGroupName(isvcName, workloadtypes.ComponentEngine, 0)
 		ginkgo.By("projecting the topology key onto the IR, PodGroup, and worker's required affinity")
 		Eventually(func(g Gomega) {
 			ir := freshInferenceReplica(g, ns.Name, isvcName, v1beta1.EngineComponent)

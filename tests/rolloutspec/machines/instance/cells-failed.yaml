@@ -649,7 +649,7 @@ cells:
   - state: Failed
     event: pod.admitted
     outcome: ignore
-    note: deadline.go ReconcileGatedDeadlines restarts a parked clock only for a transient phase, so an already-Failed row has no deadline to un-park whatever its pods' gates do
+    note: escalation/deadline.go ReconcileGatedDeadlines restarts a parked clock only for a transient phase, so an already-Failed row has no deadline to un-park whatever its pods' gates do
     placement: unit
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -701,7 +701,7 @@ cells:
   - state: Failed
     event: endpoint.rotationIn
     outcome: ignore
-    note: status_aggregate.go AvailablePodSet feeds the Component's Available counters; no exit from Failed reads them, and the adoption path proves readiness from ContainersReady instead
+    note: status/aggregate.go AvailablePodSet feeds the Component's Available counters; no exit from Failed reads them, and the adoption path proves readiness from ContainersReady instead
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -801,7 +801,7 @@ cells:
     event: config.changed
     variants: [stuckPodGrace]
     outcome: ignore
-    note: the grace bounds the stuck-pod evidence in status_aggregate.go — a pod held in a terminal kubelet waiting reason past it — and escalation.go skips an already-Failed row, so shortening or lengthening it cannot re-charge this row
+    note: the grace bounds the stuck-pod evidence in escalation/escalation.go — a pod held in a terminal kubelet waiting reason past it — and escalation.go skips an already-Failed row, so shortening or lengthening it cannot re-charge this row
     invariants: [failed.is.sticky]
     placement: unit
     coverage: {perm: [], unit: [], kind: []}
@@ -869,7 +869,7 @@ cells:
   - state: Failed
     event: timer.stuckPodGrace
     outcome: ignore
-    note: the grace arms the fast escalator in escalation.go, which skips a row already stamped Failed, so the clock keeps running against a preserved gang surge or restart without producing a second stamp
+    note: the grace arms the fast escalator in escalation/escalation.go, which skips a row already stamped Failed, so the clock keeps running against a preserved gang surge or restart without producing a second stamp
     invariants: [failed.is.sticky]
     placement: unit
     coverage:
@@ -925,7 +925,7 @@ cells:
   - state: Failed
     event: pod.runningNotReady
     outcome: defer
-    note: no clock runs on a Failed row at all - isTransientPhase excludes the phase, so neither escalation path arms - and the adoption precondition is ContainersReady, which a pod failing readiness simply never satisfies, so the row takes the ordinary roll instead of the stamp. That roll is how a node-scoped fault is answered — the disposition's terminal AutoRecover directive is executed by the rebuild, which recreates the pod under the recorded node's exclusion overlay. The re-drive is still paced by the RetryBlock gate and attributed to the retry or corrective cell (pkg/controller/v1beta1/workload/deadline.go, pkg/controller/v1beta1/workload/ops/update.go)
+    note: no clock runs on a Failed row at all - isTransientPhase excludes the phase, so neither escalation path arms - and the adoption precondition is ContainersReady, which a pod failing readiness simply never satisfies, so the row takes the ordinary roll instead of the stamp. That roll is how a node-scoped fault is answered — the disposition's terminal AutoRecover directive is executed by the rebuild, which recreates the pod under the recorded node's exclusion overlay. The re-drive is still paced by the RetryBlock gate and attributed to the retry or corrective cell (pkg/controller/v1beta1/workload/escalation/deadline.go, pkg/controller/v1beta1/workload/ops/update.go)
     placement: unit
     coverage:
       perm: []

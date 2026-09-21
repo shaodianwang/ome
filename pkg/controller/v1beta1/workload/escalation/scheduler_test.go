@@ -1,4 +1,4 @@
-package workload_test
+package escalation_test
 
 // Scheduler-hold contract: a pod the scheduler reports it cannot place
 // is waiting on cluster capacity, not failing. The escalation pass
@@ -20,8 +20,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 const schedulerMessage = "0/3 nodes are available: 3 Insufficient nvidia.com/gpu"
@@ -39,7 +40,7 @@ func unschedulablePod(name string, since time.Time) *corev1.Pod {
 			Conditions: []corev1.PodCondition{{
 				Type:               corev1.PodScheduled,
 				Status:             corev1.ConditionFalse,
-				Reason:             workload.WaitingReasonUnschedulable,
+				Reason:             types.WaitingReasonUnschedulable,
 				Message:            schedulerMessage,
 				LastTransitionTime: metav1.NewTime(since),
 			}},
@@ -49,13 +50,13 @@ func unschedulablePod(name string, since time.Time) *corev1.Pod {
 
 // creatingInstance is a single-pod Create attempt with a live deadline —
 // the shape a first rollout presents while its pod waits for placement.
-func creatingInstance(deadline time.Time) []workload.InstanceStatus {
-	return []workload.InstanceStatus{{
+func creatingInstance(deadline time.Time) []types.InstanceStatus {
+	return []types.InstanceStatus{{
 		Index:    0,
-		Phase:    workload.InstancePhaseCreating,
+		Phase:    types.InstancePhaseCreating,
 		PodCount: 1,
-		Operation: &workload.InstanceOperation{
-			Type:     workload.InstanceOperationCreate,
+		Operation: &types.InstanceOperation{
+			Type:     types.InstanceOperationCreate,
 			Deadline: metav1.NewTime(deadline),
 		},
 	}}
@@ -71,17 +72,17 @@ func TestEscalation_UnschedulablePodRecordsHold(t *testing.T) {
 	now := time.Now()
 	input, rec := escalationFixture(creatingInstance(now.Add(30 * time.Minute)))
 
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+	if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 1),
 		map[int32][]*corev1.Pod{0: {unschedulablePod("engine-0-default-0", now.Add(-5*time.Minute))}}); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
 	got := rec.store[0]
-	if got.Phase != workload.InstancePhaseCreating {
+	if got.Phase != types.InstancePhaseCreating {
 		t.Errorf("Phase: got %q want Creating (queued for placement, not failed)", got.Phase)
 	}
-	if got.Operation == nil || got.Operation.Waiting != workload.WaitingReasonUnschedulable {
-		t.Errorf("Operation.Waiting: got %+v want %q", got.Operation, workload.WaitingReasonUnschedulable)
+	if got.Operation == nil || got.Operation.Waiting != types.WaitingReasonUnschedulable {
+		t.Errorf("Operation.Waiting: got %+v want %q", got.Operation, types.WaitingReasonUnschedulable)
 	}
 	if got.LastFailure == nil || got.LastFailure.Message != schedulerMessage {
 		t.Errorf("LastFailure: got %+v want the scheduler message %q", got.LastFailure, schedulerMessage)
@@ -104,8 +105,8 @@ func TestEscalation_UnschedulableHoldIsEdgeTriggered(t *testing.T) {
 	input, rec := escalationFixture(creatingInstance(now.Add(30 * time.Minute)))
 	writes := 0
 	inner := input.MutateInstance
-	input.MutateInstance = func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
-		return inner(ctx, idx, func(s *workload.InstanceStatus) bool {
+	input.MutateInstance = func(ctx context.Context, idx int32, mutate func(*types.InstanceStatus) bool) error {
+		return inner(ctx, idx, func(s *types.InstanceStatus) bool {
 			changed := mutate(s)
 			if changed {
 				writes++
@@ -116,10 +117,10 @@ func TestEscalation_UnschedulableHoldIsEdgeTriggered(t *testing.T) {
 	pods := map[int32][]*corev1.Pod{0: {unschedulablePod("engine-0-default-0", now.Add(-5*time.Minute))}}
 
 	for pass := 0; pass < 3; pass++ {
-		if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1), pods); err != nil {
+		if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 1), pods); err != nil {
 			t.Fatalf("escalation pass %d: %v", pass, err)
 		}
-		input.ObservedState.InstanceStatuses = append([]workload.InstanceStatus(nil), rec.store...)
+		input.ObservedState.InstanceStatuses = append([]types.InstanceStatus(nil), rec.store...)
 	}
 
 	if writes != 1 {
@@ -135,7 +136,7 @@ func TestEscalation_UnschedulableHoldIsEdgeTriggered(t *testing.T) {
 func TestEscalation_UnschedulableHoldClearedOnSchedule(t *testing.T) {
 	now := time.Now()
 	insts := creatingInstance(now.Add(30 * time.Minute))
-	insts[0].Operation.Waiting = workload.WaitingReasonUnschedulable
+	insts[0].Operation.Waiting = types.WaitingReasonUnschedulable
 	input, rec := escalationFixture(insts)
 
 	scheduled := &corev1.Pod{
@@ -144,7 +145,7 @@ func TestEscalation_UnschedulableHoldClearedOnSchedule(t *testing.T) {
 			{Type: corev1.PodScheduled, Status: corev1.ConditionTrue},
 		}},
 	}
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+	if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 1),
 		map[int32][]*corev1.Pod{0: {scheduled}}); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
@@ -152,7 +153,7 @@ func TestEscalation_UnschedulableHoldClearedOnSchedule(t *testing.T) {
 	if got := rec.store[0].Operation; got == nil || got.Waiting != "" {
 		t.Errorf("Operation.Waiting: got %+v want cleared", got)
 	}
-	if rec.store[0].Phase != workload.InstancePhaseCreating {
+	if rec.store[0].Phase != types.InstancePhaseCreating {
 		t.Errorf("Phase: got %q want Creating", rec.store[0].Phase)
 	}
 }
@@ -170,17 +171,17 @@ func TestEscalation_UnschedulablePastGraceFailsEnvironmentCaused(t *testing.T) {
 	input.UnschedulableGrace = 10 * time.Minute
 	input.ObservedState.UpdateRevision = "own-engine-newhash"
 
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+	if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 1),
 		map[int32][]*corev1.Pod{0: {unschedulablePod("engine-0-default-0", now.Add(-time.Hour))}}); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
 	got := rec.store[0]
-	if got.Phase != workload.InstancePhaseFailed {
+	if got.Phase != types.InstancePhaseFailed {
 		t.Errorf("Phase: got %q want Failed", got.Phase)
 	}
-	if got.LastFailure == nil || got.LastFailure.Reason != workload.WaitingReasonUnschedulable {
-		t.Errorf("LastFailure.Reason: got %+v want %q", got.LastFailure, workload.WaitingReasonUnschedulable)
+	if got.LastFailure == nil || got.LastFailure.Reason != types.WaitingReasonUnschedulable {
+		t.Errorf("LastFailure.Reason: got %+v want %q", got.LastFailure, types.WaitingReasonUnschedulable)
 	}
 	if got.LastFailure == nil || !strings.Contains(got.LastFailure.Message, schedulerMessage) {
 		t.Errorf("LastFailure.Message: got %+v want the scheduler message", got.LastFailure)
@@ -203,12 +204,12 @@ func TestEscalation_UnschedulableWithoutGraceNeverEscalates(t *testing.T) {
 	now := time.Now()
 	input, rec := escalationFixture(creatingInstance(now.Add(-time.Hour)))
 
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+	if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 1),
 		map[int32][]*corev1.Pod{0: {unschedulablePod("engine-0-default-0", now.Add(-24*time.Hour))}}); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
-	if rec.store[0].Phase != workload.InstancePhaseCreating {
+	if rec.store[0].Phase != types.InstancePhaseCreating {
 		t.Errorf("Phase: got %q want Creating (no grace configured, deadline parked)", rec.store[0].Phase)
 	}
 	if len(rec.warns) != 0 {
@@ -229,12 +230,12 @@ func TestEscalation_UnschedulableGraceRunsFromCondition(t *testing.T) {
 
 	pod := unschedulablePod("engine-0-default-0", now.Add(-time.Minute))
 	pod.CreationTimestamp = metav1.NewTime(now.Add(-2 * time.Hour))
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+	if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 1),
 		map[int32][]*corev1.Pod{0: {pod}}); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
-	if rec.store[0].Phase != workload.InstancePhaseCreating {
+	if rec.store[0].Phase != types.InstancePhaseCreating {
 		t.Errorf("Phase: got %q want Creating (one minute of hold against a ten minute grace)", rec.store[0].Phase)
 	}
 }
@@ -246,27 +247,27 @@ func TestEscalation_UnschedulableGraceRunsFromCondition(t *testing.T) {
 // Cells: instance/Create/CreatePods/pod.unschedulable[source]/before
 func TestReconcileGatedDeadlines_ParksUnschedulableInstance(t *testing.T) {
 	now := time.Now()
-	insts := []workload.InstanceStatus{{
+	insts := []types.InstanceStatus{{
 		Index: 0,
-		Phase: workload.InstancePhaseCreating,
-		Operation: &workload.InstanceOperation{
-			Type:     workload.InstanceOperationCreate,
-			Waiting:  workload.WaitingReasonUnschedulable,
+		Phase: types.InstancePhaseCreating,
+		Operation: &types.InstanceOperation{
+			Type:     types.InstanceOperationCreate,
+			Waiting:  types.WaitingReasonUnschedulable,
 			Deadline: metav1.NewTime(now.Add(-time.Minute)),
 		},
 	}}
 	input, store, _ := expireFixture(insts)
 
-	if err := workload.ReconcileGatedDeadlines(context.Background(), input, insts, map[int32]bool{}, 30*time.Minute); err != nil {
+	if err := escalation.ReconcileGatedDeadlines(context.Background(), input, insts, map[int32]bool{}, 30*time.Minute); err != nil {
 		t.Fatalf("ReconcileGatedDeadlines: %v", err)
 	}
 	if !(*store)[0].Operation.Deadline.IsZero() {
 		t.Errorf("unschedulable Deadline: got %v want zero (parked)", (*store)[0].Operation.Deadline)
 	}
 
-	released := append([]workload.InstanceStatus(nil), (*store)...)
-	released[0].Operation = &workload.InstanceOperation{Type: workload.InstanceOperationCreate}
-	if err := workload.ReconcileGatedDeadlines(context.Background(), input, released, map[int32]bool{}, 30*time.Minute); err != nil {
+	released := append([]types.InstanceStatus(nil), (*store)...)
+	released[0].Operation = &types.InstanceOperation{Type: types.InstanceOperationCreate}
+	if err := escalation.ReconcileGatedDeadlines(context.Background(), input, released, map[int32]bool{}, 30*time.Minute); err != nil {
 		t.Fatalf("ReconcileGatedDeadlines after placement: %v", err)
 	}
 	if (*store)[0].Operation.Deadline.IsZero() {
@@ -283,30 +284,30 @@ func TestReconcileGatedDeadlines_ParksUnschedulableInstance(t *testing.T) {
 func TestReconcileGatedDeadlines_ParksUnschedulableGangSurgeSource(t *testing.T) {
 	now := time.Now()
 	surge := int32(1)
-	insts := []workload.InstanceStatus{
+	insts := []types.InstanceStatus{
 		{
 			Index: 0,
-			Phase: workload.InstancePhaseUpdating,
-			Operation: &workload.InstanceOperation{
-				Type:       workload.InstanceOperationUpdate,
-				Step:       workload.UpdateStepSurge,
+			Phase: types.InstancePhaseUpdating,
+			Operation: &types.InstanceOperation{
+				Type:       types.InstanceOperationUpdate,
+				Step:       types.UpdateStepSurge,
 				SurgeIndex: &surge,
 				Deadline:   metav1.NewTime(now.Add(10 * time.Minute)),
 			},
 		},
 		{
 			Index: 1,
-			Phase: workload.InstancePhaseCreating,
-			Operation: &workload.InstanceOperation{
-				Type:    workload.InstanceOperationUpdate,
-				Step:    workload.UpdateStepGangSurgeTarget,
-				Waiting: workload.WaitingReasonUnschedulable,
+			Phase: types.InstancePhaseCreating,
+			Operation: &types.InstanceOperation{
+				Type:    types.InstanceOperationUpdate,
+				Step:    types.UpdateStepGangSurgeTarget,
+				Waiting: types.WaitingReasonUnschedulable,
 			},
 		},
 	}
 	input, store, _ := expireFixture(insts)
 
-	if err := workload.ReconcileGatedDeadlines(context.Background(), input, insts, map[int32]bool{}, 30*time.Minute); err != nil {
+	if err := escalation.ReconcileGatedDeadlines(context.Background(), input, insts, map[int32]bool{}, 30*time.Minute); err != nil {
 		t.Fatalf("ReconcileGatedDeadlines: %v", err)
 	}
 	if !(*store)[0].Operation.Deadline.IsZero() {
@@ -317,20 +318,20 @@ func TestReconcileGatedDeadlines_ParksUnschedulableGangSurgeSource(t *testing.T)
 // migrationPair is the durable shape of a migration in flight: both rows
 // carry a Migrate operation with its own deadline, and SurgeIndex points
 // at the sibling from either side.
-func migrationPair(deadline time.Time) []workload.InstanceStatus {
+func migrationPair(deadline time.Time) []types.InstanceStatus {
 	source, surge := int32(0), int32(1)
-	op := func(sibling *int32) *workload.InstanceOperation {
-		return &workload.InstanceOperation{
-			Type:        workload.InstanceOperationMigrate,
+	op := func(sibling *int32) *types.InstanceOperation {
+		return &types.InstanceOperation{
+			Type:        types.InstanceOperationMigrate,
 			Step:        "CreateSurge",
 			RequestUUID: "mig-1",
 			SurgeIndex:  sibling,
 			Deadline:    metav1.NewTime(deadline),
 		}
 	}
-	return []workload.InstanceStatus{
-		{Index: source, Phase: workload.InstancePhaseMigrating, PodCount: 1, Operation: op(&surge)},
-		{Index: surge, Phase: workload.InstancePhaseCreating, PodCount: 1, Operation: op(&source)},
+	return []types.InstanceStatus{
+		{Index: source, Phase: types.InstancePhaseMigrating, PodCount: 1, Operation: op(&surge)},
+		{Index: surge, Phase: types.InstancePhaseCreating, PodCount: 1, Operation: op(&source)},
 	}
 }
 
@@ -344,35 +345,35 @@ func migrationPair(deadline time.Time) []workload.InstanceStatus {
 func TestEscalation_UnschedulableMigrationSurgeHoldsTheSurgeRow(t *testing.T) {
 	now := time.Now()
 	input, rec := escalationFixture(migrationPair(now.Add(30 * time.Minute)))
-	plan := workload.ComponentPlan{Instances: []workload.InstancePlan{
-		{Index: 0, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
-		{Index: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+	plan := types.ComponentPlan{Instances: []types.InstancePlan{
+		{Index: 0, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
+		{Index: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
 	}}
 
-	if err := runEscalationPass(t, workload.Deps{}, input, plan, map[int32][]*corev1.Pod{
+	if err := runEscalationPass(t, types.Deps{}, input, plan, map[int32][]*corev1.Pod{
 		0: {servingPod("engine-0-default-0")},
 		1: {unschedulablePod("engine-1-default-0", now.Add(-5*time.Minute))},
 	}); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
-	if got := rec.store[1].Operation; got == nil || got.Waiting != workload.WaitingReasonUnschedulable {
-		t.Errorf("surge Operation.Waiting: got %+v want %q", got, workload.WaitingReasonUnschedulable)
+	if got := rec.store[1].Operation; got == nil || got.Waiting != types.WaitingReasonUnschedulable {
+		t.Errorf("surge Operation.Waiting: got %+v want %q", got, types.WaitingReasonUnschedulable)
 	}
 	if got := rec.store[0].Operation; got == nil || got.Waiting != "" {
 		t.Errorf("source Operation.Waiting: got %+v want unset (its own pod is placed and serving)", got)
 	}
 	for _, s := range rec.store {
-		if s.Phase == workload.InstancePhaseFailed {
+		if s.Phase == types.InstancePhaseFailed {
 			t.Errorf("instance %d: got Failed want the migration still in flight", s.Index)
 		}
 	}
 
 	// The park reaches BOTH rows: the surge through its own token, the
 	// source through the SurgeIndex hop.
-	parked := append([]workload.InstanceStatus(nil), rec.store...)
+	parked := append([]types.InstanceStatus(nil), rec.store...)
 	parkInput, store, _ := expireFixture(parked)
-	if err := workload.ReconcileGatedDeadlines(context.Background(), parkInput, parked, map[int32]bool{}, 30*time.Minute); err != nil {
+	if err := escalation.ReconcileGatedDeadlines(context.Background(), parkInput, parked, map[int32]bool{}, 30*time.Minute); err != nil {
 		t.Fatalf("ReconcileGatedDeadlines: %v", err)
 	}
 	for _, s := range *store {
@@ -394,25 +395,25 @@ func TestEscalation_UnschedulableMigrationSurgePastGraceFails(t *testing.T) {
 	input, rec := escalationFixture(migrationPair(now.Add(30 * time.Minute)))
 	input.UnschedulableGrace = 10 * time.Minute
 	input.ObservedState.UpdateRevision = "own-engine-newhash"
-	plan := workload.ComponentPlan{Instances: []workload.InstancePlan{
-		{Index: 0, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
-		{Index: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+	plan := types.ComponentPlan{Instances: []types.InstancePlan{
+		{Index: 0, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
+		{Index: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
 	}}
 
-	if err := runEscalationPass(t, workload.Deps{}, input, plan, map[int32][]*corev1.Pod{
+	if err := runEscalationPass(t, types.Deps{}, input, plan, map[int32][]*corev1.Pod{
 		0: {servingPod("engine-0-default-0")},
 		1: {unschedulablePod("engine-1-default-0", now.Add(-time.Hour))},
 	}); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
-	if rec.store[1].Phase != workload.InstancePhaseFailed {
+	if rec.store[1].Phase != types.InstancePhaseFailed {
 		t.Errorf("surge Phase: got %q want Failed", rec.store[1].Phase)
 	}
 	if rec.store[1].Operation == nil {
 		t.Errorf("surge Operation: got nil want preserved (the migration record owns the pair)")
 	}
-	if rec.store[0].Phase != workload.InstancePhaseMigrating {
+	if rec.store[0].Phase != types.InstancePhaseMigrating {
 		t.Errorf("source Phase: got %q want Migrating (it is serving)", rec.store[0].Phase)
 	}
 	if len(rec.blocks) != 0 {
@@ -434,8 +435,8 @@ func TestEscalation_UnschedulableHoldIgnoresMessageChurn(t *testing.T) {
 	input, rec := escalationFixture(creatingInstance(now.Add(30 * time.Minute)))
 	writes := 0
 	inner := input.MutateInstance
-	input.MutateInstance = func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
-		return inner(ctx, idx, func(s *workload.InstanceStatus) bool {
+	input.MutateInstance = func(ctx context.Context, idx int32, mutate func(*types.InstanceStatus) bool) error {
+		return inner(ctx, idx, func(s *types.InstanceStatus) bool {
 			changed := mutate(s)
 			if changed {
 				writes++
@@ -452,11 +453,11 @@ func TestEscalation_UnschedulableHoldIgnoresMessageChurn(t *testing.T) {
 	} {
 		pod := unschedulablePod("engine-0-default-0", since)
 		pod.Status.Conditions[0].Message = message
-		if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+		if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 1),
 			map[int32][]*corev1.Pod{0: {pod}}); err != nil {
 			t.Fatalf("escalation pass %d: %v", pass, err)
 		}
-		input.ObservedState.InstanceStatuses = append([]workload.InstanceStatus(nil), rec.store...)
+		input.ObservedState.InstanceStatuses = append([]types.InstanceStatus(nil), rec.store...)
 	}
 
 	if writes != 1 {
@@ -476,22 +477,22 @@ func TestEscalation_UnschedulableHoldIgnoresMessageChurn(t *testing.T) {
 func TestEscalation_UnschedulableYieldsToAnotherWaitingToken(t *testing.T) {
 	now := time.Now()
 	insts := creatingInstance(now.Add(30 * time.Minute))
-	insts[0].Operation.Waiting = workload.RejectionReasonQuotaExceeded
+	insts[0].Operation.Waiting = types.RejectionReasonQuotaExceeded
 	refusedAt := metav1.NewTime(now)
 	insts[0].Operation.CapacityRefusedAt = &refusedAt
 	input, rec := escalationFixture(insts)
 	input.UnschedulableGrace = 10 * time.Minute
 
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+	if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 1),
 		map[int32][]*corev1.Pod{0: {unschedulablePod("engine-0-default-0", now.Add(-time.Hour))}}); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
 	got := rec.store[0]
-	if got.Operation == nil || got.Operation.Waiting != workload.RejectionReasonQuotaExceeded {
+	if got.Operation == nil || got.Operation.Waiting != types.RejectionReasonQuotaExceeded {
 		t.Errorf("Operation.Waiting: got %+v want the quota token untouched", got.Operation)
 	}
-	if got.Phase == workload.InstancePhaseFailed {
+	if got.Phase == types.InstancePhaseFailed {
 		t.Errorf("Phase: got Failed want the quota wait left to its own writer")
 	}
 }
@@ -510,7 +511,7 @@ func TestEscalation_UnschedulableGraceWarnsAfterAHoldWasRecorded(t *testing.T) {
 
 	// Pass 1: inside the grace, so only the hold is recorded.
 	input.UnschedulableGrace = time.Hour
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+	if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 1),
 		map[int32][]*corev1.Pod{0: {unschedulablePod("engine-0-default-0", now.Add(-10*time.Minute))}}); err != nil {
 		t.Fatalf("escalation pass 1: %v", err)
 	}
@@ -522,14 +523,14 @@ func TestEscalation_UnschedulableGraceWarnsAfterAHoldWasRecorded(t *testing.T) {
 	}
 
 	// Pass 2: the hold outlasts the grace.
-	input.ObservedState.InstanceStatuses = append([]workload.InstanceStatus(nil), rec.store...)
+	input.ObservedState.InstanceStatuses = append([]types.InstanceStatus(nil), rec.store...)
 	input.UnschedulableGrace = 5 * time.Minute
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+	if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 1),
 		map[int32][]*corev1.Pod{0: {unschedulablePod("engine-0-default-0", now.Add(-10*time.Minute))}}); err != nil {
 		t.Fatalf("escalation pass 2: %v", err)
 	}
 
-	if rec.store[0].Phase != workload.InstancePhaseFailed {
+	if rec.store[0].Phase != types.InstancePhaseFailed {
 		t.Errorf("Phase: got %q want Failed", rec.store[0].Phase)
 	}
 	if len(rec.warns) != 1 {
@@ -550,13 +551,13 @@ func TestEscalation_UnschedulableGraceWarnsAfterAHoldWasRecorded(t *testing.T) {
 // Cells: instance/Update/GangSurgeTarget/pod.unschedulable[target]/before
 func TestEscalation_UnschedulableGangPastGraceKeepsItsOperation(t *testing.T) {
 	now := time.Now()
-	insts := []workload.InstanceStatus{{
+	insts := []types.InstanceStatus{{
 		Index:    0,
-		Phase:    workload.InstancePhaseCreating,
+		Phase:    types.InstancePhaseCreating,
 		PodCount: 2,
-		Operation: &workload.InstanceOperation{
-			Type:           workload.InstanceOperationUpdate,
-			Step:           workload.UpdateStepGangSurgeTarget,
+		Operation: &types.InstanceOperation{
+			Type:           types.InstanceOperationUpdate,
+			Step:           types.UpdateStepGangSurgeTarget,
 			TargetRevision: "own-engine-newhash",
 			Deadline:       metav1.NewTime(now.Add(30 * time.Minute)),
 		},
@@ -565,7 +566,7 @@ func TestEscalation_UnschedulableGangPastGraceKeepsItsOperation(t *testing.T) {
 	input.UnschedulableGrace = 10 * time.Minute
 	input.ObservedState.UpdateRevision = "own-engine-newhash"
 
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 2),
+	if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 2),
 		map[int32][]*corev1.Pod{0: {
 			unschedulablePod("engine-0-leader-0", now.Add(-time.Hour)),
 			unschedulablePod("engine-0-worker-0", now.Add(-time.Hour)),
@@ -574,14 +575,14 @@ func TestEscalation_UnschedulableGangPastGraceKeepsItsOperation(t *testing.T) {
 	}
 
 	got := rec.store[0]
-	if got.Phase != workload.InstancePhaseFailed {
+	if got.Phase != types.InstancePhaseFailed {
 		t.Errorf("Phase: got %q want Failed", got.Phase)
 	}
 	if got.Operation == nil {
 		t.Errorf("Operation: got nil want preserved (the abandon path consumes the continuation)")
 	}
-	if got.LastFailure == nil || got.LastFailure.Reason != workload.WaitingReasonUnschedulable {
-		t.Errorf("LastFailure.Reason: got %+v want %q", got.LastFailure, workload.WaitingReasonUnschedulable)
+	if got.LastFailure == nil || got.LastFailure.Reason != types.WaitingReasonUnschedulable {
+		t.Errorf("LastFailure.Reason: got %+v want %q", got.LastFailure, types.WaitingReasonUnschedulable)
 	}
 	if len(rec.blocks) != 0 {
 		t.Errorf("RetryBlock: got %v want none (environment-caused)", rec.blocks)
@@ -600,14 +601,14 @@ func TestEscalation_UnschedulableGangPastGraceKeepsItsOperation(t *testing.T) {
 func TestEscalation_UnschedulableHoldClearedWhenPodDeleted(t *testing.T) {
 	now := time.Now()
 	insts := creatingInstance(now.Add(30 * time.Minute))
-	insts[0].Operation.Waiting = workload.WaitingReasonUnschedulable
+	insts[0].Operation.Waiting = types.WaitingReasonUnschedulable
 	// Parked while the hold lasted.
 	insts[0].Operation.Deadline = metav1.Time{}
 	input, rec := escalationFixture(insts)
 	input.UnschedulableGrace = 10 * time.Minute
 
 	// The pod is gone: an empty bucket for the instance.
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+	if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 1),
 		map[int32][]*corev1.Pod{}); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
@@ -615,14 +616,14 @@ func TestEscalation_UnschedulableHoldClearedWhenPodDeleted(t *testing.T) {
 	if got := rec.store[0].Operation; got == nil || got.Waiting != "" {
 		t.Errorf("Operation.Waiting: got %+v want cleared", got)
 	}
-	if rec.store[0].Phase != workload.InstancePhaseCreating {
+	if rec.store[0].Phase != types.InstancePhaseCreating {
 		t.Errorf("Phase: got %q want Creating (a vanished pod is not a failure)", rec.store[0].Phase)
 	}
 
-	released := append([]workload.InstanceStatus(nil), rec.store...)
+	released := append([]types.InstanceStatus(nil), rec.store...)
 	parkInput, store, _ := expireFixture(released)
 	const timeout = 30 * time.Minute
-	if err := workload.ReconcileGatedDeadlines(context.Background(), parkInput, released, map[int32]bool{}, timeout); err != nil {
+	if err := escalation.ReconcileGatedDeadlines(context.Background(), parkInput, released, map[int32]bool{}, timeout); err != nil {
 		t.Fatalf("ReconcileGatedDeadlines: %v", err)
 	}
 	rearmed := (*store)[0].Operation.Deadline
@@ -644,12 +645,12 @@ func TestEscalation_UnschedulableHoldClearedWhenPodDeleted(t *testing.T) {
 // Cells: instance/Delete/Drain/pod.unschedulable[source]/before
 func TestEscalation_UnschedulableDeleteRowIsLeftToDeleteBatch(t *testing.T) {
 	now := time.Now()
-	insts := []workload.InstanceStatus{{
+	insts := []types.InstanceStatus{{
 		Index:    0,
-		Phase:    workload.InstancePhaseDeleting,
+		Phase:    types.InstancePhaseDeleting,
 		PodCount: 1,
-		Operation: &workload.InstanceOperation{
-			Type:     workload.InstanceOperationDelete,
+		Operation: &types.InstanceOperation{
+			Type:     types.InstanceOperationDelete,
 			Step:     "Drain",
 			Deadline: metav1.NewTime(now.Add(30 * time.Minute)),
 		},
@@ -657,13 +658,13 @@ func TestEscalation_UnschedulableDeleteRowIsLeftToDeleteBatch(t *testing.T) {
 	input, rec := escalationFixture(insts)
 	input.UnschedulableGrace = 10 * time.Minute
 
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+	if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 1),
 		map[int32][]*corev1.Pod{0: {unschedulablePod("engine-0-default-0", now.Add(-time.Hour))}}); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
 	got := rec.store[0]
-	if got.Phase != workload.InstancePhaseDeleting {
+	if got.Phase != types.InstancePhaseDeleting {
 		t.Errorf("Phase: got %q want Deleting (DeleteBatch owns the row)", got.Phase)
 	}
 	if got.Operation == nil || got.Operation.Waiting != "" {
@@ -722,14 +723,14 @@ func backoffPod(name, revision string) *corev1.Pod {
 func TestEscalation_UnschedulableSurgeBlamesOnlyTheTarget(t *testing.T) {
 	now := time.Now()
 	const targetRev = "own-engine-newhash"
-	insts := []workload.InstanceStatus{{
+	insts := []types.InstanceStatus{{
 		Index:           0,
-		Phase:           workload.InstancePhaseUpdating,
+		Phase:           types.InstancePhaseUpdating,
 		PodCount:        1,
 		RunningRevision: "own-engine-oldhash",
-		Operation: &workload.InstanceOperation{
-			Type:           workload.InstanceOperationUpdate,
-			Step:           workload.UpdateStepSurge,
+		Operation: &types.InstanceOperation{
+			Type:           types.InstanceOperationUpdate,
+			Step:           types.UpdateStepSurge,
 			TargetRevision: targetRev,
 			Deadline:       metav1.NewTime(now.Add(30 * time.Minute)),
 		},
@@ -742,13 +743,13 @@ func TestEscalation_UnschedulableSurgeBlamesOnlyTheTarget(t *testing.T) {
 	target.Labels = map[string]string{query.LabelRevisionHash: query.RevisionFromName(targetRev).Hash()}
 	source := backoffPod("engine-0-default-0", "own-engine-oldhash")
 	source.Status.Conditions = []corev1.PodCondition{{Type: query.ServingConditionType, Status: corev1.ConditionTrue}}
-	if err := runEscalationPass(t, workload.Deps{Client: routedViewClient(t)}, input, singleInstancePlan(0, 1),
+	if err := runEscalationPass(t, types.Deps{Client: routedViewClient(t)}, input, singleInstancePlan(0, 1),
 		map[int32][]*corev1.Pod{0: {source, target}}); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
 	got := rec.store[0]
-	if got.Phase != workload.InstancePhaseFailed {
+	if got.Phase != types.InstancePhaseFailed {
 		t.Errorf("Phase: got %q want Failed", got.Phase)
 	}
 	if len(rec.blocks) != 0 {
@@ -770,12 +771,12 @@ func TestEscalation_UnschedulableSurgeBlamesOnlyTheTarget(t *testing.T) {
 func TestEscalation_UnschedulableSupersededLeftoverIsSilent(t *testing.T) {
 	now := time.Now()
 	const targetRev = "own-engine-newhash"
-	insts := []workload.InstanceStatus{{
+	insts := []types.InstanceStatus{{
 		Index:    0,
-		Phase:    workload.InstancePhaseCreating,
+		Phase:    types.InstancePhaseCreating,
 		PodCount: 1,
-		Operation: &workload.InstanceOperation{
-			Type:           workload.InstanceOperationCreate,
+		Operation: &types.InstanceOperation{
+			Type:           types.InstanceOperationCreate,
 			TargetRevision: targetRev,
 			Deadline:       metav1.NewTime(now.Add(30 * time.Minute)),
 		},
@@ -784,7 +785,7 @@ func TestEscalation_UnschedulableSupersededLeftoverIsSilent(t *testing.T) {
 	input.UnschedulableGrace = 10 * time.Minute
 	input.ObservedState.UpdateRevision = targetRev
 
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+	if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 1),
 		map[int32][]*corev1.Pod{0: {
 			backoffPod("engine-0-default-0", "own-engine-oldhash"),
 			unschedulablePod("engine-0-default-1", now.Add(-time.Hour)),
@@ -792,7 +793,7 @@ func TestEscalation_UnschedulableSupersededLeftoverIsSilent(t *testing.T) {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
-	if rec.store[0].Phase == workload.InstancePhaseFailed {
+	if rec.store[0].Phase == types.InstancePhaseFailed {
 		t.Errorf("Phase: got Failed want untouched (the disposition wrote nothing)")
 	}
 	if len(rec.warns) != 0 {
@@ -812,13 +813,13 @@ func TestEscalation_UnschedulableSupersededLeftoverIsSilent(t *testing.T) {
 // Cells: instance/Update/GangSurgeTarget/pod.unschedulable[target]/before
 func TestEscalation_UnschedulableGangHoldIsOrderIndependent(t *testing.T) {
 	now := time.Now()
-	insts := []workload.InstanceStatus{{
+	insts := []types.InstanceStatus{{
 		Index:    0,
-		Phase:    workload.InstancePhaseCreating,
+		Phase:    types.InstancePhaseCreating,
 		PodCount: 3,
-		Operation: &workload.InstanceOperation{
-			Type:           workload.InstanceOperationUpdate,
-			Step:           workload.UpdateStepGangSurgeTarget,
+		Operation: &types.InstanceOperation{
+			Type:           types.InstanceOperationUpdate,
+			Step:           types.UpdateStepGangSurgeTarget,
 			TargetRevision: "own-engine-newhash",
 			Deadline:       metav1.NewTime(now.Add(30 * time.Minute)),
 		},
@@ -826,8 +827,8 @@ func TestEscalation_UnschedulableGangHoldIsOrderIndependent(t *testing.T) {
 	input, rec := escalationFixture(insts)
 	writes := 0
 	inner := input.MutateInstance
-	input.MutateInstance = func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
-		return inner(ctx, idx, func(s *workload.InstanceStatus) bool {
+	input.MutateInstance = func(ctx context.Context, idx int32, mutate func(*types.InstanceStatus) bool) error {
+		return inner(ctx, idx, func(s *types.InstanceStatus) bool {
 			changed := mutate(s)
 			if changed {
 				writes++
@@ -847,11 +848,11 @@ func TestEscalation_UnschedulableGangHoldIsOrderIndependent(t *testing.T) {
 		{worker0, worker1, leader},
 		{worker1, worker0, leader},
 	} {
-		if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 3),
+		if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 3),
 			map[int32][]*corev1.Pod{0: bucket}); err != nil {
 			t.Fatalf("escalation pass %d: %v", pass, err)
 		}
-		input.ObservedState.InstanceStatuses = append([]workload.InstanceStatus(nil), rec.store...)
+		input.ObservedState.InstanceStatuses = append([]types.InstanceStatus(nil), rec.store...)
 	}
 
 	if writes != 1 {
@@ -864,14 +865,14 @@ func TestEscalation_UnschedulableGangHoldIsOrderIndependent(t *testing.T) {
 
 // restartingInstance is a repair in flight with a live deadline — the
 // shape Phase C presents while the rebuilt pod waits for placement.
-func restartingInstance(deadline time.Time) []workload.InstanceStatus {
-	return []workload.InstanceStatus{{
+func restartingInstance(deadline time.Time) []types.InstanceStatus {
+	return []types.InstanceStatus{{
 		Index:       0,
 		Incarnation: 2,
-		Phase:       workload.InstancePhaseRestarting,
+		Phase:       types.InstancePhaseRestarting,
 		PodCount:    1,
-		Operation: &workload.InstanceOperation{
-			Type:     workload.InstanceOperationRestart,
+		Operation: &types.InstanceOperation{
+			Type:     types.InstanceOperationRestart,
 			Step:     "Drain",
 			Reason:   "pod lost",
 			Deadline: metav1.NewTime(deadline),
@@ -892,18 +893,18 @@ func TestEscalation_UnschedulableRestartHoldsThenFailsPastGrace(t *testing.T) {
 
 	t.Run("held while the grace is unconfigured", func(t *testing.T) {
 		input, rec := escalationFixture(restartingInstance(now.Add(30 * time.Minute)))
-		if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+		if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 1),
 			map[int32][]*corev1.Pod{0: {unschedulablePod("engine-0-default-0", now.Add(-5*time.Minute))}}); err != nil {
 			t.Fatalf("escalation pass: %v", err)
 		}
 		got := rec.store[0]
-		if got.Phase != workload.InstancePhaseRestarting {
+		if got.Phase != types.InstancePhaseRestarting {
 			t.Errorf("Phase: got %q want Restarting (queued for placement, not failed)", got.Phase)
 		}
-		if got.Operation == nil || got.Operation.Waiting != workload.WaitingReasonUnschedulable {
-			t.Errorf("Operation.Waiting: got %+v want %q", got.Operation, workload.WaitingReasonUnschedulable)
+		if got.Operation == nil || got.Operation.Waiting != types.WaitingReasonUnschedulable {
+			t.Errorf("Operation.Waiting: got %+v want %q", got.Operation, types.WaitingReasonUnschedulable)
 		}
-		if !workload.OperationExternallyHeld(got.Operation) {
+		if !types.OperationExternallyHeld(got.Operation) {
 			t.Errorf("Operation: got %+v want externally held so the deadline parks", got.Operation)
 		}
 		if got.LastFailure == nil || got.LastFailure.Message != schedulerMessage {
@@ -920,16 +921,16 @@ func TestEscalation_UnschedulableRestartHoldsThenFailsPastGrace(t *testing.T) {
 	t.Run("failed past the configured grace", func(t *testing.T) {
 		input, rec := escalationFixture(restartingInstance(now.Add(30 * time.Minute)))
 		input.UnschedulableGrace = 10 * time.Minute
-		if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+		if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 1),
 			map[int32][]*corev1.Pod{0: {unschedulablePod("engine-0-default-0", now.Add(-time.Hour))}}); err != nil {
 			t.Fatalf("escalation pass: %v", err)
 		}
 		got := rec.store[0]
-		if got.Phase != workload.InstancePhaseFailed {
+		if got.Phase != types.InstancePhaseFailed {
 			t.Errorf("Phase: got %q want Failed", got.Phase)
 		}
-		if got.LastFailure == nil || got.LastFailure.Reason != workload.WaitingReasonUnschedulable {
-			t.Errorf("LastFailure.Reason: got %+v want %q", got.LastFailure, workload.WaitingReasonUnschedulable)
+		if got.LastFailure == nil || got.LastFailure.Reason != types.WaitingReasonUnschedulable {
+			t.Errorf("LastFailure.Reason: got %+v want %q", got.LastFailure, types.WaitingReasonUnschedulable)
 		}
 		if len(rec.blocks) != 0 {
 			t.Errorf("RetryBlock: got %v want none (environment-caused)", rec.blocks)
@@ -950,21 +951,21 @@ func TestEscalation_UnschedulableRollHoldsThenFailsPastGrace(t *testing.T) {
 	now := time.Now()
 	for _, step := range []string{"InPlace", "Drain"} {
 		t.Run(step+" held while the grace is unconfigured", func(t *testing.T) {
-			input, rec := escalationFixture([]workload.InstanceStatus{
+			input, rec := escalationFixture([]types.InstanceStatus{
 				rollInFlight(0, step, 1, now.Add(30*time.Minute)),
 			})
-			if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+			if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 1),
 				map[int32][]*corev1.Pod{0: {unschedulablePod("engine-0-default-0", now.Add(-5*time.Minute))}}); err != nil {
 				t.Fatalf("escalation pass: %v", err)
 			}
 			got := rec.store[0]
-			if got.Phase != workload.InstancePhaseUpdating {
+			if got.Phase != types.InstancePhaseUpdating {
 				t.Errorf("Phase: got %q want Updating (queued for placement, not failed)", got.Phase)
 			}
-			if got.Operation == nil || got.Operation.Waiting != workload.WaitingReasonUnschedulable {
-				t.Errorf("Operation.Waiting: got %+v want %q", got.Operation, workload.WaitingReasonUnschedulable)
+			if got.Operation == nil || got.Operation.Waiting != types.WaitingReasonUnschedulable {
+				t.Errorf("Operation.Waiting: got %+v want %q", got.Operation, types.WaitingReasonUnschedulable)
 			}
-			if !workload.OperationExternallyHeld(got.Operation) {
+			if !types.OperationExternallyHeld(got.Operation) {
 				t.Errorf("Operation: got %+v want externally held so the deadline parks", got.Operation)
 			}
 			if got.LastFailure == nil || got.LastFailure.Message != schedulerMessage {
@@ -976,21 +977,21 @@ func TestEscalation_UnschedulableRollHoldsThenFailsPastGrace(t *testing.T) {
 		})
 
 		t.Run(step+" failed past the configured grace", func(t *testing.T) {
-			input, rec := escalationFixture([]workload.InstanceStatus{
+			input, rec := escalationFixture([]types.InstanceStatus{
 				rollInFlight(0, step, 1, now.Add(30*time.Minute)),
 			})
 			input.UnschedulableGrace = 10 * time.Minute
 			input.ObservedState.UpdateRevision = updateTarget().Name
-			if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+			if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 1),
 				map[int32][]*corev1.Pod{0: {unschedulablePod("engine-0-default-0", now.Add(-time.Hour))}}); err != nil {
 				t.Fatalf("escalation pass: %v", err)
 			}
 			got := rec.store[0]
-			if got.Phase != workload.InstancePhaseFailed {
+			if got.Phase != types.InstancePhaseFailed {
 				t.Errorf("Phase: got %q want Failed", got.Phase)
 			}
-			if got.LastFailure == nil || got.LastFailure.Reason != workload.WaitingReasonUnschedulable {
-				t.Errorf("LastFailure.Reason: got %+v want %q", got.LastFailure, workload.WaitingReasonUnschedulable)
+			if got.LastFailure == nil || got.LastFailure.Reason != types.WaitingReasonUnschedulable {
+				t.Errorf("LastFailure.Reason: got %+v want %q", got.LastFailure, types.WaitingReasonUnschedulable)
 			}
 			if got.LastFailure == nil || !strings.Contains(got.LastFailure.Message, schedulerMessage) {
 				t.Errorf("LastFailure.Message: got %+v want the scheduler message", got.LastFailure)
@@ -1016,21 +1017,21 @@ func TestEscalation_UnschedulableDrainHoldsThenFailsPastGrace(t *testing.T) {
 	now := time.Now()
 
 	t.Run("held while the grace is unconfigured", func(t *testing.T) {
-		input, rec := escalationFixture([]workload.InstanceStatus{
-			rollInFlight(0, workload.UpdateStepSurgeDrain, 1, now.Add(30*time.Minute)),
+		input, rec := escalationFixture([]types.InstanceStatus{
+			rollInFlight(0, types.UpdateStepSurgeDrain, 1, now.Add(30*time.Minute)),
 		})
-		if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+		if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 1),
 			map[int32][]*corev1.Pod{0: {unschedulablePod("engine-0-default-1", now.Add(-5*time.Minute))}}); err != nil {
 			t.Fatalf("escalation pass: %v", err)
 		}
 		got := rec.store[0]
-		if got.Phase != workload.InstancePhaseUpdating {
+		if got.Phase != types.InstancePhaseUpdating {
 			t.Errorf("Phase: got %q want Updating (queued for placement, not failed)", got.Phase)
 		}
-		if got.Operation == nil || got.Operation.Waiting != workload.WaitingReasonUnschedulable {
-			t.Errorf("Operation.Waiting: got %+v want %q", got.Operation, workload.WaitingReasonUnschedulable)
+		if got.Operation == nil || got.Operation.Waiting != types.WaitingReasonUnschedulable {
+			t.Errorf("Operation.Waiting: got %+v want %q", got.Operation, types.WaitingReasonUnschedulable)
 		}
-		if !workload.OperationExternallyHeld(got.Operation) {
+		if !types.OperationExternallyHeld(got.Operation) {
 			t.Errorf("Operation: got %+v want externally held so the deadline parks", got.Operation)
 		}
 		if got.LastFailure == nil || got.LastFailure.Message != schedulerMessage {
@@ -1042,21 +1043,21 @@ func TestEscalation_UnschedulableDrainHoldsThenFailsPastGrace(t *testing.T) {
 	})
 
 	t.Run("failed past the configured grace", func(t *testing.T) {
-		input, rec := escalationFixture([]workload.InstanceStatus{
-			rollInFlight(0, workload.UpdateStepSurgeDrain, 1, now.Add(30*time.Minute)),
+		input, rec := escalationFixture([]types.InstanceStatus{
+			rollInFlight(0, types.UpdateStepSurgeDrain, 1, now.Add(30*time.Minute)),
 		})
 		input.UnschedulableGrace = 10 * time.Minute
 		input.ObservedState.UpdateRevision = updateTarget().Name
-		if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+		if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 1),
 			map[int32][]*corev1.Pod{0: {unschedulablePod("engine-0-default-1", now.Add(-time.Hour))}}); err != nil {
 			t.Fatalf("escalation pass: %v", err)
 		}
 		got := rec.store[0]
-		if got.Phase != workload.InstancePhaseFailed {
+		if got.Phase != types.InstancePhaseFailed {
 			t.Errorf("Phase: got %q want Failed", got.Phase)
 		}
-		if got.LastFailure == nil || got.LastFailure.Reason != workload.WaitingReasonUnschedulable {
-			t.Errorf("LastFailure.Reason: got %+v want %q", got.LastFailure, workload.WaitingReasonUnschedulable)
+		if got.LastFailure == nil || got.LastFailure.Reason != types.WaitingReasonUnschedulable {
+			t.Errorf("LastFailure.Reason: got %+v want %q", got.LastFailure, types.WaitingReasonUnschedulable)
 		}
 		if got.LastFailure == nil || !strings.Contains(got.LastFailure.Message, schedulerMessage) {
 			t.Errorf("LastFailure.Message: got %+v want the scheduler message", got.LastFailure)

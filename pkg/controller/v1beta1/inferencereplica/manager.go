@@ -20,8 +20,8 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	workloadgang "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/gang"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 	"github.com/ome-projects/ome/pkg/utils"
 )
 
@@ -67,7 +67,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// would fall back to the global singleton, which the pod handler does
 	// not feed.
 	if r.Expectations == nil {
-		r.Expectations = workload.NewExpectations()
+		r.Expectations = workloadtypes.NewExpectations()
 	}
 	if r.Clock == nil {
 		r.Clock = clock.RealClock{}

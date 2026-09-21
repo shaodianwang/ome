@@ -12,7 +12,7 @@
 //     and passes it in.
 //   - AggregateAndWriteStatus — ISVC-shape counters + top-level
 //     EngineReady / DecoderReady / RouterReady condition.
-//   - workload.ReconcileHeadlessService — invoked by the caller before
+//   - service.ReconcileHeadlessService — invoked by the caller before
 //     Reconcile so both the ISVC adapter and the IR adapter can share
 //     the Service renderer.
 //
@@ -30,6 +30,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/holds"
 	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
@@ -54,7 +55,7 @@ import (
 // target may be nil when DesiredSpec.PodSpec is nil (MinReplicas=0).
 // Restart / Update passes short-circuit on nil target; Create returns
 // immediately.
-func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision) (ctrl.Result, error) {
+func Reconcile(ctx context.Context, deps types.Deps, input types.ReconcileInput, plan types.ComponentPlan, target *appsv1.ControllerRevision) (ctrl.Result, error) {
 	if deps.Client == nil {
 		return ctrl.Result{}, fmt.Errorf("workload.Reconcile: nil client (component=%s)", plan.Component)
 	}
@@ -62,19 +63,19 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 	// (done, error) and a throttled write is neither, so the server's
 	// suggested delay is deposited here and floors the wake-up below.
 	if input.Pacing == nil {
-		input.Pacing = &APIPacing{}
+		input.Pacing = &types.APIPacing{}
 	}
 	// One promote-window sink per pass, for the same reason: a pod crossing
 	// its minReadySeconds window raises no watch event, so a promote waiting
 	// on it deposits the remainder here and wakes the pass below.
 	if input.PromoteWindow == nil {
-		input.PromoteWindow = &PromoteWindow{}
+		input.PromoteWindow = &types.PromoteWindow{}
 	}
 	// One held-work sink per pass, for the same reason: an operator
 	// supplying a missing configuration key raises no watch event, so a
 	// pass that held work on it deposits its wake-up here.
 	if input.PassWake == nil {
-		input.PassWake = &PassWake{}
+		input.PassWake = &types.PassWake{}
 	}
 
 	// Teardown: the owner is being deleted, so every observed Instance is
@@ -94,11 +95,11 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 		return ctrl.Result{}, err
 	}
 	res, err := Execute(ctx, deps, input, plan, target, snapshot, decision)
-	res = EarliestWake(res, input.PromoteWindow.Pending(), input.PassWake.Pending())
+	res = types.EarliestWake(res, input.PromoteWindow.Pending(), input.PassWake.Pending())
 	if input.PassWake.Bare() && res.RequeueAfter == 0 {
-		res = RequeueNow()
+		res = types.RequeueNow()
 	}
-	return NoSoonerThan(res, input.Pacing.Pending()), err
+	return types.NoSoonerThan(res, input.Pacing.Pending()), err
 }
 
 // Execute applies the Decision: the hold pass, then the op-pass action
@@ -119,7 +120,7 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 // failure persists. The op error is the pass's primary failure: it is
 // reported first and an end-of-pass error is appended to it, never
 // substituted for it.
-func Execute(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot, decision Decision) (ctrl.Result, error) {
+func Execute(ctx context.Context, deps types.Deps, input types.ReconcileInput, plan types.ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot, decision Decision) (ctrl.Result, error) {
 	// Holds first, for every row, before any verb pass: a token is
 	// written as soon as its condition is observed. What the owner does
 	// about it — abandon the step now or finish to its boundary — is the
@@ -163,14 +164,22 @@ func Execute(ctx context.Context, deps Deps, input ReconcileInput, plan Componen
 // reported what they found, so the row still names the wait an operator
 // needs to see — and the supersede-prune is withheld work in the same
 // sense, not an observation a pause hides.
-func endOfPassBookkeeping(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot, decision Decision, held holds.Result) error {
+func endOfPassBookkeeping(ctx context.Context, deps types.Deps, input types.ReconcileInput, plan types.ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot, decision Decision, held holds.Result) error {
 	if !decision.Escalate {
 		return nil
 	}
-	if err := escalateFromEvidence(ctx, deps, input, plan, target, snapshot, scaleDownExtras(decision), held); err != nil {
+	if err := escalation.Run(ctx, escalation.PassInput{
+		Deps:     deps,
+		Input:    input,
+		Plan:     plan,
+		Target:   target,
+		Pods:     snapshot.CachedPods,
+		Excluded: scaleDownExtras(decision),
+		Held:     held,
+	}); err != nil {
 		return err
 	}
-	return pruneSupersededRetryBlocks(ctx, input, target)
+	return escalation.PruneSupersededRetryBlocks(ctx, input, target)
 }
 
 // runHoldPass evaluates every external hold once, for every observed
@@ -178,27 +187,12 @@ func endOfPassBookkeeping(ctx context.Context, deps Deps, input ReconcileInput, 
 // authorities judge on — the persisted row, the plan's desired shape,
 // and the reconcile's one memoized cached pod read — and the holds
 // package owns everything decided from it.
-func runHoldPass(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, snapshot *ObservedSnapshot, excluded map[int32]struct{}) (holds.Result, error) {
-	desiredByIdx := DesiredPodCountByInstance(plan)
-	planned := make(map[int32]*InstancePlan, len(plan.Instances))
-	for i := range plan.Instances {
-		planned[plan.Instances[i].Index] = &plan.Instances[i]
-	}
-	rows := make([]holds.Row, 0, len(input.ObservedState.InstanceStatuses))
-	for _, row := range input.ObservedState.InstanceStatuses {
-		_, skip := excluded[row.Index]
-		rows = append(rows, holds.Row{
-			Status:   row,
-			Desired:  DesiredFor(desiredByIdx, row.Index, row.PodCount),
-			Instance: planned[row.Index],
-			Excluded: skip,
-		})
-	}
+func runHoldPass(ctx context.Context, deps types.Deps, input types.ReconcileInput, plan types.ComponentPlan, snapshot *ObservedSnapshot, excluded map[int32]struct{}) (holds.Result, error) {
 	return holds.Run(ctx, holds.PassInput{
 		Deps:  deps,
 		Input: input,
 		Plan:  plan,
-		Rows:  rows,
+		Rows:  holds.RowsForPlan(plan, input.ObservedState.InstanceStatuses, excluded),
 		Pods:  snapshot.CachedPods,
 	})
 }
@@ -216,7 +210,7 @@ func runHoldPass(ctx context.Context, deps Deps, input ReconcileInput, plan Comp
 //     action committed a status change the plan was computed without;
 //   - this action consumed the reconcile and owns its wake-up, so a later
 //     action must not overwrite the interval it asked for.
-func executeActions(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot, decision Decision) (ctrl.Result, bool, error) {
+func executeActions(ctx context.Context, deps types.Deps, input types.ReconcileInput, plan types.ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot, decision Decision) (ctrl.Result, bool, error) {
 	for actionIndex, action := range decision.Actions {
 		switch action.Kind {
 		// 1. Scale-down. Constraint: a status commit ends the pass — the
@@ -262,7 +256,7 @@ func executeActions(ctx context.Context, deps Deps, input ReconcileInput, plan C
 			if expiredCount, err := workloadops.ExpireMigrations(ctx, deps, input, plan); err != nil {
 				return ctrl.Result{}, false, fmt.Errorf("workload.Reconcile: expire migrations: %w", err)
 			} else if expiredCount > 0 {
-				return RequeueNow(), false, nil
+				return types.RequeueNow(), false, nil
 			}
 
 		// 5. Per-Component migration pass, one record per pass.
@@ -299,7 +293,7 @@ func executeActions(ctx context.Context, deps Deps, input ReconcileInput, plan C
 			if err != nil {
 				return res, false, err
 			}
-			return EarliestWake(res, decision.RequeueAfter), false, nil
+			return types.EarliestWake(res, decision.RequeueAfter), false, nil
 		}
 	}
 
@@ -312,14 +306,14 @@ func executeActions(ctx context.Context, deps Deps, input ReconcileInput, plan C
 // Ready→Pending transition for the Instances Plan proved unbacked. It
 // lives at the dispatcher and not under a verb because no verb owns it —
 // it is what the pass says about rows no operation is advancing.
-func demoteUnbackedInstances(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, selections []DemotionSelection) error {
+func demoteUnbackedInstances(ctx context.Context, deps types.Deps, input types.ReconcileInput, plan types.ComponentPlan, selections []types.DemotionSelection) error {
 	for _, selection := range selections {
 		demoted, err := status.DemoteUnbacked(ctx, input, selection.Index)
 		if err != nil {
 			return fmt.Errorf("workload.Reconcile: demote instance %d (component=%s): %w", selection.Index, plan.Component, err)
 		}
 		if demoted {
-			types.RecordWarning(deps.Recorder, types.EventTarget(input), EventReasonInstanceDemoted,
+			types.RecordWarning(deps.Recorder, types.EventTarget(input), types.EventReasonInstanceDemoted,
 				"Instance %d (component=%s) demoted Ready→Pending: %s", selection.Index, plan.Component, selection.Reason)
 		}
 	}
@@ -343,7 +337,7 @@ const (
 // Component narrows either scope to the indices whose create is already
 // committed: the pause finishes a materialization under way and begins
 // none, whichever caller reaches the pass.
-func createPass(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision, scope createScope) (ctrl.Result, error) {
+func createPass(ctx context.Context, deps types.Deps, input types.ReconcileInput, plan types.ComponentPlan, target *appsv1.ControllerRevision, scope createScope) (ctrl.Result, error) {
 	switch {
 	case plan.Paused:
 		return workloadops.CreateCommittedIndices(ctx, deps, input, plan, target)
@@ -368,9 +362,9 @@ func hasActionKind(actions []PlannedAction, kind ActionKind) bool {
 // what the plan was computed without); a wave still polling its victims
 // returns its wake-up and stops the actions without ending the pass; a
 // finished wave lets the actions continue.
-func scaleDownResult(input ReconcileInput, outcome workloadops.DeleteBatchResult) (res ctrl.Result, stop, endsPass bool) {
+func scaleDownResult(input types.ReconcileInput, outcome workloadops.DeleteBatchResult) (res ctrl.Result, stop, endsPass bool) {
 	if outcome.ImmediateRequeue {
-		return RequeueNow(), true, true
+		return types.RequeueNow(), true, true
 	}
 	if outcome.InProgress {
 		return scaleDownPollResult(input, outcome.RequeueAfter, outcome.PolicyDeadlineDue), true, false
@@ -382,7 +376,7 @@ func scaleDownResult(input ReconcileInput, outcome workloadops.DeleteBatchResult
 // Instance. Not the Paused gate, not Restart / Migrate / Update / Create,
 // not the escalation pass: the scale-down pipeline owns wedge escalation
 // through lifecycle.forceDelete.
-func reconcileTeardown(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan) (ctrl.Result, error) {
+func reconcileTeardown(ctx context.Context, deps types.Deps, input types.ReconcileInput, plan types.ComponentPlan) (ctrl.Result, error) {
 	extras := TeardownExtras(input.ObservedState.InstanceStatuses)
 	snapshot := NewObservedSnapshot(deps, input, plan.Component, input.ObservedState.InstanceStatuses)
 	outcome, err := deleteExtraInstances(ctx, deps, input, plan, snapshot, extras)
@@ -393,11 +387,11 @@ func reconcileTeardown(ctx context.Context, deps Deps, input ReconcileInput, pla
 	return res, nil
 }
 
-func scaleDownPollResult(input ReconcileInput, policyRequeueAfter time.Duration, policyDeadlineDue bool) ctrl.Result {
+func scaleDownPollResult(input types.ReconcileInput, policyRequeueAfter time.Duration, policyDeadlineDue bool) ctrl.Result {
 	if policyDeadlineDue {
-		return RequeueNow()
+		return types.RequeueNow()
 	}
-	return EarliestWake(ctrl.Result{}, input.ScaleDownRequeueInterval, policyRequeueAfter)
+	return types.EarliestWake(ctrl.Result{}, input.ScaleDownRequeueInterval, policyRequeueAfter)
 }
 
 func scaleDownExtras(decision Decision) map[int32]struct{} {
@@ -417,7 +411,7 @@ func scaleDownExtras(decision Decision) map[int32]struct{} {
 // deleteExtraInstances advances the Component's one durable scale-down wave.
 // The snapshot supplies the single authoritative Pod observation shared by
 // selection, drain, deletion, and completion.
-func deleteExtraInstances(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, snapshot *ObservedSnapshot, extras []int32) (workloadops.DeleteBatchResult, error) {
+func deleteExtraInstances(ctx context.Context, deps types.Deps, input types.ReconcileInput, plan types.ComponentPlan, snapshot *ObservedSnapshot, extras []int32) (workloadops.DeleteBatchResult, error) {
 	pods, err := snapshot.LivePods(ctx)
 	if err != nil {
 		return workloadops.DeleteBatchResult{}, fmt.Errorf("workload.Reconcile: list pods for scale-down (component=%s): %w", plan.Component, err)
@@ -436,7 +430,7 @@ func deleteExtraInstances(ctx context.Context, deps Deps, input ReconcileInput, 
 // pair — the Phase=Migrating source and its Operation.Type=Migrate
 // surge — is not extra, so it is not scale-down-deleted out from under
 // Migrate.
-func ScaleDownExtras(observed []InstanceStatus, plan ComponentPlan) []int32 {
+func ScaleDownExtras(observed []types.InstanceStatus, plan types.ComponentPlan) []int32 {
 	planned := make(map[int32]struct{}, len(plan.Instances))
 	for _, inst := range plan.Instances {
 		planned[inst.Index] = struct{}{}
@@ -459,7 +453,7 @@ func ScaleDownExtras(observed []InstanceStatus, plan ComponentPlan) []int32 {
 // else. Source and surge each carry their own InstanceStatus, so both
 // run the full scale-down pipeline; excluding the pair would leave its
 // pods with no scale-down operation and wedge the teardown.
-func TeardownExtras(observed []InstanceStatus) []int32 {
+func TeardownExtras(observed []types.InstanceStatus) []int32 {
 	var extras []int32
 	for _, row := range observed {
 		extras = append(extras, row.Index)

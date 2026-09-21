@@ -462,7 +462,7 @@ func SnapshotOriginal(replicas map[v1beta1.ComponentType]int32) map[v1beta1.Comp
 // of serving rotation by an in-flight operation (Drain for recreate,
 // InPlace for in-place patch). Surge lifecycle steps / GangSurgeTarget ADD a
 // pod (or a whole replacement gang) rather than remove one, so they are
-// excluded. Mirrors workload.CurrentUnavailableInFlight on the v1beta1
+// excluded. Mirrors escalation.CurrentUnavailableInFlight on the v1beta1
 // status shape.
 //
 // This is OPERATION-tracked (the dispatcher stamps Operation.Step
@@ -671,7 +671,7 @@ func (ctx GateContext) CheckRatio(inFlightSurge, inFlightUnavail, projDelta int3
 		clear(state.RecoveryEligible)
 	}
 	// Account for pods this wake-up has already started pulling out of
-	// rotation but whose status_aggregate write hasn't landed yet. Only
+	// rotation but whose status-aggregate write hasn't landed yet. Only
 	// the caller's Component carries in-flight here; peer Components'
 	// in-flight is implicit in their own dispatchers' separate runs and
 	// will be reflected in their next status write.

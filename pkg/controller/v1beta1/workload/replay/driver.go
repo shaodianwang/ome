@@ -23,9 +23,11 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
 	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
+	workloadservice "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/service"
 	types "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
@@ -185,7 +187,7 @@ func newDriver(ctx context.Context, s *Scenario, opts Options) (*driver, error) 
 		WithInterceptorFuncs(d.interceptors()).
 		Build()
 
-	if err := workload.ReconcileHeadlessService(ctx, d.cli, types.PerComponentServiceSpec{
+	if err := workloadservice.ReconcileHeadlessService(ctx, d.cli, types.PerComponentServiceSpec{
 		Name:      query.HeadlessServiceName(opts.OwnerName, opts.Component),
 		Namespace: opts.Namespace,
 		Selector:  d.selectorLabels(),
@@ -621,7 +623,7 @@ func (d *driver) runTick(ctx context.Context, tick Tick) error {
 	if err != nil {
 		return err
 	}
-	deps := workload.Deps{
+	deps := types.Deps{
 		Client:       d.cli,
 		APIReader:    d.cli,
 		Recorder:     d.recorder,
@@ -661,7 +663,7 @@ func (d *driver) reconcileHeldDeadlines(ctx context.Context, input types.Reconci
 	held := make(map[int32]bool, len(byIndex))
 	for idx, pods := range byIndex {
 		for _, pod := range pods {
-			if workload.PodAdmissionGated(pod) {
+			if types.PodAdmissionGated(pod) {
 				held[idx] = true
 				break
 			}
@@ -694,7 +696,7 @@ func (d *driver) reconcileHeldDeadlines(ctx context.Context, input types.Reconci
 		WriteAggregateCondition: func(context.Context, metav1.Condition) error { return nil },
 		WarnInstanceFailed:      func(int32, string, string) {},
 	}
-	if err := workload.ReconcileGatedDeadlines(ctx, parkInput, rows, held, timeout); err != nil {
+	if err := escalation.ReconcileGatedDeadlines(ctx, parkInput, rows, held, timeout); err != nil {
 		return fmt.Errorf("replay: reconcile held deadlines: %w", err)
 	}
 	return nil

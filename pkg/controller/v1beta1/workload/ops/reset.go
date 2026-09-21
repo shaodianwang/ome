@@ -1,6 +1,10 @@
-package workload
+package ops
 
-import "context"
+import (
+	"context"
+
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
+)
 
 // ResetOwnsOperation reports whether an operator reset may clear the
 // Operation a Failed Instance preserved: none, or a Create / Restart
@@ -9,12 +13,12 @@ import "context"
 // rollout and migration machinery: the gang abandon, wreckage cleanup,
 // release-held, and migration-expiry paths own them, and clearing one
 // from a reset would orphan its surge marker or migration record.
-func ResetOwnsOperation(op *InstanceOperation) bool {
+func ResetOwnsOperation(op *types.InstanceOperation) bool {
 	if op == nil {
 		return true
 	}
 	switch op.Type {
-	case InstanceOperationCreate, InstanceOperationRestart:
+	case types.InstanceOperationCreate, types.InstanceOperationRestart:
 		return true
 	}
 	return false
@@ -33,11 +37,11 @@ func ResetOwnsOperation(op *InstanceOperation) bool {
 // deleted out from under the caller — and an Operation the reset does
 // not own (ResetOwnsOperation) all write nothing; the ownership check is
 // enforced here on the fresh read, whatever the caller classified.
-func ClearFailedInstanceOperation(ctx context.Context, mutate func(context.Context, int32, func(*InstanceStatus) bool) error, idx int32) (bool, error) {
+func ClearFailedInstanceOperation(ctx context.Context, mutate func(context.Context, int32, func(*types.InstanceStatus) bool) error, idx int32) (bool, error) {
 	cleared := false
-	err := mutate(ctx, idx, func(s *InstanceStatus) bool {
+	err := mutate(ctx, idx, func(s *types.InstanceStatus) bool {
 		cleared = false
-		if s.Phase != InstancePhaseFailed || s.Operation == nil || !ResetOwnsOperation(s.Operation) {
+		if s.Phase != types.InstancePhaseFailed || s.Operation == nil || !ResetOwnsOperation(s.Operation) {
 			return false
 		}
 		s.Operation = nil

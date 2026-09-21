@@ -181,7 +181,7 @@ func (o *Observer) recordPodReady(obj client.Object) {
 
 // podReady reports whether a pod is "in rotation" by the SAME definition
 // the IR status aggregator uses for its serving-pod count
-// (status_aggregate.CountServingPods): ContainersReady (kubelet) AND the
+// (status.CountServingPods): ContainersReady (kubelet) AND the
 // controller's ome.io/serving readiness gate True.
 //
 // It deliberately does NOT check the kubelet-computed corev1.PodReady

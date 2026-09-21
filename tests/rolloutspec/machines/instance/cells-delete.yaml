@@ -460,7 +460,7 @@ cells:
   - state: Delete/Drain
     event: pod.admitted
     outcome: ignore
-    note: "gate exit writes nothing for a draining index: ReconcileGatedDeadlines in deadline.go parks and restarts the clock only for transient phases, and Deleting is not one, so the admitted pod is simply drained and deleted"
+    note: "gate exit writes nothing for a draining index: ReconcileGatedDeadlines in escalation/deadline.go parks and restarts the clock only for transient phases, and Deleting is not one, so the admitted pod is simply drained and deleted"
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -619,7 +619,7 @@ cells:
   - state: Delete/Drain
     event: timer.stuckPodGrace
     outcome: ignore
-    note: "the fast escalator never arms for this row: ShouldCheckForStuckPods in status_aggregate.go refuses Phase=Deleting outright and escalateFromEvidence in escalation.go skips every Delete-owned operation, so the grace elapsing produces neither a RetryBlock nor a Failed row"
+    note: "the fast escalator never arms for this row: ShouldCheckForStuckPods in escalation/escalation.go refuses Phase=Deleting outright and escalateFromEvidence in escalation.go skips every Delete-owned operation, so the grace elapsing produces neither a RetryBlock nor a Failed row"
     invariants: [one.operation.per.instance]
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
@@ -799,7 +799,7 @@ cells:
   - state: Delete/Drain
     event: pod.admissionRejected
     outcome: ignore
-    note: the terminal recycle that frees a refused pod's name belongs to the paths that place a replacement, and a teardown places none, so a refused pod is simply one more object that must be deleted and observed absent before the row can go; escalation skips every Delete-owned row either way (pkg/controller/v1beta1/workload/escalation.go)
+    note: the terminal recycle that frees a refused pod's name belongs to the paths that place a replacement, and a teardown places none, so a refused pod is simply one more object that must be deleted and observed absent before the row can go; escalation skips every Delete-owned row either way (pkg/controller/v1beta1/workload/escalation/escalation.go)
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
     status: current

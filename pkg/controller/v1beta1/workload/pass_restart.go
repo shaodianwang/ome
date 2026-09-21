@@ -10,6 +10,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
 	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
@@ -28,13 +29,13 @@ import (
 // denial stands and no watch event is coming. When a Create follows in
 // the action list the pass materializes the surge-free indices itself
 // before ending, so a stalled repair does not starve a scale-up.
-func executeRestartPass(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision, restarts []RestartSelection, createFollows bool) (res ctrl.Result, stop bool, err error) {
+func executeRestartPass(ctx context.Context, deps types.Deps, input types.ReconcileInput, plan types.ComponentPlan, target *appsv1.ControllerRevision, restarts []RestartSelection, createFollows bool) (res ctrl.Result, stop bool, err error) {
 	anyRestarting := false
 	var restartErrs []error
 	admission := newRepairAdmission(input, plan)
 	// First denial of the pass, kept so a Component that opens nothing
 	// still reports which layer is holding it.
-	var firstDenial *RolloutHold
+	var firstDenial *types.RolloutHold
 	var firstDeniedIndex int32
 	for _, selection := range restarts {
 		if selection.OpensUnavailability {
@@ -63,7 +64,7 @@ func executeRestartPass(ctx context.Context, deps Deps, input ReconcileInput, pl
 		if !anyRestarting {
 			interval = input.Requeue.Gate
 		}
-		res = PassRequeue(interval)
+		res = types.PassRequeue(interval)
 		if createFollows {
 			freshPlan := planExcludingRestartSelections(plan, restarts)
 			createResult, createErr := createPass(ctx, deps, input, freshPlan, target, createScopeFresh)
@@ -74,7 +75,7 @@ func executeRestartPass(ctx context.Context, deps Deps, input ReconcileInput, pl
 			// The create pass may carry an earlier explicit wake-up; the
 			// restart's own cadence must survive an all-ready create that
 			// asks for none.
-			res = PassRequeue(interval, createResult.RequeueAfter)
+			res = types.PassRequeue(interval, createResult.RequeueAfter)
 		}
 		if len(restartErrs) > 0 {
 			return ctrl.Result{}, false, errors.Join(restartErrs...)
@@ -97,14 +98,14 @@ func executeRestartPass(ctx context.Context, deps Deps, input ReconcileInput, pl
 // planExcludingRestartSelections is the plan with the restarting
 // Instances removed, so a create pass run alongside the restart touches
 // only surge-free indices.
-func planExcludingRestartSelections(plan ComponentPlan, restarts []RestartSelection) ComponentPlan {
+func planExcludingRestartSelections(plan types.ComponentPlan, restarts []RestartSelection) types.ComponentPlan {
 	excluded := make(map[int32]struct{}, len(restarts))
 	for _, restart := range restarts {
 		excluded[restart.Instance.Index] = struct{}{}
 	}
 
 	filtered := plan
-	filtered.Instances = make([]InstancePlan, 0, len(plan.Instances))
+	filtered.Instances = make([]types.InstancePlan, 0, len(plan.Instances))
 	for _, instance := range plan.Instances {
 		if _, restarting := excluded[instance.Index]; restarting {
 			continue
@@ -132,14 +133,14 @@ type repairAdmission struct {
 	budget   int32
 	prior    int32
 	inFlight int32
-	gate     func(strategy UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, RolloutHoldGate, string)
+	gate     func(strategy types.UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, types.RolloutHoldGate, string)
 }
 
-func newRepairAdmission(input ReconcileInput, plan ComponentPlan) *repairAdmission {
+func newRepairAdmission(input types.ReconcileInput, plan types.ComponentPlan) *repairAdmission {
 	statuses := input.ObservedState.InstanceStatuses
 	return &repairAdmission{
-		budget: PerComponentMaxUnavailableBudget(plan.UpdateStrategy.RollingUpdate, plan.Replicas),
-		prior:  CurrentUnavailableInFlight(statuses) + CurrentRestartingInFlight(statuses),
+		budget: escalation.PerComponentMaxUnavailableBudget(plan.UpdateStrategy.RollingUpdate, plan.Replicas),
+		prior:  escalation.CurrentUnavailableInFlight(statuses) + escalation.CurrentRestartingInFlight(statuses),
 		gate:   input.UpdateGate,
 	}
 }
@@ -151,21 +152,21 @@ func newRepairAdmission(input ReconcileInput, plan ComponentPlan) *repairAdmissi
 //
 // A denial is returned as the hold that produced it, so the caller can
 // report which layer is holding the Component back.
-func (a *repairAdmission) admit(ctx context.Context, plan ComponentPlan, index int32) (bool, *RolloutHold) {
-	if projected, denied := budgetDenies(a.budget, a.prior, a.inFlight); denied {
+func (a *repairAdmission) admit(ctx context.Context, plan types.ComponentPlan, index int32) (bool, *types.RolloutHold) {
+	if projected, denied := escalation.BudgetDenies(a.budget, a.prior, a.inFlight); denied {
 		logf.FromContext(ctx).V(1).Info("crash-loop repair denied by the unavailability budget",
 			"component", plan.Component, "instance", index,
 			"budget", a.budget, "projected", projected)
-		return false, &RolloutHold{
-			Gate:   RolloutHoldGateBudget,
+		return false, &types.RolloutHold{
+			Gate:   types.RolloutHoldGateBudget,
 			Reason: fmt.Sprintf("per-Component unavailability budget %d exhausted (would become %d)", a.budget, projected),
 		}
 	}
 	if a.gate != nil {
-		if allowed, gate, reason := a.gate(UpdateStrategyRecreatePod, 0, a.inFlight); !allowed {
+		if allowed, gate, reason := a.gate(types.UpdateStrategyRecreatePod, 0, a.inFlight); !allowed {
 			logf.FromContext(ctx).V(1).Info("crash-loop repair denied by the coordination gate",
 				"component", plan.Component, "instance", index, "gate", gate, "reason", reason)
-			return false, &RolloutHold{Gate: gate, Reason: reason}
+			return false, &types.RolloutHold{Gate: gate, Reason: reason}
 		}
 	}
 	a.inFlight++
@@ -177,7 +178,7 @@ func (a *repairAdmission) admit(ctx context.Context, plan ComponentPlan, index i
 // message: which layer decides whether the operator waits for a peer
 // Component, raises MaxUnavailable, or intervenes. Announced once per
 // episode on the held Instance's own row.
-func announceRepairHeld(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, index int32, held *RolloutHold) error {
+func announceRepairHeld(ctx context.Context, deps types.Deps, input types.ReconcileInput, plan types.ComponentPlan, index int32, held *types.RolloutHold) error {
 	if deps.Recorder == nil || held == nil {
 		return nil
 	}
@@ -185,11 +186,11 @@ func announceRepairHeld(ctx context.Context, deps Deps, input ReconcileInput, pl
 	if target == nil {
 		return nil
 	}
-	announced, err := status.Announce(ctx, input, index, EventReasonRepairHeld)
+	announced, err := status.Announce(ctx, input, index, types.EventReasonRepairHeld)
 	if err != nil || !announced {
 		return err
 	}
-	deps.Recorder.Eventf(target, corev1.EventTypeWarning, string(EventReasonRepairHeld),
+	deps.Recorder.Eventf(target, corev1.EventTypeWarning, string(types.EventReasonRepairHeld),
 		"OMENative component=%s instance=%d crash-loop repair held by %s: %s",
 		plan.Component, index, held.Gate, held.Reason)
 	return nil

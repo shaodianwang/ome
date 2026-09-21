@@ -30,10 +30,10 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 	workloadgang "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/gang"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // terminatingIR returns baselineIR stamped Terminating with the
@@ -532,7 +532,7 @@ func TestTeardown_LedgerClose_RetriesOnConflict(t *testing.T) {
 			},
 		}).
 		Build()
-	r := &Reconciler{Client: c, APIReader: c, Log: ctrl.Log.WithName("test"), Expectations: workload.NewExpectations(), InstanceStatusTarget: irstatus.EncodingDenseV1}
+	r := &Reconciler{Client: c, APIReader: c, Log: ctrl.Log.WithName("test"), Expectations: workloadtypes.NewExpectations(), InstanceStatusTarget: irstatus.EncodingDenseV1}
 
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
@@ -617,7 +617,7 @@ func TestTeardown_LedgerClose_RebasesOverPeerComponentWrite(t *testing.T) {
 			},
 		}).
 		Build()
-	r := &Reconciler{Client: c, APIReader: c, Log: ctrl.Log.WithName("test"), Expectations: workload.NewExpectations(), InstanceStatusTarget: irstatus.EncodingDenseV1}
+	r := &Reconciler{Client: c, APIReader: c, Log: ctrl.Log.WithName("test"), Expectations: workloadtypes.NewExpectations(), InstanceStatusTarget: irstatus.EncodingDenseV1}
 
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
@@ -680,7 +680,7 @@ func TestTeardown_StaleParentNotFound_ClosesParentLedger(t *testing.T) {
 		WithScheme(testScheme(t)).
 		WithObjects(parent, liveLedgerCM, ir).
 		Build()
-	r := &Reconciler{Client: c, APIReader: reader, Log: ctrl.Log.WithName("test"), Expectations: workload.NewExpectations(), InstanceStatusTarget: irstatus.EncodingDenseV1}
+	r := &Reconciler{Client: c, APIReader: reader, Log: ctrl.Log.WithName("test"), Expectations: workloadtypes.NewExpectations(), InstanceStatusTarget: irstatus.EncodingDenseV1}
 
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
@@ -741,7 +741,7 @@ func TestReconcile_FinalizerAddDeletionRace_NoError(t *testing.T) {
 		Client:               newStaleClient(t),
 		APIReader:            fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(live).Build(),
 		Log:                  ctrl.Log.WithName("test"),
-		Expectations:         workload.NewExpectations(),
+		Expectations:         workloadtypes.NewExpectations(),
 		InstanceStatusTarget: irstatus.EncodingDenseV1,
 	}
 	result, err := r.Reconcile(context.Background(), req)
@@ -757,7 +757,7 @@ func TestReconcile_FinalizerAddDeletionRace_NoError(t *testing.T) {
 		Client:               newStaleClient(t),
 		APIReader:            fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(baselineIR("llama-engine", "prod", 1)).Build(),
 		Log:                  ctrl.Log.WithName("test"),
-		Expectations:         workload.NewExpectations(),
+		Expectations:         workloadtypes.NewExpectations(),
 		InstanceStatusTarget: irstatus.EncodingDenseV1,
 	}
 	if _, err := r.Reconcile(context.Background(), req); err == nil {
@@ -875,7 +875,7 @@ func TestTeardown_StatuslessPodGroupsDeleteInBoundedWaves(t *testing.T) {
 		APIReader:                reader,
 		Log:                      ctrl.Log.WithName("test"),
 		Recorder:                 recorder,
-		Expectations:             workload.NewExpectations(),
+		Expectations:             workloadtypes.NewExpectations(),
 		InstanceStatusTarget:     irstatus.EncodingDenseV1,
 		GangSchedulingAvailable:  true,
 		ScaleDownPodBatchSize:    &budget,
@@ -1103,7 +1103,7 @@ func TestTeardown_CleansMetricSeriesBeforeFinalizerRelease(t *testing.T) {
 			},
 		}).
 		Build()
-	r := &Reconciler{Client: base, APIReader: base, Log: ctrl.Log.WithName("test"), Expectations: workload.NewExpectations(), InstanceStatusTarget: irstatus.EncodingDenseV1}
+	r := &Reconciler{Client: base, APIReader: base, Log: ctrl.Log.WithName("test"), Expectations: workloadtypes.NewExpectations(), InstanceStatusTarget: irstatus.EncodingDenseV1}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)})
 	if err == nil || !strings.Contains(err.Error(), "injected finalizer update failure") {
@@ -1224,10 +1224,10 @@ func TestTeardown_DeadlineExceeded_ReleasesFromEveryInstanceState(t *testing.T) 
 		{state: "Ready", phase: v1beta1.OMENativeInstanceReady},
 		{state: "Failed", phase: v1beta1.OMENativeInstanceFailed},
 		{state: "Create/CreatePods", phase: v1beta1.OMENativeInstanceCreating, op: op(v1beta1.InstanceOperationCreate, "CreatePods")},
-		{state: "Update/Surge", phase: v1beta1.OMENativeInstanceUpdating, op: op(v1beta1.InstanceOperationUpdate, workload.UpdateStepSurge)},
-		{state: "Update/SurgeDrain", phase: v1beta1.OMENativeInstanceUpdating, op: op(v1beta1.InstanceOperationUpdate, workload.UpdateStepSurgeDrain)},
-		{state: "Update/GangSurgeTarget", phase: v1beta1.OMENativeInstanceCreating, op: op(v1beta1.InstanceOperationUpdate, workload.UpdateStepGangSurgeTarget)},
-		{state: "Update/GangSurgeTargetCleanup", phase: v1beta1.OMENativeInstanceCreating, op: op(v1beta1.InstanceOperationUpdate, workload.UpdateStepGangSurgeTargetCleanup)},
+		{state: "Update/Surge", phase: v1beta1.OMENativeInstanceUpdating, op: op(v1beta1.InstanceOperationUpdate, workloadtypes.UpdateStepSurge)},
+		{state: "Update/SurgeDrain", phase: v1beta1.OMENativeInstanceUpdating, op: op(v1beta1.InstanceOperationUpdate, workloadtypes.UpdateStepSurgeDrain)},
+		{state: "Update/GangSurgeTarget", phase: v1beta1.OMENativeInstanceCreating, op: op(v1beta1.InstanceOperationUpdate, workloadtypes.UpdateStepGangSurgeTarget)},
+		{state: "Update/GangSurgeTargetCleanup", phase: v1beta1.OMENativeInstanceCreating, op: op(v1beta1.InstanceOperationUpdate, workloadtypes.UpdateStepGangSurgeTargetCleanup)},
 		{state: "Update/InPlace", phase: v1beta1.OMENativeInstanceUpdating, op: op(v1beta1.InstanceOperationUpdate, "InPlace")},
 		{state: "Update/Drain", phase: v1beta1.OMENativeInstanceUpdating, op: op(v1beta1.InstanceOperationUpdate, "Drain")},
 		{state: "Restart/Drain", phase: v1beta1.OMENativeInstanceRestarting, op: op(v1beta1.InstanceOperationRestart, "Drain")},
@@ -1375,7 +1375,7 @@ func TestTeardown_ForceDeleteEscalation_UnwedgesDeadNodePod(t *testing.T) {
 		Client:               c,
 		APIReader:            c,
 		Log:                  ctrl.Log.WithName("test"),
-		Expectations:         workload.NewExpectations(),
+		Expectations:         workloadtypes.NewExpectations(),
 		InstanceStatusTarget: irstatus.EncodingDenseV1,
 		Clock:                clocktesting.NewFakeClock(base),
 	}
@@ -1404,7 +1404,7 @@ func TestTeardown_ForceDeleteEscalation_UnwedgesDeadNodePod(t *testing.T) {
 	if forced == nil {
 		t.Fatalf("expected a grace-0 force-delete of %s during teardown; recorded deletes=%+v", wedged.Name, deletes)
 	}
-	if got := eventsContaining(drainEvents(rec), string(workload.EventReasonPodForceDeleted)); len(got) != 1 {
+	if got := eventsContaining(drainEvents(rec), string(workloadtypes.EventReasonPodForceDeleted)); len(got) != 1 {
 		t.Errorf("expected one PodForceDeleted warning, got %v", got)
 	}
 

@@ -91,7 +91,7 @@ states:
   - id: Failed
     phase: Failed
     applies: {strategies: [SurgeThenDrain, RecreatePod, InPlaceIfPossible, InPlaceOnly], shape: [single, gang]}
-    decided_in: pkg/controller/v1beta1/workload/escalation.go
+    decided_in: pkg/controller/v1beta1/workload/escalation/escalation.go
     note: the escalation pass stamped the failure; a disposable single-pod Create or Update attempt also had its operation cleared, while a gang surge and a multi-pod recreate keep theirs for the owning machine to consume. A kept Restart operation has no owning machine waiting on it - it records a spent attempt, which the gang-member-loss trigger re-arms over and the operator reset mailbox clears outright
     not_applicable:
       timer.migrationDeadline: a migration record that failed its Instance is already terminal

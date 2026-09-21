@@ -22,6 +22,7 @@
 // because more than one verb reaches them: terminal_recycle.go, the
 // paced recycle of a terminal or admission-rejected pod occupying a
 // target name, and force_delete.go, the policy-gated escalation over a
-// pod the node can no longer be asked about. render.go is the pod and
-// object renderer every placing pass shares.
+// pod the node can no longer be asked about. reset.go is the operator
+// reset that releases the Create or Restart attempt a Failed row parked,
+// and render.go is the pod and object renderer every placing pass shares.
 package ops

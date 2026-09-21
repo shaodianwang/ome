@@ -8,7 +8,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 func TestBumpCollisionCount_SameNameReplacementUntouched(t *testing.T) {
@@ -20,7 +20,7 @@ func TestBumpCollisionCount_SameNameReplacementUntouched(t *testing.T) {
 	r, c := newReconciler(t, replacement)
 
 	bumped, err := r.bumpCollisionCount(context.Background(), stale)
-	if !errors.Is(err, workload.ErrStatusOwnerGone) {
+	if !errors.Is(err, workloadtypes.ErrStatusOwnerGone) {
 		t.Fatalf("bump error: got %v want ErrStatusOwnerGone", err)
 	}
 	if bumped != nil {

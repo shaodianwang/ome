@@ -1,4 +1,4 @@
-package workload_test
+package ops_test
 
 // ClearFailedInstanceOperation: the operator-reset release of a parked
 // attempt clears only a repair-owned Operation (Create / Restart) of a
@@ -11,37 +11,38 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // recordingMutate is a MutateInstance seam over one in-memory status:
 // it applies the callback and records whether a write was requested.
-func recordingMutate(s *workload.InstanceStatus) (func(context.Context, int32, func(*workload.InstanceStatus) bool) error, *bool) {
+func recordingMutate(s *types.InstanceStatus) (func(context.Context, int32, func(*types.InstanceStatus) bool) error, *bool) {
 	wrote := false
-	return func(_ context.Context, _ int32, mutate func(*workload.InstanceStatus) bool) error {
+	return func(_ context.Context, _ int32, mutate func(*types.InstanceStatus) bool) error {
 		wrote = mutate(s)
 		return nil
 	}, &wrote
 }
 
-func parkedOperation(typ workload.InstanceOperationType) *workload.InstanceOperation {
+func parkedOperation(typ types.InstanceOperationType) *types.InstanceOperation {
 	now := metav1.Now()
-	return &workload.InstanceOperation{ID: "op-3-1", Type: typ, Step: "WaitReady", StartedAt: now, Deadline: now}
+	return &types.InstanceOperation{ID: "op-3-1", Type: typ, Step: "WaitReady", StartedAt: now, Deadline: now}
 }
 
 func TestResetOwnsOperation(t *testing.T) {
-	if !workload.ResetOwnsOperation(nil) {
+	if !workloadops.ResetOwnsOperation(nil) {
 		t.Fatalf("no Operation must be reset-owned")
 	}
-	owned := []workload.InstanceOperationType{workload.InstanceOperationCreate, workload.InstanceOperationRestart}
+	owned := []types.InstanceOperationType{types.InstanceOperationCreate, types.InstanceOperationRestart}
 	for _, typ := range owned {
-		if !workload.ResetOwnsOperation(parkedOperation(typ)) {
+		if !workloadops.ResetOwnsOperation(parkedOperation(typ)) {
 			t.Errorf("%s must be reset-owned", typ)
 		}
 	}
-	foreign := []workload.InstanceOperationType{workload.InstanceOperationUpdate, workload.InstanceOperationMigrate, workload.InstanceOperationDelete}
+	foreign := []types.InstanceOperationType{types.InstanceOperationUpdate, types.InstanceOperationMigrate, types.InstanceOperationDelete}
 	for _, typ := range foreign {
-		if workload.ResetOwnsOperation(parkedOperation(typ)) {
+		if workloadops.ResetOwnsOperation(parkedOperation(typ)) {
 			t.Errorf("%s must NOT be reset-owned", typ)
 		}
 	}
@@ -49,46 +50,46 @@ func TestResetOwnsOperation(t *testing.T) {
 
 func TestClearFailedInstanceOperation(t *testing.T) {
 	now := metav1.Now()
-	failure := &workload.InstanceTermination{PodName: "engine-3-0", Reason: "OOMKilled", Time: now}
+	failure := &types.InstanceTermination{PodName: "engine-3-0", Reason: "OOMKilled", Time: now}
 
 	cases := []struct {
 		name        string
-		status      workload.InstanceStatus
+		status      types.InstanceStatus
 		wantCleared bool
 	}{
 		{
 			name:        "failed with preserved Restart clears it",
-			status:      workload.InstanceStatus{Index: 3, Phase: workload.InstancePhaseFailed, Operation: parkedOperation(workload.InstanceOperationRestart), LastFailure: failure, Incarnation: 2},
+			status:      types.InstanceStatus{Index: 3, Phase: types.InstancePhaseFailed, Operation: parkedOperation(types.InstanceOperationRestart), LastFailure: failure, Incarnation: 2},
 			wantCleared: true,
 		},
 		{
 			name:        "failed with preserved Create clears it",
-			status:      workload.InstanceStatus{Index: 3, Phase: workload.InstancePhaseFailed, Operation: parkedOperation(workload.InstanceOperationCreate), LastFailure: failure, Incarnation: 1},
+			status:      types.InstanceStatus{Index: 3, Phase: types.InstancePhaseFailed, Operation: parkedOperation(types.InstanceOperationCreate), LastFailure: failure, Incarnation: 1},
 			wantCleared: true,
 		},
 		{
 			name:   "failed with preserved Update is refused",
-			status: workload.InstanceStatus{Index: 3, Phase: workload.InstancePhaseFailed, Operation: parkedOperation(workload.InstanceOperationUpdate), LastFailure: failure},
+			status: types.InstanceStatus{Index: 3, Phase: types.InstancePhaseFailed, Operation: parkedOperation(types.InstanceOperationUpdate), LastFailure: failure},
 		},
 		{
 			name:   "failed with preserved Migrate is refused",
-			status: workload.InstanceStatus{Index: 3, Phase: workload.InstancePhaseFailed, Operation: parkedOperation(workload.InstanceOperationMigrate)},
+			status: types.InstanceStatus{Index: 3, Phase: types.InstancePhaseFailed, Operation: parkedOperation(types.InstanceOperationMigrate)},
 		},
 		{
 			name:   "failed with preserved Delete is refused",
-			status: workload.InstanceStatus{Index: 3, Phase: workload.InstancePhaseFailed, Operation: parkedOperation(workload.InstanceOperationDelete)},
+			status: types.InstanceStatus{Index: 3, Phase: types.InstancePhaseFailed, Operation: parkedOperation(types.InstanceOperationDelete)},
 		},
 		{
 			name:   "failed without operation writes nothing",
-			status: workload.InstanceStatus{Index: 3, Phase: workload.InstancePhaseFailed, LastFailure: failure},
+			status: types.InstanceStatus{Index: 3, Phase: types.InstancePhaseFailed, LastFailure: failure},
 		},
 		{
 			name:   "non-failed with operation writes nothing",
-			status: workload.InstanceStatus{Index: 3, Phase: workload.InstancePhaseRestarting, Operation: parkedOperation(workload.InstanceOperationRestart)},
+			status: types.InstanceStatus{Index: 3, Phase: types.InstancePhaseRestarting, Operation: parkedOperation(types.InstanceOperationRestart)},
 		},
 		{
 			name:   "fresh-empty slot writes nothing",
-			status: workload.InstanceStatus{Index: 3},
+			status: types.InstanceStatus{Index: 3},
 		},
 	}
 	for _, tc := range cases {
@@ -97,7 +98,7 @@ func TestClearFailedInstanceOperation(t *testing.T) {
 			before := s
 			mutate, wrote := recordingMutate(&s)
 
-			cleared, err := workload.ClearFailedInstanceOperation(context.Background(), mutate, 3)
+			cleared, err := workloadops.ClearFailedInstanceOperation(context.Background(), mutate, 3)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -113,7 +114,7 @@ func TestClearFailedInstanceOperation(t *testing.T) {
 			if s.Operation != nil {
 				t.Fatalf("Operation must be cleared, got %+v", s.Operation)
 			}
-			if s.Phase != workload.InstancePhaseFailed {
+			if s.Phase != types.InstancePhaseFailed {
 				t.Fatalf("Phase must stay Failed, got %q", s.Phase)
 			}
 			if s.LastFailure != failure || s.Incarnation != before.Incarnation {
@@ -125,9 +126,9 @@ func TestClearFailedInstanceOperation(t *testing.T) {
 
 func TestClearFailedInstanceOperation_SeamErrorPropagates(t *testing.T) {
 	boom := errors.New("re-read IR: simulated outage")
-	mutate := func(context.Context, int32, func(*workload.InstanceStatus) bool) error { return boom }
+	mutate := func(context.Context, int32, func(*types.InstanceStatus) bool) error { return boom }
 
-	cleared, err := workload.ClearFailedInstanceOperation(context.Background(), mutate, 3)
+	cleared, err := workloadops.ClearFailedInstanceOperation(context.Background(), mutate, 3)
 	if !errors.Is(err, boom) {
 		t.Fatalf("seam error must propagate, got %v", err)
 	}

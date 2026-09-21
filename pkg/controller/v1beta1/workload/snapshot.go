@@ -2,51 +2,12 @@ package workload
 
 import (
 	"context"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/evidence"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
-
-// InstanceEvidence is the per-instance observed failure evidence for one
-// reconcile: the first workload-caused/terminal stuck pod (if any) and
-// whether the in-flight Operation's deadline has elapsed. It is EVIDENCE
-// ONLY — building it never writes Phase; deciding the Failed transition
-// from it belongs to the reconcile.
-type InstanceEvidence struct {
-	// StuckPod is the first live, non-deleting pod parked in a
-	// workload-caused/terminal waiting state past the grace window
-	// (evidence.FirstStuckPodForInstance). Nil when no pod is stuck.
-	StuckPod *corev1.Pod
-	// StuckReason is the kubelet waiting reason of StuckPod ("" when none).
-	StuckReason string
-	// DeadlinePassed reports whether the instance is in a transient phase
-	// with an in-flight Operation whose Deadline lies in the past.
-	DeadlinePassed bool
-	// Unschedulable is the first live pod of the instance's OWN bucket
-	// the scheduler reports it cannot place. Nil when every pod is
-	// scheduled, gone, or deleting.
-	//
-	// Own-bucket, unlike StuckPod: a hold names the row that has to wait,
-	// and attributing a replacement's lack of placement to the serving
-	// source would both misreport the source and, past the grace, fail
-	// it. A sibling reaches the hold through the deadline parking's
-	// SurgeIndex hop instead.
-	//
-	// Independent of the stuck-pod grace: the hold is recorded from the
-	// first observation and only its ESCALATION waits out a window.
-	Unschedulable *corev1.Pod
-	// UnschedulableMessage is the scheduler's own explanation of which
-	// constraint had no placement ("" when it gave none).
-	UnschedulableMessage string
-	// UnschedulableSince is when PodScheduled last transitioned — the
-	// start of the hold, which the escalation window is measured from.
-	UnschedulableSince metav1.Time
-}
 
 // ObservedSnapshot owns the decision-epoch observations for one reconcile.
 // Cache and API-reader views remain independent, lazy, and memoized. Evidence
@@ -54,10 +15,10 @@ type InstanceEvidence struct {
 //
 // Not safe for concurrent use — one snapshot per reconcile goroutine.
 type ObservedSnapshot struct {
-	deps      Deps
-	input     ReconcileInput
-	component ComponentType
-	insts     []InstanceStatus
+	deps      types.Deps
+	input     types.ReconcileInput
+	component types.ComponentType
+	insts     []types.InstanceStatus
 
 	live   memoObservation
 	cached memoObservation
@@ -72,7 +33,7 @@ type memoObservation struct {
 
 // NewObservedSnapshot builds the snapshot; pods are materialized lazily on
 // first access.
-func NewObservedSnapshot(deps Deps, input ReconcileInput, component ComponentType, insts []InstanceStatus) *ObservedSnapshot {
+func NewObservedSnapshot(deps types.Deps, input types.ReconcileInput, component types.ComponentType, insts []types.InstanceStatus) *ObservedSnapshot {
 	return &ObservedSnapshot{deps: deps, input: input, component: component, insts: insts}
 }
 
@@ -139,49 +100,8 @@ func (s *ObservedSnapshot) CachedPods(ctx context.Context) (map[int32][]*corev1.
 	return observation.pods.byInstance, nil
 }
 
-// EvidenceFor returns the per-instance failure evidence for idx, derived
-// from the cached-read pods + the instance's Operation deadline. Evidence
-// only — no Phase write. Stuck detection attributes pods the same way the
-// escalation pass blames them (evidence.PodsForStuckCheck: a gang Update surge is
-// inspected through its replacement gang, a Migrate pair through
-// own-plus-sibling). A non-positive grace disables stuck-pod evidence
-// entirely (fast escalation off; the deadline backstop and the scheduler
-// hold still report). A pod-read error yields deadline-only evidence, so
-// a transient read failure never fabricates a stuck signal. now/grace
-// are supplied by the caller (clock seam).
-func (s *ObservedSnapshot) EvidenceFor(ctx context.Context, idx int32, now time.Time, grace time.Duration) InstanceEvidence {
-	var ev InstanceEvidence
-	var inst *InstanceStatus
-	for i := range s.insts {
-		if s.insts[i].Index == idx {
-			inst = &s.insts[i]
-			break
-		}
-	}
-	if inst != nil {
-		ev.DeadlinePassed = operationDeadlinePassed(inst, now)
-	}
-	cached, err := s.CachedPods(ctx)
-	if err != nil {
-		return ev
-	}
-	ev.Unschedulable, ev.UnschedulableMessage, ev.UnschedulableSince = types.FirstUnschedulablePod(cached[idx])
-	pods := cached[idx]
-	if inst != nil {
-		pods = evidence.PodsForStuckCheck(*inst, cached)
-	}
-	if grace <= 0 {
-		return ev
-	}
-	if pod, reason := evidence.FirstStuckPodForInstance(pods, now, grace); pod != nil {
-		ev.StuckPod = pod
-		ev.StuckReason = reason
-	}
-	return ev
-}
-
 // observePodsLive performs the selector-scoped live-role List.
-func observePodsLive(ctx context.Context, deps Deps, input ReconcileInput, component ComponentType) (PodObservation, error) {
+func observePodsLive(ctx context.Context, deps types.Deps, input types.ReconcileInput, component types.ComponentType) (PodObservation, error) {
 	// The API reader has no Pod field index. useIndex=false preserves one List
 	// for this role, including its cached-client fallback.
 	reader := deps.Reader()
@@ -197,7 +117,7 @@ func observePodsLive(ctx context.Context, deps Deps, input ReconcileInput, compo
 }
 
 // observePodsCached performs the selector-scoped cache List.
-func observePodsCached(ctx context.Context, deps Deps, input ReconcileInput, component ComponentType) (PodObservation, error) {
+func observePodsCached(ctx context.Context, deps types.Deps, input types.ReconcileInput, component types.ComponentType) (PodObservation, error) {
 	// Cached client has the OMENative Pod field index — useIndex=true takes
 	// the index fast path instead of scanning every cached pod.
 	pods, err := query.ListOMENativePodsByName(ctx, deps.Client, input.Key.Namespace, input.Key.OwnerName, component, true)

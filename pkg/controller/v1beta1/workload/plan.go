@@ -4,6 +4,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -20,7 +21,7 @@ import (
 // The mutating webhook fills in Lifecycle fields in production;
 // BuildPlan re-applies defaults inline for robustness against
 // pre-defaulter objects and test fixtures.
-func BuildPlan(component ComponentType, desired WorkloadDesiredSpec, observed WorkloadObservedState) (ComponentPlan, error) {
+func BuildPlan(component types.ComponentType, desired types.WorkloadDesiredSpec, observed types.WorkloadObservedState) (types.ComponentPlan, error) {
 	replicas := desired.Replicas
 	if replicas <= 0 {
 		replicas = 1
@@ -35,13 +36,13 @@ func BuildPlan(component ComponentType, desired WorkloadDesiredSpec, observed Wo
 	// migration; scale-down logic is responsible for picking the right
 	// deletion target after that surge resolves.
 	indices := instancePlanIndices(observed.InstanceStatuses, replicas)
-	instances := make([]InstancePlan, len(indices))
+	instances := make([]types.InstancePlan, len(indices))
 	runners := runnersForInstance(desired.MultiPod, workerSize)
 	for i, idx := range indices {
-		instances[i] = InstancePlan{
+		instances[i] = types.InstancePlan{
 			Index:       idx,
 			Incarnation: incarnationForIndex(observed.InstanceStatuses, idx),
-			Runners:     append([]RunnerPlan(nil), runners...),
+			Runners:     append([]types.RunnerPlan(nil), runners...),
 			// Relocation-directive memory: the adapter projects the
 			// per-instance node-exclusion list from the audit ledger;
 			// Render turns it into a required NotIn hostname term so
@@ -52,7 +53,7 @@ func BuildPlan(component ComponentType, desired WorkloadDesiredSpec, observed Wo
 
 	lifecycle := desired.Lifecycle
 
-	return ComponentPlan{
+	return types.ComponentPlan{
 		Component:      component,
 		Replicas:       replicas,
 		Instances:      instances,
@@ -77,9 +78,9 @@ func BuildPlan(component ComponentType, desired WorkloadDesiredSpec, observed Wo
 
 // workerSizeFromRunners returns the "worker" Runner size or 0 when no
 // worker Runner is present (single-pod Component).
-func workerSizeFromRunners(runners []Runner) int32 {
+func workerSizeFromRunners(runners []types.Runner) int32 {
 	for _, r := range runners {
-		if r.Name == RunnerWorker {
+		if r.Name == types.RunnerWorker {
 			return r.Size
 		}
 	}
@@ -92,39 +93,39 @@ func workerSizeFromRunners(runners []Runner) int32 {
 // consistent (downstream code keys on Runner.Name). Admission rejects
 // Worker.Size <= 0 at the webhook so workerSize=0 multi-pod requests
 // never reach this function in production.
-func runnersForInstance(multiPod bool, workerSize int32) []RunnerPlan {
+func runnersForInstance(multiPod bool, workerSize int32) []types.RunnerPlan {
 	if !multiPod {
-		return []RunnerPlan{{Name: RunnerDefault, Size: 1}}
+		return []types.RunnerPlan{{Name: types.RunnerDefault, Size: 1}}
 	}
-	return []RunnerPlan{
-		{Name: RunnerLeader, Size: 1},
-		{Name: RunnerWorker, Size: workerSize},
+	return []types.RunnerPlan{
+		{Name: types.RunnerLeader, Size: 1},
+		{Name: types.RunnerWorker, Size: workerSize},
 	}
 }
 
-func restartPolicyOrDefault(p *RestartPolicy, multiPod bool) RestartPolicy {
+func restartPolicyOrDefault(p *types.RestartPolicy, multiPod bool) types.RestartPolicy {
 	if p != nil {
 		return *p
 	}
 	if multiPod {
-		return RestartPolicyRecreateInstance
+		return types.RestartPolicyRecreateInstance
 	}
-	return RestartPolicyNone
+	return types.RestartPolicyNone
 }
 
-func readyPolicyOrDefault(p *InstanceReadyPolicy, multiPod bool) InstanceReadyPolicy {
+func readyPolicyOrDefault(p *types.InstanceReadyPolicy, multiPod bool) types.InstanceReadyPolicy {
 	if p != nil {
 		return *p
 	}
 	if multiPod {
-		return InstanceReadyPolicyAllPodReady
+		return types.InstanceReadyPolicyAllPodReady
 	}
-	return InstanceReadyPolicyNone
+	return types.InstanceReadyPolicyNone
 }
 
-func updateStrategyWithDefaults(s *UpdateStrategy) UpdateStrategy {
+func updateStrategyWithDefaults(s *types.UpdateStrategy) types.UpdateStrategy {
 	if s == nil {
-		s = &UpdateStrategy{}
+		s = &types.UpdateStrategy{}
 	}
 	out := *s
 	if out.Type == "" {
@@ -132,10 +133,10 @@ func updateStrategyWithDefaults(s *UpdateStrategy) UpdateStrategy {
 		// at the dispatcher gate, whereas in-place at scale could mass-
 		// drain the fleet on a single wake-up. Opt into in-place
 		// explicitly via spec.<component>.omeNative.updateStrategy.type.
-		out.Type = UpdateStrategySurgeThenDrain
+		out.Type = types.UpdateStrategySurgeThenDrain
 	}
 	if out.InPlaceUpdateStrategy == nil {
-		out.InPlaceUpdateStrategy = &InPlaceUpdateStrategy{}
+		out.InPlaceUpdateStrategy = &types.InPlaceUpdateStrategy{}
 	}
 	if out.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle == nil {
 		mark := true
@@ -163,9 +164,9 @@ func ResolveInstanceReadyTimeout(spec *metav1.Duration, configured time.Duration
 // unset. Exported so adapters gating outside BuildPlan (e.g. migration
 // accept rejecting under Never) resolve the identical value the
 // dispatcher reads from ComponentPlan.MigrationMode.
-func MigrationModeOrDefault(p *MigrationPolicy) MigrationMode {
+func MigrationModeOrDefault(p *types.MigrationPolicy) types.MigrationMode {
 	if p == nil || p.Mode == "" {
-		return MigrationModeAuto
+		return types.MigrationModeAuto
 	}
 	return p.Mode
 }
@@ -178,7 +179,7 @@ func MigrationModeOrDefault(p *MigrationPolicy) MigrationMode {
 // The replica cap counts only non-migration indices. Counting the
 // surge against it would drop a healthy non-migrating sibling out of
 // the plan and into scale-down.
-func instancePlanIndices(instances []InstanceStatus, replicas int32) []int32 {
+func instancePlanIndices(instances []types.InstanceStatus, replicas int32) []int32 {
 	used := existingInstanceIndices(instances)
 	// "Protected" / "source" sets cover BOTH migration surge pairs and
 	// multi-pod (gang) update-surge pairs — the two cases that transiently
@@ -202,7 +203,7 @@ func instancePlanIndices(instances []InstanceStatus, replicas int32) []int32 {
 		}
 		targetIndex := *s.Operation.SurgeIndex
 		switch s.Operation.Type {
-		case InstanceOperationMigrate, InstanceOperationUpdate:
+		case types.InstanceOperationMigrate, types.InstanceOperationUpdate:
 			handoffTargetReferences[targetIndex]++
 			migrationProtected[targetIndex] = struct{}{}
 		}
@@ -210,11 +211,11 @@ func instancePlanIndices(instances []InstanceStatus, replicas int32) []int32 {
 
 	// Ready instances are stable replicas, preferred to keep.
 	readyByIndex := map[int32]bool{}
-	statusByIndex := map[int32]InstanceStatus{}
+	statusByIndex := map[int32]types.InstanceStatus{}
 	retiringSources := map[int32]struct{}{}
 	for _, s := range instances {
 		statusByIndex[s.Index] = s
-		if s.Phase == InstancePhaseReady {
+		if s.Phase == types.InstancePhaseReady {
 			readyByIndex[s.Index] = true
 		}
 	}
@@ -227,7 +228,7 @@ func instancePlanIndices(instances []InstanceStatus, replicas int32) []int32 {
 			continue
 		}
 		targetIndex := *s.Operation.SurgeIndex
-		if s.Operation.Type != InstanceOperationUpdate {
+		if s.Operation.Type != types.InstanceOperationUpdate {
 			target, found := statusByIndex[targetIndex]
 			if found && migrationHandoffPromoted(s, target, handoffTargetReferences[targetIndex]) {
 				delete(migrationProtected, s.Index)
@@ -318,23 +319,23 @@ func instancePlanIndices(instances []InstanceStatus, replicas int32) []int32 {
 	return indices
 }
 
-func migrationHandoffPromoted(source, target InstanceStatus, targetReferences int) bool {
+func migrationHandoffPromoted(source, target types.InstanceStatus, targetReferences int) bool {
 	return targetReferences == 1 &&
-		source.Phase == InstancePhaseMigrating && source.RunningRevision != "" && source.TargetRevision == "" &&
-		source.Operation != nil && source.Operation.Type == InstanceOperationMigrate &&
+		source.Phase == types.InstancePhaseMigrating && source.RunningRevision != "" && source.TargetRevision == "" &&
+		source.Operation != nil && source.Operation.Type == types.InstanceOperationMigrate &&
 		source.Operation.RequestUUID != "" && source.Operation.SurgeIndex != nil &&
 		*source.Operation.SurgeIndex == target.Index &&
-		target.Incarnation == 1 && target.ActiveOrdinal == 0 && target.Phase == InstancePhaseReady &&
+		target.Incarnation == 1 && target.ActiveOrdinal == 0 && target.Phase == types.InstancePhaseReady &&
 		target.RunningRevision == source.RunningRevision && target.TargetRevision == "" && target.Operation == nil
 }
 
-func updateHandoffPromoted(source, target InstanceStatus, targetReferences int) bool {
+func updateHandoffPromoted(source, target types.InstanceStatus, targetReferences int) bool {
 	return targetReferences == 1 &&
-		source.Phase == InstancePhaseUpdating && source.RunningRevision != "" && source.TargetRevision != "" &&
-		source.Operation != nil && source.Operation.Type == InstanceOperationUpdate &&
-		source.Operation.Step == UpdateStepSurgeDrain && source.Operation.SurgeIndex != nil &&
+		source.Phase == types.InstancePhaseUpdating && source.RunningRevision != "" && source.TargetRevision != "" &&
+		source.Operation != nil && source.Operation.Type == types.InstanceOperationUpdate &&
+		source.Operation.Step == types.UpdateStepSurgeDrain && source.Operation.SurgeIndex != nil &&
 		*source.Operation.SurgeIndex == target.Index && source.Operation.TargetRevision == source.TargetRevision &&
-		target.Incarnation == 1 && target.ActiveOrdinal == 0 && target.Phase == InstancePhaseReady &&
+		target.Incarnation == 1 && target.ActiveOrdinal == 0 && target.Phase == types.InstancePhaseReady &&
 		target.RunningRevision == source.TargetRevision && target.TargetRevision == "" && target.Operation == nil
 }
 
@@ -343,7 +344,7 @@ func updateHandoffPromoted(source, target InstanceStatus, targetReferences int) 
 // (the source) or Operation.Type=Migrate (the surge). These indices
 // stay in the plan past scale-down boundaries because deleting them
 // mid-migration would abandon a partially-rolled-out surge.
-func migrationInFlightIndices(instances []InstanceStatus) map[int32]struct{} {
+func migrationInFlightIndices(instances []types.InstanceStatus) map[int32]struct{} {
 	out := map[int32]struct{}{}
 	for i := range instances {
 		if migrationPinned(&instances[i]) {
@@ -360,12 +361,12 @@ func migrationInFlightIndices(instances []InstanceStatus) map[int32]struct{} {
 // the attempt it was made for — a Failed row keeps it, and an index the
 // record still names must stay in the plan so the retirement does not
 // abandon half a pair — while ownership ends when the attempt does.
-func migrationPinned(s *InstanceStatus) bool {
+func migrationPinned(s *types.InstanceStatus) bool {
 	if s == nil {
 		return false
 	}
-	return s.Phase == InstancePhaseMigrating ||
-		(s.Operation != nil && s.Operation.Type == InstanceOperationMigrate)
+	return s.Phase == types.InstancePhaseMigrating ||
+		(s.Operation != nil && s.Operation.Type == types.InstanceOperationMigrate)
 }
 
 // migrationSourceIndices returns the indices of source-side migration
@@ -373,10 +374,10 @@ func migrationPinned(s *InstanceStatus) bool {
 // participants (Phase=Creating + Operation.Migrate) are not included
 // because they are the +1 over MinReplicas, not the user-facing
 // replica being relocated.
-func migrationSourceIndices(instances []InstanceStatus) map[int32]struct{} {
+func migrationSourceIndices(instances []types.InstanceStatus) map[int32]struct{} {
 	out := map[int32]struct{}{}
 	for _, s := range instances {
-		if s.Phase == InstancePhaseMigrating {
+		if s.Phase == types.InstancePhaseMigrating {
 			out[s.Index] = struct{}{}
 		}
 	}
@@ -398,11 +399,11 @@ func migrationSourceIndices(instances []InstanceStatus) map[int32]struct{} {
 // occupied target discovered during recovery: the source and occupant remain
 // intact until gangSurgeUpdate can reset the claim. An unreferenced marker is
 // left for the scale-down pipeline to reap.
-func updateSurgeInFlightIndices(instances []InstanceStatus) map[int32]struct{} {
+func updateSurgeInFlightIndices(instances []types.InstanceStatus) map[int32]struct{} {
 	out := map[int32]struct{}{}
 	referenced := map[int32]struct{}{}
 	for _, s := range instances {
-		if s.Operation == nil || s.Operation.Type != InstanceOperationUpdate {
+		if s.Operation == nil || s.Operation.Type != types.InstanceOperationUpdate {
 			continue
 		}
 		if s.Operation.SurgeIndex != nil { // source
@@ -422,10 +423,10 @@ func updateSurgeInFlightIndices(instances []InstanceStatus) map[int32]struct{} {
 // in-flight gang surge (Op.Type=Update with SurgeIndex set). These count
 // toward the steady replica budget — the source IS the user-facing
 // replica being rolled; the surge target is the transient +1.
-func updateSurgeSourceIndices(instances []InstanceStatus) map[int32]struct{} {
+func updateSurgeSourceIndices(instances []types.InstanceStatus) map[int32]struct{} {
 	out := map[int32]struct{}{}
 	for _, s := range instances {
-		if s.Operation != nil && s.Operation.Type == InstanceOperationUpdate && s.Operation.SurgeIndex != nil {
+		if s.Operation != nil && s.Operation.Type == types.InstanceOperationUpdate && s.Operation.SurgeIndex != nil {
 			out[s.Index] = struct{}{}
 		}
 	}
@@ -433,7 +434,7 @@ func updateSurgeSourceIndices(instances []InstanceStatus) map[int32]struct{} {
 }
 
 // existingInstanceIndices returns the set of recorded indices.
-func existingInstanceIndices(instances []InstanceStatus) map[int32]struct{} {
+func existingInstanceIndices(instances []types.InstanceStatus) map[int32]struct{} {
 	out := map[int32]struct{}{}
 	for _, s := range instances {
 		out[s.Index] = struct{}{}
@@ -455,7 +456,7 @@ func lowestUnusedIndex(used map[int32]struct{}) int32 {
 
 // incarnationForIndex returns the current Incarnation for idx, or 1
 // when no matching entry exists yet (first reconcile or after delete).
-func incarnationForIndex(instances []InstanceStatus, idx int32) int64 {
+func incarnationForIndex(instances []types.InstanceStatus, idx int32) int64 {
 	for _, s := range instances {
 		if s.Index == idx && s.Incarnation > 0 {
 			return s.Incarnation

@@ -1,5 +1,5 @@
 // Package query holds the read-side primitives shared between the
-// workload pipeline (workload/status_aggregate.go, workload/ops/...)
+// workload pipeline (workload/status/aggregate.go, workload/ops/...)
 // and the per-Component dispatch surfaces still on the ISVC controller
 // (omenative/watches.go). Lives as a leaf so the workload package can
 // import it without closing a cycle.

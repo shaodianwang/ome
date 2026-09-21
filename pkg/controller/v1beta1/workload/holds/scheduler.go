@@ -9,7 +9,7 @@ import (
 // schedulerHold is the scheduler's verdict on a pod it cannot place. The
 // workload is waiting on cluster capacity, not failing: the token parks
 // the InstanceReadyTimeout clock, and only an operator-configured grace
-// turns the wait into a terminal failure (escalation_scheduler.go).
+// turns the wait into a terminal failure (escalation/scheduler.go).
 //
 // Recorded for EVERY operation type, Migrate included. A migration
 // stamps a deadline on both pair rows, and a replacement the scheduler

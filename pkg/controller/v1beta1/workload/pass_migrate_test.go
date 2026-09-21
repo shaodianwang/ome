@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -17,20 +18,20 @@ import (
 func TestReconcile_SkipsMigrateWhenModeNever(t *testing.T) {
 	scheme := makeScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	deps := workload.Deps{Client: c}
+	deps := types.Deps{Client: c}
 
 	in := minimalInput(t)
-	in.ObservedState.Migrations = []workload.MigrationRecord{{
-		RequestUUID: "u-never", Trigger: workload.MigrationTriggerManual,
-		Phase: workload.MigrationPhaseAccepted, SourceInstance: 0,
+	in.ObservedState.Migrations = []types.MigrationRecord{{
+		RequestUUID: "u-never", Trigger: types.MigrationTriggerManual,
+		Phase: types.MigrationPhaseAccepted, SourceInstance: 0,
 	}}
 	migrationMutated := false
-	in.MutateMigration = func(_ context.Context, _ string, _ func(*workload.MigrationRecord) bool) error {
+	in.MutateMigration = func(_ context.Context, _ string, _ func(*types.MigrationRecord) bool) error {
 		migrationMutated = true
 		return nil
 	}
 	plan := minimalPlan()
-	plan.MigrationMode = workload.MigrationModeNever
+	plan.MigrationMode = types.MigrationModeNever
 
 	_, err := workload.Reconcile(context.Background(), deps, in, plan, nil)
 	if err != nil {
@@ -51,18 +52,18 @@ func TestReconcile_SkipsMigrateWhenModeNever(t *testing.T) {
 func TestReconcile_MigrationWorkSelection(t *testing.T) {
 	scheme := makeScheme(t)
 
-	terminalAndAuto := []workload.MigrationRecord{
+	terminalAndAuto := []types.MigrationRecord{
 		// Terminal Manual — finished work, never re-picked.
-		{RequestUUID: "u-done", Trigger: workload.MigrationTriggerManual,
-			Phase: workload.MigrationPhaseCompleted, SourceInstance: 0},
+		{RequestUUID: "u-done", Trigger: types.MigrationTriggerManual,
+			Phase: types.MigrationPhaseCompleted, SourceInstance: 0},
 		// Terminal Manual failure — same.
-		{RequestUUID: "u-failed", Trigger: workload.MigrationTriggerManual,
-			Phase: workload.MigrationPhaseFailed, SourceInstance: 0},
+		{RequestUUID: "u-failed", Trigger: types.MigrationTriggerManual,
+			Phase: types.MigrationPhaseFailed, SourceInstance: 0},
 		// Auto relocation record — born terminal, structurally excluded.
-		{RequestUUID: "u-auto", Trigger: workload.MigrationTriggerAuto,
-			Phase: workload.MigrationPhaseRelocated, SourceInstance: 0},
+		{RequestUUID: "u-auto", Trigger: types.MigrationTriggerAuto,
+			Phase: types.MigrationPhaseRelocated, SourceInstance: 0},
 	}
-	if rec := workload.NextManualMigration(terminalAndAuto); rec != nil {
+	if rec := types.NextManualMigration(terminalAndAuto); rec != nil {
 		t.Fatalf("terminal/Auto records must never be selected as work; picked %q", rec.RequestUUID)
 	}
 
@@ -72,13 +73,13 @@ func TestReconcile_MigrationWorkSelection(t *testing.T) {
 	in := minimalInput(t)
 	in.ObservedState.Migrations = terminalAndAuto
 	migrationMutated := false
-	in.MutateMigration = func(_ context.Context, _ string, _ func(*workload.MigrationRecord) bool) error {
+	in.MutateMigration = func(_ context.Context, _ string, _ func(*types.MigrationRecord) bool) error {
 		migrationMutated = true
 		return nil
 	}
 	plan := minimalPlan()
-	plan.MigrationMode = workload.MigrationModeAuto
-	if _, err := workload.Reconcile(context.Background(), workload.Deps{Client: c}, in, plan, nil); err != nil {
+	plan.MigrationMode = types.MigrationModeAuto
+	if _, err := workload.Reconcile(context.Background(), types.Deps{Client: c}, in, plan, nil); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	if migrationMutated {
@@ -89,13 +90,13 @@ func TestReconcile_MigrationWorkSelection(t *testing.T) {
 	// the oldest StartedAt wins when several are in flight.
 	older := metav1.NewTime(fixedMigrationTime())
 	newer := metav1.NewTime(fixedMigrationTime().Add(time.Minute))
-	work := append(append([]workload.MigrationRecord(nil), terminalAndAuto...),
-		workload.MigrationRecord{RequestUUID: "u-newer", Trigger: workload.MigrationTriggerManual,
-			Phase: workload.MigrationPhaseAccepted, SourceInstance: 0, StartedAt: newer},
-		workload.MigrationRecord{RequestUUID: "u-older", Trigger: workload.MigrationTriggerManual,
-			Phase: workload.MigrationPhaseSurgePending, SourceInstance: 0, StartedAt: older},
+	work := append(append([]types.MigrationRecord(nil), terminalAndAuto...),
+		types.MigrationRecord{RequestUUID: "u-newer", Trigger: types.MigrationTriggerManual,
+			Phase: types.MigrationPhaseAccepted, SourceInstance: 0, StartedAt: newer},
+		types.MigrationRecord{RequestUUID: "u-older", Trigger: types.MigrationTriggerManual,
+			Phase: types.MigrationPhaseSurgePending, SourceInstance: 0, StartedAt: older},
 	)
-	rec := workload.NextManualMigration(work)
+	rec := types.NextManualMigration(work)
 	if rec == nil || rec.RequestUUID != "u-older" {
 		t.Fatalf("expected oldest non-terminal Manual record u-older, got %+v", rec)
 	}
@@ -129,26 +130,26 @@ func TestReconcile_MigrationWorkSelection(t *testing.T) {
 func TestReconcile_FreshMigrateOnNonReadySource_FallsThroughToUpdate(t *testing.T) {
 	scheme := makeScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	deps := workload.Deps{Client: c}
+	deps := types.Deps{Client: c}
 
 	in := minimalInput(t)
-	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
+	in.ObservedState.InstanceStatuses = []types.InstanceStatus{
 		// Phase=Updating: an in-flight Update from a recent spec edit
 		// (e.g., adding NodeAffinity to ISVC PodSpec). Migrate's fresh-
 		// request branch defers because source.Phase != Ready.
-		{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseUpdating, RunningRevision: "prior-rev"},
+		{Index: 0, Incarnation: 1, Phase: types.InstancePhaseUpdating, RunningRevision: "prior-rev"},
 	}
 	plan := minimalPlan()
-	plan.UpdateStrategy = workload.UpdateStrategy{Type: workload.UpdateStrategySurgeThenDrain}
-	plan.MigrationMode = workload.MigrationModeAuto
+	plan.UpdateStrategy = types.UpdateStrategy{Type: types.UpdateStrategySurgeThenDrain}
+	plan.MigrationMode = types.MigrationModeAuto
 
 	// A fresh Accepted record — the dispatcher does NOT pre-check source
 	// state; that's Migrate's job. The point of the test is the
 	// post-Migrate fall-through.
-	in.ObservedState.Migrations = []workload.MigrationRecord{{
+	in.ObservedState.Migrations = []types.MigrationRecord{{
 		RequestUUID:    "fresh-uuid-during-update",
-		Trigger:        workload.MigrationTriggerManual,
-		Phase:          workload.MigrationPhaseAccepted,
+		Trigger:        types.MigrationTriggerManual,
+		Phase:          types.MigrationPhaseAccepted,
 		SourceInstance: 0,
 		FromNode:       "node5",
 	}}
@@ -158,7 +159,7 @@ func TestReconcile_FreshMigrateOnNonReadySource_FallsThroughToUpdate(t *testing.
 	// dispatcher fix mutateCount is 0; with it, Update fires and the
 	// count is > 0.
 	mutateCount := 0
-	in.MutateInstance = func(_ context.Context, _ int32, fn func(*workload.InstanceStatus) bool) error {
+	in.MutateInstance = func(_ context.Context, _ int32, fn func(*types.InstanceStatus) bool) error {
 		mutateCount++
 		// Apply mutation against the seeded ObservedState so subsequent
 		// reads inside the same reconcile see the result.

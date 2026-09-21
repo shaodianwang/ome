@@ -8,7 +8,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // buildRemoveInstance must Forget the SAME expectations bucket the
@@ -27,7 +27,7 @@ func TestBuildRemoveInstance_ForgetsParentKeyedExpectations(t *testing.T) {
 		WithStatusSubresource(&v1beta1.InferenceReplica{}).
 		Build()
 
-	exp := workload.NewExpectations()
+	exp := workloadtypes.NewExpectations()
 	key := buildKey(ir)
 	exp.ExpectCreates(key.Namespace, key.OwnerName, key.Component, 0, 1)
 	g.Expect(exp.Satisfied(key.Namespace, key.OwnerName, key.Component, 0)).To(gomega.BeFalse(),

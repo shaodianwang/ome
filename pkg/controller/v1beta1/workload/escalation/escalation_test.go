@@ -1,12 +1,14 @@
-package workload
+package escalation
 
 import (
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // servingPodInPhase builds a pod that reads healthy — ContainersReady and
@@ -52,5 +54,30 @@ func TestPodSetFullyServing_TerminalPodDisqualifies(t *testing.T) {
 				t.Fatalf("podSetFullyServing = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestEvidenceFor_Deadline: the pass's evidence reports DeadlinePassed
+// for a transient-phase instance whose Operation.Deadline is in the past,
+// and not otherwise. Evidence only — no writes. (No stuck pod: no pods
+// are observed, so StuckPod stays nil.)
+func TestEvidenceFor_Deadline(t *testing.T) {
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	insts := []types.InstanceStatus{
+		{ // deadline in the past → DeadlinePassed
+			Index: 0, Phase: types.InstancePhaseUpdating,
+			Operation: &types.InstanceOperation{Deadline: metav1.NewTime(now.Add(-time.Minute))},
+		},
+		{ // deadline in the future → not passed
+			Index: 1, Phase: types.InstancePhaseUpdating,
+			Operation: &types.InstanceOperation{Deadline: metav1.NewTime(now.Add(time.Minute))},
+		},
+	}
+
+	if ev := evidenceFor(insts, nil, 0, now, 30*time.Second); !ev.DeadlinePassed || ev.StuckPod != nil {
+		t.Errorf("instance 0: got DeadlinePassed=%v StuckPod=%v, want true/nil", ev.DeadlinePassed, ev.StuckPod)
+	}
+	if ev := evidenceFor(insts, nil, 1, now, 30*time.Second); ev.DeadlinePassed {
+		t.Errorf("instance 1: future deadline must not be passed")
 	}
 }

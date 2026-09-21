@@ -499,7 +499,7 @@ cells:
   - state: Create/CreatePods
     event: pod.admitted
     outcome: ignore
-    note: deadline.go ReconcileGatedDeadlines restarts the parked deadline at now plus InstanceReadyTimeout on the gate-exit edge, so admission only re-arms the clock the gate-enter zeroed and the row stays in CreatePods
+    note: escalation/deadline.go ReconcileGatedDeadlines restarts the parked deadline at now plus InstanceReadyTimeout on the gate-exit edge, so admission only re-arms the clock the gate-enter zeroed and the row stays in CreatePods
     placement: perm
     coverage: {perm: [], unit: [TestReconcileGatedDeadlines_RestartsOnUngate], kind: []}
     status: current
@@ -688,7 +688,7 @@ cells:
     outcome: escalate
     to: Failed
     guard: a pod of the attempt already holds one of the terminal waiting reasons when the grace elapses and the pod set is not fully serving; the elapsed grace by itself only arms the check
-    note: the grace is measured from pod creationTimestamp by the stuck-pod evidence in status_aggregate.go, which reports a pod held in a terminal kubelet waiting reason past it, and escalation.go routes a disposable Create attempt through the disposition, which records a RetryBlock against the pinned revision or a relocation directive and clears the operation in one write
+    note: the grace is measured from pod creationTimestamp by the stuck-pod evidence in escalation/escalation.go, which reports a pod held in a terminal kubelet waiting reason past it, and escalation.go routes a disposable Create attempt through the disposition, which records a RetryBlock against the pinned revision or a relocation directive and clears the operation in one write
     invariants: [one.operation.per.instance]
     placement: perm
     coverage: {perm: [], unit: [TestEscalateStuckPodFailures_DisposesSinglePodWorkloadCaused], kind: [], replay: [T-create-stuckgrace]}
@@ -698,7 +698,7 @@ cells:
     event: timer.stuckPodGrace
     windows: [boundary, after]
     outcome: ignore
-    note: escalation.go skips a row that already reads Failed and a disposed attempt no longer carries an operation, so a later grace tick on the same wedged pod writes nothing
+    note: escalation/escalation.go skips a row that already reads Failed and a disposed attempt no longer carries an operation, so a later grace tick on the same wedged pod writes nothing
     placement: perm
     coverage: {perm: [], unit: [TestExpireOperations_AlreadyFailedNoOp], kind: []}
     status: current
@@ -754,7 +754,7 @@ cells:
     event: pod.runningNotReady
     variants: [source]
     outcome: defer
-    note: a readiness wait is evidence, never a decision input - the promote needs every pod PodReady with its minReadySeconds window elapsed and simply keeps returning, so the attempt's operation deadline is the only exit. What changes is what that exit records - the deadline disposition names the limbo pod, its first unready container and the readiness condition's message under reason ContainersNotReady instead of a bare DeadlineExceeded, and names the unsatisfied readiness gates under reason ReadinessGateNotSatisfied for the other limbo, where the containers are ready and only the gate keeps the pod out of its Service. The blame is unaffected - readiness limbo is ambiguous between the revision and the node, so it is excluded from the workload-caused set and the relocation branch still runs first where its conditions hold. A pod set with any container parked in a waiting state suppresses the classification outright, because the kubelet already named that failure (pkg/controller/v1beta1/workload/ops/create.go, pkg/controller/v1beta1/workload/deadline.go)
+    note: a readiness wait is evidence, never a decision input - the promote needs every pod PodReady with its minReadySeconds window elapsed and simply keeps returning, so the attempt's operation deadline is the only exit. What changes is what that exit records - the deadline disposition names the limbo pod, its first unready container and the readiness condition's message under reason ContainersNotReady instead of a bare DeadlineExceeded, and names the unsatisfied readiness gates under reason ReadinessGateNotSatisfied for the other limbo, where the containers are ready and only the gate keeps the pod out of its Service. The blame is unaffected - readiness limbo is ambiguous between the revision and the node, so it is excluded from the workload-caused set and the relocation branch still runs first where its conditions hold. A pod set with any container parked in a waiting state suppresses the classification outright, because the kubelet already named that failure (pkg/controller/v1beta1/workload/ops/create.go, pkg/controller/v1beta1/workload/escalation/deadline.go)
     placement: kind
     coverage: {perm: [], unit: [TestPodRunningNotReady_ExcludesWaitingContainers, TestEscalation_DeadlineWithRunningNotReadyPod_NamesTheProbe, TestEscalation_RunningNotReadyBeforeDeadline_Untouched], kind: []}
     status: current

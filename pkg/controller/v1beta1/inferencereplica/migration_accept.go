@@ -17,8 +17,8 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // unallocatedSurgeIndex marks a ledger Started row whose surge index
@@ -52,7 +52,7 @@ const unallocatedSurgeIndex = int32(-1)
 // All annotation deletions batch into ONE parent Update at pass end,
 // against a fresh parent read under conflict retry; exhausted retries
 // return requeue=true and the annotations retry next pass.
-func (r *Reconciler) consumeMigrationRequests(ctx context.Context, log logr.Logger, ir *v1beta1.InferenceReplica, parent *v1beta1.InferenceService, mode workload.MigrationMode, instanceReadyTimeout time.Duration) (requeue bool, err error) {
+func (r *Reconciler) consumeMigrationRequests(ctx context.Context, log logr.Logger, ir *v1beta1.InferenceReplica, parent *v1beta1.InferenceService, mode workloadtypes.MigrationMode, instanceReadyTimeout time.Duration) (requeue bool, err error) {
 	if parent == nil || len(parent.Annotations) == 0 {
 		return false, nil
 	}
@@ -139,9 +139,9 @@ func (r *Reconciler) consumeMigrationRequests(ctx context.Context, log logr.Logg
 			if r.Recorder != nil {
 				// Unknown schemaVersion keeps its own event reason —
 				// dashboards alert on version skew specifically.
-				eventReason := workload.EventReasonMigrationRequestRejected
+				eventReason := workloadtypes.EventReasonMigrationRequestRejected
 				if errors.Is(perr, audit.ErrUnsupportedSchemaVersion) {
-					eventReason = workload.EventReasonUnsupportedSchemaVersion
+					eventReason = workloadtypes.EventReasonUnsupportedSchemaVersion
 				}
 				r.Recorder.Eventf(parent, corev1.EventTypeWarning, string(eventReason),
 					"OMENative migration uuid=%s rejected: %s", uuid, reason)
@@ -156,7 +156,7 @@ func (r *Reconciler) consumeMigrationRequests(ctx context.Context, log logr.Logg
 		// same visibility surfaces as an accept, answered immediately.
 		// No pacing gate: rejections are records, never work, so every
 		// Never-mode request resolves in one pass.
-		if mode == workload.MigrationModeNever {
+		if mode == workloadtypes.MigrationModeNever {
 			now := metav1.NewTime(r.now())
 			msg := "migrations disabled by MigrationPolicy Mode=Never"
 			if aerr := appendMigrationStatus(ctx, r.statusWriter(), r.liveReader(), ir, v1beta1.MigrationStatus{
@@ -186,7 +186,7 @@ func (r *Reconciler) consumeMigrationRequests(ctx context.Context, log logr.Logg
 			})
 			ledgerDirty = true
 			if r.Recorder != nil {
-				r.Recorder.Eventf(parent, corev1.EventTypeWarning, string(workload.EventReasonMigrationRequestRejected),
+				r.Recorder.Eventf(parent, corev1.EventTypeWarning, string(workloadtypes.EventReasonMigrationRequestRejected),
 					"OMENative migration uuid=%s rejected: %s", uuid, msg)
 			}
 			toDelete = append(toDelete, k)
@@ -286,12 +286,12 @@ func appendMigrationStatus(ctx context.Context, writer statusWriter, reads clien
 		source, err := irstatus.GetDecoded(ctx, reads, key, fresh)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
-				return workload.ErrStatusOwnerGone
+				return workloadtypes.ErrStatusOwnerGone
 			}
 			return fmt.Errorf("re-read IR: %w", err)
 		}
 		if ownerUID == "" || fresh.UID != ownerUID {
-			return workload.ErrStatusOwnerGone
+			return workloadtypes.ErrStatusOwnerGone
 		}
 		for i := range fresh.Status.Migrations {
 			if fresh.Status.Migrations[i].RequestUUID == entry.RequestUUID {
@@ -303,7 +303,7 @@ func appendMigrationStatus(ctx context.Context, writer statusWriter, reads clien
 		fresh.Status.Migrations = append(fresh.Status.Migrations, entry)
 		if err := updateInferenceReplicaStatus(ctx, writer, fresh, source); err != nil {
 			if apierrors.IsNotFound(err) {
-				return workload.ErrStatusOwnerGone
+				return workloadtypes.ErrStatusOwnerGone
 			}
 			return fmt.Errorf("update IR status: %w", err)
 		}
@@ -328,13 +328,13 @@ func appendMigrationStatus(ctx context.Context, writer statusWriter, reads clien
 // workload mirror. Field-for-field; pointers deep-copy so the workload
 // mirror never aliases the IR's status slice (same discipline as
 // retryBlockToWorkload).
-func migrationToWorkload(v v1beta1.MigrationStatus) workload.MigrationRecord {
-	out := workload.MigrationRecord{
+func migrationToWorkload(v v1beta1.MigrationStatus) workloadtypes.MigrationRecord {
+	out := workloadtypes.MigrationRecord{
 		RequestUUID:    v.RequestUUID,
-		Trigger:        workload.MigrationTrigger(v.Trigger),
+		Trigger:        workloadtypes.MigrationTrigger(v.Trigger),
 		SourceInstance: v.SourceInstance,
 		FromNode:       v.FromNode,
-		Phase:          workload.MigrationPhase(v.Phase),
+		Phase:          workloadtypes.MigrationPhase(v.Phase),
 		Attempt:        v.Attempt,
 		Reason:         v.Reason,
 		Message:        v.Message,
@@ -358,7 +358,7 @@ func migrationToWorkload(v v1beta1.MigrationStatus) workload.MigrationRecord {
 }
 
 // migrationFromWorkload is the inverse of migrationToWorkload.
-func migrationFromWorkload(w workload.MigrationRecord) v1beta1.MigrationStatus {
+func migrationFromWorkload(w workloadtypes.MigrationRecord) v1beta1.MigrationStatus {
 	out := v1beta1.MigrationStatus{
 		RequestUUID:    w.RequestUUID,
 		Trigger:        v1beta1.MigrationTrigger(w.Trigger),
@@ -391,11 +391,11 @@ func migrationFromWorkload(w workload.MigrationRecord) v1beta1.MigrationStatus {
 // MigrationRecord shape for ObservedState.Migrations (the shape the
 // dispatcher selects work from). Same mirror discipline as
 // retryBlocksFromIR.
-func migrationsFromIR(ir *v1beta1.InferenceReplica) []workload.MigrationRecord {
+func migrationsFromIR(ir *v1beta1.InferenceReplica) []workloadtypes.MigrationRecord {
 	if len(ir.Status.Migrations) == 0 {
 		return nil
 	}
-	out := make([]workload.MigrationRecord, len(ir.Status.Migrations))
+	out := make([]workloadtypes.MigrationRecord, len(ir.Status.Migrations))
 	for i := range ir.Status.Migrations {
 		out[i] = migrationToWorkload(ir.Status.Migrations[i])
 	}
@@ -414,10 +414,10 @@ func migrationsFromIR(ir *v1beta1.InferenceReplica) []workload.MigrationRecord {
 //
 // A missing entry is a clean no-op. Owner disappearance or replacement
 // returns ErrStatusOwnerGone so callers stop effects from a stale snapshot.
-func buildMutateMigration(writer statusWriter, reads client.Reader, ir *v1beta1.InferenceReplica) func(ctx context.Context, requestUUID string, mutate func(*workload.MigrationRecord) bool) error {
+func buildMutateMigration(writer statusWriter, reads client.Reader, ir *v1beta1.InferenceReplica) func(ctx context.Context, requestUUID string, mutate func(*workloadtypes.MigrationRecord) bool) error {
 	key := client.ObjectKeyFromObject(ir)
 	ownerUID := ir.UID
-	return func(ctx context.Context, requestUUID string, mutate func(*workload.MigrationRecord) bool) error {
+	return func(ctx context.Context, requestUUID string, mutate func(*workloadtypes.MigrationRecord) bool) error {
 		var committed []v1beta1.MigrationStatus
 		wrote := false
 		err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -426,12 +426,12 @@ func buildMutateMigration(writer statusWriter, reads client.Reader, ir *v1beta1.
 			source, err := irstatus.GetDecoded(ctx, reads, key, fresh)
 			if err != nil {
 				if apierrors.IsNotFound(err) {
-					return workload.ErrStatusOwnerGone
+					return workloadtypes.ErrStatusOwnerGone
 				}
 				return fmt.Errorf("re-read IR: %w", err)
 			}
 			if ownerUID == "" || fresh.UID != ownerUID {
-				return workload.ErrStatusOwnerGone
+				return workloadtypes.ErrStatusOwnerGone
 			}
 			pos := -1
 			for i := range fresh.Status.Migrations {
@@ -452,7 +452,7 @@ func buildMutateMigration(writer statusWriter, reads client.Reader, ir *v1beta1.
 			fresh.Status.Migrations[pos] = migrationFromWorkload(w)
 			if err := updateInferenceReplicaStatus(ctx, writer, fresh, source); err != nil {
 				if apierrors.IsNotFound(err) {
-					return workload.ErrStatusOwnerGone
+					return workloadtypes.ErrStatusOwnerGone
 				}
 				return fmt.Errorf("update IR status: %w", err)
 			}
@@ -479,8 +479,8 @@ func buildMutateMigration(writer statusWriter, reads client.Reader, ir *v1beta1.
 // appendMigrationStatus (same RMW + in-memory-mirror discipline as the
 // accept path); an entry with the RequestUUID already present writes
 // nothing.
-func buildAppendMigration(writer statusWriter, reads client.Reader, ir *v1beta1.InferenceReplica) func(ctx context.Context, rec workload.MigrationRecord) error {
-	return func(ctx context.Context, rec workload.MigrationRecord) error {
+func buildAppendMigration(writer statusWriter, reads client.Reader, ir *v1beta1.InferenceReplica) func(ctx context.Context, rec workloadtypes.MigrationRecord) error {
+	return func(ctx context.Context, rec workloadtypes.MigrationRecord) error {
 		return appendMigrationStatus(ctx, writer, reads, ir, migrationFromWorkload(rec))
 	}
 }
@@ -538,12 +538,12 @@ func (r *Reconciler) syncMigrationEntries(ctx context.Context, log logr.Logger, 
 		source, err := irstatus.GetDecoded(ctx, r.liveReader(), key, fresh)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
-				return workload.ErrStatusOwnerGone
+				return workloadtypes.ErrStatusOwnerGone
 			}
 			return fmt.Errorf("re-read IR: %w", err)
 		}
 		if ownerUID == "" || fresh.UID != ownerUID {
-			return workload.ErrStatusOwnerGone
+			return workloadtypes.ErrStatusOwnerGone
 		}
 		changed := false
 
@@ -588,7 +588,7 @@ func (r *Reconciler) syncMigrationEntries(ctx context.Context, log logr.Logger, 
 		}
 		if err := updateInferenceReplicaStatus(ctx, r.statusWriter(), fresh, source); err != nil {
 			if apierrors.IsNotFound(err) {
-				return workload.ErrStatusOwnerGone
+				return workloadtypes.ErrStatusOwnerGone
 			}
 			return fmt.Errorf("update IR status: %w", err)
 		}

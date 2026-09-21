@@ -122,7 +122,7 @@ as its external half for the fixtures a `package x_test` file must call.
 **Rows are written in one place.** A row-mutation closure —
 `func(s *InstanceStatus) bool`, the callback the status adapter applies —
 may be declared only in the packages that write a row: `workload/status`,
-`workload/ops` and the reconcile root. The check is an allow-list of
+`workload/ops` and `workload/escalation`. The check is an allow-list of
 writers, not of readers, so a package added later is checked by default.
 Declaring the callback's *type*, which the adapter contract does, is not
 authoring one.

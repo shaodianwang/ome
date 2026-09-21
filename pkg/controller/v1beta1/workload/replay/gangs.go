@@ -8,7 +8,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	workloadgang "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/gang"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	types "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
@@ -26,7 +25,7 @@ const podGroupFinalizer = "replay.workload.ome.io/podgroup-lifecycle"
 // what each group says into input.Gangs, and wires the inline surge
 // prerequisite the gang-surge op reaches back through. A single-pod
 // Component has no gangs and the whole pass is inert.
-func (d *driver) reconcileGangs(ctx context.Context, deps *workload.Deps, input types.ReconcileInput, plan types.ComponentPlan) error {
+func (d *driver) reconcileGangs(ctx context.Context, deps *types.Deps, input types.ReconcileInput, plan types.ComponentPlan) error {
 	if !d.spec.GangScheduling {
 		return nil
 	}

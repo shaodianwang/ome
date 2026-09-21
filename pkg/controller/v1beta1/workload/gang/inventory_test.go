@@ -21,9 +21,9 @@ import (
 	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podgroup"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 func TestObservePodGroups_OneListIndexesOwnedAndRetainsForeignNames(t *testing.T) {
@@ -85,7 +85,7 @@ func TestCachedOwnerHasPodGroups_UsesControllerUIDNotLabels(t *testing.T) {
 	foreign := inventoryPodGroup(t, foreignOwner, "llama", 8)
 	foreign.Labels = map[string]string{
 		constants.InferenceServicePodLabelKey: withoutGroups.GetName(),
-		constants.OMEComponentLabel:           string(workload.ComponentEngine),
+		constants.OMEComponentLabel:           string(types.ComponentEngine),
 		query.LabelManagedBy:                  query.ManagedByOMENative,
 		query.LabelInstanceIdx:                "7",
 	}
@@ -208,10 +208,10 @@ func TestEnsurePodGroupsWithState_UsesInventoryWithoutPodGroupReads(t *testing.T
 		},
 	})
 	input, _ := inputWithConditionStore(owner, true, 1, true, "custom-scheduler")
-	input.AuthoritativePods = &workload.ComponentPodSnapshot{ByInstance: map[int32][]*corev1.Pod{}}
-	plan := planFor(workload.ComponentEngine, []int32{0}, true, 1, 5*time.Minute)
+	input.AuthoritativePods = &types.ComponentPodSnapshot{ByInstance: map[int32][]*corev1.Pod{}}
+	plan := planFor(types.ComponentEngine, []int32{0}, true, 1, 5*time.Minute)
 
-	if _, err := EnsurePodGroupsWithState(context.Background(), workload.Deps{Client: counting}, input, plan,
+	if _, err := EnsurePodGroupsWithState(context.Background(), types.Deps{Client: counting}, input, plan,
 		PodGroupReconcileState{Inventory: inv}); err != nil {
 		t.Fatalf("EnsurePodGroupsWithState: %v", err)
 	}
@@ -257,17 +257,17 @@ func TestEnsureSurgePodGroupWithState_SeesTopLevelCreateWithoutReads(t *testing.
 		},
 	})
 	input, _ := inputWithConditionStore(owner, true, 1, true, "custom-scheduler")
-	input.AuthoritativePods = &workload.ComponentPodSnapshot{
+	input.AuthoritativePods = &types.ComponentPodSnapshot{
 		Pods:       []*corev1.Pod{},
 		ByInstance: map[int32][]*corev1.Pod{},
 	}
-	plan := planFor(workload.ComponentEngine, []int32{6}, true, 1, 5*time.Minute)
+	plan := planFor(types.ComponentEngine, []int32{6}, true, 1, 5*time.Minute)
 	state := PodGroupReconcileState{Inventory: inv}
 
-	if _, err := EnsurePodGroupsWithState(context.Background(), workload.Deps{Client: counting}, input, plan, state); err != nil {
+	if _, err := EnsurePodGroupsWithState(context.Background(), types.Deps{Client: counting}, input, plan, state); err != nil {
 		t.Fatalf("EnsurePodGroupsWithState: %v", err)
 	}
-	ensure := EnsureSurgePodGroupWithState(workload.Deps{Client: counting}, state)
+	ensure := EnsureSurgePodGroupWithState(types.Deps{Client: counting}, state)
 	if _, err := ensure(context.Background(), input, plan, plan.Instances[0]); err != nil {
 		t.Fatalf("EnsureSurgePodGroupWithState: %v", err)
 	}
@@ -277,14 +277,14 @@ func TestEnsureSurgePodGroupWithState_SeesTopLevelCreateWithoutReads(t *testing.
 	if creates != 1 {
 		t.Fatalf("top-level plus inline ensure created %d PodGroups, want exactly 1", creates)
 	}
-	finalize := BuildFinalizeInstanceResources(counting, counting, inv, owner, "llama", workload.ComponentEngine)
+	finalize := BuildFinalizeInstanceResources(counting, counting, inv, owner, "llama", types.ComponentEngine)
 	complete, err := finalize(context.Background(), 6)
 	if err != nil {
 		t.Fatalf("finalize same-pass PodGroup: %v", err)
 	}
-	if complete || deletes != 1 || !inv.DeleteAccepted(query.PodGroupName("llama", workload.ComponentEngine, 6)) {
+	if complete || deletes != 1 || !inv.DeleteAccepted(query.PodGroupName("llama", types.ComponentEngine, 6)) {
 		t.Fatalf("same-pass finalization: complete=%v deletes=%d accepted=%v", complete, deletes,
-			inv.DeleteAccepted(query.PodGroupName("llama", workload.ComponentEngine, 6)))
+			inv.DeleteAccepted(query.PodGroupName("llama", types.ComponentEngine, 6)))
 	}
 }
 
@@ -307,14 +307,14 @@ func TestEnsureSurgePodGroupWithState_SeesTopLevelUpdate(t *testing.T) {
 		},
 	})
 	input, _ := inputWithConditionStore(owner, true, 1, true, "custom-scheduler")
-	input.AuthoritativePods = &workload.ComponentPodSnapshot{ByInstance: map[int32][]*corev1.Pod{}}
-	plan := planFor(workload.ComponentEngine, []int32{6}, true, 1, 5*time.Minute)
+	input.AuthoritativePods = &types.ComponentPodSnapshot{ByInstance: map[int32][]*corev1.Pod{}}
+	plan := planFor(types.ComponentEngine, []int32{6}, true, 1, 5*time.Minute)
 	state := PodGroupReconcileState{Inventory: inv}
 
-	if _, err := EnsurePodGroupsWithState(context.Background(), workload.Deps{Client: counting}, input, plan, state); err != nil {
+	if _, err := EnsurePodGroupsWithState(context.Background(), types.Deps{Client: counting}, input, plan, state); err != nil {
 		t.Fatalf("EnsurePodGroupsWithState: %v", err)
 	}
-	ensure := EnsureSurgePodGroupWithState(workload.Deps{Client: counting}, state)
+	ensure := EnsureSurgePodGroupWithState(types.Deps{Client: counting}, state)
 	if _, err := ensure(context.Background(), input, plan, plan.Instances[0]); err != nil {
 		t.Fatalf("EnsureSurgePodGroupWithState: %v", err)
 	}
@@ -348,10 +348,10 @@ func TestEnsurePodGroupsWithState_TerminalOwnedSkipsEnsure(t *testing.T) {
 		},
 	})
 	input, _ := inputWithConditionStore(owner, true, 1, true, "custom-scheduler")
-	input.AuthoritativePods = &workload.ComponentPodSnapshot{ByInstance: map[int32][]*corev1.Pod{}}
-	plan := planFor(workload.ComponentEngine, []int32{3}, true, 1, 5*time.Minute)
+	input.AuthoritativePods = &types.ComponentPodSnapshot{ByInstance: map[int32][]*corev1.Pod{}}
+	plan := planFor(types.ComponentEngine, []int32{3}, true, 1, 5*time.Minute)
 
-	if _, err := EnsurePodGroupsWithState(context.Background(), workload.Deps{Client: counting}, input, plan,
+	if _, err := EnsurePodGroupsWithState(context.Background(), types.Deps{Client: counting}, input, plan,
 		PodGroupReconcileState{Inventory: inv, TerminalOwned: map[int32]struct{}{3: {}}}); err != nil {
 		t.Fatalf("EnsurePodGroupsWithState: %v", err)
 	}
@@ -378,23 +378,23 @@ func TestEnsurePodGroupsWithState_DeleteOwnedReboundSkipsEnsure(t *testing.T) {
 		t.Fatalf("ObservePodGroups: %v", err)
 	}
 	input, _ := inputWithConditionStore(owner, true, 1, true, "custom-scheduler")
-	input.AuthoritativePods = &workload.ComponentPodSnapshot{ByInstance: map[int32][]*corev1.Pod{}}
-	input.ObservedState.InstanceStatuses = []workload.InstanceStatus{{
+	input.AuthoritativePods = &types.ComponentPodSnapshot{ByInstance: map[int32][]*corev1.Pod{}}
+	input.ObservedState.InstanceStatuses = []types.InstanceStatus{{
 		Index: 4,
-		Phase: workload.InstancePhaseDeleting,
-		Operation: &workload.InstanceOperation{
-			Type: workload.InstanceOperationDelete,
+		Phase: types.InstancePhaseDeleting,
+		Operation: &types.InstanceOperation{
+			Type: types.InstanceOperationDelete,
 			Step: "Drain",
 		},
 	}}
-	plan := planFor(workload.ComponentEngine, []int32{4}, true, 1, 5*time.Minute)
+	plan := planFor(types.ComponentEngine, []int32{4}, true, 1, 5*time.Minute)
 
-	if _, err := EnsurePodGroupsWithState(context.Background(), workload.Deps{Client: base}, input, plan,
+	if _, err := EnsurePodGroupsWithState(context.Background(), types.Deps{Client: base}, input, plan,
 		PodGroupReconcileState{Inventory: inv}); err != nil {
 		t.Fatalf("EnsurePodGroupsWithState: %v", err)
 	}
 	pg := &schedulingv1alpha1.PodGroup{}
-	err = base.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: query.PodGroupName("llama", workload.ComponentEngine, 4)}, pg)
+	err = base.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: query.PodGroupName("llama", types.ComponentEngine, 4)}, pg)
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("DeleteOwned rebound recreated PodGroup: %v", err)
 	}
@@ -412,7 +412,7 @@ func TestEnsurePodGroupsWithState_ForeignCollisionAndTerminatingGate(t *testing.
 	for _, tc := range []struct {
 		name      string
 		mutate    func(*schedulingv1alpha1.PodGroup)
-		wantState workload.GangState
+		wantState types.GangState
 	}{
 		{
 			name: "foreign",
@@ -420,7 +420,7 @@ func TestEnsurePodGroupsWithState_ForeignCollisionAndTerminatingGate(t *testing.
 				foreign := newOwner("prod", "foreign")
 				pg.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(foreign, testOwnerGVK)}
 			},
-			wantState: workload.GangStateOwnershipConflict,
+			wantState: types.GangStateOwnershipConflict,
 		},
 		{
 			name: "terminating owned",
@@ -428,7 +428,7 @@ func TestEnsurePodGroupsWithState_ForeignCollisionAndTerminatingGate(t *testing.
 				now := metav1.Now()
 				pg.DeletionTimestamp = &now
 			},
-			wantState: workload.GangStateTerminating,
+			wantState: types.GangStateTerminating,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -442,10 +442,10 @@ func TestEnsurePodGroupsWithState_ForeignCollisionAndTerminatingGate(t *testing.
 			}
 			base := newGangClient(t, owner)
 			input, _ := inputWithConditionStore(owner, true, 1, true, "custom-scheduler")
-			input.AuthoritativePods = &workload.ComponentPodSnapshot{ByInstance: map[int32][]*corev1.Pod{}}
-			input.Gangs = workload.NewGangObservations()
-			plan := planFor(workload.ComponentEngine, []int32{0, 1}, true, 1, 5*time.Minute)
-			_, err := EnsurePodGroupsWithState(context.Background(), workload.Deps{Client: base}, input, plan,
+			input.AuthoritativePods = &types.ComponentPodSnapshot{ByInstance: map[int32][]*corev1.Pod{}}
+			input.Gangs = types.NewGangObservations()
+			plan := planFor(types.ComponentEngine, []int32{0, 1}, true, 1, 5*time.Minute)
+			_, err := EnsurePodGroupsWithState(context.Background(), types.Deps{Client: base}, input, plan,
 				PodGroupReconcileState{Inventory: inv})
 			if err != nil {
 				t.Fatalf("EnsurePodGroupsWithState: got %v want the blocked name classified, not an error", err)
@@ -458,7 +458,7 @@ func TestEnsurePodGroupsWithState_ForeignCollisionAndTerminatingGate(t *testing.
 			}
 			sibling := &schedulingv1alpha1.PodGroup{}
 			if err := base.Get(context.Background(), client.ObjectKey{
-				Namespace: "prod", Name: query.PodGroupName("llama", workload.ComponentEngine, 1),
+				Namespace: "prod", Name: query.PodGroupName("llama", types.ComponentEngine, 1),
 			}, sibling); err != nil {
 				t.Errorf("sibling gang: got %v want it ensured despite the blocked name", err)
 			}
@@ -487,16 +487,16 @@ func TestGang_FailedPodGroupIsResetNotEscalated(t *testing.T) {
 	base := newGangClient(t, owner, pg)
 	recorder := record.NewFakeRecorder(8)
 	input, _ := inputWithConditionStore(owner, true, 1, true, "custom-scheduler")
-	input.AuthoritativePods = &workload.ComponentPodSnapshot{ByInstance: map[int32][]*corev1.Pod{}}
-	input.Gangs = workload.NewGangObservations()
-	plan := planFor(workload.ComponentEngine, []int32{0}, true, 1, 5*time.Minute)
+	input.AuthoritativePods = &types.ComponentPodSnapshot{ByInstance: map[int32][]*corev1.Pod{}}
+	input.Gangs = types.NewGangObservations()
+	plan := planFor(types.ComponentEngine, []int32{0}, true, 1, 5*time.Minute)
 
-	if _, err := EnsurePodGroupsWithState(context.Background(), workload.Deps{Client: base, Recorder: recorder},
+	if _, err := EnsurePodGroupsWithState(context.Background(), types.Deps{Client: base, Recorder: recorder},
 		input, plan, PodGroupReconcileState{Inventory: inv}); err != nil {
 		t.Fatalf("EnsurePodGroupsWithState: %v", err)
 	}
-	if got := input.Gangs.For(0); got.State != workload.GangStateFailed {
-		t.Errorf("gang state: got %q want %q", got.State, workload.GangStateFailed)
+	if got := input.Gangs.For(0); got.State != types.GangStateFailed {
+		t.Errorf("gang state: got %q want %q", got.State, types.GangStateFailed)
 	}
 	if !input.Gangs.BlocksPods(0) {
 		t.Errorf("members must be withheld until the replacement group exists")
@@ -508,7 +508,7 @@ func TestGang_FailedPodGroupIsResetNotEscalated(t *testing.T) {
 	}
 	select {
 	case ev := <-recorder.Events:
-		if !strings.Contains(ev, string(workload.EventReasonPodGroupReset)) || !strings.Contains(ev, "Failed") {
+		if !strings.Contains(ev, string(types.EventReasonPodGroupReset)) || !strings.Contains(ev, "Failed") {
 			t.Errorf("event: got %q want a PodGroupReset naming the failure", ev)
 		}
 	default:
@@ -521,8 +521,8 @@ func TestGang_FailedPodGroupIsResetNotEscalated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ObservePodGroups: %v", err)
 	}
-	input.Gangs = workload.NewGangObservations()
-	if _, err := EnsurePodGroupsWithState(context.Background(), workload.Deps{Client: base, Recorder: recorder},
+	input.Gangs = types.NewGangObservations()
+	if _, err := EnsurePodGroupsWithState(context.Background(), types.Deps{Client: base, Recorder: recorder},
 		input, plan, PodGroupReconcileState{Inventory: fresh}); err != nil {
 		t.Fatalf("EnsurePodGroupsWithState (rebuild): %v", err)
 	}
@@ -554,20 +554,20 @@ func TestGang_FailedPodGroupResetWaitsForTerminalMemberRecycle(t *testing.T) {
 		Labels:    map[string]string{query.LabelPodGroup: pg.Name},
 	}, Status: corev1.PodStatus{Phase: corev1.PodFailed}}
 
-	newPass := func(pods ...*corev1.Pod) (*PodGroupInventory, workload.ReconcileInput, *record.FakeRecorder, client.Client) {
+	newPass := func(pods ...*corev1.Pod) (*PodGroupInventory, types.ReconcileInput, *record.FakeRecorder, client.Client) {
 		inv := newPodGroupInventory(owner.GetUID(), true)
 		inv.byName[pg.Name] = pg
 		inv.ownedName[pg.Name] = pg
 		base := newGangClient(t, owner, pg)
 		input, _ := inputWithConditionStore(owner, true, 1, true, "custom-scheduler")
-		input.AuthoritativePods = &workload.ComponentPodSnapshot{Pods: pods}
-		input.Gangs = workload.NewGangObservations()
+		input.AuthoritativePods = &types.ComponentPodSnapshot{Pods: pods}
+		input.Gangs = types.NewGangObservations()
 		return inv, input, record.NewFakeRecorder(8), base
 	}
-	plan := planFor(workload.ComponentEngine, []int32{0}, true, 1, 5*time.Minute)
+	plan := planFor(types.ComponentEngine, []int32{0}, true, 1, 5*time.Minute)
 
 	inv, input, recorder, base := newPass(dead)
-	if _, err := EnsurePodGroupsWithState(context.Background(), workload.Deps{Client: base, Recorder: recorder},
+	if _, err := EnsurePodGroupsWithState(context.Background(), types.Deps{Client: base, Recorder: recorder},
 		input, plan, PodGroupReconcileState{Inventory: inv}); err != nil {
 		t.Fatalf("EnsurePodGroupsWithState: %v", err)
 	}
@@ -584,7 +584,7 @@ func TestGang_FailedPodGroupResetWaitsForTerminalMemberRecycle(t *testing.T) {
 	}
 
 	inv, input, recorder, base = newPass()
-	if _, err := EnsurePodGroupsWithState(context.Background(), workload.Deps{Client: base, Recorder: recorder},
+	if _, err := EnsurePodGroupsWithState(context.Background(), types.Deps{Client: base, Recorder: recorder},
 		input, plan, PodGroupReconcileState{Inventory: inv}); err != nil {
 		t.Fatalf("EnsurePodGroupsWithState (recycled): %v", err)
 	}
@@ -593,7 +593,7 @@ func TestGang_FailedPodGroupResetWaitsForTerminalMemberRecycle(t *testing.T) {
 	}
 	select {
 	case ev := <-recorder.Events:
-		if !strings.Contains(ev, string(workload.EventReasonPodGroupReset)) {
+		if !strings.Contains(ev, string(types.EventReasonPodGroupReset)) {
 			t.Errorf("event: got %q want a PodGroupReset", ev)
 		}
 	default:
@@ -606,7 +606,7 @@ func TestBuildFinalizeInstanceResources_DeletesOwnedOnceAndIgnoresForeign(t *tes
 		owner := newOwner("prod", "llama")
 		pg := inventoryPodGroup(t, owner, "llama", 5)
 		base := newGangClient(t, owner, pg)
-		finalize := BuildFinalizeInstanceResources(base, base, nil, owner, "llama", workload.ComponentEngine)
+		finalize := BuildFinalizeInstanceResources(base, base, nil, owner, "llama", types.ComponentEngine)
 
 		complete, err := finalize(context.Background(), 5)
 		if err != nil || complete {
@@ -634,7 +634,7 @@ func TestBuildFinalizeInstanceResources_DeletesOwnedOnceAndIgnoresForeign(t *tes
 				return c.Delete(ctx, obj, opts...)
 			},
 		})
-		finalize := BuildFinalizeInstanceResources(counting, counting, inv, owner, "llama", workload.ComponentEngine)
+		finalize := BuildFinalizeInstanceResources(counting, counting, inv, owner, "llama", types.ComponentEngine)
 		complete, err := finalize(context.Background(), 5)
 		if err != nil || complete {
 			t.Fatalf("finalize: %v", err)
@@ -657,7 +657,7 @@ func TestBuildFinalizeInstanceResources_DeletesOwnedOnceAndIgnoresForeign(t *tes
 		if err != nil {
 			t.Fatalf("refresh inventory: %v", err)
 		}
-		complete, err = BuildFinalizeInstanceResources(base, base, fresh, owner, "llama", workload.ComponentEngine)(context.Background(), 5)
+		complete, err = BuildFinalizeInstanceResources(base, base, fresh, owner, "llama", types.ComponentEngine)(context.Background(), 5)
 		if err != nil || !complete {
 			t.Fatalf("absence did not complete finalization: complete=%v err=%v", complete, err)
 		}
@@ -672,7 +672,7 @@ func TestBuildFinalizeInstanceResources_DeletesOwnedOnceAndIgnoresForeign(t *tes
 		if err != nil {
 			t.Fatalf("ObservePodGroups: %v", err)
 		}
-		finalize := BuildFinalizeInstanceResources(base, base, inv, owner, "llama", workload.ComponentEngine)
+		finalize := BuildFinalizeInstanceResources(base, base, inv, owner, "llama", types.ComponentEngine)
 		complete, err := finalize(context.Background(), 5)
 		if err != nil || !complete {
 			t.Fatalf("foreign object is absent from this owner's finalization set: %v", err)
@@ -704,7 +704,7 @@ func TestBuildFinalizeInstanceResources_DeletesOwnedOnceAndIgnoresForeign(t *tes
 				return c.Delete(ctx, obj, opts...)
 			},
 		})
-		finalize := BuildFinalizeInstanceResources(flaky, flaky, inv, owner, "llama", workload.ComponentEngine)
+		finalize := BuildFinalizeInstanceResources(flaky, flaky, inv, owner, "llama", types.ComponentEngine)
 		if _, err := finalize(context.Background(), 5); err == nil {
 			t.Fatal("transient delete failure was swallowed")
 		}
@@ -723,14 +723,14 @@ func TestBuildFinalizeInstanceResources_DeletesOwnedOnceAndIgnoresForeign(t *tes
 
 func inventoryPodGroup(t *testing.T, owner client.Object, ownerName string, index int32) *schedulingv1alpha1.PodGroup {
 	t.Helper()
-	plan := planFor(workload.ComponentEngine, []int32{index}, true, 1, 5*time.Minute)
+	plan := planFor(types.ComponentEngine, []int32{index}, true, 1, 5*time.Minute)
 	pg, err := podgroup.BuildPodGroup(owner, testOwnerGVK, ownerName, plan, plan.Instances[0])
 	if err != nil {
 		t.Fatalf("BuildPodGroup: %v", err)
 	}
 	pg.Labels = map[string]string{
 		constants.InferenceServicePodLabelKey: ownerName,
-		constants.OMEComponentLabel:           string(workload.ComponentEngine),
+		constants.OMEComponentLabel:           string(types.ComponentEngine),
 		query.LabelManagedBy:                  query.ManagedByOMENative,
 		query.LabelInstanceIdx:                stringIndex(index),
 	}

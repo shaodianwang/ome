@@ -13,8 +13,8 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // directiveEntry builds one terminal relocation-directive ledger row.
@@ -337,7 +337,7 @@ func TestStampAutoRelocationSuccess_SameNameReplacementUntouched(t *testing.T) {
 	r, c := newReconciler(t, replacement)
 
 	err := r.stampAutoRelocationSuccess(context.Background(), stale)
-	if !errors.Is(err, workload.ErrStatusOwnerGone) {
+	if !errors.Is(err, workloadtypes.ErrStatusOwnerGone) {
 		t.Fatalf("stamp error: got %v want ErrStatusOwnerGone", err)
 	}
 

@@ -12,8 +12,8 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // consumeReleaseHeldRequest is the operator release mailbox for Held
@@ -54,7 +54,7 @@ func (r *Reconciler) consumeReleaseHeldRequest(ctx context.Context, log logr.Log
 		log.Info("RetryBlock release requested for a revision with no block; consuming as no-op",
 			"revision", val)
 		if r.Recorder != nil {
-			r.Recorder.Eventf(eventTarget, corev1.EventTypeNormal, string(workload.EventReasonRetryBlockReleaseSkipped),
+			r.Recorder.Eventf(eventTarget, corev1.EventTypeNormal, string(workloadtypes.EventReasonRetryBlockReleaseSkipped),
 				"InferenceReplica %s/%s component=%s: release requested for revision %q but no retryBlock exists for it; nothing to release",
 				ir.Namespace, ir.Name, ir.Spec.Component, val)
 		}
@@ -62,14 +62,14 @@ func (r *Reconciler) consumeReleaseHeldRequest(ctx context.Context, log logr.Log
 		log.Info("RetryBlock release requested for a non-Held block; consuming as no-op",
 			"revision", match.TargetRevision, "state", match.State)
 		if r.Recorder != nil {
-			r.Recorder.Eventf(eventTarget, corev1.EventTypeNormal, string(workload.EventReasonRetryBlockReleaseSkipped),
+			r.Recorder.Eventf(eventTarget, corev1.EventTypeNormal, string(workloadtypes.EventReasonRetryBlockReleaseSkipped),
 				"InferenceReplica %s/%s component=%s: retryBlock for revision %s is %s, not Held; nothing to release",
 				ir.Namespace, ir.Name, ir.Spec.Component, match.TargetRevision, match.State)
 		}
 	default:
 		rev := match.TargetRevision
-		if rerr := buildMutateRetryBlock(r.statusWriter(), r.liveReader(), ir, retryBlockHistoryLimit)(ctx, rev, func(*workload.RetryBlock) workload.RetryBlockDisposition {
-			return workload.RetryBlockRemove
+		if rerr := buildMutateRetryBlock(r.statusWriter(), r.liveReader(), ir, retryBlockHistoryLimit)(ctx, rev, func(*workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition {
+			return workloadtypes.RetryBlockRemove
 		}); rerr != nil {
 			// Annotation NOT consumed: the request re-drives the removal
 			// next pass.
@@ -77,7 +77,7 @@ func (r *Reconciler) consumeReleaseHeldRequest(ctx context.Context, log logr.Log
 		}
 		log.Info("Held RetryBlock released at operator request", "revision", rev)
 		if r.Recorder != nil {
-			r.Recorder.Eventf(eventTarget, corev1.EventTypeNormal, string(workload.EventReasonRetryBlockReleased),
+			r.Recorder.Eventf(eventTarget, corev1.EventTypeNormal, string(workloadtypes.EventReasonRetryBlockReleased),
 				"InferenceReplica %s/%s component=%s: Held retryBlock for revision %s removed at operator request (%s annotation)",
 				ir.Namespace, ir.Name, ir.Spec.Component, rev, constants.ReleaseHeldRevisionAnnotationKey)
 		}

@@ -8,12 +8,13 @@
 // block then denies the very recovery a corrective revision was
 // published to unblock. Removing blocks as soon as their revision is
 // superseded caps that exposure.
-package workload
+package escalation
 
 import (
 	"context"
 	"fmt"
 
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 	appsv1 "k8s.io/api/apps/v1"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -33,7 +34,7 @@ import (
 // op passes and the escalation flush, with no write-ahead-ordering
 // obligations. The caller gates it with the escalation pass: never
 // under Teardown or Paused. One V(1) line names the pruned revisions.
-func pruneSupersededRetryBlocks(ctx context.Context, input ReconcileInput, target *appsv1.ControllerRevision) error {
+func PruneSupersededRetryBlocks(ctx context.Context, input types.ReconcileInput, target *appsv1.ControllerRevision) error {
 	if input.MutateRetryBlock == nil || len(input.ObservedState.RetryBlocks) == 0 {
 		return nil
 	}
@@ -62,8 +63,8 @@ func pruneSupersededRetryBlocks(ctx context.Context, input ReconcileInput, targe
 		if _, ok := live[rev]; ok {
 			continue
 		}
-		if err := input.MutateRetryBlock(ctx, rev, func(*RetryBlock) RetryBlockDisposition {
-			return RetryBlockRemove
+		if err := input.MutateRetryBlock(ctx, rev, func(*types.RetryBlock) types.RetryBlockDisposition {
+			return types.RetryBlockRemove
 		}); err != nil {
 			return fmt.Errorf("prune superseded retry block (rev=%s): %w", rev, err)
 		}

@@ -30,12 +30,13 @@
 // applied by upstream defaulters (webhook) when the operator wants
 // them; an unset value here is treated as "uncapped" so we don't
 // silently impose a budget the operator didn't write.
-package workload
+package escalation
 
 import (
 	"sort"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 	"github.com/ome-projects/ome/pkg/utils"
 )
 
@@ -58,7 +59,7 @@ const BudgetNoLimit = int32(-1)
 // group-wide MaxSurgeBudget helper. A 0% expression on any replica
 // count returns 0 (no surge allowed via this layer); a 25% expression
 // on 4 replicas returns 1 (one extra pod allowed).
-func PerComponentMaxSurgeBudget(ru *RollingUpdate, replicas int32) int32 {
+func PerComponentMaxSurgeBudget(ru *types.RollingUpdate, replicas int32) int32 {
 	if ru == nil || ru.MaxSurge == nil {
 		return BudgetNoLimit
 	}
@@ -71,7 +72,7 @@ func PerComponentMaxSurgeBudget(ru *RollingUpdate, replicas int32) int32 {
 // coordination-group ceiling. Integer values return as-is, percent
 // strings resolve via ceil semantics so a "25%" budget on 4 replicas
 // returns 1.
-func PerComponentMaxUnavailableBudget(ru *RollingUpdate, replicas int32) int32 {
+func PerComponentMaxUnavailableBudget(ru *types.RollingUpdate, replicas int32) int32 {
 	if ru == nil || ru.MaxUnavailable == nil {
 		return BudgetNoLimit
 	}
@@ -83,7 +84,7 @@ func PerComponentMaxUnavailableBudget(ru *RollingUpdate, replicas int32) int32 {
 // by RollingUpdate.Partition (the StatefulSet-style canary): the first
 // `Partition` candidates are held. A nil RollingUpdate, nil Partition,
 // or Partition <= 0 holds nothing.
-func HeldByPartition(ru *RollingUpdate, rank int32) bool {
+func HeldByPartition(ru *types.RollingUpdate, rank int32) bool {
 	if ru == nil || ru.Partition == nil || *ru.Partition <= 0 {
 		return false
 	}
@@ -119,7 +120,7 @@ func HeldByPartition(ru *RollingUpdate, rank int32) bool {
 //     capacity.
 //
 // The lowest-indexed `Partition` candidates are held.
-func PartitionHeldIndices(ru *RollingUpdate, input ReconcileInput, planned []InstancePlan, targetRevName string) map[int32]bool {
+func PartitionHeldIndices(ru *types.RollingUpdate, input types.ReconcileInput, planned []types.InstancePlan, targetRevName string) map[int32]bool {
 	held := make(map[int32]bool)
 	if ru == nil || ru.Partition == nil || *ru.Partition <= 0 {
 		return held
@@ -134,14 +135,14 @@ func PartitionHeldIndices(ru *RollingUpdate, input ReconcileInput, planned []Ins
 		if query.RevisionFromName(s.RunningRevision).Same(tgt) {
 			continue
 		}
-		if s.Phase == InstancePhaseUpdating {
+		if s.Phase == types.InstancePhaseUpdating {
 			continue
 		}
 		if s.Operation != nil {
-			if s.Operation.Type == InstanceOperationUpdate {
+			if s.Operation.Type == types.InstanceOperationUpdate {
 				continue
 			}
-			if s.Operation.Type == InstanceOperationMigrate && s.Phase != InstancePhaseMigrating {
+			if s.Operation.Type == types.InstanceOperationMigrate && s.Phase != types.InstancePhaseMigrating {
 				continue
 			}
 		}
@@ -167,7 +168,7 @@ func PartitionHeldIndices(ru *RollingUpdate, input ReconcileInput, planned []Ins
 // pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination/ratio.go
 // — both layers see the same in-flight signal so the budget math is
 // consistent.
-func CurrentSurgeInFlight(statuses []InstanceStatus) int32 {
+func CurrentSurgeInFlight(statuses []types.InstanceStatus) int32 {
 	var n int32
 	for _, s := range statuses {
 		if s.Operation == nil {
@@ -197,12 +198,12 @@ func CurrentSurgeInFlight(statuses []InstanceStatus) int32 {
 // offline (a new pod surges IN before the old one drains OUT). Other
 // Updating steps (InPlace, Drain) DO take the pod offline, so they
 // count.
-func CurrentUnavailableInFlight(statuses []InstanceStatus) int32 {
+func CurrentUnavailableInFlight(statuses []types.InstanceStatus) int32 {
 	var n int32
 	for _, s := range statuses {
-		updating := s.Phase == InstancePhaseUpdating
-		failedUpdate := s.Phase == InstancePhaseFailed && s.Operation != nil &&
-			s.Operation.Type == InstanceOperationUpdate
+		updating := s.Phase == types.InstancePhaseUpdating
+		failedUpdate := s.Phase == types.InstancePhaseFailed && s.Operation != nil &&
+			s.Operation.Type == types.InstanceOperationUpdate
 		if !updating && !failedUpdate {
 			continue
 		}
@@ -233,10 +234,10 @@ func CurrentUnavailableInFlight(statuses []InstanceStatus) int32 {
 // releases the budget while its Instance stays down. The RetryBlock
 // against the revision is what bounds repeated failures there. The
 // update arm differs: it does charge a Failed row's preserved Update.
-func CurrentRestartingInFlight(statuses []InstanceStatus) int32 {
+func CurrentRestartingInFlight(statuses []types.InstanceStatus) int32 {
 	var n int32
 	for _, s := range statuses {
-		if s.Phase == InstancePhaseRestarting {
+		if s.Phase == types.InstancePhaseRestarting {
 			n++
 		}
 	}
@@ -248,7 +249,7 @@ func CurrentRestartingInFlight(statuses []InstanceStatus) int32 {
 // is the in-flight count carried from earlier wake-ups, counted once;
 // inFlight is what this pass has already admitted. An uncapped layer
 // never denies.
-func budgetDenies(budget, prior, inFlight int32) (int32, bool) {
+func BudgetDenies(budget, prior, inFlight int32) (int32, bool) {
 	if budget == BudgetNoLimit {
 		return 0, false
 	}

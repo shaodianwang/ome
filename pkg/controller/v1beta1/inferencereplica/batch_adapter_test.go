@@ -246,22 +246,22 @@ func (c *indexedPodCreateFailureClient) Create(ctx context.Context, obj client.O
 
 // failedStamp is a canonical batchable mutation: flip the slot Failed.
 func failedStamp(idx int32) workloadtypes.InstanceMutation {
-	return workloadtypes.InstanceMutation{Index: idx, Mutate: func(s *workload.InstanceStatus) bool {
-		if s.Phase == workload.InstancePhaseFailed {
+	return workloadtypes.InstanceMutation{Index: idx, Mutate: func(s *workloadtypes.InstanceStatus) bool {
+		if s.Phase == workloadtypes.InstancePhaseFailed {
 			return false
 		}
-		s.Phase = workload.InstancePhaseFailed
+		s.Phase = workloadtypes.InstancePhaseFailed
 		return true
 	}}
 }
 
 func creatingStamp(idx int32, now metav1.Time) workloadtypes.InstanceMutation {
-	return workloadtypes.InstanceMutation{Index: idx, Mutate: func(s *workload.InstanceStatus) bool {
+	return workloadtypes.InstanceMutation{Index: idx, Mutate: func(s *workloadtypes.InstanceStatus) bool {
 		s.Incarnation = 1
-		s.Phase = workload.InstancePhaseCreating
-		s.Operation = &workload.InstanceOperation{
+		s.Phase = workloadtypes.InstancePhaseCreating
+		s.Operation = &workloadtypes.InstanceOperation{
 			ID:             fmt.Sprintf("create-%d-%d", idx, now.Unix()),
-			Type:           workload.InstanceOperationCreate,
+			Type:           workloadtypes.InstanceOperationCreate,
 			Step:           "CreatePods",
 			StartedAt:      now,
 			LastProgressAt: now,
@@ -410,16 +410,16 @@ func TestBuildApplyInstanceMutations_DuplicateIndexMutationsCompose(t *testing.T
 
 	apply := buildApplyInstanceMutations(testStatusWriter(c), ir)
 	g.Expect(apply(context.Background(), []workloadtypes.InstanceMutation{
-		{Index: 3, Mutate: func(s *workload.InstanceStatus) bool {
+		{Index: 3, Mutate: func(s *workloadtypes.InstanceStatus) bool {
 			s.PodCount += 2
 			s.Operation.RetryCount++
 			return true
 		}},
-		{Index: 3, Mutate: func(s *workload.InstanceStatus) bool {
+		{Index: 3, Mutate: func(s *workloadtypes.InstanceStatus) bool {
 			secondObservedFirst = s.PodCount == original.PodCount+2 &&
 				s.Operation != nil && s.Operation.RetryCount == original.Operation.RetryCount+1
 			s.ReadyPodCount = s.PodCount
-			s.Phase = workload.InstancePhaseReady
+			s.Phase = workloadtypes.InstancePhaseReady
 			return true
 		}},
 	})).To(gomega.Succeed())
@@ -499,9 +499,9 @@ func TestBuildApplyInstanceMutations_ConflictRetriesWholeBatch(t *testing.T) {
 	c, writes := newCountingStatusClient(t, 1, ir)
 	callbackCalls := map[int32]int{}
 	trackedFailedStamp := func(idx int32) workloadtypes.InstanceMutation {
-		return workloadtypes.InstanceMutation{Index: idx, Mutate: func(s *workload.InstanceStatus) bool {
+		return workloadtypes.InstanceMutation{Index: idx, Mutate: func(s *workloadtypes.InstanceStatus) bool {
 			callbackCalls[idx]++
-			s.Phase = workload.InstancePhaseFailed
+			s.Phase = workloadtypes.InstancePhaseFailed
 			return true
 		}}
 	}
@@ -534,19 +534,19 @@ func TestBuildApplyInstanceMutations_OnCommitReportsSuccessfulConflictAttemptOnc
 	g.Expect(c.Get(context.Background(), client.ObjectKeyFromObject(ir), storedBefore)).To(gomega.Succeed())
 	wantPrevious := v1beta1convert.InstanceStatusToWorkload(instanceStatusAt(t, storedBefore, 0))
 	commitCalls := 0
-	var previous, current *workload.InstanceStatus
+	var previous, current *workloadtypes.InstanceStatus
 	mutationCalls := 0
 	apply := buildApplyInstanceMutations(testStatusWriter(c), ir)
 
 	g.Expect(apply(context.Background(), []workloadtypes.InstanceMutation{{
 		Index: 0,
-		Mutate: func(status *workload.InstanceStatus) bool {
+		Mutate: func(status *workloadtypes.InstanceStatus) bool {
 			mutationCalls++
-			status.Phase = workload.InstancePhaseFailed
+			status.Phase = workloadtypes.InstancePhaseFailed
 			status.Operation = nil
 			return true
 		},
-		OnCommit: func(before, after *workload.InstanceStatus) {
+		OnCommit: func(before, after *workloadtypes.InstanceStatus) {
 			commitCalls++
 			previous = before
 			current = after
@@ -559,7 +559,7 @@ func TestBuildApplyInstanceMutations_OnCommitReportsSuccessfulConflictAttemptOnc
 	g.Expect(previous).NotTo(gomega.BeNil())
 	g.Expect(*previous).To(gomega.Equal(wantPrevious))
 	g.Expect(current).NotTo(gomega.BeNil())
-	g.Expect(current.Phase).To(gomega.Equal(workload.InstancePhaseFailed))
+	g.Expect(current.Phase).To(gomega.Equal(workloadtypes.InstancePhaseFailed))
 	g.Expect(current.Operation).To(gomega.BeNil())
 }
 
@@ -568,9 +568,9 @@ func TestBuildApplyInstanceMutations_OnCommitUsesPersistedRepresentation(t *test
 	ir := baselineIR("llama-engine", "prod", 1)
 	c, writes := newWireNormalizingStatusClient(t, ir)
 	now := metav1.NewTime(time.Date(2026, time.August, 14, 12, 0, 0, 123456789, time.UTC))
-	var committed *workload.InstanceStatus
+	var committed *workloadtypes.InstanceStatus
 	mutation := creatingStamp(0, now)
-	mutation.OnCommit = func(_, current *workload.InstanceStatus) {
+	mutation.OnCommit = func(_, current *workloadtypes.InstanceStatus) {
 		committed = current
 	}
 
@@ -593,7 +593,7 @@ func TestBuildApplyInstanceMutations_OnCommitUsesPersistedRepresentation(t *test
 	g.Expect(apply(context.Background(), []workloadtypes.InstanceMutation{{
 		Index:  0,
 		Remove: true,
-		Precondition: func(status *workload.InstanceStatus) bool {
+		Precondition: func(status *workloadtypes.InstanceStatus) bool {
 			return reflect.DeepEqual(*status, wantRollbackValue)
 		},
 	}})).To(gomega.Succeed())
@@ -610,9 +610,9 @@ func TestBuildApplyInstanceMutations_ImmediateRollbackUsesAuthoritativeReader(t 
 	stale, _ := newCountingStatusClient(t, 0, ir.DeepCopy())
 	writer := &staleReadingClient{Client: live, reader: stale}
 	now := metav1.NewTime(time.Date(2026, time.August, 14, 12, 0, 0, 0, time.UTC))
-	var committed *workload.InstanceStatus
+	var committed *workloadtypes.InstanceStatus
 	mutation := creatingStamp(0, now)
-	mutation.OnCommit = func(_, current *workload.InstanceStatus) {
+	mutation.OnCommit = func(_, current *workloadtypes.InstanceStatus) {
 		committed = current
 	}
 
@@ -625,7 +625,7 @@ func TestBuildApplyInstanceMutations_ImmediateRollbackUsesAuthoritativeReader(t 
 	g.Expect(apply(context.Background(), []workloadtypes.InstanceMutation{{
 		Index:  0,
 		Remove: true,
-		Precondition: func(status *workload.InstanceStatus) bool {
+		Precondition: func(status *workloadtypes.InstanceStatus) bool {
 			return reflect.DeepEqual(*status, wantRollbackValue)
 		},
 	}})).To(gomega.Succeed())
@@ -646,7 +646,7 @@ func TestCreate_MidBatchFailureRollsBackAPINormalizedStatus(t *testing.T) {
 		Client:               c,
 		APIReader:            c,
 		Clock:                clk,
-		Expectations:         workload.NewExpectations(),
+		Expectations:         workloadtypes.NewExpectations(),
 		InstanceStatusTarget: irstatus.EncodingDenseV1,
 	}
 	input := r.buildReconcileInput(context.Background(), ir, nil, nil, nil, lifecycleSettings{}, 0, coordination.GroupDefaults{})
@@ -657,7 +657,7 @@ func TestCreate_MidBatchFailureRollsBackAPINormalizedStatus(t *testing.T) {
 
 	createErr := errors.New("pod create unavailable")
 	podClient := &indexedPodCreateFailureClient{Client: c, failIndex: 1, err: createErr}
-	_, err = workloadops.Create(context.Background(), workload.Deps{
+	_, err = workloadops.Create(context.Background(), workloadtypes.Deps{
 		Client:       podClient,
 		APIReader:    c,
 		Expectations: r.Expectations,
@@ -695,11 +695,11 @@ func TestBuildApplyInstanceMutations_MixedChangesWriteOnceWithoutPhantomSlots(t 
 		failedStamp(0), // existing no-op
 		failedStamp(1), // existing change
 		// A declined mutation on a missing index must not append a slot.
-		{Index: 7, Mutate: func(*workload.InstanceStatus) bool { return false }},
+		{Index: 7, Mutate: func(*workloadtypes.InstanceStatus) bool { return false }},
 		// A changed mutation on a missing index must append exactly one slot.
-		{Index: 2, Mutate: func(s *workload.InstanceStatus) bool {
+		{Index: 2, Mutate: func(s *workloadtypes.InstanceStatus) bool {
 			s.Incarnation = 1
-			s.Phase = workload.InstancePhaseCreating
+			s.Phase = workloadtypes.InstancePhaseCreating
 			return true
 		}},
 	})).To(gomega.Succeed())
@@ -745,7 +745,7 @@ func TestBuildApplyInstanceMutations_NoChangeZeroWrites(t *testing.T) {
 	apply := buildApplyInstanceMutations(testStatusWriter(c), ir)
 	g.Expect(apply(context.Background(), []workloadtypes.InstanceMutation{
 		failedStamp(0), // already Failed — reports no change
-		{Index: 7, Mutate: func(s *workload.InstanceStatus) bool {
+		{Index: 7, Mutate: func(s *workloadtypes.InstanceStatus) bool {
 			// Missing-slot probe that declines: guard sentinel shape.
 			return s.Phase != ""
 		}},
@@ -769,7 +769,7 @@ func TestBuildApplyInstanceMutations_NotFoundAbortsStaleReconcile(t *testing.T) 
 	err := apply(context.Background(), []workloadtypes.InstanceMutation{
 		failedStamp(0),
 	})
-	g.Expect(errors.Is(err, workload.ErrStatusOwnerGone)).To(gomega.BeTrue())
+	g.Expect(errors.Is(err, workloadtypes.ErrStatusOwnerGone)).To(gomega.BeTrue())
 	g.Expect(*writes).To(gomega.Equal(0))
 }
 
@@ -811,10 +811,10 @@ func TestBuildReconcileInput_AtomicInstanceAndRetryBlockMutationOneWrite(t *test
 		context.Background(),
 		[]workloadtypes.InstanceMutation{creatingStamp(0, now)},
 		targetRevision,
-		func(block *workload.RetryBlock) workload.RetryBlockDisposition {
-			g.Expect(block.State).To(gomega.Equal(workload.RetryBlockBackoff))
-			block.State = workload.RetryBlockRetryInProgress
-			return workload.RetryBlockPersist
+		func(block *workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition {
+			g.Expect(block.State).To(gomega.Equal(workloadtypes.RetryBlockBackoff))
+			block.State = workloadtypes.RetryBlockRetryInProgress
+			return workloadtypes.RetryBlockPersist
 		},
 	)).To(gomega.Succeed())
 	g.Expect(*writes).To(gomega.Equal(1),
@@ -854,10 +854,10 @@ func TestBuildApplyInstanceMutationsWithRetryBlock_AllNoOpZeroWrites(t *testing.
 		context.Background(),
 		[]workloadtypes.InstanceMutation{failedStamp(0)},
 		targetRevision,
-		func(block *workload.RetryBlock) workload.RetryBlockDisposition {
-			g.Expect(block).To(gomega.Equal(&workload.RetryBlock{TargetRevision: targetRevision}),
+		func(block *workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition {
+			g.Expect(block).To(gomega.Equal(&workloadtypes.RetryBlock{TargetRevision: targetRevision}),
 				"a missing block must be presented as a revision-scoped zero value")
-			return workload.RetryBlockUnchanged
+			return workloadtypes.RetryBlockUnchanged
 		},
 	)).To(gomega.Succeed())
 	g.Expect(*writes).To(gomega.Equal(0))
@@ -894,9 +894,9 @@ func TestBuildApplyInstanceMutationsWithRetryBlock_WriteFailureIsAtomic(t *testi
 		context.Background(),
 		[]workloadtypes.InstanceMutation{failedStamp(0)},
 		targetRevision,
-		func(block *workload.RetryBlock) workload.RetryBlockDisposition {
-			block.State = workload.RetryBlockRetryInProgress
-			return workload.RetryBlockPersist
+		func(block *workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition {
+			block.State = workloadtypes.RetryBlockRetryInProgress
+			return workloadtypes.RetryBlockPersist
 		},
 	)
 	g.Expect(err).To(gomega.MatchError(gomega.ContainSubstring("injected status write failure")))
@@ -934,17 +934,17 @@ func TestBuildApplyInstanceMutationsWithRetryBlock_ConflictRetriesBothMutations(
 
 	g.Expect(apply(
 		context.Background(),
-		[]workloadtypes.InstanceMutation{{Index: 0, Mutate: func(status *workload.InstanceStatus) bool {
+		[]workloadtypes.InstanceMutation{{Index: 0, Mutate: func(status *workloadtypes.InstanceStatus) bool {
 			instanceCalls++
-			status.Phase = workload.InstancePhaseUpdating
+			status.Phase = workloadtypes.InstancePhaseUpdating
 			status.TargetRevision = targetRevision
 			return true
 		}}},
 		targetRevision,
-		func(block *workload.RetryBlock) workload.RetryBlockDisposition {
+		func(block *workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition {
 			retryBlockCalls++
-			block.State = workload.RetryBlockRetryInProgress
-			return workload.RetryBlockPersist
+			block.State = workloadtypes.RetryBlockRetryInProgress
+			return workloadtypes.RetryBlockPersist
 		},
 	)).To(gomega.Succeed())
 	g.Expect(*writes).To(gomega.Equal(2))
@@ -974,10 +974,10 @@ func TestBuildApplyInstanceMutationsWithRetryBlock_MixedRestoreAndRemoveOneWrite
 	c, writes := newCountingStatusClient(t, 0, ir)
 	storedBefore := &v1beta1.InferenceReplica{}
 	g.Expect(c.Get(context.Background(), client.ObjectKeyFromObject(ir), storedBefore)).To(gomega.Succeed())
-	restored := workload.InstanceStatus{
+	restored := workloadtypes.InstanceStatus{
 		Index:             0,
 		Incarnation:       9,
-		Phase:             workload.InstancePhaseReady,
+		Phase:             workloadtypes.InstancePhaseReady,
 		RunningRevision:   "rev-restored",
 		PodCount:          8,
 		ReadyPodCount:     8,
@@ -990,7 +990,7 @@ func TestBuildApplyInstanceMutationsWithRetryBlock_MixedRestoreAndRemoveOneWrite
 	apply := buildApplyInstanceMutationsWithRetryBlock(testStatusWriter(c), ir, nil)
 
 	g.Expect(apply(context.Background(), []workloadtypes.InstanceMutation{
-		{Index: 0, Mutate: func(status *workload.InstanceStatus) bool {
+		{Index: 0, Mutate: func(status *workloadtypes.InstanceStatus) bool {
 			*status = restored
 			return true
 		}},
@@ -1022,9 +1022,9 @@ func TestBuildApplyInstanceMutationsWithRetryBlock_RemovalConflictRetriesWholeBa
 	restoreCalls := 0
 
 	g.Expect(apply(context.Background(), []workloadtypes.InstanceMutation{
-		{Index: 0, Mutate: func(status *workload.InstanceStatus) bool {
+		{Index: 0, Mutate: func(status *workloadtypes.InstanceStatus) bool {
 			restoreCalls++
-			status.Phase = workload.InstancePhaseReady
+			status.Phase = workloadtypes.InstancePhaseReady
 			return true
 		}},
 		{Index: 1, Remove: true},
@@ -1056,10 +1056,10 @@ func TestBuildApplyInstanceMutationsWithRetryBlock_PreconditionRejectsStaleRemov
 	g.Expect(apply(context.Background(), []workloadtypes.InstanceMutation{{
 		Index:  0,
 		Remove: true,
-		Precondition: func(status *workload.InstanceStatus) bool {
-			return status.Phase == workload.InstancePhaseCreating
+		Precondition: func(status *workloadtypes.InstanceStatus) bool {
+			return status.Phase == workloadtypes.InstancePhaseCreating
 		},
-		OnCommit: func(_, _ *workload.InstanceStatus) {
+		OnCommit: func(_, _ *workloadtypes.InstanceStatus) {
 			commitCalls++
 		},
 	}}, "", nil)).To(gomega.Succeed())
@@ -1120,7 +1120,7 @@ func TestBuildApplyInstanceMutationsWithRetryBlock_RejectsAmbiguousMutation(t *t
 	err := apply(context.Background(), []workloadtypes.InstanceMutation{{
 		Index:  0,
 		Remove: true,
-		Mutate: func(*workload.InstanceStatus) bool { return true },
+		Mutate: func(*workloadtypes.InstanceStatus) bool { return true },
 	}}, "", nil)
 	g.Expect(err).To(gomega.MatchError(gomega.ContainSubstring("sets both Remove and Mutate")))
 
@@ -1130,10 +1130,10 @@ func TestBuildApplyInstanceMutationsWithRetryBlock_RejectsAmbiguousMutation(t *t
 	err = apply(context.Background(), []workloadtypes.InstanceMutation{
 		{
 			Index:    0,
-			Mutate:   func(*workload.InstanceStatus) bool { return true },
-			OnCommit: func(*workload.InstanceStatus, *workload.InstanceStatus) {},
+			Mutate:   func(*workloadtypes.InstanceStatus) bool { return true },
+			OnCommit: func(*workloadtypes.InstanceStatus, *workloadtypes.InstanceStatus) {},
 		},
-		{Index: 0, Mutate: func(*workload.InstanceStatus) bool { return true }},
+		{Index: 0, Mutate: func(*workloadtypes.InstanceStatus) bool { return true }},
 	}, "", nil)
 	g.Expect(err).To(gomega.MatchError(gomega.ContainSubstring("uses OnCommit but the index appears 2 times")))
 	g.Expect(*writes).To(gomega.Equal(0), "invalid mutation shapes must fail before any status write")
@@ -1152,13 +1152,13 @@ func TestBuildApplyInstanceMutations_BatchPreconditionRejectsEverything(t *testi
 	err := apply(context.Background(), []workloadtypes.InstanceMutation{
 		{
 			Index: 0,
-			BatchPrecondition: func(snapshot workload.InstanceMutationSnapshot) bool {
+			BatchPrecondition: func(snapshot workloadtypes.InstanceMutationSnapshot) bool {
 				guardCalls++
 				return snapshot.OwnerUID == ir.UID &&
 					snapshot.Instances[1].Incarnation == 99
 			},
-			Mutate: func(status *workload.InstanceStatus) bool {
-				status.Phase = workload.InstancePhaseDeleting
+			Mutate: func(status *workloadtypes.InstanceStatus) bool {
+				status.Phase = workloadtypes.InstancePhaseDeleting
 				return true
 			},
 		},
@@ -1210,12 +1210,12 @@ func TestBuildApplyInstanceMutations_BatchPreconditionRecheckedAfterConflict(t *
 	guardCalls := 0
 	g.Expect(apply(context.Background(), []workloadtypes.InstanceMutation{{
 		Index: 0,
-		BatchPrecondition: func(snapshot workload.InstanceMutationSnapshot) bool {
+		BatchPrecondition: func(snapshot workloadtypes.InstanceMutationSnapshot) bool {
 			guardCalls++
 			return snapshot.OwnerUID == ir.UID
 		},
-		Mutate: func(status *workload.InstanceStatus) bool {
-			status.Phase = workload.InstancePhaseDeleting
+		Mutate: func(status *workloadtypes.InstanceStatus) bool {
+			status.Phase = workloadtypes.InstancePhaseDeleting
 			return true
 		},
 	}}, "", nil)).To(gomega.Succeed())
@@ -1241,13 +1241,13 @@ func TestBuildApplyInstanceMutations_GuardedRemovalRejectsOwnershipDriftAfterCon
 	err := apply(context.Background(), []workloadtypes.InstanceMutation{{
 		Index:  0,
 		Remove: true,
-		BatchPrecondition: func(snapshot workload.InstanceMutationSnapshot) bool {
+		BatchPrecondition: func(snapshot workloadtypes.InstanceMutationSnapshot) bool {
 			status, found := snapshot.Instances[0]
 			return found && snapshot.OwnerUID == ir.UID && status.Incarnation == 4 &&
 				status.Operation != nil && status.Operation.ID == "gang-source" &&
-				status.Operation.Type == workload.InstanceOperationUpdate
+				status.Operation.Type == workloadtypes.InstanceOperationUpdate
 		},
-		OnCommit: func(*workload.InstanceStatus, *workload.InstanceStatus) { commits++ },
+		OnCommit: func(*workloadtypes.InstanceStatus, *workloadtypes.InstanceStatus) { commits++ },
 	}}, "", nil)
 	g.Expect(errors.Is(err, workloadtypes.ErrStatusMutationPrecondition)).To(gomega.BeTrue())
 	g.Expect(*writes).To(gomega.Equal(1), "the retry must stop before a second status write")
@@ -1273,17 +1273,17 @@ func TestBuildApplyInstanceMutations_AmbiguousCommitConfirmedAuthoritatively(t *
 	commits := 0
 	g.Expect(apply(context.Background(), []workloadtypes.InstanceMutation{{
 		Index: 0,
-		Mutate: func(status *workload.InstanceStatus) bool {
-			status.Phase = workload.InstancePhaseDeleting
-			status.Operation = &workload.InstanceOperation{
-				ID: "delete-0", Type: workload.InstanceOperationDelete, Step: "Drain", StartedAt: now,
+		Mutate: func(status *workloadtypes.InstanceStatus) bool {
+			status.Phase = workloadtypes.InstancePhaseDeleting
+			status.Operation = &workloadtypes.InstanceOperation{
+				ID: "delete-0", Type: workloadtypes.InstanceOperationDelete, Step: "Drain", StartedAt: now,
 			}
 			return true
 		},
-		Postcondition: func(status *workload.InstanceStatus) bool {
-			return status != nil && status.Phase == workload.InstancePhaseDeleting && status.Operation != nil && status.Operation.ID == "delete-0"
+		Postcondition: func(status *workloadtypes.InstanceStatus) bool {
+			return status != nil && status.Phase == workloadtypes.InstancePhaseDeleting && status.Operation != nil && status.Operation.ID == "delete-0"
 		},
-		OnCommit: func(_, current *workload.InstanceStatus) {
+		OnCommit: func(_, current *workloadtypes.InstanceStatus) {
 			commits++
 			g.Expect(current).NotTo(gomega.BeNil())
 			g.Expect(current.Operation.StartedAt.Nanosecond()).To(gomega.Equal(0), "callback must receive the wire-normalized value")
@@ -1307,12 +1307,12 @@ func TestBuildApplyInstanceMutations_AmbiguousRemovalForgetsOnlyAfterConfirmedAb
 	g.Expect(apply(context.Background(), []workloadtypes.InstanceMutation{{
 		Index:  0,
 		Remove: true,
-		BatchPrecondition: func(snapshot workload.InstanceMutationSnapshot) bool {
+		BatchPrecondition: func(snapshot workloadtypes.InstanceMutationSnapshot) bool {
 			status, found := snapshot.Instances[0]
 			return found && snapshot.OwnerUID == ir.UID && status.Incarnation == 4 &&
 				status.Operation != nil && status.Operation.ID == "delete-0"
 		},
-		OnCommit: func(previous, current *workload.InstanceStatus) {
+		OnCommit: func(previous, current *workloadtypes.InstanceStatus) {
 			commits++
 			g.Expect(previous).NotTo(gomega.BeNil())
 			g.Expect(current).To(gomega.BeNil())
@@ -1333,18 +1333,18 @@ func TestBuildApplyInstanceMutations_AmbiguousCombinedCommitConfirmed(t *testing
 
 	err := apply(context.Background(), []workloadtypes.InstanceMutation{{
 		Index: 0,
-		Mutate: func(status *workload.InstanceStatus) bool {
-			status.Phase = workload.InstancePhaseReady
+		Mutate: func(status *workloadtypes.InstanceStatus) bool {
+			status.Phase = workloadtypes.InstancePhaseReady
 			return true
 		},
-		Postcondition: func(status *workload.InstanceStatus) bool {
-			return status != nil && status.Phase == workload.InstancePhaseReady
+		Postcondition: func(status *workloadtypes.InstanceStatus) bool {
+			return status != nil && status.Phase == workloadtypes.InstancePhaseReady
 		},
-		OnCommit: func(*workload.InstanceStatus, *workload.InstanceStatus) { commits++ },
-	}}, "revision-b", func(block *workload.RetryBlock) workload.RetryBlockDisposition {
-		block.State = workload.RetryBlockHeld
+		OnCommit: func(*workloadtypes.InstanceStatus, *workloadtypes.InstanceStatus) { commits++ },
+	}}, "revision-b", func(block *workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition {
+		block.State = workloadtypes.RetryBlockHeld
 		block.AttemptsStarted = 2
-		return workload.RetryBlockPersist
+		return workloadtypes.RetryBlockPersist
 	})
 
 	g.Expect(err).NotTo(gomega.HaveOccurred())
@@ -1368,13 +1368,13 @@ func TestBuildApplyInstanceMutations_SameNameReplacementAborts(t *testing.T) {
 
 	err := apply(context.Background(), []workloadtypes.InstanceMutation{{
 		Index: 0,
-		Mutate: func(status *workload.InstanceStatus) bool {
-			status.Phase = workload.InstancePhaseDeleting
+		Mutate: func(status *workloadtypes.InstanceStatus) bool {
+			status.Phase = workloadtypes.InstancePhaseDeleting
 			return true
 		},
 	}}, "", nil)
 
-	g.Expect(errors.Is(err, workload.ErrStatusOwnerGone)).To(gomega.BeTrue())
+	g.Expect(errors.Is(err, workloadtypes.ErrStatusOwnerGone)).To(gomega.BeTrue())
 	g.Expect(*writes).To(gomega.BeZero())
 	got := &v1beta1.InferenceReplica{}
 	g.Expect(c.Get(context.Background(), client.ObjectKeyFromObject(replacement), got)).To(gomega.Succeed())
@@ -1391,11 +1391,11 @@ func TestBuildMutateInstance_SameNameReplacementAborts(t *testing.T) {
 	called := false
 
 	mutate := buildMutateInstance(r.statusWriter(), r.Client, original)
-	err := mutate(context.Background(), 0, func(*workload.InstanceStatus) bool {
+	err := mutate(context.Background(), 0, func(*workloadtypes.InstanceStatus) bool {
 		called = true
 		return true
 	})
-	g.Expect(errors.Is(err, workload.ErrStatusOwnerGone)).To(gomega.BeTrue())
+	g.Expect(errors.Is(err, workloadtypes.ErrStatusOwnerGone)).To(gomega.BeTrue())
 	g.Expect(called).To(gomega.BeFalse())
 
 	got := &v1beta1.InferenceReplica{}
@@ -1411,9 +1411,9 @@ func TestBuildRemoveInstance_SameNameReplacementAborts(t *testing.T) {
 	replacement.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{Index: 0, Phase: v1beta1.OMENativeInstanceReady}}
 	r, c := newReconciler(t, replacement)
 
-	remove := buildRemoveInstance(r.statusWriter(), r.Client, original, workload.NewExpectations())
+	remove := buildRemoveInstance(r.statusWriter(), r.Client, original, workloadtypes.NewExpectations())
 	removed, err := remove(context.Background(), 0)
-	g.Expect(errors.Is(err, workload.ErrStatusOwnerGone)).To(gomega.BeTrue())
+	g.Expect(errors.Is(err, workloadtypes.ErrStatusOwnerGone)).To(gomega.BeTrue())
 	g.Expect(removed).To(gomega.BeFalse())
 
 	got := &v1beta1.InferenceReplica{}
@@ -1430,7 +1430,7 @@ func TestBuildWriteAggregateCondition_SameNameReplacementAborts(t *testing.T) {
 
 	write := buildWriteAggregateCondition(r.statusWriter(), r.Client, original)
 	err := write(context.Background(), metav1.Condition{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Ready"})
-	g.Expect(errors.Is(err, workload.ErrStatusOwnerGone)).To(gomega.BeTrue())
+	g.Expect(errors.Is(err, workloadtypes.ErrStatusOwnerGone)).To(gomega.BeTrue())
 
 	got := &v1beta1.InferenceReplica{}
 	g.Expect(c.Get(context.Background(), client.ObjectKeyFromObject(replacement), got)).To(gomega.Succeed())
@@ -1496,7 +1496,7 @@ func TestBuildApplyInstanceMutations_RecordsOneTerminalStatusOutcome(t *testing.
 			before[result] = irStatusUpdateMetric(t, result)
 		}
 		err := buildApplyInstanceMutationsWithRetryBlock(testStatusWriter(c), ir, nil)(context.Background(), []workloadtypes.InstanceMutation{{
-			Index: 0, Mutate: func(*workload.InstanceStatus) bool { return false },
+			Index: 0, Mutate: func(*workloadtypes.InstanceStatus) bool { return false },
 		}}, "", nil)
 		if err != nil {
 			t.Fatal(err)

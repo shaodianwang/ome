@@ -11,8 +11,10 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -28,7 +30,7 @@ import (
 func TestReconcile_UpdateGateNil_AllowsAll(t *testing.T) {
 	scheme := makeScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	deps := workload.Deps{Client: c}
+	deps := types.Deps{Client: c}
 
 	in := minimalInput(t)
 	in.UpdateGate = nil
@@ -61,16 +63,16 @@ func TestReconcile_UpdateGateNil_AllowsAll(t *testing.T) {
 func TestReconcile_UpdateRan_RequeuesAndSkipsCreate(t *testing.T) {
 	scheme := makeScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	deps := workload.Deps{Client: c}
+	deps := types.Deps{Client: c}
 
 	in := minimalInput(t)
-	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
+	in.ObservedState.InstanceStatuses = []types.InstanceStatus{
 		// Phase=Updating triggers DetectUpdateTrigger → true regardless
 		// of RunningRevision; the dispatcher MUST call Update.
-		{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseUpdating, RunningRevision: "prior-rev"},
+		{Index: 0, Incarnation: 1, Phase: types.InstancePhaseUpdating, RunningRevision: "prior-rev"},
 	}
 	plan := minimalPlan()
-	plan.UpdateStrategy = workload.UpdateStrategy{Type: workload.UpdateStrategySurgeThenDrain}
+	plan.UpdateStrategy = types.UpdateStrategy{Type: types.UpdateStrategySurgeThenDrain}
 	// Provide a non-nil target so the Update loop is even considered.
 	target := &appsv1.ControllerRevision{
 		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-newtarget", Namespace: "prod"},
@@ -127,23 +129,23 @@ func TestReconcile_ScaleUpDuringUpdate_CreatesFreshIndices(t *testing.T) {
 	// shared with every other test in the package, and a create another
 	// test expected for the same owner would hold this one's fresh
 	// indices back.
-	deps := workload.Deps{Client: c, Expectations: workload.NewExpectations()}
+	deps := types.Deps{Client: c, Expectations: types.NewExpectations()}
 
 	in := minimalInput(t)
-	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
-		{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseUpdating, RunningRevision: "llama-70b-engine-priorrev"},
+	in.ObservedState.InstanceStatuses = []types.InstanceStatus{
+		{Index: 0, Incarnation: 1, Phase: types.InstancePhaseUpdating, RunningRevision: "llama-70b-engine-priorrev"},
 	}
-	in.MutateInstance = roundTripMutateInstance(c, isvc, workload.ComponentEngine)
+	in.MutateInstance = roundTripMutateInstance(c, isvc, types.ComponentEngine)
 	// Plan asks for 3 single-pod instances. Index 0 is mid-update; 1,2 brand-new.
-	plan := workload.ComponentPlan{
-		Component: workload.ComponentEngine,
+	plan := types.ComponentPlan{
+		Component: types.ComponentEngine,
 		Replicas:  3,
-		Instances: []workload.InstancePlan{
-			{Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
-			{Index: 1, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
-			{Index: 2, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+		Instances: []types.InstancePlan{
+			{Index: 0, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 1, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 2, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
 		},
-		UpdateStrategy: workload.UpdateStrategy{Type: workload.UpdateStrategySurgeThenDrain},
+		UpdateStrategy: types.UpdateStrategy{Type: types.UpdateStrategySurgeThenDrain},
 	}
 	target := &appsv1.ControllerRevision{
 		ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-newtarget", Namespace: "prod"},
@@ -192,15 +194,15 @@ func TestReconcile_ScaleUpDuringUpdate_CreatesFreshIndices(t *testing.T) {
 // a positive Partition (PartitionHeldIndices owns candidate membership).
 // A nil RollingUpdate, nil Partition, or Partition<=0 holds nothing.
 func TestHeldByPartition(t *testing.T) {
-	part := func(n int32) *workload.RollingUpdate { return &workload.RollingUpdate{Partition: &n} }
+	part := func(n int32) *types.RollingUpdate { return &types.RollingUpdate{Partition: &n} }
 	cases := []struct {
 		name string
-		ru   *workload.RollingUpdate
+		ru   *types.RollingUpdate
 		rank int32
 		held bool
 	}{
 		{"nil RollingUpdate", nil, 0, false},
-		{"nil Partition", &workload.RollingUpdate{}, 0, false},
+		{"nil Partition", &types.RollingUpdate{}, 0, false},
 		{"Partition=0 holds nothing", part(0), 0, false},
 		{"Partition=2 holds rank 0", part(2), 0, true},
 		{"Partition=2 holds rank 1", part(2), 1, true},
@@ -209,7 +211,7 @@ func TestHeldByPartition(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := workload.HeldByPartition(tc.ru, tc.rank); got != tc.held {
+			if got := escalation.HeldByPartition(tc.ru, tc.rank); got != tc.held {
 				t.Errorf("HeldByPartition(rank=%d) = %v, want %v", tc.rank, got, tc.held)
 			}
 		})
@@ -243,42 +245,42 @@ func TestReconcile_NoBudget_NoGate(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&v1beta1.InferenceService{}, &v1beta1.InferenceReplica{}).
 		WithObjects(isvc).Build()
-	deps := workload.Deps{Client: c}
+	deps := types.Deps{Client: c}
 
 	in := minimalInput(t)
 	// No UpdateGate: the cross-Component coordination layer is out of the
 	// loop, matching the IR adapter and webhook-bypassed shape.
 	in.UpdateGate = nil
-	in.MutateInstance = roundTripMutateInstance(c, isvc, workload.ComponentEngine)
+	in.MutateInstance = roundTripMutateInstance(c, isvc, types.ComponentEngine)
 
 	// 8 Ready Instances, all on a prior revision → DetectUpdateTrigger's
 	// cheap RunningRevision != target.Name fast-path fires for every one,
 	// and startingFresh is true (Phase != Updating).
-	observed := make([]workload.InstanceStatus, 0, replicas)
-	instances := make([]workload.InstancePlan, 0, replicas)
+	observed := make([]types.InstanceStatus, 0, replicas)
+	instances := make([]types.InstancePlan, 0, replicas)
 	for i := int32(0); i < replicas; i++ {
-		observed = append(observed, workload.InstanceStatus{
-			Index: i, Incarnation: 1, Phase: workload.InstancePhaseReady,
+		observed = append(observed, types.InstanceStatus{
+			Index: i, Incarnation: 1, Phase: types.InstancePhaseReady,
 			RunningRevision: "llama-70b-engine-priorrev",
 		})
-		instances = append(instances, workload.InstancePlan{
-			Index: i, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}},
+		instances = append(instances, types.InstancePlan{
+			Index: i, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}},
 		})
 	}
 	in.ObservedState.InstanceStatuses = observed
 
 	// SurgeThenDrain + nil RollingUpdate → BudgetNoLimit on both layers.
-	plan := workload.ComponentPlan{
-		Component:      workload.ComponentEngine,
+	plan := types.ComponentPlan{
+		Component:      types.ComponentEngine,
 		Replicas:       replicas,
 		Instances:      instances,
-		UpdateStrategy: workload.UpdateStrategy{Type: workload.UpdateStrategySurgeThenDrain},
+		UpdateStrategy: types.UpdateStrategy{Type: types.UpdateStrategySurgeThenDrain},
 	}
 	// Sanity-check the premise: both per-Component budgets are uncapped.
-	if got := workload.PerComponentMaxSurgeBudget(plan.UpdateStrategy.RollingUpdate, replicas); got != workload.BudgetNoLimit {
+	if got := escalation.PerComponentMaxSurgeBudget(plan.UpdateStrategy.RollingUpdate, replicas); got != escalation.BudgetNoLimit {
 		t.Fatalf("premise: MaxSurge budget must be BudgetNoLimit for nil RollingUpdate, got %d", got)
 	}
-	if got := workload.PerComponentMaxUnavailableBudget(plan.UpdateStrategy.RollingUpdate, replicas); got != workload.BudgetNoLimit {
+	if got := escalation.PerComponentMaxUnavailableBudget(plan.UpdateStrategy.RollingUpdate, replicas); got != escalation.BudgetNoLimit {
 		t.Fatalf("premise: MaxUnavailable budget must be BudgetNoLimit for nil RollingUpdate, got %d", got)
 	}
 
@@ -345,7 +347,7 @@ func TestReconcile_InPlaceMetadataUpdateProgressesWithinMaxUnavailable(t *testin
 	labelsFor := func(index string) map[string]string {
 		return map[string]string{
 			constants.InferenceServicePodLabelKey: "llama-70b",
-			constants.OMEComponentLabel:           string(workload.ComponentEngine),
+			constants.OMEComponentLabel:           string(types.ComponentEngine),
 			query.LabelManagedBy:                  query.ManagedByOMENative,
 			query.LabelInstanceIdx:                index,
 			query.LabelInstanceIncarnation:        "1",
@@ -395,47 +397,47 @@ func TestReconcile_InPlaceMetadataUpdateProgressesWithinMaxUnavailable(t *testin
 		stale:  true,
 		pods:   []*corev1.Pod{pod0.DeepCopy(), pod1.DeepCopy()},
 	}
-	deps := workload.Deps{Client: cached, APIReader: live}
+	deps := types.Deps{Client: cached, APIReader: live}
 	markNotReady := false
-	plan := workload.ComponentPlan{
-		Component: workload.ComponentEngine,
+	plan := types.ComponentPlan{
+		Component: types.ComponentEngine,
 		Replicas:  2,
-		Instances: []workload.InstancePlan{
-			{Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
-			{Index: 1, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+		Instances: []types.InstancePlan{
+			{Index: 0, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 1, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
 		},
 		InstanceReadyTimeout: 30 * time.Minute,
-		UpdateStrategy: workload.UpdateStrategy{
-			Type: workload.UpdateStrategyInPlaceIfPossible,
-			InPlaceUpdateStrategy: &workload.InPlaceUpdateStrategy{
+		UpdateStrategy: types.UpdateStrategy{
+			Type: types.UpdateStrategyInPlaceIfPossible,
+			InPlaceUpdateStrategy: &types.InPlaceUpdateStrategy{
 				MarkNotReadyDuringLifecycle: &markNotReady,
 			},
-			RollingUpdate: &workload.RollingUpdate{MaxUnavailable: intOrStringInt(1)},
+			RollingUpdate: &types.RollingUpdate{MaxUnavailable: intOrStringInt(1)},
 		},
 	}
 
-	inputWithStatuses := func(statuses []workload.InstanceStatus) workload.ReconcileInput {
+	inputWithStatuses := func(statuses []types.InstanceStatus) types.ReconcileInput {
 		input := minimalInput(t)
 		input.DesiredSpec.Replicas = 2
 		input.DesiredSpec.PodSpec = spec
-		input.ObservedState.InstanceStatuses = append([]workload.InstanceStatus(nil), statuses...)
+		input.ObservedState.InstanceStatuses = append([]types.InstanceStatus(nil), statuses...)
 		isvc := input.OwnerObject.(*v1beta1.InferenceService)
-		input.MutateInstance = roundTripMutateInstance(live, isvc, workload.ComponentEngine)
+		input.MutateInstance = roundTripMutateInstance(live, isvc, types.ComponentEngine)
 		return input
 	}
-	staleStatuses := make([]workload.InstanceStatus, 0, len(ir.Status.InstanceStatuses))
+	staleStatuses := make([]types.InstanceStatus, 0, len(ir.Status.InstanceStatuses))
 	for _, status := range ir.Status.InstanceStatuses {
 		staleStatuses = append(staleStatuses, v1beta1convert.InstanceStatusToWorkload(status))
 	}
-	staleInput := func() workload.ReconcileInput {
+	staleInput := func() types.ReconcileInput {
 		return inputWithStatuses(staleStatuses)
 	}
-	inputFromAPI := func() workload.ReconcileInput {
+	inputFromAPI := func() types.ReconcileInput {
 		current := &v1beta1.InferenceReplica{}
 		if err := live.Get(context.Background(), client.ObjectKeyFromObject(ir), current); err != nil {
 			t.Fatalf("get InferenceReplica: %v", err)
 		}
-		statuses := make([]workload.InstanceStatus, 0, len(current.Status.InstanceStatuses))
+		statuses := make([]types.InstanceStatus, 0, len(current.Status.InstanceStatuses))
 		for _, status := range current.Status.InstanceStatuses {
 			statuses = append(statuses, v1beta1convert.InstanceStatusToWorkload(status))
 		}
@@ -531,11 +533,11 @@ func TestReconcile_StrategyFlipMidSurge_RespectsUnavailabilityBudget(t *testing.
 	)
 	for _, tc := range []struct {
 		name     string
-		strategy workload.UpdateStrategyType
+		strategy types.UpdateStrategyType
 	}{
-		{"SurgeThenDrain retained", workload.UpdateStrategySurgeThenDrain},
-		{"flipped to InPlaceIfPossible", workload.UpdateStrategyInPlaceIfPossible},
-		{"flipped to RecreatePod", workload.UpdateStrategyRecreatePod},
+		{"SurgeThenDrain retained", types.UpdateStrategySurgeThenDrain},
+		{"flipped to InPlaceIfPossible", types.UpdateStrategyInPlaceIfPossible},
+		{"flipped to RecreatePod", types.UpdateStrategyRecreatePod},
 		// InPlaceOnly is deliberately absent. These Instances carry no recorded
 		// running-revision baseline, so InPlaceOnly cannot prove the diff is
 		// image-only and the mode chooser errors out before the pass reaches any
@@ -545,31 +547,31 @@ func TestReconcile_StrategyFlipMidSurge_RespectsUnavailabilityBudget(t *testing.
 		t.Run(tc.name, func(t *testing.T) {
 			scheme := makeScheme(t)
 			c := fake.NewClientBuilder().WithScheme(scheme).Build()
-			deps := workload.Deps{Client: c}
+			deps := types.Deps{Client: c}
 
 			in := minimalInput(t)
 			in.DesiredSpec.Replicas = 4
-			in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
+			in.ObservedState.InstanceStatuses = []types.InstanceStatus{
 				// Index 0 was admitted under maxSurge on a prior wake-up and
 				// still carries its surge step.
 				{
 					Index: 0, Incarnation: 1,
-					Phase: workload.InstancePhaseUpdating, RunningRevision: "prior-rev",
-					Operation: &workload.InstanceOperation{
-						Type: workload.InstanceOperationUpdate, Step: workload.UpdateStepSurge,
+					Phase: types.InstancePhaseUpdating, RunningRevision: "prior-rev",
+					Operation: &types.InstanceOperation{
+						Type: types.InstanceOperationUpdate, Step: types.UpdateStepSurge,
 						TargetRevision: "llama-70b-engine-newtarget",
 					},
 				},
-				{Index: 1, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: "prior-rev"},
-				{Index: 2, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: "prior-rev"},
-				{Index: 3, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: "prior-rev"},
+				{Index: 1, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: "prior-rev"},
+				{Index: 2, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: "prior-rev"},
+				{Index: 3, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: "prior-rev"},
 			}
 			// Record the mode each Instance was actually driven as, at the
 			// moment its Update operation is stamped. Reading Operation after
 			// the pass would miss it: with no pods in the fake client the ops
 			// escalate and clear the operation before the pass returns.
 			drivenAs := map[int32]string{}
-			in.MutateInstance = func(_ context.Context, idx int32, fn func(*workload.InstanceStatus) bool) error {
+			in.MutateInstance = func(_ context.Context, idx int32, fn func(*types.InstanceStatus) bool) error {
 				for i := range in.ObservedState.InstanceStatuses {
 					if in.ObservedState.InstanceStatuses[i].Index != idx {
 						continue
@@ -577,7 +579,7 @@ func TestReconcile_StrategyFlipMidSurge_RespectsUnavailabilityBudget(t *testing.
 					s := &in.ObservedState.InstanceStatuses[i]
 					_ = fn(s)
 					if _, seen := drivenAs[idx]; !seen &&
-						s.Operation != nil && s.Operation.Type == workload.InstanceOperationUpdate {
+						s.Operation != nil && s.Operation.Type == types.InstanceOperationUpdate {
 						drivenAs[idx] = s.Operation.Step
 					}
 					break
@@ -585,20 +587,20 @@ func TestReconcile_StrategyFlipMidSurge_RespectsUnavailabilityBudget(t *testing.
 				return nil
 			}
 
-			instances := make([]workload.InstancePlan, 4)
+			instances := make([]types.InstancePlan, 4)
 			for i := range instances {
-				instances[i] = workload.InstancePlan{
+				instances[i] = types.InstancePlan{
 					Index: int32(i), Incarnation: 1,
-					Runners: []workload.RunnerPlan{{Name: "default", Size: 1}},
+					Runners: []types.RunnerPlan{{Name: "default", Size: 1}},
 				}
 			}
-			plan := workload.ComponentPlan{
-				Component: workload.ComponentEngine,
+			plan := types.ComponentPlan{
+				Component: types.ComponentEngine,
 				Replicas:  4,
 				Instances: instances,
-				UpdateStrategy: workload.UpdateStrategy{
+				UpdateStrategy: types.UpdateStrategy{
 					Type: tc.strategy,
-					RollingUpdate: &workload.RollingUpdate{
+					RollingUpdate: &types.RollingUpdate{
 						MaxSurge:       intOrStringInt(maxSurge),
 						MaxUnavailable: intOrStringInt(maxUnavailable),
 					},

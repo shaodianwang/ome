@@ -9,8 +9,8 @@ import (
 	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
@@ -61,7 +61,7 @@ var _ = ginkgo.Describe("OMENative scale transitions — oversized gang wave (KI
 				g.Expect(status.Phase).To(Equal(v1beta1.OMENativeInstanceReady))
 				g.Expect(boundedScaleDownPodsForInstance(g, ns.Name, isvcName, status.Index)).To(HaveLen(3))
 				pg := &schedulingv1alpha1.PodGroup{}
-				pgName := query.PodGroupName(isvcName, workload.ComponentEngine, status.Index)
+				pgName := query.PodGroupName(isvcName, workloadtypes.ComponentEngine, status.Index)
 				g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: pgName}, pg)).To(Succeed())
 				g.Expect(pg.Spec.MinMember).To(Equal(int32(3)))
 			}
@@ -114,7 +114,7 @@ var _ = ginkgo.Describe("OMENative scale transitions — oversized gang wave (KI
 				g.Expect(pod.DeletionTimestamp).To(BeNil(), "the deferred gang must receive zero scale-down effects")
 			}
 			deferredPG := &schedulingv1alpha1.PodGroup{}
-			deferredPGName := query.PodGroupName(isvcName, workload.ComponentEngine, 1)
+			deferredPGName := query.PodGroupName(isvcName, workloadtypes.ComponentEngine, 1)
 			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: deferredPGName}, deferredPG)).To(Succeed())
 			g.Expect(deferredPG.DeletionTimestamp).To(BeNil(), "the deferred gang's PodGroup must stay untouched")
 		}).WithTimeout(kindShortTimeout).WithPolling(kindPollInterval).Should(Succeed())
@@ -126,7 +126,7 @@ var _ = ginkgo.Describe("OMENative scale transitions — oversized gang wave (KI
 		Eventually(func(g Gomega) {
 			g.Expect(deleteOwnedInstanceIndices(instanceStatuses(g, ns.Name, isvcName, v1beta1.EngineComponent))).
 				To(Equal([]int32{1}), "the next gang must be admitted only after the first wave closes")
-			pgName := query.PodGroupName(isvcName, workload.ComponentEngine, 2)
+			pgName := query.PodGroupName(isvcName, workloadtypes.ComponentEngine, 2)
 			err := k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: pgName}, &schedulingv1alpha1.PodGroup{})
 			g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "the completed gang's PodGroup must be finalized; err=%v", err)
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
@@ -144,7 +144,7 @@ var _ = ginkgo.Describe("OMENative scale transitions — oversized gang wave (KI
 			pgs := &schedulingv1alpha1.PodGroupList{}
 			g.Expect(k8sClient.List(suiteCtx, pgs, client.InNamespace(ns.Name))).To(Succeed())
 			g.Expect(pgs.Items).To(HaveLen(1))
-			g.Expect(pgs.Items[0].Name).To(Equal(query.PodGroupName(isvcName, workload.ComponentEngine, 0)))
+			g.Expect(pgs.Items[0].Name).To(Equal(query.PodGroupName(isvcName, workloadtypes.ComponentEngine, 0)))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 })

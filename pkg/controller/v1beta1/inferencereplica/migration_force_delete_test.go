@@ -28,9 +28,9 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	workloadgang "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/gang"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // TestReconcile_MigrationSourceWedged_ForceDeletesAndCompletes drives the
@@ -113,7 +113,7 @@ func TestReconcile_MigrationSourceWedged_ForceDeletesAndCompletes(t *testing.T) 
 		APIReader:                c,
 		Log:                      logf.Log.WithName("test"),
 		InstanceStatusTarget:     irstatus.EncodingDenseV1,
-		Expectations:             workload.NewExpectations(),
+		Expectations:             workloadtypes.NewExpectations(),
 		ScaleDownRequeueInterval: testScaleDownRequeueInterval,
 		Recorder:                 rec,
 		Clock:                    clocktesting.NewFakeClock(base),
@@ -126,7 +126,7 @@ func TestReconcile_MigrationSourceWedged_ForceDeletesAndCompletes(t *testing.T) 
 	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)}
 	var events []string
 	step := func(tag string) {
-		r.Expectations = workload.NewExpectations()
+		r.Expectations = workloadtypes.NewExpectations()
 		if _, err := r.Reconcile(ctx, request); err != nil {
 			t.Fatalf("%s reconcile: %v", tag, err)
 		}
@@ -192,7 +192,7 @@ func TestReconcile_MigrationSourceWedged_ForceDeletesAndCompletes(t *testing.T) 
 			t.Errorf("wedged source pod %s was not force-deleted at grace zero; forced=%v", name, forced)
 		}
 	}
-	if len(eventsContaining(events, string(workload.EventReasonPodForceDeleted))) == 0 {
+	if len(eventsContaining(events, string(workloadtypes.EventReasonPodForceDeleted))) == 0 {
 		t.Errorf("the sweep must warn PodForceDeleted; events=%v", events)
 	}
 	if got := get(); len(got.Status.InstanceStatuses) != 1 || got.Status.InstanceStatuses[0].Index == 0 {

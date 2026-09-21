@@ -1,4 +1,4 @@
-package workload
+package escalation
 
 import (
 	"context"
@@ -94,7 +94,7 @@ const (
 // Gang (multi-pod) UPDATE attempts must NOT be routed here — their
 // Failed-with-Operation continuation drives the gang abandon path.
 // Callers keep the plain Failed-preserving-Operation stamp for those.
-func DisposeExpiredAttempt(ctx context.Context, deps Deps, input ReconcileInput, dd DispositionDeps, inst InstanceStatus, pods []*corev1.Pod, reason string) (DispositionOutcome, error) {
+func DisposeExpiredAttempt(ctx context.Context, deps types.Deps, input types.ReconcileInput, dd types.DispositionDeps, inst types.InstanceStatus, pods []*corev1.Pod, reason string) (DispositionOutcome, error) {
 	now := metav1.NewTime(input.Now())
 	causePod, matched := evidence.FirstWorkloadCausedPod(pods)
 
@@ -104,7 +104,7 @@ func DisposeExpiredAttempt(ctx context.Context, deps Deps, input ReconcileInput,
 		unpinnedCreate := false
 		if inst.Operation != nil {
 			targetRev = inst.Operation.TargetRevision
-			unpinnedCreate = inst.Operation.Type == InstanceOperationCreate && targetRev == ""
+			unpinnedCreate = inst.Operation.Type == types.InstanceOperationCreate && targetRev == ""
 		}
 		if targetRev == "" {
 			// An empty target is a supported persisted state. The pod label
@@ -141,10 +141,10 @@ func DisposeExpiredAttempt(ctx context.Context, deps Deps, input ReconcileInput,
 			// Whether the wave charges the ladder is read off the matched
 			// reason rather than asserted here, so this branch and the gang
 			// abandon answer that question from the same set.
-			if err := RecordUpdateFailureInRetryBlock(ctx, input, targetRev, matched, IsWorkloadCausedReason(matched)); err != nil {
+			if err := types.RecordUpdateFailureInRetryBlock(ctx, input, targetRev, matched, types.IsWorkloadCausedReason(matched)); err != nil {
 				return DispositionHeldRevision, fmt.Errorf("record retry block for disposed attempt (instance=%d rev=%s): %w", inst.Index, targetRev, err)
 			}
-			termination := PodTerminationWithReason(pod, matched, now)
+			termination := types.PodTerminationWithReason(pod, matched, now)
 			if err := status.StampFailed(ctx, input, inst.Index, termination); err != nil {
 				return DispositionHeldRevision, fmt.Errorf("clear operation + stamp Failed (instance=%d): %w", inst.Index, err)
 			}
@@ -177,7 +177,7 @@ func DisposeExpiredAttempt(ctx context.Context, deps Deps, input ReconcileInput,
 	if i := strings.IndexByte(reason, ':'); i > 0 {
 		shortReason = reason[:i]
 	}
-	termination := &InstanceTermination{
+	termination := &types.InstanceTermination{
 		Reason:  shortReason,
 		Message: reason,
 		Time:    now,
@@ -186,11 +186,11 @@ func DisposeExpiredAttempt(ctx context.Context, deps Deps, input ReconcileInput,
 	if causePod != nil {
 		// Workload-caused evidence without a resolvable revision still
 		// carries the wedged pod's diagnostics into LastFailure.
-		termination = PodTerminationWithReason(causePod, matched, now)
+		termination = types.PodTerminationWithReason(causePod, matched, now)
 	} else if pod := evidence.FirstPodWaitingForReason(pods, shortReason); pod != nil {
 		// Ambiguous runtime-start failures still identify the exact failed
 		// pod so operation-specific cleanup can remove only that object.
-		termination = PodTerminationWithReason(pod, shortReason, now)
+		termination = types.PodTerminationWithReason(pod, shortReason, now)
 	} else if pod, _ := evidence.FirstRunningNotReadyPod(pods, attemptTargetRevision(input, inst)); pod != nil {
 		// Readiness limbo: the branch above chose the disposition, this
 		// only says what an operator will read. Without it the record is
@@ -240,7 +240,7 @@ func DisposeExpiredAttempt(ctx context.Context, deps Deps, input ReconcileInput,
 // records this terminal reason, so a repeated disposition of the same
 // unresolved failure doesn't re-emit the operator warning + Warning event
 // every reconcile.
-func sameTerminalFailure(inst InstanceStatus, reason string) bool {
+func sameTerminalFailure(inst types.InstanceStatus, reason string) bool {
 	return inst.LastFailure != nil && inst.LastFailure.Reason == reason
 }
 
@@ -248,14 +248,14 @@ func sameTerminalFailure(inst InstanceStatus, reason string) bool {
 // migration mode. Only the explicit Auto intent (Surge is its spelling
 // alias) enables controller-filed relocation; Never and the zero value
 // fail safe to the terminal branch.
-func migrationModeAllowsRelocation(mode MigrationMode) bool {
-	return mode == MigrationModeAuto || mode == MigrationModeSurge
+func migrationModeAllowsRelocation(mode types.MigrationMode) bool {
+	return mode == types.MigrationModeAuto || mode == types.MigrationModeSurge
 }
 
 // attemptTargetRevision resolves the revision an attempt is converging
 // toward: the pin its operation carries, else the owner's current
 // UpdateRevision (an unpinned Create renders from that).
-func attemptTargetRevision(input ReconcileInput, inst InstanceStatus) string {
+func attemptTargetRevision(input types.ReconcileInput, inst types.InstanceStatus) string {
 	if inst.Operation != nil && inst.Operation.TargetRevision != "" {
 		return inst.Operation.TargetRevision
 	}
@@ -301,7 +301,7 @@ func attemptTargetRevision(input ReconcileInput, inst InstanceStatus) string {
 // never selects it. Best-effort: a nil closure or a failed write is
 // V(1)-logged and never fails the disposition — the relocation itself
 // is ledger-driven.
-func recordRelocationDirective(ctx context.Context, deps Deps, input ReconcileInput, dd DispositionDeps, inst InstanceStatus, fromNode, detail string) (recorded bool, err error) {
+func recordRelocationDirective(ctx context.Context, deps types.Deps, input types.ReconcileInput, dd types.DispositionDeps, inst types.InstanceStatus, fromNode, detail string) (recorded bool, err error) {
 	owner := dispositionLedgerOwner(input)
 	ledger, err := audit.LoadLedgerForOwner(ctx, deps.Reader(), owner)
 	if err != nil {
@@ -358,12 +358,12 @@ func recordRelocationDirective(ctx context.Context, deps Deps, input ReconcileIn
 	// semantics on a born-terminal record — stamped = now.
 	if input.AppendMigration != nil {
 		completedAt := nowT
-		if aerr := input.AppendMigration(ctx, MigrationRecord{
+		if aerr := input.AppendMigration(ctx, types.MigrationRecord{
 			RequestUUID:    reqUUID,
-			Trigger:        MigrationTriggerAuto,
+			Trigger:        types.MigrationTriggerAuto,
 			SourceInstance: inst.Index,
 			FromNode:       fromNode,
-			Phase:          MigrationPhaseRelocated,
+			Phase:          types.MigrationPhaseRelocated,
 			Attempt:        attempts + 1,
 			Reason:         audit.ReasonAutoRecover,
 			Message:        relocationRecordMessage(fromNode, detail),
@@ -377,14 +377,14 @@ func recordRelocationDirective(ctx context.Context, deps Deps, input ReconcileIn
 	}
 	if deps.Recorder != nil {
 		if target := types.EventTarget(input); target != nil {
-			deps.Recorder.Eventf(target, corev1.EventTypeNormal, string(EventReasonAutoMigrationTriggered),
+			deps.Recorder.Eventf(target, corev1.EventTypeNormal, string(types.EventReasonAutoMigrationTriggered),
 				"OMENative component=%s instance=%d relocation directive recorded: attempt %d/%d, rebuild steered off node %s (uuid=%s)",
 				component, inst.Index, attempts+1, dd.AutoMigrateMaxAttempts, fromNode, reqUUID)
 			// Cap transition: this directive filled the last budget slot.
 			// Announce once here; subsequent over-budget dispositions stay
 			// silent (guard 3).
 			if attempts+1 == dd.AutoMigrateMaxAttempts {
-				deps.Recorder.Eventf(target, corev1.EventTypeWarning, string(EventReasonAutoMigrationCapReached),
+				deps.Recorder.Eventf(target, corev1.EventTypeWarning, string(types.EventReasonAutoMigrationCapReached),
 					"OMENative component=%s instance=%d relocation budget exhausted (%d/%d attempts); further expiries dispose terminal without relocation",
 					component, inst.Index, attempts+1, dd.AutoMigrateMaxAttempts)
 			}
@@ -399,14 +399,14 @@ func recordRelocationDirective(ctx context.Context, deps Deps, input ReconcileIn
 // dispositionLedgerOwner / dispositionLedgerOwnerGVK mirror the ops
 // migrate ledger-owner resolution: the adapter may point LedgerOwner at
 // the user-facing parent (ISVC); nil falls back to OwnerObject.
-func dispositionLedgerOwner(input ReconcileInput) client.Object {
+func dispositionLedgerOwner(input types.ReconcileInput) client.Object {
 	if input.LedgerOwner != nil {
 		return input.LedgerOwner
 	}
 	return input.OwnerObject
 }
 
-func dispositionLedgerOwnerGVK(input ReconcileInput) schema.GroupVersionKind {
+func dispositionLedgerOwnerGVK(input types.ReconcileInput) schema.GroupVersionKind {
 	if input.LedgerOwner != nil {
 		return input.LedgerOwnerGVK
 	}
@@ -423,4 +423,43 @@ func relocationRecordMessage(fromNode, detail string) string {
 		return base
 	}
 	return base + " (" + detail + ")"
+}
+
+// disposableAttempt reports whether s's in-flight attempt is owned by
+// the deadline disposition (DisposeExpiredAttempt) rather than the
+// plain Failed-preserving-Operation stamp.
+//
+//   - Create ops (any pod count): YES. Creates have no abandon /
+//     teardown continuation — a Failed-with-Operation create would
+//     re-arm through the Create stamper every pass (the churn loop).
+//     The disposition's Operation-clear is correct for gang creates
+//     too: a Failed-no-Operation gang create rebuilds via the ordinary
+//     trigger + RetryBlock gate.
+//   - Single-pod Update ops (no gang surge markers): YES — same
+//     re-arming stampers, same fix.
+//   - Gang Update ops (SurgeIndex set / gang surge target step /
+//     multi-pod plan): NO. Their Failed-with-Operation continuation is
+//     what routes the dispatcher into abandonFailedGangSurge (surge
+//     teardown → RetryBlock → source reset); clearing the Operation
+//     here would strand the wedged surge gang.
+//   - Restart / Migrate ops: NO — their expiry semantics are unchanged.
+func disposableAttempt(s *types.InstanceStatus, desiredPods int32) bool {
+	if s == nil || s.Operation == nil {
+		return false
+	}
+	switch s.Operation.Type {
+	case types.InstanceOperationCreate:
+		return true
+	case types.InstanceOperationUpdate:
+		if s.Operation.SurgeIndex != nil || s.Operation.Step == types.UpdateStepGangSurgeTarget || s.Operation.Step == types.UpdateStepGangSurgeTargetCleanup {
+			return false
+		}
+		// Deliberate divergence: multi-pod RECREATE/in-place updates
+		// (desiredPods > 1, no surge markers) also keep the legacy
+		// Failed-with-Operation stamp — conservative; an abandonless
+		// teardown/disposition for those is out of scope here.
+		return desiredPods <= 1
+	default:
+		return false
+	}
 }

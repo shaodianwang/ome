@@ -25,7 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // gangLossIR is a two-pod Instance (one leader, one worker) under the
@@ -162,7 +162,7 @@ func TestRestart_PendingGangMemberLost_RebuildsOnceRetryBlockIsDue(t *testing.T)
 			if err := c.Delete(context.Background(), worker); err != nil {
 				t.Fatalf("lose the worker: %v", err)
 			}
-			r.Expectations = workload.NewExpectations()
+			r.Expectations = workloadtypes.NewExpectations()
 
 			if _, err := r.Reconcile(context.Background(), request); err != nil {
 				t.Fatalf("Reconcile: %v", err)

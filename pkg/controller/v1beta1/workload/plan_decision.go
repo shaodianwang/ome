@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -48,7 +49,7 @@ const (
 // RestartSelection is one Instance the restart pass advances, with the
 // trigger reason that lands on Operation.Reason on the first pass.
 type RestartSelection struct {
-	Instance InstancePlan
+	Instance types.InstancePlan
 	Reason   string
 
 	// OpensUnavailability marks a selection that takes serving capacity
@@ -63,12 +64,12 @@ type RestartSelection struct {
 // MigrationSelection is the Manual migration record the migrate pass
 // drives this reconcile (a copy of the ObservedState record).
 type MigrationSelection struct {
-	Record MigrationRecord
+	Record types.MigrationRecord
 }
 
 // UpdateItem is one Instance the update pass touches, in plan order.
 type UpdateItem struct {
-	Instance InstancePlan
+	Instance types.InstancePlan
 	// AdoptRevision: stamp Ready-on-target (the RunningRevision
 	// backfill) instead of running the Update op — the Instance's
 	// runtime-ready pods already match the target.
@@ -101,7 +102,7 @@ type UpdateSelection struct {
 	// SurgeThenDrain — matches workload.BuildPlan's defaulting).
 	// SurgeThenDrain doesn't take pods offline, so the executor gates
 	// on the budget that actually applies to the strategy.
-	Strategy UpdateStrategyType
+	Strategy types.UpdateStrategyType
 	// SurgeBudget / UnavailBudget are the per-Component caps
 	// (BudgetNoLimit when uncapped) — a distinct layer from the
 	// cross-Component coordination-group gate (input.UpdateGate). Both
@@ -128,7 +129,7 @@ type PlannedAction struct {
 	Extras []int32
 
 	// Demotions are the truth-pass targets (ActionDemote).
-	Demotions []DemotionSelection
+	Demotions []types.DemotionSelection
 
 	// Restarts are the Instances the restart pass advances
 	// (ActionRestart).
@@ -200,7 +201,7 @@ type Decision struct {
 // Execute consults it at the update pass's position so the gate
 // observes live peer/self state after earlier passes' effects have
 // landed, exactly as the pass pipeline did.
-func Plan(ctx context.Context, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot) (Decision, error) {
+func Plan(ctx context.Context, input types.ReconcileInput, plan types.ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot) (Decision, error) {
 	var decision Decision
 
 	// One owner grouping for the whole pass, ahead of every selection:
@@ -281,12 +282,12 @@ func Plan(ctx context.Context, input ReconcileInput, plan ComponentPlan, target 
 		// is driven, one per pass. Terminal records and Auto records (born
 		// terminal) are excluded structurally — records, never work. Skip
 		// when mode is Never.
-		if plan.MigrationMode != MigrationModeNever {
-			if record := NextManualMigration(input.ObservedState.Migrations); record != nil {
+		if plan.MigrationMode != types.MigrationModeNever {
+			if record := types.NextManualMigration(input.ObservedState.Migrations); record != nil {
 				// A fresh migration adds one surge Instance. Let an existing update
 				// surge finish first so the two operations do not stack extra capacity.
 				// Allocated migrations always resume from their durable record.
-				if record.SurgeAllocated() || CurrentSurgeInFlight(input.ObservedState.InstanceStatuses) == 0 {
+				if record.SurgeAllocated() || escalation.CurrentSurgeInFlight(input.ObservedState.InstanceStatuses) == 0 {
 					decision.Actions = append(decision.Actions, PlannedAction{Kind: ActionMigrate, Migration: &MigrationSelection{Record: *record}})
 				}
 			}
@@ -338,7 +339,7 @@ func Plan(ctx context.Context, input ReconcileInput, plan ComponentPlan, target 
 // source and the replacement-gang marker it pins — and keeps the source
 // serving from its first pass to its last, so parking it costs the
 // Instance no capacity and closes no step half-open.
-func pausedUpdateContinuations(input ReconcileInput, items []UpdateItem) []UpdateItem {
+func pausedUpdateContinuations(input types.ReconcileInput, items []UpdateItem) []UpdateItem {
 	kept := items[:0]
 	for _, item := range items {
 		if item.StartingFresh || item.AdoptRevision || item.CleanupOnly {
@@ -358,7 +359,7 @@ func pausedUpdateContinuations(input ReconcileInput, items []UpdateItem) []Updat
 // the owner: a Failed row whose preserved operation is an Update is a
 // continuation the selection keeps (see startingFresh), so the pause
 // re-drives it rather than leaving a half-done roll parked.
-func anyUpdateContinuation(input ReconcileInput, plan ComponentPlan) bool {
+func anyUpdateContinuation(input types.ReconcileInput, plan types.ComponentPlan) bool {
 	for _, inst := range plan.Instances {
 		row := input.ObservedState.Instance(inst.Index)
 		if row == nil || gangSurgeRow(row) {
@@ -374,19 +375,19 @@ func anyUpdateContinuation(input ReconcileInput, plan ComponentPlan) bool {
 // gangSurgeRow reports whether the row belongs to a gang SurgeThenDrain
 // cycle: the source that pins a replacement index, or the replacement
 // marker itself.
-func gangSurgeRow(row *InstanceStatus) bool {
+func gangSurgeRow(row *types.InstanceStatus) bool {
 	op := row.Operation
-	if op == nil || op.Type != InstanceOperationUpdate {
+	if op == nil || op.Type != types.InstanceOperationUpdate {
 		return false
 	}
 	return op.SurgeIndex != nil ||
-		op.Step == UpdateStepGangSurgeTarget ||
-		op.Step == UpdateStepGangSurgeTargetCleanup
+		op.Step == types.UpdateStepGangSurgeTarget ||
+		op.Step == types.UpdateStepGangSurgeTargetCleanup
 }
 
 // anyRestartContinuation reports whether any row carries an in-flight
 // Restart attempt.
-func anyRestartContinuation(input ReconcileInput) bool {
+func anyRestartContinuation(input types.ReconcileInput) bool {
 	return input.OwnedRows().Any(types.OwnerRestart)
 }
 
@@ -394,7 +395,7 @@ func anyRestartContinuation(input ReconcileInput) bool {
 // already under way. A frozen pause starts no repair, but the pods an
 // open one deleted must still be recreated at the bumped Incarnation
 // rather than stay missing for the length of the hold.
-func restartContinuations(input ReconcileInput, restarts []RestartSelection) []RestartSelection {
+func restartContinuations(input types.ReconcileInput, restarts []RestartSelection) []RestartSelection {
 	owned := input.OwnedRows()
 	kept := restarts[:0]
 	for _, selection := range restarts {
@@ -416,8 +417,8 @@ func restartContinuations(input ReconcileInput, restarts []RestartSelection) []R
 // rare, so for every other policy the cached view screens for a
 // candidate first and the live read confirms it; a healthy Component
 // therefore costs no extra live List per reconcile.
-func planRestartSelections(ctx context.Context, input ReconcileInput, plan ComponentPlan, snapshot *ObservedSnapshot) ([]RestartSelection, error) {
-	if plan.RestartPolicy != RestartPolicyRecreateInstance {
+func planRestartSelections(ctx context.Context, input types.ReconcileInput, plan types.ComponentPlan, snapshot *ObservedSnapshot) ([]RestartSelection, error) {
+	if plan.RestartPolicy != types.RestartPolicyRecreateInstance {
 		cachedByInstance, err := snapshot.CachedPods(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("workload.Reconcile: list pods to screen the restart pass (component=%s): %w", plan.Component, err)
@@ -447,7 +448,7 @@ func planRestartSelections(ctx context.Context, input ReconcileInput, plan Compo
 
 // anyRestartTrigger reports whether any planned Instance would be
 // selected against the supplied pod buckets.
-func anyRestartTrigger(input ReconcileInput, plan ComponentPlan, byInstance map[int32][]*corev1.Pod) bool {
+func anyRestartTrigger(input types.ReconcileInput, plan types.ComponentPlan, byInstance map[int32][]*corev1.Pod) bool {
 	for _, inst := range plan.Instances {
 		if needs, _ := workloadops.DetectRestartTriggerWithPods(input, plan, inst, byInstance[inst.Index]); needs {
 			return true
@@ -466,8 +467,8 @@ func anyRestartTrigger(input ReconcileInput, plan ComponentPlan, byInstance map[
 // screened on the cached read and confirmed against the live read, so the
 // demotion can never fire on cache lag; a Terminating pod still counts as
 // live, deferring the correction until the loss is total and settled.
-func planUnbackedDemotions(ctx context.Context, input ReconcileInput, plan ComponentPlan, snapshot *ObservedSnapshot) ([]DemotionSelection, error) {
-	if plan.RestartPolicy == RestartPolicyRecreateInstance {
+func planUnbackedDemotions(ctx context.Context, input types.ReconcileInput, plan types.ComponentPlan, snapshot *ObservedSnapshot) ([]types.DemotionSelection, error) {
+	if plan.RestartPolicy == types.RestartPolicyRecreateInstance {
 		return nil, nil
 	}
 	planned := make(map[int32]struct{}, len(plan.Instances))
@@ -480,7 +481,7 @@ func planUnbackedDemotions(ctx context.Context, input ReconcileInput, plan Compo
 		if _, ok := planned[row.Index]; !ok {
 			continue
 		}
-		if row.Phase != InstancePhaseReady || row.Operation != nil {
+		if row.Phase != types.InstancePhaseReady || row.Operation != nil {
 			continue
 		}
 		candidates = append(candidates, row.Index)
@@ -505,10 +506,10 @@ func planUnbackedDemotions(ctx context.Context, input ReconcileInput, plan Compo
 	if err != nil {
 		return nil, fmt.Errorf("workload.Reconcile: confirm pods for truth pass (component=%s): %w", plan.Component, err)
 	}
-	var out []DemotionSelection
+	var out []types.DemotionSelection
 	for _, idx := range unbacked {
 		if len(live[idx]) == 0 {
-			out = append(out, DemotionSelection{Index: idx, Reason: "no live pods back the Ready phase"})
+			out = append(out, types.DemotionSelection{Index: idx, Reason: "no live pods back the Ready phase"})
 		}
 	}
 	return out, nil
@@ -518,21 +519,21 @@ func planUnbackedDemotions(ctx context.Context, input ReconcileInput, plan Compo
 // (pure) over the snapshot's cached pods and returns the selection
 // plus the earliest not-yet-due RetryBlock wake-up across denied
 // Instances.
-func planUpdateSelection(ctx context.Context, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot) (UpdateSelection, time.Duration, error) {
-	var rollingUpdate *RollingUpdate
+func planUpdateSelection(ctx context.Context, input types.ReconcileInput, plan types.ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot) (UpdateSelection, time.Duration, error) {
+	var rollingUpdate *types.RollingUpdate
 	if plan.UpdateStrategy.RollingUpdate != nil {
 		rollingUpdate = plan.UpdateStrategy.RollingUpdate
 	}
 	strategy := plan.UpdateStrategy.Type
 	if strategy == "" {
-		strategy = UpdateStrategySurgeThenDrain
+		strategy = types.UpdateStrategySurgeThenDrain
 	}
 	selection := UpdateSelection{
 		Strategy:             strategy,
-		SurgeBudget:          PerComponentMaxSurgeBudget(rollingUpdate, plan.Replicas),
-		UnavailBudget:        PerComponentMaxUnavailableBudget(rollingUpdate, plan.Replicas),
-		PriorSurgeInFlight:   CurrentSurgeInFlight(input.ObservedState.InstanceStatuses),
-		PriorUnavailInFlight: CurrentUnavailableInFlight(input.ObservedState.InstanceStatuses),
+		SurgeBudget:          escalation.PerComponentMaxSurgeBudget(rollingUpdate, plan.Replicas),
+		UnavailBudget:        escalation.PerComponentMaxUnavailableBudget(rollingUpdate, plan.Replicas),
+		PriorSurgeInFlight:   escalation.CurrentSurgeInFlight(input.ObservedState.InstanceStatuses),
+		PriorUnavailInFlight: escalation.CurrentUnavailableInFlight(input.ObservedState.InstanceStatuses),
 	}
 	// One cached List + bucket for the whole Component (the snapshot's
 	// non-destructive read source) — an absent bucket is an empty pod
@@ -541,7 +542,7 @@ func planUpdateSelection(ctx context.Context, input ReconcileInput, plan Compone
 	if err != nil {
 		return UpdateSelection{}, 0, fmt.Errorf("workload.Reconcile: list pods for update pass (component=%s): %w", plan.Component, err)
 	}
-	heldIndices := PartitionHeldIndices(rollingUpdate, input, plan.Instances, target.Name)
+	heldIndices := escalation.PartitionHeldIndices(rollingUpdate, input, plan.Instances, target.Name)
 	var retryBlockWait time.Duration
 	for _, inst := range plan.Instances {
 		// RollingUpdate.Partition (canary): hold the selected Instances

@@ -1,6 +1,7 @@
 package types
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -17,5 +18,23 @@ func TestReconcileInputNowPrefersTheInjectedClock(t *testing.T) {
 	unwired := ReconcileInput{}
 	if got := unwired.Now(); got.Before(before) {
 		t.Fatalf("no clock falls back to the wall clock: got %v, before the call at %v", got, before)
+	}
+}
+
+// TestReconcileInput_Compiles is a compile-time pin on the
+// ReconcileInput struct shape and the MutateInstance callback
+// signature. The struct must be value-constructible with no adapter
+// scaffolding, and the MutateInstance signature must accept a
+// workload-owned InstanceStatus mutator.
+func TestReconcileInput_Compiles(t *testing.T) {
+	_ = ReconcileInput{
+		MutateInstance: func(ctx context.Context, idx int32, mutate func(*InstanceStatus) bool) error {
+			// Exercise the mutate callback shape with a no-op caller.
+			var s InstanceStatus
+			_ = mutate(&s)
+			_ = ctx
+			_ = idx
+			return nil
+		},
 	}
 }

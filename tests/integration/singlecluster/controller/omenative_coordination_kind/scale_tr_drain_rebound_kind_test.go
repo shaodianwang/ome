@@ -9,9 +9,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
@@ -72,7 +72,7 @@ var _ = ginkgo.Describe("OMENative scale transitions — rebound while draining 
 		revisionHash := victim.Labels[query.LabelRevisionHash]
 		Expect(revisionHash).NotTo(BeEmpty(), "engine pods must carry the revision-hash label")
 		Expect(victim.Status.PodIP).NotTo(BeEmpty(), "a Ready pod must have an IP")
-		routedService := query.PerRevisionServiceName(isvcName, workload.ComponentEngine, revisionHash)
+		routedService := query.PerRevisionServiceName(isvcName, workloadtypes.ComponentEngine, revisionHash)
 
 		ginkgo.By("publishing a synthetic Ready endpoint that keeps the victim routable")
 		ready := true

@@ -26,10 +26,10 @@ Test layout. One production file, one test file, named for each other:
     splits a test file splits the fixture file.
 
 Row writes. A row-mutation closure — `func(s *InstanceStatus) bool`, the
-callback the status adapter applies — may be declared only in the four
-packages that write a row: the status package, the operation passes and the
-reconcile root, which still author some of their own, and the adapter that
-supplies the callback. The check is an allow-list of writers rather than a
+callback the status adapter applies — may be declared only in the packages
+that write a row: the status package, and the operation passes and the
+escalation pass, which still author some of their own. The reconcile root
+orchestrates and plans; it writes no row. The check is an allow-list of writers rather than a
 list of readers so that a package added later is checked by default: the
 hold pass, the evidence classifiers, the value types, the queries and the
 gang, audit and revision helpers read the row and decide from it. They do
@@ -76,9 +76,9 @@ ROW_MUTATION = re.compile(
 # directories. Matched exactly, not by prefix: a subpackage of one of these
 # is a new package and is checked.
 ROW_WRITERS = (
-    WORKLOAD_ROOT,
     os.path.join(WORKLOAD_ROOT, "status"),
     os.path.join(WORKLOAD_ROOT, "ops"),
+    os.path.join(WORKLOAD_ROOT, "escalation"),
 )
 
 

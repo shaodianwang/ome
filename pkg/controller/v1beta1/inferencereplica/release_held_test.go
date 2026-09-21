@@ -20,7 +20,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // newReleaseFixture builds a fake-client Reconciler (with recorder)
@@ -39,7 +39,7 @@ func newReleaseFixture(t *testing.T, ir *v1beta1.InferenceReplica) (*Reconciler,
 		APIReader:            c,
 		Log:                  logf.Log.WithName("test"),
 		Recorder:             rec,
-		Expectations:         workload.NewExpectations(),
+		Expectations:         workloadtypes.NewExpectations(),
 		InstanceStatusTarget: irstatus.EncodingDenseV1,
 	}
 	fresh := &v1beta1.InferenceReplica{}
@@ -99,7 +99,7 @@ func TestConsumeReleaseHeld_FullNameReleasesHeldBlock(t *testing.T) {
 	assertAnnotationConsumed(t, g, c, ir)
 
 	events := drainEvents(rec)
-	g.Expect(eventsContaining(events, string(workload.EventReasonRetryBlockReleased))).To(gomega.HaveLen(1))
+	g.Expect(eventsContaining(events, string(workloadtypes.EventReasonRetryBlockReleased))).To(gomega.HaveLen(1))
 	g.Expect(eventsContaining(events, "llama-engine-aaaaaaaa")).NotTo(gomega.BeEmpty(),
 		"the event must name the released revision")
 	g.Expect(eventsContaining(events, "operator request")).NotTo(gomega.BeEmpty(),
@@ -123,7 +123,7 @@ func TestConsumeReleaseHeld_BareHashMatches(t *testing.T) {
 	g.Expect(fresh.Status.RetryBlocks[0].TargetRevision).To(gomega.Equal("llama-engine-bbbbbbbb"))
 
 	assertAnnotationConsumed(t, g, c, ir)
-	g.Expect(eventsContaining(drainEvents(rec), string(workload.EventReasonRetryBlockReleased))).To(gomega.HaveLen(1))
+	g.Expect(eventsContaining(drainEvents(rec), string(workloadtypes.EventReasonRetryBlockReleased))).To(gomega.HaveLen(1))
 }
 
 // TestConsumeReleaseHeld_NonHeldMatch_NoOpConsumed pins the non-Held
@@ -146,9 +146,9 @@ func TestConsumeReleaseHeld_NonHeldMatch_NoOpConsumed(t *testing.T) {
 	assertAnnotationConsumed(t, g, c, ir)
 
 	events := drainEvents(rec)
-	g.Expect(eventsContaining(events, string(workload.EventReasonRetryBlockReleaseSkipped))).To(gomega.HaveLen(1))
+	g.Expect(eventsContaining(events, string(workloadtypes.EventReasonRetryBlockReleaseSkipped))).To(gomega.HaveLen(1))
 	g.Expect(eventsContaining(events, "not Held")).NotTo(gomega.BeEmpty())
-	g.Expect(eventsContaining(events, string(workload.EventReasonRetryBlockReleased)+" ")).To(gomega.BeEmpty(),
+	g.Expect(eventsContaining(events, string(workloadtypes.EventReasonRetryBlockReleased)+" ")).To(gomega.BeEmpty(),
 		"no release event on the no-op branch")
 }
 
@@ -170,7 +170,7 @@ func TestConsumeReleaseHeld_UnknownRevision_NoOpConsumed(t *testing.T) {
 	assertAnnotationConsumed(t, g, c, ir)
 
 	events := drainEvents(rec)
-	g.Expect(eventsContaining(events, string(workload.EventReasonRetryBlockReleaseSkipped))).To(gomega.HaveLen(1))
+	g.Expect(eventsContaining(events, string(workloadtypes.EventReasonRetryBlockReleaseSkipped))).To(gomega.HaveLen(1))
 	g.Expect(eventsContaining(events, "no retryBlock exists")).NotTo(gomega.BeEmpty())
 }
 
@@ -207,5 +207,5 @@ func TestConsumeReleaseHeld_ParentIsEventTarget(t *testing.T) {
 	g.Expect(requeue).To(gomega.BeFalse())
 
 	assertAnnotationConsumed(t, g, c, ir)
-	g.Expect(eventsContaining(drainEvents(rec), string(workload.EventReasonRetryBlockReleased))).To(gomega.HaveLen(1))
+	g.Expect(eventsContaining(drainEvents(rec), string(workloadtypes.EventReasonRetryBlockReleased))).To(gomega.HaveLen(1))
 }

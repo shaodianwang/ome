@@ -1,4 +1,9 @@
-package workload
+// aggregate.go — the aggregated view of a Component's rows: the per-pod
+// predicates (ready, serving, scheduled, available), the per-Instance
+// counter set, the desired-count lookup every pass sizes a row by, and
+// the Component-level convergence gates (ReachedDesiredShape,
+// RolloutComplete) both adapters publish from.
+package status
 
 import (
 	"context"
@@ -12,6 +17,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/drain"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // AvailablePodSet returns pod names that are Ready and non-terminating
@@ -108,7 +114,7 @@ func CountAvailablePods(pods []*corev1.Pod, availableByName map[string]struct{},
 		if window.MinReadySeconds > 0 {
 			available, remaining := podreadiness.IsPodAvailable(p, window.MinReadySeconds, window.Now)
 			if !available {
-				nextAvailableIn = earliestPending(nextAvailableIn, remaining)
+				nextAvailableIn = EarliestPending(nextAvailableIn, remaining)
 				continue
 			}
 		}
@@ -119,7 +125,7 @@ func CountAvailablePods(pods []*corev1.Pod, availableByName map[string]struct{},
 
 // earliestPending folds candidate into the running "next wake" value: the
 // smallest positive duration wins and a non-positive candidate is no wake.
-func earliestPending(current, candidate time.Duration) time.Duration {
+func EarliestPending(current, candidate time.Duration) time.Duration {
 	if candidate <= 0 {
 		return current
 	}
@@ -159,7 +165,7 @@ func UniqueNodes(pods []*corev1.Pod) []string {
 // desired canonical pod count (sum of Runner sizes). Returns nil for
 // an empty plan so callers fall back to the observed PodCount
 // comparison (during scale-down with stale status entries).
-func DesiredPodCountByInstance(plan ComponentPlan) map[int32]int32 {
+func DesiredPodCountByInstance(plan types.ComponentPlan) map[int32]int32 {
 	if len(plan.Instances) == 0 {
 		return nil
 	}
@@ -207,7 +213,7 @@ func InstanceMeetsThreshold(observedPodCount, observedSatisfying, desired int32)
 // coordination unavailability gate (GateContext.CheckUnavailability)
 // works from — "instances actually in the load balancer rotation
 // right now."
-func CountServingInstances(insts []InstanceStatus, desiredByIdx map[int32]int32) int32 {
+func CountServingInstances(insts []types.InstanceStatus, desiredByIdx map[int32]int32) int32 {
 	var n int32
 	for _, s := range insts {
 		desired := DesiredFor(desiredByIdx, s.Index, s.PodCount)
@@ -221,7 +227,7 @@ func CountServingInstances(insts []InstanceStatus, desiredByIdx map[int32]int32)
 // CountAvailableInstances counts Instances whose desired-many pods
 // are in EndpointSlice rotation. Strict sub-condition of Ready —
 // kube-proxy only publishes Ready pods.
-func CountAvailableInstances(insts []InstanceStatus, desiredByIdx map[int32]int32) int32 {
+func CountAvailableInstances(insts []types.InstanceStatus, desiredByIdx map[int32]int32) int32 {
 	var n int32
 	for _, s := range insts {
 		desired := DesiredFor(desiredByIdx, s.Index, s.PodCount)
@@ -239,14 +245,14 @@ func CountAvailableInstances(insts []InstanceStatus, desiredByIdx map[int32]int3
 // is ReachedDesiredShape(insts, target, 0, len(insts)). Held instances must
 // be Ready too — a staged component is only "at rest" when every instance
 // (new and held) is healthy.
-func ReachedDesiredShape(insts []InstanceStatus, targetRevName string, partition, replicas int32) bool {
+func ReachedDesiredShape(insts []types.InstanceStatus, targetRevName string, partition, replicas int32) bool {
 	if replicas <= 0 || int32(len(insts)) != replicas || partition < 0 || partition > replicas {
 		return false
 	}
 	tgt := query.RevisionFromName(targetRevName)
 	var onTarget, held int32
 	for _, s := range insts {
-		if s.Phase != InstancePhaseReady {
+		if s.Phase != types.InstancePhaseReady {
 			return false
 		}
 		if query.RevisionFromName(s.RunningRevision).Same(tgt) {
@@ -263,41 +269,8 @@ func ReachedDesiredShape(insts []InstanceStatus, targetRevName string, partition
 //
 // Operates on workload.InstanceStatus so both adapters share the same
 // gate without converting back to a v1beta1 shape.
-func RolloutComplete(insts []InstanceStatus, targetRevName string) bool {
+func RolloutComplete(insts []types.InstanceStatus, targetRevName string) bool {
 	return ReachedDesiredShape(insts, targetRevName, 0, int32(len(insts)))
-}
-
-// HasWedgedPodAgainstCurrent reports whether any pod carries a
-// revision-hash label disagreeing with currentHash — i.e., a pod
-// created for a revision the controller doesn't yet (or no longer)
-// recognize as current.
-//
-// Pods missing the label are skipped (no signal). Empty currentHash
-// means no revision has been promoted yet — treat every pod hash as
-// matching so the wedged-recovery branch doesn't over-fire on the
-// initial Create.
-//
-// Used by the wedged-pod recovery branch of the escalator: catches
-// the post-surge shape where the state machine has been reset out of
-// the transient phase set but a real wedged surge pod still exists.
-func HasWedgedPodAgainstCurrent(pods []*corev1.Pod, currentHash, revisionHashLabel string) bool {
-	if currentHash == "" || revisionHashLabel == "" {
-		return false
-	}
-	current := query.RevisionFromHash(currentHash)
-	for _, pod := range pods {
-		if pod == nil {
-			continue
-		}
-		hash := pod.Labels[revisionHashLabel]
-		if hash == "" {
-			continue
-		}
-		if !query.RevisionFromHash(hash).Same(current) {
-			return true
-		}
-	}
-	return false
 }
 
 // CountersForInstance computes the per-Instance counter set from the
@@ -322,7 +295,7 @@ func instancePodsAdmitted(pods []*corev1.Pod) bool {
 		return false
 	}
 	for _, pod := range pods {
-		if PodAdmissionGated(pod) {
+		if types.PodAdmissionGated(pod) {
 			return false
 		}
 	}
@@ -345,148 +318,8 @@ type InstanceCounters struct {
 	NodesOccupied   []string
 }
 
-// ComponentCounters is the field-level Component publication result.
-type ComponentCounters struct {
-	Replicas             int32
-	ReadyReplicas        int32
-	ServingReplicas      int32
-	AvailableReplicas    int32
-	UpdatedReplicas      int32
-	UpdatedReadyReplicas int32
-	// NextAvailableIn is the smallest pending InstanceCounters.NextAvailableIn
-	// across the Component, 0 when no pod is inside its window.
-	NextAvailableIn time.Duration
-}
-
-// TakeInlineV1Publication consumes the owned rows, overlays the publication
-// observation, and computes Component counters from that same observation.
-// Only durable identity and revision fields participate from the stored rows.
-func (o *ComponentObservation) TakeInlineV1Publication(desiredByIdx map[int32]int32, targetRevName string) ([]InstanceStatus, ComponentCounters, error) {
-	var counters ComponentCounters
-	target := query.RevisionFromName(targetRevName)
-	statuses, err := o.takeInlineV1Statuses(func(row *InstanceStatus, current InstanceCounters) {
-		desired := DesiredFor(desiredByIdx, row.Index, current.PodCount)
-		if InstanceMeetsThreshold(current.PodCount, current.ReadyPodCount, desired) {
-			counters.ReadyReplicas++
-		}
-		if InstanceMeetsThreshold(current.PodCount, current.ServingPodCount, desired) {
-			counters.ServingReplicas++
-		}
-		if InstanceMeetsThreshold(current.PodCount, current.AvailablePodCount, desired) {
-			counters.AvailableReplicas++
-		}
-		counters.NextAvailableIn = earliestPending(counters.NextAvailableIn, current.NextAvailableIn)
-		if targetRevName != "" && rowOnTargetRevision(row, target) {
-			counters.UpdatedReplicas++
-			if InstanceMeetsThreshold(current.PodCount, current.ReadyPodCount, desired) {
-				counters.UpdatedReadyReplicas++
-			}
-		}
-	})
-	if err != nil {
-		return nil, ComponentCounters{}, err
-	}
-	counters.Replicas = int32(len(statuses))
-	return statuses, counters, nil
-}
-
-// rowOnTargetRevision reports whether a row counts toward UpdatedReplicas:
-// it runs the Component's UpdateRevision and has no roll left to do.
-//
-// Running the target is necessary but not sufficient. An Update operation
-// pins the revision it opened against, and a retarget while that operation
-// is in flight leaves the pin behind the Component: the row still owes a
-// roll to the new target, and a surge already under way will promote its
-// replacement onto the pinned revision first. Counting such a row as
-// updated publishes a convergence the Component has not reached, which
-// reads to consumers as an idle Component and closes a rollout that is
-// still moving.
-func rowOnTargetRevision(row *InstanceStatus, target query.RevisionID) bool {
-	if !query.RevisionFromName(row.RunningRevision).Same(target) {
-		return false
-	}
-	op := row.Operation
-	if op == nil || op.Type != InstanceOperationUpdate || op.TargetRevision == "" {
-		return true
-	}
-	return query.RevisionFromName(op.TargetRevision).Same(target)
-}
-
 // String formats InstanceCounters for debug output.
 func (c InstanceCounters) String() string {
 	return fmt.Sprintf("pods=%d ready=%d serving=%d scheduled=%d available=%d nextAvailableIn=%s nodes=%v",
 		c.PodCount, c.ReadyPodCount, c.ServingPodCount, c.ScheduledPodCount, c.AvailablePodCount, c.NextAvailableIn, c.NodesOccupied)
-}
-
-// disposableAttempt reports whether s's in-flight attempt is owned by
-// the deadline disposition (DisposeExpiredAttempt) rather than the
-// plain Failed-preserving-Operation stamp.
-//
-//   - Create ops (any pod count): YES. Creates have no abandon /
-//     teardown continuation — a Failed-with-Operation create would
-//     re-arm through the Create stamper every pass (the churn loop).
-//     The disposition's Operation-clear is correct for gang creates
-//     too: a Failed-no-Operation gang create rebuilds via the ordinary
-//     trigger + RetryBlock gate.
-//   - Single-pod Update ops (no gang surge markers): YES — same
-//     re-arming stampers, same fix.
-//   - Gang Update ops (SurgeIndex set / gang surge target step /
-//     multi-pod plan): NO. Their Failed-with-Operation continuation is
-//     what routes the dispatcher into abandonFailedGangSurge (surge
-//     teardown → RetryBlock → source reset); clearing the Operation
-//     here would strand the wedged surge gang.
-//   - Restart / Migrate ops: NO — their expiry semantics are unchanged.
-func disposableAttempt(s *InstanceStatus, desiredPods int32) bool {
-	if s == nil || s.Operation == nil {
-		return false
-	}
-	switch s.Operation.Type {
-	case InstanceOperationCreate:
-		return true
-	case InstanceOperationUpdate:
-		if s.Operation.SurgeIndex != nil || s.Operation.Step == UpdateStepGangSurgeTarget || s.Operation.Step == UpdateStepGangSurgeTargetCleanup {
-			return false
-		}
-		// Deliberate divergence: multi-pod RECREATE/in-place updates
-		// (desiredPods > 1, no surge markers) also keep the legacy
-		// Failed-with-Operation stamp — conservative; an abandonless
-		// teardown/disposition for those is out of scope here.
-		return desiredPods <= 1
-	default:
-		return false
-	}
-}
-
-// ShouldCheckForStuckPods reports whether s qualifies for the
-// fast-failure check. Two paths qualify:
-//
-//   - Transient-phase path: an Instance with an in-flight Operation in
-//     the {Creating, Updating, Restarting, Migrating} set.
-//
-//   - Wedged-pod recovery path: an Instance with at least one pod
-//     whose revision-hash label disagrees with currentHash, regardless
-//     of Phase / Operation. Catches the wedged-state recovery case
-//     where the controller's per-Instance bookkeeping has been reset
-//     while a real stuck pod still exists.
-//
-// Skips Failed (already done) and Deleting (the scale-down pass owns its own
-// deadline). Empty currentHash suppresses the wedged branch (no
-// rollout has ever promoted → over-firing risk during initial Create).
-func ShouldCheckForStuckPods(s *InstanceStatus, pods []*corev1.Pod, currentHash, revisionHashLabel string) bool {
-	if s == nil {
-		return false
-	}
-	if s.Phase == InstancePhaseFailed || s.Phase == InstancePhaseDeleting {
-		return false
-	}
-	if s.Operation != nil {
-		switch s.Phase {
-		case InstancePhaseCreating,
-			InstancePhaseUpdating,
-			InstancePhaseRestarting,
-			InstancePhaseMigrating:
-			return true
-		}
-	}
-	return HasWedgedPodAgainstCurrent(pods, currentHash, revisionHashLabel)
 }

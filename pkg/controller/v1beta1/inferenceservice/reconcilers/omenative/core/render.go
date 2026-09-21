@@ -7,9 +7,9 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // RenderWithRevisionForISVC is the (ReconcileParams, plan, inst,
@@ -47,10 +47,10 @@ func RenderWithRevisionForISVC(
 // dispatch path. Key.Component is workload.ComponentType — the v1beta1
 // component the caller already holds gets cast at the boundary (the
 // two share the same string underlying so the conversion is free).
-func isvcRenderKey(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) workload.Key {
-	return workload.Key{
+func isvcRenderKey(isvc *v1beta1.InferenceService, component v1beta1.ComponentType) workloadtypes.Key {
+	return workloadtypes.Key{
 		Namespace: isvc.Namespace,
-		Component: workload.ComponentType(component),
+		Component: workloadtypes.ComponentType(component),
 		OwnerName: isvc.Name,
 		SelectorLabels: map[string]string{
 			constants.InferenceServicePodLabelKey: isvc.Name,
@@ -69,14 +69,14 @@ func isvcRenderKey(isvc *v1beta1.InferenceService, component v1beta1.ComponentTy
 // Exposed for callers (e.g. the omenative ops dispatch shim) that
 // construct workload.Deps directly rather than going through the
 // RenderWithRevisionForISVC wrapper.
-func ISVCRenderHook(isvc *v1beta1.InferenceService) workload.RenderHook {
+func ISVCRenderHook(isvc *v1beta1.InferenceService) workloadtypes.RenderHook {
 	return isvcRenderHook(isvc)
 }
 
 // isvcRenderHook is the unexported implementation kept as the in-package
 // entry point so the existing RenderWithRevisionForISVC wiring keeps
 // using the unqualified name.
-func isvcRenderHook(isvc *v1beta1.InferenceService) workload.RenderHook {
+func isvcRenderHook(isvc *v1beta1.InferenceService) workloadtypes.RenderHook {
 	if isvc == nil {
 		return nil
 	}
@@ -110,6 +110,6 @@ func isvcRenderHook(isvc *v1beta1.InferenceService) workload.RenderHook {
 // wrapper around workload/ops.WouldOverlayConflictWithNodeAffinity.
 // Unused — adapters use the workload form directly; retained for
 // compatibility.
-func WouldOverlayConflictForISVC(spec *corev1.PodSpec, overlay *workload.MigrationOverlay) bool {
+func WouldOverlayConflictForISVC(spec *corev1.PodSpec, overlay *workloadtypes.MigrationOverlay) bool {
 	return ops.WouldOverlayConflictWithNodeAffinity(spec, overlay)
 }

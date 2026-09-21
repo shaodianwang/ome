@@ -1,4 +1,4 @@
-package workload_test
+package escalation_test
 
 // Deadline-disposition tests: the three-branch classify-then-act that
 // replaced the bare Phase=Failed stamps for expired/stuck Create and
@@ -34,6 +34,8 @@ import (
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // dispositionCommit snapshots one committed (mutate returned true)
@@ -41,7 +43,7 @@ import (
 // Failed stamp landed in the SAME mutation.
 type dispositionCommit struct {
 	idx   int32
-	after workload.InstanceStatus
+	after types.InstanceStatus
 }
 
 // dispositionRecorders collects every observable side effect of one
@@ -50,8 +52,8 @@ type dispositionRecorders struct {
 	commits    []dispositionCommit
 	blockCalls []struct {
 		rev   string
-		disp  workload.RetryBlockDisposition
-		block workload.RetryBlock
+		disp  types.RetryBlockDisposition
+		block types.RetryBlock
 	}
 	warns []struct {
 		idx    int32
@@ -64,15 +66,15 @@ type dispositionRecorders struct {
 // over insts. updateRevision seeds ObservedState.UpdateRevision (the
 // Create-op fallback target). owner, when non-nil, becomes OwnerObject
 // (the audit-ledger owner for branch 2).
-func dispositionFixtureInput(fc *clocktesting.FakeClock, insts *[]workload.InstanceStatus, updateRevision string, policy *workload.RetryPolicy, owner client.Object) (workload.ReconcileInput, *dispositionRecorders) {
+func dispositionFixtureInput(fc *clocktesting.FakeClock, insts *[]types.InstanceStatus, updateRevision string, policy *types.RetryPolicy, owner client.Object) (types.ReconcileInput, *dispositionRecorders) {
 	rec := &dispositionRecorders{}
-	input := workload.ReconcileInput{
+	input := types.ReconcileInput{
 		Clock:             fc,
 		OwnerObject:       owner,
 		OwnerGVK:          corev1.SchemeGroupVersion.WithKind("ConfigMap"),
-		Key:               workload.Key{Namespace: "ns", Component: workload.ComponentEngine, OwnerName: "own"},
+		Key:               types.Key{Namespace: "ns", Component: types.ComponentEngine, OwnerName: "own"},
 		UpdateRetryPolicy: policy,
-		MutateInstance: func(_ context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
+		MutateInstance: func(_ context.Context, idx int32, mutate func(*types.InstanceStatus) bool) error {
 			for i := range *insts {
 				if (*insts)[i].Index == idx {
 					if mutate(&(*insts)[i]) {
@@ -83,13 +85,13 @@ func dispositionFixtureInput(fc *clocktesting.FakeClock, insts *[]workload.Insta
 			}
 			return nil
 		},
-		MutateRetryBlock: func(_ context.Context, rev string, mutate func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
-			b := workload.RetryBlock{TargetRevision: rev}
+		MutateRetryBlock: func(_ context.Context, rev string, mutate func(*types.RetryBlock) types.RetryBlockDisposition) error {
+			b := types.RetryBlock{TargetRevision: rev}
 			d := mutate(&b)
 			rec.blockCalls = append(rec.blockCalls, struct {
 				rev   string
-				disp  workload.RetryBlockDisposition
-				block workload.RetryBlock
+				disp  types.RetryBlockDisposition
+				block types.RetryBlock
 			}{rev: rev, disp: d, block: b})
 			return nil
 		},
@@ -155,32 +157,32 @@ func TestDispose_WorkloadCaused_EachReason(t *testing.T) {
 	for _, reason := range reasons {
 		for _, tc := range []struct {
 			name      string
-			policy    *workload.RetryPolicy
-			wantState workload.RetryBlockState
+			policy    *types.RetryPolicy
+			wantState types.RetryBlockState
 		}{
-			{name: "policy set backs off", policy: &workload.RetryPolicy{MaxAttempts: 3, InitialDelay: time.Minute, MaxDelay: 30 * time.Minute, Multiplier: 2}, wantState: workload.RetryBlockBackoff},
-			{name: "nil policy holds", policy: nil, wantState: workload.RetryBlockHeld},
+			{name: "policy set backs off", policy: &types.RetryPolicy{MaxAttempts: 3, InitialDelay: time.Minute, MaxDelay: 30 * time.Minute, Multiplier: 2}, wantState: types.RetryBlockBackoff},
+			{name: "nil policy holds", policy: nil, wantState: types.RetryBlockHeld},
 		} {
 			t.Run(reason+"/"+tc.name, func(t *testing.T) {
 				t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
 				fc := clocktesting.NewFakeClock(t0)
-				insts := []workload.InstanceStatus{{
+				insts := []types.InstanceStatus{{
 					Index: 0,
-					Phase: workload.InstancePhaseUpdating,
-					Operation: &workload.InstanceOperation{
-						Type:           workload.InstanceOperationUpdate,
+					Phase: types.InstancePhaseUpdating,
+					Operation: &types.InstanceOperation{
+						Type:           types.InstanceOperationUpdate,
 						TargetRevision: "rev-bad",
 					},
 				}}
 				input, rec := dispositionFixtureInput(fc, &insts, "rev-bad", tc.policy, nil)
 				pod := waitingPod("engine-0-default-0", reason, "node-a", t0.Add(-time.Minute))
 
-				outcome, err := workload.DisposeExpiredAttempt(context.Background(), workload.Deps{}, input,
-					workload.DispositionDeps{}, insts[0], []*corev1.Pod{pod}, reason)
+				outcome, err := escalation.DisposeExpiredAttempt(context.Background(), types.Deps{}, input,
+					types.DispositionDeps{}, insts[0], []*corev1.Pod{pod}, reason)
 				if err != nil {
 					t.Fatalf("DisposeExpiredAttempt: %v", err)
 				}
-				if outcome != workload.DispositionHeldRevision {
+				if outcome != escalation.DispositionHeldRevision {
 					t.Fatalf("outcome: got %v want DispositionHeldRevision", outcome)
 				}
 
@@ -189,7 +191,7 @@ func TestDispose_WorkloadCaused_EachReason(t *testing.T) {
 					t.Fatalf("MutateInstance commits: got %d want 1", len(rec.commits))
 				}
 				after := rec.commits[0].after
-				if after.Phase != workload.InstancePhaseFailed {
+				if after.Phase != types.InstancePhaseFailed {
 					t.Errorf("Phase after commit: got %q want Failed", after.Phase)
 				}
 				if after.Operation != nil {
@@ -204,7 +206,7 @@ func TestDispose_WorkloadCaused_EachReason(t *testing.T) {
 					t.Fatalf("MutateRetryBlock calls: got %d want 1", len(rec.blockCalls))
 				}
 				bc := rec.blockCalls[0]
-				if bc.rev != "rev-bad" || bc.disp != workload.RetryBlockPersist {
+				if bc.rev != "rev-bad" || bc.disp != types.RetryBlockPersist {
 					t.Errorf("block call: got (rev=%q, disp=%v) want (rev-bad, Persist)", bc.rev, bc.disp)
 				}
 				if bc.block.State != tc.wantState {
@@ -213,7 +215,7 @@ func TestDispose_WorkloadCaused_EachReason(t *testing.T) {
 				if bc.block.Reason != reason {
 					t.Errorf("block reason: got %q want %q", bc.block.Reason, reason)
 				}
-				if tc.wantState == workload.RetryBlockBackoff {
+				if tc.wantState == types.RetryBlockBackoff {
 					if bc.block.NextRetryAt == nil || !bc.block.NextRetryAt.Time.Equal(t0.Add(time.Minute)) {
 						t.Errorf("NextRetryAt: got %v want %v", bc.block.NextRetryAt, t0.Add(time.Minute))
 					}
@@ -241,26 +243,26 @@ func TestDispose_WorkloadCaused_EachReason(t *testing.T) {
 func TestDispose_WorkloadCaused_CreateFallsBackToUpdateRevision(t *testing.T) {
 	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
 	fc := clocktesting.NewFakeClock(t0)
-	insts := []workload.InstanceStatus{{
+	insts := []types.InstanceStatus{{
 		Index:     0,
-		Phase:     workload.InstancePhaseCreating,
-		Operation: &workload.InstanceOperation{Type: workload.InstanceOperationCreate},
+		Phase:     types.InstancePhaseCreating,
+		Operation: &types.InstanceOperation{Type: types.InstanceOperationCreate},
 	}}
 	input, rec := dispositionFixtureInput(fc, &insts, "rev-update", nil, nil)
 	pod := waitingPod("engine-0-default-0", "ImagePullBackOff", "node-a", t0.Add(-time.Minute))
 
-	outcome, err := workload.DisposeExpiredAttempt(context.Background(), workload.Deps{}, input,
-		workload.DispositionDeps{}, insts[0], []*corev1.Pod{pod}, "ImagePullBackOff")
+	outcome, err := escalation.DisposeExpiredAttempt(context.Background(), types.Deps{}, input,
+		types.DispositionDeps{}, insts[0], []*corev1.Pod{pod}, "ImagePullBackOff")
 	if err != nil {
 		t.Fatalf("DisposeExpiredAttempt: %v", err)
 	}
-	if outcome != workload.DispositionHeldRevision {
+	if outcome != escalation.DispositionHeldRevision {
 		t.Fatalf("outcome: got %v want DispositionHeldRevision", outcome)
 	}
 	if len(rec.blockCalls) != 1 || rec.blockCalls[0].rev != "rev-update" {
 		t.Fatalf("block calls: got %+v want one call for rev-update", rec.blockCalls)
 	}
-	if len(rec.commits) != 1 || rec.commits[0].after.Operation != nil || rec.commits[0].after.Phase != workload.InstancePhaseFailed {
+	if len(rec.commits) != 1 || rec.commits[0].after.Operation != nil || rec.commits[0].after.Phase != types.InstancePhaseFailed {
 		t.Errorf("commit: got %+v want single Failed-no-op commit", rec.commits)
 	}
 }
@@ -268,11 +270,11 @@ func TestDispose_WorkloadCaused_CreateFallsBackToUpdateRevision(t *testing.T) {
 func TestDispose_PinnedCreateUsesAttemptRevisionAfterCorrectiveEdit(t *testing.T) {
 	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
 	fc := clocktesting.NewFakeClock(t0)
-	insts := []workload.InstanceStatus{{
+	insts := []types.InstanceStatus{{
 		Index: 0,
-		Phase: workload.InstancePhaseCreating,
-		Operation: &workload.InstanceOperation{
-			Type:           workload.InstanceOperationCreate,
+		Phase: types.InstancePhaseCreating,
+		Operation: &types.InstanceOperation{
+			Type:           types.InstanceOperationCreate,
 			TargetRevision: "own-engine-oldbad",
 		},
 	}}
@@ -280,18 +282,18 @@ func TestDispose_PinnedCreateUsesAttemptRevisionAfterCorrectiveEdit(t *testing.T
 	pod := waitingPod("engine-0-leader-0", "ImagePullBackOff", "node-a", t0.Add(-time.Minute))
 	pod.Labels = map[string]string{"ome.io/revision-hash": "oldbad"}
 
-	outcome, err := workload.DisposeExpiredAttempt(context.Background(), workload.Deps{}, input,
-		workload.DispositionDeps{}, insts[0], []*corev1.Pod{pod}, "ImagePullBackOff")
+	outcome, err := escalation.DisposeExpiredAttempt(context.Background(), types.Deps{}, input,
+		types.DispositionDeps{}, insts[0], []*corev1.Pod{pod}, "ImagePullBackOff")
 	if err != nil {
 		t.Fatalf("DisposeExpiredAttempt: %v", err)
 	}
-	if outcome != workload.DispositionHeldRevision {
+	if outcome != escalation.DispositionHeldRevision {
 		t.Fatalf("outcome: got %v want DispositionHeldRevision", outcome)
 	}
 	if len(rec.blockCalls) != 1 || rec.blockCalls[0].rev != "own-engine-oldbad" {
 		t.Fatalf("block calls: got %+v want one call for own-engine-oldbad", rec.blockCalls)
 	}
-	if len(rec.commits) != 1 || rec.commits[0].after.Operation != nil || rec.commits[0].after.Phase != workload.InstancePhaseFailed {
+	if len(rec.commits) != 1 || rec.commits[0].after.Operation != nil || rec.commits[0].after.Phase != types.InstancePhaseFailed {
 		t.Fatalf("commit: got %+v want one Failed-no-operation commit", rec.commits)
 	}
 }
@@ -299,27 +301,27 @@ func TestDispose_PinnedCreateUsesAttemptRevisionAfterCorrectiveEdit(t *testing.T
 func TestDispose_UnpinnedCreateDoesNotChargeCorrectiveRevision(t *testing.T) {
 	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
 	fc := clocktesting.NewFakeClock(t0)
-	insts := []workload.InstanceStatus{{
+	insts := []types.InstanceStatus{{
 		Index:     0,
-		Phase:     workload.InstancePhaseCreating,
-		Operation: &workload.InstanceOperation{Type: workload.InstanceOperationCreate},
+		Phase:     types.InstancePhaseCreating,
+		Operation: &types.InstanceOperation{Type: types.InstanceOperationCreate},
 	}}
 	input, rec := dispositionFixtureInput(fc, &insts, "own-engine-newgood", nil, nil)
 	pod := waitingPod("engine-0-leader-0", "ImagePullBackOff", "node-a", t0.Add(-time.Minute))
 	pod.Labels = map[string]string{"ome.io/revision-hash": "oldbad"}
 
-	outcome, err := workload.DisposeExpiredAttempt(context.Background(), workload.Deps{}, input,
-		workload.DispositionDeps{}, insts[0], []*corev1.Pod{pod}, "ImagePullBackOff")
+	outcome, err := escalation.DisposeExpiredAttempt(context.Background(), types.Deps{}, input,
+		types.DispositionDeps{}, insts[0], []*corev1.Pod{pod}, "ImagePullBackOff")
 	if err != nil {
 		t.Fatalf("DisposeExpiredAttempt: %v", err)
 	}
-	if outcome != workload.DispositionTerminal {
+	if outcome != escalation.DispositionTerminal {
 		t.Fatalf("outcome: got %v want DispositionTerminal", outcome)
 	}
 	if len(rec.blockCalls) != 0 {
 		t.Fatalf("corrective revision must not be charged; got %+v", rec.blockCalls)
 	}
-	if len(rec.commits) != 1 || rec.commits[0].after.Operation != nil || rec.commits[0].after.Phase != workload.InstancePhaseFailed {
+	if len(rec.commits) != 1 || rec.commits[0].after.Operation != nil || rec.commits[0].after.Phase != types.InstancePhaseFailed {
 		t.Fatalf("commit: got %+v want one Failed-no-operation commit", rec.commits)
 	}
 	if rec.commits[0].after.LastFailure == nil || rec.commits[0].after.LastFailure.PodName != pod.Name {
@@ -337,11 +339,11 @@ func TestDispose_UnpinnedCreateDoesNotChargeCorrectiveRevision(t *testing.T) {
 func TestDispose_SupersededLeftover_DoesNotPoisonCorrectiveRevision(t *testing.T) {
 	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
 	fc := clocktesting.NewFakeClock(t0)
-	insts := []workload.InstanceStatus{{
+	insts := []types.InstanceStatus{{
 		Index: 0,
-		Phase: workload.InstancePhaseUpdating,
-		Operation: &workload.InstanceOperation{
-			Type:           workload.InstanceOperationUpdate,
+		Phase: types.InstancePhaseUpdating,
+		Operation: &types.InstanceOperation{
+			Type:           types.InstanceOperationUpdate,
 			TargetRevision: "own-engine-newgood",
 		},
 	}}
@@ -349,12 +351,12 @@ func TestDispose_SupersededLeftover_DoesNotPoisonCorrectiveRevision(t *testing.T
 	pod := waitingPod("engine-0-default-0", "ImagePullBackOff", "node-a", t0.Add(-time.Minute))
 	pod.Labels = map[string]string{"ome.io/revision-hash": "oldbad"} // prior bad rev
 
-	outcome, err := workload.DisposeExpiredAttempt(context.Background(), workload.Deps{}, input,
-		workload.DispositionDeps{}, insts[0], []*corev1.Pod{pod}, "ImagePullBackOff")
+	outcome, err := escalation.DisposeExpiredAttempt(context.Background(), types.Deps{}, input,
+		types.DispositionDeps{}, insts[0], []*corev1.Pod{pod}, "ImagePullBackOff")
 	if err != nil {
 		t.Fatalf("DisposeExpiredAttempt: %v", err)
 	}
-	if outcome != workload.DispositionSkippedSuperseded {
+	if outcome != escalation.DispositionSkippedSuperseded {
 		t.Fatalf("outcome: got %v want DispositionSkippedSuperseded", outcome)
 	}
 	if len(rec.blockCalls) != 0 {
@@ -373,11 +375,11 @@ func TestDispose_SupersededLeftover_DoesNotPoisonCorrectiveRevision(t *testing.T
 func TestDispose_TargetRevisionPod_StillHeld(t *testing.T) {
 	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
 	fc := clocktesting.NewFakeClock(t0)
-	insts := []workload.InstanceStatus{{
+	insts := []types.InstanceStatus{{
 		Index: 0,
-		Phase: workload.InstancePhaseUpdating,
-		Operation: &workload.InstanceOperation{
-			Type:           workload.InstanceOperationUpdate,
+		Phase: types.InstancePhaseUpdating,
+		Operation: &types.InstanceOperation{
+			Type:           types.InstanceOperationUpdate,
 			TargetRevision: "own-engine-newgood",
 		},
 	}}
@@ -385,12 +387,12 @@ func TestDispose_TargetRevisionPod_StillHeld(t *testing.T) {
 	pod := waitingPod("engine-0-default-0", "ImagePullBackOff", "node-a", t0.Add(-time.Minute))
 	pod.Labels = map[string]string{"ome.io/revision-hash": "newgood"} // belongs to target
 
-	outcome, err := workload.DisposeExpiredAttempt(context.Background(), workload.Deps{}, input,
-		workload.DispositionDeps{}, insts[0], []*corev1.Pod{pod}, "ImagePullBackOff")
+	outcome, err := escalation.DisposeExpiredAttempt(context.Background(), types.Deps{}, input,
+		types.DispositionDeps{}, insts[0], []*corev1.Pod{pod}, "ImagePullBackOff")
 	if err != nil {
 		t.Fatalf("DisposeExpiredAttempt: %v", err)
 	}
-	if outcome != workload.DispositionHeldRevision {
+	if outcome != escalation.DispositionHeldRevision {
 		t.Fatalf("outcome: got %v want DispositionHeldRevision", outcome)
 	}
 	if len(rec.blockCalls) != 1 || rec.blockCalls[0].rev != "own-engine-newgood" {
@@ -413,21 +415,21 @@ func TestDispose_RelocationDirective_GPUCase(t *testing.T) {
 	fc := clocktesting.NewFakeClock(t0)
 	c := fakeLedgerClient(t)
 	owner := ledgerOwnerCM()
-	deps := workload.Deps{Client: c, Clock: fc}
+	deps := types.Deps{Client: c, Clock: fc}
 	var directives []string
-	dd := workload.DispositionDeps{
+	dd := types.DispositionDeps{
 		AutoMigrateMaxAttempts: 3,
-		MigrationMode:          workload.MigrationModeAuto,
+		MigrationMode:          types.MigrationModeAuto,
 		OnRelocationDirective:  func(component string) { directives = append(directives, component) },
 	}
 	pod := waitingPod("engine-0-default-0", "CrashLoopBackOff", "node-a", t0.Add(-time.Minute))
 
-	newAttempt := func() ([]workload.InstanceStatus, workload.ReconcileInput, *dispositionRecorders) {
-		insts := []workload.InstanceStatus{{
+	newAttempt := func() ([]types.InstanceStatus, types.ReconcileInput, *dispositionRecorders) {
+		insts := []types.InstanceStatus{{
 			Index: 0,
-			Phase: workload.InstancePhaseUpdating,
-			Operation: &workload.InstanceOperation{
-				Type:           workload.InstanceOperationUpdate,
+			Phase: types.InstancePhaseUpdating,
+			Operation: &types.InstanceOperation{
+				Type:           types.InstanceOperationUpdate,
 				TargetRevision: "rev-x",
 			},
 		}}
@@ -436,17 +438,17 @@ func TestDispose_RelocationDirective_GPUCase(t *testing.T) {
 	}
 
 	insts, input, rec := newAttempt()
-	outcome, err := workload.DisposeExpiredAttempt(context.Background(), deps, input, dd, insts[0], []*corev1.Pod{pod}, "CrashLoopBackOff")
+	outcome, err := escalation.DisposeExpiredAttempt(context.Background(), deps, input, dd, insts[0], []*corev1.Pod{pod}, "CrashLoopBackOff")
 	if err != nil {
 		t.Fatalf("DisposeExpiredAttempt: %v", err)
 	}
-	if outcome != workload.DispositionRelocationDirective {
+	if outcome != escalation.DispositionRelocationDirective {
 		t.Fatalf("outcome: got %v want DispositionRelocationDirective", outcome)
 	}
 
 	// Terminal backstop applied in the same flow: ONE commit doing
 	// Failed + op-clear, one Warning, and NO RetryBlock write.
-	if len(rec.commits) != 1 || rec.commits[0].after.Phase != workload.InstancePhaseFailed || rec.commits[0].after.Operation != nil {
+	if len(rec.commits) != 1 || rec.commits[0].after.Phase != types.InstancePhaseFailed || rec.commits[0].after.Operation != nil {
 		t.Fatalf("commit: got %+v want single Failed-no-op commit (backstop unconditional)", rec.commits)
 	}
 	if len(rec.blockCalls) != 0 {
@@ -488,11 +490,11 @@ func TestDispose_RelocationDirective_GPUCase(t *testing.T) {
 	// terminal — no in-flight dedup; each disposition is one attempt).
 	for i := 2; i <= 3; i++ {
 		insts, input, _ = newAttempt()
-		outcome, err = workload.DisposeExpiredAttempt(context.Background(), deps, input, dd, insts[0], []*corev1.Pod{pod}, "CrashLoopBackOff")
+		outcome, err = escalation.DisposeExpiredAttempt(context.Background(), deps, input, dd, insts[0], []*corev1.Pod{pod}, "CrashLoopBackOff")
 		if err != nil {
 			t.Fatalf("DisposeExpiredAttempt (attempt %d): %v", i, err)
 		}
-		if outcome != workload.DispositionRelocationDirective {
+		if outcome != escalation.DispositionRelocationDirective {
 			t.Fatalf("attempt %d outcome: got %v want DispositionRelocationDirective", i, outcome)
 		}
 	}
@@ -502,17 +504,17 @@ func TestDispose_RelocationDirective_GPUCase(t *testing.T) {
 
 	// Fourth attempt: budget exhausted → terminal, no new entry.
 	insts, input, rec = newAttempt()
-	outcome, err = workload.DisposeExpiredAttempt(context.Background(), deps, input, dd, insts[0], []*corev1.Pod{pod}, "CrashLoopBackOff")
+	outcome, err = escalation.DisposeExpiredAttempt(context.Background(), deps, input, dd, insts[0], []*corev1.Pod{pod}, "CrashLoopBackOff")
 	if err != nil {
 		t.Fatalf("DisposeExpiredAttempt (over budget): %v", err)
 	}
-	if outcome != workload.DispositionTerminal {
+	if outcome != escalation.DispositionTerminal {
 		t.Fatalf("over-budget outcome: got %v want DispositionTerminal", outcome)
 	}
 	if got := len(loadLedger(t, c).Entries); got != 3 {
 		t.Errorf("ledger entries after over-budget call: got %d want 3 (no new entry)", got)
 	}
-	if len(rec.commits) != 1 || rec.commits[0].after.Phase != workload.InstancePhaseFailed || rec.commits[0].after.Operation != nil {
+	if len(rec.commits) != 1 || rec.commits[0].after.Phase != types.InstancePhaseFailed || rec.commits[0].after.Operation != nil {
 		t.Errorf("over-budget commit: got %+v want single Failed-no-op commit", rec.commits)
 	}
 	if len(directives) != 3 {
@@ -532,30 +534,30 @@ func TestDispose_RelocationDirective_MirrorsStatusRecord(t *testing.T) {
 	fc := clocktesting.NewFakeClock(t0)
 	c := fakeLedgerClient(t)
 	owner := ledgerOwnerCM()
-	deps := workload.Deps{Client: c, Clock: fc}
-	dd := workload.DispositionDeps{AutoMigrateMaxAttempts: 3, MigrationMode: workload.MigrationModeAuto}
+	deps := types.Deps{Client: c, Clock: fc}
+	dd := types.DispositionDeps{AutoMigrateMaxAttempts: 3, MigrationMode: types.MigrationModeAuto}
 	pod := waitingPod("engine-0-default-0", "CrashLoopBackOff", "node-a", t0.Add(-time.Minute))
 
-	var appended []workload.MigrationRecord
-	dispose := func() workload.DispositionOutcome {
-		insts := []workload.InstanceStatus{{
+	var appended []types.MigrationRecord
+	dispose := func() escalation.DispositionOutcome {
+		insts := []types.InstanceStatus{{
 			Index:     0,
-			Phase:     workload.InstancePhaseUpdating,
-			Operation: &workload.InstanceOperation{Type: workload.InstanceOperationUpdate, TargetRevision: "rev-x"},
+			Phase:     types.InstancePhaseUpdating,
+			Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, TargetRevision: "rev-x"},
 		}}
 		input, _ := dispositionFixtureInput(fc, &insts, "rev-x", nil, owner)
-		input.AppendMigration = func(_ context.Context, rec workload.MigrationRecord) error {
+		input.AppendMigration = func(_ context.Context, rec types.MigrationRecord) error {
 			appended = append(appended, rec)
 			return nil
 		}
-		outcome, err := workload.DisposeExpiredAttempt(context.Background(), deps, input, dd, insts[0], []*corev1.Pod{pod}, "CrashLoopBackOff")
+		outcome, err := escalation.DisposeExpiredAttempt(context.Background(), deps, input, dd, insts[0], []*corev1.Pod{pod}, "CrashLoopBackOff")
 		if err != nil {
 			t.Fatalf("DisposeExpiredAttempt: %v", err)
 		}
 		return outcome
 	}
 
-	if outcome := dispose(); outcome != workload.DispositionRelocationDirective {
+	if outcome := dispose(); outcome != escalation.DispositionRelocationDirective {
 		t.Fatalf("outcome: got %v want DispositionRelocationDirective", outcome)
 	}
 	if len(appended) != 1 {
@@ -566,7 +568,7 @@ func TestDispose_RelocationDirective_MirrorsStatusRecord(t *testing.T) {
 	if len(ledger.Entries) != 1 || rec.RequestUUID != ledger.Entries[0].RequestUUID {
 		t.Errorf("record uuid: got %q want the ledger directive's %q", rec.RequestUUID, ledger.Entries[0].RequestUUID)
 	}
-	if rec.Trigger != workload.MigrationTriggerAuto || rec.Phase != workload.MigrationPhaseRelocated {
+	if rec.Trigger != types.MigrationTriggerAuto || rec.Phase != types.MigrationPhaseRelocated {
 		t.Errorf("record: got trigger=%q phase=%q want Auto/Relocated (born terminal)", rec.Trigger, rec.Phase)
 	}
 	if rec.SourceInstance != 0 || rec.FromNode != "node-a" {
@@ -593,7 +595,7 @@ func TestDispose_RelocationDirective_MirrorsStatusRecord(t *testing.T) {
 
 	// Second attempt: Attempt tracks the ledger count.
 	fc.SetTime(t0.Add(5 * time.Minute))
-	if outcome := dispose(); outcome != workload.DispositionRelocationDirective {
+	if outcome := dispose(); outcome != escalation.DispositionRelocationDirective {
 		t.Fatalf("attempt 2 outcome: got %v want DispositionRelocationDirective", outcome)
 	}
 	if len(appended) != 2 || appended[1].Attempt != 2 {
@@ -610,23 +612,23 @@ func TestDispose_RelocationDirective_RecordMirrorFailureTolerated(t *testing.T) 
 	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
 	fc := clocktesting.NewFakeClock(t0)
 	c := fakeLedgerClient(t)
-	insts := []workload.InstanceStatus{{
+	insts := []types.InstanceStatus{{
 		Index:     0,
-		Phase:     workload.InstancePhaseUpdating,
-		Operation: &workload.InstanceOperation{Type: workload.InstanceOperationUpdate, TargetRevision: "rev-x"},
+		Phase:     types.InstancePhaseUpdating,
+		Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, TargetRevision: "rev-x"},
 	}}
 	input, rec := dispositionFixtureInput(fc, &insts, "rev-x", nil, ledgerOwnerCM())
-	input.AppendMigration = func(_ context.Context, _ workload.MigrationRecord) error {
+	input.AppendMigration = func(_ context.Context, _ types.MigrationRecord) error {
 		return fmt.Errorf("apiserver unavailable")
 	}
-	dd := workload.DispositionDeps{AutoMigrateMaxAttempts: 3, MigrationMode: workload.MigrationModeAuto}
+	dd := types.DispositionDeps{AutoMigrateMaxAttempts: 3, MigrationMode: types.MigrationModeAuto}
 	pod := waitingPod("engine-0-default-0", "CrashLoopBackOff", "node-a", t0.Add(-time.Minute))
 
-	outcome, err := workload.DisposeExpiredAttempt(context.Background(), workload.Deps{Client: c, Clock: fc}, input, dd, insts[0], []*corev1.Pod{pod}, "CrashLoopBackOff")
+	outcome, err := escalation.DisposeExpiredAttempt(context.Background(), types.Deps{Client: c, Clock: fc}, input, dd, insts[0], []*corev1.Pod{pod}, "CrashLoopBackOff")
 	if err != nil {
 		t.Fatalf("DisposeExpiredAttempt: %v (a mirror failure must not fail the disposition)", err)
 	}
-	if outcome != workload.DispositionRelocationDirective {
+	if outcome != escalation.DispositionRelocationDirective {
 		t.Fatalf("outcome: got %v want DispositionRelocationDirective", outcome)
 	}
 	// The ledger row landed — the exclusion overlay is unaffected.
@@ -634,7 +636,7 @@ func TestDispose_RelocationDirective_RecordMirrorFailureTolerated(t *testing.T) 
 	if len(ledger.Entries) != 1 || ledger.Entries[0].Reason != audit.ReasonAutoRecover || ledger.Entries[0].FromNode != "node-a" {
 		t.Fatalf("ledger: got %+v want the directive row despite the mirror failure", ledger.Entries)
 	}
-	if len(rec.commits) != 1 || rec.commits[0].after.Phase != workload.InstancePhaseFailed || rec.commits[0].after.Operation != nil {
+	if len(rec.commits) != 1 || rec.commits[0].after.Phase != types.InstancePhaseFailed || rec.commits[0].after.Operation != nil {
 		t.Errorf("commit: got %+v want single Failed-no-op commit", rec.commits)
 	}
 }
@@ -652,7 +654,7 @@ func drainEvents(recorder *record.FakeRecorder) []string {
 	}
 }
 
-func countEventsWithReason(events []string, reason workload.EventReason) int {
+func countEventsWithReason(events []string, reason types.EventReason) int {
 	n := 0
 	for _, ev := range events {
 		if strings.Contains(ev, string(reason)) {
@@ -673,22 +675,22 @@ func TestDispose_RelocationDirective_CapEventDampedToTransition(t *testing.T) {
 	c := fakeLedgerClient(t)
 	owner := ledgerOwnerCM()
 	recorder := record.NewFakeRecorder(16)
-	deps := workload.Deps{Client: c, Clock: fc, Recorder: recorder}
-	dd := workload.DispositionDeps{AutoMigrateMaxAttempts: 2, MigrationMode: workload.MigrationModeAuto}
+	deps := types.Deps{Client: c, Clock: fc, Recorder: recorder}
+	dd := types.DispositionDeps{AutoMigrateMaxAttempts: 2, MigrationMode: types.MigrationModeAuto}
 
-	dispose := func(opStartedAt time.Time, node string) (workload.DispositionOutcome, *dispositionRecorders) {
-		insts := []workload.InstanceStatus{{
+	dispose := func(opStartedAt time.Time, node string) (escalation.DispositionOutcome, *dispositionRecorders) {
+		insts := []types.InstanceStatus{{
 			Index: 0,
-			Phase: workload.InstancePhaseUpdating,
-			Operation: &workload.InstanceOperation{
-				Type:           workload.InstanceOperationUpdate,
+			Phase: types.InstancePhaseUpdating,
+			Operation: &types.InstanceOperation{
+				Type:           types.InstanceOperationUpdate,
 				TargetRevision: "rev-x",
 				StartedAt:      metav1.NewTime(opStartedAt),
 			},
 		}}
 		input, rec := dispositionFixtureInput(fc, &insts, "rev-x", nil, owner)
 		pod := waitingPod("engine-0-default-0", "CrashLoopBackOff", node, opStartedAt)
-		outcome, err := workload.DisposeExpiredAttempt(context.Background(), deps, input, dd, insts[0], []*corev1.Pod{pod}, "CrashLoopBackOff")
+		outcome, err := escalation.DisposeExpiredAttempt(context.Background(), deps, input, dd, insts[0], []*corev1.Pod{pod}, "CrashLoopBackOff")
 		if err != nil {
 			t.Fatalf("DisposeExpiredAttempt: %v", err)
 		}
@@ -697,11 +699,11 @@ func TestDispose_RelocationDirective_CapEventDampedToTransition(t *testing.T) {
 
 	// Attempt 1 (budget 1/2): directive recorded, no cap event yet.
 	outcome, _ := dispose(t0.Add(-10*time.Minute), "node-a")
-	if outcome != workload.DispositionRelocationDirective {
+	if outcome != escalation.DispositionRelocationDirective {
 		t.Fatalf("attempt 1 outcome: got %v want DispositionRelocationDirective", outcome)
 	}
 	events := drainEvents(recorder)
-	if got := countEventsWithReason(events, workload.EventReasonAutoMigrationCapReached); got != 0 {
+	if got := countEventsWithReason(events, types.EventReasonAutoMigrationCapReached); got != 0 {
 		t.Errorf("cap events after attempt 1: got %d want 0 (%v)", got, events)
 	}
 
@@ -709,14 +711,14 @@ func TestDispose_RelocationDirective_CapEventDampedToTransition(t *testing.T) {
 	// cap-reached warning (the transition).
 	fc.SetTime(t0.Add(5 * time.Minute))
 	outcome, _ = dispose(t0.Add(2*time.Minute), "node-b")
-	if outcome != workload.DispositionRelocationDirective {
+	if outcome != escalation.DispositionRelocationDirective {
 		t.Fatalf("attempt 2 outcome: got %v want DispositionRelocationDirective", outcome)
 	}
 	events = drainEvents(recorder)
-	if got := countEventsWithReason(events, workload.EventReasonAutoMigrationTriggered); got != 1 {
+	if got := countEventsWithReason(events, types.EventReasonAutoMigrationTriggered); got != 1 {
 		t.Errorf("triggered events after attempt 2: got %d want 1 (%v)", got, events)
 	}
-	if got := countEventsWithReason(events, workload.EventReasonAutoMigrationCapReached); got != 1 {
+	if got := countEventsWithReason(events, types.EventReasonAutoMigrationCapReached); got != 1 {
 		t.Errorf("cap events after attempt 2: got %d want 1 (%v)", got, events)
 	}
 
@@ -725,10 +727,10 @@ func TestDispose_RelocationDirective_CapEventDampedToTransition(t *testing.T) {
 	for i, start := range []time.Time{t0.Add(7 * time.Minute), t0.Add(12 * time.Minute)} {
 		fc.SetTime(start.Add(3 * time.Minute))
 		outcome, rec := dispose(start, "node-c")
-		if outcome != workload.DispositionTerminal {
+		if outcome != escalation.DispositionTerminal {
 			t.Fatalf("post-cap attempt %d outcome: got %v want DispositionTerminal", i+3, outcome)
 		}
-		if len(rec.commits) != 1 || rec.commits[0].after.Phase != workload.InstancePhaseFailed || rec.commits[0].after.Operation != nil {
+		if len(rec.commits) != 1 || rec.commits[0].after.Phase != types.InstancePhaseFailed || rec.commits[0].after.Operation != nil {
 			t.Errorf("post-cap commit: got %+v want single Failed-no-op commit", rec.commits)
 		}
 		events = drainEvents(recorder)
@@ -768,36 +770,36 @@ func TestDispose_RelocationDirective_ReplayDedup(t *testing.T) {
 	}
 
 	// The op is still present (the crash window) and predates the entry.
-	insts := []workload.InstanceStatus{{
+	insts := []types.InstanceStatus{{
 		Index: 0,
-		Phase: workload.InstancePhaseUpdating,
-		Operation: &workload.InstanceOperation{
-			Type:           workload.InstanceOperationUpdate,
+		Phase: types.InstancePhaseUpdating,
+		Operation: &types.InstanceOperation{
+			Type:           types.InstanceOperationUpdate,
 			TargetRevision: "rev-x",
 			StartedAt:      metav1.NewTime(t0.Add(-5 * time.Minute)),
 		},
 	}}
 	input, rec := dispositionFixtureInput(fc, &insts, "rev-x", nil, owner)
 	appendCalls := 0
-	input.AppendMigration = func(_ context.Context, _ workload.MigrationRecord) error {
+	input.AppendMigration = func(_ context.Context, _ types.MigrationRecord) error {
 		appendCalls++
 		return nil
 	}
 	recorder := record.NewFakeRecorder(8)
 	var directives []string
-	dd := workload.DispositionDeps{
+	dd := types.DispositionDeps{
 		AutoMigrateMaxAttempts: 3,
-		MigrationMode:          workload.MigrationModeAuto,
+		MigrationMode:          types.MigrationModeAuto,
 		OnRelocationDirective:  func(component string) { directives = append(directives, component) },
 	}
 	fc.SetTime(t0.Add(time.Minute))
 	pod := waitingPod("engine-0-default-0", "CrashLoopBackOff", "node-a", t0.Add(-time.Hour))
 
-	outcome, err := workload.DisposeExpiredAttempt(context.Background(), workload.Deps{Client: c, Clock: fc, Recorder: recorder}, input, dd, insts[0], []*corev1.Pod{pod}, "CrashLoopBackOff")
+	outcome, err := escalation.DisposeExpiredAttempt(context.Background(), types.Deps{Client: c, Clock: fc, Recorder: recorder}, input, dd, insts[0], []*corev1.Pod{pod}, "CrashLoopBackOff")
 	if err != nil {
 		t.Fatalf("DisposeExpiredAttempt: %v", err)
 	}
-	if outcome != workload.DispositionRelocationDirective {
+	if outcome != escalation.DispositionRelocationDirective {
 		t.Fatalf("outcome: got %v want DispositionRelocationDirective (replay counts as recorded)", outcome)
 	}
 	// Exactly one entry — the replayed write is deduped.
@@ -806,7 +808,7 @@ func TestDispose_RelocationDirective_ReplayDedup(t *testing.T) {
 		t.Fatalf("ledger: got %+v want the single seeded entry (no duplicate)", ledger.Entries)
 	}
 	// The op-clear + Failed backstop still completes.
-	if len(rec.commits) != 1 || rec.commits[0].after.Phase != workload.InstancePhaseFailed || rec.commits[0].after.Operation != nil {
+	if len(rec.commits) != 1 || rec.commits[0].after.Phase != types.InstancePhaseFailed || rec.commits[0].after.Operation != nil {
 		t.Errorf("commit: got %+v want single Failed-no-op commit", rec.commits)
 	}
 	// No duplicate side effects: no Triggered event, no metric callback.
@@ -847,31 +849,31 @@ func TestDispose_RelocationDirective_AffinityPinDisposesTerminal(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
 		spec        *corev1.PodSpec
-		wantOutcome workload.DispositionOutcome
+		wantOutcome escalation.DispositionOutcome
 		wantEntries int
 	}{
 		{name: "pin on suspect node disposes terminal", spec: pinnedSpec("node-a"),
-			wantOutcome: workload.DispositionTerminal, wantEntries: 0},
+			wantOutcome: escalation.DispositionTerminal, wantEntries: 0},
 		{name: "pin permitting another host records", spec: pinnedSpec("node-a", "node-b"),
-			wantOutcome: workload.DispositionRelocationDirective, wantEntries: 1},
+			wantOutcome: escalation.DispositionRelocationDirective, wantEntries: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fc := clocktesting.NewFakeClock(t0)
 			c := fakeLedgerClient(t)
-			insts := []workload.InstanceStatus{{
+			insts := []types.InstanceStatus{{
 				Index:     0,
-				Phase:     workload.InstancePhaseUpdating,
-				Operation: &workload.InstanceOperation{Type: workload.InstanceOperationUpdate, TargetRevision: "rev-x"},
+				Phase:     types.InstancePhaseUpdating,
+				Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, TargetRevision: "rev-x"},
 			}}
 			input, rec := dispositionFixtureInput(fc, &insts, "rev-x", nil, ledgerOwnerCM())
-			dd := workload.DispositionDeps{
+			dd := types.DispositionDeps{
 				AutoMigrateMaxAttempts: 3,
-				MigrationMode:          workload.MigrationModeAuto,
+				MigrationMode:          types.MigrationModeAuto,
 				PodSpec:                tc.spec,
 			}
 			pod := waitingPod("engine-0-default-0", "CrashLoopBackOff", "node-a", t0.Add(-time.Minute))
 
-			outcome, err := workload.DisposeExpiredAttempt(context.Background(), workload.Deps{Client: c, Clock: fc}, input, dd, insts[0], []*corev1.Pod{pod}, "CrashLoopBackOff")
+			outcome, err := escalation.DisposeExpiredAttempt(context.Background(), types.Deps{Client: c, Clock: fc}, input, dd, insts[0], []*corev1.Pod{pod}, "CrashLoopBackOff")
 			if err != nil {
 				t.Fatalf("DisposeExpiredAttempt: %v", err)
 			}
@@ -881,7 +883,7 @@ func TestDispose_RelocationDirective_AffinityPinDisposesTerminal(t *testing.T) {
 			if got := len(loadLedger(t, c).Entries); got != tc.wantEntries {
 				t.Errorf("ledger entries: got %d want %d", got, tc.wantEntries)
 			}
-			if len(rec.commits) != 1 || rec.commits[0].after.Phase != workload.InstancePhaseFailed || rec.commits[0].after.Operation != nil {
+			if len(rec.commits) != 1 || rec.commits[0].after.Phase != types.InstancePhaseFailed || rec.commits[0].after.Operation != nil {
 				t.Errorf("commit: got %+v want single Failed-no-op commit", rec.commits)
 			}
 			if len(rec.blockCalls) != 0 {
@@ -904,41 +906,41 @@ func TestDispose_Terminal(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		name string
-		dd   workload.DispositionDeps
+		dd   types.DispositionDeps
 		pods []*corev1.Pod
 	}{
 		{name: "mode Never",
-			dd:   workload.DispositionDeps{AutoMigrateMaxAttempts: 3, MigrationMode: workload.MigrationModeNever},
+			dd:   types.DispositionDeps{AutoMigrateMaxAttempts: 3, MigrationMode: types.MigrationModeNever},
 			pods: []*corev1.Pod{waitingPod("engine-0-default-0", "CrashLoopBackOff", "node-a", t0.Add(-time.Minute))}},
 		{name: "multi-node gang",
-			dd:   workload.DispositionDeps{AutoMigrateMaxAttempts: 3, MigrationMode: workload.MigrationModeAuto},
+			dd:   types.DispositionDeps{AutoMigrateMaxAttempts: 3, MigrationMode: types.MigrationModeAuto},
 			pods: splitGang},
 		{name: "no resolvable node",
-			dd:   workload.DispositionDeps{AutoMigrateMaxAttempts: 3, MigrationMode: workload.MigrationModeAuto},
+			dd:   types.DispositionDeps{AutoMigrateMaxAttempts: 3, MigrationMode: types.MigrationModeAuto},
 			pods: []*corev1.Pod{waitingPod("engine-0-default-0", "CrashLoopBackOff", "", t0.Add(-time.Minute))}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fc := clocktesting.NewFakeClock(t0)
 			c := fakeLedgerClient(t)
-			insts := []workload.InstanceStatus{{
+			insts := []types.InstanceStatus{{
 				Index:     0,
-				Phase:     workload.InstancePhaseCreating,
-				Operation: &workload.InstanceOperation{Type: workload.InstanceOperationCreate},
+				Phase:     types.InstancePhaseCreating,
+				Operation: &types.InstanceOperation{Type: types.InstanceOperationCreate},
 			}}
 			input, rec := dispositionFixtureInput(fc, &insts, "rev-x", nil, ledgerOwnerCM())
-			deps := workload.Deps{Client: c, Clock: fc}
+			deps := types.Deps{Client: c, Clock: fc}
 
-			outcome, err := workload.DisposeExpiredAttempt(context.Background(), deps, input, tc.dd, insts[0], tc.pods, "CrashLoopBackOff")
+			outcome, err := escalation.DisposeExpiredAttempt(context.Background(), deps, input, tc.dd, insts[0], tc.pods, "CrashLoopBackOff")
 			if err != nil {
 				t.Fatalf("DisposeExpiredAttempt: %v", err)
 			}
-			if outcome != workload.DispositionTerminal {
+			if outcome != escalation.DispositionTerminal {
 				t.Fatalf("outcome: got %v want DispositionTerminal", outcome)
 			}
 			if len(rec.blockCalls) != 0 {
 				t.Errorf("MutateRetryBlock calls: got %+v want none", rec.blockCalls)
 			}
-			if len(rec.commits) != 1 || rec.commits[0].after.Phase != workload.InstancePhaseFailed || rec.commits[0].after.Operation != nil {
+			if len(rec.commits) != 1 || rec.commits[0].after.Phase != types.InstancePhaseFailed || rec.commits[0].after.Operation != nil {
 				t.Errorf("commit: got %+v want single Failed-no-op commit", rec.commits)
 			}
 			if got := len(loadLedger(t, c).Entries); got != 0 {
@@ -959,26 +961,26 @@ func TestDispose_Terminal(t *testing.T) {
 func TestDispose_WorkloadCaused_NoResolvableRevision_Terminal(t *testing.T) {
 	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
 	fc := clocktesting.NewFakeClock(t0)
-	insts := []workload.InstanceStatus{{
+	insts := []types.InstanceStatus{{
 		Index:     0,
-		Phase:     workload.InstancePhaseCreating,
-		Operation: &workload.InstanceOperation{Type: workload.InstanceOperationCreate},
+		Phase:     types.InstancePhaseCreating,
+		Operation: &types.InstanceOperation{Type: types.InstanceOperationCreate},
 	}}
 	input, rec := dispositionFixtureInput(fc, &insts, "" /* no UpdateRevision */, nil, nil)
 	pod := waitingPod("engine-0-default-0", "ImagePullBackOff", "node-a", t0.Add(-time.Minute))
 
-	outcome, err := workload.DisposeExpiredAttempt(context.Background(), workload.Deps{}, input,
-		workload.DispositionDeps{}, insts[0], []*corev1.Pod{pod}, "ImagePullBackOff")
+	outcome, err := escalation.DisposeExpiredAttempt(context.Background(), types.Deps{}, input,
+		types.DispositionDeps{}, insts[0], []*corev1.Pod{pod}, "ImagePullBackOff")
 	if err != nil {
 		t.Fatalf("DisposeExpiredAttempt: %v", err)
 	}
-	if outcome != workload.DispositionTerminal {
+	if outcome != escalation.DispositionTerminal {
 		t.Fatalf("outcome: got %v want DispositionTerminal (no revision to hold)", outcome)
 	}
 	if len(rec.blockCalls) != 0 {
 		t.Errorf("MutateRetryBlock calls: got %+v want none", rec.blockCalls)
 	}
-	if len(rec.commits) != 1 || rec.commits[0].after.Phase != workload.InstancePhaseFailed || rec.commits[0].after.Operation != nil {
+	if len(rec.commits) != 1 || rec.commits[0].after.Phase != types.InstancePhaseFailed || rec.commits[0].after.Operation != nil {
 		t.Errorf("commit: got %+v want single Failed-no-op commit", rec.commits)
 	}
 }
@@ -987,11 +989,11 @@ func TestDispose_WorkloadCaused_NoResolvableRevision_Terminal(t *testing.T) {
 // ObservedState.ExcludedNodesByInstance lands on the matching
 // InstancePlan.ExcludedNodes (and only there) for Render to apply.
 func TestBuildPlan_ThreadsExcludedNodes(t *testing.T) {
-	desired := workload.WorkloadDesiredSpec{Replicas: 2}
-	observed := workload.WorkloadObservedState{
+	desired := types.WorkloadDesiredSpec{Replicas: 2}
+	observed := types.WorkloadObservedState{
 		ExcludedNodesByInstance: map[int32][]string{1: {"node-bad"}},
 	}
-	plan, err := workload.BuildPlan(workload.ComponentEngine, desired, observed)
+	plan, err := workload.BuildPlan(types.ComponentEngine, desired, observed)
 	if err != nil {
 		t.Fatalf("BuildPlan: %v", err)
 	}
@@ -1013,7 +1015,7 @@ func TestBuildPlan_ThreadsExcludedNodes(t *testing.T) {
 // Escalator integration: the fast stuck-pod escalator and the deadline
 // backstop route disposable attempts through the disposition (not the
 // old bare stamps), while the gang path keeps today's Failed-with-Op
-// behavior (pinned in deadline_test.go / status_aggregate_test.go).
+// behavior (pinned in deadline_test.go / escalation_external_test.go).
 // ---------------------------------------------------------------------------
 
 // TestEscalateStuckPodFailures_DisposesSinglePodWorkloadCaused: fast
@@ -1023,34 +1025,34 @@ func TestBuildPlan_ThreadsExcludedNodes(t *testing.T) {
 func TestEscalateStuckPodFailures_DisposesSinglePodWorkloadCaused(t *testing.T) {
 	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
 	fc := clocktesting.NewFakeClock(t0)
-	insts := []workload.InstanceStatus{{
+	insts := []types.InstanceStatus{{
 		Index: 0,
-		Phase: workload.InstancePhaseUpdating,
-		Operation: &workload.InstanceOperation{
-			Type:           workload.InstanceOperationUpdate,
+		Phase: types.InstancePhaseUpdating,
+		Operation: &types.InstanceOperation{
+			Type:           types.InstanceOperationUpdate,
 			Step:           "Drain",
 			TargetRevision: "rev-bad",
 		},
 	}}
-	policy := &workload.RetryPolicy{MaxAttempts: 3, InitialDelay: time.Minute, MaxDelay: 30 * time.Minute, Multiplier: 2}
+	policy := &types.RetryPolicy{MaxAttempts: 3, InitialDelay: time.Minute, MaxDelay: 30 * time.Minute, Multiplier: 2}
 	input, rec := dispositionFixtureInput(fc, &insts, "rev-bad", policy, nil)
 	input.ObservedState.InstanceStatuses = insts
 	input.StuckPodGrace = time.Second
 	pod := waitingPod("engine-0-default-0", "ImagePullBackOff", "node-a", t0.Add(-time.Minute))
 
-	err := runEscalationPass(t, workload.Deps{Clock: fc}, input, singleInstancePlan(0, 1),
+	err := runEscalationPass(t, types.Deps{Clock: fc}, input, singleInstancePlan(0, 1),
 		map[int32][]*corev1.Pod{0: {pod}})
 	if err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
-	if insts[0].Phase != workload.InstancePhaseFailed {
+	if insts[0].Phase != types.InstancePhaseFailed {
 		t.Errorf("Phase: got %q want Failed", insts[0].Phase)
 	}
 	if insts[0].Operation != nil {
 		t.Errorf("Operation: got %+v want nil (disposition clears the failed attempt)", insts[0].Operation)
 	}
-	if len(rec.blockCalls) != 1 || rec.blockCalls[0].rev != "rev-bad" || rec.blockCalls[0].block.State != workload.RetryBlockBackoff {
+	if len(rec.blockCalls) != 1 || rec.blockCalls[0].rev != "rev-bad" || rec.blockCalls[0].block.State != types.RetryBlockBackoff {
 		t.Errorf("RetryBlock: got %+v want one Backoff block for rev-bad", rec.blockCalls)
 	}
 	if len(rec.warns) != 1 {
@@ -1067,11 +1069,11 @@ func TestExpireOperations_SinglePodCrashLoopRecordsDirective(t *testing.T) {
 	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
 	fc := clocktesting.NewFakeClock(t0)
 	c := fakeLedgerClient(t)
-	insts := []workload.InstanceStatus{{
+	insts := []types.InstanceStatus{{
 		Index: 0,
-		Phase: workload.InstancePhaseUpdating,
-		Operation: &workload.InstanceOperation{
-			Type:           workload.InstanceOperationUpdate,
+		Phase: types.InstancePhaseUpdating,
+		Operation: &types.InstanceOperation{
+			Type:           types.InstanceOperationUpdate,
 			Step:           "Drain",
 			TargetRevision: "rev-x",
 			Deadline:       metav1.NewTime(t0.Add(-time.Minute)),
@@ -1079,18 +1081,18 @@ func TestExpireOperations_SinglePodCrashLoopRecordsDirective(t *testing.T) {
 	}}
 	input, rec := dispositionFixtureInput(fc, &insts, "rev-x", nil, ledgerOwnerCM())
 	input.ObservedState.InstanceStatuses = insts
-	input.Disposition = workload.DispositionDeps{AutoMigrateMaxAttempts: 3}
+	input.Disposition = types.DispositionDeps{AutoMigrateMaxAttempts: 3}
 	pod := waitingPod("engine-0-default-0", "CrashLoopBackOff", "node-a", t0.Add(-time.Hour))
 
 	plan := singleInstancePlan(0, 1)
-	plan.MigrationMode = workload.MigrationModeAuto
-	err := runEscalationPass(t, workload.Deps{Client: c, Clock: fc}, input, plan,
+	plan.MigrationMode = types.MigrationModeAuto
+	err := runEscalationPass(t, types.Deps{Client: c, Clock: fc}, input, plan,
 		map[int32][]*corev1.Pod{0: {pod}})
 	if err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
-	if insts[0].Phase != workload.InstancePhaseFailed || insts[0].Operation != nil {
+	if insts[0].Phase != types.InstancePhaseFailed || insts[0].Operation != nil {
 		t.Errorf("instance: got %+v want Failed-no-op (unconditional backstop)", insts[0])
 	}
 	if len(rec.blockCalls) != 0 {
@@ -1120,11 +1122,11 @@ func TestExpireOperations_SinglePodCrashLoopRecordsDirective(t *testing.T) {
 func TestExpireOperations_GangCreateDisposed(t *testing.T) {
 	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
 	fc := clocktesting.NewFakeClock(t0)
-	insts := []workload.InstanceStatus{{
+	insts := []types.InstanceStatus{{
 		Index: 0,
-		Phase: workload.InstancePhaseCreating,
-		Operation: &workload.InstanceOperation{
-			Type:     workload.InstanceOperationCreate,
+		Phase: types.InstancePhaseCreating,
+		Operation: &types.InstanceOperation{
+			Type:     types.InstanceOperationCreate,
 			Deadline: metav1.NewTime(t0.Add(-time.Minute)),
 		},
 	}}
@@ -1132,13 +1134,13 @@ func TestExpireOperations_GangCreateDisposed(t *testing.T) {
 	input.ObservedState.InstanceStatuses = insts
 	leader := waitingPod("engine-0-leader-0", "ImagePullBackOff", "node-a", t0.Add(-time.Hour))
 
-	err := runEscalationPass(t, workload.Deps{Clock: fc}, input, singleInstancePlan(0, 3),
+	err := runEscalationPass(t, types.Deps{Clock: fc}, input, singleInstancePlan(0, 3),
 		map[int32][]*corev1.Pod{0: {leader}})
 	if err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
-	if insts[0].Phase != workload.InstancePhaseFailed || insts[0].Operation != nil {
+	if insts[0].Phase != types.InstancePhaseFailed || insts[0].Operation != nil {
 		t.Errorf("instance: got %+v want Failed-no-op", insts[0])
 	}
 	if len(rec.blockCalls) != 1 || rec.blockCalls[0].rev != "rev-update" {
@@ -1155,20 +1157,20 @@ func TestDispose_Terminal_SuppressesRepeatWarnForSameFailure(t *testing.T) {
 	fc := clocktesting.NewFakeClock(t0)
 	c := fakeLedgerClient(t)
 	owner := ledgerOwnerCM()
-	deps := workload.Deps{Client: c, Clock: fc}
+	deps := types.Deps{Client: c, Clock: fc}
 	// MigrationMode unset → no relocation → pure Terminal backstop path.
-	dd := workload.DispositionDeps{}
+	dd := types.DispositionDeps{}
 	pod := waitingPod("engine-0-default-0", "CrashLoopBackOff", "node-a", t0.Add(-time.Minute))
 
-	dispose := func(prior *workload.InstanceTermination) *dispositionRecorders {
-		insts := []workload.InstanceStatus{{
+	dispose := func(prior *types.InstanceTermination) *dispositionRecorders {
+		insts := []types.InstanceStatus{{
 			Index:       0,
-			Phase:       workload.InstancePhaseUpdating,
-			Operation:   &workload.InstanceOperation{Type: workload.InstanceOperationUpdate, TargetRevision: "rev-x"},
+			Phase:       types.InstancePhaseUpdating,
+			Operation:   &types.InstanceOperation{Type: types.InstanceOperationUpdate, TargetRevision: "rev-x"},
 			LastFailure: prior,
 		}}
 		input, rec := dispositionFixtureInput(fc, &insts, "rev-x", nil, owner)
-		if _, err := workload.DisposeExpiredAttempt(context.Background(), deps, input, dd, insts[0], []*corev1.Pod{pod}, "CrashLoopBackOff"); err != nil {
+		if _, err := escalation.DisposeExpiredAttempt(context.Background(), deps, input, dd, insts[0], []*corev1.Pod{pod}, "CrashLoopBackOff"); err != nil {
 			t.Fatalf("DisposeExpiredAttempt: %v", err)
 		}
 		return rec
@@ -1179,11 +1181,11 @@ func TestDispose_Terminal_SuppressesRepeatWarnForSameFailure(t *testing.T) {
 		t.Fatalf("first dispose: got %d warns want 1", len(rec.warns))
 	}
 	// Repeat with the SAME prior terminal reason → suppressed (debounced).
-	if rec := dispose(&workload.InstanceTermination{Reason: "CrashLoopBackOff"}); len(rec.warns) != 0 {
+	if rec := dispose(&types.InstanceTermination{Reason: "CrashLoopBackOff"}); len(rec.warns) != 0 {
 		t.Errorf("repeat dispose of same CrashLoopBackOff failure: got %d warns want 0 (debounced)", len(rec.warns))
 	}
 	// A DIFFERENT prior reason is a genuinely new failure → NOT suppressed.
-	if rec := dispose(&workload.InstanceTermination{Reason: "OOMKilled"}); len(rec.warns) != 1 {
+	if rec := dispose(&types.InstanceTermination{Reason: "OOMKilled"}); len(rec.warns) != 1 {
 		t.Errorf("dispose with different prior reason: got %d warns want 1 (not debounced)", len(rec.warns))
 	}
 }
@@ -1225,34 +1227,34 @@ func runningNotReadyOnNode(name, node string, since time.Time) *corev1.Pod {
 func TestDispose_RunningNotReadyRelocatesFirst(t *testing.T) {
 	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
 	fc := clocktesting.NewFakeClock(t0)
-	deps := workload.Deps{Client: fakeLedgerClient(t), Clock: fc}
-	dd := workload.DispositionDeps{
+	deps := types.Deps{Client: fakeLedgerClient(t), Clock: fc}
+	dd := types.DispositionDeps{
 		AutoMigrateMaxAttempts: 3,
-		MigrationMode:          workload.MigrationModeAuto,
+		MigrationMode:          types.MigrationModeAuto,
 	}
-	insts := []workload.InstanceStatus{{
+	insts := []types.InstanceStatus{{
 		Index: 0,
-		Phase: workload.InstancePhaseCreating,
-		Operation: &workload.InstanceOperation{
-			Type:           workload.InstanceOperationCreate,
+		Phase: types.InstancePhaseCreating,
+		Operation: &types.InstanceOperation{
+			Type:           types.InstanceOperationCreate,
 			TargetRevision: "rev-x",
 		},
 	}}
 	input, rec := dispositionFixtureInput(fc, &insts, "rev-x", nil, ledgerOwnerCM())
 	pod := runningNotReadyOnNode("engine-0-default-0", "node-a", t0.Add(-time.Minute))
 
-	outcome, err := workload.DisposeExpiredAttempt(context.Background(), deps, input, dd, insts[0],
+	outcome, err := escalation.DisposeExpiredAttempt(context.Background(), deps, input, dd, insts[0],
 		[]*corev1.Pod{pod}, "DeadlineExceeded: Create/CreatePods exceeded InstanceReadyTimeout")
 	if err != nil {
 		t.Fatalf("DisposeExpiredAttempt: %v", err)
 	}
-	if outcome != workload.DispositionRelocationDirective {
+	if outcome != escalation.DispositionRelocationDirective {
 		t.Fatalf("outcome: got %v want DispositionRelocationDirective (relocation gets the first try)", outcome)
 	}
 	if len(rec.blockCalls) != 0 {
 		t.Errorf("MutateRetryBlock calls: got %+v want none (the node is the suspect, not the revision)", rec.blockCalls)
 	}
-	if len(rec.commits) != 1 || rec.commits[0].after.Phase != workload.InstancePhaseFailed {
+	if len(rec.commits) != 1 || rec.commits[0].after.Phase != types.InstancePhaseFailed {
 		t.Fatalf("commit: got %+v want a single Failed commit", rec.commits)
 	}
 	got := rec.commits[0].after.LastFailure
@@ -1274,16 +1276,16 @@ func TestDispose_RunningNotReadyRelocatesFirst(t *testing.T) {
 func TestDispose_UnschedulableCannotSuppressRelocation(t *testing.T) {
 	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
 	fc := clocktesting.NewFakeClock(t0)
-	deps := workload.Deps{Client: fakeLedgerClient(t), Clock: fc}
-	dd := workload.DispositionDeps{
+	deps := types.Deps{Client: fakeLedgerClient(t), Clock: fc}
+	dd := types.DispositionDeps{
 		AutoMigrateMaxAttempts: 3,
-		MigrationMode:          workload.MigrationModeAuto,
+		MigrationMode:          types.MigrationModeAuto,
 	}
-	insts := []workload.InstanceStatus{{
+	insts := []types.InstanceStatus{{
 		Index: 0,
-		Phase: workload.InstancePhaseCreating,
-		Operation: &workload.InstanceOperation{
-			Type:           workload.InstanceOperationCreate,
+		Phase: types.InstancePhaseCreating,
+		Operation: &types.InstanceOperation{
+			Type:           types.InstanceOperationCreate,
 			TargetRevision: "rev-x",
 		},
 	}}
@@ -1299,12 +1301,12 @@ func TestDispose_UnschedulableCannotSuppressRelocation(t *testing.T) {
 		}}},
 	}
 
-	outcome, err := workload.DisposeExpiredAttempt(context.Background(), deps, input, dd, insts[0],
+	outcome, err := escalation.DisposeExpiredAttempt(context.Background(), deps, input, dd, insts[0],
 		[]*corev1.Pod{pod}, "Unschedulable: 0/3 nodes are available: 3 Insufficient nvidia.com/gpu")
 	if err != nil {
 		t.Fatalf("DisposeExpiredAttempt: %v", err)
 	}
-	if outcome != workload.DispositionTerminal {
+	if outcome != escalation.DispositionTerminal {
 		t.Errorf("outcome: got %v want DispositionTerminal (no node to steer off)", outcome)
 	}
 	if len(rec.blockCalls) != 0 {

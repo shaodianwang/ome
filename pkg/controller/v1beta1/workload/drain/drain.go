@@ -307,7 +307,7 @@ func IsPodInRotation(ctx context.Context, reader client.Reader, namespace, servi
 // serviceName via the standard kubernetes.io/service-name label that the
 // in-tree endpointslice controller stamps on every slice it manages.
 //
-// Exported so status_aggregate's availablePodSet helper (which folds
+// Exported so status.AvailablePodSet (which folds
 // rotation across every pod into a single map) can reuse the same
 // label query and slice walk.
 func EndpointSlicesForService(ctx context.Context, reader client.Reader, namespace, serviceName string) ([]discoveryv1.EndpointSlice, error) {

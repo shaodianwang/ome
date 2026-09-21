@@ -84,3 +84,21 @@ func TestFirstUnschedulablePod(t *testing.T) {
 		t.Errorf("placed pod: got %v want none", pod)
 	}
 }
+
+// TestPodAdmissionGated pins the gated-pod detector: a pod is "gated"
+// (queued for admission, e.g. by Kueue) iff it still carries a scheduling
+// gate. An un-gated or nil pod is not.
+func TestPodAdmissionGated(t *testing.T) {
+	gated := &corev1.Pod{Spec: corev1.PodSpec{
+		SchedulingGates: []corev1.PodSchedulingGate{{Name: "kueue.x-k8s.io/admission"}},
+	}}
+	if !PodAdmissionGated(gated) {
+		t.Errorf("pod with a scheduling gate: got false want true")
+	}
+	if PodAdmissionGated(&corev1.Pod{}) {
+		t.Errorf("pod with no scheduling gate: got true want false")
+	}
+	if PodAdmissionGated(nil) {
+		t.Errorf("nil pod: got true want false")
+	}
+}

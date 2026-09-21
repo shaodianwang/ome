@@ -17,27 +17,29 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestPublicationObservationReusesOwnedRowsWithoutMutatingSource(t *testing.T) {
-	operation := &workload.InstanceOperation{ID: "operation-4", Type: workload.InstanceOperationUpdate, Step: "Drain"}
-	persisted := []workload.InstanceStatus{
+	operation := &types.InstanceOperation{ID: "operation-4", Type: types.InstanceOperationUpdate, Step: "Drain"}
+	persisted := []types.InstanceStatus{
 		{
-			Index: 4, Incarnation: 3, Phase: workload.InstancePhaseUpdating,
+			Index: 4, Incarnation: 3, Phase: types.InstancePhaseUpdating,
 			RunningRevision: "revision-a", TargetRevision: "revision-b",
 			PodCount: 8, ReadyPodCount: 7, ServingPodCount: 6, AvailablePodCount: 5,
 			ScheduledPodCount: 8, Admitted: true, NodesOccupied: []string{"old-node"},
 			Operation: operation,
 		},
 		{
-			Index: 9, Incarnation: 2, Phase: workload.InstancePhaseRestarting,
+			Index: 9, Incarnation: 2, Phase: types.InstancePhaseRestarting,
 			PodCount: 1, ReadyPodCount: 1, ServingPodCount: 1, AvailablePodCount: 1,
 			ScheduledPodCount: 1, Admitted: true, NodesOccupied: []string{"stale-node"},
 		},
 		{
-			Index: 4, Incarnation: 4, Phase: workload.InstancePhaseMigrating,
+			Index: 4, Incarnation: 4, Phase: types.InstancePhaseMigrating,
 			RunningRevision: "revision-c", NodesOccupied: []string{"other-old-node"},
 		},
 	}
@@ -58,7 +60,7 @@ func TestPublicationObservationReusesOwnedRowsWithoutMutatingSource(t *testing.T
 	observation, err := workload.NewOwnedPublicationObservation(
 		owned,
 		workload.NewCachedSelectorPodObservation(nil, byInstance),
-		map[string]struct{}{podA.Name: {}}, workload.AvailabilityWindow{},
+		map[string]struct{}{podA.Name: {}}, status.AvailabilityWindow{},
 	)
 	if err != nil {
 		t.Fatalf("NewOwnedPublicationObservation: %v", err)
@@ -81,7 +83,7 @@ func TestPublicationObservationReusesOwnedRowsWithoutMutatingSource(t *testing.T
 		t.Fatalf("row order = [%d %d %d], want [4 9 4]", got[0].Index, got[1].Index, got[2].Index)
 	}
 
-	for _, row := range []workload.InstanceStatus{got[0], got[2]} {
+	for _, row := range []types.InstanceStatus{got[0], got[2]} {
 		if row.PodCount != 3 || row.ReadyPodCount != 2 || row.ServingPodCount != 1 ||
 			row.AvailablePodCount != 1 || row.ScheduledPodCount != 2 || row.Admitted {
 			t.Fatalf("index 4 current fields = %+v", row)
@@ -90,7 +92,7 @@ func TestPublicationObservationReusesOwnedRowsWithoutMutatingSource(t *testing.T
 			t.Fatalf("index 4 nodes = %v, want [node-a node-b]", row.NodesOccupied)
 		}
 	}
-	if got[0].Operation == nil || got[0].Operation.ID != operation.ID || got[0].Phase != workload.InstancePhaseUpdating {
+	if got[0].Operation == nil || got[0].Operation.ID != operation.ID || got[0].Phase != types.InstancePhaseUpdating {
 		t.Fatalf("lifecycle fields were not preserved: %+v", got[0])
 	}
 	if got[1].PodCount != 0 || got[1].ReadyPodCount != 0 || got[1].ScheduledPodCount != 0 ||
@@ -117,7 +119,7 @@ func TestPublicationObservationReusesOwnedRowsWithoutMutatingSource(t *testing.T
 }
 
 func TestComponentObservationProvenanceAndEpochGuard(t *testing.T) {
-	persisted := []workload.InstanceStatus{{Index: 0, AvailablePodCount: 7}}
+	persisted := []types.InstanceStatus{{Index: 0, AvailablePodCount: 7}}
 	observation, err := workload.NewDecisionObservation(
 		persisted,
 		workload.NewAPIReaderSelectorPodObservation(nil, map[int32][]*corev1.Pod{}),
@@ -164,7 +166,7 @@ func TestPublicationObservationRejectsUnsupportedProvenance(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if _, err := workload.NewOwnedPublicationObservation(nil, test.pods, nil, workload.AvailabilityWindow{}); err == nil {
+			if _, err := workload.NewOwnedPublicationObservation(nil, test.pods, nil, status.AvailabilityWindow{}); err == nil {
 				t.Fatal("publication observation accepted unsupported provenance")
 			}
 		})
@@ -174,19 +176,19 @@ func TestPublicationObservationRejectsUnsupportedProvenance(t *testing.T) {
 func TestPublicationObservationCopiesNestedDurableState(t *testing.T) {
 	surgeIndex := int32(9)
 	exitCode := int32(143)
-	owned := []workload.InstanceStatus{{
+	owned := []types.InstanceStatus{{
 		Index:         2,
 		NodesOccupied: []string{"node-a"},
 		Conditions:    []metav1.Condition{{Type: "Ready", Message: "original"}},
-		Operation: &workload.InstanceOperation{
+		Operation: &types.InstanceOperation{
 			ID: "operation-2", SurgeIndex: &surgeIndex, HintTargetNodes: []string{"node-b"},
 		},
-		LastFailure: &workload.InstanceTermination{PodName: "pod-2", ExitCode: &exitCode},
+		LastFailure: &types.InstanceTermination{PodName: "pod-2", ExitCode: &exitCode},
 	}}
 	observation, err := workload.NewOwnedPublicationObservation(
 		owned,
 		workload.NewCachedSelectorPodObservation(nil, nil),
-		nil, workload.AvailabilityWindow{},
+		nil, status.AvailabilityWindow{},
 	)
 	if err != nil {
 		t.Fatalf("NewOwnedPublicationObservation: %v", err)
@@ -225,7 +227,7 @@ func TestPublicationObservationPreservesNilStatusSlice(t *testing.T) {
 	observation, err := workload.NewOwnedPublicationObservation(
 		nil,
 		workload.NewCachedSelectorPodObservation(nil, nil),
-		nil, workload.AvailabilityWindow{},
+		nil, status.AvailabilityWindow{},
 	)
 	if err != nil {
 		t.Fatalf("NewOwnedPublicationObservation: %v", err)
@@ -239,18 +241,18 @@ func TestPublicationObservationPreservesNilStatusSlice(t *testing.T) {
 	}
 }
 
-var benchmarkObservationRows []workload.InstanceStatus
+var benchmarkObservationRows []types.InstanceStatus
 var benchmarkComponentCounters workload.ComponentCounters
 
 func BenchmarkPublicationObservationMaterialization(b *testing.B) {
 	for _, podsPerInstance := range []int{1, 8} {
-		persisted := make([]workload.InstanceStatus, 2000)
+		persisted := make([]types.InstanceStatus, 2000)
 		byInstance := make(map[int32][]*corev1.Pod, len(persisted))
 		available := make(map[string]struct{}, len(persisted)*podsPerInstance)
 		desired := make(map[int32]int32, len(persisted))
 		for index := range persisted {
-			persisted[index] = workload.InstanceStatus{
-				Index: int32(index), Incarnation: 1, Phase: workload.InstancePhaseReady,
+			persisted[index] = types.InstanceStatus{
+				Index: int32(index), Incarnation: 1, Phase: types.InstancePhaseReady,
 				RunningRevision: "revision-a",
 			}
 			desired[int32(index)] = int32(podsPerInstance)
@@ -266,8 +268,8 @@ func BenchmarkPublicationObservationMaterialization(b *testing.B) {
 		b.Run(fmt.Sprintf("2000x%d/owned", podsPerInstance), func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
-				owned := append([]workload.InstanceStatus(nil), persisted...)
-				observation, err := workload.NewOwnedPublicationObservation(owned, pods, available, workload.AvailabilityWindow{})
+				owned := append([]types.InstanceStatus(nil), persisted...)
+				observation, err := workload.NewOwnedPublicationObservation(owned, pods, available, status.AvailabilityWindow{})
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -282,8 +284,8 @@ func BenchmarkPublicationObservationMaterialization(b *testing.B) {
 		b.Run(fmt.Sprintf("2000x%d/owned-with-counters", podsPerInstance), func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
-				owned := append([]workload.InstanceStatus(nil), persisted...)
-				observation, err := workload.NewOwnedPublicationObservation(owned, pods, available, workload.AvailabilityWindow{})
+				owned := append([]types.InstanceStatus(nil), persisted...)
+				observation, err := workload.NewOwnedPublicationObservation(owned, pods, available, status.AvailabilityWindow{})
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -299,8 +301,8 @@ func BenchmarkPublicationObservationMaterialization(b *testing.B) {
 		b.Run(fmt.Sprintf("2000x%d/legacy-owned-with-counters", podsPerInstance), func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
-				owned := append([]workload.InstanceStatus(nil), persisted...)
-				observation, err := workload.NewOwnedPublicationObservation(owned, pods, available, workload.AvailabilityWindow{})
+				owned := append([]types.InstanceStatus(nil), persisted...)
+				observation, err := workload.NewOwnedPublicationObservation(owned, pods, available, status.AvailabilityWindow{})
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -316,8 +318,8 @@ func BenchmarkPublicationObservationMaterialization(b *testing.B) {
 		b.Run(fmt.Sprintf("2000x%d/copy", podsPerInstance), func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
-				owned := append([]workload.InstanceStatus(nil), persisted...)
-				observation, err := workload.NewOwnedPublicationObservation(owned, pods, available, workload.AvailabilityWindow{})
+				owned := append([]types.InstanceStatus(nil), persisted...)
+				observation, err := workload.NewOwnedPublicationObservation(owned, pods, available, status.AvailabilityWindow{})
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -331,23 +333,23 @@ func BenchmarkPublicationObservationMaterialization(b *testing.B) {
 	}
 }
 
-func legacyObservationComponentCounters(instances []workload.InstanceStatus, desiredByIdx map[int32]int32, targetRevision string) workload.ComponentCounters {
+func legacyObservationComponentCounters(instances []types.InstanceStatus, desiredByIdx map[int32]int32, targetRevision string) workload.ComponentCounters {
 	counters := workload.ComponentCounters{Replicas: int32(len(instances))}
 	target := query.RevisionFromName(targetRevision)
 	for _, instance := range instances {
-		desired := workload.DesiredFor(desiredByIdx, instance.Index, instance.PodCount)
-		if workload.InstanceMeetsThreshold(instance.PodCount, instance.ReadyPodCount, desired) {
+		desired := status.DesiredFor(desiredByIdx, instance.Index, instance.PodCount)
+		if status.InstanceMeetsThreshold(instance.PodCount, instance.ReadyPodCount, desired) {
 			counters.ReadyReplicas++
 		}
-		if workload.InstanceMeetsThreshold(instance.PodCount, instance.ServingPodCount, desired) {
+		if status.InstanceMeetsThreshold(instance.PodCount, instance.ServingPodCount, desired) {
 			counters.ServingReplicas++
 		}
-		if workload.InstanceMeetsThreshold(instance.PodCount, instance.AvailablePodCount, desired) {
+		if status.InstanceMeetsThreshold(instance.PodCount, instance.AvailablePodCount, desired) {
 			counters.AvailableReplicas++
 		}
 		if targetRevision != "" && query.RevisionFromName(instance.RunningRevision).Same(target) {
 			counters.UpdatedReplicas++
-			if workload.InstanceMeetsThreshold(instance.PodCount, instance.ReadyPodCount, desired) {
+			if status.InstanceMeetsThreshold(instance.PodCount, instance.ReadyPodCount, desired) {
 				counters.UpdatedReadyReplicas++
 			}
 		}
@@ -407,8 +409,8 @@ func TestRemovableObservationFieldsHaveNoUnauditedDirectProductionAccess(t *test
 
 	approve("pkg/controller/v1beta1/workload/observation.go", "overlayInlineV1", readWrite, "publication materialization", allFields...)
 	approve("pkg/controller/v1beta1/workload/observation.go", "cloneInstanceStatus", removableFieldAccessCounts{reads: 2, writes: 1}, "isolated status copy", "NodesOccupied")
-	approve("pkg/controller/v1beta1/workload/status_aggregate.go", "TakeInlineV1Publication", removableFieldAccessCounts{reads: 2}, "current Pod observation", "ReadyPodCount")
-	approve("pkg/controller/v1beta1/workload/status_aggregate.go", "String", read, "current counter diagnostics", allFields...)
+	approve("pkg/controller/v1beta1/workload/observation.go", "TakeInlineV1Publication", removableFieldAccessCounts{reads: 2}, "current Pod observation", "ReadyPodCount")
+	approve("pkg/controller/v1beta1/workload/status/aggregate.go", "String", read, "current counter diagnostics", allFields...)
 	for _, function := range []string{"InstanceStatusToWorkload", "InstanceStatusFromWorkload"} {
 		approve("pkg/controller/v1beta1/v1beta1convert/convert.go", function, read, "wire conversion", "ReadyPodCount", "ScheduledPodCount")
 		approve("pkg/controller/v1beta1/v1beta1convert/convert.go", function, removableFieldAccessCounts{reads: 2, writes: 1}, "wire conversion", "NodesOccupied")
@@ -585,4 +587,105 @@ func removableFieldSelectorAccess(selector *ast.SelectorExpr, parents map[ast.No
 		}
 	}
 	return "read"
+}
+
+func TestTakeInlineV1PublicationCountersIgnorePersistedObservationFields(t *testing.T) {
+	persisted := []types.InstanceStatus{
+		{Index: 0, PodCount: 1, ReadyPodCount: 1, ServingPodCount: 1, AvailablePodCount: 1, RunningRevision: "rev-a"},
+		{Index: 1, PodCount: 1, ReadyPodCount: 0, ServingPodCount: 0, AvailablePodCount: 0, RunningRevision: "rev-b"},
+	}
+	desired := map[int32]int32{0: 1, 1: 1}
+
+	tests := []struct {
+		name   string
+		target string
+	}{
+		{name: "without target revision"},
+		{name: "with target revision", target: "rev-a"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			observation, err := workload.NewOwnedPublicationObservation(
+				append([]types.InstanceStatus(nil), persisted...),
+				workload.NewCachedSelectorPodObservation(nil, nil),
+				nil,
+				status.AvailabilityWindow{},
+			)
+			if err != nil {
+				t.Fatalf("NewOwnedPublicationObservation: %v", err)
+			}
+			statuses, got, err := observation.TakeInlineV1Publication(desired, test.target)
+			if err != nil {
+				t.Fatalf("TakeInlineV1Publication: %v", err)
+			}
+			if got.Replicas != 2 || got.ReadyReplicas != 0 || got.ServingReplicas != 0 || got.AvailableReplicas != 0 {
+				t.Errorf("current counters must come from the empty Pod observation: %+v", got)
+			}
+			if test.target == "" && (got.UpdatedReplicas != 0 || got.UpdatedReadyReplicas != 0) {
+				t.Errorf("Updated* should be zero with empty target: %+v", got)
+			}
+			if test.target != "" && (got.UpdatedReplicas != 1 || got.UpdatedReadyReplicas != 0) {
+				t.Errorf("rev-a Updated*: got (%d,%d) want (1,0)", got.UpdatedReplicas, got.UpdatedReadyReplicas)
+			}
+			for _, status := range statuses {
+				if status.PodCount != 0 || status.ReadyPodCount != 0 || status.ServingPodCount != 0 || status.AvailablePodCount != 0 {
+					t.Errorf("status %d retained stale observation fields: %+v", status.Index, status)
+				}
+			}
+		})
+	}
+}
+
+// A row whose in-flight Update pins a revision the Component no longer
+// targets still owes a roll, so it is not updated even when it happens to
+// run the target: the surge under way promotes onto the pinned revision
+// first. Publishing it as updated would claim a convergence the Component
+// has not reached and idle a rollout that is still moving.
+//
+// Cells: instance/Update/Surge/spec.revision/before
+func TestTakeInlineV1PublicationUpdatedExcludesRowsPinnedOffTarget(t *testing.T) {
+	surging := &types.InstanceOperation{Type: types.InstanceOperationUpdate, TargetRevision: "rev-b"}
+	settling := &types.InstanceOperation{Type: types.InstanceOperationUpdate, TargetRevision: "rev-a"}
+	persisted := []types.InstanceStatus{
+		{Index: 0, RunningRevision: "rev-a"},
+		{Index: 1, RunningRevision: "rev-a", Operation: surging},
+		{Index: 2, RunningRevision: "rev-a", Operation: settling},
+	}
+
+	tests := []struct {
+		name   string
+		target string
+		want   int32
+	}{
+		// The revert: the Component is back on rev-a, index 1 is
+		// mid-surge toward the abandoned rev-b and index 2 is
+		// finishing its roll onto rev-a.
+		{name: "target is the running revision", target: "rev-a", want: 2},
+		// index 1 runs rev-a, not the rev-b it is surging toward,
+		// so the pin does not make it updated either.
+		{name: "target is the pinned revision", target: "rev-b", want: 0},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			observation, err := workload.NewOwnedPublicationObservation(
+				append([]types.InstanceStatus(nil), persisted...),
+				workload.NewCachedSelectorPodObservation(nil, nil),
+				nil,
+				status.AvailabilityWindow{},
+			)
+			if err != nil {
+				t.Fatalf("NewOwnedPublicationObservation: %v", err)
+			}
+			_, got, err := observation.TakeInlineV1Publication(map[int32]int32{0: 1, 1: 1, 2: 1}, test.target)
+			if err != nil {
+				t.Fatalf("TakeInlineV1Publication: %v", err)
+			}
+			if got.UpdatedReplicas != test.want {
+				t.Errorf("UpdatedReplicas: got %d want %d", got.UpdatedReplicas, test.want)
+			}
+			if got.Replicas != 3 {
+				t.Errorf("Replicas: got %d want 3", got.Replicas)
+			}
+		})
+	}
 }

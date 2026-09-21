@@ -12,6 +12,8 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	workloadstatus "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 func TestPublicationObservationMatchesInlineV1Projection(t *testing.T) {
@@ -139,7 +141,7 @@ func TestPublicationObservationMatchesInlineV1Projection(t *testing.T) {
 			observation, err := workload.NewOwnedPublicationObservation(
 				v1beta1convert.InstanceStatusSliceToWorkload(test.statuses),
 				workload.NewCachedSelectorPodObservation(test.pods, nil),
-				test.available, workload.AvailabilityWindow{},
+				test.available, workloadstatus.AvailabilityWindow{},
 			)
 			if err != nil {
 				t.Fatalf("NewOwnedPublicationObservation: %v", err)
@@ -234,7 +236,7 @@ func TestPublicationObservationMatchesInlineV1ProjectionAtScale(t *testing.T) {
 			observation, err := workload.NewOwnedPublicationObservation(
 				v1beta1convert.InstanceStatusSliceToWorkload(statuses),
 				workload.NewCachedSelectorPodObservation(pods, nil),
-				available, workload.AvailabilityWindow{},
+				available, workloadstatus.AvailabilityWindow{},
 			)
 			if err != nil {
 				t.Fatalf("NewOwnedPublicationObservation: %v", err)
@@ -262,12 +264,12 @@ func legacyInlineV1Projection(instances []v1beta1.OMENativeInstanceStatus, byInd
 	for i := range out {
 		pods := byIndex[out[i].Index]
 		out[i].PodCount = int32(len(pods))
-		out[i].ReadyPodCount = workload.CountReadyPods(pods)
-		out[i].ServingPodCount = workload.CountServingPods(pods)
-		out[i].AvailablePodCount, _ = workload.CountAvailablePods(pods, available, workload.AvailabilityWindow{})
-		out[i].ScheduledPodCount = workload.CountScheduledPods(pods)
+		out[i].ReadyPodCount = workloadstatus.CountReadyPods(pods)
+		out[i].ServingPodCount = workloadstatus.CountServingPods(pods)
+		out[i].AvailablePodCount, _ = workloadstatus.CountAvailablePods(pods, available, workloadstatus.AvailabilityWindow{})
+		out[i].ScheduledPodCount = workloadstatus.CountScheduledPods(pods)
 		out[i].Admitted = legacyPodsAdmitted(pods)
-		out[i].NodesOccupied = workload.UniqueNodes(pods)
+		out[i].NodesOccupied = workloadstatus.UniqueNodes(pods)
 	}
 	return out
 }
@@ -324,7 +326,7 @@ func legacyPodsAdmitted(pods []*corev1.Pod) bool {
 		return false
 	}
 	for _, pod := range pods {
-		if workload.PodAdmissionGated(pod) {
+		if workloadtypes.PodAdmissionGated(pod) {
 			return false
 		}
 	}

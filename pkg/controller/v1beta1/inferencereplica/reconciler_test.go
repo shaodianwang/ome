@@ -33,7 +33,6 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 	workloadgang "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/gang"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
@@ -132,7 +131,7 @@ func newReconciler(t *testing.T, objs ...client.Object) (*Reconciler, client.Cli
 		APIReader:                c,
 		Log:                      logf.Log.WithName("test"),
 		InstanceStatusTarget:     irstatus.EncodingDenseV1,
-		Expectations:             workload.NewExpectations(),
+		Expectations:             workloadtypes.NewExpectations(),
 		ScaleDownRequeueInterval: testScaleDownRequeueInterval,
 	}, c
 }
@@ -199,7 +198,7 @@ func TestScaleDownSeriesCacheReplacesIdentityAndSupportsConcurrentKeys(t *testin
 
 func TestApplyRollbackPayload_RecordedTopologyIsAuthoritative(t *testing.T) {
 	stableTopology := "topology.example.com/stable"
-	desired := workload.WorkloadDesiredSpec{TopologyKey: "topology.example.com/canary"}
+	desired := workloadtypes.WorkloadDesiredSpec{TopologyKey: "topology.example.com/canary"}
 	payload := &revision.DataPayload{TopologyKey: &stableTopology}
 
 	r := &Reconciler{APIReader: podListFailingReader{}}
@@ -225,7 +224,7 @@ func TestApplyRollbackPayload_LegacyTopologyRecovery(t *testing.T) {
 	r, _ := newReconciler(t, worker, otherRevision)
 	// Recovery must still inspect the stable revision when the canary removed
 	// topology; live stable workers prove the rollback target used this key.
-	desired := workload.WorkloadDesiredSpec{}
+	desired := workloadtypes.WorkloadDesiredSpec{}
 
 	if err := r.applyRollbackPayload(context.Background(), ir, &desired, payload, target); err != nil {
 		t.Fatalf("applyRollbackPayload: %v", err)
@@ -243,7 +242,7 @@ func TestApplyRollbackPayload_LegacyTopologyWithoutEvidenceFailsClosed(t *testin
 		WorkerPodSpec: &corev1.PodSpec{Containers: []corev1.Container{{Name: "worker"}}},
 	}
 	r, _ := newReconciler(t)
-	desired := workload.WorkloadDesiredSpec{TopologyKey: "topology.example.com/current"}
+	desired := workloadtypes.WorkloadDesiredSpec{TopologyKey: "topology.example.com/current"}
 
 	err := r.applyRollbackPayload(context.Background(), ir, &desired, payload, target)
 	if err == nil || !strings.Contains(err.Error(), "no unambiguous OME-generated topology") {
@@ -261,7 +260,7 @@ func TestApplyRollbackPayload_LegacyTopologyAmbiguityFailsClosed(t *testing.T) {
 	podA := rollbackTopologyWorker(ir, "worker-a", "0", "stablehash", "topology.example.com/a")
 	podB := rollbackTopologyWorker(ir, "worker-b", "1", "stablehash", "topology.example.com/b")
 	r, _ := newReconciler(t, podA, podB)
-	desired := workload.WorkloadDesiredSpec{TopologyKey: "topology.example.com/current"}
+	desired := workloadtypes.WorkloadDesiredSpec{TopologyKey: "topology.example.com/current"}
 
 	err := r.applyRollbackPayload(context.Background(), ir, &desired, payload, target)
 	if err == nil || !strings.Contains(err.Error(), "conflicting OME-generated topology") {
@@ -270,7 +269,7 @@ func TestApplyRollbackPayload_LegacyTopologyAmbiguityFailsClosed(t *testing.T) {
 }
 
 func TestApplyRollbackPayload_LegacyTopologyFreeDoesNotBlock(t *testing.T) {
-	desired := workload.WorkloadDesiredSpec{}
+	desired := workloadtypes.WorkloadDesiredSpec{}
 	payload := &revision.DataPayload{
 		PodSpec:       &corev1.PodSpec{Containers: []corev1.Container{{Name: "leader"}}},
 		WorkerPodSpec: &corev1.PodSpec{Containers: []corev1.Container{{Name: "worker"}}},
@@ -365,7 +364,7 @@ func TestReconcile_TerminatingPodGroupHoldsWithoutPods(t *testing.T) {
 	}
 	now := metav1.Now()
 	pg := &schedulingv1alpha1.PodGroup{ObjectMeta: metav1.ObjectMeta{
-		Name:              query.PodGroupName(ir.Spec.ParentRef.Name, workload.ComponentEngine, 0),
+		Name:              query.PodGroupName(ir.Spec.ParentRef.Name, workloadtypes.ComponentEngine, 0),
 		Namespace:         ir.Namespace,
 		UID:               "terminating-pg",
 		DeletionTimestamp: &now,
@@ -398,8 +397,8 @@ func TestReconcile_TerminatingPodGroupHoldsWithoutPods(t *testing.T) {
 		t.Fatalf("instance statuses: got %d want 1", len(got.Status.InstanceStatuses))
 	}
 	op := got.Status.InstanceStatuses[0].Operation
-	if op == nil || op.Waiting != workload.WaitingReasonPodGroupTerminating {
-		t.Fatalf("Operation.Waiting: got %+v want %q", op, workload.WaitingReasonPodGroupTerminating)
+	if op == nil || op.Waiting != workloadtypes.WaitingReasonPodGroupTerminating {
+		t.Fatalf("Operation.Waiting: got %+v want %q", op, workloadtypes.WaitingReasonPodGroupTerminating)
 	}
 }
 
@@ -424,12 +423,12 @@ func TestReconcile_GangCleanupRetainsStatusUntilPodGroupAbsent(t *testing.T) {
 			TargetRevision: "llama-engine-retired",
 			Operation: &v1beta1.InstanceOperation{
 				ID: "target-2", Type: v1beta1.InstanceOperationUpdate,
-				Step: workload.UpdateStepGangSurgeTarget, TargetRevision: "llama-engine-retired",
+				Step: workloadtypes.UpdateStepGangSurgeTarget, TargetRevision: "llama-engine-retired",
 			},
 		},
 	}
 	targetPG := &schedulingv1alpha1.PodGroup{ObjectMeta: metav1.ObjectMeta{
-		Name:            query.PodGroupName(ir.Spec.ParentRef.Name, workload.ComponentEngine, surgeIndex),
+		Name:            query.PodGroupName(ir.Spec.ParentRef.Name, workloadtypes.ComponentEngine, surgeIndex),
 		Namespace:       ir.Namespace,
 		UID:             "target-pg",
 		Finalizers:      []string{"example.com/hold"},
@@ -800,8 +799,8 @@ func TestReconcile_Create_ConfiguredBatchSizeCapsPods(t *testing.T) {
 	g.Expect(pods.Items).To(gomega.HaveLen(2),
 		"configured scale-up Pod batch size must cap a reconcile to two missing Pods")
 	g.Expect(podNames(pods.Items)).To(gomega.ConsistOf(
-		query.PodName("llama", workload.ComponentEngine, 0, "default", 0),
-		query.PodName("llama", workload.ComponentEngine, 1, "default", 0),
+		query.PodName("llama", workloadtypes.ComponentEngine, 0, "default", 0),
+		query.PodName("llama", workloadtypes.ComponentEngine, 1, "default", 0),
 	))
 
 	got := &v1beta1.InferenceReplica{}
@@ -816,10 +815,10 @@ func TestReconcile_Create_ConfiguredBatchSizeCapsPods(t *testing.T) {
 
 // TestReconcile_Create_AlsoCreatesHeadlessService pins the headless
 // Service wire-in: a fresh IR reconcile must call
-// workload.ReconcileHeadlessService alongside workload.Reconcile so a
+// service.ReconcileHeadlessService alongside workload.Reconcile so a
 // per-Component headless Service appears in the same pass that creates
 // the pods. The Service rendering itself is unit-tested in
-// workload/services_test.go — this test only verifies the wire-in.
+// workload/service/service_test.go — this test only verifies the wire-in.
 //
 // Asserts on the canonical shape:
 //   - Name == query.HeadlessServiceName(parent, component) so any
@@ -1201,42 +1200,42 @@ func TestReconcile_SteadySinglePodSkipsAuthoritativePodGroupInventory(t *testing
 func TestRequiresAuthoritativePodGroupInventoryLifecycleTriggers(t *testing.T) {
 	ir := baselineIR("llama-engine", "podgroup-inventory-triggers", 1)
 	r, _ := newReconciler(t, ir)
-	singlePlan := workload.ComponentPlan{
-		Component: workload.ComponentEngine,
-		Instances: []workload.InstancePlan{{
+	singlePlan := workloadtypes.ComponentPlan{
+		Component: workloadtypes.ComponentEngine,
+		Instances: []workloadtypes.InstancePlan{{
 			Index:   0,
-			Runners: []workload.RunnerPlan{{Name: "default", Size: 1}},
+			Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}},
 		}},
 	}
 	multiPlan := singlePlan
-	multiPlan.Instances = []workload.InstancePlan{{
+	multiPlan.Instances = []workloadtypes.InstancePlan{{
 		Index: 0,
-		Runners: []workload.RunnerPlan{
+		Runners: []workloadtypes.RunnerPlan{
 			{Name: "leader", Size: 1},
 			{Name: "worker", Size: 1},
 		},
 	}}
-	steadyInput := workload.ReconcileInput{
+	steadyInput := workloadtypes.ReconcileInput{
 		OwnerObject: ir,
-		ObservedState: workload.WorkloadObservedState{InstanceStatuses: []workload.InstanceStatus{{
+		ObservedState: workloadtypes.WorkloadObservedState{InstanceStatuses: []workloadtypes.InstanceStatus{{
 			Index: 0,
-			Phase: workload.InstancePhaseReady,
+			Phase: workloadtypes.InstancePhaseReady,
 		}}},
 	}
 	scaleDownInput := steadyInput
 	scaleDownInput.ObservedState.InstanceStatuses = append(
-		append([]workload.InstanceStatus(nil), steadyInput.ObservedState.InstanceStatuses...),
-		workload.InstanceStatus{Index: 1, Phase: workload.InstancePhaseReady})
+		append([]workloadtypes.InstanceStatus(nil), steadyInput.ObservedState.InstanceStatuses...),
+		workloadtypes.InstanceStatus{Index: 1, Phase: workloadtypes.InstancePhaseReady})
 	terminalInput := steadyInput
-	terminalInput.ObservedState.Migrations = []workload.MigrationRecord{{
+	terminalInput.ObservedState.Migrations = []workloadtypes.MigrationRecord{{
 		SourceInstance: 0,
-		Phase:          workload.MigrationPhaseDraining,
+		Phase:          workloadtypes.MigrationPhaseDraining,
 	}}
 
 	for _, tc := range []struct {
 		name  string
-		input workload.ReconcileInput
-		plan  workload.ComponentPlan
+		input workloadtypes.ReconcileInput
+		plan  workloadtypes.ComponentPlan
 		want  bool
 	}{
 		{name: "steady single pod", input: steadyInput, plan: singlePlan, want: false},
@@ -1561,7 +1560,7 @@ func TestReconcile_MultiToSinglePodGroupSkipsStaleDeleteOwnedRebound(t *testing.
 		APIReader:               liveClient,
 		Log:                     logf.Log.WithName("test"),
 		InstanceStatusTarget:    irstatus.EncodingDenseV1,
-		Expectations:            workload.NewExpectations(),
+		Expectations:            workloadtypes.NewExpectations(),
 		GangSchedulingAvailable: true,
 	}
 
@@ -1855,7 +1854,7 @@ func TestReconcile_StatusWriteFailureStillSweepsRevisions(t *testing.T) {
 		APIReader:            c,
 		Log:                  logf.Log.WithName("test"),
 		InstanceStatusTarget: irstatus.EncodingDenseV1,
-		Expectations:         workload.NewExpectations(),
+		Expectations:         workloadtypes.NewExpectations(),
 	}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
@@ -1899,21 +1898,21 @@ func TestReconcileRelocationDirectives_ProjectionUsesCachedClient(t *testing.T) 
 
 func TestTerminalFinalizationOwned_GangSourceMarkerSurvivesRemovalRetry(t *testing.T) {
 	surgeIndex := int32(7)
-	observed := workload.WorkloadObservedState{
-		InstanceStatuses: []workload.InstanceStatus{
+	observed := workloadtypes.WorkloadObservedState{
+		InstanceStatuses: []workloadtypes.InstanceStatus{
 			{
 				Index: 3,
-				Operation: &workload.InstanceOperation{
-					Type:       workload.InstanceOperationUpdate,
+				Operation: &workloadtypes.InstanceOperation{
+					Type:       workloadtypes.InstanceOperationUpdate,
 					Step:       workloadtypes.UpdateStepSurgeDrain,
 					SurgeIndex: &surgeIndex,
 				},
 			},
 			{
 				Index: surgeIndex,
-				Operation: &workload.InstanceOperation{
-					Type: workload.InstanceOperationUpdate,
-					Step: workload.UpdateStepGangSurgeTargetCleanup,
+				Operation: &workloadtypes.InstanceOperation{
+					Type: workloadtypes.InstanceOperationUpdate,
+					Step: workloadtypes.UpdateStepGangSurgeTargetCleanup,
 				},
 			},
 		},
@@ -1928,7 +1927,7 @@ func TestTerminalFinalizationOwned_GangSourceMarkerSurvivesRemovalRetry(t *testi
 	}
 
 	observed.InstanceStatuses[0].Operation.Step = workloadtypes.UpdateStepSurge
-	observed.InstanceStatuses[1].Operation.Step = workload.UpdateStepGangSurgeTarget
+	observed.InstanceStatuses[1].Operation.Step = workloadtypes.UpdateStepGangSurgeTarget
 	if _, found := terminalFinalizationOwned(observed)[3]; found {
 		t.Fatal("pre-terminal gang source unexpectedly suppressed PodGroup ensure")
 	}
@@ -1940,38 +1939,38 @@ func TestTerminalFinalizationOwned_MigrationAndOrdinaryDelete(t *testing.T) {
 	const index int32 = 4
 	tests := []struct {
 		name     string
-		observed workload.WorkloadObservedState
+		observed workloadtypes.WorkloadObservedState
 		want     bool
 	}{
 		{
 			name: "draining migration owns finalization",
-			observed: workload.WorkloadObservedState{Migrations: []workload.MigrationRecord{{
+			observed: workloadtypes.WorkloadObservedState{Migrations: []workloadtypes.MigrationRecord{{
 				SourceInstance: index,
-				Phase:          workload.MigrationPhaseDraining,
+				Phase:          workloadtypes.MigrationPhaseDraining,
 			}}},
 			want: true,
 		},
 		{
 			name: "surge-ready migration does not own finalization",
-			observed: workload.WorkloadObservedState{Migrations: []workload.MigrationRecord{{
+			observed: workloadtypes.WorkloadObservedState{Migrations: []workloadtypes.MigrationRecord{{
 				SourceInstance: index,
-				Phase:          workload.MigrationPhaseSurgeReady,
+				Phase:          workloadtypes.MigrationPhaseSurgeReady,
 			}}},
 		},
 		{
 			name: "completed migration does not own finalization",
-			observed: workload.WorkloadObservedState{Migrations: []workload.MigrationRecord{{
+			observed: workloadtypes.WorkloadObservedState{Migrations: []workloadtypes.MigrationRecord{{
 				SourceInstance: index,
-				Phase:          workload.MigrationPhaseCompleted,
+				Phase:          workloadtypes.MigrationPhaseCompleted,
 			}}},
 		},
 		{
 			name: "ordinary delete owns finalization",
-			observed: workload.WorkloadObservedState{InstanceStatuses: []workload.InstanceStatus{{
+			observed: workloadtypes.WorkloadObservedState{InstanceStatuses: []workloadtypes.InstanceStatus{{
 				Index: index,
-				Phase: workload.InstancePhaseDeleting,
-				Operation: &workload.InstanceOperation{
-					Type: workload.InstanceOperationDelete,
+				Phase: workloadtypes.InstancePhaseDeleting,
+				Operation: &workloadtypes.InstanceOperation{
+					Type: workloadtypes.InstanceOperationDelete,
 				},
 			}}},
 			want: true,

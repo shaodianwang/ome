@@ -17,8 +17,8 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	workloadstatus "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
 	"github.com/ome-projects/ome/pkg/rollout"
 )
 
@@ -661,7 +661,7 @@ func buildComponentObservation(summary *v1beta1.InferenceReplicaStatus, c v1beta
 	// (Replicas-Partition) instances Ready on the target revision and
 	// Partition instances Ready on the prior revision? Partition=0 means
 	// this is the RolloutComplete predicate.
-	out.AtDesiredShape = workload.ReachedDesiredShape(
+	out.AtDesiredShape = workloadstatus.ReachedDesiredShape(
 		v1beta1convert.InstanceStatusSliceToWorkload(summary.InstanceStatuses),
 		summary.UpdateRevision, partition, summary.Replicas)
 	return out

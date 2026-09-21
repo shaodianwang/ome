@@ -68,8 +68,8 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/traffic"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/traffic/translators"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 	"github.com/ome-projects/ome/tests/integration/util"
 	"github.com/ome-projects/ome/tests/perf/internal/opcount"
 	"github.com/ome-projects/ome/tests/perf/omenative/runner/config"
@@ -480,7 +480,7 @@ func startManager(ctx context.Context, restCfg *rest.Config, rec *recorder.Recor
 		InstanceStatusDecoder:    irstatus.NewDecoder(statusConfig.DecodeBound()),
 		InstanceStatusTarget:     statusConfig.InstanceStatusEncoding,
 		Recorder:                 mgr.GetEventRecorderFor("InferenceReplica"),
-		Expectations:             workload.NewExpectations(),
+		Expectations:             workloadtypes.NewExpectations(),
 		MaxConcurrentReconciles:  *irConcurrency,
 		ConfigCacheTTL:           *configCacheTTL,
 		ScaleUpPodBatchSize:      podBatchSizes.ScaleUp,

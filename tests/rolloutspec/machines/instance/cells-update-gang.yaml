@@ -694,7 +694,7 @@ cells:
   - state: Update/GangSurgeTarget
     event: pod.admitted
     outcome: ignore
-    note: ReconcileGatedDeadlines in pkg/controller/v1beta1/workload/deadline.go restarts this row's parked deadline from admission and the escalation pass stops skipping it; no step of the surge advances on the gate exit itself
+    note: ReconcileGatedDeadlines in pkg/controller/v1beta1/workload/escalation/deadline.go restarts this row's parked deadline from admission and the escalation pass stops skipping it; no step of the surge advances on the gate exit itself
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -892,7 +892,7 @@ cells:
     outcome: transition
     to: Failed
     guard: a replacement pod holds a terminal waiting reason, the replacement pod set is not fully serving, and a gang Update attempt is never disposable
-    note: the fast path in pkg/controller/v1beta1/workload/escalation.go stamps Phase Failed with the operation preserved; the stamp is diagnostic because the source's claim predicates read revision and step, never phase
+    note: the fast path in pkg/controller/v1beta1/workload/escalation/escalation.go stamps Phase Failed with the operation preserved; the stamp is diagnostic because the source's claim predicates read revision and step, never phase
     placement: kind
     coverage: {perm: [], unit: [], kind: [], replay: [gangtarget-stuckgrace]}
     status: current
@@ -1154,7 +1154,7 @@ cells:
     outcome: transition
     to: Failed
     guard: a retired replacement pod holds the reason past the stuck-pod grace while carrying no deletionTimestamp, the set is not fully serving, and a gang Update attempt is never disposable
-    note: the stuck classifier reads live pods only — FirstStuckPodForInstance in pkg/controller/v1beta1/workload/status_aggregate.go skips a pod carrying a deletionTimestamp — so the reading survives exactly as long as the retirement has landed no delete on that pod, which is the same window the state's timer.stuckPodGrace cell admits. The retirement issues its deletes from the pass that claims the marker, and they can fail (an apiserver rejection), be withheld (the surge bucket's expectations unsatisfied) or never be issued at all (the claim no longer matches the source's target); any of those holds the window open. pkg/controller/v1beta1/workload/escalation.go then stamps Phase Failed with the waiting reason on LastFailure and the operation preserved, and since the cleanup claim matches on revision and step rather than phase, the stamp is diagnostic and the retirement still completes (T-gangcleanup-stuck-failed)
+    note: the stuck classifier reads live pods only — FirstStuckPodForInstance in pkg/controller/v1beta1/workload/status_aggregate.go skips a pod carrying a deletionTimestamp — so the reading survives exactly as long as the retirement has landed no delete on that pod, which is the same window the state's timer.stuckPodGrace cell admits. The retirement issues its deletes from the pass that claims the marker, and they can fail (an apiserver rejection), be withheld (the surge bucket's expectations unsatisfied) or never be issued at all (the claim no longer matches the source's target); any of those holds the window open. pkg/controller/v1beta1/workload/escalation/escalation.go then stamps Phase Failed with the waiting reason on LastFailure and the operation preserved, and since the cleanup claim matches on revision and step rather than phase, the stamp is diagnostic and the retirement still completes (T-gangcleanup-stuck-failed)
     placement: kind
     coverage: {perm: [], unit: [], kind: [], replay: [gangcleanup-stuck]}
     status: decided
@@ -1475,7 +1475,7 @@ cells:
   - state: Update/GangSurgeTargetCleanup
     event: pod.admitted
     outcome: ignore
-    note: a retired pod leaving its admission gate is deleted regardless; the gate exit only restarts this row's parked deadline in pkg/controller/v1beta1/workload/deadline.go, and that stamp is diagnostic
+    note: a retired pod leaving its admission gate is deleted regardless; the gate exit only restarts this row's parked deadline in pkg/controller/v1beta1/workload/escalation/deadline.go, and that stamp is diagnostic
     placement: sim
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -1594,7 +1594,7 @@ cells:
     outcome: transition
     to: Failed
     guard: a retired replacement pod still holds a terminal waiting reason and has not yet been marked for deletion, the set is not fully serving, and a gang Update attempt is never disposable
-    note: pkg/controller/v1beta1/workload/escalation.go stamps Phase Failed with the operation preserved; once the retirement's delete lands the classifier skips the pod, so this edge is reachable only before it does
+    note: pkg/controller/v1beta1/workload/escalation/escalation.go stamps Phase Failed with the operation preserved; once the retirement's delete lands the classifier skips the pod, so this edge is reachable only before it does
     placement: kind
     coverage: {perm: [], unit: [], kind: [], replay: [gangcleanup-stuckgrace]}
     status: current
@@ -1702,7 +1702,7 @@ cells:
     event: pod.runningNotReady
     variants: [target]
     outcome: defer
-    note: AllPodsRuntimeReady is recomputed from a live list every pass and how long a member has been trying drives no decision, so one member failing its probes keeps the whole gang's drain gate closed until the operation deadline. At that deadline the readiness wait is evidence - the record names the first such member, its first unready container and the readiness condition's message under reason ContainersNotReady - but it decides no branch, because readiness limbo is ambiguous between the revision and the node and charges no ladder (pkg/controller/v1beta1/workload/ops/update_gang.go, pkg/controller/v1beta1/workload/deadline.go)
+    note: AllPodsRuntimeReady is recomputed from a live list every pass and how long a member has been trying drives no decision, so one member failing its probes keeps the whole gang's drain gate closed until the operation deadline. At that deadline the readiness wait is evidence - the record names the first such member, its first unready container and the readiness condition's message under reason ContainersNotReady - but it decides no branch, because readiness limbo is ambiguous between the revision and the node and charges no ladder (pkg/controller/v1beta1/workload/ops/update_gang.go, pkg/controller/v1beta1/workload/escalation/deadline.go)
     placement: kind
     coverage: {perm: [], unit: [TestEscalation_GangDeadlineWithRunningNotReadyPods_NamesTheProbe], kind: []}
     status: current

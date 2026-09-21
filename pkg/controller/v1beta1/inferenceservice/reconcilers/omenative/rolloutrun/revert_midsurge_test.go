@@ -6,19 +6,21 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	workloadstatus "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // irPublished builds the IR snapshot the run reconciler reads by running
 // the same publication the InferenceReplica controller runs, so the
 // counters under test are the published ones rather than hand-written
 // numbers.
-func irPublished(t *testing.T, current, target string, rows []workload.InstanceStatus) *v1beta1.InferenceReplica {
+func irPublished(t *testing.T, current, target string, rows []workloadtypes.InstanceStatus) *v1beta1.InferenceReplica {
 	t.Helper()
 	observation, err := workload.NewOwnedPublicationObservation(
-		append([]workload.InstanceStatus(nil), rows...),
+		append([]workloadtypes.InstanceStatus(nil), rows...),
 		workload.NewCachedSelectorPodObservation(nil, nil),
 		nil,
-		workload.AvailabilityWindow{},
+		workloadstatus.AvailabilityWindow{},
 	)
 	if err != nil {
 		t.Fatalf("NewOwnedPublicationObservation: %v", err)
@@ -37,15 +39,15 @@ func irPublished(t *testing.T, current, target string, rows []workload.InstanceS
 	return ir
 }
 
-func rowOn(index int32, running string) workload.InstanceStatus {
-	return workload.InstanceStatus{Index: index, RunningRevision: running}
+func rowOn(index int32, running string) workloadtypes.InstanceStatus {
+	return workloadtypes.InstanceStatus{Index: index, RunningRevision: running}
 }
 
-func rowRollingTo(index int32, running, pinned string) workload.InstanceStatus {
-	return workload.InstanceStatus{
+func rowRollingTo(index int32, running, pinned string) workloadtypes.InstanceStatus {
+	return workloadtypes.InstanceStatus{
 		Index:           index,
 		RunningRevision: running,
-		Operation:       &workload.InstanceOperation{Type: workload.InstanceOperationUpdate, TargetRevision: pinned},
+		Operation:       &workloadtypes.InstanceOperation{Type: workloadtypes.InstanceOperationUpdate, TargetRevision: pinned},
 	}
 }
 
@@ -85,7 +87,7 @@ func TestRevertMidSurgeKeepsOneRunOpen(t *testing.T) {
 	}
 
 	// Converged on the old revision.
-	pass(t, irPublished(t, oldRev, oldRev, []workload.InstanceStatus{
+	pass(t, irPublished(t, oldRev, oldRev, []workloadtypes.InstanceStatus{
 		rowOn(0, oldRev), rowOn(1, oldRev), rowOn(2, oldRev),
 	}))
 	if active() != nil {
@@ -93,14 +95,14 @@ func TestRevertMidSurgeKeepsOneRunOpen(t *testing.T) {
 	}
 
 	// Roll toward the new revision; index 1 surges first.
-	pass(t, irPublished(t, oldRev, newRev, []workload.InstanceStatus{
+	pass(t, irPublished(t, oldRev, newRev, []workloadtypes.InstanceStatus{
 		rowOn(0, oldRev), rowRollingTo(1, oldRev, newRev), rowOn(2, oldRev),
 	}))
 	rolling := runID(t, "roll to the new revision")
 
 	// Revert while index 1 is still surging. Every row runs the restored
 	// revision, so only the pin distinguishes this from convergence.
-	pass(t, irPublished(t, oldRev, oldRev, []workload.InstanceStatus{
+	pass(t, irPublished(t, oldRev, oldRev, []workloadtypes.InstanceStatus{
 		rowOn(0, oldRev), rowRollingTo(1, oldRev, newRev), rowOn(2, oldRev),
 	}))
 	reverting := runID(t, "revert mid-surge")
@@ -108,13 +110,13 @@ func TestRevertMidSurgeKeepsOneRunOpen(t *testing.T) {
 	// The surge promotes its replacement onto the pinned revision, then
 	// rolls that replacement back. Both steps belong to the run the
 	// revert is already running.
-	pass(t, irPublished(t, oldRev, oldRev, []workload.InstanceStatus{
+	pass(t, irPublished(t, oldRev, oldRev, []workloadtypes.InstanceStatus{
 		rowOn(0, oldRev), rowOn(1, newRev), rowOn(2, oldRev),
 	}))
 	if got := runID(t, "surge promoted"); got != reverting {
 		t.Fatalf("promote opened a second run: got %s want %s (superseded %s)", got, reverting, rolling)
 	}
-	pass(t, irPublished(t, oldRev, oldRev, []workload.InstanceStatus{
+	pass(t, irPublished(t, oldRev, oldRev, []workloadtypes.InstanceStatus{
 		rowOn(0, oldRev), rowRollingTo(1, newRev, oldRev), rowOn(2, oldRev),
 	}))
 	if got := runID(t, "rolling back"); got != reverting {
@@ -123,7 +125,7 @@ func TestRevertMidSurgeKeepsOneRunOpen(t *testing.T) {
 
 	// Genuine convergence closes the run, and it stays closed.
 	for i := 0; i < 5; i++ {
-		pass(t, irPublished(t, oldRev, oldRev, []workload.InstanceStatus{
+		pass(t, irPublished(t, oldRev, oldRev, []workloadtypes.InstanceStatus{
 			rowOn(0, oldRev), rowOn(1, oldRev), rowOn(2, oldRev),
 		}))
 		if active() != nil {

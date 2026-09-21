@@ -12,7 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // reconcileForReadyTimeout runs one pass over a fresh IR and returns the
@@ -63,11 +63,11 @@ func TestInstanceReadyTimeout_UnconfiguredOpensWithNoDeadline(t *testing.T) {
 	g.Expect(op.Deadline.IsZero()).To(gomega.BeTrue(),
 		"an unconfigured readiness window must open the operation with no deadline")
 
-	cond := conditionOfType(stored.Status.Conditions, string(workload.ConditionInstanceReadyTimeoutUnconfigured))
+	cond := conditionOfType(stored.Status.Conditions, string(workloadtypes.ConditionInstanceReadyTimeoutUnconfigured))
 	g.Expect(cond).NotTo(gomega.BeNil())
 	g.Expect(cond.Status).To(gomega.Equal(metav1.ConditionTrue))
-	g.Expect(cond.Reason).To(gomega.Equal(string(workload.ReasonInstanceReadyTimeoutUnconfigured)))
-	g.Expect(eventsContaining(events, string(workload.EventReasonInstanceReadyTimeoutUnconfigured))).To(gomega.HaveLen(1))
+	g.Expect(cond.Reason).To(gomega.Equal(string(workloadtypes.ReasonInstanceReadyTimeoutUnconfigured)))
+	g.Expect(eventsContaining(events, string(workloadtypes.EventReasonInstanceReadyTimeoutUnconfigured))).To(gomega.HaveLen(1))
 }
 
 // TestInstanceReadyTimeout_ConfigSuppliesTheWindow pins the fallback: a
@@ -85,11 +85,11 @@ func TestInstanceReadyTimeout_ConfigSuppliesTheWindow(t *testing.T) {
 	g.Expect(op).NotTo(gomega.BeNil())
 	g.Expect(op.Deadline.Time).To(gomega.BeTemporally("~", before.Add(30*time.Minute), time.Minute))
 
-	cond := conditionOfType(stored.Status.Conditions, string(workload.ConditionInstanceReadyTimeoutUnconfigured))
+	cond := conditionOfType(stored.Status.Conditions, string(workloadtypes.ConditionInstanceReadyTimeoutUnconfigured))
 	g.Expect(cond).NotTo(gomega.BeNil())
 	g.Expect(cond.Status).To(gomega.Equal(metav1.ConditionFalse))
-	g.Expect(cond.Reason).To(gomega.Equal(string(workload.ReasonInstanceReadyTimeoutConfigured)))
-	g.Expect(eventsContaining(events, string(workload.EventReasonInstanceReadyTimeoutUnconfigured))).To(gomega.BeEmpty())
+	g.Expect(cond.Reason).To(gomega.Equal(string(workloadtypes.ReasonInstanceReadyTimeoutConfigured)))
+	g.Expect(eventsContaining(events, string(workloadtypes.EventReasonInstanceReadyTimeoutUnconfigured))).To(gomega.BeEmpty())
 }
 
 // TestInstanceReadyTimeout_SpecWinsOverConfig pins the precedence: an

@@ -26,7 +26,10 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	workloadstatus "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // InferenceReplicaConditionReady is the top-level condition type written
@@ -131,14 +134,14 @@ const (
 // inside the spec.minReadySeconds window becomes Available (0 when none is
 // pending). That raises the Available counters without any watch event, so
 // the caller folds it into the reconcile result to publish them on time.
-func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.InferenceReplica, plan workload.ComponentPlan, target *appsv1.ControllerRevision, holdObserved bool, hold *workload.RolloutHold) (time.Duration, error) {
+func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.InferenceReplica, plan workloadtypes.ComponentPlan, target *appsv1.ControllerRevision, holdObserved bool, hold *workloadtypes.RolloutHold) (time.Duration, error) {
 	if r.Client == nil {
 		return 0, fmt.Errorf("aggregateAndWriteStatus: nil client")
 	}
 	key := client.ObjectKeyFromObject(ir)
 	ownerUID := ir.UID
 	ownerGeneration := ir.Generation
-	desiredByIdx := workload.DesiredPodCountByInstance(plan)
+	desiredByIdx := workloadstatus.DesiredPodCountByInstance(plan)
 	component := v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component)
 
 	// List pods + EndpointSlices via the CACHED client (r.Client), outside
@@ -162,7 +165,7 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 	byIndex := query.BucketPodsByInstanceIdx(pods)
 	podObservation := workload.NewCachedSelectorPodObservation(pods, byIndex)
 	serviceName := query.HeadlessServiceName(ir.Spec.ParentRef.Name, component)
-	availableByPod, err := workload.AvailablePodSet(ctx, r.Client, ir.Namespace, serviceName)
+	availableByPod, err := workloadstatus.AvailablePodSet(ctx, r.Client, ir.Namespace, serviceName)
 	if err != nil {
 		return 0, fmt.Errorf("aggregateAndWriteStatus: compute availability: %w", err)
 	}
@@ -186,7 +189,7 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 			return nil
 		}
 		if fresh.Generation != ownerGeneration {
-			return workload.ErrStatusMutationPrecondition
+			return workloadtypes.ErrStatusMutationPrecondition
 		}
 
 		// Snapshot the live status before recomputation so a no-op
@@ -203,7 +206,7 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 			v1beta1convert.InstanceStatusSliceToWorkload(fresh.Status.InstanceStatuses),
 			podObservation,
 			availableByPod,
-			workload.AvailabilityWindow{MinReadySeconds: plan.MinReadySeconds, Now: r.now()},
+			workloadstatus.AvailabilityWindow{MinReadySeconds: plan.MinReadySeconds, Now: r.now()},
 		)
 		if err != nil {
 			return fmt.Errorf("aggregateAndWriteStatus: build publication observation: %w", err)
@@ -300,7 +303,7 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 	}); err != nil {
 		// A generation change replans without a write outcome. Other terminal
 		// retry failures retain their status-write classification.
-		if !errors.Is(err, workload.ErrStatusMutationPrecondition) {
+		if !errors.Is(err, workloadtypes.ErrStatusMutationPrecondition) {
 			if apierrors.IsConflict(err) {
 				obsmetrics.RecordStatusUpdate(obsmetrics.ControllerIR, obsmetrics.ResultConflict)
 			} else {
@@ -329,7 +332,7 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 // mirrorBack copies Component fields and transient publication counters onto
 // the caller's in-memory IR. Lifecycle fields remain owned by workload
 // operations and are left untouched.
-func mirrorBack(ir, fresh *v1beta1.InferenceReplica, publication []workload.InstanceStatus) {
+func mirrorBack(ir, fresh *v1beta1.InferenceReplica, publication []workloadtypes.InstanceStatus) {
 	ir.Status.Replicas = fresh.Status.Replicas
 	ir.Status.ReadyReplicas = fresh.Status.ReadyReplicas
 	ir.Status.ServingReplicas = fresh.Status.ServingReplicas
@@ -365,7 +368,7 @@ func (r *Reconciler) reconcileHeldDeadlines(ctx context.Context, ir *v1beta1.Inf
 	held := make(map[int32]bool, len(byIndex))
 	for idx, pods := range byIndex {
 		for _, p := range pods {
-			if workload.PodAdmissionGated(p) {
+			if workloadtypes.PodAdmissionGated(p) {
 				held[idx] = true
 				break
 			}
@@ -389,19 +392,19 @@ func (r *Reconciler) reconcileHeldDeadlines(ctx context.Context, ir *v1beta1.Inf
 			held[ir.Status.InstanceStatuses[i].Index] = true
 		}
 	}
-	return workload.ReconcileGatedDeadlines(ctx, r.buildDeadlineParkInput(ir),
+	return escalation.ReconcileGatedDeadlines(ctx, r.buildDeadlineParkInput(ir),
 		v1beta1convert.InstanceStatusSliceToWorkload(ir.Status.InstanceStatuses), held, timeout)
 }
 
 // buildDeadlineParkInput builds the minimal workload.ReconcileInput the
-// InstanceReadyTimeout parking step (workload.ReconcileGatedDeadlines)
+// InstanceReadyTimeout parking step (escalation.ReconcileGatedDeadlines)
 // consumes: the deadline write goes through MutateInstance (same retry +
 // in-memory-mirror semantics as dispatch-time writes) and the clock seam
 // supplies now. The remaining callbacks satisfy the ReconcileInput
 // must-be-set contract as explicit no-ops — parking never removes
 // instances, writes conditions, or emits events.
-func (r *Reconciler) buildDeadlineParkInput(ir *v1beta1.InferenceReplica) workload.ReconcileInput {
-	return workload.ReconcileInput{
+func (r *Reconciler) buildDeadlineParkInput(ir *v1beta1.InferenceReplica) workloadtypes.ReconcileInput {
+	return workloadtypes.ReconcileInput{
 		OwnerObject:             ir,
 		OwnerGVK:                irGVK,
 		Key:                     buildKey(ir),
@@ -416,11 +419,11 @@ func (r *Reconciler) buildDeadlineParkInput(ir *v1beta1.InferenceReplica) worklo
 
 // mirrorInstanceCounters copies transient Pod counters by Instance index.
 // Lifecycle and admission fields remain untouched.
-func mirrorInstanceCounters(status *v1beta1.InferenceReplicaStatus, publication []workload.InstanceStatus) {
+func mirrorInstanceCounters(status *v1beta1.InferenceReplicaStatus, publication []workloadtypes.InstanceStatus) {
 	if status == nil {
 		return
 	}
-	publicationByIdx := make(map[int32]workload.InstanceStatus, len(publication))
+	publicationByIdx := make(map[int32]workloadtypes.InstanceStatus, len(publication))
 	for _, instance := range publication {
 		publicationByIdx[instance.Index] = instance
 	}
@@ -493,7 +496,7 @@ func stagedAtPartition(status *v1beta1.InferenceReplicaStatus, pacing *v1beta1.I
 	if part <= 0 {
 		return false
 	}
-	return workload.ReachedDesiredShape(
+	return workloadstatus.ReachedDesiredShape(
 		v1beta1convert.InstanceStatusSliceToWorkload(status.InstanceStatuses),
 		status.UpdateRevision, part, status.Replicas)
 }
@@ -531,7 +534,7 @@ func computeRolloutStalledCondition(status *v1beta1.InferenceReplicaStatus) meta
 		// An announced overdue drain is a visibility record on a row
 		// leaving the Component, not a rollout failure; it carries its
 		// own condition.
-		if s.LastFailure.Reason == workload.DrainOverdueReason {
+		if s.LastFailure.Reason == workloadtypes.DrainOverdueReason {
 			continue
 		}
 		// It failed before this attempt began, so it is retrying, not stuck.
@@ -578,7 +581,7 @@ func computeDrainOverdueCondition(status *v1beta1.InferenceReplicaStatus) metav1
 		if s.Phase != v1beta1.OMENativeInstanceDeleting || s.LastFailure == nil {
 			continue
 		}
-		if s.LastFailure.Reason != workload.DrainOverdueReason {
+		if s.LastFailure.Reason != workloadtypes.DrainOverdueReason {
 			continue
 		}
 		overdue = append(overdue, strconv.Itoa(int(s.Index)))
@@ -624,7 +627,7 @@ func summarizeFailureReasons(reasons map[string]int) string {
 // candidate Instance was denied before reaching it, most commonly a
 // same-target RetryBlock — the persisted RetryBlock/Held state is the
 // only available signal.
-func effectiveRolloutHold(holdObserved bool, hold *workload.RolloutHold, status *v1beta1.InferenceReplicaStatus, now time.Time) *v1beta1.RolloutHold {
+func effectiveRolloutHold(holdObserved bool, hold *workloadtypes.RolloutHold, status *v1beta1.InferenceReplicaStatus, now time.Time) *v1beta1.RolloutHold {
 	if status.UpdateRevision == "" || status.CurrentRevision == status.UpdateRevision {
 		return nil
 	}

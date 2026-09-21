@@ -30,9 +30,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 const (
@@ -95,7 +95,7 @@ func gangMigSimulate(t *testing.T, c client.Client, ns, isvcName string) {
 	}
 
 	for hash, leaders := range leadersByHash {
-		svcName := query.PerRevisionServiceName(isvcName, workload.ComponentEngine, hash)
+		svcName := query.PerRevisionServiceName(isvcName, workloadtypes.ComponentEngine, hash)
 		svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: svcName}}
 		if err := c.Get(ctx, client.ObjectKeyFromObject(svc), svc); apierrors.IsNotFound(err) {
 			svc.Spec = corev1.ServiceSpec{Ports: []corev1.ServicePort{{Name: "http", Port: 8080}}}
@@ -119,7 +119,7 @@ func gangMigSimulate(t *testing.T, c client.Client, ns, isvcName string) {
 		gangMigUpsertSlice(t, c, ns, svcName, eps)
 	}
 
-	headless := query.HeadlessServiceName(isvcName, workload.ComponentEngine)
+	headless := query.HeadlessServiceName(isvcName, workloadtypes.ComponentEngine)
 	eps := make([]discoveryv1.Endpoint, 0, len(all))
 	for i, p := range all {
 		eps = append(eps, discoveryv1.Endpoint{
@@ -225,7 +225,7 @@ func TestReconcile_GangMigrationCompletesAfterSourcePlanRelease(t *testing.T) {
 	// One reconcile + one environment step; expectations are reset first
 	// (a fresh cache reads as satisfied — the informer-caught-up state).
 	step := func(tag string) {
-		r.Expectations = workload.NewExpectations()
+		r.Expectations = workloadtypes.NewExpectations()
 		if _, err := r.Reconcile(ctx, request); err != nil {
 			t.Fatalf("%s reconcile: %v", tag, err)
 		}

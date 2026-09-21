@@ -14,7 +14,7 @@ import (
 // object being collected, so the group cannot be announced yet. The wait
 // resolves itself once that object is gone and never escalates — a name
 // held by ANOTHER controller is a terminal verdict instead, and belongs
-// to the escalation pass (escalation_gang.go).
+// to the escalation pass (escalation/gang.go).
 //
 // Whether the gang can be PLACED is not read here. That reaches the
 // Instance on its member pods and is the scheduler hold's.

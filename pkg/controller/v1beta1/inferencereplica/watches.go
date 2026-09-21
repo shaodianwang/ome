@@ -18,9 +18,9 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // irKind is the Kind string on the controller owner reference the
@@ -210,7 +210,7 @@ func managedByOMENativePredicate() predicate.Predicate {
 //   - ContainerStatuses / InitContainerStatuses — terminal-failure
 //     detection (CrashLoopBackOff / ImagePullBackOff escalation).
 //   - DeletionTimestamp — drain / recreate ordering.
-//   - Spec.SchedulingGates (via workload.PodAdmissionGated) — drives the
+//   - Spec.SchedulingGates (via types.PodAdmissionGated) — drives the
 //     edge-triggered InstanceReadyTimeout park/restart on Kueue gate-exit
 //     (a gate-removal update changes only SchedulingGates, Phase stays
 //     Pending, so without this it would be dropped).
@@ -235,7 +235,7 @@ func podReconcileRelevantChanged(oldPod, newPod *corev1.Pod) bool {
 	if (oldPod.DeletionTimestamp == nil) != (newPod.DeletionTimestamp == nil) {
 		return true
 	}
-	if workload.PodAdmissionGated(oldPod) != workload.PodAdmissionGated(newPod) {
+	if workloadtypes.PodAdmissionGated(oldPod) != workloadtypes.PodAdmissionGated(newPod) {
 		return true
 	}
 	if oldPod.Spec.NodeName != newPod.Spec.NodeName {
@@ -385,12 +385,12 @@ var routingLabelKeys = []string{
 // observer feeding the SAME cache the dispatcher reads, those gates only
 // release on the TTL and every surge/recreate stalls (Instance pinned at
 // Phase=Updating, readyReplicas=0).
-func newPodEventHandler(exp *workload.Expectations) handler.EventHandler {
+func newPodEventHandler(exp *workloadtypes.Expectations) handler.EventHandler {
 	return &podEventHandler{expectations: exp}
 }
 
 type podEventHandler struct {
-	expectations *workload.Expectations
+	expectations *workloadtypes.Expectations
 }
 
 func (h *podEventHandler) Create(ctx context.Context, evt event.TypedCreateEvent[client.Object], q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
@@ -470,7 +470,7 @@ func (h *podEventHandler) enqueueOwner(obj client.Object, q workqueue.TypedRateL
 // workloadKeyFromPod pulls (parent-ISVC name, component, instanceIdx)
 // from pod labels — the tuple the workload Expectations cache keys on.
 // Returns ok=false when any required label is missing/unparsable.
-func workloadKeyFromPod(pod *corev1.Pod) (string, workload.ComponentType, int32, bool) {
+func workloadKeyFromPod(pod *corev1.Pod) (string, workloadtypes.ComponentType, int32, bool) {
 	if pod == nil || pod.Labels == nil {
 		return "", "", 0, false
 	}
@@ -489,5 +489,5 @@ func workloadKeyFromPod(pod *corev1.Pod) (string, workload.ComponentType, int32,
 	if !ok {
 		return "", "", 0, false
 	}
-	return isvc, workload.ComponentType(comp), idx, true
+	return isvc, workloadtypes.ComponentType(comp), idx, true
 }

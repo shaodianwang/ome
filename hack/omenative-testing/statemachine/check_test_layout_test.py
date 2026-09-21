@@ -121,7 +121,12 @@ class RowWriterTest(unittest.TestCase):
     def test_a_row_writer_package_may_author_the_closure(self):
         self.assertEqual(self.violations({"status/decision.go": ROW_WRITE}), [])
         self.assertEqual(self.violations({"ops/create.go": ROW_WRITE}), [])
-        self.assertEqual(self.violations({"reconcile.go": ROW_WRITE}), [])
+        self.assertEqual(self.violations({"escalation/refresh.go": ROW_WRITE}), [])
+
+    def test_the_reconcile_root_may_not(self):
+        (violation,) = self.violations({"reconcile.go": ROW_WRITE})
+        self.assertIn("reconcile.go", violation)
+        self.assertIn("row-mutation", violation)
 
     def test_a_reading_package_may_not(self):
         (violation,) = self.violations({"evidence/crashloop.go": ROW_WRITE})

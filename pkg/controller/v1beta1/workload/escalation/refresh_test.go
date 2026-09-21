@@ -1,4 +1,4 @@
-package workload_test
+package escalation_test
 
 // Evidence refresh on an already-Failed row: the escalation pass takes no
 // new edge there, but a row failed on the generic deadline must not keep
@@ -11,7 +11,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // wedgedPod builds a pod parked in a terminal kubelet waiting reason,
@@ -24,18 +25,18 @@ func wedgedPod(name, reason string, created time.Time) *corev1.Pod {
 
 // failedOnDeadline returns a Failed row whose LastFailure is the generic
 // elapsed-deadline record, with the spent attempt preserved.
-func failedOnDeadline(now time.Time) []workload.InstanceStatus {
-	return []workload.InstanceStatus{{
+func failedOnDeadline(now time.Time) []types.InstanceStatus {
+	return []types.InstanceStatus{{
 		Index:    0,
-		Phase:    workload.InstancePhaseFailed,
+		Phase:    types.InstancePhaseFailed,
 		PodCount: 1,
-		Operation: &workload.InstanceOperation{
-			Type:     workload.InstanceOperationRestart,
+		Operation: &types.InstanceOperation{
+			Type:     types.InstanceOperationRestart,
 			Step:     "Drain",
 			Deadline: metav1.NewTime(now.Add(-time.Hour)),
 		},
-		LastFailure: &workload.InstanceTermination{
-			Reason:  workload.DeadlineExceededReason,
+		LastFailure: &types.InstanceTermination{
+			Reason:  escalation.DeadlineExceededReason,
 			Message: "DeadlineExceeded: Restart/Drain exceeded InstanceReadyTimeout",
 			Time:    metav1.NewTime(now.Add(-time.Hour)),
 		},
@@ -54,16 +55,16 @@ func TestEscalation_FailedRowRefreshesGenericDeadlineEvidence(t *testing.T) {
 	input.StuckPodGrace = time.Second
 
 	stuck := wedgedPod("engine-0-default-0", "CrashLoopBackOff", now.Add(-time.Minute))
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+	if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 1),
 		map[int32][]*corev1.Pod{0: {stuck}}); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
 	got := rec.store[0]
-	if got.Phase != workload.InstancePhaseFailed {
+	if got.Phase != types.InstancePhaseFailed {
 		t.Errorf("Phase: got %q want Failed (the refresh takes no edge)", got.Phase)
 	}
-	if got.Operation == nil || got.Operation.Type != workload.InstanceOperationRestart {
+	if got.Operation == nil || got.Operation.Type != types.InstanceOperationRestart {
 		t.Errorf("Operation: got %+v want the spent Restart attempt preserved", got.Operation)
 	}
 	if got.LastFailure == nil || got.LastFailure.Reason != "CrashLoopBackOff" {
@@ -103,14 +104,14 @@ func TestEscalation_FailedRowEvidenceRefreshIsEdgeTriggered(t *testing.T) {
 
 	stuck := wedgedPod("engine-0-default-0", "CrashLoopBackOff", now.Add(-time.Minute))
 	byIdx := map[int32][]*corev1.Pod{0: {stuck}}
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1), byIdx); err != nil {
+	if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 1), byIdx); err != nil {
 		t.Fatalf("first escalation pass: %v", err)
 	}
 	first := *rec.store[0].LastFailure
 
 	// The second pass observes the refreshed row.
-	input.ObservedState.InstanceStatuses = append([]workload.InstanceStatus(nil), rec.store...)
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1), byIdx); err != nil {
+	input.ObservedState.InstanceStatuses = append([]types.InstanceStatus(nil), rec.store...)
+	if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 1), byIdx); err != nil {
 		t.Fatalf("second escalation pass: %v", err)
 	}
 
@@ -127,7 +128,7 @@ func TestEscalation_FailedRowEvidenceRefreshIsEdgeTriggered(t *testing.T) {
 func TestEscalation_FailedRowKeepsConcreteEvidence(t *testing.T) {
 	now := time.Now()
 	insts := failedOnDeadline(now)
-	insts[0].LastFailure = &workload.InstanceTermination{
+	insts[0].LastFailure = &types.InstanceTermination{
 		Reason:  "ImagePullBackOff",
 		PodName: "engine-0-default-0",
 		Message: "pod engine-0-default-0 container main stuck (ImagePullBackOff)",
@@ -137,7 +138,7 @@ func TestEscalation_FailedRowKeepsConcreteEvidence(t *testing.T) {
 	input.StuckPodGrace = time.Second
 
 	stuck := wedgedPod("engine-0-default-0", "CrashLoopBackOff", now.Add(-time.Minute))
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+	if err := runEscalationPass(t, types.Deps{}, input, singleInstancePlan(0, 1),
 		map[int32][]*corev1.Pod{0: {stuck}}); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}

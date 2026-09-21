@@ -9,11 +9,12 @@
 //
 // The holds this pass reads were recorded at the top of the reconcile
 // (holds.Run); nothing here writes one.
-package workload
+package escalation
 
 import (
 	"context"
 	"fmt"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -26,8 +27,30 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
-// escalateFromEvidence walks every observed InstanceStatus and escalates
-// terminal failures from the snapshot's evidence. Three paths converge
+// PassInput is everything the escalation pass reads.
+type PassInput struct {
+	Deps  types.Deps
+	Input types.ReconcileInput
+	Plan  types.ComponentPlan
+
+	// Target is the reconcile's roll target; nil when the Component has
+	// no pod spec (the Create-op RetryBlock fallback then stays empty).
+	Target *appsv1.ControllerRevision
+
+	// Pods is the reconcile's one memoized cached pod observation,
+	// bucketed by Instance index — the same read the hold pass judged on.
+	Pods func(ctx context.Context) (map[int32][]*corev1.Pod, error)
+
+	// Excluded marks the deferred scale-down victims: they receive no
+	// lifecycle mutation before the wave admits them.
+	Excluded map[int32]struct{}
+
+	// Held is what the hold pass recorded this reconcile.
+	Held holds.Result
+}
+
+// Run walks every observed InstanceStatus and escalates terminal
+// failures from the pass's evidence. Three paths converge
 // on Phase=Failed, and they don't fight — whichever fires first wins and
 // the other no-ops on the already-Failed Instance:
 //
@@ -116,8 +139,10 @@ import (
 // Adapter-agnostic: writes Phase=Failed via
 // input.ApplyInstanceMutations / input.MutateInstance, emits the
 // operator-facing event via input.WarnInstanceFailed.
-func escalateFromEvidence(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot, excluded map[int32]struct{}, heldRows holds.Result) error {
-	byIdx, err := snapshot.CachedPods(ctx)
+func Run(ctx context.Context, in PassInput) error {
+	deps, input, plan, target := in.Deps, in.Input, in.Plan, in.Target
+	excluded, heldRows := in.Excluded, in.Held
+	byIdx, err := in.Pods(ctx)
 	if err != nil {
 		return fmt.Errorf("workload.Reconcile: list pods for escalation pass (component=%s): %w", plan.Component, err)
 	}
@@ -131,7 +156,7 @@ func escalateFromEvidence(ctx context.Context, deps Deps, input ReconcileInput, 
 		input.ObservedState.UpdateRevision = target.Name
 	}
 	now := input.Now()
-	desiredByIdx := DesiredPodCountByInstance(plan)
+	desiredByIdx := status.DesiredPodCountByInstance(plan)
 	currentHash := query.RevisionFromName(input.ObservedState.CurrentRevision).Hash()
 	disposition := input.Disposition
 	disposition.MigrationMode = plan.MigrationMode
@@ -143,23 +168,23 @@ func escalateFromEvidence(ctx context.Context, deps Deps, input ReconcileInput, 
 		// Idempotent: skip an already-Failed Instance so the
 		// operator-facing event fires exactly once per escalation. Its
 		// recorded evidence still gets one refresh, which takes no edge.
-		if row.Phase == InstancePhaseFailed {
-			rowEvidence := snapshot.EvidenceFor(ctx, row.Index, now, input.StuckPodGrace)
+		if row.Phase == types.InstancePhaseFailed {
+			rowEvidence := evidenceFor(input.ObservedState.InstanceStatuses, byIdx, row.Index, now, input.StuckPodGrace)
 			if t := refreshedFailureEvidence(row, rowEvidence); t != nil {
 				stamps.add(row.Index, refreshFailureMutation(t), nil)
 			}
 			continue
 		}
-		rowEvidence := snapshot.EvidenceFor(ctx, row.Index, now, input.StuckPodGrace)
+		rowEvidence := evidenceFor(input.ObservedState.InstanceStatuses, byIdx, row.Index, now, input.StuckPodGrace)
 		pods := evidence.PodsForStuckCheck(row, byIdx)
-		desired := DesiredFor(desiredByIdx, row.Index, row.PodCount)
+		desired := status.DesiredFor(desiredByIdx, row.Index, row.PodCount)
 		gang := types.GangReadingFor(input, row)
 		// The hold pass already recorded or released this row's tokens.
 		// What is owed here is the repair each wait ends with — the
 		// scheduler's grace, the gang's terminal verdict — and which
 		// authority owns the row is what says whether one is owed at all.
-		held := heldRows.Holding(row.Index, WaitingReasonUnschedulable)
-		gangHeld := heldRows.Holding(row.Index, WaitingReasonPodGroupTerminating)
+		held := heldRows.Holding(row.Index, types.WaitingReasonUnschedulable)
+		gangHeld := heldRows.Holding(row.Index, types.WaitingReasonPodGroupTerminating)
 		// The hold arms above judge on pod health alone, so a row whose
 		// pods are healthy still hands a stale token back whatever it is
 		// reporting about its rotation. The FAILED-WHILE-SERVING exemption
@@ -208,7 +233,7 @@ func escalateFromEvidence(ctx context.Context, deps Deps, input ReconcileInput, 
 		// to wait. Neither path may end it: the deadline is parked for
 		// the length of the hold, and a pod parked in a terminal waiting
 		// state is waiting on the unpause rather than on a verdict.
-		if OperationPaused(row.Operation) {
+		if types.OperationPaused(row.Operation) {
 			continue
 		}
 		if rowEvidence.StuckPod == nil && !rowEvidence.DeadlinePassed {
@@ -242,7 +267,7 @@ func escalateFromEvidence(ctx context.Context, deps Deps, input ReconcileInput, 
 			// the classifier matched; PodTerminationWithReason fills in
 			// container / exit-code detail when present and falls back to the
 			// bare reason.
-			termination := PodTerminationWithReason(rowEvidence.StuckPod, rowEvidence.StuckReason, metav1.NewTime(now))
+			termination := types.PodTerminationWithReason(rowEvidence.StuckPod, rowEvidence.StuckReason, metav1.NewTime(now))
 			idx, podName, reason := row.Index, rowEvidence.StuckPod.Name, rowEvidence.StuckReason
 			stamps.add(idx, status.StampFailedOnStuckPod(termination), func() {
 				input.WarnInstanceFailed(idx, podName, reason)
@@ -291,7 +316,7 @@ func escalateFromEvidence(ctx context.Context, deps Deps, input ReconcileInput, 
 		// gang abandon charges the revision's retry ladder on.
 		termination := deadlineTermination(now, op)
 		if pod, reason := evidence.FirstWorkloadCausedPod(pods); pod != nil {
-			termination = PodTerminationWithReason(pod, reason, metav1.NewTime(now))
+			termination = types.PodTerminationWithReason(pod, reason, metav1.NewTime(now))
 		} else if pod, _ := evidence.FirstRunningNotReadyPod(pods, attemptTargetRevision(input, row)); pod != nil {
 			// Evidence only: a pod that runs yet never reports ready leaves
 			// no container-level diagnostics, so without this the record is
@@ -316,10 +341,81 @@ func escalateFromEvidence(ctx context.Context, deps Deps, input ReconcileInput, 
 	return nil
 }
 
-func singlePodSurgeAttempt(row *InstanceStatus, desiredPods int32) bool {
+// InstanceEvidence is the per-instance observed failure evidence for one
+// reconcile: the first workload-caused/terminal stuck pod (if any) and
+// whether the in-flight Operation's deadline has elapsed. It is EVIDENCE
+// ONLY — building it never writes Phase; deciding the Failed transition
+// from it is the pass's job.
+type InstanceEvidence struct {
+	// StuckPod is the first live, non-deleting pod parked in a
+	// workload-caused/terminal waiting state past the grace window
+	// (evidence.FirstStuckPodForInstance). Nil when no pod is stuck.
+	StuckPod *corev1.Pod
+	// StuckReason is the kubelet waiting reason of StuckPod ("" when none).
+	StuckReason string
+	// DeadlinePassed reports whether the instance is in a transient phase
+	// with an in-flight Operation whose Deadline lies in the past.
+	DeadlinePassed bool
+	// Unschedulable is the first live pod of the instance's OWN bucket
+	// the scheduler reports it cannot place. Nil when every pod is
+	// scheduled, gone, or deleting.
+	//
+	// Own-bucket, unlike StuckPod: a hold names the row that has to wait,
+	// and attributing a replacement's lack of placement to the serving
+	// source would both misreport the source and, past the grace, fail
+	// it. A sibling reaches the hold through the deadline parking's
+	// SurgeIndex hop instead.
+	//
+	// Independent of the stuck-pod grace: the hold is recorded from the
+	// first observation and only its ESCALATION waits out a window.
+	Unschedulable *corev1.Pod
+	// UnschedulableMessage is the scheduler's own explanation of which
+	// constraint had no placement ("" when it gave none).
+	UnschedulableMessage string
+	// UnschedulableSince is when PodScheduled last transitioned — the
+	// start of the hold, which the escalation window is measured from.
+	UnschedulableSince metav1.Time
+}
+
+// evidenceFor returns the per-instance failure evidence for idx, derived
+// from the cached-read pods + the instance's Operation deadline. Evidence
+// only — no Phase write. Stuck detection attributes pods the same way the
+// pass blames them (evidence.PodsForStuckCheck: a gang Update surge is
+// inspected through its replacement gang, a Migrate pair through
+// own-plus-sibling). A non-positive grace disables stuck-pod evidence
+// entirely (fast escalation off; the deadline backstop and the scheduler
+// hold still report). now/grace are supplied by the caller (clock seam).
+func evidenceFor(insts []types.InstanceStatus, byIdx map[int32][]*corev1.Pod, idx int32, now time.Time, grace time.Duration) InstanceEvidence {
+	var ev InstanceEvidence
+	var inst *types.InstanceStatus
+	for i := range insts {
+		if insts[i].Index == idx {
+			inst = &insts[i]
+			break
+		}
+	}
+	if inst != nil {
+		ev.DeadlinePassed = operationDeadlinePassed(inst, now)
+	}
+	ev.Unschedulable, ev.UnschedulableMessage, ev.UnschedulableSince = types.FirstUnschedulablePod(byIdx[idx])
+	pods := byIdx[idx]
+	if inst != nil {
+		pods = evidence.PodsForStuckCheck(*inst, byIdx)
+	}
+	if grace <= 0 {
+		return ev
+	}
+	if pod, reason := evidence.FirstStuckPodForInstance(pods, now, grace); pod != nil {
+		ev.StuckPod = pod
+		ev.StuckReason = reason
+	}
+	return ev
+}
+
+func singlePodSurgeAttempt(row *types.InstanceStatus, desiredPods int32) bool {
 	return row != nil && desiredPods == 1 && row.Operation != nil &&
-		row.Operation.Type == InstanceOperationUpdate &&
-		row.Operation.Step == UpdateStepSurge && row.Operation.SurgeIndex == nil
+		row.Operation.Type == types.InstanceOperationUpdate &&
+		row.Operation.Step == types.UpdateStepSurge && row.Operation.SurgeIndex == nil
 }
 
 // failureStampBuffer coalesces the escalation pass's plain Failed
@@ -330,13 +426,13 @@ func singlePodSurgeAttempt(row *InstanceStatus, desiredPods int32) bool {
 // the evidence re-escalates next reconcile). A nil warn is a mutation
 // that carries no operator-facing event of its own.
 type failureStampBuffer struct {
-	input ReconcileInput
-	muts  []InstanceMutation
+	input types.ReconcileInput
+	muts  []types.InstanceMutation
 	warns []func()
 }
 
-func (b *failureStampBuffer) add(idx int32, mutate func(*InstanceStatus) bool, warn func()) {
-	b.muts = append(b.muts, InstanceMutation{Index: idx, Mutate: mutate})
+func (b *failureStampBuffer) add(idx int32, mutate func(*types.InstanceStatus) bool, warn func()) {
+	b.muts = append(b.muts, types.InstanceMutation{Index: idx, Mutate: mutate})
 	b.warns = append(b.warns, warn)
 }
 
@@ -380,7 +476,7 @@ func (b *failureStampBuffer) flush(ctx context.Context) error {
 // so on its operation: the pods can read fully serving while nothing is
 // in rotation, and a replacement wedged in that state must escalate
 // rather than be exempted by a source that is not serving.
-func podSetIsCapacity(row InstanceStatus, pods []*corev1.Pod, desired int32) bool {
+func podSetIsCapacity(row types.InstanceStatus, pods []*corev1.Pod, desired int32) bool {
 	return podSetFullyServing(pods, desired) && !types.OperationSourceUnrouted(row.Operation)
 }
 
@@ -395,9 +491,76 @@ func podSetFullyServing(pods []*corev1.Pod, desired int32) bool {
 // e.g. Kueue).
 func anyPodAdmissionGated(pods []*corev1.Pod) bool {
 	for _, p := range pods {
-		if PodAdmissionGated(p) {
+		if types.PodAdmissionGated(p) {
 			return true
 		}
 	}
 	return false
+}
+
+// HasWedgedPodAgainstCurrent reports whether any pod carries a
+// revision-hash label disagreeing with currentHash — i.e., a pod
+// created for a revision the controller doesn't yet (or no longer)
+// recognize as current.
+//
+// Pods missing the label are skipped (no signal). Empty currentHash
+// means no revision has been promoted yet — treat every pod hash as
+// matching so the wedged-recovery branch doesn't over-fire on the
+// initial Create.
+//
+// Used by the wedged-pod recovery branch of the escalator: catches
+// the post-surge shape where the state machine has been reset out of
+// the transient phase set but a real wedged surge pod still exists.
+func HasWedgedPodAgainstCurrent(pods []*corev1.Pod, currentHash, revisionHashLabel string) bool {
+	if currentHash == "" || revisionHashLabel == "" {
+		return false
+	}
+	current := query.RevisionFromHash(currentHash)
+	for _, pod := range pods {
+		if pod == nil {
+			continue
+		}
+		hash := pod.Labels[revisionHashLabel]
+		if hash == "" {
+			continue
+		}
+		if !query.RevisionFromHash(hash).Same(current) {
+			return true
+		}
+	}
+	return false
+}
+
+// ShouldCheckForStuckPods reports whether s qualifies for the
+// fast-failure check. Two paths qualify:
+//
+//   - Transient-phase path: an Instance with an in-flight Operation in
+//     the {Creating, Updating, Restarting, Migrating} set.
+//
+//   - Wedged-pod recovery path: an Instance with at least one pod
+//     whose revision-hash label disagrees with currentHash, regardless
+//     of Phase / Operation. Catches the wedged-state recovery case
+//     where the controller's per-Instance bookkeeping has been reset
+//     while a real stuck pod still exists.
+//
+// Skips Failed (already done) and Deleting (the scale-down pass owns its own
+// deadline). Empty currentHash suppresses the wedged branch (no
+// rollout has ever promoted → over-firing risk during initial Create).
+func ShouldCheckForStuckPods(s *types.InstanceStatus, pods []*corev1.Pod, currentHash, revisionHashLabel string) bool {
+	if s == nil {
+		return false
+	}
+	if s.Phase == types.InstancePhaseFailed || s.Phase == types.InstancePhaseDeleting {
+		return false
+	}
+	if s.Operation != nil {
+		switch s.Phase {
+		case types.InstancePhaseCreating,
+			types.InstancePhaseUpdating,
+			types.InstancePhaseRestarting,
+			types.InstancePhaseMigrating:
+			return true
+		}
+	}
+	return HasWedgedPodAgainstCurrent(pods, currentHash, revisionHashLabel)
 }

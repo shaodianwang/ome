@@ -21,8 +21,8 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // migrationTestNow is the fixed instant every consume test's fake
@@ -103,7 +103,7 @@ func newConsumeFixture(t *testing.T, ir *v1beta1.InferenceReplica, parent *v1bet
 		APIReader:            c,
 		Log:                  logf.Log.WithName("test"),
 		Recorder:             rec,
-		Expectations:         workload.NewExpectations(),
+		Expectations:         workloadtypes.NewExpectations(),
 		InstanceStatusTarget: irstatus.EncodingDenseV1,
 		Clock:                clocktesting.NewFakeClock(migrationTestNow),
 	}
@@ -153,7 +153,7 @@ func TestConsumeMigrationRequests_FreshValidAccepted(t *testing.T) {
 	parent := migrationParent(map[string]string{key: validMigrationRequestJSON("engine", 0)}, false)
 	r, c, _, ir, parent := newConsumeFixture(t, ir, parent)
 
-	requeue, err := r.consumeMigrationRequests(context.Background(), r.Log, ir, parent, workload.MigrationModeAuto, migrationTestTimeout)
+	requeue, err := r.consumeMigrationRequests(context.Background(), r.Log, ir, parent, workloadtypes.MigrationModeAuto, migrationTestTimeout)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(requeue).To(gomega.BeFalse())
 
@@ -202,7 +202,7 @@ func TestConsumeMigrationRequests_RedeliveryEntryPresent_DeletedNoDuplicate(t *t
 	parent := migrationParent(map[string]string{key: validMigrationRequestJSON("engine", 0)}, false)
 	r, c, _, ir, parent := newConsumeFixture(t, ir, parent)
 
-	requeue, err := r.consumeMigrationRequests(context.Background(), r.Log, ir, parent, workload.MigrationModeAuto, migrationTestTimeout)
+	requeue, err := r.consumeMigrationRequests(context.Background(), r.Log, ir, parent, workloadtypes.MigrationModeAuto, migrationTestTimeout)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(requeue).To(gomega.BeFalse())
 
@@ -238,7 +238,7 @@ func TestConsumeMigrationRequests_TerminalInLedger_DeletedNoEntry(t *testing.T) 
 	}
 	r, c, _, ir, parent := newConsumeFixture(t, ir, parent, cm)
 
-	requeue, err := r.consumeMigrationRequests(context.Background(), r.Log, ir, parent, workload.MigrationModeAuto, migrationTestTimeout)
+	requeue, err := r.consumeMigrationRequests(context.Background(), r.Log, ir, parent, workloadtypes.MigrationModeAuto, migrationTestTimeout)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(requeue).To(gomega.BeFalse())
 
@@ -262,7 +262,7 @@ func TestConsumeMigrationRequests_Invalid_FailedRowWarningDeleted(t *testing.T) 
 			parent := migrationParent(map[string]string{key: value}, false)
 			r, c, rec, ir, parent := newConsumeFixture(t, ir, parent)
 
-			requeue, err := r.consumeMigrationRequests(context.Background(), r.Log, ir, parent, workload.MigrationModeAuto, migrationTestTimeout)
+			requeue, err := r.consumeMigrationRequests(context.Background(), r.Log, ir, parent, workloadtypes.MigrationModeAuto, migrationTestTimeout)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 			g.Expect(requeue).To(gomega.BeFalse())
 
@@ -297,7 +297,7 @@ func TestConsumeMigrationRequests_ParentNil_NoOp(t *testing.T) {
 	g := gomega.NewWithT(t)
 	ir := baselineIR("llama-engine", "default", 1)
 	r, _ := newReconciler(t, ir)
-	requeue, err := r.consumeMigrationRequests(context.Background(), r.Log, ir, nil, workload.MigrationModeAuto, migrationTestTimeout)
+	requeue, err := r.consumeMigrationRequests(context.Background(), r.Log, ir, nil, workloadtypes.MigrationModeAuto, migrationTestTimeout)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(requeue).To(gomega.BeFalse())
 	g.Expect(ir.Status.Migrations).To(gomega.BeEmpty())
@@ -314,7 +314,7 @@ func TestConsumeMigrationRequests_TwoValid_OnlyLowestKeyConsumed(t *testing.T) {
 	}, false)
 	r, c, _, ir, parent := newConsumeFixture(t, ir, parent)
 
-	requeue, err := r.consumeMigrationRequests(context.Background(), r.Log, ir, parent, workload.MigrationModeAuto, migrationTestTimeout)
+	requeue, err := r.consumeMigrationRequests(context.Background(), r.Log, ir, parent, workloadtypes.MigrationModeAuto, migrationTestTimeout)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(requeue).To(gomega.BeFalse())
 
@@ -333,7 +333,7 @@ func TestConsumeMigrationRequests_SiblingComponentLeftAlone(t *testing.T) {
 	parent := migrationParent(map[string]string{key: validMigrationRequestJSON("decoder", 0)}, true)
 	r, c, _, ir, parent := newConsumeFixture(t, ir, parent)
 
-	requeue, err := r.consumeMigrationRequests(context.Background(), r.Log, ir, parent, workload.MigrationModeAuto, migrationTestTimeout)
+	requeue, err := r.consumeMigrationRequests(context.Background(), r.Log, ir, parent, workloadtypes.MigrationModeAuto, migrationTestTimeout)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(requeue).To(gomega.BeFalse())
 
@@ -395,7 +395,7 @@ func TestConsumeMigrationRequests_NeverMode_BornTerminalFailed(t *testing.T) {
 	parent := migrationParent(map[string]string{key: validMigrationRequestJSON("engine", 0)}, false)
 	r, c, rec, ir, parent := newConsumeFixture(t, ir, parent)
 
-	requeue, err := r.consumeMigrationRequests(context.Background(), r.Log, ir, parent, workload.MigrationModeNever, migrationTestTimeout)
+	requeue, err := r.consumeMigrationRequests(context.Background(), r.Log, ir, parent, workloadtypes.MigrationModeNever, migrationTestTimeout)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(requeue).To(gomega.BeFalse())
 
@@ -420,7 +420,7 @@ func TestConsumeMigrationRequests_NeverMode_BornTerminalFailed(t *testing.T) {
 		"a born-terminal entry carries no future deadline to expire")
 
 	// The dispatcher structurally never sees it as work.
-	g.Expect(workload.NextManualMigration(migrationsFromIR(fresh))).To(gomega.BeNil(),
+	g.Expect(workloadtypes.NextManualMigration(migrationsFromIR(fresh))).To(gomega.BeNil(),
 		"a born-terminal entry must never be selectable for dispatch")
 
 	// Ledger: terminal Failed audit row mirroring the rejection.
@@ -514,7 +514,7 @@ func TestConsumeMigrationRequests_StaleParentSnapshot_DeletionStillLands(t *test
 	fresh.Labels["race"] = "yes"
 	g.Expect(c.Update(context.Background(), fresh)).To(gomega.Succeed())
 
-	requeue, err := r.consumeMigrationRequests(context.Background(), r.Log, ir, parent, workload.MigrationModeAuto, migrationTestTimeout)
+	requeue, err := r.consumeMigrationRequests(context.Background(), r.Log, ir, parent, workloadtypes.MigrationModeAuto, migrationTestTimeout)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(requeue).To(gomega.BeFalse(), "a stale snapshot must not short-circuit the pass — the delete re-reads the parent")
 	g.Expect(migrationAnnotationsOf(t, c, parent)).To(gomega.BeEmpty(),
@@ -562,7 +562,7 @@ func TestConsumeMigrationRequests_LedgerLoadedViaLiveReader(t *testing.T) {
 	// look deleted to the conflict-retry re-reads on this path.
 	r.APIReader = fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(cm, parent, ir).Build()
 
-	requeue, err := r.consumeMigrationRequests(context.Background(), r.Log, ir, parent, workload.MigrationModeAuto, migrationTestTimeout)
+	requeue, err := r.consumeMigrationRequests(context.Background(), r.Log, ir, parent, workloadtypes.MigrationModeAuto, migrationTestTimeout)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(requeue).To(gomega.BeFalse())
 

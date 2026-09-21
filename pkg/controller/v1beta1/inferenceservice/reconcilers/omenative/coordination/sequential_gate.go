@@ -13,8 +13,8 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	workloadstatus "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
 )
 
 // conditionReady is the IR-level condition type stamped by the
@@ -236,7 +236,7 @@ func observeSequentialComponentsForGate(ctx context.Context, reads client.Reader
 			// started rolling at t=0 (overlap). Only trust AtDesiredShape
 			// once the target is genuinely known to differ.
 			if revisionSkew {
-				obs.AtDesiredShape = workload.ReachedDesiredShape(
+				obs.AtDesiredShape = workloadstatus.ReachedDesiredShape(
 					v1beta1convert.InstanceStatusSliceToWorkload(summary.InstanceStatuses),
 					summary.UpdateRevision, partition, summary.Replicas)
 			}

@@ -33,6 +33,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 	workloadgang "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/gang"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // TeardownFinalizer gates IR deletion on the reconciled teardown path:
@@ -88,7 +89,7 @@ func (r *Reconciler) reconcileTeardown(ctx context.Context, log logr.Logger, ir 
 	}
 
 	deadline, deadlineInvalidReason := r.resolveTeardownDeadline(log)
-	clockInput := workload.ReconcileInput{Clock: r.Clock}
+	clockInput := workloadtypes.ReconcileInput{Clock: r.Clock}
 	var deadlineAt time.Time
 	if deadline != nil {
 		deadlineAt = ir.DeletionTimestamp.Add(*deadline)
@@ -163,7 +164,7 @@ func (r *Reconciler) reconcileTeardown(ctx context.Context, log logr.Logger, ir 
 			"InferenceReplica teardown: authoritative snapshot contains %d UID-owned component pod(s) without a valid %s label; refusing teardown effects",
 			invalid, query.LabelInstanceIdx)
 	}
-	input.AuthoritativePods = &workload.ComponentPodSnapshot{
+	input.AuthoritativePods = &workloadtypes.ComponentPodSnapshot{
 		OwnerUID:   ir.UID,
 		Pods:       ownedPods,
 		ByInstance: query.BucketPodsByInstanceIdx(ownedPods),
@@ -186,7 +187,7 @@ func (r *Reconciler) reconcileTeardown(ctx context.Context, log logr.Logger, ir 
 	// fight the scale-down pipeline that already owns wedge escalation (via
 	// lifecycle.forceDelete). Instance statuses complete through the atomic
 	// mutation batch after their Pods and per-Instance resources are gone.
-	deps := workload.Deps{
+	deps := workloadtypes.Deps{
 		Client:       r.Client,
 		APIReader:    r.APIReader,
 		Recorder:     r.Recorder,
@@ -314,7 +315,7 @@ func (r *Reconciler) closeDanglingLedgerEntries(ctx context.Context, log logr.Lo
 
 // deleteHeadlessService removes the IR-owned per-Component headless
 // Service — the one object the ensure path (buildHeadlessServiceSpec +
-// workload.ReconcileHeadlessService) maintains. Delete-by-name is the
+// service.ReconcileHeadlessService) maintains. Delete-by-name is the
 // live check; NotFound is success. Per-revision routed Services are
 // ISVC-controller-owned and not touched here.
 func (r *Reconciler) deleteHeadlessService(ctx context.Context, ir *v1beta1.InferenceReplica) error {

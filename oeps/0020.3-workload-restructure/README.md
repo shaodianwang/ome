@@ -12,7 +12,8 @@ their own. The package layout, the leaf libraries and the five verb passes stay.
 A sixth step closes the test layout the first five leave behind: one production
 file, one test file, checked rather than asserted. Four of the six steps are
 golden-identical; two re-record, and each of those states which lines move and
-why.
+why. A seventh step, after the six landed, thins the root to orchestration and
+planning and gives escalation its own package; it is golden-identical.
 
 The design is final and the code is in review on `refactor/oep-0020-3-restructure`
 — 50 commits, one PR for all six steps. Every normative statement below is a
@@ -50,6 +51,13 @@ as built**.
 6. Test consolidation (**golden-identical**): one production file, one test
    file, across the whole tree, plus a layout gate in the lock. No production
    code moves.
+7. Root thinning (**golden-identical**): the reconcile root keeps orchestration
+   and planning only — `reconcile.go`, the three pass arms, `plan.go`,
+   `plan_decision.go`, `snapshot.go`, `observation.go` — and the end-of-pass
+   repair moves into `escalation/`. The aggregate counters join `status/`, the
+   operator reset joins `ops/`, the headless Service gets a `service/` leaf,
+   and the `workload.X` forwarders are deleted in favour of the one `types`
+   spelling.
 
 ## Motivation
 
@@ -466,30 +474,40 @@ announcing into a slot the create pass has not opened.
 
 ### Structure, as built
 
-The tree gains three packages and no others. The escalation arm **stays in the
-reconcile root**: its files split by authority (`escalation_gang.go`,
-`escalation_scheduler.go`) rather than into a package of their own, because each
-arm is the other half of a hold — `holds/gang.go` reports the wait,
-`escalation_gang.go` ends the attempt — and separating the two halves by a
-package boundary would have bought a directory and cost the pairing.
+The tree gains five packages: `holds/`, `evidence/` and `status/` in steps 2–4,
+`escalation/` and `service/` in step 7. The reconcile root holds orchestration
+and planning and nothing else:
 
 ```
 workload/
-  reconcile.go            observe → holds → plan → operations → end of pass → wake
+  reconcile.go            observe → holds → plan → operations → escalation → wake
   pass_restart.go pass_update.go pass_migrate.go   one verb pass each, (result, stop, error)
   plan.go plan_decision.go
-  escalation.go escalation_gang.go escalation_scheduler.go escalation_refresh.go
-  deadline.go disposition.go budget.go retryblock_prune.go
-  observation.go snapshot.go status_aggregate.go services.go reset.go aliases.go doc.go
+  snapshot.go observation.go doc.go
+  escalation/ escalation.go gang.go scheduler.go refresh.go disposition.go deadline.go
+              budget.go retryblock_prune.go doc.go
   holds/      pass.go table.go quota.go scheduler.go gang.go nodeunknown.go sourcerotation.go pause.go doc.go
   evidence/   stuckpod.go readiness.go rejection.go terminating.go crashloop.go templatediff.go doc.go
-  status/     decision.go gangsurge.go migration.go evidence.go announced.go terminal.go precondition.go doc.go
+  status/     aggregate.go decision.go gangsurge.go migration.go evidence.go announced.go terminal.go
+              precondition.go doc.go
+  service/    service.go
   ops/        create.go create_rejection.go unknown_phase.go
               update.go update_surge.go update_gang.go update_inplace.go update_recreate.go
-              restart.go migrate.go migrate_expire.go delete_batch.go render.go
+              restart.go migrate.go migrate_expire.go delete_batch.go render.go reset.go
               terminal_recycle.go force_delete.go doc.go
   types/ query/ drain/ podreadiness/ revision/ podgroup/ gang/ audit/ replay/   unchanged in shape
 ```
+
+Each escalation arm pairs with its hold by file name across the two packages —
+`holds/gang.go` reports the wait, `escalation/gang.go` ends the attempt — and
+`escalation.Run` takes the hold pass's `Result` as input, so the pairing is a
+call and a name rather than a directory. The pass derives its own per-row
+evidence (`InstanceEvidence`, from the same memoized pod read the hold pass
+judged on); the root's snapshot hands it that read and nothing else, which is
+what keeps `escalation` from importing the root. `PodAdmissionGated` lives in
+`types/scheduling.go` for the same reason: `status/` and `escalation/` both
+read it. `holds.RowsForPlan` builds the hold pass's rows from the plan, so the
+root and the escalation tests drive the hold pass through one constructor.
 
 The table lives in `types/owner.go`: the verb passes under `ops/` and the gang
 package reach `types` but not the root package, and one table cannot have two
@@ -503,39 +521,44 @@ Two files stay in `ops/` that a reading of the target shape would move out:
 | `ops/terminal_recycle.go` | `recycleTerminalPods` frees the names terminal and admission-rejected pods hold. Create, restart and every replacement-pod path — per-pod surge, recreate rebuild, gang surge — reach it, and it deletes pods and stamps expectations. It is verb work several verbs share, not an event column |
 | `ops/force_delete.go` | `forceDeleteOnNodeDeath` removes a pod whose node is provably gone. The *reading* of node death moved to `evidence/terminating.go`; the deletion is a verb acting on its own row |
 
-Production line counts, `origin/main` against branch head. Whole-file counts of
-the `.go` files in each directory.
+Production line counts, `origin/main` before step 7 against the step-7 head.
+Whole-file counts of the `.go` files in each directory.
 
-| directory | main files | main lines | head files | head lines |
+| directory | before files | before lines | head files | head lines |
 |---|---:|---:|---:|---:|
-| `workload/` (root) | 20 | 5711 | 19 | 5183 |
-| `workload/ops/` | 29 | 11486 | 14 | 9617 |
-| `workload/types/` | 29 | 3855 | 26 | 3802 |
-| `workload/holds/` | — | — | 9 | 761 |
-| `workload/evidence/` | — | — | 7 | 1079 |
-| `workload/status/` | — | — | 6 | 1660 |
-| `workload/query/` | 4 | 780 | 4 | 823 |
-| `workload/replay/` | 8 | 3978 | 8 | 4002 |
+| `workload/` (root) | 21 | 5068 | 9 | 2508 |
+| `workload/escalation/` | — | — | 9 | 1793 |
+| `workload/service/` | — | — | 1 | 124 |
+| `workload/ops/` | 16 | 9574 | 17 | 9629 |
+| `workload/types/` | 26 | 3882 | 26 | 3890 |
+| `workload/holds/` | 9 | 792 | 9 | 816 |
+| `workload/evidence/` | 7 | 1100 | 7 | 1100 |
+| `workload/status/` | 8 | 1746 | 9 | 2076 |
+| `workload/query/` | 4 | 823 | 4 | 823 |
+| `workload/replay/` | 8 | 4002 | 8 | 4003 |
 | `workload/audit/` | 4 | 740 | 4 | 740 |
-| `workload/gang/` | 2 | 829 | 2 | 828 |
+| `workload/gang/` | 2 | 816 | 2 | 816 |
 | `workload/podgroup/` | 2 | 660 | 2 | 660 |
 | `workload/revision/` | 1 | 831 | 1 | 831 |
 | `workload/drain/` | 1 | 381 | 1 | 381 |
 | `workload/podreadiness/` | 1 | 621 | 1 | 621 |
-| **total** | **101** | **29872** | **104** | **30988** |
+| **total** | **110** | **31036** | **110** | **30811** |
 
-The root sheds 528 lines and `ops/` sheds 1869; the three new packages hold 3500.
-Net **+1116** production lines across the tree is the price of three package
-boundaries — doc comments, import blocks, the exported names a boundary needs —
-against the V × E branches and the ten ownership predicates deleted. That is the
-honest number, and it is a cost, not a saving: what the restructure buys is one
-answer per question, not fewer lines.
+The root sheds 2560 lines and 12 files. The tree as a whole is 225 lines
+smaller, which is the size of the deleted `aliases.go` less the doc comments and
+import blocks two new package boundaries cost. Test files: 118 → 120, because
+the root and `escalation/` external test packages each carry a
+`helpers_external_test.go` for the fixtures the split left on both sides of
+the boundary, and `escalation/` gains an internal `helpers_test.go` for its
+seam.
 
-Test files: 136 against 101 production files becomes 109 against 104, and test
-lines grow 61746 → 63688. The growth is the new tests for the 30 files that had
-none, less the import blocks and package clauses the merges removed.
+Three test names changed hands with the forwarders: the three in
+`aliases_test.go` pinned the alias mirror itself and went with it, and
+`TestObservedSnapshot_EvidenceDeadline` became `TestEvidenceFor_Deadline` when
+the evidence read moved off the snapshot. No `coverage.unit` entry named any of
+the four.
 
-### The six steps, as built
+### The seven steps, as built
 
 | step | kind | what it does | golden outcome |
 |---|---|---|---|
@@ -545,6 +568,7 @@ none, less the import blocks and package clauses the merges removed.
 | 4 | **re-recording** | `status/`: every stamp behind one precondition helper, decision fields split from evidence fields; `Announced` with all six clients; both `sync.Map`s deleted | **zero existing goldens move**, plus one new file: `gang-advisory-warnings.trace`, 21 lines |
 | 5 | golden-identical | `ops/` trimmed to advancing its own step; the order-dependent early returns in `executeActions` replaced by per-owner row lists, each naming the constraint it enforces | **zero**, over all 119 |
 | 6 | golden-identical | test consolidation across the tree; `check_test_layout.py` added to the lock | **zero**, over all 119, and structural: the step declares no production file |
+| 7 | golden-identical | the root thinned to orchestration and planning; `escalation/` (the pass, its gang and scheduler arms, the disposition, the deadline arithmetic, the budget, the prune), `status/aggregate.go`, `ops/reset.go`, `service/`; `aliases.go` deleted and every caller repointed to `types`; the reconcile root taken off the row-writer allow-list | **zero**, over all 119 |
 
 Step 2's ten, with the shape each carries:
 
@@ -707,7 +731,7 @@ All 7 remaining are the forced internal + external split:
 
 | file | why Go forces it |
 |---|---|
-| `escalation.go` | the escalation pass is engine-internal; the external half drives it through the `helpers_test.go` seams |
+| `escalation/escalation.go` | the escalation pass is engine-internal; the external half drives it through the `helpers_test.go` seam |
 | `reconcile.go` | `scaleDownPollResult` is unexported; the external half drives `Reconcile` end to end |
 | `plan.go` | the plan internals are unexported; the external half calls `BuildPlan` as a consumer |
 | `ops/create.go` | the rejection dispositions reach unexported classifiers; the external half calls `Create` |
@@ -768,14 +792,15 @@ revision rather than name a verb.)
    trailing line disappearing from `quota-hold-parks-deadline` and nothing else
    moving.
 4. **The row-writer rule is not `status/`-only.** Step 5's premise was that
-   `status/` becomes the only writer. It is not yet true: `ops/` still authors 25
+   `status/` becomes the only writer. It is not yet true: `ops/` still authors 26
    row-mutation closures (`update_gang.go` 11, `create.go` 5, `migrate.go` 5,
-   `delete_batch.go` 2, `migrate_expire.go` 2) and the reconcile root authors 3
-   (`escalation_refresh.go`, `reset.go`, `status_aggregate.go`), against 31 in
-   `status/`. The two the step named — the promote terminator and the migration
-   pin — are routed; routing the remaining 28 is production change well past
-   step 6's "move no production code". The gate therefore enforces the **true**
-   rule, an allow-list of three directories, rather than an aspiration.
+   `delete_batch.go` 2, `migrate_expire.go` 2, `reset.go` 1) and
+   `escalation/refresh.go` authors 1, against 32 in `status/`; the reconcile
+   root authors none. The two the step named — the promote terminator and the
+   migration pin — are routed; routing the remaining 27 is production change
+   well past step 6's "move no production code". The gate therefore enforces
+   the **true** rule, an allow-list of three directories (`status/`, `ops/`,
+   `escalation/`), rather than an aspiration.
    *Follow-up:* tighten `ROW_WRITERS` in `check_test_layout.py` to `status/`
    alone, proved by the gate going green with all 119 goldens byte-identical.
 
@@ -882,7 +907,7 @@ Gates, as run against the branch head:
 |---|---|
 | `gofmt -l pkg/ tests/` | clean |
 | `go vet ./pkg/controller/v1beta1/...` | clean |
-| `go test ./pkg/controller/v1beta1/workload/...` | ok, all 14 packages |
+| `go test ./pkg/controller/v1beta1/workload/...` | ok, all 16 packages |
 | `go test ./pkg/controller/v1beta1/workload/... -race` | ok |
 | `go test ./tests/rolloutspec/...` | ok — goldens byte-identical, no `-update` |
 | `go test ./pkg/controller/v1beta1/inferencereplica/` | ok |
@@ -971,11 +996,9 @@ sequence.
    the rules and false of the pass. Rejected on 2026-09-21: a column whose owner
    still runs in three places at three times is the failure mode this OEP exists
    to remove.
-5. **An `escalation/` package**, as the draft's target structure showed.
-   Tradeoff: a tidier root — but each escalation arm is the other half of a hold,
-   and a package boundary between `holds/gang.go` and the code that ends the
-   attempt separates two files that are read together. Rejected during step 3;
-   the arms split by authority inside the root instead.
+5. **An `escalation/` package**, as the draft's target structure showed. It
+   exists, as of step 7; the arm and its hold pair by file name across the two
+   packages and by the `holds.Result` the pass takes as input.
 6. **Leave it; keep reviewing hard.** The reviews caught every miss at the cost of
    two to three rounds per PR. That cost recurs per decision.
 
@@ -1018,6 +1041,10 @@ step's diff is allowed to look like.
    forgetting it and a warning going permanently silent. Stale markers are pruned
    by the next write that has something to say, since `MarkAnnounced` is their
    only reader.
+8. **Escalation is its own package, and the root is orchestration and
+   planning only.** Decided on 2026-09-21, reversing the step-3 call: the
+   pairing of a hold with the arm that ends the attempt is a call and a file
+   name, not a directory.
 
 ## Open Questions
 

@@ -13,7 +13,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // mt returns a whole-second, local-zone metav1.Time so values compare
@@ -36,16 +36,16 @@ func TestBuildMutateRetryBlock_PersistCreatesBlock(t *testing.T) {
 	r, c := newReconciler(t, ir)
 
 	mutate := buildMutateRetryBlock(r.statusWriter(), r.Client, ir, nil)
-	g.Expect(mutate(context.Background(), "rev-a", func(b *workload.RetryBlock) workload.RetryBlockDisposition {
+	g.Expect(mutate(context.Background(), "rev-a", func(b *workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition {
 		g.Expect(b.TargetRevision).To(gomega.Equal("rev-a"),
 			"an absent block must be handed to the callback as a zero block with TargetRevision set")
-		b.State = workload.RetryBlockBackoff
+		b.State = workloadtypes.RetryBlockBackoff
 		b.AttemptsStarted = 1
 		b.NextRetryAt = mt(10, 1)
 		b.FirstFailureAt = mt(10, 0)
 		b.LastFailureAt = mt(10, 0)
 		b.Reason = "ImagePullBackOff"
-		return workload.RetryBlockPersist
+		return workloadtypes.RetryBlockPersist
 	})).To(gomega.Succeed())
 
 	// Persistence proof: re-read from the fake client.
@@ -80,8 +80,8 @@ func TestBuildMutateRetryBlock_RemoveDeletes(t *testing.T) {
 	key := types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace}
 
 	mutate := buildMutateRetryBlock(r.statusWriter(), r.Client, ir, nil)
-	g.Expect(mutate(context.Background(), "rev-a", func(_ *workload.RetryBlock) workload.RetryBlockDisposition {
-		return workload.RetryBlockRemove
+	g.Expect(mutate(context.Background(), "rev-a", func(_ *workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition {
+		return workloadtypes.RetryBlockRemove
 	})).To(gomega.Succeed())
 
 	got := &v1beta1.InferenceReplica{}
@@ -93,8 +93,8 @@ func TestBuildMutateRetryBlock_RemoveDeletes(t *testing.T) {
 
 	// Remove of an absent block: no write (ResourceVersion stable).
 	rvBefore := got.ResourceVersion
-	g.Expect(mutate(context.Background(), "rev-gone", func(_ *workload.RetryBlock) workload.RetryBlockDisposition {
-		return workload.RetryBlockRemove
+	g.Expect(mutate(context.Background(), "rev-gone", func(_ *workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition {
+		return workloadtypes.RetryBlockRemove
 	})).To(gomega.Succeed())
 	after := &v1beta1.InferenceReplica{}
 	g.Expect(c.Get(context.Background(), key, after)).To(gomega.Succeed())
@@ -118,11 +118,11 @@ func TestBuildMutateRetryBlock_UnchangedWritesNothing(t *testing.T) {
 	g.Expect(c.Get(context.Background(), key, before)).To(gomega.Succeed())
 
 	mutate := buildMutateRetryBlock(r.statusWriter(), r.Client, ir, nil)
-	g.Expect(mutate(context.Background(), "rev-a", func(b *workload.RetryBlock) workload.RetryBlockDisposition {
+	g.Expect(mutate(context.Background(), "rev-a", func(b *workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition {
 		// Even a callback that scribbles on the block writes nothing when
 		// it reports Unchanged.
 		b.Reason = "scratch"
-		return workload.RetryBlockUnchanged
+		return workloadtypes.RetryBlockUnchanged
 	})).To(gomega.Succeed())
 
 	after := &v1beta1.InferenceReplica{}
@@ -144,11 +144,11 @@ func TestBuildMutateRetryBlock_SameNameReplacementAborts(t *testing.T) {
 	called := false
 
 	mutate := buildMutateRetryBlock(r.statusWriter(), r.Client, original, nil)
-	err := mutate(context.Background(), "rev-a", func(*workload.RetryBlock) workload.RetryBlockDisposition {
+	err := mutate(context.Background(), "rev-a", func(*workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition {
 		called = true
-		return workload.RetryBlockRemove
+		return workloadtypes.RetryBlockRemove
 	})
-	g.Expect(errors.Is(err, workload.ErrStatusOwnerGone)).To(gomega.BeTrue())
+	g.Expect(errors.Is(err, workloadtypes.ErrStatusOwnerGone)).To(gomega.BeTrue())
 	g.Expect(called).To(gomega.BeFalse())
 
 	got := &v1beta1.InferenceReplica{}
@@ -181,11 +181,11 @@ func TestBuildMutateRetryBlock_RetentionPrunesOldest(t *testing.T) {
 	// nil LastFailureAt — must be pruned; rev-current must survive
 	// despite being older than everything else.
 	mutate := buildMutateRetryBlock(r.statusWriter(), r.Client, ir, ptr.To(int32(3)))
-	g.Expect(mutate(context.Background(), "rev-old-3", func(b *workload.RetryBlock) workload.RetryBlockDisposition {
-		b.State = workload.RetryBlockHeld
+	g.Expect(mutate(context.Background(), "rev-old-3", func(b *workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition {
+		b.State = workloadtypes.RetryBlockHeld
 		b.AttemptsStarted = 3
 		b.LastFailureAt = mt(11, 0)
-		return workload.RetryBlockPersist
+		return workloadtypes.RetryBlockPersist
 	})).To(gomega.Succeed())
 
 	got := &v1beta1.InferenceReplica{}
@@ -217,11 +217,11 @@ func TestBuildMutateRetryBlock_UnconfiguredRetentionKeepsHistory(t *testing.T) {
 	r, c := newReconciler(t, ir)
 
 	mutate := buildMutateRetryBlock(r.statusWriter(), r.Client, ir, nil)
-	g.Expect(mutate(context.Background(), "rev-old-3", func(b *workload.RetryBlock) workload.RetryBlockDisposition {
-		b.State = workload.RetryBlockHeld
+	g.Expect(mutate(context.Background(), "rev-old-3", func(b *workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition {
+		b.State = workloadtypes.RetryBlockHeld
 		b.AttemptsStarted = 3
 		b.LastFailureAt = mt(11, 0)
-		return workload.RetryBlockPersist
+		return workloadtypes.RetryBlockPersist
 	})).To(gomega.Succeed())
 
 	got := &v1beta1.InferenceReplica{}
@@ -259,7 +259,7 @@ func TestRetryBlocksFromIR_RoundTrip(t *testing.T) {
 	g.Expect(observed.RetryBlocks).To(gomega.HaveLen(2))
 	w := observed.RetryBlocks[0]
 	g.Expect(w.TargetRevision).To(gomega.Equal("rev-a"))
-	g.Expect(w.State).To(gomega.Equal(workload.RetryBlockBackoff))
+	g.Expect(w.State).To(gomega.Equal(workloadtypes.RetryBlockBackoff))
 	g.Expect(w.AttemptsStarted).To(gomega.Equal(int32(2)))
 	g.Expect(w.NextRetryAt).To(gomega.Equal(mt(10, 4)))
 	g.Expect(w.FirstFailureAt).To(gomega.Equal(mt(10, 0)))
@@ -300,11 +300,11 @@ func TestAggregateStatus_PreservesRetryBlocks(t *testing.T) {
 	pod0 := podForIR(ir, 0, "default", 0, true, true)
 	r, c := newReconciler(t, ir, pod0)
 
-	plan := workload.ComponentPlan{
+	plan := workloadtypes.ComponentPlan{
 		Component: v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component),
 		Replicas:  1,
-		Instances: []workload.InstancePlan{
-			{Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+		Instances: []workloadtypes.InstancePlan{
+			{Index: 0, Incarnation: 1, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}}},
 		},
 	}
 

@@ -1,4 +1,4 @@
-package workload_test
+package escalation_test
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/evidence"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
@@ -47,15 +48,15 @@ func servingPod(name string) *corev1.Pod {
 // the callback to the local store and whose WarnInstanceFailed /
 // MutateRetryBlock record their calls.
 type escalationRecorder struct {
-	store  []workload.InstanceStatus
+	store  []workloadtypes.InstanceStatus
 	warns  []string
-	blocks []workload.RetryBlock
+	blocks []workloadtypes.RetryBlock
 }
 
-func escalationFixture(insts []workload.InstanceStatus) (workload.ReconcileInput, *escalationRecorder) {
-	rec := &escalationRecorder{store: append([]workload.InstanceStatus(nil), insts...)}
-	input := workload.ReconcileInput{
-		MutateInstance: func(_ context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
+func escalationFixture(insts []workloadtypes.InstanceStatus) (workloadtypes.ReconcileInput, *escalationRecorder) {
+	rec := &escalationRecorder{store: append([]workloadtypes.InstanceStatus(nil), insts...)}
+	input := workloadtypes.ReconcileInput{
+		MutateInstance: func(_ context.Context, idx int32, mutate func(*workloadtypes.InstanceStatus) bool) error {
 			for i := range rec.store {
 				if rec.store[i].Index == idx {
 					mutate(&rec.store[i])
@@ -64,8 +65,8 @@ func escalationFixture(insts []workload.InstanceStatus) (workload.ReconcileInput
 			}
 			return nil
 		},
-		MutateRetryBlock: func(_ context.Context, rev string, mutate func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
-			b := workload.RetryBlock{TargetRevision: rev}
+		MutateRetryBlock: func(_ context.Context, rev string, mutate func(*workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition) error {
+			b := workloadtypes.RetryBlock{TargetRevision: rev}
 			mutate(&b)
 			rec.blocks = append(rec.blocks, b)
 			return nil
@@ -74,7 +75,7 @@ func escalationFixture(insts []workload.InstanceStatus) (workload.ReconcileInput
 			rec.warns = append(rec.warns, reason)
 		},
 	}
-	input.ObservedState.InstanceStatuses = append([]workload.InstanceStatus(nil), insts...)
+	input.ObservedState.InstanceStatuses = append([]workloadtypes.InstanceStatus(nil), insts...)
 	return input, rec
 }
 
@@ -86,24 +87,24 @@ func escalationFixture(insts []workload.InstanceStatus) (workload.ReconcileInput
 // are fine, only the Operation bookkeeping is stale.
 func TestEscalation_DeadlineElapsedButServing_NoFailedStamp(t *testing.T) {
 	now := time.Now()
-	insts := []workload.InstanceStatus{{
+	insts := []workloadtypes.InstanceStatus{{
 		Index:    0,
-		Phase:    workload.InstancePhaseUpdating,
+		Phase:    workloadtypes.InstancePhaseUpdating,
 		PodCount: 1,
-		Operation: &workload.InstanceOperation{
-			Type:           workload.InstanceOperationUpdate,
+		Operation: &workloadtypes.InstanceOperation{
+			Type:           workloadtypes.InstanceOperationUpdate,
 			TargetRevision: "own-engine-newhash",
 			Deadline:       metav1.NewTime(now.Add(-time.Hour)),
 		},
 	}}
 	input, rec := escalationFixture(insts)
 
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, singleInstancePlan(0, 1),
 		map[int32][]*corev1.Pod{0: {servingPod("engine-0-default-0")}}); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
-	if rec.store[0].Phase != workload.InstancePhaseUpdating {
+	if rec.store[0].Phase != workloadtypes.InstancePhaseUpdating {
 		t.Errorf("Phase: got %q want Updating (serving Instance must not be stamped Failed)", rec.store[0].Phase)
 	}
 	if rec.store[0].Operation == nil {
@@ -125,23 +126,23 @@ func TestEscalation_DeadlineElapsedButServing_NoFailedStamp(t *testing.T) {
 // Cells: instance/Create/CreatePods/timer.operationDeadline/before
 func TestEscalation_DeadlineElapsedBelowDesiredServing_StillEscalates(t *testing.T) {
 	now := time.Now()
-	insts := []workload.InstanceStatus{{
+	insts := []workloadtypes.InstanceStatus{{
 		Index:    0,
-		Phase:    workload.InstancePhaseCreating,
+		Phase:    workloadtypes.InstancePhaseCreating,
 		PodCount: 2,
-		Operation: &workload.InstanceOperation{
-			Type:     workload.InstanceOperationCreate,
+		Operation: &workloadtypes.InstanceOperation{
+			Type:     workloadtypes.InstanceOperationCreate,
 			Deadline: metav1.NewTime(now.Add(-time.Hour)),
 		},
 	}}
 	input, rec := escalationFixture(insts)
 
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 2),
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, singleInstancePlan(0, 2),
 		map[int32][]*corev1.Pod{0: {servingPod("engine-0-leader-0")}}); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
-	if rec.store[0].Phase != workload.InstancePhaseFailed {
+	if rec.store[0].Phase != workloadtypes.InstancePhaseFailed {
 		t.Errorf("Phase: got %q want Failed (1/2 serving is not converged)", rec.store[0].Phase)
 	}
 	if len(rec.warns) != 1 {
@@ -156,12 +157,12 @@ func TestEscalation_DeadlineElapsedBelowDesiredServing_StillEscalates(t *testing
 // revision, Operation cleared, Phase=Failed, one operator warning.
 func TestEscalation_StuckPodNotServing_IdenticalDispositionOutcome(t *testing.T) {
 	now := time.Now()
-	insts := []workload.InstanceStatus{{
+	insts := []workloadtypes.InstanceStatus{{
 		Index:    0,
-		Phase:    workload.InstancePhaseUpdating,
+		Phase:    workloadtypes.InstancePhaseUpdating,
 		PodCount: 1,
-		Operation: &workload.InstanceOperation{
-			Type:           workload.InstanceOperationUpdate,
+		Operation: &workloadtypes.InstanceOperation{
+			Type:           workloadtypes.InstanceOperationUpdate,
 			Step:           workloadtypes.UpdateStepDrain,
 			TargetRevision: "own-engine-badhash",
 			Deadline:       metav1.NewTime(now.Add(30 * time.Minute)),
@@ -183,12 +184,12 @@ func TestEscalation_StuckPodNotServing_IdenticalDispositionOutcome(t *testing.T)
 		},
 	}
 
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, singleInstancePlan(0, 1),
 		map[int32][]*corev1.Pod{0: {stuck}}); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
-	if rec.store[0].Phase != workload.InstancePhaseFailed {
+	if rec.store[0].Phase != workloadtypes.InstancePhaseFailed {
 		t.Errorf("Phase: got %q want Failed", rec.store[0].Phase)
 	}
 	if rec.store[0].Operation != nil {
@@ -209,13 +210,13 @@ func TestEscalation_StuckPodNotServing_IdenticalDispositionOutcome(t *testing.T)
 func TestEscalation_SinglePodSurgeRelocatesTheFailedTarget(t *testing.T) {
 	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
 	fc := clocktesting.NewFakeClock(now)
-	insts := []workload.InstanceStatus{{
+	insts := []workloadtypes.InstanceStatus{{
 		Index:    0,
-		Phase:    workload.InstancePhaseUpdating,
+		Phase:    workloadtypes.InstancePhaseUpdating,
 		PodCount: 2,
-		Operation: &workload.InstanceOperation{
-			Type:           workload.InstanceOperationUpdate,
-			Step:           workload.UpdateStepSurge,
+		Operation: &workloadtypes.InstanceOperation{
+			Type:           workloadtypes.InstanceOperationUpdate,
+			Step:           workloadtypes.UpdateStepSurge,
 			TargetRevision: "own-engine-targethash",
 			StartedAt:      metav1.NewTime(now.Add(-time.Minute)),
 			Deadline:       metav1.NewTime(now.Add(30 * time.Minute)),
@@ -223,7 +224,7 @@ func TestEscalation_SinglePodSurgeRelocatesTheFailedTarget(t *testing.T) {
 	}}
 	c := fakeLedgerClient(t)
 	input, rec := dispositionFixtureInput(fc, &insts, "own-engine-targethash", nil, ledgerOwnerCM())
-	input.ObservedState.InstanceStatuses = append([]workload.InstanceStatus(nil), insts...)
+	input.ObservedState.InstanceStatuses = append([]workloadtypes.InstanceStatus(nil), insts...)
 	input.StuckPodGrace = time.Second
 	input.Disposition.AutoMigrateMaxAttempts = 3
 
@@ -232,8 +233,8 @@ func TestEscalation_SinglePodSurgeRelocatesTheFailedTarget(t *testing.T) {
 	target := waitingPod("engine-0-default-1", "CreateContainerError", "node-target", now.Add(-time.Minute))
 
 	plan := singleInstancePlan(0, 1)
-	plan.MigrationMode = workload.MigrationModeAuto
-	if err := runEscalationPass(t, workload.Deps{Client: c, Clock: fc}, input, plan,
+	plan.MigrationMode = workloadtypes.MigrationModeAuto
+	if err := runEscalationPass(t, workloadtypes.Deps{Client: c, Clock: fc}, input, plan,
 		map[int32][]*corev1.Pod{0: {source, target}}); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
@@ -242,7 +243,7 @@ func TestEscalation_SinglePodSurgeRelocatesTheFailedTarget(t *testing.T) {
 	if len(ledger.Entries) != 1 || ledger.Entries[0].FromNode != "node-target" {
 		t.Fatalf("relocation entries: got %+v want one directive for node-target", ledger.Entries)
 	}
-	if insts[0].Phase != workload.InstancePhaseFailed || insts[0].Operation != nil {
+	if insts[0].Phase != workloadtypes.InstancePhaseFailed || insts[0].Operation != nil {
 		t.Fatalf("instance: got Phase=%q Operation=%+v want Failed with no operation", insts[0].Phase, insts[0].Operation)
 	}
 	if insts[0].LastFailure == nil || insts[0].LastFailure.PodName != target.Name ||
@@ -261,24 +262,24 @@ func TestEscalation_SinglePodSurgeRelocatesTheFailedTarget(t *testing.T) {
 // fired after the write, one per instance.
 func TestEscalation_MultiInstanceStamps_OneBatchedWrite(t *testing.T) {
 	now := time.Now()
-	var insts []workload.InstanceStatus
+	var insts []workloadtypes.InstanceStatus
 	for idx := int32(0); idx < 3; idx++ {
-		insts = append(insts, workload.InstanceStatus{
+		insts = append(insts, workloadtypes.InstanceStatus{
 			Index:    idx,
-			Phase:    workload.InstancePhaseRestarting,
+			Phase:    workloadtypes.InstancePhaseRestarting,
 			PodCount: 1,
-			Operation: &workload.InstanceOperation{
-				Type:     workload.InstanceOperationRestart,
+			Operation: &workloadtypes.InstanceOperation{
+				Type:     workloadtypes.InstanceOperationRestart,
 				Deadline: metav1.NewTime(now.Add(-time.Hour)),
 			},
 		})
 	}
-	store := append([]workload.InstanceStatus(nil), insts...)
+	store := append([]workloadtypes.InstanceStatus(nil), insts...)
 	batchCalls, mutateCalls := 0, 0
 	var warns []int32
 	warnsBeforeWrite := -1
-	input := workload.ReconcileInput{
-		ApplyInstanceMutations: func(_ context.Context, muts []workload.InstanceMutation) error {
+	input := workloadtypes.ReconcileInput{
+		ApplyInstanceMutations: func(_ context.Context, muts []workloadtypes.InstanceMutation) error {
 			batchCalls++
 			warnsBeforeWrite = len(warns)
 			for _, m := range muts {
@@ -290,7 +291,7 @@ func TestEscalation_MultiInstanceStamps_OneBatchedWrite(t *testing.T) {
 			}
 			return nil
 		},
-		MutateInstance: func(_ context.Context, _ int32, _ func(*workload.InstanceStatus) bool) error {
+		MutateInstance: func(_ context.Context, _ int32, _ func(*workloadtypes.InstanceStatus) bool) error {
 			mutateCalls++
 			return nil
 		},
@@ -298,9 +299,9 @@ func TestEscalation_MultiInstanceStamps_OneBatchedWrite(t *testing.T) {
 			warns = append(warns, idx)
 		},
 	}
-	input.ObservedState.InstanceStatuses = append([]workload.InstanceStatus(nil), insts...)
+	input.ObservedState.InstanceStatuses = append([]workloadtypes.InstanceStatus(nil), insts...)
 
-	if err := runEscalationPass(t, workload.Deps{}, input, workload.ComponentPlan{}, nil); err != nil {
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, workloadtypes.ComponentPlan{}, nil); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
@@ -311,7 +312,7 @@ func TestEscalation_MultiInstanceStamps_OneBatchedWrite(t *testing.T) {
 		t.Errorf("MutateInstance calls: got %d want 0 (plain stamps must route through the batch)", mutateCalls)
 	}
 	for i := range store {
-		if store[i].Phase != workload.InstancePhaseFailed {
+		if store[i].Phase != workloadtypes.InstancePhaseFailed {
 			t.Errorf("instance %d Phase: got %q want Failed", store[i].Index, store[i].Phase)
 		}
 		if store[i].Operation == nil {
@@ -332,25 +333,25 @@ func TestEscalation_MultiInstanceStamps_OneBatchedWrite(t *testing.T) {
 // the error.
 func TestEscalation_BatchedWriteFails_NoWarnings(t *testing.T) {
 	now := time.Now()
-	insts := []workload.InstanceStatus{{
+	insts := []workloadtypes.InstanceStatus{{
 		Index:    0,
-		Phase:    workload.InstancePhaseRestarting,
+		Phase:    workloadtypes.InstancePhaseRestarting,
 		PodCount: 1,
-		Operation: &workload.InstanceOperation{
-			Type:     workload.InstanceOperationRestart,
+		Operation: &workloadtypes.InstanceOperation{
+			Type:     workloadtypes.InstanceOperationRestart,
 			Deadline: metav1.NewTime(now.Add(-time.Hour)),
 		},
 	}}
 	warned := 0
-	input := workload.ReconcileInput{
-		ApplyInstanceMutations: func(_ context.Context, _ []workload.InstanceMutation) error {
+	input := workloadtypes.ReconcileInput{
+		ApplyInstanceMutations: func(_ context.Context, _ []workloadtypes.InstanceMutation) error {
 			return context.DeadlineExceeded
 		},
 		WarnInstanceFailed: func(_ int32, _, _ string) { warned++ },
 	}
 	input.ObservedState.InstanceStatuses = insts
 
-	if err := runEscalationPass(t, workload.Deps{}, input, workload.ComponentPlan{}, nil); err == nil {
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, workloadtypes.ComponentPlan{}, nil); err == nil {
 		t.Fatalf("escalation pass: got nil error, want the flush failure surfaced")
 	}
 	if warned != 0 {
@@ -366,34 +367,34 @@ func TestEscalation_BatchedWriteFails_NoWarnings(t *testing.T) {
 // unbatched pass.
 func TestEscalation_DispositionFlushesPendingStamps(t *testing.T) {
 	now := time.Now()
-	insts := []workload.InstanceStatus{
+	insts := []workloadtypes.InstanceStatus{
 		{
 			// Buffered: Restart deadline expiry takes the plain stamp.
 			Index:    0,
-			Phase:    workload.InstancePhaseRestarting,
+			Phase:    workloadtypes.InstancePhaseRestarting,
 			PodCount: 1,
-			Operation: &workload.InstanceOperation{
-				Type:     workload.InstanceOperationRestart,
+			Operation: &workloadtypes.InstanceOperation{
+				Type:     workloadtypes.InstanceOperationRestart,
 				Deadline: metav1.NewTime(now.Add(-time.Hour)),
 			},
 		},
 		{
 			// Disposition: single-pod Update attempt with a stuck pod.
 			Index:    1,
-			Phase:    workload.InstancePhaseUpdating,
+			Phase:    workloadtypes.InstancePhaseUpdating,
 			PodCount: 1,
-			Operation: &workload.InstanceOperation{
-				Type:           workload.InstanceOperationUpdate,
+			Operation: &workloadtypes.InstanceOperation{
+				Type:           workloadtypes.InstanceOperationUpdate,
 				Step:           workloadtypes.UpdateStepDrain,
 				TargetRevision: "own-engine-badhash",
 				Deadline:       metav1.NewTime(now.Add(30 * time.Minute)),
 			},
 		},
 	}
-	store := append([]workload.InstanceStatus(nil), insts...)
+	store := append([]workloadtypes.InstanceStatus(nil), insts...)
 	var sequence []string
-	input := workload.ReconcileInput{
-		ApplyInstanceMutations: func(_ context.Context, muts []workload.InstanceMutation) error {
+	input := workloadtypes.ReconcileInput{
+		ApplyInstanceMutations: func(_ context.Context, muts []workloadtypes.InstanceMutation) error {
 			sequence = append(sequence, "batch")
 			for _, m := range muts {
 				for i := range store {
@@ -404,7 +405,7 @@ func TestEscalation_DispositionFlushesPendingStamps(t *testing.T) {
 			}
 			return nil
 		},
-		MutateInstance: func(_ context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
+		MutateInstance: func(_ context.Context, idx int32, mutate func(*workloadtypes.InstanceStatus) bool) error {
 			sequence = append(sequence, "mutate")
 			for i := range store {
 				if store[i].Index == idx {
@@ -413,15 +414,15 @@ func TestEscalation_DispositionFlushesPendingStamps(t *testing.T) {
 			}
 			return nil
 		},
-		MutateRetryBlock: func(_ context.Context, _ string, mutate func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
+		MutateRetryBlock: func(_ context.Context, _ string, mutate func(*workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition) error {
 			sequence = append(sequence, "retryblock")
-			b := workload.RetryBlock{}
+			b := workloadtypes.RetryBlock{}
 			mutate(&b)
 			return nil
 		},
 		WarnInstanceFailed: func(_ int32, _, _ string) {},
 	}
-	input.ObservedState.InstanceStatuses = append([]workload.InstanceStatus(nil), insts...)
+	input.ObservedState.InstanceStatuses = append([]workloadtypes.InstanceStatus(nil), insts...)
 	input.StuckPodGrace = time.Second
 
 	stuck := &corev1.Pod{
@@ -437,10 +438,10 @@ func TestEscalation_DispositionFlushesPendingStamps(t *testing.T) {
 		},
 	}
 
-	if err := runEscalationPass(t, workload.Deps{}, input,
-		workload.ComponentPlan{Instances: []workload.InstancePlan{
-			{Index: 0, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
-			{Index: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input,
+		workloadtypes.ComponentPlan{Instances: []workloadtypes.InstancePlan{
+			{Index: 0, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 1, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}}},
 		}},
 		map[int32][]*corev1.Pod{1: {stuck}}); err != nil {
 		t.Fatalf("escalation pass: %v", err)
@@ -455,10 +456,10 @@ func TestEscalation_DispositionFlushesPendingStamps(t *testing.T) {
 			t.Fatalf("write sequence: got %v want %v (pending stamps must flush before the disposition's write-ahead-ordered writes)", sequence, want)
 		}
 	}
-	if store[0].Phase != workload.InstancePhaseFailed {
+	if store[0].Phase != workloadtypes.InstancePhaseFailed {
 		t.Errorf("instance 0 Phase: got %q want Failed", store[0].Phase)
 	}
-	if store[1].Phase != workload.InstancePhaseFailed || store[1].Operation != nil {
+	if store[1].Phase != workloadtypes.InstancePhaseFailed || store[1].Operation != nil {
 		t.Errorf("instance 1: got Phase=%q Operation=%v want Failed with Operation cleared (disposition path)", store[1].Phase, store[1].Operation)
 	}
 }
@@ -477,13 +478,13 @@ func TestEscalation_MigratePair_StuckSurgePod_NotStamped(t *testing.T) {
 	surgeIdx := int32(1)
 	sourceIdx := int32(0)
 	future := metav1.NewTime(now.Add(30 * time.Minute))
-	insts := []workload.InstanceStatus{
+	insts := []workloadtypes.InstanceStatus{
 		{
 			Index:    0,
-			Phase:    workload.InstancePhaseMigrating,
+			Phase:    workloadtypes.InstancePhaseMigrating,
 			PodCount: 1,
-			Operation: &workload.InstanceOperation{
-				Type:        workload.InstanceOperationMigrate,
+			Operation: &workloadtypes.InstanceOperation{
+				Type:        workloadtypes.InstanceOperationMigrate,
 				Step:        "CreateSurge",
 				RequestUUID: "mig-1",
 				SurgeIndex:  &surgeIdx,
@@ -492,9 +493,9 @@ func TestEscalation_MigratePair_StuckSurgePod_NotStamped(t *testing.T) {
 		},
 		{
 			Index: 1,
-			Phase: workload.InstancePhaseCreating,
-			Operation: &workload.InstanceOperation{
-				Type:        workload.InstanceOperationMigrate,
+			Phase: workloadtypes.InstancePhaseCreating,
+			Operation: &workloadtypes.InstanceOperation{
+				Type:        workloadtypes.InstanceOperationMigrate,
 				Step:        "CreateSurge",
 				RequestUUID: "mig-1",
 				SurgeIndex:  &sourceIdx,
@@ -518,10 +519,10 @@ func TestEscalation_MigratePair_StuckSurgePod_NotStamped(t *testing.T) {
 		},
 	}
 
-	if err := runEscalationPass(t, workload.Deps{}, input,
-		workload.ComponentPlan{Instances: []workload.InstancePlan{
-			{Index: 0, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
-			{Index: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input,
+		workloadtypes.ComponentPlan{Instances: []workloadtypes.InstancePlan{
+			{Index: 0, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 1, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}}},
 		}},
 		map[int32][]*corev1.Pod{
 			0: {servingPod("engine-0-default-0")},
@@ -530,10 +531,10 @@ func TestEscalation_MigratePair_StuckSurgePod_NotStamped(t *testing.T) {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
-	if got := rec.store[0]; got.Phase != workload.InstancePhaseMigrating || got.Operation == nil {
+	if got := rec.store[0]; got.Phase != workloadtypes.InstancePhaseMigrating || got.Operation == nil {
 		t.Errorf("migration source must be untouched by the stuck-pod fast path; got phase=%q op=%+v", got.Phase, got.Operation)
 	}
-	if got := rec.store[1]; got.Phase != workload.InstancePhaseCreating || got.Operation == nil {
+	if got := rec.store[1]; got.Phase != workloadtypes.InstancePhaseCreating || got.Operation == nil {
 		t.Errorf("migration surge must be untouched by the stuck-pod fast path; got phase=%q op=%+v", got.Phase, got.Operation)
 	}
 	if len(rec.warns) != 0 {
@@ -550,12 +551,12 @@ func TestEscalation_MigratePair_StuckSurgePod_NotStamped(t *testing.T) {
 func TestEscalation_GangSurgeSource_GatedAttemptPods_DeadlineSkipped(t *testing.T) {
 	now := time.Now()
 	surgeIdx := int32(2)
-	insts := []workload.InstanceStatus{{
+	insts := []workloadtypes.InstanceStatus{{
 		Index:    0,
-		Phase:    workload.InstancePhaseUpdating,
+		Phase:    workloadtypes.InstancePhaseUpdating,
 		PodCount: 1,
-		Operation: &workload.InstanceOperation{
-			Type:           workload.InstanceOperationUpdate,
+		Operation: &workloadtypes.InstanceOperation{
+			Type:           workloadtypes.InstanceOperationUpdate,
 			Step:           "Surge",
 			TargetRevision: "own-engine-newhash",
 			SurgeIndex:     &surgeIdx,
@@ -574,7 +575,7 @@ func TestEscalation_GangSurgeSource_GatedAttemptPods_DeadlineSkipped(t *testing.
 		},
 	}
 
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, singleInstancePlan(0, 1),
 		map[int32][]*corev1.Pod{
 			0: {servingPod("engine-0-default-0")},
 			2: {gated},
@@ -582,7 +583,7 @@ func TestEscalation_GangSurgeSource_GatedAttemptPods_DeadlineSkipped(t *testing.
 		t.Fatalf("escalation pass: %v", err)
 	}
 
-	if rec.store[0].Phase != workload.InstancePhaseUpdating {
+	if rec.store[0].Phase != workloadtypes.InstancePhaseUpdating {
 		t.Errorf("Phase: got %q want Updating (queued attempt pods must park the source's deadline, not expire it)", rec.store[0].Phase)
 	}
 	if len(rec.warns) != 0 {
@@ -601,33 +602,33 @@ func TestEscalation_GangSurgeSource_GatedAttemptPods_DeadlineSkipped(t *testing.
 // Cells: instance/Restart/Drain/timer.operationDeadline/before
 func TestEscalation_RestartDeadlineElapsed_FailsInstance(t *testing.T) {
 	now := time.Now()
-	insts := []workload.InstanceStatus{{
+	insts := []workloadtypes.InstanceStatus{{
 		Index:       0,
 		Incarnation: 2,
-		Phase:       workload.InstancePhaseRestarting,
+		Phase:       workloadtypes.InstancePhaseRestarting,
 		PodCount:    1,
-		Operation: &workload.InstanceOperation{
-			Type:     workload.InstanceOperationRestart,
+		Operation: &workloadtypes.InstanceOperation{
+			Type:     workloadtypes.InstanceOperationRestart,
 			Step:     "Drain",
 			Deadline: metav1.NewTime(now.Add(-time.Minute)),
 		},
 	}}
 	input, rec := escalationFixture(insts)
 
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, singleInstancePlan(0, 1),
 		map[int32][]*corev1.Pod{0: {waitingPod("engine-0-default-0", "PodInitializing", "node-a", now.Add(-time.Hour))}}); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
 	got := rec.store[0]
-	if got.Phase != workload.InstancePhaseFailed {
+	if got.Phase != workloadtypes.InstancePhaseFailed {
 		t.Errorf("Phase: got %q want Failed", got.Phase)
 	}
-	if got.Operation == nil || got.Operation.Type != workload.InstanceOperationRestart {
+	if got.Operation == nil || got.Operation.Type != workloadtypes.InstanceOperationRestart {
 		t.Errorf("Operation: got %+v want the Restart attempt preserved", got.Operation)
 	}
-	if got.LastFailure == nil || got.LastFailure.Reason != workload.DeadlineExceededReason {
-		t.Errorf("LastFailure: got %+v want Reason=%s", got.LastFailure, workload.DeadlineExceededReason)
+	if got.LastFailure == nil || got.LastFailure.Reason != escalation.DeadlineExceededReason {
+		t.Errorf("LastFailure: got %+v want Reason=%s", got.LastFailure, escalation.DeadlineExceededReason)
 	}
 	if len(rec.warns) != 1 {
 		t.Errorf("WarnInstanceFailed: got %v want one call", rec.warns)
@@ -645,19 +646,19 @@ func TestEscalation_RestartDeadlineExceededWaiting_NoFastFail(t *testing.T) {
 	now := time.Now()
 	for _, tc := range []struct {
 		reason string
-		want   workload.InstancePhase
+		want   workloadtypes.InstancePhase
 	}{
-		{reason: workload.DeadlineExceededReason, want: workload.InstancePhaseRestarting},
-		{reason: "CrashLoopBackOff", want: workload.InstancePhaseFailed},
+		{reason: escalation.DeadlineExceededReason, want: workloadtypes.InstancePhaseRestarting},
+		{reason: "CrashLoopBackOff", want: workloadtypes.InstancePhaseFailed},
 	} {
 		t.Run(tc.reason, func(t *testing.T) {
-			insts := []workload.InstanceStatus{{
+			insts := []workloadtypes.InstanceStatus{{
 				Index:       0,
 				Incarnation: 2,
-				Phase:       workload.InstancePhaseRestarting,
+				Phase:       workloadtypes.InstancePhaseRestarting,
 				PodCount:    1,
-				Operation: &workload.InstanceOperation{
-					Type:     workload.InstanceOperationRestart,
+				Operation: &workloadtypes.InstanceOperation{
+					Type:     workloadtypes.InstanceOperationRestart,
 					Step:     "Drain",
 					Deadline: metav1.NewTime(now.Add(30 * time.Minute)),
 				},
@@ -665,7 +666,7 @@ func TestEscalation_RestartDeadlineExceededWaiting_NoFastFail(t *testing.T) {
 			input, rec := escalationFixture(insts)
 			input.StuckPodGrace = time.Second
 
-			if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+			if err := runEscalationPass(t, workloadtypes.Deps{}, input, singleInstancePlan(0, 1),
 				map[int32][]*corev1.Pod{0: {waitingPod("engine-0-default-0", tc.reason, "node-a", now.Add(-time.Hour))}}); err != nil {
 				t.Fatalf("escalation pass: %v", err)
 			}
@@ -673,7 +674,7 @@ func TestEscalation_RestartDeadlineExceededWaiting_NoFastFail(t *testing.T) {
 			if rec.store[0].Phase != tc.want {
 				t.Errorf("Phase: got %q want %q", rec.store[0].Phase, tc.want)
 			}
-			if tc.want == workload.InstancePhaseRestarting {
+			if tc.want == workloadtypes.InstancePhaseRestarting {
 				if rec.store[0].Operation == nil {
 					t.Errorf("Operation: got nil want the in-flight Restart untouched")
 				}
@@ -691,12 +692,12 @@ func TestEscalation_RestartDeadlineExceededWaiting_NoFastFail(t *testing.T) {
 // parking step zeroes it must not expire the Instance.
 func TestEscalation_AdmissionGatedInstance_DeadlineSkipped(t *testing.T) {
 	now := time.Now()
-	insts := []workload.InstanceStatus{{
+	insts := []workloadtypes.InstanceStatus{{
 		Index:    0,
-		Phase:    workload.InstancePhaseCreating,
+		Phase:    workloadtypes.InstancePhaseCreating,
 		PodCount: 1,
-		Operation: &workload.InstanceOperation{
-			Type:     workload.InstanceOperationCreate,
+		Operation: &workloadtypes.InstanceOperation{
+			Type:     workloadtypes.InstanceOperationCreate,
 			Deadline: metav1.NewTime(now.Add(-time.Hour)),
 		},
 	}}
@@ -712,12 +713,12 @@ func TestEscalation_AdmissionGatedInstance_DeadlineSkipped(t *testing.T) {
 		},
 	}
 
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, singleInstancePlan(0, 1),
 		map[int32][]*corev1.Pod{0: {gated}}); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
-	if rec.store[0].Phase != workload.InstancePhaseCreating {
+	if rec.store[0].Phase != workloadtypes.InstancePhaseCreating {
 		t.Errorf("Phase: got %q want Creating (gated Instance is queued, not stuck)", rec.store[0].Phase)
 	}
 	if len(rec.warns) != 0 {
@@ -757,14 +758,14 @@ func TestEscalation_DrainingPodDoesNotMaskStuckReplacement(t *testing.T) {
 			},
 		}
 	}
-	surgeDrainInstance := func() []workload.InstanceStatus {
-		return []workload.InstanceStatus{{
+	surgeDrainInstance := func() []workloadtypes.InstanceStatus {
+		return []workloadtypes.InstanceStatus{{
 			Index:    0,
-			Phase:    workload.InstancePhaseUpdating,
+			Phase:    workloadtypes.InstancePhaseUpdating,
 			PodCount: 1,
-			Operation: &workload.InstanceOperation{
-				Type:           workload.InstanceOperationUpdate,
-				Step:           workload.UpdateStepSurgeDrain,
+			Operation: &workloadtypes.InstanceOperation{
+				Type:           workloadtypes.InstanceOperationUpdate,
+				Step:           workloadtypes.UpdateStepSurgeDrain,
 				TargetRevision: "own-engine-newhash",
 				Deadline:       metav1.NewTime(now.Add(-time.Hour)),
 			},
@@ -795,11 +796,11 @@ func TestEscalation_DrainingPodDoesNotMaskStuckReplacement(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			input, rec := escalationFixture(surgeDrainInstance())
-			if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+			if err := runEscalationPass(t, workloadtypes.Deps{}, input, singleInstancePlan(0, 1),
 				map[int32][]*corev1.Pod{0: tc.pods}); err != nil {
 				t.Fatalf("escalation pass: %v", err)
 			}
-			failed := rec.store[0].Phase == workload.InstancePhaseFailed
+			failed := rec.store[0].Phase == workloadtypes.InstancePhaseFailed
 			if failed != tc.escalate {
 				t.Fatalf("Phase: got %q (escalated=%v) want escalated=%v", rec.store[0].Phase, failed, tc.escalate)
 			}
@@ -817,14 +818,14 @@ func TestEscalation_DrainingPodDoesNotMaskStuckReplacement(t *testing.T) {
 // Cells: instance/Update/Surge/spec.pauseTrue/before
 func TestEscalation_PausedHoldSkipsStuckPodFastPath(t *testing.T) {
 	now := time.Now()
-	insts := func(waiting string) []workload.InstanceStatus {
-		return []workload.InstanceStatus{{
+	insts := func(waiting string) []workloadtypes.InstanceStatus {
+		return []workloadtypes.InstanceStatus{{
 			Index:    0,
-			Phase:    workload.InstancePhaseUpdating,
+			Phase:    workloadtypes.InstancePhaseUpdating,
 			PodCount: 1,
-			Operation: &workload.InstanceOperation{
-				Type:           workload.InstanceOperationUpdate,
-				Step:           workload.UpdateStepSurge,
+			Operation: &workloadtypes.InstanceOperation{
+				Type:           workloadtypes.InstanceOperationUpdate,
+				Step:           workloadtypes.UpdateStepSurge,
 				TargetRevision: "own-engine-badhash",
 				Waiting:        waiting,
 				Deadline:       metav1.NewTime(now.Add(30 * time.Minute)),
@@ -846,13 +847,13 @@ func TestEscalation_PausedHoldSkipsStuckPodFastPath(t *testing.T) {
 		}
 	}
 
-	input, rec := escalationFixture(insts(workload.WaitingReasonPaused))
+	input, rec := escalationFixture(insts(workloadtypes.WaitingReasonPaused))
 	input.StuckPodGrace = time.Second
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, singleInstancePlan(0, 1),
 		map[int32][]*corev1.Pod{0: {stuck()}}); err != nil {
 		t.Fatalf("escalation pass (held): %v", err)
 	}
-	if rec.store[0].Phase != workload.InstancePhaseUpdating {
+	if rec.store[0].Phase != workloadtypes.InstancePhaseUpdating {
 		t.Errorf("held Phase: got %q want Updating (an operator holds the row)", rec.store[0].Phase)
 	}
 	if len(rec.warns) != 0 {
@@ -861,24 +862,24 @@ func TestEscalation_PausedHoldSkipsStuckPodFastPath(t *testing.T) {
 
 	input, rec = escalationFixture(insts(""))
 	input.StuckPodGrace = time.Second
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, singleInstancePlan(0, 1),
 		map[int32][]*corev1.Pod{0: {stuck()}}); err != nil {
 		t.Fatalf("escalation pass (released): %v", err)
 	}
-	if rec.store[0].Phase != workload.InstancePhaseFailed {
+	if rec.store[0].Phase != workloadtypes.InstancePhaseFailed {
 		t.Errorf("released Phase: got %q want Failed", rec.store[0].Phase)
 	}
 
 	// The guard is scoped to the pause token, so a row whose surge took
 	// the token over to report its source out of rotation is still the
 	// pass's business once the pause is cleared.
-	input, rec = escalationFixture(insts(workload.WaitingReasonSourceUnrouted))
+	input, rec = escalationFixture(insts(workloadtypes.WaitingReasonSourceUnrouted))
 	input.StuckPodGrace = time.Second
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, singleInstancePlan(0, 1),
 		map[int32][]*corev1.Pod{0: {stuck()}}); err != nil {
 		t.Fatalf("escalation pass (unrouted): %v", err)
 	}
-	if rec.store[0].Phase != workload.InstancePhaseFailed {
+	if rec.store[0].Phase != workloadtypes.InstancePhaseFailed {
 		t.Errorf("unrouted Phase: got %q want Failed (the pause guard must not cover it)", rec.store[0].Phase)
 	}
 }
@@ -905,14 +906,14 @@ func wedgedButGatedPod(name, reason string) *corev1.Pod {
 	return pod
 }
 
-func surgingInstanceWithWaiting(waiting string) []workload.InstanceStatus {
-	return []workload.InstanceStatus{{
+func surgingInstanceWithWaiting(waiting string) []workloadtypes.InstanceStatus {
+	return []workloadtypes.InstanceStatus{{
 		Index:    0,
-		Phase:    workload.InstancePhaseUpdating,
+		Phase:    workloadtypes.InstancePhaseUpdating,
 		PodCount: 1,
-		Operation: &workload.InstanceOperation{
-			Type:           workload.InstanceOperationUpdate,
-			Step:           workload.UpdateStepSurge,
+		Operation: &workloadtypes.InstanceOperation{
+			Type:           workloadtypes.InstanceOperationUpdate,
+			Step:           workloadtypes.UpdateStepSurge,
 			TargetRevision: "own-engine-targethash",
 			Deadline:       metav1.NewTime(time.Now().Add(30 * time.Minute)),
 			Waiting:        waiting,
@@ -929,16 +930,16 @@ func surgingInstanceWithWaiting(waiting string) []workload.InstanceStatus {
 //
 // Cells: instance/Update/Surge/pod.servingOff[source]/before, instance/Update/Surge/endpoint.rotationOut[source]/before
 func TestEscalation_UnroutedSourceDoesNotExemptAWedgedSurge(t *testing.T) {
-	insts := surgingInstanceWithWaiting(workload.WaitingReasonSourceUnrouted)
+	insts := surgingInstanceWithWaiting(workloadtypes.WaitingReasonSourceUnrouted)
 	input, rec := escalationFixture(insts)
 	input.StuckPodGrace = time.Second
 
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, singleInstancePlan(0, 1),
 		map[int32][]*corev1.Pod{0: {wedgedButGatedPod("engine-0-default-0", "ImagePullBackOff")}}); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
-	if rec.store[0].Phase != workload.InstancePhaseFailed {
+	if rec.store[0].Phase != workloadtypes.InstancePhaseFailed {
 		t.Errorf("Phase: got %q want Failed (nothing is in rotation to exempt the row)", rec.store[0].Phase)
 	}
 	if len(rec.warns) != 1 {
@@ -956,12 +957,12 @@ func TestEscalation_RoutedSourceKeepsTheServingExemption(t *testing.T) {
 	input, rec := escalationFixture(insts)
 	input.StuckPodGrace = time.Second
 
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, singleInstancePlan(0, 1),
 		map[int32][]*corev1.Pod{0: {wedgedButGatedPod("engine-0-default-0", "ImagePullBackOff")}}); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
-	if rec.store[0].Phase != workload.InstancePhaseUpdating {
+	if rec.store[0].Phase != workloadtypes.InstancePhaseUpdating {
 		t.Errorf("Phase: got %q want Updating (a serving pod set is never stamped Failed)", rec.store[0].Phase)
 	}
 	if len(rec.warns) != 0 {
@@ -981,10 +982,10 @@ func TestEscalation_RoutedSourceKeepsTheServingExemption(t *testing.T) {
 // Cells: instance/Update/Surge/pod.servingOff[source]/before
 func TestEscalation_ServingRowKeepsTheHoldArmsOnPodHealth(t *testing.T) {
 	t.Run("gang hold released", func(t *testing.T) {
-		input, rec := escalationFixture(surgingInstanceWithWaiting(workload.WaitingReasonPodGroupTerminating))
-		input.Gangs = gangObservations(0, workload.GangStateTerminating, gangTerminatingMessage)
+		input, rec := escalationFixture(surgingInstanceWithWaiting(workloadtypes.WaitingReasonPodGroupTerminating))
+		input.Gangs = gangObservations(0, workloadtypes.GangStateTerminating, gangTerminatingMessage)
 
-		if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+		if err := runEscalationPass(t, workloadtypes.Deps{}, input, singleInstancePlan(0, 1),
 			map[int32][]*corev1.Pod{0: {servingPod("engine-0-default-0")}}); err != nil {
 			t.Fatalf("escalation pass: %v", err)
 		}
@@ -993,7 +994,7 @@ func TestEscalation_ServingRowKeepsTheHoldArmsOnPodHealth(t *testing.T) {
 		if got.Operation == nil || got.Operation.Waiting != "" {
 			t.Errorf("Operation.Waiting: got %+v want cleared; serving pods are not waiting on a name", got.Operation)
 		}
-		if got.Phase != workload.InstancePhaseUpdating {
+		if got.Phase != workloadtypes.InstancePhaseUpdating {
 			t.Errorf("Phase: got %q want Updating", got.Phase)
 		}
 	})
@@ -1001,8 +1002,8 @@ func TestEscalation_ServingRowKeepsTheHoldArmsOnPodHealth(t *testing.T) {
 		// The source is healthy but out of rotation: the surge's own report
 		// stands, and the gang arm reading a Terminating group neither takes
 		// the row from it nor ends the attempt.
-		input, rec := escalationFixture(surgingInstanceWithWaiting(workload.WaitingReasonSourceUnrouted))
-		input.Gangs = gangObservations(0, workload.GangStateTerminating, gangTerminatingMessage)
+		input, rec := escalationFixture(surgingInstanceWithWaiting(workloadtypes.WaitingReasonSourceUnrouted))
+		input.Gangs = gangObservations(0, workloadtypes.GangStateTerminating, gangTerminatingMessage)
 		source := servingPod("engine-0-default-0")
 		for i := range source.Status.Conditions {
 			if source.Status.Conditions[i].Type == query.ServingConditionType {
@@ -1010,16 +1011,16 @@ func TestEscalation_ServingRowKeepsTheHoldArmsOnPodHealth(t *testing.T) {
 			}
 		}
 
-		if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+		if err := runEscalationPass(t, workloadtypes.Deps{}, input, singleInstancePlan(0, 1),
 			map[int32][]*corev1.Pod{0: {source}}); err != nil {
 			t.Fatalf("escalation pass: %v", err)
 		}
 
 		got := rec.store[0]
-		if got.Operation == nil || got.Operation.Waiting != workload.WaitingReasonSourceUnrouted {
+		if got.Operation == nil || got.Operation.Waiting != workloadtypes.WaitingReasonSourceUnrouted {
 			t.Errorf("Operation.Waiting: got %+v want the report kept; no arm may take a row from it", got.Operation)
 		}
-		if got.Phase != workload.InstancePhaseUpdating {
+		if got.Phase != workloadtypes.InstancePhaseUpdating {
 			t.Errorf("Phase: got %q want Updating", got.Phase)
 		}
 		if len(rec.warns) != 0 {
@@ -1044,18 +1045,18 @@ func TestEscalation_CorrectiveRevisionDoesNotRideTheFailingSurge(t *testing.T) {
 
 	// failingSurge is a single-pod surge committed to pinned, with the
 	// operator's corrective revision already observed.
-	failingSurge := func(deadline time.Time) []workload.InstanceStatus {
-		return []workload.InstanceStatus{{
+	failingSurge := func(deadline time.Time) []workloadtypes.InstanceStatus {
+		return []workloadtypes.InstanceStatus{{
 			Index:           0,
 			Incarnation:     1,
-			Phase:           workload.InstancePhaseUpdating,
+			Phase:           workloadtypes.InstancePhaseUpdating,
 			PodCount:        1,
 			RunningRevision: "llama-70b-engine-priorrev",
 			TargetRevision:  pinned,
-			Operation: &workload.InstanceOperation{
+			Operation: &workloadtypes.InstanceOperation{
 				ID:             "surge-0",
-				Type:           workload.InstanceOperationUpdate,
-				Step:           workload.UpdateStepSurge,
+				Type:           workloadtypes.InstanceOperationUpdate,
+				Step:           workloadtypes.UpdateStepSurge,
 				TargetRevision: pinned,
 				StartedAt:      metav1.NewTime(now.Add(-time.Hour)),
 				Deadline:       metav1.NewTime(deadline),
@@ -1087,11 +1088,11 @@ func TestEscalation_CorrectiveRevisionDoesNotRideTheFailingSurge(t *testing.T) {
 			input, rec := escalationFixture(failingSurge(tc.deadline))
 			input.StuckPodGrace = tc.grace
 			input.ObservedState.UpdateRevision = updateTarget().Name
-			if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1), tc.pods); err != nil {
+			if err := runEscalationPass(t, workloadtypes.Deps{}, input, singleInstancePlan(0, 1), tc.pods); err != nil {
 				t.Fatalf("escalation pass: %v", err)
 			}
 			got := rec.store[0]
-			if got.Phase != workload.InstancePhaseFailed {
+			if got.Phase != workloadtypes.InstancePhaseFailed {
 				t.Fatalf("Phase: got %q want Failed (the stamp is what this window commits)", got.Phase)
 			}
 			for _, b := range rec.blocks {
@@ -1108,7 +1109,7 @@ func TestEscalation_CorrectiveRevisionDoesNotRideTheFailingSurge(t *testing.T) {
 			// The row the escalation just wrote, carried forward.
 			failed := rec.store[0]
 			failed.RunningRevision = "prior-rev"
-			in.ObservedState.InstanceStatuses = []workload.InstanceStatus{failed}
+			in.ObservedState.InstanceStatuses = []workloadtypes.InstanceStatus{failed}
 			d := planTargetOrFail(t, in, minimalPlan(), updateTarget(),
 				planSnapshot(in, map[int32][]*corev1.Pod{0: {enginePod(in.Key.OwnerName, in.Key.Namespace, 0)}}))
 			ua := findAction(d, workload.ActionUpdate)
@@ -1158,7 +1159,7 @@ func TestExpireOperations_ExactBoundary(t *testing.T) {
 	// pass's mutations, like consecutive reconciles would.
 	input.ObservedState.InstanceStatuses = instances
 
-	if err := workload.EscalateFromEvidenceForTest(context.Background(), workload.Deps{}, input, workload.ComponentPlan{}, nil, workload.SnapshotWithPodsForTest(input, nil)); err != nil {
+	if err := escalation.EscalateFromEvidenceForTest(context.Background(), workloadtypes.Deps{}, input, workloadtypes.ComponentPlan{}, nil, nil); err != nil {
 		t.Fatalf("expire (before deadline): %v", err)
 	}
 	if len(mutated) != 0 {
@@ -1167,7 +1168,7 @@ func TestExpireOperations_ExactBoundary(t *testing.T) {
 
 	// AT the deadline: now.After(deadline) is false — still no expiry.
 	fc.SetTime(deadline)
-	if err := workload.EscalateFromEvidenceForTest(context.Background(), workload.Deps{}, input, workload.ComponentPlan{}, nil, workload.SnapshotWithPodsForTest(input, nil)); err != nil {
+	if err := escalation.EscalateFromEvidenceForTest(context.Background(), workloadtypes.Deps{}, input, workloadtypes.ComponentPlan{}, nil, nil); err != nil {
 		t.Fatalf("expire (at deadline): %v", err)
 	}
 	if len(mutated) != 0 {
@@ -1175,7 +1176,7 @@ func TestExpireOperations_ExactBoundary(t *testing.T) {
 	}
 
 	fc.SetTime(deadline.Add(time.Second)) // 1s AFTER
-	if err := workload.EscalateFromEvidenceForTest(context.Background(), workload.Deps{}, input, workload.ComponentPlan{}, nil, workload.SnapshotWithPodsForTest(input, nil)); err != nil {
+	if err := escalation.EscalateFromEvidenceForTest(context.Background(), workloadtypes.Deps{}, input, workloadtypes.ComponentPlan{}, nil, nil); err != nil {
 		t.Fatalf("expire (after deadline): %v", err)
 	}
 	if len(mutated) != 1 || mutated[0] != 0 {
@@ -1239,25 +1240,25 @@ func gateNotFoldedPod(name string, since time.Time) *corev1.Pod {
 // Cells: instance/Create/CreatePods/timer.operationDeadline/before
 func TestEscalation_DeadlineWithGateNotFoldedPod_NamesTheGate(t *testing.T) {
 	now := time.Now()
-	insts := []workload.InstanceStatus{{
+	insts := []workloadtypes.InstanceStatus{{
 		Index:    0,
-		Phase:    workload.InstancePhaseCreating,
+		Phase:    workloadtypes.InstancePhaseCreating,
 		PodCount: 1,
-		Operation: &workload.InstanceOperation{
-			Type:           workload.InstanceOperationCreate,
+		Operation: &workloadtypes.InstanceOperation{
+			Type:           workloadtypes.InstanceOperationCreate,
 			TargetRevision: "own-engine-newhash",
 			Deadline:       metav1.NewTime(now.Add(-time.Hour)),
 		},
 	}}
 	input, rec := escalationFixture(insts)
 
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, singleInstancePlan(0, 1),
 		map[int32][]*corev1.Pod{0: {gateNotFoldedPod("engine-0-default-0", now.Add(-time.Hour))}}); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
 	got := rec.store[0]
-	if got.Phase != workload.InstancePhaseFailed {
+	if got.Phase != workloadtypes.InstancePhaseFailed {
 		t.Errorf("Phase: got %q want Failed", got.Phase)
 	}
 	if got.LastFailure == nil || got.LastFailure.Reason != evidence.ReasonReadinessGateNotSatisfied {
@@ -1279,26 +1280,26 @@ func TestEscalation_DeadlineWithGateNotFoldedPod_NamesTheGate(t *testing.T) {
 // Cells: instance/Restart/Drain/timer.operationDeadline/before
 func TestEscalation_RestartDeadlineWithGateNotFoldedPod_NamesTheGate(t *testing.T) {
 	now := time.Now()
-	insts := []workload.InstanceStatus{{
+	insts := []workloadtypes.InstanceStatus{{
 		Index:       0,
 		Incarnation: 2,
-		Phase:       workload.InstancePhaseRestarting,
+		Phase:       workloadtypes.InstancePhaseRestarting,
 		PodCount:    1,
-		Operation: &workload.InstanceOperation{
-			Type:     workload.InstanceOperationRestart,
+		Operation: &workloadtypes.InstanceOperation{
+			Type:     workloadtypes.InstanceOperationRestart,
 			Step:     "Drain",
 			Deadline: metav1.NewTime(now.Add(-time.Hour)),
 		},
 	}}
 	input, rec := escalationFixture(insts)
 
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, singleInstancePlan(0, 1),
 		map[int32][]*corev1.Pod{0: {gateNotFoldedPod("engine-0-default-0", now.Add(-time.Hour))}}); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
 	got := rec.store[0]
-	if got.Phase != workload.InstancePhaseFailed {
+	if got.Phase != workloadtypes.InstancePhaseFailed {
 		t.Errorf("Phase: got %q want Failed", got.Phase)
 	}
 	if got.LastFailure == nil || got.LastFailure.Reason != evidence.ReasonReadinessGateNotSatisfied {
@@ -1357,25 +1358,25 @@ func runningNotReadyPod(name string, since time.Time) *corev1.Pod {
 // Cells: instance/Create/CreatePods/timer.operationDeadline/before, instance/Create/CreatePods/pod.runningNotReady[source]/before
 func TestEscalation_DeadlineWithRunningNotReadyPod_NamesTheProbe(t *testing.T) {
 	now := time.Now()
-	insts := []workload.InstanceStatus{{
+	insts := []workloadtypes.InstanceStatus{{
 		Index:    0,
-		Phase:    workload.InstancePhaseCreating,
+		Phase:    workloadtypes.InstancePhaseCreating,
 		PodCount: 1,
-		Operation: &workload.InstanceOperation{
-			Type:           workload.InstanceOperationCreate,
+		Operation: &workloadtypes.InstanceOperation{
+			Type:           workloadtypes.InstanceOperationCreate,
 			TargetRevision: "own-engine-newhash",
 			Deadline:       metav1.NewTime(now.Add(-time.Hour)),
 		},
 	}}
 	input, rec := escalationFixture(insts)
 
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, singleInstancePlan(0, 1),
 		map[int32][]*corev1.Pod{0: {runningNotReadyPod("engine-0-default-0", now.Add(-time.Hour))}}); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
 	got := rec.store[0]
-	if got.Phase != workload.InstancePhaseFailed {
+	if got.Phase != workloadtypes.InstancePhaseFailed {
 		t.Errorf("Phase: got %q want Failed", got.Phase)
 	}
 	if got.LastFailure == nil || got.LastFailure.Reason != evidence.ReasonContainersNotReady {
@@ -1400,12 +1401,12 @@ func TestEscalation_DeadlineWithRunningNotReadyPod_NamesTheProbe(t *testing.T) {
 // Cells: instance/Create/CreatePods/timer.operationDeadline/before
 func TestEscalation_DeadlineWithCrashLoopPod_KeepsAmbiguousBlame(t *testing.T) {
 	now := time.Now()
-	insts := []workload.InstanceStatus{{
+	insts := []workloadtypes.InstanceStatus{{
 		Index:    0,
-		Phase:    workload.InstancePhaseCreating,
+		Phase:    workloadtypes.InstancePhaseCreating,
 		PodCount: 1,
-		Operation: &workload.InstanceOperation{
-			Type:           workload.InstanceOperationCreate,
+		Operation: &workloadtypes.InstanceOperation{
+			Type:           workloadtypes.InstanceOperationCreate,
 			TargetRevision: "own-engine-newhash",
 			Deadline:       metav1.NewTime(now.Add(-time.Hour)),
 		},
@@ -1416,12 +1417,12 @@ func TestEscalation_DeadlineWithCrashLoopPod_KeepsAmbiguousBlame(t *testing.T) {
 	pod.Status.ContainerStatuses[0].State = corev1.ContainerState{
 		Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff", Message: "back-off 5m0s"},
 	}
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, singleInstancePlan(0, 1),
 		map[int32][]*corev1.Pod{0: {pod}}); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
-	if rec.store[0].Phase != workload.InstancePhaseFailed {
+	if rec.store[0].Phase != workloadtypes.InstancePhaseFailed {
 		t.Errorf("Phase: got %q want Failed", rec.store[0].Phase)
 	}
 	if len(rec.blocks) != 0 {
@@ -1436,24 +1437,24 @@ func TestEscalation_DeadlineWithCrashLoopPod_KeepsAmbiguousBlame(t *testing.T) {
 // Cells: instance/Create/CreatePods/pod.runningNotReady[source]/before
 func TestEscalation_RunningNotReadyBeforeDeadline_Untouched(t *testing.T) {
 	now := time.Now()
-	insts := []workload.InstanceStatus{{
+	insts := []workloadtypes.InstanceStatus{{
 		Index:    0,
-		Phase:    workload.InstancePhaseCreating,
+		Phase:    workloadtypes.InstancePhaseCreating,
 		PodCount: 1,
-		Operation: &workload.InstanceOperation{
-			Type:           workload.InstanceOperationCreate,
+		Operation: &workloadtypes.InstanceOperation{
+			Type:           workloadtypes.InstanceOperationCreate,
 			TargetRevision: "own-engine-newhash",
 			Deadline:       metav1.NewTime(now.Add(time.Hour)),
 		},
 	}}
 	input, rec := escalationFixture(insts)
 
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, singleInstancePlan(0, 1),
 		map[int32][]*corev1.Pod{0: {runningNotReadyPod("engine-0-default-0", now.Add(-24*time.Hour))}}); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
-	if rec.store[0].Phase != workload.InstancePhaseCreating {
+	if rec.store[0].Phase != workloadtypes.InstancePhaseCreating {
 		t.Errorf("Phase: got %q want Creating (the deadline is the only exit)", rec.store[0].Phase)
 	}
 	if len(rec.warns) != 0 || len(rec.blocks) != 0 {
@@ -1470,13 +1471,13 @@ func TestEscalation_RunningNotReadyBeforeDeadline_Untouched(t *testing.T) {
 func TestEscalation_GangDeadlineWithRunningNotReadyPods_NamesTheProbe(t *testing.T) {
 	now := time.Now()
 	surge := int32(1)
-	insts := []workload.InstanceStatus{{
+	insts := []workloadtypes.InstanceStatus{{
 		Index:    0,
-		Phase:    workload.InstancePhaseUpdating,
+		Phase:    workloadtypes.InstancePhaseUpdating,
 		PodCount: 2,
-		Operation: &workload.InstanceOperation{
-			Type:           workload.InstanceOperationUpdate,
-			Step:           workload.UpdateStepGangSurgeTarget,
+		Operation: &workloadtypes.InstanceOperation{
+			Type:           workloadtypes.InstanceOperationUpdate,
+			Step:           workloadtypes.UpdateStepGangSurgeTarget,
 			SurgeIndex:     &surge,
 			TargetRevision: "own-engine-newhash",
 			Deadline:       metav1.NewTime(now.Add(-time.Hour)),
@@ -1484,7 +1485,7 @@ func TestEscalation_GangDeadlineWithRunningNotReadyPods_NamesTheProbe(t *testing
 	}}
 	input, rec := escalationFixture(insts)
 
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 2),
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, singleInstancePlan(0, 2),
 		map[int32][]*corev1.Pod{1: {
 			runningNotReadyPod("engine-1-leader-0", now.Add(-time.Hour)),
 			runningNotReadyPod("engine-1-worker-0", now.Add(-time.Hour)),
@@ -1493,7 +1494,7 @@ func TestEscalation_GangDeadlineWithRunningNotReadyPods_NamesTheProbe(t *testing
 	}
 
 	got := rec.store[0]
-	if got.Phase != workload.InstancePhaseFailed {
+	if got.Phase != workloadtypes.InstancePhaseFailed {
 		t.Errorf("Phase: got %q want Failed", got.Phase)
 	}
 	if got.Operation == nil {
@@ -1502,7 +1503,7 @@ func TestEscalation_GangDeadlineWithRunningNotReadyPods_NamesTheProbe(t *testing
 	if got.LastFailure == nil || got.LastFailure.Reason != evidence.ReasonContainersNotReady {
 		t.Fatalf("LastFailure.Reason: got %+v want %q", got.LastFailure, evidence.ReasonContainersNotReady)
 	}
-	if workload.IsWorkloadCausedReason(got.LastFailure.Reason) {
+	if workloadtypes.IsWorkloadCausedReason(got.LastFailure.Reason) {
 		t.Errorf("IsWorkloadCausedReason(%q): got true want false — the abandon must not charge the ladder for an ambiguous failure", got.LastFailure.Reason)
 	}
 }
@@ -1518,14 +1519,14 @@ func TestEscalation_GangDeadlineWithRunningNotReadyPods_NamesTheProbe(t *testing
 func TestEscalation_SurgeDeadlineBlamesTheTargetNotTheSource(t *testing.T) {
 	now := time.Now()
 	const targetRev = "own-engine-newhash"
-	insts := []workload.InstanceStatus{{
+	insts := []workloadtypes.InstanceStatus{{
 		Index:           0,
-		Phase:           workload.InstancePhaseUpdating,
+		Phase:           workloadtypes.InstancePhaseUpdating,
 		PodCount:        1,
 		RunningRevision: "own-engine-oldhash",
-		Operation: &workload.InstanceOperation{
-			Type:           workload.InstanceOperationUpdate,
-			Step:           workload.UpdateStepSurge,
+		Operation: &workloadtypes.InstanceOperation{
+			Type:           workloadtypes.InstanceOperationUpdate,
+			Step:           workloadtypes.UpdateStepSurge,
 			TargetRevision: targetRev,
 			Deadline:       metav1.NewTime(now.Add(-time.Hour)),
 		},
@@ -1539,13 +1540,13 @@ func TestEscalation_SurgeDeadlineBlamesTheTargetNotTheSource(t *testing.T) {
 	target := runningNotReadyPod("engine-0-default-1", now.Add(-time.Hour))
 	target.Labels = map[string]string{query.LabelRevisionHash: query.RevisionFromName(targetRev).Hash()}
 
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1),
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, singleInstancePlan(0, 1),
 		map[int32][]*corev1.Pod{0: {source, target}}); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
 	got := rec.store[0]
-	if got.Phase != workload.InstancePhaseFailed {
+	if got.Phase != workloadtypes.InstancePhaseFailed {
 		t.Errorf("Phase: got %q want Failed (an expired deadline must resolve)", got.Phase)
 	}
 	if got.Operation != nil {
@@ -1576,9 +1577,9 @@ func TestEscalation_SurgeDeadlineBlamesTheTargetNotTheSource(t *testing.T) {
 func TestEscalation_MigrationPairIgnoresTheInstanceOperationDeadline(t *testing.T) {
 	now := time.Now()
 	input, rec := escalationFixture(migrationPair(now.Add(-time.Hour)))
-	plan := workload.ComponentPlan{Instances: []workload.InstancePlan{
-		{Index: 0, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
-		{Index: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+	plan := workloadtypes.ComponentPlan{Instances: []workloadtypes.InstancePlan{
+		{Index: 0, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}}},
+		{Index: 1, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}}},
 	}}
 
 	// The source is serving and the replacement has not come up: exactly
@@ -1587,7 +1588,7 @@ func TestEscalation_MigrationPairIgnoresTheInstanceOperationDeadline(t *testing.
 		ObjectMeta: metav1.ObjectMeta{Name: "engine-1-default-0"},
 		Status:     corev1.PodStatus{Phase: corev1.PodPending},
 	}
-	if err := runEscalationPass(t, workload.Deps{}, input, plan, map[int32][]*corev1.Pod{
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, plan, map[int32][]*corev1.Pod{
 		0: {servingPod("engine-0-default-0")},
 		1: {pending},
 	}); err != nil {
@@ -1595,7 +1596,7 @@ func TestEscalation_MigrationPairIgnoresTheInstanceOperationDeadline(t *testing.
 	}
 
 	for _, s := range rec.store {
-		if s.Phase == workload.InstancePhaseFailed {
+		if s.Phase == workloadtypes.InstancePhaseFailed {
 			t.Errorf("instance %d: got Failed want the record left in charge of the move", s.Index)
 		}
 	}
@@ -1604,5 +1605,507 @@ func TestEscalation_MigrationPairIgnoresTheInstanceOperationDeadline(t *testing.
 	}
 	if len(rec.blocks) != 0 {
 		t.Errorf("RetryBlock: got %v want none", rec.blocks)
+	}
+}
+
+// TestHasWedgedPodAgainstCurrent pins the wedged-pod recovery probe:
+// disagreement between pod's revision-hash label and currentHash flags
+// the wedge; empty currentHash is the no-rollout-ever guard that
+// suppresses false fires.
+func TestHasWedgedPodAgainstCurrent(t *testing.T) {
+	label := "ome.io/revision-hash"
+	mk := func(hash string) *corev1.Pod {
+		return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{label: hash}}}
+	}
+
+	cases := []struct {
+		name        string
+		pods        []*corev1.Pod
+		currentHash string
+		labelKey    string
+		want        bool
+	}{
+		{name: "empty currentHash never flags", pods: []*corev1.Pod{mk("anything")}, currentHash: "", labelKey: label, want: false},
+		{name: "empty labelKey never flags", pods: []*corev1.Pod{mk("anything")}, currentHash: "x", labelKey: "", want: false},
+		{name: "all pods match", pods: []*corev1.Pod{mk("x"), mk("x")}, currentHash: "x", labelKey: label, want: false},
+		{name: "one pod disagrees", pods: []*corev1.Pod{mk("x"), mk("y")}, currentHash: "x", labelKey: label, want: true},
+		{name: "pods missing label are skipped", pods: []*corev1.Pod{{ObjectMeta: metav1.ObjectMeta{}}}, currentHash: "x", labelKey: label, want: false},
+		{name: "nil pods are skipped", pods: []*corev1.Pod{nil}, currentHash: "x", labelKey: label, want: false},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := escalation.HasWedgedPodAgainstCurrent(tt.pods, tt.currentHash, tt.labelKey); got != tt.want {
+				t.Errorf("got %v want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestShouldCheckForStuckPods pins the two-path qualifier: transient
+// phase + Operation qualifies; wedged-pod (label-hash disagreement)
+// qualifies; Failed / Deleting never qualify; empty currentHash
+// suppresses the wedged branch.
+func TestShouldCheckForStuckPods(t *testing.T) {
+	label := "ome.io/revision-hash"
+	podWithHash := func(hash string) *corev1.Pod {
+		return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{label: hash}}}
+	}
+
+	cases := []struct {
+		name        string
+		status      *workloadtypes.InstanceStatus
+		pods        []*corev1.Pod
+		currentHash string
+		want        bool
+	}{
+		{name: "nil status", status: nil, want: false},
+		{name: "Failed never qualifies",
+			status: &workloadtypes.InstanceStatus{Phase: workloadtypes.InstancePhaseFailed},
+			want:   false,
+		},
+		{name: "Deleting never qualifies",
+			status: &workloadtypes.InstanceStatus{Phase: workloadtypes.InstancePhaseDeleting},
+			want:   false,
+		},
+		{name: "Creating + Operation qualifies",
+			status: &workloadtypes.InstanceStatus{Phase: workloadtypes.InstancePhaseCreating, Operation: &workloadtypes.InstanceOperation{}},
+			want:   true,
+		},
+		{name: "Updating + Operation qualifies",
+			status: &workloadtypes.InstanceStatus{Phase: workloadtypes.InstancePhaseUpdating, Operation: &workloadtypes.InstanceOperation{}},
+			want:   true,
+		},
+		{name: "Restarting + Operation qualifies",
+			status: &workloadtypes.InstanceStatus{Phase: workloadtypes.InstancePhaseRestarting, Operation: &workloadtypes.InstanceOperation{}},
+			want:   true,
+		},
+		{name: "Migrating + Operation qualifies",
+			status: &workloadtypes.InstanceStatus{Phase: workloadtypes.InstancePhaseMigrating, Operation: &workloadtypes.InstanceOperation{}},
+			want:   true,
+		},
+		{name: "Creating without Operation falls to wedged-pod check",
+			status: &workloadtypes.InstanceStatus{Phase: workloadtypes.InstancePhaseCreating},
+			pods:   []*corev1.Pod{podWithHash("x")}, currentHash: "y",
+			want: true,
+		},
+		{name: "Ready + wedged-pod qualifies",
+			status: &workloadtypes.InstanceStatus{Phase: workloadtypes.InstancePhaseReady},
+			pods:   []*corev1.Pod{podWithHash("y")}, currentHash: "x",
+			want: true,
+		},
+		{name: "Ready + matching pod hash does not qualify",
+			status: &workloadtypes.InstanceStatus{Phase: workloadtypes.InstancePhaseReady},
+			pods:   []*corev1.Pod{podWithHash("x")}, currentHash: "x",
+			want: false,
+		},
+		{name: "Ready + wedged pod but empty currentHash does not qualify",
+			status: &workloadtypes.InstanceStatus{Phase: workloadtypes.InstancePhaseReady},
+			pods:   []*corev1.Pod{podWithHash("y")}, currentHash: "",
+			want: false,
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := escalation.ShouldCheckForStuckPods(tt.status, tt.pods, tt.currentHash, label); got != tt.want {
+				t.Errorf("got %v want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestEscalateStuckPodFailures_EscalatesAndEmitsEvent pins the
+// integration contract for the escalation pass's wedged-pod recovery
+// branch: a wedged pod past grace whose revision-hash label disagrees
+// with CurrentRevision flips the InstanceStatus Phase to Failed via
+// MutateInstance and fires WarnInstanceFailed exactly once.
+func TestEscalateStuckPodFailures_EscalatesAndEmitsEvent(t *testing.T) {
+	grace := 1 * time.Millisecond
+
+	now := time.Now()
+	terminal := corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}
+	stuck := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "engine-0-default-0",
+			CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
+			Labels:            map[string]string{"ome.io/revision-hash": "newhash"},
+		},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{{State: corev1.ContainerState{Waiting: &terminal}}},
+		},
+	}
+
+	// Local mirror of the per-Instance status the closure mutates.
+	insts := []workloadtypes.InstanceStatus{{Index: 0, Phase: workloadtypes.InstancePhaseReady, RunningRevision: "own-engine-oldhash"}}
+	var eventFired struct {
+		idx    int32
+		pod    string
+		reason string
+		count  int
+	}
+	input := workloadtypes.ReconcileInput{
+		StuckPodGrace: grace,
+		MutateInstance: func(_ context.Context, idx int32, mutate func(*workloadtypes.InstanceStatus) bool) error {
+			for i := range insts {
+				if insts[i].Index == idx {
+					mutate(&insts[i])
+					return nil
+				}
+			}
+			return nil
+		},
+		WarnInstanceFailed: func(idx int32, podName, reason string) {
+			eventFired.idx = idx
+			eventFired.pod = podName
+			eventFired.reason = reason
+			eventFired.count++
+		},
+	}
+	input.ObservedState.InstanceStatuses = insts
+	input.ObservedState.CurrentRevision = "own-engine-oldhash"
+
+	err := runEscalationPass(t, workloadtypes.Deps{}, input, workloadtypes.ComponentPlan{},
+		map[int32][]*corev1.Pod{0: {stuck}})
+	if err != nil {
+		t.Fatalf("escalation pass: %v", err)
+	}
+
+	if insts[0].Phase != workloadtypes.InstancePhaseFailed {
+		t.Errorf("Phase: got %q want Failed", insts[0].Phase)
+	}
+	if eventFired.count != 1 {
+		t.Errorf("event count: got %d want 1", eventFired.count)
+	}
+	if eventFired.pod != stuck.Name {
+		t.Errorf("event pod: got %q want %q", eventFired.pod, stuck.Name)
+	}
+	if eventFired.reason != "ImagePullBackOff" {
+		t.Errorf("event reason: got %q want ImagePullBackOff", eventFired.reason)
+	}
+}
+
+// TestEscalateStuckPodFailures_GangSurgeAttributedToSource pins the
+// gang-surge attribution: a SOURCE Instance whose in-flight surge lives at
+// a SEPARATE index must escalate to Failed when the SURGE gang wedges, even
+// though the source's own pods are healthy. Without attributing the surge
+// index's stuck pods to the source, a bad-revision gang surge hangs the
+// rollout at Phase=Updating forever.
+func TestEscalateStuckPodFailures_GangSurgeAttributedToSource(t *testing.T) {
+	grace := 1 * time.Millisecond
+
+	now := time.Now()
+	healthy := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "engine-0-leader-0",
+			CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
+			Labels:            map[string]string{"ome.io/revision-hash": "oldhash"},
+		},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{{State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}},
+		},
+	}
+	terminal := corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}
+	surgeStuck := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "engine-2-leader-0",
+			CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
+			Labels:            map[string]string{"ome.io/revision-hash": "badhash"},
+		},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{{State: corev1.ContainerState{Waiting: &terminal}}},
+		},
+	}
+
+	surgeIdx := int32(2)
+	insts := []workloadtypes.InstanceStatus{{
+		Index:           0,
+		Phase:           workloadtypes.InstancePhaseUpdating,
+		RunningRevision: "own-engine-oldhash",
+		Operation: &workloadtypes.InstanceOperation{
+			Type:       workloadtypes.InstanceOperationUpdate,
+			Step:       "Surge",
+			SurgeIndex: &surgeIdx,
+		},
+	}}
+	var eventFired struct {
+		idx   int32
+		pod   string
+		count int
+	}
+	input := workloadtypes.ReconcileInput{
+		StuckPodGrace: grace,
+		MutateInstance: func(_ context.Context, idx int32, mutate func(*workloadtypes.InstanceStatus) bool) error {
+			for i := range insts {
+				if insts[i].Index == idx {
+					mutate(&insts[i])
+					return nil
+				}
+			}
+			return nil
+		},
+		WarnInstanceFailed: func(idx int32, podName, _ string) {
+			eventFired.idx = idx
+			eventFired.pod = podName
+			eventFired.count++
+		},
+	}
+	input.ObservedState.InstanceStatuses = insts
+	input.ObservedState.CurrentRevision = "own-engine-oldhash"
+
+	err := runEscalationPass(t, workloadtypes.Deps{}, input, workloadtypes.ComponentPlan{},
+		map[int32][]*corev1.Pod{0: {healthy}, 2: {surgeStuck}})
+	if err != nil {
+		t.Fatalf("escalation pass: %v", err)
+	}
+	if insts[0].Phase != workloadtypes.InstancePhaseFailed {
+		t.Errorf("source Phase: got %q want Failed", insts[0].Phase)
+	}
+	if eventFired.count != 1 || eventFired.idx != 0 {
+		t.Errorf("event: got count=%d idx=%d want count=1 idx=0", eventFired.count, eventFired.idx)
+	}
+	if eventFired.pod != surgeStuck.Name {
+		t.Errorf("event pod: got %q want %q (the wedged surge pod)", eventFired.pod, surgeStuck.Name)
+	}
+}
+
+// TestEscalateStuckPodFailures_GangSurgeIgnoresFailedSource pins corrective
+// rollout behavior: once a replacement gang is in flight, a terminal failure
+// on the old source must not be attributed to that surge. Otherwise the gang
+// recovery path abandons each new replacement before it can start.
+func TestEscalateStuckPodFailures_GangSurgeIgnoresFailedSource(t *testing.T) {
+	grace := 1 * time.Millisecond
+
+	now := time.Now()
+	oldStuck := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "engine-0-leader-0",
+			CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
+			Labels:            map[string]string{"ome.io/revision-hash": "oldhash"},
+		},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{{
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}},
+			}},
+		},
+	}
+	replacementHealthy := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "engine-2-leader-0",
+			CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
+			Labels:            map[string]string{"ome.io/revision-hash": "newhash"},
+		},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{{
+				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			}},
+		},
+	}
+	replacementStuck := replacementHealthy.DeepCopy()
+	replacementStuck.Name = "engine-2-worker-0"
+	replacementStuck.Status.ContainerStatuses[0].State = corev1.ContainerState{
+		Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"},
+	}
+
+	for _, tc := range []struct {
+		name         string
+		replacement  []*corev1.Pod
+		wantPhase    workloadtypes.InstancePhase
+		wantEventPod string
+	}{
+		{name: "replacement pods not created yet", wantPhase: workloadtypes.InstancePhaseUpdating},
+		{name: "replacement pods healthy", replacement: []*corev1.Pod{replacementHealthy}, wantPhase: workloadtypes.InstancePhaseUpdating},
+		{name: "replacement pod also stuck", replacement: []*corev1.Pod{replacementStuck}, wantPhase: workloadtypes.InstancePhaseFailed, wantEventPod: replacementStuck.Name},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			surgeIdx := int32(2)
+			insts := []workloadtypes.InstanceStatus{{
+				Index:           0,
+				Phase:           workloadtypes.InstancePhaseUpdating,
+				RunningRevision: "own-engine-oldhash",
+				Operation: &workloadtypes.InstanceOperation{
+					Type:       workloadtypes.InstanceOperationUpdate,
+					Step:       "Surge",
+					SurgeIndex: &surgeIdx,
+				},
+			}}
+			var eventPod string
+			input := workloadtypes.ReconcileInput{
+				StuckPodGrace: grace,
+				MutateInstance: func(_ context.Context, idx int32, mutate func(*workloadtypes.InstanceStatus) bool) error {
+					for i := range insts {
+						if insts[i].Index == idx {
+							mutate(&insts[i])
+						}
+					}
+					return nil
+				},
+				WarnInstanceFailed: func(_ int32, podName, _ string) { eventPod = podName },
+			}
+			input.ObservedState.InstanceStatuses = insts
+			input.ObservedState.CurrentRevision = "own-engine-newhash"
+
+			err := runEscalationPass(t, workloadtypes.Deps{}, input, workloadtypes.ComponentPlan{},
+				map[int32][]*corev1.Pod{
+					0: {oldStuck},
+					2: tc.replacement,
+				})
+			if err != nil {
+				t.Fatalf("escalation pass: %v", err)
+			}
+			if insts[0].Phase != tc.wantPhase {
+				t.Errorf("source Phase: got %q want %q", insts[0].Phase, tc.wantPhase)
+			}
+			if eventPod != tc.wantEventPod {
+				t.Errorf("event pod: got %q want %q", eventPod, tc.wantEventPod)
+			}
+		})
+	}
+}
+
+// TestEscalateStuckPodFailures_AlreadyFailedNoOp pins the idempotency:
+// the escalator must not re-fire on an already-Failed Instance even
+// though the wedged pod is still in front of it.
+func TestEscalateStuckPodFailures_AlreadyFailedNoOp(t *testing.T) {
+	grace := 1 * time.Millisecond
+
+	now := time.Now()
+	terminal := corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}
+	stuck := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "engine-0-default-0",
+			CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
+			Labels:            map[string]string{"ome.io/revision-hash": "newhash"},
+		},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{{State: corev1.ContainerState{Waiting: &terminal}}},
+		},
+	}
+
+	insts := []workloadtypes.InstanceStatus{{Index: 0, Phase: workloadtypes.InstancePhaseFailed}}
+	var eventFired int
+	input := workloadtypes.ReconcileInput{
+		StuckPodGrace: grace,
+		MutateInstance: func(_ context.Context, _ int32, _ func(*workloadtypes.InstanceStatus) bool) error {
+			t.Errorf("MutateInstance must not be called for already-Failed Instance")
+			return nil
+		},
+		WarnInstanceFailed: func(_ int32, _, _ string) { eventFired++ },
+	}
+	input.ObservedState.InstanceStatuses = insts
+	input.ObservedState.CurrentRevision = "own-engine-oldhash"
+
+	err := runEscalationPass(t, workloadtypes.Deps{}, input, workloadtypes.ComponentPlan{},
+		map[int32][]*corev1.Pod{0: {stuck}})
+	if err != nil {
+		t.Fatalf("escalation pass: %v", err)
+	}
+	if eventFired != 0 {
+		t.Errorf("event count: got %d want 0 (already-Failed must not re-fire)", eventFired)
+	}
+}
+
+// TestEscalateStuckPodFailures_NoOpWarnCallback pins the panic-on-nil
+// contract escape hatch: callers that don't wire a real recorder
+// (workload-side unit tests, adapters with no event surface) set an
+// explicit no-op closure and the Phase=Failed mutation still lands.
+func TestEscalateStuckPodFailures_NoOpWarnCallback(t *testing.T) {
+	now := time.Now()
+	terminal := corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}
+	stuck := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
+		},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{{State: corev1.ContainerState{Waiting: &terminal}}},
+		},
+	}
+	insts := []workloadtypes.InstanceStatus{{Index: 0, Phase: workloadtypes.InstancePhaseUpdating, Operation: &workloadtypes.InstanceOperation{Type: workloadtypes.InstanceOperationUpdate, Step: "Drain"}}}
+	input := workloadtypes.ReconcileInput{
+		StuckPodGrace: 1 * time.Millisecond,
+		MutateInstance: func(_ context.Context, idx int32, mutate func(*workloadtypes.InstanceStatus) bool) error {
+			for i := range insts {
+				if insts[i].Index == idx {
+					mutate(&insts[i])
+				}
+			}
+			return nil
+		},
+		// Explicit no-op stub — the panic-on-nil contract requires a
+		// non-nil callback; adapters that don't emit events wire this
+		// shape (see workload.ReconcileInput docs).
+		WarnInstanceFailed: func(_ int32, _, _ string) {},
+	}
+	input.ObservedState.InstanceStatuses = insts
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, workloadtypes.ComponentPlan{},
+		map[int32][]*corev1.Pod{0: {stuck}}); err != nil {
+		t.Fatalf("escalation pass with no-op WarnInstanceFailed: %v", err)
+	}
+	if insts[0].Phase != workloadtypes.InstancePhaseFailed {
+		t.Errorf("Phase: got %q want Failed (escalation must land even with no-op warn callback)", insts[0].Phase)
+	}
+}
+
+// Stuck-pod escalation must preserve the wedged pod's diagnostics
+// into InstanceStatus.LastFailure when it flips the Instance to Failed —
+// the escalation is followed by a recreate / teardown that deletes the
+// wedged pod, so this is the surviving trace operators read.
+func TestEscalateStuckPodFailures_CapturesLastFailure(t *testing.T) {
+	grace := 1 * time.Millisecond
+
+	now := time.Now()
+	stuck := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "engine-0-leader-0",
+			CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
+			Labels:            map[string]string{"ome.io/revision-hash": "newhash"},
+		},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  "main",
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff", Message: "back-off pulling image"}},
+			}},
+		},
+	}
+
+	insts := []workloadtypes.InstanceStatus{{Index: 0, Phase: workloadtypes.InstancePhaseUpdating, RunningRevision: "own-engine-oldhash", Operation: &workloadtypes.InstanceOperation{Type: workloadtypes.InstanceOperationUpdate, Step: "Drain"}}}
+	input := workloadtypes.ReconcileInput{
+		StuckPodGrace: grace,
+		MutateInstance: func(_ context.Context, idx int32, mutate func(*workloadtypes.InstanceStatus) bool) error {
+			for i := range insts {
+				if insts[i].Index == idx {
+					mutate(&insts[i])
+					return nil
+				}
+			}
+			return nil
+		},
+		WarnInstanceFailed: func(_ int32, _, _ string) {},
+	}
+	input.ObservedState.InstanceStatuses = insts
+	input.ObservedState.CurrentRevision = "own-engine-oldhash"
+
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, workloadtypes.ComponentPlan{},
+		map[int32][]*corev1.Pod{0: {stuck}}); err != nil {
+		t.Fatalf("escalation pass: %v", err)
+	}
+
+	if insts[0].Phase != workloadtypes.InstancePhaseFailed {
+		t.Fatalf("Phase: got %q want Failed", insts[0].Phase)
+	}
+	lf := insts[0].LastFailure
+	if lf == nil {
+		t.Fatalf("LastFailure: nil, want the wedged pod's diagnostics")
+	}
+	if lf.PodName != stuck.Name {
+		t.Errorf("LastFailure.PodName: got %q want %q", lf.PodName, stuck.Name)
+	}
+	if lf.Reason != "ImagePullBackOff" {
+		t.Errorf("LastFailure.Reason: got %q want ImagePullBackOff", lf.Reason)
+	}
+	if lf.ContainerName != "main" {
+		t.Errorf("LastFailure.ContainerName: got %q want main", lf.ContainerName)
+	}
+	// A stuck waiting-state wedge never ran a process → no exit code.
+	if lf.ExitCode != nil {
+		t.Errorf("LastFailure.ExitCode: got %v want nil for a waiting-state wedge", lf.ExitCode)
 	}
 }

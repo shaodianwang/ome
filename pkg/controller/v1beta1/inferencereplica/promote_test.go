@@ -9,7 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 const (
@@ -32,7 +32,7 @@ func getFreshIR(t *testing.T, r *Reconciler, ir *v1beta1.InferenceReplica) *v1be
 // staged-rollout contract: an IR converged to a NON-zero partition (some
 // Instances Ready on the target revision, the rest Ready-and-held on the
 // prior one) must NOT promote CurrentRevision. The promotion gate is
-// workload.RolloutComplete, which is the partition-0 predicate
+// status.RolloutComplete, which is the partition-0 predicate
 // (ReachedDesiredShape(...,0,replicas)); any held Instance makes it false,
 // so partition>0 never triggers a promotion. Staged is surfaced downstream
 // via the unchanged CurrentRevision != UpdateRevision, not by promoting.
@@ -153,7 +153,7 @@ func TestPromoteCurrentRevision_SameNameReplacementAborts(t *testing.T) {
 
 	promote := buildPromoteCurrentRevision(testStatusWriter(live), live, stale)
 	err := promote(context.Background(), promoteTargetRev)
-	g.Expect(errors.Is(err, workload.ErrStatusOwnerGone)).To(gomega.BeTrue())
+	g.Expect(errors.Is(err, workloadtypes.ErrStatusOwnerGone)).To(gomega.BeTrue())
 	g.Expect(*writes).To(gomega.Equal(0))
 
 	persisted := &v1beta1.InferenceReplica{}
@@ -177,7 +177,7 @@ func TestPromoteCurrentRevision_GenerationChangeAborts(t *testing.T) {
 
 	promote := buildPromoteCurrentRevision(testStatusWriter(live), live, stale)
 	err := promote(context.Background(), promoteTargetRev)
-	g.Expect(errors.Is(err, workload.ErrStatusMutationPrecondition)).To(gomega.BeTrue())
+	g.Expect(errors.Is(err, workloadtypes.ErrStatusMutationPrecondition)).To(gomega.BeTrue())
 	g.Expect(*writes).To(gomega.Equal(0))
 	g.Expect(stale.Status.CurrentRevision).To(gomega.Equal(promotePriorRev))
 

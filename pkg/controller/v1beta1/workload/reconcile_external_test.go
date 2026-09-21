@@ -13,10 +13,13 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
 	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
@@ -70,9 +73,9 @@ func makeScheme(t *testing.T) *runtime.Scheme {
 // stubInputCallbacks fills the callback fields that
 // workload.ReconcileInput panics on if left nil. Tests only set
 // behavior on the callbacks they care about; the rest stay no-ops.
-func stubInputCallbacks(input *workload.ReconcileInput) {
+func stubInputCallbacks(input *workloadtypes.ReconcileInput) {
 	if input.MutateInstance == nil {
-		input.MutateInstance = func(_ context.Context, _ int32, _ func(*workload.InstanceStatus) bool) error {
+		input.MutateInstance = func(_ context.Context, _ int32, _ func(*workloadtypes.InstanceStatus) bool) error {
 			return nil
 		}
 	}
@@ -86,7 +89,7 @@ func stubInputCallbacks(input *workload.ReconcileInput) {
 		input.WarnInstanceFailed = func(_ int32, _, _ string) {}
 	}
 	if input.MutateMigration == nil {
-		input.MutateMigration = func(_ context.Context, _ string, _ func(*workload.MigrationRecord) bool) error {
+		input.MutateMigration = func(_ context.Context, _ string, _ func(*workloadtypes.MigrationRecord) bool) error {
 			return nil
 		}
 	}
@@ -94,11 +97,11 @@ func stubInputCallbacks(input *workload.ReconcileInput) {
 
 type testAtomicMutationStore struct {
 	owner    client.Object
-	statuses []workload.InstanceStatus
+	statuses []workloadtypes.InstanceStatus
 	writes   int
 }
 
-func installTestAtomicMutationStore(input *workload.ReconcileInput) *testAtomicMutationStore {
+func installTestAtomicMutationStore(input *workloadtypes.ReconcileInput) *testAtomicMutationStore {
 	store := &testAtomicMutationStore{
 		owner:    input.OwnerObject,
 		statuses: cloneTestInstanceStatuses(input.ObservedState.InstanceStatuses),
@@ -107,11 +110,11 @@ func installTestAtomicMutationStore(input *workload.ReconcileInput) *testAtomicM
 	return store
 }
 
-func (s *testAtomicMutationStore) apply(_ context.Context, mutations []workload.InstanceMutation, _ string, mutateRetryBlock func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
+func (s *testAtomicMutationStore) apply(_ context.Context, mutations []workloadtypes.InstanceMutation, _ string, mutateRetryBlock func(*workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition) error {
 	if mutateRetryBlock != nil {
 		return fmt.Errorf("test atomic mutation store does not support RetryBlock mutations")
 	}
-	snapshot := workload.InstanceMutationSnapshot{Instances: make(map[int32]workload.InstanceStatus, len(s.statuses))}
+	snapshot := workloadtypes.InstanceMutationSnapshot{Instances: make(map[int32]workloadtypes.InstanceStatus, len(s.statuses))}
 	if s.owner != nil {
 		snapshot.OwnerUID = s.owner.GetUID()
 		snapshot.OwnerGeneration = s.owner.GetGeneration()
@@ -121,14 +124,14 @@ func (s *testAtomicMutationStore) apply(_ context.Context, mutations []workload.
 	}
 	for _, mutation := range mutations {
 		if mutation.BatchPrecondition != nil && !mutation.BatchPrecondition(snapshot) {
-			return workload.ErrStatusMutationPrecondition
+			return workloadtypes.ErrStatusMutationPrecondition
 		}
 	}
 
 	type committedMutation struct {
-		callback func(*workload.InstanceStatus, *workload.InstanceStatus)
-		before   *workload.InstanceStatus
-		after    *workload.InstanceStatus
+		callback func(*workloadtypes.InstanceStatus, *workloadtypes.InstanceStatus)
+		before   *workloadtypes.InstanceStatus
+		after    *workloadtypes.InstanceStatus
 	}
 	next := cloneTestInstanceStatuses(s.statuses)
 	committed := make([]committedMutation, 0, len(mutations))
@@ -153,8 +156,8 @@ func (s *testAtomicMutationStore) apply(_ context.Context, mutations []workload.
 			continue
 		}
 
-		status := workload.InstanceStatus{Index: mutation.Index}
-		var before *workload.InstanceStatus
+		status := workloadtypes.InstanceStatus{Index: mutation.Index}
+		var before *workloadtypes.InstanceStatus
 		if position >= 0 {
 			status = cloneTestInstanceStatus(next[position])
 			copy := cloneTestInstanceStatus(status)
@@ -187,11 +190,11 @@ func (s *testAtomicMutationStore) apply(_ context.Context, mutations []workload.
 	return nil
 }
 
-func (s *testAtomicMutationStore) sync(input *workload.ReconcileInput) {
+func (s *testAtomicMutationStore) sync(input *workloadtypes.ReconcileInput) {
 	input.ObservedState.InstanceStatuses = cloneTestInstanceStatuses(s.statuses)
 }
 
-func (s *testAtomicMutationStore) status(index int32) *workload.InstanceStatus {
+func (s *testAtomicMutationStore) status(index int32) *workloadtypes.InstanceStatus {
 	for i := range s.statuses {
 		if s.statuses[i].Index == index {
 			status := cloneTestInstanceStatus(s.statuses[i])
@@ -201,15 +204,15 @@ func (s *testAtomicMutationStore) status(index int32) *workload.InstanceStatus {
 	return nil
 }
 
-func cloneTestInstanceStatuses(statuses []workload.InstanceStatus) []workload.InstanceStatus {
-	cloned := make([]workload.InstanceStatus, len(statuses))
+func cloneTestInstanceStatuses(statuses []workloadtypes.InstanceStatus) []workloadtypes.InstanceStatus {
+	cloned := make([]workloadtypes.InstanceStatus, len(statuses))
 	for i := range statuses {
 		cloned[i] = cloneTestInstanceStatus(statuses[i])
 	}
 	return cloned
 }
 
-func cloneTestInstanceStatus(status workload.InstanceStatus) workload.InstanceStatus {
+func cloneTestInstanceStatus(status workloadtypes.InstanceStatus) workloadtypes.InstanceStatus {
 	converted := v1beta1convert.InstanceStatusFromWorkload(status)
 	return v1beta1convert.InstanceStatusToWorkload(*converted.DeepCopy())
 }
@@ -221,28 +224,28 @@ const testScaleDownRequeueInterval = 37 * time.Second
 // testRequeueIntervals is the dispatcher cadence these tests run under,
 // standing in for the operator config a deployed chart supplies. A test
 // pinning the unconfigured path clears ReconcileInput.Requeue.
-var testRequeueIntervals = workload.RequeueIntervals{
+var testRequeueIntervals = workloadtypes.RequeueIntervals{
 	Operation: 5 * time.Second,
 	Gate:      3 * time.Second,
 }
 
-func minimalInput(t *testing.T) workload.ReconcileInput {
+func minimalInput(t *testing.T) workloadtypes.ReconcileInput {
 	t.Helper()
 	isvc := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{
 		Name: "llama-70b", Namespace: "prod", UID: "uid-1",
 	}}
-	in := workload.ReconcileInput{
+	in := workloadtypes.ReconcileInput{
 		OwnerObject: isvc,
 		OwnerGVK:    v1beta1.SchemeGroupVersion.WithKind("InferenceService"),
 		EventTarget: isvc,
-		Key: workload.Key{
+		Key: workloadtypes.Key{
 			Namespace: "prod",
-			Component: workload.ComponentEngine,
+			Component: workloadtypes.ComponentEngine,
 			OwnerName: "llama-70b",
 		},
 		ScaleDownRequeueInterval: testScaleDownRequeueInterval,
 		Requeue:                  testRequeueIntervals,
-		DesiredSpec: workload.WorkloadDesiredSpec{
+		DesiredSpec: workloadtypes.WorkloadDesiredSpec{
 			Replicas: 1,
 			PodSpec: &corev1.PodSpec{Containers: []corev1.Container{
 				{Name: "main", Image: "test:v1"},
@@ -255,20 +258,20 @@ func minimalInput(t *testing.T) workload.ReconcileInput {
 
 // minimalPlan returns a ComponentPlan covering a single Instance at
 // index 0 with a single-pod "default" Runner.
-func minimalPlan() workload.ComponentPlan {
-	return workload.ComponentPlan{
-		Component: workload.ComponentEngine,
+func minimalPlan() workloadtypes.ComponentPlan {
+	return workloadtypes.ComponentPlan{
+		Component: workloadtypes.ComponentEngine,
 		Replicas:  1,
-		Instances: []workload.InstancePlan{
-			{Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{
+		Instances: []workloadtypes.InstancePlan{
+			{Index: 0, Incarnation: 1, Runners: []workloadtypes.RunnerPlan{
 				{Name: "default", Size: 1},
 			}},
 		},
 	}
 }
 
-func roundTripMutateInstance(c client.Client, isvc *v1beta1.InferenceService, component workload.ComponentType) func(context.Context, int32, func(*workload.InstanceStatus) bool) error {
-	return func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
+func roundTripMutateInstance(c client.Client, isvc *v1beta1.InferenceService, component workloadtypes.ComponentType) func(context.Context, int32, func(*workloadtypes.InstanceStatus) bool) error {
+	return func(ctx context.Context, idx int32, mutate func(*workloadtypes.InstanceStatus) bool) error {
 		ir := &v1beta1.InferenceReplica{}
 		key := types.NamespacedName{Namespace: isvc.Namespace, Name: isvc.Name + "-" + string(component)}
 		create := false
@@ -332,7 +335,7 @@ func instanceStatusByIndex(c client.Client, isvc *v1beta1.InferenceService, comp
 // so the per-op state machines never NPE on a missing reader.
 func TestReconcile_NilClient_Errors(t *testing.T) {
 	in := minimalInput(t)
-	_, err := workload.Reconcile(context.Background(), workload.Deps{}, in, minimalPlan(), nil)
+	_, err := workload.Reconcile(context.Background(), workloadtypes.Deps{}, in, minimalPlan(), nil)
 	if err == nil {
 		t.Fatalf("expected nil-Client to error, got nil")
 	}
@@ -350,7 +353,7 @@ func TestReconcile_NilClient_Errors(t *testing.T) {
 func TestReconcile_NilTarget_DrivesCreate(t *testing.T) {
 	scheme := makeScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	deps := workload.Deps{Client: c}
+	deps := workloadtypes.Deps{Client: c}
 
 	in := minimalInput(t)
 	plan := minimalPlan()
@@ -376,7 +379,7 @@ func TestReconcile_UnconfiguredCadenceUsesBackoff(t *testing.T) {
 	}
 
 	configured := fake.NewClientBuilder().WithScheme(scheme).Build()
-	res, err := workload.Reconcile(context.Background(), workload.Deps{Client: configured}, minimalInput(t), plan, target)
+	res, err := workload.Reconcile(context.Background(), workloadtypes.Deps{Client: configured}, minimalInput(t), plan, target)
 	if err != nil {
 		t.Fatalf("Reconcile with a configured cadence: %v", err)
 	}
@@ -386,8 +389,8 @@ func TestReconcile_UnconfiguredCadenceUsesBackoff(t *testing.T) {
 
 	unconfigured := fake.NewClientBuilder().WithScheme(scheme).Build()
 	in := minimalInput(t)
-	in.Requeue = workload.RequeueIntervals{}
-	res, err = workload.Reconcile(context.Background(), workload.Deps{Client: unconfigured}, in, plan, target)
+	in.Requeue = workloadtypes.RequeueIntervals{}
+	res, err = workload.Reconcile(context.Background(), workloadtypes.Deps{Client: unconfigured}, in, plan, target)
 	if err != nil {
 		t.Fatalf("Reconcile with no configured cadence: %v", err)
 	}
@@ -418,15 +421,15 @@ func TestReconcile_HeldWorkWakesThePass(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			c := fake.NewClientBuilder().WithScheme(scheme).Build()
 			in := minimalInput(t)
-			in.Requeue = workload.RequeueIntervals{}
+			in.Requeue = workloadtypes.RequeueIntervals{}
 			// Nothing for the passes to do: the held work is the only
 			// reason to come back.
 			in.DesiredSpec.Replicas = 0
-			wake := &workload.PassWake{}
+			wake := &workloadtypes.PassWake{}
 			wake.Observe(tc.cadence)
 			in.PassWake = wake
 
-			res, err := workload.Reconcile(context.Background(), workload.Deps{Client: c}, in, plan, nil)
+			res, err := workload.Reconcile(context.Background(), workloadtypes.Deps{Client: c}, in, plan, nil)
 			if err != nil {
 				t.Fatalf("Reconcile: %v", err)
 			}
@@ -446,11 +449,11 @@ func TestReconcile_HeldWorkWakesThePass(t *testing.T) {
 func TestReconcile_PausedSkipsCreate(t *testing.T) {
 	scheme := makeScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	deps := workload.Deps{Client: c}
+	deps := workloadtypes.Deps{Client: c}
 
 	in := minimalInput(t)
 	allocateCalls := 0
-	in.MutateInstance = func(_ context.Context, _ int32, _ func(*workload.InstanceStatus) bool) error {
+	in.MutateInstance = func(_ context.Context, _ int32, _ func(*workloadtypes.InstanceStatus) bool) error {
 		allocateCalls++
 		return nil
 	}
@@ -475,12 +478,12 @@ func TestReconcile_PausedSkipsCreate(t *testing.T) {
 func TestReconcile_PausedStillScalesDown(t *testing.T) {
 	scheme := makeScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	deps := workload.Deps{Client: c}
+	deps := workloadtypes.Deps{Client: c}
 
 	in := minimalInput(t)
-	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
-		{Index: 0, Phase: workload.InstancePhaseReady},
-		{Index: 1, Phase: workload.InstancePhaseReady},
+	in.ObservedState.InstanceStatuses = []workloadtypes.InstanceStatus{
+		{Index: 0, Phase: workloadtypes.InstancePhaseReady},
+		{Index: 1, Phase: workloadtypes.InstancePhaseReady},
 	}
 	store := installTestAtomicMutationStore(&in)
 	plan := minimalPlan()
@@ -494,10 +497,10 @@ func TestReconcile_PausedStillScalesDown(t *testing.T) {
 		t.Fatalf("paused scale-down admission must requeue immediately, got %+v", result)
 	}
 	status := store.status(1)
-	if status == nil || status.Phase != workload.InstancePhaseDeleting || status.Operation == nil || status.Operation.Type != workload.InstanceOperationDelete {
+	if status == nil || status.Phase != workloadtypes.InstancePhaseDeleting || status.Operation == nil || status.Operation.Type != workloadtypes.InstanceOperationDelete {
 		t.Fatalf("paused scale-down did not durably admit index 1: %+v", status)
 	}
-	if retained := store.status(0); retained == nil || retained.Phase != workload.InstancePhaseReady {
+	if retained := store.status(0); retained == nil || retained.Phase != workloadtypes.InstancePhaseReady {
 		t.Fatalf("paused scale-down changed retained index 0: %+v", retained)
 	}
 }
@@ -508,12 +511,12 @@ func TestReconcile_PausedStillScalesDown(t *testing.T) {
 func TestReconcile_ScaleDownExtra_DrivesDelete(t *testing.T) {
 	scheme := makeScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	deps := workload.Deps{Client: c}
+	deps := workloadtypes.Deps{Client: c}
 
 	in := minimalInput(t)
-	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
-		{Index: 0, Phase: workload.InstancePhaseReady},
-		{Index: 1, Phase: workload.InstancePhaseReady}, // extra
+	in.ObservedState.InstanceStatuses = []workloadtypes.InstanceStatus{
+		{Index: 0, Phase: workloadtypes.InstancePhaseReady},
+		{Index: 1, Phase: workloadtypes.InstancePhaseReady}, // extra
 	}
 	plan := minimalPlan() // covers only index 0
 	store := installTestAtomicMutationStore(&in)
@@ -535,9 +538,9 @@ func TestReconcile_ScaleDownExtra_DrivesDelete(t *testing.T) {
 // the plan doesn't cover its index — otherwise Migrate's surge
 // would be ripped out by the dispatcher's first pass.
 func TestReconcile_MigrationInFlight_NotScaleDown(t *testing.T) {
-	observed := []workload.InstanceStatus{
-		{Index: 0, Phase: workload.InstancePhaseReady},
-		{Index: 7, Phase: workload.InstancePhaseMigrating},
+	observed := []workloadtypes.InstanceStatus{
+		{Index: 0, Phase: workloadtypes.InstancePhaseReady},
+		{Index: 7, Phase: workloadtypes.InstancePhaseMigrating},
 	}
 	plan := minimalPlan() // covers only index 0
 
@@ -553,13 +556,13 @@ func TestReconcile_MigrationInFlight_NotScaleDown(t *testing.T) {
 // the above: an Instance whose Operation.Type=Migrate (the surge side)
 // MUST be excluded even when Phase=Creating (surge mid-spin-up).
 func TestReconcile_MigrationOperationOwned_NotScaleDown(t *testing.T) {
-	observed := []workload.InstanceStatus{
-		{Index: 0, Phase: workload.InstancePhaseReady},
+	observed := []workloadtypes.InstanceStatus{
+		{Index: 0, Phase: workloadtypes.InstancePhaseReady},
 		{
 			Index: 3,
-			Phase: workload.InstancePhaseCreating,
-			Operation: &workload.InstanceOperation{
-				Type: workload.InstanceOperationMigrate,
+			Phase: workloadtypes.InstancePhaseCreating,
+			Operation: &workloadtypes.InstanceOperation{
+				Type: workloadtypes.InstanceOperationMigrate,
 			},
 		},
 	}
@@ -585,12 +588,12 @@ func fixedMigrationTime() time.Time {
 func enginePod(isvc, ns string, idx int32) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      query.PodName(isvc, workload.ComponentEngine, idx, "default", 0),
+			Name:      query.PodName(isvc, workloadtypes.ComponentEngine, idx, "default", 0),
 			Namespace: ns,
 			UID:       types.UID(fmt.Sprintf("%s-engine-%d-uid", isvc, idx)),
 			Labels: map[string]string{
 				constants.InferenceServicePodLabelKey: isvc,
-				constants.OMEComponentLabel:           string(workload.ComponentEngine),
+				constants.OMEComponentLabel:           string(workloadtypes.ComponentEngine),
 				query.LabelInstanceIdx:                fmt.Sprintf("%d", idx),
 				query.LabelInstanceIncarnation:        "1",
 				query.LabelRunner:                     "default",
@@ -628,8 +631,8 @@ func failedEnginePod(isvc, ns string, idx int32) *corev1.Pod {
 type restartScaleTestFixture struct {
 	isvc   *v1beta1.InferenceService
 	client client.Client
-	input  workload.ReconcileInput
-	plan   workload.ComponentPlan
+	input  workloadtypes.ReconcileInput
+	plan   workloadtypes.ComponentPlan
 	target *appsv1.ControllerRevision
 }
 
@@ -650,25 +653,25 @@ func podNameSet(t *testing.T, c client.Client, namespace string) map[string]bool
 func TestReconcile_PausedCompletesTheOpenRecreate(t *testing.T) {
 	name := "paused-recreate"
 	targetName := name + "-engine-target"
-	f := newRestartScaleTestFixture(t, name, 1, true, workload.InstanceStatus{
-		Index: 0, Incarnation: 2, Phase: workload.InstancePhaseUpdating,
+	f := newRestartScaleTestFixture(t, name, 1, true, workloadtypes.InstanceStatus{
+		Index: 0, Incarnation: 2, Phase: workloadtypes.InstancePhaseUpdating,
 		RunningRevision: targetName,
-		Operation: &workload.InstanceOperation{
-			ID: "update-0", Type: workload.InstanceOperationUpdate, Step: "Drain",
+		Operation: &workloadtypes.InstanceOperation{
+			ID: "update-0", Type: workloadtypes.InstanceOperationUpdate, Step: "Drain",
 			TargetRevision: targetName,
 		},
-	}, []workload.RunnerPlan{{Name: "default", Size: 1}})
+	}, []workloadtypes.RunnerPlan{{Name: "default", Size: 1}})
 	f.plan.RestartPolicy = ""
-	f.plan.UpdateStrategy = workload.UpdateStrategy{Type: workload.UpdateStrategyRecreatePod}
+	f.plan.UpdateStrategy = workloadtypes.UpdateStrategy{Type: workloadtypes.UpdateStrategyRecreatePod}
 
-	if _, err := workload.Reconcile(context.Background(), workload.Deps{
-		Client: f.client, APIReader: f.client, Expectations: workload.NewExpectations(),
+	if _, err := workload.Reconcile(context.Background(), workloadtypes.Deps{
+		Client: f.client, APIReader: f.client, Expectations: workloadtypes.NewExpectations(),
 	}, f.input, f.plan, f.target); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 
 	names := podNameSet(t, f.client, f.isvc.Namespace)
-	want := query.PodName(f.isvc.Name, workload.ComponentEngine, 0, "default", 0)
+	want := query.PodName(f.isvc.Name, workloadtypes.ComponentEngine, 0, "default", 0)
 	if !names[want] {
 		t.Errorf("paused reconcile left the recreate half-done; pods = %v", names)
 	}
@@ -684,30 +687,30 @@ func TestReconcile_PausedCompletesTheCommittedCreate(t *testing.T) {
 	name := "paused-create"
 	targetName := name + "-engine-target"
 	member := enginePod(name, "prod", 0)
-	f := newRestartScaleTestFixture(t, name, 2, true, workload.InstanceStatus{
-		Index: 0, Incarnation: 1, Phase: workload.InstancePhaseCreating, PodCount: 1,
+	f := newRestartScaleTestFixture(t, name, 2, true, workloadtypes.InstanceStatus{
+		Index: 0, Incarnation: 1, Phase: workloadtypes.InstancePhaseCreating, PodCount: 1,
 		RunningRevision: targetName,
-		Operation: &workload.InstanceOperation{
-			ID: "create-0", Type: workload.InstanceOperationCreate, Step: "CreatePods",
+		Operation: &workloadtypes.InstanceOperation{
+			ID: "create-0", Type: workloadtypes.InstanceOperationCreate, Step: "CreatePods",
 			TargetRevision: targetName,
 		},
-	}, []workload.RunnerPlan{{Name: "default", Size: 2}}, member)
+	}, []workloadtypes.RunnerPlan{{Name: "default", Size: 2}}, member)
 	// The gang-member-loss repair owns a partial set under the recreate
 	// policy; this test is about the Create pass finishing its own.
 	f.plan.RestartPolicy = ""
 
-	if _, err := workload.Reconcile(context.Background(), workload.Deps{
-		Client: f.client, APIReader: f.client, Expectations: workload.NewExpectations(),
+	if _, err := workload.Reconcile(context.Background(), workloadtypes.Deps{
+		Client: f.client, APIReader: f.client, Expectations: workloadtypes.NewExpectations(),
 	}, f.input, f.plan, f.target); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 
 	names := podNameSet(t, f.client, f.isvc.Namespace)
-	missing := query.PodName(f.isvc.Name, workload.ComponentEngine, 0, "default", 1)
+	missing := query.PodName(f.isvc.Name, workloadtypes.ComponentEngine, 0, "default", 1)
 	if !names[missing] {
 		t.Errorf("paused reconcile left the committed gang half-built; pods = %v", names)
 	}
-	absent := query.PodName(f.isvc.Name, workload.ComponentEngine, 1, "default", 0)
+	absent := query.PodName(f.isvc.Name, workloadtypes.ComponentEngine, 1, "default", 0)
 	if names[absent] {
 		t.Errorf("paused reconcile materialized an index that never committed a create; pods = %v", names)
 	}
@@ -731,13 +734,13 @@ func TestReconcile_PausedLeavesASupersededCreateAlone(t *testing.T) {
 	build := func(t *testing.T, paused bool) *restartScaleTestFixture {
 		// RunningRevision empty: a first materialization, which is the
 		// shape whose pods the attempt owns and can hand to a successor.
-		f := newRestartScaleTestFixture(t, name, 1, paused, workload.InstanceStatus{
-			Index: 0, Incarnation: 1, Phase: workload.InstancePhaseCreating, PodCount: 1,
-			Operation: &workload.InstanceOperation{
-				ID: "create-0", Type: workload.InstanceOperationCreate, Step: "CreatePods",
+		f := newRestartScaleTestFixture(t, name, 1, paused, workloadtypes.InstanceStatus{
+			Index: 0, Incarnation: 1, Phase: workloadtypes.InstancePhaseCreating, PodCount: 1,
+			Operation: &workloadtypes.InstanceOperation{
+				ID: "create-0", Type: workloadtypes.InstanceOperationCreate, Step: "CreatePods",
 				TargetRevision: pinned,
 			},
-		}, []workload.RunnerPlan{{Name: "default", Size: 2}}, member)
+		}, []workloadtypes.RunnerPlan{{Name: "default", Size: 2}}, member)
 		f.plan.RestartPolicy = ""
 		// The edit: the pass now converges to a revision the in-flight
 		// attempt was not opened for.
@@ -748,8 +751,8 @@ func TestReconcile_PausedLeavesASupersededCreateAlone(t *testing.T) {
 	}
 
 	f := build(t, true)
-	if _, err := workload.Reconcile(context.Background(), workload.Deps{
-		Client: f.client, APIReader: f.client, Expectations: workload.NewExpectations(),
+	if _, err := workload.Reconcile(context.Background(), workloadtypes.Deps{
+		Client: f.client, APIReader: f.client, Expectations: workloadtypes.NewExpectations(),
 	}, f.input, f.plan, f.target); err != nil {
 		t.Fatalf("Reconcile paused: %v", err)
 	}
@@ -763,8 +766,8 @@ func TestReconcile_PausedLeavesASupersededCreateAlone(t *testing.T) {
 	}
 
 	f = build(t, false)
-	if _, err := workload.Reconcile(context.Background(), workload.Deps{
-		Client: f.client, APIReader: f.client, Expectations: workload.NewExpectations(),
+	if _, err := workload.Reconcile(context.Background(), workloadtypes.Deps{
+		Client: f.client, APIReader: f.client, Expectations: workloadtypes.NewExpectations(),
 	}, f.input, f.plan, f.target); err != nil {
 		t.Fatalf("Reconcile unpaused: %v", err)
 	}
@@ -786,17 +789,17 @@ func TestReconcile_PausedLeavesASupersededCreateAlone(t *testing.T) {
 func TestReconcile_PausedFinishesACreateItWouldNotRetire(t *testing.T) {
 	name := "paused-lost-member"
 	pinned := name + "-engine-pinned"
-	missing := query.PodName(name, workload.ComponentEngine, 0, "default", 1)
+	missing := query.PodName(name, workloadtypes.ComponentEngine, 0, "default", 1)
 
 	build := func(t *testing.T, runningRevision string) *restartScaleTestFixture {
-		f := newRestartScaleTestFixture(t, name, 1, true, workload.InstanceStatus{
-			Index: 0, Incarnation: 1, Phase: workload.InstancePhaseCreating, PodCount: 1,
+		f := newRestartScaleTestFixture(t, name, 1, true, workloadtypes.InstanceStatus{
+			Index: 0, Incarnation: 1, Phase: workloadtypes.InstancePhaseCreating, PodCount: 1,
 			RunningRevision: runningRevision,
-			Operation: &workload.InstanceOperation{
-				ID: "create-0", Type: workload.InstanceOperationCreate, Step: "CreatePods",
+			Operation: &workloadtypes.InstanceOperation{
+				ID: "create-0", Type: workloadtypes.InstanceOperationCreate, Step: "CreatePods",
 				TargetRevision: pinned,
 			},
-		}, []workload.RunnerPlan{{Name: "default", Size: 2}}, enginePod(name, "prod", 0))
+		}, []workloadtypes.RunnerPlan{{Name: "default", Size: 2}}, enginePod(name, "prod", 0))
 		// The gang-member-loss repair owns a partial set under the
 		// recreate policy; this is about the Create pass finishing its own.
 		f.plan.RestartPolicy = ""
@@ -813,9 +816,9 @@ func TestReconcile_PausedFinishesACreateItWouldNotRetire(t *testing.T) {
 		}}
 		recorder := record.NewFakeRecorder(8)
 
-		if _, err := workload.Reconcile(context.Background(), workload.Deps{
+		if _, err := workload.Reconcile(context.Background(), workloadtypes.Deps{
 			Client: f.client, APIReader: f.client, Recorder: recorder,
-			Expectations: workload.NewExpectations(),
+			Expectations: workloadtypes.NewExpectations(),
 		}, f.input, f.plan, f.target); err != nil {
 			t.Fatalf("Reconcile: %v", err)
 		}
@@ -837,8 +840,8 @@ func TestReconcile_PausedFinishesACreateItWouldNotRetire(t *testing.T) {
 
 	t.Run("no target to retarget to", func(t *testing.T) {
 		f := build(t, "")
-		if _, err := workload.Reconcile(context.Background(), workload.Deps{
-			Client: f.client, APIReader: f.client, Expectations: workload.NewExpectations(),
+		if _, err := workload.Reconcile(context.Background(), workloadtypes.Deps{
+			Client: f.client, APIReader: f.client, Expectations: workloadtypes.NewExpectations(),
 		}, f.input, f.plan, nil); err != nil {
 			t.Fatalf("Reconcile: %v", err)
 		}
@@ -864,7 +867,7 @@ func TestPause_UnbackedReadyInstanceDemotesToPending(t *testing.T) {
 	h.losePods(0)
 	h.step()
 
-	if s := h.instance(0); s == nil || s.Phase != workload.InstancePhasePending || s.Operation != nil {
+	if s := h.instance(0); s == nil || s.Phase != workloadtypes.InstancePhasePending || s.Operation != nil {
 		h.dumpState("paused with no pods")
 		t.Fatalf("demotion: got %+v, want Phase=Pending with no operation", s)
 	}
@@ -872,7 +875,7 @@ func TestPause_UnbackedReadyInstanceDemotesToPending(t *testing.T) {
 	if pods := h.podsOf(0); len(pods) != 0 {
 		t.Fatalf("paused pass recreated %d pod(s)", len(pods))
 	}
-	if s := h.instance(0); s == nil || s.Phase != workload.InstancePhasePending {
+	if s := h.instance(0); s == nil || s.Phase != workloadtypes.InstancePhasePending {
 		t.Fatalf("demotion did not hold across passes: %+v", s)
 	}
 
@@ -886,14 +889,14 @@ func TestPause_UnbackedReadyInstanceDemotesToPending(t *testing.T) {
 // pausedUpdate is a single-pod Update attempt already carrying the
 // operator's pause token — an attempt held at a step boundary, with its
 // deadline parked by the adapter.
-func pausedUpdate(waiting string) []workload.InstanceStatus {
-	return []workload.InstanceStatus{{
+func pausedUpdate(waiting string) []workloadtypes.InstanceStatus {
+	return []workloadtypes.InstanceStatus{{
 		Index:    0,
-		Phase:    workload.InstancePhaseUpdating,
+		Phase:    workloadtypes.InstancePhaseUpdating,
 		PodCount: 1,
-		Operation: &workload.InstanceOperation{
-			Type:    workload.InstanceOperationUpdate,
-			Step:    workload.UpdateStepSurge,
+		Operation: &workloadtypes.InstanceOperation{
+			Type:    workloadtypes.InstanceOperationUpdate,
+			Step:    workloadtypes.UpdateStepSurge,
 			Waiting: waiting,
 		},
 	}}
@@ -902,7 +905,7 @@ func pausedUpdate(waiting string) []workload.InstanceStatus {
 // pausedRecreate is the recreate roll's Phase B row under the same
 // pause — the shape the gang arm judges, since a surge SOURCE is never
 // read against its own group.
-func pausedRecreate(waiting string) []workload.InstanceStatus {
+func pausedRecreate(waiting string) []workloadtypes.InstanceStatus {
 	rows := pausedUpdate(waiting)
 	rows[0].Operation.Step = "Drain"
 	return rows
@@ -911,9 +914,9 @@ func pausedRecreate(waiting string) []workload.InstanceStatus {
 // runHoldEvidence drives the hold pass on its own, the way Execute runs
 // it for a paused Component: the authorities report, and no repair
 // follows.
-func runHoldEvidence(t *testing.T, input workload.ReconcileInput, plan workload.ComponentPlan, byIdx map[int32][]*corev1.Pod) error {
+func runHoldEvidence(t *testing.T, input workloadtypes.ReconcileInput, plan workloadtypes.ComponentPlan, byIdx map[int32][]*corev1.Pod) error {
 	t.Helper()
-	return workload.HoldPassForTest(context.Background(), workload.Deps{}, input, plan,
+	return workload.HoldPassForTest(context.Background(), workloadtypes.Deps{}, input, plan,
 		workload.SnapshotWithPodsForTest(input, byIdx))
 }
 
@@ -927,7 +930,7 @@ func runHoldEvidence(t *testing.T, input workload.ReconcileInput, plan workload.
 // Cells: instance/Update/Surge/pod.unschedulable[target]/before, instance/Update/Surge/spec.pauseTrue/before
 func TestHoldEvidence_PausedRowRecordsTheSchedulerHold(t *testing.T) {
 	now := time.Now()
-	input, rec := escalationFixture(pausedUpdate(workload.WaitingReasonPaused))
+	input, rec := escalationFixture(pausedUpdate(workloadtypes.WaitingReasonPaused))
 
 	if err := runHoldEvidence(t, input, singleInstancePlan(0, 1),
 		map[int32][]*corev1.Pod{0: {unschedulablePod("engine-0-default-0", now.Add(-5*time.Minute))}}); err != nil {
@@ -935,13 +938,13 @@ func TestHoldEvidence_PausedRowRecordsTheSchedulerHold(t *testing.T) {
 	}
 
 	got := rec.store[0]
-	if got.Operation == nil || got.Operation.Waiting != workload.WaitingReasonUnschedulable {
-		t.Errorf("Operation.Waiting: got %+v want %q (the fact takes the paused row)", got.Operation, workload.WaitingReasonUnschedulable)
+	if got.Operation == nil || got.Operation.Waiting != workloadtypes.WaitingReasonUnschedulable {
+		t.Errorf("Operation.Waiting: got %+v want %q (the fact takes the paused row)", got.Operation, workloadtypes.WaitingReasonUnschedulable)
 	}
 	if got.LastFailure == nil || got.LastFailure.Message != schedulerMessage {
 		t.Errorf("LastFailure: got %+v want the scheduler message %q", got.LastFailure, schedulerMessage)
 	}
-	if got.Phase != workload.InstancePhaseUpdating {
+	if got.Phase != workloadtypes.InstancePhaseUpdating {
 		t.Errorf("Phase: got %q want Updating (the row is queued, not failed)", got.Phase)
 	}
 	if len(rec.warns) != 0 {
@@ -957,7 +960,7 @@ func TestHoldEvidence_PausedRowRecordsTheSchedulerHold(t *testing.T) {
 // Cells: instance/Update/Surge/pod.unschedulable[target]/before, instance/Update/Surge/spec.pauseTrue/before
 func TestHoldEvidence_PausedRowTakesNoRepairAction(t *testing.T) {
 	now := time.Now()
-	input, rec := escalationFixture(pausedUpdate(workload.WaitingReasonPaused))
+	input, rec := escalationFixture(pausedUpdate(workloadtypes.WaitingReasonPaused))
 	input.UnschedulableGrace = time.Minute
 
 	if err := runHoldEvidence(t, input, singleInstancePlan(0, 1),
@@ -966,11 +969,11 @@ func TestHoldEvidence_PausedRowTakesNoRepairAction(t *testing.T) {
 	}
 
 	got := rec.store[0]
-	if got.Phase == workload.InstancePhaseFailed {
+	if got.Phase == workloadtypes.InstancePhaseFailed {
 		t.Errorf("Phase: got Failed want Updating (a pause withholds the escalation)")
 	}
-	if got.Operation == nil || got.Operation.Waiting != workload.WaitingReasonUnschedulable {
-		t.Errorf("Operation.Waiting: got %+v want %q", got.Operation, workload.WaitingReasonUnschedulable)
+	if got.Operation == nil || got.Operation.Waiting != workloadtypes.WaitingReasonUnschedulable {
+		t.Errorf("Operation.Waiting: got %+v want %q", got.Operation, workloadtypes.WaitingReasonUnschedulable)
 	}
 	if len(rec.warns) != 0 {
 		t.Errorf("WarnInstanceFailed: got %v want none", rec.warns)
@@ -987,7 +990,7 @@ func TestHoldEvidence_PausedRowTakesNoRepairAction(t *testing.T) {
 //
 // Cells: instance/Update/Surge/pod.scheduled[target]/before, instance/Update/Surge/spec.pauseTrue/before
 func TestHoldEvidence_PausedRowReleasesTheSchedulerHold(t *testing.T) {
-	input, rec := escalationFixture(pausedUpdate(workload.WaitingReasonUnschedulable))
+	input, rec := escalationFixture(pausedUpdate(workloadtypes.WaitingReasonUnschedulable))
 
 	placed := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "engine-0-default-0"},
@@ -1005,7 +1008,7 @@ func TestHoldEvidence_PausedRowReleasesTheSchedulerHold(t *testing.T) {
 	if got.Operation == nil || got.Operation.Waiting != "" {
 		t.Errorf("Operation.Waiting: got %+v want the scheduler token cleared", got.Operation)
 	}
-	if got.Phase != workload.InstancePhaseUpdating {
+	if got.Phase != workloadtypes.InstancePhaseUpdating {
 		t.Errorf("Phase: got %q want Updating", got.Phase)
 	}
 }
@@ -1017,18 +1020,18 @@ func TestHoldEvidence_PausedRowReleasesTheSchedulerHold(t *testing.T) {
 //
 // Cells: instance/Update/Drain/gang.podGroup[Terminating]/before, instance/Update/Drain/spec.pauseTrue/before
 func TestHoldEvidence_PausedRowRecordsTheGangHold(t *testing.T) {
-	input, rec := escalationFixture(pausedRecreate(workload.WaitingReasonPaused))
-	input.Gangs = gangObservations(0, workload.GangStateTerminating, gangTerminatingMessage)
+	input, rec := escalationFixture(pausedRecreate(workloadtypes.WaitingReasonPaused))
+	input.Gangs = gangObservations(0, workloadtypes.GangStateTerminating, gangTerminatingMessage)
 
 	if err := runHoldEvidence(t, input, singleInstancePlan(0, 1), nil); err != nil {
 		t.Fatalf("hold evidence pass: %v", err)
 	}
 
 	got := rec.store[0]
-	if got.Operation == nil || got.Operation.Waiting != workload.WaitingReasonPodGroupTerminating {
-		t.Errorf("Operation.Waiting: got %+v want %q", got.Operation, workload.WaitingReasonPodGroupTerminating)
+	if got.Operation == nil || got.Operation.Waiting != workloadtypes.WaitingReasonPodGroupTerminating {
+		t.Errorf("Operation.Waiting: got %+v want %q", got.Operation, workloadtypes.WaitingReasonPodGroupTerminating)
 	}
-	if got.Phase != workload.InstancePhaseUpdating {
+	if got.Phase != workloadtypes.InstancePhaseUpdating {
 		t.Errorf("Phase: got %q want Updating", got.Phase)
 	}
 }
@@ -1042,7 +1045,7 @@ func TestHoldEvidence_PausedRowRecordsTheGangHold(t *testing.T) {
 // Cells: instance/Update/Surge/pod.unschedulable[target]/before, instance/Update/Surge/spec.pauseTrue/before
 func TestHoldEvidence_PausedRowKeepsTheIncumbentFact(t *testing.T) {
 	now := time.Now()
-	rows := pausedUpdate(workload.WaitingReasonSourceUnrouted)
+	rows := pausedUpdate(workloadtypes.WaitingReasonSourceUnrouted)
 	rows[0].Operation.TargetRevision = "own-engine-targethash"
 	input, rec := escalationFixture(rows)
 
@@ -1057,8 +1060,8 @@ func TestHoldEvidence_PausedRowKeepsTheIncumbentFact(t *testing.T) {
 	}
 
 	got := rec.store[0]
-	if got.Operation == nil || got.Operation.Waiting != workload.WaitingReasonSourceUnrouted {
-		t.Errorf("Operation.Waiting: got %+v want %q kept", got.Operation, workload.WaitingReasonSourceUnrouted)
+	if got.Operation == nil || got.Operation.Waiting != workloadtypes.WaitingReasonSourceUnrouted {
+		t.Errorf("Operation.Waiting: got %+v want %q kept", got.Operation, workloadtypes.WaitingReasonSourceUnrouted)
 	}
 }
 
@@ -1111,8 +1114,8 @@ type recoveryHarness struct {
 
 	multiPod  bool
 	replicas  int32
-	lifecycle workload.Lifecycle
-	desired   workload.WorkloadDesiredSpec
+	lifecycle workloadtypes.Lifecycle
+	desired   workloadtypes.WorkloadDesiredSpec
 	target    *appsv1.ControllerRevision
 
 	// mutateErr rejects every InstanceStatus write for the listed
@@ -1120,10 +1123,10 @@ type recoveryHarness struct {
 	// on every pass — while other indices round-trip normally.
 	mutateErr map[int32]error
 
-	blocks []workload.RetryBlock
+	blocks []workloadtypes.RetryBlock
 	// requeue is the dispatcher cadence the harness runs under; a test
 	// pinning the unconfigured path zeroes it.
-	requeue         workload.RequeueIntervals
+	requeue         workloadtypes.RequeueIntervals
 	currentRevision string
 	heldWarnings    []string
 
@@ -1170,7 +1173,7 @@ func newRecoveryHarness(t *testing.T, multiPod bool) *recoveryHarness {
 func (h *recoveryHarness) revisionKey() revision.Key {
 	return revision.Key{
 		Namespace: recoveryNS,
-		Name:      recoveryOwner + "-" + string(workload.ComponentEngine),
+		Name:      recoveryOwner + "-" + string(workloadtypes.ComponentEngine),
 	}
 }
 
@@ -1197,7 +1200,7 @@ func (h *recoveryHarness) ensureRevision(spec *corev1.PodSpec) *appsv1.Controlle
 func (h *recoveryHarness) setTarget(cr *appsv1.ControllerRevision, image string) {
 	h.target = cr
 	spec := recoveryPodSpec(image)
-	h.desired = workload.WorkloadDesiredSpec{
+	h.desired = workloadtypes.WorkloadDesiredSpec{
 		Replicas:  h.replicas,
 		PodSpec:   spec,
 		Lifecycle: h.lifecycle,
@@ -1205,9 +1208,9 @@ func (h *recoveryHarness) setTarget(cr *appsv1.ControllerRevision, image string)
 	if h.multiPod {
 		h.desired.MultiPod = true
 		h.desired.WorkerPodSpec = spec.DeepCopy()
-		h.desired.Runners = []workload.Runner{{Name: "leader", Size: 1}, {Name: "worker", Size: 1}}
+		h.desired.Runners = []workloadtypes.Runner{{Name: "leader", Size: 1}, {Name: "worker", Size: 1}}
 	} else {
-		h.desired.Runners = []workload.Runner{{Name: "default", Size: 1}}
+		h.desired.Runners = []workloadtypes.Runner{{Name: "default", Size: 1}}
 	}
 }
 
@@ -1282,10 +1285,10 @@ func setPodCondition(pod *corev1.Pod, condType corev1.PodConditionType, status c
 }
 
 func (h *recoveryHarness) irKey() types.NamespacedName {
-	return types.NamespacedName{Namespace: recoveryNS, Name: recoveryOwner + "-" + string(workload.ComponentEngine)}
+	return types.NamespacedName{Namespace: recoveryNS, Name: recoveryOwner + "-" + string(workloadtypes.ComponentEngine)}
 }
 
-func (h *recoveryHarness) irStatuses() []workload.InstanceStatus {
+func (h *recoveryHarness) irStatuses() []workloadtypes.InstanceStatus {
 	h.t.Helper()
 	ir := &v1beta1.InferenceReplica{}
 	if err := h.c.Get(h.ctx, h.irKey(), ir); err != nil {
@@ -1294,7 +1297,7 @@ func (h *recoveryHarness) irStatuses() []workload.InstanceStatus {
 		}
 		h.t.Fatalf("get IR: %v", err)
 	}
-	out := make([]workload.InstanceStatus, 0, len(ir.Status.InstanceStatuses))
+	out := make([]workloadtypes.InstanceStatus, 0, len(ir.Status.InstanceStatuses))
 	for _, s := range ir.Status.InstanceStatuses {
 		out = append(out, v1beta1convert.InstanceStatusToWorkload(s))
 	}
@@ -1330,9 +1333,9 @@ func (h *recoveryHarness) removeInstance() func(ctx context.Context, idx int32) 
 
 // mutateInstance is the harness's status-write seam: the IR round-trip
 // for every index, except those mutateErr rejects.
-func (h *recoveryHarness) mutateInstance() func(context.Context, int32, func(*workload.InstanceStatus) bool) error {
-	delegate := roundTripMutateInstance(h.c, h.isvc, workload.ComponentEngine)
-	return func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
+func (h *recoveryHarness) mutateInstance() func(context.Context, int32, func(*workloadtypes.InstanceStatus) bool) error {
+	delegate := roundTripMutateInstance(h.c, h.isvc, workloadtypes.ComponentEngine)
+	return func(ctx context.Context, idx int32, mutate func(*workloadtypes.InstanceStatus) bool) error {
 		if err := h.mutateErr[idx]; err != nil {
 			return err
 		}
@@ -1340,35 +1343,35 @@ func (h *recoveryHarness) mutateInstance() func(context.Context, int32, func(*wo
 	}
 }
 
-func (h *recoveryHarness) buildInput() workload.ReconcileInput {
-	in := workload.ReconcileInput{
+func (h *recoveryHarness) buildInput() workloadtypes.ReconcileInput {
+	in := workloadtypes.ReconcileInput{
 		OwnerObject: h.isvc,
 		OwnerGVK:    v1beta1.SchemeGroupVersion.WithKind("InferenceService"),
 		EventTarget: h.isvc,
-		Key: workload.Key{
+		Key: workloadtypes.Key{
 			Namespace: recoveryNS,
-			Component: workload.ComponentEngine,
+			Component: workloadtypes.ComponentEngine,
 			OwnerName: recoveryOwner,
 		},
 		DesiredSpec: h.desired,
-		ObservedState: workload.WorkloadObservedState{
+		ObservedState: workloadtypes.WorkloadObservedState{
 			InstanceStatuses: h.irStatuses(),
-			RetryBlocks:      append([]workload.RetryBlock(nil), h.blocks...),
+			RetryBlocks:      append([]workloadtypes.RetryBlock(nil), h.blocks...),
 			CurrentRevision:  h.currentRevision,
 			UpdateRevision:   h.target.Name,
 		},
 		MutateInstance:    h.mutateInstance(),
 		RemoveInstance:    h.removeInstance(),
-		UpdateRetryPolicy: &workload.RetryPolicy{MaxAttempts: 2, InitialDelay: 20 * time.Second, MaxDelay: time.Minute, Multiplier: 2},
+		UpdateRetryPolicy: &workloadtypes.RetryPolicy{MaxAttempts: 2, InitialDelay: 20 * time.Second, MaxDelay: time.Minute, Multiplier: 2},
 		StuckPodGrace:     30 * time.Second,
 		Requeue:           h.requeue,
 		Clock:             h.clk,
 		WarnRetryHeld: func(rev string, attempts int32, reason string) {
 			h.heldWarnings = append(h.heldWarnings, fmt.Sprintf("%s attempts=%d %s", rev, attempts, reason))
 		},
-		MutateRetryBlock: func(_ context.Context, rev string, mutate func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
+		MutateRetryBlock: func(_ context.Context, rev string, mutate func(*workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition) error {
 			pos := -1
-			b := workload.RetryBlock{TargetRevision: rev}
+			b := workloadtypes.RetryBlock{TargetRevision: rev}
 			for i := range h.blocks {
 				if h.blocks[i].TargetRevision == rev {
 					pos, b = i, h.blocks[i]
@@ -1376,13 +1379,13 @@ func (h *recoveryHarness) buildInput() workload.ReconcileInput {
 				}
 			}
 			switch mutate(&b) {
-			case workload.RetryBlockPersist:
+			case workloadtypes.RetryBlockPersist:
 				if pos == -1 {
 					h.blocks = append(h.blocks, b)
 				} else {
 					h.blocks[pos] = b
 				}
-			case workload.RetryBlockRemove:
+			case workloadtypes.RetryBlockRemove:
 				if pos != -1 {
 					h.blocks = append(h.blocks[:pos], h.blocks[pos+1:]...)
 				}
@@ -1410,14 +1413,14 @@ func (h *recoveryHarness) step() {
 func (h *recoveryHarness) stepResult() (ctrl.Result, error) {
 	h.t.Helper()
 	h.kubelet()
-	deps := workload.Deps{Client: h.c, APIReader: h.c, Expectations: workload.NewExpectations()}
+	deps := workloadtypes.Deps{Client: h.c, APIReader: h.c, Expectations: workloadtypes.NewExpectations()}
 	in := h.buildInput()
-	plan, err := workload.BuildPlan(workload.ComponentEngine, h.desired, in.ObservedState)
+	plan, err := workload.BuildPlan(workloadtypes.ComponentEngine, h.desired, in.ObservedState)
 	if err != nil {
 		h.t.Fatalf("BuildPlan: %v", err)
 	}
 	res, err := workload.Reconcile(h.ctx, deps, in, plan, h.target)
-	if workload.RolloutComplete(h.irStatuses(), h.target.Name) {
+	if status.RolloutComplete(h.irStatuses(), h.target.Name) {
 		h.currentRevision = h.target.Name
 	}
 	// A 30s floor keeps stuck-pod grace and Backoff windows crossing in
@@ -1472,7 +1475,7 @@ func (h *recoveryHarness) servingPods() []*corev1.Pod {
 	return out
 }
 
-func (h *recoveryHarness) findBlock(rev string) *workload.RetryBlock {
+func (h *recoveryHarness) findBlock(rev string) *workloadtypes.RetryBlock {
 	for i := range h.blocks {
 		if h.blocks[i].TargetRevision == rev {
 			return &h.blocks[i]
@@ -1515,7 +1518,7 @@ func (h *recoveryHarness) converged(rev string) bool {
 		return false
 	}
 	s := sts[0]
-	if s.Phase != workload.InstancePhaseReady || s.RunningRevision != rev || s.Operation != nil {
+	if s.Phase != workloadtypes.InstancePhaseReady || s.RunningRevision != rev || s.Operation != nil {
 		return false
 	}
 	return len(h.badPods()) == 0
@@ -1555,7 +1558,7 @@ func (h *recoveryHarness) driveToHeld() {
 	h.setTarget(h.revBad, badImage)
 	held := func() bool {
 		b := h.findBlock(h.revBad.Name)
-		return b != nil && b.State == workload.RetryBlockHeld
+		return b != nil && b.State == workloadtypes.RetryBlockHeld
 	}
 	if !h.run(120, held) {
 		h.dumpState("exhaustion")
@@ -1707,18 +1710,18 @@ func TestCorrectiveRecovery_Gang_RollForward_MidWreckage(t *testing.T) {
 // Phase=Failed with a preserved gang-surge Update Operation, the surge
 // marker present, and the bad gang's pods live.
 func (h *recoveryHarness) gangMidWreckage() bool {
-	var source, marker *workload.InstanceStatus
+	var source, marker *workloadtypes.InstanceStatus
 	sts := h.irStatuses()
 	for i := range sts {
 		s := &sts[i]
-		if s.Operation != nil && s.Operation.Type == workload.InstanceOperationUpdate && s.Operation.SurgeIndex != nil {
+		if s.Operation != nil && s.Operation.Type == workloadtypes.InstanceOperationUpdate && s.Operation.SurgeIndex != nil {
 			source = s
 		}
-		if s.Operation != nil && s.Operation.Step == workload.UpdateStepGangSurgeTarget {
+		if s.Operation != nil && s.Operation.Step == workloadtypes.UpdateStepGangSurgeTarget {
 			marker = s
 		}
 	}
-	return source != nil && source.Phase == workload.InstancePhaseFailed &&
+	return source != nil && source.Phase == workloadtypes.InstancePhaseFailed &&
 		marker != nil && len(h.badPods()) > 0
 }
 
@@ -1756,7 +1759,7 @@ func TestCorrectiveRecovery_SinglePod_RollBack(t *testing.T) {
 	// cleanup is Plan's wreckage scan, not a widened trigger.
 	h.setTarget(h.revV1, goodImage)
 	in := h.buildInput()
-	plan, err := workload.BuildPlan(workload.ComponentEngine, h.desired, in.ObservedState)
+	plan, err := workload.BuildPlan(workloadtypes.ComponentEngine, h.desired, in.ObservedState)
 	if err != nil {
 		t.Fatalf("BuildPlan: %v", err)
 	}
@@ -1848,15 +1851,15 @@ const failedRowTarget = "llama-70b-engine-target01"
 // RetryBlock, and no pods. Without the block the Create pass would
 // re-materialize it, so the block is what keeps the row parked for the
 // length of a pass.
-func failedRowFixture(t *testing.T) (workload.ReconcileInput, workload.ComponentPlan, *appsv1.ControllerRevision, *testAtomicMutationStore, *[]string) {
+func failedRowFixture(t *testing.T) (workloadtypes.ReconcileInput, workloadtypes.ComponentPlan, *appsv1.ControllerRevision, *testAtomicMutationStore, *[]string) {
 	t.Helper()
 	in := minimalInput(t)
 	in.ObservedState.UpdateRevision = failedRowTarget
-	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
-		{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseFailed, PodCount: 1},
+	in.ObservedState.InstanceStatuses = []workloadtypes.InstanceStatus{
+		{Index: 0, Incarnation: 1, Phase: workloadtypes.InstancePhaseFailed, PodCount: 1},
 	}
-	in.ObservedState.RetryBlocks = []workload.RetryBlock{
-		{TargetRevision: failedRowTarget, State: workload.RetryBlockHeld},
+	in.ObservedState.RetryBlocks = []workloadtypes.RetryBlock{
+		{TargetRevision: failedRowTarget, State: workloadtypes.RetryBlockHeld},
 	}
 	removed := recordRetryBlockRemovals(&in)
 	store := installTestAtomicMutationStore(&in)
@@ -1867,17 +1870,17 @@ func failedRowFixture(t *testing.T) (workload.ReconcileInput, workload.Component
 // runFailedRowPass reconciles the fixture once and asserts the row came
 // out untouched: no status write, still Failed with no operation, no
 // pod materialized, and its block intact.
-func runFailedRowPass(t *testing.T, in workload.ReconcileInput, plan workload.ComponentPlan, target *appsv1.ControllerRevision, store *testAtomicMutationStore, removed *[]string) {
+func runFailedRowPass(t *testing.T, in workloadtypes.ReconcileInput, plan workloadtypes.ComponentPlan, target *appsv1.ControllerRevision, store *testAtomicMutationStore, removed *[]string) {
 	t.Helper()
 	c := fake.NewClientBuilder().WithScheme(makeScheme(t)).Build()
-	if _, err := workload.Reconcile(context.Background(), workload.Deps{Client: c}, in, plan, target); err != nil {
+	if _, err := workload.Reconcile(context.Background(), workloadtypes.Deps{Client: c}, in, plan, target); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	if store.writes != 0 {
 		t.Errorf("status writes: got %d want 0", store.writes)
 	}
 	got := store.status(0)
-	if got == nil || got.Phase != workload.InstancePhaseFailed || got.Operation != nil {
+	if got == nil || got.Phase != workloadtypes.InstancePhaseFailed || got.Operation != nil {
 		t.Errorf("row: got %+v want Failed with no operation", got)
 	}
 	pods := &corev1.PodList{}
@@ -1902,24 +1905,24 @@ func runFailedRowPass(t *testing.T, in workload.ReconcileInput, plan workload.Co
 func TestFailedRow_OperatorConfigChangesLeaveItParked(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
-		change func(*workload.ReconcileInput, *workload.ComponentPlan)
+		change func(*workloadtypes.ReconcileInput, *workloadtypes.ComponentPlan)
 	}{
 		{
 			name: "requeue cadence",
-			change: func(in *workload.ReconcileInput, _ *workload.ComponentPlan) {
-				in.Requeue = workload.RequeueIntervals{Operation: 90 * time.Second, Gate: 45 * time.Second}
+			change: func(in *workloadtypes.ReconcileInput, _ *workloadtypes.ComponentPlan) {
+				in.Requeue = workloadtypes.RequeueIntervals{Operation: 90 * time.Second, Gate: 45 * time.Second}
 			},
 		},
 		{
 			name: "gang schedule clamp",
-			change: func(_ *workload.ReconcileInput, plan *workload.ComponentPlan) {
-				plan.GangScheduleTimeout = &workload.GangScheduleTimeoutClamp{Min: time.Minute, Max: 10 * time.Minute}
+			change: func(_ *workloadtypes.ReconcileInput, plan *workloadtypes.ComponentPlan) {
+				plan.GangScheduleTimeout = &workloadtypes.GangScheduleTimeoutClamp{Min: time.Minute, Max: 10 * time.Minute}
 			},
 		},
 		{
 			name: "migration audit caps",
-			change: func(in *workload.ReconcileInput, _ *workload.ComponentPlan) {
-				in.MigrationAudit = &workload.MigrationAuditPolicy{MaxInFlight: 1, MaxPerWindow: 2, Window: time.Hour}
+			change: func(in *workloadtypes.ReconcileInput, _ *workloadtypes.ComponentPlan) {
+				in.MigrationAudit = &workloadtypes.MigrationAuditPolicy{MaxInFlight: 1, MaxPerWindow: 2, Window: time.Hour}
 			},
 		},
 	} {
@@ -1971,12 +1974,12 @@ func TestFailedRow_ExcludedAnnotationEditDoesNotRedriveIt(t *testing.T) {
 func TestFailedRow_SupersedePruneKeepsTheBlockItWaitsOn(t *testing.T) {
 	in, plan, target, store, removed := failedRowFixture(t)
 	in.ObservedState.RetryBlocks = append(in.ObservedState.RetryBlocks,
-		workload.RetryBlock{TargetRevision: "llama-70b-engine-stale001", State: workload.RetryBlockHeld},
-		workload.RetryBlock{TargetRevision: "llama-70b-engine-stale002", State: workload.RetryBlockBackoff},
+		workloadtypes.RetryBlock{TargetRevision: "llama-70b-engine-stale001", State: workloadtypes.RetryBlockHeld},
+		workloadtypes.RetryBlock{TargetRevision: "llama-70b-engine-stale002", State: workloadtypes.RetryBlockBackoff},
 	)
 
 	c := fake.NewClientBuilder().WithScheme(makeScheme(t)).Build()
-	if _, err := workload.Reconcile(context.Background(), workload.Deps{Client: c}, in, plan, target); err != nil {
+	if _, err := workload.Reconcile(context.Background(), workloadtypes.Deps{Client: c}, in, plan, target); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	want := []string{"llama-70b-engine-stale001", "llama-70b-engine-stale002"}
@@ -1991,7 +1994,7 @@ func TestFailedRow_SupersedePruneKeepsTheBlockItWaitsOn(t *testing.T) {
 	if store.writes != 0 {
 		t.Errorf("status writes: got %d want 0", store.writes)
 	}
-	if got := store.status(0); got == nil || got.Phase != workload.InstancePhaseFailed || got.Operation != nil {
+	if got := store.status(0); got == nil || got.Phase != workloadtypes.InstancePhaseFailed || got.Operation != nil {
 		t.Errorf("row: got %+v want Failed with no operation", got)
 	}
 }
@@ -2043,29 +2046,29 @@ func TestReconcile_Teardown_DeletesEveryObservedInstance(t *testing.T) {
 		enginePod("llama-70b", "prod", 2),
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
-	deps := workload.Deps{Client: c, Expectations: workload.NewExpectations()}
+	deps := workloadtypes.Deps{Client: c, Expectations: workloadtypes.NewExpectations()}
 
 	in.Teardown = true
-	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
-		{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseReady},
-		{Index: 1, Incarnation: 1, Phase: workload.InstancePhaseReady},
-		{Index: 2, Incarnation: 1, Phase: workload.InstancePhaseReady},
+	in.ObservedState.InstanceStatuses = []workloadtypes.InstanceStatus{
+		{Index: 0, Incarnation: 1, Phase: workloadtypes.InstancePhaseReady},
+		{Index: 1, Incarnation: 1, Phase: workloadtypes.InstancePhaseReady},
+		{Index: 2, Incarnation: 1, Phase: workloadtypes.InstancePhaseReady},
 	}
 	store := installTestAtomicMutationStore(&in)
 	// A non-terminal Manual record that would be dispatched on a normal
 	// reconcile; teardown must never reach the migration pass.
-	in.ObservedState.Migrations = []workload.MigrationRecord{{
-		RequestUUID: "teardown-mig", Trigger: workload.MigrationTriggerManual,
-		Phase: workload.MigrationPhaseAccepted, SourceInstance: 0,
+	in.ObservedState.Migrations = []workloadtypes.MigrationRecord{{
+		RequestUUID: "teardown-mig", Trigger: workloadtypes.MigrationTriggerManual,
+		Phase: workloadtypes.MigrationPhaseAccepted, SourceInstance: 0,
 	}}
 	migrationMutated := false
-	in.MutateMigration = func(_ context.Context, _ string, _ func(*workload.MigrationRecord) bool) error {
+	in.MutateMigration = func(_ context.Context, _ string, _ func(*workloadtypes.MigrationRecord) bool) error {
 		migrationMutated = true
 		return nil
 	}
 
 	plan := minimalPlan() // covers only index 0
-	plan.MigrationMode = workload.MigrationModeAuto
+	plan.MigrationMode = workloadtypes.MigrationModeAuto
 	// A non-nil target would arm the Update pass on a normal reconcile;
 	// teardown must never reach it.
 	target := &appsv1.ControllerRevision{
@@ -2081,7 +2084,7 @@ func TestReconcile_Teardown_DeletesEveryObservedInstance(t *testing.T) {
 	}
 	for _, idx := range []int32{0, 1, 2} {
 		status := store.status(idx)
-		if status == nil || status.Phase != workload.InstancePhaseDeleting || status.Operation == nil || status.Operation.Type != workload.InstanceOperationDelete {
+		if status == nil || status.Phase != workloadtypes.InstancePhaseDeleting || status.Operation == nil || status.Operation.Type != workloadtypes.InstanceOperationDelete {
 			t.Errorf("instance %d was not durably admitted for teardown: %+v", idx, status)
 		}
 	}
@@ -2137,19 +2140,19 @@ func TestReconcile_Teardown_DeletesMigratingPair(t *testing.T) {
 		enginePod("llama-70b", "prod", 7), // surge
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
-	deps := workload.Deps{Client: c, Expectations: workload.NewExpectations()}
+	deps := workloadtypes.Deps{Client: c, Expectations: workloadtypes.NewExpectations()}
 
 	in := minimalInput(t)
 	in.Teardown = true
-	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
-		{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseMigrating},
-		{Index: 7, Incarnation: 1, Phase: workload.InstancePhaseCreating,
-			Operation: &workload.InstanceOperation{Type: workload.InstanceOperationMigrate}},
+	in.ObservedState.InstanceStatuses = []workloadtypes.InstanceStatus{
+		{Index: 0, Incarnation: 1, Phase: workloadtypes.InstancePhaseMigrating},
+		{Index: 7, Incarnation: 1, Phase: workloadtypes.InstancePhaseCreating,
+			Operation: &workloadtypes.InstanceOperation{Type: workloadtypes.InstanceOperationMigrate}},
 	}
 	store := installTestAtomicMutationStore(&in)
 
 	plan := minimalPlan() // covers only index 0
-	plan.MigrationMode = workload.MigrationModeAuto
+	plan.MigrationMode = workloadtypes.MigrationModeAuto
 
 	result, err := workload.Reconcile(context.Background(), deps, in, plan, nil)
 	if err != nil {
@@ -2160,7 +2163,7 @@ func TestReconcile_Teardown_DeletesMigratingPair(t *testing.T) {
 	}
 	for _, idx := range []int32{0, 7} {
 		status := store.status(idx)
-		if status == nil || status.Phase != workload.InstancePhaseDeleting || status.Operation == nil || status.Operation.Type != workload.InstanceOperationDelete {
+		if status == nil || status.Phase != workloadtypes.InstancePhaseDeleting || status.Operation == nil || status.Operation.Type != workloadtypes.InstanceOperationDelete {
 			t.Errorf("mid-migration instance %d was not durably admitted: %+v", idx, status)
 		}
 	}
@@ -2195,12 +2198,12 @@ func TestReconcile_Teardown_DeletesMigratingPair(t *testing.T) {
 func TestReconcile_Teardown_NoInstancesNoPods_CleanReturn(t *testing.T) {
 	scheme := makeScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	deps := workload.Deps{Client: c, Expectations: workload.NewExpectations()}
+	deps := workloadtypes.Deps{Client: c, Expectations: workloadtypes.NewExpectations()}
 
 	in := minimalInput(t)
 	in.Teardown = true
 	mutations, removals := 0, 0
-	in.MutateInstance = func(_ context.Context, _ int32, _ func(*workload.InstanceStatus) bool) error {
+	in.MutateInstance = func(_ context.Context, _ int32, _ func(*workloadtypes.InstanceStatus) bool) error {
 		mutations++
 		return nil
 	}
@@ -2227,13 +2230,13 @@ func TestReconcile_Teardown_NoInstancesNoPods_CleanReturn(t *testing.T) {
 func TestReconcile_Teardown_PodlessInstances_RemovedAndDone(t *testing.T) {
 	scheme := makeScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	deps := workload.Deps{Client: c, Expectations: workload.NewExpectations()}
+	deps := workloadtypes.Deps{Client: c, Expectations: workloadtypes.NewExpectations()}
 
 	in := minimalInput(t)
 	in.Teardown = true
-	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
-		{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseReady},
-		{Index: 1, Incarnation: 1, Phase: workload.InstancePhaseDeleting},
+	in.ObservedState.InstanceStatuses = []workloadtypes.InstanceStatus{
+		{Index: 0, Incarnation: 1, Phase: workloadtypes.InstancePhaseReady},
+		{Index: 1, Incarnation: 1, Phase: workloadtypes.InstancePhaseDeleting},
 	}
 	store := installTestAtomicMutationStore(&in)
 
@@ -2271,12 +2274,12 @@ func TestReconcile_Teardown_IgnoresPaused(t *testing.T) {
 	scheme := makeScheme(t)
 	pod := enginePod("llama-70b", "prod", 0)
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
-	deps := workload.Deps{Client: c, Expectations: workload.NewExpectations()}
+	deps := workloadtypes.Deps{Client: c, Expectations: workloadtypes.NewExpectations()}
 
 	in := minimalInput(t)
 	in.Teardown = true
-	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
-		{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseReady},
+	in.ObservedState.InstanceStatuses = []workloadtypes.InstanceStatus{
+		{Index: 0, Incarnation: 1, Phase: workloadtypes.InstancePhaseReady},
 	}
 	store := installTestAtomicMutationStore(&in)
 	plan := minimalPlan()
@@ -2338,7 +2341,7 @@ type admission struct {
 	at          time.Time
 	rejected    bool
 	// op is the Instance's operation that issued the pod (nil when none).
-	op *workload.InstanceOperation
+	op *workloadtypes.InstanceOperation
 }
 
 type admissionHarness struct {
@@ -2348,9 +2351,9 @@ type admissionHarness struct {
 	isvc *v1beta1.InferenceService
 	clk  *clocktesting.FakeClock
 
-	desired workload.WorkloadDesiredSpec
+	desired workloadtypes.WorkloadDesiredSpec
 	target  *appsv1.ControllerRevision
-	policy  *workload.RetryPolicy
+	policy  *workloadtypes.RetryPolicy
 
 	// reject decides whether the kubelet rejects the n-th pod object
 	// (1-based) it sees under a name.
@@ -2359,9 +2362,9 @@ type admissionHarness struct {
 
 	admissions      []admission
 	currentRevision string
-	blocks          []workload.RetryBlock
-	phases          map[workload.InstancePhase]int
-	opTypes         map[workload.InstanceOperationType]int
+	blocks          []workloadtypes.RetryBlock
+	phases          map[workloadtypes.InstancePhase]int
+	opTypes         map[workloadtypes.InstanceOperationType]int
 }
 
 func newAdmissionHarness(t *testing.T, multiPod bool, reject func(name string, n int) bool) *admissionHarness {
@@ -2379,11 +2382,11 @@ func newAdmissionHarness(t *testing.T, multiPod bool, reject func(name string, n
 		isvc: isvc,
 		// Status timestamps round-trip at second precision.
 		clk:     clocktesting.NewFakeClock(time.Now().Truncate(time.Second)),
-		policy:  &workload.RetryPolicy{MaxAttempts: 3, InitialDelay: 20 * time.Second, MaxDelay: time.Minute, Multiplier: 2},
+		policy:  &workloadtypes.RetryPolicy{MaxAttempts: 3, InitialDelay: 20 * time.Second, MaxDelay: time.Minute, Multiplier: 2},
 		reject:  reject,
 		seen:    map[string]int{},
-		phases:  map[workload.InstancePhase]int{},
-		opTypes: map[workload.InstanceOperationType]int{},
+		phases:  map[workloadtypes.InstancePhase]int{},
+		opTypes: map[workloadtypes.InstanceOperationType]int{},
 	}
 	spec := recoveryPodSpec(goodImage)
 	var workerSpec *corev1.PodSpec
@@ -2393,7 +2396,7 @@ func newAdmissionHarness(t *testing.T, multiPod bool, reject func(name string, n
 	cr, _, err := revision.EnsureControllerRevisionWithWorker(
 		h.ctx, h.c, h.c, h.isvc,
 		v1beta1.SchemeGroupVersion.WithKind("InferenceService"),
-		revision.Key{Namespace: recoveryNS, Name: recoveryOwner + "-" + string(workload.ComponentEngine)},
+		revision.Key{Namespace: recoveryNS, Name: recoveryOwner + "-" + string(workloadtypes.ComponentEngine)},
 		spec, workerSpec, nil, nil, h.isvc.UID,
 	)
 	if err != nil {
@@ -2402,28 +2405,28 @@ func newAdmissionHarness(t *testing.T, multiPod bool, reject func(name string, n
 	h.target = cr
 	// BuildPlan carries only the per-resource readiness window — the operator
 	// ConfigMap fallback is the adapter's job — so the harness sets one.
-	h.desired = workload.WorkloadDesiredSpec{
+	h.desired = workloadtypes.WorkloadDesiredSpec{
 		Replicas: 1,
 		PodSpec:  spec,
-		Lifecycle: workload.Lifecycle{
+		Lifecycle: workloadtypes.Lifecycle{
 			InstanceReadyTimeout: &metav1.Duration{Duration: 30 * time.Minute},
 		},
 	}
 	if multiPod {
 		h.desired.MultiPod = true
 		h.desired.WorkerPodSpec = workerSpec
-		h.desired.Runners = []workload.Runner{{Name: "leader", Size: 1}, {Name: "worker", Size: 1}}
+		h.desired.Runners = []workloadtypes.Runner{{Name: "leader", Size: 1}, {Name: "worker", Size: 1}}
 	} else {
-		h.desired.Runners = []workload.Runner{{Name: "default", Size: 1}}
+		h.desired.Runners = []workloadtypes.Runner{{Name: "default", Size: 1}}
 	}
 	return h
 }
 
 func (h *admissionHarness) irKey() types.NamespacedName {
-	return types.NamespacedName{Namespace: recoveryNS, Name: recoveryOwner + "-" + string(workload.ComponentEngine)}
+	return types.NamespacedName{Namespace: recoveryNS, Name: recoveryOwner + "-" + string(workloadtypes.ComponentEngine)}
 }
 
-func (h *admissionHarness) irStatuses() []workload.InstanceStatus {
+func (h *admissionHarness) irStatuses() []workloadtypes.InstanceStatus {
 	h.t.Helper()
 	ir := &v1beta1.InferenceReplica{}
 	if err := h.c.Get(h.ctx, h.irKey(), ir); err != nil {
@@ -2432,7 +2435,7 @@ func (h *admissionHarness) irStatuses() []workload.InstanceStatus {
 		}
 		h.t.Fatalf("get IR: %v", err)
 	}
-	out := make([]workload.InstanceStatus, 0, len(ir.Status.InstanceStatuses))
+	out := make([]workloadtypes.InstanceStatus, 0, len(ir.Status.InstanceStatuses))
 	for _, s := range ir.Status.InstanceStatuses {
 		out = append(out, v1beta1convert.InstanceStatusToWorkload(s))
 	}
@@ -2440,7 +2443,7 @@ func (h *admissionHarness) irStatuses() []workload.InstanceStatus {
 }
 
 // status returns the single Instance's status, or nil before it exists.
-func (h *admissionHarness) status() *workload.InstanceStatus {
+func (h *admissionHarness) status() *workloadtypes.InstanceStatus {
 	for _, s := range h.irStatuses() {
 		if s.Index == 0 {
 			return &s
@@ -2469,31 +2472,31 @@ func (h *admissionHarness) removeInstance() func(ctx context.Context, idx int32)
 	}
 }
 
-func (h *admissionHarness) buildInput() workload.ReconcileInput {
-	in := workload.ReconcileInput{
+func (h *admissionHarness) buildInput() workloadtypes.ReconcileInput {
+	in := workloadtypes.ReconcileInput{
 		OwnerObject: h.isvc,
 		OwnerGVK:    v1beta1.SchemeGroupVersion.WithKind("InferenceService"),
 		EventTarget: h.isvc,
-		Key: workload.Key{
+		Key: workloadtypes.Key{
 			Namespace: recoveryNS,
-			Component: workload.ComponentEngine,
+			Component: workloadtypes.ComponentEngine,
 			OwnerName: recoveryOwner,
 		},
 		DesiredSpec: h.desired,
-		ObservedState: workload.WorkloadObservedState{
+		ObservedState: workloadtypes.WorkloadObservedState{
 			InstanceStatuses: h.irStatuses(),
-			RetryBlocks:      append([]workload.RetryBlock(nil), h.blocks...),
+			RetryBlocks:      append([]workloadtypes.RetryBlock(nil), h.blocks...),
 			CurrentRevision:  h.currentRevision,
 			UpdateRevision:   h.target.Name,
 		},
-		MutateInstance:    roundTripMutateInstance(h.c, h.isvc, workload.ComponentEngine),
+		MutateInstance:    roundTripMutateInstance(h.c, h.isvc, workloadtypes.ComponentEngine),
 		RemoveInstance:    h.removeInstance(),
 		UpdateRetryPolicy: h.policy,
 		StuckPodGrace:     30 * time.Second,
 		Clock:             h.clk,
-		MutateRetryBlock: func(_ context.Context, rev string, mutate func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
+		MutateRetryBlock: func(_ context.Context, rev string, mutate func(*workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition) error {
 			pos := -1
-			b := workload.RetryBlock{TargetRevision: rev}
+			b := workloadtypes.RetryBlock{TargetRevision: rev}
 			for i := range h.blocks {
 				if h.blocks[i].TargetRevision == rev {
 					pos, b = i, h.blocks[i]
@@ -2501,13 +2504,13 @@ func (h *admissionHarness) buildInput() workload.ReconcileInput {
 				}
 			}
 			switch mutate(&b) {
-			case workload.RetryBlockPersist:
+			case workloadtypes.RetryBlockPersist:
 				if pos == -1 {
 					h.blocks = append(h.blocks, b)
 				} else {
 					h.blocks[pos] = b
 				}
-			case workload.RetryBlockRemove:
+			case workloadtypes.RetryBlockRemove:
 				if pos != -1 {
 					h.blocks = append(h.blocks[:pos], h.blocks[pos+1:]...)
 				}
@@ -2541,7 +2544,7 @@ func (h *admissionHarness) kubelet() {
 			}
 			h.seen[pod.Name]++
 			rejected := h.reject != nil && h.reject(pod.Name, h.seen[pod.Name])
-			var op *workload.InstanceOperation
+			var op *workloadtypes.InstanceOperation
 			if s := h.status(); s != nil {
 				op = s.Operation
 			}
@@ -2600,9 +2603,9 @@ func (h *admissionHarness) pods() []corev1.Pod {
 func (h *admissionHarness) step() {
 	h.t.Helper()
 	h.kubelet()
-	deps := workload.Deps{Client: h.c, APIReader: h.c, Expectations: workload.NewExpectations(), Clock: h.clk}
+	deps := workloadtypes.Deps{Client: h.c, APIReader: h.c, Expectations: workloadtypes.NewExpectations(), Clock: h.clk}
 	in := h.buildInput()
-	plan, err := workload.BuildPlan(workload.ComponentEngine, h.desired, in.ObservedState)
+	plan, err := workload.BuildPlan(workloadtypes.ComponentEngine, h.desired, in.ObservedState)
 	if err != nil {
 		h.t.Fatalf("BuildPlan: %v", err)
 	}
@@ -2610,7 +2613,7 @@ func (h *admissionHarness) step() {
 	if err != nil {
 		h.t.Fatalf("Reconcile: %v", err)
 	}
-	if workload.RolloutComplete(h.irStatuses(), h.target.Name) {
+	if status.RolloutComplete(h.irStatuses(), h.target.Name) {
 		h.currentRevision = h.target.Name
 	}
 	h.observe()
@@ -2656,7 +2659,7 @@ func (h *admissionHarness) observe() {
 		}
 	}
 	recycling := s != nil && s.Operation != nil &&
-		(s.Operation.Type == workload.InstanceOperationCreate || s.Operation.Type == workload.InstanceOperationRestart)
+		(s.Operation.Type == workloadtypes.InstanceOperationCreate || s.Operation.Type == workloadtypes.InstanceOperationRestart)
 	if recycling && fresh > 0 && terminal > 0 {
 		h.dump("mixed fresh and terminal pods")
 		h.t.Fatalf("%s created a replacement next to %d terminal pod(s) of the same Instance", s.Operation.Type, terminal)
@@ -2678,7 +2681,7 @@ func (h *admissionHarness) run(max int, pred func() bool) bool {
 // pod live and ContainersReady.
 func (h *admissionHarness) converged() bool {
 	s := h.status()
-	if s == nil || s.Phase != workload.InstancePhaseReady || s.RunningRevision != h.target.Name || s.Operation != nil {
+	if s == nil || s.Phase != workloadtypes.InstancePhaseReady || s.RunningRevision != h.target.Name || s.Operation != nil {
 		return false
 	}
 	pods := h.pods()
@@ -2686,7 +2689,7 @@ func (h *admissionHarness) converged() bool {
 		return false
 	}
 	for i := range pods {
-		if query.IsTerminalPod(&pods[i]) || workload.CountReadyPods([]*corev1.Pod{&pods[i]}) == 0 {
+		if query.IsTerminalPod(&pods[i]) || status.CountReadyPods([]*corev1.Pod{&pods[i]}) == 0 {
 			return false
 		}
 	}
@@ -2728,14 +2731,14 @@ func TestTerminalPodRecovery_SinglePod_RecycledWithinAttempt(t *testing.T) {
 		t.Fatalf("expected one rejected admission followed by one admitted replacement of the same name, got %d admissions", len(h.admissions))
 	}
 	first, second := h.admissions[0].op, h.admissions[1].op
-	if first == nil || second == nil || first.ID != second.ID || first.Type != workload.InstanceOperationCreate {
+	if first == nil || second == nil || first.ID != second.ID || first.Type != workloadtypes.InstanceOperationCreate {
 		h.dump("attempts")
 		t.Fatalf("the replacement must be issued by the original Create attempt, got %+v then %+v", first, second)
 	}
 	if second.RetryCount != 1 {
 		t.Fatalf("the replacement must follow one recorded recycle, got RetryCount=%d", second.RetryCount)
 	}
-	if h.phases[workload.InstancePhaseFailed] > 0 {
+	if h.phases[workloadtypes.InstancePhaseFailed] > 0 {
 		t.Fatalf("the attempt must not escalate to Failed while it is repairing itself")
 	}
 	if s := h.status(); s.LastFailure == nil || s.LastFailure.Reason != admissionRejectReason {
@@ -2758,7 +2761,7 @@ func TestTerminalPodRecovery_Gang_AllMembersRecycledTogether(t *testing.T) {
 	if !h.admissions[2].at.Equal(h.admissions[3].at) {
 		t.Fatalf("replacements must be created together, got %v and %v", h.admissions[2].at, h.admissions[3].at)
 	}
-	if h.opTypes[workload.InstanceOperationRestart] > 0 {
+	if h.opTypes[workloadtypes.InstanceOperationRestart] > 0 {
 		t.Fatalf("total loss is Create's to rebuild; no Restart may run")
 	}
 	if s := h.status(); s.Incarnation != 1 {
@@ -2828,7 +2831,7 @@ func TestTerminalPodRecovery_RecreatesFollowLadderWithinDeadline(t *testing.T) {
 			t.Fatalf("recreate %d -> %d spaced %v, want the ladder delay %v", i, i+1, gap, want)
 		}
 	}
-	if h.phases[workload.InstancePhaseFailed] == 0 {
+	if h.phases[workloadtypes.InstancePhaseFailed] == 0 {
 		t.Fatalf("the expired attempt must escalate to Failed at its deadline")
 	}
 	if second := attempts[1]; !second[0].at.After(first[0].op.Deadline.Time) {
@@ -2870,14 +2873,14 @@ func (h *admissionHarness) requireNoGapFill() {
 // both members recreated together — never a single-member gap fill next
 // to the survivor.
 func TestTerminalPodRecovery_Gang_SurvivorRebuiltAsWhole(t *testing.T) {
-	leader := query.PodName(recoveryOwner, workload.ComponentEngine, 0, "leader", 0)
-	worker := query.PodName(recoveryOwner, workload.ComponentEngine, 0, "worker", 0)
+	leader := query.PodName(recoveryOwner, workloadtypes.ComponentEngine, 0, "leader", 0)
+	worker := query.PodName(recoveryOwner, workloadtypes.ComponentEngine, 0, "worker", 0)
 	h := newAdmissionHarness(t, true, func(name string, n int) bool { return name == leader && n == 1 })
 	if !h.run(40, h.converged) {
 		h.dump("gang with survivor wedged")
 		t.Fatalf("gang never reached Ready after one member died at admission")
 	}
-	if h.opTypes[workload.InstanceOperationRestart] == 0 {
+	if h.opTypes[workloadtypes.InstanceOperationRestart] == 0 {
 		t.Fatalf("a gang with a survivor must be rebuilt by Restart, not gap-filled by Create")
 	}
 	if s := h.status(); s.Incarnation != 2 {
@@ -2909,15 +2912,15 @@ func TestTerminalPodRecovery_Gang_SurvivorRebuiltAsWhole(t *testing.T) {
 // re-arm into a new whole-gang Restart (another incarnation bump, survivor
 // drained again) instead of wedging or letting Create gap-fill.
 func TestTerminalPodRecovery_Gang_SpentRestartReArms(t *testing.T) {
-	leader := query.PodName(recoveryOwner, workload.ComponentEngine, 0, "leader", 0)
-	worker := query.PodName(recoveryOwner, workload.ComponentEngine, 0, "worker", 0)
+	leader := query.PodName(recoveryOwner, workloadtypes.ComponentEngine, 0, "leader", 0)
+	worker := query.PodName(recoveryOwner, workloadtypes.ComponentEngine, 0, "worker", 0)
 	h := newAdmissionHarness(t, true, func(name string, n int) bool { return name == leader && n <= 5 })
 	h.desired.Lifecycle.InstanceReadyTimeout = &metav1.Duration{Duration: 2 * time.Minute}
 	if !h.run(80, h.converged) {
 		h.dump("spent restart wedged")
 		t.Fatalf("gang never reached Ready after its Restart attempt expired")
 	}
-	if h.phases[workload.InstancePhaseFailed] == 0 {
+	if h.phases[workloadtypes.InstancePhaseFailed] == 0 {
 		t.Fatalf("the first Restart attempt must expire to Failed before re-arming")
 	}
 	s := h.status()
@@ -2947,22 +2950,22 @@ func TestTerminalPodRecovery_Gang_SpentRestartReArms(t *testing.T) {
 
 // expiryDispatchFixture wires a Reconcile input holding one Manual
 // record and observation stubs that record what the dispatcher did.
-func expiryDispatchFixture(t *testing.T, rec workload.MigrationRecord) (workload.ReconcileInput, workload.Deps, *[]workload.MigrationRecord, *bool) {
+func expiryDispatchFixture(t *testing.T, rec workloadtypes.MigrationRecord) (workloadtypes.ReconcileInput, workloadtypes.Deps, *[]workloadtypes.MigrationRecord, *bool) {
 	t.Helper()
 	scheme := makeScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
 	clk := clocktesting.NewFakeClock(time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC))
 
-	records := []workload.MigrationRecord{rec}
+	records := []workloadtypes.MigrationRecord{rec}
 	migrateStamped := false
 
 	in := minimalInput(t)
 	in.Clock = clk
-	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
-		{Index: 0, Phase: workload.InstancePhaseReady, RunningRevision: "rev-1"},
+	in.ObservedState.InstanceStatuses = []workloadtypes.InstanceStatus{
+		{Index: 0, Phase: workloadtypes.InstancePhaseReady, RunningRevision: "rev-1"},
 	}
-	in.ObservedState.Migrations = append([]workload.MigrationRecord(nil), records...)
-	in.MutateMigration = func(_ context.Context, uuid string, mutate func(*workload.MigrationRecord) bool) error {
+	in.ObservedState.Migrations = append([]workloadtypes.MigrationRecord(nil), records...)
+	in.MutateMigration = func(_ context.Context, uuid string, mutate func(*workloadtypes.MigrationRecord) bool) error {
 		for i := range records {
 			if records[i].RequestUUID == uuid {
 				r := records[i]
@@ -2974,24 +2977,24 @@ func expiryDispatchFixture(t *testing.T, rec workload.MigrationRecord) (workload
 		}
 		return nil
 	}
-	in.MutateInstance = func(_ context.Context, _ int32, mutate func(*workload.InstanceStatus) bool) error {
-		s := workload.InstanceStatus{Index: 0, Phase: workload.InstancePhaseReady}
-		if mutate(&s) && s.Operation != nil && s.Operation.Type == workload.InstanceOperationMigrate {
+	in.MutateInstance = func(_ context.Context, _ int32, mutate func(*workloadtypes.InstanceStatus) bool) error {
+		s := workloadtypes.InstanceStatus{Index: 0, Phase: workloadtypes.InstancePhaseReady}
+		if mutate(&s) && s.Operation != nil && s.Operation.Type == workloadtypes.InstanceOperationMigrate {
 			migrateStamped = true
 		}
 		return nil
 	}
-	return in, workload.Deps{Client: c, Clock: clk}, &records, &migrateStamped
+	return in, workloadtypes.Deps{Client: c, Clock: clk}, &records, &migrateStamped
 }
 
 // pastDeadlineRecord builds a non-terminal Manual record whose Deadline
 // already elapsed relative to the fixture clock.
-func pastDeadlineRecord(uuid string) workload.MigrationRecord {
+func pastDeadlineRecord(uuid string) workloadtypes.MigrationRecord {
 	base := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
-	return workload.MigrationRecord{
+	return workloadtypes.MigrationRecord{
 		RequestUUID:    uuid,
-		Trigger:        workload.MigrationTriggerManual,
-		Phase:          workload.MigrationPhaseAccepted,
+		Trigger:        workloadtypes.MigrationTriggerManual,
+		Phase:          workloadtypes.MigrationPhaseAccepted,
 		SourceInstance: 0,
 		FromNode:       "node-a",
 		StartedAt:      metav1.NewTime(base.Add(-time.Hour)),
@@ -3006,14 +3009,14 @@ func pastDeadlineRecord(uuid string) workload.MigrationRecord {
 // rebuilds plan + ObservedState from the post-expiry status.
 func TestReconcile_ExpiryBeforeDrive(t *testing.T) {
 	in, deps, records, migrateStamped := expiryDispatchFixture(t, pastDeadlineRecord("u-expired"))
-	in.ObservedState.RetryBlocks = []workload.RetryBlock{{TargetRevision: "superseded"}}
+	in.ObservedState.RetryBlocks = []workloadtypes.RetryBlock{{TargetRevision: "superseded"}}
 	prunes := 0
-	in.MutateRetryBlock = func(context.Context, string, func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
+	in.MutateRetryBlock = func(context.Context, string, func(*workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition) error {
 		prunes++
 		return nil
 	}
 	plan := minimalPlan()
-	plan.MigrationMode = workload.MigrationModeAuto
+	plan.MigrationMode = workloadtypes.MigrationModeAuto
 
 	res, err := workload.Reconcile(context.Background(), deps, in, plan, nil)
 	if err != nil {
@@ -3023,7 +3026,7 @@ func TestReconcile_ExpiryBeforeDrive(t *testing.T) {
 		t.Errorf("dispatcher must requeue immediately after an expiry; got %+v", res)
 	}
 	got := (*records)[0]
-	if got.Phase != workload.MigrationPhaseFailed || got.CompletedAt == nil {
+	if got.Phase != workloadtypes.MigrationPhaseFailed || got.CompletedAt == nil {
 		t.Fatalf("expired record must close Failed; got %+v", got)
 	}
 	if *migrateStamped {
@@ -3040,7 +3043,7 @@ func TestReconcile_ExpiryBeforeDrive(t *testing.T) {
 func TestReconcile_ExpiryRunsUnderModeNever(t *testing.T) {
 	in, deps, records, migrateStamped := expiryDispatchFixture(t, pastDeadlineRecord("u-never-mode"))
 	plan := minimalPlan()
-	plan.MigrationMode = workload.MigrationModeNever
+	plan.MigrationMode = workloadtypes.MigrationModeNever
 
 	res, err := workload.Reconcile(context.Background(), deps, in, plan, nil)
 	if err != nil {
@@ -3049,7 +3052,7 @@ func TestReconcile_ExpiryRunsUnderModeNever(t *testing.T) {
 	if !res.Requeue {
 		t.Errorf("dispatcher must requeue after the expiry; got %+v", res)
 	}
-	if got := (*records)[0]; got.Phase != workload.MigrationPhaseFailed {
+	if got := (*records)[0]; got.Phase != workloadtypes.MigrationPhaseFailed {
 		t.Fatalf("record must expire under MigrationMode=Never too; got %+v", got)
 	}
 	if *migrateStamped {
@@ -3068,7 +3071,7 @@ func TestReconcile_NotYetExpiredRecordNotConsumed(t *testing.T) {
 	rec.Deadline = metav1.NewTime(time.Date(2026, 7, 24, 13, 0, 0, 0, time.UTC)) // 1h ahead of the fixture clock
 	in, deps, records, _ := expiryDispatchFixture(t, rec)
 	plan := minimalPlan()
-	plan.MigrationMode = workload.MigrationModeNever
+	plan.MigrationMode = workloadtypes.MigrationModeNever
 
 	if _, err := workload.Reconcile(context.Background(), deps, in, plan, nil); err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -3086,9 +3089,9 @@ func TestReconcile_NotYetExpiredRecordNotConsumed(t *testing.T) {
 // restored source stays covered by the plan and can never become an
 // extra.
 func TestScaleDownExtras_UnpinnedSurgeIsExtra(t *testing.T) {
-	observed := []workload.InstanceStatus{
-		{Index: 0, Phase: workload.InstancePhaseReady},    // restored source, in plan
-		{Index: 1, Phase: workload.InstancePhaseCreating}, // unpinned surge, op cleared
+	observed := []workloadtypes.InstanceStatus{
+		{Index: 0, Phase: workloadtypes.InstancePhaseReady},    // restored source, in plan
+		{Index: 1, Phase: workloadtypes.InstancePhaseCreating}, // unpinned surge, op cleared
 	}
 	plan := minimalPlan() // covers only index 0
 
@@ -3116,7 +3119,7 @@ func rejectedStatusWrite() error {
 
 // restartOnlyDecision selects exactly one Instance for the restart pass
 // and leaves the end-of-pass block enabled.
-func restartOnlyDecision(inst workload.InstancePlan) workload.Decision {
+func restartOnlyDecision(inst workloadtypes.InstancePlan) workload.Decision {
 	return workload.Decision{
 		Actions: []workload.PlannedAction{{
 			Kind:     workload.ActionRestart,
@@ -3127,12 +3130,12 @@ func restartOnlyDecision(inst workload.InstancePlan) workload.Decision {
 }
 
 // threeInstancePlan covers indices 0..2 with one pod each.
-func threeInstancePlan() workload.ComponentPlan {
-	plan := workload.ComponentPlan{Component: workload.ComponentEngine, Replicas: 3}
+func threeInstancePlan() workloadtypes.ComponentPlan {
+	plan := workloadtypes.ComponentPlan{Component: workloadtypes.ComponentEngine, Replicas: 3}
 	for idx := int32(0); idx < 3; idx++ {
-		plan.Instances = append(plan.Instances, workload.InstancePlan{
+		plan.Instances = append(plan.Instances, workloadtypes.InstancePlan{
 			Index: idx, Incarnation: 1,
-			Runners: []workload.RunnerPlan{{Name: "default", Size: 1}},
+			Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}},
 		})
 	}
 	return plan
@@ -3154,55 +3157,55 @@ func TestExecuteErroredOpPassStillEscalatesExpiredDeadline(t *testing.T) {
 	surgeIdx := int32(10)
 	in := minimalInput(t)
 	in.Clock = clocktesting.NewFakeClock(now)
-	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
+	in.ObservedState.InstanceStatuses = []workloadtypes.InstanceStatus{
 		{
-			Index: 0, Incarnation: 1, PodCount: 1, Phase: workload.InstancePhaseUpdating,
-			Operation: &workload.InstanceOperation{
+			Index: 0, Incarnation: 1, PodCount: 1, Phase: workloadtypes.InstancePhaseUpdating,
+			Operation: &workloadtypes.InstanceOperation{
 				ID:             "update-0",
-				Type:           workload.InstanceOperationUpdate,
-				Step:           workload.UpdateStepSurge,
+				Type:           workloadtypes.InstanceOperationUpdate,
+				Step:           workloadtypes.UpdateStepSurge,
 				SurgeIndex:     &surgeIdx,
 				StartedAt:      metav1.NewTime(now.Add(-2 * time.Minute)),
 				LastProgressAt: metav1.NewTime(now.Add(-2 * time.Minute)),
 				Deadline:       metav1.NewTime(now.Add(-time.Minute)),
 			},
 		},
-		{Index: 1, Incarnation: 1, PodCount: 1, Phase: workload.InstancePhaseReady},
+		{Index: 1, Incarnation: 1, PodCount: 1, Phase: workloadtypes.InstancePhaseReady},
 		{
-			Index: 2, Incarnation: 1, PodCount: 1, Phase: workload.InstancePhaseCreating,
-			Operation: &workload.InstanceOperation{
+			Index: 2, Incarnation: 1, PodCount: 1, Phase: workloadtypes.InstancePhaseCreating,
+			Operation: &workloadtypes.InstanceOperation{
 				ID:                "create-2",
-				Type:              workload.InstanceOperationCreate,
+				Type:              workloadtypes.InstanceOperationCreate,
 				Step:              "CreatePods",
 				StartedAt:         metav1.NewTime(now.Add(-2 * time.Minute)),
 				LastProgressAt:    metav1.NewTime(now.Add(-2 * time.Minute)),
-				Waiting:           workload.RejectionReasonQuotaExceeded,
+				Waiting:           workloadtypes.RejectionReasonQuotaExceeded,
 				CapacityRefusedAt: ptrTime(now.Add(-2 * time.Minute)),
 			},
 		},
 	}
-	in.ObservedState.RetryBlocks = []workload.RetryBlock{{TargetRevision: "superseded"}}
+	in.ObservedState.RetryBlocks = []workloadtypes.RetryBlock{{TargetRevision: "superseded"}}
 	store := installTestAtomicMutationStore(&in)
-	in.ApplyInstanceMutations = func(ctx context.Context, mutations []workload.InstanceMutation) error {
+	in.ApplyInstanceMutations = func(ctx context.Context, mutations []workloadtypes.InstanceMutation) error {
 		return store.apply(ctx, mutations, "", nil)
 	}
 	rejected := rejectedStatusWrite()
-	in.MutateInstance = func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
+	in.MutateInstance = func(ctx context.Context, idx int32, mutate func(*workloadtypes.InstanceStatus) bool) error {
 		if idx == 1 {
 			return rejected
 		}
-		return store.apply(ctx, []workload.InstanceMutation{{Index: idx, Mutate: mutate}}, "", nil)
+		return store.apply(ctx, []workloadtypes.InstanceMutation{{Index: idx, Mutate: mutate}}, "", nil)
 	}
 	warnings := 0
 	in.WarnInstanceFailed = func(int32, string, string) { warnings++ }
 	prunes := 0
-	in.MutateRetryBlock = func(context.Context, string, func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
+	in.MutateRetryBlock = func(context.Context, string, func(*workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition) error {
 		prunes++
 		return nil
 	}
 	plan := threeInstancePlan()
 	c := fake.NewClientBuilder().WithScheme(makeScheme(t)).Build()
-	deps := workload.Deps{Client: c, APIReader: c, Expectations: workload.NewExpectations()}
+	deps := workloadtypes.Deps{Client: c, APIReader: c, Expectations: workloadtypes.NewExpectations()}
 	snapshot := workload.SnapshotWithPodsForTest(in, nil)
 
 	result, err := workload.Execute(ctx, deps, in, plan, nil, snapshot, restartOnlyDecision(plan.Instances[1]))
@@ -3219,18 +3222,18 @@ func TestExecuteErroredOpPassStillEscalatesExpiredDeadline(t *testing.T) {
 	if result.Requeue || result.RequeueAfter != 0 {
 		t.Fatalf("result = %+v, want the errored pass's empty result", result)
 	}
-	if got := store.status(0); got == nil || got.Phase != workload.InstancePhaseFailed ||
-		got.LastFailure == nil || got.LastFailure.Reason != workload.DeadlineExceededReason || got.Operation == nil {
+	if got := store.status(0); got == nil || got.Phase != workloadtypes.InstancePhaseFailed ||
+		got.LastFailure == nil || got.LastFailure.Reason != escalation.DeadlineExceededReason || got.Operation == nil {
 		t.Fatalf("expired Instance was not escalated: %+v", got)
 	}
-	if got := store.status(1); got == nil || got.Phase != workload.InstancePhaseReady || got.Operation != nil {
+	if got := store.status(1); got == nil || got.Phase != workloadtypes.InstancePhaseReady || got.Operation != nil {
 		t.Fatalf("instance 1 must be untouched while its writes are rejected: %+v", got)
 	}
 	held := store.status(2)
-	if held == nil || held.Phase != workload.InstancePhaseCreating || held.Operation == nil {
+	if held == nil || held.Phase != workloadtypes.InstancePhaseCreating || held.Operation == nil {
 		t.Fatalf("held Instance changed phase: %+v", held)
 	}
-	if held.Operation.Waiting != workload.RejectionReasonQuotaExceeded {
+	if held.Operation.Waiting != workloadtypes.RejectionReasonQuotaExceeded {
 		t.Fatalf("held Instance lost its Waiting token: %q", held.Operation.Waiting)
 	}
 	if !held.Operation.Deadline.IsZero() {
@@ -3243,9 +3246,9 @@ func TestExecuteErroredOpPassStillEscalatesExpiredDeadline(t *testing.T) {
 
 // TestExecuteErroredPodReadDoesNotFabricateStuckEvidence: the restart
 // pass fails because the Pod list failed, so the escalation pass reading
-// the same memoized source fails too. The evidence it would have used is
-// deadline-only — a read failure never invents a stuck pod — nothing is
-// stamped Failed, and the joined error keeps the op error first.
+// the same memoized source fails too, before it derives any evidence — a
+// read failure never invents a stuck pod — so nothing is stamped Failed,
+// and the joined error keeps the op error first.
 //
 // Cells: instance/Ready/api.throttled[ServiceUnavailable]/before, instance/Update/Surge/timer.operationDeadline/before
 func TestExecuteErroredPodReadDoesNotFabricateStuckEvidence(t *testing.T) {
@@ -3255,27 +3258,27 @@ func TestExecuteErroredPodReadDoesNotFabricateStuckEvidence(t *testing.T) {
 	in := minimalInput(t)
 	in.Clock = clocktesting.NewFakeClock(now)
 	in.StuckPodGrace = time.Minute
-	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
+	in.ObservedState.InstanceStatuses = []workloadtypes.InstanceStatus{
 		{
-			Index: 0, Incarnation: 1, PodCount: 1, Phase: workload.InstancePhaseUpdating,
-			Operation: &workload.InstanceOperation{
+			Index: 0, Incarnation: 1, PodCount: 1, Phase: workloadtypes.InstancePhaseUpdating,
+			Operation: &workloadtypes.InstanceOperation{
 				ID:             "update-0",
-				Type:           workload.InstanceOperationUpdate,
-				Step:           workload.UpdateStepSurge,
+				Type:           workloadtypes.InstanceOperationUpdate,
+				Step:           workloadtypes.UpdateStepSurge,
 				SurgeIndex:     &surgeIdx,
 				StartedAt:      metav1.NewTime(now.Add(-2 * time.Minute)),
 				LastProgressAt: metav1.NewTime(now.Add(-2 * time.Minute)),
 				Deadline:       metav1.NewTime(now.Add(-time.Minute)),
 			},
 		},
-		{Index: 1, Incarnation: 1, PodCount: 1, Phase: workload.InstancePhaseReady},
+		{Index: 1, Incarnation: 1, PodCount: 1, Phase: workloadtypes.InstancePhaseReady},
 	}
 	store := installTestAtomicMutationStore(&in)
-	in.ApplyInstanceMutations = func(ctx context.Context, mutations []workload.InstanceMutation) error {
+	in.ApplyInstanceMutations = func(ctx context.Context, mutations []workloadtypes.InstanceMutation) error {
 		return store.apply(ctx, mutations, "", nil)
 	}
-	in.MutateInstance = func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
-		return store.apply(ctx, []workload.InstanceMutation{{Index: idx, Mutate: mutate}}, "", nil)
+	in.MutateInstance = func(ctx context.Context, idx int32, mutate func(*workloadtypes.InstanceStatus) bool) error {
+		return store.apply(ctx, []workloadtypes.InstanceMutation{{Index: idx, Mutate: mutate}}, "", nil)
 	}
 	warnings := 0
 	in.WarnInstanceFailed = func(int32, string, string) { warnings++ }
@@ -3287,20 +3290,12 @@ func TestExecuteErroredPodReadDoesNotFabricateStuckEvidence(t *testing.T) {
 				return shed
 			},
 		}).Build()
-	deps := workload.Deps{Client: c, APIReader: c, Expectations: workload.NewExpectations()}
-	snapshot := workload.NewObservedSnapshot(deps, in, workload.ComponentEngine, in.ObservedState.InstanceStatuses)
-
-	ev := snapshot.EvidenceFor(ctx, 0, now, in.StuckPodGrace)
-	if !ev.DeadlinePassed {
-		t.Fatalf("evidence must still report the elapsed deadline: %+v", ev)
-	}
-	if ev.StuckPod != nil || ev.StuckReason != "" || ev.Unschedulable != nil {
-		t.Fatalf("a failed pod read must not fabricate pod evidence: %+v", ev)
-	}
+	deps := workloadtypes.Deps{Client: c, APIReader: c, Expectations: workloadtypes.NewExpectations()}
+	snapshot := workload.NewObservedSnapshot(deps, in, workloadtypes.ComponentEngine, in.ObservedState.InstanceStatuses)
 
 	plan := minimalPlan()
-	plan.Instances = append(plan.Instances, workload.InstancePlan{
-		Index: 1, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}},
+	plan.Instances = append(plan.Instances, workloadtypes.InstancePlan{
+		Index: 1, Incarnation: 1, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}},
 	})
 	_, err := workload.Execute(ctx, deps, in, plan, nil, snapshot, restartOnlyDecision(plan.Instances[1]))
 
@@ -3315,7 +3310,7 @@ func TestExecuteErroredPodReadDoesNotFabricateStuckEvidence(t *testing.T) {
 	if opFirst > escalationSecond {
 		t.Fatalf("the op error must be reported first; got %v", err)
 	}
-	if got := store.status(0); got != nil && got.Phase == workload.InstancePhaseFailed {
+	if got := store.status(0); got != nil && got.Phase == workloadtypes.InstancePhaseFailed {
 		t.Fatalf("a failed pod read must not stamp Failed: %+v", got)
 	}
 	if warnings != 0 {
@@ -3340,12 +3335,12 @@ func TestExecuteErroredSiblingKeepsRelocationFirstTry(t *testing.T) {
 	in := minimalInput(t)
 	in.Clock = clocktesting.NewFakeClock(now)
 	in.ObservedState.UpdateRevision = "llama-70b-engine-abcde"
-	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
+	in.ObservedState.InstanceStatuses = []workloadtypes.InstanceStatus{
 		{
-			Index: 0, Incarnation: 1, PodCount: 1, Phase: workload.InstancePhaseCreating,
-			Operation: &workload.InstanceOperation{
+			Index: 0, Incarnation: 1, PodCount: 1, Phase: workloadtypes.InstancePhaseCreating,
+			Operation: &workloadtypes.InstanceOperation{
 				ID:             "create-0",
-				Type:           workload.InstanceOperationCreate,
+				Type:           workloadtypes.InstanceOperationCreate,
 				Step:           "CreatePods",
 				TargetRevision: "llama-70b-engine-abcde",
 				StartedAt:      metav1.NewTime(now.Add(-2 * time.Minute)),
@@ -3353,37 +3348,37 @@ func TestExecuteErroredSiblingKeepsRelocationFirstTry(t *testing.T) {
 				Deadline:       metav1.NewTime(now.Add(-time.Minute)),
 			},
 		},
-		{Index: 1, Incarnation: 1, PodCount: 1, Phase: workload.InstancePhaseReady},
+		{Index: 1, Incarnation: 1, PodCount: 1, Phase: workloadtypes.InstancePhaseReady},
 	}
-	in.Disposition = workload.DispositionDeps{AutoMigrateMaxAttempts: 3}
+	in.Disposition = workloadtypes.DispositionDeps{AutoMigrateMaxAttempts: 3}
 	store := installTestAtomicMutationStore(&in)
-	in.ApplyInstanceMutations = func(ctx context.Context, mutations []workload.InstanceMutation) error {
+	in.ApplyInstanceMutations = func(ctx context.Context, mutations []workloadtypes.InstanceMutation) error {
 		return store.apply(ctx, mutations, "", nil)
 	}
 	rejected := rejectedStatusWrite()
-	in.MutateInstance = func(ctx context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
+	in.MutateInstance = func(ctx context.Context, idx int32, mutate func(*workloadtypes.InstanceStatus) bool) error {
 		if idx == 1 {
 			return rejected
 		}
-		return store.apply(ctx, []workload.InstanceMutation{{Index: idx, Mutate: mutate}}, "", nil)
+		return store.apply(ctx, []workloadtypes.InstanceMutation{{Index: idx, Mutate: mutate}}, "", nil)
 	}
 	blocks := 0
-	in.MutateRetryBlock = func(context.Context, string, func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
+	in.MutateRetryBlock = func(context.Context, string, func(*workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition) error {
 		blocks++
 		return nil
 	}
-	var mirrored []workload.MigrationRecord
-	in.AppendMigration = func(_ context.Context, rec workload.MigrationRecord) error {
+	var mirrored []workloadtypes.MigrationRecord
+	in.AppendMigration = func(_ context.Context, rec workloadtypes.MigrationRecord) error {
 		mirrored = append(mirrored, rec)
 		return nil
 	}
 	plan := minimalPlan()
-	plan.MigrationMode = workload.MigrationModeAuto
-	plan.Instances = append(plan.Instances, workload.InstancePlan{
-		Index: 1, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}},
+	plan.MigrationMode = workloadtypes.MigrationModeAuto
+	plan.Instances = append(plan.Instances, workloadtypes.InstancePlan{
+		Index: 1, Incarnation: 1, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}},
 	})
 	c := fake.NewClientBuilder().WithScheme(makeScheme(t)).Build()
-	deps := workload.Deps{Client: c, APIReader: c, Expectations: workload.NewExpectations()}
+	deps := workloadtypes.Deps{Client: c, APIReader: c, Expectations: workloadtypes.NewExpectations()}
 	limbo := nodeScopedLimboPod("llama-70b-engine-0-default-0", in.Key.Namespace, suspectNode, "abcde", now.Add(-2*time.Minute))
 	snapshot := workload.SnapshotWithPodsForTest(in, map[int32][]*corev1.Pod{0: {limbo}})
 
@@ -3408,14 +3403,14 @@ func TestExecuteErroredSiblingKeepsRelocationFirstTry(t *testing.T) {
 		t.Errorf("entry identity: got fromNode=%q source=%d surge=%d want %s/0/0 (a directive allocates no surge)",
 			e.FromNode, e.SourceInstance, e.SurgeInstance, suspectNode)
 	}
-	if len(mirrored) != 1 || mirrored[0].Trigger != workload.MigrationTriggerAuto ||
-		mirrored[0].Phase != workload.MigrationPhaseRelocated || mirrored[0].Attempt != 1 {
+	if len(mirrored) != 1 || mirrored[0].Trigger != workloadtypes.MigrationTriggerAuto ||
+		mirrored[0].Phase != workloadtypes.MigrationPhaseRelocated || mirrored[0].Attempt != 1 {
 		t.Errorf("status mirror: got %+v want one born-terminal Auto record on attempt 1", mirrored)
 	}
 	if blocks != 0 {
 		t.Errorf("MutateRetryBlock calls: got %d want none (relocation never holds a revision)", blocks)
 	}
-	if got := store.status(0); got == nil || got.Phase != workload.InstancePhaseFailed || got.Operation != nil {
+	if got := store.status(0); got == nil || got.Phase != workloadtypes.InstancePhaseFailed || got.Operation != nil {
 		t.Fatalf("relocated Instance: got %+v want Failed with the operation cleared", got)
 	}
 }
@@ -3443,13 +3438,13 @@ func TestReconcileDeleteOwnedReboundFinishesBeforeRecreate(t *testing.T) {
 	plan.InstanceReadyTimeout = time.Minute
 	started := metav1.NewTime(time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC))
 	in.Clock = clocktesting.NewFakeClock(started.Add(2 * time.Minute))
-	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{{
+	in.ObservedState.InstanceStatuses = []workloadtypes.InstanceStatus{{
 		Index:       0,
 		Incarnation: 1,
-		Phase:       workload.InstancePhaseDeleting,
-		Operation: &workload.InstanceOperation{
+		Phase:       workloadtypes.InstancePhaseDeleting,
+		Operation: &workloadtypes.InstanceOperation{
 			ID:             "delete-0-rebound",
-			Type:           workload.InstanceOperationDelete,
+			Type:           workloadtypes.InstanceOperationDelete,
 			Step:           "Drain",
 			StartedAt:      started,
 			LastProgressAt: started,
@@ -3458,18 +3453,18 @@ func TestReconcileDeleteOwnedReboundFinishesBeforeRecreate(t *testing.T) {
 	}}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 		Namespace: in.Key.Namespace,
-		Name:      query.PodName(in.Key.OwnerName, workload.ComponentEngine, 0, "default", 0),
+		Name:      query.PodName(in.Key.OwnerName, workloadtypes.ComponentEngine, 0, "default", 0),
 		UID:       "rebound-pod-uid",
 		Labels: map[string]string{
 			constants.InferenceServicePodLabelKey: in.Key.OwnerName,
-			constants.OMEComponentLabel:           string(workload.ComponentEngine),
+			constants.OMEComponentLabel:           string(workloadtypes.ComponentEngine),
 			query.LabelManagedBy:                  query.ManagedByOMENative,
 			query.LabelInstanceIdx:                "0",
 		},
 	}}
 	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
-	expectations := workload.NewExpectations()
-	deps := workload.Deps{Client: base, APIReader: base, Expectations: expectations}
+	expectations := workloadtypes.NewExpectations()
+	deps := workloadtypes.Deps{Client: base, APIReader: base, Expectations: expectations}
 	store := installTestAtomicMutationStore(&in)
 	warnings := 0
 	in.WarnInstanceFailed = func(int32, string, string) { warnings++ }
@@ -3478,7 +3473,7 @@ func TestReconcileDeleteOwnedReboundFinishesBeforeRecreate(t *testing.T) {
 		finalized++
 		return true, nil
 	}
-	in.AuthoritativePods = &workload.ComponentPodSnapshot{
+	in.AuthoritativePods = &workloadtypes.ComponentPodSnapshot{
 		Pods:       []*corev1.Pod{pod},
 		ByInstance: map[int32][]*corev1.Pod{0: {pod}},
 	}
@@ -3491,14 +3486,14 @@ func TestReconcileDeleteOwnedReboundFinishesBeforeRecreate(t *testing.T) {
 		t.Fatalf("delete pass result = %+v", result)
 	}
 	status := store.status(0)
-	if status == nil || status.Phase != workload.InstancePhaseDeleting ||
-		status.Operation == nil || status.Operation.Type != workload.InstanceOperationDelete {
+	if status == nil || status.Phase != workloadtypes.InstancePhaseDeleting ||
+		status.Operation == nil || status.Operation.Type != workloadtypes.InstanceOperationDelete {
 		t.Fatalf("delete pass altered durable status: writes=%d status=%+v", store.writes, store.status(0))
 	}
 	// The row's drain is past its deadline, which is announced on the
 	// record and nowhere else: no failure, no phase move, no attempt
 	// spent. Everything the rest of this test drives still runs.
-	if status.LastFailure == nil || status.LastFailure.Reason != workload.DrainOverdueReason {
+	if status.LastFailure == nil || status.LastFailure.Reason != workloadtypes.DrainOverdueReason {
 		t.Fatalf("overdue drain not announced on the record: %+v", status.LastFailure)
 	}
 	if warnings != 0 {
@@ -3519,7 +3514,7 @@ func TestReconcileDeleteOwnedReboundFinishesBeforeRecreate(t *testing.T) {
 	}
 	expectations.ObservedDelete(in.Key.Namespace, in.Key.OwnerName, in.Key.Component, 0)
 	store.sync(&in)
-	in.AuthoritativePods = &workload.ComponentPodSnapshot{ByInstance: map[int32][]*corev1.Pod{}}
+	in.AuthoritativePods = &workloadtypes.ComponentPodSnapshot{ByInstance: map[int32][]*corev1.Pod{}}
 	result, err = workload.Reconcile(ctx, deps, in, plan, nil)
 	if err != nil {
 		t.Fatalf("completion pass: %v", err)
@@ -3547,7 +3542,7 @@ func TestReconcileDeleteOwnedReboundFinishesBeforeRecreate(t *testing.T) {
 		t.Fatalf("recreate pass result = %+v", result)
 	}
 	status = store.status(0)
-	if status == nil || status.Phase != workload.InstancePhaseCreating || store.writes != drained+2 {
+	if status == nil || status.Phase != workloadtypes.InstancePhaseCreating || store.writes != drained+2 {
 		t.Fatalf("recreated status/writes = %+v/%d", status, store.writes)
 	}
 	pods = &corev1.PodList{}
@@ -3565,16 +3560,16 @@ func TestReconcileFreshScaleDownAdmissionEndsThePass(t *testing.T) {
 	expired := metav1.NewTime(now.Add(-time.Minute))
 	in := minimalInput(t)
 	in.Clock = clocktesting.NewFakeClock(now)
-	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
-		{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseReady},
+	in.ObservedState.InstanceStatuses = []workloadtypes.InstanceStatus{
+		{Index: 0, Incarnation: 1, Phase: workloadtypes.InstancePhaseReady},
 		{
 			Index:       1,
 			Incarnation: 1,
 			PodCount:    1,
-			Phase:       workload.InstancePhaseRestarting,
-			Operation: &workload.InstanceOperation{
+			Phase:       workloadtypes.InstancePhaseRestarting,
+			Operation: &workloadtypes.InstanceOperation{
 				ID:             "restart-1",
-				Type:           workload.InstanceOperationRestart,
+				Type:           workloadtypes.InstanceOperationRestart,
 				Step:           "WaitReady",
 				StartedAt:      metav1.NewTime(now.Add(-2 * time.Minute)),
 				LastProgressAt: metav1.NewTime(now.Add(-2 * time.Minute)),
@@ -3582,16 +3577,16 @@ func TestReconcileFreshScaleDownAdmissionEndsThePass(t *testing.T) {
 			},
 		},
 	}
-	in.ObservedState.RetryBlocks = []workload.RetryBlock{{TargetRevision: "superseded"}}
-	in.AuthoritativePods = &workload.ComponentPodSnapshot{ByInstance: map[int32][]*corev1.Pod{}}
+	in.ObservedState.RetryBlocks = []workloadtypes.RetryBlock{{TargetRevision: "superseded"}}
+	in.AuthoritativePods = &workloadtypes.ComponentPodSnapshot{ByInstance: map[int32][]*corev1.Pod{}}
 	store := installTestAtomicMutationStore(&in)
-	in.ApplyInstanceMutations = func(ctx context.Context, mutations []workload.InstanceMutation) error {
+	in.ApplyInstanceMutations = func(ctx context.Context, mutations []workloadtypes.InstanceMutation) error {
 		return store.apply(ctx, mutations, "", nil)
 	}
 	warnings := 0
 	in.WarnInstanceFailed = func(int32, string, string) { warnings++ }
 	prunes := 0
-	in.MutateRetryBlock = func(context.Context, string, func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
+	in.MutateRetryBlock = func(context.Context, string, func(*workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition) error {
 		prunes++
 		return nil
 	}
@@ -3599,7 +3594,7 @@ func TestReconcileFreshScaleDownAdmissionEndsThePass(t *testing.T) {
 	plan.InstanceReadyTimeout = time.Minute
 	client := fake.NewClientBuilder().WithScheme(makeScheme(t)).Build()
 
-	result, err := workload.Reconcile(ctx, workload.Deps{Client: client, APIReader: client}, in, plan, nil)
+	result, err := workload.Reconcile(ctx, workloadtypes.Deps{Client: client, APIReader: client}, in, plan, nil)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -3607,8 +3602,8 @@ func TestReconcileFreshScaleDownAdmissionEndsThePass(t *testing.T) {
 		t.Fatalf("result = %+v, want immediate requeue", result)
 	}
 	status := store.status(1)
-	if status == nil || status.Phase != workload.InstancePhaseDeleting || status.Operation == nil ||
-		status.Operation.Type != workload.InstanceOperationDelete || status.LastFailure != nil {
+	if status == nil || status.Phase != workloadtypes.InstancePhaseDeleting || status.Operation == nil ||
+		status.Operation.Type != workloadtypes.InstanceOperationDelete || status.LastFailure != nil {
 		t.Fatalf("admitted status = %+v, want durable Delete ownership", status)
 	}
 	if store.writes != 1 {
@@ -3622,10 +3617,10 @@ func TestReconcileFreshScaleDownAdmissionEndsThePass(t *testing.T) {
 func TestExecuteActiveScaleDownExcludesDeferredExtrasFromEscalation(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
-	expiredOperation := func(id string) *workload.InstanceOperation {
-		return &workload.InstanceOperation{
+	expiredOperation := func(id string) *workloadtypes.InstanceOperation {
+		return &workloadtypes.InstanceOperation{
 			ID:             id,
-			Type:           workload.InstanceOperationRestart,
+			Type:           workloadtypes.InstanceOperationRestart,
 			Step:           "WaitReady",
 			StartedAt:      metav1.NewTime(now.Add(-2 * time.Minute)),
 			LastProgressAt: metav1.NewTime(now.Add(-2 * time.Minute)),
@@ -3634,38 +3629,38 @@ func TestExecuteActiveScaleDownExcludesDeferredExtrasFromEscalation(t *testing.T
 	}
 	in := minimalInput(t)
 	in.Clock = clocktesting.NewFakeClock(now)
-	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
-		{Index: 0, Incarnation: 1, PodCount: 1, Phase: workload.InstancePhaseRestarting, Operation: expiredOperation("retained")},
-		{Index: 1, Incarnation: 1, PodCount: 1, Phase: workload.InstancePhaseRestarting, Operation: expiredOperation("deferred-extra")},
+	in.ObservedState.InstanceStatuses = []workloadtypes.InstanceStatus{
+		{Index: 0, Incarnation: 1, PodCount: 1, Phase: workloadtypes.InstancePhaseRestarting, Operation: expiredOperation("retained")},
+		{Index: 1, Incarnation: 1, PodCount: 1, Phase: workloadtypes.InstancePhaseRestarting, Operation: expiredOperation("deferred-extra")},
 		{
 			Index:       2,
 			Incarnation: 1,
 			PodCount:    1,
-			Phase:       workload.InstancePhaseDeleting,
-			Operation: &workload.InstanceOperation{
+			Phase:       workloadtypes.InstancePhaseDeleting,
+			Operation: &workloadtypes.InstanceOperation{
 				ID:             "active-delete",
-				Type:           workload.InstanceOperationDelete,
+				Type:           workloadtypes.InstanceOperationDelete,
 				Step:           "Drain",
 				StartedAt:      metav1.NewTime(now.Add(-time.Minute)),
 				LastProgressAt: metav1.NewTime(now.Add(-time.Minute)),
 			},
 		},
 	}
-	in.ObservedState.RetryBlocks = []workload.RetryBlock{{TargetRevision: "superseded"}}
+	in.ObservedState.RetryBlocks = []workloadtypes.RetryBlock{{TargetRevision: "superseded"}}
 	store := installTestAtomicMutationStore(&in)
-	in.ApplyInstanceMutations = func(ctx context.Context, mutations []workload.InstanceMutation) error {
+	in.ApplyInstanceMutations = func(ctx context.Context, mutations []workloadtypes.InstanceMutation) error {
 		return store.apply(ctx, mutations, "", nil)
 	}
 	warnings := 0
 	in.WarnInstanceFailed = func(int32, string, string) { warnings++ }
 	prunes := 0
-	in.MutateRetryBlock = func(context.Context, string, func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
+	in.MutateRetryBlock = func(context.Context, string, func(*workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition) error {
 		prunes++
 		return nil
 	}
 	pod := enginePod(in.Key.OwnerName, in.Key.Namespace, 2)
 	client := fake.NewClientBuilder().WithScheme(makeScheme(t)).WithObjects(pod).Build()
-	deps := workload.Deps{Client: client, APIReader: client, Expectations: workload.NewExpectations()}
+	deps := workloadtypes.Deps{Client: client, APIReader: client, Expectations: workloadtypes.NewExpectations()}
 	snapshot := workload.SnapshotWithPodsForTest(in, map[int32][]*corev1.Pod{2: {pod}})
 	decision := workload.Decision{
 		Actions:  []workload.PlannedAction{{Kind: workload.ActionScaleDown, Extras: []int32{1, 2}}},
@@ -3679,13 +3674,13 @@ func TestExecuteActiveScaleDownExcludesDeferredExtrasFromEscalation(t *testing.T
 	if result.Requeue || result.RequeueAfter != testScaleDownRequeueInterval {
 		t.Fatalf("result = %+v, want configured scale-down poll", result)
 	}
-	if got := store.status(0); got == nil || got.Phase != workload.InstancePhaseFailed {
+	if got := store.status(0); got == nil || got.Phase != workloadtypes.InstancePhaseFailed {
 		t.Fatalf("retained expired Instance was not escalated: %+v", got)
 	}
-	if got := store.status(1); got == nil || got.Phase != workload.InstancePhaseRestarting || got.LastFailure != nil {
+	if got := store.status(1); got == nil || got.Phase != workloadtypes.InstancePhaseRestarting || got.LastFailure != nil {
 		t.Fatalf("deferred scale-down extra was mutated: %+v", got)
 	}
-	if got := store.status(2); got == nil || got.Phase != workload.InstancePhaseDeleting {
+	if got := store.status(2); got == nil || got.Phase != workloadtypes.InstancePhaseDeleting {
 		t.Fatalf("active Delete ownership changed: %+v", got)
 	}
 	if store.writes != 1 || warnings != 1 || prunes != 1 {
@@ -3699,19 +3694,19 @@ func TestReconcileActiveScaleDownWithoutPollSchedulesForceDeleteBoundary(t *test
 	in := minimalInput(t)
 	in.Clock = clocktesting.NewFakeClock(now)
 	in.ScaleDownRequeueInterval = 0
-	in.ForceDelete = &workload.ForceDeletePolicy{
+	in.ForceDelete = &workloadtypes.ForceDeletePolicy{
 		OverdueSlack:             2 * time.Minute,
 		NodeUnreachableThreshold: 5 * time.Minute,
 	}
-	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
-		{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseReady},
+	in.ObservedState.InstanceStatuses = []workloadtypes.InstanceStatus{
+		{Index: 0, Incarnation: 1, Phase: workloadtypes.InstancePhaseReady},
 		{
 			Index:       1,
 			Incarnation: 1,
-			Phase:       workload.InstancePhaseDeleting,
-			Operation: &workload.InstanceOperation{
+			Phase:       workloadtypes.InstancePhaseDeleting,
+			Operation: &workloadtypes.InstanceOperation{
 				ID:        "active-delete",
-				Type:      workload.InstanceOperationDelete,
+				Type:      workloadtypes.InstanceOperationDelete,
 				Step:      "Drain",
 				StartedAt: metav1.NewTime(now.Add(-time.Minute)),
 			},
@@ -3720,15 +3715,15 @@ func TestReconcileActiveScaleDownWithoutPollSchedulesForceDeleteBoundary(t *test
 	deletionTimestamp := metav1.NewTime(now.Add(-time.Minute))
 	pod := enginePod(in.Key.OwnerName, in.Key.Namespace, 1)
 	pod.DeletionTimestamp = &deletionTimestamp
-	in.AuthoritativePods = &workload.ComponentPodSnapshot{
+	in.AuthoritativePods = &workloadtypes.ComponentPodSnapshot{
 		Pods:       []*corev1.Pod{pod},
 		ByInstance: map[int32][]*corev1.Pod{1: {pod}},
 	}
 	store := installTestAtomicMutationStore(&in)
 	client := fake.NewClientBuilder().WithScheme(makeScheme(t)).Build()
 
-	result, err := workload.Reconcile(ctx, workload.Deps{
-		Client: client, APIReader: client, Expectations: workload.NewExpectations(),
+	result, err := workload.Reconcile(ctx, workloadtypes.Deps{
+		Client: client, APIReader: client, Expectations: workloadtypes.NewExpectations(),
 	}, in, minimalPlan(), nil)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -3736,7 +3731,7 @@ func TestReconcileActiveScaleDownWithoutPollSchedulesForceDeleteBoundary(t *test
 	if result.Requeue || result.RequeueAfter != time.Minute+time.Nanosecond {
 		t.Fatalf("result = %+v, want force-delete boundary in 1m+1ns", result)
 	}
-	if got := store.status(1); got == nil || got.Phase != workload.InstancePhaseDeleting {
+	if got := store.status(1); got == nil || got.Phase != workloadtypes.InstancePhaseDeleting {
 		t.Fatalf("active Delete status changed: %+v", got)
 	}
 }
@@ -3765,7 +3760,7 @@ func (h *recoveryHarness) losePods(indices ...int32) {
 	}
 }
 
-func (h *recoveryHarness) instance(idx int32) *workload.InstanceStatus {
+func (h *recoveryHarness) instance(idx int32) *workloadtypes.InstanceStatus {
 	sts := h.irStatuses()
 	for i := range sts {
 		if sts[i].Index == idx {
@@ -3793,7 +3788,7 @@ func (h *recoveryHarness) allReady(n int32) bool {
 		return false
 	}
 	for _, s := range sts {
-		if s.Phase != workload.InstancePhaseReady || s.Operation != nil || len(h.podsOf(s.Index)) != 1 {
+		if s.Phase != workloadtypes.InstancePhaseReady || s.Operation != nil || len(h.podsOf(s.Index)) != 1 {
 			return false
 		}
 	}
@@ -3825,8 +3820,8 @@ func (h *recoveryHarness) atIncarnation(idx int32, incarnation int64) bool {
 // the source rotates out.
 func unavailableModeStep(step string) bool {
 	switch step {
-	case workload.UpdateStepSurge, workload.UpdateStepSurgeDrain, "SurgeDrainSettle",
-		workload.UpdateStepGangSurgeTarget, workload.UpdateStepGangSurgeTargetCleanup:
+	case workloadtypes.UpdateStepSurge, workloadtypes.UpdateStepSurgeDrain, "SurgeDrainSettle",
+		workloadtypes.UpdateStepGangSurgeTarget, workloadtypes.UpdateStepGangSurgeTargetCleanup:
 		return false
 	case "":
 		return false
@@ -3846,7 +3841,7 @@ func unavailableModeStep(step string) bool {
 // opLessRowFixture is a paused Component holding the given rows, so the
 // lifecycle passes are parked and whatever the pass does write is the
 // event's own doing.
-func opLessRowFixture(t *testing.T, rows []workload.InstanceStatus) (workload.ReconcileInput, workload.ComponentPlan, *appsv1.ControllerRevision, *testAtomicMutationStore) {
+func opLessRowFixture(t *testing.T, rows []workloadtypes.InstanceStatus) (workloadtypes.ReconcileInput, workloadtypes.ComponentPlan, *appsv1.ControllerRevision, *testAtomicMutationStore) {
 	t.Helper()
 	in := minimalInput(t)
 	in.DesiredSpec.Paused = true
@@ -3897,13 +3892,13 @@ func TestPendingRow_PodObservationsAreInert(t *testing.T) {
 				t.Fatalf("initial create never converged")
 			}
 			h.desired.Paused = true
-			h.forcePhase(t, 0, workload.InstancePhasePending)
+			h.forcePhase(t, 0, workloadtypes.InstancePhasePending)
 			tc.arrange(t, h)
 
 			h.step()
 
 			got := h.instance(0)
-			if got == nil || got.Phase != workload.InstancePhasePending || got.Operation != nil {
+			if got == nil || got.Phase != workloadtypes.InstancePhasePending || got.Operation != nil {
 				t.Fatalf("row: got %+v want Pending with no operation", got)
 			}
 			if n := len(h.podsOf(0)); n != tc.want {
@@ -3915,9 +3910,9 @@ func TestPendingRow_PodObservationsAreInert(t *testing.T) {
 
 // forcePhase stamps a phase onto an existing row through the harness's
 // own status round-trip, standing in for the truth pass that writes it.
-func (h *recoveryHarness) forcePhase(t *testing.T, idx int32, phase workload.InstancePhase) {
+func (h *recoveryHarness) forcePhase(t *testing.T, idx int32, phase workloadtypes.InstancePhase) {
 	t.Helper()
-	if err := h.mutateInstance()(h.ctx, idx, func(s *workload.InstanceStatus) bool {
+	if err := h.mutateInstance()(h.ctx, idx, func(s *workloadtypes.InstanceStatus) bool {
 		s.Phase = phase
 		return true
 	}); err != nil {
@@ -3951,12 +3946,12 @@ func (h *recoveryHarness) flipServing(t *testing.T, idx int32, status corev1.Con
 func TestOpLessRows_ExcludedAnnotationEditStartsNoWork(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		rows []workload.InstanceStatus
-		want workload.InstancePhase
+		rows []workloadtypes.InstanceStatus
+		want workloadtypes.InstancePhase
 	}{
 		{"empty index", nil, ""},
-		{"pending row", []workload.InstanceStatus{{Index: 0, Incarnation: 1, Phase: workload.InstancePhasePending}}, workload.InstancePhasePending},
-		{"ready row", []workload.InstanceStatus{{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseReady, PodCount: 1, RunningRevision: opLessRowRevision}}, workload.InstancePhaseReady},
+		{"pending row", []workloadtypes.InstanceStatus{{Index: 0, Incarnation: 1, Phase: workloadtypes.InstancePhasePending}}, workloadtypes.InstancePhasePending},
+		{"ready row", []workloadtypes.InstanceStatus{{Index: 0, Incarnation: 1, Phase: workloadtypes.InstancePhaseReady, PodCount: 1, RunningRevision: opLessRowRevision}}, workloadtypes.InstancePhaseReady},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			in, plan, target, store := opLessRowFixture(t, tc.rows)
@@ -3980,7 +3975,7 @@ func TestOpLessRows_ExcludedAnnotationEditStartsNoWork(t *testing.T) {
 			in.DesiredSpec.PodTemplateObjectMeta = after
 
 			c := fake.NewClientBuilder().WithScheme(makeScheme(t)).Build()
-			if _, err := workload.Reconcile(context.Background(), workload.Deps{Client: c, APIReader: c}, in, plan, target); err != nil {
+			if _, err := workload.Reconcile(context.Background(), workloadtypes.Deps{Client: c, APIReader: c}, in, plan, target); err != nil {
 				t.Fatalf("Reconcile: %v", err)
 			}
 
@@ -4063,7 +4058,7 @@ func TestReadyRow_ServingGateFlipsStampNoTransition(t *testing.T) {
 			h.step()
 
 			got := h.instance(0)
-			if got == nil || got.Phase != workload.InstancePhaseReady || got.Operation != nil {
+			if got == nil || got.Phase != workloadtypes.InstancePhaseReady || got.Operation != nil {
 				t.Fatalf("row: got %+v want Ready with no operation", got)
 			}
 			if got.Incarnation != before.Incarnation {

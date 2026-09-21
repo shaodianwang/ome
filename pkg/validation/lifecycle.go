@@ -7,7 +7,7 @@
 //
 // As of the per-Component MaxSurge/MaxUnavailable wire-up, the rollout
 // budget now reads the per-Component RollingUpdate fields directly
-// (see pkg/controller/v1beta1/workload/budget.go) and composes them
+// (see pkg/controller/v1beta1/workload/escalation/budget.go) and composes them
 // with the coordination-group budgets as independent layers — the
 // effective cap is the min of both. Because the per-Component layer
 // now actively gates rollouts, we MUST also reject the unstartable

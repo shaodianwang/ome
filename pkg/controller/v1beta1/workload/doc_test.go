@@ -83,7 +83,7 @@ type allowedTransitionWrite struct {
 // an owned decision, never a second decision-maker.
 var transitionWriteAllowlist = []allowedTransitionWrite{
 	{
-		file: "workload/escalation.go", fn: "escalateFromEvidence", field: "UpdateRevision", count: 1,
+		file: "workload/escalation/escalation.go", fn: "Run", field: "UpdateRevision", count: 1,
 		why: "defaults the pass's LOCAL ReconcileInput copy (pass-by-value) so the first-rollout " +
 			"disposition can resolve its RetryBlock target before the aggregator has stamped " +
 			"UpdateRevision; never persisted — not a component-pair decision",

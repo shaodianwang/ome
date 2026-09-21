@@ -1,4 +1,4 @@
-package workload_test
+package escalation_test
 
 import (
 	"context"
@@ -10,6 +10,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // TestPerComponentMaxSurgeBudget_Integer covers the int form across
@@ -19,7 +21,7 @@ import (
 func TestPerComponentMaxSurgeBudget_Integer(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
-		input    *workload.RollingUpdate
+		input    *types.RollingUpdate
 		replicas int32
 		want     int32
 	}{
@@ -27,41 +29,41 @@ func TestPerComponentMaxSurgeBudget_Integer(t *testing.T) {
 			name:     "nil RollingUpdate returns BudgetNoLimit",
 			input:    nil,
 			replicas: 4,
-			want:     workload.BudgetNoLimit,
+			want:     escalation.BudgetNoLimit,
 		},
 		{
 			name:     "nil MaxSurge returns BudgetNoLimit",
-			input:    &workload.RollingUpdate{},
+			input:    &types.RollingUpdate{},
 			replicas: 4,
-			want:     workload.BudgetNoLimit,
+			want:     escalation.BudgetNoLimit,
 		},
 		{
 			name:     "MaxSurge=1 returns 1 regardless of replicas",
-			input:    &workload.RollingUpdate{MaxSurge: intOrStringInt(1)},
+			input:    &types.RollingUpdate{MaxSurge: intOrStringInt(1)},
 			replicas: 5,
 			want:     1,
 		},
 		{
 			name:     "MaxSurge=0 returns 0 (no surge allowed by this layer)",
-			input:    &workload.RollingUpdate{MaxSurge: intOrStringInt(0)},
+			input:    &types.RollingUpdate{MaxSurge: intOrStringInt(0)},
 			replicas: 5,
 			want:     0,
 		},
 		{
 			name:     "negative MaxSurge clamps to 0 (defensive)",
-			input:    &workload.RollingUpdate{MaxSurge: intOrStringInt(-3)},
+			input:    &types.RollingUpdate{MaxSurge: intOrStringInt(-3)},
 			replicas: 5,
 			want:     0,
 		},
 		{
 			name:     "MaxSurge=N permitted larger than replicas",
-			input:    &workload.RollingUpdate{MaxSurge: intOrStringInt(10)},
+			input:    &types.RollingUpdate{MaxSurge: intOrStringInt(10)},
 			replicas: 3,
 			want:     10,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := workload.PerComponentMaxSurgeBudget(tc.input, tc.replicas)
+			got := escalation.PerComponentMaxSurgeBudget(tc.input, tc.replicas)
 			if got != tc.want {
 				t.Errorf("got %d, want %d", got, tc.want)
 			}
@@ -90,8 +92,8 @@ func TestPerComponentMaxSurgeBudget_Percent(t *testing.T) {
 		{name: "150% clamps to 100% → equals replicas", pct: "150%", replicas: 5, want: 5},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ru := &workload.RollingUpdate{MaxSurge: intOrStringStr(tc.pct)}
-			got := workload.PerComponentMaxSurgeBudget(ru, tc.replicas)
+			ru := &types.RollingUpdate{MaxSurge: intOrStringStr(tc.pct)}
+			got := escalation.PerComponentMaxSurgeBudget(ru, tc.replicas)
 			if got != tc.want {
 				t.Errorf("got %d, want %d", got, tc.want)
 			}
@@ -104,7 +106,7 @@ func TestPerComponentMaxSurgeBudget_Percent(t *testing.T) {
 func TestPerComponentMaxUnavailableBudget_Integer(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
-		input    *workload.RollingUpdate
+		input    *types.RollingUpdate
 		replicas int32
 		want     int32
 	}{
@@ -112,29 +114,29 @@ func TestPerComponentMaxUnavailableBudget_Integer(t *testing.T) {
 			name:     "nil RollingUpdate returns BudgetNoLimit",
 			input:    nil,
 			replicas: 4,
-			want:     workload.BudgetNoLimit,
+			want:     escalation.BudgetNoLimit,
 		},
 		{
 			name:     "nil MaxUnavailable returns BudgetNoLimit",
-			input:    &workload.RollingUpdate{MaxSurge: intOrStringInt(1)},
+			input:    &types.RollingUpdate{MaxSurge: intOrStringInt(1)},
 			replicas: 4,
-			want:     workload.BudgetNoLimit,
+			want:     escalation.BudgetNoLimit,
 		},
 		{
 			name:     "MaxUnavailable=2 returns 2",
-			input:    &workload.RollingUpdate{MaxUnavailable: intOrStringInt(2)},
+			input:    &types.RollingUpdate{MaxUnavailable: intOrStringInt(2)},
 			replicas: 5,
 			want:     2,
 		},
 		{
 			name:     "MaxUnavailable=0 returns 0",
-			input:    &workload.RollingUpdate{MaxUnavailable: intOrStringInt(0)},
+			input:    &types.RollingUpdate{MaxUnavailable: intOrStringInt(0)},
 			replicas: 5,
 			want:     0,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := workload.PerComponentMaxUnavailableBudget(tc.input, tc.replicas)
+			got := escalation.PerComponentMaxUnavailableBudget(tc.input, tc.replicas)
 			if got != tc.want {
 				t.Errorf("got %d, want %d", got, tc.want)
 			}
@@ -159,8 +161,8 @@ func TestPerComponentMaxUnavailableBudget_Percent(t *testing.T) {
 		{name: "0% on N replicas → 0", pct: "0%", replicas: 10, want: 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ru := &workload.RollingUpdate{MaxUnavailable: intOrStringStr(tc.pct)}
-			got := workload.PerComponentMaxUnavailableBudget(ru, tc.replicas)
+			ru := &types.RollingUpdate{MaxUnavailable: intOrStringStr(tc.pct)}
+			got := escalation.PerComponentMaxUnavailableBudget(ru, tc.replicas)
 			if got != tc.want {
 				t.Errorf("got %d, want %d", got, tc.want)
 			}
@@ -175,31 +177,31 @@ func TestPerComponentMaxUnavailableBudget_Percent(t *testing.T) {
 func TestCurrentSurgeInFlight(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		in   []workload.InstanceStatus
+		in   []types.InstanceStatus
 		want int32
 	}{
 		{name: "empty", in: nil, want: 0},
-		{name: "no operation", in: []workload.InstanceStatus{
-			{Index: 0, Phase: workload.InstancePhaseReady},
+		{name: "no operation", in: []types.InstanceStatus{
+			{Index: 0, Phase: types.InstancePhaseReady},
 		}, want: 0},
-		{name: "one Surge step", in: []workload.InstanceStatus{
-			{Index: 0, Operation: &workload.InstanceOperation{Step: "Surge"}},
+		{name: "one Surge step", in: []types.InstanceStatus{
+			{Index: 0, Operation: &types.InstanceOperation{Step: "Surge"}},
 		}, want: 1},
-		{name: "one SurgeDrain step", in: []workload.InstanceStatus{
-			{Index: 0, Operation: &workload.InstanceOperation{Step: "SurgeDrain"}},
+		{name: "one SurgeDrain step", in: []types.InstanceStatus{
+			{Index: 0, Operation: &types.InstanceOperation{Step: "SurgeDrain"}},
 		}, want: 1},
-		{name: "one SurgeDrainSettle step", in: []workload.InstanceStatus{
-			{Index: 0, Operation: &workload.InstanceOperation{Step: "SurgeDrainSettle"}},
+		{name: "one SurgeDrainSettle step", in: []types.InstanceStatus{
+			{Index: 0, Operation: &types.InstanceOperation{Step: "SurgeDrainSettle"}},
 		}, want: 1},
-		{name: "two surge variants and one in-place skipped", in: []workload.InstanceStatus{
-			{Index: 0, Operation: &workload.InstanceOperation{Step: "Surge"}},
-			{Index: 1, Operation: &workload.InstanceOperation{Step: "SurgeDrain"}},
-			{Index: 2, Operation: &workload.InstanceOperation{Step: "InPlace"}}, // skipped
-			{Index: 3, Operation: &workload.InstanceOperation{Step: "Drain"}},   // skipped
+		{name: "two surge variants and one in-place skipped", in: []types.InstanceStatus{
+			{Index: 0, Operation: &types.InstanceOperation{Step: "Surge"}},
+			{Index: 1, Operation: &types.InstanceOperation{Step: "SurgeDrain"}},
+			{Index: 2, Operation: &types.InstanceOperation{Step: "InPlace"}}, // skipped
+			{Index: 3, Operation: &types.InstanceOperation{Step: "Drain"}},   // skipped
 		}, want: 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := workload.CurrentSurgeInFlight(tc.in)
+			got := escalation.CurrentSurgeInFlight(tc.in)
 			if got != tc.want {
 				t.Errorf("got %d, want %d", got, tc.want)
 			}
@@ -212,57 +214,57 @@ func TestCurrentSurgeInFlight(t *testing.T) {
 func TestCurrentUnavailableInFlight(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		in   []workload.InstanceStatus
+		in   []types.InstanceStatus
 		want int32
 	}{
 		{name: "empty", in: nil, want: 0},
-		{name: "Ready not counted", in: []workload.InstanceStatus{
-			{Index: 0, Phase: workload.InstancePhaseReady},
+		{name: "Ready not counted", in: []types.InstanceStatus{
+			{Index: 0, Phase: types.InstancePhaseReady},
 		}, want: 0},
-		{name: "Updating + InPlace counted", in: []workload.InstanceStatus{
-			{Index: 0, Phase: workload.InstancePhaseUpdating, Operation: &workload.InstanceOperation{Step: "InPlace"}},
+		{name: "Updating + InPlace counted", in: []types.InstanceStatus{
+			{Index: 0, Phase: types.InstancePhaseUpdating, Operation: &types.InstanceOperation{Step: "InPlace"}},
 		}, want: 1},
-		{name: "Updating + Drain counted", in: []workload.InstanceStatus{
-			{Index: 0, Phase: workload.InstancePhaseUpdating, Operation: &workload.InstanceOperation{Step: "Drain"}},
+		{name: "Updating + Drain counted", in: []types.InstanceStatus{
+			{Index: 0, Phase: types.InstancePhaseUpdating, Operation: &types.InstanceOperation{Step: "Drain"}},
 		}, want: 1},
-		{name: "Updating + Surge skipped (no offline pod)", in: []workload.InstanceStatus{
-			{Index: 0, Phase: workload.InstancePhaseUpdating, Operation: &workload.InstanceOperation{Step: "Surge"}},
+		{name: "Updating + Surge skipped (no offline pod)", in: []types.InstanceStatus{
+			{Index: 0, Phase: types.InstancePhaseUpdating, Operation: &types.InstanceOperation{Step: "Surge"}},
 		}, want: 0},
-		{name: "Updating + SurgeDrain skipped", in: []workload.InstanceStatus{
-			{Index: 0, Phase: workload.InstancePhaseUpdating, Operation: &workload.InstanceOperation{Step: "SurgeDrain"}},
+		{name: "Updating + SurgeDrain skipped", in: []types.InstanceStatus{
+			{Index: 0, Phase: types.InstancePhaseUpdating, Operation: &types.InstanceOperation{Step: "SurgeDrain"}},
 		}, want: 0},
-		{name: "Updating + SurgeDrainSettle skipped", in: []workload.InstanceStatus{
-			{Index: 0, Phase: workload.InstancePhaseUpdating, Operation: &workload.InstanceOperation{Step: "SurgeDrainSettle"}},
+		{name: "Updating + SurgeDrainSettle skipped", in: []types.InstanceStatus{
+			{Index: 0, Phase: types.InstancePhaseUpdating, Operation: &types.InstanceOperation{Step: "SurgeDrainSettle"}},
 		}, want: 0},
-		{name: "Updating without Operation counted (defensive)", in: []workload.InstanceStatus{
-			{Index: 0, Phase: workload.InstancePhaseUpdating},
+		{name: "Updating without Operation counted (defensive)", in: []types.InstanceStatus{
+			{Index: 0, Phase: types.InstancePhaseUpdating},
 		}, want: 1},
-		{name: "Failed update + Drain remains counted while retrying", in: []workload.InstanceStatus{
-			{Index: 0, Phase: workload.InstancePhaseFailed, Operation: &workload.InstanceOperation{
-				Type: workload.InstanceOperationUpdate, Step: "Drain",
+		{name: "Failed update + Drain remains counted while retrying", in: []types.InstanceStatus{
+			{Index: 0, Phase: types.InstancePhaseFailed, Operation: &types.InstanceOperation{
+				Type: types.InstanceOperationUpdate, Step: "Drain",
 			}},
 		}, want: 1},
-		{name: "Failed update + InPlace remains counted while retrying", in: []workload.InstanceStatus{
-			{Index: 0, Phase: workload.InstancePhaseFailed, Operation: &workload.InstanceOperation{
-				Type: workload.InstanceOperationUpdate, Step: "InPlace",
+		{name: "Failed update + InPlace remains counted while retrying", in: []types.InstanceStatus{
+			{Index: 0, Phase: types.InstancePhaseFailed, Operation: &types.InstanceOperation{
+				Type: types.InstanceOperationUpdate, Step: "InPlace",
 			}},
 		}, want: 1},
-		{name: "Failed update + Surge skipped because source remains online", in: []workload.InstanceStatus{
-			{Index: 0, Phase: workload.InstancePhaseFailed, Operation: &workload.InstanceOperation{
-				Type: workload.InstanceOperationUpdate, Step: "Surge",
+		{name: "Failed update + Surge skipped because source remains online", in: []types.InstanceStatus{
+			{Index: 0, Phase: types.InstancePhaseFailed, Operation: &types.InstanceOperation{
+				Type: types.InstanceOperationUpdate, Step: "Surge",
 			}},
 		}, want: 0},
-		{name: "Failed restart is outside the update budget", in: []workload.InstanceStatus{
-			{Index: 0, Phase: workload.InstancePhaseFailed, Operation: &workload.InstanceOperation{
-				Type: workload.InstanceOperationRestart, Step: "Drain",
+		{name: "Failed restart is outside the update budget", in: []types.InstanceStatus{
+			{Index: 0, Phase: types.InstancePhaseFailed, Operation: &types.InstanceOperation{
+				Type: types.InstanceOperationRestart, Step: "Drain",
 			}},
 		}, want: 0},
-		{name: "Failed without an operation is outside the in-flight budget", in: []workload.InstanceStatus{
-			{Index: 0, Phase: workload.InstancePhaseFailed},
+		{name: "Failed without an operation is outside the in-flight budget", in: []types.InstanceStatus{
+			{Index: 0, Phase: types.InstancePhaseFailed},
 		}, want: 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := workload.CurrentUnavailableInFlight(tc.in)
+			got := escalation.CurrentUnavailableInFlight(tc.in)
 			if got != tc.want {
 				t.Errorf("got %d, want %d", got, tc.want)
 			}
@@ -300,32 +302,32 @@ func intOrStringStr(s string) *intstr.IntOrString {
 func TestReconcile_PerComponentMaxSurge_DeniesAtBudget(t *testing.T) {
 	scheme := makeScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	deps := workload.Deps{Client: c}
+	deps := types.Deps{Client: c}
 
 	in := minimalInput(t)
 	in.DesiredSpec.Replicas = 3
-	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
+	in.ObservedState.InstanceStatuses = []types.InstanceStatus{
 		// Index 0: already mid-surge from a prior pass (charged to
 		// priorSurgeInFlight=1). The dispatcher's Update call on this
 		// one is allowed (startingFresh=false).
 		{
 			Index: 0, Incarnation: 1,
-			Phase: workload.InstancePhaseUpdating, RunningRevision: "prior-rev",
-			Operation: &workload.InstanceOperation{
-				Type: workload.InstanceOperationUpdate, Step: "Surge",
+			Phase: types.InstancePhaseUpdating, RunningRevision: "prior-rev",
+			Operation: &types.InstanceOperation{
+				Type: types.InstanceOperationUpdate, Step: "Surge",
 			},
 		},
 		// Indices 1 and 2: Ready on prior-rev. Should be gated because
 		// the per-Component MaxSurge=1 is already consumed by index 0.
-		{Index: 1, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: "prior-rev"},
-		{Index: 2, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: "prior-rev"},
+		{Index: 1, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: "prior-rev"},
+		{Index: 2, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: "prior-rev"},
 	}
 	// Track which Instance indices the dispatcher attempted to start.
 	// MutateInstance is the cheapest signal — any Update call mutates
 	// status. Index 0 is allowed (already in progress); indices 1 / 2
 	// must NOT mutate when the gate denies.
 	mutatedIndices := map[int32]int{}
-	in.MutateInstance = func(_ context.Context, idx int32, fn func(*workload.InstanceStatus) bool) error {
+	in.MutateInstance = func(_ context.Context, idx int32, fn func(*types.InstanceStatus) bool) error {
 		mutatedIndices[idx]++
 		for i := range in.ObservedState.InstanceStatuses {
 			if in.ObservedState.InstanceStatuses[i].Index == idx {
@@ -336,17 +338,17 @@ func TestReconcile_PerComponentMaxSurge_DeniesAtBudget(t *testing.T) {
 		return nil
 	}
 
-	plan := workload.ComponentPlan{
-		Component: workload.ComponentEngine,
+	plan := types.ComponentPlan{
+		Component: types.ComponentEngine,
 		Replicas:  3,
-		Instances: []workload.InstancePlan{
-			{Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
-			{Index: 1, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
-			{Index: 2, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+		Instances: []types.InstancePlan{
+			{Index: 0, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 1, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 2, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
 		},
-		UpdateStrategy: workload.UpdateStrategy{
-			Type: workload.UpdateStrategySurgeThenDrain,
-			RollingUpdate: &workload.RollingUpdate{
+		UpdateStrategy: types.UpdateStrategy{
+			Type: types.UpdateStrategySurgeThenDrain,
+			RollingUpdate: &types.RollingUpdate{
 				MaxSurge: intOrStringInt(1),
 			},
 		},
@@ -386,17 +388,17 @@ func TestReconcile_PerComponentMaxSurge_DeniesAtBudget(t *testing.T) {
 func TestReconcile_PerComponentMaxSurge_AllowsWithinBudget(t *testing.T) {
 	scheme := makeScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	deps := workload.Deps{Client: c}
+	deps := types.Deps{Client: c}
 
 	in := minimalInput(t)
 	in.DesiredSpec.Replicas = 3
-	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
-		{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: "prior-rev"},
-		{Index: 1, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: "prior-rev"},
-		{Index: 2, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: "prior-rev"},
+	in.ObservedState.InstanceStatuses = []types.InstanceStatus{
+		{Index: 0, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: "prior-rev"},
+		{Index: 1, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: "prior-rev"},
+		{Index: 2, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: "prior-rev"},
 	}
 	mutatedIndices := map[int32]int{}
-	in.MutateInstance = func(_ context.Context, idx int32, fn func(*workload.InstanceStatus) bool) error {
+	in.MutateInstance = func(_ context.Context, idx int32, fn func(*types.InstanceStatus) bool) error {
 		mutatedIndices[idx]++
 		for i := range in.ObservedState.InstanceStatuses {
 			if in.ObservedState.InstanceStatuses[i].Index == idx {
@@ -407,17 +409,17 @@ func TestReconcile_PerComponentMaxSurge_AllowsWithinBudget(t *testing.T) {
 		return nil
 	}
 
-	plan := workload.ComponentPlan{
-		Component: workload.ComponentEngine,
+	plan := types.ComponentPlan{
+		Component: types.ComponentEngine,
 		Replicas:  3,
-		Instances: []workload.InstancePlan{
-			{Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
-			{Index: 1, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
-			{Index: 2, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+		Instances: []types.InstancePlan{
+			{Index: 0, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 1, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 2, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
 		},
-		UpdateStrategy: workload.UpdateStrategy{
-			Type: workload.UpdateStrategySurgeThenDrain,
-			RollingUpdate: &workload.RollingUpdate{
+		UpdateStrategy: types.UpdateStrategy{
+			Type: types.UpdateStrategySurgeThenDrain,
+			RollingUpdate: &types.RollingUpdate{
 				MaxSurge: intOrStringInt(1),
 			},
 		},
@@ -452,21 +454,21 @@ func TestReconcile_PerComponentMaxSurge_AllowsWithinBudget(t *testing.T) {
 func TestReconcile_PerComponentMaxSurge_NilDefersToGroupGate(t *testing.T) {
 	scheme := makeScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	deps := workload.Deps{Client: c}
+	deps := types.Deps{Client: c}
 
 	in := minimalInput(t)
 	in.DesiredSpec.Replicas = 2
-	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
-		{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: "prior-rev"},
-		{Index: 1, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: "prior-rev"},
+	in.ObservedState.InstanceStatuses = []types.InstanceStatus{
+		{Index: 0, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: "prior-rev"},
+		{Index: 1, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: "prior-rev"},
 	}
 	// Per-Component RollingUpdate left nil (BudgetNoLimit). The group
 	// gate should be the only constraint.
-	in.UpdateGate = func(_ workload.UpdateStrategyType, _, _ int32) (bool, workload.RolloutHoldGate, string) {
-		return false, workload.RolloutHoldGateBudget, "group gate denies"
+	in.UpdateGate = func(_ types.UpdateStrategyType, _, _ int32) (bool, types.RolloutHoldGate, string) {
+		return false, types.RolloutHoldGateBudget, "group gate denies"
 	}
 	mutatedIndices := map[int32]int{}
-	in.MutateInstance = func(_ context.Context, idx int32, fn func(*workload.InstanceStatus) bool) error {
+	in.MutateInstance = func(_ context.Context, idx int32, fn func(*types.InstanceStatus) bool) error {
 		mutatedIndices[idx]++
 		for i := range in.ObservedState.InstanceStatuses {
 			if in.ObservedState.InstanceStatuses[i].Index == idx {
@@ -477,14 +479,14 @@ func TestReconcile_PerComponentMaxSurge_NilDefersToGroupGate(t *testing.T) {
 		return nil
 	}
 
-	plan := workload.ComponentPlan{
-		Component: workload.ComponentEngine,
+	plan := types.ComponentPlan{
+		Component: types.ComponentEngine,
 		Replicas:  2,
-		Instances: []workload.InstancePlan{
-			{Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
-			{Index: 1, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+		Instances: []types.InstancePlan{
+			{Index: 0, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 1, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
 		},
-		UpdateStrategy: workload.UpdateStrategy{Type: workload.UpdateStrategySurgeThenDrain},
+		UpdateStrategy: types.UpdateStrategy{Type: types.UpdateStrategySurgeThenDrain},
 		// RollingUpdate nil → per-Component layer doesn't cap.
 	}
 	target := &appsv1.ControllerRevision{
@@ -516,24 +518,24 @@ func TestReconcile_PerComponentMaxSurge_NilDefersToGroupGate(t *testing.T) {
 func TestReconcile_FailedUpdateHoldsMaxUnavailableBudget(t *testing.T) {
 	scheme := makeScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	deps := workload.Deps{Client: c}
+	deps := types.Deps{Client: c}
 
 	in := minimalInput(t)
 	in.DesiredSpec.Replicas = 2
-	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
+	in.ObservedState.InstanceStatuses = []types.InstanceStatus{
 		// Index 0: replacement timed out after the source was drained.
 		{
 			Index: 0, Incarnation: 2,
-			Phase: workload.InstancePhaseFailed, RunningRevision: "prior-rev",
-			Operation: &workload.InstanceOperation{
-				Type: workload.InstanceOperationUpdate, Step: "Drain",
+			Phase: types.InstancePhaseFailed, RunningRevision: "prior-rev",
+			Operation: &types.InstanceOperation{
+				Type: types.InstanceOperationUpdate, Step: "Drain",
 			},
 		},
 		// Index 1: Ready, needs update.
-		{Index: 1, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: "prior-rev"},
+		{Index: 1, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: "prior-rev"},
 	}
 	mutatedIndices := map[int32]int{}
-	in.MutateInstance = func(_ context.Context, idx int32, fn func(*workload.InstanceStatus) bool) error {
+	in.MutateInstance = func(_ context.Context, idx int32, fn func(*types.InstanceStatus) bool) error {
 		mutatedIndices[idx]++
 		for i := range in.ObservedState.InstanceStatuses {
 			if in.ObservedState.InstanceStatuses[i].Index == idx {
@@ -544,16 +546,16 @@ func TestReconcile_FailedUpdateHoldsMaxUnavailableBudget(t *testing.T) {
 		return nil
 	}
 
-	plan := workload.ComponentPlan{
-		Component: workload.ComponentEngine,
+	plan := types.ComponentPlan{
+		Component: types.ComponentEngine,
 		Replicas:  2,
-		Instances: []workload.InstancePlan{
-			{Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
-			{Index: 1, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+		Instances: []types.InstancePlan{
+			{Index: 0, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 1, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
 		},
-		UpdateStrategy: workload.UpdateStrategy{
-			Type: workload.UpdateStrategyRecreatePod,
-			RollingUpdate: &workload.RollingUpdate{
+		UpdateStrategy: types.UpdateStrategy{
+			Type: types.UpdateStrategyRecreatePod,
+			RollingUpdate: &types.RollingUpdate{
 				MaxUnavailable: intOrStringInt(1),
 			},
 		},
@@ -592,26 +594,26 @@ func TestReconcile_FailedUpdateHoldsMaxUnavailableBudget(t *testing.T) {
 func TestReconcile_FailedRestart_RecreateBypassesCoordGate(t *testing.T) {
 	scheme := makeScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	deps := workload.Deps{Client: c}
+	deps := types.Deps{Client: c}
 
 	in := minimalInput(t)
 	in.DesiredSpec.Replicas = 2
-	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
+	in.ObservedState.InstanceStatuses = []types.InstanceStatus{
 		// Index 0: restart escalated to Failed with the Restart
 		// operation preserved; its pod is gone (zero serving).
 		{
 			Index: 0, Incarnation: 2,
-			Phase: workload.InstancePhaseFailed, RunningRevision: "prior-rev",
-			Operation: &workload.InstanceOperation{
-				Type: workload.InstanceOperationRestart, Step: "Drain",
+			Phase: types.InstancePhaseFailed, RunningRevision: "prior-rev",
+			Operation: &types.InstanceOperation{
+				Type: types.InstanceOperationRestart, Step: "Drain",
 			},
 		},
 		// Index 1: Ready and serving on the old revision.
-		{Index: 1, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: "prior-rev",
+		{Index: 1, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: "prior-rev",
 			PodCount: 1, ReadyPodCount: 1, ServingPodCount: 1},
 	}
 	mutatedIndices := map[int32]int{}
-	in.MutateInstance = func(_ context.Context, idx int32, fn func(*workload.InstanceStatus) bool) error {
+	in.MutateInstance = func(_ context.Context, idx int32, fn func(*types.InstanceStatus) bool) error {
 		mutatedIndices[idx]++
 		for i := range in.ObservedState.InstanceStatuses {
 			if in.ObservedState.InstanceStatuses[i].Index == idx {
@@ -627,25 +629,25 @@ func TestReconcile_FailedRestart_RecreateBypassesCoordGate(t *testing.T) {
 	// 1 + delta + 1 = 2 > 1 and is denied — the double count under
 	// test.
 	var gateDeltas []int32
-	in.UpdateGate = func(_ workload.UpdateStrategyType, _, inFlightUnavail int32) (bool, workload.RolloutHoldGate, string) {
+	in.UpdateGate = func(_ types.UpdateStrategyType, _, inFlightUnavail int32) (bool, types.RolloutHoldGate, string) {
 		gateDeltas = append(gateDeltas, inFlightUnavail)
 		const desired, serving, budget = 2, 1, 1
 		if desired-serving+inFlightUnavail+1 > budget {
-			return false, workload.RolloutHoldGateBudget, "unavailable budget exhausted"
+			return false, types.RolloutHoldGateBudget, "unavailable budget exhausted"
 		}
 		return true, "", "within unavailable budget"
 	}
 
-	plan := workload.ComponentPlan{
-		Component: workload.ComponentEngine,
+	plan := types.ComponentPlan{
+		Component: types.ComponentEngine,
 		Replicas:  2,
-		Instances: []workload.InstancePlan{
-			{Index: 0, Incarnation: 2, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
-			{Index: 1, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+		Instances: []types.InstancePlan{
+			{Index: 0, Incarnation: 2, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 1, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
 		},
-		UpdateStrategy: workload.UpdateStrategy{
-			Type: workload.UpdateStrategyRecreatePod,
-			RollingUpdate: &workload.RollingUpdate{
+		UpdateStrategy: types.UpdateStrategy{
+			Type: types.UpdateStrategyRecreatePod,
+			RollingUpdate: &types.RollingUpdate{
 				// Per-Component layer stays live for the fresh start:
 				// index 0 is not in the prior in-flight anchor
 				// (Failed+Restart is not budget-charged), so
@@ -686,18 +688,18 @@ func TestReconcile_FailedRestart_RecreateBypassesCoordGate(t *testing.T) {
 func TestReconcile_PerComponentBudget_PercentForm(t *testing.T) {
 	scheme := makeScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	deps := workload.Deps{Client: c}
+	deps := types.Deps{Client: c}
 
 	in := minimalInput(t)
 	in.DesiredSpec.Replicas = 4
-	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
-		{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: "prior-rev"},
-		{Index: 1, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: "prior-rev"},
-		{Index: 2, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: "prior-rev"},
-		{Index: 3, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: "prior-rev"},
+	in.ObservedState.InstanceStatuses = []types.InstanceStatus{
+		{Index: 0, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: "prior-rev"},
+		{Index: 1, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: "prior-rev"},
+		{Index: 2, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: "prior-rev"},
+		{Index: 3, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: "prior-rev"},
 	}
 	mutatedIndices := map[int32]int{}
-	in.MutateInstance = func(_ context.Context, idx int32, fn func(*workload.InstanceStatus) bool) error {
+	in.MutateInstance = func(_ context.Context, idx int32, fn func(*types.InstanceStatus) bool) error {
 		mutatedIndices[idx]++
 		for i := range in.ObservedState.InstanceStatuses {
 			if in.ObservedState.InstanceStatuses[i].Index == idx {
@@ -708,18 +710,18 @@ func TestReconcile_PerComponentBudget_PercentForm(t *testing.T) {
 		return nil
 	}
 
-	plan := workload.ComponentPlan{
-		Component: workload.ComponentEngine,
+	plan := types.ComponentPlan{
+		Component: types.ComponentEngine,
 		Replicas:  4,
-		Instances: []workload.InstancePlan{
-			{Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
-			{Index: 1, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
-			{Index: 2, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
-			{Index: 3, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+		Instances: []types.InstancePlan{
+			{Index: 0, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 1, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 2, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 3, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
 		},
-		UpdateStrategy: workload.UpdateStrategy{
-			Type: workload.UpdateStrategySurgeThenDrain,
-			RollingUpdate: &workload.RollingUpdate{
+		UpdateStrategy: types.UpdateStrategy{
+			Type: types.UpdateStrategySurgeThenDrain,
+			RollingUpdate: &types.RollingUpdate{
 				MaxSurge: intOrStringStr("25%"), // 25% of 4 = ceil(1.0) = 1
 			},
 		},
@@ -769,17 +771,17 @@ func TestReconcile_PerComponentBudget_PercentForm(t *testing.T) {
 func TestReconcile_ConcurrentGangSurge_DistinctIndices(t *testing.T) {
 	scheme := makeScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	deps := workload.Deps{Client: c}
+	deps := types.Deps{Client: c}
 
 	const replicas = 3
 	const steadyIndices = replicas // steady indices are 0..replicas-1
 
 	in := minimalInput(t)
 	in.DesiredSpec.Replicas = replicas
-	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
-		{Index: 0, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: "prior-rev"},
-		{Index: 1, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: "prior-rev"},
-		{Index: 2, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: "prior-rev"},
+	in.ObservedState.InstanceStatuses = []types.InstanceStatus{
+		{Index: 0, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: "prior-rev"},
+		{Index: 1, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: "prior-rev"},
+		{Index: 2, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: "prior-rev"},
 	}
 
 	// Capture every SurgeIndex the pass stamps onto a source Instance,
@@ -790,12 +792,12 @@ func TestReconcile_ConcurrentGangSurge_DistinctIndices(t *testing.T) {
 	// snapshot so gangSurgeUpdate's in-memory reservation and the next
 	// sibling's AllocateSurgeIndex see the just-claimed slot.
 	stampedSurge := map[int32]int32{}
-	in.MutateInstance = func(_ context.Context, idx int32, fn func(*workload.InstanceStatus) bool) error {
+	in.MutateInstance = func(_ context.Context, idx int32, fn func(*types.InstanceStatus) bool) error {
 		s := findObserved(&in, idx)
 		if s == nil {
 			// Surge/target index absent from the snapshot — apply against a
 			// scratch status and append so later reads observe it.
-			scratch := workload.InstanceStatus{Index: idx}
+			scratch := types.InstanceStatus{Index: idx}
 			if fn(&scratch) {
 				in.ObservedState.InstanceStatuses = append(in.ObservedState.InstanceStatuses, scratch)
 				s = findObserved(&in, idx)
@@ -809,22 +811,22 @@ func TestReconcile_ConcurrentGangSurge_DistinctIndices(t *testing.T) {
 		return nil
 	}
 
-	gang := func(idx int32) workload.InstancePlan {
-		return workload.InstancePlan{
+	gang := func(idx int32) types.InstancePlan {
+		return types.InstancePlan{
 			Index: idx, Incarnation: 1,
-			Runners: []workload.RunnerPlan{
+			Runners: []types.RunnerPlan{
 				{Name: "leader", Size: 1},
 				{Name: "worker", Size: 1},
 			},
 		}
 	}
-	plan := workload.ComponentPlan{
-		Component: workload.ComponentEngine,
+	plan := types.ComponentPlan{
+		Component: types.ComponentEngine,
 		Replicas:  replicas,
-		Instances: []workload.InstancePlan{gang(0), gang(1), gang(2)},
-		UpdateStrategy: workload.UpdateStrategy{
-			Type: workload.UpdateStrategySurgeThenDrain,
-			RollingUpdate: &workload.RollingUpdate{
+		Instances: []types.InstancePlan{gang(0), gang(1), gang(2)},
+		UpdateStrategy: types.UpdateStrategy{
+			Type: types.UpdateStrategySurgeThenDrain,
+			RollingUpdate: &types.RollingUpdate{
 				MaxSurge: intOrStringInt(2),
 			},
 		},
@@ -865,7 +867,7 @@ func TestReconcile_ConcurrentGangSurge_DistinctIndices(t *testing.T) {
 // findObserved returns the observed InstanceStatus pointer for idx, or
 // nil. Local to the concurrent-surge test's mutate hook so it can write
 // back through the snapshot the dispatcher reads.
-func findObserved(in *workload.ReconcileInput, idx int32) *workload.InstanceStatus {
+func findObserved(in *types.ReconcileInput, idx int32) *types.InstanceStatus {
 	for i := range in.ObservedState.InstanceStatuses {
 		if in.ObservedState.InstanceStatuses[i].Index == idx {
 			return &in.ObservedState.InstanceStatuses[i]

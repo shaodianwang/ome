@@ -30,12 +30,15 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	workloadstatus "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // writeStatus runs aggregateAndWriteStatus for tests that only care about the
 // write outcome, discarding the availability wake.
-func writeStatus(r *Reconciler, ir *v1beta1.InferenceReplica, plan workload.ComponentPlan, target *appsv1.ControllerRevision, holdObserved bool, hold *workload.RolloutHold) error {
+func writeStatus(r *Reconciler, ir *v1beta1.InferenceReplica, plan workloadtypes.ComponentPlan, target *appsv1.ControllerRevision, holdObserved bool, hold *workloadtypes.RolloutHold) error {
 	_, err := r.aggregateAndWriteStatus(context.Background(), ir, plan, target, holdObserved, hold)
 	return err
 }
@@ -45,7 +48,7 @@ func materializeInlinePublicationStatuses(t *testing.T, insts []v1beta1.OMENativ
 	observation, err := workload.NewOwnedPublicationObservation(
 		v1beta1convert.InstanceStatusSliceToWorkload(insts),
 		workload.NewCachedSelectorPodObservation(nil, byIndex),
-		availableByPod, workload.AvailabilityWindow{},
+		availableByPod, workloadstatus.AvailabilityWindow{},
 	)
 	if err != nil {
 		t.Fatalf("build publication observation: %v", err)
@@ -193,11 +196,11 @@ func TestAggregateAndWriteStatusPersistsCompactRowsAndMirrorsCurrentObservations
 		},
 	})
 	r.APIReader = r.Client
-	plan := workload.ComponentPlan{
+	plan := workloadtypes.ComponentPlan{
 		Component: v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component),
 		Replicas:  1,
-		Instances: []workload.InstancePlan{{
-			Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}},
+		Instances: []workloadtypes.InstancePlan{{
+			Index: 0, Incarnation: 1, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}},
 		}},
 	}
 
@@ -236,7 +239,7 @@ func TestMirrorInstanceCountersUsesTransientPublicationIntersection(t *testing.T
 		{Index: 9, Phase: v1beta1.OMENativeInstanceReady, PodCount: 7, ReadyPodCount: 6},
 		{Index: 1, Phase: v1beta1.OMENativeInstanceUpdating},
 	}}
-	publication := []workload.InstanceStatus{
+	publication := []workloadtypes.InstanceStatus{
 		{Index: 1, PodCount: 1, ReadyPodCount: 1, ServingPodCount: 1, ScheduledPodCount: 1, AvailablePodCount: 1, NodesOccupied: []string{"node-a"}},
 		{Index: 3, PodCount: 2, ReadyPodCount: 2, NodesOccupied: []string{"superseded"}},
 		{Index: 3, PodCount: 4, ReadyPodCount: 3, ServingPodCount: 2, ScheduledPodCount: 4, AvailablePodCount: 1},
@@ -814,11 +817,11 @@ func TestAggregateAndWriteStatus_NoWriteWhenUnchanged(t *testing.T) {
 	slice0 := sliceForIRPod(ir, pod0, true)
 	r, c := newReconciler(t, ir, pod0, slice0)
 
-	plan := workload.ComponentPlan{
+	plan := workloadtypes.ComponentPlan{
 		Component: v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component),
 		Replicas:  1,
-		Instances: []workload.InstancePlan{
-			{Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+		Instances: []workloadtypes.InstancePlan{
+			{Index: 0, Incarnation: 1, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}}},
 		},
 	}
 	key := types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace}
@@ -899,12 +902,12 @@ func TestAggregateAndWriteStatusReusesPublicationReadsAcrossConflictRetry(t *tes
 		WithIndex(&corev1.Pod{}, query.OMENativePodIndexField, query.OMENativePodIndexExtractor).
 		WithInterceptorFuncs(funcs).
 		Build()
-	r := &Reconciler{Client: c, APIReader: c, Log: logf.Log.WithName("test"), Expectations: workload.NewExpectations(), InstanceStatusTarget: irstatus.EncodingDenseV1}
-	plan := workload.ComponentPlan{
+	r := &Reconciler{Client: c, APIReader: c, Log: logf.Log.WithName("test"), Expectations: workloadtypes.NewExpectations(), InstanceStatusTarget: irstatus.EncodingDenseV1}
+	plan := workloadtypes.ComponentPlan{
 		Component: v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component),
 		Replicas:  1,
-		Instances: []workload.InstancePlan{{
-			Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}},
+		Instances: []workloadtypes.InstancePlan{{
+			Index: 0, Incarnation: 1, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}},
 		}},
 	}
 
@@ -959,14 +962,14 @@ func TestAggregateAndWriteStatus_RebasesAfterAdjacentLifecycleWrite(t *testing.T
 		Client:               &staleReadingClient{Client: apiClient, reader: staleCache},
 		APIReader:            apiClient,
 		Log:                  logf.Log.WithName("test"),
-		Expectations:         workload.NewExpectations(),
+		Expectations:         workloadtypes.NewExpectations(),
 		InstanceStatusTarget: irstatus.EncodingDenseV1,
 	}
-	plan := workload.ComponentPlan{
+	plan := workloadtypes.ComponentPlan{
 		Component: v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component),
 		Replicas:  1,
-		Instances: []workload.InstancePlan{{
-			Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}},
+		Instances: []workloadtypes.InstancePlan{{
+			Index: 0, Incarnation: 1, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}},
 		}},
 	}
 
@@ -996,14 +999,14 @@ func TestAggregateAndWriteStatus_SameNameReplacementIsUntouched(t *testing.T) {
 		Client:               live,
 		APIReader:            live,
 		Log:                  logf.Log.WithName("test"),
-		Expectations:         workload.NewExpectations(),
+		Expectations:         workloadtypes.NewExpectations(),
 		InstanceStatusTarget: irstatus.EncodingDenseV1,
 	}
-	plan := workload.ComponentPlan{
+	plan := workloadtypes.ComponentPlan{
 		Component: v1beta1convert.ComponentTypeToWorkload(stale.Spec.Component),
 		Replicas:  1,
-		Instances: []workload.InstancePlan{{
-			Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}},
+		Instances: []workloadtypes.InstancePlan{{
+			Index: 0, Incarnation: 1, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}},
 		}},
 	}
 
@@ -1028,14 +1031,14 @@ func TestAggregateAndWriteStatus_GenerationChangeAborts(t *testing.T) {
 		Client:               live,
 		APIReader:            live,
 		Log:                  logf.Log.WithName("test"),
-		Expectations:         workload.NewExpectations(),
+		Expectations:         workloadtypes.NewExpectations(),
 		InstanceStatusTarget: irstatus.EncodingDenseV1,
 	}
-	plan := workload.ComponentPlan{
+	plan := workloadtypes.ComponentPlan{
 		Component: v1beta1convert.ComponentTypeToWorkload(stale.Spec.Component),
 		Replicas:  1,
-		Instances: []workload.InstancePlan{{
-			Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}},
+		Instances: []workloadtypes.InstancePlan{{
+			Index: 0, Incarnation: 1, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}},
 		}},
 	}
 	metricBefore := make(map[string]float64)
@@ -1044,7 +1047,7 @@ func TestAggregateAndWriteStatus_GenerationChangeAborts(t *testing.T) {
 	}
 
 	err := writeStatus(r, stale, plan, nil, false, nil)
-	g.Expect(errors.Is(err, workload.ErrStatusMutationPrecondition)).To(gomega.BeTrue())
+	g.Expect(errors.Is(err, workloadtypes.ErrStatusMutationPrecondition)).To(gomega.BeTrue())
 	g.Expect(*writes).To(gomega.Equal(0))
 	for result, before := range metricBefore {
 		g.Expect(irStatusUpdateMetric(t, result)).To(gomega.Equal(before),
@@ -1182,13 +1185,13 @@ func TestAggregateAndWriteStatus_ConflictSurfacesAsConflict(t *testing.T) {
 		WithStatusSubresource(&v1beta1.InferenceReplica{}).
 		WithInterceptorFuncs(conflict).
 		Build()
-	r := &Reconciler{Client: c, APIReader: c, Log: logf.Log.WithName("test"), Expectations: workload.NewExpectations(), InstanceStatusTarget: irstatus.EncodingDenseV1}
+	r := &Reconciler{Client: c, APIReader: c, Log: logf.Log.WithName("test"), Expectations: workloadtypes.NewExpectations(), InstanceStatusTarget: irstatus.EncodingDenseV1}
 
-	plan := workload.ComponentPlan{
+	plan := workloadtypes.ComponentPlan{
 		Component: v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component),
 		Replicas:  1,
-		Instances: []workload.InstancePlan{
-			{Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+		Instances: []workloadtypes.InstancePlan{
+			{Index: 0, Incarnation: 1, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}}},
 		},
 	}
 
@@ -1414,7 +1417,7 @@ func TestAggregateStatus_DeadlineExpired_EscalatesInstanceToFailed(t *testing.T)
 	g.Expect(got.Status.InstanceStatuses[0].LastFailure).NotTo(gomega.BeNil(),
 		"deadline escalation must record a LastFailure diagnostic")
 	g.Expect(got.Status.InstanceStatuses[0].LastFailure.Reason).
-		To(gomega.Equal(workload.DeadlineExceededReason))
+		To(gomega.Equal(escalation.DeadlineExceededReason))
 }
 
 // TestAggregateStatus_GatedInstance_DeadlineParked_NotEscalated pins the
@@ -1501,7 +1504,7 @@ func TestReconcileHeldDeadlines_GangSurgeSourceParked(t *testing.T) {
 			Phase:       v1beta1.OMENativeInstanceCreating,
 			Operation: &v1beta1.InstanceOperation{
 				Type:     v1beta1.InstanceOperationUpdate,
-				Step:     workload.UpdateStepGangSurgeTarget,
+				Step:     workloadtypes.UpdateStepGangSurgeTarget,
 				Deadline: future,
 			},
 		},
@@ -1846,13 +1849,13 @@ func TestEffectiveRolloutHold(t *testing.T) {
 
 	// No rollout in flight: nothing to hold, even with an exec verdict.
 	noRollout := &v1beta1.InferenceReplicaStatus{}
-	if h := effectiveRolloutHold(true, &workload.RolloutHold{Gate: workload.RolloutHoldGateBudget, Reason: "x", Target: "y"}, noRollout, now); h != nil {
+	if h := effectiveRolloutHold(true, &workloadtypes.RolloutHold{Gate: workloadtypes.RolloutHoldGateBudget, Reason: "x", Target: "y"}, noRollout, now); h != nil {
 		t.Errorf("no UpdateRevision must clear regardless of exec verdict: got %+v", h)
 	}
 
 	// Converged (CurrentRevision == UpdateRevision): nothing to hold.
 	converged := &v1beta1.InferenceReplicaStatus{CurrentRevision: "rev-a", UpdateRevision: "rev-a"}
-	if h := effectiveRolloutHold(true, &workload.RolloutHold{Gate: workload.RolloutHoldGateBudget, Reason: "x", Target: "rev-a"}, converged, now); h != nil {
+	if h := effectiveRolloutHold(true, &workloadtypes.RolloutHold{Gate: workloadtypes.RolloutHoldGateBudget, Reason: "x", Target: "rev-a"}, converged, now); h != nil {
 		t.Errorf("converged rollout must clear regardless of exec verdict: got %+v", h)
 	}
 
@@ -1866,8 +1869,8 @@ func TestEffectiveRolloutHold(t *testing.T) {
 
 	// Update pass ran and denied a fresh start -> the exec verdict wins,
 	// converted to the v1beta1 shape.
-	h := effectiveRolloutHold(true, &workload.RolloutHold{
-		Gate: workload.RolloutHoldGateSequential, Reason: "Sequential waiting on decoder", Target: "rev-b",
+	h := effectiveRolloutHold(true, &workloadtypes.RolloutHold{
+		Gate: workloadtypes.RolloutHoldGateSequential, Reason: "Sequential waiting on decoder", Target: "rev-b",
 	}, inFlight, now)
 	if h == nil || h.Gate != v1beta1.RolloutHoldGateSequential || h.Reason != "Sequential waiting on decoder" || h.Target != "rev-b" {
 		t.Errorf("an observed exec denial must be surfaced verbatim: got %+v", h)
@@ -1899,19 +1902,19 @@ func TestAggregateAndWriteStatus_RolloutHold_ChurnSafeAcrossReconciles(t *testin
 	slice0 := sliceForIRPod(ir, pod0, true)
 	r, c := newReconciler(t, ir, pod0, slice0)
 
-	plan := workload.ComponentPlan{
+	plan := workloadtypes.ComponentPlan{
 		Component: v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component),
 		Replicas:  1,
-		Instances: []workload.InstancePlan{
-			{Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+		Instances: []workloadtypes.InstancePlan{
+			{Index: 0, Incarnation: 1, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}}},
 		},
 	}
 	target := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: "rev-target"}}
 	key := client.ObjectKeyFromObject(ir)
 
-	budgetHold := func(inFlight int) *workload.RolloutHold {
-		return &workload.RolloutHold{
-			Gate:   workload.RolloutHoldGateBudget,
+	budgetHold := func(inFlight int) *workloadtypes.RolloutHold {
+		return &workloadtypes.RolloutHold{
+			Gate:   workloadtypes.RolloutHoldGateBudget,
 			Reason: fmt.Sprintf("per-Component surge budget 2 exhausted (would become %d)", inFlight),
 			Target: target.Name,
 		}
@@ -1968,11 +1971,11 @@ func TestAggregateAndWriteStatus_RolloutHold_SoakChurnSafeAcrossMultipleReconcil
 	slice0 := sliceForIRPod(ir, pod0, true)
 	r, c := newReconciler(t, ir, pod0, slice0)
 
-	plan := workload.ComponentPlan{
+	plan := workloadtypes.ComponentPlan{
 		Component: v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component),
 		Replicas:  1,
-		Instances: []workload.InstancePlan{
-			{Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+		Instances: []workloadtypes.InstancePlan{
+			{Index: 0, Incarnation: 1, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}}},
 		},
 	}
 	target := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: "rev-target"}}
@@ -1981,8 +1984,8 @@ func TestAggregateAndWriteStatus_RolloutHold_SoakChurnSafeAcrossMultipleReconcil
 	// coordination.CheckSequential's soak-denial message carries only stable
 	// facts for the whole soak window: component, configured duration, and the
 	// completed predecessor, with no elapsed/remaining countdown.
-	soakHold := &workload.RolloutHold{
-		Gate:   workload.RolloutHoldGateSequential,
+	soakHold := &workloadtypes.RolloutHold{
+		Gate:   workloadtypes.RolloutHoldGateSequential,
 		Reason: "Sequential.Soak: engine waiting out the 15s soak after decoder",
 		Target: target.Name,
 	}
@@ -2037,11 +2040,11 @@ func TestAggregateAndWriteStatus_RolloutHold_PausedRetryBlockFallbackChurnSafe(t
 	slice0 := sliceForIRPod(ir, pod0, true)
 	r, c := newReconciler(t, ir, pod0, slice0)
 
-	plan := workload.ComponentPlan{
+	plan := workloadtypes.ComponentPlan{
 		Component: v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component),
 		Replicas:  1,
-		Instances: []workload.InstancePlan{
-			{Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+		Instances: []workloadtypes.InstancePlan{
+			{Index: 0, Incarnation: 1, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}}},
 		},
 	}
 	target := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: "rev-target"}}

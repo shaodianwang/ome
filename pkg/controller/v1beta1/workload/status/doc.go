@@ -34,6 +34,11 @@
 // recycle, overdue — and precondition.go holds the identity every one
 // of them is preconditioned on.
 //
-// The package imports only workload/types, so the reconcile root, the
-// verb passes, the hold pass and the gang pass can all reach it.
+// aggregate.go is the read side of the same status: the per-pod
+// predicates, the per-Instance counter set, the desired-count lookup and
+// the Component-level convergence gates every publisher derives from.
+//
+// The package imports only workload/types and the leaf readers (query,
+// drain, podreadiness), so the reconcile root, the verb passes, the hold
+// pass, the escalation pass and the gang pass can all reach it.
 package status

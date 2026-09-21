@@ -1,4 +1,4 @@
-package workload_test
+package escalation_test
 
 // Supersede-prune coverage: the end-of-pass GC must remove exactly the
 // RetryBlocks whose revision nothing targets anymore — keeping every
@@ -15,15 +15,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // recordRetryBlockRemovals wires a recording MutateRetryBlock that
 // captures the revision of every Remove disposition.
-func recordRetryBlockRemovals(input *workload.ReconcileInput) *[]string {
+func recordRetryBlockRemovals(input *types.ReconcileInput) *[]string {
 	removed := &[]string{}
-	input.MutateRetryBlock = func(_ context.Context, rev string, mutate func(*workload.RetryBlock) workload.RetryBlockDisposition) error {
-		b := workload.RetryBlock{TargetRevision: rev}
-		if mutate(&b) == workload.RetryBlockRemove {
+	input.MutateRetryBlock = func(_ context.Context, rev string, mutate func(*types.RetryBlock) types.RetryBlockDisposition) error {
+		b := types.RetryBlock{TargetRevision: rev}
+		if mutate(&b) == types.RetryBlockRemove {
 			*removed = append(*removed, rev)
 		}
 		return nil
@@ -40,22 +42,22 @@ func TestPruneSupersededRetryBlocks_KeepSetMatrix(t *testing.T) {
 	removed := recordRetryBlockRemovals(&input)
 	input.ObservedState.CurrentRevision = "own-engine-current1"
 	input.ObservedState.UpdateRevision = "own-engine-update01"
-	input.ObservedState.InstanceStatuses = []workload.InstanceStatus{
-		{Index: 0, Phase: workload.InstancePhaseUpdating, Operation: &workload.InstanceOperation{
-			Type:           workload.InstanceOperationUpdate,
+	input.ObservedState.InstanceStatuses = []types.InstanceStatus{
+		{Index: 0, Phase: types.InstancePhaseUpdating, Operation: &types.InstanceOperation{
+			Type:           types.InstanceOperationUpdate,
 			TargetRevision: "own-engine-optarget",
 		}},
 	}
-	input.ObservedState.RetryBlocks = []workload.RetryBlock{
-		{TargetRevision: "own-engine-current1", State: workload.RetryBlockHeld},
-		{TargetRevision: "own-engine-update01", State: workload.RetryBlockHeld},
-		{TargetRevision: "own-engine-rolltgt1", State: workload.RetryBlockHeld},
-		{TargetRevision: "own-engine-optarget", State: workload.RetryBlockHeld},
-		{TargetRevision: "own-engine-stale001", State: workload.RetryBlockHeld},
+	input.ObservedState.RetryBlocks = []types.RetryBlock{
+		{TargetRevision: "own-engine-current1", State: types.RetryBlockHeld},
+		{TargetRevision: "own-engine-update01", State: types.RetryBlockHeld},
+		{TargetRevision: "own-engine-rolltgt1", State: types.RetryBlockHeld},
+		{TargetRevision: "own-engine-optarget", State: types.RetryBlockHeld},
+		{TargetRevision: "own-engine-stale001", State: types.RetryBlockHeld},
 	}
 	target := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: "own-engine-rolltgt1"}}
 
-	if err := workload.PruneSupersededRetryBlocksForTest(context.Background(), input, target); err != nil {
+	if err := escalation.PruneSupersededRetryBlocks(context.Background(), input, target); err != nil {
 		t.Fatalf("prune: %v", err)
 	}
 	if len(*removed) != 1 || (*removed)[0] != "own-engine-stale001" {
@@ -70,14 +72,14 @@ func TestPruneSupersededRetryBlocks_MultiStaleBatch(t *testing.T) {
 	input := minimalInput(t)
 	removed := recordRetryBlockRemovals(&input)
 	input.ObservedState.CurrentRevision = "own-engine-current1"
-	input.ObservedState.RetryBlocks = []workload.RetryBlock{
-		{TargetRevision: "own-engine-stale001", State: workload.RetryBlockHeld},
-		{TargetRevision: "own-engine-current1", State: workload.RetryBlockBackoff},
-		{TargetRevision: "own-engine-stale002", State: workload.RetryBlockBackoff},
-		{TargetRevision: "own-engine-stale003", State: workload.RetryBlockRetryInProgress},
+	input.ObservedState.RetryBlocks = []types.RetryBlock{
+		{TargetRevision: "own-engine-stale001", State: types.RetryBlockHeld},
+		{TargetRevision: "own-engine-current1", State: types.RetryBlockBackoff},
+		{TargetRevision: "own-engine-stale002", State: types.RetryBlockBackoff},
+		{TargetRevision: "own-engine-stale003", State: types.RetryBlockRetryInProgress},
 	}
 
-	if err := workload.PruneSupersededRetryBlocksForTest(context.Background(), input, nil); err != nil {
+	if err := escalation.PruneSupersededRetryBlocks(context.Background(), input, nil); err != nil {
 		t.Fatalf("prune: %v", err)
 	}
 	want := []string{"own-engine-stale001", "own-engine-stale002", "own-engine-stale003"}
@@ -97,10 +99,10 @@ func TestPruneSupersededRetryBlocks_MultiStaleBatch(t *testing.T) {
 func TestPruneSupersededRetryBlocks_NoSeamNoOp(t *testing.T) {
 	input := minimalInput(t)
 	input.MutateRetryBlock = nil
-	input.ObservedState.RetryBlocks = []workload.RetryBlock{
-		{TargetRevision: "own-engine-stale001", State: workload.RetryBlockHeld},
+	input.ObservedState.RetryBlocks = []types.RetryBlock{
+		{TargetRevision: "own-engine-stale001", State: types.RetryBlockHeld},
 	}
-	if err := workload.PruneSupersededRetryBlocksForTest(context.Background(), input, nil); err != nil {
+	if err := escalation.PruneSupersededRetryBlocks(context.Background(), input, nil); err != nil {
 		t.Fatalf("prune with nil seam: %v", err)
 	}
 }
@@ -111,14 +113,14 @@ func TestPruneSupersededRetryBlocks_NoSeamNoOp(t *testing.T) {
 func TestReconcile_PrunesSupersededRetryBlock(t *testing.T) {
 	scheme := makeScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	deps := workload.Deps{Client: c}
+	deps := types.Deps{Client: c}
 
 	in := minimalInput(t)
 	removed := recordRetryBlockRemovals(&in)
 	in.ObservedState.CurrentRevision = "own-engine-current1"
-	in.ObservedState.RetryBlocks = []workload.RetryBlock{
-		{TargetRevision: "own-engine-current1", State: workload.RetryBlockHeld},
-		{TargetRevision: "own-engine-stale001", State: workload.RetryBlockHeld},
+	in.ObservedState.RetryBlocks = []types.RetryBlock{
+		{TargetRevision: "own-engine-current1", State: types.RetryBlockHeld},
+		{TargetRevision: "own-engine-stale001", State: types.RetryBlockHeld},
 	}
 	plan := minimalPlan()
 
@@ -136,13 +138,13 @@ func TestReconcile_PrunesSupersededRetryBlock(t *testing.T) {
 func TestReconcile_Paused_NoSupersededPrune(t *testing.T) {
 	scheme := makeScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	deps := workload.Deps{Client: c}
+	deps := types.Deps{Client: c}
 
 	in := minimalInput(t)
 	removed := recordRetryBlockRemovals(&in)
 	in.ObservedState.CurrentRevision = "own-engine-current1"
-	in.ObservedState.RetryBlocks = []workload.RetryBlock{
-		{TargetRevision: "own-engine-stale001", State: workload.RetryBlockHeld},
+	in.ObservedState.RetryBlocks = []types.RetryBlock{
+		{TargetRevision: "own-engine-stale001", State: types.RetryBlockHeld},
 	}
 	plan := minimalPlan()
 	plan.Paused = true
@@ -160,13 +162,13 @@ func TestReconcile_Paused_NoSupersededPrune(t *testing.T) {
 func TestReconcile_Teardown_NoSupersededPrune(t *testing.T) {
 	scheme := makeScheme(t)
 	c := fake.NewClientBuilder().WithScheme(scheme).Build()
-	deps := workload.Deps{Client: c}
+	deps := types.Deps{Client: c}
 
 	in := minimalInput(t)
 	removed := recordRetryBlockRemovals(&in)
 	in.Teardown = true
-	in.ObservedState.RetryBlocks = []workload.RetryBlock{
-		{TargetRevision: "own-engine-stale001", State: workload.RetryBlockHeld},
+	in.ObservedState.RetryBlocks = []types.RetryBlock{
+		{TargetRevision: "own-engine-stale001", State: types.RetryBlockHeld},
 	}
 
 	if _, err := workload.Reconcile(context.Background(), deps, in, minimalPlan(), nil); err != nil {

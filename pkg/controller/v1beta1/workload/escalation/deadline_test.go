@@ -1,14 +1,15 @@
-package workload_test
+package escalation_test
 
 import (
 	"context"
 	"testing"
 	"time"
 
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
-	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // expireFixture wires a ReconcileInput whose MutateInstance applies the
@@ -17,19 +18,19 @@ import (
 // last event + a fire count. ObservedState carries its own copy of
 // insts (the pre-write observation the escalation pass iterates).
 // Returns the input and pointers the test asserts on.
-func expireFixture(insts []workload.InstanceStatus) (workload.ReconcileInput, *[]workload.InstanceStatus, *struct {
+func expireFixture(insts []workloadtypes.InstanceStatus) (workloadtypes.ReconcileInput, *[]workloadtypes.InstanceStatus, *struct {
 	idx    int32
 	reason string
 	count  int
 }) {
-	store := append([]workload.InstanceStatus(nil), insts...)
+	store := append([]workloadtypes.InstanceStatus(nil), insts...)
 	var event struct {
 		idx    int32
 		reason string
 		count  int
 	}
-	input := workload.ReconcileInput{
-		MutateInstance: func(_ context.Context, idx int32, mutate func(*workload.InstanceStatus) bool) error {
+	input := workloadtypes.ReconcileInput{
+		MutateInstance: func(_ context.Context, idx int32, mutate func(*workloadtypes.InstanceStatus) bool) error {
 			for i := range store {
 				if store[i].Index == idx {
 					mutate(&store[i])
@@ -44,7 +45,7 @@ func expireFixture(insts []workload.InstanceStatus) (workload.ReconcileInput, *[
 			event.count++
 		},
 	}
-	input.ObservedState.InstanceStatuses = append([]workload.InstanceStatus(nil), insts...)
+	input.ObservedState.InstanceStatuses = append([]workloadtypes.InstanceStatus(nil), insts...)
 	return input, &store, &event
 }
 
@@ -54,18 +55,17 @@ func expireFixture(insts []workload.InstanceStatus) (workload.ReconcileInput, *[
 // stuck-pod grace from input.StuckPodGrace; the disposition config from
 // input.Disposition + plan.MigrationMode; desired pod counts from
 // plan.Instances.
-func runEscalationPass(t *testing.T, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, byIdx map[int32][]*corev1.Pod) error {
+func runEscalationPass(t *testing.T, deps workloadtypes.Deps, input workloadtypes.ReconcileInput, plan workloadtypes.ComponentPlan, byIdx map[int32][]*corev1.Pod) error {
 	t.Helper()
-	return workload.EscalateFromEvidenceForTest(context.Background(), deps, input, plan, nil,
-		workload.SnapshotWithPodsForTest(input, byIdx))
+	return escalation.EscalateFromEvidenceForTest(context.Background(), deps, input, plan, nil, byIdx)
 }
 
 // singleInstancePlan returns a ComponentPlan whose desired pod count for
 // instance idx is pods — the DesiredPodCountByInstance input the pass
 // derives disposable-vs-gang routing from.
-func singleInstancePlan(idx, pods int32) workload.ComponentPlan {
-	return workload.ComponentPlan{
-		Instances: []workload.InstancePlan{{Index: idx, Runners: []workload.RunnerPlan{{Name: "default", Size: pods}}}},
+func singleInstancePlan(idx, pods int32) workloadtypes.ComponentPlan {
+	return workloadtypes.ComponentPlan{
+		Instances: []workloadtypes.InstancePlan{{Index: idx, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: pods}}}},
 	}
 }
 
@@ -82,11 +82,11 @@ func singleInstancePlan(idx, pods int32) workload.ComponentPlan {
 func TestExpireOperations_ExpiredDeadlineFailsInstance(t *testing.T) {
 	now := time.Now()
 	surgeIdx := int32(2)
-	insts := []workload.InstanceStatus{{
+	insts := []workloadtypes.InstanceStatus{{
 		Index: 0,
-		Phase: workload.InstancePhaseUpdating,
-		Operation: &workload.InstanceOperation{
-			Type:       workload.InstanceOperationUpdate,
+		Phase: workloadtypes.InstancePhaseUpdating,
+		Operation: &workloadtypes.InstanceOperation{
+			Type:       workloadtypes.InstanceOperationUpdate,
 			Step:       "Surge",
 			SurgeIndex: &surgeIdx,
 			Deadline:   metav1.NewTime(now.Add(-1 * time.Minute)),
@@ -94,16 +94,16 @@ func TestExpireOperations_ExpiredDeadlineFailsInstance(t *testing.T) {
 	}}
 	input, store, event := expireFixture(insts)
 
-	if err := runEscalationPass(t, workload.Deps{}, input, workload.ComponentPlan{}, nil); err != nil {
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, workloadtypes.ComponentPlan{}, nil); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
 	got := (*store)[0]
-	if got.Phase != workload.InstancePhaseFailed {
+	if got.Phase != workloadtypes.InstancePhaseFailed {
 		t.Errorf("Phase: got %q want Failed", got.Phase)
 	}
-	if got.LastFailure == nil || got.LastFailure.Reason != workload.DeadlineExceededReason {
-		t.Errorf("LastFailure: got %+v want Reason=%s", got.LastFailure, workload.DeadlineExceededReason)
+	if got.LastFailure == nil || got.LastFailure.Reason != escalation.DeadlineExceededReason {
+		t.Errorf("LastFailure: got %+v want Reason=%s", got.LastFailure, escalation.DeadlineExceededReason)
 	}
 	// Operation preserved so operators see what was in flight AND the
 	// gang abandon path can consume the continuation.
@@ -124,12 +124,12 @@ func TestExpireOperations_ExpiredDeadlineFailsInstance(t *testing.T) {
 func TestExpireOperations_DeadlineKeepsWorkloadCausedPodEvidence(t *testing.T) {
 	now := time.Now()
 	surgeIdx := int32(2)
-	gangSurgeSource := func() []workload.InstanceStatus {
-		return []workload.InstanceStatus{{
+	gangSurgeSource := func() []workloadtypes.InstanceStatus {
+		return []workloadtypes.InstanceStatus{{
 			Index: 0,
-			Phase: workload.InstancePhaseUpdating,
-			Operation: &workload.InstanceOperation{
-				Type:       workload.InstanceOperationUpdate,
+			Phase: workloadtypes.InstancePhaseUpdating,
+			Operation: &workloadtypes.InstanceOperation{
+				Type:       workloadtypes.InstanceOperationUpdate,
 				Step:       "Surge",
 				SurgeIndex: &surgeIdx,
 				Deadline:   metav1.NewTime(now.Add(-1 * time.Minute)),
@@ -152,11 +152,11 @@ func TestExpireOperations_DeadlineKeepsWorkloadCausedPodEvidence(t *testing.T) {
 			waiting("engine-2-leader-0", "ContainerCreating"),
 			waiting("engine-2-worker-0", "ImagePullBackOff"),
 		}}
-		if err := runEscalationPass(t, workload.Deps{}, input, workload.ComponentPlan{}, byIdx); err != nil {
+		if err := runEscalationPass(t, workloadtypes.Deps{}, input, workloadtypes.ComponentPlan{}, byIdx); err != nil {
 			t.Fatalf("escalation pass: %v", err)
 		}
 		got := (*store)[0]
-		if got.Phase != workload.InstancePhaseFailed || got.Operation == nil {
+		if got.Phase != workloadtypes.InstancePhaseFailed || got.Operation == nil {
 			t.Fatalf("got (phase=%q, op=%+v) want (Failed, Operation preserved)", got.Phase, got.Operation)
 		}
 		if got.LastFailure == nil || got.LastFailure.Reason != "ImagePullBackOff" || got.LastFailure.PodName != "engine-2-worker-0" {
@@ -173,12 +173,12 @@ func TestExpireOperations_DeadlineKeepsWorkloadCausedPodEvidence(t *testing.T) {
 			waiting("engine-2-leader-0", "ContainerCreating"),
 			waiting("engine-2-worker-0", "CrashLoopBackOff"),
 		}}
-		if err := runEscalationPass(t, workload.Deps{}, input, workload.ComponentPlan{}, byIdx); err != nil {
+		if err := runEscalationPass(t, workloadtypes.Deps{}, input, workloadtypes.ComponentPlan{}, byIdx); err != nil {
 			t.Fatalf("escalation pass: %v", err)
 		}
 		got := (*store)[0]
-		if got.LastFailure == nil || got.LastFailure.Reason != workload.DeadlineExceededReason {
-			t.Errorf("LastFailure: got %+v want Reason=%s", got.LastFailure, workload.DeadlineExceededReason)
+		if got.LastFailure == nil || got.LastFailure.Reason != escalation.DeadlineExceededReason {
+			t.Errorf("LastFailure: got %+v want Reason=%s", got.LastFailure, escalation.DeadlineExceededReason)
 		}
 	})
 }
@@ -188,22 +188,22 @@ func TestExpireOperations_DeadlineKeepsWorkloadCausedPodEvidence(t *testing.T) {
 // alone (no Phase change, no event).
 func TestExpireOperations_NotYetExpiredUntouched(t *testing.T) {
 	now := time.Now()
-	insts := []workload.InstanceStatus{{
+	insts := []workloadtypes.InstanceStatus{{
 		Index: 0,
-		Phase: workload.InstancePhaseUpdating,
-		Operation: &workload.InstanceOperation{
-			Type:     workload.InstanceOperationUpdate,
+		Phase: workloadtypes.InstancePhaseUpdating,
+		Operation: &workloadtypes.InstanceOperation{
+			Type:     workloadtypes.InstanceOperationUpdate,
 			Step:     "Surge",
 			Deadline: metav1.NewTime(now.Add(30 * time.Minute)),
 		},
 	}}
 	input, store, event := expireFixture(insts)
 
-	if err := runEscalationPass(t, workload.Deps{}, input, workload.ComponentPlan{}, nil); err != nil {
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, workloadtypes.ComponentPlan{}, nil); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
-	if (*store)[0].Phase != workload.InstancePhaseUpdating {
+	if (*store)[0].Phase != workloadtypes.InstancePhaseUpdating {
 		t.Errorf("Phase: got %q want Updating (untouched)", (*store)[0].Phase)
 	}
 	if event.count != 0 {
@@ -215,22 +215,22 @@ func TestExpireOperations_NotYetExpiredUntouched(t *testing.T) {
 // (zero) Deadline is treated as "never expires" so an Instance whose
 // per-op writer didn't stamp a deadline can't accidentally trip.
 func TestExpireOperations_ZeroDeadlineNeverExpires(t *testing.T) {
-	insts := []workload.InstanceStatus{{
+	insts := []workloadtypes.InstanceStatus{{
 		Index: 0,
-		Phase: workload.InstancePhaseCreating,
-		Operation: &workload.InstanceOperation{
-			Type: workload.InstanceOperationCreate,
+		Phase: workloadtypes.InstancePhaseCreating,
+		Operation: &workloadtypes.InstanceOperation{
+			Type: workloadtypes.InstanceOperationCreate,
 			Step: "Create",
 			// Deadline left as the metav1.Time zero value.
 		},
 	}}
 	input, store, event := expireFixture(insts)
 
-	if err := runEscalationPass(t, workload.Deps{}, input, workload.ComponentPlan{}, nil); err != nil {
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, workloadtypes.ComponentPlan{}, nil); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
-	if (*store)[0].Phase != workload.InstancePhaseCreating {
+	if (*store)[0].Phase != workloadtypes.InstancePhaseCreating {
 		t.Errorf("Phase: got %q want Creating (zero deadline never expires)", (*store)[0].Phase)
 	}
 	if event.count != 0 {
@@ -243,17 +243,17 @@ func TestExpireOperations_ZeroDeadlineNeverExpires(t *testing.T) {
 // deadline still in front of it.
 func TestExpireOperations_AlreadyFailedNoOp(t *testing.T) {
 	now := time.Now()
-	insts := []workload.InstanceStatus{{
+	insts := []workloadtypes.InstanceStatus{{
 		Index: 0,
-		Phase: workload.InstancePhaseFailed,
-		Operation: &workload.InstanceOperation{
-			Type:     workload.InstanceOperationUpdate,
+		Phase: workloadtypes.InstancePhaseFailed,
+		Operation: &workloadtypes.InstanceOperation{
+			Type:     workloadtypes.InstanceOperationUpdate,
 			Deadline: metav1.NewTime(now.Add(-1 * time.Minute)),
 		},
 	}}
 	mutated := false
-	input := workload.ReconcileInput{
-		MutateInstance: func(_ context.Context, _ int32, _ func(*workload.InstanceStatus) bool) error {
+	input := workloadtypes.ReconcileInput{
+		MutateInstance: func(_ context.Context, _ int32, _ func(*workloadtypes.InstanceStatus) bool) error {
 			mutated = true
 			return nil
 		},
@@ -263,7 +263,7 @@ func TestExpireOperations_AlreadyFailedNoOp(t *testing.T) {
 	}
 	input.ObservedState.InstanceStatuses = insts
 
-	if err := runEscalationPass(t, workload.Deps{}, input, workload.ComponentPlan{}, nil); err != nil {
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, workloadtypes.ComponentPlan{}, nil); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 	if mutated {
@@ -277,14 +277,14 @@ func TestExpireOperations_AlreadyFailedNoOp(t *testing.T) {
 func TestExpireOperations_TerminalPhaseUntouched(t *testing.T) {
 	now := time.Now()
 	expired := metav1.NewTime(now.Add(-1 * time.Minute))
-	for _, phase := range []workload.InstancePhase{workload.InstancePhaseReady, workload.InstancePhaseDeleting} {
-		insts := []workload.InstanceStatus{{
+	for _, phase := range []workloadtypes.InstancePhase{workloadtypes.InstancePhaseReady, workloadtypes.InstancePhaseDeleting} {
+		insts := []workloadtypes.InstanceStatus{{
 			Index:     0,
 			Phase:     phase,
-			Operation: &workload.InstanceOperation{Type: workload.InstanceOperationDelete, Deadline: expired},
+			Operation: &workloadtypes.InstanceOperation{Type: workloadtypes.InstanceOperationDelete, Deadline: expired},
 		}}
 		input, store, event := expireFixture(insts)
-		if err := runEscalationPass(t, workload.Deps{}, input, workload.ComponentPlan{}, nil); err != nil {
+		if err := runEscalationPass(t, workloadtypes.Deps{}, input, workloadtypes.ComponentPlan{}, nil); err != nil {
 			t.Fatalf("escalation pass (%s): %v", phase, err)
 		}
 		if (*store)[0].Phase != phase {
@@ -309,12 +309,12 @@ func TestExpireOperations_MigratePairSkipped(t *testing.T) {
 	expired := metav1.NewTime(now.Add(-1 * time.Minute))
 	surgeIdx := int32(1)
 	sourceIdx := int32(0)
-	insts := []workload.InstanceStatus{
+	insts := []workloadtypes.InstanceStatus{
 		{
 			Index: 0,
-			Phase: workload.InstancePhaseMigrating,
-			Operation: &workload.InstanceOperation{
-				Type:        workload.InstanceOperationMigrate,
+			Phase: workloadtypes.InstancePhaseMigrating,
+			Operation: &workloadtypes.InstanceOperation{
+				Type:        workloadtypes.InstanceOperationMigrate,
 				Step:        "CreateSurge",
 				RequestUUID: "mig-1",
 				SurgeIndex:  &surgeIdx,
@@ -323,9 +323,9 @@ func TestExpireOperations_MigratePairSkipped(t *testing.T) {
 		},
 		{
 			Index: 1,
-			Phase: workload.InstancePhaseCreating,
-			Operation: &workload.InstanceOperation{
-				Type:        workload.InstanceOperationMigrate,
+			Phase: workloadtypes.InstancePhaseCreating,
+			Operation: &workloadtypes.InstanceOperation{
+				Type:        workloadtypes.InstanceOperationMigrate,
 				Step:        "CreateSurge",
 				RequestUUID: "mig-1",
 				SurgeIndex:  &sourceIdx,
@@ -335,14 +335,14 @@ func TestExpireOperations_MigratePairSkipped(t *testing.T) {
 	}
 	input, store, event := expireFixture(insts)
 
-	if err := runEscalationPass(t, workload.Deps{}, input, workload.ComponentPlan{}, nil); err != nil {
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, workloadtypes.ComponentPlan{}, nil); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
-	if got := (*store)[0]; got.Phase != workload.InstancePhaseMigrating || got.Operation == nil {
+	if got := (*store)[0]; got.Phase != workloadtypes.InstancePhaseMigrating || got.Operation == nil {
 		t.Errorf("migration source must be untouched; got phase=%q op=%+v", got.Phase, got.Operation)
 	}
-	if got := (*store)[1]; got.Phase != workload.InstancePhaseCreating || got.Operation == nil {
+	if got := (*store)[1]; got.Phase != workloadtypes.InstancePhaseCreating || got.Operation == nil {
 		t.Errorf("migration surge must be untouched; got phase=%q op=%+v", got.Phase, got.Operation)
 	}
 	if event.count != 0 {
@@ -356,23 +356,23 @@ func TestExpireOperations_MigratePairSkipped(t *testing.T) {
 // durable operation is complete.
 func TestExpireOperations_DeleteOperationSkipped(t *testing.T) {
 	now := time.Now()
-	insts := []workload.InstanceStatus{{
+	insts := []workloadtypes.InstanceStatus{{
 		Index: 0,
-		Phase: workload.InstancePhaseRestarting,
-		Operation: &workload.InstanceOperation{
-			Type:     workload.InstanceOperationDelete,
+		Phase: workloadtypes.InstancePhaseRestarting,
+		Operation: &workloadtypes.InstanceOperation{
+			Type:     workloadtypes.InstanceOperationDelete,
 			Step:     "Drain",
 			Deadline: metav1.NewTime(now.Add(-time.Minute)),
 		},
 	}}
 	input, store, event := expireFixture(insts)
 
-	if err := runEscalationPass(t, workload.Deps{}, input, workload.ComponentPlan{}, nil); err != nil {
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, workloadtypes.ComponentPlan{}, nil); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
 	got := (*store)[0]
-	if got.Phase != workload.InstancePhaseRestarting || got.Operation == nil || got.Operation.Type != workload.InstanceOperationDelete {
+	if got.Phase != workloadtypes.InstancePhaseRestarting || got.Operation == nil || got.Operation.Type != workloadtypes.InstanceOperationDelete {
 		t.Errorf("Delete operation must be untouched; got phase=%q op=%+v", got.Phase, got.Operation)
 	}
 	if event.count != 0 {
@@ -383,12 +383,12 @@ func TestExpireOperations_DeleteOperationSkipped(t *testing.T) {
 // TestExpireOperations_NoOperationUntouched pins that an Instance with no
 // in-flight Operation is skipped (nothing to time out).
 func TestExpireOperations_NoOperationUntouched(t *testing.T) {
-	insts := []workload.InstanceStatus{{Index: 0, Phase: workload.InstancePhaseUpdating}}
+	insts := []workloadtypes.InstanceStatus{{Index: 0, Phase: workloadtypes.InstancePhaseUpdating}}
 	input, store, event := expireFixture(insts)
-	if err := runEscalationPass(t, workload.Deps{}, input, workload.ComponentPlan{}, nil); err != nil {
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, workloadtypes.ComponentPlan{}, nil); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
-	if (*store)[0].Phase != workload.InstancePhaseUpdating {
+	if (*store)[0].Phase != workloadtypes.InstancePhaseUpdating {
 		t.Errorf("Phase: got %q want Updating (no operation)", (*store)[0].Phase)
 	}
 	if event.count != 0 {
@@ -399,62 +399,39 @@ func TestExpireOperations_NoOperationUntouched(t *testing.T) {
 // Cells: instance/Update/Surge/spec.pauseTrue/before, instance/Update/Surge/spec.unpause/before
 func TestReconcileGatedDeadlines_PausedHoldParksAndRearms(t *testing.T) {
 	now := time.Now()
-	held := []workload.InstanceStatus{{
+	held := []workloadtypes.InstanceStatus{{
 		Index: 0,
-		Phase: workload.InstancePhaseUpdating,
-		Operation: &workload.InstanceOperation{
-			Type:     workload.InstanceOperationUpdate,
-			Step:     workload.UpdateStepSurge,
-			Waiting:  workload.WaitingReasonPaused,
+		Phase: workloadtypes.InstancePhaseUpdating,
+		Operation: &workloadtypes.InstanceOperation{
+			Type:     workloadtypes.InstanceOperationUpdate,
+			Step:     workloadtypes.UpdateStepSurge,
+			Waiting:  workloadtypes.WaitingReasonPaused,
 			Deadline: metav1.NewTime(now.Add(3 * time.Minute)),
 		},
 	}}
 	input, store, _ := expireFixture(held)
-	if err := workload.ReconcileGatedDeadlines(context.Background(), input, held, nil, 30*time.Minute); err != nil {
+	if err := escalation.ReconcileGatedDeadlines(context.Background(), input, held, nil, 30*time.Minute); err != nil {
 		t.Fatalf("ReconcileGatedDeadlines (held): %v", err)
 	}
 	if !(*store)[0].Operation.Deadline.IsZero() {
 		t.Errorf("held Deadline: got %v want zero (parked)", (*store)[0].Operation.Deadline)
 	}
 
-	released := []workload.InstanceStatus{{
+	released := []workloadtypes.InstanceStatus{{
 		Index: 0,
-		Phase: workload.InstancePhaseUpdating,
-		Operation: &workload.InstanceOperation{
-			Type: workload.InstanceOperationUpdate,
-			Step: workload.UpdateStepSurge,
+		Phase: workloadtypes.InstancePhaseUpdating,
+		Operation: &workloadtypes.InstanceOperation{
+			Type: workloadtypes.InstanceOperationUpdate,
+			Step: workloadtypes.UpdateStepSurge,
 		},
 	}}
 	input, store, _ = expireFixture(released)
-	if err := workload.ReconcileGatedDeadlines(context.Background(), input, released, nil, 30*time.Minute); err != nil {
+	if err := escalation.ReconcileGatedDeadlines(context.Background(), input, released, nil, 30*time.Minute); err != nil {
 		t.Fatalf("ReconcileGatedDeadlines (released): %v", err)
 	}
 	d := (*store)[0].Operation.Deadline
 	if d.IsZero() || !d.Time.After(now.Add(25*time.Minute)) {
 		t.Errorf("released Deadline %v: want a full window from the unpause", d)
-	}
-}
-
-// TestEscalation_PausedHoldSkipsStuckPodFastPath: a pod wedged in a
-// terminal waiting state under a pause is held by an operator, not
-// stuck on a verdict this controller can reach, so the fast path leaves
-// the row alone. The same evidence without the hold escalates.
-//
-// TestPodAdmissionGated pins the gated-pod detector: a pod is "gated"
-// (queued for admission, e.g. by Kueue) iff it still carries a scheduling
-// gate. An un-gated or nil pod is not.
-func TestPodAdmissionGated(t *testing.T) {
-	gated := &corev1.Pod{Spec: corev1.PodSpec{
-		SchedulingGates: []corev1.PodSchedulingGate{{Name: "kueue.x-k8s.io/admission"}},
-	}}
-	if !workload.PodAdmissionGated(gated) {
-		t.Errorf("pod with a scheduling gate: got false want true")
-	}
-	if workload.PodAdmissionGated(&corev1.Pod{}) {
-		t.Errorf("pod with no scheduling gate: got true want false")
-	}
-	if workload.PodAdmissionGated(nil) {
-		t.Errorf("nil pod: got true want false")
 	}
 }
 
@@ -464,23 +441,23 @@ func TestPodAdmissionGated(t *testing.T) {
 // The Instance is NOT failed — it is queued, not stuck.
 func TestReconcileGatedDeadlines_ParksGatedInstance(t *testing.T) {
 	now := time.Now()
-	insts := []workload.InstanceStatus{{
+	insts := []workloadtypes.InstanceStatus{{
 		Index: 0,
-		Phase: workload.InstancePhaseCreating,
-		Operation: &workload.InstanceOperation{
-			Type:     workload.InstanceOperationCreate,
+		Phase: workloadtypes.InstancePhaseCreating,
+		Operation: &workloadtypes.InstanceOperation{
+			Type:     workloadtypes.InstanceOperationCreate,
 			Deadline: metav1.NewTime(now.Add(-1 * time.Minute)), // already past
 		},
 	}}
 	input, store, _ := expireFixture(insts)
 
-	if err := workload.ReconcileGatedDeadlines(context.Background(), input, insts, map[int32]bool{0: true}, 30*time.Minute); err != nil {
+	if err := escalation.ReconcileGatedDeadlines(context.Background(), input, insts, map[int32]bool{0: true}, 30*time.Minute); err != nil {
 		t.Fatalf("ReconcileGatedDeadlines: %v", err)
 	}
 	if !(*store)[0].Operation.Deadline.IsZero() {
 		t.Errorf("gated Deadline: got %v want zero (parked)", (*store)[0].Operation.Deadline)
 	}
-	if (*store)[0].Phase != workload.InstancePhaseCreating {
+	if (*store)[0].Phase != workloadtypes.InstancePhaseCreating {
 		t.Errorf("Phase: got %q want Creating (paused, not failed)", (*store)[0].Phase)
 	}
 }
@@ -490,17 +467,17 @@ func TestReconcileGatedDeadlines_ParksGatedInstance(t *testing.T) {
 // timeout is measured from admission, not from operation start.
 func TestReconcileGatedDeadlines_RestartsOnUngate(t *testing.T) {
 	now := time.Now()
-	insts := []workload.InstanceStatus{{
+	insts := []workloadtypes.InstanceStatus{{
 		Index: 0,
-		Phase: workload.InstancePhaseCreating,
-		Operation: &workload.InstanceOperation{
-			Type: workload.InstanceOperationCreate,
+		Phase: workloadtypes.InstancePhaseCreating,
+		Operation: &workloadtypes.InstanceOperation{
+			Type: workloadtypes.InstanceOperationCreate,
 			// Deadline zero: parked while previously gated.
 		},
 	}}
 	input, store, _ := expireFixture(insts)
 
-	if err := workload.ReconcileGatedDeadlines(context.Background(), input, insts, map[int32]bool{}, 30*time.Minute); err != nil {
+	if err := escalation.ReconcileGatedDeadlines(context.Background(), input, insts, map[int32]bool{}, 30*time.Minute); err != nil {
 		t.Fatalf("ReconcileGatedDeadlines: %v", err)
 	}
 	d := (*store)[0].Operation.Deadline
@@ -518,14 +495,14 @@ func TestReconcileGatedDeadlines_RestartsOnUngate(t *testing.T) {
 func TestReconcileGatedDeadlines_UngatedNormalUntouched(t *testing.T) {
 	now := time.Now()
 	orig := metav1.NewTime(now.Add(20 * time.Minute))
-	insts := []workload.InstanceStatus{{
+	insts := []workloadtypes.InstanceStatus{{
 		Index:     0,
-		Phase:     workload.InstancePhaseCreating,
-		Operation: &workload.InstanceOperation{Type: workload.InstanceOperationCreate, Deadline: orig},
+		Phase:     workloadtypes.InstancePhaseCreating,
+		Operation: &workloadtypes.InstanceOperation{Type: workloadtypes.InstanceOperationCreate, Deadline: orig},
 	}}
 	input, store, _ := expireFixture(insts)
 
-	if err := workload.ReconcileGatedDeadlines(context.Background(), input, insts, map[int32]bool{}, 30*time.Minute); err != nil {
+	if err := escalation.ReconcileGatedDeadlines(context.Background(), input, insts, map[int32]bool{}, 30*time.Minute); err != nil {
 		t.Fatalf("ReconcileGatedDeadlines: %v", err)
 	}
 	if !(*store)[0].Operation.Deadline.Equal(&orig) {
@@ -539,14 +516,14 @@ func TestReconcileGatedDeadlines_UngatedNormalUntouched(t *testing.T) {
 func TestReconcileGatedDeadlines_NonTransientUntouched(t *testing.T) {
 	now := time.Now()
 	orig := metav1.NewTime(now.Add(5 * time.Minute))
-	insts := []workload.InstanceStatus{{
+	insts := []workloadtypes.InstanceStatus{{
 		Index:     0,
-		Phase:     workload.InstancePhaseReady,
-		Operation: &workload.InstanceOperation{Type: workload.InstanceOperationCreate, Deadline: orig},
+		Phase:     workloadtypes.InstancePhaseReady,
+		Operation: &workloadtypes.InstanceOperation{Type: workloadtypes.InstanceOperationCreate, Deadline: orig},
 	}}
 	input, store, _ := expireFixture(insts)
 
-	if err := workload.ReconcileGatedDeadlines(context.Background(), input, insts, map[int32]bool{0: true}, 30*time.Minute); err != nil {
+	if err := escalation.ReconcileGatedDeadlines(context.Background(), input, insts, map[int32]bool{0: true}, 30*time.Minute); err != nil {
 		t.Fatalf("ReconcileGatedDeadlines: %v", err)
 	}
 	if !(*store)[0].Operation.Deadline.Equal(&orig) {
@@ -560,27 +537,27 @@ func TestReconcileGatedDeadlines_NonTransientUntouched(t *testing.T) {
 // parked zero, skips). Without the pause step the backstop would fail it.
 func TestGatedInstance_NotFailedByDeadlineBackstop(t *testing.T) {
 	now := time.Now()
-	insts := []workload.InstanceStatus{{
+	insts := []workloadtypes.InstanceStatus{{
 		Index: 0,
-		Phase: workload.InstancePhaseCreating,
-		Operation: &workload.InstanceOperation{
-			Type:     workload.InstanceOperationCreate,
+		Phase: workloadtypes.InstancePhaseCreating,
+		Operation: &workloadtypes.InstanceOperation{
+			Type:     workloadtypes.InstanceOperationCreate,
 			Deadline: metav1.NewTime(now.Add(-1 * time.Hour)), // long past
 		},
 	}}
 	input, store, event := expireFixture(insts)
 
-	if err := workload.ReconcileGatedDeadlines(context.Background(), input, insts, map[int32]bool{0: true}, 30*time.Minute); err != nil {
+	if err := escalation.ReconcileGatedDeadlines(context.Background(), input, insts, map[int32]bool{0: true}, 30*time.Minute); err != nil {
 		t.Fatalf("ReconcileGatedDeadlines: %v", err)
 	}
 	// Rebuild the observation from the parked store, mirroring the fresh
 	// status read the next reconcile's escalation pass consumes.
-	input.ObservedState.InstanceStatuses = append([]workload.InstanceStatus(nil), (*store)...)
-	if err := runEscalationPass(t, workload.Deps{}, input, workload.ComponentPlan{}, nil); err != nil {
+	input.ObservedState.InstanceStatuses = append([]workloadtypes.InstanceStatus(nil), (*store)...)
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, workloadtypes.ComponentPlan{}, nil); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
 
-	if (*store)[0].Phase == workload.InstancePhaseFailed {
+	if (*store)[0].Phase == workloadtypes.InstancePhaseFailed {
 		t.Errorf("gated Instance was failed by the deadline backstop; want alive (clock paused while gated)")
 	}
 	if event.count != 0 {
@@ -597,11 +574,11 @@ func TestReconcileGatedDeadlines_ParksQuotaBlockedInstance(t *testing.T) {
 	now := time.Now()
 	original := metav1.NewTime(now.Add(10 * time.Minute))
 	refusedAt := metav1.NewTime(now)
-	insts := []workload.InstanceStatus{{
+	insts := []workloadtypes.InstanceStatus{{
 		Index: 0,
-		Phase: workload.InstancePhaseCreating,
-		Operation: &workload.InstanceOperation{
-			Type:              workload.InstanceOperationCreate,
+		Phase: workloadtypes.InstancePhaseCreating,
+		Operation: &workloadtypes.InstanceOperation{
+			Type:              workloadtypes.InstanceOperationCreate,
 			Deadline:          original,
 			Waiting:           workloadtypes.RejectionReasonQuotaExceeded,
 			CapacityRefusedAt: &refusedAt,
@@ -610,13 +587,13 @@ func TestReconcileGatedDeadlines_ParksQuotaBlockedInstance(t *testing.T) {
 	input, store, _ := expireFixture(insts)
 
 	// No pod is gated — the Operation's waiting reason is the only signal.
-	if err := workload.ReconcileGatedDeadlines(context.Background(), input, insts, map[int32]bool{}, 30*time.Minute); err != nil {
+	if err := escalation.ReconcileGatedDeadlines(context.Background(), input, insts, map[int32]bool{}, 30*time.Minute); err != nil {
 		t.Fatalf("ReconcileGatedDeadlines: %v", err)
 	}
 	if !(*store)[0].Operation.Deadline.IsZero() {
 		t.Fatalf("quota-blocked Deadline: got %v want zero (parked)", (*store)[0].Operation.Deadline)
 	}
-	if (*store)[0].Phase != workload.InstancePhaseCreating {
+	if (*store)[0].Phase != workloadtypes.InstancePhaseCreating {
 		t.Errorf("Phase: got %q want Creating (waiting on capacity, not failed)", (*store)[0].Phase)
 	}
 
@@ -625,8 +602,8 @@ func TestReconcileGatedDeadlines_ParksQuotaBlockedInstance(t *testing.T) {
 	// from the operation's original start.
 	(*store)[0].Operation.Waiting = ""
 	(*store)[0].Operation.CapacityRefusedAt = nil
-	cleared := append([]workload.InstanceStatus(nil), (*store)...)
-	if err := workload.ReconcileGatedDeadlines(context.Background(), input, cleared, map[int32]bool{}, 30*time.Minute); err != nil {
+	cleared := append([]workloadtypes.InstanceStatus(nil), (*store)...)
+	if err := escalation.ReconcileGatedDeadlines(context.Background(), input, cleared, map[int32]bool{}, 30*time.Minute); err != nil {
 		t.Fatalf("ReconcileGatedDeadlines after unblock: %v", err)
 	}
 	d := (*store)[0].Operation.Deadline
@@ -640,16 +617,16 @@ func TestReconcileGatedDeadlines_ParksQuotaBlockedInstance(t *testing.T) {
 // once a create lands. Either carrier parks, so a row still reporting
 // QuotaExceeded is not re-armed on the pass the record was retired.
 func TestReconcileGatedDeadlines_QuotaTokenAloneParks(t *testing.T) {
-	insts := []workload.InstanceStatus{{
+	insts := []workloadtypes.InstanceStatus{{
 		Index: 0,
-		Phase: workload.InstancePhaseCreating,
-		Operation: &workload.InstanceOperation{
-			Type:    workload.InstanceOperationCreate,
+		Phase: workloadtypes.InstancePhaseCreating,
+		Operation: &workloadtypes.InstanceOperation{
+			Type:    workloadtypes.InstanceOperationCreate,
 			Waiting: workloadtypes.RejectionReasonQuotaExceeded,
 		},
 	}}
 	input, store, _ := expireFixture(insts)
-	if err := workload.ReconcileGatedDeadlines(context.Background(), input, insts, map[int32]bool{}, 30*time.Minute); err != nil {
+	if err := escalation.ReconcileGatedDeadlines(context.Background(), input, insts, map[int32]bool{}, 30*time.Minute); err != nil {
 		t.Fatalf("ReconcileGatedDeadlines: %v", err)
 	}
 	if !(*store)[0].Operation.Deadline.IsZero() {
@@ -662,18 +639,18 @@ func TestReconcileGatedDeadlines_QuotaTokenAloneParks(t *testing.T) {
 // pass — a workload queued behind quota for hours must not churn status.
 func TestReconcileGatedDeadlines_QuotaBlockedStaysParkedWhileBlocked(t *testing.T) {
 	refusedAt := metav1.NewTime(time.Now())
-	insts := []workload.InstanceStatus{{
+	insts := []workloadtypes.InstanceStatus{{
 		Index: 0,
-		Phase: workload.InstancePhaseCreating,
-		Operation: &workload.InstanceOperation{
-			Type:              workload.InstanceOperationCreate,
+		Phase: workloadtypes.InstancePhaseCreating,
+		Operation: &workloadtypes.InstanceOperation{
+			Type:              workloadtypes.InstanceOperationCreate,
 			Waiting:           workloadtypes.RejectionReasonQuotaExceeded,
 			CapacityRefusedAt: &refusedAt,
 		},
 	}}
 	input, store, _ := expireFixture(insts)
 
-	if err := workload.ReconcileGatedDeadlines(context.Background(), input, insts, map[int32]bool{}, 30*time.Minute); err != nil {
+	if err := escalation.ReconcileGatedDeadlines(context.Background(), input, insts, map[int32]bool{}, 30*time.Minute); err != nil {
 		t.Fatalf("ReconcileGatedDeadlines: %v", err)
 	}
 	if !(*store)[0].Operation.Deadline.IsZero() {
@@ -691,11 +668,11 @@ func TestReconcileGatedDeadlines_QuotaBlockedStaysParkedWhileBlocked(t *testing.
 func TestQuotaBlockedInstance_NotFailedByDeadlineBackstop(t *testing.T) {
 	refusedAt := metav1.NewTime(time.Now())
 	now := time.Now()
-	insts := []workload.InstanceStatus{{
+	insts := []workloadtypes.InstanceStatus{{
 		Index: 0,
-		Phase: workload.InstancePhaseCreating,
-		Operation: &workload.InstanceOperation{
-			Type:              workload.InstanceOperationCreate,
+		Phase: workloadtypes.InstancePhaseCreating,
+		Operation: &workloadtypes.InstanceOperation{
+			Type:              workloadtypes.InstanceOperationCreate,
 			Deadline:          metav1.NewTime(now.Add(-1 * time.Hour)), // stamped before the block
 			Waiting:           workloadtypes.RejectionReasonQuotaExceeded,
 			CapacityRefusedAt: &refusedAt,
@@ -703,10 +680,10 @@ func TestQuotaBlockedInstance_NotFailedByDeadlineBackstop(t *testing.T) {
 	}}
 	input, store, event := expireFixture(insts)
 
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 1), nil); err != nil {
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, singleInstancePlan(0, 1), nil); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
-	if (*store)[0].Phase == workload.InstancePhaseFailed {
+	if (*store)[0].Phase == workloadtypes.InstancePhaseFailed {
 		t.Errorf("quota-blocked Instance was failed by the deadline backstop; want alive (waiting on capacity)")
 	}
 	if event.count != 0 {
@@ -726,21 +703,21 @@ func TestGangSurgeSource_HeldWhileItsSurgeWaitsOnQuota(t *testing.T) {
 	refusedAt := metav1.NewTime(time.Now())
 	now := time.Now()
 	surgeIndex := int32(2)
-	insts := []workload.InstanceStatus{
+	insts := []workloadtypes.InstanceStatus{
 		{
 			Index: 0,
-			Phase: workload.InstancePhaseUpdating,
-			Operation: &workload.InstanceOperation{
-				Type:       workload.InstanceOperationUpdate,
+			Phase: workloadtypes.InstancePhaseUpdating,
+			Operation: &workloadtypes.InstanceOperation{
+				Type:       workloadtypes.InstanceOperationUpdate,
 				Deadline:   metav1.NewTime(now.Add(-1 * time.Hour)), // stamped before the block
 				SurgeIndex: &surgeIndex,
 			},
 		},
 		{
 			Index: surgeIndex,
-			Phase: workload.InstancePhaseCreating,
-			Operation: &workload.InstanceOperation{
-				Type:              workload.InstanceOperationUpdate,
+			Phase: workloadtypes.InstancePhaseCreating,
+			Operation: &workloadtypes.InstanceOperation{
+				Type:              workloadtypes.InstanceOperationUpdate,
 				Waiting:           workloadtypes.RejectionReasonQuotaExceeded,
 				CapacityRefusedAt: &refusedAt,
 			},
@@ -748,7 +725,7 @@ func TestGangSurgeSource_HeldWhileItsSurgeWaitsOnQuota(t *testing.T) {
 	}
 	input, store, event := expireFixture(insts)
 
-	if err := workload.ReconcileGatedDeadlines(context.Background(), input, insts, map[int32]bool{}, 30*time.Minute); err != nil {
+	if err := escalation.ReconcileGatedDeadlines(context.Background(), input, insts, map[int32]bool{}, 30*time.Minute); err != nil {
 		t.Fatalf("ReconcileGatedDeadlines: %v", err)
 	}
 	if !(*store)[0].Operation.Deadline.IsZero() {
@@ -757,11 +734,11 @@ func TestGangSurgeSource_HeldWhileItsSurgeWaitsOnQuota(t *testing.T) {
 
 	// Escalation must skip the source too, covering the window before the
 	// park lands (or after a restart re-reads a pre-park deadline).
-	input.ObservedState.InstanceStatuses = append([]workload.InstanceStatus(nil), insts...)
-	if err := runEscalationPass(t, workload.Deps{}, input, singleInstancePlan(0, 2), nil); err != nil {
+	input.ObservedState.InstanceStatuses = append([]workloadtypes.InstanceStatus(nil), insts...)
+	if err := runEscalationPass(t, workloadtypes.Deps{}, input, singleInstancePlan(0, 2), nil); err != nil {
 		t.Fatalf("escalation pass: %v", err)
 	}
-	if (*store)[0].Phase == workload.InstancePhaseFailed {
+	if (*store)[0].Phase == workloadtypes.InstancePhaseFailed {
 		t.Errorf("source was failed by the deadline backstop; want alive (its surge is queued behind capacity)")
 	}
 	if event.count != 0 {

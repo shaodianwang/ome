@@ -115,3 +115,11 @@ func UnschedulableTermination(pod *corev1.Pod, message string, since metav1.Time
 		Time:    since,
 	}
 }
+
+// PodAdmissionGated reports whether a pod is still held by a scheduling
+// gate — queued for admission (e.g. by Kueue) and not yet allowed to run.
+// A gated pod is waiting on an external admission authority, not stuck, so
+// the InstanceReadyTimeout clock must not run while it is gated.
+func PodAdmissionGated(pod *corev1.Pod) bool {
+	return pod != nil && len(pod.Spec.SchedulingGates) > 0
+}

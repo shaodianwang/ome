@@ -1,4 +1,4 @@
-// escalation_refresh.go — the one effect the escalation pass has on a
+// refresh.go — the one effect the escalation pass has on a
 // row that is already Failed.
 //
 // Failed is sticky: the pass takes no second edge there, so a row failed
@@ -10,7 +10,9 @@
 // no event, RetryBlock, phase or operation moves. Edge-triggered by the
 // recorded reason itself, which stops being the generic one the moment
 // the refresh lands.
-package workload
+package escalation
+
+import "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 
 // refreshedFailureEvidence returns the record that should replace a
 // Failed row's LastFailure, or nil when there is nothing to refresh:
@@ -26,14 +28,14 @@ package workload
 // not when the row failed, and moving the stamp forward would both
 // misdate the failure and make a row that is merely wedged look like it
 // keeps failing anew.
-func refreshedFailureEvidence(row InstanceStatus, rowEvidence InstanceEvidence) *InstanceTermination {
+func refreshedFailureEvidence(row types.InstanceStatus, rowEvidence InstanceEvidence) *types.InstanceTermination {
 	if rowEvidence.StuckPod == nil || rowEvidence.StuckReason == "" {
 		return nil
 	}
 	if row.LastFailure == nil || row.LastFailure.Reason != DeadlineExceededReason {
 		return nil
 	}
-	return PodTerminationWithReason(rowEvidence.StuckPod, rowEvidence.StuckReason, row.LastFailure.Time)
+	return types.PodTerminationWithReason(rowEvidence.StuckPod, rowEvidence.StuckReason, row.LastFailure.Time)
 }
 
 // refreshFailureMutation writes the refreshed evidence onto LastFailure
@@ -42,9 +44,9 @@ func refreshedFailureEvidence(row InstanceStatus, rowEvidence InstanceEvidence) 
 // lands on: the pass-start observation can be stale, and a row that has
 // since left Failed or recorded a concrete cause of its own must keep
 // what it has.
-func refreshFailureMutation(termination *InstanceTermination) func(*InstanceStatus) bool {
-	return func(row *InstanceStatus) bool {
-		if row.Phase != InstancePhaseFailed {
+func refreshFailureMutation(termination *types.InstanceTermination) func(*types.InstanceStatus) bool {
+	return func(row *types.InstanceStatus) bool {
+		if row.Phase != types.InstancePhaseFailed {
 			return false
 		}
 		if row.LastFailure == nil || row.LastFailure.Reason != DeadlineExceededReason {
