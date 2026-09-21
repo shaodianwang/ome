@@ -2,8 +2,9 @@ title: "Rollout engine: behavior lock before restructure"
 oep-number: "0020.2"
 authors:
   - "@slin1237"
-status: provisional
+status: implemented
 creation-date: 2026-09-19
+last-updated: 2026-09-21
 reviewers:
   - TBD
 approvers:
@@ -21,11 +22,11 @@ see-also:
   - "/oeps/0020-integration-test-framework-v2"  # the KIND and envtest apparatus
   - "/oeps/0007-omenative-workload-strategy"    # the per-Instance lifecycle being restructured
 
-stage: alpha
+stage: beta
 
-latest-milestone: "TBD"
+latest-milestone: "beta"
 
 milestone:
-  alpha: "TBD"
-  beta: "TBD"
-  stable: "TBD"
+  alpha: "2026-09-21"   # every workload-lane arrow driven, goldens from a named commit
+  beta: "2026-09-21"    # machine frozen; ten consecutive green main builds
+  stable: "TBD"         # OEP-0020.3 step 1 merged golden-identical

@@ -191,8 +191,9 @@ each one waits on are the structural entries under **Unlocked paths** in
 | sensitivity | flipping any one ownership predicate or hold rule fails at least one golden (a mutation check run once, recorded) | met for the hold rules, partly for the surge guards. Recorded in `replay/README.md`: ten `hold-*` scenarios contend two authorities on one row, so `supersedes` now fails three goldens flipped to `false` and four flipped to `true`, and dropping the first-writer-wins guard fails those same four. Two groups stay redundant and are only sensitive as a pair — the surge ownership guards (`strategy-edit-midsurge` when both are disabled), and the per-authority `*HoldWritable` rules, which refuse exactly what the shared guard already refuses. A control that stops holds being marked fails 13 |
 | determinism | ten consecutive runs, identical traces | 118 scenarios × 10 passes, byte-identical |
 
-Part 1's exit is met on merge of this chain: every workload-lane arrow is
-driven and every adapter-lane arrow is named by a test. The sensitivity
+Part 1's exit is met: every workload-lane arrow is driven and every
+adapter-lane arrow is named by a test, with the last arrow landing in the
+adopt fix (#1632). The sensitivity
 row reads as met for the rules a scenario set can
 reach: every pair of hold authorities the engine can put on one row is
 now contended in both orders, and the rules that remain insensitive
@@ -410,6 +411,10 @@ state than before.
 - Part 2 complete: zero decided cells without coverage, machine frozen.
 - Part 3 exit met: ten consecutive green `main` builds.
 
+Alpha and Beta are met as of 2026-09-21 (#1632 landed the last workload-lane
+arrow; the freeze landed in #1589; the ten-build window was 4452 through
+4473).
+
 ### Stable
 
 - OEP-0020.3 step 1 has merged golden-identical, i.e. the lock has caught or
@@ -462,6 +467,35 @@ Resolved:
 - The replay driver publishes endpoints in the per-revision routed Service the
   engine reads, so an endpoint hold is drivable in the replay lane.
 
-All three parts have met their exit on merge of this chain, which clears the
-gate on OEP-0020.3. The status stays `provisional` until that work confirms
-the lock holds against a machine it did not grow up with.
+All three parts have met their exit, which clears the gate on OEP-0020.3.
+The status is `implemented`; the Stable criterion waits for that restructure
+to confirm the lock holds against a machine it did not grow up with.
+
+What the lock found and fixed while it was being built, each as its own PR
+with the golden or cell that recorded it: the gang surge drain deleted its
+source on the same pass it left rotation (#1631); a Failed row could never
+adopt pods already on the target, and once it could, the sibling "leave an
+unhealthy on-target pod alone" branch came alive and stopped retry and
+relocation, which the KIND lane caught on the PR before it merged (#1632); a
+paused Component recorded no hold evidence at all (#1635); a Held RetryBlock
+denied only the first pod at its revision (#1636); a canary plan and image
+landing in one write before the IR promoted its current revision wedged the
+canary unarmed (#1587); a mid-surge row counted as updated and reopened the
+run (#1582).
+
+Still open after implementation, each with an owner path:
+
+- `canary_retarget_rollback_kind_test.go` is quarantined until 2026-10-04.
+  After the rollback converges, something rewrites the InferenceReplica spec
+  every pass, so the executor's fresh-snapshot gate never opens and the phase
+  never reaches `RolledBack`. The writer was not identifiable from logs and
+  code; the projector now logs the merge patch of every spec write at debug
+  level (#1634), and the quarantined run on every build will name the field
+  the next time the wedge enters. The structural half is known: the projector
+  runs before the canary dispatch in the same pass, so any per-pass spec write
+  starves that pass's dispatch by construction.
+- The perm case `canary/pd` p363 failed once on `main` on a teardown that did
+  not converge within its bound after the case itself passed. First instance
+  of that class; not a KIND spec, so the quarantine list does not cover it.
+- The `Multi-cluster Kueue quota` soft-fail group is red on most builds and
+  invisible because it is soft-fail; reported to its owner, outside this gate.
