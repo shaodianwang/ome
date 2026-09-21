@@ -324,13 +324,19 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		Named(PlacementEndpointControllerName).
 		For(&v1beta1.InferenceService{}, builder.WithPredicates(placementPublishChange)).
-		// A TrafficMap is named after and owner-ref'd to its ISVC, so map a
-		// publication-input change back to that ISVC.
+		// A TrafficMap is named after its ISVC. Map by that stable key instead
+		// of its owner reference, which orphan deletion propagation may remove.
 		Watches(&v1beta1.TrafficMap{},
-			handler.EnqueueRequestForOwner(mgr.GetScheme(), mgr.GetRESTMapper(),
-				&v1beta1.InferenceService{}, handler.OnlyControllerOwner()),
+			handler.EnqueueRequestsFromMapFunc(enqueueTrafficMapISVC),
 			builder.WithPredicates(trafficMapPublishChange)).
 		Complete(r)
+}
+
+func enqueueTrafficMapISVC(_ context.Context, object client.Object) []ctrl.Request {
+	if _, ok := object.(*v1beta1.TrafficMap); !ok {
+		return nil
+	}
+	return []ctrl.Request{{NamespacedName: client.ObjectKeyFromObject(object)}}
 }
 
 // trafficMapPublishChange admits TrafficMap events that can change the

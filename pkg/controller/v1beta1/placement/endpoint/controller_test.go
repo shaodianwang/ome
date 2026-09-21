@@ -294,6 +294,54 @@ func TestReconcile_AuthoritativeTrafficMapStateBlocksLegacyEffects(t *testing.T)
 	}
 }
 
+func TestReconcile_OwnerlessTrafficMapHandoffReleaseEnqueuesFinalizerCleanup(t *testing.T) {
+	isvc := placedISVC("cluster-a", "svc.prod.cloud-a.example")
+	isvc.Finalizers = []string{EndpointFinalizer, placementcontroller.PlacementFinalizer}
+	trafficMap := &v1beta1.TrafficMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       isvc.Name,
+			Namespace:  isvc.Namespace,
+			Finalizers: []string{TrafficMapPublisherFinalizer, "example.com/hold"},
+		},
+		Status: v1beta1.TrafficMapStatus{
+			SourceUID: isvc.UID,
+			Publisher: &v1beta1.TrafficMapPublisherStatus{
+				PublisherName:  "gatewayapi",
+				ClaimedTargets: []string{"v1:httproute:prod/svc-global"},
+			},
+		},
+	}
+	r, c := newReconciler(t, baseConfig(), isvc, trafficMap)
+	publisher := &recordingEndpointPublisher{}
+	r.Publisher = publisher
+	require.NoError(t, c.Delete(context.Background(), isvc))
+	require.NoError(t, c.Delete(context.Background(), trafficMap))
+
+	reconcile(t, r)
+	assert.Zero(t, publisher.unpublished)
+	blockedSource := &v1beta1.InferenceService{}
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(isvc), blockedSource))
+	assert.Contains(t, blockedSource.Finalizers, EndpointFinalizer)
+
+	blockedMap := &v1beta1.TrafficMap{}
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(trafficMap), blockedMap))
+	releasedMap := blockedMap.DeepCopy()
+	releasedMap.Finalizers = []string{"example.com/hold"}
+	releasedMap.Status.Publisher = nil
+	require.NoError(t, c.Update(context.Background(), releasedMap))
+	require.True(t, trafficMapPublishChange.Update(trafficMapUpdateEvent(blockedMap, releasedMap)))
+	requests := enqueueTrafficMapISVC(context.Background(), releasedMap)
+	require.Len(t, requests, 1, "ownerless handoff release must enqueue the same-key ISVC")
+	_, err := r.Reconcile(context.Background(), requests[0])
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, publisher.unpublished)
+	releasedSource := &v1beta1.InferenceService{}
+	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(isvc), releasedSource))
+	assert.NotContains(t, releasedSource.Finalizers, EndpointFinalizer)
+	assert.Contains(t, releasedSource.Finalizers, placementcontroller.PlacementFinalizer)
+}
+
 func TestReconcile_RechecksTrafficMapImmediatelyBeforeEffects(t *testing.T) {
 	trafficMap := &v1beta1.TrafficMap{ObjectMeta: metav1.ObjectMeta{
 		Name: "svc", Namespace: "prod", Finalizers: []string{TrafficMapPublisherFinalizer},
