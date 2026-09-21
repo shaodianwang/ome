@@ -91,6 +91,7 @@ EVAL_CASE_DIR = REPO_ROOT / "hack/omenative-testing/perm/isvcs"
 MC_KIND_SPEC_GROUPS = (
     ("placement", "Multi-cluster placement", (
         "fanout", "lifecycle", "endpoint", "ownership", "reshard", "scale",
+        "trafficmap_gc",
     )),
     ("quota", "Multi-cluster Kueue quota", (
         "admission", "split_quota", "queue_routing",
