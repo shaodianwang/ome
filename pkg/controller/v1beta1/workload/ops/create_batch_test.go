@@ -1382,6 +1382,11 @@ func TestCreate_BatchedWavesAdvancePastOversizedGangAndConverge(t *testing.T) {
 	}
 }
 
+// TestCreate_BatchedGateDeniedInstanceConsumesNoBudget: the pod budget is
+// spent by the Instances the pass actually selects, so a gate-denied one
+// leaves the whole budget to its neighbour. The block is a not-yet-due
+// Backoff because that state gates a fresh start only: index 0 is denied and
+// index 1, already materializing, keeps its authorization.
 func TestCreate_BatchedGateDeniedInstanceConsumesNoBudget(t *testing.T) {
 	resetExpectations(t)
 	isvc := minimalISVC("batch-gate", "prod", 2)
@@ -1405,9 +1410,11 @@ func TestCreate_BatchedGateDeniedInstanceConsumesNoBudget(t *testing.T) {
 	target := &appsv1.ControllerRevision{
 		ObjectMeta: metav1.ObjectMeta{Name: "batch-gate-engine-deadbeef", Namespace: isvc.Namespace},
 	}
+	notDue := metav1.NewTime(time.Now().Add(time.Hour))
 	input.ObservedState.RetryBlocks = []workload.RetryBlock{{
 		TargetRevision: target.Name,
-		State:          workload.RetryBlockHeld,
+		State:          workload.RetryBlockBackoff,
+		NextRetryAt:    &notDue,
 	}}
 	recorder := newBatchMutationRecorder(input.ObservedState.InstanceStatuses)
 	podBatchSize := int32(1)

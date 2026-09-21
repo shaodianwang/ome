@@ -80,10 +80,10 @@ cells:
     outcome: transition
     to: Restart/Drain
     guard: RecreateInstanceOnPodRestart, a multi-pod Instance that still has a surviving member, and no RetryBlock denying the rebuild revision
-    note: partial gang loss hands the whole Instance to the restart pass, which runs ahead of Create and which the create gate defers to; every other shape — single pod, total loss, or a policy without instance recreate — stays in this state and the missing pod is re-created inside the same attempt at the same operation and deadline
+    note: partial gang loss hands the whole Instance to the restart pass, which runs ahead of Create and which the create gate defers to; every other shape — single pod, total loss, or a policy without instance recreate — stays in this state and the missing pod is re-created inside the same attempt at the same operation and deadline, unless a Held block denies the revision that pod would carry
     placement: unit
-    coverage: {perm: [], unit: [TestCreate_RecreateInstance_DefersPartialGangToRestart, TestCreate_NonRecreatePolicy_SelfHealsMissingPod, TestCreate_PartialPods_CreatesOnlyMissing], kind: [], replay: [T-create-gang-restart]}
-    status: current
+    coverage: {perm: [], unit: [TestCreate_RecreateInstance_DefersPartialGangToRestart, TestCreate_NonRecreatePolicy_SelfHealsMissingPod, TestCreate_PartialPods_CreatesOnlyMissing, TestCreate_RetryBlockHeld_DeniesRemainderOfInFlightAttempt], kind: [], replay: [T-create-gang-restart]}
+    status: decided
 
   - state: Create/CreatePods
     event: pod.deleted
@@ -333,6 +333,23 @@ cells:
     placement: unit
     coverage: {perm: [], unit: [TestPlan_Update_HeldByPartition], kind: []}
     status: current
+
+  - state: Create/CreatePods
+    event: spec.releaseHeldRevision
+    outcome: defer
+    note: the mailbox rewrites the Component's RetryBlock and never touches a row; a Held block denies every pod at its revision, including the ones this attempt has yet to create, so the release is what lets the attempt finish its set on the next pass (pkg/controller/v1beta1/inferencereplica/release_held.go)
+    placement: unit
+    coverage: {perm: [], unit: [TestCreate_RetryBlockReleased_RebuildsMissingMember], kind: []}
+    status: decided
+
+  - state: Create/CreatePods
+    event: gate.deny
+    variants: [Held]
+    outcome: defer
+    note: the pods an attempt has not created yet are pods at the held revision like any other, so a block that goes Held while this attempt is mid-materialization stops the rest of its set. The attempt is not parked - nothing records an external wait - so its own deadline stays the backstop that ends the wedge, which is what fails the row through the record rather than holding it open
+    placement: unit
+    coverage: {perm: [], unit: [TestCreate_RetryBlockHeld_DeniesMissingMemberRebuild], kind: []}
+    status: decided
 
   - state: Create/CreatePods
     event: timer.operationDeadline

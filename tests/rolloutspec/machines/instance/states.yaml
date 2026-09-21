@@ -49,7 +49,12 @@ states:
       timer.operationDeadline: no operation is in flight
       timer.migrationDeadline: no operation pins this index to a migration record
       gate.allow: the update trigger declines below Ready, so the coordination gate is never consulted for this row
-      gate.deny: the update trigger declines below Ready, so the coordination gate is never consulted for this row
+      gate.deny[Plan]: the update trigger declines below Ready, so the coordination gate is never consulted for this row
+      gate.deny[Pairing]: the update trigger declines below Ready, so the coordination gate is never consulted for this row
+      gate.deny[Ratio]: the update trigger declines below Ready, so the coordination gate is never consulted for this row
+      gate.deny[Sequential]: the update trigger declines below Ready, so the coordination gate is never consulted for this row
+      gate.deny[Budget]: the update trigger declines below Ready, so the coordination gate is never consulted for this row
+      gate.deny[RetryBlock]: a backoff still running and a live one-at-a-time authorization both govern the opening of an attempt, and this row rebuilds what it lost rather than opening one
       pod.ready[target]: no replacement generation exists outside a surge or migration pair
       pod.scheduled[target]: no replacement generation exists outside a surge or migration pair
       pod.containersReady[target]: no replacement generation exists outside a surge or migration pair
@@ -98,11 +103,15 @@ states:
     note: write-ahead marker committed before any pod create; the attempt pins its target revision so a failure is charged to the right RetryBlock subject
     not_applicable:
       spec.resetInstances: the reset verb addresses Failed Instances only, so a row in any other phase is skipped before anything about it is read
-      spec.releaseHeldRevision: the retry gate is consulted before an attempt starts, never during one, so a released block cannot reach a row with an operation in flight
-      timer.retryAt: the retry gate is consulted before an attempt starts, never during one
+      timer.retryAt: a backoff coming due opens an attempt, and this row already carries one
       timer.migrationDeadline: no operation pins this index to a migration record
       gate.allow: the Create pass does not consult the coordination update gate
-      gate.deny: the Create pass does not consult the coordination update gate
+      gate.deny[Plan]: the Create pass does not consult the coordination update gate
+      gate.deny[Pairing]: the Create pass does not consult the coordination update gate
+      gate.deny[Ratio]: the Create pass does not consult the coordination update gate
+      gate.deny[Sequential]: the Create pass does not consult the coordination update gate
+      gate.deny[Budget]: the Create pass does not consult the coordination update gate
+      gate.deny[RetryBlock]: a backoff still running and a live one-at-a-time authorization both govern the opening of an attempt, and this row is the attempt they authorized
       pod.ready[target]: no replacement generation exists outside a surge or migration pair
       pod.scheduled[target]: no replacement generation exists outside a surge or migration pair
       pod.containersReady[target]: no replacement generation exists outside a surge or migration pair

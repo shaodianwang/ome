@@ -846,17 +846,33 @@ func missingPodTargets(input workload.ReconcileInput, plan workload.ComponentPla
 // allowCreateForMissingInstance evaluates the gates that precede a Creating
 // intent. A denied revision is intentionally skipped rather than reported as
 // an unready create.
+//
+// Every pod the pass would create carries the target revision, so every one
+// of them answers to that revision's RetryBlock: a Held block denies the
+// whole revision, not merely the first attempt at it, and a row rebuilding a
+// member it lost waits on the record exactly as a fresh start does. The
+// milder states are asked of a fresh start only, because they govern OPENING
+// an attempt — a backoff still running, and the one-attempt-at-a-time
+// authorization — and asking them of a row already materializing would deny
+// the very attempt they authorized.
+//
+// A denied fresh start is settled: it holds no pods and runs no deadline, so
+// the pass reports it ready and waits on the block's own wake-up. A denied
+// rebuild is not — it is short of its pod set, and while it carries an
+// attempt that attempt's deadline is the backstop that ends the wait — so the
+// pass keeps its cadence for it.
 func allowCreateForMissingInstance(input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, existing []*corev1.Pod, target *appsv1.ControllerRevision) (allowed, treatedReady bool, retryAfter time.Duration) {
 	if target != nil {
 		s := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)
-		freshStart := s == nil || (s.Phase == workload.InstancePhaseFailed && s.Operation == nil)
-		if freshStart {
-			if block := workload.FindRetryBlock(input.ObservedState.RetryBlocks, target.Name); block != nil {
+		if block := workload.FindRetryBlock(input.ObservedState.RetryBlocks, target.Name); block != nil {
+			if createFreshStart(s) {
 				attemptInFlight := anyInFlightUpdateAt(input.ObservedState.InstanceStatuses, target.Name) ||
 					anyInFlightCreateAttempt(input.ObservedState.InstanceStatuses)
 				if denied, wait := evaluateRetryBlockGate(block, input.Now(), attemptInFlight); denied {
 					return false, true, wait
 				}
+			} else if block.State == workload.RetryBlockHeld {
+				return false, false, 0
 			}
 		}
 	}
@@ -870,6 +886,14 @@ func allowCreateForMissingInstance(input workload.ReconcileInput, plan workload.
 		}
 	}
 	return true, false, 0
+}
+
+// createFreshStart reports whether the row is one the Create pass would open
+// a first attempt on: no row at all, or the Failed-with-no-Operation shape a
+// disposed attempt and the operator reset mailbox both leave behind. Any
+// other row is rebuilding — it holds pods, an attempt, or both.
+func createFreshStart(s *workload.InstanceStatus) bool {
+	return s == nil || (s.Phase == workload.InstancePhaseFailed && s.Operation == nil)
 }
 
 // createAttemptOwnsPods reports whether an Instance's pods belong to a Create

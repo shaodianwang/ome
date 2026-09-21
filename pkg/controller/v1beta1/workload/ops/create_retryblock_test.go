@@ -300,3 +300,171 @@ func TestCreate_RetryBlockInProgressLive_Denies(t *testing.T) {
 		t.Errorf("denied create must not touch the block: %d write(s)", len(writes))
 	}
 }
+
+// createGateGangPod fabricates one live gang member in the shape Render
+// emits, addressed by runner and ordinal so a fixture can leave a named
+// member of the set missing.
+func createGateGangPod(t *testing.T, c client.Client, isvc *v1beta1.InferenceService, idx int32, runner string, ordinal int32) {
+	t.Helper()
+	labels := legacyTestPodLabels(isvc.Name, workload.ComponentEngine, idx, runner, 1, ordinal)
+	labels[query.LabelRevisionHash] = testRevisionHashLegacy
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      query.PodName(isvc.Name, workload.ComponentEngine, idx, runner, ordinal),
+			Namespace: isvc.Namespace,
+			Labels:    labels,
+		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "test:v1"}}},
+	}
+	if err := c.Create(context.Background(), pod); err != nil {
+		t.Fatalf("seed live gang member %s: %v", pod.Name, err)
+	}
+}
+
+// pendingGangMemberLost seeds the shape the missing-member rebuild starts
+// from: a row that was serving, demoted with its counters intact, whose gang
+// has lost one of its two members.
+func pendingGangMemberLost(t *testing.T, t0 time.Time) (*workload.ReconcileInput, workload.ComponentPlan, *appsv1.ControllerRevision, *[]retryBlockCall, client.Client, *v1beta1.InferenceService) {
+	t.Helper()
+	input, _, tcr, calls, c, isvc := createGateFixture(t, t0, v1beta1.OMENativeInstanceStatus{
+		Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstancePending,
+	})
+	createGateGangPod(t, c, isvc, 0, "leader", 0)
+	return input, legacyMultiPodComponentPlan(workload.UpdateStrategySurgeThenDrain), tcr, calls, c, isvc
+}
+
+// TestCreate_RetryBlockHeld_DeniesMissingMemberRebuild: a Held block denies
+// every pod at its revision, not only the first attempt at it. The rebuild of
+// a member the row lost is held on the same record — nothing is created and
+// the row is not stamped — and the pass keeps its cadence because a row short
+// of its pod set has not converged.
+//
+// Cells: instance/Pending/gate.deny[Held]/before
+func TestCreate_RetryBlockHeld_DeniesMissingMemberRebuild(t *testing.T) {
+	t0 := time.Now()
+	input, plan, tcr, calls, c, isvc := pendingGangMemberLost(t, t0)
+	input.ObservedState.RetryBlocks = []workload.RetryBlock{
+		{TargetRevision: tcr.Name, State: workload.RetryBlockHeld, AttemptsStarted: 1, Reason: "ImagePullBackOff"},
+	}
+
+	res, err := Create(context.Background(), legacyTestDeps(c), *input, plan, tcr)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if pods := createGatePods(t, c, isvc.Namespace); len(pods) != 1 {
+		t.Errorf("Held block must deny the missing member: got %d pod(s) want the 1 survivor", len(pods))
+	}
+	if res.RequeueAfter != input.Requeue.Operation {
+		t.Errorf("a row short of its pod set must keep the create cadence: got %v want %v",
+			res.RequeueAfter, input.Requeue.Operation)
+	}
+	if len(*calls) != 0 {
+		t.Errorf("denied rebuild must not touch the block: %d MutateRetryBlock call(s)", len(*calls))
+	}
+	s := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
+	if s.Phase != v1beta1.OMENativeInstancePending || s.Operation != nil {
+		t.Errorf("denied rebuild must not stamp an attempt: phase=%q op=%v", s.Phase, s.Operation)
+	}
+}
+
+// TestCreate_RetryBlockReleased_RebuildsMissingMember: once the record
+// releases the revision the rebuild proceeds unchanged — the missing member
+// is created under a stamped Create attempt.
+//
+// Cells: instance/Pending/gate.deny[Held]/before
+func TestCreate_RetryBlockReleased_RebuildsMissingMember(t *testing.T) {
+	t0 := time.Now()
+	input, plan, tcr, _, c, isvc := pendingGangMemberLost(t, t0)
+
+	if _, err := Create(context.Background(), legacyTestDeps(c), *input, plan, tcr); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if pods := createGatePods(t, c, isvc.Namespace); len(pods) != 2 {
+		t.Fatalf("released revision must rebuild the missing member: got %d pod(s) want 2", len(pods))
+	}
+	s := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
+	if s.Phase != v1beta1.OMENativeInstanceCreating {
+		t.Errorf("allowed rebuild must stamp Creating: got %q", s.Phase)
+	}
+}
+
+// TestCreate_RetryBlockBackoffNotDue_AllowsMissingMemberRebuild: the milder
+// states gate the opening of an attempt, not the pods of a row already
+// holding some. A not-yet-due Backoff therefore leaves the rebuild alone.
+//
+// Cells: instance/Pending/gate.deny[Held]/before
+func TestCreate_RetryBlockBackoffNotDue_AllowsMissingMemberRebuild(t *testing.T) {
+	t0 := time.Now()
+	input, plan, tcr, _, c, isvc := pendingGangMemberLost(t, t0)
+	next := metav1.NewTime(t0.Add(time.Hour))
+	input.ObservedState.RetryBlocks = []workload.RetryBlock{
+		{TargetRevision: tcr.Name, State: workload.RetryBlockBackoff, AttemptsStarted: 1, NextRetryAt: &next},
+	}
+
+	if _, err := Create(context.Background(), legacyTestDeps(c), *input, plan, tcr); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if pods := createGatePods(t, c, isvc.Namespace); len(pods) != 2 {
+		t.Fatalf("a not-yet-due Backoff must not gate a rebuild: got %d pod(s) want 2", len(pods))
+	}
+}
+
+// TestCreate_RetryBlockHeld_DeniesRemainderOfInFlightAttempt: a block that
+// goes Held while an attempt is mid-materialization stops the rest of that
+// attempt's set — the pods it has yet to create are pods at the held revision
+// like any other. The attempt is left in place with no external wait
+// recorded, so its own deadline stays the backstop.
+//
+// Cells: instance/Create/CreatePods/gate.deny[Held]/before
+func TestCreate_RetryBlockHeld_DeniesRemainderOfInFlightAttempt(t *testing.T) {
+	t0 := time.Now()
+	input, _, tcr, calls, c, isvc := createGateFixture(t, t0, v1beta1.OMENativeInstanceStatus{
+		Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceCreating,
+		Operation: &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationCreate},
+	})
+	// The attempt pins the revision it materializes; the fixture learns the
+	// target's name only once it is built.
+	input.ObservedState.InstanceStatuses[0].Operation.TargetRevision = tcr.Name
+	if err := input.MutateInstance(context.Background(), 0, func(s *workload.InstanceStatus) bool {
+		s.Operation.TargetRevision = tcr.Name
+		return true
+	}); err != nil {
+		t.Fatalf("pin the attempt's target revision: %v", err)
+	}
+	plan := legacyMultiPodComponentPlan(workload.UpdateStrategySurgeThenDrain)
+	createGateGangPod(t, c, isvc, 0, "leader", 0)
+	pinPodRevision(t, c, isvc, query.PodName(isvc.Name, workload.ComponentEngine, 0, "leader", 0), tcr)
+	input.ObservedState.RetryBlocks = []workload.RetryBlock{
+		{TargetRevision: tcr.Name, State: workload.RetryBlockHeld, AttemptsStarted: 1, Reason: "ImagePullBackOff"},
+	}
+
+	if _, err := Create(context.Background(), legacyTestDeps(c), *input, plan, tcr); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if pods := createGatePods(t, c, isvc.Namespace); len(pods) != 1 {
+		t.Errorf("Held block must deny the rest of the set: got %d pod(s) want the 1 already created", len(pods))
+	}
+	if len(*calls) != 0 {
+		t.Errorf("denied create must not touch the block: %d MutateRetryBlock call(s)", len(*calls))
+	}
+	s := legacyInstanceStatusesOnIR(c, isvc, workload.ComponentEngine)[0]
+	if s.Operation == nil || s.Operation.Waiting != "" {
+		t.Errorf("a gate denial records no external wait, so the attempt deadline keeps running: op=%+v", s.Operation)
+	}
+}
+
+// pinPodRevision restamps a seeded pod with the target ControllerRevision's
+// hash, so the pass reads it as a member of the attempt pinned to that
+// revision rather than as wreckage a retired attempt left behind.
+func pinPodRevision(t *testing.T, c client.Client, isvc *v1beta1.InferenceService, name string, target *appsv1.ControllerRevision) {
+	t.Helper()
+	pod := &corev1.Pod{}
+	key := client.ObjectKey{Namespace: isvc.Namespace, Name: name}
+	if err := c.Get(context.Background(), key, pod); err != nil {
+		t.Fatalf("get seeded pod %s: %v", name, err)
+	}
+	pod.Labels[query.LabelRevisionHash] = query.RevisionOf(target).Hash()
+	if err := c.Update(context.Background(), pod); err != nil {
+		t.Fatalf("pin revision hash on %s: %v", name, err)
+	}
+}

@@ -9,6 +9,14 @@
 # corrected behavior: under a pause the hold authorities keep recording
 # and releasing, and only the repair they would otherwise decide is
 # withheld.
+#
+# Provenance for the instance-machine cells an owner decided in the review
+# session of 2026-09-20, which settled what a Held RetryBlock denies: every
+# pod at the held revision, not only the first attempt at it. The Create
+# pass's fill of a member a row lost, and the remainder of an attempt already
+# materializing, are held on the same record as a fresh start; the milder
+# states (a backoff still running, the one-at-a-time authorization) keep
+# governing the opening of an attempt only.
 # Selectors match the cells files exactly: an empty variants, windows or
 # transition matches all of them.
 history:
@@ -38,3 +46,20 @@ history:
   # --- cells-update-surge.yaml ---
   - {state: Update/Surge, event: pod.unschedulable, variants: [], windows: [], transition: "", decision: owner-review-2026-09-20}
   - {state: Update/SurgeDrain, event: pod.unschedulable, variants: [], windows: [], transition: "", decision: owner-review-2026-09-20}
+
+
+  # --- cells-noop.yaml ---
+  - {state: Pending, event: gate.deny, variants: [Held], windows: [], transition: "", decision: owner-review-2026-09-20}
+  - {state: Pending, event: pod.deleted, variants: [source], windows: [], transition: "", decision: owner-review-2026-09-20}
+  - {state: Pending, event: spec.releaseHeldRevision, variants: [], windows: [], transition: "", decision: owner-review-2026-09-20}
+  - {state: Pending, event: timer.retryAt, variants: [], windows: [before], transition: "", decision: owner-review-2026-09-20}
+  - {state: Ready, event: gate.deny, variants: [Held], windows: [], transition: "", decision: owner-review-2026-09-20}
+  - {state: Ready, event: pod.deleted, variants: [source], windows: [before], transition: "", decision: owner-review-2026-09-20}
+
+  # --- cells-create.yaml ---
+  - {state: Create/CreatePods, event: gate.deny, variants: [Held], windows: [], transition: "", decision: owner-review-2026-09-20}
+  - {state: Create/CreatePods, event: spec.releaseHeldRevision, variants: [], windows: [], transition: "", decision: owner-review-2026-09-20}
+  - {state: Create/CreatePods, event: pod.deleted, variants: [source], windows: [before], transition: "", decision: owner-review-2026-09-20}
+
+  # --- cells-failed.yaml ---
+  - {state: Failed, event: gate.deny, variants: [Held], windows: [], transition: "", decision: owner-review-2026-09-20}

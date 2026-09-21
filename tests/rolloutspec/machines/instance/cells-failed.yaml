@@ -435,7 +435,7 @@ cells:
     event: gate.deny
     variants: [Held]
     outcome: defer
-    note: a Held block has no time bound, so the row stays Failed until a different target revision supersedes the block or an operator releases it through the release-held mailbox. Only workload-caused evidence charges the ladder that reaches Held, so an environment-caused gang wave cannot land here however often it repeats - it re-enters Backoff at the current rung with AttemptsStarted unchanged. The gate itself is consulted only for a fresh start, which after an operator reset a parked row is again
+    note: a Held block has no time bound, so the row stays Failed until a different target revision supersedes the block or an operator releases it through the release-held mailbox. Only workload-caused evidence charges the ladder that reaches Held, so an environment-caused gang wave cannot land here however often it repeats - it re-enters Backoff at the current rung with AttemptsStarted unchanged. Held denies every pod at the revision, so a row parked with a preserved operation is denied exactly as the fresh start an operator reset turns it back into
     invariants: [retryblock.gates.fresh.attempts]
     placement: unit
     coverage:
