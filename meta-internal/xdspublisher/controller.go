@@ -25,7 +25,7 @@ const legacyTargetsAnnotation = "routing.ome.io/xds-published-targets"
 
 type weightedTarget struct {
 	name   string
-	weight uint32
+	weight float64
 }
 
 type publishPlan struct {
@@ -56,8 +56,9 @@ func (*Publisher) Stateful() bool { return true }
 
 // ResolveOptions implements endpoint.TrafficMapPublisher. Transport and
 // credentials are installation-wide and never enter an InferenceService or its
-// status digest. Target selection is also installation-wide because changing it
-// per object could redirect writes outside the operator-owned target scope.
+// status digest. Target selection and weight representation are also
+// installation-wide because changing either per object could make shared
+// external state inconsistent.
 func (*Publisher) ResolveOptions(global, inline map[string]string) (map[string]string, error) {
 	if len(inline) != 0 {
 		keys := make([]string, 0, len(inline))
@@ -69,7 +70,7 @@ func (*Publisher) ResolveOptions(global, inline map[string]string) (map[string]s
 			strings.Join(keys, ", "))
 	}
 	for key := range global {
-		if key != optTargetTemplate && key != optSourceSelector {
+		if key != optTargetTemplate && key != optSourceSelector && key != optWeightMode {
 			return nil, fmt.Errorf("xDS publisher received unsupported global option %q", key)
 		}
 	}
@@ -84,7 +85,14 @@ func (*Publisher) ResolveOptions(global, inline map[string]string) (map[string]s
 	if err != nil {
 		return nil, err
 	}
-	effective := map[string]string{optTargetTemplate: templateText}
+	weightMode, err := parseWeightMode(global[optWeightMode])
+	if err != nil {
+		return nil, err
+	}
+	effective := map[string]string{
+		optTargetTemplate: templateText,
+		optWeightMode:     weightMode,
+	}
 	if sourceSelector != "" {
 		effective[optSourceSelector] = sourceSelector
 	}
@@ -125,11 +133,15 @@ func (*Publisher) Plan(
 	if err != nil {
 		return nil, err
 	}
+	weightMode, err := parseWeightMode(effectiveOptions[optWeightMode])
+	if err != nil {
+		return nil, err
+	}
 	if !sourceSelector.Matches(labels.Set(owner.Labels)) {
 		return &publishPlan{withdrawn: true}, nil
 	}
 
-	targets, err := desiredTargets(owner, trafficMap, targetTemplate)
+	targets, err := desiredTargets(owner, trafficMap, targetTemplate, weightMode)
 	if err != nil {
 		return nil, err
 	}
@@ -171,7 +183,7 @@ func (p *Publisher) Apply(
 	for _, target := range xdsPlan.targets {
 		if err := p.weights.PublishWeight(ctx, target.name, target.weight); err != nil {
 			return placementendpoint.TrafficMapPublishResult{}, fmt.Errorf(
-				"publish weight %d for xDS target %q: %w", target.weight, target.name, err,
+				"publish weight %g for xDS target %q: %w", target.weight, target.name, err,
 			)
 		}
 	}
@@ -203,7 +215,7 @@ func (p *Publisher) Unpublish(
 
 func effectiveTargetTemplate(options map[string]string) (*template.Template, error) {
 	for key := range options {
-		if key != optTargetTemplate && key != optSourceSelector {
+		if key != optTargetTemplate && key != optSourceSelector && key != optWeightMode {
 			return nil, fmt.Errorf("xDS publisher effective options contain unsupported key %q", key)
 		}
 	}
@@ -218,12 +230,14 @@ func desiredTargets(
 	owner *v1beta1.InferenceService,
 	trafficMap *v1beta1.TrafficMap,
 	targetTemplate *template.Template,
+	weightMode string,
 ) ([]weightedTarget, error) {
 	if trafficMap.Spec.Service == "" {
 		return nil, fmt.Errorf("TrafficMap service must not be empty")
 	}
 	targets := make([]weightedTarget, 0, len(trafficMap.Spec.Entries))
 	seen := make(map[string]struct{}, len(trafficMap.Spec.Entries))
+	var totalWeight int64
 	for _, entry := range trafficMap.Spec.Entries {
 		if entry.Endpoint == nil {
 			return nil, fmt.Errorf("TrafficMap entry %q has no valid endpoint", entry.Cluster)
@@ -256,7 +270,14 @@ func desiredTargets(
 			return nil, fmt.Errorf("xDS target template maps more than one entry to %q", name)
 		}
 		seen[name] = struct{}{}
-		targets = append(targets, weightedTarget{name: name, weight: uint32(entry.Weight)})
+		totalWeight += int64(entry.Weight)
+		targets = append(targets, weightedTarget{name: name, weight: float64(entry.Weight)})
+	}
+	if weightMode == weightModeNormalized && totalWeight > 0 {
+		denominator := float64(totalWeight)
+		for i := range targets {
+			targets[i].weight /= denominator
+		}
 	}
 	sort.Slice(targets, func(i, j int) bool {
 		if (targets[i].weight == 0) != (targets[j].weight == 0) {

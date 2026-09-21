@@ -29,7 +29,7 @@ type recordingPublisher struct {
 	clearFailures   map[string]error
 }
 
-func (p *recordingPublisher) PublishWeight(_ context.Context, target string, weight uint32) error {
+func (p *recordingPublisher) PublishWeight(_ context.Context, target string, weight float64) error {
 	p.published = append(p.published, weightedTarget{name: target, weight: weight})
 	if err := p.publishFailures[target]; err != nil {
 		delete(p.publishFailures, target)
@@ -79,11 +79,18 @@ func newTestPublisher(weights ClusterWeightPublisher) *Publisher {
 }
 
 func targetOptions(value string) map[string]string {
-	return map[string]string{optTargetTemplate: value}
+	return map[string]string{
+		optTargetTemplate: value,
+		optWeightMode:     weightModeNormalized,
+	}
 }
 
 func targetOptionsWithSelector(value, selector string) map[string]string {
-	return map[string]string{optTargetTemplate: value, optSourceSelector: selector}
+	return map[string]string{
+		optTargetTemplate: value,
+		optSourceSelector: selector,
+		optWeightMode:     weightModeNormalized,
+	}
 }
 
 func TestPublisherIdentityAndState(t *testing.T) {
@@ -133,6 +140,10 @@ func TestResolveOptionsValidatesSanitizedGlobals(t *testing.T) {
 		{name: "missing", options: nil, want: "required"},
 		{name: "invalid template", options: targetOptions("{{"), want: optTargetTemplate},
 		{name: "invalid source selector", options: targetOptionsWithSelector("{{.Cluster}}", "publish in ("), want: optSourceSelector},
+		{name: "missing weight mode", options: map[string]string{optTargetTemplate: "{{.Cluster}}"}, want: optWeightMode},
+		{name: "invalid weight mode", options: map[string]string{
+			optTargetTemplate: "{{.Cluster}}", optWeightMode: "percent",
+		}, want: optWeightMode},
 		{name: "unexpected", options: map[string]string{optTargetTemplate: "{{.Cluster}}", optOncall: "team"}, want: "unsupported"},
 	}
 	for _, tt := range tests {
@@ -316,8 +327,70 @@ func TestPlanIsImmutableAndApplyPublishesZeroBeforePositive(t *testing.T) {
 	assert.Zero(t, result)
 	assert.Equal(t, []weightedTarget{
 		{name: "model-a.team-a.home-a.example", weight: 0},
-		{name: "model-a.team-a.home-b.example", weight: 30},
+		{name: "model-a.team-a.home-b.example", weight: 1},
 	}, weights.published)
+}
+
+func TestPlanWeightModes(t *testing.T) {
+	tests := []struct {
+		name string
+		mode string
+		want []float64
+	}{
+		{name: "normalized", mode: weightModeNormalized, want: []float64{0.7, 0.3}},
+		{name: "relative", mode: weightModeRelative, want: []float64{70, 30}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			options := targetOptions("{{.EndpointHostname}}")
+			options[optWeightMode] = tt.mode
+			plan, err := newTestPublisher(&recordingPublisher{}).Plan(
+				testISVC("model-a"), testTrafficMap(), options,
+			)
+			require.NoError(t, err)
+			xdsPlan := plan.(*publishPlan)
+			require.Len(t, xdsPlan.targets, 2)
+			for i := range tt.want {
+				assert.InDelta(t, tt.want[i], xdsPlan.targets[i].weight, 1e-12)
+			}
+		})
+	}
+}
+
+func TestPlanNormalizedWeightsSumToOneOrStayZero(t *testing.T) {
+	tests := []struct {
+		name    string
+		weights []int32
+		want    []float64
+	}{
+		{name: "relative values", weights: []int32{2, 3}, want: []float64{0.6, 0.4}},
+		{name: "single positive", weights: []int32{0, 7}, want: []float64{0, 1}},
+		{name: "all zero", weights: []int32{0, 0}, want: []float64{0, 0}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			trafficMap := testTrafficMap()
+			for i := range tt.weights {
+				trafficMap.Spec.Entries[i].Weight = tt.weights[i]
+			}
+			plan, err := newTestPublisher(&recordingPublisher{}).Plan(
+				testISVC("model-a"), trafficMap, targetOptions("{{.Cluster}}"),
+			)
+			require.NoError(t, err)
+			xdsPlan := plan.(*publishPlan)
+			require.Len(t, xdsPlan.targets, len(tt.want))
+			total := 0.0
+			for i := range tt.want {
+				assert.InDelta(t, tt.want[i], xdsPlan.targets[i].weight, 1e-12)
+				total += xdsPlan.targets[i].weight
+			}
+			if tt.name == "all zero" {
+				assert.Zero(t, total)
+			} else {
+				assert.InDelta(t, 1, total, 1e-12)
+			}
+		})
+	}
 }
 
 func TestPlanRejectsLegacyLifecycleStateWithoutPublishing(t *testing.T) {

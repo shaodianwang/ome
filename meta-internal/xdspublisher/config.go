@@ -32,7 +32,11 @@ const (
 	optOncall             = "oncall"
 	optACL                = "acl"
 	optSourceSelector     = "sourceSelector"
+	optWeightMode         = "weightMode"
 	clusterURLPlaceholder = "{cluster}"
+
+	weightModeNormalized = "normalized"
+	weightModeRelative   = "relative"
 )
 
 var acceptedOptions = map[string]struct{}{
@@ -45,6 +49,7 @@ var acceptedOptions = map[string]struct{}{
 	optOncall:         {},
 	optACL:            {},
 	optSourceSelector: {},
+	optWeightMode:     {},
 }
 
 type config struct {
@@ -57,6 +62,7 @@ type config struct {
 	oncall         string
 	acl            *string
 	sourceSelector string
+	weightMode     string
 }
 
 // Publisher writes TrafficMap weights through the internal xDS API.
@@ -69,7 +75,7 @@ var _ placementendpoint.TrafficMapPublisher = (*Publisher)(nil)
 
 // ClusterWeightPublisher is the narrow service surface used by the adapter.
 type ClusterWeightPublisher interface {
-	PublishWeight(ctx context.Context, cluster string, weight uint32) error
+	PublishWeight(ctx context.Context, cluster string, weight float64) error
 	ClearWeight(ctx context.Context, cluster string) error
 }
 
@@ -97,7 +103,10 @@ func newTrafficMapPublisherWithFactory(
 	if err != nil {
 		return nil, err
 	}
-	globalOptions := map[string]string{optTargetTemplate: publisher.config.targetTemplate}
+	globalOptions := map[string]string{
+		optTargetTemplate: publisher.config.targetTemplate,
+		optWeightMode:     publisher.config.weightMode,
+	}
 	if publisher.config.sourceSelector != "" {
 		globalOptions[optSourceSelector] = publisher.config.sourceSelector
 	}
@@ -169,6 +178,10 @@ func parseConfig(options map[string]string) (config, error) {
 	if err != nil {
 		return config{}, err
 	}
+	weightMode, err := parseWeightMode(options[optWeightMode])
+	if err != nil {
+		return config{}, err
+	}
 
 	requestTimeout, err := parsePositiveDuration(options, optRequestTimeout)
 	if err != nil {
@@ -205,6 +218,7 @@ func parseConfig(options map[string]string) (config, error) {
 		oncall:         oncall,
 		acl:            acl,
 		sourceSelector: sourceSelector,
+		weightMode:     weightMode,
 	}, nil
 }
 
@@ -227,6 +241,22 @@ func parseSourceSelector(raw string) (labels.Selector, string, error) {
 			optSourceSelector, err)
 	}
 	return selector, selector.String(), nil
+}
+
+func parseWeightMode(raw string) (string, error) {
+	mode := strings.TrimSpace(raw)
+	if mode == "" {
+		return "", fmt.Errorf("routing.publisher.options[%q] is required by %q", optWeightMode, Name)
+	}
+	switch mode {
+	case weightModeNormalized, weightModeRelative:
+		return mode, nil
+	default:
+		return "", fmt.Errorf(
+			"routing.publisher.options[%q] must be %q or %q",
+			optWeightMode, weightModeNormalized, weightModeRelative,
+		)
+	}
 }
 
 func validateURLTemplate(raw string) error {

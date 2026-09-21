@@ -24,6 +24,7 @@ func validOptions() map[string]string {
 		optTLSCAFile:      "/certs/ca.pem",
 		optOncall:         "ome",
 		optACL:            "ome-xds-publisher",
+		optWeightMode:     weightModeNormalized,
 	}
 }
 
@@ -40,6 +41,7 @@ func TestParseConfig(t *testing.T) {
 	require.NotNil(t, cfg.acl)
 	assert.Equal(t, "ome-xds-publisher", *cfg.acl)
 	assert.Empty(t, cfg.sourceSelector)
+	assert.Equal(t, weightModeNormalized, cfg.weightMode)
 
 	tests := []struct {
 		name   string
@@ -52,6 +54,8 @@ func TestParseConfig(t *testing.T) {
 		{"missing template", func(o map[string]string) { delete(o, optTargetTemplate) }, optTargetTemplate},
 		{"bad template", func(o map[string]string) { o[optTargetTemplate] = "{{" }, optTargetTemplate},
 		{"bad source selector", func(o map[string]string) { o[optSourceSelector] = "publish in (" }, optSourceSelector},
+		{"missing weight mode", func(o map[string]string) { delete(o, optWeightMode) }, optWeightMode},
+		{"bad weight mode", func(o map[string]string) { o[optWeightMode] = "percent" }, optWeightMode},
 		{"publisher resync is not an opaque option", func(o map[string]string) { o["resyncInterval"] = "1m" }, "not accepted"},
 		{"missing URL", func(o map[string]string) { delete(o, optURLTemplate) }, optURLTemplate},
 		{"HTTP URL", func(o map[string]string) { o[optURLTemplate] = "http://automation.example.com/{cluster}" }, "absolute HTTPS"},
@@ -85,6 +89,15 @@ func TestParseConfigCanonicalizesSourceSelector(t *testing.T) {
 	assert.Equal(t, want.String(), cfg.sourceSelector)
 }
 
+func TestParseConfigCanonicalizesRelativeWeightMode(t *testing.T) {
+	options := validOptions()
+	options[optWeightMode] = "  relative  "
+
+	cfg, err := parseConfig(options)
+	require.NoError(t, err)
+	assert.Equal(t, weightModeRelative, cfg.weightMode)
+}
+
 func TestParseConfigAllowsOmittedACL(t *testing.T) {
 	options := validOptions()
 	delete(options, optACL)
@@ -110,6 +123,7 @@ func TestNewPublisherBuildsHTTPClient(t *testing.T) {
 	assert.Zero(t, got.ResyncInterval, "the common publisher config owns the wrapper cadence")
 	assert.Equal(t, map[string]string{
 		optTargetTemplate: "{{.EndpointHostname}}",
+		optWeightMode:     weightModeNormalized,
 	}, got.GlobalOptions)
 	assert.Equal(t, "ome", gotConfig.oncall)
 	require.NotNil(t, gotConfig.acl)
@@ -135,6 +149,7 @@ func TestNewPublisherCarriesSourceSelectorAsGlobalBehavior(t *testing.T) {
 	assert.Equal(t, map[string]string{
 		optTargetTemplate: "{{.EndpointHostname}}",
 		optSourceSelector: wantSelector.String(),
+		optWeightMode:     weightModeNormalized,
 	}, got.GlobalOptions)
 }
 

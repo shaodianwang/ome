@@ -116,7 +116,7 @@ calls to the xDS automation HTTP API:
 
 ```http
 PUT /api/v1/clusters/{cluster}/weight
-{"weight": 10, "createIfMissing": {"oncall": "ome"}}
+{"weight": 0.1, "createIfMissing": {"oncall": "ome"}}
 
 DELETE /api/v1/clusters/{cluster}/weight
 ```
@@ -126,9 +126,18 @@ tier (`cluster` becomes `xds_auto:cluster`), creating that tier when necessary.
 It does not mutate EDS membership or create a route arm, so the target must
 already exist in the xDS route graph.
 
-TrafficMap weights are applied verbatim. With the routing probe's explicit
-all-failed `Drain` policy, this includes publishing zero for every target; probe
-recovery republishes the newly computed capacity weights.
+The required `weightMode` option selects the xDS wire representation.
+`normalized` divides every positive TrafficMap weight by the sum of the map's
+weights, so the published vector totals 1; an all-zero map remains all-zero.
+`relative` publishes the TrafficMap's integer ratios as numeric values. With the
+routing probe's explicit all-failed `Drain` policy, either mode publishes zero
+for every target. Changing modes changes the publisher options digest and
+republishes each selected TrafficMap.
+
+Existing xDS deployments must add `weightMode` when adopting a binary with this
+option. Use `relative` for the first rollout when the wire representation must
+remain unchanged, then switch every leader candidate to `normalized`; binaries
+that predate the option reject it during configuration validation.
 
 Selecting `routing.publisher.name: xds` replaces the default Gateway API
 publisher; the two publishers do not run side by side.
@@ -153,6 +162,7 @@ routing:
       oncall: ome
       acl: ome-xds-publisher       # optional
       sourceSelector: 'routing.example.com/publish=true'  # optional
+      weightMode: normalized
       targetTemplate: '{{.EndpointHostname}}'
       urlTemplate: 'https://xds-automation.mrpc.fbinfra.net/api/v1/clusters/{cluster}/weight'
       requestTimeout: 30s
