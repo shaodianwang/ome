@@ -770,6 +770,60 @@ func TestTrafficMapPublisherRejectsUnsafeClaimsBeforeEffects(t *testing.T) {
 	}
 }
 
+func TestTrafficMapPublisherClaimArbitrationUsesUncachedState(t *testing.T) {
+	ownerA, trafficMapA := publisherTestObjects()
+	trafficMapA.Finalizers = []string{TrafficMapPublisherFinalizer}
+
+	ownerB := ownerA.DeepCopy()
+	ownerB.Name = "model-b"
+	ownerB.UID = types.UID("owner-b-uid")
+	trafficMapB := trafficMapA.DeepCopy()
+	trafficMapB.Name = ownerB.Name
+	trafficMapB.UID = types.UID("map-b-uid")
+	trafficMapB.Spec.Service = ownerB.Name
+	trafficMapB.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: v1beta1.SchemeGroupVersion.String(), Kind: "InferenceService",
+		Name: ownerB.Name, UID: ownerB.UID, Controller: trafficMapA.OwnerReferences[0].Controller,
+	}}
+	trafficMapB.Status.SourceUID = ownerB.UID
+
+	liveClient := newTrafficMapPublisherClient(t, ownerA, trafficMapA, ownerB, trafficMapB)
+	cacheClient := &frozenTrafficMapCacheClient{
+		Client: liveClient,
+		trafficMaps: map[types.NamespacedName]*v1beta1.TrafficMap{
+			client.ObjectKeyFromObject(trafficMapA): trafficMapA.DeepCopy(),
+			client.ObjectKeyFromObject(trafficMapB): trafficMapB.DeepCopy(),
+		},
+	}
+	publisher := &recordingTrafficMapPublisher{
+		name: "example-publisher", stateful: true, claims: []string{"shared-target"},
+	}
+	reconciler := &TrafficMapPublisherReconciler{
+		Client: cacheClient, APIReader: liveClient, Log: logr.Discard(), Publisher: publisher, Active: true,
+	}
+
+	_, err := reconcileTrafficMapPublisher(t, reconciler, trafficMapA)
+	require.NoError(t, err)
+	require.Equal(t, []string{"apply"}, publisher.events)
+	claimed := getPublisherTrafficMap(t, liveClient, trafficMapA)
+	require.NotNil(t, claimed.Status.Publisher)
+	assert.Equal(t, []string{"shared-target"}, claimed.Status.Publisher.ClaimedTargets)
+
+	publisher.events = nil
+	_, err = reconcileTrafficMapPublisher(t, reconciler, trafficMapB)
+	require.NoError(t, err, "the conflicting claim is a reported terminal rejection")
+	assert.Empty(t, publisher.events, "the second map must not mutate the shared target")
+
+	rejected := getPublisherTrafficMap(t, liveClient, trafficMapB)
+	assert.Nil(t, rejected.Status.Publisher, "a rejected map must not acquire the live claim")
+	programmed := apimeta.FindStatusCondition(rejected.Status.Conditions, v1beta1.TrafficMapProgrammed)
+	require.NotNil(t, programmed)
+	assert.Equal(t, metav1.ConditionFalse, programmed.Status)
+	assert.Equal(t, trafficMapPublisherReasonClaimRejected, programmed.Reason)
+	assert.Equal(t, 2, cacheClient.trafficMapGets,
+		"both reconcile inputs came from the frozen informer view")
+}
+
 func TestTrafficMapPublisherRejectsInvalidOptionsWithoutEffects(t *testing.T) {
 	owner, trafficMap := publisherTestObjects()
 	publisher := &recordingTrafficMapPublisher{
@@ -1577,6 +1631,15 @@ type staleTrafficMapClient struct {
 	served bool
 }
 
+// frozenTrafficMapCacheClient models an informer cache that has not observed
+// publisher status writes yet. Mutations still reach the live API client, as
+// they do through controller-runtime's delegating client.
+type frozenTrafficMapCacheClient struct {
+	client.Client
+	trafficMaps    map[types.NamespacedName]*v1beta1.TrafficMap
+	trafficMapGets int
+}
+
 type preEffectChangingReader struct {
 	client.Reader
 	trafficMapGets   int
@@ -1663,6 +1726,41 @@ func (c *staleTrafficMapClient) Get(
 		return nil
 	}
 	return c.Client.Get(ctx, key, object, options...)
+}
+
+func (c *frozenTrafficMapCacheClient) Get(
+	ctx context.Context,
+	key client.ObjectKey,
+	object client.Object,
+	options ...client.GetOption,
+) error {
+	trafficMap, ok := object.(*v1beta1.TrafficMap)
+	if !ok {
+		return c.Client.Get(ctx, key, object, options...)
+	}
+	snapshot, found := c.trafficMaps[key]
+	if !found {
+		return apierrors.NewNotFound(v1beta1.Resource("trafficmaps"), key.Name)
+	}
+	c.trafficMapGets++
+	snapshot.DeepCopyInto(trafficMap)
+	return nil
+}
+
+func (c *frozenTrafficMapCacheClient) List(
+	ctx context.Context,
+	list client.ObjectList,
+	options ...client.ListOption,
+) error {
+	trafficMaps, ok := list.(*v1beta1.TrafficMapList)
+	if !ok {
+		return c.Client.List(ctx, list, options...)
+	}
+	trafficMaps.Items = trafficMaps.Items[:0]
+	for _, snapshot := range c.trafficMaps {
+		trafficMaps.Items = append(trafficMaps.Items, *snapshot.DeepCopy())
+	}
+	return nil
 }
 
 func (c *conflictOnceClient) Status() client.SubResourceWriter {
