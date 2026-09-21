@@ -324,18 +324,20 @@ status:                        # independently written by routing and publisher
   programmed: true
   gatewayRef: {group: gateway.networking.k8s.io, kind: HTTPRoute, name: llama-3-70b}
   observedTrafficMapGeneration: 5
-  conditions: [{type: Programmed, status: "True", reason: HTTPRouteReconciled}]
+  conditions:
+    - {type: CapacityFallback, status: "False", reason: CapacityPollingDisabled}
+    - {type: Programmed, status: "True", reason: HTTPRouteReconciled}
 ```
 
 Two writers, one object:
 
 - The **routing controller** owns `spec` — recomputes `entries` whenever
   `status.placement` or the home's quota allocation changes — plus
-  `status.sourceUID` and the TrafficMap's `Routable` condition.
+  `status.sourceUID` and the TrafficMap's `Routable` and `CapacityFallback`
+  conditions.
 - The **publisher** patches the TrafficMap's `Programmed`, `gatewayRef`, and
   observed-generation fields plus its publisher journal. It does not replace
-  sibling status, `sourceUID`, or the routing controller's `Routable`
-  condition.
+  sibling status, `sourceUID`, or the routing controller's conditions.
 
 *Anticipated objection — "a machine-written `spec` is unusual; spec is user
 intent."* True, and we considered a status-only shape (Alternatives). The
@@ -522,7 +524,9 @@ is what makes capacity-aware weights and a gateway-neutral contract possible.
 - `spec.observedISVCGeneration` (int64) for staleness detection.
 - `status.sourceUID` (the source ISVC UID), `status.programmed` (bool), `status.gatewayRef`,
   `status.observedTrafficMapGeneration` (int64), `status.publisher`, and
-  `status.conditions[]`.
+  `status.conditions[]`. The abnormal-true `CapacityFallback` condition reports
+  whether any home is using the plan because configured endpoint capacity is
+  unavailable; per-entry `fallbackReason` carries the diagnosis.
 
 The `TrafficMap` carries the state needed to reverse publisher side effects:
 
@@ -628,9 +632,16 @@ unpublish does not require the source or its owner reference to remain readable.
   `NotPlaced`, `NoAddressableHome`, `AllHomesUnready`, `NoRoutableCapacity`, or
   `AllHomesProbeFailed`. A PreserveTraffic fallback is `Routable=True` with
   reason `AllHomesProbeFailed`. `status.conditions` is a
-  `listType=map` keyed on `type`, so `Routable` and the publisher's `Programmed`
-  coexist under server-side apply — but they are two writers on one subresource
-  and each must patch only its own condition.
+  `listType=map` keyed on `type`, so routing's `Routable` and
+  `CapacityFallback` conditions coexist with the publisher's `Programmed`
+  condition under server-side apply — but they are two writers on one
+  subresource and each must patch only its own conditions.
+- **Capacity fallback is metric-visible without error-label cardinality.**
+  `ome_trafficmap_capacity_fallback_homes{namespace,trafficmap}` is the number
+  of current entries using the plan because endpoint capacity is unavailable.
+  Per-home error details stay in the TrafficMap rather than becoming unbounded
+  metric labels. The series exists only while endpoint capacity is enabled and
+  is removed on policy disable, routing teardown, or source deletion.
 - **A policy change resets only affected observations.** Changing a probe block
   discards that ISVC's old hysteresis counters and starts inconclusive; changing
   a capacity block discards its sample window and falls open to the plan until

@@ -19,6 +19,12 @@ const TrafficMapProgrammed = "Programmed"
 // state of the map rather than its absence.
 const TrafficMapRoutable = "Routable"
 
+// TrafficMapCapacityFallback is the condition type reporting whether one or
+// more homes are using the control-plane allocation because configured
+// endpoint capacity could not produce a usable ceiling. It is owned by the
+// routing controller.
+const TrafficMapCapacityFallback = "CapacityFallback"
+
 const (
 	// MaxTrafficMapPublisherNameLength bounds a registered publisher identifier
 	// without constraining its implementation-specific naming scheme.
@@ -42,6 +48,17 @@ const (
 	TrafficMapReasonAllHomesUnready     = "AllHomesUnready"
 	TrafficMapReasonNoRoutableCapacity  = "NoRoutableCapacity"
 	TrafficMapReasonAllHomesProbeFailed = "AllHomesProbeFailed"
+)
+
+// Reasons for the CapacityFallback condition. The condition has abnormal-true
+// polarity: True means at least one home has fallen open to the control-plane
+// allocation; False means fallback is inactive, including when polling is
+// disabled or there are no homes to observe.
+const (
+	TrafficMapReasonCapacityPollingDisabled   = "CapacityPollingDisabled"
+	TrafficMapReasonNoCapacityTargets         = "NoCapacityTargets"
+	TrafficMapReasonEndpointCapacityAvailable = "EndpointCapacityAvailable"
+	TrafficMapReasonEndpointCapacityFallback  = "EndpointCapacityUnavailable"
 )
 
 // CapacitySource names which input produced an entry's Allocated count.
@@ -91,7 +108,8 @@ const (
 // is garbage-collected with the ISVC), for as long as that ISVC is routed --
 // including while no home is routable, when the table is empty or all-zero and
 // the Routable condition says why. The routing controller owns spec, SourceUID,
-// and the Routable condition; the publisher owns the rest of status.
+// and the Routable and CapacityFallback conditions; the publisher owns the
+// rest of status.
 // +genclient
 // +k8s:openapi-gen=true
 // +kubebuilder:object:root=true
@@ -282,8 +300,9 @@ type TrafficMapCapacity struct {
 // onto a concrete data plane, and whether the map has anything to realize.
 // Two writers share it: the publisher owns Programmed, GatewayRef,
 // ObservedTrafficMapGeneration, Publisher, and the Programmed condition; the
-// routing controller owns SourceUID and the Routable condition. Conditions is
-// keyed on type, so each writer must patch only its own fields and condition.
+// routing controller owns SourceUID plus the Routable and CapacityFallback
+// conditions. Conditions is keyed on type, so each writer must patch only its
+// own fields and conditions.
 type TrafficMapStatus struct {
 	// SourceUID is the UID of the InferenceService that generated this map. The
 	// routing controller writes it through its own status field manager before a
@@ -312,8 +331,8 @@ type TrafficMapStatus struct {
 	// +optional
 	Publisher *TrafficMapPublisherStatus `json:"publisher,omitempty"`
 
-	// Conditions carry the routing controller's Routable condition and the
-	// publisher's Programmed condition.
+	// Conditions carry the routing controller's Routable and CapacityFallback
+	// conditions and the publisher's Programmed condition.
 	// +optional
 	// +listType=map
 	// +listMapKey=type

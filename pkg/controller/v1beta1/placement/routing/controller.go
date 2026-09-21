@@ -74,11 +74,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if !found {
 		r.Prober.Forget(req.NamespacedName)
 		r.Capacity.Forget(req.NamespacedName)
+		deleteCapacityFallbackMetric(req.Namespace, req.Name)
 		return ctrl.Result{}, nil
 	}
 	if !isvc.DeletionTimestamp.IsZero() {
 		r.Prober.Forget(req.NamespacedName)
 		r.Capacity.Forget(req.NamespacedName)
+		deleteCapacityFallbackMetric(req.Namespace, req.Name)
 		return ctrl.Result{}, r.reap(ctx, isvc)
 	}
 
@@ -87,6 +89,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if !routingEnabled(r.Config, isvc) || !placementcontroller.IsPlacementEligible(isvc) {
 		r.Prober.Forget(req.NamespacedName)
 		r.Capacity.Forget(req.NamespacedName)
+		deleteCapacityFallbackMetric(req.Namespace, req.Name)
 		return ctrl.Result{}, r.reap(ctx, isvc)
 	}
 
@@ -144,9 +147,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if err := r.apply(ctx, isvc, spec); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.setRoutable(ctx, isvc, status, reason); err != nil {
+	if err := r.setRoutingStatus(ctx, isvc, status, reason, capacityPolicy.IsEnabled()); err != nil {
 		return ctrl.Result{}, err
 	}
+	recordCapacityFallbackMetric(isvc.Namespace, isvc.Name, capacityPolicy.IsEnabled(), spec)
 	var probeRequeueAfter time.Duration
 	if r.Prober != nil && probePolicy.IsEnabled() && len(probeTargets) > 0 {
 		probeRequeueAfter = r.Prober.nextDelay(
@@ -283,14 +287,16 @@ func (r *Reconciler) apply(ctx context.Context, isvc *v1beta1.InferenceService, 
 	return nil
 }
 
-// setRoutable writes the routing controller's Routable condition onto the
-// ISVC's TrafficMap, explaining an empty or degraded table.
+// setRoutingStatus writes the routing controller's conditions onto the ISVC's
+// TrafficMap. Routable explains an empty or degraded table; CapacityFallback
+// reports when configured endpoint capacity has fallen open to the plan.
 //
-// It re-reads and retries on conflict rather than patching blind. Routable is a
-// list-map entry with its own server-side-apply field manager, so it coexists
-// with the publisher's independently owned Programmed condition.
-func (r *Reconciler) setRoutable(ctx context.Context, isvc *v1beta1.InferenceService,
-	status metav1.ConditionStatus, reason string) error {
+// It re-reads and retries on conflict rather than patching blind. The routing
+// conditions are list-map entries with their own server-side-apply field
+// manager, so they coexist with the publisher's independently owned Programmed
+// condition.
+func (r *Reconciler) setRoutingStatus(ctx context.Context, isvc *v1beta1.InferenceService,
+	status metav1.ConditionStatus, reason string, capacityEnabled bool) error {
 	key := types.NamespacedName{Name: isvc.Name, Namespace: isvc.Namespace}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		tm := &v1beta1.TrafficMap{}
@@ -313,20 +319,29 @@ func (r *Reconciler) setRoutable(ctx context.Context, isvc *v1beta1.InferenceSer
 			ObservedGeneration: tm.Generation,
 		}
 		apimeta.SetStatusCondition(&tm.Status.Conditions, cond)
-		return r.Status().Apply(ctx, trafficMapRoutableStatusApply(tm),
+		apimeta.SetStatusCondition(&tm.Status.Conditions,
+			capacityFallbackCondition(tm.Spec, capacityEnabled, tm.Generation))
+		return r.Status().Apply(ctx, trafficMapRoutingStatusApply(tm),
 			client.FieldOwner(trafficMapRoutableStatusFieldOwner), client.ForceOwnership)
 	})
 }
 
-func trafficMapRoutableStatusApply(trafficMap *v1beta1.TrafficMap) runtime.ApplyConfiguration {
+func trafficMapRoutingStatusApply(trafficMap *v1beta1.TrafficMap) runtime.ApplyConfiguration {
 	status := map[string]any{}
 	if trafficMap.Status.SourceUID != "" {
 		status["sourceUID"] = string(trafficMap.Status.SourceUID)
 	}
-	if routable := apimeta.FindStatusCondition(
-		trafficMap.Status.Conditions, v1beta1.TrafficMapRoutable,
-	); routable != nil {
-		status["conditions"] = []any{trafficMapRoutableConditionApply(*routable)}
+	conditions := make([]any, 0, 2)
+	for _, conditionType := range []string{
+		v1beta1.TrafficMapRoutable,
+		v1beta1.TrafficMapCapacityFallback,
+	} {
+		if condition := apimeta.FindStatusCondition(trafficMap.Status.Conditions, conditionType); condition != nil {
+			conditions = append(conditions, trafficMapRoutingConditionApply(*condition))
+		}
+	}
+	if len(conditions) != 0 {
+		status["conditions"] = conditions
 	}
 	apply := &unstructured.Unstructured{Object: map[string]any{"status": status}}
 	apply.SetAPIVersion(v1beta1.SchemeGroupVersion.String())
@@ -337,7 +352,7 @@ func trafficMapRoutableStatusApply(trafficMap *v1beta1.TrafficMap) runtime.Apply
 	return client.ApplyConfigurationFromUnstructured(apply)
 }
 
-func trafficMapRoutableConditionApply(condition metav1.Condition) map[string]any {
+func trafficMapRoutingConditionApply(condition metav1.Condition) map[string]any {
 	apply := map[string]any{
 		"type":               condition.Type,
 		"status":             string(condition.Status),

@@ -125,6 +125,14 @@ var _ = ginkgo.Describe("TrafficMap status ownership", func() {
 			g.Expect(apimeta.FindStatusCondition(
 				trafficMap.Status.Conditions, v1beta1.TrafficMapRoutable,
 			)).NotTo(gomega.BeNil())
+			capacityFallback := apimeta.FindStatusCondition(
+				trafficMap.Status.Conditions, v1beta1.TrafficMapCapacityFallback,
+			)
+			g.Expect(capacityFallback).NotTo(gomega.BeNil())
+			g.Expect(capacityFallback.Status).To(gomega.Equal(metav1.ConditionFalse))
+			g.Expect(capacityFallback.Reason).To(gomega.Equal(
+				v1beta1.TrafficMapReasonCapacityPollingDisabled,
+			))
 			programmed := apimeta.FindStatusCondition(
 				trafficMap.Status.Conditions, v1beta1.TrafficMapProgrammed,
 			)
@@ -141,8 +149,10 @@ var _ = ginkgo.Describe("TrafficMap status ownership", func() {
 			g.Expect(owners).To(gomega.HaveKey("ome-trafficmap-routing"))
 			g.Expect(owners["ome-trafficmap-publisher"]).To(gomega.ContainSubstring("Programmed"))
 			g.Expect(owners["ome-trafficmap-publisher"]).NotTo(gomega.ContainSubstring("Routable"))
+			g.Expect(owners["ome-trafficmap-publisher"]).NotTo(gomega.ContainSubstring("CapacityFallback"))
 			g.Expect(owners["ome-trafficmap-publisher"]).NotTo(gomega.ContainSubstring("sourceUID"))
 			g.Expect(owners["ome-trafficmap-routing"]).To(gomega.ContainSubstring("Routable"))
+			g.Expect(owners["ome-trafficmap-routing"]).To(gomega.ContainSubstring("CapacityFallback"))
 			g.Expect(owners["ome-trafficmap-routing"]).To(gomega.ContainSubstring("sourceUID"))
 			g.Expect(owners["ome-trafficmap-routing"]).NotTo(gomega.ContainSubstring("Programmed"))
 		}).Should(gomega.Succeed())

@@ -982,6 +982,10 @@ func routableCond(tm *v1beta1.TrafficMap) *metav1.Condition {
 	return apimeta.FindStatusCondition(tm.Status.Conditions, v1beta1.TrafficMapRoutable)
 }
 
+func capacityFallbackCond(tm *v1beta1.TrafficMap) *metav1.Condition {
+	return apimeta.FindStatusCondition(tm.Status.Conditions, v1beta1.TrafficMapCapacityFallback)
+}
+
 // An ISVC that is not Placed keeps its map, emptied, with the reason. Deleting
 // it would make "not placed yet" indistinguishable from a wedged controller.
 func TestReconcile_NotPlacedKeepsEmptyTrafficMap(t *testing.T) {
@@ -1218,6 +1222,10 @@ func TestReconcile_InlineCapacityPolicyDrivesObservationAndRequeue(t *testing.T)
 	assert.Equal(t, int32(1), *tm.Spec.Entries[0].Capacity.Reported)
 	assert.Equal(t, v1beta1.CapacitySourceEndpoint, tm.Spec.Entries[0].Capacity.Source)
 	assert.Empty(t, tm.Spec.Entries[0].Capacity.FallbackReason)
+	condition := capacityFallbackCond(tm)
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionFalse, condition.Status)
+	assert.Equal(t, v1beta1.TrafficMapReasonEndpointCapacityAvailable, condition.Reason)
 }
 
 func TestReconcile_CapacityExpiryReprojectsWithoutPollingEarly(t *testing.T) {
@@ -1270,6 +1278,10 @@ func TestReconcile_CapacityExpiryReprojectsWithoutPollingEarly(t *testing.T) {
 	assert.Nil(t, tm.Spec.Entries[0].Capacity.Reported)
 	assert.Equal(t, v1beta1.CapacitySourceControlPlane, tm.Spec.Entries[0].Capacity.Source)
 	assert.Contains(t, tm.Spec.Entries[0].Capacity.FallbackReason, "stale")
+	condition := capacityFallbackCond(tm)
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionTrue, condition.Status)
+	assert.Equal(t, v1beta1.TrafficMapReasonEndpointCapacityFallback, condition.Reason)
 }
 
 func TestReconcile_InvalidCapacityEndpointDoesNotBlockValidTarget(t *testing.T) {
@@ -1347,6 +1359,10 @@ func TestReconcile_InlineCapacityDisableSkipsGlobalCapacity(t *testing.T) {
 	assert.Equal(t, int32(3), tm.Spec.Entries[0].Capacity.Allocated)
 	assert.Equal(t, v1beta1.CapacitySourceControlPlane, tm.Spec.Entries[0].Capacity.Source)
 	assert.Empty(t, tm.Spec.Entries[0].Capacity.FallbackReason)
+	condition := capacityFallbackCond(tm)
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionFalse, condition.Status)
+	assert.Equal(t, v1beta1.TrafficMapReasonCapacityPollingDisabled, condition.Reason)
 }
 
 func TestReconcile_UsesEarliestObservationDeadline(t *testing.T) {
@@ -1696,17 +1712,18 @@ func TestReconcile_ServingHomeReportsRoutable(t *testing.T) {
 	assert.Equal(t, v1beta1.TrafficMapReasonRoutable, cond.Reason)
 }
 
-func TestRoutableStatusApplyIsFieldIsolated(t *testing.T) {
+func TestRoutingStatusApplyIsFieldIsolated(t *testing.T) {
 	tm := &v1beta1.TrafficMap{ObjectMeta: metav1.ObjectMeta{
 		Name: testName, Namespace: testNS, ResourceVersion: "17",
 	}}
 	tm.Status.SourceUID = "source-uid"
 	tm.Status.Conditions = []metav1.Condition{
 		{Type: v1beta1.TrafficMapRoutable, Status: metav1.ConditionTrue, Reason: "Routable"},
+		{Type: v1beta1.TrafficMapCapacityFallback, Status: metav1.ConditionTrue, Reason: "EndpointCapacityUnavailable"},
 		{Type: v1beta1.TrafficMapProgrammed, Status: metav1.ConditionTrue, Reason: "Published"},
 	}
 
-	apply, ok := trafficMapRoutableStatusApply(tm).(interface{ UnstructuredContent() map[string]any })
+	apply, ok := trafficMapRoutingStatusApply(tm).(interface{ UnstructuredContent() map[string]any })
 	require.True(t, ok)
 	content := apply.UnstructuredContent()
 	metadata := content["metadata"].(map[string]any)
@@ -1716,8 +1733,9 @@ func TestRoutableStatusApplyIsFieldIsolated(t *testing.T) {
 	_, found := status["publisher"]
 	assert.False(t, found, "routing SSA must not own publisher status")
 	conditions := status["conditions"].([]any)
-	require.Len(t, conditions, 1)
+	require.Len(t, conditions, 2)
 	assert.Equal(t, v1beta1.TrafficMapRoutable, conditions[0].(map[string]any)["type"])
+	assert.Equal(t, v1beta1.TrafficMapCapacityFallback, conditions[1].(map[string]any)["type"])
 }
 
 func TestEnqueueTrafficMapSourceDoesNotRequireOwnerReference(t *testing.T) {
