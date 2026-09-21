@@ -23,11 +23,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	placementcontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/placement"
-	placementendpoint "github.com/ome-projects/ome/pkg/controller/v1beta1/placement/endpoint"
 	"github.com/ome-projects/ome/pkg/validation"
 )
 
@@ -76,6 +76,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		r.Capacity.Forget(req.NamespacedName)
 		return ctrl.Result{}, nil
 	}
+	if !isvc.DeletionTimestamp.IsZero() {
+		r.Prober.Forget(req.NamespacedName)
+		r.Capacity.Forget(req.NamespacedName)
+		return ctrl.Result{}, r.reap(ctx, isvc)
+	}
 
 	// A TrafficMap-backed publisher uses its finalizer as the teardown handshake:
 	// retain the map until external state is withdrawn and the source is released.
@@ -85,13 +90,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, r.reap(ctx, isvc)
 	}
 
-	// Deleting: the TrafficMap's owner reference garbage-collects it with the
-	// ISVC, so there is nothing to do.
-	if !isvc.DeletionTimestamp.IsZero() {
-		r.Prober.Forget(req.NamespacedName)
-		r.Capacity.Forget(req.NamespacedName)
-		return ctrl.Result{}, nil
-	}
 	if err := validation.ValidateRouting(&isvc.Spec); err != nil {
 		return ctrl.Result{}, fmt.Errorf("validate routing policy: %w", err)
 	}
@@ -235,7 +233,7 @@ func (r *Reconciler) ownedTrafficMap(
 		}
 		return nil, err
 	}
-	if !controlledByInferenceService(tm, isvc) {
+	if !placementcontroller.TrafficMapHasExactController(tm, isvc) {
 		return nil, fmt.Errorf("TrafficMap %s exists but is not controlled by InferenceService UID %q", key, isvc.UID)
 	}
 	if err := validateTrafficMapSourceUID(tm, isvc); err != nil {
@@ -260,7 +258,8 @@ func (r *Reconciler) apply(ctx context.Context, isvc *v1beta1.InferenceService, 
 		tm := &v1beta1.TrafficMap{ObjectMeta: metav1.ObjectMeta{Name: isvc.Name, Namespace: isvc.Namespace}}
 		var err error
 		op, err = controllerutil.CreateOrUpdate(ctx, r.Client, tm, func() error {
-			if (tm.UID != "" || tm.ResourceVersion != "") && !controlledByInferenceService(tm, isvc) {
+			if (tm.UID != "" || tm.ResourceVersion != "") &&
+				!placementcontroller.TrafficMapHasExactController(tm, isvc) {
 				return fmt.Errorf("TrafficMap %s exists but is not controlled by InferenceService UID %q",
 					client.ObjectKeyFromObject(tm), isvc.UID)
 			}
@@ -299,7 +298,7 @@ func (r *Reconciler) setRoutable(ctx context.Context, isvc *v1beta1.InferenceSer
 			// Gone, or not ours to annotate: nothing to report on.
 			return client.IgnoreNotFound(err)
 		}
-		if !controlledByInferenceService(tm, isvc) {
+		if !placementcontroller.TrafficMapHasExactController(tm, isvc) {
 			return nil
 		}
 		if err := validateTrafficMapSourceUID(tm, isvc); err != nil {
@@ -375,20 +374,34 @@ func routableMessage(reason string, status metav1.ConditionStatus, entries int) 
 	}
 }
 
-// reap deletes the ISVC's TrafficMap if we own it. It is a no-op when none
-// exists or when the object is not controlled by this ISVC (never delete
-// something we did not generate).
+// reap deletes a TrafficMap with an exact source controller or matching durable
+// source provenance. It never overrides a conflicting controller. The direct
+// TrafficMap watch keeps ownerless cleanup live when publisher status changes.
 func (r *Reconciler) reap(ctx context.Context, isvc *v1beta1.InferenceService) error {
 	if r.APIReader == nil {
 		return fmt.Errorf("reap TrafficMap: API reader is not configured")
 	}
+	if isvc == nil {
+		return fmt.Errorf("reap TrafficMap: InferenceService is nil")
+	}
 	tm := &v1beta1.TrafficMap{}
 	key := types.NamespacedName{Name: isvc.Name, Namespace: isvc.Namespace}
+	if isvc.UID == "" {
+		return fmt.Errorf("reap TrafficMap %s: InferenceService UID is empty", key)
+	}
 	if err := r.APIReader.Get(ctx, key, tm); err != nil {
 		return client.IgnoreNotFound(err)
 	}
-	if !controlledByInferenceService(tm, isvc) || !tm.DeletionTimestamp.IsZero() {
+	if !tm.DeletionTimestamp.IsZero() {
 		return nil
+	}
+	exactController := placementcontroller.TrafficMapHasExactController(tm, isvc)
+	if !exactController {
+		// Durable routing provenance survives orphan propagation, but it never
+		// overrides another controller's ownership.
+		if placementcontroller.TrafficMapHasController(tm) || tm.Status.SourceUID != isvc.UID {
+			return nil
+		}
 	}
 	if err := validateTrafficMapSourceUID(tm, isvc); err != nil {
 		return err
@@ -398,29 +411,28 @@ func (r *Reconciler) reap(ctx context.Context, isvc *v1beta1.InferenceService) e
 	if trafficMapNeedsPublisherFinalizerRepair(tm) {
 		return nil
 	}
-	return client.IgnoreNotFound(r.Delete(ctx, tm))
+	if tm.UID == "" {
+		return fmt.Errorf("reap TrafficMap %s: UID is empty", key)
+	}
+	if tm.ResourceVersion == "" {
+		return fmt.Errorf("reap TrafficMap %s: resourceVersion is empty", key)
+	}
+	uid := tm.UID
+	resourceVersion := tm.ResourceVersion
+	return client.IgnoreNotFound(r.Delete(ctx, tm, client.Preconditions{
+		UID:             &uid,
+		ResourceVersion: &resourceVersion,
+	}))
 }
 
 func trafficMapNeedsPublisherFinalizerRepair(trafficMap *v1beta1.TrafficMap) bool {
 	return trafficMapHasPublisherClaims(trafficMap) &&
-		!controllerutil.ContainsFinalizer(trafficMap, placementendpoint.TrafficMapPublisherFinalizer)
+		!controllerutil.ContainsFinalizer(trafficMap, placementcontroller.TrafficMapPublisherFinalizer)
 }
 
 func trafficMapHasPublisherClaims(trafficMap *v1beta1.TrafficMap) bool {
 	return trafficMap != nil && trafficMap.Status.Publisher != nil &&
 		len(trafficMap.Status.Publisher.ClaimedTargets) != 0
-}
-
-func controlledByInferenceService(
-	tm *v1beta1.TrafficMap,
-	isvc *v1beta1.InferenceService,
-) bool {
-	if tm == nil || isvc == nil || isvc.UID == "" {
-		return false
-	}
-	owner := metav1.GetControllerOf(tm)
-	return owner != nil && owner.APIVersion == v1beta1.SchemeGroupVersion.String() &&
-		owner.Kind == "InferenceService" && owner.Name == isvc.Name && owner.UID == isvc.UID
 }
 
 func validateTrafficMapSourceUID(
@@ -648,8 +660,9 @@ func placementMode(isvc *v1beta1.InferenceService) v1beta1.PlacementMode {
 }
 
 // SetupWithManager wires the controller: reconcile ISVCs, reacting only to
-// events that can change the generated table, and own the TrafficMaps it writes
-// so a drifted or deleted map is corrected.
+// events that can change the generated table, and watch TrafficMaps by their
+// same namespace/name source key. The direct watch continues to work after
+// orphan propagation removes a map's owner reference.
 //
 // Probe and capacity observations run inside reconciliation and use their
 // earliest returned delay as RequeueAfter.
@@ -660,7 +673,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	b := ctrl.NewControllerManagedBy(mgr).
 		Named(RoutingControllerName).
 		For(&v1beta1.InferenceService{}, builder.WithPredicates(routingTableChange)).
-		Owns(&v1beta1.TrafficMap{})
+		Watches(&v1beta1.TrafficMap{}, handler.EnqueueRequestsFromMapFunc(enqueueTrafficMapSource))
 	if r.Config.Observer.MaxConcurrentReconciles > 0 {
 		b = b.WithOptions(controller.Options{
 			MaxConcurrentReconciles: r.Config.Observer.MaxConcurrentReconciles,
@@ -668,6 +681,13 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 
 	return b.Complete(r)
+}
+
+func enqueueTrafficMapSource(_ context.Context, object client.Object) []ctrl.Request {
+	if _, ok := object.(*v1beta1.TrafficMap); !ok {
+		return nil
+	}
+	return []ctrl.Request{{NamespacedName: client.ObjectKeyFromObject(object)}}
 }
 
 // routingTableChange admits ISVC events that can change the generated TrafficMap:

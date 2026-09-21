@@ -588,8 +588,22 @@ unpublish does not require the source or its owner reference to remain readable.
   authority for deletion, zeroing, or ownership. *Rationale:* if a user can edit
   the cleanup journal, the operator's privileged publisher becomes a confused
   deputy against another service's target. ISVC status carries no duplicate
-  journal. If synchronous parent deletion is ever required, a lightweight ISVC
-  finalizer may wait for the TrafficMap to disappear, but it is only a barrier.
+  journal. On ISVC deletion, the routing controller requests deletion when the
+  map has either the exact controller owner (including a legacy map with empty
+  provenance) or no controller and a matching `status.sourceUID`. A conflicting
+  controller is never overridden. The existing placement finalizer retains the
+  source and its derived workloads while an exact-owner or matching-provenance
+  map remains. It also fails closed for an ownerless legacy map with empty
+  provenance when publisher status, its finalizer, or another publisher-owned
+  status field shows possible external publication. An exact owner with
+  mismatched provenance, or a conflicting controller with matching provenance,
+  remains blocked for manual resolution. An ownerless provenance mismatch, or a
+  conflicting controller without matching provenance, is foreign and does not
+  block teardown. Both checks use authoritative reads; the routing delete
+  carries UID and resource-version preconditions. A direct same-key TrafficMap
+  watch keeps finalizer-repair and cleanup events live after orphaning. This
+  makes TrafficMap publisher cleanup a barrier before backend teardown without
+  adding routing state to the ISVC.
 - **Created only for placement-eligible ISVCs** (those with a non-empty placement
   requirement or cluster selector) and only when both the installation gate and
   the ISVC's resolved enablement are true. A
@@ -947,6 +961,13 @@ from the then-current main branch rather than as a GitHub stack:
   routing deletion. Concurrent routing and publisher status updates prove the
   publisher patch changes only `TrafficMap.status.publisher` and its own
   `Programmed` fields—no source UID, sibling status, or condition is lost.
+- **Deletion ordering and orphan propagation.** Deleting an ISVC requests a
+  UID/resource-version-fenced delete for an exact-owned map or an ownerless map
+  with matching durable provenance. Placement keeps every derived backend while
+  that map, a conflicting matching-provenance map, or ambiguous legacy
+  publication evidence remains, and proceeds only after authoritative absence.
+  Confirmed foreign maps remain untouched and do not block teardown; ownership
+  conflicts, read failures, and replacement races fail closed.
 - **Gateway API publisher (envtest).** `spec` → one HTTPRoute with weighted
   backendRefs; entry removed → backendRef dropped and stale ExternalName Service
   deleted; `status.programmed` set; finalizer removes the route on map deletion.

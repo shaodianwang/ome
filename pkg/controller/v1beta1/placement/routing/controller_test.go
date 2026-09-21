@@ -3,6 +3,7 @@ package routing
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -20,10 +21,12 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	clocktesting "k8s.io/utils/clock/testing"
+	k8sptr "k8s.io/utils/ptr"
 	"knative.dev/pkg/apis"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -389,8 +392,10 @@ func TestReconcile_DisabledReapsExistingTrafficMap(t *testing.T) {
 	// Pre-existing owned TrafficMap that should be reaped when the feature is off.
 	existing := &v1beta1.TrafficMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      testName,
-			Namespace: testNS,
+			Name:            testName,
+			Namespace:       testNS,
+			UID:             "traffic-map-uid",
+			ResourceVersion: "1",
 			OwnerReferences: []metav1.OwnerReference{
 				*metav1.NewControllerRef(isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
 			},
@@ -408,9 +413,11 @@ func TestReconcile_PlacementIneligibleReapsWithoutStamping(t *testing.T) {
 	isvc.Spec.Placement = nil
 	existing := &v1beta1.TrafficMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:       testName,
-			Namespace:  testNS,
-			Finalizers: []string{"example.com/hold"},
+			Name:            testName,
+			Namespace:       testNS,
+			UID:             "traffic-map-uid",
+			ResourceVersion: "1",
+			Finalizers:      []string{"example.com/hold"},
 			OwnerReferences: []metav1.OwnerReference{
 				*metav1.NewControllerRef(isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
 			},
@@ -433,20 +440,22 @@ func TestReconcile_PlacementIneligibleReapsWithoutStamping(t *testing.T) {
 		"reap must not authorize a stale spec for publication before deletion")
 }
 
-func TestReconcile_DisabledDefersReapUntilClaimFinalizerIsRepaired(t *testing.T) {
+func TestReconcile_DisabledDefersOrphanedReapUntilClaimFinalizerIsRepaired(t *testing.T) {
 	isvc := splitISVC([]string{"a"}, []int32{3}, []int32{3})
 	existing := &v1beta1.TrafficMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      testName,
-			Namespace: testNS,
-			OwnerReferences: []metav1.OwnerReference{
-				*metav1.NewControllerRef(isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
+			Name:            testName,
+			Namespace:       testNS,
+			UID:             "traffic-map-uid",
+			ResourceVersion: "1",
+		},
+		Status: v1beta1.TrafficMapStatus{
+			SourceUID: isvc.UID,
+			Publisher: &v1beta1.TrafficMapPublisherStatus{
+				PublisherName:  "gatewayapi",
+				ClaimedTargets: []string{"v1:httproute:prod/svc-global"},
 			},
 		},
-		Status: v1beta1.TrafficMapStatus{Publisher: &v1beta1.TrafficMapPublisherStatus{
-			PublisherName:  "gatewayapi",
-			ClaimedTargets: []string{"v1:httproute:prod/svc-global"},
-		}},
 	}
 	r, apiClient := newReconciler(t, Config{Enabled: false}, isvc, existing)
 	r.Client = trafficMapBlindClient{Client: apiClient}
@@ -455,13 +464,17 @@ func TestReconcile_DisabledDefersReapUntilClaimFinalizerIsRepaired(t *testing.T)
 
 	deferred, exists := getTrafficMap(t, apiClient)
 	require.True(t, exists)
-	assert.Empty(t, deferred.Status.SourceUID)
+	assert.Empty(t, deferred.OwnerReferences)
+	assert.Equal(t, isvc.UID, deferred.Status.SourceUID)
 	assert.True(t, deferred.DeletionTimestamp.IsZero(), "a claimed map cannot be deleted before finalizer repair")
 	assert.Equal(t, existing.Status.Publisher.ClaimedTargets, deferred.Status.Publisher.ClaimedTargets)
 
 	deferred.Finalizers = append(deferred.Finalizers, placementendpoint.TrafficMapPublisherFinalizer)
 	require.NoError(t, apiClient.Update(context.Background(), deferred))
-	reconcile(t, r)
+	requests := enqueueTrafficMapSource(context.Background(), deferred)
+	require.Len(t, requests, 1, "the ownerless finalizer repair must enqueue its same-key source")
+	_, err := r.Reconcile(context.Background(), requests[0])
+	require.NoError(t, err)
 
 	terminating, exists := getTrafficMap(t, apiClient)
 	require.True(t, exists, "the repaired finalizer retains the map for publisher cleanup")
@@ -474,8 +487,10 @@ func TestReconcile_DisabledReapsPublisherStatusWithoutClaims(t *testing.T) {
 	isvc := splitISVC([]string{"a"}, []int32{3}, []int32{3})
 	existing := &v1beta1.TrafficMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      testName,
-			Namespace: testNS,
+			Name:            testName,
+			Namespace:       testNS,
+			UID:             "traffic-map-uid",
+			ResourceVersion: "1",
 			OwnerReferences: []metav1.OwnerReference{
 				*metav1.NewControllerRef(isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
 			},
@@ -548,6 +563,310 @@ func TestReconcile_DisabledRejectsMismatchedTrafficMapSourceUID(t *testing.T) {
 	assert.Equal(t, types.UID("other-source-uid"), current.Status.SourceUID)
 }
 
+func TestReconcile_DeletingISVCReapsTrafficMapAndPreservesJournal(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		config Config
+		optOut bool
+	}{
+		{name: "enabled", config: controllerTestConfig()},
+		{name: "globally disabled", config: Config{Enabled: false}},
+		{name: "ISVC opted out", config: controllerTestConfig(), optOut: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isvc := splitISVC([]string{"a"}, []int32{3}, []int32{3})
+			if tc.optOut {
+				disabled := false
+				isvc.Spec.Routing = &v1beta1.RoutingSpec{Enabled: &disabled}
+			}
+			now := metav1.Now()
+			isvc.DeletionTimestamp = &now
+			isvc.Finalizers = []string{"example.com/hold-source"}
+			claims := []string{"v1:httproute:prod/svc-global"}
+			tm := &v1beta1.TrafficMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            testName,
+					Namespace:       testNS,
+					UID:             "traffic-map-uid",
+					ResourceVersion: "1",
+					Finalizers:      []string{placementendpoint.TrafficMapPublisherFinalizer},
+					OwnerReferences: []metav1.OwnerReference{
+						*metav1.NewControllerRef(isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
+					},
+				},
+				Status: v1beta1.TrafficMapStatus{Publisher: &v1beta1.TrafficMapPublisherStatus{
+					PublisherName:  "gatewayapi",
+					ClaimedTargets: claims,
+				}},
+			}
+			r, c := newReconciler(t, tc.config, isvc, tm)
+
+			reconcile(t, r)
+
+			terminating, exists := getTrafficMap(t, c)
+			require.True(t, exists, "publisher finalizer retains the cleanup journal")
+			require.NotNil(t, terminating.DeletionTimestamp)
+			require.NotNil(t, terminating.Status.Publisher)
+			assert.Equal(t, claims, terminating.Status.Publisher.ClaimedTargets)
+		})
+	}
+}
+
+func TestReconcile_DeletingISVCReapsOrphanedProvenancedTrafficMap(t *testing.T) {
+	isvc := splitISVC([]string{"a"}, []int32{3}, []int32{3})
+	now := metav1.Now()
+	isvc.DeletionTimestamp = &now
+	isvc.Finalizers = []string{"example.com/hold-source"}
+	claims := []string{"v1:httproute:prod/svc-global"}
+	tm := &v1beta1.TrafficMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            testName,
+			Namespace:       testNS,
+			UID:             "traffic-map-uid",
+			ResourceVersion: "1",
+			Finalizers:      []string{placementendpoint.TrafficMapPublisherFinalizer},
+		},
+		Status: v1beta1.TrafficMapStatus{
+			SourceUID: isvc.UID,
+			Publisher: &v1beta1.TrafficMapPublisherStatus{
+				PublisherName:  "gatewayapi",
+				ClaimedTargets: claims,
+			},
+		},
+	}
+	r, c := newReconciler(t, controllerTestConfig(), isvc, tm)
+
+	reconcile(t, r)
+
+	terminating, exists := getTrafficMap(t, c)
+	require.True(t, exists, "publisher finalizer retains the orphaned map's cleanup journal")
+	require.NotNil(t, terminating.DeletionTimestamp)
+	assert.Empty(t, terminating.OwnerReferences)
+	assert.Equal(t, isvc.UID, terminating.Status.SourceUID)
+	require.NotNil(t, terminating.Status.Publisher)
+	assert.Equal(t, claims, terminating.Status.Publisher.ClaimedTargets)
+}
+
+func TestReconcile_DeletingISVCDoesNotReapConflictingController(t *testing.T) {
+	isvc := splitISVC([]string{"a"}, []int32{3}, []int32{3})
+	now := metav1.Now()
+	isvc.DeletionTimestamp = &now
+	isvc.Finalizers = []string{"example.com/hold-source"}
+	tm := &v1beta1.TrafficMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            testName,
+			Namespace:       testNS,
+			UID:             "traffic-map-uid",
+			ResourceVersion: "1",
+			Finalizers:      []string{"example.com/hold-map"},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: v1beta1.SchemeGroupVersion.String(),
+				Kind:       "InferenceService",
+				Name:       "other-service",
+				UID:        "other-source-uid",
+				Controller: k8sptr.To(true),
+			}},
+		},
+		Status: v1beta1.TrafficMapStatus{SourceUID: isvc.UID},
+	}
+	r, c := newReconciler(t, controllerTestConfig(), isvc, tm)
+
+	reconcile(t, r)
+
+	current, exists := getTrafficMap(t, c)
+	require.True(t, exists)
+	assert.True(t, current.DeletionTimestamp.IsZero())
+	assert.Equal(t, isvc.UID, current.Status.SourceUID)
+}
+
+func TestReapTrafficMapFencesConcurrentReplacement(t *testing.T) {
+	isvc := splitISVC([]string{"a"}, []int32{3}, []int32{3})
+	tm := &v1beta1.TrafficMap{ObjectMeta: metav1.ObjectMeta{
+		Name:            testName,
+		Namespace:       testNS,
+		UID:             "owned-map-uid",
+		ResourceVersion: "1",
+	}, Status: v1beta1.TrafficMapStatus{SourceUID: isvc.UID}}
+	key := client.ObjectKeyFromObject(tm)
+	deleteCalls := 0
+	c := fakeclient.NewClientBuilder().
+		WithScheme(routingScheme(t)).
+		WithObjects(tm).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Delete: func(ctx context.Context, cl client.WithWatch, object client.Object, opts ...client.DeleteOption) error {
+				deleteCalls++
+				deleteOptions := (&client.DeleteOptions{}).ApplyOptions(opts)
+				require.NotNil(t, deleteOptions.Preconditions)
+				require.NotNil(t, deleteOptions.Preconditions.UID)
+				require.NotNil(t, deleteOptions.Preconditions.ResourceVersion)
+				assert.Equal(t, object.GetUID(), *deleteOptions.Preconditions.UID)
+				assert.Equal(t, object.GetResourceVersion(), *deleteOptions.Preconditions.ResourceVersion)
+
+				replacement := &v1beta1.TrafficMap{}
+				require.NoError(t, cl.Get(ctx, key, replacement))
+				replacement.UID = "replacement-map-uid"
+				replacement.OwnerReferences = []metav1.OwnerReference{{
+					APIVersion: v1beta1.SchemeGroupVersion.String(),
+					Kind:       "InferenceService",
+					Name:       "other",
+					UID:        "other-uid",
+					Controller: k8sptr.To(true),
+				}}
+				require.NoError(t, cl.Update(ctx, replacement))
+				return apierrors.NewConflict(
+					schema.GroupResource{Group: v1beta1.SchemeGroupVersion.Group, Resource: "trafficmaps"},
+					object.GetName(),
+					apierrors.NewBadRequest("delete preconditions no longer match"),
+				)
+			},
+		}).
+		Build()
+	r := &Reconciler{Client: c, APIReader: c, Log: log.Log}
+
+	err := r.reap(context.Background(), isvc)
+
+	require.Error(t, err)
+	assert.True(t, apierrors.IsConflict(err))
+	assert.Equal(t, 1, deleteCalls)
+	replacement := &v1beta1.TrafficMap{}
+	require.NoError(t, c.Get(context.Background(), key, replacement))
+	assert.Equal(t, types.UID("replacement-map-uid"), replacement.UID)
+	assert.Equal(t, "other", metav1.GetControllerOf(replacement).Name)
+}
+
+type trafficMapIdentityReader struct {
+	client.Reader
+	clearUID             bool
+	clearResourceVersion bool
+	err                  error
+}
+
+func (r trafficMapIdentityReader) Get(
+	ctx context.Context,
+	key client.ObjectKey,
+	object client.Object,
+	opts ...client.GetOption,
+) error {
+	if _, ok := object.(*v1beta1.TrafficMap); ok && r.err != nil {
+		return r.err
+	}
+	if err := r.Reader.Get(ctx, key, object, opts...); err != nil {
+		return err
+	}
+	if _, ok := object.(*v1beta1.TrafficMap); ok {
+		if r.clearUID {
+			object.SetUID("")
+		}
+		if r.clearResourceVersion {
+			object.SetResourceVersion("")
+		}
+	}
+	return nil
+}
+
+func TestReapTrafficMapReadFailureDoesNotDelete(t *testing.T) {
+	isvc := splitISVC([]string{"a"}, []int32{3}, []int32{3})
+	tm := &v1beta1.TrafficMap{ObjectMeta: metav1.ObjectMeta{
+		Name: testName, Namespace: testNS, UID: "traffic-map-uid", ResourceVersion: "1",
+	}}
+	tm.Status.SourceUID = isvc.UID
+	deleteCalls := 0
+	c := fakeclient.NewClientBuilder().
+		WithScheme(routingScheme(t)).
+		WithObjects(tm).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Delete: func(context.Context, client.WithWatch, client.Object, ...client.DeleteOption) error {
+				deleteCalls++
+				return nil
+			},
+		}).
+		Build()
+	r := &Reconciler{
+		Client: c,
+		APIReader: trafficMapIdentityReader{
+			Reader: c,
+			err:    errors.New("authoritative TrafficMap read failed"),
+		},
+		Log: log.Log,
+	}
+
+	err := r.reap(context.Background(), isvc)
+
+	require.ErrorContains(t, err, "authoritative TrafficMap read failed")
+	assert.Zero(t, deleteCalls)
+}
+
+func TestReapTrafficMapRequiresServerIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name                 string
+		clearUID             bool
+		clearResourceVersion bool
+		wantErr              string
+	}{
+		{name: "missing UID", clearUID: true, wantErr: "UID is empty"},
+		{name: "missing resource version", clearResourceVersion: true, wantErr: "resourceVersion is empty"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isvc := splitISVC([]string{"a"}, []int32{3}, []int32{3})
+			tm := &v1beta1.TrafficMap{ObjectMeta: metav1.ObjectMeta{
+				Name:            testName,
+				Namespace:       testNS,
+				UID:             "traffic-map-uid",
+				ResourceVersion: "1",
+				OwnerReferences: []metav1.OwnerReference{
+					*metav1.NewControllerRef(isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
+				},
+			}}
+			deleteCalls := 0
+			c := fakeclient.NewClientBuilder().
+				WithScheme(routingScheme(t)).
+				WithObjects(tm).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Delete: func(context.Context, client.WithWatch, client.Object, ...client.DeleteOption) error {
+						deleteCalls++
+						return nil
+					},
+				}).
+				Build()
+			r := &Reconciler{
+				Client: c,
+				APIReader: trafficMapIdentityReader{
+					Reader:               c,
+					clearUID:             tc.clearUID,
+					clearResourceVersion: tc.clearResourceVersion,
+				},
+				Log: log.Log,
+			}
+
+			err := r.reap(context.Background(), isvc)
+
+			require.ErrorContains(t, err, tc.wantErr)
+			assert.Zero(t, deleteCalls)
+		})
+	}
+}
+
+func TestReapTrafficMapRequiresSourceIdentity(t *testing.T) {
+	isvc := splitISVC([]string{"a"}, []int32{3}, []int32{3})
+	isvc.UID = ""
+	deleteCalls := 0
+	c := fakeclient.NewClientBuilder().
+		WithScheme(routingScheme(t)).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Delete: func(context.Context, client.WithWatch, client.Object, ...client.DeleteOption) error {
+				deleteCalls++
+				return nil
+			},
+		}).
+		Build()
+	r := &Reconciler{Client: c, APIReader: c, Log: log.Log}
+
+	err := r.reap(context.Background(), isvc)
+
+	require.ErrorContains(t, err, "InferenceService UID is empty")
+	assert.Zero(t, deleteCalls)
+}
+
 func TestReconcile_UnownedTrafficMapIsNeverMutated(t *testing.T) {
 	foreign := func() *v1beta1.TrafficMap {
 		return &v1beta1.TrafficMap{
@@ -569,6 +888,24 @@ func TestReconcile_UnownedTrafficMapIsNeverMutated(t *testing.T) {
 		require.True(t, exists)
 		assert.Equal(t, "foreign-service", tm.Spec.Service)
 		assert.Empty(t, tm.OwnerReferences)
+	})
+
+	t.Run("matching provenance alone does not authorize active mutation", func(t *testing.T) {
+		isvc := splitISVC([]string{"a"}, []int32{3}, []int32{3})
+		tm := foreign()
+		tm.Status.SourceUID = isvc.UID
+		r, c := newReconciler(t, controllerTestConfig(), isvc, tm)
+
+		_, err := r.Reconcile(context.Background(), ctrl.Request{
+			NamespacedName: client.ObjectKeyFromObject(isvc),
+		})
+
+		require.ErrorContains(t, err, "is not controlled by InferenceService")
+		current, exists := getTrafficMap(t, c)
+		require.True(t, exists)
+		assert.Equal(t, "foreign-service", current.Spec.Service)
+		assert.Equal(t, isvc.UID, current.Status.SourceUID)
+		assert.Empty(t, current.OwnerReferences)
 	})
 
 	t.Run("disabled routing refuses to delete", func(t *testing.T) {
@@ -1381,6 +1718,18 @@ func TestRoutableStatusApplyIsFieldIsolated(t *testing.T) {
 	conditions := status["conditions"].([]any)
 	require.Len(t, conditions, 1)
 	assert.Equal(t, v1beta1.TrafficMapRoutable, conditions[0].(map[string]any)["type"])
+}
+
+func TestEnqueueTrafficMapSourceDoesNotRequireOwnerReference(t *testing.T) {
+	tm := &v1beta1.TrafficMap{
+		ObjectMeta: metav1.ObjectMeta{Name: testName, Namespace: testNS},
+		Status:     v1beta1.TrafficMapStatus{SourceUID: "source-uid"},
+	}
+
+	requests := enqueueTrafficMapSource(context.Background(), tm)
+
+	require.Len(t, requests, 1)
+	assert.Equal(t, client.ObjectKeyFromObject(tm), requests[0].NamespacedName)
 }
 
 func TestSetupWithManagerRequiresAPIReader(t *testing.T) {

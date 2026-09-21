@@ -200,6 +200,7 @@ type Reconciler struct {
 // +kubebuilder:rbac:groups=ome.io,resources=inferenceservices/finalizers,verbs=update
 // +kubebuilder:rbac:groups=ome.io,resources=workloadclusters,verbs=get;list;watch
 // +kubebuilder:rbac:groups=ome.io,resources=rolloutpolicies,verbs=get;list;watch
+// +kubebuilder:rbac:groups=ome.io,resources=trafficmaps,verbs=get
 
 // Reconcile maps an apiserver optimistic-lock conflict to a clean requeue. The
 // control plane runs several controllers that write the same source
@@ -1272,6 +1273,13 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, isvc *v1beta1.Inferenc
 	if !controllerutil.ContainsFinalizer(isvc, PlacementFinalizer) {
 		return ctrl.Result{}, nil
 	}
+	trafficMapRemaining, err := r.ownedTrafficMapRemaining(ctx, isvc)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if trafficMapRemaining {
+		return ctrl.Result{RequeueAfter: r.requeue()}, nil
+	}
 	// Clean up our derived copy on every currently-connected cluster. The delete
 	// is origin-guarded, so it only removes copies derived from THIS source. A
 	// cluster that is disconnected at delete time can't be cleaned now; it is
@@ -1312,6 +1320,31 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, isvc *v1beta1.Inferenc
 	// and a winning cluster.
 	DeleteForISVC(isvc.Namespace, isvc.Name)
 	return ctrl.Result{}, nil
+}
+
+// ownedTrafficMapRemaining reports whether a TrafficMap attributable to the
+// source, or ambiguous durable publication state, still exists. It is the
+// teardown barrier that lets the publisher drain routing state before placement
+// removes serving workloads.
+func (r *Reconciler) ownedTrafficMapRemaining(
+	ctx context.Context,
+	isvc *v1beta1.InferenceService,
+) (bool, error) {
+	if r.APIReader == nil {
+		return false, fmt.Errorf("check TrafficMap teardown barrier: API reader is not configured")
+	}
+	tm := &v1beta1.TrafficMap{}
+	key := types.NamespacedName{Name: isvc.Name, Namespace: isvc.Namespace}
+	if err := r.APIReader.Get(ctx, key, tm); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("check TrafficMap teardown barrier for %s: %w", key, err)
+	}
+	if isvc.UID == "" {
+		return false, fmt.Errorf("check TrafficMap teardown barrier for %s: InferenceService UID is empty", key)
+	}
+	return trafficMapBlocksSourceTeardown(tm, isvc), nil
 }
 
 // derivedRemainingOnConnected reports whether any connected cluster still holds

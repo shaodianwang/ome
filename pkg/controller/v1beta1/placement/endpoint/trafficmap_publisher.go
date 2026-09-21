@@ -40,7 +40,7 @@ const (
 
 	// TrafficMapPublisherFinalizer preserves the TrafficMap and its claim journal
 	// until the selected publisher has removed every external side effect.
-	TrafficMapPublisherFinalizer = "ome.io/trafficmap-publisher"
+	TrafficMapPublisherFinalizer = placementcontroller.TrafficMapPublisherFinalizer
 )
 
 const (
