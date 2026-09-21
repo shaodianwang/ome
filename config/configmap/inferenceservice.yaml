@@ -3,6 +3,11 @@ kind: ConfigMap
 metadata:
   name: inferenceservice-config
   namespace: ome
+# Kustomize does not restart the manager when this ConfigMap changes. After
+# `kubectl apply -k config/default`, restart the manager for settings documented
+# below as startup-only:
+#   kubectl -n ome rollout restart deployment/ome-controller-manager
+#   kubectl -n ome rollout status deployment/ome-controller-manager
 data:
   ingress: |-
     {
