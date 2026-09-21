@@ -239,6 +239,26 @@ to observe admission. Placement stalls in `Racing` without the
 `InferenceReplica` read: the per-component IR status is the admission signal
 that selects a winner.
 
+## Multi-cluster routing
+
+TrafficMap routing runs only on a multi-cluster control plane. Enable all three
+required values together:
+
+```yaml
+ome:
+  multicluster:
+    enabled: true
+    role: control-plane
+    config:
+      routing:
+        enabled: true
+```
+
+The chart refuses to render when routing is enabled without both topology
+prerequisites. The manager reads the multi-cluster ConfigMap block once at
+startup. Helm rolls the controller when that block changes; direct ConfigMap
+edits require a manager restart.
+
 ## TrafficMap publishing
 
 The chart configures a one-minute publisher resync interval even when the

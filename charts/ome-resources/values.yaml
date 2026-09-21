@@ -68,11 +68,12 @@ ome:
     # delete another's deriveds. Leave empty for a single control plane.
     placementControlPlaneID: ""
     # config holds the multi-cluster TUNABLES, rendered into the
-    # inferenceservice-config ConfigMap's "multicluster" block (NOT manager
-    # flags, so an edit applies on the next config load, not a restart). Most
-    # fields are optional: leave a duration "" or a number 0 to use the manager's
-    # built-in default. Routing observer limits are explicit and required when
-    # routing is enabled. Durations are Go duration strings ("1m", "30s", "250ms").
+    # inferenceservice-config ConfigMap's "multicluster" block. The manager reads
+    # this block once at startup. Helm rolls the controller when the rendered
+    # block changes; direct ConfigMap edits require a manager restart. Most fields
+    # are optional: leave a duration "" or a number 0 to use the manager's built-in
+    # default. Routing observer limits are explicit and required when routing is
+    # enabled. Durations are Go duration strings ("1m", "30s", "250ms").
     config:
       # workloadCluster: remote-cluster connection/transport + the status funnel.
       workloadCluster:
@@ -117,7 +118,9 @@ ome:
             addressRefreshInterval: ""    # required refresh cadence when EndpointSlices are enabled
       # routing: the TrafficMap routing controller (control plane only), which
       # projects a placed InferenceService into a capacity-aware, health-gated
-      # TrafficMap a gateway consumes. Alpha; default off.
+      # TrafficMap a gateway consumes. Alpha; default off. Enabling routing
+      # requires multicluster.enabled=true and role=control-plane; the chart
+      # rejects any other topology.
       routing:
         enabled: false          # generate TrafficMaps for placed InferenceServices
         # observer bounds the controller and HTTP resources consumed by all

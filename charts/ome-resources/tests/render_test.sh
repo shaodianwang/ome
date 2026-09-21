@@ -450,6 +450,48 @@ grep -Fqx '  - gateways' <<<"${multicluster_access}" ||
 grep -Fqx '  - httproutes' <<<"${multicluster_access}" ||
   fail "multicluster-access ClusterRole does not grant httproutes"
 
+routing_topology_error='ome.multicluster.config.routing.enabled=true requires ome.multicluster.enabled=true and ome.multicluster.role=control-plane'
+
+if routing_without_multicluster="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set ome.multicluster.config.routing.enabled=true \
+  --set-string ome.multicluster.role=control-plane 2>&1)"; then
+  fail "routing was rendered without multi-cluster enabled"
+fi
+grep -Fq "${routing_topology_error}" <<<"${routing_without_multicluster}" ||
+  fail "routing without multi-cluster enabled did not report the topology requirement"
+
+if routing_without_control_plane_role="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set ome.multicluster.config.routing.enabled=true \
+  --set ome.multicluster.enabled=true 2>&1)"; then
+  fail "routing was rendered without the control-plane role"
+fi
+grep -Fq "${routing_topology_error}" <<<"${routing_without_control_plane_role}" ||
+  fail "routing without the control-plane role did not report the topology requirement"
+
+if routing_with_wrong_role="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set ome.multicluster.config.routing.enabled=true \
+  --set ome.multicluster.enabled=true \
+  --set-string ome.multicluster.role=worker 2>&1)"; then
+  fail "routing was rendered with a non-control-plane role"
+fi
+grep -Fq "${routing_topology_error}" <<<"${routing_with_wrong_role}" ||
+  fail "routing with a non-control-plane role did not report the topology requirement"
+
+routing_control_plane="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set ome.multicluster.config.routing.enabled=true \
+  --set ome.multicluster.enabled=true \
+  --set-string ome.multicluster.role=control-plane)"
+grep -Fq $'"routing": {\n        "enabled": true' <<<"${routing_control_plane}" ||
+  fail "control-plane routing was not enabled in the controller ConfigMap"
+grep -Fq -- '--enable-multicluster' <<<"${routing_control_plane}" ||
+  fail "control-plane routing did not enable multi-cluster mode"
+grep -Fq -- '--multicluster-role=control-plane' <<<"${routing_control_plane}" ||
+  fail "control-plane routing did not set the control-plane role"
+
 gateway_backend_config="$("${helm_bin}" template ome-resources "${chart_dir}" \
   --namespace ome \
   --set ome.multicluster.config.endpoint.gatewayBackend.rewriteHostname=true \

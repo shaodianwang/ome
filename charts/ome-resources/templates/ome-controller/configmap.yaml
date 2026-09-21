@@ -1,3 +1,7 @@
+{{- $routingEnabled := .Values.ome.multicluster.config.routing.enabled | default false -}}
+{{- if and $routingEnabled (or (not .Values.ome.multicluster.enabled) (ne (.Values.ome.multicluster.role | default "") "control-plane")) -}}
+{{- fail "ome.multicluster.config.routing.enabled=true requires ome.multicluster.enabled=true and ome.multicluster.role=control-plane" -}}
+{{- end -}}
 {{- $routingPublisher := .Values.ome.multicluster.config.routing.publisher | default dict -}}
 apiVersion: v1
 kind: ConfigMap
