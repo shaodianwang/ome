@@ -55,6 +55,7 @@ func TestParseConfig(t *testing.T) {
 		{"empty ACL", func(o map[string]string) { o[optACL] = " " }, "must not be empty"},
 		{"missing template", func(o map[string]string) { delete(o, optTargetTemplate) }, optTargetTemplate},
 		{"bad template", func(o map[string]string) { o[optTargetTemplate] = "{{" }, optTargetTemplate},
+		{"unknown template function", func(o map[string]string) { o[optTargetTemplate] = "{{snake .Service}}" }, optTargetTemplate},
 		{"bad source selector", func(o map[string]string) { o[optSourceSelector] = "publish in (" }, optSourceSelector},
 		{"missing weight mode", func(o map[string]string) { delete(o, optWeightMode) }, optWeightMode},
 		{"bad weight mode", func(o map[string]string) { o[optWeightMode] = "percent" }, optWeightMode},

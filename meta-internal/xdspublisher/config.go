@@ -236,7 +236,10 @@ func parseConfig(options map[string]string) (config, error) {
 }
 
 func parseTargetTemplate(templateText string) (*template.Template, error) {
-	targetTemplate, err := template.New("xds-target").Option("missingkey=error").Parse(templateText)
+	targetTemplate, err := template.New("xds-target").
+		Funcs(targetTemplateFuncs).
+		Option("missingkey=error").
+		Parse(templateText)
 	if err != nil {
 		return nil, fmt.Errorf("routing.publisher.options[%q]: %w", optTargetTemplate, err)
 	}

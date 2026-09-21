@@ -170,7 +170,7 @@ routing:
       sourceSelector: 'routing.example.com/publish=true'  # optional
       weightMode: normalized
       normalizedTotal: "100"
-      targetTemplate: '{{.EndpointHostname}}'
+      targetTemplate: 'gke_llm_tpu_{{replaceAll "-" "_" .Service}}_{{replaceAll "-" "_" (mustTrimSuffix "-tpu" (mustTrimPrefix "msl-gcp-" .Cluster))}}'
       urlTemplate: 'https://xds-automation.mrpc.fbinfra.net/api/v1/clusters/{cluster}/weight'
       requestTimeout: 30s
       tlsCertFile: /var/facebook/x509_identities/server.pem
@@ -186,6 +186,15 @@ The target template receives `Namespace`, `Service`, `Cluster`, `Endpoint`,
 `EndpointHost`, `EndpointHostname`, and `EndpointPort`. It must render a bare
 cluster name. A `;fallback=` suffix is canonicalized to its primary tier.
 `{cluster}` in `urlTemplate` is replaced with the path-escaped result.
+
+Templates also provide `replaceAll old new value`,
+`mustTrimPrefix prefix value`, and `mustTrimSuffix suffix value`. The `must`
+helpers stop publication when an input does not have the configured affix or
+has no value left after trimming. The example above implements the conventional
+logical-name mapping for the selected GKE-backed services while keeping its
+deployment-specific prefixes in configuration. The xDS configuration stores a
+logical cluster name and gateway hostname independently, so use an explicit
+template for any target that does not follow that convention.
 
 `sourceSelector` is an optional standard Kubernetes label selector evaluated
 against each source InferenceService. Omitted or empty matches every source for
