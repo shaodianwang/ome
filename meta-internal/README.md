@@ -116,7 +116,7 @@ calls to the xDS automation HTTP API:
 
 ```http
 PUT /api/v1/clusters/{cluster}/weight
-{"weight": 0.1, "createIfMissing": {"oncall": "ome"}}
+{"weight": 10, "createIfMissing": {"oncall": "ome"}}
 
 DELETE /api/v1/clusters/{cluster}/weight
 ```
@@ -128,16 +128,19 @@ already exist in the xDS route graph.
 
 The required `weightMode` option selects the xDS wire representation.
 `normalized` divides every positive TrafficMap weight by the sum of the map's
-weights, so the published vector totals 1; an all-zero map remains all-zero.
-`relative` publishes the TrafficMap's integer ratios as numeric values. With the
-routing probe's explicit all-failed `Drain` policy, either mode publishes zero
-for every target. Changing modes changes the publisher options digest and
-republishes each selected TrafficMap.
+weights and multiplies it by the required positive `normalizedTotal`; an
+all-zero map remains all-zero. `relative` publishes the TrafficMap's integer
+ratios as numeric values and rejects `normalizedTotal`. With the routing probe's
+explicit all-failed `Drain` policy, either mode publishes zero for every target.
+Changing either option changes the publisher options digest and republishes
+each selected TrafficMap.
 
 Existing xDS deployments must add `weightMode` when adopting a binary with this
-option. Use `relative` for the first rollout when the wire representation must
-remain unchanged, then switch every leader candidate to `normalized`; binaries
-that predate the option reject it during configuration validation.
+option, and normalized deployments must also set `normalizedTotal`. Use
+`relative` without `normalizedTotal` for the first rollout when the wire
+representation must remain unchanged, then switch every leader candidate to
+`normalized` with the intended total; binaries that predate these options reject
+them during configuration validation.
 
 Selecting `routing.publisher.name: xds` replaces the default Gateway API
 publisher; the two publishers do not run side by side.
@@ -163,6 +166,7 @@ routing:
       acl: ome-xds-publisher       # optional
       sourceSelector: 'routing.example.com/publish=true'  # optional
       weightMode: normalized
+      normalizedTotal: "100"
       targetTemplate: '{{.EndpointHostname}}'
       urlTemplate: 'https://xds-automation.mrpc.fbinfra.net/api/v1/clusters/{cluster}/weight'
       requestTimeout: 30s
@@ -192,11 +196,11 @@ finalizers and target annotations still block planning even for a nonmatch, so
 selection cannot bypass the required old-lifecycle cleanup.
 
 Publisher options on individual InferenceServices are rejected. In particular,
-`targetTemplate` and `sourceSelector` are installation-wide: allowing an object
-to replace either could redirect writes outside the operator-owned target
-scope. Those two global publication settings participate in the per-TrafficMap
-options digest; transport paths, credentials, and service metadata remain
-manager-local.
+`targetTemplate`, `sourceSelector`, `weightMode`, and `normalizedTotal` are
+installation-wide: allowing an object to replace them could redirect writes or
+make shared target weights inconsistent. These global publication settings
+participate in the per-TrafficMap options digest; transport paths, credentials,
+and service metadata remain manager-local.
 
 The client presents the configured workload certificate directly to the remote
 proxy and trusts only the configured CA bundle. It deliberately ignores ambient

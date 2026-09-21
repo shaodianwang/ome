@@ -80,16 +80,18 @@ func newTestPublisher(weights ClusterWeightPublisher) *Publisher {
 
 func targetOptions(value string) map[string]string {
 	return map[string]string{
-		optTargetTemplate: value,
-		optWeightMode:     weightModeNormalized,
+		optTargetTemplate:  value,
+		optWeightMode:      weightModeNormalized,
+		optNormalizedTotal: "1",
 	}
 }
 
 func targetOptionsWithSelector(value, selector string) map[string]string {
 	return map[string]string{
-		optTargetTemplate: value,
-		optSourceSelector: selector,
-		optWeightMode:     weightModeNormalized,
+		optTargetTemplate:  value,
+		optSourceSelector:  selector,
+		optWeightMode:      weightModeNormalized,
+		optNormalizedTotal: "1",
 	}
 }
 
@@ -105,13 +107,16 @@ func TestResolveOptionsKeepsGlobalPublicationBehavior(t *testing.T) {
 		"  {{.EndpointHostname}}  ",
 		" publish=true, environment in (prod,canary) ",
 	)
+	global[optNormalizedTotal] = " 1e2 "
 
 	effective, err := p.ResolveOptions(global, nil)
 	require.NoError(t, err)
-	assert.Equal(t, targetOptionsWithSelector(
+	want := targetOptionsWithSelector(
 		"{{.EndpointHostname}}",
 		"environment in (canary,prod),publish=true",
-	), effective)
+	)
+	want[optNormalizedTotal] = "100"
+	assert.Equal(t, want, effective)
 
 	global[optTargetTemplate] = "changed"
 	assert.Equal(t, "{{.EndpointHostname}}", effective[optTargetTemplate])
@@ -144,6 +149,15 @@ func TestResolveOptionsValidatesSanitizedGlobals(t *testing.T) {
 		{name: "invalid weight mode", options: map[string]string{
 			optTargetTemplate: "{{.Cluster}}", optWeightMode: "percent",
 		}, want: optWeightMode},
+		{name: "missing normalized total", options: map[string]string{
+			optTargetTemplate: "{{.Cluster}}", optWeightMode: weightModeNormalized,
+		}, want: optNormalizedTotal},
+		{name: "invalid normalized total", options: map[string]string{
+			optTargetTemplate: "{{.Cluster}}", optWeightMode: weightModeNormalized, optNormalizedTotal: "0",
+		}, want: optNormalizedTotal},
+		{name: "normalized total with relative mode", options: map[string]string{
+			optTargetTemplate: "{{.Cluster}}", optWeightMode: weightModeRelative, optNormalizedTotal: "100",
+		}, want: optNormalizedTotal},
 		{name: "unexpected", options: map[string]string{optTargetTemplate: "{{.Cluster}}", optOncall: "team"}, want: "unsupported"},
 	}
 	for _, tt := range tests {
@@ -344,6 +358,9 @@ func TestPlanWeightModes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			options := targetOptions("{{.EndpointHostname}}")
 			options[optWeightMode] = tt.mode
+			if tt.mode == weightModeRelative {
+				delete(options, optNormalizedTotal)
+			}
 			plan, err := newTestPublisher(&recordingPublisher{}).Plan(
 				testISVC("model-a"), testTrafficMap(), options,
 			)
@@ -357,14 +374,14 @@ func TestPlanWeightModes(t *testing.T) {
 	}
 }
 
-func TestPlanNormalizedWeightsSumToOneOrStayZero(t *testing.T) {
+func TestPlanNormalizedWeightsUseConfiguredTotalOrStayZero(t *testing.T) {
 	tests := []struct {
 		name    string
 		weights []int32
 		want    []float64
 	}{
-		{name: "relative values", weights: []int32{2, 3}, want: []float64{0.6, 0.4}},
-		{name: "single positive", weights: []int32{0, 7}, want: []float64{0, 1}},
+		{name: "relative values", weights: []int32{2, 3}, want: []float64{60, 40}},
+		{name: "single positive", weights: []int32{0, 7}, want: []float64{0, 100}},
 		{name: "all zero", weights: []int32{0, 0}, want: []float64{0, 0}},
 	}
 	for _, tt := range tests {
@@ -373,9 +390,9 @@ func TestPlanNormalizedWeightsSumToOneOrStayZero(t *testing.T) {
 			for i := range tt.weights {
 				trafficMap.Spec.Entries[i].Weight = tt.weights[i]
 			}
-			plan, err := newTestPublisher(&recordingPublisher{}).Plan(
-				testISVC("model-a"), trafficMap, targetOptions("{{.Cluster}}"),
-			)
+			options := targetOptions("{{.Cluster}}")
+			options[optNormalizedTotal] = "100"
+			plan, err := newTestPublisher(&recordingPublisher{}).Plan(testISVC("model-a"), trafficMap, options)
 			require.NoError(t, err)
 			xdsPlan := plan.(*publishPlan)
 			require.Len(t, xdsPlan.targets, len(tt.want))
@@ -387,7 +404,7 @@ func TestPlanNormalizedWeightsSumToOneOrStayZero(t *testing.T) {
 			if tt.name == "all zero" {
 				assert.Zero(t, total)
 			} else {
-				assert.InDelta(t, 1, total, 1e-12)
+				assert.InDelta(t, 100, total, 1e-12)
 			}
 		})
 	}

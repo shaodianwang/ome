@@ -16,15 +16,16 @@ import (
 
 func validOptions() map[string]string {
 	return map[string]string{
-		optTargetTemplate: "{{.EndpointHostname}}",
-		optURLTemplate:    "https://automation.example.com/api/v1/clusters/{cluster}/weight",
-		optRequestTimeout: "10s",
-		optTLSCertFile:    "/certs/client.pem",
-		optTLSKeyFile:     "/certs/client-key.pem",
-		optTLSCAFile:      "/certs/ca.pem",
-		optOncall:         "ome",
-		optACL:            "ome-xds-publisher",
-		optWeightMode:     weightModeNormalized,
+		optTargetTemplate:  "{{.EndpointHostname}}",
+		optURLTemplate:     "https://automation.example.com/api/v1/clusters/{cluster}/weight",
+		optRequestTimeout:  "10s",
+		optTLSCertFile:     "/certs/client.pem",
+		optTLSKeyFile:      "/certs/client-key.pem",
+		optTLSCAFile:       "/certs/ca.pem",
+		optOncall:          "ome",
+		optACL:             "ome-xds-publisher",
+		optWeightMode:      weightModeNormalized,
+		optNormalizedTotal: "100",
 	}
 }
 
@@ -42,6 +43,7 @@ func TestParseConfig(t *testing.T) {
 	assert.Equal(t, "ome-xds-publisher", *cfg.acl)
 	assert.Empty(t, cfg.sourceSelector)
 	assert.Equal(t, weightModeNormalized, cfg.weightMode)
+	assert.Equal(t, "100", cfg.normalizedTotal)
 
 	tests := []struct {
 		name   string
@@ -56,6 +58,13 @@ func TestParseConfig(t *testing.T) {
 		{"bad source selector", func(o map[string]string) { o[optSourceSelector] = "publish in (" }, optSourceSelector},
 		{"missing weight mode", func(o map[string]string) { delete(o, optWeightMode) }, optWeightMode},
 		{"bad weight mode", func(o map[string]string) { o[optWeightMode] = "percent" }, optWeightMode},
+		{"missing normalized total", func(o map[string]string) { delete(o, optNormalizedTotal) }, optNormalizedTotal},
+		{"empty normalized total", func(o map[string]string) { o[optNormalizedTotal] = " " }, optNormalizedTotal},
+		{"zero normalized total", func(o map[string]string) { o[optNormalizedTotal] = "0" }, "finite positive"},
+		{"negative normalized total", func(o map[string]string) { o[optNormalizedTotal] = "-1" }, "finite positive"},
+		{"NaN normalized total", func(o map[string]string) { o[optNormalizedTotal] = "NaN" }, "finite positive"},
+		{"infinite normalized total", func(o map[string]string) { o[optNormalizedTotal] = "+Inf" }, "finite positive"},
+		{"invalid normalized total", func(o map[string]string) { o[optNormalizedTotal] = "all" }, "finite positive"},
 		{"publisher resync is not an opaque option", func(o map[string]string) { o["resyncInterval"] = "1m" }, "not accepted"},
 		{"missing URL", func(o map[string]string) { delete(o, optURLTemplate) }, optURLTemplate},
 		{"HTTP URL", func(o map[string]string) { o[optURLTemplate] = "http://automation.example.com/{cluster}" }, "absolute HTTPS"},
@@ -92,10 +101,30 @@ func TestParseConfigCanonicalizesSourceSelector(t *testing.T) {
 func TestParseConfigCanonicalizesRelativeWeightMode(t *testing.T) {
 	options := validOptions()
 	options[optWeightMode] = "  relative  "
+	delete(options, optNormalizedTotal)
 
 	cfg, err := parseConfig(options)
 	require.NoError(t, err)
 	assert.Equal(t, weightModeRelative, cfg.weightMode)
+	assert.Empty(t, cfg.normalizedTotal)
+}
+
+func TestParseConfigCanonicalizesNormalizedTotal(t *testing.T) {
+	options := validOptions()
+	options[optNormalizedTotal] = "  1e2  "
+
+	cfg, err := parseConfig(options)
+	require.NoError(t, err)
+	assert.Equal(t, "100", cfg.normalizedTotal)
+}
+
+func TestParseConfigRejectsNormalizedTotalInRelativeMode(t *testing.T) {
+	options := validOptions()
+	options[optWeightMode] = weightModeRelative
+
+	_, err := parseConfig(options)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), optNormalizedTotal)
 }
 
 func TestParseConfigAllowsOmittedACL(t *testing.T) {
@@ -122,8 +151,9 @@ func TestNewPublisherBuildsHTTPClient(t *testing.T) {
 	assert.Same(t, httpPublisher, got.Publisher.(*Publisher).weights)
 	assert.Zero(t, got.ResyncInterval, "the common publisher config owns the wrapper cadence")
 	assert.Equal(t, map[string]string{
-		optTargetTemplate: "{{.EndpointHostname}}",
-		optWeightMode:     weightModeNormalized,
+		optTargetTemplate:  "{{.EndpointHostname}}",
+		optWeightMode:      weightModeNormalized,
+		optNormalizedTotal: "100",
 	}, got.GlobalOptions)
 	assert.Equal(t, "ome", gotConfig.oncall)
 	require.NotNil(t, gotConfig.acl)
@@ -147,9 +177,10 @@ func TestNewPublisherCarriesSourceSelectorAsGlobalBehavior(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, wantSelector.String(), gotConfig.sourceSelector)
 	assert.Equal(t, map[string]string{
-		optTargetTemplate: "{{.EndpointHostname}}",
-		optSourceSelector: wantSelector.String(),
-		optWeightMode:     weightModeNormalized,
+		optTargetTemplate:  "{{.EndpointHostname}}",
+		optSourceSelector:  wantSelector.String(),
+		optWeightMode:      weightModeNormalized,
+		optNormalizedTotal: "100",
 	}, got.GlobalOptions)
 }
 

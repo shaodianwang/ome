@@ -70,7 +70,7 @@ func (*Publisher) ResolveOptions(global, inline map[string]string) (map[string]s
 			strings.Join(keys, ", "))
 	}
 	for key := range global {
-		if key != optTargetTemplate && key != optSourceSelector && key != optWeightMode {
+		if key != optTargetTemplate && key != optSourceSelector && key != optWeightMode && key != optNormalizedTotal {
 			return nil, fmt.Errorf("xDS publisher received unsupported global option %q", key)
 		}
 	}
@@ -89,9 +89,16 @@ func (*Publisher) ResolveOptions(global, inline map[string]string) (map[string]s
 	if err != nil {
 		return nil, err
 	}
+	_, normalizedTotal, err := parseNormalizedTotal(global, weightMode)
+	if err != nil {
+		return nil, err
+	}
 	effective := map[string]string{
 		optTargetTemplate: templateText,
 		optWeightMode:     weightMode,
+	}
+	if normalizedTotal != "" {
+		effective[optNormalizedTotal] = normalizedTotal
 	}
 	if sourceSelector != "" {
 		effective[optSourceSelector] = sourceSelector
@@ -137,11 +144,15 @@ func (*Publisher) Plan(
 	if err != nil {
 		return nil, err
 	}
+	normalizedTotal, _, err := parseNormalizedTotal(effectiveOptions, weightMode)
+	if err != nil {
+		return nil, err
+	}
 	if !sourceSelector.Matches(labels.Set(owner.Labels)) {
 		return &publishPlan{withdrawn: true}, nil
 	}
 
-	targets, err := desiredTargets(owner, trafficMap, targetTemplate, weightMode)
+	targets, err := desiredTargets(owner, trafficMap, targetTemplate, weightMode, normalizedTotal)
 	if err != nil {
 		return nil, err
 	}
@@ -215,7 +226,7 @@ func (p *Publisher) Unpublish(
 
 func effectiveTargetTemplate(options map[string]string) (*template.Template, error) {
 	for key := range options {
-		if key != optTargetTemplate && key != optSourceSelector && key != optWeightMode {
+		if key != optTargetTemplate && key != optSourceSelector && key != optWeightMode && key != optNormalizedTotal {
 			return nil, fmt.Errorf("xDS publisher effective options contain unsupported key %q", key)
 		}
 	}
@@ -231,6 +242,7 @@ func desiredTargets(
 	trafficMap *v1beta1.TrafficMap,
 	targetTemplate *template.Template,
 	weightMode string,
+	normalizedTotal float64,
 ) ([]weightedTarget, error) {
 	if trafficMap.Spec.Service == "" {
 		return nil, fmt.Errorf("TrafficMap service must not be empty")
@@ -276,7 +288,7 @@ func desiredTargets(
 	if weightMode == weightModeNormalized && totalWeight > 0 {
 		denominator := float64(totalWeight)
 		for i := range targets {
-			targets[i].weight /= denominator
+			targets[i].weight = targets[i].weight / denominator * normalizedTotal
 		}
 	}
 	sort.Slice(targets, func(i, j int) bool {

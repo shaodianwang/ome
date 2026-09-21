@@ -7,7 +7,9 @@ package xdspublisher
 import (
 	"context"
 	"fmt"
+	"math"
 	"net/url"
+	"strconv"
 	"strings"
 	"text/template"
 	"time"
@@ -33,6 +35,7 @@ const (
 	optACL                = "acl"
 	optSourceSelector     = "sourceSelector"
 	optWeightMode         = "weightMode"
+	optNormalizedTotal    = "normalizedTotal"
 	clusterURLPlaceholder = "{cluster}"
 
 	weightModeNormalized = "normalized"
@@ -40,29 +43,31 @@ const (
 )
 
 var acceptedOptions = map[string]struct{}{
-	optTargetTemplate: {},
-	optURLTemplate:    {},
-	optRequestTimeout: {},
-	optTLSCertFile:    {},
-	optTLSKeyFile:     {},
-	optTLSCAFile:      {},
-	optOncall:         {},
-	optACL:            {},
-	optSourceSelector: {},
-	optWeightMode:     {},
+	optTargetTemplate:  {},
+	optURLTemplate:     {},
+	optRequestTimeout:  {},
+	optTLSCertFile:     {},
+	optTLSKeyFile:      {},
+	optTLSCAFile:       {},
+	optOncall:          {},
+	optACL:             {},
+	optSourceSelector:  {},
+	optWeightMode:      {},
+	optNormalizedTotal: {},
 }
 
 type config struct {
-	targetTemplate string
-	urlTemplate    string
-	requestTimeout time.Duration
-	tlsCertFile    string
-	tlsKeyFile     string
-	tlsCAFile      string
-	oncall         string
-	acl            *string
-	sourceSelector string
-	weightMode     string
+	targetTemplate  string
+	urlTemplate     string
+	requestTimeout  time.Duration
+	tlsCertFile     string
+	tlsKeyFile      string
+	tlsCAFile       string
+	oncall          string
+	acl             *string
+	sourceSelector  string
+	weightMode      string
+	normalizedTotal string
 }
 
 // Publisher writes TrafficMap weights through the internal xDS API.
@@ -106,6 +111,9 @@ func newTrafficMapPublisherWithFactory(
 	globalOptions := map[string]string{
 		optTargetTemplate: publisher.config.targetTemplate,
 		optWeightMode:     publisher.config.weightMode,
+	}
+	if publisher.config.normalizedTotal != "" {
+		globalOptions[optNormalizedTotal] = publisher.config.normalizedTotal
 	}
 	if publisher.config.sourceSelector != "" {
 		globalOptions[optSourceSelector] = publisher.config.sourceSelector
@@ -182,6 +190,10 @@ func parseConfig(options map[string]string) (config, error) {
 	if err != nil {
 		return config{}, err
 	}
+	_, normalizedTotal, err := parseNormalizedTotal(options, weightMode)
+	if err != nil {
+		return config{}, err
+	}
 
 	requestTimeout, err := parsePositiveDuration(options, optRequestTimeout)
 	if err != nil {
@@ -209,16 +221,17 @@ func parseConfig(options map[string]string) (config, error) {
 	}
 
 	return config{
-		targetTemplate: templateText,
-		urlTemplate:    urlTemplate,
-		requestTimeout: requestTimeout,
-		tlsCertFile:    tlsCertFile,
-		tlsKeyFile:     tlsKeyFile,
-		tlsCAFile:      tlsCAFile,
-		oncall:         oncall,
-		acl:            acl,
-		sourceSelector: sourceSelector,
-		weightMode:     weightMode,
+		targetTemplate:  templateText,
+		urlTemplate:     urlTemplate,
+		requestTimeout:  requestTimeout,
+		tlsCertFile:     tlsCertFile,
+		tlsKeyFile:      tlsKeyFile,
+		tlsCAFile:       tlsCAFile,
+		oncall:          oncall,
+		acl:             acl,
+		sourceSelector:  sourceSelector,
+		weightMode:      weightMode,
+		normalizedTotal: normalizedTotal,
 	}, nil
 }
 
@@ -257,6 +270,34 @@ func parseWeightMode(raw string) (string, error) {
 			optWeightMode, weightModeNormalized, weightModeRelative,
 		)
 	}
+}
+
+func parseNormalizedTotal(options map[string]string, weightMode string) (float64, string, error) {
+	raw, found := options[optNormalizedTotal]
+	if weightMode == weightModeRelative {
+		if found {
+			return 0, "", fmt.Errorf(
+				"routing.publisher.options[%q] is not accepted when %q is %q",
+				optNormalizedTotal, optWeightMode, weightModeRelative,
+			)
+		}
+		return 0, "", nil
+	}
+	if weightMode != weightModeNormalized {
+		return 0, "", fmt.Errorf("cannot parse %q for unsupported weight mode %q", optNormalizedTotal, weightMode)
+	}
+	raw = strings.TrimSpace(raw)
+	if !found || raw == "" {
+		return 0, "", fmt.Errorf(
+			"routing.publisher.options[%q] is required when %q is %q",
+			optNormalizedTotal, optWeightMode, weightModeNormalized,
+		)
+	}
+	total, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsNaN(total) || math.IsInf(total, 0) || total <= 0 {
+		return 0, "", fmt.Errorf("routing.publisher.options[%q] must be a finite positive number", optNormalizedTotal)
+	}
+	return total, strconv.FormatFloat(total, 'g', -1, 64), nil
 }
 
 func validateURLTemplate(raw string) error {
