@@ -2,15 +2,14 @@ title: "Workload engine restructure: row ownership and event columns"
 oep-number: "0020.3"
 authors:
   - "@slin1237"
-status: implementable
+status: implemented
 creation-date: 2026-09-19
 reviewers:
   - TBD
 approvers:
   - TBD
 
-# The design is final and the code is in review: branch
-# refactor/oep-0020-3-restructure, 50 commits, one PR for all six steps.
+# Merged to main as one commit (#1641) carrying all six steps.
 # The engine keeps its layers and its verb passes; what changes is that the
 # two things nothing owned — which pass drives a row, and the table's event
 # columns — each get exactly one owner, and row writes are confined to an
@@ -23,17 +22,17 @@ approvers:
 # traces in three named shapes. Step 4 moves no existing golden and adds one,
 # gang-advisory-warnings. Two API additions: InstanceOperation.CapacityRefusedAt
 # and InstanceStatus.Announced, both carried through ColumnarV2.
-# Step 1 merging golden-identical is OEP-0020.2's own Stable criterion, so
-# 0020.2 reaches Stable when this PR merges.
+# Step 1 merging golden-identical was OEP-0020.2's own Stable criterion, so
+# 0020.2 reached Stable with this merge.
 see-also:
   - "/oeps/0020.2-rollout-engine-behavior-lock"   # the merged gates every step here is measured against
   - "/oeps/0020.1-rollout-state-machine-spec"     # the state x event tables that define the event columns
 
-stage: alpha
+stage: beta
 
-latest-milestone: "TBD"
+latest-milestone: "beta"
 
 milestone:
-  alpha: "TBD"
-  beta: "TBD"
-  stable: "TBD"
+  alpha: "2026-09-21"   # step 1 merged golden-identical; the ownership table is a test
+  beta: "2026-09-21"    # holds/ and evidence/ are the only writers and classifiers of their kind
+  stable: "TBD"         # the next real hold added as one file plus one table row

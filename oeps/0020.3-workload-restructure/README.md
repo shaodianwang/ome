@@ -917,10 +917,10 @@ sequence.
 
 ### Alpha
 
-- Step 1 merged golden-identical; the ownership table is a test. **This is also
+- Step 1 merged golden-identical; the ownership table is a test. **This was also
   OEP-0020.2's own Stable criterion** — the lock is not proven until it has
-  cleared or caught a real refactor once, and step 1 is that refactor. OEP-0020.2
-  reaches Stable when this PR merges.
+  cleared or caught a real refactor once, and step 1 was that refactor. OEP-0020.2
+  reached Stable with the merge (#1641, 2026-09-21).
 
 ### Beta
 

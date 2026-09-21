@@ -467,9 +467,13 @@ Resolved:
 - The replay driver publishes endpoints in the per-revision routed Service the
   engine reads, so an endpoint hold is drivable in the replay lane.
 
-All three parts have met their exit, which clears the gate on OEP-0020.3.
-The status is `implemented`; the Stable criterion waits for that restructure
-to confirm the lock holds against a machine it did not grow up with.
+All three parts have met their exit, which cleared the gate on OEP-0020.3.
+The status is `implemented` and the stage is `stable`: the restructure merged
+(#1641) with four of its six steps byte-identical under the goldens and the
+other two moving only the shapes stated in advance, and on the way the lock
+rejected real slips a reviewer could not see, for instance a Failed row's
+preserved operation being read as ownership. The lock holds against a machine
+it did not grow up with.
 
 What the lock found and fixed while it was being built, each as its own PR
 with the golden or cell that recorded it: the gang surge drain deleted its
