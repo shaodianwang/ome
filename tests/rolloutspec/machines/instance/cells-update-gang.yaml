@@ -1149,9 +1149,30 @@ cells:
     status: current
   - state: Update/GangSurgeTargetCleanup
     event: pod.waiting
-    outcome: ignore
-    note: the stuck classifier skips pods carrying a deletionTimestamp, so a wedged pod of a retired replacement raises no escalation once its delete is issued; DeadlineExceeded is not a kubelet waiting reason at all
+    variants: [ImagePullBackOff, ErrImagePull, InvalidImageName, CreateContainerConfigError, CreateContainerError, CrashLoopBackOff, RunContainerError]
+    windows: [before]
+    outcome: transition
+    to: Failed
+    guard: a retired replacement pod holds the reason past the stuck-pod grace while carrying no deletionTimestamp, the set is not fully serving, and a gang Update attempt is never disposable
+    note: the stuck classifier reads live pods only — FirstStuckPodForInstance in pkg/controller/v1beta1/workload/status_aggregate.go skips a pod carrying a deletionTimestamp — so the reading survives exactly as long as the retirement has landed no delete on that pod, which is the same window the state's timer.stuckPodGrace cell admits. The retirement issues its deletes from the pass that claims the marker, and they can fail (an apiserver rejection), be withheld (the surge bucket's expectations unsatisfied) or never be issued at all (the claim no longer matches the source's target); any of those holds the window open. pkg/controller/v1beta1/workload/escalation.go then stamps Phase Failed with the waiting reason on LastFailure and the operation preserved, and since the cleanup claim matches on revision and step rather than phase, the stamp is diagnostic and the retirement still completes (T-gangcleanup-stuck-failed)
     placement: kind
+    coverage: {perm: [], unit: [], kind: [], replay: [gangcleanup-stuck]}
+    status: decided
+  - state: Update/GangSurgeTargetCleanup
+    event: pod.waiting
+    variants: [ImagePullBackOff, ErrImagePull, InvalidImageName, CreateContainerConfigError, CreateContainerError, CrashLoopBackOff, RunContainerError]
+    windows: [boundary, after]
+    outcome: ignore
+    note: the escalation pass skips an already-Failed row, the removed row has nothing to stamp, and under teardown the pass does not run at all
+    placement: perm
+    coverage: {perm: [], unit: [], kind: []}
+    status: current
+  - state: Update/GangSurgeTargetCleanup
+    event: pod.waiting
+    variants: [DeadlineExceeded]
+    outcome: ignore
+    note: DeadlineExceeded is the diagnostic the deadline backstop stamps, not a kubelet waiting reason, so the stuck classifier never matches it; only the operation deadline can fail this row
+    placement: sim
     coverage: {perm: [], unit: [], kind: []}
     status: current
   - state: Update/GangSurgeTargetCleanup

@@ -698,7 +698,7 @@ transitions:
   - id: T-gangcleanup-stuck-failed
     from: Update/GangSurgeTargetCleanup
     event: pod.waiting
-    guard: a retired replacement pod held a terminal waiting reason past the stuck-pod grace, the set is not fully serving, and a gang step is never disposable
+    guard: a retired replacement pod held a terminal waiting reason past the stuck-pod grace while carrying no deletionTimestamp, the set is not fully serving, and a gang step is never disposable
     to: Failed
     effects: [Phase Failed on the marker with the waiting reason on LastFailure and the operation preserved; the cleanup claim ignores phase, so this is diagnostic]
     decided_in: pkg/controller/v1beta1/workload/escalation.go

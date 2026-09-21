@@ -9,12 +9,16 @@ arrows:
   - T-empty-gang-surge-target
   - T-gangtarget-cleanup-superseded
   - T-gangcleanup-stuck-failed
+cells:
+  - instance/Update/GangSurgeTargetCleanup/pod.waiting[ImagePullBackOff]/before
 intentional: >-
-  the table's Update/GangSurgeTargetCleanup/pod.waiting cell reads ignore
-  because the stuck classifier skips a pod carrying a deletionTimestamp, and
-  the pass that claims the cleanup issues the delete; the declared arrow
-  T-gangcleanup-stuck-failed is therefore reachable only while the delete is
-  refused, so no cell is cited for it
+  the retirement's own marker is stamped Failed on the wedged member, not
+  only the source that owns the surge: the stuck classifier skips a pod
+  carrying a deletionTimestamp, so the reading lasts exactly as long as the
+  retirement has landed no delete on it, and a refused delete holds that
+  window open indefinitely. The stamp is diagnostic — the cleanup claim
+  matches on revision and step rather than phase — so the retirement would
+  still complete the moment the deletes are admitted
 initial:
   spec:
     replicas: 1

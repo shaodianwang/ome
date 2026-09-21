@@ -18,6 +18,26 @@
 # states (a backoff still running, the one-at-a-time authorization) keep
 # governing the opening of an attempt only.
 #
+# Provenance for the Update/GangSurgeTargetCleanup pod.waiting cell, which
+# the same session reconciled with the arrow it contradicted. The cell read
+# ignore in every window on the ground that the retirement's delete makes
+# the pod invisible to the stuck classifier, while the declared arrow
+# T-gangcleanup-stuck-failed said the row goes to Failed. Both halves of
+# that were half true, and the classifier's rule is what settles it: it
+# skips a pod carrying a deletionTimestamp, so the reading is open exactly
+# while the retirement has landed no delete — the delete refused by the
+# apiserver, withheld on the surge bucket's unsatisfied expectations, or
+# never issued because the claim no longer matches the source's target.
+# Nothing retires the row on a stuck reading in those windows: the marker
+# outlives the wedge until an admitted delete or the operation deadline
+# ends it. So the arrow is reachable and stays, and the cell is split the
+# way the state's own timer.stuckPodGrace cell already was — before goes
+# to Failed on the seven terminal kubelet reasons, boundary and after are
+# ignore because the escalation pass skips an already-Failed row, and
+# DeadlineExceeded stays ignore because the classifier never matches a
+# reason the deadline backstop wrote. The stamp is diagnostic: the cleanup
+# claim matches on revision and step, never phase.
+#
 # Provenance for the instance-machine cells an owner decided in the review
 # session of 2026-09-20, which gave the gang surge the drain wait the
 # single-pod surge already had: the source gang's serving gate is cleared on
@@ -43,6 +63,7 @@ history:
   # --- cells-update-gang.yaml ---
   - {state: Update/GangSurgeTarget, event: pod.unschedulable, variants: [target], windows: [], transition: "", decision: owner-review-2026-09-20}
   - {state: Update/GangSurgeTarget, event: gang.podGroup, variants: [Terminating], windows: [], transition: "", decision: owner-review-2026-09-20}
+  - {state: Update/GangSurgeTargetCleanup, event: pod.waiting, variants: [ImagePullBackOff, ErrImagePull, InvalidImageName, CreateContainerConfigError, CreateContainerError, CrashLoopBackOff, RunContainerError], windows: [before], transition: "", decision: owner-review-2026-09-20}
 
   # --- cells-update-inplace-recreate.yaml ---
   - {state: Update/InPlace, event: pod.unschedulable, variants: [source], windows: [], transition: "", decision: owner-review-2026-09-20}
