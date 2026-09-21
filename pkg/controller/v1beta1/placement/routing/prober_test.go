@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -313,6 +314,197 @@ func TestProberReconcileMaintainsHysteresisAcrossUnknown(t *testing.T) {
 	provenance = prober.Provenance(target)
 	if provenance == nil || provenance.PolicyDigest != policy.PolicyDigest || provenance.Gated || provenance.Result != v1beta1.ProbeResultPassing {
 		t.Fatalf("final provenance = %+v", provenance)
+	}
+}
+
+func TestProberReconcileKeepsServicesIndependent(t *testing.T) {
+	const (
+		pathA        = "/models/a/ready"
+		changedPathA = "/models/a/live"
+		pathB        = "/models/b/health"
+	)
+	var (
+		requestsMu sync.Mutex
+		requests   = map[string]int{}
+	)
+	client := &http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		requestsMu.Lock()
+		requests[request.URL.Path]++
+		requestsMu.Unlock()
+		return &http.Response{
+			StatusCode: http.StatusServiceUnavailable,
+			Body:       io.NopCloser(strings.NewReader("unavailable")),
+			Header:     make(http.Header),
+		}, nil
+	})}
+	requestCount := func(path string) int {
+		t.Helper()
+		requestsMu.Lock()
+		defer requestsMu.Unlock()
+		return requests[path]
+	}
+
+	clk := clocktesting.NewFakeClock(testProbeNow)
+	prober := newTestProber(t, client, clk, 1, 1, testProbeResponseBytes)
+
+	configA := testProbeConfig()
+	configA.Path = "/ready"
+	configA.Period = time.Second
+	configA.FailureThreshold = 1
+	policyA := testProbePolicy(t, configA)
+	mapA := types.NamespacedName{Namespace: "team-a", Name: "service-a"}
+	targetA := Target{
+		OwnerUID:     types.UID("service-a-uid"),
+		Map:          mapA,
+		Cluster:      "cluster-a",
+		URL:          "https://gateway.example.com/models/a",
+		PolicyDigest: policyA.PolicyDigest,
+	}
+	requestA := ProbeReconcileRequest{
+		OwnerUID: targetA.OwnerUID,
+		Map:      mapA,
+		Policy:   policyA,
+		Targets:  []Target{targetA},
+	}
+
+	configB := testProbeConfig()
+	configB.Path = "/health"
+	configB.Period = 4 * time.Second
+	configB.FailureThreshold = 3
+	policyB := testProbePolicy(t, configB)
+	mapB := types.NamespacedName{Namespace: "team-b", Name: "service-b"}
+	targetB := Target{
+		OwnerUID:     types.UID("service-b-uid"),
+		Map:          mapB,
+		Cluster:      "cluster-a",
+		URL:          "https://gateway.example.com/models/b",
+		PolicyDigest: policyB.PolicyDigest,
+	}
+	requestB := ProbeReconcileRequest{
+		OwnerUID: targetB.OwnerUID,
+		Map:      mapB,
+		Policy:   policyB,
+		Targets:  []Target{targetB},
+	}
+
+	if delay, err := prober.Reconcile(context.Background(), requestA); err != nil {
+		t.Fatalf("initial service A Reconcile() error = %v", err)
+	} else if delay != configA.Period {
+		t.Fatalf("initial service A delay = %s, want %s", delay, configA.Period)
+	}
+	if reachable := prober.Reachable(targetA); reachable == nil || *reachable {
+		t.Fatalf("service A Reachable() at its threshold = %v, want false", reachable)
+	}
+	if delay, err := prober.Reconcile(context.Background(), requestB); err != nil {
+		t.Fatalf("initial service B Reconcile() error = %v", err)
+	} else if delay != configB.Period {
+		t.Fatalf("initial service B delay = %s, want %s", delay, configB.Period)
+	}
+	assertB := func(wantFailures int32, wantGated bool, wantProbeTime time.Time) {
+		t.Helper()
+		probe := prober.Provenance(targetB)
+		if probe == nil || probe.PolicyDigest != policyB.PolicyDigest ||
+			probe.ConsecutiveFailures != wantFailures || probe.Gated != wantGated ||
+			probe.LastProbeTime == nil || !probe.LastProbeTime.Time.Equal(wantProbeTime) {
+			t.Fatalf("service B provenance = %+v, want failures=%d gated=%t time=%s",
+				probe, wantFailures, wantGated, wantProbeTime)
+		}
+	}
+	assertB(1, false, testProbeNow)
+	if got := requestCount(pathA); got != 1 {
+		t.Fatalf("service A requests to %q = %d, want 1", pathA, got)
+	}
+	if got := requestCount(pathB); got != 1 {
+		t.Fatalf("service B requests to %q = %d, want 1", pathB, got)
+	}
+
+	changedConfigA := configA
+	changedConfigA.Path = "/live"
+	changedConfigA.Period = 2 * time.Second
+	changedConfigA.FailureThreshold = 2
+	changedPolicyA := testProbePolicy(t, changedConfigA)
+	changedTargetA := targetA
+	changedTargetA.PolicyDigest = changedPolicyA.PolicyDigest
+	changedRequestA := requestA
+	changedRequestA.Policy = changedPolicyA
+	changedRequestA.Targets = []Target{changedTargetA}
+	if _, err := prober.Reconcile(context.Background(), changedRequestA); err != nil {
+		t.Fatalf("changed service A Reconcile() error = %v", err)
+	}
+	if provenance := prober.Provenance(targetA); provenance != nil {
+		t.Fatalf("old service A provenance after policy change = %+v, want nil", provenance)
+	}
+	if probe := prober.Provenance(changedTargetA); probe == nil || probe.ConsecutiveFailures != 1 || probe.Gated {
+		t.Fatalf("changed service A provenance = %+v, want reset failure count", probe)
+	}
+	assertB(1, false, testProbeNow)
+	if delay, err := prober.Reconcile(context.Background(), requestB); err != nil {
+		t.Fatalf("service B Reconcile() after service A change error = %v", err)
+	} else if delay != configB.Period {
+		t.Fatalf("service B delay after service A change = %s, want %s", delay, configB.Period)
+	}
+	if got := requestCount(pathB); got != 1 {
+		t.Fatalf("service B requests after service A change = %d, want 1", got)
+	}
+
+	prober.Forget(mapA)
+	if provenance := prober.Provenance(changedTargetA); provenance != nil {
+		t.Fatalf("service A provenance after Forget() = %+v, want nil", provenance)
+	}
+	assertB(1, false, testProbeNow)
+	if delay, err := prober.Reconcile(context.Background(), requestB); err != nil {
+		t.Fatalf("service B Reconcile() after service A Forget() error = %v", err)
+	} else if delay != configB.Period {
+		t.Fatalf("service B delay after service A Forget() = %s, want %s", delay, configB.Period)
+	}
+
+	if _, err := prober.Reconcile(context.Background(), changedRequestA); err != nil {
+		t.Fatalf("reset service A Reconcile() error = %v", err)
+	}
+	if probe := prober.Provenance(changedTargetA); probe == nil || probe.ConsecutiveFailures != 1 || probe.Gated {
+		t.Fatalf("reset service A provenance = %+v, want one fresh failure", probe)
+	}
+	assertB(1, false, testProbeNow)
+	if got := requestCount(changedPathA); got != 2 {
+		t.Fatalf("changed service A requests to %q = %d, want 2", changedPathA, got)
+	}
+
+	clk.Step(changedConfigA.Period)
+	if _, err := prober.Reconcile(context.Background(), changedRequestA); err != nil {
+		t.Fatalf("second changed service A Reconcile() error = %v", err)
+	}
+	if reachable := prober.Reachable(changedTargetA); reachable == nil || *reachable {
+		t.Fatalf("changed service A Reachable() at its threshold = %v, want false", reachable)
+	}
+	assertB(1, false, testProbeNow)
+	if delay, err := prober.Reconcile(context.Background(), requestB); err != nil {
+		t.Fatalf("early service B Reconcile() error = %v", err)
+	} else if delay != configB.Period-changedConfigA.Period {
+		t.Fatalf("early service B delay = %s, want %s", delay, configB.Period-changedConfigA.Period)
+	}
+	if got := requestCount(pathB); got != 1 {
+		t.Fatalf("early service B requests = %d, want 1", got)
+	}
+
+	clk.Step(configB.Period - changedConfigA.Period)
+	if _, err := prober.Reconcile(context.Background(), requestB); err != nil {
+		t.Fatalf("second service B Reconcile() error = %v", err)
+	}
+	assertB(2, false, testProbeNow.Add(configB.Period))
+	if reachable := prober.Reachable(targetB); reachable == nil || !*reachable {
+		t.Fatalf("service B Reachable() below its threshold = %v, want true", reachable)
+	}
+
+	clk.Step(configB.Period)
+	if _, err := prober.Reconcile(context.Background(), requestB); err != nil {
+		t.Fatalf("third service B Reconcile() error = %v", err)
+	}
+	assertB(3, true, testProbeNow.Add(2*configB.Period))
+	if reachable := prober.Reachable(targetB); reachable == nil || *reachable {
+		t.Fatalf("service B Reachable() at its threshold = %v, want false", reachable)
+	}
+	if got := requestCount(pathB); got != configB.FailureThreshold {
+		t.Fatalf("service B requests to %q = %d, want %d", pathB, got, configB.FailureThreshold)
 	}
 }
 
