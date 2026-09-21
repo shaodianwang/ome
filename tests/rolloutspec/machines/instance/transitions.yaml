@@ -38,7 +38,7 @@ transitions:
     guard: a gang surge source claimed this free index as its replacement and the slot is still empty
     to: Update/GangSurgeTarget
     effects: [Phase Creating with the gang surge-target marker stamped at Incarnation one, the index pinned in the plan]
-    decided_in: pkg/controller/v1beta1/workload/ops/update_status.go
+    decided_in: pkg/controller/v1beta1/workload/status/decision.go
   - id: T-empty-migrate-target
     from: Empty
     event: spec.migrateRequest
@@ -170,7 +170,7 @@ transitions:
     guard: paused, policy not RecreateInstanceOnPodRestart, no operation, and the live read confirms no pod backs the row
     to: Pending
     effects: [Phase Pending with counters, revisions and Incarnation preserved, InstanceDemoted warning event]
-    decided_in: pkg/controller/v1beta1/workload/ops/demote.go
+    decided_in: pkg/controller/v1beta1/workload/reconcile.go
   - id: T-ready-stuck-failed
     from: Ready
     event: pod.waiting
@@ -303,7 +303,7 @@ transitions:
     guard: the Backoff RetryBlock for the same revision is due, no authorized attempt is in flight, and no pod of the Instance remains
     to: Create/CreatePods
     effects: [Phase Creating with a Create CreatePods operation, the block flipped to RetryInProgress when the attempt starts]
-    decided_in: pkg/controller/v1beta1/workload/ops/retryblock_gate.go
+    decided_in: pkg/controller/v1beta1/workload/ops/create.go
   - id: T-failed-retry-surge
     from: Failed
     event: timer.retryAt

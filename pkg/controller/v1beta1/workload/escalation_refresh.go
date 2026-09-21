@@ -26,14 +26,14 @@ package workload
 // not when the row failed, and moving the stamp forward would both
 // misdate the failure and make a row that is merely wedged look like it
 // keeps failing anew.
-func refreshedFailureEvidence(s InstanceStatus, ev InstanceEvidence) *InstanceTermination {
-	if ev.StuckPod == nil || ev.StuckReason == "" {
+func refreshedFailureEvidence(row InstanceStatus, rowEvidence InstanceEvidence) *InstanceTermination {
+	if rowEvidence.StuckPod == nil || rowEvidence.StuckReason == "" {
 		return nil
 	}
-	if s.LastFailure == nil || s.LastFailure.Reason != DeadlineExceededReason {
+	if row.LastFailure == nil || row.LastFailure.Reason != DeadlineExceededReason {
 		return nil
 	}
-	return PodTerminationWithReason(ev.StuckPod, ev.StuckReason, s.LastFailure.Time)
+	return PodTerminationWithReason(rowEvidence.StuckPod, rowEvidence.StuckReason, row.LastFailure.Time)
 }
 
 // refreshFailureMutation writes the refreshed evidence onto LastFailure
@@ -43,16 +43,16 @@ func refreshedFailureEvidence(s InstanceStatus, ev InstanceEvidence) *InstanceTe
 // since left Failed or recorded a concrete cause of its own must keep
 // what it has.
 func refreshFailureMutation(termination *InstanceTermination) func(*InstanceStatus) bool {
-	return func(s *InstanceStatus) bool {
-		if s.Phase != InstancePhaseFailed {
+	return func(row *InstanceStatus) bool {
+		if row.Phase != InstancePhaseFailed {
 			return false
 		}
-		if s.LastFailure == nil || s.LastFailure.Reason != DeadlineExceededReason {
+		if row.LastFailure == nil || row.LastFailure.Reason != DeadlineExceededReason {
 			return false
 		}
 		captured := *termination
-		captured.Time = s.LastFailure.Time
-		s.LastFailure = &captured
+		captured.Time = row.LastFailure.Time
+		row.LastFailure = &captured
 		return true
 	}
 }

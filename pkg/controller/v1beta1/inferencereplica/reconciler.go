@@ -52,10 +52,10 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 	workloadgang "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/gang"
-	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	workloadpodgroup "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podgroup"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 	"github.com/ome-projects/ome/pkg/utils"
 )
 
@@ -725,7 +725,7 @@ func (r *Reconciler) resolveUpdateRetryPolicy(log logr.Logger) *workload.RetryPo
 }
 
 func scaleDownPodObservationRequired(input workload.ReconcileInput, plan workload.ComponentPlan) bool {
-	if len(workload.ExtraInstanceIndices(input.ObservedState.InstanceStatuses, plan, false)) > 0 {
+	if len(workload.ScaleDownExtras(input.ObservedState.InstanceStatuses, plan)) > 0 {
 		return true
 	}
 	for _, status := range input.ObservedState.InstanceStatuses {
@@ -918,7 +918,7 @@ func terminalFinalizationOwned(observed workload.WorkloadObservedState) map[int3
 			owned[status.Index] = struct{}{}
 		}
 		if status.Operation.Type == workload.InstanceOperationUpdate && status.Operation.SurgeIndex != nil {
-			if status.Operation.Step == workloadops.UpdateStepSurgeDrain || status.Operation.Step == workloadops.UpdateStepSurgeDrainSettle {
+			if status.Operation.Step == workloadtypes.UpdateStepSurgeDrain || status.Operation.Step == workloadtypes.UpdateStepSurgeDrainSettle {
 				owned[status.Index] = struct{}{}
 			}
 			if status.Phase == workload.InstancePhaseFailed {

@@ -3659,6 +3659,10 @@
         "lastProgressAt"
       ],
       "properties": {
+        "capacityRefusedAt": {
+          "description": "CapacityRefusedAt is when admission last refused one of the operation's pod creates for lack of quota. The refusal is an apiserver answer to a call the create pass made, so it cannot be read off the cluster on a later pass: it is recorded here, and the hold pass converts it into the Waiting token and the deadline park on every pass it stands. Cleared by a create that completes with no refusal. Empty means the last create was not refused for capacity.",
+          "$ref": "#/definitions/v1.Time"
+        },
         "deadline": {
           "description": "Deadline is the hard timeout for the current Step. Zero (null) means the step clock is parked (e.g. while the instance's pods are admission-gated); optional + nullable so the parked null is accepted by the apiserver.",
           "$ref": "#/definitions/v1.Time"
@@ -3864,6 +3868,15 @@
         "index"
       ],
       "properties": {
+        "announced": {
+          "description": "Announced is the Instance's record of once-only messages already delivered.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "default": ""
+          },
+          "x-kubernetes-list-type": "set"
+        },
         "conditions": {
           "description": "Conditions is the Instance's conditions.",
           "type": "array",
@@ -5030,6 +5043,15 @@
         "admitted": {
           "description": "Admitted is true when this Instance's pods have left the Kueue admission scheduling gate (quota granted): the Instance has pods and none are admission-gated. False while gated/queued or before pods exist. Used by the control plane to decide the fan-out race winner.",
           "type": "boolean"
+        },
+        "announced": {
+          "description": "Announced records the once-only messages this Instance has already emitted, one entry per message: the event reason it was emitted under and the episode it was emitted in, joined by \"@\". A warning an operator needs to see once — the gang has no co-location term, the PodGroup was rebuilt, a repair is held, a drain is past its deadline — is emitted only when its entry is absent, and is stamped in the same write that emits it. Recording it on the Instance rather than in controller memory is what makes the once-only property hold per workload rather than per process, and survive a controller restart.\n\nThe episode is the in-flight operation, or the incarnation when there is none: a new attempt or a rebuilt Instance has its own messages to deliver, and the entries of the episode it replaced no longer match.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "default": ""
+          },
+          "x-kubernetes-list-type": "set"
         },
         "availablePodCount": {
           "description": "AvailablePodCount is the number of pods that are Available: in rotation on the Component's headless Service and, when lifecycle.minReadySeconds is set, Ready for at least that long.",

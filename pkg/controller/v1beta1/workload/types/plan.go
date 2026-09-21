@@ -173,9 +173,18 @@ type MigrationOverlay struct {
 	HintTargetNodes []string
 }
 
+// Runner names. A single-pod Instance has one RunnerDefault; a multi-pod
+// Instance has one RunnerLeader of size 1 and one RunnerWorker of the
+// configured worker size. The name is a segment of every pod name.
+const (
+	RunnerDefault = "default"
+	RunnerLeader  = "leader"
+	RunnerWorker  = "worker"
+)
+
 // RunnerPlan is the desired state for one Runner within an Instance.
 type RunnerPlan struct {
-	// Name is "leader", "worker", or "default" (single-pod).
+	// Name is RunnerLeader, RunnerWorker, or RunnerDefault (single-pod).
 	Name string
 	// Size is the number of pods of this Runner within the Instance.
 	Size int32

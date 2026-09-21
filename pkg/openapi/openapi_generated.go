@@ -6677,6 +6677,12 @@ func schema_pkg_apis_ome_v1beta1_InstanceOperation(ref common.ReferenceCallback)
 							Format:      "",
 						},
 					},
+					"capacityRefusedAt": {
+						SchemaProps: spec.SchemaProps{
+							Description: "CapacityRefusedAt is when admission last refused one of the operation's pod creates for lack of quota. The refusal is an apiserver answer to a call the create pass made, so it cannot be read off the cluster on a later pass: it is recorded here, and the hold pass converts it into the Waiting token and the deadline park on every pass it stands. Cleared by a create that completes with no refusal. Empty means the last create was not refused for capacity.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
 					"strategy": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Strategy is the update strategy the operation runs under, pinned when the operation opens. UpdateStrategy is not part of the revision payload, so editing it retargets nothing: an attempt keeps the mechanism it started with — a patch already under way is not re-dispatched as a recreate, a surge already spent is not unwound — and the edit reaches the Instance at its next admitted attempt. Set only when Type=Update.",
@@ -7027,6 +7033,26 @@ func schema_pkg_apis_ome_v1beta1_InstanceStatusEntry(ref common.ReferenceCallbac
 						SchemaProps: spec.SchemaProps{
 							Description: "LastFailure is the Instance's preserved failure diagnostics.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceTermination"),
+						},
+					},
+					"announced": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "set",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Announced is the Instance's record of once-only messages already delivered.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
 						},
 					},
 				},
@@ -9104,6 +9130,26 @@ func schema_pkg_apis_ome_v1beta1_OMENativeInstanceStatus(ref common.ReferenceCal
 						SchemaProps: spec.SchemaProps{
 							Description: "LastFailure preserves the diagnostics of the pod whose failure (or stuck-pod escalation) last triggered a recreate of this Instance. OMENative drains and deletes every gang pod on recreate, so the failing pod and its container termination state vanish from the cluster — this field is the surviving trace operators read when a multi-node Instance keeps recreating. Set on the first pass of a failure-driven Restart and on stuck-pod escalation; left untouched by revision-roll recreates (those carry their cause in Operation.Reason instead) so the most recent genuine failure isn't overwritten by a clean rollout.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InstanceTermination"),
+						},
+					},
+					"announced": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "set",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Announced records the once-only messages this Instance has already emitted, one entry per message: the event reason it was emitted under and the episode it was emitted in, joined by \"@\". A warning an operator needs to see once — the gang has no co-location term, the PodGroup was rebuilt, a repair is held, a drain is past its deadline — is emitted only when its entry is absent, and is stamped in the same write that emits it. Recording it on the Instance rather than in controller memory is what makes the once-only property hold per workload rather than per process, and survive a controller restart.\n\nThe episode is the in-flight operation, or the incarnation when there is none: a new attempt or a rebuilt Instance has its own messages to deliver, and the entries of the episode it replaced no longer match.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
 						},
 					},
 				},

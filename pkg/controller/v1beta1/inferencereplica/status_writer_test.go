@@ -623,5 +623,6 @@ func populatedInstanceStatus() v1beta1.OMENativeInstanceStatus {
 		ReadySince:        &now,
 		Operation:         &v1beta1.InstanceOperation{ID: "operation-a", Type: v1beta1.InstanceOperationMigrate, Step: "WaitReady", StartedAt: now, LastProgressAt: now, Deadline: now, RetryCount: 1, TargetRevision: "revision-b", Reason: "placement", SurgeIndex: &surgeIndex, FromNode: "node-a", HintTargetNodes: []string{"node-b"}, RequestUUID: "request-a"},
 		LastFailure:       &v1beta1.InstanceTermination{PodName: "model-engine-7", ContainerName: "server", Reason: "OOMKilled", ExitCode: &exitCode, Message: "container terminated", Time: now},
+		Announced:         []string{"GangSplitRisk@operation-a"},
 	}
 }

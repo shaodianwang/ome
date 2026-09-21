@@ -75,7 +75,7 @@ func BuildPlan(component ComponentType, desired WorkloadDesiredSpec, observed Wo
 // worker Runner is present (single-pod Component).
 func workerSizeFromRunners(runners []Runner) int32 {
 	for _, r := range runners {
-		if r.Name == "worker" {
+		if r.Name == RunnerWorker {
 			return r.Size
 		}
 	}
@@ -90,11 +90,11 @@ func workerSizeFromRunners(runners []Runner) int32 {
 // never reach this function in production.
 func runnersForInstance(multiPod bool, workerSize int32) []RunnerPlan {
 	if !multiPod {
-		return []RunnerPlan{{Name: "default", Size: 1}}
+		return []RunnerPlan{{Name: RunnerDefault, Size: 1}}
 	}
 	return []RunnerPlan{
-		{Name: "leader", Size: 1},
-		{Name: "worker", Size: workerSize},
+		{Name: RunnerLeader, Size: 1},
+		{Name: RunnerWorker, Size: workerSize},
 	}
 }
 
@@ -251,15 +251,9 @@ func instancePlanIndices(instances []InstanceStatus, replicas int32) []int32 {
 	picked := map[int32]struct{}{}
 
 	// Pass 1: pin migration-in-flight indices (no cap on count; both
-	// source AND surge get pinned). Source-side entries count toward
-	// the steady replica budget — the source IS the user-facing replica
-	// being relocated. Surge-side entries are a transient +1 over
-	// MinReplicas and do NOT count. Without the source accounting,
-	// Pass 3 over-allocates a brand-new index during the surge window
-	// (e.g. replicas=1 + source@0 Migrating + surge@1 Creating →
-	// Pass 3 invents Index=2), and on the very next reconcile after
-	// Migrate completes the post-Migrate Create pass materializes a
-	// phantom pod at that index.
+	// source AND surge get pinned). Only the source counts toward the
+	// steady replica budget — it IS the user-facing replica being
+	// relocated; the surge is the transient +1 and does not.
 	steadyCount := int32(0)
 	for _, idx := range sorted {
 		if _, protected := migrationProtected[idx]; !protected {
@@ -345,16 +339,27 @@ func updateHandoffPromoted(source, target InstanceStatus, targetReferences int) 
 // mid-migration would abandon a partially-rolled-out surge.
 func migrationInFlightIndices(instances []InstanceStatus) map[int32]struct{} {
 	out := map[int32]struct{}{}
-	for _, s := range instances {
-		if s.Phase == InstancePhaseMigrating {
-			out[s.Index] = struct{}{}
-			continue
-		}
-		if s.Operation != nil && s.Operation.Type == InstanceOperationMigrate {
-			out[s.Index] = struct{}{}
+	for i := range instances {
+		if migrationPinned(&instances[i]) {
+			out[instances[i].Index] = struct{}{}
 		}
 	}
 	return out
+}
+
+// migrationPinned reports whether a migration record still references this
+// row: the source by its phase, the surge by the pin on its operation.
+//
+// This is not the row's owner. A pin is a durable reference that outlives
+// the attempt it was made for — a Failed row keeps it, and an index the
+// record still names must stay in the plan so the retirement does not
+// abandon half a pair — while ownership ends when the attempt does.
+func migrationPinned(s *InstanceStatus) bool {
+	if s == nil {
+		return false
+	}
+	return s.Phase == InstancePhaseMigrating ||
+		(s.Operation != nil && s.Operation.Type == InstanceOperationMigrate)
 }
 
 // migrationSourceIndices returns the indices of source-side migration

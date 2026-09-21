@@ -2,8 +2,9 @@
 # refusal first. Quota reports a fact about the Instance — it is queued
 # behind capacity an operator controls — and the pause does not take the
 # token from it; the row keeps reporting QuotaExceeded for as long as the
-# creates are refused. The first pass whose create lands releases the
-# quota token, and the pause takes the row on the pass after that.
+# creates are refused. The first pass whose create lands retires the
+# recorded refusal, and the pass after that releases the token and hands
+# the row to the pause.
 scenario: hold-quota-then-pause
 cells:
   - instance/Update/Surge/api.quotaDenied/before
@@ -28,10 +29,10 @@ timeline:
       - spec.revision: {image: registry.example.com/runtime:v2}
       - api.quotaDenied: {verb: create, resource: pods, count: 2}
   - tick: 2
-    note: the operator pauses while the second refusal lands, and the pause does not take a row already reporting QuotaExceeded
+    note: the first refusal is reported as a token at the top of this pass while the second lands, and the pause does not take a row already reporting QuotaExceeded
     events:
       - spec.pauseTrue: {}
   - tick: 3
-    note: quota frees up and the replacement is created, so the quota authority releases its token and the pause takes the row in the same pass
+    note: quota frees up and the replacement is created, so the recorded refusal is retired while the token it was reported as still stands
   - tick: 4
-    note: the row reports the pause and neither authority writes again
+    note: with the record gone the quota authority releases its token and the pause takes the row, in one pass

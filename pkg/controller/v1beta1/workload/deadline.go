@@ -7,6 +7,9 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // DeadlineExceededReason is the LastFailure.Reason stamped when an
@@ -37,20 +40,10 @@ func operationDeadlinePassed(s *InstanceStatus, now time.Time) bool {
 	return now.After(s.Operation.Deadline.Time)
 }
 
-// isTransientPhase reports whether the phase is an in-flight operation
-// phase the InstanceReadyTimeout backstop bounds (Creating / Updating /
-// Restarting / Migrating). Terminal phases (Ready / Failed / Deleting)
-// and the empty zero value are not.
+// isTransientPhase is types.TransientPhase under the name the deadline
+// backstop's guards read by.
 func isTransientPhase(p InstancePhase) bool {
-	switch p {
-	case InstancePhaseCreating,
-		InstancePhaseUpdating,
-		InstancePhaseRestarting,
-		InstancePhaseMigrating:
-		return true
-	default:
-		return false
-	}
+	return types.TransientPhase(p)
 }
 
 // PodAdmissionGated reports whether a pod is still held by a scheduling
@@ -99,11 +92,11 @@ func ReconcileGatedDeadlines(ctx context.Context, input ReconcileInput, instance
 		held := gated[s.Index] || instanceHeldExternally(s, instances)
 		switch {
 		case held && !s.Operation.Deadline.IsZero():
-			if err := setInstanceDeadline(ctx, input, s.Index, metav1.Time{}); err != nil {
+			if err := status.StampDeadline(ctx, input, s.Index, metav1.Time{}); err != nil {
 				return fmt.Errorf("park deadline for held instance %d: %w", s.Index, err)
 			}
 		case !held && s.Operation.Deadline.IsZero():
-			if err := setInstanceDeadline(ctx, input, s.Index, metav1.NewTime(now.Add(timeout))); err != nil {
+			if err := status.StampDeadline(ctx, input, s.Index, metav1.NewTime(now.Add(timeout))); err != nil {
 				return fmt.Errorf("restart deadline for released instance %d: %w", s.Index, err)
 			}
 		}
@@ -138,22 +131,6 @@ func instanceHeldExternally(s *InstanceStatus, statuses []InstanceStatus) bool {
 	return false
 }
 
-// setInstanceDeadline writes Operation.Deadline via MutateInstance,
-// preserving the rest of the Operation. No-op when the slot is gone, has
-// no Operation, or already holds the target deadline.
-func setInstanceDeadline(ctx context.Context, input ReconcileInput, idx int32, deadline metav1.Time) error {
-	return input.MutateInstance(ctx, idx, func(s *InstanceStatus) bool {
-		if s.Phase == "" || s.Operation == nil {
-			return false
-		}
-		if s.Operation.Deadline.Time.Equal(deadline.Time) {
-			return false
-		}
-		s.Operation.Deadline = deadline
-		return true
-	})
-}
-
 // deadlineFailureMessage formats the operator-facing reason passed to
 // WarnInstanceFailed. Names the operation type + step that timed out so
 // `kubectl describe` points at what was in flight.
@@ -172,34 +149,5 @@ func deadlineTermination(now time.Time, op *InstanceOperation) *InstanceTerminat
 		Reason:  DeadlineExceededReason,
 		Message: deadlineFailureMessage(op),
 		Time:    metav1.NewTime(now),
-	}
-}
-
-// deadlineFailedMutation builds the Phase=Failed stamp for an elapsed
-// Operation deadline, recording termination on LastFailure. Mirrors
-// stuckPodFailedMutation's guard logic: a fresh-empty slot (Phase=="")
-// from the writer's append path is a sentinel for a slot deleted out
-// from under us (don't resurrect), an already-Failed slot is a no-op,
-// and any other phase flips to Failed. A slot whose Operation is already
-// gone is also a no-op: the attempt concluded (or was disposed) since the
-// deadline was observed, so there is nothing in flight left to expire.
-//
-// The Operation is preserved — operators want to see WHAT was in flight
-// when the deadline elapsed.
-func deadlineFailedMutation(termination *InstanceTermination) func(*InstanceStatus) bool {
-	return func(s *InstanceStatus) bool {
-		if s.Phase == "" {
-			return false
-		}
-		if s.Phase == InstancePhaseFailed {
-			return false
-		}
-		if s.Operation == nil {
-			return false
-		}
-		s.Phase = InstancePhaseFailed
-		captured := *termination
-		s.LastFailure = &captured
-		return true
 	}
 }

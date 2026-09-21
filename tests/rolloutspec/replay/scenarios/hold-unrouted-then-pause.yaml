@@ -3,7 +3,8 @@
 # the pause does not take a row already reporting a fact about the
 # Instance, so the operation keeps SourceUnrouted for as long as the
 # source is out. Once it is routed again the surge releases its token and
-# the pause, which is still in force, takes the row.
+# the pause, which is still in force, takes the row in that same pass —
+# release runs before record, so the row is never left unheld.
 scenario: hold-unrouted-then-pause
 cells:
   - instance/Update/Surge/endpoint.rotationOut[source]/before
@@ -38,8 +39,8 @@ timeline:
   - tick: 4
     note: the source is still out of rotation, so the token stands and neither authority writes again
   - tick: 5
-    note: the source is routed again, so the surge releases its own token
+    note: the source is routed again, so the surge releases its own token and the pause, still in force, takes the row in the same pass
     events:
       - endpoint.rotationIn[source]: {pod: {index: 0}}
   - tick: 6
-    note: the pause is still in force, so the next pass takes the row with Paused
+    note: the row reports the pause and neither authority writes again

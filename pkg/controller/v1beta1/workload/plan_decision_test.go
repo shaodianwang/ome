@@ -875,11 +875,11 @@ func TestPlan_Update_CoordGateExempt_FailedZeroServing(t *testing.T) {
 	}
 }
 
-// TestPlan_Update_CoordGateExempt_SurgeKeepsConsult asserts the
+// TestPlan_UpdateCoordGateExemptSurgeKeepsConsult asserts the
 // exemption never applies under SurgeThenDrain: the surge-side gates
 // count surge pods, not serving loss, and a Failed Instance's
 // recreate-via-surge genuinely adds one.
-func TestPlan_Update_CoordGateExempt_SurgeKeepsConsult(t *testing.T) {
+func TestPlan_UpdateCoordGateExemptSurgeKeepsConsult(t *testing.T) {
 	target := updateTarget()
 	in := minimalInput(t)
 	forbidMutations(t, &in)
@@ -1408,6 +1408,338 @@ func TestPlan_Demote_UnbackedReadyInstances(t *testing.T) {
 		d := planOrFail(t, in, plan, planSnapshot(in, nil))
 		if findAction(d, workload.ActionDemote) != nil {
 			t.Errorf("only Ready demotes, got %v", actionKinds(d))
+		}
+	})
+}
+
+// Cells: instance/Update/Drain/spec.pauseTrue/before, instance/Create/CreatePods/spec.pauseTrue/before, instance/Ready/spec.pauseTrue/before, instance/Ready/spec.unpause/before
+func TestPlan_Paused_AdvancesInFlightAttemptsOnly(t *testing.T) {
+	build := func(t *testing.T) (workload.ReconcileInput, workload.ComponentPlan) {
+		in := minimalInput(t)
+		forbidMutations(t, &in)
+		in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
+			// Recreate in flight: the old pods are gone and the new ones
+			// are not created yet.
+			{Index: 0, Incarnation: 2, Phase: workload.InstancePhaseUpdating, RunningRevision: "prior-rev",
+				Operation: &workload.InstanceOperation{
+					ID: "update-0", Type: workload.InstanceOperationUpdate, Step: "Drain",
+					TargetRevision: updateTarget().Name,
+				}},
+			// Off-target but idle: a fresh start.
+			{Index: 1, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: "prior-rev"},
+			// Create committed to this target: the set is half materialized.
+			{Index: 2, Incarnation: 1, Phase: workload.InstancePhaseCreating,
+				Operation: &workload.InstanceOperation{
+					ID: "create-2", Type: workload.InstanceOperationCreate, Step: "CreatePods",
+					TargetRevision: updateTarget().Name,
+				}},
+		}
+		plan := minimalPlan()
+		plan.Replicas = 3
+		plan.Instances = append(plan.Instances,
+			workload.InstancePlan{Index: 1, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+			workload.InstancePlan{Index: 2, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+		)
+		return in, plan
+	}
+	// Index 1 is backed, so the truth pass has nothing to correct and the
+	// decision is exactly the lifecycle selection under test.
+	pods := func(in workload.ReconcileInput) map[int32][]*corev1.Pod {
+		return map[int32][]*corev1.Pod{1: {enginePod(in.Key.OwnerName, in.Key.Namespace, 1)}}
+	}
+
+	t.Run("paused selects the open attempts only", func(t *testing.T) {
+		in, plan := build(t)
+		plan.Paused = true
+		d := planTargetOrFail(t, in, plan, updateTarget(), planSnapshot(in, pods(in)))
+		if !kindsEqual(actionKinds(d), []workload.ActionKind{workload.ActionUpdate, workload.ActionCreate}) {
+			t.Fatalf("paused decision = %v, want [Update Create]", actionKinds(d))
+		}
+		ua := findAction(d, workload.ActionUpdate)
+		if len(ua.Update.Items) != 1 || ua.Update.Items[0].Instance.Index != 0 {
+			t.Errorf("update selection = %+v, want the in-flight index 0 only", ua.Update.Items)
+		}
+		if ua.Update.Items[0].StartingFresh {
+			t.Errorf("a paused selection must never start fresh: %+v", ua.Update.Items[0])
+		}
+		if d.Escalate {
+			t.Errorf("paused decision must suspend escalation")
+		}
+	})
+
+	t.Run("no committed create means no Create pass", func(t *testing.T) {
+		in, plan := build(t)
+		plan.Paused = true
+		in.ObservedState.InstanceStatuses = in.ObservedState.InstanceStatuses[:2]
+		d := planTargetOrFail(t, in, plan, updateTarget(), planSnapshot(in, pods(in)))
+		if findAction(d, workload.ActionCreate) != nil {
+			t.Errorf("paused decision with nothing committed must not plan Create, got %v", actionKinds(d))
+		}
+	})
+
+	t.Run("unpause restores the fresh start", func(t *testing.T) {
+		in, plan := build(t)
+		d := planTargetOrFail(t, in, plan, updateTarget(), planSnapshot(in, nil))
+		ua := findAction(d, workload.ActionUpdate)
+		if ua == nil || len(ua.Update.Items) != 2 {
+			t.Fatalf("unpaused update selection = %+v, want both indices", ua)
+		}
+		if !ua.Update.Items[1].StartingFresh {
+			t.Errorf("index 1 = %+v, want a fresh start once the pause is cleared", ua.Update.Items[1])
+		}
+	})
+}
+
+// TestPlan_Paused_ReDrivesAFailedUpdateContinuation: a paused Component
+// whose only Update row is Failed with the operation preserved — the
+// deadline backstop's stamp on a multi-pod roll — is still selected, and
+// selected as a continuation. The claim decides, not the owner: nobody
+// may advance a Failed row, but the operation it carries is an Update
+// half-done, and a pause parks new work rather than leaving a roll
+// wedged until the unpause.
+//
+// Cells: instance/Failed/spec.pauseTrue/before
+func TestPlan_Paused_ReDrivesAFailedUpdateContinuation(t *testing.T) {
+	in := minimalInput(t)
+	forbidMutations(t, &in)
+	in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
+		{Index: 0, Incarnation: 2, Phase: workload.InstancePhaseFailed, RunningRevision: "prior-rev",
+			Operation: &workload.InstanceOperation{
+				ID: "update-0", Type: workload.InstanceOperationUpdate, Step: "Drain",
+				TargetRevision: updateTarget().Name,
+			}},
+	}
+	plan := minimalPlan()
+	plan.Paused = true
+	d := planTargetOrFail(t, in, plan, updateTarget(), planSnapshot(in, nil))
+	ua := findAction(d, workload.ActionUpdate)
+	if ua == nil || len(ua.Update.Items) != 1 || ua.Update.Items[0].Instance.Index != 0 {
+		t.Fatalf("paused decision = %v, want the Failed row's Update continuation selected", actionKinds(d))
+	}
+	if ua.Update.Items[0].StartingFresh {
+		t.Errorf("a Failed row with a preserved Update is a continuation, got %+v", ua.Update.Items[0])
+	}
+}
+
+// TestPlan_PauseFreeze_AdvancesOpenRepairOnly: a frozen pause suspends
+// the repair pass — a fresh pod-loss trigger is not selected — but a
+// repair already under way is still driven, so the pods it deleted are
+// recreated instead of staying missing for the length of the hold. A
+// standard pause keeps starting repairs.
+//
+// Cells: instance/Restart/Drain/spec.pauseFreeze/before, instance/Restart/Drain/spec.pauseTrue/before, instance/Ready/spec.pauseFreeze/before
+func TestPlan_PauseFreeze_AdvancesOpenRepairOnly(t *testing.T) {
+	build := func(t *testing.T) (workload.ReconcileInput, workload.ComponentPlan) {
+		in := minimalInput(t)
+		forbidMutations(t, &in)
+		in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
+			{Index: 0, Incarnation: 2, Phase: workload.InstancePhaseRestarting,
+				Operation: &workload.InstanceOperation{
+					ID: "restart-0", Type: workload.InstanceOperationRestart, Step: "Drain",
+				}},
+			// Ready with no pods: a fresh pod-loss repair trigger.
+			{Index: 1, Incarnation: 1, Phase: workload.InstancePhaseReady},
+		}
+		plan := minimalPlan()
+		plan.Replicas = 2
+		plan.RestartPolicy = workload.RestartPolicyRecreateInstance
+		plan.Paused = true
+		plan.Instances = append(plan.Instances,
+			workload.InstancePlan{Index: 1, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+		)
+		return in, plan
+	}
+
+	t.Run("frozen pause drives the open repair only", func(t *testing.T) {
+		in, plan := build(t)
+		plan.PauseFreeze = true
+		d := planTargetOrFail(t, in, plan, updateTarget(), planSnapshot(in, nil))
+		ra := findAction(d, workload.ActionRestart)
+		if ra == nil || len(ra.Restarts) != 1 || ra.Restarts[0].Instance.Index != 0 {
+			t.Fatalf("frozen restart selection = %+v, want the open repair on index 0 only", ra)
+		}
+	})
+
+	t.Run("frozen pause with nothing open plans no repair", func(t *testing.T) {
+		in, plan := build(t)
+		plan.PauseFreeze = true
+		in.ObservedState.InstanceStatuses = in.ObservedState.InstanceStatuses[1:]
+		d := planTargetOrFail(t, in, plan, updateTarget(), planSnapshot(in, nil))
+		if findAction(d, workload.ActionRestart) != nil {
+			t.Errorf("frozen decision must not start a repair, got %v", actionKinds(d))
+		}
+	})
+
+	t.Run("standard pause keeps repairing", func(t *testing.T) {
+		in, plan := build(t)
+		d := planTargetOrFail(t, in, plan, updateTarget(), planSnapshot(in, nil))
+		ra := findAction(d, workload.ActionRestart)
+		if ra == nil || len(ra.Restarts) != 2 {
+			t.Fatalf("paused restart selection = %+v, want both the open repair and the fresh one", ra)
+		}
+	})
+}
+
+// TestReconcile_PausedCompletesTheOpenRecreate: a pause taken between a
+// recreate's two phases — the old pods deleted, the new ones not created
+// yet — still recreates them. Holding there would leave the Instance
+// dark for the whole pause, which is the one thing a pause may not do.
+//
+
+// TestPlan_PauseFreeze_AdvancesTheOpenRollOnly: a freeze suspends repair
+// on top of what a standard pause withholds, but neither withholds a
+// step already under way. A recreate mid-gap and an in-place patch
+// mid-flight are both still selected as continuations — never as fresh
+// starts — and clearing the pause adds the fresh start back without
+// disturbing either of them.
+//
+// Cells: instance/Update/Drain/spec.pauseFreeze/before, instance/Update/InPlace/spec.pauseFreeze/before, instance/Update/Drain/spec.unpause/before
+func TestPlan_PauseFreeze_AdvancesTheOpenRollOnly(t *testing.T) {
+	build := func(t *testing.T) (workload.ReconcileInput, workload.ComponentPlan) {
+		t.Helper()
+		now := time.Now()
+		in := minimalInput(t)
+		forbidMutations(t, &in)
+		in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
+			rollInFlight(0, "Drain", 2, now.Add(30*time.Minute)),
+			rollInFlight(1, "InPlace", 1, now.Add(30*time.Minute)),
+			// Off-target with no attempt open: the fresh start a pause
+			// of either kind withholds.
+			{Index: 2, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: "prior-rev"},
+		}
+		plan := minimalPlan()
+		plan.Replicas = 3
+		plan.Instances = append(plan.Instances,
+			workload.InstancePlan{Index: 1, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+			workload.InstancePlan{Index: 2, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}},
+		)
+		return in, plan
+	}
+	// Index 2 is backed, so the truth pass has nothing to correct and the
+	// decision is exactly the lifecycle selection under test.
+	pods := func(in workload.ReconcileInput) map[int32][]*corev1.Pod {
+		return map[int32][]*corev1.Pod{2: {enginePod(in.Key.OwnerName, in.Key.Namespace, 2)}}
+	}
+
+	openIndices := func(t *testing.T, d workload.Decision) []int32 {
+		t.Helper()
+		ua := findAction(d, workload.ActionUpdate)
+		if ua == nil {
+			t.Fatalf("no Update action selected; got %v", actionKinds(d))
+		}
+		var out []int32
+		for _, item := range ua.Update.Items {
+			out = append(out, item.Instance.Index)
+		}
+		return out
+	}
+
+	t.Run("frozen pause drives both open rolls and starts nothing", func(t *testing.T) {
+		in, plan := build(t)
+		plan.Paused, plan.PauseFreeze = true, true
+		d := planTargetOrFail(t, in, plan, updateTarget(), planSnapshot(in, pods(in)))
+		got := openIndices(t, d)
+		if len(got) != 2 || got[0] != 0 || got[1] != 1 {
+			t.Fatalf("frozen update selection = %v, want the two open rolls [0 1]", got)
+		}
+		for _, item := range findAction(d, workload.ActionUpdate).Update.Items {
+			if item.StartingFresh {
+				t.Errorf("index %d = %+v, want a continuation under a freeze", item.Instance.Index, item)
+			}
+		}
+		if d.Escalate {
+			t.Errorf("a frozen decision must suspend escalation")
+		}
+	})
+
+	t.Run("unpause adds the fresh start and leaves the open rolls alone", func(t *testing.T) {
+		in, plan := build(t)
+		d := planTargetOrFail(t, in, plan, updateTarget(), planSnapshot(in, pods(in)))
+		got := openIndices(t, d)
+		if len(got) != 3 {
+			t.Fatalf("unpaused update selection = %v, want all three indices", got)
+		}
+		for _, item := range findAction(d, workload.ActionUpdate).Update.Items {
+			fresh := item.Instance.Index == 2
+			if item.StartingFresh != fresh {
+				t.Errorf("index %d StartingFresh = %v, want %v (the unpause restamps no open roll)",
+					item.Instance.Index, item.StartingFresh, fresh)
+			}
+		}
+	})
+}
+
+// TestPlan_PauseFreeze_AdvancesTheOpenDrain: a drain step is past the
+// point where a hold is free — the source is already out of rotation and
+// the replacement is the Instance's only capacity — so neither a standard
+// pause nor a freeze withholds it. It is selected as a continuation, and
+// clearing the pause adds back the fresh start it was withholding without
+// disturbing the drain.
+//
+// Cells: instance/Update/SurgeDrain/spec.pauseFreeze/before, instance/Update/SurgeDrain/spec.unpause/before
+func TestPlan_PauseFreeze_AdvancesTheOpenDrain(t *testing.T) {
+	build := func(t *testing.T) (workload.ReconcileInput, workload.ComponentPlan) {
+		t.Helper()
+		now := time.Now()
+		in := minimalInput(t)
+		forbidMutations(t, &in)
+		in.ObservedState.InstanceStatuses = []workload.InstanceStatus{
+			rollInFlight(0, workload.UpdateStepSurgeDrain, 1, now.Add(30*time.Minute)),
+			// Off-target with no attempt open: the fresh start a pause of
+			// either kind withholds.
+			{Index: 1, Incarnation: 1, Phase: workload.InstancePhaseReady, RunningRevision: "prior-rev"},
+		}
+		plan := minimalPlan()
+		plan.Replicas = 2
+		plan.Instances = append(plan.Instances,
+			workload.InstancePlan{Index: 1, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}})
+		return in, plan
+	}
+	pods := func(in workload.ReconcileInput) map[int32][]*corev1.Pod {
+		return map[int32][]*corev1.Pod{1: {enginePod(in.Key.OwnerName, in.Key.Namespace, 1)}}
+	}
+	openIndices := func(t *testing.T, d workload.Decision) []int32 {
+		t.Helper()
+		ua := findAction(d, workload.ActionUpdate)
+		if ua == nil {
+			t.Fatalf("no Update action selected; got %v", actionKinds(d))
+		}
+		var out []int32
+		for _, item := range ua.Update.Items {
+			out = append(out, item.Instance.Index)
+		}
+		return out
+	}
+
+	t.Run("frozen pause drives the open drain and starts nothing", func(t *testing.T) {
+		in, plan := build(t)
+		plan.Paused, plan.PauseFreeze = true, true
+		d := planTargetOrFail(t, in, plan, updateTarget(), planSnapshot(in, pods(in)))
+		got := openIndices(t, d)
+		if len(got) != 1 || got[0] != 0 {
+			t.Fatalf("frozen update selection = %v, want the open drain [0]", got)
+		}
+		if findAction(d, workload.ActionUpdate).Update.Items[0].StartingFresh {
+			t.Errorf("the open drain was restamped as a fresh attempt under a freeze")
+		}
+		if d.Escalate {
+			t.Errorf("a frozen decision must suspend escalation")
+		}
+	})
+
+	t.Run("unpause adds the fresh start and leaves the drain alone", func(t *testing.T) {
+		in, plan := build(t)
+		d := planTargetOrFail(t, in, plan, updateTarget(), planSnapshot(in, pods(in)))
+		got := openIndices(t, d)
+		if len(got) != 2 {
+			t.Fatalf("unpaused update selection = %v, want both indices", got)
+		}
+		for _, item := range findAction(d, workload.ActionUpdate).Update.Items {
+			fresh := item.Instance.Index == 1
+			if item.StartingFresh != fresh {
+				t.Errorf("index %d StartingFresh = %v, want %v (the unpause restamps no open roll)",
+					item.Instance.Index, item.StartingFresh, fresh)
+			}
 		}
 	})
 }

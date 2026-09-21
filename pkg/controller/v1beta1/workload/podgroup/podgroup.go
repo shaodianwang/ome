@@ -344,7 +344,7 @@ func EffectiveTopologyKeyForPods(desiredKey, ownerName string, component workloa
 func GeneratedTopologyKeyFromPods(ownerName string, component workload.ComponentType, pods []*corev1.Pod) (string, bool, error) {
 	keys := make(map[string]struct{})
 	for _, pod := range pods {
-		if pod == nil || pod.Labels[query.LabelRunner] != "worker" ||
+		if pod == nil || pod.Labels[query.LabelRunner] != workload.RunnerWorker ||
 			pod.Spec.Affinity == nil || pod.Spec.Affinity.PodAffinity == nil {
 			continue
 		}
@@ -361,7 +361,7 @@ func GeneratedTopologyKeyFromPods(ownerName string, component workload.Component
 			if labels[constants.InferenceServicePodLabelKey] == ownerName &&
 				labels[constants.OMEComponentLabel] == string(component) &&
 				labels[query.LabelInstanceIdx] == wantIndex &&
-				labels[query.LabelRunner] == "leader" {
+				labels[query.LabelRunner] == workload.RunnerLeader {
 				keys[term.TopologyKey] = struct{}{}
 			}
 		}
@@ -417,7 +417,7 @@ func topologyKeyFromLivePods(ownerName string, component workload.ComponentType,
 	exact := make(map[string]struct{})
 	wantIndex := fmt.Sprintf("%d", instanceIdx)
 	for _, pod := range pods {
-		if pod == nil || pod.Labels[query.LabelRunner] != "worker" ||
+		if pod == nil || pod.Labels[query.LabelRunner] != workload.RunnerWorker ||
 			pod.Spec.Affinity == nil || pod.Spec.Affinity.PodAffinity == nil {
 			continue
 		}
@@ -433,7 +433,7 @@ func topologyKeyFromLivePods(ownerName string, component workload.ComponentType,
 			if labels[constants.InferenceServicePodLabelKey] == ownerName &&
 				labels[constants.OMEComponentLabel] == string(component) &&
 				labels[query.LabelInstanceIdx] == wantIndex &&
-				labels[query.LabelRunner] == "leader" {
+				labels[query.LabelRunner] == workload.RunnerLeader {
 				exact[term.TopologyKey] = struct{}{}
 			}
 		}

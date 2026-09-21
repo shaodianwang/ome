@@ -1,6 +1,10 @@
 package types
 
-import "errors"
+import (
+	"errors"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
 
 // Gang scheduling holds — what one Instance's PodGroup says about the
 // gang, and the InstanceOperation.Waiting tokens that report it.
@@ -43,24 +47,6 @@ const (
 	GangStateOwnershipConflict GangState = "OwnershipConflict"
 	GangStateFailed            GangState = "Failed"
 )
-
-// GangRowOwnedElsewhere reports whether another state machine owns this
-// row's outcome, so nothing read off its PodGroup may hold it, flip its
-// phase, or rebuild its group. A teardown belongs to DeleteBatch, which
-// paces its own removal past any wait and has nothing left to announce
-// for a gang on its way out. A migration belongs to its record, the
-// timeout authority for both pair rows.
-func GangRowOwnedElsewhere(op *InstanceOperation) bool {
-	if op == nil {
-		return false
-	}
-	switch op.Type {
-	case InstanceOperationDelete, InstanceOperationMigrate:
-		return true
-	default:
-		return false
-	}
-}
 
 // GangObservation is one Instance's PodGroup as the escalation pass
 // reads it: the deterministic name, the classified state, and the
@@ -124,4 +110,26 @@ func (g *GangObservations) BlocksPods(idx int32) bool {
 // an object being collected, so the gang cannot be announced yet.
 func OperationGangHeld(op *InstanceOperation) bool {
 	return op != nil && op.Waiting == WaitingReasonPodGroupTerminating
+}
+
+// GangTermination is the evidence record for a gang hold or verdict: the
+// token or reason, the PodGroup's own explanation, and when it was seen.
+func GangTermination(reason, message string, at metav1.Time) *InstanceTermination {
+	return &InstanceTermination{Reason: reason, Message: message, Time: at}
+}
+
+// GangReadingFor returns the PodGroup reading that governs one row.
+//
+// A gang-surge SOURCE gets none. Its own group is the one its serving
+// pods already belong to, while the attempt in flight builds members
+// under the SURGE index — which carries its own reading and its own
+// hold. Judging the source on its own group would hold, or end, a row
+// whose replacement is the thing actually being waited on. The empty
+// reading still lets the release step retire a token the row took
+// before it became a surge source.
+func GangReadingFor(input ReconcileInput, s InstanceStatus) GangObservation {
+	if s.Operation != nil && s.Operation.SurgeIndex != nil {
+		return GangObservation{}
+	}
+	return input.Gangs.For(s.Index)
 }

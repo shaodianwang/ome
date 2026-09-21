@@ -276,7 +276,7 @@ func podReconcileRelevantChanged(oldPod, newPod *corev1.Pod) bool {
 //     new image into Status.ContainerStatuses[*].Image, so that flip MUST
 //     wake the reconcile or the rollout stalls until the periodic resync.
 //   - State.Waiting (Reason+Message) — terminal-failure / stuck-pod
-//     escalation (types.PodStuckInTerminalWaiting, types.PodTermination).
+//     escalation (evidence.PodStuckInTerminalWaiting, types.PodTermination).
 //   - State.Terminated (ExitCode+Reason+Message) — crash detection
 //     (types.PodTermination).
 //   - LastTerminationState.Terminated (ExitCode+Reason+Message) — a

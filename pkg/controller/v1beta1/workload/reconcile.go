@@ -28,13 +28,12 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/holds"
 	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // Reconcile drives one workload (one Component of one owner) toward its
@@ -47,41 +46,10 @@ import (
 // it and produces the Decision; Execute applies the Decision through
 // the workload/ops state machines and runs the escalation pass.
 //
-// The op chain:
-//
-//  1. Scale-down — DeleteBatch for any InstanceStatus index the plan no
-//     longer asks for. Completes before scale-up so excess pods don't
-//     run alongside in-flight drains.
-//  2. Truth — status-only demotion of Ready Instances with no live pods
-//     and no in-flight operation, where no op pass will act. Selected
-//     only on paused reconciles (every depth — unpaused, Create both
-//     recovers and re-stamps the phase); never touches a pod.
-//  3. Restart — per-Instance pod-loss / pod-Failed triggers; dispatched
-//     when the Component's restart policy allows it. One pass per
-//     reconcile.
-//  4. Migration expiry — Manual records past their Deadline are
-//     consumed (ops.ExpireMigrations): record closed, pair unpinned,
-//     source restored from observation. Runs BEFORE the drive pass so
-//     an expired record can never be driven (re-stamped) again, and
-//     regardless of MigrationMode so a mode flip to Never cannot
-//     strand a non-terminal record.
-//  5. Migration — the oldest non-terminal Manual record from
-//     ObservedState.Migrations drives Migrate, one per pass. Returns
-//     Requeue=true after completion so the next reconcile rebuilds
-//     plan from the post-migration status.
-//  6. Update — DetectUpdateTrigger then Update. Tracks within-pass
-//     in-flight counters and consults input.UpdateGate so
-//     cross-Component coordination can throttle the rollout.
-//  7. Create — materialize any missing Instances.
-//  8. Escalation — the terminal-failure pass (escalation.go): stuck-pod
-//     and elapsed-deadline evidence from the snapshot decides the
-//     Phase=Failed transition through the disposition classification.
-//     Runs after every eligible op-pass return, errored or not. A
-//     scale-down admission or completion commit ends the pass; an active
-//     wave excludes every extra index while retained Instances remain
-//     eligible for escalation. A paused Component runs the pass's
-//     evidence half only (holdevidence.go): the hold authorities still
-//     record and release, no repair follows.
+// Execute runs the hold pass, then the op actions in the order
+// executeActions numbers them (scale-down, demotion, restart, migration
+// expiry, migration, update, create), then escalation. Which pass may
+// advance a row is the ownership table's answer, never the order's.
 //
 // target may be nil when DesiredSpec.PodSpec is nil (MinReplicas=0).
 // Restart / Update passes short-circuit on nil target; Create returns
@@ -109,35 +77,11 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 		input.PassWake = &PassWake{}
 	}
 
-	// Teardown mode: the owner is being deleted. The planned index set is
-	// treated as empty so every observed Instance is a scale-down extra
-	// and runs the scale-down batch pipeline; nothing else runs — not the
-	// Paused gate, not Restart / Migrate / Update / Create, not the
-	// escalation pass (the scale-down pipeline owns wedge escalation via
-	// lifecycle.forceDelete). The caller owns completion detection and
-	// finalizer decisions.
-	//
-	// includeMigrating=true: a mid-migration source and its surge are
-	// deleted like everything else. The normal-path exclusion protects an
-	// in-flight Migrate from the scale-down pass, but under teardown there
-	// is no Migrate to protect — excluding the pair would leave its pods
-	// with no scale-down operation and wedge the teardown forever.
+	// Teardown: the owner is being deleted, so every observed Instance is
+	// a scale-down extra and nothing else runs. The caller owns completion
+	// detection and finalizer decisions.
 	if input.Teardown {
-		emptied := plan
-		emptied.Instances = nil
-		extras := ExtraInstanceIndices(input.ObservedState.InstanceStatuses, emptied, true)
-		snapshot := NewObservedSnapshot(deps, input, plan.Component, input.ObservedState.InstanceStatuses)
-		outcome, err := deleteExtraInstances(ctx, deps, input, plan, snapshot, extras)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if outcome.ImmediateRequeue {
-			return ctrl.Result{Requeue: true}, nil
-		}
-		if outcome.InProgress {
-			return scaleDownPollResult(input, outcome.RequeueAfter, outcome.PolicyDeadlineDue), nil
-		}
-		return ctrl.Result{}, nil
+		return reconcileTeardown(ctx, deps, input, plan)
 	}
 
 	// Single observation for this reconcile: pod reads are lazy + memoized
@@ -145,17 +89,21 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 	// source is Listed at most once and only when a pass needs it.
 	snapshot := NewObservedSnapshot(deps, input, plan.Component, input.ObservedState.InstanceStatuses)
 
-	decision, perr := Plan(ctx, input, plan, target, snapshot)
-	if perr != nil {
-		return ctrl.Result{}, perr
+	decision, err := Plan(ctx, input, plan, target, snapshot)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
 	res, err := Execute(ctx, deps, input, plan, target, snapshot, decision)
-	res = input.PassWake.Fold(FoldPassRequeue(res, input.PromoteWindow.Pending()))
-	return FloorPassRequeue(res, input.Pacing.Throttle()), err
+	res = EarliestWake(res, input.PromoteWindow.Pending(), input.PassWake.Pending())
+	if input.PassWake.Bare() && res.RequeueAfter == 0 {
+		res = RequeueNow()
+	}
+	return NoSoonerThan(res, input.Pacing.Pending()), err
 }
 
-// Execute applies the Decision: the op-pass action loop, then the
-// end-of-pass bookkeeping (endOfPassBookkeeping). A scale-down status commit
+// Execute applies the Decision: the hold pass, then the op-pass action
+// loop, then the end-of-pass bookkeeping (endOfPassBookkeeping). A
+// scale-down status commit
 // is a pass boundary because it invalidates the plan. While an admitted wave
 // is polling, escalation still runs for retained Instances but excludes every
 // scale-down extra; deferred victims must receive no lifecycle mutation before
@@ -171,21 +119,31 @@ func Reconcile(ctx context.Context, deps Deps, input ReconcileInput, plan Compon
 // failure persists. The op error is the pass's primary failure: it is
 // reported first and an end-of-pass error is appended to it, never
 // substituted for it.
-func Execute(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot, d Decision) (ctrl.Result, error) {
-	res, statusCommitBoundary, err := executeActions(ctx, deps, input, plan, target, snapshot, d)
-	// The pause hold is recorded after the actions, so the answer every
-	// step read this pass is the one the pass acted on, and the row is
-	// marked held only once the step it was on has had its turn.
-	if perr := reconcilePauseHolds(ctx, input, plan); perr != nil {
-		if err == nil {
-			return res, perr
-		}
-		err = errors.Join(err, perr)
+func Execute(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot, decision Decision) (ctrl.Result, error) {
+	// Holds first, for every row, before any verb pass: a token is
+	// written as soon as its condition is observed. What the owner does
+	// about it — abandon the step now or finish to its boundary — is the
+	// ownership table's answer, not the hold pass's.
+	//
+	// An errored hold pass does not suspend the verb passes, for the same
+	// reason an errored op pass does not suspend the bookkeeping below:
+	// every row derives its own holds, so one row's failed read must not
+	// freeze another row's operation. The op error stays the pass's
+	// primary failure and is reported first.
+	// The decision layer grouped the rows by owner once; every pass below
+	// reads its own list out of that one answer.
+	input.Owned = &decision.Owned
+	heldRows, holdErr := runHoldPass(ctx, deps, input, plan, snapshot, scaleDownExtras(decision))
+	res, endsPass, err := executeActions(ctx, deps, input, plan, target, snapshot, decision)
+	if holdErr != nil {
+		err = errors.Join(err, holdErr)
 	}
-	if statusCommitBoundary {
+	// A scale-down status commit is a pass boundary: it invalidates the
+	// plan, so nothing that reads the plan runs after it.
+	if endsPass {
 		return res, err
 	}
-	endOfPass := endOfPassBookkeeping(ctx, deps, input, plan, target, snapshot, d)
+	endOfPass := endOfPassBookkeeping(ctx, deps, input, plan, target, snapshot, decision, heldRows)
 	if endOfPass == nil {
 		return res, err
 	}
@@ -195,222 +153,177 @@ func Execute(ctx context.Context, deps Deps, input ReconcileInput, plan Componen
 	return res, errors.Join(err, endOfPass)
 }
 
-// endOfPassBookkeeping runs the end-of-pass steps the Decision allows.
+// endOfPassBookkeeping runs the end-of-pass steps the Decision allows:
+// the terminal-failure escalation pass, which repairs from the evidence
+// and from the holds this pass already recorded, followed by the
+// RetryBlock supersede-prune.
 //
-// Unpaused: the full escalation pass — evidence, holds and the repair
-// decisions that read them — followed by the RetryBlock supersede-prune.
-//
-// Paused: the evidence half alone. A pause freezes repair, not
-// observation: the authorities that report a FACT about an Instance —
-// the scheduler has no placement, the gang's name is being collected —
-// must still record and release their holds, or the row reports an
-// operator's decision while the deadline parks on nothing anyone can act
-// on, and the external-hold precedence that hands a paused row to a
-// fact-bearing authority is never reached. No repair follows from what
-// this half finds, and the supersede-prune stays suspended with it: both
-// are work a pause withholds rather than observations it hides.
-func endOfPassBookkeeping(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot, d Decision) error {
-	if !d.Escalate {
-		return reconcileExternalHolds(ctx, input, plan, snapshot, scaleDownExtras(d))
+// A paused Component runs neither. A pause freezes repair, not
+// observation — the hold authorities ran at the top of the pass and
+// reported what they found, so the row still names the wait an operator
+// needs to see — and the supersede-prune is withheld work in the same
+// sense, not an observation a pause hides.
+func endOfPassBookkeeping(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot, decision Decision, held holds.Result) error {
+	if !decision.Escalate {
+		return nil
 	}
-	if err := escalateFromEvidence(ctx, deps, input, plan, target, snapshot, scaleDownExtras(d)); err != nil {
+	if err := escalateFromEvidence(ctx, deps, input, plan, target, snapshot, scaleDownExtras(decision), held); err != nil {
 		return err
 	}
 	return pruneSupersededRetryBlocks(ctx, input, target)
 }
 
-// executeActions runs the op-pass pipeline (steps 1-7 of the chain documented
-// on Reconcile) for the Decision's selected actions, in order. The bool result
-// marks a scale-down status-commit boundary — the only return that suppresses
-// the caller's end-of-pass escalation and prune.
-func executeActions(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot, d Decision) (ctrl.Result, bool, error) {
-	for actionIndex, action := range d.Actions {
+// runHoldPass evaluates every external hold once, for every observed
+// row, before the verb passes run. It supplies the pass observation the
+// authorities judge on — the persisted row, the plan's desired shape,
+// and the reconcile's one memoized cached pod read — and the holds
+// package owns everything decided from it.
+func runHoldPass(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, snapshot *ObservedSnapshot, excluded map[int32]struct{}) (holds.Result, error) {
+	desiredByIdx := DesiredPodCountByInstance(plan)
+	planned := make(map[int32]*InstancePlan, len(plan.Instances))
+	for i := range plan.Instances {
+		planned[plan.Instances[i].Index] = &plan.Instances[i]
+	}
+	rows := make([]holds.Row, 0, len(input.ObservedState.InstanceStatuses))
+	for _, row := range input.ObservedState.InstanceStatuses {
+		_, skip := excluded[row.Index]
+		rows = append(rows, holds.Row{
+			Status:   row,
+			Desired:  DesiredFor(desiredByIdx, row.Index, row.PodCount),
+			Instance: planned[row.Index],
+			Excluded: skip,
+		})
+	}
+	return holds.Run(ctx, holds.PassInput{
+		Deps:  deps,
+		Input: input,
+		Plan:  plan,
+		Rows:  rows,
+		Pods:  snapshot.CachedPods,
+	})
+}
+
+// executeActions runs the Decision's selected actions in order; the
+// numbered arms below are the pass's one step list. The bool result
+// marks a scale-down status-commit boundary — the only return that
+// suppresses the caller's end-of-pass escalation and prune.
+//
+// Every early return below encodes an ordering constraint, and each one
+// says which. None of them fences a row off from a later pass: which pass
+// may advance a row is the ownership table's answer, asked per row, not
+// something the action order has to arrange. Two constraints recur:
+//   - the observation a later pass would read is stale, because this
+//     action committed a status change the plan was computed without;
+//   - this action consumed the reconcile and owns its wake-up, so a later
+//     action must not overwrite the interval it asked for.
+func executeActions(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot, decision Decision) (ctrl.Result, bool, error) {
+	for actionIndex, action := range decision.Actions {
 		switch action.Kind {
-		// 1. Scale-down.
+		// 1. Scale-down. Constraint: a status commit ends the pass — the
+		// wave's own write is what the plan below was computed without —
+		// and an admitted wave polling its victims must see no lifecycle
+		// mutation from a later action before it completes.
 		case ActionScaleDown:
 			outcome, err := deleteExtraInstances(ctx, deps, input, plan, snapshot, action.Extras)
 			if err != nil {
 				return ctrl.Result{}, false, err
 			}
-			if outcome.ImmediateRequeue {
-				return ctrl.Result{Requeue: true}, true, nil
-			}
-			if outcome.InProgress {
-				return scaleDownPollResult(input, outcome.RequeueAfter, outcome.PolicyDeadlineDue), false, nil
+			if res, stop, endsPass := scaleDownResult(input, outcome); stop {
+				return res, endsPass, nil
 			}
 
 		// 2. Truth pass: status-only, never a scheduling or lifecycle
 		// effect — apply and continue the pipeline.
 		case ActionDemote:
-			if derr := workloadops.DemoteUnbackedInstances(ctx, deps, input, plan, action.Demotions); derr != nil {
-				return ctrl.Result{}, false, derr
+			if err := demoteUnbackedInstances(ctx, deps, input, plan, action.Demotions); err != nil {
+				return ctrl.Result{}, false, err
 			}
 
-		// 3. Per-Instance restart pass. Instances are isolated from each
-		// other: one Instance's failed step never skips the Instances
-		// after it, and the pass fails as a whole (joined error) only
-		// after every selection has run.
+		// 3. Per-Instance restart pass. Constraint: a repair opened or
+		// held owns the wake-up — nothing in the cluster changes while a
+		// denial stands, so no watch event is coming — and the pass ends
+		// on it after materializing the surge-free indices itself.
 		case ActionRestart:
-			anyRestarting := false
-			var restartErrs []error
-			admission := newRepairAdmission(input, plan)
-			// First denial of the pass, kept so a Component that opens
-			// nothing still reports which layer is holding it.
-			var held *RolloutHold
-			var heldIndex int32
-			for _, sel := range action.Restarts {
-				// A repair that opens a new outage is admitted like an
-				// update start; one that recovers capacity already lost,
-				// or drives an open repair, is not held by anything.
-				if sel.OpensUnavailability {
-					allowed, denial := admission.admit(ctx, plan, sel.Instance.Index)
-					if !allowed {
-						if held == nil {
-							held, heldIndex = denial, sel.Instance.Index
-						}
-						continue
-					}
-				}
-				done, rerr := workloadops.Restart(ctx, deps, input, plan, sel.Instance, sel.Reason)
-				if rerr != nil {
-					logf.FromContext(ctx).Error(rerr, "restart pass: instance failed",
-						"component", plan.Component, "instance", sel.Instance.Index)
-					restartErrs = append(restartErrs, fmt.Errorf("workload.Reconcile: restart instance %d: %w", sel.Instance.Index, rerr))
-					continue
-				}
-				if !done {
-					anyRestarting = true
-				}
-			}
-			// A held repair consumes the pass exactly as an in-flight one
-			// does. Nothing in the cluster changes while the denial
-			// stands, so no watch event is coming to re-consult on; the
-			// pass has to carry the wake-up itself.
-			if anyRestarting || held != nil {
-				interval := workloadops.RestartRequeueInterval(input)
-				if !anyRestarting {
-					interval = input.Requeue.Gate
-				}
-				result := PassRequeue(interval)
-				if hasActionKind(d.Actions[actionIndex+1:], ActionCreate) {
-					// Surge-free indices are materialized even when another
-					// Instance's restart failed or was held this pass: a
-					// stalled repair must not starve an unrelated scale-up.
-					freshPlan := planExcludingRestartSelections(plan, action.Restarts)
-					createResult, ferr := createPass(ctx, deps, input, freshPlan, target, createScopeFresh)
-					if ferr != nil {
-						restartErrs = append(restartErrs, fmt.Errorf("workload.Reconcile: create fresh indices during restart: %w", ferr))
-						return createResult, false, errors.Join(restartErrs...)
-					}
-					// The create pass may carry an earlier explicit wake-up;
-					// the restart's own cadence must survive an all-ready
-					// create that asks for none.
-					result = PassRequeue(interval, createResult.RequeueAfter)
-				}
-				if len(restartErrs) > 0 {
-					return ctrl.Result{}, false, errors.Join(restartErrs...)
-				}
-				// Only when the pass opened nothing: a repair that ran is
-				// forward progress, and its held peers are ordinary pacing.
-				if !anyRestarting {
-					reportRepairHeld(deps, input, plan, heldIndex, held)
-				}
-				return result, false, nil
-			}
-			if len(restartErrs) > 0 {
-				return ctrl.Result{}, false, errors.Join(restartErrs...)
-			}
-
-		// 4. Migration expiry pass. When anything expired, requeue
-		// immediately: ObservedState and plan are now stale (record
-		// terminal, pair ops cleared), and the next pass's rebuilt plan
-		// drops the unpinned surge index so the ordinary step-1 Delete
-		// pipeline tears it down.
-		case ActionMigrateExpiry:
-			if expiredCount, eerr := workloadops.ExpireMigrations(ctx, deps, input, plan); eerr != nil {
-				return ctrl.Result{}, false, fmt.Errorf("workload.Reconcile: expire migrations: %w", eerr)
-			} else if expiredCount > 0 {
-				return ctrl.Result{Requeue: true}, false, nil
-			}
-
-		// 4. Per-Component migration pass (dispatch pacing unchanged:
-		// one record per pass).
-		//
-		// Migrate's third return (accepted) distinguishes two done=false
-		// modes:
-		//   - accepted=true: migration is mid-flight (record carries the
-		//     surge index, statuses stamped). Requeue at the Migrate
-		//     interval; do NOT fall through (DetectUpdateTrigger already
-		//     suppresses Migrate-owned status, so falling through would be
-		//     a no-op anyway, but the explicit requeue is cleaner).
-		//   - accepted=false: migration deferred without taking ownership
-		//     (fresh record, source not yet steady-Ready because of an
-		//     in-flight Update/Restart/Create). Fall through to Update/Create
-		//     so the in-flight op converges. Without fall-through the
-		//     dispatcher loops indefinitely at the MigrateRequeueInterval and
-		//     the in-flight op never runs — the affinity-trigger-not-detected
-		//     deadlock.
-		case ActionMigrate:
-			rec := action.Migration.Record
-			// Reconstruct the executor's request view from the record —
-			// the annotation was consumed at accept time.
-			req := &audit.MigrationRequest{
-				SchemaVersion:   audit.SchemaV1,
-				Component:       string(plan.Component),
-				Instance:        rec.SourceInstance,
-				FromNode:        rec.FromNode,
-				HintTargetNodes: append([]string(nil), rec.HintTargetNodes...),
-				Reason:          rec.Reason,
-			}
-			sourceIdx := rec.SourceInstance
-			done, accepted, merr := workloadops.Migrate(ctx, deps, input, plan, sourceIdx, rec.RequestUUID, req)
-			if merr != nil {
-				return ctrl.Result{}, false, fmt.Errorf("workload.Reconcile: migrate instance %d: %w", sourceIdx, merr)
-			}
-			if !done && accepted {
-				// Mid-flight: requeue at the per-op interval.
-				return PassRequeue(workloadops.MigrateRequeueInterval(input)), false, nil
-			}
-			if done {
-				// Migrate just removed the source InstanceStatus and
-				// promoted the surge to Ready (or wrote a terminal
-				// Failed). plan was computed with the stale pre-migration
-				// view (both source and surge present, or pre-failure
-				// state), so the Update + Create passes below would fall
-				// through to recreate the source-side index. Re-queue so
-				// the next reconcile rebuilds plan from the post-
-				// migration status.
-				return ctrl.Result{Requeue: true}, false, nil
-			}
-			// !done && !accepted: fresh-record defer (e.g., source
-			// Phase=Updating from an in-flight spec edit). Fall through
-			// to Update/Create so the in-flight op converges; the next
-			// reconcile re-picks the same record against a steady-Ready
-			// source.
-
-		// 5. Per-Instance update pass.
-		case ActionUpdate:
-			res, stop, uerr := executeUpdatePass(ctx, deps, input, plan, target, snapshot, action.Update, d.RequeueAfter)
-			if uerr != nil {
-				return ctrl.Result{}, false, uerr
+			createFollows := hasActionKind(decision.Actions[actionIndex+1:], ActionCreate)
+			res, stop, err := executeRestartPass(ctx, deps, input, plan, target, action.Restarts, createFollows)
+			if err != nil {
+				return res, false, err
 			}
 			if stop {
 				return res, false, nil
 			}
 
-		// 6. Create pass.
-		case ActionCreate:
-			res, cerr := createPass(ctx, deps, input, plan, target, createScopeFull)
-			if cerr != nil {
-				return res, false, cerr
+		// 4. Migration expiry pass. Constraint: the plan is stale when
+		// anything expired — ObservedState and plan carry the pre-expiry
+		// record (record terminal, pair ops cleared) — and the rebuilt plan
+		// drops the unpinned surge index so the scale-down arm (1) tears
+		// it down.
+		case ActionMigrateExpiry:
+			if expiredCount, err := workloadops.ExpireMigrations(ctx, deps, input, plan); err != nil {
+				return ctrl.Result{}, false, fmt.Errorf("workload.Reconcile: expire migrations: %w", err)
+			} else if expiredCount > 0 {
+				return RequeueNow(), false, nil
 			}
-			return FoldPassRequeue(res, d.RequeueAfter), false, nil
+
+		// 5. Per-Component migration pass, one record per pass.
+		// Constraint: a migration in flight paces the pass and a completed
+		// one leaves the plan stale, so both end it; a fresh-record defer
+		// falls through so the in-flight op it waits on converges.
+		case ActionMigrate:
+			res, stop, err := executeMigratePass(ctx, deps, input, plan, action.Migration.Record)
+			if err != nil {
+				return res, false, err
+			}
+			if stop {
+				return res, false, nil
+			}
+
+		// 6. Per-Instance update pass. Constraint: an Update that ran
+		// leaves the observation stale for Create — see executeUpdatePass's
+		// anyUpdateRan — so stop=true ends the pass with the interval the
+		// update asked for.
+		case ActionUpdate:
+			res, stop, err := executeUpdatePass(ctx, deps, input, plan, target, snapshot, action.Update, decision.RequeueAfter)
+			if err != nil {
+				return res, false, err
+			}
+			if stop {
+				return res, false, nil
+			}
+
+		// 7. Create pass, always last: nothing after it reads the
+		// observation it changes. The decision's RetryBlock wake-up merges
+		// into its result.
+		case ActionCreate:
+			res, err := createPass(ctx, deps, input, plan, target, createScopeFull)
+			if err != nil {
+				return res, false, err
+			}
+			return EarliestWake(res, decision.RequeueAfter), false, nil
 		}
 	}
 
 	// Only a paused Decision with no committed create ends without a
 	// Create action: scale-down (if any) has run, nothing else may.
 	return ctrl.Result{}, false, nil
+}
+
+// demoteUnbackedInstances applies the truth pass: the status-only
+// Ready→Pending transition for the Instances Plan proved unbacked. It
+// lives at the dispatcher and not under a verb because no verb owns it —
+// it is what the pass says about rows no operation is advancing.
+func demoteUnbackedInstances(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, selections []DemotionSelection) error {
+	for _, selection := range selections {
+		demoted, err := status.DemoteUnbacked(ctx, input, selection.Index)
+		if err != nil {
+			return fmt.Errorf("workload.Reconcile: demote instance %d (component=%s): %w", selection.Index, plan.Component, err)
+		}
+		if demoted {
+			types.RecordWarning(deps.Recorder, types.EventTarget(input), EventReasonInstanceDemoted,
+				"Instance %d (component=%s) demoted Ready→Pending: %s", selection.Index, plan.Component, selection.Reason)
+		}
+	}
+	return nil
 }
 
 // createScope names how much of the Create pass a caller asks for.
@@ -450,32 +363,45 @@ func hasActionKind(actions []PlannedAction, kind ActionKind) bool {
 	return false
 }
 
-func planExcludingRestartSelections(plan ComponentPlan, restarts []RestartSelection) ComponentPlan {
-	excluded := make(map[int32]struct{}, len(restarts))
-	for _, restart := range restarts {
-		excluded[restart.Instance.Index] = struct{}{}
+// scaleDownResult maps one scale-down batch outcome onto the pass. A
+// status commit ends the pass at a boundary (the wave's own write is
+// what the plan was computed without); a wave still polling its victims
+// returns its wake-up and stops the actions without ending the pass; a
+// finished wave lets the actions continue.
+func scaleDownResult(input ReconcileInput, outcome workloadops.DeleteBatchResult) (res ctrl.Result, stop, endsPass bool) {
+	if outcome.ImmediateRequeue {
+		return RequeueNow(), true, true
 	}
+	if outcome.InProgress {
+		return scaleDownPollResult(input, outcome.RequeueAfter, outcome.PolicyDeadlineDue), true, false
+	}
+	return ctrl.Result{}, false, false
+}
 
-	filtered := plan
-	filtered.Instances = make([]InstancePlan, 0, len(plan.Instances))
-	for _, instance := range plan.Instances {
-		if _, restarting := excluded[instance.Index]; restarting {
-			continue
-		}
-		filtered.Instances = append(filtered.Instances, instance)
+// reconcileTeardown runs the scale-down pipeline over every observed
+// Instance. Not the Paused gate, not Restart / Migrate / Update / Create,
+// not the escalation pass: the scale-down pipeline owns wedge escalation
+// through lifecycle.forceDelete.
+func reconcileTeardown(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan) (ctrl.Result, error) {
+	extras := TeardownExtras(input.ObservedState.InstanceStatuses)
+	snapshot := NewObservedSnapshot(deps, input, plan.Component, input.ObservedState.InstanceStatuses)
+	outcome, err := deleteExtraInstances(ctx, deps, input, plan, snapshot, extras)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
-	return filtered
+	res, _, _ := scaleDownResult(input, outcome)
+	return res, nil
 }
 
 func scaleDownPollResult(input ReconcileInput, policyRequeueAfter time.Duration, policyDeadlineDue bool) ctrl.Result {
 	if policyDeadlineDue {
-		return ctrl.Result{Requeue: true}
+		return RequeueNow()
 	}
-	return FoldPassRequeue(ctrl.Result{}, input.ScaleDownRequeueInterval, policyRequeueAfter)
+	return EarliestWake(ctrl.Result{}, input.ScaleDownRequeueInterval, policyRequeueAfter)
 }
 
-func scaleDownExtras(d Decision) map[int32]struct{} {
-	for _, action := range d.Actions {
+func scaleDownExtras(decision Decision) map[int32]struct{} {
+	for _, action := range decision.Actions {
 		if action.Kind != ActionScaleDown || len(action.Extras) == 0 {
 			continue
 		}
@@ -486,207 +412,6 @@ func scaleDownExtras(d Decision) map[int32]struct{} {
 		return extras
 	}
 	return nil
-}
-
-// executeUpdatePass runs the Update op for the Decision's selected
-// Instances, throttled by the within-pass counters, the per-Component
-// budget, and the coordination UpdateGate. The gate consult lives HERE,
-// not in Plan: it reads live peer/self state, so it must run at the
-// update pass's position — after earlier passes' effects (a restart
-// completion, a finished scale-down) have landed — to observe the same
-// state the pass pipeline showed it. stop=true means the pass consumed
-// the reconcile (the caller returns res without running Create).
-func executeUpdatePass(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot, sel *UpdateSelection, retryBlockWait time.Duration) (res ctrl.Result, stop bool, err error) {
-	anyUpdating := false
-	anyGated := false
-	// hold records the first StartingFresh denial this pass (Budget or
-	// UpdateGate) for RecordRolloutHold — one Component has one hold
-	// slot, so the first denial found (plan order) wins, matching the
-	// gate stack's own first-denial-wins precedence.
-	var hold *RolloutHold
-	// anyUpdateRan tracks whether ANY Update call fired this wake-up
-	// — including ones that returned done=true (e.g., a surge that
-	// just promoted Phase to Ready and stamped RunningRevision). Even
-	// a "done" Update mutates InstanceStatus; the subsequent Create
-	// pass would observe the pre-Update ObservedState snapshot, which
-	// is stale wrt ActiveOrdinal / RunningRevision / Phase. Letting
-	// Create run on stale state leads to two bugs:
-	//
-	//   1. Create's Ready-promote stamps RunningRevision=target.Name
-	//      even when the existing pods carry a different revision
-	//      (the X-2 bump-during-bump corruption mode where status
-	//      says vN but pods are still on vN-1).
-	//   2. Create's scale-up reads activeOrdinalForInstance from
-	//      stale ObservedState, sees a "missing" pod at the
-	//      pre-promote ordinal slot, and creates a duplicate
-	//      alongside the post-surge canonical pod.
-	//
-	// Skipping Create + requeue when Update fired forces the next
-	// reconcile to read fresh ObservedState that reflects the just-
-	// committed mutations, so Create's per-pod decisions are made
-	// against the current cluster state.
-	anyUpdateRan := false
-	// Count only Instances STARTING a new update this wake-up
-	// (item.StartingFresh). Instances already in Phase=Updating from a
-	// prior wake-up are anchored in the selection's Prior* counts —
-	// counting them again would double-charge the budget and deadlock
-	// the in-flight pod. Closes the within-wake-up stale-snapshot hole
-	// that otherwise lets the dispatcher fire every instance in one
-	// shot (mass outage at scale).
-	var inFlightUnavail int32
-	var inFlightSurge int32
-	// gateUnavail is the coordination gate's within-pass delta: fresh
-	// starts that pull a SERVING pod from rotation this wake-up. It
-	// diverges from inFlightUnavail (the per-Component, op-based
-	// counter) on CoordGateExempt starts — a Failed zero-serving
-	// Instance's recreate takes nothing additional offline, and its
-	// outage is already inside the gate's serving-based count, so
-	// charging it here would over-project every later consult in the
-	// same pass.
-	var gateUnavail int32
-	isSurgeStrategy := sel.Strategy == UpdateStrategySurgeThenDrain
-	// Same memoized cached read Plan selected from — the pods handed to
-	// the Update op match the selection's evidence.
-	updateByInstance, lerr := snapshot.CachedPods(ctx)
-	if lerr != nil {
-		return ctrl.Result{}, false, fmt.Errorf("workload.Reconcile: list pods for update pass (component=%s): %w", plan.Component, lerr)
-	}
-	for _, item := range sel.Items {
-		if item.AdoptRevision {
-			if berr := workloadops.BackfillRunningRevision(ctx, input, item.Instance.Index, target.Name); berr != nil {
-				return ctrl.Result{}, false, fmt.Errorf("workload.Reconcile: detect update trigger (instance=%d): %w", item.Instance.Index, berr)
-			}
-			continue
-		}
-		if item.CleanupOnly {
-			// Superseded-revision wreckage: abandon toward the current
-			// desired state. Never budget-charged and never gated —
-			// cleanup only deletes dead pods / resets a stranded
-			// continuation, freeing capacity rather than consuming it.
-			done, cerr := workloadops.CleanupWreckage(ctx, deps, input, plan, item.Instance, target, updateByInstance[item.Instance.Index])
-			if cerr != nil {
-				return ctrl.Result{}, false, fmt.Errorf("workload.Reconcile: cleanup wreckage (instance=%d): %w", item.Instance.Index, cerr)
-			}
-			if !done {
-				anyUpdating = true
-				anyUpdateRan = true
-			}
-			continue
-		}
-		if item.StartingFresh {
-			// Per-Component within-Component cap. Independent from
-			// the coordination-group cap below: each is its own
-			// capacity, both must allow; first denial stops the start.
-			// We project (prior + this-wake-up + 1) against the layer's
-			// budget the same way coordination/ratio.go's CheckSurge /
-			// CheckUnavailability project against the group budget.
-			if isSurgeStrategy {
-				if projected, denied := budgetDenies(sel.SurgeBudget, sel.PriorSurgeInFlight, inFlightSurge); denied {
-					anyGated = true
-					if hold == nil {
-						hold = &RolloutHold{
-							Gate:   RolloutHoldGateBudget,
-							Reason: fmt.Sprintf("per-Component surge budget %d exhausted (would become %d)", sel.SurgeBudget, projected),
-							Target: target.Name,
-						}
-					}
-					continue
-				}
-			} else {
-				if projected, denied := budgetDenies(sel.UnavailBudget, sel.PriorUnavailInFlight, inFlightUnavail); denied {
-					anyGated = true
-					if hold == nil {
-						hold = &RolloutHold{
-							Gate:   RolloutHoldGateBudget,
-							Reason: fmt.Sprintf("per-Component unavailability budget %d exhausted (would become %d)", sel.UnavailBudget, projected),
-							Target: target.Name,
-						}
-					}
-					continue
-				}
-			}
-			if input.UpdateGate != nil && !item.CoordGateExempt {
-				// Pass in-flight counters so the gate can project
-				// against the post-this-pass shape. Independent
-				// layer from the per-Component check above.
-				// CoordGateExempt starts skip the consult: the gate
-				// already counts their outage in its serving-based
-				// unavailability, so gating their own recreate is a
-				// double count that starves the recovery (see
-				// UpdateItem.CoordGateExempt).
-				if allowed, gate, reason := input.UpdateGate(sel.Strategy, inFlightSurge, gateUnavail); !allowed {
-					anyGated = true
-					logf.FromContext(ctx).V(1).Info("update start denied by coordination gate",
-						"component", plan.Component, "instance", item.Instance.Index,
-						"target", target.Name, "gate", gate, "reason", reason,
-						"inFlightSurge", inFlightSurge, "gateUnavail", gateUnavail)
-					if hold == nil {
-						hold = &RolloutHold{Gate: gate, Reason: reason, Target: target.Name}
-					}
-					continue
-				}
-			}
-		}
-		done, uerr := workloadops.UpdateWithPods(ctx, deps, input, plan, item.Instance, target, input.DesiredSpec.PodSpec, updateByInstance[item.Instance.Index])
-		if uerr != nil {
-			return ctrl.Result{}, false, fmt.Errorf("workload.Reconcile: update instance %d: %w", item.Instance.Index, uerr)
-		}
-		anyUpdateRan = true
-		if item.StartingFresh {
-			// Charge the wake-up budget only for fresh starts —
-			// subsequent gate checks must account for this pod.
-			if isSurgeStrategy {
-				inFlightSurge++
-			} else {
-				inFlightUnavail++
-				if !item.CoordGateExempt {
-					gateUnavail++
-				}
-			}
-		}
-		if !done {
-			anyUpdating = true
-		}
-	}
-	if anyUpdateRan {
-		// Forward progress this pass: whatever was gated for a DIFFERENT
-		// Instance is superseded — the Component is not stuck, it will
-		// re-observe fresh state (including any still-active gate) next
-		// pass. Clearing here is also what lets a resolved hold disappear
-		// promptly instead of lingering until the next denial-free pass.
-		hold = nil
-	}
-	if input.RecordRolloutHold != nil {
-		input.RecordRolloutHold(hold)
-	}
-	if anyUpdating || anyGated || anyUpdateRan {
-		// About to requeue without the full Create pass. Brand-new
-		// (surge-free) indices legitimately bypass the skip-Create
-		// gate above: they have a genuine ActiveOrdinal=0 and no
-		// RunningRevision to mis-stamp, so neither X-2 corruption
-		// mode applies — see ops.CreateFreshIndices. Materialize them
-		// now so a concurrent scale-up isn't starved behind the
-		// in-flight rollout. The full Create pass still owns
-		// surge-sensitive (touched) indices once the rollout drains.
-		if _, ferr := createPass(ctx, deps, input, plan, target, createScopeFresh); ferr != nil {
-			return ctrl.Result{}, false, ferr
-		}
-	}
-	if anyUpdating {
-		return PassRequeue(workloadops.UpdateRequeueInterval(input), retryBlockWait), true, nil
-	}
-	if anyGated {
-		return PassRequeue(input.Requeue.Gate, retryBlockWait), true, nil
-	}
-	// All Updates that ran returned done=true (steady-state for those
-	// instances). Requeue without running Create so the next pass
-	// sees fresh ObservedState — see anyUpdateRan above for the X-2
-	// (bump-during-bump) corruption modes this guards against.
-	// Immediate requeue is already sooner than any retryBlockWait.
-	if anyUpdateRan {
-		return ctrl.Result{Requeue: true}, true, nil
-	}
-	return ctrl.Result{}, false, nil
 }
 
 // deleteExtraInstances advances the Component's one durable scale-down wave.
@@ -704,161 +429,40 @@ func deleteExtraInstances(ctx context.Context, deps Deps, input ReconcileInput, 
 	return outcome, nil
 }
 
-func hasDeleteOwnedInstance(statuses []InstanceStatus) bool {
-	for _, status := range statuses {
-		if status.Phase == InstancePhaseDeleting && status.Operation != nil && status.Operation.Type == InstanceOperationDelete {
-			return true
-		}
-	}
-	return false
-}
-
-// liveObservePods performs the selector-scoped live-role List.
-func liveObservePods(ctx context.Context, deps Deps, input ReconcileInput, component ComponentType) (PodObservation, error) {
-	// The API reader has no Pod field index. useIndex=false preserves one List
-	// for this role, including its cached-client fallback.
-	reader := deps.Reader()
-	source := PodObservationSourceAPIReader
-	if deps.APIReader == nil {
-		source = PodObservationSourceCache
-	}
-	pods, err := query.ListOMENativePodsByName(ctx, reader, input.Key.Namespace, input.Key.OwnerName, component, false)
-	if err != nil {
-		return PodObservation{}, err
-	}
-	return newPodObservation(source, PodObservationScopeSelector, pods, nil), nil
-}
-
-// cachedObservePods performs the selector-scoped cache List.
-func cachedObservePods(ctx context.Context, deps Deps, input ReconcileInput, component ComponentType) (PodObservation, error) {
-	// Cached client has the OMENative Pod field index — useIndex=true takes
-	// the index fast path instead of scanning every cached pod.
-	pods, err := query.ListOMENativePodsByName(ctx, deps.Client, input.Key.Namespace, input.Key.OwnerName, component, true)
-	if err != nil {
-		return PodObservation{}, err
-	}
-	return NewCachedSelectorPodObservation(pods, nil), nil
-}
-
-// ExtraInstanceIndices returns InstanceStatus indices the plan no
-// longer covers — scale-down targets. Set-difference framing handles
+// ScaleDownExtras returns the observed indices the plan no longer
+// covers — the scale-down targets. Set-difference framing handles
 // sparse indices from surge migration (index 7 is extra only when no
-// InstancePlan covers it, regardless of replica count).
-//
-// includeMigrating=false (the normal scale-down pass) excludes
-// mid-migration Instances — Phase=Migrating sources and
-// Operation.Type=Migrate surges — so the pair isn't scale-down-deleted
-// out from under Migrate. Teardown passes includeMigrating=true:
-// everything must die, and since source and surge each carry their own
-// InstanceStatus entry, both run the full scale-down pipeline
-// (batch admission stamps Deleting over any phase).
-func ExtraInstanceIndices(observed []InstanceStatus, plan ComponentPlan, includeMigrating bool) []int32 {
+// InstancePlan covers it, regardless of replica count). A mid-migration
+// pair — the Phase=Migrating source and its Operation.Type=Migrate
+// surge — is not extra, so it is not scale-down-deleted out from under
+// Migrate.
+func ScaleDownExtras(observed []InstanceStatus, plan ComponentPlan) []int32 {
 	planned := make(map[int32]struct{}, len(plan.Instances))
 	for _, inst := range plan.Instances {
 		planned[inst.Index] = struct{}{}
 	}
 	var extras []int32
-	for _, s := range observed {
-		if _, inPlan := planned[s.Index]; inPlan {
+	for _, row := range observed {
+		if _, inPlan := planned[row.Index]; inPlan {
 			continue
 		}
-		if !includeMigrating {
-			if s.Phase == InstancePhaseMigrating {
-				continue
-			}
-			if s.Operation != nil && s.Operation.Type == InstanceOperationMigrate {
-				continue
-			}
+		if migrationPinned(&row) {
+			continue
 		}
-		extras = append(extras, s.Index)
+		extras = append(extras, row.Index)
 	}
 	return extras
 }
 
-// findObservedInstanceStatus returns the matching InstanceStatus
-// pointer, or nil if absent.
-func findObservedInstanceStatus(observed []InstanceStatus, idx int32) *InstanceStatus {
-	for i := range observed {
-		if observed[i].Index == idx {
-			return &observed[i]
-		}
+// TeardownExtras returns every observed index: under teardown the
+// planned set is empty and a mid-migration pair dies like everything
+// else. Source and surge each carry their own InstanceStatus, so both
+// run the full scale-down pipeline; excluding the pair would leave its
+// pods with no scale-down operation and wedge the teardown.
+func TeardownExtras(observed []InstanceStatus) []int32 {
+	var extras []int32
+	for _, row := range observed {
+		extras = append(extras, row.Index)
 	}
-	return nil
-}
-
-// repairAdmission paces the restart repairs that OPEN a new
-// unavailability. A wedge is usually a property of the revision, not of
-// one Instance, so without pacing a bad image or a bad argument
-// qualifies every Ready Instance in the same pass and the Component
-// recycles itself whole. The two layers an update start answers to
-// answer here too, in the same order and against the same numbers: the
-// per-Component MaxUnavailable budget, then the cross-Component
-// coordination gate. Selections denied by either wait for a later pass;
-// a repair already in flight is anchored in prior, so the pace holds
-// across passes and not merely within one.
-//
-// Lives at the executor's position, not the plan's: the coordination
-// gate reads live peer state, so it must be consulted where the pass's
-// earlier effects have already landed.
-type repairAdmission struct {
-	budget   int32
-	prior    int32
-	inFlight int32
-	gate     func(strategy UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, RolloutHoldGate, string)
-}
-
-func newRepairAdmission(input ReconcileInput, plan ComponentPlan) *repairAdmission {
-	statuses := input.ObservedState.InstanceStatuses
-	return &repairAdmission{
-		budget: PerComponentMaxUnavailableBudget(plan.UpdateStrategy.RollingUpdate, plan.Replicas),
-		prior:  CurrentUnavailableInFlight(statuses) + CurrentRestartingInFlight(statuses),
-		gate:   input.UpdateGate,
-	}
-}
-
-// admit reports whether one more repair may open this pass, charging
-// the pass's counter when it may. A repair recreates pods in place, so
-// both layers are consulted on the unavailability arm whatever the
-// Component's update strategy is: nothing about a rebuild surges.
-//
-// A denial is returned as the hold that produced it, so the caller can
-// report which layer is holding the Component back.
-func (a *repairAdmission) admit(ctx context.Context, plan ComponentPlan, index int32) (bool, *RolloutHold) {
-	if projected, denied := budgetDenies(a.budget, a.prior, a.inFlight); denied {
-		logf.FromContext(ctx).V(1).Info("crash-loop repair denied by the unavailability budget",
-			"component", plan.Component, "instance", index,
-			"budget", a.budget, "projected", projected)
-		return false, &RolloutHold{
-			Gate:   RolloutHoldGateBudget,
-			Reason: fmt.Sprintf("per-Component unavailability budget %d exhausted (would become %d)", a.budget, projected),
-		}
-	}
-	if a.gate != nil {
-		if allowed, gate, reason := a.gate(UpdateStrategyRecreatePod, 0, a.inFlight); !allowed {
-			logf.FromContext(ctx).V(1).Info("crash-loop repair denied by the coordination gate",
-				"component", plan.Component, "instance", index, "gate", gate, "reason", reason)
-			return false, &RolloutHold{Gate: gate, Reason: reason}
-		}
-	}
-	a.inFlight++
-	return true, nil
-}
-
-// reportRepairHeld announces that a Component wedged on a crash loop
-// opened no repair this pass. The Instance and the layer both go in the
-// message: which layer decides whether the operator waits for a peer
-// Component, raises MaxUnavailable, or intervenes. Repeated denials
-// render the same message, which the event recorder aggregates rather
-// than duplicating each time the pass re-consults.
-func reportRepairHeld(deps Deps, input ReconcileInput, plan ComponentPlan, index int32, held *RolloutHold) {
-	if deps.Recorder == nil || held == nil {
-		return
-	}
-	target := dispositionEventTarget(input)
-	if target == nil {
-		return
-	}
-	deps.Recorder.Eventf(target, corev1.EventTypeWarning, string(EventReasonRepairHeld),
-		"OMENative component=%s instance=%d crash-loop repair held by %s: %s",
-		plan.Component, index, held.Gate, held.Reason)
+	return extras
 }

@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -71,30 +73,11 @@ type UpdateItem struct {
 	// backfill) instead of running the Update op — the Instance's
 	// runtime-ready pods already match the target.
 	AdoptRevision bool
-	// StartingFresh: this Instance STARTS a new update rather than
-	// continuing an in-flight one, so it is subject to the
-	// per-Component budget and the coordination UpdateGate before the
-	// op runs, and it charges the within-pass counters once dispatched.
-	// An Instance whose in-flight UPDATE escalated to Phase=Failed
-	// (Update operation preserved for retry) is a CONTINUATION of that
-	// surge/drain: its in-flight pod already counts against the budget
-	// (CurrentUnavailableInFlight charges Failed+Update), so charging
-	// it again would project over budget and gate the recovery forever.
-	// Failed with any OTHER preserved operation is not budget-charged
-	// as in-flight and starts fresh — the exemption and the charge must
-	// cover the same set, or unbudgeted recreates skew the gate.
+	// StartingFresh: the Instance starts a new update rather than
+	// continuing one (!types.UpdateContinuation), so it is admitted and charged.
 	StartingFresh bool
-	// CoordGateExempt: this fresh start skips the coordination
-	// UpdateGate consult (the per-Component budget still applies). Set
-	// for a Failed Instance with zero serving pods on a non-surge
-	// strategy: the gate's unavailability accounting is serving-based
-	// (desired - ServingReplicas), so the Instance's outage is already
-	// inside the gate's current count — charging its own recreate +1 on
-	// top projects over budget on every pass and starves the recovery
-	// (nothing else can raise ServingReplicas; the denied recreate IS
-	// the recovery). Surge strategies keep the consult: their gates
-	// count surge pods, not serving loss, and the recreate genuinely
-	// adds one.
+	// CoordGateExempt: the fresh start skips the coordination gate consult
+	// (types.RecreateOfDarkFailedRow); the per-Component budget still applies.
 	CoordGateExempt bool
 	// CleanupOnly: the update trigger declined (zero revision distance —
 	// the corrective roll-back — or a third-party-revision leftover) but
@@ -189,6 +172,12 @@ type Decision struct {
 	// ever ADDS a wake-up, never delays one an op scheduled.
 	RequeueAfter time.Duration
 
+	// Owned is the pass's rows grouped by the owner that may advance
+	// them. Built once here, from the ownership table; Execute hands it
+	// to every pass so a verb reads the list it owns rather than
+	// deciding eligibility row by row for itself.
+	Owned types.OwnedRows
+
 	// Escalate gates the terminal-failure escalation pass
 	// (escalation.go). False while paused: the repair decisions are
 	// suspended with the rest of the lifecycle machinery, and the executor
@@ -212,13 +201,19 @@ type Decision struct {
 // observes live peer/self state after earlier passes' effects have
 // landed, exactly as the pass pipeline did.
 func Plan(ctx context.Context, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot) (Decision, error) {
-	var d Decision
+	var decision Decision
+
+	// One owner grouping for the whole pass, ahead of every selection:
+	// the triggers below and the verb passes Execute dispatches all read
+	// their own rows out of it.
+	decision.Owned = types.RowsByOwner(input.ObservedState.InstanceStatuses)
+	input.Owned = &decision.Owned
 
 	// Scale-down selection: indices observed but no longer planned.
 	// Runs before everything else so excess pods don't run alongside
 	// in-flight drains.
-	if extras := ExtraInstanceIndices(input.ObservedState.InstanceStatuses, plan, false); len(extras) > 0 || hasDeleteOwnedInstance(input.ObservedState.InstanceStatuses) {
-		d.Actions = append(d.Actions, PlannedAction{Kind: ActionScaleDown, Extras: extras})
+	if extras := ScaleDownExtras(input.ObservedState.InstanceStatuses, plan); len(extras) > 0 || decision.Owned.Any(types.OwnerDelete) {
+		decision.Actions = append(decision.Actions, PlannedAction{Kind: ActionScaleDown, Extras: extras})
 	}
 
 	// Truth pass, paused reconciles only: a Ready Instance whose pods are
@@ -230,12 +225,12 @@ func Plan(ctx context.Context, input ReconcileInput, plan ComponentPlan, target 
 	// never status truth. Unpaused reconciles skip it: Create both
 	// recovers the pods and re-stamps the phase in the same pass.
 	if plan.Paused {
-		demotions, derr := planUnbackedDemotions(ctx, input, plan, snapshot)
-		if derr != nil {
-			return Decision{}, derr
+		demotions, err := planUnbackedDemotions(ctx, input, plan, snapshot)
+		if err != nil {
+			return Decision{}, err
 		}
 		if len(demotions) > 0 {
-			d.Actions = append(d.Actions, PlannedAction{Kind: ActionDemote, Demotions: demotions})
+			decision.Actions = append(decision.Actions, PlannedAction{Kind: ActionDemote, Demotions: demotions})
 		}
 	}
 
@@ -253,22 +248,22 @@ func Plan(ctx context.Context, input ReconcileInput, plan ComponentPlan, target 
 	// unpause; no periodic requeue is needed while the desired state is
 	// intentionally held.
 	if !plan.Paused {
-		d.Escalate = true
+		decision.Escalate = true
 	}
 
 	// Restart selection. A frozen pause suspends the pass, so the
 	// selection is only worth computing — it costs a live pod read —
 	// when a repair is already under way to finish.
 	if !plan.PauseFreeze || anyRestartContinuation(input) {
-		restarts, rerr := planRestartSelections(ctx, input, plan, snapshot)
-		if rerr != nil {
-			return Decision{}, rerr
+		restarts, err := planRestartSelections(ctx, input, plan, snapshot)
+		if err != nil {
+			return Decision{}, err
 		}
 		if plan.PauseFreeze {
 			restarts = restartContinuations(input, restarts)
 		}
 		if len(restarts) > 0 {
-			d.Actions = append(d.Actions, PlannedAction{Kind: ActionRestart, Restarts: restarts})
+			decision.Actions = append(decision.Actions, PlannedAction{Kind: ActionRestart, Restarts: restarts})
 		}
 	}
 
@@ -278,7 +273,7 @@ func Plan(ctx context.Context, input ReconcileInput, plan ComponentPlan, target 
 		// can be driven (re-stamped) again, and regardless of MigrationMode
 		// so a mode flip to Never can never strand a non-terminal record.
 		if workloadops.HasExpiredMigrationCandidate(input.ObservedState.Migrations, input.Now()) {
-			d.Actions = append(d.Actions, PlannedAction{Kind: ActionMigrateExpiry})
+			decision.Actions = append(decision.Actions, PlannedAction{Kind: ActionMigrateExpiry})
 		}
 
 		// Migration drive selection. Work comes from the owner's
@@ -287,13 +282,12 @@ func Plan(ctx context.Context, input ReconcileInput, plan ComponentPlan, target 
 		// terminal) are excluded structurally — records, never work. Skip
 		// when mode is Never.
 		if plan.MigrationMode != MigrationModeNever {
-			if rec := NextManualMigration(input.ObservedState.Migrations); rec != nil {
+			if record := NextManualMigration(input.ObservedState.Migrations); record != nil {
 				// A fresh migration adds one surge Instance. Let an existing update
 				// surge finish first so the two operations do not stack extra capacity.
 				// Allocated migrations always resume from their durable record.
-				allocated := rec.SurgeInstance != nil && *rec.SurgeInstance >= 0
-				if allocated || CurrentSurgeInFlight(input.ObservedState.InstanceStatuses) == 0 {
-					d.Actions = append(d.Actions, PlannedAction{Kind: ActionMigrate, Migration: &MigrationSelection{Record: *rec}})
+				if record.SurgeAllocated() || CurrentSurgeInFlight(input.ObservedState.InstanceStatuses) == 0 {
+					decision.Actions = append(decision.Actions, PlannedAction{Kind: ActionMigrate, Migration: &MigrationSelection{Record: *record}})
 				}
 			}
 		}
@@ -305,19 +299,19 @@ func Plan(ctx context.Context, input ReconcileInput, plan ComponentPlan, target 
 	// and gate layers decide nothing: a held Component starts nothing
 	// for them to pace.
 	if target != nil && (!plan.Paused || anyUpdateContinuation(input, plan)) {
-		sel, retryBlockWait, uerr := planUpdateSelection(ctx, input, plan, target, snapshot)
-		if uerr != nil {
-			return Decision{}, uerr
+		selection, retryBlockWait, err := planUpdateSelection(ctx, input, plan, target, snapshot)
+		if err != nil {
+			return Decision{}, err
 		}
 		if plan.Paused {
 			// A RetryBlock wake-up paces a fresh re-trigger, which a pause
 			// withholds; the unpause is the wake-up that matters here.
-			sel.Items = pausedUpdateContinuations(input, sel.Items)
+			selection.Items = pausedUpdateContinuations(input, selection.Items)
 		} else {
-			d.RequeueAfter = retryBlockWait
+			decision.RequeueAfter = retryBlockWait
 		}
-		if len(sel.Items) > 0 {
-			d.Actions = append(d.Actions, PlannedAction{Kind: ActionUpdate, Update: &sel})
+		if len(selection.Items) > 0 {
+			decision.Actions = append(decision.Actions, PlannedAction{Kind: ActionUpdate, Update: &selection})
 		}
 	}
 
@@ -329,10 +323,10 @@ func Plan(ctx context.Context, input ReconcileInput, plan ComponentPlan, target 
 	// empty, but a set already being materialized is completed and
 	// promoted rather than held incomplete with the Instance short of it.
 	if !plan.Paused || workloadops.HasCommittedCreate(input, plan, target) {
-		d.Actions = append(d.Actions, PlannedAction{Kind: ActionCreate})
+		decision.Actions = append(decision.Actions, PlannedAction{Kind: ActionCreate})
 	}
 
-	return d, nil
+	return decision, nil
 }
 
 // pausedUpdateContinuations keeps the update items a paused Component may
@@ -350,8 +344,8 @@ func pausedUpdateContinuations(input ReconcileInput, items []UpdateItem) []Updat
 		if item.StartingFresh || item.AdoptRevision || item.CleanupOnly {
 			continue
 		}
-		s := findObservedInstanceStatus(input.ObservedState.InstanceStatuses, item.Instance.Index)
-		if s == nil || gangSurgeRow(s) {
+		row := input.ObservedState.Instance(item.Instance.Index)
+		if row == nil || gangSurgeRow(row) {
 			continue
 		}
 		kept = append(kept, item)
@@ -360,14 +354,17 @@ func pausedUpdateContinuations(input ReconcileInput, items []UpdateItem) []Updat
 }
 
 // anyUpdateContinuation reports whether any planned index carries an
-// in-flight Update attempt a paused Component would still advance.
+// Update attempt a paused Component would still advance. The claim, not
+// the owner: a Failed row whose preserved operation is an Update is a
+// continuation the selection keeps (see startingFresh), so the pause
+// re-drives it rather than leaving a half-done roll parked.
 func anyUpdateContinuation(input ReconcileInput, plan ComponentPlan) bool {
 	for _, inst := range plan.Instances {
-		s := findObservedInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)
-		if s == nil || gangSurgeRow(s) {
+		row := input.ObservedState.Instance(inst.Index)
+		if row == nil || gangSurgeRow(row) {
 			continue
 		}
-		if s.Operation != nil && s.Operation.Type == InstanceOperationUpdate {
+		if types.ClaimOf(row) == types.OwnerUpdate {
 			return true
 		}
 	}
@@ -377,8 +374,8 @@ func anyUpdateContinuation(input ReconcileInput, plan ComponentPlan) bool {
 // gangSurgeRow reports whether the row belongs to a gang SurgeThenDrain
 // cycle: the source that pins a replacement index, or the replacement
 // marker itself.
-func gangSurgeRow(s *InstanceStatus) bool {
-	op := s.Operation
+func gangSurgeRow(row *InstanceStatus) bool {
+	op := row.Operation
 	if op == nil || op.Type != InstanceOperationUpdate {
 		return false
 	}
@@ -390,12 +387,7 @@ func gangSurgeRow(s *InstanceStatus) bool {
 // anyRestartContinuation reports whether any row carries an in-flight
 // Restart attempt.
 func anyRestartContinuation(input ReconcileInput) bool {
-	for i := range input.ObservedState.InstanceStatuses {
-		if restartInFlight(&input.ObservedState.InstanceStatuses[i]) {
-			return true
-		}
-	}
-	return false
+	return input.OwnedRows().Any(types.OwnerRestart)
 }
 
 // restartContinuations keeps only the selections that advance a repair
@@ -403,19 +395,14 @@ func anyRestartContinuation(input ReconcileInput) bool {
 // open one deleted must still be recreated at the bumped Incarnation
 // rather than stay missing for the length of the hold.
 func restartContinuations(input ReconcileInput, restarts []RestartSelection) []RestartSelection {
+	owned := input.OwnedRows()
 	kept := restarts[:0]
-	for _, sel := range restarts {
-		if restartInFlight(findObservedInstanceStatus(input.ObservedState.InstanceStatuses, sel.Instance.Index)) {
-			kept = append(kept, sel)
+	for _, selection := range restarts {
+		if owned.Owns(types.OwnerRestart, selection.Instance.Index) {
+			kept = append(kept, selection)
 		}
 	}
 	return kept
-}
-
-// restartInFlight reports whether the row is mid-repair.
-func restartInFlight(s *InstanceStatus) bool {
-	return s != nil && s.Phase == InstancePhaseRestarting &&
-		s.Operation != nil && s.Operation.Type == InstanceOperationRestart
 }
 
 // planRestartSelections selects the per-Instance restart triggers:
@@ -431,17 +418,17 @@ func restartInFlight(s *InstanceStatus) bool {
 // therefore costs no extra live List per reconcile.
 func planRestartSelections(ctx context.Context, input ReconcileInput, plan ComponentPlan, snapshot *ObservedSnapshot) ([]RestartSelection, error) {
 	if plan.RestartPolicy != RestartPolicyRecreateInstance {
-		cachedByInstance, cerr := snapshot.CachedPods(ctx)
-		if cerr != nil {
-			return nil, fmt.Errorf("workload.Reconcile: list pods to screen the restart pass (component=%s): %w", plan.Component, cerr)
+		cachedByInstance, err := snapshot.CachedPods(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("workload.Reconcile: list pods to screen the restart pass (component=%s): %w", plan.Component, err)
 		}
 		if !anyRestartTrigger(input, plan, cachedByInstance) {
 			return nil, nil
 		}
 	}
-	liveByInstance, lerr := snapshot.LivePods(ctx)
-	if lerr != nil {
-		return nil, fmt.Errorf("workload.Reconcile: list pods for restart pass (component=%s): %w", plan.Component, lerr)
+	liveByInstance, err := snapshot.LivePods(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("workload.Reconcile: list pods for restart pass (component=%s): %w", plan.Component, err)
 	}
 	var restarts []RestartSelection
 	for _, inst := range plan.Instances {
@@ -489,14 +476,14 @@ func planUnbackedDemotions(ctx context.Context, input ReconcileInput, plan Compo
 	}
 	var candidates []int32
 	for i := range input.ObservedState.InstanceStatuses {
-		s := &input.ObservedState.InstanceStatuses[i]
-		if _, ok := planned[s.Index]; !ok {
+		row := &input.ObservedState.InstanceStatuses[i]
+		if _, ok := planned[row.Index]; !ok {
 			continue
 		}
-		if s.Phase != InstancePhaseReady || s.Operation != nil {
+		if row.Phase != InstancePhaseReady || row.Operation != nil {
 			continue
 		}
-		candidates = append(candidates, s.Index)
+		candidates = append(candidates, row.Index)
 	}
 	if len(candidates) == 0 {
 		return nil, nil
@@ -540,7 +527,7 @@ func planUpdateSelection(ctx context.Context, input ReconcileInput, plan Compone
 	if strategy == "" {
 		strategy = UpdateStrategySurgeThenDrain
 	}
-	sel := UpdateSelection{
+	selection := UpdateSelection{
 		Strategy:             strategy,
 		SurgeBudget:          PerComponentMaxSurgeBudget(rollingUpdate, plan.Replicas),
 		UnavailBudget:        PerComponentMaxUnavailableBudget(rollingUpdate, plan.Replicas),
@@ -550,11 +537,11 @@ func planUpdateSelection(ctx context.Context, input ReconcileInput, plan Compone
 	// One cached List + bucket for the whole Component (the snapshot's
 	// non-destructive read source) — an absent bucket is an empty pod
 	// set.
-	updateByInstance, lerr := snapshot.CachedPods(ctx)
-	if lerr != nil {
-		return UpdateSelection{}, 0, fmt.Errorf("workload.Reconcile: list pods for update pass (component=%s): %w", plan.Component, lerr)
+	updateByInstance, err := snapshot.CachedPods(ctx)
+	if err != nil {
+		return UpdateSelection{}, 0, fmt.Errorf("workload.Reconcile: list pods for update pass (component=%s): %w", plan.Component, err)
 	}
-	heldIndices := PartitionHeldIndices(rollingUpdate, input.ObservedState.InstanceStatuses, plan.Instances, target.Name)
+	heldIndices := PartitionHeldIndices(rollingUpdate, input, plan.Instances, target.Name)
 	var retryBlockWait time.Duration
 	for _, inst := range plan.Instances {
 		// RollingUpdate.Partition (canary): hold the selected Instances
@@ -567,18 +554,18 @@ func planUpdateSelection(ctx context.Context, input ReconcileInput, plan Compone
 				"component", plan.Component, "instance", inst.Index, "target", target.Name)
 			continue
 		}
-		dec := workloadops.EvaluateUpdateTrigger(input, inst, target, updateByInstance[inst.Index])
-		if dec.AdoptRevision {
+		decision := workloadops.EvaluateUpdateTrigger(input, inst, target, updateByInstance[inst.Index])
+		if decision.AdoptRevision {
 			logf.FromContext(ctx).V(1).Info("update not selected: adopting revision in place",
 				"component", plan.Component, "instance", inst.Index, "target", target.Name)
-			sel.Items = append(sel.Items, UpdateItem{Instance: inst, AdoptRevision: true})
+			selection.Items = append(selection.Items, UpdateItem{Instance: inst, AdoptRevision: true})
 			continue
 		}
-		if !dec.Trigger {
+		if !decision.Trigger {
 			// Denied by a not-yet-due Backoff RetryBlock — keep the
 			// earliest re-evaluation time across Instances.
-			if dec.RetryAfter > 0 && (retryBlockWait == 0 || dec.RetryAfter < retryBlockWait) {
-				retryBlockWait = dec.RetryAfter
+			if decision.RetryAfter > 0 && (retryBlockWait == 0 || decision.RetryAfter < retryBlockWait) {
+				retryBlockWait = decision.RetryAfter
 			}
 			// Wreckage scan: the trigger is revision-diff-keyed, so an
 			// instance at zero revision distance (corrective roll-back)
@@ -586,48 +573,45 @@ func planUpdateSelection(ctx context.Context, input ReconcileInput, plan Compone
 			// yet its superseded-revision wreckage must still be
 			// abandoned toward the current desired state. Pure snapshot
 			// read; the effect runs in Execute (ops.CleanupWreckage).
-			s := findObservedInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)
-			cleanup := workloadops.EvaluateWreckage(s, target, updateByInstance[inst.Index])
+			row := input.ObservedState.Instance(inst.Index)
+			cleanup := workloadops.EvaluateWreckage(row, target, updateByInstance[inst.Index])
 			if cleanup {
-				sel.Items = append(sel.Items, UpdateItem{Instance: inst, CleanupOnly: true})
+				selection.Items = append(selection.Items, UpdateItem{Instance: inst, CleanupOnly: true})
 			}
 			// The trigger declining is the single most common reason a
 			// rollout makes no progress, and the phase/revision pair it
 			// keyed on is not otherwise recoverable after the fact.
 			log := logf.FromContext(ctx).V(1)
-			if s == nil {
+			if row == nil {
 				log.Info("update not triggered: no observed status",
 					"component", plan.Component, "instance", inst.Index,
 					"target", target.Name, "cleanupOnly", cleanup)
 			} else {
 				log.Info("update not triggered",
 					"component", plan.Component, "instance", inst.Index,
-					"phase", s.Phase, "runningRevision", s.RunningRevision,
-					"target", target.Name, "hasOperation", s.Operation != nil,
-					"retryAfter", dec.RetryAfter, "cleanupOnly", cleanup)
+					"phase", row.Phase, "runningRevision", row.RunningRevision,
+					"target", target.Name, "hasOperation", row.Operation != nil,
+					"retryAfter", decision.RetryAfter, "cleanupOnly", cleanup)
 			}
 			continue
 		}
-		s := findObservedInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)
-		startingFresh := s == nil ||
-			(s.Phase != InstancePhaseUpdating &&
-				!(s.Phase == InstancePhaseFailed && s.Operation != nil && s.Operation.Type == InstanceOperationUpdate))
-		gateExempt := startingFresh && strategy != UpdateStrategySurgeThenDrain &&
-			s != nil && s.Phase == InstancePhaseFailed && s.ServingPodCount == 0
+		row := input.ObservedState.Instance(inst.Index)
+		startingFresh := !types.UpdateContinuation(row)
+		gateExempt := types.RecreateOfDarkFailedRow(row, strategy)
 		logf.FromContext(ctx).V(1).Info("update selected",
 			"component", plan.Component, "instance", inst.Index, "target", target.Name,
 			"startingFresh", startingFresh, "coordGateExempt", gateExempt)
-		sel.Items = append(sel.Items, UpdateItem{Instance: inst, StartingFresh: startingFresh, CoordGateExempt: gateExempt})
+		selection.Items = append(selection.Items, UpdateItem{Instance: inst, StartingFresh: startingFresh, CoordGateExempt: gateExempt})
 	}
 	// Budgets are decided here but spent in Execute, so record them with the
 	// selection they apply to: a selection that is non-empty yet starts
 	// nothing is a budget or gate outcome, not a selection one.
 	logf.FromContext(ctx).V(1).Info("update selection complete",
 		"component", plan.Component, "target", target.Name,
-		"considered", len(plan.Instances), "selected", len(sel.Items),
-		"strategy", sel.Strategy, "surgeBudget", sel.SurgeBudget,
-		"unavailBudget", sel.UnavailBudget,
-		"priorSurgeInFlight", sel.PriorSurgeInFlight,
-		"priorUnavailInFlight", sel.PriorUnavailInFlight)
-	return sel, retryBlockWait, nil
+		"considered", len(plan.Instances), "selected", len(selection.Items),
+		"strategy", selection.Strategy, "surgeBudget", selection.SurgeBudget,
+		"unavailBudget", selection.UnavailBudget,
+		"priorSurgeInFlight", selection.PriorSurgeInFlight,
+		"priorUnavailInFlight", selection.PriorUnavailInFlight)
+	return selection, retryBlockWait, nil
 }

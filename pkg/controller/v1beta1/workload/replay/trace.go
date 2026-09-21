@@ -251,7 +251,31 @@ func (t *Trace) rowFields(row types.InstanceStatus) []string {
 	if row.LastFailure != nil {
 		parts = append(parts, "lastFailure="+t.failure(row.LastFailure))
 	}
+	if len(row.Announced) > 0 {
+		parts = append(parts, "announced=["+strings.Join(t.announcements(row.Announced), " ")+"]")
+	}
 	return parts
+}
+
+// announcements renders the row's once-only markers with their episode
+// normalized, so a trace shows which episode a message was delivered in
+// without carrying the minted operation id the normalizer exists to
+// hide.
+func (t *Trace) announcements(entries []string) []string {
+	out := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		reason, episode, found := strings.Cut(entry, "@")
+		if !found {
+			out = append(out, entry)
+			continue
+		}
+		if strings.HasPrefix(episode, "#") {
+			out = append(out, entry)
+			continue
+		}
+		out = append(out, reason+"@"+t.norm.op(episode))
+	}
+	return out
 }
 
 func (t *Trace) operation(op *types.InstanceOperation) string {

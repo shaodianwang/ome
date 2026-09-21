@@ -1,0 +1,40 @@
+# The source-rotation report and the scheduler hold arriving on one surge
+# row in one pass. The replacement has no placement and the source is
+# taken out of the routed Service, both observed at once. Neither token
+# stands yet, so consultation order decides: the source out of rotation,
+# read where the surge is driven, before the scheduler, read at the end
+# of the pass. "This Instance is serving nothing" is the report.
+scenario: hold-unrouted-with-unschedulable
+intentional: >-
+  two facts fresh on one unheld row report in consultation order, which
+  is the order the verb passes read them in: SourceUnrouted takes the row
+  and the scheduler's reading is refused, so the deadline keeps running
+  on an Instance covering none of its capacity.
+cells:
+  - instance/Update/Surge/endpoint.rotationOut[source]/before
+  - instance/Update/Surge/pod.unschedulable[target]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: the pod template changes, so the rollout surges a replacement beside the source
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 2
+    note: the scheduler cannot place the replacement and the source loses its routed endpoint, in one observation; the source out of rotation is the fact the row reports
+    events:
+      - pod.unschedulable[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 3
+    note: both facts still stand and the row keeps the one it reported

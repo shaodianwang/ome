@@ -217,6 +217,10 @@ func InstanceOperationToWorkload(v *v1beta1.InstanceOperation) *workload.Instanc
 		FromNode:       v.FromNode,
 		RequestUUID:    v.RequestUUID,
 	}
+	if v.CapacityRefusedAt != nil {
+		at := *v.CapacityRefusedAt
+		out.CapacityRefusedAt = &at
+	}
 	if v.SurgeIndex != nil {
 		s := *v.SurgeIndex
 		out.SurgeIndex = &s
@@ -249,6 +253,10 @@ func InstanceOperationFromWorkload(w *workload.InstanceOperation) *v1beta1.Insta
 		Strategy:       string(UpdateStrategyTypeFromWorkload(w.Strategy)),
 		FromNode:       w.FromNode,
 		RequestUUID:    w.RequestUUID,
+	}
+	if w.CapacityRefusedAt != nil {
+		at := *w.CapacityRefusedAt
+		out.CapacityRefusedAt = &at
 	}
 	if w.SurgeIndex != nil {
 		s := *w.SurgeIndex
@@ -332,6 +340,9 @@ func InstanceStatusToWorkload(v v1beta1.OMENativeInstanceStatus) workload.Instan
 	if v.Conditions != nil {
 		out.Conditions = append(out.Conditions, v.Conditions...)
 	}
+	if v.Announced != nil {
+		out.Announced = append([]string(nil), v.Announced...)
+	}
 	return out
 }
 
@@ -362,6 +373,9 @@ func InstanceStatusFromWorkload(w workload.InstanceStatus) v1beta1.OMENativeInst
 	}
 	if w.Conditions != nil {
 		out.Conditions = append(out.Conditions, w.Conditions...)
+	}
+	if w.Announced != nil {
+		out.Announced = append([]string(nil), w.Announced...)
 	}
 	return out
 }

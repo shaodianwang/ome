@@ -51,6 +51,22 @@ const (
 	InstancePhaseDeleting   InstancePhase = "Deleting"
 )
 
+// TransientPhase reports whether the phase is an in-flight operation
+// phase the InstanceReadyTimeout backstop bounds (Creating / Updating /
+// Restarting / Migrating). Terminal phases (Ready / Failed / Deleting)
+// and the empty zero value are not.
+func TransientPhase(p InstancePhase) bool {
+	switch p {
+	case InstancePhaseCreating,
+		InstancePhaseUpdating,
+		InstancePhaseRestarting,
+		InstancePhaseMigrating:
+		return true
+	default:
+		return false
+	}
+}
+
 // UpdateStrategyType is the rollout-mechanism selector. String-mirrors
 // the CRD UpdateStrategyType; the distinct Go type catches accidental
 // drift between workload-side dispatch logic and the v1beta1 enum.
@@ -112,6 +128,19 @@ const (
 	InstanceOperationDelete  InstanceOperationType = "Delete"
 )
 
+// UpdateStepInPlace marks an Instance whose container images are being
+// patched on the live pod at the same Incarnation and UID.
+const UpdateStepInPlace = "InPlace"
+
+// UpdateStepDrain marks an Instance running the recreate roll: one step
+// spans draining and deleting the old incarnation, recreating at the
+// bumped Incarnation, and the serving flip before promotion.
+const UpdateStepDrain = "Drain"
+
+// RestartStepDrain is the one step of the Restart machine: draining and
+// deleting the old incarnation, then recreating at the bumped one.
+const RestartStepDrain = "Drain"
+
 // UpdateStepSurge marks the source Instance while a single-pod or gang
 // SurgeThenDrain replacement is being created.
 const UpdateStepSurge = "Surge"
@@ -131,12 +160,9 @@ const UpdateStepGangSurgeTargetCleanup = "GangSurgeTargetCleanup"
 // ready and whose source pods are being drained.
 const UpdateStepSurgeDrain = "SurgeDrain"
 
-// UpdateStepSurgeDrainSettle is READ for compatibility and never
-// written: a row persisted at this step by an earlier build has its
-// drain confirmed, so the pass that observes it deletes the source and
-// promotes. The surge machine keeps the source alive for no window of
-// its own — the pod's terminationGracePeriodSeconds and preStop are
-// what carry in-flight work.
+// UpdateStepSurgeDrainSettle is read as SurgeDrain and never written: a
+// row carrying it is drain-confirmed, so the pass that observes it
+// deletes the source and promotes.
 const UpdateStepSurgeDrainSettle = "SurgeDrainSettle"
 
 // InstanceOperation is the durable recovery anchor written before any
@@ -177,6 +203,15 @@ type InstanceOperation struct {
 	// terminal-finalize identity tuple, or a blip would read as the
 	// operation being replaced.
 	Waiting string
+
+	// CapacityRefusedAt is when admission last refused one of the
+	// operation's pod creates for lack of quota. The refusal is the
+	// apiserver's answer to a call the create pass made, so no later pass
+	// can read it off the cluster: the create site records it here, and
+	// the hold pass converts it into the QuotaExceeded token. It is also
+	// what the deadline park is anchored to, so the clock stops from the
+	// refusal rather than from the pass that reports it.
+	CapacityRefusedAt *metav1.Time
 
 	// Strategy is the update strategy the operation runs under, pinned
 	// when the operation opens and read in place of the live plan for as
@@ -261,6 +296,13 @@ type InstanceStatus struct {
 	// recreate of this Instance. Survives the drain+recreate that deletes
 	// the failing pod. Mirrors the CRD OMENativeInstanceStatus.LastFailure.
 	LastFailure *InstanceTermination
+
+	// Announced records the once-only messages already emitted for this
+	// Instance, one entry per message: the event reason and the episode
+	// it was emitted in. It is the dedup key for every warning that must
+	// reach an operator once rather than once per pass. Mirrors the CRD
+	// OMENativeInstanceStatus.Announced.
+	Announced []string
 }
 
 // InstanceTermination captures the container-termination diagnostics of a
@@ -312,6 +354,22 @@ type Key struct {
 	// selector and per-revision Service selector. Read-only from
 	// workload code.
 	SelectorLabels map[string]string
+}
+
+// AdapterPublished reads the row's published pod counters: how many
+// pods the Instance has, and how many of them are available.
+//
+// Both are written only by the adapter's status publication, never by a
+// pass, so a guard that reads them is an adapter-lane input: no replay
+// scenario can reach it, and the transition it guards is covered by a Go
+// test naming the arrow. Reading them through one accessor is what marks
+// that at every site. A row the caller has not observed publishes
+// nothing.
+func AdapterPublished(s *InstanceStatus) (pods, available int32) {
+	if s == nil {
+		return 0, 0
+	}
+	return s.PodCount, s.AvailablePodCount
 }
 
 // WorkloadName is the composed identity used for ControllerRevision

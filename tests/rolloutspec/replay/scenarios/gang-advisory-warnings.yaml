@@ -1,0 +1,41 @@
+# A gang declared with neither a co-location topologyKey nor a gang-aware
+# schedulerName. Both advisory warnings apply, and both are delivered once
+# and only once: each is a standing warning about the Instance as built,
+# recorded on the Instance's own row against its incarnation, so a later
+# pass over the same Instance says nothing further whatever its attempt
+# does.
+#
+# Every other gang scenario declares both settings, so this is the one
+# place the two warnings are locked; it replays twice to show the row's
+# record suppresses the second delivery.
+scenario: gang-advisory-warnings
+arrows:
+  - T-empty-create
+intentional: >-
+  the two advisory warnings are the point of this scenario: GangSplitRisk
+  on the pass that renders an unpinned worker, MaybeNoGangScheduler on the
+  pass that finds a row to record it on, and neither again afterwards.
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    gangScheduling: true
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang is materialized; the unpinned worker earns the split-risk warning on the row the create pass just opened
+    events:
+      - clock.advance: 5s
+  - tick: 2
+    note: the row now exists at pass start, so the default-scheduler heuristic is recorded and announced
+    events:
+      - clock.advance: 5s
+  - tick: 3
+    note: a third pass repeats neither warning — the markers are the row's, and the attempt has not changed
+    events:
+      - clock.advance: 5s

@@ -3,8 +3,6 @@ package types
 import (
 	"testing"
 	"time"
-
-	ctrl "sigs.k8s.io/controller-runtime"
 )
 
 // TestPassRequeue pins the precedence a pass's wake-up follows: the
@@ -50,35 +48,5 @@ func TestPassRequeue(t *testing.T) {
 				t.Errorf("an explicit wait must supersede the bare backoff; got %+v", got)
 			}
 		})
-	}
-}
-
-// TestPassWakeFold pins the held-work sink: a configured interval
-// competes as an ordinary explicit wait, an unconfigured one still
-// wakes the pass on the rate-limited backoff, and neither overrides an
-// earlier wait the pass already holds.
-func TestPassWakeFold(t *testing.T) {
-	var configured PassWake
-	configured.Observe(5 * time.Second)
-	if got := configured.Fold(ctrl.Result{}); got.RequeueAfter != 5*time.Second {
-		t.Errorf("configured wake: got %+v want RequeueAfter 5s", got)
-	}
-	if got := configured.Fold(ctrl.Result{RequeueAfter: time.Second}); got.RequeueAfter != time.Second {
-		t.Errorf("an earlier wait must win: got %+v", got)
-	}
-
-	var bare PassWake
-	bare.Observe(0)
-	got := bare.Fold(ctrl.Result{})
-	if got.RequeueAfter != 0 || !got.Requeue { //nolint:staticcheck // the bare backoff is what this asserts
-		t.Errorf("unconfigured wake must ride the rate-limited backoff: got %+v", got)
-	}
-	if withWait := bare.Fold(ctrl.Result{RequeueAfter: time.Minute}); withWait.RequeueAfter != time.Minute || withWait.Requeue { //nolint:staticcheck // an explicit wait must stand alone
-		t.Errorf("an explicit wait must stand: got %+v", withWait)
-	}
-
-	var empty *PassWake
-	if got := empty.Fold(ctrl.Result{}); got.RequeueAfter != 0 || got.Requeue { //nolint:staticcheck // no wake was deposited
-		t.Errorf("no deposit must leave the result alone: got %+v", got)
 	}
 }

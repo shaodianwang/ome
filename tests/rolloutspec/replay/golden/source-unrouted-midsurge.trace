@@ -8,8 +8,8 @@ tick=1 hold cleared
 tick=1 pass result=after:5s
 tick=2 note the source loses its routed endpoint while its serving gate still reads True
 tick=2 apply endpoint.rotationOut[source] pod=svc-a-engine-0-default-0 now=t+0s
-tick=2 row=0 write no-op precondition=no-change
 tick=2 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#1{type=Update step=Surge target=svc-a-engine-6f8b1e6c waiting=SourceUnrouted strategy=SurgeThenDrain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-0-default-0 reason=SourceUnrouted message=SourceUnrouted: source pod svc-a-engine-0-default-0 is out of the routed Service while its surge replacement is not serving yet; the surge did not take it out} precondition=ok
+tick=2 row=0 write no-op precondition=no-change
 tick=2 hold cleared
 tick=2 pass result=after:5s
 tick=3 note the source is still out of rotation, and the report is not written twice
@@ -19,7 +19,7 @@ tick=3 hold cleared
 tick=3 pass result=after:5s
 tick=4 note the source is routed again, so the report is released by the authority that set it
 tick=4 apply endpoint.rotationIn[source] pod=svc-a-engine-0-default-0 now=t+0s
-tick=4 row=0 write no-op precondition=no-change
 tick=4 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#1{type=Update step=Surge target=svc-a-engine-6f8b1e6c strategy=SurgeThenDrain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-0-default-0 reason=SourceUnrouted message=SourceUnrouted: source pod svc-a-engine-0-default-0 is out of the routed Service while its surge replacement is not serving yet; the surge did not take it out} precondition=ok
+tick=4 row=0 write no-op precondition=no-change
 tick=4 hold cleared
 tick=4 pass result=after:5s

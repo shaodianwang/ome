@@ -18,9 +18,11 @@ import (
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/drain"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/evidence"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
@@ -142,7 +144,7 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 	// Resume from the record's allocated surge index; allocate on a
 	// fresh record (SurgeInstance unset, or the pre-allocation -1
 	// sentinel imported from a legacy ledger row).
-	source := findInstanceStatus(input.ObservedState.InstanceStatuses, sourceIdx)
+	source := input.ObservedState.Instance(sourceIdx)
 	var surge *workload.InstanceStatus
 	var surgeIdx int32
 	pairConfirmedForEffects := false
@@ -151,10 +153,10 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 	// next pass's EnsurePodGroups creates the surge PodGroup before any
 	// surge pod is rendered.
 	freshStamp := false
-	if entry.SurgeInstance != nil && *entry.SurgeInstance >= 0 {
+	if entry.SurgeAllocated() {
 		// In-flight — accepted on a prior pass; the record is the anchor.
 		surgeIdx = *entry.SurgeInstance
-		surge = findInstanceStatus(input.ObservedState.InstanceStatuses, surgeIdx)
+		surge = input.ObservedState.Instance(surgeIdx)
 		accepted = true
 		// Crash window between the record's SurgeInstance write and the
 		// pair stamps: while the record is still <= SurgePending the
@@ -196,7 +198,7 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 			d, ferr := failMigration(ctx, deps, input, ledger, req, requestUUID, "source InstanceStatus missing")
 			return d, true, ferr
 		}
-		if source.Phase != workload.InstancePhaseReady || source.Operation != nil || source.RunningRevision == "" {
+		if !migrationSourceSteady(source) {
 			// Defer without taking ownership — signal to caller that
 			// fall-through is safe so the in-flight op (Update/Restart/
 			// Create) can converge. accepted=false is load-bearing here;
@@ -217,7 +219,7 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 			// fresh-request guard and must not block other ops.
 			return false, false, nil
 		case mismatch != "":
-			recordWarning(deps.Recorder, eventTarget(input), workload.EventReasonMigrationFromNodeMismatch,
+			workload.RecordWarning(deps.Recorder, workload.EventTarget(input), workload.EventReasonMigrationFromNodeMismatch,
 				"OMENative migration uuid=%s rejected: %s", requestUUID, mismatch)
 			d, ferr := failMigration(ctx, deps, input, ledger, req, requestUUID, mismatch)
 			return d, true, ferr
@@ -248,7 +250,7 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 			return false, false, fmt.Errorf("Migrate: clear capacity condition (uuid=%s): %w", requestUUID, err)
 		}
 		if ok, reason := audit.ValidateCapacity(input.MigrationAudit, input.ObservedState.Migrations, requestUUID, deps.Now()); !ok {
-			recordWarning(deps.Recorder, eventTarget(input), workload.EventReasonRateLimited,
+			workload.RecordWarning(deps.Recorder, workload.EventTarget(input), workload.EventReasonRateLimited,
 				"OMENative migration uuid=%s rejected: %s", requestUUID, reason)
 			d, ferr := failMigration(ctx, deps, input, ledger, req, requestUUID, reason)
 			return d, true, ferr
@@ -279,7 +281,7 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		if WouldOverlayConflictWithNodeAffinity(preRevSpec, preOverlay) ||
 			(preWorkerSpec != nil && WouldOverlayConflictWithNodeAffinity(preWorkerSpec, preOverlay)) {
 			reason := fmt.Sprintf("source PodSpec NodeAffinity requires kubernetes.io/hostname=%s; overlay's NotIn[%s] would make scheduling impossible", req.FromNode, req.FromNode)
-			recordWarning(deps.Recorder, eventTarget(input), workload.EventReasonMigrationNodeAffinityConflict,
+			workload.RecordWarning(deps.Recorder, workload.EventTarget(input), workload.EventReasonMigrationNodeAffinityConflict,
 				"OMENative migration uuid=%s rejected: %s", requestUUID, reason)
 			d, ferr := failMigration(ctx, deps, input, ledger, req, requestUUID, reason)
 			return d, true, ferr
@@ -337,9 +339,9 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		if err := audit.PersistLedgerForOwner(ctx, deps.Client, ledgerOwnerObject(input), ledgerOwnerGVK(input), ledger); err != nil {
 			return false, false, fmt.Errorf("Migrate: persist Started ledger: %w", err)
 		}
-		recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonMigrationRequestAccepted,
+		workload.RecordNormal(deps.Recorder, workload.EventTarget(input), workload.EventReasonMigrationRequestAccepted,
 			"OMENative %s migration accepted (uuid=%s, source-node=%s, surge-index=%d)",
-			instanceKey(input.Key.Component, sourceIdx), requestUUID, req.FromNode, surgeIdx)
+			workload.InstanceKey(input.Key.Component, sourceIdx), requestUUID, req.FromNode, surgeIdx)
 		// Record + stamps + ledger persisted — Migrate has taken ownership.
 		freshStamp = true
 	}
@@ -398,7 +400,7 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		if !confirmed {
 			return false, accepted, nil
 		}
-		finalized, ferr := finalizeAndRemoveInstance(ctx, deps, input, sourceIdx, source)
+		finalized, ferr := status.FinalizeAndRemove(ctx, deps, input, sourceIdx, source)
 		if ferr != nil {
 			return false, accepted, fmt.Errorf("Migrate: finalize source Instance in completion tail: %w", ferr)
 		}
@@ -432,7 +434,7 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 	// puts the source back in rotation: a source already drained and
 	// deleted has nothing to restore, so that shape stays with the
 	// Deadline backstop.
-	if entry.SurgeInstance != nil && *entry.SurgeInstance >= 0 && len(sourcePods) > 0 {
+	if entry.SurgeAllocated() && len(sourcePods) > 0 {
 		if blocker, wedged := surgeWedgeBlocker(input, surgePods); wedged {
 			if err := failMigrationOnWedgedSurge(ctx, deps, input, plan, entry, surgeIdx, blocker); err != nil {
 				return false, accepted, fmt.Errorf("Migrate: fail on wedged surge (uuid=%s): %w", requestUUID, err)
@@ -523,7 +525,7 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 	if WouldOverlayConflictWithNodeAffinity(surgeRevSpec, surgeInst.MigrationOverlay) ||
 		(surgeWorkerSpec != nil && WouldOverlayConflictWithNodeAffinity(surgeWorkerSpec, surgeInst.MigrationOverlay)) {
 		reason := fmt.Sprintf("source PodSpec NodeAffinity requires kubernetes.io/hostname=%s; overlay's NotIn[%s] would make scheduling impossible", req.FromNode, req.FromNode)
-		recordWarning(deps.Recorder, eventTarget(input), workload.EventReasonMigrationNodeAffinityConflict,
+		workload.RecordWarning(deps.Recorder, workload.EventTarget(input), workload.EventReasonMigrationNodeAffinityConflict,
 			"OMENative migration uuid=%s rejected: %s", requestUUID, reason)
 		d, ferr := failMigration(ctx, deps, input, ledger, req, requestUUID, reason)
 		return d, accepted, ferr
@@ -592,7 +594,7 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 				!entry.Deadline.IsZero() &&
 				!errors.Is(cerr, context.Canceled) &&
 				!errors.Is(cerr, context.DeadlineExceeded) {
-				recordWarning(deps.Recorder, eventTarget(input), workload.EventReasonMigrationSurgeCreateBlocked,
+				workload.RecordWarning(deps.Recorder, workload.EventTarget(input), workload.EventReasonMigrationSurgeCreateBlocked,
 					"OMENative migration uuid=%s waiting to create surge pod %s before its deadline",
 					requestUUID, blockedPod)
 				logf.FromContext(ctx).V(1).Info("migration surge pod creation blocked",
@@ -730,7 +732,7 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 	if source != nil && !migrationSourceOwnsRemoval(source, requestUUID, surgeIdx) {
 		return false, accepted, nil
 	}
-	removed, rerr := finalizeAndRemoveInstance(ctx, deps, input, sourceIdx, source)
+	removed, rerr := status.FinalizeAndRemove(ctx, deps, input, sourceIdx, source)
 	if rerr != nil {
 		return false, accepted, fmt.Errorf("Migrate: finalize source Instance: %w", rerr)
 	}
@@ -738,7 +740,7 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		return false, accepted, nil
 	}
 	promotedSurge := *surge
-	markReadyTransition(&promotedSurge, input.Now())
+	status.EnterReady(&promotedSurge, input.Now())
 	promotedSurge.RunningRevision = surgeRev.Name
 	promotedSurge.TargetRevision = ""
 	promotedSurge.Operation = nil
@@ -793,9 +795,9 @@ func completeMigrationTail(
 	}); err != nil {
 		return fmt.Errorf("Migrate: record Phase=Completed (uuid=%s): %w", requestUUID, err)
 	}
-	recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonMigrationCompleted,
+	workload.RecordNormal(deps.Recorder, workload.EventTarget(input), workload.EventReasonMigrationCompleted,
 		"OMENative migration uuid=%s complete: %s -> instance=%d (revision=%s)",
-		requestUUID, instanceKey(input.Key.Component, sourceIdx), surgeIdx, runningRevision)
+		requestUUID, workload.InstanceKey(input.Key.Component, sourceIdx), surgeIdx, runningRevision)
 	return nil
 }
 
@@ -811,12 +813,12 @@ func establishMigrationPair(
 	if !migrationPairStampable(source, surge, requestUUID, surgeIdx) {
 		return false, nil
 	}
-	if err := validateTerminalMutationOwner(input); err != nil {
+	if err := status.RequireOwner(input); err != nil {
 		return false, err
 	}
 	ownerUID := input.OwnerObject.GetUID()
-	sourceGuard, sourceState := terminalIdentityGuard(input, source.Index, source)
-	surgeGuard, surgeState := terminalIdentityGuard(input, surgeIdx, surge)
+	sourceGuard, sourceState := status.Guard(input, source.Index, source)
+	surgeGuard, surgeState := status.Guard(input, surgeIdx, surge)
 	confirmed := false
 	batchGuard := func(snapshot workload.InstanceMutationSnapshot) bool {
 		if snapshot.OwnerUID != ownerUID {
@@ -832,25 +834,25 @@ func establishMigrationPair(
 			confirmed = true
 			return true
 		}
-		confirmed = sourceGuard(snapshot) && sourceState.matched && surgeGuard(snapshot)
+		confirmed = sourceGuard(snapshot) && sourceState.Matched && surgeGuard(snapshot)
 		if surge == nil {
-			confirmed = confirmed && surgeState.absent
+			confirmed = confirmed && surgeState.Absent
 		} else {
-			confirmed = confirmed && surgeState.matched
+			confirmed = confirmed && surgeState.Matched
 		}
 		return confirmed
 	}
 
-	sourceMutation := migrationStatusMutation(input, source.Index, surgeIdx, migrationRoleSource, requestUUID, timeout)
+	sourceMutation := status.MigrationPinMutation(input, source.Index, surgeIdx, status.MigrationRoleSource, requestUUID, timeout)
 	sourceMutation.BatchPrecondition = batchGuard
-	sourceMutation.Postcondition = func(status *workload.InstanceStatus) bool {
-		return migrationSourceOwnsRemoval(status, requestUUID, surgeIdx)
+	sourceMutation.Postcondition = func(row *workload.InstanceStatus) bool {
+		return migrationSourceOwnsRemoval(row, requestUUID, surgeIdx)
 	}
-	surgeMutation := migrationStatusMutation(input, surgeIdx, source.Index, migrationRoleSurge, requestUUID, timeout)
-	surgeMutation.Postcondition = func(status *workload.InstanceStatus) bool {
-		return migrationSurgeOwnsPromotion(status, requestUUID, source.Index)
+	surgeMutation := status.MigrationPinMutation(input, surgeIdx, source.Index, status.MigrationRoleSurge, requestUUID, timeout)
+	surgeMutation.Postcondition = func(row *workload.InstanceStatus) bool {
+		return migrationSurgeOwnsPromotion(row, requestUUID, source.Index)
 	}
-	err := applyTerminalInstanceMutations(ctx, input, []workload.InstanceMutation{sourceMutation, surgeMutation})
+	err := status.Apply(ctx, input, []workload.InstanceMutation{sourceMutation, surgeMutation})
 	if errors.Is(err, workload.ErrStatusMutationPrecondition) || errors.Is(err, workload.ErrStatusOwnerGone) {
 		return false, nil
 	}
@@ -871,8 +873,17 @@ func migrationPairStampable(
 	if sourceOwned {
 		return surge == nil || surgeOwned
 	}
-	return source.Phase == workload.InstancePhaseReady && source.Operation == nil &&
-		source.RunningRevision != "" && surge == nil
+	return migrationSourceSteady(source) && surge == nil
+}
+
+// migrationSourceSteady reports whether a source row is one a fresh
+// record may claim: Ready on a recorded revision with no operation at
+// all. An operation of any kind, recognized or not, is a claim on the
+// row, and the revision is the migration's own requirement, since the
+// surge is created at whatever the source is running.
+func migrationSourceSteady(source *workload.InstanceStatus) bool {
+	return source != nil && source.Phase == workload.InstancePhaseReady &&
+		source.Operation == nil && source.RunningRevision != ""
 }
 
 func confirmMigrationCompletionPair(
@@ -888,18 +899,18 @@ func confirmMigrationCompletionPair(
 	if input.ApplyInstanceMutationsWithRetryBlock == nil {
 		return true, nil
 	}
-	if err := validateTerminalMutationOwner(input); err != nil {
+	if err := status.RequireOwner(input); err != nil {
 		return false, err
 	}
-	sourceGuard, sourceState := terminalIdentityGuard(input, sourceIdx, nil)
-	surgeGuard, surgeState := terminalIdentityGuard(input, surge.Index, surge)
+	sourceGuard, sourceState := status.Guard(input, sourceIdx, nil)
+	surgeGuard, surgeState := status.Guard(input, surge.Index, surge)
 	confirmed := false
 	preflight := workload.InstanceMutation{
 		Index:  sourceIdx,
 		Mutate: func(*workload.InstanceStatus) bool { return false },
 		BatchPrecondition: func(snapshot workload.InstanceMutationSnapshot) bool {
-			confirmed = sourceGuard(snapshot) && sourceState.absent &&
-				surgeGuard(snapshot) && surgeState.matched
+			confirmed = sourceGuard(snapshot) && sourceState.Absent &&
+				surgeGuard(snapshot) && surgeState.Matched
 			if !confirmed {
 				return false
 			}
@@ -908,7 +919,7 @@ func confirmMigrationCompletionPair(
 			return confirmed
 		},
 	}
-	err := applyTerminalInstanceMutations(ctx, input, []workload.InstanceMutation{preflight})
+	err := status.Apply(ctx, input, []workload.InstanceMutation{preflight})
 	if errors.Is(err, workload.ErrStatusMutationPrecondition) || errors.Is(err, workload.ErrStatusOwnerGone) {
 		return false, nil
 	}
@@ -928,32 +939,32 @@ func confirmMigrationDrainPair(
 	if !migrationSourceOwnsRemoval(source, requestUUID, surgeIdx) {
 		return false, nil
 	}
-	targetMatches := func(status *workload.InstanceStatus) bool {
-		return migrationSurgeOwnsPromotion(status, requestUUID, source.Index)
+	targetMatches := func(row *workload.InstanceStatus) bool {
+		return migrationSurgeOwnsPromotion(row, requestUUID, source.Index)
 	}
 	if !targetMatches(surge) {
 		if !allowPromoted || !migrationPromotedSurgeMatches(surge, targetRevision) {
 			return false, nil
 		}
-		targetMatches = func(status *workload.InstanceStatus) bool {
-			return migrationPromotedSurgeMatches(status, targetRevision)
+		targetMatches = func(row *workload.InstanceStatus) bool {
+			return migrationPromotedSurgeMatches(row, targetRevision)
 		}
 	}
 	if input.ApplyInstanceMutationsWithRetryBlock == nil {
 		return true, nil
 	}
-	if err := validateTerminalMutationOwner(input); err != nil {
+	if err := status.RequireOwner(input); err != nil {
 		return false, err
 	}
-	sourceGuard, sourceState := terminalIdentityGuard(input, source.Index, source)
-	surgeGuard, surgeState := terminalIdentityGuard(input, surge.Index, surge)
+	sourceGuard, sourceState := status.Guard(input, source.Index, source)
+	surgeGuard, surgeState := status.Guard(input, surge.Index, surge)
 	confirmed := false
 	preflight := workload.InstanceMutation{
 		Index:  source.Index,
 		Mutate: func(*workload.InstanceStatus) bool { return false },
 		BatchPrecondition: func(snapshot workload.InstanceMutationSnapshot) bool {
-			if !sourceGuard(snapshot) || !sourceState.matched ||
-				!surgeGuard(snapshot) || !surgeState.matched {
+			if !sourceGuard(snapshot) || !sourceState.Matched ||
+				!surgeGuard(snapshot) || !surgeState.Matched {
 				confirmed = false
 				return false
 			}
@@ -962,7 +973,7 @@ func confirmMigrationDrainPair(
 			return confirmed
 		},
 	}
-	err := applyTerminalInstanceMutations(ctx, input, []workload.InstanceMutation{preflight})
+	err := status.Apply(ctx, input, []workload.InstanceMutation{preflight})
 	if errors.Is(err, workload.ErrStatusMutationPrecondition) || errors.Is(err, workload.ErrStatusOwnerGone) {
 		return false, nil
 	}
@@ -986,7 +997,7 @@ func promoteMigrationSurge(
 		return false, nil
 	}
 	if input.ApplyInstanceMutationsWithRetryBlock == nil {
-		if err := patchInstanceStatusReadyOnRevision(ctx, input, surge.Index, targetRevision); err != nil {
+		if err := status.StampReadyOnRevision(ctx, input, surge.Index, targetRevision); err != nil {
 			if errors.Is(err, workload.ErrStatusOwnerGone) {
 				return false, nil
 			}
@@ -1001,21 +1012,21 @@ func promoteMigrationSurge(
 		if err != nil || !confirmed {
 			return false, err
 		}
-		if err := pruneRetryBlockOnPromote(ctx, input, targetRevision); err != nil {
+		if err := status.RetryBlockPruneOnPromote(ctx, input, targetRevision); err != nil {
 			return false, err
 		}
 		return true, nil
 	}
-	if err := validateTerminalMutationOwner(input); err != nil {
+	if err := status.RequireOwner(input); err != nil {
 		return false, err
 	}
-	sourceGuard, sourceState := terminalIdentityGuard(input, source.Index, source)
-	surgeGuard, surgeState := terminalIdentityGuard(input, surge.Index, surge)
-	mutation := createStatusReadyOnRevisionMutation(surge.Index, targetRevision, input.Now())
+	sourceGuard, sourceState := status.Guard(input, source.Index, source)
+	surgeGuard, surgeState := status.Guard(input, surge.Index, surge)
+	mutation := status.ReadyOnRevisionMutation(surge.Index, targetRevision, input.Now())
 	promoted := false
 	mutation.BatchPrecondition = func(snapshot workload.InstanceMutationSnapshot) bool {
-		if !sourceGuard(snapshot) || !sourceState.matched ||
-			!surgeGuard(snapshot) || !surgeState.matched {
+		if !sourceGuard(snapshot) || !sourceState.Matched ||
+			!surgeGuard(snapshot) || !surgeState.Matched {
 			return false
 		}
 		currentSource := snapshot.Instances[source.Index]
@@ -1023,15 +1034,15 @@ func promoteMigrationSurge(
 		return migrationSourceOwnsRemoval(&currentSource, requestUUID, surge.Index) &&
 			migrationSurgeOwnsPromotion(&currentSurge, requestUUID, source.Index)
 	}
-	mutation.Postcondition = func(status *workload.InstanceStatus) bool {
-		return status != nil && status.Index == surge.Index &&
-			status.Incarnation == surge.Incarnation && status.ActiveOrdinal == surge.ActiveOrdinal &&
-			migrationPromotedSurgeMatches(status, targetRevision)
+	mutation.Postcondition = func(row *workload.InstanceStatus) bool {
+		return row != nil && row.Index == surge.Index &&
+			row.Incarnation == surge.Incarnation && row.ActiveOrdinal == surge.ActiveOrdinal &&
+			migrationPromotedSurgeMatches(row, targetRevision)
 	}
 	mutation.OnCommit = func(_, _ *workload.InstanceStatus) {
 		promoted = true
 	}
-	err := applyTerminalInstanceMutations(ctx, input, []workload.InstanceMutation{mutation})
+	err := status.Apply(ctx, input, []workload.InstanceMutation{mutation})
 	if errors.Is(err, workload.ErrStatusMutationPrecondition) || errors.Is(err, workload.ErrStatusOwnerGone) {
 		return false, nil
 	}
@@ -1039,33 +1050,33 @@ func promoteMigrationSurge(
 		return false, err
 	}
 
-	if err := pruneRetryBlockOnPromote(ctx, input, targetRevision); err != nil {
+	if err := status.RetryBlockPruneOnPromote(ctx, input, targetRevision); err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
-func migrationSourceOwnsRemoval(status *workload.InstanceStatus, requestUUID string, surgeIdx int32) bool {
-	return status != nil && status.Phase == workload.InstancePhaseMigrating &&
-		status.RunningRevision != "" && status.TargetRevision == "" && status.Operation != nil &&
-		status.Operation.Type == workload.InstanceOperationMigrate &&
-		status.Operation.RequestUUID == requestUUID &&
-		status.Operation.SurgeIndex != nil && *status.Operation.SurgeIndex == surgeIdx
+func migrationSourceOwnsRemoval(row *workload.InstanceStatus, requestUUID string, surgeIdx int32) bool {
+	return row != nil && row.Phase == workload.InstancePhaseMigrating &&
+		row.RunningRevision != "" && row.TargetRevision == "" && row.Operation != nil &&
+		row.Operation.Type == workload.InstanceOperationMigrate &&
+		row.Operation.RequestUUID == requestUUID &&
+		row.Operation.SurgeIndex != nil && *row.Operation.SurgeIndex == surgeIdx
 }
 
-func migrationSurgeOwnsPromotion(status *workload.InstanceStatus, requestUUID string, sourceIdx int32) bool {
-	return status != nil && status.Incarnation == 1 && status.ActiveOrdinal == 0 &&
-		status.Phase == workload.InstancePhaseCreating && status.RunningRevision == "" &&
-		status.TargetRevision == "" && status.Operation != nil &&
-		status.Operation.Type == workload.InstanceOperationMigrate &&
-		status.Operation.RequestUUID == requestUUID &&
-		status.Operation.SurgeIndex != nil && *status.Operation.SurgeIndex == sourceIdx
+func migrationSurgeOwnsPromotion(row *workload.InstanceStatus, requestUUID string, sourceIdx int32) bool {
+	return row != nil && row.Incarnation == 1 && row.ActiveOrdinal == 0 &&
+		row.Phase == workload.InstancePhaseCreating && row.RunningRevision == "" &&
+		row.TargetRevision == "" && row.Operation != nil &&
+		row.Operation.Type == workload.InstanceOperationMigrate &&
+		row.Operation.RequestUUID == requestUUID &&
+		row.Operation.SurgeIndex != nil && *row.Operation.SurgeIndex == sourceIdx
 }
 
-func migrationPromotedSurgeMatches(status *workload.InstanceStatus, targetRevision string) bool {
-	return status != nil && status.Incarnation == 1 && status.ActiveOrdinal == 0 &&
-		status.Phase == workload.InstancePhaseReady &&
-		status.RunningRevision == targetRevision && status.TargetRevision == "" && status.Operation == nil
+func migrationPromotedSurgeMatches(row *workload.InstanceStatus, targetRevision string) bool {
+	return row != nil && row.Incarnation == 1 && row.ActiveOrdinal == 0 &&
+		row.Phase == workload.InstancePhaseReady &&
+		row.RunningRevision == targetRevision && row.TargetRevision == "" && row.Operation == nil
 }
 
 // surgeTailGatesPassed reports whether the surge Instance passes the
@@ -1101,9 +1112,9 @@ func surgeTailGatesPassed(ctx context.Context, deps workload.Deps, input workloa
 			return false, nil
 		}
 	}
-	surgeStatus := findInstanceStatus(input.ObservedState.InstanceStatuses, surgeIdx)
-	if surgeStatus == nil || surgeStatus.PodCount == 0 ||
-		surgeStatus.AvailablePodCount < surgeStatus.PodCount {
+	surgeStatus := input.ObservedState.Instance(surgeIdx)
+	publishedPods, publishedAvailable := workload.AdapterPublished(surgeStatus)
+	if publishedPods == 0 || publishedAvailable < publishedPods {
 		return false, nil
 	}
 	return true, nil
@@ -1245,7 +1256,7 @@ func holdMigrationForUnconfiguredCapacity(ctx context.Context, deps workload.Dep
 	if !opened {
 		return nil
 	}
-	recordWarning(deps.Recorder, eventTarget(input), workload.EventReasonMigrationPolicyUnconfigured,
+	workload.RecordWarning(deps.Recorder, workload.EventTarget(input), workload.EventReasonMigrationPolicyUnconfigured,
 		"OMENative migration uuid=%s held: %s", uuid, migrationCapacityUnconfiguredMessage)
 	return nil
 }
@@ -1316,7 +1327,7 @@ func failMigration(ctx context.Context, deps workload.Deps, input workload.Recon
 	}); err != nil {
 		return false, fmt.Errorf("Migrate: record Phase=Failed (%s): %w", reason, err)
 	}
-	recordWarning(deps.Recorder, eventTarget(input), workload.EventReasonMigrationRequestRejected,
+	workload.RecordWarning(deps.Recorder, workload.EventTarget(input), workload.EventReasonMigrationRequestRejected,
 		"OMENative migration uuid=%s rejected: %s", uuid, reason)
 	return true, nil
 }
@@ -1350,7 +1361,7 @@ func isMultiPodInstance(plan workload.ComponentPlan, sourceIdx int32) bool {
 // the CR via deps.Reader() (live read) so a stale cache doesn't return
 // a deleted CR as still-present.
 func surgeRevisionAndSpec(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, sourceIdx int32) (*appsv1.ControllerRevision, *corev1.PodSpec, *corev1.PodSpec, error) {
-	source := findInstanceStatus(input.ObservedState.InstanceStatuses, sourceIdx)
+	source := input.ObservedState.Instance(sourceIdx)
 	if source == nil || source.RunningRevision == "" {
 		return nil, nil, nil, nil
 	}
@@ -1371,119 +1382,23 @@ func surgeRevisionAndSpec(ctx context.Context, deps workload.Deps, input workloa
 	return cr, payload.PodSpec, payload.WorkerPodSpec, nil
 }
 
-// migrationRole picks which side of the pair stampMigrationStatus is
-// writing — source goes to Phase=Migrating with sibling=surge; surge
-// goes to Phase=Creating with sibling=source and Incarnation seeded.
-type migrationRole int
-
-const (
-	migrationRoleSource migrationRole = iota
-	migrationRoleSurge
-)
-
-// stampMigrationStatus writes one side of the migration pair. Idempotent
-// on (Phase, Operation.Type, RequestUUID). The Operation is a pin —
-// Type + RequestUUID (+ SurgeIndex for pair correlation) plus the
-// timing fields the deadline machinery reads; migration facts
-// (FromNode, hints, reason) live on the owner's status.migrations
-// record, not here.
-func stampMigrationStatus(ctx context.Context, input workload.ReconcileInput, idx, siblingIdx int32, role migrationRole, uuid string, timeout time.Duration) error {
-	mutation := migrationStatusMutation(input, idx, siblingIdx, role, uuid, timeout)
-	return input.MutateInstance(ctx, mutation.Index, mutation.Mutate)
-}
-
-func migrationStatusMutation(input workload.ReconcileInput, idx, siblingIdx int32, role migrationRole, uuid string, timeout time.Duration) workload.InstanceMutation {
-	now := metav1.NewTime(input.Now())
-	siblingPtr := siblingIdx
-	wantPhase := workload.InstancePhaseMigrating
-	idSuffix := ""
-	if role == migrationRoleSurge {
-		wantPhase = workload.InstancePhaseCreating
-		idSuffix = "-surge"
-	}
-	return workload.InstanceMutation{Index: idx, Mutate: func(s *workload.InstanceStatus) bool {
-		if role == migrationRoleSource && s.Phase == "" {
-			// Fresh-empty slot from the append path: the source status
-			// was removed out from under us — don't resurrect it. The
-			// surge role legitimately seeds a fresh slot.
-			return false
-		}
-		if s.Phase == wantPhase &&
-			s.Operation != nil && s.Operation.Type == workload.InstanceOperationMigrate &&
-			s.Operation.RequestUUID == uuid {
-			return false
-		}
-		if role == migrationRoleSurge && s.Incarnation == 0 {
-			s.Incarnation = 1
-		}
-		s.Phase = wantPhase
-		s.Operation = &workload.InstanceOperation{
-			ID:             fmt.Sprintf("migrate-%s%s-%d", uuid, idSuffix, now.Unix()),
-			Type:           workload.InstanceOperationMigrate,
-			Step:           "CreateSurge",
-			RequestUUID:    uuid,
-			SurgeIndex:     &siblingPtr,
-			StartedAt:      now,
-			LastProgressAt: now,
-			Deadline:       metav1.NewTime(now.Add(timeout)),
-		}
-		return true
-	}}
-}
-
 // patchInstanceStatusMigrating stamps source Phase=Migrating; SurgeIndex
 // on Operation points forward at the surge.
 func patchInstanceStatusMigrating(ctx context.Context, input workload.ReconcileInput, idx, surgeIdx int32, uuid string, timeout time.Duration) error {
-	return stampMigrationStatus(ctx, input, idx, surgeIdx, migrationRoleSource, uuid, timeout)
+	return status.StampMigrationPin(ctx, input, idx, surgeIdx, status.MigrationRoleSource, uuid, timeout)
 }
 
 // patchInstanceStatusMigrationSurge stamps surge Phase=Creating; SurgeIndex
 // points back at source (field reused as a sibling pointer so observers
 // can correlate the pair from either side).
 func patchInstanceStatusMigrationSurge(ctx context.Context, input workload.ReconcileInput, surgeIdx, sourceIdx int32, uuid string, timeout time.Duration) error {
-	return stampMigrationStatus(ctx, input, surgeIdx, sourceIdx, migrationRoleSurge, uuid, timeout)
+	return status.StampMigrationPin(ctx, input, surgeIdx, sourceIdx, status.MigrationRoleSurge, uuid, timeout)
 }
 
-// drainServiceForPod returns the per-revision *routed* Service name to
-// gate drain against for pod. Read from the pod's ome.io/revision-hash
-// label (stamped by Render). Empty string when the label is missing —
-// caller treats that as "no routed Service to check" and proceeds
-// straight to delete.
-//
-// We deliberately do NOT use the Component's headless Service here.
-// That Service sets PublishNotReadyAddresses=true so peer-discovery DNS
-// resolves before pods are Ready; kube-proxy then publishes the
-// endpoint with Conditions.Ready=true regardless of the pod's actual
-// Ready state, which would make drain.IsPodDrained wait forever. The
-// per-revision routed Service (created by the coordination layer with
-// PublishNotReadyAddresses=false) reflects the controller-owned
-// ome.io/serving gate correctly.
-//
-// plan.Component type flows from the caller so migrate.go can address
-// per-revision Services without importing v1beta1 itself.
+// drainServiceForPod is query.RoutedServiceForPod under the name the
+// Update and Migrate drain gates read by.
 func drainServiceForPod(input workload.ReconcileInput, plan workload.ComponentPlan, pod *corev1.Pod) string {
-	if pod == nil {
-		return ""
-	}
-	hash := pod.Labels[query.LabelRevisionHash]
-	if hash == "" {
-		return ""
-	}
-	// Workers are never members of the per-revision ROUTING Service: for
-	// multi-pod (gang) Components that Service pins runner=leader,pod-ordinal=0
-	// (coordination.BuildPerRevisionRoutingService) because workers run
-	// distributed-init peers and never serve customer traffic. Returning a
-	// routing-Service name for a worker would wedge the Migrate surge
-	// in-rotation gate forever — IsPodInRotation(worker) can never become true
-	// since the worker is not an endpoint — and is a no-op for the source
-	// drain gate (a worker is never routed, so it's trivially drained). Skip it
-	// so the gates assert only the routable leader; worker readiness is already
-	// covered upstream by AllPodsRuntimeReady, and worker availability by the
-	// headless-Service-based AvailablePodCount.
-	if pod.Labels[query.LabelRunner] == "worker" {
-		return ""
-	}
-	return query.PerRevisionServiceName(input.Key.OwnerName, plan.Component, hash)
+	return query.RoutedServiceForPod(input.Key.OwnerName, plan.Component, pod)
 }
 
 // podsDrainedFromRouting reports whether every pod in pods has left the
@@ -1514,4 +1429,77 @@ func podsDrainedFromRouting(
 		}
 	}
 	return true, nil
+}
+
+// migrate_surge_wedge.go — terminal kubelet evidence on a migration's
+// surge ends the move before the record's Deadline.
+//
+// A surge pod parked in a waiting reason it cannot get itself out of
+// never runs, so the handover it exists for can never happen. Both
+// escalation paths skip a Migrate-pinned row on purpose — a serving
+// source must not be failed for its replacement's fate — which leaves
+// the record as the only consumer of this evidence. The read therefore
+// lives in the migration pass, which already holds the surge pods, and
+// drives the SAME record close an expiry drives: the record is the
+// authority, its Deadline is the backstop.
+
+// migrationSourceUnhealthyReason is the LastFailure.Reason a source
+// records when its migration is closed and observation finds the source
+// itself not runtime-ready. It names the source's own condition, not
+// the close that exposed it — the surge's wedge is what the record and
+// the event carry.
+const migrationSourceUnhealthyReason = "MigrationClosedSourceUnhealthy"
+
+// surgeWedgeBlocker names the first surge pod parked in a terminal
+// kubelet waiting reason past the configured stuck-pod grace, in the
+// phrasing the record carries as its outcome.
+//
+// The reason set and the grace are the ones every other reader of this
+// evidence uses, so a wedge one pass acts on is a wedge the others
+// recognize. An unconfigured grace disables the read exactly as it
+// disables the fast escalation. A pod already Terminating is on its way
+// out — the recycle or the scale-down pipeline owns it — so it proves
+// nothing about the migration.
+func surgeWedgeBlocker(input workload.ReconcileInput, surgePods []*corev1.Pod) (string, bool) {
+	if input.StuckPodGrace <= 0 {
+		return "", false
+	}
+	now := input.Now()
+	for _, pod := range surgePods {
+		if pod == nil || pod.DeletionTimestamp != nil {
+			continue
+		}
+		reason, stuck := evidence.PodStuckInTerminalWaiting(pod, now, input.StuckPodGrace)
+		if !stuck {
+			continue
+		}
+		return fmt.Sprintf("surge pod %s wedged in %s past the stuck-pod grace", pod.Name, reason), true
+	}
+	return "", false
+}
+
+// failMigrationOnWedgedSurge closes the record Failed on blocker through
+// the shared record path — surge unpinned for the bounded scale-down
+// pipeline, source restored to what observation finds with its drain
+// hold released — and emits the one Warning that names the pod and the
+// reason. No RetryBlock is charged: the wedge indicts the image or the
+// node the surge landed on, not an attempt the source is allowed to make
+// on its own revision.
+func failMigrationOnWedgedSurge(
+	ctx context.Context,
+	deps workload.Deps,
+	input workload.ReconcileInput,
+	plan workload.ComponentPlan,
+	rec *workload.MigrationRecord,
+	surgeIdx int32,
+	blocker string,
+) error {
+	if err := failMigrationThroughRecord(ctx, deps, input, plan, rec, blocker,
+		migrationSourceUnhealthyReason, blocker+"; source pods not runtime-ready"); err != nil {
+		return err
+	}
+	workload.RecordWarning(deps.Recorder, workload.EventTarget(input), workload.EventReasonMigrationSurgeWedged,
+		"OMENative migration uuid=%s failed: %s; tearing down surge instance=%d",
+		rec.RequestUUID, blocker, surgeIdx)
+	return nil
 }

@@ -14,8 +14,11 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/evidence"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/holds"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
@@ -51,7 +54,7 @@ func Create(ctx context.Context, deps workload.Deps, input workload.ReconcileInp
 // indices — those with no in-flight surge state the Update pass owns. It
 // lets a scale-up of brand-new gangs proceed even while a rollout is
 // mid-flight on another index, instead of starving scale-out behind the
-// rollout (a 20-40 min cold-compile on TPU).
+// rollout.
 //
 // A surge-free index is immune to both corruption modes the dispatcher's
 // skip-Create-while-updating gate guards against: its ActiveOrdinal is a
@@ -63,10 +66,9 @@ func Create(ctx context.Context, deps workload.Deps, input workload.ReconcileInp
 // No-op (returns ctrl.Result{}, nil) when no index qualifies, so pure
 // rollouts are unaffected.
 func CreateFreshIndices(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, target *appsv1.ControllerRevision) (ctrl.Result, error) {
-	observed := input.ObservedState.InstanceStatuses
 	eligible := false
 	for _, inst := range plan.Instances {
-		if surgeFreeIndex(observed, inst.Index) {
+		if surgeFreeIndex(input, inst.Index) {
 			eligible = true
 			break
 		}
@@ -75,7 +77,7 @@ func CreateFreshIndices(ctx context.Context, deps workload.Deps, input workload.
 		return ctrl.Result{}, nil
 	}
 	return createFiltered(ctx, deps, input, plan, target, func(idx int32) bool {
-		return surgeFreeIndex(observed, idx)
+		return surgeFreeIndex(input, idx)
 	})
 }
 
@@ -90,9 +92,8 @@ func CreateCommittedIndices(ctx context.Context, deps workload.Deps, input workl
 	if !HasCommittedCreate(input, plan, target) {
 		return ctrl.Result{}, nil
 	}
-	observed := input.ObservedState.InstanceStatuses
 	return createFiltered(ctx, deps, input, plan, target, func(idx int32) bool {
-		return createFinishableAt(findInstanceStatus(observed, idx), target)
+		return createFinishableAt(input.ObservedState.Instance(idx), target)
 	})
 }
 
@@ -102,7 +103,7 @@ func CreateCommittedIndices(ctx context.Context, deps workload.Deps, input workl
 // to decide whether it has work, so both read one predicate.
 func HasCommittedCreate(input workload.ReconcileInput, plan workload.ComponentPlan, target *appsv1.ControllerRevision) bool {
 	for _, inst := range plan.Instances {
-		if createFinishableAt(findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index), target) {
+		if createFinishableAt(input.ObservedState.Instance(inst.Index), target) {
 			return true
 		}
 	}
@@ -131,8 +132,7 @@ func HasCommittedCreate(input workload.ReconcileInput, plan workload.ComponentPl
 // the same operation, and holding it instead would leave the Instance
 // short of its set for the length of the hold.
 func createFinishableAt(s *workload.InstanceStatus, target *appsv1.ControllerRevision) bool {
-	if s == nil || s.Phase != workload.InstancePhaseCreating ||
-		s.Operation == nil || s.Operation.Type != workload.InstanceOperationCreate {
+	if workload.StateOf(s) != workload.StateCreateCreatePods {
 		return false
 	}
 	// Nothing to retarget to, so nothing can be retired: every committed
@@ -152,8 +152,8 @@ func createFinishableAt(s *workload.InstanceStatus, target *appsv1.ControllerRev
 // is a surge TARGET marker owned by another index's op — overwriting it
 // with a Create stamp unpins the in-flight replacement gang from the
 // plan and scale-down deletes it mid-surge. All excluded.
-func surgeFreeIndex(observed []workload.InstanceStatus, idx int32) bool {
-	s := findInstanceStatus(observed, idx)
+func surgeFreeIndex(input workload.ReconcileInput, idx int32) bool {
+	s := input.ObservedState.Instance(idx)
 	if s == nil {
 		return true
 	}
@@ -329,7 +329,7 @@ func createFilteredBatched(
 				targetRevision = target.Name
 			}
 			mutation := createStatusCreatingMutation(inst.Index, inst.Incarnation, plan.InstanceReadyTimeout, targetRevision, now)
-			observed := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)
+			observed := input.ObservedState.Instance(inst.Index)
 			probe := workload.InstanceStatus{Index: inst.Index}
 			if observed != nil {
 				probe = *observed
@@ -361,7 +361,7 @@ func createFilteredBatched(
 			continue
 		}
 
-		observed := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)
+		observed := input.ObservedState.Instance(inst.Index)
 		wasReady := observed != nil && observed.Phase == workload.InstancePhaseReady
 		promotable, wait := query.PodSetPromotable(existing, plan.MinReadySeconds, input.Now())
 		action := &createReadyAction{
@@ -383,7 +383,7 @@ func createFilteredBatched(
 		}
 		var mutation workload.InstanceMutation
 		if target != nil && existingPodsMatchTargetRevision(existing, target) {
-			mutation = createStatusReadyOnRevisionMutation(inst.Index, target.Name, input.Now())
+			mutation = status.ReadyOnRevisionMutation(inst.Index, target.Name, input.Now())
 			action.pruneRevision = target.Name
 		} else {
 			mutation = createStatusReadyMutation(inst.Index, input.Now())
@@ -411,11 +411,11 @@ func createFilteredBatched(
 			return ctrl.Result{}, nil
 		}
 		for _, retired := range retirements {
-			recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonCreateAttemptSuperseded,
+			workload.RecordNormal(deps.Recorder, workload.EventTarget(input), workload.EventReasonCreateAttemptSuperseded,
 				"OMENative %s retired the Create attempt pinned to %s and restarted it at %s",
-				instanceKey(plan.Component, retired.index), retired.from, target.Name)
+				workload.InstanceKey(plan.Component, retired.index), retired.from, target.Name)
 		}
-		return ctrl.Result{Requeue: true}, nil
+		return workload.RequeueNow(), nil
 	}
 
 	readyStatusBatchingAvailable := input.ApplyInstanceMutations != nil || input.ApplyInstanceMutationsWithRetryBlock != nil
@@ -474,7 +474,7 @@ func createFilteredBatched(
 	}
 	// A server-suggested throttle delay is a floor, not a preference:
 	// waking earlier just re-earns the 429.
-	return workload.FloorPassRequeue(res, input.Pacing.Throttle()), nil
+	return workload.NoSoonerThan(res, input.Pacing.Pending()), nil
 }
 
 func processStartActions(
@@ -503,9 +503,9 @@ func processStartActions(
 			return true, errors.Join(err, rollbackErr)
 		}
 		if action.firstCreate {
-			recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonInstanceCreated,
+			workload.RecordNormal(deps.Recorder, workload.EventTarget(input), workload.EventReasonInstanceCreated,
 				"OMENative %s materialized; %d pod(s) requested",
-				instanceKey(input.Key.Component, action.instance.Index), len(action.missing))
+				workload.InstanceKey(input.Key.Component, action.instance.Index), len(action.missing))
 		}
 		// A dead pod on a stable name must be gone before the name can be
 		// reused; the create waits for a later pass.
@@ -610,7 +610,7 @@ func commitReadyActions(ctx context.Context, deps workload.Deps, input workload.
 	for i, action := range actions {
 		if action.pruneRevision != "" {
 			if _, pruned := prunedRevisions[action.pruneRevision]; !pruned {
-				if err := pruneRetryBlockOnPromote(ctx, input, action.pruneRevision); err != nil {
+				if err := status.RetryBlockPruneOnPromote(ctx, input, action.pruneRevision); err != nil {
 					rollbackStatusErr := rollbackReadyStatuses(ctx, input, actions[i+1:])
 					rollbackServingErr := rollbackReadyServing(ctx, deps, actions[i+1:])
 					return true, errors.Join(err, rollbackStatusErr, rollbackServingErr)
@@ -619,9 +619,9 @@ func commitReadyActions(ctx context.Context, deps workload.Deps, input workload.
 			}
 		}
 		if !action.wasReady {
-			recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonInstanceReady,
+			workload.RecordNormal(deps.Recorder, workload.EventTarget(input), workload.EventReasonInstanceReady,
 				"OMENative %s is Ready (%d pod(s) serving)",
-				instanceKey(input.Key.Component, action.instance.Index), len(action.existing))
+				workload.InstanceKey(input.Key.Component, action.instance.Index), len(action.existing))
 			if earliest := earliestPodCreation(action.existing); !earliest.IsZero() {
 				obsmetrics.RecordPodCreateToReady(input.Key.Namespace, input.Key.OwnerName,
 					string(input.Key.Component), time.Since(earliest).Seconds())
@@ -694,8 +694,8 @@ func (transition *statusTransition) rollbackMutation() (workload.InstanceMutatio
 		return workload.InstanceMutation{}, false
 	}
 	committed := *transition.current
-	matchesCommitted := func(status *workload.InstanceStatus) bool {
-		return sameCreateTransitionOwnerState(*status, committed)
+	matchesCommitted := func(row *workload.InstanceStatus) bool {
+		return sameCreateTransitionOwnerState(*row, committed)
 	}
 	if transition.previous == nil {
 		return workload.InstanceMutation{
@@ -707,11 +707,11 @@ func (transition *statusTransition) rollbackMutation() (workload.InstanceMutatio
 	previous := *transition.previous
 	return workload.InstanceMutation{
 		Index: transition.index,
-		Mutate: func(status *workload.InstanceStatus) bool {
-			if !matchesCommitted(status) {
+		Mutate: func(row *workload.InstanceStatus) bool {
+			if !matchesCommitted(row) {
 				return false
 			}
-			restoreCreateTransitionState(status, previous)
+			restoreCreateTransitionState(row, previous)
 			return true
 		},
 	}, true
@@ -730,15 +730,15 @@ func sameCreateTransitionOwnerState(current, committed workload.InstanceStatus) 
 	return reflect.DeepEqual(current, committed)
 }
 
-func restoreCreateTransitionState(status *workload.InstanceStatus, previous workload.InstanceStatus) {
-	previous.ReadyPodCount = status.ReadyPodCount
-	previous.ScheduledPodCount = status.ScheduledPodCount
-	if status.NodesOccupied != nil {
-		previous.NodesOccupied = append([]string(nil), status.NodesOccupied...)
+func restoreCreateTransitionState(row *workload.InstanceStatus, previous workload.InstanceStatus) {
+	previous.ReadyPodCount = row.ReadyPodCount
+	previous.ScheduledPodCount = row.ScheduledPodCount
+	if row.NodesOccupied != nil {
+		previous.NodesOccupied = append([]string(nil), row.NodesOccupied...)
 	} else {
 		previous.NodesOccupied = nil
 	}
-	*status = previous
+	*row = previous
 }
 
 func scaleUpPodBatchAdmits(limit *int32, selectedPods, candidatePods int32) bool {
@@ -811,7 +811,7 @@ func applyCreateIntentMutations(ctx context.Context, input workload.ReconcileInp
 		var mutateRetryBlock func(*workload.RetryBlock) workload.RetryBlockDisposition
 		if target != nil {
 			targetRevision = target.Name
-			mutateRetryBlock = markRetryBlockAttemptStarted
+			mutateRetryBlock = status.RetryBlockStartAttempt
 		}
 		err := input.ApplyInstanceMutationsWithRetryBlock(ctx, mutations, targetRevision, mutateRetryBlock)
 		if errors.Is(err, workload.ErrStatusOwnerGone) {
@@ -825,7 +825,7 @@ func applyCreateIntentMutations(ctx context.Context, input workload.ReconcileInp
 	if target == nil {
 		return true, nil
 	}
-	return true, flipRetryBlockOnAttemptStart(ctx, input, target.Name)
+	return true, status.RetryBlockAttemptStarted(ctx, input, target.Name)
 }
 
 // missingPodTargets diffs the desired pod names against the live pods. A
@@ -863,11 +863,11 @@ func missingPodTargets(input workload.ReconcileInput, plan workload.ComponentPla
 // pass keeps its cadence for it.
 func allowCreateForMissingInstance(input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, existing []*corev1.Pod, target *appsv1.ControllerRevision) (allowed, treatedReady bool, retryAfter time.Duration) {
 	if target != nil {
-		s := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)
+		s := input.ObservedState.Instance(inst.Index)
 		if block := workload.FindRetryBlock(input.ObservedState.RetryBlocks, target.Name); block != nil {
 			if createFreshStart(s) {
 				attemptInFlight := anyInFlightUpdateAt(input.ObservedState.InstanceStatuses, target.Name) ||
-					anyInFlightCreateAttempt(input.ObservedState.InstanceStatuses)
+					anyInFlightCreateAttempt(input, allInstances)
 				if denied, wait := evaluateRetryBlockGate(block, input.Now(), attemptInFlight); denied {
 					return false, true, wait
 				}
@@ -877,7 +877,7 @@ func allowCreateForMissingInstance(input workload.ReconcileInput, plan workload.
 		}
 	}
 	if plan.RestartPolicy == workload.RestartPolicyRecreateInstance && len(existing) > 0 {
-		s := findInstanceStatus(input.ObservedState.InstanceStatuses, inst.Index)
+		s := input.ObservedState.Instance(inst.Index)
 		if s != nil && s.Phase == workload.InstancePhaseReady {
 			return false, false, 0
 		}
@@ -897,15 +897,19 @@ func createFreshStart(s *workload.InstanceStatus) bool {
 }
 
 // createAttemptOwnsPods reports whether an Instance's pods belong to a Create
-// attempt that the Create pass may retire and rebuild. A recorded
-// RunningRevision excludes the row: its pods belong to a serving
-// materialization that a repair pass happens to be rebuilding, and rolling
-// those to a new revision is the update machinery's business. Retiring one
-// here would announce a retirement the pod cleanup then declines forever.
-func createAttemptOwnsPods(status *workload.InstanceStatus) bool {
-	return status != nil && status.Phase == workload.InstancePhaseCreating &&
-		status.RunningRevision == "" &&
-		status.Operation != nil && status.Operation.Type == workload.InstanceOperationCreate
+// attempt that the Create pass may retire and rebuild.
+//
+// Two halves. Ownership: the row is the Create pass's committed attempt —
+// not an empty slot it has yet to materialize, and not a row another machine
+// stamped Creating for its own replacement generation. Promotion history: a
+// recorded RunningRevision excludes the row, because its pods belong to a
+// serving materialization that a repair pass happens to be rebuilding, and
+// rolling those to a new revision is the update machinery's business.
+// Retiring one here would announce a retirement the pod cleanup then
+// declines forever.
+func createAttemptOwnsPods(row *workload.InstanceStatus) bool {
+	return workload.StateOf(row) == workload.StateCreateCreatePods &&
+		row.RunningRevision == ""
 }
 
 // retargetDeniedByRetryBlock reports whether the revision a retirement would
@@ -927,7 +931,7 @@ func retargetDeniedByRetryBlock(input workload.ReconcileInput, idx int32, target
 			others = append(others, s)
 		}
 	}
-	attemptInFlight := anyInFlightUpdateAt(others, target.Name) || anyInFlightCreateAttempt(others)
+	attemptInFlight := anyInFlightUpdateAt(others, target.Name) || anyInFlightCreateAttempt(input, idx)
 	denied, wait := evaluateRetryBlockGate(block, input.Now(), attemptInFlight)
 	return wait, denied
 }
@@ -956,14 +960,14 @@ func retireSupersededCreateMutation(input workload.ReconcileInput, idx int32, ex
 	if target == nil {
 		return retiredCreateAttempt{}, false
 	}
-	status := findInstanceStatus(input.ObservedState.InstanceStatuses, idx)
-	if !createAttemptOwnsPods(status) {
+	row := input.ObservedState.Instance(idx)
+	if !createAttemptOwnsPods(row) {
 		return retiredCreateAttempt{}, false
 	}
-	if status.Operation.TargetRevision == target.Name {
+	if row.Operation.TargetRevision == target.Name {
 		return retiredCreateAttempt{}, false
 	}
-	if status.Operation.TargetRevision == "" {
+	if row.Operation.TargetRevision == "" {
 		targetRevision := query.RevisionOf(target)
 		provenDifferent := false
 		for _, pod := range existing {
@@ -978,9 +982,9 @@ func retireSupersededCreateMutation(input workload.ReconcileInput, idx int32, ex
 		}
 	}
 
-	expectedIncarnation := status.Incarnation
-	expectedID := status.Operation.ID
-	expectedTarget := status.Operation.TargetRevision
+	expectedIncarnation := row.Incarnation
+	expectedID := row.Operation.ID
+	expectedTarget := row.Operation.TargetRevision
 	now := metav1.NewTime(input.Now())
 	replacement := workload.InstanceOperation{
 		ID:             replacementCreateOperationID(idx, target, now),
@@ -1038,8 +1042,8 @@ func retiredAttemptPods(input workload.ReconcileInput, idx int32, existing []*co
 	if target == nil {
 		return nil
 	}
-	status := findInstanceStatus(input.ObservedState.InstanceStatuses, idx)
-	if !createAttemptOwnsPods(status) || status.Operation.TargetRevision != target.Name {
+	row := input.ObservedState.Instance(idx)
+	if !createAttemptOwnsPods(row) || row.Operation.TargetRevision != target.Name {
 		return nil
 	}
 	pinned := query.RevisionOf(target)
@@ -1139,7 +1143,7 @@ func expectedPodNamesForInstance(input workload.ReconcileInput, plan workload.Co
 	var targets []podTarget
 	for _, runner := range inst.Runners {
 		if runner.Size == 1 {
-			ordinal := activeOrdinalForInstance(input.ObservedState.InstanceStatuses, inst.Index)
+			ordinal := activeOrdinalForInstance(input, inst.Index)
 			targets = append(targets, podTarget{
 				Name:    query.PodName(input.Key.OwnerName, plan.Component, inst.Index, runner.Name, ordinal),
 				Runner:  runner,
@@ -1162,23 +1166,11 @@ func expectedPodNamesForInstance(input workload.ReconcileInput, plan workload.Co
 // for idx, or 0 when no status exists yet. Single-pod
 // Create / Restart / recreateUpdate paths consult this to address the
 // post-surge canonical slot (which may be 1, not 0).
-func activeOrdinalForInstance(observed []workload.InstanceStatus, idx int32) int32 {
-	if s := findInstanceStatus(observed, idx); s != nil {
+func activeOrdinalForInstance(input workload.ReconcileInput, idx int32) int32 {
+	if s := input.ObservedState.Instance(idx); s != nil {
 		return s.ActiveOrdinal
 	}
 	return 0
-}
-
-// findInstanceStatus returns a pointer to the matching InstanceStatus
-// in the observed slice, or nil if absent. Callers must NOT mutate
-// the returned pointer — it aliases ObservedState.
-func findInstanceStatus(observed []workload.InstanceStatus, idx int32) *workload.InstanceStatus {
-	for i := range observed {
-		if observed[i].Index == idx {
-			return &observed[i]
-		}
-	}
-	return nil
 }
 
 // createMissingPods renders and creates targets, owning the per-pod
@@ -1215,7 +1207,7 @@ func createMissingPods(ctx context.Context, deps workload.Deps, input workload.R
 	}
 	for _, t := range targets {
 		template := input.DesiredSpec.PodSpec
-		if t.Runner.Name == "worker" && input.DesiredSpec.WorkerPodSpec != nil {
+		if t.Runner.Name == workload.RunnerWorker && input.DesiredSpec.WorkerPodSpec != nil {
 			template = input.DesiredSpec.WorkerPodSpec
 		}
 
@@ -1239,8 +1231,10 @@ func createMissingPods(ctx context.Context, deps workload.Deps, input workload.R
 		// Advisory (non-blocking): a multi-node gang worker rendered with no
 		// co-location podAffinity — no resolved topologyKey and no
 		// operator-supplied term — may schedule across topology domains and
-		// break the runtime's collectives. Warn once per (owner, Component).
-		maybeWarnGangSplitRisk(deps.Recorder, input, plan, inst, t.Runner, pod)
+		// break the runtime's collectives. Warn once per episode per row.
+		if err := maybeWarnGangSplitRisk(ctx, deps, input, plan, inst, t.Runner, pod); err != nil {
+			return created, err
+		}
 
 		// EXPECT-ORDER: expectation before RPC, rollback via ObservedCreate
 		// on error — a failed Create fires no watch event to decrement it.
@@ -1251,7 +1245,7 @@ func createMissingPods(ctx context.Context, deps workload.Deps, input workload.R
 				// Prior reconcile created it; cache hasn't caught up yet.
 				continue
 			}
-			rejection := workload.ClassifyAPIError(err)
+			rejection := evidence.ClassifyAPIError(err)
 			switch rejection.Class {
 			case workload.APIRejectionPermanentWorkload, workload.APIRejectionPermanentEnvironment:
 				// A migration surge's pod carries the request's placement
@@ -1263,19 +1257,23 @@ func createMissingPods(ctx context.Context, deps workload.Deps, input workload.R
 				}
 				return created, &podRejectionError{podName: t.Name, rejection: rejection, disposed: true, err: err}
 			case workload.APIRejectionCapacityBlocked:
-				entered, merr := markCapacityBlocked(ctx, input, idx)
+				recorded, incumbent, merr := status.RecordCapacityRefusal(ctx, input, idx)
 				if merr != nil {
-					return created, fmt.Errorf("record quota wait (instance=%d, pod=%s): %w", idx, t.Name, merr)
+					return created, fmt.Errorf("record quota refusal (instance=%d, pod=%s): %w", idx, t.Name, merr)
 				}
-				if entered {
-					recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonInstanceQuotaBlocked,
-						"OMENative %s waiting on capacity: %s", instanceKey(input.Key.Component, idx), rejection.Message)
+				// Announced when the refusal becomes the row's reported
+				// wait, which the hold pass decides by precedence: a row
+				// already queued behind the scheduler or a silent node keeps
+				// reporting that, and hears nothing new.
+				if recorded && holds.Enters(workload.RejectionReasonQuotaExceeded, incumbent) {
+					workload.RecordNormal(deps.Recorder, workload.EventTarget(input), workload.EventReasonInstanceQuotaBlocked,
+						"OMENative %s waiting on capacity: %s", workload.InstanceKey(input.Key.Component, idx), rejection.Message)
 				}
 				return created, &podRejectionError{podName: t.Name, rejection: rejection, err: err}
 			case workload.APIRejectionThrottled:
 				// The server named its own delay; deposit it on the pass so
 				// whichever operation issued this create wakes no earlier.
-				input.Pacing.ObserveThrottle(rejection.RetryAfter)
+				input.Pacing.Observe(rejection.RetryAfter)
 				return created, &podRejectionError{podName: t.Name, rejection: rejection, err: err}
 			}
 			return created, &podCreateError{podName: t.Name, err: err}
@@ -1283,10 +1281,10 @@ func createMissingPods(ctx context.Context, deps workload.Deps, input workload.R
 		created++
 	}
 	// Reaching here means every target was placed or already existed and
-	// no quota refusal was seen: release the waiting token so the parked
-	// deadline re-arms from this moment.
-	if err := clearCapacityBlock(ctx, input, idx); err != nil {
-		return created, fmt.Errorf("clear quota wait (instance=%d): %w", idx, err)
+	// no quota refusal was seen: retire the record so the parked deadline
+	// re-arms from this moment.
+	if err := clearCapacityRefusal(ctx, input, idx); err != nil {
+		return created, fmt.Errorf("clear quota refusal (instance=%d): %w", idx, err)
 	}
 	return created, nil
 }
@@ -1329,56 +1327,86 @@ func patchInstanceStatusReady(ctx context.Context, input workload.ReconcileInput
 	return input.MutateInstance(ctx, mutation.Index, mutation.Mutate)
 }
 
-// markReadyTransition flips s into Ready and stamps ReadySince when this is
-// an entry into Ready rather than an idempotent re-apply. Container restarts
-// that finished before the stamp (boot crashes, in-place update restarts)
-// therefore never read as post-Ready failures.
-func markReadyTransition(s *workload.InstanceStatus, now time.Time) {
-	if s.Phase != workload.InstancePhaseReady {
-		t := metav1.NewTime(now)
-		s.ReadySince = &t
-	}
-	s.Phase = workload.InstancePhaseReady
-}
-
 func createStatusReadyMutation(idx int32, now time.Time) workload.InstanceMutation {
 	return workload.InstanceMutation{Index: idx, Mutate: func(s *workload.InstanceStatus) bool {
 		if s.Phase == workload.InstancePhaseReady && s.Operation == nil {
 			return false
 		}
-		markReadyTransition(s, now)
+		status.EnterReady(s, now)
 		s.Operation = nil
 		return true
 	}}
 }
 
-// patchInstanceStatusReadyOnRevision idempotently moves to Phase=Ready
-// with RunningRevision=rev; clears Operation + TargetRevision. The
-// post-promote anchor that lets detectUpdateTrigger's fast-path
-// short-circuit on revision-equality before per-pod diffs. Success at
-// rev also prunes rev's RetryBlock — a converged subject leaves no
-// active block.
-func patchInstanceStatusReadyOnRevision(ctx context.Context, input workload.ReconcileInput, idx int32, rev string) error {
-	mutation := createStatusReadyOnRevisionMutation(idx, rev, input.Now())
-	err := input.MutateInstance(ctx, mutation.Index, mutation.Mutate)
-	if err != nil {
+// until converts an absolute policy boundary into the delay a requeue
+// takes. A zero or already-passed boundary is no delay at all — there is
+// nothing left to wait for, and asking for a zero RequeueAfter would
+// read as "no requeue requested".
+func until(now, at time.Time) time.Duration {
+	if at.IsZero() {
+		return 0
+	}
+	if wait := at.Sub(now); wait > 0 {
+		return wait
+	}
+	return 0
+}
+
+// maybeWarnGangSplitRisk emits a one-shot Warning when a multi-node gang
+// WORKER pod is about to be created with no co-location podAffinity at
+// all. Such a gang's pods may land in separate network / NVLink / TPU
+// topology domains, which breaks the tightly-coupled collectives a
+// multi-node runtime needs (NCCL/RCCL/NIXL all-reduce, multi-host TPU
+// sessions). Advisory only — it never blocks the create.
+//
+// It reads the ALREADY-RENDERED pod, so it inherits injectGangDomainAffinity's
+// exact decision instead of re-deriving it (no logic drift):
+//   - a resolved Component topologyKey means the injector added a required
+//     term -> not at risk;
+//   - a hand-written operator podAffinity is preserved on the pod → not
+//     at risk;
+//   - only a worker left with zero required podAffinity trips the warning.
+//
+// Accelerator-agnostic by construction: it inspects podAffinity, never the
+// requested resource kind, so GPU/RDMA/TPU/any future gang are covered the
+// same way. Announced once per episode on the Instance's own row, so the
+// warning reaches an operator once per workload rather than once per
+// controller process. nil-safe.
+func maybeWarnGangSplitRisk(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, runner workload.RunnerPlan, pod *corev1.Pod) error {
+	// Only a multi-node gang WORKER can split. The leader is the domain
+	// anchor (carries no co-location term by design); single-pod Instances
+	// have nothing to co-locate.
+	if runner.Name != workload.RunnerWorker || !instanceHasLeader(inst) {
+		return nil
+	}
+	// A required podAffinity term — OME-injected or operator-supplied —
+	// means the gang is already pinned to one domain.
+	if pod == nil || hasAnyRequiredPodAffinity(pod) {
+		return nil
+	}
+	target := workload.EventTarget(input)
+	if target == nil || deps.Recorder == nil {
+		return nil
+	}
+	announced, err := status.Announce(ctx, input, inst.Index, workload.EventReasonGangSplitRisk)
+	if err != nil || !announced {
 		return err
 	}
-	return pruneRetryBlockOnPromote(ctx, input, rev)
+	deps.Recorder.Eventf(target, corev1.EventTypeWarning, string(workload.EventReasonGangSplitRisk),
+		"OMENative component=%s is a multi-node gang but its worker pods have no co-location podAffinity: "+
+			"the gang may be scheduled across separate network/NVLink/TPU topology domains, breaking the "+
+			"tightly-coupled collectives a multi-node runtime needs (NCCL/RCCL/NIXL all-reduce, multi-host "+
+			"TPU sessions). Set %s.topologyKey to the node label that identifies the required topology "+
+			"domain, or declare a worker podAffinity.",
+		plan.Component, plan.Component)
+	return nil
 }
 
-func createStatusReadyOnRevisionMutation(idx int32, rev string, now time.Time) workload.InstanceMutation {
-	return workload.InstanceMutation{Index: idx, Mutate: func(s *workload.InstanceStatus) bool {
-		if s.Phase == workload.InstancePhaseReady &&
-			s.Operation == nil &&
-			s.RunningRevision == rev &&
-			s.TargetRevision == "" {
-			return false
-		}
-		markReadyTransition(s, now)
-		s.RunningRevision = rev
-		s.TargetRevision = ""
-		s.Operation = nil
-		return true
-	}}
+// hasAnyRequiredPodAffinity reports whether pod declares at least one
+// required (hard) podAffinity term — the signal that some co-location
+// constraint, OME-injected or operator-supplied, is in force.
+func hasAnyRequiredPodAffinity(pod *corev1.Pod) bool {
+	return pod.Spec.Affinity != nil &&
+		pod.Spec.Affinity.PodAffinity != nil &&
+		len(pod.Spec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution) > 0
 }

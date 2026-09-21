@@ -1,0 +1,61 @@
+# A paused Component whose only Update row is Failed with its operation
+# preserved. A multi-pod recreate is not a disposable attempt, so the
+# deadline backstop stamps Failed and keeps the Update on the row; the
+# operator then pauses. The pause parks new work, not a roll half-done:
+# the row's claim is still an Update, so the update pass is planned and
+# re-drives the attempt under the pause exactly as it would unpaused.
+scenario: pause-failed-update-continues
+intentional: >-
+  locks parity: the paused selection is decided by the row's claim (a
+  preserved Update operation) rather than by who may advance a Failed row
+  (nobody), so a Failed roll is re-driven under pause. Every action here
+  is the one the engine took before ownership was tabled; only the pass
+  position of the Paused token differs, since the hold pass now records
+  it at the top of the reconcile.
+arrows:
+  - T-empty-create
+  - T-ready-recreate
+  - T-drain-deadline
+cells:
+  - instance/Failed/spec.pauseTrue/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    schedulerName: gang-scheduler
+    strategy: RecreatePod
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the Create pass materializes the leader and its worker
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the pod template changes, so the roll drains the gang for a recreate
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the leader leaves rotation and the drained members are deleted, so the roll recreates them at the new revision
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+  - tick: 5
+    note: the rebuilt gang never reports Ready and the deadline elapses, so the row fails with its Update preserved
+    events:
+      - timer.operationDeadline: {slack: 1s}
+  - tick: 6
+    note: the operator pauses; the Failed row still claims the Update, so the pass re-drives it under the pause
+    events:
+      - spec.pauseTrue: {}
+  - tick: 7
+    note: a further pass under pause keeps driving the same continuation and starts nothing new

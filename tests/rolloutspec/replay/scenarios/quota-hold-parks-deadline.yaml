@@ -3,6 +3,17 @@
 # operation's deadline instead of spending it: the clock runs well past the
 # readiness ceiling and the row stays in flight.
 scenario: quota-hold-parks-deadline
+intentional: >-
+  the token is one pass behind the refusal and the park is not. A quota
+  refusal is the apiserver's answer to a call the create pass made, so it
+  is recorded on the operation and reported as a token by the hold pass
+  that opens the next reconcile; the deadline parks on either carrier,
+  so the clock stops on the pass admission said no and stays stopped
+  while the row still reports the wait. That is what the trace shows:
+  the deadline is parked in tick 1, the token appears in tick 2, and in
+  tick 3 the pod is created and the record retired while the token, one
+  pass behind, still holds the park; it re-arms on the pass the hold
+  pass releases the token.
 cells:
   - instance/Create/CreatePods/api.quotaDenied/before
 initial:

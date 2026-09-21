@@ -1,7 +1,9 @@
 # A quota refusal arrives on a row an operator pause is already holding.
 # The pause is the one token that says nothing about the Instance, so the
 # refusal — a fact about it, and the wait that parks its clock — takes the
-# row. The replacement is lost while the Component is paused, which is
+# row. The refusal is the apiserver's answer to a call the create pass
+# made, so it is recorded on the operation and reported as a token by the
+# hold pass that opens the next reconcile. The replacement is lost while the Component is paused, which is
 # what puts a create in front of the quota while the pause stands: a
 # paused surge still finishes the step it is on.
 scenario: hold-pause-then-quota
@@ -32,9 +34,11 @@ timeline:
     events:
       - spec.pauseTrue: {}
   - tick: 3
-    note: the replacement is lost and its recreate is refused for lack of quota, which takes the token from the pause
+    note: the replacement is lost and its recreate is refused for lack of quota, which is recorded on the operation while the pause still reports the row
     events:
       - pod.deleted[target]: {pod: {index: 0, ordinal: 1}}
       - api.quotaDenied: {verb: create, resource: pods, count: 1}
   - tick: 4
-    note: quota frees up and the replacement is created again, so the quota authority releases its token and the pause takes the row back in the same pass
+    note: the recorded refusal takes the token from the pause, and quota frees up in the same pass so the replacement is created and the record retired
+  - tick: 5
+    note: with the record retired the quota authority releases its token and the pause takes the row back, in one pass

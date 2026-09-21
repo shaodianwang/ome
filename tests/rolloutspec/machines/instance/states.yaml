@@ -42,7 +42,7 @@ states:
   - id: Pending
     phase: Pending
     applies: {strategies: [SurgeThenDrain, RecreatePod, InPlaceIfPossible, InPlaceOnly], shape: [single, gang]}
-    decided_in: pkg/controller/v1beta1/workload/ops/demote.go
+    decided_in: pkg/controller/v1beta1/workload/reconcile.go
     note: status-only demotion of a Ready row with no live pods and no operation; written by the truth pass, which runs on paused reconciles only
     not_applicable:
       spec.resetInstances: the reset verb addresses Failed Instances only, so a row in any other phase is skipped before anything about it is read
@@ -141,7 +141,7 @@ states:
     phase: Updating
     op: {type: Update, step: SurgeDrain}
     applies: {strategies: [SurgeThenDrain], shape: [single, gang]}
-    decided_in: pkg/controller/v1beta1/workload/ops/update_status.go
+    decided_in: pkg/controller/v1beta1/workload/status/decision.go
     note: the replacement is Ready and in rotation; the source's serving gate is off and its pods are draining out of the per-revision routed Service
     not_applicable:
       spec.resetInstances: the reset verb addresses Failed Instances only, so a row in any other phase is skipped before anything about it is read
@@ -154,7 +154,7 @@ states:
     phase: Creating
     op: {type: Update, step: GangSurgeTarget}
     applies: {strategies: [SurgeThenDrain], shape: [gang]}
-    decided_in: pkg/controller/v1beta1/workload/ops/update_status.go
+    decided_in: pkg/controller/v1beta1/workload/status/decision.go
     note: the replacement gang's own index; the marker pins the index in the plan so its PodGroup is created and scale-down leaves it alone, and its whole lifecycle is driven by the source's gang surge
     not_applicable:
       spec.resetInstances: the reset verb addresses Failed Instances only, so a row in any other phase is skipped before anything about it is read

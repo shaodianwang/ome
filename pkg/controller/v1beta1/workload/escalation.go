@@ -7,9 +7,8 @@
 // the transition decisions; the adapter-side status aggregator owns
 // only counters + conditions and never writes a transition field.
 //
-// The pass opens with the evidence half (holdevidence.go), which records
-// and releases the external holds. That half is the only one a paused
-// Component runs: a pause freezes repair, not observation.
+// The holds this pass reads were recorded at the top of the reconcile
+// (holds.Run); nothing here writes one.
 package workload
 
 import (
@@ -20,7 +19,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/evidence"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/holds"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
@@ -114,7 +116,7 @@ import (
 // Adapter-agnostic: writes Phase=Failed via
 // input.ApplyInstanceMutations / input.MutateInstance, emits the
 // operator-facing event via input.WarnInstanceFailed.
-func escalateFromEvidence(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot, excluded map[int32]struct{}) error {
+func escalateFromEvidence(ctx context.Context, deps Deps, input ReconcileInput, plan ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot, excluded map[int32]struct{}, heldRows holds.Result) error {
 	byIdx, err := snapshot.CachedPods(ctx)
 	if err != nil {
 		return fmt.Errorf("workload.Reconcile: list pods for escalation pass (component=%s): %w", plan.Component, err)
@@ -131,97 +133,105 @@ func escalateFromEvidence(ctx context.Context, deps Deps, input ReconcileInput, 
 	now := input.Now()
 	desiredByIdx := DesiredPodCountByInstance(plan)
 	currentHash := query.RevisionFromName(input.ObservedState.CurrentRevision).Hash()
-	dd := input.Disposition
-	dd.MigrationMode = plan.MigrationMode
-	buf := &failureStampBuffer{input: input}
-	for _, s := range input.ObservedState.InstanceStatuses {
-		if _, skip := excluded[s.Index]; skip {
+	disposition := input.Disposition
+	disposition.MigrationMode = plan.MigrationMode
+	stamps := &failureStampBuffer{input: input}
+	for _, row := range input.ObservedState.InstanceStatuses {
+		if _, skip := excluded[row.Index]; skip {
 			continue
 		}
 		// Idempotent: skip an already-Failed Instance so the
 		// operator-facing event fires exactly once per escalation. Its
 		// recorded evidence still gets one refresh, which takes no edge.
-		if s.Phase == InstancePhaseFailed {
-			ev := snapshot.EvidenceFor(ctx, s.Index, now, input.StuckPodGrace)
-			if t := refreshedFailureEvidence(s, ev); t != nil {
-				buf.add(s.Index, refreshFailureMutation(t), nil)
+		if row.Phase == InstancePhaseFailed {
+			rowEvidence := snapshot.EvidenceFor(ctx, row.Index, now, input.StuckPodGrace)
+			if t := refreshedFailureEvidence(row, rowEvidence); t != nil {
+				stamps.add(row.Index, refreshFailureMutation(t), nil)
 			}
 			continue
 		}
-		reading, herr := reconcileInstanceHolds(ctx, input, s, snapshot, byIdx, desiredByIdx, now)
-		if herr != nil {
-			return herr
-		}
-		ev, pods, desired := reading.ev, reading.pods, reading.desired
-		gang, held, gangHeld := reading.gang, reading.held, reading.gangHeld
+		rowEvidence := snapshot.EvidenceFor(ctx, row.Index, now, input.StuckPodGrace)
+		pods := evidence.PodsForStuckCheck(row, byIdx)
+		desired := DesiredFor(desiredByIdx, row.Index, row.PodCount)
+		gang := types.GangReadingFor(input, row)
+		// The hold pass already recorded or released this row's tokens.
+		// What is owed here is the repair each wait ends with — the
+		// scheduler's grace, the gang's terminal verdict — and which
+		// authority owns the row is what says whether one is owed at all.
+		held := heldRows.Holding(row.Index, WaitingReasonUnschedulable)
+		gangHeld := heldRows.Holding(row.Index, WaitingReasonPodGroupTerminating)
 		// The hold arms above judge on pod health alone, so a row whose
 		// pods are healthy still hands a stale token back whatever it is
 		// reporting about its rotation. The FAILED-WHILE-SERVING exemption
 		// is the stricter question — is this Instance actually capacity —
 		// and a surge that has reported its source out of rotation is not.
-		if podSetIsCapacity(s, pods, desired) {
+		if podSetIsCapacity(row, pods, desired) {
 			continue
 		}
-		if reason := gangTerminalReason(gang.State); reason != "" && gangVerdictActionable(s.Operation) {
-			escalateGangFailure(input, buf, s, gang, reason, now)
+		if reason := gangTerminalReason(gang.State); reason != "" && gangVerdictActionable(row.Operation) {
+			escalateGangFailure(input, stamps, row, gang, reason, now)
 			continue
 		}
 		if gangHeld {
 			// Parked until the object at the gang's name is collected,
 			// which resolves without anyone acting. A genuinely wedged
 			// sibling pod still escalates through the fast path below.
-			if ev.StuckPod == nil {
+			if rowEvidence.StuckPod == nil {
 				continue
 			}
 		}
 		if held {
-			if !unschedulableGraceElapsed(ev.UnschedulableSince, now, input.UnschedulableGrace) {
+			if !unschedulableGraceElapsed(rowEvidence.UnschedulableSince, now, input.UnschedulableGrace) {
 				// Parked. A genuinely wedged sibling pod still escalates
 				// through the fast path below; the hold itself does not.
-				if ev.StuckPod == nil {
+				if rowEvidence.StuckPod == nil {
 					continue
 				}
 			} else {
-				if ferr := escalateSchedulerHold(ctx, deps, input, dd, buf, s, pods, desired, ev, now); ferr != nil {
-					return fmt.Errorf("escalate scheduler hold (instance=%d): %w", s.Index, ferr)
+				if err := escalateSchedulerHold(ctx, deps, input, disposition, stamps, row, pods, desired, rowEvidence, now); err != nil {
+					return fmt.Errorf("escalate scheduler hold (instance=%d): %w", row.Index, err)
 				}
 				continue
 			}
 		}
-		if s.Operation != nil {
-			switch s.Operation.Type {
-			case InstanceOperationMigrate, InstanceOperationDelete:
-				continue
-			}
+		// Whether either clock may end this row's step is the ownership
+		// table's answer, per state: a migration pair is the record's,
+		// which fails both rows through itself, and a teardown is
+		// DeleteBatch's, which paces a removal past any grace and warns
+		// on its own overdue drain.
+		stuckInterrupts := types.Interruptible(&row, types.EventStuckPodGrace)
+		deadlineInterrupts := types.Interruptible(&row, types.EventOperationDeadline)
+		if !stuckInterrupts && !deadlineInterrupts {
+			continue
 		}
 		// An attempt an operator is holding is not stalled, it was told
 		// to wait. Neither path may end it: the deadline is parked for
 		// the length of the hold, and a pod parked in a terminal waiting
 		// state is waiting on the unpause rather than on a verdict.
-		if OperationPaused(s.Operation) {
+		if OperationPaused(row.Operation) {
 			continue
 		}
-		if ev.StuckPod == nil && !ev.DeadlinePassed {
+		if rowEvidence.StuckPod == nil && !rowEvidence.DeadlinePassed {
 			continue
 		}
 		// FAST path.
-		if ev.StuckPod != nil && ShouldCheckForStuckPods(&s, pods, currentHash, query.LabelRevisionHash) {
-			if disposableAttempt(&s, desired) {
+		if stuckInterrupts && rowEvidence.StuckPod != nil && ShouldCheckForStuckPods(&row, pods, currentHash, query.LabelRevisionHash) {
+			if disposableAttempt(&row, desired) {
 				// The disposition's writes are write-ahead-ordered; land
 				// the pending plain stamps first so the overall write +
 				// event order matches the unbatched pass.
-				if ferr := buf.flush(ctx); ferr != nil {
-					return fmt.Errorf("flush escalation stamps (component=%s): %w", plan.Component, ferr)
+				if err := stamps.flush(ctx); err != nil {
+					return fmt.Errorf("flush escalation stamps (component=%s): %w", plan.Component, err)
 				}
 				dispositionPods := pods
-				if singlePodSurgeAttempt(&s, desired) {
+				if singlePodSurgeAttempt(&row, desired) {
 					// A single-pod surge shares its Instance index with the
 					// serving source. Relocation evidence belongs to the exact
 					// stuck target, not the source-plus-target node set.
-					dispositionPods = []*corev1.Pod{ev.StuckPod}
+					dispositionPods = []*corev1.Pod{rowEvidence.StuckPod}
 				}
-				if _, derr := DisposeExpiredAttempt(ctx, deps, input, dd, s, dispositionPods, ev.StuckReason); derr != nil {
-					return fmt.Errorf("dispose stuck attempt (instance=%d): %w", s.Index, derr)
+				if _, err := DisposeExpiredAttempt(ctx, deps, input, disposition, row, dispositionPods, rowEvidence.StuckReason); err != nil {
+					return fmt.Errorf("dispose stuck attempt (instance=%d): %w", row.Index, err)
 				}
 				continue
 			}
@@ -232,25 +242,25 @@ func escalateFromEvidence(ctx context.Context, deps Deps, input ReconcileInput, 
 			// the classifier matched; PodTerminationWithReason fills in
 			// container / exit-code detail when present and falls back to the
 			// bare reason.
-			termination := PodTerminationWithReason(ev.StuckPod, ev.StuckReason, metav1.NewTime(now))
-			idx, podName, reason := s.Index, ev.StuckPod.Name, ev.StuckReason
-			buf.add(idx, stuckPodFailedMutation(termination), func() {
+			termination := PodTerminationWithReason(rowEvidence.StuckPod, rowEvidence.StuckReason, metav1.NewTime(now))
+			idx, podName, reason := row.Index, rowEvidence.StuckPod.Name, rowEvidence.StuckReason
+			stamps.add(idx, status.StampFailedOnStuckPod(termination), func() {
 				input.WarnInstanceFailed(idx, podName, reason)
 			})
 			continue
 		}
 		// BROAD path.
-		if !ev.DeadlinePassed {
+		if !deadlineInterrupts || !rowEvidence.DeadlinePassed {
 			continue
 		}
 		// Admission-gated pods are queued, not stuck: the parking step
 		// zeroes their deadline; a gate-enter observed before the park
 		// lands must not expire either. A gang-surge source's attempt
 		// pods live in its SurgeIndex bucket, so check that bucket too.
-		if anyPodAdmissionGated(byIdx[s.Index]) {
+		if anyPodAdmissionGated(byIdx[row.Index]) {
 			continue
 		}
-		if s.Operation != nil && s.Operation.SurgeIndex != nil && anyPodAdmissionGated(byIdx[*s.Operation.SurgeIndex]) {
+		if row.Operation != nil && row.Operation.SurgeIndex != nil && anyPodAdmissionGated(byIdx[*row.Operation.SurgeIndex]) {
 			continue
 		}
 		// Same rationale for the waits no pod can carry a gate for: a
@@ -260,56 +270,56 @@ func escalateFromEvidence(ctx context.Context, deps Deps, input ReconcileInput, 
 		// follows the same way the gate check above follows the
 		// SurgeIndex bucket. The parking step zeroes that deadline; one
 		// stamped before the park landed must not expire either.
-		if instanceHeldExternally(&s, input.ObservedState.InstanceStatuses) {
+		if instanceHeldExternally(&row, input.ObservedState.InstanceStatuses) {
 			continue
 		}
-		op := s.Operation
-		if disposableAttempt(&s, desired) {
-			if ferr := buf.flush(ctx); ferr != nil {
-				return fmt.Errorf("flush escalation stamps (component=%s): %w", plan.Component, ferr)
+		op := row.Operation
+		if disposableAttempt(&row, desired) {
+			if err := stamps.flush(ctx); err != nil {
+				return fmt.Errorf("flush escalation stamps (component=%s): %w", plan.Component, err)
 			}
-			if _, derr := DisposeExpiredAttempt(ctx, deps, input, dd, s, pods, deadlineFailureMessage(op)); derr != nil {
-				return fmt.Errorf("dispose expired attempt (instance=%d): %w", s.Index, derr)
+			if _, err := DisposeExpiredAttempt(ctx, deps, input, disposition, row, pods, deadlineFailureMessage(op)); err != nil {
+				return fmt.Errorf("dispose expired attempt (instance=%d): %w", row.Index, err)
 			}
 			continue
 		}
-		idx := s.Index
+		idx := row.Index
 		// The teardown that follows deletes the blamed pods, so revision-scoped
 		// evidence must survive on LastFailure: a workload-caused waiting reason
 		// — or a pod that ran every container yet never reported ready — names
 		// the cause more precisely than the elapsed timeout, and it is what the
 		// gang abandon charges the revision's retry ladder on.
 		termination := deadlineTermination(now, op)
-		if pod, reason := firstWorkloadCausedPod(pods); pod != nil {
+		if pod, reason := evidence.FirstWorkloadCausedPod(pods); pod != nil {
 			termination = PodTerminationWithReason(pod, reason, metav1.NewTime(now))
-		} else if pod, _ := firstRunningNotReadyPod(pods, attemptTargetRevision(input, s)); pod != nil {
+		} else if pod, _ := evidence.FirstRunningNotReadyPod(pods, attemptTargetRevision(input, row)); pod != nil {
 			// Evidence only: a pod that runs yet never reports ready leaves
 			// no container-level diagnostics, so without this the record is
 			// the bare elapsed timeout. It does not change who is blamed —
 			// the gang abandon reads the reason and this one is not in the
 			// workload-caused set.
-			termination = types.ContainersNotReadyTermination(pod, metav1.NewTime(now))
-		} else if pod := firstGateNotFoldedPod(pods, attemptTargetRevision(input, s)); pod != nil {
+			termination = evidence.ContainersNotReadyTermination(pod, metav1.NewTime(now))
+		} else if pod := evidence.FirstGateNotFoldedPod(pods, attemptTargetRevision(input, row)); pod != nil {
 			// Evidence only, same standing: a pod whose probes passed but
 			// whose readiness gate never folded into Ready is invisible to
 			// its Service, and that is what the record must say instead of
 			// the bare elapsed timeout.
-			termination = types.GateNotFoldedTermination(pod, metav1.NewTime(now))
+			termination = evidence.GateNotFoldedTermination(pod, metav1.NewTime(now))
 		}
-		buf.add(idx, deadlineFailedMutation(termination), func() {
+		stamps.add(idx, status.StampFailedKeepingOperation(termination), func() {
 			input.WarnInstanceFailed(idx, "", deadlineFailureMessage(op))
 		})
 	}
-	if ferr := buf.flush(ctx); ferr != nil {
-		return fmt.Errorf("flush escalation stamps (component=%s): %w", plan.Component, ferr)
+	if err := stamps.flush(ctx); err != nil {
+		return fmt.Errorf("flush escalation stamps (component=%s): %w", plan.Component, err)
 	}
 	return nil
 }
 
-func singlePodSurgeAttempt(s *InstanceStatus, desiredPods int32) bool {
-	return s != nil && desiredPods == 1 && s.Operation != nil &&
-		s.Operation.Type == InstanceOperationUpdate &&
-		s.Operation.Step == UpdateStepSurge && s.Operation.SurgeIndex == nil
+func singlePodSurgeAttempt(row *InstanceStatus, desiredPods int32) bool {
+	return row != nil && desiredPods == 1 && row.Operation != nil &&
+		row.Operation.Type == InstanceOperationUpdate &&
+		row.Operation.Step == UpdateStepSurge && row.Operation.SurgeIndex == nil
 }
 
 // failureStampBuffer coalesces the escalation pass's plain Failed
@@ -370,8 +380,8 @@ func (b *failureStampBuffer) flush(ctx context.Context) error {
 // so on its operation: the pods can read fully serving while nothing is
 // in rotation, and a replacement wedged in that state must escalate
 // rather than be exempted by a source that is not serving.
-func podSetIsCapacity(s InstanceStatus, pods []*corev1.Pod, desired int32) bool {
-	return podSetFullyServing(pods, desired) && !types.OperationSourceUnrouted(s.Operation)
+func podSetIsCapacity(row InstanceStatus, pods []*corev1.Pod, desired int32) bool {
+	return podSetFullyServing(pods, desired) && !types.OperationSourceUnrouted(row.Operation)
 }
 
 // podSetFullyServing is query.PodSetFullyServing under the name the
@@ -390,20 +400,4 @@ func anyPodAdmissionGated(pods []*corev1.Pod) bool {
 		}
 	}
 	return false
-}
-
-// gangReadingFor returns the PodGroup reading that governs one row.
-//
-// A gang-surge SOURCE gets none. Its own group is the one its serving
-// pods already belong to, while the attempt in flight builds members
-// under the SURGE index — which carries its own reading and its own
-// hold. Judging the source on its own group would hold, or end, a row
-// whose replacement is the thing actually being waited on. The empty
-// reading still lets the release step retire a token the row took
-// before it became a surge source.
-func gangReadingFor(input ReconcileInput, s InstanceStatus) GangObservation {
-	if s.Operation != nil && s.Operation.SurgeIndex != nil {
-		return GangObservation{}
-	}
-	return input.Gangs.For(s.Index)
 }

@@ -2761,6 +2761,10 @@ func (in *InstanceOperation) DeepCopyInto(out *InstanceOperation) {
 	in.StartedAt.DeepCopyInto(&out.StartedAt)
 	in.LastProgressAt.DeepCopyInto(&out.LastProgressAt)
 	in.Deadline.DeepCopyInto(&out.Deadline)
+	if in.CapacityRefusedAt != nil {
+		in, out := &in.CapacityRefusedAt, &out.CapacityRefusedAt
+		*out = (*in).DeepCopy()
+	}
 	if in.SurgeIndex != nil {
 		in, out := &in.SurgeIndex, &out.SurgeIndex
 		*out = new(int32)
@@ -2893,6 +2897,11 @@ func (in *InstanceStatusEntry) DeepCopyInto(out *InstanceStatusEntry) {
 		in, out := &in.LastFailure, &out.LastFailure
 		*out = new(InstanceTermination)
 		(*in).DeepCopyInto(*out)
+	}
+	if in.Announced != nil {
+		in, out := &in.Announced, &out.Announced
+		*out = make([]string, len(*in))
+		copy(*out, *in)
 	}
 }
 
@@ -3690,6 +3699,11 @@ func (in *OMENativeInstanceStatus) DeepCopyInto(out *OMENativeInstanceStatus) {
 		in, out := &in.LastFailure, &out.LastFailure
 		*out = new(InstanceTermination)
 		(*in).DeepCopyInto(*out)
+	}
+	if in.Announced != nil {
+		in, out := &in.Announced, &out.Announced
+		*out = make([]string, len(*in))
+		copy(*out, *in)
 	}
 }
 

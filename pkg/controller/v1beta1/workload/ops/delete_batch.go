@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -19,6 +20,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/drain"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
@@ -552,7 +554,7 @@ func deleteCompletionGuard(input workload.ReconcileInput, expected map[int32]wor
 }
 
 func deleteOwned(status workload.InstanceStatus) bool {
-	return status.Phase == workload.InstancePhaseDeleting && status.Operation != nil && status.Operation.Type == workload.InstanceOperationDelete
+	return workload.Owner(&status) == workload.OwnerDelete
 }
 
 func sameDeleteCandidate(current, planned workload.InstanceStatus) bool {
@@ -578,4 +580,160 @@ func cloneDeleteOperation(operation *workload.InstanceOperation) *workload.Insta
 	copy := *operation
 	copy.HintTargetNodes = append([]string(nil), operation.HintTargetNodes...)
 	return &copy
+}
+
+// What an elapsed drain deadline does.
+//
+// A Delete operation carries the same deadline every other operation
+// does, but a drain has no backstop to hand it to: the phase must not
+// move (the row is on its way out), the delete wave keeps the index,
+// and force-deleting a wedged pod is gated on the configured policy
+// plus node evidence. What is missing without this pass is the operator
+// ever being told. So the deadline is consumed for visibility: one
+// Warning naming the Instance, its pods and how far past the deadline
+// the drain is, plus a record on the row that readers of the status can
+// aggregate. Announced once per episode, keyed by the deadline itself.
+
+// announceOverdueDrains records and reports every delete-owned row
+// whose drain is past its operation deadline. The record lands first
+// and the event fires from the commit callback, so an announcement
+// survives exactly as long as the write that earned it: a failed write
+// emits nothing and the next pass re-announces.
+//
+// Every owned row, not only the wave this pass drives. A row deferred
+// behind the pod budget is the one an operator is least likely to
+// notice and most likely to be waiting on, and reporting it costs
+// nothing: the announcement reads the observation the wave was selected
+// from and takes no external effect.
+func announceOverdueDrains(
+	ctx context.Context,
+	deps workload.Deps,
+	input workload.ReconcileInput,
+	plan workload.ComponentPlan,
+	podsByInstance map[int32][]*corev1.Pod,
+) error {
+	now := input.Now()
+	statuses := input.ObservedState.InstanceStatuses
+	mutations := make([]workload.InstanceMutation, 0, len(statuses))
+	for _, row := range statuses {
+		pods := sortedInstancePods(podsByInstance[row.Index])
+		overdue, ok := overdueDrain(row, pods, now)
+		if !ok {
+			continue
+		}
+		deadline := row.Operation.Deadline
+		index := row.Index
+		detail := overdueDrainPodDetail(pods)
+		record := &workload.InstanceTermination{
+			PodName: overdueDrainPodName(pods),
+			Reason:  workload.DrainOverdueReason,
+			Message: detail,
+			Time:    deadline,
+		}
+		mutations = append(mutations, workload.InstanceMutation{
+			Index:  index,
+			Mutate: status.AnnounceDrainOverdue(deadline, record),
+			OnCommit: func(*workload.InstanceStatus, *workload.InstanceStatus) {
+				workload.RecordWarning(deps.Recorder, workload.EventTarget(input), workload.EventReasonDrainOverdue,
+					"OMENative %s: drain overdue by %s (deadline %s); %s",
+					workload.InstanceKey(plan.Component, index), overdue.Round(time.Second),
+					deadline.UTC().Format(time.RFC3339), detail)
+			},
+		})
+	}
+	if len(mutations) == 0 {
+		return nil
+	}
+	if input.ApplyInstanceMutationsWithRetryBlock == nil {
+		return fmt.Errorf("DeleteBatch: owner-aware atomic status adapter is required")
+	}
+	if err := input.ApplyInstanceMutationsWithRetryBlock(ctx, mutations, "", nil); err != nil {
+		return fmt.Errorf("DeleteBatch: announce overdue drain: %w", err)
+	}
+	return nil
+}
+
+// sortedInstancePods copies a row's pod bucket into namespace/name
+// order, so the names an announcement reports are stable across passes
+// whatever order the observation arrived in. The authoritative bucket
+// is left untouched.
+func sortedInstancePods(pods []*corev1.Pod) []*corev1.Pod {
+	out := append([]*corev1.Pod(nil), pods...)
+	sort.SliceStable(out, func(i, j int) bool {
+		left, right := out[i], out[j]
+		if left == nil || right == nil {
+			return left == nil && right != nil
+		}
+		if left.Namespace != right.Namespace {
+			return left.Namespace < right.Namespace
+		}
+		return left.Name < right.Name
+	})
+	return out
+}
+
+// overdueDrain reports how far past its deadline a Delete-owned row's
+// drain is, and whether it is overdue at all. A row with no pods left
+// has nothing to wait on — it is completing this pass — and a zero
+// deadline means the operation was never given one.
+func overdueDrain(s workload.InstanceStatus, pods []*corev1.Pod, now time.Time) (time.Duration, bool) {
+	if !deleteOwned(s) || len(pods) == 0 {
+		return 0, false
+	}
+	deadline := s.Operation.Deadline
+	if deadline.IsZero() || !now.After(deadline.Time) {
+		return 0, false
+	}
+	if status.Announced(s, workload.EventReasonDrainOverdue) {
+		return 0, false
+	}
+	return now.Sub(deadline.Time), true
+}
+
+// overdueDrainPodDetail names what the drain is still waiting on, as
+// the pass observed it. Pods already on their way out are the common
+// wedge and are reported as such; pods the wave has not asked to
+// terminate are still in rotation, so an operator can tell a stuck
+// kubelet from a stuck drain gate.
+func overdueDrainPodDetail(pods []*corev1.Pod) string {
+	terminating := make([]string, 0, len(pods))
+	pending := make([]string, 0, len(pods))
+	for _, pod := range pods {
+		if pod == nil {
+			continue
+		}
+		if pod.DeletionTimestamp != nil {
+			terminating = append(terminating, pod.Name)
+			continue
+		}
+		pending = append(pending, pod.Name)
+	}
+	parts := make([]string, 0, 2)
+	if len(terminating) > 0 {
+		parts = append(parts, fmt.Sprintf("%d pod(s) still Terminating (%s)", len(terminating), strings.Join(terminating, ", ")))
+	}
+	if len(pending) > 0 {
+		parts = append(parts, fmt.Sprintf("%d pod(s) still draining (%s)", len(pending), strings.Join(pending, ", ")))
+	}
+	if len(parts) == 0 {
+		return "no pods observed"
+	}
+	return strings.Join(parts, "; ")
+}
+
+// overdueDrainPodName picks the record's representative pod: the first
+// pod still Terminating, else the first pod of the row. The slice is
+// already sorted by namespace and name, so the choice is stable.
+func overdueDrainPodName(pods []*corev1.Pod) string {
+	for _, pod := range pods {
+		if pod != nil && pod.DeletionTimestamp != nil {
+			return pod.Name
+		}
+	}
+	for _, pod := range pods {
+		if pod != nil {
+			return pod.Name
+		}
+	}
+	return ""
 }

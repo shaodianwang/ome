@@ -6,6 +6,10 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/evidence"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // InstanceEvidence is the per-instance observed failure evidence for one
@@ -16,7 +20,7 @@ import (
 type InstanceEvidence struct {
 	// StuckPod is the first live, non-deleting pod parked in a
 	// workload-caused/terminal waiting state past the grace window
-	// (FirstStuckPodForInstance). Nil when no pod is stuck.
+	// (evidence.FirstStuckPodForInstance). Nil when no pod is stuck.
 	StuckPod *corev1.Pod
 	// StuckReason is the kubelet waiting reason of StuckPod ("" when none).
 	StuckReason string
@@ -90,7 +94,7 @@ func (s *ObservedSnapshot) LiveObservation(ctx context.Context) (ComponentObserv
 				s.input.AuthoritativePods.ByInstance,
 			)
 		} else {
-			pods, s.live.err = liveObservePods(ctx, s.deps, s.input, s.component)
+			pods, s.live.err = observePodsLive(ctx, s.deps, s.input, s.component)
 		}
 		if s.live.err == nil {
 			s.live.observation, s.live.err = NewDecisionObservation(s.insts, pods)
@@ -103,7 +107,7 @@ func (s *ObservedSnapshot) LiveObservation(ctx context.Context) (ComponentObserv
 // CachedObservation returns the decision-epoch cache observation.
 func (s *ObservedSnapshot) CachedObservation(ctx context.Context) (ComponentObservation, error) {
 	if !s.cached.done {
-		pods, err := cachedObservePods(ctx, s.deps, s.input, s.component)
+		pods, err := observePodsCached(ctx, s.deps, s.input, s.component)
 		s.cached.err = err
 		if err == nil {
 			s.cached.observation, s.cached.err = NewDecisionObservation(s.insts, pods)
@@ -138,7 +142,7 @@ func (s *ObservedSnapshot) CachedPods(ctx context.Context) (map[int32][]*corev1.
 // EvidenceFor returns the per-instance failure evidence for idx, derived
 // from the cached-read pods + the instance's Operation deadline. Evidence
 // only — no Phase write. Stuck detection attributes pods the same way the
-// escalation pass blames them (podsForStuckCheck: a gang Update surge is
+// escalation pass blames them (evidence.PodsForStuckCheck: a gang Update surge is
 // inspected through its replacement gang, a Migrate pair through
 // own-plus-sibling). A non-positive grace disables stuck-pod evidence
 // entirely (fast escalation off; the deadline backstop and the scheduler
@@ -161,17 +165,44 @@ func (s *ObservedSnapshot) EvidenceFor(ctx context.Context, idx int32, now time.
 	if err != nil {
 		return ev
 	}
-	ev.Unschedulable, ev.UnschedulableMessage, ev.UnschedulableSince = firstUnschedulablePod(cached[idx])
+	ev.Unschedulable, ev.UnschedulableMessage, ev.UnschedulableSince = types.FirstUnschedulablePod(cached[idx])
 	pods := cached[idx]
 	if inst != nil {
-		pods = podsForStuckCheck(*inst, cached)
+		pods = evidence.PodsForStuckCheck(*inst, cached)
 	}
 	if grace <= 0 {
 		return ev
 	}
-	if pod, reason := FirstStuckPodForInstance(pods, now, grace); pod != nil {
+	if pod, reason := evidence.FirstStuckPodForInstance(pods, now, grace); pod != nil {
 		ev.StuckPod = pod
 		ev.StuckReason = reason
 	}
 	return ev
+}
+
+// observePodsLive performs the selector-scoped live-role List.
+func observePodsLive(ctx context.Context, deps Deps, input ReconcileInput, component ComponentType) (PodObservation, error) {
+	// The API reader has no Pod field index. useIndex=false preserves one List
+	// for this role, including its cached-client fallback.
+	reader := deps.Reader()
+	source := PodObservationSourceAPIReader
+	if deps.APIReader == nil {
+		source = PodObservationSourceCache
+	}
+	pods, err := query.ListOMENativePodsByName(ctx, reader, input.Key.Namespace, input.Key.OwnerName, component, false)
+	if err != nil {
+		return PodObservation{}, err
+	}
+	return newPodObservation(source, PodObservationScopeSelector, pods, nil), nil
+}
+
+// observePodsCached performs the selector-scoped cache List.
+func observePodsCached(ctx context.Context, deps Deps, input ReconcileInput, component ComponentType) (PodObservation, error) {
+	// Cached client has the OMENative Pod field index — useIndex=true takes
+	// the index fast path instead of scanning every cached pod.
+	pods, err := query.ListOMENativePodsByName(ctx, deps.Client, input.Key.Namespace, input.Key.OwnerName, component, true)
+	if err != nil {
+		return PodObservation{}, err
+	}
+	return NewCachedSelectorPodObservation(pods, nil), nil
 }

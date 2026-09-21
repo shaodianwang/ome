@@ -14,8 +14,10 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/evidence"
 	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
@@ -94,7 +96,7 @@ const (
 // Callers keep the plain Failed-preserving-Operation stamp for those.
 func DisposeExpiredAttempt(ctx context.Context, deps Deps, input ReconcileInput, dd DispositionDeps, inst InstanceStatus, pods []*corev1.Pod, reason string) (DispositionOutcome, error) {
 	now := metav1.NewTime(input.Now())
-	causePod, matched := firstWorkloadCausedPod(pods)
+	causePod, matched := evidence.FirstWorkloadCausedPod(pods)
 
 	// Branch 1: workload-caused with a resolvable target revision.
 	if pod := causePod; pod != nil {
@@ -143,7 +145,7 @@ func DisposeExpiredAttempt(ctx context.Context, deps Deps, input ReconcileInput,
 				return DispositionHeldRevision, fmt.Errorf("record retry block for disposed attempt (instance=%d rev=%s): %w", inst.Index, targetRev, err)
 			}
 			termination := PodTerminationWithReason(pod, matched, now)
-			if err := failInstanceClearingOperation(ctx, input, inst.Index, termination); err != nil {
+			if err := status.StampFailed(ctx, input, inst.Index, termination); err != nil {
 				return DispositionHeldRevision, fmt.Errorf("clear operation + stamp Failed (instance=%d): %w", inst.Index, err)
 			}
 			if input.WarnInstanceFailed != nil {
@@ -163,7 +165,7 @@ func DisposeExpiredAttempt(ctx context.Context, deps Deps, input ReconcileInput,
 	relocationNode := ""
 	if causePod == nil &&
 		migrationModeAllowsRelocation(dd.MigrationMode) && dd.AutoMigrateMaxAttempts > 0 {
-		relocationNode = singleLiveNode(pods)
+		relocationNode = evidence.SingleLiveNode(pods)
 	}
 
 	// Terminal backstop (branches 2 and 3): clear the Operation + stamp
@@ -185,21 +187,21 @@ func DisposeExpiredAttempt(ctx context.Context, deps Deps, input ReconcileInput,
 		// Workload-caused evidence without a resolvable revision still
 		// carries the wedged pod's diagnostics into LastFailure.
 		termination = PodTerminationWithReason(causePod, matched, now)
-	} else if pod := firstPodWaitingForReason(pods, shortReason); pod != nil {
+	} else if pod := evidence.FirstPodWaitingForReason(pods, shortReason); pod != nil {
 		// Ambiguous runtime-start failures still identify the exact failed
 		// pod so operation-specific cleanup can remove only that object.
 		termination = PodTerminationWithReason(pod, shortReason, now)
-	} else if pod, _ := firstRunningNotReadyPod(pods, attemptTargetRevision(input, inst)); pod != nil {
+	} else if pod, _ := evidence.FirstRunningNotReadyPod(pods, attemptTargetRevision(input, inst)); pod != nil {
 		// Readiness limbo: the branch above chose the disposition, this
 		// only says what an operator will read. Without it the record is
 		// the bare elapsed timeout and says nothing about the probe.
-		termination = types.ContainersNotReadyTermination(pod, now)
+		termination = evidence.ContainersNotReadyTermination(pod, now)
 		limboDetail = termination.Message
-	} else if pod := firstGateNotFoldedPod(pods, attemptTargetRevision(input, inst)); pod != nil {
+	} else if pod := evidence.FirstGateNotFoldedPod(pods, attemptTargetRevision(input, inst)); pod != nil {
 		// Gate limbo: the probes passed but a readiness gate keeps the pod
 		// out of its Service, so no promote can fire. Same standing as the
 		// limbo above — evidence, not a branch.
-		termination = types.GateNotFoldedTermination(pod, now)
+		termination = evidence.GateNotFoldedTermination(pod, now)
 		limboDetail = termination.Message
 	}
 
@@ -217,7 +219,7 @@ func DisposeExpiredAttempt(ctx context.Context, deps Deps, input ReconcileInput,
 		outcome = DispositionRelocationDirective
 		detail = "attempt disposed with relocation directive; the rebuild is steered off the recorded node"
 	}
-	if err := failInstanceClearingOperation(ctx, input, inst.Index, termination); err != nil {
+	if err := status.StampFailed(ctx, input, inst.Index, termination); err != nil {
 		return outcome, fmt.Errorf("clear operation + stamp Failed (instance=%d): %w", inst.Index, err)
 	}
 	// Suppress the per-reconcile warn+event storm when an instance is stuck
@@ -250,104 +252,6 @@ func migrationModeAllowsRelocation(mode MigrationMode) bool {
 	return mode == MigrationModeAuto || mode == MigrationModeSurge
 }
 
-// firstWorkloadCausedPod returns the first live (non-deleting) pod whose
-// failure is deterministically scoped to the revision, plus the matched
-// reason: a workload-caused container or init-container waiting reason
-// (IsWorkloadCausedReason).
-//
-// Readiness limbo is deliberately NOT in this set. A pod that runs yet
-// never reports ready is ambiguous between the revision and the node it
-// landed on, so it must reach the relocation branch first, exactly as an
-// attempt with no evidence at all does. It contributes EVIDENCE for
-// whichever branch runs (firstRunningNotReadyPod), never the branch
-// choice.
-func firstWorkloadCausedPod(pods []*corev1.Pod) (*corev1.Pod, string) {
-	for _, pod := range pods {
-		if pod == nil || pod.DeletionTimestamp != nil {
-			continue
-		}
-		for _, cs := range pod.Status.ContainerStatuses {
-			if cs.State.Waiting == nil {
-				continue
-			}
-			if IsWorkloadCausedReason(cs.State.Waiting.Reason) {
-				return pod, cs.State.Waiting.Reason
-			}
-		}
-		for _, cs := range pod.Status.InitContainerStatuses {
-			if cs.State.Waiting == nil {
-				continue
-			}
-			if IsWorkloadCausedReason(cs.State.Waiting.Reason) {
-				return pod, cs.State.Waiting.Reason
-			}
-		}
-	}
-	return nil, ""
-}
-
-// firstRunningNotReadyPod returns the first live pod in readiness limbo
-// — running every container yet never reporting ContainersReady. Pure
-// evidence: it names what to record, never which branch to take.
-//
-// Scoped to attemptRev when the pods say which revision they belong to.
-// A single-pod surge shares its Instance index with the source it is
-// replacing, so the set holds both; blaming a source whose own probes
-// happen to be flapping charges nothing (its revision is superseded) and
-// leaves the attempt to expire again on every pass.
-//
-// Suppressed whenever ANY live pod in the scoped set has a container
-// parked in a waiting state: the kubelet has named a failure there, and
-// that name owns the blame. Several of those names (CrashLoopBackOff,
-// RunContainerError) are deliberately ambiguous between the revision and
-// the node, and a not-ready sibling must not be what decides to hold the
-// revision instead of relocating.
-func firstRunningNotReadyPod(pods []*corev1.Pod, attemptRev string) (*corev1.Pod, string) {
-	var limbo *corev1.Pod
-	for _, pod := range pods {
-		if pod == nil || pod.DeletionTimestamp != nil {
-			continue
-		}
-		if !podOnAttemptRevision(pod, attemptRev) {
-			continue
-		}
-		if types.PodHasWaitingContainer(pod) {
-			return nil, ""
-		}
-		if limbo == nil && types.PodRunningNotReady(pod) {
-			limbo = pod
-		}
-	}
-	if limbo == nil {
-		return nil, ""
-	}
-	return limbo, types.ReasonContainersNotReady
-}
-
-// firstGateNotFoldedPod returns the first live pod whose containers are
-// ready but whose Ready condition never followed, under the same scoping and
-// suppression rules as firstRunningNotReadyPod: revision-scoped when the pods
-// say which revision they belong to, and suppressed outright when the kubelet
-// has named a waiting reason on any pod of the scoped set.
-func firstGateNotFoldedPod(pods []*corev1.Pod, attemptRev string) *corev1.Pod {
-	var limbo *corev1.Pod
-	for _, pod := range pods {
-		if pod == nil || pod.DeletionTimestamp != nil {
-			continue
-		}
-		if !podOnAttemptRevision(pod, attemptRev) {
-			continue
-		}
-		if types.PodHasWaitingContainer(pod) {
-			return nil
-		}
-		if limbo == nil && types.PodGateNotFolded(pod) {
-			limbo = pod
-		}
-	}
-	return limbo
-}
-
 // attemptTargetRevision resolves the revision an attempt is converging
 // toward: the pin its operation carries, else the owner's current
 // UpdateRevision (an unpinned Create renders from that).
@@ -356,61 +260,6 @@ func attemptTargetRevision(input ReconcileInput, inst InstanceStatus) string {
 		return inst.Operation.TargetRevision
 	}
 	return input.ObservedState.UpdateRevision
-}
-
-// podOnAttemptRevision reports whether a pod may be read as the
-// attempt's own. A pod carrying no revision-hash label, or an attempt
-// with no resolvable target, leaves the scope open — the label is the
-// only evidence of ownership, and without it every pod stays a
-// candidate.
-func podOnAttemptRevision(pod *corev1.Pod, attemptRev string) bool {
-	target := query.RevisionFromName(attemptRev)
-	podRev := query.RevisionFromPod(pod)
-	if target.IsZero() || podRev.IsZero() {
-		return true
-	}
-	return podRev.Same(target)
-}
-
-func firstPodWaitingForReason(pods []*corev1.Pod, reason string) *corev1.Pod {
-	for _, pod := range pods {
-		if pod == nil || pod.DeletionTimestamp != nil {
-			continue
-		}
-		for _, statuses := range [][]corev1.ContainerStatus{pod.Status.ContainerStatuses, pod.Status.InitContainerStatuses} {
-			for _, status := range statuses {
-				if status.State.Waiting != nil && status.State.Waiting.Reason == reason {
-					return pod
-				}
-			}
-		}
-	}
-	return nil
-}
-
-// singleLiveNode returns the one node name hosting every pod of the
-// instance (single-pod, or a single-host gang), or "" when there are no
-// pods, any pod is unscheduled, or pods span multiple nodes — a
-// multi-node attempt has no single suspect node to record, so it takes
-// the terminal branch; the never-scheduled case has nothing to record.
-func singleLiveNode(pods []*corev1.Pod) string {
-	if len(pods) == 0 {
-		return ""
-	}
-	var observed string
-	for _, pod := range pods {
-		if pod == nil || pod.Spec.NodeName == "" {
-			return ""
-		}
-		if observed == "" {
-			observed = pod.Spec.NodeName
-			continue
-		}
-		if observed != pod.Spec.NodeName {
-			return ""
-		}
-	}
-	return observed
 }
 
 // recordRelocationDirective writes the relocation directive: a TERMINAL
@@ -527,7 +376,7 @@ func recordRelocationDirective(ctx context.Context, deps Deps, input ReconcileIn
 		}
 	}
 	if deps.Recorder != nil {
-		if target := dispositionEventTarget(input); target != nil {
+		if target := types.EventTarget(input); target != nil {
 			deps.Recorder.Eventf(target, corev1.EventTypeNormal, string(EventReasonAutoMigrationTriggered),
 				"OMENative component=%s instance=%d relocation directive recorded: attempt %d/%d, rebuild steered off node %s (uuid=%s)",
 				component, inst.Index, attempts+1, dd.AutoMigrateMaxAttempts, fromNode, reqUUID)
@@ -547,14 +396,6 @@ func recordRelocationDirective(ctx context.Context, deps Deps, input ReconcileIn
 	return true, nil
 }
 
-// failInstanceClearingOperation delegates to the shared writer in the
-// types package (types.FailInstanceClearingOperation) — one
-// implementation for the dispositions here and the apiserver-rejection
-// path in workload/ops.
-func failInstanceClearingOperation(ctx context.Context, input ReconcileInput, idx int32, termination *InstanceTermination) error {
-	return types.FailInstanceClearingOperation(ctx, input, idx, termination)
-}
-
 // dispositionLedgerOwner / dispositionLedgerOwnerGVK mirror the ops
 // migrate ledger-owner resolution: the adapter may point LedgerOwner at
 // the user-facing parent (ISVC); nil falls back to OwnerObject.
@@ -570,15 +411,6 @@ func dispositionLedgerOwnerGVK(input ReconcileInput) schema.GroupVersionKind {
 		return input.LedgerOwnerGVK
 	}
 	return input.OwnerGVK
-}
-
-// dispositionEventTarget mirrors the ops event-target rule:
-// input.EventTarget when set, falling back to OwnerObject.
-func dispositionEventTarget(input ReconcileInput) client.Object {
-	if input.EventTarget != nil {
-		return input.EventTarget
-	}
-	return input.OwnerObject
 }
 
 // relocationRecordMessage is the operator-facing summary on a relocation

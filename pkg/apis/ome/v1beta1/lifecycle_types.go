@@ -278,6 +278,25 @@ type OMENativeInstanceStatus struct {
 	// overwritten by a clean rollout.
 	// +optional
 	LastFailure *InstanceTermination `json:"lastFailure,omitempty"`
+
+	// Announced records the once-only messages this Instance has already
+	// emitted, one entry per message: the event reason it was emitted
+	// under and the episode it was emitted in, joined by "@". A warning
+	// an operator needs to see once — the gang has no co-location term,
+	// the PodGroup was rebuilt, a repair is held, a drain is past its
+	// deadline — is emitted only when its entry is absent, and is
+	// stamped in the same write that emits it. Recording it on the
+	// Instance rather than in controller memory is what makes the
+	// once-only property hold per workload rather than per process, and
+	// survive a controller restart.
+	//
+	// The episode is the in-flight operation, or the incarnation when
+	// there is none: a new attempt or a rebuilt Instance has its own
+	// messages to deliver, and the entries of the episode it replaced no
+	// longer match.
+	// +optional
+	// +listType=set
+	Announced []string `json:"announced,omitempty"`
 }
 
 // InstanceTermination captures the container-termination diagnostics of
@@ -371,6 +390,16 @@ type InstanceOperation struct {
 	// belongs in the Event, not in status.
 	// +optional
 	Waiting string `json:"waiting,omitempty"`
+
+	// CapacityRefusedAt is when admission last refused one of the
+	// operation's pod creates for lack of quota. The refusal is an
+	// apiserver answer to a call the create pass made, so it cannot be
+	// read off the cluster on a later pass: it is recorded here, and the
+	// hold pass converts it into the Waiting token and the deadline park
+	// on every pass it stands. Cleared by a create that completes with no
+	// refusal. Empty means the last create was not refused for capacity.
+	// +optional
+	CapacityRefusedAt *metav1.Time `json:"capacityRefusedAt,omitempty"`
 
 	// Strategy is the update strategy the operation runs under, pinned
 	// when the operation opens. UpdateStrategy is not part of the revision

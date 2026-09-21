@@ -11,6 +11,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/drain"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
@@ -129,11 +130,11 @@ func HasExpiredMigrationCandidate(records []workload.MigrationRecord, now time.T
 // instead (Draining, one idempotent tail away).
 func expireMigrationRecord(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, rec *workload.MigrationRecord) (bool, error) {
 	uuid := rec.RequestUUID
-	source := findInstanceStatus(input.ObservedState.InstanceStatuses, rec.SourceInstance)
-	allocated := rec.SurgeInstance != nil && *rec.SurgeInstance >= 0
+	source := input.ObservedState.Instance(rec.SourceInstance)
+	allocated := rec.SurgeAllocated()
 	var surge *workload.InstanceStatus
 	if allocated {
-		surge = findInstanceStatus(input.ObservedState.InstanceStatuses, *rec.SurgeInstance)
+		surge = input.ObservedState.Instance(*rec.SurgeInstance)
 	}
 
 	// The promoted surge and absent source are the durable completion
@@ -147,7 +148,7 @@ func expireMigrationRecord(ctx context.Context, deps workload.Deps, input worklo
 		if !confirmed {
 			return false, nil
 		}
-		finalized, ferr := finalizeAndRemoveInstance(ctx, deps, input, rec.SourceInstance, nil)
+		finalized, ferr := status.FinalizeAndRemove(ctx, deps, input, rec.SourceInstance, nil)
 		if ferr != nil {
 			return false, fmt.Errorf("finalize completed migration source: %w", ferr)
 		}
@@ -168,9 +169,9 @@ func expireMigrationRecord(ctx context.Context, deps workload.Deps, input worklo
 		if err := closeMigrationRecord(ctx, input, uuid, workload.MigrationPhaseCompleted, msg); err != nil {
 			return false, err
 		}
-		recordNormal(deps.Recorder, eventTarget(input), workload.EventReasonMigrationCompleted,
+		workload.RecordNormal(deps.Recorder, workload.EventTarget(input), workload.EventReasonMigrationCompleted,
 			"OMENative migration uuid=%s complete: %s -> instance=%d (record closed at expiry after the completion tail)",
-			uuid, instanceKey(plan.Component, rec.SourceInstance), *rec.SurgeInstance)
+			uuid, workload.InstanceKey(plan.Component, rec.SourceInstance), *rec.SurgeInstance)
 		return true, nil
 	}
 
@@ -195,11 +196,11 @@ func expireMigrationRecord(ctx context.Context, deps workload.Deps, input worklo
 	}
 
 	if allocated {
-		recordWarning(deps.Recorder, eventTarget(input), workload.EventReasonMigrationExpired,
+		workload.RecordWarning(deps.Recorder, workload.EventTarget(input), workload.EventReasonMigrationExpired,
 			"OMENative migration uuid=%s expired: %s; tearing down surge instance=%d",
 			uuid, blocker, *rec.SurgeInstance)
 	} else {
-		recordWarning(deps.Recorder, eventTarget(input), workload.EventReasonMigrationExpired,
+		workload.RecordWarning(deps.Recorder, workload.EventTarget(input), workload.EventReasonMigrationExpired,
 			"OMENative migration uuid=%s expired: %s", uuid, blocker)
 	}
 	return true, nil
@@ -232,11 +233,11 @@ func failMigrationThroughRecord(
 	blocker, sourceFailureReason, sourceFailureMessage string,
 ) error {
 	uuid := rec.RequestUUID
-	if rec.SurgeInstance != nil && *rec.SurgeInstance >= 0 {
+	if rec.SurgeAllocated() {
 		if err := clearMigrateOperation(ctx, input, *rec.SurgeInstance, uuid); err != nil {
 			return fmt.Errorf("clear surge Migrate op (instance=%d): %w", *rec.SurgeInstance, err)
 		}
-		if findInstanceStatus(input.ObservedState.InstanceStatuses, rec.SourceInstance) != nil {
+		if input.ObservedState.Instance(rec.SourceInstance) != nil {
 			if err := restoreSourceFromObservation(ctx, deps, input, plan, rec.SourceInstance, uuid,
 				sourceFailureReason, sourceFailureMessage); err != nil {
 				return fmt.Errorf("restore source (instance=%d): %w", rec.SourceInstance, err)

@@ -25,16 +25,28 @@ func OperationUnschedulable(op *InstanceOperation) bool {
 }
 
 // OperationExternallyHeld reports whether an operation is parked on any
-// wait outside the workload's control: admission refusing its create for
-// lack of quota, the scheduler finding no placement for its pods, the
-// gang scheduler unable to admit its PodGroup, a node that stopped
-// reporting a pod whose name the operation needs, or an operator pause
-// holding the attempt at a step boundary. Each is a wait an operator or
-// another controller resolves, so the InstanceReadyTimeout clock must
-// not run through any of them.
+// wait outside the workload's control: admission having refused its
+// create for lack of quota, the scheduler finding no placement for its
+// pods, the gang scheduler unable to admit its PodGroup, a node that
+// stopped reporting a pod whose name the operation needs, or an operator
+// pause holding the attempt at a step boundary. Each is a wait an
+// operator or another controller resolves, so the InstanceReadyTimeout
+// clock must not run through any of them.
+//
+// The quota wait is read off both the recorded refusal and its token.
+// The refusal is recorded on the pass admission said no and reported as
+// a token from the pass after, and the token outlives the record by one
+// pass once a create lands; the clock stays parked for as long as the
+// row reports the wait either way.
 func OperationExternallyHeld(op *InstanceOperation) bool {
-	return OperationCapacityBlocked(op) || OperationUnschedulable(op) ||
+	return OperationCapacityRefused(op) || OperationQuotaHeld(op) || OperationUnschedulable(op) ||
 		OperationGangHeld(op) || OperationNodeUnknown(op) || OperationPaused(op)
+}
+
+// OperationQuotaHeld reports whether the operation carries the quota
+// authority's token: the hold pass has reported the recorded refusal.
+func OperationQuotaHeld(op *InstanceOperation) bool {
+	return op != nil && op.Waiting == RejectionReasonQuotaExceeded
 }
 
 // PodUnschedulable reports whether a live pod is one the scheduler
@@ -59,4 +71,47 @@ func PodUnschedulable(pod *corev1.Pod) (message string, since metav1.Time, ok bo
 		return cond.Message, cond.LastTransitionTime, true
 	}
 	return "", metav1.Time{}, false
+}
+
+// FirstUnschedulablePod returns the live pod with no placement whose
+// name sorts lowest, with the scheduler's message and when the hold
+// started. One unplaceable pod holds the whole Instance: a gang
+// converges as a unit, and a single-pod Instance has nothing else to
+// wait on.
+//
+// Chosen by NAME rather than by position. Pods arrive bucketed from an
+// informer cache, whose order is a map iteration and differs between
+// passes; taking whichever came first would make a gang with several
+// unplaceable members record a different pod every pass and rewrite its
+// hold forever, which is exactly what the edge trigger exists to
+// prevent.
+func FirstUnschedulablePod(pods []*corev1.Pod) (*corev1.Pod, string, metav1.Time) {
+	var chosen *corev1.Pod
+	var message string
+	var since metav1.Time
+	for _, pod := range pods {
+		podMessage, podSince, ok := PodUnschedulable(pod)
+		if !ok {
+			continue
+		}
+		if chosen != nil && pod.Name >= chosen.Name {
+			continue
+		}
+		chosen, message, since = pod, podMessage, podSince
+	}
+	return chosen, message, since
+}
+
+// UnschedulableTermination is the evidence record for a scheduler hold:
+// the pod that could not be placed, the token, and the scheduler's
+// message. Time is the condition transition, so re-observing an
+// unchanged hold produces an identical record and the status no-op
+// guard keeps the pass write-free.
+func UnschedulableTermination(pod *corev1.Pod, message string, since metav1.Time) *InstanceTermination {
+	return &InstanceTermination{
+		PodName: pod.Name,
+		Reason:  WaitingReasonUnschedulable,
+		Message: message,
+		Time:    since,
+	}
 }

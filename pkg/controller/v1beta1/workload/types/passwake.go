@@ -1,16 +1,12 @@
 package types
 
-import (
-	"time"
-
-	ctrl "sigs.k8s.io/controller-runtime"
-)
+import "time"
 
 // PassWake is the pass-scoped sink for a wake-up an op pass owes but has
 // no result of its own to carry: a row held on operator configuration
 // that no watch event will announce — nothing in the cluster changes
 // when a ConfigMap key finally appears. The op deposits the wake-up here
-// and the dispatcher folds it into the pass result, so the hold is
+// and the dispatcher merges it into the pass result, so the hold is
 // re-consulted instead of waiting for an unrelated event or the resync.
 // All methods are nil-safe.
 type PassWake struct {
@@ -34,18 +30,19 @@ func (w *PassWake) Observe(after time.Duration) {
 	}
 }
 
-// Fold merges the recorded wake-up into res, under the pass precedence:
-// an explicit interval competes as the earliest wait wins, while a bare
-// wake-up only applies when the result carries no explicit wait at all.
-func (w *PassWake) Fold(res ctrl.Result) ctrl.Result {
+// Pending returns the earliest configured interval deposited this pass,
+// or zero when none was. It competes with the pass's other explicit
+// waits under the earliest-wins rule.
+func (w *PassWake) Pending() time.Duration {
 	if w == nil {
-		return res
+		return 0
 	}
-	if w.pending > 0 {
-		res = FoldPassRequeue(res, w.pending)
-	}
-	if w.bare && res.RequeueAfter == 0 {
-		res.Requeue = true //nolint:staticcheck // rate-limited backoff has no non-deprecated spelling
-	}
-	return res
+	return w.pending
+}
+
+// Bare reports that a pass deposited an unconfigured wake-up, which asks
+// for the rate-limited backoff. It applies only when the result carries
+// no explicit wait at all: an explicit wait already beats the backoff.
+func (w *PassWake) Bare() bool {
+	return w != nil && w.bare
 }

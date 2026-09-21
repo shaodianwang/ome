@@ -32,8 +32,8 @@ timeline:
     events:
       - pod.phaseTerminal[Unknown]: {pod: {index: 0, runner: leader}}
   - tick: 4
-    note: the worker is placed, so the scheduler releases its own token and the name recovery takes the row on the pass after that
+    note: the worker is placed, so the scheduler releases its own token and the name recovery takes the row in the same pass
     events:
       - pod.scheduled[source]: {pod: {index: 0, runner: worker}}
   - tick: 5
-    note: the leader's name is still held, so the recovery is what the row reports now
+    note: the leader's name is still held, so the recovery keeps the row and nothing is written again

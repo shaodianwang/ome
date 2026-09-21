@@ -58,6 +58,13 @@ type ReconcileInput struct {
 	// MutateInstance.
 	ObservedState WorkloadObservedState
 
+	// Owned is the pass's rows grouped by owner, built once by the
+	// decision layer and handed down so every pass reads the same
+	// answer. Read it through OwnedRows, never directly: a pass invoked
+	// outside a reconcile leaves this nil and derives the grouping from
+	// ObservedState instead.
+	Owned *OwnedRows
+
 	// MutateInstance applies the mutate callback to the idx-th
 	// InstanceStatus entry. Callers wrap persistence (apiserver round-
 	// trip under retry.RetryOnConflict, in-memory mirror) inside the

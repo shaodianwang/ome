@@ -1228,7 +1228,7 @@ func TestBuildApplyInstanceMutations_GuardedRemovalRejectsOwnershipDriftAfterCon
 	ir := baselineIR("llama-engine", "prod", 1)
 	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{
 		Index: 0, Incarnation: 4, Phase: v1beta1.OMENativeInstanceUpdating,
-		Operation: &v1beta1.InstanceOperation{ID: "gang-source", Type: v1beta1.InstanceOperationUpdate, Step: workloadops.UpdateStepSurgeDrain},
+		Operation: &v1beta1.InstanceOperation{ID: "gang-source", Type: v1beta1.InstanceOperationUpdate, Step: workloadtypes.UpdateStepSurgeDrain},
 	}}
 	c, writes := newCountingStatusClient(t, 1, ir)
 	reads := &driftingInstanceReader{Reader: c, index: 0}

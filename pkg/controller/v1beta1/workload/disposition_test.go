@@ -1028,6 +1028,7 @@ func TestEscalateStuckPodFailures_DisposesSinglePodWorkloadCaused(t *testing.T) 
 		Phase: workload.InstancePhaseUpdating,
 		Operation: &workload.InstanceOperation{
 			Type:           workload.InstanceOperationUpdate,
+			Step:           "Drain",
 			TargetRevision: "rev-bad",
 		},
 	}}
@@ -1071,6 +1072,7 @@ func TestExpireOperations_SinglePodCrashLoopRecordsDirective(t *testing.T) {
 		Phase: workload.InstancePhaseUpdating,
 		Operation: &workload.InstanceOperation{
 			Type:           workload.InstanceOperationUpdate,
+			Step:           "Drain",
 			TargetRevision: "rev-x",
 			Deadline:       metav1.NewTime(t0.Add(-time.Minute)),
 		},

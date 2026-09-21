@@ -1,0 +1,40 @@
+# A pod of the rebuild goes Unknown on a node that is gone, with a
+# force-delete policy in force. The sweep frees the name on the pass that
+# first reads it, so the name is never a wait: the hold reports nothing,
+# the deadline is neither parked nor re-armed, and the create pass
+# rebuilds the pod on the next pass with the clock it started with.
+scenario: nodeunknown-force-delete
+intentional: >-
+  a name the sweep frees on this pass is not recorded as NodeUnknown. The
+  hold reading runs ahead of the sweep and asks the sweep's own question,
+  so the row carries no token, no LastFailure and no parked deadline across
+  the force-delete; the attempt keeps the deadline it was stamped with.
+arrows:
+  - T-empty-create
+cells:
+  - instance/Create/CreatePods/pod.phaseTerminal[Unknown]/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    forceDelete: {overdueSlack: 1m, nodeUnreachableThreshold: 5m}
+timeline:
+  - tick: 1
+    note: the Create pass materializes the pod
+  - tick: 2
+    note: the pod is bound to a node the cluster no longer has
+    events:
+      - pod.scheduled[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the kubelet stops reporting; node death is proven on the spot, so the sweep force-deletes the pod and no wait is recorded
+    events:
+      - pod.phaseTerminal[Unknown]: {pod: {index: 0}}
+  - tick: 4
+    note: the force-deleted object is collected, and the same attempt rebuilds the pod under its original deadline
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}

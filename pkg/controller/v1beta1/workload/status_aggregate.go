@@ -12,7 +12,6 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/drain"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // AvailablePodSet returns pod names that are Ready and non-terminating
@@ -268,35 +267,6 @@ func RolloutComplete(insts []InstanceStatus, targetRevName string) bool {
 	return ReachedDesiredShape(insts, targetRevName, 0, int32(len(insts)))
 }
 
-// FirstStuckPodForInstance returns the first pod in pods that is stuck
-// in a terminal kubelet waiting state past the grace window, plus the
-// kubelet reason string. Returns (nil, "") when no pod is stuck —
-// caller skips escalation.
-//
-// "First" is order-deterministic by the input slice; callers that need
-// a stable index should sort pods before calling. For event emission
-// the order doesn't matter (the message names the specific pod).
-//
-// Adapter-agnostic counterpart of the omenative-side helper; takes
-// nothing v1beta1-shaped.
-func FirstStuckPodForInstance(pods []*corev1.Pod, now time.Time, grace time.Duration) (*corev1.Pod, string) {
-	for _, pod := range pods {
-		if pod == nil {
-			continue
-		}
-		// Skip pods marked for deletion — kubelet may be tearing them
-		// down, and "ImagePullBackOff on a deleting pod" is not an
-		// escalation signal (the pod is about to be gone anyway).
-		if pod.DeletionTimestamp != nil {
-			continue
-		}
-		if reason, stuck := types.PodStuckInTerminalWaiting(pod, now, grace); stuck {
-			return pod, reason
-		}
-	}
-	return nil, ""
-}
-
 // HasWedgedPodAgainstCurrent reports whether any pod carries a
 // revision-hash label disagreeing with currentHash — i.e., a pod
 // created for a revision the controller doesn't yet (or no longer)
@@ -487,34 +457,6 @@ func disposableAttempt(s *InstanceStatus, desiredPods int32) bool {
 	}
 }
 
-// podsForStuckCheck returns the pods whose stuck state should escalate s.
-// During a gang Update surge, inspect the replacement gang exclusively: the
-// source stays on the prior revision by design and may be the broken workload
-// this corrective rollout is replacing. Treating that old failure as a surge
-// failure makes the recovery path delete each replacement immediately. An
-// empty replacement bucket is also intentional while its pods are created.
-//
-// Migrate also uses SurgeIndex, including as a reverse sibling pointer on its
-// target status. Preserve its existing own-plus-sibling behavior here; its
-// failure semantics are separate from the gang Update state machine.
-func podsForStuckCheck(s InstanceStatus, byIdx map[int32][]*corev1.Pod) []*corev1.Pod {
-	own := byIdx[s.Index]
-	if s.Operation == nil || s.Operation.SurgeIndex == nil {
-		return own
-	}
-	sibling := byIdx[*s.Operation.SurgeIndex]
-	if s.Operation.Type == InstanceOperationUpdate {
-		return sibling
-	}
-	if len(sibling) == 0 {
-		return own
-	}
-	out := make([]*corev1.Pod, 0, len(own)+len(sibling))
-	out = append(out, own...)
-	out = append(out, sibling...)
-	return out
-}
-
 // ShouldCheckForStuckPods reports whether s qualifies for the
 // fast-failure check. Two paths qualify:
 //
@@ -547,34 +489,4 @@ func ShouldCheckForStuckPods(s *InstanceStatus, pods []*corev1.Pod, currentHash,
 		}
 	}
 	return HasWedgedPodAgainstCurrent(pods, currentHash, revisionHashLabel)
-}
-
-// stuckPodFailedMutation builds the Phase=Failed stamp for a stuck pod.
-// Guard logic: a fresh-empty slot (Phase=="") is treated as a sentinel
-// for "resurrected slot, don't touch", a Phase=Failed slot is a no-op,
-// and any other Phase flips to Failed.
-//
-// The Operation field is preserved (when present) — operators want to
-// see WHAT was in flight when the kubelet wedge surfaced. termination,
-// when non-nil, is recorded on LastFailure in the same write so the
-// wedged pod's diagnostics survive the recreate / teardown that follows
-// the escalation; nil leaves LastFailure untouched.
-func stuckPodFailedMutation(termination *InstanceTermination) func(*InstanceStatus) bool {
-	return func(s *InstanceStatus) bool {
-		if s.Phase == "" {
-			// Fresh-empty slot from the writer's append path — the real
-			// InstanceStatus was deleted out from under us
-			// (migrate-abandon cleanup, etc.). Don't resurrect.
-			return false
-		}
-		if s.Phase == InstancePhaseFailed {
-			return false
-		}
-		s.Phase = InstancePhaseFailed
-		if termination != nil {
-			captured := *termination
-			s.LastFailure = &captured
-		}
-		return true
-	}
 }

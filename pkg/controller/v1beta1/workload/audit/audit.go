@@ -489,7 +489,7 @@ func ValidateCapacity(policy *types.MigrationAuditPolicy, records []types.Migrat
 		if r.RequestUUID == requestUUID {
 			continue
 		}
-		if !r.Phase.Terminal() && r.SurgeInstance != nil && *r.SurgeInstance >= 0 {
+		if !r.Phase.Terminal() && r.SurgeAllocated() {
 			inFlight++
 		}
 		if r.AllocatedAt != nil && r.AllocatedAt.Time.After(windowStart) {

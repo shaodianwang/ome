@@ -148,6 +148,18 @@ type WorkloadObservedState struct {
 	ExcludedNodesByInstance map[int32][]string
 }
 
+// Instance returns the observed row at idx, or nil when the observation
+// carries none. The pointer aliases the observation and is read-only: a
+// write goes through MutateInstance, which re-reads the row it lands on.
+func (o WorkloadObservedState) Instance(idx int32) *InstanceStatus {
+	for i := range o.InstanceStatuses {
+		if o.InstanceStatuses[i].Index == idx {
+			return &o.InstanceStatuses[i]
+		}
+	}
+	return nil
+}
+
 // WorkloadAggregateStatus is the per-reconcile flush of counters,
 // conditions, and traffic that the reconciler hands off to
 // Source.WriteAggregateStatus.

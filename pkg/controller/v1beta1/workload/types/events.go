@@ -1,12 +1,61 @@
 package types
 
-// EventReason is the workload-internal event-reason identifier the ops
-// state machines stamp on K8s Events. Values match the legacy
-// omenative/status reason strings byte-for-byte so existing operator
-// dashboards and `kubectl describe` output keep matching.
+import (
+	"fmt"
+
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+)
+
+// EventReason is the event-reason identifier the engine stamps on K8s
+// Events. The values are an operator-facing contract — dashboards and
+// `kubectl describe` match on them — and do not change.
 type EventReason string
 
 func (r EventReason) String() string { return string(r) }
+
+// RecordNormal emits a Normal K8s Event against target. nil-safe: when
+// the recorder isn't wired (tests that construct Deps{} directly) OR the
+// target is nil, this is a no-op so callers don't have to plumb a
+// recorder. Reason is typed as EventReason — call sites pass the
+// workload-owned constant rather than a raw string so a typo or drift
+// between reasons becomes a compile-time error.
+func RecordNormal(rec record.EventRecorder, target client.Object, reason EventReason, messageFmt string, args ...any) {
+	if rec == nil || target == nil {
+		return
+	}
+	rec.Eventf(target, corev1.EventTypeNormal, string(reason), messageFmt, args...)
+}
+
+// RecordWarning emits a Warning K8s Event against target. Same nil-safe
+// semantics as RecordNormal. Reason is workload-typed for the same
+// drift-resistance rationale.
+func RecordWarning(rec record.EventRecorder, target client.Object, reason EventReason, messageFmt string, args ...any) {
+	if rec == nil || target == nil {
+		return
+	}
+	rec.Eventf(target, corev1.EventTypeWarning, string(reason), messageFmt, args...)
+}
+
+// EventTarget returns the object emitted events are stamped against —
+// ReconcileInput.EventTarget when set, falling back to OwnerObject. One
+// rule for every emitter in the engine, matching the nil-OK semantics
+// documented on the field, so no caller branches on EventTarget==nil
+// itself.
+func EventTarget(input ReconcileInput) client.Object {
+	if input.EventTarget != nil {
+		return input.EventTarget
+	}
+	return input.OwnerObject
+}
+
+// InstanceKey formats "component=engine instance=2" for event messages.
+// Keeps the format consistent across every emitter so operators can grep
+// on a single shape.
+func InstanceKey(component ComponentType, idx int32) string {
+	return fmt.Sprintf("component=%s instance=%d", component, idx)
+}
 
 const (
 	// Create / scale-up (workload/ops/create.go).
@@ -68,8 +117,7 @@ const (
 	// EventReasonAutoMigrationTriggered fires when the deadline
 	// disposition records a relocation directive (terminal AutoRecover
 	// ledger entry) for a stuck Instance — its rebuild will be steered
-	// off the recorded node. Value matches the legacy omenative
-	// detector's reason string.
+	// off the recorded node.
 	EventReasonAutoMigrationTriggered EventReason = "AutoMigrationTriggered"
 
 	// EventReasonAutoMigrationCapReached fires exactly once per budget
@@ -212,8 +260,9 @@ const (
 	// Operators install scheduler-plugins as a secondary scheduler
 	// (`scheduler-plugins-scheduler`) or as a default-scheduler plugin
 	// (in which case the warning is a false positive the controller
-	// can't detect from inside the cluster). Dedup'd per (owner,
-	// Component) per process.
+	// can't detect from inside the cluster). A standing warning: announced
+	// once per Instance incarnation on the Instance's own row
+	// (status.Announce), whatever attempt the row is on.
 	EventReasonMaybeNoGangScheduler EventReason = "MaybeNoGangScheduler"
 
 	// EventReasonGangSplitRisk is a soft Warning fired the first time a
@@ -225,7 +274,8 @@ const (
 	// NIXL all-reduce, multi-host TPU sessions). The operator sets
 	// engine.topologyKey / decoder.topologyKey (e.g. a NVLink/RDMA domain
 	// label, or the GKE TPU topology label) or declares a worker
-	// podAffinity. Advisory only — never blocks the create. Dedup'd per
-	// (owner, Component) per process.
+	// podAffinity. Advisory only — never blocks the create. A standing
+	// warning: announced once per Instance incarnation on the Instance's
+	// own row (status.Announce), whatever attempt the row is on.
 	EventReasonGangSplitRisk EventReason = "GangSplitRisk"
 )

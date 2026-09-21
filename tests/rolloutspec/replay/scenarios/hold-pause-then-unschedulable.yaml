@@ -1,16 +1,16 @@
 # A paused row whose surge replacement then turns out to have no
-# placement. The pause parks repair, not observation: the end-of-pass
-# hold evidence still runs while paused, so the scheduler takes the row
-# from the pause the moment it reports, and the scheduler's message
-# reaches LastFailure without waiting for the unpause. No repair acts on
-# it while the pause lasts.
+# placement. The pause parks repair, not observation: the hold pass at
+# the top of every reconcile still runs while paused, so the scheduler
+# takes the row from the pause the moment it reports, and the
+# scheduler's message reaches LastFailure without waiting for the
+# unpause. No repair acts on it while the pause lasts.
 scenario: hold-pause-then-unschedulable
 intentional: >-
   a fact-bearing authority takes a paused row: the scheduler's hold
-  replaces Paused in the pass it is observed, because the hold-evidence
-  half of the end-of-pass bookkeeping runs under pause while its action
-  half stays suspended. The deadline is parked by the hold as it would be
-  by the pause, and nothing relocates or fails the row until the unpause.
+  replaces Paused in the pass it is observed, because the hold pass runs
+  under pause while the repair that reads it stays suspended. The
+  deadline is parked by the hold as it would be by the pause, and
+  nothing relocates or fails the row until the unpause.
 cells:
   - instance/Update/Surge/spec.pauseTrue/before
   - instance/Update/Surge/pod.unschedulable[target]/before
@@ -38,7 +38,7 @@ timeline:
     events:
       - spec.pauseTrue: {}
   - tick: 3
-    note: the scheduler reports no placement for the replacement; the hold evidence runs under pause, so the scheduler takes the row from Paused in this pass and names the pod
+    note: the scheduler reports no placement for the replacement; the hold pass runs under pause, so the scheduler takes the row from Paused in this pass and names the pod
     events:
       - pod.unschedulable[target]: {pod: {index: 0, ordinal: 1}}
   - tick: 4

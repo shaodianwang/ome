@@ -300,6 +300,7 @@ rolloutspec-check: rolloutspec-render ## 🔎 Check a rollout state machine (MAC
 	@echo "🔎 Checking rollout state machine $(MACHINE)..."
 	@python3 hack/omenative-testing/statemachine/check_history.py --grid $(ROLLOUTSPEC_OUT)/$(MACHINE).grid.json $(ROLLOUTSPEC_HISTORY_ARGS)
 	@python3 hack/omenative-testing/statemachine/check_coverage.py --grid $(ROLLOUTSPEC_OUT)/$(MACHINE).grid.json --repo .
+	@python3 hack/omenative-testing/statemachine/check_test_layout.py --repo .
 
 # The packages whose tests are the rollout engine's behavior lock: the
 # machine tables and their well-formedness, the replay goldens with the

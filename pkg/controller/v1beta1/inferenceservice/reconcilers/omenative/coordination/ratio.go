@@ -5,7 +5,6 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
-	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
@@ -478,8 +477,8 @@ func unavailableInFlight(statuses []v1beta1.OMENativeInstanceStatus) int32 {
 			continue
 		}
 		switch s.Operation.Step {
-		case workloadops.UpdateStepSurge, workloadops.UpdateStepSurgeDrain,
-			workloadops.UpdateStepSurgeDrainSettle, workloadtypes.UpdateStepGangSurgeTarget:
+		case workloadtypes.UpdateStepSurge, workloadtypes.UpdateStepSurgeDrain,
+			workloadtypes.UpdateStepSurgeDrainSettle, workloadtypes.UpdateStepGangSurgeTarget:
 			// surge (single-pod or gang replacement) adds capacity, it
 			// doesn't remove a pod from rotation
 		default:
@@ -499,7 +498,7 @@ func surgeInFlight(statuses []v1beta1.OMENativeInstanceStatus) int32 {
 			continue
 		}
 		switch s.Operation.Step {
-		case workloadops.UpdateStepSurge, workloadops.UpdateStepSurgeDrain, workloadops.UpdateStepSurgeDrainSettle:
+		case workloadtypes.UpdateStepSurge, workloadtypes.UpdateStepSurgeDrain, workloadtypes.UpdateStepSurgeDrainSettle:
 			n++
 		}
 	}

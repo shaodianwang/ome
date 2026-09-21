@@ -8,7 +8,10 @@
 // operation / key types and does NOT import the OME CRD API package
 // (`pkg/apis/ome/v1beta1`) from any file exported to callers. Adapters
 // at the edge convert between the owner-CRD shape and the
-// workload-owned types.
+// workload-owned types. Per-instance transition fields — Phase,
+// Operation, RunningRevision — are written only by this package tree;
+// the component-level revision pair (CurrentRevision, UpdateRevision)
+// only by the owner's controller.
 //
 // Entry points:
 //   - workload.Reconcile (reconcile.go) — the per-Component dispatch
@@ -19,7 +22,7 @@
 //     Components. Wired before ops.Create so the gang is announced to
 //     the scheduler before the first pod lands.
 //
-// Callers populate a workload.ReconcileInput (input.go) — identity,
+// Callers populate a workload.ReconcileInput — identity,
 // projected DesiredSpec / ObservedState, and callback closures
 // (MutateInstance, RemoveInstance, WriteAggregateCondition,
 // WarnInstanceFailed) — and hand it to the

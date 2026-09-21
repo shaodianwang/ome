@@ -108,10 +108,21 @@ func inputWithConditionStore(owner client.Object, multiPod bool, workerSize int3
 	}
 	_ = workerSize // surfaces via planFor below
 
+	rows := map[int32]workload.InstanceStatus{}
 	input := workload.ReconcileInput{
 		OwnerObject: owner,
 		OwnerGVK:    testOwnerGVK,
 		EventTarget: owner,
+		MutateInstance: func(_ context.Context, index int32, mutate func(*workload.InstanceStatus) bool) error {
+			row, found := rows[index]
+			if !found {
+				row = workload.InstanceStatus{Index: index, Phase: workload.InstancePhaseCreating}
+			}
+			if mutate(&row) {
+				rows[index] = row
+			}
+			return nil
+		},
 		Key: workload.Key{
 			Namespace: owner.GetNamespace(),
 			Component: workload.ComponentEngine,
@@ -123,6 +134,11 @@ func inputWithConditionStore(owner client.Object, multiPod bool, workerSize int3
 			GangSchedulingAvailable: gangAvailable,
 		},
 		WriteAggregateCondition: store.write,
+		// One observed row, because the advisory scheduler warning is
+		// recorded on a row and a Component with none has nowhere to put it.
+		ObservedState: workload.WorkloadObservedState{
+			InstanceStatuses: []workload.InstanceStatus{{Index: 0, Phase: workload.InstancePhaseCreating}},
+		},
 	}
 	return input, store
 }
@@ -793,12 +809,6 @@ func TestEnsurePodGroups_MaybeNoGangSchedulerWarning_Matrix(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			// Each subtest gets a fresh dedup map so prior subtests
-			// can't suppress the next one (different owners would
-			// also work, but resetting is simpler and tests the
-			// helper).
-			resetMaybeNoGangSchedulerSeen()
-
 			owner := newOwner("prod", "llama-"+strings.ReplaceAll(tc.name, " ", "-"))
 			c := newGangClient(t, owner)
 			rec := record.NewFakeRecorder(8)
@@ -841,12 +851,10 @@ func TestEnsurePodGroups_MaybeNoGangSchedulerWarning_Matrix(t *testing.T) {
 	}
 }
 
-// TestEnsurePodGroups_MaybeNoGangScheduler_DedupPerProcess verifies
-// that two reconciles for the same (owner, Component) only fire ONE
-// MaybeNoGangScheduler event — the dedup map's job.
-func TestEnsurePodGroups_MaybeNoGangScheduler_DedupPerProcess(t *testing.T) {
-	resetMaybeNoGangSchedulerSeen()
-
+// TestEnsurePodGroups_MaybeNoGangScheduler_DedupPerRow verifies that
+// two reconciles of the same Component only fire ONE
+// MaybeNoGangScheduler event — the row's announcement record's job.
+func TestEnsurePodGroups_MaybeNoGangScheduler_DedupPerRow(t *testing.T) {
 	owner := newOwner("prod", "dedup-llama")
 	c := newGangClient(t, owner)
 	rec := record.NewFakeRecorder(16)
@@ -874,12 +882,9 @@ func TestEnsurePodGroups_MaybeNoGangScheduler_DedupPerProcess(t *testing.T) {
 }
 
 // TestEnsurePodGroups_MaybeNoGangScheduler_DedupSeparateComponents
-// verifies the dedup key is (owner, Component) — same owner but a
-// different Component must still get a warning. A key collapsed to
-// just the owner name would suppress it.
+// verifies that a second Component of the same owner still gets its own
+// warning: it reconciles its own rows, and the record lives on a row.
 func TestEnsurePodGroups_MaybeNoGangScheduler_DedupSeparateComponents(t *testing.T) {
-	resetMaybeNoGangSchedulerSeen()
-
 	owner := newOwner("prod", "multi-comp")
 	c := newGangClient(t, owner)
 	rec := record.NewFakeRecorder(16)
@@ -892,10 +897,14 @@ func TestEnsurePodGroups_MaybeNoGangScheduler_DedupSeparateComponents(t *testing
 		t.Fatalf("engine EnsurePodGroups: %v", err)
 	}
 
-	// Decoder reconcile — directly invoke the helper with the
-	// Decoder component (no Decoder spec on the owner, so we test
-	// the helper directly rather than rebuilding a Decoder plan).
-	maybeWarnNoGangScheduler(rec, inputEng, workload.ComponentDecoder, emptySpec, emptySpec)
+	// Decoder reconcile — directly invoke the helper with the Decoder
+	// component over its own rows (no Decoder spec on the owner, so we
+	// test the helper directly rather than rebuilding a Decoder plan).
+	inputDec, _ := inputWithConditionStore(owner, true, 2, true, "")
+	if err := maybeWarnNoGangScheduler(context.Background(), workload.Deps{Recorder: rec}, inputDec,
+		workload.ComponentDecoder, 0, emptySpec, emptySpec); err != nil {
+		t.Fatalf("decoder warn: %v", err)
+	}
 
 	events := drainGangSchedulerEvents(rec)
 	count := 0
@@ -913,12 +922,10 @@ func TestEnsurePodGroups_MaybeNoGangScheduler_DedupSeparateComponents(t *testing
 // the test-fixture pattern where Recorder / owner / PodSpec may be
 // nil.
 func TestMaybeWarnNoGangScheduler_NilSafety(t *testing.T) {
-	resetMaybeNoGangSchedulerSeen()
-
 	// nil owner: no-op (early return).
 	rec := record.NewFakeRecorder(2)
 	input := workload.ReconcileInput{}
-	maybeWarnNoGangScheduler(rec, input, workload.ComponentEngine, nil, nil)
+	warnNoGangScheduler(t, rec, input, workload.ComponentEngine, nil, nil)
 	if len(rec.Events) != 0 {
 		t.Errorf("nil owner should be no-op, got %d events", len(rec.Events))
 	}
@@ -931,16 +938,23 @@ func TestMaybeWarnNoGangScheduler_NilSafety(t *testing.T) {
 	rec2 := record.NewFakeRecorder(2)
 	owner := newOwner("ns", "x")
 	input2 := workload.ReconcileInput{OwnerObject: owner, EventTarget: owner}
-	maybeWarnNoGangScheduler(rec2, input2, workload.ComponentEngine, nil, nil)
+	warnNoGangScheduler(t, rec2, input2, workload.ComponentEngine, nil, nil)
 	if len(rec2.Events) != 1 {
 		t.Errorf("nil specs + valid owner should fire once, got %d events", len(rec2.Events))
 	}
 
-	// nil Recorder + valid rest: helper must not panic. Dedup map is
-	// still updated though, so reset to keep test isolation clean.
-	resetMaybeNoGangSchedulerSeen()
+	// nil Recorder + valid rest: helper must not panic.
 	input3 := workload.ReconcileInput{OwnerObject: owner, EventTarget: owner}
-	maybeWarnNoGangScheduler(nil, input3, workload.ComponentEngine, nil, nil) // no panic
+	warnNoGangScheduler(t, nil, input3, workload.ComponentEngine, nil, nil) // no panic
+}
+
+// warnNoGangScheduler calls the heuristic on Instance 0, which is the
+// row EnsurePodGroups announces on.
+func warnNoGangScheduler(t *testing.T, rec record.EventRecorder, input workload.ReconcileInput, component workload.ComponentType, leaderSpec, workerSpec *corev1.PodSpec) {
+	t.Helper()
+	if err := maybeWarnNoGangScheduler(context.Background(), workload.Deps{Recorder: rec}, input, component, 0, leaderSpec, workerSpec); err != nil {
+		t.Fatalf("warn no gang scheduler: %v", err)
+	}
 }
 
 // TestEffectiveSchedulerName_LeaderWinsThenWorker covers the

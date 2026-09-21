@@ -37,11 +37,11 @@ timeline:
     events:
       - endpoint.rotationOut[source]: {pod: {index: 0}}
   - tick: 4
-    note: the source is routed again, so the surge releases its own token and nothing re-marks in the same pass
+    note: the source is routed again, so the surge releases its own token and the pause, still in force, takes the row back in the same pass
     events:
       - endpoint.rotationIn[source]: {pod: {index: 0}}
   - tick: 5
-    note: the pause is still in force, so the next pass takes the row back with Paused
+    note: the row reports the pause and neither authority writes again
   - tick: 6
     note: the pause is lifted and the row is released by the authority that set it
     events:

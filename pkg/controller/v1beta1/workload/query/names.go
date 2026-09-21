@@ -3,6 +3,7 @@ package query
 import (
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/ome-projects/ome/pkg/constants"
@@ -92,4 +93,46 @@ func PodGroupName(isvc string, component workload.ComponentType, instanceIdx int
 	return constants.TruncateNameWithMaxLength(
 		fmt.Sprintf("%s-%s-%d", isvc, component, instanceIdx),
 		validation.LabelValueMaxLength)
+}
+
+// RoutedServiceForPod returns the per-revision *routed* Service name to
+// gate drain against for pod. Read from the pod's ome.io/revision-hash
+// label (stamped by Render). Empty string when the label is missing —
+// caller treats that as "no routed Service to check" and proceeds
+// straight to delete.
+//
+// We deliberately do NOT use the Component's headless Service here.
+// That Service sets PublishNotReadyAddresses=true so peer-discovery DNS
+// resolves before pods are Ready; kube-proxy then publishes the
+// endpoint with Conditions.Ready=true regardless of the pod's actual
+// Ready state, which would make drain.IsPodDrained wait forever. The
+// per-revision routed Service (created by the coordination layer with
+// PublishNotReadyAddresses=false) reflects the controller-owned
+// ome.io/serving gate correctly.
+//
+// plan.Component type flows from the caller so migrate.go can address
+// per-revision Services without importing v1beta1 itself.
+func RoutedServiceForPod(ownerName string, component workload.ComponentType, pod *corev1.Pod) string {
+	if pod == nil {
+		return ""
+	}
+	hash := pod.Labels[LabelRevisionHash]
+	if hash == "" {
+		return ""
+	}
+	// Workers are never members of the per-revision ROUTING Service: for
+	// multi-pod (gang) Components that Service pins runner=leader,pod-ordinal=0
+	// (coordination.BuildPerRevisionRoutingService) because workers run
+	// distributed-init peers and never serve customer traffic. Returning a
+	// routing-Service name for a worker would wedge the Migrate surge
+	// in-rotation gate forever — IsPodInRotation(worker) can never become true
+	// since the worker is not an endpoint — and is a no-op for the source
+	// drain gate (a worker is never routed, so it's trivially drained). Skip it
+	// so the gates assert only the routable leader; worker readiness is already
+	// covered upstream by AllPodsRuntimeReady, and worker availability by the
+	// headless-Service-based AvailablePodCount.
+	if pod.Labels[LabelRunner] == "worker" {
+		return ""
+	}
+	return PerRevisionServiceName(ownerName, component, hash)
 }

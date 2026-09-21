@@ -101,7 +101,38 @@ func TestReconcile_GangMigrationCompletesAfterSourcePlanRelease(t *testing.T) {
 must be named by at least one test, every cited id must be a declared
 transition, and a workload-lane arrow may not be cited at all.
 
-Both checks run together against a rendered grid:
+## Test layout
+
+`check_test_layout.py` is the third checker, and unlike the other two it
+reads no grid: it walks `pkg/controller/v1beta1/workload/...` and enforces
+two structural properties of the tree the state machines describe.
+
+**One production file, one test file, named for each other.** A production
+file that declares at least one function has a `<file>_test.go`; a file
+that declares none — types and constants, with nothing to exercise — is
+exempt, computed by scanning for `func` rather than kept in an allow-list,
+because an allow-list is the drift the check exists to catch. A test file
+names a production file: a scenario-named file that matches none is what a
+reader greps for and does not find. Where Go forces the split between the
+internal and external test packages, `<file>_test.go` and
+`<file>_external_test.go` are both allowed for one file and nothing else.
+Shared fixtures live in `helpers_test.go`, with `helpers_external_test.go`
+as its external half for the fixtures a `package x_test` file must call.
+
+**Rows are written in one place.** A row-mutation closure —
+`func(s *InstanceStatus) bool`, the callback the status adapter applies —
+may be declared only in the packages that write a row: `workload/status`,
+`workload/ops` and the reconcile root. The check is an allow-list of
+writers, not of readers, so a package added later is checked by default.
+Declaring the callback's *type*, which the adapter contract does, is not
+authoring one.
+
+    python3 check_test_layout.py --repo .
+
+It runs first in `rolloutspec-check`, ahead of the Go packages, because a
+layout failure should cost a second of python rather than a full test run.
+
+Both grid checks run together against a rendered grid:
 
     make rolloutspec-check MACHINE=instance
 

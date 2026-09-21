@@ -79,9 +79,10 @@ type ComponentPodSnapshot = types.ComponentPodSnapshot
 var (
 	// PassRequeue is re-exported so the dispatcher and the ops passes
 	// resolve a pass wake-up through one implementation.
-	PassRequeue      = types.PassRequeue
-	FoldPassRequeue  = types.FoldPassRequeue
-	FloorPassRequeue = types.FloorPassRequeue
+	PassRequeue  = types.PassRequeue
+	EarliestWake = types.EarliestWake
+	NoSoonerThan = types.NoSoonerThan
+	RequeueNow   = types.RequeueNow
 
 	ErrGangNameUnusable           = types.ErrGangNameUnusable
 	ErrStatusOwnerGone            = types.ErrStatusOwnerGone
@@ -89,6 +90,10 @@ var (
 )
 
 const (
+	RunnerDefault = types.RunnerDefault
+	RunnerLeader  = types.RunnerLeader
+	RunnerWorker  = types.RunnerWorker
+
 	ComponentRouter  = types.ComponentRouter
 	ComponentEngine  = types.ComponentEngine
 	ComponentDecoder = types.ComponentDecoder
@@ -264,26 +269,6 @@ func PodTerminationWithReason(pod *corev1.Pod, reason string, now metav1.Time) *
 // that charges a revision's retry ladder toward Held.
 func IsWorkloadCausedReason(reason string) bool {
 	return types.IsWorkloadCausedReason(reason)
-}
-
-// OperationCapacityBlocked re-exports types.OperationCapacityBlocked:
-// whether an operation is parked on the capacity-blocked Waiting token.
-// The deadline-parking step and the escalation pass both read it.
-func OperationCapacityBlocked(op *InstanceOperation) bool {
-	return types.OperationCapacityBlocked(op)
-}
-
-// MarkExternalHold re-exports types.MarkExternalHold: the single writer
-// for InstanceOperation.Waiting, shared by every authority that can
-// stall an operation from outside.
-func MarkExternalHold(ctx context.Context, input ReconcileInput, idx int32, token string, evidence *InstanceTermination, writable func(*InstanceOperation) bool) (entered, held bool, err error) {
-	return types.MarkExternalHold(ctx, input, idx, token, evidence, writable)
-}
-
-// ClearExternalHold re-exports types.ClearExternalHold: releases a
-// waiting token, and only for the authority that set it.
-func ClearExternalHold(ctx context.Context, input ReconcileInput, idx int32, token string) error {
-	return types.ClearExternalHold(ctx, input, idx, token)
 }
 
 // OperationUnschedulable re-exports types.OperationUnschedulable:

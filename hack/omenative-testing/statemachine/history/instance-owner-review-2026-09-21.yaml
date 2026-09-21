@@ -1,0 +1,82 @@
+# Provenance for the instance-machine cells corrected in the owner review
+# session of 2026-09-21, which moved every external hold to one
+# evaluation point. The six authorities — quota, the scheduler, the
+# PodGroup name, a name a silent node holds, a surge's own source, the
+# operator pause — are read once per row at the top of the reconcile,
+# before the verb passes, releasing before recording. The cells below
+# named the places the holds used to be written from: the escalation
+# pass for the scheduler and the gang, the Create pass for a held name,
+# the surge step for an unrouted source, and the create call for a quota
+# refusal. They now name the hold pass, and the escalation pass is left
+# with what it still decides — the placement grace and the terminal
+# PodGroup verdict.
+#
+# One timing consequence is stated rather than hidden: a quota refusal is
+# the apiserver's answer to a call the create pass made, so it is
+# recorded on the operation and reported as a token from the next pass.
+# The deadline park is anchored to the record, not to the token, so the
+# clock still stops on the pass admission said no.
+#
+# The same session moved every row stamp into one status package. Four
+# spec.policyTuning notes and three decided_in pointers named the file a
+# stamp used to live in; they now name status/decision.go. Those cells
+# carry no provenance entry below because their behavior is unchanged and
+# they are current, not under review — the deadline is still stamped once
+# at operation entry, and only the pointer moved.
+#
+# Selectors match the cells files exactly: an empty variants, windows or
+# transition matches all of them.
+history:
+
+  # --- cells-create.yaml ---
+  - {state: Create/CreatePods, event: api.quotaDenied, variants: [], windows: [], transition: "", decision: owner-review-2026-09-21}
+  - {state: Create/CreatePods, event: pod.unschedulable, variants: [source], windows: [], transition: "", decision: owner-review-2026-09-21}
+  - {state: Create/CreatePods, event: gang.podGroup, variants: [Terminating], windows: [], transition: "", decision: owner-review-2026-09-21}
+
+  # --- cells-failed.yaml ---
+  - {state: Failed, event: gang.podGroup, variants: [Terminating], windows: [], transition: "", decision: owner-review-2026-09-21}
+
+  # --- cells-migrate.yaml ---
+  - {state: Migrate/CreateSurge, event: pod.unschedulable, variants: [], windows: [], transition: "", decision: owner-review-2026-09-21}
+  - {state: Migrate/CreateSurge, event: api.quotaDenied, variants: [], windows: [], transition: "", decision: owner-review-2026-09-21}
+  - {state: Migrate/SurgeTarget, event: pod.unschedulable, variants: [], windows: [], transition: "", decision: owner-review-2026-09-21}
+  - {state: Migrate/SurgeTarget, event: api.quotaDenied, variants: [], windows: [], transition: "", decision: owner-review-2026-09-21}
+
+  # --- cells-noop.yaml ---
+  - {state: Empty, event: gang.podGroup, variants: [Terminating], windows: [], transition: "", decision: owner-review-2026-09-21}
+  - {state: Empty, event: gang.podGroup, variants: [OwnershipConflict], windows: [], transition: "", decision: owner-review-2026-09-21}
+  - {state: Pending, event: gang.podGroup, variants: [Terminating], windows: [], transition: "", decision: owner-review-2026-09-21}
+  - {state: Pending, event: gang.podGroup, variants: [OwnershipConflict], windows: [], transition: "", decision: owner-review-2026-09-21}
+  - {state: Ready, event: gang.podGroup, variants: [Terminating], windows: [], transition: "", decision: owner-review-2026-09-21}
+  - {state: Ready, event: gang.podGroup, variants: [OwnershipConflict], windows: [], transition: "", decision: owner-review-2026-09-21}
+
+  # --- cells-restart.yaml ---
+  - {state: Restart/Drain, event: spec.pauseTrue, variants: [], windows: [], transition: "", decision: owner-review-2026-09-21}
+  - {state: Restart/Drain, event: api.quotaDenied, variants: [], windows: [], transition: "", decision: owner-review-2026-09-21}
+  - {state: Restart/Drain, event: pod.unschedulable, variants: [source], windows: [], transition: "", decision: owner-review-2026-09-21}
+  - {state: Restart/Drain, event: pod.phaseTerminal, variants: [Unknown], windows: [], transition: "", decision: owner-review-2026-09-21}
+  - {state: Restart/Drain, event: gang.podGroup, variants: [Terminating], windows: [], transition: "", decision: owner-review-2026-09-21}
+
+  # --- cells-update-gang.yaml ---
+  - {state: Update/GangSurgeTarget, event: api.quotaDenied, variants: [], windows: [], transition: "", decision: owner-review-2026-09-21}
+  - {state: Update/GangSurgeTarget, event: pod.unschedulable, variants: [target], windows: [], transition: "", decision: owner-review-2026-09-21}
+  - {state: Update/GangSurgeTarget, event: gang.podGroup, variants: [Terminating], windows: [], transition: "", decision: owner-review-2026-09-21}
+
+  # --- cells-update-inplace-recreate.yaml ---
+  - {state: Update/InPlace, event: pod.unschedulable, variants: [source], windows: [], transition: "", decision: owner-review-2026-09-21}
+  - {state: Update/InPlace, event: spec.pauseTrue, variants: [], windows: [], transition: "", decision: owner-review-2026-09-21}
+  - {state: Update/InPlace, event: spec.unpause, variants: [], windows: [], transition: "", decision: owner-review-2026-09-21}
+  - {state: Update/Drain, event: pod.unschedulable, variants: [source], windows: [], transition: "", decision: owner-review-2026-09-21}
+  - {state: Update/Drain, event: gang.podGroup, variants: [Terminating], windows: [], transition: "", decision: owner-review-2026-09-21}
+  - {state: Update/Drain, event: api.quotaDenied, variants: [], windows: [], transition: "", decision: owner-review-2026-09-21}
+
+  # --- cells-update-surge.yaml ---
+  - {state: Update/Surge, event: pod.servingOff, variants: [source], windows: [], transition: "", decision: owner-review-2026-09-21}
+  - {state: Update/Surge, event: pod.unschedulable, variants: [], windows: [], transition: "", decision: owner-review-2026-09-21}
+  - {state: Update/Surge, event: gang.podGroup, variants: [Terminating, OwnershipConflict], windows: [], transition: "", decision: owner-review-2026-09-21}
+  - {state: Update/Surge, event: endpoint.rotationOut, variants: [source], windows: [], transition: "", decision: owner-review-2026-09-21}
+  - {state: Update/Surge, event: spec.pauseTrue, variants: [], windows: [], transition: "", decision: owner-review-2026-09-21}
+  - {state: Update/Surge, event: api.quotaDenied, variants: [], windows: [], transition: "", decision: owner-review-2026-09-21}
+  - {state: Update/SurgeDrain, event: pod.unschedulable, variants: [], windows: [], transition: "", decision: owner-review-2026-09-21}
+  - {state: Update/SurgeDrain, event: gang.podGroup, variants: [Terminating, OwnershipConflict], windows: [], transition: "", decision: owner-review-2026-09-21}
+  - {state: Update/SurgeDrain, event: api.quotaDenied, variants: [], windows: [], transition: "", decision: owner-review-2026-09-21}

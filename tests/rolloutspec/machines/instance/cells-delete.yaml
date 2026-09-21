@@ -629,7 +629,7 @@ cells:
     event: timer.forceDelete
     windows: [before]
     outcome: defer
-    note: "one clock alone never acts. stuckTerminatingEvidence in force_delete.go requires the pod past its own deletion deadline plus the overdue slack AND node-death evidence older than the threshold, and it returns the exact boundary of whichever is outstanding so the pass schedules a wake there instead of inventing a cadence"
+    note: "one clock alone never acts. evidence.StuckTerminating requires the pod past its own deletion deadline plus the overdue slack AND node-death evidence older than the threshold, and it returns the exact boundary of whichever is outstanding so the pass schedules a wake there instead of inventing a cadence"
     placement: kind
     coverage: {perm: [], unit: [TestForceDeleteRequeueTracksExactPolicyBoundaries, TestForceDelete_Overdue_EvidenceYoungerThanThreshold_Untouched], kind: []}
     status: current

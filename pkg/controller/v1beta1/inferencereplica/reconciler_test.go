@@ -36,9 +36,9 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 	workloadgang "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/gang"
-	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 // testScheme returns a runtime.Scheme with the types the IR reconciler
@@ -1903,7 +1903,7 @@ func TestTerminalFinalizationOwned_GangSourceMarkerSurvivesRemovalRetry(t *testi
 				Index: 3,
 				Operation: &workload.InstanceOperation{
 					Type:       workload.InstanceOperationUpdate,
-					Step:       workloadops.UpdateStepSurgeDrain,
+					Step:       workloadtypes.UpdateStepSurgeDrain,
 					SurgeIndex: &surgeIndex,
 				},
 			},
@@ -1925,7 +1925,7 @@ func TestTerminalFinalizationOwned_GangSourceMarkerSurvivesRemovalRetry(t *testi
 		t.Fatal("persisted gang target cleanup marker did not suppress PodGroup ensure")
 	}
 
-	observed.InstanceStatuses[0].Operation.Step = workloadops.UpdateStepSurge
+	observed.InstanceStatuses[0].Operation.Step = workloadtypes.UpdateStepSurge
 	observed.InstanceStatuses[1].Operation.Step = workload.UpdateStepGangSurgeTarget
 	if _, found := terminalFinalizationOwned(observed)[3]; found {
 		t.Fatal("pre-terminal gang source unexpectedly suppressed PodGroup ensure")

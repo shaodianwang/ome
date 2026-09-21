@@ -1,0 +1,37 @@
+# The node-unknown hold and the scheduler hold arriving on one Instance
+# in one pass. A gang's leader stops reporting and its worker cannot be
+# placed, both observed at once. Neither token stands yet, so the order
+# the authorities are consulted in decides which fact the row reports:
+# the silent node, read where the rebuild is attempted, before the
+# scheduler, read at the end of the pass.
+scenario: hold-nodeunknown-with-unschedulable
+intentional: >-
+  two facts fresh on one unheld row report in consultation order, which
+  is the order the verb passes read them in: NodeUnknown takes the row
+  and the scheduler's reading is refused, so an operator sees the wait
+  that resolves only on proven node death.
+cells:
+  - instance/Create/CreatePods/pod.phaseTerminal[Unknown]/before
+  - instance/Create/CreatePods/pod.unschedulable[source]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the Create pass materializes the leader and its worker
+  - tick: 2
+    note: the leader's kubelet stops reporting and the scheduler cannot place the worker, in one observation; the silent node is the fact the row reports
+    events:
+      - pod.phaseTerminal[Unknown]: {pod: {index: 0, runner: leader}}
+      - pod.unschedulable[source]: {pod: {index: 0, runner: worker}}
+  - tick: 3
+    note: both facts still stand and the row keeps the one it reported

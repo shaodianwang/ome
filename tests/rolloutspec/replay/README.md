@@ -33,6 +33,14 @@ A scenario is loaded through `tests/rolloutspec`, so an event, variant,
 arrow or cell the instance table does not declare fails the load. The
 scenario vocabulary and the table cannot drift.
 
+These four are the Go half of the behavior lock. The python half runs
+ahead of them under the same `make rollout-behavior-lock` target:
+`check_history.py` and `check_coverage.py` resolve the grid's provenance
+and coverage both ways, and `check_test_layout.py` enforces one test file
+per production file across `pkg/controller/v1beta1/workload/...` and
+confines row writes to the packages that write rows. All three live in
+`hack/omenative-testing/statemachine/`, and its README states their rules.
+
 ## Lanes: which arrows this directory is responsible for
 
 A transition of the instance table carries a `lane`. The default,
@@ -203,10 +211,10 @@ from what it says.
 
 `initial.spec.workers` makes the Component multi-pod: one `leader` Runner
 and a `worker` Runner of that size, which is the unit a gang is scheduled
-in. A multi-pod scenario also sets `topologyKey`, because a gang rendered
-without one trips a Warning the engine emits once per process — a one-shot
-no replay can reproduce twice, and therefore not something a golden may
-carry.
+in. Most multi-pod scenarios also set `topologyKey` and `schedulerName`,
+which keeps the two advisory gang Warnings out of their traces so each
+scenario records only what it is about. `gang-advisory-warnings` is the
+one that declares neither, and it is where those two Warnings are locked.
 
 ## Gangs
 
@@ -538,11 +546,6 @@ Effects the driver does not record:
   the ledger the audit package writes is not.
 - PodGroup detail. A PodGroup create or delete is traced by name; its
   spec (minMember, topology key, schedule timeout) is not.
-- Warnings the engine emits once per process (`GangSplitRisk`,
-  `MaybeNoGangScheduler`). Their dedup outlives a run, so the same
-  scenario would trace them on its first replay and not on its second; a
-  gang scenario declares `topologyKey` and `schedulerName` to stay out of
-  both shapes rather than record a line that cannot repeat.
 - A PodGroup's collection FINISHING. `gang.podGroup[Terminating]` holds
   the object behind the driver's finalizer and `[Deleted]` issues a
   delete, which on an object already Terminating changes nothing — there

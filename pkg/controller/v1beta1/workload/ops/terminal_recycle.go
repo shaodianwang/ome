@@ -10,6 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
@@ -104,7 +105,7 @@ func recycleTerminalPods(ctx context.Context, deps workload.Deps, input workload
 		return false, nil
 	}
 	now := input.Now()
-	if s := findInstanceStatus(input.ObservedState.InstanceStatuses, statusIdx); s != nil && s.Operation != nil && s.Operation.Type == opType {
+	if s := input.ObservedState.Instance(statusIdx); s != nil && s.Operation != nil && s.Operation.Type == opType {
 		op := s.Operation
 		if !op.Deadline.IsZero() && now.After(op.Deadline.Time) {
 			return true, nil
@@ -121,22 +122,7 @@ func recycleTerminalPods(ctx context.Context, deps workload.Deps, input workload
 	}
 
 	termination := terminalPodTermination(dead[0], metav1.NewTime(now))
-	var recycle int32
-	err := input.MutateInstance(ctx, statusIdx, func(s *workload.InstanceStatus) bool {
-		if s.Operation == nil || s.Operation.Type != opType {
-			return false
-		}
-		op := *s.Operation
-		op.RetryCount++
-		op.LastProgressAt = metav1.NewTime(now)
-		s.Operation = &op
-		recycle = op.RetryCount
-		if termination != nil {
-			captured := *termination
-			s.LastFailure = &captured
-		}
-		return true
-	})
+	recycle, err := status.RecordRecycleAttempt(ctx, input, statusIdx, opType, metav1.NewTime(now), termination)
 	if err != nil {
 		return true, fmt.Errorf("record terminal pod recycle (instance=%d): %w", statusIdx, err)
 	}
@@ -156,9 +142,9 @@ func recycleTerminalPods(ctx context.Context, deps workload.Deps, input workload
 			return true, fmt.Errorf("delete terminal pod %s/%s: %w", pod.Namespace, pod.Name, err)
 		}
 	}
-	recordWarning(deps.Recorder, eventTarget(input), workload.EventReasonTerminalPodRecycled,
+	workload.RecordWarning(deps.Recorder, workload.EventTarget(input), workload.EventReasonTerminalPodRecycled,
 		"OMENative %s deleted terminal pod(s) %s for recreate (%s recycle %d)",
-		instanceKey(input.Key.Component, podIdx), describeTerminalPods(dead), opType, recycle)
+		workload.InstanceKey(input.Key.Component, podIdx), describeTerminalPods(dead), opType, recycle)
 	return true, nil
 }
 

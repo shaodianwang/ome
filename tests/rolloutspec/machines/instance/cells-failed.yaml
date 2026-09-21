@@ -109,7 +109,7 @@ cells:
     placement: unit
     coverage:
       perm: []
-      unit: [TestPlan_Update_CoordGateExempt_FailedZeroServing, TestPlan_Update_CoordGateExempt_SurgeKeepsConsult]
+      unit: [TestPlan_Update_CoordGateExempt_FailedZeroServing, TestPlan_UpdateCoordGateExemptSurgeKeepsConsult]
       kind: []
     status: current
   - state: Failed
@@ -324,12 +324,13 @@ cells:
   - state: Failed
     event: spec.pauseTrue
     outcome: ignore
-    note: pause parks the update and create passes, so no corrective or retry attempt starts; scale-down and the pod-loss repair keep running
+    note: pause parks the update and create passes, so no corrective or retry attempt starts; a Failed row whose preserved operation is an Update is a continuation, not a start, and is re-driven under the pause; scale-down and the pod-loss repair keep running
     placement: unit
     coverage:
       perm: []
-      unit: [TestPlan_Paused_RepairRunsFleetChangesDoNot, TestReconcile_PausedSkipsCreate, TestReconcile_PausedStillScalesDown]
+      unit: [TestPlan_Paused_RepairRunsFleetChangesDoNot, TestPlan_Paused_ReDrivesAFailedUpdateContinuation, TestReconcile_PausedSkipsCreate, TestReconcile_PausedStillScalesDown]
       kind: []
+      replay: [pause-failed-update-continues]
     status: decided
   - state: Failed
     event: spec.pauseFreeze
@@ -561,7 +562,7 @@ cells:
   - state: Failed
     event: api.quotaDenied
     outcome: ignore
-    note: a quota rejection lands on the attempt that already stamped Creating or Updating, which is where it is classified and where the QuotaExceeded waiting token is recorded, so it is charged to that state; the Failed row is left untouched and re-attempts on the next admitted pass
+    note: a quota rejection lands on the attempt that already stamped Creating or Updating, which is where it is classified and where the refusal is recorded, and the QuotaExceeded waiting token names it from the next pass, so it is charged to that state; the Failed row is left untouched and re-attempts on the next admitted pass
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -584,7 +585,7 @@ cells:
   - state: Failed
     event: pod.unschedulable
     outcome: ignore
-    note: the escalation pass skips an already-Failed row before it reads any evidence, so the scheduler hold is never recorded here and the grace never arms; an unschedulable pod only keeps occupying its pod name until the recycle that re-materializes the index frees it
+    note: the hold pass skips an already-Failed row, so the scheduler hold is never recorded here and the grace never arms; an unschedulable pod only keeps occupying its pod name until the recycle that re-materializes the index frees it
     invariants: [failed.is.sticky]
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
@@ -641,7 +642,7 @@ cells:
     event: pod.phaseTerminal
     variants: [Unknown]
     outcome: ignore
-    note: the recycle predicate is PodFailed or PodSucceeded only (workload/query/discover.go); an Unknown pod is neither counted as lost nor cleaned, since ops/cleanup.go collects alien-revision pods only
+    note: the recycle predicate is PodFailed or PodSucceeded only (workload/query/discover.go); an Unknown pod is neither counted as lost nor cleaned, since the wreckage cleanup in ops/update.go collects alien-revision pods only
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
     status: current
@@ -656,7 +657,7 @@ cells:
     event: gang.podGroup
     variants: [Terminating]
     outcome: defer
-    note: the PodGroup pass classifies every planned multi-pod index including a Failed one, so the name being collected withholds the members a fresh attempt would place and the group is announced again once the object is gone. No waiting token is recorded - the escalation pass skips a row already stamped Failed before it reads any evidence, and a Failed row carries no operation to park a clock on
+    note: the PodGroup pass classifies every planned multi-pod index including a Failed one, so the name being collected withholds the members a fresh attempt would place and the group is announced again once the object is gone. No waiting token is recorded - the hold pass skips a row already stamped Failed, and a Failed row carries no operation to park a clock on
     invariants: [failed.is.sticky]
     placement: unit
     coverage: {perm: [], unit: [TestEscalation_GangReadingsOnAFailedRowAreInert, TestEnsurePodGroupsWithState_ForeignCollisionAndTerminatingGate], kind: []}

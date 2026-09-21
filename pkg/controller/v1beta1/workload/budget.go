@@ -119,7 +119,7 @@ func HeldByPartition(ru *RollingUpdate, rank int32) bool {
 //     capacity.
 //
 // The lowest-indexed `Partition` candidates are held.
-func PartitionHeldIndices(ru *RollingUpdate, observed []InstanceStatus, planned []InstancePlan, targetRevName string) map[int32]bool {
+func PartitionHeldIndices(ru *RollingUpdate, input ReconcileInput, planned []InstancePlan, targetRevName string) map[int32]bool {
 	held := make(map[int32]bool)
 	if ru == nil || ru.Partition == nil || *ru.Partition <= 0 {
 		return held
@@ -127,7 +127,7 @@ func PartitionHeldIndices(ru *RollingUpdate, observed []InstanceStatus, planned 
 	tgt := query.RevisionFromName(targetRevName)
 	candidates := make([]int32, 0, len(planned))
 	for _, inst := range planned {
-		s := findObservedInstanceStatus(observed, inst.Index)
+		s := input.ObservedState.Instance(inst.Index)
 		if s == nil {
 			continue
 		}

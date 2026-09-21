@@ -6,11 +6,13 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
+	clocktesting "k8s.io/utils/clock/testing"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -160,6 +162,11 @@ func TestReconcileDenseV1IsUnchangedByTheDecoder(t *testing.T) {
 	plain, cPlain := newReconciler(t, ir.DeepCopy())
 	bounded, cBounded := newReconciler(t, ir.DeepCopy())
 	bounded.InstanceStatusDecoder = irstatus.NewDecoder(8)
+	// Both reconciles stamp the attempts they open at "now"; a second
+	// boundary between the two runs would otherwise make the published
+	// timestamps differ for a reason unrelated to the decoder.
+	fixed := clocktesting.NewFakeClock(time.Now())
+	plain.Clock, bounded.Clock = fixed, fixed
 
 	resPlain, errPlain := plain.Reconcile(ctx, req)
 	resBounded, errBounded := bounded.Reconcile(ctx, req)
