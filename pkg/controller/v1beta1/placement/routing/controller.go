@@ -75,7 +75,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		r.Prober.Forget(req.NamespacedName)
 		r.Capacity.Forget(req.NamespacedName)
 		deleteCapacityFallbackMetric(req.Namespace, req.Name)
-		return ctrl.Result{}, nil
+		return ctrl.Result{}, r.reapSourceAbsentTrafficMap(ctx, req.NamespacedName)
 	}
 	if !isvc.DeletionTimestamp.IsZero() {
 		r.Prober.Forget(req.NamespacedName)
@@ -426,6 +426,46 @@ func (r *Reconciler) reap(ctx context.Context, isvc *v1beta1.InferenceService) e
 	if trafficMapNeedsPublisherFinalizerRepair(tm) {
 		return nil
 	}
+	return r.deleteTrafficMap(ctx, key, tm)
+}
+
+// reapSourceAbsentTrafficMap removes a generated map whose source is
+// authoritatively absent and whose controller reference has already been
+// orphaned. Durable source provenance distinguishes it from an unattributed
+// legacy or hand-authored object at the same key.
+func (r *Reconciler) reapSourceAbsentTrafficMap(
+	ctx context.Context,
+	key types.NamespacedName,
+) error {
+	if r.APIReader == nil {
+		return fmt.Errorf("reap source-absent TrafficMap: API reader is not configured")
+	}
+	tm := &v1beta1.TrafficMap{}
+	if err := r.APIReader.Get(ctx, key, tm); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("read source-absent TrafficMap %s: %w", key, err)
+	}
+	if !tm.DeletionTimestamp.IsZero() ||
+		placementcontroller.TrafficMapHasController(tm) ||
+		tm.Status.SourceUID == "" ||
+		tm.Spec.Service != key.Name {
+		return nil
+	}
+	// A stateful publisher repairs this finalizer before routing requests
+	// deletion, preserving the durable claim journal until cleanup completes.
+	if trafficMapNeedsPublisherFinalizerRepair(tm) {
+		return nil
+	}
+	return r.deleteTrafficMap(ctx, key, tm)
+}
+
+func (r *Reconciler) deleteTrafficMap(
+	ctx context.Context,
+	key types.NamespacedName,
+	tm *v1beta1.TrafficMap,
+) error {
 	if tm.UID == "" {
 		return fmt.Errorf("reap TrafficMap %s: UID is empty", key)
 	}

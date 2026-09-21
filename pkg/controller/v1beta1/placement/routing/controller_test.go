@@ -977,6 +977,209 @@ func TestReconcile_ConfirmsInferenceServiceCacheMissWithAPIReader(t *testing.T) 
 	assert.True(t, metav1.IsControlledBy(tm, isvc))
 }
 
+func TestReconcile_SourceAbsentReapsOwnerlessProvenancedTrafficMap(t *testing.T) {
+	claims := []string{"v1:httproute:prod/svc-global"}
+	tm := &v1beta1.TrafficMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            testName,
+			Namespace:       testNS,
+			UID:             "traffic-map-uid",
+			ResourceVersion: "1",
+			Finalizers:      []string{placementendpoint.TrafficMapPublisherFinalizer},
+		},
+		Spec: v1beta1.TrafficMapSpec{Service: testName},
+		Status: v1beta1.TrafficMapStatus{
+			SourceUID: "deleted-source-uid",
+			Publisher: &v1beta1.TrafficMapPublisherStatus{
+				PublisherName:  "gatewayapi",
+				ClaimedTargets: claims,
+			},
+		},
+	}
+	r, c := newReconciler(t, controllerTestConfig(), tm)
+
+	reconcile(t, r)
+
+	terminating, exists := getTrafficMap(t, c)
+	require.True(t, exists, "the publisher finalizer must retain the cleanup journal")
+	require.NotNil(t, terminating.DeletionTimestamp)
+	assert.Empty(t, terminating.OwnerReferences)
+	assert.Equal(t, types.UID("deleted-source-uid"), terminating.Status.SourceUID)
+	require.NotNil(t, terminating.Status.Publisher)
+	assert.Equal(t, claims, terminating.Status.Publisher.ClaimedTargets)
+}
+
+func TestReconcile_SourceAbsentLeavesUnattributedOrControlledTrafficMap(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*v1beta1.TrafficMap)
+	}{
+		{
+			name: "ambiguous legacy map without source provenance",
+		},
+		{
+			name: "map with an existing controller",
+			configure: func(tm *v1beta1.TrafficMap) {
+				tm.Status.SourceUID = "deleted-source-uid"
+				tm.OwnerReferences = []metav1.OwnerReference{{
+					APIVersion: v1beta1.SchemeGroupVersion.String(),
+					Kind:       "InferenceService",
+					Name:       testName,
+					UID:        "deleted-source-uid",
+					Controller: k8sptr.To(true),
+				}}
+			},
+		},
+		{
+			name: "map identifying another service",
+			configure: func(tm *v1beta1.TrafficMap) {
+				tm.Status.SourceUID = "deleted-source-uid"
+				tm.Spec.Service = "other-service"
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tm := &v1beta1.TrafficMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            testName,
+					Namespace:       testNS,
+					UID:             "traffic-map-uid",
+					ResourceVersion: "1",
+					Finalizers:      []string{"example.com/hold"},
+				},
+				Spec: v1beta1.TrafficMapSpec{Service: testName},
+			}
+			if tt.configure != nil {
+				tt.configure(tm)
+			}
+			r, c := newReconciler(t, controllerTestConfig(), tm)
+
+			reconcile(t, r)
+
+			current, exists := getTrafficMap(t, c)
+			require.True(t, exists)
+			assert.True(t, current.DeletionTimestamp.IsZero())
+		})
+	}
+}
+
+func TestReconcile_SourceAbsentDefersClaimedMapUntilPublisherFinalizerRepair(t *testing.T) {
+	claims := []string{"v1:httproute:prod/svc-global"}
+	tm := &v1beta1.TrafficMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: testName, Namespace: testNS, UID: "traffic-map-uid", ResourceVersion: "1",
+		},
+		Spec: v1beta1.TrafficMapSpec{Service: testName},
+		Status: v1beta1.TrafficMapStatus{
+			SourceUID: "deleted-source-uid",
+			Publisher: &v1beta1.TrafficMapPublisherStatus{
+				PublisherName: "gatewayapi", ClaimedTargets: claims,
+			},
+		},
+	}
+	r, c := newReconciler(t, controllerTestConfig(), tm)
+
+	reconcile(t, r)
+	deferred, exists := getTrafficMap(t, c)
+	require.True(t, exists)
+	assert.True(t, deferred.DeletionTimestamp.IsZero(),
+		"a claimed map cannot be deleted before publisher finalizer repair")
+
+	deferred.Finalizers = append(deferred.Finalizers, placementendpoint.TrafficMapPublisherFinalizer)
+	require.NoError(t, c.Update(context.Background(), deferred))
+	reconcile(t, r)
+
+	terminating, exists := getTrafficMap(t, c)
+	require.True(t, exists)
+	require.NotNil(t, terminating.DeletionTimestamp)
+	require.NotNil(t, terminating.Status.Publisher)
+	assert.Equal(t, claims, terminating.Status.Publisher.ClaimedTargets)
+}
+
+func TestReconcile_SourceAbsentTrafficMapReadFailureDoesNotDelete(t *testing.T) {
+	tm := &v1beta1.TrafficMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: testName, Namespace: testNS, UID: "traffic-map-uid", ResourceVersion: "1",
+		},
+		Spec:   v1beta1.TrafficMapSpec{Service: testName},
+		Status: v1beta1.TrafficMapStatus{SourceUID: "deleted-source-uid"},
+	}
+	c := fakeclient.NewClientBuilder().WithScheme(routingScheme(t)).
+		WithStatusSubresource(&v1beta1.InferenceService{}, &v1beta1.TrafficMap{}).
+		WithObjects(tm).Build()
+	r := &Reconciler{
+		Client: c,
+		APIReader: trafficMapIdentityReader{
+			Reader: c,
+			err:    errors.New("authoritative TrafficMap read failed"),
+		},
+		Log:    log.Log,
+		Config: controllerTestConfig(),
+	}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: testName, Namespace: testNS},
+	})
+
+	require.ErrorContains(t, err, "authoritative TrafficMap read failed")
+	current, exists := getTrafficMap(t, c)
+	require.True(t, exists)
+	assert.True(t, current.DeletionTimestamp.IsZero())
+}
+
+func TestReconcile_SourceAbsentTrafficMapDeleteFencesReplacement(t *testing.T) {
+	tm := &v1beta1.TrafficMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: testName, Namespace: testNS, UID: "orphan-map-uid", ResourceVersion: "1",
+		},
+		Spec:   v1beta1.TrafficMapSpec{Service: testName},
+		Status: v1beta1.TrafficMapStatus{SourceUID: "deleted-source-uid"},
+	}
+	key := client.ObjectKeyFromObject(tm)
+	deleteCalls := 0
+	c := fakeclient.NewClientBuilder().WithScheme(routingScheme(t)).
+		WithStatusSubresource(&v1beta1.InferenceService{}, &v1beta1.TrafficMap{}).
+		WithObjects(tm).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Delete: func(ctx context.Context, cl client.WithWatch, object client.Object, opts ...client.DeleteOption) error {
+				deleteCalls++
+				deleteOptions := (&client.DeleteOptions{}).ApplyOptions(opts)
+				require.NotNil(t, deleteOptions.Preconditions)
+				require.NotNil(t, deleteOptions.Preconditions.UID)
+				require.NotNil(t, deleteOptions.Preconditions.ResourceVersion)
+				assert.Equal(t, object.GetUID(), *deleteOptions.Preconditions.UID)
+				assert.Equal(t, object.GetResourceVersion(), *deleteOptions.Preconditions.ResourceVersion)
+
+				replacement := &v1beta1.TrafficMap{}
+				require.NoError(t, cl.Get(ctx, key, replacement))
+				replacement.UID = "replacement-map-uid"
+				replacement.Spec.Service = "other-service"
+				replacement.Status.SourceUID = "replacement-source-uid"
+				require.NoError(t, cl.Update(ctx, replacement))
+				return apierrors.NewConflict(
+					schema.GroupResource{Group: v1beta1.SchemeGroupVersion.Group, Resource: "trafficmaps"},
+					object.GetName(),
+					apierrors.NewBadRequest("delete preconditions no longer match"),
+				)
+			},
+		}).
+		Build()
+	r := &Reconciler{Client: c, APIReader: c, Log: log.Log, Config: controllerTestConfig()}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key})
+
+	require.Error(t, err)
+	assert.True(t, apierrors.IsConflict(err))
+	assert.Equal(t, 1, deleteCalls)
+	replacement := &v1beta1.TrafficMap{}
+	require.NoError(t, c.Get(context.Background(), key, replacement))
+	assert.Equal(t, types.UID("replacement-map-uid"), replacement.UID)
+	assert.Equal(t, "other-service", replacement.Spec.Service)
+	assert.True(t, replacement.DeletionTimestamp.IsZero())
+}
+
 // routableCond returns the Routable condition, or nil when absent.
 func routableCond(tm *v1beta1.TrafficMap) *metav1.Condition {
 	return apimeta.FindStatusCondition(tm.Status.Conditions, v1beta1.TrafficMapRoutable)
