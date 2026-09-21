@@ -525,6 +525,16 @@ ome:
         initialDelay: 1m
         maxDelay: 30m
         multiplier: 2.0
+      # instanceReadyTimeout is how long a newly created Instance may take to
+      # become Ready before its in-flight operation (create, rollout, restart,
+      # migration, drain) is failed. A per-Component
+      # spec.<component>.lifecycle.instanceReadyTimeout always wins. The OME
+      # binary has NO built-in window: removing this field leaves a Component
+      # that sets none of its own opening operations with NO deadline — an
+      # Instance that never becomes Ready then waits for an operator, and the
+      # Component reports an InstanceReadyTimeoutUnconfigured condition plus a
+      # warning event.
+      instanceReadyTimeout: 30m
       # stuckPodGracePeriod is the wait window after pod creation before a
       # terminal kubelet waiting state escalates to Phase=Failed. Removing
       # this field disables fast escalation (the InstanceReadyTimeout backstop

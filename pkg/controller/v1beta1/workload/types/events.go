@@ -236,10 +236,17 @@ const (
 	// migration capacity policy. Distinct from RateLimited: no cap was
 	// breached, there is no cap to judge against, and the request waits
 	// rather than failing.
-	EventReasonMigrationPolicyUnconfigured   EventReason = "MigrationPolicyUnconfigured"
-	EventReasonMigrationSurgeCreateBlocked   EventReason = "MigrationSurgeCreateBlocked"
-	EventReasonMigrationFromNodeMismatch     EventReason = "MigrationFromNodeMismatch"
-	EventReasonMigrationNodeAffinityConflict EventReason = "MigrationNodeAffinityConflict"
+	EventReasonMigrationPolicyUnconfigured EventReason = "MigrationPolicyUnconfigured"
+	// EventReasonInstanceReadyTimeoutUnconfigured is a Warning fired once,
+	// on the pass that raises the matching condition, when a Component
+	// opens operations with no readiness deadline because neither
+	// spec.lifecycle.instanceReadyTimeout nor the operator's
+	// lifecycle.instanceReadyTimeout is set. Nothing is failed: an Instance
+	// that never becomes Ready waits for an operator instead.
+	EventReasonInstanceReadyTimeoutUnconfigured EventReason = "InstanceReadyTimeoutUnconfigured"
+	EventReasonMigrationSurgeCreateBlocked      EventReason = "MigrationSurgeCreateBlocked"
+	EventReasonMigrationFromNodeMismatch        EventReason = "MigrationFromNodeMismatch"
+	EventReasonMigrationNodeAffinityConflict    EventReason = "MigrationNodeAffinityConflict"
 
 	// EventReasonPodGroupReset is a Warning fired when an Instance's
 	// PodGroup is deleted so a fresh one can be built, because the gang

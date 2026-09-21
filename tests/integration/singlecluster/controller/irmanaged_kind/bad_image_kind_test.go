@@ -23,9 +23,10 @@ import (
 // rollout would sit at Phase=Updating until InstanceReadyTimeout.
 //
 // Single-replica engine with the default SurgeThenDrain strategy.
-// InstanceReadyTimeout is intentionally left at the default 30
-// minutes (operator-facing field; we never want a fast-path
-// escalator that depends on it). The expected behavior under bad
+// InstanceReadyTimeout is intentionally left to the suite's seeded
+// lifecycle.instanceReadyTimeout of 30 minutes (operator-facing
+// window; we never want a fast-path escalator that depends on it).
+// The expected behavior under bad
 // image is:
 //
 //  1. The engine bump produces a surge pod stuck in ImagePullBackOff

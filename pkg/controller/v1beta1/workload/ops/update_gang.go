@@ -875,7 +875,7 @@ func restoreGangSurgeTargetCleanup(
 			TargetRevision: targetRevision,
 			StartedAt:      now,
 			LastProgressAt: now,
-			Deadline:       metav1.NewTime(now.Add(timeout)),
+			Deadline:       workload.DeadlineAt(now, timeout),
 		},
 	}
 	sourceIdentity := status.Capture(source)

@@ -31,6 +31,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
@@ -415,7 +416,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// InstanceReadyTimeout the per-op writers read from ComponentPlan;
 	// the mode is the same effective MigrationMode the dispatcher reads
 	// from ComponentPlan (Never rejects at accept instead of parking).
-	migrationTimeout := workload.InstanceReadyTimeoutOrDefault(input.DesiredSpec.Lifecycle.InstanceReadyTimeout)
+	instanceReadyTimeout := workload.ResolveInstanceReadyTimeout(
+		input.DesiredSpec.Lifecycle.InstanceReadyTimeout, settings.InstanceReadyTimeout)
+	migrationTimeout := instanceReadyTimeout
 	migrationMode := workload.MigrationModeOrDefault(input.DesiredSpec.Lifecycle.MigrationPolicy)
 	// The horizon the status-record trim ages against. Zero
 	// (unconfigured) ages out nothing.
@@ -505,6 +508,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// Gang admission bound for this Component's PodGroups. Nil
 	// (unconfigured) leaves the derived timeout unclamped.
 	plan.GangScheduleTimeout = settings.GangScheduleTimeout
+	// Readiness backstop for this Component's operations: BuildPlan carries
+	// only the per-resource value, so the operator-configured fallback is
+	// overlaid here. Zero (neither set) opens operations with no deadline.
+	plan.InstanceReadyTimeout = instanceReadyTimeout
 	if !scaleDownPodObservationRequired(input, plan) {
 		obsmetrics.SetScaleDownActivePods(ir.Namespace, ir.Spec.ParentRef.Name, string(ir.Spec.Component), 0)
 		obsmetrics.SetScaleDownDeferredInstances(ir.Namespace, ir.Spec.ParentRef.Name, string(ir.Spec.Component), 0)
@@ -602,6 +609,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			ByInstance: query.BucketPodsByInstanceIdx(owned),
 		}
 	}
+
+	// Past every fail-closed guard, so a pass that refuses to act writes
+	// nothing at all: report whether this Component has a readiness window.
+	r.reportInstanceReadyTimeout(ctx, log, ir, input, plan.InstanceReadyTimeout)
 
 	deps := workload.Deps{
 		Client:       r.Client,
@@ -934,6 +945,11 @@ func terminalFinalizationOwned(observed workload.WorkloadObservedState) map[int3
 // consumer reads as "this window does not exist"; there are no in-code
 // defaults behind them.
 type lifecycleSettings struct {
+	// InstanceReadyTimeout is the operator-wide readiness backstop a
+	// Component that sets no lifecycle.instanceReadyTimeout of its own
+	// falls back to. Zero leaves the Component opening operations with no
+	// deadline.
+	InstanceReadyTimeout time.Duration
 	// StuckPod bounds a pod parked in a terminal kubelet waiting state.
 	// Zero skips fast escalation; the InstanceReadyTimeout backstop still
 	// fires.
@@ -967,6 +983,7 @@ func (r *Reconciler) resolveLifecycleSettings(log logr.Logger) lifecycleSettings
 		return lifecycleSettings{}
 	}
 	var settings lifecycleSettings
+	settings.InstanceReadyTimeout = r.resolveConfiguredInstanceReadyTimeout(log)
 	if settings.StuckPod, err = cfg.ToGracePeriod(); err != nil {
 		log.V(1).Info("stuck-pod grace invalid; skipping fast escalation this pass", "error", err.Error())
 	}
@@ -1004,6 +1021,67 @@ func (r *Reconciler) resolveLifecycleSettings(log logr.Logger) lifecycleSettings
 		log.V(1).Info("retry-block history unconfigured (no lifecycle.retryBlockHistoryLimit); blocks for superseded revisions are kept")
 	}
 	return settings
+}
+
+// instanceReadyTimeoutUnsetMessage explains the Component-scoped
+// InstanceReadyTimeoutUnconfigured condition and the Warning event that
+// raises it.
+const instanceReadyTimeoutUnsetMessage = "no instanceReadyTimeout is set on the Component or in lifecycle.instanceReadyTimeout; operations open with no readiness deadline"
+
+// reportInstanceReadyTimeout surfaces the Component's effective readiness
+// backstop as a condition: True (degraded) when neither the per-resource
+// lifecycle value nor the operator's supplies one, False once either does.
+// An unset window is legal — an Instance that never becomes Ready then waits
+// for an operator instead of being failed — so it is reported, never an
+// error. The Warning is edge-triggered off the standing condition, so it
+// fires once per episode rather than every pass.
+func (r *Reconciler) reportInstanceReadyTimeout(ctx context.Context, log logr.Logger,
+	ir *v1beta1.InferenceReplica, input workload.ReconcileInput, timeout time.Duration) {
+	cond := metav1.Condition{
+		Type:               string(workload.ConditionInstanceReadyTimeoutUnconfigured),
+		Status:             metav1.ConditionFalse,
+		Reason:             string(workload.ReasonInstanceReadyTimeoutConfigured),
+		Message:            fmt.Sprintf("Instance readiness deadline is %s", timeout),
+		LastTransitionTime: metav1.Now(),
+		ObservedGeneration: ir.Generation,
+	}
+	if timeout <= 0 {
+		cond.Status = metav1.ConditionTrue
+		cond.Reason = string(workload.ReasonInstanceReadyTimeoutUnconfigured)
+		cond.Message = instanceReadyTimeoutUnsetMessage
+		if !apimeta.IsStatusConditionTrue(ir.Status.Conditions, cond.Type) {
+			workloadtypes.RecordWarning(r.Recorder, workloadtypes.EventTarget(input),
+				workload.EventReasonInstanceReadyTimeoutUnconfigured,
+				"OMENative component=%s: %s", ir.Spec.Component, instanceReadyTimeoutUnsetMessage)
+		}
+	}
+	if input.WriteAggregateCondition == nil {
+		return
+	}
+	if err := input.WriteAggregateCondition(ctx, cond); err != nil {
+		log.V(1).Info("could not record the instance-ready timeout condition", "error", err.Error())
+	}
+}
+
+// resolveConfiguredInstanceReadyTimeout loads lifecycle.instanceReadyTimeout
+// from the operator ConfigMap. Absent, invalid, or unloadable config
+// resolves to 0 — a Component that sets no readiness window of its own then
+// opens operations with no deadline — with one V(1) log naming the cause;
+// there is never an in-code fallback window.
+func (r *Reconciler) resolveConfiguredInstanceReadyTimeout(log logr.Logger) time.Duration {
+	cfg, err := r.loadLifecycleConfig(log, "instance-ready timeout")
+	if cfg == nil || err != nil {
+		return 0
+	}
+	timeout, terr := cfg.ToInstanceReadyTimeout()
+	if terr != nil {
+		log.V(1).Info("instance-ready timeout invalid; no operator-wide readiness backstop this pass", "error", terr.Error())
+		return 0
+	}
+	if timeout == 0 {
+		log.V(1).Info("instance-ready timeout unconfigured (no lifecycle.instanceReadyTimeout); a Component that sets none of its own opens operations with no deadline")
+	}
+	return timeout
 }
 
 // loadLifecycleConfig fetches the lifecycle block through the shared

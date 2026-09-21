@@ -51,7 +51,7 @@ var _ = ginkgo.Describe("behavior - corrective gang rollout", ginkgo.Ordered, fu
 			WithEngineReplicas(1),
 			WithEngineWorkerSize(1),
 			WithEngineImage(badImage))
-		// The production default InstanceReadyTimeout is 30 minutes, but this
+		// The suite's configured instanceReadyTimeout is 30 minutes, but this
 		// test's corrective-replacement assertion times out after 5 minutes.
 		if fix.ISVC.Spec.Engine.Lifecycle == nil {
 			fix.ISVC.Spec.Engine.Lifecycle = &v1beta1.LifecycleSpec{}

@@ -1790,8 +1790,10 @@ func newReconcilerWithGrace(t *testing.T, grace time.Duration, objs ...client.Ob
 	t.Helper()
 	r, c := newReconciler(t, objs...)
 
-	// Wire a fake clientset + config cache that resolves the grace.
-	lifecycleCfg := fmt.Sprintf(`{"stuckPodGracePeriod":"%s"}`, grace.String())
+	// Wire a fake clientset + config cache that resolves the grace. The
+	// readiness window rides along: it has no in-code default, so a fixture
+	// that expects operation deadlines must supply one as a deployment does.
+	lifecycleCfg := fmt.Sprintf(`{"stuckPodGracePeriod":"%s","instanceReadyTimeout":"30m"}`, grace.String())
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "inferenceservice-config",

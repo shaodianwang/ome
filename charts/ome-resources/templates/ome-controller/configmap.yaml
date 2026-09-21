@@ -111,6 +111,9 @@ data:
   {{- with .updateRetry }}
   {{- $fields = append $fields (dict "updateRetry" (dict "maxAttempts" .maxAttempts "initialDelay" .initialDelay "maxDelay" .maxDelay "multiplier" .multiplier)) }}
   {{- end }}
+  {{- with .instanceReadyTimeout }}
+  {{- $fields = append $fields (dict "instanceReadyTimeout" .) }}
+  {{- end }}
   {{- with .stuckPodGracePeriod }}
   {{- $fields = append $fields (dict "stuckPodGracePeriod" .) }}
   {{- end }}

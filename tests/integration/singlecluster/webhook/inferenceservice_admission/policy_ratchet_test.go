@@ -1,8 +1,6 @@
 package inferenceservice_admission
 
 import (
-	"time"
-
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -125,8 +123,8 @@ var _ = ginkgo.Describe("ISVC admission matrix: OMENative lifecycle defaults", f
 		Expect(lc.UpdateStrategy.RollingUpdate.MaxSurge).To(HaveValue(Equal(intstr.FromString("25%"))))
 		Expect(lc.UpdateStrategy.RollingUpdate.MaxUnavailable).To(BeNil(),
 			"SurgeThenDrain is gated on MaxSurge and never reads MaxUnavailable, so the defaulter leaves it unset")
-		Expect(lc.InstanceReadyTimeout).NotTo(BeNil())
-		Expect(lc.InstanceReadyTimeout.Duration).To(Equal(30 * time.Minute))
+		Expect(lc.InstanceReadyTimeout).To(BeNil(),
+			"the readiness window is operator config the controller resolves, so admission stores no value")
 		Expect(lc.MigrationPolicy).NotTo(BeNil())
 		Expect(lc.MigrationPolicy.Mode).To(Equal(v1beta1.MigrationPolicyModeAuto))
 
@@ -162,8 +160,8 @@ var _ = ginkgo.Describe("ISVC admission matrix: OMENative lifecycle defaults", f
 			"restartPolicy is shape-dependent and must stay unset while the shape is unresolved")
 		Expect(lc.UpdateStrategy).NotTo(BeNil())
 		Expect(lc.UpdateStrategy.Type).To(Equal(v1beta1.UpdateStrategySurgeThenDrain))
-		Expect(lc.InstanceReadyTimeout).NotTo(BeNil())
-		Expect(lc.InstanceReadyTimeout.Duration).To(Equal(30 * time.Minute))
+		Expect(lc.InstanceReadyTimeout).To(BeNil(),
+			"the readiness window is operator config the controller resolves, so admission stores no value")
 		Expect(lc.MigrationPolicy).NotTo(BeNil())
 		Expect(lc.MigrationPolicy.Mode).To(Equal(v1beta1.MigrationPolicyModeAuto))
 	})

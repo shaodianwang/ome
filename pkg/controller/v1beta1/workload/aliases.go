@@ -84,6 +84,11 @@ var (
 	NoSoonerThan = types.NoSoonerThan
 	RequeueNow   = types.RequeueNow
 
+	// DeadlineAt is re-exported so every per-op writer stamps an operation
+	// deadline — including the "no window configured" case — through one
+	// implementation.
+	DeadlineAt = types.DeadlineAt
+
 	ErrGangNameUnusable           = types.ErrGangNameUnusable
 	ErrStatusOwnerGone            = types.ErrStatusOwnerGone
 	ErrStatusMutationPrecondition = types.ErrStatusMutationPrecondition
@@ -183,6 +188,8 @@ const (
 	EventReasonMaybeNoGangScheduler          = types.EventReasonMaybeNoGangScheduler
 	EventReasonGangSplitRisk                 = types.EventReasonGangSplitRisk
 
+	EventReasonInstanceReadyTimeoutUnconfigured = types.EventReasonInstanceReadyTimeoutUnconfigured
+
 	RetryBlockBackoff         = types.RetryBlockBackoff
 	RetryBlockHeld            = types.RetryBlockHeld
 	RetryBlockRetryInProgress = types.RetryBlockRetryInProgress
@@ -201,6 +208,10 @@ const (
 	ConditionMigrationPolicyUnconfigured = types.ConditionMigrationPolicyUnconfigured
 	ReasonMigrationCapacityUnconfigured  = types.ReasonMigrationCapacityUnconfigured
 	ReasonMigrationCapacityConfigured    = types.ReasonMigrationCapacityConfigured
+
+	ConditionInstanceReadyTimeoutUnconfigured = types.ConditionInstanceReadyTimeoutUnconfigured
+	ReasonInstanceReadyTimeoutUnconfigured    = types.ReasonInstanceReadyTimeoutUnconfigured
+	ReasonInstanceReadyTimeoutConfigured      = types.ReasonInstanceReadyTimeoutConfigured
 
 	ReasonPodGroupCRDNotInstalled = types.ReasonPodGroupCRDNotInstalled
 	ReasonGangSchedulingAvailable = types.ReasonGangSchedulingAvailable

@@ -103,6 +103,7 @@ func SeedDefaultConfigMaps(ctx context.Context, c client.Client) error {
   "scaleDownPodBatchSize": 100,
   "revisionHistoryLimit": 10,
   "retryBlockHistoryLimit": 3,
+  "instanceReadyTimeout": "30m",
   "audit": {"maxInFlightMigrations": 3, "maxMigrationsPerWindow": 10, "window": "1h"},
   "requeue": {"operation": "5s", "gate": "3s"},
   "gangScheduleTimeout": {"min": "60s", "max": "600s"}

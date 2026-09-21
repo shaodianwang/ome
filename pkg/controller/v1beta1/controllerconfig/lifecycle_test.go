@@ -510,6 +510,82 @@ func TestLifecycleConfig_ToGracePeriod(t *testing.T) {
 	}
 }
 
+// TestLifecycleConfig_ToInstanceReadyTimeout pins the validation contract
+// for the operator-wide readiness backstop: a configured duration parses,
+// an absent key yields zero (unconfigured, not an error, so operations
+// open with no deadline), and any non-positive or unparsable value is an
+// error the caller treats as unconfigured.
+func TestLifecycleConfig_ToInstanceReadyTimeout(t *testing.T) {
+	t.Run("configured value parses", func(t *testing.T) {
+		cfg := &LifecycleConfig{InstanceReadyTimeout: "30m"}
+		timeout, err := cfg.ToInstanceReadyTimeout()
+		require.NoError(t, err)
+		assert.Equal(t, 30*time.Minute, timeout)
+	})
+
+	t.Run("nil receiver yields zero, no error", func(t *testing.T) {
+		var cfg *LifecycleConfig
+		timeout, err := cfg.ToInstanceReadyTimeout()
+		require.NoError(t, err)
+		assert.Equal(t, time.Duration(0), timeout)
+	})
+
+	t.Run("absent key yields zero, no error", func(t *testing.T) {
+		cfg := &LifecycleConfig{InstanceReadyTimeout: ""}
+		timeout, err := cfg.ToInstanceReadyTimeout()
+		require.NoError(t, err)
+		assert.Equal(t, time.Duration(0), timeout)
+	})
+
+	invalidTimeouts := []struct {
+		name  string
+		value string
+	}{
+		{"invalid duration", "not-a-duration"},
+		{"zero duration", "0s"},
+		{"negative duration", "-5m"},
+	}
+	for _, tt := range invalidTimeouts {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &LifecycleConfig{InstanceReadyTimeout: tt.value}
+			timeout, err := cfg.ToInstanceReadyTimeout()
+			assert.Error(t, err)
+			assert.Equal(t, time.Duration(0), timeout)
+		})
+	}
+}
+
+// TestNewLifecycleConfig_InstanceReadyTimeout pins the load contract for
+// the instanceReadyTimeout key: present + valid parses, absent leaves the
+// field empty (no error).
+func TestNewLifecycleConfig_InstanceReadyTimeout(t *testing.T) {
+	load := func(t *testing.T, lifecycle string) *LifecycleConfig {
+		t.Helper()
+		clientset := fake.NewSimpleClientset()
+		configMap := &v1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      constants.InferenceServiceConfigMapName,
+				Namespace: constants.OMENamespace,
+			},
+			Data: map[string]string{LifecycleConfigName: lifecycle},
+		}
+		_, err := clientset.CoreV1().ConfigMaps(constants.OMENamespace).Create(context.TODO(), configMap, metav1.CreateOptions{})
+		require.NoError(t, err)
+		cfg, err := NewLifecycleConfig(clientset)
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+		return cfg
+	}
+
+	t.Run("valid instanceReadyTimeout key", func(t *testing.T) {
+		assert.Equal(t, "30m", load(t, `{"instanceReadyTimeout":"30m"}`).InstanceReadyTimeout)
+	})
+
+	t.Run("lifecycle key without instanceReadyTimeout yields empty field", func(t *testing.T) {
+		assert.Equal(t, "", load(t, `{}`).InstanceReadyTimeout)
+	})
+}
+
 // TestLifecycleConfig_ToUnschedulableGracePeriod pins the validation
 // contract for the scheduler-hold escalation window: a configured
 // duration parses, an absent key yields zero (unconfigured, not an

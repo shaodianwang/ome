@@ -2400,7 +2400,15 @@ func newAdmissionHarness(t *testing.T, multiPod bool, reject func(name string, n
 		t.Fatalf("EnsureControllerRevision: %v", err)
 	}
 	h.target = cr
-	h.desired = workload.WorkloadDesiredSpec{Replicas: 1, PodSpec: spec}
+	// BuildPlan carries only the per-resource readiness window — the operator
+	// ConfigMap fallback is the adapter's job — so the harness sets one.
+	h.desired = workload.WorkloadDesiredSpec{
+		Replicas: 1,
+		PodSpec:  spec,
+		Lifecycle: workload.Lifecycle{
+			InstanceReadyTimeout: &metav1.Duration{Duration: 30 * time.Minute},
+		},
+	}
 	if multiPod {
 		h.desired.MultiPod = true
 		h.desired.WorkerPodSpec = workerSpec

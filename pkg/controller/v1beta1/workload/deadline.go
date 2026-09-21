@@ -26,7 +26,8 @@ const DeadlineExceededReason = "DeadlineExceeded"
 // an in-flight Operation whose Deadline lies in the past. A zero
 // Deadline (the metav1.Time zero value) is treated as "never expires" so
 // an unset field can't trip the timeout — see plan.go's
-// InstanceReadyTimeoutOrDefault for where the deadline window comes from.
+// ResolveInstanceReadyTimeout for where the deadline window comes from,
+// and types.DeadlineAt for the unconfigured case that stamps the zero.
 func operationDeadlinePassed(s *InstanceStatus, now time.Time) bool {
 	if s == nil || s.Operation == nil {
 		return false
@@ -79,6 +80,9 @@ func PodAdmissionGated(pod *corev1.Pod) bool {
 //   - released with a live (non-zero) deadline -> untouched, so the
 //     no-hold path behaves exactly as the per-op writer stamped it.
 //
+// A non-positive timeout means no readiness window is configured at either
+// level, so there is no clock to restart and the zero deadline stands.
+//
 // Edge-triggered: it writes only on the hold-enter (park) and hold-exit
 // (restart) transitions — a workload queued for hours does not churn its
 // status.
@@ -95,8 +99,8 @@ func ReconcileGatedDeadlines(ctx context.Context, input ReconcileInput, instance
 			if err := status.StampDeadline(ctx, input, s.Index, metav1.Time{}); err != nil {
 				return fmt.Errorf("park deadline for held instance %d: %w", s.Index, err)
 			}
-		case !held && s.Operation.Deadline.IsZero():
-			if err := status.StampDeadline(ctx, input, s.Index, metav1.NewTime(now.Add(timeout))); err != nil {
+		case !held && s.Operation.Deadline.IsZero() && timeout > 0:
+			if err := status.StampDeadline(ctx, input, s.Index, types.DeadlineAt(metav1.NewTime(now), timeout)); err != nil {
 				return fmt.Errorf("restart deadline for released instance %d: %w", s.Index, err)
 			}
 		}

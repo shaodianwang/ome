@@ -53,13 +53,17 @@ func BuildPlan(component ComponentType, desired WorkloadDesiredSpec, observed Wo
 	lifecycle := desired.Lifecycle
 
 	return ComponentPlan{
-		Component:            component,
-		Replicas:             replicas,
-		Instances:            instances,
-		RestartPolicy:        restartPolicyOrDefault(lifecycle.RestartPolicy, desired.MultiPod),
-		UpdateStrategy:       updateStrategyWithDefaults(lifecycle.UpdateStrategy),
-		ReadyPolicy:          readyPolicyOrDefault(lifecycle.ReadyPolicy, desired.MultiPod),
-		InstanceReadyTimeout: InstanceReadyTimeoutOrDefault(lifecycle.InstanceReadyTimeout),
+		Component:      component,
+		Replicas:       replicas,
+		Instances:      instances,
+		RestartPolicy:  restartPolicyOrDefault(lifecycle.RestartPolicy, desired.MultiPod),
+		UpdateStrategy: updateStrategyWithDefaults(lifecycle.UpdateStrategy),
+		ReadyPolicy:    readyPolicyOrDefault(lifecycle.ReadyPolicy, desired.MultiPod),
+		// Per-resource value only: the operator-configured fallback lives in
+		// the ConfigMap the adapter reads, so the adapter overlays the
+		// resolved window on the returned plan the same way it overlays
+		// GangScheduleTimeout. Zero here means "no per-resource window".
+		InstanceReadyTimeout: ResolveInstanceReadyTimeout(lifecycle.InstanceReadyTimeout, 0),
 		MinReadySeconds:      max(desired.MinReadySeconds, 0),
 		MigrationMode:        MigrationModeOrDefault(lifecycle.MigrationPolicy),
 		Paused:               desired.Paused,
@@ -140,16 +144,18 @@ func updateStrategyWithDefaults(s *UpdateStrategy) UpdateStrategy {
 	return out
 }
 
-// InstanceReadyTimeoutOrDefault resolves the effective per-Component
-// InstanceReadyTimeout: the configured lifecycle value, or the 30m
-// default when unset. Exported so adapters stamping deadlines outside
-// BuildPlan (e.g. migration accept) resolve the identical value the
-// per-op writers read from ComponentPlan.InstanceReadyTimeout.
-func InstanceReadyTimeoutOrDefault(d *metav1.Duration) time.Duration {
-	if d == nil {
-		return 30 * time.Minute
+// ResolveInstanceReadyTimeout resolves the effective per-Component
+// InstanceReadyTimeout: the per-resource lifecycle value when set,
+// otherwise the operator-configured window (lifecycle.instanceReadyTimeout).
+// Zero means neither level supplies one and operations open with no
+// deadline. Exported so adapters stamping deadlines outside BuildPlan
+// (e.g. migration accept) resolve the identical value the per-op writers
+// read from ComponentPlan.InstanceReadyTimeout.
+func ResolveInstanceReadyTimeout(spec *metav1.Duration, configured time.Duration) time.Duration {
+	if spec != nil && spec.Duration > 0 {
+		return spec.Duration
 	}
-	return d.Duration
+	return configured
 }
 
 // MigrationModeOrDefault resolves the effective per-Component

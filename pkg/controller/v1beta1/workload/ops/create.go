@@ -992,7 +992,7 @@ func retireSupersededCreateMutation(input workload.ReconcileInput, idx int32, ex
 		Step:           createStepCreatePods,
 		StartedAt:      now,
 		LastProgressAt: now,
-		Deadline:       metav1.NewTime(now.Add(timeout)),
+		Deadline:       workload.DeadlineAt(now, timeout),
 		TargetRevision: target.Name,
 	}
 	from := expectedTarget
@@ -1314,7 +1314,7 @@ func createStatusCreatingMutation(idx int32, incarnation int64, timeout time.Dur
 			Step:           createStepCreatePods,
 			StartedAt:      now,
 			LastProgressAt: now,
-			Deadline:       metav1.NewTime(now.Add(timeout)),
+			Deadline:       workload.DeadlineAt(now, timeout),
 			TargetRevision: targetRev,
 		}
 		return true

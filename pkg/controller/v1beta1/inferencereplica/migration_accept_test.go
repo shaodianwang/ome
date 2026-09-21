@@ -359,6 +359,9 @@ func TestReconcile_ConsumesMigrationRequestAnnotation(t *testing.T) {
 	ir := baselineIR("llama-engine", "default", 1)
 	parent := migrationParent(map[string]string{key: validMigrationRequestJSON("engine", 0)}, false)
 	r, c, _, _, _ := newConsumeFixture(t, ir, parent)
+	// The IR carries no instanceReadyTimeout of its own, so the entry's
+	// Deadline must come from the operator's lifecycle.instanceReadyTimeout.
+	withLifecycleConfig(r, `{"instanceReadyTimeout":"20m"}`)
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace},
@@ -371,7 +374,7 @@ func TestReconcile_ConsumesMigrationRequestAnnotation(t *testing.T) {
 	entry := fresh.Status.Migrations[0]
 	g.Expect(entry.RequestUUID).To(gomega.Equal("uuid-wire"))
 	g.Expect(entry.Deadline.Time).To(
-		gomega.BeTemporally("==", migrationTestNow.Add(workload.InstanceReadyTimeoutOrDefault(nil))))
+		gomega.BeTemporally("==", migrationTestNow.Add(20*time.Minute)))
 	g.Expect(entry.Phase).To(gomega.Equal(v1beta1.MigrationPhaseFailed),
 		"same-pass dispatch must reject a migration of a nonexistent instance onto the entry")
 	g.Expect(entry.Message).To(gomega.ContainSubstring("source InstanceStatus missing"))

@@ -127,17 +127,21 @@ func (r *Reconciler) reconcileTeardown(ctx context.Context, log logr.Logger, ir 
 	// The same-target update retry policy is nil: the Update pass never
 	// runs in teardown, and neither does the escalation pass (zero
 	// escalation windows / zero relocation budget — wedge escalation
-	// belongs to the Delete pipeline's lifecycle.forceDelete). The rest
-	// of the zero lifecycleSettings is safe for the same reason: the
-	// surge settle window and gang bounds belong to passes teardown does
-	// not run, the migration caps gate admission of work a deleting IR
-	// accepts none of, the retry-block history cap only prunes on a
-	// RetryBlock write teardown never makes, and the requeue cadence is
-	// not the Delete pipeline's — it paces itself with
-	// ScaleDownRequeueInterval plus the force-delete and teardown
-	// deadlines, set below. Coordination group defaults are likewise
-	// irrelevant: teardown never consults the update gate.
-	input := r.buildReconcileInput(ctx, ir, parent, nil, forceDeletePolicy, lifecycleSettings{}, 0, coordination.GroupDefaults{})
+	// belongs to the Delete pipeline's lifecycle.forceDelete). Only the
+	// readiness backstop is carried: the Drain operation stamps its
+	// deadline from it, so teardown resolves it from the same two levels
+	// the reconcile path does. The rest of the zero lifecycleSettings is
+	// safe for the same reason as the retry policy: the surge settle
+	// window and gang bounds belong to passes teardown does not run, the
+	// migration caps gate admission of work a deleting IR accepts none
+	// of, the retry-block history cap only prunes on a RetryBlock write
+	// teardown never makes, and the requeue cadence is not the Delete
+	// pipeline's — it paces itself with ScaleDownRequeueInterval plus the
+	// force-delete and teardown deadlines, set below. Coordination group
+	// defaults are likewise irrelevant: teardown never consults the
+	// update gate.
+	settings := lifecycleSettings{InstanceReadyTimeout: r.resolveConfiguredInstanceReadyTimeout(log)}
+	input := r.buildReconcileInput(ctx, ir, parent, nil, forceDeletePolicy, settings, 0, coordination.GroupDefaults{})
 	input.Teardown = true
 	input.ScaleDownPodBatchSize = r.ScaleDownPodBatchSize
 	input.ScaleDownRequeueInterval = r.ScaleDownRequeueInterval
@@ -146,6 +150,8 @@ func (r *Reconciler) reconcileTeardown(ctx context.Context, log logr.Logger, ir 
 	if perr != nil {
 		return ctrl.Result{}, fmt.Errorf("InferenceReplica teardown: build plan (ir=%s/%s): %w", ir.Namespace, ir.Name, perr)
 	}
+	plan.InstanceReadyTimeout = workload.ResolveInstanceReadyTimeout(
+		input.DesiredSpec.Lifecycle.InstanceReadyTimeout, settings.InstanceReadyTimeout)
 	pods, lerr := query.LiveListPodsForComponent(ctx, r.APIReader, ir.Namespace, ir.Spec.ParentRef.Name,
 		v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component))
 	if lerr != nil {

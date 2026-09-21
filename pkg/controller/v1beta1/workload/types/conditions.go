@@ -27,6 +27,13 @@ const (
 	// reports the last capacity judgment made for a pending request:
 	// the pass that judges one under a configured policy sets it False.
 	ConditionMigrationPolicyUnconfigured ConditionType = "MigrationPolicyUnconfigured"
+
+	// ConditionInstanceReadyTimeoutUnconfigured is True when neither the
+	// Component's spec.lifecycle.instanceReadyTimeout nor the operator's
+	// lifecycle.instanceReadyTimeout supplies a readiness backstop, so every
+	// operation the Component opens runs with no deadline and an Instance
+	// that never becomes Ready waits instead of being failed.
+	ConditionInstanceReadyTimeoutUnconfigured ConditionType = "InstanceReadyTimeoutUnconfigured"
 )
 
 const (
@@ -44,4 +51,11 @@ const (
 	// ReasonMigrationCapacityConfigured stamps Status=False: the pass
 	// judged a request against the operator's caps.
 	ReasonMigrationCapacityConfigured ConditionReason = "MigrationCapacityConfigured"
+	// ReasonInstanceReadyTimeoutUnconfigured stamps the
+	// InstanceReadyTimeoutUnconfigured condition when no readiness backstop
+	// is supplied at either level.
+	ReasonInstanceReadyTimeoutUnconfigured ConditionReason = "InstanceReadyTimeoutUnconfigured"
+	// ReasonInstanceReadyTimeoutConfigured stamps Status=False: an effective
+	// readiness window is in force for the Component.
+	ReasonInstanceReadyTimeoutConfigured ConditionReason = "InstanceReadyTimeoutConfigured"
 )

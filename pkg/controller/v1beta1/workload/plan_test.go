@@ -165,7 +165,8 @@ func TestBuildPlan_SinglePod_DefaultsFromDefaulter(t *testing.T) {
 
 func TestBuildPlan_SinglePod_InlineDefaultsWhenWebhookSkipped(t *testing.T) {
 	// Simulates a pre-defaulter object — adapter projected an empty
-	// lifecycle. BuildPlan applies the same defaults inline.
+	// lifecycle. BuildPlan applies the same defaults inline, except for the
+	// readiness window, which is operator configuration the adapter overlays.
 	desired := singlePodDesired(1, Lifecycle{})
 	plan, err := BuildPlan(ComponentEngine, desired, WorkloadObservedState{})
 	if err != nil {
@@ -188,8 +189,8 @@ func TestBuildPlan_SinglePod_InlineDefaultsWhenWebhookSkipped(t *testing.T) {
 		!*plan.UpdateStrategy.InPlaceUpdateStrategy.MarkNotReadyDuringLifecycle {
 		t.Errorf("gracePeriodSeconds: got %+v want 30", plan.UpdateStrategy.InPlaceUpdateStrategy)
 	}
-	if plan.InstanceReadyTimeout != 30*time.Minute {
-		t.Errorf("InstanceReadyTimeout: got %v want 30m", plan.InstanceReadyTimeout)
+	if plan.InstanceReadyTimeout != 0 {
+		t.Errorf("InstanceReadyTimeout: got %v want 0 (no per-resource window; the adapter overlays the operator's)", plan.InstanceReadyTimeout)
 	}
 	if plan.MigrationMode != MigrationModeAuto {
 		t.Errorf("MigrationMode: got %q want auto", plan.MigrationMode)
@@ -1095,5 +1096,49 @@ func TestBuildPlan_CarriesMinReadySeconds(t *testing.T) {
 	}
 	if plan.MinReadySeconds != 0 {
 		t.Fatalf("MinReadySeconds: got %d want 0", plan.MinReadySeconds)
+	}
+}
+
+// TestResolveInstanceReadyTimeout pins the precedence of the readiness
+// backstop: the per-resource lifecycle value wins over the operator's
+// configured window, the configured window covers a resource that sets
+// none, and zero — neither level supplying one — is the honest
+// "unconfigured" answer rather than a number baked into the binary.
+func TestResolveInstanceReadyTimeout(t *testing.T) {
+	tests := []struct {
+		name       string
+		spec       *metav1.Duration
+		configured time.Duration
+		want       time.Duration
+	}{
+		{"spec wins over config", &metav1.Duration{Duration: 5 * time.Minute}, 30 * time.Minute, 5 * time.Minute},
+		{"spec alone", &metav1.Duration{Duration: 5 * time.Minute}, 0, 5 * time.Minute},
+		{"config covers an unset spec", nil, 30 * time.Minute, 30 * time.Minute},
+		{"neither is set", nil, 0, 0},
+		{"non-positive spec falls through to config", &metav1.Duration{}, 30 * time.Minute, 30 * time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ResolveInstanceReadyTimeout(tt.spec, tt.configured); got != tt.want {
+				t.Errorf("ResolveInstanceReadyTimeout: got %v want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDeadlineAt pins the unconfigured case: with no readiness window an
+// operation must open with NO deadline (the zero Time the backstop reads
+// as "never expires"), never one equal to its own start time, which the
+// very next pass would read as already elapsed.
+func TestDeadlineAt(t *testing.T) {
+	now := metav1.NewTime(time.Now().Truncate(time.Second))
+
+	if got := DeadlineAt(now, 30*time.Minute); !got.Time.Equal(now.Add(30 * time.Minute)) {
+		t.Errorf("configured window: got %v want %v", got, now.Add(30*time.Minute))
+	}
+	for _, timeout := range []time.Duration{0, -time.Minute} {
+		if got := DeadlineAt(now, timeout); !got.IsZero() {
+			t.Errorf("timeout %v: got deadline %v want the zero Time", timeout, got)
+		}
 	}
 }

@@ -593,8 +593,8 @@ func assertUnresolvedShapePolicies(t *testing.T, lifecycle *v1beta1.LifecycleSpe
 	}
 	require.NotNil(t, lifecycle.UpdateStrategy)
 	assert.Equal(t, v1beta1.UpdateStrategySurgeThenDrain, lifecycle.UpdateStrategy.Type)
-	require.NotNil(t, lifecycle.InstanceReadyTimeout)
-	assert.Equal(t, 30*time.Minute, lifecycle.InstanceReadyTimeout.Duration)
+	assert.Nil(t, lifecycle.InstanceReadyTimeout,
+		"the readiness window is operator config the controller resolves; admission must not freeze one onto the object")
 	require.NotNil(t, lifecycle.MigrationPolicy)
 	assert.Equal(t, v1beta1.MigrationPolicyModeAuto, lifecycle.MigrationPolicy.Mode)
 }
@@ -662,8 +662,8 @@ func TestDefaultOMENativeComponent(t *testing.T) {
 		require.NotNil(t, spec.ReadyPolicy)
 		assert.Equal(t, v1beta1.InstanceReadyPolicyAllPodReady, *spec.ReadyPolicy)
 
-		require.NotNil(t, spec.InstanceReadyTimeout)
-		assert.Equal(t, 30*time.Minute, spec.InstanceReadyTimeout.Duration)
+		assert.Nil(t, spec.InstanceReadyTimeout,
+			"the readiness window comes from lifecycle.instanceReadyTimeout, so admission leaves the field unset")
 
 		require.NotNil(t, spec.MigrationPolicy)
 		assert.Equal(t, v1beta1.MigrationPolicyModeAuto, spec.MigrationPolicy.Mode)

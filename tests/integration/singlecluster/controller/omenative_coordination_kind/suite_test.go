@@ -36,7 +36,7 @@ var (
 const kindLifecycleConfig = `{"scaleUpPodBatchSize":100,"scaleDownPodBatchSize":2,"scaleDownRequeueInterval":"5s",` +
 	`"requeue":{"operation":"5s","gate":"3s"},` +
 	`"gangScheduleTimeout":{"min":"60s","max":"600s"},` +
-	`"revisionHistoryLimit":10,"retryBlockHistoryLimit":3,` +
+	`"revisionHistoryLimit":10,"retryBlockHistoryLimit":3,"instanceReadyTimeout":"30m",` +
 	`"audit":{"maxInFlightMigrations":3,"maxMigrationsPerWindow":10,"window":"1h"}}`
 
 func setupOMENativeCoordinationManager(ctx context.Context, mgr ctrl.Manager) error {

@@ -66,7 +66,7 @@ func MigrationPinMutation(input types.ReconcileInput, idx, siblingIdx int32, rol
 			SurgeIndex:     &siblingPtr,
 			StartedAt:      now,
 			LastProgressAt: now,
-			Deadline:       metav1.NewTime(now.Add(timeout)),
+			Deadline:       types.DeadlineAt(now, timeout),
 		}
 		return true
 	}}

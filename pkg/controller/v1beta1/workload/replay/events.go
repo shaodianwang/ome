@@ -548,7 +548,7 @@ func applyMigrateRequest(_ context.Context, d *driver, ev TimelineEvent) (string
 		Reason:         ev.Args.Reason,
 		Phase:          types.MigrationPhaseAccepted,
 		StartedAt:      now,
-		Deadline:       metav1.NewTime(now.Add(timeout)),
+		Deadline:       types.DeadlineAt(now, timeout),
 	})
 	return fmt.Sprintf("uuid=%s instance=%d fromNode=%s", d.norm.uid(uuid), *ev.Args.Instance, orNil(ev.Args.FromNode)), nil
 }

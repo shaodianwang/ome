@@ -277,7 +277,7 @@ func admitDeleteBatch(ctx context.Context, input workload.ReconcileInput, plan w
 			Step:           "Drain",
 			StartedAt:      now,
 			LastProgressAt: now,
-			Deadline:       metav1.NewTime(now.Add(plan.InstanceReadyTimeout)),
+			Deadline:       workload.DeadlineAt(now, plan.InstanceReadyTimeout),
 		}
 		index := candidate.status.Index
 		incarnation := candidate.status.Incarnation

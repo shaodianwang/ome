@@ -2,7 +2,23 @@ package types
 
 import (
 	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+// DeadlineAt is the Operation.Deadline an operation opening at now runs
+// under. A non-positive timeout means no readiness backstop is in force —
+// neither the per-Component spec.lifecycle.instanceReadyTimeout nor the
+// operator's lifecycle.instanceReadyTimeout is set — and yields the zero
+// Time, which the deadline predicate reads as "never expires". Without
+// this the operation would open on a deadline equal to its own start and
+// expire on the next pass.
+func DeadlineAt(now metav1.Time, timeout time.Duration) metav1.Time {
+	if timeout <= 0 {
+		return metav1.Time{}
+	}
+	return metav1.NewTime(now.Add(timeout))
+}
 
 // ComponentPlan is the desired Component → Instance → Runner → Pod
 // shape computed each reconcile from desired + observed state. Not
@@ -34,7 +50,10 @@ type ComponentPlan struct {
 	ReadyPolicy InstanceReadyPolicy
 
 	// InstanceReadyTimeout is the wait ceiling on a newly-created
-	// Instance becoming Ready.
+	// Instance becoming Ready: the per-Component
+	// spec.lifecycle.instanceReadyTimeout, else the operator's
+	// lifecycle.instanceReadyTimeout. Zero means neither is configured and
+	// operations open with no deadline.
 	InstanceReadyTimeout time.Duration
 
 	// GangScheduleTimeout bounds the per-PodGroup schedule timeout that a

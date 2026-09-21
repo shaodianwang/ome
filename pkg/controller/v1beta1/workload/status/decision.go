@@ -188,7 +188,7 @@ func StampUpdatingInPlace(ctx context.Context, input types.ReconcileInput, idx i
 			Strategy:       strategy,
 			StartedAt:      now,
 			LastProgressAt: now,
-			Deadline:       metav1.NewTime(now.Add(timeout)),
+			Deadline:       types.DeadlineAt(now, timeout),
 		}
 		return true
 	})
@@ -232,7 +232,7 @@ func StampRecreating(ctx context.Context, input types.ReconcileInput, idx int32,
 			Reason:         reason,
 			StartedAt:      now,
 			LastProgressAt: now,
-			Deadline:       metav1.NewTime(now.Add(timeout)),
+			Deadline:       types.DeadlineAt(now, timeout),
 		}
 		return true
 	})
@@ -277,7 +277,7 @@ func StampRestarting(ctx context.Context, input types.ReconcileInput, idx int32,
 			Reason:         reason,
 			StartedAt:      now,
 			LastProgressAt: now,
-			Deadline:       metav1.NewTime(now.Add(timeout)),
+			Deadline:       types.DeadlineAt(now, timeout),
 			TargetRevision: pinned,
 		}
 		return true
@@ -355,7 +355,7 @@ func StampSurging(ctx context.Context, input types.ReconcileInput, idx int32, ta
 			Strategy:       strategy,
 			StartedAt:      now,
 			LastProgressAt: now,
-			Deadline:       metav1.NewTime(now.Add(timeout)),
+			Deadline:       types.DeadlineAt(now, timeout),
 		}
 		return true
 	})

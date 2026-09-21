@@ -66,7 +66,7 @@ func stampGangSurgeSource(s *types.InstanceStatus, idx, surgeIdx int32, targetRe
 		Strategy:       strategy,
 		StartedAt:      now,
 		LastProgressAt: now,
-		Deadline:       metav1.NewTime(now.Add(timeout)),
+		Deadline:       types.DeadlineAt(now, timeout),
 	}
 	return true
 }
@@ -85,7 +85,7 @@ func stampGangSurgeTarget(s *types.InstanceStatus, surgeIdx int32, targetRev str
 		TargetRevision: targetRev,
 		StartedAt:      now,
 		LastProgressAt: now,
-		Deadline:       metav1.NewTime(now.Add(timeout)),
+		Deadline:       types.DeadlineAt(now, timeout),
 	}
 	return true
 }
@@ -227,7 +227,7 @@ func RestoreGangSurgeTarget(
 			TargetRevision: targetRev,
 			StartedAt:      now,
 			LastProgressAt: now,
-			Deadline:       metav1.NewTime(now.Add(timeout)),
+			Deadline:       types.DeadlineAt(now, timeout),
 		},
 	}
 	sourceIdentity := Capture(source)

@@ -548,6 +548,15 @@ type LifecycleConfig struct {
 	// means unconfigured: the workload layer fails safe (the first same-target
 	// failure Holds), never a silent fallback to baked-in numbers.
 	UpdateRetry *UpdateRetryConfig `json:"updateRetry,omitempty"`
+	// InstanceReadyTimeout is how long a newly created Instance may take to
+	// become Ready before its in-flight operation is failed. A duration
+	// string ("30m"). A per-Component
+	// spec.<component>.lifecycle.instanceReadyTimeout always wins. There is
+	// intentionally NO in-code default: absence at both levels means the
+	// backstop does not exist and operations open with no deadline, which
+	// the Component reports as a warning condition rather than being failed
+	// against a fabricated window.
+	InstanceReadyTimeout string `json:"instanceReadyTimeout,omitempty"`
 	// StuckPodGracePeriod is the wait window after pod creation before a
 	// terminal kubelet waiting state escalates to Phase=Failed. A duration
 	// string ("60s"); absence or parse failure disables fast escalation
@@ -933,6 +942,24 @@ func (c *LifecycleConfig) ToGracePeriod() (time.Duration, error) {
 	}
 	if d <= 0 {
 		return 0, fmt.Errorf("invalid lifecycle.stuckPodGracePeriod: must be > 0, got %s", d)
+	}
+	return d, nil
+}
+
+// ToInstanceReadyTimeout validates and parses InstanceReadyTimeout. A nil
+// receiver or absent key is NOT an error — it means the operator supplied
+// no Component-wide readiness backstop, which the caller distinguishes
+// from invalid by the returned zero value.
+func (c *LifecycleConfig) ToInstanceReadyTimeout() (time.Duration, error) {
+	if c == nil || c.InstanceReadyTimeout == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(c.InstanceReadyTimeout)
+	if err != nil {
+		return 0, fmt.Errorf("invalid lifecycle.instanceReadyTimeout %q: %w", c.InstanceReadyTimeout, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("invalid lifecycle.instanceReadyTimeout: must be > 0, got %s", d)
 	}
 	return d, nil
 }

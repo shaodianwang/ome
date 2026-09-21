@@ -2,9 +2,7 @@ package isvc
 
 import (
 	"context"
-	"time"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -328,9 +326,11 @@ func defaultOMENativeComponent(ext *v1beta1.ComponentExtensionSpec, shape compon
 		spec.ReadyPolicy = &rp
 	}
 
-	if spec.InstanceReadyTimeout == nil {
-		spec.InstanceReadyTimeout = &metav1.Duration{Duration: 30 * time.Minute}
-	}
+	// InstanceReadyTimeout is deliberately not stamped. The readiness
+	// backstop is operator configuration (lifecycle.instanceReadyTimeout in
+	// the inferenceservice-config ConfigMap); stamping a value here would
+	// freeze it onto the object and make the configured one unreachable.
+	// Leaving it nil is what lets the controller fall back to config.
 
 	if spec.MigrationPolicy == nil {
 		spec.MigrationPolicy = &v1beta1.MigrationPolicy{}
