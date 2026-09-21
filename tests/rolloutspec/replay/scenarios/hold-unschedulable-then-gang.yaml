@@ -1,0 +1,40 @@
+# Both escalation-pass hold authorities on one gang row, the pod-level
+# one first. A member the scheduler cannot place records Unschedulable;
+# the group's name then goes into collection, and the gang arm does not
+# take a row another authority is already reporting. When the member is
+# placed the scheduler releases its own token and the gang arm takes the
+# row in the same pass — releases run before any mark exactly so the row
+# is never left unheld for a pass, which would re-arm the parked clock.
+scenario: hold-unschedulable-then-gang
+cells:
+  - instance/Create/CreatePods/pod.unschedulable[source]/before
+  - instance/Create/CreatePods/gang.podGroup[Terminating]/before
+  - instance/Create/CreatePods/pod.scheduled[source]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: the scheduler cannot place the leader, and it is the first authority on the row
+    events:
+      - pod.unschedulable[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the group's name goes into collection, and the gang arm does not take a row already reporting Unschedulable
+    events:
+      - gang.podGroup[Terminating]: {instance: 0}
+  - tick: 4
+    note: the leader is placed, so the scheduler releases its token and the gang arm takes the row in the same pass
+    events:
+      - pod.scheduled[source]: {pod: {index: 0, runner: leader}}

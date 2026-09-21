@@ -1,0 +1,43 @@
+# The same two escalation-pass authorities in the other order. The
+# group's name goes into collection first, so the operation reports
+# PodGroupTerminating; a member the scheduler cannot place then arrives,
+# and the pod-level arm does not take a row already parked on the gang's
+# token — it takes the token first only when both apply on an unheld row.
+# The row goes on reporting the gang while the name is in collection: the
+# driver can put a PodGroup into collection but cannot finish one, so the
+# handover in this direction is the one the reverse scenario records.
+scenario: hold-gang-then-unschedulable
+intentional: >-
+  the table's gang.podGroup[Terminating] cell says a pod-level
+  Unschedulable hold takes the token first, which holds when both apply
+  to an unheld row in one pass; it is not a right to take the row from a
+  gang token already recorded, and the engine does not give it one.
+cells:
+  - instance/Create/CreatePods/gang.podGroup[Terminating]/before
+  - instance/Create/CreatePods/pod.unschedulable[source]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: the group's name goes into collection, and the gang arm is the first authority on the row
+    events:
+      - gang.podGroup[Terminating]: {instance: 0}
+  - tick: 3
+    note: the scheduler cannot place the leader, and the pod-level arm does not take a row already reporting PodGroupTerminating
+    events:
+      - pod.unschedulable[source]: {pod: {index: 0, runner: leader}}
+  - tick: 4
+    note: the name is still in collection, so the row goes on reporting the gang and the scheduler's message never reaches LastFailure

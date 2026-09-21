@@ -1,0 +1,34 @@
+# The node-unknown hold and the scheduler hold on one Instance. A gang
+# member's kubelet stops reporting, so its name is held rather than
+# recycled and the operation reports NodeUnknown; a sibling the scheduler
+# cannot place then arrives, and the pod-level arm does not take a row
+# another authority is already reporting. The two writers sit in
+# different passes — the name recovery in the Create pass, the scheduler
+# in the end-of-pass escalation — and the token rules are what order them.
+scenario: hold-nodeunknown-then-unschedulable
+cells:
+  - instance/Create/CreatePods/pod.phaseTerminal[Unknown]/before
+  - instance/Create/CreatePods/pod.unschedulable[source]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the Create pass materializes the leader and its worker
+  - tick: 2
+    note: the leader's kubelet stops reporting, so its name is held and the recovery is the first authority on the row
+    events:
+      - pod.phaseTerminal[Unknown]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the scheduler cannot place the worker, and the pod-level arm does not take a row already reporting NodeUnknown
+    events:
+      - pod.unschedulable[source]: {pod: {index: 0, runner: worker}}

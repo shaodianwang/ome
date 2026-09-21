@@ -1,0 +1,39 @@
+# The same two authorities in the other order. The scheduler cannot place
+# the worker first, so the operation reports Unschedulable; the leader's
+# kubelet then stops reporting, and the name recovery does not take a row
+# another authority is already reporting — it holds the name and withholds
+# the create either way, so the row reports the wait an operator has a
+# grace configured for rather than the one that resolves itself.
+scenario: hold-unschedulable-then-nodeunknown
+cells:
+  - instance/Create/CreatePods/pod.unschedulable[source]/before
+  - instance/Create/CreatePods/pod.phaseTerminal[Unknown]/before
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the Create pass materializes the leader and its worker
+  - tick: 2
+    note: the scheduler cannot place the worker, and it is the first authority on the row
+    events:
+      - pod.unschedulable[source]: {pod: {index: 0, runner: worker}}
+  - tick: 3
+    note: the leader's kubelet stops reporting, and the name recovery does not take a row already reporting Unschedulable
+    events:
+      - pod.phaseTerminal[Unknown]: {pod: {index: 0, runner: leader}}
+  - tick: 4
+    note: the worker is placed, so the scheduler releases its own token and the name recovery takes the row on the pass after that
+    events:
+      - pod.scheduled[source]: {pod: {index: 0, runner: worker}}
+  - tick: 5
+    note: the leader's name is still held, so the recovery is what the row reports now

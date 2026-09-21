@@ -1,0 +1,26 @@
+tick=1 note the Create pass materializes the leader and its worker
+tick=1 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-3363fef6 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 2 pod(s) requested
+tick=1 pod create name=svc-a-engine-0-leader-0 revision=3363fef6 incarnation=1 ordinal=0
+tick=1 pod create name=svc-a-engine-0-worker-0 revision=3363fef6 incarnation=1 ordinal=0
+tick=1 pass result=after:5s
+tick=2 note the scheduler cannot place the worker, and it is the first authority on the row
+tick=2 apply pod.unschedulable[source] pod=svc-a-engine-0-worker-0 now=t+0s
+tick=2 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-3363fef6 waiting=Unschedulable started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-0-worker-0 reason=Unschedulable} precondition=ok
+tick=2 pass result=after:5s
+tick=2 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-3363fef6 waiting=Unschedulable started=t+0s lastProgressAt=t+0s deadline=nil} lastFailure={pod=svc-a-engine-0-worker-0 reason=Unschedulable} precondition=ok
+tick=3 note the leader's kubelet stops reporting, and the name recovery does not take a row already reporting Unschedulable
+tick=3 apply pod.phaseTerminal[Unknown] pod=svc-a-engine-0-leader-0 now=t+0s
+tick=3 row=0 write no-op precondition=no-change
+tick=3 row=0 write no-op precondition=no-change
+tick=3 pass result=after:5s
+tick=4 note the worker is placed, so the scheduler releases its own token and the name recovery takes the row on the pass after that
+tick=4 apply pod.scheduled[source] pod=svc-a-engine-0-worker-0 node=node-0 now=t+0s
+tick=4 row=0 write no-op precondition=no-change
+tick=4 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-3363fef6 started=t+0s lastProgressAt=t+0s deadline=nil} lastFailure={pod=svc-a-engine-0-worker-0 reason=Unschedulable} precondition=ok
+tick=4 pass result=after:5s
+tick=4 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-3363fef6 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-0-worker-0 reason=Unschedulable} precondition=ok
+tick=5 note the leader's name is still held, so the recovery is what the row reports now
+tick=5 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-3363fef6 waiting=NodeUnknown started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-0-leader-0 reason=NodeUnknown message=NodeUnknown: pod svc-a-engine-0-leader-0 is in phase Unknown on node <unbound>; its kubelet has stopped reporting, so the name is held rather than recycled} precondition=ok
+tick=5 pass result=after:5s
+tick=5 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-3363fef6 waiting=NodeUnknown started=t+0s lastProgressAt=t+0s deadline=nil} lastFailure={pod=svc-a-engine-0-leader-0 reason=NodeUnknown message=NodeUnknown: pod svc-a-engine-0-leader-0 is in phase Unknown on node <unbound>; its kubelet has stopped reporting, so the name is held rather than recycled} precondition=ok

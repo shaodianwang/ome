@@ -186,17 +186,17 @@ each one waits on are the structural entries under **Unlocked paths** in
 |---|---|---|
 | every workload-lane arrow driven | 118 arrows, checked by a test that joins scenario headers with `transitions.yaml` | 117 of 118. The one left is `T-failed-adopt-revision`, which the engine does not fire: `AdoptRevision`'s spec-match compares a live pod against the unrendered desired template, and the renderer's `Hostname`, `Subdomain` and serving gate make that comparison unsatisfiable. The fix is an engine change, landing separately; `failed-runtime-ready-resurge` records the route the engine takes instead |
 | every adapter-lane arrow covered | 20 arrows, each named by a Go test in an `// Arrows:` comment, gated by `rolloutspec-check` | 20 of 20 |
-| goldens captured from a named commit | the commit sha recorded in `replay/README.md` | `cf75eb72`, the `main` commit the work is based on; no engine code changed since |
-| runtime | the replay package under 60 seconds in the unit lane | about 11 seconds for 108 scenarios |
-| sensitivity | flipping any one ownership predicate or hold rule fails at least one golden (a mutation check run once, recorded) | partly. Recorded in `replay/README.md`: the surge ownership guards fail `strategy-edit-midsurge` when both are disabled and nothing when either is alone, because the per-operation strategy pin makes them redundant for any row the harness can produce. Hold *precedence* is not locked at all — neither the ordered pause pair nor first-writer-wins fails a golden, because no scenario puts a second authority on a held row; a control mutation that stops holds being marked fails three, so holds themselves are locked. The missing scenario is named in the README |
-| determinism | ten consecutive runs, identical traces | 108 scenarios × 10 passes, byte-identical |
+| goldens captured from a named commit | the commit sha recorded in `replay/README.md` | `cf75eb72`, the `main` commit the work started from, re-recorded onto `c990ad96` (`[Bugfix] Pause freezes repair, not hold evidence`) for the two `hold-*` traces that engine change moved |
+| runtime | the replay package under 60 seconds in the unit lane | about 11 seconds for 118 scenarios |
+| sensitivity | flipping any one ownership predicate or hold rule fails at least one golden (a mutation check run once, recorded) | met for the hold rules, partly for the surge guards. Recorded in `replay/README.md`: ten `hold-*` scenarios contend two authorities on one row, so `supersedes` now fails three goldens flipped to `false` and four flipped to `true`, and dropping the first-writer-wins guard fails those same four. Two groups stay redundant and are only sensitive as a pair — the surge ownership guards (`strategy-edit-midsurge` when both are disabled), and the per-authority `*HoldWritable` rules, which refuse exactly what the shared guard already refuses. A control that stops holds being marked fails 13 |
+| determinism | ten consecutive runs, identical traces | 118 scenarios × 10 passes, byte-identical |
 
 Part 1's exit is met once the `AdoptRevision` fix lands and its arrow is
-driven. The sensitivity row is the one judgement call left: as written it
-asks that *any* one hold rule fail a golden, and the precedence rules do
-not, so it is closed either by one scenario contending two authorities on a
-held row or by narrowing the criterion to the rules a scenario set can
-reach. The lock does not block on it.
+driven. The sensitivity row reads as met for the rules a scenario set can
+reach: every pair of hold authorities the engine can put on one row is
+now contended in both orders, and the rules that remain insensitive
+alone are redundant with a rule that is — a fact the mutation table
+records per rule rather than leaving to the reader.
 
 ### Part 2: close coverage and freeze
 

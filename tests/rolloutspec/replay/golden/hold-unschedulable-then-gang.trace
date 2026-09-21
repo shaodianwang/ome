@@ -1,0 +1,26 @@
+tick=1 note the gang's PodGroup is announced before its first member, and the Create pass materializes both
+tick=1 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=1 podgroup create name=svc-a-engine-0
+tick=1 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-3363fef6 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 2 pod(s) requested
+tick=1 pod create name=svc-a-engine-0-leader-0 revision=3363fef6 incarnation=1 ordinal=0
+tick=1 pod create name=svc-a-engine-0-worker-0 revision=3363fef6 incarnation=1 ordinal=0
+tick=1 pass result=after:5s
+tick=2 note the scheduler cannot place the leader, and it is the first authority on the row
+tick=2 apply pod.unschedulable[source] pod=svc-a-engine-0-leader-0 now=t+0s
+tick=2 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=2 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-3363fef6 waiting=Unschedulable started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-0-leader-0 reason=Unschedulable} precondition=ok
+tick=2 pass result=after:5s
+tick=2 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-3363fef6 waiting=Unschedulable started=t+0s lastProgressAt=t+0s deadline=nil} lastFailure={pod=svc-a-engine-0-leader-0 reason=Unschedulable} precondition=ok
+tick=3 note the group's name goes into collection, and the gang arm does not take a row already reporting Unschedulable
+tick=3 apply gang.podGroup[Terminating] podGroup=svc-a-engine-0 state=Terminating now=t+0s
+tick=3 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=3 row=0 write no-op precondition=no-change
+tick=3 row=0 write no-op precondition=no-change
+tick=3 pass result=after:5s
+tick=4 note the leader is placed, so the scheduler releases its token and the gang arm takes the row in the same pass
+tick=4 apply pod.scheduled[source] pod=svc-a-engine-0-leader-0 node=node-0 now=t+0s
+tick=4 condition type=GangSchedulingUnavailable status=False reason=GangSchedulingAvailable message=Gang scheduling is available or not required
+tick=4 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-3363fef6 started=t+0s lastProgressAt=t+0s deadline=nil} lastFailure={pod=svc-a-engine-0-leader-0 reason=Unschedulable} precondition=ok
+tick=4 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-3363fef6 waiting=PodGroupTerminating started=t+0s lastProgressAt=t+0s deadline=nil} lastFailure={pod= reason=PodGroupTerminating message=PodGroup svc-a-engine-0 is terminating; the gang is announced again once it is collected} precondition=ok
+tick=4 pass result=after:5s

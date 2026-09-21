@@ -1,0 +1,49 @@
+# A paused row whose surge replacement then turns out to have no
+# placement. The pause parks repair, not observation: the end-of-pass
+# hold evidence still runs while paused, so the scheduler takes the row
+# from the pause the moment it reports, and the scheduler's message
+# reaches LastFailure without waiting for the unpause. No repair acts on
+# it while the pause lasts.
+scenario: hold-pause-then-unschedulable
+intentional: >-
+  a fact-bearing authority takes a paused row: the scheduler's hold
+  replaces Paused in the pass it is observed, because the hold-evidence
+  half of the end-of-pass bookkeeping runs under pause while its action
+  half stays suspended. The deadline is parked by the hold as it would be
+  by the pause, and nothing relocates or fails the row until the unpause.
+cells:
+  - instance/Update/Surge/spec.pauseTrue/before
+  - instance/Update/Surge/pod.unschedulable[target]/before
+  - instance/Update/Surge/spec.unpause/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: the pod template changes, so the rollout surges a replacement beside the source
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 2
+    note: the operator pauses, and the pause is the first authority on the row - the operation carries Paused
+    events:
+      - spec.pauseTrue: {}
+  - tick: 3
+    note: the scheduler reports no placement for the replacement; the hold evidence runs under pause, so the scheduler takes the row from Paused in this pass and names the pod
+    events:
+      - pod.unschedulable[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 4
+    note: the pause is lifted; the row is already held by the scheduler, so the unpause changes nothing on it
+    events:
+      - spec.unpause: {}
+  - tick: 5
+    note: the scheduler hold stands and is not written again

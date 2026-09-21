@@ -1,0 +1,40 @@
+# A quota refusal arrives on a row an operator pause is already holding.
+# The pause is the one token that says nothing about the Instance, so the
+# refusal — a fact about it, and the wait that parks its clock — takes the
+# row. The replacement is lost while the Component is paused, which is
+# what puts a create in front of the quota while the pause stands: a
+# paused surge still finishes the step it is on.
+scenario: hold-pause-then-quota
+cells:
+  - instance/Update/Surge/spec.pauseTrue/before
+  - instance/Update/Surge/pod.deleted[target]/before
+  - instance/Update/Surge/api.quotaDenied/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: the pod template changes, so the rollout surges a replacement beside the source
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 2
+    note: the operator pauses, and the pause is the first authority on the row - the operation carries Paused
+    events:
+      - spec.pauseTrue: {}
+  - tick: 3
+    note: the replacement is lost and its recreate is refused for lack of quota, which takes the token from the pause
+    events:
+      - pod.deleted[target]: {pod: {index: 0, ordinal: 1}}
+      - api.quotaDenied: {verb: create, resource: pods, count: 1}
+  - tick: 4
+    note: quota frees up and the replacement is created again, so the quota authority releases its token and the pause takes the row back in the same pass

@@ -1,0 +1,32 @@
+tick=1 note the pod template changes, so the rollout surges a replacement beside the source
+tick=1 apply spec.revision image=registry.example.com/runtime:v2 generation=1 now=t+0s
+tick=1 gate consult strategy=SurgeThenDrain surge=0 unavail=0 verdict=allow
+tick=1 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#1{type=Update step=Surge target=svc-a-engine-6f8b1e6c strategy=SurgeThenDrain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 event Normal RecreateUpdateStarted OMENative component=engine instance=0 surge to revision svc-a-engine-6f8b1e6c (newOrdinal=1)
+tick=1 pod create name=svc-a-engine-0-default-1 revision=6f8b1e6c incarnation=1 ordinal=1
+tick=1 hold cleared
+tick=1 pass result=after:5s
+tick=2 note the operator pauses, and the pause is the first authority on the row - the operation carries Paused
+tick=2 apply spec.pauseTrue paused=true freeze=false generation=2 now=t+0s
+tick=2 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#1{type=Update step=Surge target=svc-a-engine-6f8b1e6c strategy=SurgeThenDrain started=t+0s lastProgressAt=t+0s deadline=nil} precondition=ok
+tick=2 row=0 write no-op precondition=no-change
+tick=2 hold cleared
+tick=2 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#1{type=Update step=Surge target=svc-a-engine-6f8b1e6c waiting=Paused strategy=SurgeThenDrain started=t+0s lastProgressAt=t+0s deadline=nil} precondition=ok
+tick=2 pass result=after:5s
+tick=3 note the replacement is lost and its recreate is refused for lack of quota, which takes the token from the pause
+tick=3 apply pod.deleted[target] pod=svc-a-engine-0-default-1 now=t+0s
+tick=3 apply api.quotaDenied verb=create resource=pods count=1 now=t+0s
+tick=3 row=0 write no-op precondition=no-change
+tick=3 pod create-rejected name=svc-a-engine-0-default-1 rejection=api.quotaDenied
+tick=3 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#1{type=Update step=Surge target=svc-a-engine-6f8b1e6c waiting=QuotaExceeded strategy=SurgeThenDrain started=t+0s lastProgressAt=t+0s deadline=nil} precondition=ok
+tick=3 event Normal InstanceQuotaBlocked OMENative component=engine instance=0 waiting on capacity: pods "svc-a" is forbidden: exceeded quota: compute-resources, requested: pods=1, used: pods=4, limited: pods=4
+tick=3 hold cleared
+tick=3 row=0 write no-op precondition=no-change
+tick=3 pass result=after:5s
+tick=4 note quota frees up and the replacement is created again, so the quota authority releases its token and the pause takes the row back in the same pass
+tick=4 row=0 write no-op precondition=no-change
+tick=4 pod create name=svc-a-engine-0-default-1 revision=6f8b1e6c incarnation=1 ordinal=1
+tick=4 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#1{type=Update step=Surge target=svc-a-engine-6f8b1e6c strategy=SurgeThenDrain started=t+0s lastProgressAt=t+0s deadline=nil} precondition=ok
+tick=4 hold cleared
+tick=4 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#1{type=Update step=Surge target=svc-a-engine-6f8b1e6c waiting=Paused strategy=SurgeThenDrain started=t+0s lastProgressAt=t+0s deadline=nil} precondition=ok
+tick=4 pass result=after:5s

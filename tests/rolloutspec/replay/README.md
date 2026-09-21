@@ -56,14 +56,16 @@ ids back to the grid.
 ## Golden provenance
 
 Goldens were captured against the engine at `cf75eb72`
-(`[OEP] 0020.2 rollout engine behavior lock`), which is the `main` commit
-this branch is based on. The branch changes no engine code, so the
-recorded traces are the behavior of `main` at that commit. They have been
-re-recorded since, for the trace format and for the driver's fidelity
-fixes (deadline parking, pod-write values, the owner generation, the
-per-revision routed Service). Each of those changed how a run is
-rendered, or what the driver put in front of the engine — never what the
-engine does with it.
+(`[OEP] 0020.2 rollout engine behavior lock`) and track `main` from there.
+No branch recording them changes engine code, so the recorded traces are
+the behavior of `main` at the commit each was last captured on — most
+recently `c990ad96` (`[Bugfix] Pause freezes repair, not hold evidence`),
+which moved the two `hold-*` traces that pair the scheduler with a pause.
+The rest have been re-recorded only for the trace format and for the
+driver's fidelity fixes (deadline parking, pod-write values, the owner
+generation, the per-revision routed Service). Each of those changed how a
+run is rendered, or what the driver put in front of the engine — never
+what the engine does with it.
 
 ## Changing a golden
 
@@ -427,17 +429,20 @@ above:
    and record every scenario that fails.
 3. `git checkout` the file. Nothing here is committed mutated.
 
-Recorded result, over 108 scenarios:
+Recorded result, over 118 scenarios:
 
 | mutation | goldens failed |
 |---|---|
 | `isSurgeOwnedStatus` → `false` **and** `effectiveUpdateStrategy`'s pin dropped (`ops/update.go`) | 1: `strategy-edit-midsurge` |
-| `supersedes` → `false` (`types/externalhold.go`) | none |
-| `supersedes` → `true` | none |
-| the first-writer-wins guard in `MarkExternalHold` removed | none |
-| `MarkExternalHold` never marking (the control) | 3: `quota-hold-parks-deadline`, `source-unrouted-midsurge`, `surge-force-clock` |
+| `supersedes` → `false` (`types/externalhold.go`) | 3: `hold-pause-then-quota`, `hold-pause-then-unrouted`, `hold-pause-then-unschedulable` |
+| `supersedes` → `true` | 4: `hold-pause-then-quota`, `hold-pause-then-unrouted`, `hold-quota-then-pause`, `hold-unschedulable-then-pause` |
+| the first-writer-wins guard in `MarkExternalHold` removed | the same 4 |
+| `schedulerHoldWritable` → `true` (`unschedulable.go`) | none |
+| that guard removed **and** `schedulerHoldWritable` → `true` | 6: `hold-gang-then-unschedulable`, `hold-nodeunknown-then-unschedulable`, `hold-pause-then-quota`, `hold-pause-then-unrouted`, `hold-quota-then-pause`, `hold-unschedulable-then-pause` |
+| that guard removed **and** `gangHoldWritable` / `nodeUnknownHoldWritable` → `true` | 6: `hold-pause-then-quota`, `hold-pause-then-unrouted`, `hold-quota-then-pause`, `hold-unschedulable-then-gang`, `hold-unschedulable-then-nodeunknown`, `hold-unschedulable-then-pause` |
+| `MarkExternalHold` never marking (the control) | 13: the 10 `hold-*` scenarios plus `quota-hold-parks-deadline`, `source-unrouted-midsurge`, `surge-force-clock` |
 
-Two things to read off it.
+Three things to read off it.
 
 **The surge guards are only sensitive as a pair.** Flipping
 `isSurgeOwnedStatus` alone changes nothing, because
@@ -450,13 +455,58 @@ scenario format deliberately cannot seed an in-flight operation. With
 both disabled, `strategy-edit-midsurge` fails — it locks that a strategy
 edit does not derail an attempt already in flight.
 
-**Hold precedence is not locked; holds themselves are.** The control row
-shows three scenarios read a hold. None of them puts a SECOND authority
-on a row that already carries a token, which is the only situation the
-precedence rules decide, so both the ordered pause pair and
-first-writer-wins can be inverted with every golden still passing. The
-gap is a missing scenario, not a missing gate: a paused row that then
-has its create refused for quota would close it.
+**Hold precedence is locked by the `hold-*` scenarios.** Each one puts a
+second authority on a row that already carries a token, which is the only
+situation the precedence rules decide, and records the token after every
+authority arrives and after every one clears. Inverting `supersedes` in
+either direction, or dropping the first-writer-wins guard, now fails a
+golden. The pairs and what wins:
+
+| row already holds | authority that arrives | outcome | scenario |
+|---|---|---|---|
+| `Paused` | `SourceUnrouted` | takes the row (the one ordered pair) | `hold-pause-then-unrouted` |
+| `SourceUnrouted` | `Paused` | refused; the surge keeps it | `hold-unrouted-then-pause` |
+| `Paused` | `QuotaExceeded` | takes the row | `hold-pause-then-quota` |
+| `QuotaExceeded` | `Paused` | refused; quota keeps it | `hold-quota-then-pause` |
+| `Unschedulable` | `Paused` | refused; the scheduler keeps it | `hold-unschedulable-then-pause` |
+| `Paused` | `Unschedulable` | takes the row | `hold-pause-then-unschedulable` |
+| `PodGroupTerminating` | `Unschedulable` | refused; the gang keeps it | `hold-gang-then-unschedulable` |
+| `Unschedulable` | `PodGroupTerminating` | refused; the scheduler keeps it | `hold-unschedulable-then-gang` |
+| `NodeUnknown` | `Unschedulable` | refused; the recovery keeps it | `hold-nodeunknown-then-unschedulable` |
+| `Unschedulable` | `NodeUnknown` | refused; the scheduler keeps it | `hold-unschedulable-then-nodeunknown` |
+
+Every one of them also records the release order — the incumbent's
+authority reports its wait over and the other takes the row, in the same
+pass where the two writers are ordered that way and on the next pass
+where they are not.
+
+**The per-authority eligibility rules are redundant with the shared
+guard, the same way the surge guards are.** `schedulerHoldWritable`,
+`gangHoldWritable` and `nodeUnknownHoldWritable` each refuse an operation
+parked on another token, which is what `MarkExternalHold`'s
+first-writer-wins guard already decides; flipping one alone changes no
+golden, and it takes the pair to move one. The two rules are not the same
+rule — the writable ones also refuse a `Delete`, and each names the
+operator pause as its one exception, without which `supersedes` could
+never fire for them — but no row the harness can build separates them.
+
+A pause reaches that rule like any other incumbent, because the evidence
+half of the end-of-pass bookkeeping runs on a paused Component
+(`holdevidence.go`) while the repair half stays suspended: the scheduler,
+the gang arm and the name recovery go on recording and releasing their
+holds under a pause, and a fact they report takes the row from it in the
+pass they report it. `hold-pause-then-unschedulable` records the
+scheduler taking a paused row and the unpause changing nothing on it;
+`hold-unschedulable-then-pause` records the mirror, a placed pod
+releasing the scheduler's token while the pause is still on.
+
+One pair the engine cannot be made to contend on, recorded as such:
+
+- **`Paused` and `NodeUnknown`.** The recovery writes its hold from the
+  Create pass, and a `Create` is not an operation the pause holds
+  (`pauseHeldOperation`), so the two are never on the same row. The one
+  shape that could put them there — a repair continuation finishing its
+  step under a frozen pause — is one the scenario format cannot stage.
 
 ## Unlocked paths
 
@@ -487,6 +537,14 @@ Effects the driver does not record:
   scenario would trace them on its first replay and not on its second; a
   gang scenario declares `topologyKey` and `schedulerName` to stay out of
   both shapes rather than record a line that cannot repeat.
+- A PodGroup's collection FINISHING. `gang.podGroup[Terminating]` holds
+  the object behind the driver's finalizer and `[Deleted]` issues a
+  delete, which on an object already Terminating changes nothing — there
+  is no `pod.deleted` equivalent for a group. So a `PodGroupTerminating`
+  hold can be recorded and refused but never released, and the gang arm
+  taking over from a cleared pod token is recorded from the other side
+  (`hold-unschedulable-then-gang`) instead.
+
 - The owner's teardown deadline. `timer.teardownDeadline` and the 14
   arrows that fire on it are decided in the IR adapter's teardown pass,
   which removes the finalizer; `workload.Reconcile` never sees it.

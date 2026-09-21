@@ -1,0 +1,53 @@
+# The scheduler hold meets an operator pause. The replacement has no
+# placement first, so the operation reports Unschedulable with the
+# scheduler's pod on LastFailure; the operator then pauses, and the pause
+# does not take a row another authority is already reporting. When the
+# pod is placed, the scheduler, the authority that set the token, releases
+# it in that same pass even though the Component is still paused: the
+# pause parks repair, not the bookkeeping that keeps the row truthful.
+scenario: hold-unschedulable-then-pause
+intentional: >-
+  the token lives exactly as long as the condition it reports: the
+  hold-evidence half of the end-of-pass bookkeeping runs under pause, so
+  the scheduler releases on the pod being placed without waiting for the
+  unpause. The row is then held by nothing but the pause, and the
+  suspended action half means no repair runs until the operator resumes.
+cells:
+  - instance/Update/Surge/pod.unschedulable[target]/before
+  - instance/Update/Surge/spec.pauseTrue/before
+  - instance/Update/Surge/pod.scheduled[target]/before
+  - instance/Update/Surge/spec.unpause/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: the pod template changes, so the rollout surges a replacement beside the source
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 2
+    note: the scheduler reports no placement for the replacement, and it is the first authority on the row
+    events:
+      - pod.unschedulable[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 3
+    note: the operator pauses, and the pause does not take a row already reporting Unschedulable
+    events:
+      - spec.pauseTrue: {}
+  - tick: 4
+    note: the replacement is placed, and the scheduler releases the token it set in this same pass even though the Component is paused
+    events:
+      - pod.scheduled[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 5
+    note: the pause is lifted; the scheduler's token is already gone, so the unpause finds no hold to release and only re-arms the deadline the pause had parked
+    events:
+      - spec.unpause: {}
