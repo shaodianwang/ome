@@ -176,7 +176,7 @@ var _ = ginkgo.Describe("TrafficMap status ownership", func() {
 
 		ginkgo.By("letting the routing writer update Routable independently")
 		updateISVCStatus(isvc, func(current *v1beta1.InferenceService) {
-			current.Status.Placement.Phase = v1beta1.PlacementPhaseRacing
+			current.Status.Placement.Phase = v1beta1.PlacementPhaseAdmitting
 		})
 		gomega.Eventually(func(g gomega.Gomega) {
 			trafficMap := getTrafficMap(g, namespace, name)

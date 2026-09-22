@@ -48,7 +48,7 @@ placement:
 funnel:
   enabledSafetyRequeueMs: 300000
   # Larger poll penalty than CI so the funnel win is pronounced at scale; this is
-  # the Racing re-check cadence with the funnel off.
+  # the Admitting re-check cadence with the funnel off.
   disabledSafetyRequeueMs: 6000
   batchPeriodMs: 100
   resyncIntervalMs: 250

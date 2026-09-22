@@ -202,10 +202,10 @@ var _ = ginkgo.Describe("Multi-cluster placement split mode", func() {
 		gomega.Eventually(func(g gomega.Gomega) {
 			ps := placementStatusOf(isvcNS, isvcName)
 			g.Expect(ps).NotTo(gomega.BeNil())
-			g.Expect(ps.Phase).To(gomega.Equal(v1beta1.PlacementPhaseRacing))
+			g.Expect(ps.Phase).To(gomega.Equal(v1beta1.PlacementPhaseAdmitting))
 			g.Expect(ps.Candidates).To(gomega.HaveLen(2))
 			for _, c := range ps.Candidates {
-				g.Expect(c.Phase).To(gomega.Equal(v1beta1.CandidatePhasePlaced))
+				g.Expect(c.Phase).To(gomega.Equal(v1beta1.CandidatePhaseAdmitting))
 			}
 		}, eventuallyTimeout, eventuallyPoll).Should(gomega.Succeed())
 

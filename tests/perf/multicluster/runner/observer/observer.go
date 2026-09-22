@@ -6,8 +6,8 @@
 // transitions.
 //
 // Two transitions are timestamped:
-//   - first fan-out: the source's placement leaves Pending (the placer has
-//     fanned out and is Racing, or has already Placed). This is the
+//   - first fan-out: the source's placement leaves Pending (the placer is
+//     Admitting, or has already Placed). This is the
 //     control-plane-visible proxy for "the derived exists on the candidates".
 //   - placed: the source's placement first reports Placed.
 //
@@ -50,8 +50,8 @@ type Observer struct {
 	// in this run. In the harness all members advertise the accelerator label
 	// the sources require, so every member is a candidate for every source; the
 	// runner supplies the count (the member count) rather than the observer
-	// snapshotting a racy mid-fan-out status, which can undercount when the
-	// placer skips Racing and goes straight to Placed under fast admission.
+	// snapshotting an in-progress fan-out status, which can undercount when the
+	// placer skips Admitting and goes straight to Placed under fast admission.
 	candidates int
 }
 
@@ -102,11 +102,13 @@ func (o *Observer) record(obj client.Object) {
 	phase := isvc.Status.Placement.Phase
 	now := time.Now()
 
-	// Any phase past Pending means the placer has fanned out (Racing) or won
-	// (Placed). Both imply the derived exists on the candidates, so either marks
-	// first fan-out.
+	// Any phase past Pending means the placer has fanned out (Admitting) or has
+	// an admitted home (Placed). Both imply the derived exists on the candidates,
+	// so either marks first fan-out. Accept legacy Racing during rolling upgrades.
 	switch phase {
-	case v1beta1.PlacementPhaseRacing, v1beta1.PlacementPhasePlaced, v1beta1.PlacementPhaseFailed:
+	case v1beta1.PlacementPhaseAdmitting,
+		v1beta1.PlacementPhaseRacing, //nolint:staticcheck // Accept legacy status during rolling upgrades.
+		v1beta1.PlacementPhasePlaced, v1beta1.PlacementPhaseFailed:
 		o.sink.RecordFanOut(key, o.candidates, now)
 	}
 	if phase == v1beta1.PlacementPhasePlaced {

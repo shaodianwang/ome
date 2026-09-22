@@ -873,9 +873,10 @@ MC_ERRORS = [(None, "green"), (1, "yellow"), (51, "red")]
 
 MC_PHASE_MAP = [{"type": "value", "options": {
     "Placed": {"color": "green", "index": 0},
-    "Racing": {"color": "yellow", "index": 1},
-    "Pending": {"color": "orange", "index": 2},
-    "Failed": {"color": "red", "index": 3}}}]
+    "Admitting": {"color": "yellow", "index": 1},
+    "Racing": {"color": "yellow", "index": 2},
+    "Pending": {"color": "orange", "index": 3},
+    "Failed": {"color": "red", "index": 4}}}]
 
 
 def mc_measured(expr):
@@ -1063,8 +1064,9 @@ def mc_control_plane():
                         f'(ome_isvc_placement_phase{{{MC_PLACE},isvc=~"$isvc"}}))',
                         "{{phase}}", instant=True)],
                 (0, y, 6, 7),
-                desc="Pending = nothing matched or nothing connected. Racing = fanned out, not "
-                     "yet admitted. Placed = admitted. Failed = terminal.")
+                desc="Pending = nothing matched or nothing connected. Admitting = fanned out, "
+                     "not yet admitted. Placed = admitted. Failed = terminal. Racing is the "
+                     "legacy name for Admitting and may appear during upgrades.")
     pie["options"] = {"legend": {"displayMode": "list", "placement": "right", "showLegend": True},
                       "pieType": "donut",
                       "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False}}
@@ -1072,7 +1074,8 @@ def mc_control_plane():
         {"matcher": {"id": "byName", "options": n},
          "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": c}}]}
         for n, c in (("Placed", "green"), ("Failed", "red"),
-                     ("Racing", "yellow"), ("Pending", "orange"))]
+                     ("Admitting", "yellow"), ("Racing", "yellow"),
+                     ("Pending", "orange"))]
     p.append(pie)
 
     p.append(mc_labelled_table(
@@ -1095,8 +1098,10 @@ def mc_control_plane():
         ["exported_namespace", "isvc", "cluster", "phase"],
         {"exported_namespace": "Namespace", "isvc": "InferenceService",
          "cluster": "Workload cluster", "phase": "Candidate phase"},
-        desc="Every cluster this ISVC was fanned out to. Single mode expects one Admitted "
-             "winner; All and Split list every serving home."))
+        desc="Every cluster this ISVC was fanned out to. Admitting means the derived ISVC "
+             "exists but has not been admitted; legacy Placed may appear with the same meaning "
+             "during upgrades. Single mode expects one Admitted winner; All and Split list "
+             "every serving home."))
     y += 7
 
     p.append(mc_labelled_table(

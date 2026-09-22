@@ -1532,7 +1532,7 @@
       }
     },
     "v1beta1.CandidatePlacement": {
-      "description": "CandidatePlacement is the per-cluster state of a fan-out candidate in the placement race.",
+      "description": "CandidatePlacement is the per-cluster state of a fan-out candidate.",
       "type": "object",
       "required": [
         "cluster"
@@ -5197,11 +5197,11 @@
       }
     },
     "v1beta1.PlacementStatus": {
-      "description": "PlacementStatus is the multi-cluster placement status: which workload cluster an InferenceService is placed on and a coarse phase.",
+      "description": "PlacementStatus is the multi-cluster placement status: its coarse phase and the candidate clusters participating in placement.",
       "type": "object",
       "properties": {
         "candidates": {
-          "description": "Candidates are the clusters this ISVC has been fanned out to during the placement race. Populated by the control plane.",
+          "description": "Candidates are the clusters this ISVC has been fanned out to during placement. Populated by the control plane.",
           "type": "array",
           "items": {
             "default": {},
@@ -5213,11 +5213,11 @@
           "x-kubernetes-list-type": "map"
         },
         "cluster": {
-          "description": "Cluster is the WorkloadCluster the ISVC is currently placed on. Empty while pending (no candidate yet, or transport not connected).",
+          "description": "Cluster is the winning WorkloadCluster in Single mode. It is empty before admission and in All/Split modes, where Candidates is authoritative.",
           "type": "string"
         },
         "endpoint": {
-          "description": "Endpoint is the externally-addressable URL of the winning cluster's placement, mirrored from the derived InferenceService's status.url once it is admitted AND addressable. Empty while pending/racing/failed or before the winner reports a URL. An external global LB/DNS consumes this to route traffic to the winning cluster.",
+          "description": "Endpoint is the externally-addressable URL of the winning cluster in Single mode, mirrored from the derived InferenceService's status.url once it is admitted AND addressable. It is empty before the winner reports a URL and in All/Split modes, where per-candidate endpoints are authoritative.",
           "$ref": "#/definitions/knative.URL"
         },
         "phase": {

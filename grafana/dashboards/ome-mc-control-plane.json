@@ -1078,6 +1078,21 @@
               {
                 "matcher": {
                   "id": "byName",
+                  "options": "Admitting"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "yellow"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
                   "options": "Racing"
                 },
                 "properties": [
@@ -1107,7 +1122,7 @@
               }
             ]
           },
-          "description": "Pending = nothing matched or nothing connected. Racing = fanned out, not yet admitted. Placed = admitted. Failed = terminal.",
+          "description": "Pending = nothing matched or nothing connected. Admitting = fanned out, not yet admitted. Placed = admitted. Failed = terminal. Racing is the legacy name for Admitting and may appear during upgrades.",
           "options": {
             "legend": {
               "displayMode": "list",
@@ -1188,17 +1203,21 @@
                             "color": "green",
                             "index": 0
                           },
-                          "Racing": {
+                          "Admitting": {
                             "color": "yellow",
                             "index": 1
                           },
+                          "Racing": {
+                            "color": "yellow",
+                            "index": 2
+                          },
                           "Pending": {
                             "color": "orange",
-                            "index": 2
+                            "index": 3
                           },
                           "Failed": {
                             "color": "red",
-                            "index": 3
+                            "index": 4
                           }
                         }
                       }
@@ -1282,7 +1301,7 @@
             },
             "overrides": []
           },
-          "description": "Every cluster this ISVC was fanned out to. Single mode expects one Admitted winner; All and Split list every serving home.",
+          "description": "Every cluster this ISVC was fanned out to. Admitting means the derived ISVC exists but has not been admitted; legacy Placed may appear with the same meaning during upgrades. Single mode expects one Admitted winner; All and Split list every serving home.",
           "options": {
             "showHeader": true
           },

@@ -226,7 +226,7 @@ var _ = ginkgo.Describe("Gateway API TrafficMap publisher", func() {
 		trafficMap = getTrafficMap(gomega.Default, namespace, name)
 		previousGeneration = trafficMap.Generation
 		updateISVCStatus(isvc, func(current *v1beta1.InferenceService) {
-			current.Status.Placement.Phase = v1beta1.PlacementPhaseRacing
+			current.Status.Placement.Phase = v1beta1.PlacementPhaseAdmitting
 		})
 		waitForTrafficMapEntries(namespace, name, previousGeneration, map[string]int32{})
 		reconcileGatewayTrafficMap(reconciler, key)

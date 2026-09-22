@@ -4657,6 +4657,7 @@ pub struct InferenceServiceStatusPlacementCandidates {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum InferenceServiceStatusPlacementCandidatesPhase {
+    Admitting,
     Placed,
     Admitted,
 }
@@ -4664,6 +4665,7 @@ pub enum InferenceServiceStatusPlacementCandidatesPhase {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum InferenceServiceStatusPlacementPhase {
     Pending,
+    Admitting,
     Racing,
     Placed,
     Failed,

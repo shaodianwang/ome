@@ -202,6 +202,10 @@ func setDerivedEndpointOn(member cluster, namespace, name, host string) {
 		key := types.NamespacedName{Namespace: namespace, Name: name}
 		g.Expect(member.client.Get(member.ctx, key, derived)).To(gomega.Succeed())
 		derived.Status.URL = apis.HTTPS(host)
+		derived.Status.SetCondition(v1beta1.IngressReady, &apis.Condition{
+			Type:   v1beta1.IngressReady,
+			Status: corev1.ConditionTrue,
+		})
 		g.Expect(member.client.Status().Update(member.ctx, derived)).To(gomega.Succeed())
 	}, eventuallyTimeout, eventuallyPoll).Should(gomega.Succeed())
 }

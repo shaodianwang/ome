@@ -176,7 +176,7 @@ var _ = ginkgo.Describe("TrafficMap routing controller", func() {
 
 		ginkgo.By("demoting the ISVC out of Placed")
 		updateISVCStatus(isvc, func(s *v1beta1.InferenceService) {
-			s.Status.Placement.Phase = v1beta1.PlacementPhaseRacing
+			s.Status.Placement.Phase = v1beta1.PlacementPhaseAdmitting
 		})
 
 		// A status demotion does not make the source ineligible: the map is

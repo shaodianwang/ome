@@ -2912,7 +2912,7 @@ func schema_pkg_apis_ome_v1beta1_CandidatePlacement(ref common.ReferenceCallback
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "CandidatePlacement is the per-cluster state of a fan-out candidate in the placement race.",
+				Description: "CandidatePlacement is the per-cluster state of a fan-out candidate.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"cluster": {
@@ -9276,12 +9276,12 @@ func schema_pkg_apis_ome_v1beta1_PlacementStatus(ref common.ReferenceCallback) c
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "PlacementStatus is the multi-cluster placement status: which workload cluster an InferenceService is placed on and a coarse phase.",
+				Description: "PlacementStatus is the multi-cluster placement status: its coarse phase and the candidate clusters participating in placement.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"cluster": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Cluster is the WorkloadCluster the ISVC is currently placed on. Empty while pending (no candidate yet, or transport not connected).",
+							Description: "Cluster is the winning WorkloadCluster in Single mode. It is empty before admission and in All/Split modes, where Candidates is authoritative.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -9295,7 +9295,7 @@ func schema_pkg_apis_ome_v1beta1_PlacementStatus(ref common.ReferenceCallback) c
 					},
 					"endpoint": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Endpoint is the externally-addressable URL of the winning cluster's placement, mirrored from the derived InferenceService's status.url once it is admitted AND addressable. Empty while pending/racing/failed or before the winner reports a URL. An external global LB/DNS consumes this to route traffic to the winning cluster.",
+							Description: "Endpoint is the externally-addressable URL of the winning cluster in Single mode, mirrored from the derived InferenceService's status.url once it is admitted AND addressable. It is empty before the winner reports a URL and in All/Split modes, where per-candidate endpoints are authoritative.",
 							Ref:         ref("knative.dev/pkg/apis.URL"),
 						},
 					},
@@ -9309,7 +9309,7 @@ func schema_pkg_apis_ome_v1beta1_PlacementStatus(ref common.ReferenceCallback) c
 							},
 						},
 						SchemaProps: spec.SchemaProps{
-							Description: "Candidates are the clusters this ISVC has been fanned out to during the placement race. Populated by the control plane.",
+							Description: "Candidates are the clusters this ISVC has been fanned out to during placement. Populated by the control plane.",
 							Type:        []string{"array"},
 							Items: &spec.SchemaOrArray{
 								Schema: &spec.Schema{

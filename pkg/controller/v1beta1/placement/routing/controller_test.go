@@ -1193,7 +1193,7 @@ func capacityFallbackCond(tm *v1beta1.TrafficMap) *metav1.Condition {
 // it would make "not placed yet" indistinguishable from a wedged controller.
 func TestReconcile_NotPlacedKeepsEmptyTrafficMap(t *testing.T) {
 	isvc := splitISVC([]string{"a"}, []int32{3}, []int32{3})
-	isvc.Status.Placement.Phase = v1beta1.PlacementPhaseRacing
+	isvc.Status.Placement.Phase = v1beta1.PlacementPhaseAdmitting
 	r, c := newReconciler(t, controllerTestConfig(), isvc)
 
 	reconcile(t, r)
@@ -1712,7 +1712,7 @@ func TestReconcile_NotPlacedForgetsStaleCapacityTargets(t *testing.T) {
 
 	current := &v1beta1.InferenceService{}
 	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(isvc), current))
-	current.Status.Placement.Phase = v1beta1.PlacementPhaseRacing
+	current.Status.Placement.Phase = v1beta1.PlacementPhaseAdmitting
 	require.NotEmpty(t, current.Status.Placement.Candidates)
 	require.NoError(t, c.Status().Update(context.Background(), current))
 	clk.Step(cfg.Capacity.Period)
@@ -1763,7 +1763,7 @@ func TestReconcile_NotPlacedForgetsStaleProbeTargets(t *testing.T) {
 
 	current := &v1beta1.InferenceService{}
 	require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(isvc), current))
-	current.Status.Placement.Phase = v1beta1.PlacementPhaseRacing
+	current.Status.Placement.Phase = v1beta1.PlacementPhaseAdmitting
 	require.NotEmpty(t, current.Status.Placement.Candidates, "the demoted status retains a stale admitted candidate")
 	require.NoError(t, c.Status().Update(context.Background(), current))
 	clk.Step(cfg.Probe.Period)
@@ -2134,7 +2134,7 @@ func TestRoutingTableChangePredicate(t *testing.T) {
 
 	t.Run("routable-ness change is admitted", func(t *testing.T) {
 		nw := base.DeepCopy()
-		nw.Status.Placement.Phase = v1beta1.PlacementPhaseRacing
+		nw.Status.Placement.Phase = v1beta1.PlacementPhaseAdmitting
 		assert.True(t, routingTableChange.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: nw}))
 	})
 

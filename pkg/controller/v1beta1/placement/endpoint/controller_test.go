@@ -195,10 +195,10 @@ func TestReconcile_UnplacedTearsDownAndDropsFinalizer(t *testing.T) {
 	r, c := newReconciler(t, baseConfig(), placedISVC("cluster-a", "svc.prod.cloud-a.example"))
 	reconcile(t, r) // publish + finalizer
 
-	// Placement regresses to Racing (winner lost). Publisher must tear down.
+	// Placement regresses to Admitting (winner lost). Publisher must tear down.
 	cur := &v1beta1.InferenceService{}
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "svc", Namespace: "prod"}, cur))
-	cur.Status.Placement.Phase = v1beta1.PlacementPhaseRacing
+	cur.Status.Placement.Phase = v1beta1.PlacementPhaseAdmitting
 	cur.Status.Placement.Cluster = ""
 	cur.Status.Placement.Endpoint = nil
 	require.NoError(t, c.Status().Update(context.Background(), cur))
@@ -588,7 +588,7 @@ func TestResolveTarget(t *testing.T) {
 				Candidates: []v1beta1.CandidatePlacement{
 					{Cluster: "workload-2", Phase: v1beta1.CandidatePhaseAdmitted, Endpoint: apis.HTTPS("b.example")},
 					{Cluster: "workload-1", Phase: v1beta1.CandidatePhaseAdmitted, Endpoint: apis.HTTPS("a.example")},
-					{Cluster: "workload-3", Phase: v1beta1.CandidatePhasePlaced}, // gated: not a home
+					{Cluster: "workload-3", Phase: v1beta1.CandidatePhaseAdmitting}, // gated: not a home
 				},
 			}},
 		}
@@ -607,7 +607,7 @@ func TestResolveTarget(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "prod"},
 			Status: v1beta1.InferenceServiceStatus{Placement: &v1beta1.PlacementStatus{
 				Phase:      v1beta1.PlacementPhasePlaced,
-				Candidates: []v1beta1.CandidatePlacement{{Cluster: "workload-1", Phase: v1beta1.CandidatePhasePlaced}},
+				Candidates: []v1beta1.CandidatePlacement{{Cluster: "workload-1", Phase: v1beta1.CandidatePhaseAdmitting}},
 			}},
 		}
 		_, ok, err := r.resolveTarget(isvc, nil)
@@ -705,7 +705,7 @@ func TestPlacementPublishChange(t *testing.T) {
 	t.Run("phase change passes", func(t *testing.T) {
 		old := base.DeepCopy()
 		nw := base.DeepCopy()
-		nw.Status.Placement.Phase = v1beta1.PlacementPhaseRacing
+		nw.Status.Placement.Phase = v1beta1.PlacementPhaseAdmitting
 		assert.True(t, placementPublishChange.Update(updateEvent(old, nw)))
 	})
 

@@ -13,7 +13,7 @@
 # status — the funnel reacts on an event, the poll waits up to its interval. To
 # isolate that flow-back step from fan-out time, the winner's admit delay is set
 # comfortably ABOVE the (small) fan-out latency, so by the time the winner
-# admits the placer is already Racing and simply waiting for the win to land.
+# admits the placer is already Admitting and simply waiting for the win to land.
 # The funnel then converges within batchPeriodMs; the poll waits up to
 # disabledSafetyRequeueMs. That gap is the number the harness proves.
 #
@@ -23,7 +23,7 @@
 # Three members with a spread of admit delays so a deterministic winner emerges:
 # member-fast admits first and wins; the other two admit much later (they lose
 # and get swept). member-fast's delay is above the typical fan-out latency so the
-# win lands while the placer is already Racing.
+# win lands while the placer is already Admitting.
 members:
   - name: member-fast
     admitDelayMs: 2500
@@ -53,7 +53,7 @@ funnel:
   # Funnel-ON pass: long safety requeue so status convergence is attributable to
   # funnel EVENTS, not the poll backstop. 2 minutes >> the per-pass window.
   enabledSafetyRequeueMs: 120000
-  # Funnel-OFF pass: the (Racing) status re-check cadence — there is no event
+  # Funnel-OFF pass: the (Admitting) status re-check cadence — there is no event
   # path, so the placer only re-checks for a winner this often. Set well above
   # batchPeriodMs so the funnel's event-driven convergence is unmistakably
   # faster; the delta vs the funnel pass is the headline.

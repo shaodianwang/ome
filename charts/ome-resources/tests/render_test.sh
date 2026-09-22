@@ -435,7 +435,7 @@ fi
 # The control plane selects a placement winner from the per-component
 # InferenceReplica status it reads on each workload cluster, so the
 # multicluster-access ClusterRole must grant it. Without the grant every read is
-# forbidden, fan-out still succeeds, and placement never leaves Racing — a
+# forbidden, fan-out still succeeds, and placement never leaves Admitting — a
 # failure mode no lane in the test matrix reproduces, because they all
 # authenticate as cluster-admin rather than as this ServiceAccount.
 multicluster_access="$("${helm_bin}" template ome-resources "${chart_dir}" \
