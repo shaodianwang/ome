@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Check the workload tree's test layout, and who is allowed to write a row.
+"""Check the rollout trees' test layout, and who is allowed to write a row.
 
 Two properties, both structural, both cheap enough to run before any Go
-compiles.
+compiles. They govern two trees: the workload engine and the
+InferenceReplica adapter that drives it.
 
 Test layout. One production file, one test file, named for each other:
 
@@ -28,13 +29,15 @@ Test layout. One production file, one test file, named for each other:
 Row writes. A row-mutation closure — `func(s *InstanceStatus) bool`, the
 callback the status adapter applies — may be declared only in the status
 package. Every other package decides and calls a named stamp: the
-operation passes, the escalation pass and the reconcile root hold no
-mutation closure of their own. The check is an allow-list of one writer
-rather than a list of readers so that a package added later is checked by
-default: the hold pass, the evidence classifiers, the value types, the
-queries and the gang, audit and revision helpers read the row and decide
-from it. They do not write it, and a closure appearing in one of them is
-that separation breaking down.
+operation passes, the escalation pass, the reconcile root and the
+InferenceReplica adapter hold no mutation closure of their own. The check
+is an allow-list of writers per tree rather than a list of readers so that
+a package added later is checked by default: the hold pass, the evidence
+classifiers, the value types, the queries and the gang, audit and revision
+helpers read the row and decide from it. They do not write it, and a
+closure appearing in one of them is that separation breaking down. The
+adapter's allow-list is empty: it persists whole objects through its own
+status writer and applies the engine's stamps to rows, and authors none.
 
 Two places outside the status package spell the callback's signature and
 are not writers, which the check tells apart by shape rather than by
@@ -60,9 +63,28 @@ import argparse
 import os
 import re
 import sys
+from dataclasses import dataclass
 
-# The tree the layout rule governs.
+# The engine tree and the adapter tree.
 WORKLOAD_ROOT = os.path.join("pkg", "controller", "v1beta1", "workload")
+ADAPTER_ROOT = os.path.join("pkg", "controller", "v1beta1", "inferencereplica")
+
+
+@dataclass(frozen=True)
+class Root:
+    """A tree the layout rule governs, and the packages under it that may
+    author a row-mutation closure. Writer directories are repo-relative and
+    matched exactly, not by prefix: a subpackage of a writer is a new package
+    and is checked."""
+
+    path: str
+    row_writers: tuple[str, ...] = ()
+
+
+ROOTS = (
+    Root(WORKLOAD_ROOT, row_writers=(os.path.join(WORKLOAD_ROOT, "status"),)),
+    Root(ADAPTER_ROOT),
+)
 
 # The shared-fixture files per package: the internal one, and the external
 # half for the fixtures an external test file must be able to call.
@@ -83,13 +105,6 @@ FUNC_DECL = re.compile(r"^func\b", re.MULTILINE)
 # legitimately do.
 ROW_MUTATION = re.compile(
     r"func\(\s*\w+\s+\*(?:\w+\.)?InstanceStatus\s*,?\s*\)\s*bool\s*\{"
-)
-
-# Where a row-mutation closure may be declared, as repo-relative package
-# directories. Matched exactly, not by prefix: a subpackage of one of these
-# is a new package and is checked.
-ROW_WRITERS = (
-    os.path.join(WORKLOAD_ROOT, "status"),
 )
 
 
@@ -127,10 +142,17 @@ def walk_packages(root: str):
         yield dirpath, production, tests
 
 
-def check_layout(repo: str) -> list[str]:
-    root = os.path.join(repo, WORKLOAD_ROOT)
+def check_layout(repo: str, roots: tuple[Root, ...] = ROOTS) -> list[str]:
+    violations: list[str] = []
+    for root in roots:
+        violations.extend(_check_layout_root(repo, root.path))
+    return violations
+
+
+def _check_layout_root(repo: str, root_path: str) -> list[str]:
+    root = os.path.join(repo, root_path)
     if not os.path.isdir(root):
-        return [f"{WORKLOAD_ROOT}: no such directory under {repo}"]
+        return [f"{root_path}: no such directory under {repo}"]
 
     violations: list[str] = []
     for dirpath, production, tests in walk_packages(root):
@@ -177,21 +199,23 @@ def check_layout(repo: str) -> list[str]:
     return violations
 
 
-def check_row_writers(repo: str) -> list[str]:
-    allowed = {os.path.normpath(os.path.join(repo, d)) for d in ROW_WRITERS}
+def check_row_writers(repo: str, roots: tuple[Root, ...] = ROOTS) -> list[str]:
     violations: list[str] = []
-    for dirpath, production, _ in walk_packages(os.path.join(repo, WORKLOAD_ROOT)):
-        if os.path.normpath(dirpath) in allowed:
-            continue
-        for name in production:
-            path = os.path.join(dirpath, name)
-            with open(path, encoding="utf-8") as handle:
-                if ROW_MUTATION.search(handle.read()):
-                    violations.append(
-                        f"{os.path.relpath(path, repo)}: declares a row-mutation "
-                        f"closure outside the package that writes rows "
-                        f"({', '.join(ROW_WRITERS)})"
-                    )
+    for root in roots:
+        allowed = {os.path.normpath(os.path.join(repo, d)) for d in root.row_writers}
+        where = ", ".join(root.row_writers) if root.row_writers else "none under " + root.path
+        for dirpath, production, _ in walk_packages(os.path.join(repo, root.path)):
+            if os.path.normpath(dirpath) in allowed:
+                continue
+            for name in production:
+                path = os.path.join(dirpath, name)
+                with open(path, encoding="utf-8") as handle:
+                    if ROW_MUTATION.search(handle.read()):
+                        violations.append(
+                            f"{os.path.relpath(path, repo)}: declares a row-mutation "
+                            f"closure outside the package that writes rows "
+                            f"({where})"
+                        )
     return violations
 
 

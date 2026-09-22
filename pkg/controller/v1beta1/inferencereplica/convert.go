@@ -50,8 +50,7 @@ func IRGVK() schema.GroupVersionKind { return irGVK }
 // workload.ReconcileInput so the workload dispatcher can drive the
 // per-Instance pipeline without taking on a backward import to
 // v1beta1.InferenceReplica. THE bridge between the IR adapter's
-// source-of-truth shape and the workload package's plain-data carrier
-// — analogous to internalsource.BuildReconcileInput on the ISVC side.
+// source-of-truth shape and the workload package's plain-data carrier.
 //
 // OwnerObject is the IR itself: every emitted pod / ControllerRevision
 // / PodGroup is GC'd through the IR's controller OwnerReference.
@@ -290,9 +289,7 @@ func (r *Reconciler) warnRetryHeldFunc(ir *v1beta1.InferenceReplica, eventTarget
 
 // buildHeadlessServiceSpec adapts an InferenceReplica into the typed
 // workload.PerComponentServiceSpec the workload renderer consumes.
-// Mirrors omenative.BuildHeadlessServiceSpec byte-for-byte except for:
-// (a) the v1beta1.InferenceReplica handle, (b) the owner-ref shape —
-// the IR owns its per-Component headless Service so deletion of the IR
+// The IR owns its per-Component headless Service so deletion of the IR
 // cascades to the Service. The ISVC controller continues to manage the
 // IR lifecycle; inside its own lifetime, the IR controller is
 // the sole Service writer.
@@ -948,8 +945,7 @@ func replaceInstanceStatuses(ir *v1beta1.InferenceReplica, statuses []v1beta1.OM
 // mirrorInstanceStatus copies the just-committed InstanceStatus onto
 // the caller's in-memory IR snapshot. Subsequent ops in the same
 // reconcile pass observe the post-write state instead of the stale
-// pre-reconcile snapshot — same shape as status/mutate.go on the
-// ISVC side.
+// pre-reconcile snapshot.
 func mirrorInstanceStatus(ir *v1beta1.InferenceReplica, src v1beta1.OMENativeInstanceStatus) {
 	mirrorInstanceStatuses(ir, []v1beta1.OMENativeInstanceStatus{src})
 }

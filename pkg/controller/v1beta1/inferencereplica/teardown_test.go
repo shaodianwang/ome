@@ -14,7 +14,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
-	kubefake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/record"
 	clocktesting "k8s.io/utils/clock/testing"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -22,11 +21,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	controllermetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
@@ -44,119 +41,6 @@ func terminatingIR(name, namespace string, replicas int32, dt time.Time) *v1beta
 	ir.DeletionTimestamp = &ts
 	ir.Finalizers = []string{TeardownFinalizer}
 	return ir
-}
-
-// withLifecycleConfig wires a fake clientset + zero-TTL config cache
-// serving the given lifecycle JSON so the teardown/force-delete config
-// resolvers see it.
-func withLifecycleConfig(r *Reconciler, lifecycleJSON string) {
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: "inferenceservice-config", Namespace: "ome"},
-		Data:       map[string]string{"lifecycle": lifecycleJSON},
-	}
-	r.Clientset = kubefake.NewSimpleClientset(cm)
-	r.ConfigCache = controllerconfig.NewConfigCache(0)
-}
-
-// drainEvents empties a FakeRecorder's channel.
-func drainEvents(rec *record.FakeRecorder) []string {
-	var out []string
-	for {
-		select {
-		case e := <-rec.Events:
-			out = append(out, e)
-		default:
-			return out
-		}
-	}
-}
-
-func eventsContaining(events []string, substr string) []string {
-	var out []string
-	for _, e := range events {
-		if strings.Contains(e, substr) {
-			out = append(out, e)
-		}
-	}
-	return out
-}
-
-type teardownListReader struct {
-	client.Reader
-	podLists      int
-	podGroupLists int
-	podError      error
-	podGroupError error
-}
-
-func (r *teardownListReader) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
-	switch list.(type) {
-	case *corev1.PodList:
-		r.podLists++
-		if r.podError != nil {
-			return r.podError
-		}
-	case *schedulingv1alpha1.PodGroupList:
-		r.podGroupLists++
-		if r.podGroupError != nil {
-			return r.podGroupError
-		}
-	}
-	return r.Reader.List(ctx, list, opts...)
-}
-
-func ownedPodGroupForIR(ir *v1beta1.InferenceReplica, name string, index int32) *schedulingv1alpha1.PodGroup {
-	return &schedulingv1alpha1.PodGroup{ObjectMeta: metav1.ObjectMeta{
-		Name:      name,
-		Namespace: ir.Namespace,
-		Labels: map[string]string{
-			query.LabelInstanceIdx: intToLabel(int64(index)),
-		},
-		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(
-			ir, v1beta1.SchemeGroupVersion.WithKind("InferenceReplica"))},
-	}}
-}
-
-func scaleDownGaugeSeriesExists(t *testing.T, metricName, namespace, isvc, component string) bool {
-	t.Helper()
-	families, err := controllermetrics.Registry.Gather()
-	if err != nil {
-		t.Fatalf("gather controller metrics: %v", err)
-	}
-	want := map[string]string{"namespace": namespace, "isvc": isvc, "component": component}
-	for _, family := range families {
-		if family.GetName() != metricName {
-			continue
-		}
-		for _, metric := range family.Metric {
-			if len(metric.Label) != len(want) {
-				continue
-			}
-			matches := true
-			for _, label := range metric.Label {
-				if want[label.GetName()] != label.GetValue() {
-					matches = false
-					break
-				}
-			}
-			if matches {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func assertScaleDownGaugeSeries(t *testing.T, want bool, namespace, isvc, component string) {
-	t.Helper()
-	for _, name := range []string{
-		"ome_omenative_scale_down_active_pods",
-		"ome_omenative_scale_down_deferred_instances",
-	} {
-		if got := scaleDownGaugeSeriesExists(t, name, namespace, isvc, component); got != want {
-			t.Errorf("metric %s series existence: got %t want %t", name, got, want)
-		}
-	}
 }
 
 // TestReconcile_AddsTeardownFinalizer pins the arm step: the first
@@ -375,20 +259,6 @@ func TestTeardown_InvalidDeadlineConfig_WarnsInvalid(t *testing.T) {
 	}
 	if strings.Contains(msg, "no lifecycle.teardown.deadline configured") {
 		t.Errorf("invalid-config TeardownBlocked message must not claim the deadline is unconfigured; got %q", msg)
-	}
-}
-
-// ledgerCMForOwner materializes a migration audit ConfigMap for the
-// named ledger owner, the shape audit.PersistLedgerForOwner writes.
-func ledgerCMForOwner(t *testing.T, ownerName, namespace string, ledger *audit.Ledger) *corev1.ConfigMap {
-	t.Helper()
-	raw, err := json.Marshal(ledger)
-	if err != nil {
-		t.Fatalf("marshal ledger: %v", err)
-	}
-	return &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: ownerName + audit.ConfigMapNameSuffix, Namespace: namespace},
-		Data:       map[string]string{audit.LedgerKey: string(raw)},
 	}
 }
 

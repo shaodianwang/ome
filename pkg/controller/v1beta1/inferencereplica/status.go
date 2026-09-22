@@ -147,8 +147,7 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 	// List pods + EndpointSlices via the CACHED client (r.Client), outside
 	// the retry closure: both reads are idempotent (no apiserver-side
 	// mutation), so on a status conflict we just re-stamp the same counters
-	// onto the re-read IR. Mirrors the omenative direct path which reads pods
-	// + availability once at the top of AggregateAndWriteStatus.
+	// onto the re-read IR.
 	//
 	// This aggregator is observability-only COUNTING — the manager cache is
 	// scoped to OME pods, has the OMENative Pod field index registered, and

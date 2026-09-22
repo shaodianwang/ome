@@ -378,8 +378,7 @@ var routingLabelKeys = []string{
 // next reconcile could read a stale expectation entry and stay parked
 // behind the create/delete gate until the 2-minute TTL.
 //
-// This mirrors omenative.NewPodEventHandler on the legacy ISVC path.
-// The IR controller needs its own copy because it dispatches the same
+// The IR controller owns this handler because it dispatches the
 // workload pipeline (ops.surgeUpdate / recreateUpdate / Migrate) whose
 // destructive steps gate on ExpectationsCache().Satisfied(); without an
 // observer feeding the SAME cache the dispatcher reads, those gates only

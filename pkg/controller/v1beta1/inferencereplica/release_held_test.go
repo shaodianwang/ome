@@ -1,11 +1,5 @@
 package inferencereplica
 
-// Release-mailbox coverage for the ome.io/release-held-revision
-// annotation: a Held block matched by full revision name or bare hash
-// is removed and the annotation is consumed; non-Held or unknown
-// revisions consume as an explanatory no-op; unmatched blocks are
-// never touched.
-
 import (
 	"context"
 	"testing"
@@ -22,6 +16,12 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
+
+// Release-mailbox coverage for the ome.io/release-held-revision
+// annotation: a Held block matched by full revision name or bare hash
+// is removed and the annotation is consumed; non-Held or unknown
+// revisions consume as an explanatory no-op; unmatched blocks are
+// never touched.
 
 // newReleaseFixture builds a fake-client Reconciler (with recorder)
 // around the given IR and re-reads it so the ResourceVersion is

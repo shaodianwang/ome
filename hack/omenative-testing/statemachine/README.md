@@ -104,8 +104,12 @@ transition, and a workload-lane arrow may not be cited at all.
 ## Test layout
 
 `check_test_layout.py` is the third checker, and unlike the other two it
-reads no grid: it walks `pkg/controller/v1beta1/workload/...` and enforces
-two structural properties of the tree the state machines describe.
+reads no grid: it walks two trees — the engine,
+`pkg/controller/v1beta1/workload/...`, and the InferenceReplica adapter that
+drives it, `pkg/controller/v1beta1/inferencereplica/` — and enforces two
+structural properties of the code the state machines describe. The roots
+are a list in the script (`ROOTS`), each with its own row-writer
+allow-list.
 
 **One production file, one test file, named for each other.** A production
 file that declares at least one function has a `<file>_test.go`; a file
@@ -122,11 +126,15 @@ as its external half for the fixtures a `package x_test` file must call.
 **Rows are written in one place.** A row-mutation closure —
 `func(s *InstanceStatus) bool`, the callback the status adapter applies —
 may be declared only in `workload/status`. Every other package decides and
-calls a named stamp. The check is an allow-list of one writer, not of
-readers, so a package added later is checked by default. Declaring the
-callback's *type* (`types/input.go`) or taking it as a parameter (the replay
-store) is not authoring one, and a closure that does not name its parameter
-cannot write the row.
+calls a named stamp. The check is an allow-list of writers per tree, not of
+readers, so a package added later is checked by default. The adapter's
+allow-list is empty: it persists whole objects through its own status
+writer (`status_writer.go`, which is not a row writer) and applies the
+engine's stamps to rows, so a row-mutation closure anywhere under it is a
+violation. Declaring the callback's *type* (`types/input.go`) or taking it
+as a parameter (the replay store, the adapter's `convert.go` seams) is not
+authoring one, and a closure that does not name its parameter cannot write
+the row.
 
     python3 check_test_layout.py --repo .
 

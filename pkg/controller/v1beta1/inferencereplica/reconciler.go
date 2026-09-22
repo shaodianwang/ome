@@ -201,7 +201,7 @@ type scaleDownSeriesIdentity struct {
 // delegates lifecycle dispatch to workload.Reconcile, and
 // aggregates the per-Component counters onto IR.Status.
 //
-// Loop (mirrors the omenative.ReconcileComponent shape):
+// Loop:
 //
 //  1. Get IR. NotFound → no-op (background owner-ref GC handles
 //     children).
@@ -1545,11 +1545,6 @@ func irRevisionKey(ir *v1beta1.InferenceReplica) revision.Key {
 // Data (or foreign-ownership) collision, bump
 // IR.Status.CollisionCount, persist, and retry the EnsureControllerRevision
 // with the new salt. The retry yields a different hash and lands.
-//
-// Mirrors the ISVC-side ensureRevisionWithCollisionRetry byte-for-byte
-// except for: (a) the v1beta1.InferenceReplica handle, (b) the
-// owner-ref shape (IR is owner), (c) collision-counter persistence
-// goes to IR.Status.CollisionCount instead of the per-Component status.
 func (r *Reconciler) ensureRevisionWithCollisionRetry(ctx context.Context, ir *v1beta1.InferenceReplica, input workloadtypes.ReconcileInput) (*appsv1.ControllerRevision, error) {
 	revKey := irRevisionKey(ir)
 
@@ -1798,7 +1793,7 @@ func (r *Reconciler) bumpCollisionCount(ctx context.Context, ir *v1beta1.Inferen
 		return nil, err
 	}
 	// Mirror onto the cached IR so the immediate retry sees the bumped
-	// value. Same mirror shape the ISVC adapter uses.
+	// value.
 	ir.Status.CollisionCount = &next
 	return &next, nil
 }

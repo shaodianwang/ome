@@ -1,13 +1,5 @@
 package inferencereplica
 
-// Reset-mailbox coverage for the ome.io/reset-instances annotation: a
-// Failed Instance named by index (or by "all") has every pod deleted and
-// its preserved Operation cleared while Phase=Failed and LastFailure
-// survive; a still-serving Instance and one parked behind a rollout- or
-// migration-owned continuation are skipped untouched; non-Failed or
-// unknown targets and malformed values consume as explanatory no-ops; a
-// re-delivered request finds nothing to do.
-
 import (
 	"context"
 	"errors"
@@ -32,6 +24,14 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
+
+// Reset-mailbox coverage for the ome.io/reset-instances annotation: a
+// Failed Instance named by index (or by "all") has every pod deleted and
+// its preserved Operation cleared while Phase=Failed and LastFailure
+// survive; a still-serving Instance and one parked behind a rollout- or
+// migration-owned continuation are skipped untouched; non-Failed or
+// unknown targets and malformed values consume as explanatory no-ops; a
+// re-delivered request finds nothing to do.
 
 // newResetFixture builds a fake-client Reconciler (with recorder and a
 // fresh Expectations cache) around the IR plus its pods, optionally

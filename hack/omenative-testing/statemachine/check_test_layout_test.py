@@ -6,16 +6,17 @@ from pathlib import Path
 import check_test_layout
 
 
-def repo(files):
-    """Build a throwaway repo whose workload tree holds `files`.
+def repo(files, root=check_test_layout.WORKLOAD_ROOT):
+    """Build a throwaway repo whose tree under `root` holds `files`.
 
-    Keys are paths under pkg/controller/v1beta1/workload; values are file
-    bodies. Returns the TemporaryDirectory (the caller keeps it alive).
+    Keys are paths under root (the workload tree by default); values are
+    file bodies. Returns the TemporaryDirectory (the caller keeps it alive).
     """
     tmp = tempfile.TemporaryDirectory()
-    root = Path(tmp.name) / check_test_layout.WORKLOAD_ROOT
+    base = Path(tmp.name) / root
+    base.mkdir(parents=True, exist_ok=True)
     for rel, body in files.items():
-        path = root / rel
+        path = base / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(body)
     return tmp
@@ -26,12 +27,15 @@ DECL_ONLY = "package p\n\ntype T struct{}\n\nconst X = 1\n"
 TEST = "package p\n\nimport \"testing\"\n\nfunc TestDo(t *testing.T) {}\n"
 EXTERNAL_TEST = "package p_test\n\nimport \"testing\"\n\nfunc TestDoAsAConsumer(t *testing.T) {}\n"
 
+WORKLOAD_ONLY = (check_test_layout.ROOTS[0],)
+ADAPTER_ONLY = (check_test_layout.ROOTS[1],)
+
 
 class LayoutTest(unittest.TestCase):
     def violations(self, files):
         tmp = repo(files)
         self.addCleanup(tmp.cleanup)
-        return check_test_layout.check_layout(tmp.name)
+        return check_test_layout.check_layout(tmp.name, WORKLOAD_ONLY)
 
     def test_one_test_file_per_production_file_passes(self):
         self.assertEqual(self.violations({"do.go": FUNC, "do_test.go": TEST}), [])
@@ -100,7 +104,50 @@ class LayoutTest(unittest.TestCase):
     def test_a_missing_tree_is_reported_rather_than_passing_silently(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        self.assertTrue(check_test_layout.check_layout(tmp.name))
+        self.assertTrue(check_test_layout.check_layout(tmp.name, WORKLOAD_ONLY))
+
+
+class AdapterLayoutTest(unittest.TestCase):
+    """The adapter tree is held to the same layout rule as the engine."""
+
+    def violations(self, files):
+        tmp = repo(files, check_test_layout.ADAPTER_ROOT)
+        self.addCleanup(tmp.cleanup)
+        return check_test_layout.check_layout(tmp.name, ADAPTER_ONLY)
+
+    def test_one_test_file_per_production_file_passes(self):
+        self.assertEqual(
+            self.violations(
+                {"reconciler.go": FUNC, "reconciler_test.go": TEST, "helpers_test.go": TEST}
+            ),
+            [],
+        )
+
+    def test_a_scenario_named_test_file_fails(self):
+        (violation,) = self.violations(
+            {"reconciler.go": FUNC, "reconciler_test.go": TEST, "gang_loss_restart_test.go": TEST}
+        )
+        self.assertIn(check_test_layout.ADAPTER_ROOT, violation)
+        self.assertIn("gang_loss_restart_test.go", violation)
+        self.assertIn("names no production file", violation)
+
+    def test_a_second_test_file_for_one_production_file_fails(self):
+        (violation,) = self.violations(
+            {"status.go": FUNC, "status_test.go": TEST, "status_contract_test.go": TEST}
+        )
+        self.assertIn("status_contract_test.go", violation)
+
+    def test_a_production_file_without_a_test_file_fails(self):
+        (violation,) = self.violations({"manager.go": FUNC})
+        self.assertIn("no manager_test.go", violation)
+
+    def test_both_trees_are_checked_by_default(self):
+        tmp = repo({"do.go": FUNC, "do_test.go": TEST})
+        self.addCleanup(tmp.cleanup)
+        violations = check_test_layout.check_layout(tmp.name)
+        self.assertEqual(len(violations), 1)
+        self.assertIn(check_test_layout.ADAPTER_ROOT, violations[0])
+        self.assertIn("no such directory", violations[0])
 
 
 ROW_WRITE = (
@@ -127,7 +174,7 @@ class RowWriterTest(unittest.TestCase):
     def violations(self, files):
         tmp = repo(files)
         self.addCleanup(tmp.cleanup)
-        return check_test_layout.check_row_writers(tmp.name)
+        return check_test_layout.check_row_writers(tmp.name, WORKLOAD_ONLY)
 
     def test_the_status_package_may_author_the_closure(self):
         self.assertEqual(self.violations({"status/decision.go": ROW_WRITE}), [])
@@ -168,6 +215,33 @@ class RowWriterTest(unittest.TestCase):
 
     def test_a_subpackage_of_a_writer_is_checked(self):
         self.assertTrue(self.violations({"ops/inner/x.go": ROW_WRITE}))
+
+
+class AdapterRowWriterTest(unittest.TestCase):
+    """The adapter authors no row-mutation closure: its allow-list is empty,
+    so the closure is a violation anywhere under it, its own status writer
+    included."""
+
+    def violations(self, files):
+        tmp = repo(files, check_test_layout.ADAPTER_ROOT)
+        self.addCleanup(tmp.cleanup)
+        return check_test_layout.check_row_writers(tmp.name, ADAPTER_ONLY)
+
+    def test_the_adapter_root_may_not(self):
+        (violation,) = self.violations({"reset_instances.go": ROW_WRITE})
+        self.assertIn("reset_instances.go", violation)
+        self.assertIn("row-mutation", violation)
+        self.assertIn("none under", violation)
+
+    def test_the_adapters_status_writer_is_not_a_row_writer(self):
+        (violation,) = self.violations({"status_writer.go": ROW_WRITE})
+        self.assertIn("status_writer.go", violation)
+
+    def test_taking_the_callback_as_a_parameter_is_still_not_authoring_one(self):
+        self.assertEqual(self.violations({"convert.go": ROW_CALLBACK_PARAMETER}), [])
+
+    def test_test_files_are_not_checked(self):
+        self.assertEqual(self.violations({"convert_test.go": ROW_WRITE}), [])
 
 
 if __name__ == "__main__":
