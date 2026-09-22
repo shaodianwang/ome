@@ -148,6 +148,10 @@ type ConfigState struct {
 	// engine unconfigured, which holds every request rather than
 	// admitting it unbounded.
 	MigrationAudit *MigrationAudit `json:"migrationAudit,omitempty"`
+	// AutoMigrateBudget is lifecycle.autoMigrate.maxAttempts, the
+	// per-Instance relocation budget the disposition spends. Unset
+	// leaves the engine unconfigured, which never records a directive.
+	AutoMigrateBudget int32 `json:"autoMigrateBudget,omitempty"`
 }
 
 // MigrationAudit is the migration admission budget.

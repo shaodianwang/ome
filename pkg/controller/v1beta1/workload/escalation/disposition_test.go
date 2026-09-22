@@ -25,6 +25,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
@@ -131,6 +132,12 @@ func fakeLedgerClient(t *testing.T) client.Client {
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add corev1 to scheme: %v", err)
+	}
+	// The source-rotation hold reads a labeled source's routed Service
+	// membership; a scheme that cannot list EndpointSlices fails that
+	// read instead of abstaining the way an absent Service does.
+	if err := discoveryv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add discoveryv1 to scheme: %v", err)
 	}
 	return fake.NewClientBuilder().WithScheme(scheme).Build()
 }

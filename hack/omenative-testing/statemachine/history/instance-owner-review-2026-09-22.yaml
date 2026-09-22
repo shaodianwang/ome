@@ -1,0 +1,16 @@
+# Provenance for the instance-machine cell corrected in the owner review
+# session of 2026-09-22, which fixed which node a disposed attempt is
+# steered off. The relocation branch used to read the one node shared by
+# every pod in the Instance's bucket; a single-pod surge keeps its serving
+# source and its replacement in that bucket, so a replacement wedged on
+# any node but the source's read as "spanning nodes" and the deadline
+# disposed it terminal with no directive. The reading now covers the
+# attempt's own pods — the source shares the index, not the attempt — so
+# the directive names the replacement's node. The relocation-first rule
+# is unchanged: evidence never selects the dispose branch, and relocation
+# keeps the first try.
+#
+# Selectors match the cells files exactly: an empty variants, windows or
+# transition matches all of them.
+history:
+  - {state: Update/Surge, event: timer.operationDeadline, variants: [], windows: [before], transition: "", decision: owner-review-2026-09-22}

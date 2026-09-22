@@ -69,9 +69,12 @@ const (
 //     block.
 //  2. RELOCATABLE — no workload-caused reason, MigrationMode=Auto,
 //     relocation budget (operator config) not exhausted, and the
-//     attempt's pods occupy exactly ONE resolvable node (single-pod
+//     attempt's OWN pods occupy exactly ONE resolvable node (single-pod
 //     instances and single-host gangs; multi-node attempts fall
-//     through): record a RELOCATION DIRECTIVE — a TERMINAL AutoRecover
+//     through). A live pod of another revision in the same bucket — the
+//     serving source of a single-pod surge — is not the attempt's and
+//     neither names nor vetoes the node (evidence.AttemptSuspectNode).
+//     Record a RELOCATION DIRECTIVE — a TERMINAL AutoRecover
 //     ledger entry (evidence, budget accounting, and node-exclusion
 //     memory; NOT a migration work order — the migration detector
 //     ignores AutoRecover entries), then apply the SAME unconditional
@@ -158,14 +161,16 @@ func DisposeExpiredAttempt(ctx context.Context, deps types.Deps, input types.Rec
 		// UpdateRevision) — nothing to hold; dispose terminal below.
 	}
 
-	// Branch 2: relocatable — the attempt's pods occupy exactly one
-	// resolvable node, so the rebuild can be steered off it. The
-	// directive is written below, once the evidence the backstop derives
-	// is available to travel with it.
+	// Branch 2: relocatable — the attempt's own pods occupy exactly one
+	// resolvable node, so the rebuild can be steered off it. A single-pod
+	// surge shares its Instance index with the serving source, whose node
+	// is not the attempt's to record. The directive is written below,
+	// once the evidence the backstop derives is available to travel with
+	// it.
 	relocationNode := ""
 	if causePod == nil &&
 		migrationModeAllowsRelocation(dd.MigrationMode) && dd.AutoMigrateMaxAttempts > 0 {
-		relocationNode = evidence.SingleLiveNode(pods)
+		relocationNode = evidence.AttemptSuspectNode(pods, attemptTargetRevision(input, inst))
 	}
 
 	// Terminal backstop (branches 2 and 3): clear the Operation + stamp

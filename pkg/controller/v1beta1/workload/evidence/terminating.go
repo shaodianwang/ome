@@ -283,6 +283,25 @@ func SingleLiveNode(pods []*corev1.Pod) string {
 	return observed
 }
 
+// AttemptSuspectNode returns the node a failed attempt is steered off:
+// SingleLiveNode over the attempt's own pods. A live pod of another
+// revision is not the attempt's — a single-pod surge shares its Instance
+// index with the source it replaces, and that source's node says nothing
+// about where the replacement failed — so it neither names nor vetoes
+// the suspect node. A pod on its way out, or one with no revision label,
+// is read as today: a recreate that drained its old pod is still failing
+// on that pod, and without the label ownership cannot be told apart.
+func AttemptSuspectNode(pods []*corev1.Pod, attemptRev string) string {
+	own := make([]*corev1.Pod, 0, len(pods))
+	for _, pod := range pods {
+		if pod != nil && pod.DeletionTimestamp == nil && !podOnAttemptRevision(pod, attemptRev) {
+			continue
+		}
+		own = append(own, pod)
+	}
+	return SingleLiveNode(own)
+}
+
 // UnknownPhaseTargetPods returns the pods in phase Unknown occupying one
 // of the target names, lowest name first. Name order — not the
 // informer's map iteration order — decides which pod a hold's evidence

@@ -18,10 +18,60 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/evidence"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
 var tNow = time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC)
+
+// TestAttemptSuspectNode: the suspect node is read off the attempt's own
+// pods. A single-pod surge shares its bucket with the serving source, so
+// a source on another node — or one not yet bound — must neither veto
+// the reading nor be the node it names; a pod being removed, or one
+// without a revision label, is read exactly as SingleLiveNode reads it.
+func TestAttemptSuspectNode(t *testing.T) {
+	const oldRev, newRev = "own-engine-oldhash", "own-engine-newhash"
+	on := func(rev, node string) *corev1.Pod {
+		pod := &corev1.Pod{Spec: corev1.PodSpec{NodeName: node}}
+		if rev != "" {
+			pod.Labels = map[string]string{query.LabelRevisionHash: query.RevisionFromName(rev).Hash()}
+		}
+		return pod
+	}
+	leaving := func(rev, node string) *corev1.Pod {
+		pod := on(rev, node)
+		pod.DeletionTimestamp = &metav1.Time{Time: tNow}
+		return pod
+	}
+	for _, tc := range []struct {
+		name string
+		pods []*corev1.Pod
+		want string
+	}{
+		{name: "source and target on different nodes name the target's", pods: []*corev1.Pod{on(oldRev, "a"), on(newRev, "b")}, want: "b"},
+		{name: "an unbound source does not veto the target's node", pods: []*corev1.Pod{on(oldRev, ""), on(newRev, "b")}, want: "b"},
+		{name: "only the source present names nothing", pods: []*corev1.Pod{on(oldRev, "a")}, want: ""},
+		{name: "the same pod carrying the target label resolves as before", pods: []*corev1.Pod{on(newRev, "a")}, want: "a"},
+		{name: "unlabeled pods stay in scope", pods: []*corev1.Pod{on("", "a")}, want: "a"},
+		{name: "unlabeled pods spanning nodes still name nothing", pods: []*corev1.Pod{on("", "a"), on("", "b")}, want: ""},
+		{name: "a drained old pod on its way out is still the attempt's", pods: []*corev1.Pod{leaving(oldRev, "a")}, want: "a"},
+		{name: "a leaving source and a target on another node span nodes", pods: []*corev1.Pod{leaving(oldRev, "a"), on(newRev, "b")}, want: ""},
+		{name: "a target gang on one node resolves", pods: []*corev1.Pod{on(oldRev, "a"), on(newRev, "b"), on(newRev, "b")}, want: "b"},
+		{name: "a target gang spanning nodes names nothing", pods: []*corev1.Pod{on(newRev, "b"), on(newRev, "c")}, want: ""},
+		{name: "no target revision leaves every pod in scope", pods: []*corev1.Pod{on(oldRev, "a"), on(newRev, "b")}, want: ""},
+		{name: "no pods", pods: nil, want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rev := newRev
+			if tc.name == "no target revision leaves every pod in scope" {
+				rev = ""
+			}
+			if got := evidence.AttemptSuspectNode(tc.pods, rev); got != tc.want {
+				t.Errorf("AttemptSuspectNode: got %q want %q", got, tc.want)
+			}
+		})
+	}
+}
 
 func tPolicy() *types.ForceDeletePolicy {
 	return &types.ForceDeletePolicy{

@@ -757,7 +757,8 @@ func (d *driver) buildInput(desired types.WorkloadDesiredSpec, observed types.Wo
 		Teardown:                 d.teardown,
 		Clock:                    d.clock,
 		Disposition: types.DispositionDeps{
-			PodSpec: desired.PodSpec,
+			PodSpec:                desired.PodSpec,
+			AutoMigrateMaxAttempts: d.cfg.AutoMigrateBudget,
 		},
 	}
 	if policy := d.cfg.UpdateRetry; policy != nil {

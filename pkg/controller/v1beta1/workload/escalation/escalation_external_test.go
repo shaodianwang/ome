@@ -255,6 +255,82 @@ func TestEscalation_SinglePodSurgeRelocatesTheFailedTarget(t *testing.T) {
 	}
 }
 
+// TestEscalation_SinglePodSurgeDeadlineRelocatesOffTheTargetNode pins the
+// deadline path of the same split. The source serves on its own node and
+// the replacement sits on another; when the operation deadline ends the
+// attempt, the directive must name the replacement's node — the source
+// is not the attempt's, so it can neither be blamed nor, by sitting on a
+// second node, turn the reading empty and lose the directive. Two shapes
+// reach the deadline without the fast escalator: a replacement bound but
+// never started, and a wedged one with the stuck-pod grace disabled.
+//
+// Cells: instance/Update/Surge/timer.operationDeadline/before
+func TestEscalation_SinglePodSurgeDeadlineRelocatesOffTheTargetNode(t *testing.T) {
+	const oldRev, targetRev = "own-engine-oldhash", "own-engine-targethash"
+	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
+	label := func(pod *corev1.Pod, rev string) *corev1.Pod {
+		pod.Labels = map[string]string{query.LabelRevisionHash: query.RevisionFromName(rev).Hash()}
+		return pod
+	}
+	boundNeverStarted := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "engine-0-default-1", CreationTimestamp: metav1.NewTime(now.Add(-2 * time.Hour))},
+		Spec:       corev1.PodSpec{NodeName: "node-target"},
+		Status:     corev1.PodStatus{Phase: corev1.PodPending},
+	}
+	for _, tc := range []struct {
+		name   string
+		target *corev1.Pod
+		grace  time.Duration
+	}{
+		{name: "bound but never started", target: boundNeverStarted, grace: time.Second},
+		{name: "wedged with the fast escalator disabled", target: waitingPod("engine-0-default-1", "CrashLoopBackOff", "node-target", now.Add(-2*time.Hour)), grace: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fc := clocktesting.NewFakeClock(now)
+			insts := []workloadtypes.InstanceStatus{{
+				Index:           0,
+				Phase:           workloadtypes.InstancePhaseUpdating,
+				PodCount:        1,
+				RunningRevision: oldRev,
+				Operation: &workloadtypes.InstanceOperation{
+					Type:           workloadtypes.InstanceOperationUpdate,
+					Step:           workloadtypes.UpdateStepSurge,
+					TargetRevision: targetRev,
+					StartedAt:      metav1.NewTime(now.Add(-2 * time.Hour)),
+					Deadline:       metav1.NewTime(now.Add(-time.Hour)),
+				},
+			}}
+			c := fakeLedgerClient(t)
+			input, rec := dispositionFixtureInput(fc, &insts, targetRev, nil, ledgerOwnerCM())
+			input.ObservedState.InstanceStatuses = append([]workloadtypes.InstanceStatus(nil), insts...)
+			input.StuckPodGrace = tc.grace
+			input.Disposition.AutoMigrateMaxAttempts = 3
+
+			source := label(servingPod("engine-0-default-0"), oldRev)
+			source.Spec.NodeName = "node-source"
+			target := label(tc.target.DeepCopy(), targetRev)
+
+			plan := singleInstancePlan(0, 1)
+			plan.MigrationMode = workloadtypes.MigrationModeAuto
+			if err := runEscalationPass(t, workloadtypes.Deps{Client: c, Clock: fc}, input, plan,
+				map[int32][]*corev1.Pod{0: {source, target}}); err != nil {
+				t.Fatalf("escalation pass: %v", err)
+			}
+
+			ledger := loadLedger(t, c)
+			if len(ledger.Entries) != 1 || ledger.Entries[0].FromNode != "node-target" {
+				t.Fatalf("relocation entries: got %+v want one directive for node-target", ledger.Entries)
+			}
+			if insts[0].Phase != workloadtypes.InstancePhaseFailed || insts[0].Operation != nil {
+				t.Fatalf("instance: got Phase=%q Operation=%+v want Failed with no operation", insts[0].Phase, insts[0].Operation)
+			}
+			if len(rec.blockCalls) != 0 {
+				t.Fatalf("RetryBlocks: got %+v want none (the deadline blames no revision)", rec.blockCalls)
+			}
+		})
+	}
+}
+
 // TestEscalation_MultiInstanceStamps_OneBatchedWrite pins the batched
 // flush: when the adapter wires ApplyInstanceMutations, a
 // multi-instance escalation of plain Failed stamps lands in ONE batched
