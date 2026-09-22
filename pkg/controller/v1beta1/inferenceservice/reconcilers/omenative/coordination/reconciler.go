@@ -241,9 +241,14 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 		}
 
 		// Delete per-revision Service pairs whose revision-hash has no
-		// live pods. Safe because we Ensure only for hashes with pods —
-		// a hash with zero pods is genuinely past retention. Pods added
-		// between the list and the delete re-Ensure on the next reconcile.
+		// live pods and is not the Component's roll target. A hash with zero
+		// pods that is not the target is genuinely past retention. The
+		// target revision is protected even before its first pod exists:
+		// peer Components create its Services ahead of the pods whose
+		// OME_<PEER>_REVISION_ENDPOINT names them, and sweeping those would
+		// leave the pods with a dead peer endpoint until re-created. Pods
+		// added between the list and the delete re-Ensure on the next
+		// reconcile.
 		//
 		// The sweep runs unconditionally. It cannot be gated on the live
 		// revision-hash set matching Status.Components.<c>.Traffic: the
@@ -253,7 +258,11 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 		// the pass on which the two sets agree, so a gate would skip the
 		// only sweep that could collect that revision's Services. Cost is
 		// a cached-client List, not an apiserver round trip.
-		if err := gcOrphanedPerRevisionServices(ctx, in.Client, in.ISVC, c, perRevisionPods[c]); err != nil {
+		retained, err := retainedRevisionHashes(ctx, in.Reader, in.ISVC, c, perRevisionPods[c])
+		if err != nil {
+			return nil, fmt.Errorf("resolve retained revisions for %s: %w", c, err)
+		}
+		if err := gcOrphanedPerRevisionServices(ctx, in.Client, in.ISVC, c, retained); err != nil {
 			return nil, fmt.Errorf("gc per-revision services for %s: %w", c, err)
 		}
 	}
@@ -700,8 +709,33 @@ func sumPodCounts(in map[string]int32) int32 {
 	return sum
 }
 
+// retainedRevisionHashes is the revision-hash set the orphan sweep must
+// keep for one Component: every hash with a live pod plus the Component's
+// roll-target hash from its IR status. The target is retained even with
+// zero pods because peer Components create its per-revision Services
+// ahead of the pods that name them. Returns liveHashes as-is when the IR
+// reports no target yet.
+func retainedRevisionHashes(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, liveHashes map[string]int32) (map[string]int32, error) {
+	target, err := latestRevisionHashChecked(ctx, reads, isvc.Namespace, isvc.Name, component)
+	if err != nil {
+		return nil, err
+	}
+	if target == "" {
+		return liveHashes, nil
+	}
+	if _, live := liveHashes[target]; live {
+		return liveHashes, nil
+	}
+	retained := make(map[string]int32, len(liveHashes)+1)
+	for h, n := range liveHashes {
+		retained[h] = n
+	}
+	retained[target] = 0
+	return retained, nil
+}
+
 // gcOrphanedPerRevisionServices deletes per-revision Service pairs
-// whose revision-hash has no live pods for `component`.
+// whose revision-hash is not in `liveHashes` for `component`.
 //
 // The sweep lists Services in the ISVC's namespace that carry the
 // (inferenceservice + component + revision-hash) selector keys, then

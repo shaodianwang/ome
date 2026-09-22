@@ -615,6 +615,28 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// nothing at all: report whether this Component has a readiness window.
 	r.reportInstanceReadyTimeout(ctx, log, ir, input, plan.InstanceReadyTimeout)
 
+	// Peer revision pairing for every pod rendered this pass: resolve each
+	// serving peer's roll-target revision and create that revision's
+	// per-revision Services before any pod that names them exists. While a
+	// peer's projection or status lags this Component's parent generation
+	// the pairing is unknowable, so the pass renders nothing (status is
+	// still written by the deferred aggregator) and retries.
+	var peerRevisionFor coordination.PeerRevisionFunc
+	if coordination.PeerEnvDeclared(parent) {
+		peers, hold, perr := r.resolvePeerRevisions(ctx, ir, parent, rollTarget)
+		if perr != nil {
+			return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: resolve peer revisions (component=%s): %w", ir.Spec.Component, perr)
+		}
+		if hold != "" {
+			log.V(1).Info("Holding dispatch until peer revisions are resolvable", "reason", hold)
+			return ctrl.Result{Requeue: true}, nil
+		}
+		if serr := r.ensurePeerRevisionServices(ctx, parent, peers); serr != nil {
+			return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: ensure peer per-revision services (component=%s): %w", ir.Spec.Component, serr)
+		}
+		peerRevisionFor = peers.hashFor
+	}
+
 	deps := workloadtypes.Deps{
 		Client:       r.Client,
 		APIReader:    r.APIReader,
@@ -624,12 +646,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 		// Wire peer-env injection on the IR-managed (live) path.
 		// ISVCRenderHook overlays OME_<PEER>_ENDPOINT / _REVISION_ENDPOINT
 		// onto each rendered pod so PD components (engine <-> decoder) can
-		// address each other by stable DNS. It returns nil when the parent
+		// address each other by stable DNS and by the per-revision Service of
+		// the peer revision they pair with. It returns nil when the parent
 		// ISVC has no rollout groups, so single-component / non-rollout
 		// boxes are unaffected. parent may be nil when the
 		// parent ISVC is unresolved (foreground-GC window) — the hook handles
 		// nil by returning nil.
-		RenderHook: omenativecore.ISVCRenderHook(parent),
+		RenderHook: omenativecore.ISVCRenderHook(parent, peerRevisionFor),
 		// Ensure a gang surge's PodGroup inline, just before its pods —
 		// closes the window where the surge index hasn't yet landed in the
 		// plan the top-level EnsurePodGroups keys off (a gang scheduler
