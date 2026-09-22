@@ -1,0 +1,43 @@
+title: "Runtime-declared inference signals for autoscaling"
+oep-number: "0029"
+authors:
+  - "@slin1237"
+status: provisional
+# state: design only; no code. Checked against main at 2720a40b (2026-09-22): ServingRuntimeSpec has no signals field, AutoscalerPolicySpec has only the template form, charts/ome-resources ships no AutoscalerPolicy objects.
+creation-date: 2026-09-22
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+# The autoscaling path built under OEP-0013 and OEP-0013.1 is complete from
+# the policy down to the KEDA ScaledObject, but nothing in the tree says what
+# a model server's queue depth, cache utilization or time-to-first-token is
+# called or how it is aggregated. This OEP puts that one fact in one place:
+# a `signals` map on the ServingRuntime holding a complete Prometheus
+# expression per signal name. A second, PromQL-free AutoscalerPolicy shape
+# names a signal and a target; the service owner writes a reference. The
+# chart ships three policies, one per conventional signal name.
+see-also:
+  - "/oeps/0013-autoscaling"                    # the per-Component autoscaler block and the KEDA dispatch this renders into
+  - "/oeps/0013.1-autoscaler-policy"            # AutoscalerPolicy, the closed template variable set, and the no-per-service-parameters decision
+  - "/oeps/0013.2-scaling-coordinator"          # the anchor/follower coordinator; unaffected, but reads the same anchor scaler
+  - "/oeps/0015.2-canary-analysis"              # the analysis samplers that carry their own PromQL; the named follow-up
+  - "/oeps/0026-inferencereplica-public-api"    # an IR with runtimeRef renders from the runtime, so signals travel with it
+
+replaces: []
+
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"
+
+# No runtime feature gate. The signal policy form ships behind the existing
+# chart-level autoscalerPolicy.enabled value; the runtime field is inert
+# until a policy names one of its signals.
+feature-gates: []
+disable-supported: true
