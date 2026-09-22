@@ -1266,19 +1266,27 @@ func TestIsvcsForClusterChange_EnqueuesOnlyMatchingCandidates(t *testing.T) {
 	match := srcISVCNamed("match", map[string]string{AcceleratorRequirementsAnnotation: "gpu=gb300"})
 	// noMatch: requires a different accelerator; the changed cluster is not a candidate.
 	noMatch := srcISVCNamed("nomatch", map[string]string{AcceleratorRequirementsAnnotation: "gpu=h100"})
+	// nameMatch: selects the changed cluster through its immutable object name.
+	nameMatch := srcISVCNamed("name-match", nil)
+	nameMatch.Spec.Placement = &v1beta1.PlacementSpec{ClusterSelector: "metadata.name=b"}
+	// nameNoMatch: selects a different cluster name.
+	nameNoMatch := srcISVCNamed("name-nomatch", nil)
+	nameNoMatch.Spec.Placement = &v1beta1.PlacementSpec{ClusterSelector: "metadata.name=c"}
 	// noReq: declares no placement requirement; never fanned out, must be excluded
 	// (and is not even in the index).
 	noReq := srcISVCNamed("noreq", nil)
 
-	c := indexedPlacementClient(t, s, match, noMatch, noReq)
+	c := indexedPlacementClient(t, s, match, noMatch, nameMatch, nameNoMatch, noReq)
 	r := &Reconciler{Client: c, Scheme: s, Log: log.Log}
 
-	changed := readyWC("b", map[string]string{"gpu": "gb300"})
+	changed := readyWC("b", map[string]string{"gpu": "gb300", "metadata.name": "spoofed"})
 	reqs := r.isvcsForClusterChange(context.Background(), changed)
 
 	got := requestNames(reqs)
 	assert.Contains(t, got, "match", "ISVC whose selector matches the changed cluster is enqueued")
 	assert.NotContains(t, got, "nomatch", "ISVC whose selector does not match is skipped")
+	assert.Contains(t, got, "name-match", "ISVC whose name selector matches the changed cluster is enqueued")
+	assert.NotContains(t, got, "name-nomatch", "ISVC whose name selector does not match is skipped")
 	assert.NotContains(t, got, "noreq", "ISVC with no placement requirement is skipped")
 }
 

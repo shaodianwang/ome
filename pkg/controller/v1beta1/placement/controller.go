@@ -1683,9 +1683,9 @@ func registerPlacementEligibleIndex(ctx context.Context, indexer client.FieldInd
 // only those for which the changed cluster is (or just stopped being) a
 // candidate:
 //
-//   - selector MATCHES the changed cluster's labels: the cluster may now be a
-//     candidate (entering the set on a label add / readiness flip), or remains one
-//     (a label change elsewhere on the cluster) — re-evaluate.
+//   - selector MATCHES the changed cluster's labels or metadata.name: the cluster
+//     may now be a candidate (entering the set on a label add / readiness flip),
+//     or remains one (a label change elsewhere on the cluster) — re-evaluate.
 //   - status already REFERENCES the changed cluster (winner or candidate): the
 //     change may be the cluster LEAVING the set (a label removed so the selector
 //     no longer matches, or readiness flipped away). The event carries only the
@@ -1700,7 +1700,7 @@ func (r *Reconciler) isvcsForClusterChange(ctx context.Context, obj client.Objec
 		return nil
 	}
 	clusterName := wc.GetName()
-	clusterLabels := labels.Set(wc.GetLabels())
+	clusterSelectorSet := workloadClusterSelectorSet(wc)
 
 	list := &v1beta1.InferenceServiceList{}
 	if err := r.List(ctx, list, client.MatchingFields{placementEligibleIndexField: placementEligibleIndexValue}); err != nil {
@@ -1710,7 +1710,7 @@ func (r *Reconciler) isvcsForClusterChange(ctx context.Context, obj client.Objec
 	reqs := make([]ctrl.Request, 0, len(list.Items))
 	for i := range list.Items {
 		isvc := &list.Items[i]
-		if !clusterAffectsISVC(isvc, clusterName, clusterLabels) {
+		if !clusterAffectsISVC(isvc, clusterName, clusterSelectorSet) {
 			continue
 		}
 		reqs = append(reqs, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: isvc.Namespace, Name: isvc.Name}})
@@ -1718,14 +1718,13 @@ func (r *Reconciler) isvcsForClusterChange(ctx context.Context, obj client.Objec
 	return reqs
 }
 
-// clusterAffectsISVC reports whether a change to the named cluster (with the
-// given post-change labels) can affect this ISVC's placement: either the ISVC's
-// requirement selector matches the cluster's labels (it is/becomes a candidate),
-// or the ISVC's status already references the cluster (it is/was placed there and
-// must re-evaluate if the cluster is leaving the candidate set). A malformed
-// selector is treated as "affects" (fail safe: re-enqueue so the reconcile can
-// surface the malformed-selector status).
-func clusterAffectsISVC(isvc *v1beta1.InferenceService, clusterName string, clusterLabels labels.Set) bool {
+// clusterAffectsISVC reports whether a change to the named cluster can affect
+// this ISVC's placement: either the ISVC's selector matches the cluster's
+// selector set (it is/becomes a candidate), or the ISVC's status already
+// references the cluster (it is/was placed there and must re-evaluate if the
+// cluster is leaving the candidate set). A malformed selector is treated as
+// "affects" so reconcile can surface the malformed-selector status.
+func clusterAffectsISVC(isvc *v1beta1.InferenceService, clusterName string, clusterSelectorSet labels.Set) bool {
 	if isvcStatusReferencesCluster(isvc, clusterName) {
 		return true
 	}
@@ -1736,7 +1735,7 @@ func clusterAffectsISVC(isvc *v1beta1.InferenceService, clusterName string, clus
 	if !hasReq {
 		return false // not fanned out fleet-wide; the cluster cannot be a candidate
 	}
-	return sel.Matches(clusterLabels)
+	return sel.Matches(clusterSelectorSet)
 }
 
 // isvcStatusReferencesCluster reports whether the ISVC's placement status names

@@ -9225,14 +9225,14 @@ func schema_pkg_apis_ome_v1beta1_PlacementSpec(ref common.ReferenceCallback) com
 					},
 					"requirements": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Requirements is the intrinsic capability selector a candidate workload cluster MUST satisfy, expressed as a Kubernetes label-selector string matched against WorkloadCluster labels (e.g. \"accelerator in (gb300, tpu7x)\"). It is the structured equivalent of the ome.io/accelerator-requirements annotation. Empty means no intrinsic requirement.",
+							Description: "Requirements is the intrinsic capability selector a candidate workload cluster MUST satisfy, expressed as a Kubernetes label-selector string matched against WorkloadCluster labels plus the virtual, immutable metadata.name key (e.g. \"accelerator in (gb300, tpu7x)\"). It is the structured equivalent of the ome.io/accelerator-requirements annotation. Empty means no intrinsic requirement.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
 					},
 					"clusterSelector": {
 						SchemaProps: spec.SchemaProps{
-							Description: "ClusterSelector is an optional operator-imposed routing overlay (label-selector string) AND-ed onto Requirements to further narrow candidates (e.g. \"provider=cloud-a\"). Structured equivalent of the ome.io/cluster-selector annotation.",
+							Description: "ClusterSelector is an optional operator-imposed routing overlay (label-selector string) AND-ed onto Requirements to further narrow candidates. It can select WorkloadCluster labels (e.g. \"provider=cloud-a\") or immutable object names (e.g. \"metadata.name in (cluster-a,cluster-c)\"). Structured equivalent of the ome.io/cluster-selector annotation.",
 							Type:        []string{"string"},
 							Format:      "",
 						},

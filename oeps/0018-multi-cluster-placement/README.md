@@ -66,7 +66,7 @@ The platform owner's constraint is explicit: **OME should own the multi-cluster 
 
 - **Control-plane cluster:** the cluster where multi-cluster ISVCs are submitted and where OME's fan-out controller runs. It has no GPU nodes and runs no serving pods; an ISVC here is an *intent + status* object, not a running workload.
 - **Workload cluster:** a GPU cluster where ISVCs actually run. Runs OME (unchanged from single-cluster) and **Kueue**.
-- **Candidate clusters:** the workload clusters whose capability labels satisfy an ISVC's requirements (e.g. `gpu=gb300`) and that are reachable. The fan-out targets exactly this set.
+- **Candidate clusters:** the workload clusters whose capability labels and virtual `metadata.name` attribute satisfy an ISVC's requirements (e.g. `gpu=gb300`) and that are reachable. The fan-out targets exactly this set.
 - **Derived ISVC:** the clone of the submitted ISVC that the fan-out controller creates on a candidate cluster. A normal, unmodified ISVC — the worker's OME runs it as if a human applied it. It carries an origin annotation for tracking + GC, and its pods carry the Kueue `queue-name` label so that cluster's Kueue gates them.
 - **Admission gate:** Kueue's pod scheduling gate (`kueue.x-k8s.io/admission`). A gated pod is **queued, not stuck** — it consumes no GPU until that cluster's Kueue admits it.
 - **Winner / race:** the candidate cluster whose Kueue admits the derived ISVC's pods first. Distributed admission across candidates *is* the placement decision; there is no central scoring.
@@ -100,7 +100,7 @@ New:
 Deliberately *not*:
 - **No ISVC spec surgery.** No `spec.managedBy`, no Kueue GenericJob integration (`Suspend`/`PodSets`/`Finished`), no `MultiKueueAdapter`. Those are required only to adopt MultiKueue (approach A); we don't. The derived ISVC is a plain ISVC whose *pods* are Kueue-gated by a label — nothing more.
 - **No Kueue vocabulary in the user-facing API.** `WorkloadCluster` carries no `ClusterQueue` field; the `queue-name` the pods carry is resolved by convention/operator-config, not written by users.
-- **No `ClusterPlacementPolicy` in v1.** Candidates are derived by capability matching (the ISVC's accelerator requirements vs `WorkloadCluster` labels). A selector-based policy for operator-imposed routing (partition pools, per-class rules) is a v2 extension, not needed for capacity pooling.
+- **No `ClusterPlacementPolicy` in v1.** Candidates are derived by matching the ISVC's placement selectors against `WorkloadCluster` labels and virtual `metadata.name`. A separate policy object for operator-imposed routing (partition pools, per-class rules) is a v2 extension, not needed for capacity pooling.
 
 ### Feasibility: gating OMENative pods
 
@@ -150,7 +150,7 @@ status:
 
 The referenced `Secret` is just the kubeconfig (rotated/RBAC'd independently); the `WorkloadCluster` is the registry entry operators reason about. There is intentionally no capacity field: the race delegates "does this cluster have room?" to that cluster's Kueue at admission time.
 
-**Candidate selection (no CRD).** An ISVC's candidate set = reachable `WorkloadCluster`s whose labels satisfy the ISVC's accelerator requirements (OME already knows the accelerator from the model/runtime). This is plain matching, not a policy object. (`ClusterPlacementPolicy` for operator-imposed routing is a v2 extension — see [Open Questions](#open-questions).)
+**Candidate selection (no CRD).** An ISVC's candidate set = reachable `WorkloadCluster`s whose labels and virtual `metadata.name` attribute satisfy the ISVC's placement selectors (OME already knows the accelerator from the model/runtime). This is plain matching, not a policy object. (`ClusterPlacementPolicy` for operator-imposed routing is a v2 extension — see [Open Questions](#open-questions).)
 
 **ISVC — unchanged spec; additive status only:**
 
@@ -173,8 +173,8 @@ status:
 ### Fan-out and winner selection
 
 ```
-1. Candidates = reachable WorkloadClusters whose labels satisfy the ISVC's
-   accelerator requirements (e.g. gpu=gb300).
+1. Candidates = reachable WorkloadClusters whose labels and virtual
+   `metadata.name` attribute satisfy the ISVC's placement selectors.
 2. Create the DERIVED ISVC on EVERY candidate (origin annotation; pods stamped
    with the Kueue queue-name label + serving annotation). Each cluster's Kueue
    gates the pods until that cluster has room.
@@ -235,7 +235,7 @@ OME owns the global endpoint (decided in design: not delegated to an external LB
 
 ## Test Plan
 
-- **Unit:** candidate matching (ISVC requirements vs `WorkloadCluster` labels); derived-ISVC rendering incl. the Kueue label/annotation stamp; winner-selection (first-admitted) + loser-deletion; origin-GC predicate; `PodAdmissionGated` + the gated-deadline pause (done).
+- **Unit:** candidate matching (ISVC selectors vs `WorkloadCluster` labels and virtual `metadata.name`); derived-ISVC rendering incl. the Kueue label/annotation stamp; winner-selection (first-admitted) + loser-deletion; origin-GC predicate; `PodAdmissionGated` + the gated-deadline pause (done).
 - **Integration (envtest, control-plane side):** fan-out creates a clone per candidate against fake remote clients; one admits -> losers deleted; none admit -> all stay alive (no timeout failure); remote-unreachable -> re-fan-out.
 - **Multi-cluster e2e (KIND, >=2 clusters), authoritative:** real Kueue on each worker; submit ISVC to the control plane -> clones land on both candidates gated -> free quota on one -> it wins, the other clone is deleted, endpoint points at the winner; preempt the winner -> re-homes. The race, preemption, and gated-wait paths only reproduce against real Kueue. **Multi-node:** a Size>1 (leader+worker) ISVC fan-out, to verify OME's PodGroup and Kueue's pod-group cooperate.
 

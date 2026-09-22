@@ -579,7 +579,7 @@ kubectl --context kind-ome-quota-hub apply -f hack/kwok-sim/fixtures/63-placemen
 | `62-placement-single.yaml` | race, then sweep the loser | one winner, read it |
 | `63-placement-split-spread.yaml` | 3 replicas = 192 chips = the whole fleet | 2 on a, 1 on b |
 | `64-placement-split-capped.yaml` | a per-cluster ceiling overriding Packed | 1 each |
-| `65-placement-pinned.yaml` | `clusterSelector: zone=b` | member-b only |
+| `65-placement-pinned.yaml` | `clusterSelector: metadata.name=member-b` | member-b only |
 | `66-placement-nomatch.yaml` | a requirement nothing carries | never placed |
 
 One replica is one whole cube — the `tpu7x-4x4x4` runtime is 1 leader + 15

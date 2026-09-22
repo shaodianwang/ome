@@ -539,7 +539,7 @@ and stay there. Drop that annotation to place without quota instead.
   62-placement-single.yaml        race, then sweep the loser -> one winner
   63-placement-split-spread.yaml  3 replicas, 192 chips      -> 2 on a, 1 on b
   64-placement-split-capped.yaml  a per-cluster ceiling      -> 1 each
-  65-placement-pinned.yaml        clusterSelector zone=b     -> member-b only
+  65-placement-pinned.yaml        metadata.name=member-b      -> member-b only
   66-placement-nomatch.yaml       matches nothing            -> never placed
 
 They all charge sim-tenants.serving, so run one at a time.

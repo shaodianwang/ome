@@ -56,8 +56,9 @@ would triple the fan-out/derive/finalizer/GC surface for a tail difference.
   - **Split** — the guaranteed floor (`minReplicas`) is distributed across
     clusters; keep every cluster that admitted ≥1; sum until the floor is met
     (OEP-0018.1). N endpoints weighted by ready replicas.
-- **Candidate** — a Ready `WorkloadCluster` whose labels satisfy the ISVC's
-  requirement selector. Identical across modes — selection is orthogonal to mode.
+- **Candidate** — a Ready `WorkloadCluster` whose labels and virtual
+  `metadata.name` attribute satisfy the ISVC's selectors. Identical across modes
+  — selection is orthogonal to mode.
 - **Home** — a candidate actually serving (admitted). `Single` has one; `All`/`Split` have ≥1.
 
 ## What must be true
