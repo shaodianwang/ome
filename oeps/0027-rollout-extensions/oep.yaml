@@ -1,0 +1,43 @@
+title: "Rollout extensions: pairs, splits, targeted rollback, windows, cross-cluster progression, capacity loss"
+oep-number: "0027"
+authors:
+  - "@slin1237"
+status: provisional
+# state: design only; no code. Six investigations on main at 063ad441 (rollout-idea-1 through -6) and the OEP-0026 ownership rule at a95fd18e are the inputs; the independent bug fixes it lists are not yet filed.
+creation-date: 2026-09-21
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+# Six small extensions to the rollout surface that shipped under OEP-0017,
+# 0017.1 and 0017.2, each one field or one one-of member inside spec.rollout,
+# RolloutPolicy, spec.placement or an existing annotation. None adds a CRD.
+# None lets the engine choose a strategy for the user: each either moves a
+# decision earlier or adds a switch whose absence is today's behavior. The
+# frozen instance table (OEP-0020.1) and the replay goldens (OEP-0020.2) are
+# the lock every "no engine change" claim is measured against.
+see-also:
+  - "/oeps/0017-unified-rollout-v2"            # groups[] and the canary|blueGreen|rollingUpdate one-of these extend
+  - "/oeps/0017.1-rollout-policy"              # RolloutPolicy and the pinned run; the window rides both
+  - "/oeps/0017.2-per-component-canary"        # the engine+decoder canary unit the pair extension makes real
+  - "/oeps/0015.1-canary-executor"             # the canary step machine, sticky reject and rollback verb
+  - "/oeps/0018-multi-cluster-placement"       # hub, member, derived ISVC; cross-cluster progression sits on the hub
+  - "/oeps/0025-multi-cluster-routing"         # TrafficMap; why cross-cluster traffic weighting is out of scope here
+  - "/oeps/0026-inferencereplica-public-api"   # rollout-control fields and who may write them
+  - "/oeps/0020.1-rollout-state-machine-spec"  # the frozen instance table each extension is checked against
+  - "/oeps/0020.2-rollout-engine-behavior-lock" # the replay goldens; a golden that moves is an engine change
+
+replaces: []
+
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"
+
+feature-gates: []
+disable-supported: true
