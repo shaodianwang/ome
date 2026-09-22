@@ -3,7 +3,7 @@ oep-number: "0013.1"
 authors:
   - "@slin1237"
 status: implemented
-# state: autoscalerpolicy_types.go + pkg/controller/v1beta1/autoscalerpolicy + webhook/admission/autoscalerpolicy; #1330. Proportional coordinator follow-up is PR #1087
+# state: autoscalerpolicy_types.go + pkg/controller/v1beta1/autoscalerpolicy + webhook/admission/autoscalerpolicy; #1330. cross-Component scaling coordinator is OEP-0013.2
 creation-date: 2026-09-01
 reviewers:
   - TBD

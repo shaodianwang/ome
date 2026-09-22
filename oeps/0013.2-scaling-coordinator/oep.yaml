@@ -1,0 +1,43 @@
+title: "Cross-Component Scaling Coordinator"
+oep-number: "0013.2"
+authors:
+  - "@slin1237"
+status: provisional
+# state: design only; no code. spec.scalingPolicy is validated (pkg/validation/scalingpolicy.go rejects Proportional and Pinned since #1084) and stored, but no controller reads it. Resolves #1035; supersedes draft PR #1087.
+creation-date: 2026-09-21
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+# Follow-up to OEP-0013, which added spec.scalingPolicy on InferenceService
+# and the runtime-level default on ServingRuntime. The coordinator it sketched
+# was never built; admission rejects Proportional and Pinned today. This OEP
+# states the owner's decision (build, keep rejecting, or remove the field) and
+# specifies the coordinator: ISVC policy over runtime default, anchor desired
+# count drives follower InferenceReplicas through /scale, round-up rule,
+# followers may not carry their own autoscaler, one status block, Pinned
+# removed. Sibling of OEP-0013.1 (AutoscalerPolicy CRD), not related to it.
+see-also:
+  - "/oeps/0013-autoscaling"
+  - "/oeps/0013.1-autoscaler-policy"
+  - "/oeps/0026-inferencereplica-public-api"   # ownership rule must name the follower write on referenced IRs
+  - "/oeps/0007-omenative-workload-strategy"
+
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"
+
+# No feature gate and no config toggle. Admission rejects Proportional until
+# the coordinator lands; the same change lifts the rejection. Pinned stays
+# rejected and leaves the enum in Beta.
+feature-gates: []
+disable-supported: false
+
+metrics:
+  - ome_scaling_policy_coordination_total   # labels: outcome (applied|noop|clamped|conflict|error)
