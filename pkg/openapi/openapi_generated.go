@@ -5712,6 +5712,13 @@ func schema_pkg_apis_ome_v1beta1_InPlaceUpdateStrategy(ref common.ReferenceCallb
 				Description: "InPlaceUpdateStrategy tunes the per-pod in-place update sequence.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
+					"gracePeriodSeconds": {
+						SchemaProps: spec.SchemaProps{
+							Description: "GracePeriodSeconds is accepted so manifests that set it keep validating and has no effect on the roll: a drained pod is deleted as soon as it leaves rotation, and its own terminationGracePeriodSeconds and preStop hooks cover the in-flight work it still owes.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
 					"markNotReadyDuringLifecycle": {
 						SchemaProps: spec.SchemaProps{
 							Description: "MarkNotReadyDuringLifecycle, when true, flips ome.io/serving=False on the pod before the in-place mutation so EndpointSlice drains traffic first. Defaults to true.",

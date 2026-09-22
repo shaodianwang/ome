@@ -667,6 +667,14 @@ type RollingUpdate struct {
 
 // InPlaceUpdateStrategy tunes the per-pod in-place update sequence.
 type InPlaceUpdateStrategy struct {
+	// GracePeriodSeconds is accepted so manifests that set it keep validating
+	// and has no effect on the roll: a drained pod is deleted as soon as it
+	// leaves rotation, and its own terminationGracePeriodSeconds and preStop
+	// hooks cover the in-flight work it still owes.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	GracePeriodSeconds *int32 `json:"gracePeriodSeconds,omitempty"`
+
 	// MarkNotReadyDuringLifecycle, when true, flips ome.io/serving=False on
 	// the pod before the in-place mutation so EndpointSlice drains traffic
 	// first. Defaults to true.

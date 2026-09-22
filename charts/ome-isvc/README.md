@@ -459,7 +459,8 @@ Every key is optional and emitted only when set. Specifically:
 - `updateStrategy:` emits only if `type`, `rollingUpdate.*`, or
   `inPlaceUpdateStrategy.*` is set.
 - `rollingUpdate:` emits only if `partition` or `maxUnavailable` is set.
-- `inPlaceUpdateStrategy:` emits only if `markNotReadyDuringLifecycle` is set.
+- `inPlaceUpdateStrategy:` emits only if `gracePeriodSeconds` or
+  `markNotReadyDuringLifecycle` is set.
 - `migrationPolicy:` emits only if `mode` is set.
 
 This avoids producing empty `lifecycle: {}` / `updateStrategy: {}` maps

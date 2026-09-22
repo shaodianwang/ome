@@ -226,6 +226,7 @@
               "type": "object",
               "additionalProperties": false,
               "properties": {
+                "gracePeriodSeconds":          {"type": "integer", "minimum": 0, "description": "Accepted so existing values keep validating; has no effect on the roll. Draining is the pod's own terminationGracePeriodSeconds and preStop."},
                 "markNotReadyDuringLifecycle": {"type": "boolean", "description": "When true, flips ome.io/serving=False on the pod before the mutation so EndpointSlice drains traffic first. Controller default is true."}
               }
             }
