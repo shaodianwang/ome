@@ -1,0 +1,48 @@
+title: "Rollout group sequencer"
+oep-number: "0017.3"
+authors:
+  - "@slin1237"
+status: provisional
+# state: not built. Today collapseSequential (coordination/groups.go) orders only a run of single-Component blueGreen groups; ValidateRolloutOrderingEnforced (pkg/validation/coordination.go, #1080, #1513) rejects every other multi-group list under groupOrdering: Sequential and every non-empty order. Resolves issue #1040; replaces draft PR #1094.
+creation-date: 2026-08-18
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+# OEP-0017 defines the ordered groups[] list with a one-of progression per
+# group; OEP-0017.1 pins the rendered plan into status.rollout.activeRun for
+# the length of a run. Cross-group ordering is enforced for one shape only
+# and admission rejects the rest. This follow-up defines the general group
+# sequencer: per-progression completion, one active group at a time, in-group
+# order for multi-Component blueGreen/rollingUpdate groups, sequencer-owned
+# soak, hold on pause/failure/rollback, a persisted cursor in activeRun, and
+# the admission lifts that ride with each enforced shape.
+see-also:
+  - "/oeps/0017-unified-rollout-v2"
+  - "/oeps/0017.1-rollout-policy"
+  - "/oeps/0017.2-per-component-canary"
+  - "/oeps/0020.1-rollout-state-machine-spec"
+  - "/oeps/0026-inferencereplica-public-api"
+  - "/oeps/0007.1-omenative-coordinated-rollout"
+
+# Additive to 0017 and 0017.1, not a supersession.
+replaces: []
+
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"
+
+# No feature gate: the sequencer replaces the collapse path rather than
+# sitting beside it, and each admission lift lands only with its enforcement.
+feature-gates: []
+disable-supported: false
+
+metrics:
+  - ome_rollout_group_active          # gauge; labels: namespace, isvc, group
+  - ome_rollout_group_waiting_total   # labels: namespace, reason

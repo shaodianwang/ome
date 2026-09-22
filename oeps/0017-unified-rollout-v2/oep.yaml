@@ -16,6 +16,7 @@ see-also:
   - "/oeps/0015.1-canary-executor"               # the canary executor v2 would absorb
   - "/oeps/0007.1-omenative-coordinated-rollout" # coordination groups origin
   - "/oeps/0017.1-rollout-policy"                # follow-up: reusable RolloutPolicy + run pinning
+  - "/oeps/0017.3-rollout-group-sequencer"       # follow-up: general cross-group ordering
 
 stage: alpha
 
