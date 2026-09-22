@@ -686,10 +686,20 @@ cells:
   # recycle the Create and Restart passes gained does not reach this marker.
   - state: Update/GangSurgeTarget
     event: pod.phaseTerminal
+    variants: [Failed, Succeeded]
     outcome: ignore
     note: the restart trigger in pkg/controller/v1beta1/workload/ops/update.go declines a row whose non-Create operation is preserved, so no pass recreates a terminal replacement pod and the row converges only through the stuck or deadline escalation; the gang surge path is untouched by the terminal-pod recycle, though the readiness gate it shares now rejects such a pod outright rather than reading its stale conditions as healthy
     placement: sim
     coverage: {perm: [], unit: [TestDetectRestartTrigger_GangSurgeMarkerIsNotRepairedOnItsOwn], kind: []}
+    status: decided
+  - state: Update/GangSurgeTarget
+    event: pod.phaseTerminal
+    variants: [Unknown]
+    outcome: defer
+    guard: node death is proven - the Node object is gone, or has carried an unreachable taint or a NotReady condition past the threshold - and a force-delete policy is configured; with neither, the row holds instead of acting
+    note: a replacement member the kubelet will never report again is not recycled by name, because the node has stopped reporting rather than the pod having died and a returning kubelet may still be running it. The gang surge routes it to the force-delete sweep, the same authority pod.nodeLost answers to, which deletes it only on proven node death under a configured force-delete policy, and the same attempt rebuilds the member at its ordinal under the surge index on the pass that observes it gone; the source gang is never touched and stays in rotation throughout. Without a policy nothing frees the name, so the hold pass records the NodeUnknown token on this marker row with its deadline parked, and the source's operation deadline stays the bound on the attempt
+    placement: unit
+    coverage: {perm: [], unit: [TestGangSurgeUpdate_UnknownMemberSweptOnProvenNodeDeath, TestGangSurgeUpdate_UnknownMemberHeldWithoutForceDeletePolicy], kind: []}
     status: decided
   - state: Update/GangSurgeTarget
     event: pod.admitted

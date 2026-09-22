@@ -3414,3 +3414,104 @@ func TestSurgeUpdate_PausedDrainDeletesAndPromotes(t *testing.T) {
 			row.Phase, row.ActiveOrdinal)
 	}
 }
+
+// quietSurgeTarget binds the fixture's replacement to node and turns it
+// into a pod the kubelet has stopped reporting: phase Unknown, no
+// conditions. The node is never seeded, so node-death evidence reads it
+// as gone.
+func quietSurgeTarget(t *testing.T, f *midSurgeFixture, node string) {
+	t.Helper()
+	live, alive := f.livePod(t, f.surgePod)
+	if !alive {
+		t.Fatalf("fixture: replacement %s is gone", f.surgePod.Name)
+	}
+	live.Spec.NodeName = node
+	if err := f.client.Update(context.Background(), live); err != nil {
+		t.Fatalf("bind replacement %s to %s: %v", live.Name, node, err)
+	}
+	patchPodStatus(t, f, f.surgePod, func(pod *corev1.Pod) {
+		pod.Status.Phase = corev1.PodUnknown
+		pod.Status.Conditions = nil
+	})
+}
+
+// withForceDeletePolicy is the operator's force-delete policy as a
+// runSurgePass tweak.
+func withForceDeletePolicy(in *workload.ReconcileInput, _ *workload.ComponentPlan) {
+	in.ForceDelete = &workload.ForceDeletePolicy{OverdueSlack: 2 * time.Minute, NodeUnreachableThreshold: 5 * time.Minute}
+}
+
+// TestSurgeUpdate_UnknownTargetSweptOnProvenNodeDeath: a replacement whose
+// kubelet has stopped reporting can never clear the promote bar, and its
+// name is not recycled the way a dead pod's is, because a returning
+// kubelet may still be running it. With a force-delete policy configured
+// and its node provably gone, the sweep frees the surge ordinal on the
+// pass that reads it and the same attempt rebuilds the replacement there;
+// the source keeps serving throughout and no step moves.
+//
+// Cells: instance/Update/Surge/pod.phaseTerminal[Unknown]/before
+func TestSurgeUpdate_UnknownTargetSweptOnProvenNodeDeath(t *testing.T) {
+	f := newMidSurgeFixture(t, workload.UpdateStepSurge, false, true)
+	quietSurgeTarget(t, f, "node-gone")
+
+	got := runSurgePass(t, f, withForceDeletePolicy)
+
+	if got.done || got.phase != v1beta1.OMENativeInstanceUpdating || got.step != workload.UpdateStepSurge {
+		t.Errorf("pass 1: got done=%v phase=%s step=%s want the surge still at Surge", got.done, got.phase, got.step)
+	}
+	if got.targetAlive {
+		t.Fatalf("the replacement must be force-deleted once its node is provably gone")
+	}
+	if !got.sourceAlive || !got.sourceServing {
+		t.Fatalf("the source must stay in rotation: alive=%v serving=%v", got.sourceAlive, got.sourceServing)
+	}
+	if got.failed || got.blocks != 0 {
+		t.Errorf("the sweep is not a failure: lastFailure=%v retryBlocks=%d", got.failed, got.blocks)
+	}
+
+	got = runSurgePass(t, f, withForceDeletePolicy)
+
+	if !got.targetAlive {
+		t.Fatalf("the same attempt must rebuild the replacement at the surge ordinal")
+	}
+	rebuilt, _ := f.livePod(t, f.surgePod)
+	if rebuilt.Status.Phase == corev1.PodUnknown {
+		t.Fatalf("the surge ordinal still holds the quiet pod, not a fresh one")
+	}
+	if ord, ok := query.PodOrdinalFromLabels(rebuilt); !ok || ord != 1 {
+		t.Errorf("rebuilt ordinal: got %d (%v) want 1", ord, ok)
+	}
+	if got.step != workload.UpdateStepSurge || got.activeOrdinal != 0 || !got.sourceServing {
+		t.Errorf("pass 2: got step=%s activeOrdinal=%d sourceServing=%v want the source untouched at Surge",
+			got.step, got.activeOrdinal, got.sourceServing)
+	}
+}
+
+// TestSurgeUpdate_UnknownTargetHeldWithoutForceDeletePolicy: with no
+// force-delete policy nothing can prove the node dead, so the quiet
+// replacement is left where it is and the surge neither creates over its
+// name nor moves; the wait it reports is the hold pass's.
+//
+// Cells: instance/Update/Surge/pod.phaseTerminal[Unknown]/before
+func TestSurgeUpdate_UnknownTargetHeldWithoutForceDeletePolicy(t *testing.T) {
+	f := newMidSurgeFixture(t, workload.UpdateStepSurge, false, true)
+	quietSurgeTarget(t, f, "node-gone")
+
+	got := runSurgePass(t, f, nil)
+
+	if got.done || got.step != workload.UpdateStepSurge || got.activeOrdinal != 0 {
+		t.Errorf("got done=%v step=%s activeOrdinal=%d want the surge held at Surge", got.done, got.step, got.activeOrdinal)
+	}
+	if !got.targetAlive {
+		t.Fatalf("the replacement must not be deleted without a force-delete policy")
+	}
+	if live, _ := f.livePod(t, f.surgePod); live.Status.Phase != corev1.PodUnknown {
+		t.Fatalf("the quiet replacement was replaced: phase=%s", live.Status.Phase)
+	}
+	if !got.sourceAlive || !got.sourceServing {
+		t.Fatalf("the source must stay in rotation: alive=%v serving=%v", got.sourceAlive, got.sourceServing)
+	}
+	if got.failed || got.blocks != 0 {
+		t.Errorf("a held name is not a failure: lastFailure=%v retryBlocks=%d", got.failed, got.blocks)
+	}
+}

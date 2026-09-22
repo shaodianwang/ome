@@ -373,6 +373,16 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 	} else if recycling {
 		return false, nil
 	}
+	// A replacement whose kubelet has stopped reporting is not dead
+	// evidence: its name is freed only by the force-delete sweep, on
+	// proven node death, and the source keeps serving meanwhile. The
+	// policy boundary needs no plumbing here: an in-flight surge requeues
+	// on the operation cadence.
+	if holding, _, herr := recoverUnknownPhaseTargets(ctx, deps, input, inst.Index, surgePods, targets); herr != nil {
+		return false, fmt.Errorf("recover unknown-phase surge target (instance=%d): %w", inst.Index, herr)
+	} else if holding {
+		return false, nil
+	}
 	if len(surgePods) == 0 && !staleAtSurgeSlot {
 		if !deps.ExpectationsCache().Satisfied(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, inst.Index) {
 			return false, nil

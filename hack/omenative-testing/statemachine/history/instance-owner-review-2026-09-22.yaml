@@ -10,7 +10,39 @@
 # is unchanged: evidence never selects the dispose branch, and relocation
 # keeps the first try.
 #
+#
+# Provenance for the instance-machine cells decided in the owner review
+# session of 2026-09-22, which settled what a surge does about a
+# replacement whose kubelet has stopped reporting. Phase Unknown is not
+# terminal, so the name is never recycled the way a Failed or Succeeded
+# occupant is; it is routed to the force-delete sweep, which frees it
+# only on proven node death under a configured force-delete policy, and
+# the same attempt rebuilds the replacement at its ordinal. The source
+# is not touched. Without a policy the row waits, and the wait is a
+# held one: the hold pass records the NodeUnknown token, which for a
+# single-pod surge required the hold's target set to include the surge
+# ordinal rather than the active one alone.
+#
+# The three surge shapes take the same reading — the per-pod surge, the
+# gang surge and the migration surge. The gang cell REVISES the earlier
+# decision on Update/GangSurgeTarget × pod.phaseTerminal, which read the
+# whole event as a definite failure the row waits out to the deadline;
+# that reading stays for the Failed and Succeeded variants and the
+# Unknown variant now carries its own cell.
+#
 # Selectors match the cells files exactly: an empty variants, windows or
 # transition matches all of them.
 history:
   - {state: Update/Surge, event: timer.operationDeadline, variants: [], windows: [before], transition: "", decision: owner-review-2026-09-22}
+
+
+  # --- cells-update-surge.yaml ---
+  - {state: Update/Surge, event: pod.phaseTerminal, variants: [Unknown], windows: [], transition: "", decision: owner-review-2026-09-22}
+
+  # --- cells-update-gang.yaml ---
+  # Revises the earlier wait-it-out decision for the Unknown variant.
+  - {state: Update/GangSurgeTarget, event: pod.phaseTerminal, variants: [Unknown], windows: [], transition: "", decision: owner-review-2026-09-22}
+
+  # --- cells-migrate.yaml ---
+  - {state: Migrate/CreateSurge, event: pod.phaseTerminal, variants: [Unknown], windows: [], transition: "", decision: owner-review-2026-09-22}
+  - {state: Migrate/SurgeTarget, event: pod.phaseTerminal, variants: [Unknown], windows: [], transition: "", decision: owner-review-2026-09-22}

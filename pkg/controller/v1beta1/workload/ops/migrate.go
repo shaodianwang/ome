@@ -551,6 +551,16 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 	} else if recycling {
 		return false, accepted, nil
 	}
+	// A surge pod whose kubelet has stopped reporting is not dead
+	// evidence: its name is freed only by the force-delete sweep, on
+	// proven node death, and the source keeps serving meanwhile. The
+	// record's Deadline stays the bound while the name is held; the
+	// sweep reads and events under the surge index, where the pods live.
+	if holding, _, herr := recoverUnknownPhaseTargets(ctx, deps, input, surgeIdx, surgePods, desired); herr != nil {
+		return false, accepted, fmt.Errorf("recover unknown-phase migration surge pod (instance=%d): %w", surgeIdx, herr)
+	} else if holding {
+		return false, accepted, nil
+	}
 	existingByName := query.IndexPodsByName(surgePods)
 	missing := make([]podTarget, 0, len(desired))
 	for _, t := range desired {

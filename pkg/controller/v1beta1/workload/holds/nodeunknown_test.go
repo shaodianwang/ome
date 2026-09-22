@@ -130,3 +130,56 @@ func TestNodeUnknown_HoldsATargetNameASilentNodeKeeps(t *testing.T) {
 		}
 	})
 }
+
+// TestNodeUnknown_HoldsTheSurgeOrdinalOfASinglePodRow: the replacement of
+// a single-pod surge is built at the ordinal opposite the active one, on
+// the same row, so while the surge is in flight that name is one the
+// rebuild needs. A silent node holding it is reported as the row's wait
+// the way a held create target is; the same name on a row that is not
+// surging is nobody's target, and a gang source, whose replacement is
+// built under its own index, reads nothing at the other ordinal.
+//
+// Cells: instance/Update/Surge/pod.phaseTerminal[Unknown]/before
+func TestNodeUnknown_HoldsTheSurgeOrdinalOfASinglePodRow(t *testing.T) {
+	const surgeName = "svc-a-engine-0-default-1"
+
+	t.Run("a surging row asks for the surge ordinal", func(t *testing.T) {
+		store, _ := newStore(surgingRow(""))
+		applyPlanned(t, store, map[int32][]*corev1.Pod{0: {quietPod(surgeName, "node-a")}})
+		if got := store.waiting(0); got != types.WaitingReasonNodeUnknown {
+			t.Errorf("waiting = %q, want %q: the surge ordinal is a target name", got, types.WaitingReasonNodeUnknown)
+		}
+		if lf := store.lastFailure(0); lf == nil || lf.PodName != surgeName {
+			t.Errorf("lastFailure = %+v, want the replacement named", lf)
+		}
+	})
+
+	t.Run("the surge ordinal is asked for through the drain step", func(t *testing.T) {
+		row := surgingRow("")
+		row.Operation.Step = types.UpdateStepSurgeDrain
+		store, _ := newStore(row)
+		applyPlanned(t, store, map[int32][]*corev1.Pod{0: {quietPod(surgeName, "node-a")}})
+		if got := store.waiting(0); got != types.WaitingReasonNodeUnknown {
+			t.Errorf("waiting = %q, want %q", got, types.WaitingReasonNodeUnknown)
+		}
+	})
+
+	t.Run("a row that is not surging asks for the active ordinal only", func(t *testing.T) {
+		store, _ := newStore(creatingRow(""))
+		applyPlanned(t, store, map[int32][]*corev1.Pod{0: {quietPod(surgeName, "node-a")}})
+		if got := store.waiting(0); got != "" {
+			t.Errorf("waiting = %q, want none: no surge is building at that ordinal", got)
+		}
+	})
+
+	t.Run("a gang source reads nothing at the other ordinal", func(t *testing.T) {
+		row := surgingRow("")
+		surgeIdx := int32(2)
+		row.Operation.SurgeIndex = &surgeIdx
+		store, _ := newStore(row)
+		applyPlanned(t, store, map[int32][]*corev1.Pod{0: {quietPod(surgeName, "node-a")}})
+		if got := store.waiting(0); got == types.WaitingReasonNodeUnknown {
+			t.Errorf("waiting = %q, want not NodeUnknown: a gang replacement is built under its own index", got)
+		}
+	})
+}

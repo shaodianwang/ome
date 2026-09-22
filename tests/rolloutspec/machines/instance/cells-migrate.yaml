@@ -318,6 +318,7 @@ cells:
     status: current
   - state: Migrate/CreateSurge
     event: pod.phaseTerminal
+    variants: [Failed, Succeeded]
     outcome: ignore
     note: the restart trigger and both escalation paths skip a Migrate-pinned row, so
       a terminal pod is neither replaced nor stamped — a terminal surge pod stalls the
@@ -327,6 +328,16 @@ cells:
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
     status: current
+  - state: Migrate/CreateSurge
+    event: pod.phaseTerminal
+    variants: [Unknown]
+    outcome: defer
+    guard: node death is proven - the Node object is gone, or has carried an unreachable taint or a NotReady condition past the threshold - and a force-delete policy is configured; with neither, the row holds instead of acting
+    note: a surge pod the kubelet will never report again is not recycled by name, because the node has stopped reporting rather than the pod having died and a returning kubelet may still be running it. The surge step routes it to the force-delete sweep, the same authority pod.nodeLost answers to, which deletes it only on proven node death under a configured force-delete policy, and the same request rebuilds the surge at its ordinal on the pass that observes it gone; the source is never touched and stays in rotation throughout. Without a policy nothing frees the name, so the hold pass records the NodeUnknown token on the surge row, and the record Deadline stays the bound on the request
+    invariants: [record.is.timeout.authority]
+    placement: unit
+    coverage: {perm: [], unit: [TestMigrateSurge_UnknownTargetSweptOnProvenNodeDeath, TestMigrateSurge_UnknownTargetHeldWithoutForceDeletePolicy], kind: []}
+    status: decided
   - state: Migrate/CreateSurge
     event: pod.admitted
     outcome: ignore
@@ -1069,6 +1080,7 @@ cells:
     status: current
   - state: Migrate/SurgeTarget
     event: pod.phaseTerminal
+    variants: [Failed, Succeeded]
     outcome: ignore
     note: the restart trigger and escalation both skip a Migrate-pinned row, so a
       terminal own pod is neither replaced nor stamped and stalls the surge gates to
@@ -1077,6 +1089,16 @@ cells:
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
     status: current
+  - state: Migrate/SurgeTarget
+    event: pod.phaseTerminal
+    variants: [Unknown]
+    outcome: defer
+    guard: node death is proven - the Node object is gone, or has carried an unreachable taint or a NotReady condition past the threshold - and a force-delete policy is configured; with neither, the row holds instead of acting
+    note: an own pod the kubelet will never report again is not recycled by name, because the node has stopped reporting rather than the pod having died and a returning kubelet may still be running it. The surge step routes it to the force-delete sweep, the same authority pod.nodeLost answers to, which deletes it only on proven node death under a configured force-delete policy, and the same request rebuilds the pod at its ordinal on the pass that observes it gone; the source is never touched and stays in rotation throughout. Without a policy nothing frees the name, so the hold pass records the NodeUnknown token on this row, and the record Deadline stays the bound on the request
+    invariants: [record.is.timeout.authority]
+    placement: unit
+    coverage: {perm: [], unit: [TestMigrateSurge_UnknownTargetSweptOnProvenNodeDeath, TestMigrateSurge_UnknownTargetHeldWithoutForceDeletePolicy], kind: []}
+    status: decided
   - state: Migrate/SurgeTarget
     event: pod.admitted
     outcome: ignore

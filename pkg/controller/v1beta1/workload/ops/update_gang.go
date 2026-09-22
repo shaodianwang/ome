@@ -221,6 +221,15 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 	} else if recycling {
 		return false, nil
 	}
+	// A member whose kubelet has stopped reporting is not dead evidence:
+	// its name is freed only by the force-delete sweep, on proven node
+	// death, and the source gang keeps serving meanwhile. The sweep reads
+	// and events under the surge index, where the pods live.
+	if holding, _, herr := recoverUnknownPhaseTargets(ctx, deps, input, surgeIdx, surgePods, surgeTargets); herr != nil {
+		return false, fmt.Errorf("recover unknown-phase surge gang member (instance=%d): %w", surgeIdx, herr)
+	} else if holding {
+		return false, nil
+	}
 	existingByName := query.IndexPodsByName(surgePods)
 	missing := make([]podTarget, 0)
 	for _, t := range surgeTargets {

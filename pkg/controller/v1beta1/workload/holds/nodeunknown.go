@@ -7,6 +7,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/evidence"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
@@ -57,8 +58,10 @@ func reportNodeUnknown(ctx context.Context, in PassInput, row Row) (reading, err
 //
 // Single-pod Runners read the ordinal slot from the row's recorded
 // ActiveOrdinal, which SurgeThenDrain alternates between 0 and 1 across
-// rollouts; multi-pod Runners occupy every 0..Size-1 ordinal. A row the
-// plan no longer covers asks for no name at all.
+// rollouts; while such a row is mid-surge its replacement is being built
+// at the other slot, so that name is asked for too. Multi-pod Runners
+// occupy every 0..Size-1 ordinal. A row the plan no longer covers asks
+// for no name at all.
 func targetPodNames(in PassInput, row Row) map[string]struct{} {
 	if row.Instance == nil {
 		return nil
@@ -67,6 +70,9 @@ func targetPodNames(in PassInput, row Row) map[string]struct{} {
 	for _, runner := range row.Instance.Runners {
 		if runner.Size == 1 {
 			names[query.PodName(in.Input.Key.OwnerName, in.Plan.Component, row.Status.Index, runner.Name, row.Status.ActiveOrdinal)] = struct{}{}
+			if singlePodSurgeInFlight(row.Status) {
+				names[query.PodName(in.Input.Key.OwnerName, in.Plan.Component, row.Status.Index, runner.Name, 1-row.Status.ActiveOrdinal)] = struct{}{}
+			}
 			continue
 		}
 		for o := int32(0); o < runner.Size; o++ {
@@ -74,4 +80,15 @@ func targetPodNames(in PassInput, row Row) map[string]struct{} {
 		}
 	}
 	return names
+}
+
+// singlePodSurgeInFlight reports whether the row is running the per-pod
+// SurgeThenDrain cycle, which builds the replacement at the ordinal
+// opposite the active one on the same index. A gang surge builds under
+// its own index and is read there.
+func singlePodSurgeInFlight(s types.InstanceStatus) bool {
+	return s.Operation != nil &&
+		s.Operation.Type == types.InstanceOperationUpdate &&
+		s.Operation.SurgeIndex == nil &&
+		status.SurgeUpdateStep(s.Operation.Step)
 }

@@ -3802,3 +3802,113 @@ func equalitySafeOperation(a, b *v1beta1.OMENativeInstanceStatus) bool {
 	}
 	return (a.Operation == nil) == (b.Operation == nil) && a.Phase == b.Phase
 }
+
+// quietMigrationSurge turns the migration's surge pod into one the
+// kubelet has stopped reporting: phase Unknown, bound to a node the
+// cluster never had, so node-death evidence reads it as gone.
+func quietMigrationSurge(t *testing.T, f *migFixture, pod *corev1.Pod) {
+	t.Helper()
+	ctx := context.Background()
+	live := &corev1.Pod{}
+	if err := f.c.Get(ctx, client.ObjectKeyFromObject(pod), live); err != nil {
+		t.Fatalf("get surge pod: %v", err)
+	}
+	live.Spec.NodeName = "node-gone"
+	if err := f.c.Update(ctx, live); err != nil {
+		t.Fatalf("bind surge pod: %v", err)
+	}
+	live.Status = corev1.PodStatus{Phase: corev1.PodUnknown}
+	if err := f.c.Status().Update(ctx, live); err != nil {
+		t.Fatalf("quiet surge pod: %v", err)
+	}
+}
+
+// assertMigrationSourceUntouched pins that the source kept its pin and
+// its rotation across a pass over a quiet surge pod.
+func assertMigrationSourceUntouched(t *testing.T, f *migFixture, before *v1beta1.OMENativeInstanceStatus) {
+	t.Helper()
+	src := findInstanceStatusOnIRForFixture(t, f, 0)
+	if !equalitySafeOperation(src, before) {
+		t.Errorf("source row moved: got %+v want %+v", src, before)
+	}
+	if src != nil && src.LastFailure != nil {
+		t.Errorf("source LastFailure: got %+v want none (a quiet surge is not the source's failure)", src.LastFailure)
+	}
+	for _, pod := range migPodsForInstance(t, f, 0) {
+		if pod.DeletionTimestamp != nil || !podreadiness.IsServing(pod) {
+			t.Errorf("source pod %s must stay in rotation; deletion=%v conditions=%+v",
+				pod.Name, pod.DeletionTimestamp, pod.Status.Conditions)
+		}
+	}
+}
+
+// TestMigrateSurge_UnknownTargetSweptOnProvenNodeDeath: the migration's
+// surge pod goes quiet on a node the cluster no longer has. Its name is
+// not recycled the way a dead pod's is; with a force-delete policy
+// configured the sweep frees it on the pass that reads it and the same
+// request rebuilds the surge at its ordinal, while the source keeps
+// serving and the record stays in flight.
+//
+// Cells: instance/Migrate/CreateSurge/pod.phaseTerminal[Unknown]/before, instance/Migrate/SurgeTarget/pod.phaseTerminal[Unknown]/before
+func TestMigrateSurge_UnknownTargetSweptOnProvenNodeDeath(t *testing.T) {
+	f := newSinglePodMigFixture(t)
+	f.forceDelete = &workload.ForceDeletePolicy{OverdueSlack: 2 * time.Minute, NodeUnreachableThreshold: 5 * time.Minute}
+	const uuid = "mig-surge-unknown-swept"
+	f.records = []workload.MigrationRecord{mkMigRecord(uuid, 0, "node-a")}
+	surgePods := driveToSurgePods(t, f, uuid, 1)
+	quietMigrationSurge(t, f, surgePods[0])
+	before := findInstanceStatusOnIRForFixture(t, f, 0)
+
+	done, accepted := f.pass(t, uuid)
+	if done || !accepted {
+		t.Fatalf("sweep pass: got done=%v accepted=%v, want the migration still in flight", done, accepted)
+	}
+	if !sitePodGone(t, f.c, surgePods[0]) {
+		t.Fatalf("quiet surge pod %s must be force-deleted once its node is provably gone", surgePods[0].Name)
+	}
+	if rec := f.record(t, uuid); rec.Phase == workload.MigrationPhaseFailed {
+		t.Errorf("record: got Failed want the migration still driving; %+v", *rec)
+	}
+	assertMigrationSourceUntouched(t, f, before)
+
+	done, accepted = f.pass(t, uuid)
+	if done || !accepted {
+		t.Fatalf("rebuild pass: got done=%v accepted=%v, want the migration still in flight", done, accepted)
+	}
+	rebuilt := migPodsForInstance(t, f, 1)
+	if len(rebuilt) != 1 || rebuilt[0].Name != surgePods[0].Name || rebuilt[0].Status.Phase == corev1.PodUnknown {
+		t.Fatalf("the same request must rebuild the surge at its ordinal; got %+v", rebuilt)
+	}
+	assertMigrationSourceUntouched(t, f, before)
+}
+
+// TestMigrateSurge_UnknownTargetHeldWithoutForceDeletePolicy: with no
+// force-delete policy nothing can prove the node dead, so the quiet surge
+// pod keeps its name: it is neither deleted nor created over, the record
+// stays in flight for its Deadline, and the source is untouched.
+//
+// Cells: instance/Migrate/CreateSurge/pod.phaseTerminal[Unknown]/before, instance/Migrate/SurgeTarget/pod.phaseTerminal[Unknown]/before
+func TestMigrateSurge_UnknownTargetHeldWithoutForceDeletePolicy(t *testing.T) {
+	f := newSinglePodMigFixture(t)
+	const uuid = "mig-surge-unknown-held"
+	f.records = []workload.MigrationRecord{mkMigRecord(uuid, 0, "node-a")}
+	surgePods := driveToSurgePods(t, f, uuid, 1)
+	quietMigrationSurge(t, f, surgePods[0])
+	before := findInstanceStatusOnIRForFixture(t, f, 0)
+
+	done, accepted := f.pass(t, uuid)
+	if done || !accepted {
+		t.Fatalf("held pass: got done=%v accepted=%v, want the migration still in flight", done, accepted)
+	}
+	if sitePodGone(t, f.c, surgePods[0]) {
+		t.Fatalf("quiet surge pod %s must not be deleted without a force-delete policy", surgePods[0].Name)
+	}
+	held := migPodsForInstance(t, f, 1)
+	if len(held) != 1 || held[0].Status.Phase != corev1.PodUnknown {
+		t.Fatalf("the surge ordinal must still hold the quiet pod; got %+v", held)
+	}
+	if rec := f.record(t, uuid); rec.Phase == workload.MigrationPhaseFailed {
+		t.Errorf("record: got Failed want the migration still driving; %+v", *rec)
+	}
+	assertMigrationSourceUntouched(t, f, before)
+}

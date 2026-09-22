@@ -2675,3 +2675,117 @@ func TestGangSurgeUpdate_HoldsSourceDrainForMinReadySeconds(t *testing.T) {
 		}
 	}
 }
+
+// quietGangSurgeFixture is the gang surge mid-flight whose replacement
+// leader's kubelet has stopped reporting: phase Unknown, bound to a node
+// the cluster never had, so node-death evidence reads it as gone. The
+// input carries an owner the sweep's audit ledger can hang off and the
+// force-delete policy under test.
+func quietGangSurgeFixture(t *testing.T, policy *workload.ForceDeletePolicy) *gangRejectionFixture {
+	t.Helper()
+	legacyResetExpectations(t)
+	f := newGangRejectionFixture(t, "OutOfmemory")
+	ctx := context.Background()
+	live := &corev1.Pod{}
+	if err := f.client.Get(ctx, client.ObjectKeyFromObject(f.dead), live); err != nil {
+		t.Fatalf("get replacement leader: %v", err)
+	}
+	live.Spec.NodeName = "node-gone"
+	if err := f.client.Update(ctx, live); err != nil {
+		t.Fatalf("bind replacement leader: %v", err)
+	}
+	live.Status = corev1.PodStatus{Phase: corev1.PodUnknown}
+	if err := f.client.Status().Update(ctx, live); err != nil {
+		t.Fatalf("quiet replacement leader: %v", err)
+	}
+	isvc := legacyMinimalISVC(f.isvcName, f.namespace, 1)
+	isvc.UID = f.store.ownerUID
+	f.input.OwnerObject, f.input.EventTarget = isvc, isvc
+	f.input.OwnerGVK = v1beta1.SchemeGroupVersion.WithKind("InferenceService")
+	f.input.ForceDelete = policy
+	return f
+}
+
+// assertGangSourceUntouched pins that the source row kept its in-flight
+// surge: same step, no failure stamped, not Failed.
+func assertGangSourceUntouched(t *testing.T, f *gangRejectionFixture) {
+	t.Helper()
+	src := f.store.statuses[0]
+	if src.Phase != workload.InstancePhaseUpdating || src.Operation == nil || src.Operation.Step != workload.UpdateStepSurge {
+		t.Errorf("source row: got phase=%s op=%+v want the surge still open at Surge", src.Phase, src.Operation)
+	}
+	if src.LastFailure != nil {
+		t.Errorf("source LastFailure: got %+v want none (a quiet member is not the source's failure)", src.LastFailure)
+	}
+}
+
+// TestGangSurgeUpdate_UnknownMemberSweptOnProvenNodeDeath: a replacement
+// member whose kubelet has stopped reporting keeps its name, so the gang
+// can never complete around it. With a force-delete policy configured and
+// the node provably gone, the sweep frees the member on the pass that
+// reads it — nothing else is created on that pass — and the same attempt
+// rebuilds the gang under the surge index; the source row is untouched.
+//
+// Cells: instance/Update/GangSurgeTarget/pod.phaseTerminal[Unknown]/before
+func TestGangSurgeUpdate_UnknownMemberSweptOnProvenNodeDeath(t *testing.T) {
+	f := quietGangSurgeFixture(t, &workload.ForceDeletePolicy{OverdueSlack: 2 * time.Minute, NodeUnreachableThreshold: 5 * time.Minute})
+
+	done, err := gangSurgeUpdate(context.Background(), f.deps, f.input, f.plan, f.plan.Instances[0], f.target)
+	if err != nil {
+		t.Fatalf("gangSurgeUpdate: %v", err)
+	}
+	if done {
+		t.Fatal("gangSurgeUpdate reported done while freeing a quiet member")
+	}
+	if !sitePodGone(t, f.client, f.dead) {
+		t.Fatalf("quiet member %s must be force-deleted once its node is provably gone", f.dead.Name)
+	}
+	if got := gangPodCount(t, f); got != 0 {
+		t.Fatalf("pass 1 created %d members while the name was being freed", got)
+	}
+	assertGangSourceUntouched(t, f)
+
+	done, err = gangSurgeUpdate(context.Background(), f.deps, f.input, f.plan, f.plan.Instances[0], f.target)
+	if err != nil {
+		t.Fatalf("gangSurgeUpdate pass 2: %v", err)
+	}
+	if done {
+		t.Fatal("gangSurgeUpdate reported done on the rebuild pass")
+	}
+	rebuilt := &corev1.Pod{}
+	if err := f.client.Get(context.Background(), client.ObjectKeyFromObject(f.dead), rebuilt); err != nil {
+		t.Fatalf("the same attempt must rebuild the member under the surge index: %v", err)
+	}
+	if rebuilt.Status.Phase == corev1.PodUnknown {
+		t.Fatalf("the member's name still holds the quiet pod, not a fresh one")
+	}
+	if got := gangPodCount(t, f); got != 2 {
+		t.Errorf("rebuilt gang: got %d members want the whole gang", got)
+	}
+	assertGangSourceUntouched(t, f)
+}
+
+// TestGangSurgeUpdate_UnknownMemberHeldWithoutForceDeletePolicy: with no
+// force-delete policy nothing can prove the node dead, so the quiet member
+// keeps its name and the gang surge neither deletes it nor creates the
+// rest of the gang around it; the row waits, and the source is untouched.
+//
+// Cells: instance/Update/GangSurgeTarget/pod.phaseTerminal[Unknown]/before
+func TestGangSurgeUpdate_UnknownMemberHeldWithoutForceDeletePolicy(t *testing.T) {
+	f := quietGangSurgeFixture(t, nil)
+
+	done, err := gangSurgeUpdate(context.Background(), f.deps, f.input, f.plan, f.plan.Instances[0], f.target)
+	if err != nil {
+		t.Fatalf("gangSurgeUpdate: %v", err)
+	}
+	if done {
+		t.Fatal("gangSurgeUpdate reported done while a member is in phase Unknown")
+	}
+	if sitePodGone(t, f.client, f.dead) {
+		t.Fatalf("quiet member %s must not be deleted without a force-delete policy", f.dead.Name)
+	}
+	if got := gangPodCount(t, f); got != 1 {
+		t.Fatalf("pass created %d more members around a name a silent node holds", got-1)
+	}
+	assertGangSourceUntouched(t, f)
+}
