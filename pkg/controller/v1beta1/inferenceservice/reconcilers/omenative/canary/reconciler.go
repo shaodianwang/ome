@@ -160,8 +160,8 @@ type stepSampler interface {
 }
 
 // Result reports the executor's decision for one reconcile. Active=false means
-// no canary is in progress. Partition is the StatefulSet-style
-// RollingUpdate.Partition the controller applies to the canary's component
+// no canary is in progress. Partition is the StatefulSet-style partition the
+// controller projects onto the canary component's spec.pacing.partition
 // (instances < Partition are held on the stable revision). RequeueAfter > 0
 // asks the controller to re-reconcile (capacity / pause / drain pending).
 type Result struct {

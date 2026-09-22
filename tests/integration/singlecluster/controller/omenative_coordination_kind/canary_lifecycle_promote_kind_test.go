@@ -98,6 +98,10 @@ var _ = ginkgo.Describe("behavior — canary manual promote lifecycle", ginkgo.O
 			g.Expect(byRev[canaryHash]).To(Equal(2), "50%% capacity of 4 replicas must stage 2 canary pods")
 			g.Expect(byRev[stableHash]).To(Equal(2), "the stable revision must keep the complement")
 
+			// The held step is a settled state for the engine IR: partition 2
+			// on spec.pacing, Ready=True/Staged.
+			expectIRStagedAt(g, ns.Name, isvcName, v1beta1.EngineComponent, 2)
+
 			traffic := trafficForComponent(c, v1beta1.EngineComponent)
 			g.Expect(traffic).To(HaveLen(2), "expected a canary/stable weight pair, got %s", describeTraffic(traffic))
 			byTag := map[string]int32{}
@@ -157,6 +161,9 @@ var _ = ginkgo.Describe("behavior — canary manual promote lifecycle", ginkgo.O
 				g.Expect(ir.Spec.Pacing.RollbackToRevision).To(BeNil(),
 					"rollout-rollback=false must not point the IR at a rollback target")
 			}
+			// The IR keeps reporting the held step as Staged for as long as
+			// the step is held.
+			expectIRStagedAt(g, ns.Name, isvcName, v1beta1.EngineComponent, 2)
 		}, 10*time.Second, 500*time.Millisecond).Should(Succeed())
 
 		// Action: promote the real canary hash. This opens the manual gate,

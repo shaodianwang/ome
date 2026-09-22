@@ -95,7 +95,7 @@ type UpdateItem struct {
 // plus the pure budget inputs the executor's within-pass counters
 // project against.
 type UpdateSelection struct {
-	// Items in plan order. Instances held by RollingUpdate.Partition
+	// Items in plan order. Instances held by the effective partition
 	// (canary) and Instances with no trigger are not listed.
 	Items []UpdateItem
 	// Strategy is the resolved update strategy (empty Type defaults to
@@ -542,13 +542,16 @@ func planUpdateSelection(ctx context.Context, input types.ReconcileInput, plan t
 	if err != nil {
 		return UpdateSelection{}, 0, fmt.Errorf("workload.Reconcile: list pods for update pass (component=%s): %w", plan.Component, err)
 	}
-	heldIndices := escalation.PartitionHeldIndices(rollingUpdate, input, plan.Instances, target.Name)
+	// The hold reads the projected pacing partition first (a canary step
+	// or plan-gate hold), then the user's rollingUpdate partition.
+	partition := escalation.EffectivePartition(input.DesiredSpec.Pacing, rollingUpdate)
+	heldIndices := escalation.PartitionHeldIndices(partition, input, plan.Instances, target.Name)
 	var retryBlockWait time.Duration
 	for _, inst := range plan.Instances {
-		// RollingUpdate.Partition (canary): hold the selected Instances
-		// on their current revision — skip their update. Membership is
-		// keyed to revision, not index position, and Instances already
-		// converging to target are never held (they must finish); see
+		// Partition hold (canary): hold the selected Instances on their
+		// current revision — skip their update. Membership is keyed to
+		// revision, not index position, and Instances already converging
+		// to target are never held (they must finish); see
 		// PartitionHeldIndices for the full candidacy rule.
 		if heldIndices[inst.Index] {
 			logf.FromContext(ctx).V(1).Info("update not selected: held by partition",

@@ -273,7 +273,7 @@ func decisionsFor(t *testing.T, r *Reconciler, key client.ObjectKey) readerDecis
 		ready:          ready,
 		stalled:        stalled,
 		liveRevisions:  live,
-		stagedAtPartit: stagedAtPartition(&ir.Status, ir.Spec.Pacing),
+		stagedAtPartit: stagedAtPartition(&ir.Status, ir.Spec.Lifecycle, ir.Spec.Pacing),
 	}
 }
 

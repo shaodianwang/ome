@@ -189,20 +189,19 @@ func TestReconcile_ScaleUpDuringUpdate_CreatesFreshIndices(t *testing.T) {
 	}
 }
 
-// TestHeldByPartition pins the RollingUpdate.Partition count predicate:
-// a hold candidate is held iff its rank in the candidate order is below
-// a positive Partition (PartitionHeldIndices owns candidate membership).
-// A nil RollingUpdate, nil Partition, or Partition<=0 holds nothing.
+// TestHeldByPartition pins the partition count predicate: a hold
+// candidate is held iff its rank in the candidate order is below a
+// positive partition (PartitionHeldIndices owns candidate membership).
+// A nil partition or partition<=0 holds nothing.
 func TestHeldByPartition(t *testing.T) {
-	part := func(n int32) *types.RollingUpdate { return &types.RollingUpdate{Partition: &n} }
+	part := func(n int32) *int32 { return &n }
 	cases := []struct {
-		name string
-		ru   *types.RollingUpdate
-		rank int32
-		held bool
+		name      string
+		partition *int32
+		rank      int32
+		held      bool
 	}{
-		{"nil RollingUpdate", nil, 0, false},
-		{"nil Partition", &types.RollingUpdate{}, 0, false},
+		{"nil Partition", nil, 0, false},
 		{"Partition=0 holds nothing", part(0), 0, false},
 		{"Partition=2 holds rank 0", part(2), 0, true},
 		{"Partition=2 holds rank 1", part(2), 1, true},
@@ -211,8 +210,39 @@ func TestHeldByPartition(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := escalation.HeldByPartition(tc.ru, tc.rank); got != tc.held {
+			if got := escalation.HeldByPartition(tc.partition, tc.rank); got != tc.held {
 				t.Errorf("HeldByPartition(rank=%d) = %v, want %v", tc.rank, got, tc.held)
+			}
+		})
+	}
+}
+
+// TestEffectivePartition pins the source precedence of the partition
+// hold: the projected pacing partition wins whenever it is set — an
+// explicit 0 releases every Instance even over a user partition — and
+// only a nil pacing partition defers to the user's RollingUpdate.
+func TestEffectivePartition(t *testing.T) {
+	part := func(n int32) *int32 { return &n }
+	cases := []struct {
+		name   string
+		pacing *types.WorkloadPacing
+		ru     *types.RollingUpdate
+		want   *int32
+	}{
+		{"neither set", nil, nil, nil},
+		{"user partition only", nil, &types.RollingUpdate{Partition: part(2)}, part(2)},
+		{"pacing partition only", &types.WorkloadPacing{Partition: part(3)}, nil, part(3)},
+		{"pacing wins over user", &types.WorkloadPacing{Partition: part(3)}, &types.RollingUpdate{Partition: part(2)}, part(3)},
+		{"pacing 0 releases over user", &types.WorkloadPacing{Partition: part(0)}, &types.RollingUpdate{Partition: part(2)}, part(0)},
+		{"pacing block without partition defers", &types.WorkloadPacing{}, &types.RollingUpdate{Partition: part(2)}, part(2)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := escalation.EffectivePartition(tc.pacing, tc.ru)
+			switch {
+			case got == nil && tc.want == nil:
+			case got == nil || tc.want == nil || *got != *tc.want:
+				t.Errorf("EffectivePartition = %v, want %v", got, tc.want)
 			}
 		})
 	}

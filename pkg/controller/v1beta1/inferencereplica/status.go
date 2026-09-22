@@ -21,6 +21,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 	isvcstatus "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
@@ -91,8 +92,9 @@ const (
 	// short-circuit while a rollout is mid-flight.
 	ReasonRolloutInProgress = "RolloutInProgress"
 	// ReasonStaged is stamped when the IR has converged to a static
-	// rollingUpdate.partition — (replicas-partition) Instances on the target
-	// revision and `partition` held on the prior one, all Ready. Ready=True:
+	// partition (a projected canary step or a user rollingUpdate partition)
+	// — (replicas-partition) Instances on the target revision and
+	// `partition` held on the prior one, all Ready. Ready=True:
 	// a partitioned rollout is intentionally complete-and-holding, not
 	// "in progress". Distinct from AllInstancesReady (fully rolled).
 	ReasonStaged = "Staged"
@@ -476,13 +478,17 @@ func hasFailedInstance(insts []v1beta1.OMENativeInstanceStatus) bool {
 // responsible for invoking apimeta.SetStatusCondition to merge the
 // returned condition into status.Conditions (which handles
 // LastTransitionTime correctly).
-// effectivePartition returns the IR's static rollingUpdate.partition, or 0
-// when unset.
-func effectivePartition(pacing *v1beta1.InferenceReplicaPacing) int32 {
-	if pacing == nil || pacing.Partition == nil {
+// effectivePartition returns the partition the IR holds Instances at — the
+// projected spec.pacing.partition when set, else the user's lifecycle
+// rollingUpdate partition — or 0 when neither is set. It is the same source
+// order the workload engine plans with, so the condition below describes the
+// shape the engine actually converges to.
+func effectivePartition(lifecycle *v1beta1.LifecycleSpec, pacing *v1beta1.InferenceReplicaPacing) int32 {
+	p := irprojector.EffectivePartition(lifecycle, pacing)
+	if p == nil {
 		return 0
 	}
-	return *pacing.Partition
+	return *p
 }
 
 // stagedAtPartition reports whether the IR has converged to a static,
@@ -490,8 +496,8 @@ func effectivePartition(pacing *v1beta1.InferenceReplicaPacing) int32 {
 // revision and `partition` Instances held Ready on the prior one. Zero
 // partition (full rollout) is not staged — it converges via the normal
 // promotion path.
-func stagedAtPartition(status *v1beta1.InferenceReplicaStatus, pacing *v1beta1.InferenceReplicaPacing) bool {
-	part := effectivePartition(pacing)
+func stagedAtPartition(status *v1beta1.InferenceReplicaStatus, lifecycle *v1beta1.LifecycleSpec, pacing *v1beta1.InferenceReplicaPacing) bool {
+	part := effectivePartition(lifecycle, pacing)
 	if part <= 0 {
 		return false
 	}
@@ -703,11 +709,11 @@ func computeReadyCondition(status *v1beta1.InferenceReplicaStatus, desiredReplic
 		cond.Status = metav1.ConditionFalse
 		cond.Reason = ReasonInstanceFailed
 		cond.Message = "At least one Instance has Phase=Failed"
-	case stagedAtPartition(status, pacing):
+	case stagedAtPartition(status, lifecycle, pacing):
 		// Converged to a static partition: intentionally holding old-revision
 		// Instances, all Ready. Ready=True (not RolloutInProgress/Unknown) —
 		// the rollout is complete for the configured partition.
-		part := effectivePartition(pacing)
+		part := effectivePartition(lifecycle, pacing)
 		cond.Status = metav1.ConditionTrue
 		cond.Reason = ReasonStaged
 		cond.Message = fmt.Sprintf("Staged at partition %d: %d/%d Instances on %s, %d held on the prior revision",

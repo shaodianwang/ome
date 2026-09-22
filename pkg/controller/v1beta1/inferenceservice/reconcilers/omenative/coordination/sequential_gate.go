@@ -197,9 +197,10 @@ func observeSequentialComponentsForGate(ctx context.Context, reads client.Reader
 	out := make(map[v1beta1.ComponentType]ComponentObservation, len(components))
 	for _, c := range components {
 		// One consistent IR snapshot per Component: metadata (generation,
-		// parent-generation annotation), spec (effective partition from the
-		// merged ISVC↔runtime lifecycle — including a runtime-inherited
-		// partition the raw ISVC never shows), and status. A read error
+		// parent-generation annotation), spec (effective partition: the
+		// projected pacing partition, else the merged ISVC↔runtime lifecycle
+		// partition — including a runtime-inherited one the raw ISVC never
+		// shows), and status. A read error
 		// fails closed: fabricating a zero-valued observation for the
 		// rolling peer would admit a second Component and break
 		// at-most-one-rolling.

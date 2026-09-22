@@ -178,33 +178,30 @@ type WorkloadAggregateStatus struct {
 	Traffic              []ComponentTrafficTarget
 }
 
-// WorkloadPacing is the projected rollout pacing.
-// Adapters compute it once per reconcile.
+// WorkloadPacing is the projected rollout pacing: the rollout-control
+// values a composer (the ISVC controller's canary machine) owns, kept
+// apart from the user's Lifecycle so a step never writes into the
+// user's update strategy. Adapters compute it once per reconcile from
+// IR spec.pacing.
 //
-// LATENT BUG: despite the "the reconciler reads" framing, NOTHING in the rollout
-// engine reads Partition / MaxUnavailable / Decisions. The IR converter
-// (inferencereplica/convert.go) populates Partition and MaxUnavailable
-// from IR spec.pacing, but pacing actually flows through
-// RollingUpdate.Partition + the UpdateGate callback instead, and
-// availability is computed from EndpointSlice membership — so IR
-// spec.pacing.partition and spec.pacing.maxUnavailable are currently NOT
-// honored. (IR spec.pacing.rollbackToRevision IS live, handled in
-// inferencereplica/reconciler.go — only partition/maxUnavailable are
-// dead.) Decisions/PacingDecisions is likewise never constructed in
-// production.
-// Documented rather than wired: nothing sets these fields today.
+// Only Partition is read by the engine (escalation.EffectivePartition:
+// it takes precedence over the user's RollingUpdate.Partition).
+// MaxUnavailable has no producer and is not read — the per-Component
+// budget comes from RollingUpdate.MaxUnavailable and the group ceiling
+// from the UpdateGate callback. Decisions is never constructed in
+// production. (IR spec.pacing.rollbackToRevision is handled by the IR
+// reconciler, not carried here.)
 type WorkloadPacing struct {
-	// Partition holds back updates for Instances whose index is less
-	// than Partition. 0 (the default) updates all Instances. Used
-	// for canary holds.
-	//
-	// NOT READ by the engine — see the WorkloadPacing type note above.
+	// Partition holds back updates for the lowest-indexed `Partition`
+	// Instances still off the target revision. 0 releases every
+	// Instance even when the user's RollingUpdate carries a partition;
+	// nil defers to the user's RollingUpdate.Partition. Used for canary
+	// step holds.
 	Partition *int32
 
-	// MaxUnavailable caps in-rollout disruption. nil falls back to
-	// the reconciler default (25%).
-	//
-	// NOT READ by the engine — see the WorkloadPacing type note above.
+	// MaxUnavailable caps in-rollout disruption. Nothing projects it
+	// and the engine does not read it; the budget comes from
+	// RollingUpdate.MaxUnavailable.
 	MaxUnavailable *intstr.IntOrString
 
 	// Decisions is the projected per-gate allow/deny map for this

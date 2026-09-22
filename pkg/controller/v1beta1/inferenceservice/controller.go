@@ -596,33 +596,35 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 	}
 
-	// Canary: when the effective plan carries a canary group, stamp the
-	// current step's RollingUpdate.Partition onto each merged Component
-	// before the Component reconcilers run, so the standard
-	// spec→IR→plan→HeldByPartition path holds the staged old/new split. The
-	// step machine + traffic run in Step 6a below.
+	// Canary: when the effective plan carries a canary group, compute the
+	// current step's partition for each Component before the Component
+	// reconcilers run. It travels to the InferenceReplica as the
+	// rollout-control spec.pacing.partition — never inside the user's
+	// lifecycle — and the engine's partition hold stages the old/new split
+	// from there. The step machine + traffic run in Step 6a below.
+	var enginePartition, decoderPartition, routerPartition *int32
 	if len(rollout.CanaryGroups(isvc)) > 0 {
 		if mergedEngine != nil {
-			canary.StampStepPartition(isvc, v1beta1.EngineComponent, &mergedEngine.ComponentExtensionSpec)
+			enginePartition = canary.StepPartition(isvc, v1beta1.EngineComponent, &mergedEngine.ComponentExtensionSpec)
 		}
 		if mergedDecoder != nil {
-			canary.StampStepPartition(isvc, v1beta1.DecoderComponent, &mergedDecoder.ComponentExtensionSpec)
+			decoderPartition = canary.StepPartition(isvc, v1beta1.DecoderComponent, &mergedDecoder.ComponentExtensionSpec)
 		}
 		if mergedRouter != nil {
-			canary.StampStepPartition(isvc, v1beta1.RouterComponent, &mergedRouter.ComponentExtensionSpec)
+			routerPartition = canary.StepPartition(isvc, v1beta1.RouterComponent, &mergedRouter.ComponentExtensionSpec)
 		}
 	} else {
 		// A canary-KIND group with no resolvable plan (ref-only pre-open, or
-		// parked) stamps a full hold instead of no partition, keeping the
+		// parked) projects a full hold instead of no partition, keeping the
 		// projected spec deterministic across run states.
 		if mergedEngine != nil {
-			canary.StampPlanGateHold(isvc, v1beta1.EngineComponent, &mergedEngine.ComponentExtensionSpec)
+			enginePartition = canary.PlanGateHoldPartition(isvc, v1beta1.EngineComponent, &mergedEngine.ComponentExtensionSpec)
 		}
 		if mergedDecoder != nil {
-			canary.StampPlanGateHold(isvc, v1beta1.DecoderComponent, &mergedDecoder.ComponentExtensionSpec)
+			decoderPartition = canary.PlanGateHoldPartition(isvc, v1beta1.DecoderComponent, &mergedDecoder.ComponentExtensionSpec)
 		}
 		if mergedRouter != nil {
-			canary.StampPlanGateHold(isvc, v1beta1.RouterComponent, &mergedRouter.ComponentExtensionSpec)
+			routerPartition = canary.PlanGateHoldPartition(isvc, v1beta1.RouterComponent, &mergedRouter.ComponentExtensionSpec)
 		}
 	}
 
@@ -682,6 +684,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			AcceleratorClassName: engineAcName,
 			Overlays:             resolvedOverlays,
 			PolicyResolver:       policyResolver,
+			PacingPartition:      enginePartition,
 		}, mergedEngine)
 		reconcilers = append(reconcilers, engineReconciler)
 	}
@@ -713,6 +716,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			AcceleratorClassName: decoderAcName,
 			Overlays:             resolvedOverlays,
 			PolicyResolver:       policyResolver,
+			PacingPartition:      decoderPartition,
 		}, mergedDecoder)
 		reconcilers = append(reconcilers, decoderReconciler)
 	}
@@ -724,13 +728,14 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 		// Router has no supported-model-format input — ModelFormat stays nil.
 		routerReconciler := components.NewRouter(cdeps, components.ComponentInputs{
-			DeploymentMode: routerDeploymentMode,
-			BaseModel:      baseModel,
-			BaseModelMeta:  baseModelMeta,
-			Runtime:        rt,
-			RuntimeName:    rtName,
-			Overlays:       resolvedOverlays,
-			PolicyResolver: policyResolver,
+			DeploymentMode:  routerDeploymentMode,
+			BaseModel:       baseModel,
+			BaseModelMeta:   baseModelMeta,
+			Runtime:         rt,
+			RuntimeName:     rtName,
+			Overlays:        resolvedOverlays,
+			PolicyResolver:  policyResolver,
+			PacingPartition: routerPartition,
 		}, mergedRouter) // merged router spec, not isvc.Spec.Router
 		reconcilers = append(reconcilers, routerReconciler)
 	}

@@ -606,8 +606,8 @@ func buildGroupObservation(ctx context.Context, reads client.Reader, isvc *v1bet
 		// controller stages Instances at. A runtime-inherited partition is
 		// invisible on the raw ISVC, so reading the ISVC here would treat a
 		// legitimately staged Component as an incomplete rollout forever.
-		// Canary-owned Components never reach this loop (they leave
-		// Partition 0, driven by the canary reconciler's own
+		// Canary-owned Components never reach this loop (their hold is the
+		// projected pacing partition, driven by the canary reconciler's own
 		// EffectivePartition path).
 		partition, err := irprojector.ComponentIRPartition(ctx, reads, isvc.Namespace, isvc.Name, c)
 		if err != nil {

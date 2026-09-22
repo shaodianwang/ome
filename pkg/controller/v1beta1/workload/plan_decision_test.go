@@ -703,6 +703,65 @@ func TestPlan_Update_HeldByPartition(t *testing.T) {
 	}
 }
 
+// TestPlan_Update_PacingPartitionPrecedence asserts where the hold reads
+// its partition: the projected pacing partition (a canary step) holds
+// even when the user's rollingUpdate carries none, an explicit pacing 0
+// releases every Instance over a user partition, and a nil pacing
+// partition defers to the user's rollingUpdate partition.
+func TestPlan_Update_PacingPartitionPrecedence(t *testing.T) {
+	target := updateTarget()
+	part := func(n int32) *int32 { return &n }
+	newPlan := func(ru *types.RollingUpdate) types.ComponentPlan {
+		return types.ComponentPlan{
+			Component: types.ComponentEngine,
+			Replicas:  2,
+			Instances: []types.InstancePlan{
+				{Index: 0, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
+				{Index: 1, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
+			},
+			UpdateStrategy: types.UpdateStrategy{Type: types.UpdateStrategySurgeThenDrain, RollingUpdate: ru},
+		}
+	}
+	cases := []struct {
+		name        string
+		pacing      *types.WorkloadPacing
+		ru          *types.RollingUpdate
+		wantIndices []int32
+	}{
+		{"pacing holds with no user partition", &types.WorkloadPacing{Partition: part(1)}, nil, []int32{1}},
+		{"pacing 0 releases over user partition", &types.WorkloadPacing{Partition: part(0)}, &types.RollingUpdate{Partition: part(1)}, []int32{0, 1}},
+		{"nil pacing defers to user partition", &types.WorkloadPacing{}, &types.RollingUpdate{Partition: part(1)}, []int32{1}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := minimalInput(t)
+			forbidMutations(t, &in)
+			in.DesiredSpec.Pacing = tc.pacing
+			in.ObservedState.InstanceStatuses = []types.InstanceStatus{
+				{Index: 0, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: "prior-rev"},
+				{Index: 1, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: "prior-rev"},
+			}
+			d := planTargetOrFail(t, in, newPlan(tc.ru), target, planSnapshot(in, nil))
+			ua := findAction(d, workload.ActionUpdate)
+			if ua == nil {
+				t.Fatalf("expected an Update action, got %v", actionKinds(d))
+			}
+			var got []int32
+			for _, item := range ua.Update.Items {
+				got = append(got, item.Instance.Index)
+			}
+			if len(got) != len(tc.wantIndices) {
+				t.Fatalf("update items = %v, want %v", got, tc.wantIndices)
+			}
+			for i := range got {
+				if got[i] != tc.wantIndices[i] {
+					t.Fatalf("update items = %v, want %v", got, tc.wantIndices)
+				}
+			}
+		})
+	}
+}
+
 // TestPlan_Update_PartitionHoldsCountOnSparseIndices asserts the
 // partition hold on a SPARSE index set (migration / lowest-unused
 // surge allocation leave gaps): Partition counts Instances to hold —

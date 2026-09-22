@@ -139,6 +139,15 @@ type Params struct {
 	// TopologySpread; nil defaults to the co-location TopologyKey.
 	TopologySpreadKey *string
 
+	// PacingPartition is the rollout-control partition the ISVC
+	// controller's canary machine computed for this Component (the
+	// current step's hold, or the full plan-gate hold), projected onto
+	// ir.Spec.Pacing.Partition. It is kept out of ir.Spec.Lifecycle,
+	// which is the user's update strategy and stays a verbatim copy. nil
+	// when no canary governs the Component; an explicit 0 releases every
+	// Instance for the duration of the plan.
+	PacingPartition *int32
+
 	// ResolvedAutoscaler is the authoritative per-Component
 	// ComponentAutoscaler the autoscaler.ResolveComponentAutoscaler
 	// helper picked from the ISVC → runtime → default chain. The
@@ -243,9 +252,10 @@ func EnsureInferenceReplica(ctx context.Context, p Params) (*v1beta1.InferenceRe
 			return fmt.Errorf("get IR %s/%s: %w", p.ISVC.Namespace, name, getErr)
 		}
 
-		// IR exists - apply the desired spec on top of the live object. Pacing is
-		// owned by coordination and preserved here. Paused is projected from the
-		// parent ISVC's operator-facing rollout-paused annotation below.
+		// IR exists - apply the desired spec on top of the live object. The
+		// pacing partition is projected; the rest of the pacing block (the
+		// canary executor's rollback target) is preserved. Paused is projected
+		// from the parent ISVC's operator-facing rollout-paused annotation below.
 		original := ir.DeepCopy()
 		applyDesiredSpec(ir, p, name)
 
@@ -359,7 +369,8 @@ func newInferenceReplica(p Params, name string) *v1beta1.InferenceReplica {
 // whether the apiserver assigns a UID — and Spec.Replicas, which is
 // autoscaler-owned on Update; see desiredReplicas).
 //
-// Preserves Spec.Pacing on Update. Spec.Paused is projected from the existing
+// Projects Spec.Pacing.Partition and preserves the rest of Spec.Pacing on
+// Update (see projectedPacing). Spec.Paused is projected from the existing
 // operator-facing ISVC annotation because InferenceReplica is controller-only;
 // removing the annotation explicitly clears the circuit breaker on every IR.
 //
@@ -436,6 +447,7 @@ func applyDesiredSpec(ir *v1beta1.InferenceReplica, p Params, name string) {
 	ir.Spec.TopologyKey = p.TopologyKey
 	ir.Spec.TopologySpread = p.TopologySpread
 	ir.Spec.TopologySpreadKey = p.TopologySpreadKey
+	ir.Spec.Pacing = projectedPacing(ir.Spec.Pacing, p.PacingPartition, ir.Spec.Replicas)
 	// Project the P/D pairing protocol onto the Components that pair. The
 	// token rides the engine/decoder revision hash so a protocol change rolls
 	// both; the router does not participate in pairing and must not re-roll
@@ -458,6 +470,32 @@ func applyDesiredSpec(ir *v1beta1.InferenceReplica, p Params, name string) {
 	if !p.PreserveAutoscaler {
 		ir.Spec.Autoscaler = p.ResolvedAutoscaler.DeepCopy()
 	}
+}
+
+// projectedPacing returns the pacing block to stamp: the rollout-control
+// partition replaces whatever partition the live block carries, while the
+// rollback target the canary executor writes to the same block directly is
+// preserved. The partition is capped at the projected replica count —
+// admission rejects a larger value, and holding every Instance is the same
+// hold at either number. A block left with no fields projects as nil so an
+// IR outside any canary keeps a stable spec.
+func projectedPacing(live *v1beta1.InferenceReplicaPacing, partition *int32, replicas *int32) *v1beta1.InferenceReplicaPacing {
+	out := &v1beta1.InferenceReplicaPacing{}
+	if live != nil {
+		out = live.DeepCopy()
+	}
+	out.Partition = nil
+	if partition != nil {
+		p := *partition
+		if replicas != nil && p > *replicas {
+			p = *replicas
+		}
+		out.Partition = &p
+	}
+	if out.Partition == nil && out.MaxUnavailable == nil && out.RollbackToRevision == nil {
+		return nil
+	}
+	return out
 }
 
 // projectionUnchanged reports whether applyDesiredSpec left the fields the

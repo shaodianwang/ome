@@ -5,15 +5,16 @@ import (
 	"github.com/ome-projects/ome/pkg/rollout"
 )
 
-// EffectivePartition returns the StatefulSet-style RollingUpdate.Partition the
-// controller should apply to a component while a canary is in progress, reading
-// the current step from status. Instances with index < Partition are held on the
+// EffectivePartition returns the StatefulSet-style partition the controller
+// should apply to a component while a canary is in progress, reading the
+// current step from status. Instances with index < Partition are held on the
 // stable revision; (desired - Partition) roll to the canary revision.
 //
-// It is a pure read used by the controller to stamp the partition onto the merged
-// component lifecycle before the component reconcilers run — the same
-// spec→IR→plan→HeldByPartition path an operator-set partition takes. Returns
-// (nil, false) when no canary plan is set for the InferenceService.
+// It is a pure read used by the controller to project the partition onto the
+// InferenceReplica's rollout-control spec.pacing.partition before the
+// component reconcilers run; the engine's partition hold reads it ahead of
+// an operator-set lifecycle partition. Returns (nil, false) when no canary
+// plan is set for the InferenceService.
 //
 //   - The current step's Capacity resolved against desired.
 //
@@ -68,14 +69,16 @@ func EffectivePartition(isvc *v1beta1.InferenceService, component v1beta1.Compon
 	return &p, true
 }
 
-// StampStepPartition stamps the current canary step's RollingUpdate.Partition
-// onto a merged Component's lifecycle (creating the lifecycle / updateStrategy /
-// rollingUpdate chain as needed), so the standard spec→IR→plan→HeldByPartition
-// path holds the staged split. No-op when no canary is active for the ISVC.
-// desiredReplicas is read from the Component's MinReplicas (fallback MaxReplicas).
-func StampStepPartition(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, ext *v1beta1.ComponentExtensionSpec) {
+// StepPartition returns the current canary step's partition for a merged
+// Component, the value the projector writes to the InferenceReplica's
+// rollout-control spec.pacing.partition so the engine's partition hold
+// stages the split. The merged Component's lifecycle is left untouched: it
+// is the user's update strategy. nil when no canary is active for the
+// Component. desiredReplicas is read from the Component's MinReplicas
+// (fallback MaxReplicas).
+func StepPartition(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, ext *v1beta1.ComponentExtensionSpec) *int32 {
 	if ext == nil {
-		return
+		return nil
 	}
 	desired := int32(ext.MaxReplicas)
 	if ext.MinReplicas != nil {
@@ -83,18 +86,9 @@ func StampStepPartition(isvc *v1beta1.InferenceService, component v1beta1.Compon
 	}
 	p, ok := EffectivePartition(isvc, component, desired)
 	if !ok {
-		return
+		return nil
 	}
-	if ext.Lifecycle == nil {
-		ext.Lifecycle = &v1beta1.LifecycleSpec{}
-	}
-	if ext.Lifecycle.UpdateStrategy == nil {
-		ext.Lifecycle.UpdateStrategy = &v1beta1.UpdateStrategy{}
-	}
-	if ext.Lifecycle.UpdateStrategy.RollingUpdate == nil {
-		ext.Lifecycle.UpdateStrategy.RollingUpdate = &v1beta1.RollingUpdate{}
-	}
-	ext.Lifecycle.UpdateStrategy.RollingUpdate.Partition = p
+	return p
 }
 
 // groupHasComponent reports whether c is a member of the group.
@@ -107,20 +101,20 @@ func groupHasComponent(g *v1beta1.RolloutGroup, c v1beta1.ComponentType) bool {
 	return false
 }
 
-// StampPlanGateHold stamps a full-hold partition (every instance held on its
-// current revision) onto a Component that belongs to a canary-KIND spec group
-// — an inline canary or a policyRef declaring canary — while NO effective
-// canary plan is resolvable (run not yet open, or parked on an unresolvable
-// ref). It is the projection-side twin of the update gates' plan hold: the
-// stamped spec stays DETERMINISTIC across the pre-open and parked states, so
-// a transiently lost pin cannot flap the projected IR between a step
-// partition and no partition (which churns the IR generation and starves
-// every fresh-snapshot gate downstream). No-op when a canary plan IS
-// effective (StampStepPartition owns that) or the Component is not in a
+// PlanGateHoldPartition returns a full-hold partition (every instance held
+// on its current revision) for a Component that belongs to a canary-KIND
+// spec group — an inline canary or a policyRef declaring canary — while NO
+// effective canary plan is resolvable (run not yet open, or parked on an
+// unresolvable ref). It is the projection-side twin of the update gates'
+// plan hold: the projected spec stays DETERMINISTIC across the pre-open and
+// parked states, so a transiently lost pin cannot flap the projected IR
+// between a step partition and no partition (which churns the IR generation
+// and starves every fresh-snapshot gate downstream). nil when a canary plan
+// IS effective (StepPartition owns that) or the Component is not in a
 // canary-kind group.
-func StampPlanGateHold(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, ext *v1beta1.ComponentExtensionSpec) {
+func PlanGateHoldPartition(isvc *v1beta1.InferenceService, component v1beta1.ComponentType, ext *v1beta1.ComponentExtensionSpec) *int32 {
 	if ext == nil || isvc.Spec.Rollout == nil || rollout.CanaryGroupFor(isvc, component) != nil {
-		return
+		return nil
 	}
 	member := false
 	for i := range isvc.Spec.Rollout.Groups {
@@ -133,20 +127,11 @@ func StampPlanGateHold(isvc *v1beta1.InferenceService, component v1beta1.Compone
 		}
 	}
 	if !member {
-		return
+		return nil
 	}
 	desired := int32(ext.MaxReplicas)
 	if ext.MinReplicas != nil {
 		desired = int32(*ext.MinReplicas)
 	}
-	if ext.Lifecycle == nil {
-		ext.Lifecycle = &v1beta1.LifecycleSpec{}
-	}
-	if ext.Lifecycle.UpdateStrategy == nil {
-		ext.Lifecycle.UpdateStrategy = &v1beta1.UpdateStrategy{}
-	}
-	if ext.Lifecycle.UpdateStrategy.RollingUpdate == nil {
-		ext.Lifecycle.UpdateStrategy.RollingUpdate = &v1beta1.RollingUpdate{}
-	}
-	ext.Lifecycle.UpdateStrategy.RollingUpdate.Partition = &desired
+	return &desired
 }

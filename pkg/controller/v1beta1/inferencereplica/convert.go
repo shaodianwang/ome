@@ -334,10 +334,11 @@ func desiredFromIR(ir *v1beta1.InferenceReplica) workloadtypes.WorkloadDesiredSp
 	if ir.Spec.Replicas != nil && *ir.Spec.Replicas > 0 {
 		replicas = *ir.Spec.Replicas
 	}
-	// Pacing.{Partition,MaxUnavailable} are populated here but unread by
-	// the rollout engine — see the WorkloadPacing notes in
-	// workload/types/source.go. (Pacing.RollbackToRevision IS live —
-	// handled in reconciler.go.)
+	// Pacing.Partition is the rollout-control partition the engine's
+	// update hold reads ahead of the user's Lifecycle partition;
+	// Pacing.MaxUnavailable is copied but has no producer and no reader
+	// (see WorkloadPacing). Pacing.RollbackToRevision is handled in
+	// reconciler.go.
 	desired := workloadtypes.WorkloadDesiredSpec{
 		Replicas:        replicas,
 		MinReadySeconds: ir.Spec.MinReadySeconds,

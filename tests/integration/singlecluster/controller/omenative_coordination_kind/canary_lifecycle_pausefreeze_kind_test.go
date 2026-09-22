@@ -94,6 +94,9 @@ var _ = ginkgo.Describe("behavior — canary global pause freeze and drain", gin
 			g.Expect(c.Status.Canary.ObservedTrafficWeight).To(Equal(int32(20)))
 			g.Expect(c.Status.Components[v1beta1.EngineComponent].RolloutPhase).
 				To(Equal(v1beta1.RolloutPhasePaused))
+			// The timed hold is a settled state for the engine IR: 50% of 2
+			// holds one Instance on spec.pacing, Ready=True/Staged.
+			expectIRStagedAt(g, ns.Name, isvcName, v1beta1.EngineComponent, 1)
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		// Action: freeze the rollout globally, well before the step timer
@@ -119,6 +122,8 @@ var _ = ginkgo.Describe("behavior — canary global pause freeze and drain", gin
 			g.Expect(c.Status.Canary.ObservedTrafficWeight).To(Equal(int32(20)),
 				"a globally paused canary must not move traffic")
 			g.Expect(c.Status.Canary.RolledBackRevisionHash).To(BeEmpty())
+			// The frozen step keeps its projected hold and stays Staged.
+			expectIRStagedAt(g, ns.Name, isvcName, v1beta1.EngineComponent, 1)
 		}, lfFreezeWindow, time.Second).Should(Succeed())
 
 		// Action: clear the global pause.

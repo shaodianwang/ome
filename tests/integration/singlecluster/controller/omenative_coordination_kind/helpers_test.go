@@ -10,12 +10,15 @@ import (
 	"github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferencereplica"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/tests/integration/kindfix"
@@ -76,6 +79,22 @@ func freshInferenceReplica(g gomega.Gomega, namespace, isvcName string, componen
 	name := irprojector.InferenceReplicaName(isvcName, component)
 	g.ExpectWithOffset(1, k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: namespace, Name: name}, out)).To(gomega.Succeed())
 	return out
+}
+
+// expectIRStagedAt asserts a canary step held on one Component: the
+// InferenceReplica carries the step's partition on the rollout-control
+// spec.pacing.partition (the user's lifecycle is not where it travels) and
+// reports Ready=True/Staged for that partition rather than an open-ended
+// RolloutInProgress.
+func expectIRStagedAt(g gomega.Gomega, namespace, isvcName string, component v1beta1.ComponentType, partition int32) {
+	ir := freshInferenceReplica(g, namespace, isvcName, component)
+	g.ExpectWithOffset(1, ir.Spec.Pacing).NotTo(gomega.BeNil(), "a held canary step must project spec.pacing.partition")
+	g.ExpectWithOffset(1, ir.Spec.Pacing.Partition).To(gomega.HaveValue(gomega.Equal(partition)))
+	ready := apimeta.FindStatusCondition(ir.Status.Conditions, inferencereplica.InferenceReplicaConditionReady)
+	g.ExpectWithOffset(1, ready).NotTo(gomega.BeNil(), "the InferenceReplica must carry a Ready condition")
+	g.ExpectWithOffset(1, ready.Status).To(gomega.Equal(metav1.ConditionTrue),
+		"a canary held at a step is Ready, not RolloutInProgress: %s", ready.Message)
+	g.ExpectWithOffset(1, ready.Reason).To(gomega.Equal(inferencereplica.ReasonStaged))
 }
 
 // instanceStatuses returns the authoritative per-instance statuses for one

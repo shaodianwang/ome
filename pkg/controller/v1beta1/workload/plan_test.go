@@ -841,16 +841,16 @@ func TestPartitionHeldIndices(t *testing.T) {
 	}
 	const target = "owner-engine-target"
 	cases := []struct {
-		name     string
-		ru       *types.RollingUpdate
-		observed []types.InstanceStatus
-		planned  []types.InstancePlan
-		want     map[int32]bool
+		name      string
+		partition *int32
+		observed  []types.InstanceStatus
+		planned   []types.InstancePlan
+		want      map[int32]bool
 	}{
 		{
-			name:    "nil rollingUpdate holds nothing",
-			ru:      nil,
-			planned: planFor(0, 1),
+			name:      "nil partition holds nothing",
+			partition: nil,
+			planned:   planFor(0, 1),
 			observed: []types.InstanceStatus{
 				{Index: 0, Phase: types.InstancePhaseReady, RunningRevision: "old"},
 				{Index: 1, Phase: types.InstancePhaseReady, RunningRevision: "old"},
@@ -858,9 +858,9 @@ func TestPartitionHeldIndices(t *testing.T) {
 			want: map[int32]bool{},
 		},
 		{
-			name:    "lowest old-revision Instances held, count = Partition",
-			ru:      &types.RollingUpdate{Partition: p(2)},
-			planned: planFor(0, 1, 2),
+			name:      "lowest old-revision Instances held, count = Partition",
+			partition: p(2),
+			planned:   planFor(0, 1, 2),
 			observed: []types.InstanceStatus{
 				{Index: 0, Phase: types.InstancePhaseReady, RunningRevision: "old"},
 				{Index: 1, Phase: types.InstancePhaseReady, RunningRevision: "old"},
@@ -869,9 +869,9 @@ func TestPartitionHeldIndices(t *testing.T) {
 			want: map[int32]bool{0: true, 1: true},
 		},
 		{
-			name:    "on-target Instance is past holding; hold keys to revision, not position",
-			ru:      &types.RollingUpdate{Partition: p(1)},
-			planned: planFor(0, 1),
+			name:      "on-target Instance is past holding; hold keys to revision, not position",
+			partition: p(1),
+			planned:   planFor(0, 1),
 			observed: []types.InstanceStatus{
 				{Index: 0, Phase: types.InstancePhaseReady, RunningRevision: target},
 				{Index: 1, Phase: types.InstancePhaseReady, RunningRevision: "old"},
@@ -879,9 +879,9 @@ func TestPartitionHeldIndices(t *testing.T) {
 			want: map[int32]bool{1: true},
 		},
 		{
-			name:    "mid-update Instance must finish — hold falls to next old-revision Instance",
-			ru:      &types.RollingUpdate{Partition: p(1)},
-			planned: planFor(0, 1),
+			name:      "mid-update Instance must finish — hold falls to next old-revision Instance",
+			partition: p(1),
+			planned:   planFor(0, 1),
 			observed: []types.InstanceStatus{
 				{Index: 0, Phase: types.InstancePhaseUpdating, RunningRevision: "old",
 					Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: "Surge"}},
@@ -890,9 +890,9 @@ func TestPartitionHeldIndices(t *testing.T) {
 			want: map[int32]bool{1: true},
 		},
 		{
-			name:    "Failed Update continuation and gang-surge target marker are never held",
-			ru:      &types.RollingUpdate{Partition: p(2)},
-			planned: planFor(0, 1, 2),
+			name:      "Failed Update continuation and gang-surge target marker are never held",
+			partition: p(2),
+			planned:   planFor(0, 1, 2),
 			observed: []types.InstanceStatus{
 				{Index: 0, Phase: types.InstancePhaseCreating, RunningRevision: "",
 					Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: types.UpdateStepGangSurgeTarget}},
@@ -903,9 +903,9 @@ func TestPartitionHeldIndices(t *testing.T) {
 			want: map[int32]bool{2: true},
 		},
 		{
-			name:    "migration surge target excluded; Migrating source stays a candidate",
-			ru:      &types.RollingUpdate{Partition: p(1)},
-			planned: planFor(1, 5),
+			name:      "migration surge target excluded; Migrating source stays a candidate",
+			partition: p(1),
+			planned:   planFor(1, 5),
 			observed: []types.InstanceStatus{
 				{Index: 1, Phase: types.InstancePhaseMigrating, RunningRevision: "old",
 					Operation: &types.InstanceOperation{Type: types.InstanceOperationMigrate}},
@@ -915,16 +915,16 @@ func TestPartitionHeldIndices(t *testing.T) {
 			want: map[int32]bool{1: true},
 		},
 		{
-			name:     "unobserved planned Instances are not candidates",
-			ru:       &types.RollingUpdate{Partition: p(2)},
-			planned:  planFor(0, 1),
-			observed: []types.InstanceStatus{{Index: 1, Phase: types.InstancePhaseReady, RunningRevision: "old"}},
-			want:     map[int32]bool{1: true},
+			name:      "unobserved planned Instances are not candidates",
+			partition: p(2),
+			planned:   planFor(0, 1),
+			observed:  []types.InstanceStatus{{Index: 1, Phase: types.InstancePhaseReady, RunningRevision: "old"}},
+			want:      map[int32]bool{1: true},
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := escalation.PartitionHeldIndices(tc.ru, types.ReconcileInput{ObservedState: types.WorkloadObservedState{InstanceStatuses: tc.observed}}, tc.planned, target)
+			got := escalation.PartitionHeldIndices(tc.partition, types.ReconcileInput{ObservedState: types.WorkloadObservedState{InstanceStatuses: tc.observed}}, tc.planned, target)
 			if len(got) != len(tc.want) {
 				t.Fatalf("held = %v, want %v", got, tc.want)
 			}

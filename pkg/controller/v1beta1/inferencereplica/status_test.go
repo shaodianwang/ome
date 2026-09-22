@@ -502,6 +502,67 @@ func TestAggregateStatus_ReadyCondition_StagedAtPartition(t *testing.T) {
 		"not staged until the partitioned shape is fully reached")
 }
 
+// TestAggregateStatus_ReadyCondition_StagedReadsSamePartitionAsPlan pins
+// that the Staged decision reads the partition from the same sources, in
+// the same order, as the engine's hold: the projected spec.pacing.partition
+// (a canary step) first, else the user's lifecycle rollingUpdate partition.
+// A held canary step therefore reports Ready=True/Staged, and so does a
+// user partition with no canary; a pacing partition that disagrees with the
+// user's is the one the condition describes.
+func TestAggregateStatus_ReadyCondition_StagedReadsSamePartitionAsPlan(t *testing.T) {
+	g := gomega.NewWithT(t)
+	one, two := int32(1), int32(2)
+	staged := func() *v1beta1.InferenceReplicaStatus {
+		return &v1beta1.InferenceReplicaStatus{
+			Replicas:             3,
+			ReadyReplicas:        3,
+			UpdatedReadyReplicas: 2,
+			CurrentRevision:      "rev-a",
+			UpdateRevision:       "rev-b",
+			InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
+				{Index: 0, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: "rev-b"},
+				{Index: 1, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: "rev-b"},
+				{Index: 2, Phase: v1beta1.OMENativeInstanceReady, RunningRevision: "rev-a"},
+			},
+		}
+	}
+	userPartition := func(p int32) *v1beta1.LifecycleSpec {
+		return &v1beta1.LifecycleSpec{UpdateStrategy: &v1beta1.UpdateStrategy{
+			RollingUpdate: &v1beta1.RollingUpdate{Partition: &p}}}
+	}
+
+	// Canary step held at partition 1, no user partition: Staged.
+	cond := computeReadyCondition(staged(), nil, nil, &v1beta1.InferenceReplicaPacing{Partition: &one})
+	g.Expect(cond.Status).To(gomega.Equal(metav1.ConditionTrue))
+	g.Expect(cond.Reason).To(gomega.Equal(ReasonStaged))
+
+	// User partition 1 with no canary: the engine holds one Instance, so
+	// the condition must call that Staged too.
+	cond = computeReadyCondition(staged(), nil, userPartition(1), nil)
+	g.Expect(cond.Status).To(gomega.Equal(metav1.ConditionTrue),
+		"a user rollingUpdate.partition is the partition the engine holds at when no canary projects one")
+	g.Expect(cond.Reason).To(gomega.Equal(ReasonStaged))
+
+	// Canary step partition 1 over a user partition 2: the pacing value is
+	// the one the engine held at, so the 1-held shape is Staged.
+	cond = computeReadyCondition(staged(), nil, userPartition(2), &v1beta1.InferenceReplicaPacing{Partition: &one})
+	g.Expect(cond.Reason).To(gomega.Equal(ReasonStaged),
+		"the projected pacing partition, not the user's, decides the staged shape")
+
+	// Canary partition 0 (released) over a user partition 1: the engine
+	// rolls every Instance, so a 1-held shape is still in progress.
+	zero := int32(0)
+	cond = computeReadyCondition(staged(), nil, userPartition(1), &v1beta1.InferenceReplicaPacing{Partition: &zero})
+	g.Expect(cond.Status).To(gomega.Equal(metav1.ConditionUnknown),
+		"an explicit pacing partition 0 releases every Instance even over a user partition")
+	g.Expect(cond.Reason).To(gomega.Equal(ReasonRolloutInProgress))
+
+	// Shape disagreement with the pacing partition is not Staged.
+	cond = computeReadyCondition(staged(), nil, nil, &v1beta1.InferenceReplicaPacing{Partition: &two})
+	g.Expect(cond.Reason).To(gomega.Equal(ReasonRolloutInProgress),
+		"one held Instance does not satisfy a partition of two")
+}
+
 // TestAggregateStatus_ReadyCondition_FalseOnStuck pins the
 // stuck-replica-count branch: ReadyReplicas < Replicas with
 // CurrentRevision == UpdateRevision (no rollout in flight) →

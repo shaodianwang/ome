@@ -79,20 +79,36 @@ func PerComponentMaxUnavailableBudget(ru *types.RollingUpdate, replicas int32) i
 	return utils.ScaledCountFromIntOrString(ru.MaxUnavailable, replicas, true)
 }
 
-// HeldByPartition reports whether the hold candidate at `rank` (its
-// position in PartitionHeldIndices' ascending candidate order) is held
-// by RollingUpdate.Partition (the StatefulSet-style canary): the first
-// `Partition` candidates are held. A nil RollingUpdate, nil Partition,
-// or Partition <= 0 holds nothing.
-func HeldByPartition(ru *types.RollingUpdate, rank int32) bool {
-	if ru == nil || ru.Partition == nil || *ru.Partition <= 0 {
-		return false
+// EffectivePartition returns the partition the update pass holds at.
+// The projected Pacing.Partition wins when set — it is the rollout-
+// control value the composer (a canary step, a plan-gate hold) owns,
+// and an explicit 0 there releases every Instance even when the user's
+// strategy carries a partition. Otherwise the user's
+// RollingUpdate.Partition applies. nil when neither is set.
+func EffectivePartition(pacing *types.WorkloadPacing, ru *types.RollingUpdate) *int32 {
+	if pacing != nil && pacing.Partition != nil {
+		return pacing.Partition
 	}
-	return rank < *ru.Partition
+	if ru == nil {
+		return nil
+	}
+	return ru.Partition
 }
 
-// PartitionHeldIndices returns the set of Instance indices
-// RollingUpdate.Partition holds on their current revision this pass.
+// HeldByPartition reports whether the hold candidate at `rank` (its
+// position in PartitionHeldIndices' ascending candidate order) is held
+// by the effective partition (the StatefulSet-style canary): the first
+// `partition` candidates are held. A nil partition or partition <= 0
+// holds nothing.
+func HeldByPartition(partition *int32, rank int32) bool {
+	if partition == nil || *partition <= 0 {
+		return false
+	}
+	return rank < *partition
+}
+
+// PartitionHeldIndices returns the set of Instance indices the
+// effective partition holds on their current revision this pass.
 // Partition counts Instances to hold, not index values — migration and
 // lowest-unused surge allocation leave sparse index sets (e.g. {1,2}
 // for replicas=2), so a raw index<Partition compare holds the wrong
@@ -119,10 +135,10 @@ func HeldByPartition(ru *types.RollingUpdate, rank int32) bool {
 //     non-Migrating phase) — the pair's source carries the steady
 //     capacity.
 //
-// The lowest-indexed `Partition` candidates are held.
-func PartitionHeldIndices(ru *types.RollingUpdate, input types.ReconcileInput, planned []types.InstancePlan, targetRevName string) map[int32]bool {
+// The lowest-indexed `partition` candidates are held.
+func PartitionHeldIndices(partition *int32, input types.ReconcileInput, planned []types.InstancePlan, targetRevName string) map[int32]bool {
 	held := make(map[int32]bool)
-	if ru == nil || ru.Partition == nil || *ru.Partition <= 0 {
+	if partition == nil || *partition <= 0 {
 		return held
 	}
 	tgt := query.RevisionFromName(targetRevName)
@@ -150,7 +166,7 @@ func PartitionHeldIndices(ru *types.RollingUpdate, input types.ReconcileInput, p
 	}
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i] < candidates[j] })
 	for i, idx := range candidates {
-		if !HeldByPartition(ru, int32(i)) {
+		if !HeldByPartition(partition, int32(i)) {
 			break
 		}
 		held[idx] = true

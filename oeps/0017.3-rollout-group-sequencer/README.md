@@ -152,7 +152,7 @@ Component's target and stable revision, and decides whole-plan completion;
 per-group completion refines that decision. Enforcement reuses two hooks: the
 coordination dispatcher's fresh-update gate (`gate_eval.go` consults
 `CheckSequential` before a fresh per-Instance update; a cross-group check is a
-sibling) and the canary partition stamp (`canary.StampPlanGateHold` already
+sibling) and the canary partition projection (`canary.PlanGateHoldPartition` already
 holds a canary group whose plan is unresolvable; a Pending group takes the
 same hold).
 
