@@ -1,0 +1,41 @@
+title: "Encoder-prefill-decode (EPD) disaggregation"
+oep-number: "0028"
+authors:
+  - "@slin1237"
+status: provisional
+# state: design only; no code. No runtime, sample or test in the tree runs EPD; the shape is checked against the PD code on main at 2720a40b (37 role-enumeration sites). Alpha waits on a first runtime (Open Question 1).
+creation-date: 2026-09-22
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+# A separate encoder stage (vision, audio) in front of prefill for multimodal
+# models: spec.encoder on the InferenceService, encoderConfig on the
+# ServingRuntime, encoder as a fourth ComponentType, accepted by the
+# InferenceReplica's spec.component. Wired to prefill as prefill is wired to
+# decode: per-revision peer env, one opaque pairing token, consumer-first
+# rollout order (decode, prefill, encoder). The embedding transfer stays the
+# runtime's protocol. Chooses a fixed fourth role (A) over a general stage list
+# (B), and makes the role-enumeration sites table-driven so (B) is later a
+# change to one table.
+see-also:
+  - "/oeps/0007-omenative-workload-strategy"   # per-role pod sets and peer DNS
+  - "/oeps/0007.1-omenative-coordinated-rollout" # per-revision Services and OME_<PEER>_*ENDPOINT
+  - "/oeps/0017-unified-rollout-v2"            # groups over roles; sequencing by list order
+  - "/oeps/0026-inferencereplica-public-api"   # roles and pieces; spec.component picks the piece
+  - "/oeps/0027-rollout-extensions"            # Proposal 1: the paired cohort this OEP extends to a chain
+
+replaces: []
+
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"
+
+feature-gates: []
+disable-supported: true
