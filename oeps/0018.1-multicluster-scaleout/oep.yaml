@@ -3,6 +3,7 @@ oep-number: "0018.1"
 authors:
   - "@slin1237"
 status: implemented
+# state: placement/controller.go reconcileSplit; Split first cut #909
 creation-date: 2026-06-26
 reviewers:
   - TBD
@@ -25,9 +26,9 @@ replaces: []
 
 stage: alpha
 
-latest-milestone: "TBD"
+latest-milestone: "alpha"
 
 milestone:
-  alpha: "TBD"
+  alpha: "2026-08-04"
   beta: "TBD"
   stable: "TBD"

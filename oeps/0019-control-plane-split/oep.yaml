@@ -3,6 +3,7 @@ oep-number: "0019"
 authors:
   - "@slin1237"
 status: provisional
+# state: nothing built; cmd/manager is still the single control-plane binary and the chart has no split value
 creation-date: 2026-06-24
 reviewers:
   - TBD

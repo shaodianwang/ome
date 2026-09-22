@@ -2,7 +2,8 @@ title: Progressive (Canary) Rollout Executor
 oep-number: "0015.1"
 authors:
   - "@slin1237"
-status: provisional
+status: implemented
+# state: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary; #439
 creation-date: 2026-06-04
 reviewers:
   - TBD
@@ -20,10 +21,10 @@ see-also:
 # The target maturity stage in the current dev cycle.
 stage: alpha
 
-latest-milestone: "TBD"
+latest-milestone: "alpha"
 
 milestone:
-  alpha: "TBD"
+  alpha: "2026-06-05"
   beta: "TBD"
   stable: "TBD"
 

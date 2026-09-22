@@ -2,7 +2,8 @@ title: "InferenceService status URLs: correct, gateway-aware endpoints"
 oep-number: "0023"
 authors:
   - "@slin1237"
-status: provisional
+status: implemented
+# state: ingress/builders/endpoints.go + gateway-aware addresses; #811-#814; cmd/ome-status-preflight
 creation-date: 2026-07-13
 reviewers:
   - TBD
@@ -16,9 +17,9 @@ see-also:
 
 stage: alpha
 
-latest-milestone: "TBD"
+latest-milestone: "alpha"
 
 milestone:
-  alpha: "TBD"
+  alpha: "2026-07-23"
   beta: "TBD"
   stable: "TBD"

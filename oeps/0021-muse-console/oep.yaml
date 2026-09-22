@@ -2,7 +2,8 @@ title: "MUSE: a management plane and console for OME"
 oep-number: "0021"
 authors:
   - "@slin1237"
-status: provisional
+status: implementable
+# state: read plane shipped: muse/crates/muse-server, muse/web, charts/muse (#616, #623); write plane (deploy, convert, transfer) not built and its PR-per-write design (0021.1) is withdrawn
 creation-date: 2026-06-29
 reviewers:
   - TBD

@@ -3,6 +3,7 @@ oep-number: "0021.2"
 authors:
   - "@nigupta"
 status: implemented
+# state: muse-server/src/service/system.rs + muse/web/src/panels/System.tsx; #844
 creation-date: 2026-07-28
 reviewers:
   - TBD
@@ -24,9 +25,9 @@ see-also:
 
 stage: alpha
 
-latest-milestone: "TBD"
+latest-milestone: "alpha"
 
 milestone:
-  alpha: "TBD"
+  alpha: "2026-07-29"
   beta: "TBD"
   stable: "TBD"

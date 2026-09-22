@@ -2,7 +2,8 @@ title: Generic ServingRuntimes + ISVC-driven tuning
 oep-number: 0012
 authors:
   - "@slin1237"
-status: provisional
+status: implemented
+# state: Part B inheritance controller (servingruntime/inheritance_controller.go, #149; EffectiveSpec replaced by client-side resolve) + Part C engine-preset mutator (#159); Part A is an authoring convention
 creation-date: 2026-05-18
 reviewers:
   - TBD
@@ -14,9 +15,9 @@ see-also:
 
 stage: alpha
 
-latest-milestone: "TBD"
+latest-milestone: "alpha"
 
 milestone:
-  alpha: "TBD"
+  alpha: "2026-05-19"
   beta: "TBD"
   stable: "TBD"

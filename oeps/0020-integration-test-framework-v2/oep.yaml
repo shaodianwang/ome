@@ -2,7 +2,8 @@ title: "Integration test framework v2: multi-cluster, perf, conflict gate"
 oep-number: "0020"
 authors:
   - "@slin1237"
-status: provisional
+status: implemented
+# state: tests/integration/multicluster (Part 1, #589), tests/perf (Part 2), tests/integration/kindfix (Part 5, #421)
 creation-date: 2026-06-26
 reviewers:
   - TBD
@@ -19,9 +20,9 @@ see-also:
 
 stage: alpha
 
-latest-milestone: "TBD"
+latest-milestone: "alpha"
 
 milestone:
-  alpha: "TBD"
+  alpha: "2026-06-27"
   beta: "TBD"
   stable: "TBD"

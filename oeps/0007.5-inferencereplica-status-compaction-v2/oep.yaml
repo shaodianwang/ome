@@ -2,7 +2,8 @@ title: "OMENative InferenceReplica status compaction v2"
 oep-number: "0007.5"
 authors:
   - "@slin1237"
-status: provisional
+status: implemented
+# state: pkg/controller/v1beta1/irstatus ColumnarV2 codec + selection; #1504, qualification #1505
 creation-date: 2026-08-17
 reviewers:
   - TBD
@@ -19,10 +20,10 @@ see-also:
 
 stage: alpha
 
-latest-milestone: "TBD"
+latest-milestone: "alpha"
 
 milestone:
-  alpha: "TBD"
+  alpha: "2026-09-16"
   beta: "TBD"
   stable: "TBD"
 

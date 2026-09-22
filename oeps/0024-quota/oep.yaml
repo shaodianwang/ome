@@ -3,7 +3,8 @@ oep-number: "0024"
 authors:
   - "@fanyang-real"
   - "@Huang-Wei"
-status: provisional
+status: implemented
+# state: acceleratorquota_types.go + pkg/controller/v1beta1/acceleratorquota + cmd/ome-quota-manager + charts/ome-quota-manager; CRD #1167, Kueue v1beta2 #1181
 creation-date: 2026-08-10
 reviewers:
   - TBD
@@ -23,9 +24,9 @@ see-also:
 
 stage: alpha
 
-latest-milestone: "TBD"
+latest-milestone: "alpha"
 
 milestone:
-  alpha: "TBD"
+  alpha: "2026-08-21"
   beta: "TBD"
   stable: "TBD"

@@ -2,7 +2,8 @@ title: ISVC Model Overlays
 oep-number: 0010
 authors:
   - "@slin1237"
-status: provisional
+status: implemented
+# state: spec.model.overlays + MountedOverlays/OverlaysReady status; inferenceservice/utils/overlay.go; #132
 creation-date: 2026-05-18
 reviewers:
   - TBD
@@ -12,9 +13,9 @@ approvers:
 # The target maturity stage in the current dev cycle.
 stage: alpha
 
-latest-milestone: "TBD"
+latest-milestone: "alpha"
 
 milestone:
-  alpha: "TBD"
+  alpha: "2026-05-18"
   beta: "TBD"
   stable: "TBD"

@@ -2,7 +2,8 @@ title: "Multi-Cluster Routing: capacity-aware traffic maps"
 oep-number: "0025"
 authors:
   - "@fanyang-real"
-status: provisional
+status: implemented
+# state: trafficmap_types.go + routing_types.go + placement/routing + endpoint/gatewayapi_trafficmap.go; #1425/#1426/#1428
 creation-date: 2026-09-04
 reviewers:
   - TBD
@@ -27,9 +28,9 @@ see-also:
 
 stage: alpha
 
-latest-milestone: "TBD"
+latest-milestone: "alpha"
 
 milestone:
-  alpha: "TBD"
+  alpha: "2026-09-09"
   beta: "TBD"
   stable: "TBD"

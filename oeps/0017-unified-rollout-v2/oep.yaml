@@ -2,7 +2,8 @@ title: Unified InferenceService Rollout v2 (composable rollout groups)
 oep-number: "0017"
 authors:
   - "@slin1237"
-status: implementable
+status: implemented
+# state: RolloutGroup one-of canary|blueGreen|rollingUpdate in rollout_types.go; #513 (ordering opt-out #1513)
 creation-date: 2026-06-07
 reviewers:
   - TBD
@@ -18,9 +19,9 @@ see-also:
 
 stage: alpha
 
-latest-milestone: "TBD"
+latest-milestone: "alpha"
 
 milestone:
-  alpha: "TBD"
+  alpha: "2026-06-22"
   beta: "TBD"
   stable: "TBD"

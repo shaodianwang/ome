@@ -2,7 +2,8 @@ title: OMENative Workload Strategy
 oep-number: 0007
 authors:
   - "@slin1237"
-status: provisional
+status: implemented
+# state: pkg/controller/v1beta1/workload + pkg/apis/ome/v1beta1/{lifecycle,inferencereplica}_types.go; IR CRD foundation #245
 creation-date: 2026-04-16
 reviewers:
   - TBD
@@ -19,10 +20,10 @@ stage: alpha
 # Draft — not yet tied to a release milestone. Implementation phasing is
 # expected to span multiple minor releases with a deliberately long
 # deprecation window for the LWS-backed modes.
-latest-milestone: "TBD"
+latest-milestone: "alpha"
 
 milestone:
-  alpha: "TBD"
+  alpha: "2026-05-27"
   beta: "TBD"
   stable: "TBD"
 

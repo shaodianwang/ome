@@ -2,7 +2,8 @@ title: "Compact OMENative InferenceReplica status"
 oep-number: "0007.4"
 authors:
   - "@slin1237"
-status: provisional
+status: implemented
+# state: #1066 (consumer migration) + #1069 (compaction)
 creation-date: 2026-08-16
 reviewers:
   - TBD
@@ -24,10 +25,10 @@ see-also:
 
 stage: alpha
 
-latest-milestone: "TBD"
+latest-milestone: "alpha"
 
 milestone:
-  alpha: "TBD"
+  alpha: "2026-08-18"
   beta: "TBD"
   stable: "TBD"
 

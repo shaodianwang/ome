@@ -2,7 +2,8 @@ title: Reusable Rollout Policies
 oep-number: "0017.1"
 authors:
   - "@slin1237"
-status: provisional
+status: implemented
+# state: rolloutpolicy_types.go + rollout_run_types.go + pkg/controller/v1beta1/rolloutpolicy; #1345. Group sequencer follow-up is PR #1094
 creation-date: 2026-09-02
 reviewers:
   - TBD
@@ -31,10 +32,10 @@ replaces: []
 # The target maturity stage in the current dev cycle.
 stage: alpha
 
-latest-milestone: "TBD"
+latest-milestone: "alpha"
 
 milestone:
-  alpha: "TBD"
+  alpha: "2026-09-03"
   beta: "TBD"
   stable: "TBD"
 

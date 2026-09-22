@@ -2,7 +2,8 @@ title: Reusable Autoscaler Policies
 oep-number: "0013.1"
 authors:
   - "@slin1237"
-status: provisional
+status: implemented
+# state: autoscalerpolicy_types.go + pkg/controller/v1beta1/autoscalerpolicy + webhook/admission/autoscalerpolicy; #1330. Proportional coordinator follow-up is PR #1087
 creation-date: 2026-09-01
 reviewers:
   - TBD
@@ -27,10 +28,10 @@ replaces: []
 # The target maturity stage in the current dev cycle.
 stage: alpha
 
-latest-milestone: "TBD"
+latest-milestone: "alpha"
 
 milestone:
-  alpha: "TBD"
+  alpha: "2026-09-02"
   beta: "TBD"
   stable: "TBD"
 

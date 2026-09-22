@@ -2,7 +2,8 @@ title: "Placement Modes: Single, All, and Split"
 oep-number: "0018.3"
 authors:
   - "@yan9fan"
-status: provisional
+status: implemented
+# state: PlacementMode Single|All|Split in placement_types.go; All #888/#893, Split #909
 creation-date: 2026-07-30
 reviewers:
   - TBD
@@ -25,9 +26,9 @@ see-also:
 
 stage: alpha
 
-latest-milestone: "TBD"
+latest-milestone: "alpha"
 
 milestone:
-  alpha: "TBD"
+  alpha: "2026-08-04"
   beta: "TBD"
   stable: "TBD"

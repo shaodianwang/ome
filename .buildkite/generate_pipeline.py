@@ -1204,6 +1204,13 @@ def ci_steps() -> str:
             ":truck: Dep CRDs Drift",
             "dep-crds",
         ),
+        # oeps/STATUS.md is rendered from every oeps/*/oep.yaml; a status
+        # edit without a regen leaves the table lying about the code.
+        _drift_check_step(
+            "oep-status-drift",
+            ":clipboard: OEP Status Drift",
+            "oep-status",
+        ),
     ]
     steps = base + "\n" + "\n".join(drift_checks)
     if GKE_KIND_ENABLED:

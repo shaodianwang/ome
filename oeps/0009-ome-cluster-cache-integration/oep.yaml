@@ -2,7 +2,8 @@ title: OME Model Cache Provider Integration
 oep-number: 0009
 authors:
   - "@slin1237"
-status: provisional
+status: implementable
+# state: BaseModel.spec.distribution + ModelCacheStatus in model.go landed (#35, #56); provider factory, BaseModel Sharded reconcile path and ISVC injection not built
 creation-date: 2026-05-04
 reviewers:
   - TBD

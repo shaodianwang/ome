@@ -2,7 +2,8 @@ title: "ome-scheduler: topology-aware gang placement for accelerator fleets"
 oep-number: "0022"
 authors:
   - "@slin1237"
-status: provisional
+status: implemented
+# state: scheduler/ module (cmd/ome-scheduler, plugins/gangpack, topology) + charts/ome-scheduler; #644, spreading #1280. Phases C (preemption) and D (backfill) are not built
 creation-date: 2026-07-06
 reviewers:
   - TBD
@@ -21,9 +22,9 @@ see-also:
 
 stage: alpha
 
-latest-milestone: "TBD"
+latest-milestone: "alpha"
 
 milestone:
-  alpha: "TBD"
+  alpha: "2026-07-06"
   beta: "TBD"
   stable: "TBD"

@@ -2,7 +2,8 @@ title: Unified InferenceService Rollout (spec.rollout)
 oep-number: "0015"
 authors:
   - "@slin1237"
-status: provisional
+status: implemented
+# state: spec.rollout in rollout_types.go; #426
 creation-date: 2026-06-03
 reviewers:
   - TBD
@@ -16,9 +17,9 @@ see-also:
 
 stage: alpha
 
-latest-milestone: "TBD"
+latest-milestone: "alpha"
 
 milestone:
-  alpha: "TBD"
+  alpha: "2026-06-04"
   beta: "TBD"
   stable: "TBD"

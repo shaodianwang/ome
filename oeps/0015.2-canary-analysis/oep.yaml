@@ -2,7 +2,8 @@ title: Metric-Gated Canary Promotion and Auto-Rollback
 oep-number: "0015.2"
 authors:
   - "@slin1237"
-status: provisional
+status: implemented
+# state: RolloutAnalysis/AnalysisPrometheus in rollout_types.go + canary/analysis_sampler.go; #551
 creation-date: 2026-06-24
 reviewers:
   - TBD
@@ -26,10 +27,10 @@ see-also:
 # The target maturity stage in the current dev cycle.
 stage: alpha
 
-latest-milestone: "TBD"
+latest-milestone: "alpha"
 
 milestone:
-  alpha: "TBD"
+  alpha: "2026-06-25"
   beta: "TBD"
   stable: "TBD"
 

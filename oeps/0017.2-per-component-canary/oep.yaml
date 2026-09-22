@@ -2,7 +2,8 @@ title: Per-Component Canary Plans
 oep-number: "0017.2"
 authors:
   - "@benj"
-status: provisional
+status: implementable
+# state: canary units at admission (pkg/rollout/canary_unit.go, pkg/validation/canary.go, #1480) and per-Component status.canary landed; chart-level concurrency gate and concurrent-run KIND specs from the Alpha criteria not in tree
 creation-date: 2026-09-12
 reviewers:
   - TBD

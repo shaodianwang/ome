@@ -2,7 +2,8 @@ title: "Rollout state-machine specification: exhaustive state x event tables"
 oep-number: "0020.1"
 authors:
   - "@slin1237"
-status: provisional
+status: implementable
+# state: instance machine only: tests/rolloutspec/machines/instance + wellformed_test.go (#1498, #1533); the group, canary, run and coordination machines are not yet tabled
 creation-date: 2026-09-14
 reviewers:
   - TBD
@@ -24,9 +25,9 @@ see-also:
 
 stage: alpha
 
-latest-milestone: "TBD"
+latest-milestone: "alpha"
 
 milestone:
-  alpha: "TBD"
+  alpha: "2026-09-15"
   beta: "TBD"
   stable: "TBD"

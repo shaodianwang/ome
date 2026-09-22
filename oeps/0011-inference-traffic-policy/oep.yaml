@@ -2,7 +2,8 @@ title: InferenceService Backend Traffic Policy
 oep-number: "0011"
 authors:
   - "@slin1237"
-status: implementable
+status: implemented
+# state: Part 1 (scope after #434): traffic_types.go, traffic_status_types.go, BackendTrafficPolicy translators; #136/#147/#160. Beta ome_traffic_* metrics not built
 creation-date: 2026-05-15
 reviewers:
   - TBD

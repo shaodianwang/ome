@@ -2,7 +2,8 @@ title: OMENative Coordinated Rollout
 oep-number: "0007.1"
 authors:
   - "@slin1237"
-status: provisional
+status: implemented
+# state: pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination + coordination_types.go; #218
 creation-date: 2026-05-20
 reviewers:
   - TBD
@@ -18,10 +19,10 @@ see-also:
 # Status.Components.*.Traffic[] producer that closes Part 2 alpha.
 stage: alpha
 
-latest-milestone: "TBD"
+latest-milestone: "alpha"
 
 milestone:
-  alpha: "TBD"
+  alpha: "2026-05-24"
   beta: "TBD"
   stable: "TBD"
 

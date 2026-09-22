@@ -2,7 +2,8 @@ title: Component-Scoped Autoscaling
 oep-number: 0013
 authors:
   - "@slin1237"
-status: provisional
+status: implemented
+# state: pkg/apis/ome/v1beta1/autoscaler.go ComponentAutoscaler; slices 1/6 #336 through 6/6 #389
 creation-date: 2026-05-19
 last-revised: 2026-05-28
 reviewers:
@@ -24,10 +25,10 @@ stage: alpha
 feature-gates: []
 disable-supported: true
 
-latest-milestone: "TBD"
+latest-milestone: "alpha"
 
 milestone:
-  alpha: "TBD"
+  alpha: "2026-06-01"
   beta: "TBD"
   stable: "TBD"
 

@@ -483,6 +483,7 @@ class TestDriftCheckEmission(unittest.TestCase):
             ("manifests-drift", ":memo: Manifests Drift", "manifests"),
             ("generate-drift", ":arrows_counterclockwise: Generate Drift", "generate"),
             ("dep-crds-drift", ":truck: Dep CRDs Drift", "dep-crds"),
+            ("oep-status-drift", ":clipboard: OEP Status Drift", "oep-status"),
         ]:
             with self.subTest(key=key):
                 yaml_text = gp._drift_check_step(key, label, target)

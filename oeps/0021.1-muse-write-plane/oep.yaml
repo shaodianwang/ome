@@ -2,7 +2,8 @@ title: "MUSE write plane: create/edit OME resources via pull request"
 oep-number: "0021.1"
 authors:
   - "@slin1237"
-status: provisional
+status: withdrawn
+# state: withdrawn 2026-09-21 by owner decision; nothing built (no muse-writer in muse/); document kept as a record
 creation-date: 2026-07-15
 reviewers:
   - TBD

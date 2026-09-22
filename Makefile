@@ -127,6 +127,14 @@ generate-apiref: genref ## 📚 Generate API reference documentation
 	@cd $(PROJECT_DIR)/hack/genref/ && $(GENREF) -o $(PROJECT_DIR)/site/content/en/docs/reference
 	@echo "✅ API reference documentation generated"
 
+.PHONY: oep-status
+oep-status: ## 📚 Regenerate oeps/STATUS.md from every oeps/*/oep.yaml
+	@python3 $(PROJECT_DIR)/hack/oep-status.py
+
+.PHONY: oep-status-check
+oep-status-check: ## 📚 Fail if oeps/STATUS.md is stale
+	@python3 $(PROJECT_DIR)/hack/oep-status.py --check
+
 include Makefile-deps.mk
 
 ##@ 🛠️  Development

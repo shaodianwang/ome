@@ -2,7 +2,8 @@ title: "Multi-cluster performance hardening + endpoint publisher"
 oep-number: "0018.2"
 authors:
   - "@slin1237"
-status: provisional
+status: implemented
+# state: placement/dispatcher.go + placement/endpoint + controllerconfig/multicluster.go; #589, gateway backends #1478
 creation-date: 2026-06-26
 reviewers:
   - TBD
@@ -18,9 +19,9 @@ see-also:
 
 stage: alpha
 
-latest-milestone: "TBD"
+latest-milestone: "alpha"
 
 milestone:
-  alpha: "TBD"
+  alpha: "2026-06-27"
   beta: "TBD"
   stable: "TBD"

@@ -2,7 +2,8 @@ title: Pinned ServingRuntime revisions for InferenceServices
 oep-number: 0014
 authors:
   - "@slin1237"
-status: provisional
+status: implemented
+# state: pkg/controller/v1beta1/runtimerevision (pinning #179, webhook #181, GC #184); spec.runtime.autoSync
 creation-date: 2026-05-20
 reviewers:
   - TBD
@@ -14,9 +15,9 @@ see-also:
 
 stage: alpha
 
-latest-milestone: "TBD"
+latest-milestone: "alpha"
 
 milestone:
-  alpha: "TBD"
+  alpha: "2026-05-21"
   beta: "TBD"
   stable: "TBD"

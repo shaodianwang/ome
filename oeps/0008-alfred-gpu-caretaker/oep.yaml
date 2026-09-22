@@ -3,6 +3,7 @@ oep-number: "0008"
 authors:
   - "@slin1237"
 status: provisional
+# state: nothing built; only the AlfredAPIGroupName constant in pkg/constants/constants.go
 creation-date: 2026-04-16
 last-revised: 2026-06-04
 reviewers:

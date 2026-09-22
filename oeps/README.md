@@ -23,7 +23,12 @@ oeps/<number>-<slug>/
   `<type>/<desc>` or `<username>/<desc>`, enforced by the pre-commit hook).
 - Status moves `provisional` → `implementable` → `implemented`; supersession is
   recorded with a `see-also`/`replaces` entry on both ends so the trail is
-  bidirectional.
+  bidirectional. `withdrawn` marks a proposal the owner decided not to pursue:
+  the document stays as a record, nothing in it is built or planned.
+- Every `oep.yaml` carries a `# state:` comment under `status:` naming the
+  evidence (a code path or PR number) the status was checked against.
+  [`STATUS.md`](STATUS.md) is generated from those files by `make oep-status`;
+  do not hand-edit it.
 
 ## README structure
 

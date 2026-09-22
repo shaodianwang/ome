@@ -3,6 +3,7 @@ oep-number: "0020.3"
 authors:
   - "@slin1237"
 status: implemented
+# state: workload/{holds,evidence,escalation,types/owner.go}; #1641, #1646, #1648
 creation-date: 2026-09-19
 reviewers:
   - TBD
