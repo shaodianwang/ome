@@ -8,6 +8,21 @@ OME Resources and Controller
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
+| alfred.enabled | bool | `false` | Deploy Alfred, the upstream GPU cluster caretaker (see [Alfred](#alfred)). |
+| alfred.replicaCount | int | `3` | Every replica observes; only the leader decides. |
+| alfred.image.hub | string | `""` | Overrides global.hub for the alfred image. |
+| alfred.image.repository | string | `"alfred"` |  |
+| alfred.image.pullPolicy | string | `"IfNotPresent"` |  |
+| alfred.image.tag | string | `ome.version` | Stamped together with the other images at publish time. |
+| alfred.resources.limits.memory | string | `"1Gi"` | Raise on clusters with many thousands of pods; the cluster-wide pod cache dominates. |
+| alfred.serviceMonitor.enabled | bool | `false` | Requires prometheus-operator. |
+| alfred.configMapName | string | `"alfred-config"` | Policy ConfigMap; the flag, the ConfigMap and the RBAC write grant follow it. |
+| alfred.simulation.configMapName | string | `""` | Existing ConfigMap with `workers.json` plus the scheduler configs it references; required for execution. |
+| alfred.simulation.timeout | string | `"10s"` |  |
+| alfred.migration.apiVersion | string | `""` | `"v1"` opts into guarded execution: installs the admission guard and the dispatch journal. |
+| alfred.migration.acknowledgementTimeout | string | `"2m"` |  |
+| alfred.migration.failureBackoff | string | `"5m"` |  |
+| alfred.config | object | upstream defaults | Policy configuration rendered verbatim into `<configMapName>/config.yaml` (upstream `alfredConfig` schema). |
 | global.imagePullSecrets | list | `[]` |  |
 | global.hub | string | `"ghcr.io/moirai-internal"` |  |
 | modelAgent.health.port | int | `8080` |  |
@@ -116,6 +131,42 @@ OME Resources and Controller
 | prometheus.service.port | int | `9090` |  |
 | prometheus.service.type | string | `"ClusterIP"` |  |
 | prometheus.storage.sizeLimit | string | `"8Gi"` | emptyDir size cap. Covers active head, WAL, and compaction overlap for a moderate high-cardinality inference fleet. |
+
+## Alfred
+
+Alfred is the upstream GPU cluster caretaker (OEP-0008 in ome-projects/ome).
+It observes node health and GPU placement, recommends corrective migrations,
+and in execute mode requests them through the OMENative
+`ome.io/migration-request-v1-<uuid>` annotation that the InferenceReplica
+controller already consumes. It never cordons, drains, or evicts.
+
+The chart deploys the unmodified upstream binary. The image is built by
+`dockerfiles/alfred.Dockerfile` from the upstream commit recorded in
+`.alfred-oss-ref`, and `templates/alfred/` mirrors upstream's
+`charts/ome-alfred`. To move to a newer upstream commit, update
+`.alfred-oss-ref`, diff `charts/ome-alfred` upstream between the two commits,
+and carry any change into `templates/alfred/` and the `alfred` values block.
+
+Alfred is off by default. `alfred.enabled: true` installs it recommend-only:
+it publishes metrics, Events and the `alfred-recommendations` ConfigMap and
+writes nothing else. Execution needs three explicit opt-ins:
+
+1. `alfred.simulation.configMapName`: an existing ConfigMap holding
+   `workers.json` and the scheduler configuration files it references, mounted
+   at `/etc/alfred-simulation` (profile identities come from
+   `alfred-simulator --print-profile`).
+2. `alfred.migration.apiVersion: v1`: installs the fail-closed
+   ValidatingAdmissionPolicy that limits alfred's ServiceAccount to adding one
+   migration-request annotation, and pre-creates the `alfred-dispatch-state`
+   journal. The journal carries `helm.sh/resource-policy: keep`; never prune or
+   recreate it while requests may be unresolved.
+3. `alfred.config.mode: execute`.
+
+`alfred.config` is rendered verbatim into the `alfred-config` ConfigMap and
+hot-reloaded. Set `policies.nodeHealth.triggerConditions` to the node
+condition types the cluster's node-health detector actually reports, and keep
+`maxInFlightMigrations` / `maxMigrationsPerHour` at or below the controller's
+own migration capacity caps.
 
 ## Bundled Prometheus
 

@@ -7,6 +7,10 @@ TAG          ?= $(GIT_TAG)
 ARCH         ?= linux/amd64
 MANAGER_IMG  ?= $(REGISTRY)/ome-manager:$(TAG)
 QUOTA_MANAGER_IMG ?= $(REGISTRY)/ome-quota-manager:$(TAG)
+ALFRED_IMG   ?= $(REGISTRY)/alfred:$(TAG)
+# Upstream ome-projects/ome commit alfred is built from. .alfred-oss-ref is the
+# single source of truth; the Dockerfile requires it as a build-arg.
+ALFRED_OSS_REF ?= $(strip $(shell cat $(CURDIR)/.alfred-oss-ref))
 
 # Git version and commit information for build
 version_pkg = github.com/ome-projects/ome/pkg/version
@@ -485,6 +489,14 @@ ome-quota-manager-image: fmt vet ## Build ome-quota-manager image.
 		. -f dockerfiles/ome-quota-manager.Dockerfile -t $(QUOTA_MANAGER_IMG)
 	@echo "✅ Image built"
 
+.PHONY: alfred-image
+alfred-image: ## 🎩 Build the alfred image from the upstream source pinned in .alfred-oss-ref.
+	@echo "🎩 Building alfred image (upstream $(ALFRED_OSS_REF))..."
+	$(DOCKER_BUILD_CMD) build --platform=$(ARCH) \
+		--build-arg ALFRED_OSS_REF=$(ALFRED_OSS_REF) \
+		. -f dockerfiles/alfred.Dockerfile -t $(ALFRED_IMG)
+	@echo "✅ Image built"
+
 .PHONY: muse-image
 muse-image: ## Build the MUSE console image (read-plane API + web UI).
 	@echo "🚀 Building muse-server image..."
@@ -621,6 +633,12 @@ push-manager-image: ome-image ## Push manager image to registry.
 push-ome-agent-image: ome-agent-image ## Push ome-agent image to registry.
 	@echo "🚀 Pushing ome-agent image to registry..."
 	$(DOCKER_BUILD_CMD) push $(REGISTRY)/ome-agent:$(TAG)
+	@echo "✅ Image pushed"
+
+.PHONY: push-alfred-image
+push-alfred-image: alfred-image ## Push alfred image to registry.
+	@echo "🚀 Pushing alfred image to registry..."
+	$(DOCKER_BUILD_CMD) push $(ALFRED_IMG)
 	@echo "✅ Image pushed"
 
 .PHONY: patch-manager-dev

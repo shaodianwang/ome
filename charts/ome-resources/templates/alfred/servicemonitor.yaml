@@ -1,0 +1,22 @@
+{{- if and .Values.alfred.enabled .Values.alfred.serviceMonitor.enabled }}
+{{- $sm := .Values.alfred.serviceMonitor }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: ome-alfred
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ome-alfred.labels" . | nindent 4 }}
+    {{- with $sm.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "ome-alfred.selectorLabels" . | nindent 6 }}
+  endpoints:
+  - port: metrics
+    path: /metrics
+    interval: {{ $sm.interval }}
+    scrapeTimeout: {{ $sm.scrapeTimeout }}
+{{- end }}

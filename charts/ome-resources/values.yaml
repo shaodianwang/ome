@@ -799,6 +799,182 @@ modelAgent:
       cpu: '10'
       memory: 100Gi
 
+# Alfred, the GPU cluster caretaker (upstream OEP-0008). It observes node
+# health and GPU placement, recommends corrective migrations, and in execute
+# mode requests them through the OMENative migration-request annotation; it
+# never cordons, drains, or evicts. The image is the unmodified upstream binary
+# built from the ome-projects/ome commit in .alfred-oss-ref
+# (dockerfiles/alfred.Dockerfile). templates/alfred/ mirrors the upstream
+# charts/ome-alfred: when bumping the pin, diff that chart upstream and carry
+# any change over.
+alfred:
+  enabled: false
+  # Every replica runs the read-only observation loop (scrape any pod); only
+  # the leader decides and dispatches.
+  replicaCount: 3
+  image:
+    # Docker registry hub. If set, overrides global.hub for alfred.
+    # If repository contains '/', hub is ignored.
+    hub: ""
+    repository: alfred
+    pullPolicy: IfNotPresent
+    tag: *defaultVersion
+  # Additional annotations applied to the alfred pod template.
+  podAnnotations: {}
+  priorityClassName: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    # The cluster-wide pod cache dominates Alfred's memory; raise the limit on
+    # clusters with many thousands of pods.
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # Spread replicas across nodes so one node drain cannot take the leader and
+  # every standby at once. ScheduleAnyway keeps single-node clusters
+  # schedulable; set to [] to disable.
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          control-plane: ome-alfred
+  metrics:
+    port: 8080
+  healthPort: 8081
+  # ServiceMonitor for the alfred metrics Service. Requires prometheus-operator;
+  # the prometheus.io/scrape annotations on the pods work without it.
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    additionalLabels: {}
+  # Name of the policy ConfigMap: the --config-name flag, the rendered
+  # ConfigMap, and the namespaced RBAC write grant all follow this value.
+  configMapName: alfred-config
+  # Opt-in placement simulation. Name an existing immutable ConfigMap holding
+  # workers.json and the scheduler YAML files it references; it is mounted at
+  # /etc/alfred-simulation. Trusted startup configuration, not the hot-reloaded
+  # policy map.
+  simulation:
+    configMapName: ""
+    timeout: 10s
+  # Opt-in to the OME v1 migration API. "v1" lets alfred dispatch migrations:
+  # it requires simulation.configMapName, installs the fail-closed admission
+  # guard for alfred's ServiceAccount, and pre-creates the durable dispatch
+  # journal. Empty keeps alfred recommend-only whatever config.mode says.
+  migration:
+    apiVersion: ""
+    acknowledgementTimeout: 2m
+    failureBackoff: 5m
+  # Alfred's policy configuration, rendered verbatim into
+  # <configMapName>/config.yaml and hot-reloaded by every replica. A config
+  # that fails schema validation is rejected at reload and the last-known-good
+  # stays in force. Keys follow upstream's alfredConfig schema.
+  config:
+    schemaVersion: 1
+    # recommend-only | execute. recommend-only never dispatches a migration:
+    # policies, arbitration and reporting all run, only the dispatcher is off.
+    mode: recommend-only
+    # Named events request fresh supplemental passes without interrupting a
+    # pass or postponing the regular deadline ([] disables).
+    decisionLoopInterval: 5m
+    observationLoopInterval: 30s
+    earlyTickOn: [NodeConditionChange, NodeMaintenanceChange]
+    # Scheduler simulation is mandatory before execution. Profiles are keyed by
+    # the effective replacement Pod schedulerName. Execution also requires
+    # migration.apiVersion=v1 and the verified admission guard. The shipped
+    # default is intentionally empty. Copy the exact worker --print-profile
+    # identity:
+    # profiles:
+    #   default-scheduler:
+    #     backend: kube-v135
+    #     schedulerVersion: v1.35.4
+    #     configurationID: sha256:<immutable-config-digest>
+    #     gangScheduling: false
+    scheduling:
+      profiles: {}
+    policies:
+      defragmentation:
+        enabled: true
+        fragmentationThreshold: 0.25
+        # conservative | balanced | aggressive: a scoring knob, never a
+        # safety bypass.
+        aggressiveness: balanced
+        scoring:
+          # Within-node demand sizes, ascending.
+          sizeLadder: [1, 2, 4, 8]
+          # 0: pure observed demand; 1: pure prior.
+          demandBlendLambda: 0.3
+          # Static prior over demand sizes; keys must be ladder sizes and
+          # weights must sum to 1.
+          sizePrior:
+            "1": 0.1
+            "2": 0.1
+            "4": 0.2
+            "8": 0.6
+          pendingUrgencyTauMinutes: 30
+      nodeHealth:
+        enabled: true
+        aggressiveness: balanced
+        # Consumed from existing node conditions; Alfred never detects health.
+        # Set to the condition types the cluster's node-health detector reports.
+        triggerConditions: [GpuUnhealthy]
+        signalOnly: false
+        healthCooldownFloorMinutes: 5
+        nodeSuspicionWindowMinutes: 30
+        # Match any explicitly configured planned-maintenance signal. No
+        # default rules: arbitrary labels and taints do not request evacuation.
+        maintenance:
+          triggers: []
+          # - name: patching-label
+          #   label: {key: maintenance.example.com/state, value: patching}
+          # - name: patching-taint
+          #   taint: {key: maintenance.example.com/patching, value: "true", effect: NoSchedule}
+          # - name: patching-condition
+          #   condition: {type: Patching, status: "True"}
+    # Per-workload defaults; alfred.ome.io/* annotations on an
+    # InferenceService win over these.
+    defaultMovable: true
+    recentPlacementCooldownMinutes: 10
+    perWorkloadCooldownMinutes: 30
+    perNodeCooldownMinutes: 10
+    # Reserved compatibility field; RawDeployment remains advisory-only.
+    rawDeploymentMigrationEnabled: false
+    # OMENative execution uses the owning controller's migration annotations.
+    omenativeMigrationEnabled: true
+    lwsRecommendationsEnabled: true
+    # Output. The recommendations ConfigMap is pre-created by this chart;
+    # Alfred updates it but never creates it.
+    recommendationsConfigMapEnabled: true
+    recommendationsConfigMapName: alfred-recommendations
+    # Global safety bounds, applied once by the arbiter across every policy.
+    # Keep them at or below the controller's own migration capacity caps.
+    maxInFlightMigrations: 3
+    maxMigrationsPerHour: 10
+    emergencyPendingAgeMinutes: 10
+    # Weekly UTC windows gating defrag dispatch; empty means no window
+    # applies. Node-health evacuation deliberately overrides them.
+    # maintenanceWindows:
+    #   - days: [Sat, Sun]
+    #     start: "02:00"
+    #     end: "06:00"
+    maintenanceWindows: []
+    spotPolicy:
+      avoidAsTarget: true
+      preferAsSource: true
+      preemptibleLabels:
+        - node.kubernetes.io/preemptible
+        - cloud.google.com/gke-preemptible
+    allowCrossTenantOptimization: true
+    logLevel: info
+    structuredLogging: true
+
 # ServiceMonitor for the controller-manager metrics endpoint.
 # Requires prometheus-operator (monitoring.coreos.com/v1) installed
 # in the cluster. Leave disabled for clusters that use vanilla

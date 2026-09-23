@@ -46,6 +46,9 @@ KIND_NODE_IMAGE_FILE = REPO_ROOT / ".kind-node-image"
 TOOLS_GO_MOD = REPO_ROOT / "hack" / "internal" / "tools" / "go.mod"
 KIND_CI_DOCKERFILE = REPO_ROOT / "dockerfiles" / "kind-ci.Dockerfile"
 VALIDATION_JOB = REPO_ROOT / ".buildkite" / "gke-kind-validation-job.yaml"
+ALFRED_OSS_REF_FILE = REPO_ROOT / ".alfred-oss-ref"
+ALFRED_DOCKERFILE = REPO_ROOT / "dockerfiles" / "alfred.Dockerfile"
+MAKEFILE = REPO_ROOT / "Makefile"
 
 # go.mod files whose k8s.io/* staging modules must share one minor. Only the
 # v0.<minor>.<patch> staging scheme is comparable: klog (v2.x), gengo (v2.x) and
@@ -104,6 +107,10 @@ SWEEP_PRUNE_DIRS = frozenset({".git", ".claude", "bin", "node_modules", "target"
 # A concrete node reference, as opposed to a templated one
 # (`kindest/node:${KIND_NODE_TAG}`) or bare prose (`kindest/node`).
 KIND_NODE_LITERAL = re.compile(r"kindest/node:v?\d")
+
+# A full 40-hex commit SHA: the alfred pin must be a commit, never a branch or
+# tag, so an image build is reproducible from the pin alone.
+FULL_COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
 def read_pin(path: Path) -> str:
@@ -271,6 +278,34 @@ class ValidationJobTest(unittest.TestCase):
             validation_job_env("KIND_VERSION"),
             go_mod_require(TOOLS_GO_MOD, "sigs.k8s.io/kind"),
             "gke-kind-validation-job.yaml must pin the sigs.k8s.io/kind require",
+        )
+
+
+class AlfredPinTest(unittest.TestCase):
+    """The upstream alfred commit has one home, and every builder reads it."""
+
+    def test_pin_is_a_full_commit_sha(self):
+        self.assertRegex(
+            read_pin(ALFRED_OSS_REF_FILE),
+            FULL_COMMIT_SHA,
+            ".alfred-oss-ref must hold one full commit SHA of ome-projects/ome",
+        )
+
+    def test_dockerfile_requires_the_pin_as_a_build_arg(self):
+        text = ALFRED_DOCKERFILE.read_text()
+        self.assertRegex(
+            text,
+            r"(?m)^ARG ALFRED_OSS_REF$",
+            "alfred.Dockerfile must declare ARG ALFRED_OSS_REF without a default; "
+            "a default would be a second copy of the pin",
+        )
+        self.assertNotRegex(text, r"(?m)^ARG ALFRED_OSS_REF=")
+
+    def test_makefile_reads_the_pin_file(self):
+        self.assertIn(
+            ".alfred-oss-ref",
+            MAKEFILE.read_text(),
+            "make alfred-image must take ALFRED_OSS_REF from .alfred-oss-ref",
         )
 
 

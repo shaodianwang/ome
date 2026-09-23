@@ -82,6 +82,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 KIND_SUITE_DIR = REPO_ROOT / "tests/integration/singlecluster/controller/omenative_coordination_kind"
 MC_KIND_SUITE_DIR = REPO_ROOT / "tests/integration/multicluster/scaleout_kind"
 EVAL_CASE_DIR = REPO_ROOT / "hack/omenative-testing/perm/isvcs"
+# Upstream ome-projects/ome commit the alfred image is built from; the
+# Dockerfile fetches that source itself, so the pin is passed as a build-arg.
+ALFRED_OSS_REF_FILE = REPO_ROOT / ".alfred-oss-ref"
 
 # Multi-cluster groups, same shape and same exact-ownership rule as the
 # coordination groups below. Every job here stands up three KIND clusters, so a
@@ -271,6 +274,12 @@ IMAGES = [
     # root Go module (unlike ome-scheduler) but ships as its own image so its
     # Kueue write grant is scoped to its own ServiceAccount.
     ("ome-quota-manager", "ome-quota-manager", "dockerfiles/ome-quota-manager.Dockerfile"),
+    # alfred: the upstream GPU cluster caretaker (node-health evacuation +
+    # defragmentation via the OMENative migration-request annotation), built
+    # unmodified from the upstream commit in .alfred-oss-ref. Pure Go, no xet.
+    # An optional ome-resources component (alfred.enabled), so it is not part
+    # of the release marker.
+    ("alfred", "alfred", "dockerfiles/alfred.Dockerfile"),
 ]
 
 CHARTS = ["ome-crd", "ome-resources", "ome-isvc", "muse", "ome-scheduler", "ome-quota-manager"]
@@ -1274,7 +1283,14 @@ def _build_image_step(label: str, ecr_name: str, dockerfile: str) -> str:
 def _image_build_args(label: str) -> list[str]:
     if label == "muse-server":
         return [f"RUST_BUILDER_IMAGE={RUST_BUILDER_IMAGE}"]
-    return [f"GO_BUILDER_IMAGE={GO_BUILDER_IMAGE}"]
+    args = [f"GO_BUILDER_IMAGE={GO_BUILDER_IMAGE}"]
+    if label == "alfred":
+        args.append(f"ALFRED_OSS_REF={_alfred_oss_ref()}")
+    return args
+
+
+def _alfred_oss_ref() -> str:
+    return ALFRED_OSS_REF_FILE.read_text().strip()
 
 
 def _mirror_image_step(label: str, ecr_name: str) -> str:

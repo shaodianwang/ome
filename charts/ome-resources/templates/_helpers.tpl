@@ -57,3 +57,47 @@ app.kubernetes.io/part-of: ome
 {{ toYaml . }}
 {{- end }}
 {{- end }}
+
+{{/*
+Alfred selector labels. control-plane is the stable selector key and must
+never change; the Service, ServiceMonitor and topology spread select on it.
+*/}}
+{{- define "ome-alfred.selectorLabels" -}}
+control-plane: ome-alfred
+{{- end }}
+
+{{/*
+Stable per-pod labels: the selector plus the component identity. Kept free of
+chart/version provenance so a chart publish alone never rolls the pods.
+*/}}
+{{- define "ome-alfred.podLabels" -}}
+{{ include "ome-alfred.selectorLabels" . }}
+app.kubernetes.io/name: ome-alfred
+app.kubernetes.io/component: ome-alfred
+{{- end }}
+
+{{/*
+Full label set stamped on every non-pod alfred resource.
+*/}}
+{{- define "ome-alfred.labels" -}}
+{{ include "ome.labels" . }}
+{{ include "ome-alfred.podLabels" . }}
+{{- end }}
+
+{{/*
+Alfred image reference: alfred.image.hub overrides global.hub; a repository
+containing '/' is used as-is (same contract as ome.imageWithHub).
+*/}}
+{{- define "ome-alfred.image" -}}
+{{- $a := .Values.alfred -}}
+{{- include "ome.imageWithHub" (dict "values" (merge (dict "global" (dict "hub" (default .Values.global.hub $a.image.hub))) .Values) "repository" $a.image.repository "tag" ($a.image.tag | toString)) -}}
+{{- end }}
+
+{{/*
+Name of the recommendations ConfigMap. The policy config is the single source
+of truth, so the pre-created ConfigMap and the RBAC write grant can never
+drift from what the reporter writes to.
+*/}}
+{{- define "ome-alfred.recommendationsName" -}}
+{{- .Values.alfred.config.recommendationsConfigMapName | default "alfred-recommendations" -}}
+{{- end }}

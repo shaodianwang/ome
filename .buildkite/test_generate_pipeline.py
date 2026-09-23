@@ -463,6 +463,28 @@ class TestImageBuildEmission(unittest.TestCase):
             plugin_config,
         )
 
+    def test_every_image_dockerfile_exists(self):
+        missing = [d for _, _, d in gp.IMAGES if not (gp.REPO_ROOT / d).exists()]
+        self.assertEqual(missing, [], "IMAGES names Dockerfiles that are not in the tree")
+
+    def test_alfred_build_passes_the_pinned_upstream_commit(self):
+        # alfred is built from upstream source the Dockerfile fetches itself, so
+        # the build step must hand it the commit from .alfred-oss-ref.
+        pin = gp.ALFRED_OSS_REF_FILE.read_text().strip()
+        yaml_text = gp._build_image_step("alfred", "alfred", "dockerfiles/alfred.Dockerfile")
+        self.assertIn(f'- "ALFRED_OSS_REF={pin}"', yaml_text)
+        self.assertIn(f'- "GO_BUILDER_IMAGE={gp.GO_BUILDER_IMAGE}"', yaml_text)
+        self.assertIn(("alfred", "alfred", "dockerfiles/alfred.Dockerfile"), gp.IMAGES)
+
+    def test_only_alfred_carries_the_upstream_pin(self):
+        for label, _, _ in gp.IMAGES:
+            if label == "alfred":
+                continue
+            self.assertFalse(
+                any(a.startswith("ALFRED_OSS_REF=") for a in gp._image_build_args(label)),
+                f"{label} must not receive the alfred pin",
+            )
+
 
 class TestDriftCheckEmission(unittest.TestCase):
     # A drift check installs its tooling with `go install` before it compares
