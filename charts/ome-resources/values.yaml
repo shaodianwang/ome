@@ -40,11 +40,14 @@ ome:
   #     - sourceLabels: ["__meta_kubernetes_namespace"]
   #       targetLabel: k8s_namespace_name
   podMonitor: {}
-  # multiclusterAccess installs the long-lived ServiceAccount token used by
-  # InferenceDeploymentOperator to manage OME resources from a control-plane
-  # cluster.
+  # Permissions for a remote placement controller. Authentication is supplied
+  # by the platform through the WorkloadCluster kubeconfig.
   multiclusterAccess:
-    enabled: true
+    enabled: false
+    # Empty installs only the ClusterRole, for bindings managed outside Helm.
+    # Otherwise bind existing User, Group or ServiceAccount identities here.
+    # ServiceAccount subjects require a namespace; no accounts or tokens are created.
+    subjects: []
   # multicluster enables the control-plane fan-out placement controllers.
   # Alpha; default off. On the CONTROL-PLANE cluster set enabled: true and
   # role: control-plane (this disables the local InferenceService->pods reconciler
@@ -101,7 +104,7 @@ ome:
         dispatcherMode: ""          # "AllAtOnce" (default) or "Incremental"
         dispatcherStepSize: 0       # candidates Incremental adds per round (0 => one)
         dispatcherRoundTimeout: ""  # Incremental round dwell ("" => no dwell)
-        localQueue: ""              # one Kueue LocalQueue name stamped on EVERY derived workload ("" => no queue label, so Kueue does not gate them). Empty by default: a LocalQueue is named for the quota leaf it belongs to, so one global name cannot address more than one tenant
+        localQueue: ""              # fallback only when the source has no ome.io/local-queue annotation; leave empty for per-service quota selection
       # endpoint: the global endpoint publisher (Gateway API HTTPRoute to the winner).
       endpoint:
         globalHostTemplate: ""  # text/template for the global host ("" => only annotated ISVCs publish)

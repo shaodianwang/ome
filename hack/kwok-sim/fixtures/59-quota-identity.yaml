@@ -1,0 +1,20 @@
+# Simulator-owned authentication for the hub's member kubeconfigs. Production
+# identities are issued by the platform; access charts supply only permissions.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ome-quota-access
+  labels:
+    kwok-sim/managed: "true"
+---
+# Persistent simulator fleets need a token that survives between test runs.
+# This credential is confined to the disposable member cluster.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ome-quota-access-token
+  labels:
+    kwok-sim/managed: "true"
+  annotations:
+    kubernetes.io/service-account.name: ome-quota-access
+type: kubernetes.io/service-account-token

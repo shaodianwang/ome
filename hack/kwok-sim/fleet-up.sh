@@ -341,11 +341,14 @@ echo "==> the member-issued grant on each member"
 # with that field, and forcing the conflict hands it to helm, which blanks it
 # and leaves the webhook unable to verify until the rotator writes it back.
 for ctx in "kind-${MEMBER_A}" "kind-${MEMBER_B}"; do
+  kubectl --context "$ctx" -n "$OME_NS" apply -f hack/kwok-sim/fixtures/59-quota-identity.yaml >/dev/null
   helm template ome-quota-manager charts/ome-quota-manager/ \
     --namespace "$OME_NS" --show-only templates/remote_access.yaml \
     --set quotaManager.mode=workload \
     --set quotaManager.remoteAccess.enabled=true \
-    --set quotaManager.remoteAccess.serviceAccount.staticToken=true \
+    --set 'quotaManager.remoteAccess.subjects[0].kind=ServiceAccount' \
+    --set 'quotaManager.remoteAccess.subjects[0].name=ome-quota-access' \
+    --set "quotaManager.remoteAccess.subjects[0].namespace=$OME_NS" \
   | kubectl --context "$ctx" apply --server-side --force-conflicts -f - >/dev/null
 done
 
@@ -355,9 +358,8 @@ done
 #
 # The ClusterRole is the chart's own, rendered the same way the quota grant
 # above is, so the fleet exercises the grant a real control plane is given
-# instead of a copy of it. Its ServiceAccount and token come along and go
-# unused; only the rules matter here. The binding onto ome-quota-access is the
-# fixture, because the chart has no reason to know about this fleet's identity.
+# instead of a copy of it. Authentication belongs to the simulator's identity
+# fixture; the charts only define the grants that identity exercises.
 if [ "$WITH_PLACEMENT" -eq 1 ]; then
   echo "==> the placement grant on each member"
   for ctx in "kind-${MEMBER_A}" "kind-${MEMBER_B}"; do

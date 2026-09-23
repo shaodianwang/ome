@@ -437,9 +437,10 @@ fi
 # multicluster-access ClusterRole must grant it. Without the grant every read is
 # forbidden, fan-out still succeeds, and placement never leaves Admitting — a
 # failure mode no lane in the test matrix reproduces, because they all
-# authenticate as cluster-admin rather than as this ServiceAccount.
+# authenticate as cluster-admin rather than exercising this role.
 multicluster_access="$("${helm_bin}" template ome-resources "${chart_dir}" \
   --namespace ome \
+  --set ome.multiclusterAccess.enabled=true \
   --show-only templates/ome-controller/rbac/multicluster_access.yaml)"
 grep -Fqx '  - inferencereplicas' <<<"${multicluster_access}" ||
   fail "multicluster-access ClusterRole does not grant inferencereplicas"
@@ -877,3 +878,44 @@ for translator_resource in networking.istio.io/destinationrules gateway.envoypro
   role_grants "${translator_resource%/*}" "${translator_resource#*/}" ||
     fail "manager ClusterRole does not grant list+watch on ${translator_resource}, which a traffic translator watches"
 done
+
+# Remote placement access is an optional member-side grant, with platform-owned authentication.
+if grep -Fq 'ome.io/component: multicluster-access' <<<"$rendered"; then
+  fail "remote placement access rendered by default"
+fi
+placement_access() {
+  "${helm_bin}" template ome-resources "${chart_dir}" --namespace ome \
+    --set ome.multiclusterAccess.enabled=true \
+    --show-only templates/ome-controller/rbac/multicluster_access.yaml "$@"
+}
+access="$(placement_access)"
+grep -Fq 'kind: ClusterRole' <<<"$access" || fail "placement role missing"
+for forbidden in 'kind: ServiceAccount' 'kind: Secret' 'kind: ClusterRoleBinding'; do
+  if grep -Fq "$forbidden" <<<"$access"; then
+    fail "role-only placement access rendered $forbidden"
+  fi
+done
+bound_access="$(placement_access \
+  --set 'ome.multiclusterAccess.subjects[0].kind=Group' \
+  --set 'ome.multiclusterAccess.subjects[0].name=placement-controllers')"
+grep -Fq 'kind: ClusterRoleBinding' <<<"$bound_access" || fail "placement binding missing"
+grep -Fq 'name: "placement-controllers"' <<<"$bound_access" || fail "placement group missing"
+if grep -Eq '^kind: (ServiceAccount|Secret)$' <<<"$bound_access"; then
+  fail "placement group access provisioned credentials"
+fi
+for invalid in \
+  'ome.multiclusterAccess.subjects[0].kind=Robot' \
+  'ome.multiclusterAccess.subjects[0].kind=User' \
+  'ome.multiclusterAccess.subjects[0].kind=ServiceAccount,ome.multiclusterAccess.subjects[0].name=existing'; do
+  if placement_access --set "$invalid" >/dev/null 2>&1; then
+    fail "invalid placement access subject rendered: $invalid"
+  fi
+done
+existing_access="$(placement_access \
+  --set 'ome.multiclusterAccess.subjects[0].kind=ServiceAccount' \
+  --set 'ome.multiclusterAccess.subjects[0].name=existing' \
+  --set 'ome.multiclusterAccess.subjects[0].namespace=identity')"
+grep -Fq 'namespace: "identity"' <<<"$existing_access" || fail "existing account namespace missing"
+if grep -Eq '^kind: (ServiceAccount|Secret)$' <<<"$existing_access"; then
+  fail "placement binding provisioned credentials"
+fi

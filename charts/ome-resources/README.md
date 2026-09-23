@@ -58,7 +58,8 @@ OME Resources and Controller
 | ome.modelCache.endpoint | string | `""` | HTTP endpoint for the optional model cache provider control-plane API. |
 | ome.modelCache.options | object | `{}` | Provider-specific options. For `cluster_cache`, supported keys include `timeout` and `operation_retention`. |
 | ome.modelCache.provider | string | `""` | Optional model cache provider name. Use `cluster_cache` for sharded model distribution through cluster_cache. |
-| ome.multiclusterAccess.enabled | bool | `true` | Install ServiceAccount, token Secret, and scoped RBAC for InferenceDeploymentOperator. |
+| ome.multiclusterAccess.enabled | bool | `false` | Install the remote placement ClusterRole. |
+| ome.multiclusterAccess.subjects | list | `[]` | Bind existing identities; empty leaves bindings to the platform. |
 | ome.multicluster.config.routing.publisher.name | string | `""` | TrafficMap publisher name; empty or `gatewayapi` uses the built-in Gateway API publisher. |
 | ome.multicluster.config.routing.publisher.options | object | `{}` | Options interpreted by the selected publisher. |
 | ome.multicluster.config.routing.publisher.resyncInterval | string | `"1m"` | Periodic TrafficMap publication reconciliation backstop. |
@@ -230,14 +231,44 @@ For long-term observability, deploy a separate full Prometheus stack
 
 ## Multicluster Access
 
-`ome.multiclusterAccess.enabled=true` installs a ServiceAccount and long-lived
-token Secret that a control-plane InferenceDeploymentOperator can use to manage
-OME resources in this workload cluster. The RBAC is scoped to writing derived
-`InferenceService` resources, plus read-only access to the `InferenceReplica`,
-`ClusterServingRuntime`, `Pod` and `PodGroup` resources the control plane reads
-to observe admission. Placement stalls in `Admitting` without the
-`InferenceReplica` read: the per-component IR status is the admission signal
-that selects a winner.
+`ome.multiclusterAccess.enabled=true` installs the `ome-multicluster-access`
+ClusterRole. It grants derived `InferenceService` CRUD and the reads used for
+admission and endpoint discovery. Authentication belongs to the platform and
+is selected by each `WorkloadCluster` kubeconfig; this chart creates no remote
+ServiceAccount or token Secret. The controller's own local ServiceAccount is
+independent and remains required.
+
+An empty `subjects` list installs only the role, allowing a separate GitOps
+application to own the platform binding. To let this chart own the binding:
+
+```yaml
+ome:
+  multiclusterAccess:
+    enabled: true
+    subjects:
+      - kind: Group
+        name: placement-controllers
+```
+
+Subjects may be existing Users, Groups, or ServiceAccounts. ServiceAccount
+subjects require an explicit namespace and do not cause account creation.
+
+### Upgrading token-based installs
+
+Earlier chart versions enabled remote access by default and created
+`ome-multicluster-access`, its ServiceAccount binding, and
+`ome-multicluster-access-token`. Before upgrading, explicitly enable the role
+where it is needed and move credential ownership to the platform. This includes
+any InferenceDeploymentOperator client still using that token: establish and
+verify its replacement identity or arrange ownership transfer of the existing
+account and token before Helm removes them. `subjects: []` also removes the
+chart-owned binding; preserve access through an external binding or explicitly
+list the existing identity. With Argo CD, verify the effective pruning policy
+and resource ownership before removing obsolete objects.
+
+The role name and permissions stay stable, so independently managed
+workload-identity bindings continue to reference the same role. For a full
+review of the related settings, see [the multicluster option audit](multicluster-options.md).
 
 ## Multi-cluster routing
 
