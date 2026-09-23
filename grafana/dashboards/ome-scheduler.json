@@ -688,11 +688,72 @@
       }
     },
     {
+      "type": "timeseries",
+      "title": "Scheduler up by version",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 17,
+        "w": 24,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (version) (up{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"} * on (cluster, namespace, pod) group_left(version) max by (cluster, namespace, pod, version) (label_replace(kube_pod_container_info{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"}, \"version\", \"$1\", \"image\", \".*:(.*)\")))",
+          "refId": "K",
+          "legendFormat": "{{version}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "description": "Scrape targets responding, grouped by the image tag reported by kube-state-metrics. During a rollout, old and new versions appear as separate series. Follows the Cluster and Pod pickers. Requires kube_pod_container_info.",
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
       "type": "row",
       "title": "Outcomes \u2014 is work getting placed?",
       "gridPos": {
         "x": 0,
-        "y": 17,
+        "y": 24,
         "w": 24,
         "h": 1
       },
@@ -708,7 +769,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 18,
+        "y": 25,
         "w": 12,
         "h": 8
       },
@@ -719,7 +780,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum by (result) (rate(scheduler_schedule_attempts_total{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"}[5m]))",
-          "refId": "K",
+          "refId": "L",
           "legendFormat": "{{result}}"
         }
       ],
@@ -773,7 +834,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 18,
+        "y": 25,
         "w": 12,
         "h": 8
       },
@@ -784,7 +845,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum by (queue) (scheduler_pending_pods{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"})",
-          "refId": "L",
+          "refId": "M",
           "legendFormat": "{{queue}}"
         }
       ],
@@ -837,7 +898,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 26,
+        "y": 33,
         "w": 12,
         "h": 7
       },
@@ -848,7 +909,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum(rate(scheduler_schedule_attempts_total{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\",result=\"unschedulable\"}[5m]))",
-          "refId": "M"
+          "refId": "N"
         }
       ],
       "fieldConfig": {
@@ -897,7 +958,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 26,
+        "y": 33,
         "w": 12,
         "h": 7
       },
@@ -908,7 +969,7 @@
             "uid": "${datasource}"
           },
           "expr": "histogram_quantile(0.99, sum by (le) (rate(scheduler_pod_scheduling_attempts_bucket{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"}[5m])))",
-          "refId": "N"
+          "refId": "O"
         }
       ],
       "fieldConfig": {
@@ -952,7 +1013,7 @@
       "title": "Gang admission \u2014 yielding, or actually starving?",
       "gridPos": {
         "x": 0,
-        "y": 33,
+        "y": 40,
         "w": 24,
         "h": 1
       },
@@ -968,7 +1029,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 34,
+        "y": 41,
         "w": 12,
         "h": 7
       },
@@ -979,7 +1040,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum by (result) (rate(ome_scheduler_gang_pin_total{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"}[5m]))",
-          "refId": "O",
+          "refId": "P",
           "legendFormat": "{{result}}"
         }
       ],
@@ -1033,7 +1094,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 34,
+        "y": 41,
         "w": 12,
         "h": 7
       },
@@ -1044,7 +1105,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum(rate(ome_scheduler_gang_pin_total{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\",result=\"no_fit\"}[5m]))",
-          "refId": "P"
+          "refId": "Q"
         }
       ],
       "fieldConfig": {
@@ -1093,7 +1154,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 41,
+        "y": 48,
         "w": 12,
         "h": 7
       },
@@ -1104,7 +1165,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum(ome_scheduler_pinned_groups{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"})",
-          "refId": "Q"
+          "refId": "R"
         }
       ],
       "fieldConfig": {
@@ -1152,7 +1213,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 41,
+        "y": 48,
         "w": 12,
         "h": 7
       },
@@ -1163,7 +1224,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum by (result) (rate(ome_scheduler_gang_gate_total{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"}[5m]))",
-          "refId": "R",
+          "refId": "S",
           "legendFormat": "gate {{result}}"
         },
         {
@@ -1172,7 +1233,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum by (trigger) (rate(ome_scheduler_gang_activation_total{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"}[5m]))",
-          "refId": "S",
+          "refId": "T",
           "legendFormat": "activation {{trigger}}"
         },
         {
@@ -1181,7 +1242,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum(rate(ome_scheduler_gang_unwind_total{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"}[5m]))",
-          "refId": "T",
+          "refId": "U",
           "legendFormat": "unwind"
         }
       ],
@@ -1227,7 +1288,7 @@
       "title": "Latency \u2014 how fast, and which hook is slow",
       "gridPos": {
         "x": 0,
-        "y": 48,
+        "y": 55,
         "w": 24,
         "h": 1
       },
@@ -1243,7 +1304,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 49,
+        "y": 56,
         "w": 12,
         "h": 8
       },
@@ -1254,7 +1315,7 @@
             "uid": "${datasource}"
           },
           "expr": "histogram_quantile(0.50, sum by (le) (rate(scheduler_pod_scheduling_duration_seconds_bucket{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"}[5m])))",
-          "refId": "U",
+          "refId": "V",
           "legendFormat": "p50"
         },
         {
@@ -1263,7 +1324,7 @@
             "uid": "${datasource}"
           },
           "expr": "histogram_quantile(0.99, sum by (le) (rate(scheduler_pod_scheduling_duration_seconds_bucket{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"}[5m])))",
-          "refId": "V",
+          "refId": "W",
           "legendFormat": "p99"
         }
       ],
@@ -1313,7 +1374,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 49,
+        "y": 56,
         "w": 12,
         "h": 8
       },
@@ -1324,7 +1385,7 @@
             "uid": "${datasource}"
           },
           "expr": "histogram_quantile(0.99, sum by (le) (rate(scheduler_scheduling_attempt_duration_seconds_bucket{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"}[5m])))",
-          "refId": "W"
+          "refId": "X"
         }
       ],
       "fieldConfig": {
@@ -1373,7 +1434,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 57,
+        "y": 64,
         "w": 12,
         "h": 8
       },
@@ -1384,7 +1445,7 @@
             "uid": "${datasource}"
           },
           "expr": "histogram_quantile(0.99, sum by (extension_point, le) (rate(scheduler_framework_extension_point_duration_seconds_bucket{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"}[5m])))",
-          "refId": "X",
+          "refId": "Y",
           "legendFormat": "{{extension_point}}"
         }
       ],
@@ -1434,7 +1495,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 57,
+        "y": 64,
         "w": 12,
         "h": 8
       },
@@ -1445,7 +1506,7 @@
             "uid": "${datasource}"
           },
           "expr": "histogram_quantile(0.99, sum by (plugin, le) (rate(scheduler_plugin_execution_duration_seconds_bucket{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"}[5m])))",
-          "refId": "Y",
+          "refId": "Z",
           "legendFormat": "{{plugin}}"
         }
       ],
@@ -1491,7 +1552,7 @@
       "title": "Preemption & queue churn",
       "gridPos": {
         "x": 0,
-        "y": 65,
+        "y": 72,
         "w": 24,
         "h": 1
       },
@@ -1507,7 +1568,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 66,
+        "y": 73,
         "w": 8,
         "h": 7
       },
@@ -1518,7 +1579,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum(rate(scheduler_preemption_attempts_total{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"}[5m]))",
-          "refId": "Z"
+          "refId": "A"
         }
       ],
       "fieldConfig": {
@@ -1566,7 +1627,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 66,
+        "y": 73,
         "w": 8,
         "h": 7
       },
@@ -1577,7 +1638,7 @@
             "uid": "${datasource}"
           },
           "expr": "histogram_quantile(0.99, sum by (le) (rate(scheduler_preemption_victims_bucket{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"}[5m])))",
-          "refId": "A"
+          "refId": "B"
         }
       ],
       "fieldConfig": {
@@ -1625,7 +1686,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 66,
+        "y": 73,
         "w": 8,
         "h": 7
       },
@@ -1636,7 +1697,7 @@
             "uid": "${datasource}"
           },
           "expr": "topk(10, sum by (event) (rate(scheduler_queue_incoming_pods_total{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"}[5m])))",
-          "refId": "B",
+          "refId": "C",
           "legendFormat": "{{event}}"
         }
       ],
@@ -1682,7 +1743,7 @@
       "title": "Process",
       "gridPos": {
         "x": 0,
-        "y": 73,
+        "y": 80,
         "w": 24,
         "h": 1
       },
@@ -1698,7 +1759,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 74,
+        "y": 81,
         "w": 8,
         "h": 7
       },
@@ -1709,7 +1770,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum by (pod) (rate(process_cpu_seconds_total{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"}[5m]))",
-          "refId": "C",
+          "refId": "D",
           "legendFormat": "{{pod}}"
         }
       ],
@@ -1759,7 +1820,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 74,
+        "y": 81,
         "w": 8,
         "h": 7
       },
@@ -1770,7 +1831,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum by (pod) (process_resident_memory_bytes{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"})",
-          "refId": "D",
+          "refId": "E",
           "legendFormat": "{{pod}}"
         }
       ],
@@ -1820,7 +1881,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 74,
+        "y": 81,
         "w": 8,
         "h": 7
       },
@@ -1831,7 +1892,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum by (pod) (go_goroutines{cluster=\"$cluster\",pod=~\"ome-scheduler.*\",pod=~\"$pod\"})",
-          "refId": "E",
+          "refId": "F",
           "legendFormat": "{{pod}}"
         }
       ],
@@ -1875,7 +1936,7 @@
       "title": "Scraping, and the gang metrics still missing",
       "gridPos": {
         "x": 0,
-        "y": 81,
+        "y": 88,
         "w": 24,
         "h": 6
       },

@@ -320,11 +320,72 @@
       }
     },
     {
+      "type": "timeseries",
+      "title": "Controller up by version",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 24,
+        "h": 7
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (version) (up{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\"} * on (cluster, namespace, pod) group_left(version) max by (cluster, namespace, pod, version) (label_replace(kube_pod_container_info{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\"}, \"version\", \"$1\", \"image\", \".*:(.*)\")))",
+          "refId": "E",
+          "legendFormat": "{{version}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "description": "Scrape targets responding, grouped by the image tag reported by kube-state-metrics. During a rollout, old and new versions appear as separate series. Follows the Cluster and Pod pickers. Requires kube_pod_container_info.",
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
       "type": "row",
       "title": "Reconcile",
       "gridPos": {
         "x": 0,
-        "y": 5,
+        "y": 12,
         "w": 24,
         "h": 1
       },
@@ -340,7 +401,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 6,
+        "y": 13,
         "w": 12,
         "h": 8
       },
@@ -351,7 +412,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum by (controller) (rate(controller_runtime_reconcile_total{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\"}[5m]))",
-          "refId": "E",
+          "refId": "F",
           "legendFormat": "{{controller}}"
         }
       ],
@@ -400,7 +461,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 6,
+        "y": 13,
         "w": 12,
         "h": 8
       },
@@ -411,7 +472,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum by (controller) (rate(controller_runtime_reconcile_errors_total{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\"}[5m]))",
-          "refId": "F",
+          "refId": "G",
           "legendFormat": "{{controller}}"
         }
       ],
@@ -460,7 +521,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 14,
+        "y": 21,
         "w": 12,
         "h": 8
       },
@@ -471,7 +532,7 @@
             "uid": "${datasource}"
           },
           "expr": "histogram_quantile(0.99, sum by (controller, le) (rate(controller_runtime_reconcile_time_seconds_bucket{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\"}[5m])))",
-          "refId": "G",
+          "refId": "H",
           "legendFormat": "{{controller}}"
         }
       ],
@@ -520,7 +581,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 14,
+        "y": 21,
         "w": 12,
         "h": 8
       },
@@ -531,7 +592,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum by (name) (workqueue_depth{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\"})",
-          "refId": "H",
+          "refId": "I",
           "legendFormat": "{{name}}"
         }
       ],
@@ -575,7 +636,7 @@
       "title": "Admission webhooks",
       "gridPos": {
         "x": 0,
-        "y": 22,
+        "y": 29,
         "w": 24,
         "h": 1
       },
@@ -591,7 +652,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 23,
+        "y": 30,
         "w": 12,
         "h": 7
       },
@@ -602,7 +663,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum by (webhook) (rate(controller_runtime_webhook_requests_total{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\"}[5m]))",
-          "refId": "I",
+          "refId": "J",
           "legendFormat": "{{webhook}}"
         }
       ],
@@ -652,7 +713,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 23,
+        "y": 30,
         "w": 12,
         "h": 7
       },
@@ -663,7 +724,7 @@
             "uid": "${datasource}"
           },
           "expr": "histogram_quantile(0.99, sum by (webhook, le) (rate(controller_runtime_webhook_latency_seconds_bucket{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\"}[5m])))",
-          "refId": "J",
+          "refId": "K",
           "legendFormat": "{{webhook}}"
         }
       ],
@@ -708,7 +769,7 @@
       "title": "Process",
       "gridPos": {
         "x": 0,
-        "y": 30,
+        "y": 37,
         "w": 24,
         "h": 1
       },
@@ -724,7 +785,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 31,
+        "y": 38,
         "w": 8,
         "h": 7
       },
@@ -735,7 +796,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum by (pod) (rate(process_cpu_seconds_total{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\"}[5m]))",
-          "refId": "K",
+          "refId": "L",
           "legendFormat": "{{pod}}"
         }
       ],
@@ -785,7 +846,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 31,
+        "y": 38,
         "w": 8,
         "h": 7
       },
@@ -796,7 +857,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum by (pod) (process_resident_memory_bytes{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\"})",
-          "refId": "L",
+          "refId": "M",
           "legendFormat": "{{pod}}"
         }
       ],
@@ -845,7 +906,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 31,
+        "y": 38,
         "w": 8,
         "h": 7
       },
@@ -856,7 +917,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum by (pod) (go_goroutines{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\"})",
-          "refId": "M",
+          "refId": "N",
           "legendFormat": "{{pod}}"
         }
       ],
@@ -901,7 +962,7 @@
       "title": "OMENative",
       "gridPos": {
         "x": 0,
-        "y": 38,
+        "y": 45,
         "w": 24,
         "h": 1
       },
@@ -917,7 +978,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 39,
+        "y": 46,
         "w": 8,
         "h": 7
       },
@@ -928,7 +989,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum by (component) (ome_omenative_per_revision_service_total{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\"})",
-          "refId": "N",
+          "refId": "O",
           "legendFormat": "{{component}}"
         }
       ],
@@ -977,7 +1038,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 39,
+        "y": 46,
         "w": 8,
         "h": 7
       },
@@ -988,7 +1049,7 @@
             "uid": "${datasource}"
           },
           "expr": "histogram_quantile(0.50, sum by (le) (rate(ome_omenative_pod_create_to_ready_seconds_bucket{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\"}[5m])))",
-          "refId": "O",
+          "refId": "P",
           "legendFormat": "p50"
         },
         {
@@ -997,7 +1058,7 @@
             "uid": "${datasource}"
           },
           "expr": "histogram_quantile(0.99, sum by (le) (rate(ome_omenative_pod_create_to_ready_seconds_bucket{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\"}[5m])))",
-          "refId": "P",
+          "refId": "Q",
           "legendFormat": "p99"
         }
       ],
@@ -1047,7 +1108,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 39,
+        "y": 46,
         "w": 8,
         "h": 7
       },
@@ -1058,7 +1119,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum(rate(ome_omenative_auto_migrations_total{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\"}[5m]))",
-          "refId": "Q",
+          "refId": "R",
           "legendFormat": "Auto migrations"
         },
         {
@@ -1067,7 +1128,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum(rate(ome_omenative_ratio_gate_bypassed_total{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\"}[5m]))",
-          "refId": "R",
+          "refId": "S",
           "legendFormat": "Ratio-gate bypassed"
         }
       ],
@@ -1113,7 +1174,7 @@
       "title": "Managed resources \u2014 from kube-state-metrics",
       "gridPos": {
         "x": 0,
-        "y": 46,
+        "y": 53,
         "w": 24,
         "h": 1
       },
@@ -1129,7 +1190,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 47,
+        "y": 54,
         "w": 8,
         "h": 7
       },
@@ -1140,7 +1201,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum by (status) (ome_inferenceservice_transition_status{cluster=\"$cluster\"})",
-          "refId": "S",
+          "refId": "T",
           "legendFormat": "{{status}}"
         }
       ],
@@ -1189,7 +1250,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 47,
+        "y": 54,
         "w": 8,
         "h": 7
       },
@@ -1200,7 +1261,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum by (state) (ome_basemodel_state{cluster=\"$cluster\"})",
-          "refId": "T",
+          "refId": "U",
           "legendFormat": "namespaced/{{state}}"
         },
         {
@@ -1209,7 +1270,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum by (state) (ome_clusterbasemodel_state{cluster=\"$cluster\"})",
-          "refId": "U",
+          "refId": "V",
           "legendFormat": "cluster/{{state}}"
         }
       ],
@@ -1258,7 +1319,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 47,
+        "y": 54,
         "w": 8,
         "h": 7
       },
@@ -1269,7 +1330,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum(rate(ome_isvc_status_update_total{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\"}[5m]))",
-          "refId": "V"
+          "refId": "W"
         }
       ],
       "fieldConfig": {
@@ -1314,7 +1375,7 @@
       "title": "Canary sampler",
       "gridPos": {
         "x": 0,
-        "y": 54,
+        "y": 61,
         "w": 24,
         "h": 1
       },
@@ -1330,7 +1391,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 55,
+        "y": 62,
         "w": 12,
         "h": 7
       },
@@ -1341,7 +1402,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum(ome_canary_sampler_inflight{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\"})",
-          "refId": "W",
+          "refId": "X",
           "legendFormat": "Inflight"
         },
         {
@@ -1350,7 +1411,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum(ome_canary_sampler_queue_depth{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\"})",
-          "refId": "X",
+          "refId": "Y",
           "legendFormat": "Queue depth"
         }
       ],
@@ -1398,7 +1459,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 55,
+        "y": 62,
         "w": 12,
         "h": 7
       },
@@ -1409,7 +1470,7 @@
             "uid": "${datasource}"
           },
           "expr": "sum(rate(ome_canary_sampler_starved_total{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\"}[5m]))",
-          "refId": "Y"
+          "refId": "Z"
         }
       ],
       "fieldConfig": {

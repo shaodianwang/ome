@@ -55,6 +55,20 @@ def target(expr, legend=None, instant=False, table=False):
 target.n = 0
 
 
+def up_by_version(up_selector, pod_info_selector=None):
+    """Count healthy scrape targets by the image tag KSM reports for each pod."""
+    if pod_info_selector is None:
+        pod_info_selector = up_selector
+    return (
+        "sum by (version) ("
+        f"up{{{up_selector}}} "
+        "* on (cluster, namespace, pod) group_left(version) "
+        "max by (cluster, namespace, pod, version) ("
+        f'label_replace(kube_pod_container_info{{{pod_info_selector}}}, '
+        '"version", "$1", "image", ".*:(.*)")))'
+    )
+
+
 def panel(kind, title, targets, gp, unit=None, thresholds=T_NONE, desc=None,
           decimals=None, minv=None, maxv=None, stacked=False):
     """One panel. `gp` is (x, y, w, h) on Grafana's 24-column grid."""
@@ -231,6 +245,16 @@ def control_plane():
                         "falling behind."))
     y += 4
 
+    p.append(panel(
+        "timeseries", "Controller up by version",
+        [target(up_by_version(job), "{{version}}")],
+        (0, y, 24, 7), minv=0,
+        desc="Scrape targets responding, grouped by the image tag reported by "
+             "kube-state-metrics. During a rollout, old and new versions appear "
+             "as separate series. Follows the Cluster and Pod pickers. Requires "
+             "kube_pod_container_info."))
+    y += 7
+
     p.append(row("Reconcile", y)); y += 1
     p.append(panel("timeseries", "Reconciles by controller",
                    [target(f'sum by (controller) (rate(controller_runtime_reconcile_total{{{job}}}[5m]))',
@@ -400,6 +424,16 @@ def scheduler():
                    (18, y, 6, 4), thresholds=[(None, "green"), (20, "yellow"), (100, "red")],
                    desc="Pods the scheduler has not placed. A gang that cannot fit parks here."))
     y += 4
+
+    p.append(panel(
+        "timeseries", "Scheduler up by version",
+        [target(up_by_version(s), "{{version}}")],
+        (0, y, 24, 7), minv=0,
+        desc="Scrape targets responding, grouped by the image tag reported by "
+             "kube-state-metrics. During a rollout, old and new versions appear "
+             "as separate series. Follows the Cluster and Pod pickers. Requires "
+             "kube_pod_container_info."))
+    y += 7
 
     p.append(row("Outcomes — is work getting placed?", y)); y += 1
     p.append(panel("timeseries", "Attempts by result",
