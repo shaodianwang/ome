@@ -60,8 +60,9 @@ func trafficMapHasPublicationEvidence(trafficMap *v1beta1.TrafficMap) bool {
 		return false
 	}
 	return controllerutil.ContainsFinalizer(trafficMap, TrafficMapPublisherFinalizer) ||
-		trafficMap.Status.Publisher != nil || trafficMap.Status.Programmed ||
+		trafficMap.Status.Publisher != nil || trafficMap.Status.Published || trafficMap.Status.Programmed ||
 		trafficMap.Status.GatewayRef != nil || trafficMap.Status.ObservedTrafficMapGeneration != 0 ||
+		apimeta.FindStatusCondition(trafficMap.Status.Conditions, v1beta1.TrafficMapPublished) != nil ||
 		apimeta.FindStatusCondition(trafficMap.Status.Conditions, v1beta1.TrafficMapProgrammed) != nil
 }
 

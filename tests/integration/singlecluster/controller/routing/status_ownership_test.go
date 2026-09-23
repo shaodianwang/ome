@@ -117,6 +117,7 @@ var _ = ginkgo.Describe("TrafficMap status ownership", func() {
 			trafficMap := &v1beta1.TrafficMap{}
 			g.Expect(k8sClient.Get(suiteCtx, key, trafficMap)).To(gomega.Succeed())
 			g.Expect(trafficMap.Status.SourceUID).To(gomega.Equal(isvc.UID))
+			g.Expect(trafficMap.Status.Published).To(gomega.BeTrue())
 			g.Expect(trafficMap.Status.Programmed).To(gomega.BeTrue())
 			g.Expect(trafficMap.Status.GatewayRef).NotTo(gomega.BeNil())
 			g.Expect(trafficMap.Status.GatewayRef.Name).To(gomega.Equal(name))
@@ -138,6 +139,11 @@ var _ = ginkgo.Describe("TrafficMap status ownership", func() {
 			)
 			g.Expect(programmed).NotTo(gomega.BeNil())
 			g.Expect(programmed.Status).To(gomega.Equal(metav1.ConditionTrue))
+			published := apimeta.FindStatusCondition(
+				trafficMap.Status.Conditions, v1beta1.TrafficMapPublished,
+			)
+			g.Expect(published).NotTo(gomega.BeNil())
+			g.Expect(published.Status).To(gomega.Equal(metav1.ConditionTrue))
 
 			owners := map[string]string{}
 			for _, fields := range trafficMap.ManagedFields {
@@ -147,6 +153,7 @@ var _ = ginkgo.Describe("TrafficMap status ownership", func() {
 			}
 			g.Expect(owners).To(gomega.HaveKey("ome-trafficmap-publisher"))
 			g.Expect(owners).To(gomega.HaveKey("ome-trafficmap-routing"))
+			g.Expect(owners["ome-trafficmap-publisher"]).To(gomega.ContainSubstring("Published"))
 			g.Expect(owners["ome-trafficmap-publisher"]).To(gomega.ContainSubstring("Programmed"))
 			g.Expect(owners["ome-trafficmap-publisher"]).NotTo(gomega.ContainSubstring("Routable"))
 			g.Expect(owners["ome-trafficmap-publisher"]).NotTo(gomega.ContainSubstring("CapacityFallback"))
@@ -154,6 +161,7 @@ var _ = ginkgo.Describe("TrafficMap status ownership", func() {
 			g.Expect(owners["ome-trafficmap-routing"]).To(gomega.ContainSubstring("Routable"))
 			g.Expect(owners["ome-trafficmap-routing"]).To(gomega.ContainSubstring("CapacityFallback"))
 			g.Expect(owners["ome-trafficmap-routing"]).To(gomega.ContainSubstring("sourceUID"))
+			g.Expect(owners["ome-trafficmap-routing"]).NotTo(gomega.ContainSubstring("Published"))
 			g.Expect(owners["ome-trafficmap-routing"]).NotTo(gomega.ContainSubstring("Programmed"))
 		}).Should(gomega.Succeed())
 
@@ -168,6 +176,9 @@ var _ = ginkgo.Describe("TrafficMap status ownership", func() {
 			g.Expect(trafficMap.Status.GatewayRef).To(gomega.BeNil())
 			g.Expect(apimeta.FindStatusCondition(
 				trafficMap.Status.Conditions, v1beta1.TrafficMapRoutable,
+			)).NotTo(gomega.BeNil())
+			g.Expect(apimeta.FindStatusCondition(
+				trafficMap.Status.Conditions, v1beta1.TrafficMapPublished,
 			)).NotTo(gomega.BeNil())
 			g.Expect(apimeta.FindStatusCondition(
 				trafficMap.Status.Conditions, v1beta1.TrafficMapProgrammed,
@@ -192,6 +203,11 @@ var _ = ginkgo.Describe("TrafficMap status ownership", func() {
 			)
 			g.Expect(programmed).NotTo(gomega.BeNil())
 			g.Expect(programmed.Status).To(gomega.Equal(metav1.ConditionTrue))
+			published := apimeta.FindStatusCondition(
+				trafficMap.Status.Conditions, v1beta1.TrafficMapPublished,
+			)
+			g.Expect(published).NotTo(gomega.BeNil())
+			g.Expect(published.Status).To(gomega.Equal(metav1.ConditionTrue))
 			g.Expect(trafficMap.Status.Publisher).NotTo(gomega.BeNil())
 		}).Should(gomega.Succeed())
 	})

@@ -461,7 +461,9 @@ func assertTrafficMapStatusFieldOwners(trafficMap *v1beta1.TrafficMap) {
 	gomega.ExpectWithOffset(1, owners).To(gomega.HaveKey("ome-trafficmap-routing"))
 	gomega.ExpectWithOffset(1, owners).To(gomega.HaveKey("ome-trafficmap-publisher"))
 	gomega.ExpectWithOffset(1, owners["ome-trafficmap-routing"]).To(gomega.ContainSubstring("Routable"))
+	gomega.ExpectWithOffset(1, owners["ome-trafficmap-routing"]).NotTo(gomega.ContainSubstring("Published"))
 	gomega.ExpectWithOffset(1, owners["ome-trafficmap-routing"]).NotTo(gomega.ContainSubstring("Programmed"))
+	gomega.ExpectWithOffset(1, owners["ome-trafficmap-publisher"]).To(gomega.ContainSubstring("Published"))
 	gomega.ExpectWithOffset(1, owners["ome-trafficmap-publisher"]).To(gomega.ContainSubstring("Programmed"))
 	gomega.ExpectWithOffset(1, owners["ome-trafficmap-publisher"]).NotTo(gomega.ContainSubstring("Routable"))
 }

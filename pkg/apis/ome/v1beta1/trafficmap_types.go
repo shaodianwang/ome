@@ -7,9 +7,13 @@ import (
 	"knative.dev/pkg/apis"
 )
 
-// TrafficMapProgrammed is the condition type reporting whether the active
+// TrafficMapPublished is the condition type reporting whether the active
 // publisher has realized this TrafficMap onto a concrete data plane (e.g. a
 // Gateway API HTTPRoute).
+const TrafficMapPublished = "Published"
+
+// TrafficMapProgrammed is the legacy condition type for publication status.
+// Deprecated: use TrafficMapPublished.
 const TrafficMapProgrammed = "Programmed"
 
 // TrafficMapRoutable is the condition type reporting whether this map carries a
@@ -116,7 +120,7 @@ const (
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=tm;tmap
 // +kubebuilder:printcolumn:name="Mode",type=string,JSONPath=`.spec.mode`
-// +kubebuilder:printcolumn:name="Programmed",type=string,JSONPath=`.status.conditions[?(@.type=="Programmed")].status`
+// +kubebuilder:printcolumn:name="Published",type=string,JSONPath=`.status.conditions[?(@.type=="Published")].status`
 // +kubebuilder:printcolumn:name="Routable",type=string,JSONPath=`.status.conditions[?(@.type=="Routable")].status`
 // +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Routable")].reason`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
@@ -298,8 +302,8 @@ type TrafficMapCapacity struct {
 
 // TrafficMapStatus reports whether the active publisher has realized this map
 // onto a concrete data plane, and whether the map has anything to realize.
-// Two writers share it: the publisher owns Programmed, GatewayRef,
-// ObservedTrafficMapGeneration, Publisher, and the Programmed condition; the
+// Two writers share it: the publisher owns Published, GatewayRef,
+// ObservedTrafficMapGeneration, Publisher, and the publication conditions; the
 // routing controller owns SourceUID plus the Routable and CapacityFallback
 // conditions. Conditions is keyed on type, so each writer must patch only its
 // own fields and conditions.
@@ -311,13 +315,18 @@ type TrafficMapStatus struct {
 	// +optional
 	SourceUID types.UID `json:"sourceUID,omitempty"`
 
-	// Programmed reports whether the active publisher has realized this map onto
+	// Published reports whether the active publisher has realized this map onto
 	// its data plane.
+	// +optional
+	Published bool `json:"published,omitempty"`
+
+	// Programmed mirrors Published for compatibility with older clients.
+	// Deprecated: use Published.
 	// +optional
 	Programmed bool `json:"programmed,omitempty"`
 
 	// GatewayRef identifies the data plane object realizing this map (e.g. the
-	// HTTPRoute the Gateway API publisher created). Empty until programmed.
+	// HTTPRoute the Gateway API publisher created). Empty until published.
 	// +optional
 	GatewayRef *TrafficMapGatewayRef `json:"gatewayRef,omitempty"`
 
@@ -332,7 +341,8 @@ type TrafficMapStatus struct {
 	Publisher *TrafficMapPublisherStatus `json:"publisher,omitempty"`
 
 	// Conditions carry the routing controller's Routable and CapacityFallback
-	// conditions and the publisher's Programmed condition.
+	// conditions and the publisher's Published condition. The publisher also
+	// maintains the deprecated Programmed condition for older clients.
 	// +optional
 	// +listType=map
 	// +listMapKey=type

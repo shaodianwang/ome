@@ -7860,11 +7860,11 @@
       }
     },
     "v1beta1.TrafficMapStatus": {
-      "description": "TrafficMapStatus reports whether the active publisher has realized this map onto a concrete data plane, and whether the map has anything to realize. Two writers share it: the publisher owns Programmed, GatewayRef, ObservedTrafficMapGeneration, Publisher, and the Programmed condition; the routing controller owns SourceUID plus the Routable and CapacityFallback conditions. Conditions is keyed on type, so each writer must patch only its own fields and conditions.",
+      "description": "TrafficMapStatus reports whether the active publisher has realized this map onto a concrete data plane, and whether the map has anything to realize. Two writers share it: the publisher owns Published, GatewayRef, ObservedTrafficMapGeneration, Publisher, and the publication conditions; the routing controller owns SourceUID plus the Routable and CapacityFallback conditions. Conditions is keyed on type, so each writer must patch only its own fields and conditions.",
       "type": "object",
       "properties": {
         "conditions": {
-          "description": "Conditions carry the routing controller's Routable and CapacityFallback conditions and the publisher's Programmed condition.",
+          "description": "Conditions carry the routing controller's Routable and CapacityFallback conditions and the publisher's Published condition. The publisher also maintains the deprecated Programmed condition for older clients.",
           "type": "array",
           "items": {
             "default": {},
@@ -7878,7 +7878,7 @@
           "x-kubernetes-patch-strategy": "merge"
         },
         "gatewayRef": {
-          "description": "GatewayRef identifies the data plane object realizing this map (e.g. the HTTPRoute the Gateway API publisher created). Empty until programmed.",
+          "description": "GatewayRef identifies the data plane object realizing this map (e.g. the HTTPRoute the Gateway API publisher created). Empty until published.",
           "$ref": "#/definitions/v1beta1.TrafficMapGatewayRef"
         },
         "observedTrafficMapGeneration": {
@@ -7887,7 +7887,11 @@
           "format": "int64"
         },
         "programmed": {
-          "description": "Programmed reports whether the active publisher has realized this map onto its data plane.",
+          "description": "Programmed mirrors Published for compatibility with older clients. Deprecated: use Published.",
+          "type": "boolean"
+        },
+        "published": {
+          "description": "Published reports whether the active publisher has realized this map onto its data plane.",
           "type": "boolean"
         },
         "publisher": {

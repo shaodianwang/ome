@@ -219,6 +219,13 @@ func TestTrafficMapBlocksSourceTeardownIdentityMatrix(t *testing.T) {
 			wantBlock: true,
 		},
 		{
+			name: "ownerless empty provenance with published bit",
+			configure: func(tm *v1beta1.TrafficMap) {
+				tm.Status.Published = true
+			},
+			wantBlock: true,
+		},
+		{
 			name: "ownerless empty provenance with programmed bit",
 			configure: func(tm *v1beta1.TrafficMap) {
 				tm.Status.Programmed = true
@@ -236,6 +243,16 @@ func TestTrafficMapBlocksSourceTeardownIdentityMatrix(t *testing.T) {
 			name: "ownerless empty provenance with observed generation",
 			configure: func(tm *v1beta1.TrafficMap) {
 				tm.Status.ObservedTrafficMapGeneration = 1
+			},
+			wantBlock: true,
+		},
+		{
+			name: "ownerless empty provenance with published condition",
+			configure: func(tm *v1beta1.TrafficMap) {
+				tm.Status.Conditions = []metav1.Condition{{
+					Type: v1beta1.TrafficMapPublished, Status: metav1.ConditionFalse,
+					Reason: "Pending", LastTransitionTime: metav1.Now(),
+				}}
 			},
 			wantBlock: true,
 		},

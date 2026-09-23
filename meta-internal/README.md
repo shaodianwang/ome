@@ -198,8 +198,9 @@ template for any target that does not follow that convention.
 
 `sourceSelector` is an optional standard Kubernetes label selector evaluated
 against each source InferenceService. Omitted or empty matches every source for
-compatibility. A fresh nonmatching source converges to `Programmed=False` with
-reason `Withdrawn` without claiming or calling any xDS target. If it previously
+compatibility. A fresh nonmatching source converges to `Published=False` with
+reason `Withdrawn` without claiming or calling any xDS target. The deprecated
+`Programmed` status is mirrored during migration. If the source previously
 matched, the shared publisher lifecycle first drains its existing claims to
 zero and retains those claims until the whole TrafficMap is deleted. Source
 label changes enqueue publication immediately; changing the global selector

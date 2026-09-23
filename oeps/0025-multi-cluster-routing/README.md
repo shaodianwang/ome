@@ -257,8 +257,8 @@ closed for that ISVC before any external request; it never becomes an arbitrary
 option passed to a privileged client. The selected publisher name is deliberately
 absent from the ISVC API. If a previously programmed ISVC is updated with an
 invalid override, the publisher retains its last known-good applied state and
-reports `Programmed=False`; it does not derive destructive cleanup from invalid
-input.
+reports `Published=False` (and mirrors the deprecated `Programmed=False`); it
+does not derive destructive cleanup from invalid input.
 
 `spec.placement.capacityFactors` predates this separation but controls routing,
 not placement. `spec.routing.capacityFactors` is the primary field. During the
@@ -321,12 +321,14 @@ spec:
   observedISVCGeneration: 42   # the ISVC generation this table came from
 status:                        # independently written by routing and publisher
   sourceUID: 4424bd9b-9986-4de0-b17b-b3cdbd920f34
+  published: true
   programmed: true
   gatewayRef: {group: gateway.networking.k8s.io, kind: HTTPRoute, name: llama-3-70b}
   observedTrafficMapGeneration: 5
   conditions:
     - {type: CapacityFallback, status: "False", reason: CapacityPollingDisabled}
-    - {type: Programmed, status: "True", reason: HTTPRouteReconciled}
+    - {type: Published, status: "True", reason: Published}
+    - {type: Programmed, status: "True", reason: HTTPRouteReconciled} # deprecated compatibility mirror
 ```
 
 Two writers, one object:
@@ -335,9 +337,10 @@ Two writers, one object:
   `status.placement` or the home's quota allocation changes — plus
   `status.sourceUID` and the TrafficMap's `Routable` and `CapacityFallback`
   conditions.
-- The **publisher** patches the TrafficMap's `Programmed`, `gatewayRef`, and
-  observed-generation fields plus its publisher journal. It does not replace
-  sibling status, `sourceUID`, or the routing controller's conditions.
+- The **publisher** patches the TrafficMap's `Published`, `gatewayRef`, and
+  observed-generation fields plus its publisher journal. It mirrors the
+  deprecated `Programmed` status during migration and does not replace sibling
+  status, `sourceUID`, or the routing controller's conditions.
 
 *Anticipated objection — "a machine-written `spec` is unusual; spec is user
 intent."* True, and we considered a status-only shape (Alternatives). The
@@ -464,9 +467,10 @@ sharing transport is not bundling the features.
    routing controller workqueue polls capacity and probes each endpoint according
    to that ISVC's resolved periods. Either input failing to answer falls back to
    the control-plane value and records why.
-5. **The shared publisher programs the data plane.** It reads `entries` rather
+5. **The shared publisher publishes to the data plane.** It reads `entries` rather
    than re-deriving from `status.placement`, receives the ISVC's resolved safe
-   options for that call, and writes `status.programmed`.
+   options for that call, and writes `status.published` plus its deprecated
+   `status.programmed` compatibility mirror.
 6. **Cutoff.** A home losing all ready replicas flips `healthy:false`/`weight:0`
    in the next reconcile. A home failing N consecutive probes does the same while
    another home still passes; a fleet-wide failure follows `allFailedPolicy`.
@@ -522,7 +526,8 @@ is what makes capacity-aware weights and a gateway-neutral contract possible.
     attributable to the policy that produced it without duplicating that policy
     into every entry.
 - `spec.observedISVCGeneration` (int64) for staleness detection.
-- `status.sourceUID` (the source ISVC UID), `status.programmed` (bool), `status.gatewayRef`,
+- `status.sourceUID` (the source ISVC UID), `status.published` (bool), the
+  deprecated `status.programmed` compatibility mirror, `status.gatewayRef`,
   `status.observedTrafficMapGeneration` (int64), `status.publisher`, and
   `status.conditions[]`. The abnormal-true `CapacityFallback` condition reports
   whether any home is using the plan because configured endpoint capacity is
@@ -633,9 +638,9 @@ unpublish does not require the source or its owner reference to remain readable.
   `AllHomesProbeFailed`. A PreserveTraffic fallback is `Routable=True` with
   reason `AllHomesProbeFailed`. `status.conditions` is a
   `listType=map` keyed on `type`, so routing's `Routable` and
-  `CapacityFallback` conditions coexist with the publisher's `Programmed`
-  condition under server-side apply — but they are two writers on one
-  subresource and each must patch only its own conditions.
+  `CapacityFallback` conditions coexist with the publisher's `Published` and
+  deprecated `Programmed` conditions under server-side apply — but they are two
+  writers on one subresource and each must patch only its own conditions.
 - **Capacity fallback is metric-visible without error-label cardinality.**
   `ome_trafficmap_capacity_fallback_homes{namespace,trafficmap}` is the number
   of current entries using the plan because endpoint capacity is unavailable.
@@ -672,7 +677,7 @@ unpublish does not require the source or its owner reference to remain readable.
 ### Publisher contract (pluggable, gateway-neutral)
 
 A `Publisher` reads a `TrafficMap`, reconciles exactly one data-plane
-realization, and reports `status.programmed`. Global config selects exactly one
+realization, and reports `status.published`. Global config selects exactly one
 implementation for the installation; each manager process constructs one shared
 instance, and leader election permits one active mutator. The instance owns one
 transport and connection pool; each call receives the effective, immutable
@@ -753,7 +758,7 @@ only as that sequence's last step.
   SMG populates its worker registry and splits by entry weight. Because we own
   that codebase this is a native reflector mirroring its existing pod
   service-discovery, not an out-of-process adapter or xDS push. Here SMG is the
-  consumer, so the "publisher" is a no-op beyond marking `status.programmed`; the
+  consumer, so the "publisher" is a no-op beyond marking `status.published`; the
   contract is identical.
 
 Changing the global publisher name is deliberately not a live per-ISVC switch.
@@ -948,7 +953,7 @@ from the then-current main branch rather than as a GitHub stack:
   rejected at startup. Unknown/protected keys, missing or malformed target scope,
   out-of-scope targets, duplicates, cross-ISVC collisions, and a claim union over
   the API bound produce no external mutation and set a precise
-  `Programmed=False` reason.
+  `Published=False` reason.
 - **Publisher lifecycle (envtest + fake backend).** `TrafficMap.spec` programs the
   expected targets; a target-mapping update atomically preclaims the full new
   set, drains old claims before publishing new ones, and survives failure or
@@ -971,7 +976,7 @@ from the then-current main branch rather than as a GitHub stack:
   provenance permits no new publisher effect, and a mismatch also prevents
   routing deletion. Concurrent routing and publisher status updates prove the
   publisher patch changes only `TrafficMap.status.publisher` and its own
-  `Programmed` fields—no source UID, sibling status, or condition is lost.
+  publication fields—no source UID, sibling status, or condition is lost.
 - **Deletion ordering and orphan propagation.** Deleting an ISVC requests a
   UID/resource-version-fenced delete for an exact-owned map or an ownerless map
   with matching durable provenance. Placement keeps every derived backend while
@@ -981,7 +986,7 @@ from the then-current main branch rather than as a GitHub stack:
   conflicts, read failures, and replacement races fail closed.
 - **Gateway API publisher (envtest).** `spec` → one HTTPRoute with weighted
   backendRefs; entry removed → backendRef dropped and stale ExternalName Service
-  deleted; `status.programmed` set; finalizer removes the route on map deletion.
+  deleted; `status.published` set; finalizer removes the route on map deletion.
 - **Integration (multi-cluster harness, OEP-0020).** fan-out → admit → map
   generated → gateway programmed → kill a home → weight→0 within one reconcile.
   Run two ISVCs with different inline probe paths and publisher mappings, change

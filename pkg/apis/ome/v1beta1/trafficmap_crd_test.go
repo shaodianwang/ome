@@ -41,7 +41,7 @@ func TestTrafficMapCRD_EntrySchema(t *testing.T) {
 func TestTrafficMapCRD_PublisherStatusJournal(t *testing.T) {
 	root := loadTrafficMapCRDSchema(t)
 	status := requireSchemaProperty(t, root, "status")
-	requireTrafficMapOptionalProperties(t, "status", status, "publisher")
+	requireTrafficMapOptionalProperties(t, "status", status, "published", "programmed", "publisher")
 	publisher := requireSchemaProperty(t, status, "publisher")
 	requireTrafficMapRequiredProperties(t, "status.publisher", publisher, "publisherName")
 	requireTrafficMapOptionalProperties(t, "status.publisher", publisher, "claimedTargets", "observedOptionsDigest")

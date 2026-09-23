@@ -122,6 +122,8 @@ pub struct TrafficMapStatus {
     )]
     pub observed_traffic_map_generation: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub programmed: Option<bool>,
 }
 
