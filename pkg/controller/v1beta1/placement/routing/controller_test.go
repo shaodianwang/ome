@@ -497,7 +497,7 @@ func TestReconcile_DisabledReapsPublisherStatusWithoutClaims(t *testing.T) {
 		},
 		Status: v1beta1.TrafficMapStatus{
 			Publisher:                    &v1beta1.TrafficMapPublisherStatus{PublisherName: "stateless"},
-			Programmed:                   true,
+			Published:                    true,
 			ObservedTrafficMapGeneration: 7,
 			GatewayRef: &v1beta1.TrafficMapGatewayRef{
 				Group: "gateway.networking.k8s.io", Kind: "HTTPRoute", Name: "svc-global",
@@ -1923,7 +1923,7 @@ func TestRoutingStatusApplyIsFieldIsolated(t *testing.T) {
 	tm.Status.Conditions = []metav1.Condition{
 		{Type: v1beta1.TrafficMapRoutable, Status: metav1.ConditionTrue, Reason: "Routable"},
 		{Type: v1beta1.TrafficMapCapacityFallback, Status: metav1.ConditionTrue, Reason: "EndpointCapacityUnavailable"},
-		{Type: v1beta1.TrafficMapProgrammed, Status: metav1.ConditionTrue, Reason: "Published"},
+		{Type: v1beta1.TrafficMapPublished, Status: metav1.ConditionTrue, Reason: "Published"},
 	}
 
 	apply, ok := trafficMapRoutingStatusApply(tm).(interface{ UnstructuredContent() map[string]any })

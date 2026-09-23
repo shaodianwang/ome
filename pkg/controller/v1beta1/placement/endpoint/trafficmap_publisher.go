@@ -45,7 +45,6 @@ const (
 
 const (
 	trafficMapPublisherReasonPublished        = "Published"
-	trafficMapPublisherReasonProgrammed       = "Programmed"
 	trafficMapPublisherReasonWithdrawn        = "Withdrawn"
 	trafficMapPublisherReasonInvalidOwner     = "InvalidOwner"
 	trafficMapPublisherReasonInvalidOptions   = "InvalidOptions"
@@ -249,7 +248,7 @@ func (r *TrafficMapPublisherReconciler) Reconcile(ctx context.Context, req ctrl.
 		if err != nil {
 			return r.retryFailure(ctx, trafficMap, trafficMapPublisherReasonApplyFailed, err)
 		}
-		if err := r.markProgrammed(ctx, client.ObjectKeyFromObject(trafficMap), trafficMap.UID,
+		if err := r.markPublished(ctx, client.ObjectKeyFromObject(trafficMap), trafficMap.UID,
 			trafficMap.Generation, nil, effectiveOptions, result); err != nil {
 			if errors.Is(err, errTrafficMapPublisherJournalChanged) {
 				return ctrl.Result{Requeue: true}, nil
@@ -307,7 +306,7 @@ func (r *TrafficMapPublisherReconciler) Reconcile(ctx context.Context, req ctrl.
 	if err != nil {
 		return r.retryFailure(ctx, trafficMap, trafficMapPublisherReasonApplyFailed, err)
 	}
-	if err := r.markProgrammed(ctx, client.ObjectKeyFromObject(trafficMap), trafficMap.UID,
+	if err := r.markPublished(ctx, client.ObjectKeyFromObject(trafficMap), trafficMap.UID,
 		trafficMap.Generation, expectedClaims, effectiveOptions, result); err != nil {
 		if errors.Is(err, errTrafficMapPublisherJournalChanged) {
 			return ctrl.Result{Requeue: true}, nil
@@ -678,7 +677,6 @@ func (r *TrafficMapPublisherReconciler) clearPublisherJournal(
 		return r.patchPublisherStatus(ctx, cleared, func(status *v1beta1.TrafficMapStatus) error {
 			status.Publisher = nil
 			status.Published = false
-			status.Programmed = false
 			status.GatewayRef = nil
 			status.ObservedTrafficMapGeneration = 0
 			condition := metav1.Condition{
@@ -688,8 +686,6 @@ func (r *TrafficMapPublisherReconciler) clearPublisherJournal(
 				Message:            "TrafficMap publisher state is removed",
 				ObservedGeneration: cleared.Generation,
 			}
-			apimeta.SetStatusCondition(&status.Conditions, condition)
-			condition.Type = v1beta1.TrafficMapProgrammed
 			apimeta.SetStatusCondition(&status.Conditions, condition)
 			return nil
 		})
@@ -727,7 +723,7 @@ func (r *TrafficMapPublisherReconciler) removeFinalizer(
 		if live.UID != uid {
 			return fmt.Errorf("TrafficMap %s was replaced while removing its publisher finalizer", key)
 		}
-		if live.Status.Publisher != nil || live.Status.GatewayRef != nil || live.Status.Published || live.Status.Programmed ||
+		if live.Status.Publisher != nil || live.Status.GatewayRef != nil || live.Status.Published ||
 			live.Status.ObservedTrafficMapGeneration != 0 {
 			return fmt.Errorf("TrafficMap %s still has publisher-owned status", key)
 		}
@@ -740,7 +736,7 @@ func (r *TrafficMapPublisherReconciler) removeFinalizer(
 	})
 }
 
-func (r *TrafficMapPublisherReconciler) markProgrammed(
+func (r *TrafficMapPublisherReconciler) markPublished(
 	ctx context.Context,
 	key types.NamespacedName,
 	uid types.UID,
@@ -775,7 +771,6 @@ func (r *TrafficMapPublisherReconciler) markProgrammed(
 			)
 		}
 		status.Published = !result.Withdrawn
-		status.Programmed = status.Published
 		status.ObservedTrafficMapGeneration = generation
 		if result.Withdrawn {
 			status.GatewayRef = nil
@@ -799,13 +794,6 @@ func (r *TrafficMapPublisherReconciler) markProgrammed(
 			condition.Message = fmt.Sprintf("TrafficMap publication is withdrawn by publisher %q", r.Publisher.Name())
 		}
 		apimeta.SetStatusCondition(&status.Conditions, condition)
-		legacyCondition := condition
-		legacyCondition.Type = v1beta1.TrafficMapProgrammed
-		if !result.Withdrawn {
-			legacyCondition.Reason = trafficMapPublisherReasonProgrammed
-			legacyCondition.Message = fmt.Sprintf("TrafficMap is programmed by publisher %q", r.Publisher.Name())
-		}
-		apimeta.SetStatusCondition(&status.Conditions, legacyCondition)
 		return nil
 	})
 }
@@ -847,7 +835,6 @@ func (r *TrafficMapPublisherReconciler) markFailed(
 	return r.patchStatusByKey(ctx, client.ObjectKeyFromObject(trafficMap), trafficMap.UID,
 		func(status *v1beta1.TrafficMapStatus) error {
 			status.Published = false
-			status.Programmed = false
 			condition := metav1.Condition{
 				Type:               v1beta1.TrafficMapPublished,
 				Status:             metav1.ConditionFalse,
@@ -855,8 +842,6 @@ func (r *TrafficMapPublisherReconciler) markFailed(
 				Message:            trafficMapPublisherFailureMessage(reason),
 				ObservedGeneration: trafficMap.Generation,
 			}
-			apimeta.SetStatusCondition(&status.Conditions, condition)
-			condition.Type = v1beta1.TrafficMapProgrammed
 			apimeta.SetStatusCondition(&status.Conditions, condition)
 			return nil
 		})
@@ -894,11 +879,9 @@ func (r *TrafficMapPublisherReconciler) patchPublisherStatus(
 	// applying the sparse status projection so withdrawal cannot leave stale
 	// publication state or a stale GatewayRef behind.
 	if (live.Status.Published && !desired.Status.Published) ||
-		(live.Status.Programmed && !desired.Status.Programmed) ||
 		(live.Status.GatewayRef != nil && desired.Status.GatewayRef == nil) {
 		narrowed := live.DeepCopy()
 		narrowed.Status.Published = desired.Status.Published
-		narrowed.Status.Programmed = desired.Status.Programmed
 		narrowed.Status.GatewayRef = copyTrafficMapGatewayRef(desired.Status.GatewayRef)
 		if err := r.Status().Patch(ctx, narrowed,
 			client.MergeFromWithOptions(live, client.MergeFromWithOptimisticLock{})); err != nil {
@@ -922,7 +905,6 @@ func (r *TrafficMapPublisherReconciler) applyPublisherStatus(
 func trafficMapPublisherStatusApply(trafficMap *v1beta1.TrafficMap) runtime.ApplyConfiguration {
 	status := map[string]any{
 		"published":                    trafficMap.Status.Published,
-		"programmed":                   trafficMap.Status.Programmed,
 		"observedTrafficMapGeneration": trafficMap.Status.ObservedTrafficMapGeneration,
 	}
 	if trafficMap.Status.Publisher != nil {
@@ -954,16 +936,11 @@ func trafficMapPublisherStatusApply(trafficMap *v1beta1.TrafficMap) runtime.Appl
 		}
 		status["gatewayRef"] = gatewayRef
 	}
-	conditions := make([]any, 0, 2)
+	conditions := make([]any, 0, 1)
 	if published := apimeta.FindStatusCondition(
 		trafficMap.Status.Conditions, v1beta1.TrafficMapPublished,
 	); published != nil {
 		conditions = append(conditions, trafficMapConditionApply(*published))
-	}
-	if programmed := apimeta.FindStatusCondition(
-		trafficMap.Status.Conditions, v1beta1.TrafficMapProgrammed,
-	); programmed != nil {
-		conditions = append(conditions, trafficMapConditionApply(*programmed))
 	}
 	if len(conditions) != 0 {
 		status["conditions"] = conditions
@@ -1158,7 +1135,7 @@ func publisherStatusNeedsFinalizer(status v1beta1.TrafficMapStatus, stateful boo
 	if publisherJournalHasClaims(status.Publisher) {
 		return true
 	}
-	return stateful && (status.Publisher != nil || status.Published || status.Programmed || status.GatewayRef != nil ||
+	return stateful && (status.Publisher != nil || status.Published || status.GatewayRef != nil ||
 		status.ObservedTrafficMapGeneration != 0)
 }
 

@@ -129,13 +129,6 @@ func TestTrafficMapBlocksSourceTeardownIdentityMatrix(t *testing.T) {
 		owner.UID = "other-source-uid"
 		return owner
 	}
-	programmedCondition := func() []metav1.Condition {
-		return []metav1.Condition{{
-			Type: v1beta1.TrafficMapProgrammed, Status: metav1.ConditionFalse,
-			Reason: "Pending", LastTransitionTime: metav1.Now(),
-		}}
-	}
-
 	tests := []struct {
 		name      string
 		configure func(*v1beta1.TrafficMap)
@@ -226,13 +219,6 @@ func TestTrafficMapBlocksSourceTeardownIdentityMatrix(t *testing.T) {
 			wantBlock: true,
 		},
 		{
-			name: "ownerless empty provenance with programmed bit",
-			configure: func(tm *v1beta1.TrafficMap) {
-				tm.Status.Programmed = true
-			},
-			wantBlock: true,
-		},
-		{
 			name: "ownerless empty provenance with gateway reference",
 			configure: func(tm *v1beta1.TrafficMap) {
 				tm.Status.GatewayRef = &v1beta1.TrafficMapGatewayRef{Name: "route"}
@@ -257,13 +243,6 @@ func TestTrafficMapBlocksSourceTeardownIdentityMatrix(t *testing.T) {
 			wantBlock: true,
 		},
 		{
-			name: "ownerless empty provenance with programmed condition",
-			configure: func(tm *v1beta1.TrafficMap) {
-				tm.Status.Conditions = programmedCondition()
-			},
-			wantBlock: true,
-		},
-		{
 			name:      "ownerless empty provenance without publication evidence",
 			configure: func(*v1beta1.TrafficMap) {},
 		},
@@ -272,7 +251,7 @@ func TestTrafficMapBlocksSourceTeardownIdentityMatrix(t *testing.T) {
 			configure: func(tm *v1beta1.TrafficMap) {
 				tm.Status.SourceUID = "other-source-uid"
 				tm.Finalizers = []string{TrafficMapPublisherFinalizer}
-				tm.Status.Conditions = programmedCondition()
+				tm.Status.Published = true
 			},
 		},
 		{
@@ -287,7 +266,7 @@ func TestTrafficMapBlocksSourceTeardownIdentityMatrix(t *testing.T) {
 			configure: func(tm *v1beta1.TrafficMap) {
 				tm.OwnerReferences = []metav1.OwnerReference{conflictingOwner()}
 				tm.Status.SourceUID = "third-source-uid"
-				tm.Status.Programmed = true
+				tm.Status.Published = true
 			},
 		},
 	}
@@ -310,11 +289,11 @@ func TestReconcileDelete_TrafficMapIdentityControlsBackendTeardown(t *testing.T)
 		wantBlock bool
 	}{
 		{
-			name: "ambiguous legacy stateless publication",
+			name: "ambiguous stateless publication",
 			configure: func(tm *v1beta1.TrafficMap, _ *v1beta1.InferenceService) {
-				tm.Status.Programmed = true
+				tm.Status.Published = true
 				tm.Status.Conditions = []metav1.Condition{{
-					Type: v1beta1.TrafficMapProgrammed, Status: metav1.ConditionTrue,
+					Type: v1beta1.TrafficMapPublished, Status: metav1.ConditionTrue,
 					Reason: "Published", LastTransitionTime: metav1.Now(),
 				}}
 			},
@@ -335,7 +314,7 @@ func TestReconcileDelete_TrafficMapIdentityControlsBackendTeardown(t *testing.T)
 			name: "ownerless mismatched provenance is foreign despite publication evidence",
 			configure: func(tm *v1beta1.TrafficMap, _ *v1beta1.InferenceService) {
 				tm.Status.SourceUID = "other-source-uid"
-				tm.Status.Programmed = true
+				tm.Status.Published = true
 				tm.Finalizers = []string{TrafficMapPublisherFinalizer}
 			},
 		},

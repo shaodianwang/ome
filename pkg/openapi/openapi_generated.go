@@ -14000,7 +14000,7 @@ func schema_pkg_apis_ome_v1beta1_TrafficMapStatus(ref common.ReferenceCallback) 
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "TrafficMapStatus reports whether the active publisher has realized this map onto a concrete data plane, and whether the map has anything to realize. Two writers share it: the publisher owns Published, GatewayRef, ObservedTrafficMapGeneration, Publisher, and the publication conditions; the routing controller owns SourceUID plus the Routable and CapacityFallback conditions. Conditions is keyed on type, so each writer must patch only its own fields and conditions.",
+				Description: "TrafficMapStatus reports whether the active publisher has realized this map onto a concrete data plane, and whether the map has anything to realize. Two writers share it: the publisher owns Published, GatewayRef, ObservedTrafficMapGeneration, Publisher, and the Published condition; the routing controller owns SourceUID plus the Routable and CapacityFallback conditions. Conditions is keyed on type, so each writer must patch only its own fields and conditions.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"sourceUID": {
@@ -14013,13 +14013,6 @@ func schema_pkg_apis_ome_v1beta1_TrafficMapStatus(ref common.ReferenceCallback) 
 					"published": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Published reports whether the active publisher has realized this map onto its data plane.",
-							Type:        []string{"boolean"},
-							Format:      "",
-						},
-					},
-					"programmed": {
-						SchemaProps: spec.SchemaProps{
-							Description: "Programmed mirrors Published for compatibility with older clients. Deprecated: use Published.",
 							Type:        []string{"boolean"},
 							Format:      "",
 						},
@@ -14055,7 +14048,7 @@ func schema_pkg_apis_ome_v1beta1_TrafficMapStatus(ref common.ReferenceCallback) 
 							},
 						},
 						SchemaProps: spec.SchemaProps{
-							Description: "Conditions carry the routing controller's Routable and CapacityFallback conditions and the publisher's Published condition. The publisher also maintains the deprecated Programmed condition for older clients.",
+							Description: "Conditions carry the routing controller's Routable and CapacityFallback conditions and the publisher's Published condition.",
 							Type:        []string{"array"},
 							Items: &spec.SchemaOrArray{
 								Schema: &spec.Schema{

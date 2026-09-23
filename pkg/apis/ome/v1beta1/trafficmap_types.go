@@ -12,10 +12,6 @@ import (
 // Gateway API HTTPRoute).
 const TrafficMapPublished = "Published"
 
-// TrafficMapProgrammed is the legacy condition type for publication status.
-// Deprecated: use TrafficMapPublished.
-const TrafficMapProgrammed = "Programmed"
-
 // TrafficMapRoutable is the condition type reporting whether this map carries a
 // target a gateway can send traffic to. It is owned by the routing controller,
 // which writes it on every pass so an empty table always explains itself: the
@@ -303,7 +299,7 @@ type TrafficMapCapacity struct {
 // TrafficMapStatus reports whether the active publisher has realized this map
 // onto a concrete data plane, and whether the map has anything to realize.
 // Two writers share it: the publisher owns Published, GatewayRef,
-// ObservedTrafficMapGeneration, Publisher, and the publication conditions; the
+// ObservedTrafficMapGeneration, Publisher, and the Published condition; the
 // routing controller owns SourceUID plus the Routable and CapacityFallback
 // conditions. Conditions is keyed on type, so each writer must patch only its
 // own fields and conditions.
@@ -319,11 +315,6 @@ type TrafficMapStatus struct {
 	// its data plane.
 	// +optional
 	Published bool `json:"published,omitempty"`
-
-	// Programmed mirrors Published for compatibility with older clients.
-	// Deprecated: use Published.
-	// +optional
-	Programmed bool `json:"programmed,omitempty"`
 
 	// GatewayRef identifies the data plane object realizing this map (e.g. the
 	// HTTPRoute the Gateway API publisher created). Empty until published.
@@ -341,8 +332,7 @@ type TrafficMapStatus struct {
 	Publisher *TrafficMapPublisherStatus `json:"publisher,omitempty"`
 
 	// Conditions carry the routing controller's Routable and CapacityFallback
-	// conditions and the publisher's Published condition. The publisher also
-	// maintains the deprecated Programmed condition for older clients.
+	// conditions and the publisher's Published condition.
 	// +optional
 	// +listType=map
 	// +listMapKey=type

@@ -247,7 +247,7 @@ func reconcileTrafficMapPublisher(
 		g.Expect(err).NotTo(gomega.HaveOccurred())
 		trafficMap := &v1beta1.TrafficMap{}
 		g.Expect(controlCluster.client.Get(controlCluster.ctx, key, trafficMap)).To(gomega.Succeed())
-		g.Expect(trafficMap.Status.Programmed).To(gomega.BeTrue())
+		g.Expect(trafficMap.Status.Published).To(gomega.BeTrue())
 		g.Expect(trafficMap.Status.ObservedTrafficMapGeneration).To(gomega.Equal(trafficMap.Generation))
 	}, eventuallyTimeout, eventuallyPoll).Should(gomega.Succeed())
 }
@@ -277,7 +277,7 @@ func publishedGatewayWeights(g gomega.Gomega, namespace, name string) map[string
 	key := types.NamespacedName{Namespace: namespace, Name: name}
 	trafficMap := &v1beta1.TrafficMap{}
 	g.Expect(controlCluster.client.Get(controlCluster.ctx, key, trafficMap)).To(gomega.Succeed())
-	g.Expect(trafficMap.Status.Programmed).To(gomega.BeTrue())
+	g.Expect(trafficMap.Status.Published).To(gomega.BeTrue())
 	g.Expect(trafficMap.Status.ObservedTrafficMapGeneration).To(gomega.Equal(trafficMap.Generation))
 	g.Expect(trafficMap.Status.GatewayRef).NotTo(gomega.BeNil())
 

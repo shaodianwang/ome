@@ -268,7 +268,7 @@ func createPublishedTrafficMapForGC(
 		g.Expect(current.Status.SourceUID).To(gomega.Equal(isvc.UID))
 		g.Expect(current.Status.Publisher).NotTo(gomega.BeNil())
 		g.Expect(current.Status.Publisher.ClaimedTargets).To(gomega.Equal(publisher.claims))
-		g.Expect(current.Status.Programmed).To(gomega.BeTrue())
+		g.Expect(current.Status.Published).To(gomega.BeTrue())
 	}).WithTimeout(mediumTimeout).WithPolling(pollInterval).Should(gomega.Succeed())
 
 	return isvc, trafficMap, publisher, reconciler
@@ -319,7 +319,7 @@ func assertPublisherCleanupComplete(key types.NamespacedName) {
 		))
 		g.Expect(current.Status.Publisher).To(gomega.BeNil())
 		g.Expect(current.Status.GatewayRef).To(gomega.BeNil())
-		g.Expect(current.Status.Programmed).To(gomega.BeFalse())
+		g.Expect(current.Status.Published).To(gomega.BeFalse())
 		g.Expect(current.Status.ObservedTrafficMapGeneration).To(gomega.BeZero())
 	}).WithTimeout(mediumTimeout).WithPolling(pollInterval).Should(gomega.Succeed())
 }

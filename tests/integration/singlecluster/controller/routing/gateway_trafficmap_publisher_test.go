@@ -111,9 +111,9 @@ var _ = ginkgo.Describe("Gateway API TrafficMap publisher", func() {
 			fmt.Sprintf("v1:httproute:%s/%s", routeKey.Namespace, routeKey.Name),
 		}))
 		gomega.Expect(trafficMap.Status.Publisher.ObservedOptionsDigest).To(gomega.BeEmpty())
-		gomega.Expect(trafficMap.Status.Programmed).To(gomega.BeFalse())
+		gomega.Expect(trafficMap.Status.Published).To(gomega.BeFalse())
 		gomega.Expect(trafficMap.Status.GatewayRef).To(gomega.BeNil())
-		failed := apimeta.FindStatusCondition(trafficMap.Status.Conditions, v1beta1.TrafficMapProgrammed)
+		failed := apimeta.FindStatusCondition(trafficMap.Status.Conditions, v1beta1.TrafficMapPublished)
 		gomega.Expect(failed).NotTo(gomega.BeNil())
 		gomega.Expect(failed.Status).To(gomega.Equal(metav1.ConditionFalse))
 		gomega.Expect(failed.Reason).To(gomega.Equal("ClaimRejected"))
@@ -139,9 +139,9 @@ var _ = ginkgo.Describe("Gateway API TrafficMap publisher", func() {
 			fmt.Sprintf("v1:httproute:%s/%s", namespace, trafficMap.Status.GatewayRef.Name),
 		}))
 
-		programmed := apimeta.FindStatusCondition(trafficMap.Status.Conditions, v1beta1.TrafficMapProgrammed)
-		gomega.Expect(programmed).NotTo(gomega.BeNil())
-		gomega.Expect(programmed.Status).To(gomega.Equal(metav1.ConditionTrue))
+		published := apimeta.FindStatusCondition(trafficMap.Status.Conditions, v1beta1.TrafficMapPublished)
+		gomega.Expect(published).NotTo(gomega.BeNil())
+		gomega.Expect(published.Status).To(gomega.Equal(metav1.ConditionTrue))
 		assertTrafficMapStatusFieldOwners(trafficMap)
 
 		gomega.Expect(trafficMap.Status.GatewayRef.Namespace).To(gomega.Equal(routeKey.Namespace))
@@ -320,7 +320,7 @@ var _ = ginkgo.Describe("Gateway API TrafficMap publisher", func() {
 			))
 			g.Expect(current.Status.Publisher).To(gomega.BeNil())
 			g.Expect(current.Status.GatewayRef).To(gomega.BeNil())
-			g.Expect(current.Status.Programmed).To(gomega.BeFalse())
+			g.Expect(current.Status.Published).To(gomega.BeFalse())
 			g.Expect(current.Status.ObservedTrafficMapGeneration).To(gomega.BeZero())
 			g.Expect(apimeta.FindStatusCondition(
 				current.Status.Conditions, v1beta1.TrafficMapRoutable,
@@ -359,7 +359,7 @@ func reconcileGatewayTrafficMap(
 	reconciler *placementendpoint.TrafficMapPublisherReconciler,
 	key types.NamespacedName,
 ) *v1beta1.TrafficMap {
-	var programmed *v1beta1.TrafficMap
+	var published *v1beta1.TrafficMap
 	gomega.EventuallyWithOffset(1, func(g gomega.Gomega) {
 		_, err := reconciler.Reconcile(suiteCtx, ctrl.Request{NamespacedName: key})
 		g.Expect(err).NotTo(gomega.HaveOccurred())
@@ -368,14 +368,14 @@ func reconcileGatewayTrafficMap(
 		g.Expect(current.Finalizers).To(gomega.ContainElement(
 			placementendpoint.TrafficMapPublisherFinalizer,
 		))
-		g.Expect(current.Status.Programmed).To(gomega.BeTrue())
+		g.Expect(current.Status.Published).To(gomega.BeTrue())
 		g.Expect(current.Status.ObservedTrafficMapGeneration).To(gomega.Equal(current.Generation))
 		g.Expect(current.Status.Publisher).NotTo(gomega.BeNil())
 		g.Expect(current.Status.Publisher.ClaimedTargets).To(gomega.HaveLen(1))
 		g.Expect(current.Status.GatewayRef).NotTo(gomega.BeNil())
-		programmed = current
+		published = current
 	}).Should(gomega.Succeed())
-	return programmed
+	return published
 }
 
 func waitForTrafficMapEntries(
@@ -462,9 +462,7 @@ func assertTrafficMapStatusFieldOwners(trafficMap *v1beta1.TrafficMap) {
 	gomega.ExpectWithOffset(1, owners).To(gomega.HaveKey("ome-trafficmap-publisher"))
 	gomega.ExpectWithOffset(1, owners["ome-trafficmap-routing"]).To(gomega.ContainSubstring("Routable"))
 	gomega.ExpectWithOffset(1, owners["ome-trafficmap-routing"]).NotTo(gomega.ContainSubstring("Published"))
-	gomega.ExpectWithOffset(1, owners["ome-trafficmap-routing"]).NotTo(gomega.ContainSubstring("Programmed"))
 	gomega.ExpectWithOffset(1, owners["ome-trafficmap-publisher"]).To(gomega.ContainSubstring("Published"))
-	gomega.ExpectWithOffset(1, owners["ome-trafficmap-publisher"]).To(gomega.ContainSubstring("Programmed"))
 	gomega.ExpectWithOffset(1, owners["ome-trafficmap-publisher"]).NotTo(gomega.ContainSubstring("Routable"))
 }
 

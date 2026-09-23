@@ -862,7 +862,7 @@ func TestTrafficMapPublishChange(t *testing.T) {
 	t.Run("handoff entering passes", func(t *testing.T) {
 		old := base.DeepCopy()
 		nw := base.DeepCopy()
-		nw.Status.Programmed = true
+		nw.Status.Published = true
 		assert.True(t, trafficMapPublishChange.Update(trafficMapUpdateEvent(old, nw)))
 	})
 
@@ -888,7 +888,7 @@ func TestTrafficMapPublishChange(t *testing.T) {
 			PublisherName: "gatewayapi", ClaimedTargets: []string{"v1:httproute:prod/svc-global"},
 		}
 		nw := old.DeepCopy()
-		nw.Status.Programmed = true
+		nw.Status.Published = true
 		nw.Status.ObservedTrafficMapGeneration = 2
 
 		assert.False(t, trafficMapPublishChange.Update(trafficMapUpdateEvent(old, nw)))

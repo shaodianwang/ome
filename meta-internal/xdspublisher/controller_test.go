@@ -244,11 +244,11 @@ func TestFreshNonmatchingSourceWithdrawsThroughLifecycleWithoutExternalCalls(t *
 	require.NoError(t, kubeClient.Get(context.Background(), request.NamespacedName, current))
 	require.NotNil(t, current.Status.Publisher)
 	assert.Empty(t, current.Status.Publisher.ClaimedTargets)
-	assert.False(t, current.Status.Programmed)
-	programmed := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
-	require.NotNil(t, programmed)
-	assert.Equal(t, metav1.ConditionFalse, programmed.Status)
-	assert.Equal(t, "Withdrawn", programmed.Reason)
+	assert.False(t, current.Status.Published)
+	published := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapPublished)
+	require.NotNil(t, published)
+	assert.Equal(t, metav1.ConditionFalse, published.Status)
+	assert.Equal(t, "Withdrawn", published.Reason)
 }
 
 func TestNonmatchingSourceDrainsExistingClaimsThroughLifecycle(t *testing.T) {
@@ -265,8 +265,8 @@ func TestNonmatchingSourceDrainsExistingClaimsThroughLifecycle(t *testing.T) {
 	}
 	trafficMap.Finalizers = []string{placementendpoint.TrafficMapPublisherFinalizer}
 	trafficMap.Status = v1beta1.TrafficMapStatus{
-		SourceUID:  owner.UID,
-		Programmed: true,
+		SourceUID: owner.UID,
+		Published: true,
 		Publisher: &v1beta1.TrafficMapPublisherStatus{
 			PublisherName:  Name,
 			ClaimedTargets: []string{"old.example"},
@@ -307,11 +307,11 @@ func TestNonmatchingSourceDrainsExistingClaimsThroughLifecycle(t *testing.T) {
 	require.NotNil(t, current.Status.Publisher)
 	assert.Equal(t, []string{"old.example"}, current.Status.Publisher.ClaimedTargets,
 		"a drained claim remains owned until whole-map finalization")
-	assert.False(t, current.Status.Programmed)
-	programmed := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
-	require.NotNil(t, programmed)
-	assert.Equal(t, metav1.ConditionFalse, programmed.Status)
-	assert.Equal(t, "Withdrawn", programmed.Reason)
+	assert.False(t, current.Status.Published)
+	published := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapPublished)
+	require.NotNil(t, published)
+	assert.Equal(t, metav1.ConditionFalse, published.Status)
+	assert.Equal(t, "Withdrawn", published.Reason)
 }
 
 func TestPlanIsImmutableAndApplyPublishesZeroBeforePositive(t *testing.T) {

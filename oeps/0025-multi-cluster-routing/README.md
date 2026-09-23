@@ -257,8 +257,8 @@ closed for that ISVC before any external request; it never becomes an arbitrary
 option passed to a privileged client. The selected publisher name is deliberately
 absent from the ISVC API. If a previously programmed ISVC is updated with an
 invalid override, the publisher retains its last known-good applied state and
-reports `Published=False` (and mirrors the deprecated `Programmed=False`); it
-does not derive destructive cleanup from invalid input.
+reports `Published=False`; it does not derive destructive cleanup from invalid
+input.
 
 `spec.placement.capacityFactors` predates this separation but controls routing,
 not placement. `spec.routing.capacityFactors` is the primary field. During the
@@ -322,13 +322,11 @@ spec:
 status:                        # independently written by routing and publisher
   sourceUID: 4424bd9b-9986-4de0-b17b-b3cdbd920f34
   published: true
-  programmed: true
   gatewayRef: {group: gateway.networking.k8s.io, kind: HTTPRoute, name: llama-3-70b}
   observedTrafficMapGeneration: 5
   conditions:
     - {type: CapacityFallback, status: "False", reason: CapacityPollingDisabled}
     - {type: Published, status: "True", reason: Published}
-    - {type: Programmed, status: "True", reason: HTTPRouteReconciled} # deprecated compatibility mirror
 ```
 
 Two writers, one object:
@@ -338,9 +336,8 @@ Two writers, one object:
   `status.sourceUID` and the TrafficMap's `Routable` and `CapacityFallback`
   conditions.
 - The **publisher** patches the TrafficMap's `Published`, `gatewayRef`, and
-  observed-generation fields plus its publisher journal. It mirrors the
-  deprecated `Programmed` status during migration and does not replace sibling
-  status, `sourceUID`, or the routing controller's conditions.
+  observed-generation fields plus its publisher journal. It does not replace
+  sibling status, `sourceUID`, or the routing controller's conditions.
 
 *Anticipated objection — "a machine-written `spec` is unusual; spec is user
 intent."* True, and we considered a status-only shape (Alternatives). The
@@ -469,8 +466,7 @@ sharing transport is not bundling the features.
    the control-plane value and records why.
 5. **The shared publisher publishes to the data plane.** It reads `entries` rather
    than re-deriving from `status.placement`, receives the ISVC's resolved safe
-   options for that call, and writes `status.published` plus its deprecated
-   `status.programmed` compatibility mirror.
+   options for that call, and writes `status.published`.
 6. **Cutoff.** A home losing all ready replicas flips `healthy:false`/`weight:0`
    in the next reconcile. A home failing N consecutive probes does the same while
    another home still passes; a fleet-wide failure follows `allFailedPolicy`.
@@ -526,9 +522,9 @@ is what makes capacity-aware weights and a gateway-neutral contract possible.
     attributable to the policy that produced it without duplicating that policy
     into every entry.
 - `spec.observedISVCGeneration` (int64) for staleness detection.
-- `status.sourceUID` (the source ISVC UID), `status.published` (bool), the
-  deprecated `status.programmed` compatibility mirror, `status.gatewayRef`,
-  `status.observedTrafficMapGeneration` (int64), `status.publisher`, and
+- `status.sourceUID` (the source ISVC UID), `status.published` (bool),
+  `status.gatewayRef`, `status.observedTrafficMapGeneration` (int64),
+  `status.publisher`, and
   `status.conditions[]`. The abnormal-true `CapacityFallback` condition reports
   whether any home is using the plan because configured endpoint capacity is
   unavailable; per-entry `fallbackReason` carries the diagnosis.
@@ -552,8 +548,8 @@ atomically claims the complete canonical desired set before any external call,
 retains targets it has drained, and removes a claim only after idempotent
 unpublish succeeds. `observedOptionsDigest` identifies the effective safe
 behavior from the last successful programming pass; it may be absent while a
-first attempt has claims but has not completed. The normal `programmed` fields
-report successful realization separately from this cleanup authority.
+first attempt has claims but has not completed. The `Published` status reports
+successful realization separately from this cleanup authority.
 
 The status schema caps publisher names at 128 characters and the claim set at
 128 opaque identifiers of at most 512 characters. Before any external mutation,
@@ -638,9 +634,9 @@ unpublish does not require the source or its owner reference to remain readable.
   `AllHomesProbeFailed`. A PreserveTraffic fallback is `Routable=True` with
   reason `AllHomesProbeFailed`. `status.conditions` is a
   `listType=map` keyed on `type`, so routing's `Routable` and
-  `CapacityFallback` conditions coexist with the publisher's `Published` and
-  deprecated `Programmed` conditions under server-side apply — but they are two
-  writers on one subresource and each must patch only its own conditions.
+  `CapacityFallback` conditions coexist with the publisher's `Published`
+  condition under server-side apply — but they are two writers on one
+  subresource and each must patch only its own conditions.
 - **Capacity fallback is metric-visible without error-label cardinality.**
   `ome_trafficmap_capacity_fallback_homes{namespace,trafficmap}` is the number
   of current entries using the plan because endpoint capacity is unavailable.

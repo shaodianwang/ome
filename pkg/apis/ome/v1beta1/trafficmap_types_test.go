@@ -11,8 +11,7 @@ const testTrafficMapPublisherObservedOptionsDigest = "sha256:0123456789abcdef012
 
 func TestTrafficMapPublisherStatusJSONRoundTrip(t *testing.T) {
 	status := TrafficMapStatus{
-		Published:  true,
-		Programmed: true,
+		Published: true,
 		Publisher: &TrafficMapPublisherStatus{
 			PublisherName:         "example-publisher",
 			ClaimedTargets:        []string{"example-system/model-service"},
@@ -31,20 +30,8 @@ func TestTrafficMapPublisherStatusJSONRoundTrip(t *testing.T) {
 	if !reflect.DeepEqual(roundTripped.Publisher, status.Publisher) {
 		t.Fatalf("publisher status after round trip = %#v, want %#v", roundTripped.Publisher, status.Publisher)
 	}
-	if !roundTripped.Published || !roundTripped.Programmed {
-		t.Fatalf("publication status after round trip = published:%t programmed:%t, want both true",
-			roundTripped.Published, roundTripped.Programmed)
-	}
-}
-
-func TestTrafficMapPublisherStatusAcceptsLegacyProgrammedField(t *testing.T) {
-	var status TrafficMapStatus
-	if err := json.Unmarshal([]byte(`{"programmed":true}`), &status); err != nil {
-		t.Fatalf("json.Unmarshal() error = %v", err)
-	}
-	if !status.Programmed || status.Published {
-		t.Fatalf("legacy status = published:%t programmed:%t, want false/true",
-			status.Published, status.Programmed)
+	if !roundTripped.Published {
+		t.Fatal("published status after round trip = false, want true")
 	}
 }
 

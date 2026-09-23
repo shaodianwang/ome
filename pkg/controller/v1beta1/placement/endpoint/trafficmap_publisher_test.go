@@ -167,7 +167,7 @@ func TestTrafficMapPublisherRequiresMatchingSourceUIDBeforePlanning(t *testing.T
 			current := getPublisherTrafficMap(t, kubeClient, trafficMap)
 			assert.Equal(t, tc.sourceUID, current.Status.SourceUID,
 				"publisher status ownership must not create or overwrite routing provenance")
-			condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
+			condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapPublished)
 			require.NotNil(t, condition)
 			assert.Equal(t, trafficMapPublisherReasonInvalidOwner, condition.Reason)
 		})
@@ -205,7 +205,7 @@ func TestTrafficMapPublisherChecksSourceUIDThroughAPIReader(t *testing.T) {
 	assert.Empty(t, publisher.events)
 	current := getPublisherTrafficMap(t, baseClient, trafficMap)
 	assert.Empty(t, current.Status.SourceUID)
-	condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
+	condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapPublished)
 	require.NotNil(t, condition)
 	assert.Equal(t, trafficMapPublisherReasonInvalidOwner, condition.Reason)
 }
@@ -240,7 +240,7 @@ func TestTrafficMapPublisherRetriesInitialOwnerReadFailure(t *testing.T) {
 	assert.Zero(t, planCalls)
 	assert.Empty(t, publisher.events)
 	current := getPublisherTrafficMap(t, baseClient, trafficMap)
-	condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
+	condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapPublished)
 	require.NotNil(t, condition)
 	assert.Equal(t, trafficMapPublisherReasonInvalidOwner, condition.Reason)
 }
@@ -355,7 +355,7 @@ func TestTrafficMapPublisherRechecksSourceAndOwnerAtPreEffectFence(t *testing.T)
 				assert.Empty(t, publisher.events, "the last live provenance check must precede external effects")
 				current := getPublisherTrafficMap(t, baseClient, trafficMap)
 				assert.Equal(t, owner.UID, current.Status.SourceUID)
-				condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
+				condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapPublished)
 				require.NotNil(t, condition)
 				assert.Equal(t, trafficMapPublisherReasonInvalidOwner, condition.Reason)
 			})
@@ -401,7 +401,7 @@ func TestTrafficMapPublisherRetriesOwnerReadFailureAtPreEffectFence(t *testing.T
 			assert.Equal(t, 1, planCalls)
 			assert.Empty(t, publisher.events)
 			current := getPublisherTrafficMap(t, baseClient, trafficMap)
-			condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
+			condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapPublished)
 			require.NotNil(t, condition)
 			assert.Equal(t, trafficMapPublisherReasonInvalidOwner, condition.Reason)
 		})
@@ -438,7 +438,7 @@ func TestTrafficMapPublisherWaitsForLegacyEndpointCleanup(t *testing.T) {
 	assert.Empty(t, publisher.events)
 	current := getPublisherTrafficMap(t, kubeClient, trafficMap)
 	assert.NotContains(t, current.Finalizers, TrafficMapPublisherFinalizer)
-	condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
+	condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapPublished)
 	require.NotNil(t, condition)
 	assert.Equal(t, trafficMapPublisherReasonLegacyActive, condition.Reason)
 
@@ -473,7 +473,7 @@ func TestTrafficMapPublisherForeignJournalDoesNotBypassLegacyCleanup(t *testing.
 	require.NoError(t, err)
 	assert.Empty(t, publisher.events)
 	current := getPublisherTrafficMap(t, kubeClient, trafficMap)
-	condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
+	condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapPublished)
 	require.NotNil(t, condition)
 	assert.Equal(t, trafficMapPublisherReasonLegacyActive, condition.Reason)
 }
@@ -516,7 +516,7 @@ func TestTrafficMapPublisherRetriesLegacyStateReadFailure(t *testing.T) {
 	require.ErrorContains(t, err, "injected InferenceService list failure")
 	assert.Empty(t, publisher.events)
 	current := getPublisherTrafficMap(t, baseClient, trafficMap)
-	condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
+	condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapPublished)
 	require.NotNil(t, condition)
 	assert.Equal(t, trafficMapPublisherReasonLegacyActive, condition.Reason)
 }
@@ -592,14 +592,10 @@ func TestTrafficMapPublisherPreclaimsBeforeDrainAndApply(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, wantDigest, current.Status.Publisher.ObservedOptionsDigest)
 	assert.True(t, current.Status.Published)
-	assert.True(t, current.Status.Programmed)
 	assert.Equal(t, trafficMap.Generation, current.Status.ObservedTrafficMapGeneration)
 	require.NotNil(t, current.Status.GatewayRef)
 	assert.Equal(t, "GlobalRoute", current.Status.GatewayRef.Kind)
 	assert.Equal(t, "model", current.Status.GatewayRef.Name)
-	programmed := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
-	require.NotNil(t, programmed)
-	assert.Equal(t, metav1.ConditionTrue, programmed.Status)
 	published := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapPublished)
 	require.NotNil(t, published)
 	assert.Equal(t, metav1.ConditionTrue, published.Status)
@@ -654,7 +650,7 @@ func TestTrafficMapPublisherPreflightRunsAfterPreclaimBeforeEffects(t *testing.T
 				"a failed preflight must precede and prevent Drain and Apply")
 
 			current := getPublisherTrafficMap(t, kubeClient, trafficMap)
-			condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
+			condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapPublished)
 			require.NotNil(t, condition)
 			assert.Equal(t, metav1.ConditionFalse, condition.Status)
 			assert.Equal(t, trafficMapPublisherReasonClaimRejected, condition.Reason)
@@ -665,7 +661,7 @@ func TestTrafficMapPublisherPreflightRunsAfterPreclaimBeforeEffects(t *testing.T
 func TestTrafficMapPublisherWithdrawnResultRecordsConvergence(t *testing.T) {
 	owner, trafficMap := publisherTestObjects()
 	trafficMap.Finalizers = []string{TrafficMapPublisherFinalizer}
-	trafficMap.Status.Programmed = true
+	trafficMap.Status.Published = true
 	trafficMap.Status.ObservedTrafficMapGeneration = trafficMap.Generation - 1
 	trafficMap.Status.GatewayRef = &v1beta1.TrafficMapGatewayRef{
 		Group: "networking.example.com", Kind: "GlobalRoute", Namespace: "routes", Name: "old",
@@ -690,18 +686,18 @@ func TestTrafficMapPublisherWithdrawnResultRecordsConvergence(t *testing.T) {
 	require.NoError(t, err)
 
 	current := getPublisherTrafficMap(t, kubeClient, trafficMap)
-	assert.False(t, current.Status.Programmed)
+	assert.False(t, current.Status.Published)
 	assert.Nil(t, current.Status.GatewayRef)
 	assert.Equal(t, trafficMap.Generation, current.Status.ObservedTrafficMapGeneration)
 	require.NotNil(t, current.Status.Publisher)
 	assert.Equal(t, []string{"target"}, current.Status.Publisher.ClaimedTargets,
 		"successful withdrawal retains the durable claim until finalization")
 	assert.NotEmpty(t, current.Status.Publisher.ObservedOptionsDigest)
-	programmed := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
-	require.NotNil(t, programmed)
-	assert.Equal(t, metav1.ConditionFalse, programmed.Status)
-	assert.Equal(t, trafficMapPublisherReasonWithdrawn, programmed.Reason)
-	assert.Equal(t, trafficMap.Generation, programmed.ObservedGeneration)
+	published := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapPublished)
+	require.NotNil(t, published)
+	assert.Equal(t, metav1.ConditionFalse, published.Status)
+	assert.Equal(t, trafficMapPublisherReasonWithdrawn, published.Reason)
+	assert.Equal(t, trafficMap.Generation, published.ObservedGeneration)
 }
 
 func TestTrafficMapPublisherRejectsUnsafeClaimsBeforeEffects(t *testing.T) {
@@ -767,7 +763,7 @@ func TestTrafficMapPublisherRejectsUnsafeClaimsBeforeEffects(t *testing.T) {
 			} else {
 				assert.Equal(t, tt.journal, current.Status.Publisher)
 			}
-			condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
+			condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapPublished)
 			require.NotNil(t, condition)
 			assert.Equal(t, metav1.ConditionFalse, condition.Status)
 			assert.Equal(t, tt.wantReason, condition.Reason)
@@ -822,10 +818,10 @@ func TestTrafficMapPublisherClaimArbitrationUsesUncachedState(t *testing.T) {
 
 	rejected := getPublisherTrafficMap(t, liveClient, trafficMapB)
 	assert.Nil(t, rejected.Status.Publisher, "a rejected map must not acquire the live claim")
-	programmed := apimeta.FindStatusCondition(rejected.Status.Conditions, v1beta1.TrafficMapProgrammed)
-	require.NotNil(t, programmed)
-	assert.Equal(t, metav1.ConditionFalse, programmed.Status)
-	assert.Equal(t, trafficMapPublisherReasonClaimRejected, programmed.Reason)
+	published := apimeta.FindStatusCondition(rejected.Status.Conditions, v1beta1.TrafficMapPublished)
+	require.NotNil(t, published)
+	assert.Equal(t, metav1.ConditionFalse, published.Status)
+	assert.Equal(t, trafficMapPublisherReasonClaimRejected, published.Reason)
 	assert.Equal(t, 2, cacheClient.trafficMapGets,
 		"both reconcile inputs came from the frozen informer view")
 }
@@ -846,7 +842,7 @@ func TestTrafficMapPublisherRejectsInvalidOptionsWithoutEffects(t *testing.T) {
 	current := getPublisherTrafficMap(t, kubeClient, trafficMap)
 	assert.NotContains(t, current.Finalizers, TrafficMapPublisherFinalizer)
 	assert.Nil(t, current.Status.Publisher)
-	condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
+	condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapPublished)
 	require.NotNil(t, condition)
 	assert.Equal(t, trafficMapPublisherReasonInvalidOptions, condition.Reason)
 	assert.NotContains(t, condition.Message, "protected option")
@@ -901,7 +897,7 @@ func TestTrafficMapPublisherValidatesOwnerIdentityBeforeOptionsOrPlan(t *testing
 			assert.Zero(t, planCalls)
 			assert.Empty(t, publisher.events)
 			current := getPublisherTrafficMap(t, kubeClient, trafficMap)
-			condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
+			condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapPublished)
 			require.NotNil(t, condition)
 			assert.Equal(t, trafficMapPublisherReasonInvalidOwner, condition.Reason)
 		})
@@ -927,7 +923,7 @@ func TestTrafficMapPublisherRepairsFinalizerBeforeRejectingExistingClaims(t *tes
 	_, err = reconcileTrafficMapPublisher(t, reconciler, current)
 	require.NoError(t, err)
 	current = getPublisherTrafficMap(t, kubeClient, trafficMap)
-	condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
+	condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapPublished)
 	require.NotNil(t, condition)
 	assert.Equal(t, trafficMapPublisherReasonInvalidOwner, condition.Reason)
 	assert.Equal(t, []string{"target"}, current.Status.Publisher.ClaimedTargets)
@@ -939,7 +935,7 @@ func TestStatefulTrafficMapPublisherRepairsFinalizerForZeroClaimState(t *testing
 	trafficMap.Status.Publisher = &v1beta1.TrafficMapPublisherStatus{
 		PublisherName: "example-publisher",
 	}
-	trafficMap.Status.Programmed = true
+	trafficMap.Status.Published = true
 	publisher := &recordingTrafficMapPublisher{name: "example-publisher", stateful: true}
 	reconciler, kubeClient := newTrafficMapPublisherReconciler(t, publisher, owner, trafficMap)
 
@@ -962,7 +958,7 @@ func TestTrafficMapStatelessPublisherCannotReturnClaims(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, publisher.events)
 	current := getPublisherTrafficMap(t, kubeClient, trafficMap)
-	condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
+	condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapPublished)
 	require.NotNil(t, condition)
 	assert.Equal(t, trafficMapPublisherReasonInvalidPlan, condition.Reason)
 	assert.Equal(t, trafficMapPublisherFailureMessage(trafficMapPublisherReasonInvalidPlan), condition.Message)
@@ -978,7 +974,7 @@ func TestTrafficMapStatelessPublisherHonorsGlobalSwitchFence(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, publisher.events)
 	current := getPublisherTrafficMap(t, kubeClient, trafficMap)
-	condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
+	condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapPublished)
 	require.NotNil(t, condition)
 	assert.Equal(t, trafficMapPublisherReasonClaimRejected, condition.Reason)
 }
@@ -1063,15 +1059,15 @@ func TestTrafficMapPublisherApplyFailureKeepsPreclaimForRetry(t *testing.T) {
 	require.NotNil(t, current.Status.Publisher)
 	assert.Equal(t, []string{"target"}, current.Status.Publisher.ClaimedTargets)
 	assert.Empty(t, current.Status.Publisher.ObservedOptionsDigest)
-	assert.False(t, current.Status.Programmed)
-	condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
+	assert.False(t, current.Status.Published)
+	condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapPublished)
 	require.NotNil(t, condition)
 	assert.Equal(t, trafficMapPublisherReasonApplyFailed, condition.Reason)
 
 	_, err = reconcileTrafficMapPublisher(t, reconciler, current)
 	require.NoError(t, err)
 	current = getPublisherTrafficMap(t, kubeClient, trafficMap)
-	assert.True(t, current.Status.Programmed)
+	assert.True(t, current.Status.Published)
 	assert.NotEmpty(t, current.Status.Publisher.ObservedOptionsDigest)
 	assert.Equal(t, 2, attempts)
 }
@@ -1102,7 +1098,7 @@ func TestTrafficMapPublisherDrainFailureKeepsClaimsForRetry(t *testing.T) {
 	require.NotNil(t, current.Status.Publisher)
 	assert.Equal(t, []string{"current", "retired"}, current.Status.Publisher.ClaimedTargets)
 	assert.Equal(t, []string{"drain:retired"}, publisher.events)
-	condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
+	condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapPublished)
 	require.NotNil(t, condition)
 	assert.Equal(t, trafficMapPublisherReasonDrainFailed, condition.Reason)
 
@@ -1110,7 +1106,7 @@ func TestTrafficMapPublisherDrainFailureKeepsClaimsForRetry(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"drain:retired", "drain:retired", "apply"}, publisher.events)
 	current = getPublisherTrafficMap(t, kubeClient, trafficMap)
-	assert.True(t, current.Status.Programmed)
+	assert.True(t, current.Status.Published)
 }
 
 func TestTrafficMapPublisherDoesNotRecreateLostJournalAfterApply(t *testing.T) {
@@ -1134,7 +1130,7 @@ func TestTrafficMapPublisherDoesNotRecreateLostJournalAfterApply(t *testing.T) {
 	assert.True(t, result.Requeue)
 	current := getPublisherTrafficMap(t, kubeClient, trafficMap)
 	assert.Nil(t, current.Status.Publisher)
-	assert.False(t, current.Status.Programmed)
+	assert.False(t, current.Status.Published)
 	assert.Nil(t, current.Status.GatewayRef)
 }
 
@@ -1162,13 +1158,13 @@ func TestTrafficMapPublisherRetriesAfterSuccessStatusWriteFails(t *testing.T) {
 	current := getPublisherTrafficMap(t, baseClient, trafficMap)
 	require.NotNil(t, current.Status.Publisher)
 	assert.Equal(t, []string{"target"}, current.Status.Publisher.ClaimedTargets)
-	assert.False(t, current.Status.Programmed)
+	assert.False(t, current.Status.Published)
 
 	_, err = reconcileTrafficMapPublisher(t, reconciler, current)
 	require.NoError(t, err)
 	assert.Equal(t, 2, applyCalls, "retry must idempotently reapply after a lost success-status write")
 	current = getPublisherTrafficMap(t, baseClient, trafficMap)
-	assert.True(t, current.Status.Programmed)
+	assert.True(t, current.Status.Published)
 }
 
 func TestTrafficMapPublisherFinalizesWhenInactiveWithoutOwner(t *testing.T) {
@@ -1265,7 +1261,7 @@ func TestTrafficMapPublisherBlocksCleanupForMismatchedJournal(t *testing.T) {
 	assert.Contains(t, current.Finalizers, TrafficMapPublisherFinalizer)
 	require.NotNil(t, current.Status.Publisher)
 	assert.Equal(t, "old-publisher", current.Status.Publisher.PublisherName)
-	condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
+	condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapPublished)
 	require.NotNil(t, condition)
 	assert.Equal(t, trafficMapPublisherReasonPublisherChanged, condition.Reason)
 }
@@ -1348,7 +1344,6 @@ func TestClearPublisherJournalClearsPublisherOwnedStatus(t *testing.T) {
 	_, trafficMap := publisherTestObjects()
 	desiredStatus := v1beta1.TrafficMapStatus{
 		Published:                    true,
-		Programmed:                   true,
 		ObservedTrafficMapGeneration: trafficMap.Generation,
 		GatewayRef: &v1beta1.TrafficMapGatewayRef{
 			Group: "networking.example.com", Kind: "GlobalRoute", Name: "model",
@@ -1358,8 +1353,6 @@ func TestClearPublisherJournalClearsPublisherOwnedStatus(t *testing.T) {
 		},
 		Conditions: []metav1.Condition{{
 			Type: v1beta1.TrafficMapPublished, Status: metav1.ConditionTrue, Reason: "Published",
-		}, {
-			Type: v1beta1.TrafficMapProgrammed, Status: metav1.ConditionTrue, Reason: "Programmed",
 		}},
 	}
 	publisher := &recordingTrafficMapPublisher{name: "example-publisher", stateful: true}
@@ -1376,14 +1369,9 @@ func TestClearPublisherJournalClearsPublisherOwnedStatus(t *testing.T) {
 	))
 	current := getPublisherTrafficMap(t, kubeClient, trafficMap)
 	assert.False(t, current.Status.Published)
-	assert.False(t, current.Status.Programmed)
 	assert.Zero(t, current.Status.ObservedTrafficMapGeneration)
 	assert.Nil(t, current.Status.GatewayRef)
 	assert.Nil(t, current.Status.Publisher)
-	programmed := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
-	require.NotNil(t, programmed)
-	assert.Equal(t, metav1.ConditionFalse, programmed.Status)
-	assert.Equal(t, trafficMapPublisherReasonUnpublished, programmed.Reason)
 	published := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapPublished)
 	require.NotNil(t, published)
 	assert.Equal(t, metav1.ConditionFalse, published.Status)
@@ -1414,16 +1402,15 @@ func TestTrafficMapPublisherStatusApplyRetriesOnConflict(t *testing.T) {
 	require.NoError(t, err)
 	current := getPublisherTrafficMap(t, baseClient, trafficMap)
 	assert.True(t, wrapped.conflicted)
-	programmed := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
-	require.NotNil(t, programmed)
-	assert.Equal(t, metav1.ConditionTrue, programmed.Status)
+	published := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapPublished)
+	require.NotNil(t, published)
+	assert.Equal(t, metav1.ConditionTrue, published.Status)
 }
 
 func TestTrafficMapPublisherStatusApplyIsFieldIsolated(t *testing.T) {
 	_, trafficMap := publisherTestObjects()
 	trafficMap.ResourceVersion = "17"
 	trafficMap.Status.Published = true
-	trafficMap.Status.Programmed = true
 	trafficMap.Status.ObservedTrafficMapGeneration = trafficMap.Generation
 	trafficMap.Status.Publisher = &v1beta1.TrafficMapPublisherStatus{
 		PublisherName: "example-publisher", ClaimedTargets: []string{"target"},
@@ -1432,7 +1419,6 @@ func TestTrafficMapPublisherStatusApplyIsFieldIsolated(t *testing.T) {
 	trafficMap.Status.Conditions = []metav1.Condition{
 		{Type: v1beta1.TrafficMapRoutable, Status: metav1.ConditionTrue, Reason: "Routable"},
 		{Type: v1beta1.TrafficMapPublished, Status: metav1.ConditionTrue, Reason: "Published"},
-		{Type: v1beta1.TrafficMapProgrammed, Status: metav1.ConditionTrue, Reason: "Programmed"},
 	}
 
 	content := publisherApplyContent(t, trafficMapPublisherStatusApply(trafficMap))
@@ -1442,14 +1428,12 @@ func TestTrafficMapPublisherStatusApplyIsFieldIsolated(t *testing.T) {
 	_, found := status["sourceUID"]
 	assert.False(t, found, "publisher SSA must not own routing source provenance")
 	conditions := status["conditions"].([]any)
-	require.Len(t, conditions, 2)
+	require.Len(t, conditions, 1)
 	assert.Equal(t, v1beta1.TrafficMapPublished, conditions[0].(map[string]any)["type"])
-	assert.Equal(t, v1beta1.TrafficMapProgrammed, conditions[1].(map[string]any)["type"])
 
 	trafficMap.Status.Publisher = nil
 	trafficMap.Status.GatewayRef = nil
 	trafficMap.Status.Published = false
-	trafficMap.Status.Programmed = false
 	trafficMap.Status.ObservedTrafficMapGeneration = 0
 	content = publisherApplyContent(t, trafficMapPublisherStatusApply(trafficMap))
 	status = content["status"].(map[string]any)
@@ -1458,7 +1442,6 @@ func TestTrafficMapPublisherStatusApplyIsFieldIsolated(t *testing.T) {
 	_, found = status["gatewayRef"]
 	assert.False(t, found, "owned pointer fields are removed by SSA omission")
 	assert.Equal(t, false, status["published"])
-	assert.Equal(t, false, status["programmed"])
 	assert.Equal(t, int64(0), status["observedTrafficMapGeneration"])
 }
 

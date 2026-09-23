@@ -188,8 +188,6 @@ spec:
               observedTrafficMapGeneration:
                 format: int64
                 type: integer
-              programmed:
-                type: boolean
               published:
                 type: boolean
               publisher:

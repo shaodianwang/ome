@@ -293,7 +293,7 @@ func (r *Reconciler) apply(ctx context.Context, isvc *v1beta1.InferenceService, 
 //
 // It re-reads and retries on conflict rather than patching blind. The routing
 // conditions are list-map entries with their own server-side-apply field
-// manager, so they coexist with the publisher's independently owned Programmed
+// manager, so they coexist with the publisher's independently owned Published
 // condition.
 func (r *Reconciler) setRoutingStatus(ctx context.Context, isvc *v1beta1.InferenceService,
 	status metav1.ConditionStatus, reason string, capacityEnabled bool) error {

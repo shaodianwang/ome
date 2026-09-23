@@ -335,7 +335,7 @@ func TestGatewayAPITrafficMapHostnameChangeCollisionPreservesPublishedRoute(t *t
 	trafficMap := gatewayTrafficMapWithJournal(owner, routeKey,
 		gatewayTrafficMapEntry("cluster-a", "new-backend.example", 99),
 	)
-	trafficMap.Status.Programmed = true
+	trafficMap.Status.Published = true
 	trafficMap.Status.ObservedTrafficMapGeneration = trafficMap.Generation
 	oldRoute := renderer.publisher.buildHTTPRoute(owner, Target{
 		GlobalHost:           oldHostname,
@@ -363,7 +363,7 @@ func TestGatewayAPITrafficMapHostnameChangeCollisionPreservesPublishedRoute(t *t
 	require.NoError(t, err)
 
 	current := getPublisherTrafficMap(t, kubeClient, trafficMap)
-	condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
+	condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapPublished)
 	require.NotNil(t, condition)
 	assert.Equal(t, metav1.ConditionFalse, condition.Status)
 	assert.Equal(t, trafficMapPublisherReasonClaimRejected, condition.Reason)
@@ -439,7 +439,7 @@ func TestGatewayAPITrafficMapLegacyDuplicateRoutesBothReportCollision(t *testing
 		_, err := reconcileTrafficMapPublisher(t, reconciler, trafficMap)
 		require.NoError(t, err)
 		current := getPublisherTrafficMap(t, kubeClient, trafficMap)
-		condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapProgrammed)
+		condition := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapPublished)
 		require.NotNil(t, condition)
 		assert.Equal(t, metav1.ConditionFalse, condition.Status)
 		assert.Equal(t, trafficMapPublisherReasonClaimRejected, condition.Reason)
