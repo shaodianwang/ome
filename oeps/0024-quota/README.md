@@ -220,10 +220,13 @@ Five concrete failure modes, each anchored to current code:
   to one cluster; becomes that cluster's `ClusterQueue` `nominalQuota` for the pair.
 - **Matched cluster** — a registered `WorkloadCluster` a leaf may run on. It is
   **derived, never selected**: under `Explicit` the matched set is exactly the
-  clusters named in `perCluster[]`; under `Proportional` it is the clusters with
-  non-zero capacity for the budgeted `(resource, flavor)` pair. Only matched
-  clusters receive a projection and only they are apportioned a share, so an
-  unmatched cluster is not "zero" — it is absent. There is deliberately no
+  clusters named in `perCluster[]` with a non-zero share; under `Proportional`
+  it is the clusters with the budgeted `(resource, flavor)` pair **installed** —
+  a non-zero high-water mark — whether or not any of it is schedulable right now.
+  Only matched clusters receive a projection, so an unmatched cluster is not
+  "zero" — it is absent. A matched cluster can still be apportioned zero, when all
+  its chips are parked or the split rounds its share down; its projection then
+  carries `nominal: 0` and admits nothing new. There is deliberately no
   cluster-selector field; see *Why the matched set is derived*.
 - **Management plane** — the OME manager running `--multicluster-role=control-plane`
   *and* quota-management mode. It holds the authored tree and the `WorkloadCluster`
@@ -505,7 +508,10 @@ The management plane, for each leaf node and `(resource, flavor)` pair:
      **schedulable** capacity of that pair (chips on Ready, uncordoned nodes),
      read from that cluster's derived root on every pass (see *Derived
      capacity*). The high-water mark is not the basis: parked chips cannot run
-     work, so they earn no share. While any registered cluster cannot be read,
+     work, so they earn no share. It decides the matched set instead, so a
+     cluster whose chips are all parked keeps its copies at `nominal: 0` rather
+     than having them swept — sweeping would delete the tenant's queue and strand
+     its pending and admitted work there. While any registered cluster cannot be read,
      every `Proportional` leaf is held at its last split — its member copies are
      neither rewritten nor swept (Open Question #2).
 2. Server-side-applies **one `AcceleratorQuota` per matched cluster** — the leaf
@@ -961,9 +967,9 @@ already implied, and a second independent source could disagree with it.
 - Under **`Explicit`**, `perCluster[]` names the clusters *and* their shares. A
   selector would be pure duplication, and the two could contradict each other.
 - Under **`Proportional`**, shares split in proportion to each cluster's
-  allocatable capacity for the budgeted `(resource, flavor)` pair. A cluster
-  without that flavor has zero capacity for it and therefore takes a zero share —
-  the arithmetic excludes incapable clusters without being told to.
+  schedulable capacity for the budgeted `(resource, flavor)` pair. A cluster
+  without that flavor installed reports no capacity for it and is not matched —
+  the member's own reading excludes incapable clusters without being told to.
 
 Deriving is also *safer* than selecting. A selector saying `region=eu` on a leaf
 budgeting `tpu7x` can match a cluster with no TPUs at all. That cluster is then

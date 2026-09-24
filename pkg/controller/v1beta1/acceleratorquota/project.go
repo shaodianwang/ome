@@ -642,6 +642,7 @@ func (r *Reconciler) fleetCapacity(ctx context.Context, clusters []string,
 				ResourceName:   c.ResourceName,
 				ResourceFlavor: c.ResourceFlavor,
 				Allocatable:    c.Allocatable.DeepCopy(),
+				HighWaterMark:  c.HighWaterMark.DeepCopy(),
 				ObservedAt:     c.ObservedAt.DeepCopy(),
 			})
 		}

@@ -74,6 +74,11 @@ func member(t *testing.T, objs ...client.Object) workloadcluster.SelectivelyCach
 // memberRoot is the root a member's own controller creates, carrying the
 // capacity it derived from its own hardware.
 func memberRoot(chips string) *v1beta1.AcceleratorQuota {
+	return parkedRoot(chips, chips)
+}
+
+// parkedRoot reports installed chips of which only allocatable are schedulable.
+func parkedRoot(allocatable, installed string) *v1beta1.AcceleratorQuota {
 	return &v1beta1.AcceleratorQuota{
 		ObjectMeta: metav1.ObjectMeta{Name: rootName},
 		Spec:       v1beta1.AcceleratorQuotaSpec{Role: v1beta1.AcceleratorQuotaRoleCohort},
@@ -81,7 +86,8 @@ func memberRoot(chips string) *v1beta1.AcceleratorQuota {
 			Capacity: []v1beta1.AcceleratorCapacityStatus{{
 				ResourceName:   "google.com/tpu",
 				ResourceFlavor: "tpu7x",
-				Allocatable:    resource.MustParse(chips),
+				Allocatable:    resource.MustParse(allocatable),
+				HighWaterMark:  resource.MustParse(installed),
 			}},
 		},
 	}
@@ -886,9 +892,7 @@ func TestProjectKeepsProjectedCopiesWhenAnExplicitSplitStopsAddingUp(t *testing.
 // cordoned or NotReady nodes still count toward the high-water mark, but no
 // workload can land on them, so they earn no share.
 func TestProjectSplitsOnSchedulableCapacity(t *testing.T) {
-	drained := memberRoot("1")
-	drained.Status.Capacity[0].HighWaterMark = resource.MustParse("3")
-	a := member(t, drained)
+	a := member(t, parkedRoot("1", "3"))
 	b := member(t, memberRoot("1"))
 	fleet := &fakeFleet{members: map[string]workloadcluster.SelectivelyCachingClient{
 		"member-a": a,
@@ -908,6 +912,87 @@ func TestProjectSplitsOnSchedulableCapacity(t *testing.T) {
 		if got := projectedOn(t, c)["team"]; got != "60" {
 			t.Errorf("%s team share = %q, want 60", name, got)
 		}
+	}
+}
+
+// A member whose nodes are all cordoned takes a share of zero, and its copies
+// stay at that rather than being swept: the queue still holds the tenant's
+// admitted and pending work, and deleting it would strand both until the nodes
+// return.
+func TestProjectKeepsAParkedMembersCopiesAtZero(t *testing.T) {
+	a := member(t, memberRoot("1"))
+	b := member(t, memberRoot("1"))
+	fleet := &fakeFleet{members: map[string]workloadcluster.SelectivelyCachingClient{
+		"member-a": a,
+		"member-b": b,
+	}}
+	r, _ := projectingReconciler(t, fleet,
+		registered("member-a"),
+		registered("member-b"),
+		cohort(rootName, "", budget("128")),
+		cohort("group", rootName),
+		leaf("team", "group", budget("120")),
+	)
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{}); err != nil {
+		t.Fatalf("Reconcile() = %v", err)
+	}
+
+	setRoot := func(root *v1beta1.AcceleratorQuota) {
+		t.Helper()
+		var live v1beta1.AcceleratorQuota
+		if err := a.Get(context.Background(), types.NamespacedName{Name: rootName}, &live); err != nil {
+			t.Fatalf("get member-a root: %v", err)
+		}
+		live.Status = root.Status
+		if err := a.Status().Update(context.Background(), &live); err != nil {
+			t.Fatalf("update member-a root: %v", err)
+		}
+		if _, err := r.Reconcile(context.Background(), ctrl.Request{}); err != nil {
+			t.Fatalf("Reconcile() = %v", err)
+		}
+	}
+
+	setRoot(parkedRoot("0", "1"))
+	if diff := cmp.Diff(map[string]string{"group": "", "team": "0"}, projectedOn(t, a)); diff != "" {
+		t.Errorf("parked member-a copies (-want +got):\n%s", diff)
+	}
+	if got := projectedOn(t, b)["team"]; got != "120" {
+		t.Errorf("member-b team share = %q, want 120", got)
+	}
+
+	setRoot(memberRoot("1"))
+	for name, c := range map[string]workloadcluster.SelectivelyCachingClient{"member-a": a, "member-b": b} {
+		if got := projectedOn(t, c)["team"]; got != "60" {
+			t.Errorf("after recovery, %s team share = %q, want 60", name, got)
+		}
+	}
+}
+
+// A member with none of the flavor installed is not a home for it, so it gets
+// no queue that could only ever admit nothing.
+func TestProjectLeavesOutAMemberWithoutTheFlavor(t *testing.T) {
+	a := member(t, memberRoot("1"))
+	bare := memberRoot("1")
+	bare.Status.Capacity = nil
+	b := member(t, bare)
+	fleet := &fakeFleet{members: map[string]workloadcluster.SelectivelyCachingClient{
+		"member-a": a,
+		"member-b": b,
+	}}
+	r, _ := projectingReconciler(t, fleet,
+		registered("member-a"),
+		registered("member-b"),
+		cohort(rootName, "", budget("128")),
+		leaf("team", rootName, budget("120")),
+	)
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{}); err != nil {
+		t.Fatalf("Reconcile() = %v", err)
+	}
+	if got := projectedOn(t, a)["team"]; got != "120" {
+		t.Errorf("member-a team share = %q, want 120", got)
+	}
+	if got := projectedOn(t, b); len(got) != 0 {
+		t.Errorf("member-b carries %v, want nothing", got)
 	}
 }
 
