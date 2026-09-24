@@ -341,22 +341,41 @@ func TestProjectResumesWhenTheFleetIsWholeAgain(t *testing.T) {
 	b := member(t, memberRoot("1"))
 	fleet := &fakeFleet{members: map[string]workloadcluster.SelectivelyCachingClient{"member-a": a}}
 
-	r, _ := projectingReconciler(t, fleet,
+	r, c := projectingReconciler(t, fleet,
 		registered("member-a"),
 		registered("member-b"),
 		cohort(rootName, "", budget("128")),
 		leaf("team", rootName, budget("120")),
 	)
+	rootMessages := func() map[string]string {
+		t.Helper()
+		var root v1beta1.AcceleratorQuota
+		if err := c.Get(context.Background(), client.ObjectKey{Name: rootName}, &root); err != nil {
+			t.Fatalf("get root: %v", err)
+		}
+		messages := map[string]string{}
+		for _, cluster := range root.Status.Clusters {
+			messages[cluster.Cluster] = cluster.Message
+		}
+		return messages
+	}
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{}); err != nil {
 		t.Fatalf("first Reconcile() = %v", err)
 	}
 	if len(projectedOn(t, a)) != 0 {
 		t.Fatal("the hold did not take")
 	}
+	held := "projections held: [member-b] unreachable, and re-splitting without them would over-grant the fleet"
+	if diff := cmp.Diff(map[string]string{"member-a": held, "member-b": held}, rootMessages()); diff != "" {
+		t.Errorf("root did not report the hold (-want +got):\n%s", diff)
+	}
 
 	fleet.members["member-b"] = b
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{}); err != nil {
 		t.Fatalf("second Reconcile() = %v", err)
+	}
+	if diff := cmp.Diff(map[string]string{"member-a": "", "member-b": ""}, rootMessages()); diff != "" {
+		t.Errorf("root retained a stale hold after recovery (-want +got):\n%s", diff)
 	}
 
 	if diff := cmp.Diff(map[string]string{"team": "90"}, projectedOn(t, a)); diff != "" {

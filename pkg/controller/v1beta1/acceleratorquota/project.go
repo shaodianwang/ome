@@ -180,6 +180,11 @@ func (r *Reconciler) project(ctx context.Context, built *tree.Tree,
 		}
 		return view, nil
 	}
+	// Members own their roots, so no projected root is read back to replace a
+	// fleet-wide hold. Record the healthy membership explicitly on each pass.
+	if built.Root != nil {
+		view.say(built.Root.Name(), registered, "")
+	}
 
 	capacity, reported, unreadable := r.fleetCapacity(ctx, connected)
 	for cluster, err := range unreadable {
