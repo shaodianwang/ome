@@ -21,26 +21,15 @@ type Capacity struct {
 	Cluster        string
 	ResourceName   string
 	ResourceFlavor string
-	Allocatable    resource.Quantity
 
-	// HighWaterMark is the damped reading a split divides by. Allocatable moves
-	// whenever a node is cordoned or replaced, and apportioning against it would
-	// move every tenant's share on the whole fleet whenever one node anywhere
-	// was drained. Zero means the member reports no mark, and Allocatable
-	// stands in.
-	HighWaterMark resource.Quantity
+	// Allocatable is what a proportional split divides by: chips on nodes that
+	// are Ready and not cordoned. Chips on a parked node count toward the
+	// member's high-water mark but cannot run anything, so they earn no share.
+	Allocatable resource.Quantity
 
 	// ObservedAt is when the member took the reading, carried so a caller can
 	// report how stale a share's basis is.
 	ObservedAt *metav1.Time
-}
-
-// basis is the number this reading contributes to a proportional split.
-func (c Capacity) basis() resource.Quantity {
-	if c.HighWaterMark.IsZero() {
-		return c.Allocatable
-	}
-	return c.HighWaterMark
 }
 
 // Fleet is what the hub knows about its members on one pass.
@@ -126,7 +115,7 @@ func Resolve(t *tree.Tree, fleet Fleet, opts ResolveOptions) Resolution {
 	byPair := map[key][]shares.Weight{}
 	for _, c := range fleet.Capacity {
 		k := key{c.ResourceName, c.ResourceFlavor}
-		byPair[k] = append(byPair[k], shares.Weight{Cluster: c.Cluster, Capacity: c.basis()})
+		byPair[k] = append(byPair[k], shares.Weight{Cluster: c.Cluster, Capacity: c.Allocatable})
 	}
 	for k := range byPair {
 		// Sorted so a split's tiebreak sees the same order however the caller

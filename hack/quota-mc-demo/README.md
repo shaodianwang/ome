@@ -379,7 +379,7 @@ projected the moment `mc-demo-serving` leaves the tree, and the sweep removes th
 `LocalQueue`, the `ClusterQueue` and the `Cohort` together. Each member keeps only
 its own bare root, which the hub never projects and never reaps — capacity is a
 property of the cluster rather than of anything an admin authored, and the
-high-water marks every split is sized against live on that object.
+schedulable capacity every split is sized against lives on that object.
 
 > [!IMPORTANT]
 > Delete the ISVCs first, as the block above does. Kueue holds

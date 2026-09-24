@@ -511,8 +511,7 @@ func TestProjectReapsOnDeletion(t *testing.T) {
 // The reserved root is the one name that stands on every cluster and is never
 // projected: a member's own controller creates it and derives that cluster's
 // capacity onto it. Reaping by name alone would take a member's root down with
-// the hub's, and the capacity and high-water marks every split is sized against
-// would go with it.
+// the hub's, and the capacity every split is sized against would go with it.
 func TestProjectDoesNotReapAMembersOwnRoot(t *testing.T) {
 	a := member(t, memberRoot("256"))
 	fleet := &fakeFleet{members: map[string]workloadcluster.SelectivelyCachingClient{"member-a": a}}
@@ -770,6 +769,145 @@ func TestProjectHoldsWhenAMemberCannotBeRead(t *testing.T) {
 	if got := projectedOn(t, a); len(got) != 0 {
 		t.Errorf("projected %v onto member-a while member-b was unreadable; "+
 			"a split taken without member-b over-grants the fleet", got)
+	}
+}
+
+// A hold is only a hold if it preserves what members already carry. A
+// proportional leaf that cannot be re-split while a member is unreadable keeps
+// its last copies on every reachable member, ancestors included, and re-splits
+// once the fleet reports again.
+func TestProjectKeepsProjectedCopiesWhileAMemberCannotBeRead(t *testing.T) {
+	a := member(t, memberRoot("3"))
+	fleet := &fakeFleet{members: map[string]workloadcluster.SelectivelyCachingClient{
+		"member-a": a,
+		"member-b": member(t, memberRoot("1")),
+	}}
+
+	r, _ := projectingReconciler(t, fleet,
+		registered("member-a"),
+		registered("member-b"),
+		cohort(rootName, "", budget("128")),
+		cohort("group", rootName, budget("128")),
+		leaf("team", "group", budget("120")),
+	)
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{}); err != nil {
+		t.Fatalf("first Reconcile() = %v", err)
+	}
+	before := projectedOn(t, a)
+	if before["team"] != "90" {
+		t.Fatalf("setup: member-a carries %v, want team at 90", before)
+	}
+
+	fleet.members["member-b"] = unreadableMember(t, memberRoot("1"))
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{}); err != nil {
+		t.Fatalf("held Reconcile() = %v", err)
+	}
+	if diff := cmp.Diff(before, projectedOn(t, a)); diff != "" {
+		t.Errorf("member-a's copies changed while member-b was unreadable (-held +got):\n%s", diff)
+	}
+
+	fleet.members["member-b"] = member(t, memberRoot("3"))
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{}); err != nil {
+		t.Fatalf("recovered Reconcile() = %v", err)
+	}
+	if got := projectedOn(t, a)["team"]; got != "60" {
+		t.Errorf("member-a's team share after recovery = %q, want 60", got)
+	}
+}
+
+// The unreachable path holds by returning before anything is written or swept.
+// Pinned so a refactor that folds it into the unreadable path keeps the copies.
+func TestProjectKeepsProjectedCopiesWhileAMemberIsUnreachable(t *testing.T) {
+	a := member(t, memberRoot("3"))
+	fleet := &fakeFleet{members: map[string]workloadcluster.SelectivelyCachingClient{
+		"member-a": a,
+		"member-b": member(t, memberRoot("1")),
+	}}
+
+	r, _ := projectingReconciler(t, fleet,
+		registered("member-a"),
+		registered("member-b"),
+		cohort(rootName, "", budget("128")),
+		leaf("team", rootName, budget("120")),
+	)
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{}); err != nil {
+		t.Fatalf("first Reconcile() = %v", err)
+	}
+	before := projectedOn(t, a)
+
+	delete(fleet.members, "member-b")
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{}); err != nil {
+		t.Fatalf("held Reconcile() = %v", err)
+	}
+	if diff := cmp.Diff(before, projectedOn(t, a)); diff != "" {
+		t.Errorf("member-a's copies changed while member-b was unreachable (-held +got):\n%s", diff)
+	}
+}
+
+// An explicit split edited so it no longer sums to nominal is unresolved, and
+// is held rather than swept: the members keep the last split that did add up.
+func TestProjectKeepsProjectedCopiesWhenAnExplicitSplitStopsAddingUp(t *testing.T) {
+	a := member(t, memberRoot("3"))
+	fleet := &fakeFleet{members: map[string]workloadcluster.SelectivelyCachingClient{"member-a": a}}
+
+	explicit := budget("120")
+	explicit.Policy = v1beta1.AcceleratorQuotaDistributionExplicit
+	explicit.PerCluster = []v1beta1.AcceleratorClusterShare{{Cluster: "member-a", Nominal: resource.MustParse("120")}}
+	r, hub := projectingReconciler(t, fleet,
+		registered("member-a"),
+		cohort(rootName, "", budget("128")),
+		leaf("team", rootName, explicit),
+	)
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{}); err != nil {
+		t.Fatalf("first Reconcile() = %v", err)
+	}
+	before := projectedOn(t, a)
+	if before["team"] != "120" {
+		t.Fatalf("setup: member-a carries %v, want team at 120", before)
+	}
+
+	var team v1beta1.AcceleratorQuota
+	if err := hub.Get(context.Background(), types.NamespacedName{Name: "team"}, &team); err != nil {
+		t.Fatalf("get team: %v", err)
+	}
+	team.Spec.Budgets[0].PerCluster[0].Nominal = resource.MustParse("100")
+	if err := hub.Update(context.Background(), &team); err != nil {
+		t.Fatalf("update team: %v", err)
+	}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{}); err != nil {
+		t.Fatalf("held Reconcile() = %v", err)
+	}
+	if diff := cmp.Diff(before, projectedOn(t, a)); diff != "" {
+		t.Errorf("member-a's copies changed after the split stopped adding up (-held +got):\n%s", diff)
+	}
+}
+
+// A proportional split divides by what each member can schedule now. Chips on
+// cordoned or NotReady nodes still count toward the high-water mark, but no
+// workload can land on them, so they earn no share.
+func TestProjectSplitsOnSchedulableCapacity(t *testing.T) {
+	drained := memberRoot("1")
+	drained.Status.Capacity[0].HighWaterMark = resource.MustParse("3")
+	a := member(t, drained)
+	b := member(t, memberRoot("1"))
+	fleet := &fakeFleet{members: map[string]workloadcluster.SelectivelyCachingClient{
+		"member-a": a,
+		"member-b": b,
+	}}
+
+	r, _ := projectingReconciler(t, fleet,
+		registered("member-a"),
+		registered("member-b"),
+		cohort(rootName, "", budget("128")),
+		leaf("team", rootName, budget("120")),
+	)
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{}); err != nil {
+		t.Fatalf("Reconcile() = %v", err)
+	}
+	for name, c := range map[string]workloadcluster.SelectivelyCachingClient{"member-a": a, "member-b": b} {
+		if got := projectedOn(t, c)["team"]; got != "60" {
+			t.Errorf("%s team share = %q, want 60", name, got)
+		}
 	}
 }
 

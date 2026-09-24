@@ -501,11 +501,13 @@ The management plane, for each leaf node and `(resource, flavor)` pair:
 
 1. Computes per-cluster **shares** from the entry's effective policy:
    - `Explicit` — take `perCluster[]` verbatim (must sum to `nominal`).
-   - `Proportional` — split `nominal` in proportion to a **snapshot** of each
-     cluster's allocatable capacity of that pair, read from that cluster's derived
-     root (see *Derived capacity*). The snapshot is deliberately static: shares
-     change only when the budget is reconciled, not continuously as capacity
-     drifts (Open Question #2).
+   - `Proportional` — split `nominal` in proportion to each cluster's
+     **schedulable** capacity of that pair (chips on Ready, uncordoned nodes),
+     read from that cluster's derived root on every pass (see *Derived
+     capacity*). The high-water mark is not the basis: parked chips cannot run
+     work, so they earn no share. While any registered cluster cannot be read,
+     every `Proportional` leaf is held at its last split — its member copies are
+     neither rewritten nor swept (Open Question #2).
 2. Server-side-applies **one `AcceleratorQuota` per matched cluster** — the leaf
    plus its full ancestor chain — over the existing `WorkloadCluster` connection
    subsystem (`pkg/controller/v1beta1/workloadcluster/remoteclient.go`). Each
@@ -800,7 +802,7 @@ the tree is authorable and checkable as a whole.
 - `spec.distribution.policy` ∈ `{Explicit, Proportional}` (pluggable; `Solver` is a
   future value) — this node's **default** policy. `Proportional` reads allocatable
   capacity per `(resource, flavor)` from each member's derived root
-  `AcceleratorQuota.status.capacity` (a snapshot — see *Derived capacity* and Open
+  `AcceleratorQuota.status.capacity` (read every pass — see *Derived capacity* and Open
   Question #2). There
   is no single fleet-wide default object; each node states its policy. An unset
   value falls back to the operator-level default in the `quota` config
