@@ -844,6 +844,9 @@ fn not_ready_info(status: &InferenceServiceStatus) -> (Option<String>, Option<St
 #[derive(Serialize)]
 pub struct InferenceServiceView {
     pub name: String,
+    /// Deletion takes precedence over status, which can remain stale during GC.
+    #[serde(skip_serializing_if = "Option::is_none", rename = "deletionTimestamp")]
+    pub deletion_timestamp: Option<Time>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -882,7 +885,8 @@ pub struct InferenceServiceView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub age: Option<String>,
     /// Accelerator chips currently held by this service's scheduled pods. Filled
-    /// by the resource endpoints (which hold the pod caches); absent when zero.
+    /// by the resource endpoints from synchronized pod caches, including zero.
+    /// Absent when occupancy has not been evaluated; never infer it from replicas.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accelerators: Option<i64>,
     /// The runtime the operator actually resolves for this service (see
@@ -900,8 +904,16 @@ impl InferenceServiceView {
     pub fn of(isvc: &InferenceService) -> Self {
         let meta = isvc.meta();
         let status = isvc.status.as_ref();
-        let ready = status.and_then(ready_condition).map(|c| c.status == "True");
-        let (reason, message) = status.map(not_ready_info).unwrap_or((None, None));
+        let (ready, reason, message) = if meta.deletion_timestamp.is_some() {
+            (Some(false), Some("Terminating".to_owned()), None)
+        } else {
+            let (reason, message) = status.map(not_ready_info).unwrap_or((None, None));
+            (
+                status.and_then(ready_condition).map(|c| c.status == "True"),
+                reason,
+                message,
+            )
+        };
         let model = status.and_then(|s| s.model_status.as_ref());
         let copies = model.and_then(|m| m.model_copies.as_ref());
         let model_ref = isvc.spec.model.as_ref().and_then(|model| {
@@ -926,6 +938,7 @@ impl InferenceServiceView {
             runtime: isvc.spec.runtime.as_ref().map(|r| r.name.clone()),
             runtime_ref,
             deployment_mode: isvc.spec.deployment_mode.as_ref().and_then(enum_str),
+            deletion_timestamp: meta.deletion_timestamp.clone(),
             ready,
             url: status.and_then(|s| s.url.clone()).filter(|s| !s.is_empty()),
             components: status.map(components_of).unwrap_or_default(),
@@ -2082,6 +2095,45 @@ pub fn tagged<T: Serialize>(view: T, cluster: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deletion_overrides_readiness_and_failure_but_active_status_is_preserved() {
+        for status in [
+            Value::Null,
+            serde_json::json!({ "conditions": [{
+                "type": "Ready", "status": "True", "reason": "Ready", "message": "",
+                "lastTransitionTime": "2026-08-01T00:00:00Z"
+            }] }),
+            serde_json::json!({ "conditions": [{
+                "type": "Ready", "status": "False", "reason": "EngineNotReady", "message": "waiting",
+                "lastTransitionTime": "2026-08-01T00:00:00Z"
+            }] }),
+        ] {
+            let mut service: InferenceService = serde_json::from_value(serde_json::json!({
+                "metadata": { "name": "chat", "namespace": "team-a" },
+                "spec": {}, "status": status
+            }))
+            .unwrap();
+            let active = to_val(InferenceServiceView::of(&service));
+            assert!(active.get("deletionTimestamp").is_none());
+            assert!(active.get("accelerators").is_none());
+            if let Some(condition) = status["conditions"].get(0) {
+                assert_eq!(active["ready"], condition["status"] == "True");
+                if condition["status"] == "False" {
+                    assert_eq!(active["reason"], "EngineNotReady");
+                    assert_eq!(active["message"], "waiting");
+                }
+            } else {
+                assert!(active.get("ready").is_none());
+            }
+            service.metadata.deletion_timestamp =
+                Some(serde_json::from_value(serde_json::json!("2026-09-01T00:00:00Z")).unwrap());
+            let terminating = to_val(InferenceServiceView::of(&service));
+            assert_eq!(terminating["ready"], false);
+            assert_eq!(terminating["reason"], "Terminating");
+            assert!(terminating.get("message").is_none());
+        }
+    }
 
     #[test]
     fn resource_refs_preserve_scope_and_namespace() {

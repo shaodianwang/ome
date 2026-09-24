@@ -62,6 +62,22 @@ from the placement planner rather than collapsed into a fabricated domain.
 `inferencereplicas`, `clusterbasemodels`, `clusterservingruntimes`,
 `finetunedweights`, `workloadclusters`, `nodes`.
 
+InferenceService list and detail projections keep terminating resources visible.
+When `metadata.deletionTimestamp` is present, the projection includes
+`deletionTimestamp`, sets `ready: false`, and reports `reason: "Terminating"`
+before any recorded readiness or model-load failure. Component replica counts
+and other status fields remain diagnostic snapshots and can be stale during
+deletion; `raw=true` preserves the underlying Kubernetes object.
+
+`accelerators` is the occupied GPU/TPU chip count from scheduled, non-terminal
+pods, including pods that are draining. A synchronized cache with no matching
+occupancy returns `accelerators: 0`, for active and terminating services alike.
+Inventory endpoints reject explicitly selected clusters whose initial caches
+are unavailable with HTTP 503; fleet reads include only ready clusters. Absence
+of an occupancy field is not zero and must not be replaced with stale replica
+counts for a terminating service. These are informer snapshots, not live
+apiserver reads or a guarantee of watch freshness.
+
 Set `MUSE_ARGO_NAMESPACE` (Helm: `config.argo.enabled` plus
 `config.argo.namespace`) to watch Argo CD `Application` resources in the local
 management cluster. The chart grants only `get/list/watch` on Applications in

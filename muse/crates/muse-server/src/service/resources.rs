@@ -147,7 +147,8 @@ where
 /// resolved against the runtime caches and the accelerator chips its pods hold
 /// (one pod-cache scan for the whole listing). Runtime identity resolves from the
 /// spec only — the pod-label fallback would cost a pod scan per row, so it is
-/// reserved for the single-object detail view.
+/// reserved for the single-object detail view. Callers select synchronized
+/// clusters, so a missing pod entry means zero occupancy.
 fn isvc_rows(c: &ClusterState, state: &AppState) -> Vec<Value> {
     let held = accel_held_by_isvc(&c.pods.list());
     c.inference_services
@@ -157,12 +158,14 @@ fn isvc_rows(c: &ClusterState, state: &AppState) -> Vec<Value> {
             let mut view = InferenceServiceView::of(isvc);
             view.resolved_runtime_ref =
                 resolved_runtime_ref(isvc, &c.serving_runtimes, &c.cluster_serving_runtimes, None);
-            view.accelerators = held
-                .get(&(
+            view.accelerators = Some(
+                held.get(&(
                     isvc.meta().namespace.clone().unwrap_or_default(),
                     view.name.clone(),
                 ))
-                .copied();
+                .copied()
+                .unwrap_or(0),
+            );
             view.delivery = state
                 .argo()
                 .and_then(|argo| argo.delivery_for(isvc.as_ref(), "ome.io", "InferenceService"));
@@ -225,9 +228,12 @@ fn isvc_detail(
             Some(&c.pods),
         );
         if let Some(ns) = isvc.meta().namespace.as_deref() {
-            detail.view.accelerators = accel_held_by_isvc(&c.pods.list_namespaced(ns))
-                .get(&(ns.to_owned(), detail.view.name.clone()))
-                .copied();
+            detail.view.accelerators = Some(
+                accel_held_by_isvc(&c.pods.list_namespaced(ns))
+                    .get(&(ns.to_owned(), detail.view.name.clone()))
+                    .copied()
+                    .unwrap_or(0),
+            );
         }
         detail.view.delivery = state
             .argo()
@@ -339,11 +345,225 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use kube::runtime::{reflector, watcher};
     use ome_client::InferenceService;
     use serde_json::json;
 
     use super::*;
+    use crate::{
+        app_context::AppStateConfig,
+        informers::{CacheState, CapacitySignal, Feed, Invalidations},
+        protocol::INFERENCE_SERVICE_POD_LABEL,
+    };
+
+    fn cached<K: Resource<DynamicType = ()> + Clone + 'static>(items: Vec<K>) -> Lister<K> {
+        let (store, mut writer) = reflector::store::<K>();
+        for item in items {
+            writer.apply_watcher_event(&watcher::Event::Apply(item));
+        }
+        Lister::new(store)
+    }
+
+    fn state(services: Vec<InferenceService>, pods: Vec<Pod>) -> AppState {
+        let cluster = ClusterState {
+            name: "test".to_owned(),
+            version: String::new(),
+            client: kube::Client::try_from(kube::Config::new(
+                "http://127.0.0.1:1".parse().unwrap(),
+            ))
+            .unwrap(),
+            inference_services: cached(services),
+            base_models: cached(vec![]),
+            serving_runtimes: cached(vec![]),
+            inference_replicas: cached(vec![]),
+            cluster_base_models: cached(vec![]),
+            cluster_serving_runtimes: cached(vec![]),
+            fine_tuned_weights: cached(vec![]),
+            workload_clusters: cached(vec![]),
+            nodes: cached(vec![]),
+            pods: cached(pods),
+            deployments: cached(vec![]),
+            daemon_sets: cached(vec![]),
+            cache: CacheState::default(),
+        };
+        AppState::new(
+            vec![cluster],
+            Topology {
+                island_labels: vec![],
+                nvlink_labels: vec![],
+            },
+            Feed::new(1),
+            Invalidations::new(None),
+            CapacitySignal::new(),
+            None,
+            AppStateConfig {
+                metrics: None,
+                pod_inspect: None,
+                pod_log_stream: None,
+                refresh: Duration::from_secs(1),
+                sse_keep_alive: None,
+                attention_stuck_step_secs: None,
+                capacity_limits: rollup::CapacityLimits {
+                    max_fragments: 1,
+                    max_consumers: 1,
+                },
+                dashboard_policy: None,
+                metrics_time_ranges: None,
+                system_components: Arc::new(vec![]),
+                argo: None,
+            },
+        )
+    }
+
+    fn pod(namespace: &str, name: &str, phase: &str, scheduled: bool) -> Pod {
+        let mut pod: Pod = serde_json::from_value(json!({
+            "metadata": {
+                "name": name, "namespace": namespace,
+                "labels": { (INFERENCE_SERVICE_POD_LABEL): "shared" }
+            },
+            "spec": { "containers": [{
+                "name": "engine", "resources": { "requests": { "google.com/tpu": "4" } }
+            }] },
+            "status": { "phase": phase }
+        }))
+        .unwrap();
+        if scheduled {
+            pod.spec.as_mut().unwrap().node_name = Some("worker".to_owned());
+        }
+        pod
+    }
+
+    async fn projected(state: &AppState) -> (Value, Value) {
+        let list = list_kind(
+            Path("inferenceservices".to_owned()),
+            Query(ListParams::default()),
+            State(state.clone()),
+        )
+        .await
+        .unwrap();
+        let detail = get_kind(
+            Path(("inferenceservices".to_owned(), "shared".to_owned())),
+            Query(ViewParams {
+                namespace: Some("team-a".to_owned()),
+                ..Default::default()
+            }),
+            State(state.clone()),
+        )
+        .await
+        .unwrap();
+        (
+            serde_json::to_value(list.0).unwrap()["items"][0].clone(),
+            detail.0,
+        )
+    }
+
+    #[tokio::test]
+    async fn terminating_service_stays_visible_with_zero_occupancy_and_raw_status() {
+        let service: InferenceService = serde_json::from_value(json!({
+            "metadata": {
+                "name": "shared", "namespace": "team-a",
+                "deletionTimestamp": "2026-09-01T00:00:00Z",
+                "finalizers": ["foregroundDeletion"]
+            },
+            "spec": {},
+            "status": {
+                "conditions": [{
+                    "type": "Ready", "status": "True", "reason": "Ready", "message": "",
+                    "lastTransitionTime": "2026-08-01T00:00:00Z"
+                }],
+                "components": { "engine": { "autoscaler": { "currentReplicas": 62 } } }
+            }
+        }))
+        .unwrap();
+        let state = state(vec![service], vec![]);
+        state.clusters[0].cache.mark_ready();
+        let (list, detail) = projected(&state).await;
+        for view in [list, detail] {
+            assert_eq!(view["deletionTimestamp"], "2026-09-01T00:00:00Z");
+            assert_eq!(view["ready"], false);
+            assert_eq!(view["reason"], "Terminating");
+            assert_eq!(view["accelerators"], 0);
+        }
+        let raw = get_kind(
+            Path(("inferenceservices".to_owned(), "shared".to_owned())),
+            Query(ViewParams {
+                raw: true,
+                namespace: Some("team-a".to_owned()),
+                ..Default::default()
+            }),
+            State(state),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(raw["status"]["conditions"][0]["status"], "True");
+        assert_eq!(
+            raw["status"]["components"]["engine"]["autoscaler"]["currentReplicas"],
+            62
+        );
+        assert_eq!(raw["metadata"]["finalizers"], json!(["foregroundDeletion"]));
+    }
+
+    #[tokio::test]
+    async fn occupancy_counts_draining_pods_but_excludes_terminal_unscheduled_and_other_owners() {
+        let mut service = isvc("team-a");
+        let timestamp = serde_json::from_value(json!("2026-09-01T00:00:00Z")).unwrap();
+        service.metadata.deletion_timestamp = Some(timestamp);
+        let mut draining = pod("team-a", "draining", "Running", true);
+        draining.metadata.deletion_timestamp = service.metadata.deletion_timestamp.clone();
+        let mut other_owner = pod("team-a", "other", "Running", true);
+        other_owner.metadata.labels = None;
+        let state = state(
+            vec![service],
+            vec![
+                draining,
+                pod("team-a", "starting", "Pending", true),
+                pod("team-a", "finished", "Succeeded", true),
+                pod("team-a", "failed", "Failed", true),
+                pod("team-a", "queued", "Pending", false),
+                pod("team-b", "same-owner-name", "Running", true),
+                other_owner,
+            ],
+        );
+        state.clusters[0].cache.mark_ready();
+        let (list, detail) = projected(&state).await;
+        assert_eq!(list["accelerators"], 8);
+        assert_eq!(detail["accelerators"], 8);
+    }
+
+    #[tokio::test]
+    async fn unavailable_inventory_is_not_reported_as_zero() {
+        let state = state(vec![isvc("team-a")], vec![]);
+        assert!(matches!(
+            list_kind(
+                Path("inferenceservices".to_owned()),
+                Query(ListParams::default()),
+                State(state.clone()),
+            )
+            .await,
+            Err(ApiError::Unavailable(_))
+        ));
+        assert!(matches!(
+            get_kind(
+                Path(("inferenceservices".to_owned(), "shared".to_owned())),
+                Query(ViewParams {
+                    cluster: Some("test".to_owned()),
+                    ..Default::default()
+                }),
+                State(state.clone()),
+            )
+            .await,
+            Err(ApiError::Unavailable(_))
+        ));
+        state.clusters[0].cache.mark_ready();
+        let (list, detail) = projected(&state).await;
+        for view in [list, detail] {
+            assert_eq!(view["accelerators"], 0);
+            assert!(view.get("deletionTimestamp").is_none());
+        }
+    }
 
     fn isvc(namespace: &str) -> InferenceService {
         serde_json::from_value(json!({
