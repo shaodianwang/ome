@@ -65,6 +65,8 @@ spec:
         - {{ .Values.modelAgent.hostPath }}
         - --num-download-worker
         - '2'
+        - --model-verification-concurrency
+        - {{ .Values.modelAgent.modelVerificationConcurrency | quote }}
         env:
         - name: NODE_NAME
           valueFrom:
