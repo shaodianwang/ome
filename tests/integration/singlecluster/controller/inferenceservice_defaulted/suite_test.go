@@ -1,22 +1,25 @@
-// Package inferenceservice_defaulted hosts integration tests that run
-// the InferenceService MUTATING webhook (the defaulter) and the
-// InferenceService reconciler together in one manager — the full
-// create path a live cluster takes. The controller/inferenceservice
-// suite deliberately runs without admission so it can pin reconciler
-// behavior for stored (never-defaulted) objects; this suite pins the
-// opposite contract: what the reconciler does with the DEFAULTED spec
-// every admitted InferenceService actually carries.
+// Package inferenceservice_defaulted hosts integration tests for the
+// values an InferenceService may leave unset. The reconciler fills them
+// after the ServingRuntime merge, so a value authored on the
+// InferenceService wins, then one authored on the runtime, then the
+// deploy block of inferenceservice-config; the stored object is never
+// written. The controller/inferenceservice suite pins reconciler behavior
+// for explicit specs; this suite pins the contract for unset fields.
 package inferenceservice_defaulted
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/tests/integration/components"
 	"github.com/ome-projects/ome/tests/integration/framework"
 	"github.com/ome-projects/ome/tests/integration/util"
@@ -24,7 +27,7 @@ import (
 
 // TestInferenceServiceDefaulted is the Go entrypoint Ginkgo hooks into.
 func TestInferenceServiceDefaulted(t *testing.T) {
-	util.RunSuite(t, "InferenceService Defaulted Reconcile Integration Suite")
+	util.RunSuite(t, "InferenceService Reconcile-Time Defaults Integration Suite")
 }
 
 var (
@@ -38,11 +41,6 @@ var _ = ginkgo.BeforeSuite(func() {
 	framework.SetupTestLogger()
 
 	s, err := framework.NewSuite(&framework.Framework{
-		// Only the mutating webhook configuration is installed: the
-		// validator handler is registered on the server (the builder
-		// wires both) but never dialed, so specs exercise defaulting
-		// without also re-testing validation.
-		WebhookPath: "tests/integration/singlecluster/controller/inferenceservice_defaulted/testdata",
 		OptionalCRDs: []framework.OptionalCRDBundle{
 			// The ISVC RawDeployment path unconditionally reconciles a
 			// PodMonitor — without this the SetControllerReference
@@ -59,17 +57,16 @@ var _ = ginkgo.BeforeSuite(func() {
 	k8sClient = s.Client
 	suiteCtx, suiteCancel = context.WithCancel(s.Ctx)
 
-	// Both ends of the chain read inferenceservice-config from the OME
-	// namespace: the defaulter via NewDeployConfig (failurePolicy=Fail,
-	// so a missing CM 500s every ISVC create) and the reconciler at
-	// reconcile time.
-	ginkgo.By("seeding inferenceservice-config for the defaulter and the reconciler")
+	// The reconciler reads the deploy block of inferenceservice-config in
+	// the OME namespace; the seed carries the chart-equivalent values. The
+	// chart's termination grace is added here rather than in the shared seed
+	// because the KIND suites share that seed and a real kubelet would hold
+	// every pod deletion for the full period.
+	ginkgo.By("seeding inferenceservice-config for the reconciler")
 	gomega.Expect(util.SeedDefaultConfigMaps(suiteCtx, k8sClient)).To(gomega.Succeed())
+	gomega.Expect(setDeployGracePeriod(suiteCtx, k8sClient, configuredGracePeriodSeconds)).To(gomega.Succeed())
 
 	mgrSetup := func(ctx context.Context, mgr ctrl.Manager) error {
-		if err := components.SetupInferenceServiceWebhook(mgr); err != nil {
-			return err
-		}
 		// BaseModel reconciler drives the CBM fixtures to Ready so the
 		// ISVC reconciler's model resolution succeeds.
 		if err := components.SetupBaseModel(ctx, mgr); err != nil {
@@ -89,3 +86,28 @@ var _ = ginkgo.AfterSuite(func() {
 		_ = suiteFwk.Teardown()
 	}
 })
+
+// configuredGracePeriodSeconds is the deploy.terminationGracePeriodSeconds
+// this suite configures, the value the chart ships.
+const configuredGracePeriodSeconds = int64(600)
+
+// setDeployGracePeriod adds terminationGracePeriodSeconds to the deploy
+// block of the seeded inferenceservice-config before the manager starts.
+func setDeployGracePeriod(ctx context.Context, c client.Client, seconds int64) error {
+	cm := &corev1.ConfigMap{}
+	key := types.NamespacedName{Namespace: constants.OMENamespace, Name: constants.InferenceServiceConfigMapName}
+	if err := c.Get(ctx, key, cm); err != nil {
+		return err
+	}
+	deploy := map[string]any{}
+	if err := json.Unmarshal([]byte(cm.Data["deploy"]), &deploy); err != nil {
+		return err
+	}
+	deploy["terminationGracePeriodSeconds"] = seconds
+	raw, err := json.Marshal(deploy)
+	if err != nil {
+		return err
+	}
+	cm.Data["deploy"] = string(raw)
+	return c.Update(ctx, cm)
+}

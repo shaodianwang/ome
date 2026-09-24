@@ -431,6 +431,8 @@ type WorkerSpec struct {
 
 	// Size of the worker, this is the number of pods in the worker.
 	// Controls how many worker pod instances will be deployed for horizontal scaling.
+	// Unset inherits the ServingRuntime's value; when neither sets it, a
+	// declared leader gets one worker.
 	// +optional
 	Size *int `json:"size,omitempty"`
 

@@ -60,6 +60,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun"
 	traffic "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/traffic"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/specdefaults"
 	isvcstatus "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
@@ -244,18 +245,14 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// consistent.
 	log := r.Log.WithValues("namespace", isvc.Namespace, "isvc", isvc.Name)
 	ctx = ctrl.LoggerInto(ctx, log)
-	// get annotations from isvc
-	annotations := utils.Filter(isvc.Annotations, func(key string) bool {
-		return !utils.Includes(constants.ServiceAnnotationDisallowedList, key)
-	})
-
 	deployConfig, err := controllerconfig.NewDeployConfigCached(r.ConfigCache, r.Clientset)
 	if err != nil {
 		return reconcile.Result{}, errors.Wrapf(err, "fails to create DeployConfig")
 	}
 
-	// For backward compatibility with predictor-based architecture
-	deploymentMode := isvcutils.GetDeploymentMode(annotations, deployConfig)
+	// The InferenceService-level mode gates VirtualDeployment and status;
+	// per-Component dispatch is resolved from the merged specs below.
+	deploymentMode := isvcutils.InferenceServiceDeploymentMode(isvc, constants.DeploymentModeType(deployConfig.DefaultDeploymentMode))
 	log.V(1).Info("InferenceService deployment mode resolved", "deploymentMode", deploymentMode)
 
 	// examine DeletionTimestamp to determine if object is under deletion
@@ -540,6 +537,39 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// this port, so it must be captured here and threaded down.
 	componentRunnerPorts := isvcutils.MergedRunnerPorts(mergedEngine, mergedDecoder, mergedRouter)
 
+	// Step 4: Determine deployment modes based on merged specs
+	engineDeploymentMode, decoderDeploymentMode, routerDeploymentMode, err := isvcutils.DetermineDeploymentModes(mergedEngine, mergedDecoder, mergedRouter, rt, isvc.Spec.DeploymentMode)
+	if err != nil {
+		r.Log.Error(err, "Failed to determine deployment modes", "Name", isvc.Name)
+		r.Recorder.Event(isvc, v1.EventTypeWarning, "DeploymentModeError", err.Error())
+		return reconcile.Result{}, err
+	}
+	componentDeploymentModes := make(map[v1beta1.ComponentType]constants.DeploymentModeType, 3)
+	if mergedEngine != nil {
+		componentDeploymentModes[v1beta1.EngineComponent] = engineDeploymentMode
+	}
+	if mergedDecoder != nil {
+		componentDeploymentModes[v1beta1.DecoderComponent] = decoderDeploymentMode
+	}
+	if mergedRouter != nil {
+		componentDeploymentModes[v1beta1.RouterComponent] = routerDeploymentMode
+	}
+
+	// If both engine and decoder exist, it's PD-disaggregated. V(1):
+	// steady-state per-reconcile breadcrumb; no operator action.
+	if mergedEngine != nil && mergedDecoder != nil {
+		log.V(1).Info("PD-disaggregated deployment detected")
+	}
+
+	// Step 4b: fill what neither the InferenceService nor its runtime set,
+	// from operator configuration and fixed fallbacks. The merged specs are
+	// reconcile-local copies, so the stored object is never written; every
+	// reader below, from the canary partition math to the renderers, sees
+	// the resolved values.
+	specdefaults.Engine(mergedEngine, engineDeploymentMode, deployConfig)
+	specdefaults.Decoder(mergedDecoder, decoderDeploymentMode, deployConfig)
+	specdefaults.Router(mergedRouter, routerDeploymentMode, deployConfig)
+
 	// Rollout run layer: resolve and pin the effective plan BEFORE the
 	// partition stamp and the dispatch engines, so every consumer in this
 	// pass indexes the same frozen plan. Pinning is not chart-gated; only
@@ -626,30 +656,6 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		if mergedRouter != nil {
 			routerPartition = canary.PlanGateHoldPartition(isvc, v1beta1.RouterComponent, &mergedRouter.ComponentExtensionSpec)
 		}
-	}
-
-	// Step 4: Determine deployment modes based on merged specs
-	engineDeploymentMode, decoderDeploymentMode, routerDeploymentMode, err := isvcutils.DetermineDeploymentModes(mergedEngine, mergedDecoder, mergedRouter, rt, isvc.Spec.DeploymentMode)
-	if err != nil {
-		r.Log.Error(err, "Failed to determine deployment modes", "Name", isvc.Name)
-		r.Recorder.Event(isvc, v1.EventTypeWarning, "DeploymentModeError", err.Error())
-		return reconcile.Result{}, err
-	}
-	componentDeploymentModes := make(map[v1beta1.ComponentType]constants.DeploymentModeType, 3)
-	if mergedEngine != nil {
-		componentDeploymentModes[v1beta1.EngineComponent] = engineDeploymentMode
-	}
-	if mergedDecoder != nil {
-		componentDeploymentModes[v1beta1.DecoderComponent] = decoderDeploymentMode
-	}
-	if mergedRouter != nil {
-		componentDeploymentModes[v1beta1.RouterComponent] = routerDeploymentMode
-	}
-
-	// If both engine and decoder exist, it's PD-disaggregated. V(1):
-	// steady-state per-reconcile breadcrumb; no operator action.
-	if mergedEngine != nil && mergedDecoder != nil {
-		log.V(1).Info("PD-disaggregated deployment detected")
 	}
 
 	// Step 5: Create reconcilers based on merged specs. The

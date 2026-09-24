@@ -1,13 +1,10 @@
 // Package inferenceservice_admission hosts integration tests for the
-// full InferenceService admission chain: the MUTATING webhook (the
-// defaulter) AND the VALIDATING webhook installed together, exactly as
-// the canonical manifests deploy them. The sibling suites
-// webhook/inferenceservice (validator only) and
-// webhook/inferenceservice_defaulter (defaulter only) each isolate a
-// single handler; this suite pins the interaction matrix — what the
-// validator sees is the DEFAULTED object, so create-vs-update ×
-// defaulted-vs-explicit combinations behave differently than either
-// handler does alone.
+// InferenceService admission contract as a whole: what the apiserver
+// stores after the validating webhook admits an object. Nothing is
+// defaulted at admission, so a stored object is exactly what its author
+// wrote; the controller resolves defaults after the runtime merge. The
+// sibling suite webhook/inferenceservice pins individual validator rules;
+// this suite pins create-vs-update behavior on the stored object.
 package inferenceservice_admission
 
 import (
@@ -46,12 +43,6 @@ var _ = ginkgo.BeforeSuite(func() {
 	suiteFwk = s.Fwk
 	k8sClient = s.Client
 	suiteCtx, suiteCancel = context.WithCancel(s.Ctx)
-
-	// The defaulter reads inferenceservice-config from the OME
-	// namespace via NewDeployConfig — without this seed, every ISVC
-	// create returns a 500 from the webhook (failurePolicy=Fail).
-	ginkgo.By("seeding inferenceservice-config so the defaulter can read DeployConfig")
-	gomega.Expect(util.SeedDefaultConfigMaps(suiteCtx, k8sClient)).To(gomega.Succeed())
 
 	mgrSetup := func(ctx context.Context, mgr ctrl.Manager) error {
 		return components.SetupInferenceServiceWebhook(mgr)

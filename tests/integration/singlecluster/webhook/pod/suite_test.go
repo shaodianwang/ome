@@ -3,8 +3,8 @@
 // against every pod create with an InferenceService or TrainingJob
 // label). Boots envtest with a stripped-down testdata/webhooks.yaml
 // that registers ONLY /mutate-pods — full manifests.yaml installs
-// the ISVC validator + defaulter alongside, neither of which the
-// pod mutator suite needs.
+// the ISVC validator alongside, which the pod mutator suite does not
+// need.
 package pod
 
 import (

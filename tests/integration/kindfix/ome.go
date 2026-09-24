@@ -8,8 +8,14 @@ package kindfix
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
+
+	"github.com/ome-projects/ome/pkg/constants"
 
 	kedav1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
@@ -138,6 +144,9 @@ func StandardOMESetup(opts SetupOpts) kindutil.ManagerSetup {
 		if err := util.SeedDefaultConfigMaps(ctx, directClient); err != nil {
 			return err
 		}
+		if err := dropConfiguredMaxReplicas(ctx, directClient); err != nil {
+			return err
+		}
 
 		// Register the OMENative pod field-index on the manager cache, exactly
 		// as cmd/manager does (query.RegisterOMENativePodIndex). Without it the
@@ -204,4 +213,33 @@ func StandardOMESetup(opts SetupOpts) kindutil.ManagerSetup {
 		}
 		return nil
 	}
+}
+
+// dropConfiguredMaxReplicas removes deploy.replicas.defaultMaxReplicas from
+// the seeded inferenceservice-config. The KIND suites drive replica counts
+// through minReplicas: with no configured ceiling the reconciler collapses
+// maxReplicas onto min, so the cluster's HPA controller, which has no
+// metrics here, clamps the count to every new min. A ceiling above min would
+// hand the count to that controller and it would never scale down.
+func dropConfiguredMaxReplicas(ctx context.Context, c client.Client) error {
+	cm := &corev1.ConfigMap{}
+	key := types.NamespacedName{Namespace: constants.OMENamespace, Name: constants.InferenceServiceConfigMapName}
+	if err := c.Get(ctx, key, cm); err != nil {
+		return err
+	}
+	deploy := map[string]any{}
+	if err := json.Unmarshal([]byte(cm.Data["deploy"]), &deploy); err != nil {
+		return fmt.Errorf("decode deploy block of %s: %w", key.Name, err)
+	}
+	replicas, _ := deploy["replicas"].(map[string]any)
+	if _, ok := replicas["defaultMaxReplicas"]; !ok {
+		return nil
+	}
+	delete(replicas, "defaultMaxReplicas")
+	raw, err := json.Marshal(deploy)
+	if err != nil {
+		return err
+	}
+	cm.Data["deploy"] = string(raw)
+	return c.Update(ctx, cm)
 }

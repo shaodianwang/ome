@@ -48,10 +48,13 @@ func OMENativeStatusConfigJSON() string {
 //     to keep the controller from materializing routes
 //   - deploy.defaultDeploymentMode = RawDeployment (the safe default;
 //     NewDeployConfig errors on empty), plus the deploy.replicas and
-//     deploy.updateStrategy admission defaults (the values the chart ships)
-//     so defaulter-dependent specs see chart-equivalent behavior. Without
-//     the updateStrategy block an OMENative component is stamped with no
-//     rollout budget at all, since the binary carries none
+//     deploy.updateStrategy defaults the chart ships. The reconciler fills
+//     them on the merged component spec when neither the InferenceService
+//     nor its runtime sets a value; without the updateStrategy block an
+//     OMENative component runs with no per-Component rollout budget, since
+//     the binary carries none. deploy.terminationGracePeriodSeconds is
+//     deliberately absent: the KIND suites share this seed, and a real
+//     kubelet would hold every pod deletion for the full grace period
 //   - lifecycle scaleUpPodBatchSize and scaleDownPodBatchSize bound OMENative
 //     create and delete work in Pod-equivalent units while keeping each
 //     Instance or gang atomic

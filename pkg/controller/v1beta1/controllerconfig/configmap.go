@@ -262,42 +262,45 @@ type NamespaceIngressGateway struct {
 // +kubebuilder:object:generate=false
 type DeployConfig struct {
 	DefaultDeploymentMode string `json:"defaultDeploymentMode,omitempty"`
-	// Replicas carries the admission-time component replica defaults the
-	// ISVC defaulter stamps on unset minReplicas/maxReplicas fields. There
-	// are intentionally NO in-code defaults — the values are supplied via
-	// the inferenceservice-config ConfigMap (Helm chart / GitOps). Absent
-	// (nil block or nil field) means unconfigured: the defaulter leaves the
-	// corresponding field as authored, never a silent fallback to baked-in
-	// numbers. Configured values must be > 0 (rejected at config-load).
+	// Replicas carries the component replica defaults the reconciler fills
+	// on a merged component spec whose minReplicas/maxReplicas neither the
+	// InferenceService nor its ServingRuntime set; the stored object is
+	// never written. There are intentionally NO in-code defaults — the
+	// values are supplied via the inferenceservice-config ConfigMap (Helm
+	// chart / GitOps). Absent (nil block or nil field) means unconfigured:
+	// the reconciler leaves the corresponding field unset, never a silent
+	// fallback to baked-in numbers. Configured values must be > 0 (rejected
+	// at config-load).
 	Replicas *ReplicasDefaultsConfig `json:"replicas,omitempty"`
-	// TerminationGracePeriodSeconds is the admission-time pod termination
-	// grace the ISVC defaulter stamps on any component that does not author
-	// one. It bounds how long a component has to finish in-flight work after
-	// SIGTERM, so a serving component whose requests outlive the platform
-	// default loses them on every restart unless this is raised.
+	// TerminationGracePeriodSeconds is the pod termination grace the
+	// reconciler fills on any component pod spec that neither the
+	// InferenceService nor its ServingRuntime set. It bounds how long a
+	// component has to finish in-flight work after SIGTERM, so a serving
+	// component whose requests outlive the platform default loses them on
+	// every restart unless this is raised.
 	//
 	// Following Replicas above, there is no in-code default: nil means
-	// unconfigured and the component keeps whatever it authored. A configured
+	// unconfigured and the pod keeps the Kubernetes default. A configured
 	// value must be > 0 (rejected at config-load).
 	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
-	// MinReadySeconds is the admission-time lifecycle.minReadySeconds the
-	// ISVC defaulter stamps on every OMENative component that does not
-	// author one: the time a newly Ready pod must stay Ready before a
-	// rollout drains or promotes past it. No in-code default: nil means
+	// MinReadySeconds is the lifecycle.minReadySeconds the reconciler fills
+	// on every OMENative component whose InferenceService and ServingRuntime
+	// both leave it unset: the time a newly Ready pod must stay Ready before
+	// a rollout drains or promotes past it. No in-code default: nil means
 	// unconfigured and the component keeps whatever it authored (unset =
 	// Available as soon as Ready). A configured value must be >= 0.
 	MinReadySeconds *int32 `json:"minReadySeconds,omitempty"`
-	// UpdateStrategy is the admission-time lifecycle.updateStrategy the ISVC
-	// defaulter stamps on OMENative components that do not author one, keyed
-	// by component so a router and an engine can roll differently. Following
-	// the fields above there is no in-code default: an absent block, an
-	// absent component entry, or an absent field means unconfigured and the
-	// component keeps whatever it authored.
+	// UpdateStrategy is the lifecycle.updateStrategy the reconciler fills on
+	// OMENative components whose InferenceService and ServingRuntime both
+	// leave it unset, keyed by component so a router and an engine can roll
+	// differently. Following the fields above there is no in-code default:
+	// an absent block, an absent component entry, or an absent field means
+	// unconfigured and the component keeps whatever it authored.
 	UpdateStrategy *UpdateStrategyDefaultsConfig `json:"updateStrategy,omitempty"`
 }
 
-// UpdateStrategyDefaultsConfig is the admission-time per-pod-swap defaulting
-// policy loaded from the "deploy.updateStrategy" block of the
+// UpdateStrategyDefaultsConfig is the per-pod-swap defaulting policy loaded
+// from the "deploy.updateStrategy" block of the
 // inferenceservice-config ConfigMap. Each component is independent; a nil
 // entry disables defaulting for that component only.
 //
@@ -309,7 +312,7 @@ type UpdateStrategyDefaultsConfig struct {
 }
 
 // ComponentUpdateStrategyDefaults carries one component's per-pod-swap
-// defaults. Both budgets may be configured; the defaulter stamps only the one
+// defaults. Both budgets may be configured; the reconciler fills only the one
 // the resolved strategy reads, because a surge strategy never consults
 // MaxUnavailable and a non-surge strategy never consults MaxSurge, and a value
 // that is never read reads as a bound that is doing nothing.
@@ -346,7 +349,7 @@ func (c *UpdateStrategyDefaultsConfig) ForComponent(component workloadtypes.Comp
 }
 
 // validate rejects a malformed block at config-load rather than letting the
-// defaulter stamp a strategy the CRD enum refuses or a budget that deadlocks
+// reconciler run a strategy the CRD enum refuses or a budget that deadlocks
 // every rollout.
 func (c *UpdateStrategyDefaultsConfig) validate() error {
 	if c == nil {
@@ -394,8 +397,8 @@ func (e *ComponentUpdateStrategyDefaults) validate(component string) error {
 	return nil
 }
 
-// ReplicasDefaultsConfig is the admission-time replica-defaulting policy
-// loaded from the "deploy.replicas" block of the inferenceservice-config
+// ReplicasDefaultsConfig is the replica-defaulting policy loaded from the
+// "deploy.replicas" block of the inferenceservice-config
 // ConfigMap. Every field is optional; a nil field disables defaulting of
 // that value only.
 //
@@ -405,7 +408,7 @@ type ReplicasDefaultsConfig struct {
 	// components share one floor default).
 	DefaultMinReplicas *int `json:"defaultMinReplicas,omitempty"`
 	// DefaultMaxReplicas fills an unset component maxReplicas, per
-	// component. The defaulter raises the filled value to an authored
+	// component. The reconciler raises the filled value to an authored
 	// minReplicas so it never manufactures a min>max conflict.
 	DefaultMaxReplicas ComponentMaxReplicasDefaults `json:"defaultMaxReplicas,omitempty"`
 }
@@ -420,7 +423,7 @@ type ComponentMaxReplicasDefaults struct {
 }
 
 // Min returns the configured minReplicas default; nil (including a nil
-// receiver) means unconfigured — the defaulter leaves the field as authored.
+// receiver) means unconfigured — the reconciler leaves the field unset.
 func (c *ReplicasDefaultsConfig) Min() *int {
 	if c == nil {
 		return nil

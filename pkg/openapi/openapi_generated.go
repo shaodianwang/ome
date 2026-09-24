@@ -3568,7 +3568,7 @@ func schema_pkg_apis_ome_v1beta1_ComponentExtensionSpec(ref common.ReferenceCall
 					},
 					"lifecycle": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component resolves to deploymentMode OMENative (spec.deploymentMode or the per-Component ome.io/deploymentMode annotation); ignored otherwise. The status counterpart is status.components.<component>.lifecycle.",
+							Description: "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component resolves to deploymentMode OMENative (spec.deploymentMode or the per-Component ome.io/deploymentMode annotation); ignored otherwise. A field left unset here inherits the ServingRuntime's value for the Component; the controller fills what neither sets from cluster configuration and fixed fallbacks and never writes them back. The status counterpart is status.components.<component>.lifecycle.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec"),
 						},
 					},
@@ -4410,7 +4410,7 @@ func schema_pkg_apis_ome_v1beta1_DecoderSpec(ref common.ReferenceCallback) commo
 					},
 					"lifecycle": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component resolves to deploymentMode OMENative (spec.deploymentMode or the per-Component ome.io/deploymentMode annotation); ignored otherwise. The status counterpart is status.components.<component>.lifecycle.",
+							Description: "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component resolves to deploymentMode OMENative (spec.deploymentMode or the per-Component ome.io/deploymentMode annotation); ignored otherwise. A field left unset here inherits the ServingRuntime's value for the Component; the controller fills what neither sets from cluster configuration and fixed fallbacks and never writes them back. The status counterpart is status.components.<component>.lifecycle.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec"),
 						},
 					},
@@ -5185,7 +5185,7 @@ func schema_pkg_apis_ome_v1beta1_EngineSpec(ref common.ReferenceCallback) common
 					},
 					"lifecycle": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component resolves to deploymentMode OMENative (spec.deploymentMode or the per-Component ome.io/deploymentMode annotation); ignored otherwise. The status counterpart is status.components.<component>.lifecycle.",
+							Description: "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component resolves to deploymentMode OMENative (spec.deploymentMode or the per-Component ome.io/deploymentMode annotation); ignored otherwise. A field left unset here inherits the ServingRuntime's value for the Component; the controller fills what neither sets from cluster configuration and fixed fallbacks and never writes them back. The status counterpart is status.components.<component>.lifecycle.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec"),
 						},
 					},
@@ -5721,7 +5721,7 @@ func schema_pkg_apis_ome_v1beta1_InPlaceUpdateStrategy(ref common.ReferenceCallb
 					},
 					"markNotReadyDuringLifecycle": {
 						SchemaProps: spec.SchemaProps{
-							Description: "MarkNotReadyDuringLifecycle, when true, flips ome.io/serving=False on the pod before the in-place mutation so EndpointSlice drains traffic first. Defaults to true.",
+							Description: "MarkNotReadyDuringLifecycle, when true, flips ome.io/serving=False on the pod before the in-place mutation so EndpointSlice drains traffic first. Unset inherits the ServingRuntime's value, then true.",
 							Type:        []string{"boolean"},
 							Format:      "",
 						},
@@ -7938,7 +7938,7 @@ func schema_pkg_apis_ome_v1beta1_LifecycleSpec(ref common.ReferenceCallback) com
 				Properties: map[string]spec.Schema{
 					"restartPolicy": {
 						SchemaProps: spec.SchemaProps{
-							Description: "RestartPolicy controls what OMENative does when a managed pod fails. Distinct from the inlined corev1.PodSpec.RestartPolicy: that one tells kubelet whether to restart a container in-place; this one tells the OMENative controller whether to recreate the whole Instance.",
+							Description: "RestartPolicy controls what OMENative does when a managed pod fails. Distinct from the inlined corev1.PodSpec.RestartPolicy: that one tells kubelet whether to restart a container in-place; this one tells the OMENative controller whether to recreate the whole Instance. Unset inherits the ServingRuntime's value; when neither sets it, multi-pod Instances use RecreateInstanceOnPodRestart and single-pod Instances use None.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -7951,7 +7951,7 @@ func schema_pkg_apis_ome_v1beta1_LifecycleSpec(ref common.ReferenceCallback) com
 					},
 					"readyPolicy": {
 						SchemaProps: spec.SchemaProps{
-							Description: "ReadyPolicy controls how Instance-level readiness is aggregated from the underlying pods. None is accepted only for single-pod Instances, where it is equivalent to AllPodReady; admission rejects None on multi-pod OMENative Components because per-pod readiness reporting is not supported.",
+							Description: "ReadyPolicy controls how Instance-level readiness is aggregated from the underlying pods. None is accepted only for single-pod Instances, where it is equivalent to AllPodReady; admission rejects None on multi-pod OMENative Components because per-pod readiness reporting is not supported. Unset inherits the ServingRuntime's value; when neither sets it, multi-pod Instances use AllPodReady and single-pod Instances use None.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -7964,7 +7964,7 @@ func schema_pkg_apis_ome_v1beta1_LifecycleSpec(ref common.ReferenceCallback) com
 					},
 					"minReadySeconds": {
 						SchemaProps: spec.SchemaProps{
-							Description: "MinReadySeconds is the minimum time a newly Ready pod must stay Ready before OMENative treats it as Available. A pod is Available when its PodReady condition is True and that condition's lastTransitionTime plus MinReadySeconds is not after the current time, evaluated per pod (the Deployment.spec.minReadySeconds rule). Ready remains the health signal; Available is the pacing signal: a rollout drains or promotes an Instance only once its new pods are Available, so the maxSurge / maxUnavailable budgets stay held for the whole window, and availableReplicas / availablePodCount count only Available pods. Unset or 0 means Available as soon as Ready. A value authored on the InferenceService always wins. Clusters may supply an admission-time default through the inferenceservice-config ConfigMap; it is stamped onto the InferenceService, so it also takes precedence over a value authored in the ServingRuntime's engineConfig / decoderConfig / routerConfig lifecycle (the InferenceService overrides the runtime when the two merge), as terminationGracePeriodSeconds does.",
+							Description: "MinReadySeconds is the minimum time a newly Ready pod must stay Ready before OMENative treats it as Available. A pod is Available when its PodReady condition is True and that condition's lastTransitionTime plus MinReadySeconds is not after the current time, evaluated per pod (the Deployment.spec.minReadySeconds rule). Ready remains the health signal; Available is the pacing signal: a rollout drains or promotes an Instance only once its new pods are Available, so the maxSurge / maxUnavailable budgets stay held for the whole window, and availableReplicas / availablePodCount count only Available pods. Unset or 0 means Available as soon as Ready. A value authored on the InferenceService wins; an unset value inherits the ServingRuntime's; when neither sets it, the cluster default from the inferenceservice-config ConfigMap applies.",
 							Type:        []string{"integer"},
 							Format:      "int32",
 						},
@@ -8303,7 +8303,7 @@ func schema_pkg_apis_ome_v1beta1_MigrationPolicy(ref common.ReferenceCallback) c
 				Properties: map[string]spec.Schema{
 					"mode": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Mode gates migration: Auto enables both deadline-disposition relocation and explicit migration requests; Never disables both. Defaults to Auto.",
+							Description: "Mode gates migration: Auto enables both deadline-disposition relocation and explicit migration requests; Never disables both. Unset inherits the ServingRuntime's value, then Auto.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -9955,13 +9955,13 @@ func schema_pkg_apis_ome_v1beta1_RollingUpdate(ref common.ReferenceCallback) com
 					},
 					"maxUnavailable": {
 						SchemaProps: spec.SchemaProps{
-							Description: "MaxUnavailable is the maximum number of Instances (or fraction) allowed to be in a non-Ready state during the rollout. Accepts either an absolute integer count (e.g. 2) or a percent string (e.g. \"25%\"). Percent values resolve to ceil(replicas * percent / 100) at reconcile time so the budget scales with the Component's replica count.",
+							Description: "MaxUnavailable is the maximum number of Instances (or fraction) allowed to be in a non-Ready state during the rollout. Accepts either an absolute integer count (e.g. 2) or a percent string (e.g. \"25%\"). Percent values resolve to ceil(replicas * percent / 100) at reconcile time so the budget scales with the Component's replica count. Unset inherits the ServingRuntime's value; when neither sets it and the strategy is not SurgeThenDrain, the cluster default applies, and without one this layer sets no cap.",
 							Ref:         ref("k8s.io/apimachinery/pkg/util/intstr.IntOrString"),
 						},
 					},
 					"maxSurge": {
 						SchemaProps: spec.SchemaProps{
-							Description: "MaxSurge is the maximum number of extra Instances (or fraction) the rollout may create above the Component's desired replica count during a rolling update. Accepts either an absolute integer count (e.g. 1) or a percent string (e.g. \"25%\"). Percent values resolve to ceil(replicas * percent / 100) at reconcile time. Mirrors the semantics of upstream appsv1.Deployment.Strategy.RollingUpdate.MaxSurge — extra capacity is created and brought to Ready before old Instances are drained, enabling zero-capacity-dip rollouts.\n\nWhen the Component participates in a RolloutCoordinationGroup with a non-zero CoordinationPacing.MaxSurge, the group-wide ceiling caps the per-Component MaxSurge.",
+							Description: "MaxSurge is the maximum number of extra Instances (or fraction) the rollout may create above the Component's desired replica count during a rolling update. Accepts either an absolute integer count (e.g. 1) or a percent string (e.g. \"25%\"). Percent values resolve to ceil(replicas * percent / 100) at reconcile time. Mirrors the semantics of upstream appsv1.Deployment.Strategy.RollingUpdate.MaxSurge — extra capacity is created and brought to Ready before old Instances are drained, enabling zero-capacity-dip rollouts.\n\nWhen the Component participates in a RolloutCoordinationGroup with a non-zero CoordinationPacing.MaxSurge, the group-wide ceiling caps the per-Component MaxSurge. Unset inherits the ServingRuntime's value; when neither sets it and the strategy is SurgeThenDrain, the cluster default applies, and without one this layer sets no cap.",
 							Ref:         ref("k8s.io/apimachinery/pkg/util/intstr.IntOrString"),
 						},
 					},
@@ -11792,7 +11792,7 @@ func schema_pkg_apis_ome_v1beta1_RouterSpec(ref common.ReferenceCallback) common
 					},
 					"lifecycle": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component resolves to deploymentMode OMENative (spec.deploymentMode or the per-Component ome.io/deploymentMode annotation); ignored otherwise. The status counterpart is status.components.<component>.lifecycle.",
+							Description: "Lifecycle groups OMENative-specific lifecycle policies for this Component. Applies only when the Component resolves to deploymentMode OMENative (spec.deploymentMode or the per-Component ome.io/deploymentMode annotation); ignored otherwise. A field left unset here inherits the ServingRuntime's value for the Component; the controller fills what neither sets from cluster configuration and fixed fallbacks and never writes them back. The status counterpart is status.components.<component>.lifecycle.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec"),
 						},
 					},
@@ -14201,7 +14201,7 @@ func schema_pkg_apis_ome_v1beta1_UpdateStrategy(ref common.ReferenceCallback) co
 				Properties: map[string]spec.Schema{
 					"type": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Type selects the rollout mechanism. Defaults to SurgeThenDrain for safety — preserves serving capacity throughout the rollout.",
+							Description: "Type selects the rollout mechanism. Unset inherits the ServingRuntime's value, then the cluster default from the inferenceservice-config ConfigMap, then SurgeThenDrain, which preserves serving capacity throughout the rollout.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -14703,7 +14703,7 @@ func schema_pkg_apis_ome_v1beta1_WorkerSpec(ref common.ReferenceCallback) common
 					},
 					"size": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Size of the worker, this is the number of pods in the worker. Controls how many worker pod instances will be deployed for horizontal scaling.",
+							Description: "Size of the worker, this is the number of pods in the worker. Controls how many worker pod instances will be deployed for horizontal scaling. Unset inherits the ServingRuntime's value; when neither sets it, a declared leader gets one worker.",
 							Type:        []string{"integer"},
 							Format:      "int32",
 						},

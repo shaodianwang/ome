@@ -386,7 +386,7 @@ for `standalone` / `multinode`).
 ### Defaults
 
 When a `pacing:` block is declared but a sub-key is omitted, the
-controller defaulter stamps:
+controller resolves at reconcile time:
 
 | Field             | Default              |
 | ----------------- | -------------------- |
@@ -436,7 +436,9 @@ deployments:
 
 ### Defaults
 
-When `lifecycle:` is omitted, the controller defaulter stamps:
+When `lifecycle:` is omitted, the controller resolves these values at
+reconcile time. A value the ServingRuntime sets wins over them, and
+nothing is written back to the InferenceService:
 
 | Field                                              | Single-pod              | Multi-pod (Leader+Worker)         |
 | -------------------------------------------------- | ----------------------- | --------------------------------- |

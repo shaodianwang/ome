@@ -15,13 +15,14 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// RawDeployment replica-bound defaulting at the reconciler layer.
-// Stored InferenceServices can reach reconciliation without admission
-// defaults, so the Raw dispatch must tolerate omitted MinReplicas /
-// MaxReplicas: an omitted min falls back to 1 and an omitted max
-// collapses to min. These specs drive full reconciles and pin the
+// RawDeployment replica-bound defaulting at the reconciler layer. Stored
+// InferenceServices carry omitted MinReplicas / MaxReplicas as authored;
+// the reconciler resolves deploy.replicas from inferenceservice-config
+// (seeded here as min=1, engine max=3) on the merged spec and renders the
+// children from that. These specs drive full reconciles and pin the
 // resulting child-resource shapes, so a regression that turns omitted
-// bounds back into a dispatch error fails loudly here.
+// bounds back into a dispatch error, or stops applying the configured
+// defaults, fails loudly here.
 var _ = ginkgo.Describe("InferenceService RawDeployment replica defaults", func() {
 	var ns *corev1.Namespace
 
@@ -71,7 +72,7 @@ var _ = ginkgo.Describe("InferenceService RawDeployment replica defaults", func(
 		return hpa
 	}
 
-	ginkgo.It("engine with fully omitted replica bounds converges to a Deployment and a 1/1 HPA", func() {
+	ginkgo.It("engine with fully omitted replica bounds converges to a Deployment and a 1/3 HPA from the configured defaults", func() {
 		createModelAndRuntime("raw-depl-omitted")
 
 		isvc := v1beta1testing.MakeInferenceService("raw-depl-omitted-isvc", ns.Name).
@@ -88,13 +89,19 @@ var _ = ginkgo.Describe("InferenceService RawDeployment replica defaults", func(
 			return k8sClient.Get(suiteCtx, types.NamespacedName{Namespace: ns.Name, Name: engineName}, &appsv1.Deployment{})
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 
-		ginkgo.By("the default-class HPA is created with min=1 and max=1 (omitted bounds collapse to the floor)")
+		ginkgo.By("the default-class HPA is created with min=1 and max=3 (the configured deploy.replicas defaults)")
 		hpa := getHPA(ns.Name, engineName)
 		Expect(hpa.Spec.MinReplicas).NotTo(BeNil())
 		Expect(*hpa.Spec.MinReplicas).To(BeNumerically("==", 1))
-		Expect(hpa.Spec.MaxReplicas).To(BeNumerically("==", 1))
+		Expect(hpa.Spec.MaxReplicas).To(BeNumerically("==", 3))
 		Expect(hpa.Spec.ScaleTargetRef.Kind).To(Equal("Deployment"))
 		Expect(hpa.Spec.ScaleTargetRef.Name).To(Equal(engineName))
+
+		ginkgo.By("the stored InferenceService still carries no replica bounds")
+		stored := &v1beta1.InferenceService{}
+		Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Namespace: ns.Name, Name: isvc.Name}, stored)).To(Succeed())
+		Expect(stored.Spec.Engine.MinReplicas).To(BeNil())
+		Expect(stored.Spec.Engine.MaxReplicas).To(BeZero())
 
 		ginkgo.By("reconciliation completed past autoscaler dispatch: the engine autoscaler status is published")
 		Eventually(func(g Gomega) {
@@ -109,7 +116,7 @@ var _ = ginkgo.Describe("InferenceService RawDeployment replica defaults", func(
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
-	ginkgo.It("engine with only minReplicas set collapses the omitted max onto min", func() {
+	ginkgo.It("engine with only minReplicas set takes the configured max above it", func() {
 		createModelAndRuntime("raw-depl-minonly")
 
 		minReplicas := 2
@@ -125,7 +132,28 @@ var _ = ginkgo.Describe("InferenceService RawDeployment replica defaults", func(
 		hpa := getHPA(ns.Name, constants.EngineServiceName(isvc.Name))
 		Expect(hpa.Spec.MinReplicas).NotTo(BeNil())
 		Expect(*hpa.Spec.MinReplicas).To(BeNumerically("==", 2))
-		Expect(hpa.Spec.MaxReplicas).To(BeNumerically("==", 2))
+		Expect(hpa.Spec.MaxReplicas).To(BeNumerically("==", 3),
+			"an authored min below the configured max keeps the configured max")
+	})
+
+	ginkgo.It("engine with only minReplicas above the configured max raises the max onto min", func() {
+		createModelAndRuntime("raw-depl-minabove")
+
+		minReplicas := 5
+		isvc := v1beta1testing.MakeInferenceService("raw-depl-minabove-isvc", ns.Name).
+			Model("raw-depl-minabove-cbm").
+			Runtime("raw-depl-minabove-csr").
+			DeploymentMode(constants.RawDeployment).
+			Engine(&v1beta1.EngineSpec{
+				ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &minReplicas},
+			}).Obj()
+		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
+
+		hpa := getHPA(ns.Name, constants.EngineServiceName(isvc.Name))
+		Expect(hpa.Spec.MinReplicas).NotTo(BeNil())
+		Expect(*hpa.Spec.MinReplicas).To(BeNumerically("==", 5))
+		Expect(hpa.Spec.MaxReplicas).To(BeNumerically("==", 5),
+			"the resolved max is raised to an authored min so the HPA is never min>max")
 	})
 
 	ginkgo.It("engine and decoder keep their own replica bounds on their own HPAs and Services", func() {

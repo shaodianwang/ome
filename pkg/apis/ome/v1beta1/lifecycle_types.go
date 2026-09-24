@@ -528,7 +528,10 @@ type LifecycleSpec struct {
 	// RestartPolicy controls what OMENative does when a managed pod fails.
 	// Distinct from the inlined corev1.PodSpec.RestartPolicy: that one tells
 	// kubelet whether to restart a container in-place; this one tells the
-	// OMENative controller whether to recreate the whole Instance.
+	// OMENative controller whether to recreate the whole Instance. Unset
+	// inherits the ServingRuntime's value; when neither sets it, multi-pod
+	// Instances use RecreateInstanceOnPodRestart and single-pod Instances
+	// use None.
 	// +optional
 	RestartPolicy *InstanceRestartPolicy `json:"restartPolicy,omitempty"`
 
@@ -541,7 +544,9 @@ type LifecycleSpec struct {
 	// the underlying pods. None is accepted only for single-pod Instances,
 	// where it is equivalent to AllPodReady; admission rejects None on
 	// multi-pod OMENative Components because per-pod readiness reporting
-	// is not supported.
+	// is not supported. Unset inherits the ServingRuntime's value; when
+	// neither sets it, multi-pod Instances use AllPodReady and single-pod
+	// Instances use None.
 	// +optional
 	ReadyPolicy *InstanceReadyPolicy `json:"readyPolicy,omitempty"`
 
@@ -561,12 +566,9 @@ type LifecycleSpec struct {
 	// maxUnavailable budgets stay held for the whole window, and
 	// availableReplicas / availablePodCount count only Available pods.
 	// Unset or 0 means Available as soon as Ready. A value authored on the
-	// InferenceService always wins. Clusters may supply an admission-time
-	// default through the inferenceservice-config ConfigMap; it is stamped
-	// onto the InferenceService, so it also takes precedence over a value
-	// authored in the ServingRuntime's engineConfig / decoderConfig /
-	// routerConfig lifecycle (the InferenceService overrides the runtime
-	// when the two merge), as terminationGracePeriodSeconds does.
+	// InferenceService wins; an unset value inherits the ServingRuntime's;
+	// when neither sets it, the cluster default from the
+	// inferenceservice-config ConfigMap applies.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	MinReadySeconds *int32 `json:"minReadySeconds,omitempty"`
@@ -595,8 +597,10 @@ const (
 // UpdateStrategy controls how OMENative rolls template changes
 // across an Instance's pods.
 type UpdateStrategy struct {
-	// Type selects the rollout mechanism. Defaults to SurgeThenDrain
-	// for safety — preserves serving capacity throughout the rollout.
+	// Type selects the rollout mechanism. Unset inherits the
+	// ServingRuntime's value, then the cluster default from the
+	// inferenceservice-config ConfigMap, then SurgeThenDrain, which
+	// preserves serving capacity throughout the rollout.
 	// +optional
 	Type UpdateStrategyType `json:"type,omitempty"`
 
@@ -644,6 +648,9 @@ type RollingUpdate struct {
 	// absolute integer count (e.g. 2) or a percent string (e.g. "25%").
 	// Percent values resolve to ceil(replicas * percent / 100) at
 	// reconcile time so the budget scales with the Component's replica count.
+	// Unset inherits the ServingRuntime's value; when neither sets it and
+	// the strategy is not SurgeThenDrain, the cluster default applies, and
+	// without one this layer sets no cap.
 	// +optional
 	// +kubebuilder:validation:XIntOrString
 	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
@@ -659,7 +666,9 @@ type RollingUpdate struct {
 	//
 	// When the Component participates in a RolloutCoordinationGroup with a
 	// non-zero CoordinationPacing.MaxSurge, the group-wide ceiling caps the
-	// per-Component MaxSurge.
+	// per-Component MaxSurge. Unset inherits the ServingRuntime's value;
+	// when neither sets it and the strategy is SurgeThenDrain, the cluster
+	// default applies, and without one this layer sets no cap.
 	// +optional
 	// +kubebuilder:validation:XIntOrString
 	MaxSurge *intstr.IntOrString `json:"maxSurge,omitempty"`
@@ -677,7 +686,7 @@ type InPlaceUpdateStrategy struct {
 
 	// MarkNotReadyDuringLifecycle, when true, flips ome.io/serving=False on
 	// the pod before the in-place mutation so EndpointSlice drains traffic
-	// first. Defaults to true.
+	// first. Unset inherits the ServingRuntime's value, then true.
 	// +optional
 	MarkNotReadyDuringLifecycle *bool `json:"markNotReadyDuringLifecycle,omitempty"`
 }
@@ -703,7 +712,8 @@ const (
 // (both automatic deadline-disposition relocation and explicit annotation-triggered migration).
 type MigrationPolicy struct {
 	// Mode gates migration: Auto enables both deadline-disposition relocation and
-	// explicit migration requests; Never disables both. Defaults to Auto.
+	// explicit migration requests; Never disables both. Unset inherits the
+	// ServingRuntime's value, then Auto.
 	// +optional
 	Mode MigrationPolicyMode `json:"mode,omitempty"`
 }

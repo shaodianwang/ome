@@ -34,9 +34,8 @@ import (
 // (Sequential-policy and single-Component-group rejections) are skipped
 // with a note stating the current rule.
 //
-// Defaulter-side tests (MaxSurge/MaxUnavailable/MaintainRatio fills) live in
-// tests/integration/singlecluster/webhook/inferenceservice_defaulter/. The
-// defaulter is not wired in this suite's webhook fixture.
+// Unset pacing values (MaxSurge/MaxUnavailable/MaintainRatio) are resolved
+// by the controller at reconcile time, never at admission.
 
 // Reusable container set: minimal pod with OME's runtime container.
 func coordRunner() []corev1.Container {

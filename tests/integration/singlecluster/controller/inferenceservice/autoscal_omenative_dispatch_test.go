@@ -124,7 +124,9 @@ var _ = ginkgo.Describe("InferenceService OMENative autoscaler dispatch", func()
 		waitForAutoscalIRStatus(fixture, v1beta1.AutoscalerKEDA, v1beta1.AutoscalerManagedByOME, "runtime")
 	})
 
-	ginkgo.It("omitted replica bounds floor the IR and its HPA at one replica", func() {
+	ginkgo.It("omitted replica bounds resolve to the configured defaults on the IR and its HPA", func() {
+		// The stored spec carries no bounds; the reconciler applies the
+		// seeded deploy.replicas (min=1, engine max=3) to the merged spec.
 		fixture := createAutoscalIRFixture(ns.Name, "autoscal-floor", nil, 0,
 			&v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerHPA}, nil)
 
@@ -135,7 +137,7 @@ var _ = ginkgo.Describe("InferenceService OMENative autoscaler dispatch", func()
 		hpa := expectAutoscalIRHPA(fixture)
 		Expect(hpa.Spec.MinReplicas).NotTo(BeNil())
 		Expect(*hpa.Spec.MinReplicas).To(Equal(int32(1)))
-		Expect(hpa.Spec.MaxReplicas).To(Equal(int32(1)))
+		Expect(hpa.Spec.MaxReplicas).To(Equal(int32(3)))
 	})
 
 	ginkgo.It("class transition HPA to KEDA to None removes the stale scaler at each step", func() {

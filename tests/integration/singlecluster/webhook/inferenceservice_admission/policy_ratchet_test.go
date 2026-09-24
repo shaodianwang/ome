@@ -4,7 +4,7 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -79,113 +79,65 @@ var _ = ginkgo.Describe("ISVC admission matrix: revision-history-limit annotatio
 	})
 })
 
-// OMENative lifecycle defaulting × validation. The defaulter stamps the
-// exact readyPolicy the validator demands for multi-pod Components
-// (AllPodReady), so an operator who omits the field must land on the
-// valid default — this interplay only exists with both webhooks
-// installed.
-var _ = ginkgo.Describe("ISVC admission matrix: OMENative lifecycle defaults", func() {
+// Admission stores an OMENative InferenceService as authored: no lifecycle
+// policy, rollout budget, worker size, or deployment-mode annotation is
+// written. The controller resolves all of them after the runtime merge, so
+// the validator only ever judges explicit values.
+var _ = ginkgo.Describe("ISVC admission matrix: nothing is defaulted at admission", func() {
 
 	ginkgo.BeforeEach(ensureNamespace)
 
 	runner := func(image string) *v1beta1.RunnerSpec {
 		return &v1beta1.RunnerSpec{Container: corev1.Container{Name: "ome-container", Image: image}}
 	}
-	multiPodEngine := func(size int) *v1beta1.EngineSpec {
+	multiPodEngine := func(size *int) *v1beta1.EngineSpec {
 		return &v1beta1.EngineSpec{
 			Leader: &v1beta1.LeaderSpec{Runner: runner("ghcr.io/example/runtime:v1")},
-			Worker: &v1beta1.WorkerSpec{Size: &size, Runner: runner("ghcr.io/example/runtime:v1")},
+			Worker: &v1beta1.WorkerSpec{Size: size, Runner: runner("ghcr.io/example/runtime:v1")},
 		}
 	}
-
-	ginkgo.It("multi-pod OMENative create without lifecycle stores the full shape-dependent defaults", func() {
-		isvc := v1beta1testing.MakeInferenceService("admissio-mn-defaults", "admissio-matrix").
+	// omeNativeISVC declares the mode through the typed spec field only, so
+	// the stored annotations show exactly what admission wrote.
+	omeNativeISVC := func(name string, engine *v1beta1.EngineSpec) *v1beta1testing.InferenceServiceWrapper {
+		w := v1beta1testing.MakeInferenceService(name, "admissio-matrix").
 			Runtime("admissio-runtime").
 			AutoSync(false).
-			DeploymentMode(constants.OMENative).
-			Engine(multiPodEngine(2)).
+			Engine(engine)
+		w.Spec.DeploymentMode = ptr.To(constants.OMENative)
+		return w
+	}
+
+	ginkgo.It("multi-pod OMENative create without lifecycle stores no lifecycle and no annotation", func() {
+		isvc := omeNativeISVC("admissio-mn-authored", multiPodEngine(ptr.To(2))).
 			Router(admissionRouter()).
 			Obj()
 		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, isvc) })
 
-		got := mustGet("admissio-mn-defaults")
-
-		ginkgo.By("engine (multi-pod) defaults")
-		lc := got.Spec.Engine.Lifecycle
-		Expect(lc).NotTo(BeNil())
-		Expect(lc.ReadyPolicy).To(HaveValue(Equal(v1beta1.InstanceReadyPolicyAllPodReady)),
-			"multi-pod readiness must default to the aggregation the validator requires")
-		Expect(lc.RestartPolicy).To(HaveValue(Equal(v1beta1.InstanceRestartPolicyRecreateInstance)))
-		Expect(lc.UpdateStrategy).NotTo(BeNil())
-		Expect(lc.UpdateStrategy.Type).To(Equal(v1beta1.UpdateStrategySurgeThenDrain))
-		Expect(lc.UpdateStrategy.RollingUpdate).NotTo(BeNil())
-		Expect(lc.UpdateStrategy.RollingUpdate.MaxSurge).To(HaveValue(Equal(intstr.FromString("25%"))))
-		Expect(lc.UpdateStrategy.RollingUpdate.MaxUnavailable).To(BeNil(),
-			"SurgeThenDrain is gated on MaxSurge and never reads MaxUnavailable, so the defaulter leaves it unset")
-		Expect(lc.InstanceReadyTimeout).To(BeNil(),
-			"the readiness window is operator config the controller resolves, so admission stores no value")
-		Expect(lc.MigrationPolicy).NotTo(BeNil())
-		Expect(lc.MigrationPolicy.Mode).To(Equal(v1beta1.MigrationPolicyModeAuto))
-
-		ginkgo.By("router (always single-pod) defaults")
-		rlc := got.Spec.Router.Lifecycle
-		Expect(rlc).NotTo(BeNil())
-		Expect(rlc.ReadyPolicy).To(HaveValue(Equal(v1beta1.InstanceReadyPolicyNone)))
-		Expect(rlc.RestartPolicy).To(HaveValue(Equal(v1beta1.InstanceRestartPolicyNone)))
+		got := mustGet("admissio-mn-authored")
+		Expect(got.Spec.Engine.Lifecycle).To(BeNil(), "lifecycle policies resolve at reconcile time")
+		Expect(got.Spec.Router.Lifecycle).To(BeNil())
+		Expect(got.Spec.Engine.Worker.Size).To(HaveValue(Equal(2)))
+		Expect(got.Annotations).NotTo(HaveKey(constants.DeploymentMode))
 	})
 
-	ginkgo.It("single-pod OMENative engine leaves shape-dependent policies unset for runtime resolution", func() {
-		// A raw single-pod engine may still inherit a Leader/Worker shape
-		// from its runtime, so the defaulter must NOT commit readyPolicy or
-		// restartPolicy at admission — only the shape-independent defaults.
-		engine := admissionEngine()
-		engine.ComponentExtensionSpec.Annotations = map[string]string{
-			constants.DeploymentMode: string(constants.OMENative),
-		}
-		isvc := v1beta1testing.MakeInferenceService("admissio-sp-unresolved", "admissio-matrix").
-			Runtime("admissio-runtime").
-			AutoSync(false).
-			Engine(engine).
-			Obj()
-		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, isvc) })
-
-		got := mustGet("admissio-sp-unresolved")
-		lc := got.Spec.Engine.Lifecycle
-		Expect(lc).NotTo(BeNil())
-		Expect(lc.ReadyPolicy).To(BeNil(),
-			"readyPolicy is shape-dependent and must stay unset while the shape is unresolved")
-		Expect(lc.RestartPolicy).To(BeNil(),
-			"restartPolicy is shape-dependent and must stay unset while the shape is unresolved")
-		Expect(lc.UpdateStrategy).NotTo(BeNil())
-		Expect(lc.UpdateStrategy.Type).To(Equal(v1beta1.UpdateStrategySurgeThenDrain))
-		Expect(lc.InstanceReadyTimeout).To(BeNil(),
-			"the readiness window is operator config the controller resolves, so admission stores no value")
-		Expect(lc.MigrationPolicy).NotTo(BeNil())
-		Expect(lc.MigrationPolicy.Mode).To(Equal(v1beta1.MigrationPolicyModeAuto))
-	})
-
-	ginkgo.It("leader+worker pair without an explicit size stores worker.size=1 and multi-pod defaults", func() {
-		engine := &v1beta1.EngineSpec{
-			Leader: &v1beta1.LeaderSpec{Runner: runner("ghcr.io/example/runtime:v1")},
-			Worker: &v1beta1.WorkerSpec{Runner: runner("ghcr.io/example/runtime:v1")},
-		}
-		isvc := v1beta1testing.MakeInferenceService("admissio-worker-size", "admissio-matrix").
-			Runtime("admissio-runtime").
-			AutoSync(false).
-			DeploymentMode(constants.OMENative).
-			Engine(engine).
-			Obj()
+	ginkgo.It("leader+worker pair without a size is admitted and stores the size unset", func() {
+		isvc := omeNativeISVC("admissio-worker-size", multiPodEngine(nil)).Obj()
 		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, isvc) })
 
 		got := mustGet("admissio-worker-size")
-		Expect(got.Spec.Engine.Worker.Size).To(HaveValue(Equal(1)),
-			"a declared Leader+Worker pair without an explicit size must default to 1")
-		// Size=1 resolves the shape to multi-pod before the lifecycle
-		// defaults run, so the multi-pod readiness default applies.
-		Expect(got.Spec.Engine.Lifecycle).NotTo(BeNil())
-		Expect(got.Spec.Engine.Lifecycle.ReadyPolicy).To(HaveValue(Equal(v1beta1.InstanceReadyPolicyAllPodReady)))
+		Expect(got.Spec.Engine.Worker.Size).To(BeNil(),
+			"the size resolves to the runtime's value or one worker at reconcile time")
+		Expect(got.Spec.Engine.Lifecycle).To(BeNil())
+	})
+
+	ginkgo.It("readyPolicy None on a size-less leader+worker pair is rejected like any multi-pod pair", func() {
+		engine := multiPodEngine(nil)
+		engine.Lifecycle = &v1beta1.LifecycleSpec{ReadyPolicy: ptr.To(v1beta1.InstanceReadyPolicyNone)}
+		isvc := omeNativeISVC("admissio-none-unsized", engine).Obj()
+		err := k8sClient.Create(suiteCtx, isvc)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("is not allowed on a multi-pod OMENative component"))
 	})
 })

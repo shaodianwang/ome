@@ -70,24 +70,12 @@ func SetupAcceleratorQuotaWebhook(mgr ctrl.Manager, maxDepth int) error {
 // SetupInferenceServiceWebhook registers the ISVC validating webhook
 // on the supplied manager via ctrl.NewWebhookManagedBy — the same
 // path cmd/manager/main.go uses, so the registered URL paths match
-// what the apiserver dials. The defaulter is wired alongside on the
-// same builder call (controller-runtime requires them to share a
-// builder per type) but is opt-in via a separate testdata fixture:
-// suites that don't install the mutating webhook configuration won't
-// trigger the defaulter.
+// what the apiserver dials.
 func SetupInferenceServiceWebhook(mgr ctrl.Manager) error {
-	clientset, err := kubernetes.NewForConfig(mgr.GetConfig())
-	if err != nil {
-		return fmt.Errorf("SetupInferenceServiceWebhook: build clientset: %w", err)
-	}
 	return ctrl.NewWebhookManagedBy(mgr, &v1beta1.InferenceService{}).
 		WithValidator(&isvcwebhook.InferenceServiceValidator{
 			Client:          mgr.GetClient(),
 			RuntimeSelector: runtimeselector.New(mgr.GetClient()),
-		}).
-		WithDefaulter(&isvcwebhook.InferenceServiceDefaulter{
-			Client:    mgr.GetClient(),
-			ClientSet: clientset,
 		}).
 		Complete()
 }

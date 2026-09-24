@@ -53,7 +53,7 @@ func baselineISVC(name string) *v1beta1testing.InferenceServiceWrapper {
 }
 
 // mustGet re-reads the stored object after admission so assertions see
-// exactly what the apiserver persisted (defaulter output included).
+// exactly what the apiserver persisted.
 func mustGet(name string) *v1beta1.InferenceService {
 	ginkgo.GinkgoHelper()
 	got := &v1beta1.InferenceService{}
@@ -62,54 +62,49 @@ func mustGet(name string) *v1beta1.InferenceService {
 	return got
 }
 
-// Replica-bounds admission through the full defaulter → validator
-// chain. The validator judges the DEFAULTED object: minReplicas
-// defaults to 1 and an unset maxReplicas is stamped (engine/decoder 3,
-// router 2) before any bounds check runs, so these specs pin the
-// combinations where defaulting and validation interact.
+// Replica-bounds admission. The validator judges the object as authored:
+// minReplicas / maxReplicas are not defaulted at admission (the controller
+// resolves deploy.replicas after the runtime merge), so an unset bound is
+// stored unset and only explicit values are checked against each other.
 var _ = ginkgo.Describe("ISVC admission matrix: replica bounds", func() {
 
 	ginkgo.BeforeEach(ensureNamespace)
 
-	ginkgo.It("create with no replica fields stores the defaulted bounds", func() {
-		isvc := baselineISVC("admissio-defaulted-bounds").Obj()
+	ginkgo.It("create with no replica fields stores the object as authored", func() {
+		isvc := baselineISVC("admissio-authored-bounds").Obj()
 		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, isvc) })
 
-		got := mustGet("admissio-defaulted-bounds")
-		Expect(got.Spec.Engine.MinReplicas).To(HaveValue(Equal(1)),
-			"unset minReplicas must be defaulted, not stored nil")
-		Expect(got.Spec.Engine.MaxReplicas).To(Equal(3),
-			"unset maxReplicas must be stamped by the defaulter, not stored 0")
-		Expect(got.Annotations).To(HaveKeyWithValue(constants.DeploymentMode, string(constants.RawDeployment)),
-			"engine-only shape must inherit the configured default deployment mode")
+		got := mustGet("admissio-authored-bounds")
+		Expect(got.Spec.Engine.MinReplicas).To(BeNil(), "unset minReplicas must be stored unset")
+		Expect(got.Spec.Engine.MaxReplicas).To(BeZero(), "unset maxReplicas must be stored unset")
+		Expect(got.Annotations).NotTo(HaveKey(constants.DeploymentMode),
+			"admission must not write a deployment-mode annotation")
 	})
 
-	ginkgo.It("create with minReplicas equal to the defaulted maxReplicas is admitted", func() {
-		// Boundary of the defaulted-max interaction: the validator sees
-		// max stamped to the default, so an explicit min at exactly that
-		// value must still admit.
-		isvc := baselineISVC("admissio-min-eq-defaultmax").Obj()
-		isvc.Spec.Engine.MinReplicas = ptr.To(3)
+	ginkgo.It("create with only minReplicas above the configured default max is admitted as authored", func() {
+		// The validator compares only explicit bounds, so an explicit floor
+		// above the configured ceiling is stored as written; the controller
+		// raises the resolved max to it.
+		isvc := baselineISVC("admissio-min-only").Obj()
+		isvc.Spec.Engine.MinReplicas = ptr.To(5)
 		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, isvc) })
 
-		got := mustGet("admissio-min-eq-defaultmax")
-		Expect(got.Spec.Engine.MinReplicas).To(HaveValue(Equal(3)))
-		Expect(got.Spec.Engine.MaxReplicas).To(Equal(3))
+		got := mustGet("admissio-min-only")
+		Expect(got.Spec.Engine.MinReplicas).To(HaveValue(Equal(5)))
+		Expect(got.Spec.Engine.MaxReplicas).To(BeZero())
 	})
 
-	ginkgo.It("create preserves an explicit maxReplicas instead of re-stamping the default", func() {
+	ginkgo.It("create with an explicit maxReplicas stores it and leaves minReplicas unset", func() {
 		isvc := baselineISVC("admissio-explicit-max").Obj()
 		isvc.Spec.Engine.MaxReplicas = 10
 		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, isvc) })
 
 		got := mustGet("admissio-explicit-max")
-		Expect(got.Spec.Engine.MaxReplicas).To(Equal(10),
-			"explicit maxReplicas must survive the defaulter unchanged")
-		Expect(got.Spec.Engine.MinReplicas).To(HaveValue(Equal(1)),
-			"minReplicas still defaults independently of the explicit max")
+		Expect(got.Spec.Engine.MaxReplicas).To(Equal(10))
+		Expect(got.Spec.Engine.MinReplicas).To(BeNil())
 	})
 
 	ginkgo.It("create with explicit minReplicas greater than explicit maxReplicas is rejected with the engine field path", func() {
@@ -132,10 +127,7 @@ var _ = ginkgo.Describe("ISVC admission matrix: replica bounds", func() {
 			"negative min must be rejected on the Component that carries it, not a generic path")
 	})
 
-	ginkgo.It("create with explicit minReplicas=0 and no KEDA opt-in is rejected, not silently defaulted", func() {
-		// The defaulter only fills a NIL minReplicas — an explicit 0 must
-		// reach the validator as 0 and trip the scale-to-zero gate rather
-		// than being papered over with the default of 1.
+	ginkgo.It("create with explicit minReplicas=0 and no KEDA opt-in is rejected", func() {
 		isvc := baselineISVC("admissio-scale-to-zero").Obj()
 		isvc.Spec.Engine.MinReplicas = ptr.To(0)
 		err := k8sClient.Create(suiteCtx, isvc)
@@ -143,19 +135,7 @@ var _ = ginkgo.Describe("ISVC admission matrix: replica bounds", func() {
 		Expect(err.Error()).To(ContainSubstring("InvalidScaleToZero"))
 	})
 
-	ginkgo.It("router defaults its own maxReplicas independently of the engine default", func() {
-		isvc := baselineISVC("admissio-router-max").Router(admissionRouter()).Obj()
-		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
-		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, isvc) })
-
-		got := mustGet("admissio-router-max")
-		Expect(got.Spec.Engine.MaxReplicas).To(Equal(3))
-		Expect(got.Spec.Router.MaxReplicas).To(Equal(2),
-			"router carries its own (smaller) maxReplicas default")
-		Expect(got.Spec.Router.MinReplicas).To(HaveValue(Equal(1)))
-	})
-
-	ginkgo.It("engine+decoder create defaults decoder bounds and resolves PDDisaggregated", func() {
+	ginkgo.It("engine+decoder create stores no deployment-mode annotation and no replica bounds", func() {
 		isvc := baselineISVC("admissio-decoder-bounds").
 			Decoder(&v1beta1.DecoderSpec{
 				PodSpec: v1beta1.PodSpec{
@@ -166,15 +146,12 @@ var _ = ginkgo.Describe("ISVC admission matrix: replica bounds", func() {
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, isvc) })
 
 		got := mustGet("admissio-decoder-bounds")
-		Expect(got.Annotations).To(HaveKeyWithValue(constants.DeploymentMode, string(constants.PDDisaggregated)))
-		Expect(got.Spec.Decoder.MinReplicas).To(HaveValue(Equal(1)))
-		Expect(got.Spec.Decoder.MaxReplicas).To(Equal(3))
+		Expect(got.Annotations).NotTo(HaveKey(constants.DeploymentMode))
+		Expect(got.Spec.Decoder.MinReplicas).To(BeNil())
+		Expect(got.Spec.Decoder.MaxReplicas).To(BeZero())
 	})
 
-	ginkgo.It("update that clears maxReplicas re-defaults it rather than storing zero", func() {
-		// The defaulter runs on UPDATE too: writing maxReplicas back to
-		// its zero value re-stamps the default instead of persisting an
-		// unbounded/zero max.
+	ginkgo.It("update that clears maxReplicas stores it unset", func() {
 		isvc := baselineISVC("admissio-update-clear-max").Obj()
 		isvc.Spec.Engine.MaxReplicas = 6
 		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
@@ -186,17 +163,17 @@ var _ = ginkgo.Describe("ISVC admission matrix: replica bounds", func() {
 		Expect(k8sClient.Update(suiteCtx, got)).To(Succeed())
 
 		got = mustGet("admissio-update-clear-max")
-		Expect(got.Spec.Engine.MaxReplicas).To(Equal(3),
-			"cleared maxReplicas must be re-defaulted on update, not stored as 0")
+		Expect(got.Spec.Engine.MaxReplicas).To(BeZero(),
+			"a cleared maxReplicas is stored unset; the controller resolves the configured default")
 	})
 
 	ginkgo.It("update raising minReplicas above the stored maxReplicas is rejected", func() {
 		isvc := baselineISVC("admissio-update-min-gt-max").Obj()
+		isvc.Spec.Engine.MaxReplicas = 3
 		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, isvc) })
 
 		got := mustGet("admissio-update-min-gt-max")
-		Expect(got.Spec.Engine.MaxReplicas).To(Equal(3))
 		got.Spec.Engine.MinReplicas = ptr.To(5)
 		err := k8sClient.Update(suiteCtx, got)
 		Expect(err).To(HaveOccurred())
@@ -205,10 +182,6 @@ var _ = ginkgo.Describe("ISVC admission matrix: replica bounds", func() {
 	})
 
 	ginkgo.It("update leaving replica bounds untouched admits unrelated metadata changes", func() {
-		// A stored, fully-defaulted object must keep accepting writes that
-		// do not touch the validated fields — the bounds check re-runs on
-		// every update and must not manufacture a rejection from the
-		// object's own defaulted state.
 		isvc := baselineISVC("admissio-update-unrelated").Obj()
 		Expect(k8sClient.Create(suiteCtx, isvc)).To(Succeed())
 		ginkgo.DeferCleanup(func() { _ = k8sClient.Delete(suiteCtx, isvc) })
@@ -222,14 +195,14 @@ var _ = ginkgo.Describe("ISVC admission matrix: replica bounds", func() {
 
 		got = mustGet("admissio-update-unrelated")
 		Expect(got.Labels).To(HaveKeyWithValue("admissio-touched", "true"))
-		Expect(got.Spec.Engine.MinReplicas).To(HaveValue(Equal(1)))
-		Expect(got.Spec.Engine.MaxReplicas).To(Equal(3))
+		Expect(got.Spec.Engine.MinReplicas).To(BeNil())
+		Expect(got.Spec.Engine.MaxReplicas).To(BeZero())
 	})
 })
 
-// Disruption-budget admission through the full chain: the shape checks
-// run on the defaulted object and name the exact per-Component field
-// path so the controller never builds an invalid PodDisruptionBudget.
+// Disruption-budget admission: the shape checks name the exact
+// per-Component field path so the controller never builds an invalid
+// PodDisruptionBudget.
 var _ = ginkgo.Describe("ISVC admission matrix: disruption budgets", func() {
 
 	ginkgo.BeforeEach(ensureNamespace)

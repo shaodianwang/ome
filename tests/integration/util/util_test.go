@@ -112,9 +112,10 @@ var _ = ginkgo.Describe("util.SeedDefaultConfigMaps", func() {
 		Expect(cm.Data).To(HaveKey("omenativeStatus"))
 		Expect(cm.Data["omenativeStatus"]).To(MatchJSON(`{"instanceStatusEncoding":"ColumnarV2","maxDecodedInstances":20000}`))
 		// The deploy block must round-trip the chart-equivalent replica and
-		// update-strategy defaults the ISVC defaulter reads at admission.
-		// Without the updateStrategy block an OMENative component is stamped
-		// with no rollout budget at all, since the binary carries none.
+		// update-strategy defaults the reconciler fills on the merged
+		// component spec. Without the updateStrategy block an OMENative
+		// component runs with no per-Component rollout budget, since the
+		// binary carries none.
 		Expect(cm.Data["deploy"]).To(MatchJSON(`{
 			"defaultDeploymentMode": "RawDeployment",
 			"replicas": {

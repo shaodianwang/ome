@@ -229,8 +229,8 @@ func chooseUpdateMode(strategy workload.UpdateStrategyType, running, target *cor
 		}
 		return updateModeRecreate, nil
 	case "":
-		// Default matches SurgeThenDrain so direct callers (tests,
-		// fuzz) skipping the defaulter get safe behavior.
+		// An unset type runs as SurgeThenDrain, the same reading
+		// BuildPlan applies.
 		return updateModeSurge, nil
 	default:
 		return 0, fmt.Errorf("unknown UpdateStrategy.Type %q", strategy)

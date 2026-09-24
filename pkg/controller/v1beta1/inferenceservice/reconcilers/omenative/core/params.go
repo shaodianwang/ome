@@ -61,8 +61,8 @@ type ReconcileParams struct {
 	// reconciled.
 	Component v1beta1.ComponentType
 
-	// ComponentExt is the merged ComponentExtensionSpec, including the
-	// `omenative` sub-block populated by the mutating webhook defaulter.
+	// ComponentExt is the merged ComponentExtensionSpec, with the values the
+	// reconciler fills after the runtime merge already applied.
 	ComponentExt *v1beta1.ComponentExtensionSpec
 
 	// WorkerSize is Worker.Size for multi-pod Instances. Zero when the

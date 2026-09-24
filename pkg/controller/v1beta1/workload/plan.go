@@ -18,9 +18,9 @@ import (
 //   - Multi-pod (desired.MultiPod=true): one "leader" Runner of size 1
 //     plus one "worker" Runner of the user-set Worker.Size.
 //
-// The mutating webhook fills in Lifecycle fields in production;
-// BuildPlan re-applies defaults inline for robustness against
-// pre-defaulter objects and test fixtures.
+// An unset Lifecycle field means its fixed fallback; BuildPlan resolves
+// those here, so a spec that names none of them plans the same way as
+// one that spells them out.
 func BuildPlan(component types.ComponentType, desired types.WorkloadDesiredSpec, observed types.WorkloadObservedState) (types.ComponentPlan, error) {
 	replicas := desired.Replicas
 	if replicas <= 0 {

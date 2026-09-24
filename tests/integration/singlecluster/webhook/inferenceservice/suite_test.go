@@ -1,8 +1,7 @@
 // Package inferenceservice hosts integration tests for the
 // InferenceService validating webhook. Boots envtest with the
-// testdata/webhooks.yaml fixture (validator only — no defaulter, no
-// pod mutator) so we don't have to register every other ISVC
-// admission handler in this manager.
+// testdata/webhooks.yaml fixture (validator only, no pod mutator) so we
+// don't have to register every other admission handler in this manager.
 package inferenceservice
 
 import (
