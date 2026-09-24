@@ -128,6 +128,7 @@ KIND_SPEC_GROUPS = (
     )),
     ("canary-rollouts", "Canary rollouts", (
         "canary_secondary_only", "rolloutpolicy_run", "canary_per_unit",
+        "policyref_canary_coordination",
     )),
     ("canary-lifecycle", "Canary lifecycle", (
         "canary_lifecycle_promote", "canary_lifecycle_pausefreeze",

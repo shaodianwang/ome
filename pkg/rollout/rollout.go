@@ -20,11 +20,17 @@ func Effective(isvc *v1beta1.InferenceService) *v1beta1.RolloutSpec {
 	return isvc.Spec.Rollout
 }
 
-// CanaryGroups returns every effective rollout group whose progression is
-// canary, in plan order. A group owns one canary unit — the router, or
+// CanaryGroups returns every effective rollout group carrying an EXECUTABLE
+// canary body, in plan order. A group owns one canary unit — the router, or
 // engine+decoder — and admission rejects two groups sharing a unit, so the
 // returned groups drive disjoint Components and their step machines cannot
 // contend.
+//
+// The inline body is the test on purpose: this answers "which ladder can be
+// stepped", not "which group declared canary". A ref-only group has no ladder
+// until a run pins its policy, so it is absent here and its Components take
+// the plan-gate hold instead. Consumers asking the declared question —
+// whether a Component is gated at all — must use RolloutGroup.DeclaredProgression.
 func CanaryGroups(isvc *v1beta1.InferenceService) []*v1beta1.RolloutGroup {
 	spec := Effective(isvc)
 	if spec == nil {

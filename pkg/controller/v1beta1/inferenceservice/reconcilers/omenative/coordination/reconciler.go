@@ -484,7 +484,11 @@ func podReadyAndServing(pod *corev1.Pod) bool {
 func dropCanaryOwned(comps []v1beta1.ComponentType, isvc *v1beta1.InferenceService) []v1beta1.ComponentType {
 	owned := map[v1beta1.ComponentType]struct{}{}
 	for _, g := range isvc.Spec.GetRolloutGroups() {
-		if g.Canary == nil {
+		// Declared kind, not an inline body: this reads the raw spec, where a
+		// policyRef-canary group carries no inline arm. Missing it leaves the
+		// Component in coordination's pod-proportional traffic writer, which
+		// then overwrites the canary's explicit step weight every reconcile.
+		if g.DeclaredProgression() != v1beta1.RolloutProgressionCanary {
 			continue
 		}
 		for _, c := range g.Components {

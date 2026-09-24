@@ -119,9 +119,7 @@ func PlanGateHoldPartition(isvc *v1beta1.InferenceService, component v1beta1.Com
 	member := false
 	for i := range isvc.Spec.Rollout.Groups {
 		g := &isvc.Spec.Rollout.Groups[i]
-		kind := g.Canary != nil ||
-			(g.BlueGreen == nil && g.RollingUpdate == nil && g.PolicyRef != nil && g.PolicyRef.Progression == v1beta1.RolloutProgressionCanary)
-		if kind && groupHasComponent(g, component) {
+		if g.DeclaredProgression() == v1beta1.RolloutProgressionCanary && groupHasComponent(g, component) {
 			member = true
 			break
 		}
