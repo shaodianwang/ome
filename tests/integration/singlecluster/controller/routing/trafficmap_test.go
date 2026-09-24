@@ -14,6 +14,7 @@ import (
 	"knative.dev/pkg/apis"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 	ometesting "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 )
 
@@ -192,6 +193,82 @@ var _ = ginkgo.Describe("TrafficMap routing controller", func() {
 			g.Expect(cond.Reason).To(gomega.Equal(v1beta1.TrafficMapReasonNotPlaced))
 		}).Should(gomega.Succeed())
 	})
+
+	ginkgo.It("pre-arms an absent cluster, drains its first route entry, and restores it on removal", func() {
+		name := uniqueName("svc")
+		isvc := createISVC(isvcNS, name, &v1beta1.PlacementSpec{
+			Mode:         v1beta1.PlacementModeSplit,
+			Requirements: "accelerator=test",
+		})
+
+		ginkgo.By("adding a durable hold before the target cluster is routable")
+		generation := updateISVCMetadata(isvc, func(cur *v1beta1.InferenceService) {
+			if cur.Annotations == nil {
+				cur.Annotations = make(map[string]string)
+			}
+			cur.Annotations[constants.TrafficDrainAnnotation] =
+				`{"turnup-hold":{"cluster":"cluster-b","reason":"hold new cluster until verified"}}`
+		})
+
+		gomega.Eventually(func(g gomega.Gomega) {
+			tm := getTrafficMap(g, isvcNS, name)
+			g.Expect(tm.Spec.Entries).To(gomega.BeEmpty())
+			cond := apimeta.FindStatusCondition(tm.Status.Conditions, v1beta1.TrafficMapOverrideActive)
+			g.Expect(cond).NotTo(gomega.BeNil())
+			g.Expect(cond.Status).To(gomega.Equal(metav1.ConditionFalse))
+			g.Expect(cond.Reason).To(gomega.Equal(v1beta1.TrafficMapReasonOverridesPending))
+		}).Should(gomega.Succeed())
+
+		ginkgo.By("placing an incumbent arm while the held cluster is still absent")
+		placeISVC(isvc, candidate("cluster-a", "cluster-a.example.com", 7, 7))
+		gomega.Eventually(func(g gomega.Gomega) {
+			tm := getTrafficMap(g, isvcNS, name)
+			g.Expect(tm.Spec.Entries).To(gomega.HaveLen(1))
+			g.Expect(tm.Spec.Entries[0].Cluster).To(gomega.Equal("cluster-a"))
+			g.Expect(tm.Spec.Entries[0].Weight).To(gomega.Equal(int32(1)))
+			cond := apimeta.FindStatusCondition(tm.Status.Conditions, v1beta1.TrafficMapOverrideActive)
+			g.Expect(cond).NotTo(gomega.BeNil())
+			g.Expect(cond.Reason).To(gomega.Equal(v1beta1.TrafficMapReasonOverridesPending))
+		}).Should(gomega.Succeed())
+
+		ginkgo.By("admitting the held cluster and requiring its first emitted weight to be zero")
+		placeISVC(isvc,
+			candidate("cluster-a", "cluster-a.example.com", 7, 7),
+			candidate("cluster-b", "cluster-b.example.com", 3, 3))
+		gomega.Eventually(func(g gomega.Gomega) {
+			tm := getTrafficMap(g, isvcNS, name)
+			byCluster := entriesByCluster(g, tm)
+			g.Expect(byCluster).To(gomega.HaveLen(2))
+			g.Expect(byCluster["cluster-a"].Weight).To(gomega.Equal(int32(7)))
+			g.Expect(byCluster["cluster-b"].Weight).To(gomega.Equal(int32(0)))
+			g.Expect(byCluster["cluster-b"].Healthy).To(gomega.BeTrue())
+			g.Expect(byCluster["cluster-b"].DrainRefs).To(gomega.Equal([]string{"turnup-hold"}))
+			cond := apimeta.FindStatusCondition(tm.Status.Conditions, v1beta1.TrafficMapOverrideActive)
+			g.Expect(cond).NotTo(gomega.BeNil())
+			g.Expect(cond.Status).To(gomega.Equal(metav1.ConditionTrue))
+			g.Expect(cond.Reason).To(gomega.Equal(v1beta1.TrafficMapReasonOverridesApplied))
+		}).Should(gomega.Succeed())
+
+		ginkgo.By("removing the annotation without changing spec generation")
+		updatedGeneration := updateISVCMetadata(isvc, func(cur *v1beta1.InferenceService) {
+			delete(cur.Annotations, constants.TrafficDrainAnnotation)
+		})
+		gomega.Expect(updatedGeneration).To(gomega.Equal(generation),
+			"a metadata-only drain update must not require a workload generation change")
+
+		ginkgo.By("observing the manager watch restore the current computed weight")
+		gomega.Eventually(func(g gomega.Gomega) {
+			tm := getTrafficMap(g, isvcNS, name)
+			byCluster := entriesByCluster(g, tm)
+			g.Expect(byCluster["cluster-a"].Weight).To(gomega.Equal(int32(7)))
+			g.Expect(byCluster["cluster-b"].Weight).To(gomega.Equal(int32(3)))
+			g.Expect(byCluster["cluster-b"].DrainRefs).To(gomega.BeEmpty())
+			cond := apimeta.FindStatusCondition(tm.Status.Conditions, v1beta1.TrafficMapOverrideActive)
+			g.Expect(cond).NotTo(gomega.BeNil())
+			g.Expect(cond.Status).To(gomega.Equal(metav1.ConditionFalse))
+			g.Expect(cond.Reason).To(gomega.Equal(v1beta1.TrafficMapReasonNoOverrides))
+		}).Should(gomega.Succeed())
+	})
 })
 
 // createISVC creates a minimal InferenceService (single Engine runner) with an
@@ -250,6 +327,23 @@ func updateISVCStatusWithOffset(offset int, isvc *v1beta1.InferenceService, muta
 		mutate(cur)
 		g.Expect(k8sClient.Status().Update(suiteCtx, cur)).To(gomega.Succeed())
 	}).Should(gomega.Succeed())
+}
+
+// updateISVCMetadata applies a metadata-only change and returns the persisted
+// generation. Kubernetes does not bump generation for annotations, so this
+// exercises the routing controller's explicit annotation predicate rather than
+// relying on a spec update to wake it.
+func updateISVCMetadata(isvc *v1beta1.InferenceService, mutate func(*v1beta1.InferenceService)) int64 {
+	key := types.NamespacedName{Namespace: isvc.Namespace, Name: isvc.Name}
+	var generation int64
+	gomega.EventuallyWithOffset(1, func(g gomega.Gomega) {
+		cur := &v1beta1.InferenceService{}
+		g.Expect(k8sClient.Get(suiteCtx, key, cur)).To(gomega.Succeed())
+		mutate(cur)
+		g.Expect(k8sClient.Update(suiteCtx, cur)).To(gomega.Succeed())
+		generation = cur.Generation
+	}).Should(gomega.Succeed())
+	return generation
 }
 
 // getTrafficMap fetches the ISVC's TrafficMap (named after it), failing the

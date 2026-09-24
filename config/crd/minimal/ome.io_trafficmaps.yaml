@@ -26,6 +26,9 @@ spec:
     - jsonPath: .status.conditions[?(@.type=="Routable")].status
       name: Routable
       type: string
+    - jsonPath: .status.conditions[?(@.type=="OverrideActive")].status
+      name: Override
+      type: string
     - jsonPath: .status.conditions[?(@.type=="Routable")].reason
       name: Reason
       type: string

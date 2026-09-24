@@ -15,6 +15,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 	placementendpoint "github.com/ome-projects/ome/pkg/controller/v1beta1/placement/endpoint"
 	ometesting "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 )
@@ -173,6 +174,39 @@ var _ = ginkgo.Describe("TrafficMap status ownership", func() {
 				trafficMap.Status.Conditions, v1beta1.TrafficMapPublished,
 			)).NotTo(gomega.BeNil())
 		}).Should(gomega.Succeed())
+
+		ginkgo.By("applying a manual hold without taking publisher-owned status")
+		updateISVCMetadata(isvc, func(current *v1beta1.InferenceService) {
+			if current.Annotations == nil {
+				current.Annotations = make(map[string]string)
+			}
+			current.Annotations[constants.TrafficDrainAnnotation] = `{"incident":{"cluster":"cluster-a","reason":"maintenance"}}`
+		})
+		gomega.Eventually(func(g gomega.Gomega) {
+			trafficMap := getTrafficMap(g, namespace, name)
+			g.Expect(trafficMap.Spec.Entries).To(gomega.HaveLen(1))
+			g.Expect(trafficMap.Spec.Entries[0].Weight).To(gomega.BeZero())
+			g.Expect(trafficMap.Spec.Entries[0].DrainRefs).To(gomega.Equal([]string{"incident"}))
+			active := apimeta.FindStatusCondition(trafficMap.Status.Conditions, v1beta1.TrafficMapOverrideActive)
+			g.Expect(active).NotTo(gomega.BeNil())
+			g.Expect(active.Status).To(gomega.Equal(metav1.ConditionTrue))
+			published := apimeta.FindStatusCondition(trafficMap.Status.Conditions, v1beta1.TrafficMapPublished)
+			g.Expect(published).NotTo(gomega.BeNil())
+			g.Expect(published.Status).To(gomega.Equal(metav1.ConditionTrue))
+			owners := trafficMapStatusFieldOwners(trafficMap)
+			g.Expect(owners["ome-trafficmap-routing"]).To(gomega.ContainSubstring("OverrideActive"))
+			g.Expect(owners["ome-trafficmap-publisher"]).NotTo(gomega.ContainSubstring("OverrideActive"))
+		}).Should(gomega.Succeed())
+
+		ginkgo.By("publishing the drained map without taking the manual-hold condition")
+		result, err = reconciler.Reconcile(suiteCtx, ctrl.Request{NamespacedName: key})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(result).To(gomega.Equal(ctrl.Result{}))
+		trafficMap := getTrafficMap(gomega.Default, namespace, name)
+		active := apimeta.FindStatusCondition(trafficMap.Status.Conditions, v1beta1.TrafficMapOverrideActive)
+		gomega.Expect(active).NotTo(gomega.BeNil())
+		gomega.Expect(active.Status).To(gomega.Equal(metav1.ConditionTrue))
+		gomega.Expect(trafficMap.Status.ObservedTrafficMapGeneration).To(gomega.Equal(trafficMap.Generation))
 
 		ginkgo.By("letting the routing writer update Routable independently")
 		updateISVCStatus(isvc, func(current *v1beta1.InferenceService) {

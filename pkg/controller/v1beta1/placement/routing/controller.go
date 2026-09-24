@@ -27,7 +27,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 	placementcontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/placement"
+	"github.com/ome-projects/ome/pkg/trafficdrain"
 	"github.com/ome-projects/ome/pkg/validation"
 )
 
@@ -47,7 +49,7 @@ const trafficMapRoutableStatusFieldOwner = "ome-trafficmap-routing"
 // routable: an empty table plus a Routable=False reason. When routing becomes
 // ineligible, a TrafficMap-backed publisher may hold the map through its
 // finalizer until external state is withdrawn. The routing controller writes
-// spec, sourceUID, and Routable; the publisher owns its disjoint status fields.
+// spec, sourceUID, and routing conditions; the publisher owns its disjoint status fields.
 type Reconciler struct {
 	client.Client
 	// APIReader confirms cache misses before state is forgotten. A transient
@@ -97,6 +99,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, fmt.Errorf("validate routing policy: %w", err)
 	}
 
+	overrides, err := trafficdrain.FromAnnotations(isvc.Annotations)
+	if err != nil {
+		// Preserve the last valid map if malformed intent reaches storage;
+		// treating it as absent could restore traffic during a drain.
+		return ctrl.Result{}, fmt.Errorf("parse %s: %w", constants.TrafficDrainAnnotation, err)
+	}
+
 	probePolicy, err := ResolveProbePolicy(r.Config, &isvc.Spec)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("resolve probe policy: %w", err)
@@ -143,11 +152,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	// Unroutable is a state of the map, not a reason to remove it: build the
 	// table (possibly empty) and let the condition carry the explanation.
-	spec, status, reason := buildSpec(isvc, probePolicy, capacityPolicy, r.Prober, r.Capacity)
+	spec, status, reason := buildSpec(isvc, probePolicy, capacityPolicy, r.Prober, r.Capacity, overrides...)
 	if err := r.apply(ctx, isvc, spec); err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.setRoutingStatus(ctx, isvc, status, reason, capacityPolicy.IsEnabled()); err != nil {
+	if err := r.setRoutingStatus(ctx, isvc, status, reason, capacityPolicy.IsEnabled(), overrides...); err != nil {
 		return ctrl.Result{}, err
 	}
 	recordCapacityFallbackMetric(isvc.Namespace, isvc.Name, capacityPolicy.IsEnabled(), spec)
@@ -296,7 +305,7 @@ func (r *Reconciler) apply(ctx context.Context, isvc *v1beta1.InferenceService, 
 // manager, so they coexist with the publisher's independently owned Published
 // condition.
 func (r *Reconciler) setRoutingStatus(ctx context.Context, isvc *v1beta1.InferenceService,
-	status metav1.ConditionStatus, reason string, capacityEnabled bool) error {
+	status metav1.ConditionStatus, reason string, capacityEnabled bool, overrides ...trafficdrain.Override) error {
 	key := types.NamespacedName{Name: isvc.Name, Namespace: isvc.Namespace}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		tm := &v1beta1.TrafficMap{}
@@ -321,6 +330,8 @@ func (r *Reconciler) setRoutingStatus(ctx context.Context, isvc *v1beta1.Inferen
 		apimeta.SetStatusCondition(&tm.Status.Conditions, cond)
 		apimeta.SetStatusCondition(&tm.Status.Conditions,
 			capacityFallbackCondition(tm.Spec, capacityEnabled, tm.Generation))
+		apimeta.SetStatusCondition(&tm.Status.Conditions,
+			overrideActiveCondition(tm.Spec.Entries, overrides, tm.Generation))
 		return r.Status().Apply(ctx, trafficMapRoutingStatusApply(tm),
 			client.FieldOwner(trafficMapRoutableStatusFieldOwner), client.ForceOwnership)
 	})
@@ -331,10 +342,11 @@ func trafficMapRoutingStatusApply(trafficMap *v1beta1.TrafficMap) runtime.ApplyC
 	if trafficMap.Status.SourceUID != "" {
 		status["sourceUID"] = string(trafficMap.Status.SourceUID)
 	}
-	conditions := make([]any, 0, 2)
+	conditions := make([]any, 0, 3)
 	for _, conditionType := range []string{
 		v1beta1.TrafficMapRoutable,
 		v1beta1.TrafficMapCapacityFallback,
+		v1beta1.TrafficMapOverrideActive,
 	} {
 		if condition := apimeta.FindStatusCondition(trafficMap.Status.Conditions, conditionType); condition != nil {
 			conditions = append(conditions, trafficMapRoutingConditionApply(*condition))
@@ -366,6 +378,41 @@ func trafficMapRoutingConditionApply(condition metav1.Condition) map[string]any 
 	return apply
 }
 
+func overrideActiveCondition(entries []v1beta1.TrafficMapEntry, overrides []trafficdrain.Override,
+	generation int64) metav1.Condition {
+	applied := make(map[string]struct{}, len(overrides))
+	arms := 0
+	for i := range entries {
+		if len(entries[i].DrainRefs) == 0 {
+			continue
+		}
+		arms++
+		for _, ref := range entries[i].DrainRefs {
+			applied[ref] = struct{}{}
+		}
+	}
+
+	cond := metav1.Condition{
+		Type:               v1beta1.TrafficMapOverrideActive,
+		Status:             metav1.ConditionFalse,
+		Reason:             v1beta1.TrafficMapReasonNoOverrides,
+		Message:            "no traffic-drain annotation override is configured",
+		ObservedGeneration: generation,
+	}
+	if len(overrides) > 0 && len(applied) == 0 {
+		cond.Reason = v1beta1.TrafficMapReasonOverridesPending
+		cond.Message = fmt.Sprintf("%d traffic-drain annotation override(s) pending; no matching routable arm", len(overrides))
+		return cond
+	}
+	if len(applied) > 0 {
+		cond.Status = metav1.ConditionTrue
+		cond.Reason = v1beta1.TrafficMapReasonOverridesApplied
+		cond.Message = fmt.Sprintf("%d of %d traffic-drain annotation override(s) active across %d route arm(s); inspect spec.entries[].drainRefs",
+			len(applied), len(overrides), arms)
+	}
+	return cond
+}
+
 // routableMessage renders the operator-facing explanation for a Routable reason.
 // The entry count is included because "empty" and "degraded" are different
 // problems and the reason alone does not distinguish how many homes exist.
@@ -377,6 +424,8 @@ func routableMessage(reason string, status metav1.ConditionStatus, entries int) 
 		return "placed, but no admitted home reports an addressable endpoint"
 	case v1beta1.TrafficMapReasonAllHomesUnready:
 		return fmt.Sprintf("%d home(s) addressable but none has ready replicas; all route weights are zero", entries)
+	case v1beta1.TrafficMapReasonTrafficDrain:
+		return fmt.Sprintf("manual traffic-drain overrides set all %d route arm(s) to zero", entries)
 	case v1beta1.TrafficMapReasonNoRoutableCapacity:
 		return fmt.Sprintf("%d home(s) addressable but none has positive routable capacity; all route weights are zero", entries)
 	case v1beta1.TrafficMapReasonAllHomesProbeFailed:
@@ -518,6 +567,7 @@ func buildSpec(
 	capacityPolicy ResolvedCapacityPolicy,
 	probe *Prober,
 	capacity *CapacityPoller,
+	overrides ...trafficdrain.Override,
 ) (v1beta1.TrafficMapSpec, metav1.ConditionStatus, string) {
 	empty := v1beta1.TrafficMapSpec{
 		Service:                isvc.Name,
@@ -578,6 +628,7 @@ func buildSpec(
 			Probe: probe.Provenance(targets[i]),
 		}
 	}
+	manualDrainCausedAllZero := applyTrafficDrains(entries, overrides)
 	hasPositiveWeight := slices.ContainsFunc(entries, func(e v1beta1.TrafficMapEntry) bool { return e.Weight > 0 })
 	status := metav1.ConditionFalse
 	reason := v1beta1.TrafficMapReasonNoRoutableCapacity
@@ -587,6 +638,8 @@ func buildSpec(
 		if allProbesFailed(homes) {
 			reason = v1beta1.TrafficMapReasonAllHomesProbeFailed
 		}
+	} else if manualDrainCausedAllZero {
+		reason = v1beta1.TrafficMapReasonTrafficDrain
 	} else if !slices.ContainsFunc(homes, func(h Home) bool { return h.Ready > 0 }) {
 		reason = v1beta1.TrafficMapReasonAllHomesUnready
 	} else if !slices.ContainsFunc(homes, func(h Home) bool { return h.RoutableReplicas() > 0 }) {
@@ -639,6 +692,23 @@ func targetsForInferenceService(isvc *v1beta1.InferenceService, policyDigest str
 		targets = append(targets, target)
 	}
 	return targets
+}
+
+// applyTrafficDrains applies manual holds after automatic capacity and health.
+func applyTrafficDrains(entries []v1beta1.TrafficMapEntry, overrides []trafficdrain.Override) bool {
+	hadPositive := slices.ContainsFunc(entries, func(e v1beta1.TrafficMapEntry) bool { return e.Weight > 0 })
+	for i := range entries {
+		for j := range overrides {
+			if overrides[j].Cluster == entries[i].Cluster {
+				entries[i].DrainRefs = append(entries[i].DrainRefs, overrides[j].ID)
+			}
+		}
+		if len(entries[i].DrainRefs) > 0 {
+			sort.Strings(entries[i].DrainRefs)
+			entries[i].Weight = 0
+		}
+	}
+	return hadPositive && !slices.ContainsFunc(entries, func(e v1beta1.TrafficMapEntry) bool { return e.Weight > 0 })
 }
 
 // allocationSource names which input produced the entry's allocation. Endpoint
@@ -772,6 +842,11 @@ var routingTableChange = predicate.Funcs{
 			return true
 		}
 		if !equality.Semantic.DeepEqual(routingPublisherSpec(oldISVC), routingPublisherSpec(newISVC)) {
+			return true
+		}
+		oldDrain, oldHasDrain := oldISVC.Annotations[constants.TrafficDrainAnnotation]
+		newDrain, newHasDrain := newISVC.Annotations[constants.TrafficDrainAnnotation]
+		if oldHasDrain != newHasDrain || oldDrain != newDrain {
 			return true
 		}
 		// The condition is part of what we write, so a change in status or reason

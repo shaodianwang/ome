@@ -27,6 +27,9 @@ spec:
     - jsonPath: .status.conditions[?(@.type=="Routable")].status
       name: Routable
       type: string
+    - jsonPath: .status.conditions[?(@.type=="OverrideActive")].status
+      name: Override
+      type: string
     - jsonPath: .status.conditions[?(@.type=="Routable")].reason
       name: Reason
       type: string
@@ -77,6 +80,11 @@ spec:
                       type: object
                     cluster:
                       type: string
+                    drainRefs:
+                      items:
+                        type: string
+                      type: array
+                      x-kubernetes-list-type: set
                     endpoint:
                       type: string
                     healthy:

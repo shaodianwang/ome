@@ -1923,6 +1923,7 @@ func TestRoutingStatusApplyIsFieldIsolated(t *testing.T) {
 	tm.Status.Conditions = []metav1.Condition{
 		{Type: v1beta1.TrafficMapRoutable, Status: metav1.ConditionTrue, Reason: "Routable"},
 		{Type: v1beta1.TrafficMapCapacityFallback, Status: metav1.ConditionTrue, Reason: "EndpointCapacityUnavailable"},
+		{Type: v1beta1.TrafficMapOverrideActive, Status: metav1.ConditionTrue, Reason: "OverridesApplied"},
 		{Type: v1beta1.TrafficMapPublished, Status: metav1.ConditionTrue, Reason: "Published"},
 	}
 
@@ -1936,9 +1937,10 @@ func TestRoutingStatusApplyIsFieldIsolated(t *testing.T) {
 	_, found := status["publisher"]
 	assert.False(t, found, "routing SSA must not own publisher status")
 	conditions := status["conditions"].([]any)
-	require.Len(t, conditions, 2)
+	require.Len(t, conditions, 3)
 	assert.Equal(t, v1beta1.TrafficMapRoutable, conditions[0].(map[string]any)["type"])
 	assert.Equal(t, v1beta1.TrafficMapCapacityFallback, conditions[1].(map[string]any)["type"])
+	assert.Equal(t, v1beta1.TrafficMapOverrideActive, conditions[2].(map[string]any)["type"])
 }
 
 func TestEnqueueTrafficMapSourceDoesNotRequireOwnerReference(t *testing.T) {

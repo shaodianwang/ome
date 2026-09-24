@@ -154,3 +154,23 @@ func TestTrafficMapProbe_RoundTrips(t *testing.T) {
 		t.Fatalf("probe round trip:\n got %+v\nwant %+v", out, in)
 	}
 }
+
+func TestTrafficMapEntry_DrainRefsRoundTrip(t *testing.T) {
+	in := TrafficMapEntry{
+		Cluster:   "cluster-a",
+		Weight:    0,
+		Healthy:   true,
+		DrainRefs: []string{"incident-a", "maintenance-a"},
+	}
+	raw, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out TrafficMapEntry
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(in.DrainRefs, out.DrainRefs) {
+		t.Fatalf("DrainRefs = %v, want %v", out.DrainRefs, in.DrainRefs)
+	}
+}

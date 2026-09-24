@@ -65,6 +65,7 @@ var (
 // plane's placement decision and must NOT ride along onto the derived ISVC,
 // where the worker cluster's reconciler would (re)interpret them: the
 // placement selectors (candidate selection is the control plane's job), the
+// traffic-drain override (one shared cross-cluster routing decision), the
 // rollout operator-verbs (promote/rollback/repin advance one shared rollout,
 // owned by the control plane — a copy on every candidate would each consume
 // the verb), and the rollout plan-source provenance (system-authored during
@@ -74,6 +75,7 @@ var (
 var controlPlaneOnlyAnnotations = []string{
 	AcceleratorRequirementsAnnotation,
 	ClusterSelectorAnnotation,
+	constants.TrafficDrainAnnotation,
 	constants.RolloutPromoteAnnotation,
 	constants.RolloutRollbackAnnotation,
 	constants.RolloutRepinAnnotation,

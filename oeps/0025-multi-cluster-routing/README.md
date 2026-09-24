@@ -333,8 +333,8 @@ Two writers, one object:
 
 - The **routing controller** owns `spec` — recomputes `entries` whenever
   `status.placement` or the home's quota allocation changes — plus
-  `status.sourceUID` and the TrafficMap's `Routable` and `CapacityFallback`
-  conditions.
+  `status.sourceUID` and the TrafficMap's `Routable`, `CapacityFallback`, and
+  `OverrideActive` conditions.
 - The **publisher** patches the TrafficMap's `Published`, `gatewayRef`, and
   observed-generation fields plus its publisher journal. It does not replace
   sibling status, `sourceUID`, or the routing controller's conditions.
@@ -669,6 +669,50 @@ unpublish does not require the source or its owner reference to remain readable.
   for one ISVC cannot be claimed by another. A malformed, mismatched, or unlisted
   annotation value causes no external mutation and reports a migration-blocked
   condition; the controller never treats arbitrary annotation text as a target.
+
+### Manual traffic holds
+
+Automatic readiness recovery can return traffic to a cluster while an operator
+still needs it isolated. A manual hold is one ID-keyed entry in the source
+InferenceService's `ome.io/traffic-drain` annotation. It forces that cluster's
+final weight to zero after automatic capacity and probe policy are evaluated.
+
+```yaml
+metadata:
+  annotations:
+    ome.io/traffic-drain: >-
+      {"incident-a":{"cluster":"cluster-a","reason":"regional mitigation"}}
+```
+
+The value is a strict JSON object. Each entry requires exactly `cluster` and a
+nonempty `reason`; duplicate IDs or fields, unknown fields, and malformed values
+are rejected by admission. If invalid intent reaches storage, reconciliation
+preserves the last valid TrafficMap instead of dropping the hold.
+
+Several IDs may hold the same arm. Removing one preserves the others; removing
+the final ID restores the current automatic weight. Probe recovery cannot clear
+an active hold, and removing a hold cannot restore a home that automatic policy
+still drains. A hold for an absent arm stays pending and applies to that arm's
+first emitted entry. `spec.entries[].drainRefs` records the sorted applied IDs,
+and the routing-owned `OverrideActive` condition reports applied, pending, or
+absent holds without changing the publisher's `Published` condition.
+
+The annotation stays on the source ISVC. Placement strips it from derived
+workload ISVCs, so a hold does not change replica allocation or roll Pods.
+Writers must read-modify-write the ID map with the ISVC resourceVersion and retry
+conflicts; replacing the whole value from a stale read can erase another
+operator's hold. A GitOps installation must ignore this exact annotation and
+set `RespectIgnoreDifferences=true` on every source-ISVC Application, preserving
+management of unrelated metadata.
+
+This control sets weights to zero; it does not choose arbitrary positive
+weights. Holding every arm at zero leaves no eligible destination. Static xDS
+fallback requires a separate explicit opt-out: set this source's
+`spec.routing.enabled` to `false`, wait for the TrafficMap publisher finalizer to
+withdraw its claimed weights, then verify absent runtime keys on every client.
+The authored route weights then apply. Stopping a publisher without withdrawing
+its values leaves the last dynamic values in place. Re-enabling routing returns
+to current automatic capacity weights, with any retained manual holds applied.
 
 ### Publisher contract (pluggable, gateway-neutral)
 

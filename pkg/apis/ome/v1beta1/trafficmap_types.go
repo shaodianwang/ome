@@ -19,6 +19,17 @@ const TrafficMapPublished = "Published"
 // state of the map rather than its absence.
 const TrafficMapRoutable = "Routable"
 
+// TrafficMapOverrideActive reports whether source traffic-drain annotation IDs
+// currently override one or more route-arm weights.
+const TrafficMapOverrideActive = "OverrideActive"
+
+// Reasons for the OverrideActive condition.
+const (
+	TrafficMapReasonOverridesApplied = "OverridesApplied"
+	TrafficMapReasonOverridesPending = "OverridesPending"
+	TrafficMapReasonNoOverrides      = "NoOverrides"
+)
+
 // TrafficMapCapacityFallback is the condition type reporting whether one or
 // more homes are using the control-plane allocation because configured
 // endpoint capacity could not produce a usable ceiling. It is owned by the
@@ -41,6 +52,7 @@ const (
 // an empty table. AllHomesUnready and NoRoutableCapacity accompany an all-zero
 // table. AllHomesProbeFailed accompanies either the all-zero Drain policy or a
 // positive PreserveTraffic fallback among homes with ready capacity.
+// TrafficDrain identifies an all-zero result caused by manual overrides.
 const (
 	TrafficMapReasonRoutable            = "Routable"
 	TrafficMapReasonNotPlaced           = "NotPlaced"
@@ -48,6 +60,7 @@ const (
 	TrafficMapReasonAllHomesUnready     = "AllHomesUnready"
 	TrafficMapReasonNoRoutableCapacity  = "NoRoutableCapacity"
 	TrafficMapReasonAllHomesProbeFailed = "AllHomesProbeFailed"
+	TrafficMapReasonTrafficDrain        = "TrafficDrain"
 )
 
 // Reasons for the CapacityFallback condition. The condition has abnormal-true
@@ -108,7 +121,7 @@ const (
 // is garbage-collected with the ISVC), for as long as that ISVC is routed --
 // including while no home is routable, when the table is empty or all-zero and
 // the Routable condition says why. The routing controller owns spec, SourceUID,
-// and the Routable and CapacityFallback conditions; the publisher owns the
+// and the Routable, CapacityFallback, and OverrideActive conditions; the publisher owns the
 // rest of status.
 // +genclient
 // +k8s:openapi-gen=true
@@ -118,6 +131,7 @@ const (
 // +kubebuilder:printcolumn:name="Mode",type=string,JSONPath=`.spec.mode`
 // +kubebuilder:printcolumn:name="Published",type=string,JSONPath=`.status.conditions[?(@.type=="Published")].status`
 // +kubebuilder:printcolumn:name="Routable",type=string,JSONPath=`.status.conditions[?(@.type=="Routable")].status`
+// +kubebuilder:printcolumn:name="Override",type=string,JSONPath=`.status.conditions[?(@.type=="OverrideActive")].status`
 // +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Routable")].reason`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 type TrafficMap struct {
@@ -186,6 +200,7 @@ type TrafficMapEntry struct {
 	// percentage. Unready and zero-capacity homes always have weight 0. When every
 	// probe conclusively fails, PreserveTraffic may retain capacity-derived
 	// weights for ready homes; Drain writes an authoritative all-zero table.
+	// Manual DrainRefs can force any arm to zero after these automatic inputs.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=1000000
@@ -193,7 +208,8 @@ type TrafficMapEntry struct {
 
 	// Healthy is the readiness-plus-probe result for this home. An unready home is
 	// always weighted 0; a probe-unhealthy home may retain a positive weight only
-	// under a fleet-wide PreserveTraffic fallback.
+	// under a fleet-wide PreserveTraffic fallback. A manual DrainRefs override
+	// can set a healthy home to zero without changing its health evidence.
 	// +optional
 	Healthy bool `json:"healthy"`
 
@@ -209,6 +225,13 @@ type TrafficMapEntry struct {
 	// path's (ingress, DNS, certificate, route).
 	// +optional
 	Probe *TrafficMapProbe `json:"probe,omitempty"`
+
+	// DrainRefs names the independent override IDs in the source
+	// InferenceService's ome.io/traffic-drain annotation that force this
+	// entry's weight to zero. Empty means no manual override contributed.
+	// +optional
+	// +listType=set
+	DrainRefs []string `json:"drainRefs,omitempty"`
 }
 
 // TrafficMapProbe records what the active end-to-end probe observed for one
