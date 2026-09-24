@@ -502,11 +502,14 @@ func buildAppendMigration(writer statusWriter, reads client.Reader, ir *v1beta1.
 //     unconfigured and trims nothing. Non-terminal entries are never
 //     trimmed; terminal entries lacking CompletedAt are kept.
 //     INVARIANT: status may forget only what the ledger remembers — an
-//     aged terminal entry whose UUID has no terminal ledger row is
-//     retained (logged at V(1), once per pass with the count), because
-//     trimming it would let step 1 re-synthesize the UUID from its
-//     Started row as fresh Accepted work. The expiry path's hard
-//     ledger mirror means this backstop should never trigger.
+//     aged Completed/Failed entry whose UUID has no terminal ledger row
+//     is retained (logged at V(1), once per pass with the count),
+//     because trimming it would let step 1 re-synthesize the UUID from
+//     its Started row as fresh Accepted work. The expiry path's hard
+//     ledger mirror means this backstop should never trigger. Relocated
+//     entries are exempt: they are born terminal, step 1 never imports
+//     Auto rows, and the ledger prunes their AutoRecover rows once the
+//     rebuilt instance is Ready — so the window alone ages them out.
 //
 // One status write covers both; the committed slice mirrors onto the
 // caller's in-memory IR. Ledger read is best-effort — an unreadable
@@ -547,17 +550,18 @@ func (r *Reconciler) syncMigrationEntries(ctx context.Context, log logr.Logger, 
 		}
 		changed := false
 
-		// Trim aged-out terminal entries — but only those the ledger
-		// also records terminally (see the invariant in the func doc).
-		// A zero window is unconfigured: nothing ages out, because there
-		// is no operator-stated horizon to age against.
+		// Trim aged-out terminal entries. Completed/Failed entries need
+		// the ledger to record them terminally (see the invariant in the
+		// func doc); Relocated entries never do. A zero window is
+		// unconfigured: nothing ages out, because there is no
+		// operator-stated horizon to age against.
 		cutoff := r.now().Add(-recordWindow)
 		trimBlocked = 0
 		kept := fresh.Status.Migrations[:0]
 		for i := range fresh.Status.Migrations {
 			e := fresh.Status.Migrations[i]
 			if recordWindow > 0 && e.Phase.Terminal() && e.CompletedAt != nil && e.CompletedAt.Time.Before(cutoff) {
-				if ledger.HasCompletedOrFailedRequest(e.RequestUUID) {
+				if e.Phase == v1beta1.MigrationPhaseRelocated || ledger.HasCompletedOrFailedRequest(e.RequestUUID) {
 					changed = true
 					continue
 				}

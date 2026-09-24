@@ -941,6 +941,45 @@ func TestSyncMigrationEntries_TrimsAgedTerminal(t *testing.T) {
 		"the trimmed slice must mirror back onto the in-memory IR")
 }
 
+// TestSyncMigrationEntries_TrimsAgedRelocatedWithoutLedgerRow pins that a
+// born-terminal Relocated (Auto) record ages out on the window alone. Its
+// AutoRecover ledger row is pruned when the rebuilt instance is observed
+// Ready, and the upgrade import never synthesizes Auto rows, so the
+// ledger-witness backstop guarding Completed/Failed entries has nothing
+// to protect here.
+func TestSyncMigrationEntries_TrimsAgedRelocatedWithoutLedgerRow(t *testing.T) {
+	g := gomega.NewWithT(t)
+	born := metav1.NewTime(migrationTestNow.Add(-migrationTestRecordWindow - 2*time.Hour))
+	succeededAt := metav1.NewTime(migrationTestNow.Add(-migrationTestRecordWindow - time.Hour))
+
+	entry := acceptedEntry("u-relocated-succeeded")
+	entry.Trigger = v1beta1.MigrationTriggerAuto
+	entry.Phase = v1beta1.MigrationPhaseRelocated
+	entry.Reason = audit.ReasonAutoRecover
+	entry.StartedAt = born
+	entry.Deadline = born
+	entry.CompletedAt = &succeededAt
+	succeeded := true
+	entry.Succeeded = &succeeded
+
+	ir := baselineIR("llama-engine", "default", 1)
+	ir.Status.Migrations = []v1beta1.MigrationStatus{entry}
+	parent := migrationParent(nil, false)
+	// The ledger no longer holds the UUID: the success prune removed its
+	// AutoRecover row when the instance came Ready.
+	cm := ledgerCMForOwner(t, parent.Name, parent.Namespace, &audit.Ledger{})
+	r, c, _, ir, parent := newConsumeFixture(t, ir, parent, cm)
+
+	g.Expect(r.syncMigrationEntries(context.Background(), r.Log, ir, parent, migrationTestTimeout, migrationTestRecordWindow)).To(gomega.Succeed())
+
+	fresh := &v1beta1.InferenceReplica{}
+	g.Expect(c.Get(context.Background(), types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace}, fresh)).To(gomega.Succeed())
+	g.Expect(fresh.Status.Migrations).To(gomega.BeEmpty(),
+		"an aged Relocated record must trim without a ledger witness; otherwise every successful auto-relocation is retained forever")
+	g.Expect(ir.Status.Migrations).To(gomega.BeEmpty(),
+		"the trimmed slice must mirror back onto the in-memory IR")
+}
+
 // TestSyncMigrationEntries_TrimRequiresLedgerTerminal_NoResurrection
 // pins the trim invariant ("status may forget only what the ledger
 // remembers") and THE PHANTOM-RESURRECTION REGRESSION it backstops:
