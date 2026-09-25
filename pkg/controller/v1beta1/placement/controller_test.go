@@ -6,12 +6,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/utils/ptr"
@@ -2524,6 +2526,63 @@ func TestReconcile_SplitApplyFailurePreservesObservedStandingHome(t *testing.T) 
 	require.NotNil(t, ready)
 	assert.Equal(t, corev1.ConditionTrue, ready.Status)
 	assert.Equal(t, placementReadyReasonReady, ready.Reason)
+}
+
+// conflictUpdateClient rejects every apply with an optimistic-lock conflict, as
+// a member-side writer racing the placer to the derived copy would.
+type conflictUpdateClient struct {
+	client.WithWatch
+	updates int
+}
+
+func (c *conflictUpdateClient) Update(_ context.Context, obj client.Object, _ ...client.UpdateOption) error {
+	c.updates++
+	return apierrors.NewConflict(
+		schema.GroupResource{Group: v1beta1.SchemeGroupVersion.Group, Resource: "inferenceservices"},
+		obj.GetName(),
+		errors.New("the object has been modified; please apply your changes to the latest version and try again"),
+	)
+}
+
+// recordingSink keeps the messages logged at each severity so a test can pin
+// which outcomes the placer reports as failures.
+type recordingSink struct {
+	infos  []string
+	errors []string
+}
+
+func (s *recordingSink) Init(logr.RuntimeInfo)               {}
+func (s *recordingSink) Enabled(int) bool                    { return true }
+func (s *recordingSink) Info(_ int, msg string, _ ...any)    { s.infos = append(s.infos, msg) }
+func (s *recordingSink) Error(_ error, msg string, _ ...any) { s.errors = append(s.errors, msg) }
+func (s *recordingSink) WithValues(...any) logr.LogSink      { return s }
+func (s *recordingSink) WithName(string) logr.LogSink        { return s }
+
+func TestReconcile_SplitApplyConflictRetriesWithoutErrorLog(t *testing.T) {
+	s := testScheme(t)
+	worker := &conflictUpdateClient{WithWatch: workerWithReplicas(t, s, "fresh.a.example", 1, 1)}
+	src := srcISVCSplit("gpu=gb300", 2)
+	src.Finalizers = []string{PlacementFinalizer}
+	src.Status.Placement = &v1beta1.PlacementStatus{
+		Phase: v1beta1.PlacementPhasePlaced,
+		Candidates: []v1beta1.CandidatePlacement{{
+			Cluster: "a", Phase: v1beta1.CandidatePhaseAdmitted,
+			Endpoint: apis.HTTPS("stale.a.example"), AdmittedReplicas: 4, ReadyReplicas: 4,
+		}},
+	}
+	r, _ := newPlacer(s, fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
+		"a": workloadcluster.NewNeverCachingClient(worker),
+	}}, src, readyWC("a", map[string]string{"gpu": "gb300"}))
+	sink := &recordingSink{}
+	r.Log = logr.New(sink)
+
+	res, err := r.Reconcile(context.Background(), req())
+
+	require.NoError(t, err)
+	assert.Equal(t, time.Second, res.RequeueAfter, "a conflicted apply retries on the next pass")
+	assert.Positive(t, worker.updates)
+	assert.Empty(t, sink.errors, "an optimistic-lock conflict is a retry, not a failure")
+	assert.Contains(t, sink.infos, "split: place conflicted on cluster; retrying")
 }
 
 func TestReconcile_SplitDeleteFailureKeepsObservedHome(t *testing.T) {

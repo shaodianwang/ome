@@ -751,7 +751,13 @@ func (r *Reconciler) reconcileSplit(
 			continue
 		}
 		if err := r.placeOnReplicasBounded(ctx, cluster, cl, isvc, targets[cluster], maxPer); err != nil {
-			r.Log.Error(err, "split: place failed on cluster", "cluster", cluster, "isvc", isvc.Namespace+"/"+isvc.Name)
+			if apierrors.IsConflict(err) {
+				// The derived copy moved under the apply; the next pass re-reads
+				// it, so a stale-version write is a retry, not a failure.
+				r.Log.V(1).Info("split: place conflicted on cluster; retrying", "cluster", cluster, "isvc", isvc.Namespace+"/"+isvc.Name)
+			} else {
+				r.Log.Error(err, "split: place failed on cluster", "cluster", cluster, "isvc", isvc.Namespace+"/"+isvc.Name)
+			}
 			if home.state == homePresent {
 				cands = append(cands, home.candidate)
 			}
