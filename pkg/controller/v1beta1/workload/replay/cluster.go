@@ -645,7 +645,7 @@ func instanceIndexOf(pod *corev1.Pod) (int32, error) {
 	if !ok {
 		return 0, fmt.Errorf("replay: pod %s carries no %s label", pod.Name, query.LabelInstanceIdx)
 	}
-	idx, err := strconv.Atoi(raw)
+	idx, err := strconv.ParseInt(raw, 10, 32)
 	if err != nil {
 		return 0, fmt.Errorf("replay: pod %s has an unparsable %s label %q: %w", pod.Name, query.LabelInstanceIdx, raw, err)
 	}
