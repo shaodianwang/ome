@@ -12,7 +12,8 @@ token scan the checker enforces three structural rules:
   * Go files under the shipped roots may import the never-shipped packages
     (meta-internal, the sharded model-cache backend, pkg/kubectl) only from the
     wire-up files listed below, so a new wire-up is a reviewed decision;
-  * file paths are scanned like file contents.
+  * file paths are scanned like file contents;
+  * a path that cannot be classified or opened is a finding, never a pass.
 
 Usage:
   check_internal_tokens.py --tree            # every tracked file (CI)
@@ -225,8 +226,10 @@ def scan_file(root: str, rel: str, patterns, rules) -> list[str]:
     try:
         with open(os.path.join(root, rel), "rb") as fh:
             data = fh.read()
-    except OSError:
-        return []
+    except FileNotFoundError:
+        return [f"{rel}: [missing] no such file under {root} (deleted locally, or wrong --root / working directory)"]
+    except OSError as err:
+        return [f"{rel}: [unreadable] {err.strerror}"]
     if b"\0" in data[:8192]:
         return []
     text = data.decode("utf-8", "replace")
@@ -269,7 +272,10 @@ def main(argv=None) -> int:
     scanned = 0
     for rel in sorted(set(rels)):
         if classify(rel) is None:
-            continue  # reported above in tree mode; unknown paths are never silently accepted there
+            if args.files is not None:  # tree mode reported the top-level entry above
+                findings.append(f"{rel}: [unclassified] path is outside every classified top-level entry; "
+                                f"add its root to SHIPPED, INTERNAL_ONLY or CLEAN in hack/check_internal_tokens.py")
+            continue
         scanned += 1
         findings.extend(scan_file(root, rel, patterns, rules))
 

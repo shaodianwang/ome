@@ -109,6 +109,17 @@ class CheckInternalTokens(unittest.TestCase):
 
     # --- structural rules (tree mode) --------------------------------------
 
+    def test_files_mode_missing_path_fails(self):
+        r = run(self.root, "--files", "pkg/x/never_written.go")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("[missing]", r.stdout)
+
+    def test_files_mode_unclassified_path_fails(self):
+        rel = write(self.root, "newtree/x.go", "package x\n")
+        r = run(self.root, "--files", rel)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("[unclassified]", r.stdout)
+
     def test_tree_mode_flags_unclassified_toplevel_and_stale_exemptions(self):
         a = write(self.root, "pkg/x/x.go", "package x\n")
         b = write(self.root, "mystery/thing.txt", "hello\n")
