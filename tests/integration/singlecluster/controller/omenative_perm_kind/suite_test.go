@@ -62,6 +62,7 @@ func TestOMENativePerm(t *testing.T) {
 		BuildImages: kindfix.FakeServingImages(),
 		CRDPaths:    kindfix.OMECRDPaths(),
 		Setup:       nil, // EXTERNAL manager — no in-process controller.
+		Scheduler:   kindfix.SchedulerFromEnv(),
 	})
 
 	suiteCtx = state.Ctx

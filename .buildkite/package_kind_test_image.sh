@@ -90,6 +90,12 @@ if [ "${BUILDKITE_BRANCH:-}" = main ]; then
   echo "--- pull ${canary_metrics_image} ---"
   crane pull --platform linux/amd64 "$canary_metrics_image" "$stage/images/canary-metrics.tar"
   crane validate --tarball "$stage/images/canary-metrics.tar"
+  # The KIND lanes' scheduler dimension installs this commit's own scheduler;
+  # generate_pipeline.py lists mirror-ome-scheduler as a dependency on main.
+  scheduler_image="${repo}/ome-scheduler:${short_sha}"
+  echo "--- pull ${scheduler_image} ---"
+  crane pull --platform linux/amd64 "$scheduler_image" "$stage/images/ome-scheduler.tar"
+  crane validate --tarball "$stage/images/ome-scheduler.tar"
 fi
 
 # The operator-upgrade identity gate (omenative-upgrade-kind-test.tgz) needs a

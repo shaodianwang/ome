@@ -36,10 +36,14 @@ func StandardClusterBaseModel(name, storageURI string) *v1beta1.ClusterBaseModel
 // auto-selects for StandardClusterBaseModel: it supports the safetensors /
 // LlamaForCausalLM / Transformers shape with autoSelect on and priority 10.
 func StandardClusterServingRuntime(name string) *v1beta1.ClusterServingRuntime {
-	return v1beta1testing.MakeClusterServingRuntime(name).
+	csr := v1beta1testing.MakeClusterServingRuntime(name).
 		SupportsModelFormat("safetensors", true, 10).
 		WithLastFormatArchitecture("LlamaForCausalLM").
 		Obj()
+	// The suite's scheduler dimension: the runtime names the scheduler the
+	// suite installed, and the controller back-fills it into every pod.
+	csr.Spec.SchedulerName = SchedulerName()
+	return csr
 }
 
 // ApplyModelRuntimeOpts adjusts ApplyModelRuntime for the two cluster setups

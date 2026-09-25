@@ -51,3 +51,30 @@ class EvalSchedulerDimension(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class KindSchedulerDimension(unittest.TestCase):
+    def test_main_emits_scheduler_twins_in_their_own_group(self):
+        gp = load({"GKE_KIND_SCHEDULER_ENABLED": "1", "GKE_KIND_SCHEDULER_HARD_FAIL": "0"})
+        out = gp._gke_kind_scheduler_group()
+        self.assertIn('key: "integration-test-kind-scheduler-gke"', out)
+        self.assertIn('OME_TEST_SCHEDULER: "ome-scheduler"', out)
+        self.assertIn("soft_fail: true", out)
+        twins = [l for l in out.splitlines() if 'key: "kind-gke-' in l]
+        self.assertEqual(len(twins), len(gp._kind_spec_groups()))
+        self.assertTrue(all(l.rstrip('"').endswith("-ome-scheduler") for l in twins), twins[:3])
+
+    def test_hard_fail_switch_removes_soft_fail_on_kind_twins(self):
+        gp = load({"GKE_KIND_SCHEDULER_HARD_FAIL": "1"})
+        self.assertNotIn("soft_fail", gp._gke_kind_scheduler_group())
+
+    def test_twins_are_main_only_and_switchable(self):
+        with mock.patch.dict(os.environ, {"BUILDKITE_BRANCH": "feature/x", "BUILDKITE_COMMIT": "0123456789abcdef", "GKE_KIND_SCHEDULER_ENABLED": "1"}, clear=False):
+            import generate_pipeline as module
+            pr = importlib.reload(module).generate_pipeline()
+        self.assertNotIn("integration-test-kind-scheduler-gke", pr)
+        main_off = load({"GKE_KIND_SCHEDULER_ENABLED": "0"}).generate_pipeline()
+        self.assertNotIn("integration-test-kind-scheduler-gke", main_off)
+        main_on = load({"GKE_KIND_SCHEDULER_ENABLED": "1"}).generate_pipeline()
+        self.assertIn("integration-test-kind-scheduler-gke", main_on)
+        self.assertIn('- "mirror-ome-scheduler"', main_on)

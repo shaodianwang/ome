@@ -62,6 +62,10 @@ type SuiteOpts struct {
 	// CRDPaths carries only optional dependency CRDs in this mode. The chart
 	// owns the OME CRDs.
 	Deployed *DeployedOME
+	// Scheduler, when set, installs the gang scheduler into the cluster after
+	// the CRDs and before the manager, and adds the PodGroup CRD to CRDPaths.
+	// Fixture runtimes select it through spec.schedulerName (see kindfix).
+	Scheduler *SchedulerInstall
 }
 
 // SuiteState is the shared, cross-spec state every KIND-backed
@@ -163,10 +167,18 @@ func RunKindSuite(t *testing.T, opts SuiteOpts) *SuiteState {
 		t.Fatalf("RunKindSuite: BuildAndLoadImages: %v", err)
 	}
 
+	if opts.Scheduler != nil {
+		opts.CRDPaths = withSchedulerCRDs(opts.CRDPaths, opts.Scheduler)
+	}
 	if shouldApplyCRDs(opts) {
 		if err := ApplyCRDs(ctx, cfg, opts.CRDPaths); err != nil {
 			t.Fatalf("RunKindSuite: ApplyCRDs: %v", err)
 		}
+	}
+	// The scheduler lists PodGroups at startup, so it follows the CRDs; the
+	// manager and a deployed OME follow it so their first gang finds it.
+	if err := installScheduler(ctx, opts.ClusterName, opts.Scheduler); err != nil {
+		t.Fatalf("RunKindSuite: %v", err)
 	}
 
 	// After the optional CRDs: a deployed controller discovers them at startup,

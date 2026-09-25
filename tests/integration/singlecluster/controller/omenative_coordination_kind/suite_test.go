@@ -90,6 +90,9 @@ func TestOMENativeCoordinationKindController(t *testing.T) {
 		// starts that controller so projected InferenceReplica CRs turn into
 		// pods + status.
 		Setup: setupOMENativeCoordinationManager,
+		// Scheduler dimension: OME_TEST_SCHEDULER=ome-scheduler installs the gang
+		// scheduler and the fixture runtime selects it.
+		Scheduler: kindfix.SchedulerFromEnv(),
 	})
 
 	gomega.RegisterFailHandler(ginkgo.Fail)

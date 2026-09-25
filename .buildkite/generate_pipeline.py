@@ -249,6 +249,12 @@ GKE_EVAL_ENABLED = _truthy(os.environ.get("GKE_EVAL_ENABLED", "1"))
 GKE_EVAL_SCHEDULER_ENABLED = _truthy(os.environ.get("GKE_EVAL_SCHEDULER_ENABLED", "1"))
 GKE_EVAL_SCHEDULER_HARD_FAIL = _truthy(os.environ.get("GKE_EVAL_SCHEDULER_HARD_FAIL", "0"))
 EVAL_GANG_SCHEDULER = "ome-scheduler"
+# Scheduler dimension of the KIND suite lanes: every semantic group again with
+# the fixture runtime selecting ome-scheduler, installed into the suite's
+# cluster. Main-only (the baked scheduler image is a main artifact) and
+# advisory until GKE_KIND_SCHEDULER_HARD_FAIL=1.
+GKE_KIND_SCHEDULER_ENABLED = _truthy(os.environ.get("GKE_KIND_SCHEDULER_ENABLED", "1"))
+GKE_KIND_SCHEDULER_HARD_FAIL = _truthy(os.environ.get("GKE_KIND_SCHEDULER_HARD_FAIL", "0"))
 # "" is the cluster default scheduler; every eval job is emitted once per entry.
 EVAL_SCHEDULERS = [""] + ([EVAL_GANG_SCHEDULER] if GKE_EVAL_SCHEDULER_ENABLED else [])
 # Kill switch for the deployed-mode operator-upgrade identity gate (see
@@ -704,6 +710,43 @@ def _gke_kind_group() -> str:
     return _yaml_block([group], 2)
 
 
+def _gke_kind_scheduler_group() -> str:
+    """The KIND suite lanes once more under the gang scheduler (main only).
+
+    Same bundle, same semantic groups, one extra env var: the suite installs
+    ome-scheduler into its cluster and the fixture runtime selects it. Its own
+    group and status context keep the default-scheduler gate untouched;
+    advisory until GKE_KIND_SCHEDULER_HARD_FAIL=1.
+    """
+    plugins = _gke_kind_plugins(
+        _kind_ci_image(f"test-{COMMIT[:8]}-{BUILD_NUMBER}")
+    )
+    children = []
+    for slug, label, files in _kind_spec_groups():
+        focus = _kind_focus(files)
+        file_label = "file" if len(files) == 1 else "files"
+        child = {
+            "label": f":test_tube: {label} [{EVAL_GANG_SCHEDULER}] ({len(files)} {file_label})",
+            "key": f"kind-gke-{slug}-{EVAL_GANG_SCHEDULER}",
+            "depends_on": "package-kind-test-image",
+            "env": {"OME_KIND_FOCUS": focus, "OME_TEST_SCHEDULER": EVAL_GANG_SCHEDULER},
+            "agents": {"queue": GKE_QUEUE},
+            "command": "sh .buildkite/run_kind_tests_gke.sh",
+            "retry": {"automatic": _infra_retry_automatic()},
+            "plugins": plugins,
+        }
+        if not GKE_KIND_SCHEDULER_HARD_FAIL:
+            child["soft_fail"] = True
+        children.append(child)
+    group = {
+        "group": f":test_tube: Integration Tests (KIND on GKE, {EVAL_GANG_SCHEDULER})",
+        "key": "integration-test-kind-scheduler-gke",
+        "notify": [{"github_commit_status": {"context": "integration-test-kind-scheduler-gke"}}],
+        "steps": children,
+    }
+    return _yaml_block([group], 2)
+
+
 def _kind_quarantine_group() -> str:
     """The quarantined specs: one soft-fail job, or nothing when none are.
 
@@ -792,6 +835,7 @@ def _package_kind_test_image_step() -> str:
             '      - "test"\n'
             '      - "mirror-kind-ci"\n'
             '      - "mirror-canary-metrics"\n'
+            '      - "mirror-ome-scheduler"\n'
         )
     return (
         '  - label: ":package: Package exact Go KIND runner"\n'
@@ -1253,6 +1297,8 @@ def ci_steps() -> str:
     if GKE_KIND_ENABLED:
         steps += "\n" + _package_kind_test_image_step()
         steps += "\n" + _gke_kind_group()
+        if BRANCH == "main" and GKE_KIND_SCHEDULER_ENABLED:
+            steps += "\n" + _gke_kind_scheduler_group()
         if quarantine := _kind_quarantine_group():
             steps += "\n" + quarantine
         steps += "\n" + _mc_kind_group()
