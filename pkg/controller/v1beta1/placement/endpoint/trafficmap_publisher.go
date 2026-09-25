@@ -91,7 +91,13 @@ type TrafficMapPublishPlanCapture struct {
 	Targets                 []v1beta1.TrafficMapPublisherTarget
 	PlanCompatibilityDigest string
 	NoPositivePlanPolicy    TrafficMapNoPositivePlanPolicy
-	Withdrawn               bool
+	// AllowAllHomesUnreadyFallback opts this publisher plan into replaying a
+	// compatible retained positive plan for a definitive AllHomesUnready
+	// routing verdict. This permits an earlier source generation and a current
+	// claim subset whose omitted retained targets all have zero weight. The
+	// shared default remains fail closed because the verdict can be a real outage.
+	AllowAllHomesUnreadyFallback bool
+	Withdrawn                    bool
 }
 
 // TrafficMapPublisherFallback is an optional capability for publishers whose
@@ -622,7 +628,9 @@ func (r *TrafficMapPublisherReconciler) preclaim(
 		if capture != nil && !capture.Withdrawn &&
 			!trafficMapPlanCapturePositive(capture) &&
 			capture.NoPositivePlanPolicy == TrafficMapNoPositivePlanPolicyRetainLastPositive {
-			eligible, known := trafficMapFallbackEligibility(live, liveOwner)
+			eligible, known := trafficMapFallbackEligibilityWithAllHomesUnready(
+				live, liveOwner, capture.AllowAllHomesUnreadyFallback,
+			)
 			if !known {
 				if err := r.patchPublisherStatus(ctx, live, func(status *v1beta1.TrafficMapStatus) error {
 					setTrafficMapPublicationConditions(
@@ -636,7 +644,17 @@ func (r *TrafficMapPublisherReconciler) preclaim(
 				}
 				return errTrafficMapPublisherEligibilityUnknown
 			}
-			if eligible && publisherClaimsReplayCompatible(desiredClaims, existing) && validateTrafficMapLastPositive(
+			allHomesUnready := eligible && capture.AllowAllHomesUnreadyFallback &&
+				trafficMapRoutableReason(live) == v1beta1.TrafficMapReasonAllHomesUnready
+			claimsCompatible := publisherClaimsReplayCompatible(desiredClaims, existing)
+			validateLastPositive := validateTrafficMapLastPositive
+			if allHomesUnready {
+				claimsCompatible = publisherClaimsReplayCompatibleForAllHomesUnready(
+					desiredClaims, existing, journal.LastPositive,
+				)
+				validateLastPositive = validateTrafficMapLastPositiveFromEarlierGeneration
+			}
+			if eligible && claimsCompatible && validateLastPositive(
 				journal.LastPositive, existing, liveOwner.Generation,
 				capture.PlanCompatibilityDigest, live.Generation,
 			) == nil {
@@ -672,12 +690,19 @@ func (r *TrafficMapPublisherReconciler) preclaim(
 		}
 
 		keepLastPositive := false
-		if capture != nil && !capture.Withdrawn && trafficMapPlanCapturePositive(capture) &&
-			slices.Equal(existing, desiredClaims) {
-			keepLastPositive = validateTrafficMapLastPositive(
+		if capture != nil && !capture.Withdrawn && trafficMapPlanCapturePositive(capture) {
+			keepLastPositive = slices.Equal(existing, desiredClaims) && validateTrafficMapLastPositive(
 				journal.LastPositive, union, liveOwner.Generation,
 				capture.PlanCompatibilityDigest, live.Generation,
 			) == nil
+			if !keepLastPositive && capture.AllowAllHomesUnreadyFallback {
+				keepLastPositive = publisherClaimsReplayCompatibleForAllHomesUnready(
+					desiredClaims, existing, journal.LastPositive,
+				) && validateTrafficMapLastPositiveFromEarlierGeneration(
+					journal.LastPositive, existing, liveOwner.Generation,
+					capture.PlanCompatibilityDigest, live.Generation,
+				) == nil
+			}
 		}
 		lastPositive := journal.LastPositive
 		if !keepLastPositive {
@@ -872,6 +897,14 @@ func validateTrafficMapPlanCapture(
 		return fmt.Errorf("publisher returned unknown no-positive plan policy %q",
 			capture.NoPositivePlanPolicy)
 	}
+	if capture.AllowAllHomesUnreadyFallback &&
+		capture.NoPositivePlanPolicy != TrafficMapNoPositivePlanPolicyRetainLastPositive {
+		return fmt.Errorf("AllHomesUnready fallback requires no-positive plan policy %q",
+			TrafficMapNoPositivePlanPolicyRetainLastPositive)
+	}
+	if capture.AllowAllHomesUnreadyFallback && capture.Withdrawn {
+		return fmt.Errorf("withdrawn publisher plan cannot enable AllHomesUnready fallback")
+	}
 	if err := validatePublisherDigest(capture.PlanCompatibilityDigest); err != nil {
 		return fmt.Errorf("invalid plan compatibility digest: %w", err)
 	}
@@ -896,6 +929,33 @@ func validateTrafficMapLastPositive(
 	compatibilityDigest string,
 	currentTrafficMapGeneration int64,
 ) error {
+	return validateTrafficMapLastPositiveGeneration(
+		lastPositive, claims, ownerGeneration, compatibilityDigest,
+		currentTrafficMapGeneration, false,
+	)
+}
+
+func validateTrafficMapLastPositiveFromEarlierGeneration(
+	lastPositive *v1beta1.TrafficMapPublisherLastPositive,
+	claims []string,
+	ownerGeneration int64,
+	compatibilityDigest string,
+	currentTrafficMapGeneration int64,
+) error {
+	return validateTrafficMapLastPositiveGeneration(
+		lastPositive, claims, ownerGeneration, compatibilityDigest,
+		currentTrafficMapGeneration, true,
+	)
+}
+
+func validateTrafficMapLastPositiveGeneration(
+	lastPositive *v1beta1.TrafficMapPublisherLastPositive,
+	claims []string,
+	ownerGeneration int64,
+	compatibilityDigest string,
+	currentTrafficMapGeneration int64,
+	allowPreviousOwnerGeneration bool,
+) error {
 	if lastPositive == nil {
 		return fmt.Errorf("retained positive plan is absent")
 	}
@@ -905,7 +965,8 @@ func validateTrafficMapLastPositive(
 			lastPositive.TrafficMapGeneration, currentTrafficMapGeneration)
 	}
 	if lastPositive.ObservedISVCGeneration < 1 ||
-		lastPositive.ObservedISVCGeneration != ownerGeneration {
+		lastPositive.ObservedISVCGeneration > ownerGeneration ||
+		(!allowPreviousOwnerGeneration && lastPositive.ObservedISVCGeneration != ownerGeneration) {
 		return fmt.Errorf("retained source generation %d does not match current generation %d",
 			lastPositive.ObservedISVCGeneration, ownerGeneration)
 	}
@@ -1021,6 +1082,14 @@ func trafficMapFallbackEligibility(
 	trafficMap *v1beta1.TrafficMap,
 	owner *v1beta1.InferenceService,
 ) (eligible bool, known bool) {
+	return trafficMapFallbackEligibilityWithAllHomesUnready(trafficMap, owner, false)
+}
+
+func trafficMapFallbackEligibilityWithAllHomesUnready(
+	trafficMap *v1beta1.TrafficMap,
+	owner *v1beta1.InferenceService,
+	allowAllHomesUnready bool,
+) (eligible bool, known bool) {
 	if trafficMap == nil || owner == nil {
 		return false, false
 	}
@@ -1125,7 +1194,35 @@ func trafficMapFallbackEligibility(
 			placement.Phase != v1beta1.PlacementPhaseFailed && placementUnknown {
 			return false, false
 		}
-		return false, true
+		if !allowAllHomesUnready {
+			return false, true
+		}
+		if placement.Phase == v1beta1.PlacementPhaseAdmitting ||
+			placement.Phase == v1beta1.PlacementPhaseFailed {
+			return false, true
+		}
+		if placement.Phase != v1beta1.PlacementPhasePlaced || ready == nil ||
+			ready.Status != corev1.ConditionFalse || len(trafficMap.Spec.Entries) == 0 {
+			return false, false
+		}
+		for _, entry := range trafficMap.Spec.Entries {
+			if entry.Endpoint == nil || entry.Endpoint.Host == "" || entry.Weight != 0 || entry.Healthy {
+				return false, false
+			}
+			if len(entry.DrainRefs) != 0 || entry.Probe != nil && entry.Probe.Gated {
+				return false, true
+			}
+			if entry.Capacity == nil {
+				return false, false
+			}
+			if entry.Capacity.Allocated <= 0 {
+				return false, true
+			}
+			if entry.Capacity.Ready != 0 {
+				return false, false
+			}
+		}
+		return true, true
 	case v1beta1.TrafficMapReasonNoRoutableCapacity,
 		v1beta1.TrafficMapReasonAllHomesProbeFailed,
 		v1beta1.TrafficMapReasonTrafficDrain:
@@ -1965,6 +2062,47 @@ func publisherClaimDifference(left, right []string) []string {
 
 func publisherClaimsReplayCompatible(current, durable []string) bool {
 	return len(current) == 0 || slices.Equal(current, durable)
+}
+
+func publisherClaimsReplayCompatibleForAllHomesUnready(
+	current, durable []string,
+	lastPositive *v1beta1.TrafficMapPublisherLastPositive,
+) bool {
+	if len(current) == 0 || lastPositive == nil {
+		return false
+	}
+	currentSet := make(map[string]struct{}, len(current))
+	durableSet := make(map[string]struct{}, len(durable))
+	for _, claim := range current {
+		currentSet[claim] = struct{}{}
+	}
+	for _, claim := range durable {
+		durableSet[claim] = struct{}{}
+	}
+	for _, claim := range current {
+		if _, found := durableSet[claim]; !found {
+			return false
+		}
+	}
+	for _, target := range lastPositive.Targets {
+		if _, found := currentSet[target.Target]; !found && target.Weight > 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func trafficMapRoutableReason(trafficMap *v1beta1.TrafficMap) string {
+	if trafficMap == nil {
+		return ""
+	}
+	condition := apimeta.FindStatusCondition(
+		trafficMap.Status.Conditions, v1beta1.TrafficMapRoutable,
+	)
+	if condition == nil {
+		return ""
+	}
+	return condition.Reason
 }
 
 func routingPublisherOptions(owner *v1beta1.InferenceService) map[string]string {

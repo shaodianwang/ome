@@ -13,11 +13,13 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"knative.dev/pkg/apis"
+	duckv1 "knative.dev/pkg/apis/duck/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -267,6 +269,105 @@ func TestFreshNonmatchingSourceWithdrawsThroughLifecycleWithoutExternalCalls(t *
 	assert.Equal(t, "Withdrawn", published.Reason)
 }
 
+func TestRetainLastPositiveReplaysAllHomesUnreadyAcrossGeneration(t *testing.T) {
+	owner := testISVC("model-a")
+	owner.Generation = 3
+	owner.Spec.Placement = &v1beta1.PlacementSpec{
+		Mode: v1beta1.PlacementModeSplit, Requirements: "accelerator=test",
+	}
+	owner.Status.ObservedGeneration = owner.Generation
+	owner.Status.Placement = &v1beta1.PlacementStatus{Phase: v1beta1.PlacementPhasePlaced}
+	owner.Status.Conditions = duckv1.Conditions{{
+		Type: apis.ConditionReady, Status: corev1.ConditionFalse, Reason: "PlacementNotReady",
+	}}
+
+	trafficMap := testTrafficMap()
+	trafficMap.UID = "traffic-map-uid"
+	trafficMap.Generation = 4
+	trafficMap.Finalizers = []string{placementendpoint.TrafficMapPublisherFinalizer}
+	trafficMap.Spec.Mode = v1beta1.PlacementModeSplit
+	trafficMap.Spec.ObservedISVCGeneration = owner.Generation
+	for i := range trafficMap.Spec.Entries {
+		trafficMap.Spec.Entries[i].Weight = 0
+		trafficMap.Spec.Entries[i].Healthy = false
+		trafficMap.Spec.Entries[i].Capacity = &v1beta1.TrafficMapCapacity{Allocated: 1}
+	}
+	trafficMap.OwnerReferences = []metav1.OwnerReference{
+		*metav1.NewControllerRef(owner, v1beta1.SchemeGroupVersion.WithKind("InferenceService")),
+	}
+	options := targetOptions("{{.EndpointHostname}}")
+	options[optNoPositivePlanPolicy] = noPositivePlanPolicyRetainLastPositive
+	digest, err := planCompatibilityDigest(options)
+	require.NoError(t, err)
+	lastPositive := &v1beta1.TrafficMapPublisherLastPositive{
+		TrafficMapGeneration:    trafficMap.Generation - 1,
+		ObservedISVCGeneration:  owner.Generation - 1,
+		PlanCompatibilityDigest: digest,
+		Targets: []v1beta1.TrafficMapPublisherTarget{
+			{Target: "model-a.team-a.home-a.example", Weight: 60},
+			{Target: "model-a.team-a.home-b.example", Weight: 40},
+			{Target: "retired.example", Weight: 0},
+		},
+	}
+	trafficMap.Status = v1beta1.TrafficMapStatus{
+		SourceUID:                    owner.UID,
+		ObservedTrafficMapGeneration: lastPositive.TrafficMapGeneration,
+		Conditions: []metav1.Condition{
+			{
+				Type: v1beta1.TrafficMapRoutable, Status: metav1.ConditionFalse,
+				Reason: v1beta1.TrafficMapReasonAllHomesUnready, ObservedGeneration: trafficMap.Generation,
+			},
+			{
+				Type: v1beta1.TrafficMapOverrideActive, Status: metav1.ConditionFalse,
+				Reason: v1beta1.TrafficMapReasonNoOverrides, ObservedGeneration: trafficMap.Generation,
+			},
+		},
+		Publisher: &v1beta1.TrafficMapPublisherStatus{
+			PublisherName: Name,
+			ClaimedTargets: []string{
+				"model-a.team-a.home-a.example",
+				"model-a.team-a.home-b.example",
+				"retired.example",
+			},
+			LastPositive: lastPositive.DeepCopy(),
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1beta1.AddToScheme(scheme))
+	kubeClient := fakeclient.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&v1beta1.TrafficMap{}).
+		WithObjects(owner, trafficMap).
+		Build()
+	weights := &recordingPublisher{}
+	reconciler := &placementendpoint.TrafficMapPublisherReconciler{
+		Client: kubeClient, APIReader: kubeClient, Log: logr.Discard(),
+		Publisher: newTestPublisher(weights), GlobalOptions: options, Active: true,
+	}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{
+		Namespace: trafficMap.Namespace, Name: trafficMap.Name,
+	}}
+
+	_, err = reconciler.Reconcile(context.Background(), request)
+	require.NoError(t, err)
+	assert.Equal(t, []weightedTarget{
+		{name: "retired.example", weight: 0},
+		{name: "model-a.team-a.home-a.example", weight: 60},
+		{name: "model-a.team-a.home-b.example", weight: 40},
+	}, weights.published)
+	assert.Empty(t, weights.cleared)
+	current := &v1beta1.TrafficMap{}
+	require.NoError(t, kubeClient.Get(context.Background(), request.NamespacedName, current))
+	assert.False(t, current.Status.Published)
+	assert.Equal(t, lastPositive.TrafficMapGeneration, current.Status.ObservedTrafficMapGeneration)
+	assert.Equal(t, lastPositive, current.Status.Publisher.LastPositive)
+	fallback := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapPublicationFallback)
+	require.NotNil(t, fallback)
+	assert.Equal(t, metav1.ConditionTrue, fallback.Status)
+	assert.Equal(t, v1beta1.TrafficMapReasonLastPositiveRetained, fallback.Reason)
+}
+
 func TestNonmatchingSourceDrainsExistingClaimsThroughLifecycle(t *testing.T) {
 	owner := testISVC("model-a")
 	owner.Generation = 2
@@ -449,6 +550,7 @@ func TestCapturePreservesPostTransformPlan(t *testing.T) {
 	assert.False(t, captured.Withdrawn)
 	assert.Equal(t, placementendpoint.TrafficMapNoPositivePlanPolicyRetainLastPositive,
 		captured.NoPositivePlanPolicy)
+	assert.True(t, captured.AllowAllHomesUnreadyFallback)
 	assert.Regexp(t, `^sha256:[0-9a-f]{64}$`, captured.PlanCompatibilityDigest)
 	assert.Equal(t, []v1beta1.TrafficMapPublisherTarget{
 		{Target: "model-a.team-a.home-a.example", Weight: 60},
@@ -473,6 +575,7 @@ func TestCaptureDistinguishesEmptyPlanFromWithdrawal(t *testing.T) {
 	emptyCapture, err := p.Capture(emptyPlan)
 	require.NoError(t, err)
 	assert.False(t, emptyCapture.Withdrawn)
+	assert.False(t, emptyCapture.AllowAllHomesUnreadyFallback)
 	assert.Empty(t, emptyCapture.Targets)
 	zeroMap := testTrafficMap()
 	for i := range zeroMap.Spec.Entries {
@@ -483,18 +586,27 @@ func TestCaptureDistinguishesEmptyPlanFromWithdrawal(t *testing.T) {
 	zeroCapture, err := p.Capture(zeroPlan)
 	require.NoError(t, err)
 	assert.False(t, zeroCapture.Withdrawn)
+	assert.False(t, zeroCapture.AllowAllHomesUnreadyFallback)
 	assert.Equal(t, []v1beta1.TrafficMapPublisherTarget{
 		{Target: "model-a.team-a.home-a.example", Weight: 0},
 		{Target: "model-a.team-a.home-b.example", Weight: 0},
 	}, zeroCapture.Targets)
+	retainedOptions := targetOptions("{{.EndpointHostname}}")
+	retainedOptions[optNoPositivePlanPolicy] = noPositivePlanPolicyRetainLastPositive
+	retainedZeroPlan, err := p.Plan(owner, zeroMap, retainedOptions)
+	require.NoError(t, err)
+	retainedZeroCapture, err := p.Capture(retainedZeroPlan)
+	require.NoError(t, err)
+	assert.True(t, retainedZeroCapture.AllowAllHomesUnreadyFallback)
 
-	withdrawnPlan, err := p.Plan(owner, testTrafficMap(), targetOptionsWithSelector(
-		"{{.EndpointHostname}}", "publish=true",
-	))
+	withdrawnOptions := targetOptionsWithSelector("{{.EndpointHostname}}", "publish=true")
+	withdrawnOptions[optNoPositivePlanPolicy] = noPositivePlanPolicyRetainLastPositive
+	withdrawnPlan, err := p.Plan(owner, testTrafficMap(), withdrawnOptions)
 	require.NoError(t, err)
 	withdrawnCapture, err := p.Capture(withdrawnPlan)
 	require.NoError(t, err)
 	assert.True(t, withdrawnCapture.Withdrawn)
+	assert.False(t, withdrawnCapture.AllowAllHomesUnreadyFallback)
 	assert.Empty(t, withdrawnCapture.Targets)
 }
 

@@ -241,11 +241,14 @@ func (*Publisher) Capture(
 			fmt.Errorf("xDS withdrawn plan contains %d targets", len(capturedTargets))
 	}
 
+	allowAllHomesUnreadyFallback := !xdsPlan.withdrawn &&
+		xdsPlan.noPositivePlanPolicy == placementendpoint.TrafficMapNoPositivePlanPolicyRetainLastPositive
 	return placementendpoint.TrafficMapPublishPlanCapture{
-		Targets:                 capturedTargets,
-		PlanCompatibilityDigest: xdsPlan.planCompatibilityDigest,
-		NoPositivePlanPolicy:    xdsPlan.noPositivePlanPolicy,
-		Withdrawn:               xdsPlan.withdrawn,
+		Targets:                      capturedTargets,
+		PlanCompatibilityDigest:      xdsPlan.planCompatibilityDigest,
+		NoPositivePlanPolicy:         xdsPlan.noPositivePlanPolicy,
+		AllowAllHomesUnreadyFallback: allowAllHomesUnreadyFallback,
+		Withdrawn:                    xdsPlan.withdrawn,
 	}, nil
 }
 

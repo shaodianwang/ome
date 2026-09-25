@@ -26,13 +26,13 @@ This proposal:
 - persists the exact last positive plan for restart-safe replay; and
 - exposes fallback through `TrafficMap.status` and a metric.
 
-It does not retain traffic for manual or probe drains, zero capacity,
-definitively unready homes, deletion, routing opt-out, or source withdrawal. An
-unknown home never authorizes replay; under `RetainLastPositive`, the publisher
-leaves already-applied state untouched until observation becomes definitive.
-`ApplyCurrent` continues to apply the current no-positive plan. The proposal
-also does not prove that a retained endpoint is healthy or impose a fallback
-expiry in the first version.
+By default, it does not retain traffic for manual or probe drains, zero
+capacity, definitively unready homes, deletion, routing opt-out, or source
+withdrawal. An unknown home never authorizes replay; under
+`RetainLastPositive`, the publisher leaves already-applied state untouched until
+observation becomes definitive. `ApplyCurrent` continues to apply the current
+no-positive plan. The proposal also does not prove that a retained endpoint is
+healthy or impose a fallback expiry in the first version.
 
 Terms used below:
 
@@ -87,7 +87,8 @@ Fallback is allowed only when all of the following are true:
 5. A valid snapshot exists for the same publisher, source generation,
    compatible plan options, and exact claim set.
 
-The allowlist is closed. These states never authorize replay:
+The publisher-neutral allowlist is closed. These states do not authorize its
+baseline replay:
 
 - `AllHomesUnready`, `NoRoutableCapacity`, probe `Drain`, or any manual-drain
   intent, including a pending or malformed override;
@@ -95,6 +96,35 @@ The allowlist is closed. These states never authorize replay:
   any `NotPlaced` state without `PlacementLost` provenance;
 - stale or missing status, claim mismatch, deletion, routing opt-out, or
   publisher source withdrawal.
+
+### Publisher-specific `AllHomesUnready` extension
+
+An xDS-specific availability policy needs to survive a scale-up transition in
+which the current homes temporarily report zero ready replicas. Applying that
+all-zero plan would remove a route that was serving immediately before the
+source-generation change.
+
+A publisher plan may opt into `AllHomesUnready` replay through the captured
+`AllowAllHomesUnreadyFallback` capability. The xDS publisher enables it only
+under `RetainLastPositive`; publishers that omit the capability retain the
+closed baseline above. This extension adds these requirements:
+
+1. `Routable=False/AllHomesUnready` is fresh, placement is `Placed`, Ready is
+   definitively False, and every current route arm is addressable, unhealthy,
+   positively allocated, weighted zero, and has no drain or probe gate.
+2. The current plan has at least one target and introduces no new claim.
+3. A current plan may omit a durable claim only when that target already has
+   zero weight in the retained snapshot. Replay still applies the complete
+   durable snapshot, including the omitted zero-weight target.
+4. The snapshot source generation may precede the current source generation,
+   but it cannot be zero or from the future. The source UID, current observed
+   generation, TrafficMap generation, plan digest, and collision checks remain
+   unchanged.
+
+This cannot prove that the retained positive endpoints are still healthy; that
+is the availability tradeoff accepted by xDS installations that configure
+`RetainLastPositive`. Manual drain, probe drain, zero capacity, withdrawal, and
+unknown status remain authoritative and never use this extension.
 
 A fresh `PlacementUnknown` verdict also never authorizes replay, but it is an
 incomplete observation rather than a definitive negative. The publisher
@@ -161,6 +191,7 @@ effective configuration and advances after a successful fallback.
 | Positive plan | Apply it; after full success replace the snapshot. |
 | No-positive plan with `ApplyCurrent` | Clear the snapshot, then apply the current plan. |
 | Eligible no-positive plan with `RetainLastPositive` and a valid snapshot | Re-apply the complete snapshot. |
+| Opted-in xDS `AllHomesUnready` plan with a compatible prior-generation snapshot | Re-apply the complete snapshot. |
 | Otherwise-valid but ineligible no-positive plan, or invalid snapshot | Clear the snapshot, then apply the current plan. |
 | Stale or unclassifiable input | Do not mutate externally; report Unknown and retry. |
 | Invalid owner, provenance, options, or plan | Do not mutate externally; report Unknown and retry. |
@@ -171,8 +202,9 @@ All paths preserve these invariants:
 1. Before an external mutation, the controller durably sets
    `PublicationFallback=Unknown/Transitioning` and `Published=False`.
 2. A claim-set, source-generation, or plan-compatibility change clears the old
-   snapshot before mutation. Preclaim expansion and explicit zero, withdrawal,
-   or finalization do the same.
+   snapshot before mutation unless the xDS `AllHomesUnready` extension proves
+   the prior-generation and zero-weight retired-claim constraints above.
+   Preclaim expansion, withdrawal, or finalization still clear it.
 3. A snapshot is committed only after the complete positive plan succeeds.
    Replay repeats normal target, collision, source-UID, and exact-owner checks,
    then applies the complete snapshot idempotently. A failed replay preserves
@@ -211,7 +243,8 @@ only while fallback is True, otherwise `0`, and is removed with the
 - Compatibility: `ApplyCurrent` publishes empty/all-zero plans unchanged, and
   unsupported publishers reject retention mode.
 - Eligibility: cover both allowed reasons and every explicit exclusion,
-  including stale generations and drain intent.
+  including stale generations and drain intent. Cover the xDS extension with a
+  prior source generation and a retired zero-weight claim.
 - Snapshot: validate schema bounds, deep copy/round trip, exact claim equality,
   source generation, compatibility digest, and integer preservation.
 - Crash safety: fail before and after external writes, including after apply

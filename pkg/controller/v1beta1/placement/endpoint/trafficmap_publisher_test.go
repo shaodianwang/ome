@@ -774,6 +774,112 @@ func TestTrafficMapPublisherReplaysEligibleLastPositivePlan(t *testing.T) {
 	assert.Equal(t, trafficMap.Generation, fallback.ObservedGeneration)
 }
 
+func TestTrafficMapPublisherReplaysAllHomesUnreadyForOptedInPublisher(t *testing.T) {
+	owner, trafficMap := allHomesUnreadyPublisherObjects()
+	currentClaims := []string{"target-a", "target-b", "target-c"}
+	durableClaims := []string{"target-a", "target-b", "target-c", "target-retired"}
+	lastPositive := &v1beta1.TrafficMapPublisherLastPositive{
+		TrafficMapGeneration:    trafficMap.Generation - 1,
+		ObservedISVCGeneration:  owner.Generation - 1,
+		PlanCompatibilityDigest: testPublisherDigest("a"),
+		Targets: []v1beta1.TrafficMapPublisherTarget{
+			{Target: "target-a", Weight: 75},
+			{Target: "target-b", Weight: 25},
+			{Target: "target-c", Weight: 0},
+			{Target: "target-retired", Weight: 0},
+		},
+	}
+	trafficMap.Status.Published = true
+	trafficMap.Status.ObservedTrafficMapGeneration = lastPositive.TrafficMapGeneration
+	trafficMap.Status.Publisher = &v1beta1.TrafficMapPublisherStatus{
+		PublisherName: "example-publisher", ClaimedTargets: durableClaims,
+		ObservedOptionsDigest: testPublisherDigest("f"),
+		LastPositive:          copyTrafficMapLastPositive(lastPositive),
+	}
+	base := &recordingTrafficMapPublisher{
+		name: "example-publisher", stateful: true, claims: currentClaims,
+	}
+	publisher := &fallbackTrafficMapPublisher{
+		recordingTrafficMapPublisher: base,
+		capture: func(TrafficMapPublishPlan) (TrafficMapPublishPlanCapture, error) {
+			return TrafficMapPublishPlanCapture{
+				Targets: []v1beta1.TrafficMapPublisherTarget{
+					{Target: "target-a", Weight: 0},
+					{Target: "target-b", Weight: 0},
+					{Target: "target-c", Weight: 0},
+				},
+				PlanCompatibilityDigest:      testPublisherDigest("a"),
+				NoPositivePlanPolicy:         TrafficMapNoPositivePlanPolicyRetainLastPositive,
+				AllowAllHomesUnreadyFallback: true,
+			}, nil
+		},
+		replay: func(got v1beta1.TrafficMapPublisherLastPositive) (TrafficMapPublishPlan, error) {
+			assert.Equal(t, *lastPositive, got)
+			return testTrafficMapPublishPlan{claims: durableClaims}, nil
+		},
+	}
+	reconciler, kubeClient := newTrafficMapPublisherReconciler(t, publisher, owner, trafficMap)
+
+	_, err := reconcileTrafficMapPublisher(t, reconciler, trafficMap)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"replay", "apply"}, publisher.events)
+
+	current := getPublisherTrafficMap(t, kubeClient, trafficMap)
+	assert.Equal(t, durableClaims, current.Status.Publisher.ClaimedTargets)
+	assert.Equal(t, lastPositive, current.Status.Publisher.LastPositive)
+	fallback := apimeta.FindStatusCondition(current.Status.Conditions, v1beta1.TrafficMapPublicationFallback)
+	require.NotNil(t, fallback)
+	assert.Equal(t, metav1.ConditionTrue, fallback.Status)
+	assert.Equal(t, v1beta1.TrafficMapReasonLastPositiveRetained, fallback.Reason)
+}
+
+func TestTrafficMapPublisherAllHomesUnreadyFallbackRequiresPublisherOptIn(t *testing.T) {
+	owner, trafficMap := allHomesUnreadyPublisherObjects()
+	durableClaims := []string{"target-a", "target-b", "target-c", "target-retired"}
+	trafficMap.Status.Publisher = &v1beta1.TrafficMapPublisherStatus{
+		PublisherName: "example-publisher", ClaimedTargets: durableClaims,
+		LastPositive: &v1beta1.TrafficMapPublisherLastPositive{
+			TrafficMapGeneration:    trafficMap.Generation - 1,
+			ObservedISVCGeneration:  owner.Generation,
+			PlanCompatibilityDigest: testPublisherDigest("a"),
+			Targets: []v1beta1.TrafficMapPublisherTarget{
+				{Target: "target-a", Weight: 75},
+				{Target: "target-b", Weight: 25},
+				{Target: "target-c", Weight: 0},
+				{Target: "target-retired", Weight: 0},
+			},
+		},
+	}
+	base := &recordingTrafficMapPublisher{
+		name: "example-publisher", stateful: true,
+		claims: []string{"target-a", "target-b", "target-c"},
+	}
+	publisher := &fallbackTrafficMapPublisher{
+		recordingTrafficMapPublisher: base,
+		capture: func(TrafficMapPublishPlan) (TrafficMapPublishPlanCapture, error) {
+			return TrafficMapPublishPlanCapture{
+				Targets: []v1beta1.TrafficMapPublisherTarget{
+					{Target: "target-a", Weight: 0},
+					{Target: "target-b", Weight: 0},
+					{Target: "target-c", Weight: 0},
+				},
+				PlanCompatibilityDigest: testPublisherDigest("a"),
+				NoPositivePlanPolicy:    TrafficMapNoPositivePlanPolicyRetainLastPositive,
+			}, nil
+		},
+		replay: func(v1beta1.TrafficMapPublisherLastPositive) (TrafficMapPublishPlan, error) {
+			t.Fatal("generic fallback must not replay AllHomesUnready")
+			return nil, nil
+		},
+	}
+	reconciler, kubeClient := newTrafficMapPublisherReconciler(t, publisher, owner, trafficMap)
+
+	_, err := reconcileTrafficMapPublisher(t, reconciler, trafficMap)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"drain:target-retired", "apply"}, publisher.events)
+	assert.Nil(t, getPublisherTrafficMap(t, kubeClient, trafficMap).Status.Publisher.LastPositive)
+}
+
 func TestTrafficMapPublisherInvalidSnapshotClearsBeforeApplyingCurrentPlan(t *testing.T) {
 	owner, trafficMap := eligiblePlacementLossPublisherObjects()
 	claims := []string{"target-a"}
@@ -1463,6 +1569,73 @@ func TestTrafficMapPublisherPositiveRecoveryReplacesFallbackSnapshot(t *testing.
 	require.NotNil(t, fallback)
 	assert.Equal(t, metav1.ConditionFalse, fallback.Status)
 	assert.Equal(t, trafficMapPublisherReasonCurrentPlan, fallback.Reason)
+}
+
+func TestTrafficMapPublisherKeepsEarlierSnapshotUntilPositiveRecoveryApplies(t *testing.T) {
+	owner, trafficMap := allHomesUnreadyPublisherObjects()
+	owner.Status.Conditions[0].Status = corev1.ConditionTrue
+	owner.Status.Conditions[0].Reason = "PlacementReady"
+	for i := range owner.Status.Placement.Candidates {
+		owner.Status.Placement.Candidates[i].ReadyReplicas = 1
+	}
+	for i := range trafficMap.Spec.Entries {
+		trafficMap.Spec.Entries[i].Weight = 1
+		trafficMap.Spec.Entries[i].Healthy = true
+		trafficMap.Spec.Entries[i].Capacity.Ready = 1
+	}
+	routable := apimeta.FindStatusCondition(
+		trafficMap.Status.Conditions, v1beta1.TrafficMapRoutable,
+	)
+	routable.Status = metav1.ConditionTrue
+	routable.Reason = v1beta1.TrafficMapReasonRoutable
+	currentClaims := []string{"target-a", "target-b", "target-c"}
+	durableClaims := []string{"target-a", "target-b", "target-c", "target-retired"}
+	lastPositive := &v1beta1.TrafficMapPublisherLastPositive{
+		TrafficMapGeneration:    trafficMap.Generation - 1,
+		ObservedISVCGeneration:  owner.Generation - 1,
+		PlanCompatibilityDigest: testPublisherDigest("a"),
+		Targets: []v1beta1.TrafficMapPublisherTarget{
+			{Target: "target-a", Weight: 75},
+			{Target: "target-b", Weight: 25},
+			{Target: "target-c", Weight: 0},
+			{Target: "target-retired", Weight: 0},
+		},
+	}
+	trafficMap.Status.Publisher = &v1beta1.TrafficMapPublisherStatus{
+		PublisherName: "example-publisher", ClaimedTargets: durableClaims,
+		LastPositive: copyTrafficMapLastPositive(lastPositive),
+	}
+	base := &recordingTrafficMapPublisher{
+		name: "example-publisher", stateful: true, claims: currentClaims,
+	}
+	publisher := &fallbackTrafficMapPublisher{
+		recordingTrafficMapPublisher: base,
+		capture: func(TrafficMapPublishPlan) (TrafficMapPublishPlanCapture, error) {
+			return TrafficMapPublishPlanCapture{
+				Targets: []v1beta1.TrafficMapPublisherTarget{
+					{Target: "target-a", Weight: 50},
+					{Target: "target-b", Weight: 30},
+					{Target: "target-c", Weight: 20},
+				},
+				PlanCompatibilityDigest:      testPublisherDigest("a"),
+				NoPositivePlanPolicy:         TrafficMapNoPositivePlanPolicyRetainLastPositive,
+				AllowAllHomesUnreadyFallback: true,
+			}, nil
+		},
+	}
+	reconciler, kubeClient := newTrafficMapPublisherReconciler(t, publisher, owner, trafficMap)
+	publisher.apply = func(context.Context, TrafficMapPublishPlan) (TrafficMapPublishResult, error) {
+		current := getPublisherTrafficMap(t, kubeClient, trafficMap)
+		assert.Equal(t, lastPositive, current.Status.Publisher.LastPositive,
+			"the retained plan must survive until positive recovery is fully applied")
+		return TrafficMapPublishResult{}, errors.New("partial positive recovery")
+	}
+
+	_, err := reconcileTrafficMapPublisher(t, reconciler, trafficMap)
+	require.ErrorContains(t, err, "partial positive recovery")
+	assert.Equal(t, []string{"drain:target-retired", "apply"}, publisher.events)
+	current := getPublisherTrafficMap(t, kubeClient, trafficMap)
+	assert.Equal(t, lastPositive, current.Status.Publisher.LastPositive)
 }
 
 func TestTrafficMapPublisherUnknownEligibilityPreservesSnapshotWithoutEffects(t *testing.T) {
@@ -3071,6 +3244,96 @@ func TestTrafficMapFallbackEligibilityAllowlist(t *testing.T) {
 	}
 }
 
+func TestTrafficMapFallbackEligibilityAllHomesUnreadyExtension(t *testing.T) {
+	tests := []struct {
+		name     string
+		mutate   func(*v1beta1.InferenceService, *v1beta1.TrafficMap)
+		allow    bool
+		eligible bool
+		known    bool
+	}{
+		{name: "definitive all-homes-unready", allow: true, eligible: true, known: true},
+		{
+			name: "publisher does not opt in", known: true,
+		},
+		{
+			name: "placement observation unknown", allow: true, known: false,
+			mutate: func(owner *v1beta1.InferenceService, _ *v1beta1.TrafficMap) {
+				owner.Status.Conditions[0].Status = corev1.ConditionUnknown
+				owner.Status.Conditions[0].Reason = placementcontroller.PlacementReadyReasonUnknown
+			},
+		},
+		{
+			name: "manual drain", allow: true, known: true,
+			mutate: func(owner *v1beta1.InferenceService, _ *v1beta1.TrafficMap) {
+				owner.Annotations = map[string]string{constants.TrafficDrainAnnotation: "{}"}
+			},
+		},
+		{
+			name: "empty routing table", allow: true, known: false,
+			mutate: func(_ *v1beta1.InferenceService, trafficMap *v1beta1.TrafficMap) {
+				trafficMap.Spec.Entries = nil
+			},
+		},
+		{
+			name: "manual drain provenance", allow: true, known: true,
+			mutate: func(_ *v1beta1.InferenceService, trafficMap *v1beta1.TrafficMap) {
+				trafficMap.Spec.Entries[0].DrainRefs = []string{"maintenance"}
+			},
+		},
+		{
+			name: "probe gate", allow: true, known: true,
+			mutate: func(_ *v1beta1.InferenceService, trafficMap *v1beta1.TrafficMap) {
+				trafficMap.Spec.Entries[0].Probe = &v1beta1.TrafficMapProbe{Gated: true}
+			},
+		},
+		{
+			name: "zero allocated capacity", allow: true, known: true,
+			mutate: func(_ *v1beta1.InferenceService, trafficMap *v1beta1.TrafficMap) {
+				trafficMap.Spec.Entries[0].Capacity.Allocated = 0
+			},
+		},
+		{
+			name: "missing capacity provenance", allow: true, known: false,
+			mutate: func(_ *v1beta1.InferenceService, trafficMap *v1beta1.TrafficMap) {
+				trafficMap.Spec.Entries[0].Capacity = nil
+			},
+		},
+		{
+			name: "contradictory ready capacity", allow: true, known: false,
+			mutate: func(_ *v1beta1.InferenceService, trafficMap *v1beta1.TrafficMap) {
+				trafficMap.Spec.Entries[0].Capacity.Ready = 1
+			},
+		},
+		{
+			name: "positive route weight", allow: true, known: false,
+			mutate: func(_ *v1beta1.InferenceService, trafficMap *v1beta1.TrafficMap) {
+				trafficMap.Spec.Entries[0].Weight = 1
+			},
+		},
+		{
+			name: "healthy route arm", allow: true, known: false,
+			mutate: func(_ *v1beta1.InferenceService, trafficMap *v1beta1.TrafficMap) {
+				trafficMap.Spec.Entries[0].Healthy = true
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			owner, trafficMap := allHomesUnreadyPublisherObjects()
+			if tt.mutate != nil {
+				tt.mutate(owner, trafficMap)
+			}
+			eligible, known := trafficMapFallbackEligibilityWithAllHomesUnready(
+				trafficMap, owner, tt.allow,
+			)
+			assert.Equal(t, tt.eligible, eligible)
+			assert.Equal(t, tt.known, known)
+		})
+	}
+}
+
 func TestValidateTrafficMapLastPositive(t *testing.T) {
 	valid := &v1beta1.TrafficMapPublisherLastPositive{
 		TrafficMapGeneration:    3,
@@ -3113,6 +3376,53 @@ func TestValidateTrafficMapLastPositive(t *testing.T) {
 			}
 			assert.Error(t, validateTrafficMapLastPositive(
 				snapshot, claims, 7, testPublisherDigest("a"), 4,
+			))
+		})
+	}
+}
+
+func TestValidateTrafficMapLastPositiveFromEarlierGeneration(t *testing.T) {
+	valid := &v1beta1.TrafficMapPublisherLastPositive{
+		TrafficMapGeneration:    3,
+		ObservedISVCGeneration:  6,
+		PlanCompatibilityDigest: testPublisherDigest("a"),
+		Targets:                 []v1beta1.TrafficMapPublisherTarget{{Target: "a", Weight: 1}},
+	}
+	require.NoError(t, validateTrafficMapLastPositiveFromEarlierGeneration(
+		valid, []string{"a"}, 7, testPublisherDigest("a"), 4,
+	))
+	assert.Error(t, validateTrafficMapLastPositive(
+		valid, []string{"a"}, 7, testPublisherDigest("a"), 4,
+	), "the generic fallback must continue to require the current source generation")
+
+	future := copyTrafficMapLastPositive(valid)
+	future.ObservedISVCGeneration = 8
+	assert.Error(t, validateTrafficMapLastPositiveFromEarlierGeneration(
+		future, []string{"a"}, 7, testPublisherDigest("a"), 4,
+	))
+}
+
+func TestPublisherClaimsReplayCompatibleForAllHomesUnready(t *testing.T) {
+	snapshot := &v1beta1.TrafficMapPublisherLastPositive{Targets: []v1beta1.TrafficMapPublisherTarget{
+		{Target: "a", Weight: 75},
+		{Target: "b", Weight: 25},
+		{Target: "c", Weight: 0},
+	}}
+	tests := []struct {
+		name    string
+		current []string
+		want    bool
+	}{
+		{name: "exact claims", current: []string{"a", "b", "c"}, want: true},
+		{name: "omits zero target", current: []string{"a", "b"}, want: true},
+		{name: "omits positive target", current: []string{"a", "c"}},
+		{name: "adds target", current: []string{"a", "b", "c", "d"}},
+		{name: "empty current claims"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, publisherClaimsReplayCompatibleForAllHomesUnready(
+				tt.current, []string{"a", "b", "c"}, snapshot,
 			))
 		})
 	}
@@ -3167,6 +3477,12 @@ func TestValidateTrafficMapPlanCapture(t *testing.T) {
 				capture.Withdrawn = true
 			},
 		},
+		{
+			name: "AllHomesUnready fallback with apply-current policy",
+			mutate: func(capture *TrafficMapPublishPlanCapture) {
+				capture.AllowAllHomesUnreadyFallback = true
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -3180,6 +3496,14 @@ func TestValidateTrafficMapPlanCapture(t *testing.T) {
 	mismatch := valid
 	mismatch.Targets = slices.Clone(valid.Targets)
 	assert.Error(t, validateTrafficMapPlanCapture(&mismatch, []string{"a"}))
+
+	retained := valid
+	retained.Targets = slices.Clone(valid.Targets)
+	retained.NoPositivePlanPolicy = TrafficMapNoPositivePlanPolicyRetainLastPositive
+	retained.AllowAllHomesUnreadyFallback = true
+	require.NoError(t, validateTrafficMapPlanCapture(&retained, []string{"a", "b"}))
+	retained.Withdrawn = true
+	assert.Error(t, validateTrafficMapPlanCapture(&retained, []string{"a", "b"}))
 }
 
 func TestTrafficMapPublisherSetupValidation(t *testing.T) {
@@ -3306,6 +3630,34 @@ func eligiblePlacementLossPublisherObjects() (*v1beta1.InferenceService, *v1beta
 			Reason: v1beta1.TrafficMapReasonNoOverrides, ObservedGeneration: trafficMap.Generation,
 		},
 	}
+	return owner, trafficMap
+}
+
+func allHomesUnreadyPublisherObjects() (*v1beta1.InferenceService, *v1beta1.TrafficMap) {
+	owner, trafficMap := eligiblePlacementLossPublisherObjects()
+	owner.Generation++
+	owner.Status.ObservedGeneration = owner.Generation
+	owner.Spec.Placement.Mode = v1beta1.PlacementModeSplit
+	owner.Status.Placement = &v1beta1.PlacementStatus{
+		Phase: v1beta1.PlacementPhasePlaced,
+		Candidates: []v1beta1.CandidatePlacement{
+			{Cluster: "cluster-a", Endpoint: &apis.URL{Scheme: "https", Host: "a.example"}, AdmittedReplicas: 1},
+			{Cluster: "cluster-b", Endpoint: &apis.URL{Scheme: "https", Host: "b.example"}, AdmittedReplicas: 1},
+			{Cluster: "cluster-c", Endpoint: &apis.URL{Scheme: "https", Host: "c.example"}, AdmittedReplicas: 1},
+		},
+	}
+	owner.Status.Conditions[0].Status = corev1.ConditionFalse
+	owner.Status.Conditions[0].Reason = "PlacementNotReady"
+	trafficMap.Spec.Mode = v1beta1.PlacementModeSplit
+	trafficMap.Spec.ObservedISVCGeneration = owner.Generation
+	trafficMap.Spec.Entries = []v1beta1.TrafficMapEntry{
+		{Cluster: "cluster-a", Endpoint: &apis.URL{Scheme: "https", Host: "a.example"}, Capacity: &v1beta1.TrafficMapCapacity{Allocated: 1}},
+		{Cluster: "cluster-b", Endpoint: &apis.URL{Scheme: "https", Host: "b.example"}, Capacity: &v1beta1.TrafficMapCapacity{Allocated: 1}},
+		{Cluster: "cluster-c", Endpoint: &apis.URL{Scheme: "https", Host: "c.example"}, Capacity: &v1beta1.TrafficMapCapacity{Allocated: 1}},
+	}
+	apimeta.FindStatusCondition(
+		trafficMap.Status.Conditions, v1beta1.TrafficMapRoutable,
+	).Reason = v1beta1.TrafficMapReasonAllHomesUnready
 	return owner, trafficMap
 }
 

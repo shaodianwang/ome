@@ -142,8 +142,16 @@ The required installation-only `noPositivePlanPolicy` option controls how the
 publisher handles a valid plan with no positive weight. `ApplyCurrent` preserves
 the factual empty or all-zero publication. `RetainLastPositive` replays the last
 fully applied compatible positive plan only for the narrow placement-loss and
-address-loss states defined by OEP-0025.1. The publisher rejects missing,
-unknown, or per-InferenceService values.
+address-loss states defined by OEP-0025.1. The xDS publisher additionally opts
+that policy into replay for a fresh, definitive `AllHomesUnready` verdict. This
+xDS-only extension may replay a compatible snapshot from an earlier source
+generation so scale-up does not zero a previously serving route. It requires a
+nonempty current all-zero target set with positive allocated capacity; current
+targets must be durable claims, and any retired durable target omitted from the
+current set must already have zero retained weight. Drain, override, capacity,
+probe-failure, and withdrawal states remain authoritative. Unknown or
+inconsistent status preserves the journal and performs no external mutation.
+The publisher rejects missing, unknown, or per-InferenceService values.
 
 Existing xDS deployments must add `weightMode` when adopting a binary with this
 option, and normalized deployments must also set `normalizedTotal`. Use
