@@ -17,8 +17,8 @@ import (
 
 // These specs (S8-S11) drive the single-mode placement lifecycle beyond the
 // happy race, end-to-end across the three envtest apiservers on the sim path:
-// the winner-lost grace window (hold, then re-race), admission loss (demote to
-// Admitting, re-place onto the surviving member, sweep the former winner), terminal
+// the winner-lost grace window (report loss, then re-race), admission loss
+// (report Admitting, re-place onto the surviving member, sweep the former winner), terminal
 // failure (surface Failed, never re-place into a hot loop), and the origin
 // guard that keeps the fan-out and the loser sweep away from a user-owned
 // same-named InferenceService on a candidate cluster.
@@ -95,7 +95,7 @@ var _ = ginkgo.Describe("Multi-cluster placement lifecycle", func() {
 		}, eventuallyTimeout, eventuallyPoll).Should(gomega.Succeed())
 	}
 
-	ginkgo.It("S8 winner-lost grace: holds the placement within the window, re-races only after it elapses", func() {
+	ginkgo.It("S8 winner-lost grace: reports loss within the window, re-races only after it elapses", func() {
 		placeAndWinOn(member1Cluster, wc1Name)
 
 		ginkgo.By("deleting the winner's derived out from under the control plane")
@@ -103,21 +103,14 @@ var _ = ginkgo.Describe("Multi-cluster placement lifecycle", func() {
 		gomega.Expect(ok).To(gomega.BeTrue())
 		gomega.Expect(member1Cluster.client.Delete(member1Cluster.ctx, derived)).To(gomega.Succeed())
 
-		// The grace clock arms when the placer first observes the derived absent
-		// on the connected winner, which is at or after the delete — so a window
-		// strictly shorter than winnerLostGrace, measured from the delete, must
-		// see the placement held and no re-fan-out anywhere.
-		ginkgo.By("asserting the placement holds and nothing is re-fanned-out within the grace window")
-		gomega.Consistently(func(g gomega.Gomega) {
+		ginkgo.By("asserting the observed absence retains only the winner identity")
+		gomega.Eventually(func(g gomega.Gomega) {
 			ps := placementStatusOf(isvcNS, isvcName)
 			g.Expect(ps).NotTo(gomega.BeNil())
-			g.Expect(ps.Phase).To(gomega.Equal(v1beta1.PlacementPhasePlaced))
+			g.Expect(ps.Phase).To(gomega.Equal(v1beta1.PlacementPhasePending))
 			g.Expect(ps.Cluster).To(gomega.Equal(wc1Name))
-			_, ok1 := getDerivedOn(member1Cluster, isvcNS, isvcName)
-			g.Expect(ok1).To(gomega.BeFalse(), "the placer must not re-apply the derived within the grace window")
-			_, ok2 := getDerivedOn(member2Cluster, isvcNS, isvcName)
-			g.Expect(ok2).To(gomega.BeFalse(), "the placer must not fan out to another candidate within the grace window")
-		}, "1s", eventuallyPoll).Should(gomega.Succeed())
+			g.Expect(ps.Candidates).To(gomega.BeEmpty())
+		}, eventuallyTimeout, eventuallyPoll).Should(gomega.Succeed())
 
 		// After the grace window the placer re-races: the derived reappears on the
 		// candidates, member1's still-admitted engine wins again, and the loser
@@ -138,7 +131,7 @@ var _ = ginkgo.Describe("Multi-cluster placement lifecycle", func() {
 			"the loser copy from the re-race fan-out must be swept once the winner re-admits")
 	})
 
-	ginkgo.It("S9 lost admission: demotes to Admitting after the grace window and re-places onto the surviving member", func() {
+	ginkgo.It("S9 lost admission: reports Admitting during grace and re-places onto the surviving member", func() {
 		placeAndWinOn(member1Cluster, wc1Name)
 
 		// Every instance loses its Kueue admission (the preemption shape): the
@@ -148,22 +141,17 @@ var _ = ginkgo.Describe("Multi-cluster placement lifecycle", func() {
 			{Index: 0, Phase: v1beta1.OMENativeInstancePending, Admitted: false},
 		})
 
-		ginkgo.By("asserting the placement rides out the dip within the grace window")
-		gomega.Consistently(func(g gomega.Gomega) {
+		ginkgo.By("asserting the observed admission loss retains only the winner identity")
+		gomega.Eventually(func(g gomega.Gomega) {
 			ps := placementStatusOf(isvcNS, isvcName)
 			g.Expect(ps).NotTo(gomega.BeNil())
-			g.Expect(ps.Phase).To(gomega.Equal(v1beta1.PlacementPhasePlaced))
+			g.Expect(ps.Phase).To(gomega.Equal(v1beta1.PlacementPhaseAdmitting))
 			g.Expect(ps.Cluster).To(gomega.Equal(wc1Name))
-		}, "1s", eventuallyPoll).Should(gomega.Succeed())
-
-		ginkgo.By("asserting the placement demotes to Admitting once the window elapses")
-		gomega.Eventually(func() v1beta1.PlacementPhase {
-			ps := placementStatusOf(isvcNS, isvcName)
-			if ps == nil {
-				return ""
-			}
-			return ps.Phase
-		}, eventuallyTimeout, eventuallyPoll).Should(gomega.Equal(v1beta1.PlacementPhaseAdmitting))
+			g.Expect(ps.Candidates).To(gomega.ConsistOf(v1beta1.CandidatePlacement{
+				Cluster: wc1Name,
+				Phase:   v1beta1.CandidatePhaseAdmitting,
+			}))
+		}, eventuallyTimeout, eventuallyPoll).Should(gomega.Succeed())
 
 		ginkgo.By("admitting the surviving member so it wins the re-race")
 		gomega.Eventually(func() bool {
