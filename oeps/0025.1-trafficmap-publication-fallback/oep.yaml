@@ -1,0 +1,36 @@
+title: "TrafficMap publication fallback"
+oep-number: "0025.1"
+authors:
+  - "@fanyang-real"
+status: provisional
+# state: design only; no implementation
+creation-date: 2026-09-24
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+# Follow-up to OEP-0025. TrafficMap remains factual while a capable publisher
+# may, when explicitly configured, retain its last fully applied positive plan
+# during narrowly defined placement loss. Status exposes the divergence.
+see-also:
+  - "/oeps/0025-multi-cluster-routing"
+  - "/oeps/0018-multi-cluster-placement"
+  - "/oeps/0018.3-placement-modes"
+
+replaces: []
+
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"
+
+feature-gates: []
+disable-supported: true
+
+metrics:
+  - ome_trafficmap_publication_fallback # gauge; labels: namespace, trafficmap, publisher
