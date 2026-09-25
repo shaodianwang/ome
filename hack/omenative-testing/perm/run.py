@@ -766,6 +766,18 @@ def _pod_serving(obj):
     return False
 
 
+def _pod_placement(obj, labels):
+    """Scheduler-facing fields every watcher record carries, whichever loop
+    builds it: node binding, scheduler name and the pod-group label.
+    Invariant D reads all three; a record without them is never evaluated."""
+    spec = obj.get("spec") or {}
+    return {
+        "node": spec.get("nodeName", ""),
+        "sched": spec.get("schedulerName", ""),
+        "pg": labels.get("scheduling.x-k8s.io/pod-group", ""),
+    }
+
+
 def _inv_new(case_id, hdr):
     """Fresh invariant-poller state. Header `inv_off=A|B|C|D|all` (which requires
     an adjacent '# reason:' comment — enforced by validate-only) disables checks.
@@ -1031,6 +1043,10 @@ def _inv_check_gang_scheduling(inv, pod_state, pods_per_inst, hits, now):
        existing member has one within INV_SUSTAIN_D ticks. Teardown is not a
        gang event: pods being deleted are not counted."""
     live = [p for p in pod_state.values() if p and p["alive"]]
+    untyped = [p for p in live if "sched" not in p or "pg" not in p or "node" not in p]
+    if untyped:
+        inv["d_untyped"] = True   # a record builder drifted: reported, never a violation
+        live = [p for p in live if p not in untyped]
     if not live:
         return
     inv["d_seen"] = True
@@ -1125,6 +1141,8 @@ def invariant_checks(inv, verdict, notes, checks):
         checks.append("  ⓘ invariant D (gang-scheduling) never saw a live pod — vacuous (no assertion made)")
     if inv.get("d_on") and inv.get("pg_unavailable"):
         checks.append("  ⓘ invariant D: PodGroup API unavailable on this cluster — pod-group checks skipped; scheduler name and gang binding still asserted")
+    if inv.get("d_on") and inv.get("d_untyped"):
+        checks.append("  ⓘ invariant D: some pod records carried no placement fields (a watcher builder lacks _pod_placement) — those records were not evaluated")
     if not inv["viol"]:
         active = [x for x, on in (("A", inv["a_on"] and inv["ir_seen"]),
                                   ("B", inv["b_on"] and inv["b_seen"]),
@@ -1961,10 +1979,8 @@ def _apply_event(ctx, ev):
             "serving": _pod_serving(obj),
             "uid": meta.get("uid", ""),
             "newanno": annos.get(TRIGGER_ANNO) == TRIGGER_VAL,
-            "node": (obj.get("spec") or {}).get("nodeName", ""),
-            "sched": (obj.get("spec") or {}).get("schedulerName", ""),
-            "pg": labels.get("scheduling.x-k8s.io/pod-group", ""),
             "created": meta.get("creationTimestamp", ""),
+            **_pod_placement(obj, labels),
         }
         if rev:
             ctx.setdefault("seen_hashes", set()).add(rev)   # every revision-hash ever observed
@@ -2214,6 +2230,7 @@ def _setup_and_ready(case_id, yaml_file, hdr):
     _stop_watcher(ctx)
     delete_case(yaml_file)   # don't leak the ISVC
     print(f"  ✗ INIT TIMEOUT after {budget}s")
+    _print_pending_snapshot(case_id)
     return None, ("INIT_TIMEOUT", "never reached initial settled state")
 
 
@@ -2266,6 +2283,32 @@ def soften_expected_fail(hdr, verdict, checks):
         checks.append("  ⓘ marked infeasible — an unsatisfiable config (expected); recorded XFAIL, not a regression")
         return "XFAIL"
     return verdict
+
+
+def _print_pending_snapshot(case_id):
+    """What the case's pods, PodGroups and scheduler events looked like when it
+    never settled — printed before teardown, which erases all of it."""
+    cols = ("NAME:.metadata.name,PHASE:.status.phase,NODE:.spec.nodeName,SCHED:.spec.schedulerName,"
+            "PG:.metadata.labels.scheduling\\.x-k8s\\.io/pod-group,READY:.status.conditions[?(@.type==\"Ready\")].status")
+    r = kubectl("-n", NS, "get", "pods", "-l", f"ome.io/inferenceservice={case_id}", "-o", f"custom-columns={cols}")
+    print("  pods at timeout:")
+    for line in (r.stdout or r.stderr).strip().splitlines()[:24]:
+        print(f"    {line}")
+    r = kubectl("-n", NS, "get", "podgroups.scheduling.x-k8s.io", "-l", f"ome.io/inferenceservice={case_id}",
+                "-o", "custom-columns=NAME:.metadata.name,MIN:.spec.minMember,PHASE:.status.phase,SCHEDULED:.status.scheduled,RUNNING:.status.running")
+    if r.returncode == 0 and r.stdout.strip():
+        print("  podgroups at timeout:")
+        for line in r.stdout.strip().splitlines()[:12]:
+            print(f"    {line}")
+    r = kubectl("-n", NS, "get", "events", "--field-selector", "involvedObject.kind=Pod",
+                "--sort-by=.lastTimestamp", "-o",
+                "custom-columns=LAST:.lastTimestamp,TYPE:.type,REASON:.reason,OBJECT:.involvedObject.name,MESSAGE:.message")
+    if r.returncode == 0:
+        mine = [l for l in r.stdout.splitlines() if case_id in l]
+        if mine:
+            print("  pod events (newest last):")
+            for line in mine[-16:]:
+                print(f"    {line[:220]}")
 
 
 def _print_failure_snapshot(case_id, hdr, ctx):
@@ -4917,6 +4960,7 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
                 if state == "INIT" and now > deadline_init:
                     state = "INIT_TIMEOUT"
                     print(f"  ✗ INIT TIMEOUT after {init_budget}s")
+                    _print_pending_snapshot(case_id)
                     break
                 if state == "DRAINING" and deadline_conv and now > deadline_conv:
                     state = "DRAIN_TIMEOUT" if progressed else "NO_CHANGE"
@@ -4954,7 +4998,8 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
                                    "pairing": labels.get(PAIRING_LABEL, ""),
                                    "uid": meta.get("uid", ""), "newanno": False,
                                    "serving": _pod_serving(obj),
-                                   "created": meta.get("creationTimestamp", "")}
+                                   "created": meta.get("creationTimestamp", ""),
+                                   **_pod_placement(obj, labels)}
             agg = aggregate(pod_state, None, surge_modes, pods_per_inst)
             for c in COMPS:
                 if agg.get(c, (0, 0, 0))[0] > peaks[c]:
@@ -5389,6 +5434,7 @@ def run_case(case_id):
                 if state == "INIT" and now > deadline_init:
                     state = "INIT_TIMEOUT"
                     print(f"  ✗ INIT TIMEOUT after {init_budget}s — never reached initial settled state")
+                    _print_pending_snapshot(case_id)
                     break
                 if state == "ROTATING" and deadline_rotate and now > deadline_rotate:
                     state = "ROTATE_TIMEOUT" if progressed else "NO_ROLLOUT"
@@ -5459,7 +5505,8 @@ def run_case(case_id):
                                    "ready": ready, "hash": rev, "uid": uid, "newanno": newanno,
                                    "pairing": labels.get(PAIRING_LABEL, ""),
                                    "serving": _pod_serving(obj),
-                                   "created": meta.get("creationTimestamp", "")}
+                                   "created": meta.get("creationTimestamp", ""),
+                                   **_pod_placement(obj, labels)}
 
             meas = {}
             agg = aggregate(pod_state, old_hashes, modes, pods_per_inst, measures=meas)

@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 import time
+import re
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -436,6 +437,21 @@ class ParkedInvariantVerdictTest(unittest.TestCase):
             "engine/0 Phase=Ready while the IR's own podCount is 0"))
         self.assertEqual(verdict, "FAIL")
         self.assertFalse(batch.is_green(verdict))
+
+
+class PodRecordBuilders(unittest.TestCase):
+    """Every loop that builds watcher records must carry the placement fields
+    invariant D reads; a builder without them silently blinds the invariant."""
+
+    def test_every_record_builder_includes_placement(self):
+        src = (HERE / "run.py").read_text()
+        builders = [m.start() for m in re.finditer(r'pod_state(?:"\])?\[[^\]]+\] = \{', src)]
+        self.assertGreaterEqual(len(builders), 3)
+        for start in builders:
+            block = src[start:src.index("}", start + 1) + 1]
+            # the closing brace of a nested dict literal ends the block early; look a bit further
+            block = src[start:start + 1200]
+            self.assertIn("_pod_placement(obj, labels)", block, src[start:start + 200])
 
 
 if __name__ == "__main__":

@@ -40,6 +40,16 @@ collect_diagnostics() {
     >"${diagnostics_dir}/ome-resources.yaml" 2>&1 || true
   KUBECONFIG="$kubeconfig" kubectl -n ome logs deployment/ome-controller-manager \
     --all-containers --tail=-1 >"${diagnostics_dir}/controller.log" 2>&1 || true
+  # Scheduler-lane evidence: the gang scheduler's own log, the PodGroups it
+  # saw, and the events (FailedScheduling reasons outlive the pods).
+  if KUBECONFIG="$kubeconfig" kubectl -n ome get deployment ome-scheduler >/dev/null 2>&1; then
+    KUBECONFIG="$kubeconfig" kubectl -n ome logs deployment/ome-scheduler \
+      --all-containers --tail=-1 >"${diagnostics_dir}/scheduler.log" 2>&1 || true
+  fi
+  KUBECONFIG="$kubeconfig" kubectl get podgroups.scheduling.x-k8s.io -A -o yaml \
+    >"${diagnostics_dir}/podgroups.yaml" 2>&1 || true
+  KUBECONFIG="$kubeconfig" kubectl get events -A --sort-by=.lastTimestamp \
+    >"${diagnostics_dir}/events.txt" 2>&1 || true
 }
 
 finish() {

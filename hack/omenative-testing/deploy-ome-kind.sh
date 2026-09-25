@@ -102,6 +102,11 @@ METRICS_IMAGE="$(python3 "$RENDER" --kind --value OME_EVAL_METRICS_IMAGE)"
 # chart is installed below.
 SCHEDULER_NAME="$(python3 "$RENDER" --kind --value OME_EVAL_SCHEDULER)"
 SCHEDULER_BUILD_IMAGE="ome-scheduler:${BUILD_TAG}"
+# The gang scheduler pins every gang to a topology domain and treats a gang
+# without one as unresolvable. KIND nodes carry no domain label, so the whole
+# cluster is labeled as one domain and the scheduler falls back to that key.
+SCHEDULER_TOPOLOGY_KEY="${OME_EVAL_SCHEDULER_TOPOLOGY_KEY:-topology.kubernetes.io/zone}"
+SCHEDULER_TOPOLOGY_DOMAIN="${OME_EVAL_SCHEDULER_TOPOLOGY_DOMAIN:-ome-eval}"
 
 case "${OME_KIND_OFFLINE:-false}" in
   1|true|TRUE|yes|YES) OFFLINE=1 ;;
@@ -455,11 +460,15 @@ if [ -n "$SCHEDULER_NAME" ]; then
   # Same content-derived tag as the controller so a rebuilt scheduler rolls on a
   # reused cluster. One replica: a single-node cluster cannot host the chart's
   # HA pair, and leader election with one candidate is still correct.
+  echo "--- label every node as one topology domain (${SCHEDULER_TOPOLOGY_KEY}=${SCHEDULER_TOPOLOGY_DOMAIN}) ---"
+  kubectl --context "$KCTX" label nodes --all --overwrite \
+    "${SCHEDULER_TOPOLOGY_KEY}=${SCHEDULER_TOPOLOGY_DOMAIN}"
   echo "--- install ${SCHEDULER_NAME} (gang scheduler) ---"
   helm upgrade --install ome-scheduler charts/ome-scheduler/ \
     --kube-context "$KCTX" --namespace "$OME_NS" \
     --set global.hub="" \
     --set scheduler.name="$SCHEDULER_NAME" \
+    --set scheduler.plugin.topologyKey="$SCHEDULER_TOPOLOGY_KEY" \
     --set scheduler.image.repository=ome-scheduler \
     --set scheduler.image.tag="$DEPLOY_TAG" \
     --set scheduler.replicaCount=1 \
