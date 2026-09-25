@@ -256,6 +256,11 @@ func (r *Reconciler) reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 	if !isvc.DeletionTimestamp.IsZero() {
 		return r.reconcileDelete(ctx, isvc)
 	}
+	// The primary watch and queued status events can include local services.
+	// Only placement sources may acquire placement state or remote allocations.
+	if !IsPlacementEligible(isvc) {
+		return ctrl.Result{}, nil
+	}
 
 	if controllerutil.AddFinalizer(isvc, PlacementFinalizer) {
 		if err := r.Update(ctx, isvc); err != nil {
@@ -1607,7 +1612,7 @@ func placementEligibleIndexExtractor(obj client.Object) []string {
 	if !ok {
 		return nil
 	}
-	if !declaresPlacementRequirement(isvc) {
+	if !IsPlacementEligible(isvc) {
 		return nil
 	}
 	return []string{placementEligibleIndexValue}
@@ -1628,6 +1633,9 @@ func declaresPlacementRequirement(isvc *v1beta1.InferenceService) bool {
 // predicate so ordinary, single-cluster InferenceServices do not accidentally
 // acquire multi-cluster artifacts.
 func IsPlacementEligible(isvc *v1beta1.InferenceService) bool {
+	if isvc == nil || isvc.Labels[PlacementOriginLabel] != "" || isvc.Annotations[PlacementOriginUIDAnnotation] != "" {
+		return false
+	}
 	return declaresPlacementRequirement(isvc)
 }
 
