@@ -715,8 +715,19 @@ class TestCheckedInTreeClassification(unittest.TestCase):
             for _, _, cases in gp._eval_case_groups()
             for case_id in cases
         ]
-        self.assertEqual(len(emitted), len(committed))
+        # Every case runs once per scheduler dimension (cluster default, ome-scheduler).
+        self.assertEqual(len(emitted), len(committed) * len(gp.EVAL_SCHEDULERS))
         self.assertEqual(set(emitted), set(committed))
+        job_keys = re.findall(r'key: "(omenative-e2e-(?!kind-gke)[^"]+)"', yaml_text)
+        self.assertEqual(len(job_keys), len(commands))
+        for scheduler in gp.EVAL_SCHEDULERS:
+            per_sched = [
+                case_id
+                for key, command in zip(job_keys, commands)
+                if ("-" + gp.EVAL_GANG_SCHEDULER in key) == bool(scheduler)
+                for case_id in command.split()[2:]
+            ]
+            self.assertEqual(sorted(per_sched), sorted(committed), scheduler or "default")
 
 
 if __name__ == "__main__":

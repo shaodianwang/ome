@@ -75,7 +75,8 @@ vs. recreate updates.
 ```sh
 make test-kind                                  # full suite
 GINKGO_FOCUS='PD per-Component' make test-kind  # narrow to specific specs
-make test-kind-scheduler                        # focused controller + ome-scheduler contract
+# controller + ome-scheduler contract: the perm harness lane with OME_EVAL_SCHEDULER=ome-scheduler
+# (hack/omenative-testing/perm/README.md, "Scheduler dimension")
 make test-kind-clean                            # delete leftover clusters
 ```
 

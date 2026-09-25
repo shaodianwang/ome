@@ -18,7 +18,9 @@ for case_id in "$@"; do
 done
 
 short_sha=$(printf '%.8s' "${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}")
-cluster=$(printf 'ome-eval-%s-%s' "$feature" "$topology" | tr '_' '-')
+scheduler="${OME_EVAL_SCHEDULER:-}"
+lane="${feature}-${topology}${scheduler:+-${scheduler}}"
+cluster=$(printf 'ome-eval-%s' "$lane" | tr '_' '-')
 images_dir="${OME_KIND_IMAGES_DIR:-/images}"
 repo="${PROD_ECR_REGISTRY:-168653207203.dkr.ecr.us-east-2.amazonaws.com}/msl_infra"
 run_stamp="${BUILDKITE_BUILD_NUMBER:-local}-${BUILDKITE_JOB_ID:-$$}"
@@ -74,7 +76,7 @@ until docker info >/dev/null 2>&1; do
 done
 
 echo "--- load KIND and exact runtime images ---"
-for archive in kindest-node busybox ome-manager ome-agent canary-metrics; do
+for archive in kindest-node busybox ome-manager ome-agent ome-scheduler canary-metrics; do
   path="${images_dir}/${archive}.tar"
   [ -s "$path" ] || { echo "missing image archive: $path" >&2; exit 1; }
   docker load -i "$path"
@@ -88,12 +90,15 @@ node_image=$(tr -d '[:space:]' <.kind-node-image | cut -d@ -f1)
 manager_ref="${repo}/ome-manager:${short_sha}"
 agent_ref="${repo}/ome-agent:${short_sha}"
 metrics_ref="${repo}/canary-metrics:${short_sha}"
+scheduler_ref="${repo}/ome-scheduler:${short_sha}"
 docker image inspect "$manager_ref" >/dev/null
 docker image inspect "$agent_ref" >/dev/null
 docker image inspect "$metrics_ref" >/dev/null
+docker image inspect "$scheduler_ref" >/dev/null
 docker tag "$manager_ref" "ome-manager:${short_sha}"
 docker tag "$agent_ref" "ome-agent:${short_sha}"
 docker tag "$metrics_ref" canary-metrics:kind-local
+docker tag "$scheduler_ref" "ome-scheduler:${short_sha}"
 
 docker run --rm --privileged busybox sh -c '
   sysctl -w fs.inotify.max_user_watches=1048576
@@ -131,6 +136,7 @@ export OME_TEST_NS=sandbox
 export OME_EVAL_KIND=1
 export OME_TEST_ALLOW_CTRL_RESTART=1
 export OME_EVAL_METRICS_IMAGE=canary-metrics:kind-local
+export OME_EVAL_SCHEDULER="$scheduler"
 export OME_KIND_OFFLINE=true
 export OME_IMAGE_TAG="$short_sha"
 export OME_RUN_TS="$run_stamp"
@@ -145,8 +151,8 @@ echo "--- validate and run ${feature}/${topology} ---"
   python3 batch.py \
     --conc "${OME_EVAL_CASE_CONCURRENCY:-4}" \
     --pod-budget "${OME_EVAL_POD_BUDGET:-${OME_EVAL_EXCLUSIVE_PODS:-64}}" \
-    --junit "results/${run_stamp}/junit-${feature}-${topology}.xml" \
+    --junit "results/${run_stamp}/junit-${lane}.xml" \
     "$@"
-  test -s "results/${run_stamp}/junit-${feature}-${topology}.xml"
-  grep -q '<testcase' "results/${run_stamp}/junit-${feature}-${topology}.xml"
+  test -s "results/${run_stamp}/junit-${lane}.xml"
+  grep -q '<testcase' "results/${run_stamp}/junit-${lane}.xml"
 )

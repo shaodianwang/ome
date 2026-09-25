@@ -97,6 +97,11 @@ MANAGER_BUILD_IMAGE="ome-manager:${BUILD_TAG}"
 AGENT_BUILD_IMAGE="ome-agent:${BUILD_TAG}"
 RENDER="hack/omenative-testing/perm/runtime_fixtures.py"
 METRICS_IMAGE="$(python3 "$RENDER" --kind --value OME_EVAL_METRICS_IMAGE)"
+# Empty: the cluster default schedules the fixtures. A name (the scheduler lane
+# sets ome-scheduler) is stamped on every fixture runtime and the matching
+# chart is installed below.
+SCHEDULER_NAME="$(python3 "$RENDER" --kind --value OME_EVAL_SCHEDULER)"
+SCHEDULER_BUILD_IMAGE="ome-scheduler:${BUILD_TAG}"
 
 case "${OME_KIND_OFFLINE:-false}" in
   1|true|TRUE|yes|YES) OFFLINE=1 ;;
@@ -224,6 +229,26 @@ build_canary_metrics_image() (
     -t "$METRICS_IMAGE" "$stage"
 )
 
+build_scheduler_image() (
+  set -e
+  local stage
+  stage="$(mktemp -d "${TMPDIR:-/tmp}/ome-scheduler.XXXXXX")"
+  trap 'rm -rf -- "$stage"' EXIT
+
+  echo "--- compile ome-scheduler ---"
+  (
+    cd scheduler
+    CGO_ENABLED=0 GOTOOLCHAIN=local GOPROXY=off \
+      go build -trimpath -o "${stage}/ome-scheduler" ./cmd/ome-scheduler
+  )
+  ln -s ome-scheduler "${stage}/entrypoint"
+  DOCKER_BUILDKIT=0 docker build --pull=false --network=none \
+    -f dockerfiles/kind-prebuilt.Dockerfile \
+    --build-arg BASE_IMAGE=scratch \
+    --build-arg RUN_USER=65532:65532 \
+    -t "$SCHEDULER_BUILD_IMAGE" "$stage"
+)
+
 if [ "$SKIP_BUILD" -eq 0 ] && [ "$OFFLINE" -eq 1 ]; then
   ensure_prebuilt_base
   CARGO_NET_OFFLINE=true GOTOOLCHAIN=local GOPROXY=off make xet-build
@@ -231,6 +256,7 @@ if [ "$SKIP_BUILD" -eq 0 ] && [ "$OFFLINE" -eq 1 ]; then
   build_prebuilt_image "$AGENT_BUILD_IMAGE" ./cmd/ome-agent ome-agent 0:0 \
     config/ome-agent/ome-agent.yaml
   build_canary_metrics_image
+  [ -z "$SCHEDULER_NAME" ] || build_scheduler_image
 elif [ "$SKIP_BUILD" -eq 0 ]; then
   echo "--- build ${MANAGER_BUILD_IMAGE} ---"
   docker build -f dockerfiles/manager.Dockerfile -t "$MANAGER_BUILD_IMAGE" .
@@ -239,6 +265,10 @@ elif [ "$SKIP_BUILD" -eq 0 ]; then
   docker build -f dockerfiles/ome-agent.Dockerfile -t "$AGENT_BUILD_IMAGE" .
   echo "--- build ${METRICS_IMAGE} ---"
   docker build -f dockerfiles/canary-metrics.Dockerfile -t "$METRICS_IMAGE" .
+  if [ -n "$SCHEDULER_NAME" ]; then
+    echo "--- build ${SCHEDULER_BUILD_IMAGE} ---"
+    docker build -f dockerfiles/ome-scheduler.Dockerfile -t "$SCHEDULER_BUILD_IMAGE" .
+  fi
 fi
 
 if ! MANAGER_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$MANAGER_BUILD_IMAGE" 2>/dev/null)"; then
@@ -257,6 +287,17 @@ MANAGER_IMAGE="ome-manager:${DEPLOY_TAG}"
 AGENT_IMAGE="ome-agent:${DEPLOY_TAG}"
 docker image tag "$MANAGER_BUILD_IMAGE" "$MANAGER_IMAGE"
 docker image tag "$AGENT_BUILD_IMAGE" "$AGENT_IMAGE"
+SCHEDULER_IMAGE=""
+if [ -n "$SCHEDULER_NAME" ]; then
+  docker image inspect "$SCHEDULER_BUILD_IMAGE" >/dev/null 2>&1 || {
+    echo "FATAL: local image ${SCHEDULER_BUILD_IMAGE} not found; OME_EVAL_SCHEDULER=${SCHEDULER_NAME} needs it" >&2
+    echo "       omit --skip-build or set OME_IMAGE_TAG to an existing image tag" >&2
+    exit 1
+  }
+  SCHEDULER_IMAGE="ome-scheduler:${DEPLOY_TAG}"
+  docker image tag "$SCHEDULER_BUILD_IMAGE" "$SCHEDULER_IMAGE"
+  echo "    scheduler: ${SCHEDULER_IMAGE}"
+fi
 echo "--- deploy image set ${DEPLOY_TAG} ---"
 echo "    manager: ${MANAGER_IMAGE_ID}"
 echo "    agent:   ${AGENT_IMAGE_ID}"
@@ -264,6 +305,7 @@ echo "    agent:   ${AGENT_IMAGE_ID}"
 echo "--- load images into ${CLUSTER} ---"
 kind_load "$MANAGER_IMAGE"
 kind_load "$AGENT_IMAGE"
+[ -z "$SCHEDULER_IMAGE" ] || kind_load "$SCHEDULER_IMAGE"
 if docker image inspect "$METRICS_IMAGE" >/dev/null 2>&1; then
   kind_load "$METRICS_IMAGE"
 elif [ "$OFFLINE" -eq 1 ]; then
@@ -311,6 +353,14 @@ helm upgrade --install ome-crd charts/ome-crd/ \
 if [ "$OFFLINE" -eq 1 ]; then
   echo "--- install PodGroup CRD ---"
   kubectl --context "$KCTX" apply -f "${EVAL_DIR}/podgroup-crd.yaml"
+  kubectl --context "$KCTX" wait --for=condition=Established \
+    crd/podgroups.scheduling.x-k8s.io --timeout=60s
+elif [ -n "$SCHEDULER_NAME" ]; then
+  # The gang scheduler lists PodGroups at startup; vendor the CRD the same way
+  # the KIND suites do and install it before the chart.
+  echo "--- install PodGroup CRD ---"
+  make scheduler-plugins-crds
+  kubectl --context "$KCTX" apply -f tests/integration/dep-crds/scheduler-plugins/
   kubectl --context "$KCTX" wait --for=condition=Established \
     crd/podgroups.scheduling.x-k8s.io --timeout=60s
 fi
@@ -401,6 +451,26 @@ helm upgrade --install ome charts/ome-resources/ "${HELM_ARGS[@]}" "${CONVERGE_A
 # The fixtures are templates: the PVC, the seed Job and the ClusterBaseModel's
 # storageUri all have to name $NS, because a pod cannot mount a PVC from
 # another namespace and the ISVC validator rejects a model that points at one.
+if [ -n "$SCHEDULER_NAME" ]; then
+  # Same content-derived tag as the controller so a rebuilt scheduler rolls on a
+  # reused cluster. One replica: a single-node cluster cannot host the chart's
+  # HA pair, and leader election with one candidate is still correct.
+  echo "--- install ${SCHEDULER_NAME} (gang scheduler) ---"
+  helm upgrade --install ome-scheduler charts/ome-scheduler/ \
+    --kube-context "$KCTX" --namespace "$OME_NS" \
+    --set global.hub="" \
+    --set scheduler.name="$SCHEDULER_NAME" \
+    --set scheduler.image.repository=ome-scheduler \
+    --set scheduler.image.tag="$DEPLOY_TAG" \
+    --set scheduler.replicaCount=1 \
+    --set scheduler.podDisruptionBudget.enabled=false \
+    --set scheduler.resources.requests.cpu=100m \
+    --set scheduler.resources.requests.memory=256Mi \
+    --set scheduler.resources.limits.cpu=1 \
+    --set scheduler.resources.limits.memory=1Gi \
+    --wait --timeout 300s
+fi
+
 echo "--- side-load the fixture images ---"
 if [ "$OFFLINE" -eq 1 ]; then
   docker load -i "${IMAGES_DIR}/eval-nginx.tar" >/dev/null

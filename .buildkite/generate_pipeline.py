@@ -243,6 +243,14 @@ def _truthy(val: str) -> bool:
 # See .buildkite/README-gke-kind.md.
 GKE_KIND_ENABLED = _truthy(os.environ.get("GKE_KIND_ENABLED", "1"))
 GKE_EVAL_ENABLED = _truthy(os.environ.get("GKE_EVAL_ENABLED", "1"))
+# Second scheduler dimension of the eval: every feature/topology job again with
+# the fixtures stamped schedulerName=ome-scheduler and the gang scheduler
+# installed in the KIND cluster. Advisory until GKE_EVAL_SCHEDULER_HARD_FAIL=1.
+GKE_EVAL_SCHEDULER_ENABLED = _truthy(os.environ.get("GKE_EVAL_SCHEDULER_ENABLED", "1"))
+GKE_EVAL_SCHEDULER_HARD_FAIL = _truthy(os.environ.get("GKE_EVAL_SCHEDULER_HARD_FAIL", "0"))
+EVAL_GANG_SCHEDULER = "ome-scheduler"
+# "" is the cluster default scheduler; every eval job is emitted once per entry.
+EVAL_SCHEDULERS = [""] + ([EVAL_GANG_SCHEDULER] if GKE_EVAL_SCHEDULER_ENABLED else [])
 # Kill switch for the deployed-mode operator-upgrade identity gate (see
 # _gke_upgrade_identity_step). The step resolves its own previous-image
 # reference at run time, so this only needs to gate whether the step exists.
@@ -932,8 +940,11 @@ def _gke_eval_group() -> str:
     default_target_waves = int(os.environ.get("GKE_EVAL_TARGET_WAVES", "4"))
     canary_target_waves = int(os.environ.get("GKE_EVAL_CANARY_TARGET_WAVES", "2"))
     children = []
-    for feature, topology, cases in _eval_case_groups():
+    for scheduler in EVAL_SCHEDULERS:
+      for feature, topology, cases in _eval_case_groups():
         slug = f"{feature}-{topology}".replace("_", "-")
+        if scheduler:
+            slug += "-" + scheduler.replace("_", "-")
         prometheus = "true" if feature in ("canary", "reject") else "false"
         pod_budget = configured_pod_budget or ("35" if feature == "canary" else "64")
         if feature == "canary":
@@ -951,24 +962,29 @@ def _gke_eval_group() -> str:
         for index, shard_cases in enumerate(subshards, start=1):
             part = f" [{index}/{len(subshards)}]" if len(subshards) > 1 else ""
             key_part = f"-{index}-of-{len(subshards)}" if len(subshards) > 1 else ""
-            children.append(
-                {
-                    "label": f":test_tube: {feature} / {topology}{part} ({len(shard_cases)} cases)",
-                    "key": f"omenative-e2e-{slug}{key_part}",
-                    "depends_on": "package-kind-eval-image",
-                    "timeout_in_minutes": 180,
-                    "env": {
-                        "OME_KIND_PROMETHEUS_ENABLED": prometheus,
-                        "OME_EVAL_CASE_CONCURRENCY": str(concurrency),
-                        "OME_EVAL_POD_BUDGET": pod_budget,
-                        "PROD_ECR_REGISTRY": PROD_ECR_REGISTRY,
-                    },
-                    "agents": {"queue": GKE_QUEUE},
-                    "command": "sh .buildkite/run_omenative_eval_gke.sh "
-                    + " ".join([feature, topology, *shard_cases]),
-                    "plugins": plugins,
-                }
-            )
+            sched_part = f" [{scheduler}]" if scheduler else ""
+            env = {
+                "OME_KIND_PROMETHEUS_ENABLED": prometheus,
+                "OME_EVAL_CASE_CONCURRENCY": str(concurrency),
+                "OME_EVAL_POD_BUDGET": pod_budget,
+                "PROD_ECR_REGISTRY": PROD_ECR_REGISTRY,
+            }
+            if scheduler:
+                env["OME_EVAL_SCHEDULER"] = scheduler
+            child = {
+                "label": f":test_tube: {feature} / {topology}{part}{sched_part} ({len(shard_cases)} cases)",
+                "key": f"omenative-e2e-{slug}{key_part}",
+                "depends_on": "package-kind-eval-image",
+                "timeout_in_minutes": 180,
+                "env": env,
+                "agents": {"queue": GKE_QUEUE},
+                "command": "sh .buildkite/run_omenative_eval_gke.sh "
+                + " ".join([feature, topology, *shard_cases]),
+                "plugins": plugins,
+            }
+            if scheduler and not GKE_EVAL_SCHEDULER_HARD_FAIL:
+                child["soft_fail"] = True
+            children.append(child)
     group = {
         "group": ":test_tube: OMENative YAML E2E (KIND on GKE)",
         "key": "omenative-e2e-kind-gke",
@@ -1350,6 +1366,7 @@ def _package_kind_eval_image_step() -> str:
               - "mirror-kind-ci"
               - "mirror-ome-manager"
               - "mirror-ome-agent"
+              - "mirror-ome-scheduler"
               - "mirror-canary-metrics"
 {_auto_retry()}
             secrets:

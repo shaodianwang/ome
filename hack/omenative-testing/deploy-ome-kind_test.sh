@@ -92,6 +92,7 @@ case "$tool" in
     case " $* " in
       *" --images "*) ;;
       *" --case-images "*) ;;
+      *" --value OME_EVAL_SCHEDULER"*) ;;
       *) echo '{}' ;;
     esac
     ;;

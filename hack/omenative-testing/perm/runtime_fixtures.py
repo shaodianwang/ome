@@ -59,6 +59,11 @@ DEFAULTS = {
     "OME_EVAL_NGINX_ALT_IMAGE": "nginxinc/nginx-unprivileged:1.28-alpine",
     "OME_EVAL_METRICS_IMAGE": "canary-metrics:latest",
     "OME_EVAL_PV_HOST_PATH": "/ome-eval-model",
+    # Scheduler stamped on every fixture runtime (and on the runtimes the cases
+    # embed). Empty renders no schedulerName, so the cluster default places the
+    # pods; the scheduler lane sets ome-scheduler and the runner then asserts
+    # gang scheduling (invariant D).
+    "OME_EVAL_SCHEDULER": "",
 }
 
 # KIND has no arch to select for and pulls nothing: its static RWX volume is
@@ -71,6 +76,7 @@ KIND_OVERRIDES = {
     "OME_EVAL_NGINX_IMAGE": "nginxinc/nginx-unprivileged:1.27-alpine",
     "OME_EVAL_NGINX_ALT_IMAGE": "nginxinc/nginx-unprivileged:1.28-alpine",
     "OME_EVAL_METRICS_IMAGE": "canary-metrics:kind-local",
+    "OME_EVAL_SCHEDULER": "",
 }
 
 
@@ -110,6 +116,13 @@ def render_text(text, values):
         text = "\n".join(
             line for line in text.splitlines()
             if "kubernetes.io/arch" not in line
+        ) + "\n"
+    # No scheduler selected: drop the emptied schedulerName line so the cluster
+    # default applies instead of an empty (invalid) name.
+    if not values.get("OME_EVAL_SCHEDULER"):
+        text = "\n".join(
+            line for line in text.splitlines()
+            if line.strip() != "schedulerName:"
         ) + "\n"
     return text
 

@@ -32,6 +32,18 @@ scale behavior. Targets whatever cluster your kubeconfig points at — override 
 > through a registry mirror exports the three variables first — the CI tree
 > keeps the mirror paths: `source .buildkite/eval_image_mirror.sh`.
 >
+> **Scheduler dimension.** `OME_EVAL_SCHEDULER` names the scheduler stamped on
+> every fixture runtime (and on the runtimes the cases embed). Empty, the
+> default, renders no `schedulerName` and the cluster default places the pods.
+> `OME_EVAL_SCHEDULER=ome-scheduler` makes `deploy-ome-kind.sh` build, load and
+> install the gang scheduler chart, and the runner then asserts invariant D on
+> every case: each pod runs under that scheduler, each multi-pod Instance's pods
+> share one PodGroup whose `minMember` equals the gang size, and a gang binds
+> as a unit. On a real cluster the scheduler must already run under that name.
+> CI runs every eval job twice, once per scheduler (`omenative-e2e-<feature>-<topology>`
+> and `…-ome-scheduler`); the scheduler jobs are advisory until
+> `GKE_EVAL_SCHEDULER_HARD_FAIL=1`.
+>
 > **Canary-analysis cases (`analysis=…`) additionally need:** the bundled
 > `ome-prometheus` enabled in the cluster (chart `prometheus.enabled`, now the
 > default) scraping `$OME_TEST_NS`, and the `canary-metrics` image (built from

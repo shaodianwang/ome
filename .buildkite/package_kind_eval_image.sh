@@ -36,7 +36,7 @@ stage=$(mktemp -d)
 trap 'rm -rf -- "$stage"' EXIT
 mkdir -p "$stage/images"
 
-for image in ome-manager ome-agent canary-metrics; do
+for image in ome-manager ome-agent ome-scheduler canary-metrics; do
   ref="${repo}/${image}:${short_sha}"
   echo "--- pull ${ref}"
   crane pull --platform linux/amd64 "$ref" "$stage/images/${image}.tar"

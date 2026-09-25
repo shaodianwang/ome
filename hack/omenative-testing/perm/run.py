@@ -116,6 +116,8 @@ TEARDOWN_POLL_S = 5.0
 # per case, ~5 req/s at batch conc-8 — the same order as the existing status
 # polls (canary 0.5/s, migrate ledger 0.2/s).
 INV_TICK_S = 5.0
+INV_SUSTAIN_D = 6    # gang-scheduling ticks (30 s): a gang half-bound this long is not still arriving
+SCHED_NAME = os.environ.get("OME_EVAL_SCHEDULER", "").strip()   # non-empty: invariant D asserts gang scheduling
 # Sustain counts, in CONSECUTIVE tick observations — the transient carve-out:
 #   A (status-truth): 2 observations = the condition spanned >= 1 full tick
 #     interval (>= 5s; fires 5-10s after onset depending on tick phase), so a
@@ -765,7 +767,7 @@ def _pod_serving(obj):
 
 
 def _inv_new(case_id, hdr):
-    """Fresh invariant-poller state. Header `inv_off=A|B|C|all` (which requires
+    """Fresh invariant-poller state. Header `inv_off=A|B|C|D|all` (which requires
     an adjacent '# reason:' comment — enforced by validate-only) disables checks.
     Invariant C (pair-alive) additionally requires arming: a pairing-mode
     handler sets inv["pairing"] at trigger time for a non-empty→non-empty
@@ -777,6 +779,13 @@ def _inv_new(case_id, hdr):
         "a_on": off not in ("A", "all"),
         "b_on": off not in ("B", "all"),
         "c_on": off not in ("C", "all"),
+        # Invariant D (gang scheduling) exists only when the fixtures name a
+        # scheduler (OME_EVAL_SCHEDULER): every pod must run under it and every
+        # gang must bind as one PodGroup.
+        "d_on": bool(SCHED_NAME) and off not in ("D", "all"),
+        "d_seen": False,        # invariant D observed at least one live pod
+        "pg_seen": False,       # invariant D resolved at least one PodGroup
+        "pg_unavailable": False,  # PodGroup API missing: D2 skipped, D1/D3 still assert
         # inv_xfail scope: a violation of this invariant class is the case's
         # tracked bug (notimpl issue) and records as the XFAIL, never a FAIL.
         "xfail": str(hdr.get("inv_xfail", "") or ""),
@@ -999,12 +1008,82 @@ def _inv_check_pair_alive(inv, pod_state, hits, now):
              f"(engine serves {eng_p}, decoder serves {dec_p})")
 
 
+def _list_podgroups(case_id):
+    """name → spec.minMember for the case's PodGroups; None when the API is unavailable."""
+    r = kubectl("-n", NS, "get", "podgroups.scheduling.x-k8s.io", "-l",
+                f"ome.io/inferenceservice={case_id}", "-o", "json")
+    if r.returncode != 0:
+        return None
+    try:
+        items = json.loads(r.stdout).get("items", [])
+    except Exception:
+        return None
+    return {(it.get("metadata") or {}).get("name", ""): int((it.get("spec") or {}).get("minMember") or 0)
+            for it in items}
+
+
+def _inv_check_gang_scheduling(inv, pod_state, pods_per_inst, hits, now):
+    """Invariant D, one tick, only when OME_EVAL_SCHEDULER names a scheduler:
+    D1 every live case pod carries that schedulerName (the runtime's name
+       reached the rendered pods); D2 every multi-pod Instance's pods share
+       one pod-group label whose PodGroup exists with minMember == pods per
+       Instance; D3 a gang binds as a unit — once any member has a node, every
+       existing member has one within INV_SUSTAIN_D ticks. Teardown is not a
+       gang event: pods being deleted are not counted."""
+    live = [p for p in pod_state.values() if p and p["alive"]]
+    if not live:
+        return
+    inv["d_seen"] = True
+    for p in live:
+        if p.get("sched", "") != SCHED_NAME:
+            key = ("D", "scheduler-name", p["comp"], p.get("inst", "0"))
+            _inv_hit(inv, hits, key, key, 1, now,
+                     f"{p['comp']}/{p.get('inst', '0')} pod runs under scheduler "
+                     f"{p.get('sched') or 'default'!r}, expected {SCHED_NAME!r}")
+    gangs = defaultdict(list)
+    for p in live:
+        if pods_per_inst.get(p["comp"], 1) > 1:
+            gangs[(p["comp"], p.get("inst", "0"))].append(p)
+    if not gangs:
+        return
+    pgs = None
+    for (comp, inst), members in sorted(gangs.items()):
+        want = pods_per_inst[comp]
+        bound = [m for m in members if m.get("node")]
+        if bound and len(bound) < len(members):
+            key = ("D", "partial-gang", comp, inst)
+            _inv_hit(inv, hits, key, key, INV_SUSTAIN_D, now,
+                     f"{comp}/{inst}: {len(bound)} of {len(members)} live gang pods bound to a node "
+                     f"(gang size {want}) — the gang did not bind as a unit")
+        groups = {m.get("pg", "") for m in members}
+        if len(groups) != 1 or "" in groups:
+            key = ("D", "pod-group-label", comp, inst)
+            _inv_hit(inv, hits, key, key, INV_SUSTAIN_D, now,
+                     f"{comp}/{inst}: gang pods carry pod-group labels {sorted(groups)!r}, expected one shared group")
+            continue
+        if pgs is None:
+            pgs = _list_podgroups(inv["case_id"])
+            if pgs is None:
+                inv["pg_unavailable"] = True
+                continue
+        name = next(iter(groups))
+        inv["pg_seen"] = True
+        if name not in pgs:
+            key = ("D", "pod-group-missing", comp, inst)
+            _inv_hit(inv, hits, key, key, INV_SUSTAIN_D, now,
+                     f"{comp}/{inst}: pods reference PodGroup {name!r}, which does not exist")
+        elif pgs[name] != want:
+            key = ("D", "pod-group-minmember", comp, inst)
+            _inv_hit(inv, hits, key, key, 1, now,
+                     f"{comp}/{inst}: PodGroup {name!r} minMember={pgs[name]}, expected {want}")
+
+
 def _inv_tick(inv, pod_state, pods_per_inst):
     """One invariant observation, self-rate-limited to INV_TICK_S. Called from
     every watch loop each iteration; a no-op between ticks and when every
     invariant is opted out. Streaks reset for keys not observed this tick
     (the CONSECUTIVE-tick sustain rule)."""
-    if not inv or (not inv["a_on"] and not inv["b_on"] and not inv["c_on"]):
+    if not inv or not (inv["a_on"] or inv["b_on"] or inv["c_on"] or inv.get("d_on")):
         return
     now = time.time()
     if now - inv["last"] < INV_TICK_S:
@@ -1017,6 +1096,8 @@ def _inv_tick(inv, pod_state, pods_per_inst):
         _inv_check_endpoints(inv, pod_state, hits, now)
     if inv["c_on"]:
         _inv_check_pair_alive(inv, pod_state, hits, now)
+    if inv.get("d_on"):
+        _inv_check_gang_scheduling(inv, pod_state, pods_per_inst, hits, now)
     for k in [k for k in inv["streaks"] if k not in hits]:
         del inv["streaks"][k]
 
@@ -1040,12 +1121,17 @@ def invariant_checks(inv, verdict, notes, checks):
     pairing = inv.get("pairing")
     if inv["c_on"] and pairing and not pairing.get("seen"):
         checks.append("  ⓘ invariant C (pair-alive) never saw both engine and decoder serving at a tick — vacuous (no assertion made)")
+    if inv.get("d_on") and not inv.get("d_seen"):
+        checks.append("  ⓘ invariant D (gang-scheduling) never saw a live pod — vacuous (no assertion made)")
+    if inv.get("d_on") and inv.get("pg_unavailable"):
+        checks.append("  ⓘ invariant D: PodGroup API unavailable on this cluster — pod-group checks skipped; scheduler name and gang binding still asserted")
     if not inv["viol"]:
         active = [x for x, on in (("A", inv["a_on"] and inv["ir_seen"]),
                                   ("B", inv["b_on"] and inv["b_seen"]),
-                                  ("C", inv["c_on"] and bool(pairing) and pairing.get("seen", False))) if on]
+                                  ("C", inv["c_on"] and bool(pairing) and pairing.get("seen", False)),
+                                  ("D", inv.get("d_on", False) and inv.get("d_seen", False))) if on]
         if active:
-            checks.append(f"  ✓ continuous invariants held ({'+'.join(active)}): no sustained status-truth / endpoints-membership / pair-alive violation")
+            checks.append(f"  ✓ continuous invariants held ({'+'.join(active)}): no sustained status-truth / endpoints-membership / pair-alive / gang-scheduling violation")
         return verdict
     scope = inv.get("xfail") or ""
     ref = f"#{inv['xfail_issue']}" if inv.get("xfail_issue") else "UNLINKED"
@@ -1599,14 +1685,14 @@ HDR_VALIDATORS = {
     # Opt out of the continuous invariants (A=status-truth, B=endpoints-
     # membership, C=pair-alive). REQUIRES an adjacent '# reason: <why>' comment
     # on line 2 of the case file — validate-only rejects an inv_off without one.
-    "inv_off": lambda v: v in {"A", "B", "C", "all"},
+    "inv_off": lambda v: v in {"A", "B", "C", "D", "all"},
     # Scope a notimpl parking to a continuous invariant: a sustained violation
     # of the NAMED invariant is the tracked bug itself, so it records as the
     # case's XFAIL instead of hardening the verdict to FAIL. The invariant is
     # still evaluated and printed (unlike inv_off, nothing is blinded), and a
     # violation of any OTHER invariant fails hard as always. Requires
     # notimpl=1 (whose issue= names the bug) + the line-2 '# reason:' comment.
-    "inv_xfail": lambda v: v in {"A", "B", "C", "all"},
+    "inv_xfail": lambda v: v in {"A", "B", "C", "D", "all"},
     # Fault injection: fault=<kind>:<param> — quota:<n≥0>, podkill:<phase>,
     # ctrlrestart:<phase> (phase ∈ FAULT_PHASES), cordon:<target ∈ FAULT_TARGETS>.
     "fault": _fault_ok,
@@ -1876,6 +1962,8 @@ def _apply_event(ctx, ev):
             "uid": meta.get("uid", ""),
             "newanno": annos.get(TRIGGER_ANNO) == TRIGGER_VAL,
             "node": (obj.get("spec") or {}).get("nodeName", ""),
+            "sched": (obj.get("spec") or {}).get("schedulerName", ""),
+            "pg": labels.get("scheduling.x-k8s.io/pod-group", ""),
             "created": meta.get("creationTimestamp", ""),
         }
         if rev:
