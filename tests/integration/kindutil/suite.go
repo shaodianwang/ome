@@ -153,6 +153,9 @@ func RunKindSuite(t *testing.T, opts SuiteOpts) *SuiteState {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
+	if opts.Scheduler != nil && opts.Workers < opts.Scheduler.minWorkers() {
+		opts.Workers = opts.Scheduler.minWorkers()
+	}
 	cfg, err := EnsureCluster(ctx, opts.ClusterName, opts.Workers, opts.ExtraMounts...)
 	if err != nil {
 		t.Fatalf("RunKindSuite: EnsureCluster(%s): %v", opts.ClusterName, err)

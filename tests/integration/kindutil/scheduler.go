@@ -37,6 +37,10 @@ type SchedulerInstall struct {
 	// TopologyDomain is the single domain value stamped on every node; empty
 	// means "ome-kind".
 	TopologyDomain string
+	// MinWorkers raises the suite's worker count: the gang scheduler places one
+	// gang member per node, so gang specs need as many workers as their largest
+	// gang plus its surge. Zero means 6.
+	MinWorkers int
 }
 
 const schedulerCRDPath = "tests/integration/dep-crds/scheduler-plugins"
@@ -60,6 +64,13 @@ func (s *SchedulerInstall) topologyKey() string {
 		return s.TopologyKey
 	}
 	return "topology.kubernetes.io/zone"
+}
+
+func (s *SchedulerInstall) minWorkers() int {
+	if s.MinWorkers > 0 {
+		return s.MinWorkers
+	}
+	return 6
 }
 
 func (s *SchedulerInstall) topologyDomain() string {

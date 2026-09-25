@@ -245,6 +245,11 @@ GKE_EVAL_ENABLED = _truthy(os.environ.get("GKE_EVAL_ENABLED", "1"))
 # installed in the KIND cluster. Advisory until GKE_EVAL_SCHEDULER_HARD_FAIL=1.
 GKE_EVAL_SCHEDULER_ENABLED = _truthy(os.environ.get("GKE_EVAL_SCHEDULER_ENABLED", "1"))
 GKE_EVAL_SCHEDULER_HARD_FAIL = _truthy(os.environ.get("GKE_EVAL_SCHEDULER_HARD_FAIL", "0"))
+# The gang scheduler places one gang member per node, so a multi-node case needs
+# as many worker nodes as its peak pod count. Its scheduler twin gets a cluster
+# sized to the shard, capped here; cases above the cap are left out of the twin
+# and named in OME_EVAL_SCHEDULER_SKIPPED.
+GKE_EVAL_SCHEDULER_MAX_WORKERS = int(os.environ.get("GKE_EVAL_SCHEDULER_MAX_WORKERS", "12"))
 EVAL_GANG_SCHEDULER = "ome-scheduler"
 # Scheduler dimension of the KIND suite lanes: every semantic group again with
 # the fixture runtime selecting ome-scheduler, installed into the suite's
@@ -991,9 +996,31 @@ def _gke_eval_group() -> str:
         target_waves = (
             canary_target_waves if feature == "canary" else default_target_waves
         )
+        peaks = {case_id: _eval_case_peak_pods(case_id) for case_id in cases}
+        workers = None
+        skipped: list[str] = []
+        if scheduler and topology.endswith("-mn"):
+            # Whole-node gang placement: every pod of a running case needs its
+            # own worker, so the node count is the pod budget for this twin.
+            kept = [c for c in cases if peaks.get(c) is not None and peaks[c] <= GKE_EVAL_SCHEDULER_MAX_WORKERS]
+            skipped = [c for c in cases if c not in kept]
+            cases = kept
+            if not cases:
+                # Nothing fits the cap: say so in the build instead of dropping
+                # the twin silently.
+                children.append({
+                    "label": f":information_source: {feature} / {topology} [{scheduler}] needs more than {GKE_EVAL_SCHEDULER_MAX_WORKERS} nodes ({len(skipped)} cases skipped)",
+                    "key": f"omenative-e2e-{slug}-skipped",
+                    "command": "echo 'whole-node gang placement: cases above the node cap are not run in this twin: "
+                    + " ".join(skipped) + "'",
+                    "agents": {"queue": BUILD_QUEUE},
+                })
+                continue
+            workers = max(2, max(peaks[c] for c in cases))
+            pod_budget = str(workers)
         subshards = _split_eval_cases(
             cases,
-            {case_id: _eval_case_peak_pods(case_id) for case_id in cases},
+            peaks,
             concurrency,
             int(pod_budget),
             target_waves,
@@ -1010,6 +1037,10 @@ def _gke_eval_group() -> str:
             }
             if scheduler:
                 env["OME_EVAL_SCHEDULER"] = scheduler
+            if workers is not None:
+                env["OME_EVAL_KIND_WORKERS"] = str(workers)
+            if skipped:
+                env["OME_EVAL_SCHEDULER_SKIPPED"] = " ".join(skipped)
             child = {
                 "label": f":test_tube: {feature} / {topology}{part}{sched_part} ({len(shard_cases)} cases)",
                 "key": f"omenative-e2e-{slug}{key_part}",

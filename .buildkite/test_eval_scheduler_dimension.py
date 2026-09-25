@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import re
 import sys
 import unittest
 from unittest import mock
@@ -28,8 +29,10 @@ class EvalSchedulerDimension(unittest.TestCase):
         self.assertIn("soft_fail: true", out)
         job_keys = [l for l in out.splitlines() if 'key: "omenative-e2e-' in l and "omenative-e2e-kind-gke" not in l]
         default_jobs = [l for l in job_keys if "-ome-scheduler" not in l]
-        sched_jobs = [l for l in job_keys if "-ome-scheduler" in l]
-        self.assertEqual(len(default_jobs), len(sched_jobs))
+        sched_jobs = [l for l in job_keys if "-ome-scheduler" in l and not l.rstrip('"').endswith("-skipped")]
+        # Multi-node twins are re-sharded to their node budget, so the counts
+        # differ; every default lane still has at least one twin or a skip note.
+        self.assertGreater(len(sched_jobs), 0)
         self.assertGreater(len(default_jobs), 0)
 
     def test_hard_fail_switch_removes_soft_fail(self):
@@ -78,3 +81,45 @@ class KindSchedulerDimension(unittest.TestCase):
         main_on = load({"GKE_KIND_SCHEDULER_ENABLED": "1"}).generate_pipeline()
         self.assertIn("integration-test-kind-scheduler-gke", main_on)
         self.assertIn('- "mirror-ome-scheduler"', main_on)
+
+
+class SchedulerTwinNodeSizing(unittest.TestCase):
+    def test_multi_node_twins_carry_a_node_count_equal_to_their_budget(self):
+        gp = load({"GKE_EVAL_SCHEDULER_ENABLED": "1", "GKE_EVAL_SCHEDULER_MAX_WORKERS": "8"})
+        out = gp._gke_eval_group()
+        blocks = out.split("- label:")
+        mn_twins = [b for b in blocks if "-mn-ome-scheduler" in b and "-skipped" not in b]
+        self.assertTrue(mn_twins)
+        for b in mn_twins:
+            m = re.search(r'OME_EVAL_KIND_WORKERS: "(\d+)"', b)
+            self.assertIsNotNone(m, b[:200])
+            self.assertLessEqual(int(m.group(1)), 8)
+            self.assertIn(f'OME_EVAL_POD_BUDGET: "{m.group(1)}"', b)
+        for b in blocks:
+            if "omenative-e2e-" in b and "-mn-ome-scheduler" not in b:
+                self.assertNotIn("OME_EVAL_KIND_WORKERS", b)
+
+    def test_cases_above_the_cap_are_left_out_and_named(self):
+        def skipped(cap):
+            gp = load({"GKE_EVAL_SCHEDULER_ENABLED": "1", "GKE_EVAL_SCHEDULER_MAX_WORKERS": str(cap)})
+            out = gp._gke_eval_group()
+            named = set()
+            for m in re.finditer(r'OME_EVAL_SCHEDULER_SKIPPED: "([^"]*)"', out):
+                named.update(m.group(1).split())
+            for m in re.finditer(r"not run in this twin: ([^']*)'", out):
+                named.update(m.group(1).split())
+            return named, out
+        small, out_small = skipped(3)
+        large, out_large = skipped(64)
+        self.assertTrue(small)
+        self.assertLess(len(large), len(small))
+        # a case is either run by the twin or named as skipped, never dropped silently
+        gp = load({"GKE_EVAL_SCHEDULER_ENABLED": "1", "GKE_EVAL_SCHEDULER_MAX_WORKERS": "3"})
+        committed = {c for f, t, cases in gp._eval_case_groups() if t.endswith("-mn") for c in cases}
+        run_in_twins = set()
+        for block in out_small.split("- label:"):
+            if "-mn-ome-scheduler" in block and "-skipped" not in block:
+                for cmd in re.findall(r"run_omenative_eval_gke\.sh \S+ \S+ ([^\"]+)", block):
+                    run_in_twins.update(cmd.split())
+        self.assertEqual(committed, run_in_twins | small)
+

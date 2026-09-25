@@ -25,4 +25,8 @@ func TestSchedulerFromEnv(t *testing.T) {
 	if got := SchedulerFromEnv().Image; got != "ome-scheduler:abc12345" {
 		t.Fatalf("image override ignored, got %q", got)
 	}
+	t.Setenv(EnvSchedulerWorkers, "9")
+	if got := SchedulerFromEnv().MinWorkers; got != 9 {
+		t.Fatalf("worker override ignored, got %d", got)
+	}
 }

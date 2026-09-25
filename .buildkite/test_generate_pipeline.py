@@ -715,11 +715,18 @@ class TestCheckedInTreeClassification(unittest.TestCase):
             for _, _, cases in gp._eval_case_groups()
             for case_id in cases
         ]
-        # Every case runs once per scheduler dimension (cluster default, ome-scheduler).
-        self.assertEqual(len(emitted), len(committed) * len(gp.EVAL_SCHEDULERS))
+        # Every case runs once under the default scheduler; the ome-scheduler twin
+        # runs every case whose whole-node footprint fits the node cap and names
+        # the rest, so nothing is dropped silently.
         self.assertEqual(set(emitted), set(committed))
         job_keys = re.findall(r'key: "(omenative-e2e-(?!kind-gke)[^"]+)"', yaml_text)
+        job_keys = [k for k in job_keys if not k.endswith("-skipped")]
         self.assertEqual(len(job_keys), len(commands))
+        skipped = set()
+        for m in re.finditer(r'OME_EVAL_SCHEDULER_SKIPPED: "([^"]*)"', yaml_text):
+            skipped.update(m.group(1).split())
+        for m in re.finditer(r"not run in this twin: ([^']*)'", yaml_text):
+            skipped.update(m.group(1).split())
         for scheduler in gp.EVAL_SCHEDULERS:
             per_sched = [
                 case_id
@@ -727,7 +734,11 @@ class TestCheckedInTreeClassification(unittest.TestCase):
                 if ("-" + gp.EVAL_GANG_SCHEDULER in key) == bool(scheduler)
                 for case_id in command.split()[2:]
             ]
-            self.assertEqual(sorted(per_sched), sorted(committed), scheduler or "default")
+            if scheduler:
+                self.assertEqual(set(per_sched) | skipped, set(committed), scheduler)
+                self.assertFalse(set(per_sched) & skipped)
+            else:
+                self.assertEqual(sorted(per_sched), sorted(committed), "default")
 
 
 if __name__ == "__main__":

@@ -49,4 +49,7 @@ func TestInstallSchedulerValidation(t *testing.T) {
 	if s.topologyKey() != "topology.kubernetes.io/zone" || s.topologyDomain() != "ome-kind" {
 		t.Fatalf("topology defaults: key %q domain %q", s.topologyKey(), s.topologyDomain())
 	}
+	if s.minWorkers() != 6 || (&SchedulerInstall{MinWorkers: 3}).minWorkers() != 3 {
+		t.Fatalf("worker defaults: %d", s.minWorkers())
+	}
 }

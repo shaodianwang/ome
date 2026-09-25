@@ -2,6 +2,7 @@ package kindfix
 
 import (
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/ome-projects/ome/tests/integration/kindutil"
@@ -16,6 +17,10 @@ const EnvScheduler = "OME_TEST_SCHEDULER"
 // EnvSchedulerImage overrides the local image tag the suite loads for the
 // scheduler; the CI runner points it at the baked archive it tagged.
 const EnvSchedulerImage = "OME_TEST_SCHEDULER_IMAGE"
+
+// EnvSchedulerWorkers overrides the worker count a scheduler-mode suite insists
+// on (default 6, one gang member per node).
+const EnvSchedulerWorkers = "OME_TEST_SCHEDULER_WORKERS"
 
 const defaultSchedulerImage = "ome-scheduler:kind-local"
 
@@ -35,5 +40,11 @@ func SchedulerFromEnv() *kindutil.SchedulerInstall {
 	if image == "" {
 		image = defaultSchedulerImage
 	}
-	return &kindutil.SchedulerInstall{Name: name, Image: image}
+	install := &kindutil.SchedulerInstall{Name: name, Image: image}
+	if raw := strings.TrimSpace(os.Getenv(EnvSchedulerWorkers)); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			install.MinWorkers = n
+		}
+	}
+	return install
 }

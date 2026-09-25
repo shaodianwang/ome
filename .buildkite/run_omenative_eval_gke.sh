@@ -117,7 +117,16 @@ docker run --rm --privileged busybox sh -c '
 
 mkdir -p /ome-eval-model
 chmod 0777 /ome-eval-model
-cat >"${tmp_dir}/kind.yaml" <<'EOF'
+# Worker count: two by default; the gang scheduler places one gang member per
+# node, so a multi-node twin arrives with OME_EVAL_KIND_WORKERS sized to its
+# shard's peak pods.
+workers="${OME_EVAL_KIND_WORKERS:-2}"
+case "$workers" in
+  ''|*[!0-9]*) echo "OME_EVAL_KIND_WORKERS must be a positive integer, got '$workers'" >&2; exit 2 ;;
+esac
+[ "$workers" -ge 1 ] || { echo "OME_EVAL_KIND_WORKERS must be at least 1" >&2; exit 2; }
+{
+  cat <<'KINDEOF'
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
@@ -125,17 +134,22 @@ nodes:
     extraMounts:
       - hostPath: /ome-eval-model
         containerPath: /ome-eval-model
+KINDEOF
+  i=0
+  while [ "$i" -lt "$workers" ]; do
+    cat <<'KINDEOF'
   - role: worker
     extraMounts:
       - hostPath: /ome-eval-model
         containerPath: /ome-eval-model
-  - role: worker
-    extraMounts:
-      - hostPath: /ome-eval-model
-        containerPath: /ome-eval-model
-EOF
-
-echo "--- create three-node KIND cluster ---"
+KINDEOF
+    i=$((i + 1))
+  done
+} >"${tmp_dir}/kind.yaml"
+if [ -n "${OME_EVAL_SCHEDULER_SKIPPED:-}" ]; then
+  echo "--- cases above the whole-node cap, not run in this scheduler twin: ${OME_EVAL_SCHEDULER_SKIPPED} ---"
+fi
+echo "--- create KIND cluster: 1 control-plane + ${workers} worker(s) ---"
 kind create cluster --name "$cluster" --image "$node_image" \
   --config "${tmp_dir}/kind.yaml" --wait 180s
 kind get kubeconfig --name "$cluster" >"$kubeconfig"
