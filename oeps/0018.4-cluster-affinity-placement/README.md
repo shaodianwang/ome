@@ -203,7 +203,7 @@ spec:
       matchFields:               # WorkloadCluster object fields
       - key: metadata.name
         operator: In
-        values: [usc1-1, usc1-2]
+        values: [cluster-a, cluster-b]
     - weight: 1                  # optional; permitted only in Split
       matchExpressions:          # WorkloadCluster labels
       - key: region
@@ -238,7 +238,7 @@ placement:
   - matchFields:
     - key: metadata.name
       operator: In
-      values: [usc1-1, usc1-2, usc1-3]
+      values: [cluster-a, cluster-b, cluster-c]
 ```
 
 Each eligible cluster receives the source's complete replica policy. With a
@@ -255,7 +255,7 @@ placement:
   - matchFields:
     - key: metadata.name
       operator: In
-      values: [usc1-1, usc1-2, usc1-3]
+      values: [cluster-a, cluster-b, cluster-c]
 ```
 
 18 replicas produce `6,6,6`; 10 produce `4,3,3` in lexical cluster-name order.
@@ -270,17 +270,17 @@ placement:
     matchFields:
     - key: metadata.name
       operator: In
-      values: [usc1-1, usc1-2]
+      values: [cluster-a, cluster-b]
   - weight: 2
     matchFields:
     - key: metadata.name
       operator: In
-      values: [usc1-3]
+      values: [cluster-c]
   - weight: 1
     matchFields:
     - key: metadata.name
       operator: In
-      values: [usc1-4]
+      values: [cluster-d]
 ```
 
 Weights apply **per matching cluster**. The denominator is `3+3+2+1=9`, giving
@@ -296,7 +296,7 @@ placement:
   - matchFields:
     - key: metadata.name
       operator: In
-      values: [usc1-1, usc1-2, usc1-3]
+      values: [cluster-a, cluster-b, cluster-c]
 ```
 
 For a floor of 12 replicas and total eligible hardware capacities equivalent
@@ -319,7 +319,7 @@ mode; otherwise two competing sources would define the distribution.
 4. `matchFields` supports **only `metadata.name`**, with `In` and `NotIn` and
    nonempty lists of valid WorkloadCluster names. Matching reads the real object
    name, independently of labels. For example, a label `metadata.name: forged`
-   cannot make a WorkloadCluster named `usc1-1` pass a name match for `forged`.
+   cannot make a WorkloadCluster named `cluster-a` pass a name match for `forged`.
    A label expression with that key still matches the real label.
 5. Multi-value field requirements are an intentional extension: Kubernetes'
    node-affinity helper requires exactly one value for field `In`/`NotIn`.
@@ -695,7 +695,7 @@ and choose the intended recipe explicitly.
 | Mode-only placement currently matching nothing | New behavior is unconstrained; review explicitly before enabling the new controller. |
 
 For example, old selectors `requirements: accelerator=gb300` and
-`clusterSelector: metadata.name in (usc1-1,usc1-2)` become:
+`clusterSelector: metadata.name in (cluster-a,cluster-b)` become:
 
 ```yaml
 placement:
@@ -708,7 +708,7 @@ placement:
     matchFields:
     - key: metadata.name
       operator: In
-      values: [usc1-1, usc1-2]
+      values: [cluster-a, cluster-b]
 ```
 
 A name-existence selector needs special care: metadata.name always exists.
