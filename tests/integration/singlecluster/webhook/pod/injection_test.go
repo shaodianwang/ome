@@ -113,7 +113,7 @@ var _ = ginkgo.Describe("Pod mutator injection matrix", ginkgo.Ordered, func() {
 
 		sc := got.Spec.Containers[0].SecurityContext
 		Expect(sc).NotTo(BeNil())
-		Expect(sc.Privileged).To(HaveValue(BeTrue()))
+		Expect(sc.Privileged).To(BeNil())
 		Expect(sc.Capabilities.Add).To(ContainElement(corev1.Capability("IPC_LOCK")))
 	})
 
