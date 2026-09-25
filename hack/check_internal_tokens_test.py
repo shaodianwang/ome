@@ -119,6 +119,12 @@ class CheckInternalTokens(unittest.TestCase):
         r = run(self.root, "--files", rel)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("[unclassified]", r.stdout)
+    def test_symlinks_are_skipped(self):
+        write(self.root, "hack/notes/real.md", "plain text\n")
+        os.symlink("notes", os.path.join(self.root, "hack", "alias"))
+        os.symlink("notes/real.md", os.path.join(self.root, "hack", "alias.md"))
+        r = run(self.root, "--files", "hack/alias", "hack/alias.md", "hack/notes/real.md")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_tree_mode_flags_unclassified_toplevel_and_stale_exemptions(self):
         a = write(self.root, "pkg/x/x.go", "package x\n")

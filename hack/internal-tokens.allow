@@ -9,6 +9,7 @@ charts/ome-isvc/**                         codenames,org-tooling,storage  # inte
 charts/ome-resources/values-usc1-*.yaml    *        # per-cluster install overlay, never shipped
 charts/ome-resources/tests/render_test.sh  clusters # renders that overlay; the block is carved from the public copy
 hack/model-download/**                     org-tooling,org-domains,storage  # blob-store download tooling that only works on internal clusters
+.agents/skills/**                          clusters,repos,org-tooling,storage  # agent runbooks for this repository's own clusters and CI; never shipped
 docs/RELEASE.md                            storage,repos,clusters  # internal release process
 hack/check_internal_tokens_test.py         *        # the checker's own fixtures
 hack/internal-tokens.txt                   *        # the pattern list itself

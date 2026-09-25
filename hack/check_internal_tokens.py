@@ -45,6 +45,7 @@ INTERNAL_ONLY = (
 # Everything else: scanned. Shipped paths additionally get the `upstream`
 # scope and the import guard.
 CLEAN = (
+    ".agents/", ".claude",  # agent skills (tracked symlink .claude -> .agents); held to the same standard
     "oeps/", "tests/", "hack/", "docs/", "ome-client-rs/", "charts/", "config/",
     ".buildkite/", ".devcontainer/", ".github/", "dockerfiles/", "grafana/",
     "README.md", "CONTRIBUTING.md", "CLAUDE.md", "AGENTS.md", "Makefile", "Makefile-deps.mk",
@@ -223,6 +224,8 @@ def scan_file(root: str, rel: str, patterns, rules) -> list[str]:
         return []
     if rel.startswith(SKIP_PREFIXES) or rel.endswith(SKIP_SUFFIXES) or "zz_generated" in os.path.basename(rel):
         return []
+    if os.path.islink(os.path.join(root, rel)):
+        return []  # the target is scanned under its own tracked path
     try:
         with open(os.path.join(root, rel), "rb") as fh:
             data = fh.read()

@@ -15,7 +15,13 @@ venv/
 # Test binary, built with `go test -c`
 *.test
 .serena
-.claude
+# Agent config: .claude is a tracked symlink to .agents; only skills are shared.
+.agents/settings.local.json
+.agents/scheduled_tasks.lock
+.agents/specs/
+.agents/tmp/
+.agents/worktrees/
+.agents/scratch/
 # Output of the go coverage tool, specifically when used with LiteIDE
 *.out
 
