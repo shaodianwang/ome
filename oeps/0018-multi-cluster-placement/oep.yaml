@@ -12,6 +12,7 @@ approvers:
 
 # Related surfaces (quota, autoscaling that this leans on):
 see-also:
+  - "/oeps/0018.4-cluster-affinity-placement" # proposed affinity API; retains Single's admission race
   - "/oeps/0013-autoscaling"                    # per-cluster autoscaling interacts with per-cluster quota
 
 stage: alpha

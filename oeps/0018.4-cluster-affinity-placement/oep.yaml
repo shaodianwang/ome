@@ -1,0 +1,30 @@
+title: "Cluster affinity and replica allocation for placement"
+oep-number: "0018.4"
+authors:
+  - Wei Huang
+status: provisional
+# state: design only; audited placement_types.go, placement/{match,controller,derive}.go, quota capacity, and routing on 2026-09-24; no implementation in this change.
+creation-date: 2026-09-24
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+# Proposed partial supersession: candidate selection and Split allocation.
+# Single retains the admission race; transport, ownership, and routing remain
+# governed by their existing OEPs. Earlier OEPs retain their implemented status.
+see-also:
+  - "/oeps/0018-multi-cluster-placement"
+  - "/oeps/0018.1-multicluster-scaleout"
+  - "/oeps/0018.2-multi-cluster-performance"
+  - "/oeps/0018.3-placement-modes"
+  - "/oeps/0013.1-autoscaler-policy"
+  - "/oeps/0024-quota"
+  - "/oeps/0025-multi-cluster-routing"
+
+stage: alpha
+latest-milestone: "TBD"
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"
