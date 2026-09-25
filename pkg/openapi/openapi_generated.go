@@ -63,10 +63,12 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CandidateRolloutGroup":            schema_pkg_apis_ome_v1beta1_CandidateRolloutGroup(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CandidateRolloutLastRun":          schema_pkg_apis_ome_v1beta1_CandidateRolloutLastRun(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CandidateRolloutStatus":           schema_pkg_apis_ome_v1beta1_CandidateRolloutStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterAffinityTerm":              schema_pkg_apis_ome_v1beta1_ClusterAffinityTerm(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterBaseModel":                 schema_pkg_apis_ome_v1beta1_ClusterBaseModel(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterBaseModelList":             schema_pkg_apis_ome_v1beta1_ClusterBaseModelList(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterConnectionSource":          schema_pkg_apis_ome_v1beta1_ClusterConnectionSource(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterProfileRef":                schema_pkg_apis_ome_v1beta1_ClusterProfileRef(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterSelectorRequirement":       schema_pkg_apis_ome_v1beta1_ClusterSelectorRequirement(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterServingRuntime":            schema_pkg_apis_ome_v1beta1_ClusterServingRuntime(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterServingRuntimeList":        schema_pkg_apis_ome_v1beta1_ClusterServingRuntimeList(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler":              schema_pkg_apis_ome_v1beta1_ComponentAutoscaler(ref),
@@ -3111,6 +3113,66 @@ func schema_pkg_apis_ome_v1beta1_CandidateRolloutStatus(ref common.ReferenceCall
 	}
 }
 
+func schema_pkg_apis_ome_v1beta1_ClusterAffinityTerm(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "ClusterAffinityTerm selects WorkloadClusters by ANDing its requirements. Multiple terms form a union; a weight assigns replica shares to each match.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"weight": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Weight is permitted only for static Split. If any term has an explicit weight, matching term weights add and omitted weights contribute one. Omission must be preserved to distinguish unweighted overlapping terms.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
+					"matchExpressions": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "MatchExpressions selects the WorkloadCluster's actual labels.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterSelectorRequirement"),
+									},
+								},
+							},
+						},
+					},
+					"matchFields": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "MatchFields selects the real metadata.name using In or NotIn. Multiple names are allowed; a label named metadata.name does not affect this match.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterSelectorRequirement"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterSelectorRequirement"},
+	}
+}
+
 func schema_pkg_apis_ome_v1beta1_ClusterBaseModel(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -3247,6 +3309,56 @@ func schema_pkg_apis_ome_v1beta1_ClusterProfileRef(ref common.ReferenceCallback)
 						},
 					},
 				},
+			},
+		},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_ClusterSelectorRequirement(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "ClusterSelectorRequirement tests one label or supported object field.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"key": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Key is a label key, or metadata.name for a field requirement.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"operator": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Operator follows Kubernetes node-selector semantics for labels.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"values": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Values is nonempty for In/NotIn, empty for Exists/DoesNotExist, and a single integer for Gt/Lt.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"key", "operator"},
 			},
 		},
 	}

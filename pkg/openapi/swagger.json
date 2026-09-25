@@ -1647,6 +1647,35 @@
         }
       }
     },
+    "v1beta1.ClusterAffinityTerm": {
+      "description": "ClusterAffinityTerm selects WorkloadClusters by ANDing its requirements. Multiple terms form a union; a weight assigns replica shares to each match.",
+      "type": "object",
+      "properties": {
+        "matchExpressions": {
+          "description": "MatchExpressions selects the WorkloadCluster's actual labels.",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1beta1.ClusterSelectorRequirement"
+          },
+          "x-kubernetes-list-type": "atomic"
+        },
+        "matchFields": {
+          "description": "MatchFields selects the real metadata.name using In or NotIn. Multiple names are allowed; a label named metadata.name does not affect this match.",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1beta1.ClusterSelectorRequirement"
+          },
+          "x-kubernetes-list-type": "atomic"
+        },
+        "weight": {
+          "description": "Weight is permitted only for static Split. If any term has an explicit weight, matching term weights add and omitted weights contribute one. Omission must be preserved to distinguish unweighted overlapping terms.",
+          "type": "integer",
+          "format": "int32"
+        }
+      }
+    },
     "v1beta1.ClusterBaseModel": {
       "description": "ClusterBaseModel is the Schema for the basemodels API",
       "type": "object",
@@ -1720,6 +1749,35 @@
         "name": {
           "type": "string",
           "default": ""
+        }
+      }
+    },
+    "v1beta1.ClusterSelectorRequirement": {
+      "description": "ClusterSelectorRequirement tests one label or supported object field.",
+      "type": "object",
+      "required": [
+        "key",
+        "operator"
+      ],
+      "properties": {
+        "key": {
+          "description": "Key is a label key, or metadata.name for a field requirement.",
+          "type": "string",
+          "default": ""
+        },
+        "operator": {
+          "description": "Operator follows Kubernetes node-selector semantics for labels.",
+          "type": "string",
+          "default": ""
+        },
+        "values": {
+          "description": "Values is nonempty for In/NotIn, empty for Exists/DoesNotExist, and a single integer for Gt/Lt.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "default": ""
+          },
+          "x-kubernetes-list-type": "atomic"
         }
       }
     },
