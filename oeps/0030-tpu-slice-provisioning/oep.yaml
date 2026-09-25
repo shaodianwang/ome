@@ -3,10 +3,9 @@ oep-number: "0030"
 authors:
   - "@yan9fan"
 status: provisional
-# state: Nothing built. The problem is measured on msl-gcp-usc1-rc-1-tpu
-# (2026-09-25): a 4-chip OME pod fails START_SESSION on a 2x2x2 partition, and
-# works on a 2x2x1 one. The runtime-side prerequisite is msl-tpu-kernel PR #1827
-# (verified: 4/4 Init worker single-host, 8/8 multi-host). Recommends Option 1
+# state: Design only; proposes controller-owned slice provisioning.
+# A 4-chip OME pod requires a matching 2x2x1 partition.
+# Recommends Option 1
 # (ome-controller provisions, ome-scheduler places): slice creation is a slow
 # control-plane call and must stay out of the pod-binding path. Open Question 1
 # is the only fact that would move it to Option 2.
@@ -19,7 +18,7 @@ approvers:
 see-also:
   - "/oeps/0022-ome-scheduler"  # topology-aware placement ONTO existing slices; this OEP is about creating them
 
-# Alpha would be one shape (2x2x1), single-host, opt-in per ISVC, rc-1 only.
+# Alpha would be one shape (2x2x1), single-host, opt-in per ISVC on a test cluster.
 stage: alpha
 
 latest-milestone: "TBD"

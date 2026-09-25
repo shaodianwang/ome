@@ -40,8 +40,8 @@ libtpu validates every session against the provisioned partition, and the
 **total** topology a session requests must **equal** the partition's. Any
 mismatch is `START_SESSION failed ... Max # of tries(=3) exhausted`.
 
-Measured on `msl-gcp-usc1-rc-1-tpu`, 2026-09-24/25 (T289928654, follow-up from
-S709272):
+The following controlled tests compare requested session shapes with provisioned
+partitions:
 
 | workload shape | partition | result |
 |---|---|---|
@@ -61,16 +61,13 @@ Two consequences the reader should not have to infer:
 
 Today the only producer of slices for OME is NPC (`TPUNodePool.spec.slices`),
 decided per cube ahead of time by capacity config. That is workable when the
-demand profile is known and uniform. It is not workable when it is not: on rc-1,
-1575 tpu7x nodes sit in `2x2x2` carves and only 160 in `2x2x1`, so a 4-chip OME
-service has 160 nodes of addressable capacity out of ~1900 — and lands in
-`CrashLoopBackOff` if it picks wrong. Three such services were crash-looping on
-rc-1 at 600+ restarts each when this was written.
+demand profile is known and uniform. With mixed demand, a 4-chip OME service
+cannot use free capacity carved exclusively into `2x2x2` partitions. It can
+enter `CrashLoopBackOff` if placed there despite having enough free chips.
 
-This blocks T289929189 (moving slice pre-provisioning to usc1): the 4765 prod
-`avocado-t4-9b-*` pods run the 4-chip shape and work today **only** because
-usc1-1 is entirely static — 6860 tpu7x nodes, none carrying a topology-mode
-label. Flipping usc1 converts all of them at once.
+Converting a static pool to pre-provisioned slices therefore requires matching
+the shapes of its existing workloads. Enabling `PROVISION_ONLY` across a pool
+without those matching partitions can prevent those workloads from starting.
 
 ### Goals
 
@@ -88,7 +85,7 @@ label. Flipping usc1 converts all of them at once.
 - **Defragmentation or re-carving.** Reshaping a cube whose partitions are in use
   is out of scope; see [Open Questions](#open-questions).
 - **The libtpu session shape itself.** Getting the process group to match the
-  partition is a runtime concern, fixed separately in msl-tpu-kernel PR #1827.
+  partition is a runtime concern outside this proposal.
 - **Non-TPU accelerators.** GPU fabrics have no partition object to create.
 
 ## Terminology
@@ -148,7 +145,7 @@ control-plane round trip each time and the scheduler always has somewhere to
 pack the next one.
 
 > **Constraint, measured — do not design around the opposite.** A Slice CR is
-> exactly **one** partition: `vanjani-tpu-halo-4x4x4-v1-0` carries a
+> exactly **one** partition: a tested `4x4x4` slice carries a
 > `partitionIds` list of length 1 and labels 16 nodes. A partition is granted
 > whole, so a gang **cannot** take part of one — an 8-chip session on a `4x4x4`
 > partition fails exactly as a 4-chip session on a `2x2x2` does (both measured
@@ -168,16 +165,16 @@ OME workloads set `schedulerName: slice-scheduler`, and `slice-scheduler` learns
 to own a slice for an OME object (`InferenceReplica` / OMENative Instance) the
 way it already does for a `StatefulSet`.
 
-The capability exists and is running: `slice-scheduler-controller-manager` holds
-`create`/`delete` on `slices.accelerator.gke.io`, 33 pods on rc-1 use
-`schedulerName: slice-scheduler`, and three live slices are workload-owned —
-including `vanjani-tpu-halo-toy-2x2x1-v1-0`, a `2x2x1` created on demand, which
-is exactly the avocado shape:
+The capability has been verified with StatefulSet workloads:
+`slice-scheduler-controller-manager` holds `create`/`delete` on
+`slices.accelerator.gke.io`, and creates workload-owned `2x2x1` slices on demand
+for pods using `schedulerName: slice-scheduler`. A representative slice carries
+the following ownership metadata:
 
 ```yaml
 labels:
   cloud.google.com/slice-owner-kind: StatefulSet
-  cloud.google.com/slice-owner-name: vanjani-tpu-halo-toy-2x2x1-v1
+  cloud.google.com/slice-owner-name: example-workload
 annotations:
   cloud.google.com/managed-by: slice-scheduler
 ```
@@ -240,14 +237,13 @@ the fragmentation answer first.
 - **Integration (envtest):** slice created before pods bind; slice deleted on
   owner deletion; finalizer blocks release while a pod holds it; no slice created
   on a static pool.
-- **e2e on rc-1:** a 4-chip OME service starts on a cube with **no** pre-carved
-  `2x2x1`, reaching 4/4 `Init worker` and 0 `START_SESSION`. The reusable gate is
-  `argo-gitops` `cluster/workload/msl-gcp-usc1-rc-1-tpu/softslice-probe/` (~4 min,
-  asserts the working shape and reports the broken one).
+- **e2e on a test cluster:** a 4-chip OME service starts on a cube with **no**
+  pre-carved `2x2x1`, reaching 4/4 `Init worker` and no `START_SESSION` failures.
+  Verify both matching and mismatched session shapes against the table above.
 
 ## Graduation Criteria
 
-- **Alpha:** one shape (`2x2x1`), single-host, opt-in per ISVC, rc-1 only.
+- **Alpha:** one shape (`2x2x1`), single-host, opt-in per ISVC on a test cluster.
 - **Beta:** multi-host shapes (`2x2x2`+) with gang placement preserved; slice
   leak rate measured at 0 over a week of rollouts; metric for created/released/
   leaked slices.
@@ -266,19 +262,16 @@ goes away.
 
 ## Alternatives
 
-**Static carve only (no OEP).** Pre-carve avocado's cubes `{"2x2x1": 16}` via
-NPC and change nothing in OME. This *works* — it is what the verified rc-1 pilot
-runs on, it matches today's packing exactly (16 independent 4-chip workloads per
-cube, same as 16 static hosts), and it needs no new code.
+**Static carve only (no OEP).** Pre-carve cubes `{"2x2x1": 16}` via NPC and
+change nothing in OME. This has been verified for a fixed 4-chip workload shape:
+it packs 16 independent workloads per cube, the same as 16 static hosts, and
+needs no new OME code.
 
-I am not proposing it as the answer, but it is the right **near-term** move and
-should not be skipped while this OEP is debated: it unblocks T289929189 for
-avocado specifically, whose shape is fixed and known. Dynamic provisioning earns
-its keep when shapes are heterogeneous and unpredictable — which is the research
-workload profile already using `slice-scheduler`, and plausibly where usc1 ends
-up. Note the prerequisite: usc1-1's pools are `2x2x2` topology and report
-`SLICES: unsupported on 2x2x2`, because carving requires a full `4x4x4` cube — so
-those pools must be rebuilt before any `2x2x1` exists there.
+I recommend this as a **near-term** option for known, uniform shapes. Dynamic
+provisioning is useful when shapes are heterogeneous and unpredictable. Carving
+requires a full `4x4x4` cube: a `2x2x2` pool reports
+`SLICES: unsupported on 2x2x2` and must be rebuilt before it can provide
+`2x2x1` slices.
 
 ## Open Questions
 
@@ -286,7 +279,7 @@ those pools must be rebuilt before any `2x2x1` exists there.
    the only fact that would move me off Option 1: if the answer is yes, Option 2
    costs one fewer slice producer for no placement regression. Worth an hour of
    reading its source before we commit. *Owner: TBD.*
-2. **Can `slice-scheduler` own a slice for a non-StatefulSet?** All three live
+2. **Can `slice-scheduler` own a slice for a non-StatefulSet?** The verified
    examples are StatefulSets. If the owner model is hardcoded, Option 2 is more
    than a `schedulerName` change. *Owner: TBD.*
 3. **Fragmentation.** Creating a `2x2x1` needs a cube not already carved
@@ -294,13 +287,13 @@ those pools must be rebuilt before any `2x2x1` exists there.
    one. Dynamic creation moves the planning problem rather than removing it.
    Mixed carves are legal (the CEL rule caps only total chips at 64), which may
    be enough — **unverified.** *Owner: TBD.*
-4. **Should the admission policy land first, regardless?** T289928654 step 4
-   proposes a Warn-mode policy flagging single-host pods on multi-host
+4. **Should the admission policy land first, regardless?** A Warn-mode policy
+   could flag single-host pods on multi-host
    partitions. It is cheap and catches the mistake at submit time instead of at
    `START_SESSION`. I think yes, independent of this OEP.
 
 **Scope:** this applies to OME TPU workloads on `PROVISION_ONLY` pools. Static
 pools and non-TPU accelerators are unaffected.
 
-**See also:** OEP-0022 (`ome-scheduler` placement — the layer this builds on),
-T289928654, T289929189, msl-tpu-kernel PR #1827.
+**See also:** [OEP-0022](../0022-ome-scheduler/) (`ome-scheduler` placement — the
+layer this builds on).
