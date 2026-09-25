@@ -2673,7 +2673,7 @@ func TestMigrate_SourcePodLossAroundTheWedgeClose(t *testing.T) {
 }
 
 // TestMigrate_MigrationDeadlineAroundTheWedgeClose: the record Deadline
-// is the backstop the surge's own evidence pre-empts. Elapsing as the
+// is the backstop the surge's own evidence preempts. Elapsing as the
 // close lands changes nothing — the record is closed Failed either way
 // and carries one terminal write — and elapsing afterwards reopens
 // nothing, because expiry declines a record that is already terminal.

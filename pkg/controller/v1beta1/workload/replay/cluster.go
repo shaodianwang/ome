@@ -637,7 +637,7 @@ func conditionValue(pod *corev1.Pod, condType corev1.PodConditionType) string {
 }
 
 // instanceIndexOf reads the Instance ordinal a pod is labelled with. A pod
-// the engine rendered always carries it; a missing or unparseable label
+// the engine rendered always carries it; a missing or unparsable label
 // means the driver is about to attribute an expectation to the wrong
 // Instance, which is worse than failing the run.
 func instanceIndexOf(pod *corev1.Pod) (int32, error) {
@@ -647,7 +647,7 @@ func instanceIndexOf(pod *corev1.Pod) (int32, error) {
 	}
 	idx, err := strconv.Atoi(raw)
 	if err != nil {
-		return 0, fmt.Errorf("replay: pod %s has an unparseable %s label %q: %w", pod.Name, query.LabelInstanceIdx, raw, err)
+		return 0, fmt.Errorf("replay: pod %s has an unparsable %s label %q: %w", pod.Name, query.LabelInstanceIdx, raw, err)
 	}
 	return int32(idx), nil
 }

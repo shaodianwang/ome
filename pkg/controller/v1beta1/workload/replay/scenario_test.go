@@ -74,7 +74,7 @@ func TestSortedEventIDsIncludesTheClock(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Errorf("%s is appliable and must be listed", ClockAdvance)
+		t.Errorf("%s is applicable and must be listed", ClockAdvance)
 	}
 }
 

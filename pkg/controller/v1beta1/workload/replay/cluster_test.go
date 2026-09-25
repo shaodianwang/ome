@@ -146,7 +146,7 @@ func TestInstanceIndexOfRejectsAMissingLabel(t *testing.T) {
 	}
 	bad := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{query.LabelInstanceIdx: "x"}}}
 	if _, err := instanceIndexOf(bad); err == nil {
-		t.Fatalf("an unparseable instance label must not read as index 0")
+		t.Fatalf("an unparsable instance label must not read as index 0")
 	}
 	good := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{query.LabelInstanceIdx: "7"}}}
 	idx, err := instanceIndexOf(good)

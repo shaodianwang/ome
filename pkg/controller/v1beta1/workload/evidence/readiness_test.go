@@ -41,7 +41,7 @@ func TestPodRunningNotReady_ExcludesWaitingContainers(t *testing.T) {
 	}
 }
 
-// TestPodGateNotFolded_IsDisjointFromRunningNotReady pins the detector and its disjointness from the
+// TestPodGateNotFolded_IsDisjointFromRunningNotReady pins the detector and that it is disjoint from the
 // containers-never-ready limbo: this shape requires ContainersReady True and
 // Ready not True, so a pod is evidence for at most one of the two.
 //

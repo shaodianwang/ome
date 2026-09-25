@@ -122,7 +122,7 @@ func (s *RowStore) MutateInstance(ctx context.Context, idx int32, mutate func(*t
 
 // RemoveInstance drops one row, reporting whether it was there.
 func (s *RowStore) RemoveInstance(_ context.Context, idx int32) (bool, error) {
-	position := s.positionOf(idx)
+	position := s.rowPosition(idx)
 	if position < 0 {
 		return false, nil
 	}
@@ -328,7 +328,7 @@ func (s *RowStore) applyRetryBlock(commit RetryBlockCommit) {
 	}
 }
 
-func (s *RowStore) positionOf(idx int32) int {
+func (s *RowStore) rowPosition(idx int32) int {
 	for i := range s.rows {
 		if s.rows[i].Index == idx {
 			return i
@@ -338,7 +338,7 @@ func (s *RowStore) positionOf(idx int32) int {
 }
 
 func (s *RowStore) rowCopy(idx int32) *types.InstanceStatus {
-	position := s.positionOf(idx)
+	position := s.rowPosition(idx)
 	if position < 0 {
 		return nil
 	}
