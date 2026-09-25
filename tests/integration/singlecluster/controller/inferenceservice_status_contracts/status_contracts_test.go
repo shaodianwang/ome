@@ -1,6 +1,8 @@
 package inferenceservicestatuscontracts
 
 import (
+	"strconv"
+
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -120,8 +122,8 @@ var _ = ginkgo.Describe("InferenceService OMENative status contracts", ginkgo.Or
 			g.Expect(k8sClient.Get(suiteCtx, isvcKey, fresh)).To(Succeed())
 			lc := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle
 			g.Expect(lc).NotTo(BeNil(), "the IR-managed engine must carry a Lifecycle subtree")
-			g.Expect(lc.ObservedGeneration).To(Equal(ir.Generation),
-				"Lifecycle.ObservedGeneration must mirror the IR's observed generation")
+			g.Expect(lc.ObservedGeneration).To(Equal(fresh.Generation),
+				"Lifecycle.ObservedGeneration must report the ISVC generation the reconciled IR was projected from")
 			g.Expect(lc.Replicas).To(Equal(int32(2)))
 			g.Expect(lc.ReadyReplicas).To(Equal(int32(1)))
 			g.Expect(lc.ServingReplicas).To(Equal(int32(1)))
@@ -240,5 +242,104 @@ var _ = ginkgo.Describe("InferenceService OMENative status contracts", ginkgo.Or
 				"zero desired Instances must not satisfy the ReadyReplicas >= Replicas branch via 0 >= 0")
 			g.Expect(cond.Reason).To(Equal("NoReplicas"))
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+	})
+
+	ginkgo.It("keeps Lifecycle.ObservedGeneration on the ISVC generation across IR-only spec changes", func() {
+		// A migration request annotation rides from the ISVC onto the IR pod
+		// template, so it bumps the IR generation while the ISVC generation
+		// stays put. The Lifecycle block must keep reporting the ISVC
+		// generation once the IR has reconciled its current spec.
+		migrationKey := constants.MigrationRequestAnnotationPrefix + "3f2c9a4e-6b1d-4c58-9e7a-0d2f1b8c5a61"
+
+		var isvcGeneration, irGeneration int64
+		ginkgo.By("waiting for the projector stamp to match the ISVC generation")
+		Eventually(func(g Gomega) {
+			fresh := &v1beta1.InferenceService{}
+			g.Expect(k8sClient.Get(suiteCtx, isvcKey, fresh)).To(Succeed())
+			ir := &v1beta1.InferenceReplica{}
+			g.Expect(k8sClient.Get(suiteCtx, irKey, ir)).To(Succeed())
+			g.Expect(ir.Annotations).To(HaveKeyWithValue(
+				constants.InferenceReplicaParentGenerationAnnotationKey, strconv.FormatInt(fresh.Generation, 10)))
+			isvcGeneration = fresh.Generation
+			irGeneration = ir.Generation
+		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+
+		// expectISVCGeneration asserts the Lifecycle block settles on the
+		// ISVC generation and stays there, whatever the IR generation is.
+		expectISVCGeneration := func() {
+			check := func(g Gomega) {
+				fresh := &v1beta1.InferenceService{}
+				g.Expect(k8sClient.Get(suiteCtx, isvcKey, fresh)).To(Succeed())
+				g.Expect(fresh.Generation).To(Equal(isvcGeneration),
+					"IR-only spec changes must not move the ISVC generation")
+				lc := fresh.Status.Components[v1beta1.EngineComponent].Lifecycle
+				g.Expect(lc).NotTo(BeNil())
+				g.Expect(lc.ObservedGeneration).To(Equal(isvcGeneration),
+					"Lifecycle.ObservedGeneration must be the ISVC generation (IR generation is %d)", irGeneration)
+			}
+			Eventually(check).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+			Consistently(check).WithTimeout(15 * util.PollInterval).WithPolling(util.PollInterval).Should(Succeed())
+		}
+
+		// reconcileIR marks the IR as having reconciled its current spec,
+		// which is the IR controller's job in a full deployment.
+		reconcileIR := func() {
+			setIRStatus(func(ir *v1beta1.InferenceReplica) { ir.Status.ObservedGeneration = ir.Generation })
+		}
+
+		// setISVCAnnotations applies mutate to a fresh read of the ISVC's
+		// annotations, retrying on conflict.
+		setISVCAnnotations := func(mutate func(map[string]string)) {
+			Eventually(func(g Gomega) {
+				fresh := &v1beta1.InferenceService{}
+				g.Expect(k8sClient.Get(suiteCtx, isvcKey, fresh)).To(Succeed())
+				if fresh.Annotations == nil {
+					fresh.Annotations = map[string]string{}
+				}
+				mutate(fresh.Annotations)
+				g.Expect(k8sClient.Update(suiteCtx, fresh)).To(Succeed())
+			}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+		}
+
+		// awaitIRGenerationBump waits for the annotation change to reach the
+		// IR pod template, which moves the IR generation but not the ISVC's.
+		// The closing inequality relies on this Ordered container never
+		// editing the ISVC spec before this spec, so the ISVC generation is
+		// still its creation value once the IR generation has moved past it.
+		awaitIRGenerationBump := func(hasAnnotation bool) {
+			Eventually(func(g Gomega) {
+				ir := &v1beta1.InferenceReplica{}
+				g.Expect(k8sClient.Get(suiteCtx, irKey, ir)).To(Succeed())
+				g.Expect(ir.Spec.Runners).NotTo(BeEmpty())
+				if hasAnnotation {
+					g.Expect(ir.Spec.Runners[0].Template.Annotations).To(HaveKey(migrationKey))
+				} else {
+					g.Expect(ir.Spec.Runners[0].Template.Annotations).NotTo(HaveKey(migrationKey))
+				}
+				g.Expect(ir.Generation).To(BeNumerically(">", irGeneration),
+					"the pod-template annotation change must bump the IR generation")
+				irGeneration = ir.Generation
+			}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
+			Expect(irGeneration).NotTo(Equal(isvcGeneration),
+				"the scenario needs the IR and ISVC generations to diverge")
+		}
+
+		ginkgo.By("reconciling the IR at its current generation")
+		reconcileIR()
+		expectISVCGeneration()
+
+		ginkgo.By("adding a migration request annotation, which rides onto the IR pod template")
+		setISVCAnnotations(func(a map[string]string) {
+			a[migrationKey] = `{"schemaVersion":"v1","component":"engine","instance":0,"from_node":"node-a"}`
+		})
+		awaitIRGenerationBump(true)
+		reconcileIR()
+		expectISVCGeneration()
+
+		ginkgo.By("removing the migration request annotation, which bumps the IR generation again")
+		setISVCAnnotations(func(a map[string]string) { delete(a, migrationKey) })
+		awaitIRGenerationBump(false)
+		reconcileIR()
+		expectISVCGeneration()
 	})
 })
