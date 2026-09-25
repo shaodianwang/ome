@@ -546,4 +546,80 @@ var _ = ginkgo.Describe("behavior — rollout policy runs", ginkgo.Ordered, func
 			g.Expect(c.Status.Rollout.LastRun.Outcome).To(Equal(v1beta1.RolloutRunCompleted))
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
+
+	ginkgo.It("opens a run on a derived group whose policy ref was inflated away at derive time", func() {
+		// Config: the shape a hub places on a member — the policy body INLINED
+		// into the group, the spec ref dropped, and the policy identity left
+		// only in the derive-time provenance annotation ("<idx>=<name>@<digest>",
+		// which has no progression field). Placement is not booted here: this
+		// object IS the member controller's input, and the defect is in how it
+		// reconstructs the ref from that annotation.
+		//
+		// This has to round-trip through a real apiserver. The pinned ref's
+		// progression is a required CRD enum, so the zero value the annotation
+		// leaves behind is rejected by the status subresource — a failure no
+		// fake-client test can see.
+		const isvcName = "rp-run5"
+		const policyName = "vllm-engine-standard"
+		fix := newCoordFixture(ns.Name, WithISVCName(isvcName),
+			WithoutDecoder(),
+			WithEngineReplicas(2),
+			WithEngineImage("fake-serving:v1"),
+			WithISVCAnnotation(constants.RolloutPlanSourceAnnotation,
+				"0="+policyName+"@rp1:8b734048103c"))
+		applyFixture(Default, fix)
+		deferFixtureCleanup(fix)
+		convergeStableEngine(ns.Name, isvcName, 2)
+
+		// Action: attach the inlined canary — no policyRef, because the hub
+		// replaced it with the composed body — and bump the image to open a run.
+		Eventually(func(g Gomega) {
+			cur := freshISVC(g, ns.Name, isvcName)
+			cur.Spec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{{
+				Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+				Canary:     &v1beta1.GroupCanary{Steps: rpCanarySteps(25, 100)},
+			}}}
+			cur.Spec.Engine.PodSpec.Containers[0].Image = "fake-serving:v2"
+			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		// Invariant: the status write LANDS, carrying the reconstructed policy
+		// identity with a progression taken from the composed body.
+		Eventually(func(g Gomega) {
+			c := freshISVC(g, ns.Name, isvcName)
+			run := pinnedRun(g, c)
+			pg := run.Plan.Groups[0]
+			g.Expect(pg.Source).To(Equal(v1beta1.RolloutPlanSourcePolicy))
+			g.Expect(pg.PolicyRef).NotTo(BeNil())
+			g.Expect(pg.PolicyRef.Name).To(Equal(policyName))
+			g.Expect(pg.PolicyRef.Progression).To(Equal(v1beta1.RolloutProgressionCanary),
+				"the composed body must supply the progression the annotation cannot carry")
+			g.Expect(pg.Group.Canary).NotTo(BeNil())
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		// Invariant: the gate actually RUNS. The symptom was never a broken
+		// roll — pods converged fine — but an unrecorded one: with no ActiveRun
+		// persisted, the canary machinery never engaged and the rollout went
+		// ungated.
+		Eventually(func(g Gomega) {
+			c := freshISVC(g, ns.Name, isvcName)
+			g.Expect(c.Status.Canary).NotTo(BeNil())
+			g.Expect(c.Status.Canary.CurrentStep).To(Equal(int32(0)))
+			g.Expect(c.Status.Canary.ObservedTrafficWeight).To(Equal(int32(25)))
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].RolloutPhase).
+				To(Equal(v1beta1.RolloutPhasePaused))
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		// Invariant: the run stays persisted and no status write is rejected.
+		// The live failure repeated an UpdateFailed warning every reconcile.
+		Consistently(func(g Gomega) {
+			c := freshISVC(g, ns.Name, isvcName)
+			run := pinnedRun(g, c)
+			g.Expect(run.Plan.Groups[0].PolicyRef).NotTo(BeNil())
+			g.Expect(run.Plan.Groups[0].PolicyRef.Progression).
+				To(Equal(v1beta1.RolloutProgressionCanary))
+			g.Expect(eventsWithReason(g, ns.Name, "UpdateFailed")).To(BeEmpty(),
+				"the status subresource must accept the pinned plan")
+		}, 10*time.Second, 500*time.Millisecond).Should(Succeed())
+	})
 })
