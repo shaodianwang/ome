@@ -16,16 +16,17 @@ import (
 
 func validOptions() map[string]string {
 	return map[string]string{
-		optTargetTemplate:  "{{.EndpointHostname}}",
-		optURLTemplate:     "https://automation.example.com/api/v1/clusters/{cluster}/weight",
-		optRequestTimeout:  "10s",
-		optTLSCertFile:     "/certs/client.pem",
-		optTLSKeyFile:      "/certs/client-key.pem",
-		optTLSCAFile:       "/certs/ca.pem",
-		optOncall:          "ome",
-		optACL:             "ome-xds-publisher",
-		optWeightMode:      weightModeNormalized,
-		optNormalizedTotal: "100",
+		optTargetTemplate:       "{{.EndpointHostname}}",
+		optURLTemplate:          "https://automation.example.com/api/v1/clusters/{cluster}/weight",
+		optRequestTimeout:       "10s",
+		optTLSCertFile:          "/certs/client.pem",
+		optTLSKeyFile:           "/certs/client-key.pem",
+		optTLSCAFile:            "/certs/ca.pem",
+		optOncall:               "ome",
+		optACL:                  "ome-xds-publisher",
+		optWeightMode:           weightModeNormalized,
+		optNormalizedTotal:      "100",
+		optNoPositivePlanPolicy: noPositivePlanPolicyApplyCurrent,
 	}
 }
 
@@ -44,6 +45,7 @@ func TestParseConfig(t *testing.T) {
 	assert.Empty(t, cfg.sourceSelector)
 	assert.Equal(t, weightModeNormalized, cfg.weightMode)
 	assert.Equal(t, "100", cfg.normalizedTotal)
+	assert.Equal(t, noPositivePlanPolicyApplyCurrent, cfg.noPositivePlanPolicy)
 
 	tests := []struct {
 		name   string
@@ -69,6 +71,10 @@ func TestParseConfig(t *testing.T) {
 		{"infinite normalized total", func(o map[string]string) { o[optNormalizedTotal] = "+Inf" }, "positive integer"},
 		{"overflowing normalized total", func(o map[string]string) { o[optNormalizedTotal] = "4294967296" }, "positive integer"},
 		{"invalid normalized total", func(o map[string]string) { o[optNormalizedTotal] = "all" }, "positive integer"},
+		{"missing no-positive plan policy", func(o map[string]string) { delete(o, optNoPositivePlanPolicy) }, optNoPositivePlanPolicy},
+		{"empty no-positive plan policy", func(o map[string]string) { o[optNoPositivePlanPolicy] = " " }, optNoPositivePlanPolicy},
+		{"unknown no-positive plan policy", func(o map[string]string) { o[optNoPositivePlanPolicy] = "RetainLastKnown" }, optNoPositivePlanPolicy},
+		{"case-mismatched no-positive plan policy", func(o map[string]string) { o[optNoPositivePlanPolicy] = "applycurrent" }, optNoPositivePlanPolicy},
 		{"publisher resync is not an opaque option", func(o map[string]string) { o["resyncInterval"] = "1m" }, "not accepted"},
 		{"missing URL", func(o map[string]string) { delete(o, optURLTemplate) }, optURLTemplate},
 		{"HTTP URL", func(o map[string]string) { o[optURLTemplate] = "http://automation.example.com/{cluster}" }, "absolute HTTPS"},
@@ -87,6 +93,22 @@ func TestParseConfig(t *testing.T) {
 			_, err := parseConfig(options)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.want)
+		})
+	}
+}
+
+func TestParseConfigCanonicalizesNoPositivePlanPolicy(t *testing.T) {
+	for _, policy := range []string{
+		noPositivePlanPolicyApplyCurrent,
+		noPositivePlanPolicyRetainLastPositive,
+	} {
+		t.Run(policy, func(t *testing.T) {
+			options := validOptions()
+			options[optNoPositivePlanPolicy] = "  " + policy + "  "
+
+			cfg, err := parseConfig(options)
+			require.NoError(t, err)
+			assert.Equal(t, policy, cfg.noPositivePlanPolicy)
 		})
 	}
 }
@@ -157,20 +179,24 @@ func TestNewPublisherBuildsHTTPClient(t *testing.T) {
 		gotConfig = cfg
 		return httpPublisher, nil
 	}
+	options := validOptions()
+	options[optNoPositivePlanPolicy] = "  " + noPositivePlanPolicyApplyCurrent + "  "
 
 	got, err := newTrafficMapPublisherWithFactory(
-		routing.PublisherConfig{Options: validOptions()},
+		routing.PublisherConfig{Options: options},
 		factory,
 	)
 	require.NoError(t, err)
 	assert.Same(t, httpPublisher, got.Publisher.(*Publisher).weights)
 	assert.Zero(t, got.ResyncInterval, "the common publisher config owns the wrapper cadence")
 	assert.Equal(t, map[string]string{
-		optTargetTemplate:  "{{.EndpointHostname}}",
-		optWeightMode:      weightModeNormalized,
-		optNormalizedTotal: "100",
+		optTargetTemplate:       "{{.EndpointHostname}}",
+		optWeightMode:           weightModeNormalized,
+		optNormalizedTotal:      "100",
+		optNoPositivePlanPolicy: noPositivePlanPolicyApplyCurrent,
 	}, got.GlobalOptions)
 	assert.Equal(t, "ome", gotConfig.oncall)
+	assert.Equal(t, noPositivePlanPolicyApplyCurrent, gotConfig.noPositivePlanPolicy)
 	require.NotNil(t, gotConfig.acl)
 	assert.Equal(t, "ome-xds-publisher", *gotConfig.acl)
 }
@@ -192,10 +218,11 @@ func TestNewPublisherCarriesSourceSelectorAsGlobalBehavior(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, wantSelector.String(), gotConfig.sourceSelector)
 	assert.Equal(t, map[string]string{
-		optTargetTemplate:  "{{.EndpointHostname}}",
-		optSourceSelector:  wantSelector.String(),
-		optWeightMode:      weightModeNormalized,
-		optNormalizedTotal: "100",
+		optTargetTemplate:       "{{.EndpointHostname}}",
+		optSourceSelector:       wantSelector.String(),
+		optWeightMode:           weightModeNormalized,
+		optNormalizedTotal:      "100",
+		optNoPositivePlanPolicy: noPositivePlanPolicyApplyCurrent,
 	}, got.GlobalOptions)
 }
 

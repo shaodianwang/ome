@@ -5,7 +5,9 @@ package xdspublisher
 import (
 	"context"
 	"errors"
+	"slices"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -22,6 +24,8 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	placementendpoint "github.com/ome-projects/ome/pkg/controller/v1beta1/placement/endpoint"
 )
+
+const validPlanCompatibilityDigest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 type recordingPublisher struct {
 	published       []weightedTarget
@@ -81,18 +85,20 @@ func newTestPublisher(weights ClusterWeightPublisher) *Publisher {
 
 func targetOptions(value string) map[string]string {
 	return map[string]string{
-		optTargetTemplate:  value,
-		optWeightMode:      weightModeNormalized,
-		optNormalizedTotal: "100",
+		optTargetTemplate:       value,
+		optWeightMode:           weightModeNormalized,
+		optNormalizedTotal:      "100",
+		optNoPositivePlanPolicy: noPositivePlanPolicyApplyCurrent,
 	}
 }
 
 func targetOptionsWithSelector(value, selector string) map[string]string {
 	return map[string]string{
-		optTargetTemplate:  value,
-		optSourceSelector:  selector,
-		optWeightMode:      weightModeNormalized,
-		optNormalizedTotal: "100",
+		optTargetTemplate:       value,
+		optSourceSelector:       selector,
+		optWeightMode:           weightModeNormalized,
+		optNormalizedTotal:      "100",
+		optNoPositivePlanPolicy: noPositivePlanPolicyApplyCurrent,
 	}
 }
 
@@ -109,6 +115,7 @@ func TestResolveOptionsKeepsGlobalPublicationBehavior(t *testing.T) {
 		" publish=true, environment in (prod,canary) ",
 	)
 	global[optNormalizedTotal] = " 000100 "
+	global[optNoPositivePlanPolicy] = "  " + noPositivePlanPolicyRetainLastPositive + "  "
 
 	effective, err := p.ResolveOptions(global, nil)
 	require.NoError(t, err)
@@ -117,6 +124,7 @@ func TestResolveOptionsKeepsGlobalPublicationBehavior(t *testing.T) {
 		"environment in (canary,prod),publish=true",
 	)
 	want[optNormalizedTotal] = "100"
+	want[optNoPositivePlanPolicy] = noPositivePlanPolicyRetainLastPositive
 	assert.Equal(t, want, effective)
 
 	global[optTargetTemplate] = "changed"
@@ -128,6 +136,7 @@ func TestResolveOptionsRejectsEveryInlineOption(t *testing.T) {
 	for _, inline := range []map[string]string{
 		{optTargetTemplate: "{{.Cluster}}"},
 		{optRequestTimeout: "1s"},
+		{optNoPositivePlanPolicy: noPositivePlanPolicyRetainLastPositive},
 		{"unknown": "value"},
 	} {
 		_, err := p.ResolveOptions(targetOptions("{{.EndpointHostname}}"), inline)
@@ -159,6 +168,13 @@ func TestResolveOptionsValidatesSanitizedGlobals(t *testing.T) {
 		{name: "normalized total with relative mode", options: map[string]string{
 			optTargetTemplate: "{{.Cluster}}", optWeightMode: weightModeRelative, optNormalizedTotal: "100",
 		}, want: optNormalizedTotal},
+		{name: "missing no-positive plan policy", options: map[string]string{
+			optTargetTemplate: "{{.Cluster}}", optWeightMode: weightModeNormalized, optNormalizedTotal: "100",
+		}, want: optNoPositivePlanPolicy},
+		{name: "invalid no-positive plan policy", options: map[string]string{
+			optTargetTemplate: "{{.Cluster}}", optWeightMode: weightModeNormalized, optNormalizedTotal: "100",
+			optNoPositivePlanPolicy: "apply-current",
+		}, want: optNoPositivePlanPolicy},
 		{name: "unexpected", options: map[string]string{optTargetTemplate: "{{.Cluster}}", optOncall: "team"}, want: "unsupported"},
 	}
 	for _, tt := range tests {
@@ -414,6 +430,290 @@ func TestPlanNormalizedWeightsUseConfiguredTotalOrStayZero(t *testing.T) {
 				require.NoError(t, err)
 				assert.Equal(t, wantTotal, total)
 			}
+		})
+	}
+}
+
+func TestCapturePreservesPostTransformPlan(t *testing.T) {
+	trafficMap := testTrafficMap()
+	trafficMap.Spec.Entries[0].Weight = 2
+	trafficMap.Spec.Entries[1].Weight = 3
+	options := targetOptions("{{.EndpointHostname}}")
+	options[optNoPositivePlanPolicy] = noPositivePlanPolicyRetainLastPositive
+	p := newTestPublisher(&recordingPublisher{})
+
+	plan, err := p.Plan(testISVC("model-a"), trafficMap, options)
+	require.NoError(t, err)
+	captured, err := p.Capture(plan)
+	require.NoError(t, err)
+	assert.False(t, captured.Withdrawn)
+	assert.Equal(t, placementendpoint.TrafficMapNoPositivePlanPolicyRetainLastPositive,
+		captured.NoPositivePlanPolicy)
+	assert.Regexp(t, `^sha256:[0-9a-f]{64}$`, captured.PlanCompatibilityDigest)
+	assert.Equal(t, []v1beta1.TrafficMapPublisherTarget{
+		{Target: "model-a.team-a.home-a.example", Weight: 60},
+		{Target: "model-a.team-a.home-b.example", Weight: 40},
+	}, captured.Targets)
+
+	captured.Targets[0].Target = "mutated.example"
+	capturedAgain, err := p.Capture(plan)
+	require.NoError(t, err)
+	assert.Equal(t, "model-a.team-a.home-a.example", capturedAgain.Targets[0].Target,
+		"captured targets must not alias the opaque plan")
+}
+
+func TestCaptureDistinguishesEmptyPlanFromWithdrawal(t *testing.T) {
+	p := newTestPublisher(&recordingPublisher{})
+	owner := testISVC("model-a")
+	emptyMap := testTrafficMap()
+	emptyMap.Spec.Entries = nil
+
+	emptyPlan, err := p.Plan(owner, emptyMap, targetOptions("{{.EndpointHostname}}"))
+	require.NoError(t, err)
+	emptyCapture, err := p.Capture(emptyPlan)
+	require.NoError(t, err)
+	assert.False(t, emptyCapture.Withdrawn)
+	assert.Empty(t, emptyCapture.Targets)
+	zeroMap := testTrafficMap()
+	for i := range zeroMap.Spec.Entries {
+		zeroMap.Spec.Entries[i].Weight = 0
+	}
+	zeroPlan, err := p.Plan(owner, zeroMap, targetOptions("{{.EndpointHostname}}"))
+	require.NoError(t, err)
+	zeroCapture, err := p.Capture(zeroPlan)
+	require.NoError(t, err)
+	assert.False(t, zeroCapture.Withdrawn)
+	assert.Equal(t, []v1beta1.TrafficMapPublisherTarget{
+		{Target: "model-a.team-a.home-a.example", Weight: 0},
+		{Target: "model-a.team-a.home-b.example", Weight: 0},
+	}, zeroCapture.Targets)
+
+	withdrawnPlan, err := p.Plan(owner, testTrafficMap(), targetOptionsWithSelector(
+		"{{.EndpointHostname}}", "publish=true",
+	))
+	require.NoError(t, err)
+	withdrawnCapture, err := p.Capture(withdrawnPlan)
+	require.NoError(t, err)
+	assert.True(t, withdrawnCapture.Withdrawn)
+	assert.Empty(t, withdrawnCapture.Targets)
+}
+
+func TestCaptureRejectsInvalidOpaquePlans(t *testing.T) {
+	p := newTestPublisher(&recordingPublisher{})
+
+	_, err := p.Capture(foreignPlan{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "plan of type")
+
+	_, err = p.Capture(&publishPlan{
+		targets:                 []weightedTarget{{name: "a.example", weight: 1}},
+		claims:                  []string{"b.example"},
+		planCompatibilityDigest: validPlanCompatibilityDigest,
+		noPositivePlanPolicy:    placementendpoint.TrafficMapNoPositivePlanPolicyApplyCurrent,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "do not exactly match")
+
+	_, err = p.Capture(&publishPlan{
+		planCompatibilityDigest: validPlanCompatibilityDigest,
+		noPositivePlanPolicy:    "unknown",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid no-positive plan policy")
+}
+
+func TestPlanCompatibilityDigestExcludesOnlyFallbackPolicy(t *testing.T) {
+	firstOptions := targetOptionsWithSelector("{{.EndpointHostname}}", "publish=true")
+	first, err := planCompatibilityDigest(firstOptions)
+	require.NoError(t, err)
+	assert.Regexp(t, `^sha256:[0-9a-f]{64}$`, first)
+
+	reordered := map[string]string{
+		optNormalizedTotal:      firstOptions[optNormalizedTotal],
+		optNoPositivePlanPolicy: noPositivePlanPolicyRetainLastPositive,
+		optWeightMode:           firstOptions[optWeightMode],
+		optSourceSelector:       firstOptions[optSourceSelector],
+		optTargetTemplate:       firstOptions[optTargetTemplate],
+	}
+	second, err := planCompatibilityDigest(reordered)
+	require.NoError(t, err)
+	assert.Equal(t, first, second, "map order and fallback policy must not affect compatibility")
+
+	for _, tt := range []struct {
+		name   string
+		mutate func(map[string]string)
+	}{
+		{name: "target template", mutate: func(options map[string]string) {
+			options[optTargetTemplate] = "{{.Cluster}}"
+		}},
+		{name: "source selector", mutate: func(options map[string]string) {
+			options[optSourceSelector] = "publish=false"
+		}},
+		{name: "weight mode", mutate: func(options map[string]string) {
+			options[optWeightMode] = weightModeRelative
+			delete(options, optNormalizedTotal)
+		}},
+		{name: "normalized total", mutate: func(options map[string]string) {
+			options[optNormalizedTotal] = "101"
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			changed := targetOptionsWithSelector("{{.EndpointHostname}}", "publish=true")
+			tt.mutate(changed)
+			digest, err := planCompatibilityDigest(changed)
+			require.NoError(t, err)
+			assert.NotEqual(t, first, digest)
+		})
+	}
+}
+
+func TestReplayBuildsDetachedCanonicalPlan(t *testing.T) {
+	weights := &recordingPublisher{}
+	p := newTestPublisher(weights)
+	snapshot := v1beta1.TrafficMapPublisherLastPositive{
+		TrafficMapGeneration:    12,
+		ObservedISVCGeneration:  42,
+		PlanCompatibilityDigest: validPlanCompatibilityDigest,
+		Targets: []v1beta1.TrafficMapPublisherTarget{
+			{Target: "c.example", Weight: 30},
+			{Target: "a.example", Weight: 0},
+			{Target: "b.example", Weight: 70},
+			{Target: "d.example", Weight: int64(maxNormalizedTotal)},
+		},
+	}
+
+	plan, err := p.Replay(snapshot)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"a.example", "b.example", "c.example", "d.example"}, plan.Claims())
+	xdsPlan := plan.(*publishPlan)
+	assert.Equal(t, []weightedTarget{
+		{name: "a.example", weight: 0},
+		{name: "b.example", weight: 70},
+		{name: "c.example", weight: 30},
+		{name: "d.example", weight: uint32(maxNormalizedTotal)},
+	}, xdsPlan.targets)
+
+	snapshot.Targets[0] = v1beta1.TrafficMapPublisherTarget{Target: "mutated.example", Weight: 1}
+	assert.Equal(t, "c.example", xdsPlan.targets[2].name, "replay plan must not alias the status snapshot")
+
+	_, err = p.Apply(context.Background(), plan)
+	require.NoError(t, err)
+	assert.Equal(t, xdsPlan.targets, weights.published)
+}
+
+func TestReplayRejectsMalformedSnapshot(t *testing.T) {
+	valid := func() v1beta1.TrafficMapPublisherLastPositive {
+		return v1beta1.TrafficMapPublisherLastPositive{
+			TrafficMapGeneration:    12,
+			ObservedISVCGeneration:  42,
+			PlanCompatibilityDigest: validPlanCompatibilityDigest,
+			Targets:                 []v1beta1.TrafficMapPublisherTarget{{Target: "a.example", Weight: 1}},
+		}
+	}
+	tests := []struct {
+		name   string
+		mutate func(*v1beta1.TrafficMapPublisherLastPositive)
+		want   string
+	}{
+		{name: "TrafficMap generation", mutate: func(snapshot *v1beta1.TrafficMapPublisherLastPositive) {
+			snapshot.TrafficMapGeneration = 0
+		}, want: "TrafficMap generation"},
+		{name: "source generation", mutate: func(snapshot *v1beta1.TrafficMapPublisherLastPositive) {
+			snapshot.ObservedISVCGeneration = 0
+		}, want: "InferenceService generation"},
+		{name: "digest", mutate: func(snapshot *v1beta1.TrafficMapPublisherLastPositive) {
+			snapshot.PlanCompatibilityDigest = "sha256:ABC"
+		}, want: "compatibility digest"},
+		{name: "empty", mutate: func(snapshot *v1beta1.TrafficMapPublisherLastPositive) {
+			snapshot.Targets = nil
+		}, want: "at least one target"},
+		{name: "all zero", mutate: func(snapshot *v1beta1.TrafficMapPublisherLastPositive) {
+			snapshot.Targets[0].Weight = 0
+		}, want: "positive weight"},
+		{name: "negative weight", mutate: func(snapshot *v1beta1.TrafficMapPublisherLastPositive) {
+			snapshot.Targets[0].Weight = -1
+		}, want: "between 0"},
+		{name: "overflowing weight", mutate: func(snapshot *v1beta1.TrafficMapPublisherLastPositive) {
+			snapshot.Targets[0].Weight = int64(maxNormalizedTotal) + 1
+		}, want: "between 0"},
+		{name: "duplicate target", mutate: func(snapshot *v1beta1.TrafficMapPublisherLastPositive) {
+			snapshot.Targets = append(snapshot.Targets,
+				v1beta1.TrafficMapPublisherTarget{Target: "a.example", Weight: 2})
+		}, want: "more than once"},
+		{name: "scope prefix", mutate: func(snapshot *v1beta1.TrafficMapPublisherLastPositive) {
+			snapshot.Targets[0].Target = "scope/a.example"
+		}, want: "scope prefix"},
+		{name: "fallback suffix", mutate: func(snapshot *v1beta1.TrafficMapPublisherLastPositive) {
+			snapshot.Targets[0].Target = "a.example;fallback=b.example"
+		}, want: "not canonical"},
+		{name: "surrounding whitespace", mutate: func(snapshot *v1beta1.TrafficMapPublisherLastPositive) {
+			snapshot.Targets[0].Target = " a.example "
+		}, want: "not canonical"},
+		{name: "long target", mutate: func(snapshot *v1beta1.TrafficMapPublisherLastPositive) {
+			snapshot.Targets[0].Target = strings.Repeat("a", v1beta1.MaxTrafficMapPublisherTargetLength+1)
+		}, want: "maximum"},
+		{name: "too many targets", mutate: func(snapshot *v1beta1.TrafficMapPublisherLastPositive) {
+			snapshot.Targets = make([]v1beta1.TrafficMapPublisherTarget, v1beta1.MaxTrafficMapPublisherTargets+1)
+			for i := range snapshot.Targets {
+				snapshot.Targets[i] = v1beta1.TrafficMapPublisherTarget{
+					Target: "target-" + strconv.Itoa(i), Weight: 1,
+				}
+			}
+		}, want: "maximum"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			snapshot := valid()
+			tt.mutate(&snapshot)
+			weights := &recordingPublisher{}
+			plan, err := newTestPublisher(weights).Replay(snapshot)
+			require.Error(t, err)
+			assert.Nil(t, plan)
+			assert.Contains(t, err.Error(), tt.want)
+			assert.Empty(t, weights.published)
+			assert.Empty(t, weights.cleared)
+		})
+	}
+}
+
+func TestReplayApplyFailureRetriesCompleteSnapshot(t *testing.T) {
+	wantPlan := []weightedTarget{
+		{name: "a.example", weight: 0},
+		{name: "b.example", weight: 20},
+		{name: "c.example", weight: 30},
+	}
+	for _, failedTarget := range []string{"a.example", "b.example", "c.example"} {
+		t.Run(failedTarget, func(t *testing.T) {
+			weights := &recordingPublisher{publishFailures: map[string]error{
+				failedTarget: errors.New("unavailable"),
+			}}
+			p := newTestPublisher(weights)
+			plan, err := p.Replay(v1beta1.TrafficMapPublisherLastPositive{
+				TrafficMapGeneration:    12,
+				ObservedISVCGeneration:  42,
+				PlanCompatibilityDigest: validPlanCompatibilityDigest,
+				Targets: []v1beta1.TrafficMapPublisherTarget{
+					{Target: "c.example", Weight: 30},
+					{Target: "a.example", Weight: 0},
+					{Target: "b.example", Weight: 20},
+				},
+			})
+			require.NoError(t, err)
+
+			_, err = p.Apply(context.Background(), plan)
+			require.Error(t, err)
+			failedIndex := slices.IndexFunc(wantPlan, func(target weightedTarget) bool {
+				return target.name == failedTarget
+			})
+			require.NotEqual(t, -1, failedIndex)
+			firstAttempt := slices.Clone(wantPlan[:failedIndex+1])
+			assert.Equal(t, firstAttempt, weights.published)
+
+			_, err = p.Apply(context.Background(), plan)
+			require.NoError(t, err)
+			assert.Equal(t, append(firstAttempt, wantPlan...), weights.published,
+				"retry must restart from the first snapshot target")
 		})
 	}
 }

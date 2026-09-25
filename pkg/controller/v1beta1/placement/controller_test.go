@@ -275,7 +275,7 @@ func TestWritePlacementProjectsSourceReady(t *testing.T) {
 				candidates:       []v1beta1.CandidatePlacement{servingCandidate},
 				readinessUnknown: true,
 			},
-			wantStatus: corev1.ConditionUnknown, wantReason: placementReadyReasonUnknown,
+			wantStatus: corev1.ConditionUnknown, wantReason: PlacementReadyReasonUnknown,
 			wantMessage: placementReadyMessageUnknown,
 		},
 		{
@@ -687,7 +687,7 @@ func TestReconcile_LostWinnerBecomesUnknownWhenMemberReadFails(t *testing.T) {
 		assert.Equal(t, "a", p.Cluster)
 		assert.Equal(t, v1beta1.PlacementPhasePending, p.Phase)
 		assert.Empty(t, p.Candidates)
-		assert.Equal(t, placementReadyReasonUnknown, cpReadyCondition(t, cp).Reason)
+		assert.Equal(t, PlacementReadyReasonUnknown, cpReadyCondition(t, cp).Reason)
 	}
 }
 
@@ -1521,7 +1521,7 @@ func TestReconcile_StickyWinnerDisconnectedHoldsWithoutArmingGrace(t *testing.T)
 	ready := got.Status.GetCondition(apis.ConditionReady)
 	require.NotNil(t, ready)
 	assert.Equal(t, corev1.ConditionUnknown, ready.Status)
-	assert.Equal(t, placementReadyReasonUnknown, ready.Reason)
+	assert.Equal(t, PlacementReadyReasonUnknown, ready.Reason)
 	assert.False(t, hasDerived(t, wa), "must NOT re-race / fan out to a on a disconnected winner")
 	_, armed := r.winnerLostSince.Load(isvc.UID)
 	assert.False(t, armed, "grace clock must NOT be armed for a disconnected winner")
@@ -1609,7 +1609,7 @@ func TestReconcile_StandingObservationHasPerMemberDeadline(t *testing.T) {
 	assert.Zero(t, p.Candidates[0].ReadyReplicas)
 	ready := cpReadyCondition(t, cp)
 	assert.Equal(t, corev1.ConditionUnknown, ready.Status)
-	assert.Equal(t, placementReadyReasonUnknown, ready.Reason)
+	assert.Equal(t, PlacementReadyReasonUnknown, ready.Reason)
 }
 
 // Once the winner reappears, its pending grace marker is cleared so another
@@ -2170,7 +2170,7 @@ func TestReconcile_AllModeUnreadableHomeDoesNotBorrowLegacyReady(t *testing.T) {
 	ready := got.Status.GetCondition(apis.ConditionReady)
 	require.NotNil(t, ready)
 	assert.Equal(t, corev1.ConditionUnknown, ready.Status)
-	assert.Equal(t, placementReadyReasonUnknown, ready.Reason)
+	assert.Equal(t, PlacementReadyReasonUnknown, ready.Reason)
 	by := candidatesByCluster(got.Status.Placement.Candidates)
 	require.Contains(t, by, "b")
 	assert.Zero(t, by["b"].ReadyReplicas,
@@ -2290,7 +2290,7 @@ func TestReconcile_AllModePostApplyIRFailureKeepsFreshObservation(t *testing.T) 
 	ready := got.Status.GetCondition(apis.ConditionReady)
 	require.NotNil(t, ready)
 	assert.Equal(t, corev1.ConditionUnknown, ready.Status)
-	assert.Equal(t, placementReadyReasonUnknown, ready.Reason)
+	assert.Equal(t, PlacementReadyReasonUnknown, ready.Reason)
 }
 
 // TestReconcile_AllModeAdmittingWhileAllGated: no home admitted yet -> Admitting, both

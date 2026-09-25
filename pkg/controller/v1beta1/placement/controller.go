@@ -57,12 +57,14 @@ const (
 	placementReadyReasonPending = "PlacementPending"
 	// PlacementReadyReasonLost identifies an authoritative loss of every current
 	// home without treating an unreadable member as absent.
-	PlacementReadyReasonLost       = "PlacementLost"
+	PlacementReadyReasonLost = "PlacementLost"
+	// PlacementReadyReasonUnknown identifies an incomplete placement observation
+	// that cannot prove either serving readiness or authoritative placement loss.
+	PlacementReadyReasonUnknown    = "PlacementUnknown"
 	placementReadyReasonAdmitting  = "PlacementAdmitting"
 	placementReadyReasonReady      = "PlacementReady"
 	placementReadyReasonNotReady   = "PlacementNotReady"
 	placementReadyReasonFailed     = "PlacementFailed"
-	placementReadyReasonUnknown    = "PlacementUnknown"
 	placementReadyMessagePending   = "Waiting for an eligible workload cluster"
 	placementReadyMessageLost      = "All recorded placement homes are confirmed absent"
 	placementReadyMessageAdmitting = "Waiting for a workload cluster to admit the InferenceService"
@@ -1343,7 +1345,7 @@ func setSourcePlacementReady(status *v1beta1.InferenceServiceStatus, res placeme
 		if res.placementLost {
 			manager.MarkUnknown(apis.ConditionReady, PlacementReadyReasonLost, placementReadyMessageLost)
 		} else if res.readinessUnknown {
-			manager.MarkUnknown(apis.ConditionReady, placementReadyReasonUnknown, placementReadyMessageUnknown)
+			manager.MarkUnknown(apis.ConditionReady, PlacementReadyReasonUnknown, placementReadyMessageUnknown)
 		} else {
 			manager.MarkUnknown(apis.ConditionReady, placementReadyReasonPending, placementReadyMessagePending)
 		}
@@ -1353,14 +1355,14 @@ func setSourcePlacementReady(status *v1beta1.InferenceServiceStatus, res placeme
 		if res.ready {
 			manager.MarkTrueWithReason(apis.ConditionReady, placementReadyReasonReady, placementReadyMessageReady)
 		} else if res.readinessUnknown {
-			manager.MarkUnknown(apis.ConditionReady, placementReadyReasonUnknown, placementReadyMessageUnknown)
+			manager.MarkUnknown(apis.ConditionReady, PlacementReadyReasonUnknown, placementReadyMessageUnknown)
 		} else {
 			manager.MarkFalse(apis.ConditionReady, placementReadyReasonNotReady, placementReadyMessageNotReady)
 		}
 	case v1beta1.PlacementPhaseFailed:
 		manager.MarkFalse(apis.ConditionReady, placementReadyReasonFailed, placementReadyMessageFailed)
 	default:
-		manager.MarkUnknown(apis.ConditionReady, placementReadyReasonUnknown, placementReadyMessageUnknown)
+		manager.MarkUnknown(apis.ConditionReady, PlacementReadyReasonUnknown, placementReadyMessageUnknown)
 	}
 
 	// Other condition writers can temporarily recompute Ready while adding their

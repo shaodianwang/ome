@@ -26,10 +26,13 @@ This proposal:
 - persists the exact last positive plan for restart-safe replay; and
 - exposes fallback through `TrafficMap.status` and a metric.
 
-It does not retain traffic for manual or probe drains, zero capacity, unready or
-unknown homes, deletion, routing opt-out, or source withdrawal. It also does not
-prove that a retained endpoint is healthy or impose a fallback expiry in the
-first version.
+It does not retain traffic for manual or probe drains, zero capacity,
+definitively unready homes, deletion, routing opt-out, or source withdrawal. An
+unknown home never authorizes replay; under `RetainLastPositive`, the publisher
+leaves already-applied state untouched until observation becomes definitive.
+`ApplyCurrent` continues to apply the current no-positive plan. The proposal
+also does not prove that a retained endpoint is healthy or impose a fallback
+expiry in the first version.
 
 Terms used below:
 
@@ -84,14 +87,21 @@ Fallback is allowed only when all of the following are true:
 5. A valid snapshot exists for the same publisher, source generation,
    compatible plan options, and exact claim set.
 
-The allowlist is closed. These states always bypass fallback:
+The allowlist is closed. These states never authorize replay:
 
-- `AllHomesUnready`, `PlacementUnknown`, `NoRoutableCapacity`, probe `Drain`,
-  or any manual-drain intent, including a pending or malformed override;
+- `AllHomesUnready`, `NoRoutableCapacity`, probe `Drain`, or any manual-drain
+  intent, including a pending or malformed override;
 - initial placement, `Admitting`, `Failed`, non-Single total placement loss, or
   any `NotPlaced` state without `PlacementLost` provenance;
 - stale or missing status, claim mismatch, deletion, routing opt-out, or
   publisher source withdrawal.
+
+A fresh `PlacementUnknown` verdict also never authorizes replay, but it is an
+incomplete observation rather than a definitive negative. The publisher
+therefore preserves the snapshot and claims, reports fallback eligibility
+Unknown, and performs no external mutation until placement supplies a
+definitive verdict. This prevents a transient incomplete read during controller
+restart from destroying the durable plan needed once `PlacementLost` returns.
 
 Invalid ownership, provenance, options, or plans cause no external mutation;
 the publisher reports Unknown and retries. Unclassifiable stale input behaves

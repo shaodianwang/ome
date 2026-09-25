@@ -138,12 +138,23 @@ all-failed `Drain` policy, either mode publishes zero for every target. Changing
 either option changes the publisher options digest and republishes each selected
 TrafficMap.
 
+The required installation-only `noPositivePlanPolicy` option controls how the
+publisher handles a valid plan with no positive weight. `ApplyCurrent` preserves
+the factual empty or all-zero publication. `RetainLastPositive` replays the last
+fully applied compatible positive plan only for the narrow placement-loss and
+address-loss states defined by OEP-0025.1. The publisher rejects missing,
+unknown, or per-InferenceService values.
+
 Existing xDS deployments must add `weightMode` when adopting a binary with this
 option, and normalized deployments must also set `normalizedTotal`. Use
 `relative` without `normalizedTotal` for the first rollout when the wire
 representation must remain unchanged, then switch every leader candidate to
 `normalized` with the intended total; binaries that predate these options reject
 them during configuration validation.
+
+Deploy `noPositivePlanPolicy: ApplyCurrent` while establishing snapshot coverage
+before opting into `RetainLastPositive`. Changing only this policy does not
+invalidate a compatible captured plan.
 
 Selecting `routing.publisher.name: xds` replaces the default Gateway API
 publisher; the two publishers do not run side by side.
@@ -170,6 +181,7 @@ routing:
       sourceSelector: 'routing.example.com/publish=true'  # optional
       weightMode: normalized
       normalizedTotal: "100"
+      noPositivePlanPolicy: ApplyCurrent
       targetTemplate: 'gke_llm_tpu_{{replaceAll "-" "_" .Service}}_{{replaceAll "-" "_" (mustTrimSuffix "-tpu" (mustTrimPrefix "msl-gcp-" .Cluster))}}'
       urlTemplate: 'https://xds-automation.mrpc.fbinfra.net/api/v1/clusters/{cluster}/weight'
       requestTimeout: 30s
@@ -208,11 +220,13 @@ endpoint finalizers and target annotations still block planning even for a
 nonmatch, so selection cannot bypass the required old-lifecycle cleanup.
 
 Publisher options on individual InferenceServices are rejected. In particular,
-`targetTemplate`, `sourceSelector`, `weightMode`, and `normalizedTotal` are
-installation-wide: allowing an object to replace them could redirect writes or
-make shared target weights inconsistent. These global publication settings
-participate in the per-TrafficMap options digest; transport paths, credentials,
-and service metadata remain manager-local.
+`targetTemplate`, `sourceSelector`, `weightMode`, `normalizedTotal`, and
+`noPositivePlanPolicy` are installation-wide: allowing an object to replace
+them could redirect writes, make shared target weights inconsistent, or change
+outage behavior. These global publication settings participate in the
+per-TrafficMap options digest; the snapshot compatibility digest excludes only
+`noPositivePlanPolicy`. Transport paths, credentials, and service metadata
+remain manager-local.
 
 The client presents the configured workload certificate directly to the remote
 proxy and trusts only the configured CA bundle. It deliberately ignores ambient

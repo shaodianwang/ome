@@ -24,50 +24,56 @@ const (
 	// Name is the value selected at routing.publisher.name.
 	Name = "xds"
 
-	optTargetTemplate     = "targetTemplate"
-	optURLTemplate        = "urlTemplate"
-	optRequestTimeout     = "requestTimeout"
-	optTLSCertFile        = "tlsCertFile"
-	optTLSKeyFile         = "tlsKeyFile"
-	optTLSCAFile          = "tlsCAFile"
-	optOncall             = "oncall"
-	optACL                = "acl"
-	optSourceSelector     = "sourceSelector"
-	optWeightMode         = "weightMode"
-	optNormalizedTotal    = "normalizedTotal"
-	clusterURLPlaceholder = "{cluster}"
+	optTargetTemplate       = "targetTemplate"
+	optURLTemplate          = "urlTemplate"
+	optRequestTimeout       = "requestTimeout"
+	optTLSCertFile          = "tlsCertFile"
+	optTLSKeyFile           = "tlsKeyFile"
+	optTLSCAFile            = "tlsCAFile"
+	optOncall               = "oncall"
+	optACL                  = "acl"
+	optSourceSelector       = "sourceSelector"
+	optWeightMode           = "weightMode"
+	optNormalizedTotal      = "normalizedTotal"
+	optNoPositivePlanPolicy = "noPositivePlanPolicy"
+	clusterURLPlaceholder   = "{cluster}"
 
-	weightModeNormalized        = "normalized"
-	weightModeRelative          = "relative"
-	maxNormalizedTotal   uint64 = 1<<32 - 1
+	weightModeNormalized                          = "normalized"
+	weightModeRelative                            = "relative"
+	noPositivePlanPolicyApplyCurrent              = string(placementendpoint.TrafficMapNoPositivePlanPolicyApplyCurrent)
+	noPositivePlanPolicyRetainLastPositive        = string(placementendpoint.TrafficMapNoPositivePlanPolicyRetainLastPositive)
+	maxXDSWeight                           uint64 = 1<<32 - 1
+	maxNormalizedTotal                            = maxXDSWeight
 )
 
 var acceptedOptions = map[string]struct{}{
-	optTargetTemplate:  {},
-	optURLTemplate:     {},
-	optRequestTimeout:  {},
-	optTLSCertFile:     {},
-	optTLSKeyFile:      {},
-	optTLSCAFile:       {},
-	optOncall:          {},
-	optACL:             {},
-	optSourceSelector:  {},
-	optWeightMode:      {},
-	optNormalizedTotal: {},
+	optTargetTemplate:       {},
+	optURLTemplate:          {},
+	optRequestTimeout:       {},
+	optTLSCertFile:          {},
+	optTLSKeyFile:           {},
+	optTLSCAFile:            {},
+	optOncall:               {},
+	optACL:                  {},
+	optSourceSelector:       {},
+	optWeightMode:           {},
+	optNormalizedTotal:      {},
+	optNoPositivePlanPolicy: {},
 }
 
 type config struct {
-	targetTemplate  string
-	urlTemplate     string
-	requestTimeout  time.Duration
-	tlsCertFile     string
-	tlsKeyFile      string
-	tlsCAFile       string
-	oncall          string
-	acl             *string
-	sourceSelector  string
-	weightMode      string
-	normalizedTotal string
+	targetTemplate       string
+	urlTemplate          string
+	requestTimeout       time.Duration
+	tlsCertFile          string
+	tlsKeyFile           string
+	tlsCAFile            string
+	oncall               string
+	acl                  *string
+	sourceSelector       string
+	weightMode           string
+	normalizedTotal      string
+	noPositivePlanPolicy string
 }
 
 // Publisher writes TrafficMap weights through the internal xDS API.
@@ -109,8 +115,9 @@ func newTrafficMapPublisherWithFactory(
 		return nil, err
 	}
 	globalOptions := map[string]string{
-		optTargetTemplate: publisher.config.targetTemplate,
-		optWeightMode:     publisher.config.weightMode,
+		optTargetTemplate:       publisher.config.targetTemplate,
+		optWeightMode:           publisher.config.weightMode,
+		optNoPositivePlanPolicy: publisher.config.noPositivePlanPolicy,
 	}
 	if publisher.config.normalizedTotal != "" {
 		globalOptions[optNormalizedTotal] = publisher.config.normalizedTotal
@@ -194,6 +201,10 @@ func parseConfig(options map[string]string) (config, error) {
 	if err != nil {
 		return config{}, err
 	}
+	noPositivePlanPolicy, err := parseNoPositivePlanPolicy(options[optNoPositivePlanPolicy])
+	if err != nil {
+		return config{}, err
+	}
 
 	requestTimeout, err := parsePositiveDuration(options, optRequestTimeout)
 	if err != nil {
@@ -221,17 +232,18 @@ func parseConfig(options map[string]string) (config, error) {
 	}
 
 	return config{
-		targetTemplate:  templateText,
-		urlTemplate:     urlTemplate,
-		requestTimeout:  requestTimeout,
-		tlsCertFile:     tlsCertFile,
-		tlsKeyFile:      tlsKeyFile,
-		tlsCAFile:       tlsCAFile,
-		oncall:          oncall,
-		acl:             acl,
-		sourceSelector:  sourceSelector,
-		weightMode:      weightMode,
-		normalizedTotal: normalizedTotal,
+		targetTemplate:       templateText,
+		urlTemplate:          urlTemplate,
+		requestTimeout:       requestTimeout,
+		tlsCertFile:          tlsCertFile,
+		tlsKeyFile:           tlsKeyFile,
+		tlsCAFile:            tlsCAFile,
+		oncall:               oncall,
+		acl:                  acl,
+		sourceSelector:       sourceSelector,
+		weightMode:           weightMode,
+		normalizedTotal:      normalizedTotal,
+		noPositivePlanPolicy: noPositivePlanPolicy,
 	}, nil
 }
 
@@ -302,6 +314,24 @@ func parseNormalizedTotal(options map[string]string, weightMode string) (uint32,
 			optNormalizedTotal, maxNormalizedTotal)
 	}
 	return uint32(total), strconv.FormatUint(total, 10), nil
+}
+
+func parseNoPositivePlanPolicy(raw string) (string, error) {
+	policy := strings.TrimSpace(raw)
+	if policy == "" {
+		return "", fmt.Errorf("routing.publisher.options[%q] is required by %q", optNoPositivePlanPolicy, Name)
+	}
+	switch policy {
+	case noPositivePlanPolicyApplyCurrent, noPositivePlanPolicyRetainLastPositive:
+		return policy, nil
+	default:
+		return "", fmt.Errorf(
+			"routing.publisher.options[%q] must be %q or %q",
+			optNoPositivePlanPolicy,
+			noPositivePlanPolicyApplyCurrent,
+			noPositivePlanPolicyRetainLastPositive,
+		)
+	}
 }
 
 func validateURLTemplate(raw string) error {

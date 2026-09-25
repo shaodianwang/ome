@@ -5,6 +5,8 @@ package xdspublisher
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"slices"
@@ -23,15 +25,19 @@ import (
 // publisher lifecycle. Its presence requires that lifecycle to finish cleanup.
 const legacyTargetsAnnotation = "routing.ome.io/xds-published-targets"
 
+const xdsPlanCompatibilityDigestVersion = "v1"
+
 type weightedTarget struct {
 	name   string
 	weight uint32
 }
 
 type publishPlan struct {
-	targets   []weightedTarget
-	claims    []string
-	withdrawn bool
+	targets                 []weightedTarget
+	claims                  []string
+	planCompatibilityDigest string
+	noPositivePlanPolicy    placementendpoint.TrafficMapNoPositivePlanPolicy
+	withdrawn               bool
 }
 
 func (p *publishPlan) Claims() []string {
@@ -54,6 +60,8 @@ type targetTemplateData struct {
 // Stateful implements endpoint.TrafficMapPublisher.
 func (*Publisher) Stateful() bool { return true }
 
+var _ placementendpoint.TrafficMapPublisherFallback = (*Publisher)(nil)
+
 // ResolveOptions implements endpoint.TrafficMapPublisher. Transport and
 // credentials are installation-wide and never enter an InferenceService or its
 // status digest. Target selection and weight representation are also
@@ -70,7 +78,8 @@ func (*Publisher) ResolveOptions(global, inline map[string]string) (map[string]s
 			strings.Join(keys, ", "))
 	}
 	for key := range global {
-		if key != optTargetTemplate && key != optSourceSelector && key != optWeightMode && key != optNormalizedTotal {
+		if key != optTargetTemplate && key != optSourceSelector && key != optWeightMode && key != optNormalizedTotal &&
+			key != optNoPositivePlanPolicy {
 			return nil, fmt.Errorf("xDS publisher received unsupported global option %q", key)
 		}
 	}
@@ -93,9 +102,14 @@ func (*Publisher) ResolveOptions(global, inline map[string]string) (map[string]s
 	if err != nil {
 		return nil, err
 	}
+	noPositivePlanPolicy, err := parseNoPositivePlanPolicy(global[optNoPositivePlanPolicy])
+	if err != nil {
+		return nil, err
+	}
 	effective := map[string]string{
-		optTargetTemplate: templateText,
-		optWeightMode:     weightMode,
+		optTargetTemplate:       templateText,
+		optWeightMode:           weightMode,
+		optNoPositivePlanPolicy: noPositivePlanPolicy,
 	}
 	if normalizedTotal != "" {
 		effective[optNormalizedTotal] = normalizedTotal
@@ -148,8 +162,20 @@ func (*Publisher) Plan(
 	if err != nil {
 		return nil, err
 	}
+	noPositivePlanPolicy, err := parseNoPositivePlanPolicy(effectiveOptions[optNoPositivePlanPolicy])
+	if err != nil {
+		return nil, err
+	}
+	compatibilityDigest, err := planCompatibilityDigest(effectiveOptions)
+	if err != nil {
+		return nil, err
+	}
 	if !sourceSelector.Matches(labels.Set(owner.Labels)) {
-		return &publishPlan{withdrawn: true}, nil
+		return &publishPlan{
+			planCompatibilityDigest: compatibilityDigest,
+			noPositivePlanPolicy:    placementendpoint.TrafficMapNoPositivePlanPolicy(noPositivePlanPolicy),
+			withdrawn:               true,
+		}, nil
 	}
 
 	targets, err := desiredTargets(owner, trafficMap, targetTemplate, weightMode, normalizedTotal)
@@ -161,7 +187,111 @@ func (*Publisher) Plan(
 		claims[i] = targets[i].name
 	}
 	sort.Strings(claims)
-	return &publishPlan{targets: targets, claims: claims}, nil
+	return &publishPlan{
+		targets:                 targets,
+		claims:                  claims,
+		planCompatibilityDigest: compatibilityDigest,
+		noPositivePlanPolicy:    placementendpoint.TrafficMapNoPositivePlanPolicy(noPositivePlanPolicy),
+	}, nil
+}
+
+// Capture implements endpoint.TrafficMapPublisherFallback. It exposes the
+// immutable xDS plan as a publisher-neutral post-transform target/weight set.
+func (*Publisher) Capture(
+	plan placementendpoint.TrafficMapPublishPlan,
+) (placementendpoint.TrafficMapPublishPlanCapture, error) {
+	xdsPlan, ok := plan.(*publishPlan)
+	if !ok || xdsPlan == nil {
+		return placementendpoint.TrafficMapPublishPlanCapture{},
+			fmt.Errorf("xDS publisher cannot capture plan of type %T", plan)
+	}
+	if err := validatePlanPolicy(xdsPlan.noPositivePlanPolicy); err != nil {
+		return placementendpoint.TrafficMapPublishPlanCapture{}, err
+	}
+	if err := validatePlanCompatibilityDigest(xdsPlan.planCompatibilityDigest); err != nil {
+		return placementendpoint.TrafficMapPublishPlanCapture{}, err
+	}
+
+	claims, err := validateClaims(xdsPlan.claims)
+	if err != nil {
+		return placementendpoint.TrafficMapPublishPlanCapture{}, fmt.Errorf("validate xDS capture claims: %w", err)
+	}
+	targets := slices.Clone(xdsPlan.targets)
+	sortWeightedTargets(targets)
+	targetClaims := make([]string, len(targets))
+	capturedTargets := make([]v1beta1.TrafficMapPublisherTarget, len(targets))
+	for i := range targets {
+		targetClaims[i] = targets[i].name
+		capturedTargets[i] = v1beta1.TrafficMapPublisherTarget{
+			Target: targets[i].name,
+			Weight: int64(targets[i].weight),
+		}
+	}
+	targetClaims, err = validateClaims(targetClaims)
+	if err != nil {
+		return placementendpoint.TrafficMapPublishPlanCapture{}, fmt.Errorf("validate xDS capture targets: %w", err)
+	}
+	if !slices.Equal(claims, targetClaims) {
+		return placementendpoint.TrafficMapPublishPlanCapture{}, fmt.Errorf(
+			"xDS capture targets %v do not exactly match plan claims %v", targetClaims, claims,
+		)
+	}
+	if xdsPlan.withdrawn && len(capturedTargets) != 0 {
+		return placementendpoint.TrafficMapPublishPlanCapture{},
+			fmt.Errorf("xDS withdrawn plan contains %d targets", len(capturedTargets))
+	}
+
+	return placementendpoint.TrafficMapPublishPlanCapture{
+		Targets:                 capturedTargets,
+		PlanCompatibilityDigest: xdsPlan.planCompatibilityDigest,
+		NoPositivePlanPolicy:    xdsPlan.noPositivePlanPolicy,
+		Withdrawn:               xdsPlan.withdrawn,
+	}, nil
+}
+
+// Replay implements endpoint.TrafficMapPublisherFallback. It validates the
+// complete durable snapshot before constructing an opaque plan for Apply.
+func (*Publisher) Replay(
+	snapshot v1beta1.TrafficMapPublisherLastPositive,
+) (placementendpoint.TrafficMapPublishPlan, error) {
+	if snapshot.TrafficMapGeneration < 1 {
+		return nil, fmt.Errorf("xDS replay snapshot TrafficMap generation must be positive")
+	}
+	if snapshot.ObservedISVCGeneration < 1 {
+		return nil, fmt.Errorf("xDS replay snapshot observed InferenceService generation must be positive")
+	}
+	if err := validatePlanCompatibilityDigest(snapshot.PlanCompatibilityDigest); err != nil {
+		return nil, err
+	}
+	if len(snapshot.Targets) == 0 {
+		return nil, fmt.Errorf("xDS replay snapshot must contain at least one target")
+	}
+	if len(snapshot.Targets) > v1beta1.MaxTrafficMapPublisherTargets {
+		return nil, fmt.Errorf("xDS replay snapshot has %d targets, maximum is %d",
+			len(snapshot.Targets), v1beta1.MaxTrafficMapPublisherTargets)
+	}
+
+	targets := make([]weightedTarget, len(snapshot.Targets))
+	claims := make([]string, len(snapshot.Targets))
+	hasPositive := false
+	for i, target := range snapshot.Targets {
+		if target.Weight < 0 || uint64(target.Weight) > maxXDSWeight {
+			return nil, fmt.Errorf("xDS replay target %q weight %d must be between 0 and %d",
+				target.Target, target.Weight, maxXDSWeight)
+		}
+		claims[i] = target.Target
+		targets[i] = weightedTarget{name: target.Target, weight: uint32(target.Weight)}
+		hasPositive = hasPositive || target.Weight > 0
+	}
+	validatedClaims, err := validateClaims(claims)
+	if err != nil {
+		return nil, fmt.Errorf("validate xDS replay snapshot targets: %w", err)
+	}
+	if !hasPositive {
+		return nil, fmt.Errorf("xDS replay snapshot must contain at least one positive weight")
+	}
+	sortWeightedTargets(targets)
+	return &publishPlan{targets: targets, claims: validatedClaims}, nil
 }
 
 // Drain implements endpoint.TrafficMapPublisher. A stale override remains
@@ -226,7 +356,8 @@ func (p *Publisher) Unpublish(
 
 func effectiveTargetTemplate(options map[string]string) (*template.Template, error) {
 	for key := range options {
-		if key != optTargetTemplate && key != optSourceSelector && key != optWeightMode && key != optNormalizedTotal {
+		if key != optTargetTemplate && key != optSourceSelector && key != optWeightMode && key != optNormalizedTotal &&
+			key != optNoPositivePlanPolicy {
 			return nil, fmt.Errorf("xDS publisher effective options contain unsupported key %q", key)
 		}
 	}
@@ -290,13 +421,17 @@ func desiredTargets(
 	if weightMode == weightModeNormalized {
 		normalizeTargetWeights(targets, normalizedTotal)
 	}
+	sortWeightedTargets(targets)
+	return targets, nil
+}
+
+func sortWeightedTargets(targets []weightedTarget) {
 	sort.Slice(targets, func(i, j int) bool {
 		if (targets[i].weight == 0) != (targets[j].weight == 0) {
 			return targets[i].weight == 0
 		}
 		return targets[i].name < targets[j].name
 	})
-	return targets, nil
 }
 
 // normalizeTargetWeights uses largest-remainder apportionment. The floor pass
@@ -392,4 +527,52 @@ func validateClaims(claims []string) ([]string, error) {
 		}
 	}
 	return validated, nil
+}
+
+func validatePlanPolicy(policy placementendpoint.TrafficMapNoPositivePlanPolicy) error {
+	switch policy {
+	case placementendpoint.TrafficMapNoPositivePlanPolicyApplyCurrent,
+		placementendpoint.TrafficMapNoPositivePlanPolicyRetainLastPositive:
+		return nil
+	default:
+		return fmt.Errorf("xDS plan has invalid no-positive plan policy %q", policy)
+	}
+}
+
+func planCompatibilityDigest(options map[string]string) (string, error) {
+	compatibleOptions := make(map[string]string, len(options))
+	for key, value := range options {
+		if key != optNoPositivePlanPolicy {
+			compatibleOptions[key] = value
+		}
+	}
+	payload := struct {
+		Version   string            `json:"version"`
+		Publisher string            `json:"publisher"`
+		Options   map[string]string `json:"options"`
+	}{
+		Version:   xdsPlanCompatibilityDigestVersion,
+		Publisher: Name,
+		Options:   compatibleOptions,
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("encode xDS plan compatibility options: %w", err)
+	}
+	sum := sha256.Sum256(encoded)
+	return fmt.Sprintf("sha256:%x", sum), nil
+}
+
+func validatePlanCompatibilityDigest(digest string) error {
+	const prefix = "sha256:"
+	if !strings.HasPrefix(digest, prefix) || len(digest) != len(prefix)+sha256.Size*2 {
+		return fmt.Errorf("xDS plan compatibility digest %q must be sha256 followed by 64 lowercase hexadecimal characters", digest)
+	}
+	encoded := strings.TrimPrefix(digest, prefix)
+	for _, char := range encoded {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return fmt.Errorf("xDS plan compatibility digest %q must be sha256 followed by 64 lowercase hexadecimal characters", digest)
+		}
+	}
+	return nil
 }
