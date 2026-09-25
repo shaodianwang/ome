@@ -1,0 +1,45 @@
+title: Slice provisioning for OME TPU workloads
+oep-number: "0030"
+authors:
+  - "@yan9fan"
+status: provisional
+# state: Nothing built. The problem is measured on msl-gcp-usc1-rc-1-tpu
+# (2026-09-25): a 4-chip OME pod fails START_SESSION on a 2x2x2 partition, and
+# works on a 2x2x1 one. The runtime-side prerequisite is msl-tpu-kernel PR #1827
+# (verified: 4/4 Init worker single-host, 8/8 multi-host). Recommends Option 1
+# (ome-controller provisions, ome-scheduler places): slice creation is a slow
+# control-plane call and must stay out of the pod-binding path. Open Question 1
+# is the only fact that would move it to Option 2.
+creation-date: 2026-09-25
+reviewers:
+  - TBD
+approvers:
+  - TBD
+
+see-also:
+  - "/oeps/0022-ome-scheduler"  # topology-aware placement ONTO existing slices; this OEP is about creating them
+
+# Alpha would be one shape (2x2x1), single-host, opt-in per ISVC, rc-1 only.
+stage: alpha
+
+latest-milestone: "TBD"
+
+milestone:
+  alpha: "TBD"
+  beta: "TBD"
+  stable: "TBD"
+
+# Opt-in per ISVC during alpha; absence of PROVISION_ONLY on the candidate nodes
+# short-circuits all slice work, so static pools are unaffected by construction.
+feature-gates: []
+disable-supported: true
+
+# RESERVED -- NOT YET IMPLEMENTED. Slice lifecycle is the thing that can leak
+# hardware, so it is the thing that must be counted; a leaked partition is
+# invisible without these.
+metrics:
+  - ome_tpu_slice_created_total
+  - ome_tpu_slice_released_total
+  - ome_tpu_slice_create_failures_total
+  - ome_tpu_slice_leaked_total
+  - ome_tpu_slice_provision_duration_seconds
