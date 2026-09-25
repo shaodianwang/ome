@@ -1641,12 +1641,6 @@ func TestPlan_PauseFreeze_AdvancesOpenRepairOnly(t *testing.T) {
 	})
 }
 
-// TestReconcile_PausedCompletesTheOpenRecreate: a pause taken between a
-// recreate's two phases — the old pods deleted, the new ones not created
-// yet — still recreates them. Holding there would leave the Instance
-// dark for the whole pause, which is the one thing a pause may not do.
-//
-
 // TestPlan_PauseFreeze_AdvancesTheOpenRollOnly: a freeze suspends repair
 // on top of what a standard pause withholds, but neither withholds a
 // step already under way. A recreate mid-gap and an in-place patch

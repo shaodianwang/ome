@@ -283,8 +283,8 @@ func anyInFlightCreateAttempt(input workload.ReconcileInput, except int32) bool 
 // recordUpdateFailureInRetryBlock delegates to the shared writer in the
 // types package (workload.RecordUpdateFailureInRetryBlock) — one
 // implementation for the gang abandon here and the workload-root
-// deadline disposition. Kept as a package-local name so the ops-side
-// call sites and invariant tests read unchanged.
+// deadline disposition, under the package-local name the ops-side call
+// sites and invariant tests use.
 func recordUpdateFailureInRetryBlock(ctx context.Context, input workload.ReconcileInput, targetRev, reason string, workloadCaused bool) error {
 	return workload.RecordUpdateFailureInRetryBlock(ctx, input, targetRev, reason, workloadCaused)
 }

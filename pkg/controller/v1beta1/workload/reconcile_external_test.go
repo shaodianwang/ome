@@ -41,15 +41,11 @@ import (
 // machines. The tests below assert the orchestration shape — nil-deps
 // guards, scale-down-then-create ordering, and the early-return
 // requeue on partial scale-down — by driving Reconcile against a real
-// fake client and the real workload/ops bodies. Per-op bug-fix
-// coverage already lives in workload/ops/*_test.go and is unchanged
-// by the dispatch refactor (the op bodies move with their tests; only
-// the dispatcher's call site changes).
+// fake client and the real workload/ops bodies.
 //
-// Heavier per-op coverage (Update gate ordering, Restart trigger
-// detection, Migrate surge lifecycle) stays in workload/ops/*_test.go;
-// those tests already drive the per-op functions directly and don't
-// need a Reconcile wrapper.
+// Per-op coverage (Update gate ordering, Restart trigger detection,
+// Migrate surge lifecycle) lives in workload/ops/*_test.go; those tests
+// drive the per-op functions directly and need no Reconcile wrapper.
 
 // makeScheme builds the runtime.Scheme the fake client needs.
 func makeScheme(t *testing.T) *runtime.Scheme {
@@ -1633,8 +1629,8 @@ func TestCorrectiveRecovery_Gang_InitialCreateRetarget(t *testing.T) {
 // Roll-forward: corrective NEW revision.
 // ---------------------------------------------------------------------------
 
-// TestCorrectiveRecovery_SinglePod_RollForward reproduces the prod
-// release shape for a single-pod instance: Held + Phase=Failed + the
+// TestCorrectiveRecovery_SinglePod_RollForward covers the corrective
+// release of a single-pod instance: Held + Phase=Failed + the
 // bad-revision pod still occupying the surge ordinal, then a corrective
 // NEW revision. The rollout must converge on the corrective revision
 // with zero manual intervention: reclassifyByRevisionHash
@@ -1754,9 +1750,9 @@ func TestCorrectiveRecovery_SinglePod_RollBack(t *testing.T) {
 	}
 	originalPod := serving[0].Name
 
-	// Pin the trigger contract the fix deliberately preserves: the pure
-	// evaluation still declines (RunningRevision == target fast-path) —
-	// cleanup is Plan's wreckage scan, not a widened trigger.
+	// Pin the trigger contract: the pure evaluation declines
+	// (RunningRevision == target fast-path) — cleanup is Plan's wreckage
+	// scan, not a widened trigger.
 	h.setTarget(h.revV1, goodImage)
 	in := h.buildInput()
 	plan, err := workload.BuildPlan(workloadtypes.ComponentEngine, h.desired, in.ObservedState)
@@ -1817,11 +1813,11 @@ func TestCorrectiveRecovery_Gang_RollBack_MidWreckage(t *testing.T) {
 	}
 }
 
-// TestCorrectiveRecovery_Gang_RollBack_PostHeld documents that the gang
-// roll-back from the SETTLED at-Held state trivially converges on
-// current main: the final abandon left the source Ready on v1 with no
-// wreckage, so a target equal to v1 needs no work. The gang undo path
-// is only broken at the dirty (mid-wreckage) timing.
+// TestCorrectiveRecovery_Gang_RollBack_PostHeld: the gang roll-back from
+// the SETTLED at-Held state needs no work: the final abandon left the
+// source Ready on v1 with no wreckage, so a target equal to v1 is already
+// met. The dirty timing is covered by
+// TestCorrectiveRecovery_Gang_RollBack_MidWreckage.
 //
 // Cells: instance/Failed/gate.deny[Held]/before
 func TestCorrectiveRecovery_Gang_RollBack_PostHeld(t *testing.T) {
@@ -2323,9 +2319,9 @@ func TestReconcile_Teardown_IgnoresPaused(t *testing.T) {
 // attempt, paced by the update retry ladder and bounded by the attempt's
 // deadline; a gang recycles as a whole.
 //
-// The harness is the closed reconcile loop of corrective_recovery_test.go
-// with a kubelet that rejects admissions on demand: fake client + fake
-// clock + IR-backed InstanceStatus round-trip + in-memory RetryBlocks.
+// The harness is the closed-loop recoveryHarness with a kubelet that
+// rejects admissions on demand: fake client + fake clock + IR-backed
+// InstanceStatus round-trip + in-memory RetryBlocks.
 
 const (
 	admissionRejectReason = "UnexpectedAdmissionError"
@@ -3738,9 +3734,9 @@ func TestReconcileActiveScaleDownWithoutPollSchedulesForceDeleteBoundary(t *test
 
 // The restart pass gives every selected Instance its turn each pass. These
 // tests drive two single-pod Instances under RecreateInstance through the
-// closed-loop harness (corrective_recovery_test.go): both lose their pod so
-// both are selected for restart in the same pass, and one Instance's status
-// writes are rejected on every pass.
+// closed-loop recoveryHarness: both lose their pod so both are selected for
+// restart in the same pass, and one Instance's status writes are rejected
+// on every pass.
 
 // losePods deletes every live pod of the given Instances so the next pass
 // selects each of them for restart (pod count below desired).

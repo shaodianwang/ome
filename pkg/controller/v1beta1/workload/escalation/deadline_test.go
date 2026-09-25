@@ -489,9 +489,9 @@ func TestReconcileGatedDeadlines_RestartsOnUngate(t *testing.T) {
 	}
 }
 
-// TestReconcileGatedDeadlines_UngatedNormalUntouched: the no-Kueue path is
-// unchanged — an un-gated Instance with a normal (non-zero) Deadline is
-// left exactly as the per-op writer stamped it.
+// TestReconcileGatedDeadlines_UngatedNormalUntouched: an un-gated Instance
+// with a live (non-zero) Deadline is left exactly as the per-op writer
+// stamped it.
 func TestReconcileGatedDeadlines_UngatedNormalUntouched(t *testing.T) {
 	now := time.Now()
 	orig := metav1.NewTime(now.Add(20 * time.Minute))
@@ -531,10 +531,10 @@ func TestReconcileGatedDeadlines_NonTransientUntouched(t *testing.T) {
 	}
 }
 
-// TestGatedInstance_NotFailedByDeadlineBackstop is the regression guard for
-// the fix: a gated Instance long past its ORIGINAL deadline must survive
-// the deadline backstop — pause (parks the clock) then expire (sees the
-// parked zero, skips). Without the pause step the backstop would fail it.
+// TestGatedInstance_NotFailedByDeadlineBackstop: a gated Instance long past
+// its original deadline must survive the deadline backstop — pause (parks
+// the clock) then expire (sees the parked zero, skips). Without the pause
+// step the backstop would fail it.
 func TestGatedInstance_NotFailedByDeadlineBackstop(t *testing.T) {
 	now := time.Now()
 	insts := []workloadtypes.InstanceStatus{{

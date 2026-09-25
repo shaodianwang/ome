@@ -14,7 +14,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 )
 
-// TestMapDiffRecordsValues pins the fix that made the in-place lock real:
+// TestMapDiffRecordsValues pins the property the in-place lock rests on:
 // a changed key is recorded with both of its values, normalized.
 func TestMapDiffRecordsValues(t *testing.T) {
 	d := &driver{norm: newNormalizer(traceStart)}

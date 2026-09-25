@@ -1,8 +1,7 @@
 // Internal-package tests for workload.Migrate's private helpers
 // (validateFromNode, etc.) that aren't reachable from outside the
 // workload/ops package. The end-to-end TestMigrate_* lifecycle tests
-// (status.migrations-driven, single-pod + gang) live in
-// migrate_entry_lifecycle_test.go alongside this file.
+// (status.migrations-driven, single-pod + gang) live below.
 
 package ops
 

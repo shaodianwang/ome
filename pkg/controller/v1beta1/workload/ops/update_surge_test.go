@@ -463,9 +463,9 @@ func TestReclassifyByRevisionHash_KeepsValidSurge(t *testing.T) {
 	}
 }
 
-// TestReclassifyByRevisionHash_DrainsStaleByRunningRev pins the X-2
-// recovery: a pod labeled with the just-promoted RunningRevision but
-// sitting in the surge bucket MUST be moved to drain so Phase 2
+// TestReclassifyByRevisionHash_DrainsStaleByRunningRev pins the stale-pod
+// reclassification: a pod labeled with the just-promoted RunningRevision
+// but sitting in the surge bucket MUST be moved to drain so Phase 2
 // deletes it instead of Phase 3 promoting the wrong revision.
 func TestReclassifyByRevisionHash_DrainsStaleByRunningRev(t *testing.T) {
 	mk := func(rev string) *corev1.Pod {
@@ -562,7 +562,7 @@ func TestSurgeUpdate_PostPromoteCreateDoesNotResurrectDrainedOrdinal(t *testing.
 }
 
 // TestSurgeUpdate_MultiInstance_NoOrdResurrectionAfterPromote pins
-// the multi-instance follow-up. Even when BOTH instances have been
+// the multi-instance shape: even when BOTH instances have been
 // promoted to ActiveOrdinal=1, the next Create pass must not see
 // "ordinal 0 is missing" for either instance and resurrect a drained
 // slot.
@@ -946,15 +946,14 @@ func TestSurgeUpdate_PostV2Promote_V2PodsDrainedWhenV3SurgeFires(t *testing.T) {
 	}
 }
 
-// TestSurgeUpdate_StaleRevPodAtSurgeSlot_Drained pins the X-2 follow-up
-// invariant for the stale-slot eviction path. When a pod labeled with
-// the just-promoted RunningRevision survives at the surge ordinal, the
-// rev-hash recheck must route it out of the surge bucket and the
-// stale-slot branch must delete it — and ONLY it: the canonical pod at
-// the old ordinal keeps serving until the real Phase 2 drain, after
-// the correct-rev surge pod is Ready (cleanup never pulls the
-// healthy source out of rotation). Phase 3 must NOT promote on the
-// stale pod.
+// TestSurgeUpdate_StaleRevPodAtSurgeSlot_Drained pins the stale-slot
+// eviction path. When a pod labeled with the just-promoted
+// RunningRevision survives at the surge ordinal, the rev-hash recheck
+// must route it out of the surge bucket and the stale-slot branch must
+// delete it — and ONLY it: the canonical pod at the old ordinal keeps
+// serving until the real Phase 2 drain, after the correct-rev surge pod
+// is Ready (cleanup never pulls the healthy source out of rotation).
+// Phase 3 must NOT promote on the stale pod.
 func TestSurgeUpdate_StaleRevPodAtSurgeSlot_Drained(t *testing.T) {
 	legacyResetExpectations(t)
 	isvc, ir := surgeISVCReady("llama-70b", "prod", 1)
@@ -1386,8 +1385,8 @@ func gangInputWithRemove(isvc *v1beta1.InferenceService, c client.Client) worklo
 // committed to v2.
 //
 // The promote MUST stamp RunningRevision=v2 (the rev the surged pods
-// actually carry), NOT v3 (the latest target). Stamping v3 is the X-2
-// corruption: status would claim v3 while the pods run v2, and
+// actually carry), NOT v3 (the latest target). Stamping v3 would leave
+// status claiming v3 while the pods run v2, and
 // DetectUpdateTrigger's fast path (RunningRevision == target) would then
 // short-circuit forever — the rollout never re-fires to drive the pods to
 // v3, leaving them stranded on the intermediate revision. With the
@@ -1450,7 +1449,7 @@ func TestGangSurgeUpdate_BumpDuringBump_PromotesPinnedRev(t *testing.T) {
 		t.Fatalf("surge Instance idx=1 missing after promote")
 	}
 	if promoted.RunningRevision != v2Name {
-		t.Errorf("X-2 re-bump: promoted RunningRevision=%q, want %q (the rev the pods actually carry). "+
+		t.Errorf("re-bump during an in-flight surge: promoted RunningRevision=%q, want %q (the rev the pods actually carry). "+
 			"Stamping the latest target (%q) strands the pods on the intermediate rev — "+
 			"DetectUpdateTrigger's fast path short-circuits and the rollout never converges.",
 			promoted.RunningRevision, v2Name, v3Name)
@@ -1512,8 +1511,7 @@ func TestGangSurgeUpdate_DrainsSourceFromRotationBeforeDelete(t *testing.T) {
 	// Leave a delete-expectation outstanding on the source so the pass stops
 	// at the post-drain Satisfied() gate WITHOUT deleting — letting us observe
 	// the serving flip on the still-present source pods. The drain MUST run
-	// before that gate (the fix); the original code returned at the gate with
-	// the source still serving.
+	// before that gate.
 	workload.DefaultExpectations.ExpectDeletes("prod", "llama-70b", workload.ComponentEngine, 0, 1)
 
 	if _, err := surgeUpdate(context.Background(), legacyTestDeps(c), input, plan, plan.Instances[0], v2, nil); err != nil {
@@ -1855,9 +1853,9 @@ func runSurgePass(t *testing.T, f *midSurgeFixture, tweak func(*workload.Reconci
 	return out
 }
 
-// surgeConfigChangeCases is the operator-config edit set the surge cells
-// claim no reader for. It is the shared set plus the relocation budget,
-// which the surge rows name and the non-surge rows do not.
+// surgeConfigChangeCases is the operator-config edit set that no surge
+// step reads. It is the shared set plus the relocation budget, which the
+// surge rows name and the non-surge rows do not.
 //
 // Two knobs in those cells have no field to set here. teardownDeadline
 // lives on the owner's teardown clock and retryBlockHistoryLimit on the

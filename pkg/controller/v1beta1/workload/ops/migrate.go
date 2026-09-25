@@ -1345,8 +1345,8 @@ func podsDrainedFromRouting(
 	return true, nil
 }
 
-// migrate_surge_wedge.go — terminal kubelet evidence on a migration's
-// surge ends the move before the record's Deadline.
+// Terminal kubelet evidence on a migration's surge ends the move before
+// the record's Deadline.
 //
 // A surge pod parked in a waiting reason it cannot get itself out of
 // never runs, so the handover it exists for can never happen. Both

@@ -23,8 +23,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-// TestReconcile_RestartPass_OneLiveListForManyInstances pins the
-// O(gangs^2) fix: the restart pass does a SINGLE live pod List for the
+// TestReconcile_RestartPass_OneLiveListForManyInstances pins the restart
+// pass's read cost: it does a SINGLE live pod List for the
 // whole Component and buckets by Instance index, not one live List per
 // Instance. With three healthy Ready instances under the gang-default
 // RecreateInstance policy, the live APIReader must see exactly one
@@ -82,7 +82,7 @@ func TestReconcile_RestartPass_OneLiveListForManyInstances(t *testing.T) {
 }
 
 // TestReconcile_RestartPass_PerInstanceSemanticsPreserved proves the
-// single-List + bucket refactor preserves exact per-Instance restart
+// single List + per-Instance bucketing keeps exact per-Instance restart
 // semantics: a Failed pod in index 1's bucket triggers a restart (status
 // flips to Restarting on index 1) while healthy indices 0 and 2 are left
 // untouched.

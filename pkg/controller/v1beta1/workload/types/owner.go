@@ -8,9 +8,8 @@
 // cannot disagree about a row they all meet.
 //
 // The table below is keyed by the state ids of the Instance state machine
-// (tests/rolloutspec/machines/instance/states.yaml) and by its event ids,
-// so a reader can hold the two side by side and a test can prove they name
-// the same states.
+// and by its event ids, so a reader can hold the two side by side and a
+// spec-side test can prove they name the same states.
 package types
 
 // RowOwner names the one pass that may advance a row's phase and
@@ -31,8 +30,7 @@ const (
 
 // RowState is one persisted (Phase, Operation.Type, Operation.Step) an
 // InstanceStatus can carry. The ids mirror the state ids of the Instance
-// state machine; TestOwnerTableMatchesInstanceMachine holds the two sets
-// together.
+// state machine; a spec-side test holds the two sets together.
 type RowState string
 
 const (

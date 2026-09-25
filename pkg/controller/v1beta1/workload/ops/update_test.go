@@ -1699,8 +1699,8 @@ func anyContains(events []string, sub string) bool {
 // happens at attempt-stamp time (status.RetryBlockAttemptStarted), after
 // the dispatcher's budget/coordination gates admit the start. A block
 // for a DIFFERENT target revision is a different RetrySubject and never
-// gates (the Failed-wedge fix stands), and a Failed-continuation
-// (teardown/abandon of a failed candidate) is exempt.
+// gates, and a Failed-continuation (teardown/abandon of a failed
+// candidate) is exempt.
 
 // retryBlockCall records one MutateRetryBlock invocation.
 type retryBlockCall struct {
@@ -1910,9 +1910,8 @@ func TestDetectUpdate_RetryBlockInProgressLeaked_SelfHeals(t *testing.T) {
 }
 
 // TestDetectUpdate_NewRevisionPassesGate: a block for a DIFFERENT
-// (older) target revision never gates the new target — the wedge
-// regression guard: a corrective revision must roll even when the
-// prior revision Held.
+// (older) target revision never gates the new target: a corrective
+// revision must roll even when the prior revision Held.
 func TestDetectUpdate_NewRevisionPassesGate(t *testing.T) {
 	t0 := time.Now()
 	input, plan, tcr, calls, c, _ := retryGateFixture(t, t0)

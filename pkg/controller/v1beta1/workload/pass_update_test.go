@@ -42,17 +42,16 @@ func TestReconcile_UpdateGateNil_AllowsAll(t *testing.T) {
 	}
 }
 
-// TestReconcile_UpdateRan_RequeuesAndSkipsCreate pins the X-2
-// (bump-during-bump) fix: when ANY Update.call fires in the per-
+// TestReconcile_UpdateRan_RequeuesAndSkipsCreate pins the
+// bump-during-bump dispatch rule: when ANY Update.call fires in the per-
 // Instance loop (even one returning done=true), the dispatcher MUST
 // return Requeue WITHOUT running the Create pass. The Create pass
-// reads ObservedState (a snapshot) which is now stale wrt the mutations
+// reads ObservedState (a snapshot) which is stale wrt the mutations
 // the Update calls just committed; running Create on stale state
 // corrupts RunningRevision (Create promotes pods to target.Name even
 // when the pods are on a different revision) and creates duplicate
 // pods (Create's scale-up reads the pre-promote ActiveOrdinal and
-// thinks the canonical slot is missing). Both are the X-2 corruption
-// modes.
+// thinks the canonical slot is missing).
 //
 // We exercise the path by seeding an Instance with Phase=Updating —
 // DetectUpdateTrigger returns true on this phase, so Update fires —
@@ -87,15 +86,16 @@ func TestReconcile_UpdateRan_RequeuesAndSkipsCreate(t *testing.T) {
 		t.Logf("Reconcile op error (expected for dispatch-shape test): %v", err)
 	}
 	// The load-bearing assertion: dispatcher returned Requeue=true (or
-	// RequeueAfter > 0) — Create did NOT run. Without the X-2 fix, the
-	// dispatcher returned Create's result (possibly Requeue=false).
+	// RequeueAfter > 0) — Create did NOT run. A dispatcher that fell
+	// through to Create would return Create's result (possibly
+	// Requeue=false).
 	if !result.Requeue && result.RequeueAfter == 0 {
-		t.Errorf("dispatcher must Requeue when any Update fired (X-2 guard); got %+v", result)
+		t.Errorf("dispatcher must Requeue when any Update fired; got %+v", result)
 	}
 }
 
-// TestReconcile_ScaleUpDuringUpdate_CreatesFreshIndices pins the
-// scale-out-during-rollout fix: with instance-0 mid-update (Phase=
+// TestReconcile_ScaleUpDuringUpdate_CreatesFreshIndices pins scale-out
+// during a rollout: with instance-0 mid-update (Phase=
 // Updating) and the plan asking for indices [0,1,2], the dispatcher must
 // materialize the brand-new (surge-free) indices 1 and 2 THIS reconcile
 // — not starve them behind the in-flight rollout on index 0 — then
@@ -255,16 +255,14 @@ func TestEffectivePartition(t *testing.T) {
 // update in ONE pass. Seed 8 Ready Instances all on a prior revision and
 // the dispatcher starts a fresh surge on ALL 8 in a single reconcile.
 //
-// This is the raw fleet-dispatch shape with the webhook out of the
-// loop. The real-cluster guard against a mass single-pass dispatch is the
-// webhook's 25% default-budget defaulter, which stamps a non-nil RollingUpdate
-// (percent MaxSurge/MaxUnavailable) so PerComponentMax*Budget != -1 and
-// the loop's projected-vs-budget check caps fresh starts per pass. When
-// that defaulter is bypassed (nil RollingUpdate here), the dispatcher is
-// uncapped by design — the group-level UpdateGate is the only remaining
-// layer, and it is nil too. We assert the CURRENT behavior explicitly so
-// a regression that silently re-caps (or fails to dispatch) the raw path
-// is caught. No XFAIL: uncapped dispatch is the documented raw contract.
+// This is the raw dispatch shape. In a cluster the per-Component
+// RollingUpdate is inherited from the ServingRuntime or the configured
+// cluster default, so PerComponentMax*Budget != -1 and the loop's
+// projected-vs-budget check caps fresh starts per pass. With neither
+// (nil RollingUpdate here) the dispatcher is uncapped by design — the
+// group-level UpdateGate is the only other layer, and it is nil too. The
+// test asserts that uncapped contract so a change that silently re-caps
+// (or fails to dispatch) the raw path is caught.
 func TestReconcile_NoBudget_NoGate(t *testing.T) {
 	const replicas = int32(8)
 

@@ -2142,8 +2142,8 @@ func TestReconcile_AllModeObservesStandingHomeAcrossReadinessGate(t *testing.T) 
 	assert.Equal(t, "fresh.b.example", by["b"].Endpoint.Host)
 }
 
-// Legacy status could only say that some home was Ready; it did not attribute
-// ingress readiness per candidate. Do not assign that aggregate verdict to an
+// An aggregate Ready condition not written by this controller carries no
+// per-candidate ingress attribution, so it must not be assigned to an
 // unreadable home whose carried ReadyReplicas may have come from pods alone.
 func TestReconcile_AllModeUnreadableHomeDoesNotBorrowLegacyReady(t *testing.T) {
 	s := testScheme(t)

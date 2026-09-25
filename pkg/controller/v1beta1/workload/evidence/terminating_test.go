@@ -51,7 +51,7 @@ func TestAttemptSuspectNode(t *testing.T) {
 		{name: "source and target on different nodes name the target's", pods: []*corev1.Pod{on(oldRev, "a"), on(newRev, "b")}, want: "b"},
 		{name: "an unbound source does not veto the target's node", pods: []*corev1.Pod{on(oldRev, ""), on(newRev, "b")}, want: "b"},
 		{name: "only the source present names nothing", pods: []*corev1.Pod{on(oldRev, "a")}, want: ""},
-		{name: "the same pod carrying the target label resolves as before", pods: []*corev1.Pod{on(newRev, "a")}, want: "a"},
+		{name: "a lone pod carrying the target label names its node", pods: []*corev1.Pod{on(newRev, "a")}, want: "a"},
 		{name: "unlabeled pods stay in scope", pods: []*corev1.Pod{on("", "a")}, want: "a"},
 		{name: "unlabeled pods spanning nodes still name nothing", pods: []*corev1.Pod{on("", "a"), on("", "b")}, want: ""},
 		{name: "a drained old pod on its way out is still the attempt's", pods: []*corev1.Pod{leaving(oldRev, "a")}, want: "a"},

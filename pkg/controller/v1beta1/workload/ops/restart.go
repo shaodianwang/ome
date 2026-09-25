@@ -539,7 +539,7 @@ func runnerRestartedSinceReady(pod *corev1.Pod, readySince *metav1.Time) (string
 	return "", false
 }
 
-// restart_crashloop.go — repair for a wedge no other pass owns.
+// Crash-loop repair: a wedge no other pass owns.
 //
 // No pass owns an operation-free Ready row, so this trigger does: the
 // stuck-pod fast escalator qualifies such a row only through the

@@ -843,7 +843,7 @@ func TestCreate_PromoteRecordsRunningRevision(t *testing.T) {
 }
 
 // TestCreate_PromoteSkipsRunningRevisionForOffTargetPods pins the
-// X-2 bump-during-bump guard in Create.reconcileInstance:
+// bump-during-bump rule in Create.reconcileInstance:
 // when existing pods are runtime-ready but carry a different revision
 // hash from target (e.g., they were created by an earlier surge cycle
 // pinned to a now-superseded target), the promote MUST NOT stamp
@@ -891,7 +891,7 @@ func TestCreate_PromoteSkipsRunningRevisionForOffTargetPods(t *testing.T) {
 	// The load-bearing assertion: RunningRevision must NOT have been
 	// updated to target.Name — the pod is genuinely on priorRev.
 	if s.RunningRevision != priorRev {
-		t.Errorf("RunningRevision: got %q want %q (X-2 guard — Create promote must NOT clobber RunningRevision when pods are off-target)",
+		t.Errorf("RunningRevision: got %q want %q (Create promote must NOT clobber RunningRevision when pods are off-target)",
 			s.RunningRevision, priorRev)
 	}
 }
@@ -924,14 +924,12 @@ func TestCreate_PromoteWithNilTargetSkipsRunningRevision(t *testing.T) {
 // A pod loss in an already-Ready Instance can be recovered two ways: the
 // Restart pass (whole-Instance drain+recreate — the RecreateInstance
 // contract) and the Create pass (backfill the missing pod by name). These
-// race. When Create wins it stamps Phase=Creating, which latches the
-// outcome by making DetectRestartTrigger skip on every later pass — so
-// RecreateInstance silently degrades to "recreate just the dead pod" (the
-// leader and surviving workers keep their incarnation). Empirically
-// non-deterministic: the same 3-pod gang recovered the whole gang in one
-// run and only the dead pod in another.
+// race. Were Create to win it would stamp Phase=Creating, which latches
+// the outcome by making DetectRestartTrigger skip on every later pass — so
+// RecreateInstance would silently degrade to "recreate just the dead pod"
+// (the leader and surviving workers keep their incarnation).
 //
-// Fix: Create defers partial-Instance recovery to Restart under
+// Create therefore defers partial-Instance recovery to Restart under
 // RecreateInstance, so Restart deterministically owns whole-gang recreate.
 
 // gangPod fabricates a leader/worker gang pod (podForInstance only emits

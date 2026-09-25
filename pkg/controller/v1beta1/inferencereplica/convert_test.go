@@ -1671,8 +1671,8 @@ func TestBuildReconcileInput_NilParentLeavesGateNil(t *testing.T) {
 		"no parent ⇒ no coordination to enforce ⇒ gate stays nil")
 }
 
-// TestBuildReconcileInput_WiresMigrationWhenParentSet pins Layer 2: the
-// IR-managed path always wires MutateMigration (the executor's
+// TestBuildReconcileInput_WiresMigrationWhenParentSet pins the migration
+// wiring: the IR-managed path always wires MutateMigration (the executor's
 // status.migrations write-back seam) and mirrors the persisted records
 // onto ObservedState.Migrations (the dispatcher's work source); with a
 // resolvable parent it points the migration audit ledger at the parent
@@ -2036,8 +2036,8 @@ func TestBuildReconcileInput_GateUsesFreshIRStatus(t *testing.T) {
 				Groups: []v1beta1.RolloutGroup{{
 					Components:    []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 					RollingUpdate: &v1beta1.GroupRollingUpdate{},
-					// RatioBalanced pacing is spelled as MaintainRatio in v2;
-					// tolerance 25 preserves the original RatioTolerancePercent.
+					// RatioBalanced pacing is expressed as MaintainRatio with a
+					// 25% tolerance.
 					MaintainRatio: &v1beta1.MaintainRatio{Tolerance: &tol},
 				}},
 			},

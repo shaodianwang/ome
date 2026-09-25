@@ -237,9 +237,10 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 	// Without this, a surge that never becomes Ready and never escalates pins
 	// itself to a dead rev and holds the maxSurge budget until
 	// instanceReadyTimeout. A surge that IS about to promote (Ready) skips
-	// this and keeps the X-2 pin below so its promote stamps the rev its pods
-	// actually run. Only Step=Surge — later surge steps are past the point of
-	// no return (source already draining) and finish their cycle.
+	// this and keeps the committed-rev pin below so its promote stamps the
+	// rev its pods actually run. Only Step=Surge — later surge steps are
+	// past the point of no return (source already draining) and finish
+	// their cycle.
 	//
 	// A strategy edit is NOT a redirect: the strategy is pinned for the life
 	// of the operation, so the surge finishes its cycle and the edit reaches
@@ -309,9 +310,10 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 	if s := row; s != nil {
 		instanceFailed = s.Phase == workload.InstancePhaseFailed
 		if !instanceFailed && surgeClaim(s) && s.Operation.TargetRevision != "" {
-			// Normal in-flight surge: stay pinned to the committed rev (X-2
-			// anti-corruption). A FAILED surge instead re-commits to the current
-			// target so a corrective revision can supersede the failed one.
+			// Normal in-flight surge: stay pinned to the committed rev so a
+			// re-bump mid-surge cannot mis-stamp the promote. A FAILED surge
+			// instead re-commits to the current target so a corrective revision
+			// can supersede the failed one.
 			surgeTargetName = s.Operation.TargetRevision
 		}
 	}
@@ -322,8 +324,8 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 	// from a previous cycle's promote, or a dead pod from an exhausted
 	// attempt toward a superseded revision. Without the recheck the
 	// ordinal partition treats such a pod as the valid surge and either
-	// promotes the wrong revision (X-2) or waits forever on a pod that
-	// can never become Ready. See reclassifyByRevisionHash.
+	// promotes the wrong revision or waits forever on a pod that can
+	// never become Ready. See reclassifyByRevisionHash.
 	surgePods, oldPods = reclassifyByRevisionHash(surgePods, oldPods, surgeTargetRev)
 
 	// Phase 1 entry: stamp Phase=Updating + Op.Step=Surge if not
@@ -520,8 +522,8 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 	// surge actually drove the pod to — NOT the latest target if a
 	// mid-surge bump moved it). Using target.Name here would write
 	// "RunningRevision=<latest-target>" while the pod is on the prior
-	// rev — the X-2 corruption mode. detectUpdateTrigger picks up the
-	// drift on the next reconcile and fires a fresh surge cycle.
+	// rev. With the pinned rev, detectUpdateTrigger picks up the drift
+	// on the next reconcile and fires a fresh surge cycle.
 	if err := status.StampReadyAtOrdinal(ctx, input, inst.Index, surgeTargetName, newOrdinal); err != nil {
 		return false, fmt.Errorf("promote surge (instance=%d): %w", inst.Index, err)
 	}
@@ -575,7 +577,7 @@ func partitionPodsBySurgeOrdinal(pods []*corev1.Pod, oldOrdinal, newOrdinal int3
 //   - a leftover from the previous cycle's promote (labeled with the
 //     just-promoted RunningRevision) — keeping it as the "valid surge"
 //     would let Phase 3 promote RunningRevision to the pinned target
-//     while the actual pod runs a prior rev (the X-2 corruption mode);
+//     while the actual pod runs a prior rev;
 //   - a dead pod from an exhausted attempt toward a superseded revision
 //     (labeled with a rev that is neither RunningRevision nor the
 //     current target) — keeping it parks the rollout forever on

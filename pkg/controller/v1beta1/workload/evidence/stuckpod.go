@@ -73,8 +73,8 @@ func FirstStuckPodForInstance(pods []*corev1.Pod, now time.Time, grace time.Dura
 // empty replacement bucket is also intentional while its pods are created.
 //
 // Migrate also uses SurgeIndex, including as a reverse sibling pointer on its
-// target status. Preserve its existing own-plus-sibling behavior here; its
-// failure semantics are separate from the gang Update state machine.
+// target status. It keeps the own-plus-sibling classification; its failure
+// semantics are separate from the gang Update state machine.
 func PodsForStuckCheck(s types.InstanceStatus, byIdx map[int32][]*corev1.Pod) []*corev1.Pod {
 	own := byIdx[s.Index]
 	if s.Operation == nil || s.Operation.SurgeIndex == nil {

@@ -45,13 +45,12 @@ type reading struct {
 // table is the six holds in the order they are consulted within one
 // pass. Order decides only who reaches an unheld row first when two
 // facts arrive on it in the same pass — an incumbent token is never taken
-// except by the one ordered pair in takesRowFrom — and it is the order
-// the facts were read in before the hold pass existed: the quota refusal
-// and the silent node are read where a create is attempted, the source
-// out of rotation where a surge is driven, and the scheduler and the
-// PodGroup at the end of the pass. A fact that reaches an operator
-// first on one build must reach them first on the next, so the order is
-// an invariant of the row's report, not of this file.
+// except by the one ordered pair in takesRowFrom. The order follows where
+// each fact arises: the quota refusal and the silent node where a create
+// is attempted, the source out of rotation where a surge is driven, and
+// the scheduler and the PodGroup at the end of the pass. A fact that
+// reaches an operator first on one build must reach them first on the
+// next, so the order is an invariant of the row's report, not of this file.
 //
 // Each row states the invariant its mayOwn rule encodes.
 var table = []authority{

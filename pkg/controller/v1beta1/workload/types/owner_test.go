@@ -10,10 +10,10 @@ func rowFor(phase InstancePhase, opType InstanceOperationType, step string) *Ins
 	return s
 }
 
-// TestOwner_EveryMachineStateHasExactlyOneOwner pins the owner event of the ownership table for every
-// state of the Instance machine. The rows are the states' own (phase,
-// operation type, step); TestOwnerTableMatchesInstanceMachine in
-// tests/rolloutspec proves this list is the machine's list.
+// TestOwner_EveryMachineStateHasExactlyOneOwner pins the owner event of
+// the ownership table for every state of the Instance machine. The rows
+// are the states' own (phase, operation type, step); a spec-side test
+// proves this list is the machine's list.
 func TestOwner_EveryMachineStateHasExactlyOneOwner(t *testing.T) {
 	cases := []struct {
 		state RowState

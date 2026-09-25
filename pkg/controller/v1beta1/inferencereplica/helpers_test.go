@@ -531,9 +531,7 @@ func sliceForIRPod(ir *v1beta1.InferenceReplica, pod *corev1.Pod, ready bool) *d
 }
 
 // intToLabel formats a non-negative int64 as the label-safe ASCII
-// string the workload-side pod label helpers produce. Mirrors the
-// helper in omenative/test_helpers_test.go (test packages can't
-// share unexported helpers across directory boundaries).
+// string the workload-side pod label helpers produce.
 func intToLabel(n int64) string {
 	if n == 0 {
 		return "0"

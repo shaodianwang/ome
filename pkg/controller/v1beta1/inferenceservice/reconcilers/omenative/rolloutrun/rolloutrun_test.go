@@ -918,8 +918,8 @@ func TestStickyRejectIsScopedToTheGroupThatRolledBack(t *testing.T) {
 }
 
 func TestRolledBackRunStillClosesForTheGroupThatFailed(t *testing.T) {
-	// The isolation fix must not swallow a real rollback: when the run DID pin
-	// the revision the canary rejected, the run closes RolledBack as before.
+	// Per-group reject scoping must not swallow a real rollback: when the run
+	// pinned the revision the canary rejected, it closes RolledBack.
 	isvc := isvcFixture(v1beta1.RolloutGroup{
 		Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
 		Canary:     canaryBody(10, 100),

@@ -356,9 +356,9 @@ func TestCreate_RetryBlockBackoffDue_AllowsAndFlips(t *testing.T) {
 }
 
 // TestCreate_NewInstanceNoBlock_Unaffected: (e) a genuinely-new instance
-// (no status slot, no block) creates exactly as before the gate existed
-// — and its attempt stamp records nothing (a fresh start with no prior
-// failure needs no block).
+// (no status slot, no block) passes the gate and creates — and its
+// attempt stamp records nothing (a fresh start with no prior failure
+// needs no block).
 func TestCreate_NewInstanceNoBlock_Unaffected(t *testing.T) {
 	t0 := time.Now()
 	input, plan, tcr, calls, c, isvc := createGateFixture(t, t0)

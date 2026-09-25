@@ -179,8 +179,8 @@ type Decision struct {
 	// deciding eligibility row by row for itself.
 	Owned types.OwnedRows
 
-	// Escalate gates the terminal-failure escalation pass
-	// (escalation.go). False while paused: the repair decisions are
+	// Escalate gates the terminal-failure escalation pass (the
+	// escalation package). False while paused: the repair decisions are
 	// suspended with the rest of the lifecycle machinery, and the executor
 	// runs the pass's evidence half alone so the hold authorities keep
 	// reporting what they see (deadlines are parked by the adapter while

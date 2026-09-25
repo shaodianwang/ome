@@ -289,7 +289,7 @@ func SingleLiveNode(pods []*corev1.Pod) string {
 // index with the source it replaces, and that source's node says nothing
 // about where the replacement failed — so it neither names nor vetoes
 // the suspect node. A pod on its way out, or one with no revision label,
-// is read as today: a recreate that drained its old pod is still failing
+// stays in scope: a recreate that drained its old pod is still failing
 // on that pod, and without the label ownership cannot be told apart.
 func AttemptSuspectNode(pods []*corev1.Pod, attemptRev string) string {
 	own := make([]*corev1.Pod, 0, len(pods))

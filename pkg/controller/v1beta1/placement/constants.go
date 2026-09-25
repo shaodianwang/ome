@@ -15,9 +15,7 @@ const (
 	// for this ISVC (e.g. "gpu=gb300"). Selector attributes include cluster labels
 	// and the virtual, immutable metadata.name key. An ISVC that declares neither
 	// this nor ClusterSelectorAnnotation is NOT fanned out fleet-wide. The value
-	// is user/GitOps-supplied — there is no in-code default (eventually the control
-	// plane resolves it from spec.model + selected runtime; until then it is
-	// expressed here).
+	// is user/GitOps-supplied — there is no in-code default.
 	AcceleratorRequirementsAnnotation = "ome.io/accelerator-requirements"
 
 	// ClusterSelectorAnnotation holds an optional extra selector string (e.g.

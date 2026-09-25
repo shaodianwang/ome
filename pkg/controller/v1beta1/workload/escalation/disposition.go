@@ -440,14 +440,15 @@ func relocationRecordMessage(fromNode, detail string) string {
 //     The disposition's Operation-clear is correct for gang creates
 //     too: a Failed-no-Operation gang create rebuilds via the ordinary
 //     trigger + RetryBlock gate.
-//   - Single-pod Update ops (no gang surge markers): YES — same
-//     re-arming stampers, same fix.
+//   - Single-pod Update ops (no gang surge markers): YES — the same
+//     re-arming stampers apply.
 //   - Gang Update ops (SurgeIndex set / gang surge target step /
 //     multi-pod plan): NO. Their Failed-with-Operation continuation is
 //     what routes the dispatcher into abandonFailedGangSurge (surge
 //     teardown → RetryBlock → source reset); clearing the Operation
 //     here would strand the wedged surge gang.
-//   - Restart / Migrate ops: NO — their expiry semantics are unchanged.
+//   - Restart / Migrate ops: NO — they take the plain
+//     Failed-preserving-Operation stamp.
 func disposableAttempt(s *types.InstanceStatus, desiredPods int32) bool {
 	if s == nil || s.Operation == nil {
 		return false
@@ -459,10 +460,9 @@ func disposableAttempt(s *types.InstanceStatus, desiredPods int32) bool {
 		if s.Operation.SurgeIndex != nil || s.Operation.Step == types.UpdateStepGangSurgeTarget || s.Operation.Step == types.UpdateStepGangSurgeTargetCleanup {
 			return false
 		}
-		// Deliberate divergence: multi-pod RECREATE/in-place updates
-		// (desiredPods > 1, no surge markers) also keep the legacy
-		// Failed-with-Operation stamp — conservative; an abandonless
-		// teardown/disposition for those is out of scope here.
+		// Multi-pod RECREATE/in-place updates (desiredPods > 1, no surge
+		// markers) also keep the Failed-with-Operation stamp: the
+		// disposition is conservative and owns only the single-pod shape.
 		return desiredPods <= 1
 	default:
 		return false

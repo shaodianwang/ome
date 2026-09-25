@@ -46,9 +46,8 @@ func TestReconcile_SkipsMigrateWhenModeNever(t *testing.T) {
 // contract: the dispatcher selects ONLY non-terminal Manual records.
 // Terminal records (any trigger) and Auto records (born terminal —
 // Relocated) are records, never work; they must never be picked even
-// when they are the only records present. This replaces the retired
-// reason-string filter stack (nextInFlightFromLedger's AutoRecover /
-// ForceDelete guards) with a structural exclusion.
+// when they are the only records present. The exclusion is structural
+// (phase and trigger), not a reason-string filter.
 func TestReconcile_MigrationWorkSelection(t *testing.T) {
 	scheme := makeScheme(t)
 
@@ -114,14 +113,13 @@ func TestReconcile_MigrationWorkSelection(t *testing.T) {
 // completes, and the source never reaches Ready so the migration can
 // never proceed (silent deadlock).
 //
-// Reproduction shape: user adds NodeAffinity to ISVC.Spec.Engine
-// PodSpec while the source pod is Running on the to-be-pinned node.
-// The controller fires Update (Phase=Updating). A migration request is
-// accepted into status.migrations before the Update converges. The
-// dispatcher picks the record; Migrate sees Phase=Updating, returns
-// done=false without stamping. Without the fall-through the dispatcher
-// requeues at MigrateRequeueInterval indefinitely and Update never
-// runs.
+// Shape: a spec edit (NodeAffinity on the Engine PodSpec, say) while the
+// source pod is Running fires Update (Phase=Updating), and a migration
+// request is accepted into status.migrations before the Update
+// converges. The dispatcher picks the record; Migrate sees
+// Phase=Updating and returns done=false without stamping. Without the
+// fall-through the dispatcher would requeue at MigrateRequeueInterval
+// indefinitely and Update would never run.
 //
 // Test shape: instrument MutateInstance to count calls. Without the
 // fall-through: zero mutations (Migrate's defer doesn't mutate; Update
@@ -155,9 +153,8 @@ func TestReconcile_FreshMigrateOnNonReadySource_FallsThroughToUpdate(t *testing.
 	}}
 
 	// Count MutateInstance calls to detect Update firing. Migrate's
-	// defer path doesn't mutate; Update's stamp does. Without the
-	// dispatcher fix mutateCount is 0; with it, Update fires and the
-	// count is > 0.
+	// defer path doesn't mutate; Update's stamp does, so a dispatcher
+	// that falls through to Update leaves the count > 0.
 	mutateCount := 0
 	in.MutateInstance = func(_ context.Context, _ int32, fn func(*types.InstanceStatus) bool) error {
 		mutateCount++
@@ -188,8 +185,8 @@ func TestReconcile_FreshMigrateOnNonReadySource_FallsThroughToUpdate(t *testing.
 
 	// Load-bearing assertion: MutateInstance was called at least once,
 	// which means the dispatcher reached the Update pass after Migrate
-	// deferred. Without the fix the dispatcher returns immediately
-	// after Migrate's silent defer and mutateCount stays 0.
+	// deferred. A dispatcher that returned on Migrate's silent defer
+	// would leave mutateCount at 0.
 	if mutateCount == 0 {
 		t.Errorf("expected dispatcher to fall through to Update after Migrate deferred; MutateInstance was never called (silent Migrate-defer deadlock)")
 	}

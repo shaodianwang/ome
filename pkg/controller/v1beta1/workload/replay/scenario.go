@@ -476,7 +476,7 @@ func validateEvent(scenario string, tick int, ev TimelineEvent, vocab Vocabulary
 		}
 	}
 	if _, known := eventAppliers[ev.ID]; !known {
-		return fmt.Errorf("replay: %s tick %d: event %s is declared in the table but the driver cannot apply it yet", scenario, tick, ev.ID)
+		return fmt.Errorf("replay: %s tick %d: event %s is declared but the driver does not apply it", scenario, tick, ev.ID)
 	}
 	return nil
 }

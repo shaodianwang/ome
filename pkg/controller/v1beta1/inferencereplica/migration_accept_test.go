@@ -533,8 +533,8 @@ func TestConsumeMigrationRequests_LedgerLoadedViaLiveReader(t *testing.T) {
 }
 
 // Tests for the status.migrations adapter seam: the MutateMigration
-// RMW closure, the observed-state mirror, the ledger upgrade import,
-// the terminal-entry trim, and the aggregator-preservation regression.
+// RMW closure, the observed-state mirror, the ledger upgrade import and
+// the terminal-entry trim.
 
 // TestBuildMutateMigration_PersistsAndMirrors pins the seam: the
 // callback's mutation lands on the apiserver (proven by re-read) and
@@ -734,8 +734,7 @@ func TestBuildAppendMigration_AppendsIdempotently(t *testing.T) {
 // TestMigrationsFromIR_RoundTrip pins the observed-state mirror:
 // migrationsFromIR converts field-for-field onto the workload shape and
 // the v1beta1 -> workload -> v1beta1 round-trip is the identity, so the
-// RMW closure cannot lose fields (HintTargetNodes included — the API
-// addition this branch makes).
+// RMW closure cannot lose fields (HintTargetNodes included).
 func TestMigrationsFromIR_RoundTrip(t *testing.T) {
 	g := gomega.NewWithT(t)
 	ir := baselineIR("llama-engine", "prod", 1)
@@ -811,7 +810,7 @@ func TestSyncMigrationEntries_UpgradeImport(t *testing.T) {
 	ledger := &audit.Ledger{Entries: []audit.Entry{
 		// In-flight with a real surge index -> imports with SurgeInstance=7.
 		inflightRow,
-		// T2 accept sentinel -> imports with SurgeInstance unset.
+		// Accept-time sentinel (surge index -1) -> imports with SurgeInstance unset.
 		startedRow("u-sentinel", "engine", 1, -1, "maintenance", rowTime),
 		// Terminal counterpart present -> ignored.
 		startedRow("u-done", "engine", 2, 3, "done-before", rowTime),
@@ -982,7 +981,7 @@ func TestSyncMigrationEntries_TrimsAgedRelocatedWithoutLedgerRow(t *testing.T) {
 
 // TestSyncMigrationEntries_TrimRequiresLedgerTerminal_NoResurrection
 // pins the trim invariant ("status may forget only what the ledger
-// remembers") and THE PHANTOM-RESURRECTION REGRESSION it backstops:
+// remembers") and the phantom resurrection it prevents:
 // an aged terminal entry whose UUID has only a Started ledger row (the
 // expiry's terminal mirror never landed) must be RETAINED — trimming
 // it would free the UUID for the upgrade import, which would

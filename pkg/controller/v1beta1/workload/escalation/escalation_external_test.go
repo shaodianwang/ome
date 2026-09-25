@@ -960,15 +960,6 @@ func TestEscalation_PausedHoldSkipsStuckPodFastPath(t *testing.T) {
 	}
 }
 
-// TestReconcile_PausedFinishesACreateItWouldNotRetire: the pause skips a
-// committed create only where finishing it would mean replacing it. An
-// Instance that was serving before is never retired, so the pass adds
-// the member it lost under the same operation even after the target has
-// moved; with no target at all there is nothing to retarget to and the
-// same holds. Either way the Instance would otherwise stay short of its
-// set for the length of the hold.
-//
-
 // wedgedButGatedPod is the shape the failed-while-serving guard must not
 // read as healthy capacity: conditions still say ContainersReady and the
 // serving gate is still True, while the container is parked in a

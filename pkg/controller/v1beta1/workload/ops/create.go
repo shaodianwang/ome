@@ -1018,8 +1018,8 @@ func earliestPodCreation(pods []*corev1.Pod) time.Time {
 // for an Instance carries the rev-hash label of `target`. Used by the
 // Create pass's Ready promote to avoid stamping
 // RunningRevision=target.Name on pods that are actually on a different
-// (typically intermediate) revision — the X-2 bump-during-bump
-// corruption mode.
+// (typically intermediate) revision after a bump during an in-flight
+// surge.
 //
 // Returns true when:
 //   - existing is non-empty AND

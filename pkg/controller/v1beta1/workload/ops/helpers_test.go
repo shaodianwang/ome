@@ -1033,15 +1033,14 @@ func terminatingPod(t *testing.T, c client.Client, pod *corev1.Pod) *corev1.Pod 
 	return out
 }
 
-// configChange is one operator-config edit and the name the machine
-// tables give it.
+// configChange is one operator-config edit under a short name.
 type configChange struct {
 	name  string
 	tweak func(*workload.ReconcileInput, *workload.ComponentPlan)
 }
 
-// configChangeCases is the set of knobs whose cells claim no reader on a
-// roll in flight. retryBlockHistoryLimit has no field here on purpose:
+// configChangeCases is the set of knobs an in-flight roll must not read.
+// retryBlockHistoryLimit has no field here on purpose:
 // it is consumed by the status writer's end-of-pass prune, so what an
 // update pass owes it is to write no RetryBlock at all — which every
 // case here asserts through the outcome's block count.
