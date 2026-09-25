@@ -162,7 +162,7 @@ metadata:
     cloud.google.com/reservation-name: batch3pod5co
     cloud.google.com/reservation-subblocks: batch3pod5co-block-$(printf '%04d' "$BLOCK")-subblock-$(printf '%04d' "$cube_idx")
     is_tpu: "true"
-    metafb.cloud/node-type: tpu7x
+    node.example.com/type: tpu7x
     kwok-sim/cube: "${cube_idx}"
 YAML
       for m in ${MODELS+"${MODELS[@]}"}; do

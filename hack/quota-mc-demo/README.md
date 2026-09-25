@@ -98,6 +98,16 @@ for kc in "$HUB" "$MEMBER_A" "$MEMBER_B"; do
 done
 ```
 
+> [!NOTE]
+> The runtime fixtures name public Docker Hub images. On clusters that pull
+> only through a registry mirror, rewrite them on the way in — the CI tree
+> keeps the mirror paths:
+>
+> ```sh
+> source .buildkite/eval_image_mirror.sh   # AWS_REGION=... selects the replica
+> mirror_images < hack/quota-mc-demo/fixtures/01-runtime.yaml | kubectl --kubeconfig "$kc" apply -f -
+> ```
+
 One pod per replica, four chips per pod. Inert on the hub (the `control-plane`
 role switches the local ServingRuntime and InferenceService controllers off),
 but installed there anyway so the hub's admission webhook sees the same world
@@ -309,6 +319,7 @@ thing — JAX on live `tpu7x` silicon behind an OpenAI-shaped API. Verified on
 member B.
 
 ```sh
+# Through a mirror: mirror_images < .../40-runtime-tpu-jax.yaml | kubectl ... apply -f -
 kubectl --kubeconfig "$MEMBER_B" apply -f hack/quota-mc-demo/fixtures/40-runtime-tpu-jax.yaml
 kubectl --kubeconfig "$MEMBER_B" apply -f hack/quota-mc-demo/fixtures/41-isvc-tpu-jax.yaml
 kubectl --kubeconfig "$MEMBER_B" -n ome-mc-test port-forward svc/mc-demo-jax 8080:8080

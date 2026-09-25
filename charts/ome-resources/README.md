@@ -134,7 +134,7 @@ OME Resources and Controller
 
 ## Alfred
 
-Alfred is the upstream GPU cluster caretaker (OEP-0008 in ome-projects/ome).
+Alfred is the upstream GPU cluster caretaker.
 It observes node health and GPU placement, recommends corrective migrations,
 and in execute mode requests them through the OMENative
 `ome.io/migration-request-v1-<uuid>` annotation that the InferenceReplica

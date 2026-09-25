@@ -79,7 +79,7 @@ spec:
           medium: Memory
       runner:
         name: ome-container
-        image: 168653207203.dkr.ecr.us-west-2.amazonaws.com/pt_dockerio/vllm/vllm-tpu:nightly-20260428-99e0d15-fd74c90
+        image: docker.io/vllm/vllm-tpu:nightly-20260428-99e0d15-fd74c90
         ports:
         - containerPort: 8080
           name: http
@@ -217,7 +217,7 @@ spec:
           medium: Memory
       runner:
         name: ome-container
-        image: 168653207203.dkr.ecr.us-west-2.amazonaws.com/pt_dockerio/vllm/vllm-tpu:nightly-20260428-99e0d15-fd74c90
+        image: docker.io/vllm/vllm-tpu:nightly-20260428-99e0d15-fd74c90
         volumeMounts:
         - mountPath: /dev/shm
           name: dshm

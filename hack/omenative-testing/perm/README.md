@@ -24,10 +24,18 @@ scale behavior. Targets whatever cluster your kubeconfig points at — override 
 > `OME_EVAL_KIND=1`) to target a local KIND cluster; see
 > [`../deploy-ome-kind.sh`](../deploy-ome-kind.sh).
 >
+> **Images are tokens, not literals.** The fixtures and the cases that embed
+> their own runtime name `${OME_EVAL_NGINX_IMAGE}`, `${OME_EVAL_NGINX_ALT_IMAGE}`
+> (the tag the runtime-image-bump cases roll onto) and
+> `${OME_EVAL_METRICS_IMAGE}`; the defaults are the public Docker Hub names and
+> a bare `canary-metrics` tag. KIND side-loads them. A cluster that pulls only
+> through a registry mirror exports the three variables first — the CI tree
+> keeps the mirror paths: `source .buildkite/eval_image_mirror.sh`.
+>
 > **Canary-analysis cases (`analysis=…`) additionally need:** the bundled
 > `ome-prometheus` enabled in the cluster (chart `prometheus.enabled`, now the
-> default) scraping `$OME_TEST_NS`, and the `canary-metrics` image (built +
-> mirrored to prod ECR by the BuildKite pipeline) pullable by the cluster.
+> default) scraping `$OME_TEST_NS`, and the `canary-metrics` image (built from
+> `dockerfiles/canary-metrics.Dockerfile` by the pipeline) pullable by the cluster.
 
 The expansion roadmap (P1–P4, the feature taxonomy, deferred autoscaling) lives
 in [`../DESIGN.md`](../DESIGN.md). This file is the how-to-run reference.

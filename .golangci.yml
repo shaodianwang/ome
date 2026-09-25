@@ -1,4 +1,4 @@
-# golangci-lint config for the mslsrc/ome fork.
+# golangci-lint configuration for this repository.
 #
 # Only the upstream-inherited violations are suppressed below. Every
 # other lint failure is enforced. When upstream re-enables their lint

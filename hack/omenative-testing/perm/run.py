@@ -206,10 +206,31 @@ def apply_runtime_fixtures():
                    input=runtime_fixtures.render(kind=runtime_fixtures.kind_from_env()))
 
 
+def _fixture_values():
+    return runtime_fixtures.resolve(kind=runtime_fixtures.kind_from_env())
+
+
+def render_case(yaml_file):
+    """The case manifest with its fixture tokens (image registry, node arch)
+    resolved for the target cluster, exactly as the shared runtime fixtures are."""
+    return runtime_fixtures.render_text(Path(yaml_file).read_text(), _fixture_values())
+
+
+def apply_case(yaml_file):
+    return kubectl("apply", "--validate=false", "-n", NS, "-f", "-", input=render_case(yaml_file))
+
+
+def delete_case(yaml_file):
+    if yaml_file is None:   # nothing was ever applied
+        return None
+    return kubectl("delete", "-n", NS, "-f", "-", "--wait=false", input=render_case(yaml_file))
+
+
 def parse_header(path):
     """First line of YAML has comment header with Ne=N Nd=N Nr=N ceil_e=N ceil_d=N ceil_r=N."""
     with open(path) as f:
         first = f.readline().lstrip("#").strip()
+    first = runtime_fixtures.substitute(first, _fixture_values())
     fields = {}
     for tok in first.split():
         if "=" in tok and not tok.startswith("("):
@@ -1539,7 +1560,7 @@ HDR_VALIDATORS = {
     "reason": lambda v: bool(str(v)),
     "rt": lambda v: bool(str(v)),
     "edit": lambda v: v in {"material", "noop", "image", "resources"},
-    "img": lambda v: bool(str(v)),
+    "img": lambda v: bool(str(v)) and not runtime_fixtures.unknown_tokens(str(v)),
     "break": lambda v: v == "stuck",
     # Scenario knobs. during= times a destructive op against an in-flight one:
     # recreate deletes mid-rollout/mid-migration; migrate files its request
@@ -2057,7 +2078,7 @@ def _setup_and_ready(case_id, yaml_file, hdr):
     N = {"engine": Ne, "decoder": Nd, "router": Nr}
     configured = {c for c in COMPS if N[c] > 0}
     apply_runtime_fixtures()
-    r = kubectl("apply", "--validate=false", "-n", NS, "-f", str(yaml_file))
+    r = apply_case(yaml_file)
     if r.returncode != 0:
         msg = (r.stderr.strip().splitlines() or ["kubectl apply failed"])[-1]
         print(f"  APPLY FAILED: {msg[:200]}")
@@ -2098,12 +2119,12 @@ def _setup_and_ready(case_id, yaml_file, hdr):
             ok_f, fmsg = _fault_setup(ctx["fault"], case_id, hdr)
             if not ok_f:
                 _stop_watcher(ctx)
-                kubectl("delete", "-n", NS, "-f", str(yaml_file), "--wait=false")
+                delete_case(yaml_file)
                 print(f"  ✗ FAULT SETUP FAILED: {fmsg}")
                 return None, ("INFRA-FAIL", fmsg)
             return ctx, None
     _stop_watcher(ctx)
-    kubectl("delete", "-n", NS, "-f", str(yaml_file), "--wait=false")   # don't leak the ISVC
+    delete_case(yaml_file)   # don't leak the ISVC
     print(f"  ✗ INIT TIMEOUT after {budget}s")
     return None, ("INIT_TIMEOUT", "never reached initial settled state")
 
@@ -2303,7 +2324,7 @@ def _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks):
     # that doesn't converge is never an expected failure, so it re-hardens
     # an XFAIL back to FAIL.
     if not os.getenv("OME_TEST_KEEP"):
-        kubectl("delete", "-n", NS, "-f", str(find_isvc(case_id)), "--wait=false")
+        delete_case(find_isvc(case_id))
         total_pods = sum(ctx["N"][c] * ctx["pods_per_inst"].get(c, 1) for c in ctx["configured"])
         verdict = teardown_check(case_id, total_pods, verdict, notes, checks)
     else:
@@ -3652,7 +3673,7 @@ def _compremove(case_id, yaml_file, desc, hdr):
                           f"({len(keep_uids[c] - cur)} gone, {len(cur - keep_uids[c])} new)")
     if hdr.get("readd") and verdict == "PASS":
         print(f"  Phase 4: re-adding {comp} (re-apply the original manifest)")
-        rr = kubectl("apply", "--validate=false", "-n", NS, "-f", str(yaml_file))
+        rr = apply_case(yaml_file)
         rebudget = min(MAX_BUDGET_S, INIT_BASE_S + INIT_PER_POD_S * N[comp] * ctx["pods_per_inst"][comp])
         t0, back = time.time(), False
         while rr.returncode == 0 and time.time() - t0 < rebudget and not ctx["closed"]:
@@ -4718,7 +4739,7 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
           + f"   ceilings e≤{ce} d≤{cd} r≤{cr}")
 
     apply_runtime_fixtures()
-    r = kubectl("apply", "--validate=false", "-n", NS, "-f", str(yaml_file))
+    r = apply_case(yaml_file)
     if r.returncode != 0:
         msg = (r.stderr.strip().splitlines() or ["kubectl apply failed"])[-1]
         print(f"  APPLY FAILED: {msg[:200]}")
@@ -5019,7 +5040,7 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
     # Cleanup + universal teardown gate (after the softening — a non-converging
     # cleanup is never an expected failure).
     if not os.getenv("OME_TEST_KEEP"):
-        kubectl("delete", "-n", NS, "-f", str(yaml_file), "--wait=false")
+        delete_case(yaml_file)
         verdict = teardown_check(case_id, sum(N[c] * pods_per_inst.get(c, 1) for c in configured),
                                  verdict, notes, checks)
     else:
@@ -5051,10 +5072,10 @@ def run_reject_case(case_id, yaml_file, desc, hdr):
     want = hdr.get("reason")   # optional single-token substring the denial must contain
     print(f"\n=== {case_id} [expect=reject] ===\n{desc}")
     apply_runtime_fixtures()
-    r = kubectl("apply", "--validate=false", "-n", NS, "-f", str(yaml_file))
+    r = apply_case(yaml_file)
     msg = (r.stderr.strip().splitlines() or [""])[-1]
     if r.returncode == 0:
-        kubectl("delete", "-n", NS, "-f", str(yaml_file), "--wait=false")  # don't leak the wrongly-accepted ISVC
+        delete_case(yaml_file)  # don't leak the wrongly-accepted ISVC
         verdict, note = "FAIL", "apply ACCEPTED but admission rejection was expected"
         print("  ✗ apply ACCEPTED — the rule did not fire")
         # The wrongly-accepted ISVC's cleanup must converge like any other case.
@@ -5118,7 +5139,7 @@ def run_case(case_id):
     # Apply the ISVC. On rejection (bad manifest / webhook denial) RECORD an
     # APPLY_FAIL row — never silently drop the case (a missing result reads as
     # "didn't run", which hides malformed test cases).
-    r = kubectl("apply", "--validate=false", "-n", NS, "-f", str(yaml_file))
+    r = apply_case(yaml_file)
     if r.returncode != 0:
         msg = (r.stderr.strip().splitlines() or ["kubectl apply failed"])[-1]
         print(f"  APPLY FAILED: {msg[:300]}")
@@ -5811,7 +5832,7 @@ def run_case(case_id):
     # Cleanup + universal teardown gate (after the infeasible softening — a
     # non-converging cleanup is never an expected failure).
     if not os.getenv("OME_TEST_KEEP"):
-        kubectl("delete", "-n", NS, "-f", str(yaml_file), "--wait=false")
+        delete_case(yaml_file)
         verdict = teardown_check(case_id, sum(N[c] * pods_per_inst.get(c, 1) for c in configured),
                                  verdict, notes, checks)
     else:
@@ -5847,7 +5868,7 @@ if __name__ == "__main__":
         traceback.print_exc()
         _f = find_isvc(_case)
         if _f:
-            kubectl("delete", "-n", NS, "-f", str(_f), "--wait=false")
+            delete_case(_f)
     finally:
         # Fault apparatus teardown (quota delete + uncordon) runs no matter how
         # the case ended — PASS, FAIL, INFRA-FAIL or crash.

@@ -421,7 +421,7 @@ if [ "$OFFLINE" -eq 1 ]; then
         exit 1
         ;;
     esac
-  done < <(python3 "$RENDER" --case-images)
+  done < <(python3 "$RENDER" --kind --case-images)
 else
   while read -r image; do
     [ -n "$image" ] || continue
@@ -429,7 +429,8 @@ else
       kind_load "$image"
       echo "    loaded ${image}"
     else
-      # canary-metrics lives in a private registry with no public equivalent.
+      # canary-metrics is built from this repo, not pulled; without a local
+      # build there is nothing to load.
       echo "WARNING: cannot obtain ${image}; cases needing it will fail to start" >&2
     fi
   done < <(python3 "$RENDER" --kind --images)

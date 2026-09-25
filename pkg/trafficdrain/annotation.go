@@ -34,7 +34,7 @@ func FromAnnotations(annotations map[string]string) ([]Override, error) {
 
 // Parse decodes the traffic-drain value:
 //
-//	{"incident-id":{"cluster":"cluster-a","reason":"operator context"}}
+//	{"drain-id":{"cluster":"cluster-a","reason":"operator context"}}
 //
 // Both object levels reject duplicate and unknown fields. Overrides are sorted
 // by ID so TrafficMap output is deterministic regardless of JSON member order.

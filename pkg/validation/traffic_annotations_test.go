@@ -67,7 +67,7 @@ func TestValidateTrafficAnnotations_TypedValues(t *testing.T) {
 		{
 			name: "valid traffic drain map",
 			annotations: map[string]string{
-				constants.TrafficDrainAnnotation: `{"sev-1":{"cluster":"cluster-a","reason":"incident mitigation"}}`,
+				constants.TrafficDrainAnnotation: `{"drain-1":{"cluster":"cluster-a","reason":"planned maintenance"}}`,
 			},
 			wantOK: true,
 		},
@@ -158,14 +158,14 @@ func TestValidateTrafficAnnotations_TypedValues(t *testing.T) {
 		{
 			name: "traffic drain malformed JSON",
 			annotations: map[string]string{
-				constants.TrafficDrainAnnotation: `{"sev-1":`,
+				constants.TrafficDrainAnnotation: `{"drain-1":`,
 			},
 			wantContains: "InvalidTrafficDrain",
 		},
 		{
 			name: "traffic drain missing reason",
 			annotations: map[string]string{
-				constants.TrafficDrainAnnotation: `{"sev-1":{"cluster":"cluster-a"}}`,
+				constants.TrafficDrainAnnotation: `{"drain-1":{"cluster":"cluster-a"}}`,
 			},
 			wantContains: "InvalidTrafficDrain",
 		},

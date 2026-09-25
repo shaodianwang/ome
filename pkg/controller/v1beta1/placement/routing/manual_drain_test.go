@@ -23,8 +23,8 @@ func overrideActiveCond(tm *v1beta1.TrafficMap) *metav1.Condition {
 }
 
 func TestRoutingTableChange_ManualDrainAnnotation(t *testing.T) {
-	first := `{"incident":{"cluster":"a","reason":"maintenance"}}`
-	second := `{"incident":{"cluster":"b","reason":"maintenance"}}`
+	first := `{"drain":{"cluster":"a","reason":"maintenance"}}`
+	second := `{"drain":{"cluster":"b","reason":"maintenance"}}`
 	for _, tc := range []struct {
 		name   string
 		before map[string]string
@@ -53,8 +53,8 @@ func TestReconcile_TrafficDrainAnnotationComposesAndRemovalRestoresComputedWeigh
 	isvc := splitISVC([]string{"a", "b"}, []int32{7, 3}, []int32{7, 3})
 	isvc.Annotations = map[string]string{
 		constants.TrafficDrainAnnotation: `{
-			"sev-b":{"cluster":"a","reason":"second responder hold"},
-			"sev-a":{"cluster":"a","reason":"first responder hold"}
+			"drain-b":{"cluster":"a","reason":"second operator hold"},
+			"drain-a":{"cluster":"a","reason":"first operator hold"}
 		}`,
 	}
 	r, c := newReconciler(t, controllerTestConfig(), isvc)
@@ -65,7 +65,7 @@ func TestReconcile_TrafficDrainAnnotationComposesAndRemovalRestoresComputedWeigh
 	require.Len(t, tm.Spec.Entries, 2)
 	assert.Equal(t, int32(0), tm.Spec.Entries[0].Weight)
 	assert.True(t, tm.Spec.Entries[0].Healthy, "manual drain must not rewrite automatic health")
-	assert.Equal(t, []string{"sev-a", "sev-b"}, tm.Spec.Entries[0].DrainRefs)
+	assert.Equal(t, []string{"drain-a", "drain-b"}, tm.Spec.Entries[0].DrainRefs)
 	assert.Equal(t, int32(3), tm.Spec.Entries[1].Weight)
 	override := overrideActiveCond(tm)
 	require.NotNil(t, override)
@@ -73,13 +73,13 @@ func TestReconcile_TrafficDrainAnnotationComposesAndRemovalRestoresComputedWeigh
 	assert.Equal(t, v1beta1.TrafficMapReasonOverridesApplied, override.Reason)
 	assert.Contains(t, override.Message, "2 of 2")
 
-	updateDrainAnnotation(t, c, `{"sev-b":{"cluster":"a","reason":"second responder hold"}}`)
+	updateDrainAnnotation(t, c, `{"drain-b":{"cluster":"a","reason":"second operator hold"}}`)
 	reconcile(t, r)
 	tm, ok = getTrafficMap(t, c)
 	require.True(t, ok)
 	assert.Equal(t, int32(0), tm.Spec.Entries[0].Weight,
 		"one remaining override must keep the arm drained")
-	assert.Equal(t, []string{"sev-b"}, tm.Spec.Entries[0].DrainRefs)
+	assert.Equal(t, []string{"drain-b"}, tm.Spec.Entries[0].DrainRefs)
 
 	cur := &v1beta1.InferenceService{}
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: testName, Namespace: testNS}, cur))
@@ -190,7 +190,7 @@ func TestReconcile_PendingTrafficDrainAppliesWhenArmBecomesRoutable(t *testing.T
 func TestReconcile_InvalidTrafficDrainPreservesLastValidTrafficMap(t *testing.T) {
 	isvc := splitISVC([]string{"a", "b"}, []int32{7, 3}, []int32{7, 3})
 	isvc.Annotations = map[string]string{
-		constants.TrafficDrainAnnotation: `{"sev":{"cluster":"a","reason":"mitigation"}}`,
+		constants.TrafficDrainAnnotation: `{"drain":{"cluster":"a","reason":"mitigation"}}`,
 	}
 	r, c := newReconciler(t, controllerTestConfig(), isvc)
 	reconcile(t, r)
@@ -200,7 +200,7 @@ func TestReconcile_InvalidTrafficDrainPreservesLastValidTrafficMap(t *testing.T)
 	assert.Equal(t, int32(0), tm.Spec.Entries[0].Weight)
 	oldGeneration := tm.Generation
 
-	updateDrainAnnotation(t, c, `{"sev":`)
+	updateDrainAnnotation(t, c, `{"drain":`)
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: testName, Namespace: testNS},
 	})
@@ -212,7 +212,7 @@ func TestReconcile_InvalidTrafficDrainPreservesLastValidTrafficMap(t *testing.T)
 	assert.Equal(t, oldGeneration, tm.Generation)
 	assert.Equal(t, int32(0), tm.Spec.Entries[0].Weight,
 		"malformed intent must never be treated as an absent drain")
-	assert.Equal(t, []string{"sev"}, tm.Spec.Entries[0].DrainRefs)
+	assert.Equal(t, []string{"drain"}, tm.Spec.Entries[0].DrainRefs)
 }
 
 func TestBuildSpec_ManualDrainsComposeWithProbePolicy(t *testing.T) {

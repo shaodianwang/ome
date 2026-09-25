@@ -91,6 +91,7 @@ case "$tool" in
   python3)
     case " $* " in
       *" --images "*) ;;
+      *" --case-images "*) ;;
       *) echo '{}' ;;
     esac
     ;;

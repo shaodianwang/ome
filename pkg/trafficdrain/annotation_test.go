@@ -12,13 +12,13 @@ import (
 func TestParse(t *testing.T) {
 	t.Run("valid overrides are sorted by ID", func(t *testing.T) {
 		got, err := Parse(`{
-			"sev-z":{"reason":"second hold","cluster":"cluster-b"},
-			"sev-a":{"cluster":"cluster-a","reason":"first hold"}
+			"drain-z":{"reason":"second hold","cluster":"cluster-b"},
+			"drain-a":{"cluster":"cluster-a","reason":"first hold"}
 		}`)
 		require.NoError(t, err)
 		assert.Equal(t, []Override{
-			{ID: "sev-a", Cluster: "cluster-a", Reason: "first hold"},
-			{ID: "sev-z", Cluster: "cluster-b", Reason: "second hold"},
+			{ID: "drain-a", Cluster: "cluster-a", Reason: "first hold"},
+			{ID: "drain-z", Cluster: "cluster-b", Reason: "second hold"},
 		}, got)
 	})
 
@@ -36,17 +36,17 @@ func TestParse(t *testing.T) {
 		{name: "empty", raw: ``, want: "decode top-level object"},
 		{name: "array", raw: `[]`, want: "top-level value must be a JSON object"},
 		{name: "null", raw: `null`, want: "top-level value must be a JSON object"},
-		{name: "duplicate ID", raw: `{"sev":{"cluster":"a","reason":"one"},"sev":{"cluster":"b","reason":"two"}}`, want: `duplicate override ID "sev"`},
+		{name: "duplicate ID", raw: `{"drain":{"cluster":"a","reason":"one"},"drain":{"cluster":"b","reason":"two"}}`, want: `duplicate override ID "drain"`},
 		{name: "empty ID", raw: `{"":{"cluster":"a","reason":"one"}}`, want: "override ID must be non-empty"},
-		{name: "whitespace ID", raw: `{" sev":{"cluster":"a","reason":"one"}}`, want: "override ID must not have leading or trailing whitespace"},
-		{name: "non-object override", raw: `{"sev":"cluster-a"}`, want: `override "sev" must be a JSON object`},
-		{name: "missing cluster", raw: `{"sev":{"reason":"one"}}`, want: `override "sev" cluster must be non-empty`},
-		{name: "missing reason", raw: `{"sev":{"cluster":"a"}}`, want: `override "sev" reason must be non-empty`},
-		{name: "empty reason", raw: `{"sev":{"cluster":"a","reason":" "}}`, want: `override "sev" reason must be non-empty`},
-		{name: "whitespace cluster", raw: `{"sev":{"cluster":" a","reason":"one"}}`, want: `override "sev" cluster must not have leading or trailing whitespace`},
-		{name: "unknown field", raw: `{"sev":{"cluster":"a","reason":"one","weight":"0"}}`, want: `override "sev" has unknown field "weight"`},
-		{name: "duplicate field", raw: `{"sev":{"cluster":"a","cluster":"b","reason":"one"}}`, want: `override "sev" has duplicate field "cluster"`},
-		{name: "non-string field", raw: `{"sev":{"cluster":1,"reason":"one"}}`, want: `override "sev" field "cluster" must be a string`},
+		{name: "whitespace ID", raw: `{" drain":{"cluster":"a","reason":"one"}}`, want: "override ID must not have leading or trailing whitespace"},
+		{name: "non-object override", raw: `{"drain":"cluster-a"}`, want: `override "drain" must be a JSON object`},
+		{name: "missing cluster", raw: `{"drain":{"reason":"one"}}`, want: `override "drain" cluster must be non-empty`},
+		{name: "missing reason", raw: `{"drain":{"cluster":"a"}}`, want: `override "drain" reason must be non-empty`},
+		{name: "empty reason", raw: `{"drain":{"cluster":"a","reason":" "}}`, want: `override "drain" reason must be non-empty`},
+		{name: "whitespace cluster", raw: `{"drain":{"cluster":" a","reason":"one"}}`, want: `override "drain" cluster must not have leading or trailing whitespace`},
+		{name: "unknown field", raw: `{"drain":{"cluster":"a","reason":"one","weight":"0"}}`, want: `override "drain" has unknown field "weight"`},
+		{name: "duplicate field", raw: `{"drain":{"cluster":"a","cluster":"b","reason":"one"}}`, want: `override "drain" has duplicate field "cluster"`},
+		{name: "non-string field", raw: `{"drain":{"cluster":1,"reason":"one"}}`, want: `override "drain" field "cluster" must be a string`},
 		{name: "trailing data", raw: `{} {}`, want: "unexpected trailing JSON token"},
 	}
 	for _, tc := range tests {
@@ -64,8 +64,8 @@ func TestFromAnnotations(t *testing.T) {
 	assert.Nil(t, got)
 
 	got, err = FromAnnotations(map[string]string{
-		constants.TrafficDrainAnnotation: `{"sev":{"cluster":"a","reason":"mitigation"}}`,
+		constants.TrafficDrainAnnotation: `{"drain":{"cluster":"a","reason":"mitigation"}}`,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, []Override{{ID: "sev", Cluster: "a", Reason: "mitigation"}}, got)
+	assert.Equal(t, []Override{{ID: "drain", Cluster: "a", Reason: "mitigation"}}, got)
 }

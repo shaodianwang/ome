@@ -22,7 +22,7 @@ func TestDeriveISVC(t *testing.T) {
 				LocalQueueAnnotation:                "serving-lq",
 				AcceleratorRequirementsAnnotation:   "gpu=gb300",
 				ClusterSelectorAnnotation:           "provider=cloud-a",
-				constants.TrafficDrainAnnotation:    `{"sev":{"cluster":"cluster-a","reason":"mitigation"}}`,
+				constants.TrafficDrainAnnotation:    `{"drain":{"cluster":"cluster-a","reason":"mitigation"}}`,
 				constants.RolloutPromoteAnnotation:  "abc123def",
 				constants.RolloutRollbackAnnotation: "true",
 				constants.NetworkVisibility:         "cluster-local", // an ingress override that SHOULD ride along

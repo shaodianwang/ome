@@ -65,7 +65,7 @@ spec:
       effect: NoSchedule
     runner:
       name: ome-container
-      image: 168653207203.dkr.ecr.us-west-2.amazonaws.com/pt_dockerio/library/busybox:latest
+      image: docker.io/library/busybox:latest
       # NOT `sh -c "sleep infinity"`. A shell given one simple command execs it,
       # so sleep becomes PID 1 — and the kernel does not apply default signal
       # dispositions to PID 1, so an unhandled SIGTERM is discarded rather than

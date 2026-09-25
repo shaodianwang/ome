@@ -1,4 +1,4 @@
-# p721: runtime image bump propagates (gang) — leader+worker roll whole-gang onto the new-image revision  mode=runtimerev rt=ome-coordtest-rt-p721 expect=roll edit=image img=168653207203.dkr.ecr.us-east-2.amazonaws.com/pt_dockerio/nginxinc/nginx-unprivileged:1.28-alpine Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 topo=engine-mn
+# p721: runtime image bump propagates (gang) — leader+worker roll whole-gang onto the new-image revision  mode=runtimerev rt=ome-coordtest-rt-p721 expect=roll edit=image img=${OME_EVAL_NGINX_ALT_IMAGE} Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 topo=engine-mn
 # Multi-node test ClusterServingRuntime — each Instance is a gang of
 # 1 leader + N worker pods (LeaderWorkerSet). Same nginx + 15s artificial
 # startup as the single-pod runtime, but split into leader.runner +
@@ -25,7 +25,7 @@ spec:
     leader:
       runner: &mnRunner
         name:  ome-container
-        image: 168653207203.dkr.ecr.us-east-2.amazonaws.com/pt_dockerio/nginxinc/nginx-unprivileged:1.27-alpine
+        image: ${OME_EVAL_NGINX_IMAGE}
         # Cap nginx workers (NOT 'auto'): 'auto' = one worker per NODE core,
         # ignoring the CPU cgroup quota — on a 144-core gang node that's ~144
         # workers → OOM at 128Mi (and thrash at 200m CPU). The image conf already

@@ -36,6 +36,13 @@ repos:
 
   - repo: local
     hooks:
+      - id: internal-tokens
+        name: Internal identifiers
+        description: Reject internal hosts, clusters, codenames, tickets and people in paths that leave this repository
+        entry: python3 hack/check_internal_tokens.py --files
+        language: system
+        types: [text]
+        exclude: ^(pkg/client/|pkg/openapi/|config/crd/|charts/ome-crd/templates/|.*zz_generated.*|.*go\.sum$)
       - id: github-noreply-author-email
         name: GitHub noreply author email
         description: Require the configured Git author email to use GitHub noreply

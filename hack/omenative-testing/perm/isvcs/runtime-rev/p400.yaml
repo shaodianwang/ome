@@ -19,13 +19,17 @@ spec:
       priority: 1
 
   engineConfig: &cpuRunner
-    nodeSelector: { kubernetes.io/arch: amd64 }
+    nodeSelector: { kubernetes.io/arch: ${OME_EVAL_NODE_ARCH} }
     runner:
       name:  ome-container
-      image: 168653207203.dkr.ecr.us-east-2.amazonaws.com/pt_dockerio/nginxinc/nginx-unprivileged:1.27-alpine
+      image: ${OME_EVAL_NGINX_IMAGE}
       # The critical line: sleep before starting nginx so pod startup
       # takes ~15s. Without this, peak/drain transitions complete in
       # ~2s and the sampler misses them.
+      # The trap keeps sh (PID 1 until the exec) responsive to pod deletion.
+      # The kubelet delivers the image's declared stop signal — nginx images
+      # declare SIGQUIT, not SIGTERM — and an untrapped PID-1 shell ignores it,
+      # leaving a deleted pod Terminating for its full termination grace.
       # Cap nginx workers (NOT 'auto', which = one worker per NODE core and
       # ignores the CPU cgroup quota → OOM on a big node). The image conf already
       # sets worker_processes, so sed a copy into /tmp (conf is read-only) and

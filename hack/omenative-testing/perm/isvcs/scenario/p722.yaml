@@ -1,4 +1,4 @@
-# p722: runtime image bump propagates (PD) — engine and decoder each roll onto their own new-image revision  mode=runtimerev rt=ome-coordtest-rt-p722 expect=roll edit=image img=168653207203.dkr.ecr.us-east-2.amazonaws.com/pt_dockerio/nginxinc/nginx-unprivileged:1.28-alpine Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=3 ceil_r=0 topo=pd
+# p722: runtime image bump propagates (PD) — engine and decoder each roll onto their own new-image revision  mode=runtimerev rt=ome-coordtest-rt-p722 expect=roll edit=image img=${OME_EVAL_NGINX_ALT_IMAGE} Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=3 ceil_r=0 topo=pd
 # Test ClusterServingRuntime — CPU-only, nginx, artificial 15s startup delay.
 # The sleep is the critical part: without it nginx is Ready in ~150ms and the
 # pod sampler misses every transition.
@@ -22,7 +22,7 @@ spec:
     nodeSelector: { kubernetes.io/arch: amd64 }
     runner:
       name:  ome-container
-      image: 168653207203.dkr.ecr.us-east-2.amazonaws.com/pt_dockerio/nginxinc/nginx-unprivileged:1.27-alpine
+      image: ${OME_EVAL_NGINX_IMAGE}
       # The critical line: sleep before starting nginx so pod startup
       # takes ~15s. Without this, peak/drain transitions complete in
       # ~2s and the sampler misses them.

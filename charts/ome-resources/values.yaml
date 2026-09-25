@@ -805,7 +805,7 @@ modelAgent:
       cpu: '10'
       memory: 100Gi
 
-# Alfred, the GPU cluster caretaker (upstream OEP-0008). It observes node
+# Alfred, the upstream GPU cluster caretaker. It observes node
 # health and GPU placement, recommends corrective migrations, and in execute
 # mode requests them through the OMENative migration-request annotation; it
 # never cordons, drains, or evicts. The image is the unmodified upstream binary

@@ -14,11 +14,25 @@ This is a **blocker, not a preference**: any change that introduces (or preserve
 
 ## Upstreaming Boundaries (HARD BLOCKERS)
 
-This repo is periodically upstreamed to the public OME repo. Two rules keep internal information out of the public tree:
+This repo is periodically synced to the public OME repo, and its OEPs, tests and hack tooling are meant to be publishable too. Three rules keep internal information out of everything that can leave:
 
-**Internal-only folders — never ported upstream.** `.buildkite/`, `hack/`, `config/`, `oeps/`, `grafana/`, `muse/`, `dockerfiles/`, `.claude/`, `.github/`, `meta-internal/` (deployment-specific extensions compiled in only under the `meta_internal` build tag, together with their single wire-up `cmd/manager/register_meta_internal.go` and the Makefile/Dockerfile tag plumbing), and all of `charts/` (upstream maintains its own charts; upstream chart changes are authored directly in the upstream repo, never copied from here). These may freely reference internal clusters, tools, and runbooks — nothing in them is ever copied upstream verbatim (upstream maintains its own equivalents where one is needed).
+**Write leak-free by default, everywhere.** Code, comments, log/error/event strings, test names, fixtures, testdata, chart values and templates, OEPs, runbooks and docs must not carry internal information. The classes, with the neutral replacement in parentheses:
+- hostnames, domains and URL schemes of internal systems (`example.com`, `oci://`/`s3://bucket`);
+- cluster, environment, namespace and GitOps names (`cluster-a`/`member-a`, `team-b`, "GitOps");
+- people, usernames, oncall and team names (`example-user`, `team-a`);
+- ticket, incident and diff numbers, PR numbers, and design-document numbers in code or test names (state the invariant instead);
+- model, checkpoint and product codenames (`llama-70b`, `example-model`);
+- storage buckets, registries and cloud account or project ids;
+- fleet shape and capacity of real clusters, and "we run/operate" narrative about them;
+- private design vocabulary used as fixtures (real tenant paths, hub/app names);
+- incident and change narrative ("the outage", "used to", "pre-fix") — see Code Comments;
+- references to artifacts the public tree does not carry (paths under `tests/rolloutspec`, rollout-table coverage trailers stay internal and are stripped by the sync).
 
-**Upstreamable code must be leak-free.** Everything under `pkg/`, `cmd/` (except `register_meta_internal.go`), `internal/`, and `scheduler/` flows upstream (now or in a future wave) and must never contain internal information — in code, comments, log/error strings, test fixtures, or testdata. That includes: internal hostnames/domains, cluster and environment names, internal service names, absolute local paths (`/Users/<name>`, `/home/<name>`), usernames, team/oncall names, ticket or diff numbers, and internal-only header/token names. Use neutral fixtures (`example.com`, generic service names) instead. Treat a violation like a hardcoded magic value: a review blocker to call out explicitly, not a nit. `tests/` is case-by-case (integration suites are ported selectively) — write new test fixtures leak-free by default.
+`hack/check_internal_tokens.py` enforces the mechanical part of this list as a pre-commit hook and the `internal-tokens` CI step. It scans every tracked text file and every path by default (`hack/internal-tokens.txt` holds the patterns); the only blanket exemptions are `muse/`, `charts/muse/` and `meta-internal/`; everything else, including `.buildkite`, `dockerfiles`, `config/` and the internal charts, is scanned and may only be exempted per pattern group with a reason in `hack/internal-tokens.allow` (an exemption without a reason, or one that matches nothing, fails the check). It also fails on a new top-level directory until it is classified as shipped, internal-only or clean, and on any Go file under the shipped roots that imports `meta-internal`, the sharded model-cache backend or `pkg/kubectl` from outside the listed wire-up files. A clean run is necessary, not sufficient: read what you wrote for meaning.
+
+**What the sync ships, and what it never ships.** Synced to the public repo: `pkg/`, `cmd/` (except `cmd/manager/register_meta_internal.go`), `internal/`, `scheduler/`, the charts `ome-resources`, `ome-quota-manager`, `ome-scheduler`, `ome-serving`, `ome-crd` (minus internal-only values files and templates), and `config/configmap`. Never shipped, and exempt from the token check only where they are genuine deployment configuration: `meta-internal/` and its build-tag wire-up, `charts/muse/`, `charts/ome-isvc/`, per-cluster `values-*.yaml` overlays and the Alfred templates in `ome-resources`, `.buildkite/`, `dockerfiles/`, `grafana/`, `muse/`, `.github/`, `.claude/`, the rest of `config/`, the sharded model-cache backend and its wire-ups, `pkg/kubectl` + `cmd/kubectl-qt`, and the tests/KIND harness until its CI wave lands. `oeps/`, `tests/` and `hack/` are not synced today but are cleaned to the same standard so they can be.
+
+**Treat a violation like a hardcoded magic value:** a review blocker to call out explicitly, not a nit. Fix it in this repo first; the sync only mirrors.
 
 ## Code Comments
 
@@ -282,9 +296,7 @@ The `model-agent` DaemonSet deployed by `charts/ome-resources/` runs an image bu
 - **ome-resources** — Controller deployment, model-agent DaemonSet, RBAC, webhooks, cluster resources.
 
 ### Sample Manifests (`config/samples/`)
-- `avo-tier5-pd/` — end-to-end PD-disaggregated walkthrough (CBM + CSR + ISVC).
-- `basemodel/` — PVC-backed BaseModel and ClusterBaseModel fixtures.
-- `modelcache/` — Sharded BaseModel + `cluster_cache` values.
+- `autoscalerpolicy/` — AutoscalerPolicy examples.
 
 Runtime/model catalog YAMLs (vendor-specific ClusterServingRuntime / ClusterBaseModel) live in operators' own GitOps repos, not in-tree.
 
@@ -301,7 +313,7 @@ OME builds work out-of-the-box on a fully-provisioned developer Mac, but several
     | sh -s -- -y --default-toolchain stable --profile minimal
   ```
 - **`make generate` writes to the Go env file** (`~/.config/go/env`) if you run it on a Makefile from before commit `[Misc] Makefile: avoid go env -w in make generate`. Update or rebase before reporting failures.
-- **IPv6 / mks-cpu sandboxes**: envtest's `kube-apiserver` auto-detects the pod's IPv6 external address, then refuses to start because it doesn't match the IPv4 service-cluster range. Wrap the binary with a shim pinning `--advertise-address=127.0.0.1`; see `.buildkite/run_tests.sh` for the canonical pattern.
+- **IPv6-only CI sandboxes**: envtest's `kube-apiserver` auto-detects the pod's IPv6 external address, then refuses to start because it doesn't match the IPv4 service-cluster range. Wrap the binary with a shim pinning `--advertise-address=127.0.0.1`; see `.buildkite/run_tests.sh` for the canonical pattern.
 - **envtest debugging**: `export KUBEBUILDER_ATTACH_CONTROL_PLANE_OUTPUT=true` to forward kube-apiserver/etcd output into test logs.
 - **xet-linked binaries / tests**: `export LD_LIBRARY_PATH=$(pwd)/pkg/xet/target/release` so the dynamic linker finds `libxet.{so,dylib}` (needed for `ome-agent` tests and any binary that links the Rust staticlib path).
 - **KUBEBUILDER_ASSETS one-liner**: rather than retyping the full `bin/setup-envtest` invocation for every `go test` call, save this as a shell alias / persistent env:

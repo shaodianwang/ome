@@ -29,7 +29,7 @@ spec:
     nodeSelector: { kubernetes.io/arch: amd64 }
     runner:
       name:  ome-container
-      image: 168653207203.dkr.ecr.us-east-2.amazonaws.com/pt_dockerio/nginxinc/nginx-unprivileged:1.27-alpine
+      image: ${OME_EVAL_NGINX_IMAGE}
       command: ["sh", "-c", "trap 'exit 0' QUIT TERM INT; sleep ${TEST_STARTUP_DELAY:-15} & wait $! && sed 's/^worker_processes.*/worker_processes 2;/' /etc/nginx/nginx.conf > /tmp/nginx.conf && exec nginx -c /tmp/nginx.conf -g 'daemon off;'"]
       env:
         - { name: TEST_REV,            value: "v1" }

@@ -8,7 +8,7 @@
 # metadata.name, and it materializes a LocalQueue of that name in every enrolled
 # namespace — so both tenants below live in kwok-sim and are told apart by the
 # queue-name label their pods carry. That is the shape a real fleet has: a
-# handful of serving namespaces, often one, holding dozens of tenants.
+# handful of serving namespaces, often one, holding many tenants.
 #
 # Each names its own leaf, because the ISVC->(queue, priority) resolver is not
 # built yet; afterwards the reconciler will derive the same label from the

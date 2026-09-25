@@ -22,7 +22,9 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-RUNTIME = os.path.join(os.path.dirname(HERE), "runtime")
+sys.path.insert(0, os.path.dirname(HERE))
+import runtime_fixtures  # noqa: E402  (perm/runtime_fixtures.py)
+
 PROXY = os.path.join(HERE, "prom-delay-proxy.yaml")
 KUBECONFIG = os.environ.get("OME_TEST_KUBECONFIG") or os.environ.get("KUBECONFIG") or os.path.expanduser("~/.kube/config")
 NS = os.environ.get("OME_TEST_NS", "sandbox")
@@ -121,8 +123,11 @@ def main():
     hung = [f"hung-{j:03d}" for j in range(n)]
     print(f"=== hung-prom isolation: {n} hung canaries + 1 control, ns={NS}, timeout={timeout}s ===")
 
-    kubectl("apply", "-f", RUNTIME)
-    kubectl("apply", "-n", NS, "-f", PROXY)
+    # Fixtures and the proxy are templates (namespace, images): render them.
+    values = runtime_fixtures.resolve(kind=runtime_fixtures.kind_from_env())
+    kubectl("apply", "-n", NS, "-f", "-", input=runtime_fixtures.render(kind=runtime_fixtures.kind_from_env()))
+    proxy = runtime_fixtures.render_text(open(PROXY).read(), values)
+    kubectl("apply", "-n", NS, "-f", "-", input=proxy)
     docs = [CONTROL.replace("__NAME__", control)]
     docs += [HUNG.replace("__NAME__", h).replace("__NS__", NS) for h in hung]
     kubectl("apply", "-n", NS, "-f", "-", input="\n---\n".join(docs))
@@ -161,7 +166,7 @@ def main():
     print("=" * 60)
 
     kubectl("-n", NS, "delete", "isvc", *everyone, "--wait=false")
-    kubectl("-n", NS, "delete", "-f", PROXY, "--wait=false")
+    kubectl("-n", NS, "delete", "-f", "-", "--wait=false", input=proxy)
     sys.exit(0 if ok else 1)
 
 

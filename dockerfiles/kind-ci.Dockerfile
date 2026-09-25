@@ -1,7 +1,7 @@
 # kind-ci: the offline workload image for the GKE-backed KIND CI step
 # (integration-test-kind-gke) and the kind validation Job.
 #
-# The MSL GCP RC cluster has NO public egress from pods — it can't reach Docker
+# The GKE CI cluster has NO public egress from pods — it can't reach Docker
 # Hub, dl.k8s.io, proxy.golang.org, crates.io, or gcr.io at run time. So every
 # tool, module, crate, and base image the KIND suite needs is baked in HERE and
 # pulled from prod ECR (which the cluster CAN pull). Built on the TW build queue

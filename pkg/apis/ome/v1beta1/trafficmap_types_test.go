@@ -206,7 +206,7 @@ func TestTrafficMapEntry_DrainRefsRoundTrip(t *testing.T) {
 		Cluster:   "cluster-a",
 		Weight:    0,
 		Healthy:   true,
-		DrainRefs: []string{"incident-a", "maintenance-a"},
+		DrainRefs: []string{"drain-a", "maintenance-a"},
 	}
 	raw, err := json.Marshal(in)
 	if err != nil {

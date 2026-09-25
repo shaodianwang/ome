@@ -21,11 +21,15 @@ spec:
       priority: 1
 
   engineConfig: &mnComponent
-    nodeSelector: { kubernetes.io/arch: amd64 }
+    nodeSelector: { kubernetes.io/arch: ${OME_EVAL_NODE_ARCH} }
     leader:
       runner: &mnRunner
         name:  ome-container
-        image: 168653207203.dkr.ecr.us-east-2.amazonaws.com/pt_dockerio/nginxinc/nginx-unprivileged:1.27-alpine
+        image: ${OME_EVAL_NGINX_IMAGE}
+        # The trap keeps sh (PID 1 until the exec) responsive to pod deletion.
+        # The kubelet delivers the image's declared stop signal — nginx images
+        # declare SIGQUIT, not SIGTERM — and an untrapped PID-1 shell ignores it,
+        # leaving a deleted pod Terminating for its full termination grace.
         # Cap nginx workers (NOT 'auto'): 'auto' = one worker per NODE core,
         # ignoring the CPU cgroup quota — on a 144-core gang node that's ~144
         # workers → OOM at 128Mi (and thrash at 200m CPU). The image conf already
@@ -50,7 +54,7 @@ spec:
 
   # Router is single-pod (not gang-scheduled).
   routerConfig:
-    nodeSelector: { kubernetes.io/arch: amd64 }
+    nodeSelector: { kubernetes.io/arch: ${OME_EVAL_NODE_ARCH} }
     runner: *mnRunner
 
 ---

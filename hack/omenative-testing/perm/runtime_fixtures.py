@@ -13,7 +13,8 @@ The fixtures are not portable as literal YAML. Three things vary per cluster:
 
 Each is a ${TOKEN} in the YAML, substituted here. Only the tokens below are
 touched, so shell expansions inside container commands (${TEST_STARTUP_DELAY})
-survive rendering untouched.
+survive rendering untouched. Case manifests that embed their own runtime carry
+the same tokens; run.py renders them through this module before applying.
 
 Usage:
     python3 runtime_fixtures.py [--kind] > rendered.yaml
@@ -42,30 +43,33 @@ STAGES = (STAGE_ALL, STAGE_BOOTSTRAP, STAGE_RESOURCES)
 BOOTSTRAP_FIXTURES = ("pvc-and-seed.yaml",)
 KIND_BOOTSTRAP_FIXTURES = ("pv-kind.yaml",)
 
-# Defaults target the shared GKE eval cluster.
+# Defaults are the public image names and the shared eval cluster's storage
+# layout. A cluster that pulls only through a registry mirror exports the
+# image tokens (the CI tree keeps the mirror paths; see
+# .buildkite/eval_image_mirror.sh). canary-metrics is built from this repo
+# (dockerfiles/canary-metrics.Dockerfile) and has no public registry, so its
+# default is a bare tag that must be overridden or side-loaded.
 DEFAULTS = {
     "OME_TEST_NS": "sandbox",
     "OME_EVAL_STORAGE_CLASS": "shared-vast",
     "OME_EVAL_PVC_ACCESS_MODE": "ReadWriteMany",
     "OME_EVAL_NODE_ARCH": "amd64",
-    "OME_EVAL_NGINX_IMAGE": (
-        "168653207203.dkr.ecr.us-east-2.amazonaws.com/pt_dockerio/"
-        "nginxinc/nginx-unprivileged:1.27-alpine"
-    ),
-    "OME_EVAL_METRICS_IMAGE": (
-        "168653207203.dkr.ecr.us-east-2.amazonaws.com/msl_infra/canary-metrics:latest"
-    ),
+    "OME_EVAL_NGINX_IMAGE": "nginxinc/nginx-unprivileged:1.27-alpine",
+    # A second tag of the same image: the runtime-image-bump cases roll onto it.
+    "OME_EVAL_NGINX_ALT_IMAGE": "nginxinc/nginx-unprivileged:1.28-alpine",
+    "OME_EVAL_METRICS_IMAGE": "canary-metrics:latest",
     "OME_EVAL_PV_HOST_PATH": "/ome-eval-model",
 }
 
-# KIND has no arch to select for and no pull credentials for the private
-# registry. Its static RWX volume is backed by a path mounted into every node;
-# fixture images are built or side-loaded with `kind load`.
+# KIND has no arch to select for and pulls nothing: its static RWX volume is
+# backed by a path mounted into every node, and fixture images are built or
+# side-loaded with `kind load` under exactly these names.
 KIND_OVERRIDES = {
     "OME_EVAL_STORAGE_CLASS": "ome-eval-shared",
     "OME_EVAL_PVC_ACCESS_MODE": "ReadWriteMany",
     "OME_EVAL_NODE_ARCH": "",
     "OME_EVAL_NGINX_IMAGE": "nginxinc/nginx-unprivileged:1.27-alpine",
+    "OME_EVAL_NGINX_ALT_IMAGE": "nginxinc/nginx-unprivileged:1.28-alpine",
     "OME_EVAL_METRICS_IMAGE": "canary-metrics:kind-local",
 }
 
@@ -86,9 +90,20 @@ def resolve(kind=False):
     return values
 
 
-def render_text(text, values):
+def substitute(text, values):
+    """Replace the fixture tokens in `text`; other ${...} expansions survive."""
     for token, value in values.items():
         text = text.replace("${%s}" % token, value)
+    return text
+
+
+def unknown_tokens(text):
+    """Fixture-style ${TOKEN} references in `text` that no token resolves."""
+    return sorted(set(re.findall(r"\$\{(OME_[A-Z0-9_]+)\}", text)) - set(DEFAULTS))
+
+
+def render_text(text, values):
+    text = substitute(text, values)
     # An empty arch selects nothing; drop the line rather than emit an empty
     # map value, which would make the pod unschedulable on every node.
     if not values["OME_EVAL_NODE_ARCH"]:
@@ -148,11 +163,13 @@ def images(kind=False, stage=STAGE_ALL):
     return seen
 
 
-def case_images():
-    """Container image references embedded directly in case manifests."""
+def case_images(kind=False):
+    """Container image references embedded directly in case manifests, as they
+    resolve for the target cluster."""
+    values = resolve(kind=kind)
     seen = []
     for path in sorted(CASE_DIR.glob("**/*.yaml")):
-        for line in path.read_text().splitlines():
+        for line in substitute(path.read_text(), values).splitlines():
             match = re.match(r"^\s*image:\s*[\"']?([^\"'\s]+)", line)
             if match is None:
                 match = re.search(r"(?:^|\s)img=([^\s]+)", line)
@@ -191,7 +208,9 @@ def main():
                      (args.value, ", ".join(sorted(DEFAULTS))))
         sys.stdout.write(value + "\n")
     elif args.case_images:
-        sys.stdout.write("".join(image + "\n" for image in case_images()))
+        sys.stdout.write("".join(
+            image + "\n" for image in case_images(kind=args.kind)
+        ))
     elif args.images:
         sys.stdout.write("".join(
             i + "\n" for i in images(kind=args.kind, stage=args.stage)

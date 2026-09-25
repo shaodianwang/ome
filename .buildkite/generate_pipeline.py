@@ -1042,6 +1042,17 @@ def ci_steps() -> str:
             plugins:
 {_tw_docker_plugin(CI_IMAGE, indent=14)}
 
+          - label: ":lock: Internal Identifiers"
+            key: "internal-tokens"
+{_gh_status("internal-tokens")}
+{_infra_retry()}
+            command: |
+              bash .buildkite/check_internal_tokens.sh
+            agents:
+              queue: "{DEFAULT_QUEUE}"
+            plugins:
+{_tw_docker_plugin(CI_IMAGE, indent=14)}
+
           - label: ":golangci-lint: Lint"
             key: "lint"
 {_gh_status("lint")}
