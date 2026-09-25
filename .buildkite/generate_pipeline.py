@@ -14,8 +14,6 @@ Environment variables read at runtime:
     BUILDKITE_BUILD_NUMBER    – pipeline-unique build number
     BUILDKITE_PULL_REQUEST    – pull request number, or "false"
     BUILDKITE_PULL_REQUEST_BASE_BRANCH – pull request base branch
-    OME_PIPELINE_MODE         – pipeline to generate ("daily" or "standard")
-    KARGO_BUILD               – daily mode: run smoke tests for BUILDKITE_COMMIT only
     AWS_ACCOUNT_ID            – dev AWS account for ECR (default: 588845226011)
     PROD_AWS_ACCOUNT_ID       – prod AWS account for ECR (default: 168653207203)
     AWS_REGION                – AWS region for ECR (default: us-east-2)
@@ -208,9 +206,8 @@ KIND_SPEC_GROUPS = (
 # soft-fail "Quarantined KIND specs" group, so a PR author is never gated on a
 # failure nobody is fixing and the failure stays visible.
 #
-# This pipeline has no nightly schedule — the `daily` mode is the RC promotion
-# pipeline and never packages the KIND bundle — so the quarantine group runs on
-# every build, soft-fail. Give it a nightly-only trigger once one exists.
+# This pipeline has no nightly schedule, so the quarantine group runs on every
+# build as a soft-fail. Give it a nightly-only trigger once one exists.
 #
 # Every entry carries an owner, a one-line reason and an expiry (two weeks is
 # the norm). Generation fails on an unknown spec, an empty owner or reason, and
@@ -264,8 +261,6 @@ GKE_UPGRADE_ENABLED = _truthy(os.environ.get("GKE_UPGRADE_ENABLED", "1"))
 
 BRANCH = os.environ.get("BUILDKITE_BRANCH", "")
 COMMIT = os.environ.get("BUILDKITE_COMMIT", "HEAD")
-PIPELINE_MODE = os.environ.get("OME_PIPELINE_MODE", "").strip().lower()
-
 # (label-suffix, ECR repo name under msl_infra/, Dockerfile)
 # Drop redundant "ome-" prefix in ECR names so we don't get "ome-ome-*".
 # model-agent is not built locally; we consume upstream-published images.
@@ -1554,23 +1549,10 @@ def _priority_prefix() -> str:
 
 
 def main() -> None:
-    if PIPELINE_MODE not in ("", "daily", "standard"):
-        sys.stderr.write(
-            "invalid OME_PIPELINE_MODE: "
-            f"{PIPELINE_MODE!r}; expected 'daily' or 'standard'\n"
-        )
+    if os.environ.get("OME_PIPELINE_MODE"):
+        sys.stderr.write("OME_PIPELINE_MODE is no longer supported\n")
         raise SystemExit(2)
-
-    if PIPELINE_MODE == "daily":
-        # The daily generator imports this module for shared queue and plugin
-        # helpers, so load it lazily after this module has defined them.
-        import generate_daily_pipeline as daily
-
-        pipeline = daily.generate_pipeline()
-    else:
-        pipeline = generate_pipeline()
-
-    sys.stdout.write(_priority_prefix() + pipeline)
+    sys.stdout.write(_priority_prefix() + generate_pipeline())
 
 
 if __name__ == "__main__":

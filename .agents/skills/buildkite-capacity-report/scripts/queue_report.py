@@ -17,7 +17,7 @@ import os
 import re
 import sys
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 PIPELINE = "ome"
 PENDING_STATES = {"scheduled", "assigned", "accepted"}
@@ -29,10 +29,10 @@ PR_CHECK_KEYS = {
 }
 FAMILIES = [
     "PR checks", "drift checks", "images", "charts", "KIND packaging", "KIND coordination",
-    "KIND multi-cluster", "KIND quarantine", "KIND upgrade", "OMENative eval", "daily RC",
+    "KIND multi-cluster", "KIND quarantine", "KIND upgrade", "OMENative eval",
     "other ome step", "other pipelines",
 ]
-CLASSES = ["ome main", "ome PR", "ome daily", "other pipelines"]
+CLASSES = ["ome main", "ome PR", "other pipelines"]
 EMOJI = re.compile(r"^(:[a-z0-9_+-]+:\s*)+")
 
 
@@ -77,18 +77,9 @@ def agent_queue(agent):
     return None
 
 
-def is_daily(build):
-    env = build.get("env") or {}
-    if str(env.get("OME_PIPELINE_MODE", "")).lower() == "daily":
-        return True
-    return any(str(j.get("step_key") or "").startswith("daily-") for j in build.get("jobs") or [])
-
-
 def build_class(build):
     if (build.get("pipeline") or {}).get("slug") != PIPELINE:
         return "other pipelines"
-    if is_daily(build):
-        return "ome daily"
     return "ome main" if build.get("branch") == "main" else "ome PR"
 
 
@@ -114,8 +105,6 @@ def family_of(job, build):
         return "charts"
     if key.endswith("-drift"):
         return "drift checks"
-    if key.startswith("daily-"):
-        return "daily RC"
     if key in PR_CHECK_KEYS:
         return "PR checks"
     return "other ome step"

@@ -19,7 +19,7 @@ are ignored everywhere.
 | Bucket | States | Meaning |
 |---|---|---|
 | pending | `scheduled`, `assigned`, `accepted` | eligible and waiting for an agent; wait = now − `runnable_at` (fallback `scheduled_at`, `created_at`) |
-| held | `limited`, `limiting` | blocked by a concurrency group (the daily smokes); not queue demand |
+| held | `limited`, `limiting` | blocked by a concurrency group; not queue demand |
 | running | `running` | occupies one agent |
 | not demand | `waiting`, `blocked`, `broken`, `skipped`, `canceled`, `passed`, `failed`, `timed_out` | dependencies unmet, or finished |
 
@@ -27,9 +27,8 @@ are ignored everywhere.
 
 | Class | Rule |
 |---|---|
-| `ome main` | pipeline `ome`, branch `main`, not daily |
-| `ome PR` | pipeline `ome`, any other branch, not daily |
-| `ome daily` | pipeline `ome` with `env.OME_PIPELINE_MODE == "daily"` or any `daily-*` step key |
+| `ome main` | pipeline `ome`, branch `main` |
+| `ome PR` | pipeline `ome`, any other branch |
 | `other pipelines` | any other pipeline in the org (the top five are listed by slug) |
 
 ## Job family (from `step_key`)
@@ -46,7 +45,6 @@ are ignored everywhere.
 | KIND quarantine | `kind-gke-quarantine` |
 | KIND upgrade | `kind-gke-upgrade-identity` |
 | OMENative eval | `omenative-e2e-*` |
-| daily RC | `daily-*` |
 | other ome step | anything else in the `ome` pipeline (for example the pipeline upload job) |
 | other pipelines | every job of another pipeline |
 

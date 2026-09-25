@@ -15,8 +15,7 @@ python3 $L new < "$OME_ONCALL_STATE_DIR/last-list.json"
 
 `new` prints `NEW` (terminal, red, above the watermark, unhandled), `ADV`
 (soft-failed only, with the per-key streak), `RUN` (not terminal) and the
-latest build. Daily release-candidate builds are already hidden by
-`main_builds.py`.
+latest build.
 
 - `NEW` → candidate for dispatch.
 - `ADV` with a streak under 3 → `mark <n> flaky-known --keys <keys> --note 'soft-fail only'`.

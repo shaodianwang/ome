@@ -103,9 +103,6 @@ Protocol in full, with the dispatch prompt: `references/iteration.md`.
   when the state file was lost (`gh issue list --label ci-triaged`).
 - Workers never close issues, never merge, never bisect, never quarantine,
   never retry a red spec or Go test, never edit tests to pass.
-- Daily release-candidate builds (`OME_PIPELINE_MODE=daily`, `daily-*` keys)
-  are not this loop's: `main_builds.py` hides them; point the user at the
-  `daily-monitor` and `daily-triage` skills if they ask about one.
 
 ## Stop
 

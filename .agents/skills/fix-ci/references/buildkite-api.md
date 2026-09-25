@@ -29,7 +29,7 @@ Base: `https://api.buildkite.com/v2/organizations/msl/pipelines/ome`. Header:
 | job artifacts | `GET /builds/<n>/jobs/<job-id>/artifacts`; each has a `download_url` that redirects to storage (fetch the redirect target without the bearer header) |
 | build artifacts | `GET /builds/<n>/artifacts` |
 | retry a job | `PUT /builds/<n>/jobs/<job-id>/retry` (returns the new job; the old one gets `retried: true`, `retried_in_job_id`) |
-| annotations | `GET /builds/<n>/annotations` (the standard pipeline posts none; only the daily pipeline annotates) |
+| annotations | `GET /builds/<n>/annotations` |
 
 Useful job fields: `type` (`script` for real steps; `waiter`, `manual`,
 `trigger` otherwise), `step_key`, `name`, `state`, `exit_status`,

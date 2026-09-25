@@ -6,7 +6,7 @@ Standard library only. The API token comes from $BUILDKITE_API_TOKEN or
 no state; `dump` writes raw build JSON under
 ~/.cache/ome-agent.noindex/scratch/ci-triage/ (override: OME_CITRIAGE_SCRATCH).
 
-  main_builds.py list [--limit N] [--json] [--include-daily] [--branch main]
+  main_builds.py list [--limit N] [--json] [--branch main]
   main_builds.py diff <build> [--json]
   main_builds.py dump <build>
 """
@@ -124,13 +124,6 @@ def job_key(job: dict) -> str:
     return job.get("step_key") or job.get("name") or job.get("id", "?")[:8]
 
 
-def is_daily(build: dict) -> bool:
-    env = build.get("env") or {}
-    if str(env.get("OME_PIPELINE_MODE", "")).lower() == "daily":
-        return True
-    return any(str(j.get("step_key") or "").startswith("daily-") for j in script_jobs(build))
-
-
 def latest_attempts(build: dict) -> tuple[list[dict], dict[str, int]]:
     """Newest attempt per (step key, parallel index); also earlier failed attempts per key."""
     newest: dict[tuple, dict] = {}
@@ -171,7 +164,6 @@ def summarize(build: dict) -> dict:
         "finished_at": build.get("finished_at"),
         "web_url": build.get("web_url") or f"https://buildkite.com/{ORG}/{PIPELINE}/builds/{build.get('number')}",
         "message": message,
-        "daily": is_daily(build),
         "red_keys": red,
         "soft_keys": soft,
         "retried_keys": dict(sorted(earlier_red.items())),
@@ -204,8 +196,6 @@ def job_row(build_number: int, job: dict, attempts: int) -> dict:
 def cmd_list(args) -> None:
     builds = fetch_builds(args.branch, args.limit)
     rows = [summarize(b) for b in builds]
-    if not args.include_daily:
-        rows = [r for r in rows if not r["daily"]]
     if args.json:
         json.dump(rows, sys.stdout, indent=1)
         sys.stdout.write("\n")
@@ -225,14 +215,14 @@ def cmd_list(args) -> None:
             parts.append(f"RUNNING: {len(r['running_keys'])} jobs")
         parts.append(r["message"])
         print("  ".join(parts))
-    print(f"\nhttps://buildkite.com/{ORG}/{PIPELINE}/builds/<n>   (daily builds hidden; --include-daily to show)")
+    print(f"\nhttps://buildkite.com/{ORG}/{PIPELINE}/builds/<n>")
 
 
 def previous_standard_build(number: int, branch: str) -> dict | None:
     for build in fetch_builds(branch, 60):
         if (build.get("number") or 0) >= number:
             continue
-        if is_daily(build) or build.get("state") not in TERMINAL_BUILD_STATES:
+        if build.get("state") not in TERMINAL_BUILD_STATES:
             continue
         return build
     return None
@@ -240,8 +230,6 @@ def previous_standard_build(number: int, branch: str) -> dict | None:
 
 def cmd_diff(args) -> None:
     build = fetch_build(args.build)
-    if is_daily(build):
-        die(f"build {args.build} is a daily release-candidate build; use the daily-triage skill")
     branch = build.get("branch") or "main"
     prev = previous_standard_build(build["number"], branch)
     jobs, earlier_red = latest_attempts(build)
@@ -331,7 +319,6 @@ def main() -> None:
     p.add_argument("--branch", default="main")
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--json", action="store_true")
-    p.add_argument("--include-daily", action="store_true", help="also list daily release-candidate builds")
     p.set_defaults(func=cmd_list)
 
     p = sub.add_parser("diff", help="failed jobs of one build against the previous standard build")

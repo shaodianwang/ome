@@ -15,10 +15,8 @@ conclusion second, action last. Deliverables, in order:
 2. only when justified, one narrow action: a single evidence-backed retry, a
    draft PR for a mechanical fix, or an explicit escalation.
 
-Scope: standard builds on `main` (Buildkite org `msl`, pipeline `ome`). Builds
-whose env has `OME_PIPELINE_MODE=daily` or whose jobs carry `daily-*` step keys
-are the release-candidate pipeline: hand those to the `daily-triage` skill.
-Pull-request builds are the `fix-ci` skill's job.
+Scope: builds on `main` (Buildkite org `msl`, pipeline `ome`). Pull-request
+builds are the `fix-ci` skill's job.
 
 ## Ground rules
 

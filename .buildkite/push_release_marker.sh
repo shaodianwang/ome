@@ -94,10 +94,9 @@ done
 # The marker asserts a chart version per component and an image tag per runtime
 # image. Chart versions come from artifacts the publishing step wrote, so they
 # are evidence; the image tags are derived from the commit and would otherwise
-# be a guess. Confirm each one resolves in prod ECR, the same gate
-# daily_candidate.py applies before calling a SHA a complete release —
-# otherwise a mirror that never ran yields a "qualified" marker whose images
-# 404, and the failure only surfaces as ErrImagePull after Kargo promotes it.
+# be a guess. Confirm each runtime image exists before publishing a marker.
+# Otherwise a failed mirror yields a qualified release whose images fail to
+# pull after Kargo promotes it.
 CRANE_VERSION="${CRANE_VERSION:-0.20.6}"
 if ! command -v crane >/dev/null 2>&1; then
   case "$(uname -m)" in

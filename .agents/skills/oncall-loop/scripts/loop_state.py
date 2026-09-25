@@ -77,7 +77,7 @@ def read_rows() -> list[dict]:
     if not isinstance(rows, list):
         sys.stderr.write("loop_state: stdin JSON is not a list of builds\n")
         sys.exit(2)
-    rows = [r for r in rows if isinstance(r, dict) and r.get("number") is not None and not r.get("daily")]
+    rows = [r for r in rows if isinstance(r, dict) and r.get("number") is not None]
     return sorted(rows, key=lambda r: int(r["number"]))
 
 

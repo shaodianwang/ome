@@ -766,28 +766,8 @@ class TestMulticlusterKindGroup(PipelineTestCase):
             )
 
 
-class TestReleaseContentsMatchDiscovery(unittest.TestCase):
-    """The marker and the daily discovery path must mean the same release."""
-
-    def _daily_candidate(self):
-        path = Path(gp.__file__).resolve().parent / "daily_candidate.py"
-        spec = importlib.util.spec_from_file_location("daily_candidate_under_test", path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
-
-    def test_marker_contents_match_candidate_and_published_components(self):
-        # Two hardcoded answers to "what is a complete OME release". Adding a
-        # chart to one only makes the marker and the discovery path promote
-        # different things under the same name.
-        candidate = self._daily_candidate()
-        self.assertEqual(
-            tuple(gp.RELEASE_MARKER_CHARTS), tuple(candidate.CHARTS)
-        )
-        self.assertEqual(
-            tuple(gp.RELEASE_MARKER_IMAGES), tuple(candidate.IMAGES)
-        )
-
+class TestReleaseMarkerContents(unittest.TestCase):
+    def test_marker_contents_are_published(self):
         unknown = set(gp.RELEASE_MARKER_CHARTS) - set(gp.CHARTS)
         self.assertEqual(unknown, set(), f"{sorted(unknown)} are not in CHARTS")
 
@@ -799,3 +779,10 @@ class TestReleaseContentsMatchDiscovery(unittest.TestCase):
         self.assertEqual(
             unknown, set(), f"{sorted(unknown)} are published by no build step"
         )
+
+
+class TestRetiredPipelineMode(unittest.TestCase):
+    def test_legacy_pipeline_mode_fails_closed(self):
+        with mock.patch.dict(os.environ, {"OME_PIPELINE_MODE": "daily"}):
+            with self.assertRaisesRegex(SystemExit, "2"):
+                gp.main()

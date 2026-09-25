@@ -114,6 +114,3 @@ is a dependency state, not a failure of their own.
 | group `omenative-e2e-kind-gke` → `omenative-e2e-<feature>-<topology>[-i-of-n]` | `GKE_EVAL_ENABLED` | deployed OMENative eval over the case YAMLs in `hack/omenative-testing/perm/isvcs/`; 180 minute timeout; results archive uploaded as an artifact |
 | group `integration-test-kind-upgrade` → `kind-gke-upgrade-identity` | `GKE_UPGRADE_ENABLED` and `GKE_KIND_ENABLED` | operator-upgrade identity gate; skips loudly when the previous images were not baked |
 | `chart-ome-release` | `build.branch == "main"` | after a `wait` barrier: the release marker for the control-plane charts and images |
-
-`OME_PIPELINE_MODE=daily` selects a different generator (the release-candidate
-pipeline); that mode is out of scope here.

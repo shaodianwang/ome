@@ -18,8 +18,8 @@ where; verify against it before quoting a queue name.
 
 | Queue | Constant | Runs | Supply |
 |---|---|---|---|
-| `tw-cpu-x86` | `DEFAULT_QUEUE`, `BUILD_QUEUE` | every-branch lanes (`lint`, `vet`, `test`, `integration-test`, `perf-test`, `scheduler-test`, `rollout-behavior-lock`, `helm-lint`, `muse-rust-checks`, hygiene, `*-drift`), image `build-*` / `mirror-*`, `chart-*`, `package-kind-*`, daily discovery and promotion steps | container agents shared org-wide with other pipelines; one job per agent |
-| GKE KIND queue | `GKE_QUEUE = GKE_KIND_QUEUE` (default `gke-tpu-v7x`; `.buildkite/README-gke-kind.md` documents the dedicated `gke-kind-x86` design) | `kind-gke-<slug>`, `kind-gke-mc-*`, `kind-gke-quarantine`, `kind-gke-upgrade-identity`, `omenative-e2e-*`, daily RC smokes | agent pods created per job by an agent-stack-k8s controller; each KIND job requests about 5 vCPU, 14 GiB RAM, 24 GiB ephemeral; zero idle agents is by design |
+| `tw-cpu-x86` | `DEFAULT_QUEUE`, `BUILD_QUEUE` | every-branch lanes (`lint`, `vet`, `test`, `integration-test`, `perf-test`, `scheduler-test`, `rollout-behavior-lock`, `helm-lint`, `muse-rust-checks`, hygiene, `*-drift`), image `build-*` / `mirror-*`, `chart-*`, `package-kind-*` | container agents shared org-wide with other pipelines; one job per agent |
+| GKE KIND queue | `GKE_QUEUE = GKE_KIND_QUEUE` (default `gke-tpu-v7x`; `.buildkite/README-gke-kind.md` documents the dedicated `gke-kind-x86` design) | `kind-gke-<slug>`, `kind-gke-mc-*`, `kind-gke-quarantine`, `kind-gke-upgrade-identity`, `omenative-e2e-*` | agent pods created per job by an agent-stack-k8s controller; each KIND job requests about 5 vCPU, 14 GiB RAM, 24 GiB ephemeral; zero idle agents is by design |
 
 There is no separate docker or dind queue: the container queue's agents run
 the docker plugin against a local daemon, and each GKE job pod carries its own
@@ -68,7 +68,7 @@ python3 $S/queue_report.py --data-dir "$DIR" --queue gke-tpu-v7x --json "$DIR/su
 ```
 
 Per queue it prints: agents (total, busy, idle), pending jobs by pipeline
-class (`ome main`, `ome PR`, `ome daily`, other pipelines) and by job family,
+class (`ome main`, `ome PR`, other pipelines) and by job family,
 wait percentiles (p50, p90, max, from `runnable_at`), the top demand owners
 (builds with the most pending and running jobs, with links), running jobs
 older than the family's p90 duration, and from history: the 24h concurrency
@@ -124,8 +124,8 @@ switch the ambient kubeconfig (`.agents/skills/fix-ci/references/buildkite-api.m
   `meta_data` (`queue=...`) on the agent. Jobs of type other than `script`
   never occupy an agent.
 - `runnable_at` is when a job became eligible; wait = now − `runnable_at`.
-  Jobs in `limited`/`limiting` are held by a concurrency group (the daily
-  smokes), not by the queue.
+  Jobs in `limited`/`limiting` are held by a concurrency group, not by the
+  queue.
 - The 10-minute buckets sample concurrency at the bucket midpoint so stacked
   families stay additive; do not replace it with per-family maxima.
 - The ceiling is an estimate from history; the live busy count can wobble

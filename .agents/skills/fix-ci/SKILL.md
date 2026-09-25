@@ -1,6 +1,6 @@
 ---
 name: fix-ci
-description: Diagnose and fix red Buildkite CI on mslsrc/ome pull requests and main. Use when the user says "CI failed", "fix the build", "why is the PR red", "fix CI", "check CI status", "retry the flaky job", or asks why a Buildkite step or GitHub commit status is failing. Not for the public OME repository's CI or for the daily release-candidate pipeline.
+description: Diagnose and fix red Buildkite CI on mslsrc/ome pull requests and main. Use when the user says "CI failed", "fix the build", "why is the PR red", "fix CI", "check CI status", "retry the flaky job", or asks why a Buildkite step or GitHub commit status is failing. Not for the public OME repository's CI.
 ---
 
 # Fix CI (mslsrc/ome on Buildkite)

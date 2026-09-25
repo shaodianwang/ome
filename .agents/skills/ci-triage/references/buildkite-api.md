@@ -40,7 +40,4 @@ Parsing:
   one that counts.
 - Build states: `running`, `failing` (still running with a red job), then the
   terminal `passed`, `failed`, `canceled`, `blocked`, `skipped`, `not_run`.
-- Build `env.OME_PIPELINE_MODE == "daily"` (or any `daily-*` step key) marks a
-  release-candidate build, which is out of scope here.
-
 Save anything you download under `~/.cache/ome-agent.noindex/scratch/ci-triage/`.
