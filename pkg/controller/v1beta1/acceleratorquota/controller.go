@@ -291,13 +291,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			// straight back, but in the idle case above there is no such event
 			// and dropping the interval would disable the only thing that would
 			// notice the tree being repaired.
-			return ctrl.Result{RequeueAfter: r.ResyncInterval}, nil
+			return ctrl.Result{RequeueAfter: r.nextResync()}, nil
 		}
 		if err := r.reconcileCapacity(ctx, built.Root.Quota); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
-	return ctrl.Result{RequeueAfter: r.ResyncInterval}, nil
+	return ctrl.Result{RequeueAfter: r.nextResync()}, nil
 }
 
 // reconcileStatus writes one node's observed position and condition. It patches
@@ -686,6 +686,9 @@ type options struct {
 }
 
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager, opts ...Option) error {
+	if r.Capacity.ReportInterval < 0 {
+		return fmt.Errorf("capacity report interval must be nonnegative")
+	}
 	var cfg options
 	for _, o := range opts {
 		o(&cfg)

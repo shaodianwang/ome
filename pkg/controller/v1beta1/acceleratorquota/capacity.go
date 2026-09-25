@@ -58,6 +58,10 @@ type CapacityOptions struct {
 	// damping, so the mark tracks every dip — including the ones caused by a
 	// drain or a reboot.
 	HysteresisPercent int32
+
+	// ReportInterval bounds how long unchanged hardware observations can remain
+	// unpublished. Zero disables periodic timestamp refreshes.
+	ReportInterval time.Duration
 }
 
 // Enabled reports whether capacity derivation is configured.
@@ -162,11 +166,13 @@ func (r *Reconciler) reconcileCapacity(ctx context.Context, root *v1beta1.Accele
 	// unattributed slice and the raw node counts have no other reader.
 	recordCapacity(observed)
 
+	now := metav1.Now()
 	updated := root.DeepCopy()
 	updated.Status.Capacity = mergeCapacity(
-		root.Status.Capacity, observed.Capacities, r.Capacity.HysteresisPercent, metav1.Now())
+		root.Status.Capacity, observed.Capacities, r.Capacity.HysteresisPercent, now)
 
-	if equalCapacity(root.Status.Capacity, updated.Status.Capacity) {
+	if equalCapacity(root.Status.Capacity, updated.Status.Capacity) &&
+		!capacityReportDue(root.Status.Capacity, now.Time, r.Capacity.ReportInterval) {
 		return nil
 	}
 	if err := r.Status().Patch(ctx, updated, client.MergeFrom(root)); err != nil {
@@ -177,6 +183,28 @@ func (r *Reconciler) reconcileCapacity(ctx context.Context, root *v1beta1.Accele
 		return fmt.Errorf("writing root capacity: %w", err)
 	}
 	return nil
+}
+
+// capacityReportDue refreshes only completed samples. A failed read cannot
+// extend their freshness, and an absent report cannot claim observed hardware.
+func capacityReportDue(reports []v1beta1.AcceleratorCapacityStatus, now time.Time, interval time.Duration) bool {
+	if interval <= 0 {
+		return false
+	}
+	for _, report := range reports {
+		if report.ObservedAt == nil || report.ObservedAt.After(now) || now.Sub(report.ObservedAt.Time) >= interval {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *Reconciler) nextResync() time.Duration {
+	interval := r.ResyncInterval
+	if report := r.Capacity.ReportInterval; r.Capacity.Enabled() && report > 0 && (interval <= 0 || report < interval) {
+		interval = report
+	}
+	return interval
 }
 
 // flavors reads the Kueue ResourceFlavors capacity is attributed to.
