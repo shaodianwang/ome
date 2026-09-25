@@ -181,7 +181,11 @@ keys with job links, class per key, the quoted first error, the
 flaky-or-real verdict with its basis, ranked suspects (PR numbers and
 titles), the action taken or recommended, and the dedupe marker
 `<!-- ci-triage step=<key> -->` on anything posted to GitHub. Post it in your
-reply first; then to GitHub as below.
+reply first; then to GitHub as below; then, when `OME_SLACK_APP_ID` is set,
+to the working-group channel with
+`python3 .agents/skills/slack-post/scripts/slack_post.py --markdown-file <write-up>`
+(the `slack-post` skill), threading later updates for the same breakage
+under that post with `--thread-ts`.
 
 ## Step 6: act, once
 

@@ -104,6 +104,12 @@ For every non-terminal entry:
 python3 $L log "latest b<n> <state>; new: <n1 keys...>|none; followed: <n2 status>..."
 ```
 
+When `OME_SLACK_APP_ID` is set and the iteration found a new red build,
+escalated, or moved a follow-up to a new state, post the same reply to the
+working-group channel:
+`python3 .agents/skills/slack-post/scripts/slack_post.py --text-file <reply>`
+(the `slack-post` skill). A quiet iteration stays off the channel.
+
 Reply shape, five lines or fewer when nothing happened:
 
 ```
