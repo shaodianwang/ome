@@ -42,6 +42,14 @@ ome:
   podMonitor: {}
   # Permissions for a remote placement controller. Authentication is supplied
   # by the platform through the WorkloadCluster kubeconfig.
+  # viewer installs a standalone read-only ClusterRole for operators and bots,
+  # bound to one group. Off by default; turn it on for clusters whose
+  # authenticator issues a group per ClusterRole name instead of aggregating
+  # into the built-in `view` role.
+  viewer:
+    enabled: false
+    clusterRoleName: ome-viewer
+    group: "ClusterRole:ome-viewer"
   multiclusterAccess:
     enabled: false
     # Empty installs only the ClusterRole, for bindings managed outside Helm.

@@ -1,0 +1,45 @@
+{{- if .Values.ome.viewer.enabled }}
+---
+# Standalone read-only access to everything an OME operator inspects: ome.io
+# resources plus the pods, events, services, nodes and pod logs behind them.
+# The built-in `view` ClusterRole covers most of this through aggregation, but
+# an authenticator that hands out one group per ClusterRole name needs a role
+# it can bind directly. The binding subject is the group named in values.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Values.ome.viewer.clusterRoleName }}
+  labels:
+    {{- include "ome.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["ome.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "events", "services", "endpoints", "configmaps", "namespaces", "nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets", "controllerrevisions"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Values.ome.viewer.clusterRoleName }}
+  labels:
+    {{- include "ome.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Values.ome.viewer.clusterRoleName }}
+subjects:
+  - kind: Group
+    apiGroup: rbac.authorization.k8s.io
+    name: {{ .Values.ome.viewer.group | quote }}
+{{- end }}
