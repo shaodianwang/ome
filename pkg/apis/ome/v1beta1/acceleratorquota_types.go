@@ -26,6 +26,7 @@ package v1beta1
 import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // AcceleratorQuotaRootName is the reserved name of the single parent-less node
@@ -609,6 +610,26 @@ type AcceleratorCapacityStatus struct {
 	// +listType=map
 	// +listMapKey=cluster
 	PerCluster []AcceleratorClusterCapacityStatus `json:"perCluster,omitempty"`
+
+	// Attribution identifies the hardware mapping used for this observation.
+	// Omission cannot establish whether an observed zero is a complete sample.
+	// +optional
+	Attribution *AcceleratorCapacityAttribution `json:"attribution,omitempty"`
+}
+
+// AcceleratorCapacityAttribution describes how nodes were assigned to a flavor.
+type AcceleratorCapacityAttribution struct {
+	// FlavorUID identifies the observed ResourceFlavor object.
+	FlavorUID types.UID `json:"flavorUID"`
+	// NodeLabels is the flavor's node selector at observation time.
+	// +optional
+	NodeLabels map[string]string `json:"nodeLabels,omitempty"`
+	// FlavorSetHash identifies all flavor definitions and configured resource
+	// names used by the attribution rule, including more specific selectors.
+	FlavorSetHash string `json:"flavorSetHash"`
+	// Complete means every observed node advertising this resource was
+	// unambiguously attributed and every flavor had a verifiable identity.
+	Complete bool `json:"complete"`
 }
 
 // AcceleratorClusterCapacityStatus is one cluster's contribution to a flavor's

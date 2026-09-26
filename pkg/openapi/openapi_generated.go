@@ -15,6 +15,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorBudget":                schema_pkg_apis_ome_v1beta1_AcceleratorBudget(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorBudgetStatus":          schema_pkg_apis_ome_v1beta1_AcceleratorBudgetStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorCapabilities":          schema_pkg_apis_ome_v1beta1_AcceleratorCapabilities(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorCapacityAttribution":   schema_pkg_apis_ome_v1beta1_AcceleratorCapacityAttribution(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorCapacityStatus":        schema_pkg_apis_ome_v1beta1_AcceleratorCapacityStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorClass":                 schema_pkg_apis_ome_v1beta1_AcceleratorClass(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorClassList":             schema_pkg_apis_ome_v1beta1_AcceleratorClassList(ref),
@@ -445,6 +446,60 @@ func schema_pkg_apis_ome_v1beta1_AcceleratorCapabilities(ref common.ReferenceCal
 	}
 }
 
+func schema_pkg_apis_ome_v1beta1_AcceleratorCapacityAttribution(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "AcceleratorCapacityAttribution describes how nodes were assigned to a flavor.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"flavorUID": {
+						SchemaProps: spec.SchemaProps{
+							Description: "FlavorUID identifies the observed ResourceFlavor object.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"nodeLabels": {
+						SchemaProps: spec.SchemaProps{
+							Description: "NodeLabels is the flavor's node selector at observation time.",
+							Type:        []string{"object"},
+							AdditionalProperties: &spec.SchemaOrBool{
+								Allows: true,
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
+					"flavorSetHash": {
+						SchemaProps: spec.SchemaProps{
+							Description: "FlavorSetHash identifies all flavor definitions and configured resource names used by the attribution rule, including more specific selectors.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"complete": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Complete means every observed node advertising this resource was unambiguously attributed and every flavor had a verifiable identity.",
+							Default:     false,
+							Type:        []string{"boolean"},
+							Format:      "",
+						},
+					},
+				},
+				Required: []string{"flavorUID", "flavorSetHash", "complete"},
+			},
+		},
+	}
+}
+
 func schema_pkg_apis_ome_v1beta1_AcceleratorCapacityStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -508,12 +563,18 @@ func schema_pkg_apis_ome_v1beta1_AcceleratorCapacityStatus(ref common.ReferenceC
 							},
 						},
 					},
+					"attribution": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Attribution identifies the hardware mapping used for this observation. Omission cannot establish whether an observed zero is a complete sample.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorCapacityAttribution"),
+						},
+					},
 				},
 				Required: []string{"resourceName", "resourceFlavor"},
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorClusterCapacityStatus", "k8s.io/apimachinery/pkg/api/resource.Quantity", "k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorCapacityAttribution", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorClusterCapacityStatus", "k8s.io/apimachinery/pkg/api/resource.Quantity", "k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
 	}
 }
 

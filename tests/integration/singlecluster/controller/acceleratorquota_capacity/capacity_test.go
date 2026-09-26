@@ -1,15 +1,47 @@
 package acceleratorquota_capacity
 
 import (
+	"fmt"
+
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	kueuev1beta2 "sigs.k8s.io/kueue/apis/kueue/v1beta2"
+
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
 var _ = ginkgo.Describe("Derived root capacity", func() {
 	ginkgo.BeforeEach(func() {
 		resetRoot()
+	})
+
+	ginkgo.It("persists flavor identity and complete attribution for an empty pool", func() {
+		var flavor kueuev1beta2.ResourceFlavor
+		gomega.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Name: tpuFlavor}, &flavor)).To(gomega.Succeed())
+		want := &v1beta1.AcceleratorCapacityAttribution{
+			FlavorUID: flavor.UID, NodeLabels: flavor.Spec.NodeLabels, Complete: true,
+		}
+		gomega.Eventually(func() (string, error) {
+			var root v1beta1.AcceleratorQuota
+			if err := k8sClient.Get(suiteCtx, client.ObjectKey{Name: v1beta1.AcceleratorQuotaRootName}, &root); err != nil {
+				return "", err
+			}
+			for _, report := range root.Status.Capacity {
+				if report.ResourceName != tpuResource || report.ResourceFlavor != tpuFlavor {
+					continue
+				}
+				if report.ObservedAt == nil || report.Attribution == nil || report.Attribution.FlavorSetHash == "" {
+					return "", fmt.Errorf("waiting for report provenance")
+				}
+				return cmp.Diff("0", report.Allocatable.String()) +
+					cmp.Diff(want, report.Attribution, cmpopts.IgnoreFields(v1beta1.AcceleratorCapacityAttribution{}, "FlavorSetHash")), nil
+			}
+			return "", fmt.Errorf("waiting for an explicit empty-pool report")
+		}, timeout, interval).Should(gomega.BeEmpty())
 	})
 
 	ginkgo.It("records the fleet total on the reserved root", func() {

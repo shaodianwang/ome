@@ -143,6 +143,40 @@
         }
       }
     },
+    "v1beta1.AcceleratorCapacityAttribution": {
+      "description": "AcceleratorCapacityAttribution describes how nodes were assigned to a flavor.",
+      "type": "object",
+      "required": [
+        "flavorUID",
+        "flavorSetHash",
+        "complete"
+      ],
+      "properties": {
+        "complete": {
+          "description": "Complete means every observed node advertising this resource was unambiguously attributed and every flavor had a verifiable identity.",
+          "type": "boolean",
+          "default": false
+        },
+        "flavorSetHash": {
+          "description": "FlavorSetHash identifies all flavor definitions and configured resource names used by the attribution rule, including more specific selectors.",
+          "type": "string",
+          "default": ""
+        },
+        "flavorUID": {
+          "description": "FlavorUID identifies the observed ResourceFlavor object.",
+          "type": "string",
+          "default": ""
+        },
+        "nodeLabels": {
+          "description": "NodeLabels is the flavor's node selector at observation time.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "default": ""
+          }
+        }
+      }
+    },
     "v1beta1.AcceleratorCapacityStatus": {
       "description": "AcceleratorCapacityStatus is the observed physical capacity of one flavor, the denominator an admin reads a budget against. It is derived, never authored.",
       "type": "object",
@@ -154,6 +188,10 @@
         "allocatable": {
           "description": "Allocatable is the currently schedulable quantity: the flavor's resource summed over Ready, uncordoned nodes matching the flavor's node labels. Nodes that are NotReady or cordoned remain physical inventory but contribute no schedulable capacity.",
           "$ref": "#/definitions/resource.Quantity"
+        },
+        "attribution": {
+          "description": "Attribution identifies the hardware mapping used for this observation. Omission cannot establish whether an observed zero is a complete sample.",
+          "$ref": "#/definitions/v1beta1.AcceleratorCapacityAttribution"
         },
         "highWaterMark": {
           "description": "HighWaterMark is the greatest Allocatable observed for this flavor. Budget checks compare against it rather than the instantaneous value, so capacity that shrinks — a drain, a cordon, a device-plugin restart — never marks a node Degraded. It is lowered only once the observed value stays below it by more than the configured hysteresis band.",
