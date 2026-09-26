@@ -1,6 +1,6 @@
 ---
 name: slack-post
-description: Post one report or status line to the OME working-group Slack channel (Meta workspace) through the Slack API Proxy with the Meta CLI, authored by the msl-ome-bot app when OME_SLACK_APP_ID is set and by the operator otherwise. Use when another skill says "post the summary to Slack", or when the user asks to "post this to the channel", "notify the working group", "send the triage to Slack", or "thread this under the earlier post". One message per invocation; never a direct Slack call; never a body with a credential in it.
+description: Post one report or status line to the OME working-group Slack channel (Meta workspace) through the Slack API Proxy with the Meta CLI, authored by the msl-ome-bot Crewmate when OME_SLACK_BOT is set and by the operator otherwise. Use when another skill says "post the summary to Slack", or when the user asks to "post this to the channel", "notify the working group", "send the triage to Slack", or "thread this under the earlier post". One message per invocation; never a direct Slack call; never a body with a credential in it.
 ---
 
 # slack-post — one message to the working-group channel
@@ -13,10 +13,23 @@ so it needs no confirmation; a delete would, and this skill never deletes.
 
 ## Identity
 
-| `OME_SLACK_APP_ID` | Author of the post | Needs |
+| `OME_SLACK_BOT` | Author of the post | Needs |
 |---|---|---|
-| set to the app ID (`A…`) | the `msl-ome-bot` app | `act_as_app` on `SLACK_APP_AUTH:<APP_ID>` for the Meta identity running the command, and the bot invited to the channel |
+| the Crewmate, `cm-msl-ome-bot` or its FBID `1555509462542873` | the `msl-ome-bot` app, bound to that Crewmate | `act_as` on `CREWMATE_ACCESS:1555509462542873` for the Meta identity running the command (the script runs the CLI as the Crewmate), and the bot invited to the channel |
+| an app ID (`A…`) with no owner Crewmate | that app directly | `act_as_app` on `SLACK_APP_AUTH:<APP_ID>` |
 | unset | you, through your own connected Slack account | a connection (`meta slack.auth status` prints the link when there is none) |
+
+The portal binds every app to a Crewmate and grants `act_as_app` to that
+Crewmate alone, so a person or a job posts by acting as the Crewmate, never by
+naming the app. The app is `A0C4EU337J7`.
+
+Acting as the Crewmate mints a delegated credential from an identity already
+in the CLI's connection context, and only a certificate-backed identity can
+carry the grant: a devserver or OnDemand for a person, a job identity (FaaS,
+Sandcastle, a service identity) for automation. A laptop has no such identity,
+so the Crewmate lane fails there before anything reaches Slack
+("Failed to mint delegated CAT for CREWMATE ..."). Run the bot lane from a
+devserver; the person lane works from anywhere.
 
 Automation runs with the app; a person answering a question may post as
 themselves. `--require-app` refuses the second lane so a scheduled job can
@@ -61,17 +74,34 @@ Not for alerts: those flow from detectors through Pegasus to the same channel.
    is enough; leave Meta webhooks off until the bot must answer mentions.
 2. On the app's Overview page add the Meta (Prod) workspace to its
    distribution, then invite the bot to the channel.
-3. Grant `act_as_app` on `SLACK_APP_AUTH:<APP_ID>` to each identity that
-   will post (start with the operators' own identities; add the job identity
-   when a poller exists). `meta slack.app describe --app <APP_ID>` shows the
-   registration; `meta slack.auth status` shows your own connections.
-4. Export `OME_SLACK_APP_ID=<APP_ID>` where the skills run and send one
+3. Grant `act_as` on `CREWMATE_ACCESS:<crewmate FBID>` to each identity that
+   will post (the portal seeds the creator and the oncall; add the job
+   identity when a poller exists). `meta slack.app describe --app <APP_ID>`
+   shows the registration and the Crewmate; `meta hipster.acl access
+   --type=CREWMATE_ACCESS --name=<FBID> --action=act_as` shows who may act.
+4. Give the Crewmate Meta CLI access on its Crewmate Hub profile (the
+   MetaCLI card: Read / write, ceiling CONFIDENTIAL, since a send is an
+   UPDATE and Slack content is CONFIDENTIAL) and request the Slack command
+   access, which a human on the `slack_integration` oncall approves:
+   ```sh
+   meta amp.request create --acl-type=PM_ACTION --acl-name='1702230051323006/Access' \
+     --action=access --grantee-type=CREWMATE --grantee-name=<crewmate FBID> \
+     --reason='<bot> posts <what> to <channel>'
+   ```
+   Both are checked after the credential is minted; a refusal names the one
+   that is missing. `auth.debug identities` additionally needs the Meta CLI
+   login domain (`304977649833214/Login`), which `slack.message send` does
+   not; do not treat that denial as a Slack problem.
+5. On a devserver export `OME_SLACK_BOT=<crewmate FBID>` and send one
    `--dry-run`, then one real line.
 
 ## When the CLI refuses
 
 The refusal names the fix. The common ones: no connected account (connect
-through the printed link, or set `OME_SLACK_APP_ID`); an app installed
+through the printed link, or set `OME_SLACK_BOT`); "Acting as Crewmate … is
+asked for, but this command is running as you" (the selector named the app;
+use the Crewmate handle or FBID); "needs act_as on CREWMATE_ACCESS" (ask a
+maintainer of the Crewmate for the grant); an app installed
 org-wide needs the workspace (the script always passes `--workspace=meta`;
 override with `OME_SLACK_WORKSPACE`); the bot is not in the channel (invite
 it); `missing_scope` on `--username` or `--icon-emoji` (the app lacks

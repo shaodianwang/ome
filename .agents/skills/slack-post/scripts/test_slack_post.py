@@ -20,20 +20,31 @@ class BuildCommandTest(unittest.TestCase):
     def setUp(self) -> None:
         self.env = mock.patch.dict(os.environ, {}, clear=False)
         self.env.start()
-        for key in ("OME_SLACK_APP_ID", "OME_SLACK_CHANNEL_ID", "OME_SLACK_WORKSPACE"):
+        for key in ("OME_SLACK_BOT", "OME_SLACK_CHANNEL_ID", "OME_SLACK_WORKSPACE"):
             os.environ.pop(key, None)
 
     def tearDown(self) -> None:
         self.env.stop()
 
-    def test_markdown_as_app_from_env(self) -> None:
-        os.environ["OME_SLACK_APP_ID"] = "A0TESTAPP01"
+    def test_markdown_as_crewmate_from_env(self) -> None:
+        os.environ["OME_SLACK_BOT"] = "1555509462542873"
         args = parse("--markdown-file", "r.md")
         cmd = slack_post.build_command(args, "markdown", "/tmp/x.md", "meta")
-        self.assertEqual(cmd[:3], ["meta", "slack.message", "send"])
+        self.assertEqual(cmd[:5], ["meta", "--act-as-crewmate", "1555509462542873", "slack.message", "send"])
         self.assertIn(f"--channel-id={slack_post.DEFAULT_CHANNEL_ID}", cmd)
         self.assertIn("--markdown-text=file:///tmp/x.md", cmd)
         self.assertIn("--workspace=meta", cmd)
+        self.assertFalse(any(part.startswith("--as=") for part in cmd))
+
+    def test_crewmate_handle_selects_the_crewmate_lane(self) -> None:
+        args = parse("--text", "x", "--as", "cm-msl-ome-bot")
+        cmd = slack_post.build_command(args, "text", None, "meta")
+        self.assertEqual(cmd[1:3], ["--act-as-crewmate", "cm-msl-ome-bot"])
+
+    def test_app_id_selects_the_app_lane(self) -> None:
+        args = parse("--text", "x", "--as", "A0TESTAPP01")
+        cmd = slack_post.build_command(args, "text", None, "meta")
+        self.assertEqual(cmd[:3], ["meta", "slack.message", "send"])
         self.assertIn("--as=A0TESTAPP01", cmd)
 
     def test_text_as_self_without_app(self) -> None:

@@ -12,10 +12,12 @@ message. Standard library only.
   slack_post.py --markdown-file r.md --dry-run         # the CLI previews the post without sending
   slack_post.py --markdown-file r.md --print           # show the command; run nothing
 
-Identity: with OME_SLACK_APP_ID set (or --as) the post is authored by that
-registered app; otherwise it is authored by the operator's own connected Slack
-account. Destination: --channel-id, else OME_SLACK_CHANNEL_ID, else the
-working-group channel. Workspace alias: OME_SLACK_WORKSPACE, default "meta".
+Identity: OME_SLACK_BOT (or --as) selects the bot. A Crewmate selector
+(cm-handle or FBID) runs the CLI as that Crewmate, which posts through the app
+Garfield binds to it; an app ID (A...) posts as that app directly. Unset, the
+post is authored by the operator's own connected Slack account. Destination:
+--channel-id, else OME_SLACK_CHANNEL_ID, else the working-group channel.
+Workspace alias: OME_SLACK_WORKSPACE, default "meta".
 """
 
 from __future__ import annotations
@@ -51,6 +53,7 @@ SECRET_PATTERNS = (
 THREAD_TS = re.compile(r"^\d{10}\.\d{6}$")
 CHANNEL_ID = re.compile(r"^[CG][A-Z0-9]{8,}$")
 APP_ID = re.compile(r"^A[A-Z0-9]{8,}$")
+CREWMATE = re.compile(r"^(cm-[a-z0-9-]+|\d{6,})$")
 
 
 class PostError(Exception):
@@ -90,17 +93,23 @@ def build_command(
     channel = args.channel_id or os.environ.get("OME_SLACK_CHANNEL_ID") or DEFAULT_CHANNEL_ID
     if not CHANNEL_ID.match(channel):
         raise PostError(f"--channel-id must be a Slack conversation ID, got {channel!r}")
-    app = args.as_app or os.environ.get("OME_SLACK_APP_ID") or ""
-    if app and not APP_ID.match(app):
-        raise PostError(f"the app ID must look like A0XXXXXXXXX, got {app!r}")
-    if args.require_app and not app:
-        raise PostError("OME_SLACK_APP_ID is unset and --require-app was given; not posting as a person")
-    if (args.username or args.icon_emoji) and not app:
-        raise PostError("--username and --icon-emoji need an app identity (OME_SLACK_APP_ID or --as)")
+    bot = args.as_app or os.environ.get("OME_SLACK_BOT") or ""
+    crewmate = bool(bot) and bool(CREWMATE.match(bot))
+    if bot and not crewmate and not APP_ID.match(bot):
+        raise PostError(f"the bot selector must be a Crewmate (cm-handle or FBID) or an app ID (A0...), got {bot!r}")
+    if args.require_app and not bot:
+        raise PostError("OME_SLACK_BOT is unset and --require-app was given; not posting as a person")
+    if (args.username or args.icon_emoji) and not bot:
+        raise PostError("--username and --icon-emoji need the bot identity (OME_SLACK_BOT or --as)")
     if args.thread_ts and not THREAD_TS.match(args.thread_ts):
         raise PostError(f"--thread-ts must look like 1700000000.000100, got {args.thread_ts!r}")
 
-    cmd = [meta_bin, "slack.message", "send", f"--channel-id={channel}"]
+    # A Crewmate is selected with the global flag, before the slack.* part;
+    # the CLI then uses the app bound to it and rejects --as.
+    cmd = [meta_bin]
+    if crewmate:
+        cmd += ["--act-as-crewmate", bot]
+    cmd += ["slack.message", "send", f"--channel-id={channel}"]
     if kind == "markdown":
         cmd.append(f"--markdown-text=file://{body_path}")
     elif body_path is not None:
@@ -109,8 +118,8 @@ def build_command(
         cmd.append(f"--text={args.text}")
     workspace = args.workspace or os.environ.get("OME_SLACK_WORKSPACE") or DEFAULT_WORKSPACE
     cmd.append(f"--workspace={workspace}")
-    if app:
-        cmd.append(f"--as={app}")
+    if bot and not crewmate:
+        cmd.append(f"--as={bot}")
     if args.username:
         cmd.append(f"--username={args.username}")
     if args.icon_emoji:
@@ -132,7 +141,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--text-file", help="mrkdwn body from this file, or - for stdin")
     parser.add_argument("--text", help="one short mrkdwn line")
     parser.add_argument("--channel-id", help="Slack conversation ID (default: OME_SLACK_CHANNEL_ID or the working-group channel)")
-    parser.add_argument("--as", dest="as_app", help="registered app ID to post as (default: OME_SLACK_APP_ID; unset posts as you)")
+    parser.add_argument("--as", dest="as_app", help="bot selector: Crewmate cm-handle or FBID, or an app ID (default: OME_SLACK_BOT; unset posts as you)")
     parser.add_argument("--require-app", action="store_true", help="refuse to post as a person")
     parser.add_argument("--workspace", help="workspace alias (default: OME_SLACK_WORKSPACE or meta)")
     parser.add_argument("--thread-ts", help="reply in the thread of this message timestamp")
