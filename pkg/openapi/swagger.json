@@ -415,10 +415,18 @@
           "description": "Allocatable is that cluster's schedulable quantity of the flavor.",
           "$ref": "#/definitions/resource.Quantity"
         },
+        "attribution": {
+          "description": "Attribution is the member's hardware mapping at observation time.",
+          "$ref": "#/definitions/v1beta1.AcceleratorCapacityAttribution"
+        },
         "cluster": {
           "description": "Cluster is the WorkloadCluster's name.",
           "type": "string",
           "default": ""
+        },
+        "clusterUID": {
+          "description": "ClusterUID identifies the registration through which the report was read. Omission cannot establish that a same-name cluster owns this sample.",
+          "type": "string"
         },
         "highWaterMark": {
           "description": "HighWaterMark is the greatest Allocatable observed on this cluster.",
@@ -427,6 +435,18 @@
         "observedAt": {
           "description": "ObservedAt is when this cluster's value was last sampled. A stale stamp distinguishes \"capacity dropped\" from \"the cluster stopped reporting\".",
           "$ref": "#/definitions/v1.Time"
+        },
+        "reportAvailable": {
+          "description": "ReportAvailable means the most recent collection verified the source object and registration. It does not imply that ObservedAt is fresh.",
+          "type": "boolean"
+        },
+        "reportResourceVersion": {
+          "description": "ReportResourceVersion identifies the source object read for this sample.",
+          "type": "string"
+        },
+        "reportUID": {
+          "description": "ReportUID identifies the member's root AcceleratorQuota.",
+          "type": "string"
         }
       }
     },

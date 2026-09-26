@@ -1,7 +1,10 @@
 package multicluster
 
 import (
+	"fmt"
 	"time"
+
+	"github.com/google/go-cmp/cmp"
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
@@ -169,6 +172,65 @@ var _ = ginkgo.Describe("Management-plane quota projection", ginkgo.Ordered, fun
 			},
 		})
 	}
+
+	ginkgo.It("persists identified hardware reports including an empty member pool", func() {
+		observed := metav1.NewTime(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+		want := map[string]v1beta1.AcceleratorClusterCapacityStatus{}
+		for _, tc := range []struct {
+			name        string
+			member      cluster
+			allocatable string
+		}{
+			{name: wcA, member: member1Cluster, allocatable: "3"},
+			{name: wcB, member: member2Cluster, allocatable: "0"},
+		} {
+			var registration v1beta1.WorkloadCluster
+			gomega.Expect(controlCluster.client.Get(controlCluster.ctx, client.ObjectKey{Name: tc.name}, &registration)).To(gomega.Succeed())
+			var report v1beta1.AcceleratorQuota
+			gomega.Eventually(func() error {
+				if err := tc.member.client.Get(tc.member.ctx, client.ObjectKey{Name: v1beta1.AcceleratorQuotaRootName}, &report); err != nil {
+					return err
+				}
+				report.Status.Capacity = []v1beta1.AcceleratorCapacityStatus{{
+					ResourceName: tpu, ResourceFlavor: flavor,
+					Allocatable: resource.MustParse(tc.allocatable), HighWaterMark: resource.MustParse("8"),
+					ObservedAt:  observed.DeepCopy(),
+					Attribution: &v1beta1.AcceleratorCapacityAttribution{FlavorUID: "example-flavor-uid", FlavorSetHash: "example-mapping", Complete: true, NodeLabels: map[string]string{"accelerator": "example-tpu"}},
+				}}
+				return tc.member.client.Status().Update(tc.member.ctx, &report)
+			}, eventuallyTimeout, eventuallyPoll).Should(gomega.Succeed())
+			want[tc.name] = v1beta1.AcceleratorClusterCapacityStatus{
+				Cluster: tc.name, ClusterUID: registration.UID, ReportUID: report.UID,
+				ReportResourceVersion: report.ResourceVersion, ReportAvailable: true,
+				Allocatable: resource.MustParse(tc.allocatable), HighWaterMark: resource.MustParse("8"),
+				ObservedAt: observed.DeepCopy(), Attribution: report.Status.Capacity[0].Attribution.DeepCopy(),
+			}
+		}
+		ginkgo.DeferCleanup(func() {
+			gomega.Eventually(func() error {
+				var root v1beta1.AcceleratorQuota
+				if err := member2Cluster.client.Get(member2Cluster.ctx, client.ObjectKey{Name: v1beta1.AcceleratorQuotaRootName}, &root); err != nil {
+					return err
+				}
+				root.Status.Capacity[0].Allocatable = resource.MustParse("1")
+				return member2Cluster.client.Status().Update(member2Cluster.ctx, &root)
+			}, eventuallyTimeout, eventuallyPoll).Should(gomega.Succeed())
+		})
+		gomega.Eventually(func() (string, error) {
+			var root v1beta1.AcceleratorQuota
+			if err := controlCluster.client.Get(controlCluster.ctx, client.ObjectKey{Name: v1beta1.AcceleratorQuotaRootName}, &root); err != nil {
+				return "", err
+			}
+			if len(root.Status.Capacity) != 1 {
+				return "", fmt.Errorf("waiting for aggregate report")
+			}
+			got := map[string]v1beta1.AcceleratorClusterCapacityStatus{}
+			for _, row := range root.Status.Capacity[0].PerCluster {
+				got[row.Cluster] = row
+			}
+			return cmp.Diff(want, got, cmp.Comparer(func(a, b resource.Quantity) bool { return a.Cmp(b) == 0 })), nil
+		}, eventuallyTimeout, eventuallyPoll).Should(gomega.BeEmpty())
+	})
 
 	ginkgo.It("splits one fleet budget across two real members", func() {
 		authorTree("120")

@@ -639,6 +639,24 @@ type AcceleratorClusterCapacityStatus struct {
 	// +required
 	Cluster string `json:"cluster"`
 
+	// ClusterUID identifies the registration through which the report was read.
+	// Omission cannot establish that a same-name cluster owns this sample.
+	// +optional
+	ClusterUID types.UID `json:"clusterUID,omitempty"`
+
+	// ReportUID identifies the member's root AcceleratorQuota.
+	// +optional
+	ReportUID types.UID `json:"reportUID,omitempty"`
+
+	// ReportResourceVersion identifies the source object read for this sample.
+	// +optional
+	ReportResourceVersion string `json:"reportResourceVersion,omitempty"`
+
+	// ReportAvailable means the most recent collection verified the source
+	// object and registration. It does not imply that ObservedAt is fresh.
+	// +optional
+	ReportAvailable bool `json:"reportAvailable,omitempty"`
+
 	// Allocatable is that cluster's schedulable quantity of the flavor.
 	// +optional
 	Allocatable resource.Quantity `json:"allocatable,omitempty"`
@@ -651,6 +669,10 @@ type AcceleratorClusterCapacityStatus struct {
 	// distinguishes "capacity dropped" from "the cluster stopped reporting".
 	// +optional
 	ObservedAt *metav1.Time `json:"observedAt,omitempty"`
+
+	// Attribution is the member's hardware mapping at observation time.
+	// +optional
+	Attribution *AcceleratorCapacityAttribution `json:"attribution,omitempty"`
 }
 
 // AcceleratorQuotaClusterStatus is one workload cluster's projection state,

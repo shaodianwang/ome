@@ -903,6 +903,34 @@ func schema_pkg_apis_ome_v1beta1_AcceleratorClusterCapacityStatus(ref common.Ref
 							Format:      "",
 						},
 					},
+					"clusterUID": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ClusterUID identifies the registration through which the report was read. Omission cannot establish that a same-name cluster owns this sample.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"reportUID": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ReportUID identifies the member's root AcceleratorQuota.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"reportResourceVersion": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ReportResourceVersion identifies the source object read for this sample.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"reportAvailable": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ReportAvailable means the most recent collection verified the source object and registration. It does not imply that ObservedAt is fresh.",
+							Type:        []string{"boolean"},
+							Format:      "",
+						},
+					},
 					"allocatable": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Allocatable is that cluster's schedulable quantity of the flavor.",
@@ -921,12 +949,18 @@ func schema_pkg_apis_ome_v1beta1_AcceleratorClusterCapacityStatus(ref common.Ref
 							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
 						},
 					},
+					"attribution": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Attribution is the member's hardware mapping at observation time.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorCapacityAttribution"),
+						},
+					},
 				},
 				Required: []string{"cluster"},
 			},
 		},
 		Dependencies: []string{
-			"k8s.io/apimachinery/pkg/api/resource.Quantity", "k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorCapacityAttribution", "k8s.io/apimachinery/pkg/api/resource.Quantity", "k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
 	}
 }
 
