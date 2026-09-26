@@ -1547,6 +1547,60 @@
         }
       }
     },
+    "v1beta1.CandidateAllocationStatus": {
+      "description": "CandidateAllocationStatus separates original, currently authorized, and desired floors. A zero current floor does not authorize deletion before traffic drains.",
+      "type": "object",
+      "required": [
+        "clusterUID",
+        "originalReplicas",
+        "currentReplicas",
+        "desiredReplicas"
+      ],
+      "properties": {
+        "capacity": {
+          "description": "Capacity is the accepted hardware sample, when capacity determines weight.",
+          "$ref": "#/definitions/v1beta1.PlacementCapacitySample"
+        },
+        "clusterUID": {
+          "type": "string",
+          "default": ""
+        },
+        "currentReplicas": {
+          "type": "integer",
+          "format": "int32",
+          "default": 0
+        },
+        "desiredReplicas": {
+          "type": "integer",
+          "format": "int32",
+          "default": 0
+        },
+        "drainRequested": {
+          "description": "DrainRequested withdraws this home from routing before physical removal.",
+          "type": "boolean"
+        },
+        "matchingTerms": {
+          "description": "MatchingTerms contains zero-based indexes into the source's affinity terms.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "int32",
+            "default": 0
+          },
+          "x-kubernetes-list-type": "set"
+        },
+        "originalReplicas": {
+          "type": "integer",
+          "format": "int32",
+          "default": 0
+        },
+        "weight": {
+          "description": "Weight is the effective static allocation weight, when applicable.",
+          "type": "integer",
+          "format": "int64"
+        }
+      }
+    },
     "v1beta1.CandidateAutoscalingStatus": {
       "description": "CandidateAutoscalingStatus is the per-home AutoscalerPolicy digest state the watch-funnel lifts off a derived InferenceService.",
       "type": "object",
@@ -1601,6 +1655,14 @@
           "type": "integer",
           "format": "int32"
         },
+        "allocation": {
+          "description": "Allocation is the persisted floor and identity of this member.",
+          "$ref": "#/definitions/v1beta1.CandidateAllocationStatus"
+        },
+        "appliedPlanID": {
+          "description": "AppliedPlanID identifies the allocation acknowledged by this member.",
+          "type": "string"
+        },
         "autoscaling": {
           "description": "Autoscaling mirrors this home's AutoscalerPolicy state so digest skew between homes is visible from the source InferenceService. Set only when the source references at least one policy.",
           "$ref": "#/definitions/v1beta1.CandidateAutoscalingStatus"
@@ -1613,6 +1675,10 @@
         "endpoint": {
           "description": "Endpoint is this candidate's own externally-addressable URL, mirrored from its derived InferenceService's status.url once admitted AND addressable. In Single mode only the winner carries one and the top-level PlacementStatus.Endpoint is authoritative; in All/Split mode every serving home carries its own, and this list is the source of truth an external LB/DNS consumes to route across homes. Empty until the home is addressable.",
           "$ref": "#/definitions/knative.URL"
+        },
+        "observationKnown": {
+          "description": "ObservationKnown distinguishes a current observation from retained evidence.",
+          "type": "boolean"
         },
         "phase": {
           "description": "Phase is the candidate's state.",
@@ -5283,6 +5349,150 @@
         }
       }
     },
+    "v1beta1.PlacementCapacityPool": {
+      "description": "PlacementCapacityPool is the evidence for one resource/flavor ratio.",
+      "type": "object",
+      "required": [
+        "resourceName",
+        "resourceFlavor",
+        "demand",
+        "allocatable",
+        "observedAt",
+        "reportUID",
+        "reportResourceVersion",
+        "attribution"
+      ],
+      "properties": {
+        "allocatable": {
+          "type": "integer",
+          "format": "int64",
+          "default": 0
+        },
+        "attribution": {
+          "default": {},
+          "$ref": "#/definitions/v1beta1.AcceleratorCapacityAttribution"
+        },
+        "demand": {
+          "type": "integer",
+          "format": "int64",
+          "default": 0
+        },
+        "observedAt": {
+          "$ref": "#/definitions/v1.Time"
+        },
+        "reportResourceVersion": {
+          "type": "string",
+          "default": ""
+        },
+        "reportUID": {
+          "type": "string",
+          "default": ""
+        },
+        "resourceFlavor": {
+          "type": "string",
+          "default": ""
+        },
+        "resourceName": {
+          "type": "string",
+          "default": ""
+        }
+      }
+    },
+    "v1beta1.PlacementCapacitySample": {
+      "description": "PlacementCapacitySample records the identified hardware and resolved demand used to normalize one member into nominal whole-replica capacity.",
+      "type": "object",
+      "required": [
+        "demandFingerprint",
+        "replicas",
+        "pools"
+      ],
+      "properties": {
+        "demandFingerprint": {
+          "type": "string",
+          "default": ""
+        },
+        "pools": {
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1beta1.PlacementCapacityPool"
+          },
+          "x-kubernetes-list-map-keys": [
+            "resourceName",
+            "resourceFlavor"
+          ],
+          "x-kubernetes-list-type": "map"
+        },
+        "replicas": {
+          "type": "integer",
+          "format": "int64",
+          "default": 0
+        }
+      }
+    },
+    "v1beta1.PlacementPlanStatus": {
+      "description": "PlacementPlanStatus identifies the allocation persisted before member writes. Original assignments remain fixed throughout a transition, including retargets.",
+      "type": "object",
+      "required": [
+        "id",
+        "revision",
+        "sourceUID",
+        "observedGeneration",
+        "inputDigest",
+        "requestedReplicas",
+        "assignedReplicas",
+        "unassignedReplicas",
+        "originalUnassignedReplicas"
+      ],
+      "properties": {
+        "assignedReplicas": {
+          "type": "integer",
+          "format": "int64",
+          "default": 0
+        },
+        "id": {
+          "type": "string",
+          "default": ""
+        },
+        "inputDigest": {
+          "description": "InputDigest identifies resolved source intent and accepted allocation inputs. Heartbeat timestamps and report resource versions do not change this digest.",
+          "type": "string",
+          "default": ""
+        },
+        "observedGeneration": {
+          "type": "integer",
+          "format": "int64",
+          "default": 0
+        },
+        "originalUnassignedReplicas": {
+          "description": "OriginalUnassignedReplicas retains the unassigned part of the original floor.",
+          "type": "integer",
+          "format": "int32",
+          "default": 0
+        },
+        "requestedReplicas": {
+          "description": "RequestedReplicas includes the assigned and unassigned desired floor.",
+          "type": "integer",
+          "format": "int64",
+          "default": 0
+        },
+        "revision": {
+          "description": "Revision increases for every accepted allocation or drain instruction.",
+          "type": "integer",
+          "format": "int64",
+          "default": 0
+        },
+        "sourceUID": {
+          "type": "string",
+          "default": ""
+        },
+        "unassignedReplicas": {
+          "type": "integer",
+          "format": "int32",
+          "default": 0
+        }
+      }
+    },
     "v1beta1.PlacementSpec": {
       "description": "PlacementSpec declares how the control plane selects the workload clusters an InferenceService is placed onto, and how many of them serve it. It subsumes the legacy ome.io/accelerator-requirements and ome.io/cluster-selector annotations in a typed, schema-validated form; when this field is nil the control plane still honors those annotations for backward compatibility.",
       "type": "object",
@@ -5339,6 +5549,10 @@
         "phase": {
           "description": "Phase is a coarse placement state.",
           "type": "string"
+        },
+        "plan": {
+          "description": "Plan is the durable authority for member allocation writes.",
+          "$ref": "#/definitions/v1beta1.PlacementPlanStatus"
         }
       }
     },

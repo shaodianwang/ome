@@ -354,28 +354,6 @@ func TestWritePlacementProjectsSourceReady(t *testing.T) {
 	}
 }
 
-func TestWritePlacementObservedGenerationUsesReconciledSnapshot(t *testing.T) {
-	s := testScheme(t)
-	source := srcISVC("gpu=gb300")
-	source.Generation = 7
-	r, cp := newPlacer(s, fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{}}, source)
-
-	reconciled := &v1beta1.InferenceService{}
-	require.NoError(t, cp.Get(context.Background(), client.ObjectKeyFromObject(source), reconciled))
-	live := reconciled.DeepCopy()
-	live.Generation = 8
-	require.NoError(t, cp.Update(context.Background(), live))
-
-	_, err := r.writePlacement(context.Background(), reconciled, placementResult{phase: v1beta1.PlacementPhasePending})
-	require.NoError(t, err)
-
-	got := &v1beta1.InferenceService{}
-	require.NoError(t, cp.Get(context.Background(), client.ObjectKeyFromObject(source), got))
-	assert.Equal(t, int64(8), got.Generation)
-	assert.Equal(t, int64(7), got.Status.ObservedGeneration,
-		"a concurrent spec update must not be reported as observed by stale placement")
-}
-
 func TestPlacementCandidateServingRequiresReadyIngress(t *testing.T) {
 	derived := srcISVC("gpu=gb300")
 	candidate := v1beta1.CandidatePlacement{

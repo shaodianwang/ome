@@ -34,6 +34,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workloadcluster"
+	"github.com/ome-projects/ome/pkg/placement/plan"
 )
 
 const (
@@ -1316,13 +1317,16 @@ func (r *Reconciler) writePlacement(ctx context.Context, isvc *v1beta1.Inference
 		if err := r.APIReader.Get(ctx, key, cur); err != nil {
 			return err
 		}
+		if !plan.SameSnapshot(isvc, cur) {
+			return plan.ErrStaleSnapshot
+		}
 		readyBefore := cur.Status.GetCondition(apis.ConditionReady)
 		if cur.Status.Placement == nil {
 			cur.Status.Placement = &v1beta1.PlacementStatus{}
 		}
 		cur.Status.Placement.Cluster = res.winner
 		cur.Status.Placement.Phase = res.phase
-		cur.Status.Placement.Candidates = res.candidates
+		cur.Status.Placement.Candidates = mergeCandidateObservations(cur.Status.Placement.Candidates, res.candidates)
 		cur.Status.Placement.Endpoint = res.url
 		cur.Status.URL = res.url
 		applyPolicyConditions(&cur.Status, policyConds)
@@ -1336,6 +1340,9 @@ func (r *Reconciler) writePlacement(ctx context.Context, isvc *v1beta1.Inference
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, nil
+		}
+		if errors.Is(err, plan.ErrStaleSnapshot) {
+			return ctrl.Result{RequeueAfter: r.requeue()}, nil
 		}
 		return ctrl.Result{}, err
 	}
