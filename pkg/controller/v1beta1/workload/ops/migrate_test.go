@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
+
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -4015,4 +4017,64 @@ func recreateCharacterizationSource(t *testing.T, f *migFixture, source *corev1.
 		t.Fatalf("recreated source UID = %q, want %q different from %q", fresh.UID, uid, source.UID)
 	}
 	return fresh
+}
+
+func TestPlacementPauseMigrationSurge(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		allocated bool
+	}{
+		{name: "fresh migration waits without effects"},
+		{name: "allocated migration finishes cleanup", allocated: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newSinglePodMigFixture(t)
+			const uuid = "migration-a"
+			f.records = []workload.MigrationRecord{mkMigRecord(uuid, 0, "node-a")}
+			if tt.allocated {
+				driveToSurgePods(t, f, uuid, 1)
+			}
+			beforePods := f.listPods(t)
+			beforeRecord := *f.record(t, uuid)
+			pass := func() bool {
+				t.Helper()
+				legacyResetExpectations(t)
+				in := f.input(t)
+				in.PauseNewSurge = true
+				req := &audit.MigrationRequest{SchemaVersion: audit.SchemaV1, Component: string(f.component), Instance: 0, FromNode: "node-a"}
+				done, accepted, err := Migrate(context.Background(), f.deps(), in, f.plan, 0, uuid, req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if diff := cmp.Diff(tt.allocated, accepted); diff != "" {
+					t.Errorf("accepted (-want +got):\n%s", diff)
+				}
+				return done
+			}
+			if !tt.allocated {
+				if pass() {
+					t.Fatal("fresh migration completed while held")
+				}
+				if diff := cmp.Diff(beforePods, f.listPods(t)); diff != "" {
+					t.Errorf("pods changed while held (-want +got):\n%s", diff)
+				}
+				if diff := cmp.Diff(beforeRecord, *f.record(t, uuid)); diff != "" {
+					t.Errorf("reservation changed while held (-want +got):\n%s", diff)
+				}
+				return
+			}
+			for i := 0; i < 10; i++ {
+				f.react(t)
+				if pass() {
+					break
+				}
+			}
+			if diff := cmp.Diff(workload.MigrationPhaseCompleted, f.record(t, uuid).Phase); diff != "" {
+				t.Errorf("migration phase (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(1, len(f.listPods(t))); diff != "" {
+				t.Errorf("physical pod count after cleanup (-want +got):\n%s", diff)
+			}
+		})
+	}
 }

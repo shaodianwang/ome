@@ -61,6 +61,11 @@ type InferenceReplicaList struct {
 // admission webhook rejects writes from other actors that lack the
 // ome.io/controller-write annotation.
 type InferenceReplicaSpec struct {
+	// PlacementExecution is allocation authority projected from a derived service.
+	// Its generation must be observed before the control plane uses member evidence.
+	// +optional
+	PlacementExecution *PlacementExecutionPolicy `json:"placementExecution,omitempty"`
+
 	// ParentRef names the InferenceService that owns this replica.
 	// Set by the ISVC controller at create time; immutable thereafter.
 	ParentRef ParentReference `json:"parentRef"`

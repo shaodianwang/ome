@@ -669,6 +669,27 @@ spec:
                   type: string
                 paused:
                   type: boolean
+                placementExecution:
+                  properties:
+                    clusterUID:
+                      type: string
+                    pauseSurge:
+                      type: boolean
+                    planID:
+                      type: string
+                    revision:
+                      format: int64
+                      minimum: 1
+                      type: integer
+                    sourceUID:
+                      type: string
+                  required:
+                    - clusterUID
+                    - pauseSurge
+                    - planID
+                    - revision
+                    - sourceUID
+                  type: object
                 replicas:
                   format: int32
                   type: integer

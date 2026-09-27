@@ -51,6 +51,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/placement/protocol"
 )
 
 // IsIRManagedComponent returns true when the given Component should be
@@ -81,6 +82,8 @@ var isvcGVK = v1beta1.SchemeGroupVersion.WithKind("InferenceService")
 // it hands the IR controller the exact same per-pod template the
 // dispatch site computed.
 type Params struct {
+	placementExecution *v1beta1.PlacementExecutionPolicy
+
 	// ISVC is the parent InferenceService. The projector reads
 	// ISVC.Name / Namespace / UID for IR naming + owner-ref, and
 	// passes Spec.<component>.Lifecycle into the IR Spec.
@@ -194,11 +197,9 @@ type Params struct {
 //
 // Idempotent: the second invocation with the same Params produces the
 // same Spec and no-ops (projectionUnchanged skips the write). On a real
-// change it issues a merge patch of only the diffed fields — with no
-// ResourceVersion precondition, so a concurrent IR status write from the
-// IR controller can't turn it into an optimistic-lock conflict. The
-// retry.RetryOnConflict wrapper remains for the racing-create path, which
-// synthesizes a Conflict.
+// change it patches only the diffed fields. Placement-managed projections
+// use an optimistic lock so concurrent writes cannot regress plan authority.
+// Ordinary local projections do not contend with IR status writes.
 //
 // Errors are wrapped with the offending IR namespace/name for grep-
 // ability in operator logs — except apierrors.IsConflict, which callers
@@ -207,6 +208,11 @@ func EnsureInferenceReplica(ctx context.Context, p Params) (*v1beta1.InferenceRe
 	if err := validateParams(p); err != nil {
 		return nil, err
 	}
+	policy, err := protocol.FromDerived(p.ISVC)
+	if err != nil {
+		return nil, err
+	}
+	p.placementExecution = policy
 	p = applyQuotaGovernance(p)
 
 	name := InferenceReplicaName(p.ISVC.Name, p.Component)
@@ -222,7 +228,7 @@ func EnsureInferenceReplica(ctx context.Context, p Params) (*v1beta1.InferenceRe
 	if p.Reader != nil {
 		reads = p.Reader
 	}
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		ir := &v1beta1.InferenceReplica{}
 		getErr := reads.Get(ctx, key, ir)
 		switch {
@@ -251,6 +257,9 @@ func EnsureInferenceReplica(ctx context.Context, p Params) (*v1beta1.InferenceRe
 		case getErr != nil:
 			return fmt.Errorf("get IR %s/%s: %w", p.ISVC.Namespace, name, getErr)
 		}
+		if err := protocol.Authorize(ir.Spec.PlacementExecution, policy); err != nil {
+			return fmt.Errorf("project IR %s/%s: %w", p.ISVC.Namespace, name, err)
+		}
 
 		// IR exists - apply the desired spec on top of the live object. The
 		// pacing partition is projected; the rest of the pacing block (the
@@ -270,12 +279,10 @@ func EnsureInferenceReplica(ctx context.Context, p Params) (*v1beta1.InferenceRe
 			return nil
 		}
 
-		// Merge patch (no ResourceVersion precondition) so a concurrent
-		// IR status write from the IR controller doesn't turn this into an
-		// optimistic-lock conflict — the projector only owns spec/metadata
-		// fields, never status. RetryOnConflict still wraps the Get→patch
-		// for the racing-create path below, which synthesizes a Conflict.
 		patch := client.MergeFrom(original)
+		if policy != nil {
+			patch = client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{})
+		}
 
 		// Every write bumps the IR's generation, and a write on every pass
 		// starves each fresh-snapshot consumer downstream — ObservedGeneration
@@ -429,6 +436,7 @@ func applyDesiredSpec(ir *v1beta1.InferenceReplica, p Params, name string) {
 	ir.Spec.ParentRef = v1beta1.ParentReference{
 		Name: p.ISVC.Name,
 	}
+	ir.Spec.PlacementExecution = p.placementExecution.DeepCopy()
 	ir.Spec.Component = p.Component
 	ir.Spec.Replicas = desiredReplicas(ir, p)
 	ir.Spec.Runners = runnersFromParams(p)

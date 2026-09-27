@@ -25,6 +25,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	workloadstatus "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
+	"github.com/ome-projects/ome/pkg/placement/protocol"
 )
 
 // irGVK is the GroupVersionKind every IR-driven workload reconcile
@@ -224,6 +225,22 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 		input.UpdateGate = func(strategy workloadtypes.UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, workloadtypes.RolloutHoldGate, string) {
 			allowed, gate, reason := coordination.EvaluateUpdateGate(ctx, r.liveReader(), parent, ir.Spec.Component, r.Recorder, coordDefaults, strategy, inFlightSurge, inFlightUnavail)
 			return allowed, workloadtypes.RolloutHoldGate(gate), reason
+		}
+	}
+	if policy := ir.Spec.PlacementExecution; policy != nil {
+		input.PauseNewSurge = policy.PauseSurge || protocol.Validate(policy) != nil
+		coordinationGate := input.UpdateGate
+		input.UpdateGate = func(strategy workloadtypes.UpdateStrategyType, surge, unavailable int32) (bool, workloadtypes.RolloutHoldGate, string) {
+			if err := protocol.Validate(policy); err != nil {
+				return false, workloadtypes.RolloutHoldGateBudget, err.Error()
+			}
+			if policy.PauseSurge && strategy == workloadtypes.UpdateStrategySurgeThenDrain {
+				return false, workloadtypes.RolloutHoldGateBudget, "placement transition holds new member surge"
+			}
+			if coordinationGate != nil {
+				return coordinationGate(strategy, surge, unavailable)
+			}
+			return true, "", ""
 		}
 	}
 	// The migration audit ledger (history) lives on the user-facing

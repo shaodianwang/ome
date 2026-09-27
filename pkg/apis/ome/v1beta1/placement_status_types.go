@@ -81,3 +81,16 @@ type PlacementCapacityPool struct {
 	ReportResourceVersion string                         `json:"reportResourceVersion"`
 	Attribution           AcceleratorCapacityAttribution `json:"attribution"`
 }
+
+// PlacementExecutionPolicy carries source allocation authority to a member's
+// component reconciler. It is absent for locally managed services.
+type PlacementExecutionPolicy struct {
+	PlanID string `json:"planID"`
+	// +kubebuilder:validation:Minimum=1
+	Revision   int64     `json:"revision"`
+	SourceUID  types.UID `json:"sourceUID"`
+	ClusterUID types.UID `json:"clusterUID"`
+	// PauseSurge prevents new surplus-producing operations while existing
+	// operations retain their reservations and may finish cleanup.
+	PauseSurge bool `json:"pauseSurge"`
+}

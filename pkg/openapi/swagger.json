@@ -3447,6 +3447,10 @@
           "description": "Paused, when true, stops the InferenceReplica controller from initiating fleet changes: Update, Create, and Migration operations are neither started nor advanced. The component's RestartPolicy keeps repairing existing Instances at their current revision unless PauseMode is Freeze. In-flight operations resume on unpause.",
           "type": "boolean"
         },
+        "placementExecution": {
+          "description": "PlacementExecution is allocation authority projected from a derived service. Its generation must be observed before the control plane uses member evidence.",
+          "$ref": "#/definitions/v1beta1.PlacementExecutionPolicy"
+        },
         "replicas": {
           "description": "Replicas is the desired Instance count. The HPA / KEDA scale subresource writes this field. Defaults to 1 when omitted.",
           "type": "integer",
@@ -5427,6 +5431,41 @@
           "type": "integer",
           "format": "int64",
           "default": 0
+        }
+      }
+    },
+    "v1beta1.PlacementExecutionPolicy": {
+      "description": "PlacementExecutionPolicy carries source allocation authority to a member's component reconciler. It is absent for locally managed services.",
+      "type": "object",
+      "required": [
+        "planID",
+        "revision",
+        "sourceUID",
+        "clusterUID",
+        "pauseSurge"
+      ],
+      "properties": {
+        "clusterUID": {
+          "type": "string",
+          "default": ""
+        },
+        "pauseSurge": {
+          "description": "PauseSurge prevents new surplus-producing operations while existing operations retain their reservations and may finish cleanup.",
+          "type": "boolean",
+          "default": false
+        },
+        "planID": {
+          "type": "string",
+          "default": ""
+        },
+        "revision": {
+          "type": "integer",
+          "format": "int64",
+          "default": 0
+        },
+        "sourceUID": {
+          "type": "string",
+          "default": ""
         }
       }
     },

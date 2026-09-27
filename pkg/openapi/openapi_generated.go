@@ -144,6 +144,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ParentReference":                  schema_pkg_apis_ome_v1beta1_ParentReference(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementCapacityPool":            schema_pkg_apis_ome_v1beta1_PlacementCapacityPool(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementCapacitySample":          schema_pkg_apis_ome_v1beta1_PlacementCapacitySample(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementExecutionPolicy":         schema_pkg_apis_ome_v1beta1_PlacementExecutionPolicy(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementPlanStatus":              schema_pkg_apis_ome_v1beta1_PlacementPlanStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementSpec":                    schema_pkg_apis_ome_v1beta1_PlacementSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementStatus":                  schema_pkg_apis_ome_v1beta1_PlacementStatus(ref),
@@ -6187,6 +6188,12 @@ func schema_pkg_apis_ome_v1beta1_InferenceReplicaSpec(ref common.ReferenceCallba
 				Description: "InferenceReplicaSpec is the desired state of one (ISVC, Component) workload. The InferenceService controller is the sole writer; the admission webhook rejects writes from other actors that lack the ome.io/controller-write annotation.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
+					"placementExecution": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PlacementExecution is allocation authority projected from a derived service. Its generation must be observed before the control plane uses member evidence.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementExecutionPolicy"),
+						},
+					},
 					"parentRef": {
 						SchemaProps: spec.SchemaProps{
 							Description: "ParentRef names the InferenceService that owns this replica. Set by the ISVC controller at create time; immutable thereafter.",
@@ -6310,7 +6317,7 @@ func schema_pkg_apis_ome_v1beta1_InferenceReplicaSpec(ref common.ReferenceCallba
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaPacing", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ParentReference", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.Runner"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaPacing", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ParentReference", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementExecutionPolicy", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.Runner"},
 	}
 }
 
@@ -9651,6 +9658,56 @@ func schema_pkg_apis_ome_v1beta1_PlacementCapacitySample(ref common.ReferenceCal
 		},
 		Dependencies: []string{
 			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementCapacityPool"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_PlacementExecutionPolicy(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "PlacementExecutionPolicy carries source allocation authority to a member's component reconciler. It is absent for locally managed services.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"planID": {
+						SchemaProps: spec.SchemaProps{
+							Default: "",
+							Type:    []string{"string"},
+							Format:  "",
+						},
+					},
+					"revision": {
+						SchemaProps: spec.SchemaProps{
+							Default: 0,
+							Type:    []string{"integer"},
+							Format:  "int64",
+						},
+					},
+					"sourceUID": {
+						SchemaProps: spec.SchemaProps{
+							Default: "",
+							Type:    []string{"string"},
+							Format:  "",
+						},
+					},
+					"clusterUID": {
+						SchemaProps: spec.SchemaProps{
+							Default: "",
+							Type:    []string{"string"},
+							Format:  "",
+						},
+					},
+					"pauseSurge": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PauseSurge prevents new surplus-producing operations while existing operations retain their reservations and may finish cleanup.",
+							Default:     false,
+							Type:        []string{"boolean"},
+							Format:      "",
+						},
+					},
+				},
+				Required: []string{"planID", "revision", "sourceUID", "clusterUID", "pauseSurge"},
+			},
+		},
 	}
 }
 
