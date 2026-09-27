@@ -9755,6 +9755,14 @@ func schema_pkg_apis_ome_v1beta1_PlacementPlanStatus(ref common.ReferenceCallbac
 							Format:      "",
 						},
 					},
+					"pauseSurge": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PauseSurge keeps new member rollout reservations stopped while placement owns the shared transition allowance. Releasing it creates a new revision.",
+							Default:     false,
+							Type:        []string{"boolean"},
+							Format:      "",
+						},
+					},
 					"requestedReplicas": {
 						SchemaProps: spec.SchemaProps{
 							Description: "RequestedReplicas includes the assigned and unassigned desired floor.",
@@ -9786,7 +9794,7 @@ func schema_pkg_apis_ome_v1beta1_PlacementPlanStatus(ref common.ReferenceCallbac
 						},
 					},
 				},
-				Required: []string{"id", "revision", "sourceUID", "observedGeneration", "inputDigest", "requestedReplicas", "assignedReplicas", "unassignedReplicas", "originalUnassignedReplicas"},
+				Required: []string{"id", "revision", "sourceUID", "observedGeneration", "inputDigest", "pauseSurge", "requestedReplicas", "assignedReplicas", "unassignedReplicas", "originalUnassignedReplicas"},
 			},
 		},
 	}
@@ -14645,6 +14653,13 @@ func schema_pkg_apis_ome_v1beta1_TrafficMapSpec(ref common.ReferenceCallback) co
 				Description: "TrafficMapSpec is the computed routing table. It is a machine-written declarative artifact — the routing controller recomputes it whenever status.placement or the home's quota allocation changes; the publisher consumes it as desired state. A validating webhook may reject writes from non-controller users.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
+					"placementPlanID": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PlacementPlanID identifies the accepted allocation behind this routing table. Publication must acknowledge this plan before a placement drains.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 					"service": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Service is the routed logical service — the InferenceService name. Equal to metadata.name in v1; a distinct field leaves room for a future many-ISVC-to-one-service map.",

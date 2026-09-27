@@ -97,6 +97,8 @@ func TestPersistPlanAcrossRestartAndRetarget(t *testing.T) {
 			p.Assignments["member-a"] = a
 		}},
 		{name: "return to earlier allocation", wantRevision: 5, mutate: func(p *Proposal) { *p = proposalFixture() }},
+		{name: "pause acquires new authority", wantRevision: 6, mutate: func(p *Proposal) { p.PauseSurge = true }},
+		{name: "release acquires new authority", wantRevision: 7, mutate: func(p *Proposal) { p.PauseSurge = false }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if tt.mutate != nil {

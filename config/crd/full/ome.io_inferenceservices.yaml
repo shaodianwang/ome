@@ -32495,6 +32495,8 @@ spec:
                           format: int32
                           minimum: 0
                           type: integer
+                        pauseSurge:
+                          type: boolean
                         requestedReplicas:
                           format: int64
                           minimum: 0
@@ -32515,6 +32517,7 @@ spec:
                         - inputDigest
                         - observedGeneration
                         - originalUnassignedReplicas
+                        - pauseSurge
                         - requestedReplicas
                         - revision
                         - sourceUID

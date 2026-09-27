@@ -18,6 +18,9 @@ type PlacementPlanStatus struct {
 	// InputDigest identifies resolved source intent and accepted allocation inputs.
 	// Heartbeat timestamps and report resource versions do not change this digest.
 	InputDigest string `json:"inputDigest"`
+	// PauseSurge keeps new member rollout reservations stopped while placement
+	// owns the shared transition allowance. Releasing it creates a new revision.
+	PauseSurge bool `json:"pauseSurge"`
 	// RequestedReplicas includes the assigned and unassigned desired floor.
 	// +kubebuilder:validation:Minimum=0
 	RequestedReplicas int64 `json:"requestedReplicas"`

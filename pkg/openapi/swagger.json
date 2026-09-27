@@ -5478,6 +5478,7 @@
         "sourceUID",
         "observedGeneration",
         "inputDigest",
+        "pauseSurge",
         "requestedReplicas",
         "assignedReplicas",
         "unassignedReplicas",
@@ -5508,6 +5509,11 @@
           "type": "integer",
           "format": "int32",
           "default": 0
+        },
+        "pauseSurge": {
+          "description": "PauseSurge keeps new member rollout reservations stopped while placement owns the shared transition allowance. Releasing it creates a new revision.",
+          "type": "boolean",
+          "default": false
         },
         "requestedReplicas": {
           "description": "RequestedReplicas includes the assigned and unassigned desired floor.",
@@ -8295,6 +8301,10 @@
           "description": "ObservedISVCGeneration is the InferenceService generation this table was computed from, so a consumer can detect staleness relative to the source.",
           "type": "integer",
           "format": "int64"
+        },
+        "placementPlanID": {
+          "description": "PlacementPlanID identifies the accepted allocation behind this routing table. Publication must acknowledge this plan before a placement drains.",
+          "type": "string"
         },
         "service": {
           "description": "Service is the routed logical service — the InferenceService name. Equal to metadata.name in v1; a distinct field leaves room for a future many-ISVC-to-one-service map.",

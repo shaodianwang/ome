@@ -172,6 +172,11 @@ type TrafficMapList struct {
 // consumes it as desired state. A validating webhook may reject writes from
 // non-controller users.
 type TrafficMapSpec struct {
+	// PlacementPlanID identifies the accepted allocation behind this routing
+	// table. Publication must acknowledge this plan before a placement drains.
+	// +optional
+	PlacementPlanID string `json:"placementPlanID,omitempty"`
+
 	// Service is the routed logical service — the InferenceService name. Equal to
 	// metadata.name in v1; a distinct field leaves room for a future
 	// many-ISVC-to-one-service map.

@@ -35,6 +35,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workloadcluster"
 	"github.com/ome-projects/ome/pkg/placement/plan"
+	"github.com/ome-projects/ome/pkg/placement/protocol"
 )
 
 const (
@@ -1104,8 +1105,12 @@ func (r *Reconciler) derivedFor(src *v1beta1.InferenceService) (*v1beta1.Inferen
 // applyDerived create-or-updates the derived ISVC `desired` on the target
 // cluster.
 func (r *Reconciler) applyDerived(ctx context.Context, cluster string, cl client.Client, src, desired *v1beta1.InferenceService) error {
+	policy, err := protocol.FromDerived(desired)
+	if err != nil {
+		return err
+	}
 	target := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: desired.Name, Namespace: desired.Namespace}}
-	_, err := controllerutil.CreateOrUpdate(ctx, cl, target, func() error {
+	_, err = controllerutil.CreateOrUpdate(ctx, cl, target, func() error {
 		// Origin-guard the apply, mirroring the origin guard on the delete path
 		// (deleteDerivedOn): a target that already exists (CreateOrUpdate's Get
 		// populated it, so ResourceVersion is set) and is NOT a derived of THIS
@@ -1119,6 +1124,18 @@ func (r *Reconciler) applyDerived(ctx context.Context, cluster string, cl client
 		if target.ResourceVersion != "" && !isOurDerived(target, src) {
 			return fmt.Errorf("refusing to overwrite non-derived InferenceService %s/%s on candidate cluster: not a placement derived of control plane %q",
 				target.Namespace, target.Name, r.ControlPlaneID)
+		}
+		current, err := protocol.FromDerived(target)
+		if err != nil {
+			return err
+		}
+		if err := protocol.Authorize(current, policy); err != nil {
+			return err
+		}
+		if policy != nil {
+			if err := r.checkPlanCurrent(ctx, src); err != nil {
+				return err
+			}
 		}
 		// Before the wholesale re-stamp below overwrites it, the live remote
 		// spec is the evidence for the FieldPruned detector: a member apiserver

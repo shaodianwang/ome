@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -35,6 +36,12 @@ func TestPlanStorageCompatibility(t *testing.T) {
 		want  error
 	}{
 		{name: "current schema"},
+		{name: "schema without surge coordination", prune: func(fields map[string]apiextensionsv1.JSONSchemaProps) {
+			stored := fields["plan"]
+			delete(stored.Properties, "pauseSurge")
+			stored.Required = slices.DeleteFunc(stored.Required, func(name string) bool { return name == "pauseSurge" })
+			fields["plan"] = stored
+		}, want: plan.ErrSchemaUnsupported},
 		{name: "schema without plan authority", prune: func(fields map[string]apiextensionsv1.JSONSchemaProps) { delete(fields, "plan") }, want: plan.ErrSchemaUnsupported},
 		{name: "schema without candidate allocations", prune: func(fields map[string]apiextensionsv1.JSONSchemaProps) {
 			delete(fields["candidates"].Items.Schema.Properties, "allocation")
@@ -86,7 +93,7 @@ func TestPlanStorageCompatibility(t *testing.T) {
 						t.Fatal(err)
 					}
 					before := source.DeepCopy()
-					proposal := plan.Proposal{InputDigest: "intent-a", UnassignedReplicas: 2, Assignments: map[string]v1beta1.CandidateAllocationStatus{
+					proposal := plan.Proposal{InputDigest: "intent-a", PauseSurge: true, UnassignedReplicas: 2, Assignments: map[string]v1beta1.CandidateAllocationStatus{
 						"member-a": {ClusterUID: "registration-a", OriginalReplicas: 6, CurrentReplicas: 6, DesiredReplicas: 4, MatchingTerms: []int32{0}},
 						"member-b": {ClusterUID: "registration-b", OriginalReplicas: 0, CurrentReplicas: 0, DesiredReplicas: 0},
 					}}
@@ -122,7 +129,7 @@ func TestPlanStorageCompatibility(t *testing.T) {
 					}
 					want := &v1beta1.PlacementStatus{Plan: &v1beta1.PlacementPlanStatus{
 						ID: got.Status.Placement.Plan.ID, Revision: 1, SourceUID: source.UID, ObservedGeneration: source.Generation,
-						InputDigest: "intent-a", RequestedReplicas: 6, AssignedReplicas: 4, UnassignedReplicas: 2,
+						InputDigest: "intent-a", PauseSurge: true, RequestedReplicas: 6, AssignedReplicas: 4, UnassignedReplicas: 2,
 					}}
 					for _, cluster := range []string{"member-a", "member-b"} {
 						allocation := proposal.Assignments[cluster]

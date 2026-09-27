@@ -133,6 +133,8 @@ spec:
               observedISVCGeneration:
                 format: int64
                 type: integer
+              placementPlanID:
+                type: string
               service:
                 type: string
             required:

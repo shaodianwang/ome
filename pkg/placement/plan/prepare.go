@@ -20,6 +20,7 @@ func prepare(source *v1beta1.InferenceService, proposal Proposal) (*v1beta1.Plac
 	}
 	out := &v1beta1.PlacementStatus{Plan: &v1beta1.PlacementPlanStatus{
 		SourceUID: source.UID, ObservedGeneration: source.Generation, InputDigest: proposal.InputDigest,
+		PauseSurge:         proposal.PauseSurge,
 		UnassignedReplicas: proposal.UnassignedReplicas, OriginalUnassignedReplicas: proposal.OriginalUnassignedReplicas,
 	}}
 	originalTotal := int64(proposal.OriginalUnassignedReplicas)

@@ -27,6 +27,7 @@ var (
 // Callers carry original floors across partial application and retargets.
 type Proposal struct {
 	InputDigest                string
+	PauseSurge                 bool
 	OriginalUnassignedReplicas int32
 	UnassignedReplicas         int32
 	Assignments                map[string]v1beta1.CandidateAllocationStatus
