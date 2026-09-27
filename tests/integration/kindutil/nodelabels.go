@@ -55,6 +55,24 @@ func LabelNode(ctx context.Context, c client.Client, nodeName, key, value string
 	return c.Patch(ctx, node, client.MergeFrom(base))
 }
 
+// RemoveNodeLabel deletes key from one node's labels; a node without the key
+// is left untouched.
+func RemoveNodeLabel(ctx context.Context, c client.Client, nodeName, key string) error {
+	node := &corev1.Node{}
+	if err := c.Get(ctx, client.ObjectKey{Name: nodeName}, node); err != nil {
+		return fmt.Errorf("RemoveNodeLabel: get %s: %w", nodeName, err)
+	}
+	if _, present := node.Labels[key]; !present {
+		return nil
+	}
+	base := node.DeepCopy()
+	delete(node.Labels, key)
+	if err := c.Patch(ctx, node, client.MergeFrom(base)); err != nil {
+		return fmt.Errorf("RemoveNodeLabel: patch %s: %w", nodeName, err)
+	}
+	return nil
+}
+
 // labelAllNodes is the all-nodes implementation backing the
 // per-model helpers above. Walks the live node list and patches
 // each that needs the label.

@@ -6,9 +6,8 @@
 #
 # Usage: sh .buildkite/mirror_image.sh [--only-main] <ecr-name> <tag> [<tag>...]
 #
-# --only-main: exit 0 on non-main branches (use when the corresponding build
-#              step is gated to main via push-branches=main; nothing on dev
-#              to mirror otherwise).
+# --only-main: exit 0 on non-main branches; prod receives main-qualified
+#              images only, whatever a branch build pushed to dev.
 set -eu
 
 if [ "${1:-}" = "--only-main" ]; then

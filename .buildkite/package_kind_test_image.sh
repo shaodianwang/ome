@@ -22,7 +22,7 @@ fi
 target="${repo}/kind-ci:test-${short_sha}-${build_number}"
 # One bundle per KIND suite; every one is baked into the same runner image and
 # selected at run time by OME_KIND_TEST_BUNDLE.
-artifact_bundles="omenative-kind-test.tgz multicluster-kind-test.tgz omenative-upgrade-kind-test.tgz"
+artifact_bundles="omenative-kind-test.tgz multicluster-kind-test.tgz omenative-upgrade-kind-test.tgz alfred-kind-test.tgz"
 
 command -v buildkite-agent >/dev/null 2>&1 || {
   echo "buildkite-agent is required to download the test bundle" >&2
@@ -72,6 +72,26 @@ kueue_image="${KUEUE_IMAGE_REPO:-registry.k8s.io/kueue/kueue}:${kueue_version}"
 echo "--- pull ${kueue_image}"
 crane pull --platform linux/amd64 "$kueue_image" "$stage/images/kueue.tar"
 crane validate --tarball "$stage/images/kueue.tar"
+
+# The alfred lane deploys the image this pipeline built from .alfred-oss-ref;
+# the runner has no egress, so it travels as a tarball like the rest of
+# /images. The generator sets OME_ALFRED_IMAGE_REQUIRED only when that lane
+# is on, and then this step has already waited for the build, so a missing
+# image is a defect to fail on rather than something to skip.
+if [ "${OME_ALFRED_IMAGE_REQUIRED:-0}" = "1" ]; then
+  AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID:-588845226011}"
+  ECR_REGISTRY="${ECR_REGISTRY:-${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com}"
+  alfred_image="${ECR_REGISTRY}/msl_infra/alfred:${short_sha}"
+  ecr_login_for dev crane auth login --username AWS --password-stdin "$ECR_REGISTRY"
+  echo "--- pull ${alfred_image}"
+  if ! probe=$(crane manifest "$alfred_image" 2>&1 >/dev/null); then
+    echo "alfred image ${alfred_image} is not in the dev registry: ${probe}" >&2
+    exit 1
+  fi
+  crane pull --platform linux/amd64 "$alfred_image" "$stage/images/alfred.tar"
+  crane validate --tarball "$stage/images/alfred.tar"
+  printf '%s\n' "$alfred_image" >"$stage/images/alfred-image"
+fi
 
 # The operator-upgrade identity gate's first pass installs OME with
 # --skip-build (see deploy-ome-kind-from-image.sh). Under that flag,

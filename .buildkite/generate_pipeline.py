@@ -3,7 +3,9 @@
 
 Image builds and chart packaging always run; the per-step scripts only
 push to ECR when BUILDKITE_BRANCH=main, so PR builds validate without
-publishing.
+publishing. The exception is _push_every_branch_images(): those images
+push their commit tag from every branch because a KIND lane pulls them
+back out of the dev registry.
 
 Usage:
     python3 .buildkite/generate_pipeline.py | buildkite-agent pipeline upload
@@ -79,6 +81,7 @@ GKE_QUEUE = os.environ.get("GKE_KIND_QUEUE", "gke-tpu-v7x")
 REPO_ROOT = Path(__file__).resolve().parents[1]
 KIND_SUITE_DIR = REPO_ROOT / "tests/integration/singlecluster/controller/omenative_coordination_kind"
 MC_KIND_SUITE_DIR = REPO_ROOT / "tests/integration/multicluster/scaleout_kind"
+ALFRED_KIND_SUITE_DIR = REPO_ROOT / "tests/integration/singlecluster/controller/alfred_kind"
 EVAL_CASE_DIR = REPO_ROOT / "hack/omenative-testing/perm/isvcs"
 # Upstream ome-projects/ome commit the alfred image is built from; the
 # Dockerfile fetches that source itself, so the pin is passed as a build-arg.
@@ -97,6 +100,19 @@ MC_KIND_SPEC_GROUPS = (
     ("quota", "Multi-cluster Kueue quota", (
         "admission", "split_quota", "queue_routing",
     )),
+)
+
+# The alfred lane: one three-worker KIND cluster per group, exact ownership like
+# the coordination groups. _spec_groups_for rejects a mapped stem whose file
+# does not exist, so this tuple lists only the spec files present on the branch;
+# a new alfred spec is classified here in the commit that adds it.
+ALFRED_KIND_SPEC_GROUPS = (
+    ("observe", "Alfred observe and advise", ("observe", "recommend_only", "config_reload", "advisory", "ineligible")),
+    ("execute", "Alfred guarded execution", ("evacuate_single", "guard", "columnar_status", "no_capacity")),
+    ("budgets", "Alfred budgets and cooldowns", ("budget", "cooldown", "priority", "suspicion")),
+    ("maintenance-defrag", "Alfred maintenance and defrag", ("maintenance", "maintenance_window", "defrag")),
+    ("resilience", "Alfred resilience", ("ack_timeout", "leader_failover", "journal")),
+    ("shapes", "Alfred workload shapes", ("gang_evacuate", "partial_gang", "pd", "multi_instance")),
 )
 
 # Each group gets one three-node KIND cluster. Groups balance observed runtime
@@ -263,6 +279,9 @@ EVAL_SCHEDULERS = [""] + ([EVAL_GANG_SCHEDULER] if GKE_EVAL_SCHEDULER_ENABLED el
 # _gke_upgrade_identity_step). The step resolves its own previous-image
 # reference at run time, so this only needs to gate whether the step exists.
 GKE_UPGRADE_ENABLED = _truthy(os.environ.get("GKE_UPGRADE_ENABLED", "1"))
+# Kill switch for the alfred lane. Off also drops the package step's wait on
+# the alfred image build, so a broken alfred build cannot block the other lanes.
+GKE_ALFRED_ENABLED = _truthy(os.environ.get("GKE_ALFRED_ENABLED", "1"))
 
 BRANCH = os.environ.get("BUILDKITE_BRANCH", "")
 COMMIT = os.environ.get("BUILDKITE_COMMIT", "HEAD")
@@ -296,6 +315,20 @@ IMAGES = [
     # of the release marker.
     ("alfred", "alfred", "dockerfiles/alfred.Dockerfile"),
 ]
+
+
+def _push_every_branch_images() -> frozenset[str]:
+    """Images whose build pushes on every branch.
+
+    The alfred KIND lane loads its image from a tarball the package step
+    pulls out of the dev registry, so a PR must be able to publish it. With
+    the lane off nothing consumes a branch build, and the image pushes on
+    main only like every other. The prod mirror stays main-only for all.
+    """
+    if GKE_KIND_ENABLED and GKE_ALFRED_ENABLED:
+        return frozenset({"alfred"})
+    return frozenset()
+
 
 CHARTS = ["ome-crd", "ome-resources", "ome-isvc", "muse", "ome-scheduler", "ome-quota-manager"]
 
@@ -527,6 +560,10 @@ def _mc_kind_spec_files() -> list[str]:
     return _spec_files_in(MC_KIND_SUITE_DIR)
 
 
+def _alfred_kind_spec_files() -> list[str]:
+    return _spec_files_in(ALFRED_KIND_SUITE_DIR)
+
+
 def _today() -> datetime.date:
     """Indirection so the expiry check is testable without freezing the clock."""
     return datetime.date.today()
@@ -626,6 +663,10 @@ def _mc_kind_spec_groups() -> list[tuple[str, str, list[str]]]:
     return _spec_groups_for(MC_KIND_SUITE_DIR, MC_KIND_SPEC_GROUPS)
 
 
+def _alfred_kind_spec_groups() -> list[tuple[str, str, list[str]]]:
+    return _spec_groups_for(ALFRED_KIND_SUITE_DIR, ALFRED_KIND_SPEC_GROUPS)
+
+
 def _kind_focus(files: list[str]) -> str:
     """A -ginkgo.focus-file regex matching exactly the named spec files."""
     return "/(" + "|".join(re.escape(filename) for filename in files) + ")$"
@@ -667,6 +708,43 @@ def _mc_kind_group() -> str:
         "group": ":test_tube: Integration Tests (multi-cluster KIND on GKE)",
         "key": "integration-test-kind-mc-gke",
         "notify": [{"github_commit_status": {"context": "integration-test-kind-mc-gke"}}],
+        "steps": steps,
+    }
+    return _yaml_block([group], 2)
+
+
+def _alfred_kind_group() -> str:
+    """The alfred lane: one job per group, each on its own KIND cluster.
+
+    Soft-fail: the lane deploys an externally built component into the
+    cluster and its real-scheduler scenarios pay one-minute cooldown
+    floors, so its flake shape is unproven.
+    """
+    plugins = _gke_kind_plugins(_kind_ci_image(f"test-{COMMIT[:8]}-{BUILD_NUMBER}"))
+    steps = []
+    for slug, label, files in _alfred_kind_spec_groups():
+        file_label = "file" if len(files) == 1 else "files"
+        steps.append(
+            {
+                "label": f":test_tube: {label} ({len(files)} {file_label})",
+                "key": f"kind-gke-alfred-{slug}",
+                "depends_on": "package-kind-test-image",
+                "soft_fail": True,
+                "env": {
+                    "OME_KIND_TEST_BUNDLE": "/kind-test/alfred-kind-test.tgz",
+                    "OME_KIND_FOCUS": _kind_focus(files),
+                    "OME_KIND_TIMEOUT": "75m",
+                },
+                "agents": {"queue": GKE_QUEUE},
+                "command": "sh .buildkite/run_kind_tests_gke.sh",
+                "retry": {"automatic": _infra_retry_automatic()},
+                "plugins": plugins,
+            }
+        )
+    group = {
+        "group": ":test_tube: Integration Tests (alfred KIND on GKE)",
+        "key": "integration-test-kind-alfred-gke",
+        "notify": [{"github_commit_status": {"context": "integration-test-kind-alfred-gke"}}],
         "steps": steps,
     }
     return _yaml_block([group], 2)
@@ -828,15 +906,16 @@ def _gke_upgrade_identity_step() -> str:
 
 def _package_kind_test_image_step() -> str:
     """Put the exact Go test bundle in a commit-tagged runner image for GKE."""
-    dependencies = '    depends_on: "test"\n'
+    deps = ["test"]
     if BRANCH == "main":
-        dependencies = (
-            "    depends_on:\n"
-            '      - "test"\n'
-            '      - "mirror-kind-ci"\n'
-            '      - "mirror-canary-metrics"\n'
-            '      - "mirror-ome-scheduler"\n'
-        )
+        deps += ["mirror-kind-ci", "mirror-canary-metrics", "mirror-ome-scheduler"]
+    if GKE_ALFRED_ENABLED:
+        # The alfred lane's image is pulled from the dev registry at package
+        # time; the build must finish first and the script must treat a
+        # missing image as a failure.
+        deps.append("build-alfred")
+    dependencies = "    depends_on:\n" + "".join(f'      - "{d}"\n' for d in deps)
+    alfred_env = '      OME_ALFRED_IMAGE_REQUIRED: "1"\n' if GKE_ALFRED_ENABLED else ""
     return (
         '  - label: ":package: Package exact Go KIND runner"\n'
         '    key: "package-kind-test-image"\n'
@@ -845,8 +924,11 @@ def _package_kind_test_image_step() -> str:
         f"{_auto_retry(indent=4)}\n"
         "    env:\n"
         f'      AWS_REGION: "{AWS_REGION}"\n'
+        f'      ECR_REGISTRY: "{ECR_REGISTRY}"\n'
         f'      PROD_ECR_REGISTRY: "{PROD_ECR_REGISTRY}"\n'
+        f"{alfred_env}"
         "    secrets:\n"
+        '      - "ECR_AUTH_TOKEN"\n'
         '      - "PROD_ECR_AUTH_TOKEN"\n'
         "    agents:\n"
         f'      queue: "{BUILD_QUEUE}"\n'
@@ -1171,6 +1253,7 @@ def ci_steps() -> str:
               - ".buildkite/artifacts/omenative-kind-test.tgz"
               - ".buildkite/artifacts/multicluster-kind-test.tgz"
               - ".buildkite/artifacts/omenative-upgrade-kind-test.tgz"
+              - ".buildkite/artifacts/alfred-kind-test.tgz"
               - ".buildkite/artifacts/kind"
             agents:
               queue: "{DEFAULT_QUEUE}"
@@ -1328,6 +1411,8 @@ def ci_steps() -> str:
         if quarantine := _kind_quarantine_group():
             steps += "\n" + quarantine
         steps += "\n" + _mc_kind_group()
+        if GKE_ALFRED_ENABLED:
+            steps += "\n" + _alfred_kind_group()
     return steps
 
 
@@ -1340,9 +1425,11 @@ def _build_image_step(label: str, ecr_name: str, dockerfile: str) -> str:
     """Emit a cf-docker-image plugin step that builds + pushes to dev ECR.
 
     Builds on every branch (validates the Dockerfile); pushes only on
-    main via push-branches. Mirror to prod ECR is handled by
-    _mirror_image_step which copies the manifest at the registry layer
-    — no rebuild, no layer re-upload.
+    main via push-branches, except the images whose build pushes on every
+    branch (_push_every_branch_images): their commit tag from every branch
+    and `latest` from main only.
+    Mirror to prod ECR is handled by _mirror_image_step which copies the
+    manifest at the registry layer — no rebuild, no layer re-upload.
     """
     build_args = _image_build_args(label)
     args_block = ""
@@ -1350,6 +1437,12 @@ def _build_image_step(label: str, ecr_name: str, dockerfile: str) -> str:
         args_block = "                  args:\n" + "\n".join(
             f'                    - "{arg}"' for arg in build_args
         ) + "\n"
+    every_branch = label in _push_every_branch_images()
+    push_line = "push: true" if every_branch else 'push-branches: "main"'
+    # `latest` is main-only: the mirror step copies it to the prod registry,
+    # so a branch build of an every-branch image publishes its commit tag only.
+    tags = [COMMIT[:8]] if every_branch and BRANCH != "main" else ["latest", COMMIT[:8]]
+    tags_line = "tags: [" + ", ".join(f'"{tag}"' for tag in tags) + "]"
 
     return textwrap.dedent(
         f"""\
@@ -1371,8 +1464,8 @@ def _build_image_step(label: str, ecr_name: str, dockerfile: str) -> str:
                   build-context: "."
 {args_block.rstrip()}
                   platforms: ["linux/amd64", "linux/arm64"]
-                  push-branches: "main"
-                  tags: ["latest", "{COMMIT[:8]}"]
+                  {push_line}
+                  {tags_line}
                   login: true
 {_auto_retry(indent=18)}
                   tw-buildkit: true
@@ -1398,8 +1491,8 @@ def _mirror_image_step(label: str, ecr_name: str) -> str:
     manifest+blob copy, no rebuild and no docker daemon required (the
     ci-base image doesn't ship one). The script downloads crane on first
     run and uses cloud_oss for cross-account ECR auth via the shared
-    _ecr_login.sh helper. --only-main skips on PR branches (build step
-    only pushes on main, so there's nothing on dev to mirror otherwise).
+    _ecr_login.sh helper. --only-main skips on PR branches: prod receives
+    main-qualified images only, whatever a branch build pushed to dev.
     """
     short_sha = "${BUILDKITE_COMMIT:0:8}"
     return textwrap.dedent(

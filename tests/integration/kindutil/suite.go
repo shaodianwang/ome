@@ -87,7 +87,9 @@ type SuiteState struct {
 	Client client.Client
 
 	// Manager is the in-process controller-runtime manager. nil when
-	// SuiteOpts.Setup was nil (smoke-test pattern).
+	// SuiteOpts.Setup was nil (smoke-test pattern), and nil between
+	// StopManager and StartManager, so specs must re-read Suite().Manager
+	// after a restart rather than caching it.
 	Manager ctrl.Manager
 
 	managerMu     sync.Mutex
@@ -224,8 +226,35 @@ func shouldApplyCRDs(opts SuiteOpts) bool {
 	return opts.Deployed == nil || len(opts.CRDPaths) > 0
 }
 
+// StopManager stops the suite's in-process manager and waits for it to exit.
+// The cluster, client and suite context stay valid, so specs can observe how
+// an external component behaves while the controller is away. No-op when no
+// manager is running.
+func (s *SuiteState) StopManager() error {
+	if s == nil {
+		return fmt.Errorf("SuiteState is nil")
+	}
+	s.managerMu.Lock()
+	defer s.managerMu.Unlock()
+	s.stopManagerLocked()
+	return nil
+}
+
+// StartManager starts a fresh manager against the same cluster and setup
+// callback. It errors when a manager is already running or the suite was
+// started without a Setup.
+func (s *SuiteState) StartManager() error {
+	if s == nil {
+		return fmt.Errorf("SuiteState is nil")
+	}
+	s.managerMu.Lock()
+	defer s.managerMu.Unlock()
+	return s.startManagerLocked()
+}
+
 // RestartManager stops the suite's in-process manager, waits for it to exit,
-// and starts a fresh manager against the same cluster and setup callback. The
+// and starts a fresh manager against the same cluster and setup callback,
+// all under one lock so nothing can start or stop a manager in between. The
 // Kubernetes client and suite context remain valid, so specs can verify that
 // durable controller state resumes after process-local caches disappear.
 func (s *SuiteState) RestartManager() error {
@@ -234,26 +263,37 @@ func (s *SuiteState) RestartManager() error {
 	}
 	s.managerMu.Lock()
 	defer s.managerMu.Unlock()
+	s.stopManagerLocked()
+	return s.startManagerLocked()
+}
+
+func (s *SuiteState) stopManager() {
+	s.managerMu.Lock()
+	defer s.managerMu.Unlock()
+	s.stopManagerLocked()
+}
+
+// startManagerLocked starts the manager and records it. Requires managerMu
+// to be held.
+func (s *SuiteState) startManagerLocked() error {
 	if s.managerSetup == nil {
 		return fmt.Errorf("SuiteState has no manager setup callback")
 	}
 	if s.managerStop != nil {
-		s.managerStop()
+		return fmt.Errorf("manager is already running")
 	}
-	s.Manager = nil
-	s.managerStop = nil
 	mgr, stop, err := StartManager(s.Ctx, s.RestConfig, s.managerScheme, s.managerSetup)
 	if err != nil {
-		return fmt.Errorf("restart manager: %w", err)
+		return fmt.Errorf("start manager: %w", err)
 	}
 	s.Manager = mgr
 	s.managerStop = stop
 	return nil
 }
 
-func (s *SuiteState) stopManager() {
-	s.managerMu.Lock()
-	defer s.managerMu.Unlock()
+// stopManagerLocked stops any running manager and clears it. Requires
+// managerMu to be held.
+func (s *SuiteState) stopManagerLocked() {
 	if s.managerStop != nil {
 		s.managerStop()
 		s.managerStop = nil

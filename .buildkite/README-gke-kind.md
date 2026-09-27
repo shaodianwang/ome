@@ -182,3 +182,17 @@ A pin baked only into the Dockerfile therefore cannot reach the branch that
 raises it — the runner asks for a node image it has no egress to fetch and dies
 in `kind create cluster`. The `ARG`s in `dockerfiles/kind-ci.Dockerfile` are
 fallbacks for standalone use of the image; keep them tracking the two files.
+
+## Alfred lane
+
+`integration-test-kind-alfred-gke` runs `tests/integration/singlecluster/controller/alfred_kind`
+from `/kind-test/alfred-kind-test.tgz`, one four-node cluster (three workers)
+per group in `ALFRED_KIND_SPEC_GROUPS`. The suite deploys the alfred image this
+pipeline built from `.alfred-oss-ref`: `build-alfred` pushes its commit tag on
+every branch (`latest` stays main-only), `package_kind_test_image.sh` pulls that
+tag into `/images/alfred.tar`, and `run_kind_tests_gke.sh` exports
+`OME_ALFRED_IMAGE` after loading it. Kill switch: `GKE_ALFRED_ENABLED=0` drops
+the lane, the package step's wait on and requirement for the alfred image, and
+the every-branch push, so the image publishes on main only like every other.
+Soft-fail until it has soaked; promote by removing `soft_fail` in
+`_alfred_kind_group`.

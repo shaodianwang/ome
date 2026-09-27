@@ -21,7 +21,8 @@ import (
 // "fake-serving:v1") that pod specs use.
 type ImageBuildSpec struct {
 	// ContextDir is the docker build context directory, relative to
-	// the repo root. Must contain a Dockerfile.
+	// the repo root. Must contain the Dockerfile named by Dockerfile
+	// (default "Dockerfile").
 	ContextDir string
 
 	// Tag is the local image tag the build produces. Pod specs use
@@ -46,6 +47,15 @@ type ImageBuildSpec struct {
 	// tests need so kubelet's runtime-image equality check resolves
 	// the post-bump container as different from the pre-bump one.
 	BuildArgs map[string]string
+
+	// Dockerfile names the Dockerfile relative to ContextDir. Empty means
+	// ContextDir/Dockerfile, the docker default.
+	Dockerfile string
+
+	// RequireBuildKit forces DOCKER_BUILDKIT=1 for this build. Set it when
+	// the Dockerfile uses BuildKit-only syntax such as RUN --mount; the
+	// legacy builder (the harness default) rejects those instructions.
+	RequireBuildKit bool
 }
 
 // buildCache memoizes per-process which content-hashes we've already
@@ -53,13 +63,13 @@ type ImageBuildSpec struct {
 // same test binary doesn't redo the work.
 var (
 	buildCacheMu sync.Mutex
-	buildCache   = make(map[string]string) // ContextDir → built hash
+	buildCache   = make(map[string]string) // cache key (context dir, Dockerfile, build args) → content hash
 )
 
 // BuildAndLoadImages applies every spec in order: docker-build, tag,
 // then `kind load docker-image` into clusterName. Builds are skipped
-// when the context's content hash matches the last build for that
-// ContextDir within this test process.
+// when the context's content hash matches the last build for the same
+// ContextDir, Dockerfile and build args within this test process.
 //
 // Returns the first error encountered; partial progress is left in
 // place (the user can re-run with the offending spec excluded).
@@ -96,19 +106,19 @@ func buildAndLoad(ctx context.Context, clusterName string, spec ImageBuildSpec) 
 	if err != nil {
 		return fmt.Errorf("hash %s: %w", absCtx, err)
 	}
-	// Fold BuildArgs into the cache key so two specs over the same
-	// ContextDir that differ only by --build-arg both build (otherwise
-	// the second skip-because-cached and resolves to the first's
+	// Fold Dockerfile and BuildArgs into the cache key so two specs over
+	// the same ContextDir that differ only by -f or --build-arg both build
+	// (otherwise the second skips as cached and resolves to the first's
 	// image content, which is exactly what we're trying to avoid for
 	// in-place update tests).
-	cacheKey := absCtx + "|" + buildArgsCacheKey(spec.BuildArgs)
+	cacheKey := absCtx + "|" + spec.Dockerfile + "|" + buildArgsCacheKey(spec.BuildArgs)
 
 	buildCacheMu.Lock()
 	cached, hit := buildCache[cacheKey]
 	buildCacheMu.Unlock()
 
 	if !hit || cached != hash {
-		if err := dockerBuild(ctx, absCtx, spec.Tag, spec.BuildArgs); err != nil {
+		if err := dockerBuild(ctx, spec, absCtx); err != nil {
 			return err
 		}
 		buildCacheMu.Lock()
@@ -145,15 +155,9 @@ func buildArgsCacheKey(args map[string]string) string {
 	return strings.Join(parts, ",")
 }
 
-// dockerBuild runs `docker build -t <tag> [--build-arg KEY=VAL ...] <contextDir>`.
-// Defaults to DOCKER_BUILDKIT=0 (the legacy builder) — fake-serving's
-// Dockerfile is plain multi-stage with no BuildKit-only syntax, and forcing
-// buildx would require users to install the buildx component, which not
-// every Docker install ships with (notably colima + docker.io upstream).
-// A caller-set DOCKER_BUILDKIT wins: daemons running the containerd image
-// store (common in CI dind setups) reject the legacy builder, so CI exports
-// DOCKER_BUILDKIT=1.
-func dockerBuild(ctx context.Context, contextDir, tag string, buildArgs map[string]string) error {
+// dockerBuildArgv is the argv of `docker build` for one spec. Build args are
+// sorted so two specs that differ only in map order produce the same command.
+func dockerBuildArgv(contextDir, dockerfile, tag string, buildArgs map[string]string) []string {
 	args := []string{"build", "-t", tag}
 	keys := make([]string, 0, len(buildArgs))
 	for k := range buildArgs {
@@ -163,17 +167,53 @@ func dockerBuild(ctx context.Context, contextDir, tag string, buildArgs map[stri
 	for _, k := range keys {
 		args = append(args, "--build-arg", k+"="+buildArgs[k])
 	}
-	args = append(args, contextDir)
-	cmd := exec.CommandContext(ctx, "docker", args...)
-	cmd.Env = os.Environ()
-	if os.Getenv("DOCKER_BUILDKIT") == "" {
-		cmd.Env = append(cmd.Env, "DOCKER_BUILDKIT=0")
+	if dockerfile != "" {
+		args = append(args, "-f", filepath.Join(contextDir, dockerfile))
 	}
+	return append(args, contextDir)
+}
+
+// dockerBuildEnv returns the DOCKER_BUILDKIT assignment to append to the
+// build's environment, or "" to leave the caller's value alone. The harness
+// defaults to the legacy builder (see dockerBuild on why); a spec that
+// needs BuildKit says so and wins over any caller-set value.
+func dockerBuildEnv(requireBuildKit bool) string {
+	if requireBuildKit {
+		return "DOCKER_BUILDKIT=1"
+	}
+	if os.Getenv("DOCKER_BUILDKIT") == "" {
+		return "DOCKER_BUILDKIT=0"
+	}
+	return ""
+}
+
+// dockerBuildEnviron is the build's environment: base plus the DOCKER_BUILDKIT
+// assignment dockerBuildEnv chose. exec keeps the last value of a duplicate
+// key, so appending is what lets a required BuildKit win over a caller-set
+// DOCKER_BUILDKIT=0.
+func dockerBuildEnviron(base []string, requireBuildKit bool) []string {
+	env := dockerBuildEnv(requireBuildKit)
+	if env == "" {
+		return base
+	}
+	return append(append([]string(nil), base...), env)
+}
+
+// dockerBuild runs `docker build -t <tag> [--build-arg KEY=VAL ...] [-f <ctx>/<dockerfile>] <contextDir>`.
+// The legacy builder (DOCKER_BUILDKIT=0) is the default because it needs no
+// buildx component, which not every Docker install ships with (notably
+// colima + docker.io upstream). A spec whose Dockerfile needs BuildKit-only
+// syntax opts in with RequireBuildKit; otherwise a caller-set DOCKER_BUILDKIT
+// wins (daemons on the containerd image store reject the legacy builder, so
+// CI exports DOCKER_BUILDKIT=1).
+func dockerBuild(ctx context.Context, spec ImageBuildSpec, contextDir string) error {
+	argv := dockerBuildArgv(contextDir, spec.Dockerfile, spec.Tag, spec.BuildArgs)
+	cmd := exec.CommandContext(ctx, "docker", argv...)
+	cmd.Env = dockerBuildEnviron(os.Environ(), spec.RequireBuildKit)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("docker build -t %s %s: %w (stderr: %s)",
-			tag, contextDir, err, stderr.String())
+		return fmt.Errorf("docker %s: %w (stderr: %s)", strings.Join(argv, " "), err, stderr.String())
 	}
 	return nil
 }

@@ -9,8 +9,9 @@
 # workload image dockerfiles/kind-ci.Dockerfile. This script only:
 #   1. confirms the privileged dind sidecar is reachable,
 #   2. `docker load`s the image tarballs under /images into dind (kind node, the
-#      golang/distroless bases the fake-serving build needs, and Kueue, which
-#      the multi-cluster suite installs into its members),
+#      golang/distroless bases the fake-serving build needs, Kueue, which the
+#      multi-cluster suite installs into its members, and the alfred image the
+#      alfred lane deploys, packaged only when that lane is on),
 #   3. loads the exact-commit test binary packaged by the unit-test job,
 #   4. runs the semantic file group selected by OME_KIND_FOCUS.
 #
@@ -104,6 +105,21 @@ for tar in "$IMAGES_DIR"/kindest-node.tar "$IMAGES_DIR"/fake-serving-build.tar \
   [ -f "$tar" ] || { echo "FATAL: baked image tarball missing: $tar" >&2; exit 1; }
   docker load -i "$tar"
 done
+
+# The alfred lane's image and its reference. Other lanes never look for it.
+if [ -f "$IMAGES_DIR/alfred.tar" ]; then
+  docker load -i "$IMAGES_DIR/alfred.tar"
+  OME_ALFRED_IMAGE="$(tr -d '[:space:]' <"$IMAGES_DIR/alfred-image")"
+  export OME_ALFRED_IMAGE
+  echo "--- alfred image: $OME_ALFRED_IMAGE"
+fi
+# The alfred bundle cannot build its image here (no egress); refuse to start
+# without the preloaded one rather than fail minutes later inside the suite.
+case "$ARTIFACT_BUNDLE" in
+  */alfred-kind-test.tgz)
+    [ -f "$IMAGES_DIR/alfred.tar" ] || { echo "alfred bundle selected but $IMAGES_DIR/alfred.tar is missing" >&2; exit 1; }
+    ;;
+esac
 
 # Raise the inotify ceilings on the Docker daemon's kernel before any cluster
 # exists. Each shard runs a 3-node cluster and every nested kubelet/containerd

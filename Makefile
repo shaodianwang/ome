@@ -1133,6 +1133,34 @@ test-kind-raw: xet-build dep-crds ## 🧪 Run KIND-backed RawDeployment tests (r
 		-v -timeout 20m $(if $(GINKGO_FOCUS),-ginkgo.focus '$(GINKGO_FOCUS)') -ginkgo.v
 	@echo "✅ KIND RawDeployment tests passed"
 
+.PHONY: test-kind-alfred
+test-kind-alfred: xet-build dep-crds ## 🧪 Run the alfred KIND suite (real kubelet + the pipeline-built alfred image — needs docker, kind and helm locally)
+	@echo "🧪 Running alfred KIND tests..."
+	@PATH="$(LOCALBIN):$$PATH" command -v kind >/dev/null 2>&1 || { \
+		echo "❌ kind is not installed. Install with: make kind (pins the version from hack/internal/tools/go.mod)"; \
+		exit 1; \
+	}
+	@PATH="$(LOCALBIN):$$PATH" command -v helm >/dev/null 2>&1 || { \
+		echo "❌ helm is not installed. Install with: make helm (the suite renders charts/ome-resources with helm template)"; \
+		exit 1; \
+	}
+	@docker info >/dev/null 2>&1 || { \
+		echo "❌ docker is not reachable. KIND tests need a running Docker daemon."; \
+		exit 1; \
+	}
+	@# Deploys alfred from charts/ome-resources into its OWN cluster
+	@# (ome-alfred-kind, three workers with fake GPUs). The alfred image is
+	@# built from dockerfiles/alfred.Dockerfile at the pin in .alfred-oss-ref
+	@# (needs BuildKit + github.com) unless OME_ALFRED_IMAGE names a ref that
+	@# is already in the local docker daemon.
+	@PATH="$(LOCALBIN):$$PATH" \
+		LD_LIBRARY_PATH="$(XET_LIB_PATH):$$LD_LIBRARY_PATH" \
+		DYLD_LIBRARY_PATH="$(XET_LIB_PATH):$$DYLD_LIBRARY_PATH" \
+		KIND_KEEP_CLUSTER=$${KIND_KEEP_CLUSTER:-true} \
+		go test ./tests/integration/singlecluster/controller/alfred_kind/... \
+		-v -timeout 120m $(if $(GINKGO_FOCUS),-ginkgo.focus '$(GINKGO_FOCUS)') -ginkgo.v
+	@echo "✅ alfred KIND tests passed"
+
 PERM_KUBECONFIG ?= /tmp/kind-ome-coord.kubeconfig
 PERM_PROCS ?= 2
 

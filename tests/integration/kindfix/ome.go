@@ -44,6 +44,7 @@ const (
 	CoordClusterName     = "ome-coord-kind"
 	IRManagedClusterName = "ome-irmanaged-kind"
 	RawClusterName       = "ome-raw-kind"
+	AlfredClusterName    = "ome-alfred-kind"
 )
 
 // KIND timeout tier — tuned for real kubelet latency (image pull, pod schedule,

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import datetime
 import importlib.util
+import itertools
 import json
 import os
 import re
@@ -49,15 +50,18 @@ class PipelineTestCase(unittest.TestCase):
             (root / name).write_text(body)
         return root
 
+    def patch_attr(self, attr, value):
+        patcher = mock.patch.object(gp, attr, value)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def patch_generator(self, suite_dir, groups, quarantine=()):
         for attr, value in (
             ("KIND_SUITE_DIR", suite_dir),
             ("KIND_SPEC_GROUPS", groups),
             ("KIND_QUARANTINE", list(quarantine)),
         ):
-            patcher = mock.patch.object(gp, attr, value)
-            patcher.start()
-            self.addCleanup(patcher.stop)
+            self.patch_attr(attr, value)
 
     def quarantine_entry(self, spec, owner="tester", reason="known defect", expires=None):
         """A valid entry by default; each test invalidates the one field it pins."""
@@ -739,6 +743,145 @@ class TestCheckedInTreeClassification(unittest.TestCase):
                 self.assertFalse(set(per_sched) & skipped)
             else:
                 self.assertEqual(sorted(per_sched), sorted(committed), "default")
+
+
+class TestAlfredKindBundle(unittest.TestCase):
+    """The alfred suite ships as its own bundle, like the other KIND lanes."""
+
+    def test_test_step_uploads_the_alfred_bundle(self):
+        self.assertIn('".buildkite/artifacts/alfred-kind-test.tgz"', gp.ci_steps())
+
+    def test_run_tests_packages_the_alfred_bundle(self):
+        script = (gp.REPO_ROOT / ".buildkite" / "run_tests.sh").read_text()
+        self.assertIn(
+            "package_kind_bundle alfred-kind-test.tgz alfred_kind.test",
+            script,
+            "run_tests.sh must compile the alfred suite into alfred-kind-test.tgz",
+        )
+        self.assertIn("./tests/integration/singlecluster/controller/alfred_kind", script)
+        package = (gp.REPO_ROOT / ".buildkite" / "package_kind_test_image.sh").read_text()
+        bundles = re.search(r'^artifact_bundles="([^"]*)"', package, re.M)
+        self.assertIsNotNone(bundles, "package_kind_test_image.sh must list artifact_bundles")
+        self.assertIn("alfred-kind-test.tgz", bundles.group(1).split())
+
+
+class TestAlfredKindGroup(PipelineTestCase):
+    """The alfred lane: its own group, its own bundle, soft-fail, kill switch."""
+
+    def setUp(self):
+        self.yaml_text = gp._alfred_kind_group()
+
+    def test_is_its_own_group_with_its_own_status_context(self):
+        self.assertIn('key: "integration-test-kind-alfred-gke"', self.yaml_text)
+        self.assertIn('context: "integration-test-kind-alfred-gke"', self.yaml_text)
+
+    def test_runs_its_own_bundle_and_soft_fails(self):
+        self.assertIn('OME_KIND_TEST_BUNDLE: "/kind-test/alfred-kind-test.tgz"', self.yaml_text)
+        self.assertIn("soft_fail: true", self.yaml_text)
+
+    def test_shards_partition_the_suite(self):
+        patterns = _focus_patterns(self.yaml_text)
+        groups = gp._alfred_kind_spec_groups()
+        self.assertEqual(len(patterns), len(groups))
+        for name in gp._alfred_kind_spec_files():
+            owners = [
+                slug
+                for (slug, _, _), pattern in zip(groups, patterns)
+                if re.search(pattern, str(gp.ALFRED_KIND_SUITE_DIR / name))
+            ]
+            self.assertEqual(len(owners), 1, f"{name} matched by {owners or 'no shard'}")
+
+    def test_alfred_image_pushes_on_every_branch(self):
+        alfred = gp._build_image_step("alfred", "alfred", "dockerfiles/alfred.Dockerfile")
+        self.assertIn("push: true", alfred)
+        self.assertNotIn("push-branches", alfred)
+        manager = gp._build_image_step("ome-manager", "ome-manager", "dockerfiles/manager.Dockerfile")
+        self.assertIn('push-branches: "main"', manager)
+        self.assertNotIn("push: true", manager)
+
+    def test_every_branch_image_tags_latest_only_on_main(self):
+        sha = gp.COMMIT[:8]
+        self.patch_attr("BRANCH", "feature/anything")
+        alfred = gp._build_image_step("alfred", "alfred", "dockerfiles/alfred.Dockerfile")
+        self.assertIn(f'tags: ["{sha}"]', alfred)
+        self.assertNotIn('"latest"', alfred)
+        manager = gp._build_image_step("ome-manager", "ome-manager", "dockerfiles/manager.Dockerfile")
+        self.assertIn(f'tags: ["latest", "{sha}"]', manager)
+        self.patch_attr("BRANCH", "main")
+        alfred = gp._build_image_step("alfred", "alfred", "dockerfiles/alfred.Dockerfile")
+        self.assertIn(f'tags: ["latest", "{sha}"]', alfred)
+
+    def test_package_step_waits_for_the_alfred_build(self):
+        step = gp._package_kind_test_image_step()
+        self.assertIn('"build-alfred"', step)
+        self.assertIn('OME_ALFRED_IMAGE_REQUIRED: "1"', step)
+        self.assertIn('"ECR_AUTH_TOKEN"', step)
+
+    def test_lane_is_emitted_by_default(self):
+        self.assertIn("kind-gke-alfred-", gp.ci_steps())
+
+    def test_kill_switch_drops_the_lane_and_the_dependency(self):
+        self.patch_attr("GKE_ALFRED_ENABLED", False)
+        self.assertNotIn("kind-gke-alfred-", gp.ci_steps())
+        step = gp._package_kind_test_image_step()
+        self.assertNotIn('"build-alfred"', step)
+        self.assertNotIn("OME_ALFRED_IMAGE_REQUIRED", step)
+        # Nothing consumes a branch build of the image with the lane off, so it
+        # publishes on main only like every other image.
+        alfred = gp._build_image_step("alfred", "alfred", "dockerfiles/alfred.Dockerfile")
+        self.assertIn('push-branches: "main"', alfred)
+        self.assertNotIn("push: true", alfred)
+
+    def test_lane_is_nested_under_the_kind_switch(self):
+        self.patch_attr("GKE_KIND_ENABLED", False)
+        self.assertNotIn("kind-gke-alfred-", gp.ci_steps())
+        alfred = gp._build_image_step("alfred", "alfred", "dockerfiles/alfred.Dockerfile")
+        self.assertIn('push-branches: "main"', alfred)
+
+
+class TestPipelineDependenciesResolve(PipelineTestCase):
+    """Every depends_on in the rendered pipeline names an emitted key.
+
+    A dependency on a key no step emits fails the whole upload rather than
+    one lane, so a step dropped by a branch condition or a kill switch must
+    take its dependents with it.
+    """
+
+    def _keys_and_dependencies(self, yaml_text):
+        keys = set(re.findall(r'^\s*key: "([^"]+)"\s*$', yaml_text, re.M))
+        targets = set()
+        lines = yaml_text.splitlines()
+        index = 0
+        while index < len(lines):
+            line = lines[index]
+            index += 1
+            if match := re.match(r'^\s*depends_on: "([^"]+)"\s*$', line):
+                targets.add(match.group(1))
+            elif match := re.match(r"^\s*depends_on: \[(.*)\]\s*$", line):
+                targets.update(re.findall(r'"([^"]+)"', match.group(1)))
+            elif re.match(r"^\s*depends_on:\s*$", line):
+                while index < len(lines) and (
+                    item := re.match(r'^\s*- "([^"]+)"\s*$', lines[index])
+                ):
+                    targets.add(item.group(1))
+                    index += 1
+        return keys, targets
+
+    def test_every_dependency_names_an_emitted_key(self):
+        cases = itertools.product(("main", "feature/anything"), (True, False), (True, False))
+        for branch, kind, alfred in cases:
+            with self.subTest(branch=branch, kind=kind, alfred=alfred):
+                self.patch_attr("BRANCH", branch)
+                self.patch_attr("GKE_KIND_ENABLED", kind)
+                self.patch_attr("GKE_ALFRED_ENABLED", alfred)
+                keys, targets = self._keys_and_dependencies(gp.generate_pipeline())
+                self.assertTrue(keys, "no step keys found; did the YAML shape change?")
+                self.assertTrue(targets, "no depends_on found; did the YAML shape change?")
+                dangling = targets - keys
+                self.assertEqual(
+                    dangling, set(),
+                    f"{sorted(dangling)} are depended on but no step emits them",
+                )
 
 
 if __name__ == "__main__":

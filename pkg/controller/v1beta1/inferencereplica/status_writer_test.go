@@ -746,6 +746,10 @@ func TestInferenceReplicaStatusReadInventory(t *testing.T) {
 	approve("tests/integration/singlecluster/controller/inferencereplica_status_encoding/status_encoding_test.go", "<package>", read(4), representationQualification, "InstanceStatusEncoding", "InstanceStatusColumns")
 	approve("tests/integration/singlecluster/controller/inferencereplica_status_encoding/status_encoding_test.go", "expectStatusOutsideRowsEqual", accessCounts{writes: 2}, representationQualification, rows, "InstanceStatusEncoding", "InstanceStatusColumns")
 	approve("tests/integration/singlecluster/controller/omenative_coordination_kind/status_encoding_kind_test.go", "<package>", accessCounts{writes: 1}, representationQualification, rows, "InstanceStatusEncoding", "InstanceStatusColumns")
+	// The alfred drift gate asserts the stored form the controller hands to
+	// alfred's decoder, so it reads the marker, the columns and the dense list.
+	approve("tests/integration/singlecluster/controller/alfred_kind/columnar_status_kind_test.go", "<package>", read(4), representationQualification, "InstanceStatusEncoding")
+	approve("tests/integration/singlecluster/controller/alfred_kind/columnar_status_kind_test.go", "<package>", read(1), representationQualification, rows, "InstanceStatusColumns")
 
 	inv := loadStatusInventory(t)
 	actual := map[fieldUse]accessCounts{}

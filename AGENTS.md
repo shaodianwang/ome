@@ -137,7 +137,7 @@ tests/integration/
 ├── components/, util/                     # helpers
 └── singlecluster/
     ├── webhook/{inferenceservice,basemodel,servingruntime,pod,runtimepreset,runtimerevision,acceleratorquota,acceleratorquota_cert}
-    ├── controller/{inferenceservice,basemodel,servingruntime,runtimerevision,acceleratorquota,acceleratorquota_capacity,omenative_coordination_kind}
+    ├── controller/{inferenceservice,basemodel,servingruntime,runtimerevision,acceleratorquota,acceleratorquota_capacity,omenative_coordination_kind,alfred_kind}
     ├── clustercache/
     └── agents/metadata/
 ```
@@ -184,6 +184,8 @@ KIND specs use generous timeouts (`kindShortTimeout=30s`, `kindMediumTimeout=2m`
 CI runs the suite through the hard-gating `integration-test-kind-gke` group. The unit-test lane compiles one exact-commit test binary, and named semantic jobs run disjoint file groups in separate three-node KIND clusters on GKE agents. The TW dind cannot provide the bridge networking KIND requires.
 
 **Every new KIND spec file must be classified** into a group in `KIND_SPEC_GROUPS` in `.buildkite/generate_pipeline.py` — the generator enforces exact ownership and rejects unowned (or stale) specs, so an unclassified `*_kind_test.go` fails pipeline generation for every build. Validate locally with `python3 -m unittest discover -s .buildkite -p 'test_*.py'` before pushing.
+
+**Alfred suite** (`alfred_kind/`) — deploys the alfred image built from `.alfred-oss-ref` through the ome-resources alfred templates into a three-worker cluster with fake GPU nodes, and drives it black-box against the in-process controller: node-health and maintenance signals are patched onto Nodes, and the outcome is read back through alfred's metrics, events, recommendations and journal ConfigMaps, the ISVC migration annotations and InferenceReplica status. `make test-kind-alfred` (set `OME_ALFRED_IMAGE` to skip the local image build). New spec files must be classified in `ALFRED_KIND_SPEC_GROUPS` in `.buildkite/generate_pipeline.py`.
 
 **Multi-cluster real-Kueue suite** (`tests/integration/multicluster/`, gated by `OME_MC_REALKUEUE=1`) — validates OEP-0018 single-active placement against a *real* Kueue admission stack. The default `make integration-test` runs this suite's **sim** path (`admitDerivedOn`); with the env gate it stands up 1 control-plane + 2 member envtest apiservers in one process, each member running a full OME manager + Kueue (core controllers + scheduler + pod webhook), and drives fan-out → real quota-gated admission → race → loser-sweep for real (no kubelet — admission = Kueue scheduling-gate removal). Run it via:
 
