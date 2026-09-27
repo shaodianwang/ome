@@ -6194,6 +6194,13 @@ func schema_pkg_apis_ome_v1beta1_InferenceReplicaSpec(ref common.ReferenceCallba
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementExecutionPolicy"),
 						},
 					},
+					"placementReplicaLimit": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PlacementReplicaLimit reserves the largest replica count this component may request while placement pauses growth. Only a raised placement floor can increase this limit; autoscaler requests remain in Replicas.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
 					"parentRef": {
 						SchemaProps: spec.SchemaProps{
 							Description: "ParentRef names the InferenceService that owns this replica. Set by the ISVC controller at create time; immutable thereafter.",
@@ -6331,6 +6338,13 @@ func schema_pkg_apis_ome_v1beta1_InferenceReplicaStatus(ref common.ReferenceCall
 					"observedGeneration": {
 						SchemaProps: spec.SchemaProps{
 							Description: "ObservedGeneration is the InferenceReplica.metadata.generation the most recent status flush reflects.",
+							Type:        []string{"integer"},
+							Format:      "int64",
+						},
+					},
+					"placementObservedGeneration": {
+						SchemaProps: spec.SchemaProps{
+							Description: "PlacementObservedGeneration identifies the generation reconciled with placement rollout and replica-growth guards. The control plane requires this acknowledgement before sharing surge allowance with the member.",
 							Type:        []string{"integer"},
 							Format:      "int64",
 						},

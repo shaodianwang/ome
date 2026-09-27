@@ -690,6 +690,10 @@ spec:
                     - revision
                     - sourceUID
                   type: object
+                placementReplicaLimit:
+                  format: int32
+                  minimum: 1
+                  type: integer
                 replicas:
                   format: int32
                   type: integer
@@ -4404,6 +4408,10 @@ spec:
                   x-kubernetes-list-type: map
                 observedGeneration:
                   format: int64
+                  type: integer
+                placementObservedGeneration:
+                  format: int64
+                  minimum: 1
                   type: integer
                 readyReplicas:
                   format: int32

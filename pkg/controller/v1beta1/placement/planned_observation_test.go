@@ -57,7 +57,9 @@ func observationFixture(t *testing.T) plannedObservationFixture {
 	ir.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(member, v1beta1.SchemeGroupVersion.WithKind("InferenceService"))}
 	ir.Spec.Component, ir.Spec.ParentRef.Name = v1beta1.EngineComponent, source.Name
 	ir.Spec.Replicas, ir.Spec.PlacementExecution = ptr.To[int32](1), policy
+	ir.Spec.PlacementReplicaLimit = ptr.To[int32](1)
 	ir.Status.ObservedGeneration = ir.Generation
+	ir.Status.PlacementObservedGeneration = ir.Generation
 	ir.Status.InstanceStatuses[0].Admitted = true
 	resources.pods[0].Namespace = source.Namespace
 	resources.pods[0].Labels[constants.InferenceServicePodLabelKey] = source.Name
@@ -80,6 +82,12 @@ func TestObservePlannedHome(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "observed component acknowledges pause", want: steady},
+		{name: "generic generation observation cannot acknowledge placement guards", edit: func(f *plannedObservationFixture) {
+			f.resources.ir.Status.PlacementObservedGeneration = 0
+		}, want: result{Home: allocation.Home{Known: true, Occupied: 1, Ready: 1}, Ready: 1, Admitted: 1}},
+		{name: "stale placement guard acknowledgement cannot grant authority", edit: func(f *plannedObservationFixture) {
+			f.resources.ir.Status.PlacementObservedGeneration--
+		}, want: result{Home: allocation.Home{Known: true, Occupied: 1, Ready: 1}, Ready: 1, Admitted: 1}},
 		{name: "gang width is verified through its PodGroup", edit: func(f *plannedObservationFixture) {
 			f.resources.addGang()
 			f.extraObjects = []client.Object{testMemberPodGroup(f.resources.ir)}
@@ -99,6 +107,7 @@ func TestObservePlannedHome(t *testing.T) {
 			ir := f.resources.ir.DeepCopy()
 			ir.UID, ir.Name, ir.Spec.Component = "decoder-uid", "service-decoder", v1beta1.DecoderComponent
 			ir.Spec.Replicas = ptr.To[int32](2)
+			ir.Spec.PlacementReplicaLimit = ptr.To[int32](2)
 			pod := f.resources.pods[0].DeepCopy()
 			pod.Name, pod.UID, pod.OwnerReferences[0].UID = "decoder-0", "decoder-pod", ir.UID
 			f.extraObjects = []client.Object{ir, pod}
@@ -109,7 +118,13 @@ func TestObservePlannedHome(t *testing.T) {
 			f.decodeBound = 1
 		}, want: steady},
 		{name: "unbounded columnar status is unknown", edit: func(f *plannedObservationFixture) { f.resources.ir = columnarTwin(t, f.resources.ir) }, wantErr: true},
-		{name: "autoscaler request reserves uncreated instances", edit: func(f *plannedObservationFixture) { f.resources.ir.Spec.Replicas = ptr.To[int32](3) }, want: result{Home: allocation.Home{Known: true, Applied: true, Occupied: 3, Ready: 1}, PauseAcknowledged: true, Applied: "plan-a", Ready: 1, Admitted: 1}},
+		{name: "autoscaler request reserves uncreated instances", edit: func(f *plannedObservationFixture) {
+			f.resources.ir.Spec.Replicas = ptr.To[int32](3)
+			f.resources.ir.Spec.PlacementReplicaLimit = ptr.To[int32](3)
+		}, want: result{Home: allocation.Home{Known: true, Applied: true, Occupied: 3, Ready: 1}, PauseAcknowledged: true, Applied: "plan-a", Ready: 1, Admitted: 1}},
+		{name: "deferred autoscaler growth does not expand authority", edit: func(f *plannedObservationFixture) { f.resources.ir.Spec.Replicas = ptr.To[int32](8) }, want: steady},
+		{name: "unused limit remains committed", edit: func(f *plannedObservationFixture) { f.resources.ir.Spec.PlacementReplicaLimit = ptr.To[int32](3) }, want: result{Home: allocation.Home{Known: true, Applied: true, Occupied: 3, Ready: 1}, PauseAcknowledged: true, Applied: "plan-a", Ready: 1, Admitted: 1}},
+		{name: "pruned growth limit cannot acknowledge pause", edit: func(f *plannedObservationFixture) { f.resources.ir.Spec.PlacementReplicaLimit = nil }, want: result{Home: allocation.Home{Known: true, Occupied: 1, Ready: 1}, Ready: 1, Admitted: 1}},
 		{name: "negative desired replicas are unknown", edit: func(f *plannedObservationFixture) { f.resources.ir.Spec.Replicas = ptr.To[int32](-1) }, wantErr: true},
 		{name: "replaced source cannot inherit observations", edit: func(f *plannedObservationFixture) { f.source.Status.Placement.Plan.SourceUID = "older-source" }, wantErr: true},
 		{name: "metadata annotation alone cannot acknowledge pause", edit: func(f *plannedObservationFixture) { f.resources.ir.Spec.PlacementExecution = nil }, want: result{Home: allocation.Home{Known: true, Occupied: 1, Ready: 1}, Ready: 1, Admitted: 1}},

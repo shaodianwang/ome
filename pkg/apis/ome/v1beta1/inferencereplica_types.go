@@ -65,6 +65,12 @@ type InferenceReplicaSpec struct {
 	// Its generation must be observed before the control plane uses member evidence.
 	// +optional
 	PlacementExecution *PlacementExecutionPolicy `json:"placementExecution,omitempty"`
+	// PlacementReplicaLimit reserves the largest replica count this component
+	// may request while placement pauses growth. Only a raised placement floor
+	// can increase this limit; autoscaler requests remain in Replicas.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	PlacementReplicaLimit *int32 `json:"placementReplicaLimit,omitempty"`
 
 	// ParentRef names the InferenceService that owns this replica.
 	// Set by the ISVC controller at create time; immutable thereafter.
@@ -317,6 +323,13 @@ type InferenceReplicaStatus struct {
 	// the most recent status flush reflects.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// PlacementObservedGeneration identifies the generation reconciled with
+	// placement rollout and replica-growth guards. The control plane requires
+	// this acknowledgement before sharing surge allowance with the member.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	PlacementObservedGeneration int64 `json:"placementObservedGeneration,omitempty"`
 
 	// Replicas is the total Instance count (any phase).
 	// +optional

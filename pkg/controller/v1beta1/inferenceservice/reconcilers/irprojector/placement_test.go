@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 
+	"k8s.io/utils/ptr"
+
 	"github.com/google/go-cmp/cmp"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -133,5 +135,110 @@ func TestPlacementProjectionCannotOverwriteRacingAuthority(t *testing.T) {
 	}
 	if diff := cmp.Diff(newer, stored.Spec.PlacementExecution); diff != "" {
 		t.Errorf("authority regressed (-want +got):\n%s", diff)
+	}
+}
+
+func TestPlacementReplicaLimitPreservesScaleRequests(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		requested int32
+		floor     int
+		release   bool
+		want      *int32
+	}{
+		{name: "existing committed demand", requested: 5, floor: 2, want: ptr.To[int32](5)},
+		{name: "autoscaler increase stays deferred", requested: 8, floor: 2, want: ptr.To[int32](5)},
+		{name: "autoscaler decrease releases reservation", requested: 3, floor: 2, want: ptr.To[int32](3)},
+		{name: "placement floor can increase reservation", requested: 8, floor: 6, want: ptr.To[int32](6)},
+		{name: "placement floor protects against stale scaler", requested: 1, floor: 2, want: ptr.To[int32](2)},
+		{name: "release clears growth limit", requested: 8, floor: 2, release: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			service := baselineISVC("service-a", "team-a")
+			service.Labels = map[string]string{constants.PlacementOrigin: string(service.UID)}
+			policy := &v1beta1.PlacementExecutionPolicy{PlanID: "plan-a", Revision: 1, SourceUID: service.UID, ClusterUID: "cluster-a"}
+			stamp := func() {
+				raw, err := protocol.Encode(policy)
+				if err != nil {
+					t.Fatal(err)
+				}
+				service.Annotations = map[string]string{constants.PlacementExecution: raw}
+			}
+			stamp()
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+			p := minimalParams(t, service, c)
+			p.ResolvedAutoscaler = &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerExternal}
+			ir, err := EnsureInferenceReplica(t.Context(), p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ir.Spec.Replicas = ptr.To[int32](5)
+			if err := c.Update(t.Context(), ir); err != nil {
+				t.Fatal(err)
+			}
+			policy.PlanID, policy.Revision, policy.PauseSurge = "plan-b", 2, true
+			stamp()
+			ir, err = EnsureInferenceReplica(t.Context(), p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if diff := cmp.Diff(ptr.To[int32](5), ir.Spec.PlacementReplicaLimit); diff != "" {
+				t.Fatal(diff)
+			}
+			ir.Spec.Replicas = ptr.To(tt.requested)
+			if err := c.Update(t.Context(), ir); err != nil {
+				t.Fatal(err)
+			}
+			p.ComponentExt.MinReplicas = ptr.To(tt.floor)
+			if tt.release || tt.floor != 2 {
+				policy.PlanID, policy.Revision = "plan-c", 3
+				policy.PauseSurge = !tt.release
+				stamp()
+			}
+			got, err := EnsureInferenceReplica(t.Context(), p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if diff := cmp.Diff(tt.want, got.Spec.PlacementReplicaLimit); diff != "" {
+				t.Errorf("limit (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(ptr.To(tt.requested), got.Spec.Replicas); diff != "" {
+				t.Errorf("autoscaler request changed:\n%s", diff)
+			}
+			again, err := EnsureInferenceReplica(t.Context(), p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if diff := cmp.Diff(got, again); diff != "" {
+				t.Errorf("stable projection changed:\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestPlacementPauseRequiresResolvedFloor(t *testing.T) {
+	for i, floor := range []*int{nil, ptr.To(0), ptr.To(-1)} {
+		t.Run([]string{"omitted", "zero", "negative"}[i], func(t *testing.T) {
+			service := baselineISVC("service-a", "team-a")
+			service.Labels = map[string]string{constants.PlacementOrigin: string(service.UID)}
+			raw, err := protocol.Encode(&v1beta1.PlacementExecutionPolicy{PlanID: "plan-a", Revision: 1, SourceUID: service.UID, ClusterUID: "cluster-a", PauseSurge: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			service.Annotations = map[string]string{constants.PlacementExecution: raw}
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+			p := minimalParams(t, service, c)
+			p.ComponentExt.MinReplicas = floor
+			if _, err := EnsureInferenceReplica(t.Context(), p); err == nil {
+				t.Fatal("unresolved floor accepted")
+			}
+			list := &v1beta1.InferenceReplicaList{}
+			if err := c.List(t.Context(), list); err != nil {
+				t.Fatal(err)
+			}
+			if len(list.Items) != 0 {
+				t.Fatal("unresolved floor created an IR")
+			}
+		})
 	}
 }

@@ -2541,6 +2541,11 @@ func (in *InferenceReplicaSpec) DeepCopyInto(out *InferenceReplicaSpec) {
 		*out = new(PlacementExecutionPolicy)
 		**out = **in
 	}
+	if in.PlacementReplicaLimit != nil {
+		in, out := &in.PlacementReplicaLimit, &out.PlacementReplicaLimit
+		*out = new(int32)
+		**out = **in
+	}
 	out.ParentRef = in.ParentRef
 	if in.Replicas != nil {
 		in, out := &in.Replicas, &out.Replicas

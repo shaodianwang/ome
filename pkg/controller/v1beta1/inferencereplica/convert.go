@@ -351,6 +351,9 @@ func desiredFromIR(ir *v1beta1.InferenceReplica) workloadtypes.WorkloadDesiredSp
 	if ir.Spec.Replicas != nil && *ir.Spec.Replicas > 0 {
 		replicas = *ir.Spec.Replicas
 	}
+	if policy := ir.Spec.PlacementExecution; policy != nil && policy.PauseSurge && ir.Spec.PlacementReplicaLimit != nil {
+		replicas = min(replicas, *ir.Spec.PlacementReplicaLimit)
+	}
 	// Pacing.Partition is the rollout-control partition the engine's
 	// update hold reads ahead of the user's Lifecycle partition;
 	// Pacing.MaxUnavailable is copied but has no producer and no reader
@@ -408,6 +411,22 @@ func desiredFromIR(ir *v1beta1.InferenceReplica) workloadtypes.WorkloadDesiredSp
 		}
 	}
 	return desired
+}
+
+// validatePlacementReplicaLimit runs before workload actions and generation
+// acknowledgement. A pruned or unresolved limit cannot grant member growth.
+func validatePlacementReplicaLimit(ir *v1beta1.InferenceReplica) error {
+	policy := ir.Spec.PlacementExecution
+	if policy == nil || !policy.PauseSurge {
+		return nil
+	}
+	if err := protocol.Validate(policy); err != nil {
+		return err
+	}
+	if ir.Spec.PlacementReplicaLimit == nil || *ir.Spec.PlacementReplicaLimit <= 0 {
+		return fmt.Errorf("placement pause requires a persisted positive replica limit")
+	}
+	return nil
 }
 
 // runnersFromIR converts the IR Runner list to the workload.Runner

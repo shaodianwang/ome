@@ -2560,3 +2560,49 @@ func TestPlacementSurgeGate(t *testing.T) {
 		})
 	}
 }
+
+func TestPlacementReplicaLimit(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		limit        *int32
+		pause, local bool
+		invalid      bool
+		want         int32
+		wantErr      bool
+	}{
+		{name: "paused autoscaler growth is deferred", limit: ptr.To[int32](2), pause: true, want: 2},
+		{name: "released autoscaler request takes effect", limit: ptr.To[int32](2), want: 5},
+		{name: "ordinary local ignores limit", limit: ptr.To[int32](2), local: true, want: 5},
+		{name: "unused limit does not force growth", limit: ptr.To[int32](8), pause: true, want: 5},
+		{name: "missing limit cannot acknowledge pause", pause: true, wantErr: true},
+		{name: "zero limit cannot use replica fallback", limit: ptr.To[int32](0), pause: true, wantErr: true},
+		{name: "negative limit cannot execute", limit: ptr.To[int32](-1), pause: true, wantErr: true},
+		{name: "invalid authority cannot acknowledge pause", limit: ptr.To[int32](2), pause: true, invalid: true, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ir := &v1beta1.InferenceReplica{Spec: v1beta1.InferenceReplicaSpec{
+				Replicas: ptr.To[int32](5), PlacementReplicaLimit: tt.limit,
+				PlacementExecution: &v1beta1.PlacementExecutionPolicy{PlanID: "plan-a", Revision: 1, SourceUID: "source-a", ClusterUID: "cluster-a", PauseSurge: tt.pause},
+			}}
+			if tt.local {
+				ir.Spec.PlacementExecution = nil
+			}
+			if tt.invalid {
+				ir.Spec.PlacementExecution.PlanID = ""
+			}
+			before := ir.DeepCopy()
+			err := validatePlacementReplicaLimit(ir)
+			if diff := cmp.Diff(tt.wantErr, err != nil); diff != "" {
+				t.Fatalf("%s: %v", diff, err)
+			}
+			if !tt.wantErr {
+				if diff := cmp.Diff(tt.want, desiredFromIR(ir).Replicas); diff != "" {
+					t.Error(diff)
+				}
+			}
+			if diff := cmp.Diff(before, ir); diff != "" {
+				t.Errorf("scale request mutated:\n%s", diff)
+			}
+		})
+	}
+}

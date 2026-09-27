@@ -3451,6 +3451,11 @@
           "description": "PlacementExecution is allocation authority projected from a derived service. Its generation must be observed before the control plane uses member evidence.",
           "$ref": "#/definitions/v1beta1.PlacementExecutionPolicy"
         },
+        "placementReplicaLimit": {
+          "description": "PlacementReplicaLimit reserves the largest replica count this component may request while placement pauses growth. Only a raised placement floor can increase this limit; autoscaler requests remain in Replicas.",
+          "type": "integer",
+          "format": "int32"
+        },
         "replicas": {
           "description": "Replicas is the desired Instance count. The HPA / KEDA scale subresource writes this field. Defaults to 1 when omitted.",
           "type": "integer",
@@ -3561,6 +3566,11 @@
         },
         "observedGeneration": {
           "description": "ObservedGeneration is the InferenceReplica.metadata.generation the most recent status flush reflects.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "placementObservedGeneration": {
+          "description": "PlacementObservedGeneration identifies the generation reconciled with placement rollout and replica-growth guards. The control plane requires this acknowledgement before sharing surge allowance with the member.",
           "type": "integer",
           "format": "int64"
         },

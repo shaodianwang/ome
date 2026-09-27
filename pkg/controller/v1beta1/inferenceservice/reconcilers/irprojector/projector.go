@@ -82,7 +82,8 @@ var isvcGVK = v1beta1.SchemeGroupVersion.WithKind("InferenceService")
 // it hands the IR controller the exact same per-pod template the
 // dispatch site computed.
 type Params struct {
-	placementExecution *v1beta1.PlacementExecutionPolicy
+	placementExecution    *v1beta1.PlacementExecutionPolicy
+	placementReplicaLimit *int32
 
 	// ISVC is the parent InferenceService. The projector reads
 	// ISVC.Name / Namespace / UID for IR naming + owner-ref, and
@@ -213,6 +214,9 @@ func EnsureInferenceReplica(ctx context.Context, p Params) (*v1beta1.InferenceRe
 		return nil, err
 	}
 	p.placementExecution = policy
+	if policy != nil && policy.PauseSurge && (p.ComponentExt == nil || p.ComponentExt.MinReplicas == nil || *p.ComponentExt.MinReplicas <= 0 || int64(*p.ComponentExt.MinReplicas) > math.MaxInt32) {
+		return nil, fmt.Errorf("placement pause requires a resolved positive component floor")
+	}
 	p = applyQuotaGovernance(p)
 
 	name := InferenceReplicaName(p.ISVC.Name, p.Component)
@@ -233,6 +237,7 @@ func EnsureInferenceReplica(ctx context.Context, p Params) (*v1beta1.InferenceRe
 		getErr := reads.Get(ctx, key, ir)
 		switch {
 		case apierrors.IsNotFound(getErr):
+			p.placementReplicaLimit = placementReplicaLimit(ir, p)
 			ir = newInferenceReplica(p, name)
 			if err := p.Client.Create(ctx, ir); err != nil {
 				if apierrors.IsAlreadyExists(err) {
@@ -266,6 +271,7 @@ func EnsureInferenceReplica(ctx context.Context, p Params) (*v1beta1.InferenceRe
 		// canary executor's rollback target) is preserved. Paused is projected
 		// from the parent ISVC's operator-facing rollout-paused annotation below.
 		original := ir.DeepCopy()
+		p.placementReplicaLimit = placementReplicaLimit(ir, p)
 		applyDesiredSpec(ir, p, name)
 
 		// No-op guard: skip the write entirely when nothing the projector
@@ -437,6 +443,7 @@ func applyDesiredSpec(ir *v1beta1.InferenceReplica, p Params, name string) {
 		Name: p.ISVC.Name,
 	}
 	ir.Spec.PlacementExecution = p.placementExecution.DeepCopy()
+	ir.Spec.PlacementReplicaLimit = p.placementReplicaLimit
 	ir.Spec.Component = p.Component
 	ir.Spec.Replicas = desiredReplicas(ir, p)
 	ir.Spec.Runners = runnersFromParams(p)
@@ -589,6 +596,21 @@ func desiredReplicas(ir *v1beta1.InferenceReplica, p Params) *int32 {
 		return ir.Spec.Replicas
 	}
 	return replicasFromComponentExt(p.ComponentExt)
+}
+
+// placementReplicaLimit captures committed demand before the pause is
+// acknowledged. Subsequent autoscaler increases cannot expand that reservation.
+func placementReplicaLimit(ir *v1beta1.InferenceReplica, p Params) *int32 {
+	if p.placementExecution == nil || !p.placementExecution.PauseSurge {
+		return nil
+	}
+	floor := int32(*p.ComponentExt.MinReplicas)
+	requested := *desiredReplicas(ir, p)
+	limit := max(floor, requested)
+	if ir.Spec.PlacementExecution != nil && ir.Spec.PlacementExecution.PauseSurge && ir.Spec.PlacementReplicaLimit != nil {
+		limit = max(floor, min(*ir.Spec.PlacementReplicaLimit, requested))
+	}
+	return &limit
 }
 
 // isAutoscalerManaged reports whether the resolved Component autoscaler

@@ -124,12 +124,22 @@ func (r *Reconciler) observePlannedHome(ctx context.Context, source *v1beta1.Inf
 		// Whole replica units contain Engine and Decoder. Router stays shared
 		// within each home, with its own replica policy and readiness gate.
 		if ir.Spec.Component != v1beta1.RouterComponent {
-			// Autoscaler requests can precede Pod creation. Retain that committed
-			// demand while leaving the member's scale subresource untouched.
-			out.Home.Occupied = max(out.Home.Occupied, count.Occupied, *ir.Spec.Replicas)
+			// A paused limit is durable capacity authority, even if the current
+			// autoscaler request is smaller. Requests above it remain deferred.
+			committed := *ir.Spec.Replicas
+			if ir.Spec.PlacementExecution != nil && ir.Spec.PlacementExecution.PauseSurge && ir.Spec.PlacementReplicaLimit != nil {
+				committed = *ir.Spec.PlacementReplicaLimit
+			}
+			out.Home.Occupied = max(out.Home.Occupied, count.Occupied, committed)
 			out.RolloutReserved = max(out.RolloutReserved, count.Reserved)
 		}
-		applied = applied && ir.Generation > 0 && ir.Status.ObservedGeneration == ir.Generation && ir.DeletionTimestamp.IsZero() && equality.Semantic.DeepEqual(ir.Spec.PlacementExecution, policy)
+		if policy.PauseSurge {
+			applied = applied && ir.Spec.PlacementReplicaLimit != nil && *ir.Spec.PlacementReplicaLimit > 0
+			if ir.Spec.Component != v1beta1.RouterComponent {
+				applied = applied && ir.Spec.PlacementReplicaLimit != nil && *ir.Spec.PlacementReplicaLimit >= previous.Allocation.CurrentReplicas
+			}
+		}
+		applied = applied && ir.Generation > 0 && ir.Status.ObservedGeneration == ir.Generation && ir.Status.PlacementObservedGeneration == ir.Generation && ir.DeletionTimestamp.IsZero() && equality.Semantic.DeepEqual(ir.Spec.PlacementExecution, policy)
 		if memberExists {
 			applied = applied && ir.Annotations[constants.InferenceReplicaParentGenerationAnnotationKey] == strconv.FormatInt(member.Generation, 10)
 		}

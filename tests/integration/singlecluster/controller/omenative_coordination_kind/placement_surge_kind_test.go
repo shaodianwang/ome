@@ -6,7 +6,10 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	autoscalingv1 "k8s.io/api/autoscaling/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -122,4 +125,94 @@ var _ = ginkgo.Describe("placement member surge coordination", func() {
 			}
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
+	ginkgo.It("defers member autoscaler growth while local scale and assigned floors advance", func() {
+		ns, err := util.CreateNamespaceFromPrefix(suiteCtx, k8sClient, "placement-scale-")
+		Expect(err).NotTo(HaveOccurred())
+		ginkgo.DeferCleanup(func() { Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed()) })
+		policy := &v1beta1.PlacementExecutionPolicy{PlanID: "plan-a", Revision: 1, SourceUID: "source-a", ClusterUID: "cluster-a", PauseSurge: true}
+		raw, err := protocol.Encode(policy)
+		Expect(err).NotTo(HaveOccurred())
+		member := newCoordFixture(ns.Name, WithISVCName("member-scale"), WithoutDecoder())
+		local := newCoordFixture(ns.Name, WithISVCName("local-scale"), WithoutDecoder())
+		for _, fixture := range []*coordFixture{member, local} {
+			fixture.ISVC.Spec.Engine.Autoscaler = &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerExternal}
+			if fixture.ISVC.Annotations == nil {
+				fixture.ISVC.Annotations = map[string]string{}
+			}
+		}
+		member.ISVC.Labels = map[string]string{constants.PlacementOrigin: string(policy.SourceUID)}
+		member.ISVC.Annotations[constants.PlacementExecution] = raw
+		local.ISVC.Annotations[constants.PlacementExecution] = "irrelevant to local scale"
+		for _, fixture := range []*coordFixture{member, local} {
+			applyFixture(Default, fixture)
+			deferFixtureCleanup(fixture)
+		}
+		Eventually(func(g Gomega) {
+			for _, fixture := range []*coordFixture{member, local} {
+				ir := freshInferenceReplica(g, ns.Name, fixture.ISVC.Name, v1beta1.EngineComponent)
+				g.Expect(ir.Status.ObservedGeneration).To(Equal(ir.Generation))
+				g.Expect(ir.Status.ServingReplicas).To(Equal(int32(1)))
+				if fixture == member {
+					g.Expect(ir.Spec.PlacementReplicaLimit).To(HaveValue(Equal(int32(1))))
+					g.Expect(ir.Status.PlacementObservedGeneration).To(Equal(ir.Generation))
+				} else {
+					g.Expect(ir.Spec.PlacementReplicaLimit).To(BeNil())
+					g.Expect(ir.Status.PlacementObservedGeneration).To(BeZero())
+				}
+			}
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+		for _, fixture := range []*coordFixture{member, local} {
+			Eventually(func(g Gomega) {
+				ir := freshInferenceReplica(g, ns.Name, fixture.ISVC.Name, v1beta1.EngineComponent)
+				scale := &autoscalingv1.Scale{ObjectMeta: metav1.ObjectMeta{Name: ir.Name, Namespace: ir.Namespace, ResourceVersion: ir.ResourceVersion}, Spec: autoscalingv1.ScaleSpec{Replicas: 3}}
+				g.Expect(k8sClient.SubResource("scale").Update(suiteCtx, ir, client.WithSubResourceBody(scale))).To(Succeed())
+			}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+		}
+		Eventually(func(g Gomega) {
+			ir := freshInferenceReplica(g, ns.Name, local.ISVC.Name, v1beta1.EngineComponent)
+			g.Expect(ir.Status.ServingReplicas).To(Equal(int32(3)))
+			g.Expect(listOMENativePods(g, ns.Name, local.ISVC.Name)).To(HaveLen(3))
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+		Consistently(func(g Gomega) {
+			ir := freshInferenceReplica(g, ns.Name, member.ISVC.Name, v1beta1.EngineComponent)
+			g.Expect(ir.Spec.Replicas).To(HaveValue(Equal(int32(3))))
+			g.Expect(ir.Spec.PlacementReplicaLimit).To(HaveValue(Equal(int32(1))))
+			g.Expect(ir.Status.ServingReplicas).To(Equal(int32(1)))
+			g.Expect(listOMENativePods(g, ns.Name, member.ISVC.Name)).To(HaveLen(1))
+		}).WithTimeout(kindShortTimeout).WithPolling(kindPollInterval).Should(Succeed())
+		policy.PlanID, policy.Revision = "plan-b", 2
+		raw, err = protocol.Encode(policy)
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(func(g Gomega) {
+			service := freshISVC(g, ns.Name, member.ISVC.Name)
+			floor := 2
+			service.Spec.Engine.MinReplicas = &floor
+			service.Annotations[constants.PlacementExecution] = raw
+			g.Expect(k8sClient.Update(suiteCtx, service)).To(Succeed())
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+		Eventually(func(g Gomega) {
+			ir := freshInferenceReplica(g, ns.Name, member.ISVC.Name, v1beta1.EngineComponent)
+			g.Expect(ir.Spec.Replicas).To(HaveValue(Equal(int32(3))))
+			g.Expect(ir.Spec.PlacementReplicaLimit).To(HaveValue(Equal(int32(2))))
+			g.Expect(ir.Status.PlacementObservedGeneration).To(Equal(ir.Generation))
+			g.Expect(ir.Status.ServingReplicas).To(Equal(int32(2)))
+			g.Expect(listOMENativePods(g, ns.Name, member.ISVC.Name)).To(HaveLen(2))
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+		policy.PlanID, policy.Revision, policy.PauseSurge = "plan-c", 3, false
+		raw, err = protocol.Encode(policy)
+		Expect(err).NotTo(HaveOccurred())
+		Eventually(func(g Gomega) {
+			service := freshISVC(g, ns.Name, member.ISVC.Name)
+			service.Annotations[constants.PlacementExecution] = raw
+			g.Expect(k8sClient.Update(suiteCtx, service)).To(Succeed())
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+		Eventually(func(g Gomega) {
+			ir := freshInferenceReplica(g, ns.Name, member.ISVC.Name, v1beta1.EngineComponent)
+			g.Expect(ir.Spec.PlacementReplicaLimit).To(BeNil())
+			g.Expect(ir.Status.PlacementObservedGeneration).To(Equal(ir.Generation))
+			g.Expect(ir.Status.ServingReplicas).To(Equal(int32(3)))
+			g.Expect(listOMENativePods(g, ns.Name, member.ISVC.Name)).To(HaveLen(3))
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+	})
+
 })
