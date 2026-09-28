@@ -1,0 +1,450 @@
+package canary
+
+import (
+	"context"
+	"strings"
+	"testing"
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/rollout"
+)
+
+// parkedFailed builds a single-engine canary parked in the Failed terminal at
+// step 0 on revision "new", with the resume verb set to value.
+func parkedFailed(value string) (*v1beta1.InferenceService, ReconcileInputs) {
+	isvc := pinActiveRun(canaryISVC(twoStep(), nil))
+	isvc.Namespace = "ns"
+	isvc.Annotations = map[string]string{constants.RolloutResumeAnnotation: value}
+	isvc.Status.Canary = &v1beta1.CanaryStatus{
+		CanaryRevisionHash:   "new",
+		StableRevisionHash:   "old",
+		CurrentStep:          0,
+		AnalysisFailedChecks: 3,
+		StepEnteredTime:      &metav1.Time{Time: time.Unix(500, 0)},
+	}
+	setPhase(isvc, v1beta1.EngineComponent, v1beta1.RolloutPhaseFailed)
+	return isvc, baseInputs(isvc, map[string]int32{"new": 0, "old": 4})
+}
+
+func eventsFrom(rec *record.FakeRecorder) []string {
+	out := []string{}
+	for {
+		select {
+		case e := <-rec.Events:
+			out = append(out, e)
+		default:
+			return out
+		}
+	}
+}
+
+func hasEvent(events []string, reason string) bool {
+	for _, e := range events {
+		if strings.Contains(e, reason) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestResume_ClearsFailedHold is the verb's reason to exist: a parked Failed
+// canary with a fresh target and no way out re-enters the ladder at step 0
+// against the revision already there, without minting a new one.
+func TestResume_ClearsFailedHold(t *testing.T) {
+	isvc, in := parkedFailed("new")
+	rec := record.NewFakeRecorder(8)
+	in.Recorder = rec
+
+	res, err := Reconcile(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if !res.Active || res.RequeueAfter != reconcileRequeue {
+		t.Fatalf("resume should stay active on the standard requeue, got %+v", res)
+	}
+	if phaseOf(isvc) != v1beta1.RolloutPhasePending {
+		t.Fatalf("resume must clear the terminal phase, got %q", phaseOf(isvc))
+	}
+	cs := isvc.Status.Canary
+	if cs.CurrentStep != 0 || cs.AnalysisFailedChecks != 0 || cs.CanaryRevisionHash != "new" {
+		t.Fatalf("resume must re-arm at step 0 on the parked revision with a fresh budget, got %+v", cs)
+	}
+	if cs.StableRevisionHash != "old" {
+		t.Fatalf("resume must preserve the pre-canary stable identity, got %q", cs.StableRevisionHash)
+	}
+	if !cs.StepEnteredTime.Time.Equal(in.Now) {
+		t.Fatalf("resume must re-anchor the step clock, got %v", cs.StepEnteredTime.Time)
+	}
+	if _, still := isvc.Annotations[constants.RolloutResumeAnnotation]; still {
+		t.Fatal("resume must consume its annotation")
+	}
+	if !hasEvent(eventsFrom(rec), EventReasonRolloutResumed) {
+		t.Fatal("an applied resume must be visible as an Event")
+	}
+
+	// The ladder actually runs on the next pass rather than staying parked.
+	in.Now = in.Now.Add(reconcileRequeue)
+	if _, err := Reconcile(context.Background(), in); err != nil {
+		t.Fatalf("Reconcile after resume: %v", err)
+	}
+	if phaseOf(isvc) != v1beta1.RolloutPhasePending {
+		t.Fatalf("resumed canary should wait on capacity at step 0, got %q", phaseOf(isvc))
+	}
+}
+
+// TestResume_ScopedToComponent pins the "<component>=<hash>" form: the scope
+// names which canary unit the verb addresses.
+func TestResume_ScopedToComponent(t *testing.T) {
+	isvc, in := parkedFailed("engine=new")
+	if _, err := Reconcile(context.Background(), in); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if phaseOf(isvc) != v1beta1.RolloutPhasePending {
+		t.Fatalf("a scope naming this Component must resume it, got %q", phaseOf(isvc))
+	}
+}
+
+// TestResume_ScopedElsewhereIsUntouched pins the non-cannibalization rule: a
+// verb addressed to another canary unit is neither acted on nor consumed, so
+// that unit's own dispatch still sees it.
+func TestResume_ScopedElsewhereIsUntouched(t *testing.T) {
+	isvc, in := parkedFailed("router=new")
+	rec := record.NewFakeRecorder(8)
+	in.Recorder = rec
+
+	if _, err := Reconcile(context.Background(), in); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if phaseOf(isvc) != v1beta1.RolloutPhaseFailed {
+		t.Fatalf("a verb scoped to another Component must not resume this one, got %q", phaseOf(isvc))
+	}
+	if isvc.Annotations[constants.RolloutResumeAnnotation] != "router=new" {
+		t.Fatal("a verb scoped to another Component must survive this Component's pass")
+	}
+	if len(eventsFrom(rec)) != 0 {
+		t.Fatal("a verb addressed elsewhere must stay silent here")
+	}
+}
+
+// TestResume_BareHashAddressesOnlyItsOwnCanary is the same rule for the bare
+// form: an unscoped hash belongs to whichever unit's canary carries it.
+func TestResume_BareHashAddressesOnlyItsOwnCanary(t *testing.T) {
+	isvc, in := parkedFailed("somebodyelse")
+	if _, err := Reconcile(context.Background(), in); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if phaseOf(isvc) != v1beta1.RolloutPhaseFailed {
+		t.Fatalf("a hash naming no local canary must not resume, got %q", phaseOf(isvc))
+	}
+	if isvc.Annotations[constants.RolloutResumeAnnotation] != "somebodyelse" {
+		t.Fatal("a hash naming no local canary must be left for the unit that owns it")
+	}
+}
+
+// TestResume_StaleHashRejected pins the CAS guard under an explicit scope: the
+// scope addresses this Component, so the mismatch is a real rejection — said
+// out loud, and consumed so it cannot retry forever.
+func TestResume_StaleHashRejected(t *testing.T) {
+	isvc, in := parkedFailed("engine=stalehash")
+	rec := record.NewFakeRecorder(8)
+	in.Recorder = rec
+
+	if _, err := Reconcile(context.Background(), in); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if phaseOf(isvc) != v1beta1.RolloutPhaseFailed {
+		t.Fatalf("a stale hash must leave the hold in place, got %q", phaseOf(isvc))
+	}
+	if isvc.Status.Canary.AnalysisFailedChecks != 3 {
+		t.Fatal("a rejected resume must not reset canary state")
+	}
+	if _, still := isvc.Annotations[constants.RolloutResumeAnnotation]; still {
+		t.Fatal("a rejected resume must still be consumed")
+	}
+	if !hasEvent(eventsFrom(rec), EventReasonRolloutResumeRejected) {
+		t.Fatal("a rejected resume must say so rather than fail silently")
+	}
+}
+
+// TestResume_RejectedWithoutPinnedRun pins the run license on the Failed
+// terminal: a Failed hold keeps its run open by construction, so one without a
+// run has no pinned ladder to re-enter and no rollback signal to drop either.
+func TestResume_RejectedWithoutPinnedRun(t *testing.T) {
+	isvc, in := parkedFailed("new")
+	in.RunActive = false
+	rec := record.NewFakeRecorder(8)
+	in.Recorder = rec
+
+	if _, err := Reconcile(context.Background(), in); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if phaseOf(isvc) != v1beta1.RolloutPhaseFailed {
+		t.Fatalf("no pinned run must leave the hold in place, got %q", phaseOf(isvc))
+	}
+	if _, still := isvc.Annotations[constants.RolloutResumeAnnotation]; still {
+		t.Fatal("a rejected resume must still be consumed")
+	}
+	if !hasEvent(eventsFrom(rec), EventReasonRolloutResumeRejected) {
+		t.Fatal("no pinned run must be reported, not silently ignored")
+	}
+}
+
+// TestResume_NoTerminalPhaseIsNoop pins the no-op branch: an addressed verb
+// with nothing parked changes no state, and is consumed rather than left to
+// fire at some later hold.
+func TestResume_NoTerminalPhaseIsNoop(t *testing.T) {
+	isvc, in := parkedFailed("new")
+	setPhase(isvc, v1beta1.EngineComponent, v1beta1.RolloutPhaseCanarying)
+	isvc.Status.Canary.AnalysisFailedChecks = 3
+
+	if _, err := Reconcile(context.Background(), in); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if isvc.Status.Canary.AnalysisFailedChecks != 3 {
+		t.Fatal("a no-op resume must not reset a live canary")
+	}
+	if _, still := isvc.Annotations[constants.RolloutResumeAnnotation]; still {
+		t.Fatal("an addressed no-op resume must be consumed")
+	}
+}
+
+// TestResume_PausedRolloutIgnoresTheVerb pins pause depth: a paused rollout
+// observes only — no state change and no annotation consumption — so the
+// resume is still there to apply when the pause clears.
+func TestResume_PausedRolloutIgnoresTheVerb(t *testing.T) {
+	isvc, in := parkedFailed("new")
+	isvc.Annotations[constants.PausedRolloutAnnotation] = "true"
+
+	if _, err := Reconcile(context.Background(), in); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if phaseOf(isvc) != v1beta1.RolloutPhaseFailed {
+		t.Fatalf("a paused rollout must not resume, got %q", phaseOf(isvc))
+	}
+	if isvc.Annotations[constants.RolloutResumeAnnotation] != "new" {
+		t.Fatal("a paused rollout must not consume the verb")
+	}
+}
+
+// TestResume_ConsumptionPersistedToAPIServer pins durable consumption: the
+// controller writes only the status subresource, so an in-memory delete alone
+// would leave the verb live and re-resume every later terminal hold.
+func TestResume_ConsumptionPersistedToAPIServer(t *testing.T) {
+	isvc, in := parkedFailed("new")
+	c := fake.NewClientBuilder().WithScheme(canaryScheme(t)).WithObjects(isvc).Build()
+	in.Client = c
+
+	if _, err := Reconcile(context.Background(), in); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	stored := &v1beta1.InferenceService{}
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "svc"}, stored); err != nil {
+		t.Fatal(err)
+	}
+	if _, still := stored.Annotations[constants.RolloutResumeAnnotation]; still {
+		t.Fatal("resume consumption must be persisted to the apiserver, not just in-memory")
+	}
+}
+
+// TestResume_ClearsRolledBackHoldAndTakesTheRollbackVerb covers the second
+// terminal. A rollback that was requested by annotation leaves the verb live
+// (it is consumed only on a re-arm), so a resume that did not take it with the
+// phase would re-arm the hold on the very next pass.
+func TestResume_ClearsRolledBackHoldAndTakesTheRollbackVerb(t *testing.T) {
+	isvc := pinActiveRun(canaryISVC(twoStep(), nil))
+	isvc.Namespace = "ns"
+	isvc.Annotations = map[string]string{
+		constants.RolloutRollbackAnnotation: "true",
+		constants.RolloutResumeAnnotation:   "new",
+	}
+	isvc.Status.Canary = &v1beta1.CanaryStatus{
+		CanaryRevisionHash:     "new",
+		StableRevisionHash:     "old",
+		RolledBackRevisionHash: "new",
+	}
+	setPhase(isvc, v1beta1.EngineComponent, v1beta1.RolloutPhaseRolledBack)
+
+	in := baseInputs(isvc, map[string]int32{"old": 4})
+	// A completed rollback has already pointed the IR back at stable, so the
+	// observed target names the STABLE revision, not the parked canary — and
+	// it closed the run, which is why this terminal needs no pinned plan.
+	in.CanaryRevisionHash = "old"
+	in.RunActive = false
+
+	res, err := Reconcile(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if res.RolledBack {
+		t.Fatal("a resumed rollback must stop signalling the revert, or the IR stays pinned to stable")
+	}
+	if phaseOf(isvc) != v1beta1.RolloutPhasePending {
+		t.Fatalf("resume must clear the RolledBack hold, got %q", phaseOf(isvc))
+	}
+	cs := isvc.Status.Canary
+	if cs.RolledBackRevisionHash != "" {
+		t.Fatalf("resume must drop the rejection, got %q", cs.RolledBackRevisionHash)
+	}
+	if cs.CanaryRevisionHash != "new" {
+		t.Fatalf("resume must re-arm on the PARKED revision, not the observed stable one, got %q", cs.CanaryRevisionHash)
+	}
+	for _, key := range []string{constants.RolloutResumeAnnotation, constants.RolloutRollbackAnnotation} {
+		if _, still := isvc.Annotations[key]; still {
+			t.Fatalf("resume must consume %s, or the hold re-arms next pass", key)
+		}
+	}
+}
+
+// TestResume_RolledBackDoesNotRunTheLadderOnTheInvertedTarget is why a resume
+// returns instead of falling through. Until the IR's rollback target clears,
+// the observed target still names the stable revision; running the step
+// machine against it would program stable as its own canary.
+func TestResume_RolledBackDoesNotRunTheLadderOnTheInvertedTarget(t *testing.T) {
+	isvc := pinActiveRun(canaryISVC(twoStep(), nil))
+	isvc.Annotations = map[string]string{constants.RolloutResumeAnnotation: "new"}
+	isvc.Status.Canary = &v1beta1.CanaryStatus{
+		CanaryRevisionHash:     "new",
+		StableRevisionHash:     "old",
+		RolledBackRevisionHash: "new",
+	}
+	setPhase(isvc, v1beta1.EngineComponent, v1beta1.RolloutPhaseRolledBack)
+
+	in := baseInputs(isvc, map[string]int32{"old": 4})
+	in.CanaryRevisionHash = "old"
+	in.RunActive = false
+	if _, err := Reconcile(context.Background(), in); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if got := isvc.Status.Components[v1beta1.EngineComponent].Traffic; len(got) != 0 {
+		t.Fatalf("no traffic may be programmed on the resume pass, got %+v", got)
+	}
+}
+
+// TestDispatch_ResumeUnpinsTheIRRollbackTarget closes the loop on the
+// RolledBack terminal: clearing the hold is only half the escape, because the
+// IR is still overridden onto the stable ControllerRevision and would keep
+// every Instance there. The same pass that resumes must drop that override so
+// the Component can roll forward again.
+func TestDispatch_ResumeUnpinsTheIRRollbackTarget(t *testing.T) {
+	ns := "default"
+	n4 := 4
+	// No pinned run: the completed rollback closed it.
+	isvc := canaryISVC(twoStep(), nil)
+	isvc.Namespace = ns
+	isvc.Name = "resumed"
+	isvc.Annotations = map[string]string{constants.RolloutResumeAnnotation: "target"}
+	isvc.Spec.Engine = &v1beta1.EngineSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n4}}
+	isvc.Status.Canary = &v1beta1.CanaryStatus{
+		CanaryRevisionHash:     "target",
+		StableRevisionHash:     "stable",
+		RolledBackRevisionHash: "target",
+	}
+	setPhase(isvc, v1beta1.EngineComponent, v1beta1.RolloutPhaseRolledBack)
+
+	stableCR := "resumed-engine-stable"
+	engineIR := &v1beta1.InferenceReplica{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "resumed-engine", Generation: 3}}
+	engineIR.Spec.Runners = []v1beta1.Runner{{Name: v1beta1.RunnerNameDefault, Size: 1}}
+	engineIR.Spec.Pacing = &v1beta1.InferenceReplicaPacing{RollbackToRevision: &stableCR}
+	// The revert completed: the IR names stable as both its current and its
+	// update revision, so the observed target reports stable.
+	engineIR.Status.CurrentRevision = stableCR
+	engineIR.Status.UpdateRevision = stableCR
+	engineIR.Status.ObservedGeneration = 3
+
+	c := fake.NewClientBuilder().
+		WithScheme(canaryScheme(t)).
+		WithStatusSubresource(&v1beta1.InferenceReplica{}).
+		WithRuntimeObjects(
+			isvc, engineIR,
+			canaryPod(ns, isvc.Name, "engine", "stable", "stable-0"),
+			canaryPod(ns, isvc.Name, "engine", "stable", "stable-1"),
+			canaryControllerRevision(ns, isvc.Name, "engine", "stable", 1),
+			canaryControllerRevision(ns, isvc.Name, "engine", "target", 2),
+		).
+		Build()
+	ctx := context.Background()
+	if _, err := Dispatch(ctx, DispatchDeps{
+		Client: c, Reader: c, ISVC: isvc,
+		ComponentRunnerPorts: canaryRunnerPorts(),
+		Group:                rollout.CanaryGroup(isvc),
+	}); err != nil {
+		t.Fatalf("Dispatch resume: %v", err)
+	}
+
+	if phaseOf(isvc) != v1beta1.RolloutPhasePending {
+		t.Fatalf("resume must clear the RolledBack hold, got %q", phaseOf(isvc))
+	}
+	if isvc.Status.Canary.CanaryRevisionHash != "target" || isvc.Status.Canary.RolledBackRevisionHash != "" {
+		t.Fatalf("resume must re-arm on the parked revision, got %+v", isvc.Status.Canary)
+	}
+	live := &v1beta1.InferenceReplica{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: ns, Name: engineIR.Name}, live); err != nil {
+		t.Fatal(err)
+	}
+	if live.Spec.Pacing != nil && live.Spec.Pacing.RollbackToRevision != nil {
+		t.Fatalf("resume must drop the IR rollback target, still %q", *live.Spec.Pacing.RollbackToRevision)
+	}
+}
+
+// TestResetCanaryStatus_ClearsTerminalPhase is the regression for the one-way
+// trap. The phase lives on the Component status, not in the canary status, so
+// a re-arm that reset one and not the other published a canary armed on the
+// current target while still labelled with the phase it escaped — and the
+// hold's own re-arm test (observed target != cs.CanaryRevisionHash) then
+// compares the target against itself and is false forever.
+func TestResetCanaryStatus_ClearsTerminalPhase(t *testing.T) {
+	for _, parked := range []v1beta1.RolloutPhase{v1beta1.RolloutPhaseFailed, v1beta1.RolloutPhaseRolledBack} {
+		isvc := canaryISVC(twoStep(), nil)
+		setPhase(isvc, v1beta1.EngineComponent, parked)
+		cs := &v1beta1.CanaryStatus{CanaryRevisionHash: "old", StableRevisionHash: "old"}
+		rollout.SetCanaryStatusFor(&isvc.Status, v1beta1.EngineComponent, cs)
+
+		resetCanaryStatus(isvc, v1beta1.EngineComponent, cs, "t1", "new", time.Unix(1000, 0))
+
+		if got := phaseOf(isvc); terminalPhase(got) {
+			t.Fatalf("a re-arm out of %s must not leave a terminal phase behind, got %q", parked, got)
+		}
+	}
+}
+
+// A re-arm must not disturb a phase that is not parked: the step machine owns
+// those, and overwriting one here would re-anchor step clocks mid-bake.
+func TestResetCanaryStatus_LeavesLivePhaseAlone(t *testing.T) {
+	isvc := canaryISVC(twoStep(), nil)
+	setPhase(isvc, v1beta1.EngineComponent, v1beta1.RolloutPhaseCanarying)
+	cs := &v1beta1.CanaryStatus{CanaryRevisionHash: "old"}
+	rollout.SetCanaryStatusFor(&isvc.Status, v1beta1.EngineComponent, cs)
+
+	resetCanaryStatus(isvc, v1beta1.EngineComponent, cs, "t1", "new", time.Unix(1000, 0))
+
+	if phaseOf(isvc) != v1beta1.RolloutPhaseCanarying {
+		t.Fatalf("a live phase must be left to the step machine, got %q", phaseOf(isvc))
+	}
+}
+
+func TestParseResume(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  resumeRequest
+		ok    bool
+	}{
+		{value: "abc123", want: resumeRequest{hash: "abc123"}, ok: true},
+		{value: "engine=abc123", want: resumeRequest{component: v1beta1.EngineComponent, hash: "abc123"}, ok: true},
+		{value: ""},
+		{value: "="},
+		{value: "engine="},
+		{value: "=abc123"},
+	} {
+		got, ok := parseResume(tc.value)
+		if ok != tc.ok || got != tc.want {
+			t.Fatalf("parseResume(%q) = (%+v, %v), want (%+v, %v)", tc.value, got, ok, tc.want, tc.ok)
+		}
+	}
+}

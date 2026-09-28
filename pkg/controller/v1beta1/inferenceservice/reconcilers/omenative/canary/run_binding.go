@@ -54,7 +54,7 @@ func BindRun(isvc *v1beta1.InferenceService, g *v1beta1.RolloutGroup, adopting b
 		cs = &v1beta1.CanaryStatus{}
 	}
 	rollout.SetCanaryStatusFor(&isvc.Status, primary, cs)
-	resetCanaryStatus(cs, targetID, target.Revision, isvc.Status.Rollout.ActiveRun.OpenedAt.Time)
+	resetCanaryStatus(isvc, primary, cs, targetID, target.Revision, isvc.Status.Rollout.ActiveRun.OpenedAt.Time)
 	if target.StableRevision != "" {
 		cs.StableRevisionHash = target.StableRevision
 	}

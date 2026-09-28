@@ -9,6 +9,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary/analysis"
 	"github.com/ome-projects/ome/pkg/rollout"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -31,7 +32,10 @@ type ReconcileInputs struct {
 	// not watch (the analysis auth Secret): reading those through the cached
 	// Client would spin up a cluster-wide informer for the type.
 	Reader client.Reader
-	ISVC   *v1beta1.InferenceService
+	// Recorder publishes the operator-verb outcomes an operator needs to tell
+	// an applied verb from an inapplicable one. nil (tests) silences them.
+	Recorder record.EventRecorder
+	ISVC     *v1beta1.InferenceService
 	// Group is the canary group being dispatched — the unit's own ladder. Nil
 	// resolves it from Component.
 	Group              *v1beta1.RolloutGroup
@@ -227,6 +231,17 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 		cs.StableRevisionHash = in.StableRevisionHash
 	}
 
+	// Resume (ome.io/rollout-resume): the operator cleared a terminal hold.
+	// It runs ahead of the holds themselves — those re-arm only toward a NEW
+	// target, which is exactly the escape this verb exists to provide without
+	// one — and returns rather than falling through, so the step machine only
+	// sees the re-armed status once the observation it reads has caught up.
+	if resumed, err := handleResume(ctx, in, cs); err != nil {
+		return nil, err
+	} else if resumed {
+		return &Result{Active: true, RequeueAfter: reconcileRequeue}, nil
+	}
+
 	// Bind an active canary to the IR's authoritative target before handling
 	// operator commands. A changed target starts the staged plan with fresh
 	// per-target state while preserving the original stable identity.
@@ -241,7 +256,7 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 		// here means the fresh run is already pinned. Without one, hold state
 		// as-is rather than start a fresh canary on an unpinned plan.
 		if in.RunActive && in.CanaryRevisionHash != "" && (targetChanged || in.CanaryRevisionHash != cs.CanaryRevisionHash) {
-			resetCanaryStatus(cs, in.TargetID, in.CanaryRevisionHash, in.Now)
+			resetCanaryStatus(in.ISVC, in.Component, cs, in.TargetID, in.CanaryRevisionHash, in.Now)
 		}
 	}
 
@@ -265,7 +280,7 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 				if err := consumeAnnotation(ctx, in.Client, in.ISVC, constants.RolloutRollbackAnnotation); err != nil {
 					return nil, err
 				}
-				resetCanaryStatus(cs, in.TargetID, in.CanaryRevisionHash, in.Now)
+				resetCanaryStatus(in.ISVC, in.Component, cs, in.TargetID, in.CanaryRevisionHash, in.Now)
 				// fall through: start a fresh canary toward the new target.
 			} else {
 				return reconcileRollback(in, cs), nil
@@ -291,7 +306,7 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 		stableHash := stableHashFor(cs, in.PerRevisionPods, cs.CanaryRevisionHash)
 		if in.RunActive && in.CanaryRevisionHash != "" &&
 			(targetChanged || (in.CanaryRevisionHash != cs.CanaryRevisionHash && in.CanaryRevisionHash != stableHash)) {
-			resetCanaryStatus(cs, in.TargetID, in.CanaryRevisionHash, in.Now)
+			resetCanaryStatus(in.ISVC, in.Component, cs, in.TargetID, in.CanaryRevisionHash, in.Now)
 			// fall through: start a fresh canary toward the new target.
 		} else {
 			return &Result{Active: true, RequeueAfter: failedRequeue}, nil
@@ -306,7 +321,7 @@ func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	// appears, in which case start a fresh canary.
 	if cs != nil && int(cs.CurrentStep) >= len(plan.Steps) {
 		if in.RunActive && in.CanaryRevisionHash != "" && (targetChanged || in.CanaryRevisionHash != cs.CanaryRevisionHash) {
-			resetCanaryStatus(cs, in.TargetID, in.CanaryRevisionHash, in.Now)
+			resetCanaryStatus(in.ISVC, in.Component, cs, in.TargetID, in.CanaryRevisionHash, in.Now)
 		} else {
 			// This return skips the main-path syncPromotedThrough, so converge any
 			// promote residue here: a canary can complete while the durable record
@@ -537,12 +552,25 @@ func pausedResult(cs *v1beta1.CanaryStatus, plan *v1beta1.GroupCanary, desiredRe
 // StableRevisionHash is the one field PRESERVED: a mid-canary retarget does
 // not change which revision was stable when the rollout began, and dropping
 // it would make a later rollback target the partially-rolled intermediate.
-func resetCanaryStatus(cs *v1beta1.CanaryStatus, targetID, hash string, now time.Time) {
+//
+// Clearing a terminal RolloutPhase is part of the re-arm, not a courtesy the
+// callers may skip. The phase lives on the Component status, not in cs, so a
+// reset that left it behind would publish a re-armed canary still labelled
+// Failed or RolledBack — and the terminal holds gate their re-arm on the
+// observed target differing from cs.CanaryRevisionHash, which the reset has
+// just made equal. The hold would then compare the target against itself and
+// never re-arm again: a one-way trap out of a phase nothing can clear.
+// Pending is the honest phase at step 0 — no capacity staged, no traffic
+// shifted — and the pass's own gate overwrites it as soon as it decides.
+func resetCanaryStatus(isvc *v1beta1.InferenceService, c v1beta1.ComponentType, cs *v1beta1.CanaryStatus, targetID, hash string, now time.Time) {
 	*cs = v1beta1.CanaryStatus{
 		TargetID:           targetID,
 		CanaryRevisionHash: hash,
 		StableRevisionHash: cs.StableRevisionHash,
 		StepEnteredTime:    &metav1.Time{Time: now},
+	}
+	if terminalPhase(isvc.Status.Components[c].RolloutPhase) {
+		setPhase(isvc, c, v1beta1.RolloutPhasePending)
 	}
 }
 

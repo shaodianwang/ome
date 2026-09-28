@@ -12,7 +12,7 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// Behavior test — canary retarget rollback target.
+// Behavior test — canary retarget rollback target, and the escape from it.
 //
 // Pins the persisted stable identity end-to-end on a real kubelet: stable A
 // serves, a canary toward B pauses mid-step with B pods alive, a second spec
@@ -20,6 +20,12 @@ import (
 // A — the revision that was stable when the canary began — never to the
 // partially-rolled intermediate B. The identity lives in
 // status.canary.stableRevisionHash, so it also survives controller restarts.
+//
+// The rollback then parks terminal: it rejects C until a DIFFERENT target
+// appears. The tail drives ome.io/rollout-resume over that hold and pins the
+// whole escape — rejection dropped, IR unpinned from A, ladder back at step 0
+// on C with its gate re-running — because clearing the status field alone
+// would leave every Instance overridden onto A.
 var _ = ginkgo.Describe("behavior — canary retarget rollback", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 	ginkgo.BeforeEach(func() {
@@ -31,7 +37,7 @@ var _ = ginkgo.Describe("behavior — canary retarget rollback", ginkgo.Ordered,
 		Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed())
 	})
 
-	ginkgo.It("A -> partial B -> retarget C -> rollback returns to A", func() {
+	ginkgo.It("A -> partial B -> retarget C -> rollback returns to A -> resume re-enters C", func() {
 		// Config: 4-replica engine, no canary yet — converge fully on A first
 		// so the canary group added later observes a clean stable revision.
 		const isvcName = "canary-rt1"
@@ -141,6 +147,52 @@ var _ = ginkgo.Describe("behavior — canary retarget rollback", ginkgo.Ordered,
 				g.Expect(pod.Labels[query.LabelRevisionHash]).To(Equal(stableHash),
 					"pod %s must be back on stable A", pod.Name)
 			}
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		// Action 4: resume the parked rollback. The hold rejects C until a
+		// DIFFERENT target appears, so without this verb the only way back to C
+		// is to mint a cosmetically-new revision of the same content.
+		Eventually(func(g Gomega) {
+			cur := freshISVC(g, ns.Name, isvcName)
+			cur.Annotations[constants.RolloutResumeAnnotation] = cHash
+			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
+		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		// Invariant: the verb is consumed, the rejection is dropped, and the IR's
+		// rollback target is unpinned — clearing the phase alone would leave every
+		// Instance overridden onto A.
+		Eventually(func(g Gomega) {
+			c := freshISVC(g, ns.Name, isvcName)
+			g.Expect(c.Annotations).NotTo(HaveKey(constants.RolloutResumeAnnotation),
+				"a one-shot verb must be consumed")
+			g.Expect(c.Status.Canary).NotTo(BeNil())
+			g.Expect(c.Status.Canary.RolledBackRevisionHash).To(BeEmpty(),
+				"resume must drop the sticky rejection of C")
+			ir := freshInferenceReplica(g, ns.Name, isvcName, v1beta1.EngineComponent)
+			if ir.Spec.Pacing != nil {
+				g.Expect(ir.Spec.Pacing.RollbackToRevision).To(BeNil(),
+					"resume must unpin the IR from stable A")
+			}
+		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+
+		// Invariant: the ladder actually restarts against C — step 0 stages its
+		// 50% split again and its manual gate holds there, rather than the canary
+		// completing ungated or re-parking on the old rejection.
+		Eventually(func(g Gomega) {
+			c := freshISVC(g, ns.Name, isvcName)
+			g.Expect(c.Status.Canary.CanaryRevisionHash).To(Equal(cHash),
+				"the resumed ladder must target the revision that was parked")
+			g.Expect(c.Status.Canary.CurrentStep).To(Equal(int32(0)),
+				"resume re-enters at step 0, it does not waive the steps already walked")
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].RolloutPhase).
+				To(Equal(v1beta1.RolloutPhasePaused), "step 0's manual gate must re-run")
+			onC := 0
+			for _, pod := range listOMENativePods(g, ns.Name, isvcName) {
+				if pod.DeletionTimestamp == nil && pod.Labels[query.LabelRevisionHash] == cHash {
+					onC++
+				}
+			}
+			g.Expect(onC).To(Equal(2), "step 0 stages half the fleet on C")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 	})
 })

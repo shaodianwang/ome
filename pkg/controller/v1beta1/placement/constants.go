@@ -55,12 +55,18 @@ var (
 // where the worker cluster's reconciler would (re)interpret them: the
 // placement selectors (candidate selection is the control plane's job), the
 // traffic-drain override (one shared cross-cluster routing decision), the
-// rollout operator-verbs (promote/rollback/repin advance one shared rollout,
-// owned by the control plane — a copy on every candidate would each consume
-// the verb), and the rollout plan-source provenance (system-authored during
-// derive-time policy inflation; a user-supplied value on the source must never
-// masquerade as control-plane provenance on the derived). Stripped by
-// DeriveISVC; inflation re-authors the plan-source entry afterwards.
+// rollout operator-verbs (promote/rollback/repin/resume advance one shared
+// rollout, owned by the control plane — a copy on every candidate would each
+// consume the verb, and the source's still-live copy would re-derive it onto
+// the member on the next sync, replaying it forever), and the rollout
+// plan-source provenance (system-authored during derive-time policy
+// inflation; a user-supplied value on the source must never masquerade as
+// control-plane provenance on the derived). Stripped by DeriveISVC;
+// inflation re-authors the plan-source entry afterwards.
+//
+// Nothing forwards these hub→member, and the hub runs no rollout of its own,
+// so on a placed InferenceService a verb takes effect only when applied
+// directly to the member object.
 var controlPlaneOnlyAnnotations = []string{
 	AcceleratorRequirementsAnnotation,
 	ClusterSelectorAnnotation,
@@ -68,6 +74,7 @@ var controlPlaneOnlyAnnotations = []string{
 	constants.RolloutPromoteAnnotation,
 	constants.RolloutRollbackAnnotation,
 	constants.RolloutRepinAnnotation,
+	constants.RolloutResumeAnnotation,
 	constants.RolloutPlanSourceAnnotation,
 }
 

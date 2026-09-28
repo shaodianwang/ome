@@ -201,6 +201,7 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 	res, err := Reconcile(ctx, ReconcileInputs{
 		Client:                   d.Client,
 		Reader:                   d.Reader,
+		Recorder:                 d.Recorder,
 		ISVC:                     d.ISVC,
 		Group:                    d.Group,
 		Component:                primary,
