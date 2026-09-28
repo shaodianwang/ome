@@ -23,13 +23,15 @@ type snapshotClient struct {
 	client.Client
 	ctx       context.Context
 	snapshots map[string]snapshot
+	readError error
 }
 
-func (c *snapshotClient) Get(_ context.Context, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+func (c *snapshotClient) Get(_ context.Context, key client.ObjectKey, object client.Object, opts ...client.GetOption) (err error) {
+	defer func() { c.rememberError(err) }()
 	if err := c.ctx.Err(); err != nil {
 		return err
 	}
-	err := c.Client.Get(c.ctx, key, object, opts...)
+	err = c.Client.Get(c.ctx, key, object, opts...)
 	if err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
@@ -58,7 +60,8 @@ func (c *snapshotClient) Get(_ context.Context, key client.ObjectKey, object cli
 	return err
 }
 
-func (c *snapshotClient) List(_ context.Context, list client.ObjectList, opts ...client.ListOption) error {
+func (c *snapshotClient) List(_ context.Context, list client.ObjectList, opts ...client.ListOption) (err error) {
+	defer func() { c.rememberError(err) }()
 	if err := c.ctx.Err(); err != nil {
 		return err
 	}
@@ -90,6 +93,9 @@ func (c *snapshotClient) record(key string, value snapshot) error {
 }
 
 func (c *snapshotClient) check(ctx context.Context) error {
+	if c.readError != nil {
+		return c.readError
+	}
 	for key, expected := range c.snapshots {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -103,6 +109,14 @@ func (c *snapshotClient) check(ctx context.Context) error {
 		}
 	}
 	return ctx.Err()
+}
+
+// Some member helpers tolerate failed optional lookups. A capacity observation
+// cannot certify inputs after such a read, even when rendering returns a spec.
+func (c *snapshotClient) rememberError(err error) {
+	if err != nil && !apierrors.IsNotFound(err) && c.readError == nil {
+		c.readError = err
+	}
 }
 
 func objectIdentity(object metav1.Object) (string, error) {

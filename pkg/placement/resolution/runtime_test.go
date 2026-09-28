@@ -77,7 +77,7 @@ func (f *runtimeFixture) sharded() (*v1beta1.ClusterBaseModel, *corev1.ConfigMap
 	model.Spec.Distribution = ptr.To(v1beta1.DistributionSharded)
 	model.Status.Conditions = []metav1.Condition{{Type: v1beta1.ModelConditionReady, Status: metav1.ConditionTrue, ObservedGeneration: model.Generation}}
 	f.runtime.Spec.SupportedModelFormats[0].ModelCacheProviders = []v1beta1.ModelCacheProvider{v1beta1.ModelCacheProviderClusterCache}
-	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: constants.InferenceServiceConfigMapName, Namespace: f.namespace, UID: "config-uid"}, Data: map[string]string{"modelCache": `{"name":"cluster_cache"}`}}
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: constants.InferenceServiceConfigMapName, Namespace: f.namespace, UID: "config-uid"}, Data: map[string]string{"modelCache": `{"provider":"cluster_cache"}`}}
 	f.extra = append(f.extra, cm)
 	return model, cm
 }
@@ -98,6 +98,29 @@ func runtimeScheme(t *testing.T) *runtime.Scheme {
 		}
 	}
 	return s
+}
+
+func TestResolveShardedProviderConfiguration(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		config  string
+		wantErr bool
+	}{
+		{name: "member provider key", config: `{"provider":"cluster_cache"}`},
+		{name: "provider whitespace normalized", config: `{"provider":" cluster_cache "}`},
+		{name: "unrecognized name key", config: `{"name":"cluster_cache"}`, wantErr: true},
+		{name: "empty provider", config: `{"provider":""}`, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newRuntimeFixture()
+			_, cm := f.sharded()
+			cm.Data["modelCache"] = tt.config
+			_, err := (Resolver{Client: fixtureClient(t, f), OperatorNamespace: f.namespace}).Resolve(t.Context(), f.service, nil)
+			if diff := cmp.Diff(tt.wantErr, err != nil); diff != "" {
+				t.Fatalf("provider configuration (-want +got):\n%s\n%v", diff, err)
+			}
+		})
+	}
 }
 
 func TestResolveRuntime(t *testing.T) {

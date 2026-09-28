@@ -31,4 +31,41 @@ and verify member application independently. The runtime hash identifies the
 selected runtime spec; it does not include service overrides, model data, or
 the member's rendered workloads.
 
-This package has no controller call site and changes no local service behavior.
+## Rendered replica units
+
+`Resolver.ResolveUnit` extends runtime resolution through the member's
+Engine/Decoder renderer and accelerator accounting. It reads the configured
+member operator namespace, applies deployment defaults, selects each component's
+AcceleratorClass, resolves overlays and fine-tuned weight inputs, and calls the
+same pod rendering methods as the member. No workloads or status are written.
+Router is excluded from the placement unit.
+
+The member ConfigMap must explicitly configure `acceleratorResources`.
+`modelCache.provider` supplies the model-cache provider, following the member's
+field name and provider-name normalization. Configuration, AcceleratorClasses,
+model inputs, optional Service lookups, and RuntimeClasses join the dependency
+checks. A failed read invalidates the observation even if a member helper
+tolerates that optional lookup.
+
+RawDeployment contributes its primary pod. OMENative and MultiNode gangs
+contribute a leader and the resolved worker count. A declared leader/worker pair
+with size omitted resolves to one worker under the member's defaulting helper.
+Incomplete gangs and unsupported deployment modes return no unit. Component
+replica floors do not affect the per-replica demand fingerprint.
+
+RuntimeClass overhead, node selectors, and tolerations are resolved explicitly;
+conflicting authored values return an error. The returned templates otherwise
+precede workload projection and pod admission. Model readiness selectors remain
+in the templates. Aggregate hardware weights do not establish that these
+scheduling constraints can be satisfied.
+
+`ResolvedUnit.Check` verifies the identified read inputs. Resource versions and
+AcceleratorClass status participate in that check, but do not change the demand
+fingerprint by themselves. Configuration identity/content, selected accelerator
+specifications, runtime/model inputs, RuntimeClasses, and rendered pod shapes do.
+
+Flavor attribution and proof of the member's actual applied/admitted demand are
+still required before authorizing a capacity plan. This resolver does not infer
+other admission mutations or prove that a member has refreshed its configuration.
+There is no placement-controller call site, and local service reconciliation
+uses its existing path.

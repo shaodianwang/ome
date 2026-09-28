@@ -10,6 +10,7 @@ import (
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -39,6 +40,7 @@ type Runtime struct {
 	Decoder   *v1beta1.DecoderSpec
 	Router    *v1beta1.RouterSpec
 	Model     *v1beta1.BaseModelSpec
+	ModelMeta *metav1.ObjectMeta
 	reads     *snapshotClient
 }
 
@@ -93,20 +95,20 @@ func (r Resolver) Resolve(ctx context.Context, desired, standing *v1beta1.Infere
 			return nil, err
 		}
 		var provider struct {
-			Name string `json:"name"`
+			Name string `json:"provider"`
 		}
 		if raw := cm.Data[controllerconfig.ModelCacheConfigName]; raw != "" {
 			if err := json.Unmarshal([]byte(raw), &provider); err != nil {
 				return nil, fmt.Errorf("decode member model cache configuration: %w", err)
 			}
 		}
-		config.ModelCacheProvider = provider.Name
-		if strings.TrimSpace(provider.Name) == "" {
+		config.ModelCacheProvider = strings.TrimSpace(provider.Name)
+		if config.ModelCacheProvider == "" {
 			return nil, fmt.Errorf("sharded runtime resolution requires a configured model cache provider")
 		}
 	}
 	selector := runtimeselector.NewWithConfig(config)
-	out := &Runtime{Model: model, reads: reads}
+	out := &Runtime{Model: model, ModelMeta: modelMeta, reads: reads}
 	ref := service.Spec.Runtime
 	switch {
 	case ref != nil && ref.Name != "":
