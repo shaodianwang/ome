@@ -456,3 +456,84 @@ class PodRecordBuilders(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CanaryHookTest(unittest.TestCase):
+    """The canary verb exposes the grid state as a hook; verbs and faults
+    keyed on it fire in that state, optionally at one step."""
+
+    def test_phase_maps_to_a_hook(self):
+        self.assertEqual("canary-staging", run._canary_hook("Pending"))
+        self.assertEqual("canary-serving", run._canary_hook("Canarying"))
+        self.assertEqual("canary-serving", run._canary_hook("Paused"))
+        self.assertEqual("canary-draining", run._canary_hook("Promoting"))
+        self.assertEqual("canary-rollingback", run._canary_hook("RollingBack"))
+        self.assertEqual("canary-failed", run._canary_hook("Failed"))
+        self.assertIsNone(run._canary_hook("Stable"))
+        self.assertIsNone(run._canary_hook(""))
+
+    def test_hook_matches_state_and_optional_step(self):
+        self.assertTrue(run._hook_due("canary-serving", "canary-serving", 1))
+        self.assertTrue(run._hook_due("canary-serving@1", "canary-serving", 1))
+        self.assertFalse(run._hook_due("canary-serving@0", "canary-serving", 1))
+        self.assertFalse(run._hook_due("canary-failed", "canary-serving", 0))
+        self.assertFalse(run._hook_due("canary-serving", None, 0))
+
+    def test_hook_spec_validates(self):
+        self.assertTrue(run._canary_hook_ok("canary-failed"))
+        self.assertTrue(run._canary_hook_ok("canary-serving@2"))
+        self.assertFalse(run._canary_hook_ok("canary-serving@x"))
+        self.assertFalse(run._canary_hook_ok("rotating"))
+
+    def test_stable_victim_is_an_old_revision_pod(self):
+        pods = {"a": {"alive": True, "hash": "old", "inst": "0", "created": "1"},
+                "b": {"alive": True, "hash": "new", "inst": "1", "created": "2"}}
+        self.assertEqual("a", run._fault_pick_pod(pods, {"engine": 1}, {"old"}, victim="stable"))
+        self.assertEqual("b", run._fault_pick_pod(pods, {"engine": 1}, {"old"}))
+
+    def test_fault_tick_fires_on_the_canary_hook(self):
+        fired = []
+        f = {"case_id": "p1", "kind": "podkill", "param": "canary-serving@1", "victim": "",
+             "fired": False, "infra_fail": None, "notes": []}
+        ctx = {"fault": f, "trigger_ts": 1.0, "pod_state": {}, "pods_per_inst": {}, "old_hashes": set(),
+               "canary_hook": "canary-serving", "canary_step": 0}
+        orig = run._fault_fire
+        run._fault_fire = lambda *a, **k: fired.append(a)
+        try:
+            run._fault_tick(ctx)
+            self.assertEqual([], fired)
+            ctx["canary_step"] = 1
+            run._fault_tick(ctx)
+            self.assertEqual(1, len(fired))
+        finally:
+            run._fault_fire = orig
+
+
+class CanaryHeaderTest(unittest.TestCase):
+    """validate-only knows the canary-mode knobs and refuses them elsewhere."""
+
+    def _errs(self, header):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def test_canary_hooks_need_canary_mode(self):
+        base = "# p999: x mode=rollout Ne=1 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 topo=engine"
+        self.assertTrue(any("during=canary-serving" in e for e in self._errs(base + " during=canary-serving")))
+        self.assertTrue(any("verb=" in e for e in self._errs(base + " verb=pause")))
+        self.assertTrue(any("cell=" in e for e in self._errs(base + " cell=canary/Serving/pause")))
+
+    def test_canary_knobs_validate(self):
+        base = "# p999: x mode=canary Ne=1 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 canary=manual topo=engine"
+        self.assertEqual([], self._errs(base + " during=canary-serving verb=pause verbhold=30 cell=canary/Serving/pause"))
+        self.assertEqual([], self._errs(base + " fault=podkill:canary-serving victim=stable"))
+        self.assertEqual([], self._errs(base + " bump=decoder img=example.com/canary-test/missing:none terminal=Failed"))
+        self.assertEqual([], self._errs(base + " during=canary-serving verb=promote skipsoak=90 cell=canary/Serving[T]/promote"))
+        self.assertTrue(any("verb=" in e for e in self._errs(base + " verb=pause")))
+        self.assertTrue(any("victim=" in e for e in self._errs(base + " victim=stable")))
+        self.assertTrue(any("img=" in e for e in self._errs(base + " img=example.com/canary-test/missing:none")))
+        self.assertTrue(any("fault=" in e for e in self._errs(base + " fault=podkill:rotating")))
+        self.assertTrue(any("cell=" in e for e in self._errs(base + " cell=nonsense")))

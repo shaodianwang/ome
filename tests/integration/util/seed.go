@@ -123,7 +123,9 @@ func SeedDefaultConfigMaps(ctx context.Context, c client.Client) error {
 }`,
 		"rollout": `{
   "maxPinnedPlanBytes": 16384,
-  "defaultReadyTimeout": "15m"
+  "defaultReadyTimeout": "15m",
+  "canaryRequeue": "10s",
+  "canaryParkedRequeue": "5m"
 }`,
 		controllerconfig.OMENativeStatusConfigName: OMENativeStatusConfigJSON(),
 	}); err != nil {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/rollout"
 )
 
 // terminalPhase reports whether a Component's phase is one of the two parked
@@ -71,17 +72,26 @@ func (r resumeRequest) addressesComponent(c v1beta1.ComponentType, cs *v1beta1.C
 // hold the next passes until the target flips back. The Failed path has no
 // such inversion, but takes the same one-requeue detour so the verb has a
 // single behaviour.
-func handleResume(ctx context.Context, in ReconcileInputs, cs *v1beta1.CanaryStatus) (bool, error) {
+//
+// The verb itself is handed back through take and removed by the controller
+// after the status flush that carries the re-arm: a lost flush then leaves
+// the verb in place to be applied again, and a verb still visible after a
+// successful flush finds nothing parked and is consumed with no effect.
+func handleResume(ctx context.Context, in ReconcileInputs, cs *v1beta1.CanaryStatus, take func(string)) (bool, error) {
 	req, ok := parseResume(in.ISVC.Annotations[constants.RolloutResumeAnnotation])
 	if !ok || !req.addressesComponent(in.Component, cs) {
 		return false, nil
 	}
 	consume := func() error {
-		return consumeAnnotation(ctx, in.Client, in.ISVC, constants.RolloutResumeAnnotation)
+		take(constants.RolloutResumeAnnotation)
+		return nil
 	}
 
+	// The park is read from the status marker and the phase together, so a
+	// Failed hold whose phase was dropped by an external write still resumes.
 	phase := in.ISVC.Status.Components[in.Component].RolloutPhase
-	if cs == nil || !terminalPhase(phase) {
+	state := rollout.StateOf(cs, phase, 0)
+	if cs == nil || !state.Terminal() {
 		// Nothing parked to clear. Consume rather than leave an addressed verb
 		// on the object waiting to fire at the next terminal hold.
 		return false, consume()
@@ -102,7 +112,7 @@ func handleResume(ctx context.Context, in ReconcileInputs, cs *v1beta1.CanarySta
 	// A reject lookup that consulted the record first would leave the hold
 	// asserted and strand the resume here, succeeding with no run to show for
 	// it. Locked by the run layer's cleared-reject reopen test.
-	if !in.RunActive && phase != v1beta1.RolloutPhaseRolledBack {
+	if !in.RunActive && state != rollout.CanaryStateRolledBack {
 		recordResume(in.ISVC, in.Component, false)
 		emit(in.Recorder, in.ISVC, corev1.EventTypeWarning, EventReasonRolloutResumeRejected,
 			"resume rejected for %s: no rollout run is pinned, so there is no plan to re-enter", in.Component)
@@ -116,7 +126,9 @@ func handleResume(ctx context.Context, in ReconcileInputs, cs *v1beta1.CanarySta
 	}
 
 	// A live rollback verb would re-arm the hold on the very next pass, so the
-	// resume takes it with the phase it is clearing.
+	// resume takes it with the phase it is clearing. This one is removed
+	// durably before the flush: the resume decision does not depend on it,
+	// and a copy that outlived the flush would roll the resumed canary back.
 	if err := consumeAnnotation(ctx, in.Client, in.ISVC, constants.RolloutRollbackAnnotation); err != nil {
 		return false, err
 	}

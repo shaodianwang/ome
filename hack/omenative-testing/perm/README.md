@@ -261,6 +261,42 @@ revision — the real-cluster proof that one ladder does not pull another along
 ungated. The idle unit's `ceil_*` is set to N (no surge), so a stray rotation
 fails the case rather than passing quietly.
 
+#### Canary-state hooks (`during=`, `verb=`, `fault=`, `bump=`)
+
+The step machine is a state × event table, and p319 + p366–p383 aim an event at
+a named state instead of at "some time after the bump". Every one of them names
+the grid cell it covers in `cell=canary/<State>/<event>` (the states are
+`Staging`, `Serving`, `PreHold`, `Draining`, `Done`, `RollingBack`,
+`RolledBack`, `Failed`).
+
+- **`during=canary-<state>[@<step>]`** — when to act: `canary-staging`
+  (`Pending`), `canary-serving` (`Canarying`/`Paused`), `canary-draining`
+  (`Promoting`), `canary-rollingback`, `canary-failed`; `@2` narrows it to one
+  step index. The verb polls the ISVC status every 2 s and fires once.
+- **`verb=`** — the operator verb to fire at the hook: `pause` / `pause-freeze`
+  (lifted after `verbhold=<s>`, default 45; the step index must not move while
+  held), `promote` (the matching hash; with `skipsoak=<s>` the case asserts it
+  beat a timed step's soak), `promote-stale` (a real hash token naming the
+  stable revision; the step must not move for 20 s), `rollback`, `rebump` (a
+  second revision bump of the bumped members), `rebump-fix` (a bump that also
+  drops the runner image override), `timeout-clear`.
+- **`fault=<kind>:canary-<state>`** — the existing faults (`podkill`,
+  `ctrlrestart`, `quota:<n>`, `cordon:source`) fired at a canary hook instead
+  of `rotating`/`settling`; `victim=canary|stable` aims a podkill at the newest
+  canary pod or at an old-revision pod.
+- **`bump=<members>`** — bump only these group members (an engine-only or
+  decoder-only change under a router unit); `img=<ref>` gives the bumped
+  revision an unpullable image so the capacity gate never opens.
+- **`terminal=Stable|RolledBack|Failed`** — the expected terminal phase when the
+  derivation from `analysis=`/`rollback=` does not apply; `Failed` asserts the
+  park (no canary traffic, not fully rolled, nothing rolled back).
+- **`prearm=rollback`** — leave a rollback request on the idle service before
+  the bump; **`nophase=<Phase>`** — a phase that must not be observed once the
+  hook has fired.
+
+Failure cases set `canary.readyTimeout: "90s"` in the group so the park lands
+inside the case budget.
+
 ### Canary analysis (`analysis=…`, OEP-0015.2)
 
 `isvcs/canary/` p330–p343 gate steps on a **Prometheus query** instead of a

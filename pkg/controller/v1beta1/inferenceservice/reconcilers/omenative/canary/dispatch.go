@@ -46,6 +46,13 @@ type DispatchDeps struct {
 	// DefaultReadyTimeout is the operator-configured capacity-gate bound
 	// (rollout.defaultReadyTimeout); zero means no configured default.
 	DefaultReadyTimeout time.Duration
+	// Requeue and ParkedRequeue are the operator-configured cadences
+	// (rollout.canaryRequeue, rollout.canaryParkedRequeue) at which an
+	// in-progress step and a Failed park are re-checked. Zero means
+	// unconfigured: the dispatch asks for the controller's rate-limited
+	// requeue instead.
+	Requeue       time.Duration
+	ParkedRequeue time.Duration
 	// MetricProviders are this cluster's logical provider bindings; a canary
 	// source naming a providerRef resolves through them. Run open already
 	// parks an unbound name, so an unbound name HERE is a mid-run config
@@ -66,6 +73,26 @@ type DispatchDeps struct {
 	Group *v1beta1.RolloutGroup
 }
 
+// Outcome is what one canary dispatch hands the controller.
+type Outcome struct {
+	// RequeueAfter is the configured cadence at which to re-run. Requeue asks
+	// for the controller's rate-limited requeue when no cadence is configured
+	// for the wait the executor is in.
+	RequeueAfter time.Duration
+	Requeue      bool
+	// Consume lists the operator annotations this pass applied, to be removed
+	// once the pass's status write has landed.
+	Consume []string
+}
+
+// wait is the outcome of a pass that must come back before deciding.
+func (d DispatchDeps) wait() Outcome {
+	if d.Requeue > 0 {
+		return Outcome{RequeueAfter: d.Requeue}
+	}
+	return Outcome{Requeue: true}
+}
+
 // Dispatch runs the canary step machine for an InferenceService, mutating
 // isvc.Status in-memory (phase, traffic, step) and returning a requeue hint. The
 // step machine is ISVC-level; it is driven through the externally-routed
@@ -74,13 +101,13 @@ type DispatchDeps struct {
 // capacity is applied separately by the controller via EffectivePartition.
 //
 // No-op (requeue 0) when no canary plan is set.
-func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
+func Dispatch(ctx context.Context, d DispatchDeps) (Outcome, error) {
 	if d.Group == nil || d.Group.Canary == nil {
-		return 0, nil
+		return Outcome{}, nil
 	}
 	primary := primaryComponentOf(d.Group)
 	if primary == "" {
-		return 0, nil
+		return Outcome{}, nil
 	}
 	// Observe per-revision pods for EVERY configured component (not just the
 	// primary): the canary stages capacity on all of them, so the gate must wait
@@ -91,13 +118,13 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 	// the doomed MatchingFields probe and goes straight to the label-selector List.
 	perRev, readyRev, routingRev, observedPods, err := coordination.ObservePerRevisionPods(ctx, d.Reader, d.ISVC, configuredComponents(d.Group), false)
 	if err != nil {
-		return 0, err
+		return Outcome{}, err
 	}
 	pods := perRev[primary]
 
 	revisions, err := observeCanaryRevisions(ctx, d.Reader, d.ISVC, primary)
 	if err != nil {
-		return 0, err
+		return Outcome{}, err
 	}
 	canaryHash := revisions.targetHash
 
@@ -121,7 +148,7 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 			}
 			routing := routingRev[comp][hash]
 			if _, err := coordination.EnsurePerRevisionServices(ctx, d.Client, d.ISVC, comp, hash, routing, d.ComponentRunnerPorts[comp]); err != nil {
-				return 0, err
+				return Outcome{}, err
 			}
 		}
 		// The orphan sweep runs unconditionally, mirroring coordination.
@@ -131,14 +158,14 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 		// which a drained pod disappears is exactly the pass on which the
 		// two sets agree — skipping it strands that revision's Services.
 		if err := coordination.GCOrphanedPerRevisionServices(ctx, d.Client, d.ISVC, comp, perRev[comp]); err != nil {
-			return 0, err
+			return Outcome{}, err
 		}
 	}
 
 	// Revision names and counters from an older IR generation describe a
 	// different desired workload. Wait for one internally consistent snapshot.
 	if !revisions.statusFresh {
-		return reconcileRequeue, nil
+		return d.wait(), nil
 	}
 
 	// A live non-current revision can appear before the IR status publishes its
@@ -146,7 +173,7 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 	if revisions.fromIR && revisions.currentHash != "" && revisions.currentHash == canaryHash &&
 		otherRevision(pods, canaryHash) != "" &&
 		(rollout.CanaryStatusFor(&d.ISVC.Status, primary) == nil || rollout.CanaryStatusFor(&d.ISVC.Status, primary).StableRevisionHash == "") {
-		return reconcileRequeue, nil
+		return d.wait(), nil
 	}
 
 	now := d.Now
@@ -156,10 +183,10 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 
 	secondaryReady, secondaryFresh, err := secondaryCapacityReady(ctx, d.Reader, d.ISVC, perRev, readyRev, observedPods, primary, d.Group)
 	if err != nil {
-		return 0, err
+		return Outcome{}, err
 	}
 	if !secondaryFresh {
-		return reconcileRequeue, nil
+		return d.wait(), nil
 	}
 	// The IR revision pair authoritatively assigns current=stable and
 	// update=canary while the two revisions are distinct.
@@ -192,11 +219,11 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 	// which the meaningful-diff traffic write corrects on the next pass.
 	canaryProtocol, _, err := coordination.PairingProtocolForRevision(ctx, d.Client, d.ISVC.Namespace, d.ISVC.Name, primary, canaryHash)
 	if err != nil {
-		return 0, err
+		return Outcome{}, err
 	}
 	stableProtocol, _, err := coordination.PairingProtocolForRevision(ctx, d.Client, d.ISVC.Namespace, d.ISVC.Name, primary, stableHash)
 	if err != nil {
-		return 0, err
+		return Outcome{}, err
 	}
 	res, err := Reconcile(ctx, ReconcileInputs{
 		Client:                   d.Client,
@@ -221,9 +248,11 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 		RunActive:                v1beta1.RolloutRunActive(d.ISVC),
 		TargetID:                 activeCanaryTargetID(d.ISVC, d.Group),
 		DefaultReadyTimeout:      d.DefaultReadyTimeout,
+		Requeue:                  d.Requeue,
+		ParkedRequeue:            d.ParkedRequeue,
 	})
 	if err != nil {
-		return 0, err
+		return Outcome{}, err
 	}
 
 	// Rollback signal: when the executor is rolling back, point EVERY group
@@ -233,15 +262,28 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 	// stages capacity on all group Components, so a PD rollback must revert all of
 	// them — signaling only the primary leaves the engine/decoder serving the
 	// rejected revision behind the rolled-back router.
+	missingStable := false
 	for _, comp := range configuredComponents(d.Group) {
 		persistedStable := componentStableRevisionHash(d.ISVC, comp, primary)
-		if err := reconcileRollbackSignal(ctx, d.Client, d.Reader, d.ISVC, comp, persistedStable, res.RolledBack); err != nil {
-			return 0, err
+		missing, err := reconcileRollbackSignal(ctx, d.Client, d.Reader, d.ISVC, comp, persistedStable, res.RolledBack)
+		if err != nil {
+			return Outcome{}, err
+		}
+		missingStable = missingStable || missing
+	}
+	if missingStable {
+		// A rollback with no stable revision to return to cannot be carried
+		// out. Park it, loudly, rather than report a revert in progress that
+		// never completes; a new target re-arms the unit.
+		if cs := rollout.CanaryStatusFor(&d.ISVC.Status, primary); cs != nil && cs.Failed == nil {
+			parkFailed(d.ISVC, primary, cs, v1beta1.CanaryFailureStableRevisionMissing, now)
+			emit(d.Recorder, d.ISVC, corev1.EventTypeWarning, EventReasonCanaryStableRevisionMissing,
+				"%s cannot roll back: no ControllerRevision is retained for its stable revision; parked Failed until a new target appears", primary)
 		}
 	}
 
 	recordDispatch(d.Recorder, d.ISVC, primary, res)
-	return res.RequeueAfter, nil
+	return Outcome{RequeueAfter: res.RequeueAfter, Requeue: res.Requeue, Consume: res.Consume}, nil
 }
 
 // reconcileRollbackSignal sets (rolledBack) or clears one Component IR's
@@ -260,35 +302,40 @@ func Dispatch(ctx context.Context, d DispatchDeps) (time.Duration, error) {
 // FIRST step. Echoing CurrentRevision back would then tell the IR to "roll back"
 // to the canary revision it is already on — a no-op — so the canary pods never
 // drain and the rollback wedges in RollingBack forever.
-func reconcileRollbackSignal(ctx context.Context, c client.Client, reads client.Reader, isvc *v1beta1.InferenceService, comp v1beta1.ComponentType, stableHash string, rolledBack bool) error {
+//
+// It reports missingStable when a rollback names a stable hash whose
+// ControllerRevision is not retained: there is nothing to point the
+// workload at, and the caller parks the canary rather than leave the revert
+// reported as in progress.
+func reconcileRollbackSignal(ctx context.Context, c client.Client, reads client.Reader, isvc *v1beta1.InferenceService, comp v1beta1.ComponentType, stableHash string, rolledBack bool) (missingStable bool, err error) {
 	if c == nil || reads == nil {
-		return nil
+		return false, nil
 	}
 	ir := &v1beta1.InferenceReplica{}
 	key := types.NamespacedName{Namespace: isvc.Namespace, Name: irprojector.InferenceReplicaName(isvc.Name, comp)}
 	if err := reads.Get(ctx, key, ir); err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil
+			return false, nil
 		}
-		return err
+		return false, err
 	}
 	var want *string
 	if rolledBack {
 		// An unknown stable identity must not clear a rollback signal that may
 		// already carry the correct target, or guess from revision ordering.
 		if stableHash == "" {
-			return nil
+			return false, nil
 		}
 		stable, err := stableRevisionName(ctx, reads, isvc, comp, stableHash)
 		if err != nil {
-			return err
+			return false, err
 		}
 		// Only signal a real stable target. An empty result (the stable CR was
 		// GC'd, or only the canary revision exists) must NOT fall back to the
-		// canary revision — that would be a no-op roll. Leaving the signal unset
-		// lets the IR reconciler's NotFound path degrade gracefully.
+		// canary revision — that would be a no-op roll. The signal stays unset
+		// and the caller parks the canary.
 		if stable == "" {
-			return nil
+			return true, nil
 		}
 		want = &stable
 	}
@@ -297,13 +344,13 @@ func reconcileRollbackSignal(ctx context.Context, c client.Client, reads client.
 		cur = ir.Spec.Pacing.RollbackToRevision
 	}
 	if utils.PtrStrEqual(cur, want) {
-		return nil
+		return false, nil
 	}
 	if ir.Spec.Pacing == nil {
 		ir.Spec.Pacing = &v1beta1.InferenceReplicaPacing{}
 	}
 	ir.Spec.Pacing.RollbackToRevision = want
-	return c.Update(ctx, ir)
+	return false, c.Update(ctx, ir)
 }
 
 // stableRevisionName resolves the ControllerRevision name of an exact stable

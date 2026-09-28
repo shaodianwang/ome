@@ -111,15 +111,18 @@ var _ = ginkgo.Describe("behavior — canary capacity gate under pod loss", gink
 		Expect(k8sClient.Delete(suiteCtx, &lostPod,
 			&client.DeleteOptions{GracePeriodSeconds: &zero})).To(Succeed())
 
-		// Invariant: the gate re-closes while the replacement starts — phase
-		// returns to Pending, the step does not advance, and the state machine
-		// keeps its target.
+		// Invariant: losing the canary pod does not move the step machine. The
+		// hold keeps its phase and its programmed split while the replacement
+		// starts; only the capacity wait is recorded, and the target stays.
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, isvcName)
-			g.Expect(c.Status.Components[v1beta1.EngineComponent].RolloutPhase).
-				To(Equal(v1beta1.RolloutPhasePending),
-					"losing the canary pod must re-close the capacity gate")
 			g.Expect(c.Status.Canary).NotTo(BeNil())
+			g.Expect(c.Status.Canary.CapacityWaitSince).NotTo(BeNil(),
+				"losing the canary pod must record the capacity wait")
+			g.Expect(c.Status.Components[v1beta1.EngineComponent].RolloutPhase).
+				To(Equal(v1beta1.RolloutPhasePaused),
+					"a capacity dip must not move a held step back to Pending")
+			g.Expect(c.Status.Canary.ObservedTrafficWeight).To(Equal(int32(50)))
 			g.Expect(c.Status.Canary.CurrentStep).To(Equal(int32(0)))
 			g.Expect(c.Status.Canary.CanaryRevisionHash).To(Equal(canaryHash),
 				"pod loss must not retarget or reset the canary")
@@ -134,6 +137,8 @@ var _ = ginkgo.Describe("behavior — canary capacity gate under pod loss", gink
 				To(Equal(v1beta1.RolloutPhasePaused),
 					"the hold must resume once the replacement canary pod serves")
 			g.Expect(c.Status.Canary).NotTo(BeNil())
+			g.Expect(c.Status.Canary.CapacityWaitSince).To(BeNil(),
+				"the recorded capacity wait must clear once the replacement serves")
 			g.Expect(c.Status.Canary.CurrentStep).To(Equal(int32(0)))
 
 			var canaryPods, stablePods []corev1.Pod

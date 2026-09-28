@@ -56,6 +56,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModel":                        schema_pkg_apis_ome_v1beta1_BaseModel(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModelList":                    schema_pkg_apis_ome_v1beta1_BaseModelList(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.BaseModelSpec":                    schema_pkg_apis_ome_v1beta1_BaseModelSpec(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CanaryFailure":                    schema_pkg_apis_ome_v1beta1_CanaryFailure(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CanaryStatus":                     schema_pkg_apis_ome_v1beta1_CanaryStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CandidateAllocationStatus":        schema_pkg_apis_ome_v1beta1_CandidateAllocationStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CandidateAutoscalingStatus":       schema_pkg_apis_ome_v1beta1_CandidateAutoscalingStatus(ref),
@@ -2807,6 +2808,36 @@ func schema_pkg_apis_ome_v1beta1_BaseModelSpec(ref common.ReferenceCallback) com
 	}
 }
 
+func schema_pkg_apis_ome_v1beta1_CanaryFailure(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "CanaryFailure is why and when a canary parked.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"reason": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Reason names the gate that gave up.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"time": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Time is when the canary parked.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
+				},
+				Required: []string{"reason"},
+			},
+		},
+		Dependencies: []string{
+			"k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
+	}
+}
+
 func schema_pkg_apis_ome_v1beta1_CanaryStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -2919,12 +2950,24 @@ func schema_pkg_apis_ome_v1beta1_CanaryStatus(ref common.ReferenceCallback) comm
 							},
 						},
 					},
+					"capacityWaitSince": {
+						SchemaProps: spec.SchemaProps{
+							Description: "CapacityWaitSince is when the current step's capacity gate became unmet. The ready timeout is measured from here and never from the step's soak anchor, so a long soak cannot spend the capacity budget and a capacity dip cannot restart the soak. Cleared once the step's capacity is met.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Time"),
+						},
+					},
+					"failed": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Failed records that the canary is parked at CurrentStep: the capacity gate stayed unmet past the ready timeout, analysis stayed inconclusive past the stall timeout, or a rollback found no stable revision to return to. While set the step machine does not run, the phase reads Failed and the stable revision keeps serving. Cleared by a re-arm toward a new target and by a rollback request.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CanaryFailure"),
+						},
+					},
 				},
 				Required: []string{"currentStep", "observedTrafficWeight"},
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AnalysisMetricResult", "k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AnalysisMetricResult", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CanaryFailure", "k8s.io/apimachinery/pkg/apis/meta/v1.Time"},
 	}
 }
 

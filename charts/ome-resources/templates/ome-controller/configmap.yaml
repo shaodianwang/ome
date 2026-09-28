@@ -61,7 +61,9 @@ data:
   rollout: |-
     {
       "maxPinnedPlanBytes": {{ .Values.ome.controller.rollout.maxPinnedPlanBytes | default 0 }},
-      "defaultReadyTimeout": "{{ .Values.ome.controller.rollout.defaultReadyTimeout | default "" }}"
+      "defaultReadyTimeout": "{{ .Values.ome.controller.rollout.defaultReadyTimeout | default "" }}",
+      "canaryRequeue": "{{ .Values.ome.controller.rollout.canaryRequeue | default "" }}",
+      "canaryParkedRequeue": "{{ .Values.ome.controller.rollout.canaryParkedRequeue | default "" }}"
     }
 {{- with .Values.ome.metricProviders }}
 

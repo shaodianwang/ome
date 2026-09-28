@@ -1187,7 +1187,36 @@ def invariant_checks(inv, verdict, notes, checks):
 # updated pod observed post-trigger), migrating (migration accept observed).
 # One firing per case (latched). Any fault-APPARATUS error → the distinct
 # INFRA-FAIL verdict: the harness broke, not the product — never a FAIL/PASS.
-FAULT_PHASES = {"rotating", "migrating", "settling"}
+# Canary-state hooks: the grid state the canary verb reads off the ISVC
+# status each poll (Pending -> staging, Canarying/Paused -> serving,
+# Promoting -> draining, RollingBack, Failed). A fault or a verb keyed on one
+# fires while the step machine is in that state; "@<step>" narrows it to one
+# step index.
+CANARY_HOOKS = {"canary-staging", "canary-serving", "canary-draining", "canary-rollingback", "canary-failed"}
+FAULT_PHASES = {"rotating", "migrating", "settling"} | CANARY_HOOKS
+CANARY_VERBS = {"pause", "pause-freeze", "promote", "promote-stale", "rebump", "rebump-fix",
+                "rollback", "timeout-clear"}
+
+
+def _canary_hook(phase):
+    """Grid state of a canary rolloutPhase, as a hook name (None when idle)."""
+    return {"Pending": "canary-staging", "Canarying": "canary-serving", "Paused": "canary-serving",
+            "Promoting": "canary-draining", "RollingBack": "canary-rollingback",
+            "Failed": "canary-failed"}.get(phase or "")
+
+
+def _canary_hook_ok(v):
+    """Header validator for a canary hook spec: <hook>[@<step>]."""
+    hook, _, at = str(v).partition("@")
+    return hook in CANARY_HOOKS and (not at or at.isdigit())
+
+
+def _hook_due(spec, hook, step):
+    """spec = <hook>[@<step>]: due when the hook matches and, if given, the step."""
+    want, _, at = str(spec).partition("@")
+    if not hook or want != hook:
+        return False
+    return not at or (step is not None and str(step) == at)
 FAULT_TARGETS = {"source"}
 # Marker label stamped on a node the harness cordons, so batch.py's end-of-run
 # sweep can find (and uncordon) ONLY harness cordons — never an operator's.
@@ -1277,6 +1306,7 @@ def _fault_new(case_id, hdr):
         return None
     kind, _, param = v.partition(":")
     return {"case_id": case_id, "kind": kind, "param": param,
+            "victim": str(hdr.get("victim") or ""),
             "fired": False, "infra_fail": None, "notes": []}
 
 
@@ -1420,12 +1450,14 @@ def _fault_setup(f, case_id, hdr):
         return False, f["infra_fail"]
 
 
-def _fault_pick_pod(pod_state, pods_per_inst, old_hashes):
+def _fault_pick_pod(pod_state, pods_per_inst, old_hashes, victim=None):
     """Deterministic podkill victim: (1) gang topology → the leader pod of the
     lowest live instance index (heads the whole gang); (2) surge in flight (an
     alive new-revision pod exists) → the newest surge pod (latest
     creationTimestamp, name tie-break) — hits the in-flight rollout, not
-    settled capacity; (3) otherwise the first live pod sorted by name."""
+    settled capacity; (3) otherwise the first live pod sorted by name.
+    victim="stable" overrides (2): the first live OLD-revision pod, so a case
+    can take capacity from the revision that keeps serving under a canary."""
     def _idx(p):
         try:
             return int(p.get("inst", "0"))
@@ -1434,6 +1466,14 @@ def _fault_pick_pod(pod_state, pods_per_inst, old_hashes):
     live = [(n, p) for n, p in sorted(pod_state.items()) if p and p["alive"]]
     if not live:
         return None
+    if victim == "stable" and old_hashes:
+        olds = [(n, p) for n, p in live if p.get("hash") in old_hashes]
+        if olds:
+            return olds[0][0]
+    if victim == "canary" and old_hashes is not None:
+        surges = [(n, p) for n, p in live if p.get("hash") and p["hash"] not in old_hashes]
+        if surges:
+            return max(surges, key=lambda x: (x[1].get("created", ""), x[0]))[0]
     if any(v > 1 for v in pods_per_inst.values()):
         leaders = [(n, p) for n, p in live if p.get("runner") == "leader"]
         if leaders:
@@ -1449,7 +1489,7 @@ def _fault_fire(f, pod_state, pods_per_inst, old_hashes):
     """One-shot phase-fault action (latched by the caller's fired check)."""
     f["fired"] = True
     if f["kind"] == "podkill":
-        victim = _fault_pick_pod(pod_state, pods_per_inst, old_hashes)
+        victim = _fault_pick_pod(pod_state, pods_per_inst, old_hashes, victim=f.get("victim"))
         if not victim:
             f["infra_fail"] = "podkill: no live pod to delete"
             return
@@ -1499,6 +1539,8 @@ def _fault_tick(ctx):
         due = old is not None and any(
             p and p["alive"] and ((p.get("hash") and p["hash"] not in old) or p.get("newanno"))
             for p in ctx["pod_state"].values())
+    elif ph.partition("@")[0] in CANARY_HOOKS:
+        due = _hook_due(ph, ctx.get("canary_hook"), ctx.get("canary_step"))
     else:   # migrating
         due = bool(ctx.get("fault_migrating"))
     if due:
@@ -1670,7 +1712,7 @@ HDR_VALIDATORS = {
     # recreate deletes mid-rollout/mid-migration; migrate files its request
     # mid-rotate (both must complete; ordering unasserted — the product may
     # preempt the rollout); runtimerev edits the CSR mid-rotate.
-    "during": lambda v: v in {"rollout", "migrate"},
+    "during": lambda v: v in {"rollout", "migrate"} or _canary_hook_ok(v),
     "remove": lambda v: v in {"decoder", "router"},   # compremove: component patched out
     "readd": lambda v: v == 1,    # compremove: re-apply the manifest, assert round-trip
     "dup": lambda v: v == 1,      # migrate: re-file the same request UUID (dedup contract)
@@ -1689,6 +1731,24 @@ HDR_VALIDATORS = {
     "scale_e": lambda v: isinstance(v, int) and v >= 1,
     "scale_d": lambda v: isinstance(v, int) and v >= 1,
     "topo": lambda v: v in {"engine", "pd", "engine-mn", "pd-mn"},
+    # Canary-mode knobs (mode=canary). verb= fires one operator verb when the
+    # canary reaches the during= hook; verbhold= is how long a pause verb holds
+    # before it is lifted; bump= names the group members to bump (default: the
+    # whole group); img= with bump= gives the bumped revision an unstartable
+    # image; terminal= overrides the expected terminal phase; prearm=rollback
+    # leaves a rollback request on the idle ISVC before the bump; victim=
+    # aims a podkill at the stable or the canary revision; skipsoak= states the
+    # timed step's pause so a verb that skips it can be asserted; cell= names
+    # the grid cell the case covers.
+    "verb": lambda v: v in CANARY_VERBS,
+    "verbhold": _int_ge0,
+    "bump": lambda v: bool(str(v)) and all(m in COMPS for m in str(v).split(",")),
+    "terminal": lambda v: v in {"Stable", "RolledBack", "Failed"},
+    "prearm": lambda v: v == "rollback",
+    "victim": lambda v: v in {"stable", "canary"},
+    "skipsoak": _int_ge0,
+    "nophase": lambda v: v in {"Pending", "Canarying", "Paused", "Promoting", "RollingBack", "RolledBack", "Failed"},
+    "cell": lambda v: re.match(r"^canary/[A-Za-z]+(\[[A-Za-z]+\])?/[A-Za-z0-9]+(\[[A-Za-z]+\])?$", str(v)) is not None,
     "infeasible": lambda v: v == 1,
     "notimpl": lambda v: v == 1,
     # GitHub issue number a notimpl=1 case is parked on. REQUIRED with notimpl:
@@ -1799,10 +1859,25 @@ def validate_case_file(path):
         errs.append(f"{path}:1: mode=compremove needs remove=<component>")
     if "readd" in fields and mode != "compremove":
         errs.append(f"{path}:1: readd=1 only applies to mode=compremove")
-    if "during" in fields and fields["during"] not in {"recreate": {"rollout", "migrate"},
-                                                       "migrate": {"rollout"},
-                                                       "runtimerev": {"rollout"}}.get(mode, set()):
-        errs.append(f"{path}:1: during={fields['during']} not supported for mode={mode}")
+    during = str(fields.get("during", ""))
+    if during and _canary_hook_ok(during):
+        if mode != "canary":
+            errs.append(f"{path}:1: during={during} is a canary hook (mode=canary)")
+    elif during and during not in {"recreate": {"rollout", "migrate"},
+                                   "migrate": {"rollout"},
+                                   "runtimerev": {"rollout"}}.get(mode, set()):
+        errs.append(f"{path}:1: during={during} not supported for mode={mode}")
+    for k in ("verb", "verbhold", "bump", "terminal", "prearm", "skipsoak", "cell", "nophase"):
+        if k in fields and mode != "canary":
+            errs.append(f"{path}:1: {k}= is a canary-mode knob (mode=canary)")
+    if "verb" in fields and not _canary_hook_ok(during):
+        errs.append(f"{path}:1: verb= needs during=<canary hook> to say when it fires")
+    if "victim" in fields and not str(fields.get("fault", "")).startswith("podkill:"):
+        errs.append(f"{path}:1: victim= aims a podkill (needs fault=podkill:<hook>)")
+    if mode == "canary" and "img" in fields and "bump" not in fields:
+        errs.append(f"{path}:1: img= in canary mode needs bump=<members> (the revision it breaks)")
+    if mode == "canary" and str(fields.get("fault", "")).partition(":")[2].partition("@")[0] in ("rotating", "migrating", "settling"):
+        errs.append(f"{path}:1: fault= in canary mode fires at a canary hook (fault=<kind>:canary-<state>)")
     if ("dup" in fields or "hint" in fields) and mode != "migrate":
         errs.append(f"{path}:1: dup=/hint= are migrate-mode knobs")
     if fields.get("blocked") and "fault" not in fields:
@@ -2069,14 +2144,27 @@ def _bumped(ctx):
     return members or ({"engine"} & ctx["configured"])
 
 
-def _bump_rev(ctx, bumped, val=TRIGGER_VAL, extra=None):
+def _bump_rev(ctx, bumped, val=TRIGGER_VAL, extra=None, image=None):
     # extra: additional pod annotations set on the bumped components (analysis
     # cases use it to carry the canary revision's health, e.g. perm.test/error-rate
     # — one patch both rolls the revision AND flips the canary pods' emitted metric).
+    # image: a runner image override for the bumped components. A non-empty
+    # value gives the new revision that image (an unpullable one is how a case
+    # parks a canary on its capacity gate); "" drops a previous override so the
+    # next revision starts again; None leaves the runner alone.
     anns = {TRIGGER_ANNO: val, "ome.io/deploymentMode": "OMENative"}
     if extra:
         anns.update(extra)
     patch = {"spec": {c: {"annotations": dict(anns)} for c in sorted(bumped)}}
+    if image is not None:
+        for c in sorted(bumped):
+            runner = {"image": image} if image else None
+            # A multi-node component renders its leader's runner, so the
+            # override has to sit under leader: for the pods to pick it up.
+            if ctx["pods_per_inst"].get(c, 1) > 1:
+                patch["spec"][c]["leader"] = {"runner": runner}
+            else:
+                patch["spec"][c]["runner"] = runner
     rr = kubectl("-n", NS, "patch", "isvc", ctx["case_id"], "--type=merge", "-p", json.dumps(patch))
     ctx["trigger_ts"] = time.time()
     return rr.returncode == 0
@@ -4455,6 +4543,32 @@ def _canary_command_state(canary, current_hash, old_hashes, promoted_step):
     return current_hash, promoted_step, target_ready, promote_ready, changed
 
 
+def _canary_verb(ctx, verb, canary_hash, primary):
+    """Fire one operator verb at the canary hook. Each is a kubectl the harness
+    already issues somewhere; the hook only decides WHEN it lands."""
+    cid = ctx["case_id"]
+    if verb in ("pause", "pause-freeze"):
+        _pause_annotation(cid, "true" if verb == "pause" else "freeze")
+    elif verb == "promote":
+        kubectl("-n", NS, "annotate", "isvc", cid, f"{PROMOTE_ANNO}={canary_hash}", "--overwrite")
+    elif verb == "promote-stale":
+        # A real revision-hash token that names the wrong revision: the stable
+        # one. Admission accepts the shape; the executor must ignore the value.
+        stale = sorted(ctx["old_hashes"])[0]
+        kubectl("-n", NS, "annotate", "isvc", cid, f"{PROMOTE_ANNO}={stale}", "--overwrite")
+    elif verb == "rollback":
+        kubectl("-n", NS, "annotate", "isvc", cid, f"{ROLLBACK_ANNO}=true", "--overwrite")
+    elif verb == "rebump":
+        _bump_rev(ctx, ctx["bumped"], val="v3")
+    elif verb == "rebump-fix":
+        _bump_rev(ctx, ctx["bumped"], val="v3", image="")
+    elif verb == "timeout-clear":
+        kubectl("-n", NS, "annotate", "isvc", cid, "ome.io/rollout-ready-timeout-")
+    note = f"verb fired: {verb} at {ctx.get('canary_hook')} step={ctx.get('canary_step')}"
+    ctx.setdefault("verb_notes", []).append(note)
+    print(f"    ⚡ {note}")
+
+
 def _canary(case_id, yaml_file, desc, hdr):
     """Canary rollout (OEP-0017 v2). The ISVC ships a spec.rollout.groups[] canary
     group in the initial apply; once rev A is Ready we bump the primary component's revision to
@@ -4509,6 +4623,21 @@ def _canary(case_id, yaml_file, desc, hdr):
     # pass/breach default.
     if hdr.get("errorrate") is not None and analysis_extra is not None:
         analysis_extra = {**analysis_extra, "perm.test/error-rate": str(hdr.get("errorrate"))}
+    # Canary-state hook knobs (see HDR_VALIDATORS): a verb or a fault keyed on
+    # a grid state, a partial-group bump, an unstartable image for the bumped
+    # revision, and an expected terminal that overrides the derivation below.
+    during = str(hdr.get("during") or "")
+    verb = str(hdr.get("verb") or "")
+    verbhold = int(hdr.get("verbhold") or 45)
+    bump_members = {m.strip() for m in str(hdr.get("bump") or "").split(",") if m.strip()}
+    bad_image = str(hdr.get("img") or "")
+    terminal = str(hdr.get("terminal") or "")
+    soak_s = int(hdr.get("skipsoak") or 0)
+    nophase = str(hdr.get("nophase") or "")
+    if hdr.get("prearm") == "rollback":
+        # A rollback request left on the idle service before any canary exists.
+        kubectl("-n", NS, "annotate", "isvc", case_id, f"{ROLLBACK_ANNO}=true", "--overwrite")
+        print("    prearm: ome.io/rollout-rollback=true set on the idle service")
     # Expected terminal phase. breach + inconclusive/Rollback drain to stable;
     # inconclusive/Hold parks Failed (stable keeps serving); pass promotes.
     if analysis_mode == "breach" or (analysis_mode == "inconclusive" and on_inconclusive == "rollback"):
@@ -4519,6 +4648,8 @@ def _canary(case_id, yaml_file, desc, hdr):
         expect = "Stable"
     else:
         expect = "RolledBack" if do_rollback else "Stable"
+    expect = terminal or expect
+    expect_rollback = do_rollback or expect == "RolledBack"
     nsteps = len(cinfo.get("steps") or []) or 2
     primary = _canary_primary(ctx, cgroup)
     if not primary:
@@ -4530,6 +4661,11 @@ def _canary(case_id, yaml_file, desc, hdr):
     # the coordination trigger path, which bumps all group members). The primary
     # stays the component whose status/traffic the step machine is observed on.
     group = (set(cinfo.get("members") or ctx["info"].get("members") or []) & ctx["configured"]) or {primary}
+    if bump_members:
+        # A partial bump: only the named members get the new revision, so the
+        # unit's target changes while the primary's own revision may not.
+        group = (bump_members & group) or group
+    ctx["bumped"] = group
     # Components of every OTHER canary unit. Nothing bumps them, so they must
     # stay whole on their stable revision with no run of their own — the
     # real-cluster proof that one unit's ladder does not drive another's.
@@ -4538,7 +4674,7 @@ def _canary(case_id, yaml_file, desc, hdr):
     print(f"  Phase 2: canary policy={policy} steps={nsteps} primary={primary} bump={sorted(group)}"
           + (f" idle_units={others}" if others else "")
           + ("  +rollback" if do_rollback else ""))
-    if not _bump_rev(ctx, group, extra=analysis_extra):
+    if not _bump_rev(ctx, group, extra=analysis_extra, image=bad_image or None):
         return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", "rev bump patch failed")
     ctx["track_comps"] = sorted(ctx["configured"])   # gang/floor bookkeeping in _read_one
     # Budget tracks the whole bumped group, not just the primary: a rollback (or a
@@ -4561,6 +4697,12 @@ def _canary(case_id, yaml_file, desc, hdr):
     promoted_step = -1  # highest step index already promoted (multi-step plans pause more than once)
     promote_rejected = None
     rejected = None     # status.canary.rolledBackRevisionHash once a rollback is recorded
+    verb_fired = verb_lifted = rebump_retargeted = False
+    verb_ts = 0.0
+    step_at_verb = step_at_lift = None
+    stale_held = None   # promote-stale: did the step hold 20s after the stale promote
+    hook_fired_ts = None    # when the case's verb or fault landed (nophase= window)
+    after_hook_phases = set()
     state, stable, last_poll = "ROLLING", None, 0.0
 
     while ctx["trigger_ts"] and time.time() - ctx["trigger_ts"] < budget and not ctx["closed"]:
@@ -4589,10 +4731,32 @@ def _canary(case_id, yaml_file, desc, hdr):
                 if t.get("latestRevision"):
                     traffic_by_step[step] = t.get("percent", 0)
 
+        # Canary-state hook: expose the grid state to the fault dispatcher and
+        # fire the case's verb once, when the state (and step) it names arrives.
+        ctx["canary_hook"], ctx["canary_step"] = _canary_hook(phase), step
+        if verb and not verb_fired and _hook_due(during, ctx["canary_hook"], step):
+            verb_fired, verb_ts, step_at_verb = True, now, step
+            _canary_verb(ctx, verb, canary_hash, primary)
+        fault = ctx.get("fault")
+        if hook_fired_ts is None and (verb_fired or (fault and fault.get("fired"))):
+            hook_fired_ts = now
+        elif hook_fired_ts is not None and phase:
+            after_hook_phases.add(phase)
+        elif verb_fired and verb in ("rebump", "rebump-fix") and target_changed and previous_canary_hash:
+            rebump_retargeted = True
+        if verb_fired and verb in ("pause", "pause-freeze") and not verb_lifted and now - verb_ts >= verbhold:
+            verb_lifted, step_at_lift = True, step
+            _pause_annotation(case_id, "")
+            print(f"    verb lifted: rollout-paused removed after {verbhold}s (step={step})")
+        if verb_fired and verb == "promote-stale" and stale_held is None and now - verb_ts >= 20:
+            stale_held = (step == step_at_verb)
+
         # Rollback probe: once the canary is in progress, request a rollback. The
         # canary reverts every Instance to the stable revision and HOLDS there
-        # (RolledBack), rejecting the rolled-back revision.
-        if (do_rollback and not rollback_set and canary_target_ready and
+        # (RolledBack), rejecting the rolled-back revision. A rebump verb goes
+        # first, and the probe then waits for the retargeted canary to serve.
+        rollback_gate = (not verb) or (verb_fired and (verb not in ("rebump", "rebump-fix") or rebump_retargeted))
+        if (do_rollback and not rollback_set and canary_target_ready and rollback_gate and
                 phase in ("Canarying", "Paused")):
             rollback_set = True
             kubectl("-n", NS, "annotate", "isvc", case_id, f"{ROLLBACK_ANNO}=true", "--overwrite")
@@ -4603,7 +4767,8 @@ def _canary(case_id, yaml_file, desc, hdr):
         # more than once). Wait for the prior durable promotion record to clear
         # before reusing the same target hash at another step.
         should_promote = (policy == "manual" and not do_rollback and phase == "Paused" and
-                          canary_hash and promote_ready and step is not None and step > promoted_step)
+                          canary_hash and promote_ready and step is not None and step > promoted_step and
+                          not (verb == "promote-stale" and stale_held is None))
         if should_promote:
             rr = kubectl("-n", NS, "annotate", "isvc", case_id,
                          f"{PROMOTE_ANNO}={canary_hash}", "--overwrite")
@@ -4689,10 +4854,32 @@ def _canary(case_id, yaml_file, desc, hdr):
                      f"{u} unit recorded no canary run of its own",
                      f"{u} unit picked up a canary run it was never given: {idle_run}")
 
+    for x in ctx.get("verb_notes", []):
+        checks.append(f"  ⓘ {x}")
+    if verb:
+        good(verb_fired, f"verb {verb} fired at {during}",
+             f"verb {verb} never fired: the canary never reached {during} (phases={sorted(phases)})")
+    if verb in ("pause", "pause-freeze") and verb_fired:
+        good(verb_lifted and step_at_lift == step_at_verb,
+             f"paused canary held its step ({step_at_verb}) for {verbhold}s until the pause was lifted",
+             f"paused canary moved from step {step_at_verb} to {step_at_lift} under rollout-paused")
+    if verb == "promote-stale" and verb_fired:
+        good(stale_held is True,
+             f"a promote naming the stable revision left the step at {step_at_verb}",
+             f"a promote naming the stable revision moved the step off {step_at_verb}")
+
     want = expect
     good(state == "CONVERGED",
          f"reached {want} in {ctx.get('converged_at')}s",
          f"did not reach {want} (state={state}, phases={sorted(phases)})")
+    if nophase and hook_fired_ts is not None:
+        good(nophase not in after_hook_phases,
+             f"phase {nophase} was not observed after the hook fired (saw {sorted(after_hook_phases)})",
+             f"phase {nophase} was observed after the hook fired (saw {sorted(after_hook_phases)})")
+    if verb == "promote" and soak_s and ctx.get("converged_at") is not None:
+        good(ctx["converged_at"] < soak_s,
+             f"a matching promote skipped the {soak_s}s soak (converged in {ctx['converged_at']}s)",
+             f"a matching promote did not skip the {soak_s}s soak (converged in {ctx['converged_at']}s)")
     # NOTE: "Canarying" is transient — the reconciler sets it then immediately
     # supersedes it with "Paused" in the same reconcile for any step that pauses,
     # so it never persists for paused steps. Assert the canary entered an ACTIVE
@@ -4707,7 +4894,11 @@ def _canary(case_id, yaml_file, desc, hdr):
         # goes Pending → RollingBack → RolledBack without ever entering a
         # traffic-split phase. RollingBack is itself proof the canary engaged
         # and was rejected, so accept it when a rollback is the expected outcome.
-        if not active and (do_rollback or expect == "RolledBack") and ("RollingBack" in phases):
+        if not active and expect_rollback and ({"RollingBack", "RolledBack"} & phases):
+            active = True
+        # A canary parked on its capacity gate (an unstartable image, no quota)
+        # never serves a split either: Pending then Failed is the whole story.
+        if not active and expect == "Failed" and ("Failed" in phases):
             active = True
         good(active,
              "observed an active canary phase (Canarying/Paused/RollingBack)",
@@ -4748,7 +4939,22 @@ def _canary(case_id, yaml_file, desc, hdr):
                  f"unexpectedly rolled back ({rejected})")
         return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
-    if do_rollback:
+    if expect == "Failed":
+        # Parked: the stable revision keeps serving, the canary never took
+        # traffic, and nothing rolled back.
+        good("Failed" in phases, "parked Failed (stable keeps serving)",
+             f"never observed Failed; saw {sorted(phases)}")
+        good(new < N[primary], f"{primary} did not fully roll while parked ({new}/{N[primary]} on canary)",
+             f"{primary} fully rolled to the canary revision despite the park ({new}/{N[primary]})")
+        fc = (fetch_status(case_id).get("components", {}) or {}).get(primary, {}) or {}
+        canary_pct = next((t.get("percent", 0) for t in (fc.get("traffic") or []) if t.get("latestRevision")), 0)
+        good(canary_pct == 0, "canary revision carries no traffic while parked",
+             f"canary revision carries {canary_pct}% traffic while parked")
+        good(not rejected, "did not roll back (a park is a hold, not a revert)",
+             f"unexpectedly rolled back ({rejected})")
+        return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
+
+    if expect_rollback:
         # Rolled back: drained back to stable (0 canary Instances), the rejected
         # revision recorded + held, and RollingBack observed during the drain.
         good(new == 0, f"{primary} drained back to stable (0 canary Instances)",
@@ -4778,9 +4984,11 @@ def _canary(case_id, yaml_file, desc, hdr):
     good(canary_pct == 100,
          f"canary revision carries 100% traffic at convergence (per-step: {weights})",
          f"canary revision traffic at convergence is {canary_pct}% (want 100); per-step: {weights}")
-    good(new == N[primary],
-         f"{primary} fully rolled to canary revision ({new}/{N[primary]})",
-         f"{primary} not fully on canary revision ({new}/{N[primary]})")
+    for c in sorted(ctx.get("bumped") or {primary}):
+        rolled, _ = _inst_rev_split(ctx, c)
+        good(rolled == N[c],
+             f"{c} fully rolled to canary revision ({rolled}/{N[c]})",
+             f"{c} not fully on canary revision ({rolled}/{N[c]})")
 
     if policy == "manual":
         if promote_rejected:

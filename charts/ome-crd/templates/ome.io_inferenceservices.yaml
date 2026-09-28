@@ -31776,9 +31776,26 @@ spec:
                       type: integer
                     canaryRevisionHash:
                       type: string
+                    capacityWaitSince:
+                      format: date-time
+                      type: string
                     currentStep:
                       format: int32
                       type: integer
+                    failed:
+                      properties:
+                        reason:
+                          enum:
+                            - CapacityTimeout
+                            - AnalysisStalled
+                            - StableRevisionMissing
+                          type: string
+                        time:
+                          format: date-time
+                          type: string
+                      required:
+                        - reason
+                      type: object
                     lastConclusiveEvaluationTime:
                       format: date-time
                       type: string
@@ -31948,9 +31965,26 @@ spec:
                             type: integer
                           canaryRevisionHash:
                             type: string
+                          capacityWaitSince:
+                            format: date-time
+                            type: string
                           currentStep:
                             format: int32
                             type: integer
+                          failed:
+                            properties:
+                              reason:
+                                enum:
+                                  - CapacityTimeout
+                                  - AnalysisStalled
+                                  - StableRevisionMissing
+                                type: string
+                              time:
+                                format: date-time
+                                type: string
+                            required:
+                              - reason
+                            type: object
                           lastConclusiveEvaluationTime:
                             format: date-time
                             type: string

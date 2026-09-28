@@ -1472,6 +1472,24 @@
         }
       }
     },
+    "v1beta1.CanaryFailure": {
+      "description": "CanaryFailure is why and when a canary parked.",
+      "type": "object",
+      "required": [
+        "reason"
+      ],
+      "properties": {
+        "reason": {
+          "description": "Reason names the gate that gave up.",
+          "type": "string",
+          "default": ""
+        },
+        "time": {
+          "description": "Time is when the canary parked.",
+          "$ref": "#/definitions/v1.Time"
+        }
+      }
+    },
     "v1beta1.CanaryStatus": {
       "description": "CanaryStatus tracks progress of a spec.rollout.groups[].canary rollout. It is the executor's persistent state machine: which step is active, when it was entered (Auto promotion measures Pause.Duration from here), and which revision is the canary. Absent when no canary is in progress.",
       "type": "object",
@@ -1489,11 +1507,19 @@
           "description": "CanaryRevisionHash is the revision hash being rolled out.",
           "type": "string"
         },
+        "capacityWaitSince": {
+          "description": "CapacityWaitSince is when the current step's capacity gate became unmet. The ready timeout is measured from here and never from the step's soak anchor, so a long soak cannot spend the capacity budget and a capacity dip cannot restart the soak. Cleared once the step's capacity is met.",
+          "$ref": "#/definitions/v1.Time"
+        },
         "currentStep": {
           "description": "CurrentStep is the zero-based index into spec.rollout.groups[i].canary.steps.",
           "type": "integer",
           "format": "int32",
           "default": 0
+        },
+        "failed": {
+          "description": "Failed records that the canary is parked at CurrentStep: the capacity gate stayed unmet past the ready timeout, analysis stayed inconclusive past the stall timeout, or a rollback found no stable revision to return to. While set the step machine does not run, the phase reads Failed and the stable revision keeps serving. Cleared by a re-arm toward a new target and by a rollback request.",
+          "$ref": "#/definitions/v1beta1.CanaryFailure"
         },
         "lastConclusiveEvaluationTime": {
           "description": "LastConclusiveEvaluationTime is when analysis last produced a conclusive sample (pass or fail — i.e. Prometheus answered). The stall timeout is measured from here: a long run of inconclusive samples escalates to Failed. Set only under Promotion=Analysis.",

@@ -106,7 +106,7 @@ var _ = ginkgo.Describe("util.SeedDefaultConfigMaps", func() {
 		// capacity-gate escalation timeout has no in-code fallback, so the
 		// seed is what keeps suite behavior chart-equivalent.
 		Expect(cm.Data).To(HaveKey("rollout"))
-		Expect(cm.Data["rollout"]).To(MatchJSON(`{"maxPinnedPlanBytes":16384,"defaultReadyTimeout":"15m"}`))
+		Expect(cm.Data["rollout"]).To(MatchJSON(`{"maxPinnedPlanBytes":16384,"defaultReadyTimeout":"15m","canaryRequeue":"10s","canaryParkedRequeue":"5m"}`))
 		// The omenativeStatus block is required by the InferenceReplica
 		// reconciler at startup; the seed targets the chart default.
 		Expect(cm.Data).To(HaveKey("omenativeStatus"))

@@ -810,6 +810,9 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	if rolloutRunRequeue > pendingRequeue.RequeueAfter {
 		pendingRequeue.RequeueAfter = rolloutRunRequeue
 	}
+	// Operator annotations the canary passes applied this reconcile. They
+	// are removed after the status write that carries their effect lands.
+	var canaryConsume []string
 	if canaryGroups := rollout.CanaryGroups(isvc); len(canaryGroups) > 0 {
 		// Resolve the metrics source + query timeout per-reconcile from the
 		// canaryAnalysis operator config (so ConfigMap edits take effect without a
@@ -820,16 +823,18 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			log.Error(err, "Failed to load canaryAnalysis config")
 			return reconcile.Result{}, errors.Wrapf(err, "fails to load canaryAnalysis config")
 		}
-		var defaultReadyTimeout time.Duration
+		var defaultReadyTimeout, canaryRequeue, canaryParkedRequeue time.Duration
 		if rolloutConfig != nil {
 			defaultReadyTimeout = rolloutConfig.DefaultReadyTimeout
+			canaryRequeue = rolloutConfig.CanaryRequeue
+			canaryParkedRequeue = rolloutConfig.CanaryParkedRequeue
 		}
 		// One dispatch per canary group. A group owns one unit, so the runs
 		// touch disjoint Components: neither can see the other's step counter,
 		// and the soonest requeue wins so the faster unit is not slowed to the
 		// pace of the slower one.
 		for _, g := range canaryGroups {
-			ra, err := canary.Dispatch(ctx, canary.DispatchDeps{
+			out, err := canary.Dispatch(ctx, canary.DispatchDeps{
 				ISVC:                     isvc,
 				Client:                   r.Client,
 				Reader:                   r.APIReader,
@@ -838,6 +843,8 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				BundledPrometheusAddress: analysisConfig.BundledPrometheusAddress,
 				QueryTimeout:             analysisConfig.QueryTimeoutDuration(),
 				DefaultReadyTimeout:      defaultReadyTimeout,
+				Requeue:                  canaryRequeue,
+				ParkedRequeue:            canaryParkedRequeue,
 				MetricProviders:          metricProviders,
 				DefaultProvider:          analysisConfig.DefaultProvider,
 				ComponentRunnerPorts:     componentRunnerPorts,
@@ -847,9 +854,13 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 				log.Error(err, "Failed to reconcile canary rollout")
 				return reconcile.Result{}, errors.Wrapf(err, "fails to reconcile canary")
 			}
-			if ra > pendingRequeue.RequeueAfter {
-				pendingRequeue.RequeueAfter = ra
+			if out.RequeueAfter > pendingRequeue.RequeueAfter {
+				pendingRequeue.RequeueAfter = out.RequeueAfter
 			}
+			if out.Requeue {
+				pendingRequeue.Requeue = true
+			}
+			canaryConsume = append(canaryConsume, out.Consume...)
 		}
 	}
 	// Load the coordination tuning per-reconcile from the operator config so
@@ -925,7 +936,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// flushing it here those writes are dropped on every requeuing pass,
 	// which is the steady state during active rollouts.
 	if pendingRequeue.Requeue || pendingRequeue.RequeueAfter > 0 {
-		if err := r.updateStatus(isvc, deploymentMode); err != nil {
+		if err := r.flushStatusThenConsume(ctx, isvc, deploymentMode, canaryConsume); err != nil {
 			r.Recorder.Event(isvc, v1.EventTypeWarning, "InternalError", err.Error())
 			return reconcile.Result{}, err
 		}
@@ -1062,7 +1073,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return reconcile.Result{}, err
 	}
 
-	if err = r.updateStatus(isvc, deploymentMode); err != nil {
+	if err = r.flushStatusThenConsume(ctx, isvc, deploymentMode, canaryConsume); err != nil {
 		// A terminal status conflict is benign — requeue and re-reconcile
 		// off fresh state instead of surfacing an ERROR-level failure.
 		if apierrors.IsConflict(err) {
@@ -1175,6 +1186,26 @@ func (r *InferenceServiceReconciler) clearRuntimeUnresolved(isvc *v1beta1.Infere
 		Status: v1.ConditionTrue,
 		Reason: "RuntimeResolved",
 	})
+}
+
+// flushStatusThenConsume writes the status, then removes the operator
+// annotations whose effect that write carried. The order is the contract: a
+// verb is consumed only once the state it produced is durable, and each
+// applied verb leaves a record in status that keeps a still-visible
+// annotation inert, so a removal that fails here is retried by a later pass
+// rather than re-applied.
+func (r *InferenceServiceReconciler) flushStatusThenConsume(ctx context.Context, isvc *v1beta1.InferenceService, deploymentMode constants.DeploymentModeType, consume []string) error {
+	if err := r.updateStatus(isvc, deploymentMode); err != nil {
+		return err
+	}
+	if len(consume) == 0 {
+		return nil
+	}
+	if err := canary.ConsumeAnnotations(ctx, r.Client, isvc, consume); err != nil {
+		r.Log.V(1).Info("operator annotation removal after the status write failed; a later pass retries it",
+			"InferenceService", isvc.Name, "annotations", consume, "error", err.Error())
+	}
+	return nil
 }
 
 func (r *InferenceServiceReconciler) updateStatus(desiredService *v1beta1.InferenceService, deploymentMode constants.DeploymentModeType) error {

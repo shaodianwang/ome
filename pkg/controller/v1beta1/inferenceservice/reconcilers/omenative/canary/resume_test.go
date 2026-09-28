@@ -233,23 +233,44 @@ func TestResume_PausedRolloutIgnoresTheVerb(t *testing.T) {
 	}
 }
 
-// TestResume_ConsumptionPersistedToAPIServer pins durable consumption: the
-// controller writes only the status subresource, so an in-memory delete alone
-// would leave the verb live and re-resume every later terminal hold.
-func TestResume_ConsumptionPersistedToAPIServer(t *testing.T) {
+// TestResume_ConsumptionFollowsTheFlush pins the verb's removal contract: the
+// pass applies the resume in status and hands the annotation back, the
+// controller removes it after the status write has landed, and a copy that
+// outlives that write (a stale cache, a failed removal) finds nothing parked
+// and is consumed without re-arming anything.
+func TestResume_ConsumptionFollowsTheFlush(t *testing.T) {
 	isvc, in := parkedFailed("new")
 	c := fake.NewClientBuilder().WithScheme(canaryScheme(t)).WithObjects(isvc).Build()
 	in.Client = c
 
-	if _, err := Reconcile(context.Background(), in); err != nil {
+	res, err := Reconcile(context.Background(), in)
+	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	stored := &v1beta1.InferenceService{}
-	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "svc"}, stored); err != nil {
-		t.Fatal(err)
+	if len(res.Consume) != 1 || res.Consume[0] != constants.RolloutResumeAnnotation {
+		t.Fatalf("the pass must hand the resume back for removal after the flush, got %v", res.Consume)
 	}
-	if _, still := stored.Annotations[constants.RolloutResumeAnnotation]; still {
-		t.Fatal("resume consumption must be persisted to the apiserver, not just in-memory")
+	if _, present := storedAnnotations(t, c, isvc)[constants.RolloutResumeAnnotation]; !present {
+		t.Fatal("the pass must not remove the annotation before its status write is durable")
+	}
+	armedAt := isvc.Status.Canary.StepEnteredTime.Time
+
+	// The controller flushed and removed it; a stale cache still shows it.
+	flushed(t, c, isvc, res)
+	if _, still := storedAnnotations(t, c, isvc)[constants.RolloutResumeAnnotation]; still {
+		t.Fatal("resume consumption must be persisted to the apiserver after the flush")
+	}
+	isvc.Annotations = map[string]string{constants.RolloutResumeAnnotation: "new"}
+	in.Now = in.Now.Add(reconcileRequeue)
+	res, err = Reconcile(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Reconcile with a lingering resume: %v", err)
+	}
+	if !isvc.Status.Canary.StepEnteredTime.Time.Equal(armedAt) || isvc.Status.Canary.CurrentStep != 0 {
+		t.Fatalf("a lingering resume on a re-armed canary must not re-arm it again, got %+v", isvc.Status.Canary)
+	}
+	if len(res.Consume) != 1 || res.Consume[0] != constants.RolloutResumeAnnotation {
+		t.Fatalf("a lingering resume with nothing parked is consumed, got %v", res.Consume)
 	}
 }
 
@@ -414,9 +435,12 @@ func TestResetCanaryStatus_ClearsTerminalPhase(t *testing.T) {
 	}
 }
 
-// A re-arm must not disturb a phase that is not parked: the step machine owns
-// those, and overwriting one here would re-anchor step clocks mid-bake.
-func TestResetCanaryStatus_LeavesLivePhaseAlone(t *testing.T) {
+// A re-arm projects Pending whatever phase it found: the re-armed step has
+// staged nothing and shifted nothing, and a serving phase left behind would
+// make it read as a split that dipped rather than one staging from scratch.
+// The step clocks are re-anchored by the reset itself, so nothing mid-bake
+// survives it to be disturbed.
+func TestResetCanaryStatus_ProjectsStagingPhase(t *testing.T) {
 	isvc := canaryISVC(twoStep(), nil)
 	setPhase(isvc, v1beta1.EngineComponent, v1beta1.RolloutPhaseCanarying)
 	cs := &v1beta1.CanaryStatus{CanaryRevisionHash: "old"}
@@ -424,8 +448,8 @@ func TestResetCanaryStatus_LeavesLivePhaseAlone(t *testing.T) {
 
 	resetCanaryStatus(isvc, v1beta1.EngineComponent, cs, "t1", "new", time.Unix(1000, 0))
 
-	if phaseOf(isvc) != v1beta1.RolloutPhaseCanarying {
-		t.Fatalf("a live phase must be left to the step machine, got %q", phaseOf(isvc))
+	if phaseOf(isvc) != v1beta1.RolloutPhasePending {
+		t.Fatalf("a re-arm must project the honest phase at step 0, got %q", phaseOf(isvc))
 	}
 }
 

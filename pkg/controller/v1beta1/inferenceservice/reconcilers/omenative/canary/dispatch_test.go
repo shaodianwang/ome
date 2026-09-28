@@ -856,6 +856,7 @@ func TestDispatch_RepairsInvertedStableIdentity(t *testing.T) {
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
 		v1beta1.EngineComponent: {RolloutPhase: v1beta1.RolloutPhasePending},
 	}
+	pinActiveRun(isvc) // a live canary steps only under a pinned run
 	engineIR := &v1beta1.InferenceReplica{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "repair-identity-engine"}}
 	engineIR.Spec.Runners = []v1beta1.Runner{{Name: v1beta1.RunnerNameDefault, Size: 1}}
 	engineIR.Status.CurrentRevision = "repair-identity-engine-stable"
@@ -919,8 +920,10 @@ func TestDispatch_MultiPodSecondaryCapacityCountsInstances(t *testing.T) {
 		CurrentStep:        1,
 	}
 	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
-		v1beta1.RouterComponent: {RolloutPhase: v1beta1.RolloutPhaseCanarying},
+		// The final step was just entered: it is staging until its capacity is met.
+		v1beta1.RouterComponent: {RolloutPhase: v1beta1.RolloutPhasePending},
 	}
+	pinActiveRun(isvc) // a live canary steps only under a pinned run
 	routerIR := ir(ns, isvc.Name, v1beta1.RouterComponent, "rtrtarget")
 	routerIR.Status.CurrentRevision = isvc.Name + "-router-rtrstable"
 	engineIR := ir(ns, isvc.Name, v1beta1.EngineComponent, "engtarget")
@@ -1460,10 +1463,10 @@ func TestRollbackSignal_UnknownStableKeepsTarget(t *testing.T) {
 		canaryControllerRevision(ns, "d1", "engine", "newhash", 2),
 	).Build()
 
-	if err := reconcileRollbackSignal(context.Background(), c, c, isvc, v1beta1.EngineComponent, "", true); err != nil {
+	if _, err := reconcileRollbackSignal(context.Background(), c, c, isvc, v1beta1.EngineComponent, "", true); err != nil {
 		t.Fatal(err)
 	}
-	if err := reconcileRollbackSignal(context.Background(), c, c, isvc, v1beta1.EngineComponent, "missing", true); err != nil {
+	if _, err := reconcileRollbackSignal(context.Background(), c, c, isvc, v1beta1.EngineComponent, "missing", true); err != nil {
 		t.Fatal(err)
 	}
 	got := &v1beta1.InferenceReplica{}
@@ -1622,5 +1625,58 @@ func TestComponentReplicas(t *testing.T) {
 	}
 	if got := componentReplicas(isvc, v1beta1.DecoderComponent); got != 0 {
 		t.Fatalf("absent component → 0, got %d", got)
+	}
+}
+
+// A rollback whose stable revision has no retained ControllerRevision cannot
+// be carried out: the IR gets no rollback target, and the canary parks Failed
+// with the reason instead of reporting a revert that never completes.
+func TestDispatch_RollbackWithoutStableRevisionParksFailed(t *testing.T) {
+	ns := "default"
+	n4 := 4
+	isvc := canaryISVC(twoStep(), nil)
+	isvc.Namespace = ns
+	isvc.Name = "no-stable"
+	isvc.Spec.Engine = &v1beta1.EngineSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n4}}
+	isvc.Status.Canary = &v1beta1.CanaryStatus{CanaryRevisionHash: "new", StableRevisionHash: "old", CurrentStep: 0, ObservedTrafficWeight: 50}
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {RolloutPhase: v1beta1.RolloutPhasePaused},
+	}
+	pinActiveRun(isvc)
+	isvc.Status.Rollout.ActiveRun.TargetRevisions = []v1beta1.RolloutRunTarget{
+		{Component: v1beta1.EngineComponent, Revision: "new", StableRevision: "old"},
+	}
+	engineIR := ir(ns, isvc.Name, v1beta1.EngineComponent, "new")
+	engineIR.Status.CurrentRevision = isvc.Name + "-engine-old"
+	c := fake.NewClientBuilder().WithScheme(canaryScheme(t)).WithRuntimeObjects(
+		isvc, engineIR,
+		canaryPod(ns, isvc.Name, "engine", "old", "old-0"),
+		canaryPod(ns, isvc.Name, "engine", "old", "old-1"),
+		canaryPod(ns, isvc.Name, "engine", "new", "new-2"),
+		canaryPod(ns, isvc.Name, "engine", "new", "new-3"),
+		// Only the canary revision is retained; the stable one was pruned.
+		canaryControllerRevision(ns, isvc.Name, "engine", "new", 2),
+	).Build()
+	deps := DispatchDeps{Client: c, Reader: c, ISVC: isvc, ComponentRunnerPorts: canaryRunnerPorts(), Group: rollout.CanaryGroup(isvc)}
+
+	isvc.Annotations = map[string]string{constants.RolloutRollbackAnnotation: "true"}
+	for pass := 0; pass < 2; pass++ {
+		if _, err := Dispatch(context.Background(), deps); err != nil {
+			t.Fatalf("Dispatch pass %d: %v", pass, err)
+		}
+		cs := rollout.CanaryStatusFor(&isvc.Status, v1beta1.EngineComponent)
+		if cs == nil || cs.Failed == nil || cs.Failed.Reason != v1beta1.CanaryFailureStableRevisionMissing {
+			t.Fatalf("pass %d: expected a StableRevisionMissing park, got %+v", pass, cs)
+		}
+		if got := isvc.Status.Components[v1beta1.EngineComponent].RolloutPhase; got != v1beta1.RolloutPhaseFailed {
+			t.Fatalf("pass %d: phase %q, want Failed", pass, got)
+		}
+		got := &v1beta1.InferenceReplica{}
+		if err := c.Get(context.Background(), types.NamespacedName{Namespace: ns, Name: isvc.Name + "-engine"}, got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Spec.Pacing != nil && got.Spec.Pacing.RollbackToRevision != nil {
+			t.Fatalf("pass %d: no rollback target must be signaled when the stable revision is gone: %+v", pass, got.Spec.Pacing)
+		}
 	}
 }

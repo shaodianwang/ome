@@ -1367,3 +1367,73 @@ func TestMarkRuntimeUnresolvedEventPreservesPercent(t *testing.T) {
 		t.Fatal("expected a RuntimeNotFound event")
 	}
 }
+
+// An applied operator verb is removed only after the status write that
+// carries its effect has landed; when that write fails the annotation stays,
+// and the record in status keeps it inert until a later pass retries.
+func TestFlushStatusThenConsumeOrdersRemovalAfterTheWrite(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+	scheme := runtime.NewScheme()
+	g.Expect(v1beta1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+	g.Expect(v1.AddToScheme(scheme)).NotTo(gomega.HaveOccurred())
+
+	const canaryHash = "bbfb0fd4"
+	nn := types.NamespacedName{Name: "test-isvc", Namespace: "default"}
+	newISVC := func() *v1beta1.InferenceService {
+		return &v1beta1.InferenceService{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: nn.Name, Namespace: nn.Namespace,
+				Annotations: map[string]string{constants.RolloutPromoteAnnotation: canaryHash},
+			},
+			Spec: v1beta1.InferenceServiceSpec{
+				Model:  &v1beta1.ModelRef{Name: "base-model", Kind: stringPtr("BaseModel")},
+				Engine: &v1beta1.EngineSpec{},
+			},
+			Status: v1beta1.InferenceServiceStatus{
+				Components: map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{v1beta1.EngineComponent: {}},
+				Canary:     &v1beta1.CanaryStatus{CanaryRevisionHash: canaryHash},
+			},
+		}
+	}
+	// desiredFrom is the in-memory object after a pass applied the promote:
+	// the step advanced, the record stamped, the annotation taken in-memory.
+	desiredFrom := func(live client.Client) *v1beta1.InferenceService {
+		desired := &v1beta1.InferenceService{}
+		g.Expect(live.Get(context.TODO(), nn, desired)).NotTo(gomega.HaveOccurred())
+		delete(desired.Annotations, constants.RolloutPromoteAnnotation)
+		desired.Status.Canary.CurrentStep = 1
+		desired.Status.Canary.PromotedThrough = canaryHash
+		return desired
+	}
+
+	t.Run("the write lands, then the verb is removed", func(t *testing.T) {
+		isvc := newISVC()
+		live := ctrlclientfake.NewClientBuilder().WithScheme(scheme).WithObjects(isvc).WithStatusSubresource(isvc).Build()
+		reconciler := &InferenceServiceReconciler{Client: live, APIReader: live, Scheme: scheme, Log: ctrl.Log.WithName("test"), Recorder: record.NewFakeRecorder(10)}
+		err := reconciler.flushStatusThenConsume(context.TODO(), desiredFrom(live), constants.OMENative, []string{constants.RolloutPromoteAnnotation})
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		persisted := &v1beta1.InferenceService{}
+		g.Expect(live.Get(context.TODO(), nn, persisted)).NotTo(gomega.HaveOccurred())
+		g.Expect(persisted.Status.Canary.CurrentStep).To(gomega.Equal(int32(1)))
+		g.Expect(persisted.Status.Canary.PromotedThrough).To(gomega.Equal(canaryHash))
+		g.Expect(persisted.Annotations).NotTo(gomega.HaveKey(constants.RolloutPromoteAnnotation))
+	})
+
+	t.Run("the write fails, the verb stays", func(t *testing.T) {
+		isvc := newISVC()
+		live := ctrlclientfake.NewClientBuilder().WithScheme(scheme).WithObjects(isvc).WithStatusSubresource(isvc).Build()
+		failing := interceptor.NewClient(live, interceptor.Funcs{
+			SubResourceUpdate: func(context.Context, client.Client, string, client.Object, ...client.SubResourceUpdateOption) error {
+				return errors.New("status write refused")
+			},
+		})
+		reconciler := &InferenceServiceReconciler{Client: failing, APIReader: live, Scheme: scheme, Log: ctrl.Log.WithName("test"), Recorder: record.NewFakeRecorder(10)}
+		err := reconciler.flushStatusThenConsume(context.TODO(), desiredFrom(live), constants.OMENative, []string{constants.RolloutPromoteAnnotation})
+		g.Expect(err).To(gomega.HaveOccurred())
+		persisted := &v1beta1.InferenceService{}
+		g.Expect(live.Get(context.TODO(), nn, persisted)).NotTo(gomega.HaveOccurred())
+		g.Expect(persisted.Annotations).To(gomega.HaveKeyWithValue(constants.RolloutPromoteAnnotation, canaryHash),
+			"a verb must outlive a lost status write so the next pass can apply it again")
+		g.Expect(persisted.Status.Canary.CurrentStep).To(gomega.Equal(int32(0)))
+	})
+}

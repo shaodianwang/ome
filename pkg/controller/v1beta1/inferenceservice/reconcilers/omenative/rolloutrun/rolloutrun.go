@@ -480,7 +480,7 @@ func closedOutcome(isvc *v1beta1.InferenceService, active *v1beta1.RolloutRun, t
 				if pinnedFor[primary] != cs.RolledBackRevisionHash {
 					continue
 				}
-				if primaryPhase(isvc, g) == v1beta1.RolloutPhaseRolledBack {
+				if rollout.StateOf(cs, primaryPhase(isvc, g), len(g.Canary.Steps)) == rollout.CanaryStateRolledBack {
 					return v1beta1.RolloutRunRolledBack, true
 				}
 				return "", false

@@ -436,6 +436,13 @@ ome:
       # its own. Empty means no configured default (each consumer keeps its
       # documented fallback).
       defaultReadyTimeout: "15m"
+      # How soon the canary executor re-checks a step in progress (capacity
+      # coming up, a timed pause, a drain window). Empty means unconfigured:
+      # the executor falls back to the controller's rate-limited requeue.
+      canaryRequeue: "10s"
+      # Heartbeat of a parked (Failed) canary, which only an operator or a new
+      # target moves. Empty means the same rate-limited fallback.
+      canaryParkedRequeue: "5m"
     # coordination tunes the OMENative cross-Component coordination layer.
     coordination:
       # Per-revision hysteresis band (percent) for the pod-proportional traffic

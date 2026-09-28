@@ -495,6 +495,14 @@ func dropCanaryOwned(comps []v1beta1.ComponentType, isvc *v1beta1.InferenceServi
 			owned[c] = struct{}{}
 		}
 	}
+	// The pinned plan is the run's truth: a canary group edited out of the
+	// spec while its run is open keeps driving its Components from the pin,
+	// so coordination keeps its hands off them for as long as the run does.
+	for _, g := range rollout.CanaryGroups(isvc) {
+		for _, c := range g.Components {
+			owned[c] = struct{}{}
+		}
+	}
 	if len(owned) == 0 {
 		return comps
 	}
