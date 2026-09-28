@@ -99,8 +99,8 @@ func TestIRStatusToComponentStatus_ObservedGenerationRule(t *testing.T) {
 		{name: "never-reconciled IR carries the live value", ir: mkIR(stamp("9"), 0), live: carried, want: 2},
 		{name: "missing stamp carries the live value", ir: mkIR(nil, irGeneration), live: carried, want: 2},
 		{name: "missing stamp with no live block reports zero", ir: mkIR(nil, irGeneration), live: nil, want: 0},
-		{name: "unparseable stamp carries the live value", ir: mkIR(stamp("not-a-number"), irGeneration), live: carried, want: 2},
-		{name: "unparseable stamp with no live block reports zero", ir: mkIR(stamp(""), irGeneration), live: nil, want: 0},
+		{name: "unparsable stamp carries the live value", ir: mkIR(stamp("not-a-number"), irGeneration), live: carried, want: 2},
+		{name: "unparsable stamp with no live block reports zero", ir: mkIR(stamp(""), irGeneration), live: nil, want: 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

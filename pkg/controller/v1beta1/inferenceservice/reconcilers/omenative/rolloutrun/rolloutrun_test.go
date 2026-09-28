@@ -1068,7 +1068,7 @@ func TestDerivedProvenanceLeavesProgressionUnset(t *testing.T) {
 	isvc := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{
 		Name: "llm-a", Namespace: "ns",
 		Annotations: map[string]string{
-			constants.RolloutPlanSourceAnnotation: "0=meta-router-standard@rp1:aaf48b2c4d29;1=vllm-engine-standard@rp1:8b734048103c",
+			constants.RolloutPlanSourceAnnotation: "0=example-router-standard@rp1:aaf48b2c4d29;1=vllm-engine-standard@rp1:8b734048103c",
 		},
 	}}
 
@@ -1088,7 +1088,7 @@ func TestDerivedProvenanceLeavesProgressionUnset(t *testing.T) {
 				idx, p.PolicyRef.Progression)
 		}
 	}
-	if got[0].PolicyRef.Name != "meta-router-standard" || got[0].PortableDigest != "rp1:aaf48b2c4d29" {
+	if got[0].PolicyRef.Name != "example-router-standard" || got[0].PortableDigest != "rp1:aaf48b2c4d29" {
 		t.Errorf("groups[0] = %+v", got[0])
 	}
 	if got[1].PolicyRef.Name != "vllm-engine-standard" || got[1].PortableDigest != "rp1:8b734048103c" {
