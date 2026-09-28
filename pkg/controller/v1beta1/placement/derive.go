@@ -68,6 +68,10 @@ func DeriveISVC(src *v1beta1.InferenceService, controlPlaneID, localQueue string
 	for _, k := range controlPlaneOnlyAnnotations {
 		delete(d.Annotations, k)
 	}
+	delete(d.Annotations, constants.PlacementPolicy)
+	if src.Spec.Placement.UsesClusterAffinity() {
+		d.Annotations[constants.PlacementPolicy] = string(v1beta1.PlacementPolicyClusterAffinity)
+	}
 	for k := range d.Annotations {
 		for _, p := range controlPlaneOnlyAnnotationPrefixes {
 			if strings.HasPrefix(k, p) {

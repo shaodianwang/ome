@@ -79,7 +79,7 @@ var _ = ginkgo.Describe("TrafficMap status ownership", func() {
 		})).To(gomega.Succeed())
 
 		name := uniqueName("svc")
-		isvc := createISVC(namespace, name, &v1beta1.PlacementSpec{
+		isvc := createISVC(namespace, name, &v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity,
 			Mode:            v1beta1.PlacementModeSingle,
 			ClusterAffinity: routingTestAffinity(),
 		})
@@ -237,7 +237,7 @@ var _ = ginkgo.Describe("TrafficMap status ownership", func() {
 		})).To(gomega.Succeed())
 
 		name := uniqueName("svc")
-		isvc := createISVC(namespace, name, &v1beta1.PlacementSpec{
+		isvc := createISVC(namespace, name, &v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity,
 			Mode:            v1beta1.PlacementModeSingle,
 			ClusterAffinity: routingTestAffinity(),
 		})

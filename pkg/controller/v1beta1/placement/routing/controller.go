@@ -87,6 +87,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return reapResult(r.reap(ctx, isvc))
 	}
 
+	if isvc.Status.Placement != nil && isvc.Status.Placement.Plan != nil && !isvc.Spec.Placement.UsesClusterAffinity() {
+		return ctrl.Result{}, fmt.Errorf("an accepted placement plan requires spec.placement.policy: ClusterAffinity")
+	}
+
 	// A TrafficMap-backed publisher uses its finalizer as the teardown handshake:
 	// retain the map until external state is withdrawn and the source is released.
 	if !routingEnabled(r.Config, isvc) || !placementcontroller.IsPlacementEligible(isvc) {
@@ -770,6 +774,18 @@ func servingCandidates(isvc *v1beta1.InferenceService) []*v1beta1.CandidatePlace
 			cs = append(cs, c)
 		}
 	}
+	// Annotation-based Single placement can carry only its top-level winner and
+	// endpoint. Treat it as one serving candidate.
+	if !isvc.Spec.Placement.UsesClusterAffinity() && len(cs) == 0 && placementMode(isvc) == v1beta1.PlacementModeSingle &&
+		pl.Cluster != "" && pl.Endpoint != nil && pl.Endpoint.Host != "" {
+		cs = append(cs, &v1beta1.CandidatePlacement{
+			Cluster:          pl.Cluster,
+			Phase:            v1beta1.CandidatePhaseAdmitted,
+			Endpoint:         pl.Endpoint.DeepCopy(),
+			AdmittedReplicas: 1,
+			ReadyReplicas:    1,
+		})
+	}
 	sort.Slice(cs, func(i, j int) bool { return cs[i].Cluster < cs[j].Cluster })
 	return cs
 }
@@ -781,6 +797,8 @@ func capacityFactor(isvc *v1beta1.InferenceService, cluster string) *resource.Qu
 	var factors map[string]resource.Quantity
 	if isvc.Spec.Routing != nil && isvc.Spec.Routing.CapacityFactors != nil {
 		factors = isvc.Spec.Routing.CapacityFactors
+	} else if isvc.Spec.Placement != nil && !isvc.Spec.Placement.UsesClusterAffinity() {
+		factors = isvc.Spec.Placement.CapacityFactors
 	}
 	if factors == nil {
 		return nil
@@ -792,12 +810,9 @@ func capacityFactor(isvc *v1beta1.InferenceService, cluster string) *resource.Qu
 	return nil
 }
 
-// placementMode returns only explicitly declared intent.
+// placementMode preserves the Legacy Single default.
 func placementMode(isvc *v1beta1.InferenceService) v1beta1.PlacementMode {
-	if isvc.Spec.Placement == nil {
-		return ""
-	}
-	return isvc.Spec.Placement.Mode
+	return isvc.Spec.Placement.EffectiveMode()
 }
 
 // SetupWithManager wires the controller: reconcile ISVCs, reacting only to

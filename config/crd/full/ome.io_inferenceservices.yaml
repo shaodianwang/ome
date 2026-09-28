@@ -26893,6 +26893,11 @@ spec:
                         - Split
                         - SplitByCapacity
                       type: string
+                    policy:
+                      enum:
+                        - Legacy
+                        - ClusterAffinity
+                      type: string
                     requirements:
                       nullable: true
                       type: string
@@ -26914,9 +26919,10 @@ spec:
                           nullable: true
                           type: boolean
                       type: object
-                  required:
-                    - mode
                   type: object
+                  x-kubernetes-validations:
+                    - message: ClusterAffinity requires an explicit mode
+                      rule: '!has(self.policy) || self.policy != ''ClusterAffinity'' || has(self.mode)'
                 rollout:
                   properties:
                     groupOrdering:
@@ -31730,6 +31736,8 @@ spec:
               x-kubernetes-validations:
                 - message: spec.routing.capacityFactors and deprecated spec.placement.capacityFactors must not both be set
                   rule: '!(has(self.routing) && has(self.routing.capacityFactors) && has(self.placement) && has(self.placement.capacityFactors))'
+                - message: ClusterAffinity placement policy cannot be removed; drain and recreate the service to use Legacy
+                  rule: '!has(oldSelf.placement) || !has(oldSelf.placement.policy) || oldSelf.placement.policy != ''ClusterAffinity'' || (has(self.placement) && has(self.placement.policy) && self.placement.policy == ''ClusterAffinity'')'
             status:
               properties:
                 address:

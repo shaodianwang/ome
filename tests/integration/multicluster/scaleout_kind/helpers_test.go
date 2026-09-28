@@ -67,7 +67,7 @@ func runnableSourceISVC(namespace, name, model, runtime string, mode v1beta1.Pla
 			Annotations: map[string]string{constants.DeploymentMode: string(constants.OMENative)},
 		},
 		Spec: v1beta1.InferenceServiceSpec{
-			Placement: &v1beta1.PlacementSpec{
+			Placement: &v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity,
 				Mode:            mode,
 				ClusterAffinity: []v1beta1.ClusterAffinityTerm{{MatchExpressions: []v1beta1.ClusterSelectorRequirement{{Key: acceleratorLabel, Operator: corev1.NodeSelectorOpIn, Values: []string{acceleratorValue}}}}},
 			},

@@ -54,7 +54,7 @@ func sourceISVC(namespace, name, acceleratorRequirements string) *v1beta1.Infere
 			Namespace: namespace,
 		},
 		Spec: v1beta1.InferenceServiceSpec{
-			Placement: &v1beta1.PlacementSpec{Mode: v1beta1.PlacementModeSingle, ClusterAffinity: affinityForRequirement(acceleratorRequirements)},
+			Placement: &v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity, Mode: v1beta1.PlacementModeSingle, ClusterAffinity: affinityForRequirement(acceleratorRequirements)},
 			Engine: &v1beta1.EngineSpec{
 				Runner: &v1beta1.RunnerSpec{
 					Container: corev1.Container{Name: "ome-container", Image: "example/model-server:test"},

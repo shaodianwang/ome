@@ -21,12 +21,15 @@ func TestInvalidPlacementCannotAcquireFinalizer(t *testing.T) {
 		{name: "null affinity", placement: `{"mode":"Single","clusterAffinity":null}`},
 		{name: "empty affinity", placement: `{"mode":"Single","clusterAffinity":[]}`},
 		{name: "explicit packing", placement: `{"mode":"Split","split":{"spread":false}}`},
-		{name: "obsolete annotation without typed intent", placement: `null`, legacyAnnotation: true},
+		{name: "obsolete annotation beside typed intent", placement: `{"mode":"Single"}`, legacyAnnotation: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			source := srcISVC("")
 			if err := json.Unmarshal([]byte(tt.placement), &source.Spec.Placement); err != nil {
 				t.Fatal(err)
+			}
+			if source.Spec.Placement != nil {
+				source.Spec.Placement.Policy = v1beta1.PlacementPolicyClusterAffinity
 			}
 			if tt.legacyAnnotation {
 				source.Annotations[ClusterSelectorAnnotation] = ""

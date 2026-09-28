@@ -5549,21 +5549,18 @@
       }
     },
     "v1beta1.PlacementSpec": {
-      "description": "PlacementSpec declares explicit multi-cluster intent. Affinity omission is unconstrained; invalid or obsolete restrictions cannot widen the matched set.",
+      "description": "PlacementSpec declares multi-cluster intent. Policy omission preserves the legacy selector and allocation contract, including its mode defaults.",
       "type": "object",
-      "required": [
-        "mode"
-      ],
       "properties": {
         "capacityFactors": {
-          "description": "CapacityFactors is retained only to reject obsolete routing intent. Deprecated: use spec.routing.capacityFactors.",
+          "description": "CapacityFactors is the Legacy alias for routing capacity factors. Deprecated: use spec.routing.capacityFactors.",
           "type": "object",
           "additionalProperties": {
             "$ref": "#/definitions/resource.Quantity"
           }
         },
         "clusterAffinity": {
-          "description": "ClusterAffinity ORs terms whose requirements are ANDed. Omission matches every registration; an explicit empty or null list is invalid.",
+          "description": "ClusterAffinity ORs terms whose requirements are ANDed. Requires the ClusterAffinity policy; omission then matches every registration. An explicit empty or null list is invalid.",
           "type": "array",
           "items": {
             "default": {},
@@ -5572,7 +5569,7 @@
           "x-kubernetes-list-type": "atomic"
         },
         "clusterSelector": {
-          "description": "ClusterSelector is retained only to reject obsolete selector intent. Deprecated: use clusterAffinity.",
+          "description": "ClusterSelector is a Legacy selector over labels and virtual metadata.name. Deprecated: opt into ClusterAffinity and use clusterAffinity.",
           "type": "string"
         },
         "maxSurge": {
@@ -5581,16 +5578,19 @@
           "format": "int32"
         },
         "mode": {
-          "description": "Mode is required; an empty placement block does not select a policy.",
-          "type": "string",
-          "default": ""
+          "description": "Mode is required for ClusterAffinity. Legacy omission means Single.",
+          "type": "string"
+        },
+        "policy": {
+          "description": "Policy explicitly opts into ClusterAffinity semantics. Omission is Legacy. ClusterAffinity cannot be removed from an existing service; migrating back requires draining and recreating the source and its derived workloads.",
+          "type": "string"
         },
         "requirements": {
-          "description": "Requirements is retained only to reject obsolete selector intent. Deprecated: use clusterAffinity.matchExpressions or matchFields.",
+          "description": "Requirements is a Legacy label selector, ANDed with ClusterSelector. Deprecated: opt into ClusterAffinity and use clusterAffinity.",
           "type": "string"
         },
         "split": {
-          "description": "Split provides the requested floor and optional per-home ceiling for Split and SplitByCapacity. Other modes reject this block.",
+          "description": "Split provides the requested floor and optional per-home ceiling for Split and SplitByCapacity. ClusterAffinity rejects it in other modes.",
           "$ref": "#/definitions/v1beta1.SplitSpec"
         }
       }
@@ -7843,12 +7843,12 @@
       "type": "object",
       "properties": {
         "maxReplicasPerCluster": {
-          "description": "MaxReplicasPerCluster is an optional local ceiling. A target exceeding a positive ceiling holds the whole new plan; zero leaves the ceiling uncapped.",
+          "description": "MaxReplicasPerCluster is an optional local ceiling. ClusterAffinity holds plans exceeding it; Legacy clips requests to it. Zero leaves it uncapped.",
           "type": "integer",
           "format": "int32"
         },
         "minReplicasPerCluster": {
-          "description": "MinReplicasPerCluster is retained only to reject obsolete anti-sliver intent. Deprecated: exact shares cannot discard a small admission.",
+          "description": "MinReplicasPerCluster discards Legacy homes admitted below this count. Deprecated: ClusterAffinity exact shares cannot discard a small admission.",
           "type": "integer",
           "format": "int32"
         },
@@ -7858,7 +7858,7 @@
           "format": "int32"
         },
         "spread": {
-          "description": "Spread is retained only to reject obsolete packing intent. Deprecated: mode and affinity weights determine allocation.",
+          "description": "Spread requests ceil(replicas/candidates) on each Legacy candidate. False uses admission-driven packing in candidate name order. Deprecated: ClusterAffinity uses exact shares and optional affinity weights.",
           "type": "boolean"
         }
       }

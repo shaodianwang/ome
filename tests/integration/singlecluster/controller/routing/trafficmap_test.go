@@ -37,7 +37,7 @@ var _ = ginkgo.Describe("TrafficMap routing controller", func() {
 
 	ginkgo.It("generates an owner-ref'd TrafficMap for a Placed single-home ISVC", func() {
 		name := uniqueName("svc")
-		isvc := createISVC(isvcNS, name, &v1beta1.PlacementSpec{
+		isvc := createISVC(isvcNS, name, &v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity,
 			Mode:            v1beta1.PlacementModeSingle,
 			ClusterAffinity: routingTestAffinity(),
 		})
@@ -70,7 +70,7 @@ var _ = ginkgo.Describe("TrafficMap routing controller", func() {
 		name := uniqueName("svc")
 		// cluster-a's replicas each serve twice a baseline replica, so with equal
 		// admitted counts a's share is double b's: a 2:1 split.
-		isvc := createISVC(isvcNS, name, &v1beta1.PlacementSpec{
+		isvc := createISVC(isvcNS, name, &v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity,
 			Mode:            v1beta1.PlacementModeSplit,
 			ClusterAffinity: routingTestAffinity(),
 		})
@@ -104,7 +104,7 @@ var _ = ginkgo.Describe("TrafficMap routing controller", func() {
 
 	ginkgo.It("health-gates an unready home to weight 0 and re-weights the survivor", func() {
 		name := uniqueName("svc")
-		isvc := createISVC(isvcNS, name, &v1beta1.PlacementSpec{
+		isvc := createISVC(isvcNS, name, &v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity,
 			Mode:            v1beta1.PlacementModeSplit,
 			ClusterAffinity: routingTestAffinity(),
 		})
@@ -139,7 +139,7 @@ var _ = ginkgo.Describe("TrafficMap routing controller", func() {
 
 	ginkgo.It("publishes all-zero weights when every home is unready", func() {
 		name := uniqueName("svc")
-		isvc := createISVC(isvcNS, name, &v1beta1.PlacementSpec{
+		isvc := createISVC(isvcNS, name, &v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity,
 			Mode:            v1beta1.PlacementModeSplit,
 			ClusterAffinity: routingTestAffinity(),
 		})
@@ -163,7 +163,7 @@ var _ = ginkgo.Describe("TrafficMap routing controller", func() {
 
 	ginkgo.It("keeps an emptied TrafficMap that explains itself when the ISVC leaves Placed", func() {
 		name := uniqueName("svc")
-		isvc := createISVC(isvcNS, name, &v1beta1.PlacementSpec{
+		isvc := createISVC(isvcNS, name, &v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity,
 			Mode:            v1beta1.PlacementModeSingle,
 			ClusterAffinity: routingTestAffinity(),
 		})
@@ -195,7 +195,7 @@ var _ = ginkgo.Describe("TrafficMap routing controller", func() {
 
 	ginkgo.It("pre-arms an absent cluster, drains its first route entry, and restores it on removal", func() {
 		name := uniqueName("svc")
-		isvc := createISVC(isvcNS, name, &v1beta1.PlacementSpec{
+		isvc := createISVC(isvcNS, name, &v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity,
 			Mode:            v1beta1.PlacementModeSplit,
 			ClusterAffinity: routingTestAffinity(),
 		})

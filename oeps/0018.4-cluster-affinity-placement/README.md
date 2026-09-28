@@ -51,7 +51,10 @@ and separates two allocation contracts:
 full service onto every eligible cluster. Clusters are always identified by
 `WorkloadCluster.metadata.name` and selected using that object's labels and name.
 
-This intentionally breaks parts of OEP-0018.3's API and Split semantics. It also
+The explicit `spec.placement.policy: ClusterAffinity` opt-in changes parts of
+OEP-0018.3's API and Split semantics. Without it, the Legacy policy retains
+selector strings, annotation precedence, mode defaults, and admission-driven
+Packed/spread allocation through controller and CRD upgrades. It also
 relaxes OEP-0018/0018.1's prohibition on capacity reads **for SplitByCapacity**.
 Member admission remains authoritative: an allocation is desired state, not a
 reservation or proof that pods can run. A manual migration is specified below.
@@ -145,7 +148,8 @@ admission; a Ready WorkloadCluster alone does not establish it.
 - Changing autoscaling semantics, apportioning a global autoscaling ceiling,
   or computing fleet demand from traffic. These decisions belong to a future
   autoscaling OEP; existing per-home scaling behavior remains.
-- Preserving Packed allocation or silently translating old manifests at runtime.
+- Supporting Packed allocation within ClusterAffinity or silently translating
+  old manifests at runtime. Legacy remains a separate compatibility contract.
 
 ## Proposal
 
@@ -187,12 +191,15 @@ claim distributed member writes are an atomic Kubernetes Binding.
 
 ### API and recipes
 
-The new `clusterAffinity` field selects clusters and, in Split mode, assigns
+`spec.placement.policy: ClusterAffinity` explicitly selects the new contract.
+Omitting `policy`, or setting it to `Legacy`, retains the existing contract.
+The `clusterAffinity` field selects clusters and, in Split mode, assigns
 replica weights. The existing `mode` field supplies the placement context:
 
 ```yaml
 spec:
   placement:
+    policy: ClusterAffinity
     mode: Split                  # Single | All | Split | SplitByCapacity
     clusterAffinity:             # optional, atomic list of selector terms
     - weight: 3                  # optional; permitted only in Split
@@ -214,7 +221,7 @@ spec:
 This fragment highlights the new affinity API. Existing replica-count and
 local-ceiling controls are described in
 [Replica counts and autoscaling](#replica-counts-and-autoscaling). `mode` is
-required when placement is present, avoiding a new hidden behavioral default.
+required for ClusterAffinity. Legacy retains its implicit Single mode.
 Each Split recipe below assumes a fleet floor N=18 unless stated otherwise.
 Targets describe the assigned floor. Local autoscaling can increase actual
 replicas independently under the existing local ceilings.
@@ -223,6 +230,7 @@ replicas independently under the existing local ceilings.
 
 ```yaml
 placement:
+  policy: ClusterAffinity
   mode: Single
 ```
 
@@ -233,6 +241,7 @@ An affinity may narrow that set. No term may carry a weight in Single.
 
 ```yaml
 placement:
+  policy: ClusterAffinity
   mode: All
   clusterAffinity:
   - matchFields:
@@ -250,6 +259,7 @@ is an admission error, not an ignored field.
 
 ```yaml
 placement:
+  policy: ClusterAffinity
   mode: Split
   clusterAffinity:
   - matchFields:
@@ -264,6 +274,7 @@ placement:
 
 ```yaml
 placement:
+  policy: ClusterAffinity
   mode: Split
   clusterAffinity:
   - weight: 3
@@ -291,6 +302,7 @@ are `4,3,2,1`. Affinity list order does not confer priority.
 
 ```yaml
 placement:
+  policy: ClusterAffinity
   mode: SplitByCapacity
   clusterAffinity:
   - matchFields:
@@ -607,15 +619,17 @@ a sufficient implementation.
 
 | Input | Rule and reason |
 |---|---|
-| Placement absent | No multi-cluster intent in the new API; reject legacy placement annotations until migrated. Control-plane role does not imply local execution. |
-| Placement present | Require a supported mode; `{}` is invalid. |
+| Placement absent | Honor legacy selector annotations when present; otherwise no multi-cluster intent. Control-plane role does not imply local execution. |
+| Policy omitted or Legacy | Preserve typed-over-annotation precedence, implicit Single, and no-selector/no-match semantics. Reject affinity, maxSurge, and SplitByCapacity without opt-in. |
+| Policy ClusterAffinity | Require a supported explicit mode. Reject legacy fields and selector annotations, including zero-valued presence. |
+| Policy removal after opt-in | Reject with CRD transition validation and webhook validation. Drain and recreate the source to return to Legacy. |
 | Affinity omitted | Unconstrained matching; still subject to preflight. |
 | Empty/null affinity or empty term | Reject; do not interpret a malformed restriction as the whole fleet. |
 | Label requirement | Kubernetes key/operator/value validation; In/NotIn need values, Exists/DoesNotExist forbid them, Gt/Lt need one integer value. |
 | Field requirement | Only metadata.name and In/NotIn with one or more valid names. Unknown fields/operators are errors. |
 | Weight | Integer 1..100; allowed only in Split, including when its value is 1. |
 | Split settings | Retain replicas (positive when present) and maxReplicasPerCluster (nonnegative; zero is uncapped), for both Split modes. Reject a computed target above a declared cap. |
-| Removed fields/annotations | Reject during migration; never silently ignore restrictions or legacy Packed intent. |
+| Legacy fields/annotations | Honor under Legacy; reject under ClusterAffinity. Never silently ignore restrictions or Packed intent. |
 | Unresolved floor or capacity normalization | Hold with an actionable condition; never invent counts or a hardware conversion. |
 | Empty match or no usable capacity | Valid request that waits with a reason; fleet state is not a schema error. |
 
@@ -626,8 +640,8 @@ are an API-review item rather than an arbitrary runtime truncation.
 
 ### Implementation sequence
 
-1. **Schema and matcher.** Add the new mode and affinity term types; remove old
-   placement selectors/knobs using the migration bridge below. Implement one
+1. **Schema and matcher.** Add the policy discriminator, new mode, and affinity term types.
+   Keep the Legacy path isolated through the compatibility window. Implement one
    normalized matcher shared by reconciliation, eligibility indexing, cluster
    change handling, routing, and endpoint ownership. `IsPlacementEligible`
    becomes based on explicit placement intent, so Recipe 1 is indexed.
@@ -668,12 +682,19 @@ The field audit covers every field in the existing
 | `SplitSpec.MaxReplicasPerCluster` | Retain the local ceiling and existing AutoscalerPolicy preflight dependency pending the autoscaling follow-up. |
 | `SplitSpec.MinReplicasPerCluster` | Remove; dropping an admitted sliver would violate the requested allocation. |
 
-"Remove" means deprecate during the schema migration window, reject its use
-under the new placement contract, then remove it from types and schemas after
-migration. The legacy selector annotations are removed along with their typed
-equivalents. This OEP does not keep either selector string as a second way to
-express affinity. The retained replica controls are existing API, not new fields
-introduced by this proposal.
+The dispositions above apply to the ClusterAffinity contract. During the
+compatibility window, both schemas remain available and Legacy remains fully
+functional: source updates, placement, failover, Packed/spread allocation,
+anti-sliver behavior, and routing-factor aliases continue. A typed placement
+block still overrides selector annotations as a whole. Mode-only Legacy intent
+still matches nothing. No controller restart, feature deployment, or elapsed
+time opts a service into ClusterAffinity.
+
+The new contract rejects old fields rather than translating them. Opt-in members
+carry their policy separately from the stripped source placement block; backend
+and execution guards must distinguish them from Legacy copies. Ordinary local
+services retain their existing behavior. Removing Legacy requires a separate
+migration/removal decision and an audited inventory; there is no timed cutoff.
 
 **No automatic conversion can preserve every old Split deployment.** Packed has
 no equivalent, and balanced rounding and anti-sliver behavior change. Inventory
@@ -692,13 +713,14 @@ and choose the intended recipe explicitly.
 | split.maxReplicasPerCluster | Retain the local ceiling. Verify every new weighted target fits; raise the cap, reduce N, or adjust membership/weights if it does not. |
 | split.minReplicasPerCluster | Removed. Integer weights can produce zero/small homes; use explicit home selection/counts or retain a manual per-cluster deployment if an anti-sliver floor is required. |
 | placement.capacityFactors | Move to spec.routing.capacityFactors, preserving values. Never turn these traffic factors into replica weights. |
-| Mode-only placement currently matching nothing | New behavior is unconstrained; review explicitly before enabling the new controller. |
+| Mode-only placement currently matching nothing | Remains no-match under Legacy. Affinity omission becomes unconstrained only after explicit policy opt-in. |
 
 For example, old selectors `requirements: accelerator=gb300` and
 `clusterSelector: metadata.name in (cluster-a,cluster-b)` become:
 
 ```yaml
 placement:
+  policy: ClusterAffinity
   mode: Single
   clusterAffinity:
   - matchExpressions:
@@ -719,38 +741,32 @@ resolve the discrepancy before migration.
 
 **Upgrade procedure:**
 
-1. Export source manifests, existing placement status, derived allocations,
-   policy references, and routing factors. Classify every source by the table;
-   resolve cases with no equivalent. Stop GitOps writers from restoring old
-   fields during the maintenance window.
-2. Install a transitional CRD schema that retains both old and new fields.
-   Stop all old control-plane placement/routing writers before submitting new
-   manifests. Existing member workloads keep running. Stop any old validating
-   webhook that would reject the bridge format, within the same maintenance
-   procedure.
-3. Rewrite every source with explicit mode and new affinity, remove deprecated
-   fields/annotations, and validate the stored objects by reading them back.
-   Retain the bridge schema so malformed old payloads can be **detected and
-   rejected**; removing their schema first can cause Kubernetes to prune a
-   restriction before any validator sees it.
-4. Start the new controllers with legacy-field rejection and new validation.
-   For unchanged Single/All selections, adopt only derived objects with matching
-   origin identity. For changed Split targets, expose a proposed transition and
-   apply the configured surge budget; hold where migration cannot be done with
-   the declared budget. Verify requested/admitted/ready counts and TrafficMap
-   output before resuming routine writers.
-5. After an audited compatibility window, remove obsolete fields from the
-   schema, generated clients, and examples. Require strict field validation in
-   supported clients and retire old automation. Ordinary unknown-field pruning
-   cannot substitute for a migration guard during the compatibility window.
+1. Ship the schema and both policy implementations together. Retain old fields
+   in the schema. Upgrading existing sources must not change their selected
+   policy, candidate set, derived workloads, or ability to accept updates.
+2. Upgrade member controllers before enabling ClusterAffinity. Keep every old
+   hub placement/routing writer stopped before any source opts in: an old binary
+   cannot interpret the new policy discriminator.
+3. Inventory each source before opting it in. Export its manifest, status,
+   allocations, and routing configuration. Choose a new recipe explicitly,
+   including rounding and anti-sliver changes. Packed has no equivalent.
+4. Update that source atomically: set `policy: ClusterAffinity`, specify `mode`,
+   convert selectors, and remove legacy fields and annotations. Verify the
+   stored object, accepted plan, admitted/ready counts, and published routing.
+   Existing identity, observation, and surge checks may hold adoption or moves;
+   opting in does not grant permission to discard serving capacity.
+5. Maintain Legacy until its removal is explicitly approved after inventory and
+   migration. Never prune legacy restrictions before all legacy writers and
+   manifests have been retired.
 
-**Rollback:** stop new writers, restore the bridge schema if already removed,
-restore the exported old manifests and compatible allocations, then restart old
-writers. An old controller must never reconcile a new mode-only or weighted
-manifest: it could lose restrictions or hold it indefinitely. Capacity-based
-plans have no automatic reverse conversion; use the saved allocation or
-manually authored per-cluster services. No zero-downtime upgrade or rollback is
-promised without capacity for the required transitions.
+**Rollback:** Before any opt-in, exporting and restoring the matching legacy
+schema and binary is sufficient; existing services still use the old contract.
+After opt-in, do not run a legacy binary against a ClusterAffinity source. Drain
+and recreate it with a legacy manifest and compatible allocations, or restore a
+coordinated fleet snapshot during maintenance. CRD transition validation blocks
+removing the opt-in on a live source, including on hubs without an ISVC webhook.
+Reverting compatibility support itself removes Legacy reconciliation and must
+not be deployed while legacy sources remain.
 
 ## Test Plan
 
@@ -838,9 +854,9 @@ placements and deployments relying on sliver removal.
 5. **Use routing capacity factors as replica weights.** Reuses an existing map,
    but it confuses relative serving throughput with hardware inventory and
    scheduling intent. Keep routing and placement weights separate.
-6. **Preserve every legacy knob.** Reduces immediate migration cost but creates
-   interactions between weights, packing, per-home floors/caps, and capacity
-   redistribution. Prefer a small initial API and explicit migration exceptions.
+6. **Combine legacy knobs with affinity.** Creates interactions between weights,
+   packing, per-home floors/caps, and capacity redistribution. Keep Legacy
+   isolated; its knobs cannot be mixed into the ClusterAffinity contract.
 
 ## Open Questions
 

@@ -66,7 +66,7 @@ func srcISVC(selector string) *v1beta1.InferenceService {
 			Annotations: map[string]string{},
 		},
 		Spec: v1beta1.InferenceServiceSpec{
-			Placement: &v1beta1.PlacementSpec{Mode: v1beta1.PlacementModeSingle, ClusterAffinity: testAffinity(selector)},
+			Placement: &v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity, Mode: v1beta1.PlacementModeSingle, ClusterAffinity: testAffinity(selector)},
 			Engine:    &v1beta1.EngineSpec{Runner: &v1beta1.RunnerSpec{Container: corev1.Container{Name: "ome-container", Image: "img"}}},
 		},
 	}
@@ -1775,10 +1775,10 @@ func TestIsvcsForClusterChange_EnqueuesOnlyMatchingCandidates(t *testing.T) {
 	noMatch := srcISVCNamed("nomatch", "gpu=h100")
 	// nameMatch: selects the changed cluster through its immutable object name.
 	nameMatch := srcISVCNamed("name-match")
-	nameMatch.Spec.Placement = &v1beta1.PlacementSpec{Mode: v1beta1.PlacementModeSingle, ClusterAffinity: testAffinity("metadata.name=b")}
+	nameMatch.Spec.Placement = &v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity, Mode: v1beta1.PlacementModeSingle, ClusterAffinity: testAffinity("metadata.name=b")}
 	// nameNoMatch: selects a different cluster name.
 	nameNoMatch := srcISVCNamed("name-nomatch")
-	nameNoMatch.Spec.Placement = &v1beta1.PlacementSpec{Mode: v1beta1.PlacementModeSingle, ClusterAffinity: testAffinity("metadata.name=c")}
+	nameNoMatch.Spec.Placement = &v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity, Mode: v1beta1.PlacementModeSingle, ClusterAffinity: testAffinity("metadata.name=c")}
 	// noReq: declares no placement requirement; never fanned out, must be excluded
 	// (and is not even in the index).
 	noReq := srcISVCNamed("noreq")
@@ -1918,7 +1918,7 @@ func TestReconcile_FanOutBoundsStuckClusterAndProceeds(t *testing.T) {
 func srcISVCMode(mode v1beta1.PlacementMode, requirements string) *v1beta1.InferenceService {
 	i := srcISVC("")
 	i.Annotations = nil
-	i.Spec.Placement = &v1beta1.PlacementSpec{Mode: mode, ClusterAffinity: testAffinity(requirements)}
+	i.Spec.Placement = &v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity, Mode: mode, ClusterAffinity: testAffinity(requirements)}
 	return i
 }
 
@@ -2309,7 +2309,7 @@ func TestReconcile_SplitWithNoDesiredReplicasHoldsPending(t *testing.T) {
 func srcISVCSplit(requirements string, replicas int32) *v1beta1.InferenceService {
 	i := srcISVC("")
 	i.Annotations = nil
-	i.Spec.Placement = &v1beta1.PlacementSpec{
+	i.Spec.Placement = &v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity,
 		Mode:            v1beta1.PlacementModeSplit,
 		ClusterAffinity: testAffinity(requirements),
 		Split:           &v1beta1.SplitSpec{Replicas: &replicas},

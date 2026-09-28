@@ -1,9 +1,16 @@
 # Multicluster placement
 
-An InferenceService opts into placement with `spec.placement` and an explicit
-`mode`. An ordinary service without that block stays local. Member copies carry
-source ownership and execution authority; placement does not adopt an unrelated
-service with the same name.
+An InferenceService selects the new contract with
+`spec.placement.policy: ClusterAffinity` and an explicit `mode`. Without that
+opt-in, selector strings and annotations retain Legacy behavior through upgrades.
+An ordinary service without any placement intent stays local. Placement does
+not adopt an unrelated member service with the same name.
+
+The following sections describe ClusterAffinity. Legacy continues to support
+implicit Single, typed-over-annotation selector precedence, Packed/spread Split,
+anti-sliver settings, routing-factor aliases, updates, and failover. In Legacy,
+no selectors means no matching clusters; in ClusterAffinity, omitted affinity
+matches every registration.
 
 `Single` races eligible members for admission and retains one winner. `All`
 places the full service on every eligible member. `Split` assigns exact shares
@@ -15,6 +22,7 @@ execution; they do not change those shares.
 ```yaml
 spec:
   placement:
+    policy: ClusterAffinity
     mode: Split
     clusterAffinity:
       - weight: 3
@@ -102,8 +110,11 @@ active transition before downgrading to a member binary that does not enforce
 placement pauses and replica limits. Ordinary local services do not acquire
 these guards.
 
-Migrate source manifests explicitly:
+Opt in one source deliberately after upgrading member controllers and retiring
+old hub writers. Existing Legacy sources do not require migration for this
+upgrade. Update the source in one write:
 
+- Set `policy: ClusterAffinity`.
 - Replace `requirements`, `clusterSelector`, and the corresponding placement
   annotations with `clusterAffinity` and an explicit mode.
 - Remove `split.spread` and `split.minReplicasPerCluster`, including explicit
@@ -111,6 +122,12 @@ Migrate source manifests explicitly:
   Packed placement has no equivalent.
 - Move placement `capacityFactors` to `spec.routing.capacityFactors`.
 
-Obsolete restrictions are rejected and retained through storage round trips.
-They must be removed deliberately; a controller update cannot silently erase
-an invalid restriction and widen the matched fleet.
+Legacy restrictions remain honored until opt-in. ClusterAffinity rejects them,
+including explicit empty/zero values preserved through storage round trips.
+The policy cannot be removed from an existing source: draining and recreating
+it is required to return to Legacy. Downgrading to an old hub binary also
+requires migrating or restoring opted-in sources first.
+
+Deploy compatibility support together with the affinity implementation. A build
+that only rejects legacy intent holds old sources and stops their placement and
+routing updates, even though existing member pods may keep serving.

@@ -127,7 +127,7 @@ func (g *Generator) buildSource(cls config.SizeClass, classIdx, i int) *v1beta1.
 			},
 		},
 		Spec: v1beta1.InferenceServiceSpec{
-			Placement: &v1beta1.PlacementSpec{Mode: v1beta1.PlacementModeSingle, ClusterAffinity: []v1beta1.ClusterAffinityTerm{{MatchExpressions: []v1beta1.ClusterSelectorRequirement{{Key: g.cfg.Placement.AcceleratorLabel, Operator: corev1.NodeSelectorOpIn, Values: []string{g.cfg.Placement.AcceleratorValue}}}}}},
+			Placement: &v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity, Mode: v1beta1.PlacementModeSingle, ClusterAffinity: []v1beta1.ClusterAffinityTerm{{MatchExpressions: []v1beta1.ClusterSelectorRequirement{{Key: g.cfg.Placement.AcceleratorLabel, Operator: corev1.NodeSelectorOpIn, Values: []string{g.cfg.Placement.AcceleratorValue}}}}}},
 			Engine: &v1beta1.EngineSpec{
 				Runner: &v1beta1.RunnerSpec{
 					Container: corev1.Container{Name: "ome-container", Image: cls.Image},

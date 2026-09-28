@@ -266,6 +266,10 @@ func (r *Reconciler) reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 		return ctrl.Result{}, nil
 	}
 
+	if !isvc.Spec.Placement.UsesClusterAffinity() {
+		return r.reconcileLegacy(ctx, isvc)
+	}
+
 	clusters := &v1beta1.WorkloadClusterList{}
 	if err := r.List(ctx, clusters); err != nil {
 		return ctrl.Result{}, err
@@ -525,12 +529,9 @@ func (r *Reconciler) reconcileSingle(
 	}
 }
 
-// placementMode preserves unsupported or missing modes for validation.
+// placementMode resolves the default only for Legacy placement.
 func placementMode(isvc *v1beta1.InferenceService) v1beta1.PlacementMode {
-	if isvc.Spec.Placement == nil {
-		return ""
-	}
-	return isvc.Spec.Placement.Mode
+	return isvc.Spec.Placement.EffectiveMode()
 }
 
 // reconcileAll implements PlacementModeAll: run the ISVC on EVERY candidate that
@@ -1382,15 +1383,14 @@ func placementEligibleIndexExtractor(obj client.Object) []string {
 	return []string{placementEligibleIndexValue}
 }
 
-// declaresPlacementRequirement includes invalid legacy intent so reconciliation
-// can report migration errors without treating an old source as a local service.
+// declaresPlacementRequirement preserves Legacy's no-selector/local boundary.
+// Explicit new-policy fields remain eligible so invalid opt-in is observable.
 func declaresPlacementRequirement(isvc *v1beta1.InferenceService) bool {
-	if isvc.Spec.Placement != nil {
+	if p := isvc.Spec.Placement; p != nil && (p.Policy != "" && p.Policy != v1beta1.PlacementPolicyLegacy || p.ClusterAffinity != nil || p.MaxSurge != nil || p.Mode == v1beta1.PlacementModeSplitByCapacity) {
 		return true
 	}
-	_, requirement := isvc.Annotations[AcceleratorRequirementsAnnotation]
-	_, selector := isvc.Annotations[ClusterSelectorAnnotation]
-	return requirement || selector
+	requirements, selector := placementInputs(isvc)
+	return requirements != "" || selector != ""
 }
 
 // IsPlacementEligible reports whether an InferenceService participates in the

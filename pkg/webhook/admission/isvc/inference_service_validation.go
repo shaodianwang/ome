@@ -128,6 +128,9 @@ func (v *InferenceServiceValidator) ValidateUpdate(ctx context.Context, oldIsvc,
 	if err := validateLegacyAutoscalerFieldsFromCtx(ctx); err != nil {
 		return nil, err
 	}
+	if err := validation.ValidatePlacementPolicyUpdate(&oldIsvc.Spec, &isvc.Spec); err != nil {
+		return nil, err
+	}
 	if err := validation.ValidateCoordinationUpdate(&oldIsvc.Spec, &isvc.Spec); err != nil {
 		return nil, err
 	}

@@ -196,10 +196,13 @@ func (e *specEnv) seedModelRuntimeOnMembers() (model, runtime string) {
 // createSource creates the control-plane source ISVC and registers the teardown
 // every spec needs: delete it, then wait for the placer to sweep its derived off
 // every member before the model and runtime go away.
-func (e *specEnv) createSource(model, runtime string, mode v1beta1.PlacementMode, replicas int) *v1beta1.InferenceService {
+func (e *specEnv) createSource(model, runtime string, mode v1beta1.PlacementMode, replicas int, configure ...func(*v1beta1.InferenceService)) *v1beta1.InferenceService {
 	src := runnableSourceISVC(e.isvcNS, e.isvcName, model, runtime, mode, replicas)
 	e.applyEngineResources(src)
 	e.routeToSpecQueue(src)
+	for _, edit := range configure {
+		edit(src)
+	}
 	mustCreate(controlCluster, src)
 
 	ginkgo.DeferCleanup(func() {

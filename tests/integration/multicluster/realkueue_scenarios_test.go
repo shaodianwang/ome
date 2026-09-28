@@ -484,6 +484,6 @@ func runnableSourceISVC(ns, name, runtime, accelReq, queue string, withDecoder b
 		})
 	}
 	result := w.Obj()
-	result.Spec.Placement = &v1beta1.PlacementSpec{Mode: v1beta1.PlacementModeSingle, ClusterAffinity: affinityForRequirement(accelReq)}
+	result.Spec.Placement = &v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity, Mode: v1beta1.PlacementModeSingle, ClusterAffinity: affinityForRequirement(accelReq)}
 	return result
 }

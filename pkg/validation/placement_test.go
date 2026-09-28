@@ -44,6 +44,9 @@ func TestValidatePlacement(t *testing.T) {
 			if err := json.Unmarshal([]byte(tt.placement), &placement); err != nil {
 				t.Fatal(err)
 			}
+			if placement != nil {
+				placement.Policy = v1beta1.PlacementPolicyClusterAffinity
+			}
 			err := ValidatePlacement(&v1beta1.InferenceServiceSpec{Placement: placement})
 			if diff := cmp.Diff(tt.wantError == "", err == nil); diff != "" {
 				t.Fatalf("error presence:\n%s\n%v", diff, err)
@@ -68,6 +71,9 @@ func TestValidatePlacementIntent(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			source := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Annotations: tt.annotations}}
+			if tt.invalid {
+				source.Spec.Placement = &v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity, Mode: v1beta1.PlacementModeSingle}
+			}
 			before := source.DeepCopy()
 			err := ValidatePlacementIntent(source)
 			if diff := cmp.Diff(tt.invalid, err != nil); diff != "" {

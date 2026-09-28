@@ -3,6 +3,8 @@ package validation
 import (
 	"fmt"
 
+	"k8s.io/apimachinery/pkg/labels"
+
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/placement/affinity"
@@ -15,6 +17,15 @@ func ValidatePlacement(spec *v1beta1.InferenceServiceSpec) error {
 		return nil
 	}
 	p := spec.Placement
+	if p.Policy == "" || p.Policy == v1beta1.PlacementPolicyLegacy {
+		if p.ClusterAffinity != nil || p.MaxSurge != nil || p.Mode == v1beta1.PlacementModeSplitByCapacity {
+			return fmt.Errorf("clusterAffinity, maxSurge, and SplitByCapacity require spec.placement.policy: ClusterAffinity")
+		}
+		return validateLegacyPlacement(spec)
+	}
+	if !p.UsesClusterAffinity() {
+		return fmt.Errorf("spec.placement.policy must be Legacy or ClusterAffinity")
+	}
 	split := p.Mode == v1beta1.PlacementModeSplit || p.Mode == v1beta1.PlacementModeSplitByCapacity
 	if !split && p.Mode != v1beta1.PlacementModeSingle && p.Mode != v1beta1.PlacementModeAll {
 		return fmt.Errorf("spec.placement.mode must explicitly select Single, All, Split, or SplitByCapacity")
@@ -47,11 +58,17 @@ func ValidatePlacement(spec *v1beta1.InferenceServiceSpec) error {
 	return nil
 }
 
-// ValidatePlacementIntent rejects obsolete annotations even when their values
-// are empty. Silently dropping such restrictions could widen the matched fleet.
+// ValidatePlacementIntent keeps the selected policy authoritative. Legacy
+// annotations are accepted only outside the explicit ClusterAffinity contract.
 func ValidatePlacementIntent(isvc *v1beta1.InferenceService) error {
 	if isvc == nil {
 		return nil
+	}
+	if !isvc.Spec.Placement.UsesClusterAffinity() {
+		if isvc.Status.Placement != nil && isvc.Status.Placement.Plan != nil {
+			return fmt.Errorf("an accepted placement plan requires spec.placement.policy: ClusterAffinity")
+		}
+		return ValidatePlacement(&isvc.Spec)
 	}
 	for _, key := range []string{constants.AcceleratorRequirements, constants.ClusterSelector} {
 		if _, exists := isvc.Annotations[key]; exists {
@@ -59,4 +76,49 @@ func ValidatePlacementIntent(isvc *v1beta1.InferenceService) error {
 		}
 	}
 	return ValidatePlacement(&isvc.Spec)
+}
+
+func validateLegacyPlacement(spec *v1beta1.InferenceServiceSpec) error {
+	p := spec.Placement
+	if p == nil {
+		return nil
+	}
+	for _, sel := range []struct{ field, value string }{
+		{"requirements", p.Requirements},
+		{"clusterSelector", p.ClusterSelector},
+	} {
+		if sel.value == "" {
+			continue
+		}
+		if _, err := labels.Parse(sel.value); err != nil {
+			return fmt.Errorf("spec.placement.%s is not a valid label selector %q: %w", sel.field, sel.value, err)
+		}
+	}
+	s := p.Split
+	if s == nil {
+		return nil
+	}
+	if s.Replicas != nil && *s.Replicas < 1 {
+		return fmt.Errorf("spec.placement.split.replicas must be >= 1 when set, got %d", *s.Replicas)
+	}
+	if s.MaxReplicasPerCluster < 0 {
+		return fmt.Errorf("spec.placement.split.maxReplicasPerCluster must be >= 0, got %d", s.MaxReplicasPerCluster)
+	}
+	if s.MinReplicasPerCluster < 0 {
+		return fmt.Errorf("spec.placement.split.minReplicasPerCluster must be >= 0, got %d", s.MinReplicasPerCluster)
+	}
+	if s.MaxReplicasPerCluster > 0 && s.MinReplicasPerCluster > s.MaxReplicasPerCluster {
+		return fmt.Errorf("spec.placement.split.minReplicasPerCluster (%d) must not exceed maxReplicasPerCluster (%d)",
+			s.MinReplicasPerCluster, s.MaxReplicasPerCluster)
+	}
+	return nil
+}
+
+// ValidatePlacementPolicyUpdate prevents a policy downgrade from handing planned
+// workloads to the admission-driven controller, including without a stored plan.
+func ValidatePlacementPolicyUpdate(oldSpec, newSpec *v1beta1.InferenceServiceSpec) error {
+	if oldSpec.Placement.UsesClusterAffinity() && !newSpec.Placement.UsesClusterAffinity() {
+		return fmt.Errorf("spec.placement.policy ClusterAffinity cannot be removed; drain and recreate the service to use Legacy")
+	}
+	return nil
 }

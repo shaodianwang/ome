@@ -141,7 +141,7 @@ func TestDeriveISVC_StripsRoutingDirectives(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "prod", UID: "uid-123"},
 		Spec: v1beta1.InferenceServiceSpec{
 			Engine: &v1beta1.EngineSpec{},
-			Placement: &v1beta1.PlacementSpec{
+			Placement: &v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity,
 				Mode: v1beta1.PlacementModeAll,
 				CapacityFactors: map[string]resource.Quantity{ //nolint:staticcheck // Exercise the supported legacy alias.
 					"cluster-a": resource.MustParse("2"),

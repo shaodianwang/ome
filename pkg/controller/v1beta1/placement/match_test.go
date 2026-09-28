@@ -59,7 +59,7 @@ func testAffinity(selectors ...string) []v1beta1.ClusterAffinityTerm {
 }
 
 func isvcReq(requirements, selector string) *v1beta1.InferenceService {
-	return isvcPlacement(&v1beta1.PlacementSpec{Mode: v1beta1.PlacementModeSingle, ClusterAffinity: testAffinity(requirements, selector)})
+	return isvcPlacement(&v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity, Mode: v1beta1.PlacementModeSingle, ClusterAffinity: testAffinity(requirements, selector)})
 }
 
 func isvcPlacement(p *v1beta1.PlacementSpec) *v1beta1.InferenceService {
@@ -85,11 +85,11 @@ func TestMatchCandidates(t *testing.T) {
 		{name: "matching labels", source: isvcReq("accelerator=gpu-a", ""), want: []string{"member-a", "member-b"}},
 		{name: "conjunctive requirements", source: isvcReq("accelerator=gpu-a", "region=west"), want: []string{"member-a"}},
 		{name: "object names", source: isvcReq("accelerator=gpu-a", "metadata.name in (member-b,member-c,member-d)"), want: []string{"member-b"}},
-		{name: "actual metadata name label", source: isvcPlacement(&v1beta1.PlacementSpec{Mode: v1beta1.PlacementModeSingle, ClusterAffinity: []v1beta1.ClusterAffinityTerm{{MatchExpressions: []v1beta1.ClusterSelectorRequirement{{Key: "metadata.name", Operator: corev1.NodeSelectorOpIn, Values: []string{"label-name"}}}}}}), want: []string{"member-a"}},
+		{name: "actual metadata name label", source: isvcPlacement(&v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity, Mode: v1beta1.PlacementModeSingle, ClusterAffinity: []v1beta1.ClusterAffinityTerm{{MatchExpressions: []v1beta1.ClusterSelectorRequirement{{Key: "metadata.name", Operator: corev1.NodeSelectorOpIn, Values: []string{"label-name"}}}}}}), want: []string{"member-a"}},
 		{name: "unready match", source: isvcReq("", "metadata.name=member-d"), reason: MatchReasonNoReadyClusters},
 		{name: "no matching registration", source: isvcReq("accelerator=gpu-c", ""), reason: MatchReasonNoMatch},
 		{name: "malformed affinity", source: isvcReq("!!!", ""), reason: MatchReasonMalformedSelector, invalid: true},
-		{name: "empty affinity", source: isvcPlacement(&v1beta1.PlacementSpec{Mode: v1beta1.PlacementModeSingle, ClusterAffinity: []v1beta1.ClusterAffinityTerm{}}), reason: MatchReasonMalformedSelector, invalid: true},
+		{name: "empty affinity", source: isvcPlacement(&v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity, Mode: v1beta1.PlacementModeSingle, ClusterAffinity: []v1beta1.ClusterAffinityTerm{}}), reason: MatchReasonMalformedSelector, invalid: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			before := &v1beta1.WorkloadClusterList{Items: clusters}
@@ -120,9 +120,9 @@ func TestPlacementEligibilityIncludesInvalidIntent(t *testing.T) {
 	}{
 		{name: "local", source: isvcPlacement(nil)},
 		{name: "unconstrained", source: isvcReq("", ""), eligible: true},
-		{name: "empty block", source: isvcPlacement(&v1beta1.PlacementSpec{}), eligible: true, invalid: true},
-		{name: "legacy empty annotation", source: &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{ClusterSelectorAnnotation: ""}}}, eligible: true, invalid: true},
-		{name: "legacy annotation beside typed intent", source: &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{AcceleratorRequirementsAnnotation: "accelerator=gpu-a"}}, Spec: v1beta1.InferenceServiceSpec{Placement: &v1beta1.PlacementSpec{Mode: v1beta1.PlacementModeSingle}}}, eligible: true, invalid: true},
+		{name: "empty block", source: isvcPlacement(&v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity}), eligible: true, invalid: true},
+		{name: "legacy empty annotation", source: &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{ClusterSelectorAnnotation: ""}}}},
+		{name: "legacy annotation beside typed intent", source: &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{AcceleratorRequirementsAnnotation: "accelerator=gpu-a"}}, Spec: v1beta1.InferenceServiceSpec{Placement: &v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity, Mode: v1beta1.PlacementModeSingle}}}, eligible: true, invalid: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if diff := cmp.Diff(tt.eligible, IsPlacementEligible(tt.source)); diff != "" {

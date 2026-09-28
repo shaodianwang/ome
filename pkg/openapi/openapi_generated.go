@@ -9818,13 +9818,19 @@ func schema_pkg_apis_ome_v1beta1_PlacementSpec(ref common.ReferenceCallback) com
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "PlacementSpec declares explicit multi-cluster intent. Affinity omission is unconstrained; invalid or obsolete restrictions cannot widen the matched set.",
+				Description: "PlacementSpec declares multi-cluster intent. Policy omission preserves the legacy selector and allocation contract, including its mode defaults.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
+					"policy": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Policy explicitly opts into ClusterAffinity semantics. Omission is Legacy. ClusterAffinity cannot be removed from an existing service; migrating back requires draining and recreating the source and its derived workloads.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
 					"mode": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Mode is required; an empty placement block does not select a policy.",
-							Default:     "",
+							Description: "Mode is required for ClusterAffinity. Legacy omission means Single.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -9836,7 +9842,7 @@ func schema_pkg_apis_ome_v1beta1_PlacementSpec(ref common.ReferenceCallback) com
 							},
 						},
 						SchemaProps: spec.SchemaProps{
-							Description: "ClusterAffinity ORs terms whose requirements are ANDed. Omission matches every registration; an explicit empty or null list is invalid.",
+							Description: "ClusterAffinity ORs terms whose requirements are ANDed. Requires the ClusterAffinity policy; omission then matches every registration. An explicit empty or null list is invalid.",
 							Type:        []string{"array"},
 							Items: &spec.SchemaOrArray{
 								Schema: &spec.Schema{
@@ -9857,27 +9863,27 @@ func schema_pkg_apis_ome_v1beta1_PlacementSpec(ref common.ReferenceCallback) com
 					},
 					"requirements": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Requirements is retained only to reject obsolete selector intent. Deprecated: use clusterAffinity.matchExpressions or matchFields.",
+							Description: "Requirements is a Legacy label selector, ANDed with ClusterSelector. Deprecated: opt into ClusterAffinity and use clusterAffinity.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
 					},
 					"clusterSelector": {
 						SchemaProps: spec.SchemaProps{
-							Description: "ClusterSelector is retained only to reject obsolete selector intent. Deprecated: use clusterAffinity.",
+							Description: "ClusterSelector is a Legacy selector over labels and virtual metadata.name. Deprecated: opt into ClusterAffinity and use clusterAffinity.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
 					},
 					"split": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Split provides the requested floor and optional per-home ceiling for Split and SplitByCapacity. Other modes reject this block.",
+							Description: "Split provides the requested floor and optional per-home ceiling for Split and SplitByCapacity. ClusterAffinity rejects it in other modes.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.SplitSpec"),
 						},
 					},
 					"capacityFactors": {
 						SchemaProps: spec.SchemaProps{
-							Description: "CapacityFactors is retained only to reject obsolete routing intent. Deprecated: use spec.routing.capacityFactors.",
+							Description: "CapacityFactors is the Legacy alias for routing capacity factors. Deprecated: use spec.routing.capacityFactors.",
 							Type:        []string{"object"},
 							AdditionalProperties: &spec.SchemaOrBool{
 								Allows: true,
@@ -9890,7 +9896,6 @@ func schema_pkg_apis_ome_v1beta1_PlacementSpec(ref common.ReferenceCallback) com
 						},
 					},
 				},
-				Required: []string{"mode"},
 			},
 		},
 		Dependencies: []string{
@@ -13912,21 +13917,21 @@ func schema_pkg_apis_ome_v1beta1_SplitSpec(ref common.ReferenceCallback) common.
 					},
 					"spread": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Spread is retained only to reject obsolete packing intent. Deprecated: mode and affinity weights determine allocation.",
+							Description: "Spread requests ceil(replicas/candidates) on each Legacy candidate. False uses admission-driven packing in candidate name order. Deprecated: ClusterAffinity uses exact shares and optional affinity weights.",
 							Type:        []string{"boolean"},
 							Format:      "",
 						},
 					},
 					"maxReplicasPerCluster": {
 						SchemaProps: spec.SchemaProps{
-							Description: "MaxReplicasPerCluster is an optional local ceiling. A target exceeding a positive ceiling holds the whole new plan; zero leaves the ceiling uncapped.",
+							Description: "MaxReplicasPerCluster is an optional local ceiling. ClusterAffinity holds plans exceeding it; Legacy clips requests to it. Zero leaves it uncapped.",
 							Type:        []string{"integer"},
 							Format:      "int32",
 						},
 					},
 					"minReplicasPerCluster": {
 						SchemaProps: spec.SchemaProps{
-							Description: "MinReplicasPerCluster is retained only to reject obsolete anti-sliver intent. Deprecated: exact shares cannot discard a small admission.",
+							Description: "MinReplicasPerCluster discards Legacy homes admitted below this count. Deprecated: ClusterAffinity exact shares cannot discard a small admission.",
 							Type:        []string{"integer"},
 							Format:      "int32",
 						},

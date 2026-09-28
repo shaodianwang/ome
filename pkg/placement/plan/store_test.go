@@ -24,7 +24,7 @@ import (
 func sourceFixture() *v1beta1.InferenceService {
 	return &v1beta1.InferenceService{
 		ObjectMeta: metav1.ObjectMeta{Name: "service", Namespace: "team-a", UID: "source-a", Generation: 1},
-		Spec:       v1beta1.InferenceServiceSpec{Placement: &v1beta1.PlacementSpec{Mode: v1beta1.PlacementModeSplit}},
+		Spec:       v1beta1.InferenceServiceSpec{Placement: &v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity, Mode: v1beta1.PlacementModeSplit}},
 	}
 }
 

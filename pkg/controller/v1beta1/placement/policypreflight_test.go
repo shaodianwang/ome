@@ -329,7 +329,7 @@ func TestPreflightPolicies_SplitHardGate(t *testing.T) {
 				t.Run(tc.name, func(t *testing.T) {
 					s := testScheme(t)
 					isvc := srcISVCWithRef("")
-					isvc.Spec.Placement = &v1beta1.PlacementSpec{Mode: mode, Split: &v1beta1.SplitSpec{MaxReplicasPerCluster: tc.cap}}
+					isvc.Spec.Placement = &v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity, Mode: mode, Split: &v1beta1.SplitSpec{MaxReplicasPerCluster: tc.cap}}
 					clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{"a": memberWith(s, maxConsumingPolicy(testPolicyName))}}
 					r, _ := newPlacer(s, clusters, isvc, maxConsumingPolicy(testPolicyName))
 					out := r.preflightPolicies(t.Context(), isvc, []string{"a"}, []v1beta1.WorkloadCluster{*readyWC("a", capabilityLabels())})

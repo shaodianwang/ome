@@ -9,6 +9,17 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 )
 
+// IsAffinityMember distinguishes opt-in members from ordinary local services
+// and legacy derived copies. An execution envelope also establishes opt-in.
+func IsAffinityMember(service *v1beta1.InferenceService) bool {
+	if service == nil || (service.Annotations[constants.PlacementOriginUID] == "" && service.Labels[constants.PlacementOrigin] == "") {
+		return false
+	}
+	_, selected := service.Annotations[constants.PlacementPolicy]
+	_, planned := service.Annotations[constants.PlacementExecution]
+	return selected || planned
+}
+
 // FromDerived reads policy only on origin-marked services. A similarly named
 // annotation on an ordinary local service cannot change its execution policy.
 func FromDerived(service *v1beta1.InferenceService) (*v1beta1.PlacementExecutionPolicy, error) {

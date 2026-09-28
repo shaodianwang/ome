@@ -64,7 +64,7 @@ func splitISVC(clusters []string, admitted, ready []int32) *v1beta1.InferenceSer
 	return &v1beta1.InferenceService{
 		ObjectMeta: metav1.ObjectMeta{Name: testName, Namespace: testNS, UID: "uid-1", Generation: 7},
 		Spec: v1beta1.InferenceServiceSpec{
-			Placement: &v1beta1.PlacementSpec{
+			Placement: &v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity,
 				Mode: v1beta1.PlacementModeSplit,
 			},
 		},
@@ -373,7 +373,6 @@ func TestReconcile_ObsoletePlacementIntentPreservesTrafficMap(t *testing.T) {
 		edit func(*v1beta1.InferenceService)
 	}{
 		{name: "legacy annotation", edit: func(source *v1beta1.InferenceService) {
-			source.Spec.Placement = nil
 			source.Annotations = map[string]string{"ome.io/accelerator-requirements": "accelerator=gpu"}
 		}},
 		{name: "empty legacy annotation", edit: func(source *v1beta1.InferenceService) {

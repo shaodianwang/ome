@@ -136,7 +136,7 @@ func splitSourceISVC(namespace, name, requirements string, split *v1beta1.SplitS
 	return &v1beta1.InferenceService{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec: v1beta1.InferenceServiceSpec{
-			Placement: &v1beta1.PlacementSpec{
+			Placement: &v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity,
 				Mode:            v1beta1.PlacementModeSplit,
 				ClusterAffinity: affinityForRequirement(requirements),
 				Split:           split,
