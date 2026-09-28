@@ -869,6 +869,42 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return reconcile.Result{}, errors.Wrapf(err, "fails to reconcile coordination")
 	}
 
+	componentModes := map[v1beta1.ComponentType]constants.DeploymentModeType{
+		v1beta1.EngineComponent:  engineDeploymentMode,
+		v1beta1.DecoderComponent: decoderDeploymentMode,
+		v1beta1.RouterComponent:  routerDeploymentMode,
+	}
+
+	// Project IR status onto the ISVC on requeueing passes too — see the
+	// call below for what the projection is; this call exists only so the
+	// short-circuit cannot skip it.
+	//
+	// The projector is the ONLY writer of both the Lifecycle subtree and
+	// the top-level EngineReady / DecoderReady / RouterReady conditions,
+	// and a requeueing pass is the steady state of an active rollout, not
+	// an exception. Running it only on the no-requeue tail freezes the
+	// projection for as long as anything asks to requeue, and because the
+	// rollout engines gate on component readiness, that freeze sustains
+	// itself: stale NotReady conditions hold the rollout at its step, the
+	// held rollout keeps requeueing, and the requeue keeps the projection
+	// stale. Observed in production as an ISVC pinned
+	// Ready=False/Initializing for seven days with its live IR eleven
+	// generations ahead, no reconcile errors, and no recovery across
+	// controller restarts.
+	//
+	// Deliberately an ADDITIONAL call rather than a move: the tail call
+	// keeps its position after ingress / traffic / component-status
+	// cleanup, so the no-requeue path's write ordering is unchanged. An
+	// unchanged rollup performs zero writes (AggregateIRStatus skips the
+	// Status().Update when the recomputed status DeepEquals the live one),
+	// so the pass that runs both calls still writes at most once.
+	if pendingRequeue.Requeue || pendingRequeue.RequeueAfter > 0 {
+		if err = irprojector.AggregateIRStatus(ctx, r.Client, r.APIReader, isvc, componentModes); err != nil {
+			r.Recorder.Event(isvc, v1.EventTypeWarning, "InternalError", err.Error())
+			return reconcile.Result{}, err
+		}
+	}
+
 	// If any Component asked to requeue, return that signal AFTER
 	// coordination has run. Ingress / traffic / external-service
 	// reconciliation downstream is skipped this pass — they re-run on
@@ -1013,11 +1049,6 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// a retry; first-reconcile NotFound is swallowed inside the
 	// helper (the next reconcile picks up the IR's fresh status once
 	// the cache observes it).
-	componentModes := map[v1beta1.ComponentType]constants.DeploymentModeType{
-		v1beta1.EngineComponent:  engineDeploymentMode,
-		v1beta1.DecoderComponent: decoderDeploymentMode,
-		v1beta1.RouterComponent:  routerDeploymentMode,
-	}
 	if err = irprojector.AggregateIRStatus(ctx, r.Client, r.APIReader, isvc, componentModes); err != nil {
 		r.Recorder.Event(isvc, v1.EventTypeWarning, "InternalError", err.Error())
 		return reconcile.Result{}, err

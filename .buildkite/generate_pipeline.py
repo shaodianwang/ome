@@ -146,7 +146,7 @@ KIND_SPEC_GROUPS = (
     )),
     ("canary-lifecycle", "Canary lifecycle", (
         "canary_lifecycle_promote", "canary_lifecycle_pausefreeze",
-        "canary_lifecycle_podloss",
+        "canary_lifecycle_podloss", "projection_freeze",
     )),
     ("ratio-core", "RatioBalanced coordination", (
         "ratiobalanced", "ratio_n3", "ratio_pause_resume",
