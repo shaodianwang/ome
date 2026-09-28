@@ -1,9 +1,9 @@
 title: "Cluster affinity and replica allocation for placement"
 oep-number: "0018.4"
 authors:
-  - Wei Huang
-status: provisional
-# state: design only; audited placement_types.go, placement/{match,controller,derive}.go, quota capacity, and routing on 2026-09-24; no implementation in this change.
+  - "@Huang-Wei"
+status: implemented
+# state: placement.policy ClusterAffinity + cluster_affinity_types.go, SplitByCapacity apportionment (split_plan.go/split_executor.go, #1718/#1743), persisted allocation plans (#1736), AllocationShortfall reporting (plan_status.go), bounded transitions (#1724) and legacy preservation (#1796)
 creation-date: 2026-09-24
 reviewers:
   - TBD
@@ -23,8 +23,8 @@ see-also:
   - "/oeps/0025-multi-cluster-routing"
 
 stage: alpha
-latest-milestone: "TBD"
+latest-milestone: "alpha"
 milestone:
-  alpha: "TBD"
+  alpha: "2026-09-27"
   beta: "TBD"
   stable: "TBD"

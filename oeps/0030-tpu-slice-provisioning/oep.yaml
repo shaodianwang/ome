@@ -2,10 +2,9 @@ title: Slice provisioning for OME TPU workloads
 oep-number: "0030"
 authors:
   - "@yan9fan"
-status: provisional
-# state: Design only; proposes controller-owned slice provisioning.
-# A 4-chip OME pod requires a matching 2x2x1 partition.
-# Recommends Option 1
+status: implementable
+# state: pkg/tpuslice shape derivation (#1702) and the GKE slice client (#1703) landed, and the workload engine carries the Provisioner seam and its CapacityProvisioning hold (#1709); no provisioner wires the slice client into Deps.Provisioner yet, so no slice is created today
+# A 4-chip OME pod requires a matching 2x2x1 partition. Recommends Option 1
 # (ome-controller provisions, ome-scheduler places): slice creation is a slow
 # control-plane call and must stay out of the pod-binding path. Open Question 1
 # is the only fact that would move it to Option 2.

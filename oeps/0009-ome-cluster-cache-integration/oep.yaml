@@ -2,8 +2,8 @@ title: OME Model Cache Provider Integration
 oep-number: 0009
 authors:
   - "@slin1237"
-status: implementable
-# state: BaseModel.spec.distribution + ModelCacheStatus in model.go landed (#35, #56); provider factory, BaseModel Sharded reconcile path and ISVC injection not built
+status: implemented
+# state: BaseModel.spec.distribution + ModelCacheStatus in model.go (#35, #56); provider config in controllerconfig, the sharded backend client, the BaseModel Sharded reconcile path and ISVC env injection (components/base.go) all landed, with runtime capability matching in runtimeselector/model_cache.go
 creation-date: 2026-05-04
 reviewers:
   - TBD
@@ -17,10 +17,10 @@ see-also:
 # The target maturity stage in the current dev cycle.
 stage: alpha
 
-latest-milestone: "TBD"
+latest-milestone: "alpha"
 
 milestone:
-  alpha: "TBD"
+  alpha: "2026-05-17"
   beta: "TBD"
   stable: "TBD"
 

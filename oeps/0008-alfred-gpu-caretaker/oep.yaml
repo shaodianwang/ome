@@ -2,8 +2,8 @@ title: Alfred GPU Cluster Caretaker
 oep-number: "0008"
 authors:
   - "@slin1237"
-status: provisional
-# state: nothing built; only the AlfredAPIGroupName constant in pkg/constants/constants.go
+status: implemented
+# state: alfred deployed from charts/ome-resources/templates/alfred at the image pinned by .alfred-oss-ref (#1676) and driven black-box by tests/integration/singlecluster/controller/alfred_kind (#1688): defrag, node-health evacuation, arbitration, recommend-only default. The caretaker engine itself lives outside this repo; only the alfred.ome.io annotations are in pkg/constants
 creation-date: 2026-04-16
 last-revised: 2026-06-04
 reviewers:
@@ -22,10 +22,10 @@ replaces:
 # The target maturity stage in the current dev cycle.
 stage: alpha
 
-latest-milestone: "TBD"
+latest-milestone: "alpha"
 
 milestone:
-  alpha: "TBD"
+  alpha: "2026-09-26"
   beta: "TBD"
   stable: "TBD"
 

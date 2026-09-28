@@ -2,8 +2,8 @@ title: "TrafficMap publication fallback"
 oep-number: "0025.1"
 authors:
   - "@fanyang-real"
-status: provisional
-# state: design only; no implementation
+status: implemented
+# state: TrafficMap publication fallback in placement/endpoint/trafficmap_publisher.go + trafficmap_types.go; #1697
 creation-date: 2026-09-24
 reviewers:
   - TBD
@@ -22,10 +22,10 @@ replaces: []
 
 stage: alpha
 
-latest-milestone: "TBD"
+latest-milestone: "alpha"
 
 milestone:
-  alpha: "TBD"
+  alpha: "2026-09-25"
   beta: "TBD"
   stable: "TBD"
 

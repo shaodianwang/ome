@@ -2,8 +2,8 @@ title: Per-Component Canary Plans
 oep-number: "0017.2"
 authors:
   - "@benj"
-status: implementable
-# state: canary units at admission (pkg/rollout/canary_unit.go, pkg/validation/canary.go, #1480) and per-Component status.canary landed; chart-level concurrency gate and concurrent-run KIND specs from the Alpha criteria not in tree
+status: implemented
+# state: canary units at admission (pkg/rollout/canary_unit.go, pkg/validation/canary.go, #1480), per-unit status.canary with the legacy alias derived in rollout/canary_status.go, and the per-unit KIND spec canary_per_unit_kind_test.go. Concurrency is gated per ISVC by rollout.groupOrdering: Concurrent (#1513) rather than the chart value the Alpha criteria name; the ome_canary_* metrics and a mixed-outcome KIND spec are not in tree
 creation-date: 2026-09-12
 reviewers:
   - TBD
@@ -33,10 +33,10 @@ replaces: []
 
 stage: alpha
 
-latest-milestone: "TBD"
+latest-milestone: "alpha"
 
 milestone:
-  alpha: "TBD"
+  alpha: "2026-09-15"
   beta: "TBD"
   stable: "TBD"
 
