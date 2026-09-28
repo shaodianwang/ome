@@ -2,6 +2,7 @@ package multicluster
 
 import (
 	"fmt"
+	"strings"
 	"sync/atomic"
 
 	"github.com/onsi/ginkgo/v2"
@@ -12,6 +13,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/irprojector"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/placement"
 	"github.com/ome-projects/ome/tests/integration/util"
 )
@@ -43,19 +46,15 @@ func rotateSecret(c cluster, namespace, name string, kubeconfig []byte) {
 	}, eventuallyTimeout, eventuallyPoll).Should(gomega.Succeed())
 }
 
-// sourceISVC builds a minimal control-plane source InferenceService that declares
-// a single Engine component and the accelerator requirement selector that makes
-// it eligible for fan-out onto matching candidate clusters.
+// sourceISVC declares Single placement with one Engine and label affinity.
 func sourceISVC(namespace, name, acceleratorRequirements string) *v1beta1.InferenceService {
 	return &v1beta1.InferenceService{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
-			Annotations: map[string]string{
-				placement.AcceleratorRequirementsAnnotation: acceleratorRequirements,
-			},
 		},
 		Spec: v1beta1.InferenceServiceSpec{
+			Placement: &v1beta1.PlacementSpec{Mode: v1beta1.PlacementModeSingle, ClusterAffinity: affinityForRequirement(acceleratorRequirements)},
 			Engine: &v1beta1.EngineSpec{
 				Runner: &v1beta1.RunnerSpec{
 					Container: corev1.Container{Name: "ome-container", Image: "example/model-server:test"},
@@ -63,6 +62,15 @@ func sourceISVC(namespace, name, acceleratorRequirements string) *v1beta1.Infere
 			},
 		},
 	}
+}
+
+// affinityForRequirement converts the equality requirement used by these fixtures.
+func affinityForRequirement(requirement string) []v1beta1.ClusterAffinityTerm {
+	key, value, ok := strings.Cut(requirement, "=")
+	gomega.ExpectWithOffset(1, ok && key != "" && value != "").To(gomega.BeTrue(), "fixture requires key=value")
+	return []v1beta1.ClusterAffinityTerm{{MatchExpressions: []v1beta1.ClusterSelectorRequirement{{
+		Key: key, Operator: corev1.NodeSelectorOpIn, Values: []string{value},
+	}}}}
 }
 
 // keeperISVC builds a minimal control-plane InferenceService with no accelerator
@@ -190,4 +198,24 @@ var nameCounter atomic.Int64
 // uniqueName builds a per-spec unique, DNS-1123-safe resource name.
 func uniqueName(prefix string) string {
 	return fmt.Sprintf("%s-%d", prefix, nameCounter.Add(1))
+}
+
+// upsertPlannedEngineStatusOn uses the member projector to preserve ownership
+// and placement authority, then simulates admission on the bare member API.
+func upsertPlannedEngineStatusOn(member cluster, namespace, name string, instances []v1beta1.OMENativeInstanceStatus) {
+	gomega.EventuallyWithOffset(1, func(g gomega.Gomega) {
+		derived := &v1beta1.InferenceService{}
+		g.Expect(member.client.Get(member.ctx, client.ObjectKey{Namespace: namespace, Name: name}, derived)).To(gomega.Succeed())
+		g.Expect(derived.Spec.Engine).NotTo(gomega.BeNil())
+		ir, err := irprojector.EnsureInferenceReplica(member.ctx, irprojector.Params{
+			Client: member.client, ISVC: derived, Component: v1beta1.EngineComponent,
+			ComponentExt: &derived.Spec.Engine.ComponentExtensionSpec,
+			ObjectMeta:   metav1.ObjectMeta{Labels: map[string]string{constants.InferenceServicePodLabelKey: name}},
+			PodSpec:      &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "example/model-server:test"}}},
+		})
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		ir.Status.ObservedGeneration = ir.Generation
+		ir.Status.PlacementObservedGeneration = ir.Generation
+		g.Expect(util.WriteDenseInstanceStatuses(member.ctx, member.client, ir, instances)).To(gomega.Succeed())
+	}, eventuallyTimeout, eventuallyPoll).Should(gomega.Succeed())
 }

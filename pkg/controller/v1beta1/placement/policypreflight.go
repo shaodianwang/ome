@@ -514,7 +514,7 @@ func (r *Reconciler) preflightPolicies(ctx context.Context, isvc *v1beta1.Infere
 	// Split hard gate: with no per-cluster ceiling, every home renders the
 	// GLOBAL MaxReplicas, so a fleet-wide metric outage would drive each home
 	// to the full budget (N x max). Hold loudly; the fix is one spec field.
-	if placementMode(isvc) == v1beta1.PlacementModeSplit && splitCeilingUnset(isvc) {
+	if mode := placementMode(isvc); (mode == v1beta1.PlacementModeSplit || mode == v1beta1.PlacementModeSplitByCapacity) && splitCeilingUnset(isvc) {
 		for _, name := range names {
 			consumes, err := render.ConsumesMaxReplicas(anchorSpecs[name])
 			if err != nil || consumes {

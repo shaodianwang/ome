@@ -16,6 +16,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	ometesting "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
+	"github.com/ome-projects/ome/pkg/validation"
 )
 
 // These specs drive the routing controller end-to-end through envtest: they set
@@ -37,8 +38,8 @@ var _ = ginkgo.Describe("TrafficMap routing controller", func() {
 	ginkgo.It("generates an owner-ref'd TrafficMap for a Placed single-home ISVC", func() {
 		name := uniqueName("svc")
 		isvc := createISVC(isvcNS, name, &v1beta1.PlacementSpec{
-			Mode:         v1beta1.PlacementModeSingle,
-			Requirements: "accelerator=test",
+			Mode:            v1beta1.PlacementModeSingle,
+			ClusterAffinity: routingTestAffinity(),
 		})
 		placeISVC(isvc, candidate("cluster-a", "cluster-a.example.com", 2, 2))
 
@@ -70,12 +71,11 @@ var _ = ginkgo.Describe("TrafficMap routing controller", func() {
 		// cluster-a's replicas each serve twice a baseline replica, so with equal
 		// admitted counts a's share is double b's: a 2:1 split.
 		isvc := createISVC(isvcNS, name, &v1beta1.PlacementSpec{
-			Mode:         v1beta1.PlacementModeSplit,
-			Requirements: "accelerator=test",
-			CapacityFactors: map[string]resource.Quantity{
-				"cluster-a": resource.MustParse("2"),
-			},
+			Mode:            v1beta1.PlacementModeSplit,
+			ClusterAffinity: routingTestAffinity(),
 		})
+		isvc.Spec.Routing = &v1beta1.RoutingSpec{CapacityFactors: map[string]resource.Quantity{"cluster-a": resource.MustParse("2")}}
+		gomega.Expect(k8sClient.Update(suiteCtx, isvc)).To(gomega.Succeed())
 		placeISVC(isvc,
 			candidate("cluster-a", "cluster-a.example.com", 2, 2),
 			candidate("cluster-b", "cluster-b.example.com", 2, 2))
@@ -105,12 +105,11 @@ var _ = ginkgo.Describe("TrafficMap routing controller", func() {
 	ginkgo.It("health-gates an unready home to weight 0 and re-weights the survivor", func() {
 		name := uniqueName("svc")
 		isvc := createISVC(isvcNS, name, &v1beta1.PlacementSpec{
-			Mode:         v1beta1.PlacementModeSplit,
-			Requirements: "accelerator=test",
-			CapacityFactors: map[string]resource.Quantity{
-				"cluster-a": resource.MustParse("2"),
-			},
+			Mode:            v1beta1.PlacementModeSplit,
+			ClusterAffinity: routingTestAffinity(),
 		})
+		isvc.Spec.Routing = &v1beta1.RoutingSpec{CapacityFactors: map[string]resource.Quantity{"cluster-a": resource.MustParse("2")}}
+		gomega.Expect(k8sClient.Update(suiteCtx, isvc)).To(gomega.Succeed())
 		placeISVC(isvc,
 			candidate("cluster-a", "cluster-a.example.com", 2, 2),
 			candidate("cluster-b", "cluster-b.example.com", 2, 2))
@@ -141,8 +140,8 @@ var _ = ginkgo.Describe("TrafficMap routing controller", func() {
 	ginkgo.It("publishes all-zero weights when every home is unready", func() {
 		name := uniqueName("svc")
 		isvc := createISVC(isvcNS, name, &v1beta1.PlacementSpec{
-			Mode:         v1beta1.PlacementModeSplit,
-			Requirements: "accelerator=test",
+			Mode:            v1beta1.PlacementModeSplit,
+			ClusterAffinity: routingTestAffinity(),
 		})
 		placeISVC(isvc,
 			candidate("cluster-a", "cluster-a.example.com", 2, 0),
@@ -165,8 +164,8 @@ var _ = ginkgo.Describe("TrafficMap routing controller", func() {
 	ginkgo.It("keeps an emptied TrafficMap that explains itself when the ISVC leaves Placed", func() {
 		name := uniqueName("svc")
 		isvc := createISVC(isvcNS, name, &v1beta1.PlacementSpec{
-			Mode:         v1beta1.PlacementModeSingle,
-			Requirements: "accelerator=test",
+			Mode:            v1beta1.PlacementModeSingle,
+			ClusterAffinity: routingTestAffinity(),
 		})
 		placeISVC(isvc, candidate("cluster-a", "cluster-a.example.com", 1, 1))
 
@@ -197,8 +196,8 @@ var _ = ginkgo.Describe("TrafficMap routing controller", func() {
 	ginkgo.It("pre-arms an absent cluster, drains its first route entry, and restores it on removal", func() {
 		name := uniqueName("svc")
 		isvc := createISVC(isvcNS, name, &v1beta1.PlacementSpec{
-			Mode:         v1beta1.PlacementModeSplit,
-			Requirements: "accelerator=test",
+			Mode:            v1beta1.PlacementModeSplit,
+			ClusterAffinity: routingTestAffinity(),
 		})
 
 		ginkgo.By("adding a durable hold before the target cluster is routable")
@@ -271,6 +270,10 @@ var _ = ginkgo.Describe("TrafficMap routing controller", func() {
 	})
 })
 
+func routingTestAffinity() []v1beta1.ClusterAffinityTerm {
+	return []v1beta1.ClusterAffinityTerm{{MatchExpressions: []v1beta1.ClusterSelectorRequirement{{Key: "accelerator", Operator: corev1.NodeSelectorOpIn, Values: []string{"test"}}}}}
+}
+
 // createISVC creates a minimal InferenceService (single Engine runner) with an
 // optional placement spec, and returns the created object (with its generation
 // and UID populated).
@@ -286,6 +289,7 @@ func createISVC(ns, name string, pl *v1beta1.PlacementSpec) *v1beta1.InferenceSe
 			Placement: pl,
 		},
 	}
+	gomega.ExpectWithOffset(1, validation.ValidatePlacementIntent(isvc)).To(gomega.Succeed())
 	gomega.ExpectWithOffset(1, k8sClient.Create(suiteCtx, isvc)).To(gomega.Succeed())
 	return isvc
 }

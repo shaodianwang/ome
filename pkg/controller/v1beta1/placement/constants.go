@@ -10,19 +10,10 @@ import "github.com/ome-projects/ome/pkg/constants"
 const PlacementControllerName = "placement"
 
 const (
-	// AcceleratorRequirementsAnnotation holds a label-selector string of the
-	// accelerator/capability attributes a candidate WorkloadCluster MUST satisfy
-	// for this ISVC (e.g. "gpu=gb300"). Selector attributes include cluster labels
-	// and the virtual, immutable metadata.name key. An ISVC that declares neither
-	// this nor ClusterSelectorAnnotation is NOT fanned out fleet-wide. The value
-	// is user/GitOps-supplied — there is no in-code default.
-	AcceleratorRequirementsAnnotation = "ome.io/accelerator-requirements"
-
-	// ClusterSelectorAnnotation holds an optional extra selector string (e.g.
-	// "provider=cloud-a" or "metadata.name=cluster-a") AND-ed onto the accelerator
-	// requirements to further narrow candidate clusters. It is sufficient on its
-	// own to make an ISVC eligible for fleet-wide fan-out.
-	ClusterSelectorAnnotation = "ome.io/cluster-selector"
+	// AcceleratorRequirementsAnnotation identifies obsolete placement intent.
+	AcceleratorRequirementsAnnotation = constants.AcceleratorRequirements
+	// ClusterSelectorAnnotation identifies obsolete placement intent.
+	ClusterSelectorAnnotation = constants.ClusterSelector
 
 	// PlacementFinalizer lets the controller delete the derived ISVC before the
 	// source ISVC is removed.

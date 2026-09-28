@@ -59,7 +59,11 @@ metadata:
 spec:
   placement:
     mode: All
-    requirements: accelerator=tpu7x
+    clusterAffinity:
+      - matchExpressions:
+          - key: accelerator
+            operator: In
+            values: [tpu7x]
   model:
     name: demo-noop
   runtime:
@@ -85,7 +89,11 @@ metadata:
 spec:
   placement:
     mode: All
-    requirements: accelerator=tpu7x
+    clusterAffinity:
+      - matchExpressions:
+          - key: accelerator
+            operator: In
+            values: [tpu7x]
   model:
     name: demo-noop
   runtime:

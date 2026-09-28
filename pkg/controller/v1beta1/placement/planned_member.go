@@ -116,7 +116,7 @@ func (r *Reconciler) placePlannedOn(ctx context.Context, source *v1beta1.Inferen
 	if source.Spec.Placement.Split != nil {
 		ceiling = source.Spec.Placement.Split.MaxReplicasPerCluster
 	}
-	setDerivedReplicas(desired, assignment.CurrentReplicas, ceiling)
+	setPlannedReplicas(desired, assignment.CurrentReplicas, ceiling)
 	policy := executionPolicy(source, assignment)
 	raw, err := protocol.Encode(policy)
 	if err != nil {
@@ -130,6 +130,73 @@ func (r *Reconciler) placePlannedOn(ctx context.Context, source *v1beta1.Inferen
 		return err
 	}
 	return r.applyDerived(ctx, candidate.Cluster, cl, source, desired)
+}
+
+// setPlannedReplicas preserves an omitted maximum for member runtime inheritance.
+// A retained floor can exceed a newly reduced cap until its replacement serves.
+func setPlannedReplicas(member *v1beta1.InferenceService, replicas, ceiling int32) {
+	apply := func(component *v1beta1.ComponentExtensionSpec) {
+		floor := int(replicas)
+		component.MinReplicas = &floor
+		if ceiling > 0 {
+			component.MaxReplicas = int(max(ceiling, replicas))
+		} else if component.MaxReplicas > 0 {
+			component.MaxReplicas = max(component.MaxReplicas, floor)
+		}
+	}
+	if member.Spec.Engine != nil {
+		apply(&member.Spec.Engine.ComponentExtensionSpec)
+	}
+	if member.Spec.Decoder != nil {
+		apply(&member.Spec.Decoder.ComponentExtensionSpec)
+	}
+}
+
+// syncPlannedPolicy updates coordination authority while retaining the member
+// spec. An ineligible home can acknowledge a pause or release without receiving
+// source template or replica changes that its preflight has not approved.
+func (r *Reconciler) syncPlannedPolicy(ctx context.Context, source *v1beta1.InferenceService, candidate v1beta1.CandidatePlacement) error {
+	if err := r.checkPlanCurrent(ctx, source); err != nil {
+		return err
+	}
+	if err := checkPlannedAssignment(source, candidate); err != nil {
+		return err
+	}
+	policy := executionPolicy(source, candidate.Allocation)
+	cl, err := r.plannedClient(ctx, candidate.Cluster, candidate.Allocation.ClusterUID)
+	if err != nil {
+		return err
+	}
+	member := &v1beta1.InferenceService{}
+	if err := cl.Get(ctx, client.ObjectKeyFromObject(source), member); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if !isOurDerived(member, source) || member.UID == "" || !member.DeletionTimestamp.IsZero() {
+		return fmt.Errorf("member identity cannot authorize a surge pause")
+	}
+	previous, err := protocol.FromDerived(member)
+	if err != nil {
+		return err
+	}
+	if err := protocol.Authorize(previous, policy); err != nil {
+		return err
+	}
+	raw, err := protocol.Encode(policy)
+	if err != nil {
+		return err
+	}
+	if member.Annotations[constants.PlacementExecution] == raw {
+		return nil
+	}
+	base := member.DeepCopy()
+	if member.Annotations == nil {
+		member.Annotations = map[string]string{}
+	}
+	member.Annotations[constants.PlacementExecution] = raw
+	if err := r.checkPlanCurrent(ctx, source); err != nil {
+		return err
+	}
+	return cl.Patch(ctx, member, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 }
 
 // deletePlannedOn requires independently verified drain and rechecks member

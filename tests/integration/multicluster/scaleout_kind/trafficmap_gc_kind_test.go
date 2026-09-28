@@ -8,6 +8,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -206,7 +207,7 @@ func createPublishedTrafficMapForGC(
 	name := uniqueName("trafficmap-gc")
 	isvc := runnableSourceISVC(namespace, name, "unused-model", "unused-runtime",
 		v1beta1.PlacementModeSingle, 1)
-	isvc.Spec.Placement.Requirements = "trafficmap-gc=true"
+	isvc.Spec.Placement.ClusterAffinity = []v1beta1.ClusterAffinityTerm{{MatchExpressions: []v1beta1.ClusterSelectorRequirement{{Key: "trafficmap-gc", Operator: corev1.NodeSelectorOpIn, Values: []string{"true"}}}}}
 	mustCreate(controlCluster, isvc)
 	key := client.ObjectKeyFromObject(isvc)
 

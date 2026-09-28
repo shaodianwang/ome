@@ -353,7 +353,7 @@ func (v *InferenceServiceValidator) validateInferenceService(ctx context.Context
 	if err := validateComponentPodDisruptionBudgets(isvc); err != nil {
 		return allWarnings, err
 	}
-	if err := validation.ValidatePlacement(&isvc.Spec); err != nil {
+	if err := validation.ValidatePlacementIntent(isvc); err != nil {
 		return allWarnings, err
 	}
 	if err := validation.ValidateRouting(&isvc.Spec); err != nil {

@@ -3,12 +3,22 @@ package scaleout_kind
 import (
 	"time"
 
+	"github.com/go-logr/logr"
+	"github.com/google/go-cmp/cmp"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	gatewayapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	placementendpoint "github.com/ome-projects/ome/pkg/controller/v1beta1/placement/endpoint"
+	placementrouting "github.com/ome-projects/ome/pkg/controller/v1beta1/placement/routing"
+	"github.com/ome-projects/ome/tests/integration/kindutil"
 )
 
 // Re-sharding and failure handling: what the placement does when a home goes
@@ -22,95 +32,51 @@ var _ = ginkgo.Describe("Multi-cluster re-shard and failure (KIND)", func() {
 		env = setupSpecEnv()
 	})
 
-	ginkgo.It("tops the survivor up when a home is lost, without disturbing what it already runs", func() {
-		const desired = 2
-
+	ginkgo.DescribeTable("retains exact shares across a member connection loss", func(reconnect bool) {
 		model, runtime := env.seedModelRuntimeOnMembers()
-		env.createSplitSource(model, runtime, desired)
-
+		env.createSplitSource(model, runtime, 2)
+		gomega.Eventually(func(g gomega.Gomega) {
+			for _, m := range env.members {
+				g.Expect(runningEnginePodsOn(g, m.c, env.isvcNS, env.isvcName)).To(gomega.Equal(1))
+			}
+			ps := placementStatusOf(env.isvcNS, env.isvcName)
+			g.Expect(ps).NotTo(gomega.BeNil())
+			g.Expect(ps.Plan).NotTo(gomega.BeNil())
+			g.Expect(ps.Plan.PauseSurge).To(gomega.BeFalse())
+		}).WithTimeout(longTimeout).WithPolling(pollInterval).Should(gomega.Succeed())
 		survivor, lost := env.members[0], env.members[1]
-
-		ginkgo.By("waiting for the spread: one replica on each home")
-		for _, m := range env.members {
-			gomega.Eventually(func(g gomega.Gomega) {
-				g.Expect(runningEnginePodsOn(g, m.c, env.isvcNS, env.isvcName)).
-					To(gomega.Equal(1))
-			}).WithTimeout(longTimeout).WithPolling(pollInterval).Should(gomega.Succeed(),
-				"%s should be running exactly its share", m.wcName)
-		}
-
-		// Capture what the survivor is already running. A re-shard must ADD to it,
-		// never restart it: recreating a serving replica to rebalance would be an
-		// outage the user never asked for.
-		incumbent := enginePodsOn(gomega.Default, survivor.c, env.isvcNS, env.isvcName)
-		gomega.Expect(incumbent).To(gomega.HaveLen(1))
-		incumbentUID := incumbent[0].UID
-
-		ginkgo.By("disconnecting the other home")
+		incumbent := enginePodsOn(gomega.Default, survivor.c, env.isvcNS, env.isvcName)[0].UID
+		planID := placementStatusOf(env.isvcNS, env.isvcName).Plan.ID
 		env.disconnectMember(lost)
 		ginkgo.DeferCleanup(func() { env.reconnectMember(lost) })
-
-		ginkgo.By("asserting the survivor takes over the full desired count")
-		gomega.Eventually(func(g gomega.Gomega) {
-			g.Expect(runningEnginePodsOn(g, survivor.c, env.isvcNS, env.isvcName)).
-				To(gomega.Equal(desired))
-		}).WithTimeout(longTimeout).WithPolling(pollInterval).Should(gomega.Succeed(),
-			"%s should absorb the lost home's share", survivor.wcName)
-
-		ginkgo.By("asserting the replica it was already serving was never restarted")
-		var found bool
-		for _, p := range enginePodsOn(gomega.Default, survivor.c, env.isvcNS, env.isvcName) {
-			if p.UID == incumbentUID {
-				found = true
+		assertStable := func(g gomega.Gomega) {
+			g.Expect(runningEnginePodsOn(g, survivor.c, env.isvcNS, env.isvcName)).To(gomega.Equal(1))
+			pods := enginePodsOn(g, survivor.c, env.isvcNS, env.isvcName)
+			g.Expect(pods).To(gomega.HaveLen(1))
+			g.Expect(cmp.Diff(incumbent, pods[0].UID)).To(gomega.BeEmpty())
+			ps := placementStatusOf(env.isvcNS, env.isvcName)
+			g.Expect(ps).NotTo(gomega.BeNil())
+			g.Expect(ps.Plan).NotTo(gomega.BeNil())
+			g.Expect(cmp.Diff(planID, ps.Plan.ID)).To(gomega.BeEmpty())
+			shares := map[string]int32{}
+			for _, candidate := range ps.Candidates {
+				g.Expect(candidate.Allocation).NotTo(gomega.BeNil())
+				shares[candidate.Cluster] = candidate.Allocation.DesiredReplicas
 			}
+			g.Expect(cmp.Diff(map[string]int32{survivor.wcName: 1, lost.wcName: 1}, shares)).To(gomega.BeEmpty())
 		}
-		gomega.Expect(found).To(gomega.BeTrue(),
-			"the incumbent replica must survive the re-shard — topping up is additive")
-	})
-
-	ginkgo.It("rebalances back onto a home that returns, and then holds steady", func() {
-		const desired = 2
-
-		model, runtime := env.seedModelRuntimeOnMembers()
-		env.createSplitSource(model, runtime, desired)
-
-		survivor, returning := env.members[0], env.members[1]
-
-		for _, m := range env.members {
+		gomega.Consistently(assertStable).WithTimeout(10 * time.Second).WithPolling(time.Second).Should(gomega.Succeed())
+		if reconnect {
+			env.reconnectMember(lost)
 			gomega.Eventually(func(g gomega.Gomega) {
-				g.Expect(runningEnginePodsOn(g, m.c, env.isvcNS, env.isvcName)).
-					To(gomega.Equal(1))
+				assertStable(g)
+				g.Expect(runningEnginePodsOn(g, lost.c, env.isvcNS, env.isvcName)).To(gomega.Equal(1))
 			}).WithTimeout(longTimeout).WithPolling(pollInterval).Should(gomega.Succeed())
 		}
-
-		ginkgo.By("losing a home, then bringing it back")
-		env.disconnectMember(returning)
-		gomega.Eventually(func(g gomega.Gomega) {
-			g.Expect(runningEnginePodsOn(g, survivor.c, env.isvcNS, env.isvcName)).
-				To(gomega.Equal(desired))
-		}).WithTimeout(longTimeout).WithPolling(pollInterval).Should(gomega.Succeed())
-		env.reconnectMember(returning)
-
-		ginkgo.By("asserting the spread is restored across both homes")
-		for _, m := range env.members {
-			gomega.Eventually(func(g gomega.Gomega) {
-				g.Expect(runningEnginePodsOn(g, m.c, env.isvcNS, env.isvcName)).
-					To(gomega.Equal(1))
-			}).WithTimeout(longTimeout).WithPolling(pollInterval).Should(gomega.Succeed(),
-				"%s should be back to its even share", m.wcName)
-		}
-
-		// Convergence is only useful if it settles. An apportionment that keeps
-		// re-deciding would churn pods forever.
-		ginkgo.By("asserting the distribution then stays put")
-		gomega.Consistently(func(g gomega.Gomega) {
-			g.Expect([]int{
-				runningEnginePodsOn(g, env.members[0].c, env.isvcNS, env.isvcName),
-				runningEnginePodsOn(g, env.members[1].c, env.isvcNS, env.isvcName),
-			}).To(gomega.Equal([]int{1, 1}))
-		}).WithTimeout(15*time.Second).WithPolling(time.Second).Should(gomega.Succeed(),
-			"the re-shard must converge, not oscillate")
-	})
+	},
+		ginkgo.Entry("unreachable home retains its share", false),
+		ginkgo.Entry("returning home keeps the same allocation", true),
+	)
 
 	ginkgo.It("does not move the placement when the winner's pod is replaced", func() {
 		model, runtime := env.seedModelRuntimeOnMembers()
@@ -187,5 +153,86 @@ var _ = ginkgo.Describe("Multi-cluster re-shard and failure (KIND)", func() {
 			g.Expect(ps.Cluster).To(gomega.Equal(failedOn))
 		}).WithTimeout(20*time.Second).WithPolling(2*time.Second).Should(gomega.Succeed(),
 			"a terminally failed placement must not re-place into a fail loop")
+	})
+})
+
+var _ = ginkgo.Describe("Placement move with route publication (KIND)", func() {
+	ginkgo.It("serves the replacement before retiring the original home", func() {
+		env := setupSpecEnv()
+		gomega.Expect(kindutil.ApplyCRDs(controlCluster.ctx, controlCluster.cfg, []string{"tests/integration/dep-crds/gateway-api"})).To(gomega.Succeed())
+		scheme := kindutil.BaseScheme()
+		gomega.Expect(gatewayapiv1.Install(scheme)).To(gomega.Succeed())
+		cl, err := client.New(controlCluster.cfg, client.Options{Scheme: scheme})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		routing := &placementrouting.Reconciler{Client: cl, APIReader: cl, Log: logr.Discard(), Config: placementrouting.Config{Enabled: true}}
+		publisher := &placementendpoint.TrafficMapPublisherReconciler{
+			Client: cl, APIReader: cl, Log: logr.Discard(), Active: true,
+			Publisher: placementendpoint.NewGatewayAPITrafficMapPublisher(cl, cl, placementendpoint.Config{
+				GlobalHostTemplate: "{{.Name}}.{{.Namespace}}.example.com", GlobalGateway: env.isvcNS + "/gateway", BackendPort: 443,
+			}),
+		}
+		key := client.ObjectKey{Namespace: env.isvcNS, Name: env.isvcName}
+		publish := func(g gomega.Gomega) {
+			_, err := routing.Reconcile(controlCluster.ctx, ctrl.Request{NamespacedName: key})
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			_, err = publisher.Reconcile(controlCluster.ctx, ctrl.Request{NamespacedName: key})
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+		}
+		model, runtime := env.seedModelRuntimeOnMembers()
+		source := env.createSplitSource(model, runtime, 1)
+		ginkgo.DeferCleanup(func() {
+			tm := &v1beta1.TrafficMap{}
+			if err := cl.Get(controlCluster.ctx, key, tm); apierrors.IsNotFound(err) {
+				return
+			} else {
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			}
+			gomega.Expect(cl.Delete(controlCluster.ctx, tm)).To(gomega.Succeed())
+			gomega.Eventually(func(g gomega.Gomega) {
+				_, err := publisher.Reconcile(controlCluster.ctx, ctrl.Request{NamespacedName: key})
+				g.Expect(err).NotTo(gomega.HaveOccurred())
+				g.Expect(apierrors.IsNotFound(cl.Get(controlCluster.ctx, key, &v1beta1.TrafficMap{}))).To(gomega.BeTrue())
+			}).WithTimeout(longTimeout).WithPolling(pollInterval).Should(gomega.Succeed())
+		})
+		first := env.preferredMember()
+		replacement := env.other(first)
+		gomega.Eventually(func(g gomega.Gomega) {
+			publish(g)
+			g.Expect(runningEnginePodsOn(g, first.c, env.isvcNS, env.isvcName)).To(gomega.Equal(1))
+			g.Expect(cl.Get(controlCluster.ctx, key, source)).To(gomega.Succeed())
+			candidate := candidateFor(source.Status.Placement, first.wcName)
+			g.Expect(candidate).NotTo(gomega.BeNil())
+			g.Expect(candidate.ReadyReplicas).To(gomega.Equal(int32(1)))
+			g.Expect(source.Status.Placement.Plan.PauseSurge).To(gomega.BeFalse())
+		}).WithTimeout(longTimeout).WithPolling(pollInterval).Should(gomega.Succeed())
+
+		gomega.Eventually(func(g gomega.Gomega) {
+			g.Expect(cl.Get(controlCluster.ctx, key, source)).To(gomega.Succeed())
+			source.Spec.Placement.MaxSurge = ptr.To[int32](1)
+			source.Spec.Placement.ClusterAffinity = []v1beta1.ClusterAffinityTerm{{MatchFields: []v1beta1.ClusterSelectorRequirement{{Key: "metadata.name", Operator: corev1.NodeSelectorOpIn, Values: []string{replacement.wcName}}}}}
+			g.Expect(cl.Update(controlCluster.ctx, source)).To(gomega.Succeed())
+		}).WithTimeout(mediumTimeout).WithPolling(pollInterval).Should(gomega.Succeed())
+		maxOccupied, lostCoverage := 0, false
+		gomega.Eventually(func(g gomega.Gomega) {
+			publish(g)
+			oldPods := enginePodsOn(g, first.c, env.isvcNS, env.isvcName)
+			newPods := enginePodsOn(g, replacement.c, env.isvcNS, env.isvcName)
+			maxOccupied = max(maxOccupied, len(oldPods)+len(newPods))
+			newReady := 0
+			for _, pod := range newPods {
+				for _, condition := range pod.Status.Conditions {
+					if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
+						newReady++
+					}
+				}
+			}
+			lostCoverage = lostCoverage || len(oldPods) == 0 && newReady == 0
+			g.Expect(newReady).To(gomega.Equal(1))
+			g.Expect(oldPods).To(gomega.BeEmpty())
+			g.Expect(cl.Get(controlCluster.ctx, key, source)).To(gomega.Succeed())
+			g.Expect(source.Status.Placement.Plan.PauseSurge).To(gomega.BeFalse())
+		}).WithTimeout(longTimeout).WithPolling(pollInterval).Should(gomega.Succeed())
+		gomega.Expect(maxOccupied).To(gomega.BeNumerically("<=", 2), "one shared surge replica")
+		gomega.Expect(cmp.Diff(false, lostCoverage)).To(gomega.BeEmpty(), "original home must survive until its replacement is ready")
 	})
 })

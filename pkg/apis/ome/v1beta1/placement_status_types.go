@@ -5,6 +5,18 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
+// PlacementInputValid reports whether source placement intent can be evaluated.
+// Serving readiness is independent of this condition.
+const PlacementInputValid = "PlacementInputValid"
+
+// PlacementSatisfied reports whether every assigned floor is admitted and no
+// requested floor remains unassigned. Serving readiness is independent.
+const PlacementSatisfied = "PlacementSatisfied"
+
+// PlacementConverged reports whether member execution has reached the accepted
+// allocation. It does not imply admission or serving readiness.
+const PlacementConverged = "PlacementConverged"
+
 // PlacementPlanStatus identifies the allocation persisted before member writes.
 // Original assignments remain fixed throughout a transition, including retargets.
 type PlacementPlanStatus struct {

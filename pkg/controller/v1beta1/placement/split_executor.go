@@ -1,0 +1,325 @@
+package placement
+
+import (
+	"context"
+	"fmt"
+	"maps"
+	"math"
+	"slices"
+
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"knative.dev/pkg/apis"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/placement/allocation"
+	"github.com/ome-projects/ome/pkg/placement/plan"
+)
+
+// reconcileSplit persists each allocation before granting member authority.
+// Readiness gates execution while the full affinity match determines shares.
+func (r *Reconciler) reconcileSplit(ctx context.Context, source *v1beta1.InferenceService, clusters []v1beta1.WorkloadCluster, eligible []string, standing *placementObservations) (ctrl.Result, error) {
+	proposal, err := desiredSplitPlan(source, clusters, nil)
+	if err != nil {
+		return r.writeSplitHold(ctx, source, standing, "AllocationUnresolved", err)
+	}
+	if source.Status.Placement == nil || source.Status.Placement.Plan == nil {
+		if err := r.adoptSplitMembers(ctx, source, clusters, &proposal); err != nil {
+			return r.writeSplitHold(ctx, source, standing, "ObservationUnknown", err)
+		}
+	}
+	proposal.PauseSurge = splitPauseRequired(source, proposal)
+	store := plan.Store{Client: r.Client, Reader: r.APIReader}
+	accepted, err := store.Persist(ctx, source, proposal)
+	if err != nil {
+		return r.writeSplitHold(ctx, source, standing, "PlanNotPersisted", err)
+	}
+	observations := r.observeSplitMembers(ctx, accepted, eligible)
+	step, err := advanceSplitPlan(accepted, observations)
+	if err != nil {
+		return r.writeSplitObservations(ctx, accepted, observations, "ObservationUnknown", err.Error())
+	}
+	for name, target := range step.Targets {
+		assignment := proposal.Assignments[name]
+		assignment.CurrentReplicas = target
+		if slices.Contains(step.Drain, name) {
+			assignment.DrainRequested = true
+		}
+		if slices.Contains(step.Resume, name) {
+			assignment.DrainRequested = false
+		}
+		proposal.Assignments[name] = assignment
+	}
+	if step.Complete {
+		proposal.PauseSurge = false
+		proposal.OriginalUnassignedReplicas = proposal.UnassignedReplicas
+		for name, assignment := range proposal.Assignments {
+			assignment.OriginalReplicas = assignment.CurrentReplicas
+			if assignment.CurrentReplicas == 0 && observations[name].Home.Absent {
+				assignment.DrainRequested = false
+			}
+			proposal.Assignments[name] = assignment
+		}
+	}
+	next, err := store.Persist(ctx, accepted, proposal)
+	if err != nil {
+		return r.writeSplitObservations(ctx, accepted, observations, "PlanNotPersisted", err.Error())
+	}
+	// A drain proof belongs to the exact published plan. A revision change
+	// invalidates it, even when the next plan retains the same zero floor.
+	changed := next.Status.Placement.Plan.ID != accepted.Status.Placement.Plan.ID
+	for _, candidate := range next.Status.Placement.Candidates {
+		observed := observations[candidate.Cluster]
+		assignment := candidate.Allocation
+		if !observed.Candidate.ObservationKnown || (observed.Member != nil && !observed.Member.DeletionTimestamp.IsZero()) {
+			continue
+		}
+		cctx, cancel := context.WithTimeout(ctx, r.placeTimeout())
+		switch {
+		case assignment.CurrentReplicas > 0 && observed.Home.Eligible:
+			err = r.placePlannedOn(cctx, next, candidate)
+		case assignment.CurrentReplicas == 0 && assignment.DrainRequested && observed.Home.Drained && !changed:
+			err = r.deletePlannedOn(cctx, next, candidate, true)
+		case observed.Member != nil:
+			err = r.syncPlannedPolicy(cctx, next, candidate)
+		default:
+			err = nil
+		}
+		cancel()
+		if err != nil {
+			if apierrors.IsConflict(err) {
+				if step.Reason != "MemberApplicationFailed" {
+					step.Reason = "MemberApplicationPending"
+				}
+				r.Log.V(1).Info("planned member application conflicted; retrying", "cluster", candidate.Cluster)
+			} else {
+				step.Reason = "MemberApplicationFailed"
+				r.Log.Error(err, "planned member application failed", "cluster", candidate.Cluster)
+			}
+		}
+	}
+	return r.writeSplitObservations(ctx, next, observations, step.Reason, "")
+}
+
+func splitPauseRequired(source *v1beta1.InferenceService, proposal plan.Proposal) bool {
+	grow, shrink, drain := false, false, false
+	for _, assignment := range proposal.Assignments {
+		grow = grow || assignment.DesiredReplicas > assignment.CurrentReplicas
+		shrink = shrink || assignment.DesiredReplicas < assignment.CurrentReplicas
+		drain = drain || assignment.DrainRequested
+	}
+	active := source.Status.Placement != nil && source.Status.Placement.Plan != nil && source.Status.Placement.Plan.PauseSurge
+	// An unconfigured move cannot begin. Leave member rollouts and scaling
+	// available unless an accepted transition already owns their allowance.
+	if source.Spec.Placement.MaxSurge == nil && grow && shrink && !active {
+		return false
+	}
+	return proposal.PauseSurge || grow || shrink || drain
+}
+
+// adoptSplitMembers inventories standing copies before an allocation exists.
+// Unassigned original floor protects serving replicas without treating pending
+// fan-out requests as extra migration budget.
+func (r *Reconciler) adoptSplitMembers(ctx context.Context, source *v1beta1.InferenceService, clusters []v1beta1.WorkloadCluster, proposal *plan.Proposal) error {
+	readSource := source.DeepCopy()
+	readSource.Status.Placement = &v1beta1.PlacementStatus{Plan: &v1beta1.PlacementPlanStatus{SourceUID: source.UID}}
+	registered := map[string]v1beta1.WorkloadCluster{}
+	for _, cluster := range clusters {
+		registered[cluster.Name] = cluster
+	}
+	for _, previous := range standingPlacementCandidates(source) {
+		if _, exists := registered[previous.Cluster]; !exists {
+			return fmt.Errorf("standing cluster %q registration cannot be verified", previous.Cluster)
+		}
+	}
+	// Member writes can survive a failed first status write. Inventory every
+	// registration before adopting authority, including currently unmatched homes.
+	inventory := maps.Clone(proposal.Assignments)
+	for _, cluster := range clusters {
+		if _, exists := inventory[cluster.Name]; !exists {
+			inventory[cluster.Name] = v1beta1.CandidateAllocationStatus{ClusterUID: cluster.UID}
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(inventory)) {
+		assignment := inventory[name]
+		candidate := v1beta1.CandidatePlacement{Cluster: name, Allocation: &assignment}
+		cctx, cancel := context.WithTimeout(ctx, r.placeTimeout())
+		observed, err := r.observePlannedHome(cctx, readSource, candidate, declaredComponents(source))
+		cancel()
+		if err != nil {
+			return fmt.Errorf("cluster %q: %w", name, err)
+		}
+		if _, tracked := proposal.Assignments[name]; observed.Home.Absent && !tracked {
+			continue
+		}
+		if !observed.Home.Absent {
+			floor, err := adoptedMemberFloor(observed.Member)
+			if err != nil {
+				return fmt.Errorf("cluster %q: %w", name, err)
+			}
+			assignment.CurrentReplicas = floor
+			proposal.PauseSurge = true
+		}
+		proposal.Assignments[name] = assignment
+	}
+	proposal.OriginalUnassignedReplicas = splitDesiredReplicas(source)
+	return nil
+}
+
+func adoptedMemberFloor(member *v1beta1.InferenceService) (int32, error) {
+	if member == nil {
+		return 0, fmt.Errorf("remaining member resources have no verifiable service floor")
+	}
+	var floors []*int
+	if member.Spec.Engine != nil {
+		floors = append(floors, member.Spec.Engine.MinReplicas)
+	}
+	if member.Spec.Decoder != nil {
+		floors = append(floors, member.Spec.Decoder.MinReplicas)
+	}
+	var floor int32
+	for i, value := range floors {
+		if value == nil || *value < 0 || int64(*value) > math.MaxInt32 {
+			return 0, fmt.Errorf("standing component floor is unresolved")
+		}
+		if i > 0 && floor != int32(*value) {
+			return 0, fmt.Errorf("standing engine and decoder floors must use whole replica units")
+		}
+		floor = int32(*value)
+	}
+	if len(floors) == 0 {
+		return 0, fmt.Errorf("standing service has no scalable component")
+	}
+	return floor, nil
+}
+
+func (r *Reconciler) observeSplitMembers(ctx context.Context, source *v1beta1.InferenceService, eligible []string) map[string]plannedHomeObservation {
+	trafficMap := &v1beta1.TrafficMap{}
+	if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(source), trafficMap); err != nil {
+		trafficMap = nil
+	}
+	out := map[string]plannedHomeObservation{}
+	settled := true
+	for _, candidate := range source.Status.Placement.Candidates {
+		settled = settled && candidate.Allocation.CurrentReplicas == candidate.Allocation.DesiredReplicas
+	}
+	for _, candidate := range source.Status.Placement.Candidates {
+		cctx, cancel := context.WithTimeout(ctx, r.placeTimeout())
+		observed, err := r.observePlannedHome(cctx, source, candidate, declaredComponents(source))
+		cancel()
+		if err != nil {
+			r.Log.Error(err, "planned member observation failed", "cluster", candidate.Cluster)
+		}
+		observed.Home.Eligible = slices.Contains(eligible, candidate.Cluster)
+		known, routable, drained := plannedTrafficEvidence(source, trafficMap, observed.Candidate)
+		observed.Home.Routable, observed.Home.Drained = routable, drained
+		// Settled positive floors can release their pause without routing. Any
+		// movement or zero-floor cleanup requires verified publication because
+		// unknown traffic cannot prove that a serving home is safe to retire.
+		if !known && !observed.Home.Absent && (!settled || candidate.Allocation.CurrentReplicas == 0) {
+			observed.Home.Known = false
+		}
+		out[candidate.Cluster] = observed
+	}
+	return out
+}
+
+func advanceSplitPlan(source *v1beta1.InferenceService, observations map[string]plannedHomeObservation) (allocation.Step, error) {
+	accepted := source.Status.Placement.Plan
+	input := allocation.Transition{
+		From:    allocation.Plan{Targets: map[string]int32{}, Unassigned: accepted.OriginalUnassignedReplicas},
+		Current: map[string]int32{}, Desired: allocation.Plan{Targets: map[string]int32{}, Unassigned: accepted.UnassignedReplicas},
+		Homes: map[string]allocation.Home{}, MaxSurge: source.Spec.Placement.MaxSurge,
+	}
+	var reserved, occupied int64
+	pauseAcknowledged := true
+	for _, candidate := range source.Status.Placement.Candidates {
+		assignment, observed := candidate.Allocation, observations[candidate.Cluster]
+		input.From.Targets[candidate.Cluster] = assignment.OriginalReplicas
+		input.Current[candidate.Cluster] = assignment.CurrentReplicas
+		input.Desired.Targets[candidate.Cluster] = assignment.DesiredReplicas
+		input.Homes[candidate.Cluster] = observed.Home
+		reserved += int64(observed.RolloutReserved)
+		occupied += int64(observed.Home.Occupied)
+		if !observed.Home.Absent && !observed.PauseAcknowledged {
+			pauseAcknowledged = false
+		}
+	}
+	if reserved > math.MaxInt32 {
+		return allocation.Step{}, fmt.Errorf("rollout reservations exceed supported replica count")
+	}
+	input.RolloutReserved = int32(reserved)
+	if accepted.PauseSurge && !pauseAcknowledged {
+		return allocation.Step{Targets: input.Current, Reason: "AwaitingSurgePause"}, nil
+	}
+	step, err := allocation.Advance(input)
+	if step.Complete && accepted.PauseSurge && occupied+reserved > accepted.AssignedReplicas {
+		step.Complete = false
+		step.Reason = "AwaitingMemberCleanup"
+	}
+	return step, err
+}
+
+func (r *Reconciler) writeSplitObservations(ctx context.Context, source *v1beta1.InferenceService, observations map[string]plannedHomeObservation, reason, message string) (ctrl.Result, error) {
+	res := placementResult{phase: v1beta1.PlacementPhasePending, conditions: []policyCondition{splitProgressCondition(reason, message)}}
+	for _, previous := range source.Status.Placement.Candidates {
+		observed := observations[previous.Cluster]
+		candidate := observed.Candidate
+		if candidate.Cluster == "" {
+			candidate = retainedUnknownCandidate(source, previous)
+		}
+		res.candidates = append(res.candidates, candidate)
+		if previous.Allocation.CurrentReplicas > 0 && res.phase == v1beta1.PlacementPhasePending {
+			res.phase = v1beta1.PlacementPhaseAdmitting
+		}
+		if candidate.AdmittedReplicas > 0 {
+			res.phase = v1beta1.PlacementPhasePlaced
+		}
+		res.ready = res.ready || (candidate.ObservationKnown && candidate.ReadyReplicas > 0 && candidate.Endpoint != nil)
+		res.readinessUnknown = res.readinessUnknown || !candidate.ObservationKnown
+	}
+	res.readinessUnknown = res.readinessUnknown && !res.ready
+	result, err := r.writePlacement(ctx, source, res)
+	if reason != "" {
+		result.RequeueAfter = r.requeue()
+	}
+	return result, err
+}
+
+func (r *Reconciler) writeSplitHold(ctx context.Context, source *v1beta1.InferenceService, standing *placementObservations, reason string, cause error) (ctrl.Result, error) {
+	res := placementResult{phase: v1beta1.PlacementPhasePending, conditions: []policyCondition{splitProgressCondition(reason, cause.Error())}}
+	for _, name := range standing.projectedStanding() {
+		home := standing.homes[name]
+		if home.state == homeAbsent {
+			continue
+		}
+		res.candidates = append(res.candidates, home.candidate)
+		res.ready = res.ready || home.serving
+		res.readinessUnknown = res.readinessUnknown || home.state == homeUnknown
+		if home.candidate.AdmittedReplicas > 0 {
+			res.phase = v1beta1.PlacementPhasePlaced
+		} else if res.phase == v1beta1.PlacementPhasePending {
+			res.phase = v1beta1.PlacementPhaseAdmitting
+		}
+	}
+	res.readinessUnknown = res.readinessUnknown && !res.ready
+	result, err := r.writePlacement(ctx, source, res)
+	result.RequeueAfter = r.requeue()
+	return result, err
+}
+
+func splitProgressCondition(reason, message string) policyCondition {
+	condition := policyCondition{condType: apis.ConditionType(v1beta1.PlacementConverged), cond: apis.Condition{
+		Status: corev1.ConditionFalse, Reason: reason, Message: message,
+	}}
+	if reason == "" {
+		condition.cond.Status = corev1.ConditionTrue
+		condition.cond.Reason = "AllocationConverged"
+		condition.cond.Message = "Members have applied the accepted allocation"
+	} else if message == "" {
+		condition.cond.Message = "Waiting for member execution and routing to converge on the accepted allocation"
+	}
+	return condition
+}

@@ -472,7 +472,6 @@ func runnableSourceISVC(ns, name, runtime, accelReq, queue string, withDecoder b
 	w := ometesting.MakeInferenceService(name, ns).
 		Runtime(runtime).
 		DeploymentMode(constants.OMENative).
-		Annotation(placement.AcceleratorRequirementsAnnotation, accelReq).
 		Annotation(placement.LocalQueueAnnotation, queue).
 		Engine(&v1beta1.EngineSpec{
 			ComponentExtensionSpec: component(),
@@ -484,5 +483,7 @@ func runnableSourceISVC(ns, name, runtime, accelReq, queue string, withDecoder b
 			PodSpec:                podSpec(),
 		})
 	}
-	return w.Obj()
+	result := w.Obj()
+	result.Spec.Placement = &v1beta1.PlacementSpec{Mode: v1beta1.PlacementModeSingle, ClusterAffinity: affinityForRequirement(accelReq)}
+	return result
 }

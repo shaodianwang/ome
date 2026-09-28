@@ -80,8 +80,8 @@ var _ = ginkgo.Describe("TrafficMap status ownership", func() {
 
 		name := uniqueName("svc")
 		isvc := createISVC(namespace, name, &v1beta1.PlacementSpec{
-			Mode:         v1beta1.PlacementModeSingle,
-			Requirements: "accelerator=test",
+			Mode:            v1beta1.PlacementModeSingle,
+			ClusterAffinity: routingTestAffinity(),
 		})
 		placeISVC(isvc, candidate("cluster-a", "cluster-a.example.com", 1, 1))
 
@@ -238,8 +238,8 @@ var _ = ginkgo.Describe("TrafficMap status ownership", func() {
 
 		name := uniqueName("svc")
 		isvc := createISVC(namespace, name, &v1beta1.PlacementSpec{
-			Mode:         v1beta1.PlacementModeSingle,
-			Requirements: "accelerator=test",
+			Mode:            v1beta1.PlacementModeSingle,
+			ClusterAffinity: routingTestAffinity(),
 		})
 		placeISVC(isvc, candidate("cluster-a", "cluster-a.example.com", 1, 1))
 		key := types.NamespacedName{Namespace: namespace, Name: name}

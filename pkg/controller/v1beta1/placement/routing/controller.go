@@ -29,6 +29,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	placementcontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/placement"
+	"github.com/ome-projects/ome/pkg/placement/plan"
 	"github.com/ome-projects/ome/pkg/trafficdrain"
 	"github.com/ome-projects/ome/pkg/validation"
 )
@@ -95,6 +96,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return reapResult(r.reap(ctx, isvc))
 	}
 
+	if err := validation.ValidatePlacementIntent(isvc); err != nil {
+		return ctrl.Result{}, fmt.Errorf("validate placement intent: %w", err)
+	}
 	if err := validation.ValidateRouting(&isvc.Spec); err != nil {
 		return ctrl.Result{}, fmt.Errorf("validate routing policy: %w", err)
 	}
@@ -271,6 +275,18 @@ func (r *Reconciler) apply(ctx context.Context, isvc *v1beta1.InferenceService, 
 		tm := &v1beta1.TrafficMap{ObjectMeta: metav1.ObjectMeta{Name: isvc.Name, Namespace: isvc.Namespace}}
 		var err error
 		op, err = controllerutil.CreateOrUpdate(ctx, r.Client, tm, func() error {
+			if spec.PlacementPlanID != "" {
+				if r.APIReader == nil {
+					return fmt.Errorf("planned routing requires a direct source reader")
+				}
+				live := &v1beta1.InferenceService{}
+				if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(isvc), live); err != nil {
+					return err
+				}
+				if !plan.SameSnapshot(isvc, live) {
+					return plan.ErrStaleSnapshot
+				}
+			}
 			if (tm.UID != "" || tm.ResourceVersion != "") &&
 				!placementcontroller.TrafficMapHasExactController(tm, isvc) {
 				return fmt.Errorf("TrafficMap %s exists but is not controlled by InferenceService UID %q",
@@ -586,6 +602,9 @@ func buildSpec(
 		ObservedISVCGeneration: isvc.Generation,
 	}
 	pl := isvc.Status.Placement
+	if pl != nil && pl.Plan != nil {
+		empty.PlacementPlanID = pl.Plan.ID
+	}
 	if pl == nil || pl.Phase != v1beta1.PlacementPhasePlaced {
 		return empty, metav1.ConditionFalse, v1beta1.TrafficMapReasonNotPlaced
 	}
@@ -638,6 +657,9 @@ func buildSpec(
 			},
 			Probe: probe.Provenance(targets[i]),
 		}
+		if pl.Plan != nil && c.Allocation != nil && c.Allocation.DrainRequested {
+			entries[i].Weight = 0
+		}
 	}
 	manualDrainCausedAllZero := applyTrafficDrains(entries, overrides)
 	hasPositiveWeight := slices.ContainsFunc(entries, func(e v1beta1.TrafficMapEntry) bool { return e.Weight > 0 })
@@ -659,6 +681,7 @@ func buildSpec(
 		reason = v1beta1.TrafficMapReasonAllHomesProbeFailed
 	}
 	return v1beta1.TrafficMapSpec{
+		PlacementPlanID:        empty.PlacementPlanID,
 		Service:                isvc.Name,
 		Mode:                   placementMode(isvc),
 		Entries:                entries,
@@ -747,34 +770,17 @@ func servingCandidates(isvc *v1beta1.InferenceService) []*v1beta1.CandidatePlace
 			cs = append(cs, c)
 		}
 	}
-	// Annotation-based Single placement can carry only its top-level winner and
-	// endpoint. Treat it as one serving candidate.
-	if len(cs) == 0 && placementMode(isvc) == v1beta1.PlacementModeSingle &&
-		pl.Cluster != "" && pl.Endpoint != nil && pl.Endpoint.Host != "" {
-		cs = append(cs, &v1beta1.CandidatePlacement{
-			Cluster:          pl.Cluster,
-			Phase:            v1beta1.CandidatePhaseAdmitted,
-			Endpoint:         pl.Endpoint.DeepCopy(),
-			AdmittedReplicas: 1,
-			ReadyReplicas:    1,
-		})
-	}
 	sort.Slice(cs, func(i, j int) bool { return cs[i].Cluster < cs[j].Cluster })
 	return cs
 }
 
 // capacityFactor returns the per-replica relative serving capacity the ISVC
-// declares for a workload cluster, or nil when none is set. spec.routing is
-// canonical; the placement field is a compatibility alias used only when the
-// routing map is absent. Nil is the identity factor 1.0 — the weight computation
-// treats a nil or non-positive factor as 1.
+// declares in spec.routing for a workload cluster, or nil when none is set.
+// Nil is the multiplicative identity in the weight computation.
 func capacityFactor(isvc *v1beta1.InferenceService, cluster string) *resource.Quantity {
 	var factors map[string]resource.Quantity
 	if isvc.Spec.Routing != nil && isvc.Spec.Routing.CapacityFactors != nil {
 		factors = isvc.Spec.Routing.CapacityFactors
-	} else if isvc.Spec.Placement != nil {
-		//nolint:staticcheck // compatibility read for deprecated spec.placement.capacityFactors
-		factors = isvc.Spec.Placement.CapacityFactors
 	}
 	if factors == nil {
 		return nil
@@ -786,11 +792,10 @@ func capacityFactor(isvc *v1beta1.InferenceService, cluster string) *resource.Qu
 	return nil
 }
 
-// placementMode returns the ISVC's declared placement mode, defaulting legacy
-// annotation-based placement to Single.
+// placementMode returns only explicitly declared intent.
 func placementMode(isvc *v1beta1.InferenceService) v1beta1.PlacementMode {
 	if isvc.Spec.Placement == nil {
-		return v1beta1.PlacementModeSingle
+		return ""
 	}
 	return isvc.Spec.Placement.Mode
 }

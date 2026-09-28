@@ -5,8 +5,10 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
@@ -246,4 +248,91 @@ func plannedTestRegistration() *v1beta1.WorkloadCluster {
 	registration := readyWC("member-a", nil)
 	registration.UID = "member-a-uid"
 	return registration
+}
+
+func TestPlannedPolicyPreservesMemberSpec(t *testing.T) {
+	for _, tt := range []struct {
+		name                             string
+		editSource                       func(*v1beta1.InferenceService)
+		editMember                       func(*v1beta1.InferenceService)
+		stale, absent, detached, wantErr bool
+	}{
+		{name: "pause changes only authority"},
+		{name: "absent member is not created", absent: true},
+		{name: "release retains member spec", editSource: func(s *v1beta1.InferenceService) { s.Status.Placement.Plan.PauseSurge = false }},
+		{name: "source changed before pause", stale: true, wantErr: true},
+		{name: "detached assignment cannot pause", detached: true, wantErr: true},
+		{name: "local member is untouched", editMember: func(s *v1beta1.InferenceService) { s.Labels, s.Annotations = nil, nil }, wantErr: true},
+		{name: "malformed policy is retained", editMember: func(s *v1beta1.InferenceService) { s.Annotations[constants.PlacementExecution] = "invalid" }, wantErr: true},
+		{name: "newer member policy is retained", editMember: func(s *v1beta1.InferenceService) {
+			raw, _ := protocol.Encode(&v1beta1.PlacementExecutionPolicy{PlanID: "newer", Revision: 3, SourceUID: "uid-1", ClusterUID: "member-a-uid", PauseSurge: true})
+			s.Annotations[constants.PlacementExecution] = raw
+		}, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			source := plannedTestSource()
+			source.Status.Placement.Plan.PauseSurge = true
+			if tt.editSource != nil {
+				tt.editSource(source)
+			}
+			member := DeriveISVC(source, "", "")
+			member.UID = "member-uid"
+			member.Spec.Engine.MinReplicas = ptr.To(7)
+			member.Spec.Engine.MaxReplicas = 9
+			member.Annotations["example.com/member-metadata"] = "retained"
+			if tt.editMember != nil {
+				tt.editMember(member)
+			}
+			worker := emptyWorker(testScheme(t))
+			if !tt.absent {
+				if err := worker.Create(t.Context(), member); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := member.DeepCopy()
+			live := source.DeepCopy()
+			if tt.stale {
+				live.Generation++
+			}
+			connections := identifiedTestClusters{fakeClusters: fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{"member-a": workloadcluster.NewNeverCachingClient(worker)}}, uid: "member-a-uid"}
+			r, _ := newPlacer(testScheme(t), connections, live, plannedTestRegistration())
+			candidate := *source.Status.Placement.Candidates[0].DeepCopy()
+			if tt.detached {
+				candidate.Allocation.CurrentReplicas++
+			}
+			err := r.syncPlannedPolicy(t.Context(), source, candidate)
+			if diff := cmp.Diff(tt.wantErr, err != nil); diff != "" {
+				t.Fatalf("%s: %v", diff, err)
+			}
+			got := &v1beta1.InferenceService{}
+			err = worker.Get(t.Context(), client.ObjectKeyFromObject(member), got)
+			if tt.absent {
+				if !apierrors.IsNotFound(err) {
+					t.Fatalf("absence changed: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.wantErr {
+				if diff := cmp.Diff(before, got); diff != "" {
+					t.Error(diff)
+				}
+				return
+			}
+			policy, err := protocol.FromDerived(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if diff := cmp.Diff(executionPolicy(source, candidate.Allocation), policy); diff != "" {
+				t.Error(diff)
+			}
+			got.ResourceVersion = before.ResourceVersion
+			delete(got.Annotations, constants.PlacementExecution)
+			if diff := cmp.Diff(before, got); diff != "" {
+				t.Errorf("pause changed member content (-want +got):\n%s", diff)
+			}
+		})
+	}
 }

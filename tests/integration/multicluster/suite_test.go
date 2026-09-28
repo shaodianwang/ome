@@ -195,11 +195,11 @@ func createCluster(withKueue, withGatewayAPI bool) cluster {
 	c := cluster{fwk: newFramework(withKueue, withGatewayAPI)}
 
 	schemeMu.Lock()
+	defer schemeMu.Unlock()
 	cfg, err := c.fwk.Init()
 	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "framework.Init")
 	ctx, cl, err := c.fwk.SetupClient(cfg)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "framework.SetupClient")
-	schemeMu.Unlock()
 
 	c.cfg = cfg
 	c.ctx = ctx

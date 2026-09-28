@@ -50,11 +50,12 @@ func newPlacementObservations(isvc *v1beta1.InferenceService, clusters []v1beta1
 		previous: make(map[string]v1beta1.CandidatePlacement),
 		homes:    make(map[string]homeObservation),
 	}
-	selector, hasRequirements, selectorErr := requirementSelector(isvc)
+	selector, selectorErr := placementSelector(isvc)
 	o.projectAll = selectorErr != nil
 	for i := range clusters {
 		o.known[clusters[i].Name] = true
-		if selectorErr == nil && hasRequirements && selector.Matches(workloadClusterSelectorSet(&clusters[i])) {
+		_, matches := selector.Match(&clusters[i])
+		if selectorErr == nil && matches {
 			o.matches[clusters[i].Name] = true
 		}
 	}
@@ -484,9 +485,6 @@ func (r *Reconciler) writeObservedMulti(
 			continue
 		}
 		candidate := home.candidate
-		if heldSplitSliver(isvc, candidate) {
-			candidate = identityCandidate(cluster)
-		}
 		candidates = append(candidates, candidate)
 		unknown = unknown || home.state == homeUnknown
 		if candidate.Phase == v1beta1.CandidatePhaseAdmitted {
@@ -506,14 +504,6 @@ func (r *Reconciler) writeObservedMulti(
 		readinessUnknown: unknown && !serving,
 		placementLost:    considered > 0 && allAbsent && len(candidates) == 0,
 	})
-}
-
-func heldSplitSliver(isvc *v1beta1.InferenceService, candidate v1beta1.CandidatePlacement) bool {
-	if placementMode(isvc) != v1beta1.PlacementModeSplit || isvc.Spec.Placement == nil || isvc.Spec.Placement.Split == nil {
-		return false
-	}
-	minimum := isvc.Spec.Placement.Split.MinReplicasPerCluster
-	return minimum > 0 && candidate.AdmittedReplicas > 0 && candidate.AdmittedReplicas < minimum
 }
 
 func observedCandidateResult(home homeObservation) placementResult {

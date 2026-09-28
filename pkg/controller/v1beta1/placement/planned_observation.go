@@ -22,13 +22,14 @@ import (
 
 type plannedHomeObservation struct {
 	Candidate         v1beta1.CandidatePlacement
+	Member            *v1beta1.InferenceService
 	Home              allocation.Home
 	RolloutReserved   int32
 	PauseAcknowledged bool
 }
 
 // observePlannedHome reads a direct, identity-checked member inventory. Component
-// requirements must include runtime inheritance, even before those IRs exist.
+// requirements include every declared component, even before its IR exists.
 func (r *Reconciler) observePlannedHome(ctx context.Context, source *v1beta1.InferenceService, previous v1beta1.CandidatePlacement, components []v1beta1.ComponentType) (plannedHomeObservation, error) {
 	out := plannedHomeObservation{Candidate: retainedUnknownCandidate(source, previous)}
 	out.Candidate.ObservationKnown, out.Candidate.AppliedPlanID = false, ""
@@ -167,6 +168,7 @@ func (r *Reconciler) observePlannedHome(ctx context.Context, source *v1beta1.Inf
 		if live.UID != member.UID || live.ResourceVersion != member.ResourceVersion {
 			return out, fmt.Errorf("member changed during resource observation")
 		}
+		out.Member = member
 	}
 	scaled := make([]v1beta1.ComponentType, 0, len(components))
 	ready := int32(math.MaxInt32)

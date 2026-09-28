@@ -21,7 +21,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/placement"
 	"github.com/ome-projects/ome/tests/perf/multicluster/runner/config"
 	perflabels "github.com/ome-projects/ome/tests/perf/multicluster/runner/labels"
 )
@@ -113,13 +112,11 @@ func (g *Generator) generateClass(ctx context.Context, cls config.SizeClass, cla
 }
 
 // buildSource produces one control-plane source InferenceService for the class:
-// a single Engine component plus the accelerator-requirements annotation that
-// makes it eligible for fan-out onto the matching candidate members. The
+// a single Engine component with explicit placement affinity. The
 // harness + class labels ride through DeriveISVC onto the derived copies so the
 // member-side admitter and the observer can scope to this run's objects.
 func (g *Generator) buildSource(cls config.SizeClass, classIdx, i int) *v1beta1.InferenceService {
 	name := fmt.Sprintf("src-%s-%s-%d-%d", g.nameSuffix, cls.ClassName, classIdx, i)
-	requirement := g.cfg.Placement.AcceleratorLabel + "=" + g.cfg.Placement.AcceleratorValue
 	return &v1beta1.InferenceService{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -128,11 +125,9 @@ func (g *Generator) buildSource(cls config.SizeClass, classIdx, i int) *v1beta1.
 				perflabels.HarnessLabel: perflabels.HarnessLabelValue,
 				perflabels.ClassLabel:   cls.ClassName,
 			},
-			Annotations: map[string]string{
-				placement.AcceleratorRequirementsAnnotation: requirement,
-			},
 		},
 		Spec: v1beta1.InferenceServiceSpec{
+			Placement: &v1beta1.PlacementSpec{Mode: v1beta1.PlacementModeSingle, ClusterAffinity: []v1beta1.ClusterAffinityTerm{{MatchExpressions: []v1beta1.ClusterSelectorRequirement{{Key: g.cfg.Placement.AcceleratorLabel, Operator: corev1.NodeSelectorOpIn, Values: []string{g.cfg.Placement.AcceleratorValue}}}}}},
 			Engine: &v1beta1.EngineSpec{
 				Runner: &v1beta1.RunnerSpec{
 					Container: corev1.Container{Name: "ome-container", Image: cls.Image},

@@ -36,8 +36,8 @@ var _ = ginkgo.Describe("Gateway API TrafficMap publisher", func() {
 		clusterA := "cluster.a"
 		clusterB := "cluster.b"
 		isvc := createISVC(namespace, name, &v1beta1.PlacementSpec{
-			Mode:         v1beta1.PlacementModeSplit,
-			Requirements: "accelerator=test",
+			Mode:            v1beta1.PlacementModeSplit,
+			ClusterAffinity: routingTestAffinity(),
 		})
 		placeISVC(isvc,
 			candidate(clusterA, "a.routing.example.com", 2, 2),

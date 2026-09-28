@@ -21,8 +21,7 @@ import (
 )
 
 // acceleratorLabel/Value is the capability both members advertise and every
-// source ISVC requires. Candidate matching is label-based and an ISVC that
-// declares no requirement matches no cluster, so every spec must set it.
+// source ISVC selects through explicit placement affinity.
 const (
 	acceleratorLabel = "gpu"
 	acceleratorValue = "test-accel"
@@ -43,15 +42,9 @@ func uniqueName(prefix string) string {
 	return fmt.Sprintf("%s-%s-%d", prefix, runID, nameCounter.Add(1))
 }
 
-// memberLabels is the label set both members carry, matched by requirement().
+// memberLabels is the label set selected by source placement affinity.
 func memberLabels() map[string]string {
 	return map[string]string{acceleratorLabel: acceleratorValue}
-}
-
-// requirement is the selector a source ISVC declares to make both members
-// candidates.
-func requirement() string {
-	return acceleratorLabel + "=" + acceleratorValue
 }
 
 // kubeconfigSecretFor is the cluster-typed wrapper over multicluster.KubeConfigSecret.
@@ -65,7 +58,7 @@ func kubeconfigSecretFor(member cluster, namespace, name string) *corev1.Secret 
 // actually run: OMENative deployment mode (so the member dispatches through the
 // InferenceReplica path and creates pods), the fake-serving image, and the model
 // + runtime the members have. mode selects the placement cardinality;
-// requirement() makes both members candidates.
+// label affinity makes both members candidates.
 func runnableSourceISVC(namespace, name, model, runtime string, mode v1beta1.PlacementMode, replicas int) *v1beta1.InferenceService {
 	return &v1beta1.InferenceService{
 		ObjectMeta: metav1.ObjectMeta{
@@ -75,8 +68,8 @@ func runnableSourceISVC(namespace, name, model, runtime string, mode v1beta1.Pla
 		},
 		Spec: v1beta1.InferenceServiceSpec{
 			Placement: &v1beta1.PlacementSpec{
-				Mode:         mode,
-				Requirements: requirement(),
+				Mode:            mode,
+				ClusterAffinity: []v1beta1.ClusterAffinityTerm{{MatchExpressions: []v1beta1.ClusterSelectorRequirement{{Key: acceleratorLabel, Operator: corev1.NodeSelectorOpIn, Values: []string{acceleratorValue}}}}},
 			},
 			Model:   &v1beta1.ModelRef{Name: model},
 			Runtime: &v1beta1.ServingRuntimeRef{Name: runtime},

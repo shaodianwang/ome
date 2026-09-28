@@ -39,7 +39,11 @@ metadata:
 spec:
   placement:
     mode: Single
-    requirements: accelerator=does-not-exist
+    clusterAffinity:
+      - matchExpressions:
+          - key: accelerator
+            operator: In
+            values: [does-not-exist]
   model:
     name: demo-noop
   runtime:

@@ -3,24 +3,10 @@
 #   kubectl --context kind-ome-quota-hub apply -f hack/kwok-sim/fixtures/50-fleet-proportional.yaml
 #   kubectl --context kind-ome-quota-hub apply -f hack/kwok-sim/fixtures/63-placement-split-spread.yaml
 #
-# This is the fixture the fleet exists for. Three replicas is 192 chips — the
-# whole fleet — and 50-fleet-proportional hands member A 128 and member B 64, so
-# the only split that fits is 2 and 1. Neither member could run all three, which
-# is what makes a converged placement evidence of real apportionment rather than
-# an even division chosen up front.
-#
-# Expect 32 running pods on member A and 16 on member B. The derived copy on
-# each member carries only that member's share: the placer rewrites
-# engine.minReplicas per home, so nothing there records the fleet-wide figure.
-#
-#   hack/kwok-sim/fleet-status.sh
-#   kubectl --context kind-ome-quota-hub -n kwok-sim get isvc place-split-spread \
-#     -o jsonpath='{range .status.placement.candidates[*]}{.cluster}={.readyReplicas}{"\n"}{end}'
-#
-# spread: true is load-bearing. Packed (the default) fills the preferred home
-# first, and stops only when quota refuses the next replica — which is a fine
-# thing to watch, but it is 64-placement-split-capped that shows it without
-# depending on which home the placer prefers.
+# Equal static weights assign the three replicas as 2 and 1 in cluster-name
+# order. Quota admits those assigned shares independently; a shortfall on one
+# member stays pending there. The fixture's quota tree admits both shares.
+# Expect 32 running pods on member A and 16 on member B.
 #
 # This consumes every chip in the fleet. Run it alone.
 #
@@ -45,10 +31,13 @@ metadata:
 spec:
   placement:
     mode: Split
-    requirements: accelerator=tpu7x
+    clusterAffinity:
+      - matchExpressions:
+          - key: accelerator
+            operator: In
+            values: [tpu7x]
     split:
       replicas: 3
-      spread: true
   model:
     name: demo-noop
   runtime:

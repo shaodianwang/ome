@@ -9818,39 +9818,66 @@ func schema_pkg_apis_ome_v1beta1_PlacementSpec(ref common.ReferenceCallback) com
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "PlacementSpec declares how the control plane selects the workload clusters an InferenceService is placed onto, and how many of them serve it. It subsumes the legacy ome.io/accelerator-requirements and ome.io/cluster-selector annotations in a typed, schema-validated form; when this field is nil the control plane still honors those annotations for backward compatibility.",
+				Description: "PlacementSpec declares explicit multi-cluster intent. Affinity omission is unconstrained; invalid or obsolete restrictions cannot widen the matched set.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"mode": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Mode is the placement cardinality: Single (one cluster), All (every candidate), or Split (replicas distributed across clusters). Defaults to Single. All and Split are rejected by admission on a control plane that does not implement them.",
+							Description: "Mode is required; an empty placement block does not select a policy.",
+							Default:     "",
 							Type:        []string{"string"},
 							Format:      "",
 						},
 					},
+					"clusterAffinity": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "atomic",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "ClusterAffinity ORs terms whose requirements are ANDed. Omission matches every registration; an explicit empty or null list is invalid.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterAffinityTerm"),
+									},
+								},
+							},
+						},
+					},
+					"maxSurge": {
+						SchemaProps: spec.SchemaProps{
+							Description: "MaxSurge is the whole-replica allowance shared by placement transitions and local rollout surge. Omission blocks disruptive movement between homes.",
+							Type:        []string{"integer"},
+							Format:      "int32",
+						},
+					},
 					"requirements": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Requirements is the intrinsic capability selector a candidate workload cluster MUST satisfy, expressed as a Kubernetes label-selector string matched against WorkloadCluster labels plus the virtual, immutable metadata.name key (e.g. \"accelerator in (gb300, tpu7x)\"). It is the structured equivalent of the ome.io/accelerator-requirements annotation. Empty means no intrinsic requirement.",
+							Description: "Requirements is retained only to reject obsolete selector intent. Deprecated: use clusterAffinity.matchExpressions or matchFields.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
 					},
 					"clusterSelector": {
 						SchemaProps: spec.SchemaProps{
-							Description: "ClusterSelector is an optional operator-imposed routing overlay (label-selector string) AND-ed onto Requirements to further narrow candidates. It can select WorkloadCluster labels (e.g. \"provider=cloud-a\") or immutable object names (e.g. \"metadata.name in (cluster-a,cluster-c)\"). Structured equivalent of the ome.io/cluster-selector annotation.",
+							Description: "ClusterSelector is retained only to reject obsolete selector intent. Deprecated: use clusterAffinity.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
 					},
 					"split": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Split tunes Split mode (distributing replicas across clusters). Only consulted when Mode is Split; ignored otherwise. Nil means Split defaults: distribute the engine's minReplicas, packed onto the fewest clusters.",
+							Description: "Split provides the requested floor and optional per-home ceiling for Split and SplitByCapacity. Other modes reject this block.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.SplitSpec"),
 						},
 					},
 					"capacityFactors": {
 						SchemaProps: spec.SchemaProps{
-							Description: "CapacityFactors overrides the per-replica relative serving capacity of named workload clusters, keyed by WorkloadCluster name. It weights traffic for heterogeneous hardware where one cluster's replica serves more (or less) than another's: a home's routed share scales with its admitted replicas times this factor. A quantity of \"2\" means each replica on that cluster carries twice the share of a factor-1 replica; \"500m\" means half. A cluster absent from the map (or the whole field unset) uses the identity factor 1. This is a routing weight only — it does not influence placement or how many replicas a cluster admits.\n\nDeprecated: use spec.routing.capacityFactors.",
+							Description: "CapacityFactors is retained only to reject obsolete routing intent. Deprecated: use spec.routing.capacityFactors.",
 							Type:        []string{"object"},
 							AdditionalProperties: &spec.SchemaOrBool{
 								Allows: true,
@@ -9863,10 +9890,11 @@ func schema_pkg_apis_ome_v1beta1_PlacementSpec(ref common.ReferenceCallback) com
 						},
 					},
 				},
+				Required: []string{"mode"},
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.SplitSpec", "k8s.io/apimachinery/pkg/api/resource.Quantity"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterAffinityTerm", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.SplitSpec", "k8s.io/apimachinery/pkg/api/resource.Quantity"},
 	}
 }
 
@@ -13872,7 +13900,7 @@ func schema_pkg_apis_ome_v1beta1_SplitSpec(ref common.ReferenceCallback) common.
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "SplitSpec tunes how Split mode distributes replicas across candidate clusters. All fields are optional and degrade to the documented defaults.",
+				Description: "SplitSpec declares the fleet floor and optional local ceiling. The floor falls back only to an explicitly declared positive engine.minReplicas.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"replicas": {
@@ -13884,21 +13912,21 @@ func schema_pkg_apis_ome_v1beta1_SplitSpec(ref common.ReferenceCallback) common.
 					},
 					"spread": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Spread selects the apportionment policy. False (default) is Packed: fan out in preference order and fill the fewest clusters the fleet's quota forces (better locality, fewer endpoint backends). True is Balanced: apportion ~evenly (ceil(N/candidates)) so replicas spread across more clusters (blast-radius resilience over locality).",
+							Description: "Spread is retained only to reject obsolete packing intent. Deprecated: mode and affinity weights determine allocation.",
 							Type:        []string{"boolean"},
 							Format:      "",
 						},
 					},
 					"maxReplicasPerCluster": {
 						SchemaProps: spec.SchemaProps{
-							Description: "MaxReplicasPerCluster caps how many replicas one cluster may hold. It bounds the over-request the fractional fan-out makes, and — combined with Spread — is the lever that forces the fill to move on before a cluster is full (deliberate spread without reading capacity). Zero means no cap.",
+							Description: "MaxReplicasPerCluster is an optional local ceiling. A target exceeding a positive ceiling holds the whole new plan; zero leaves the ceiling uncapped.",
 							Type:        []string{"integer"},
 							Format:      "int32",
 						},
 					},
 					"minReplicasPerCluster": {
 						SchemaProps: spec.SchemaProps{
-							Description: "MinReplicasPerCluster is the anti-sliver floor: a home that admits fewer than this is dropped and its replicas returned to the deficit, so the placement does not keep a home serving a tiny, uneconomical fraction. Zero keeps any home that admitted >=1.",
+							Description: "MinReplicasPerCluster is retained only to reject obsolete anti-sliver intent. Deprecated: exact shares cannot discard a small admission.",
 							Type:        []string{"integer"},
 							Format:      "int32",
 						},

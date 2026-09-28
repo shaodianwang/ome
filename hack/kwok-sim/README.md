@@ -543,9 +543,9 @@ unforgettable:
    issued. The rules are the chart's, not a copy — the fleet exercises the grant
    a real control plane is given.
 3. Labels each `WorkloadCluster` `accelerator=tpu7x` and `zone=a` / `zone=b`.
-   That label set is the placer's entire candidate-selection input: an ISVC's
-   `spec.placement.requirements` is matched against it and nothing else, and an
-   ISVC declaring **no** requirement matches **no** cluster.
+   `spec.placement.clusterAffinity` matches those labels and can also constrain
+   the registration's actual `metadata.name`. Omitted affinity matches every
+   registration; an ISVC without `spec.placement` remains local.
 
 `--topology` becomes forwardable under this flag, since it is what puts a
 scheduler on the members for the mode to mean anything.
@@ -578,8 +578,8 @@ kubectl --context kind-ome-quota-hub apply -f hack/kwok-sim/fixtures/63-placemen
 | `61-placement-all.yaml` | every member serves | 16 pods each, no winner |
 | `62-placement-single.yaml` | race, then sweep the loser | one winner, read it |
 | `63-placement-split-spread.yaml` | 3 replicas = 192 chips = the whole fleet | 2 on a, 1 on b |
-| `64-placement-split-capped.yaml` | a per-cluster ceiling overriding Packed | 1 each |
-| `65-placement-pinned.yaml` | `clusterSelector: metadata.name=member-b` | member-b only |
+| `64-placement-split-capped.yaml` | equal shares with a per-cluster ceiling | 1 each |
+| `65-placement-pinned.yaml` | `clusterAffinity.matchFields` selects `metadata.name=member-b` | member-b only |
 | `66-placement-nomatch.yaml` | a requirement nothing carries | never placed |
 
 One replica is one whole cube — the `tpu7x-4x4x4` runtime is 1 leader + 15

@@ -82,9 +82,7 @@ var _ = ginkgo.Describe("Multi-cluster endpoints (KIND)", func() {
 			for _, m := range env.members {
 				cand := candidateFor(ps, m.wcName)
 				g.Expect(cand).NotTo(gomega.BeNil(), "no candidate entry for %s", m.wcName)
-				// Balanced spreads ceil(desired/homes) to each home, so every home
-				// must carry a non-zero weight — a zero here means the spread
-				// collapsed onto one home and an LB would send it all the traffic.
+				// Equal weights assign one replica to each of the two homes.
 				g.Expect(cand.ReadyReplicas).To(gomega.BeNumerically(">=", 1),
 					"%s should report ready replicas as its traffic weight", m.wcName)
 				totalReady += cand.ReadyReplicas

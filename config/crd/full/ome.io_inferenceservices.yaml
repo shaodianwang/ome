@@ -26804,32 +26804,118 @@ spec:
                           - type: string
                         pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                         x-kubernetes-int-or-string: true
+                      nullable: true
                       type: object
+                    clusterAffinity:
+                      items:
+                        properties:
+                          matchExpressions:
+                            items:
+                              properties:
+                                key:
+                                  minLength: 1
+                                  type: string
+                                operator:
+                                  enum:
+                                    - In
+                                    - NotIn
+                                    - Exists
+                                    - DoesNotExist
+                                    - Gt
+                                    - Lt
+                                  type: string
+                                values:
+                                  items:
+                                    type: string
+                                  maxItems: 64
+                                  type: array
+                                  x-kubernetes-list-type: atomic
+                              required:
+                                - key
+                                - operator
+                              type: object
+                            maxItems: 64
+                            type: array
+                            x-kubernetes-list-type: atomic
+                          matchFields:
+                            items:
+                              properties:
+                                key:
+                                  minLength: 1
+                                  type: string
+                                operator:
+                                  enum:
+                                    - In
+                                    - NotIn
+                                    - Exists
+                                    - DoesNotExist
+                                    - Gt
+                                    - Lt
+                                  type: string
+                                values:
+                                  items:
+                                    type: string
+                                  maxItems: 64
+                                  type: array
+                                  x-kubernetes-list-type: atomic
+                              required:
+                                - key
+                                - operator
+                              type: object
+                            maxItems: 64
+                            type: array
+                            x-kubernetes-list-type: atomic
+                          weight:
+                            format: int32
+                            maximum: 100
+                            minimum: 1
+                            type: integer
+                        type: object
+                        x-kubernetes-validations:
+                          - message: a cluster affinity term must contain a requirement
+                            rule: (has(self.matchExpressions) && size(self.matchExpressions) > 0) || (has(self.matchFields) && size(self.matchFields) > 0)
+                      maxItems: 64
+                      minItems: 1
+                      nullable: true
+                      type: array
+                      x-kubernetes-list-type: atomic
                     clusterSelector:
+                      nullable: true
                       type: string
+                    maxSurge:
+                      format: int32
+                      minimum: 0
+                      type: integer
                     mode:
-                      default: Single
                       enum:
                         - Single
                         - All
                         - Split
+                        - SplitByCapacity
                       type: string
                     requirements:
+                      nullable: true
                       type: string
                     split:
                       properties:
                         maxReplicasPerCluster:
                           format: int32
+                          minimum: 0
                           type: integer
                         minReplicasPerCluster:
                           format: int32
+                          nullable: true
                           type: integer
                         replicas:
                           format: int32
+                          minimum: 1
                           type: integer
                         spread:
+                          nullable: true
                           type: boolean
                       type: object
+                  required:
+                    - mode
                   type: object
                 rollout:
                   properties:

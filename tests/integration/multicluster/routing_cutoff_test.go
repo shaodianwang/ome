@@ -113,7 +113,7 @@ var _ = ginkgo.Describe("Multi-cluster routing cutoff", func() {
 			isvcNS,
 			isvcName,
 			acceleratorLabel+"="+acceleratorValue,
-			&v1beta1.SplitSpec{Replicas: ptr.To[int32](2), Spread: true},
+			&v1beta1.SplitSpec{Replicas: ptr.To[int32](2)},
 		))
 		gomega.Eventually(func(g gomega.Gomega) {
 			_, found := getDerivedOn(member1Cluster, isvcNS, isvcName)
@@ -125,8 +125,8 @@ var _ = ginkgo.Describe("Multi-cluster routing cutoff", func() {
 		ginkgo.By("admitting one ready replica with an endpoint on each home")
 		setDerivedEndpointOn(member1Cluster, isvcNS, isvcName, "home-a.routing.example.com")
 		setDerivedEndpointOn(member2Cluster, isvcNS, isvcName, "home-b.routing.example.com")
-		upsertEngineIRStatusOn(member1Cluster, isvcNS, isvcName, admittedEngineInstances(1))
-		upsertEngineIRStatusOn(member2Cluster, isvcNS, isvcName, admittedEngineInstances(1))
+		upsertPlannedEngineStatusOn(member1Cluster, isvcNS, isvcName, admittedEngineInstances(1))
+		upsertPlannedEngineStatusOn(member2Cluster, isvcNS, isvcName, admittedEngineInstances(1))
 		setEngineReadyReplicasOn(member1Cluster, isvcNS, isvcName, 1)
 		setEngineReadyReplicasOn(member2Cluster, isvcNS, isvcName, 1)
 
@@ -154,7 +154,7 @@ var _ = ginkgo.Describe("Multi-cluster routing cutoff", func() {
 		))
 
 		ginkgo.By("making one admitted home unready")
-		upsertEngineIRStatusOn(member2Cluster, isvcNS, isvcName, []v1beta1.OMENativeInstanceStatus{{
+		upsertPlannedEngineStatusOn(member2Cluster, isvcNS, isvcName, []v1beta1.OMENativeInstanceStatus{{
 			Index:    0,
 			Phase:    v1beta1.OMENativeInstancePending,
 			Admitted: true,

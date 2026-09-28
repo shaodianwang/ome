@@ -271,17 +271,12 @@ func (e *specEnv) createKeeperISVC() *v1beta1.InferenceService {
 	return keeper
 }
 
-// createSplitSource creates a Split-mode source that spreads its replicas evenly
-// across the members. Balanced (spread) is what makes the distribution
-// observable without Kueue: Packed would fill the first home and sweep the
-// second, since with no admission gate every requested replica is admitted.
+// createSplitSource assigns an equal share of the fleet floor to each member.
 func (e *specEnv) createSplitSource(model, runtime string, replicas int) *v1beta1.InferenceService {
-	return e.createSplitSourceWith(model, runtime, replicas, &v1beta1.SplitSpec{Spread: true})
+	return e.createSplitSourceWith(model, runtime, replicas, &v1beta1.SplitSpec{})
 }
 
-// createSplitSourceWith is createSplitSource with the Split policy spelled out,
-// for the specs that exercise Packed order, the per-cluster ceiling, or the
-// anti-sliver floor.
+// createSplitSourceWith declares an explicit floor and optional local ceiling.
 func (e *specEnv) createSplitSourceWith(model, runtime string, replicas int, split *v1beta1.SplitSpec) *v1beta1.InferenceService {
 	src := runnableSourceISVC(e.isvcNS, e.isvcName, model, runtime, v1beta1.PlacementModeSplit, replicas)
 	src.Spec.Placement.Split = split
@@ -451,12 +446,7 @@ func (e *specEnv) admittedAcrossHomes() int32 {
 	return total
 }
 
-// preferredMember returns the member the placer fills first under Packed.
-//
-// MatchCandidates returns candidates sorted by WorkloadCluster name, and
-// splitApportion walks that slice in order — so preference is lexicographic on
-// the name, NOT the order this suite happened to register them in. Those two
-// coincide only until a uniqueName counter crosses a digit boundary.
+// preferredMember is first in the deterministic name order for allocation ties.
 func (e *specEnv) preferredMember() memberReg {
 	preferred := e.members[0]
 	for _, m := range e.members[1:] {

@@ -36,6 +36,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workloadcluster"
 	"github.com/ome-projects/ome/pkg/placement/plan"
 	"github.com/ome-projects/ome/pkg/placement/protocol"
+	"github.com/ome-projects/ome/pkg/validation"
 )
 
 const (
@@ -80,6 +81,7 @@ var sourcePlacementConditionSet = apis.NewLivingConditionSet()
 
 // placementResult is the status the reconciler writes for one pass.
 type placementResult struct {
+	conditions       []policyCondition
 	winner           string
 	phase            v1beta1.PlacementPhase
 	candidates       []v1beta1.CandidatePlacement
@@ -264,12 +266,6 @@ func (r *Reconciler) reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 		return ctrl.Result{}, nil
 	}
 
-	if controllerutil.AddFinalizer(isvc, PlacementFinalizer) {
-		if err := r.Update(ctx, isvc); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-
 	clusters := &v1beta1.WorkloadClusterList{}
 	if err := r.List(ctx, clusters); err != nil {
 		return ctrl.Result{}, err
@@ -278,8 +274,30 @@ func (r *Reconciler) reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 	// are read before any readiness or policy gate so those gates can stop
 	// actuation without freezing the source's view of serving health.
 	observations := r.observeStandingHomes(ctx, isvc, clusters.Items)
+	if err := validation.ValidatePlacementIntent(isvc); err != nil {
+		return r.writeObservedPlacement(ctx, isvc, observations)
+	}
+	// Validate before a full-object write can normalize or prune invalid intent.
+	if controllerutil.AddFinalizer(isvc, PlacementFinalizer) {
+		if err := r.Update(ctx, isvc); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
 	candidates, reason, err := MatchCandidates(isvc, clusters.Items)
-	if err != nil || len(candidates) == 0 {
+	split := placementMode(isvc) == v1beta1.PlacementModeSplit || placementMode(isvc) == v1beta1.PlacementModeSplitByCapacity
+	if split {
+		// Outgoing homes still serve during a move. Unreadable peers cannot
+		// prevent discovery of health on the remaining matched members.
+		observations.projectAll = true
+		for _, cluster := range clusters.Items {
+			if observations.matches[cluster.Name] && !slices.Contains(observations.standing, cluster.Name) {
+				observations.standing = append(observations.standing, cluster.Name)
+				observations.refresh(ctx, r, isvc, cluster.Name)
+			}
+		}
+	}
+	if err != nil || (len(candidates) == 0 && !split) {
 		// Surface WHY there are no candidates (malformed selector / no
 		// requirements declared / no Ready clusters / no match) so the empty
 		// set is diagnosable instead of an indistinguishable Pending.
@@ -336,8 +354,8 @@ func (r *Reconciler) reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 			res, err = r.reconcileSingle(ctx, isvc, candidates, observations)
 		case v1beta1.PlacementModeAll:
 			res, err = r.reconcileAll(ctx, isvc, candidates, observations)
-		case v1beta1.PlacementModeSplit:
-			res, err = r.reconcileSplit(ctx, isvc, candidates, observations)
+		case v1beta1.PlacementModeSplit, v1beta1.PlacementModeSplitByCapacity:
+			res, err = r.reconcileSplit(ctx, isvc, clusters.Items, candidates, observations)
 		default:
 			r.Log.Info("placement mode not supported by this build; holding Pending",
 				"mode", mode, "isvc", isvc.Namespace+"/"+isvc.Name)
@@ -507,13 +525,12 @@ func (r *Reconciler) reconcileSingle(
 	}
 }
 
-// placementMode returns the ISVC's placement cardinality, defaulting to Single
-// when spec.placement is unset or its mode is empty (the legacy/annotation path).
+// placementMode preserves unsupported or missing modes for validation.
 func placementMode(isvc *v1beta1.InferenceService) v1beta1.PlacementMode {
-	if p := isvc.Spec.Placement; p != nil && p.Mode != "" {
-		return p.Mode
+	if isvc.Spec.Placement == nil {
+		return ""
 	}
-	return v1beta1.PlacementModeSingle
+	return isvc.Spec.Placement.Mode
 }
 
 // reconcileAll implements PlacementModeAll: run the ISVC on EVERY candidate that
@@ -605,267 +622,6 @@ func (r *Reconciler) reconcileAll(
 	return res, err
 }
 
-// reconcileSplit implements PlacementModeSplit: distribute the desired replica
-// count (spec.placement.split.replicas, else the engine floor minReplicas)
-// across candidate clusters. It requests a target on each, lets that cluster's
-// Kueue admit as many whole-gang replicas as fit, keeps every home that admits
-// >=1, and sums admitted until the floor is met. Packed by default — fill the
-// fewest clusters in preference order, spilling the remainder to the next;
-// Balanced (spec.placement.split.spread) apportions an even share across all
-// candidates. The endpoint weight follows each home's ready replicas.
-//
-// Distribution is a single ordered pass. It trims observed over-admission but
-// does not re-apportion a deficit beyond that pass. Like All, there is no sticky
-// winner or re-race: each home is independent.
-func (r *Reconciler) reconcileSplit(
-	ctx context.Context,
-	isvc *v1beta1.InferenceService,
-	candidates []string,
-	observations *placementObservations,
-) (ctrl.Result, error) {
-	desired := splitDesiredReplicas(isvc)
-	if desired <= 0 {
-		// No floor declared — nothing to distribute.
-		return r.writePlacement(ctx, isvc, placementResult{phase: v1beta1.PlacementPhasePending})
-	}
-	// Split mode implies spec.placement is set; the split sub-block may be nil
-	// (defaults: distribute the floor, Packed, uncapped, no anti-sliver floor).
-	var maxPer, minPer int32
-	spread := false
-	if sp := isvc.Spec.Placement.Split; sp != nil {
-		maxPer, minPer, spread = sp.MaxReplicasPerCluster, sp.MinReplicasPerCluster, sp.Spread
-	}
-
-	// Phase 1 — observe before apportioning. Unknown homes retain their last
-	// admitted share for allocation safety but publish zero ready capacity.
-	// Standing homes that are not actuatable this pass reserve their share, so
-	// a readiness or preflight gate cannot make their capacity look free.
-	projected := observations.projectedClusters(candidates)
-	selected := make(map[string]bool, len(candidates))
-	for _, cluster := range candidates {
-		selected[cluster] = true
-	}
-	homes := make(map[string]homeObservation, len(projected))
-	for _, cluster := range projected {
-		home, ok := observations.get(cluster)
-		if !ok {
-			home = observations.refresh(ctx, r, isvc, cluster)
-		}
-		homes[cluster] = home
-		if home.err != nil {
-			r.Log.Error(home.err, "split: member read failed; keeping allocation share",
-				"cluster", cluster, "isvc", isvc.Namespace+"/"+isvc.Name)
-		}
-	}
-	actuatable := make(map[string]bool, len(candidates))
-	actionCandidates := make([]string, 0, len(candidates))
-	admitted := make(map[string]int32, len(candidates))
-	var reserved int32
-	for _, cluster := range projected {
-		home := homes[cluster]
-		count := home.candidate.AdmittedReplicas
-		if home.state == homeAbsent || home.terminal ||
-			(minPer > 0 && count > 0 && count < minPer) {
-			count = 0
-		}
-		if selected[cluster] && !home.terminal {
-			actuatable[cluster] = true
-			actionCandidates = append(actionCandidates, cluster)
-			admitted[cluster] = count
-		} else if !selected[cluster] {
-			reserved += count
-		}
-	}
-
-	// Phase 2 — apportion the desired count into a per-cluster target request.
-	remainingDesired := desired - reserved
-	if remainingDesired < 0 {
-		remainingDesired = 0
-	}
-	targets := splitApportion(actionCandidates, admitted, remainingDesired, maxPer, spread)
-
-	// Phase 3 — apply: request the target on kept clusters, sweep the rest, and
-	// record per-home status from the observed counts.
-	var admittedTotal int32
-	cands := make([]v1beta1.CandidatePlacement, 0, len(candidates))
-	serving := false
-	unobserved := false
-	retrySoon := false
-	for _, cluster := range projected {
-		home := homes[cluster]
-		sliver := home.candidate.AdmittedReplicas > 0 && minPer > 0 &&
-			home.candidate.AdmittedReplicas < minPer
-		if home.terminal {
-			cands = append(cands, home.candidate)
-			continue
-		}
-		if !actuatable[cluster] {
-			if home.state == homeAbsent {
-				continue
-			}
-			candidate := home.candidate
-			if sliver {
-				candidate = identityCandidate(cluster)
-			}
-			cands = append(cands, candidate)
-			unobserved = unobserved || home.state == homeUnknown
-			if candidate.Phase == v1beta1.CandidatePhaseAdmitted {
-				admittedTotal += candidate.AdmittedReplicas
-				serving = serving || home.serving
-			}
-			continue
-		}
-		if home.state == homeUnknown {
-			unobserved = true
-			if observations.had(cluster) {
-				cands = append(cands, home.candidate)
-				if home.candidate.Phase == v1beta1.CandidatePhaseAdmitted {
-					admittedTotal += min32(home.candidate.AdmittedReplicas, targets[cluster])
-				}
-			}
-			continue
-		}
-		if sliver || targets[cluster] <= 0 {
-			// Sliver, or not needed (Packed floor met / trimmed away): sweep any derived.
-			if home.state == homePresent {
-				if err := r.deleteDerivedOnBounded(ctx, cluster, isvc); err != nil {
-					r.Log.Error(err, "split: sweep cluster failed", "cluster", cluster, "isvc", isvc.Namespace+"/"+isvc.Name)
-					cands = append(cands, home.candidate)
-					if home.candidate.Phase == v1beta1.CandidatePhaseAdmitted {
-						admittedTotal += home.candidate.AdmittedReplicas
-						serving = serving || home.serving
-					}
-					retrySoon = true
-				}
-			}
-			continue
-		}
-		cl, ok := r.Clusters.ClientFor(cluster)
-		if !ok {
-			if home.state == homePresent {
-				cands = append(cands, home.candidate)
-			}
-			if home.state == homePresent && home.candidate.Phase == v1beta1.CandidatePhaseAdmitted {
-				admittedTotal += min32(home.candidate.AdmittedReplicas, targets[cluster])
-				serving = serving || home.serving
-			}
-			retrySoon = true
-			continue
-		}
-		if err := r.placeOnReplicasBounded(ctx, cluster, cl, isvc, targets[cluster], maxPer); err != nil {
-			if apierrors.IsConflict(err) {
-				// The derived copy moved under the apply; the next pass re-reads
-				// it, so a stale-version write is a retry, not a failure.
-				r.Log.V(1).Info("split: place conflicted on cluster; retrying", "cluster", cluster, "isvc", isvc.Namespace+"/"+isvc.Name)
-			} else {
-				r.Log.Error(err, "split: place failed on cluster", "cluster", cluster, "isvc", isvc.Namespace+"/"+isvc.Name)
-			}
-			if home.state == homePresent {
-				cands = append(cands, home.candidate)
-			}
-			if home.state == homePresent && home.candidate.Phase == v1beta1.CandidatePhaseAdmitted {
-				admittedTotal += min32(home.candidate.AdmittedReplicas, targets[cluster])
-				serving = serving || home.serving
-			}
-			retrySoon = true
-			continue
-		}
-		if home.candidate.AdmittedReplicas == 0 {
-			// Gated so far: keep trying and record an admitting candidate.
-			cands = append(cands, identityCandidate(cluster))
-			continue
-		}
-		// Count admitted toward the floor, capped by the target — a trimmed home is
-		// on its way down to target, so do not credit the excess it still shows.
-		counted := home.candidate.AdmittedReplicas
-		if counted > targets[cluster] {
-			counted = targets[cluster]
-		}
-		admittedTotal += counted
-		cands = append(cands, home.candidate)
-		serving = serving || home.serving
-	}
-
-	phase := v1beta1.PlacementPhaseAdmitting
-	if admittedTotal > 0 {
-		phase = v1beta1.PlacementPhasePlaced
-	}
-	res, err := r.writePlacement(ctx, isvc, placementResult{
-		phase: phase, candidates: cands, ready: serving,
-		readinessUnknown: unobserved && !serving,
-	})
-	if err == nil && (admittedTotal < desired || unobserved || retrySoon) {
-		// Floor not yet met (homes still gated / capacity filling in): re-poll at
-		// the normal cadence rather than the long steady-state backstop.
-		res.RequeueAfter = r.requeue()
-	}
-	return res, err
-}
-
-// splitApportion computes each candidate's target replica REQUEST for Split.
-// admitted[c] is the replicas currently admitted on c (0 if none). A target of 0
-// means "do not use this cluster" (sweep). Preference order is the candidates
-// slice order. Two Packed regimes plus Balanced:
-//
-//   - TRIM (sum admitted >= desired): pin each cluster to min(admitted,
-//     remaining) in preference order — keep the preferred clusters full and shed
-//     the excess from the least-preferred, so requests sum to exactly desired and
-//     no gated remainder can push the admitted total any higher. This is what
-//     converges transient over-admission back down.
-//   - FILL (sum admitted < desired): over-request the remaining deficit on each
-//     cluster in preference order (Kueue admits what fits); already-admitted
-//     replicas close the deficit. Over-admission from gated remainders admitting
-//     later is cleaned up by TRIM on the next pass.
-//   - Balanced (spread): request an even ceil(desired/n) share on every candidate.
-func splitApportion(candidates []string, admitted map[string]int32, desired, maxPer int32, spread bool) map[string]int32 {
-	targets := make(map[string]int32, len(candidates))
-	if len(candidates) == 0 {
-		return targets
-	}
-	capTo := func(v int32) int32 {
-		if maxPer > 0 && v > maxPer {
-			return maxPer
-		}
-		return v
-	}
-	if spread {
-		share := capTo(ceilDiv(desired, int32(len(candidates))))
-		for _, c := range candidates {
-			targets[c] = share
-		}
-		return targets
-	}
-	var total int32
-	for _, c := range candidates {
-		total += admitted[c]
-	}
-	remaining := desired
-	if total >= desired {
-		for _, c := range candidates { // TRIM
-			t := capTo(min32(admitted[c], remaining))
-			targets[c] = t
-			remaining -= t
-		}
-		return targets
-	}
-	for _, c := range candidates { // FILL
-		if remaining <= 0 {
-			targets[c] = 0
-			continue
-		}
-		targets[c] = capTo(remaining)
-		remaining -= admitted[c]
-	}
-	return targets
-}
-
-func min32(a, b int32) int32 {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 // splitDesiredReplicas is the Split desired replica count: spec.placement.split.
 // replicas when set, else the engine component's minReplicas (the guaranteed
 // floor). Zero when neither is declared.
@@ -874,7 +630,10 @@ func splitDesiredReplicas(isvc *v1beta1.InferenceService) int32 {
 		return *p.Split.Replicas
 	}
 	if isvc.Spec.Engine != nil && isvc.Spec.Engine.MinReplicas != nil {
-		return int32(*isvc.Spec.Engine.MinReplicas)
+		floor := *isvc.Spec.Engine.MinReplicas
+		if floor > 0 && floor <= math.MaxInt32 {
+			return int32(floor)
+		}
 	}
 	return 0
 }
@@ -937,14 +696,6 @@ func placementReadyReplicas(comps []v1beta1.ComponentType, statuses map[v1beta1.
 	return mn
 }
 
-// ceilDiv is integer ceiling division; b <= 0 returns a (no split).
-func ceilDiv(a, b int32) int32 {
-	if b <= 0 {
-		return a
-	}
-	return (a + b - 1) / b
-}
-
 // fanOut ensures the derived ISVC exists on each connected candidate. A
 // per-cluster failure does not abort the others — one bad cluster must not deny
 // the race to the healthy ones. Returns the clusters actually placed on; returns
@@ -995,14 +746,6 @@ func (r *Reconciler) placeOnBounded(ctx context.Context, cluster string, cl clie
 	cctx, cancel := context.WithTimeout(ctx, r.placeTimeout())
 	defer cancel()
 	return r.placeOn(cctx, cluster, cl, isvc)
-}
-
-// placeOnReplicasBounded runs placeOnReplicas under the per-cluster deadline
-// (Split's per-cluster apportioned apply).
-func (r *Reconciler) placeOnReplicasBounded(ctx context.Context, cluster string, cl client.Client, isvc *v1beta1.InferenceService, replicas, maxPer int32) error {
-	cctx, cancel := context.WithTimeout(ctx, r.placeTimeout())
-	defer cancel()
-	return r.placeOnReplicas(cctx, cluster, cl, isvc, replicas, maxPer)
 }
 
 func (r *Reconciler) deleteDerivedOnBounded(ctx context.Context, cluster string, isvc *v1beta1.InferenceService) error {
@@ -1075,18 +818,6 @@ func (r *Reconciler) placeOn(ctx context.Context, cluster string, cl client.Clie
 	if err != nil {
 		return err
 	}
-	return r.applyDerived(ctx, cluster, cl, src, d)
-}
-
-// placeOnReplicas is placeOn with a Split per-cluster apportioned replica band
-// pinned onto the derived's scalable components before the apply: replicas is
-// this home's share (the floor), maxPer the per-cluster ceiling (0 = uncapped).
-func (r *Reconciler) placeOnReplicas(ctx context.Context, cluster string, cl client.Client, src *v1beta1.InferenceService, replicas, maxPer int32) error {
-	d, err := r.derivedFor(src)
-	if err != nil {
-		return err
-	}
-	setDerivedReplicas(d, replicas, maxPer)
 	return r.applyDerived(ctx, cluster, cl, src, d)
 }
 
@@ -1328,6 +1059,7 @@ func (r *Reconciler) writePlacement(ctx context.Context, isvc *v1beta1.Inference
 	policyConds := mergePolicyConditions(
 		r.policyStatusForWrite(isvc, &res),
 		r.rolloutStatusForWrite(isvc, &res))
+	policyConds = mergePolicyConditions(policyConds, res.conditions)
 	key := client.ObjectKeyFromObject(isvc)
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		cur := &v1beta1.InferenceService{}
@@ -1347,6 +1079,8 @@ func (r *Reconciler) writePlacement(ctx context.Context, isvc *v1beta1.Inference
 		cur.Status.Placement.Endpoint = res.url
 		cur.Status.URL = res.url
 		applyPolicyConditions(&cur.Status, policyConds)
+		applyPolicyConditions(&cur.Status, []policyCondition{placementInputCondition(isvc)})
+		applyPolicyConditions(&cur.Status, placementSatisfactionConditions(cur))
 		setSourcePlacementReady(&cur.Status, res, readyBefore)
 		// res was computed from the reconciled snapshot, not the live object read
 		// for conflict-safe status persistence. A concurrent spec update must not
@@ -1648,14 +1382,15 @@ func placementEligibleIndexExtractor(obj client.Object) []string {
 	return []string{placementEligibleIndexValue}
 }
 
-// declaresPlacementRequirement reports whether the ISVC is eligible for
-// cross-cluster fan-out — it declares a requirement or cluster selector via
-// spec.placement or the legacy annotations. Uses placementInputs so it stays in
-// lockstep with requirementSelector (the source of truth for what counts as a
-// requirement); a divergence would index ISVCs the matcher ignores, or vice versa.
+// declaresPlacementRequirement includes invalid legacy intent so reconciliation
+// can report migration errors without treating an old source as a local service.
 func declaresPlacementRequirement(isvc *v1beta1.InferenceService) bool {
-	requirements, clusterSelector := placementInputs(isvc)
-	return requirements != "" || clusterSelector != ""
+	if isvc.Spec.Placement != nil {
+		return true
+	}
+	_, requirement := isvc.Annotations[AcceleratorRequirementsAnnotation]
+	_, selector := isvc.Annotations[ClusterSelectorAnnotation]
+	return requirement || selector
 }
 
 // IsPlacementEligible reports whether an InferenceService participates in the
@@ -1700,7 +1435,7 @@ func (r *Reconciler) isvcsForClusterChange(ctx context.Context, obj client.Objec
 		return nil
 	}
 	clusterName := wc.GetName()
-	clusterSelectorSet := workloadClusterSelectorSet(wc)
+	clusterSelectorSet := labels.Set(wc.Labels)
 
 	list := &v1beta1.InferenceServiceList{}
 	if err := r.List(ctx, list, client.MatchingFields{placementEligibleIndexField: placementEligibleIndexValue}); err != nil {
@@ -1728,14 +1463,12 @@ func clusterAffectsISVC(isvc *v1beta1.InferenceService, clusterName string, clus
 	if isvcStatusReferencesCluster(isvc, clusterName) {
 		return true
 	}
-	sel, hasReq, err := requirementSelector(isvc)
+	selector, err := placementSelector(isvc)
 	if err != nil {
-		return true // malformed selector: fail safe by re-enqueuing
+		return true
 	}
-	if !hasReq {
-		return false // not fanned out fleet-wide; the cluster cannot be a candidate
-	}
-	return sel.Matches(clusterSelectorSet)
+	_, matches := selector.Match(&v1beta1.WorkloadCluster{ObjectMeta: metav1.ObjectMeta{Name: clusterName, Labels: clusterSelectorSet}})
+	return matches
 }
 
 // isvcStatusReferencesCluster reports whether the ISVC's placement status names
