@@ -44,6 +44,10 @@ data:
   podDisruptionBudget: |-
     {{- toJson . | nindent 4 }}
 {{- end }}
+{{- with .Values.ome.controller.tpuSliceProvisioning }}
+  tpuSliceProvisioning: |-
+    {{- toJson . | nindent 4 }}
+{{- end }}
 
   canaryAnalysis: |-
     {

@@ -485,6 +485,38 @@ ome:
         maxUnavailable: 1
       omeNative:
         maxUnavailable: 1
+    # tpuSliceProvisioning describes TPU node pools that provision slices on
+    # demand: how a workload's slice shape is read from the node labels its
+    # pods select, how a provisioned slice is recognized, and the metadata and
+    # ready states of the slice objects the controller creates. Read once at
+    # manager startup. Empty ({}) provisions no slices; set, every field is
+    # required, the binary has no default for any of them, and a malformed
+    # block stops the manager from starting. Pools without the provisionOnly
+    # label hold static slices and are never provisioned or released.
+    # slice.annotations may be {} but must be present. Example for GKE dynamic
+    # slicing with single-host Ironwood slices:
+    #   tpuSliceProvisioning:
+    #     chipResource: google.com/tpu
+    #     nodeLabels:
+    #       accelerator: cloud.google.com/gke-tpu-accelerator
+    #       topology: cloud.google.com/gke-tpu-topology
+    #       slice: cloud.google.com/gke-tpu-slice
+    #     provisionOnly:
+    #       key: cloud.google.com/gke-accelerator-topology-mode
+    #       value: PROVISION_ONLY
+    #     accelerators:
+    #       tpu7x:
+    #         sliceType: tpu7x
+    #         chipsPerHost: 4
+    #         topologies: ["2x2x1"]
+    #     slice:
+    #       ownerKindLabel: cloud.google.com/slice-owner-kind
+    #       ownerNameLabel: cloud.google.com/slice-owner-name
+    #       annotations:
+    #         cloud.google.com/managed-by: slice-scheduler
+    #         slice.gke.io/retry-on-failure: "true"
+    #       readyStates: [ACTIVE, ACTIVE_DEGRADED]
+    tpuSliceProvisioning: {}
     # lifecycle tunes the OMENative per-Instance lifecycle state machine.
     lifecycle:
       # Missing-Pod budget for one OMENative scale-up pass. Instance and

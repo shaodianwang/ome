@@ -72,6 +72,18 @@ grep -Fq '"rawDeployment":{"maxUnavailable":1}' <<<"${controller_config}" ||
   fail "default RawDeployment disruption budget was not rendered"
 grep -Fq '"omeNative":{"maxUnavailable":1}' <<<"${controller_config}" ||
   fail "default OMENative disruption budget was not rendered"
+if grep -Fq 'tpuSliceProvisioning' <<<"${controller_config}"; then
+  fail "tpuSliceProvisioning was rendered when unset"
+fi
+
+tpu_slice_config="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set-json 'ome.controller.tpuSliceProvisioning={"chipResource":"example.com/tpu","accelerators":{"acc-a":{"sliceType":"type-a","chipsPerHost":4,"topologies":["2x2x1"]}},"slice":{"annotations":{},"readyStates":["READY"]}}' \
+  --show-only templates/ome-controller/configmap.yaml)"
+grep -Fq '"accelerators":{"acc-a":{"chipsPerHost":4,"sliceType":"type-a","topologies":["2x2x1"]}}' <<<"${tpu_slice_config}" ||
+  fail "tpuSliceProvisioning accelerators were not rendered as JSON"
+grep -Fq '"slice":{"annotations":{},"readyStates":["READY"]}' <<<"${tpu_slice_config}" ||
+  fail "tpuSliceProvisioning did not keep explicitly empty slice annotations"
 if grep -Fq 'minReadySeconds' <<<"${controller_config}"; then
   fail "deploy.minReadySeconds was rendered when unset"
 fi
