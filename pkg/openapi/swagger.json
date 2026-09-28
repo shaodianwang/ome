@@ -5470,6 +5470,52 @@
         }
       }
     },
+    "v1beta1.PlacementComponentDemand": {
+      "description": "PlacementComponentDemand identifies one component's rendered replica shape.",
+      "type": "object",
+      "required": [
+        "component",
+        "renderingHash"
+      ],
+      "properties": {
+        "component": {
+          "type": "string",
+          "default": ""
+        },
+        "renderingHash": {
+          "description": "RenderingHash includes pod shapes, worker count, mode and RuntimeClasses.",
+          "type": "string",
+          "default": ""
+        }
+      }
+    },
+    "v1beta1.PlacementDemandContract": {
+      "description": "PlacementDemandContract binds component rendering to normalized unit demand. Router is excluded because its replicas follow a per-home policy.",
+      "type": "object",
+      "required": [
+        "fingerprint",
+        "components"
+      ],
+      "properties": {
+        "components": {
+          "description": "Components includes exactly the declared Engine/Decoder components.",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1beta1.PlacementComponentDemand"
+          },
+          "x-kubernetes-list-map-keys": [
+            "component"
+          ],
+          "x-kubernetes-list-type": "map"
+        },
+        "fingerprint": {
+          "description": "Fingerprint identifies the complete resolved resource/flavor demand.",
+          "type": "string",
+          "default": ""
+        }
+      }
+    },
     "v1beta1.PlacementExecutionPolicy": {
       "description": "PlacementExecutionPolicy carries source allocation authority to a member's component reconciler. It is absent for locally managed services.",
       "type": "object",
@@ -5484,6 +5530,10 @@
         "clusterUID": {
           "type": "string",
           "default": ""
+        },
+        "demand": {
+          "description": "Demand requires member rendering to match the accepted normalization inputs before a component can project workloads. Absent for static plans.",
+          "$ref": "#/definitions/v1beta1.PlacementDemandContract"
         },
         "pauseSurge": {
           "description": "PauseSurge prevents new surplus-producing operations while existing operations retain their reservations and may finish cleanup.",

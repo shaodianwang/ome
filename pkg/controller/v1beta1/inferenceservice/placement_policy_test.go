@@ -29,6 +29,12 @@ func TestPlacementPolicyPreflight(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	demand, err := protocol.Encode(&v1beta1.PlacementExecutionPolicy{PlanID: "plan-a", Revision: 1, SourceUID: "source-a", ClusterUID: "cluster-a",
+		Demand: &v1beta1.PlacementDemandContract{Fingerprint: strings.Repeat("a", 64), Components: []v1beta1.PlacementComponentDemand{{Component: v1beta1.EngineComponent, RenderingHash: strings.Repeat("b", 64)}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, mode := range []constants.DeploymentModeType{constants.OMENative, constants.RawDeployment, constants.MultiNode, constants.VirtualDeployment} {
 		t.Run(string(mode), func(t *testing.T) {
 			for _, tt := range []struct {
@@ -36,15 +42,19 @@ func TestPlacementPolicyPreflight(t *testing.T) {
 				origin    string
 				policy    string
 				deleting  bool
+				engine    bool
 				wantBlock bool
 			}{
 				{name: "local service"},
 				{name: "local malformed annotation ignored", policy: "{"},
-				{name: "local future policy ignored", policy: `{"version":2}`},
+				{name: "local future policy ignored", policy: `{"version":3}`},
+				{name: "local ignores demand inventory", policy: demand},
 				{name: "derived without policy", origin: "source-a"},
 				{name: "supported policy", origin: "source-a", policy: policy},
 				{name: "malformed policy", origin: "source-a", policy: "{", wantBlock: true},
-				{name: "unknown version", origin: "source-a", policy: `{"version":2}`, wantBlock: true},
+				{name: "unknown version", origin: "source-a", policy: `{"version":3}`, wantBlock: true},
+				{name: "supported demand", origin: "source-a", policy: demand, engine: true},
+				{name: "undeclared demand component", origin: "source-a", policy: demand, wantBlock: true},
 				{name: "wrong origin", origin: "source-b", policy: policy, wantBlock: true},
 				{name: "deletion permits cleanup", origin: "source-a", policy: "{", deleting: true},
 			} {
@@ -55,6 +65,9 @@ func TestPlacementPolicyPreflight(t *testing.T) {
 					}
 					service := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: "service", Namespace: "team-a", UID: "member-uid", ResourceVersion: "1", Annotations: map[string]string{}},
 						Spec: v1beta1.InferenceServiceSpec{DeploymentMode: ptr.To(mode)}}
+					if tt.engine {
+						service.Spec.Engine = &v1beta1.EngineSpec{}
+					}
 					if tt.origin != "" {
 						service.Annotations[constants.PlacementOriginUID] = tt.origin
 					}
@@ -91,7 +104,7 @@ func TestPlacementPolicyPreflight(t *testing.T) {
 					wantReads := 1
 					if tt.wantBlock {
 						wantReads = 0
-						if err == nil || !strings.Contains(err.Error(), "placement execution policy") {
+						if err == nil || !strings.Contains(err.Error(), "placement") {
 							t.Fatalf("error = %v, want invalid placement policy", err)
 						}
 					} else if !errors.Is(err, configErr) {

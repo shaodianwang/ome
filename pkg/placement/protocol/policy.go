@@ -2,9 +2,13 @@
 package protocol
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"k8s.io/apimachinery/pkg/api/equality"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -23,7 +27,10 @@ func IsAffinityMember(service *v1beta1.InferenceService) bool {
 
 // executionVersion identifies the annotation wire format. An envelope keeps
 // readers that only understand flat policies from accepting partial authority.
-const executionVersion = 1
+const (
+	executionVersion = 1
+	demandVersion    = 2
+)
 
 type executionEnvelope struct {
 	Version int                               `json:"version"`
@@ -57,6 +64,23 @@ func FromDerived(service *v1beta1.InferenceService) (*v1beta1.PlacementExecution
 	if string(policy.SourceUID) != origin {
 		return nil, fmt.Errorf("placement execution policy does not belong to the derived service's source")
 	}
+	if policy.Demand != nil {
+		declared := map[v1beta1.ComponentType]bool{
+			v1beta1.EngineComponent:  service.Spec.Engine != nil,
+			v1beta1.DecoderComponent: service.Spec.Decoder != nil,
+		}
+		for _, component := range policy.Demand.Components {
+			if !declared[component.Component] {
+				return nil, fmt.Errorf("placement demand names an undeclared component %q", component.Component)
+			}
+			delete(declared, component.Component)
+		}
+		for component, exists := range declared {
+			if exists {
+				return nil, fmt.Errorf("placement demand is missing component %q", component)
+			}
+		}
+	}
 	return policy, nil
 }
 
@@ -74,14 +98,21 @@ func decode(raw string) (*v1beta1.PlacementExecutionPolicy, error) {
 		if err := decoder.Decode(&envelope); err != nil {
 			return nil, err
 		}
-		if envelope.Version != executionVersion {
+		if envelope.Version != executionVersion && envelope.Version != demandVersion {
 			return nil, fmt.Errorf("unsupported execution policy version %d", envelope.Version)
+		}
+		hasDemand := envelope.Policy != nil && envelope.Policy.Demand != nil
+		if (envelope.Version == demandVersion) != hasDemand {
+			return nil, fmt.Errorf("execution policy version does not match its demand contract")
 		}
 		return envelope.Policy, nil
 	}
 	var policy v1beta1.PlacementExecutionPolicy
 	if err := decoder.Decode(&policy); err != nil {
 		return nil, err
+	}
+	if policy.Demand != nil {
+		return nil, fmt.Errorf("placement demand requires a versioned execution envelope")
 	}
 	return &policy, nil
 }
@@ -92,7 +123,24 @@ func Validate(policy *v1beta1.PlacementExecutionPolicy) error {
 	if policy == nil || policy.PlanID == "" || policy.Revision <= 0 || policy.SourceUID == "" || policy.ClusterUID == "" {
 		return fmt.Errorf("placement execution policy requires plan, source, cluster identities and a positive revision")
 	}
+	if policy.Demand != nil {
+		if !validHash(policy.Demand.Fingerprint) || len(policy.Demand.Components) == 0 {
+			return fmt.Errorf("placement demand requires a fingerprint and component renderings")
+		}
+		seen := map[v1beta1.ComponentType]bool{}
+		for _, component := range policy.Demand.Components {
+			if (component.Component != v1beta1.EngineComponent && component.Component != v1beta1.DecoderComponent) || seen[component.Component] || !validHash(component.RenderingHash) {
+				return fmt.Errorf("placement demand has invalid or duplicate component %q", component.Component)
+			}
+			seen[component.Component] = true
+		}
+	}
 	return nil
+}
+
+func validHash(value string) bool {
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == sha256.Size && value == strings.ToLower(value)
 }
 
 // Encode produces the annotation value a source stamps on an owned member copy.
@@ -100,7 +148,11 @@ func Encode(policy *v1beta1.PlacementExecutionPolicy) (string, error) {
 	if err := Validate(policy); err != nil {
 		return "", err
 	}
-	data, err := json.Marshal(executionEnvelope{Version: executionVersion, Policy: policy})
+	version := executionVersion
+	if policy.Demand != nil {
+		version = demandVersion
+	}
+	data, err := json.Marshal(executionEnvelope{Version: version, Policy: policy})
 	return string(data), err
 }
 
@@ -122,7 +174,7 @@ func Authorize(current, next *v1beta1.PlacementExecutionPolicy) error {
 	if current.SourceUID != next.SourceUID || current.ClusterUID != next.ClusterUID {
 		return fmt.Errorf("placement execution identity changed")
 	}
-	if next.Revision < current.Revision || next.Revision == current.Revision && *next != *current {
+	if next.Revision < current.Revision || next.Revision == current.Revision && !equality.Semantic.DeepEqual(next, current) {
 		return fmt.Errorf("placement execution revision is stale or conflicting")
 	}
 	return nil

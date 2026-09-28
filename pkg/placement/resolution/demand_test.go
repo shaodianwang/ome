@@ -108,6 +108,15 @@ func TestResolveDemand(t *testing.T) {
 			if diff := cmp.Diff(f.root.ObjectMeta, got.Report); diff != "" {
 				t.Fatalf("report provenance (-want +got):\n%s", diff)
 			}
+			contract := &v1beta1.PlacementDemandContract{Fingerprint: got.Demand.Fingerprint}
+			for _, component := range []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent} {
+				if hash, exists := got.Unit.Rendering[component]; exists {
+					contract.Components = append(contract.Components, v1beta1.PlacementComponentDemand{Component: component, RenderingHash: hash})
+				}
+			}
+			if diff := cmp.Diff(contract, got.Contract); diff != "" {
+				t.Fatalf("execution contract (-want +got):\n%s", diff)
+			}
 			if err := got.Check(t.Context()); err != nil {
 				t.Fatal(err)
 			}
@@ -116,6 +125,10 @@ func TestResolveDemand(t *testing.T) {
 			}
 			got.Demand.Pools[0].NodeLabels["hardware"] = "mutated"
 			got.Report.Labels = map[string]string{"changed": "true"}
+			got.Contract.Components[0].RenderingHash = "mutated"
+			if diff := cmp.Diff(contract.Components[0].RenderingHash, got.Unit.Rendering[v1beta1.EngineComponent]); diff != "" {
+				t.Fatalf("contract aliases unit rendering:\n%s", diff)
+			}
 			if diff := cmp.Diff(before, unitJSON(t, []any{f.service, f.runtime, f.extra})); diff != "" {
 				t.Fatalf("mutated inputs (-want +got):\n%s", diff)
 			}

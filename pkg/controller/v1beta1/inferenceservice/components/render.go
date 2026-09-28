@@ -8,6 +8,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/placement/capacity"
 )
 
 // ReplicaTemplates are the component's rendered templates before workload
@@ -17,6 +19,26 @@ type ReplicaTemplates struct {
 	Primary    *corev1.PodSpec
 	Worker     *corev1.PodSpec
 	WorkerSize int
+}
+
+// PodSets describes one complete replica under the component's resolved mode.
+func (t ReplicaTemplates) PodSets(mode constants.DeploymentModeType, leader, worker bool) ([]capacity.PodSet, error) {
+	sets := []capacity.PodSet{{Name: "primary", Count: 1, Spec: t.Primary}}
+	switch mode {
+	case constants.RawDeployment:
+		return sets, nil
+	case constants.OMENative:
+		if !leader && !worker {
+			return sets, nil
+		}
+	case constants.MultiNode:
+	default:
+		return nil, fmt.Errorf("deployment mode %q has no supported replica shape", mode)
+	}
+	if !leader || !worker || t.Worker == nil || t.WorkerSize <= 0 {
+		return nil, fmt.Errorf("a multi-pod replica requires a leader and a positive resolved worker count")
+	}
+	return append(sets, capacity.PodSet{Name: "workers", Count: int64(t.WorkerSize), Spec: t.Worker}), nil
 }
 
 // RenderEngineReplica uses the Engine's pod renderer without reconciling

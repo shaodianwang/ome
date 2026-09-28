@@ -105,6 +105,10 @@ func (e *Engine) Reconcile(ctx context.Context, isvc *v1beta1.InferenceService) 
 
 	// Get worker size
 	size := e.getWorkerSize()
+	if err := checkPlacementDemand(ctx, &e.BaseComponentFields, isvc, v1beta1.EngineComponent, e.engineSpec.Leader != nil, e.engineSpec.Worker != nil,
+		ReplicaTemplates{Primary: podSpec, Worker: workerPodSpec, WorkerSize: size}); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	// Reconcile deployment based on deployment mode. The deployment
 	// reconciler's RequeueAfter MUST be preserved through the rest of

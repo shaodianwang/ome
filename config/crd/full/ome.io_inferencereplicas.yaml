@@ -673,6 +673,36 @@ spec:
                   properties:
                     clusterUID:
                       type: string
+                    demand:
+                      properties:
+                        components:
+                          items:
+                            properties:
+                              component:
+                                enum:
+                                  - engine
+                                  - decoder
+                                type: string
+                              renderingHash:
+                                pattern: ^[a-f0-9]{64}$
+                                type: string
+                            required:
+                              - component
+                              - renderingHash
+                            type: object
+                          maxItems: 2
+                          minItems: 1
+                          type: array
+                          x-kubernetes-list-map-keys:
+                            - component
+                          x-kubernetes-list-type: map
+                        fingerprint:
+                          pattern: ^[a-f0-9]{64}$
+                          type: string
+                      required:
+                        - components
+                        - fingerprint
+                      type: object
                     pauseSurge:
                       type: boolean
                     planID:

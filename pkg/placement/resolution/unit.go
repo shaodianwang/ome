@@ -7,11 +7,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
-	"slices"
 
 	corev1 "k8s.io/api/core/v1"
 	nodev1 "k8s.io/api/node/v1"
-	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -29,10 +27,11 @@ import (
 // ResolvedUnit combines the member's rendering and nominal accelerator demand.
 // Check verifies read dependencies, not pod admission or member application.
 type ResolvedUnit struct {
-	Runtime *Runtime
-	Demand  capacity.UnitDemand
-	Engine  components.ReplicaTemplates
-	Decoder *components.ReplicaTemplates
+	Runtime   *Runtime
+	Demand    capacity.UnitDemand
+	Engine    components.ReplicaTemplates
+	Decoder   *components.ReplicaTemplates
+	Rendering map[v1beta1.ComponentType]string
 }
 
 func (u *ResolvedUnit) Check(ctx context.Context) error {
@@ -107,7 +106,7 @@ func (r Resolver) ResolveUnit(ctx context.Context, desired, standing *v1beta1.In
 		return nil, err
 	}
 	unit := capacity.ReplicaUnit{}
-	unit.Engine, err = renderedPodSets(engineMode, engine.Leader != nil, engine.Worker != nil, out.Engine)
+	unit.Engine, err = out.Engine.PodSets(engineMode, engine.Leader != nil, engine.Worker != nil)
 	if err != nil {
 		return nil, fmt.Errorf("engine demand: %w", err)
 	}
@@ -121,7 +120,7 @@ func (r Resolver) ResolveUnit(ctx context.Context, desired, standing *v1beta1.In
 			return nil, err
 		}
 		out.Decoder = &templates
-		unit.Decoder, err = renderedPodSets(decoderMode, decoder.Leader != nil, decoder.Worker != nil, templates)
+		unit.Decoder, err = templates.PodSets(decoderMode, decoder.Leader != nil, decoder.Worker != nil)
 		if err != nil {
 			return nil, fmt.Errorf("decoder demand: %w", err)
 		}
@@ -140,6 +139,21 @@ func (r Resolver) ResolveUnit(ctx context.Context, desired, standing *v1beta1.In
 		}
 	}
 	var modelIdentity metav1.ObjectMeta
+	out.Rendering = map[v1beta1.ComponentType]string{}
+	for _, component := range []struct {
+		name v1beta1.ComponentType
+		mode constants.DeploymentModeType
+		pods []capacity.PodSet
+	}{{v1beta1.EngineComponent, engineMode, unit.Engine}, {v1beta1.DecoderComponent, decoderMode, unit.Decoder}} {
+		if len(component.pods) == 0 {
+			continue
+		}
+		fingerprint, err := capacity.ComponentFingerprint(ctx, rt.reads, component.name, component.mode, component.pods)
+		if err != nil {
+			return nil, err
+		}
+		out.Rendering[component.name] = fingerprint
+	}
 	if rt.ModelMeta != nil {
 		modelIdentity = renderingIdentity(*rt.ModelMeta)
 	}
@@ -168,68 +182,10 @@ func (r Resolver) ResolveUnit(ctx context.Context, desired, standing *v1beta1.In
 	return out, nil
 }
 
-func renderedPodSets(mode constants.DeploymentModeType, leader, worker bool, templates components.ReplicaTemplates) ([]capacity.PodSet, error) {
-	sets := []capacity.PodSet{{Name: "primary", Count: 1, Spec: templates.Primary}}
-	switch mode {
-	case constants.RawDeployment:
-		return sets, nil
-	case constants.OMENative:
-		if !leader && !worker {
-			return sets, nil
-		}
-	case constants.MultiNode:
-	default:
-		return nil, fmt.Errorf("deployment mode %q has no supported replica shape", mode)
-	}
-	if !leader || !worker || templates.Worker == nil || templates.WorkerSize <= 0 {
-		return nil, fmt.Errorf("a multi-pod replica requires a leader and a positive resolved worker count")
-	}
-	return append(sets, capacity.PodSet{Name: "workers", Count: int64(templates.WorkerSize), Spec: templates.Worker}), nil
-}
-
 func renderingIdentity(meta metav1.ObjectMeta) metav1.ObjectMeta {
 	return metav1.ObjectMeta{Name: meta.Name, Namespace: meta.Namespace, UID: meta.UID, Labels: maps.Clone(meta.Labels), Annotations: maps.Clone(meta.Annotations)}
 }
 
-// RuntimeClass admission contributes overhead and required node selection.
-// A conflicting authored value cannot be measured as an admitted pod.
 func resolveRuntimeClass(ctx context.Context, reader client.Reader, pod *corev1.PodSpec) (*nodev1.RuntimeClass, error) {
-	if pod.RuntimeClassName == nil {
-		if len(pod.Overhead) != 0 {
-			return nil, fmt.Errorf("pod overhead has no identified RuntimeClass")
-		}
-		return nil, nil
-	}
-	if *pod.RuntimeClassName == "" {
-		return nil, fmt.Errorf("RuntimeClass name is empty")
-	}
-	class := &nodev1.RuntimeClass{}
-	if err := reader.Get(ctx, client.ObjectKey{Name: *pod.RuntimeClassName}, class); err != nil {
-		return nil, err
-	}
-	var overhead corev1.ResourceList
-	if class.Overhead != nil {
-		overhead = class.Overhead.PodFixed
-	}
-	if len(pod.Overhead) != 0 && !apiequality.Semantic.DeepEqual(pod.Overhead, overhead) {
-		return nil, fmt.Errorf("pod overhead differs from RuntimeClass %q", class.Name)
-	}
-	pod.Overhead = overhead.DeepCopy()
-	if class.Scheduling != nil {
-		for key, value := range class.Scheduling.NodeSelector {
-			if existing, ok := pod.NodeSelector[key]; ok && existing != value {
-				return nil, fmt.Errorf("pod node selector conflicts with RuntimeClass %q", class.Name)
-			}
-			if pod.NodeSelector == nil {
-				pod.NodeSelector = map[string]string{}
-			}
-			pod.NodeSelector[key] = value
-		}
-		for _, toleration := range class.Scheduling.Tolerations {
-			if !slices.ContainsFunc(pod.Tolerations, func(existing corev1.Toleration) bool { return apiequality.Semantic.DeepEqual(existing, toleration) }) {
-				pod.Tolerations = append(pod.Tolerations, *toleration.DeepCopy())
-			}
-		}
-	}
-	return class, nil
+	return capacity.ApplyRuntimeClass(ctx, reader, pod)
 }

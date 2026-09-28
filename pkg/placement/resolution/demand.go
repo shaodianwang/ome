@@ -17,9 +17,10 @@ import (
 // identity. Consumers must match Report to fleet provenance and verify member
 // application before using Reader's fresh hardware sample to authorize a plan.
 type ResolvedDemand struct {
-	Unit   *ResolvedUnit
-	Demand capacity.Demand
-	Report metav1.ObjectMeta
+	Unit     *ResolvedUnit
+	Demand   capacity.Demand
+	Report   metav1.ObjectMeta
+	Contract *v1beta1.PlacementDemandContract
 }
 
 func (d *ResolvedDemand) Check(ctx context.Context) error {
@@ -61,6 +62,12 @@ func (r Resolver) ResolveDemand(ctx context.Context, desired, standing *v1beta1.
 		return nil, err
 	}
 	out := &ResolvedDemand{Unit: unit, Demand: demand, Report: *root.ObjectMeta.DeepCopy()}
+	out.Contract = &v1beta1.PlacementDemandContract{Fingerprint: demand.Fingerprint}
+	for _, component := range []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent} {
+		if hash, exists := unit.Rendering[component]; exists {
+			out.Contract.Components = append(out.Contract.Components, v1beta1.PlacementComponentDemand{Component: component, RenderingHash: hash})
+		}
+	}
 	if err := out.Check(ctx); err != nil {
 		return nil, err
 	}

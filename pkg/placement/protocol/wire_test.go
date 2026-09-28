@@ -24,7 +24,7 @@ func TestExecutionWireCompatibility(t *testing.T) {
 	}{
 		{name: "flat policy", raw: string(flat)},
 		{name: "versioned policy", raw: `{"version":1,"policy":` + string(flat) + `}`},
-		{name: "future version", raw: `{"version":2,"policy":` + string(flat) + `}`, wantErr: true},
+		{name: "future version", raw: `{"version":3,"policy":` + string(flat) + `}`, wantErr: true},
 		{name: "missing version", raw: `{"policy":` + string(flat) + `}`, wantErr: true},
 		{name: "null version", raw: `{"version":null,"policy":` + string(flat) + `}`, wantErr: true},
 		{name: "wrong version type", raw: `{"version":"1","policy":` + string(flat) + `}`, wantErr: true},

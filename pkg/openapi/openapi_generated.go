@@ -145,6 +145,8 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ParentReference":                  schema_pkg_apis_ome_v1beta1_ParentReference(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementCapacityPool":            schema_pkg_apis_ome_v1beta1_PlacementCapacityPool(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementCapacitySample":          schema_pkg_apis_ome_v1beta1_PlacementCapacitySample(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementComponentDemand":         schema_pkg_apis_ome_v1beta1_PlacementComponentDemand(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementDemandContract":          schema_pkg_apis_ome_v1beta1_PlacementDemandContract(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementExecutionPolicy":         schema_pkg_apis_ome_v1beta1_PlacementExecutionPolicy(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementPlanStatus":              schema_pkg_apis_ome_v1beta1_PlacementPlanStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementSpec":                    schema_pkg_apis_ome_v1beta1_PlacementSpec(ref),
@@ -9718,6 +9720,81 @@ func schema_pkg_apis_ome_v1beta1_PlacementCapacitySample(ref common.ReferenceCal
 	}
 }
 
+func schema_pkg_apis_ome_v1beta1_PlacementComponentDemand(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "PlacementComponentDemand identifies one component's rendered replica shape.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"component": {
+						SchemaProps: spec.SchemaProps{
+							Default: "",
+							Type:    []string{"string"},
+							Format:  "",
+						},
+					},
+					"renderingHash": {
+						SchemaProps: spec.SchemaProps{
+							Description: "RenderingHash includes pod shapes, worker count, mode and RuntimeClasses.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+				Required: []string{"component", "renderingHash"},
+			},
+		},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_PlacementDemandContract(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "PlacementDemandContract binds component rendering to normalized unit demand. Router is excluded because its replicas follow a per-home policy.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"fingerprint": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Fingerprint identifies the complete resolved resource/flavor demand.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"components": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"component",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Components includes exactly the declared Engine/Decoder components.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementComponentDemand"),
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"fingerprint", "components"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementComponentDemand"},
+	}
+}
+
 func schema_pkg_apis_ome_v1beta1_PlacementExecutionPolicy(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -9761,10 +9838,18 @@ func schema_pkg_apis_ome_v1beta1_PlacementExecutionPolicy(ref common.ReferenceCa
 							Format:      "",
 						},
 					},
+					"demand": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Demand requires member rendering to match the accepted normalization inputs before a component can project workloads. Absent for static plans.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementDemandContract"),
+						},
+					},
 				},
 				Required: []string{"planID", "revision", "sourceUID", "clusterUID", "pauseSurge"},
 			},
 		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementDemandContract"},
 	}
 }
 

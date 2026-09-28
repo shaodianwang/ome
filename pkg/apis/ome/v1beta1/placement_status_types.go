@@ -108,4 +108,31 @@ type PlacementExecutionPolicy struct {
 	// PauseSurge prevents new surplus-producing operations while existing
 	// operations retain their reservations and may finish cleanup.
 	PauseSurge bool `json:"pauseSurge"`
+	// Demand requires member rendering to match the accepted normalization
+	// inputs before a component can project workloads. Absent for static plans.
+	// +optional
+	Demand *PlacementDemandContract `json:"demand,omitempty"`
+}
+
+// PlacementDemandContract binds component rendering to normalized unit demand.
+// Router is excluded because its replicas follow a per-home policy.
+type PlacementDemandContract struct {
+	// Fingerprint identifies the complete resolved resource/flavor demand.
+	// +kubebuilder:validation:Pattern=`^[a-f0-9]{64}$`
+	Fingerprint string `json:"fingerprint"`
+	// Components includes exactly the declared Engine/Decoder components.
+	// +listType=map
+	// +listMapKey=component
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=2
+	Components []PlacementComponentDemand `json:"components"`
+}
+
+// PlacementComponentDemand identifies one component's rendered replica shape.
+type PlacementComponentDemand struct {
+	// +kubebuilder:validation:Enum=engine;decoder
+	Component ComponentType `json:"component"`
+	// RenderingHash includes pod shapes, worker count, mode and RuntimeClasses.
+	// +kubebuilder:validation:Pattern=`^[a-f0-9]{64}$`
+	RenderingHash string `json:"renderingHash"`
 }
