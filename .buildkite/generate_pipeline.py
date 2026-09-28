@@ -244,6 +244,36 @@ KIND_QUARANTINE: list[dict[str, str]] = [
     },
 ]
 
+# Scheduler-twin soft list: the escape hatch that keeps the gating twins
+# meaningful, the way KIND_QUARANTINE does for a spec. A group whose twin is
+# red on main while its default-scheduler job is green is a gang-scheduler
+# defect with an owner; it stays advisory here, visibly and briefly, instead of
+# turning every main build red or being retried away. Same rules as the
+# quarantine: owner, one-line reason, expiry (two weeks is the norm);
+# generation fails on an unknown group, an empty owner or reason, and on the
+# day after `expires`. To promote the twin, delete the entry in the fix PR.
+KIND_SCHEDULER_SOFT_GROUPS: list[dict[str, str]] = [
+    {
+        "group": "gang-surge-multipod",
+        "owner": "slin1237",
+        "expires": "2026-10-12",
+        "reason": (
+            "the required leader topology spread is not honored under the "
+            "gang scheduler: two instances' leaders never land on distinct "
+            "nodes within the spec's budget; the default-scheduler job passes"
+        ),
+    },
+    {
+        "group": "migration-relocation",
+        "owner": "slin1237",
+        "expires": "2026-10-12",
+        "reason": (
+            "auto-relocation of a stuck Instance does not complete under the "
+            "gang scheduler; the default-scheduler job passes"
+        ),
+    },
+]
+
 
 def _truthy(val: str) -> bool:
     return val.strip().lower() in ("1", "true", "yes", "on")
@@ -258,9 +288,11 @@ GKE_KIND_ENABLED = _truthy(os.environ.get("GKE_KIND_ENABLED", "1"))
 GKE_EVAL_ENABLED = _truthy(os.environ.get("GKE_EVAL_ENABLED", "1"))
 # Second scheduler dimension of the eval: every feature/topology job again with
 # the fixtures stamped schedulerName=ome-scheduler and the gang scheduler
-# installed in the KIND cluster. Advisory until GKE_EVAL_SCHEDULER_HARD_FAIL=1.
+# installed in the KIND cluster. The twins gate the build like the default
+# jobs; GKE_EVAL_SCHEDULER_HARD_FAIL=0 is the emergency switch that makes them
+# advisory again, to be reported the moment it is flipped.
 GKE_EVAL_SCHEDULER_ENABLED = _truthy(os.environ.get("GKE_EVAL_SCHEDULER_ENABLED", "1"))
-GKE_EVAL_SCHEDULER_HARD_FAIL = _truthy(os.environ.get("GKE_EVAL_SCHEDULER_HARD_FAIL", "0"))
+GKE_EVAL_SCHEDULER_HARD_FAIL = _truthy(os.environ.get("GKE_EVAL_SCHEDULER_HARD_FAIL", "1"))
 # The gang scheduler places one gang member per node, so a multi-node case needs
 # as many worker nodes as its peak pod count. Its scheduler twin gets a cluster
 # sized to the shard, capped here; cases above the cap are left out of the twin
@@ -269,10 +301,12 @@ GKE_EVAL_SCHEDULER_MAX_WORKERS = int(os.environ.get("GKE_EVAL_SCHEDULER_MAX_WORK
 EVAL_GANG_SCHEDULER = "ome-scheduler"
 # Scheduler dimension of the KIND suite lanes: every semantic group again with
 # the fixture runtime selecting ome-scheduler, installed into the suite's
-# cluster. Main-only (the baked scheduler image is a main artifact) and
-# advisory until GKE_KIND_SCHEDULER_HARD_FAIL=1.
+# cluster. Main-only (the baked scheduler image is a main artifact). The twins
+# gate the build except the groups in KIND_SCHEDULER_SOFT_GROUPS;
+# GKE_KIND_SCHEDULER_HARD_FAIL=0 is the emergency switch that makes every twin
+# advisory again.
 GKE_KIND_SCHEDULER_ENABLED = _truthy(os.environ.get("GKE_KIND_SCHEDULER_ENABLED", "1"))
-GKE_KIND_SCHEDULER_HARD_FAIL = _truthy(os.environ.get("GKE_KIND_SCHEDULER_HARD_FAIL", "0"))
+GKE_KIND_SCHEDULER_HARD_FAIL = _truthy(os.environ.get("GKE_KIND_SCHEDULER_HARD_FAIL", "1"))
 # "" is the cluster default scheduler; every eval job is emitted once per entry.
 EVAL_SCHEDULERS = [""] + ([EVAL_GANG_SCHEDULER] if GKE_EVAL_SCHEDULER_ENABLED else [])
 # Kill switch for the deployed-mode operator-upgrade identity gate (see
@@ -578,7 +612,6 @@ def _kind_quarantine_files() -> list[str]:
     quarantine blocks the build instead of silently un-testing a spec forever.
     """
     actual = set(_spec_files_in(KIND_SUITE_DIR))
-    today = _today()
     files: list[str] = []
     for entry in KIND_QUARANTINE:
         spec = str(entry.get("spec", "")).strip()
@@ -589,25 +622,64 @@ def _kind_quarantine_files() -> list[str]:
             raise RuntimeError(f"quarantined KIND spec does not exist: {filename}")
         if filename in files:
             raise RuntimeError(f"duplicate KIND quarantine entry: {filename}")
-        for field in ("owner", "reason"):
-            if not str(entry.get(field, "")).strip():
-                raise RuntimeError(f"KIND quarantine entry for {spec} has no {field}")
-        raw_expiry = str(entry.get("expires", "")).strip()
-        try:
-            expires = datetime.date.fromisoformat(raw_expiry)
-        except ValueError:
-            raise RuntimeError(
-                f"KIND quarantine entry for {spec} needs an expires date "
-                f"(YYYY-MM-DD), got {raw_expiry!r}"
-            ) from None
-        if expires < today:
-            raise RuntimeError(
-                f"KIND quarantine for {spec} expired on {raw_expiry} "
-                f"(owner {entry['owner']}): fix the spec and return it to its "
-                "group, or extend the entry with a reason"
-            )
+        _owned_until(
+            entry, f"KIND quarantine entry for {spec}",
+            expired=lambda raw, owner: (
+                f"KIND quarantine for {spec} expired on {raw} (owner {owner}): "
+                "fix the spec and return it to its group, or extend the entry "
+                "with a reason"
+            ),
+        )
         files.append(filename)
     return files
+
+
+def _owned_until(entry: dict, what: str, expired) -> str:
+    """Check the owner/reason/expires triple every dated escape hatch carries
+    and return the expiry as written. `expired(raw, owner)` words the error for
+    an entry whose time is up.
+    """
+    for field in ("owner", "reason"):
+        if not str(entry.get(field, "")).strip():
+            raise RuntimeError(f"{what} has no {field}")
+    raw_expiry = str(entry.get("expires", "")).strip()
+    try:
+        expires = datetime.date.fromisoformat(raw_expiry)
+    except ValueError:
+        raise RuntimeError(
+            f"{what} needs an expires date (YYYY-MM-DD), got {raw_expiry!r}"
+        ) from None
+    if expires < _today():
+        raise RuntimeError(expired(raw_expiry, entry["owner"]))
+    return raw_expiry
+
+
+def _kind_scheduler_soft_groups() -> dict[str, str]:
+    """Validate KIND_SCHEDULER_SOFT_GROUPS; return {group slug: expiry}.
+
+    Same rejections as the quarantine, for the same reason: an entry that
+    names no group, that nobody owns or explains, or whose time is up has
+    stopped carrying information, and an abandoned soft twin would otherwise
+    stay advisory forever.
+    """
+    known = {slug for slug, _, _ in KIND_SPEC_GROUPS}
+    soft: dict[str, str] = {}
+    for entry in KIND_SCHEDULER_SOFT_GROUPS:
+        group = str(entry.get("group", "")).strip()
+        if not group:
+            raise RuntimeError("KIND scheduler soft-list entry without a group")
+        if group not in known:
+            raise RuntimeError(f"soft-listed KIND scheduler twin is not a spec group: {group}")
+        if group in soft:
+            raise RuntimeError(f"duplicate KIND scheduler soft-list entry: {group}")
+        soft[group] = _owned_until(
+            entry, f"KIND scheduler soft-list entry for {group}",
+            expired=lambda raw, owner: (
+                f"KIND scheduler twin {group} was soft until {raw} (owner {owner}): "
+                "fix it under the gang scheduler, or extend the entry with a reason"
+            ),
+        )
+    return soft
 
 
 def _spec_groups_for(
@@ -793,18 +865,24 @@ def _gke_kind_scheduler_group() -> str:
 
     Same bundle, same semantic groups, one extra env var: the suite installs
     ome-scheduler into its cluster and the fixture runtime selects it. Its own
-    group and status context keep the default-scheduler gate untouched;
-    advisory until GKE_KIND_SCHEDULER_HARD_FAIL=1.
+    group and status context keep the default-scheduler gate untouched. Every
+    twin gates the build except the soft-listed groups, which stay advisory
+    until their entry expires (and all of them while
+    GKE_KIND_SCHEDULER_HARD_FAIL=0).
     """
     plugins = _gke_kind_plugins(
         _kind_ci_image(f"test-{COMMIT[:8]}-{BUILD_NUMBER}")
     )
+    soft = _kind_scheduler_soft_groups()
     children = []
     for slug, label, files in _kind_spec_groups():
         focus = _kind_focus(files)
         file_label = "file" if len(files) == 1 else "files"
+        text = f":test_tube: {label} [{EVAL_GANG_SCHEDULER}] ({len(files)} {file_label})"
+        if slug in soft:
+            text += f" (advisory until {soft[slug]})"
         child = {
-            "label": f":test_tube: {label} [{EVAL_GANG_SCHEDULER}] ({len(files)} {file_label})",
+            "label": text,
             "key": f"kind-gke-{slug}-{EVAL_GANG_SCHEDULER}",
             "depends_on": "package-kind-test-image",
             "env": {"OME_KIND_FOCUS": focus, "OME_TEST_SCHEDULER": EVAL_GANG_SCHEDULER},
@@ -813,7 +891,7 @@ def _gke_kind_scheduler_group() -> str:
             "retry": {"automatic": _infra_retry_automatic()},
             "plugins": plugins,
         }
-        if not GKE_KIND_SCHEDULER_HARD_FAIL:
+        if slug in soft or not GKE_KIND_SCHEDULER_HARD_FAIL:
             child["soft_fail"] = True
         children.append(child)
     group = {
@@ -1132,6 +1210,11 @@ def _gke_eval_group() -> str:
                 "agents": {"queue": GKE_QUEUE},
                 "command": "sh .buildkite/run_omenative_eval_gke.sh "
                 + " ".join([feature, topology, *shard_cases]),
+                # The runner leaves with 125 when the shard never reached its
+                # cases (cluster bring-up or the OME deploy on a contended
+                # agent), so the infra preset reruns exactly that and never a
+                # red case.
+                "retry": {"automatic": _infra_retry_automatic()},
                 "plugins": plugins,
             }
             if scheduler and not GKE_EVAL_SCHEDULER_HARD_FAIL:
@@ -1404,6 +1487,10 @@ def ci_steps() -> str:
     ]
     steps = base + "\n" + "\n".join(drift_checks)
     if GKE_KIND_ENABLED:
+        # The twins are main-only; validate their soft list on every branch so
+        # an expired or misnamed entry blocks the PR that carries it, not the
+        # next main build.
+        _kind_scheduler_soft_groups()
         steps += "\n" + _package_kind_test_image_step()
         steps += "\n" + _gke_kind_group()
         if BRANCH == "main" and GKE_KIND_SCHEDULER_ENABLED:

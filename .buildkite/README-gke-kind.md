@@ -183,6 +183,29 @@ raises it — the runner asks for a node image it has no egress to fetch and die
 in `kind create cluster`. The `ARG`s in `dockerfiles/kind-ci.Dockerfile` are
 fallbacks for standalone use of the image; keep them tracking the two files.
 
+## Exit codes, retries, and the scheduler twins
+
+Every KIND-backed job carries the infra-retry preset (`exit_status: 125` and
+`agent_stop`, never exit 1), so what a runner reports as 125 is the whole
+retry policy. `run_kind_tests_gke.sh` reports 125 when the dind sidecar never
+answers, or when the suite dies in BeforeSuite creating its cluster or
+installing the gang scheduler with no spec run; a suite that reached even one
+spec keeps its own status. `run_omenative_eval_gke.sh` reports 125 for any
+status-1 failure before its first case runs (dind, image load, `kind create`,
+the settle gate, the OME deploy) and keeps the shard's own status from the
+first case on. A red spec or case is a defect to fix, quarantine, or park, and
+is never retried.
+
+The `ome-scheduler` twins of the KIND groups and of the eval shards gate the
+build like their default-scheduler jobs. A twin that is red on main while its
+default job is green is a gang-scheduler defect with an owner; it goes into
+`KIND_SCHEDULER_SOFT_GROUPS` in `generate_pipeline.py` with an owner, a
+one-line reason and an expiry, and its job label says `advisory until <date>`.
+Generation fails on an unknown group, a missing owner or reason, and the day
+after the expiry, on every branch. `GKE_EVAL_SCHEDULER_HARD_FAIL=0` and
+`GKE_KIND_SCHEDULER_HARD_FAIL=0` make every twin advisory again; they are
+emergency switches, to be reported the moment they are flipped.
+
 ## Alfred lane
 
 `integration-test-kind-alfred-gke` runs `tests/integration/singlecluster/controller/alfred_kind`

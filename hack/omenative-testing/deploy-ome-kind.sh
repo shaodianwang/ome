@@ -181,6 +181,35 @@ kind_load() {
   rm -f "$archive"
 }
 
+# The first calls into a freshly created cluster can hit an apiserver or etcd
+# that is still settling. `kubectl apply` is idempotent, so the bring-up
+# applies retry a few times before a failure counts as real.
+apply_with_retry() {
+  local attempt
+  for attempt in 1 2 3 4 5; do
+    if kubectl --context "$KCTX" apply "$@"; then
+      return 0
+    fi
+    echo "kubectl apply failed (attempt ${attempt}/5); retrying in 10s" >&2
+    sleep 10
+  done
+  return 1
+}
+
+# `kubectl wait` errors out instead of waiting while a just-created CRD has no
+# status yet, so poll until the condition exists and then let wait watch it.
+wait_for_crd_established() {
+  local crd="$1" deadline
+  deadline=$(( $(date +%s) + 120 ))
+  until kubectl --context "$KCTX" wait --for=condition=Established "crd/${crd}" --timeout=60s 2>/dev/null; do
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      echo "FATAL: crd/${crd} never became Established" >&2
+      return 1
+    fi
+    sleep 3
+  done
+}
+
 ensure_prebuilt_base() {
   if ! docker image inspect "$PREBUILT_BASE" >/dev/null 2>&1; then
     docker load -i "${IMAGES_DIR}/fake-serving-build.tar" >/dev/null
@@ -332,9 +361,9 @@ if [ "$OFFLINE" -eq 1 ]; then
     }
     kind_load "${CERT_IMAGES[$i]}"
   done
-  kubectl --context "$KCTX" apply -f "${EVAL_DIR}/cert-manager.yaml"
+  apply_with_retry -f "${EVAL_DIR}/cert-manager.yaml"
 else
-  kubectl --context "$KCTX" apply -f \
+  apply_with_retry -f \
     "https://github.com/cert-manager/cert-manager/releases/download/${CERT_MANAGER_VERSION}/cert-manager.yaml"
 fi
 kubectl --context "$KCTX" -n cert-manager wait --for=condition=Available \
@@ -357,17 +386,15 @@ helm upgrade --install ome-crd charts/ome-crd/ \
 
 if [ "$OFFLINE" -eq 1 ]; then
   echo "--- install PodGroup CRD ---"
-  kubectl --context "$KCTX" apply -f "${EVAL_DIR}/podgroup-crd.yaml"
-  kubectl --context "$KCTX" wait --for=condition=Established \
-    crd/podgroups.scheduling.x-k8s.io --timeout=60s
+  apply_with_retry -f "${EVAL_DIR}/podgroup-crd.yaml"
+  wait_for_crd_established podgroups.scheduling.x-k8s.io
 elif [ -n "$SCHEDULER_NAME" ]; then
   # The gang scheduler lists PodGroups at startup; vendor the CRD the same way
   # the KIND suites do and install it before the chart.
   echo "--- install PodGroup CRD ---"
   make scheduler-plugins-crds
-  kubectl --context "$KCTX" apply -f tests/integration/dep-crds/scheduler-plugins/
-  kubectl --context "$KCTX" wait --for=condition=Established \
-    crd/podgroups.scheduling.x-k8s.io --timeout=60s
+  apply_with_retry -f tests/integration/dep-crds/scheduler-plugins/
+  wait_for_crd_established podgroups.scheduling.x-k8s.io
 fi
 
 echo "--- install controller ---"

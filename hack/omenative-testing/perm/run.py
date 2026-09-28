@@ -218,8 +218,25 @@ def render_case(yaml_file):
     return runtime_fixtures.render_text(Path(yaml_file).read_text(), _fixture_values())
 
 
+# The admission webhook reads runtimes through a cache. A case that ships its
+# own ServingRuntime creates it in the same apply as its InferenceService, so
+# the validator can see the ISVC before the runtime and deny it as unsupported.
+# That denial, and only that one, is re-applied for a short window.
+RUNTIME_LAG_DENIAL = "does not support model"
+RUNTIME_LAG_WINDOW_S = 30
+
+
 def apply_case(yaml_file):
-    return kubectl("apply", "--validate=false", "-n", NS, "-f", "-", input=render_case(yaml_file))
+    body = render_case(yaml_file)
+    ships_runtime = re.search(r"^kind:\s*(Cluster)?ServingRuntime\s*$", body, re.M) is not None
+    deadline = time.monotonic() + RUNTIME_LAG_WINDOW_S
+    while True:
+        r = kubectl("apply", "--validate=false", "-n", NS, "-f", "-", input=body)
+        if (r.returncode == 0 or not ships_runtime
+                or RUNTIME_LAG_DENIAL not in (r.stderr or "")
+                or time.monotonic() >= deadline):
+            return r
+        time.sleep(2)
 
 
 def delete_case(yaml_file):
@@ -2273,7 +2290,7 @@ def _setup_and_ready(case_id, yaml_file, hdr):
     r = apply_case(yaml_file)
     if r.returncode != 0:
         msg = (r.stderr.strip().splitlines() or ["kubectl apply failed"])[-1]
-        print(f"  APPLY FAILED: {msg[:200]}")
+        print(f"  APPLY FAILED: {msg[:400]}")
         return None, ("APPLY_FAIL", msg[:200])
     info = get_spec_info(case_id)
     ctx = {
@@ -5081,7 +5098,7 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
     r = apply_case(yaml_file)
     if r.returncode != 0:
         msg = (r.stderr.strip().splitlines() or ["kubectl apply failed"])[-1]
-        print(f"  APPLY FAILED: {msg[:200]}")
+        print(f"  APPLY FAILED: {msg[:400]}")
         write_result(case_id, desc, Ne, Nd, Nr, ce, cd, cr, zero, dash,
                      None, None, "APPLY_FAIL", msg[:200], zero)
         return 0

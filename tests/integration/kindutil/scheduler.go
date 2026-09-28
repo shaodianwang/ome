@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // SchedulerInstall puts the gang scheduler into the suite's KIND cluster so
@@ -122,12 +123,19 @@ func installScheduler(ctx context.Context, clusterName string, s *SchedulerInsta
 		return err
 	}
 	defer os.Remove(kubeconfig)
-	label := exec.CommandContext(ctx, "kubectl", "--kubeconfig", kubeconfig, "label", "nodes", "--all", "--overwrite",
-		s.topologyKey()+"="+s.topologyDomain())
-	var labelErr bytes.Buffer
-	label.Stderr = &labelErr
-	if err := label.Run(); err != nil {
-		return fmt.Errorf("installScheduler: label nodes with the topology domain: %w (stderr: %s)", err, labelErr.String())
+	// The first API calls into a freshly created cluster can hit an apiserver
+	// or etcd that is still settling; that is bring-up, not a suite result.
+	if err := retryTransient(ctx, 24, func() error {
+		label := exec.CommandContext(ctx, "kubectl", "--kubeconfig", kubeconfig, "label", "nodes", "--all", "--overwrite",
+			s.topologyKey()+"="+s.topologyDomain())
+		var labelErr bytes.Buffer
+		label.Stderr = &labelErr
+		if err := label.Run(); err != nil {
+			return fmt.Errorf("installScheduler: label nodes with the topology domain: %w (stderr: %s)", err, labelErr.String())
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	args := []string{
 		"upgrade", "--install", "ome-scheduler", filepath.Join(root, s.chartPath()),
@@ -146,16 +154,41 @@ func installScheduler(ctx context.Context, clusterName string, s *SchedulerInsta
 		"--set", "scheduler.resources.limits.memory=1Gi",
 		"--wait", "--timeout", "300s",
 	}
-	cmd := exec.CommandContext(ctx, "helm", args...)
-	cmd.Dir = root
-	cmd.Env = os.Environ()
-	var stderr bytes.Buffer
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("installScheduler: helm upgrade --install ome-scheduler: %w (stderr: %s)", err, stderr.String())
+	// Idempotent, so a second attempt after an apiserver hiccup is safe.
+	return retryTransient(ctx, 2, func() error {
+		cmd := exec.CommandContext(ctx, "helm", args...)
+		cmd.Dir = root
+		cmd.Env = os.Environ()
+		var stderr bytes.Buffer
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("installScheduler: helm upgrade --install ome-scheduler: %w (stderr: %s)", err, stderr.String())
+		}
+		return nil
+	})
+}
+
+// retryTransient runs fn up to attempts times, pausing between attempts, and
+// returns the last error. Bring-up commands against a cluster that is still
+// settling are retried this way instead of failing BeforeSuite on the first
+// timeout.
+func retryTransient(ctx context.Context, attempts int, fn func() error) error {
+	var err error
+	for i := 0; i < attempts; i++ {
+		if err = fn(); err == nil {
+			return nil
+		}
+		if i == attempts-1 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(5 * time.Second):
+		}
 	}
-	return nil
+	return err
 }
 
 // writeClusterKubeconfig captures `kind get kubeconfig` into a private temp

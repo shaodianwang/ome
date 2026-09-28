@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import importlib
 import os
 import re
@@ -19,14 +20,32 @@ def load(env: dict[str, str]):
         return importlib.reload(module)
 
 
+# run_omenative_eval_gke.sh and run_kind_tests_gke.sh leave with 125 when a
+# job never reached its cases or specs; the infra preset, and only the infra
+# preset, reruns that.
+INFRA_RETRY_BLOCK = (
+    "        retry:\n"
+    "          automatic:\n"
+    "            - exit_status: 125\n"
+    "              limit: 2\n"
+    '            - signal_reason: "agent_stop"\n'
+    "              limit: 2"
+)
+
+
+def job_blocks(yaml_text: str) -> list[str]:
+    """One string per emitted job, skip notes included."""
+    return yaml_text.split("- label:")[1:]
+
+
 class EvalSchedulerDimension(unittest.TestCase):
-    def test_default_emits_both_schedulers_with_advisory_gang_jobs(self):
-        gp = load({"GKE_EVAL_SCHEDULER_ENABLED": "1", "GKE_EVAL_SCHEDULER_HARD_FAIL": "0"})
+    def test_default_emits_both_schedulers_and_gates_the_twins(self):
+        gp = load({"GKE_EVAL_SCHEDULER_ENABLED": "1"})
         out = gp._gke_eval_group()
         self.assertIn("omenative-e2e-", out)
         self.assertIn("-ome-scheduler", out)
         self.assertIn('OME_EVAL_SCHEDULER: "ome-scheduler"', out)
-        self.assertIn("soft_fail: true", out)
+        self.assertNotIn("soft_fail", out)
         job_keys = [l for l in out.splitlines() if 'key: "omenative-e2e-' in l and "omenative-e2e-kind-gke" not in l]
         default_jobs = [l for l in job_keys if "-ome-scheduler" not in l]
         sched_jobs = [l for l in job_keys if "-ome-scheduler" in l and not l.rstrip('"').endswith("-skipped")]
@@ -35,11 +54,20 @@ class EvalSchedulerDimension(unittest.TestCase):
         self.assertGreater(len(sched_jobs), 0)
         self.assertGreater(len(default_jobs), 0)
 
-    def test_hard_fail_switch_removes_soft_fail(self):
-        gp = load({"GKE_EVAL_SCHEDULER_ENABLED": "1", "GKE_EVAL_SCHEDULER_HARD_FAIL": "1"})
+    def test_advisory_switch_softens_the_twins_only(self):
+        gp = load({"GKE_EVAL_SCHEDULER_ENABLED": "1", "GKE_EVAL_SCHEDULER_HARD_FAIL": "0"})
         out = gp._gke_eval_group()
-        self.assertIn("-ome-scheduler", out)
-        self.assertNotIn("soft_fail: true", out)
+        seen_twin = seen_default = False
+        for block in job_blocks(out):
+            if "-skipped" in block:
+                continue
+            if "-ome-scheduler" in block:
+                seen_twin = True
+                self.assertIn("soft_fail: true", block)
+            else:
+                seen_default = True
+                self.assertNotIn("soft_fail", block)
+        self.assertTrue(seen_twin and seen_default)
 
     def test_kill_switch_keeps_only_the_default_scheduler(self):
         gp = load({"GKE_EVAL_SCHEDULER_ENABLED": "0"})
@@ -47,29 +75,98 @@ class EvalSchedulerDimension(unittest.TestCase):
         self.assertNotIn("-ome-scheduler", out)
         self.assertNotIn("OME_EVAL_SCHEDULER", out)
 
+    def test_every_eval_job_retries_only_on_infra_failure(self):
+        gp = load({"GKE_EVAL_SCHEDULER_ENABLED": "1"})
+        out = gp._gke_eval_group()
+        jobs = out.count("run_omenative_eval_gke.sh")
+        self.assertGreater(jobs, 0)
+        self.assertEqual(out.count(INFRA_RETRY_BLOCK), jobs)
+        # The doctrine: a red case is a finding to fix or park, never a retry.
+        self.assertNotIn('exit_status: "*"', out)
+        self.assertNotIn("exit_status: 1\n", out)
+        first = out.index("        retry:")
+        self.assertLess(first, out.index("        plugins:", first),
+                        "retry must be a step-level key, not nested under plugins")
+
     def test_eval_image_waits_for_the_scheduler_mirror(self):
         gp = load({})
         self.assertIn('- "mirror-ome-scheduler"', gp._package_kind_eval_image_step())
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class KindSchedulerDimension(unittest.TestCase):
-    def test_main_emits_scheduler_twins_in_their_own_group(self):
-        gp = load({"GKE_KIND_SCHEDULER_ENABLED": "1", "GKE_KIND_SCHEDULER_HARD_FAIL": "0"})
-        out = gp._gke_kind_scheduler_group()
+    def soft_entry(self, gp, group, **overrides):
+        entry = {
+            "group": group,
+            "owner": "tester",
+            "reason": "known gang-scheduler defect",
+            "expires": (gp._today() + datetime.timedelta(days=7)).isoformat(),
+        }
+        entry.update(overrides)
+        return entry
+
+    def test_main_emits_gating_scheduler_twins_in_their_own_group(self):
+        gp = load({"GKE_KIND_SCHEDULER_ENABLED": "1"})
+        with mock.patch.object(gp, "KIND_SCHEDULER_SOFT_GROUPS", []):
+            out = gp._gke_kind_scheduler_group()
         self.assertIn('key: "integration-test-kind-scheduler-gke"', out)
         self.assertIn('OME_TEST_SCHEDULER: "ome-scheduler"', out)
-        self.assertIn("soft_fail: true", out)
+        self.assertNotIn("soft_fail", out)
         twins = [l for l in out.splitlines() if 'key: "kind-gke-' in l]
         self.assertEqual(len(twins), len(gp._kind_spec_groups()))
         self.assertTrue(all(l.rstrip('"').endswith("-ome-scheduler") for l in twins), twins[:3])
+        self.assertEqual(out.count(INFRA_RETRY_BLOCK), len(twins))
 
-    def test_hard_fail_switch_removes_soft_fail_on_kind_twins(self):
-        gp = load({"GKE_KIND_SCHEDULER_HARD_FAIL": "1"})
-        self.assertNotIn("soft_fail", gp._gke_kind_scheduler_group())
+    def test_soft_listed_twins_stay_advisory_until_their_expiry(self):
+        gp = load({"GKE_KIND_SCHEDULER_ENABLED": "1"})
+        slug = gp.KIND_SPEC_GROUPS[0][0]
+        entry = self.soft_entry(gp, slug)
+        with mock.patch.object(gp, "KIND_SCHEDULER_SOFT_GROUPS", [entry]):
+            out = gp._gke_kind_scheduler_group()
+        soft = [b for b in job_blocks(out) if "soft_fail: true" in b]
+        self.assertEqual(len(soft), 1)
+        self.assertIn(f'key: "kind-gke-{slug}-ome-scheduler"', soft[0])
+        self.assertIn(f"advisory until {entry['expires']}", soft[0])
+
+    def test_soft_list_rejects_stale_or_anonymous_entries(self):
+        gp = load({"GKE_KIND_SCHEDULER_ENABLED": "1"})
+        slug = gp.KIND_SPEC_GROUPS[0][0]
+        yesterday = (gp._today() - datetime.timedelta(days=1)).isoformat()
+        for entry, message in (
+            (self.soft_entry(gp, "no-such-group"), "not a spec group"),
+            (self.soft_entry(gp, slug, owner=""), "has no owner"),
+            (self.soft_entry(gp, slug, reason=" "), "has no reason"),
+            (self.soft_entry(gp, slug, expires="soon"), "needs an expires date"),
+            (self.soft_entry(gp, slug, expires=yesterday), "was soft until"),
+        ):
+            with self.subTest(message=message):
+                with mock.patch.object(gp, "KIND_SCHEDULER_SOFT_GROUPS", [entry]):
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        gp._kind_scheduler_soft_groups()
+        twice = [self.soft_entry(gp, slug), self.soft_entry(gp, slug)]
+        with mock.patch.object(gp, "KIND_SCHEDULER_SOFT_GROUPS", twice):
+            with self.assertRaisesRegex(RuntimeError, "duplicate"):
+                gp._kind_scheduler_soft_groups()
+
+    def test_checked_in_soft_list_is_valid(self):
+        gp = load({})
+        soft = gp._kind_scheduler_soft_groups()
+        known = {slug for slug, _, _ in gp.KIND_SPEC_GROUPS}
+        self.assertTrue(set(soft) <= known)
+
+    def test_soft_list_is_validated_on_every_branch(self):
+        with mock.patch.dict(os.environ, {"BUILDKITE_BRANCH": "feature/x", "BUILDKITE_COMMIT": "0123456789abcdef", "GKE_KIND_SCHEDULER_ENABLED": "1"}, clear=False):
+            import generate_pipeline as module
+            pr = importlib.reload(module)
+            with mock.patch.object(pr, "KIND_SCHEDULER_SOFT_GROUPS", [self.soft_entry(pr, "no-such-group")]):
+                with self.assertRaisesRegex(RuntimeError, "not a spec group"):
+                    pr.generate_pipeline()
+
+    def test_advisory_switch_softens_every_twin(self):
+        gp = load({"GKE_KIND_SCHEDULER_HARD_FAIL": "0"})
+        with mock.patch.object(gp, "KIND_SCHEDULER_SOFT_GROUPS", []):
+            out = gp._gke_kind_scheduler_group()
+        twins = [l for l in out.splitlines() if 'key: "kind-gke-' in l]
+        self.assertEqual(out.count("soft_fail: true"), len(twins))
 
     def test_twins_are_main_only_and_switchable(self):
         with mock.patch.dict(os.environ, {"BUILDKITE_BRANCH": "feature/x", "BUILDKITE_COMMIT": "0123456789abcdef", "GKE_KIND_SCHEDULER_ENABLED": "1"}, clear=False):
@@ -123,3 +220,6 @@ class SchedulerTwinNodeSizing(unittest.TestCase):
                     run_in_twins.update(cmd.split())
         self.assertEqual(committed, run_in_twins | small)
 
+
+if __name__ == "__main__":
+    unittest.main()

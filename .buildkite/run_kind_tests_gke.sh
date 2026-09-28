@@ -92,7 +92,9 @@ until docker info >/dev/null 2>&1; do
   if [ "$i" -gt 60 ]; then
     echo "FATAL: no reachable Docker daemon after ~120s. Expect a privileged" >&2
     echo "  docker:dind sidecar at DOCKER_HOST=${DOCKER_HOST:-<unset>}." >&2
-    exit 1
+    # A sidecar that never came up is agent trouble, not a result: leave with
+    # the exit code the group's infra-retry preset reruns.
+    exit 125
   fi
   sleep 2
 done
@@ -187,18 +189,19 @@ set +e
 set -e
 suite_status="$(cat "$suite_status_file" 2>/dev/null || echo 1)"
 
-# A `kind create cluster` that dies of agent starvation is not a test result.
-# It fails in BeforeSuite, before a single It runs, and the binary exits 1 —
-# indistinguishable from a real spec failure to Buildkite, so the KIND group's
-# infra-retry preset (exit 125 / agent_stop, deliberately never exit 1) cannot
-# see it. Translate exactly that shape to 125 and leave every other exit code
-# alone: a suite that reached even one spec keeps its own status, so "never
-# retry a red spec" still holds.
+# A `kind create cluster` that dies of agent starvation is not a test result,
+# and neither is the scheduler install when the just-created apiserver times
+# out its first calls. Both fail in BeforeSuite, before a single It runs, and
+# the binary exits 1 — indistinguishable from a real spec failure to Buildkite,
+# so the KIND group's infra-retry preset (exit 125 / agent_stop, deliberately
+# never exit 1) cannot see them. Translate exactly those shapes to 125 and
+# leave every other exit code alone: a suite that reached even one spec keeps
+# its own status, so "never retry a red spec" still holds.
 if [ "$suite_status" -ne 0 ] \
-   && grep -q 'EnsureCluster(' "$suite_log" \
-   && grep -q 'createCluster:' "$suite_log" \
-   && ! grep -qE '^Ran [1-9][0-9]* of ' "$suite_log"; then
-  echo "--- cluster create failed in BeforeSuite with no spec run; exiting 125 for infra retry ---" >&2
+   && ! grep -qE '^Ran [1-9][0-9]* of ' "$suite_log" \
+   && { { grep -q 'EnsureCluster(' "$suite_log" && grep -q 'createCluster:' "$suite_log"; } \
+        || grep -q 'RunKindSuite: installScheduler:' "$suite_log"; }; then
+  echo "--- cluster bring-up failed in BeforeSuite with no spec run; exiting 125 for infra retry ---" >&2
   exit 125
 fi
 

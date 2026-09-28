@@ -41,8 +41,11 @@ scale behavior. Targets whatever cluster your kubeconfig points at — override 
 > share one PodGroup whose `minMember` equals the gang size, and a gang binds
 > as a unit. On a real cluster the scheduler must already run under that name.
 > CI runs every eval job twice, once per scheduler (`omenative-e2e-<feature>-<topology>`
-> and `…-ome-scheduler`); the scheduler jobs are advisory until
-> `GKE_EVAL_SCHEDULER_HARD_FAIL=1`.
+> and `…-ome-scheduler`), and both gate the build; `GKE_EVAL_SCHEDULER_HARD_FAIL=0`
+> is the emergency switch that makes the scheduler jobs advisory. A shard that
+> never reaches its cases (the KIND cluster or the OME deploy failed on the
+> agent) leaves with exit 125 and the pipeline reruns it; a red case is never
+> retried.
 >
 > **Canary-analysis cases (`analysis=…`) additionally need:** the bundled
 > `ome-prometheus` enabled in the cluster (chart `prometheus.enabled`, now the

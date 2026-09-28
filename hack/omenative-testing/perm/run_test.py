@@ -537,3 +537,49 @@ class CanaryHeaderTest(unittest.TestCase):
         self.assertTrue(any("img=" in e for e in self._errs(base + " img=example.com/canary-test/missing:none")))
         self.assertTrue(any("fault=" in e for e in self._errs(base + " fault=podkill:rotating")))
         self.assertTrue(any("cell=" in e for e in self._errs(base + " cell=nonsense")))
+
+class ApplyCaseRuntimeLagTest(unittest.TestCase):
+    """apply_case re-applies only the webhook's runtime-lag denial, only for a
+    case that ships its own runtime, and only for a bounded window."""
+
+    DENIAL = ('Error from server (Forbidden): admission webhook denied the request: '
+              'runtime ome-coordtest-rt-p1 does not support model m: runtime not found')
+
+    def _run(self, body, results, clock=None):
+        calls = []
+        ticks = iter(clock or [0.0] * 50)
+
+        def fake_kubectl(*args, input=None, **kw):
+            calls.append(input)
+            code, err = results[min(len(calls) - 1, len(results) - 1)]
+            return subprocess.CompletedProcess(args, code, stdout="", stderr=err)
+
+        saved = (run.kubectl, run.render_case, run.time.sleep, run.time.monotonic)
+        run.kubectl, run.render_case = fake_kubectl, lambda f: body
+        run.time.sleep, run.time.monotonic = (lambda s: None), (lambda: next(ticks))
+        try:
+            return run.apply_case("case.yaml"), calls
+        finally:
+            run.kubectl, run.render_case, run.time.sleep, run.time.monotonic = saved
+
+    def test_reapplies_the_lag_denial_until_the_runtime_is_visible(self):
+        body = "kind: ClusterServingRuntime\n---\nkind: InferenceService\n"
+        r, calls = self._run(body, [(1, self.DENIAL), (1, self.DENIAL), (0, "")])
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(len(calls), 3)
+
+    def test_other_denials_and_runtime_less_cases_are_not_retried(self):
+        body = "kind: ClusterServingRuntime\n---\nkind: InferenceService\n"
+        r, calls = self._run(body, [(1, "Error from server (Forbidden): model m is disabled")])
+        self.assertEqual((r.returncode, len(calls)), (1, 1))
+        r, calls = self._run("kind: InferenceService\n", [(1, self.DENIAL)])
+        self.assertEqual((r.returncode, len(calls)), (1, 1))
+
+    def test_the_window_is_bounded(self):
+        body = "kind: ServingRuntime\n---\nkind: InferenceService\n"
+        # deadline is 30s after the first clock read; the attempt that sees the
+        # window spent returns its denial and nothing runs after it
+        clock = [0.0, 10.0, 20.0, 31.0, 40.0, 50.0]
+        r, calls = self._run(body, [(1, self.DENIAL)], clock=clock)
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(len(calls), 3)

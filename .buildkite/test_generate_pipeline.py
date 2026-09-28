@@ -60,6 +60,8 @@ class PipelineTestCase(unittest.TestCase):
             ("KIND_SUITE_DIR", suite_dir),
             ("KIND_SPEC_GROUPS", groups),
             ("KIND_QUARANTINE", list(quarantine)),
+            # Staged groups carry no soft twins; the real list names real groups.
+            ("KIND_SCHEDULER_SOFT_GROUPS", []),
         ):
             self.patch_attr(attr, value)
 

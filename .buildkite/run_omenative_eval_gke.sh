@@ -28,6 +28,14 @@ results_root="hack/omenative-testing/perm/results/${run_stamp}"
 diagnostics_dir="${results_root}/diagnostics"
 tmp_dir=$(mktemp -d)
 kubeconfig="${tmp_dir}/kubeconfig"
+# Exit-code contract for the pipeline's infra-retry preset, which reruns exit
+# 125 and never exit 1: a status-1 failure before the first case runs (the
+# dind sidecar, the image load, `kind create cluster`, the settle gate or the
+# OME deploy) is bring-up on a contended agent, not a result, and leaves as
+# 125. Once the cases start the shard keeps its own status: a red case is a
+# finding, never a retry. Usage and configuration errors exit 2 and stay 2.
+before_cases=1
+stage=setup
 
 collect_diagnostics() {
   [ -s "$kubeconfig" ] || return 0
@@ -56,6 +64,10 @@ finish() {
   status=$?
   trap - EXIT
   set +e
+  if [ "$status" -eq 1 ] && [ "$before_cases" -eq 1 ]; then
+    echo "--- ${stage} failed before any case ran; exiting 125 for infra retry ---" >&2
+    status=125
+  fi
   collect_diagnostics
   kind delete cluster --name "$cluster" >/dev/null 2>&1 || true
   if command -v buildkite-agent >/dev/null 2>&1; then
@@ -77,7 +89,8 @@ trap finish EXIT
 echo "--- ${feature}/${topology}: $# cases ---"
 echo "    $*"
 
-echo "--- wait for dind ---"
+stage="wait for dind"
+echo "--- ${stage} ---"
 i=0
 until docker info >/dev/null 2>&1; do
   i=$((i + 1))
@@ -85,7 +98,8 @@ until docker info >/dev/null 2>&1; do
   sleep 2
 done
 
-echo "--- load KIND and exact runtime images ---"
+stage="load KIND and exact runtime images"
+echo "--- ${stage} ---"
 for archive in kindest-node busybox ome-manager ome-agent ome-scheduler canary-metrics; do
   path="${images_dir}/${archive}.tar"
   [ -s "$path" ] || { echo "missing image archive: $path" >&2; exit 1; }
@@ -149,7 +163,8 @@ KINDEOF
 if [ -n "${OME_EVAL_SCHEDULER_SKIPPED:-}" ]; then
   echo "--- cases above the whole-node cap, not run in this scheduler twin: ${OME_EVAL_SCHEDULER_SKIPPED} ---"
 fi
-echo "--- create KIND cluster: 1 control-plane + ${workers} worker(s) ---"
+stage="create KIND cluster: 1 control-plane + ${workers} worker(s)"
+echo "--- ${stage} ---"
 kind create cluster --name "$cluster" --image "$node_image" \
   --config "${tmp_dir}/kind.yaml" --wait 180s
 kind get kubeconfig --name "$cluster" >"$kubeconfig"
@@ -165,10 +180,44 @@ export OME_KIND_OFFLINE=true
 export OME_IMAGE_TAG="$short_sha"
 export OME_RUN_TS="$run_stamp"
 
-echo "--- deploy exact OME images ---"
+stage="wait for the cluster to settle"
+echo "--- ${stage} ---"
+# `kind create --wait` reports its own timeout as a warning and returns
+# success, so a cluster that is still bootstrapping arrives here looking
+# created. Wait for every node to register and turn Ready and for the
+# apiserver to answer three probes in a row; a cluster that never settles
+# fails as bring-up, not as a case.
+settle_timeout="${OME_EVAL_KIND_SETTLE_TIMEOUT:-300}"
+case "$settle_timeout" in
+  ''|*[!0-9]*) echo "OME_EVAL_KIND_SETTLE_TIMEOUT must be a number of seconds, got '$settle_timeout'" >&2; exit 2 ;;
+esac
+expected_nodes=$((workers + 1))
+settle_deadline=$(( $(date +%s) + settle_timeout ))
+stable=0
+while [ "$stable" -lt 3 ]; do
+  if [ "$(date +%s)" -ge "$settle_deadline" ]; then
+    echo "cluster did not settle within ${settle_timeout}s" >&2
+    kubectl get nodes 2>&1 | head -20 >&2
+    exit 1
+  fi
+  registered=$(kubectl get nodes --no-headers 2>/dev/null | wc -l | tr -d ' ')
+  if [ "${registered:-0}" -ge "$expected_nodes" ] \
+     && kubectl wait --for=condition=Ready node --all --timeout=15s >/dev/null 2>&1 \
+     && kubectl get --raw=/readyz >/dev/null 2>&1; then
+    stable=$((stable + 1))
+  else
+    stable=0
+  fi
+  sleep 5
+done
+kubectl get nodes
+
+stage="deploy exact OME images"
+echo "--- ${stage} ---"
 bash hack/omenative-testing/deploy-ome-kind.sh --cluster "$cluster" --skip-build
 
 echo "--- validate and run ${feature}/${topology} ---"
+before_cases=0
 (
   cd hack/omenative-testing/perm
   python3 run.py --validate-only
