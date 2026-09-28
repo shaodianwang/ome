@@ -9,9 +9,57 @@ weekly triage list is exactly:
 
 ## Watermark
 
-- internal (mslsrc/ome) main: 624955e7  # Resolve ISVC defaults after runtime merge (#1678)
-- oss (ome-projects/ome) main at last sync: f3c6693b  # #997 squash — #996 (code) + #997 (charts) merged 2026-09-25
-- state written: 2026-09-25
+- internal (mslsrc/ome) main: cf6dc468  # [Misc] tests: neutral fixture name, spelling fix (#1799)
+- oss (ome-projects/ome) main at last sync: 653ee9cc  # #1135 squash — #1134 (code) + #1135 (charts) merged 2026-09-27
+- state written: 2026-09-27
+
+## Last sync (2026-09-27) — COMPLETE
+
+Range 624955e7..cf6dc468 (52 internal commits, 37 of them touching shipped
+paths: the placement-plan and fleet-capacity wave #1718-#1744, RDMA fixes
+#1686/#1798, cluster affinity API #1723, lifecycle generation #1719,
+scheduler metrics #1730, publication fallback #1697, hygiene #1690-#1694).
+Built from a dry run of the candidate tool on the automation branch
+(`hack/oss-sync/candidate.py`, branch ci/oss-sync-automation-v2; the
+tooling is NOT on main because its PR #1726 was closed by the owner) plus
+hand work: its 10 set-aside conflicts (public copy kept for the Alfred
+blocks of the ome-resources README/values, the model-agent daemonset
+flags, the status_writer approvals for absent tests/ files, one
+`// Cells:` trailer and the rdma_injector comment wording; internal copy
+for workload/revision/revision_test.go, placement/controller.go and
+controller_test.go), removal of the two public-only characterization
+tests superseded by #1691's ports (workload/ops and inferencereplica
+`*_source_identity_characterization_test.go`), the go.mod bumps that
+matched the public lines (x/sys, x/term, k8s.io/component-helpers added
+by tidy; the dependabot bumps of oci-go-sdk, ginkgo, istio client-go and
+validator did not apply), OSS `make generate` + `make manifests`.
+Internal-first before the push: #1799 (fixture `example-router-standard`,
+`unparsable`), so shipped paths of internal cf6dc468 and the candidate
+are identical. Two OSS PRs, drafts under the owner's identity with the two
+trailers, opened after the go and MERGED by the owner the same evening:
+
+| OSS PR | branch | content | squash |
+|---|---|---|---|
+| #1134 | core/placement-plans-capacity | code + regenerated CRDs/openapi (109 files, 2 deletions) | 4fab7585 |
+| #1135 | helm/quota-manager-report-interval | quota-manager `capacity.reportInterval` + render tests, placement timeout comments (5 files) | 653ee9cc |
+
+Owner decision 2026-09-27: the `ome-viewer` ClusterRole from #1793
+(`viewer_role.yaml` + the `viewer:` values block) is internal bot access and
+is NEVER shipped — dropped from #1135, recorded in the SKILL.md blocklist
+(with the Alfred templates and per-cluster overlays) and in the automation
+branch's `config.NEVER_SHIPPED` / `CARVE_SWEEP`.
+
+Gates before the push: build, vet, unit tests of the 22 touched packages
+plus the scheduler module on its own, identifier gate clean (109 and 114
+outgoing files), codespell, carve sweep, chart render tests + helm lint;
+fresh-eyes read of all 13.4k added lines → one medium (the fixture name,
+fixed via #1799) and four lows (pending below).
+
+Blocked this range (never shipped): OEPs #1689 #1696 #1699 #1717, docs
+#1746, CI/harness #1705 #1711 #1712 #1714 #1715 #1735 and the hack/.buildkite
+parts of #1698, agent skills #1707 #1741 #1781, tests/ #1695 and the Alfred
+KIND suite #1688, the meta-internal parts of #1700/#1701, the viewer role
+of #1793.
 
 ## Last sync (2026-09-24/25) — COMPLETE
 
@@ -166,11 +214,21 @@ until nudged; zsh does not word-split unquoted variables (multi-package
 
 ## Known pending above/around the watermark
 
-- Landed after bbacdfa0 — first items for the next run (triage
-  `git log bbacdfa0..origin/main`): d069ed78 #1520 canary members follow
-  the group primary; fde9bede #1521 hygiene (already mirrored into
-  #951-#955 — confirm with the drift check, do not re-port); e8b3ee75
-  #1522 canary: no ladder without a stable revision; anything newer.
+- Landed after cf6dc468: nothing at close-out (2026-09-27 evening); the
+  next triage is `git log cf6dc468..origin/main`.
+- Follow-ups from the 2026-09-27 review (internal-first, then mirror; none
+  blocking): rolloutrun.go / rolloutrun_test.go comments telling the "zero
+  Progression fails every status write" story → state the invariant;
+  placement/controller.go "(graceful degradation, no magic literal in the
+  hot path)" → "zero falls back to DefaultPlaceTimeout"; the ome-resources
+  render-test comment retelling the preset-webhook rollout ordering → state
+  the failurePolicy invariant. The dependabot bumps in the range
+  (oci-go-sdk 65.126.0, ginkgo 2.33.0, istio client-go 1.31.1, validator
+  10.30.5) did not match the public go.mod lines — check next run whether
+  upstream is ahead or behind. `pkg/xet` and `scheduler/go.mod` had no
+  diff in range. The sync tooling (`hack/oss-sync/`: report, candidate,
+  App token helper, carve config) lives only on the closed #1726 branch —
+  decide whether to revive the automation.
 - Internal follow-ups found by the 2026-09-16 audits (internal-first, then
   mirror): prometheus relabel regex mangles a bare IPv6 pod IP for
   port-less containers (`fd00::1` + 9090 → `fd00::9090`; rewrite from
@@ -375,3 +433,8 @@ See the HARD BLOCKLIST in SKILL.md — do not re-triage those every week.
   2026-09-17 (OSS main f6e1f7f7); internal hygiene #1521 merged. Cascade
   near-miss (guard must be fatal) recorded in SKILL.md. Watermark → bbacdfa0.
 - 2026-09-24/25: synced bbacdfa0..624955e7 (150 commits, workload restructure) as OSS #996 code + #997 charts via the tree-state 3-way method, ALL MERGED (OSS main f3c6693b). Internal-first ports #1686 (#989 RDMA), #1687 (#987/#776 charts). Fresh-eyes audit → 294 rollout-table trailers stripped upstream, ~60 comments rewritten internal-first (#1692). New standing tooling: hack/check_internal_tokens.py (#1698). Watermark → 624955e7.
+- 2026-09-27: synced 624955e7..cf6dc468 (52 commits, placement plans and
+  fleet capacity wave) as OSS #1134 code + #1135 charts (candidate tool dry
+  run + hand-resolved conflicts), ALL MERGED 2026-09-27 (OSS main 653ee9cc).
+  Internal-first #1799. Owner rule: the ome-viewer ClusterRole is never
+  shipped. Watermark → cf6dc468.

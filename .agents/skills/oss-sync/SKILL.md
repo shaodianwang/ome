@@ -111,6 +111,13 @@ then copy outward. Internal stays a strict superset.
 - **charts/muse**, **charts/ome-isvc** (built around internal vendor
   bundles: cks-gb300, internal ECR images), **values-usc1-*.yaml** and any
   per-cluster values overlays.
+- **Internal-only pieces of the shipped charts** (owner rules, 2026-09-27):
+  `charts/ome-resources/templates/alfred/` with the `alfred:` values block
+  and README section (upstream carries its own `charts/ome-alfred`), and
+  the `ome-viewer` ClusterRole (`templates/ome-controller/rbac/viewer_role.yaml`
+  plus the `viewer:` values block), which grants internal bot access. When
+  resolving README/values conflicts, keep the public copy of those blocks;
+  sweep added chart lines for `ome-viewer|alfred:|alfred.`.
 - **pkg/kubectl + cmd/kubectl-qt** — upstream drives its own CLI
   (kubectl-ome OEP + pkg/cli); porting ours would collide.
 - `.buildkite/`, `hack/` internal tooling, `oeps/`, `grafana/`, `muse/`,
