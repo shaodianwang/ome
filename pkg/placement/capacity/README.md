@@ -33,6 +33,38 @@ counts, and complete templates. Pod-set and configuration ordering are canonical
 init-container ordering is preserved because it affects demand. Inputs are not
 mutated and returned templates do not alias them.
 
+## Hardware flavor attribution
+
+`AttributeUnit` maps each measured pod set to exactly one ResourceFlavor. It
+uses required node selectors and node-affinity expressions on label keys present
+in the member's complete flavor catalog. This follows Kueue's label projection,
+without consulting queue resource groups or quota to decide placement weights.
+Preferred affinity, node field constraints, and labels outside the catalog
+remain scheduling inputs; they do not select a hardware pool. In particular,
+model-readiness labels remain in the rendered templates for the member scheduler.
+Multiple compatible flavors are unknown, including overlapping flavors where
+the pod's requirements do not identify one pool. No flavor ordering or available
+hardware amount resolves that ambiguity.
+
+The member root must report the complete configured resource/flavor matrix,
+including explicit zeros. Every current row must agree with live flavor UIDs,
+node labels, and the shared mapping fingerprint. The fingerprint includes unused
+flavors because they can change which pool owns a node. Historical rows without
+attribution cannot prove capacity. Required pools must have complete attribution;
+unattributed nodes cannot silently contribute to a weight.
+
+The reporter attributes nodes to their unique most-specific flavor and reports
+ties as incomplete. Empty-valued flavor labels are rejected by this consumer:
+the report's label comparison cannot distinguish an absent label from a present
+empty value. Existing quota reporting retains its behavior.
+
+Engine, Decoder, and worker demand sharing a pool is combined in whole units.
+Different accelerator resources remain separate. The resulting demand fingerprint
+includes the rendered unit, complete mapping, and combined pool demands. Hardware
+totals, observation times, and quota amounts do not enter that fingerprint.
+
+## Fresh hardware observations
+
 After unambiguous flavor attribution, `Reader` combines demand sharing a
 resource/flavor pool and normalizes identified, fresh per-cluster allocatable
 reports to whole replica units. It takes the minimum ratio across required

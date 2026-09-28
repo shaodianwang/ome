@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	kueuev1beta2 "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -76,6 +77,9 @@ func unitClient(t *testing.T, f runtimeFixture, intercept interceptor.Funcs) cli
 	t.Helper()
 	scheme := runtimeScheme(t)
 	if err := nodev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := kueuev1beta2.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	objects := append([]client.Object{f.runtime}, f.extra...)

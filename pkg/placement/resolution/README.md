@@ -64,8 +64,25 @@ AcceleratorClass status participate in that check, but do not change the demand
 fingerprint by themselves. Configuration identity/content, selected accelerator
 specifications, runtime/model inputs, RuntimeClasses, and rendered pod shapes do.
 
-Flavor attribution and proof of the member's actual applied/admitted demand are
-still required before authorizing a capacity plan. This resolver does not infer
-other admission mutations or prove that a member has refreshed its configuration.
-There is no placement-controller call site, and local service reconciliation
-uses its existing path.
+## Attributed accelerator demand
+
+`Resolver.ResolveDemand` extends the rendered unit with the live ResourceFlavor
+catalog and the local AcceleratorQuota root named by the caller. It requires a
+live, identified root with no parent, and verifies its resource/flavor attribution
+against the complete catalog. Quota amounts and current hardware totals do not
+choose flavors or size per-replica demand. Unknown or ambiguous mappings return
+no result. See the [capacity contract](../capacity/README.md) for label projection
+and report completeness requirements.
+
+`ResolvedDemand.Report` retains the root identity and resource version. Both the
+root and complete flavor catalog participate in `Check`, including changes during
+resolution. A root heartbeat invalidates the old observation but does not change
+freshly resolved demand. Replacing or changing a flavor's labels changes the
+mapping fingerprint, including flavors the service does not use.
+
+Before authorizing a capacity plan, the caller must match this report identity
+and version to the capacity reader's fleet evidence, revalidate dependencies and
+registration identity, and prove the member's actual applied/admitted demand.
+The resolver does not infer other admission mutations or prove that a member has
+refreshed its configuration. There is no placement-controller call site, and
+local service reconciliation uses its existing path.
