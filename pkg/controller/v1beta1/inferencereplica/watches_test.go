@@ -2,18 +2,23 @@ package inferencereplica
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/sliceprovision"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/tpuslice/gke"
 )
 
 // managedPod returns a baseline OMENative-managed pod with the routing
@@ -574,5 +579,44 @@ func TestPodGroupPredicate_FiltersOnlyStatusChurn(t *testing.T) {
 	}
 	if p.Generic(event.GenericEvent{Object: statusOnly}) {
 		t.Fatal("generic event must not enqueue terminal cleanup")
+	}
+}
+
+// TestTPUSliceToIR pins the slice event routing: a slice provisioned for
+// an InferenceReplica enqueues that replica, and any other slice enqueues
+// nothing.
+func TestTPUSliceToIR(t *testing.T) {
+	slice := func(ownerKind, owner string) client.Object {
+		u := gke.NewObject()
+		u.SetName("llama-engine-0-0-abc")
+		u.SetLabels(map[string]string{sliceOwnerKindLabel: ownerKind})
+		if owner != "" {
+			u.SetAnnotations(map[string]string{sliceprovision.AnnotationOwner: owner})
+		}
+		return u
+	}
+	configured := &Reconciler{TPUSliceProvisioning: sliceTestConfig()}
+	for _, tc := range []struct {
+		name string
+		r    *Reconciler
+		obj  client.Object
+		want []reconcile.Request
+	}{
+		{
+			name: "provisioned for a replica",
+			r:    configured,
+			obj:  slice(irKind, "prod/llama-engine"),
+			want: []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: "prod", Name: "llama-engine"}}},
+		},
+		{name: "provisioning unconfigured", r: &Reconciler{}, obj: slice(irKind, "prod/llama-engine")},
+		{name: "another owner kind", r: configured, obj: slice("InferenceService", "prod/llama")},
+		{name: "no owner", r: configured, obj: slice(irKind, "")},
+		{name: "malformed owner", r: configured, obj: slice(irKind, "llama-engine")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.r.tpuSliceToIR(context.Background(), tc.obj); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("tpuSliceToIR = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

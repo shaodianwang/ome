@@ -18,6 +18,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/sliceprovision"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
@@ -155,6 +156,19 @@ func irNameFromDrainServiceName(name string) (string, bool) {
 		return prefix, true
 	}
 	return "", false
+}
+
+// tpuSliceToIR maps a TPU slice event to the InferenceReplica the slice was
+// provisioned for.
+func (r *Reconciler) tpuSliceToIR(_ context.Context, obj client.Object) []reconcile.Request {
+	if r.TPUSliceProvisioning == nil || obj.GetLabels()[r.TPUSliceProvisioning.Slice.OwnerKindLabel] != irKind {
+		return nil
+	}
+	owner, ok := sliceprovision.OwnerOf(obj)
+	if !ok {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: owner}}
 }
 
 // managedByOMENativePredicate keeps the pod watch to OMENative-managed

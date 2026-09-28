@@ -56,6 +56,16 @@ rules:
   - patch
   - update
 - apiGroups:
+  - accelerator.gke.io
+  resources:
+  - slices
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
   - admissionregistration.k8s.io
   resources:
   - mutatingwebhookconfigurations

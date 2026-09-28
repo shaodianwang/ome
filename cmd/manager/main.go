@@ -658,6 +658,11 @@ func main() {
 
 	if options.enableInferenceReplicaCtrl && !isControlPlane {
 		setupLog.Info("Setting up InferenceReplica controller")
+		var tpuSliceConfig *controllerconfig.TPUSliceProvisioningConfig
+		if tpuSliceConfig, err = controllerconfig.NewTPUSliceProvisioningConfig(clientSet); err != nil {
+			setupLog.Error(err, "Failed to initialize TPU slice provisioning configuration")
+			os.Exit(1)
+		}
 		if err = (&v1beta1inferencereplicacontroller.Reconciler{
 			Client:                   mgr.GetClient(),
 			Clientset:                clientSet,
@@ -671,6 +676,7 @@ func main() {
 			ScaleUpPodBatchSize:      podBatchSizes.ScaleUp,
 			ScaleDownPodBatchSize:    podBatchSizes.ScaleDown,
 			ScaleDownRequeueInterval: podBatchSizes.ScaleDownRequeueInterval,
+			TPUSliceProvisioning:     tpuSliceConfig,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "Failed to create InferenceReplica controller")
 			os.Exit(1)

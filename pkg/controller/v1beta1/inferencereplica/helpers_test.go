@@ -15,10 +15,13 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/uuid"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
@@ -35,12 +38,15 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/sliceprovision"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 	workloadgang "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/gang"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
+	"github.com/ome-projects/ome/pkg/tpuslice"
+	"github.com/ome-projects/ome/pkg/tpuslice/gke"
 )
 
 // newCountingStatusClient builds a fake client over objs that counts
@@ -922,4 +928,146 @@ func ledgerCMForOwner(t *testing.T, ownerName, namespace string, ledger *audit.L
 		ObjectMeta: metav1.ObjectMeta{Name: ownerName + audit.ConfigMapNameSuffix, Namespace: namespace},
 		Data:       map[string]string{audit.LedgerKey: string(raw)},
 	}
+}
+
+// TPU slice provisioning fixtures. sliceTestConfig provisions "tpu-a"
+// slices on pools whose nodes carry the provision-only label, and each pod
+// of optedInIR fills one 2x2x1 slice.
+const (
+	sliceKeyAccelerator = "example.com/accelerator"
+	sliceKeyTopology    = "example.com/topology"
+	sliceKeySlice       = "example.com/slice"
+	sliceKeyProvision   = "example.com/provisioning"
+	sliceValueProvision = "on-demand"
+	sliceChipResource   = "example.com/chip"
+	sliceOwnerKindLabel = "example.com/owner-kind"
+	sliceStateReady     = "ACTIVE"
+)
+
+func sliceTestConfig() *controllerconfig.TPUSliceProvisioningConfig {
+	return &controllerconfig.TPUSliceProvisioningConfig{
+		ChipResource: sliceChipResource,
+		NodeLabels: controllerconfig.TPUSliceNodeLabels{
+			Accelerator: sliceKeyAccelerator,
+			Topology:    sliceKeyTopology,
+			Slice:       sliceKeySlice,
+		},
+		ProvisionOnly: controllerconfig.TPUSliceLabel{Key: sliceKeyProvision, Value: sliceValueProvision},
+		Accelerators: map[string]controllerconfig.TPUSliceAccelerator{
+			"tpu-a": {SliceType: "type-a", ChipsPerHost: 4, Topologies: []string{"2x2x1", "2x2x2"}},
+		},
+		Slice: controllerconfig.TPUSliceObject{
+			OwnerKindLabel: sliceOwnerKindLabel,
+			OwnerNameLabel: "example.com/owner-name",
+			ReadyStates:    []string{sliceStateReady},
+		},
+	}
+}
+
+// newSliceReconciler is newReconciler with TPU slice provisioning
+// configured, the Slice CRD installed and a provision-only "tpu-a" node.
+// The client assigns UIDs on create, as the API server does: a slice is
+// released under a UID precondition.
+func newSliceReconciler(t *testing.T, objs ...client.Object) (*Reconciler, client.WithWatch) {
+	t.Helper()
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "tpu-node", Labels: map[string]string{
+		sliceKeyAccelerator: "tpu-a",
+		sliceKeyProvision:   sliceValueProvision,
+	}}}
+	r, base := newReconciler(t, append([]client.Object{node}, objs...)...)
+	c := interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if obj.GetUID() == "" {
+				obj.SetUID(uuid.NewUUID())
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+	})
+	r.Client, r.APIReader, r.sliceReader = c, c, c
+	r.TPUSliceProvisioning = sliceTestConfig()
+	return r, c
+}
+
+// optedInIR is baselineIR opted in to TPU slice provisioning, with pods
+// that each fill one 2x2x1 "tpu-a" slice.
+func optedInIR(name, namespace string, replicas int32) *v1beta1.InferenceReplica {
+	ir := baselineIR(name, namespace, replicas)
+	template := &ir.Spec.Runners[0].Template
+	template.Annotations = map[string]string{constants.TPUSliceProvisioningAnnotationKey: "true"}
+	template.Spec.NodeSelector = map[string]string{sliceKeyAccelerator: "tpu-a", sliceKeyTopology: "2x2x1"}
+	template.Spec.Containers[0].Resources.Limits = corev1.ResourceList{sliceChipResource: resource.MustParse("4")}
+	return ir
+}
+
+// seedSlice creates the slice ir's provisioner places slot's pods on, and
+// returns its name. state is the state the slice reports; empty reports
+// none yet.
+func seedSlice(t *testing.T, r *Reconciler, c client.Client, ir *v1beta1.InferenceReplica, slot sliceprovision.Slot, state string) string {
+	t.Helper()
+	p, err := r.sliceProvisioner(ir)
+	if err != nil || p == nil {
+		t.Fatalf("sliceProvisioner = %v, %v", p, err)
+	}
+	topology, err := tpuslice.ParseTopology("2x2x1")
+	if err != nil {
+		t.Fatalf("ParseTopology: %v", err)
+	}
+	placement, err := p.Ensure(context.Background(), sliceprovision.Demand{
+		Shape:     tpuslice.Shape{Accelerator: "tpu-a", Topology: topology},
+		SliceType: "type-a",
+	}, slot)
+	if err != nil {
+		t.Fatalf("Ensure(%+v): %v", slot, err)
+	}
+	if state != "" {
+		setSliceState(t, c, placement.Slice.Name, state)
+	}
+	return placement.Slice.Name
+}
+
+// setSliceState reports state as the slice's Ready condition reason, as
+// the slice's provider does.
+func setSliceState(t *testing.T, c client.Client, name, state string) {
+	t.Helper()
+	u := getSlice(t, c, name)
+	if u == nil {
+		t.Fatalf("slice %s not found", name)
+	}
+	u.Object["status"] = map[string]interface{}{
+		"conditions": []interface{}{
+			map[string]interface{}{"type": "Ready", "status": "True", "reason": state},
+		},
+	}
+	if err := c.Update(context.Background(), u); err != nil {
+		t.Fatalf("update slice %s: %v", name, err)
+	}
+}
+
+// getSlice returns the named slice, or nil when there is none.
+func getSlice(t *testing.T, c client.Client, name string) *unstructured.Unstructured {
+	t.Helper()
+	u := gke.NewObject()
+	if err := c.Get(context.Background(), client.ObjectKey{Name: name}, u); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		t.Fatalf("get slice %s: %v", name, err)
+	}
+	return u
+}
+
+// sliceNames returns the names of every slice.
+func sliceNames(t *testing.T, c client.Client) []string {
+	t.Helper()
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(gke.GroupVersion.WithKind(gke.Kind + "List"))
+	if err := c.List(context.Background(), list); err != nil {
+		t.Fatalf("list slices: %v", err)
+	}
+	names := make([]string, 0, len(list.Items))
+	for _, u := range list.Items {
+		names = append(names, u.GetName())
+	}
+	sort.Strings(names)
+	return names
 }

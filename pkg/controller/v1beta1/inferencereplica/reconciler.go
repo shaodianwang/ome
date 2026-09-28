@@ -71,6 +71,8 @@ import (
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=controllerrevisions,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=accelerator.gke.io,resources=slices,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 
 // Reconciler drives each IR lifecycle through the workload pipeline.
 type Reconciler struct {
@@ -170,6 +172,14 @@ type Reconciler struct {
 	// series after the object has disappeared and its labels are unavailable.
 	scaleDownSeriesMu    sync.Mutex
 	scaleDownSeriesCache map[types.NamespacedName]scaleDownSeriesIdentity
+
+	// TPUSliceProvisioning is loaded once at startup. nil provisions no TPU
+	// slices.
+	TPUSliceProvisioning *controllerconfig.TPUSliceProvisioningConfig
+	// sliceReader is the cached slice reader. SetupWithManager sets it when
+	// TPUSliceProvisioning is set and the Slice CRD is installed; nil
+	// provisions no TPU slices.
+	sliceReader client.Reader
 
 	// Clock supplies wall-clock time to the workload lifecycle layer.
 	// SetupWithManager defaults it to the real clock; tests may inject a fake.
@@ -707,7 +717,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	}
 	plan.InstanceTopologyKeys = effectiveTopology
 
+	slices, sliceErr := r.provisionSlices(ctx, ir, &deps, &input)
+	if sliceErr != nil {
+		return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: provision TPU slices (component=%s): %w", ir.Spec.Component, sliceErr)
+	}
 	result, err = workload.Reconcile(ctx, deps, input, plan, rollTarget)
+	if err == nil {
+		if sweepErr := slices.sweep(ctx, input, plan); sweepErr != nil {
+			result = ctrl.Result{}
+			err = fmt.Errorf("InferenceReplica reconciler: sweep TPU slices (component=%s): %w", ir.Spec.Component, sweepErr)
+		}
+	}
 
 	// Reconcile the per-Component headless Service. The Service gives every
 	// pod a stable FQDN for peer discovery during gang init (multi-node) and

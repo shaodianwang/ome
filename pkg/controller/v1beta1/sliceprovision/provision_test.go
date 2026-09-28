@@ -432,6 +432,87 @@ func TestEnsureReadsLive(t *testing.T) {
 	}
 }
 
+func TestObserve(t *testing.T) {
+	d := demand(t, "2x2x1")
+	slot := Slot{Instance: 1}
+	tests := []struct {
+		name       string
+		seed       []func(*unstructured.Unstructured)
+		absent     bool
+		demand     Demand
+		wantReady  bool
+		wantReason string
+		wantErr    error
+	}{
+		{name: "not created", absent: true, demand: d, wantReason: "not created yet"},
+		{name: "active", seed: []func(*unstructured.Unstructured){withState("ACTIVE", "")}, demand: d, wantReady: true},
+		{name: "not yet active", seed: []func(*unstructured.Unstructured){withState("PROVISIONING", "")}, demand: d, wantReason: "is PROVISIONING"},
+		{name: "other shape", seed: []func(*unstructured.Unstructured){withState("ACTIVE", "")}, demand: demand(t, "2x2x2"), wantReason: "want type-a 2x2x2"},
+		{name: "foreign", seed: []func(*unstructured.Unstructured){withLabel(LabelOwnerUID, "uid-b")}, demand: d, wantErr: gke.ErrOwnershipConflict},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newFakeClient()
+			p := newProvisioner(t, c, testOwner)
+			if !tt.absent {
+				if err := c.Create(context.Background(), stored(t, p, d, slot, tt.seed...)); err != nil {
+					t.Fatalf("seed: %v", err)
+				}
+			}
+			pl, err := p.Observe(context.Background(), tt.demand, slot)
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) || pl.Ready {
+					t.Fatalf("Observe = %+v, %v; want %v", pl, err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Observe: %v", err)
+			}
+			if pl.Ready != tt.wantReady || !strings.Contains(pl.Reason, tt.wantReason) {
+				t.Fatalf("Observe placement = %+v, want ready %v with reason containing %q", pl, tt.wantReady, tt.wantReason)
+			}
+			if tt.wantReady {
+				if diff := cmp.Diff(map[string]string{keySlice: p.Name(slot)}, pl.NodeSelector); diff != "" {
+					t.Fatalf("ready placement node selector mismatch (-want +got):\n%s", diff)
+				}
+			}
+			if _, found := getSlice(t, c, p.Name(slot)); found == tt.absent {
+				t.Fatalf("slice present = %v after Observe, want %v: Observe never creates", found, !tt.absent)
+			}
+		})
+	}
+}
+
+func TestObserveReadsThroughCache(t *testing.T) {
+	cached := newFakeClient()
+	live := newFakeClient()
+	p, err := New(testConfig(), cached, live, live, testOwner)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	d := demand(t, "2x2x1")
+	if err := live.Create(context.Background(), stored(t, p, d, Slot{}, withState("ACTIVE", ""))); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	pl, err := p.Observe(context.Background(), d, Slot{})
+	if err != nil || pl.Ready {
+		t.Fatalf("Observe = %+v, %v; want the cached read, which has no slice", pl, err)
+	}
+	boom := errors.New("boom")
+	failing := fake.NewClientBuilder().WithInterceptorFuncs(interceptor.Funcs{
+		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+			return boom
+		},
+	}).Build()
+	if p, err = New(testConfig(), failing, live, live, testOwner); err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := p.Observe(context.Background(), d, Slot{}); !errors.Is(err, boom) {
+		t.Fatalf("Observe error = %v, want the read error", err)
+	}
+}
+
 func pod(name string, nodeSelector map[string]string, phase corev1.PodPhase) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns"},

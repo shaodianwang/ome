@@ -20,8 +20,10 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/sliceprovision"
 	workloadgang "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/gang"
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
+	"github.com/ome-projects/ome/pkg/tpuslice/gke"
 	"github.com/ome-projects/ome/pkg/utils"
 )
 
@@ -48,6 +50,11 @@ import (
 //   - ScaledObject (owned): watched only when the KEDA CRD is present
 //     (probed at setup); an unconditional watch would fail manager
 //     startup when KEDA is absent (cache-sync timeout).
+//   - TPU slices: watched only when TPU slice provisioning is configured
+//     and the Slice CRD is present (probed at setup). A slice event
+//     enqueues the InferenceReplica it was provisioned for, so a slice
+//     turning ready releases its withheld pods and a released slice
+//     completes teardown.
 //
 // The parent InferenceService is NOT watched — the IR's owner ref to
 // its parent means the parent's controller already gets re-enqueued
@@ -105,6 +112,22 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err != nil {
 		return err
 	}
+	// TPU slices are provisioned only when configured and the Slice CRD is
+	// installed at setup: a watch on an absent CRD fails manager startup.
+	sliceFound := false
+	if r.TPUSliceProvisioning != nil {
+		if err := sliceprovision.CheckConfig(r.TPUSliceProvisioning); err != nil {
+			return fmt.Errorf("inferencereplica: TPU slice provisioning: %w", err)
+		}
+		if sliceFound, err = utils.IsCrdAvailable(mgr.GetConfig(), gke.GroupVersion.String(), gke.Kind); err != nil {
+			return err
+		}
+		if sliceFound {
+			r.sliceReader = mgr.GetCache()
+		} else {
+			r.Log.Info("The InferenceReplica controller won't provision TPU slices because the " + gke.GroupVersion.String() + " " + gke.Kind + " CRD is not available; pods are created without slices until it is installed and the manager restarts.")
+		}
+	}
 
 	b := ctrl.NewControllerManagedBy(mgr).
 		// MaxConcurrentReconciles parallelizes reconciles for distinct IRs;
@@ -120,6 +143,9 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		b = b.Owns(&kedav1.ScaledObject{})
 	} else {
 		r.Log.Info("The InferenceReplica controller won't watch keda.sh/v1alpha1/ScaledObject resources because the CRD is not available; InferenceReplicas requesting KEDA autoscaling will fail on reconcile until KEDA is installed.")
+	}
+	if sliceFound {
+		b = b.Watches(gke.NewObject(), handler.EnqueueRequestsFromMapFunc(r.tpuSliceToIR))
 	}
 	return b.
 		Watches(

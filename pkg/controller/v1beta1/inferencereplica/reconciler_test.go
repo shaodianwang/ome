@@ -18,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	clocktesting "k8s.io/utils/clock/testing"
@@ -33,6 +34,7 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/sliceprovision"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
 	workloadgang "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/gang"
@@ -3150,6 +3152,233 @@ func TestReconcileUnresolvedPlacementLimitCannotAcknowledge(t *testing.T) {
 			}
 			if len(pods.Items) != 0 {
 				t.Fatal("unresolved limit created pods")
+			}
+		})
+	}
+}
+
+// TestReconcile_TPUSlices_WithholdsPodsUntilTheirSliceIsReady pins the
+// opted-in create path: a pass creates each Instance's slice and withholds
+// its pod on the provisioning hold, and the pass after the slice turns
+// ready creates the pod confined to it.
+func TestReconcile_TPUSlices_WithholdsPodsUntilTheirSliceIsReady(t *testing.T) {
+	ctx := context.Background()
+	ir := optedInIR("llama-engine", "prod", 1)
+	r, c := newSliceReconciler(t, ir)
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)}
+	p, err := r.sliceProvisioner(ir)
+	if err != nil {
+		t.Fatalf("sliceProvisioner: %v", err)
+	}
+	name := p.Name(sliceprovision.Slot{Instance: 0})
+
+	for pass := 0; pass < 2; pass++ {
+		if _, err := r.Reconcile(ctx, req); err != nil {
+			t.Fatalf("pass %d: %v", pass, err)
+		}
+	}
+	if got := sliceNames(t, c); !reflect.DeepEqual(got, []string{name}) {
+		t.Fatalf("slices = %v, want [%s]", got, name)
+	}
+	if pods := listPods(t, c, ir.Namespace); len(pods) != 0 {
+		t.Fatalf("a pod must wait for its slice; created %v", podNames(pods))
+	}
+	got := &v1beta1.InferenceReplica{}
+	if err := c.Get(ctx, req.NamespacedName, got); err != nil {
+		t.Fatalf("get IR: %v", err)
+	}
+	if row := instanceStatusAt(t, got, 0); row.Operation == nil || row.Operation.Waiting != workloadtypes.WaitingReasonCapacityProvisioning {
+		t.Fatalf("Instance 0 operation = %+v, want it waiting on %s", row.Operation, workloadtypes.WaitingReasonCapacityProvisioning)
+	}
+
+	setSliceState(t, c, name, sliceStateReady)
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("ready pass: %v", err)
+	}
+	pods := listPods(t, c, ir.Namespace)
+	if len(pods) != 1 {
+		t.Fatalf("pods = %v, want one once its slice is ready", podNames(pods))
+	}
+	if got := pods[0].Spec.NodeSelector[sliceKeySlice]; got != name {
+		t.Fatalf("pod selects slice %q, want %q", got, name)
+	}
+}
+
+// TestReconcile_TPUSlices_OptedOutPodsAreNotConfined pins the opt-in: a
+// pod that selects a provision-only pool, of an owner that does not opt
+// in, is created as before and no slice is provisioned for it.
+func TestReconcile_TPUSlices_OptedOutPodsAreNotConfined(t *testing.T) {
+	ir := optedInIR("llama-engine", "prod", 1)
+	ir.Spec.Runners[0].Template.Annotations = nil
+	r, c := newSliceReconciler(t, ir)
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	pods := listPods(t, c, ir.Namespace)
+	if len(pods) != 1 {
+		t.Fatalf("pods = %v, want one", podNames(pods))
+	}
+	if got, ok := pods[0].Spec.NodeSelector[sliceKeySlice]; ok {
+		t.Fatalf("an opted-out pod must not be confined to a slice; selects %q", got)
+	}
+	if got := sliceNames(t, c); len(got) != 0 {
+		t.Fatalf("no slice may be provisioned for an opted-out owner; got %v", got)
+	}
+}
+
+// TestReconcile_TPUSlices_ScaleDownReleasesTheRemovedInstancesSlice pins
+// the per-Instance release: a removed Instance's slice outlives its
+// terminating pod and is released once the pod is gone, and the kept
+// Instance's slice stays.
+func TestReconcile_TPUSlices_ScaleDownReleasesTheRemovedInstancesSlice(t *testing.T) {
+	const podHold = "example.com/hold"
+	ctx := context.Background()
+	ir := optedInIR("llama-engine", "prod", 1)
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{
+		{Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady, PodCount: 1, ReadyPodCount: 1, ServingPodCount: 1},
+		{Index: 1, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady, PodCount: 1, ReadyPodCount: 1, ServingPodCount: 1},
+	}
+	r, c := newSliceReconciler(t, ir)
+	var slices [2]string
+	var removedPod client.ObjectKey
+	for i := range slices {
+		slices[i] = seedSlice(t, r, c, ir, sliceprovision.Slot{Instance: int32(i)}, sliceStateReady)
+		pod := podForIR(ir, int32(i), string(v1beta1.RunnerNameDefault), 0, true, true)
+		pod.Spec.NodeSelector = map[string]string{sliceKeySlice: slices[i]}
+		if i == 1 {
+			pod.Finalizers = []string{podHold}
+			removedPod = client.ObjectKeyFromObject(pod)
+		}
+		if err := c.Create(ctx, pod); err != nil {
+			t.Fatalf("create pod: %v", err)
+		}
+	}
+	kept, removed := slices[0], slices[1]
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)}
+	reconcile := func(stage string, pass int) {
+		t.Helper()
+		if _, err := r.Reconcile(ctx, req); err != nil {
+			t.Fatalf("%s pass %d: %v", stage, pass, err)
+		}
+	}
+
+	pod := &corev1.Pod{}
+	for pass := 0; pass < 10; pass++ {
+		reconcile("scale-down", pass)
+		if err := c.Get(ctx, removedPod, pod); err != nil {
+			t.Fatalf("get the removed Instance's pod: %v", err)
+		}
+		if pod.DeletionTimestamp != nil {
+			break
+		}
+	}
+	if pod.DeletionTimestamp == nil {
+		t.Fatal("the removed Instance's pod must be deleted")
+	}
+	for pass := 0; pass < 3; pass++ {
+		reconcile("terminating", pass)
+	}
+	if getSlice(t, c, removed) == nil {
+		t.Fatal("a slice must outlive the pod confined to it")
+	}
+
+	pod.Finalizers = nil
+	if err := c.Update(ctx, pod); err != nil {
+		t.Fatalf("release the pod: %v", err)
+	}
+	for pass := 0; pass < 10 && getSlice(t, c, removed) != nil; pass++ {
+		reconcile("release", pass)
+	}
+	if getSlice(t, c, removed) != nil {
+		t.Fatalf("the removed Instance's slice must be released once its pod is gone; slices %v", sliceNames(t, c))
+	}
+	if getSlice(t, c, kept) == nil {
+		t.Fatal("the kept Instance's slice must stay")
+	}
+	pods := listPods(t, c, ir.Namespace)
+	if len(pods) != 1 || pods[0].Spec.NodeSelector[sliceKeySlice] != kept {
+		t.Fatalf("pods = %v, want only the kept Instance's pod", podNames(pods))
+	}
+}
+
+// TestReconcile_TPUSlices_ReleasesUnusedSlicesOfAnOptedOutOwner pins the
+// release-only pass: an owner that opted out still releases the slices it
+// holds once no pod is confined to them.
+func TestReconcile_TPUSlices_ReleasesUnusedSlicesOfAnOptedOutOwner(t *testing.T) {
+	ir := optedInIR("llama-engine", "prod", 1)
+	ir.Spec.Runners[0].Template.Annotations = nil
+	r, c := newSliceReconciler(t, ir)
+	stale := seedSlice(t, r, c, ir, sliceprovision.Slot{Instance: 0}, sliceStateReady)
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if getSlice(t, c, stale) != nil {
+		t.Fatal("a slice no pod is confined to must be released once its owner opts out")
+	}
+	if pods := listPods(t, c, ir.Namespace); len(pods) != 1 {
+		t.Fatalf("pods = %v, want the opted-out pod created unconfined", podNames(pods))
+	}
+}
+
+// TestReconcile_TPUSlices_FailuresFailThePass pins that a failed slice
+// read or release is the pass's error, and that a provisioning failure is
+// raised before any pod is created.
+func TestReconcile_TPUSlices_FailuresFailThePass(t *testing.T) {
+	failing := func(c client.WithWatch, funcs interceptor.Funcs) client.WithWatch {
+		return interceptor.NewClient(c, funcs)
+	}
+	for _, tc := range []struct {
+		name    string
+		wire    func(r *Reconciler, c client.WithWatch)
+		wantErr string
+		// wantPods is whether the pass creates the pod before failing.
+		wantPods bool
+	}{
+		{
+			name: "cached slice read",
+			wire: func(r *Reconciler, c client.WithWatch) {
+				r.sliceReader = failing(c, interceptor.Funcs{
+					List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+						if _, ok := list.(*unstructured.UnstructuredList); ok {
+							return errors.New("injected slice list failure")
+						}
+						return c.List(ctx, list, opts...)
+					},
+				})
+			},
+			wantErr: "provision TPU slices",
+		},
+		{
+			name: "slice release",
+			wire: func(r *Reconciler, c client.WithWatch) {
+				r.Client = failing(c, interceptor.Funcs{
+					Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+						if _, ok := obj.(*unstructured.Unstructured); ok {
+							return errors.New("injected slice delete failure")
+						}
+						return c.Delete(ctx, obj, opts...)
+					},
+				})
+			},
+			wantErr:  "sweep TPU slices",
+			wantPods: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ir := optedInIR("llama-engine", "prod", 1)
+			ir.Spec.Runners[0].Template.Annotations = nil
+			r, c := newSliceReconciler(t, ir)
+			seedSlice(t, r, c, ir, sliceprovision.Slot{Instance: 0}, sliceStateReady)
+			tc.wire(r, c)
+
+			_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ir)})
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !strings.Contains(err.Error(), "injected") {
+				t.Fatalf("Reconcile error = %v, want the %s failure", err, tc.wantErr)
+			}
+			if pods := listPods(t, c, ir.Namespace); (len(pods) > 0) != tc.wantPods {
+				t.Fatalf("pods = %v, want pods created before the failure: %v", podNames(pods), tc.wantPods)
 			}
 		})
 	}

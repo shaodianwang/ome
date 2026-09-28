@@ -217,6 +217,26 @@ func (p *Provisioner) Ensure(ctx context.Context, d Demand, slot Slot) (Placemen
 			return Placement{}, err
 		}
 	}
+	return p.classify(s, spec)
+}
+
+// Observe reports, from a cached read, whether slot's pods may be created. It
+// never creates a slice: a slot with none must wait for Ensure.
+func (p *Provisioner) Observe(ctx context.Context, d Demand, slot Slot) (Placement, error) {
+	spec := p.spec(d, slot)
+	s, found, err := p.cached.Get(ctx, spec.Name)
+	if err != nil {
+		return Placement{}, err
+	}
+	if !found {
+		return Placement{Reason: fmt.Sprintf("slice %s is not created yet", spec.Name)}, nil
+	}
+	return p.classify(s, spec)
+}
+
+// classify is whether s, found at spec's name, lets the slot's pods be
+// created.
+func (p *Provisioner) classify(s gke.Slice, spec gke.Spec) (Placement, error) {
 	if !s.OwnedBy(p.ownerLabels) {
 		return Placement{}, fmt.Errorf("%w: %s", gke.ErrOwnershipConflict, s.Name)
 	}

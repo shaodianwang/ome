@@ -3,8 +3,9 @@
 // scale-down batch pipeline tears every Instance down (drain → graceful
 // delete → stuck-Terminating force-delete escalation → audit) and the
 // teardown finalizer lifts only when owned component Pods are gone and
-// owned PodGroups are authoritatively absent. Teardown therefore carries
-// the same guarantees as scale-down instead of un-instrumented background GC.
+// owned PodGroups and TPU slices are authoritatively absent. Teardown
+// therefore carries the same guarantees as scale-down instead of
+// un-instrumented background GC.
 //
 // Pods keep their IR owner references throughout: if the controller
 // dies mid-teardown, background GC still collects everything the moment
@@ -28,6 +29,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/coordination"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/sliceprovision"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/audit"
@@ -38,9 +40,9 @@ import (
 
 // TeardownFinalizer gates IR deletion on the reconciled teardown path:
 // added on every reconcile while DeletionTimestamp is nil, removed once
-// no owned component Pod or pending owned PodGroup remains (or the configured
-// lifecycle.teardown deadline passes). An already-Terminating IR without it is
-// left entirely to background GC.
+// no owned component Pod, pending owned PodGroup or owned TPU slice
+// remains (or the configured lifecycle.teardown deadline passes). An
+// already-Terminating IR without it is left entirely to background GC.
 const TeardownFinalizer = "ome.io/ir-teardown"
 
 // Teardown event reasons, emitted on the IR itself (the parent ISVC is
@@ -70,11 +72,13 @@ const teardownEscapeHint = "manual escape: kubectl patch inferencereplica %s -n 
 //     force-delete escalation when lifecycle.forceDelete is configured
 //     — the designed unwedger for pods stuck on dead nodes.
 //  3. Completion = no live owned component Pods (a Pod whose status entry was
-//     lost must still block) and no owned PodGroups in the authoritative inventory.
+//     lost must still block), no owned PodGroups in the authoritative inventory,
+//     and then no owned TPU slice on a live read once the rest is gone.
 //     Then delete the IR-owned headless Service and remove the finalizer.
 //  4. Survivors past the configured lifecycle.teardown.deadline →
-//     Warning + release the finalizer to background GC. No deadline
-//     configured → strict hold with a per-pass aggregated Warning.
+//     Warning + release the owned TPU slices + release the finalizer to
+//     background GC. No deadline configured → strict hold with a per-pass
+//     aggregated Warning.
 //
 // The parent ISVC is typically ALREADY deleted here (background GC
 // deletes the ISVC first): the input builder tolerates parent=nil (the
@@ -106,6 +110,7 @@ func (r *Reconciler) reconcileTeardown(ctx context.Context, log logr.Logger, ir 
 			deadline, summary, ir.Spec.ParentRef.Name, ir.Spec.Component, TeardownFinalizer, ir.Name, ir.Namespace))
 		parent := r.resolveParentFrom(ctx, r.APIReader, ir)
 		r.closeDanglingLedgerEntries(ctx, log, ir, parent)
+		r.releaseSlicesPastDeadline(ctx, ir)
 		r.deleteScaleDownSeries(ir)
 		if ferr := r.removeTeardownFinalizer(ctx, ir); ferr != nil {
 			return ctrl.Result{}, fmt.Errorf("InferenceReplica teardown: remove finalizer past deadline: %w", ferr)
@@ -178,6 +183,19 @@ func (r *Reconciler) reconcileTeardown(ctx context.Context, log logr.Logger, ir 
 		input.FinalizeInstanceResources = workloadgang.BuildFinalizeInstanceResources(
 			r.Client, r.APIReader, podGroupInventory, input.OwnerObject, input.Key.OwnerName, plan.Component)
 	}
+	tpuSlices, serr := r.sliceProvisioner(ir)
+	if serr != nil {
+		return ctrl.Result{}, fmt.Errorf("InferenceReplica teardown: TPU slice provisioner: %w", serr)
+	}
+	if tpuSlices != nil {
+		inUse, uerr := slicesInUse(ctx, ir, tpuSlices)
+		if uerr != nil {
+			return ctrl.Result{}, fmt.Errorf("InferenceReplica teardown: observe TPU slices: %w", uerr)
+		}
+		if inUse {
+			input.FinalizeInstanceResources = releasingSlices(input.FinalizeInstanceResources, tpuSlices)
+		}
+	}
 
 	// The normal path's deferred aggregateAndWriteStatus is NOT
 	// installed here: its counter/condition writes die with the IR. The
@@ -210,7 +228,14 @@ func (r *Reconciler) reconcileTeardown(ctx context.Context, log logr.Logger, ir 
 		}
 	}
 
-	if len(ownedPods) == 0 && teardownPodGroupsFinalized(podGroupInventory) {
+	workloadGone := len(ownedPods) == 0 && teardownPodGroupsFinalized(podGroupInventory)
+	slicesReleased := true
+	if workloadGone && tpuSlices != nil {
+		if slicesReleased, err = tpuSlices.ReleaseAll(ctx); err != nil {
+			return ctrl.Result{}, fmt.Errorf("InferenceReplica teardown: release TPU slices: %w", err)
+		}
+	}
+	if workloadGone && slicesReleased {
 		if derr := r.deleteHeadlessService(ctx, ir); derr != nil {
 			return ctrl.Result{}, derr
 		}
@@ -234,9 +259,14 @@ func (r *Reconciler) reconcileTeardown(ctx context.Context, log logr.Logger, ir 
 		if deadlineInvalidReason != "" {
 			detail = "lifecycle.teardown.deadline configured but invalid: " + deadlineInvalidReason
 		}
+		remaining := fmt.Sprintf("%d owned pod(s) and %d owned PodGroup(s) remain (selector: parent=%q, component=%q)",
+			len(ownedPods), pendingTeardownPodGroups(podGroupInventory), ir.Spec.ParentRef.Name, ir.Spec.Component)
+		if workloadGone {
+			remaining = fmt.Sprintf("owned TPU slices are being released (selector: %s=%s)", sliceprovision.LabelOwnerUID, ir.UID)
+		}
 		r.warnTeardown(ir, ReasonTeardownBlocked, fmt.Sprintf(
-			"teardown blocked: %d owned pod(s) and %d owned PodGroup(s) remain (selector: parent=%q, component=%q); finalizer %s holds until cleanup completes (%s); "+teardownEscapeHint,
-			len(ownedPods), pendingTeardownPodGroups(podGroupInventory), ir.Spec.ParentRef.Name, ir.Spec.Component, TeardownFinalizer, detail, ir.Name, ir.Namespace))
+			"teardown blocked: %s; finalizer %s holds until cleanup completes (%s); "+teardownEscapeHint,
+			remaining, TeardownFinalizer, detail, ir.Name, ir.Namespace))
 	}
 	if result.IsZero() {
 		// Pods survive with no Delete in flight (e.g. a statusless

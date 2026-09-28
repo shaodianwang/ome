@@ -122,6 +122,11 @@ var (
 	RDMAProfileAnnotationKey              = "rdma.ome.io/profile"
 	RDMAContainerNameAnnotationKey        = "rdma.ome.io/container-name"
 
+	// TPUSliceProvisioningAnnotationKey set to "true" opts an
+	// InferenceService's pods in to TPU slices the controller provisions
+	// for them on provision-only node pools.
+	TPUSliceProvisioningAnnotationKey = OMEAPIGroupName + "/tpu-slice-provisioning"
+
 	// Runtime profile injection — opt-in profiles that factor out
 	// repetitive ServingRuntime YAML (probes, /dev/shm, prometheus
 	// scrape annotations). Each is gated on its own profile annotation;

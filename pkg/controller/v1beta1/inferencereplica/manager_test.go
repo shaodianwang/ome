@@ -27,9 +27,12 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/sliceprovision"
 	workloadgang "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/gang"
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
+	"github.com/ome-projects/ome/pkg/tpuslice/gke"
 	"github.com/ome-projects/ome/pkg/utils"
 )
 
@@ -236,6 +239,54 @@ func TestSetupWithManager_GangSchedulingFollowsThePodGroupCRD(t *testing.T) {
 			}
 			if !tc.present && err != nil {
 				t.Fatalf("setup must not touch the PodGroup index when the CRD is absent, got %v", err)
+			}
+		})
+	}
+}
+
+// TestSetupWithManager_TPUSlicesFollowTheSliceCRD pins the gated half of
+// slice provisioning: slices are read, and so provisioned, only when
+// provisioning is configured and the Slice CRD is installed; a
+// configuration that would overwrite a label the controller sets fails
+// setup.
+func TestSetupWithManager_TPUSlicesFollowTheSliceCRD(t *testing.T) {
+	overwriting := sliceTestConfig()
+	overwriting.Slice.OwnerKindLabel = sliceprovision.LabelOwnerUID
+	for _, tc := range []struct {
+		name       string
+		config     *controllerconfig.TPUSliceProvisioningConfig
+		crd        bool
+		wantReader bool
+		wantErr    string
+	}{
+		{name: "configured, CRD installed", config: sliceTestConfig(), crd: true, wantReader: true},
+		{name: "configured, CRD absent", config: sliceTestConfig()},
+		{name: "unconfigured, CRD installed", crd: true},
+		{name: "configured to overwrite a controller label", config: overwriting, crd: true, wantErr: "TPU slice provisioning"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			seedCRDDiscovery(false, false)
+			list := &metav1.APIResourceList{GroupVersion: gke.GroupVersion.String()}
+			if tc.crd {
+				list.APIResources = []metav1.APIResource{{Kind: gke.Kind}}
+			}
+			utils.SetAvailableResourcesForApi(gke.GroupVersion.String(), list)
+			mgr := newSetupManager(t, true)
+			r := wiredReconciler(mgr)
+			r.TPUSliceProvisioning = tc.config
+
+			err := r.SetupWithManager(mgr)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("setup error = %v, want it to contain %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("setup: %v", err)
+			}
+			if got := r.sliceReader != nil; got != tc.wantReader {
+				t.Fatalf("slices read = %v, want %v", got, tc.wantReader)
 			}
 		})
 	}
