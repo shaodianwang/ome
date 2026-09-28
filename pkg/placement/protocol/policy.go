@@ -4,6 +4,7 @@ package protocol
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -18,6 +19,15 @@ func IsAffinityMember(service *v1beta1.InferenceService) bool {
 	_, selected := service.Annotations[constants.PlacementPolicy]
 	_, planned := service.Annotations[constants.PlacementExecution]
 	return selected || planned
+}
+
+// executionVersion identifies the annotation wire format. An envelope keeps
+// readers that only understand flat policies from accepting partial authority.
+const executionVersion = 1
+
+type executionEnvelope struct {
+	Version int                               `json:"version"`
+	Policy  *v1beta1.PlacementExecutionPolicy `json:"policy"`
 }
 
 // FromDerived reads policy only on origin-marked services. A similarly named
@@ -37,15 +47,41 @@ func FromDerived(service *v1beta1.InferenceService) (*v1beta1.PlacementExecution
 	if !exists {
 		return nil, nil
 	}
-	var policy v1beta1.PlacementExecutionPolicy
-	if err := json.Unmarshal([]byte(raw), &policy); err != nil {
+	policy, err := decode(raw)
+	if err != nil {
 		return nil, fmt.Errorf("invalid placement execution policy: %w", err)
 	}
-	if err := Validate(&policy); err != nil {
+	if err := Validate(policy); err != nil {
 		return nil, err
 	}
 	if string(policy.SourceUID) != origin {
 		return nil, fmt.Errorf("placement execution policy does not belong to the derived service's source")
+	}
+	return policy, nil
+}
+
+func decode(raw string) (*v1beta1.PlacementExecutionPolicy, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &fields); err != nil {
+		return nil, err
+	}
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	_, hasVersion := fields["version"]
+	_, hasPolicy := fields["policy"]
+	if hasVersion || hasPolicy {
+		var envelope executionEnvelope
+		if err := decoder.Decode(&envelope); err != nil {
+			return nil, err
+		}
+		if envelope.Version != executionVersion {
+			return nil, fmt.Errorf("unsupported execution policy version %d", envelope.Version)
+		}
+		return envelope.Policy, nil
+	}
+	var policy v1beta1.PlacementExecutionPolicy
+	if err := decoder.Decode(&policy); err != nil {
+		return nil, err
 	}
 	return &policy, nil
 }
@@ -64,7 +100,7 @@ func Encode(policy *v1beta1.PlacementExecutionPolicy) (string, error) {
 	if err := Validate(policy); err != nil {
 		return "", err
 	}
-	data, err := json.Marshal(policy)
+	data, err := json.Marshal(executionEnvelope{Version: executionVersion, Policy: policy})
 	return string(data), err
 }
 

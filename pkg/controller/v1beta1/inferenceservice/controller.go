@@ -66,6 +66,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
 	rolloutpolicycontroller "github.com/ome-projects/ome/pkg/controller/v1beta1/rolloutpolicy"
+	"github.com/ome-projects/ome/pkg/placement/protocol"
 	"github.com/ome-projects/ome/pkg/rollout"
 	"github.com/ome-projects/ome/pkg/runtimeinheritance"
 	"github.com/ome-projects/ome/pkg/runtimerevision"
@@ -245,6 +246,13 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// consistent.
 	log := r.Log.WithValues("namespace", isvc.Namespace, "isvc", isvc.Name)
 	ctx = ctrl.LoggerInto(ctx, log)
+	// Unsupported member authority must hold before any reconciliation writes.
+	// Deletion still follows finalizer cleanup regardless of the stored policy.
+	if isvc.DeletionTimestamp.IsZero() {
+		if _, err := protocol.FromDerived(isvc); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	deployConfig, err := controllerconfig.NewDeployConfigCached(r.ConfigCache, r.Clientset)
 	if err != nil {
 		return reconcile.Result{}, errors.Wrapf(err, "fails to create DeployConfig")

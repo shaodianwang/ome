@@ -110,6 +110,13 @@ active transition before downgrading to a member binary that does not enforce
 placement pauses and replica limits. Ordinary local services do not acquire
 these guards.
 
+Execution annotations use an explicit versioned envelope. Members can still
+read existing flat policies, but reject unsupported versions or fields before
+reconciliation writes. Upgrade members before the source emits envelopes;
+flat-only policy readers cannot establish allocation authority from them.
+Deleting a service can still follow finalizer cleanup, and ordinary local
+services ignore placement execution annotations.
+
 Opt in one source deliberately after upgrading member controllers and retiring
 old hub writers. Existing Legacy sources do not require migration for this
 upgrade. Update the source in one write:
