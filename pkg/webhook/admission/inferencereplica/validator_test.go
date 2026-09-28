@@ -3,6 +3,7 @@ package inferencereplica
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/onsi/gomega"
@@ -10,15 +11,20 @@ import (
 	authenticationv1 "k8s.io/api/authentication/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	kedav1 "github.com/kedacore/keda/v2/apis/keda/v1alpha1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 )
 
 func newDecoder(t *testing.T) admission.Decoder {
@@ -818,5 +824,248 @@ func TestHandle(t *testing.T) {
 				g.Expect(resp.Result.Message).To(gomega.ContainSubstring(sub))
 			}
 		})
+	}
+}
+
+const (
+	sliceAccelerator   = "example.com/accelerator"
+	sliceTopology      = "example.com/topology"
+	sliceProvisioning  = "example.com/provisioning"
+	sliceProvisionOnly = "on-demand"
+	sliceChip          = "example.com/chip"
+)
+
+// sliceConfig provisions 2x2x1 and 2x2x2 slices of accelerator tpu-a, four
+// chips to a host, on nodes labeled provisioning=on-demand.
+func sliceConfig(t *testing.T) *controllerconfig.TPUSliceProvisioningConfig {
+	t.Helper()
+	cfg := &controllerconfig.TPUSliceProvisioningConfig{
+		ChipResource: sliceChip,
+		NodeLabels: controllerconfig.TPUSliceNodeLabels{
+			Accelerator: sliceAccelerator,
+			Topology:    sliceTopology,
+			Slice:       "example.com/slice",
+		},
+		ProvisionOnly: controllerconfig.TPUSliceLabel{Key: sliceProvisioning, Value: sliceProvisionOnly},
+		Accelerators: map[string]controllerconfig.TPUSliceAccelerator{
+			"tpu-a": {SliceType: "type-a", ChipsPerHost: 4, Topologies: []string{"2x2x1", "2x2x2"}},
+		},
+		Slice: controllerconfig.TPUSliceObject{
+			OwnerKindLabel: "example.com/owner-kind",
+			OwnerNameLabel: "example.com/owner-name",
+			Annotations:    map[string]string{"example.com/managed-by": "scheduler"},
+			ReadyStates:    []string{"ACTIVE", "ACTIVE_DEGRADED"},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("slice config is invalid: %v", err)
+	}
+	return cfg
+}
+
+// sliceIR returns a controller-written IR whose pods select topology on
+// tpu-a and request chips each: one default runner when workers is zero,
+// otherwise a leader and that many workers. optIn marks every template.
+func sliceIR(optIn bool, topology string, chips int64, workers int32) *v1beta1.InferenceReplica {
+	var annotations map[string]string
+	if optIn {
+		annotations = map[string]string{constants.TPUSliceProvisioningAnnotationKey: "true"}
+	}
+	template := corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{Annotations: annotations},
+		Spec: corev1.PodSpec{
+			NodeSelector: map[string]string{sliceAccelerator: "tpu-a", sliceTopology: topology},
+			Containers: []corev1.Container{{
+				Name:  "ome-container",
+				Image: "sgl:1.0",
+				Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+					sliceChip: *resource.NewQuantity(chips, resource.DecimalSI),
+				}},
+			}},
+		},
+	}
+	ir := baselineIR(withControllerWrite())
+	if workers == 0 {
+		ir.Spec.Runners = []v1beta1.Runner{{Name: v1beta1.RunnerNameDefault, Size: 1, Template: template}}
+		return ir
+	}
+	ir.Spec.Runners = []v1beta1.Runner{
+		{Name: v1beta1.RunnerNameLeader, Size: 1, Template: *template.DeepCopy()},
+		{Name: v1beta1.RunnerNameWorker, Size: workers, Template: *template.DeepCopy()},
+	}
+	return ir
+}
+
+// withoutOptIn returns a clone whose runner at index i does not opt in.
+func withoutOptIn(ir *v1beta1.InferenceReplica, i int) *v1beta1.InferenceReplica {
+	out := ir.DeepCopy()
+	delete(out.Spec.Runners[i].Template.Annotations, constants.TPUSliceProvisioningAnnotationKey)
+	return out
+}
+
+func sliceNode(name string, labels map[string]string) *corev1.Node {
+	return &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels}}
+}
+
+func TestHandleTPUSliceDemand(t *testing.T) {
+	provisionOnly := sliceNode("provision-only", map[string]string{sliceAccelerator: "tpu-a", sliceProvisioning: sliceProvisionOnly})
+	static := sliceNode("static", map[string]string{sliceAccelerator: "tpu-a", sliceTopology: "4x4x4"})
+	failingList := interceptor.Funcs{List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+		return errors.New("boom")
+	}}
+	const invalid = "pods cannot be placed on a provisioned slice"
+
+	tests := []struct {
+		name         string
+		unconfigured bool
+		// nodes defaults to one provision-only node carrying tpu-a.
+		nodes        []client.Object
+		funcs        interceptor.Funcs
+		req          func(t *testing.T) admission.Request
+		wantAllowed  bool
+		wantContains []string
+	}{
+		{
+			name:        "create whose pod fills a single-host slice → allowed",
+			req:         func(t *testing.T) admission.Request { return createReq(t, sliceIR(true, "2x2x1", 4, 0)) },
+			wantAllowed: true,
+		},
+		{
+			name:         "create whose pod leaves its slice's chips idle → denied",
+			req:          func(t *testing.T) admission.Request { return createReq(t, sliceIR(true, "2x2x1", 2, 0)) },
+			wantContains: []string{"prod-models/llama-engine", invalid, "topology 2x2x1"},
+		},
+		{
+			name:        "create whose leader and worker fill a two-host slice → allowed",
+			req:         func(t *testing.T) admission.Request { return createReq(t, sliceIR(true, "2x2x2", 4, 1)) },
+			wantAllowed: true,
+		},
+		{
+			name:         "create whose leader and two workers overfill a two-host slice → denied",
+			req:          func(t *testing.T) admission.Request { return createReq(t, sliceIR(true, "2x2x2", 4, 2)) },
+			wantContains: []string{invalid, "topology 2x2x2"},
+		},
+		{
+			name:         "create selecting an unprovisionable topology → denied",
+			req:          func(t *testing.T) admission.Request { return createReq(t, sliceIR(true, "4x4x4", 4, 15)) },
+			wantContains: []string{invalid, "not provisionable"},
+		},
+		{
+			name: "create whose default runner declares two pods → allowed",
+			req: func(t *testing.T) admission.Request {
+				// An Instance runs one pod from its default runner whatever
+				// the runner's Size, and that pod's four chips fill 2x2x1.
+				ir := sliceIR(true, "2x2x1", 4, 0)
+				ir.Spec.Runners[0].Size = 2
+				return createReq(t, ir)
+			},
+			wantAllowed: true,
+		},
+		{
+			name:        "create that does not opt in → allowed",
+			req:         func(t *testing.T) admission.Request { return createReq(t, sliceIR(false, "2x2x1", 2, 0)) },
+			wantAllowed: true,
+		},
+		{
+			name: "create whose worker alone opts in → allowed",
+			req: func(t *testing.T) admission.Request {
+				return createReq(t, withoutOptIn(sliceIR(true, "2x2x2", 4, 2), 0))
+			},
+			wantAllowed: true,
+		},
+		{
+			name:        "create on a static pool → allowed",
+			nodes:       []client.Object{static},
+			req:         func(t *testing.T) admission.Request { return createReq(t, sliceIR(true, "4x4x4", 4, 0)) },
+			wantAllowed: true,
+		},
+		{
+			name:         "create without slice provisioning → allowed",
+			unconfigured: true,
+			req:          func(t *testing.T) admission.Request { return createReq(t, sliceIR(true, "2x2x1", 2, 0)) },
+			wantAllowed:  true,
+		},
+		{
+			name:        "create whose nodes cannot be read → allowed",
+			funcs:       failingList,
+			req:         func(t *testing.T) admission.Request { return createReq(t, sliceIR(true, "2x2x1", 2, 0)) },
+			wantAllowed: true,
+		},
+		{
+			name: "update introducing the failure → denied",
+			req: func(t *testing.T) admission.Request {
+				return updateReq(t, sliceIR(true, "2x2x1", 4, 0), sliceIR(true, "2x2x1", 2, 0))
+			},
+			wantContains: []string{invalid},
+		},
+		{
+			name: "update opting failing runners in → denied",
+			req: func(t *testing.T) admission.Request {
+				return updateReq(t, sliceIR(false, "2x2x1", 2, 0), sliceIR(true, "2x2x1", 2, 0))
+			},
+			wantContains: []string{invalid},
+		},
+		{
+			name: "update keeping failing runners → allowed",
+			req: func(t *testing.T) admission.Request {
+				old := sliceIR(true, "2x2x1", 2, 0)
+				return updateReq(t, old, withReplicas(old, 3))
+			},
+			wantAllowed: true,
+		},
+		{
+			name: "update whose previous runners fail too → allowed",
+			req: func(t *testing.T) admission.Request {
+				old := sliceIR(true, "2x2x1", 2, 0)
+				return updateReq(t, old, withImage(old, "sgl:2.0"))
+			},
+			wantAllowed: true,
+		},
+		{
+			name: "update opting failing runners out → allowed",
+			req: func(t *testing.T) admission.Request {
+				return updateReq(t, sliceIR(true, "2x2x1", 4, 0), sliceIR(false, "2x2x1", 2, 0))
+			},
+			wantAllowed: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			g := gomega.NewWithT(t)
+			nodes := tc.nodes
+			if nodes == nil {
+				nodes = []client.Object{provisionOnly}
+			}
+			v := &Validator{
+				Decoder:              newDecoder(t),
+				TPUSliceProvisioning: sliceConfig(t),
+				Nodes:                fake.NewClientBuilder().WithObjects(nodes...).WithInterceptorFuncs(tc.funcs).Build(),
+			}
+			if tc.unconfigured {
+				v.TPUSliceProvisioning, v.Nodes = nil, nil
+			}
+			resp := v.Handle(context.Background(), tc.req(t))
+			g.Expect(resp.Allowed).To(gomega.Equal(tc.wantAllowed), resp.Result.Message)
+			for _, sub := range tc.wantContains {
+				g.Expect(resp.Result.Message).To(gomega.ContainSubstring(sub))
+			}
+		})
+	}
+}
+
+// TestHandleTPUSliceDemandScaleReadsNoNodes pins that an update leaving
+// the runners alone, such as a scale, reads no nodes.
+func TestHandleTPUSliceDemandScaleReadsNoNodes(t *testing.T) {
+	nodes := fake.NewClientBuilder().WithInterceptorFuncs(interceptor.Funcs{
+		List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+			t.Error("the nodes were read for an update that keeps the runners")
+			return nil
+		},
+	}).Build()
+	v := &Validator{Decoder: newDecoder(t), TPUSliceProvisioning: sliceConfig(t), Nodes: nodes}
+	old := sliceIR(true, "2x2x1", 4, 0)
+	if resp := v.Handle(context.Background(), updateReq(t, old, withReplicas(old, 3))); !resp.Allowed {
+		t.Fatalf("scale update denied: %s", resp.Result.Message)
 	}
 }

@@ -62,6 +62,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/leaderelection"
 	"github.com/ome-projects/ome/pkg/runtimeselector"
+	"github.com/ome-projects/ome/pkg/tpuslice/gke"
 	"github.com/ome-projects/ome/pkg/utils"
 	"github.com/ome-projects/ome/pkg/version"
 	autoscalerpolicywebhook "github.com/ome-projects/ome/pkg/webhook/admission/autoscalerpolicy"
@@ -546,6 +547,17 @@ func main() {
 		rolloutMaxPlanBytes = rolloutStartupConfig.MaxPinnedPlanBytes
 	}
 
+	// TPU slice provisioning config is read once at startup and shared by
+	// the InferenceReplica controller, which provisions slices from it, and
+	// the InferenceReplica webhook, which checks slice demand against it.
+	var tpuSliceConfig *controllerconfig.TPUSliceProvisioningConfig
+	if !isControlPlane && (options.enableInferenceReplicaCtrl || options.enableWebhook) {
+		if tpuSliceConfig, err = controllerconfig.NewTPUSliceProvisioningConfig(clientSet); err != nil {
+			setupLog.Error(err, "Failed to initialize TPU slice provisioning configuration")
+			os.Exit(1)
+		}
+	}
+
 	eventBroadcaster := record.NewBroadcaster()
 	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: clientSet.CoreV1().Events("")})
 	if isControlPlane {
@@ -658,11 +670,6 @@ func main() {
 
 	if options.enableInferenceReplicaCtrl && !isControlPlane {
 		setupLog.Info("Setting up InferenceReplica controller")
-		var tpuSliceConfig *controllerconfig.TPUSliceProvisioningConfig
-		if tpuSliceConfig, err = controllerconfig.NewTPUSliceProvisioningConfig(clientSet); err != nil {
-			setupLog.Error(err, "Failed to initialize TPU slice provisioning configuration")
-			os.Exit(1)
-		}
 		if err = (&v1beta1inferencereplicacontroller.Reconciler{
 			Client:                   mgr.GetClient(),
 			Clientset:                clientSet,
@@ -762,9 +769,20 @@ func main() {
 		})
 
 		setupLog.Info("Registering InferenceReplica validator webhook to the webhook server")
-		hookServer.Register("/validate-ome-io-v1beta1-inferencereplica", &webhook.Admission{
-			Handler: &inferencereplicawebhook.Validator{Decoder: admission.NewDecoder(mgr.GetScheme())},
-		})
+		irValidator := &inferencereplicawebhook.Validator{Decoder: admission.NewDecoder(mgr.GetScheme())}
+		// Slice demand is checked only when slices are provisioned:
+		// configured, with the Slice CRD installed at startup.
+		if tpuSliceConfig != nil {
+			var sliceFound bool
+			if sliceFound, err = utils.IsCrdAvailable(cfg, gke.GroupVersion.String(), gke.Kind); err != nil {
+				setupLog.Error(err, "Failed to probe for the Slice CRD")
+				os.Exit(1)
+			}
+			if sliceFound {
+				irValidator.TPUSliceProvisioning, irValidator.Nodes = tpuSliceConfig, mgr.GetAPIReader()
+			}
+		}
+		hookServer.Register("/validate-ome-io-v1beta1-inferencereplica", &webhook.Admission{Handler: irValidator})
 
 		// The AutoscalerPolicy ValidatingWebhookConfiguration is chart-gated
 		// alongside the CRD; registering the handler unconditionally is

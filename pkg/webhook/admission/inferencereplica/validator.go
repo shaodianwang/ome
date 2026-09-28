@@ -19,17 +19,21 @@ package inferencereplica
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"reflect"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/sliceprovision"
 	"github.com/ome-projects/ome/pkg/validation"
 )
 
@@ -39,6 +43,11 @@ var log = logf.Log.WithName("inferencereplica-validation-webhook")
 // +kubebuilder:object:generate=false
 type Validator struct {
 	Decoder admission.Decoder
+	// TPUSliceProvisioning is the slice provisioning the controller runs,
+	// nil when it provisions no slices. Nodes, set with it, reads the nodes
+	// an Instance's slice demand is resolved against.
+	TPUSliceProvisioning *controllerconfig.TPUSliceProvisioningConfig
+	Nodes                client.Reader
 }
 
 // hasControllerWriteAnnotation accepts only the literal "true";
@@ -71,7 +80,7 @@ func denyDirectWrite(op admissionv1.Operation, namespace, name string) admission
 //     unconditionally (see isFinalizerOnlyUpdate).
 //   - Delete is not registered in the kubebuilder verbs list and
 //     therefore not reached here; operators may delete to recover.
-func (v *Validator) Handle(_ context.Context, req admission.Request) admission.Response {
+func (v *Validator) Handle(ctx context.Context, req admission.Request) admission.Response {
 	// Defensive: webhook is registered for Create+Update only, but a
 	// future operator misconfig shouldn't surprise us.
 	switch req.Operation {
@@ -96,8 +105,9 @@ func (v *Validator) Handle(_ context.Context, req admission.Request) admission.R
 	// spec.parentRef.UID to the wrong parent or move the IR between
 	// Component slots. This is exactly the failure mode webhook gates
 	// exist for.
+	var oldObj *v1beta1.InferenceReplica
 	if req.Operation == admissionv1.Update {
-		oldObj := &v1beta1.InferenceReplica{}
+		oldObj = &v1beta1.InferenceReplica{}
 		if err := v.Decoder.DecodeRaw(req.OldObject, oldObj); err != nil {
 			log.Error(err, "Failed to decode old InferenceReplica",
 				"namespace", req.Namespace, "name", req.Name)
@@ -169,6 +179,15 @@ func (v *Validator) Handle(_ context.Context, req admission.Request) admission.R
 	// admission rejection (and also catches plain volumeMount typos in a
 	// runtime's pod template).
 	if err := validateIRRunnerVolumes(newObj); err != nil {
+		return admission.Denied(fmt.Sprintf(
+			"InferenceReplica %s/%s: %s",
+			req.Namespace, req.Name, err.Error()))
+	}
+
+	// The controller withholds the pods of an Instance that cannot fill a
+	// provisioned slice, so such runners would leave every Instance they
+	// reach without pods. Rejecting them leaves the IR as it was.
+	if err := v.validateIRTPUSlices(ctx, oldObj, newObj); err != nil {
 		return admission.Denied(fmt.Sprintf(
 			"InferenceReplica %s/%s: %s",
 			req.Namespace, req.Name, err.Error()))
@@ -327,4 +346,69 @@ func validateContainerVolumeMounts(
 		}
 	}
 	return nil
+}
+
+// validateIRTPUSlices rejects runners whose Instance the controller cannot
+// place on a provisioned slice. An update is rejected only when it
+// introduces the failure: one that keeps the runners, or whose previous
+// runners fail too, is admitted. A failed node read admits the IR; the
+// controller repeats the check before it creates pods.
+func (v *Validator) validateIRTPUSlices(ctx context.Context, oldObj, newObj *v1beta1.InferenceReplica) error {
+	if v.TPUSliceProvisioning == nil || v.Nodes == nil {
+		return nil
+	}
+	if oldObj != nil && reflect.DeepEqual(oldObj.Spec.Runners, newObj.Spec.Runners) {
+		return nil
+	}
+	err := v.invalidSliceDemand(ctx, newObj)
+	if err == nil || (oldObj != nil && v.invalidSliceDemand(ctx, oldObj) != nil) {
+		return nil
+	}
+	return err
+}
+
+// invalidSliceDemand returns why an Instance of ir cannot run on a
+// provisioned slice. It returns nil when it can, when ir does not opt in,
+// and when the nodes cannot be read.
+func (v *Validator) invalidSliceDemand(ctx context.Context, ir *v1beta1.InferenceReplica) error {
+	if !slicesOptedIn(ir) {
+		return nil
+	}
+	_, _, err := sliceprovision.Resolve(ctx, v.Nodes, v.TPUSliceProvisioning, instancePodSpecs(ir))
+	if err != nil && !errors.Is(err, sliceprovision.ErrInvalidDemand) {
+		log.Error(err, "Admitting InferenceReplica without checking its TPU slice demand",
+			"namespace", ir.Namespace, "name", ir.Name)
+		return nil
+	}
+	return err
+}
+
+// slicesOptedIn reports whether the controller places ir's pods on
+// provisioned slices: the template of its default or leader runner opts in.
+func slicesOptedIn(ir *v1beta1.InferenceReplica) bool {
+	for i := range ir.Spec.Runners {
+		runner := &ir.Spec.Runners[i]
+		if runner.Name == v1beta1.RunnerNameDefault || runner.Name == v1beta1.RunnerNameLeader {
+			return runner.Template.Annotations[constants.TPUSliceProvisioningAnnotationKey] == "true"
+		}
+	}
+	return false
+}
+
+// instancePodSpecs are the specs of one Instance's pods, one per pod, as
+// the controller creates them: one from the default or leader runner's
+// template, and Size from the worker runner's.
+func instancePodSpecs(ir *v1beta1.InferenceReplica) []*corev1.PodSpec {
+	var specs []*corev1.PodSpec
+	for i := range ir.Spec.Runners {
+		runner := &ir.Spec.Runners[i]
+		n := int32(1)
+		if runner.Name == v1beta1.RunnerNameWorker {
+			n = runner.Size
+		}
+		for ; n > 0; n-- {
+			specs = append(specs, &runner.Template.Spec)
+		}
+	}
+	return specs
 }
