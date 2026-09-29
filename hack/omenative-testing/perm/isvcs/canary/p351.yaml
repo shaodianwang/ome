@@ -1,4 +1,4 @@
-# p351: canary-analysis pd manual rollback during analysis  mode=canary Ne=8 Nd=8 Nr=2 ceil_e=9 ceil_d=9 ceil_r=3 canary=auto rollback=1 failurelimit=1 cell=canary/Serving[A]/rollback co=none topo=pd
+# p351: canary-analysis pd manual rollback during analysis  mode=canary Ne=8 Nd=8 Nr=2 ceil_e=9 ceil_d=9 ceil_r=3 canary=auto rollback=1 failurelimit=1 cell=canary/Serving[A]/rollback notimpl=1 issue=1835 co=none topo=pd
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p351 }

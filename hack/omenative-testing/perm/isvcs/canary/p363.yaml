@@ -1,4 +1,4 @@
-# p363: canary-analysis pd breach at final 100pct step  mode=canary Ne=8 Nd=8 Nr=2 ceil_e=9 ceil_d=9 ceil_r=3 canary=auto analysis=breach failurelimit=1 cell=canary/Draining[A]/sampleFails co=none topo=pd
+# p363: canary-analysis pd breach at final 100pct step  mode=canary Ne=8 Nd=8 Nr=2 ceil_e=9 ceil_d=9 ceil_r=3 canary=auto analysis=breach failurelimit=1 cell=canary/Draining[A]/sampleFails notimpl=1 issue=1835 co=none topo=pd
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p363 }

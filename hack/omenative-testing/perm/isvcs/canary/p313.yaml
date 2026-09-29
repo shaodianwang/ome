@@ -1,4 +1,4 @@
-# p313: canary pd manual rollback to stable  mode=canary Ne=8 Nd=8 Nr=2 ceil_e=9 ceil_d=9 ceil_r=3 canary=manual rollback=1 cell=canary/Serving[M]/rollback[pd] co=none topo=pd
+# p313: canary pd manual rollback to stable  mode=canary Ne=8 Nd=8 Nr=2 ceil_e=9 ceil_d=9 ceil_r=3 canary=manual rollback=1 cell=canary/Serving[M]/rollback[pd] notimpl=1 issue=1835 co=none topo=pd
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p313 }
