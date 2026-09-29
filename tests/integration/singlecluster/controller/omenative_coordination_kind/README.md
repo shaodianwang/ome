@@ -40,6 +40,7 @@ vs. recreate updates.
 | InferenceReplica pause blocks pod recreation | inference_replica_pause_kind |
 | Multi-pod topology PodGroup + worker affinity | topology_podgroup_kind |
 | Single-replica safe default | single_replica_kind |
+| Standalone InferenceReplica | standalone_replica_kind |
 | In-place opt-in | inplace_kind |
 | Sequential | sequential_kind |
 | Independent | independent_kind |

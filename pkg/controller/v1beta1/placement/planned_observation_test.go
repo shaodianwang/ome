@@ -56,7 +56,7 @@ func observationFixture(t *testing.T) plannedObservationFixture {
 	ir.Labels = map[string]string{constants.InferenceServicePodLabelKey: source.Name}
 	ir.Annotations = map[string]string{constants.InferenceReplicaParentGenerationAnnotationKey: "3"}
 	ir.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(member, v1beta1.SchemeGroupVersion.WithKind("InferenceService"))}
-	ir.Spec.Component, ir.Spec.ParentRef.Name = v1beta1.EngineComponent, source.Name
+	ir.Spec.Component, ir.Spec.ParentRef = v1beta1.EngineComponent, &v1beta1.ParentReference{Name: source.Name}
 	ir.Spec.Replicas, ir.Spec.PlacementExecution = ptr.To[int32](1), policy
 	ir.Spec.PlacementReplicaLimit = ptr.To[int32](1)
 	ir.Status.ObservedGeneration = ir.Generation

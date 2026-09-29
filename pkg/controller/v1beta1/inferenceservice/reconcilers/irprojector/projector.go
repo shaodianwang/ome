@@ -72,6 +72,37 @@ func IsIRManagedComponent(deploymentMode constants.DeploymentModeType) bool {
 // self-contained and doesn't need a cross-package import.
 var isvcGVK = v1beta1.SchemeGroupVersion.WithKind("InferenceService")
 
+// projectedBy reports whether the live replica is the one isvc projects: it
+// is controlled by isvc, or it carries isvc as parentRef and no controller
+// at all, which is a projected replica whose owner reference was removed
+// by hand and is re-stamped below. A replica with no parentRef, or another
+// controller, belongs to someone else.
+func projectedBy(ir *v1beta1.InferenceReplica, isvc *v1beta1.InferenceService) bool {
+	if metav1.IsControlledBy(ir, isvc) {
+		return true
+	}
+	return metav1.GetControllerOf(ir) == nil && ir.ParentName() == isvc.Name
+}
+
+// notProjectedError explains why a live replica projectedBy rejects is left
+// alone. A replica still controlled by a deleted InferenceService of the
+// same name, or one already being deleted, clears on its own, so the
+// message says to wait; any other replica holds the name until one of the
+// two is renamed.
+func notProjectedError(ir *v1beta1.InferenceReplica, isvc *v1beta1.InferenceService) error {
+	if ref := metav1.GetControllerOf(ir); ref != nil && ref.Name == isvc.Name && ref.UID != isvc.UID &&
+		schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind).GroupKind() == isvcGVK.GroupKind() {
+		return fmt.Errorf("InferenceReplica %s/%s still belongs to a previous InferenceService %s (uid %s) and is being removed; it is recreated once gone",
+			isvc.Namespace, ir.Name, isvc.Name, ref.UID)
+	}
+	if ir.DeletionTimestamp != nil {
+		return fmt.Errorf("InferenceReplica %s/%s (uid %s) is being deleted; it is recreated for InferenceService %s once gone",
+			isvc.Namespace, ir.Name, ir.UID, isvc.Name)
+	}
+	return fmt.Errorf("InferenceReplica %s/%s exists and is not projected by InferenceService %s: it is a standalone replica or another object's; rename one of them",
+		isvc.Namespace, ir.Name, isvc.Name)
+}
+
 // Params is the input bag EnsureInferenceReplica reads to build the
 // desired IR Spec. The dispatch site in
 // components/{engine,decoder,router}.go fills it from the rendered
@@ -147,9 +178,9 @@ type Params struct {
 	// controller's canary machine computed for this Component (the
 	// current step's hold, or the full plan-gate hold), projected onto
 	// ir.Spec.Pacing.Partition. It is kept out of ir.Spec.Lifecycle,
-	// which is the user's update strategy and stays a verbatim copy. nil
-	// when no canary governs the Component; an explicit 0 releases every
-	// Instance for the duration of the plan.
+	// which carries the component's update strategy. nil when no canary
+	// governs the Component; an explicit 0 releases every Instance for the
+	// duration of the plan.
 	PacingPartition *int32
 
 	// ResolvedAutoscaler is the authoritative per-Component
@@ -200,7 +231,9 @@ type Params struct {
 // same Spec and no-ops (projectionUnchanged skips the write). On a real
 // change it patches only the diffed fields. Placement-managed projections
 // use an optimistic lock so concurrent writes cannot regress plan authority.
-// Ordinary local projections do not contend with IR status writes.
+// Ordinary local projections do not contend with IR status writes. A live
+// replica the ISVC does not project (see projectedBy) is left untouched and
+// reported as an error.
 //
 // Errors are wrapped with the offending IR namespace/name for grep-
 // ability in operator logs — except apierrors.IsConflict, which callers
@@ -267,6 +300,9 @@ func EnsureInferenceReplica(ctx context.Context, p Params) (*v1beta1.InferenceRe
 		case getErr != nil:
 			return fmt.Errorf("get IR %s/%s: %w", p.ISVC.Namespace, name, getErr)
 		}
+		if !projectedBy(ir, p.ISVC) {
+			return notProjectedError(ir, p.ISVC)
+		}
 		if err := protocol.Authorize(ir.Spec.PlacementExecution, policy); err != nil {
 			return fmt.Errorf("project IR %s/%s: %w", p.ISVC.Namespace, name, err)
 		}
@@ -320,11 +356,12 @@ func EnsureInferenceReplica(ctx context.Context, p Params) (*v1beta1.InferenceRe
 	return committed, nil
 }
 
-// InferenceReplicaName returns the canonical IR name for an
-// (ISVC, Component) pair: <isvc>-<component>. The IR controller's
-// revision/service helpers all key off ParentRef.Name so the IR's
-// name itself is mostly a routing identifier; we keep the legacy
-// per-Component naming so kubectl debugging is intuitive.
+// InferenceReplicaName returns the name of the replica an InferenceService
+// projects for a Component: <inferenceservice>-<component>. The replica
+// derives its pod, Service and revision names from the InferenceService
+// name (its NamePrefix), so this name is a routing identifier that keeps
+// kubectl output grouped per Component. The InferenceService controller
+// also finds its projected replicas by this name (ComponentIR).
 func InferenceReplicaName(isvcName string, component v1beta1.ComponentType) string {
 	return isvcName + "-" + string(component)
 }
@@ -361,8 +398,8 @@ func validateParams(p Params) error {
 // controller-write annotation the IR validating webhook gates on.
 //
 // Labels are inherited from the rendered per-Component ObjectMeta so
-// the IR object itself carries the same legacy OMENative trio every
-// downstream consumer expects.
+// the IR object carries the same InferenceService, component and
+// runtime labels as the Component's pods.
 func newInferenceReplica(p Params, name string) *v1beta1.InferenceReplica {
 	ir := &v1beta1.InferenceReplica{
 		ObjectMeta: metav1.ObjectMeta{
@@ -388,9 +425,11 @@ func newInferenceReplica(p Params, name string) *v1beta1.InferenceReplica {
 // autoscaler-owned on Update; see desiredReplicas).
 //
 // Projects Spec.Pacing.Partition and preserves the rest of Spec.Pacing on
-// Update (see projectedPacing). Spec.Paused is projected from the existing
-// operator-facing ISVC annotation because InferenceReplica is controller-only;
-// removing the annotation explicitly clears the circuit breaker on every IR.
+// Update (see projectedPacing). Spec.Paused follows the parent ISVC's
+// operator-facing rollout-paused annotation, because admission denies an
+// operator's direct spec edits to a projected replica; removing the
+// annotation clears the circuit breaker on every projected replica. A
+// standalone replica is the user's and never reaches this function.
 //
 // Preserves Spec.Replicas on Update when the Component is autoscaler-
 // managed — the IR's /scale subresource is the HPA / KEDA / external
@@ -399,10 +438,10 @@ func newInferenceReplica(p Params, name string) *v1beta1.InferenceReplica {
 // the autoscaler's value and make the ISVC controller and the autoscaler
 // fight over the count. See desiredReplicas for the full decision.
 func applyDesiredSpec(ir *v1beta1.InferenceReplica, p Params, name string) {
-	// Force the metadata fields the projector owns. Annotations get
-	// the controller-write stamp; user-set annotations on the IR are
-	// not preserved across reconciles (the IR is a controller-only
-	// resource — users edit the parent ISVC).
+	// Stamp the annotation keys the projector owns and keep every other
+	// key: operators annotate a projected replica directly (to release a
+	// held revision, for one), and the merge patch carries only the keys
+	// that changed.
 	if ir.Annotations == nil {
 		ir.Annotations = map[string]string{}
 	}
@@ -426,16 +465,18 @@ func applyDesiredSpec(ir *v1beta1.InferenceReplica, p Params, name string) {
 		delete(ir.Annotations, constants.RevisionExcludedAnnotationKeysAnnotationKey)
 	}
 
-	// Labels track the per-Component ObjectMeta the omenative path
-	// would have stamped on pods — copying them onto the IR itself
-	// gives kubectl-side filterability without changing the pod
-	// label-set the IR controller emits.
+	// Labels track the per-Component ObjectMeta stamped on the
+	// Component's pods — copying them onto the IR itself gives
+	// kubectl-side filterability without changing the pod label-set the
+	// IR controller emits. Unlike annotations, the label set is replaced
+	// wholesale on every pass, so a label added by hand is removed on the
+	// next reconcile while foreign annotation keys are kept.
 	ir.Labels = copyMap(p.ObjectMeta.Labels)
 
-	// Owner-ref must stamp the live ISVC so GC cascades
-	// the IR on ISVC delete. Update overwrites any drifted owner ref
-	// (operators who edit the IR's owner refs by hand will see them
-	// re-stamped next reconcile — intentional).
+	// Owner-ref must stamp the live ISVC so GC cascades the IR on ISVC
+	// delete. On Update the re-stamp applies to a replica projectedBy
+	// already accepted: owner refs edited by hand on it are replaced on the
+	// next reconcile, intentionally.
 	ir.OwnerReferences = []metav1.OwnerReference{
 		*metav1.NewControllerRef(p.ISVC, isvcGVK),
 	}
@@ -444,7 +485,7 @@ func applyDesiredSpec(ir *v1beta1.InferenceReplica, p Params, name string) {
 	// webhook. On Update we re-stamp the same values — no-op for a
 	// well-formed IR, defense-in-depth if someone manually edited
 	// the live object.
-	ir.Spec.ParentRef = v1beta1.ParentReference{
+	ir.Spec.ParentRef = &v1beta1.ParentReference{
 		Name: p.ISVC.Name,
 	}
 	ir.Spec.PlacementExecution = p.placementExecution.DeepCopy()
@@ -566,15 +607,13 @@ func boundPatchForLog(data []byte) string {
 //     live ir.Spec.Replicas. Re-stamping MinReplicas would clobber the
 //     value HPA / KEDA / an external scaler wrote via /scale, making the
 //     ISVC controller and the autoscaler fight over the count every
-//     reconcile. Defensive fall-back to MinReplicas if the live value is
-//     somehow nil/<=0 (a well-formed IR always has it set from create, so
-//     this only guards against a hand-edited or partially-migrated IR —
-//     we never write a nil into a live scale target).
+//     reconcile. Fall back to MinReplicas (at least 1) when the live value
+//     is nil or <= 0; a KEDA scaler idling at zero lands here and the
+//     replica path runs one Instance.
 //
-//   - UPDATE + autoscaling OFF (resolved Class == None / nil): the ISVC
-//     controller owns the count, so stamp MinReplicas. (Class None is the
-//     proportional-policy follower case where OME drives replicas directly;
-//     until that coordinator wires in, MinReplicas is the floor.)
+//   - UPDATE + autoscaling OFF (resolved Class == None / nil): Class None
+//     means no autoscaler; the InferenceService controller owns the count,
+//     so stamp MinReplicas.
 //
 // ir is the object applyDesiredSpec is mutating — on the Update path it is
 // the live IR fetched via Get (so ResourceVersion + the autoscaler-written
@@ -595,8 +634,8 @@ func desiredReplicas(ir *v1beta1.InferenceReplica, p Params) *int32 {
 		return replicasFromComponentExt(p.ComponentExt)
 	}
 	// Update + autoscaler-managed: preserve the live (autoscaler-written)
-	// value. Guard against a malformed live IR carrying nil/<=0 — never
-	// write a nil into a live scale target.
+	// value; a live nil or <= 0 falls back to MinReplicas, so a nil is
+	// never written into a live scale target.
 	if ir.Spec.Replicas != nil && *ir.Spec.Replicas > 0 {
 		return ir.Spec.Replicas
 	}
@@ -624,11 +663,10 @@ func placementReplicaLimit(ir *v1beta1.InferenceReplica, p Params) *int32 {
 //
 // Every class except None has an external writer of spec.replicas: HPA and
 // KEDA are OME-managed scalers that target the /scale subresource, and
-// External is an operator-owned scaler that writes /scale directly
-// (documented on InferenceReplicaSpec.Replicas / .Autoscaler). Only None
-// means "no autoscaler at all" — the ISVC controller (or the proportional
-// coordinator, also OME) owns the count. A nil resolved block is treated as
-// None (matches autoscaler.autoscalerClass / resolvedClass).
+// External is an operator-owned scaler that writes the scale subresource
+// directly. Only None means no autoscaler at all; the InferenceService
+// controller owns the count. A nil resolved block is treated as None
+// (matches autoscaler.autoscalerClass / resolvedClass).
 func isAutoscalerManaged(a *v1beta1.ComponentAutoscaler) bool {
 	if a == nil {
 		return false

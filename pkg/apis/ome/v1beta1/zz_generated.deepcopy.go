@@ -2574,7 +2574,11 @@ func (in *InferenceReplicaSpec) DeepCopyInto(out *InferenceReplicaSpec) {
 		*out = new(int32)
 		**out = **in
 	}
-	out.ParentRef = in.ParentRef
+	if in.ParentRef != nil {
+		in, out := &in.ParentRef, &out.ParentRef
+		*out = new(ParentReference)
+		**out = **in
+	}
 	if in.Replicas != nil {
 		in, out := &in.Replicas, &out.Replicas
 		*out = new(int32)

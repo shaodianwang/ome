@@ -97,6 +97,19 @@ data:
       "maxDecodedInstances": {{ int64 $omenativeStatus.maxDecodedInstances }}{{- end }}
     }
 
+  {{- $inferenceReplica := .Values.ome.controller.inferenceReplica | default dict }}
+  {{- $identity := $inferenceReplica.controllerIdentity | default dict }}
+  {{- $controllerUser := printf "system:serviceaccount:%s:ome-controller-manager" .Release.Namespace }}
+  {{- $usernames := include "ome.identityList" (dict "key" "ome.controller.inferenceReplica.controllerIdentity.usernames" "value" $identity.usernames) | fromJsonArray }}
+  {{- $groups := include "ome.identityList" (dict "key" "ome.controller.inferenceReplica.controllerIdentity.groups" "value" $identity.groups) | fromJsonArray }}
+  inferenceReplica: |-
+    {
+      "controllerIdentity": {
+        "usernames": {{ concat (list $controllerUser) $usernames | uniq | toJson }},
+        "groups": {{ $groups | uniq | toJson }}
+      }
+    }
+
   {{- with .Values.ome.controller.lifecycle }}
   {{- $fields := list }}
   {{- if hasKey . "scaleUpPodBatchSize" }}

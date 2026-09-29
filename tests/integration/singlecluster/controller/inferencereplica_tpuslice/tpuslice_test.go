@@ -94,7 +94,7 @@ func sliceIR(parent, namespace, accelerator, topology string, chips int64, worke
 			}},
 		},
 		Spec: v1beta1.InferenceReplicaSpec{
-			ParentRef: v1beta1.ParentReference{Name: parent},
+			ParentRef: &v1beta1.ParentReference{Name: parent},
 			Component: v1beta1.EngineComponent,
 			Replicas:  ptr.To(int32(1)),
 			Runners:   runners,

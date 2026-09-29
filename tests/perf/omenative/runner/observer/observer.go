@@ -110,7 +110,7 @@ func (o *Observer) recordIR(obj client.Object) {
 	if desired == 0 || ir.Status.ReadyReplicas < desired {
 		return
 	}
-	isvcName := ir.Spec.ParentRef.Name
+	isvcName := ir.ParentName()
 	if isvcName == "" {
 		return
 	}

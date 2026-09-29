@@ -149,7 +149,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if kedaFound {
 		b = b.Owns(&kedav1.ScaledObject{})
 	} else {
-		r.Log.Info("The InferenceReplica controller won't watch keda.sh/v1alpha1/ScaledObject resources because the CRD is not available; InferenceReplicas requesting KEDA autoscaling will fail on reconcile until KEDA is installed.")
+		r.Log.Info("The InferenceReplica controller does not watch keda.sh/v1alpha1/ScaledObject because the CRD is not installed; ScaledObject changes will not trigger replica reconciles until KEDA is installed and the manager restarts.")
 	}
 	if sliceFound {
 		b = b.Watches(gke.NewObject(), r.tpuSliceEventHandler())
@@ -168,7 +168,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// slices that don't target an OMENative drain Service.
 		Watches(
 			&discoveryv1.EndpointSlice{},
-			handler.EnqueueRequestsFromMapFunc(EndpointSliceToIR),
+			handler.EnqueueRequestsFromMapFunc(r.endpointSliceToIR),
 		).
 		Complete(r)
 }

@@ -14,6 +14,7 @@
 - [Graduation Criteria](#graduation-criteria)
 - [Alternatives](#alternatives)
 - [Migration](#migration)
+- [Follow-ups](#follow-ups)
 - [Open Questions](#open-questions)
 <!-- /toc -->
 
@@ -30,7 +31,9 @@ The IR becomes user-creatable. The ISVC becomes the *composition* layer over pod
 sets: traffic and router wiring, per-revision Services, prefill-to-decode
 pairing, group rollouts and canary across sets, multi-cluster placement, status
 aggregation. Every ISVC role gets two forms, never one: **inline** (today's
-behavior, byte-for-byte) and **referenced** (bring your own IR).
+behavior, byte-for-byte) and **referenced** (bring your own IR). Phase 1 lands
+the standalone form: a user creates an IR directly, and no ISVC names it; the
+referenced form is Phase 3.
 
 OEP-0007 said "OMENative introduces no new user-visible CRDs." This OEP revises
 that one sentence. Nothing else in OEP-0007 changes.
@@ -89,8 +92,8 @@ A future provider then has one object to target, not the ISVC's model catalog.
   projector path. The KIND suites that drive it (`irmanaged_kind`,
   `omenative_coordination_kind`, `omenative_perm_kind`) are the compatibility
   lock.
-- **No new rollout engine.** `pkg/controller/v1beta1/workload` and its 123
-  replay goldens under `tests/rolloutspec/replay/golden` are unchanged.
+- **No new rollout engine.** `pkg/controller/v1beta1/workload`, including its
+  replay driver, is unchanged.
 - No new traffic data plane. Traffic across refs reuses per-revision Services
   and `TrafficMap` (OEP-0025).
 - No change to `RawDeployment`, `MultiNode`, `PDDisaggregated` modes.
@@ -109,13 +112,29 @@ Each term is defined once; the consequence is part of the definition.
   renders exactly one piece; which one is chosen by its role, never guessed.
 - **Inline form:** the ISVC role carries a spec (`engine: {…}`); the ISVC
   creates and owns the IR. This is today's only form.
+- **Projected replica:** the IR an inline role creates. It carries an ISVC
+  controller owner reference and `spec.parentRef`. Either one marks it
+  projected, so it stays projected after its ISVC is deleted with the orphan
+  policy, which removes the owner reference.
+- **Standalone replica:** an IR with neither an ISVC controller owner reference
+  nor `spec.parentRef`. A user creates it directly. Its own name stands in for
+  the parent name in its pod, Service and revision names and in the
+  `ome.io/inferenceservice` pod label.
+- **Name prefix:** the parent ISVC name for a projected IR, the IR's own name
+  for a standalone IR; pod, Service and revision names start with it.
 - **Referenced form:** the ISVC role names existing IRs
-  (`engine: {replicaRefs: […]}`); the user owns them.
-- **Owner:** the actor allowed to write an IR's user fields. Inline: the ISVC
-  controller. Referenced: whoever created the IR. Exactly one owner per IR.
+  (`engine: {replicaRefs: […]}`); the user owns them. A referenced IR is a
+  standalone replica an ISVC names.
+- **Owner:** the actor allowed to write an IR's user fields. Projected: the
+  ISVC controller. Standalone and referenced: the user, meaning any principal
+  RBAC lets write the IR except the ISVC controller; admission does not track
+  which user created it. An IR has one owner: the ISVC controller or the user.
 - **Rollout-control field:** an IR spec field a *composer* writes to steer a
   rollout across sets: partition, pacing, rollback target, paused/pauseMode.
-  Everything else in the spec is a **user field**.
+- **Controller-only field:** an IR spec field only the ISVC controller writes,
+  on any IR: `parentRef`, `placementExecution`, `placementReplicaLimit`. A spec
+  field that is neither rollout-control nor controller-only is a **user
+  field**.
 - **Composer:** the ISVC controller when it orchestrates a rollout across the
   IRs of one ISVC. A composer is not an owner.
 
@@ -123,15 +142,15 @@ Each term is defined once; the consequence is part of the definition.
 
 ### 1. The IR becomes public by fixing three things
 
-| What makes it internal today | Where | Change |
+| Constraint | Where | Phase 1 change |
 |---|---|---|
 | Only the ISVC creates one | `irprojector.EnsureInferenceReplica` | Users may `kubectl apply` an IR. |
-| `parentRef` and `component` assume a parent | `inferencereplica_types.go:64-71`; the IR controller reads the parent via `resolveParent` and derives label, Service and revision names from `parentRef.name` | `parentRef` becomes optional. Naming falls back to the IR's own name. |
-| The ISVC controller writes the spec; the webhook denies writes without `ome.io/controller-write=true` | `pkg/webhook/admission/inferencereplica/validator.go:129` | Owner-based enforcement (Design Details). |
+| `parentRef` and `component` assume a parent | `inferencereplica_types.go`; the IR controller reads the parent via `resolveParent` and derives label, Service and revision names from `parentRef.name` | `parentRef` becomes optional. Naming falls back to the IR's own name. |
+| The webhook admits a spec write that carries the annotation `ome.io/controller-write=true`, which anyone with write RBAC can add | `pkg/webhook/admission/inferencereplica` | Ownership follows the form (section 3): the webhook recognizes the ISVC controller by the identity configured in `inferenceservice-config`, and RBAC governs a standalone IR (Design Details). |
 
-The IR controller already tolerates a missing parent: every parent read in
-`convert.go` is behind a `parent != nil` guard. Standalone is closer than the
-type comments suggest.
+The IR controller tolerates a missing parent: every parent read in `convert.go`
+is behind a `parent != nil` guard, and `resolveParent` returns nil for a
+standalone IR, so the IR's events land on the IR itself.
 
 ### 2. The InferenceService becomes composition
 
@@ -161,10 +180,15 @@ creates `<isvc>-engine`.
 
 ### 3. Ownership follows the form
 
+The webhook reads an IR's form from the object itself: a projected replica
+carries an ISVC controller owner reference or `spec.parentRef`, and a
+standalone replica carries neither.
+
 | Form | Owner | ISVC may write | Enforcement |
 |---|---|---|---|
-| Inline | ISVC controller | the whole spec (today's projector) | as today, plus owner identity |
-| Referenced | the user | at most the rollout-control fields, only while a rollout group names the IR | admission or SSA field managers |
+| Projected (inline role) | ISVC controller | the whole spec (the projector) | admission by controller identity; anyone RBAC admits may still write metadata |
+| Standalone | the user: any principal RBAC lets write it except the ISVC controller; admission does not track which user created it | nothing: the projector refuses an IR it does not project, and no ISVC names a standalone IR before Phase 3 | RBAC, plus the controller-only fields and the standalone rejections (Design Details) |
+| Referenced (Phase 3) | the user | at most the rollout-control fields, only while a rollout group names the IR | admission by controller identity; which writes it admits depends on Open Question 1 |
 
 Whether the composer may write even the rollout-control fields on a referenced
 IR is **Open Question 1**. The alternative is that cross-set rollouts are driven
@@ -173,25 +197,32 @@ never writes a referenced IR at all.
 
 ### 4. Spec split
 
-Same fields, documented and validated as two groups.
+Same fields, documented as three groups. Phase 1 enforces the controller-only
+group; the user/rollout-control split is enforced with the referenced form
+(Phase 3).
 
 | Group | Fields |
 |---|---|
-| User | `runners` (or `modelRef`/`runtimeRef`, section 5), `replicas`, `minReadySeconds`, `topologyKey`, `topologySpread`, `topologySpreadKey`, `lifecycle` (restart, update strategy, ready policy, migration), `revisionHistoryLimit`, `autoscaler` |
+| User | `component` (set at create, immutable), `runners` (or `modelRef`/`runtimeRef`, section 5), `replicas`, `minReadySeconds`, `topologyKey`, `topologySpread`, `topologySpreadKey`, `lifecycle` (restart, update strategy, ready policy, migration), `revisionHistoryLimit`, `autoscaler` |
 | Rollout-control | `pacing.partition`, `pacing.maxUnavailable`, `pacing.rollbackToRevision`, `paused`, `pauseMode`, `pairingProtocol` |
+| Controller-only | `parentRef`, `placementExecution`, `placementReplicaLimit` |
 
-One fact from the code cuts across this table. The canary partition does **not**
-travel through `spec.pacing.partition` today. `canary.EffectivePartition` stamps
-it onto the merged component lifecycle, so it reaches the IR as
-`spec.lifecycle.updateStrategy.rollingUpdate.partition` — a user field.
-`pacing.partition` and `pacing.maxUnavailable` are copied into the engine input
-and never read (`inferencereplica/convert.go:337`); only `rollbackToRevision` is
-live. The split therefore requires one of: (a) route the canary partition through
-`pacing.partition` and make the engine read it, or (b) declare
-`lifecycle.updateStrategy.rollingUpdate.partition` a rollout-control field. I
-recommend (a): a composer should never have to write inside `lifecycle`, which
-is the user's update strategy. This is a behavior-preserving move only if the
-engine treats the two sources identically; the goldens decide.
+The composer steers a rollout through `pacing` and never writes inside
+`lifecycle`, which is the user's update strategy:
+
+- The canary partition travels through `spec.pacing.partition`. The projector
+  writes it, capped at `replicas`, and keeps the rest of the `pacing` block.
+  The engine reads it ahead of `lifecycle.updateStrategy.rollingUpdate.partition`
+  (`escalation.EffectivePartition`): an explicit `0` releases every Instance
+  even when the user's strategy carries a partition, and an absent value
+  defers to the user's partition.
+- `pacing.maxUnavailable` is reserved and has no effect. Disruption during a
+  rollout is paced by `lifecycle.updateStrategy.rollingUpdate.maxUnavailable`.
+- `pacing.rollbackToRevision`: nothing checks the name at admission. The IR
+  controller acts on it only when it names a ControllerRevision the IR
+  controls; a foreign revision raises the Warning event
+  `RollbackRevisionForeign` and is ignored, and a missing one falls back to
+  the spec. The canary executor pins only revisions the IR controls.
 
 ### 5. Runtime integration moves to the IR, optionally
 
@@ -239,7 +270,7 @@ Each phase leaves every existing ISVC untouched.
 
 | Phase | Delivers | Locked by |
 |---|---|---|
-| 1 | Spec split documented and validated; owner rule enforced; `parentRef` optional; a bare-pod IR (`runners` only) is usable standalone | existing KIND suites through the inline path; workload goldens; **new** envtest webhook suite `webhook/inferencereplica` for admission |
+| 1 | Spec split documented as three groups, with the controller-only group enforced (the user/rollout-control split is enforced with the referenced form, Phase 3); owner rule enforced; `parentRef` optional; a bare-pod IR (`runners` only) is usable standalone | existing KIND suites through the inline path; workload goldens; webhook unit tests; **new** envtest suites `webhook/inferencereplica` (ownership rules per form) and `controller/inferencereplica_standalone` (naming, events, idle router, teardown); **new** KIND spec `standalone_replica`; the `ome-resources` render test (identity block, webhook configuration) |
 | 2 | `modelRef`/`runtimeRef`; rendering library extracted; inline form creates an IR with refs | KIND suites through the inline path (byte-equal IR spec is the assertion); goldens; new envtest specs for per-piece validation |
 | 3 | Referenced form on the ISVC, one ref per role | new KIND specs: ISVC over a pre-created IR, router over a referenced engine |
 | 4 | Multiple refs per role: traffic across refs (`TrafficMap` as actuator), pairing across sets, groups naming refs | new KIND specs per case in Motivation; TrafficMap envtest |
@@ -250,14 +281,14 @@ Each phase leaves every existing ISVC untouched.
 
 | Field | Type | Group | Validation | Note |
 |---|---|---|---|---|
-| `spec.parentRef` | `ParentReference` | — | optional; immutable once set | today required. Absent means standalone. |
+| `spec.parentRef` | `ParentReference` | controller-only | optional; set only by the controller, together with the ISVC controller owner reference; immutable | a set `parentRef` marks a projected replica; absent, with no ISVC controller owner reference, means standalone |
 | `spec.component` | `engine\|decoder\|router` | user | required; immutable | selects the piece when refs are set |
 | `spec.modelRef` | `ModelRef` (same type as ISVC `spec.model`) | user | optional; requires `runners` absent | `BaseModel` or `ClusterBaseModel` |
 | `spec.runtimeRef` | `ServingRuntimeRef` (same type as ISVC `spec.runtime`) | user | optional; runtime must carry the piece named by `component` | without `modelRef`, the runtime's piece is rendered as-is |
 | `spec.runners` | `[]Runner` | user | required when neither ref is set; forbidden when a ref is set | unchanged shape |
-| `spec.pacing.partition`, `.maxUnavailable`, `.rollbackToRevision` | as today | rollout-control | `partition <= replicas` (today's rule) | partition made live (Proposal 4a) |
-| `spec.paused`, `spec.pauseMode` | as today | rollout-control | unchanged | |
-| `spec.pairingProtocol` | `*string` | rollout-control | `engine`/`decoder` only | the composer stamps the ISVC value |
+| `spec.pacing.partition`, `.maxUnavailable`, `.rollbackToRevision` | unchanged | rollout-control | unchanged: `partition <= replicas` | `partition` takes precedence over the user's rolling-update partition; `maxUnavailable` is reserved (section 4) |
+| `spec.paused`, `spec.pauseMode` | unchanged | rollout-control | unchanged: `pauseMode` is `Recover` or `Freeze` | |
+| `spec.pairingProtocol` | `*string` | rollout-control | a label value, at most 63 characters; accepted on every component | only engine and decoder replicas pair on it; a change on any replica mints a new revision; on a projected replica the composer copies `spec.rollout.pairingProtocol` onto engine and decoder, never onto the router |
 
 Rules:
 1. Exactly one of {`runners`, `modelRef`, `runtimeRef`-alone} is the template
@@ -266,9 +297,24 @@ Rules:
 2. `runtimeRef` names a runtime without the piece for `component` ⇒ rejected at
    admission when the runtime is readable; otherwise a `Ready=False` condition
    with reason `RuntimePieceMissing`.
-3. On a referenced IR, a write to a user field by anyone but the owner is
-   rejected. On any IR, a write to a rollout-control field by anyone but the
-   owner or the composer is rejected. Mechanism in Design Details.
+3. On a projected IR, a spec write by anyone but the ISVC controller is
+   rejected. On any IR, a write to a controller-only field by anyone but the
+   ISVC controller is rejected, and `parentRef` is immutable for every writer.
+   On a referenced IR, a write to a user field by anyone but the owner is
+   rejected (Phase 3). On any IR, a write to a rollout-control field by anyone
+   but the owner or the composer is rejected (Phase 3). Phase 1 enforces the
+   projected-IR and controller-only checks. Mechanism in Design Details.
+4. A standalone IR's name is the prefix of its pod and Service names, so it
+   must match the ISVC name pattern and must not collide with an ISVC. The IR
+   webhook rejects a standalone IR named `<isvc>` or `<isvc>-<component>` for
+   an existing ISVC; the ISVC webhook rejects a new ISVC when a standalone IR
+   already uses its name or one of its projected IR names. Both checks read
+   the API server directly, yet an ISVC and a standalone IR created at the same
+   moment can both pass. If the IR took a projected IR name, the projector
+   refuses to adopt it and the ISVC reconcile fails with an error that names
+   it; the projector never overwrites an IR it does not project. If the IR took
+   the ISVC's own name and a role the ISVC also fills, the two IRs of that role
+   derive the same pod and Service names and contend for them (Follow-ups).
 
 ### InferenceService referenced form
 
@@ -307,12 +353,97 @@ Two mechanisms can implement rule 3 above. Both are stated; one is recommended.
   signal, so a user can still clobber a controller field and only notice on the
   next reconcile.
 
-I recommend **(a)**. The webhook is in place, the identity check is one
-comparison, and the failure is a clear denial at `kubectl apply` rather than a
-silent overwrite. Note what today's gate is: the string
-`ome.io/controller-write=true` in annotations. Anyone with write RBAC can add it.
-The package doc says so: RBAC is the boundary, the webhook is "discouragement".
-Option (a) makes the webhook the boundary for user fields.
+I recommend **(a)**, and Phase 1 implements it. The webhook is in place, the
+identity check is one comparison, and the failure is a clear denial at
+`kubectl apply` rather than a silent overwrite. The gate (a) replaces is the
+string `ome.io/controller-write=true` in annotations, and anyone with write RBAC
+can add it: it is a convention, not a boundary. Option (a) makes the webhook the
+boundary for spec writes on a projected IR; the annotation remains only as the
+fallback when no identity is configured.
+
+#### What Phase 1 implements
+
+- **Identity.** The `inferenceReplica.controllerIdentity` block of the
+  `inferenceservice-config` ConfigMap lists `usernames` and `groups`. A request
+  comes from the controller when its username is listed or any of its groups
+  is. The block parses strictly: an unknown or repeated key, content after the
+  object, a blank or whitespace-padded entry, and an identity a whole class of
+  callers holds (`system:anonymous`, `system:authenticated`,
+  `system:unauthenticated`, `system:serviceaccounts`) are errors, so a
+  malformed block never loads as an identity other than the one written. The
+  `ome-resources` chart always lists the controller's own ServiceAccount,
+  `system:serviceaccount:<release namespace>:ome-controller-manager`, and adds
+  the names set in `ome.controller.inferenceReplica.controllerIdentity`.
+- **Fallback.** With no identity configured, the webhook recognizes the
+  controller by the `ome.io/controller-write=true` annotation the projector
+  stamps.
+- **Startup check.** Once elected leader, the manager asks the API server who
+  it is (a SelfSubjectReview) and logs the admission mode, `identity` or
+  `annotation`. If the configured identity does not name the manager, it logs
+  an error and keeps running, and the webhook denies its projections until the
+  block names it. If the review itself fails, it logs that the identity could
+  not be verified, and the webhook's decision stands either way.
+- **Installation.** The `ome-resources` chart installs the webhook
+  configuration on every multicluster role: fail-closed, on CREATE and UPDATE
+  of `inferencereplicas`, and skipping objects already being deleted. The
+  `scale` subresource is not matched, so an autoscaler sets `spec.replicas`
+  through it on either form without passing the webhook.
+
+The webhook decides each request by the IR's form (section 3) and the
+requester:
+
+| Request | Projected IR | Standalone IR |
+|---|---|---|
+| Create | only the controller, and only with the ISVC controller owner reference: `parentRef` without it is refused for every writer | anyone RBAC admits; the placement fields need the controller; the standalone rejections below apply |
+| Spec update | only the controller | anyone RBAC admits; the controller-only fields need the controller; the standalone rejections below apply, except the name checks, which run at create |
+| Metadata-only update: labels, annotations, finalizers, keeping or removing the controller owner reference | anyone RBAC admits | anyone RBAC admits, except adding a migration request |
+| Install or change a controller owner reference | only the controller | only the controller for an ISVC controller owner reference; anyone RBAC admits for another kind's |
+| Change `parentRef` or `component` | refused for every writer | refused for every writer |
+| Delete | not gated | not gated |
+
+A standalone IR rejects settings it accepts in shape but nothing acts on
+without an ISVC, for every writer including the controller:
+
+- `spec.autoscaler.class` `HPA` or `KEDA`: only the ISVC controller creates
+  those scalers. To autoscale a standalone IR, set class `External` and point
+  your own HorizontalPodAutoscaler or ScaledObject at its scale subresource.
+- `spec.lifecycle.minReadySeconds`: an IR reads `spec.minReadySeconds`, never
+  the nested field.
+- A name outside the ISVC name pattern, or one that collides with an ISVC
+  (rule 4).
+- A manual migration request (an `ome.io/migration-request-v1-` annotation): a
+  migration surges through the per-revision Service only an ISVC creates.
+
+Two rows need their reason stated. First, an update that keeps the spec and
+installs no controller owner reference is decided without loading the
+identity. Operator requests such as `ome.io/migration-request-v1-<uuid>`,
+`ome.io/release-held-revision` and `ome.io/reset-instances` are annotations,
+and the garbage collector patches owner references, so these writes must pass
+a fail-closed webhook even when the ConfigMap is unreadable.
+A create, a spec change or an owner-reference install needs the identity; if
+the block cannot be loaded, the webhook answers with an internal error and the
+write fails. Second, anyone may keep or remove a controller owner reference,
+because the garbage collector removes it when it orphans an IR and clears
+`blockOwnerDeletion` during foreground deletion; the projector re-stamps it
+while the ISVC exists. Installing one is different: on a projected IR the
+projector would refuse the IR under its new owner and the ISVC reconcile would
+fail on every pass, and an ISVC owner on a standalone IR would attach it to an
+ISVC. ISVC owner references match by group and kind, so every served version
+counts.
+
+**Orphaned projected IRs.** Deleting an ISVC with the orphan policy removes the
+owner reference from its IRs and leaves `spec.parentRef` in place, so the IRs
+stay projected. The webhook still admits spec writes only from the controller,
+and the IR controller stops each pass before the workload pass: it cannot scope
+the revision history of an IR that names a parent no ISVC controls. The pods
+keep running as they are, and deleting the IR still runs its teardown.
+Recreating an ISVC with the same name re-adopts the IRs. The new ISVC's UID
+scopes a new revision history, so each IR moves its Instances onto a new
+revision through its update strategy, even when the pod template is unchanged.
+
+Composer writes on a referenced IR arrive with Phase 3, and their rule depends
+on Open Question 1. Phase 1 has no composer writes: no ISVC names a standalone
+IR, and the ISVC controller writes only the IRs it projects.
 
 ### Rendering library extraction
 
@@ -354,6 +485,19 @@ referenced IR the IR controller resolves the composing ISVC through the
 `replicaRefs` back-index (a field index on `spec.*.replicaRefs`) instead of
 `parentRef`.
 
+The IR's own drain Service needs no ISVC. Every IR creates a headless Service,
+`<name prefix>-<component>-headless`, with the IR as its controller owner, and
+the IR controller maps an EndpointSlice event to its IR through that owner
+reference (`endpointSliceToIR`). A name parse cannot do this for a standalone
+IR: it maps IR `demo`'s Service `demo-engine-headless` to `demo-engine`, an IR
+that does not exist. The parse remains as the fallback when the Service
+lookup fails or the Service has no IR controller owner
+(`irNameFromDrainServiceName`); it covers the ISVC-owned per-revision
+Services, whose prefix names the projected IR. When the lookup fails for a
+standalone IR's Service, the parse usually yields a name no IR carries (at
+worst an unrelated IR reconciles once), so the standalone IR misses that
+event.
+
 ### Traffic across refs
 
 `TrafficMap` (OEP-0025) has entries keyed by cluster (`entries[].cluster`).
@@ -379,30 +523,54 @@ contract and needs its own decision).
 |---|---|---|
 | Two writers of one IR field | rollout flaps between the user's value and the composer's | the spec split plus admission rule 3; a field has one writer per form |
 | A referenced IR is deleted while an ISVC names it | the role loses capacity; the ISVC cannot recreate what it does not own | `status.components[c]` reports `ReplicaRefMissing`; the ISVC does not recreate (no inference) |
-| Partition move (Proposal 4a) changes engine behavior | canary holds the wrong Instances | goldens: the move ships only golden-identical, or with a re-record named per shape as OEP-0020.3 did |
-| A user edits a controller-owned IR after Phase 1 | today the projector overwrites it next reconcile; after (a) the write is denied | denial message names the parent ISVC to edit instead (today's message already does) |
+| The canary partition and the user's rolling-update partition disagree | canary holds the wrong Instances | no field moves: the projector writes the canary partition to `spec.pacing.partition`, the engine reads it ahead of the user's partition (`escalation.EffectivePartition`, section 4), and a unit test pins that order |
+| A user edits a projected IR | the projector would overwrite the edit on its next reconcile | the webhook denies a spec write by anyone but the controller identity, and the denial names the parent ISVC to edit instead |
+| An ISVC is deleted with the orphan cascade | its IRs stay frozen under the projected rules: only the controller may write their spec, and the IR controller stops each pass before the workload pass, so the pods keep running with no rollout, scaling or pod replacement | recreate the ISVC, which re-adopts the IRs and moves their Instances onto a new revision, or delete the IRs; deletion runs the usual teardown |
+| The configured identity does not name the manager | the webhook denies every projection, so no inline ISVC can create or update its IRs | the chart always lists the controller's own ServiceAccount; the startup check logs an error that names both identities; metadata-only updates never load the identity, so finalizers and garbage collection keep working |
+| An ISVC and a standalone IR with colliding names are created at the same moment | both admission checks pass (rule 4) | the projector refuses an IR it does not project and never overwrites it; making the same-prefix case harmless is a follow-up |
 | Inline path changes bytes | every existing ISVC re-rolls on upgrade | Phase 2 assertion: IR spec byte-equal before and after, checked in the KIND suites |
 
 ## Test Plan
 
 - **Existing suites, unchanged, run through the inline path each phase:**
   `irmanaged_kind`, `omenative_coordination_kind`, `omenative_perm_kind`,
-  `rawdeployment_kind`; the workload replay goldens (123 files).
-- **New envtest suite** `tests/integration/singlecluster/webhook/inferencereplica`:
-  owner-identity rules per form; `runners` vs refs exclusivity; piece-missing
-  rejection; `partition <= replicas`; second-composer rejection.
-- **New envtest specs** in the IR controller suite: standalone bare IR reaches
-  Ready with no parent; naming falls back to the IR name; router IR is idle.
-- **New KIND specs** (each classified in `KIND_SPEC_GROUPS`): ISVC over a
-  pre-created engine IR; two engine refs on two node pools with weights; two
-  runtimes side by side; rollout group naming one ref while the other holds;
-  pairing across two decode IRs.
+  `rawdeployment_kind`.
+- **Webhook unit tests** (`pkg/webhook/admission/inferencereplica`), Phase 1:
+  the decision table per form in both admission modes, owner-reference
+  installs and removals, orphaned projected IRs, the standalone rejections,
+  the metadata-only path when the identity cannot be loaded, and
+  `partition <= replicas`.
+- **New envtest suite** `tests/integration/singlecluster/webhook/inferencereplica`,
+  the webhook against a real API server. Phase 1: a user creates and edits a
+  standalone IR but not its controller-only fields; a standalone IR carrying
+  `parentRef` is refused; a projected IR is admitted only from the controller
+  identity; a standalone IR named like an ISVC is refused. Phase 2 adds
+  `runners` vs refs exclusivity and piece-missing rejection; Phase 3 adds
+  second-composer rejection.
+- **New envtest suite**
+  `tests/integration/singlecluster/controller/inferencereplica_standalone`,
+  Phase 1: a standalone IR derives its pod, revision, Service and selector
+  names from its own name; its conditions and events land on the IR itself; a
+  router IR runs with nothing to route to; deleting the IR tears down through
+  its finalizer.
+- **New KIND spec** `standalone_replica` (Phase 1, classified in
+  `KIND_SPEC_GROUPS`): a standalone IR reaches Ready without an ISVC and rolls
+  to a new image.
+- **Chart render test** (`charts/ome-resources/tests/render_test.sh`), Phase 1:
+  the identity block always lists the controller's ServiceAccount in the
+  release namespace and adds the configured names; a malformed value fails the
+  render; the webhook configuration renders on every multicluster role.
+- **New KIND specs** for Phases 3-4 (each classified in `KIND_SPEC_GROUPS`):
+  ISVC over a pre-created engine IR; two engine refs on two node pools with
+  weights; two runtimes side by side; rollout group naming one ref while the
+  other holds; pairing across two decode IRs.
 - **Unit:** rendering library golden for each piece, both callers, same hash.
 
 ## Graduation Criteria
 
 - **Alpha:** Phases 1-2 merged; inline path byte-identical (KIND-asserted);
-  standalone IR usable.
+  standalone IR usable. State: Phase 1 is merged and the standalone IR is
+  usable; Phase 2 is pending, so alpha is not reached.
 - **Beta:** Phase 3 merged; the three Motivation cases run in KIND; Open
   Questions 1 and 2 closed.
 - **Stable:** Phase 4 merged; `TrafficMap` per-ref weights published; IR API
@@ -430,13 +598,68 @@ contract and needs its own decision).
 
 - Existing users: none. The inline form is today's path; IR names, specs and
   pods are unchanged.
-- `kubectl edit` of an owned IR: today denied for lack of the annotation, or
-  silently overwritten if the annotation is forged. After Phase 1: denied by
-  identity, with the parent ISVC named in the message. Rollout-control fields
-  (`paused`, `pacing`) on an owned IR stay controller-written; operators keep
-  using the ISVC annotation `ome.io/rollout-paused`.
-- Operators who script against `spec.parentRef` being present should read
-  `metadata.ownerReferences` instead; `parentRef` stays set on inline IRs.
+- `kubectl edit` of a projected IR: a spec change is denied unless it comes
+  from the controller identity, and the message names the parent ISVC to edit
+  instead. An operator-managed `inferenceservice-config` without the
+  `inferenceReplica` block leaves no identity configured, and the webhook
+  falls back to the `ome.io/controller-write=true` annotation. Metadata stays
+  writable by anyone RBAC admits. Rollout-control fields (`paused`, `pacing`)
+  on a projected IR stay controller-written; operators keep using the ISVC
+  annotation `ome.io/rollout-paused`.
+- Upgrading a chart install registers the IR webhook, which only a kustomize
+  install registered before Phase 1. From then on, a direct spec edit of a
+  projected IR is denied at admission instead of being overwritten by the
+  projector on its next reconcile.
+- Deleting an ISVC with the orphan policy leaves its IRs frozen under the
+  projected rules (Design Details). Recreate the ISVC to re-adopt them, which
+  moves their Instances onto a new revision, or delete the IRs.
+- A standalone IR rejects, for every writer, the settings nothing acts on
+  without an ISVC: autoscaler class `HPA` or `KEDA`,
+  `lifecycle.minReadySeconds`, a manual migration request, and a name outside
+  the ISVC name pattern or colliding with an ISVC. Use class `External` with
+  your own scaler, and `spec.minReadySeconds`. A new ISVC is rejected when a
+  standalone IR already uses its name or one of its projected IR names; the
+  check runs on create only, so existing ISVCs are unaffected.
+- Operators who script against `spec.parentRef`: a set `parentRef` marks a
+  projected IR, including one whose ISVC was deleted with the orphan policy
+  and whose owner reference is therefore gone. A standalone IR carries neither
+  `parentRef` nor an ISVC controller owner reference. `parentRef` stays set on
+  inline IRs.
+
+## Follow-ups
+
+These are gaps Phase 1 leaves open or exposes, not decisions this OEP still
+needs.
+
+1. **Manual migration on a standalone IR.** A migration surges through the
+   per-revision Service, which only an ISVC creates, so the webhook rejects a
+   migration request on a standalone IR. The engine could fall back to the
+   IR's headless Service when no per-revision Service exists.
+2. **Make a name collision harmless, not merely unlikely.** Admission makes the
+   collision in rule 4 unlikely but cannot rule it out. Two IRs that derive the
+   same name prefix and role write the same headless Service, each setting
+   itself as its controller owner (`ReconcileHeadlessService`), and can derive
+   the same pod names. The IR controller should leave alone a pod or Service
+   another IR controls.
+3. **Name-keyed readers ignore an IR the ISVC does not control.** Readers such
+   as `irprojector.ComponentIR` fetch `<isvc>-<component>` by name and do not
+   check the controller owner reference, so a standalone IR that won the race
+   in rule 4 is read as the ISVC's own, for example when the rollout run reads
+   revision pairs, or when a projected peer resolves its pairing.
+4. **KEDA scale-to-zero on the IR path.** A KEDA scaler idling at zero writes
+   0 through the scale subresource. The projector re-stamps the component's
+   `minReplicas` over a zero count, and the IR runs one Instance for a zero
+   count, so the component never reaches zero pods. Scale-to-zero needs both
+   to honor an explicit 0 while an autoscaler owns the count.
+5. **Remove the annotation fallback.** The fallback trusts a convention anyone
+   with write RBAC can forge. The `ome-resources` chart and the kustomize
+   `inferenceservice-config` both carry the identity block; once every
+   supported install does, the fallback, and the projector's annotation
+   stamp, can be removed.
+6. **Rust client drift.** Nothing checks `ome-client-rs` against the CRDs it
+   mirrors. Phase 1 regenerated `inferencereplicas.rs` so a Rust consumer
+   decodes an IR without `parentRef`; the other modules are not regenerated
+   and may lag their CRDs. A CI drift check would keep them current.
 
 ## Open Questions
 
@@ -445,13 +668,20 @@ contract and needs its own decision).
    on a user-owned object. No: rollouts across referenced sets are driven only
    by `RolloutPolicy` objects the user binds, and the ISVC is read-only over
    referenced IRs. Design Details names the one code path that differs.
+   *Deferred to Phase 3.* Phase 1 does not depend on it: no ISVC names a
+   standalone IR, so no composer writes one.
 2. **Does the rendering library move into the IR controller?** Owner leans yes.
-   The "no" case is Alternative 4.
+   The "no" case is Alternative 4. *Belongs to Phase 2.*
 3. **Name:** keep `InferenceReplica`, or rename now that it is public? A rename
    is a new kind with a conversion; it is cheapest before Phase 3.
+   *Answered no for Phase 1:* the kind stays `InferenceReplica`. A rename
+   changes the object every inline role creates, which breaks the
+   byte-identical inline path.
 4. **Should `spec.component` be renamed `role`?** The field now means "which
    piece this set renders and which slot it fills." `component` is the ISVC's
    word for the slot; `role` is the word this document needed.
+   *Answered no for Phase 1:* the field stays `component`, for the same reason:
+   a rename changes the spec bytes of every projected IR.
 
-Next action: the owner decides Open Question 1 before Phase 1 admission rules are
-written, since rule 3 is different under each answer.
+Next action: the owner decides Open Question 2 before Phase 2 starts, and Open
+Question 1 before Phase 3, whose admission rules extend rule 3 to the composer.

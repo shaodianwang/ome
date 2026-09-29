@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -589,6 +590,29 @@ func main() {
 			os.Exit(1)
 		}
 
+		// With a controllerIdentity configured, the InferenceReplica webhook
+		// admits projections only from that identity. The check runs as a
+		// runnable, after the manager starts and on the leader that projects,
+		// and reports a mismatch, or an identity it could not verify, without
+		// blocking startup.
+		if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+			mode, err := controllerconfig.CheckControllerIdentity(ctx, clientSet)
+			switch {
+			case err != nil && mode == "":
+				setupLog.Error(err, "InferenceReplica admission: could not load the controller identity")
+			case errors.Is(err, controllerconfig.ErrControllerIdentityUnverified):
+				setupLog.Error(err, "InferenceReplica admission: could not verify this manager's identity", "mode", mode)
+			case err != nil:
+				setupLog.Error(err, "InferenceReplica admission: this manager is not the configured controller identity; its InferenceReplica projections will be denied until inferenceReplica.controllerIdentity names it", "mode", mode)
+			default:
+				setupLog.Info("InferenceReplica admission mode", "mode", mode)
+			}
+			return nil
+		})); err != nil {
+			setupLog.Error(err, "Failed to register the InferenceReplica controller identity check")
+			os.Exit(1)
+		}
+
 		if autoscalerPolicyFound {
 			setupLog.Info("Setting up AutoscalerPolicy status controller")
 			if err := autoscalerpolicycontroller.SetupWithManager(mgr, clientSet, controllerconfig.NewConfigCache(options.configCacheTTL)); err != nil {
@@ -769,7 +793,12 @@ func main() {
 		})
 
 		setupLog.Info("Registering InferenceReplica validator webhook to the webhook server")
-		irValidator := &inferencereplicawebhook.Validator{Decoder: admission.NewDecoder(mgr.GetScheme())}
+		irValidator := &inferencereplicawebhook.Validator{
+			Decoder:     admission.NewDecoder(mgr.GetScheme()),
+			Reader:      mgr.GetAPIReader(),
+			Clientset:   clientSet,
+			ConfigCache: controllerconfig.NewConfigCache(options.configCacheTTL),
+		}
 		// Slice demand is checked only when slices are provisioned:
 		// configured, with the Slice CRD installed at startup.
 		if tpuSliceConfig != nil {
@@ -816,6 +845,7 @@ func main() {
 			if err = ctrl.NewWebhookManagedBy(mgr, &v1beta1.InferenceService{}).
 				WithValidator(&isvc.InferenceServiceValidator{
 					Client:          mgr.GetClient(),
+					Reader:          mgr.GetAPIReader(),
 					RuntimeSelector: runtimeSelector,
 					// Rejects any spec.<component>.autoscalerPolicyRef when
 					// the AutoscalerPolicy CRD is absent, so a ref can never

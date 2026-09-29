@@ -391,7 +391,7 @@ func baselineIR(name, namespace string, replicas int32) *v1beta1.InferenceReplic
 			}},
 		},
 		Spec: v1beta1.InferenceReplicaSpec{
-			ParentRef: v1beta1.ParentReference{
+			ParentRef: &v1beta1.ParentReference{
 				Name: "llama",
 			},
 			Component: v1beta1.EngineComponent,
@@ -503,12 +503,11 @@ func podForIR(ir *v1beta1.InferenceReplica, instanceIdx int32, runnerName string
 // sliceForIRPod constructs an EndpointSlice carrying one endpoint for
 // pod against the IR's per-Component headless Service. Used by status
 // tests that need AvailableReplicas to mirror ReadyReplicas — the
-// aggregator reads availability off the EndpointSlice (same
-// as the omenative direct path), so without a slice every pod is
-// invisible to the availability counter regardless of ContainersReady.
+// aggregator reads availability off the EndpointSlice, so without a
+// slice every pod is invisible to the availability counter regardless
+// of ContainersReady.
 //
-// Returns a slice with Endpoints[0].Conditions.Ready set to ready —
-// the same toggle the omenative sliceWithEndpoint helper exposes.
+// Returns a slice with Endpoints[0].Conditions.Ready set to ready.
 // AddressType=IPv4 + a fixed bogus address keep the fake-client
 // validation happy; the controller's availability counter only reads
 // TargetRef.Name + Ready, not the IP.

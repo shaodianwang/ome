@@ -122,9 +122,11 @@ func TestReconcileProjectsIRStatusOnRequeuingPass(t *testing.T) {
 			Annotations: map[string]string{
 				constants.InferenceReplicaParentGenerationAnnotationKey: "7",
 			},
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService"))},
 		},
 		Spec: v1beta1.InferenceReplicaSpec{
-			Replicas: ptr.To(int32(2)),
+			ParentRef: &v1beta1.ParentReference{Name: isvcName},
+			Replicas:  ptr.To(int32(2)),
 		},
 		Status: v1beta1.InferenceReplicaStatus{
 			ObservedGeneration:   3,
@@ -277,8 +279,9 @@ func TestReconcileProjectionConvergesAcrossRepeatedRequeues(t *testing.T) {
 			Annotations: map[string]string{
 				constants.InferenceReplicaParentGenerationAnnotationKey: "1",
 			},
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService"))},
 		},
-		Spec:   v1beta1.InferenceReplicaSpec{Replicas: ptr.To(int32(4))},
+		Spec:   v1beta1.InferenceReplicaSpec{ParentRef: &v1beta1.ParentReference{Name: isvcName}, Replicas: ptr.To(int32(4))},
 		Status: v1beta1.InferenceReplicaStatus{ObservedGeneration: 1},
 	}
 

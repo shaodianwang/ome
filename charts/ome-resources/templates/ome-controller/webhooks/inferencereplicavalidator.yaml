@@ -1,0 +1,33 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  creationTimestamp: null
+  name: inferencereplica.ome.io
+  annotations:
+    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/serving-cert
+webhooks:
+  - clientConfig:
+      caBundle: Cg==
+      service:
+        name: ome-webhook-server-service
+        namespace: {{ .Release.Namespace }}
+        path: /validate-ome-io-v1beta1-inferencereplica
+    failurePolicy: Fail
+    name: inferencereplica.ome-webhook-server.validator
+    sideEffects: None
+    admissionReviewVersions: ["v1"]
+    # Objects already being deleted skip admission, so finalizer removal
+    # during a cascade delete can never wedge behind the webhook.
+    matchConditions:
+      - name: skip-deletion
+        expression: "!has(object.metadata.deletionTimestamp)"
+    rules:
+      - apiGroups:
+          - ome.io
+        apiVersions:
+          - v1beta1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - inferencereplicas

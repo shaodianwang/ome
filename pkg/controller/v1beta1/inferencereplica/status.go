@@ -159,13 +159,13 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 	// plus a MatchingFields probe the live reader can't serve. r.APIReader
 	// stays reserved for the destructive/correctness-critical paths
 	// (drain/delete/recreate confirm) that genuinely need a live read.
-	pods, err := query.ListOMENativePodsByName(ctx, r.Client, ir.Namespace, ir.Spec.ParentRef.Name, component, true)
+	pods, err := query.ListOMENativePodsByName(ctx, r.Client, ir.Namespace, ir.NamePrefix(), component, true)
 	if err != nil {
 		return 0, fmt.Errorf("aggregateAndWriteStatus: list pods: %w", err)
 	}
 	byIndex := query.BucketPodsByInstanceIdx(pods)
 	podObservation := workload.NewCachedSelectorPodObservation(pods, byIndex)
-	serviceName := query.HeadlessServiceName(ir.Spec.ParentRef.Name, component)
+	serviceName := query.HeadlessServiceName(ir.NamePrefix(), component)
 	availableByPod, err := workloadstatus.AvailablePodSet(ctx, r.Client, ir.Namespace, serviceName)
 	if err != nil {
 		return 0, fmt.Errorf("aggregateAndWriteStatus: compute availability: %w", err)
@@ -254,7 +254,7 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 		if ir.Spec.PlacementExecution != nil {
 			fresh.Status.PlacementObservedGeneration = ownerGeneration
 		}
-		fresh.Status.LabelSelector = irLabelSelectorString(fresh.Spec.ParentRef.Name, fresh.Spec.Component)
+		fresh.Status.LabelSelector = irLabelSelectorString(fresh.NamePrefix(), fresh.Spec.Component)
 
 		// Top-level Ready condition. Two-axis rule:
 		//   Status=True    when ReadyReplicas == Replicas AND
@@ -755,15 +755,12 @@ func computeReadyCondition(status *v1beta1.InferenceReplicaStatus, desiredReplic
 	return cond
 }
 
-// irLabelSelectorString returns the canonical "k=v,k=v" selector
-// string the HPA scale subresource consumes via
-// IR.status.labelSelector. Formula matches the legacy ISVC-side
-// componentLabelSelectorString byte-for-byte so existing HPAs
-// continue to resolve unchanged after a workload migrates from
-// ISVC-direct to IR-driven.
-func irLabelSelectorString(isvc string, component v1beta1.ComponentType) string {
+// irLabelSelectorString returns the "k=v,k=v" selector the HPA scale
+// subresource reads from IR.status.labelSelector: the name-prefix,
+// component and managed-by labels every pod of the replica carries.
+func irLabelSelectorString(namePrefix string, component v1beta1.ComponentType) string {
 	return labels.SelectorFromSet(labels.Set{
-		constants.InferenceServicePodLabelKey: isvc,
+		constants.InferenceServicePodLabelKey: namePrefix,
 		constants.OMEComponentLabel:           string(component),
 		query.LabelManagedBy:                  query.ManagedByOMENative,
 	}).String()

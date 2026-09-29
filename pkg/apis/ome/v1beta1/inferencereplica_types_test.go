@@ -25,6 +25,52 @@ func TestParentReference_JSONShape(t *testing.T) {
 	}
 }
 
+func TestInferenceReplicaNames(t *testing.T) {
+	standalone := &InferenceReplica{ObjectMeta: metav1.ObjectMeta{Name: "pool-a"}}
+	if got := standalone.ParentName(); got != "" {
+		t.Fatalf("standalone ParentName = %q, want empty", got)
+	}
+	if got := standalone.NamePrefix(); got != "pool-a" {
+		t.Fatalf("standalone NamePrefix = %q, want pool-a", got)
+	}
+
+	projected := &InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Name: "svc-engine"},
+		Spec:       InferenceReplicaSpec{ParentRef: &ParentReference{Name: "svc"}},
+	}
+	if got := projected.ParentName(); got != "svc" {
+		t.Fatalf("projected ParentName = %q, want svc", got)
+	}
+	if got := projected.NamePrefix(); got != "svc" {
+		t.Fatalf("projected NamePrefix = %q, want svc", got)
+	}
+
+	var absent *InferenceReplica
+	if got := absent.ParentName(); got != "" {
+		t.Fatalf("nil ParentName = %q, want empty", got)
+	}
+	if got := absent.NamePrefix(); got != "" {
+		t.Fatalf("nil NamePrefix = %q, want empty", got)
+	}
+}
+
+func TestInferenceReplicaSpecParentRefJSON(t *testing.T) {
+	raw, err := json.Marshal(InferenceReplicaSpec{Component: EngineComponent})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(raw), "parentRef") {
+		t.Fatalf("nil parentRef must be omitted, got %s", raw)
+	}
+	var stored InferenceReplicaSpec
+	if err := json.Unmarshal([]byte(`{"parentRef":{"name":"svc"},"component":"engine","runners":[]}`), &stored); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if stored.ParentRef == nil || stored.ParentRef.Name != "svc" {
+		t.Fatalf("stored parentRef = %+v, want &{Name: svc}", stored.ParentRef)
+	}
+}
+
 // columnarStatusFixture exercises every ColumnarV2 field, including a
 // non-ascending row order and entries carrying each exceptional record.
 func columnarStatusFixture() InferenceReplicaStatus {

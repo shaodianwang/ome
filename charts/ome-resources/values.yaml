@@ -530,6 +530,16 @@ ome:
     #         slice.gke.io/retry-on-failure: "true"
     #       readyStates: [ACTIVE, ACTIVE_DEGRADED]
     tpuSliceProvisioning: {}
+    # inferenceReplica configures InferenceReplica admission. controllerIdentity
+    # names the identity the InferenceService controller writes with; the
+    # webhook admits spec writes on the replicas an InferenceService projects
+    # only from that identity. usernames and groups are added to the chart's
+    # controller ServiceAccount in the release namespace, which is always
+    # listed, so an extra identity can never drop the controller's own.
+    inferenceReplica:
+      controllerIdentity:
+        usernames: []
+        groups: []
     # lifecycle tunes the OMENative per-Instance lifecycle state machine.
     lifecycle:
       # Missing-Pod budget for one OMENative scale-up pass. Instance and

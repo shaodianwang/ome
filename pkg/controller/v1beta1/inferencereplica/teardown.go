@@ -99,7 +99,7 @@ func (r *Reconciler) reconcileTeardown(ctx context.Context, log logr.Logger, ir 
 		deadlineAt = ir.DeletionTimestamp.Add(*deadline)
 	}
 	if deadline != nil && clockInput.Now().After(deadlineAt) {
-		pods, lerr := query.LiveListPodsForComponent(ctx, r.APIReader, ir.Namespace, ir.Spec.ParentRef.Name,
+		pods, lerr := query.LiveListPodsForComponent(ctx, r.APIReader, ir.Namespace, ir.NamePrefix(),
 			v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component))
 		summary := fmt.Sprintf("%d owned pod(s) observed", len(podsControlledBy(pods, ir.UID)))
 		if lerr != nil {
@@ -107,7 +107,7 @@ func (r *Reconciler) reconcileTeardown(ctx context.Context, log logr.Logger, ir 
 		}
 		r.warnTeardown(ir, ReasonTeardownDeadlineExceeded, fmt.Sprintf(
 			"teardown deadline %s exceeded (%s; selector: parent=%q, component=%q); releasing finalizer %s to background GC; "+teardownEscapeHint,
-			deadline, summary, ir.Spec.ParentRef.Name, ir.Spec.Component, TeardownFinalizer, ir.Name, ir.Namespace))
+			deadline, summary, ir.NamePrefix(), ir.Spec.Component, TeardownFinalizer, ir.Name, ir.Namespace))
 		parent := r.resolveParentFrom(ctx, r.APIReader, ir)
 		r.closeDanglingLedgerEntries(ctx, log, ir, parent)
 		r.releaseSlicesPastDeadline(ctx, ir)
@@ -158,7 +158,7 @@ func (r *Reconciler) reconcileTeardown(ctx context.Context, log logr.Logger, ir 
 	}
 	plan.InstanceReadyTimeout = workload.ResolveInstanceReadyTimeout(
 		input.DesiredSpec.Lifecycle.InstanceReadyTimeout, settings.InstanceReadyTimeout)
-	pods, lerr := query.LiveListPodsForComponent(ctx, r.APIReader, ir.Namespace, ir.Spec.ParentRef.Name,
+	pods, lerr := query.LiveListPodsForComponent(ctx, r.APIReader, ir.Namespace, ir.NamePrefix(),
 		v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component))
 	if lerr != nil {
 		return ctrl.Result{}, fmt.Errorf("InferenceReplica teardown: live-list component pods: %w", lerr)
@@ -260,7 +260,7 @@ func (r *Reconciler) reconcileTeardown(ctx context.Context, log logr.Logger, ir 
 			detail = "lifecycle.teardown.deadline configured but invalid: " + deadlineInvalidReason
 		}
 		remaining := fmt.Sprintf("%d owned pod(s) and %d owned PodGroup(s) remain (selector: parent=%q, component=%q)",
-			len(ownedPods), pendingTeardownPodGroups(podGroupInventory), ir.Spec.ParentRef.Name, ir.Spec.Component)
+			len(ownedPods), pendingTeardownPodGroups(podGroupInventory), ir.NamePrefix(), ir.Spec.Component)
 		if workloadGone {
 			remaining = fmt.Sprintf("owned TPU slices are being released (selector: %s=%s)", sliceprovision.LabelOwnerUID, ir.UID)
 		}

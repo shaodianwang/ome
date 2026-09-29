@@ -91,7 +91,7 @@ func (r *Reconciler) observePlannedHome(ctx context.Context, source *v1beta1.Inf
 			return out, fmt.Errorf("component %q changed during inventory discovery", ir.Name)
 		}
 		owner := metav1.GetControllerOf(ir)
-		if owner == nil || owner.APIVersion != v1beta1.SchemeGroupVersion.String() || owner.Kind != "InferenceService" || owner.Name != source.Name || owner.UID == "" || ir.Spec.ParentRef.Name != source.Name {
+		if owner == nil || owner.APIVersion != v1beta1.SchemeGroupVersion.String() || owner.Kind != "InferenceService" || owner.Name != source.Name || owner.UID == "" || ir.ParentName() != source.Name {
 			return out, fmt.Errorf("component %q has unverified service ownership", ir.Name)
 		}
 		if memberExists && owner.UID != member.UID {

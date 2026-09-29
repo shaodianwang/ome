@@ -114,6 +114,17 @@ data:
       "maxDecodedInstances": 20000
     }
 
+  # The identity the InferenceService controller writes with: the
+  # InferenceReplica admission webhook admits spec writes on the replicas an
+  # InferenceService projects only from a listed username or group. The
+  # username is the manager's ServiceAccount in the namespace it runs in.
+  inferenceReplica: |-
+    {
+      "controllerIdentity": {
+        "usernames": ["system:serviceaccount:ome:ome-controller-manager"]
+      }
+    }
+
   canaryAnalysis: |-
     {
       "bundledPrometheusAddress": "http://ome-prometheus.ome.svc:9090",

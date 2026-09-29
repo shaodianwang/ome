@@ -78,7 +78,7 @@ func releasingSlices(finalize func(context.Context, int32) (bool, error), p *sli
 // holds its slice's chips until it is gone.
 func (r *Reconciler) pinnedSlices(ir *v1beta1.InferenceReplica, p *sliceprovision.Provisioner) func(context.Context) (map[string]struct{}, error) {
 	return func(ctx context.Context) (map[string]struct{}, error) {
-		pods, err := query.LiveListPodsForComponent(ctx, r.APIReader, ir.Namespace, ir.Spec.ParentRef.Name,
+		pods, err := query.LiveListPodsForComponent(ctx, r.APIReader, ir.Namespace, ir.NamePrefix(),
 			v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component))
 		if err != nil {
 			return nil, err

@@ -9,10 +9,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	v1beta1 "github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/ome-projects/ome/pkg/quota/tree"
 	"github.com/ome-projects/ome/pkg/runtimeselector"
 	quotawebhook "github.com/ome-projects/ome/pkg/webhook/admission/acceleratorquota"
 	basemodelwebhook "github.com/ome-projects/ome/pkg/webhook/admission/basemodel"
+	irwebhook "github.com/ome-projects/ome/pkg/webhook/admission/inferencereplica"
 	isvcwebhook "github.com/ome-projects/ome/pkg/webhook/admission/isvc"
 	podwebhook "github.com/ome-projects/ome/pkg/webhook/admission/pod"
 )
@@ -75,6 +77,7 @@ func SetupInferenceServiceWebhook(mgr ctrl.Manager) error {
 	return ctrl.NewWebhookManagedBy(mgr, &v1beta1.InferenceService{}).
 		WithValidator(&isvcwebhook.InferenceServiceValidator{
 			Client:          mgr.GetClient(),
+			Reader:          mgr.GetAPIReader(),
 			RuntimeSelector: runtimeselector.New(mgr.GetClient()),
 		}).
 		Complete()
@@ -107,6 +110,29 @@ func SetupPodMutatorWebhook(mgr ctrl.Manager) error {
 		Client:    mgr.GetClient(),
 		Clientset: clientset,
 		Decoder:   admission.NewDecoder(mgr.GetScheme()),
+	}})
+	return nil
+}
+
+// SetupInferenceReplicaWebhook registers the InferenceReplica validating
+// webhook on the supplied manager's webhook server, wired as
+// cmd/manager/main.go wires it. The ConfigCache TTL is zero so a suite that
+// edits the inferenceReplica config block sees the change on the next
+// request.
+func SetupInferenceReplicaWebhook(mgr ctrl.Manager) error {
+	server := mgr.GetWebhookServer()
+	if server == nil {
+		return fmt.Errorf("SetupInferenceReplicaWebhook: manager has no webhook server (set Framework.WebhookPath)")
+	}
+	clientset, err := kubernetes.NewForConfig(mgr.GetConfig())
+	if err != nil {
+		return fmt.Errorf("SetupInferenceReplicaWebhook: build clientset: %w", err)
+	}
+	server.Register("/validate-ome-io-v1beta1-inferencereplica", &webhook.Admission{Handler: &irwebhook.Validator{
+		Decoder:     admission.NewDecoder(mgr.GetScheme()),
+		Reader:      mgr.GetAPIReader(),
+		Clientset:   clientset,
+		ConfigCache: controllerconfig.NewConfigCache(0),
 	}})
 	return nil
 }

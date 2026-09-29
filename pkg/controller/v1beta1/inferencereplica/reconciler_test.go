@@ -554,7 +554,6 @@ func TestReconcile_ParentPauseParksDeadlineBeforeRevisionError(t *testing.T) {
 	// Model a stale projection caused by an ISVC component render failure: the
 	// parent is paused, but the IR spec was never patched.
 	ir.Spec.Paused = false
-	ir.OwnerReferences = nil // force revision creation to fail before the defer
 	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{
 		Index: 0,
 		Phase: v1beta1.OMENativeInstanceCreating,
@@ -572,10 +571,19 @@ func TestReconcile_ParentPauseParksDeadlineBeforeRevisionError(t *testing.T) {
 		},
 	}}
 	r, c := newReconciler(t, ir, parent)
+	// Fail revision creation so the pass errors before the status defer.
+	r.Client = interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
+		Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if _, ok := obj.(*appsv1.ControllerRevision); ok {
+				return errors.New("injected revision create failure")
+			}
+			return cl.Create(ctx, obj, opts...)
+		},
+	})
 	key := types.NamespacedName{Name: ir.Name, Namespace: ir.Namespace}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key})
-	if err == nil || !strings.Contains(err.Error(), "missing controller OwnerReference") {
+	if err == nil || !strings.Contains(err.Error(), "injected revision create failure") {
 		t.Fatalf("expected pre-defer revision error, got %v", err)
 	}
 	got := &v1beta1.InferenceReplica{}
@@ -637,14 +645,14 @@ func TestReconcile_Create_MaterializesPods(t *testing.T) {
 	g.Expect(pods.Items).To(gomega.HaveLen(2),
 		"expected one pod per desired Instance; got %d", len(pods.Items))
 
-	// Pod names must follow the legacy shape <isvc>-<component>-<idx>-default-0
-	// so existing selectors keep matching.
+	// Pod names follow <prefix>-<component>-<idx>-default-0, where a
+	// projected replica's prefix is its parent ISVC's name.
 	names := podNames(pods.Items)
 	g.Expect(names).To(gomega.ContainElement(query.PodName("llama", v1beta1convert.ComponentTypeToWorkload(v1beta1.EngineComponent), 0, "default", 0)))
 	g.Expect(names).To(gomega.ContainElement(query.PodName("llama", v1beta1convert.ComponentTypeToWorkload(v1beta1.EngineComponent), 1, "default", 0)))
 
-	// Every pod must be owner-ref'd to the IR (Kind=InferenceReplica),
-	// NOT the legacy ISVC owner.
+	// Every pod must be controller-owned by the IR (Kind=InferenceReplica),
+	// not by the parent ISVC.
 	for _, pod := range pods.Items {
 		g.Expect(pod.OwnerReferences).To(gomega.HaveLen(1))
 		ref := pod.OwnerReferences[0]
@@ -667,8 +675,9 @@ func TestReconcile_Create_MaterializesPods(t *testing.T) {
 	g.Expect(got.Status.ObservedGeneration).To(gomega.Equal(int64(1)))
 	g.Expect(got.Status.LabelSelector).NotTo(gomega.BeEmpty(),
 		"LabelSelector must be set for HPA scale subresource")
-	// LabelSelector must encode the legacy OMENative pod-selector trio so
-	// existing HPAs continue to resolve.
+	// LabelSelector must encode the OMENative pod-selector trio (name
+	// prefix, component, managed-by) so the HPA's scale selector matches
+	// the replica's pods.
 	g.Expect(got.Status.LabelSelector).To(gomega.ContainSubstring("component=engine"))
 	g.Expect(got.Status.LabelSelector).To(gomega.ContainSubstring("ome.io/inferenceservice=llama"))
 	g.Expect(got.Status.LabelSelector).To(gomega.ContainSubstring("ome.io/managed-by=OMENative"))
@@ -718,13 +727,13 @@ func TestReconcile_Create_ConfiguredBatchSizeCapsPods(t *testing.T) {
 // workload/service/service_test.go — this test only verifies the wire-in.
 //
 // Asserts on the canonical shape:
-//   - Name == query.HeadlessServiceName(parent, component) so any
-//     tooling that looks for `<isvc>-<component>-headless` keeps working
+//   - Name == query.HeadlessServiceName(prefix, component), which is
+//     `<isvc>-<component>-headless` for a projected replica
 //   - ClusterIP == None so DNS returns per-pod A records (no
 //     kube-proxy load-balancing) — required for gang-init peer discovery
 //   - PublishNotReadyAddresses == true so peer DNS resolves before
 //     pods flip Ready (workers must discover each other during init)
-//   - Selector carries the legacy OMENative pod-selector trio
+//   - Selector carries the OMENative pod-selector trio
 //     (ome.io/inferenceservice + component + managed-by=OMENative) so
 //     the Service matches the same pods the workload renderer stamps
 //   - Owner ref points at the IR (Kind=InferenceReplica), NOT the
@@ -3381,5 +3390,141 @@ func TestReconcile_TPUSlices_FailuresFailThePass(t *testing.T) {
 				t.Fatalf("pods = %v, want pods created before the failure: %v", podNames(pods), tc.wantPods)
 			}
 		})
+	}
+}
+func TestRevisionScopeUIDFollowsTheForm(t *testing.T) {
+	projected := &v1beta1.InferenceReplica{ObjectMeta: metav1.ObjectMeta{
+		Name: "svc-engine", Namespace: "team-a", UID: "replica-uid",
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: v1beta1.SchemeGroupVersion.String(), Kind: "InferenceService",
+			Name: "svc", UID: "isvc-uid", Controller: ptr.To(true),
+		}},
+	}}
+	if got, err := revisionScopeUID(projected); err != nil || got != "isvc-uid" {
+		t.Fatalf("projected scope = %q, %v, want isvc-uid", got, err)
+	}
+	// The owner is matched by group and kind, so an InferenceService served
+	// at another ome.io version keeps the parent's scope.
+	otherVersion := projected.DeepCopy()
+	otherVersion.Spec.ParentRef = &v1beta1.ParentReference{Name: "svc"}
+	otherVersion.OwnerReferences[0].APIVersion = v1beta1.SchemeGroupVersion.Group + "/v2"
+	if got, err := revisionScopeUID(otherVersion); err != nil || got != "isvc-uid" {
+		t.Fatalf("scope with an InferenceService owner at another version = %q, %v, want isvc-uid", got, err)
+	}
+	noOwnerUID := projected.DeepCopy()
+	noOwnerUID.OwnerReferences[0].UID = ""
+	if _, err := revisionScopeUID(noOwnerUID); err == nil || !strings.Contains(err.Error(), "controlling InferenceService reference has no UID") {
+		t.Fatalf("an InferenceService controller reference without a UID must be refused, got err=%v", err)
+	}
+	standalone := &v1beta1.InferenceReplica{ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "team-a", UID: "replica-uid"}}
+	if got, err := revisionScopeUID(standalone); err != nil || got != "replica-uid" {
+		t.Fatalf("standalone scope = %q, %v, want replica-uid", got, err)
+	}
+	adopted := standalone.DeepCopy()
+	adopted.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: "apps/v1", Kind: "Deployment", Name: "operator", UID: "other-uid", Controller: ptr.To(true),
+	}}
+	if got, err := revisionScopeUID(adopted); err != nil || got != "replica-uid" {
+		t.Fatalf("scope with a non-InferenceService owner = %q, %v, want replica-uid", got, err)
+	}
+	otherGroup := standalone.DeepCopy()
+	otherGroup.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: "serving.kserve.io/v1beta1", Kind: "InferenceService", Name: "svc", UID: "other-uid", Controller: ptr.To(true),
+	}}
+	if got, err := revisionScopeUID(otherGroup); err != nil || got != "replica-uid" {
+		t.Fatalf("scope with an InferenceService owner from another group = %q, %v, want replica-uid", got, err)
+	}
+	orphaned := standalone.DeepCopy()
+	orphaned.Spec.ParentRef = &v1beta1.ParentReference{Name: "svc"}
+	if _, err := revisionScopeUID(orphaned); err == nil || !strings.Contains(err.Error(), "no InferenceService controls it") {
+		t.Fatalf("a parentRef without a controlling InferenceService must be refused, got err=%v", err)
+	}
+	noUID := standalone.DeepCopy()
+	noUID.UID = ""
+	if _, err := revisionScopeUID(noUID); err == nil {
+		t.Fatal("a standalone replica without a UID must be refused")
+	}
+}
+
+func TestRollbackRevisionMustBeControlledByTheReplica(t *testing.T) {
+	ir := &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "team-a", UID: "replica-uid"},
+		Spec: v1beta1.InferenceReplicaSpec{
+			Component: v1beta1.EngineComponent,
+			Pacing:    &v1beta1.InferenceReplicaPacing{RollbackToRevision: ptr.To("pool-a-engine-aaaa")},
+		},
+	}
+	owned := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{
+		Name: "pool-a-engine-aaaa", Namespace: "team-a",
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ir, irGVK)},
+	}}
+	other := ir.DeepCopy()
+	other.Name, other.UID = "pool-b", "other-uid"
+	foreign := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{
+		Name: "pool-b-engine-bbbb", Namespace: "team-a",
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(other, irGVK)},
+	}}
+	ownerless := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: "pool-a-engine-cccc", Namespace: "team-a"}}
+	recorder := record.NewFakeRecorder(4)
+	base := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(owned, foreign, ownerless).Build()
+	r := &Reconciler{APIReader: base, Recorder: recorder}
+	expectWarning := func(what string) {
+		t.Helper()
+		select {
+		case ev := <-recorder.Events:
+			if !strings.HasPrefix(ev, corev1.EventTypeWarning) || !strings.Contains(ev, EventReasonRollbackRevisionForeign) {
+				t.Fatalf("%s: event %q is not a %s Warning", what, ev, EventReasonRollbackRevisionForeign)
+			}
+		default:
+			t.Fatalf("%s produced no warning event", what)
+		}
+	}
+
+	cr, err := r.rollbackRevision(context.Background(), ir, ir)
+	if err != nil || cr == nil || cr.Name != owned.Name {
+		t.Fatalf("owned revision: cr=%v err=%v, want %s", cr, err, owned.Name)
+	}
+
+	ir.Spec.Pacing.RollbackToRevision = ptr.To("pool-b-engine-bbbb")
+	cr, err = r.rollbackRevision(context.Background(), ir, ir)
+	if err != nil || cr != nil {
+		t.Fatalf("foreign revision: cr=%v err=%v, want nil", cr, err)
+	}
+	expectWarning("foreign revision")
+
+	ir.Spec.Pacing.RollbackToRevision = ptr.To(ownerless.Name)
+	cr, err = r.rollbackRevision(context.Background(), ir, ir)
+	if err != nil || cr != nil {
+		t.Fatalf("revision without owner references: cr=%v err=%v, want nil", cr, err)
+	}
+	expectWarning("revision without owner references")
+
+	if n := len(recorder.Events); n != 0 {
+		t.Fatalf("unexpected extra events: %d", n)
+	}
+	ir.Spec.Pacing.RollbackToRevision = ptr.To("pool-a-engine-gone")
+	cr, err = r.rollbackRevision(context.Background(), ir, ir)
+	if err != nil || cr != nil {
+		t.Fatalf("missing revision: cr=%v err=%v, want nil", cr, err)
+	}
+	select {
+	case ev := <-recorder.Events:
+		t.Fatalf("missing revision must not raise an event, got %q", ev)
+	default:
+	}
+
+	injected := errors.New("injected get failure")
+	r.APIReader = interceptor.NewClient(base, interceptor.Funcs{
+		Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, ok := obj.(*appsv1.ControllerRevision); ok {
+				return injected
+			}
+			return cl.Get(ctx, key, obj, opts...)
+		},
+	})
+	ir.Spec.Pacing.RollbackToRevision = ptr.To(owned.Name)
+	cr, err = r.rollbackRevision(context.Background(), ir, ir)
+	if !errors.Is(err, injected) || cr != nil {
+		t.Fatalf("read failure: cr=%v err=%v, want the injected error", cr, err)
 	}
 }

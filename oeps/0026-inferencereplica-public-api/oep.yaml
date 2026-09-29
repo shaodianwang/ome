@@ -2,8 +2,8 @@ title: "InferenceReplica as a public API, InferenceService as composition"
 oep-number: "0026"
 authors:
   - "@slin1237"
-status: provisional
-# state: design only; no code. The IR is still controller-only (pkg/webhook/admission/inferencereplica gates on ome.io/controller-write).
+status: implementable
+# state: Phase 1 implemented: pkg/webhook/admission/inferencereplica + pkg/controller/v1beta1/controllerconfig/inferencereplica.go + charts/ome-resources/templates/ome-controller/webhooks/inferencereplicavalidator.yaml + tests/integration/singlecluster/controller/inferencereplica_standalone; Phases 2-4 open.
 # The number 0026 was used once before by a draft ("deployment mode transitions", branch
 # feat/oep-0026-deployment-mode-transitions) that was withdrawn and never merged; this is the only 0026 on main.
 creation-date: 2026-09-21

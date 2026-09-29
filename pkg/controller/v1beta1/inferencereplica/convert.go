@@ -32,9 +32,8 @@ import (
 // stamps on emitted pods / revisions / services. Decoded objects often
 // have an empty TypeMeta (controller-runtime strips it on Get), so the
 // workload package cannot derive the GVK from OwnerObject — the
-// adapter passes the correct value alongside via
-// ReconcileInput.OwnerGVK. Mirrors the same approach
-// internalsource.isvcGVK takes on the ISVC adapter side.
+// reconciler passes the correct value alongside via
+// ReconcileInput.OwnerGVK.
 var irGVK = v1beta1.SchemeGroupVersion.WithKind("InferenceReplica")
 
 // isvcGVK is the parent InferenceService's GVK — stamped as the owner of
@@ -56,18 +55,18 @@ func IRGVK() schema.GroupVersionKind { return irGVK }
 // OwnerObject is the IR itself: every emitted pod / ControllerRevision
 // / PodGroup is GC'd through the IR's controller OwnerReference.
 //
-// OwnerName on the workload.Key is the parent ISVC name — pod names
-// (<isvc>-<component>-<idx>-<runner>-<ord>), service names, and the
-// HPA scale-selector formula all key off the ISVC name. The
-// SelectorLabels carry the legacy OMENative trio so existing selectors
-// keep matching.
+// OwnerName is ir.NamePrefix(): the parent InferenceService name for a
+// projected replica, the replica's own name for a standalone one. Pod
+// names (<prefix>-<component>-<idx>-<runner>-<ord>), Service names and
+// the HPA scale-selector formula all key off it. The SelectorLabels are
+// the OMENative trio (name prefix, component, managed-by) the renderer
+// stamps on every pod.
 //
 // EventTarget defaults to the parent ISVC when the caller passes a
 // non-nil parent (so user-facing event streams stay coherent under
-// `kubectl describe isvc`). When parent is nil — the IR was created
-// directly without a parent in the cache, or the parent fetch failed
-// — EventTarget falls back to the IR itself so events still land
-// somewhere observable.
+// `kubectl describe isvc`). When parent is nil — a standalone replica,
+// or the parent fetch failed — EventTarget falls back to the IR itself
+// so events still land somewhere observable.
 //
 // Migration work flows from IR.Status.Migrations (mirrored onto
 // ObservedState.Migrations): the workload dispatcher selects the oldest
@@ -76,18 +75,17 @@ func IRGVK() schema.GroupVersionKind { return irGVK }
 // into status.migrations by consumeMigrationRequests before dispatch.
 //
 // UpdateGate IS wired (when the parent ISVC is resolvable) onto the
-// shared coordination.EvaluateUpdateGate decision site — the identical
-// gate stack the ISVC-direct path runs. Without it, the IR-managed path
-// (the production default) would skip ALL cross-Component coordination:
+// shared coordination.EvaluateUpdateGate decision site. Without it, a
+// projected replica would skip ALL cross-Component coordination:
 // Sequential ordering, RatioBalanced, and the group-wide surge /
 // unavailability budgets would go unenforced (both Components of a
 // Sequential group recreated concurrently; a group MaxSurge never capping
 // a Component whose per-Component budget is larger). The gate
 // reads only the parent ISVC's Spec + Status, so the resolved parent is
-// all it needs. When parent is nil (no resolvable parent / fetch failed)
-// the gate stays nil and the dispatcher falls back to "always allowed" —
-// coordination is meaningless without the parent's RolloutCoordination
-// block, so there is nothing to enforce anyway.
+// all it needs. When parent is nil (a standalone replica, or the fetch
+// failed) the gate stays nil and the dispatcher falls back to "always
+// allowed" — coordination is meaningless without the parent's
+// RolloutCoordination block, so there is nothing to enforce anyway.
 //
 // Taking the typed *InferenceService (not client.Object) is deliberate:
 // a nil parent passed as client.Object becomes a non-nil interface
@@ -204,20 +202,21 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 		PodSpec:                desired.PodSpec,
 		WorkerPodSpec:          desired.WorkerPodSpec,
 		// Count each recorded relocation directive on the auto-migration
-		// counter, keyed by the user-facing parent ISVC.
+		// counter, keyed by the name prefix (the InferenceService name for
+		// a projected replica).
 		OnRelocationDirective: func(component string) {
-			coordination.RecordAutoMigrationTriggered(ir.Namespace, ir.Spec.ParentRef.Name, component, audit.ReasonAutoRecover)
+			coordination.RecordAutoMigrationTriggered(ir.Namespace, ir.NamePrefix(), component, audit.ReasonAutoRecover)
 		},
 	}
 
-	// Wire the coordination UpdateGate onto the shared decision site so the
-	// IR-managed path enforces Sequential / RatioBalanced / surge /
-	// unavailability exactly like the ISVC-direct path. The gate reads the
-	// parent ISVC's RolloutCoordination block + authoritative per-Component
-	// IR status directly via ComponentIRStatus, so it only runs when the
-	// parent is resolvable; a nil parent means there is no coordination
-	// block to enforce and the dispatcher's nil-gate fallback ("always
-	// allowed") is correct.
+	// Wire the coordination UpdateGate onto the shared decision site so a
+	// projected replica enforces its parent's Sequential / RatioBalanced /
+	// surge / unavailability rules. The gate reads the parent ISVC's
+	// RolloutCoordination block + authoritative per-Component IR status
+	// directly via ComponentIRStatus, so it only runs when the parent is
+	// resolvable; a nil parent means there is no coordination block to
+	// enforce and the dispatcher's nil-gate fallback ("always allowed") is
+	// correct.
 	if parent != nil {
 		// The gate reads peer Component status, which must be live:
 		// cross-Component coordination against a cache-lagged peer would
@@ -316,28 +315,24 @@ func (r *Reconciler) warnRetryHeldFunc(ir *v1beta1.InferenceReplica, eventTarget
 // buildHeadlessServiceSpec adapts an InferenceReplica into the typed
 // workload.PerComponentServiceSpec the workload renderer consumes.
 // The IR owns its per-Component headless Service so deletion of the IR
-// cascades to the Service. The ISVC controller continues to manage the
-// IR lifecycle; inside its own lifetime, the IR controller is
-// the sole Service writer.
+// cascades to the Service; the IR controller is the Service's sole
+// writer.
 //
-// OwnerName on the Service name resolves through the parent ISVC
-// (ir.Spec.ParentRef.Name) so the Service name stays byte-identical to
-// the legacy `<isvc>-<component>-headless` shape — every tool that
-// looks for that name keeps working unchanged.
+// OwnerName is ir.NamePrefix(): the parent InferenceService name for a
+// projected replica, the replica's own name for a standalone one. The
+// Service is named <prefix>-<component>-headless.
 //
 // Selector matches the labels the workload renderer stamps on pods
 // (see render.go::podLabels): ome.io/inferenceservice + component +
-// managed-by=OMENative. The trio is identical to the ISVC adapter so
-// the Services from both paths select the same pod set; this is what
-// keeps the shadow-mode diff byte-identical.
+// managed-by=OMENative.
 func buildHeadlessServiceSpec(ir *v1beta1.InferenceReplica) workloadtypes.PerComponentServiceSpec {
 	selector := map[string]string{
-		constants.InferenceServicePodLabelKey: ir.Spec.ParentRef.Name,
+		constants.InferenceServicePodLabelKey: ir.NamePrefix(),
 		constants.OMEComponentLabel:           string(ir.Spec.Component),
 		query.LabelManagedBy:                  query.ManagedByOMENative,
 	}
 	return workloadtypes.PerComponentServiceSpec{
-		Name:      query.HeadlessServiceName(ir.Spec.ParentRef.Name, v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component)),
+		Name:      query.HeadlessServiceName(ir.NamePrefix(), v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component)),
 		Namespace: ir.Namespace,
 		Selector:  selector,
 		Labels:    selector,
@@ -353,8 +348,7 @@ func buildHeadlessServiceSpec(ir *v1beta1.InferenceReplica) workloadtypes.PerCom
 // PodSpec/WorkerPodSpec come from the Runner.Template's PodSpec.
 // PodTemplateObjectMeta is derived from the Runner.Template's
 // ObjectMeta so user-intent pod-template labels/annotations land on
-// every emitted pod (matches the legacy ObjectMeta projection from
-// components/{engine,decoder,router}.go via the ISVC adapter).
+// every emitted pod.
 func desiredFromIR(ir *v1beta1.InferenceReplica) workloadtypes.WorkloadDesiredSpec {
 	replicas := int32(1)
 	if ir.Spec.Replicas != nil && *ir.Spec.Replicas > 0 {
@@ -516,23 +510,21 @@ func retryBlockFromWorkload(w workloadtypes.RetryBlock) v1beta1.RetryBlock {
 }
 
 // buildKey is the IR-side workload.Key projection. The SelectorLabels
-// carry the legacy OMENative trio so existing pod selectors keep
-// matching during the dual-write window (every pod the IR controller
-// creates is observable by the same selector the legacy omenative
-// controller used).
+// are the OMENative trio (name prefix, component, managed-by) the
+// workload renderer stamps on every pod it creates.
 //
-// OwnerName resolves to the parent ISVC name (from
-// IR.Spec.ParentRef.Name) so pod / service names stay byte-identical
-// to the legacy shape — query.PodName / query.HeadlessServiceName /
-// revision.Name all key off this field.
+// OwnerName is ir.NamePrefix(): the parent InferenceService name for a
+// projected replica, the replica's own name for a standalone one.
+// query.PodName and query.HeadlessServiceName key off this field, and
+// irRevisionKey derives revision names from the same prefix.
 func buildKey(ir *v1beta1.InferenceReplica) workloadtypes.Key {
 	return workloadtypes.Key{
 		Namespace:   ir.Namespace,
 		Component:   v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component),
-		OwnerName:   ir.Spec.ParentRef.Name,
+		OwnerName:   ir.NamePrefix(),
 		OwnerLabels: ir.Labels,
 		SelectorLabels: map[string]string{
-			constants.InferenceServicePodLabelKey: ir.Spec.ParentRef.Name,
+			constants.InferenceServicePodLabelKey: ir.NamePrefix(),
 			constants.OMEComponentLabel:           string(ir.Spec.Component),
 			query.LabelManagedBy:                  query.ManagedByOMENative,
 		},
@@ -540,15 +532,13 @@ func buildKey(ir *v1beta1.InferenceReplica) workloadtypes.Key {
 }
 
 // buildMutateInstance wraps the workload-typed mutate callback with an
-// IR-typed apiserver round-trip. Mirrors status.MutateInstance on the
-// ISVC side: re-read under retry.RetryOnConflict, locate/append the
-// (idx) InstanceStatus, hand the workload-typed mirror to the caller,
-// convert back to v1beta1 if the caller reported a real change, and
-// persist via Status().Update().
+// IR-typed apiserver round-trip: re-read under retry.RetryOnConflict,
+// locate/append the (idx) InstanceStatus, hand the workload-typed mirror
+// to the caller, convert back to v1beta1 if the caller reported a real
+// change, and persist via Status().Update().
 //
-// The boolean return lets the workload caller short-circuit the
-// apiserver round-trip when no real change happened — matches the
-// legacy ISVC-side contract so per-op writers stay idempotent.
+// The boolean return lets the workload caller skip the apiserver
+// round-trip when nothing changed, so per-op writers stay idempotent.
 //
 // Owner disappearance or replacement returns ErrStatusOwnerGone so callers
 // stop before applying effects selected from the stale snapshot.
@@ -1236,8 +1226,8 @@ func retryBlockOlder(a, b v1beta1.RetryBlock) bool {
 // workload.ReconcileInput.RemoveInstance callback. Drops the (idx)
 // InstanceStatus, persists, and (on a real removal) forgets the
 // expectation entry so a later index reuse doesn't inherit stale
-// counters. The expectations bucket keys on Key.OwnerName — the parent
-// ISVC name (buildKey), not the IR name — so Forget must use the same.
+// counters. The expectations bucket keys on Key.OwnerName, which is
+// ir.NamePrefix() (buildKey), so Forget must use the same.
 // Owner disappearance or replacement returns ErrStatusOwnerGone.
 func buildRemoveInstance(writer statusWriter, reads client.Reader, ir *v1beta1.InferenceReplica, exp *workloadtypes.Expectations) func(ctx context.Context, idx int32) (bool, error) {
 	key := client.ObjectKeyFromObject(ir)
@@ -1286,7 +1276,7 @@ func buildRemoveInstance(writer statusWriter, reads client.Reader, ir *v1beta1.I
 			if cache == nil {
 				cache = workloadtypes.DefaultExpectations
 			}
-			cache.Forget(ir.Namespace, ir.Spec.ParentRef.Name, v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component), idx)
+			cache.Forget(ir.Namespace, ir.NamePrefix(), v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component), idx)
 		}
 		return hadEntry, nil
 	}

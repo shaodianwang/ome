@@ -71,9 +71,13 @@ func TestEngineReconcileDeployment_ProjectsMergedTopologyKey(t *testing.T) {
 	isvc := &v1beta1.InferenceService{
 		ObjectMeta: metav1.ObjectMeta{Name: "topology", Namespace: "default", UID: types.UID("topology-uid")},
 	}
-	g.Expect(c.Create(context.Background(), &v1beta1.InferenceReplica{ObjectMeta: metav1.ObjectMeta{
-		Name: "topology-engine", Namespace: "default", UID: types.UID("topology-engine-uid"),
-	}})).To(gomega.Succeed())
+	g.Expect(c.Create(context.Background(), &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "topology-engine", Namespace: "default", UID: types.UID("topology-engine-uid"),
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService"))},
+		},
+		Spec: v1beta1.InferenceReplicaSpec{ParentRef: &v1beta1.ParentReference{Name: isvc.Name}},
+	})).To(gomega.Succeed())
 	leaderPodSpec := &v1.PodSpec{Containers: []v1.Container{{Name: "leader", Image: "test:v1"}}}
 	workerPodSpec := &v1.PodSpec{Containers: []v1.Container{{Name: "worker", Image: "test:v1"}}}
 	componentMeta := metav1.ObjectMeta{

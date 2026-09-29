@@ -6,7 +6,7 @@
 // OME reconciler on the members, so this admitter plays that role: it watches
 // the member's derived ISVCs and, after a configurable per-member admit delay,
 // stamps an admitted instance onto every declared component's InferenceReplica
-// (the authoritative per-instance status the placer now reads).
+// (the authoritative per-instance status the placer reads).
 //
 // The per-member delay is what makes the race deterministic: a member with a
 // short delay admits first and wins; a member with a long delay loses and has
@@ -164,8 +164,8 @@ func componentIRName(isvcName string, comp v1beta1.ComponentType) string {
 
 // markAdmitted stamps an admitted, ready instance onto every declared
 // component's InferenceReplica — the authoritative per-instance status the
-// placer's AllComponentsAdmitted now reads (from the IR, not the ISVC's
-// LifecycleStatus) to pick a winner. Each IR is created if absent, then its
+// placer's AllComponentsAdmitted reads from the IR, which alone carries the
+// per-instance rows, to pick a winner. Each IR is created if absent, then its
 // status subresource is written.
 func (r *Reconciler) markAdmitted(ctx context.Context, derived *v1beta1.InferenceService) error {
 	for _, comp := range declaredComponents(derived) {
@@ -178,7 +178,7 @@ func (r *Reconciler) markAdmitted(ctx context.Context, derived *v1beta1.Inferenc
 			// bare members (no manager pre-creates the IR). Ignored when the IR
 			// already exists (Create returns AlreadyExists).
 			Spec: v1beta1.InferenceReplicaSpec{
-				ParentRef: v1beta1.ParentReference{Name: derived.Name},
+				ParentRef: &v1beta1.ParentReference{Name: derived.Name},
 				Component: comp,
 				Runners: []v1beta1.Runner{{
 					Name: v1beta1.RunnerNameDefault,

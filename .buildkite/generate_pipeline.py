@@ -126,6 +126,7 @@ KIND_SPEC_GROUPS = (
     ("foundation-lifecycle", "Foundation and lifecycle", (
         "baseline_no_coord", "diagnostic", "lifecycle_basic", "lifecycle",
         "single_replica", "regression", "watches", "manager_restart_identity",
+        "standalone_replica",
     )),
     ("status-events-services", "Status, events, and services", (
         "events", "status", "status_surface", "status_encoding",

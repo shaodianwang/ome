@@ -1,20 +1,39 @@
 // Package inferencereplica implements the validating admission webhook
-// for the InferenceReplica CRD. InferenceReplica is a controller-only
-// resource: users only ever write InferenceService, and the ISVC
-// controller is the sole writer of InferenceReplica specs.
+// for the InferenceReplica CRD.
 //
-// This webhook enforces the convention by rejecting any Create / Update
-// that lacks the ome.io/controller-write=true annotation, and any
-// spec-field edits the ISVC controller never makes (spec.runners,
-// spec.podTemplate, spec.parentRef, spec.component) from an actor without
-// the annotation. RBAC restricting write on inferencereplicas to the OME
-// ServiceAccount is the actual security boundary — this webhook is the
-// "discouragement" layer that yields clear error messages and stops
-// well-intentioned kubectl edits.
+// A replica has one of two forms. A projected replica carries an
+// InferenceService controller owner reference or spec.parentRef; only the
+// InferenceService controller may write its spec, and anyone RBAC admits
+// may still change its metadata (the migration, release-held and
+// reset-instances mailboxes are annotations). A standalone replica carries
+// neither and is governed by RBAC, except for the placement fields
+// placementExecution and placementReplicaLimit, which only the controller
+// may set, and for a few settings nothing acts on without an
+// InferenceService (HPA and KEDA scaler classes, the nested
+// lifecycle.minReadySeconds, manual migration requests), which are
+// rejected rather than silently ignored.
 //
-// Deletion is not gated: operators may kubectl delete an InferenceReplica
-// for debugging, and the controller will recreate it on the next ISVC
-// reconcile.
+// spec.parentRef is set only by the InferenceService controller on the
+// replicas it projects and is rejected on a standalone create, one without
+// the InferenceService controller owner reference. Because parentRef is
+// immutable, a replica whose owner reference an orphan delete removed
+// stays projected. Only the controller may install a controller owner
+// reference on a projected replica, or an InferenceService one on a
+// standalone replica; anyone may keep or remove a replica's controller
+// owner reference, as the garbage collector does when it clears
+// blockOwnerDeletion or orphans a replica. InferenceService owner
+// references are matched by group and kind, so any served version counts.
+//
+// The controller is recognized by the identity configured in the
+// inferenceReplica block of inferenceservice-config (a ServiceAccount
+// username or a group). With no identity configured the webhook falls back
+// to the ome.io/controller-write=true annotation the projector stamps,
+// which is a convention rather than a boundary. An update that keeps the
+// spec and installs no controller owner reference is decided without the
+// identity, so an unreadable config never refuses one.
+//
+// spec.parentRef and spec.component are immutable for every writer, and
+// deletion is never gated.
 package inferencereplica
 
 import (
@@ -25,7 +44,11 @@ import (
 	"reflect"
 
 	admissionv1 "k8s.io/api/admission/v1"
+	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -48,6 +71,42 @@ type Validator struct {
 	// an Instance's slice demand is resolved against.
 	TPUSliceProvisioning *controllerconfig.TPUSliceProvisioningConfig
 	Nodes                client.Reader
+	// Reader resolves the InferenceService whose name a standalone replica
+	// would collide with. Nil skips that check.
+	Reader client.Reader
+	// Clientset and ConfigCache load the inferenceReplica block of
+	// inferenceservice-config, which names the controller identity. A nil
+	// Clientset means no identity is configured.
+	Clientset   kubernetes.Interface
+	ConfigCache *controllerconfig.ConfigCache
+}
+
+// actor classifies the requesting identity.
+type actor struct {
+	// controller is true for the InferenceService controller: the
+	// configured identity when one is set, otherwise a request carrying the
+	// controller-write annotation.
+	controller bool
+	// identityConfigured selects the wording of denials.
+	identityConfigured bool
+}
+
+func actorFor(identity *controllerconfig.ControllerIdentityConfig, user authenticationv1.UserInfo, obj *v1beta1.InferenceReplica) actor {
+	if identity.Configured() {
+		return actor{controller: identity.Matches(user), identityConfigured: true}
+	}
+	return actor{controller: hasControllerWriteAnnotation(obj.Annotations)}
+}
+
+func (v *Validator) controllerIdentity() (*controllerconfig.ControllerIdentityConfig, error) {
+	if v.Clientset == nil {
+		return nil, nil
+	}
+	cfg, err := controllerconfig.NewInferenceReplicaConfigCached(v.ConfigCache, v.Clientset)
+	if err != nil {
+		return nil, fmt.Errorf("load %s config: %w", controllerconfig.InferenceReplicaConfigName, err)
+	}
+	return cfg.Identity(), nil
 }
 
 // hasControllerWriteAnnotation accepts only the literal "true";
@@ -60,29 +119,118 @@ func hasControllerWriteAnnotation(annotations map[string]string) bool {
 		constants.InferenceReplicaControllerWriteAnnotationVal
 }
 
-func denyDirectWrite(op admissionv1.Operation, namespace, name string) admission.Response {
+const projectedWriteHint = "edit the InferenceService instead"
+
+func denyProjectedWrite(req admission.Request, parent string, who actor) admission.Response {
+	if who.identityConfigured {
+		return admission.Denied(fmt.Sprintf(
+			"InferenceReplica %s/%s is projected by InferenceService %s/%s, whose controller alone writes its spec; %s (request from %q)",
+			req.Namespace, req.Name, req.Namespace, parent, projectedWriteHint, req.UserInfo.Username))
+	}
 	return admission.Denied(fmt.Sprintf(
-		"InferenceReplica is a controller-only resource and rejects direct "+
-			"%s on %s/%s: missing %s=%s annotation. Edit the parent "+
-			"InferenceService spec instead; the controller will reconcile "+
-			"the InferenceReplica.",
-		op, namespace, name,
-		constants.InferenceReplicaControllerWriteAnnotationKey,
-		constants.InferenceReplicaControllerWriteAnnotationVal,
-	))
+		"InferenceReplica %s/%s is projected by InferenceService %s/%s and rejects a direct %s without the %s=%s annotation; %s",
+		req.Namespace, req.Name, req.Namespace, parent, req.Operation,
+		constants.InferenceReplicaControllerWriteAnnotationKey, constants.InferenceReplicaControllerWriteAnnotationVal,
+		projectedWriteHint))
 }
 
-// Handle gates writes per the package doc:
-//   - Create / Update without ome.io/controller-write=true ⇒ Denied.
-//   - Update changing spec.parentRef or spec.component (even from the
-//     controller) ⇒ Denied; recreating the IR is required.
-//   - Update touching nothing but metadata.finalizers ⇒ Allowed
-//     unconditionally (see isFinalizerOnlyUpdate).
-//   - Delete is not registered in the kubebuilder verbs list and
-//     therefore not reached here; operators may delete to recover.
+func denyControllerOnlyFields(req admission.Request) admission.Response {
+	return admission.Denied(fmt.Sprintf(
+		"InferenceReplica %s/%s: spec.placementExecution and spec.placementReplicaLimit are written only by the InferenceService controller",
+		req.Namespace, req.Name))
+}
+
+func denyStandaloneMigration(req admission.Request) admission.Response {
+	return admission.Denied(fmt.Sprintf(
+		"InferenceReplica %s/%s: manual migration is not available on a standalone replica; it surges through the per-revision Service only an InferenceService creates",
+		req.Namespace, req.Name))
+}
+
+// admitCreate applies the create rows of the ownership table; shape checks
+// run afterwards in Handle.
+func (v *Validator) admitCreate(ctx context.Context, obj *v1beta1.InferenceReplica, who actor, req admission.Request) admission.Response {
+	// The projector creates parentRef together with the controller owner
+	// reference, so parentRef alone is refused for every writer.
+	if obj.Spec.ParentRef != nil && projectingParent(obj) == nil {
+		return admission.Denied(fmt.Sprintf(
+			"InferenceReplica %s/%s: spec.parentRef is set by the InferenceService controller on the replicas it projects; omit it on a standalone InferenceReplica",
+			req.Namespace, req.Name))
+	}
+	if parent, projected := projectedForm(obj); projected {
+		if !who.controller {
+			return denyProjectedWrite(req, parent, who)
+		}
+		return admission.Allowed("")
+	}
+	if placementFieldsSet(obj.Spec) && !who.controller {
+		return denyControllerOnlyFields(req)
+	}
+	if err := standaloneSpecError(obj.Spec); err != nil {
+		return admission.Denied(fmt.Sprintf("InferenceReplica %s/%s: %s", req.Namespace, req.Name, err))
+	}
+	if err := validation.ValidateInferenceServiceName(req.Name); err != nil {
+		return admission.Denied(fmt.Sprintf("InferenceReplica %s/%s: a standalone replica's name is the prefix of its pod and Service names and must match %q", req.Namespace, req.Name, validation.IsvcNameFmt))
+	}
+	if migrationRequested(nil, obj) {
+		return denyStandaloneMigration(req)
+	}
+	if v.Reader != nil {
+		for _, candidate := range collidingInferenceServiceNames(req.Name) {
+			isvc := &v1beta1.InferenceService{}
+			err := v.Reader.Get(ctx, types.NamespacedName{Namespace: req.Namespace, Name: candidate}, isvc)
+			switch {
+			case err == nil:
+				return admission.Denied(fmt.Sprintf(
+					"InferenceReplica %s/%s: InferenceService %s/%s exists and the replicas it projects would share pod and Service names with this one; choose another name",
+					req.Namespace, req.Name, req.Namespace, candidate))
+			case !apierrors.IsNotFound(err):
+				return admission.Errored(http.StatusInternalServerError, fmt.Errorf("check InferenceService %s/%s: %w", req.Namespace, candidate, err))
+			}
+		}
+	}
+	return admission.Allowed("")
+}
+
+// admitUpdate applies the update rows of the ownership table. The form is
+// read from the old object; immutability and metadata-only updates are
+// decided by Handle before this runs.
+func (v *Validator) admitUpdate(oldObj, newObj *v1beta1.InferenceReplica, who actor, req admission.Request) admission.Response {
+	// A non-controller may keep or remove a controller owner reference but
+	// not install one on a projected replica, whose projector would refuse
+	// it and wedge the InferenceService, nor attach a standalone replica to
+	// an InferenceService. Removal is how the garbage collector orphans a
+	// replica; the projector re-stamps the reference while the
+	// InferenceService exists.
+	parent, projected := projectedForm(oldObj)
+	if !who.controller && controllerRefInstalled(oldObj, newObj) && (projected || projectingParent(newObj) != nil) {
+		return admission.Denied(fmt.Sprintf(
+			"InferenceReplica %s/%s: only the InferenceService controller may set an InferenceService controller owner reference or change a projected replica's",
+			req.Namespace, req.Name))
+	}
+	if projected {
+		if !who.controller && specChanged(oldObj.Spec, newObj.Spec) {
+			return denyProjectedWrite(req, parent, who)
+		}
+		return admission.Allowed("")
+	}
+	if !who.controller && controllerOnlyChanged(oldObj.Spec, newObj.Spec) {
+		return denyControllerOnlyFields(req)
+	}
+	if err := standaloneSpecError(newObj.Spec); err != nil {
+		return admission.Denied(fmt.Sprintf("InferenceReplica %s/%s: %s", req.Namespace, req.Name, err))
+	}
+	if migrationRequested(oldObj, newObj) {
+		return denyStandaloneMigration(req)
+	}
+	return admission.Allowed("")
+}
+
+// Handle applies, in order: the immutability of spec.parentRef and
+// spec.component, the metadata-only exemption, the ownership table for the
+// replica's form and the requester's identity, then the shape checks that
+// hold for every writer. An update that keeps the spec and installs no
+// controller owner reference is decided without the identity.
 func (v *Validator) Handle(ctx context.Context, req admission.Request) admission.Response {
-	// Defensive: webhook is registered for Create+Update only, but a
-	// future operator misconfig shouldn't surprise us.
 	switch req.Operation {
 	case admissionv1.Create, admissionv1.Update:
 	default:
@@ -96,15 +244,6 @@ func (v *Validator) Handle(ctx context.Context, req admission.Request) admission
 		return admission.Errored(http.StatusBadRequest, err)
 	}
 
-	// Immutability check runs unconditionally on every Update, BEFORE
-	// the controller-write annotation gate. The annotation gates WHO
-	// can write (operator vs. controller), but field immutability is a
-	// stronger contract that applies to ALL writers — a misbehaving
-	// controller (e.g., stale ISVC controller cache) that stamps the
-	// controller-write annotation must NOT also be able to change
-	// spec.parentRef.UID to the wrong parent or move the IR between
-	// Component slots. This is exactly the failure mode webhook gates
-	// exist for.
 	var oldObj *v1beta1.InferenceReplica
 	if req.Operation == admissionv1.Update {
 		oldObj = &v1beta1.InferenceReplica{}
@@ -113,17 +252,6 @@ func (v *Validator) Handle(ctx context.Context, req admission.Request) admission
 				"namespace", req.Namespace, "name", req.Name)
 			return admission.Errored(http.StatusBadRequest, err)
 		}
-
-		// Finalizer-only updates are admitted before every gate below.
-		// Such a patch cannot violate any invariant this webhook protects
-		// (spec immutability, controller-write provenance) — but denying
-		// it can manufacture a teardown wedge: this webhook is fail-
-		// closed, so a refused finalizer-removal update leaves a
-		// Terminating IR stuck behind our own admission gate.
-		if isFinalizerOnlyUpdate(oldObj, newObj) {
-			return admission.Allowed("finalizer-only update")
-		}
-
 		if !reflect.DeepEqual(oldObj.Spec.ParentRef, newObj.Spec.ParentRef) {
 			return admission.Denied(fmt.Sprintf(
 				"InferenceReplica %s/%s: spec.parentRef is immutable",
@@ -134,54 +262,46 @@ func (v *Validator) Handle(ctx context.Context, req admission.Request) admission
 				"InferenceReplica %s/%s: spec.component is immutable",
 				req.Namespace, req.Name))
 		}
+		// An update that keeps the spec and installs no controller owner
+		// reference is decided without the identity: a finalizer change, a
+		// label or annotation edit and the garbage collector's owner
+		// reference patches must pass this fail-closed webhook even when the
+		// config is unreadable. The unchanged spec is not re-checked.
+		if !specChanged(oldObj.Spec, newObj.Spec) && !controllerRefInstalled(oldObj, newObj) {
+			if _, projected := projectedForm(oldObj); !projected && migrationRequested(oldObj, newObj) {
+				return denyStandaloneMigration(req)
+			}
+			return admission.Allowed("metadata-only update")
+		}
 	}
 
-	if !hasControllerWriteAnnotation(newObj.Annotations) {
-		log.V(1).Info("Rejecting direct write to InferenceReplica",
-			"op", req.Operation,
-			"namespace", req.Namespace, "name", req.Name,
-			"userInfo", req.UserInfo.Username)
-		return denyDirectWrite(req.Operation, req.Namespace, req.Name)
+	// Only creates and the updates that change the spec or install a
+	// controller owner reference need the identity.
+	identity, err := v.controllerIdentity()
+	if err != nil {
+		log.Error(err, "Failed to load the InferenceReplica controller identity",
+			"namespace", req.Namespace, "name", req.Name)
+		return admission.Errored(http.StatusInternalServerError, err)
+	}
+	who := actorFor(identity, req.UserInfo, newObj)
+
+	if oldObj != nil {
+		if resp := v.admitUpdate(oldObj, newObj, who, req); !resp.Allowed {
+			return resp
+		}
+	} else if resp := v.admitCreate(ctx, newObj, who, req); !resp.Allowed {
+		return resp
 	}
 
-	// Validate the projected Autoscaler block shape. The IR
-	// webhook is strict about all spec writes by default (controller-
-	// write annotation gate above); this is defense-in-depth against a
-	// misbehaving controller writing a malformed projection. External
-	// writes to spec.autoscaler are deliberately NOT blocked —
-	// the /scale subresource only mutates spec.replicas, so a successful
-	// write here means either the controller did it or someone forged
-	// the annotation. Either way the shape must be valid.
+	// Shape checks hold for every writer.
 	if err := validateIRAutoscaler(newObj); err != nil {
-		return admission.Denied(fmt.Sprintf(
-			"InferenceReplica %s/%s: %s",
-			req.Namespace, req.Name, err.Error()))
+		return admission.Denied(fmt.Sprintf("InferenceReplica %s/%s: %s", req.Namespace, req.Name, err.Error()))
 	}
-
-	// Pacing.Partition must be <= effective Replicas, otherwise an
-	// over-Partition silently holds every Instance back forever (the
-	// rollout engine treats Partition as a per-index threshold and
-	// freezes any Instance with index < Partition).
 	if err := validateIRPacing(newObj); err != nil {
-		return admission.Denied(fmt.Sprintf(
-			"InferenceReplica %s/%s: %s",
-			req.Namespace, req.Name, err.Error()))
+		return admission.Denied(fmt.Sprintf("InferenceReplica %s/%s: %s", req.Namespace, req.Name, err.Error()))
 	}
-
-	// Every container/initContainer volumeMount in a rendered Runner pod
-	// template must resolve to a volume declared in that same pod spec.
-	// A mount that names an undeclared volume is accepted here but
-	// REJECTED by the kube-apiserver at pod-create time during reconcile
-	// ("spec.containers[0].volumeMounts[0].name: Not found: <name>"),
-	// which surfaces only as a buried InferenceReplica reconcile error
-	// in the manager log — with no signal at kubectl apply. This gate is
-	// defense-in-depth: it turns that silent failure into a clear
-	// admission rejection (and also catches plain volumeMount typos in a
-	// runtime's pod template).
 	if err := validateIRRunnerVolumes(newObj); err != nil {
-		return admission.Denied(fmt.Sprintf(
-			"InferenceReplica %s/%s: %s",
-			req.Namespace, req.Name, err.Error()))
+		return admission.Denied(fmt.Sprintf("InferenceReplica %s/%s: %s", req.Namespace, req.Name, err.Error()))
 	}
 
 	// The controller withholds the pods of an Instance that cannot fill a
@@ -194,50 +314,6 @@ func (v *Validator) Handle(ctx context.Context, req admission.Request) admission
 	}
 
 	return admission.Allowed("")
-}
-
-// isFinalizerOnlyUpdate reports whether the update changes nothing
-// beyond metadata.finalizers. A finalizer-only patch cannot violate any
-// invariant this webhook protects — spec immutability and controller-
-// write provenance both concern content the patch leaves untouched —
-// while refusing it can only manufacture teardown wedges: the webhook
-// is fail-closed, and finalizer add/remove is exactly the write a
-// controller must be able to make for deletion to complete.
-//
-// "Finalizer-only" is judged strictly:
-//   - Spec must be deep-equal.
-//   - Status must be deep-equal. With the status subresource enabled
-//     the apiserver already resets status before validating admission
-//     runs on main-resource updates (and /status updates never reach
-//     this webhook, whose rule covers only the main resource), so this
-//     check is inert today; it keeps the exemption airtight if the
-//     subresource wiring ever changes.
-//   - ObjectMeta must be deep-equal after overwriting, on a copy of the
-//     old metadata, only Finalizers (the field under test) plus the
-//     fields the apiserver itself rewrites on every update and clients
-//     cannot use to smuggle state: ResourceVersion (storage-assigned,
-//     optimistic concurrency enforced by the apiserver), ManagedFields
-//     (server-side field tracking, rewritten on every write), and
-//     Generation (apiserver-stamped; inert here given spec equality).
-//
-// Any other metadata delta — labels, annotations (including stripping
-// the controller-write annotation), ownerReferences, deletion fields —
-// disqualifies the update, which then falls through to the normal
-// gates. Combining a finalizer change with any such edit is therefore
-// not a bypass.
-func isFinalizerOnlyUpdate(oldObj, newObj *v1beta1.InferenceReplica) bool {
-	if !reflect.DeepEqual(oldObj.Spec, newObj.Spec) {
-		return false
-	}
-	if !reflect.DeepEqual(oldObj.Status, newObj.Status) {
-		return false
-	}
-	meta := oldObj.ObjectMeta.DeepCopy()
-	meta.Finalizers = newObj.Finalizers
-	meta.ResourceVersion = newObj.ResourceVersion
-	meta.ManagedFields = newObj.ManagedFields
-	meta.Generation = newObj.Generation
-	return reflect.DeepEqual(*meta, newObj.ObjectMeta)
 }
 
 // validateIRAutoscaler runs the shared Autoscaler shape check against

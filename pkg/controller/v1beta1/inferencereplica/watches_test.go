@@ -3,6 +3,7 @@ package inferencereplica
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -11,15 +12,18 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/sliceprovision"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 	"github.com/ome-projects/ome/pkg/tpuslice/gke"
 )
 
@@ -374,7 +378,7 @@ func TestManagedByOMENativePredicate_UpdateFieldDiff(t *testing.T) {
 				p := managedPod()
 				ctrl := true
 				p.OwnerReferences = []metav1.OwnerReference{
-					{Kind: irKind, Name: "isvc-engine", Controller: &ctrl},
+					{APIVersion: irGVK.GroupVersion().String(), Kind: irGVK.Kind, Name: "isvc-engine", Controller: &ctrl},
 				}
 				return p
 			}(),
@@ -428,9 +432,9 @@ func TestManagedByOMENativePredicate_UpdateFieldDiff(t *testing.T) {
 	}
 }
 
-// TestIRNameFromDrainServiceName covers the EndpointSlice -> IR name
-// reverse-lookup for both OMENative drain Service shapes plus the reject
-// cases the unfiltered watch relies on the mapper to screen out.
+// TestIRNameFromDrainServiceName covers the drain Service name ->
+// projected replica name parse for both OMENative drain Service shapes plus
+// the reject cases the unfiltered watch relies on the mapper to screen out.
 func TestIRNameFromDrainServiceName(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -444,6 +448,7 @@ func TestIRNameFromDrainServiceName(t *testing.T) {
 		{name: "per-revision engine", service: "my-isvc-engine-rev-abcdef", wantIR: "my-isvc-engine", wantOK: true},
 		{name: "per-revision hex hash", service: "my-isvc-decoder-rev-5f7c9a", wantIR: "my-isvc-decoder", wantOK: true},
 		{name: "isvc name with dashes", service: "a-b-c-engine-headless", wantIR: "a-b-c-engine", wantOK: true},
+		{name: "isvc name containing the revision marker", service: "llama-rev-2-engine-rev-5f7c9a", wantIR: "llama-rev-2-engine", wantOK: true},
 		{name: "empty", service: "", wantOK: false},
 		{name: "unrelated headless (unknown component)", service: "kubernetes-headless", wantOK: false},
 		{name: "unrelated service", service: "some-random-service", wantOK: false},
@@ -463,10 +468,12 @@ func TestIRNameFromDrainServiceName(t *testing.T) {
 	}
 }
 
-// TestEndpointSliceToIR verifies the map function emits exactly the
-// owning IR request for an OMENative drain slice and nothing for a
+// TestEndpointSliceToIR verifies that, with no Service in the cache, the
+// map function falls back to the name parse: it emits the projected
+// replica's request for an OMENative drain slice and nothing for a
 // foreign slice (or a non-EndpointSlice object).
 func TestEndpointSliceToIR(t *testing.T) {
+	r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(testScheme(t)).Build()}
 	slice := &discoveryv1.EndpointSlice{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "ns",
@@ -474,12 +481,12 @@ func TestEndpointSliceToIR(t *testing.T) {
 			Labels:    map[string]string{discoveryv1.LabelServiceName: "my-isvc-engine-headless"},
 		},
 	}
-	reqs := EndpointSliceToIR(context.Background(), slice)
+	reqs := r.endpointSliceToIR(context.Background(), slice)
 	if len(reqs) != 1 {
-		t.Fatalf("EndpointSliceToIR returned %d requests, want 1", len(reqs))
+		t.Fatalf("endpointSliceToIR returned %d requests, want 1", len(reqs))
 	}
 	if reqs[0].Namespace != "ns" || reqs[0].Name != "my-isvc-engine" {
-		t.Errorf("EndpointSliceToIR request = %v, want ns/my-isvc-engine", reqs[0].NamespacedName)
+		t.Errorf("endpointSliceToIR request = %v, want ns/my-isvc-engine", reqs[0].NamespacedName)
 	}
 
 	// Per-revision slice.
@@ -489,9 +496,9 @@ func TestEndpointSliceToIR(t *testing.T) {
 			Labels:    map[string]string{discoveryv1.LabelServiceName: "my-isvc-decoder-rev-deadbeef"},
 		},
 	}
-	revReqs := EndpointSliceToIR(context.Background(), revSlice)
+	revReqs := r.endpointSliceToIR(context.Background(), revSlice)
 	if len(revReqs) != 1 || revReqs[0].Name != "my-isvc-decoder" {
-		t.Errorf("EndpointSliceToIR(per-revision) = %v, want ns/my-isvc-decoder", revReqs)
+		t.Errorf("endpointSliceToIR(per-revision) = %v, want ns/my-isvc-decoder", revReqs)
 	}
 
 	// Foreign slice -> no request.
@@ -501,13 +508,192 @@ func TestEndpointSliceToIR(t *testing.T) {
 			Labels:    map[string]string{discoveryv1.LabelServiceName: "kube-dns"},
 		},
 	}
-	if got := EndpointSliceToIR(context.Background(), foreign); got != nil {
-		t.Errorf("EndpointSliceToIR(foreign) = %v, want nil", got)
+	if got := r.endpointSliceToIR(context.Background(), foreign); got != nil {
+		t.Errorf("endpointSliceToIR(foreign) = %v, want nil", got)
 	}
 
 	// Non-EndpointSlice object -> nil.
-	if got := EndpointSliceToIR(context.Background(), &corev1.Pod{}); got != nil {
-		t.Errorf("EndpointSliceToIR(non-slice) = %v, want nil", got)
+	if got := r.endpointSliceToIR(context.Background(), &corev1.Pod{}); got != nil {
+		t.Errorf("endpointSliceToIR(non-slice) = %v, want nil", got)
+	}
+}
+
+func TestEndpointSliceToIRUsesTheServiceOwnerForAStandaloneReplica(t *testing.T) {
+	isController := true
+	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{
+		Name: "pool-a-engine-headless", Namespace: "team-a",
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: v1beta1.SchemeGroupVersion.String(), Kind: "InferenceReplica",
+			Name: "pool-a", UID: "ir-uid", Controller: &isController,
+		}},
+	}}
+	r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(svc).Build()}
+
+	slice := &discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{
+		Name: "pool-a-engine-headless-x7k2p", Namespace: "team-a",
+		Labels: map[string]string{discoveryv1.LabelServiceName: "pool-a-engine-headless"},
+	}}
+	got := r.endpointSliceToIR(context.Background(), slice)
+	want := []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: "team-a", Name: "pool-a"}}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("endpointSliceToIR = %v, want %v", got, want)
+	}
+}
+
+// A headless Service name over the DNS label limit is truncated to a form
+// the name parse cannot map back, so the controller owner resolves it.
+func TestEndpointSliceToIRResolvesATruncatedHeadlessNameThroughTheOwner(t *testing.T) {
+	prefix := strings.Repeat("a", 70)
+	name := query.HeadlessServiceName(prefix, workloadtypes.ComponentEngine)
+	if strings.HasPrefix(name, prefix) {
+		t.Fatalf("fixture name %q is not truncated", name)
+	}
+	isController := true
+	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{
+		Name: name, Namespace: "team-a",
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: v1beta1.SchemeGroupVersion.String(), Kind: "InferenceReplica",
+			Name: prefix, UID: "ir-uid", Controller: &isController,
+		}},
+	}}
+	r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(svc).Build()}
+
+	slice := &discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{
+		Name: name + "-x7k2p", Namespace: "team-a",
+		Labels: map[string]string{discoveryv1.LabelServiceName: name},
+	}}
+	got := r.endpointSliceToIR(context.Background(), slice)
+	want := []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: "team-a", Name: prefix}}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("endpointSliceToIR = %v, want %v", got, want)
+	}
+}
+
+// Only the controller owner is authoritative: a replica named by a
+// non-controller owner reference leaves the slice to the name parse.
+func TestEndpointSliceToIRParsesTheNameWhenTheReplicaIsNotTheController(t *testing.T) {
+	isController := false
+	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{
+		Name: "my-isvc-engine-headless", Namespace: "team-a",
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: v1beta1.SchemeGroupVersion.String(), Kind: "InferenceReplica",
+			Name: "pool-a", UID: "ir-uid", Controller: &isController,
+		}},
+	}}
+	r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(svc).Build()}
+
+	slice := &discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{
+		Name: "my-isvc-engine-headless-x7k2p", Namespace: "team-a",
+		Labels: map[string]string{discoveryv1.LabelServiceName: "my-isvc-engine-headless"},
+	}}
+	got := r.endpointSliceToIR(context.Background(), slice)
+	want := []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: "team-a", Name: "my-isvc-engine"}}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("endpointSliceToIR = %v, want %v", got, want)
+	}
+}
+
+// The controller owner is matched by group and kind: an InferenceReplica from
+// another API group is not this controller's replica, so the slice falls back
+// to the name parse.
+func TestEndpointSliceToIRParsesTheNameWhenTheOwnerIsFromAnotherGroup(t *testing.T) {
+	isController := true
+	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{
+		Name: "my-isvc-engine-headless", Namespace: "team-a",
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: "serving.example.com/v1", Kind: "InferenceReplica",
+			Name: "pool-a", UID: "other-uid", Controller: &isController,
+		}},
+	}}
+	r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(svc).Build()}
+
+	slice := &discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{
+		Name: "my-isvc-engine-headless-x7k2p", Namespace: "team-a",
+		Labels: map[string]string{discoveryv1.LabelServiceName: "my-isvc-engine-headless"},
+	}}
+	got := r.endpointSliceToIR(context.Background(), slice)
+	want := []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: "team-a", Name: "my-isvc-engine"}}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("endpointSliceToIR = %v, want %v", got, want)
+	}
+}
+
+// The pod handler enqueues the InferenceReplica controller matched by group
+// and kind, and skips a same-kind controller from another API group.
+func TestPodEventHandlerMatchesTheControllerByGroupAndKind(t *testing.T) {
+	isController := true
+	for _, tc := range []struct {
+		name       string
+		apiVersion string
+		want       []reconcile.Request
+	}{
+		{
+			name:       "ome.io controller",
+			apiVersion: v1beta1.SchemeGroupVersion.String(),
+			want:       []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: "ns", Name: "pool-a"}}},
+		},
+		{name: "controller from another group", apiVersion: "serving.example.com/v1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := managedPod()
+			pod.OwnerReferences = []metav1.OwnerReference{{
+				APIVersion: tc.apiVersion, Kind: "InferenceReplica",
+				Name: "pool-a", UID: "ir-uid", Controller: &isController,
+			}}
+			h := newPodEventHandler(workloadtypes.NewExpectations())
+			ctx := context.Background()
+			type requestQueue = workqueue.TypedRateLimitingInterface[reconcile.Request]
+			// One queue per event type: a queue collapses duplicate requests,
+			// so a shared queue would pass when only one event enqueued.
+			for _, fire := range []struct {
+				name string
+				send func(requestQueue)
+			}{
+				{"create", func(q requestQueue) { h.Create(ctx, event.TypedCreateEvent[client.Object]{Object: pod}, q) }},
+				{"update", func(q requestQueue) {
+					h.Update(ctx, event.TypedUpdateEvent[client.Object]{ObjectOld: pod, ObjectNew: pod}, q)
+				}},
+				{"delete", func(q requestQueue) { h.Delete(ctx, event.TypedDeleteEvent[client.Object]{Object: pod}, q) }},
+				{"generic", func(q requestQueue) { h.Generic(ctx, event.TypedGenericEvent[client.Object]{Object: pod}, q) }},
+			} {
+				q := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[reconcile.Request]())
+				fire.send(q)
+				var got []reconcile.Request
+				for q.Len() > 0 {
+					req, _ := q.Get()
+					got = append(got, req)
+					q.Done(req)
+				}
+				q.ShutDown()
+				if !reflect.DeepEqual(got, tc.want) {
+					t.Errorf("%s enqueued %v, want %v", fire.name, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// A per-revision Service is controlled by the InferenceService, not the
+// replica, so its slices map through the name parse to the projected replica.
+func TestEndpointSliceToIRParsesTheNameWhenTheInferenceServiceOwnsTheService(t *testing.T) {
+	isController := true
+	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{
+		Name: "my-isvc-engine-rev-5f7c9a", Namespace: "team-a",
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: v1beta1.SchemeGroupVersion.String(), Kind: "InferenceService",
+			Name: "my-isvc", UID: "isvc-uid", Controller: &isController,
+		}},
+	}}
+	r := &Reconciler{Client: fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(svc).Build()}
+
+	slice := &discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{
+		Name: "my-isvc-engine-rev-5f7c9a-q4m8d", Namespace: "team-a",
+		Labels: map[string]string{discoveryv1.LabelServiceName: "my-isvc-engine-rev-5f7c9a"},
+	}}
+	got := r.endpointSliceToIR(context.Background(), slice)
+	want := []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: "team-a", Name: "my-isvc-engine"}}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("endpointSliceToIR = %v, want %v", got, want)
 	}
 }
 

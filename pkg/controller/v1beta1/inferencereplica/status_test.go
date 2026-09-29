@@ -16,6 +16,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -28,6 +29,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
@@ -270,10 +272,8 @@ func TestMirrorInstanceCountersUsesTransientPublicationIntersection(t *testing.T
 // pins the AvailableReplicas counter via the end-to-end Reconcile path.
 // With pods ContainersReady AND published as Ready in the per-Component
 // headless Service's EndpointSlice, AvailableReplicas should collapse
-// onto ReadyReplicas. The aggregator reads availability off the slice
-// exactly like the omenative direct path
-// (TestAggregateAndWriteStatus_PerInstanceCountersFromObservedPods),
-// so the two adapters produce byte-identical counters.
+// onto ReadyReplicas. The aggregator reads availability off the slice,
+// not off pod readiness.
 //
 // AvailableReplicas does not always mirror ReadyReplicas — the two CAN
 // diverge, see TestAggregateStatus_AvailableReplicas_ZeroWhenSliceNotReady —
@@ -382,13 +382,11 @@ func TestReconcile_WakesWhenMinReadyWindowElapses(t *testing.T) {
 // EndpointSlice-gated availability semantic: a pod ContainersReady but
 // NOT yet in any EndpointSlice's Ready endpoints reads
 // AvailablePodCount=0 → AvailableReplicas=0, while ReadyReplicas still
-// reports 1. Mirrors the omenative direct path's
-// TestAggregateAndWriteStatus_AvailableRequiresEndpointSliceReady.
+// reports 1.
 //
 // This is the "newly-Ready pod hasn't been picked up by kube-proxy
 // yet" window — operators get a useful signal that the pod is alive
-// but not in rotation, instead of the previous always-mirrors-ready
-// behavior that hid the kube-proxy lag.
+// but not in rotation, so the kube-proxy lag stays visible.
 func TestAggregateStatus_AvailableReplicas_ZeroWhenSliceNotReady(t *testing.T) {
 	g := gomega.NewWithT(t)
 	ir := baselineIR("llama-engine", "prod", 1)
@@ -1364,8 +1362,6 @@ func TestAggregateStatus_BadImageSurge_EscalatesInstanceToFailed(t *testing.T) {
 // stuck-pod grace (lifecycle stuckPodGracePeriod) must NOT escalate.
 // Without this guard, a brief transient pull failure
 // on a flaky registry would mis-classify a pod that's about to recover.
-// Mirrors the equivalent omenative-direct-path test
-// TestSurgeUpdate_ImagePullBackOff_WithinGrace_NoEscalation.
 func TestAggregateStatus_StuckPodWithinGrace_NoEscalation(t *testing.T) {
 	g := gomega.NewWithT(t)
 
@@ -2908,4 +2904,31 @@ func TestDrainOverdueCondition_ClearsWhenNoRowIsOverdue(t *testing.T) {
 	cond := computeDrainOverdueCondition(status)
 	g.Expect(cond.Status).To(gomega.Equal(metav1.ConditionFalse))
 	g.Expect(cond.Reason).To(gomega.Equal(ReasonDrainsWithinDeadline))
+}
+
+// A standalone replica's selector keys on its own name, the label value its
+// pods carry, not on a `<name>-<component>` derivation of it.
+func TestIRLabelSelectorStringForAStandaloneReplica(t *testing.T) {
+	ir := &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "team-a"},
+		Spec:       v1beta1.InferenceReplicaSpec{Component: v1beta1.EngineComponent},
+	}
+	got := irLabelSelectorString(ir.NamePrefix(), ir.Spec.Component)
+	sel, err := labels.Parse(got)
+	if err != nil {
+		t.Fatalf("selector %q does not parse: %v", got, err)
+	}
+	podLabels := func(namePrefix string) labels.Set {
+		return labels.Set{
+			constants.InferenceServicePodLabelKey: namePrefix,
+			constants.OMEComponentLabel:           string(v1beta1.EngineComponent),
+			query.LabelManagedBy:                  query.ManagedByOMENative,
+		}
+	}
+	if !sel.Matches(podLabels("pool-a")) {
+		t.Fatalf("selector %q does not match the replica's own pods", got)
+	}
+	if sel.Matches(podLabels("pool-a-engine")) {
+		t.Fatalf("selector %q matches pods labeled pool-a-engine", got)
+	}
 }

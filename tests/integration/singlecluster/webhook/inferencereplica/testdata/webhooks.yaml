@@ -1,0 +1,24 @@
+# Test-only fixture: ValidatingWebhookConfiguration for the InferenceReplica
+# webhook. envtest patches the caBundle and clientConfig.service into a URL
+# at install. The deletion matchCondition of the chart is omitted so the
+# handler's own metadata-only path is what admits teardown writes.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: inferencereplica.ome.io
+webhooks:
+  - clientConfig:
+      caBundle: Cg==
+      service:
+        name: ome-webhook-service
+        namespace: ome
+        path: /validate-ome-io-v1beta1-inferencereplica
+    failurePolicy: Fail
+    name: inferencereplica.ome-webhook-server.validator
+    sideEffects: None
+    admissionReviewVersions: ["v1"]
+    rules:
+      - apiGroups: ["ome.io"]
+        apiVersions: ["v1beta1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["inferencereplicas"]

@@ -47,7 +47,7 @@ func retentionIR(parent, namespace string) *v1beta1.InferenceReplica {
 			}},
 		},
 		Spec: v1beta1.InferenceReplicaSpec{
-			ParentRef: v1beta1.ParentReference{Name: parent},
+			ParentRef: &v1beta1.ParentReference{Name: parent},
 			Component: v1beta1.EngineComponent,
 			Replicas:  ptr.To(int32(1)),
 			Runners: []v1beta1.Runner{{

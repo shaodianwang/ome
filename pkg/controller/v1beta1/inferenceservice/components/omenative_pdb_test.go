@@ -416,7 +416,7 @@ func omeNativePDBTestIR(isvc *v1beta1.InferenceService, component v1beta1.Compon
 			UID:       types.UID("pdb-test-ir-uid"),
 		},
 		Spec: v1beta1.InferenceReplicaSpec{
-			ParentRef: v1beta1.ParentReference{Name: isvc.Name},
+			ParentRef: &v1beta1.ParentReference{Name: isvc.Name},
 			Component: component,
 			Replicas:  &replicas,
 			Runners:   runners,

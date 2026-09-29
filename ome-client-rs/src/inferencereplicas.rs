@@ -37,12 +37,38 @@ pub struct InferenceReplicaSpec {
     pub min_ready_seconds: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pacing: Option<InferenceReplicaPacing>,
-    #[serde(rename = "parentRef")]
-    pub parent_ref: InferenceReplicaParentRef,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "pairingProtocol"
+    )]
+    pub pairing_protocol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "parentRef")]
+    pub parent_ref: Option<InferenceReplicaParentRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "pauseMode")]
+    pub pause_mode: Option<InferenceReplicaPauseMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused: Option<bool>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "placementExecution"
+    )]
+    pub placement_execution: Option<InferenceReplicaPlacementExecution>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "placementReplicaLimit"
+    )]
+    pub placement_replica_limit: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replicas: Option<i32>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "revisionHistoryLimit"
+    )]
+    pub revision_history_limit: Option<i32>,
     pub runners: Vec<InferenceReplicaRunners>,
     #[serde(
         default,
@@ -50,6 +76,18 @@ pub struct InferenceReplicaSpec {
         rename = "topologyKey"
     )]
     pub topology_key: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "topologySpread"
+    )]
+    pub topology_spread: Option<InferenceReplicaTopologySpread>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "topologySpreadKey"
+    )]
+    pub topology_spread_key: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -525,16 +563,38 @@ pub struct InferenceReplicaAutoscalerKedaAdvancedScalingModifiers {
         skip_serializing_if = "Option::is_none",
         rename = "metricType"
     )]
-    pub metric_type: Option<String>,
+    pub metric_type: Option<InferenceReplicaAutoscalerKedaAdvancedScalingModifiersMetricType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceReplicaAutoscalerKedaAdvancedScalingModifiersMetricType {
+    AverageValue,
+    Value,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InferenceReplicaAutoscalerKedaFallback {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behavior: Option<InferenceReplicaAutoscalerKedaFallbackBehavior>,
     #[serde(rename = "failureThreshold")]
     pub failure_threshold: i32,
     pub replicas: i32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceReplicaAutoscalerKedaFallbackBehavior {
+    #[serde(rename = "static")]
+    Static,
+    #[serde(rename = "currentReplicas")]
+    CurrentReplicas,
+    #[serde(rename = "currentReplicasIfHigher")]
+    CurrentReplicasIfHigher,
+    #[serde(rename = "currentReplicasIfLower")]
+    CurrentReplicasIfLower,
+    #[serde(rename = "scalingModifiers")]
+    ScalingModifiers,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -567,8 +627,14 @@ pub struct InferenceReplicaAutoscalerKedaTriggers {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InferenceReplicaAutoscalerKedaTriggersAuthenticationRef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
+    pub kind: Option<InferenceReplicaAutoscalerKedaTriggersAuthenticationRefKind>,
     pub name: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceReplicaAutoscalerKedaTriggersAuthenticationRefKind {
+    TriggerAuthentication,
+    ClusterTriggerAuthentication,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -585,6 +651,12 @@ pub struct InferenceReplicaLifecycle {
         rename = "migrationPolicy"
     )]
     pub migration_policy: Option<InferenceReplicaLifecycleMigrationPolicy>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "minReadySeconds"
+    )]
+    pub min_ready_seconds: Option<i32>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -607,20 +679,8 @@ pub struct InferenceReplicaLifecycle {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InferenceReplicaLifecycleMigrationPolicy {
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "maxAutoRetries"
-    )]
-    pub max_auto_retries: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<InferenceReplicaLifecycleMigrationPolicyMode>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "progressDeadlineSeconds"
-    )]
-    pub progress_deadline_seconds: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -723,6 +783,25 @@ pub struct InferenceReplicaParentRef {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceReplicaPauseMode {
+    Recover,
+    Freeze,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceReplicaPlacementExecution {
+    #[serde(rename = "clusterUID")]
+    pub cluster_uid: String,
+    #[serde(rename = "pauseSurge")]
+    pub pause_surge: bool,
+    #[serde(rename = "planID")]
+    pub plan_id: String,
+    pub revision: i64,
+    #[serde(rename = "sourceUID")]
+    pub source_uid: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InferenceReplicaRunners {
     pub name: InferenceReplicaRunnersName,
     pub size: i32,
@@ -802,6 +881,12 @@ pub struct InferenceReplicaRunnersTemplateSpec {
     pub host_users: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "hostnameOverride"
+    )]
+    pub hostname_override: Option<String>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -926,6 +1011,12 @@ pub struct InferenceReplicaRunnersTemplateSpec {
     pub topology_spread_constraints: Option<Vec<BTreeMap<String, serde_json::Value>>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volumes: Option<Vec<BTreeMap<String, serde_json::Value>>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "workloadRef"
+    )]
+    pub workload_ref: Option<InferenceReplicaRunnersTemplateSpecWorkloadRef>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -969,6 +1060,25 @@ pub struct InferenceReplicaRunnersTemplateSpecResourcesClaims {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceReplicaRunnersTemplateSpecWorkloadRef {
+    pub name: String,
+    #[serde(rename = "podGroup")]
+    pub pod_group: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "podGroupReplicaKey"
+    )]
+    pub pod_group_replica_key: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceReplicaTopologySpread {
+    Preferred,
+    Required,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InferenceReplicaStatus {
     #[serde(
         default,
@@ -999,6 +1109,18 @@ pub struct InferenceReplicaStatus {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
+        rename = "instanceStatusColumns"
+    )]
+    pub instance_status_columns: Option<InferenceReplicaStatusInstanceStatusColumns>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "instanceStatusEncoding"
+    )]
+    pub instance_status_encoding: Option<InferenceReplicaStatusInstanceStatusEncoding>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
         rename = "instanceStatuses"
     )]
     pub instance_statuses: Option<Vec<InferenceReplicaStatusInstanceStatuses>>,
@@ -1008,6 +1130,8 @@ pub struct InferenceReplicaStatus {
         rename = "labelSelector"
     )]
     pub label_selector: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migrations: Option<Vec<InferenceReplicaStatusMigrations>>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1017,11 +1141,29 @@ pub struct InferenceReplicaStatus {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
+        rename = "placementObservedGeneration"
+    )]
+    pub placement_observed_generation: Option<i64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
         rename = "readyReplicas"
     )]
     pub ready_replicas: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replicas: Option<i32>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "retryBlocks"
+    )]
+    pub retry_blocks: Option<Vec<InferenceReplicaStatusRetryBlocks>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "rolloutHold"
+    )]
+    pub rollout_hold: Option<InferenceReplicaStatusRolloutHold>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1051,6 +1193,223 @@ pub struct InferenceReplicaStatus {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceReplicaStatusInstanceStatusColumns {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "activeOrdinalOne"
+    )]
+    pub active_ordinal_one: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admitted: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "availablePodCounts"
+    )]
+    pub available_pod_counts:
+        Option<Vec<InferenceReplicaStatusInstanceStatusColumnsAvailablePodCounts>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entries: Option<Vec<InferenceReplicaStatusInstanceStatusColumnsEntries>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incarnations: Option<Vec<InferenceReplicaStatusInstanceStatusColumnsIncarnations>>,
+    pub members: String,
+    pub phases: Vec<InferenceReplicaStatusInstanceStatusColumnsPhases>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "podCounts")]
+    pub pod_counts: Option<Vec<InferenceReplicaStatusInstanceStatusColumnsPodCounts>>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "rowOrder")]
+    pub row_order: Option<Vec<i64>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "runningRevisions"
+    )]
+    pub running_revisions: Option<Vec<InferenceReplicaStatusInstanceStatusColumnsRunningRevisions>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "servingPodCounts"
+    )]
+    pub serving_pod_counts:
+        Option<Vec<InferenceReplicaStatusInstanceStatusColumnsServingPodCounts>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "targetRevisions"
+    )]
+    pub target_revisions: Option<Vec<InferenceReplicaStatusInstanceStatusColumnsTargetRevisions>>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceReplicaStatusInstanceStatusColumnsAvailablePodCounts {
+    pub indexes: String,
+    pub value: i32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceReplicaStatusInstanceStatusColumnsEntries {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub announced: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conditions: Option<Vec<Condition>>,
+    pub index: i32,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "lastFailure"
+    )]
+    pub last_failure: Option<InferenceReplicaStatusInstanceStatusColumnsEntriesLastFailure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<InferenceReplicaStatusInstanceStatusColumnsEntriesOperation>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "readySince"
+    )]
+    pub ready_since: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceReplicaStatusInstanceStatusColumnsEntriesLastFailure {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "containerName"
+    )]
+    pub container_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "exitCode")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(rename = "podName")]
+    pub pod_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceReplicaStatusInstanceStatusColumnsEntriesOperation {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "capacityRefusedAt"
+    )]
+    pub capacity_refused_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "fromNode")]
+    pub from_node: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "hintTargetNodes"
+    )]
+    pub hint_target_nodes: Option<Vec<String>>,
+    pub id: String,
+    #[serde(rename = "lastProgressAt")]
+    pub last_progress_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "requestUUID"
+    )]
+    pub request_uuid: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "retryCount"
+    )]
+    pub retry_count: Option<i32>,
+    #[serde(rename = "startedAt")]
+    pub started_at: String,
+    pub step: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "surgeIndex"
+    )]
+    pub surge_index: Option<i32>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "targetRevision"
+    )]
+    pub target_revision: Option<String>,
+    #[serde(rename = "type")]
+    pub r#type: InferenceReplicaStatusInstanceStatusColumnsEntriesOperationType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceReplicaStatusInstanceStatusColumnsEntriesOperationType {
+    Create,
+    Update,
+    Restart,
+    Migrate,
+    Delete,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceReplicaStatusInstanceStatusColumnsIncarnations {
+    pub indexes: String,
+    pub value: i64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceReplicaStatusInstanceStatusColumnsPhases {
+    pub indexes: String,
+    pub value: InferenceReplicaStatusInstanceStatusColumnsPhasesValue,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceReplicaStatusInstanceStatusColumnsPhasesValue {
+    Pending,
+    Creating,
+    Ready,
+    Updating,
+    Restarting,
+    Migrating,
+    Failed,
+    Deleting,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceReplicaStatusInstanceStatusColumnsPodCounts {
+    pub indexes: String,
+    pub value: i32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceReplicaStatusInstanceStatusColumnsRunningRevisions {
+    pub indexes: String,
+    pub value: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceReplicaStatusInstanceStatusColumnsServingPodCounts {
+    pub indexes: String,
+    pub value: i32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceReplicaStatusInstanceStatusColumnsTargetRevisions {
+    pub indexes: String,
+    pub value: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceReplicaStatusInstanceStatusEncoding {
+    ColumnarV2,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InferenceReplicaStatusInstanceStatuses {
     #[serde(
         default,
@@ -1060,6 +1419,8 @@ pub struct InferenceReplicaStatusInstanceStatuses {
     pub active_ordinal: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admitted: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub announced: Option<Vec<String>>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1094,6 +1455,12 @@ pub struct InferenceReplicaStatusInstanceStatuses {
         rename = "readyPodCount"
     )]
     pub ready_pod_count: Option<i32>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "readySince"
+    )]
+    pub ready_since: Option<String>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1142,6 +1509,12 @@ pub struct InferenceReplicaStatusInstanceStatusesLastFailure {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InferenceReplicaStatusInstanceStatusesOperation {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "capacityRefusedAt"
+    )]
+    pub capacity_refused_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "fromNode")]
@@ -1172,6 +1545,8 @@ pub struct InferenceReplicaStatusInstanceStatusesOperation {
     #[serde(rename = "startedAt")]
     pub started_at: String,
     pub step: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<String>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1186,6 +1561,8 @@ pub struct InferenceReplicaStatusInstanceStatusesOperation {
     pub target_revision: Option<String>,
     #[serde(rename = "type")]
     pub r#type: InferenceReplicaStatusInstanceStatusesOperationType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -1210,6 +1587,128 @@ pub enum InferenceReplicaStatusInstanceStatusesPhase {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceReplicaStatusMigrations {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "allocatedAt"
+    )]
+    pub allocated_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<i32>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "completedAt"
+    )]
+    pub completed_at: Option<String>,
+    pub deadline: String,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "fromNode")]
+    pub from_node: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "hintTargetNodes"
+    )]
+    pub hint_target_nodes: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    pub phase: InferenceReplicaStatusMigrationsPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(rename = "requestUUID")]
+    pub request_uuid: String,
+    #[serde(rename = "sourceInstance")]
+    pub source_instance: i32,
+    #[serde(rename = "startedAt")]
+    pub started_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub succeeded: Option<bool>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "surgeInstance"
+    )]
+    pub surge_instance: Option<i32>,
+    pub trigger: InferenceReplicaStatusMigrationsTrigger,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceReplicaStatusMigrationsPhase {
+    Accepted,
+    SurgePending,
+    SurgeReady,
+    Draining,
+    Completed,
+    Failed,
+    Relocated,
+    Pending,
+    InProgress,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceReplicaStatusMigrationsTrigger {
+    Manual,
+    Auto,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceReplicaStatusRetryBlocks {
+    #[serde(rename = "attemptsStarted")]
+    pub attempts_started: i32,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "firstFailureAt"
+    )]
+    pub first_failure_at: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "lastFailureAt"
+    )]
+    pub last_failure_at: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "nextRetryAt"
+    )]
+    pub next_retry_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub state: InferenceReplicaStatusRetryBlocksState,
+    #[serde(rename = "targetRevision")]
+    pub target_revision: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceReplicaStatusRetryBlocksState {
+    Backoff,
+    Held,
+    RetryInProgress,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceReplicaStatusRolloutHold {
+    pub gate: InferenceReplicaStatusRolloutHoldGate,
+    pub reason: String,
+    pub since: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceReplicaStatusRolloutHoldGate {
+    Pairing,
+    Ratio,
+    Sequential,
+    Budget,
+    RetryBlock,
+    Held,
+    Plan,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InferenceReplicaStatusTraffic {
     #[serde(
         default,
@@ -1217,6 +1716,12 @@ pub struct InferenceReplicaStatusTraffic {
         rename = "latestRevision"
     )]
     pub latest_revision: Option<bool>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "pairingProtocol"
+    )]
+    pub pairing_protocol: Option<String>,
     pub percent: i32,
     #[serde(rename = "revisionName")]
     pub revision_name: String,

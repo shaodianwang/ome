@@ -375,7 +375,7 @@ func fixtureInferenceReplica(name string, podsPerInstance int32) *v1beta1.Infere
 			}},
 		},
 		Spec: v1beta1.InferenceReplicaSpec{
-			ParentRef: v1beta1.ParentReference{Name: "example"},
+			ParentRef: &v1beta1.ParentReference{Name: "example"},
 			Component: v1beta1.EngineComponent,
 			Replicas:  &replicas,
 			Runners:   fixtureRunners(podsPerInstance),

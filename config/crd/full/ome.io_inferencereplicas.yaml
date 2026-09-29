@@ -658,6 +658,7 @@ spec:
                 parentRef:
                   properties:
                     name:
+                      minLength: 1
                       type: string
                   required:
                     - name
@@ -749,6 +750,7 @@ spec:
                   type: integer
                 replicas:
                   format: int32
+                  minimum: 0
                   type: integer
                 revisionHistoryLimit:
                   format: int32
@@ -3849,7 +3851,6 @@ spec:
                   type: string
               required:
                 - component
-                - parentRef
                 - runners
               type: object
             status:

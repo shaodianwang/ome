@@ -318,8 +318,9 @@ var _ = ginkgo.Describe("OMENative reconciled IR teardown (KIND)", ginkgo.Ordere
 	// the projector recreates a fresh one (the parent ISVC still
 	// exists). A spec-owned hold finalizer keeps the Terminating state
 	// observable; the strips are plain finalizer-only client updates
-	// (the kind manager runs no webhooks; the IR validator's
-	// finalizer-only exemption is pinned by the webhook envtest suite).
+	// (the kind manager runs no webhooks; the IR validator admits
+	// finalizer-only updates as metadata-only updates, pinned by its unit
+	// tests and the webhook envtest suite).
 	ginkgo.It("TEARDOWN-HANDOFF: a Terminating IR without the finalizer is left to GC and the projector rebuilds a fresh IR", func() {
 		const isvcName = "td-handoff"
 		const holdFinalizer = "kind-test.ome.io/teardown-hold"

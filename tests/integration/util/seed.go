@@ -31,14 +31,23 @@ func OMENativeStatusConfigJSON() string {
 		SeededInstanceStatusEncoding, SeededMaxDecodedInstances)
 }
 
+// InferenceReplicaConfigJSON is the inferenceReplica block the envtest and
+// KIND fixtures seed. The in-process manager authenticates as the envtest
+// admin (group system:masters) or the kind admin (group
+// kubeadm:cluster-admins), so both groups name the controller identity.
+func InferenceReplicaConfigJSON() string {
+	return `{"controllerIdentity":{"groups":["system:masters","kubeadm:cluster-admins"]}}`
+}
+
 // SeedDefaultConfigMaps creates the ConfigMap the controllers read at
 // reconcile time:
 //
 //   - inferenceservice-config — keys: ingress, deploy, lifecycle, omeAgent,
-//     rollout, omenativeStatus. The ISVC reconciler reads ingress + deploy +
-//     rollout; the BaseModel PVC path reads omeAgent; the InferenceReplica
-//     reconciler reads lifecycle and omenativeStatus; the manager binary
-//     requires omenativeStatus at startup (ColumnarV2 with the chart's
+//     rollout, omenativeStatus, inferenceReplica. The ISVC reconciler reads
+//     ingress + deploy + rollout; the BaseModel PVC path reads omeAgent; the
+//     InferenceReplica reconciler reads lifecycle and omenativeStatus; the
+//     InferenceReplica admission webhook reads inferenceReplica; the manager
+//     binary requires omenativeStatus at startup (ColumnarV2 with the chart's
 //     bound here, matching the chart default).
 //
 // Values are minimal-viable defaults that satisfy each helper's
@@ -65,6 +74,8 @@ func OMENativeStatusConfigJSON() string {
 //     config-driven with no in-code fallback, so without this key a canary
 //     step waiting on capacity would never escalate to Failed; supplying
 //     the chart's value keeps suite behavior chart-equivalent
+//   - inferenceReplica names the controller identity by the admin groups
+//     the in-process manager authenticates with (InferenceReplicaConfigJSON)
 //
 // Idempotent: subsequent calls with the same desired state are no-ops.
 // If a ConfigMap already exists with different data, this function
@@ -127,7 +138,8 @@ func SeedDefaultConfigMaps(ctx context.Context, c client.Client) error {
   "canaryRequeue": "10s",
   "canaryParkedRequeue": "5m"
 }`,
-		controllerconfig.OMENativeStatusConfigName: OMENativeStatusConfigJSON(),
+		controllerconfig.OMENativeStatusConfigName:  OMENativeStatusConfigJSON(),
+		controllerconfig.InferenceReplicaConfigName: InferenceReplicaConfigJSON(),
 	}); err != nil {
 		return fmt.Errorf("seed inferenceservice-config: %w", err)
 	}

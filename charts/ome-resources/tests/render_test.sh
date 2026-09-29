@@ -88,6 +88,201 @@ if grep -Fq 'minReadySeconds' <<<"${controller_config}"; then
   fail "deploy.minReadySeconds was rendered when unset"
 fi
 
+# The InferenceReplica admission webhook admits spec writes on projected
+# replicas only from the controller identity, so the chart always lists the
+# ServiceAccount the controller Deployment runs as and adds configured
+# identities to it.
+inference_replica_identity() {
+  awk '
+    /^  inferenceReplica: \|-$/ { capture = 1; next }
+    capture && /^    / { print; next }
+    capture { exit }
+  ' <<<"$1" | tr -d '[:space:]'
+}
+controller_username() {
+  awk '
+    /^  namespace: / && namespace == "" { namespace = $2 }
+    $1 == "serviceAccountName:" && account == "" { account = $2 }
+    END { if (namespace != "" && account != "") print "system:serviceaccount:" namespace ":" account }
+  ' <<<"$1"
+}
+default_identity="$(inference_replica_identity "${controller_config}")"
+[[ "${default_identity}" == '{"controllerIdentity":{"usernames":["system:serviceaccount:ome:ome-controller-manager"],"groups":[]}}' ]] ||
+  fail "default controller identity is not the controller ServiceAccount alone: ${default_identity}"
+default_controller_username="$(controller_username "${controller}")"
+[[ -n "${default_controller_username}" ]] ||
+  fail "controller Deployment namespace or serviceAccountName was not rendered"
+grep -Fq "\"${default_controller_username}\"" <<<"${default_identity}" ||
+  fail "controller identity does not list ${default_controller_username}, the account the controller Deployment runs as"
+
+team_a_config="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace team-a \
+  --show-only templates/ome-controller/configmap.yaml)"
+team_a_controller="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace team-a \
+  --show-only templates/ome-controller/deployment.yaml)"
+team_a_identity="$(inference_replica_identity "${team_a_config}")"
+[[ "${team_a_identity}" == '{"controllerIdentity":{"usernames":["system:serviceaccount:team-a:ome-controller-manager"],"groups":[]}}' ]] ||
+  fail "controller identity did not follow the release namespace: ${team_a_identity}"
+team_a_controller_username="$(controller_username "${team_a_controller}")"
+[[ -n "${team_a_controller_username}" ]] ||
+  fail "team-a controller Deployment namespace or serviceAccountName was not rendered"
+grep -Fq "\"${team_a_controller_username}\"" <<<"${team_a_identity}" ||
+  fail "team-a controller identity does not list ${team_a_controller_username}, the account the controller Deployment runs as"
+
+extra_username_config="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set-json 'ome.controller.inferenceReplica.controllerIdentity.usernames=["system:serviceaccount:ome:custom"]' \
+  --show-only templates/ome-controller/configmap.yaml)"
+extra_username_identity="$(inference_replica_identity "${extra_username_config}")"
+[[ "${extra_username_identity}" == '{"controllerIdentity":{"usernames":["system:serviceaccount:ome:ome-controller-manager","system:serviceaccount:ome:custom"],"groups":[]}}' ]] ||
+  fail "an extra username did not add to the controller ServiceAccount: ${extra_username_identity}"
+
+group_config="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set-json 'ome.controller.inferenceReplica.controllerIdentity.groups=["group-a"]' \
+  --show-only templates/ome-controller/configmap.yaml)"
+group_identity="$(inference_replica_identity "${group_config}")"
+[[ "${group_identity}" == '{"controllerIdentity":{"usernames":["system:serviceaccount:ome:ome-controller-manager"],"groups":["group-a"]}}' ]] ||
+  fail "a configured group was not rendered beside the controller ServiceAccount: ${group_identity}"
+
+for configured_usernames in \
+  '["system:serviceaccount:ome:ome-controller-manager","system:serviceaccount:ome:custom"]' \
+  '["system:serviceaccount:ome:custom","system:serviceaccount:ome:ome-controller-manager"]'; do
+  dedup_config="$("${helm_bin}" template ome-resources "${chart_dir}" \
+    --namespace ome \
+    --set-json "ome.controller.inferenceReplica.controllerIdentity.usernames=${configured_usernames}" \
+    --show-only templates/ome-controller/configmap.yaml)"
+  dedup_identity="$(inference_replica_identity "${dedup_config}")"
+  [[ "${dedup_identity}" == '{"controllerIdentity":{"usernames":["system:serviceaccount:ome:ome-controller-manager","system:serviceaccount:ome:custom"],"groups":[]}}' ]] ||
+    fail "configured usernames ${configured_usernames} did not list the controller ServiceAccount once and first: ${dedup_identity}"
+done
+
+dedup_group_config="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set-json 'ome.controller.inferenceReplica.controllerIdentity.groups=["group-a","group-a"]' \
+  --show-only templates/ome-controller/configmap.yaml)"
+dedup_group_identity="$(inference_replica_identity "${dedup_group_config}")"
+[[ "${dedup_group_identity}" == '{"controllerIdentity":{"usernames":["system:serviceaccount:ome:ome-controller-manager"],"groups":["group-a"]}}' ]] ||
+  fail "a repeated group was not listed once: ${dedup_group_identity}"
+
+# The manager rejects the whole block when a key holds a string instead of a
+# list, or when a name is not a string, is blank or has surrounding whitespace.
+# So a single name set as a scalar (--set key=name) renders as a list, an empty
+# scalar renders as an empty list, and any other kind or a bad name fails the
+# render and names the key.
+scalar_username_config="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set ome.controller.inferenceReplica.controllerIdentity.usernames=system:serviceaccount:ome:custom \
+  --show-only templates/ome-controller/configmap.yaml)"
+scalar_username_identity="$(inference_replica_identity "${scalar_username_config}")"
+[[ "${scalar_username_identity}" == '{"controllerIdentity":{"usernames":["system:serviceaccount:ome:ome-controller-manager","system:serviceaccount:ome:custom"],"groups":[]}}' ]] ||
+  fail "a scalar username did not render as a list beside the controller ServiceAccount: ${scalar_username_identity}"
+
+scalar_group_config="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set ome.controller.inferenceReplica.controllerIdentity.groups=group-a \
+  --show-only templates/ome-controller/configmap.yaml)"
+scalar_group_identity="$(inference_replica_identity "${scalar_group_config}")"
+[[ "${scalar_group_identity}" == '{"controllerIdentity":{"usernames":["system:serviceaccount:ome:ome-controller-manager"],"groups":["group-a"]}}' ]] ||
+  fail "a scalar group did not render as a one-element list: ${scalar_group_identity}"
+
+# render_fails_with <message> <helm arguments...>: rendering the controller
+# ConfigMap with the arguments fails and reports <message>.
+render_fails_with() {
+  local message="$1" output
+  shift
+  if output="$("${helm_bin}" template ome-resources "${chart_dir}" \
+    --namespace ome \
+    --show-only templates/ome-controller/configmap.yaml "$@" 2>&1)"; then
+    fail "rendering with $* succeeded, expected: ${message}"
+  fi
+  grep -Fq -- "${message}" <<<"${output}" ||
+    fail "rendering with $* did not report \"${message}\": ${output}"
+}
+for key in usernames groups; do
+  identity_key="ome.controller.inferenceReplica.controllerIdentity.${key}"
+  empty_config="$("${helm_bin}" template ome-resources "${chart_dir}" \
+    --namespace ome \
+    --set "${identity_key}=" \
+    --show-only templates/ome-controller/configmap.yaml)"
+  [[ "$(inference_replica_identity "${empty_config}")" == "${default_identity}" ]] ||
+    fail "an empty scalar controllerIdentity.${key} did not render as an empty list"
+
+  render_fails_with "${identity_key} must be a list of names or a single name" \
+    --set "${identity_key}=123"
+  render_fails_with "${identity_key} must be a non-blank name without surrounding whitespace" \
+    --set-json "${identity_key}=\" name-a\""
+  render_fails_with "${identity_key}[1] must be a name, got " \
+    --set-json "${identity_key}=[\"name-a\",123]"
+  render_fails_with "${identity_key}[1] must be a non-blank name without surrounding whitespace" \
+    --set-json "${identity_key}=[\"name-a\",\" name-b\"]"
+  render_fails_with "${identity_key}[1] must be a non-blank name without surrounding whitespace" \
+    --set-json "${identity_key}=[\"name-a\",\"\"]"
+done
+
+# A null override removes the key; a template that reads values through the
+# removed key fails to render, and one that renders must still list the
+# controller ServiceAccount.
+for cleared in ome.controller.inferenceReplica ome.controller.inferenceReplica.controllerIdentity; do
+  cleared_config="$("${helm_bin}" template ome-resources "${chart_dir}" \
+    --namespace ome \
+    --set "${cleared}=null" \
+    --show-only templates/ome-controller/configmap.yaml)"
+  [[ "$(inference_replica_identity "${cleared_config}")" == "${default_identity}" ]] ||
+    fail "clearing ${cleared} did not keep the controller ServiceAccount"
+done
+
+# validating_webhook <rendered> <name>: the ValidatingWebhookConfiguration
+# called <name>, empty when it is not rendered.
+validating_webhook() {
+  awk -v name="$2" '
+    function flush() {
+      if (kind && named) printf "%s", doc
+      doc = ""
+      kind = named = 0
+    }
+    /^---/ { flush(); next }
+    { doc = doc $0 "\n" }
+    /^kind: ValidatingWebhookConfiguration$/ { kind = 1 }
+    $0 == "  name: " name { named = 1 }
+    END { flush() }
+  ' <<<"$1"
+}
+webhook_paths() {
+  awk '$1 == "path:" { print $2 }' <<<"$1"
+}
+webhook_ca_source() {
+  awk '$1 == "cert-manager.io/inject-ca-from:" { print $2 }' <<<"$1"
+}
+# The manager serves InferenceReplica admission on every multicluster role, so
+# the webhook configuration renders on every role too.
+inference_replica_webhook_path='/validate-ome-io-v1beta1-inferencereplica'
+[[ "$(webhook_paths "$(validating_webhook "${rendered}" inferencereplica.ome.io)")" == "${inference_replica_webhook_path}" ]] ||
+  fail "ValidatingWebhookConfiguration inferencereplica.ome.io was not rendered with path ${inference_replica_webhook_path}"
+control_plane_rendered="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set ome.multicluster.role=control-plane)"
+[[ "$(webhook_paths "$(validating_webhook "${control_plane_rendered}" inferencereplica.ome.io)")" == "${inference_replica_webhook_path}" ]] ||
+  fail "ValidatingWebhookConfiguration inferencereplica.ome.io was not rendered under the control-plane role"
+# The InferenceService validator renders by default and is skipped under the
+# control-plane role, which shows the role override reached the render.
+[[ -n "$(webhook_paths "$(validating_webhook "${rendered}" inferenceservice.ome.io)")" ]] ||
+  fail "ValidatingWebhookConfiguration inferenceservice.ome.io was not rendered by default"
+[[ -z "$(webhook_paths "$(validating_webhook "${control_plane_rendered}" inferenceservice.ome.io)")" ]] ||
+  fail "ValidatingWebhookConfiguration inferenceservice.ome.io was rendered under the control-plane role"
+
+# cert-manager injects the CA bundle from the Certificate in the release
+# namespace. Naming any other namespace leaves the bundle empty, and the
+# fail-closed webhook then rejects every write.
+for namespace in ome team-a; do
+  namespace_webhook="$(validating_webhook "$("${helm_bin}" template ome-resources "${chart_dir}" \
+    --namespace "${namespace}" \
+    --show-only templates/ome-controller/webhooks/inferencereplicavalidator.yaml)" inferencereplica.ome.io)"
+  [[ "$(webhook_ca_source "${namespace_webhook}")" == "${namespace}/serving-cert" ]] ||
+    fail "ValidatingWebhookConfiguration inferencereplica.ome.io in release namespace ${namespace} does not inject the CA from ${namespace}/serving-cert"
+done
+
 min_ready_zero="$("${helm_bin}" template ome-resources "${chart_dir}" \
   --namespace ome \
   --set ome.controller.minReadySeconds=0 \

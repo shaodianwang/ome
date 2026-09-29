@@ -10,10 +10,14 @@ import (
 
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 	"github.com/ome-projects/ome/tests/integration/framework"
@@ -128,6 +132,29 @@ var _ = ginkgo.Describe("util.SeedDefaultConfigMaps", func() {
 				"decoder": {"type": "SurgeThenDrain", "maxSurge": "25%", "maxUnavailable": "25%"}
 			}
 		}`))
+		Expect(cm.Data).To(HaveKeyWithValue(controllerconfig.InferenceReplicaConfigName, util.InferenceReplicaConfigJSON()))
+	})
+
+	// The InferenceReplica webhook admits spec writes on projected replicas only
+	// from the controller identity, and the in-process manager writes as the
+	// envtest admin (system:masters) or the kind admin (kubeadm:cluster-admins).
+	ginkgo.It("seeds an inferenceReplica block the webhook loader reads as the harness admin identities", func() {
+		clientset := fake.NewSimpleClientset(&corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: constants.InferenceServiceConfigMapName, Namespace: constants.OMENamespace},
+			Data:       map[string]string{controllerconfig.InferenceReplicaConfigName: util.InferenceReplicaConfigJSON()},
+		})
+		cfg, err := controllerconfig.NewInferenceReplicaConfigCached(nil, clientset)
+		Expect(err).NotTo(HaveOccurred())
+		identity := cfg.Identity()
+		Expect(identity.Matches(authenticationv1.UserInfo{
+			Username: "admin", Groups: []string{"system:masters", "system:authenticated"},
+		})).To(BeTrue(), "the envtest admin")
+		Expect(identity.Matches(authenticationv1.UserInfo{
+			Username: "kubernetes-admin", Groups: []string{"kubeadm:cluster-admins", "system:authenticated"},
+		})).To(BeTrue(), "the kind admin")
+		Expect(identity.Matches(authenticationv1.UserInfo{
+			Username: "example-user", Groups: []string{"system:authenticated"},
+		})).To(BeFalse(), "an ordinary authenticated caller")
 	})
 })
 

@@ -52,8 +52,9 @@ func mustSecondaryReady(t *testing.T, ctx context.Context, reads client.Reader, 
 // ir builds an InferenceReplica whose UpdateRevision names the per-Component
 // canary target observed by Dispatch.
 func ir(ns, isvc string, comp v1beta1.ComponentType, hash string) *v1beta1.InferenceReplica {
+	name := isvc + "-" + string(comp)
 	r := &v1beta1.InferenceReplica{ObjectMeta: metav1.ObjectMeta{
-		Namespace: ns, Name: isvc + "-" + string(comp),
+		Namespace: ns, Name: name, UID: canaryIRUID(name),
 	}}
 	r.Spec.Runners = []v1beta1.Runner{{Name: v1beta1.RunnerNameDefault, Size: 1}}
 	r.Status.UpdateRevision = isvc + "-" + string(comp) + "-" + hash
@@ -300,12 +301,20 @@ func canaryScheme(t *testing.T) *runtime.Scheme {
 	return s
 }
 
+// canaryIRUID is the UID a fixture InferenceReplica carries, so a revision can
+// name that replica as its controller.
+func canaryIRUID(name string) types.UID {
+	return types.UID(name + "-uid")
+}
+
 // canaryControllerRevision builds a ControllerRevision carrying the OMENative
 // revision label set the rollback-target lookup selects on, named like a real
 // per-(ISVC, Component) CR (`<isvc>-<component>-<hash>`) with a monotonic
-// .Revision. Seeded directly into the fake client so the rollback signal has
-// revision history to resolve the stable target from.
+// .Revision and controlled by the Component's replica. Seeded directly into
+// the fake client so the rollback signal has revision history to resolve the
+// stable target from.
 func canaryControllerRevision(ns, isvc, comp, hash string, rev int64) *appsv1.ControllerRevision {
+	replica := &metav1.ObjectMeta{Name: isvc + "-" + comp, UID: canaryIRUID(isvc + "-" + comp)}
 	return &appsv1.ControllerRevision{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: ns,
@@ -314,6 +323,9 @@ func canaryControllerRevision(ns, isvc, comp, hash string, rev int64) *appsv1.Co
 				constants.InferenceServicePodLabelKey: isvc,
 				constants.OMEComponentLabel:           comp,
 				query.LabelManagedBy:                  query.ManagedByOMENative,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(replica, v1beta1.SchemeGroupVersion.WithKind("InferenceReplica")),
 			},
 		},
 		Revision: rev,
@@ -491,7 +503,7 @@ func TestDispatch_HoldsUntilIRIdentifiesCanaryTarget(t *testing.T) {
 	isvc.Spec.Engine = &v1beta1.EngineSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n4}}
 	pinActiveRun(isvc)
 
-	engineIR := &v1beta1.InferenceReplica{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "target-lag-engine", Generation: 2}}
+	engineIR := &v1beta1.InferenceReplica{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "target-lag-engine", UID: canaryIRUID("target-lag-engine"), Generation: 2}}
 	engineIR.Spec.Runners = []v1beta1.Runner{{Name: v1beta1.RunnerNameDefault, Size: 1}}
 	engineIR.Status.CurrentRevision = "target-lag-engine-stable"
 	engineIR.Status.UpdateRevision = "target-lag-engine-stable"
@@ -574,7 +586,7 @@ func TestDispatch_ArmsFromLivePodsWhenCurrentRevisionUnpromoted(t *testing.T) {
 	isvc.Spec.Engine = &v1beta1.EngineSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n4}}
 	pinActiveRun(isvc)
 
-	engineIR := &v1beta1.InferenceReplica{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "unpromoted-engine", Generation: 2}}
+	engineIR := &v1beta1.InferenceReplica{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "unpromoted-engine", UID: canaryIRUID("unpromoted-engine"), Generation: 2}}
 	engineIR.Spec.Runners = []v1beta1.Runner{{Name: v1beta1.RunnerNameDefault, Size: 1}}
 	engineIR.Status.CurrentRevision = ""
 	engineIR.Status.UpdateRevision = "unpromoted-engine-target"
@@ -1126,7 +1138,7 @@ func TestDispatch_ServicesHashAndRollbackWarning(t *testing.T) {
 	pinActiveRun(isvc)
 	// IR names the canary target (its UpdateRevision) — Dispatch must source the
 	// hash from here, not the (stale) ISVC aggregate.
-	ir := &v1beta1.InferenceReplica{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "d1-engine"}}
+	ir := &v1beta1.InferenceReplica{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "d1-engine", UID: canaryIRUID("d1-engine")}}
 	ir.Spec.Runners = []v1beta1.Runner{{Name: v1beta1.RunnerNameDefault, Size: 1}}
 	ir.Status.UpdateRevision = "d1-engine-newhash"
 	ir.Status.CurrentRevision = "d1-engine-stable0" // the stable revision rollback reverts to
@@ -1220,7 +1232,7 @@ func TestDispatch_PDRouterRollbackTargetsStable(t *testing.T) {
 		{Component: v1beta1.DecoderComponent, Revision: "decNew", StableRevision: "decStable"},
 	}
 	// Router IR fully rolled to canary: CurrentRevision == UpdateRevision == canary CR.
-	rtrIR := &v1beta1.InferenceReplica{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "pd-router"}}
+	rtrIR := &v1beta1.InferenceReplica{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "pd-router", UID: canaryIRUID("pd-router")}}
 	rtrIR.Status.UpdateRevision = "pd-router-rtrNew"
 	rtrIR.Status.CurrentRevision = "pd-router-rtrNew"
 	engIR := ir(ns, "pd", v1beta1.EngineComponent, "engNew")
@@ -1393,6 +1405,7 @@ func TestDispatch_RollbackTargetsPersistedStableAfterRetarget(t *testing.T) {
 func TestStableRevisionName_PersistedIdentity(t *testing.T) {
 	ns := "default"
 	isvc := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "sr1"}}
+	replica := ir(ns, "sr1", v1beta1.EngineComponent, "revC")
 	c := fake.NewClientBuilder().WithScheme(canaryScheme(t)).WithRuntimeObjects(
 		canaryControllerRevision(ns, "sr1", "engine", "revA", 1),
 		canaryControllerRevision(ns, "sr1", "engine", "revB", 2),
@@ -1400,17 +1413,64 @@ func TestStableRevisionName_PersistedIdentity(t *testing.T) {
 	).Build()
 	ctx := context.Background()
 
-	got, err := stableRevisionName(ctx, c, isvc, v1beta1.EngineComponent, "revA")
+	got, err := stableRevisionName(ctx, c, isvc, v1beta1.EngineComponent, replica, "revA")
 	if err != nil || got != "sr1-engine-revA" {
 		t.Fatalf("persisted identity must resolve exactly: got %q err=%v", got, err)
 	}
-	got, err = stableRevisionName(ctx, c, isvc, v1beta1.EngineComponent, "")
+	got, err = stableRevisionName(ctx, c, isvc, v1beta1.EngineComponent, replica, "")
 	if err != nil || got != "" {
 		t.Fatalf("no persisted identity must not guess: got %q err=%v", got, err)
 	}
-	got, err = stableRevisionName(ctx, c, isvc, v1beta1.EngineComponent, "gone0000")
+	got, err = stableRevisionName(ctx, c, isvc, v1beta1.EngineComponent, replica, "gone0000")
 	if err != nil || got != "" {
 		t.Fatalf("persisted identity not retained → no target (no guessing), got %q err=%v", got, err)
+	}
+}
+
+// TestRollbackSignal_PinsOnlyARevisionTheReplicaControls pins the ownership
+// filter on the rollback target: the revision labels also match revisions
+// another object controls, and the replica refuses a rollback target it does
+// not control, so only a revision the replica controls may be pinned.
+func TestRollbackSignal_PinsOnlyARevisionTheReplicaControls(t *testing.T) {
+	ns := "default"
+	isvc := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "sr1"}}
+	own := canaryControllerRevision(ns, "sr1", "engine", "revA", 2)
+	// Same labels and hash as the replica's own revision, controlled by another
+	// replica. It lists ahead of the replica's own revision, so the lookup must
+	// skip it rather than take the first match.
+	foreign := canaryControllerRevision(ns, "sr1", "engine", "revA", 1)
+	foreign.Name = "sr1-engine-copy-revA"
+	foreign.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(
+		&metav1.ObjectMeta{Name: "pool-a", UID: canaryIRUID("pool-a")},
+		v1beta1.SchemeGroupVersion.WithKind("InferenceReplica"),
+	)}
+
+	// pinned runs the rollback signal against the given revisions and returns
+	// the replica's RollbackToRevision, "" when unset.
+	pinned := func(t *testing.T, revisions ...runtime.Object) string {
+		t.Helper()
+		replica := ir(ns, "sr1", v1beta1.EngineComponent, "revB")
+		c := fake.NewClientBuilder().WithScheme(canaryScheme(t)).
+			WithRuntimeObjects(append([]runtime.Object{isvc, replica}, revisions...)...).Build()
+		ctx := context.Background()
+		if _, err := reconcileRollbackSignal(ctx, c, c, isvc, v1beta1.EngineComponent, "revA", true); err != nil {
+			t.Fatal(err)
+		}
+		got := &v1beta1.InferenceReplica{}
+		if err := c.Get(ctx, types.NamespacedName{Namespace: ns, Name: replica.Name}, got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Spec.Pacing == nil || got.Spec.Pacing.RollbackToRevision == nil {
+			return ""
+		}
+		return *got.Spec.Pacing.RollbackToRevision
+	}
+
+	if got := pinned(t, foreign, own); got != own.Name {
+		t.Fatalf("rollback must pin the revision the replica controls (%s), got %q", own.Name, got)
+	}
+	if got := pinned(t, foreign); got != "" {
+		t.Fatalf("a revision another object controls must not be pinned, got %q", got)
 	}
 }
 
@@ -1453,7 +1513,7 @@ func TestComponentStableRevisionHashPrecedence(t *testing.T) {
 func TestRollbackSignal_UnknownStableKeepsTarget(t *testing.T) {
 	ns := "default"
 	isvc := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "d1"}}
-	rbIR := &v1beta1.InferenceReplica{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "d1-engine"}}
+	rbIR := &v1beta1.InferenceReplica{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "d1-engine", UID: canaryIRUID("d1-engine")}}
 	rbIR.Status.UpdateRevision = "d1-engine-newhash"
 	hold := "d1-engine-stable0"
 	rbIR.Spec.Pacing = &v1beta1.InferenceReplicaPacing{RollbackToRevision: &hold}

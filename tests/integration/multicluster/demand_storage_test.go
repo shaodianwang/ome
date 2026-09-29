@@ -89,7 +89,7 @@ func TestDemandContractStorage(t *testing.T) {
 						policy = nil
 					}
 					ir := &v1beta1.InferenceReplica{ObjectMeta: metav1.ObjectMeta{Name: tt.name, Namespace: "team-a"}, Spec: v1beta1.InferenceReplicaSpec{
-						ParentRef: v1beta1.ParentReference{Name: "service"}, Component: v1beta1.EngineComponent, PlacementExecution: policy,
+						ParentRef: &v1beta1.ParentReference{Name: "service"}, Component: v1beta1.EngineComponent, PlacementExecution: policy,
 						Runners: []v1beta1.Runner{{Name: v1beta1.RunnerNameDefault, Size: 1, Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "runner", Image: "example.com/serving:v1"}}}}}},
 					}}
 					err := cl.Create(t.Context(), ir)

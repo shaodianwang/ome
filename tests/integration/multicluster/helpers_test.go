@@ -151,7 +151,7 @@ func admitDerivedOn(member cluster, namespace, name string) {
 			// Minimal valid spec so the Create passes CRD schema validation on
 			// bare members (the sim path has no manager to pre-create the IR).
 			Spec: v1beta1.InferenceReplicaSpec{
-				ParentRef: v1beta1.ParentReference{Name: name},
+				ParentRef: &v1beta1.ParentReference{Name: name},
 				Component: v1beta1.EngineComponent,
 				Runners: []v1beta1.Runner{{
 					Name: v1beta1.RunnerNameDefault,

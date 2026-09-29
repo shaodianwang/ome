@@ -39,9 +39,10 @@ import (
 )
 
 // buildRemoveInstance must Forget the SAME expectations bucket the
-// workload ops populate: Key.OwnerName is the parent ISVC name
-// (buildKey), not the IR name. Keyed on the IR name the Forget deletes
-// nothing, so a reused index inherits stale counters until the TTL.
+// workload ops populate: Key.OwnerName is ir.NamePrefix() (the parent
+// InferenceService name for a projected replica). Keyed on the IR name,
+// a projected replica's Forget deletes nothing, so a reused index
+// inherits stale counters until the TTL.
 func TestBuildRemoveInstance_ForgetsParentKeyedExpectations(t *testing.T) {
 	g := gomega.NewWithT(t)
 	ir := baselineIR("llama-engine", "default", 1)
@@ -2608,5 +2609,55 @@ func TestPlacementReplicaLimit(t *testing.T) {
 				t.Errorf("scale request mutated:\n%s", diff)
 			}
 		})
+	}
+}
+
+func TestStandaloneReplicaDerivesNamesFromItsOwnName(t *testing.T) {
+	ir := &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "team-a"},
+		Spec:       v1beta1.InferenceReplicaSpec{Component: v1beta1.EngineComponent},
+	}
+
+	key := buildKey(ir)
+	if key.OwnerName != "pool-a" {
+		t.Fatalf("Key.OwnerName = %q, want pool-a", key.OwnerName)
+	}
+	if got := key.SelectorLabels[constants.InferenceServicePodLabelKey]; got != "pool-a" {
+		t.Fatalf("selector label = %q, want pool-a", got)
+	}
+
+	svc := buildHeadlessServiceSpec(ir)
+	if svc.Name != "pool-a-engine-headless" {
+		t.Fatalf("headless Service name = %q, want pool-a-engine-headless", svc.Name)
+	}
+	if got := svc.Selector[constants.InferenceServicePodLabelKey]; got != "pool-a" {
+		t.Fatalf("headless Service selector = %q, want pool-a", got)
+	}
+
+	rk := irRevisionKey(ir)
+	if rk.Name != "pool-a-engine" {
+		t.Fatalf("revision key name = %q, want pool-a-engine", rk.Name)
+	}
+	if got := rk.Labels[constants.InferenceServicePodLabelKey]; got != "pool-a" {
+		t.Fatalf("revision key label = %q, want pool-a", got)
+	}
+}
+
+func TestProjectedReplicaDerivesNamesFromItsParent(t *testing.T) {
+	ir := &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Name: "svc-engine", Namespace: "team-a"},
+		Spec: v1beta1.InferenceReplicaSpec{
+			ParentRef: &v1beta1.ParentReference{Name: "svc"},
+			Component: v1beta1.EngineComponent,
+		},
+	}
+	if key := buildKey(ir); key.OwnerName != "svc" {
+		t.Fatalf("Key.OwnerName = %q, want svc", key.OwnerName)
+	}
+	if svc := buildHeadlessServiceSpec(ir); svc.Name != "svc-engine-headless" {
+		t.Fatalf("headless Service name = %q, want svc-engine-headless", svc.Name)
+	}
+	if rk := irRevisionKey(ir); rk.Name != "svc-engine" {
+		t.Fatalf("revision key name = %q, want svc-engine", rk.Name)
 	}
 }

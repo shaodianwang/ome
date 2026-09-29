@@ -7,6 +7,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -24,19 +26,19 @@ import (
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
-// irKind is the Kind string on the controller owner reference the
-// projector stamps on every Pod the IR-managed path creates. The pod
-// event handler uses it to enqueue the owning InferenceReplica.
+// irKind is the InferenceReplica Kind as it appears in owner references
+// and in the owner-kind label of a provisioned TPU slice.
 const irKind = "InferenceReplica"
 
 // perRevisionServiceInfix is the segment PerRevisionServiceName inserts
 // between the <isvc>-<component> prefix and the revision hash suffix
 // (`<isvc>-<component>-rev-<hash>`). The EndpointSlice mapper strips it
-// to recover the owning IR name.
+// to recover the projected replica name; the InferenceService owns the
+// per-revision Services, so their owner reference does not name a replica.
 const perRevisionServiceInfix = "-rev-"
 
 // headlessServiceSuffix is the trailing segment of the per-Component
-// headless Service name (`<isvc>-<component>-headless`).
+// headless Service name (`<namePrefix>-<component>-headless`).
 const headlessServiceSuffix = "-headless"
 
 // podGroupPredicate ignores gang-scheduler status churn while preserving
@@ -75,53 +77,51 @@ func podGroupVerdictChanged(oldObj, newObj client.Object) bool {
 	return before.Status.Phase != after.Status.Phase
 }
 
-// EndpointSliceToIR maps an EndpointSlice for an OMENative drain Service
-// (the per-Component headless Service or a per-revision routed Service)
-// back to its owning InferenceReplica reconcile key.
-//
-// The SurgeThenDrain / RecreatePod drain step gates old-pod deletion on
-// drain.IsPodDrained, which reads these Services' EndpointSlices. Without
-// this watch the IR controller only re-observes kube-proxy convergence on
-// the workloadops.UpdateRequeueInterval timer tick — turning every drain
-// into a fixed poll-interval wait instead of an event-driven step. The
-// ISVC controller already watches EndpointSlices (EndpointSliceToISVC),
-// but that enqueues the ISVC, not the IR that actually runs the drain.
-//
-// Returns an empty slice for any slice that doesn't target an
-// OMENative drain Service — the watch is unfiltered, so the mapper does
-// all the filtering by name.
-func EndpointSliceToIR(ctx context.Context, obj client.Object) []reconcile.Request {
+// endpointSliceToIR maps an EndpointSlice event onto the InferenceReplica
+// whose drain Service the slice belongs to. A Service this controller
+// created names the replica as its controller owner, which is authoritative
+// for every naming form; the owner is matched by group and kind, so a
+// same-kind owner from another API group does not count. Per-revision
+// Services are owned by the InferenceService instead, so they fall back to
+// the `<namePrefix>-<component>` name parse, which is the replica name for a
+// projected replica. Slices of any other Service map to nothing.
+func (r *Reconciler) endpointSliceToIR(ctx context.Context, obj client.Object) []reconcile.Request {
 	slice, ok := obj.(*discoveryv1.EndpointSlice)
 	if !ok {
 		return nil
 	}
 	serviceName := slice.Labels[discoveryv1.LabelServiceName]
+	if serviceName == "" {
+		return nil
+	}
+	svc := &corev1.Service{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: slice.Namespace, Name: serviceName}, svc); err == nil {
+		if ref := metav1.GetControllerOf(svc); ref != nil &&
+			schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind).GroupKind() == irGVK.GroupKind() {
+			return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: slice.Namespace, Name: ref.Name}}}
+		}
+	}
 	irName, ok := irNameFromDrainServiceName(serviceName)
 	if !ok {
 		return nil
 	}
-	return []reconcile.Request{{
-		NamespacedName: types.NamespacedName{
-			Namespace: slice.Namespace,
-			Name:      irName,
-		},
-	}}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: slice.Namespace, Name: irName}}}
 }
 
 // irNameFromDrainServiceName parses an OMENative drain Service name into
-// the owning IR name (`<isvc>-<component>`), or ok=false when the name
-// isn't a recognized OMENative drain Service.
+// the projected replica name (`<inferenceservice>-<component>`), or
+// ok=false when the name isn't a recognized OMENative drain Service.
 //
 // Two shapes are recognized (query.HeadlessServiceName /
 // query.PerRevisionServiceName):
-//   - `<isvc>-<component>-headless`
-//   - `<isvc>-<component>-rev-<hash>`
+//   - `<inferenceservice>-<component>-headless`
+//   - `<inferenceservice>-<component>-rev-<hash>`
 //
-// Both reduce to `<isvc>-<component>`, which is exactly the IR name
-// (irprojector.InferenceReplicaName is `<isvc>-<component>`). The
-// `-<component>` suffix is matched against the known component-type set
-// so an arbitrary `-headless` Service doesn't masquerade as
-// OMENative-owned.
+// The parse names the projected replica (irprojector.InferenceReplicaName);
+// a standalone replica is resolved through its headless Service's owner
+// reference instead. The `-<component>` suffix is matched against the known
+// component-type set so an arbitrary `-headless` Service doesn't masquerade
+// as OMENative-owned.
 func irNameFromDrainServiceName(name string) (string, bool) {
 	if name == "" {
 		return "", false
@@ -131,10 +131,11 @@ func irNameFromDrainServiceName(name string) (string, bool) {
 	case strings.HasSuffix(name, headlessServiceSuffix):
 		prefix = strings.TrimSuffix(name, headlessServiceSuffix)
 	case strings.Contains(name, perRevisionServiceInfix):
-		// Revision hashes are hex (no `-rev-` token), so the FIRST
-		// occurrence bounds the <isvc>-<component> prefix. The
-		// component-suffix match below rejects any false positive.
-		prefix = name[:strings.Index(name, perRevisionServiceInfix)]
+		// Revision hashes are hex (no `-rev-` token) while an
+		// InferenceService name may contain one, so the LAST occurrence
+		// bounds the <isvc>-<component> prefix. The component-suffix
+		// match below rejects any false positive.
+		prefix = name[:strings.LastIndex(name, perRevisionServiceInfix)]
 	default:
 		return "", false
 	}
@@ -147,9 +148,9 @@ func irNameFromDrainServiceName(name string) (string, bool) {
 		if !strings.HasSuffix(prefix, suffix) {
 			continue
 		}
-		// prefix is already `<isvc>-<component>` == the IR name; the
-		// component-suffix match only validates it's OMENative-owned and
-		// guards against an empty isvc segment.
+		// prefix is already `<inferenceservice>-<component>`, the projected
+		// replica name; the component-suffix match only validates it's
+		// OMENative-owned and guards against an empty prefix segment.
 		if strings.TrimSuffix(prefix, suffix) == "" {
 			return "", false
 		}
@@ -472,10 +473,10 @@ func (h *podEventHandler) Generic(ctx context.Context, evt event.TypedGenericEve
 
 // observe drives ObservedCreate / ObservedDelete on the expectations
 // cache, keyed identically to the dispatcher's ExpectCreates /
-// ExpectDeletes: (namespace, parent-ISVC name, component, instance).
-// The parent-ISVC name is the pod's ome.io/inferenceservice label, which
-// equals workload.ReconcileInput.Key.OwnerName on the IR path
-// (inferencereplica/convert.go sets OwnerName = ParentRef.Name).
+// ExpectDeletes: (namespace, name prefix, component, instance). The
+// name prefix is the pod's ome.io/inferenceservice label, which equals
+// workload.ReconcileInput.Key.OwnerName on the IR path
+// (inferencereplica/convert.go sets OwnerName = ir.NamePrefix()).
 func (h *podEventHandler) observe(pod *corev1.Pod, isAdd bool) {
 	isvc, component, idx, ok := workloadKeyFromPod(pod)
 	if !ok {
@@ -488,17 +489,17 @@ func (h *podEventHandler) observe(pod *corev1.Pod, isAdd bool) {
 	h.expectations.ObservedDelete(pod.Namespace, isvc, component, idx)
 }
 
-// enqueueOwner pushes a reconcile request for the InferenceReplica
-// controller-ref on the pod. Pods the IR-managed path creates carry the
-// IR as their controller owner; pods owned by something else (e.g. the
-// legacy ISVC-direct path) are skipped — observe already ran and is a
-// harmless no-op against this controller's cache.
+// enqueueOwner pushes a reconcile request for the InferenceReplica that
+// controls the pod, matched by group and kind. Pods under any other
+// controller, including a same-kind one from another API group, are
+// skipped; for creates and deletes observe has already run, and is a no-op
+// against this controller's cache.
 func (h *podEventHandler) enqueueOwner(obj client.Object, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
 	for _, ref := range obj.GetOwnerReferences() {
 		if ref.Controller == nil || !*ref.Controller {
 			continue
 		}
-		if ref.Kind != irKind {
+		if schema.FromAPIVersionAndKind(ref.APIVersion, ref.Kind).GroupKind() != irGVK.GroupKind() {
 			continue
 		}
 		q.Add(reconcile.Request{
@@ -511,7 +512,7 @@ func (h *podEventHandler) enqueueOwner(obj client.Object, q workqueue.TypedRateL
 	}
 }
 
-// workloadKeyFromPod pulls (parent-ISVC name, component, instanceIdx)
+// workloadKeyFromPod pulls (name prefix, component, instanceIdx)
 // from pod labels — the tuple the workload Expectations cache keys on.
 // Returns ok=false when any required label is missing/unparsable.
 func workloadKeyFromPod(pod *corev1.Pod) (string, workloadtypes.ComponentType, int32, bool) {

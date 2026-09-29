@@ -10,14 +10,13 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
 )
 
-// componentIRStatuses fetches the authoritative InferenceReplica status for
-// every declared component of isvc via the given workload-cluster reader. The
-// derived ISVC and its per-component InferenceReplicas live on the same workload
-// cluster, so `reads` must be that cluster's client. A missing IR yields a nil
-// map entry, which the predicates treat as "no status yet" — the same way the
-// pre-migration code treated an absent ISVC status copy. The authoritative IR
-// status is the source of truth; the ISVC's mirrored LifecycleStatus is no
-// longer read.
+// componentIRStatuses fetches the InferenceReplica status for every declared
+// component of isvc via the given workload-cluster reader. The derived ISVC
+// and its per-component InferenceReplicas live on the same workload cluster,
+// so `reads` must be that cluster's client. It reads the replica, not the
+// ISVC's mirrored component status, because only the replica carries the
+// per-Instance rows the admission predicates inspect. A missing IR yields a
+// nil map entry, which the predicates treat as "no status yet".
 func componentIRStatuses(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService) (map[v1beta1.ComponentType]*v1beta1.InferenceReplicaStatus, error) {
 	out := make(map[v1beta1.ComponentType]*v1beta1.InferenceReplicaStatus)
 	for _, c := range declaredComponents(isvc) {

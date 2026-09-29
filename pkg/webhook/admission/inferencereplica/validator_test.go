@@ -45,17 +45,22 @@ func encode(t *testing.T, obj *v1beta1.InferenceReplica) []byte {
 	return raw
 }
 
-// baselineIR returns a syntactically-valid InferenceReplica suitable for
-// cloning into Create / Update fixtures.
+// baselineIR returns a syntactically-valid projected InferenceReplica
+// (InferenceService controller owner reference plus parentRef) suitable
+// for cloning into Create / Update fixtures.
 func baselineIR(annotations map[string]string) *v1beta1.InferenceReplica {
 	return &v1beta1.InferenceReplica{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        "llama-engine",
 			Namespace:   "prod-models",
 			Annotations: annotations,
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: v1beta1.SchemeGroupVersion.String(), Kind: "InferenceService",
+				Name: "llama", UID: "isvc-uid", Controller: ptr.To(true),
+			}},
 		},
 		Spec: v1beta1.InferenceReplicaSpec{
-			ParentRef: v1beta1.ParentReference{
+			ParentRef: &v1beta1.ParentReference{
 				Name: "llama",
 			},
 			Component: v1beta1.EngineComponent,
@@ -268,12 +273,14 @@ func withReplicasAndAutoscaler(ir *v1beta1.InferenceReplica, n int32, as *v1beta
 	return out
 }
 
-// TestHandle covers every gate in pkg/webhook/admission/inferencereplica.
+// TestHandle covers every gate with no controller identity configured,
+// where the controller-write annotation marks a controller write;
+// baselineIR is a projected replica.
 //
 // Each row builds an admission request from `req(t)`, runs Handle, and
-// asserts Allowed plus optional rejection substring(s). Cases not built
-// via createReq/updateReq use the inline `req` builder; that's how
-// Delete and the malformed-body cases stay in the same table.
+// asserts Allowed plus optional substring(s) the message must contain.
+// Cases not built via createReq/updateReq use the inline `req` builder;
+// that's how Delete and the malformed-body cases stay in the same table.
 func TestHandle(t *testing.T) {
 	wcw := withControllerWrite() // baseline annotation; "controller write"
 
@@ -287,7 +294,7 @@ func TestHandle(t *testing.T) {
 			name:         "create without annotation → denied",
 			req:          func(t *testing.T) admission.Request { return createReq(t, baselineIR(nil)) },
 			wantAllowed:  false,
-			wantContains: []string{"controller-only resource", constants.InferenceReplicaControllerWriteAnnotationKey},
+			wantContains: []string{"is projected by InferenceService prod-models/llama", "rejects a direct CREATE", constants.InferenceReplicaControllerWriteAnnotationKey, "edit the InferenceService instead"},
 		},
 		{
 			name:        "create with empty annotation map → denied (same as nil)",
@@ -309,11 +316,11 @@ func TestHandle(t *testing.T) {
 			wantAllowed: true,
 		},
 		{
-			name: "update dropping annotation → denied",
+			name: "update dropping annotation (metadata only) → allowed",
 			req: func(t *testing.T) admission.Request {
 				return updateReq(t, baselineIR(wcw), baselineIR(nil))
 			},
-			wantAllowed: false,
+			wantAllowed: true,
 		},
 		{
 			name: "update with spec change AND dropped annotation → denied",
@@ -375,11 +382,8 @@ func TestHandle(t *testing.T) {
 			},
 			wantAllowed: false,
 		},
-		// IR-side defense-in-depth on spec.autoscaler shape.
-		// The IR webhook does NOT block external writes
-		// to spec.autoscaler (the /scale subresource only mutates
-		// spec.replicas), but any successful write must carry a
-		// shape-valid Autoscaler block.
+		// The spec.autoscaler shape check holds for every writer: any
+		// admitted write must carry a shape-valid Autoscaler block.
 		{
 			name: "create with valid hpa autoscaler → allowed",
 			req: func(t *testing.T) admission.Request {
@@ -471,12 +475,10 @@ func TestHandle(t *testing.T) {
 			},
 			wantAllowed: true,
 		},
-		// The immutability gate runs BEFORE the controller-write
-		// annotation gate. A misbehaving controller (stale ISVC cache)
-		// that stamps the annotation MUST NOT also be able to flip
-		// spec.parentRef.UID to the wrong parent or move the IR between
-		// Component slots: for an annotation-true + UID-rewrite payload
-		// the immutability error wins.
+		// Immutability is decided before ownership: even a controller
+		// write may not repoint spec.parentRef or move the replica
+		// between Component slots, so for an annotated rewrite the
+		// immutability error wins.
 		{
 			name: "update with annotation, same parentRef → allowed (baseline)",
 			req: func(t *testing.T) admission.Request {
@@ -502,12 +504,11 @@ func TestHandle(t *testing.T) {
 			wantContains: []string{"spec.component is immutable"},
 		},
 		{
-			name: "update without annotation, same parentRef → denied (annotation gate)",
+			name: "update without annotation, same parentRef (metadata only) → allowed",
 			req: func(t *testing.T) admission.Request {
 				return updateReq(t, baselineIR(wcw), baselineIR(nil))
 			},
-			wantAllowed:  false,
-			wantContains: []string{"controller-only resource"},
+			wantAllowed: true,
 		},
 		{
 			name: "update without annotation, different parentRef.Name → denied (immutability fires first)",
@@ -687,39 +688,43 @@ func TestHandle(t *testing.T) {
 				`volumeMount "dshm" has no matching volume`,
 			},
 		},
-		// Finalizer-only-update exemption: a patch that changes nothing
-		// but metadata.finalizers is admitted before the immutability and
-		// controller-write gates — denying it would wedge teardown behind
-		// this fail-closed webhook. Combining a finalizer change with ANY
-		// other edit falls through to the normal gates.
+		// Metadata-only updates: an update that keeps the spec and installs
+		// no controller owner reference is admitted without the ownership
+		// gates, so a finalizer change never wedges teardown behind this
+		// fail-closed webhook. A finalizer change combined with a spec edit,
+		// a parentRef change or a new controller owner reference still meets
+		// the gates.
 		{
-			name: "finalizer add without annotation → allowed (exemption)",
+			name: "finalizer add without annotation → allowed (metadata only)",
 			req: func(t *testing.T) admission.Request {
 				old := baselineIR(nil)
 				return updateReq(t, old, withFinalizers(old, "ome.io/ir-teardown"))
 			},
-			wantAllowed: true,
+			wantAllowed:  true,
+			wantContains: []string{"metadata-only update"},
 		},
 		{
-			name: "finalizer remove without annotation → allowed (exemption)",
+			name: "finalizer remove without annotation → allowed (metadata only)",
 			req: func(t *testing.T) admission.Request {
 				old := withFinalizers(baselineIR(nil), "ome.io/ir-teardown")
 				return updateReq(t, old, withFinalizers(old))
 			},
-			wantAllowed: true,
+			wantAllowed:  true,
+			wantContains: []string{"metadata-only update"},
 		},
 		{
-			name: "finalizer remove on terminating IR without annotation → allowed",
+			name: "finalizer remove on terminating IR without annotation → allowed (metadata only)",
 			req: func(t *testing.T) admission.Request {
 				old := withFinalizers(baselineIR(nil), "ome.io/ir-teardown")
 				old.DeletionTimestamp = &metav1.Time{Time: metav1.Now().Time}
 				old.DeletionGracePeriodSeconds = ptr.To[int64](0)
 				return updateReq(t, old, withFinalizers(old))
 			},
-			wantAllowed: true,
+			wantAllowed:  true,
+			wantContains: []string{"metadata-only update"},
 		},
 		{
-			name: "finalizer change + apiserver-mutated fields (rv/generation/managedFields) → allowed",
+			name: "finalizer change + apiserver-mutated fields (rv/generation/managedFields) → allowed (metadata only)",
 			req: func(t *testing.T) admission.Request {
 				old := withFinalizers(baselineIR(nil), "ome.io/ir-teardown")
 				old.ResourceVersion = "100"
@@ -730,17 +735,18 @@ func TestHandle(t *testing.T) {
 				newObj.ManagedFields = []metav1.ManagedFieldsEntry{{Manager: "ome-manager"}}
 				return updateReq(t, old, newObj)
 			},
-			wantAllowed: true,
+			wantAllowed:  true,
+			wantContains: []string{"metadata-only update"},
 		},
 		{
-			name: "finalizer change + spec change → denied (not exempt)",
+			name: "finalizer change + spec change → denied",
 			req: func(t *testing.T) admission.Request {
 				old := baselineIR(nil)
 				return updateReq(t, old,
 					withReplicas(withFinalizers(old, "ome.io/ir-teardown"), 7))
 			},
 			wantAllowed:  false,
-			wantContains: []string{"controller-only resource"},
+			wantContains: []string{"is projected by InferenceService prod-models/llama", "rejects a direct UPDATE"},
 		},
 		{
 			name: "finalizer change + parentRef change → denied (immutability fires)",
@@ -753,38 +759,68 @@ func TestHandle(t *testing.T) {
 			wantContains: []string{"spec.parentRef is immutable"},
 		},
 		{
-			name: "finalizer change + label change → denied (not exempt)",
+			name: "finalizer change + label change → allowed (metadata only)",
 			req: func(t *testing.T) admission.Request {
 				old := baselineIR(nil)
 				return updateReq(t, old,
 					withLabel(withFinalizers(old, "ome.io/ir-teardown"), "app", "rogue"))
 			},
-			wantAllowed:  false,
-			wantContains: []string{"controller-only resource"},
+			wantAllowed:  true,
+			wantContains: []string{"metadata-only update"},
 		},
 		{
-			name: "finalizer change + annotation change → denied (not exempt)",
+			name: "finalizer change + annotation change → allowed (metadata only)",
 			req: func(t *testing.T) admission.Request {
 				// Stripping the controller-write annotation alongside a
-				// finalizer edit must not ride the exemption: annotations
-				// differ, so the write falls through to the normal gate and
-				// is denied for the missing annotation.
+				// finalizer edit is a metadata-only update, which needs no
+				// annotation.
 				old := withFinalizers(baselineIR(wcw), "ome.io/ir-teardown")
 				newObj := withFinalizers(baselineIR(nil), "ome.io/ir-teardown", "extra")
 				return updateReq(t, old, newObj)
 			},
-			wantAllowed:  false,
-			wantContains: []string{"controller-only resource"},
+			wantAllowed:  true,
+			wantContains: []string{"metadata-only update"},
 		},
 		{
-			name: "finalizer change + ownerRef change → denied (not exempt)",
+			name: "finalizer change + non-controller ownerRef added → allowed (metadata only)",
 			req: func(t *testing.T) admission.Request {
 				old := baselineIR(nil)
 				return updateReq(t, old,
 					withOwnerRef(withFinalizers(old, "ome.io/ir-teardown"), "other-parent"))
 			},
+			wantAllowed:  true,
+			wantContains: []string{"metadata-only update"},
+		},
+		{
+			name: "finalizer change + controller ownerRef removed → allowed (removal is admitted)",
+			req: func(t *testing.T) admission.Request {
+				old := baselineIR(nil)
+				newObj := withFinalizers(old, "ome.io/ir-teardown")
+				newObj.OwnerReferences = nil
+				return updateReq(t, old, newObj)
+			},
+			wantAllowed:  true,
+			wantContains: []string{"metadata-only update"},
+		},
+		{
+			name: "controller ownerRef blockOwnerDeletion cleared without annotation → allowed (metadata only)",
+			req: func(t *testing.T) admission.Request {
+				old := withBlockOwnerDeletion(baselineIR(nil), true)
+				return updateReq(t, old, withBlockOwnerDeletion(old, false))
+			},
+			wantAllowed:  true,
+			wantContains: []string{"metadata-only update"},
+		},
+		{
+			name: "finalizer change + controller ownerRef repointed → denied",
+			req: func(t *testing.T) admission.Request {
+				old := baselineIR(nil)
+				newObj := withFinalizers(old, "ome.io/ir-teardown")
+				newObj.OwnerReferences[0].UID = "other-isvc-uid"
+				return updateReq(t, old, newObj)
+			},
 			wantAllowed:  false,
-			wantContains: []string{"controller-only resource"},
+			wantContains: []string{ownerRefDenial},
 		},
 		{
 			name: "create with leader/worker runners, both declare dshm → allowed",

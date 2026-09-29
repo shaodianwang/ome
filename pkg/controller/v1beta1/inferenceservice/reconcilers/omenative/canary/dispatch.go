@@ -7,10 +7,12 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -326,14 +328,14 @@ func reconcileRollbackSignal(ctx context.Context, c client.Client, reads client.
 		if stableHash == "" {
 			return false, nil
 		}
-		stable, err := stableRevisionName(ctx, reads, isvc, comp, stableHash)
+		stable, err := stableRevisionName(ctx, reads, isvc, comp, ir, stableHash)
 		if err != nil {
 			return false, err
 		}
 		// Only signal a real stable target. An empty result (the stable CR was
-		// GC'd, or only the canary revision exists) must NOT fall back to the
-		// canary revision — that would be a no-op roll. The signal stays unset
-		// and the caller parks the canary.
+		// GC'd or the replica does not control it, or only the canary revision
+		// exists) must NOT fall back to the canary revision — that would be a
+		// no-op roll. With no controlled match the pin is simply not written.
 		if stable == "" {
 			return true, nil
 		}
@@ -361,7 +363,11 @@ func reconcileRollbackSignal(ctx context.Context, c client.Client, reads client.
 // forward roll — once every Instance is on the canary revision, neither the IR
 // status nor the live pod set still names the stable revision, but its
 // ControllerRevision is retained.
-func stableRevisionName(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, comp v1beta1.ComponentType, stableHash string) (string, error) {
+//
+// Only a revision the Component's replica controls qualifies: the labels also
+// match revisions another object controls, and the replica refuses a rollback
+// target it does not control.
+func stableRevisionName(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, comp v1beta1.ComponentType, ir *v1beta1.InferenceReplica, stableHash string) (string, error) {
 	if stableHash == "" {
 		return "", nil
 	}
@@ -377,9 +383,19 @@ func stableRevisionName(ctx context.Context, reads client.Reader, isvc *v1beta1.
 	want := query.RevisionFromHash(stableHash)
 	for i := range list.Items {
 		cr := &list.Items[i]
-		if query.RevisionOf(cr).Same(want) {
+		if !query.RevisionOf(cr).Same(want) {
+			continue
+		}
+		if metav1.IsControlledBy(cr, ir) {
 			return cr.Name, nil
 		}
+		var controllerKind, controllerName, controllerUID string
+		if ref := metav1.GetControllerOf(cr); ref != nil {
+			controllerKind, controllerName, controllerUID = ref.Kind, ref.Name, string(ref.UID)
+		}
+		log.FromContext(ctx).V(1).Info("Revision matches the stable hash but the replica does not control it; not pinning it",
+			"revision", cr.Name, "controllerKind", controllerKind, "controllerName", controllerName,
+			"controllerUID", controllerUID, "inferenceReplica", ir.Name, "inferenceReplicaUID", string(ir.UID))
 	}
 	return "", nil
 }

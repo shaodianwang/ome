@@ -383,7 +383,7 @@ func newInferenceReplica(name string, replicas int32) *v1beta1.InferenceReplica 
 			},
 		},
 		Spec: v1beta1.InferenceReplicaSpec{
-			ParentRef: v1beta1.ParentReference{Name: "example"},
+			ParentRef: &v1beta1.ParentReference{Name: "example"},
 			Component: v1beta1.EngineComponent,
 			Replicas:  &replicas,
 			Runners: []v1beta1.Runner{{
