@@ -1,0 +1,26 @@
+# p1929: canary pd decoder canary pod dies at a pre-step hold and the hold outlasts its return  mode=canary Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=3 ceil_r=0 canary=auto during=canary-serving@1 verb=planedit-repin fault=podkill:canary-prehold victim=canary victimcomp=decoder verb2=resume during2=canary-prehold release=promote releaseafter=45 cell=canary/PreHold/secondary[decoder],canary/PreHold/capacityDropped[decoder] co=none topo=pd
+# The resume is inert at a live hold and only carries the release; the release waits out the pod's return, so the hold is judged after the dip and the recovery.
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p1929 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine, decoder]
+          canary:
+            steps:
+              - { capacity: "25%", traffic: 25, pause: { duration: "20s" } }
+              - { capacity: "50%", traffic: 50, pause: { duration: "20s" } }
+              - { capacity: "100%", traffic: 100 }
