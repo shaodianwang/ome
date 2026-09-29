@@ -872,3 +872,112 @@ class CanarySettleTest(unittest.TestCase):
         self.assertEqual({"name": run.MAIN_CONTAINER, "image": "example.com/x:none"}, body["spec"]["decoder"]["leader"]["runner"])
         self.assertNotIn("runner", body["spec"]["engine"])
         self.assertNotIn("leader", body["spec"]["engine"])
+
+class CanaryWave2HooksTest(unittest.TestCase):
+    """The PreHold, Done and RolledBack hooks, the second verb, and the verbs
+    that reach the grid's remaining columns."""
+
+    def test_hooks_read_the_step_state_not_only_the_phase(self):
+        self.assertEqual("canary-serving", run._canary_hook("Paused", {"preStepHold": False}, 2))
+        self.assertEqual("canary-prehold", run._canary_hook("Paused", {"preStepHold": True}, 2))
+        self.assertEqual("canary-done", run._canary_hook("Stable", {"currentStep": 2}, 2))
+        self.assertIsNone(run._canary_hook("Stable", {"currentStep": 0}, 2))
+        self.assertIsNone(run._canary_hook("Stable", {}, 0))
+        self.assertEqual("canary-rolledback", run._canary_hook("RolledBack"))
+        self.assertTrue(run._canary_hook_ok("canary-prehold"))
+        self.assertTrue(run._canary_hook_ok("canary-done@2"))
+
+    def test_plan_edit_leaves_the_pinned_ladder_alone(self):
+        self.assertTrue(run._plan_edit_untouched({0: 25, 1: 50, 2: 100}))
+        self.assertFalse(run._plan_edit_untouched({0: 25, 1: run.PLANEDIT_TRAFFIC, 2: 100}))
+
+    def _capture(self, ctx, verb, canary_hash="abc123", spec=None):
+        calls = []
+        def fake_kubectl(*args, **kw):
+            calls.append(list(args))
+            if args[:2] == ("-n", run.NS) and args[2] == "get":
+                return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"spec": spec or {}}), stderr="")
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        saved = run.kubectl
+        run.kubectl = fake_kubectl
+        try:
+            run._canary_verb(ctx, verb, canary_hash, "engine")
+        finally:
+            run.kubectl = saved
+        return calls
+
+    def _ctx(self, **extra):
+        ctx = {"case_id": "p1", "info": {"canary_groups": [{"unit": "engine", "members": ["engine", "decoder"], "policy": "auto",
+                                                              "steps": [{"capacity": "25%", "traffic": 25}, {"capacity": "50%", "traffic": 50}, {"capacity": "100%", "traffic": 100}]}]},
+               "configured": {"engine", "decoder"}, "hdr": {}, "canary_hook": "canary-serving", "canary_step": 1}
+        ctx.update(extra)
+        return ctx
+
+    def test_repin_resume_and_timeout_write_their_annotations(self):
+        self.assertIn("ome.io/rollout-repin=now", self._capture(self._ctx(), "repin")[0])
+        self.assertIn("ome.io/rollout-resume=abc123", self._capture(self._ctx(), "resume")[0])
+        self.assertIn("ome.io/rollout-ready-timeout=3m", self._capture(self._ctx(timeout_value="3m"), "timeout-set")[0])
+
+    def _spec(self):
+        return {"rollout": {"pairingProtocol": "v1", "groups": [
+            {"components": ["router"], "blueGreen": {}},
+            {"components": ["engine", "decoder"], "canary": {"steps": [
+                {"capacity": "25%", "traffic": 25, "pause": {"duration": "20s"}},
+                {"capacity": "50%", "traffic": 50, "pause": {"duration": "20s"}},
+                {"capacity": "100%", "traffic": 100}]}}]}}
+
+    def test_plan_edit_inserts_a_step_the_pinned_run_never_serves(self):
+        calls = self._capture(self._ctx(), "planedit", spec=self._spec())
+        patch = json.loads(next(c for c in calls if "patch" in c)[-1])
+        groups = patch["spec"]["rollout"]["groups"]
+        self.assertEqual(["router"], groups[0]["components"], "other groups are written back unchanged")
+        traffic = [st["traffic"] for st in groups[1]["canary"]["steps"]]
+        self.assertEqual([25, 50, run.PLANEDIT_TRAFFIC, 100], traffic)
+
+    def test_plan_edit_repin_shrinks_the_ladder_then_repins(self):
+        calls = self._capture(self._ctx(), "planedit-repin", spec=self._spec())
+        patch = json.loads(next(c for c in calls if "patch" in c)[-1])
+        traffic = [st["traffic"] for st in patch["spec"]["rollout"]["groups"][1]["canary"]["steps"]]
+        self.assertEqual([50, 100], traffic)
+        self.assertTrue(any("ome.io/rollout-repin=now" in c for c in calls))
+
+    def test_group_remove_empties_the_groups(self):
+        calls = self._capture(self._ctx(), "groupremove")
+        patch = json.loads(next(c for c in calls if "patch" in c)[-1])
+        self.assertEqual([], patch["spec"]["rollout"]["groups"])
+
+
+class CanaryWave2HeaderTest(unittest.TestCase):
+    def _errs(self, header):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    BASE = "# p999: x mode=canary Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 canary=auto topo=engine"
+
+    def test_second_verb_and_new_hooks_validate(self):
+        self.assertEqual([], self._errs(self.BASE + " during=canary-serving@1 verb=planedit-repin verb2=promote during2=canary-prehold cell=canary/PreHold/promote"))
+        self.assertEqual([], self._errs(self.BASE + " during=canary-done verb=pause cell=canary/Done/pause"))
+        self.assertEqual([], self._errs(self.BASE + " rollback=1 during=canary-rolledback verb=resume terminal=Stable cell=canary/RolledBack/resume"))
+        self.assertEqual([], self._errs(self.BASE + " during=canary-staging verb=timeout-set timeout=3m cell=canary/Staging/timeoutEdit"))
+        self.assertTrue(any("verb2= needs" in e for e in self._errs(self.BASE + " verb2=promote during2=canary-prehold")))
+        self.assertTrue(any("timeout-set needs" in e for e in self._errs(self.BASE + " during=canary-staging verb=timeout-set")))
+        self.assertTrue(any("timeout= is the value" in e for e in self._errs(self.BASE + " during=canary-staging verb=pause timeout=3m")))
+
+
+class CanaryExpectTest(unittest.TestCase):
+    """The expected terminal and the verdict contract it selects."""
+
+    def test_derivation_and_explicit_terminal(self):
+        self.assertEqual(("Stable", False), run._canary_expect("", None, "hold", False))
+        self.assertEqual(("RolledBack", True), run._canary_expect("", None, "hold", True))
+        self.assertEqual(("RolledBack", True), run._canary_expect("", "breach", "hold", False))
+        self.assertEqual(("Failed", False), run._canary_expect("", "inconclusive", "hold", False))
+        self.assertEqual(("RolledBack", True), run._canary_expect("", "inconclusive", "rollback", False))
+        self.assertEqual(("Failed", False), run._canary_expect("Failed", None, "hold", False))
+        # a rollback probe that resumes or re-targets afterwards ends Stable
+        self.assertEqual(("Stable", False), run._canary_expect("Stable", None, "hold", True))
+        self.assertEqual(("RolledBack", True), run._canary_expect("RolledBack", None, "hold", False))

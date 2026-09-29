@@ -1302,17 +1302,34 @@ def invariant_checks(inv, verdict, notes, checks):
 # Promoting -> draining, RollingBack, Failed). A fault or a verb keyed on one
 # fires while the step machine is in that state; "@<step>" narrows it to one
 # step index.
-CANARY_HOOKS = {"canary-staging", "canary-serving", "canary-draining", "canary-rollingback", "canary-failed"}
+CANARY_HOOKS = {"canary-staging", "canary-serving", "canary-prehold", "canary-draining", "canary-done",
+                "canary-rollingback", "canary-rolledback", "canary-failed"}
 FAULT_PHASES = {"rotating", "migrating", "settling"} | CANARY_HOOKS
 CANARY_VERBS = {"pause", "pause-freeze", "promote", "promote-stale", "rebump", "rebump-fix",
-                "rollback", "timeout-clear", "scale"}
+                "rollback", "timeout-clear", "timeout-set", "scale", "repin", "resume",
+                "planedit", "planedit-repin", "groupremove"}
+# The step a mid-run plan edit inserts; a pinned run never visits it.
+PLANEDIT_TRAFFIC = 75
 
 
-def _canary_hook(phase):
-    """Grid state of a canary rolloutPhase, as a hook name (None when idle)."""
+def _canary_hook(phase, can=None, nsteps=None):
+    """Grid state of a canary, as a hook name (None when idle). The phase
+    alone names most states; PreHold is a Paused step whose pre-step hold is
+    set, and Done is Stable with the step index at the ladder's end."""
+    can = can or {}
+    if phase == "Paused" and can.get("preStepHold"):
+        return "canary-prehold"
+    if phase == "Stable" and nsteps and can.get("currentStep") is not None and int(can.get("currentStep")) >= nsteps:
+        return "canary-done"
     return {"Pending": "canary-staging", "Canarying": "canary-serving", "Paused": "canary-serving",
             "Promoting": "canary-draining", "RollingBack": "canary-rollingback",
-            "Failed": "canary-failed"}.get(phase or "")
+            "RolledBack": "canary-rolledback", "Failed": "canary-failed"}.get(phase or "")
+
+
+def _plan_edit_untouched(traffic_by_step):
+    """A mid-run plan edit leaves the pinned ladder alone: the step it
+    inserted is never served."""
+    return PLANEDIT_TRAFFIC not in set(traffic_by_step.values())
 
 
 def _canary_hook_ok(v):
@@ -1861,6 +1878,11 @@ HDR_VALIDATORS = {
     # the grid cell the case covers.
     "verb": lambda v: v in CANARY_VERBS,
     "verbhold": _int_ge0,
+    # A second verb at a second hook (fires once the first verb has fired);
+    # timeout= is the duration timeout-set writes.
+    "verb2": lambda v: v in CANARY_VERBS,
+    "during2": _canary_hook_ok,
+    "timeout": lambda v: re.match(r"^[0-9]+(s|m|h)$", str(v)) is not None,
     "bump": lambda v: bool(str(v)) and all(m in COMPS for m in str(v).split(",")),
     "terminal": lambda v: v in {"Stable", "RolledBack", "Failed"},
     "prearm": lambda v: v == "rollback",
@@ -1994,12 +2016,19 @@ def validate_case_file(path):
                                    "migrate": {"rollout"},
                                    "runtimerev": {"rollout"}}.get(mode, set()):
         errs.append(f"{path}:1: during={during} not supported for mode={mode}")
-    for k in ("verb", "verbhold", "bump", "terminal", "prearm", "skipsoak", "cell", "nophase",
+    for k in ("verb", "verbhold", "bump", "terminal", "prearm", "skipsoak", "cell", "nophase", "verb2", "during2", "timeout",
               "imgcomp", "ratio_tol", "xcheck"):
         if k in fields and mode != "canary":
             errs.append(f"{path}:1: {k}= is a canary-mode knob (mode=canary)")
     if "verb" in fields and not _canary_hook_ok(during):
         errs.append(f"{path}:1: verb= needs during=<canary hook> to say when it fires")
+    if "verb2" in fields and ("verb" not in fields or "during2" not in fields):
+        errs.append(f"{path}:1: verb2= needs verb= (it fires after the first verb) and during2=<canary hook>")
+    if str(fields.get("verb", "")) == "timeout-set" or str(fields.get("verb2", "")) == "timeout-set":
+        if "timeout" not in fields:
+            errs.append(f"{path}:1: verb=timeout-set needs timeout=<duration>")
+    if "timeout" in fields and "timeout-set" not in (str(fields.get("verb", "")), str(fields.get("verb2", ""))):
+        errs.append(f"{path}:1: timeout= is the value verb=timeout-set writes")
     if "victim" in fields and not str(fields.get("fault", "")).startswith("podkill:"):
         errs.append(f"{path}:1: victim= aims a podkill (needs fault=podkill:<hook>)")
     if "victimcomp" in fields and not str(fields.get("fault", "")).startswith("podkill:"):
@@ -4749,6 +4778,22 @@ def _canary_verb(ctx, verb, canary_hash, primary):
         kubectl("-n", NS, "annotate", "isvc", cid, "ome.io/rollout-ready-timeout-")
     elif verb == "scale":
         _canary_scale(ctx)
+    elif verb == "repin":
+        # "now" skips the render-digest CAS; the run keeps its identity and
+        # progress, and a clamped step that would raise exposure holds.
+        kubectl("-n", NS, "annotate", "isvc", cid, "ome.io/rollout-repin=now", "--overwrite")
+    elif verb == "resume":
+        # The parked canary revision hash is the guard against resuming a
+        # stale target; the ladder restarts at step 0 against the same target.
+        kubectl("-n", NS, "annotate", "isvc", cid, f"ome.io/rollout-resume={canary_hash}", "--overwrite")
+    elif verb == "timeout-set":
+        kubectl("-n", NS, "annotate", "isvc", cid, f"ome.io/rollout-ready-timeout={ctx.get('timeout_value') or '90s'}", "--overwrite")
+    elif verb in ("planedit", "planedit-repin"):
+        _canary_plan_edit(ctx, shrink=(verb == "planedit-repin"))
+        if verb == "planedit-repin":
+            kubectl("-n", NS, "annotate", "isvc", cid, "ome.io/rollout-repin=now", "--overwrite")
+    elif verb == "groupremove":
+        kubectl("-n", NS, "patch", "isvc", cid, "--type=merge", "-p", json.dumps({"spec": {"rollout": {"groups": []}}}))
     note = f"verb fired: {verb} at {ctx.get('canary_hook')} step={ctx.get('canary_step')}"
     ctx.setdefault("verb_notes", []).append(note)
     print(f"    ⚡ {note}")
@@ -4780,6 +4825,65 @@ def _canary_pods_settled(expect, phase, new_by_comp, want, stranded):
     if expect == "Failed":
         return phase == "Failed"
     return all(n == want[c] for c, n in new_by_comp.items()) and not stranded
+
+
+def _canary_expect(terminal, analysis_mode, on_inconclusive, do_rollback):
+    """(expected terminal phase, whether the verdict reads the rollback
+    contract). breach and inconclusive/Rollback drain to stable;
+    inconclusive/Hold parks Failed; pass promotes; a rollback probe drains.
+    An explicit terminal= names the outcome outright, and only a RolledBack
+    terminal reads the rollback contract: a case that rolls back and then
+    resumes or re-targets ends Stable and is judged as such."""
+    if analysis_mode == "breach" or (analysis_mode == "inconclusive" and on_inconclusive == "rollback"):
+        expect = "RolledBack"
+    elif analysis_mode == "inconclusive":
+        expect = "Failed"
+    elif analysis_mode == "pass":
+        expect = "Stable"
+    else:
+        expect = "RolledBack" if do_rollback else "Stable"
+    if terminal:
+        return terminal, terminal == "RolledBack"
+    return expect, do_rollback or expect == "RolledBack"
+
+
+def _canary_plan_edit(ctx, shrink=False):
+    """Edit the driven canary group's ladder in the live spec. shrink=False
+    inserts a step at PLANEDIT_TRAFFIC before the final one (a pinned run
+    never serves it); shrink=True drops the first step, so the current step
+    index maps to a higher exposure and a repin must hold rather than raise.
+    Every other group is written back unchanged."""
+    r = kubectl("-n", NS, "get", "isvc", ctx["case_id"], "-o", "json")
+    if r.returncode != 0:
+        ctx.setdefault("verb_errors", []).append(f"plan edit: cannot read the live spec: {r.stderr.strip()[:120]}")
+        return
+    spec = json.loads(r.stdout).get("spec", {})
+    groups = (spec.get("rollout") or {}).get("groups") or []
+    members = set((_canary_group(ctx) or {}).get("members") or [])
+    edited = False
+    for g in groups:
+        if not isinstance(g.get("canary"), dict) or set(g.get("components") or []) != members:
+            continue
+        steps = list(g["canary"].get("steps") or [])
+        if shrink:
+            if len(steps) < 2:
+                ctx.setdefault("verb_errors", []).append("plan edit: shrinking needs a ladder of two or more steps")
+                return
+            steps = steps[1:]
+        else:
+            last = steps[-1] if steps else {"capacity": "100%", "traffic": 100}
+            steps = steps[:-1] + [{"capacity": f"{PLANEDIT_TRAFFIC}%", "traffic": PLANEDIT_TRAFFIC,
+                                   "pause": {"duration": "20s"}}, last]
+        g["canary"]["steps"] = steps
+        edited = True
+        break
+    if not edited:
+        ctx.setdefault("verb_errors", []).append("plan edit: no canary group matches the driven unit")
+        return
+    rr = kubectl("-n", NS, "patch", "isvc", ctx["case_id"], "--type=merge", "-p",
+                 json.dumps({"spec": {"rollout": {"groups": groups}}}))
+    if rr.returncode != 0:
+        ctx.setdefault("verb_errors", []).append(f"plan edit: patch failed: {rr.stderr.strip()[:120]}")
 
 
 def _canary_scale(ctx):
@@ -4857,6 +4961,11 @@ def _canary(case_id, yaml_file, desc, hdr):
     during = str(hdr.get("during") or "")
     verb = str(hdr.get("verb") or "")
     verbhold = int(hdr.get("verbhold") or 45)
+    # A second verb at a second hook, for the states only a first verb can
+    # reach (a repin that holds makes PreHold; a completed run makes Done).
+    verb2 = str(hdr.get("verb2") or "")
+    during2 = str(hdr.get("during2") or "")
+    ctx["timeout_value"] = str(hdr.get("timeout") or "90s")
     bump_members = {m.strip() for m in str(hdr.get("bump") or "").split(",") if m.strip()}
     bad_image = str(hdr.get("img") or "")
     terminal = str(hdr.get("terminal") or "")
@@ -4879,18 +4988,7 @@ def _canary(case_id, yaml_file, desc, hdr):
         # A rollback request left on the idle service before any canary exists.
         kubectl("-n", NS, "annotate", "isvc", case_id, f"{ROLLBACK_ANNO}=true", "--overwrite")
         print("    prearm: ome.io/rollout-rollback=true set on the idle service")
-    # Expected terminal phase. breach + inconclusive/Rollback drain to stable;
-    # inconclusive/Hold parks Failed (stable keeps serving); pass promotes.
-    if analysis_mode == "breach" or (analysis_mode == "inconclusive" and on_inconclusive == "rollback"):
-        expect = "RolledBack"
-    elif analysis_mode == "inconclusive":
-        expect = "Failed"
-    elif analysis_mode == "pass":
-        expect = "Stable"
-    else:
-        expect = "RolledBack" if do_rollback else "Stable"
-    expect = terminal or expect
-    expect_rollback = do_rollback or expect == "RolledBack"
+    expect, expect_rollback = _canary_expect(terminal, analysis_mode, on_inconclusive, do_rollback)
     nsteps = len(cinfo.get("steps") or []) or 2
     primary = _canary_primary(ctx, cgroup)
     if not primary:
@@ -4963,6 +5061,7 @@ def _canary(case_id, yaml_file, desc, hdr):
     promote_rejected = None
     rejected = None     # status.canary.rolledBackRevisionHash once a rollback is recorded
     verb_fired = verb_lifted = rebump_retargeted = False
+    verb2_fired = False
     verb_ts = 0.0
     step_at_verb = step_at_lift = None
     stale_held = None   # promote-stale: did the step hold 20s after the stale promote
@@ -5011,10 +5110,13 @@ def _canary(case_id, yaml_file, desc, hdr):
 
         # Canary-state hook: expose the grid state to the fault dispatcher and
         # fire the case's verb once, when the state (and step) it names arrives.
-        ctx["canary_hook"], ctx["canary_step"] = _canary_hook(phase), step
+        ctx["canary_hook"], ctx["canary_step"] = _canary_hook(phase, can, nsteps), step
         if verb and not verb_fired and _hook_due(during, ctx["canary_hook"], step):
             verb_fired, verb_ts, step_at_verb = True, now, step
             _canary_verb(ctx, verb, canary_hash, primary)
+        elif verb2 and verb_fired and not verb2_fired and _hook_due(during2, ctx["canary_hook"], step):
+            verb2_fired = True
+            _canary_verb(ctx, verb2, canary_hash, primary)
         fault = ctx.get("fault")
         if hook_fired_ts is None and (verb_fired or (fault and fault.get("fired"))):
             hook_fired_ts = now
@@ -5166,6 +5268,13 @@ def _canary(case_id, yaml_file, desc, hdr):
     if verb:
         good(verb_fired, f"verb {verb} fired at {during}",
              f"verb {verb} never fired: the canary never reached {during} (phases={sorted(phases)})")
+    if verb2:
+        good(verb2_fired, f"second verb {verb2} fired at {during2}",
+             f"second verb {verb2} never fired: the canary never reached {during2} after {verb} (phases={sorted(phases)})")
+    if "planedit" in (verb, verb2):
+        good(_plan_edit_untouched(traffic_by_step),
+             "mid-run plan edit left the pinned ladder alone (the inserted step was never served)",
+             f"mid-run plan edit changed the running ladder (served {PLANEDIT_TRAFFIC}%; per-step {traffic_by_step})")
     if verb == "scale" and verb_fired:
         checks.append("  ⓘ scale fired mid-canary: " + " ".join(f"{c}→{t}" for c, t in sorted(scale_to.items())))
     if proto2_target is not None:

@@ -1,0 +1,20 @@
+# p1827: canary engine repin that would raise exposure holds and a promote releases it  mode=canary Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 canary=auto during=canary-serving@1 verb=planedit-repin verb2=promote during2=canary-prehold cell=canary/PreHold/promote co=none topo=engine
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p1827 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          canary:
+            steps:
+              - { capacity: "25%", traffic: 25, pause: { duration: "20s" } }
+              - { capacity: "50%", traffic: 50, pause: { duration: "20s" } }
+              - { capacity: "100%", traffic: 100 }

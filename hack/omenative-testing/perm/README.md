@@ -273,16 +273,31 @@ the grid cell it covers in `cell=canary/<State>/<event>` (the states are
 `RolledBack`, `Failed`).
 
 - **`during=canary-<state>[@<step>]`** — when to act: `canary-staging`
-  (`Pending`), `canary-serving` (`Canarying`/`Paused`), `canary-draining`
-  (`Promoting`), `canary-rollingback`, `canary-failed`; `@2` narrows it to one
-  step index. The verb polls the ISVC status every 2 s and fires once.
+  (`Pending`), `canary-serving` (`Canarying`/`Paused`), `canary-prehold`
+  (`Paused` with the pre-step hold set, which only a repin creates),
+  `canary-draining` (`Promoting`), `canary-done` (`Stable` with the step at the
+  ladder's end), `canary-rollingback`, `canary-rolledback`, `canary-failed`;
+  `@2` narrows it to one step index. The verb polls the ISVC status every 2 s
+  and fires once. **`verb2=` / `during2=`** fire a second verb at a second hook
+  once the first has fired, which is how a case reaches PreHold (a
+  `planedit-repin` at Serving, then the verb under test at `canary-prehold`).
 - **`verb=`** — the operator verb to fire at the hook: `pause` / `pause-freeze`
   (lifted after `verbhold=<s>`, default 45; the step index must not move while
   held), `promote` (the matching hash; with `skipsoak=<s>` the case asserts it
   beat a timed step's soak), `promote-stale` (a real hash token naming the
   stable revision; the step must not move for 20 s), `rollback`, `rebump` (a
   second revision bump of the bumped members), `rebump-fix` (a bump that also
-  drops the runner image override), `timeout-clear`.
+  drops the runner image override), `timeout-clear` and `timeout-set` (writes
+  `ome.io/rollout-ready-timeout=<timeout=>`), `repin` (`ome.io/rollout-repin=now`:
+  the run keeps its identity and progress), `resume` (`ome.io/rollout-resume=<canary
+  hash>`: a terminal canary re-enters the ladder at step 0), `planedit` (inserts
+  a step at 75% into the driven group's ladder; a pinned run never serves it,
+  and the verdict asserts so), `planedit-repin` (drops the ladder's first step
+  and repins, so the clamped step would raise exposure and the run holds at
+  PreHold), `groupremove` (empties `spec.rollout.groups` mid-run; the pinned
+  plan keeps stepping), `scale` (see the PD knobs below). `terminal=` decides
+  the verdict contract: only `RolledBack` reads the rollback checks, so a case
+  that rolls back and then resumes or re-targets is judged as `Stable`.
 - **`fault=<kind>:canary-<state>`** — the existing faults (`podkill`,
   `ctrlrestart`, `quota:<n>`, `cordon:source`) fired at a canary hook instead
   of `rotating`/`settling`; `victim=canary|stable` aims a podkill at the newest
