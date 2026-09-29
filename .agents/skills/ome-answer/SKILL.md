@@ -9,7 +9,8 @@ Read `ome-bridge` first for the helper, the verbs, the fan-out rule and how
 to pick clusters. Every command below is
 `$B command "<verb and args>"` with
 `B="python3 <ome-bridge skill dir>/scripts/ome_bridge.py"`. Everything here
-is read-only; if the fix needs a guarded verb, name it and stop.
+is read-only; if the fix needs a guarded verb, name it and stop. An error-rate
+or fatal-rate alert on a serving model goes to `serving-incident` instead.
 
 ## 1. Locate the object
 

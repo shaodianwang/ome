@@ -1,6 +1,6 @@
 ---
 name: ome-oncall
-description: Answer CI and release oncall questions about the OME repository from the OME bot - "why is main red", "is this failure flaky", "what broke build N", "did my commit pass", "what is promoted where", "what runs on cluster X" - through the ome-bridge tools builds, ci and docs and the release endpoint, and reply with a verdict, quoted evidence and the next action. Read-only; never retries, promotes or files anything. Load after ome-bridge.
+description: Answer CI and release oncall questions about the OME repository from the OME bot - "why is main red", "is this failure flaky", "what broke build N", "did my commit pass", "what is promoted where", "what runs on cluster X" - through the ome-bridge tools builds, ci and docs and the release endpoint, and reply with a verdict, quoted evidence and the next action. Read-only; never retries, promotes or files anything. Serving alerts belong to serving-incident. Load after ome-bridge.
 ---
 
 # ome-oncall — CI and release questions, answered from the bridge

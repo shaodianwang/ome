@@ -20,6 +20,9 @@ No release tag carries the CLI yet; build it from upstream `main`:
 git clone https://github.com/ome-projects/ome && cd ome && make kubectl-ome   # bin/kubectl-ome
 ```
 
+An `unknown command` for `traffic`, `placement` or `instance` means a stale
+build; rebuild rather than falling back to raw kubectl.
+
 ## Kubeconfigs
 
 Run the `msl-access-bootstrap` skill: it writes one kubeconfig per cluster
