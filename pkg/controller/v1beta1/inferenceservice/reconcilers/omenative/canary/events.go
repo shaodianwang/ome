@@ -11,8 +11,9 @@ const (
 	// EventReasonRolloutResumed is recorded when ome.io/rollout-resume clears a
 	// terminal phase and the ladder re-enters at step 0.
 	EventReasonRolloutResumed = "RolloutResumed"
-	// EventReasonRolloutResumeRejected is recorded when an addressed
-	// ome.io/rollout-resume cannot be honored (stale hash, or no pinned run).
+	// EventReasonRolloutResumeRejected is recorded when an ome.io/rollout-resume
+	// cannot be honored: a stale hash, no pinned run, or a value that
+	// addresses no canary of the InferenceService.
 	EventReasonRolloutResumeRejected = "RolloutResumeRejected"
 	// EventReasonCanaryRollbackIgnored is recorded when a rollback request
 	// finds no canary in flight and is removed rather than left to fire on

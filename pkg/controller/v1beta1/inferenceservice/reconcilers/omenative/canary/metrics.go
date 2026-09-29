@@ -66,7 +66,7 @@ var (
 
 	canaryResumeTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "ome_canary_resume_total",
-		Help: "Count of ome.io/rollout-resume verbs processed, by outcome (applied|rejected) per (namespace, isvc, component).",
+		Help: "Count of ome.io/rollout-resume verbs processed, by outcome (applied|rejected|ignored) per (namespace, isvc, component).",
 	}, []string{"namespace", "isvc", "component", "outcome"})
 
 	// Sampler saturation observability. MaxConcurrency is a fleet-wide ceiling, so
@@ -118,12 +118,19 @@ func recordRollback(isvc *v1beta1.InferenceService, c v1beta1.ComponentType, cau
 	canaryRollbackTotal.WithLabelValues(isvc.Namespace, isvc.Name, string(c), cause).Inc()
 }
 
-// recordResume emits the resume counter with its outcome (applied|rejected).
-func recordResume(isvc *v1beta1.InferenceService, c v1beta1.ComponentType, applied bool) {
-	outcome := "rejected"
-	if applied {
-		outcome = "applied"
-	}
+// Outcomes of an ome.io/rollout-resume verb, the values of the resume
+// counter's outcome label.
+const (
+	// resumeApplied: a parked canary re-entered the ladder.
+	resumeApplied = "applied"
+	// resumeRejected: the verb addressed a parked canary it could not resume.
+	resumeRejected = "rejected"
+	// resumeIgnored: the verb addressed no canary and was removed.
+	resumeIgnored = "ignored"
+)
+
+// recordResume emits the resume counter with its outcome.
+func recordResume(isvc *v1beta1.InferenceService, c v1beta1.ComponentType, outcome string) {
 	canaryResumeTotal.WithLabelValues(isvc.Namespace, isvc.Name, string(c), outcome).Inc()
 }
 

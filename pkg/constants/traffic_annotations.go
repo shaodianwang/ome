@@ -124,7 +124,8 @@ var (
 	// InferenceService has more than one canary unit parked; a bare hash is
 	// addressed to whichever Component's canary carries it. The controller
 	// clears the annotation after consuming it. No-op when the addressed
-	// Component is in no terminal phase.
+	// Component is in no terminal phase; a value that addresses no canary
+	// unit at all is removed without effect.
 	//
 	// Resume is deliberately NOT a waiver: the ladder restarts at step 0 and
 	// every gate re-runs, so a revision that failed analysis fails again

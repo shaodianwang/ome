@@ -43,20 +43,32 @@ func parseResume(v string) (resumeRequest, bool) {
 	return resumeRequest{hash: v}, true
 }
 
-// addressesComponent reports whether this verb is aimed at the Component being
-// reconciled, and is what decides consumption.
+// addressesUnit reports whether this verb is aimed at the canary unit driven
+// through Component c, whose canary record is cs.
 //
-// A scoped value names exactly one Component, so that Component owns the verb
-// outright — it consumes it in every branch, including a rejection, because a
-// verb that is never consumed retries forever. A bare hash is addressed to
-// whichever Component's canary carries it; a Component the hash does not name
-// leaves the annotation untouched, so one canary unit's dispatch cannot eat a
-// verb aimed at another's.
-func (r resumeRequest) addressesComponent(c v1beta1.ComponentType, cs *v1beta1.CanaryStatus) bool {
+// A scoped value names one unit outright (a member names the unit it belongs
+// to), so that unit owns the verb in every branch, including a rejection,
+// because a verb that is never consumed retries forever. A bare hash is
+// addressed to whichever unit's canary carries it; a unit the hash does not
+// name leaves the annotation for the unit that owns it, so one canary unit's
+// dispatch cannot eat a verb aimed at another's.
+func (r resumeRequest) addressesUnit(c v1beta1.ComponentType, cs *v1beta1.CanaryStatus) bool {
 	if r.component != "" {
-		return r.component == c
+		return rollout.CanaryUnit(r.component) == rollout.CanaryUnit(c)
 	}
 	return cs != nil && r.hash == cs.CanaryRevisionHash
+}
+
+// addressesAnyUnit reports whether some canary unit of the InferenceService
+// owns this verb. A verb no unit owns has nothing to act on, now or later.
+func (r resumeRequest) addressesAnyUnit(isvc *v1beta1.InferenceService) bool {
+	for _, g := range rollout.CanaryGroups(isvc) {
+		primary := rollout.PrimaryOf(g)
+		if r.addressesUnit(primary, rollout.CanaryStatusFor(&isvc.Status, primary)) {
+			return true
+		}
+	}
+	return false
 }
 
 // handleResume applies the one-shot ome.io/rollout-resume verb: clear this
@@ -78,13 +90,26 @@ func (r resumeRequest) addressesComponent(c v1beta1.ComponentType, cs *v1beta1.C
 // the verb in place to be applied again, and a verb still visible after a
 // successful flush finds nothing parked and is consumed with no effect.
 func handleResume(ctx context.Context, in ReconcileInputs, cs *v1beta1.CanaryStatus, take func(string)) (bool, error) {
-	req, ok := parseResume(in.ISVC.Annotations[constants.RolloutResumeAnnotation])
-	if !ok || !req.addressesComponent(in.Component, cs) {
+	value := in.ISVC.Annotations[constants.RolloutResumeAnnotation]
+	req, ok := parseResume(value)
+	if !ok {
 		return false, nil
 	}
 	consume := func() error {
 		take(constants.RolloutResumeAnnotation)
 		return nil
+	}
+	if !req.addressesUnit(in.Component, cs) {
+		if req.addressesAnyUnit(in.ISVC) {
+			return false, nil
+		}
+		// A verb no canary carries is consumed and ignored rather than left
+		// to fire on a later canary that happens to carry the same hash, a
+		// park it was never meant for.
+		recordResume(in.ISVC, in.Component, resumeIgnored)
+		emit(in.Recorder, in.ISVC, corev1.EventTypeWarning, EventReasonRolloutResumeRejected,
+			"resume rejected: %q addresses no canary, parked or in flight; the request is removed", value)
+		return false, consume()
 	}
 
 	// The park is read from the status marker and the phase together, so a
@@ -113,13 +138,13 @@ func handleResume(ctx context.Context, in ReconcileInputs, cs *v1beta1.CanarySta
 	// asserted and strand the resume here, succeeding with no run to show for
 	// it. Locked by the run layer's cleared-reject reopen test.
 	if !in.RunActive && state != rollout.CanaryStateRolledBack {
-		recordResume(in.ISVC, in.Component, false)
+		recordResume(in.ISVC, in.Component, resumeRejected)
 		emit(in.Recorder, in.ISVC, corev1.EventTypeWarning, EventReasonRolloutResumeRejected,
 			"resume rejected for %s: no rollout run is pinned, so there is no plan to re-enter", in.Component)
 		return false, consume()
 	}
 	if req.hash != cs.CanaryRevisionHash {
-		recordResume(in.ISVC, in.Component, false)
+		recordResume(in.ISVC, in.Component, resumeRejected)
 		emit(in.Recorder, in.ISVC, corev1.EventTypeWarning, EventReasonRolloutResumeRejected,
 			"resume rejected for %s: %q is not the parked canary revision %q", in.Component, req.hash, cs.CanaryRevisionHash)
 		return false, consume()
@@ -136,7 +161,7 @@ func handleResume(ctx context.Context, in ReconcileInputs, cs *v1beta1.CanarySta
 	// rollback has already pointed the IR back at stable, so the observation
 	// names the wrong revision until the rollback signal clears.
 	resetCanaryStatus(in.ISVC, in.Component, cs, in.TargetID, cs.CanaryRevisionHash, in.Now)
-	recordResume(in.ISVC, in.Component, true)
+	recordResume(in.ISVC, in.Component, resumeApplied)
 	emit(in.Recorder, in.ISVC, corev1.EventTypeNormal, EventReasonRolloutResumed,
 		"resumed %s from %s: re-entering the canary ladder at step 0 on revision %s; every gate re-runs",
 		in.Component, phase, cs.CanaryRevisionHash)

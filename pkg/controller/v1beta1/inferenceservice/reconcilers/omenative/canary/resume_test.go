@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -19,7 +20,13 @@ import (
 // parkedFailed builds a single-engine canary parked in the Failed terminal at
 // step 0 on revision "new", with the resume verb set to value.
 func parkedFailed(value string) (*v1beta1.InferenceService, ReconcileInputs) {
-	isvc := pinActiveRun(canaryISVC(twoStep(), nil))
+	return parkedFailedOn(canaryISVC(twoStep(), nil), value)
+}
+
+// parkedFailedOn parks the engine unit of isvc in the Failed terminal at step
+// 0 on revision "new", with the resume verb set to value.
+func parkedFailedOn(isvc *v1beta1.InferenceService, value string) (*v1beta1.InferenceService, ReconcileInputs) {
+	isvc = pinActiveRun(isvc)
 	isvc.Namespace = "ns"
 	isvc.Annotations = map[string]string{constants.RolloutResumeAnnotation: value}
 	isvc.Status.Canary = &v1beta1.CanaryStatus{
@@ -52,6 +59,20 @@ func hasEvent(events []string, reason string) bool {
 		}
 	}
 	return false
+}
+
+// withRouterUnit adds a second canary unit, the router, so a verb can be
+// addressed to a unit other than the engine.
+func withRouterUnit(isvc *v1beta1.InferenceService) *v1beta1.InferenceService {
+	isvc.Spec.Rollout.Groups = append(isvc.Spec.Rollout.Groups, v1beta1.RolloutGroup{
+		Components: []v1beta1.ComponentType{v1beta1.RouterComponent},
+		Canary:     &v1beta1.GroupCanary{Steps: twoStep()},
+	})
+	return isvc
+}
+
+func resumeCount(isvc *v1beta1.InferenceService, outcome string) float64 {
+	return testutil.ToFloat64(canaryResumeTotal.WithLabelValues(isvc.Namespace, isvc.Name, string(v1beta1.EngineComponent), outcome))
 }
 
 // TestResume_ClearsFailedHold is the verb's reason to exist: a parked Failed
@@ -115,7 +136,7 @@ func TestResume_ScopedToComponent(t *testing.T) {
 // verb addressed to another canary unit is neither acted on nor consumed, so
 // that unit's own dispatch still sees it.
 func TestResume_ScopedElsewhereIsUntouched(t *testing.T) {
-	isvc, in := parkedFailed("router=new")
+	isvc, in := parkedFailedOn(withRouterUnit(canaryISVC(twoStep(), nil)), "router=new")
 	rec := record.NewFakeRecorder(8)
 	in.Recorder = rec
 
@@ -136,15 +157,133 @@ func TestResume_ScopedElsewhereIsUntouched(t *testing.T) {
 // TestResume_BareHashAddressesOnlyItsOwnCanary is the same rule for the bare
 // form: an unscoped hash belongs to whichever unit's canary carries it.
 func TestResume_BareHashAddressesOnlyItsOwnCanary(t *testing.T) {
-	isvc, in := parkedFailed("somebodyelse")
+	isvc, in := parkedFailedOn(withRouterUnit(canaryISVC(twoStep(), nil)), "somebodyelse")
+	rollout.SetCanaryStatusFor(&isvc.Status, v1beta1.EngineComponent, isvc.Status.Canary)
+	rollout.SetCanaryStatusFor(&isvc.Status, v1beta1.RouterComponent, &v1beta1.CanaryStatus{
+		CanaryRevisionHash: "somebodyelse",
+		StableRevisionHash: "router-old",
+	})
+	rec := record.NewFakeRecorder(8)
+	in.Recorder = rec
+
 	if _, err := Reconcile(context.Background(), in); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	if phaseOf(isvc) != v1beta1.RolloutPhaseFailed {
-		t.Fatalf("a hash naming no local canary must not resume, got %q", phaseOf(isvc))
+		t.Fatalf("a hash naming another unit's canary must not resume this one, got %q", phaseOf(isvc))
 	}
 	if isvc.Annotations[constants.RolloutResumeAnnotation] != "somebodyelse" {
-		t.Fatal("a hash naming no local canary must be left for the unit that owns it")
+		t.Fatal("a hash naming another unit's canary must be left for the unit that owns it")
+	}
+	if len(eventsFrom(rec)) != 0 {
+		t.Fatal("a verb addressed elsewhere must stay silent here")
+	}
+}
+
+// TestResume_UnaddressedOnIdleServiceIsConsumed pins the Idle cell of the
+// grid: a request naming the stable revision of a service with no canary
+// addresses nothing, so it is consumed and ignored, said out loud and
+// counted. Left in place it would fire on a later canary minted with the
+// same hash, a park it was never meant for.
+func TestResume_UnaddressedOnIdleServiceIsConsumed(t *testing.T) {
+	isvc := canaryISVC(twoStep(), nil)
+	isvc.Namespace = "ns"
+	isvc.Annotations = map[string]string{constants.RolloutResumeAnnotation: "old"}
+	c := fake.NewClientBuilder().WithScheme(canaryScheme(t)).WithObjects(isvc).Build()
+	in := baseInputs(isvc, map[string]int32{"old": 4})
+	in.Client = c
+	in.RunActive = false
+	in.CanaryRevisionHash, in.StableRevisionHash = "old", ""
+	rec := record.NewFakeRecorder(8)
+	in.Recorder = rec
+	before := resumeCount(isvc, resumeIgnored)
+
+	res, err := Reconcile(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if res.Active || rollout.CanaryStatusFor(&isvc.Status, v1beta1.EngineComponent) != nil {
+		t.Fatalf("an unaddressed resume must not arm anything, got %+v", res)
+	}
+	if _, still := isvc.Annotations[constants.RolloutResumeAnnotation]; still {
+		t.Fatal("a resume that addresses no canary must be consumed")
+	}
+	if len(res.Consume) != 1 || res.Consume[0] != constants.RolloutResumeAnnotation {
+		t.Fatalf("the pass must hand the resume back for removal after the flush, got %v", res.Consume)
+	}
+	if _, present := storedAnnotations(t, c, isvc)[constants.RolloutResumeAnnotation]; !present {
+		t.Fatal("the pass must not remove the annotation before the status flush")
+	}
+	events := eventsFrom(rec)
+	if !hasEvent(events, EventReasonRolloutResumeRejected) || !hasEvent(events, "addresses no canary") {
+		t.Fatalf("an unaddressed resume must be reported as addressing no canary, got %v", events)
+	}
+	if got := resumeCount(isvc, resumeIgnored) - before; got != 1 {
+		t.Fatalf("an unaddressed resume must be counted once as ignored, got %v", got)
+	}
+}
+
+// TestResume_UnaddressedWhileCanaryLiveIsConsumed is the same rule with a
+// canary in flight: a request naming a revision no canary carries is
+// consumed without touching the live step.
+func TestResume_UnaddressedWhileCanaryLiveIsConsumed(t *testing.T) {
+	isvc, in := parkedFailed("old")
+	setPhase(isvc, v1beta1.EngineComponent, v1beta1.RolloutPhaseCanarying)
+	in.PerRevisionPods = map[string]int32{"new": 2, "old": 2}
+	rec := record.NewFakeRecorder(8)
+	in.Recorder = rec
+
+	res, err := Reconcile(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	cs := isvc.Status.Canary
+	if cs.CanaryRevisionHash != "new" || cs.CurrentStep != 0 || cs.AnalysisFailedChecks != 3 {
+		t.Fatalf("an unaddressed resume must not touch the live canary, got %+v", cs)
+	}
+	if !res.Active || phaseOf(isvc) != v1beta1.RolloutPhasePaused {
+		t.Fatalf("the live step must run on unchanged, got %+v phase %q", res, phaseOf(isvc))
+	}
+	if len(res.Consume) != 1 || res.Consume[0] != constants.RolloutResumeAnnotation {
+		t.Fatalf("a resume that addresses no canary must be consumed, got %v", res.Consume)
+	}
+	if !hasEvent(eventsFrom(rec), EventReasonRolloutResumeRejected) {
+		t.Fatal("an unaddressed resume must be reported, not silently dropped")
+	}
+}
+
+// TestResume_ScopedToNoUnitIsConsumed: a scope naming a Component that is
+// no canary unit of the service addresses nothing either.
+func TestResume_ScopedToNoUnitIsConsumed(t *testing.T) {
+	isvc, in := parkedFailed("router=new")
+	rec := record.NewFakeRecorder(8)
+	in.Recorder = rec
+
+	if _, err := Reconcile(context.Background(), in); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if phaseOf(isvc) != v1beta1.RolloutPhaseFailed {
+		t.Fatalf("a scope naming no unit must not resume this one, got %q", phaseOf(isvc))
+	}
+	if _, still := isvc.Annotations[constants.RolloutResumeAnnotation]; still {
+		t.Fatal("a scope naming no unit must be consumed")
+	}
+	if !hasEvent(eventsFrom(rec), EventReasonRolloutResumeRejected) {
+		t.Fatal("a scope naming no unit must be reported")
+	}
+}
+
+// TestResume_ScopedToTheUnitsOtherMember: the decoder shares the engine's
+// unit, so a scope naming it addresses that unit's parked canary.
+func TestResume_ScopedToTheUnitsOtherMember(t *testing.T) {
+	isvc := canaryISVC(twoStep(), nil)
+	isvc.Spec.Rollout.Groups[0].Components = []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}
+	isvc, in := parkedFailedOn(isvc, "decoder=new")
+	if _, err := Reconcile(context.Background(), in); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if phaseOf(isvc) != v1beta1.RolloutPhasePending {
+		t.Fatalf("a scope naming the unit's other member must resume it, got %q", phaseOf(isvc))
 	}
 }
 
