@@ -84,7 +84,7 @@ var _ = ginkgo.BeforeSuite(func() {
 	//     through CheckSource/InspectSource → Ready.
 	//   - ISVC reconciler uses Name (→ runtimeselector.Config.ModelCacheProvider)
 	//     and Config (→ InferenceServicesConfig.ModelCache, which
-	//     components/base.go reads to inject MODEL_CACHE_PROVIDER /
+	//     render.UpdateEnvVariables reads to inject MODEL_CACHE_PROVIDER /
 	//     MODEL_CACHE_ENDPOINT / CLUSTER_CACHE_HEADLESS_SERVICE /
 	//     MODEL_CACHE_OPTIONS on Sharded pods).
 	// Endpoint is a benign URL so the env-injection assertions in the

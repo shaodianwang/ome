@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"maps"
 
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	nodev1 "k8s.io/api/node/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -18,9 +19,8 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/components"
-	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/specdefaults"
-	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
 	"github.com/ome-projects/ome/pkg/placement/capacity"
+	"github.com/ome-projects/ome/pkg/render"
 	"github.com/ome-projects/ome/pkg/runtimeselector"
 )
 
@@ -65,67 +65,63 @@ func (r Resolver) ResolveUnit(ctx context.Context, desired, standing *v1beta1.In
 	if len(cfg.AcceleratorResources) == 0 {
 		return nil, fmt.Errorf("replica rendering requires configured member accelerator resources")
 	}
-	engine, decoder := rt.Engine.DeepCopy(), rt.Decoder.DeepCopy()
-	engineMode, decoderMode, routerMode, err := isvcutils.DetermineDeploymentModes(engine, decoder, rt.Router, rt.Spec, service.Spec.DeploymentMode)
+	// Deployment defaults are applied to copies; rt keeps the merged specs
+	// as the runtime produced them.
+	resolved := &render.Resolved{
+		Model: rt.Model, ModelMeta: rt.ModelMeta,
+		Runtime: rt.Spec, RuntimeName: rt.Name, RuntimeIsCluster: rt.IsCluster,
+		UserSpecifiedRuntime: service.Spec.Runtime != nil && service.Spec.Runtime.Name != "",
+		Specs:                render.Specs{Engine: rt.Engine.DeepCopy(), Decoder: rt.Decoder.DeepCopy(), Router: rt.Router.DeepCopy()},
+	}
+	if err := render.Prepare(resolved, service.Spec.DeploymentMode, deploy); err != nil {
+		return nil, err
+	}
+	in := render.Inputs{Service: service, Client: rt.reads, Runtimes: runtimeselector.New(rt.reads), Accelerators: acceleratorclassselector.New(rt.reads), Config: cfg, Log: logr.Discard()}
+	resolved.Overlays, err = render.ResolveOverlays(ctx, in)
 	if err != nil {
 		return nil, err
 	}
-	specdefaults.Engine(engine, engineMode, deploy)
-	specdefaults.Decoder(decoder, decoderMode, deploy)
-	overlays, err := isvcutils.ResolveOverlays(rt.reads, service)
-	if err != nil {
-		return nil, err
-	}
-	selector := runtimeselector.New(rt.reads)
-	format := selector.GetSupportedModelFormat(ctx, rt.Spec, rt.Model, service.Spec.Runtime != nil && service.Spec.Runtime.Name != "")
-	deps := &components.ComponentDeps{Client: rt.reads, Config: cfg}
-	inputs := components.ComponentInputs{Runtime: rt.Spec, RuntimeName: rt.Name, BaseModel: rt.Model, BaseModelMeta: rt.ModelMeta, ModelFormat: format, Overlays: overlays}
+	engine, decoder := resolved.Specs.Engine, resolved.Specs.Decoder
+	engineMode, decoderMode := resolved.Modes[v1beta1.EngineComponent], resolved.Modes[v1beta1.DecoderComponent]
 	var accelerators []*v1beta1.AcceleratorClass
-	selectInputs := func(component v1beta1.ComponentType, mode constants.DeploymentModeType) (components.ComponentInputs, error) {
-		in := inputs
-		in.DeploymentMode = mode
-		ac, name, err := acceleratorclassselector.New(rt.reads).GetAcceleratorClass(ctx, service, rt.Spec, component)
+	pieceFor := func(component v1beta1.ComponentType) (*render.Piece, error) {
+		p, ac, err := resolved.Piece(ctx, in, component)
 		if err != nil {
-			return in, err
+			return nil, err
 		}
 		if ac != nil {
-			in.AcceleratorClass, in.AcceleratorClassName = &ac.Spec, name
 			identity := ac.DeepCopy()
 			identity.ObjectMeta = renderingIdentity(identity.ObjectMeta)
 			identity.Status = v1beta1.AcceleratorClassStatus{}
 			accelerators = append(accelerators, identity)
 		}
-		return in, nil
+		return p, nil
 	}
-	out := &ResolvedUnit{Runtime: rt, Modes: map[v1beta1.ComponentType]constants.DeploymentModeType{v1beta1.EngineComponent: engineMode}}
-	if decoder != nil {
-		out.Modes[v1beta1.DecoderComponent] = decoderMode
-	}
-	if rt.Router != nil {
-		out.Modes[v1beta1.RouterComponent] = routerMode
-	}
-	engineInputs, err := selectInputs(v1beta1.EngineComponent, engineMode)
+	out := &ResolvedUnit{Runtime: rt, Modes: resolved.Modes}
+	enginePiece, err := pieceFor(v1beta1.EngineComponent)
 	if err != nil {
 		return nil, err
 	}
-	out.Engine, err = components.RenderEngineReplica(ctx, deps, engineInputs, service, engine)
+	engineRendered, err := render.RenderEngine(ctx, enginePiece, service, engine)
 	if err != nil {
 		return nil, err
 	}
+	out.Engine = components.ReplicaTemplatesFrom(engineRendered.Templates)
 	unit := capacity.ReplicaUnit{}
 	unit.Engine, err = out.Engine.PodSets(engineMode, engine.Leader != nil, engine.Worker != nil)
 	if err != nil {
 		return nil, fmt.Errorf("engine demand: %w", err)
 	}
 	if decoder != nil {
-		decoderInputs, err := selectInputs(v1beta1.DecoderComponent, decoderMode)
+		decoderPiece, err := pieceFor(v1beta1.DecoderComponent)
 		if err != nil {
 			return nil, err
 		}
-		templates, err := components.RenderDecoderReplica(ctx, deps, decoderInputs, service, decoder)
+		decoderRendered, err := render.RenderDecoder(ctx, decoderPiece, service, decoder)
 		if err != nil {
 			return nil, err
 		}
+		templates := components.ReplicaTemplatesFrom(decoderRendered.Templates)
 		out.Decoder = &templates
 		unit.Decoder, err = templates.PodSets(decoderMode, decoder.Leader != nil, decoder.Worker != nil)
 		if err != nil {

@@ -29,7 +29,7 @@ type inferenceServiceOpts struct {
 // reconcilers carry their own ModelCache field. Suites that exercise
 // Sharded models need this — the provider's Name flows into the
 // runtimeselector config, and its Config flows into the env-injection
-// path that components/base.go reads.
+// path that render.UpdateEnvVariables reads.
 func WithISVCModelCacheProvider(p sharded.Provider) InferenceServiceOption {
 	return func(o *inferenceServiceOpts) { o.modelCacheProvider = p }
 }

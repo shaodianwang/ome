@@ -31,6 +31,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/specdefaults"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
+	"github.com/ome-projects/ome/pkg/render"
 	"github.com/ome-projects/ome/pkg/runtimeselector"
 	v1beta1testing "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 )
@@ -302,7 +303,7 @@ func renderThroughProjector(t *testing.T, ctx context.Context, c client.Client, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	in := ComponentInputs{BaseModel: model, BaseModelMeta: modelMeta, Runtime: rt, RuntimeName: service.Spec.Runtime.Name, Overlays: overlays}
+	piece := &render.Piece{Client: c, Log: logr.Discard(), InferenceServiceConfig: cfg, BaseModel: model, BaseModelMeta: modelMeta, Runtime: rt, RuntimeName: service.Spec.Runtime.Name, Overlays: overlays}
 	// The router takes no model format and no accelerator class; the engine
 	// and decoder resolve both per component.
 	if tc.component != v1beta1.RouterComponent {
@@ -310,49 +311,32 @@ func renderThroughProjector(t *testing.T, ctx context.Context, c client.Client, 
 		if err != nil {
 			t.Fatal(err)
 		}
-		in.ModelFormat = selector.GetSupportedModelFormat(ctx, rt, model, true)
-		in.AcceleratorClassName = acName
+		piece.SupportedModelFormat = selector.GetSupportedModelFormat(ctx, rt, model, true)
+		piece.AcceleratorClassName = acName
 		if ac != nil {
-			in.AcceleratorClass = &ac.Spec
+			piece.AcceleratorClass = &ac.Spec
 		}
 	}
-	deps := &ComponentDeps{Client: c, Config: cfg}
 
-	var templates ReplicaTemplates
-	var ext *v1beta1.ComponentExtensionSpec
-	var topologyKey, spreadKey *string
-	var spread *v1beta1.TopologySpreadPolicy
-	multiPod := false
+	var rendered render.Rendered
 	switch tc.component {
 	case v1beta1.EngineComponent:
-		in.DeploymentMode = engineMode
-		templates, err = RenderEngineReplica(ctx, deps, in, service, engine)
-		ext, topologyKey, spread, spreadKey = &engine.ComponentExtensionSpec, engine.TopologyKey, engine.TopologySpread, engine.TopologySpreadKey
-		multiPod = engine.Leader != nil && engine.Worker != nil
+		piece.DeploymentMode = engineMode
+		rendered, err = render.RenderEngine(ctx, piece, service, engine)
 	case v1beta1.DecoderComponent:
-		in.DeploymentMode = decoderMode
-		templates, err = RenderDecoderReplica(ctx, deps, in, service, decoder)
-		ext, topologyKey, spread, spreadKey = &decoder.ComponentExtensionSpec, decoder.TopologyKey, decoder.TopologySpread, decoder.TopologySpreadKey
-		multiPod = decoder.Leader != nil && decoder.Worker != nil
+		piece.DeploymentMode = decoderMode
+		rendered, err = render.RenderDecoder(ctx, piece, service, decoder)
 	case v1beta1.RouterComponent:
-		in.DeploymentMode = routerMode
-		r := NewRouter(deps, in, router).(*Router)
-		var meta metav1.ObjectMeta
-		meta, err = r.reconcileObjectMeta(ctx, service)
-		if err == nil {
-			var pod *corev1.PodSpec
-			pod, err = r.reconcilePodSpec(service, &meta)
-			templates = ReplicaTemplates{ObjectMeta: meta, Primary: pod}
-		}
-		ext = &router.ComponentExtensionSpec
+		piece.DeploymentMode = routerMode
+		rendered, err = render.RenderRouter(ctx, piece, service, router)
 	}
 	if err != nil {
 		t.Fatalf("render %s: %v", tc.component, err)
 	}
 	ir, err := irprojector.EnsureInferenceReplica(ctx, irprojector.Params{
-		ISVC: service, Component: tc.component, ComponentExt: ext,
-		ObjectMeta: templates.ObjectMeta, PodSpec: templates.Primary, WorkerPodSpec: templates.Worker, WorkerSize: templates.WorkerSize,
-		MultiPod: multiPod, TopologyKey: topologyKey, TopologySpread: spread, TopologySpreadKey: spreadKey, Client: c,
+		ISVC: service, Component: tc.component, ComponentExt: rendered.ComponentExt,
+		ObjectMeta: rendered.ObjectMeta, PodSpec: rendered.Primary, WorkerPodSpec: rendered.Worker, WorkerSize: rendered.WorkerSize,
+		MultiPod: rendered.MultiPod, TopologyKey: rendered.TopologyKey, TopologySpread: rendered.TopologySpread, TopologySpreadKey: rendered.TopologySpreadKey, Client: c,
 	})
 	if err != nil {
 		t.Fatalf("project %s: %v", tc.component, err)

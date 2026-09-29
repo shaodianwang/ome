@@ -30,6 +30,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/ome-projects/ome/pkg/placement/capacity"
 	"github.com/ome-projects/ome/pkg/placement/protocol"
+	"github.com/ome-projects/ome/pkg/render"
 )
 
 func TestComponentReconcileChecksPlacementDemandBeforeWrites(t *testing.T) {
@@ -97,19 +98,20 @@ func TestComponentReconcileChecksPlacementDemandBeforeWrites(t *testing.T) {
 							service := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: "member-service", Namespace: "team-a", UID: "member-uid",
 								Labels: map[string]string{constants.PlacementOrigin: "source-a"}, Annotations: map[string]string{},
 							}}
-							var templates ReplicaTemplates
+							piece := &render.Piece{Client: cl, InferenceServiceConfig: deps.Config, DeploymentMode: mode}
+							var rendered render.Rendered
 							var err error
 							if component == v1beta1.EngineComponent {
 								service.Spec.Engine = engine
-								templates, err = RenderEngineReplica(t.Context(), deps, in, service, engine)
+								rendered, err = render.RenderEngine(t.Context(), piece, service, engine)
 							} else {
 								service.Spec.Decoder = decoder
-								templates, err = RenderDecoderReplica(t.Context(), deps, in, service, decoder)
+								rendered, err = render.RenderDecoder(t.Context(), piece, service, decoder)
 							}
 							if err != nil {
 								t.Fatal(err)
 							}
-							sets, err := templates.PodSets(mode, true, true)
+							sets, err := ReplicaTemplatesFrom(rendered.Templates).PodSets(mode, true, true)
 							if err != nil {
 								t.Fatal(err)
 							}

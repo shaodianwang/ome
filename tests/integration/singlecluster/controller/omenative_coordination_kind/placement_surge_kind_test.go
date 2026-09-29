@@ -24,6 +24,7 @@ import (
 	"github.com/ome-projects/ome/pkg/placement/capacity"
 	"github.com/ome-projects/ome/pkg/placement/protocol"
 	"github.com/ome-projects/ome/pkg/placement/resolution"
+	"github.com/ome-projects/ome/pkg/render"
 	"github.com/ome-projects/ome/pkg/runtimeselector"
 	"github.com/ome-projects/ome/tests/integration/kindfix"
 	"github.com/ome-projects/ome/tests/integration/kindutil"
@@ -347,12 +348,13 @@ func fixtureEngineRenderingHash(g Gomega, service *v1beta1.InferenceService) str
 	cfg, deploy, err := controllerconfig.RenderingConfig(cm)
 	g.Expect(err).NotTo(HaveOccurred())
 	specdefaults.Engine(rt.Engine, constants.OMENative, deploy)
-	templates, err := components.RenderEngineReplica(suiteCtx, &components.ComponentDeps{Client: k8sClient, Config: cfg}, components.ComponentInputs{
-		DeploymentMode: constants.OMENative, Runtime: rt.Spec, RuntimeName: rt.Name, BaseModel: rt.Model, BaseModelMeta: rt.ModelMeta,
-		ModelFormat: runtimeselector.New(k8sClient).GetSupportedModelFormat(suiteCtx, rt.Spec, rt.Model, true),
+	rendered, err := render.RenderEngine(suiteCtx, &render.Piece{
+		Client: k8sClient, InferenceServiceConfig: cfg, DeploymentMode: constants.OMENative,
+		Runtime: rt.Spec, RuntimeName: rt.Name, BaseModel: rt.Model, BaseModelMeta: rt.ModelMeta,
+		SupportedModelFormat: runtimeselector.New(k8sClient).GetSupportedModelFormat(suiteCtx, rt.Spec, rt.Model, true),
 	}, service, rt.Engine)
 	g.Expect(err).NotTo(HaveOccurred())
-	sets, err := templates.PodSets(constants.OMENative, false, false)
+	sets, err := components.ReplicaTemplatesFrom(rendered.Templates).PodSets(constants.OMENative, false, false)
 	g.Expect(err).NotTo(HaveOccurred())
 	hash, err := capacity.ComponentFingerprint(suiteCtx, k8sClient, v1beta1.EngineComponent, constants.OMENative, sets)
 	g.Expect(err).NotTo(HaveOccurred())

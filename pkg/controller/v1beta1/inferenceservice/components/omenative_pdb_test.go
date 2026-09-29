@@ -24,6 +24,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/pdb"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/render"
 )
 
 func TestReconcileOMENativePDBUsesConfiguredFallback(t *testing.T) {
@@ -392,7 +393,7 @@ func omeNativePDBTestScheme(t *testing.T) *runtime.Scheme {
 }
 
 func omeNativePDBTestBase(cl client.Client, scheme *runtime.Scheme, config *controllerconfig.InferenceServicesConfig) *BaseComponentFields {
-	return &BaseComponentFields{Client: cl, Scheme: scheme, InferenceServiceConfig: config}
+	return &BaseComponentFields{Piece: render.Piece{InferenceServiceConfig: config}, Client: cl, Scheme: scheme}
 }
 
 func omeNativePDBTestObjects(component v1beta1.ComponentType) (*v1beta1.InferenceService, metav1.ObjectMeta) {

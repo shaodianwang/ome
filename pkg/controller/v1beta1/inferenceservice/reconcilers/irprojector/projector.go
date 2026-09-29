@@ -52,6 +52,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/placement/protocol"
+	"github.com/ome-projects/ome/pkg/render"
 )
 
 // IsIRManagedComponent returns true when the given Component should be
@@ -688,52 +689,17 @@ func replicasFromComponentExt(c *v1beta1.ComponentExtensionSpec) *int32 {
 	return &r
 }
 
-// runnersFromParams produces the IR.Spec.Runners projection. Single-
-// pod Components emit one Runner of {Name: default, Size: 1};
-// multi-pod Components emit {leader, Size=1} + {worker, Size=N}.
-// Mirrors the workload.BuildPlan projection (core/params.go:
-// runnersForDesired) so the workload dispatcher sees the same Runner
-// shape regardless of which adapter built the IR.
-//
-// The Runner.Template carries the rendered PodSpec PLUS the
-// per-Component ObjectMeta (labels + annotations). The IR controller's
-// desiredFromIR projection reads back PodSpec + ObjectMeta from
-// these templates into WorkloadDesiredSpec.PodSpec /
-// PodTemplateObjectMeta — that's how the rendered template flows
-// into the workload renderer without re-rendering.
+// runnersFromParams produces the IR.Spec.Runners projection: the rendered
+// per-Component templates as the runner list the IR controller reads back
+// without re-rendering.
 func runnersFromParams(p Params) []v1beta1.Runner {
-	tmplMeta := templateObjectMeta(p)
-	if !p.MultiPod {
-		return []v1beta1.Runner{{
-			Name: v1beta1.RunnerNameDefault,
-			Size: 1,
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: tmplMeta,
-				Spec:       *p.PodSpec,
-			},
-		}}
-	}
-	out := []v1beta1.Runner{
-		{
-			Name: v1beta1.RunnerNameLeader,
-			Size: 1,
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: tmplMeta,
-				Spec:       *p.PodSpec,
-			},
-		},
-	}
-	if p.WorkerPodSpec != nil {
-		out = append(out, v1beta1.Runner{
-			Name: v1beta1.RunnerNameWorker,
-			Size: int32(p.WorkerSize),
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: tmplMeta,
-				Spec:       *p.WorkerPodSpec,
-			},
-		})
-	}
-	return out
+	return render.Runners(render.Templates{
+		ObjectMeta: p.ObjectMeta,
+		Primary:    p.PodSpec,
+		Worker:     p.WorkerPodSpec,
+		WorkerSize: p.WorkerSize,
+		MultiPod:   p.MultiPod,
+	}, p.ComponentExt)
 }
 
 // objectScopedAnnotationKeys returns sorted ISVC annotation keys that were not declared
@@ -758,60 +724,6 @@ func objectScopedAnnotationKeys(p Params) []string {
 	}
 	sort.Strings(keys)
 	return keys
-}
-
-// templateObjectMeta builds the PodTemplateSpec.ObjectMeta stamped on
-// every Runner. It merges TWO sources:
-//
-//  1. p.ObjectMeta.{Labels,Annotations} — the rendered per-Component
-//     metadata the dispatch site computed via reconcileObjectMeta
-//     (which already folds in BaseModel / ServingRuntime / ISVC-level
-//     labels + annotations).
-//
-//  2. p.ComponentExt.{Labels,Annotations} — the user-declared
-//     per-Component overrides from spec.<component>.{labels,annotations}.
-//     These take precedence (last-write-wins) so an operator bumping
-//     spec.engine.annotations to force a rollout sees that key land on
-//     the pod template, which in turn flips the revision hash and
-//     triggers the ControllerRevision / rollout machinery the IR
-//     controller drives. Mirrors the components/{engine,decoder,router}.go
-//     processAnnotations / processLabels merge order.
-//
-// Name / Namespace / GenerateName / CreationTimestamp / ResourceVersion
-// / UID are intentionally dropped — those are owner-object fields and
-// stamping them on the template would leak the per-Component ObjectMeta
-// identity onto every emitted pod.
-//
-// Defensive against caller bugs: even when the dispatch site forgets
-// to merge p.ComponentExt.{Labels,Annotations} into p.ObjectMeta, the
-// projector still emits them on the template. Annotation-only ISVC
-// edits (the canonical no-image-bump rollout trigger) only work if
-// the projector treats ComponentExt as authoritative for these keys.
-func templateObjectMeta(p Params) metav1.ObjectMeta {
-	labels := copyMap(p.ObjectMeta.Labels)
-	annotations := copyMap(p.ObjectMeta.Annotations)
-	if p.ComponentExt != nil {
-		if len(p.ComponentExt.Labels) > 0 {
-			if labels == nil {
-				labels = make(map[string]string, len(p.ComponentExt.Labels))
-			}
-			for k, v := range p.ComponentExt.Labels {
-				labels[k] = v
-			}
-		}
-		if len(p.ComponentExt.Annotations) > 0 {
-			if annotations == nil {
-				annotations = make(map[string]string, len(p.ComponentExt.Annotations))
-			}
-			for k, v := range p.ComponentExt.Annotations {
-				annotations[k] = v
-			}
-		}
-	}
-	return metav1.ObjectMeta{
-		Labels:      labels,
-		Annotations: annotations,
-	}
 }
 
 // revisionHistoryLimitFromISVC projects the operator-facing

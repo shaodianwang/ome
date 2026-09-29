@@ -24,6 +24,7 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
+	"github.com/ome-projects/ome/pkg/render"
 )
 
 func TestRawComponentDeployment_UsesTypedKEDAForEveryComponent(t *testing.T) {
@@ -147,7 +148,7 @@ func TestWriteComponentAutoscalerStatus_RawCompatibilityResolution(t *testing.T)
 					},
 				},
 			}
-			base := &BaseComponentFields{Client: cl, DeploymentMode: constants.RawDeployment}
+			base := &BaseComponentFields{Piece: render.Piece{DeploymentMode: constants.RawDeployment}, Client: cl}
 			objectMeta := metav1.ObjectMeta{Name: "status-raw-engine", Namespace: "default", Annotations: tt.annotations}
 
 			err := writeComponentAutoscalerStatus(base, isvc, v1beta1.EngineComponent, objectMeta, &v1beta1.ComponentExtensionSpec{})

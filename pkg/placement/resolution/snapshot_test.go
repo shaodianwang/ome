@@ -157,6 +157,23 @@ func TestSnapshotReadFailures(t *testing.T) {
 	}
 }
 
+// TestSnapshotRemembersReadFailure pins that a failed read poisons the
+// observation even when the caller treats the lookup as optional and goes on.
+func TestSnapshotRemembersReadFailure(t *testing.T) {
+	want := errors.New("member API unavailable")
+	base := fake.NewClientBuilder().WithScheme(runtimeScheme(t)).WithObjects(snapshotObject()).Build()
+	c := interceptor.NewClient(base, interceptor.Funcs{Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+		return want
+	}})
+	reads := newSnapshot(c, t.Context())
+	if err := readSnapshot(reads, false); !errors.Is(err, want) {
+		t.Fatalf("read error = %v, want %v", err, want)
+	}
+	if err := reads.check(t.Context()); !errors.Is(err, want) {
+		t.Fatalf("check after a dropped read error = %v, want %v", err, want)
+	}
+}
+
 func TestSnapshotContexts(t *testing.T) {
 	type contextKey struct{}
 	for _, list := range []bool{false, true} {

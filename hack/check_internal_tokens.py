@@ -70,7 +70,6 @@ GUARDED_IMPORTS = {
         "pkg/controller/v1beta1/basemodel/controller_test.go",
         "pkg/controller/v1beta1/controllerconfig/configmap.go",
         "pkg/controller/v1beta1/controllerconfig/configmap_test.go",
-        "pkg/controller/v1beta1/inferenceservice/components/base.go",
         "pkg/controller/v1beta1/inferenceservice/components/base_test.go",
         "pkg/controller/v1beta1/inferenceservice/controller.go",
     },

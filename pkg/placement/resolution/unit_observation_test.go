@@ -24,31 +24,29 @@ func TestResolveUnitRejectsIncompleteReads(t *testing.T) {
 		operation string
 	}{
 		{name: "config read fails", operation: "config-error"},
-		{name: "optional service read fails", operation: "service-error"},
 		{name: "config changes during rendering", operation: "config-change"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			f, cm := newUnitFixture()
+			unitAccelerator(&f)
 			changed := false
 			cl := unitClient(t, f, interceptor.Funcs{Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
 				if _, config := object.(*corev1.ConfigMap); config && tt.operation == "config-error" {
 					return errors.New("config read unavailable")
 				}
-				if _, service := object.(*corev1.Service); service {
-					if tt.operation == "service-error" {
-						return errors.New("service read unavailable")
+				// The accelerator class is read while the engine's render inputs
+				// are built: after the rendering config, before the observation
+				// is checked.
+				if _, accelerator := object.(*v1beta1.AcceleratorClass); accelerator && tt.operation == "config-change" && !changed {
+					fresh := &corev1.ConfigMap{}
+					if err := cl.Get(ctx, client.ObjectKeyFromObject(cm), fresh); err != nil {
+						return err
 					}
-					if tt.operation == "config-change" && !changed {
-						fresh := &corev1.ConfigMap{}
-						if err := cl.Get(ctx, client.ObjectKeyFromObject(cm), fresh); err != nil {
-							return err
-						}
-						fresh.Data[controllerconfig.AcceleratorResourcesConfigName] = `[]`
-						if err := cl.Update(ctx, fresh); err != nil {
-							return err
-						}
-						changed = true
+					fresh.Data[controllerconfig.AcceleratorResourcesConfigName] = `[]`
+					if err := cl.Update(ctx, fresh); err != nil {
+						return err
 					}
+					changed = true
 				}
 				return cl.Get(ctx, key, object, opts...)
 			}})

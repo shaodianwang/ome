@@ -34,6 +34,7 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/canary"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
+	"github.com/ome-projects/ome/pkg/render"
 	"github.com/ome-projects/ome/pkg/runtimeselector"
 	omeTesting "github.com/ome-projects/ome/pkg/utils/testing"
 )
@@ -952,63 +953,6 @@ func determineEngineDeploymentMode(engineSpec *v1beta1.EngineSpec) constants.Dep
 	return constants.RawDeployment
 }
 
-func TestValidateResolvedRuntimeEnabled(t *testing.T) {
-	disabled := true
-	tests := []struct {
-		name        string
-		runtimeName string
-		runtimeSpec *v1beta1.ServingRuntimeSpec
-		isCluster   bool
-		wantErr     bool
-	}{
-		{
-			name:        "nil runtime spec",
-			runtimeName: "nil-runtime",
-		},
-		{
-			name:        "enabled runtime",
-			runtimeName: "enabled-runtime",
-			runtimeSpec: &v1beta1.ServingRuntimeSpec{},
-		},
-		{
-			name:        "disabled namespaced runtime",
-			runtimeName: "namespaced-runtime",
-			runtimeSpec: &v1beta1.ServingRuntimeSpec{Disabled: &disabled},
-			wantErr:     true,
-		},
-		{
-			name:        "disabled cluster runtime",
-			runtimeName: "cluster-runtime",
-			runtimeSpec: &v1beta1.ServingRuntimeSpec{Disabled: &disabled},
-			isCluster:   true,
-			wantErr:     true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := validateResolvedRuntimeEnabled(tt.runtimeSpec, tt.runtimeName, tt.isCluster)
-			if !tt.wantErr {
-				if err != nil {
-					t.Fatalf("validateResolvedRuntimeEnabled() error = %v", err)
-				}
-				return
-			}
-
-			var disabledErr *runtimeselector.RuntimeDisabledError
-			if !errors.As(err, &disabledErr) {
-				t.Fatalf("validateResolvedRuntimeEnabled() error = %T, want *runtimeselector.RuntimeDisabledError", err)
-			}
-			if disabledErr.RuntimeName != tt.runtimeName {
-				t.Errorf("RuntimeName = %q, want %q", disabledErr.RuntimeName, tt.runtimeName)
-			}
-			if disabledErr.IsCluster != tt.isCluster {
-				t.Errorf("IsCluster = %t, want %t", disabledErr.IsCluster, tt.isCluster)
-			}
-		})
-	}
-}
-
 func TestEnsureIngressDisableAnnotation(t *testing.T) {
 	tests := []struct {
 		name                string
@@ -1366,6 +1310,60 @@ func TestMarkRuntimeUnresolvedEventPreservesPercent(t *testing.T) {
 		g.Expect(ev).NotTo(gomega.ContainSubstring("MISSING"))
 	default:
 		t.Fatal("expected a RuntimeNotFound event")
+	}
+}
+
+// Every error the named-runtime validation reports, other than the advisory
+// mismatch and a missing runtime, is a validation failure of the service's
+// own configuration; the reason it is reported under must not depend on the
+// error's type.
+func TestReportResolveErrorEvents(t *testing.T) {
+	model := &v1beta1.BaseModelSpec{ModelFormat: v1beta1.ModelFormat{Name: "pytorch"}}
+	inheritance := fmt.Errorf("fetch parent %q: %w", "parent-a", errors.New("parent runtime not found"))
+	for _, tt := range []struct {
+		name        string
+		runtime     bool
+		model       bool
+		err         error
+		wantReason  string
+		wantMessage string
+	}{
+		{name: "validation error other than not found", runtime: true, model: true, err: inheritance,
+			wantReason: "RuntimeValidationError", wantMessage: "Runtime runtime-a does not support model model-a: fetch parent"},
+		{name: "disabled runtime reported by validation", runtime: true, model: true, err: &runtimeselector.RuntimeDisabledError{RuntimeName: "runtime-a", IsCluster: true},
+			wantReason: "RuntimeValidationError", wantMessage: "Runtime runtime-a does not support model model-a"},
+		{name: "disabled runtime without a model", runtime: true, err: &runtimeselector.RuntimeDisabledError{RuntimeName: "runtime-a", IsCluster: true},
+			wantReason: "RuntimeValidationError", wantMessage: "Runtime runtime-a failed validation"},
+		{name: "runtime read error without a model", runtime: true, err: inheritance,
+			wantReason: "RuntimeFetchError", wantMessage: "fetch parent"},
+		{name: "merge failure", runtime: true, model: true, err: &render.MergeError{Err: errors.New("failed to merge engine specs")},
+			wantReason: "MergeSpecsError", wantMessage: "failed to merge engine specs"},
+		{name: "auto-selection error", model: true, err: errors.New("failed to fetch runtimes"),
+			wantReason: "RuntimeSelectionError", wantMessage: "Failed to find runtime for model model-a: failed to fetch runtimes"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewGomegaWithT(t)
+			isvc := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: "service", Namespace: "team-a"}}
+			in := render.Inputs{Service: isvc}
+			if tt.runtime {
+				isvc.Spec.Runtime = &v1beta1.ServingRuntimeRef{Name: "runtime-a"}
+			}
+			if tt.model {
+				isvc.Spec.Model = &v1beta1.ModelRef{Name: "model-a"}
+				in.Model = model
+			}
+			rec := record.NewFakeRecorder(10)
+			r := &InferenceServiceReconciler{Log: ctrl.Log.WithName("test"), Recorder: rec}
+			_, err := r.reportResolveError(isvc, constants.RawDeployment, in, tt.err)
+			g.Expect(err).To(gomega.HaveOccurred())
+			select {
+			case ev := <-rec.Events:
+				g.Expect(ev).To(gomega.HavePrefix("Warning " + tt.wantReason + " "))
+				g.Expect(ev).To(gomega.ContainSubstring(tt.wantMessage))
+			default:
+				t.Fatalf("expected a %s event", tt.wantReason)
+			}
+		})
 	}
 }
 

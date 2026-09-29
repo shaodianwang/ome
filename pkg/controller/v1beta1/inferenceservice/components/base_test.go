@@ -18,7 +18,16 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/basemodel/backends/sharded"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/status"
+	"github.com/ome-projects/ome/pkg/render"
 )
+
+// The rendering library compares the configured provider against the API's
+// provider name; the backend's constant must keep the same value.
+func TestClusterCacheProviderNameMatchesTheAPI(t *testing.T) {
+	if sharded.ProviderClusterCache != string(v1beta1.ModelCacheProviderClusterCache) {
+		t.Fatalf("provider names differ: backend %q, API %q", sharded.ProviderClusterCache, v1beta1.ModelCacheProviderClusterCache)
+	}
+}
 
 func TestUpdatePodSpecNodeSelector(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
@@ -130,12 +139,12 @@ func TestUpdatePodSpecNodeSelector(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Create BaseComponentFields
-			b := &BaseComponentFields{
+			b := &BaseComponentFields{Piece: render.Piece{
 				BaseModel:                         tt.baseModel,
 				BaseModelMeta:                     tt.baseModelMeta,
 				FineTunedServingWithMergedWeights: tt.fineTunedServingWithMergedWeights,
 				Log:                               ctrl.Log.WithName("test"),
-			}
+			}}
 
 			// Create pod spec with existing node selector if provided
 			podSpec := &v1.PodSpec{}
@@ -195,7 +204,7 @@ func TestUpdatePodSpecNodeSelector(t *testing.T) {
 func TestUpdatePodSpecNodeSelectorWithoutModel(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 
-	b := &BaseComponentFields{
+	b := &BaseComponentFields{Piece: render.Piece{
 		Runtime: &v1beta1.ServingRuntimeSpec{
 			ServingRuntimePodSpec: v1beta1.ServingRuntimePodSpec{
 				NodeSelector: map[string]string{
@@ -204,7 +213,7 @@ func TestUpdatePodSpecNodeSelectorWithoutModel(t *testing.T) {
 				},
 			},
 		},
-	}
+	}}
 	isvc := &v1beta1.InferenceService{
 		Spec: v1beta1.InferenceServiceSpec{
 			Engine: &v1beta1.EngineSpec{
@@ -230,7 +239,7 @@ func TestUpdateEnvVariablesForShardedModel(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 
 	storageURI := "s3://bucket/sharded-model"
-	b := &BaseComponentFields{
+	b := &BaseComponentFields{Piece: render.Piece{
 		BaseModel: &v1beta1.BaseModelSpec{
 			Storage: &v1beta1.StorageSpec{
 				StorageUri: &storageURI,
@@ -247,7 +256,7 @@ func TestUpdateEnvVariablesForShardedModel(t *testing.T) {
 			},
 		},
 		Log: ctrl.Log.WithName("test"),
-	}
+	}}
 	container := &v1.Container{}
 	isvc := &v1beta1.InferenceService{
 		ObjectMeta: metav1.ObjectMeta{
@@ -284,7 +293,7 @@ func TestUpdateModelMountsSkipShardedModel(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 
 	modelPath := "/models/sharded-model"
-	b := &BaseComponentFields{
+	b := &BaseComponentFields{Piece: render.Piece{
 		BaseModel: &v1beta1.BaseModelSpec{
 			Storage: &v1beta1.StorageSpec{
 				Path: &modelPath,
@@ -296,7 +305,7 @@ func TestUpdateModelMountsSkipShardedModel(t *testing.T) {
 			Namespace: "default",
 		},
 		Log: ctrl.Log.WithName("test"),
-	}
+	}}
 	isvc := &v1beta1.InferenceService{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-isvc",
@@ -322,7 +331,7 @@ func TestProcessBaseLabels(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 
 	// Test that ProcessBaseLabels adds the correct labels
-	b := &BaseComponentFields{
+	b := &BaseComponentFields{Piece: render.Piece{
 		BaseModel: &v1beta1.BaseModelSpec{
 			ModelExtensionSpec: v1beta1.ModelExtensionSpec{
 				Vendor: stringPtr("meta"),
@@ -338,7 +347,7 @@ func TestProcessBaseLabels(t *testing.T) {
 		RuntimeName:      "test-runtime",
 		FineTunedServing: true,
 		Log:              logr.Discard(),
-	}
+	}}
 
 	isvc := &v1beta1.InferenceService{
 		ObjectMeta: metav1.ObjectMeta{
@@ -372,7 +381,7 @@ func TestProcessBaseLabels(t *testing.T) {
 // map, never a type-assertion panic).
 func TestProcessBaseAnnotationsFTStrategy(t *testing.T) {
 	mkFields := func(hyperParameters string) *BaseComponentFields {
-		return &BaseComponentFields{
+		return &BaseComponentFields{Piece: render.Piece{
 			FineTunedServing: true,
 			FineTunedWeights: []*v1beta1.FineTunedWeight{{
 				ObjectMeta: metav1.ObjectMeta{Name: "ftw-1"},
@@ -381,7 +390,7 @@ func TestProcessBaseAnnotationsFTStrategy(t *testing.T) {
 				},
 			}},
 			Log: logr.Discard(),
-		}
+		}}
 	}
 	isvc := &v1beta1.InferenceService{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-isvc", Namespace: "default"},
@@ -433,7 +442,7 @@ func TestProcessBaseAnnotationsFTStrategy(t *testing.T) {
 // hyper-parameter is a returned error rather than a reconcile panic.
 func TestProcessBaseLabelsNonStringStrategy(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
-	b := &BaseComponentFields{
+	b := &BaseComponentFields{Piece: render.Piece{
 		FineTunedServing: true,
 		FineTunedWeights: []*v1beta1.FineTunedWeight{{
 			ObjectMeta: metav1.ObjectMeta{Name: "ftw-1"},
@@ -442,7 +451,7 @@ func TestProcessBaseLabelsNonStringStrategy(t *testing.T) {
 			},
 		}},
 		Log: logr.Discard(),
-	}
+	}}
 	isvc := &v1beta1.InferenceService{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-isvc", Namespace: "default"},
 	}
@@ -459,10 +468,10 @@ func TestProcessBaseLabelsNonStringStrategy(t *testing.T) {
 // the live ISVC label map.
 func TestProcessComponentLabelsDoesNotMutateISVCLabels(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
-	b := &BaseComponentFields{
+	b := &BaseComponentFields{Piece: render.Piece{
 		RuntimeName: "test-runtime",
 		Log:         logr.Discard(),
-	}
+	}}
 	isvc := &v1beta1.InferenceService{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-isvc",
@@ -481,7 +490,7 @@ func TestProcessComponentLabelsDoesNotMutateISVCLabels(t *testing.T) {
 
 func TestProcessComponentAnnotationsReservesInPlaceImageTransition(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
-	b := &BaseComponentFields{RuntimeName: "test-runtime", Log: logr.Discard()}
+	b := &BaseComponentFields{Piece: render.Piece{RuntimeName: "test-runtime", Log: logr.Discard()}}
 	isvc := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{
 		Name: "test-isvc", Namespace: "default",
 		Annotations: map[string]string{
@@ -567,10 +576,9 @@ func TestUpdateComponentStatusLeanModel(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cl := ctrlclientfake.NewClientBuilder().WithScheme(scheme).Build()
 			b := &BaseComponentFields{
-				Client:         cl,
-				StatusManager:  status.NewStatusReconciler(),
-				DeploymentMode: constants.RawDeployment,
-				Log:            logr.Discard(),
+				Piece:         render.Piece{DeploymentMode: constants.RawDeployment, Log: logr.Discard()},
+				Client:        cl,
+				StatusManager: status.NewStatusReconciler(),
 			}
 
 			err := UpdateComponentStatus(b, tt.isvc, v1beta1.EngineComponent, metav1.ObjectMeta{}, &v1beta1.ComponentExtensionSpec{})

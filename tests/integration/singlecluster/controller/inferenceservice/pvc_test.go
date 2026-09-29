@@ -31,9 +31,9 @@ import (
 //     label (PVCs aren't bound to specific nodes; the model-agent
 //     doesn't label nodes for PVC-backed models)
 //
-// All gated by components/base.go's `if pvc := parsePVCComponents(b);
-// pvc != nil` branch in UpdateVolumeMounts/UpdateEnvVariables/
-// UpdatePodSpecVolumes/UpdatePodSpecNodeSelector.
+// All gated by the PVC branches in pkg/render: `parsePVCComponents(p)` in
+// UpdateVolumeMounts / UpdatePodSpecVolumes and `isPVCBaseModel(p)` in
+// UpdateEnvVariables (through modelPathEnvValue) / UpdatePodSpecNodeSelector.
 var _ = ginkgo.Describe("InferenceService + PVC end-to-end", ginkgo.Ordered, func() {
 	var ns *corev1.Namespace
 

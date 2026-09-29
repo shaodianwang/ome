@@ -106,9 +106,9 @@ func (w *ClusterServingRuntimeWrapper) Container(c corev1.Container) *ClusterSer
 // runtime catalogs put a single-node engine container. The
 // ISVC's Engine spec is then a stub (`Engine(&v1beta1.EngineSpec{})`)
 // to opt into the engine component, and MergeRuntimeSpecs combines
-// the two. UpdateVolumeMounts in components/base.go only injects
-// model-volume mounts onto the merged Runner.Container, so this is
-// also the only place that picks up PVC volume mounts.
+// the two. render.UpdateVolumeMounts only injects model-volume mounts
+// onto the merged Runner.Container, so this is also the only place
+// that picks up PVC volume mounts.
 func (w *ClusterServingRuntimeWrapper) EngineRunner(c corev1.Container) *ClusterServingRuntimeWrapper {
 	if w.Spec.EngineConfig == nil {
 		w.Spec.EngineConfig = &v1beta1.EngineSpec{}

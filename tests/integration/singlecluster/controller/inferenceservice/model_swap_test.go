@@ -29,14 +29,13 @@ import (
 // runtime selector + ValidateRuntime gate every transition; a swap
 // to a distribution the runtime doesn't support stalls the rollout.
 //
-// These specs are coverage for the model-swap surface that
-// pkg/controller/v1beta1/inferenceservice/components/base.go branches
-// produce, exercising both:
+// These specs are coverage for the model-swap surface that the pkg/render
+// branches produce, exercising both:
 //
-//   - the env-injection branch in UpdateEnvVariables / modelCacheEnvVars
+//   - the env-injection branch in UpdateEnvVariables / clusterCacheEnvVars
 //     (Sharded only; PVC + per-node skip cache envs entirely)
-//   - the volume branch in AppendPodSpec (PVC adds the PVC volume +
-//     mount; Sharded carries no model volume)
+//   - the volume branch in UpdatePodSpecVolumes / UpdateVolumeMounts (PVC
+//     adds the PVC volume + mount; Sharded carries no model volume)
 //
 // Existing distribution_change_test.go in basemodel covers the CBM-side
 // branch flip; this is the ISVC-side mirror.

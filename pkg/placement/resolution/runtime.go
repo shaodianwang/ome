@@ -4,6 +4,7 @@ package resolution
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	isvcutils "github.com/ome-projects/ome/pkg/controller/v1beta1/inferenceservice/utils"
+	"github.com/ome-projects/ome/pkg/render"
 	"github.com/ome-projects/ome/pkg/runtimerevision"
 	"github.com/ome-projects/ome/pkg/runtimeselector"
 )
@@ -78,15 +80,16 @@ func (r Resolver) Resolve(ctx context.Context, desired, standing *v1beta1.Infere
 	if err := readPinState(ctx, reads, service, standing); err != nil {
 		return nil, err
 	}
-	model, modelMeta, modelStatus, err := isvcutils.ReconcileBaseModelWithStatus(reads, service)
+	model, modelMeta, modelStatus, err := render.ResolveModel(ctx, render.Inputs{Service: service, Client: reads})
 	if err != nil {
+		var notReady *render.ModelNotReadyError
+		if errors.As(err, &notReady) {
+			return nil, fmt.Errorf("sharded model is not ready: %s", notReady.Message)
+		}
 		return nil, err
 	}
 	config := runtimeselector.NewConfig(reads)
 	if isvcutils.IsShardedBaseModel(model) {
-		if ready, reason := isvcutils.ShardedBaseModelReady(modelStatus, modelMeta.Generation); !ready {
-			return nil, fmt.Errorf("sharded model is not ready: %s", reason)
-		}
 		if r.OperatorNamespace == "" {
 			return nil, fmt.Errorf("sharded runtime resolution requires the member operator namespace")
 		}
@@ -143,17 +146,22 @@ func (r Resolver) Resolve(ctx context.Context, desired, standing *v1beta1.Infere
 	if out.Spec == nil {
 		return nil, fmt.Errorf("runtime resolution returned no spec")
 	}
-	if out.Spec.IsDisabled() {
-		return nil, &runtimeselector.RuntimeDisabledError{RuntimeName: out.Name, IsCluster: out.IsCluster}
+	// The model and the runtime are already read; overlays are read by the
+	// rendering step, so the preflight's dependency set is the runtime inputs.
+	resolved, err := render.Resolve(ctx, render.Inputs{
+		Service: service, Client: reads, Runtimes: selector, Log: logr.Discard(),
+		Model: model, ModelMeta: modelMeta, ModelStatus: modelStatus, ModelRead: true,
+		OverlaysRead: true,
+		Runtime:      out.Spec, RuntimeName: out.Name, RuntimeIsCluster: out.IsCluster,
+	})
+	if err != nil {
+		return nil, err
 	}
 	out.Hash, _, err = runtimerevision.Hash(out.Spec)
 	if err != nil {
 		return nil, err
 	}
-	out.Engine, out.Decoder, out.Router, err = isvcutils.MergeRuntimeSpecs(service, out.Spec, logr.Discard())
-	if err != nil {
-		return nil, err
-	}
+	out.Engine, out.Decoder, out.Router = resolved.Specs.Engine, resolved.Specs.Decoder, resolved.Specs.Router
 	if err := out.Check(ctx); err != nil {
 		return nil, err
 	}
