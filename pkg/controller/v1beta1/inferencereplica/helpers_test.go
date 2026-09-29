@@ -458,11 +458,11 @@ func (r podListFailingReader) List(ctx context.Context, list client.ObjectList, 
 func podForIR(ir *v1beta1.InferenceReplica, instanceIdx int32, runnerName string, ordinal int32, ready, serving bool) *corev1.Pod {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      query.PodName(ir.Spec.ParentRef.Name, v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component), instanceIdx, runnerName, ordinal),
+			Name:      query.PodName(ir.NamePrefix(), v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component), instanceIdx, runnerName, ordinal),
 			Namespace: ir.Namespace,
 			UID:       types.UID(fmt.Sprintf("%s-%d-%s-%d-uid", ir.Name, instanceIdx, runnerName, ordinal)),
 			Labels: map[string]string{
-				constants.InferenceServicePodLabelKey: ir.Spec.ParentRef.Name,
+				constants.InferenceServicePodLabelKey: ir.NamePrefix(),
 				constants.OMEComponentLabel:           string(ir.Spec.Component),
 				query.LabelInstanceIdx:                intToLabel(int64(instanceIdx)),
 				query.LabelInstanceIncarnation:        "1",

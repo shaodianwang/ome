@@ -2,6 +2,7 @@ package inferencereplica
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -10,6 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -24,6 +26,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
+	"github.com/ome-projects/ome/pkg/runtimeinheritance"
 )
 
 // irKind is the InferenceReplica Kind as it appears in owner references
@@ -535,4 +538,138 @@ func workloadKeyFromPod(pod *corev1.Pod) (string, workloadtypes.ComponentType, i
 		return "", "", 0, false
 	}
 	return isvc, workloadtypes.ComponentType(comp), idx, true
+}
+
+// Cache field indexes over InferenceReplicas for the runtime and model
+// watches. Like irUIDIndexField, the names are internal cache identifiers,
+// not Kubernetes fields.
+const (
+	// irRuntimeRefIndexField indexes replicas by spec.runtimeRef.name.
+	irRuntimeRefIndexField = "ome.io/inferencereplica-runtime-ref"
+	// irModelRefIndexField indexes replicas by spec.modelRef.name.
+	irModelRefIndexField = "ome.io/inferencereplica-model-ref"
+	// irRuntimeAutoSelectIndexField indexes, under irRuntimeAutoSelected,
+	// the replicas whose runtime is selected for their model: spec.modelRef
+	// set and spec.runtimeRef absent. Any runtime change can change that
+	// selection.
+	irRuntimeAutoSelectIndexField = "ome.io/inferencereplica-runtime-auto-select"
+	irRuntimeAutoSelected         = "true"
+)
+
+// irRuntimeRefIndexExtractor indexes a replica by the runtime it names.
+func irRuntimeRefIndexExtractor(obj client.Object) []string {
+	ir, ok := obj.(*v1beta1.InferenceReplica)
+	if !ok || ir.Spec.RuntimeRef == nil || ir.Spec.RuntimeRef.Name == "" {
+		return nil
+	}
+	return []string{ir.Spec.RuntimeRef.Name}
+}
+
+// irModelRefIndexExtractor indexes a replica by the model it names.
+func irModelRefIndexExtractor(obj client.Object) []string {
+	ir, ok := obj.(*v1beta1.InferenceReplica)
+	if !ok || ir.Spec.ModelRef == nil || ir.Spec.ModelRef.Name == "" {
+		return nil
+	}
+	return []string{ir.Spec.ModelRef.Name}
+}
+
+// irRuntimeAutoSelectIndexExtractor indexes a replica whose runtime is
+// selected for its model.
+func irRuntimeAutoSelectIndexExtractor(obj client.Object) []string {
+	ir, ok := obj.(*v1beta1.InferenceReplica)
+	if !ok || ir.Spec.ModelRef == nil || ir.Spec.RuntimeRef != nil {
+		return nil
+	}
+	return []string{irRuntimeAutoSelected}
+}
+
+// registerRefIndexes installs the runtime and model reference indexes the
+// watch mappers list through.
+func registerRefIndexes(ctx context.Context, indexer client.FieldIndexer) error {
+	for field, extractor := range map[string]client.IndexerFunc{
+		irRuntimeRefIndexField:        irRuntimeRefIndexExtractor,
+		irModelRefIndexField:          irModelRefIndexExtractor,
+		irRuntimeAutoSelectIndexField: irRuntimeAutoSelectIndexExtractor,
+	} {
+		if err := indexer.IndexField(ctx, &v1beta1.InferenceReplica{}, field, extractor); err != nil {
+			return fmt.Errorf("register InferenceReplica index %s: %w", field, err)
+		}
+	}
+	return nil
+}
+
+// runtimeToReplicas maps a ServingRuntime or ClusterServingRuntime event
+// onto the replicas that render from it: those naming it or a runtime that
+// inherits from it (the chain is merged into what a replica renders), and
+// those whose runtime is selected for their model, since any runtime change
+// can change the selection. A namespaced runtime reaches only the replicas
+// of its namespace; a cluster-scoped one reaches every namespace.
+func (r *Reconciler) runtimeToReplicas(ctx context.Context, obj client.Object) []reconcile.Request {
+	root := types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()}
+	sources := []types.NamespacedName{root}
+	descendants, err := runtimeinheritance.Descendants(ctx, r.Client, root)
+	if err != nil {
+		// The direct consumers are still enqueued.
+		r.Log.Error(err, "fan-out runtime event: resolve inheriting runtimes failed", "runtime", root)
+	}
+	sources = append(sources, descendants...)
+
+	seen := sets.New[types.NamespacedName]()
+	var reqs []reconcile.Request
+	enqueue := func(list *v1beta1.InferenceReplicaList) {
+		for i := range list.Items {
+			key := client.ObjectKeyFromObject(&list.Items[i])
+			if seen.Has(key) {
+				continue
+			}
+			seen.Insert(key)
+			reqs = append(reqs, reconcile.Request{NamespacedName: key})
+		}
+	}
+	for _, source := range sources {
+		named := &v1beta1.InferenceReplicaList{}
+		opts := []client.ListOption{client.MatchingFields{irRuntimeRefIndexField: source.Name}}
+		if source.Namespace != "" {
+			opts = append(opts, client.InNamespace(source.Namespace))
+		}
+		if err := r.List(ctx, named, opts...); err != nil {
+			r.Log.Error(err, "fan-out runtime event: list InferenceReplicas naming the runtime failed", "runtime", source)
+			continue
+		}
+		enqueue(named)
+	}
+	auto := &v1beta1.InferenceReplicaList{}
+	opts := []client.ListOption{client.MatchingFields{irRuntimeAutoSelectIndexField: irRuntimeAutoSelected}}
+	if root.Namespace != "" {
+		opts = append(opts, client.InNamespace(root.Namespace))
+	}
+	if err := r.List(ctx, auto, opts...); err != nil {
+		r.Log.Error(err, "fan-out runtime event: list InferenceReplicas selecting a runtime failed", "runtime", root)
+	} else {
+		enqueue(auto)
+	}
+	return reqs
+}
+
+// modelToReplicas maps a BaseModel or ClusterBaseModel event onto the
+// replicas whose modelRef names it. A namespaced model reaches only the
+// replicas of its namespace; a cluster-scoped one reaches every namespace.
+// Status changes count: a sharded model turning Ready is what lets a replica
+// reported as ModelNotFound render.
+func (r *Reconciler) modelToReplicas(ctx context.Context, obj client.Object) []reconcile.Request {
+	list := &v1beta1.InferenceReplicaList{}
+	opts := []client.ListOption{client.MatchingFields{irModelRefIndexField: obj.GetName()}}
+	if obj.GetNamespace() != "" {
+		opts = append(opts, client.InNamespace(obj.GetNamespace()))
+	}
+	if err := r.List(ctx, list, opts...); err != nil {
+		r.Log.Error(err, "fan-out model event: list InferenceReplicas naming the model failed", "model", client.ObjectKeyFromObject(obj))
+		return nil
+	}
+	reqs := make([]reconcile.Request, 0, len(list.Items))
+	for i := range list.Items {
+		reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+	}
+	return reqs
 }

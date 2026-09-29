@@ -165,3 +165,29 @@ func TestRenderComponentDispatches(t *testing.T) {
 		t.Fatal("an unknown component was rendered")
 	}
 }
+
+func TestRuntimeDeclaresPiece(t *testing.T) {
+	rt := &v1beta1.ServingRuntimeSpec{
+		EngineConfig: &v1beta1.EngineSpec{},
+		RouterConfig: &v1beta1.RouterSpec{},
+	}
+	for _, tc := range []struct {
+		name      string
+		rt        *v1beta1.ServingRuntimeSpec
+		component v1beta1.ComponentType
+		want      bool
+	}{
+		{"engine declared", rt, v1beta1.EngineComponent, true},
+		{"router declared", rt, v1beta1.RouterComponent, true},
+		{"decoder not declared", rt, v1beta1.DecoderComponent, false},
+		{"decoder declared", &v1beta1.ServingRuntimeSpec{DecoderConfig: &v1beta1.DecoderSpec{}}, v1beta1.DecoderComponent, true},
+		{"unknown component", rt, v1beta1.ComponentType("sidecar"), false},
+		{"no runtime", nil, v1beta1.EngineComponent, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := RuntimeDeclaresPiece(tc.rt, tc.component); got != tc.want {
+				t.Fatalf("RuntimeDeclaresPiece = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

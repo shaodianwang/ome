@@ -55,6 +55,9 @@ import (
 //     enqueues the InferenceReplica it was provisioned for, so a slice
 //     turning ready releases its withheld pods and a released slice
 //     completes teardown. The leader also reports the slices by state.
+//   - ServingRuntime / ClusterServingRuntime / BaseModel / ClusterBaseModel:
+//     mapped through the reference indexes onto the replicas that render
+//     their pods from modelRef or runtimeRef (watches.go).
 //
 // The parent InferenceService is NOT watched — the IR's owner ref to
 // its parent means the parent's controller already gets re-enqueued
@@ -154,7 +157,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if sliceFound {
 		b = b.Watches(gke.NewObject(), r.tpuSliceEventHandler())
 	}
-	return b.
+	if err := b.
 		Watches(
 			&corev1.Pod{},
 			newPodEventHandler(r.Expectations),
@@ -170,7 +173,23 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 			&discoveryv1.EndpointSlice{},
 			handler.EnqueueRequestsFromMapFunc(r.endpointSliceToIR),
 		).
-		Complete(r)
+		// A replica that renders from modelRef or runtimeRef re-renders when
+		// the runtime it names (or one it inherits from), any runtime it may
+		// select, or its model changes. Status changes count: a sharded model
+		// turning Ready is what lets a blocked replica render.
+		Watches(&v1beta1.ServingRuntime{}, handler.EnqueueRequestsFromMapFunc(r.runtimeToReplicas)).
+		Watches(&v1beta1.ClusterServingRuntime{}, handler.EnqueueRequestsFromMapFunc(r.runtimeToReplicas)).
+		Watches(&v1beta1.BaseModel{}, handler.EnqueueRequestsFromMapFunc(r.modelToReplicas)).
+		Watches(&v1beta1.ClusterBaseModel{}, handler.EnqueueRequestsFromMapFunc(r.modelToReplicas)).
+		Complete(r); err != nil {
+		return err
+	}
+	// The mappers of the runtime and model watches list through these
+	// indexes; the cache accepts them until the manager starts.
+	if err := registerRefIndexes(context.Background(), mgr.GetFieldIndexer()); err != nil {
+		return fmt.Errorf("inferencereplica: %w", err)
+	}
+	return nil
 }
 
 // validateWiring rejects a mis-wired reconciler at setup. The

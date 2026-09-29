@@ -3,6 +3,7 @@ package render
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/go-logr/logr"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -223,6 +224,40 @@ func Prepare(r *Resolved, specMode *constants.DeploymentModeType, deploy *contro
 	specdefaults.Engine(r.Specs.Engine, engineMode, deploy)
 	specdefaults.Decoder(r.Specs.Decoder, decoderMode, deploy)
 	specdefaults.Router(r.Specs.Router, routerMode, deploy)
+	return nil
+}
+
+// PrepareRole is Prepare for one role: it determines the deployment mode of
+// role c alone and applies the operator's deploy defaults to its merged
+// spec, in place. A caller that renders a single role and declares no engine
+// uses it instead of Prepare, which requires an engine. The merged specs
+// must declare the role.
+func PrepareRole(r *Resolved, c v1beta1.ComponentType, specMode *constants.DeploymentModeType, deploy *controllerconfig.DeployConfig) error {
+	if r.Modes == nil {
+		r.Modes = make(map[v1beta1.ComponentType]constants.DeploymentModeType, 1)
+	}
+	switch c {
+	case v1beta1.EngineComponent:
+		if r.Specs.Engine == nil {
+			return fmt.Errorf("the merged specs declare no %s role", c)
+		}
+		r.Modes[c] = isvcutils.DetermineComponentDeploymentMode(r.Specs.Engine, r.Runtime, specMode)
+		specdefaults.Engine(r.Specs.Engine, r.Modes[c], deploy)
+	case v1beta1.DecoderComponent:
+		if r.Specs.Decoder == nil {
+			return fmt.Errorf("the merged specs declare no %s role", c)
+		}
+		r.Modes[c] = isvcutils.DetermineComponentDeploymentMode(r.Specs.Decoder, r.Runtime, specMode)
+		specdefaults.Decoder(r.Specs.Decoder, r.Modes[c], deploy)
+	case v1beta1.RouterComponent:
+		if r.Specs.Router == nil {
+			return fmt.Errorf("the merged specs declare no %s role", c)
+		}
+		r.Modes[c] = isvcutils.DetermineComponentDeploymentMode(r.Specs.Router, r.Runtime, specMode)
+		specdefaults.Router(r.Specs.Router, r.Modes[c], deploy)
+	default:
+		return fmt.Errorf("component %q is not a role", c)
+	}
 	return nil
 }
 

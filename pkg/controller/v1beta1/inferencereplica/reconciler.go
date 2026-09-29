@@ -62,6 +62,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
 	workloadservice "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/service"
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
+	"github.com/ome-projects/ome/pkg/runtimeselector"
 	"github.com/ome-projects/ome/pkg/utils"
 )
 
@@ -77,6 +78,7 @@ import (
 // +kubebuilder:rbac:groups=apps,resources=controllerrevisions,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=accelerator.gke.io,resources=slices,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
+// +kubebuilder:rbac:groups=ome.io,resources=basemodels;clusterbasemodels;servingruntimes;clusterservingruntimes;finetunedweights,verbs=get;list;watch
 
 // Reconciler drives each IR lifecycle through the workload pipeline.
 type Reconciler struct {
@@ -88,6 +90,11 @@ type Reconciler struct {
 	// lifecycle configuration. When nil, each resolver applies its documented
 	// compatibility or fail-safe behavior.
 	Clientset kubernetes.Interface
+
+	// RuntimeSelector resolves a replica's runtimeRef and selects a runtime
+	// for a modelRef without one. Nil when this controller renders no refs: a
+	// replica with refs then reports RenderFailed.
+	RuntimeSelector runtimeselector.Selector
 
 	// ConfigCache memoizes the inferenceservice-config ConfigMap for a
 	// short, flag-driven TTL so per-reconcile config loads share one
@@ -396,7 +403,23 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	// the ISVC-side coordination reconciler.
 	coordDefaults := r.resolveCoordinationGroupDefaults(log)
 
-	input := r.buildReconcileInput(ctx, ir, parent, retryPolicy, forceDeletePolicy, settings, autoMigrateBudget, coordDefaults)
+	// The pod templates: the stored runners, or, for a replica that names a
+	// model or a runtime, the runners rendered from them for this pass only.
+	// The stored spec never gains runners. A template source that cannot be
+	// rendered is published on the Ready condition and the pass ends here;
+	// the runtime and model watches re-trigger the replica when it changes.
+	runners := ir.Spec.Runners
+	if rendered, rerr := r.renderFromRefs(ctx, ir); rerr != nil {
+		var blocked *renderBlocked
+		if errors.As(rerr, &blocked) {
+			return r.reportRenderBlocked(ctx, ir, blocked)
+		}
+		return ctrl.Result{}, fmt.Errorf("InferenceReplica reconciler: render from refs (ir=%s/%s): %w", ir.Namespace, ir.Name, rerr)
+	} else if rendered != nil {
+		runners = rendered
+	}
+
+	input := r.buildReconcileInput(ctx, ir, runners, parent, retryPolicy, forceDeletePolicy, settings, autoMigrateBudget, coordDefaults)
 	input.ScaleUpPodBatchSize = r.ScaleUpPodBatchSize
 	input.ScaleDownPodBatchSize = r.ScaleDownPodBatchSize
 	input.ScaleDownRequeueInterval = r.ScaleDownRequeueInterval
@@ -1714,7 +1737,10 @@ func (r *Reconciler) revisionHash(ir *v1beta1.InferenceReplica, input workloadty
 
 	r.revisionHashMu.Lock()
 	defer r.revisionHashMu.Unlock()
-	if entry, ok := r.revisionHashCache[cacheKey]; ok &&
+	// A replica rendered from refs derives its templates from the model and
+	// the runtime, which change without a generation bump, so its hash is
+	// computed every pass.
+	if entry, ok := r.revisionHashCache[cacheKey]; ok && !rendersFromRefs(ir) &&
 		entry.uid == ir.UID &&
 		entry.generation == ir.Generation &&
 		entry.excludedAnnotationKeys == excludedAnnotationKeys &&
@@ -1723,8 +1749,8 @@ func (r *Reconciler) revisionHash(ir *v1beta1.InferenceReplica, input workloadty
 		return entry.hash, entry.raw, nil
 	}
 
-	// Hash a copy without inherited ISVC annotations while retaining them on rendered pods.
-	meta := stripExcludedAnnotations(input.DesiredSpec.PodTemplateObjectMeta, parseExcludedAnnotationKeys(ir))
+	// Hash a copy without the inherited object annotations while retaining them on rendered pods.
+	meta := stripExcludedAnnotations(input.DesiredSpec.PodTemplateObjectMeta, hashExcludedAnnotationKeys(ir))
 	hash, raw, err := revision.HashWithWorkerTopologyAndPairing(
 		input.DesiredSpec.PodSpec, input.DesiredSpec.WorkerPodSpec,
 		meta,
@@ -1748,6 +1774,26 @@ func (r *Reconciler) revisionHash(ir *v1beta1.InferenceReplica, input workloadty
 		raw:                    raw,
 	}
 	return hash, raw, nil
+}
+
+// hashExcludedAnnotationKeys returns the pod-template annotation keys omitted
+// from revision hashing: the inherited InferenceService keys the projector
+// stamps on a projected replica and, on a replica rendered from refs, every
+// key of the replica's own object annotations, which the render inherits
+// into the template the way an InferenceService's are. The refs set is
+// derived in memory; nothing is stamped on the replica.
+func hashExcludedAnnotationKeys(ir *v1beta1.InferenceReplica) map[string]struct{} {
+	excluded := parseExcludedAnnotationKeys(ir)
+	if !rendersFromRefs(ir) || len(ir.Annotations) == 0 {
+		return excluded
+	}
+	if excluded == nil {
+		excluded = make(map[string]struct{}, len(ir.Annotations))
+	}
+	for k := range ir.Annotations {
+		excluded[k] = struct{}{}
+	}
+	return excluded
 }
 
 // parseExcludedAnnotationKeys returns inherited ISVC annotation keys omitted from revision hashing.

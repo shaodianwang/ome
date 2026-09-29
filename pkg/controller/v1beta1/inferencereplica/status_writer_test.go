@@ -797,6 +797,8 @@ func TestInferenceReplicaFetchInventory(t *testing.T) {
 	approve("pkg/controller/v1beta1/inferencereplica/release_held.go", "Reconciler.consumeReleaseHeldRequest", "Get", 1, passThroughSpecMetadata+" (annotation consumption)")
 	approve("pkg/controller/v1beta1/inferencereplica/reset_instances.go", "Reconciler.consumeResetInstancesRequest", "Get", 1, passThroughSpecMetadata+" (annotation consumption)")
 	approve("pkg/controller/v1beta1/inferencereplica/slices.go", "irExists", "List", 1, passThroughSpecMetadata+" (TPU slice owner existence by UID)")
+	approve("pkg/controller/v1beta1/inferencereplica/watches.go", "Reconciler.runtimeToReplicas", "List", 2, passThroughSpecMetadata+" (runtime watch fan-out through the reference indexes)")
+	approve("pkg/controller/v1beta1/inferencereplica/watches.go", "Reconciler.modelToReplicas", "List", 1, passThroughSpecMetadata+" (model watch fan-out through the reference index)")
 
 	// Replay harness pass-through reads.
 	approve("pkg/controller/v1beta1/workload/replay/driver.go", "driver.bumpGeneration", "Get", 1, passThroughSpecMetadata+" (replay owner generation bump)")

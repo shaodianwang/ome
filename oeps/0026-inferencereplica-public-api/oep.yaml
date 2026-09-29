@@ -3,7 +3,7 @@ oep-number: "0026"
 authors:
   - "@slin1237"
 status: implementable
-# state: Phase 1 implemented: pkg/webhook/admission/inferencereplica + pkg/controller/v1beta1/controllerconfig/inferencereplica.go + charts/ome-resources/templates/ome-controller/webhooks/inferencereplicavalidator.yaml + tests/integration/singlecluster/controller/inferencereplica_standalone; Phases 2-4 open.
+# state: Phase 1 implemented: pkg/webhook/admission/inferencereplica + pkg/controller/v1beta1/controllerconfig/inferencereplica.go + charts/ome-resources/templates/ome-controller/webhooks/inferencereplicavalidator.yaml + tests/integration/singlecluster/controller/inferencereplica_standalone; Phase 2 implemented: pkg/render + pkg/controller/v1beta1/inferencereplica/render.go + tests/integration/singlecluster/controller/inferencereplica_standalone + tests/integration/singlecluster/webhook/inferencereplica + tests/integration/singlecluster/controller/omenative_coordination_kind/standalone_replica_refs_kind_test.go; Phases 3-4 open.
 # The number 0026 was used once before by a draft ("deployment mode transitions", branch
 # feat/oep-0026-deployment-mode-transitions) that was withdrawn and never merged; this is the only 0026 on main.
 creation-date: 2026-09-21

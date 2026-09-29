@@ -1662,6 +1662,20 @@ func NewModelCacheConfig(clientset kubernetes.Interface) (*sharded.ProviderConfi
 	if err != nil {
 		return nil, err
 	}
+	return parseModelCacheConfig(configMap)
+}
+
+// NewModelCacheConfigCached is the ConfigCache-backed variant of
+// NewModelCacheConfig used on the reconcile hot path.
+func NewModelCacheConfigCached(cache *ConfigCache, clientset kubernetes.Interface) (*sharded.ProviderConfig, error) {
+	configMap, err := cache.get(clientset)
+	if err != nil {
+		return nil, err
+	}
+	return parseModelCacheConfig(configMap)
+}
+
+func parseModelCacheConfig(configMap *v1.ConfigMap) (*sharded.ProviderConfig, error) {
 	modelCacheConfig := &sharded.ProviderConfig{}
 	if modelCache, ok := configMap.Data[ModelCacheConfigName]; ok {
 		err := json.Unmarshal([]byte(modelCache), modelCacheConfig)

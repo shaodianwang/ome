@@ -9,6 +9,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	v1beta1testing "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
@@ -25,6 +26,18 @@ func bareIR(namespace, name string, component v1beta1.ComponentType) *v1beta1.In
 					Containers: []corev1.Container{{Name: "server", Image: "example.com/serving:1.0"}},
 				}},
 			}},
+		},
+	}
+}
+
+// refsIR is a standalone replica that renders from the named
+// ClusterServingRuntime instead of stored runners.
+func refsIR(namespace, name string, component v1beta1.ComponentType, runtime string) *v1beta1.InferenceReplica {
+	return &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: v1beta1.InferenceReplicaSpec{
+			Component:  component,
+			RuntimeRef: &v1beta1.ServingRuntimeRef{Name: runtime},
 		},
 	}
 }
@@ -120,5 +133,32 @@ var _ = ginkgo.Describe("InferenceReplica ownership admission", func() {
 		err := userClient.Create(suiteCtx, bareIR(ns.Name, "shared", v1beta1.EngineComponent))
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("would share pod and Service names"))
+	})
+
+	ginkgo.It("rejects runners together with refs on a standalone replica", func() {
+		ir := bareIR(ns.Name, "pool-a", v1beta1.EngineComponent)
+		ir.Spec.ModelRef = &v1beta1.ModelRef{Name: "model-a"}
+		err := userClient.Create(suiteCtx, ir)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("exclusive"))
+	})
+
+	ginkgo.It("rejects a runtime that lacks the replica's piece", func() {
+		runtime := v1beta1testing.MakeClusterServingRuntime(ns.Name + "-runtime").
+			EngineRunner(corev1.Container{Name: "ome-container", Image: "example.com/serving:1.0"}).Obj()
+		Expect(k8sClient.Create(suiteCtx, runtime)).To(Succeed())
+		ginkgo.DeferCleanup(func() {
+			Expect(client.IgnoreNotFound(k8sClient.Delete(suiteCtx, runtime))).To(Succeed())
+		})
+
+		err := userClient.Create(suiteCtx, refsIR(ns.Name, "pool-a", v1beta1.DecoderComponent, runtime.Name))
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring(`ClusterServingRuntime "` + runtime.Name + `" has no decoder piece`))
+
+		Expect(userClient.Create(suiteCtx, refsIR(ns.Name, "pool-b", v1beta1.EngineComponent, runtime.Name))).To(Succeed())
+	})
+
+	ginkgo.It("admits a standalone replica whose runtime is not found", func() {
+		Expect(userClient.Create(suiteCtx, refsIR(ns.Name, "pool-a", v1beta1.DecoderComponent, ns.Name+"-missing"))).To(Succeed())
 	})
 })

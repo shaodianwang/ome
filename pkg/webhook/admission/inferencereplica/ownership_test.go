@@ -16,11 +16,13 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
+	"github.com/ome-projects/ome/pkg/runtimeselector"
 )
 
 const (
@@ -142,6 +144,39 @@ func withLifecycleMinReady(ir *v1beta1.InferenceReplica, seconds int32) *v1beta1
 	return out
 }
 
+// refsIR is a standalone replica of component c that renders from the
+// ClusterServingRuntime runtime-a instead of stored runners.
+func refsIR(c v1beta1.ComponentType) *v1beta1.InferenceReplica {
+	ir := standaloneIR()
+	ir.Spec.Component = c
+	ir.Spec.Runners = nil
+	ir.Spec.RuntimeRef = &v1beta1.ServingRuntimeRef{Name: "runtime-a", Kind: ptr.To(runtimeselector.KindClusterServingRuntime)}
+	return ir
+}
+
+func withModelRef(ir *v1beta1.InferenceReplica, name string) *v1beta1.InferenceReplica {
+	out := ir.DeepCopy()
+	out.Spec.ModelRef = &v1beta1.ModelRef{Name: name}
+	return out
+}
+
+func withRuntimeRef(ir *v1beta1.InferenceReplica, ref *v1beta1.ServingRuntimeRef) *v1beta1.InferenceReplica {
+	out := ir.DeepCopy()
+	out.Spec.RuntimeRef = ref
+	return out
+}
+
+func withoutRunners(ir *v1beta1.InferenceReplica) *v1beta1.InferenceReplica {
+	out := ir.DeepCopy()
+	out.Spec.Runners = nil
+	return out
+}
+
+// clusterRuntime is a ClusterServingRuntime declaring the roles of spec.
+func clusterRuntime(name string, spec v1beta1.ServingRuntimeSpec, annotations map[string]string) *v1beta1.ClusterServingRuntime {
+	return &v1beta1.ClusterServingRuntime{ObjectMeta: metav1.ObjectMeta{Name: name, Annotations: annotations}, Spec: spec}
+}
+
 func TestOwnershipByIdentity(t *testing.T) {
 	collidingISVC := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "prod-models"}}
 	withParentRef := standaloneIR()
@@ -169,6 +204,14 @@ func TestOwnershipByIdentity(t *testing.T) {
 	}
 	blocked := withBlockOwnerDeletion(projectedIR(), true)
 	migrationKey := constants.MigrationRequestAnnotationPrefix + "0f3a"
+	engineOnly := v1beta1.ServingRuntimeSpec{EngineConfig: &v1beta1.EngineSpec{}}
+	engineRuntime := clusterRuntime("runtime-a", engineOnly, nil)
+	namespacedEngineRuntime := &v1beta1.ServingRuntime{ObjectMeta: metav1.ObjectMeta{Name: "runtime-a", Namespace: "prod-models"}, Spec: engineOnly}
+	decoderParent := clusterRuntime("runtime-base", v1beta1.ServingRuntimeSpec{DecoderConfig: &v1beta1.DecoderSpec{}}, nil)
+	inheritingChild := clusterRuntime("runtime-a", engineOnly, map[string]string{constants.RuntimeInheritFromAnnotationKey: "runtime-base"})
+	noDecoderPiece := `ClusterServingRuntime "runtime-a" has no decoder piece; a decoder replica cannot render from it`
+	decoderFromRunners := standaloneIR()
+	decoderFromRunners.Spec.Component = v1beta1.DecoderComponent
 
 	cases := []struct {
 		name     string
@@ -353,6 +396,63 @@ func TestOwnershipByIdentity(t *testing.T) {
 				ir.Name = "pool.a"
 				return asUser(createReq(t, ir), plainUser)
 			}, false, "prefix of its pod and Service names and must match"},
+		// A standalone replica that names a runtime is checked against the
+		// runtime the controller would resolve.
+		{"a standalone decoder replica may not name a runtime without a decoder piece", []client.Object{engineRuntime},
+			func(t *testing.T) admission.Request {
+				return asUser(createReq(t, refsIR(v1beta1.DecoderComponent)), plainUser)
+			}, false, noDecoderPiece},
+		{"a standalone engine replica renders from a runtime with an engine piece", []client.Object{engineRuntime},
+			func(t *testing.T) admission.Request {
+				return asUser(createReq(t, refsIR(v1beta1.EngineComponent)), plainUser)
+			}, true, ""},
+		{"a standalone replica may name a runtime that is not found", nil,
+			func(t *testing.T) admission.Request {
+				return asUser(createReq(t, refsIR(v1beta1.DecoderComponent)), plainUser)
+			}, true, ""},
+		{"a reference to the ServingRuntime kind checks the namespaced runtime", []client.Object{namespacedEngineRuntime},
+			func(t *testing.T) admission.Request {
+				ref := &v1beta1.ServingRuntimeRef{Name: "runtime-a", Kind: ptr.To(runtimeselector.KindServingRuntime)}
+				return asUser(createReq(t, withRuntimeRef(refsIR(v1beta1.DecoderComponent), ref)), plainUser)
+			}, false, `ServingRuntime "runtime-a" has no decoder piece`},
+		{"a reference to the ClusterServingRuntime kind falls back to the namespaced runtime as the controller does", []client.Object{namespacedEngineRuntime},
+			func(t *testing.T) admission.Request {
+				return asUser(createReq(t, refsIR(v1beta1.DecoderComponent)), plainUser)
+			}, false, `ServingRuntime "runtime-a" has no decoder piece`},
+		{"a runtime inheriting the piece from its parent is admitted", []client.Object{decoderParent, inheritingChild},
+			func(t *testing.T) admission.Request {
+				return asUser(createReq(t, refsIR(v1beta1.DecoderComponent)), plainUser)
+			}, true, ""},
+		{"a runtime whose inherit-from parent is missing is rejected", []client.Object{inheritingChild},
+			func(t *testing.T) admission.Request {
+				return asUser(createReq(t, refsIR(v1beta1.EngineComponent)), plainUser)
+			}, false, `runtime "runtime-a" inherits from "runtime-base", which does not exist`},
+		{"a standalone replica may not pin its runtime", []client.Object{engineRuntime},
+			func(t *testing.T) admission.Request {
+				pinned := refsIR(v1beta1.EngineComponent)
+				pinned.Spec.RuntimeRef.AutoSync = ptr.To(false)
+				return asUser(createReq(t, pinned), plainUser)
+			}, false, "not honored on an InferenceReplica"},
+		{"a standalone replica may not keep its runners when it gains a model reference", nil,
+			func(t *testing.T) admission.Request {
+				return asUser(updateReq(t, standaloneIR(), withModelRef(standaloneIR(), "model-a")), plainUser)
+			}, false, "exclusive"},
+		{"a standalone replica may not drop its last template source", nil,
+			func(t *testing.T) admission.Request {
+				return asUser(updateReq(t, standaloneIR(), withoutRunners(standaloneIR())), plainUser)
+			}, false, "spec.runners is required unless spec.modelRef or spec.runtimeRef is set"},
+		{"a standalone replica may move from runners to a runtime that is not found", nil,
+			func(t *testing.T) admission.Request {
+				return asUser(updateReq(t, standaloneIR(), refsIR(v1beta1.EngineComponent)), plainUser)
+			}, true, ""},
+		{"a standalone replica may not move to a runtime without its piece", []client.Object{engineRuntime},
+			func(t *testing.T) admission.Request {
+				return asUser(updateReq(t, decoderFromRunners, refsIR(v1beta1.DecoderComponent)), plainUser)
+			}, false, noDecoderPiece},
+		{"the controller may set placement fields on a refs replica", []client.Object{engineRuntime},
+			func(t *testing.T) admission.Request {
+				return asUser(createReq(t, withPlacementLimit(refsIR(v1beta1.EngineComponent))), controllerUser)
+			}, true, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -364,6 +464,35 @@ func TestOwnershipByIdentity(t *testing.T) {
 				t.Fatalf("message %q does not contain %q", resp.Result.Message, tc.contains)
 			}
 		})
+	}
+}
+
+// TestTemplateSourceReadsTheRuntimeOnlyWhenNamed pins that a replica with
+// modelRef alone, and an update that keeps its runtime reference, read no
+// runtime.
+func TestTemplateSourceReadsTheRuntimeOnlyWhenNamed(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1beta1.AddToScheme(scheme); err != nil {
+		t.Fatalf("scheme: %v", err)
+	}
+	v := identityValidator(t)
+	v.Reader = ctrlfake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			switch obj.(type) {
+			case *v1beta1.ServingRuntime, *v1beta1.ClusterServingRuntime:
+				t.Errorf("runtime %s was read", key.Name)
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	}).Build()
+
+	modelOnly := withModelRef(withoutRunners(standaloneIR()), "model-a")
+	if resp := v.Handle(context.Background(), asUser(createReq(t, modelOnly), plainUser)); !resp.Allowed {
+		t.Fatalf("modelRef alone denied: %s", resp.Result.Message)
+	}
+	refs := refsIR(v1beta1.EngineComponent)
+	if resp := v.Handle(context.Background(), asUser(updateReq(t, refs, withReplicas(refs, 3)), plainUser)); !resp.Allowed {
+		t.Fatalf("scale of a refs replica denied: %s", resp.Result.Message)
 	}
 }
 

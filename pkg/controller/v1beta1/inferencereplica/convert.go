@@ -111,8 +111,12 @@ func IRGVK() schema.GroupVersionKind { return irGVK }
 // fill-ins (from the coordination config), likewise resolved ONCE per
 // reconcile by the caller; the zero value means unconfigured and each
 // knob uses its documented unconfigured behavior.
-func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.InferenceReplica, parent *v1beta1.InferenceService, updateRetryPolicy *workloadtypes.RetryPolicy, forceDeletePolicy *workloadtypes.ForceDeletePolicy, settings lifecycleSettings, autoMigrateBudget int32, coordDefaults coordination.GroupDefaults) workloadtypes.ReconcileInput {
-	desired := desiredFromIR(ir)
+//
+// runners are the pod templates of this pass: the replica's stored runners,
+// or the runners rendered from its model and runtime references, which are
+// never stored on the replica.
+func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.InferenceReplica, runners []v1beta1.Runner, parent *v1beta1.InferenceService, updateRetryPolicy *workloadtypes.RetryPolicy, forceDeletePolicy *workloadtypes.ForceDeletePolicy, settings lifecycleSettings, autoMigrateBudget int32, coordDefaults coordination.GroupDefaults) workloadtypes.ReconcileInput {
+	desired := desiredFromIR(ir, runners)
 	// The parent annotation is the operator-facing source of truth whenever the
 	// parent is readable. This deliberately overrides both stale true and stale
 	// false values on the projected IR: a component render/projector failure must
@@ -342,14 +346,15 @@ func buildHeadlessServiceSpec(ir *v1beta1.InferenceReplica) workloadtypes.PerCom
 	}
 }
 
-// desiredFromIR projects IR.Spec.Runners + IR.Spec.Lifecycle onto
-// the workload.WorkloadDesiredSpec the workload dispatcher reads.
+// desiredFromIR projects the runners + IR.Spec.Lifecycle onto the
+// workload.WorkloadDesiredSpec the workload dispatcher reads. runners are
+// the replica's stored runners or the ones rendered from its references.
 //
 // PodSpec/WorkerPodSpec come from the Runner.Template's PodSpec.
 // PodTemplateObjectMeta is derived from the Runner.Template's
 // ObjectMeta so user-intent pod-template labels/annotations land on
 // every emitted pod.
-func desiredFromIR(ir *v1beta1.InferenceReplica) workloadtypes.WorkloadDesiredSpec {
+func desiredFromIR(ir *v1beta1.InferenceReplica, runners []v1beta1.Runner) workloadtypes.WorkloadDesiredSpec {
 	replicas := int32(1)
 	if ir.Spec.Replicas != nil && *ir.Spec.Replicas > 0 {
 		replicas = *ir.Spec.Replicas
@@ -365,7 +370,7 @@ func desiredFromIR(ir *v1beta1.InferenceReplica) workloadtypes.WorkloadDesiredSp
 	desired := workloadtypes.WorkloadDesiredSpec{
 		Replicas:        replicas,
 		MinReadySeconds: ir.Spec.MinReadySeconds,
-		Runners:         runnersFromIR(ir),
+		Runners:         runnersFromIR(runners),
 		Paused:          ir.Spec.Paused,
 		PauseFreeze:     ir.Spec.Paused && ir.Spec.PauseMode == v1beta1.PauseModeFreeze,
 	}
@@ -390,11 +395,11 @@ func desiredFromIR(ir *v1beta1.InferenceReplica) workloadtypes.WorkloadDesiredSp
 	if ir.Spec.Lifecycle != nil {
 		desired.Lifecycle = v1beta1convert.LifecycleSpecToWorkload(*ir.Spec.Lifecycle)
 	}
-	// Pull the per-role PodSpec + ObjectMeta out of the rendered IR
-	// runners. The IR contract requires at least one Runner; the
-	// webhook validates the {default} | {leader, worker} shapes.
-	for i := range ir.Spec.Runners {
-		runner := &ir.Spec.Runners[i]
+	// Pull the per-role PodSpec + ObjectMeta out of the runners. The
+	// webhook validates the {default} | {leader, worker} shapes of stored
+	// runners; rendered runners take the same shapes.
+	for i := range runners {
+		runner := &runners[i]
 		switch runner.Name {
 		case v1beta1.RunnerNameDefault:
 			spec := runner.Template.Spec
@@ -432,16 +437,16 @@ func validatePlacementReplicaLimit(ir *v1beta1.InferenceReplica) error {
 	return nil
 }
 
-// runnersFromIR converts the IR Runner list to the workload.Runner
+// runnersFromIR converts a Runner list to the workload.Runner
 // projection. The names round-trip 1:1 (RunnerNameDefault → "default",
 // RunnerNameLeader → "leader", RunnerNameWorker → "worker"); the size
 // is the per-Instance pod count for that role.
-func runnersFromIR(ir *v1beta1.InferenceReplica) []workloadtypes.Runner {
-	if len(ir.Spec.Runners) == 0 {
+func runnersFromIR(runners []v1beta1.Runner) []workloadtypes.Runner {
+	if len(runners) == 0 {
 		return nil
 	}
-	out := make([]workloadtypes.Runner, 0, len(ir.Spec.Runners))
-	for _, r := range ir.Spec.Runners {
+	out := make([]workloadtypes.Runner, 0, len(runners))
+	for _, r := range runners {
 		out = append(out, workloadtypes.Runner{
 			Name: string(r.Name),
 			Size: r.Size,

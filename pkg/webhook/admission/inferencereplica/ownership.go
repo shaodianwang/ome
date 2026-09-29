@@ -10,6 +10,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/validation"
 )
 
 // isvcGVK identifies the InferenceService kind in owner references.
@@ -92,11 +93,15 @@ func specChanged(oldSpec, newSpec v1beta1.InferenceReplicaSpec) bool {
 	return !equality.Semantic.DeepEqual(oldSpec, newSpec)
 }
 
-// standaloneSpecError rejects settings a standalone replica accepts in shape
-// but nothing acts on: only the InferenceService controller creates HPA or
-// KEDA scalers, and a replica reads spec.minReadySeconds, never the nested
-// lifecycle field.
+// standaloneSpecError rejects a standalone spec that renders from more or
+// fewer than one template source or pins its runtime, and settings a
+// standalone replica accepts in shape but nothing acts on: only the
+// InferenceService controller creates HPA or KEDA scalers, and a replica reads
+// spec.minReadySeconds, never the nested lifecycle field.
 func standaloneSpecError(s v1beta1.InferenceReplicaSpec) error {
+	if err := validation.ValidateInferenceReplicaTemplateSource(len(s.Runners), s.ModelRef != nil, s.RuntimeRef != nil, pinnedRuntime(s.RuntimeRef)); err != nil {
+		return err
+	}
 	if s.Autoscaler != nil && (s.Autoscaler.Class == v1beta1.AutoscalerHPA || s.Autoscaler.Class == v1beta1.AutoscalerKEDA) {
 		return fmt.Errorf("spec.autoscaler.class %q creates no scaler on a standalone InferenceReplica; target the scale subresource with your own HorizontalPodAutoscaler or ScaledObject, or use class %q",
 			s.Autoscaler.Class, v1beta1.AutoscalerExternal)
@@ -105,6 +110,22 @@ func standaloneSpecError(s v1beta1.InferenceReplicaSpec) error {
 		return fmt.Errorf("spec.lifecycle.minReadySeconds is not read on an InferenceReplica; set spec.minReadySeconds")
 	}
 	return nil
+}
+
+// pinnedRuntime reports whether ref asks for a runtime pin: autoSync off or a
+// named revision. A replica renders the live runtime and keeps no
+// ControllerRevision of it, so a pin is rejected rather than ignored.
+func pinnedRuntime(ref *v1beta1.ServingRuntimeRef) bool {
+	if ref == nil {
+		return false
+	}
+	return (ref.AutoSync != nil && !*ref.AutoSync) || (ref.Revision != nil && *ref.Revision != "")
+}
+
+// runtimeRefChanged reports whether newSpec names a runtime oldSpec did not,
+// or a different one.
+func runtimeRefChanged(oldSpec, newSpec v1beta1.InferenceReplicaSpec) bool {
+	return newSpec.RuntimeRef != nil && !equality.Semantic.DeepEqual(oldSpec.RuntimeRef, newSpec.RuntimeRef)
 }
 
 // migrationRequested reports whether newObj carries a migration-request

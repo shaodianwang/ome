@@ -6279,7 +6279,7 @@ func schema_pkg_apis_ome_v1beta1_InferenceReplicaSpec(ref common.ReferenceCallba
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "InferenceReplicaSpec is the desired state of one pod set. Its fields fall into three groups:\n\n  - User fields describe the pod set itself: component, set at create and\n    immutable; runners, replicas, minReadySeconds, topologyKey,\n    topologySpread, topologySpreadKey, lifecycle, revisionHistoryLimit and\n    autoscaler. The owner of the replica writes them: the InferenceService\n    controller for a projected replica, the creating user for a standalone\n    one.\n  - Rollout-control fields steer a rollout across pod sets: pacing, paused,\n    pauseMode and pairingProtocol. The InferenceService controller writes\n    them on the replicas it orchestrates; on a standalone replica its owner\n    sets them.\n  - Controller-only fields carry state only the InferenceService controller\n    can know: parentRef, placementExecution and placementReplicaLimit.",
+				Description: "InferenceReplicaSpec is the desired state of one pod set. Its fields fall into three groups:\n\n  - User fields describe the pod set itself: component, set at create and\n    immutable; the template source (runners, modelRef and runtimeRef),\n    replicas, minReadySeconds, topologyKey, topologySpread,\n    topologySpreadKey, lifecycle, revisionHistoryLimit and autoscaler. The\n    owner of the replica writes them: the InferenceService controller for\n    a projected replica, the creating user for a standalone one. Exactly\n    one template source: runners, or modelRef and/or runtimeRef; the\n    validating webhook enforces it.\n  - Rollout-control fields steer a rollout across pod sets: pacing, paused,\n    pauseMode and pairingProtocol. The InferenceService controller writes\n    them on the replicas it orchestrates; on a standalone replica its owner\n    sets them.\n  - Controller-only fields carry state only the InferenceService controller\n    can know: parentRef, placementExecution and placementReplicaLimit.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"placementExecution": {
@@ -6307,6 +6307,18 @@ func schema_pkg_apis_ome_v1beta1_InferenceReplicaSpec(ref common.ReferenceCallba
 							Default:     "",
 							Type:        []string{"string"},
 							Format:      "",
+						},
+					},
+					"modelRef": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ModelRef names the BaseModel (in the replica's namespace) or ClusterBaseModel this replica serves. With it set the controller renders the pods from the model and the runtime: the runtime named by RuntimeRef, or the runtime selected for the model when RuntimeRef is absent. Fine-tuned weights and overlays render as they do on an InferenceService. Exclusive with Runners. User field.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelRef"),
+						},
+					},
+					"runtimeRef": {
+						SchemaProps: spec.SchemaProps{
+							Description: "RuntimeRef names the ServingRuntime (in the replica's namespace) or ClusterServingRuntime whose piece for Component this replica renders. The runtime must declare that piece. Without ModelRef the piece renders as-is, with no model mounted. The runtime's pod spec places the pods (node selector, affinity, resources); a second accelerator pool is a second runtime. A pin (autoSync=false, revision) is not honored: the live runtime renders, and the validating webhook rejects a pinned reference. Exclusive with Runners. User field.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeRef"),
 						},
 					},
 					"replicas": {
@@ -6361,7 +6373,7 @@ func schema_pkg_apis_ome_v1beta1_InferenceReplicaSpec(ref common.ReferenceCallba
 							},
 						},
 						SchemaProps: spec.SchemaProps{
-							Description: "Runners is the fully-rendered set of pod templates per Instance. MUST be non-empty. Single-pod Instances have one Runner with Name=\"default\" and Size=1; multi-node Instances typically have Name=\"leader\" (Size=1) plus Name=\"worker\" (Size=N).\n\nThe InferenceReplica controller treats each Runner.Template as opaque input (same contract appsv1.Deployment.spec.template uses).",
+							Description: "Runners is the fully-rendered set of pod templates per Instance. A single-pod Instance has one Runner named \"default\" with Size=1; a multi-node Instance has \"leader\" (Size=1) and \"worker\" (Size=N). Required unless ModelRef or RuntimeRef is set, in which case it must be absent: the controller renders the runners from the refs and never stores them. The controller treats each Runner.Template as opaque input. User field.",
 							Type:        []string{"array"},
 							Items: &spec.SchemaOrArray{
 								Schema: &spec.Schema{
@@ -6413,11 +6425,11 @@ func schema_pkg_apis_ome_v1beta1_InferenceReplicaSpec(ref common.ReferenceCallba
 						},
 					},
 				},
-				Required: []string{"component", "runners"},
+				Required: []string{"component"},
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaPacing", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ParentReference", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementExecutionPolicy", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.Runner"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ComponentAutoscaler", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.InferenceReplicaPacing", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.LifecycleSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelRef", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ParentReference", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementExecutionPolicy", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.Runner", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeRef"},
 	}
 }
 

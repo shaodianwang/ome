@@ -281,6 +281,35 @@ func TestPrepare(t *testing.T) {
 	}
 }
 
+// PrepareRole prepares one role without requiring an engine: the mode of that
+// role alone is recorded and only its spec receives the defaults.
+func TestPrepareRole(t *testing.T) {
+	res := &Resolved{Runtime: &v1beta1.ServingRuntimeSpec{}, Specs: Specs{
+		Decoder: &v1beta1.DecoderSpec{Leader: &v1beta1.LeaderSpec{}, Worker: &v1beta1.WorkerSpec{}},
+	}}
+	if err := PrepareRole(res, v1beta1.DecoderComponent, nil, &controllerconfig.DeployConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	want := map[v1beta1.ComponentType]constants.DeploymentModeType{v1beta1.DecoderComponent: constants.OMENative}
+	if diff := cmp.Diff(want, res.Modes); diff != "" {
+		t.Errorf("modes (-want +got):\n%s", diff)
+	}
+	if res.Specs.Decoder.Worker.Size == nil || *res.Specs.Decoder.Worker.Size != 1 {
+		t.Errorf("worker size = %v, want the one-worker default", res.Specs.Decoder.Worker.Size)
+	}
+	mode := constants.OMENative
+	single := &Resolved{Specs: Specs{Engine: &v1beta1.EngineSpec{}}}
+	if err := PrepareRole(single, v1beta1.EngineComponent, &mode, nil); err != nil {
+		t.Fatal(err)
+	}
+	if single.Modes[v1beta1.EngineComponent] != constants.OMENative {
+		t.Errorf("engine mode = %q, want the spec mode", single.Modes[v1beta1.EngineComponent])
+	}
+	if err := PrepareRole(single, v1beta1.RouterComponent, nil, nil); err == nil {
+		t.Fatal("a role the merged specs do not declare was prepared")
+	}
+}
+
 func TestPieceAcceleratorClass(t *testing.T) {
 	for _, tt := range []struct {
 		name      string

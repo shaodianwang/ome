@@ -3,9 +3,11 @@ package inferencereplica
 import (
 	"context"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -914,6 +916,153 @@ func TestTPUSliceEventHandlerTimesProvisioning(t *testing.T) {
 				if got := irStatusMetric(t, "ome_tpu_slice_provision_duration_seconds", labels) - before; got != step.want {
 					t.Fatalf("seen %s: provisioning times observed = %v, want %v", step.seen, got, step.want)
 				}
+			}
+		})
+	}
+}
+
+// refReplica is a standalone replica in namespace ns naming the given
+// runtime and model; an empty name leaves that reference unset.
+func refReplica(name, ns, runtime, model string) *v1beta1.InferenceReplica {
+	ir := &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, UID: types.UID(name + "-uid")},
+		Spec:       v1beta1.InferenceReplicaSpec{Component: v1beta1.EngineComponent},
+	}
+	if runtime != "" {
+		ir.Spec.RuntimeRef = &v1beta1.ServingRuntimeRef{Name: runtime}
+	}
+	if model != "" {
+		ir.Spec.ModelRef = &v1beta1.ModelRef{Name: model}
+	}
+	return ir
+}
+
+func TestRefIndexExtractors(t *testing.T) {
+	for _, tc := range []struct {
+		name                 string
+		obj                  client.Object
+		runtime, model, auto []string
+	}{
+		{name: "runtime and model", obj: refReplica("a", "team-a", "runtime-a", "model-a"), runtime: []string{"runtime-a"}, model: []string{"model-a"}},
+		{name: "model alone selects a runtime", obj: refReplica("a", "team-a", "", "model-a"), model: []string{"model-a"}, auto: []string{irRuntimeAutoSelected}},
+		{name: "runtime alone", obj: refReplica("a", "team-a", "runtime-a", ""), runtime: []string{"runtime-a"}},
+		{name: "runners replica", obj: baselineIR("llama-engine", "prod", 1)},
+		{name: "not a replica", obj: &corev1.Pod{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := irRuntimeRefIndexExtractor(tc.obj); !reflect.DeepEqual(got, tc.runtime) {
+				t.Errorf("runtime index = %v, want %v", got, tc.runtime)
+			}
+			if got := irModelRefIndexExtractor(tc.obj); !reflect.DeepEqual(got, tc.model) {
+				t.Errorf("model index = %v, want %v", got, tc.model)
+			}
+			if got := irRuntimeAutoSelectIndexExtractor(tc.obj); !reflect.DeepEqual(got, tc.auto) {
+				t.Errorf("auto-select index = %v, want %v", got, tc.auto)
+			}
+		})
+	}
+}
+
+// refWatchReconciler builds a reconciler over a fake client carrying the
+// reference indexes and objs.
+func refWatchReconciler(t *testing.T, objs ...client.Object) *Reconciler {
+	t.Helper()
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).
+		WithIndex(&v1beta1.InferenceReplica{}, irRuntimeRefIndexField, irRuntimeRefIndexExtractor).
+		WithIndex(&v1beta1.InferenceReplica{}, irModelRefIndexField, irModelRefIndexExtractor).
+		WithIndex(&v1beta1.InferenceReplica{}, irRuntimeAutoSelectIndexField, irRuntimeAutoSelectIndexExtractor).
+		Build()
+	return &Reconciler{Client: c, Log: logr.Discard()}
+}
+
+func requestNames(reqs []reconcile.Request) []string {
+	names := make([]string, 0, len(reqs))
+	for _, req := range reqs {
+		names = append(names, req.Namespace+"/"+req.Name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func TestRuntimeToReplicas(t *testing.T) {
+	// child-a inherits from the cluster runtime runtime-a, so a runtime-a
+	// event reaches the replica naming child-a as well.
+	child := &v1beta1.ClusterServingRuntime{ObjectMeta: metav1.ObjectMeta{
+		Name: "child-a", Annotations: map[string]string{constants.RuntimeInheritFromAnnotationKey: "runtime-a"},
+	}}
+	r := refWatchReconciler(t,
+		child,
+		refReplica("named", "team-a", "runtime-a", ""),
+		refReplica("named-elsewhere", "team-b", "runtime-a", "model-a"),
+		refReplica("selecting", "team-a", "", "model-a"),
+		refReplica("selecting-elsewhere", "team-b", "", "model-a"),
+		refReplica("other-runtime", "team-a", "runtime-b", ""),
+		refReplica("inheriting", "team-a", "child-a", ""),
+		baselineIR("llama-engine", "team-a", 1),
+	)
+	for _, tc := range []struct {
+		name string
+		obj  client.Object
+		want []string
+	}{
+		{
+			name: "cluster runtime reaches every namespace",
+			obj:  &v1beta1.ClusterServingRuntime{ObjectMeta: metav1.ObjectMeta{Name: "runtime-a"}},
+			want: []string{"team-a/inheriting", "team-a/named", "team-a/selecting", "team-b/named-elsewhere", "team-b/selecting-elsewhere"},
+		},
+		{
+			name: "namespaced runtime reaches its namespace",
+			obj:  &v1beta1.ServingRuntime{ObjectMeta: metav1.ObjectMeta{Name: "runtime-a", Namespace: "team-b"}},
+			want: []string{"team-b/named-elsewhere", "team-b/selecting-elsewhere"},
+		},
+		{
+			name: "runtime nobody names reaches the selecting replicas",
+			obj:  &v1beta1.ClusterServingRuntime{ObjectMeta: metav1.ObjectMeta{Name: "runtime-c"}},
+			want: []string{"team-a/selecting", "team-b/selecting-elsewhere"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := requestNames(r.runtimeToReplicas(context.Background(), tc.obj))
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("runtimeToReplicas = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestModelToReplicas(t *testing.T) {
+	r := refWatchReconciler(t,
+		refReplica("named", "team-a", "runtime-a", "model-a"),
+		refReplica("named-elsewhere", "team-b", "", "model-a"),
+		refReplica("other-model", "team-a", "", "model-b"),
+		refReplica("runtime-only", "team-a", "runtime-a", ""),
+		baselineIR("llama-engine", "team-a", 1),
+	)
+	for _, tc := range []struct {
+		name string
+		obj  client.Object
+		want []string
+	}{
+		{
+			name: "cluster model reaches every namespace",
+			obj:  &v1beta1.ClusterBaseModel{ObjectMeta: metav1.ObjectMeta{Name: "model-a"}},
+			want: []string{"team-a/named", "team-b/named-elsewhere"},
+		},
+		{
+			name: "namespaced model reaches its namespace",
+			obj:  &v1beta1.BaseModel{ObjectMeta: metav1.ObjectMeta{Name: "model-a", Namespace: "team-a"}},
+			want: []string{"team-a/named"},
+		},
+		{
+			name: "model nobody names reaches nothing",
+			obj:  &v1beta1.ClusterBaseModel{ObjectMeta: metav1.ObjectMeta{Name: "model-c"}},
+			want: []string{},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := requestNames(r.modelToReplicas(context.Background(), tc.obj))
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("modelToReplicas = %v, want %v", got, tc.want)
 			}
 		})
 	}

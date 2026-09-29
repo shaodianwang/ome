@@ -848,6 +848,85 @@ func TestHandle(t *testing.T) {
 			},
 			wantAllowed: true,
 		},
+		// A standalone replica renders from exactly one template source:
+		// spec.runners, or spec.modelRef and/or spec.runtimeRef, with no
+		// runtime pin. Without a Reader no runtime is resolved.
+		{
+			name:         "standalone create with runners and modelRef → denied",
+			req:          func(t *testing.T) admission.Request { return createReq(t, withModelRef(standaloneIR(), "model-a")) },
+			wantContains: []string{"spec.runners and spec.modelRef/spec.runtimeRef are exclusive"},
+		},
+		{
+			name: "standalone create with runners and runtimeRef → denied",
+			req: func(t *testing.T) admission.Request {
+				return createReq(t, withRuntimeRef(standaloneIR(), refsIR(v1beta1.EngineComponent).Spec.RuntimeRef))
+			},
+			wantContains: []string{"spec.runners and spec.modelRef/spec.runtimeRef are exclusive"},
+		},
+		{
+			name: "standalone create with modelRef alone → allowed",
+			req: func(t *testing.T) admission.Request {
+				return createReq(t, withModelRef(withoutRunners(standaloneIR()), "model-a"))
+			},
+			wantAllowed: true,
+		},
+		{
+			name:        "standalone create with runtimeRef alone → allowed",
+			req:         func(t *testing.T) admission.Request { return createReq(t, refsIR(v1beta1.EngineComponent)) },
+			wantAllowed: true,
+		},
+		{
+			name: "standalone create with modelRef and runtimeRef → allowed",
+			req: func(t *testing.T) admission.Request {
+				return createReq(t, withModelRef(refsIR(v1beta1.EngineComponent), "model-a"))
+			},
+			wantAllowed: true,
+		},
+		{
+			name:         "standalone create with no template source → denied",
+			req:          func(t *testing.T) admission.Request { return createReq(t, withoutRunners(standaloneIR())) },
+			wantContains: []string{"spec.runners is required unless spec.modelRef or spec.runtimeRef is set"},
+		},
+		{
+			name: "standalone create with runtimeRef.autoSync=false → denied",
+			req: func(t *testing.T) admission.Request {
+				ir := refsIR(v1beta1.EngineComponent)
+				ir.Spec.RuntimeRef.AutoSync = ptr.To(false)
+				return createReq(t, ir)
+			},
+			wantContains: []string{"spec.runtimeRef.autoSync=false and spec.runtimeRef.revision are not honored on an InferenceReplica"},
+		},
+		{
+			name: "standalone create with runtimeRef.revision → denied",
+			req: func(t *testing.T) admission.Request {
+				ir := refsIR(v1beta1.EngineComponent)
+				ir.Spec.RuntimeRef.Revision = ptr.To("runtime-a-1")
+				return createReq(t, ir)
+			},
+			wantContains: []string{"not honored on an InferenceReplica"},
+		},
+		{
+			name: "standalone update adding runners to a refs replica → denied",
+			req: func(t *testing.T) admission.Request {
+				refs := refsIR(v1beta1.EngineComponent)
+				return updateReq(t, refs, withRuntimeRef(standaloneIR(), refs.Spec.RuntimeRef))
+			},
+			wantContains: []string{"exclusive"},
+		},
+		{
+			name: "standalone update removing the last template source → denied",
+			req: func(t *testing.T) admission.Request {
+				return updateReq(t, standaloneIR(), withoutRunners(standaloneIR()))
+			},
+			wantContains: []string{"spec.runners is required unless spec.modelRef or spec.runtimeRef is set"},
+		},
+		{
+			name: "standalone update replacing runners with refs → allowed",
+			req: func(t *testing.T) admission.Request {
+				return updateReq(t, standaloneIR(), refsIR(v1beta1.EngineComponent))
+			},
+			wantAllowed: true,
+		},
 	}
 
 	for _, tc := range tests {

@@ -32,6 +32,7 @@ import (
 	inferencereplica "github.com/ome-projects/ome/pkg/controller/v1beta1/inferencereplica"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/runtimeselector"
 	"github.com/ome-projects/ome/tests/integration/components"
 	"github.com/ome-projects/ome/tests/integration/kindutil"
 	"github.com/ome-projects/ome/tests/integration/util"
@@ -204,6 +205,7 @@ func StandardOMESetup(opts SetupOpts) kindutil.ManagerSetup {
 				Clientset:                clientset,
 				Log:                      ctrl.Log.WithName("InferenceReplica"),
 				APIReader:                mgr.GetAPIReader(),
+				RuntimeSelector:          runtimeselector.New(mgr.GetClient()),
 				InstanceStatusDecoder:    irstatus.NewDecoder(statusConfig.DecodeBound()),
 				InstanceStatusTarget:     statusConfig.InstanceStatusEncoding,
 				Recorder:                 mgr.GetEventRecorderFor("InferenceReplica"),

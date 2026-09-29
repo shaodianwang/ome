@@ -692,6 +692,14 @@ func main() {
 		}
 	}
 
+	// The runtime selector the InferenceReplica controller renders replicas
+	// with from their model and runtime references, shared with the
+	// InferenceService validator. It carries the cluster's model cache
+	// provider so a sharded model selects a runtime that supports it.
+	runtimeSelectorConfig := runtimeselector.NewConfig(mgr.GetClient())
+	runtimeSelectorConfig.ModelCacheProvider = modelCacheProvider.Name
+	runtimeSelector := runtimeselector.NewWithConfig(runtimeSelectorConfig)
+
 	if options.enableInferenceReplicaCtrl && !isControlPlane {
 		setupLog.Info("Setting up InferenceReplica controller")
 		if err = (&v1beta1inferencereplicacontroller.Reconciler{
@@ -699,6 +707,7 @@ func main() {
 			Clientset:                clientSet,
 			Log:                      ctrl.Log.WithName("InferenceReplica"),
 			APIReader:                mgr.GetAPIReader(),
+			RuntimeSelector:          runtimeSelector,
 			InstanceStatusDecoder:    instanceStatusDecoder,
 			InstanceStatusTarget:     omenativeStatusConfig.InstanceStatusEncoding,
 			Recorder:                 eventBroadcaster.NewRecorder(mgr.GetScheme(), v1.EventSource{Component: "v1beta1Controllers"}),
@@ -838,10 +847,6 @@ func main() {
 		if isControlPlane {
 			setupLog.Info("control-plane role: InferenceService validator webhook disabled (runtime selection runs on workload clusters)")
 		} else {
-			runtimeSelectorConfig := runtimeselector.NewConfig(mgr.GetClient())
-			runtimeSelectorConfig.ModelCacheProvider = modelCacheProvider.Name
-			runtimeSelector := runtimeselector.NewWithConfig(runtimeSelectorConfig)
-
 			if err = ctrl.NewWebhookManagedBy(mgr, &v1beta1.InferenceService{}).
 				WithValidator(&isvc.InferenceServiceValidator{
 					Client:          mgr.GetClient(),

@@ -118,6 +118,36 @@ const (
 	ReasonNoReplicas = "NoReplicas"
 )
 
+// Ready=False reasons stamped when a replica has no pod templates to run:
+// it declares no template source, or it renders from modelRef/runtimeRef
+// and the render is blocked. The workload pass does not run and the existing
+// pods are left as they are; the runtime and model watches re-trigger the
+// replica when the referenced objects change.
+const (
+	// ReasonTemplateSourceMissing: neither runners nor a model or runtime
+	// reference is set.
+	ReasonTemplateSourceMissing = "TemplateSourceMissing"
+	// ReasonModelNotFound: no BaseModel or ClusterBaseModel carries the
+	// referenced name, or a sharded model has not finished loading.
+	ReasonModelNotFound = "ModelNotFound"
+	// ReasonModelDisabled: the referenced model is disabled.
+	ReasonModelDisabled = "ModelDisabled"
+	// ReasonRuntimeNotFound: the named runtime does not exist in the
+	// replica's namespace or at cluster scope.
+	ReasonRuntimeNotFound = "RuntimeNotFound"
+	// ReasonRuntimeDisabled: the named runtime is disabled.
+	ReasonRuntimeDisabled = "RuntimeDisabled"
+	// ReasonRuntimeSelectionFailed: no runtime serves the model, or the
+	// named runtime cannot serve it.
+	ReasonRuntimeSelectionFailed = "RuntimeSelectionFailed"
+	// ReasonRuntimePieceMissing: the runtime declares no piece for the
+	// replica's component.
+	ReasonRuntimePieceMissing = "RuntimePieceMissing"
+	// ReasonRenderFailed: the merge or the render of the pod templates
+	// failed, or this controller is not configured to render from refs.
+	ReasonRenderFailed = "RenderFailed"
+)
+
 // aggregateAndWriteStatus publishes cached Pod and EndpointSlice facts over
 // freshly read lifecycle rows, then computes the IR summaries and conditions.
 // Lifecycle fields and CurrentRevision retain their dedicated writers, with

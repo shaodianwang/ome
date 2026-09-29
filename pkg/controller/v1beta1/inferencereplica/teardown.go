@@ -147,7 +147,7 @@ func (r *Reconciler) reconcileTeardown(ctx context.Context, log logr.Logger, ir 
 	// defaults are likewise irrelevant: teardown never consults the
 	// update gate.
 	settings := lifecycleSettings{InstanceReadyTimeout: r.resolveConfiguredInstanceReadyTimeout(log)}
-	input := r.buildReconcileInput(ctx, ir, parent, nil, forceDeletePolicy, settings, 0, coordination.GroupDefaults{})
+	input := r.buildReconcileInput(ctx, ir, ir.Spec.Runners, parent, nil, forceDeletePolicy, settings, 0, coordination.GroupDefaults{})
 	input.Teardown = true
 	input.ScaleDownPodBatchSize = r.ScaleDownPodBatchSize
 	input.ScaleDownRequeueInterval = r.ScaleDownRequeueInterval

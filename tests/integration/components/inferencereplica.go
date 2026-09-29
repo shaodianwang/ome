@@ -10,6 +10,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	inferencereplica "github.com/ome-projects/ome/pkg/controller/v1beta1/inferencereplica"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
+	"github.com/ome-projects/ome/pkg/runtimeselector"
 )
 
 // InferenceReplicaOption mutates the IR reconciler before it is
@@ -69,6 +70,7 @@ func SetupInferenceReplica(ctx context.Context, mgr ctrl.Manager, opts ...Infere
 		Clientset:                clientset,
 		Log:                      ctrl.Log.WithName("InferenceReplica"),
 		APIReader:                mgr.GetAPIReader(),
+		RuntimeSelector:          runtimeselector.New(mgr.GetClient()),
 		InstanceStatusDecoder:    irstatus.NewDecoder(statusConfig.DecodeBound()),
 		InstanceStatusTarget:     statusConfig.InstanceStatusEncoding,
 		Recorder:                 mgr.GetEventRecorderFor("InferenceReplica"),

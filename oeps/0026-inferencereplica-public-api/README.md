@@ -203,7 +203,7 @@ group; the user/rollout-control split is enforced with the referenced form
 
 | Group | Fields |
 |---|---|
-| User | `component` (set at create, immutable), `runners` (or `modelRef`/`runtimeRef`/`acceleratorSelector`, section 5), `replicas`, `minReadySeconds`, `topologyKey`, `topologySpread`, `topologySpreadKey`, `lifecycle` (restart, update strategy, ready policy, migration), `revisionHistoryLimit`, `autoscaler` |
+| User | `component` (set at create, immutable), `runners` (or `modelRef`/`runtimeRef`, section 5), `replicas`, `minReadySeconds`, `topologyKey`, `topologySpread`, `topologySpreadKey`, `lifecycle` (restart, update strategy, ready policy, migration), `revisionHistoryLimit`, `autoscaler` |
 | Rollout-control | `pacing.partition`, `pacing.maxUnavailable`, `pacing.rollbackToRevision`, `paused`, `pauseMode`, `pairingProtocol` |
 | Controller-only | `parentRef`, `placementExecution`, `placementReplicaLimit` |
 
@@ -226,11 +226,12 @@ The composer steers a rollout through `pacing` and never writes inside
 
 ### 5. Runtime integration moves to the IR, optionally
 
-Three new optional fields: `spec.modelRef`, `spec.runtimeRef` and, only with
-one of them, `spec.acceleratorSelector`. With a ref set,
+Two new optional fields: `spec.modelRef` and `spec.runtimeRef`. With a ref set,
 `spec.component` selects **which piece** of the runtime the IR renders. A
 runtime has three pieces; the IR's role picks one. The controller never infers
-the piece from what the runtime happens to contain.
+the piece from what the runtime happens to contain. Accelerator placement
+comes from the runtime's pod spec (node selector, affinity, resources); a
+second accelerator pool is a second runtime.
 
 Validation is per piece:
 
@@ -252,10 +253,9 @@ are set, and the ISVC inline form. The inline form keeps creating its IRs with
 the rendered runners plus the revision hash, captured before it, locks that.
 Refs are the
 standalone IR's feature. A refs IR carries no role overrides: it renders the
-runtime piece named by `spec.component`, the model, and an optional
-`spec.acceleratorSelector` (the ISVC's type). Anything beyond that uses
-`runners`. Open Question 2 is answered yes; the alternative, and why it is
-worse, is in Alternatives.
+runtime piece named by `spec.component` and the model. Anything beyond that
+uses `runners`. Open Question 2 is answered yes; the alternative, and why it
+is worse, is in Alternatives.
 
 ### 6. What an IR cannot know alone: its peers
 
@@ -278,7 +278,7 @@ Each phase leaves every existing ISVC untouched.
 | Phase | Delivers | Locked by |
 |---|---|---|
 | 1 | Spec split documented as three groups, with the controller-only group enforced (the user/rollout-control split is enforced with the referenced form, Phase 3); owner rule enforced; `parentRef` optional; a bare-pod IR (`runners` only) is usable standalone | existing KIND suites through the inline path; workload goldens; webhook unit tests; **new** envtest suites `webhook/inferencereplica` (ownership rules per form) and `controller/inferencereplica_standalone` (naming, events, idle router, teardown); **new** KIND spec `standalone_replica`; the `ome-resources` render test (identity block, webhook configuration) |
-| 2 | `modelRef`/`runtimeRef`/`acceleratorSelector` on the IR; rendering library `pkg/render` extracted; the inline form keeps `runners`; a standalone IR renders from refs | a byte golden of the projector's rendered runners and revision hash, captured before the extraction; existing merge, component, projector, hash and placement unit tests; KIND suites through the inline path; **new** envtest specs (webhook: `runners` vs refs exclusivity, piece-missing rejection; controller: refs render the runtime image and model path, auto-selection, `RuntimePieceMissing`, re-render on runtime change); **new** KIND spec `standalone_replica_refs`; one unit test asserting the inline path and the refs path produce identical runners and hash |
+| 2 | `modelRef`/`runtimeRef` on the IR; rendering library `pkg/render` extracted; the inline form keeps `runners`; a standalone IR renders from refs | a byte golden of the projector's rendered runners and revision hash, captured before the extraction; existing merge, component, projector, hash and placement unit tests; KIND suites through the inline path; **new** envtest specs (webhook: `runners` vs refs exclusivity, piece-missing rejection; controller: refs render the runtime image and model path, auto-selection, `RuntimePieceMissing`, re-render on runtime change); **new** KIND spec `standalone_replica_refs`; one unit test asserting the inline path and the refs path produce identical runners and hash |
 | 3 | Referenced form on the ISVC, one ref per role | new KIND specs: ISVC over a pre-created IR, router over a referenced engine |
 | 4 | Multiple refs per role: traffic across refs (`TrafficMap` as actuator), pairing across sets, groups naming refs | new KIND specs per case in Motivation; TrafficMap envtest |
 
@@ -291,8 +291,7 @@ Each phase leaves every existing ISVC untouched.
 | `spec.parentRef` | `ParentReference` | controller-only | optional; set only by the controller, together with the ISVC controller owner reference; immutable | a set `parentRef` marks a projected replica; absent, with no ISVC controller owner reference, means standalone |
 | `spec.component` | `engine\|decoder\|router` | user | required; immutable | selects the piece when refs are set |
 | `spec.modelRef` | `ModelRef` (same type as ISVC `spec.model`) | user | optional; requires `runners` absent | `BaseModel` or `ClusterBaseModel`; `fineTunedWeights` and `overlays` render as on the ISVC |
-| `spec.runtimeRef` | `ServingRuntimeRef` (same type as ISVC `spec.runtime`) | user | optional; runtime must carry the piece named by `component` | without `modelRef`, the runtime's piece is rendered as-is |
-| `spec.acceleratorSelector` | `AcceleratorSelector` (same type as ISVC `spec.acceleratorSelector`) | user | optional; only with `modelRef` or `runtimeRef`; a runtime that declares no `acceleratorRequirements` ignores it | the resolved class supplies the node selector, affinity, resources and per-class runtime overrides, as on the ISVC |
+| `spec.runtimeRef` | `ServingRuntimeRef` (same type as ISVC `spec.runtime`) | user | optional; runtime must carry the piece named by `component` | without `modelRef`, the runtime's piece is rendered as-is; the runtime's pod spec places the pods |
 | `spec.runners` | `[]Runner` | user | required when neither ref is set; forbidden when a ref is set; a refs IR carries no `runners` and no role overrides | unchanged shape |
 | `spec.pacing.partition`, `.maxUnavailable`, `.rollbackToRevision` | unchanged | rollout-control | unchanged: `partition <= replicas` | `partition` takes precedence over the user's rolling-update partition; `maxUnavailable` is reserved (section 4) |
 | `spec.paused`, `spec.pauseMode` | unchanged | rollout-control | unchanged: `pauseMode` is `Recover` or `Freeze` | |
@@ -302,17 +301,26 @@ Rules:
 1. Exactly one of {`runners`, `modelRef`, `runtimeRef`-alone} is the template
    source. `modelRef` with `runtimeRef` names both; `modelRef` alone
    auto-selects the runtime as the ISVC does; `runtimeRef` alone renders the
-   runtime's piece as-is. Mixing `runners` with a ref is rejected, and
-   `acceleratorSelector` with `runners` is rejected. Rationale: two sources
-   with one winner is inference.
+   runtime's piece as-is. Mixing `runners` with a ref is rejected. Rationale:
+   two sources with one winner is inference.
 2. `runtimeRef` names a runtime without the piece for `component` ⇒ rejected at
-   admission when the runtime is readable; otherwise a `Ready=False` condition
-   with reason `RuntimePieceMissing`. A `runtimeRef` that pins a runtime
-   revision (`autoSync: false`) is rejected at admission: the IR controller
-   renders the live runtime and creates no runtime snapshots. A model that
-   cannot be found, or is not yet ready, yields `Ready=False` with reason
-   `ModelNotFound`; the IR renders again when the model changes, through its
-   watch, without a polling interval.
+   admission on create or when the reference changes, when the runtime is
+   readable; otherwise a `Ready=False` condition with reason
+   `RuntimePieceMissing`. A `runtimeRef` naming a runtime whose inherit-from
+   parent does not exist is denied at admission with a message naming the
+   parent. A disabled runtime or model is reported by the IR
+   controller (`Ready=False` with reason `RuntimeDisabled` or `ModelDisabled`),
+   not denied at admission: disabling is an operational flip the controller
+   re-evaluates through its watches, and a write to the IR that keeps its
+   references (a scale, a pause) must not wait on it. A `runtimeRef` that pins
+   a runtime revision (`autoSync: false`) is rejected at admission: the IR
+   controller renders the live runtime and creates no runtime snapshots. A
+   model that cannot be found, or is not yet ready, yields `Ready=False` with
+   reason `ModelNotFound`; the IR renders again when the model changes, through
+   its watch, without a polling interval. A refs IR's own object annotations
+   are inherited pod metadata excluded from the revision hash, as an ISVC's
+   are: an annotation edit on the IR rolls no pods, and the same edit on an
+   ISVC and on the IR that describes its workload yields one revision hash.
 3. On a projected IR, a spec write by anyone but the ISVC controller is
    rejected. On any IR, a write to a controller-only field by anyone but the
    ISVC controller is rejected, and `parentRef` is immutable for every writer.
@@ -479,11 +487,11 @@ functions in the same order and hand the result to the projector, which
 writes `runners`; the golden, captured before the extraction, pins that
 output. The IR controller: when a replica carries refs, it builds an
 ISVC-shaped shell from the replica (the replica's name prefix, namespace,
-labels and annotations; `spec.model`, `spec.runtime` and
-`spec.acceleratorSelector` from the refs; an empty role spec for
-`spec.component` so the runtime piece is the whole template), calls `Resolve`,
-`Prepare` and `RenderComponent`, and feeds the runners into its workload pass
-in memory. The replica's stored spec keeps the refs and never gains `runners`.
+labels and annotations; `spec.model` and `spec.runtime` from the refs; no
+accelerator selector; an empty role spec for `spec.component` so the runtime
+piece is the whole template), calls `Resolve`, `Prepare` and
+`RenderComponent`, and feeds the runners into its workload pass in memory. The
+replica's stored spec keeps the refs and never gains `runners`.
 
 The revision hash is over the rendered runners, so both callers produce the
 same hash for the same inputs. One unit test renders identical inputs through
@@ -622,9 +630,9 @@ contract and needs its own decision).
    with the same controller behind it; two status shapes for one engine; and
    the migration of every existing `<isvc>-<component>` IR to the new kind.
 4. **IR stays bare; composition users write pod templates (Open Question 2's
-   "no").** *Loses:* a referenced engine cannot be auto-matched to a runtime or
-   accelerator, so case 2 (two runtimes) means hand-rendered templates that
-   drift from the runtime catalog. Worse: model-format validation happens only
+   "no").** *Loses:* a referenced engine cannot be auto-matched to a runtime,
+   so case 2 (two runtimes) means hand-rendered templates that drift from the
+   runtime catalog. Worse: model-format validation happens only
    in the ISVC, so a bare IR can run a template the catalog would have rejected.
 
 ## Migration
@@ -706,8 +714,7 @@ needs.
 2. **Does the rendering library move into the IR controller?** *Answered
    yes.* The package is `pkg/render` with two callers; the inline ISVC path
    keeps writing `runners` and stays byte-identical; a refs IR carries no
-   role overrides beyond `acceleratorSelector`. Alternative 4 is the "no"
-   case.
+   role overrides. Alternative 4 is the "no" case.
 3. **Name:** keep `InferenceReplica`, or rename now that it is public? A rename
    is a new kind with a conversion; it is cheapest before Phase 3.
    *Answered no for Phase 1:* the kind stays `InferenceReplica`. A rename

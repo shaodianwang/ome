@@ -35,6 +35,8 @@ pub struct InferenceReplicaSpec {
         rename = "minReadySeconds"
     )]
     pub min_ready_seconds: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "modelRef")]
+    pub model_ref: Option<InferenceReplicaModelRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pacing: Option<InferenceReplicaPacing>,
     #[serde(
@@ -69,7 +71,14 @@ pub struct InferenceReplicaSpec {
         rename = "revisionHistoryLimit"
     )]
     pub revision_history_limit: Option<i32>,
-    pub runners: Vec<InferenceReplicaRunners>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runners: Option<Vec<InferenceReplicaRunners>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "runtimeRef"
+    )]
+    pub runtime_ref: Option<InferenceReplicaRuntimeRef>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -760,6 +769,32 @@ pub enum InferenceReplicaLifecycleUpdateStrategyType {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceReplicaModelRef {
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "apiGroup")]
+    pub api_group: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "fineTunedWeights"
+    )]
+    pub fine_tuned_weights: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlays: Option<Vec<InferenceReplicaModelRefOverlays>>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceReplicaModelRefOverlays {
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "apiGroup")]
+    pub api_group: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InferenceReplicaPacing {
     #[serde(
         default,
@@ -792,13 +827,58 @@ pub enum InferenceReplicaPauseMode {
 pub struct InferenceReplicaPlacementExecution {
     #[serde(rename = "clusterUID")]
     pub cluster_uid: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub demand: Option<InferenceReplicaPlacementExecutionDemand>,
     #[serde(rename = "pauseSurge")]
     pub pause_surge: bool,
     #[serde(rename = "planID")]
     pub plan_id: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "replicaFloors"
+    )]
+    pub replica_floors: Option<Vec<InferenceReplicaPlacementExecutionReplicaFloors>>,
     pub revision: i64,
     #[serde(rename = "sourceUID")]
     pub source_uid: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceReplicaPlacementExecutionDemand {
+    pub components: Vec<InferenceReplicaPlacementExecutionDemandComponents>,
+    pub fingerprint: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceReplicaPlacementExecutionDemandComponents {
+    pub component: InferenceReplicaPlacementExecutionDemandComponentsComponent,
+    #[serde(rename = "renderingHash")]
+    pub rendering_hash: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceReplicaPlacementExecutionDemandComponentsComponent {
+    #[serde(rename = "engine")]
+    Engine,
+    #[serde(rename = "decoder")]
+    Decoder,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceReplicaPlacementExecutionReplicaFloors {
+    pub component: InferenceReplicaPlacementExecutionReplicaFloorsComponent,
+    pub replicas: i32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceReplicaPlacementExecutionReplicaFloorsComponent {
+    #[serde(rename = "engine")]
+    Engine,
+    #[serde(rename = "decoder")]
+    Decoder,
+    #[serde(rename = "router")]
+    Router,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -1070,6 +1150,19 @@ pub struct InferenceReplicaRunnersTemplateSpecWorkloadRef {
         rename = "podGroupReplicaKey"
     )]
     pub pod_group_replica_key: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceReplicaRuntimeRef {
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "apiGroup")]
+    pub api_group: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "autoSync")]
+    pub auto_sync: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

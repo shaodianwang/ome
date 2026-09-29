@@ -3454,11 +3454,10 @@
       }
     },
     "v1beta1.InferenceReplicaSpec": {
-      "description": "InferenceReplicaSpec is the desired state of one pod set. Its fields fall into three groups:\n\n  - User fields describe the pod set itself: component, set at create and\n    immutable; runners, replicas, minReadySeconds, topologyKey,\n    topologySpread, topologySpreadKey, lifecycle, revisionHistoryLimit and\n    autoscaler. The owner of the replica writes them: the InferenceService\n    controller for a projected replica, the creating user for a standalone\n    one.\n  - Rollout-control fields steer a rollout across pod sets: pacing, paused,\n    pauseMode and pairingProtocol. The InferenceService controller writes\n    them on the replicas it orchestrates; on a standalone replica its owner\n    sets them.\n  - Controller-only fields carry state only the InferenceService controller\n    can know: parentRef, placementExecution and placementReplicaLimit.",
+      "description": "InferenceReplicaSpec is the desired state of one pod set. Its fields fall into three groups:\n\n  - User fields describe the pod set itself: component, set at create and\n    immutable; the template source (runners, modelRef and runtimeRef),\n    replicas, minReadySeconds, topologyKey, topologySpread,\n    topologySpreadKey, lifecycle, revisionHistoryLimit and autoscaler. The\n    owner of the replica writes them: the InferenceService controller for\n    a projected replica, the creating user for a standalone one. Exactly\n    one template source: runners, or modelRef and/or runtimeRef; the\n    validating webhook enforces it.\n  - Rollout-control fields steer a rollout across pod sets: pacing, paused,\n    pauseMode and pairingProtocol. The InferenceService controller writes\n    them on the replicas it orchestrates; on a standalone replica its owner\n    sets them.\n  - Controller-only fields carry state only the InferenceService controller\n    can know: parentRef, placementExecution and placementReplicaLimit.",
       "type": "object",
       "required": [
-        "component",
-        "runners"
+        "component"
       ],
       "properties": {
         "autoscaler": {
@@ -3478,6 +3477,10 @@
           "description": "MinReadySeconds is the minimum time a newly Ready pod must stay Ready before it counts as Available. The workload engine paces rollout drains and promotions on Available pods and counts only Available pods in availableReplicas; 0 means Available as soon as Ready. On a projected replica the InferenceService controller copies the component's effective lifecycle.minReadySeconds: the InferenceService's value, else the runtime's, else the operator's deploy default.",
           "type": "integer",
           "format": "int32"
+        },
+        "modelRef": {
+          "description": "ModelRef names the BaseModel (in the replica's namespace) or ClusterBaseModel this replica serves. With it set the controller renders the pods from the model and the runtime: the runtime named by RuntimeRef, or the runtime selected for the model when RuntimeRef is absent. Fine-tuned weights and overlays render as they do on an InferenceService. Exclusive with Runners. User field.",
+          "$ref": "#/definitions/v1beta1.ModelRef"
         },
         "pacing": {
           "description": "Pacing is rollout control written onto this replica: the canary partition, the rollback target and a reserved disruption budget. The InferenceService controller writes it on the replicas it orchestrates; on a standalone replica its owner sets it. Nil means the replica rolls independently.",
@@ -3519,7 +3522,7 @@
           "format": "int32"
         },
         "runners": {
-          "description": "Runners is the fully-rendered set of pod templates per Instance. MUST be non-empty. Single-pod Instances have one Runner with Name=\"default\" and Size=1; multi-node Instances typically have Name=\"leader\" (Size=1) plus Name=\"worker\" (Size=N).\n\nThe InferenceReplica controller treats each Runner.Template as opaque input (same contract appsv1.Deployment.spec.template uses).",
+          "description": "Runners is the fully-rendered set of pod templates per Instance. A single-pod Instance has one Runner named \"default\" with Size=1; a multi-node Instance has \"leader\" (Size=1) and \"worker\" (Size=N). Required unless ModelRef or RuntimeRef is set, in which case it must be absent: the controller renders the runners from the refs and never stores them. The controller treats each Runner.Template as opaque input. User field.",
           "type": "array",
           "items": {
             "default": {},
@@ -3529,6 +3532,10 @@
             "name"
           ],
           "x-kubernetes-list-type": "map"
+        },
+        "runtimeRef": {
+          "description": "RuntimeRef names the ServingRuntime (in the replica's namespace) or ClusterServingRuntime whose piece for Component this replica renders. The runtime must declare that piece. Without ModelRef the piece renders as-is, with no model mounted. The runtime's pod spec places the pods (node selector, affinity, resources); a second accelerator pool is a second runtime. A pin (autoSync=false, revision) is not honored: the live runtime renders, and the validating webhook rejects a pinned reference. Exclusive with Runners. User field.",
+          "$ref": "#/definitions/v1beta1.ServingRuntimeRef"
         },
         "topologyKey": {
           "description": "TopologyKey is the gang co-location node-label key for this Component. When set on a multi-node Component, the InferenceReplica controller auto-generates the per-Instance worker→leader podAffinity that co-locates every worker onto its gang's leader on a node sharing this label value. Nil means no auto-generated gang affinity. On a projected replica the value is the effective InferenceService or runtime component setting.",

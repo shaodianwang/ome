@@ -39,6 +39,27 @@ func ComponentName(service *v1beta1.InferenceService, c v1beta1.ComponentType) s
 	return service.Name + "-" + string(c)
 }
 
+// RuntimeDeclaresPiece reports whether a runtime declares the role spec for
+// component c: its engineConfig, decoderConfig or routerConfig. It is false
+// when the runtime declares no such role, or c is not a role, and a replica
+// of that component cannot render from the runtime. Admission and the
+// replica controller share this check so both mean the same thing by "has
+// the piece".
+func RuntimeDeclaresPiece(rt *v1beta1.ServingRuntimeSpec, c v1beta1.ComponentType) bool {
+	if rt == nil {
+		return false
+	}
+	switch c {
+	case v1beta1.EngineComponent:
+		return rt.EngineConfig != nil
+	case v1beta1.DecoderComponent:
+		return rt.DecoderConfig != nil
+	case v1beta1.RouterComponent:
+		return rt.RouterConfig != nil
+	}
+	return false
+}
+
 // RenderComponent renders the role c of service from its merged spec.
 func RenderComponent(ctx context.Context, p *Piece, service *v1beta1.InferenceService, specs Specs, c v1beta1.ComponentType) (Rendered, error) {
 	switch c {

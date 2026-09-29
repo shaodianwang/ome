@@ -32,6 +32,13 @@
 // spec and installs no controller owner reference is decided without the
 // identity, so an unreadable config never refuses one.
 //
+// A standalone replica renders from exactly one template source:
+// spec.runners, or spec.modelRef and/or spec.runtimeRef; a runtime pin is
+// rejected. A named runtime that resolves without the piece for the
+// replica's component, or whose inherit-from chain names a runtime that does
+// not exist, is rejected when the reference is set or changed; one that is
+// not found is admitted, and the controller reports it on the replica.
+//
 // spec.parentRef and spec.component are immutable for every writer, and
 // deletion is never gated.
 package inferencereplica
@@ -57,6 +64,9 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/sliceprovision"
+	"github.com/ome-projects/ome/pkg/render"
+	"github.com/ome-projects/ome/pkg/runtimeinheritance"
+	"github.com/ome-projects/ome/pkg/runtimeselector"
 	"github.com/ome-projects/ome/pkg/validation"
 )
 
@@ -72,7 +82,8 @@ type Validator struct {
 	TPUSliceProvisioning *controllerconfig.TPUSliceProvisioningConfig
 	Nodes                client.Reader
 	// Reader resolves the InferenceService whose name a standalone replica
-	// would collide with. Nil skips that check.
+	// would collide with, and the runtime a standalone replica names. Nil
+	// skips both checks.
 	Reader client.Reader
 	// Clientset and ConfigCache load the inferenceReplica block of
 	// inferenceservice-config, which names the controller identity. A nil
@@ -175,6 +186,9 @@ func (v *Validator) admitCreate(ctx context.Context, obj *v1beta1.InferenceRepli
 		return denyStandaloneMigration(req)
 	}
 	if v.Reader != nil {
+		if resp := v.admitRuntimePiece(ctx, obj, req); !resp.Allowed {
+			return resp
+		}
 		for _, candidate := range collidingInferenceServiceNames(req.Name) {
 			isvc := &v1beta1.InferenceService{}
 			err := v.Reader.Get(ctx, types.NamespacedName{Namespace: req.Namespace, Name: candidate}, isvc)
@@ -194,7 +208,7 @@ func (v *Validator) admitCreate(ctx context.Context, obj *v1beta1.InferenceRepli
 // admitUpdate applies the update rows of the ownership table. The form is
 // read from the old object; immutability and metadata-only updates are
 // decided by Handle before this runs.
-func (v *Validator) admitUpdate(oldObj, newObj *v1beta1.InferenceReplica, who actor, req admission.Request) admission.Response {
+func (v *Validator) admitUpdate(ctx context.Context, oldObj, newObj *v1beta1.InferenceReplica, who actor, req admission.Request) admission.Response {
 	// A non-controller may keep or remove a controller owner reference but
 	// not install one on a projected replica, whose projector would refuse
 	// it and wedge the InferenceService, nor attach a standalone replica to
@@ -222,7 +236,63 @@ func (v *Validator) admitUpdate(oldObj, newObj *v1beta1.InferenceReplica, who ac
 	if migrationRequested(oldObj, newObj) {
 		return denyStandaloneMigration(req)
 	}
+	// A runtime is checked when the update names it; an update that keeps
+	// the reference is admitted even if the runtime has since lost the
+	// piece, which the controller reports, so a scale or pause never waits
+	// on the runtime.
+	if v.Reader != nil && runtimeRefChanged(oldObj.Spec, newObj.Spec) {
+		if resp := v.admitRuntimePiece(ctx, newObj, req); !resp.Allowed {
+			return resp
+		}
+	}
 	return admission.Allowed("")
+}
+
+// admitRuntimePiece denies a standalone replica whose named runtime resolves
+// without the piece for its component, or whose inherit-from chain names a
+// runtime that does not exist, a configuration no retry resolves; a replica
+// that names no runtime is admitted.
+func (v *Validator) admitRuntimePiece(ctx context.Context, obj *v1beta1.InferenceReplica, req admission.Request) admission.Response {
+	if obj.Spec.RuntimeRef == nil {
+		return admission.Allowed("")
+	}
+	msg, err := v.runtimePieceMissing(ctx, req.Namespace, obj.Spec)
+	var parentMissing *runtimeinheritance.ParentNotFoundError
+	if errors.As(err, &parentMissing) {
+		return admission.Denied(fmt.Sprintf("InferenceReplica %s/%s: runtime %q inherits from %q, which does not exist, so the runtime cannot be resolved",
+			req.Namespace, req.Name, obj.Spec.RuntimeRef.Name, parentMissing.Parent))
+	}
+	if err != nil {
+		return admission.Errored(http.StatusInternalServerError, fmt.Errorf("check runtime %q: %w", obj.Spec.RuntimeRef.Name, err))
+	}
+	if msg != "" {
+		return admission.Denied(fmt.Sprintf("InferenceReplica %s/%s: %s", req.Namespace, req.Name, msg))
+	}
+	return admission.Allowed("")
+}
+
+// runtimePieceMissing reports a named runtime that resolves and lacks the
+// piece for the replica's component. The runtime resolves as the replica
+// controller resolves it: the reference's kind picks the scope and an
+// inherit-from chain is merged first. A runtime that is not found admits:
+// the controller reports it on the replica and renders when it appears.
+func (v *Validator) runtimePieceMissing(ctx context.Context, namespace string, spec v1beta1.InferenceReplicaSpec) (string, error) {
+	ref := spec.RuntimeRef
+	rt, isCluster, err := runtimeselector.NewDefaultRuntimeFetcher(v.Reader).GetRuntime(ctx, ref.Name, namespace, runtimeselector.RefKind(ref))
+	if runtimeselector.IsRuntimeNotFoundError(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if render.RuntimeDeclaresPiece(rt, spec.Component) {
+		return "", nil
+	}
+	kind := runtimeselector.KindServingRuntime
+	if isCluster {
+		kind = runtimeselector.KindClusterServingRuntime
+	}
+	return fmt.Sprintf("%s %q has no %s piece; a %s replica cannot render from it", kind, ref.Name, spec.Component, spec.Component), nil
 }
 
 // Handle applies, in order: the immutability of spec.parentRef and
@@ -286,7 +356,7 @@ func (v *Validator) Handle(ctx context.Context, req admission.Request) admission
 	who := actorFor(identity, req.UserInfo, newObj)
 
 	if oldObj != nil {
-		if resp := v.admitUpdate(oldObj, newObj, who, req); !resp.Allowed {
+		if resp := v.admitUpdate(ctx, oldObj, newObj, who, req); !resp.Allowed {
 			return resp
 		}
 	} else if resp := v.admitCreate(ctx, newObj, who, req); !resp.Allowed {

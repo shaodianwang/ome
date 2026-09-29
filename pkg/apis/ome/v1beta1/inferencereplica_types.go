@@ -61,11 +61,13 @@ type InferenceReplicaList struct {
 // into three groups:
 //
 //   - User fields describe the pod set itself: component, set at create and
-//     immutable; runners, replicas, minReadySeconds, topologyKey,
-//     topologySpread, topologySpreadKey, lifecycle, revisionHistoryLimit and
-//     autoscaler. The owner of the replica writes them: the InferenceService
-//     controller for a projected replica, the creating user for a standalone
-//     one.
+//     immutable; the template source (runners, modelRef and runtimeRef),
+//     replicas, minReadySeconds, topologyKey, topologySpread,
+//     topologySpreadKey, lifecycle, revisionHistoryLimit and autoscaler. The
+//     owner of the replica writes them: the InferenceService controller for
+//     a projected replica, the creating user for a standalone one. Exactly
+//     one template source: runners, or modelRef and/or runtimeRef; the
+//     validating webhook enforces it.
 //   - Rollout-control fields steer a rollout across pod sets: pacing, paused,
 //     pauseMode and pairingProtocol. The InferenceService controller writes
 //     them on the replicas it orchestrates; on a standalone replica its owner
@@ -98,6 +100,26 @@ type InferenceReplicaSpec struct {
 	// Immutable; moving a workload between roles requires recreating the
 	// InferenceReplica.
 	Component ComponentType `json:"component"`
+
+	// ModelRef names the BaseModel (in the replica's namespace) or
+	// ClusterBaseModel this replica serves. With it set the controller renders
+	// the pods from the model and the runtime: the runtime named by RuntimeRef,
+	// or the runtime selected for the model when RuntimeRef is absent. Fine-tuned
+	// weights and overlays render as they do on an InferenceService. Exclusive
+	// with Runners. User field.
+	// +optional
+	ModelRef *ModelRef `json:"modelRef,omitempty"`
+
+	// RuntimeRef names the ServingRuntime (in the replica's namespace) or
+	// ClusterServingRuntime whose piece for Component this replica renders.
+	// The runtime must declare that piece. Without ModelRef the piece renders
+	// as-is, with no model mounted. The runtime's pod spec places the pods
+	// (node selector, affinity, resources); a second accelerator pool is a
+	// second runtime. A pin (autoSync=false, revision) is not honored: the
+	// live runtime renders, and the validating webhook rejects a pinned
+	// reference. Exclusive with Runners. User field.
+	// +optional
+	RuntimeRef *ServingRuntimeRef `json:"runtimeRef,omitempty"`
 
 	// Replicas is the desired Instance count; nil or 0 runs one Instance.
 	// Whatever targets the scale subresource (HPA, KEDA or an external
@@ -158,18 +180,17 @@ type InferenceReplicaSpec struct {
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$`
 	PairingProtocol *string `json:"pairingProtocol,omitempty"`
 
-	// Runners is the fully-rendered set of pod templates per Instance.
-	// MUST be non-empty. Single-pod Instances have one Runner with
-	// Name="default" and Size=1; multi-node Instances typically have
-	// Name="leader" (Size=1) plus Name="worker" (Size=N).
+	// Runners is the fully-rendered set of pod templates per Instance. A
+	// single-pod Instance has one Runner named "default" with Size=1; a
+	// multi-node Instance has "leader" (Size=1) and "worker" (Size=N). Required
+	// unless ModelRef or RuntimeRef is set, in which case it must be absent: the
+	// controller renders the runners from the refs and never stores them. The
+	// controller treats each Runner.Template as opaque input. User field.
 	//
-	// The InferenceReplica controller treats each Runner.Template as opaque
-	// input (same contract appsv1.Deployment.spec.template uses).
-	//
-	// +kubebuilder:validation:MinItems=1
+	// +optional
 	// +listType=map
 	// +listMapKey=name
-	Runners []Runner `json:"runners"`
+	Runners []Runner `json:"runners,omitempty"`
 
 	// Lifecycle holds the OMENative lifecycle policies (RestartPolicy,
 	// UpdateStrategy, ReadyPolicy, InstanceReadyTimeout, MigrationPolicy).
