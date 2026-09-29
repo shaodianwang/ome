@@ -28,6 +28,11 @@ func placementSatisfactionConditions(source *v1beta1.InferenceService) []policyC
 		Status: corev1.ConditionUnknown, Reason: "AwaitingMemberApplication", Message: "Waiting for observations of the accepted placement plan",
 	}}
 	accepted := status.Plan
+	if accepted.SingleMove != nil && accepted.SingleMove.Selected == "" {
+		condition.cond.Reason = "AwaitingReplacementAdmission"
+		condition.cond.Message = "The bounded replacement race has no admitted winner"
+		return []policyCondition{condition}
+	}
 	if accepted.Mode == v1beta1.PlacementModeSingle && accepted.Winner == "" {
 		condition.cond.Reason = "AwaitingSingleWinner"
 		condition.cond.Message = "The admission race has no committed winner"

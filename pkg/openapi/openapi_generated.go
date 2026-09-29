@@ -151,6 +151,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementExecutionPolicy":         schema_pkg_apis_ome_v1beta1_PlacementExecutionPolicy(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementHomePolicy":              schema_pkg_apis_ome_v1beta1_PlacementHomePolicy(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementPlanStatus":              schema_pkg_apis_ome_v1beta1_PlacementPlanStatus(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementSingleMoveStatus":        schema_pkg_apis_ome_v1beta1_PlacementSingleMoveStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementSpec":                    schema_pkg_apis_ome_v1beta1_PlacementSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementStatus":                  schema_pkg_apis_ome_v1beta1_PlacementStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodSpec":                          schema_pkg_apis_ome_v1beta1_PodSpec(ref),
@@ -3010,6 +3011,12 @@ func schema_pkg_apis_ome_v1beta1_CandidateAllocationStatus(ref common.ReferenceC
 							Format:      "",
 						},
 					},
+					"replacementStartedAt": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ReplacementStartedAt persists the start of an authorized bounded probe. The configured replacement timeout is evaluated against this instant.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.MicroTime"),
+						},
+					},
 					"matched": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Matched distinguishes a desired full-policy home from an outgoing home, including an affinity that matches every registration without terms.",
@@ -3095,7 +3102,7 @@ func schema_pkg_apis_ome_v1beta1_CandidateAllocationStatus(ref common.ReferenceC
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementCapacitySample", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementHomePolicy"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementCapacitySample", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementHomePolicy", "k8s.io/apimachinery/pkg/apis/meta/v1.MicroTime"},
 	}
 }
 
@@ -10023,6 +10030,12 @@ func schema_pkg_apis_ome_v1beta1_PlacementPlanStatus(ref common.ReferenceCallbac
 							Format:      "",
 						},
 					},
+					"singleMove": {
+						SchemaProps: spec.SchemaProps{
+							Description: "SingleMove retains bounded replacement-race state until the old home and losing probes have been removed. Winner remains the serving home.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementSingleMoveStatus"),
+						},
+					},
 					"adoptionDigest": {
 						SchemaProps: spec.SchemaProps{
 							Description: "AdoptionDigest fixes the initial intent while standing homes are being inventoried. A changed intent cannot expand an incomplete inventory.",
@@ -10102,6 +10115,35 @@ func schema_pkg_apis_ome_v1beta1_PlacementPlanStatus(ref common.ReferenceCallbac
 				Required: []string{"id", "revision", "sourceUID", "observedGeneration", "inputDigest", "pauseSurge", "requestedReplicas", "assignedReplicas", "unassignedReplicas", "originalUnassignedReplicas"},
 			},
 		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementSingleMoveStatus"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_PlacementSingleMoveStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "PlacementSingleMoveStatus separates replacement admission from serving handoff.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"selected": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Selected records the admitted replacement while it becomes ready and routable.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"cursor": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Cursor identifies the last nominated replacement for fair bounded retries.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+				},
+			},
+		},
 	}
 }
 
@@ -10152,6 +10194,12 @@ func schema_pkg_apis_ome_v1beta1_PlacementSpec(ref common.ReferenceCallback) com
 							Format:      "int32",
 						},
 					},
+					"replacementTimeout": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ReplacementTimeout bounds a non-admitting probe during a healthy Single move. Omission retains pending probes; a positive duration allows rotation.",
+							Ref:         ref("k8s.io/apimachinery/pkg/apis/meta/v1.Duration"),
+						},
+					},
 					"requirements": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Requirements is a Legacy label selector, ANDed with ClusterSelector. Deprecated: opt into ClusterAffinity and use clusterAffinity.",
@@ -10190,7 +10238,7 @@ func schema_pkg_apis_ome_v1beta1_PlacementSpec(ref common.ReferenceCallback) com
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterAffinityTerm", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.SplitSpec", "k8s.io/apimachinery/pkg/api/resource.Quantity"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ClusterAffinityTerm", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.SplitSpec", "k8s.io/apimachinery/pkg/api/resource.Quantity", "k8s.io/apimachinery/pkg/apis/meta/v1.Duration"},
 	}
 }
 

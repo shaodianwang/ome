@@ -41,6 +41,10 @@ type PlacementPlanStatus struct {
 	// Empty means the persisted Single admission race has not selected a home.
 	// +optional
 	Winner string `json:"winner,omitempty"`
+	// SingleMove retains bounded replacement-race state until the old home and
+	// losing probes have been removed. Winner remains the serving home.
+	// +optional
+	SingleMove *PlacementSingleMoveStatus `json:"singleMove,omitempty"`
 	// AdoptionDigest fixes the initial intent while standing homes are being
 	// inventoried. A changed intent cannot expand an incomplete inventory.
 	// +optional
@@ -69,6 +73,16 @@ type PlacementPlanStatus struct {
 	OriginalUnassignedReplicas int32 `json:"originalUnassignedReplicas"`
 }
 
+// PlacementSingleMoveStatus separates replacement admission from serving handoff.
+type PlacementSingleMoveStatus struct {
+	// Selected records the admitted replacement while it becomes ready and routable.
+	// +optional
+	Selected string `json:"selected,omitempty"`
+	// Cursor identifies the last nominated replacement for fair bounded retries.
+	// +optional
+	Cursor string `json:"cursor,omitempty"`
+}
+
 // CandidateAllocationStatus separates original, currently authorized, and desired
 // floors. A zero current floor does not authorize deletion before traffic drains.
 type CandidateAllocationStatus struct {
@@ -85,6 +99,10 @@ type CandidateAllocationStatus struct {
 	// candidate wins. A retained winner does not carry this permission.
 	// +optional
 	RaceCandidate bool `json:"raceCandidate,omitempty"`
+	// ReplacementStartedAt persists the start of an authorized bounded probe.
+	// The configured replacement timeout is evaluated against this instant.
+	// +optional
+	ReplacementStartedAt *metav1.MicroTime `json:"replacementStartedAt,omitempty"`
 	// Matched distinguishes a desired full-policy home from an outgoing home,
 	// including an affinity that matches every registration without terms.
 	// +optional

@@ -135,3 +135,88 @@ func TestSingleWinnerPersistenceReadback(t *testing.T) {
 		})
 	}
 }
+
+func TestSingleMoveAuthority(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		edit    func(*Proposal)
+		wantErr bool
+	}{
+		{name: "bounded replacement race"},
+		{name: "selected replacement retains serving winner", edit: func(p *Proposal) {
+			p.SingleMove.Selected = "member-b"
+			a := p.Assignments["member-b"]
+			a.RaceCandidate = false
+			p.Assignments["member-b"] = a
+		}},
+		{name: "movement needs pause", edit: func(p *Proposal) { p.PauseSurge = false }, wantErr: true},
+		{name: "movement needs winner", edit: func(p *Proposal) { p.Winner = "" }, wantErr: true},
+		{name: "movement is Single only", edit: func(p *Proposal) { p.Mode = v1beta1.PlacementModeAll }, wantErr: true},
+		{name: "missing selection has no authority", edit: func(p *Proposal) { p.SingleMove.Selected = "member-c" }, wantErr: true},
+		{name: "selection cannot retain race deletion permission", edit: func(p *Proposal) { p.SingleMove.Selected = "member-b" }, wantErr: true},
+		{name: "unmaterialized selection has no authority", edit: func(p *Proposal) {
+			p.SingleMove.Selected = "member-b"
+			a := p.Assignments["member-b"]
+			a.RaceCandidate = false
+			a.CurrentReplicas = 0
+			a.CurrentHome = nil
+			p.Assignments["member-b"] = a
+		}, wantErr: true},
+		{name: "absent original retains identity until handoff", edit: func(p *Proposal) {
+			a := p.Assignments["member-a"]
+			a.CurrentReplicas = 0
+			a.CurrentHome = nil
+			p.Assignments["member-a"] = a
+		}},
+		{name: "cancelled move can restore absent original", edit: func(p *Proposal) {
+			p.SingleMove.Selected = p.Winner
+			a := p.Assignments["member-a"]
+			a.DesiredReplicas, a.DesiredHome = a.CurrentReplicas, a.CurrentHome.DeepCopy()
+			a.CurrentReplicas, a.CurrentHome = 0, nil
+			p.Assignments["member-a"] = a
+			b := p.Assignments["member-b"]
+			b.DesiredReplicas, b.DesiredHome = 0, nil
+			p.Assignments["member-b"] = b
+		}},
+		{name: "absent winner without original authority cannot restore", wantErr: true, edit: func(p *Proposal) {
+			p.SingleMove.Selected = p.Winner
+			a := p.Assignments["member-a"]
+			a.DesiredReplicas, a.DesiredHome = a.CurrentReplicas, a.CurrentHome.DeepCopy()
+			a.OriginalReplicas, a.CurrentReplicas, a.CurrentHome = 0, 0, nil
+			p.Assignments["member-a"] = a
+			b := p.Assignments["member-b"]
+			b.DesiredReplicas, b.DesiredHome = 0, nil
+			p.Assignments["member-b"] = b
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p := singleProposalFixture()
+			p.Winner, p.PauseSurge, p.SingleMove = "member-a", true, &v1beta1.PlacementSingleMoveStatus{Cursor: "member-b"}
+			a := p.Assignments["member-a"]
+			a.RaceCandidate, a.OriginalReplicas, a.DesiredReplicas, a.DesiredHome = false, a.CurrentReplicas, 0, nil
+			p.Assignments["member-a"] = a
+			if tt.edit != nil {
+				tt.edit(&p)
+			}
+			source := sourceFixture()
+			source.Spec.Placement.Mode = p.Mode
+			store := storeFixture(t, source, interceptor.Funcs{})
+			got, err := store.Persist(t.Context(), source, p)
+			if diff := cmp.Diff(tt.wantErr, err != nil); diff != "" {
+				t.Fatalf("error %v: %s", err, diff)
+			}
+			if tt.wantErr {
+				return
+			}
+			if diff := cmp.Diff(p.SingleMove, got.Status.Placement.Plan.SingleMove); diff != "" {
+				t.Fatal(diff)
+			}
+			if diff := cmp.Diff(p.Winner, got.Status.Placement.Plan.Winner); diff != "" {
+				t.Fatal(diff)
+			}
+			if diff := cmp.Diff(got, mustPersist(t, store, got, p)); diff != "" {
+				t.Fatalf("restart changed movement: %s", diff)
+			}
+		})
+	}
+}

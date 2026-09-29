@@ -216,7 +216,22 @@ func TestAdvanceSplitPlanPauseAndCleanup(t *testing.T) {
 	}
 }
 
-func TestReconcileSplitMoveRequiresPublishedDrain(t *testing.T) {
+func TestReconcileMoveRequiresPublishedDrain(t *testing.T) {
+	for _, tt := range []struct {
+		name           string
+		mode           v1beta1.PlacementMode
+		cancel, absent bool
+	}{
+		{name: "Split", mode: v1beta1.PlacementModeSplit},
+		{name: "Single", mode: v1beta1.PlacementModeSingle},
+		{name: "Single cancellation", mode: v1beta1.PlacementModeSingle, cancel: true},
+		{name: "Single cancellation after original loss", mode: v1beta1.PlacementModeSingle, cancel: true, absent: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) { testMoveRequiresPublishedDrain(t, tt.mode, tt.cancel, tt.absent) })
+	}
+}
+
+func testMoveRequiresPublishedDrain(t *testing.T, mode v1beta1.PlacementMode, cancelMove, absentOriginal bool) {
 	fixture := observationFixture(t)
 	source := fixture.source
 	source.Namespace = "prod"
@@ -227,9 +242,20 @@ func TestReconcileSplitMoveRequiresPublishedDrain(t *testing.T) {
 	source.Status.Placement.Candidates[0].Cluster = "a"
 	source.Status.Placement.Candidates[0].Allocation.ClusterUID = "a-uid"
 	source.Status.Placement.Candidates[0].Allocation.OriginalReplicas = 1
+	if mode == v1beta1.PlacementModeSingle {
+		source.Spec.Placement.Mode, source.Spec.Placement.Split = mode, nil
+		source.Spec.Engine.MinReplicas = ptr.To(1)
+		source.Status.Placement.Cluster = "a"
+		source.Status.Placement.Plan.Mode, source.Status.Placement.Plan.Winner = mode, "a"
+		home := &v1beta1.PlacementHomePolicy{InputDigest: "initial-intent", ReplicaFloors: []v1beta1.PlacementComponentFloor{{Component: v1beta1.EngineComponent, Replicas: 1}}}
+		source.Status.Placement.Candidates[0].Allocation.CurrentHome = home.DeepCopy()
+		source.Status.Placement.Candidates[0].Allocation.DesiredHome = home.DeepCopy()
+	}
 	fixture.member.Namespace = source.Namespace
 	fixture.member.Spec.Engine.MinReplicas = ptr.To(1)
 	fixture.resources.ir.Namespace = source.Namespace
+	fixture.resources.ir.Name = source.Name + "-engine"
+	fixture.resources.pods[0].OwnerReferences[0].Name = fixture.resources.ir.Name
 	fixture.resources.pods[0].Namespace = source.Namespace
 	policy := executionPolicy(source, source.Status.Placement.Candidates[0].Allocation)
 	raw, err := protocol.Encode(policy)
@@ -341,14 +367,15 @@ func TestReconcileSplitMoveRequiresPublishedDrain(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, stage := range []struct {
+	type moveStage struct {
 		name    string
 		before  func()
 		current map[string]int32
 		drain   bool
 		pause   bool
 		memberA bool
-	}{
+	}
+	stages := []moveStage{
 		{name: "persist pause before replacement", current: map[string]int32{"a": 1, "b": 0}, pause: true, memberA: true},
 		{name: "acknowledged pause permits replacement", before: func() { acknowledge("a", false); publish(map[string]int32{"a": 1}) }, current: map[string]int32{"a": 1, "b": 1}, pause: true, memberA: true},
 		{name: "unready replacement retains original", before: func() { acknowledge("a", false); publish(map[string]int32{"a": 1}) }, current: map[string]int32{"a": 1, "b": 1}, pause: true, memberA: true},
@@ -378,7 +405,57 @@ func TestReconcileSplitMoveRequiresPublishedDrain(t *testing.T) {
 			}
 		}, current: map[string]int32{"a": 0, "b": 1}},
 		{name: "released plan remains stable", before: func() { acknowledge("b", false); publish(map[string]int32{"b": 1}) }, current: map[string]int32{"a": 0, "b": 1}},
-	} {
+	}
+	if mode == v1beta1.PlacementModeSingle {
+		stages[len(stages)-1].drain = true
+		selectReplacement := moveStage{name: "admission selects before serving handoff", before: func() { acknowledge("b", true); publish(map[string]int32{"a": 1, "b": 1}) }, current: map[string]int32{"a": 1, "b": 1}, pause: true, memberA: true}
+		stages[3].before = func() { acknowledge("a", false); acknowledge("b", false); publish(map[string]int32{"a": 1, "b": 1}) }
+		stages = append(stages[:3], append([]moveStage{selectReplacement}, stages[3:]...)...)
+	}
+	if cancelMove {
+		stages = append(stages[:4], []moveStage{
+			{name: "restored affinity drains selected replacement", before: func() {
+				live := readSource()
+				live.Spec.Placement.ClusterAffinity = testAffinity("target!=true")
+				if err := root.Update(t.Context(), live); err != nil {
+					t.Fatal(err)
+				}
+				acknowledge("a", false)
+				acknowledge("b", false)
+				publish(map[string]int32{"a": 1, "b": 1})
+			}, current: map[string]int32{"a": 1, "b": 1}, pause: true, memberA: true},
+			{name: "acknowledged cancellation requests replacement drain", before: func() { acknowledge("a", false); acknowledge("b", false); publish(map[string]int32{"a": 1, "b": 1}) }, current: map[string]int32{"a": 1, "b": 1}, pause: true, memberA: true},
+			{name: "replacement drain must be published", before: func() { acknowledge("a", false); acknowledge("b", false); publish(map[string]int32{"a": 1, "b": 0}) }, current: map[string]int32{"a": 1, "b": 0}, pause: true, memberA: true},
+			{name: "replacement deletion retains pause", before: func() { acknowledge("a", false); acknowledge("b", false); publish(map[string]int32{"a": 1, "b": 0}) }, current: map[string]int32{"a": 1, "b": 0}, pause: true, memberA: true},
+			{name: "replacement physical cleanup completes cancellation", before: func() {
+				for _, obj := range []client.Object{&v1beta1.InferenceReplica{ObjectMeta: metav1.ObjectMeta{Name: fixture.resources.ir.Name, Namespace: source.Namespace}}, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: fixture.resources.pods[0].Name, Namespace: source.Namespace}}} {
+					if err := workers["b"].Delete(t.Context(), obj); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}, current: map[string]int32{"a": 1, "b": 0}, memberA: true},
+		}...)
+		if absentOriginal {
+			cancel := stages[4].before
+			stages[4].before = func() {
+				cancel()
+				for _, obj := range []client.Object{fixture.member, fixture.resources.ir, &fixture.resources.pods[0]} {
+					if err := workers["a"].Delete(t.Context(), obj); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			stages[4].name = "absent original receives fresh restoration goal"
+			stages[4].current, stages[4].memberA = map[string]int32{"a": 0, "b": 1}, false
+			restore := []moveStage{
+				{name: "replacement pause acknowledgement permits original recreation", before: func() { acknowledge("b", false); publish(map[string]int32{"b": 1}) }, current: map[string]int32{"a": 1, "b": 1}, pause: true, memberA: true},
+				{name: "unready restoration retains serving replacement", before: func() { acknowledge("b", false); publish(map[string]int32{"b": 1}) }, current: map[string]int32{"a": 1, "b": 1}, pause: true, memberA: true},
+			}
+			stages[5].before = func() { acknowledge("a", true); acknowledge("b", false); publish(map[string]int32{"a": 1, "b": 1}) }
+			stages = append(stages[:5], append(restore, stages[5:]...)...)
+		}
+	}
+	for _, stage := range stages {
 		if !t.Run(stage.name, func(t *testing.T) {
 			if stage.before != nil {
 				stage.before()
@@ -387,12 +464,26 @@ func TestReconcileSplitMoveRequiresPublishedDrain(t *testing.T) {
 				t.Fatal(err)
 			}
 			live := readSource()
+			if mode == v1beta1.PlacementModeSingle {
+				winner := "a"
+				if !cancelMove && (stage.drain || stage.current["a"] == 0) {
+					winner = "b"
+				}
+				if diff := cmp.Diff(winner, live.Status.Placement.Plan.Winner); diff != "" {
+					t.Errorf("serving winner: %s", diff)
+				}
+			}
 			current := map[string]int32{}
 			for _, candidate := range live.Status.Placement.Candidates {
 				current[candidate.Cluster] = candidate.Allocation.CurrentReplicas
 				if candidate.Cluster == "a" {
 					if diff := cmp.Diff(stage.drain, candidate.Allocation.DrainRequested); diff != "" {
 						t.Error(diff)
+					}
+					if absentOriginal {
+						if diff := cmp.Diff(int32(1), candidate.Allocation.OriginalReplicas); diff != "" {
+							t.Fatalf("restoration changed original budget: %s", diff)
+						}
 					}
 				}
 			}

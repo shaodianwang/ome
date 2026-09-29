@@ -149,6 +149,7 @@ package_kind_bundle() {
   # one built from this commit.
   cp -R tests/integration/dep-crds/keda "$stage/dep-crds/"
   cp -R tests/integration/dep-crds/scheduler-plugins "$stage/dep-crds/"
+  cp -R tests/integration/dep-crds/gateway-api "$stage/dep-crds/"
   cp -R tests/integration/dep-crds/kueue-install "$stage/dep-crds/"
   {
     printf 'state=ready\n'

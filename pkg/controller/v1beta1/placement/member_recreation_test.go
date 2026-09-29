@@ -58,6 +58,7 @@ func TestPlannedMemberRecreationWaitsForInventory(t *testing.T) {
 					proposal := plan.Proposal{Mode: mode, InputDigest: "accepted-input", PauseSurge: true, Assignments: map[string]v1beta1.CandidateAllocationStatus{"member-a": *a.DeepCopy()}}
 					if mode == v1beta1.PlacementModeSingle {
 						proposal.Winner = "member-a"
+						proposal.SingleMove = &v1beta1.PlacementSingleMoveStatus{Selected: "member-a"}
 					}
 					scheme := testScheme(t)
 					worker := emptyWorker(scheme)

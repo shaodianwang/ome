@@ -771,7 +771,15 @@ func servingCandidates(isvc *v1beta1.InferenceService) []*v1beta1.CandidatePlace
 	for i := range pl.Candidates {
 		c := &pl.Candidates[i]
 		if pl.Plan != nil && pl.Plan.Mode == v1beta1.PlacementModeSingle && (pl.Plan.Winner == "" || c.Cluster != pl.Plan.Winner) {
-			continue
+			if pl.Plan.Winner == "" {
+				continue
+			}
+			// A cancelled selection can still back the serving floor. Keep its
+			// route until the allocator authorizes draining that retained home.
+			retained := pl.Plan.SingleMove != nil && pl.Plan.SingleMove.Selected == pl.Plan.Winner && c.Allocation != nil && !c.Allocation.RaceCandidate && c.Allocation.CurrentReplicas > 0 && !c.Allocation.DrainRequested
+			if !retained && (pl.Plan.SingleMove == nil || pl.Plan.SingleMove.Selected == "" || pl.Plan.SingleMove.Selected != c.Cluster) {
+				continue
+			}
 		}
 		if c.Phase == v1beta1.CandidatePhaseAdmitted && c.Endpoint != nil && c.Endpoint.Host != "" {
 			cs = append(cs, c)

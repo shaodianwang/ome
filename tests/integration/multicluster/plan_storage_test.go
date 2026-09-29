@@ -34,11 +34,25 @@ func TestPlanStorageCompatibility(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
 		single bool
+		move   bool
 		prune  func(map[string]apiextensionsv1.JSONSchemaProps)
 		want   error
 	}{
 		{name: "current schema"},
 		{name: "Single authority survives storage", single: true},
+		{name: "Single movement survives storage", single: true, move: true},
+		{name: "schema without Single movement", single: true, move: true, prune: func(fields map[string]apiextensionsv1.JSONSchemaProps) {
+			delete(fields["plan"].Properties, "singleMove")
+		}, want: plan.ErrSchemaUnsupported},
+		{name: "schema without replacement selection", single: true, move: true, prune: func(fields map[string]apiextensionsv1.JSONSchemaProps) {
+			delete(fields["plan"].Properties["singleMove"].Properties, "selected")
+		}, want: plan.ErrSchemaUnsupported},
+		{name: "schema without replacement cursor", single: true, move: true, prune: func(fields map[string]apiextensionsv1.JSONSchemaProps) {
+			delete(fields["plan"].Properties["singleMove"].Properties, "cursor")
+		}, want: plan.ErrSchemaUnsupported},
+		{name: "schema without replacement timeout origin", single: true, move: true, prune: func(fields map[string]apiextensionsv1.JSONSchemaProps) {
+			delete(fields["candidates"].Items.Schema.Properties["allocation"].Properties, "replacementStartedAt")
+		}, want: plan.ErrSchemaUnsupported},
 		{name: "schema without Single winner", single: true, prune: func(fields map[string]apiextensionsv1.JSONSchemaProps) {
 			delete(fields["plan"].Properties, "winner")
 		}, want: plan.ErrSchemaUnsupported},
@@ -128,6 +142,19 @@ func TestPlanStorageCompatibility(t *testing.T) {
 							"member-b": {ClusterUID: "registration-b", RaceCandidate: true, DrainRequested: true},
 						}}
 					}
+					if tt.move {
+						proposal.PauseSurge = true
+						proposal.SingleMove = &v1beta1.PlacementSingleMoveStatus{Selected: "member-b", Cursor: "member-b"}
+						a := proposal.Assignments["member-a"]
+						b := proposal.Assignments["member-b"]
+						b.CurrentReplicas, b.DesiredReplicas = a.CurrentReplicas, a.DesiredReplicas
+						b.CurrentHome, b.DesiredHome = a.CurrentHome.DeepCopy(), a.DesiredHome.DeepCopy()
+						b.RaceCandidate, b.DrainRequested = false, false
+						start := metav1.NewMicroTime(time.Unix(100, 123000).UTC())
+						b.ReplacementStartedAt = &start
+						a.DesiredHome, a.DesiredReplicas = nil, 0
+						proposal.Assignments["member-a"], proposal.Assignments["member-b"] = a, b
+					}
 					got, err := store.Persist(t.Context(), source, proposal)
 					if !participant {
 						if err == nil || got != nil {
@@ -160,6 +187,10 @@ func TestPlanStorageCompatibility(t *testing.T) {
 						want.Plan.Mode, want.Plan.Winner = v1beta1.PlacementModeSingle, "member-a"
 						want.Plan.PauseSurge = false
 						want.Plan.RequestedReplicas, want.Plan.AssignedReplicas, want.Plan.UnassignedReplicas = 2, 2, 0
+					}
+					if tt.move {
+						want.Plan.PauseSurge = true
+						want.Plan.SingleMove = proposal.SingleMove.DeepCopy()
 					}
 					for _, cluster := range []string{"member-a", "member-b"} {
 						allocation := proposal.Assignments[cluster]

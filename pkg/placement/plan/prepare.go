@@ -23,7 +23,7 @@ func prepare(source *v1beta1.InferenceService, proposal Proposal) (*v1beta1.Plac
 		return nil, fmt.Errorf("placement plan requires an input digest and nonnegative unassigned floors")
 	}
 	out := &v1beta1.PlacementStatus{Plan: &v1beta1.PlacementPlanStatus{
-		Mode: proposal.Mode, Winner: proposal.Winner, AdoptionDigest: proposal.AdoptionDigest,
+		Mode: proposal.Mode, Winner: proposal.Winner, SingleMove: proposal.SingleMove.DeepCopy(), AdoptionDigest: proposal.AdoptionDigest,
 		SourceUID: source.UID, ObservedGeneration: source.Generation, InputDigest: proposal.InputDigest,
 		PauseSurge:         proposal.PauseSurge,
 		UnassignedReplicas: proposal.UnassignedReplicas, OriginalUnassignedReplicas: proposal.OriginalUnassignedReplicas,
@@ -96,15 +96,29 @@ func prepare(source *v1beta1.InferenceService, proposal Proposal) (*v1beta1.Plac
 	if proposal.Mode != v1beta1.PlacementModeSingle && proposal.Winner != "" {
 		return nil, fmt.Errorf("only Single placement can commit a winner")
 	}
+	if proposal.SingleMove != nil && (proposal.Mode != v1beta1.PlacementModeSingle || proposal.Winner == "" || !proposal.PauseSurge) {
+		return nil, fmt.Errorf("Single movement requires a retained winner and shared surge pause")
+	}
 	if proposal.Mode == v1beta1.PlacementModeSingle {
+		selected := proposal.Winner
+		if proposal.SingleMove != nil {
+			selected = proposal.SingleMove.Selected
+		}
 		if proposal.Winner != "" {
 			winner, exists := proposal.Assignments[proposal.Winner]
-			if !exists || winner.RaceCandidate || winner.DesiredHome == nil || winner.DesiredReplicas <= 0 {
+			if !exists || winner.RaceCandidate || (proposal.SingleMove == nil && (winner.DesiredHome == nil || winner.DesiredReplicas <= 0)) || (proposal.SingleMove != nil && winner.OriginalReplicas <= 0 && (winner.CurrentHome == nil || winner.CurrentReplicas <= 0)) {
 				return nil, fmt.Errorf("Single winner requires retained full-home authority")
 			}
 		}
+		if proposal.SingleMove != nil && selected != "" {
+			a, exists := proposal.Assignments[selected]
+			restoringOriginal := selected == proposal.Winner && a.OriginalReplicas > 0 && a.CurrentReplicas == 0
+			if !exists || a.DesiredHome == nil || a.DesiredReplicas <= 0 || (!restoringOriginal && (a.CurrentHome == nil || a.CurrentReplicas <= 0)) || a.RaceCandidate {
+				return nil, fmt.Errorf("selected Single replacement requires full-home authority")
+			}
+		}
 		for name, a := range proposal.Assignments {
-			if a.DesiredReplicas > 0 && ((proposal.Winner != "" && name != proposal.Winner) || (proposal.Winner == "" && !a.RaceCandidate)) {
+			if a.DesiredReplicas > 0 && ((selected != "" && name != selected) || (selected == "" && !a.RaceCandidate && name != proposal.Winner)) {
 				return nil, fmt.Errorf("Single desired home is neither a race candidate nor its committed winner")
 			}
 		}

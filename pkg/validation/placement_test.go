@@ -16,6 +16,9 @@ func TestValidatePlacement(t *testing.T) {
 	for _, tt := range []struct{ name, placement, wantError string }{
 		{name: "local service", placement: `null`},
 		{name: "unconstrained single", placement: `{"mode":"Single"}`},
+		{name: "bounded replacement retries", placement: `{"mode":"Single","replacementTimeout":"5m"}`},
+		{name: "zero replacement timeout", placement: `{"mode":"Single","replacementTimeout":"0s"}`, wantError: "replacementTimeout"},
+		{name: "replacement timeout only for Single", placement: `{"mode":"All","replacementTimeout":"5m"}`, wantError: "replacementTimeout"},
 		{name: "unconstrained all", placement: `{"mode":"All"}`},
 		{name: "equal split", placement: `{"mode":"Split","split":{"replicas":6}}`},
 		{name: "capacity split", placement: `{"mode":"SplitByCapacity","split":{"replicas":6,"maxReplicasPerCluster":4},"maxSurge":1}`},

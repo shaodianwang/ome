@@ -6,8 +6,10 @@ import (
 	"maps"
 	"math"
 	"slices"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"knative.dev/pkg/apis"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -76,14 +78,26 @@ func (r *Reconciler) executePlannedAllocation(ctx context.Context, source *v1bet
 			}
 		}
 	}
-	step, err := advanceSplitPlan(accepted, observations)
+	var step allocation.Step
+	if proposal.SingleMove != nil && proposal.SingleMove.Selected == "" {
+		step, err = advanceSingleRace(accepted, observations, &proposal, time.Now())
+	} else {
+		step, err = advanceSplitPlan(accepted, observations)
+	}
 	if err != nil {
 		return r.writeSplitObservations(ctx, accepted, observations, "ObservationUnknown", err.Error())
 	}
+	if proposal.SingleMove != nil && proposal.SingleMove.Selected != "" && proposal.SingleMove.Selected != proposal.Winner {
+		selected := observations[proposal.SingleMove.Selected]
+		if !selected.FullHomeReady || !selected.Home.Routable {
+			step.Complete = false
+		}
+	}
 	for name, target := range step.Targets {
 		assignment := proposal.Assignments[name]
+		mayRefresh := proposal.SingleMove == nil || proposal.SingleMove.Selected != "" || assignment.CurrentReplicas == 0 || equality.Semantic.DeepEqual(assignment.CurrentHome, assignment.DesiredHome)
 		assignment.CurrentReplicas = target
-		if assignment.DesiredHome != nil && target == assignment.DesiredReplicas {
+		if mayRefresh && assignment.DesiredHome != nil && target == assignment.DesiredReplicas {
 			assignment.CurrentHome = assignment.DesiredHome.DeepCopy()
 		}
 		if slices.Contains(step.Drain, name) {
@@ -99,14 +113,28 @@ func (r *Reconciler) executePlannedAllocation(ctx context.Context, source *v1bet
 	}
 	if step.Complete {
 		proposal.PauseSurge = false
+		if proposal.SingleMove != nil {
+			proposal.Winner = proposal.SingleMove.Selected
+			proposal.SingleMove = nil
+		}
 		proposal.OriginalUnassignedReplicas = proposal.UnassignedReplicas
 		for name, assignment := range proposal.Assignments {
 			assignment.OriginalReplicas = assignment.CurrentReplicas
+			assignment.ReplacementStartedAt = nil
 			if assignment.CurrentReplicas == 0 && observations[name].Home.Absent {
 				assignment.DrainRequested = false
 				assignment.CurrentHome = nil
+				if proposal.Mode == v1beta1.PlacementModeSingle {
+					assignment.RaceCandidate = true
+				}
 			}
 			proposal.Assignments[name] = assignment
+		}
+	}
+	if proposal.SingleMove != nil && proposal.SingleMove.Selected != "" && proposal.SingleMove.Selected != proposal.Winner {
+		selected := observations[proposal.SingleMove.Selected]
+		if selected.FullHomeReady && selected.Home.Routable && selected.Home.Known && (slices.Contains(step.Drain, proposal.Winner) || observations[proposal.Winner].Home.Absent) {
+			proposal.Winner = proposal.SingleMove.Selected
 		}
 	}
 	next, err := store.Persist(ctx, accepted, proposal)
@@ -124,6 +152,8 @@ func (r *Reconciler) executePlannedAllocation(ctx context.Context, source *v1bet
 		}
 		cctx, cancel := context.WithTimeout(ctx, r.placeTimeout())
 		switch {
+		case next.Status.Placement.Plan.SingleMove != nil && next.Status.Placement.Plan.SingleMove.Selected == "" && assignment.RaceCandidate && assignment.CurrentReplicas == 0 && assignment.DesiredReplicas == 0 && assignment.DrainRequested:
+			err = r.deletePlannedRaceLoser(cctx, next, candidate)
 		case assignment.CurrentReplicas > 0 && observed.Home.Eligible:
 			err = r.placePlannedOn(cctx, next, candidate)
 		case assignment.CurrentReplicas == 0 && assignment.DrainRequested && observed.Home.Drained && !changed:
@@ -150,6 +180,9 @@ func (r *Reconciler) executePlannedAllocation(ctx context.Context, source *v1bet
 }
 
 func splitPauseRequired(source *v1beta1.InferenceService, proposal plan.Proposal) bool {
+	if proposal.SingleMove != nil {
+		return true
+	}
 	grow, shrink, drain := false, false, false
 	for _, assignment := range proposal.Assignments {
 		grow = grow || assignment.DesiredReplicas > assignment.CurrentReplicas
@@ -308,11 +341,29 @@ func advanceSplitPlan(source *v1beta1.InferenceService, observations map[string]
 			}
 		}
 	}
+	if accepted.SingleMove != nil {
+		selected := accepted.SingleMove.Selected
+		resolved := slices.ContainsFunc(source.Status.Placement.Candidates, func(c v1beta1.CandidatePlacement) bool {
+			return c.Cluster == selected && !c.Allocation.HomeInputsPending
+		})
+		if selected == "" || !resolved {
+			return allocation.Step{Targets: input.Current, Reason: "AwaitingHomeInputs"}, nil
+		}
+		if !observations[selected].FullHomeReady {
+			home := input.Homes[selected]
+			home.Ready = 0
+			input.Homes[selected] = home
+		}
+	}
 	advance := allocation.Advance
-	if accepted.Mode == v1beta1.PlacementModeAll {
+	if accepted.Mode == v1beta1.PlacementModeAll || accepted.SingleMove != nil {
 		advance = allocation.AdvanceWholeHomes
 	}
 	step, err := advance(input)
+	if accepted.SingleMove != nil && accepted.SingleMove.Selected != accepted.Winner && observations[accepted.SingleMove.Selected].Terminal {
+		step.Complete = false
+		step.Reason = "ReplacementFailed"
+	}
 	if step.Complete && accepted.PauseSurge && occupied+reserved > accepted.AssignedReplicas {
 		step.Complete = false
 		step.Reason = "AwaitingMemberCleanup"
@@ -321,6 +372,21 @@ func advanceSplitPlan(source *v1beta1.InferenceService, observations map[string]
 }
 
 func (r *Reconciler) writeSplitObservations(ctx context.Context, source *v1beta1.InferenceService, observations map[string]plannedHomeObservation, reason, message string) (ctrl.Result, error) {
+	if source.Status.Placement.Plan.Mode == v1beta1.PlacementModeSingle {
+		standing := &placementObservations{homes: map[string]homeObservation{}}
+		for name, observed := range observations {
+			state := homePresent
+			if !observed.Home.Known {
+				state = homeUnknown
+			} else if observed.Home.Absent {
+				state = homeAbsent
+			}
+			serving := observed.Member != nil && placementCandidateServing(observed.Member, observed.Candidate)
+			standing.homes[name] = homeObservation{state: state, candidate: observed.Candidate, serving: serving, terminal: observed.Terminal}
+			standing.standing = append(standing.standing, name)
+		}
+		return r.writeSinglePlanStatus(ctx, source, standing, reason)
+	}
 	res := placementResult{phase: v1beta1.PlacementPhasePending, conditions: []policyCondition{splitProgressCondition(reason, message)}}
 	if placementMode(source) == v1beta1.PlacementModeSplitByCapacity {
 		res.conditions = append(res.conditions, capacityFreshCondition(corev1.ConditionTrue, "CapacityVerified", "Matched members have usable hardware and resolved demand"))
@@ -389,6 +455,8 @@ func splitProgressCondition(reason, message string) policyCondition {
 		condition.cond.Status = corev1.ConditionTrue
 		condition.cond.Reason = "AllocationConverged"
 		condition.cond.Message = "Members have applied the accepted allocation"
+	} else if reason == "ReplacementFailed" && message == "" {
+		condition.cond.Message = "Selected replacement is terminally failed; the serving winner remains retained"
 	} else if message == "" {
 		condition.cond.Message = "Waiting for member execution and routing to converge on the accepted allocation"
 	}

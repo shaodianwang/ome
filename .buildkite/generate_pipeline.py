@@ -102,7 +102,7 @@ MC_KIND_SPEC_GROUPS = (
         "legacy_compatibility",
     )),
     ("quota", "Multi-cluster Kueue quota", (
-        "admission", "split_quota", "queue_routing", "single_race",
+        "admission", "split_quota", "queue_routing", "single_race", "single_move", "single_loss",
     )),
 )
 

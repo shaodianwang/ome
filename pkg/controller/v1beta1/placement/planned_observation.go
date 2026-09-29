@@ -26,6 +26,8 @@ type plannedHomeObservation struct {
 	Home              allocation.Home
 	RolloutReserved   int32
 	PauseAcknowledged bool
+	FullHomeReady     bool
+	Terminal          bool
 }
 
 // observePlannedHome reads a direct, identity-checked member inventory. Component
@@ -201,6 +203,14 @@ func (r *Reconciler) observePlannedHome(ctx context.Context, source *v1beta1.Inf
 	out.Home.Applied = applied
 	out.Home.Ready = ready
 	out.PauseAcknowledged = applied && policy.PauseSurge
+	out.FullHomeReady = applied && len(policy.ReplicaFloors) > 0
+	for _, floor := range policy.ReplicaFloors {
+		out.FullHomeReady = out.FullHomeReady && counts[floor.Component].Ready >= floor.Replicas
+	}
+	if memberExists {
+		out.Terminal = IsTerminallyFailed(member, statuses)
+	}
+	out.FullHomeReady = out.FullHomeReady && !out.Terminal
 	out.Candidate = v1beta1.CandidatePlacement{Cluster: previous.Cluster, Allocation: previous.Allocation.DeepCopy(), ObservationKnown: true, Phase: v1beta1.CandidatePhaseAdmitting}
 	if applied {
 		out.Candidate.AppliedPlanID = policy.PlanID
@@ -221,6 +231,7 @@ func (r *Reconciler) observePlannedHome(ctx context.Context, source *v1beta1.Inf
 	} else {
 		out.Home.Ready = 0
 	}
+	out.FullHomeReady = out.FullHomeReady && out.Candidate.ReadyReplicas > 0
 	return out, nil
 }
 

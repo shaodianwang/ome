@@ -287,3 +287,71 @@ func TestPlannedTrafficEvidence(t *testing.T) {
 		})
 	}
 }
+
+func TestFullHomeReadyRequiresEveryReplicaFloor(t *testing.T) {
+	for _, tt := range []struct {
+		name                                   string
+		engine, router                         int32
+		terminal, stale, ingressPending, ready bool
+	}{
+		{name: "complete engine", engine: 1, ready: true},
+		{name: "partial engine", engine: 2},
+		{name: "complete engine and router", engine: 1, router: 1, ready: true},
+		{name: "partial router", engine: 1, router: 2},
+		{name: "terminal member", engine: 1, terminal: true},
+		{name: "stale component acknowledgement", engine: 1, stale: true},
+		{name: "ingress is not ready", engine: 1, ingressPending: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := observationFixture(t)
+			a := f.source.Status.Placement.Candidates[0].Allocation
+			a.CurrentReplicas, a.DesiredReplicas = tt.engine, tt.engine
+			a.CurrentHome = &v1beta1.PlacementHomePolicy{InputDigest: "intent", ReplicaFloors: []v1beta1.PlacementComponentFloor{{Component: v1beta1.EngineComponent, Replicas: tt.engine}}}
+			if tt.router > 0 {
+				a.CurrentHome.ReplicaFloors = append(a.CurrentHome.ReplicaFloors, v1beta1.PlacementComponentFloor{Component: v1beta1.RouterComponent, Replicas: tt.router})
+			}
+			a.DesiredHome = a.CurrentHome.DeepCopy()
+			policy := executionPolicy(f.source, a)
+			raw, err := protocol.Encode(policy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.member.Annotations[constants.PlacementExecution] = raw
+			if tt.ingressPending {
+				f.member.Status.SetCondition(v1beta1.IngressReady, &apis.Condition{Status: corev1.ConditionFalse})
+			}
+			if tt.terminal {
+				f.member.Status.ModelStatus.TransitionStatus = v1beta1.InvalidSpec
+			}
+			f.resources.ir.Spec.PlacementExecution = policy.DeepCopy()
+			f.resources.ir.Spec.Replicas, f.resources.ir.Spec.PlacementReplicaLimit = ptr.To(tt.engine), ptr.To(tt.engine)
+			if tt.stale {
+				f.resources.ir.Status.PlacementObservedGeneration = 0
+			}
+			objects := []client.Object{f.member, f.resources.ir, &f.resources.pods[0]}
+			if tt.router > 0 {
+				ir := f.resources.ir.DeepCopy()
+				ir.Name, ir.UID, ir.Spec.Component = "service-router", "router-uid", v1beta1.RouterComponent
+				ir.Spec.Replicas, ir.Spec.PlacementReplicaLimit = ptr.To(tt.router), ptr.To(tt.router)
+				pod := f.resources.pods[0].DeepCopy()
+				pod.Name, pod.UID, pod.OwnerReferences[0].UID = "router-0", "router-pod", ir.UID
+				f.components = append(f.components, v1beta1.RouterComponent)
+				objects = append(objects, ir, pod)
+			}
+			scheme := testScheme(t)
+			worker := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+			clusters := identifiedTestClusters{fakeClusters: fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{"member-a": workloadcluster.NewNeverCachingClient(worker)}}, uid: "member-a-uid"}
+			r, _ := newPlacer(scheme, clusters, f.source, plannedTestRegistration())
+			got, err := r.observePlannedHome(t.Context(), f.source, f.source.Status.Placement.Candidates[0], f.components)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if diff := cmp.Diff(tt.ready, got.FullHomeReady); diff != "" {
+				t.Fatal(diff)
+			}
+			if diff := cmp.Diff(tt.terminal, got.Terminal); diff != "" {
+				t.Fatal(diff)
+			}
+		})
+	}
+}

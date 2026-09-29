@@ -21,6 +21,9 @@ import (
 // reconcileSinglePlanned commits race nominations and the observed winner
 // before member writes. Race cleanup is distinct from moving a retained home.
 func (r *Reconciler) reconcileSinglePlanned(ctx context.Context, source *v1beta1.InferenceService, clusters []v1beta1.WorkloadCluster, eligible []string, observations *placementObservations) (ctrl.Result, error) {
+	if source.Status.Placement != nil && source.Status.Placement.Plan != nil && source.Status.Placement.Plan.SingleMove != nil {
+		return r.reconcileSingleMove(ctx, source, clusters, eligible, observations)
+	}
 	winner := winnerCluster(source)
 	if winner != "" {
 		home, ok := observations.get(winner)
@@ -42,7 +45,7 @@ func (r *Reconciler) reconcileSinglePlanned(ctx context.Context, source *v1beta1
 		} else {
 			r.clearGrace(source.UID)
 			if !observations.matches[winner] {
-				return r.writeSinglePlanStatus(ctx, source, observations, "MigrationBlocked")
+				return r.reconcileSingleMove(ctx, source, clusters, eligible, observations)
 			}
 			if !slices.Contains(eligible, winner) {
 				return r.writeSinglePlanStatus(ctx, source, observations, "AwaitingHomeInputs")
@@ -323,6 +326,8 @@ func (r *Reconciler) writeSinglePlanStatus(ctx context.Context, source *v1beta1.
 			switch {
 			case winner == "":
 				reason = "AwaitingSingleWinner"
+			case source.Status.Placement.Plan.SingleMove != nil:
+				reason = "AwaitingMemberConvergence"
 			case cleanupPending:
 				reason = "AwaitingRaceCleanup"
 			case !winnerApplied:

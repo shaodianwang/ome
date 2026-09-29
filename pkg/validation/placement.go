@@ -18,8 +18,8 @@ func ValidatePlacement(spec *v1beta1.InferenceServiceSpec) error {
 	}
 	p := spec.Placement
 	if p.Policy == "" || p.Policy == v1beta1.PlacementPolicyLegacy {
-		if p.ClusterAffinity != nil || p.MaxSurge != nil || p.Mode == v1beta1.PlacementModeSplitByCapacity {
-			return fmt.Errorf("clusterAffinity, maxSurge, and SplitByCapacity require spec.placement.policy: ClusterAffinity")
+		if p.ClusterAffinity != nil || p.MaxSurge != nil || p.ReplacementTimeout != nil || p.Mode == v1beta1.PlacementModeSplitByCapacity {
+			return fmt.Errorf("clusterAffinity, maxSurge, replacementTimeout, and SplitByCapacity require spec.placement.policy: ClusterAffinity")
 		}
 		return validateLegacyPlacement(spec)
 	}
@@ -38,6 +38,9 @@ func ValidatePlacement(spec *v1beta1.InferenceServiceSpec) error {
 	}
 	if p.MaxSurge != nil && *p.MaxSurge < 0 {
 		return fmt.Errorf("spec.placement.maxSurge must be nonnegative whole replicas")
+	}
+	if p.ReplacementTimeout != nil && (p.Mode != v1beta1.PlacementModeSingle || p.ReplacementTimeout.Duration <= 0) {
+		return fmt.Errorf("spec.placement.replacementTimeout must be positive and is permitted only for Single")
 	}
 	if p.Split == nil {
 		return nil

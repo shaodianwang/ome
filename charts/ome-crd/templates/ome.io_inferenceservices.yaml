@@ -26898,6 +26898,11 @@ spec:
                         - Legacy
                         - ClusterAffinity
                       type: string
+                    replacementTimeout:
+                      type: string
+                      x-kubernetes-validations:
+                        - message: replacementTimeout must be a positive duration
+                          rule: duration(self) > duration('0s')
                     requirements:
                       nullable: true
                       type: string
@@ -26923,6 +26928,8 @@ spec:
                   x-kubernetes-validations:
                     - message: ClusterAffinity requires an explicit mode
                       rule: '!has(self.policy) || self.policy != ''ClusterAffinity'' || has(self.mode)'
+                    - message: replacementTimeout requires ClusterAffinity Single placement
+                      rule: '!has(self.replacementTimeout) || (has(self.policy) && self.policy == ''ClusterAffinity'' && has(self.mode) && self.mode == ''Single'')'
                 rollout:
                   properties:
                     groupOrdering:
@@ -32596,6 +32603,9 @@ spec:
                                 type: integer
                               raceCandidate:
                                 type: boolean
+                              replacementStartedAt:
+                                format: date-time
+                                type: string
                               weight:
                                 format: int64
                                 minimum: 0
@@ -32748,6 +32758,13 @@ spec:
                           format: int64
                           minimum: 1
                           type: integer
+                        singleMove:
+                          properties:
+                            cursor:
+                              type: string
+                            selected:
+                              type: string
+                          type: object
                         sourceUID:
                           type: string
                         unassignedReplicas:

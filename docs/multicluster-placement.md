@@ -92,8 +92,9 @@ Member autoscaling otherwise retains its local policy.
 
 ## Moving replicas
 
-The transition coordination below applies to `All`, `Split`, and
-`SplitByCapacity`. `Single` retains its admission-race behavior.
+All four modes use the shared surge and member acknowledgement protocol for
+moves between homes. Single's initial admission race is separate from moving
+an existing winner.
 
 `Single` persists its nominated homes before creating workloads, then commits
 the observed winner before cleaning up race losers. One admitted instance of
@@ -102,10 +103,10 @@ floor. Simultaneously observed winners are ordered by cluster name. A restart
 retains accepted nominations and the committed winner. Only that winner can be
 published for routing, even while loser resources await cleanup.
 
-A matching Single winner remains sticky. Unknown member health holds its
-identity; confirmed loss uses the configured recovery grace. Healthy affinity
-changes currently report `MigrationBlocked` and retain the winner. The initial
-admission race does not authorize a deliberate move of a healthy service.
+A matching Single winner remains sticky. An affinity change that excludes it
+can start a bounded replacement race while the current winner keeps serving.
+Unknown member health retains the winner's identity and allocation; a missing
+connection does not prove that its workloads have stopped.
 
 `maxSurge` is a whole-replica allowance shared by placement and member rollout
 surge. An omitted allowance blocks moves between homes. Zero permits no excess;
@@ -124,6 +125,39 @@ serving home. Removing a home also requires publication of its zero traffic
 weight for the exact plan. A missing or stale publication holds the move.
 A settled positive allocation can release its pause without global routing;
 this does not authorize any further replica movement.
+
+### Single replacements
+
+A replacement probe is a complete candidate home. Its full resolved floor must
+fit the shared allowance: with an original floor of two and `maxSurge: 2`, only
+one additional two-replica home can race at a time. A smaller allowance cannot
+create a partial home. Existing rollout occupancy and reservations also consume
+this allowance.
+
+One admitted instance of every component selects a replacement. The original
+winner remains protected until that replacement reaches its complete Engine,
+Decoder, and Router floors and has published routing. The serving winner changes
+when the original is requested to drain, or after its absence is verified.
+Unselected probes receive no traffic. A cancelled replacement that already
+serves retains its route until it can be safely drained. Physical cleanup of
+the original and losing probes must finish before the surge pause can be released.
+
+An optional positive `spec.placement.replacementTimeout` bounds how long a
+probe may wait for component admission. Expired probes are retired and their
+resources removed before another probe can spend their allowance. The persisted
+start time survives controller restarts. This timeout does not apply to a
+selected replacement waiting for full readiness. A terminally failed selected
+replacement retains the original winner and reports `ReplacementFailed` until
+its configuration is repaired or the move is cancelled.
+
+If the original disappears during an accepted move, placement verifies that its
+derived service, InferenceReplicas, and Pods are absent before releasing its
+current allocation. Its original floor remains the budget baseline. Cancelling
+the move can restore an eligible original home within the same allowance; a
+serving replacement stays protected until the restored home is fully ready and
+routable. Unknown inventory holds this recovery. After a handoff, complete loss
+of every home requires verified empty inventories and the configured winner-loss
+grace before a fresh initial race can begin.
 
 ## Full-policy homes
 
@@ -278,3 +312,8 @@ requires migrating or restoring opted-in sources first.
 Deploy compatibility support together with the affinity implementation. A build
 that only rejects legacy intent holds old sources and stops their placement and
 routing updates, even though existing member pods may keep serving.
+
+For per-service opt-in, writer exclusion, stored-object checks, and rollback,
+follow the [migration and rollback procedure](../oeps/0018.4-cluster-affinity-placement/README.md#migration).
+Retain legacy fields in the schema until every legacy source and writer has
+been retired; pruning them can erase restrictions before validation sees them.

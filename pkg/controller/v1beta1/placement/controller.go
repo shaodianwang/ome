@@ -1167,7 +1167,7 @@ func placementEligibleIndexExtractor(obj client.Object) []string {
 // declaresPlacementRequirement preserves Legacy's no-selector/local boundary.
 // Explicit new-policy fields remain eligible so invalid opt-in is observable.
 func declaresPlacementRequirement(isvc *v1beta1.InferenceService) bool {
-	if p := isvc.Spec.Placement; p != nil && (p.Policy != "" && p.Policy != v1beta1.PlacementPolicyLegacy || p.ClusterAffinity != nil || p.MaxSurge != nil || p.Mode == v1beta1.PlacementModeSplitByCapacity) {
+	if p := isvc.Spec.Placement; p != nil && (p.Policy != "" && p.Policy != v1beta1.PlacementPolicyLegacy || p.ClusterAffinity != nil || p.MaxSurge != nil || p.ReplacementTimeout != nil || p.Mode == v1beta1.PlacementModeSplitByCapacity) {
 		return true
 	}
 	requirements, selector := placementInputs(isvc)

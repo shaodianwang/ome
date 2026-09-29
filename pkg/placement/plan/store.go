@@ -28,6 +28,7 @@ var (
 type Proposal struct {
 	Mode                       v1beta1.PlacementMode
 	Winner                     string
+	SingleMove                 *v1beta1.PlacementSingleMoveStatus
 	AdoptionDigest             string
 	InputDigest                string
 	PauseSurge                 bool

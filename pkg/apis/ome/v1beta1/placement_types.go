@@ -1,6 +1,9 @@
 package v1beta1
 
-import "k8s.io/apimachinery/pkg/api/resource"
+import (
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
 
 // PlacementMode is the cardinality of a multi-cluster placement: how many
 // workload clusters end up serving the InferenceService.
@@ -41,6 +44,7 @@ const (
 // PlacementSpec declares multi-cluster intent. Policy omission preserves the
 // legacy selector and allocation contract, including its mode defaults.
 // +kubebuilder:validation:XValidation:rule="!has(self.policy) || self.policy != 'ClusterAffinity' || has(self.mode)",message="ClusterAffinity requires an explicit mode"
+// +kubebuilder:validation:XValidation:rule="!has(self.replacementTimeout) || (has(self.policy) && self.policy == 'ClusterAffinity' && has(self.mode) && self.mode == 'Single')",message="replacementTimeout requires ClusterAffinity Single placement"
 type PlacementSpec struct {
 	// Policy explicitly opts into ClusterAffinity semantics. Omission is Legacy.
 	// ClusterAffinity cannot be removed from an existing service; migrating back
@@ -67,6 +71,12 @@ type PlacementSpec struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	MaxSurge *int32 `json:"maxSurge,omitempty"`
+
+	// ReplacementTimeout bounds a non-admitting probe during a healthy Single
+	// move. Omission retains pending probes; a positive duration allows rotation.
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="replacementTimeout must be a positive duration"
+	ReplacementTimeout *metav1.Duration `json:"replacementTimeout,omitempty"`
 
 	// LegacyFields retains explicit zero-valued obsolete fields during JSON round trips.
 	// It is serialization bookkeeping and is not a wire field.

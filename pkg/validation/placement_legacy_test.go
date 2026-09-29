@@ -25,6 +25,7 @@ func TestPlacementPolicyCompatibility(t *testing.T) {
 		{name: "invalid legacy selector", payload: `{"spec":{"placement":{"requirements":"!!!"}}}`, invalid: true},
 		{name: "affinity requires opt-in", payload: `{"spec":{"placement":{"mode":"Single","clusterAffinity":[{"matchExpressions":[{"key":"accelerator","operator":"Exists"}]}]}}}`, invalid: true},
 		{name: "surge requires opt-in", payload: `{"spec":{"placement":{"mode":"Single","maxSurge":0}}}`, invalid: true},
+		{name: "replacement timeout requires opt-in", payload: `{"spec":{"placement":{"mode":"Single","replacementTimeout":"5m"}}}`, invalid: true},
 		{name: "capacity requires opt-in", payload: `{"spec":{"placement":{"mode":"SplitByCapacity"}}}`, invalid: true},
 		{name: "unknown policy", payload: `{"spec":{"placement":{"policy":"Unknown","mode":"Single"}}}`, invalid: true},
 		{name: "new policy cannot inherit packing", payload: `{"spec":{"placement":{"policy":"ClusterAffinity","mode":"Split","split":{"spread":false}}}}`, invalid: true},

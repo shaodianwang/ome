@@ -1644,6 +1644,10 @@
           "description": "RaceCandidate authorizes cleanup of a Single race copy after another candidate wins. A retained winner does not carry this permission.",
           "type": "boolean"
         },
+        "replacementStartedAt": {
+          "description": "ReplacementStartedAt persists the start of an authorized bounded probe. The configured replacement timeout is evaluated against this instant.",
+          "$ref": "#/definitions/v1.MicroTime"
+        },
         "weight": {
           "description": "Weight is the effective static allocation weight, when applicable.",
           "type": "integer",
@@ -5704,6 +5708,10 @@
           "format": "int64",
           "default": 0
         },
+        "singleMove": {
+          "description": "SingleMove retains bounded replacement-race state until the old home and losing probes have been removed. Winner remains the serving home.",
+          "$ref": "#/definitions/v1beta1.PlacementSingleMoveStatus"
+        },
         "sourceUID": {
           "type": "string",
           "default": ""
@@ -5715,6 +5723,20 @@
         },
         "winner": {
           "description": "Winner commits the admitted Single home before race losers are removed. Empty means the persisted Single admission race has not selected a home.",
+          "type": "string"
+        }
+      }
+    },
+    "v1beta1.PlacementSingleMoveStatus": {
+      "description": "PlacementSingleMoveStatus separates replacement admission from serving handoff.",
+      "type": "object",
+      "properties": {
+        "cursor": {
+          "description": "Cursor identifies the last nominated replacement for fair bounded retries.",
+          "type": "string"
+        },
+        "selected": {
+          "description": "Selected records the admitted replacement while it becomes ready and routable.",
           "type": "string"
         }
       }
@@ -5755,6 +5777,10 @@
         "policy": {
           "description": "Policy explicitly opts into ClusterAffinity semantics. Omission is Legacy. ClusterAffinity cannot be removed from an existing service; migrating back requires draining and recreating the source and its derived workloads.",
           "type": "string"
+        },
+        "replacementTimeout": {
+          "description": "ReplacementTimeout bounds a non-admitting probe during a healthy Single move. Omission retains pending probes; a positive duration allows rotation.",
+          "$ref": "#/definitions/v1.Duration"
         },
         "requirements": {
           "description": "Requirements is a Legacy label selector, ANDed with ClusterSelector. Deprecated: opt into ClusterAffinity and use clusterAffinity.",

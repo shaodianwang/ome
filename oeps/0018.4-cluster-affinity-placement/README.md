@@ -571,6 +571,55 @@ Absent a transition budget, hold a disruptive move with `MigrationBlocked`;
 do not invent a hidden make-before-break allowance. Operators can perform a
 manual maintenance-window migration if spare capacity does not exist.
 
+For Single, a **replacement probe** is a complete candidate home started while
+the current winner continues serving. Probes share `spec.placement.maxSurge`
+with existing rollout reservations and occupied replicas. With an original
+floor of two and `maxSurge: 2`, only one additional two-replica home can race at
+a time. A smaller allowance holds the move; it cannot create a partial home.
+For different candidate floors, each grant must fit the budget of every active
+probe that could become the winner.
+
+One admitted instance of every component selects a replacement, preserving the
+Single admission predicate. Selection alone cannot retire the current winner:
+the replacement must reach its complete Engine, Decoder, and Router floors and
+have published routing. The persisted serving winner changes with the request
+to drain the original, or after verifying the original is absent. Unselected
+probes receive no traffic. A cancelled selection that already serves retains
+its route until the allocator can safely drain it. Physical cleanup
+of the original and losing probes precedes release of the shared surge pause.
+
+If the original disappears during an accepted move, verify that its derived
+service, InferenceReplicas, and Pods are absent before releasing its current
+allocation. Keep the original floor as the transition's budget baseline.
+Cancelling that move can recreate an eligible original home from freshly
+resolved policy, using the same shared allowance. Any serving replacement stays
+protected until the restored home reaches every component floor and is routable.
+Missing connections, failed inventory reads, and remaining resources cannot
+authorize this recovery. This continues the accepted move; it does not bypass
+the winner-loss grace period to start a new placement race.
+
+Complete loss can also occur after a handoff while original-home cleanup is
+still in progress. When every retained or newly registered home is physically
+empty, wait the configured winner-loss grace, persist removal of the old move's
+authority, then start Single's ordinary admission race using current affinity.
+Any remaining service, InferenceReplica, Pod, or unknown inventory interrupts
+that empty-home grace. The fresh admission race therefore cannot overlap
+surviving movement resources.
+
+A terminally failed selected replacement keeps the original winner retained
+and reports `PlacementConverged=False`, reason `ReplacementFailed`. Selection
+stays fixed while its configuration is repaired or the move is cancelled; this
+does not introduce automatic retries of terminal failures on other clusters.
+
+A probe waiting indefinitely for admission can monopolize a small allowance.
+An optional positive `spec.placement.replacementTimeout`, valid only for Single,
+bounds that wait; omission keeps the pending probe. For example, `5m` permits
+rotation after five minutes without full component admission. The controller
+persists the probe's start time and nomination cursor, retires an expired probe,
+and waits for physical removal before reusing its allowance. A controller
+restart cannot restart that timer or increase the original floor. The timeout
+does not apply to a selected replacement waiting for full readiness.
+
 A disconnected home can still be serving. Automatic replacement after an
 unreachable grace period cannot promise strict global at-most-N without a
 fencing mechanism. The first implementation preserves unknown allocations;
