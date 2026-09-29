@@ -420,10 +420,16 @@ carries the label in metadata and NO Service ever carries it in
 `spec.selector`. Continuous **invariant C (pair-alive)** arms for every
 non-empty→non-empty transition: whenever both engine and decoder serve, a
 pairable pair (equal or either-empty protocols) must exist. The gate's
-liveness escapes are exempt: the 1×1 mutual wall explicitly, and the no-pair
+liveness escapes are exempt where the window is unavoidable: the no-pair
 and last-hop windows through the disarm rule (a side at zero serving drops
-`both-present`, and the tracker re-arms only on the next pairable sample).
-Waive with `inv_off=C` + a line-2 `# reason:` comment.
+`both-present`, and the tracker re-arms only on the next pairable sample), and
+the 1×1 mutual wall only when a pairing Component updates drain-first
+(`RecreatePod`). Under a surge or in-place strategy both replacements come up
+regardless, so an unpaired sample at 1×1 is a violation; the incident-shaped
+cases (`p1817` to `p1819`, one side slow through `runner.env
+TEST_STARTUP_DELAY`) and the symmetric `p810`/`p830` are parked on that gap
+until the gate holds the drain. Waive with `inv_off=C` + a line-2 `# reason:`
+comment.
 
 A `canary=auto` case with a canary group in the YAML drives the same protocol
 patch through the staged canary (steps advance on their own `pause.duration`

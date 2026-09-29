@@ -798,3 +798,35 @@ class CanaryFloorAndSoakTest(unittest.TestCase):
             run.kubectl = saved
         self.assertEqual("decoder", f["victim_comp"])
         self.assertTrue(f["fired"])
+
+class PairAliveOneByOneTest(unittest.TestCase):
+    """At 1x1 the unpaired first-mover window is exempt only for drain-first
+    strategies; under a surge or in-place strategy it is a violation."""
+
+    @staticmethod
+    def _pod(comp, proto):
+        return {"alive": True, "ready": True, "serving": True, "comp": comp, "inst": "0", "pairing": proto}
+
+    def _run(self, drain_first):
+        inv = run._inv_new("p1", {})
+        inv["pairing"] = {"frm": "v1", "to": "v2", "armed": False, "seen": False, "drain_first": drain_first}
+        paired = {"e0": self._pod("engine", "v1"), "d0": self._pod("decoder", "v1")}
+        split = {"e0": self._pod("engine", "v1"), "d0": self._pod("decoder", "v2")}
+        run._inv_check_pair_alive(inv, paired, set(), 1.0)          # arms
+        for tick in range(run.INV_SUSTAIN_C):
+            hits = set()
+            run._inv_check_pair_alive(inv, split, hits, 6.0 + 5 * tick)
+        return inv
+
+    def test_surge_one_by_one_split_is_a_violation(self):
+        inv = self._run(drain_first=False)
+        self.assertIn(("C", "pair-alive"), inv["viol"])
+
+    def test_drain_first_one_by_one_split_is_exempt(self):
+        inv = self._run(drain_first=True)
+        self.assertEqual({}, inv["viol"])
+
+    def test_drain_first_is_read_from_the_strategies(self):
+        self.assertFalse(run._pairing_drain_first({"strat": {"engine": "SurgeThenDrain", "decoder": "InPlaceOnly"}}))
+        self.assertTrue(run._pairing_drain_first({"strat": {"engine": "SurgeThenDrain", "decoder": "RecreatePod"}}))
+        self.assertFalse(run._pairing_drain_first({"strat": {}}))

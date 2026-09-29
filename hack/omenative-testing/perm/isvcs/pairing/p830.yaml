@@ -1,4 +1,5 @@
-# p830: pairing 1x1 gang wall ST — single-gang sides surge whole replacement gangs, the pair survives the flip  mode=pairing proto=nixl-v2 Ne=1 Nd=1 Nr=0 ceil_e=2 ceil_d=2 ceil_r=0 co=bluegreen topo=pd-mn
+# p830: pairing 1x1 gang ST — single-gang sides surge whole replacement gangs; the pair must survive the flip, with equal startups the first-mover window is a race  mode=pairing proto=nixl-v2 Ne=1 Nd=1 Nr=0 ceil_e=2 ceil_d=2 ceil_r=0 notimpl=1 issue=1818 inv_xfail=C co=bluegreen topo=pd-mn
+# reason: parked on the pair-floor gate's 1x1 mutual wall — under a surge strategy both first movers are admitted at operation start and each side drains its source when its own replacement is Ready, so the old pair breaks for the slower side's startup; the invariant records that window as the tracked bug
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p830 }

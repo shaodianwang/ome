@@ -183,6 +183,18 @@ def migrate_settle_budget(n_insts):
     return min(MAX_BUDGET_S, MIGRATE_SETTLE_BASE_S + MIGRATE_SETTLE_PER_INST_S * max(1, n_insts))
 
 IN_PLACE_TYPES = {"InPlaceIfPossible", "InPlaceOnly"}
+# Strategies whose replacement is up before the source leaves serving: a surge
+# drains only after its replacement is Ready, an in-place op returns the same
+# pod. Everything else (RecreatePod) is drain-first: nothing comes up until
+# something goes down, which is the only shape where an unpaired window at
+# 1x1 is unavoidable.
+REPLACEMENT_FIRST_TYPES = {"SurgeThenDrain"} | IN_PLACE_TYPES
+
+
+def _pairing_drain_first(info):
+    """True when either pairing Component updates drain-first."""
+    strat = info.get("strat") or {}
+    return any((strat.get(c) or "SurgeThenDrain") not in REPLACEMENT_FIRST_TYPES for c in ("engine", "decoder"))
 COMPS = ("engine", "decoder", "router")
 
 TSV_HEADER = ("id\tdesc\tNe\tNd\tNr\tceil_e\tceil_d\tceil_r\tpeak_e\tpeak_d\tpeak_r\t"
@@ -1008,15 +1020,18 @@ def _inv_check_pair_alive(inv, pod_state, hits, now):
     pairable pair must exist — some serving engine pod and serving decoder pod
     with equal protocols, or either empty (empty pairs with anything).
 
-    The gate's liveness escapes are exempt:
+    The gate's liveness escapes are exempt where the window is unavoidable:
       - no pair to protect: once no pairable pair exists (a side at zero, or
         externally destroyed), the check DISARMS — the unpaired samples that
         follow are the product progressing back toward a pair, exactly what the
         no-pair-pre-existing escape allows. It re-arms on the next pairable
         sample. The last-hop escape's window is covered by the same rule: the
         acting side's final hop passes through zero serving, which disarms.
-      - the 1×1 mutual wall: both Components down to <=1 serving Instance is
-        the bounded first-mover window the gate deliberately allows.
+      - the 1×1 mutual wall, for drain-first strategies only: with nothing
+        able to come up before something goes down, the first-mover window is
+        unavoidable. Under a surge or in-place strategy both replacements come
+        up regardless, so the old pair can keep serving until the new pair
+        exists, and an unpaired sample at 1×1 is a violation.
     """
     st = inv.get("pairing")
     if not st:
@@ -1032,8 +1047,8 @@ def _inv_check_pair_alive(inv, pod_state, hits, now):
     if pairable:
         st["armed"] = True
         return
-    if len(eng) <= 1 and len(dec) <= 1:
-        return   # 1×1 mutual wall: bounded by-design window; stays armed
+    if len(eng) <= 1 and len(dec) <= 1 and st.get("drain_first"):
+        return   # 1×1 mutual wall under drain-first: unavoidable window; stays armed
     if not st["armed"]:
         return
     key = ("C", "pair-alive")
@@ -4393,7 +4408,8 @@ def _pairing(case_id, yaml_file, desc, hdr):
     # gate's). Cases that destroy the pair themselves (pkill) waive it via
     # inv_off=C in their header.
     if from_proto and target and bumped == {"engine", "decoder"}:
-        ctx["inv"]["pairing"] = {"frm": from_proto, "to": target, "armed": False, "seen": False}
+        ctx["inv"]["pairing"] = {"frm": from_proto, "to": target, "armed": False, "seen": False,
+                                 "drain_first": _pairing_drain_first(info)}
 
     # Budget: rotate base + per bumped pod, plus canary step pauses when the
     # case ships a canary group (the step machine advances on its own timers).
@@ -4892,7 +4908,8 @@ def _canary(case_id, yaml_file, desc, hdr):
         # Pair-alive arms exactly as the pairing handler arms it: a non-empty→
         # non-empty transition with both pairing Components rolling.
         if from_proto and proto_target and group == {"engine", "decoder"}:
-            ctx["inv"]["pairing"] = {"frm": from_proto, "to": proto_target, "armed": False, "seen": False}
+            ctx["inv"]["pairing"] = {"frm": from_proto, "to": proto_target, "armed": False, "seen": False,
+                                     "drain_first": _pairing_drain_first(ctx["info"])}
     elif not _bump_rev(ctx, group, extra=analysis_extra, image=bad_image or None, image_comps=image_comps):
         return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", "rev bump patch failed")
     if {"engine", "decoder"} <= group:
