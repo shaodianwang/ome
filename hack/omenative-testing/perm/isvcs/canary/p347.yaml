@@ -1,4 +1,4 @@
-# p347: canary-analysis engine transient breach recovers  mode=canary Ne=12 Nd=0 Nr=0 ceil_e=13 ceil_d=0 ceil_r=0 canary=auto analysis=pass health=breach failurelimit=8 cell=canary/Serving[A]/sampleFails[transient] co=none topo=engine notimpl=1 issue=900
+# p347: canary-analysis engine transient breach recovers  mode=canary Ne=12 Nd=0 Nr=0 ceil_e=13 ceil_d=0 ceil_r=0 canary=auto analysis=pass health=breach failurelimit=12 minfails=1 cell=canary/Serving[A]/sampleFails[transient] co=none topo=engine
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p347 }
@@ -8,7 +8,7 @@ spec:
   engine:
     minReplicas: 12
     maxReplicas: 12
-    annotations: { ome.io/deploymentMode: "OMENative", perm.test/error-rate: "0.0", perm.test/emit: "true", prometheus.io/scrape: "true", prometheus.io/port: "8080", prometheus.io/path: "/metrics", perm.test/decay: "30" }
+    annotations: { ome.io/deploymentMode: "OMENative", perm.test/error-rate: "0.0", perm.test/emit: "true", prometheus.io/scrape: "true", prometheus.io/port: "8080", prometheus.io/path: "/metrics", perm.test/decay: "120" }
     lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
   rollout:
     groups:
@@ -17,10 +17,11 @@ spec:
             steps:
               - capacity: "50%"
                 traffic: 50
+                pause: { duration: "150s" }
                 analysis:
                   interval: "15s"
-                  failureLimit: 8
-                  initialDelay: "20s"
+                  failureLimit: 12
+                  initialDelay: "30s"
                   metrics:
                     - name: error_rate
                       query: 'max(canary_error_rate{inferenceservice="{{.ISVCName}}",component="{{.Component}}"})'

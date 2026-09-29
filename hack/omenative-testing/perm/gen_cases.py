@@ -235,7 +235,7 @@ def ceils(topo, ce, n=N, nd=None, surge_d=0, surge_r=0):
 
 HDR_ORDER = ["mode", "Ne", "Nd", "Nr", "ceil_e", "ceil_d", "ceil_r", "to_e", "to_d", "to_r",
              "partition", "mig", "restart", "kill", "inst", "canary", "rollback",
-             "analysis", "health", "errorrate", "oninconclusive", "failurelimit", "expect", "reason",
+             "analysis", "health", "errorrate", "oninconclusive", "failurelimit", "minfails", "expect", "reason",
              "co", "topo", "infeasible", "floor_hard"]
 
 
@@ -679,14 +679,17 @@ Canalysis("operator GTE success breach", "engine", "breach",
                                metrics=[err_metric(name="success", query=SUCC_QUERY, op="GTE", threshold="0.95")])))
 Canalysis("operator GTE success pass", "engine", "pass",
           _gate2(analysis_spec(metrics=[err_metric(name="success", query=SUCC_QUERY, op="GTE", threshold="0.95")])))
-# Transient breach then recovery: a few breaches (below the budget) then the
-# error-rate decays to 0 -> passes -> promote (budget non-exhaustion).
-# notimpl=1 issue=900: the time-based decay clock (pod-serving-relative) does
-# not reliably align with the analysis sampling clock on a real cluster, so
-# the recovery isn't deterministic (the parked fix is a controllable non-timing
-# recovery trigger). decay is whole seconds.
-Canalysis("transient breach recovers", "engine", "pass", health="breach", decay="30",
-          steps=_gate2(analysis_spec(failure_limit=8, interval="15s")), notimpl=1, issue=900)
+# Transient breach then recovery (budget non-exhaustion): each canary pod
+# breaches for its first `decay` seconds of serving, then reads 0 -> promote.
+# Sized against the step's clock (starts when its last canary pod turns Ready)
+# and the 15s Prometheus scrape: initialDelay 30s covers that pod's first scrape,
+# so the first sample fails; at most 8 samples fit in the 120s breach (+1 scrape),
+# under failureLimit 12; the 150s bake holds the advance until it has cleared.
+Canalysis("transient breach recovers", "engine", "pass", health="breach", decay="120",
+          steps=[astep("50%", 50, analysis_spec(failure_limit=12, interval="15s", initial_delay="30s"),
+                       pause={"duration": "150s"}),
+                 astep("100%", 100)],
+          minfails=1)
 # Manual promote overrides a pending (breaching) analysis bake -> promote.
 Canalysis("manual promote overrides analysis", "engine", "pass", health="breach", policy="manual",
           steps=_gate2(analysis_spec(failure_limit=5)))

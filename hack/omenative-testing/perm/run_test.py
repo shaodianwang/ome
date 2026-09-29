@@ -538,6 +538,14 @@ class CanaryHeaderTest(unittest.TestCase):
         self.assertTrue(any("img=" in e for e in self._errs(base + " img=example.com/canary-test/missing:none")))
         self.assertTrue(any("fault=" in e for e in self._errs(base + " fault=podkill:rotating")))
 
+    def test_minfails_counts_a_promoted_canarys_failing_samples(self):
+        base = "# p999: x mode=canary Ne=1 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 canary=auto topo=engine"
+        self.assertEqual([], self._errs(base + " analysis=pass health=breach failurelimit=12 minfails=1"))
+        self.assertTrue(any("minfails=" in e for e in self._errs(base + " analysis=breach failurelimit=1 minfails=1")))
+        self.assertTrue(any("malformed header value minfails=0" in e for e in self._errs(base + " analysis=pass minfails=0")))
+        rollout = "# p999: x mode=rollout Ne=1 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 topo=engine"
+        self.assertTrue(any("minfails= is a canary-mode knob" in e for e in self._errs(rollout + " analysis=pass minfails=1")))
+
     def test_a_missing_policy_is_judged_as_held(self):
         base = "# p999: x mode=canary Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 canary=auto topo=engine"
         self.assertEqual([], self._errs(base + " prearm=planinvalid terminal=Held cell=canary/Idle/runLost"))

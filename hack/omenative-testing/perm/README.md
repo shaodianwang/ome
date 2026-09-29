@@ -434,6 +434,16 @@ The query is `max(canary_error_rate{inferenceservice="{{.ISVCName}}",component="
 revision label. Analysis-validation reject cases live in `isvcs/reject/`
 (p324–p328). Run them like any case: `python3 batch.py --conc 4 p330-p343`.
 
+`health=breach` with `analysis=pass` is the transient shape: the canary pods
+breach for their first `perm.test/decay` seconds of serving and then recover, so
+the gated step must accrue failing samples under `failurelimit` and still
+promote. `minfails=<n>` makes the runner assert that the peak of
+`status…canary.analysisFailedChecks` reached n before the step advanced — the
+promotion alone would also pass a run whose sampler never saw the breach. Pick
+the step's `initialDelay`, `interval`, `failureLimit`, bake (`pause.duration`)
+and `decay` against the two clocks involved: the step's clock starts when its
+last canary pod turns Ready, and the bundled Prometheus scrapes every 15s.
+
 ### Scale & hung-Prometheus (`perf/`)
 
 Two real-cluster perf harnesses for the async sampler:

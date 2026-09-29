@@ -2218,6 +2218,10 @@ HDR_VALIDATORS = {
     "errorrate": _numlike,
     "oninconclusive": lambda v: str(v).lower() in {"hold", "rollback"},
     "failurelimit": _int_ge0,
+    # minfails= is the least failing samples a PROMOTED analysis canary must have
+    # accrued (the peak of status.canary.analysisFailedChecks) — the transient
+    # shape's proof that the breach was sampled under the budget, not skipped.
+    "minfails": lambda v: isinstance(v, int) and v >= 1,
     "expect": lambda v: v in {"reject", "roll", "noroll", "recover", "fail"},
     "reason": lambda v: bool(str(v)),
     "rt": lambda v: bool(str(v)),
@@ -2406,9 +2410,11 @@ def validate_case_file(path):
                                    "runtimerev": {"rollout"}}.get(mode, set()):
         errs.append(f"{path}:1: during={during} not supported for mode={mode}")
     for k in ("verb", "verbhold", "bump", "terminal", "prearm", "skipsoak", "cell", "nophase", "verb2", "during2", "timeout",
-              "imgcomp", "ratio_tol", "xcheck", "release", "releaseafter", "pairto"):
+              "imgcomp", "ratio_tol", "xcheck", "release", "releaseafter", "pairto", "minfails"):
         if k in fields and mode != "canary":
             errs.append(f"{path}:1: {k}= is a canary-mode knob (mode=canary)")
+    if "minfails" in fields and str(fields.get("analysis", "")).lower() != "pass":
+        errs.append(f"{path}:1: minfails= counts the failing samples a promoted canary accrued (needs analysis=pass)")
     if "verb" in fields and not _canary_hook_ok(during):
         errs.append(f"{path}:1: verb= needs during=<canary hook> to say when it fires")
     if "verb2" in fields and ("verb" not in fields or "during2" not in fields):
@@ -5698,6 +5704,7 @@ def _canary(case_id, yaml_file, desc, hdr):
     phases, traffic_by_step = set(), {}
     canary_hash = None
     saw_metrics = False   # analysis wrote status.canary.metricResults at least once
+    failed_checks_peak = 0   # most failing samples seen accrued in one step (reset on advance)
     rollback_set = did_promote = False
     promoted_step = -1  # highest step index already promoted (multi-step plans pause more than once)
     promote_rejected = None
@@ -5761,6 +5768,7 @@ def _canary(case_id, yaml_file, desc, hdr):
                   "re-arming manual promotion")
         if can.get("metricResults"):
             saw_metrics = True
+        failed_checks_peak = max(failed_checks_peak, int(can.get("analysisFailedChecks") or 0))
         step = can.get("currentStep")
         if step is not None:
             for t in (comp.get("traffic") or []):
@@ -6264,6 +6272,13 @@ def _canary(case_id, yaml_file, desc, hdr):
             canary_pct = next((t.get("percent", 0) for t in (fc.get("traffic") or []) if t.get("latestRevision")), 0)
             good(canary_pct == 100, "canary revision carries 100% traffic after passing analysis",
                  f"canary traffic at convergence is {canary_pct}% (want 100)")
+            # The transient shape: the budget path is only proven when failing
+            # samples accrued (under failurelimit) before the step advanced.
+            min_fails = int(hdr.get("minfails") or 0)
+            if min_fails:
+                good(failed_checks_peak >= min_fails,
+                     f"analysis accrued {failed_checks_peak} failing sample(s) under the {hdr.get('failurelimit')} budget before recovering",
+                     f"analysis accrued {failed_checks_peak} failing sample(s) before promoting (want ≥{min_fails}) — the breach was never sampled")
         elif expect == "RolledBack":
             good(new == 0, f"{primary} drained to stable after analysis rollback (0 canary)",
                  f"{primary} still has {new} canary Instances after rollback")
