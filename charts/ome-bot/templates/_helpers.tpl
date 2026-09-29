@@ -49,7 +49,11 @@ app.kubernetes.io/part-of: ome
 {{- end -}}
 {{- end -}}
 
+{{/* Mount points of the config ConfigMap and the secrets volume. */}}
+{{- define "ome-bot.configDir" -}}/etc/ome-bot/config{{- end -}}
+{{- define "ome-bot.secretsDir" -}}/etc/ome-bot/secrets{{- end -}}
+
 {{/* Path of the mounted HMAC key. */}}
 {{- define "ome-bot.authSecretFile" -}}
-{{- printf "/etc/ome-bot/auth/%s" .Values.config.auth.secretKey -}}
+{{- printf "%s/%s" (include "ome-bot.secretsDir" .) .Values.config.auth.secretKey -}}
 {{- end -}}

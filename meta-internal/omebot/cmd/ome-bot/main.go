@@ -53,6 +53,15 @@ func run(configPath string, log *slog.Logger) error {
 		}
 		verifier.MaxSkew = time.Duration(cfg.Auth.MaxSkewSeconds) * time.Second
 	}
+	prober := &omebot.Prober{Config: cfg, Paths: paths, Timeout: time.Duration(cfg.Timeouts.ProbeSeconds) * time.Second}
+	release, err := omebot.NewRelease(cfg, prober)
+	if err != nil {
+		return err
+	}
+	var docs *omebot.Docs
+	if cfg.Docs != nil {
+		docs = &omebot.Docs{Config: *cfg.Docs, Limit: cfg.OutputLimitBytes}
+	}
 	srv := &omebot.Server{
 		Config: cfg,
 		Paths:  paths,
@@ -62,24 +71,27 @@ func run(configPath string, log *slog.Logger) error {
 			Limit:   cfg.OutputLimitBytes,
 			Env:     cfg.Env,
 		},
-		Prober:   &omebot.Prober{Config: cfg, Paths: paths, Timeout: time.Duration(cfg.Timeouts.ProbeSeconds) * time.Second},
+		Prober:   prober,
 		Verifier: verifier,
 		Log:      log,
+		Tools:    omebot.NewTools(cfg.Tools, docs, cfg.OutputLimitBytes),
+		Release:  release,
 	}
 	httpSrv := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           srv.Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
+		ReadHeaderTimeout: time.Duration(cfg.Timeouts.ReadHeaderSeconds) * time.Second,
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	errCh := make(chan error, 1)
 	go func() { errCh <- httpSrv.ListenAndServe() }()
 	srv.SetReady(true)
-	log.Info("listening", "addr", cfg.Listen, "clusters", cfg.ClusterNames(), "auth", cfg.Auth.Mode)
+	log.Info("listening", "addr", cfg.Listen, "clusters", cfg.ClusterNames(), "auth", cfg.Auth.Mode,
+		"tools", srv.Tools.Names(), "release", release != nil)
 	select {
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.Timeouts.ShutdownSeconds)*time.Second)
 		defer cancel()
 		return httpSrv.Shutdown(shutdownCtx)
 	case err := <-errCh:

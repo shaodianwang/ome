@@ -374,6 +374,8 @@ helm-lint: helm ## ⎈ Lint all charts
 	@HELM_BIN="$(HELM)" bash $(CHARTS_DIR)/ome-resources/tests/render_test.sh
 	@echo "🧪 Testing ome-quota-manager chart contracts..."
 	@HELM_BIN="$(HELM)" bash $(CHARTS_DIR)/ome-quota-manager/tests/render_test.sh
+	@echo "🧪 Testing ome-bot chart contracts..."
+	@HELM_BIN="$(HELM)" bash $(CHARTS_DIR)/ome-bot/tests/render_test.sh
 	@echo "✅ Helm lint complete"
 
 .PHONY: helm-doc

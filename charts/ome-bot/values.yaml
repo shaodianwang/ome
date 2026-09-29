@@ -39,6 +39,16 @@ homeDir: /tmp
 service:
   port: 8080
 
+# Volume holding the bot's secret files, mounted read-only at
+# /etc/ome-bot/secrets: the HMAC key under config.auth.secretKey and every
+# file a tool's envFromFiles names. Any volume source works, for example a
+# Secret or a CSI secrets-store volume that mounts files directly. Required
+# when config.auth.mode is hmac.
+secrets:
+  volume: {}
+  #  secret:
+  #    secretName: ome-bot
+
 config:
   # kubectl-ome inside the image.
   kubectlOmePath: /usr/local/bin/kubectl-ome
@@ -54,6 +64,12 @@ config:
     commandSeconds: 25 # one kubectl-ome invocation
     probeSeconds: 10 # one cluster reachability probe
     fanoutSeconds: 60 # a command run on every cluster
+    readHeaderSeconds: 10 # HTTP request header read
+    shutdownSeconds: 10 # graceful drain on SIGTERM
+  # Largest accepted request body.
+  maxRequestBytes: 65536
+  # Requests that run a process or probe clusters at once; more get 429 busy.
+  maxInFlight: 8
   # Bytes of CLI output kept per cluster per command.
   outputLimitBytes: 12000
   # The OME controller Deployment whose image tag is reported as the installed
@@ -66,10 +82,39 @@ config:
     # X-OME-Bot-Signature = hex(HMAC-SHA256(key, timestamp + "\n" + body)).
     # "none": only for a Deployment that is unreachable except by port-forward.
     mode: hmac
-    # Secret in the release namespace holding the shared key under secretKey.
-    existingSecret: ""
+    # File name of the shared key inside secrets.volume.
     secretKey: hmac
     maxSkewSeconds: 300
+  # Read-only tools served by POST /v1/tool, rendered verbatim. Each needs
+  # name, command, subcommands and timeoutSeconds; argsPrefix, forbiddenFlags,
+  # env (KEY=VALUE) and envFromFiles (KEY: absolute path, read per call) are
+  # optional. Arguments are passed after argsPrefix without a shell.
+  tools: []
+  #  - name: builds
+  #    command: /usr/bin/python3
+  #    argsPrefix: [/opt/ome/skills/ci-triage/scripts/main_builds.py]
+  #    subcommands: [list, diff]
+  #    timeoutSeconds: 60
+  #    envFromFiles: {BUILDKITE_API_TOKEN: /etc/ome-bot/secrets/buildkite-token}
+  #    env: [OME_CITRIAGE_SCRATCH=/tmp/scratch]
+  # The built-in docs tool searches and reads .md and .yaml files under these
+  # roots. The paths are the trees the image bakes in. Set to null to disable.
+  docs:
+    roots:
+      - {name: docs, path: /opt/ome/docs}
+      - {name: oeps, path: /opt/ome/oeps}
+      - {name: skills, path: /opt/ome/skills}
+      - {name: upstream-docs, path: /opt/ome/upstream/site/content/en/docs}
+      - {name: kubectl-ome, path: /opt/ome/upstream/cmd/kubectl-ome}
+    maxMatches: 50
+    maxReadBytes: 24000
+  # Kargo project read by GET /v1/release. Set exactly one of cluster, the
+  # registry entry whose credentials read it, and inCluster: true, the pod's
+  # own ServiceAccount. Empty => the endpoint answers not_configured.
+  kargo: {}
+  #  inCluster: true
+  #  namespace: kargo-proj-a
+  #  recentFreight: 5
 
 # The fleet registry, rendered verbatim into the config. Each entry names one
 # credential source:

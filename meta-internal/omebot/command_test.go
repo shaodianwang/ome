@@ -3,6 +3,7 @@
 package omebot
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -69,5 +70,41 @@ func TestHelpTextListsVerbs(t *testing.T) {
 		if !strings.Contains(h, needle) {
 			t.Errorf("help lacks %q", needle)
 		}
+	}
+}
+
+func TestParseErrorClasses(t *testing.T) {
+	cases := map[string]string{
+		"rollout pause chat --cluster member-a":           ErrNotAVerb,
+		"installed pods":                                  ErrNotAVerb,
+		"get isvc --kubeconfig=/etc/x --cluster member-a": ErrForbiddenFlag,
+		"get isvc --as admin":                             ErrForbiddenFlag,
+		"logs chat":                                       ErrNeedsCluster,
+		"get isvc --cluster":                              ErrMalformed,
+		"get isvc \"unterminated":                         ErrMalformed,
+		"get isvc \x01":                                   ErrMalformed,
+	}
+	for text, want := range cases {
+		_, err := ParseCommand(text)
+		var pe *ParseError
+		if !errors.As(err, &pe) || pe.Class != want {
+			t.Errorf("%q: err = %v, want class %q", text, err, want)
+		}
+	}
+}
+
+func TestReadOnlyPlacementTrafficQuotaVerbs(t *testing.T) {
+	for _, text := range []string{
+		"placement status chat --cluster member-a",
+		"placement explain chat --cluster member-a",
+		"traffic status chat --cluster member-a",
+		"quota status --cluster member-a",
+	} {
+		if p, err := ParseCommand(text); err != nil || p.Kind != KindCLI {
+			t.Errorf("%q: got %+v, %v", text, p, err)
+		}
+	}
+	if n := len(ReadVerbs()); n != 31 {
+		t.Errorf("read verbs = %d, want 31", n)
 	}
 }

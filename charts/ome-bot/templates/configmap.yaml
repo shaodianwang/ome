@@ -1,5 +1,5 @@
-{{- if and (eq .Values.config.auth.mode "hmac") (not .Values.config.auth.existingSecret) }}
-{{- fail "config.auth.existingSecret is required when config.auth.mode is hmac" }}
+{{- if and (eq .Values.config.auth.mode "hmac") (not .Values.secrets.volume) }}
+{{- fail "secrets.volume is required when config.auth.mode is hmac" }}
 {{- end }}
 {{- if not .Values.clusters }}
 {{- fail "clusters must list at least one registry entry" }}
@@ -21,6 +21,8 @@ data:
     {{- end }}
     timeouts: {{- toYaml .Values.config.timeouts | nindent 6 }}
     outputLimitBytes: {{ int .Values.config.outputLimitBytes }}
+    maxRequestBytes: {{ int .Values.config.maxRequestBytes }}
+    maxInFlight: {{ int .Values.config.maxInFlight }}
     auth:
       mode: {{ .Values.config.auth.mode | quote }}
       {{- if eq .Values.config.auth.mode "hmac" }}
@@ -31,5 +33,14 @@ data:
     ome:
       namespace: {{ .Values.config.ome.namespace | quote }}
       managerDeployment: {{ .Values.config.ome.managerDeployment | quote }}
+    {{- end }}
+    {{- with .Values.config.tools }}
+    tools: {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with .Values.config.docs }}
+    docs: {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with .Values.config.kargo }}
+    kargo: {{- toYaml . | nindent 6 }}
     {{- end }}
     clusters: {{- toYaml .Values.clusters | nindent 6 }}

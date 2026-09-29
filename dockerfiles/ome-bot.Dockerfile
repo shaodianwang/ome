@@ -9,6 +9,13 @@
 #                             alfred.Dockerfile builds alfred: the CLI carries
 #                             all domain logic and lives upstream only.
 #
+# The runtime stage also carries python3 for the standard-library CI scripts
+# the tool registry runs, and read-only trees for the built-in docs tool:
+#   /opt/ome/{docs,oeps,skills}   from this repository
+#   /opt/ome/upstream/...         upstream user docs and the kubectl-ome README
+#                                 from the same clone the CLI is built from
+# They are root-owned so the runtime user can read but never rewrite them.
+#
 # The runtime base is a real distro for the same reason as
 # ome-quota-manager.Dockerfile: the exec-credential provider the platform
 # injects into the pod is dynamically linked and needs a C runtime.
@@ -54,20 +61,36 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
       -ldflags "-s -w -X github.com/ome-projects/ome/pkg/version.GitVersion=${GIT_TAG} -X github.com/ome-projects/ome/pkg/version.GitCommit=${GIT_COMMIT}" \
       -o /ome-bot ./meta-internal/omebot/cmd/ome-bot
 
+# The docs trees are rebuilt with cp so every file is created in one RUN,
+# where setting modes works on every builder; files copied from the context
+# keep modes the builder may refuse to change in a later step.
+FROM ${GO_BUILDER_IMAGE} AS docs-tree
+COPY docs/ /src/docs/
+COPY oeps/ /src/oeps/
+COPY .agents/skills/ /src/skills/
+COPY --from=cli-builder /src/upstream/site/content/en/docs/ /src/upstream/site/content/en/docs/
+COPY --from=cli-builder /src/upstream/cmd/kubectl-ome/README.md /src/upstream/cmd/kubectl-ome/README.md
+RUN mkdir -p /opt/ome \
+    && cp -R /src/. /opt/ome/ \
+    && find /opt/ome -type d -exec chmod 0755 {} + \
+    && find /opt/ome -type f -exec chmod 0644 {} +
+
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 RUN if [ -f /usr/bin/microdnf ]; then \
         microdnf update -y && \
-        microdnf install -y glibc libgcc libstdc++ openssl-libs && \
+        microdnf install -y glibc libgcc libstdc++ openssl-libs python3 && \
         microdnf clean all; \
     elif [ -f /usr/bin/apt-get ]; then \
         apt-get update && \
-        apt-get install -y ca-certificates libc6 libgcc-s1 libstdc++6 libssl3 && \
+        apt-get install -y ca-certificates libc6 libgcc-s1 libstdc++6 libssl3 python3 && \
         apt-get upgrade -y && \
         apt-get clean && rm -rf /var/lib/apt/lists/*; \
     fi
 WORKDIR /
 COPY --from=cli-builder /out/kubectl-ome /usr/local/bin/kubectl-ome
 COPY --from=bot-builder /ome-bot /ome-bot
+COPY --from=docs-tree /opt/ome /opt/ome
+RUN python3 --version
 USER 65532:65532
 ENTRYPOINT ["/ome-bot"]

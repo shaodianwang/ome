@@ -34,7 +34,7 @@ spec:
           image: {{ include "ome-bot.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
-            - --config=/etc/ome-bot/config.yaml
+            - --config={{ include "ome-bot.configDir" . }}/config.yaml
           env:
             - name: HOME
               value: {{ .Values.homeDir | quote }}
@@ -55,15 +55,15 @@ spec:
           resources: {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
             - name: config
-              mountPath: /etc/ome-bot
+              mountPath: {{ include "ome-bot.configDir" . }}
               readOnly: true
             - name: kubeconfigs
               mountPath: {{ .Values.config.kubeconfigDir }}
             - name: home
               mountPath: {{ .Values.homeDir }}
-            {{- if eq .Values.config.auth.mode "hmac" }}
-            - name: auth
-              mountPath: /etc/ome-bot/auth
+            {{- if .Values.secrets.volume }}
+            - name: secrets
+              mountPath: {{ include "ome-bot.secretsDir" . }}
               readOnly: true
             {{- end }}
       volumes:
@@ -74,13 +74,9 @@ spec:
           emptyDir: {}
         - name: home
           emptyDir: {}
-        {{- if eq .Values.config.auth.mode "hmac" }}
-        - name: auth
-          secret:
-            secretName: {{ .Values.config.auth.existingSecret }}
-            items:
-              - key: {{ .Values.config.auth.secretKey }}
-                path: {{ .Values.config.auth.secretKey }}
+        {{- with .Values.secrets.volume }}
+        - name: secrets
+          {{- toYaml . | nindent 10 }}
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector: {{- toYaml . | nindent 8 }}

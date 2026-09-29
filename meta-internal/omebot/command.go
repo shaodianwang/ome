@@ -3,7 +3,6 @@
 package omebot
 
 import (
-	"fmt"
 	"sort"
 	"strings"
 )
@@ -41,8 +40,12 @@ var readVerbs = map[string]bool{
 	"rollout explain":       true,
 	"rollout history":       true,
 	"rollout validate":      true,
+	"traffic status":        true,
 	"traffic explain":       true,
+	"placement status":      true,
+	"placement explain":     true,
 	"placement endpoint":    true,
+	"quota status":          true,
 	"quota tree":            true,
 	"quota validate":        true,
 	"instance list":         true,
@@ -106,7 +109,7 @@ func ParseCommand(text string) (Parsed, error) {
 		if len(tokens) == 2 && strings.EqualFold(tokens[1], "clusters") {
 			return Parsed{Kind: KindClusters}, nil
 		}
-		return Parsed{}, fmt.Errorf("unknown command %q; try `help`", strings.Join(tokens, " "))
+		return Parsed{}, refuse(ErrNotAVerb, "unknown command %q; try `help`", strings.Join(tokens, " "))
 	}
 
 	verbLen := 0
@@ -116,7 +119,7 @@ func ParseCommand(text string) (Parsed, error) {
 		verbLen = 1
 	}
 	if verbLen == 0 {
-		return Parsed{}, fmt.Errorf("%q is not a read-only kubectl-ome verb this bot runs; try `help`", strings.Join(tokens[:min(2, len(tokens))], " "))
+		return Parsed{}, refuse(ErrNotAVerb, "%q is not a read-only kubectl-ome verb this bot runs; try `help`", strings.Join(tokens[:min(2, len(tokens))], " "))
 	}
 	p := Parsed{Kind: KindCLI, Verb: tokens[:verbLen]}
 	rest := tokens[verbLen:]
@@ -125,7 +128,7 @@ func ParseCommand(text string) (Parsed, error) {
 		switch {
 		case tok == "--cluster":
 			if i+1 >= len(rest) {
-				return Parsed{}, fmt.Errorf("--cluster needs a value")
+				return Parsed{}, refuse(ErrMalformed, "--cluster needs a value")
 			}
 			p.Cluster = rest[i+1]
 			i++
@@ -136,13 +139,13 @@ func ParseCommand(text string) (Parsed, error) {
 		}
 		for _, f := range forbiddenFlags {
 			if tok == f || strings.HasPrefix(tok, f+"=") {
-				return Parsed{}, fmt.Errorf("flag %s is not allowed through this bot", f)
+				return Parsed{}, refuse(ErrForbiddenFlag, "flag %s is not allowed through this bot", f)
 			}
 		}
 		p.Args = append(p.Args, tok)
 	}
 	if p.Cluster == "" && !fanoutVerbs[strings.Join(p.Verb, " ")] {
-		return Parsed{}, fmt.Errorf("`%s` needs `--cluster <name>`; `clusters` lists them", strings.Join(p.Verb, " "))
+		return Parsed{}, refuse(ErrNeedsCluster, "`%s` needs `--cluster <name>`; `clusters` lists them", strings.Join(p.Verb, " "))
 	}
 	return p, nil
 }
@@ -165,7 +168,7 @@ func tokenize(text string) ([]string, error) {
 	}
 	for _, r := range text {
 		if r < 0x20 && r != '\t' && r != '\n' || r == 0x7f {
-			return nil, fmt.Errorf("control character in command")
+			return nil, refuse(ErrMalformed, "control character in command")
 		}
 		switch {
 		case quote != 0:
@@ -185,7 +188,7 @@ func tokenize(text string) ([]string, error) {
 		}
 	}
 	if quote != 0 {
-		return nil, fmt.Errorf("unbalanced quote in command")
+		return nil, refuse(ErrMalformed, "unbalanced quote in command")
 	}
 	flush()
 	return tokens, nil

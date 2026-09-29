@@ -75,11 +75,11 @@ func TestServerFanoutAndSingleCluster(t *testing.T) {
 		t.Fatalf("args not forwarded: %q", resp.Sections[0].Output)
 	}
 	_, resp = post(t, h, `{"text":"get isvc --cluster nope"}`, false)
-	if resp.OK || !strings.Contains(resp.Error, "unknown cluster") {
+	if resp.OK || !strings.Contains(resp.Error, "unknown cluster") || resp.ErrorClass != ErrUnknownCluster {
 		t.Fatalf("unknown cluster: %+v", resp)
 	}
 	_, resp = post(t, h, `{"text":"rollout pause chat --cluster hub-a"}`, false)
-	if resp.OK || !strings.Contains(resp.Error, "not a read-only") {
+	if resp.OK || !strings.Contains(resp.Error, "not a read-only") || resp.ErrorClass != ErrNotAVerb {
 		t.Fatalf("guarded verb: %+v", resp)
 	}
 }
@@ -93,5 +93,133 @@ func TestRenderClusters(t *testing.T) {
 		if !strings.Contains(text, needle) {
 			t.Errorf("render lacks %q:\n%s", needle, text)
 		}
+	}
+}
+
+func signedRequest(t *testing.T, method, path, body string) *http.Request {
+	t.Helper()
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	ts := time.Now().Unix()
+	req.Header.Set(HeaderTimestamp, strconv.FormatInt(ts, 10))
+	req.Header.Set(HeaderSignature, Sign([]byte("k"), ts, []byte(body)))
+	return req
+}
+
+func toolServer(t *testing.T) (*Server, *bytes.Buffer) {
+	t.Helper()
+	s := testServer(t, AuthModeHMAC)
+	tools, _ := testTools(t)
+	s.Tools = tools
+	logs := &bytes.Buffer{}
+	s.Log = slog.New(slog.NewJSONHandler(logs, nil))
+	return s, logs
+}
+
+func postTool(t *testing.T, h http.Handler, body string) (*httptest.ResponseRecorder, ToolResponse) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, signedRequest(t, "POST", "/v1/tool", body))
+	var resp ToolResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	return rec, resp
+}
+
+func TestServerTool(t *testing.T) {
+	s, logs := toolServer(t)
+	h := s.Handler()
+	rec, resp := postTool(t, h, `{"requestId":"r-1","actor":{"employeeFbid":7},"tool":"ci","args":["status","42"]}`)
+	if rec.Code != 200 || !resp.OK || resp.Result == nil || !strings.Contains(resp.Result.Output, "args: --prefix status 42") {
+		t.Fatalf("tool: code %d resp %+v", rec.Code, resp)
+	}
+	if !strings.Contains(resp.Text, "status 42") {
+		t.Errorf("text: %s", resp.Text)
+	}
+	audit := logs.String()
+	for _, want := range []string{`"kind":"tool"`, `"request_id":"r-1"`, `"tool":"ci"`, `"actor_fbid":7`} {
+		if !strings.Contains(audit, want) {
+			t.Errorf("audit lacks %s: %s", want, audit)
+		}
+	}
+	if strings.Contains(audit, "scratch: /tmp/scratch") {
+		t.Error("audit must not carry tool output")
+	}
+
+	for body, want := range map[string]string{
+		`{"tool":"nope","args":["x"]}`:                 ErrUnknownTool,
+		`{"tool":"ci","args":["retry"]}`:               ErrSubcommandNotAllowed,
+		`{"tool":"ci","args":["status","--download"]}`: ErrForbiddenFlag,
+	} {
+		rec, resp := postTool(t, h, body)
+		if rec.Code != 200 || resp.OK || resp.ErrorClass != want {
+			t.Errorf("%s: code %d resp %+v", body, rec.Code, resp)
+		}
+	}
+	rec, resp = postTool(t, h, `{"tool":"ci","args":["fail"]}`)
+	if rec.Code != 200 || resp.OK || resp.ErrorClass != "" || resp.Result.ExitCode != 4 {
+		t.Errorf("failing tool: code %d resp %+v", rec.Code, resp)
+	}
+
+	unsigned := httptest.NewRequest("POST", "/v1/tool", strings.NewReader(`{"tool":"ci","args":["status"]}`))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, unsigned)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("unsigned tool: %d", rec.Code)
+	}
+}
+
+func TestServerRelease(t *testing.T) {
+	s, logs := toolServer(t)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, signedRequest(t, "GET", "/v1/release", ""))
+	var resp ReleaseResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if rec.Code != http.StatusNotFound || resp.ErrorClass != ErrNotConfigured {
+		t.Fatalf("unconfigured: code %d resp %+v", rec.Code, resp)
+	}
+
+	s.Release = fakeRelease(t)
+	rec = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, signedRequest(t, "GET", "/v1/release", ""))
+	resp = ReleaseResponse{}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if rec.Code != 200 || !resp.OK || resp.Release == nil || !strings.Contains(resp.Text, "stage-rc") {
+		t.Fatalf("release: code %d resp %+v", rec.Code, resp)
+	}
+	if !strings.Contains(logs.String(), `"kind":"release"`) {
+		t.Errorf("audit lacks release kind: %s", logs.String())
+	}
+}
+
+func TestServerBusyAndBodyCap(t *testing.T) {
+	s, _ := toolServer(t)
+	s.slots = make(chan struct{}, 1)
+	s.slots <- struct{}{}
+	h := s.Handler()
+
+	rec, resp := postTool(t, h, `{"tool":"ci","args":["status"]}`)
+	if rec.Code != http.StatusTooManyRequests || resp.ErrorClass != ErrBusy {
+		t.Errorf("tool busy: code %d resp %+v", rec.Code, resp)
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, signedRequest(t, "POST", "/v1/command", `{"text":"get isvc -A"}`))
+	if rec.Code != http.StatusTooManyRequests || !strings.Contains(rec.Body.String(), ErrBusy) {
+		t.Errorf("command busy: code %d body %s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, signedRequest(t, "GET", "/v1/release", ""))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("unconfigured release is refused before taking a slot: %d", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, signedRequest(t, "POST", "/v1/command", `{"text":"help"}`))
+	if rec.Code != http.StatusOK {
+		t.Errorf("help needs no slot: %d", rec.Code)
+	}
+
+	s.Config.MaxRequestBytes = 16
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, signedRequest(t, "POST", "/v1/tool", `{"tool":"ci","args":["status","long"]}`))
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("body cap: %d", rec.Code)
 	}
 }

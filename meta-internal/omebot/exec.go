@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -30,6 +31,7 @@ type Result struct {
 	Truncated bool          `json:"truncated"`
 	Error     string        `json:"error,omitempty"`
 	Duration  time.Duration `json:"-"`
+	TimedOut  bool          `json:"-"`
 }
 
 var secretRE = regexp.MustCompile(`(?i)(bearer\s+|token[=:]\s*|authorization[=:]\s*)[A-Za-z0-9._~+/=-]{8,}`)
@@ -43,23 +45,33 @@ func Redact(s string) string {
 // Run invokes the CLI for one cluster. An empty kubeconfig path leaves the
 // CLI on its in-cluster credentials.
 func (r *Runner) Run(ctx context.Context, cluster, kubeconfig string, args []string) Result {
-	start := time.Now()
-	ctx, cancel := context.WithTimeout(ctx, r.Timeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, r.Bin, args...)
-	env := append([]string(nil), os.Environ()...)
-	env = append(env, r.Env...)
+	env := append([]string(nil), r.Env...)
 	if kubeconfig != "" {
 		env = append(env, "KUBECONFIG="+kubeconfig)
 	}
-	cmd.Env = env
-	stdout := &cappedBuffer{limit: r.Limit}
-	stderr := &cappedBuffer{limit: r.Limit}
+	res := runProcess(ctx, r.Bin, args, env, r.Timeout, r.Limit)
+	res.Cluster = cluster
+	return res
+}
+
+// runProcess runs bin with the inherited environment plus env, bounded in
+// time and output, and redacts what it returns. On timeout the whole
+// process group is killed so children cannot hold the output pipes open.
+func runProcess(ctx context.Context, bin string, args, env []string, timeout time.Duration, limit int) Result {
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Env = append(append([]string(nil), os.Environ()...), env...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	stdout := &cappedBuffer{limit: limit}
+	stderr := &cappedBuffer{limit: limit}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
-	res := Result{Cluster: cluster}
+	var res Result
 	err := cmd.Run()
 	res.Duration = time.Since(start)
 	res.Output = Redact(stdout.String())
@@ -69,7 +81,8 @@ func (r *Runner) Run(ctx context.Context, cluster, kubeconfig string, args []str
 		switch {
 		case errors.Is(ctx.Err(), context.DeadlineExceeded):
 			res.ExitCode = -1
-			res.Error = "timed out after " + r.Timeout.String()
+			res.TimedOut = true
+			res.Error = "timed out after " + timeout.String()
 		case errors.As(err, &exitErr):
 			res.ExitCode = exitErr.ExitCode()
 			res.Error = strings.TrimSpace(Redact(stderr.String()))
