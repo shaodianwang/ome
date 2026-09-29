@@ -842,3 +842,33 @@ class CanaryHandlerBindingsTest(unittest.TestCase):
         binds = [n.lineno for n in ast.walk(fn) if isinstance(n, ast.Assign)
                  for tgt in n.targets if isinstance(tgt, ast.Name) and tgt.id == "want"]
         self.assertEqual(1, len(binds), f"`want` rebound inside _canary at lines {binds}")
+
+
+class CanarySettleTest(unittest.TestCase):
+    """The terminal is reached only when every bumped member's pods agree
+    with it, and a multi-node image override names the leader's container."""
+
+    def test_rollback_settles_when_every_member_drained(self):
+        self.assertFalse(run._canary_pods_settled("RolledBack", "RolledBack", {"router": 0, "decoder": 3}, {}, False))
+        self.assertTrue(run._canary_pods_settled("RolledBack", "RolledBack", {"router": 0, "decoder": 0}, {}, False))
+
+    def test_completion_settles_when_every_member_rolled(self):
+        want = {"engine": 2, "decoder": 2}
+        self.assertFalse(run._canary_pods_settled("Stable", "Stable", {"engine": 2, "decoder": 1}, want, False))
+        self.assertTrue(run._canary_pods_settled("Stable", "Stable", {"engine": 2, "decoder": 2}, want, False))
+        self.assertFalse(run._canary_pods_settled("Stable", "Stable", {"engine": 2, "decoder": 2}, want, True))
+        self.assertTrue(run._canary_pods_settled("Failed", "Failed", {"engine": 1}, want, False))
+
+    def test_multi_node_image_override_names_the_leader_container(self):
+        seen = []
+        saved = run.kubectl
+        run.kubectl = lambda *a, **k: (seen.append(a), subprocess.CompletedProcess(a, 0, stdout="", stderr=""))[1]
+        try:
+            ctx = {"case_id": "p1", "pods_per_inst": {"engine": 1, "decoder": 2}}
+            run._bump_rev(ctx, {"engine", "decoder"}, image="example.com/x:none", image_comps={"decoder"})
+        finally:
+            run.kubectl = saved
+        body = json.loads(seen[0][-1])
+        self.assertEqual({"name": run.MAIN_CONTAINER, "image": "example.com/x:none"}, body["spec"]["decoder"]["leader"]["runner"])
+        self.assertNotIn("runner", body["spec"]["engine"])
+        self.assertNotIn("leader", body["spec"]["engine"])

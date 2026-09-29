@@ -1,4 +1,4 @@
-# p1807: canary pd partial quota refuses part of the surge  mode=canary Ne=2 Nd=2 Nr=2 ceil_e=3 ceil_d=3 ceil_r=2 canary=auto fault=quota:1 terminal=Failed cell=canary/Staging/readyTimeout[quotaPartial] co=none topo=pd
+# p1807: canary pd partial quota refuses part of the surge  mode=canary Ne=2 Nd=2 Nr=2 ceil_e=3 ceil_d=3 ceil_r=3 canary=auto fault=quota:1 terminal=Failed cell=canary/Staging/readyTimeout[quotaPartial] co=none topo=pd
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p1807 }

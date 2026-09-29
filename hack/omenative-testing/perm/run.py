@@ -183,6 +183,9 @@ def migrate_settle_budget(n_insts):
     return min(MAX_BUDGET_S, MIGRATE_SETTLE_BASE_S + MIGRATE_SETTLE_PER_INST_S * max(1, n_insts))
 
 IN_PLACE_TYPES = {"InPlaceIfPossible", "InPlaceOnly"}
+# The fixture runtimes' main container. A leader runner override must name
+# it (the CRD requires a name there), and readiness is read off it.
+MAIN_CONTAINER = "ome-container"
 # Strategies whose replacement is up before the source leaves serving: a surge
 # drains only after its replacement is Ready, an in-place op returns the same
 # pod. Everything else (RecreatePod) is drain-first: nothing comes up until
@@ -2174,7 +2177,7 @@ def _apply_event(ctx, ev):
     labels = meta.get("labels", {}) or {}
     annos = meta.get("annotations", {}) or {}
     cstats = obj.get("status", {}).get("containerStatuses") or []
-    ready = any(cs.get("name") == "ome-container" and cs.get("ready") for cs in cstats)
+    ready = any(cs.get("name") == MAIN_CONTAINER and cs.get("ready") for cs in cstats)
     comp = labels.get("component", "?")
     rev = labels.get(REV_LABEL, "")
     deletion = meta.get("deletionTimestamp")
@@ -2321,12 +2324,14 @@ def _bump_rev(ctx, bumped, val=TRIGGER_VAL, extra=None, image=None, image_comps=
         for c in sorted(bumped):
             if image_comps and c not in image_comps:
                 continue
-            runner = {"image": image} if image else None
             # A multi-node component renders its leader's runner, so the
-            # override has to sit under leader: for the pods to pick it up.
+            # override has to sit under leader:, and a leader runner must
+            # name the container it overrides.
             if ctx["pods_per_inst"].get(c, 1) > 1:
+                runner = {"name": MAIN_CONTAINER, "image": image} if image else None
                 patch["spec"][c]["leader"] = {"runner": runner}
             else:
+                runner = {"image": image} if image else None
                 patch["spec"][c]["runner"] = runner
     rr = kubectl("-n", NS, "patch", "isvc", ctx["case_id"], "--type=merge", "-p", json.dumps(patch))
     ctx["trigger_ts"] = time.time()
@@ -4763,6 +4768,20 @@ def _canary_pairing_surface(case_id, ctx, hdr, target, group, primary, xcheck, v
     return verdict
 
 
+def _canary_pods_settled(expect, phase, new_by_comp, want, stranded):
+    """Whether the pods have caught up with the terminal the phase reports,
+    for EVERY bumped member: a rollback has drained each one to zero canary
+    Instances, a completion has each one fully on the canary revision (and
+    nothing on a pre-re-target revision), a park is the phase alone. The
+    secondaries drain after the observed primary, so judging on the primary
+    alone reads a drain still in flight as a defect."""
+    if expect == "RolledBack":
+        return all(n == 0 for n in new_by_comp.values())
+    if expect == "Failed":
+        return phase == "Failed"
+    return all(n == want[c] for c, n in new_by_comp.items()) and not stranded
+
+
 def _canary_scale(ctx):
     """verb=scale: re-target replicas mid-canary to the scale_e=/scale_d=
     targets. The convergence target moves with them; the capacity floor keeps
@@ -5070,13 +5089,9 @@ def _canary(case_id, yaml_file, desc, hdr):
         # old-pod drain finishes asynchronously a few seconds later. Wait for the
         # pods to actually settle (full roll, or 0 canary for a rollback) so we
         # don't snapshot mid-drain.
-        cur_new, _ = _inst_rev_split(ctx, primary)
-        if expect == "RolledBack":
-            pods_settled = (cur_new == 0)
-        elif expect == "Failed":
-            pods_settled = (phase == "Failed")   # parked at the failed step; pod count is whatever it reached
-        else:                                    # Stable
-            pods_settled = (cur_new == want[primary]) and (pre_final is None or not stranded())
+        new_by_comp = {c: _inst_rev_split(ctx, c)[0] for c in group}
+        pods_settled = _canary_pods_settled(expect, phase, new_by_comp, want,
+                                            pre_final is not None and bool(stranded()))
         if proto2_target is not None and not p2_fired:
             pods_settled = False   # the re-target must land before convergence counts
         if phase == expect and pods_settled:
@@ -5518,7 +5533,7 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
             name = meta.get("name", "?")
             labels = meta.get("labels", {}) or {}
             cstats = obj.get("status", {}).get("containerStatuses") or []
-            ready = any(cs.get("name") == "ome-container" and cs.get("ready") for cs in cstats)
+            ready = any(cs.get("name") == MAIN_CONTAINER and cs.get("ready") for cs in cstats)
             if ev_type == "DELETED":
                 if meta.get("uid"):
                     inv["dead_uids"].add(meta["uid"])   # stale-endpoint invariant
@@ -6004,7 +6019,7 @@ def run_case(case_id):
             cstats = obj.get("status", {}).get("containerStatuses") or []
             ready = False
             for cs in cstats:
-                if cs.get("name") == "ome-container":
+                if cs.get("name") == MAIN_CONTAINER:
                     ready = bool(cs.get("ready"))
                     break
 

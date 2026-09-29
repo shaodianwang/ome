@@ -338,9 +338,13 @@ one side of it:
   park.
 
 A deliberately slow side needs no knob: the case YAML sets
-`runner.env: [{ name: TEST_STARTUP_DELAY, value: "75" }]` on that Component
+`runner.env: [{ name: TEST_STARTUP_DELAY, value: "40" }]` on that Component
 (the runner merges into the runtime container by env name), so its canary
-pods turn Ready later than the other side's.
+pods turn Ready later than the other side's. Keep the delay under the fixture
+runtime's startup probe budget (30 × 2 s = 60 s), or the kubelet restarts the
+container before it binds. On a multi-node Component the override sits under
+`leader.runner` and must carry `name: ome-container`; the CRD requires the
+name there.
 
 ### Canary analysis (`analysis=…`, OEP-0015.2)
 

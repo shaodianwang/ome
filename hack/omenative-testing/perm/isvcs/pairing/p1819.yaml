@@ -10,7 +10,7 @@ spec:
     minReplicas: 1
     maxReplicas: 1
     annotations: { ome.io/deploymentMode: OMENative }
-    leader: { runner: { env: [ { name: TEST_STARTUP_DELAY, value: "75" } ] } }
+    leader: { runner: { name: ome-container, env: [ { name: TEST_STARTUP_DELAY, value: "40" } ] } }
     worker: { size: 1 }
     lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
   decoder:

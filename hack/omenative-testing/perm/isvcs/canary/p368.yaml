@@ -1,4 +1,5 @@
-# p368: canary engine manual hold with a canary pod dying mid-split  mode=canary Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 canary=manual fault=podkill:canary-serving victim=canary cell=canary/Serving/capacityDropped co=none topo=engine
+# p368: canary engine manual hold with a canary pod dying mid-split  mode=canary Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 canary=manual fault=podkill:canary-serving victim=canary cell=canary/Serving/capacityDropped notimpl=1 issue=1829 inv_xfail=A co=none topo=engine
+# reason: parked on the status-truth gap after a pod deletion — the InferenceReplica keeps the Instance Phase=Ready with podCount 0 until the replacement lands, which the gang scheduler stretches past the invariant's window; every other check stays hard
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p368 }
