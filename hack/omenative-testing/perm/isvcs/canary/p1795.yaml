@@ -1,5 +1,4 @@
-# p1795: canary pd pairing swap on an asymmetric fleet  mode=canary Ne=4 Nd=2 Nr=0 ceil_e=5 ceil_d=3 ceil_r=0 canary=auto proto=pair-v2 ratio_tol=25 xcheck=sectraffic notimpl=1 issue=1346 cell=canary/Idle/pairing[asymmetric] co=none topo=pd
-# reason: parked on the canary-secondary traffic gap — the secondaries publish no live traffic targets under a canary group, so their pairing targets cannot be checked until the issue is fixed; pods, Services, convergence and the pair-alive invariant stay hard
+# p1795: canary pd pairing swap on an asymmetric fleet  mode=canary Ne=4 Nd=2 Nr=0 ceil_e=5 ceil_d=3 ceil_r=0 canary=auto proto=pair-v2 ratio_tol=25 cell=canary/Idle/pairing[asymmetric] co=none topo=pd
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p1795 }

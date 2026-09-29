@@ -1,5 +1,4 @@
-# p817: pairing swap v1→v2 through an auto canary group 50/100 — the staged canary carries the cohort change, traffic publishes both protocols mid-flight  mode=pairing proto=nixl-v2 canary=auto Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=3 ceil_r=0 co=none topo=pd notimpl=1 issue=1346
-# reason: parked on the canary-secondary traffic gap — the canary engine writes traffic for the PRIMARY only and coordination drops canary-owned Components, so the decoder's pairing targets cannot exist until the issue is fixed; the roll itself converges and every other surface passes
+# p817: pairing swap v1→v2 through an auto canary group 50/100 — the staged canary carries the cohort change, traffic publishes both protocols mid-flight  mode=pairing proto=nixl-v2 canary=auto Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=3 ceil_r=0 co=none topo=pd
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p817 }

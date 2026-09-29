@@ -1,5 +1,4 @@
-# p1789: canary pd pairing swap through a three-step canary  mode=canary Ne=4 Nd=4 Nr=0 ceil_e=5 ceil_d=5 ceil_r=0 canary=auto proto=pair-v2 xcheck=sectraffic notimpl=1 issue=1346 cell=canary/Idle/pairing[threeStep] co=none topo=pd
-# reason: parked on the canary-secondary traffic gap — the secondaries publish no live traffic targets under a canary group, so their pairing targets cannot be checked until the issue is fixed; pods, Services, convergence and the pair-alive invariant stay hard
+# p1789: canary pd pairing swap through a three-step canary  mode=canary Ne=4 Nd=4 Nr=0 ceil_e=5 ceil_d=5 ceil_r=0 canary=auto proto=pair-v2 cell=canary/Idle/pairing[threeStep] co=none topo=pd
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p1789 }

@@ -1,5 +1,4 @@
-# p1944: canary pd pairing change while draining re-targets both sides  mode=canary Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=3 ceil_r=0 canary=auto bump=engine,decoder during=canary-draining verb=pairing pairto=pair-v2 cell=canary/Draining/pairing xcheck=sectraffic notimpl=1 issue=1346 co=none topo=pd
-# reason: parked on the canary-secondary traffic gap — the secondaries publish no live traffic targets under a canary group, so their pairing targets cannot be checked until the issue is fixed; pods, Services, convergence and the pair-alive invariant stay hard
+# p1944: canary pd pairing change while draining re-targets both sides  mode=canary Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=3 ceil_r=0 canary=auto bump=engine,decoder during=canary-draining verb=pairing pairto=pair-v2 cell=canary/Draining/pairing co=none topo=pd
 # The drain window is what makes Draining observable: without scaleDownDelaySeconds the final step's Promoting lasts one reconcile, shorter than the sampler.
 apiVersion: ome.io/v1beta1
 kind: InferenceService

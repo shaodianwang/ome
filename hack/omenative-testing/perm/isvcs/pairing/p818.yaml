@@ -1,5 +1,4 @@
-# p818: pairing swap v1→v2 through a 3-step auto canary 25/50/100 at N=4 — the step machine paces the cohort flip  mode=pairing proto=nixl-v2 canary=auto Ne=4 Nd=4 Nr=0 ceil_e=5 ceil_d=5 ceil_r=0 co=none topo=pd notimpl=1 issue=1346
-# reason: parked on the canary-secondary traffic gap — the canary engine writes traffic for the PRIMARY only and coordination drops canary-owned Components, so the decoder's pairing targets cannot exist until the issue is fixed; the roll itself converges and every other surface passes
+# p818: pairing swap v1→v2 through a 3-step auto canary 25/50/100 at N=4 — the step machine paces the cohort flip  mode=pairing proto=nixl-v2 canary=auto Ne=4 Nd=4 Nr=0 ceil_e=5 ceil_d=5 ceil_r=0 co=none topo=pd
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p818 }
