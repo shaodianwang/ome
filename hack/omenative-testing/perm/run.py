@@ -400,6 +400,7 @@ def get_spec_info(case_id):
             "order": g.get("order", []) or [],
             "policy": (str(can.get("promotion") or "").lower() or None),
             "steps": can.get("steps", []) or [],
+            "readyTimeout": can.get("readyTimeout"),
         }
         info["canary_groups"].append(cg)
         if info["canary"] is None:
@@ -1307,9 +1308,39 @@ CANARY_HOOKS = {"canary-staging", "canary-serving", "canary-prehold", "canary-dr
 FAULT_PHASES = {"rotating", "migrating", "settling"} | CANARY_HOOKS
 CANARY_VERBS = {"pause", "pause-freeze", "promote", "promote-stale", "rebump", "rebump-fix",
                 "rollback", "timeout-clear", "timeout-set", "scale", "repin", "resume",
-                "planedit", "planedit-repin", "groupremove"}
-# The step a mid-run plan edit inserts; a pinned run never visits it.
+                "planedit", "planedit-repin", "groupremove", "runlost", "pairing", "quotalift"}
+# The step a plan edit inserts: a pinned run never visits it, the next run does.
 PLANEDIT_TRAFFIC = 75
+# Verbs a case may leave on the idle service before the bump (the grid's
+# Idle column). A lost run is not one of them: at Idle there is no run to
+# lose; that cell needs an invalid policy fixture instead.
+PREARM_VERBS = {"rollback", "pause", "promote", "repin", "resume", "timeout-set",
+                "planedit", "groupremove", "scale"}
+# Verbs that end a case whose second verb leaves a pre-step hold in place.
+RELEASE_VERBS = {"promote", "resume"}
+# Delay between the second verb and the release: the window the second
+# verb's own claim (the hold survived it) needs to be observed.
+RELEASE_AFTER_S = int(20 * TIMEOUT_MULT)
+# Verbs whose claim is a re-target: a new canary hash must follow them.
+RETARGET_VERBS = {"rebump", "rebump-fix", "pairing"}
+# Hooks where a lost run holds the ladder in place; at the terminals the
+# loss is inert and the ladder still ends.
+RUNLOST_HOLD_HOOKS = {"canary-staging", "canary-serving", "canary-prehold", "canary-draining"}
+# How long a lost run must stay unpinned before the case ends as held.
+RUNLOST_HOLD_S = int(45 * TIMEOUT_MULT)
+# Phases only a canary run projects; a bump with no group shows none.
+CANARY_RUN_PHASES = {"Pending", "Canarying", "Paused", "Promoting", "RollingBack", "RolledBack", "Failed"}
+# Status is sampled every 2 s, so a hold's start and end are each observed
+# up to one poll late: the slack on an observed soak or deadline.
+SOAK_OBSERVE_SLACK_S = 5.0
+# Latency between a ready-timeout deadline and the observed park: the
+# capacity wait anchors a pass after the bump and the park lands on a requeue.
+PARK_LATENCY_S = int(45 * TIMEOUT_MULT)
+RESUME_ANNO = "ome.io/rollout-resume"
+REPIN_ANNO = "ome.io/rollout-repin"
+READY_TIMEOUT_ANNO = "ome.io/rollout-ready-timeout"
+# JSON pointer of the pinned run in the status subresource.
+ACTIVE_RUN_POINTER = "/status/rollout/activeRun"
 
 
 def _canary_hook(phase, can=None, nsteps=None):
@@ -1341,7 +1372,7 @@ def _rollback_probe_gate(verb, during, verb_fired, rebump_retargeted):
         return True
     if not verb_fired:
         return False
-    return verb not in ("rebump", "rebump-fix") or rebump_retargeted
+    return verb not in RETARGET_VERBS or rebump_retargeted
 
 
 def _promote_verb_advanced(verb, during, verb_fired, advanced_at):
@@ -1385,6 +1416,149 @@ def _hook_due(spec, hook, step):
     if not hook or want != hook:
         return False
     return not at or (step is not None and str(step) == at)
+
+
+def _duration_s(v):
+    """Seconds in a Go-style duration (45s, 3m, 1h); None when unparseable."""
+    m = re.match(r"^([0-9]+(?:\.[0-9]+)?)(s|m|h)$", str(v or ""))
+    if not m:
+        return None
+    return float(m.group(1)) * {"s": 1, "m": 60, "h": 3600}[m.group(2)]
+
+
+def _step_soak_s(steps, idx):
+    """The timed pause of ladder step idx, in seconds (0 when untimed)."""
+    try:
+        st = steps[idx]
+    except (IndexError, TypeError):
+        return 0.0
+    pause = st.get("pause") if isinstance(st, dict) else None
+    return (_duration_s((pause or {}).get("duration")) if isinstance(pause, dict) else None) or 0.0
+
+
+def _step_new_count(step, n):
+    """Ready canary Instances a step asks for: its capacity as a count or as a
+    percentage of the fleet, rounded up and clamped to the fleet."""
+    cap = (step or {}).get("capacity") if isinstance(step, dict) else None
+    if isinstance(cap, int):
+        return max(0, min(n, cap))
+    s = str(cap or "").strip()
+    try:
+        if s.endswith("%"):
+            return max(0, min(n, -(-n * int(s[:-1]) // 100)))
+        return max(0, min(n, int(s)))
+    except ValueError:
+        return n
+
+
+def _prearm_arms_canary(prearm):
+    """Whether the bump after a pre-armed verb still opens a canary run. A
+    group removal leaves nothing to arm: the bump is a plain rollout."""
+    return prearm != "groupremove"
+
+
+def _prearm_pause_held(phases_before_lift, max_step_before_lift):
+    """A pause left on the idle service holds the arm: until the lift the
+    ladder may stage but never serves a split or moves past step 0."""
+    return (not (set(phases_before_lift) & {"Canarying", "Paused", "Promoting"})
+            and (max_step_before_lift or 0) == 0)
+
+
+def _first_hold_served(first_hold_wait, soak_s):
+    """A stale promote token left on the idle service is ignored: the
+    ladder's first timed hold runs its full soak (within poll slack) instead
+    of being skipped. Vacuous for an untimed first step."""
+    if not soak_s:
+        return True
+    return first_hold_wait is not None and first_hold_wait >= soak_s - SOAK_OBSERVE_SLACK_S
+
+
+def _plan_edit_served_expected(prearmed):
+    """Which way a plan edit's inserted step cuts: a pinned run never serves
+    it (a mid-run edit), the next run pins the edited plan and does (an edit
+    left on the idle service)."""
+    return bool(prearmed)
+
+
+def _park_matches_budget(park_wait_s, budget_s, plan_budget_s=None):
+    """The park arrived at the annotation's budget (within the park's landing
+    latency) and, when the plan's own budget differs, nearer to the
+    annotation's than to the plan's: the arm inherited the annotation."""
+    if park_wait_s is None or budget_s is None:
+        return False
+    if not (budget_s - SOAK_OBSERVE_SLACK_S <= park_wait_s <= budget_s + PARK_LATENCY_S):
+        return False
+    if plan_budget_s is None or plan_budget_s == budget_s:
+        return True
+    return abs(park_wait_s - budget_s) < abs(park_wait_s - plan_budget_s)
+
+
+def _no_canary_phase(phases):
+    """A bump with no canary group is a plain rollout: none of the run's
+    phases may appear after it."""
+    return not (set(phases) & CANARY_RUN_PHASES)
+
+
+def _release_due(release, verb2_fired, verb2_ts, released, now, after_s):
+    """The release fires once, after_s seconds after the second verb."""
+    return bool(release) and verb2_fired and not released and now - verb2_ts >= after_s
+
+
+def _prehold_survived(step_at_verb2, hook_at_release, step_at_release):
+    """The second verb left the pre-step hold in place: when the release
+    fires the ladder still sits held at the step the verb found it on."""
+    return (step_at_verb2 is not None and step_at_release == step_at_verb2
+            and hook_at_release == "canary-prehold")
+
+
+def _runlost_hold_expected(during):
+    """Whether a lost run holds the ladder at this hook: the live states
+    hold; a finished, rolled-back or parked ladder is unaffected."""
+    return str(during or "").partition("@")[0] in RUNLOST_HOLD_HOOKS
+
+
+def _runlost_held(step_at_verb, steps_unpinned, step_at_repin):
+    """No step moved while no run was pinned, and a re-pinned run resumed at
+    the same step (adopted in place, not restarted)."""
+    if step_at_verb is None:
+        return False
+    if any(s != step_at_verb for s in steps_unpinned):
+        return False
+    return step_at_repin is None or step_at_repin == step_at_verb
+
+
+def _runlost_acknowledged(events):
+    """The event reason that acknowledges a lost run, from (reason, message)
+    pairs: the executor's hold, or the run layer adopting the in-flight
+    ladder in place when it re-pinned before an executor pass saw the loss."""
+    for reason, msg in events:
+        if reason == "CanaryRunLost":
+            return reason
+        if reason == "RolloutPlanRepinned" and "adopted" in (msg or ""):
+            return reason
+    return None
+
+
+def _retargeted_by_hash(canary_hash, hashes_at_verb):
+    """A re-target verb's proof: the run's canary hash left the set of hashes
+    that existed when the verb fired."""
+    return bool(canary_hash) and canary_hash not in hashes_at_verb
+
+
+def _proto2_hook(during, during2, verb2):
+    """The hook a proto2= re-target fires at: during2= when no second verb
+    speaks for it, else during= ("" = the first Ready canary pod)."""
+    if during2 and not verb2:
+        return during2
+    return during or ""
+
+
+def _park_survived_capacity(capacity_landed, step_at_verb, hook_after, step_after):
+    """Capacity that lands after the deadline does not un-park the canary:
+    it still reads Failed at the same step once the capacity is there
+    (resume is the exit)."""
+    return (capacity_landed and step_at_verb is not None
+            and hook_after == "canary-failed" and step_after == step_at_verb)
 FAULT_TARGETS = {"source"}
 # Marker label stamped on a node the harness cordons, so batch.py's end-of-run
 # sweep can find (and uncordon) ONLY harness cordons — never an operator's.
@@ -1912,11 +2086,11 @@ HDR_VALIDATORS = {
     # canary reaches the during= hook; verbhold= is how long a pause verb holds
     # before it is lifted; bump= names the group members to bump (default: the
     # whole group); img= with bump= gives the bumped revision an unstartable
-    # image; terminal= overrides the expected terminal phase; prearm=rollback
-    # leaves a rollback request on the idle ISVC before the bump; victim=
-    # aims a podkill at the stable or the canary revision; skipsoak= states the
-    # timed step's pause so a verb that skips it can be asserted; cell= names
-    # every grid cell the case proves, comma-separated.
+    # image; terminal= overrides the expected terminal phase; prearm=<verb>
+    # applies a verb to the idle ISVC before the bump; victim= aims a podkill
+    # at the stable or the canary revision; skipsoak= states the timed step's
+    # pause so a verb that skips it can be asserted; cell= names every grid
+    # cell the case proves, comma-separated.
     "verb": lambda v: v in CANARY_VERBS,
     "verbhold": _int_ge0,
     # A second verb at a second hook (fires once the first verb has fired);
@@ -1926,7 +2100,13 @@ HDR_VALIDATORS = {
     "timeout": lambda v: re.match(r"^[0-9]+(s|m|h)$", str(v)) is not None,
     "bump": lambda v: bool(str(v)) and all(m in COMPS for m in str(v).split(",")),
     "terminal": lambda v: v in {"Stable", "RolledBack", "Failed"},
-    "prearm": lambda v: v == "rollback",
+    "prearm": lambda v: v in PREARM_VERBS,
+    # release= fires that verb releaseafter= seconds after the second verb,
+    # so a case whose second verb leaves a pre-step hold in place can end;
+    # pairto= is the protocol verb=pairing patches in at its hook.
+    "release": lambda v: v in RELEASE_VERBS,
+    "releaseafter": _int_ge0,
+    "pairto": _pairing_token,
     "victim": lambda v: v in {"stable", "canary"},
     # victimcomp= narrows a podkill to one Component (one side of a PD pair);
     # imgcomp= narrows img= to one bumped member; ratio_tol= is invariant E's
@@ -2058,7 +2238,7 @@ def validate_case_file(path):
                                    "runtimerev": {"rollout"}}.get(mode, set()):
         errs.append(f"{path}:1: during={during} not supported for mode={mode}")
     for k in ("verb", "verbhold", "bump", "terminal", "prearm", "skipsoak", "cell", "nophase", "verb2", "during2", "timeout",
-              "imgcomp", "ratio_tol", "xcheck"):
+              "imgcomp", "ratio_tol", "xcheck", "release", "releaseafter", "pairto"):
         if k in fields and mode != "canary":
             errs.append(f"{path}:1: {k}= is a canary-mode knob (mode=canary)")
     if "verb" in fields and not _canary_hook_ok(during):
@@ -2068,8 +2248,9 @@ def validate_case_file(path):
     if str(fields.get("verb", "")) == "timeout-set" or str(fields.get("verb2", "")) == "timeout-set":
         if "timeout" not in fields:
             errs.append(f"{path}:1: verb=timeout-set needs timeout=<duration>")
-    if "timeout" in fields and "timeout-set" not in (str(fields.get("verb", "")), str(fields.get("verb2", ""))):
-        errs.append(f"{path}:1: timeout= is the value verb=timeout-set writes")
+    if "timeout" in fields and "timeout-set" not in (str(fields.get("verb", "")), str(fields.get("verb2", "")),
+                                                     str(fields.get("prearm", ""))):
+        errs.append(f"{path}:1: timeout= is the value verb=timeout-set (or prearm=timeout-set) writes")
     if "victim" in fields and not str(fields.get("fault", "")).startswith("podkill:"):
         errs.append(f"{path}:1: victim= aims a podkill (needs fault=podkill:<hook>)")
     if "victimcomp" in fields and not str(fields.get("fault", "")).startswith("podkill:"):
@@ -2086,10 +2267,36 @@ def validate_case_file(path):
             errs.append(f"{path}:1: proto2= re-targets a proto= transition (needs proto=)")
         if "proto2" in fields and fields["proto2"] == fields.get("proto"):
             errs.append(f"{path}:1: proto2= must differ from proto= (a mid-roll re-target)")
-        if str(fields.get("verb", "")) == "scale" and not any(k in fields for k in ("scale_e", "scale_d")):
-            errs.append(f"{path}:1: verb=scale needs scale_e=/scale_d= (the mid-canary replica targets)")
-        if any(k in fields for k in ("scale_e", "scale_d")) and str(fields.get("verb", "")) != "scale":
-            errs.append(f"{path}:1: scale_e=/scale_d= in canary mode fire through verb=scale during=<hook>")
+        scale_owners = (str(fields.get("verb", "")), str(fields.get("verb2", "")), str(fields.get("prearm", "")))
+        if "scale" in scale_owners and not any(k in fields for k in ("scale_e", "scale_d")):
+            errs.append(f"{path}:1: verb=scale needs scale_e=/scale_d= (the mid-canary replica targets), as verb2=scale and prearm=scale do")
+        if any(k in fields for k in ("scale_e", "scale_d")) and "scale" not in scale_owners:
+            errs.append(f"{path}:1: scale_e=/scale_d= in canary mode fire through verb=scale during=<hook> (or verb2=scale during2=<hook>), or prearm=scale")
+        prearm = str(fields.get("prearm", ""))
+        verbs = {str(fields.get(k, "")) for k in ("verb", "verb2")} - {""}
+        if prearm == "timeout-set" and "timeout" not in fields:
+            errs.append(f"{path}:1: prearm=timeout-set needs timeout=<duration> (the budget the arm inherits)")
+        if prearm == "scale" and not any(k in fields for k in ("scale_e", "scale_d")):
+            errs.append(f"{path}:1: prearm=scale needs scale_e=/scale_d= (the fleet the arm counts)")
+        if prearm == "planedit" and verbs & {"planedit", "planedit-repin"}:
+            errs.append(f"{path}:1: prearm=planedit (the next run serves the inserted step) and a mid-run plan edit (it never does) assert opposite directions")
+        if "release" in fields and ("verb2" not in fields or str(fields.get("during2", "")).partition("@")[0] != "canary-prehold"):
+            errs.append(f"{path}:1: release= ends a case whose second verb leaves a pre-step hold in place (needs verb2= and during2=canary-prehold)")
+        if "releaseafter" in fields and "release" not in fields:
+            errs.append(f"{path}:1: releaseafter= is the delay before release= fires (needs release=)")
+        if "quotalift" in verbs and not str(fields.get("fault", "")).startswith("quota:"):
+            errs.append(f"{path}:1: verb=quotalift lifts the case's quota fault (needs fault=quota:<n>)")
+        if "pairing" in verbs:
+            if "pairto" not in fields:
+                errs.append(f"{path}:1: verb=pairing needs pairto=<token|clear> (the protocol it patches in)")
+            if "bump" not in fields:
+                errs.append(f"{path}:1: verb=pairing re-targets a bump-triggered canary (needs bump=)")
+            if fields.get("Ne", 0) == 0 or fields.get("Nd", 0) == 0:
+                errs.append(f"{path}:1: verb=pairing re-mints engine and decoder together — needs Ne>0 and Nd>0")
+        if "pairto" in fields and "pairing" not in verbs:
+            errs.append(f"{path}:1: pairto= is the protocol verb=pairing patches in (needs verb=pairing or verb2=pairing)")
+        if "during2" in fields and "verb2" not in fields and "proto2" not in fields:
+            errs.append(f"{path}:1: during2= without verb2= is the proto2= re-target hook (needs proto2=)")
         if "imgcomp" in fields and "img" not in fields:
             errs.append(f"{path}:1: imgcomp= narrows img= (needs img=)")
         if "imgcomp" in fields and "bump" in fields and str(fields["imgcomp"]) not in str(fields["bump"]).split(","):
@@ -3533,6 +3740,21 @@ def _isvc_annotations(case_id):
         return {}
 
 
+def _isvc_events(case_id):
+    """(reason, message) of every event recorded on the case's
+    InferenceService, oldest first."""
+    r = kubectl("-n", NS, "get", "events", "--field-selector",
+                f"involvedObject.kind=InferenceService,involvedObject.name={case_id}", "-o", "json")
+    if r.returncode != 0:
+        return []
+    try:
+        items = json.loads(r.stdout).get("items", []) or []
+    except Exception:
+        return []
+    items.sort(key=lambda it: str(it.get("lastTimestamp") or it.get("eventTime") or ""))
+    return [(str(it.get("reason") or ""), str(it.get("message") or "")) for it in items]
+
+
 def _migrate(case_id, yaml_file, desc, hdr):
     """Set an explicit migration-request annotation; assert the audit ledger
     reaches Completed, a replacement Instance surges onto a different node, the
@@ -4835,6 +5057,16 @@ def _canary_verb(ctx, verb, canary_hash, primary):
             kubectl("-n", NS, "annotate", "isvc", cid, "ome.io/rollout-repin=now", "--overwrite")
     elif verb == "groupremove":
         kubectl("-n", NS, "patch", "isvc", cid, "--type=merge", "-p", json.dumps({"spec": {"rollout": {"groups": []}}}))
+    elif verb == "runlost":
+        _remove_active_run(ctx)
+    elif verb == "pairing":
+        # The protocol rides every engine and decoder revision: the patch
+        # re-mints both, a new target for the whole pair at once.
+        ok, msg = _pairing_patch(cid, ctx.get("pairto_target") or "")
+        if not ok:
+            ctx.setdefault("verb_errors", []).append(f"pairing patch denied: {msg[:120]}")
+    elif verb == "quotalift":
+        _lift_quota(cid)
     note = f"verb fired: {verb} at {ctx.get('canary_hook')} step={ctx.get('canary_step')}"
     ctx.setdefault("verb_notes", []).append(note)
     print(f"    ⚡ {note}")
@@ -4927,19 +5159,82 @@ def _canary_plan_edit(ctx, shrink=False):
         ctx.setdefault("verb_errors", []).append(f"plan edit: patch failed: {rr.stderr.strip()[:120]}")
 
 
+def _scale_patch(case_id, targets):
+    """Re-target Components' replicas (min = max = target). Returns (ok, last
+    stderr line)."""
+    patch = {"spec": {c: {"minReplicas": t, "maxReplicas": t} for c, t in sorted(targets.items())}}
+    rr = kubectl("-n", NS, "patch", "isvc", case_id, "--type=merge", "-p", json.dumps(patch))
+    return rr.returncode == 0, (rr.stderr.strip().splitlines() or [""])[-1]
+
+
 def _canary_scale(ctx):
     """verb=scale: re-target replicas mid-canary to the scale_e=/scale_d=
     targets. The convergence target moves with them; the capacity floor keeps
     min(start, target) as its basis, as the pairing handler does."""
     targets = ctx.get("scale_to") or {}
-    patch = {"spec": {c: {"minReplicas": t, "maxReplicas": t} for c, t in sorted(targets.items())}}
-    rr = kubectl("-n", NS, "patch", "isvc", ctx["case_id"], "--type=merge", "-p", json.dumps(patch))
-    if rr.returncode != 0:
-        ctx.setdefault("verb_errors", []).append(f"scale patch failed: {rr.stderr.strip()[:120]}")
+    ok, msg = _scale_patch(ctx["case_id"], targets)
+    if not ok:
+        ctx.setdefault("verb_errors", []).append(f"scale patch failed: {msg[:120]}")
         return
     for c, t in targets.items():
         ctx["want"][c] = t
         ctx["N"][c] = min(ctx["N"][c], t)
+
+
+def _remove_active_run(ctx):
+    """verb=runlost: drop the pinned run from the status subresource, which is
+    how a lost run looks to the executor. With no run pinned at the hook there
+    is nothing to lose; the verb records that and counts as fired."""
+    cid = ctx["case_id"]
+    if not (fetch_status(cid).get("rollout") or {}).get("activeRun"):
+        ctx.setdefault("verb_notes", []).append(f"runlost: no run pinned at {ctx.get('canary_hook')}; nothing to remove")
+        return
+    rr = kubectl("-n", NS, "patch", "isvc", cid, "--subresource=status", "--type=json",
+                 "-p", json.dumps([{"op": "remove", "path": ACTIVE_RUN_POINTER}]))
+    if rr.returncode != 0:
+        ctx.setdefault("verb_errors", []).append(f"runlost: status patch failed: {rr.stderr.strip()[:120]}")
+
+
+def _wait_fleet_at(ctx, targets, budget):
+    """Block until every Component in targets has exactly its target of alive,
+    fully serving Instances: the pre-bump fleet a scale re-shapes."""
+    t0 = time.time()
+    while time.time() - t0 < budget and not ctx["closed"]:
+        _read_one(ctx)
+        serving = _serving_instance_counts(ctx["pod_state"], ctx["pods_per_inst"])
+        alive = defaultdict(set)
+        for pod in ctx["pod_state"].values():
+            if pod and pod["alive"]:
+                alive[pod["comp"]].add(pod.get("inst", "0"))
+        if all(serving.get(c, 0) == t and len(alive.get(c, ())) == t for c, t in targets.items()):
+            return True
+    return False
+
+
+def _prearm(ctx, verb, primary, scale_to):
+    """Apply a verb to the idle service before the bump (the grid's Idle
+    column) through the same writes the hook verbs use. The stable revision's
+    hash stands in for the canary hash a promote or resume names: it is the
+    only revision an idle service has, and admission checks the token's
+    shape, not its target. A scale waits for the re-shaped fleet to settle so
+    the arm counts it. Returns (ok, message)."""
+    ctx["canary_hook"], ctx["canary_step"] = "idle", None
+    if verb == "scale":
+        ok, msg = _scale_patch(ctx["case_id"], scale_to)
+        if not ok:
+            return False, f"prearm scale patch denied: {msg[:160]}"
+        budget = min(MAX_BUDGET_S, INIT_BASE_S + INIT_PER_POD_S * sum(scale_to.values()))
+        if not _wait_fleet_at(ctx, scale_to, budget):
+            return False, f"prearm scale: the fleet never settled at {scale_to} within {budget}s"
+        for c, t in scale_to.items():
+            ctx["N"][c] = t
+        note = "verb fired: scale at idle " + " ".join(f"{c}→{t}" for c, t in sorted(scale_to.items()))
+        ctx.setdefault("verb_notes", []).append(note)
+        print(f"    ⚡ {note}")
+        return True, ""
+    stable = sorted(ctx["old_hashes"] or [""])[0]
+    _canary_verb(ctx, verb, stable, primary)
+    return True, ""
 
 
 def _canary(case_id, yaml_file, desc, hdr):
@@ -5025,16 +5320,26 @@ def _canary(case_id, yaml_file, desc, hdr):
     image_comps = {str(hdr["imgcomp"])} if hdr.get("imgcomp") else None
     ratio_tol = int(hdr.get("ratio_tol") or 50) / 100.0
     xcheck = str(hdr.get("xcheck") or "")
-    if hdr.get("prearm") == "rollback":
-        # A rollback request left on the idle service before any canary exists.
-        kubectl("-n", NS, "annotate", "isvc", case_id, f"{ROLLBACK_ANNO}=true", "--overwrite")
-        print("    prearm: ome.io/rollout-rollback=true set on the idle service")
+    # A verb left on the idle service before the bump (the Idle column); a
+    # release for a second verb that leaves a pre-step hold in place; the
+    # protocol a pairing verb patches in at its hook.
+    prearm = str(hdr.get("prearm") or "")
+    release = str(hdr.get("release") or "")
+    release_after = int(hdr["releaseafter"]) if hdr.get("releaseafter") is not None else RELEASE_AFTER_S
+    pairto_target = None if hdr.get("pairto") is None else ("" if str(hdr["pairto"]) == "clear" else str(hdr["pairto"]))
+    ctx["pairto_target"] = pairto_target
     expect, expect_rollback = _canary_expect(terminal, analysis_mode, on_inconclusive, do_rollback)
-    nsteps = len(cinfo.get("steps") or []) or 2
     primary = _canary_primary(ctx, cgroup)
     if not primary:
         return _write_fail(case_id, desc, hdr, "NO_PRIMARY", "no configured component to canary")
     N = ctx["N"]
+    if prearm:
+        ok, msg = _prearm(ctx, prearm, primary, scale_to)
+        if not ok:
+            return _write_fail(case_id, desc, hdr, "PREARM_FAIL", msg)
+        ctx["prearm_annos"] = _isvc_annotations(case_id)   # what still lingers when the bump lands
+    # A plan edit left on the idle service is the plan the next run pins.
+    nsteps = (len(cinfo.get("steps") or []) or 2) + (1 if prearm == "planedit" else 0)
     # Bump EVERY configured member of the canary group, not just the primary — a
     # coupled multi-component canary (e.g. [engine, decoder]) must roll all
     # members for the secondary-capacity gate to be genuinely exercised (mirrors
@@ -5103,14 +5408,34 @@ def _canary(case_id, yaml_file, desc, hdr):
     rejected = None     # status.canary.rolledBackRevisionHash once a rollback is recorded
     verb_fired = verb_lifted = rebump_retargeted = False
     verb2_fired = False
-    verb_ts = 0.0
-    step_at_verb = step_at_lift = None
+    verb_ts = verb2_ts = 0.0
+    step_at_verb = step_at_verb2 = hook_at_verb2 = step_at_lift = None
     stale_held = None   # promote-stale: did the step hold 20s after the stale promote
     advanced_at = None  # first poll that saw the step past the one the verb fired at
-    hook_fired_ts = None    # when the case's verb or fault landed (nophase= window)
+    # When the case's verb or fault landed (nophase= window); a pre-armed
+    # verb lands with the bump itself.
+    hook_fired_ts = ctx["trigger_ts"] if prearm else None
     after_hook_phases = set()
+    hooks_seen = set()
     p2_fired = False
-    pre_final = None    # hash universe before the proto2 re-target (nothing may stay on it)
+    pre_final = None    # hash universe before a re-target (nothing may stay on it)
+    # A pre-armed pause owes its lift verbhold s after the bump.
+    prearm_lifted = prearm != "pause"
+    phases_before_lift, max_step_before_lift = set(), None
+    first_serving_ts = advance_ts = None   # step 0 served, then the step advanced: the first hold's soak
+    failed_at = None
+    released, step_at_release, hook_at_release = False, None, None
+    # A lost run: the window with no run pinned, and where a re-pin resumed.
+    runlost_armed = "runlost" in (verb, verb2)
+    runlost_during = during2 if verb2 == "runlost" else during
+    runlost_ts = runlost_step = step_at_repin = None
+    unpinned_seen, steps_unpinned = False, []
+    # A pairing verb: the hashes that existed when it fired; a new one proves the re-target.
+    hashes_at_verb, pairing_retargeted = None, False
+    # A quota lift: the canary pods the parked step asks for must land.
+    quota_verb = "quotalift" in (verb, verb2)
+    capacity_landed, quota_need = False, 0
+    last_hook = last_step = None
     state, stable, last_poll = "ROLLING", None, 0.0
 
     def canary_ready_pods():
@@ -5152,12 +5477,45 @@ def _canary(case_id, yaml_file, desc, hdr):
         # Canary-state hook: expose the grid state to the fault dispatcher and
         # fire the case's verb once, when the state (and step) it names arrives.
         ctx["canary_hook"], ctx["canary_step"] = _canary_hook(phase, can, nsteps), step
+        last_hook, last_step = ctx["canary_hook"], step
+        if ctx["canary_hook"]:
+            hooks_seen.add(ctx["canary_hook"])
+        if failed_at is None and phase == "Failed":
+            failed_at = now
+        # A quota lift lets the parked step's capacity land; a second verb
+        # after the lift waits for it, so the park is judged with capacity there.
+        if quota_verb and (verb2_fired if verb2 == "quotalift" else verb_fired) and not capacity_landed:
+            plan_steps = cinfo.get("steps") or []
+            cur = plan_steps[min(step or 0, len(plan_steps) - 1)] if plan_steps else {}
+            quota_need = sum(_step_new_count(cur, N[c]) * ctx["pods_per_inst"].get(c, 1) for c in group)
+            if canary_ready_pods() >= max(1, quota_need):
+                capacity_landed = True
+                print(f"    capacity landed after the quota lift ({canary_ready_pods()} canary pod(s) Ready, {quota_need} asked)")
+        fired_now = ""
         if verb and not verb_fired and _hook_due(during, ctx["canary_hook"], step):
-            verb_fired, verb_ts, step_at_verb = True, now, step
+            verb_fired, verb_ts, step_at_verb, fired_now = True, now, step, verb
             _canary_verb(ctx, verb, canary_hash, primary)
-        elif verb2 and verb_fired and not verb2_fired and _hook_due(during2, ctx["canary_hook"], step):
-            verb2_fired = True
+        elif (verb2 and verb_fired and not verb2_fired and _hook_due(during2, ctx["canary_hook"], step)
+              and (verb != "quotalift" or capacity_landed)):
+            verb2_fired, verb2_ts, step_at_verb2, hook_at_verb2, fired_now = True, now, step, ctx["canary_hook"], verb2
             _canary_verb(ctx, verb2, canary_hash, primary)
+        elif _release_due(release, verb2_fired, verb2_ts, released, now, release_after):
+            released, step_at_release, hook_at_release = True, step, ctx["canary_hook"]
+            _canary_verb(ctx, release, canary_hash, primary)
+        if fired_now == "pairing":
+            # The patch re-mints both pairing Components: the whole pair is
+            # bumped from here, nothing may stay on a pre-re-target revision,
+            # and pair-alive arms as the pairing handler arms it.
+            group = group | ({"engine", "decoder"} & ctx["configured"])
+            ctx["bumped"] = group
+            hashes_at_verb = set(ctx["old_hashes"]) | set(ctx.get("seen_hashes", set())) | ({canary_hash} if canary_hash else set())
+            pre_final = set(hashes_at_verb)
+            if from_proto and pairto_target and {"engine", "decoder"} <= ctx["configured"]:
+                ctx["inv"]["pairing"] = {"frm": from_proto, "to": pairto_target, "armed": False, "seen": False,
+                                         "drain_first": _pairing_drain_first(ctx["info"])}
+        if hashes_at_verb is not None and not pairing_retargeted and _retargeted_by_hash(canary_hash, hashes_at_verb):
+            pairing_retargeted = True
+            print(f"    pairing verb re-targeted the canary: new canary hash {canary_hash}")
         fault = ctx.get("fault")
         if hook_fired_ts is None and (verb_fired or (fault and fault.get("fired"))):
             hook_fired_ts = now
@@ -5171,14 +5529,48 @@ def _canary(case_id, yaml_file, desc, hdr):
             verb_lifted, step_at_lift = True, step
             _pause_annotation(case_id, "")
             print(f"    verb lifted: rollout-paused removed after {verbhold}s (step={step})")
+        if not prearm_lifted:
+            # A pause left on the idle service: record what the arm did under
+            # it, then lift it verbhold s after the bump.
+            if phase:
+                phases_before_lift.add(phase)
+            if step is not None:
+                max_step_before_lift = max(max_step_before_lift or 0, step)
+            if now - ctx["trigger_ts"] >= verbhold:
+                prearm_lifted = True
+                _pause_annotation(case_id, "")
+                print(f"    prearm lifted: rollout-paused removed {verbhold}s after the bump "
+                      f"(step={step}, phases={sorted(phases_before_lift)})")
+        if first_serving_ts is None and step == 0 and phase in ("Canarying", "Paused"):
+            first_serving_ts = now
+        if advance_ts is None and first_serving_ts is not None and step is not None and step > 0:
+            advance_ts = now
         if verb_fired and verb == "promote-stale" and stale_held is None and now - verb_ts >= 20:
             stale_held = (step == step_at_verb)
         if verb_fired and advanced_at is None and step is not None and step_at_verb is not None and step > step_at_verb:
             advanced_at = now
-        # The protocol re-target fires at the during= hook, or once the first
-        # canary pod is Ready: a re-target over a partially-landed intermediate.
+        if runlost_armed and (verb2_fired if verb2 == "runlost" else verb_fired):
+            # The window with no run pinned: the step may not move inside it,
+            # and a re-pin must resume where the loss found the ladder.
+            pinned = bool((st.get("rollout") or {}).get("activeRun"))
+            if runlost_ts is None:
+                runlost_ts, runlost_step = now, (step_at_verb2 if verb2 == "runlost" else step_at_verb)
+            if not pinned:
+                unpinned_seen = True
+                steps_unpinned.append(step)
+            elif unpinned_seen and step_at_repin is None:
+                step_at_repin = step
+                print(f"    run re-pinned at step={step}")
+            if not pinned and now - runlost_ts >= RUNLOST_HOLD_S and _runlost_hold_expected(runlost_during):
+                state = "HELD"
+                print(f"    held with no pinned run for {RUNLOST_HOLD_S}s")
+                break
+        # The protocol re-target fires at its hook (during2= when no second
+        # verb owns it, else during=), or once the first canary pod is Ready:
+        # a re-target over a partially-landed intermediate.
+        p2_hook = _proto2_hook(during, during2, verb2)
         if proto2_target is not None and not p2_fired and (
-                _hook_due(during, ctx["canary_hook"], step) if during else canary_ready_pods() > 0):
+                _hook_due(p2_hook, ctx["canary_hook"], step) if p2_hook else canary_ready_pods() > 0):
             p2_fired = True
             pre_final = set(ctx["old_hashes"]) | set(ctx.get("seen_hashes", set()))
             ok2, msg2 = _pairing_patch(case_id, proto2_target)
@@ -5198,7 +5590,7 @@ def _canary(case_id, yaml_file, desc, hdr):
         # Rollback probe: once the canary is in progress, request a rollback. The
         # canary reverts every Instance to the stable revision and HOLDS there
         # (RolledBack), rejecting the rolled-back revision.
-        rollback_gate = _rollback_probe_gate(verb, during, verb_fired, rebump_retargeted)
+        rollback_gate = _rollback_probe_gate(verb, during, verb_fired, rebump_retargeted or pairing_retargeted)
         if (do_rollback and not rollback_set and canary_target_ready and rollback_gate and
                 phase in ("Canarying", "Paused")):
             rollback_set = True
@@ -5238,9 +5630,15 @@ def _canary(case_id, yaml_file, desc, hdr):
                                             pre_final is not None and bool(stranded()))
         if proto2_target is not None and not p2_fired:
             pods_settled = False   # the re-target must land before convergence counts
-        if _awaiting_pause_lift(verb, verb_fired, verb_lifted):
+        if _awaiting_pause_lift(verb, verb_fired, verb_lifted) or not prearm_lifted:
             pods_settled = False   # a terminal reached under the pause is judged after the lift
-        if phase == expect and pods_settled:
+        if quota_verb and not capacity_landed:
+            pods_settled = False   # the park is judged once the lifted capacity is there
+        if release and not released:
+            pods_settled = False   # the hold is judged at the release
+        # A bump with no group is a plain rollout: its phase is not the run's.
+        phase_ok = phase == expect or (not _prearm_arms_canary(prearm) and expect == "Stable" and phase in ("", "Stable"))
+        if phase_ok and pods_settled:
             stable = stable or now
             if now - stable >= STABILITY_S:
                 state = "CONVERGED"
@@ -5315,12 +5713,101 @@ def _canary(case_id, yaml_file, desc, hdr):
     if verb2:
         good(verb2_fired, f"second verb {verb2} fired at {during2}",
              f"second verb {verb2} never fired: the canary never reached {during2} after {verb} (phases={sorted(phases)})")
-    if "planedit" in (verb, verb2):
-        good(_plan_edit_untouched(traffic_by_step),
-             "mid-run plan edit left the pinned ladder alone (the inserted step was never served)",
-             f"mid-run plan edit changed the running ladder (served {PLANEDIT_TRAFFIC}%; per-step {traffic_by_step})")
+    if "planedit" in (verb, verb2) or prearm == "planedit":
+        served = not _plan_edit_untouched(traffic_by_step)
+        if _plan_edit_served_expected(prearm == "planedit"):
+            good(served,
+                 f"a plan edit left on the idle service was pinned by the next run (served {PLANEDIT_TRAFFIC}%; per-step {traffic_by_step})",
+                 f"the next run did not pin the pre-armed plan edit (never served {PLANEDIT_TRAFFIC}%; per-step {traffic_by_step})")
+        else:
+            good(not served,
+                 "mid-run plan edit left the pinned ladder alone (the inserted step was never served)",
+                 f"mid-run plan edit changed the running ladder (served {PLANEDIT_TRAFFIC}%; per-step {traffic_by_step})")
     if verb == "scale" and verb_fired:
         checks.append("  ⓘ scale fired mid-canary: " + " ".join(f"{c}→{t}" for c, t in sorted(scale_to.items())))
+    if prearm:
+        annos_at_bump = ctx.get("prearm_annos") or {}
+        final_annos = _isvc_annotations(case_id)
+        lingering = sorted(k.split("/")[-1] for k in annos_at_bump if k.startswith("ome.io/rollout-"))
+        checks.append(f"  ⓘ prearm {prearm}: rollout annotations on the service at the bump: {lingering or 'none'}")
+    if prearm == "pause":
+        good(prearm_lifted, f"pre-armed pause lifted {verbhold}s after the bump",
+             "the pre-armed pause was never lifted within the budget")
+        good(_prearm_pause_held(phases_before_lift, max_step_before_lift),
+             f"a pause left on the idle service held the arm until the lift (phases {sorted(phases_before_lift)}, step {max_step_before_lift})",
+             f"the arm served under the pre-armed pause (phases {sorted(phases_before_lift)}, step {max_step_before_lift})")
+    elif prearm == "promote":
+        soak = _step_soak_s(cinfo.get("steps") or [], 0)
+        wait = None if (first_serving_ts is None or advance_ts is None) else advance_ts - first_serving_ts
+        if soak and policy != "manual":
+            good(_first_hold_served(wait, soak),
+                 f"the stale promote token was ignored: step 0 soaked {wait:.0f}s of its {soak:.0f}s hold" if wait is not None else "",
+                 "the stale promote token skipped the first hold (step 0 advanced "
+                 + (f"{wait:.0f}s into a {soak:.0f}s soak)" if wait is not None else "before a soak was observed)"))
+        else:
+            checks.append("  ⓘ prearm promote: step 0 has no timed hold; the manual gate's checks below carry the claim")
+        checks.append(f"  ⓘ prearm promote token at convergence: {'still present' if PROMOTE_ANNO in final_annos else 'gone'}")
+    elif prearm == "repin":
+        # A cell the grid leaves open: the observed behaviour is the record.
+        checks.append(f"  ⓘ prearm repin: annotation {'present' if REPIN_ANNO in annos_at_bump else 'already consumed'} at the bump, "
+                      f"{'present' if REPIN_ANNO in final_annos else 'gone'} at convergence; "
+                      f"PreHold {'observed' if 'canary-prehold' in hooks_seen else 'not observed'}; phases {sorted(phases)}")
+    elif prearm == "resume":
+        good(RESUME_ANNO not in final_annos, "a resume left on the idle service was consumed",
+             "the resume request left on the idle service is still on it")
+    elif prearm == "rollback":
+        seen = any(r == "CanaryRollbackIgnored" for r, _ in _isvc_events(case_id))
+        checks.append(f"  ⓘ prearm rollback: CanaryRollbackIgnored event {'recorded' if seen else 'not recorded'}")
+    elif prearm == "timeout-set":
+        budget_s, plan_s = _duration_s(ctx["timeout_value"]), _duration_s(cinfo.get("readyTimeout"))
+        if expect == "Failed":
+            wait = None if failed_at is None else failed_at - ctx["trigger_ts"]
+            good(_park_matches_budget(wait, budget_s, plan_s),
+                 f"the arm inherited the {ctx['timeout_value']} budget (parked {wait:.0f}s after the bump; plan {cinfo.get('readyTimeout') or 'none'})" if wait is not None else "",
+                 "the park did not follow the pre-armed budget (parked "
+                 + (f"{wait:.0f}s after the bump" if wait is not None else "never")
+                 + f"; budget {ctx['timeout_value']}, plan {cinfo.get('readyTimeout') or 'none'})")
+        else:
+            checks.append("  ⓘ prearm timeout-set: no park expected, so the inherited budget is not observable")
+    elif prearm == "scale":
+        checks.append("  ⓘ prearm scale: fleet re-shaped before the bump ("
+                      + " ".join(f"{c}={t}" for c, t in sorted(scale_to.items()))
+                      + "); the arm's targets are the new fleet (the fully-rolled checks assert it)")
+    if release:
+        good(released, f"release {release} fired {release_after}s after {verb2}",
+             f"release {release} never fired: {verb2} did not fire or the budget ended first")
+        if released:
+            good(_prehold_survived(step_at_verb2, hook_at_release, step_at_release),
+                 f"the pre-step hold survived {verb2}: still held at step {step_at_verb2} when {release} fired",
+                 f"the hold did not survive {verb2}: step {step_at_verb2} → {step_at_release}, state {hook_at_release} at the release")
+    if runlost_armed and (verb2_fired if verb2 == "runlost" else verb_fired):
+        ack = _runlost_acknowledged(_isvc_events(case_id))
+        good(ack is not None, f"the controller acknowledged the lost run ({ack})",
+             "no CanaryRunLost event (nor an in-place adoption) followed the removed run")
+        if ack == "RolloutPlanRepinned":
+            checks.append("  ⓘ the run layer re-adopted the run in place before an executor pass observed the loss")
+        good(_runlost_held(runlost_step, steps_unpinned, step_at_repin),
+             f"the ladder held at step {runlost_step} while no run was pinned"
+             + (" and resumed there when re-pinned" if step_at_repin is not None else ""),
+             f"the ladder moved while no run was pinned (steps {steps_unpinned}, re-pinned at step {step_at_repin}, lost at {runlost_step})")
+        if state == "HELD":
+            checks.append(f"  ✓ held with no pinned run for {RUNLOST_HOLD_S}s: the decided outcome at {runlost_during}")
+            return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
+    pairing_fired = "pairing" in (verb, verb2) and (verb2_fired if verb2 == "pairing" else verb_fired)
+    if pairing_fired:
+        good(pairing_retargeted, f"pairing verb re-targeted the canary toward {pairto_target!r} (new canary hash observed)",
+             "no new canary hash followed the pairing verb (the pair was not re-targeted)")
+    if quota_verb and (verb2_fired if verb2 == "quotalift" else verb_fired):
+        good(capacity_landed, f"capacity landed after the quota lift ({quota_need} canary pod(s) asked by the parked step)",
+             "capacity never landed after the quota lift")
+        q_step = step_at_verb2 if verb2 == "quotalift" else step_at_verb
+        if verb == "quotalift" and verb2:
+            hook_after, step_after = hook_at_verb2, step_at_verb2   # the park as the exit verb found it
+        else:
+            hook_after, step_after = last_hook, last_step
+        good(_park_survived_capacity(capacity_landed, q_step, hook_after, step_after),
+             f"the park survived arriving capacity: still Failed at step {q_step} with the capacity there (resume is the exit)",
+             f"the park did not hold once capacity landed (state {hook_after}, step {q_step} → {step_after})")
     if proto2_target is not None:
         good(p2_fired, f"proto2 re-target fired ({proto_target!r}→{proto2_target!r})",
              f"proto2 re-target never fired (phases={sorted(phases)})")
@@ -5349,6 +5836,20 @@ def _canary(case_id, yaml_file, desc, hdr):
              f"a matching promote skipped the {soak_s}s soak (step advanced {waited:.0f}s after the promote)" if waited is not None else "",
              f"a matching promote did not skip the {soak_s}s soak (step advanced "
              + (f"{waited:.0f}s after the promote)" if waited is not None else "never after the promote)"))
+    if not _prearm_arms_canary(prearm):
+        # No group when the bump landed: a plain rollout, no run, no phase.
+        good(_no_canary_phase(after_hook_phases),
+             f"no canary phase after the bump: a group-less bump is a plain rollout (saw {sorted(after_hook_phases)})",
+             f"a canary phase appeared after a bump with no group (saw {sorted(after_hook_phases)})")
+        run_after = _canary_run(fetch_status(case_id), primary)
+        good(not run_after.get("canaryRevisionHash"), "no canary run was recorded for the unit",
+             f"a canary run was recorded without a group: {run_after}")
+        for c in sorted(group):
+            rolled, _ = _inst_rev_split(ctx, c)
+            good(rolled == want[c], f"{c} fully rolled to the new revision ({rolled}/{want[c]})",
+                 f"{c} not fully on the new revision ({rolled}/{want[c]})")
+        return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
+
     # NOTE: "Canarying" is transient — the reconciler sets it then immediately
     # supersedes it with "Paused" in the same reconcile for any step that pauses,
     # so it never persists for paused steps. Assert the canary entered an ACTIVE
@@ -5458,7 +5959,7 @@ def _canary(case_id, yaml_file, desc, hdr):
         else:
             verdict = "FAIL"; notes.append("never observed RollingBack")
             checks.append("  ✗ never observed RollingBack")
-        if proto_target is not None and state == "CONVERGED":
+        if (proto_target is not None or pairing_fired) and state == "CONVERGED":
             # Both cohorts revert: every pairing surface reads the protocol the
             # stable revision carried before the transition.
             verdict = _canary_pairing_surface(case_id, ctx, hdr, from_proto, group, primary, xcheck, verdict, notes, checks)
@@ -5482,10 +5983,13 @@ def _canary(case_id, yaml_file, desc, hdr):
              f"{c} not fully on canary revision ({rolled}/{want[c]})")
     if pre_final is not None:
         left = stranded()
-        good(not left, "proto2: no Instance stranded on the intermediate cohort",
-             f"proto2: {len(left)} pod(s) still on a pre-re-target revision: {left[:4]}")
-    if proto_target is not None and state == "CONVERGED":
-        final_proto = proto2_target if (proto2_target is not None and p2_fired) else proto_target
+        good(not left, "re-target: no Instance stranded on a pre-re-target revision",
+             f"re-target: {len(left)} pod(s) still on a pre-re-target revision: {left[:4]}")
+    if (proto_target is not None or pairing_fired) and state == "CONVERGED":
+        if pairing_fired:
+            final_proto = pairto_target
+        else:
+            final_proto = proto2_target if (proto2_target is not None and p2_fired) else proto_target
         verdict = _canary_pairing_surface(case_id, ctx, hdr, final_proto, group, primary, xcheck, verdict, notes, checks)
 
     if policy == "manual":

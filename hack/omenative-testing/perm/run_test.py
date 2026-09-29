@@ -1063,3 +1063,372 @@ class PauseLiftTest(unittest.TestCase):
         self.assertFalse(run._awaiting_pause_lift("pause", False, False))
         self.assertFalse(run._awaiting_pause_lift("promote", True, False))
         self.assertFalse(run._awaiting_pause_lift(None, False, False))
+
+
+class PrearmPredicateTest(unittest.TestCase):
+    """Verdict rules for a verb left on the idle service before the bump."""
+
+    def test_durations_and_step_soak(self):
+        self.assertEqual(45.0, run._duration_s("45s"))
+        self.assertEqual(180.0, run._duration_s("3m"))
+        self.assertEqual(3600.0, run._duration_s("1h"))
+        self.assertIsNone(run._duration_s("soon"))
+        self.assertIsNone(run._duration_s(None))
+        steps = [{"capacity": "25%", "traffic": 25, "pause": {"duration": "20s"}}, {"capacity": "100%", "traffic": 100}]
+        self.assertEqual(20.0, run._step_soak_s(steps, 0))
+        self.assertEqual(0.0, run._step_soak_s(steps, 1))
+        self.assertEqual(0.0, run._step_soak_s(steps, 5))
+
+    def test_step_new_count_rounds_up_and_clamps(self):
+        self.assertEqual(2, run._step_new_count({"capacity": "25%"}, 8))
+        self.assertEqual(1, run._step_new_count({"capacity": "25%"}, 2))
+        self.assertEqual(8, run._step_new_count({"capacity": "100%"}, 8))
+        self.assertEqual(3, run._step_new_count({"capacity": 3}, 8))
+        self.assertEqual(8, run._step_new_count({"capacity": 12}, 8))
+        self.assertEqual(8, run._step_new_count({}, 8))
+
+    def test_only_a_group_removal_leaves_nothing_to_arm(self):
+        self.assertFalse(run._prearm_arms_canary("groupremove"))
+        for v in ("", "pause", "promote", "repin", "resume", "timeout-set", "planedit", "scale", "rollback"):
+            self.assertTrue(run._prearm_arms_canary(v), v)
+
+    def test_prearmed_pause_holds_the_arm(self):
+        self.assertTrue(run._prearm_pause_held(set(), None))
+        self.assertTrue(run._prearm_pause_held({"Stable", "Pending"}, 0))
+        self.assertFalse(run._prearm_pause_held({"Pending", "Canarying"}, 0))
+        self.assertFalse(run._prearm_pause_held({"Paused"}, 0))
+        self.assertFalse(run._prearm_pause_held({"Pending"}, 1))
+
+    def test_stale_promote_leaves_the_first_hold_intact(self):
+        self.assertTrue(run._first_hold_served(20.0, 20.0))
+        self.assertTrue(run._first_hold_served(20.0 - run.SOAK_OBSERVE_SLACK_S, 20.0))
+        self.assertFalse(run._first_hold_served(4.0, 20.0))
+        self.assertFalse(run._first_hold_served(None, 20.0))
+        self.assertTrue(run._first_hold_served(None, 0.0), "an untimed first step has no soak to skip")
+
+    def test_plan_edit_direction_follows_where_the_edit_landed(self):
+        self.assertTrue(run._plan_edit_served_expected(True))
+        self.assertFalse(run._plan_edit_served_expected(False))
+
+    def test_park_follows_the_pre_armed_budget(self):
+        self.assertTrue(run._park_matches_budget(50.0, 45.0, 90.0))
+        self.assertTrue(run._park_matches_budget(45.0, 45.0, None))
+        self.assertFalse(run._park_matches_budget(88.0, 45.0, 90.0), "nearer the plan's budget than the annotation's")
+        self.assertFalse(run._park_matches_budget(20.0, 45.0, 90.0), "before the budget elapsed")
+        self.assertFalse(run._park_matches_budget(45.0 + run.PARK_LATENCY_S + 1, 45.0, None), "past the landing latency")
+        self.assertFalse(run._park_matches_budget(None, 45.0, 90.0))
+
+    def test_plain_rollout_shows_no_canary_phase(self):
+        self.assertTrue(run._no_canary_phase({"", "Stable"}))
+        self.assertFalse(run._no_canary_phase({"Stable", "Pending"}))
+        self.assertFalse(run._no_canary_phase({"Canarying"}))
+
+
+class PrearmWritesTest(unittest.TestCase):
+    """The pre-bump path shares the hook verbs' writes: the stable hash is the
+    token a promote or resume names, and a scale patches through _scale_patch
+    and then counts the settled fleet."""
+
+    def _capture(self, verb, scale_to=None, old_hashes=("stable1",)):
+        calls = []
+
+        def fake_kubectl(*args, **kw):
+            calls.append(list(args))
+            if args[:2] == ("-n", run.NS) and args[2] == "get":
+                return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"spec": {}, "status": {}}), stderr="")
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        ctx = {"case_id": "p1", "old_hashes": set(old_hashes), "hdr": {}, "info": {"canary_groups": []},
+               "configured": {"engine"}, "N": {"engine": 2}, "timeout_value": "45s", "closed": False}
+        saved = run.kubectl
+        run.kubectl = fake_kubectl
+        try:
+            ok, msg = run._prearm(ctx, verb, "engine", scale_to or {})
+        finally:
+            run.kubectl = saved
+        return ok, calls, ctx
+
+    def test_promote_and_resume_name_the_stable_revision(self):
+        ok, calls, ctx = self._capture("promote")
+        self.assertTrue(ok)
+        self.assertTrue(any(f"{run.PROMOTE_ANNO}=stable1" in c for c in calls))
+        self.assertEqual("idle", ctx["canary_hook"])
+        self.assertTrue(any("at idle" in n for n in ctx["verb_notes"]))
+        self.assertTrue(any(f"{run.RESUME_ANNO}=stable1" in c for c in self._capture("resume")[1]))
+
+    def test_repin_timeout_and_rollback_write_their_annotations(self):
+        self.assertTrue(any(f"{run.REPIN_ANNO}=now" in c for c in self._capture("repin")[1]))
+        self.assertTrue(any(f"{run.READY_TIMEOUT_ANNO}=45s" in c for c in self._capture("timeout-set")[1]))
+        self.assertTrue(any(f"{run.ROLLBACK_ANNO}=true" in c for c in self._capture("rollback")[1]))
+
+    def test_pause_writes_the_global_pause(self):
+        saved = run.PAUSE_PROJECT_S
+        run.PAUSE_PROJECT_S = 0
+        try:
+            calls = self._capture("pause")[1]
+        finally:
+            run.PAUSE_PROJECT_S = saved
+        self.assertTrue(any("ome.io/rollout-paused=true" in c for c in calls))
+
+    def test_group_remove_empties_the_groups_before_the_bump(self):
+        calls = self._capture("groupremove")[1]
+        patch = json.loads(next(c for c in calls if "patch" in c)[-1])
+        self.assertEqual([], patch["spec"]["rollout"]["groups"])
+
+    def test_scale_patches_then_counts_the_settled_fleet(self):
+        saved = run._wait_fleet_at
+        run._wait_fleet_at = lambda ctx, targets, budget: True
+        try:
+            ok, calls, ctx = self._capture("scale", scale_to={"engine": 4})
+        finally:
+            run._wait_fleet_at = saved
+        self.assertTrue(ok)
+        patch = json.loads(next(c for c in calls if "patch" in c)[-1])
+        self.assertEqual({"minReplicas": 4, "maxReplicas": 4}, patch["spec"]["engine"])
+        self.assertEqual(4, ctx["N"]["engine"])
+
+    def test_scale_that_never_settles_is_a_setup_failure(self):
+        saved = run._wait_fleet_at
+        run._wait_fleet_at = lambda ctx, targets, budget: False
+        try:
+            ok, _, ctx = self._capture("scale", scale_to={"engine": 4})
+        finally:
+            run._wait_fleet_at = saved
+        self.assertFalse(ok)
+        self.assertEqual(2, ctx["N"]["engine"], "an unsettled fleet keeps the old count")
+
+    def test_wait_fleet_at_settles_on_the_exact_fleet(self):
+        ctx = {"closed": False, "pods_per_inst": {"engine": 1}, "pod_state": {
+            f"e{i}": {"alive": True, "comp": "engine", "inst": str(i), "ready": True, "serving": True} for i in range(4)}}
+        saved = run._read_one
+        run._read_one = lambda c, timeout=1.0: None
+        try:
+            self.assertTrue(run._wait_fleet_at(ctx, {"engine": 4}, 1.0))
+            ctx["pod_state"]["e4"] = {"alive": True, "comp": "engine", "inst": "4", "ready": False, "serving": False}
+            self.assertFalse(run._wait_fleet_at(ctx, {"engine": 4}, 0.2), "a fifth alive Instance is not the target fleet")
+        finally:
+            run._read_one = saved
+
+
+class ReleaseTest(unittest.TestCase):
+    def test_release_fires_once_after_the_window(self):
+        self.assertFalse(run._release_due("promote", False, 0.0, False, 100.0, 20))
+        self.assertFalse(run._release_due("promote", True, 90.0, False, 100.0, 20))
+        self.assertTrue(run._release_due("promote", True, 80.0, False, 100.0, 20))
+        self.assertFalse(run._release_due("promote", True, 80.0, True, 100.0, 20))
+        self.assertFalse(run._release_due("", True, 80.0, False, 100.0, 20))
+
+    def test_hold_must_survive_the_second_verb_until_the_release(self):
+        self.assertTrue(run._prehold_survived(1, "canary-prehold", 1))
+        self.assertFalse(run._prehold_survived(1, "canary-prehold", 2))
+        self.assertFalse(run._prehold_survived(1, "canary-serving", 1))
+        self.assertFalse(run._prehold_survived(None, "canary-prehold", None))
+
+
+class RunLostTest(unittest.TestCase):
+    def test_live_hooks_hold_and_terminals_do_not(self):
+        for h in ("canary-staging", "canary-serving@1", "canary-prehold", "canary-draining"):
+            self.assertTrue(run._runlost_hold_expected(h), h)
+        for h in ("canary-done", "canary-rollingback", "canary-rolledback", "canary-failed", ""):
+            self.assertFalse(run._runlost_hold_expected(h), h)
+
+    def test_step_never_moves_while_no_run_is_pinned(self):
+        self.assertTrue(run._runlost_held(1, [1, 1, 1], None))
+        self.assertTrue(run._runlost_held(1, [1, 1], 1))
+        self.assertTrue(run._runlost_held(1, [], None), "a re-pin faster than a poll leaves nothing to fault")
+        self.assertFalse(run._runlost_held(1, [1, 2], None))
+        self.assertFalse(run._runlost_held(1, [1], 0), "a re-pin must adopt in place, not restart")
+        self.assertFalse(run._runlost_held(None, [], None))
+
+    def test_acknowledgement_is_the_hold_event_or_an_in_place_adoption(self):
+        self.assertEqual("CanaryRunLost", run._runlost_acknowledged(
+            [("RolloutRunOpened", "run r1 opened"), ("CanaryRunLost", "engine canary has no pinned rollout run")]))
+        self.assertEqual("RolloutPlanRepinned", run._runlost_acknowledged(
+            [("RolloutPlanRepinned", "run r2 adopted the in-flight rollout in place")]))
+        self.assertIsNone(run._runlost_acknowledged([("RolloutPlanRepinned", "run r1 repinned to digest abc")]))
+        self.assertIsNone(run._runlost_acknowledged([]))
+
+    def _fire(self, status):
+        calls = []
+
+        def fake_kubectl(*args, **kw):
+            calls.append(list(args))
+            if args[2] == "get":
+                return subprocess.CompletedProcess(args, 0, stdout=json.dumps({"status": status}), stderr="")
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        ctx = {"case_id": "p1", "canary_hook": "canary-serving", "canary_step": 1}
+        saved = run.kubectl
+        run.kubectl = fake_kubectl
+        try:
+            run._canary_verb(ctx, "runlost", "abc123", "engine")
+        finally:
+            run.kubectl = saved
+        return calls, ctx
+
+    def test_verb_removes_the_pinned_run_from_the_status_subresource(self):
+        calls, ctx = self._fire({"rollout": {"activeRun": {"runID": "r1"}}})
+        patch = next(c for c in calls if "patch" in c)
+        self.assertIn("--subresource=status", patch)
+        self.assertEqual([{"op": "remove", "path": "/status/rollout/activeRun"}], json.loads(patch[-1]))
+        self.assertNotIn("verb_errors", ctx)
+
+    def test_verb_with_no_pinned_run_records_it_and_patches_nothing(self):
+        calls, ctx = self._fire({"rollout": {}})
+        self.assertFalse(any("patch" in c for c in calls))
+        self.assertTrue(any("nothing to remove" in n for n in ctx["verb_notes"]))
+
+    def test_isvc_events_are_read_oldest_first(self):
+        items = [{"reason": "CanaryRunLost", "message": "held", "lastTimestamp": "2026-01-01T00:00:09Z"},
+                 {"reason": "RolloutRunOpened", "message": "opened", "lastTimestamp": "2026-01-01T00:00:01Z"}]
+        saved = run.kubectl
+        run.kubectl = lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=json.dumps({"items": items}), stderr="")
+        try:
+            self.assertEqual([("RolloutRunOpened", "opened"), ("CanaryRunLost", "held")], run._isvc_events("p1"))
+        finally:
+            run.kubectl = saved
+
+
+class PairingVerbTest(unittest.TestCase):
+    def test_verb_patches_the_pairing_protocol_at_the_hook(self):
+        calls = []
+
+        def fake_kubectl(*args, **kw):
+            calls.append(list(args))
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        ctx = {"case_id": "p1", "pairto_target": "pair-v3", "canary_hook": "canary-prehold", "canary_step": 1}
+        saved = run.kubectl
+        run.kubectl = fake_kubectl
+        try:
+            run._canary_verb(ctx, "pairing", "abc123", "engine")
+            ctx["pairto_target"] = ""
+            run._canary_verb(ctx, "pairing", "abc123", "engine")
+        finally:
+            run.kubectl = saved
+        patches = [json.loads(c[-1]) for c in calls if "patch" in c]
+        self.assertEqual("pair-v3", patches[0]["spec"]["rollout"]["pairingProtocol"])
+        self.assertIsNone(patches[1]["spec"]["rollout"]["pairingProtocol"], "clear removes the field")
+
+    def test_retarget_is_a_hash_outside_the_set_that_existed_at_the_verb(self):
+        self.assertFalse(run._retargeted_by_hash("h1", {"h0", "h1"}))
+        self.assertTrue(run._retargeted_by_hash("h2", {"h0", "h1"}))
+        self.assertFalse(run._retargeted_by_hash(None, {"h0"}))
+
+    def test_proto2_fires_at_during2_when_no_second_verb_owns_it(self):
+        self.assertEqual("canary-prehold", run._proto2_hook("canary-serving@1", "canary-prehold", ""))
+        self.assertEqual("canary-serving@1", run._proto2_hook("canary-serving@1", "canary-prehold", "promote"))
+        self.assertEqual("canary-staging", run._proto2_hook("canary-staging", "", ""))
+        self.assertEqual("", run._proto2_hook("", "", ""))
+
+    def test_rollback_probe_waits_for_a_pairing_retarget(self):
+        self.assertFalse(run._rollback_probe_gate("pairing", "canary-serving", True, False))
+        self.assertTrue(run._rollback_probe_gate("pairing", "canary-serving", True, True))
+
+
+class QuotaLiftTest(unittest.TestCase):
+    def test_verb_deletes_the_case_quota(self):
+        calls = []
+
+        def fake_kubectl(*args, **kw):
+            calls.append(list(args))
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        ctx = {"case_id": "p1", "canary_hook": "canary-failed", "canary_step": 0}
+        saved = run.kubectl
+        run.kubectl = fake_kubectl
+        try:
+            run._canary_verb(ctx, "quotalift", "abc123", "engine")
+        finally:
+            run.kubectl = saved
+        self.assertTrue(any("resourcequota" in c and "perm-p1-quota" in c for c in calls))
+
+    def test_park_survives_capacity_that_lands_late(self):
+        self.assertTrue(run._park_survived_capacity(True, 0, "canary-failed", 0))
+        self.assertFalse(run._park_survived_capacity(False, 0, "canary-failed", 0), "capacity never landed")
+        self.assertFalse(run._park_survived_capacity(True, 0, "canary-serving", 0), "the park ended")
+        self.assertFalse(run._park_survived_capacity(True, 0, "canary-failed", 1), "the step moved")
+        self.assertFalse(run._park_survived_capacity(True, None, "canary-failed", 0))
+
+
+class CanaryWave3HeaderTest(unittest.TestCase):
+    """One accept and one reject per cross-field rule of the new knobs."""
+
+    def _errs(self, header):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    BASE = "# p999: x mode=canary Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 canary=auto topo=engine"
+    PD = "# p999: x mode=canary Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=3 ceil_r=0 canary=auto topo=pd"
+
+    def test_prearm_accepts_the_idle_column_verbs(self):
+        for v in ("rollback", "pause", "promote", "repin", "resume", "planedit", "groupremove"):
+            self.assertEqual([], self._errs(self.BASE + f" prearm={v} cell=canary/Idle/{v}"), v)
+        self.assertEqual([], self._errs(self.BASE + " prearm=timeout-set timeout=45s bump=engine img=example.com/canary-test/missing:none terminal=Failed"))
+        self.assertEqual([], self._errs(self.BASE + " prearm=scale scale_e=4"))
+
+    def test_prearm_rejects_a_lost_run_and_unknown_verbs(self):
+        self.assertTrue(any("prearm=runlost" in e for e in self._errs(self.BASE + " prearm=runlost")))
+        self.assertTrue(any("prearm=pairing" in e for e in self._errs(self.BASE + " prearm=pairing")))
+        self.assertTrue(any("prearm=" in e for e in self._errs(
+            "# p999: x mode=rollout Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 prearm=pause")))
+
+    def test_prearm_timeout_set_needs_timeout(self):
+        self.assertTrue(any("prearm=timeout-set needs timeout=" in e for e in self._errs(self.BASE + " prearm=timeout-set")))
+        self.assertEqual([], self._errs(self.BASE + " prearm=timeout-set timeout=45s"))
+
+    def test_prearm_scale_needs_a_target(self):
+        self.assertTrue(any("prearm=scale needs" in e for e in self._errs(self.BASE + " prearm=scale")))
+        self.assertTrue(any("scale_e=/scale_d=" in e for e in self._errs(self.BASE + " scale_e=4")))
+        self.assertEqual([], self._errs(self.BASE + " prearm=scale scale_e=4"))
+
+    def test_a_second_verb_may_scale(self):
+        held = " during=canary-serving@1 verb=planedit-repin verb2=scale scale_e=4 during2=canary-prehold release=promote"
+        self.assertEqual([], self._errs(self.BASE.replace("ceil_e=3", "ceil_e=5") + held))
+        self.assertTrue(any("scale_e=/scale_d=" in e for e in self._errs(
+            self.BASE + " during=canary-serving@1 verb=planedit-repin verb2=scale during2=canary-prehold release=promote")))
+
+    def test_prearm_planedit_excludes_a_mid_run_edit(self):
+        self.assertTrue(any("opposite directions" in e for e in self._errs(
+            self.BASE + " prearm=planedit during=canary-serving verb=planedit")))
+        self.assertEqual([], self._errs(self.BASE + " prearm=planedit during=canary-serving verb=pause"))
+
+    def test_release_needs_a_second_verb_at_prehold(self):
+        ok = self.BASE + " during=canary-serving@1 verb=planedit-repin verb2=repin during2=canary-prehold release=promote releaseafter=30"
+        self.assertEqual([], self._errs(ok))
+        self.assertEqual([], self._errs(ok.replace("release=promote", "release=resume")))
+        self.assertTrue(any("release=" in e for e in self._errs(self.BASE + " during=canary-serving verb=pause release=promote")))
+        self.assertTrue(any("release=" in e for e in self._errs(
+            self.BASE + " during=canary-serving@1 verb=planedit-repin verb2=repin during2=canary-serving release=promote")))
+        self.assertTrue(any("release=rollback" in e for e in self._errs(ok.replace("release=promote", "release=rollback"))))
+        self.assertTrue(any("releaseafter=" in e for e in self._errs(
+            self.BASE + " during=canary-serving@1 verb=planedit-repin verb2=repin during2=canary-prehold releaseafter=30")))
+
+    def test_quotalift_needs_the_quota_fault(self):
+        self.assertEqual([], self._errs(self.BASE + " fault=quota:0 terminal=Failed during=canary-failed verb=quotalift"))
+        self.assertEqual([], self._errs(
+            self.BASE + " fault=quota:0 terminal=Stable during=canary-failed verb=quotalift verb2=resume during2=canary-failed"))
+        self.assertTrue(any("quotalift" in e for e in self._errs(self.BASE + " during=canary-failed verb=quotalift")))
+        self.assertTrue(any("quotalift" in e for e in self._errs(
+            self.BASE + " fault=podkill:canary-serving during=canary-failed verb=quotalift")))
+
+    def test_pairing_verb_needs_pairto_bump_and_a_pair(self):
+        self.assertEqual([], self._errs(self.PD + " bump=engine during=canary-draining verb=pairing pairto=pair-v3"))
+        self.assertEqual([], self._errs(
+            self.PD + " bump=engine during=canary-serving@1 verb=planedit-repin verb2=pairing during2=canary-prehold pairto=clear"))
+        self.assertTrue(any("pairto=" in e for e in self._errs(self.PD + " bump=engine during=canary-draining verb=pairing")))
+        self.assertTrue(any("bump=" in e for e in self._errs(self.PD + " during=canary-draining verb=pairing pairto=pair-v3")))
+        self.assertTrue(any("Ne>0 and Nd>0" in e for e in self._errs(
+            self.BASE + " bump=engine during=canary-draining verb=pairing pairto=pair-v3")))
+        self.assertTrue(any("pairto=" in e for e in self._errs(
+            self.PD + " bump=engine during=canary-draining verb=pause pairto=pair-v3")))
+
+    def test_during2_without_a_second_verb_is_the_proto2_hook(self):
+        self.assertEqual([], self._errs(
+            self.PD + " proto=pair-v2 proto2=pair-v3 during=canary-serving@1 verb=planedit-repin during2=canary-prehold"))
+        self.assertTrue(any("during2=" in e for e in self._errs(
+            self.BASE + " during=canary-serving verb=pause during2=canary-prehold")))
+
+    def test_new_verbs_are_hook_verbs(self):
+        self.assertEqual([], self._errs(self.BASE + " during=canary-serving verb=runlost cell=canary/Serving/runLost"))
+        self.assertTrue(any("verb=" in e for e in self._errs(self.BASE + " verb=runlost")))

@@ -270,9 +270,9 @@ The step machine is a state × event table, and p319 + p366–p383 aim an event 
 a named state instead of at "some time after the bump". Every one of them names
 the grid cells it proves in `cell=`, a comma-separated list of
 `canary/<State>/<event>` ids (the states are `Idle`, `Staging`, `Serving`,
-`PreHold`, `Draining`, `Done`, `RollingBack`, `RolledBack`, `Failed`); a case
-that exercises a second row, such as the recovery half of a podkill, carries
-both ids.
+`PreHold`, `Draining`, `Done`, `RollingBack`, `RolledBack`, `Failed`; `Idle`
+is reached through `prearm=`, below); a case that exercises a second row,
+such as the recovery half of a podkill, carries both ids.
 
 - **`during=canary-<state>[@<step>]`** — when to act: `canary-staging`
   (`Pending`), `canary-serving` (`Canarying`/`Paused`), `canary-prehold`
@@ -283,6 +283,11 @@ both ids.
   and fires once. **`verb2=` / `during2=`** fire a second verb at a second hook
   once the first has fired, which is how a case reaches PreHold (a
   `planedit-repin` at Serving, then the verb under test at `canary-prehold`).
+  **`release=promote|resume`** fires that verb `releaseafter=<s>` seconds
+  (default 20, `RELEASE_AFTER_S`) after the second verb, so a case whose
+  second verb leaves the pre-step hold in place can end (needs `verb2=` and
+  `during2=canary-prehold`); the verdict asserts the ladder was still held at
+  the same step when the release fired, and that it then completes.
 - **`verb=`** — the operator verb to fire at the hook: `pause` / `pause-freeze`
   (lifted after `verbhold=<s>`, default 45; the step index must not move while
   held), `promote` (the matching hash; with `skipsoak=<s>` the case asserts it
@@ -297,7 +302,21 @@ both ids.
   and the verdict asserts so), `planedit-repin` (drops the ladder's first step
   and repins, so the clamped step would raise exposure and the run holds at
   PreHold), `groupremove` (empties `spec.rollout.groups` mid-run; the pinned
-  plan keeps stepping), `scale` (see the PD knobs below). `terminal=` decides
+  plan keeps stepping), `scale` (see the PD knobs below), `runlost` (removes
+  the pinned run from the status subresource, `status.rollout.activeRun`,
+  which is how a lost run looks to the executor; the verdict asserts the step
+  never moved while no run was pinned, that a re-pinned run resumed at that
+  step, and that the controller acknowledged the loss with a `CanaryRunLost`
+  event or the run layer's in-place adoption; at a live hook a run that is
+  never re-pinned ends the case as held after `RUNLOST_HOLD_S`), `pairing`
+  (patches `spec.rollout.pairingProtocol` to `pairto=<token|clear>` on a
+  bump-triggered canary; needs `bump=`, Ne>0 and Nd>0; the verdict asserts a
+  new canary hash followed the patch, nothing stays on a pre-re-target
+  revision, and the pairing surface reads `pairto=` at the terminal),
+  `quotalift` (lifts the case's `fault=quota:<n>`; a second verb waits for
+  the lifted capacity to land, and the verdict asserts the park survived it:
+  still Failed at the same step once the parked step's pods are Ready).
+  `terminal=` decides
   the verdict contract: only `RolledBack` reads the rollback checks, so a case
   that rolls back and then resumes or re-targets is judged as `Stable`.
 - **`fault=<kind>:canary-<state>`** — the existing faults (`podkill`,
@@ -313,9 +332,28 @@ both ids.
 - **`terminal=Stable|RolledBack|Failed`** — the expected terminal phase when the
   derivation from `analysis=`/`rollback=` does not apply; `Failed` asserts the
   park (no canary traffic, not fully rolled, nothing rolled back).
-- **`prearm=rollback`** — leave a rollback request on the idle service before
-  the bump; **`nophase=<Phase>`** — a phase that must not be observed once the
-  hook has fired.
+- **`prearm=<verb>`** — apply a verb to the idle service after the initial
+  fleet settles and before the bump: the grid's Idle column, through the same
+  writes the hook verbs use (a promote or resume names the stable revision's
+  hash, the only revision an idle service has). Accepted: `rollback` (consumed
+  with a `CanaryRollbackIgnored` event, reported), `pause` (the arm holds until
+  the runner lifts the pause `verbhold=` seconds after the bump: no split
+  served and no step past 0 before the lift), `promote` (a stale token that
+  lingers and is ignored: the first timed hold soaks in full), `repin`
+  (lingers until a run opens; the grid leaves the cell open, so the verdict
+  records what the first run did with it and asserts only completion),
+  `resume` (consumed: the annotation is gone at convergence and the ladder
+  runs normally), `timeout-set` with `timeout=` (the arm inherits the budget:
+  with a bad-image bump and `terminal=Failed` the park must arrive at the
+  annotation's timeout, not the plan's `readyTimeout`), `planedit` (the next
+  run pins the edited plan, so the inserted 75% step IS served: the inverse of
+  a mid-run edit's verdict), `groupremove` (nothing arms: the bump is a plain
+  rollout with no canary phase and no run), `scale` with `scale_e=`/`scale_d=`
+  (the fleet is re-shaped and settles before the bump; the arm counts the new
+  fleet). `runlost` is not accepted here: at Idle there is no run to lose, so
+  the Idle/runLost cell needs an invalid policy fixture instead.
+  **`nophase=<Phase>`** — a phase that must not be observed once the hook has
+  fired (with `prearm=`, once the bump lands).
 
 Failure cases set `canary.readyTimeout: "90s"` in the group so the park lands
 inside the case budget.
@@ -332,9 +370,10 @@ one side of it:
   non-empty→non-empty transition, and the pairing surface (pod labels, live
   traffic targets, Service metadata) is asserted at the terminal for the
   protocol it implies: the target on `Stable`, the original on `RolledBack`.
-  **`proto2=`** re-targets the protocol at the `during=` hook, or at the first
-  Ready canary pod when no hook is named; convergence then requires every
-  bumped pod past the pre-re-target revisions (nothing stranded).
+  **`proto2=`** re-targets the protocol at the `during=` hook (at `during2=`
+  when that hook has no `verb2=` of its own), or at the first Ready canary pod
+  when no hook is named; convergence then requires every bumped pod past the
+  pre-re-target revisions (nothing stranded).
 - **`verb=scale`** with **`scale_e=`/`scale_d=`** — re-target one side's
   replicas at the `during=` hook; the convergence target moves with it and the
   capacity floor keeps `min(start, target)` as its basis.
