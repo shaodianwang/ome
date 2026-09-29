@@ -19,10 +19,16 @@ func engineRecord(s *v1beta1.InferenceServiceStatus) *v1beta1.CanaryStatus {
 	return s.Components[v1beta1.EngineComponent].Canary
 }
 
+// isvcWith wraps a status in an object with no rollout spec: only the
+// Components carrying a record are executor-owned.
+func isvcWith(s *v1beta1.InferenceServiceStatus) *v1beta1.InferenceService {
+	return &v1beta1.InferenceService{Status: *s}
+}
+
 // A pass that read the current record writes its decision.
 func TestBaseKeepsADecisionMadeFromTheCurrentRecord(t *testing.T) {
 	read := statusWithRecord(&v1beta1.CanaryStatus{CanaryRevisionHash: "new"}, v1beta1.RolloutPhasePaused)
-	base := NewBase(read)
+	base := NewBase(isvcWith(read))
 	desired := read.DeepCopy()
 	engineRecord(desired).RolledBackRevisionHash = "new"
 	live := read.DeepCopy()
@@ -39,7 +45,7 @@ func TestBaseKeepsADecisionMadeFromTheCurrentRecord(t *testing.T) {
 // and reports it so the pass decides again from the current record.
 func TestBaseKeepsTheLiveRecordOverAStalePass(t *testing.T) {
 	stale := statusWithRecord(&v1beta1.CanaryStatus{CanaryRevisionHash: "new"}, v1beta1.RolloutPhasePaused)
-	base := NewBase(stale)
+	base := NewBase(isvcWith(stale))
 	live := statusWithRecord(&v1beta1.CanaryStatus{CanaryRevisionHash: "new", RolledBackRevisionHash: "new"}, v1beta1.RolloutPhaseRollingBack)
 	entry := live.Components[v1beta1.EngineComponent]
 	entry.Traffic = []v1beta1.ComponentTrafficTarget{{RevisionName: "stable", Percent: 100}}
@@ -73,7 +79,7 @@ func TestBaseKeepsTheLiveRecordOverAStalePass(t *testing.T) {
 
 // A live record that appeared after the pass read no record is newer too.
 func TestBaseKeepsARecordThePassNeverRead(t *testing.T) {
-	base := NewBase(&v1beta1.InferenceServiceStatus{})
+	base := NewBase(&v1beta1.InferenceService{})
 	live := statusWithRecord(&v1beta1.CanaryStatus{CanaryRevisionHash: "new"}, v1beta1.RolloutPhasePending)
 	desired := &v1beta1.InferenceServiceStatus{}
 
@@ -88,7 +94,7 @@ func TestBaseKeepsARecordThePassNeverRead(t *testing.T) {
 // The state a write persisted is the base of the pass's later decisions.
 func TestBaseAdvancesToTheWrittenState(t *testing.T) {
 	read := statusWithRecord(&v1beta1.CanaryStatus{CanaryRevisionHash: "old", RolledBackRevisionHash: "old"}, v1beta1.RolloutPhaseRolledBack)
-	base := NewBase(read)
+	base := NewBase(isvcWith(read))
 	written := statusWithRecord(&v1beta1.CanaryStatus{CanaryRevisionHash: "new"}, v1beta1.RolloutPhasePending)
 	base.Advance(written)
 	desired := written.DeepCopy()
@@ -112,5 +118,40 @@ func TestNilBaseGuardsNothing(t *testing.T) {
 	}
 	if engineRecord(desired).RolledBackRevisionHash != "" {
 		t.Fatal("a nil base must not touch the status")
+	}
+}
+
+// A secondary of a canary group carries no record of its own, yet its traffic
+// is the executor's: a live write to it is kept over a stale pass exactly as
+// the primary's is. Outside a canary group the same Component is not guarded.
+func TestBaseKeepsALiveSecondaryTrafficOverAStalePass(t *testing.T) {
+	read := &v1beta1.InferenceService{Spec: v1beta1.InferenceServiceSpec{Rollout: &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{{
+		Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+		Canary:     &v1beta1.GroupCanary{Steps: twoStep()},
+	}}}}}
+	read.Status = *statusWithRecord(&v1beta1.CanaryStatus{CanaryRevisionHash: "new"}, v1beta1.RolloutPhasePaused)
+	split := []v1beta1.ComponentTrafficTarget{{RevisionName: "d-new", Percent: 50}, {RevisionName: "d-stable", Percent: 50}}
+	whole := []v1beta1.ComponentTrafficTarget{{RevisionName: "d-stable", Percent: 100}}
+
+	base := NewBase(read)
+	live := read.Status.DeepCopy()
+	live.Components[v1beta1.DecoderComponent] = v1beta1.ComponentStatusSpec{Traffic: whole}
+	desired := read.Status.DeepCopy()
+	desired.Components[v1beta1.DecoderComponent] = v1beta1.ComponentStatusSpec{Traffic: split}
+	if !base.PreserveFresh(desired, live) || !base.Stale() {
+		t.Fatal("a newer live split on a secondary was not detected")
+	}
+	if got := desired.Components[v1beta1.DecoderComponent].Traffic; len(got) != 1 || got[0].RevisionName != "d-stable" {
+		t.Fatalf("the live secondary traffic was not kept: %+v", got)
+	}
+
+	unowned := NewBase(&v1beta1.InferenceService{Status: *read.Status.DeepCopy()})
+	desired = read.Status.DeepCopy()
+	desired.Components[v1beta1.DecoderComponent] = v1beta1.ComponentStatusSpec{Traffic: split}
+	if unowned.PreserveFresh(desired, live) || unowned.Stale() {
+		t.Fatal("a Component outside every canary group is not the executor's to guard")
+	}
+	if got := desired.Components[v1beta1.DecoderComponent].Traffic; len(got) != 2 {
+		t.Fatalf("the pass's own write to an unowned Component was dropped: %+v", got)
 	}
 }

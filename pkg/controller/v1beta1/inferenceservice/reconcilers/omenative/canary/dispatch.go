@@ -98,9 +98,10 @@ func (d DispatchDeps) wait() Outcome {
 // Dispatch runs the canary step machine for an InferenceService, mutating
 // isvc.Status in-memory (phase, traffic, step) and returning a requeue hint. The
 // step machine is ISVC-level; it is driven through the externally-routed
-// (primary) Component — the router for PD, otherwise the single Component — whose
-// per-revision Services carry the external traffic weight. Per-component pod
-// capacity is applied separately by the controller via EffectivePartition.
+// (primary) Component — the router for PD, otherwise the single Component —
+// and every member of the group publishes the step's traffic weight on its own
+// per-revision Services. Per-component pod capacity is applied separately by
+// the controller via EffectivePartition.
 //
 // No-op (requeue 0) when no canary plan is set.
 func Dispatch(ctx context.Context, d DispatchDeps) (Outcome, error) {
@@ -183,7 +184,7 @@ func Dispatch(ctx context.Context, d DispatchDeps) (Outcome, error) {
 		now = time.Now()
 	}
 
-	secondaryReady, secondaryFresh, err := secondaryCapacityReady(ctx, d.Reader, d.ISVC, perRev, readyRev, observedPods, primary, d.Group)
+	secondaryReady, secondaryFresh, secondaryObserved, err := secondaryCapacityReady(ctx, d.Reader, d.ISVC, perRev, readyRev, observedPods, primary, d.Group)
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -228,6 +229,10 @@ func Dispatch(ctx context.Context, d DispatchDeps) (Outcome, error) {
 		return Outcome{}, err
 	}
 	groupPods, groupStable := groupRollbackInputs(d.ISVC, d.Group, primary, perRev)
+	secondaries, err := secondaryRevisions(ctx, d.Client, d.ISVC, primary, d.Group, secondaryObserved, groupStable)
+	if err != nil {
+		return Outcome{}, err
+	}
 	res, err := Reconcile(ctx, ReconcileInputs{
 		Client:                    d.Client,
 		Reader:                    d.Reader,
@@ -245,6 +250,7 @@ func Dispatch(ctx context.Context, d DispatchDeps) (Outcome, error) {
 		GroupTotalPerRevisionPods: groupPods,
 		GroupStableRevisionHashes: groupStable,
 		SecondaryCapacityReady:    secondaryReady,
+		Secondaries:               secondaries,
 		Now:                       now,
 		Sampler:                   samplerOrNil(d.Sampler),
 		Prometheus:                resolveCanarySource(d.Group, d.MetricProviders, d.DefaultProvider),
@@ -449,6 +455,31 @@ func groupRollbackInputs(isvc *v1beta1.InferenceService, g *v1beta1.RolloutGroup
 	return pods, stable
 }
 
+// secondaryRevisions resolves each non-primary member's revision pair for the
+// traffic writer: the target the capacity gate observed on its IR, so a
+// member's targets name the revision whose capacity was verified, and the
+// persisted stable revision the rollback check uses, so a rollback returns
+// traffic to the revision the member reverts to. The protocols come from the
+// two ControllerRevisions through the cached client, as the primary's do.
+func secondaryRevisions(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, primary v1beta1.ComponentType, g *v1beta1.RolloutGroup, observed map[v1beta1.ComponentType]observedCanaryRevisions, stable map[v1beta1.ComponentType]string) (map[v1beta1.ComponentType]MemberRevisions, error) {
+	out := map[v1beta1.ComponentType]MemberRevisions{}
+	for _, comp := range configuredComponents(g) {
+		if comp == primary {
+			continue
+		}
+		m := MemberRevisions{CanaryRevisionHash: observed[comp].targetHash, StableRevisionHash: stable[comp]}
+		var err error
+		if m.CanaryPairingProtocol, _, err = coordination.PairingProtocolForRevision(ctx, reads, isvc.Namespace, isvc.Name, comp, m.CanaryRevisionHash); err != nil {
+			return nil, err
+		}
+		if m.StablePairingProtocol, _, err = coordination.PairingProtocolForRevision(ctx, reads, isvc.Namespace, isvc.Name, comp, m.StableRevisionHash); err != nil {
+			return nil, err
+		}
+		out[comp] = m
+	}
+	return out, nil
+}
+
 // samplerOrNil converts a possibly-nil *Sampler into the stepSampler interface,
 // returning a true nil interface (not a non-nil interface wrapping a nil pointer)
 // so the executor's `Sampler == nil` guard works and never dereferences nil.
@@ -511,10 +542,11 @@ func bindingSource(b controllerconfig.MetricProviderBinding, overlay *v1beta1.An
 }
 
 // configuredComponents lists the Components the canary operates on — the canary
-// group's own Components. The step machine + traffic run through the primary
+// group's own Components. The step machine runs through the primary
 // (router>engine>decoder); the capacity gate observes EVERY Component in the
 // group, so a PD pair stages capacity on engine+decoder together before traffic
-// shifts (the secondaryCapacityReady gate).
+// shifts (the secondaryCapacityReady gate), and every Component publishes the
+// step's traffic weight on its own revisions.
 func configuredComponents(g *v1beta1.RolloutGroup) []v1beta1.ComponentType {
 	if g == nil {
 		return nil
@@ -538,9 +570,14 @@ func configuredComponents(g *v1beta1.RolloutGroup) []v1beta1.ComponentType {
 // IR runner topology provides the gang-safe ready Instance count. readyPerRev
 // keeps ready Pods as a required capacity signal. perRev detects a live peer
 // revision while an equal current/target pair settles.
-func secondaryCapacityReady(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, perRev, readyPerRev map[v1beta1.ComponentType]map[string]int32, observedPods map[v1beta1.ComponentType][]*corev1.Pod, primary v1beta1.ComponentType, g *v1beta1.RolloutGroup) (bool, bool, error) {
+//
+// It also returns each secondary's observed revision pair, so the traffic
+// writer keys a member's targets to the very target its capacity was checked
+// against. The pair is complete only when the gate reports a fresh view.
+func secondaryCapacityReady(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, perRev, readyPerRev map[v1beta1.ComponentType]map[string]int32, observedPods map[v1beta1.ComponentType][]*corev1.Pod, primary v1beta1.ComponentType, g *v1beta1.RolloutGroup) (ready, fresh bool, observed map[v1beta1.ComponentType]observedCanaryRevisions, err error) {
+	observed = map[v1beta1.ComponentType]observedCanaryRevisions{}
 	if g == nil || g.Canary == nil || len(g.Canary.Steps) == 0 {
-		return true, true, nil
+		return true, true, observed, nil
 	}
 	plan := g.Canary
 	idx := int32(0)
@@ -554,17 +591,19 @@ func secondaryCapacityReady(ctx context.Context, reads client.Reader, isvc *v1be
 		idx = int32(len(plan.Steps) - 1)
 	}
 	step := plan.Steps[idx]
+	ready = true
 	for _, c := range configuredComponents(g) {
 		if c == primary {
 			continue
 		}
 		revisions, err := observeCanaryRevisions(ctx, reads, isvc, c)
 		if err != nil {
-			return false, false, err
+			return false, false, observed, err
 		}
 		if !revisions.statusFresh {
-			return false, false, nil
+			return false, false, observed, nil
 		}
+		observed[c] = revisions
 		secHash := revisions.targetHash
 		if secHash == "" {
 			continue
@@ -572,18 +611,18 @@ func secondaryCapacityReady(ctx context.Context, reads client.Reader, isvc *v1be
 		// Equal current and target revisions mean this Component was not bumped.
 		// A live peer revision is allowed to disappear before the gate releases.
 		if revisions.currentHash == secHash {
-			if otherRevision(perRev[c], secHash) == "" {
-				continue
+			if otherRevision(perRev[c], secHash) != "" {
+				ready = false
 			}
-			return false, true, nil
+			continue
 		}
 		readyInstances := revisions.readyTargetInstanceCount(observedPods[c])
 		readyCapacity := readyCapacityCount(readyPerRev[c][secHash], readyInstances)
 		if readyCapacity < resolveStepNewCount(step, componentReplicas(isvc, c)) {
-			return false, true, nil
+			ready = false
 		}
 	}
-	return true, true, nil
+	return ready, true, observed, nil
 }
 
 type observedCanaryRevisions struct {
@@ -702,10 +741,10 @@ func observeCanaryRevisions(ctx context.Context, reads client.Reader, isvc *v1be
 	return observedCanaryRevisions{}, nil
 }
 
-// primaryComponent is the externally-routed Component the canary group drives its
-// step machine + traffic weight through: router > engine > decoder, among the
-// group's Components. Secondary Components (a PD pair's engine/decoder) stage
-// capacity and gate the step but don't carry the external traffic weight.
+// primaryComponentOf is the externally-routed Component the canary group drives
+// its step machine through: router > engine > decoder, among the group's
+// Components. Secondary Components (a PD pair's engine/decoder) stage capacity,
+// gate the step, and publish the step's weight on their own revisions.
 func primaryComponentOf(g *v1beta1.RolloutGroup) v1beta1.ComponentType {
 	return rollout.PrimaryOf(g)
 }

@@ -1485,7 +1485,7 @@ func TestUpdateStatusKeepsTheLiveCanaryRecordOverAStalePass(t *testing.T) {
 		// re-armed toward a new target and read the request against it.
 		working := persisted(live)
 		working.Status = statusWith(&v1beta1.CanaryStatus{CanaryRevisionHash: "new", StableRevisionHash: "old"}, v1beta1.RolloutPhasePaused)
-		base := canary.NewBase(&working.Status)
+		base := canary.NewBase(working)
 		working.Status = statusWith(&v1beta1.CanaryStatus{CanaryRevisionHash: "v3", StableRevisionHash: "old", RolledBackRevisionHash: "v3"}, v1beta1.RolloutPhaseRollingBack)
 		entry := engine(working)
 		entry.LatestReadyRevision = "rev-new"
@@ -1509,7 +1509,7 @@ func TestUpdateStatusKeepsTheLiveCanaryRecordOverAStalePass(t *testing.T) {
 			map[string]string{constants.RolloutPromoteAnnotation: "new"})
 		working := persisted(live)
 		working.Status = statusWith(&v1beta1.CanaryStatus{CanaryRevisionHash: "new", StableRevisionHash: "old"}, v1beta1.RolloutPhasePending)
-		base := canary.NewBase(&working.Status)
+		base := canary.NewBase(working)
 		working.Status = statusWith(&v1beta1.CanaryStatus{CanaryRevisionHash: "new", StableRevisionHash: "old", CurrentStep: 1, PromotedThrough: "new"}, v1beta1.RolloutPhasePending)
 		delete(working.Annotations, constants.RolloutPromoteAnnotation)
 
@@ -1527,7 +1527,7 @@ func TestUpdateStatusKeepsTheLiveCanaryRecordOverAStalePass(t *testing.T) {
 			statusWith(&v1beta1.CanaryStatus{CanaryRevisionHash: "new", StableRevisionHash: "old", ObservedTrafficWeight: 50}, v1beta1.RolloutPhasePaused),
 			map[string]string{constants.RolloutPromoteAnnotation: "new"})
 		working := persisted(live)
-		base := canary.NewBase(&working.Status)
+		base := canary.NewBase(working)
 		working.Status = statusWith(&v1beta1.CanaryStatus{CanaryRevisionHash: "new", StableRevisionHash: "old", ObservedTrafficWeight: 50, CurrentStep: 1, PromotedThrough: "new"}, v1beta1.RolloutPhasePending)
 		delete(working.Annotations, constants.RolloutPromoteAnnotation)
 

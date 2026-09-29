@@ -4,6 +4,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/rollout"
 )
 
 // unitState is what the executor projects for one Component: the canary
@@ -41,15 +42,23 @@ func (u unitState) equal(o unitState) bool {
 // decisions over a newer record; comparing the live record with the base is
 // what tells the two apart. A nil Base guards nothing.
 type Base struct {
+	// owned is every Component a canary group governs. The executor writes
+	// each one's traffic, and the primary's record and phase, so a secondary
+	// is guarded like the primary although it carries no record of its own.
+	owned map[v1beta1.ComponentType]struct{}
 	units map[v1beta1.ComponentType]unitState
 	alias *v1beta1.CanaryStatus
 	stale bool
 }
 
-// NewBase snapshots the executor-owned state of a status as read.
-func NewBase(s *v1beta1.InferenceServiceStatus) *Base {
-	b := &Base{}
-	b.snapshot(s)
+// NewBase snapshots the executor-owned state of an InferenceService as read.
+func NewBase(isvc *v1beta1.InferenceService) *Base {
+	b := &Base{owned: rollout.CanaryOwnedComponents(isvc)}
+	if isvc == nil {
+		b.snapshot(nil)
+		return b
+	}
+	b.snapshot(&isvc.Status)
 	return b
 }
 
@@ -65,18 +74,19 @@ func (b *Base) snapshot(s *v1beta1.InferenceServiceStatus) {
 	}
 }
 
-// recordedUnits lists the Components that carry a canary record on either
-// side: the units whose projection the executor owns.
-func (b *Base) recordedUnits(o *Base) map[v1beta1.ComponentType]struct{} {
+// ownedUnits lists the Components whose projection the executor owns: every
+// member of a canary group, and any Component that carries a canary record on
+// either side.
+func (b *Base) ownedUnits(o *Base) map[v1beta1.ComponentType]struct{} {
 	units := map[v1beta1.ComponentType]struct{}{}
-	for c, u := range b.units {
-		if u.canary != nil {
-			units[c] = struct{}{}
-		}
+	for c := range b.owned {
+		units[c] = struct{}{}
 	}
-	for c, u := range o.units {
-		if u.canary != nil {
-			units[c] = struct{}{}
+	for _, side := range []*Base{b, o} {
+		for c, u := range side.units {
+			if u.canary != nil {
+				units[c] = struct{}{}
+			}
 		}
 	}
 	return units
@@ -86,7 +96,7 @@ func (b *Base) equal(o *Base) bool {
 	if !equality.Semantic.DeepEqual(b.alias, o.alias) {
 		return false
 	}
-	for c := range b.recordedUnits(o) {
+	for c := range b.ownedUnits(o) {
 		if !b.units[c].equal(o.units[c]) {
 			return false
 		}
@@ -102,14 +112,15 @@ func (b *Base) PreserveFresh(dst, live *v1beta1.InferenceServiceStatus) bool {
 	if b == nil || dst == nil || live == nil {
 		return false
 	}
-	current := NewBase(live)
+	current := &Base{}
+	current.snapshot(live)
 	if b.equal(current) {
 		return false
 	}
 	if dst.Components == nil {
 		dst.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{}
 	}
-	for c := range b.recordedUnits(current) {
+	for c := range b.ownedUnits(current) {
 		entry := dst.Components[c]
 		u := current.units[c]
 		entry.Canary = u.canary.DeepCopy()

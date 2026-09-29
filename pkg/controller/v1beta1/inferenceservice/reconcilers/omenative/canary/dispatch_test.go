@@ -39,7 +39,7 @@ func mustSecondaryReady(t *testing.T, ctx context.Context, reads client.Reader, 
 			}
 		}
 	}
-	ok, fresh, err := secondaryCapacityReady(ctx, reads, isvc, perRev, readyPerRev, observedPods, primary, rollout.CanaryGroup(isvc))
+	ok, fresh, _, err := secondaryCapacityReady(ctx, reads, isvc, perRev, readyPerRev, observedPods, primary, rollout.CanaryGroup(isvc))
 	if err != nil {
 		t.Fatalf("secondaryCapacityReady error: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestSecondaryCapacityReadyRequiresAuthoritativeIR(t *testing.T) {
 				objects = append(objects, tc.ir)
 			}
 			reads := fake.NewClientBuilder().WithScheme(canaryScheme(t)).WithRuntimeObjects(objects...).Build()
-			ready, fresh, err := secondaryCapacityReady(context.Background(), reads, isvc, perRev, perRev, nil, v1beta1.RouterComponent, rollout.CanaryGroup(isvc))
+			ready, fresh, _, err := secondaryCapacityReady(context.Background(), reads, isvc, perRev, perRev, nil, v1beta1.RouterComponent, rollout.CanaryGroup(isvc))
 			if err != nil {
 				t.Fatalf("secondaryCapacityReady: %v", err)
 			}

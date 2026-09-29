@@ -62,7 +62,13 @@ type ReconcileInputs struct {
 	// exact complete-PodReady target Instance count. Single-component canaries
 	// pass true.
 	SecondaryCapacityReady bool
-	Now                    time.Time
+	// Secondaries carries each NON-primary member's revision pair and pairing
+	// protocols, keyed by Component. Every member publishes the ladder's
+	// weights on its own revisions wherever the primary's traffic is written;
+	// a member absent here has its traffic left alone. nil (single-Component
+	// callers) writes the primary's alone.
+	Secondaries map[v1beta1.ComponentType]MemberRevisions
+	Now         time.Time
 	// Sampler reads analysis metric results without blocking the reconcile: a miss
 	// kicks a bounded background query and an event re-reconciles when it lands.
 	// The controller wires *Sampler; tests inject a fake. Only used by analysis steps.
@@ -99,6 +105,17 @@ type ReconcileInputs struct {
 	// requeue instead of a fixed cadence.
 	Requeue       time.Duration
 	ParkedRequeue time.Duration
+}
+
+// MemberRevisions is one secondary's revision pair: the target its capacity
+// gate verified and its persisted stable revision, with the pairing protocol
+// each was minted under. A member that was not bumped names the same revision
+// twice; a member with no stable revision leaves it empty.
+type MemberRevisions struct {
+	CanaryRevisionHash    string
+	StableRevisionHash    string
+	CanaryPairingProtocol string
+	StablePairingProtocol string
 }
 
 // The ready Pod count bounds the exact ready Instance count and remains the
@@ -361,10 +378,10 @@ func reconcile(ctx context.Context, in ReconcileInputs, take func(string)) (*Res
 		}
 	}
 
-	// Capacity satisfied: program this step's external traffic weight.
+	// Capacity satisfied: program this step's external traffic weight on
+	// every member of the unit.
 	weightBefore := cs.ObservedTrafficWeight
-	applyTraffic(in.ISVC, in.Component, in.CanaryRevisionHash, in.StableRevisionHash,
-		in.CanaryPairingProtocol, in.StablePairingProtocol, step.Traffic)
+	applyGroupTraffic(in, step.Traffic)
 
 	// Final step (TrafficWeight 100): drain the stable revision, then complete.
 	if int(cs.CurrentStep) == len(plan.Steps)-1 {
@@ -525,6 +542,7 @@ func reconcileRollback(in ReconcileInputs, cs *v1beta1.CanaryStatus) *Result {
 		stableProtocol = in.StablePairingProtocol
 	}
 	applyTraffic(in.ISVC, in.Component, cs.RolledBackRevisionHash, stableHash, "", stableProtocol, 0)
+	applyGroupStableTraffic(in)
 	// RolledBack is the revert-COMPLETE phase, so it must wait out every
 	// non-stable revision — not just the rejected one. A retargeted canary
 	// (A -> partial B -> retarget C -> rollback) leaves stragglers on the

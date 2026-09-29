@@ -321,9 +321,10 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return r.handleVirtualDeployment(isvc)
 	}
 
-	// The canary executor's record as this pass read it. The status flush
-	// keeps the live record over decisions made from a stale copy of it.
-	base := canary.NewBase(&isvc.Status)
+	// The canary executor's state as this pass read it: the records, and the
+	// phase and traffic of every Component a canary group governs. The status
+	// flush keeps the live state over decisions made from a stale copy of it.
+	base := canary.NewBase(isvc)
 
 	// Initialize status if not already initialized
 	if isvc.Status.Components == nil {

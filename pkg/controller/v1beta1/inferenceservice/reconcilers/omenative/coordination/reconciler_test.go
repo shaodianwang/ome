@@ -2196,3 +2196,52 @@ func TestReconcile_PinnedCanaryGroupKeepsOwnership(t *testing.T) {
 		}
 	}
 }
+
+// A canary group's secondary is the canary engine's as much as its primary:
+// coordination writes neither's traffic, whatever the pod proportions say, so
+// the step weight the canary engine published on the secondary stands.
+func TestReconcile_LeavesCanarySecondaryTrafficToTheCanaryEngine(t *testing.T) {
+	isvc := testOMENativeISVC()
+	isvc.Spec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{{
+		Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+		Canary: &v1beta1.GroupCanary{Steps: []v1beta1.RolloutGroupStep{
+			{Capacity: intstr.FromString("50%"), Traffic: 10},
+			{Capacity: intstr.FromString("100%"), Traffic: 100},
+		}},
+	}}}
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.DecoderComponent: {Traffic: []v1beta1.ComponentTrafficTarget{
+			{RevisionName: "llama-decoder-rev-canaryhash", Percent: 10},
+			{RevisionName: "llama-decoder-rev-stablehash", Percent: 90},
+		}},
+	}
+	pods := []runtime.Object{
+		buildPod(isvc, v1beta1.DecoderComponent, "canaryhash", 0),
+		buildPod(isvc, v1beta1.DecoderComponent, "stablehash", 1),
+	}
+	c := testClient(pods...)
+	if _, err := Reconcile(context.Background(), ReconcileInputs{
+		ISVC: isvc, Client: c, Reader: c, Now: time.Now(),
+		ComponentDeploymentModes: testOMENativeModes(v1beta1.EngineComponent, v1beta1.DecoderComponent),
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := isvc.Status.Components[v1beta1.DecoderComponent].Traffic
+	if len(got) != 2 {
+		t.Fatalf("coordination rewrote a canary secondary's traffic: %+v", got)
+	}
+	for _, target := range got {
+		var want int32
+		switch target.RevisionName {
+		case "llama-decoder-rev-canaryhash":
+			want = 10
+		case "llama-decoder-rev-stablehash":
+			want = 90
+		default:
+			t.Fatalf("coordination wrote traffic for a canary secondary: %q", target.RevisionName)
+		}
+		if target.Percent != want {
+			t.Errorf("%s: got %d%% want %d%% — coordination overwrote the canary secondary's step weight", target.RevisionName, target.Percent, want)
+		}
+	}
+}
