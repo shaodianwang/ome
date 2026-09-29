@@ -981,3 +981,77 @@ class CanaryExpectTest(unittest.TestCase):
         # a rollback probe that resumes or re-targets afterwards ends Stable
         self.assertEqual(("Stable", False), run._canary_expect("Stable", None, "hold", True))
         self.assertEqual(("RolledBack", True), run._canary_expect("RolledBack", None, "hold", False))
+
+
+class RebumpRollbackProbeTest(unittest.TestCase):
+    """The rollback probe after a re-target verb waits on rebump_retargeted,
+    which is set from a one-sample signal (target_changed). Every sample after
+    the verb fires lands in the hook-bookkeeping if/elif chain, so the
+    assignment must be its own statement, not a branch of that chain."""
+
+    def test_retarget_flag_is_not_a_branch_of_the_hook_chain(self):
+        import ast
+
+        tree = ast.parse((HERE / "run.py").read_text())
+        hits = []
+
+        def visit(node, parents):
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, ast.Assign) and any(
+                        isinstance(t, ast.Name) and t.id == "rebump_retargeted" for t in child.targets
+                ) and isinstance(child.value, ast.Constant) and child.value.value is True:
+                    hits.append(parents)
+                visit(child, parents + [child])
+
+        visit(tree, [])
+        self.assertEqual(len(hits), 1, "expected exactly one `rebump_retargeted = True`")
+        parents = hits[0]
+        guard = parents[-1]
+        self.assertIsInstance(guard, ast.If, "the assignment must sit directly under an if")
+        enclosing = parents[-2]
+        self.assertFalse(
+            isinstance(enclosing, ast.If) and guard in enclosing.orelse,
+            "rebump_retargeted must not be set from an elif of the hook-bookkeeping chain",
+        )
+
+
+class RollbackProbeGateTest(unittest.TestCase):
+    def test_no_verb_never_holds_the_probe(self):
+        self.assertTrue(run._rollback_probe_gate(None, None, False, False))
+
+    def test_pre_rollback_verb_goes_first(self):
+        self.assertFalse(run._rollback_probe_gate("pause", "canary-serving", False, False))
+        self.assertTrue(run._rollback_probe_gate("pause", "canary-serving", True, False))
+
+    def test_retarget_waits_for_the_retargeted_canary(self):
+        self.assertFalse(run._rollback_probe_gate("rebump", "canary-serving", True, False))
+        self.assertTrue(run._rollback_probe_gate("rebump", "canary-serving", True, True))
+
+    def test_post_rollback_verb_never_holds_the_probe(self):
+        for during in ("canary-rollingback", "canary-rolledback", "canary-rolledback@0"):
+            self.assertTrue(run._rollback_probe_gate("rollback", during, False, False), during)
+            self.assertTrue(run._rollback_probe_gate("rebump", during, False, False), during)
+
+
+class StagedPromoteTest(unittest.TestCase):
+    def test_promote_fired_while_staging_counts_once_the_step_advanced(self):
+        self.assertTrue(run._promote_verb_advanced("promote", "canary-staging", True, 12.0))
+        self.assertTrue(run._promote_verb_advanced("promote", "canary-staging@0", True, 12.0))
+
+    def test_anything_else_keeps_the_manual_contract(self):
+        self.assertFalse(run._promote_verb_advanced("promote", "canary-staging", True, None))
+        self.assertFalse(run._promote_verb_advanced("promote", "canary-staging", False, 12.0))
+        self.assertFalse(run._promote_verb_advanced("promote", "canary-serving", True, 12.0))
+        self.assertFalse(run._promote_verb_advanced("pause", "canary-staging", True, 12.0))
+
+
+class PauseLiftTest(unittest.TestCase):
+    def test_convergence_waits_for_a_fired_pause_to_lift(self):
+        self.assertTrue(run._awaiting_pause_lift("pause", True, False))
+        self.assertTrue(run._awaiting_pause_lift("pause-freeze", True, False))
+
+    def test_nothing_else_holds_convergence(self):
+        self.assertFalse(run._awaiting_pause_lift("pause", True, True))
+        self.assertFalse(run._awaiting_pause_lift("pause", False, False))
+        self.assertFalse(run._awaiting_pause_lift("promote", True, False))
+        self.assertFalse(run._awaiting_pause_lift(None, False, False))

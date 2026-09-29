@@ -1326,6 +1326,38 @@ def _canary_hook(phase, can=None, nsteps=None):
             "RolledBack": "canary-rolledback", "Failed": "canary-failed"}.get(phase or "")
 
 
+# Hooks a canary reaches only through a rollback; a verb hooked there cannot
+# fire before the probe has run.
+POST_ROLLBACK_HOOKS = {"canary-rollingback", "canary-rolledback"}
+
+
+def _rollback_probe_gate(verb, during, verb_fired, rebump_retargeted):
+    """Whether the rollback probe may fire. A verb hooked before the rollback
+    goes first (a re-target additionally waits for the re-targeted canary to
+    serve); a verb hooked at or after the rollback never holds the probe."""
+    if not verb:
+        return True
+    if str(during or "").partition("@")[0] in POST_ROLLBACK_HOOKS:
+        return True
+    if not verb_fired:
+        return False
+    return verb not in ("rebump", "rebump-fix") or rebump_retargeted
+
+
+def _promote_verb_advanced(verb, during, verb_fired, advanced_at):
+    """A promote fired while Staging is the manual promotion itself: the step
+    advances as soon as capacity lands, without a soak, so the ladder is never
+    observed Paused and no second promote is owed."""
+    return (verb == "promote" and verb_fired and advanced_at is not None
+            and str(during or "").partition("@")[0] == "canary-staging")
+
+
+def _awaiting_pause_lift(verb, verb_fired, verb_lifted):
+    """A pause verb's claim is what the canary does once the pause is lifted,
+    so convergence may not be declared while the hold is still in place."""
+    return verb in ("pause", "pause-freeze") and verb_fired and not verb_lifted
+
+
 def _plan_edit_untouched(traffic_by_step):
     """A mid-run plan edit leaves the pinned ladder alone: the step it
     inserted is never served."""
@@ -5122,7 +5154,9 @@ def _canary(case_id, yaml_file, desc, hdr):
             hook_fired_ts = now
         elif hook_fired_ts is not None and phase:
             after_hook_phases.add(phase)
-        elif verb_fired and verb in ("rebump", "rebump-fix") and target_changed and previous_canary_hash:
+        # Independent of the hook bookkeeping above: target_changed is true for
+        # one sample only, and every sample after the verb lands in that chain.
+        if verb_fired and verb in ("rebump", "rebump-fix") and target_changed and previous_canary_hash:
             rebump_retargeted = True
         if verb_fired and verb in ("pause", "pause-freeze") and not verb_lifted and now - verb_ts >= verbhold:
             verb_lifted, step_at_lift = True, step
@@ -5154,9 +5188,8 @@ def _canary(case_id, yaml_file, desc, hdr):
 
         # Rollback probe: once the canary is in progress, request a rollback. The
         # canary reverts every Instance to the stable revision and HOLDS there
-        # (RolledBack), rejecting the rolled-back revision. A rebump verb goes
-        # first, and the probe then waits for the retargeted canary to serve.
-        rollback_gate = (not verb) or (verb_fired and (verb not in ("rebump", "rebump-fix") or rebump_retargeted))
+        # (RolledBack), rejecting the rolled-back revision.
+        rollback_gate = _rollback_probe_gate(verb, during, verb_fired, rebump_retargeted)
         if (do_rollback and not rollback_set and canary_target_ready and rollback_gate and
                 phase in ("Canarying", "Paused")):
             rollback_set = True
@@ -5196,6 +5229,8 @@ def _canary(case_id, yaml_file, desc, hdr):
                                             pre_final is not None and bool(stranded()))
         if proto2_target is not None and not p2_fired:
             pods_settled = False   # the re-target must land before convergence counts
+        if _awaiting_pause_lift(verb, verb_fired, verb_lifted):
+            pods_settled = False   # a terminal reached under the pause is judged after the lift
         if phase == expect and pods_settled:
             stable = stable or now
             if now - stable >= STABILITY_S:
@@ -5283,7 +5318,8 @@ def _canary(case_id, yaml_file, desc, hdr):
     if verb in ("pause", "pause-freeze") and verb_fired:
         good(verb_lifted and step_at_lift == step_at_verb,
              f"paused canary held its step ({step_at_verb}) for {verbhold}s until the pause was lifted",
-             f"paused canary moved from step {step_at_verb} to {step_at_lift} under rollout-paused")
+             f"paused canary moved from step {step_at_verb} to {step_at_lift} under rollout-paused" if verb_lifted
+             else f"the pause was never lifted within the budget (held {verbhold}s from step {step_at_verb})")
     if verb == "promote-stale" and verb_fired:
         good(stale_held is True,
              f"a promote naming the stable revision left the step at {step_at_verb}",
@@ -5323,6 +5359,8 @@ def _canary(case_id, yaml_file, desc, hdr):
         # A canary parked on its capacity gate (an unstartable image, no quota)
         # never serves a split either: Pending then Failed is the whole story.
         if not active and expect == "Failed" and ("Failed" in phases):
+            active = True
+        if not active and _promote_verb_advanced(verb, during, verb_fired, advanced_at):
             active = True
         good(active,
              "observed an active canary phase (Canarying/Paused/RollingBack)",
@@ -5447,8 +5485,11 @@ def _canary(case_id, yaml_file, desc, hdr):
             notes.append(f"promote rejected by webhook (kindPromoteTarget vs revision-hash): {promote_rejected}")
             checks.append(f"  ✗ MANUAL promote annotation rejected by admission: {promote_rejected}")
         else:
-            good("Paused" in phases, "MANUAL rollout paused before promote", "MANUAL rollout never Paused")
-            good(did_promote, "promote annotation accepted + consumed (advanced)", "never promoted")
+            staged = _promote_verb_advanced(verb, during, verb_fired, advanced_at)
+            good("Paused" in phases or staged,
+                 "the staged promote advanced the step without a hold" if staged else "MANUAL rollout paused before promote",
+                 "MANUAL rollout never Paused")
+            good(did_promote or staged, "promote annotation accepted + consumed (advanced)", "never promoted")
     else:
         # AUTO advances on the pause timer with no manual promote. If the PLAN has
         # ≥2 traffic-bearing steps it must step through the intermediate weights on
