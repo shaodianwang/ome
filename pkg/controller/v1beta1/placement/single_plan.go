@@ -124,7 +124,19 @@ func (r *Reconciler) reconcileSinglePlanned(ctx context.Context, source *v1beta1
 	if winner != "" {
 		r.sweepPlannedRace(ctx, accepted)
 	}
-	result, err := r.writeSinglePlanStatus(ctx, accepted, observations, "")
+	waiting := false
+	if winner == "" && len(nominated) > 0 {
+		waiting = true
+		for _, name := range nominated {
+			waiting = waiting && applied[name] && observations.homes[name].state == homePresent
+		}
+	}
+	result, err := r.writePlacement(ctx, accepted, r.singlePlanStatus(ctx, accepted, observations, ""))
+	// A materialized race waits for member events or the configured backstop.
+	// Failed writes, unknown observations and stale snapshots retry promptly.
+	if !waiting && result.RequeueAfter > 0 {
+		result.RequeueAfter = r.requeue()
+	}
 	if winner == "" && roundWait > 0 {
 		result.RequeueAfter = min(result.RequeueAfter, roundWait)
 	}
@@ -245,6 +257,14 @@ func (r *Reconciler) deletePlannedRaceLoser(ctx context.Context, source *v1beta1
 }
 
 func (r *Reconciler) writeSinglePlanStatus(ctx context.Context, source *v1beta1.InferenceService, observations *placementObservations, reason string) (ctrl.Result, error) {
+	result, err := r.writePlacement(ctx, source, r.singlePlanStatus(ctx, source, observations, reason))
+	if result.RequeueAfter > 0 {
+		result.RequeueAfter = r.requeue()
+	}
+	return result, err
+}
+
+func (r *Reconciler) singlePlanStatus(ctx context.Context, source *v1beta1.InferenceService, observations *placementObservations, reason string) placementResult {
 	winner := winnerCluster(source)
 	res := placementResult{winner: winner, phase: v1beta1.PlacementPhasePending}
 	cleanupPending, winnerApplied := false, false
@@ -336,7 +356,5 @@ func (r *Reconciler) writeSinglePlanStatus(ctx context.Context, source *v1beta1.
 		}
 		res.conditions = []policyCondition{splitProgressCondition(reason, "")}
 	}
-	result, err := r.writePlacement(ctx, source, res)
-	result.RequeueAfter = r.requeue()
-	return result, err
+	return res
 }

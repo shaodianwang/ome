@@ -22,6 +22,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 
 	"sigs.k8s.io/yaml"
@@ -90,12 +91,22 @@ type SizeClass struct {
 	// InferenceService. No in-code default: the YAML supplies it (any
 	// pullable-looking ref works; envtest never pulls).
 	Image string `json:"image"`
+
+	// RuntimeName identifies the OMENative runtime seeded on every member.
+	RuntimeName string `json:"runtimeName"`
+	// MinReplicas is the complete Engine floor for each generated service.
+	MinReplicas int `json:"minReplicas"`
 }
 
 // Placement carries the placement-reconciler knobs the harness drives.
 // They are config-surface mirrors of the reconciler's own fields/options,
 // supplied by the YAML so a run can sweep them without a code change.
 type Placement struct {
+	// ClientQPS and ClientBurst set the per-member request budget for this workload.
+	// Zero preserves client-go defaults; both must be configured together.
+	ClientQPS   float32 `json:"clientQPS"`
+	ClientBurst int     `json:"clientBurst"`
+
 	// AcceleratorLabel / AcceleratorValue is the capability label the
 	// members advertise and the source ISVCs require (e.g. "gpu" /
 	// "test-accel"). The harness stamps the label on every member's
@@ -277,6 +288,15 @@ func (c *Config) validate() error {
 		if cl.Count < 1 {
 			errs = append(errs, fmt.Errorf("classes[%q].count must be >= 1", cl.ClassName))
 		}
+		if cl.RuntimeName == "" {
+			errs = append(errs, fmt.Errorf("classes[%q].runtimeName must be set", cl.ClassName))
+		}
+		if cl.MinReplicas > math.MaxInt32 {
+			errs = append(errs, fmt.Errorf("classes[%q].minReplicas exceeds the replica API range", cl.ClassName))
+		}
+		if cl.MinReplicas <= 0 {
+			errs = append(errs, fmt.Errorf("classes[%q].minReplicas must be positive", cl.ClassName))
+		}
 		if cl.Image == "" {
 			errs = append(errs, fmt.Errorf("classes[%q].image must be set", cl.ClassName))
 		}
@@ -287,6 +307,9 @@ func (c *Config) validate() error {
 
 func (p *Placement) validate() []error {
 	var errs []error
+	if p.ClientQPS < 0 || p.ClientBurst < 0 || (p.ClientQPS == 0) != (p.ClientBurst == 0) {
+		errs = append(errs, errors.New("placement.clientQPS and clientBurst must both be positive or both zero"))
+	}
 	for _, f := range []struct {
 		name, val string
 	}{

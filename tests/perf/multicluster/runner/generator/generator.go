@@ -1,10 +1,6 @@
-// Package generator turns a config.Config into the control-plane source
-// InferenceServices the placement harness measures. Each source declares the
-// accelerator requirement (so it fans out onto the matching member clusters)
-// and carries the harness + class labels the observer and member-side admitter
-// read. The WorkloadClusters and their kubeconfig Secrets are stood up by the
-// runner before generation (they depend on the member rest.Configs); the
-// generator owns only the source ISVCs.
+// Package generator creates source services and their member runtime catalog
+// for the placement benchmark. Harness and class labels identify each source
+// throughout fan-out and observation.
 package generator
 
 import (
@@ -17,10 +13,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/tests/perf/multicluster/runner/config"
 	perflabels "github.com/ome-projects/ome/tests/perf/multicluster/runner/labels"
 )
@@ -38,9 +36,7 @@ type Generator struct {
 	cfg       *config.Config
 	namespace string
 	sink      CreatedSink
-	// nameSuffix scopes the source-ISVC names to one pass so the funnel pass and
-	// the poll pass never collide on the control cluster (both run in the same
-	// process against the same apiserver).
+	// nameSuffix identifies the comparison pass in source names and diagnostics.
 	nameSuffix string
 }
 
@@ -127,12 +123,32 @@ func (g *Generator) buildSource(cls config.SizeClass, classIdx, i int) *v1beta1.
 			},
 		},
 		Spec: v1beta1.InferenceServiceSpec{
-			Placement: &v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity, Mode: v1beta1.PlacementModeSingle, ClusterAffinity: []v1beta1.ClusterAffinityTerm{{MatchExpressions: []v1beta1.ClusterSelectorRequirement{{Key: g.cfg.Placement.AcceleratorLabel, Operator: corev1.NodeSelectorOpIn, Values: []string{g.cfg.Placement.AcceleratorValue}}}}}},
+			DeploymentMode: ptr.To(constants.OMENative),
+			Runtime:        &v1beta1.ServingRuntimeRef{Name: cls.RuntimeName, Kind: ptr.To("ServingRuntime")},
+			Placement:      &v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity, Mode: v1beta1.PlacementModeSingle, ClusterAffinity: []v1beta1.ClusterAffinityTerm{{MatchExpressions: []v1beta1.ClusterSelectorRequirement{{Key: g.cfg.Placement.AcceleratorLabel, Operator: corev1.NodeSelectorOpIn, Values: []string{g.cfg.Placement.AcceleratorValue}}}}}},
 			Engine: &v1beta1.EngineSpec{
+				ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: ptr.To(cls.MinReplicas)},
 				Runner: &v1beta1.RunnerSpec{
-					Container: corev1.Container{Name: "ome-container", Image: cls.Image},
+					Container: corev1.Container{Name: constants.MainContainerName, Image: cls.Image},
 				},
 			},
 		},
 	}
+}
+
+// SeedRuntimes gives backend preflight a real catalog entry on each member.
+func SeedRuntimes(ctx context.Context, c client.Client, cfg *config.Config, namespace string) error {
+	seen := map[string]bool{}
+	for _, cls := range cfg.Classes {
+		if seen[cls.RuntimeName] {
+			continue
+		}
+		seen[cls.RuntimeName] = true
+		rt := &v1beta1.ServingRuntime{ObjectMeta: metav1.ObjectMeta{Name: cls.RuntimeName, Namespace: namespace},
+			Spec: v1beta1.ServingRuntimeSpec{}}
+		if err := c.Create(ctx, rt); err != nil {
+			return fmt.Errorf("seed runtime %q: %w", cls.RuntimeName, err)
+		}
+	}
+	return nil
 }

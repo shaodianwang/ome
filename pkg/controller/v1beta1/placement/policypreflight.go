@@ -69,17 +69,24 @@ func aggregateCondition(status corev1.ConditionStatus, reason, message string) p
 	}
 }
 
-// applyPolicyConditions writes staged conditions through the ISVC condition
-// manager (which preserves LastTransitionTime on unchanged content). A nil
-// slice is the no-ref fast path: nothing touches the status. A clear entry
-// removes the condition type instead.
+// applyPolicyConditions preserves transition times when the final condition
+// content is unchanged. A clear entry removes the condition type instead.
 func applyPolicyConditions(st *v1beta1.InferenceServiceStatus, conds []policyCondition) {
 	for i := range conds {
 		if conds[i].clear {
 			removeCondition(st, conds[i].condType)
 			continue
 		}
+		previous := st.GetCondition(conds[i].condType)
 		st.SetCondition(conds[i].condType, &conds[i].cond)
+		if sameConditionState(previous, st.GetCondition(conds[i].condType)) {
+			for j := range st.Conditions {
+				if st.Conditions[j].Type == conds[i].condType {
+					st.Conditions[j].LastTransitionTime = previous.LastTransitionTime
+					break
+				}
+			}
+		}
 	}
 }
 

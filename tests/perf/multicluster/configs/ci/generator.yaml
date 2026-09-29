@@ -33,6 +33,9 @@ members:
     admitDelayMs: 9000
 
 placement:
+  # Live runtime and allocation fences share this per-member request budget.
+  clientQPS: 50
+  clientBurst: 100
   acceleratorLabel: gpu
   acceleratorValue: test-accel
   controlPlaneId: perf-mc-ci
@@ -67,10 +70,14 @@ funnel:
 
 classes:
   - className: small
+    runtimeName: runtime-small
+    minReplicas: 1
     count: 8
     creationIntervalMs: 30
     image: ghcr.io/perf/runtime:small
   - className: large
+    runtimeName: runtime-large
+    minReplicas: 1
     count: 2
     creationIntervalMs: 100
     image: ghcr.io/perf/runtime:large

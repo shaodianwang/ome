@@ -376,14 +376,15 @@ func setupMultiCluster(mgr manager.Manager, clientSet kubernetes.Interface, opti
 		placement.WithStatusSafetyRequeue(w.statusSafetyRequeue),
 	}
 	if w.cacheEnabled {
-		funnelCfg := placement.FunnelConfigFor(options.placementControlPlaneID)
-		funnelCfg.ResyncInterval = w.funnelResyncInterval
-		funnelCfg.BufferSize = w.funnelBufferSize
-		funnel := workloadcluster.NewStatusFunnel(clusterManager, funnelCfg)
-		if err := mgr.Add(funnel); err != nil {
-			return fmt.Errorf("add multi-cluster status funnel runnable: %w", err)
+		for _, funnelCfg := range placement.StatusFunnelConfigsFor(options.placementControlPlaneID) {
+			funnelCfg.ResyncInterval = w.funnelResyncInterval
+			funnelCfg.BufferSize = w.funnelBufferSize
+			funnel := workloadcluster.NewStatusFunnel(clusterManager, funnelCfg)
+			if err := mgr.Add(funnel); err != nil {
+				return fmt.Errorf("add multi-cluster status funnel runnable: %w", err)
+			}
+			convergeOpts = append(convergeOpts, placement.WithStatusEvents(funnel.Events()))
 		}
-		convergeOpts = append(convergeOpts, placement.WithStatusEvents(funnel.Events()))
 	}
 
 	// Derived workloads are only Kueue-gated when they carry a queue label, so

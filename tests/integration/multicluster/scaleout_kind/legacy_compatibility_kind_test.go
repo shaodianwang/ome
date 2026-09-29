@@ -25,7 +25,7 @@ var _ = ginkgo.DescribeTable("Legacy placement compatibility (KIND)",
 				s.Spec.Placement.Split = &v1beta1.SplitSpec{Replicas: ptr.To[int32](3), Spread: spread}
 			}
 		})
-		gomega.Eventually(func() int32 { return env.readyReplicasAcrossHomes() }).WithTimeout(longTimeout).WithPolling(pollInterval).Should(gomega.Equal(wantInitial))
+		gomega.Eventually(func() int32 { return env.legacyReadyReplicasAcrossHomes() }).WithTimeout(longTimeout).WithPolling(pollInterval).Should(gomega.Equal(wantInitial))
 		var before map[string][]string
 		gomega.Eventually(func(g gomega.Gomega) {
 			snapshot := map[string][]string{}
@@ -38,7 +38,7 @@ var _ = ginkgo.DescribeTable("Legacy placement compatibility (KIND)",
 				slices.Sort(snapshot[m.wcName])
 			}
 			g.Expect(total).To(gomega.Equal(int(wantInitial)), "wait for surplus pod cleanup before the restart snapshot")
-			g.Expect(env.readyReplicasAcrossHomes()).To(gomega.Equal(wantInitial))
+			g.Expect(env.legacyReadyReplicasAcrossHomes()).To(gomega.Equal(wantInitial))
 			before = snapshot
 		}).WithTimeout(longTimeout).WithPolling(pollInterval).Should(gomega.Succeed())
 		ginkgo.By("restarting placement with stored legacy intent and standing pods")
@@ -48,7 +48,7 @@ var _ = ginkgo.DescribeTable("Legacy placement compatibility (KIND)",
 			ps := placementStatusOf(env.isvcNS, env.isvcName)
 			g.Expect(ps).NotTo(gomega.BeNil())
 			g.Expect(ps.Plan).To(gomega.BeNil())
-			g.Expect(env.readyReplicasAcrossHomes()).To(gomega.Equal(wantInitial))
+			g.Expect(env.legacyReadyReplicasAcrossHomes()).To(gomega.Equal(wantInitial))
 			after := map[string][]string{}
 			for _, m := range env.members {
 				for _, pod := range enginePodsOn(g, m.c, env.isvcNS, env.isvcName) {
@@ -75,7 +75,7 @@ var _ = ginkgo.DescribeTable("Legacy placement compatibility (KIND)",
 			return controlCluster.client.Update(controlCluster.ctx, current)
 		})).To(gomega.Succeed())
 		gomega.Eventually(func(g gomega.Gomega) {
-			g.Expect(env.readyReplicasAcrossHomes()).To(gomega.Equal(wantUpdated))
+			g.Expect(env.legacyReadyReplicasAcrossHomes()).To(gomega.Equal(wantUpdated))
 			total := 0
 			for _, m := range env.members {
 				pods := enginePodsOn(g, m.c, env.isvcNS, env.isvcName)
@@ -100,3 +100,15 @@ var _ = ginkgo.DescribeTable("Legacy placement compatibility (KIND)",
 	ginkgo.Entry("Packed fills admitted homes", v1beta1.PlacementModeSplit, false, int32(3), int32(5)),
 	ginkgo.Entry("spread retains per-home ceiling rounding", v1beta1.PlacementModeSplit, true, int32(4), int32(6)),
 )
+
+func (e *specEnv) legacyReadyReplicasAcrossHomes() int32 {
+	ps := placementStatusOf(e.isvcNS, e.isvcName)
+	if ps == nil {
+		return 0
+	}
+	var total int32
+	for i := range ps.Candidates {
+		total += ps.Candidates[i].ReadyReplicas
+	}
+	return total
+}

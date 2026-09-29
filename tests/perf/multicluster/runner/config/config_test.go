@@ -3,7 +3,10 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/google/go-cmp/cmp"
 )
 
 const validYAML = `
@@ -26,10 +29,14 @@ funnel:
   resyncIntervalMs: 250
 classes:
   - className: small
+    runtimeName: runtime-small
+    minReplicas: 1
     count: 10
     creationIntervalMs: 20
     image: ghcr.io/perf/runtime:small
   - className: large
+    runtimeName: runtime-large
+    minReplicas: 1
     count: 5
     creationIntervalMs: 100
     image: ghcr.io/perf/runtime:large
@@ -80,6 +87,8 @@ funnel:
   batchPeriodMs: 100
 classes:
   - className: small
+    runtimeName: runtime-small
+    minReplicas: 1
     count: 1
     image: img
 `,
@@ -100,6 +109,8 @@ funnel:
   batchPeriodMs: 100
 classes:
   - className: small
+    runtimeName: runtime-small
+    minReplicas: 1
     count: 1
     image: img
 `,
@@ -119,6 +130,8 @@ funnel:
   batchPeriodMs: 100
 classes:
   - className: small
+    runtimeName: runtime-small
+    minReplicas: 1
     count: 1
     image: img
 `,
@@ -138,6 +151,8 @@ funnel:
   batchPeriodMs: 100
 classes:
   - className: small
+    runtimeName: runtime-small
+    minReplicas: 1
     count: 1
     image: img
 `,
@@ -156,6 +171,8 @@ funnel:
   batchPeriodMs: 100
 classes:
   - className: small
+    runtimeName: runtime-small
+    minReplicas: 1
     count: 1
     image: img
 `,
@@ -175,6 +192,8 @@ funnel:
   batchPeriodMs: 100
 classes:
   - className: small
+    runtimeName: runtime-small
+    minReplicas: 1
     count: 1
 `,
 		"no classes": `
@@ -209,5 +228,47 @@ func TestLoadConfigUnknownFieldRejected(t *testing.T) {
 	body := validYAML + "\nbogusField: 1\n"
 	if _, err := LoadConfig(writeTemp(t, body)); err == nil {
 		t.Fatalf("expected strict-parse error for unknown field, got nil")
+	}
+}
+
+func TestLoadConfigRequiresMemberPolicy(t *testing.T) {
+	for _, tt := range []struct{ name, from, to, want string }{
+		{name: "runtime", from: "runtimeName: runtime-small", to: "runtimeName: ''", want: "runtimeName must be set"},
+		{name: "zero floor", from: "minReplicas: 1", to: "minReplicas: 0", want: "minReplicas must be positive"},
+		{name: "negative floor", from: "minReplicas: 1", to: "minReplicas: -1", want: "minReplicas must be positive"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := LoadConfig(writeTemp(t, strings.Replace(validYAML, tt.from, tt.to, 1)))
+			got := err != nil && strings.Contains(err.Error(), tt.want)
+			if diff := cmp.Diff(true, got); diff != "" {
+				t.Fatalf("validation (-want +got): %s; error: %v", diff, err)
+			}
+		})
+	}
+}
+
+func TestPlacementClientTuning(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		qps     float32
+		burst   int
+		wantErr bool
+	}{
+		{name: "client defaults"},
+		{name: "explicit budget", qps: 50, burst: 100},
+		{name: "missing burst", qps: 50, wantErr: true},
+		{name: "missing rate", burst: 100, wantErr: true},
+		{name: "negative rate", qps: -1, burst: 100, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := LoadConfig(writeTemp(t, validYAML))
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg.Placement.ClientQPS, cfg.Placement.ClientBurst = tt.qps, tt.burst
+			if diff := cmp.Diff(tt.wantErr, cfg.validate() != nil); diff != "" {
+				t.Error(diff)
+			}
+		})
 	}
 }

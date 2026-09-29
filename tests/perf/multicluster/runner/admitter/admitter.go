@@ -1,23 +1,17 @@
-// Package admitter is the member-side stand-in for Kueue + the worker
-// reconciler. The control-plane placer fans a source InferenceService out
-// onto every candidate member; on each member the placer then watches the
-// derived ISVC for AllComponentsAdmitted (an admitted instance on every
-// declared component) to declare that member the race winner. envtest runs no
-// OME reconciler on the members, so this admitter plays that role: it watches
-// the member's derived ISVCs and, after a configurable per-member admit delay,
-// stamps an admitted instance onto every declared component's InferenceReplica
-// (the authoritative per-instance status the placer reads).
-//
-// The per-member delay is what makes the race deterministic: a member with a
-// short delay admits first and wins; a member with a long delay loses and has
-// its derived swept. The admitter reports the admit instant to the recorder so
-// the harness can measure status-convergence latency (admit -> source status
-// reflects it) — the headline funnel-vs-poll metric.
+// Package admitter simulates delayed member admission for placement benchmarks.
+// It acknowledges the derived execution policy on owned InferenceReplicas;
+// physical Pod readiness and rollout transitions require the integration suites.
 package admitter
 
 import (
 	"context"
+	"fmt"
+	"maps"
+	"strconv"
 	"time"
+
+	"k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/utils/ptr"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -31,6 +25,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/placement/protocol"
 	"github.com/ome-projects/ome/tests/integration/util"
 	perflabels "github.com/ome-projects/ome/tests/perf/multicluster/runner/labels"
 )
@@ -84,8 +80,7 @@ func New(c client.Client, admitDelay time.Duration, concurrency int, clockNow fu
 
 var _ reconcile.Reconciler = (*Reconciler)(nil)
 
-// Reconcile drives one derived ISVC toward admitted. It is a no-op once every
-// declared component's InferenceReplica already reports an admitted instance.
+// Reconcile admits each configured replica and acknowledges its execution policy.
 func (r *Reconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
 	derived := &v1beta1.InferenceService{}
 	if err := r.client.Get(ctx, req.NamespacedName, derived); err != nil {
@@ -162,88 +157,129 @@ func componentIRName(isvcName string, comp v1beta1.ComponentType) string {
 	return isvcName + "-" + string(comp)
 }
 
-// markAdmitted stamps an admitted, ready instance onto every declared
-// component's InferenceReplica — the authoritative per-instance status the
-// placer's AllComponentsAdmitted reads from the IR, which alone carries the
-// per-instance rows, to pick a winner. Each IR is created if absent, then its
-// status subresource is written.
+// admissionIR derives the single-runner fixture from explicit member authority.
+func admissionIR(derived *v1beta1.InferenceService, comp v1beta1.ComponentType) (*v1beta1.InferenceReplica, error) {
+	policy, err := protocol.FromDerived(derived)
+	if err != nil {
+		return nil, err
+	}
+	if policy == nil || derived.UID == "" {
+		return nil, fmt.Errorf("admission requires an identified derived service and execution policy")
+	}
+	if policy.PauseSurge || policy.Demand != nil {
+		return nil, fmt.Errorf("admission benchmark supports unpaused full-policy homes only")
+	}
+	var replicas int32
+	for _, floor := range policy.ReplicaFloors {
+		if floor.Component == comp {
+			replicas = floor.Replicas
+		}
+	}
+	var runner *v1beta1.RunnerSpec
+	switch comp {
+	case v1beta1.EngineComponent:
+		if derived.Spec.Engine != nil {
+			runner = derived.Spec.Engine.Runner
+		}
+	case v1beta1.DecoderComponent:
+		if derived.Spec.Decoder != nil {
+			runner = derived.Spec.Decoder.Runner
+		}
+	case v1beta1.RouterComponent:
+		if derived.Spec.Router != nil {
+			runner = derived.Spec.Router.Runner
+		}
+	}
+	if replicas <= 0 || runner == nil || runner.Image == "" {
+		return nil, fmt.Errorf("admission requires an explicit floor and runner for %s", comp)
+	}
+	labels := maps.Clone(derived.Labels)
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	labels[constants.InferenceServicePodLabelKey] = derived.Name
+	return &v1beta1.InferenceReplica{
+		ObjectMeta: metav1.ObjectMeta{Namespace: derived.Namespace, Name: componentIRName(derived.Name, comp),
+			Labels:          labels,
+			Annotations:     map[string]string{constants.InferenceReplicaParentGenerationAnnotationKey: strconv.FormatInt(derived.Generation, 10)},
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(derived, v1beta1.SchemeGroupVersion.WithKind("InferenceService"))}},
+		Spec: v1beta1.InferenceReplicaSpec{ParentRef: &v1beta1.ParentReference{Name: derived.Name}, Component: comp, Replicas: ptr.To(replicas), PlacementExecution: policy,
+			Runners: []v1beta1.Runner{{Name: v1beta1.RunnerNameDefault, Size: 1, Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{runner.Container}}}}}},
+	}, nil
+}
+
+// markAdmitted acknowledges each exact execution policy after the member delay.
 func (r *Reconciler) markAdmitted(ctx context.Context, derived *v1beta1.InferenceService) error {
 	for _, comp := range declaredComponents(derived) {
-		ir := &v1beta1.InferenceReplica{
-			ObjectMeta: metav1.ObjectMeta{
-				Namespace: derived.Namespace,
-				Name:      componentIRName(derived.Name, comp),
-			},
-			// Minimal valid spec so the Create passes CRD schema validation on
-			// bare members (no manager pre-creates the IR). Ignored when the IR
-			// already exists (Create returns AlreadyExists).
-			Spec: v1beta1.InferenceReplicaSpec{
-				ParentRef: &v1beta1.ParentReference{Name: derived.Name},
-				Component: comp,
-				Runners: []v1beta1.Runner{{
-					Name: v1beta1.RunnerNameDefault,
-					Size: 1,
-					Template: corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "sim:latest"}}},
-					},
-				}},
-			},
-		}
-		if err := r.client.Create(ctx, ir); err != nil && !apierrors.IsAlreadyExists(err) {
+		desired, err := admissionIR(derived, comp)
+		if err != nil {
 			return err
 		}
-		// Re-read for the current resourceVersion before the status write (the
-		// IR may already exist from a prior reconcile or the worker path).
-		if err := r.client.Get(ctx, types.NamespacedName{Namespace: ir.Namespace, Name: ir.Name}, ir); err != nil {
+		ir := &v1beta1.InferenceReplica{}
+		err = r.client.Get(ctx, client.ObjectKeyFromObject(desired), ir)
+		if apierrors.IsNotFound(err) {
+			ir = desired
+			if err := r.client.Create(ctx, ir); err != nil {
+				return err
+			}
+		} else if err != nil {
+			return err
+		} else {
+			if !metav1.IsControlledBy(ir, derived) {
+				return fmt.Errorf("admission component is not owned by the derived service")
+			}
+			ir.Spec, ir.Annotations = desired.Spec, desired.Annotations
+			if err := r.client.Update(ctx, ir); err != nil {
+				return err
+			}
+		}
+		if err := r.client.Get(ctx, client.ObjectKeyFromObject(ir), ir); err != nil {
 			return err
 		}
-		if err := util.WriteDenseInstanceStatuses(ctx, r.client, ir, []v1beta1.OMENativeInstanceStatus{
-			{Index: 0, Phase: v1beta1.OMENativeInstanceReady, Admitted: true},
-		}); err != nil {
+		rows := make([]v1beta1.OMENativeInstanceStatus, int(*ir.Spec.Replicas))
+		for i := range rows {
+			rows[i] = v1beta1.OMENativeInstanceStatus{Index: int32(i), Phase: v1beta1.OMENativeInstancePending, Admitted: true}
+		}
+		ir.Status.ObservedGeneration = ir.Generation
+		ir.Status.PlacementObservedGeneration = ir.Generation
+		if err := util.WriteDenseInstanceStatuses(ctx, r.client, ir, rows); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// allComponentsAdmitted reports whether every declared component's
-// InferenceReplica already has an admitted instance (the steady state the
-// admitter leaves a winner in). Kept local so the admitter has no dependency on
-// the placement package internals.
-func (r *Reconciler) allComponentsAdmitted(ctx context.Context, isvc *v1beta1.InferenceService) (bool, error) {
-	declared := declaredComponents(isvc)
+func (r *Reconciler) allComponentsAdmitted(ctx context.Context, derived *v1beta1.InferenceService) (bool, error) {
+	declared := declaredComponents(derived)
 	if len(declared) == 0 {
 		return false, nil
 	}
 	for _, comp := range declared {
-		rows, err := r.componentInstanceStatuses(ctx, isvc.Namespace, isvc.Name, comp)
+		desired, err := admissionIR(derived, comp)
 		if err != nil {
 			return false, err
 		}
-		if !hasAdmittedInstance(rows) {
+		ir := &v1beta1.InferenceReplica{}
+		if err := r.client.Get(ctx, client.ObjectKeyFromObject(desired), ir); apierrors.IsNotFound(err) {
 			return false, nil
+		} else if err != nil {
+			return false, err
+		}
+		if !metav1.IsControlledBy(ir, derived) || !equality.Semantic.DeepEqual(ir.Spec.PlacementExecution, desired.Spec.PlacementExecution) || !equality.Semantic.DeepEqual(ir.Spec.Replicas, desired.Spec.Replicas) || ir.Annotations[constants.InferenceReplicaParentGenerationAnnotationKey] != desired.Annotations[constants.InferenceReplicaParentGenerationAnnotationKey] || ir.Status.PlacementObservedGeneration != ir.Generation {
+			return false, nil
+		}
+		rows, err := util.DecodedInstanceStatuses(ir)
+		if err != nil {
+			return false, err
+		}
+		if len(rows) != int(*desired.Spec.Replicas) {
+			return false, nil
+		}
+		for _, row := range rows {
+			if !row.Admitted {
+				return false, nil
+			}
 		}
 	}
 	return true, nil
-}
-
-// componentInstanceStatuses reads one component's decoded InferenceReplica
-// rows, returning (nil, nil) when the IR does not exist yet (treated as "no
-// admitted instance").
-func (r *Reconciler) componentInstanceStatuses(ctx context.Context, namespace, isvcName string, comp v1beta1.ComponentType) ([]v1beta1.OMENativeInstanceStatus, error) {
-	key := types.NamespacedName{Namespace: namespace, Name: componentIRName(isvcName, comp)}
-	rows, err := util.GetInstanceStatuses(ctx, r.client, key)
-	if apierrors.IsNotFound(err) {
-		return nil, nil
-	}
-	return rows, err
-}
-
-func hasAdmittedInstance(rows []v1beta1.OMENativeInstanceStatus) bool {
-	for _, inst := range rows {
-		if inst.Admitted {
-			return true
-		}
-	}
-	return false
 }

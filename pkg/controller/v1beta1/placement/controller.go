@@ -1056,19 +1056,18 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager, opts ...ConvergeOption) 
 	}
 	b := ctrl.NewControllerManagedBy(mgr).
 		Named(PlacementControllerName).
-		For(&v1beta1.InferenceService{}).
+		For(&v1beta1.InferenceService{}, builder.WithPredicates(placementRelevantSourceChange)).
 		WithOptions(controller.Options{MaxConcurrentReconciles: r.MaxConcurrentReconciles}).
 		Watches(&v1beta1.WorkloadCluster{}, handler.EnqueueRequestsFromMapFunc(r.isvcsForClusterChange),
 			builder.WithPredicates(placementRelevantClusterChange))
 	if r.Capacity != nil {
 		b = b.Watches(&v1beta1.AcceleratorQuota{}, handler.EnqueueRequestsFromMapFunc(r.isvcsForCapacityChange), builder.WithPredicates(capacityRelevantChange))
 	}
-	// Consume the remote watch-funnel channel: each event already carries the
-	// LOCAL source key (resolved funnel-side), so the handler just enqueues that
-	// key, debounced by the batch period so a burst of derived-status updates for
-	// one ISVC folds into a single reconcile.
-	if cfg.statusEvents != nil {
-		b = b.WatchesRawSource(source.Channel(cfg.statusEvents, r.statusEventHandler(cfg.batchPeriod)))
+	// Member event streams share one debounce handler, so a burst of status
+	// changes for one source produces one reconcile.
+	eventHandler := r.statusEventHandler(cfg.batchPeriod)
+	for _, events := range cfg.statusEvents {
+		b = b.WatchesRawSource(source.Channel(events, eventHandler))
 	}
 	return b.Complete(r)
 }

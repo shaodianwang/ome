@@ -1,10 +1,14 @@
 package scaleout_kind
 
 import (
+	"slices"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
@@ -22,35 +26,61 @@ var _ = ginkgo.Describe("Multi-cluster scale and churn (KIND)", func() {
 
 	ginkgo.It("converges a multi-replica spread across both homes", func() {
 		const (
-			desired   = 6
-			perHome   = desired / 2
-			converged = int32(desired)
+			desired = 6
+			perHome = desired / 2
 		)
 
 		model, runtime := env.seedModelRuntimeOnMembers()
 		env.createSplitSource(model, runtime, desired)
 
-		ginkgo.By("asserting every home brings up its full share of running pods")
-		for _, m := range env.members {
-			gomega.Eventually(func(g gomega.Gomega) {
-				g.Expect(runningEnginePodsOn(g, m.c, env.isvcNS, env.isvcName)).
-					To(gomega.Equal(perHome))
-			}).WithTimeout(longTimeout).WithPolling(pollInterval).Should(gomega.Succeed(),
-				"%s should be running its %d-replica share", m.wcName, perHome)
+		readyPods := func(g gomega.Gomega) map[string][]types.UID {
+			out := map[string][]types.UID{}
+			for _, m := range env.members {
+				pods := enginePodsOn(g, m.c, env.isvcNS, env.isvcName)
+				g.Expect(cmp.Diff(perHome, len(pods))).To(gomega.BeEmpty(), "pod count on %s", m.wcName)
+				for _, pod := range pods {
+					g.Expect(pod.DeletionTimestamp.IsZero()).To(gomega.BeTrue())
+					g.Expect(cmp.Diff(corev1.PodRunning, pod.Status.Phase)).To(gomega.BeEmpty())
+					g.Expect(slices.ContainsFunc(pod.Status.Conditions, func(c corev1.PodCondition) bool {
+						return c.Type == corev1.PodReady && c.Status == corev1.ConditionTrue
+					})).To(gomega.BeTrue(), "pod %s must be ready", pod.Name)
+					out[m.wcName] = append(out[m.wcName], pod.UID)
+				}
+				slices.Sort(out[m.wcName])
+			}
+			return out
+		}
+		assertConvergedStatus := func(g gomega.Gomega) {
+			ps := placementStatusOf(env.isvcNS, env.isvcName)
+			g.Expect(ps).NotTo(gomega.BeNil())
+			g.Expect(ps.Plan).NotTo(gomega.BeNil())
+			g.Expect(ps.Plan.PauseSurge).To(gomega.BeFalse())
+			g.Expect(cmp.Diff(int64(desired), ps.Plan.AssignedReplicas)).To(gomega.BeEmpty())
+			g.Expect(cmp.Diff(int32(0), ps.Plan.UnassignedReplicas)).To(gomega.BeEmpty())
+			for _, m := range env.members {
+				candidate := candidateFor(ps, m.wcName)
+				g.Expect(candidate).NotTo(gomega.BeNil())
+				g.Expect(candidate.Allocation).NotTo(gomega.BeNil())
+				g.Expect(candidate.ObservationKnown).To(gomega.BeTrue())
+				g.Expect(cmp.Diff(ps.Plan.ID, candidate.AppliedPlanID)).To(gomega.BeEmpty())
+				g.Expect(cmp.Diff([3]int32{perHome, perHome, perHome}, [3]int32{candidate.Allocation.CurrentReplicas, candidate.Allocation.DesiredReplicas, candidate.ReadyReplicas})).To(gomega.BeEmpty(), "current, desired, ready replicas on %s", m.wcName)
+			}
 		}
 
-		ginkgo.By("asserting the fleet-wide ready count reaches the desired total")
-		gomega.Eventually(func() int32 {
-			return env.readyReplicasAcrossHomes()
-		}).WithTimeout(longTimeout).WithPolling(pollInterval).Should(gomega.Equal(converged),
-			"summed ready replicas should reach the desired count")
+		ginkgo.By("waiting for ready pods and acknowledgement of the settled plan")
+		var serving map[string][]types.UID
+		gomega.Eventually(func(g gomega.Gomega) {
+			serving = readyPods(g)
+			assertConvergedStatus(g)
+		}).WithTimeout(longTimeout).WithPolling(pollInterval).Should(gomega.Succeed())
 
-		// Reaching the count is half the claim; not overshooting is the other.
-		// An apportionment that keeps over-requesting would sit above desired.
-		ginkgo.By("asserting it settles at the desired count rather than overshooting")
-		gomega.Consistently(func() int32 {
-			return env.readyReplicasAcrossHomes()
-		}).WithTimeout(15 * time.Second).WithPolling(time.Second).Should(gomega.Equal(converged))
+		// A guarded inventory read can become unknown while member status changes.
+		// Direct Pod identity and readiness prove workload stability through that gap.
+		ginkgo.By("asserting the ready workloads stay stable without extra pods")
+		gomega.Consistently(func(g gomega.Gomega) {
+			g.Expect(cmp.Diff(serving, readyPods(g))).To(gomega.BeEmpty())
+		}).WithTimeout(15 * time.Second).WithPolling(time.Second).Should(gomega.Succeed())
+		gomega.Eventually(assertConvergedStatus).WithTimeout(longTimeout).WithPolling(pollInterval).Should(gomega.Succeed())
 	})
 
 	ginkgo.It("keeps the winner and its endpoint stable across repeated loss of the other home", func() {

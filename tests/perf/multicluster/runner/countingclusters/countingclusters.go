@@ -1,21 +1,12 @@
-// Package countingclusters wraps the placement reconciler's view of the
-// cross-cluster transport (placement.ClusterClients) so every remote
-// round-trip the placer makes — fan-out Creates/Updates, findWinner Gets,
-// loser Deletes, status reads — is counted per verb and resource kind.
-//
-// The placer reaches the member apiservers ONLY through
-// ClusterClients.ClientFor(name); wrapping that one seam captures the entire
-// remote op profile without touching the reconciler. The per-cluster clients
-// are SelectivelyCachingClients (WithWatch + cache event handlers), so the
-// wrapper embeds the real client for the non-counted surface (Watch,
-// AddCacheEventHandler, Scheme, RESTMapper, ...) and overrides only the verbs
-// worth counting, delegating each to the embedded client after bumping the
-// shared counter. Counts come from tests/perf/internal/opcount so the count
-// schema matches the rest of the perf harnesses.
+// Package countingclusters counts remote operations while preserving identified
+// transports, live observations, and informer event handlers.
 package countingclusters
 
 import (
 	"context"
+	"sync"
+
+	"k8s.io/apimachinery/pkg/types"
 
 	toolscache "k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -28,8 +19,10 @@ import (
 // Counting wraps a placement.ClusterClients, counting every op on the
 // per-cluster clients it hands out into a shared opcount.Counts.
 type Counting struct {
-	inner  placement.ClusterClients
-	counts *opcount.Counts
+	inner   placement.ClusterClients
+	counts  *opcount.Counts
+	mu      sync.Mutex
+	clients map[string]*countingRemote
 }
 
 var _ placement.ClusterClients = (*Counting)(nil)
@@ -37,7 +30,7 @@ var _ placement.ClusterClients = (*Counting)(nil)
 // New wraps inner so the per-cluster clients it returns accumulate their ops
 // into counts. The same counts can be Snapshot/Flat'd after a pass.
 func New(inner placement.ClusterClients, counts *opcount.Counts) *Counting {
-	return &Counting{inner: inner, counts: counts}
+	return &Counting{inner: inner, counts: counts, clients: map[string]*countingRemote{}}
 }
 
 // Connected passes through; it makes no remote call.
@@ -46,11 +39,40 @@ func (c *Counting) Connected() []string { return c.inner.Connected() }
 // ClientFor returns a counting wrapper around the live per-cluster client, or
 // (nil, false) when the cluster is not connected.
 func (c *Counting) ClientFor(name string) (workloadcluster.SelectivelyCachingClient, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	cl, ok := c.inner.ClientFor(name)
+	return c.wrap(name, cl, ok)
+}
+
+// ClientForUID keeps registration verification on the underlying manager.
+func (c *Counting) ClientForUID(name string, uid types.UID) (workloadcluster.SelectivelyCachingClient, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	identified, ok := c.inner.(interface {
+		ClientForUID(string, types.UID) (workloadcluster.SelectivelyCachingClient, bool)
+	})
 	if !ok {
 		return nil, false
 	}
-	return &countingRemote{SelectivelyCachingClient: cl, counts: c.counts}, true
+	cl, ok := identified.ClientForUID(name, uid)
+	return c.wrap(name, cl, ok)
+}
+
+// One wrapper per live connection preserves placement's transport fence.
+func (c *Counting) wrap(name string, cl workloadcluster.SelectivelyCachingClient, ok bool) (workloadcluster.SelectivelyCachingClient, bool) {
+	if !ok || cl == nil {
+		return nil, false
+	}
+	if old := c.clients[name]; old != nil && old.SelectivelyCachingClient == cl {
+		return old, true
+	}
+	wrapped := &countingRemote{SelectivelyCachingClient: cl, counts: c.counts}
+	if direct, ok := workloadcluster.DirectClient(cl); ok {
+		wrapped.direct = &countingRemote{SelectivelyCachingClient: workloadcluster.NewNeverCachingClient(direct), counts: c.counts}
+	}
+	c.clients[name] = wrapped
+	return wrapped, true
 }
 
 // countingRemote is a SelectivelyCachingClient that counts the verbs the
@@ -60,7 +82,11 @@ func (c *Counting) ClientFor(name string) (workloadcluster.SelectivelyCachingCli
 type countingRemote struct {
 	workloadcluster.SelectivelyCachingClient
 	counts *opcount.Counts
+	direct client.WithWatch
 }
+
+// DirectClient counts live operations without passing reads through an informer.
+func (c *countingRemote) DirectClient() client.WithWatch { return c.direct }
 
 func (c *countingRemote) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 	c.counts.Add("get", opcount.KindOf(obj))

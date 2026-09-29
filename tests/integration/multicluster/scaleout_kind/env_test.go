@@ -366,20 +366,6 @@ func (e *specEnv) reconnectMember(m memberReg) {
 		"%s should return to Ready once its kubeconfig is restored", m.wcName)
 }
 
-// readyReplicasAcrossHomes sums the ready-replica weight every home reports —
-// the fleet-wide count Split converges toward.
-func (e *specEnv) readyReplicasAcrossHomes() int32 {
-	ps := placementStatusOf(e.isvcNS, e.isvcName)
-	if ps == nil {
-		return 0
-	}
-	var total int32
-	for i := range ps.Candidates {
-		total += ps.Candidates[i].ReadyReplicas
-	}
-	return total
-}
-
 // createFailingSource creates a Single-mode source whose engine image does not
 // exist, with a short InstanceReadyTimeout so the member's readiness backstop
 // escalates the Instance to Failed inside the suite's budget rather than the

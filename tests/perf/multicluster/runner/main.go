@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/placement"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workloadcluster"
 	"github.com/ome-projects/ome/tests/integration/components"
@@ -119,37 +120,14 @@ func run(ctx context.Context) error {
 	}
 	log.Info("loaded generator config",
 		"members", len(cfg.Members), "classes", len(cfg.Classes),
-		"sourcesPerPass", cfg.Total(), "dispatcher", cfg.Placement.DispatcherMode)
-
-	memberNames := make([]string, len(cfg.Members))
-	for i, m := range cfg.Members {
-		memberNames[i] = m.Name
-	}
+		"sourcesPerPass", cfg.Total(), "dispatcher", cfg.Placement.DispatcherMode,
+		"memberClientQPS", cfg.Placement.ClientQPS, "memberClientBurst", cfg.Placement.ClientBurst)
 
 	startWall := time.Now()
-
-	// Stand up the control plane + members (two-phase scheme guard) and seed the
-	// member WorkloadClusters/Secrets on the control plane.
-	topo, err := clusters.BringUp(ctx, memberNames, cfg.Placement.AcceleratorLabel, cfg.Placement.AcceleratorValue)
-	if err != nil {
-		return err
-	}
-	defer topo.Teardown()
-
-	if err := topo.EnsureNamespaceEverywhere(ctx, *loadNamespace); err != nil {
-		return err
-	}
-
-	// Start each member's admitter once (it persists across both passes). The
-	// admit timestamps feed BOTH passes' recorders via a swappable sink so the
-	// admitter does not need restarting per pass.
 	sinkRouter := &admitSinkRouter{}
-	if err := startMemberAdmitters(ctx, topo, cfg, sinkRouter); err != nil {
-		return err
-	}
 
 	// Pass 1: funnel ENABLED (event-driven convergence, long safety requeue).
-	funnelRes, funnelOps, err := runPass(ctx, topo, cfg, sinkRouter, true)
+	funnelRes, funnelOps, err := runScenario(ctx, cfg, sinkRouter, true)
 	if err != nil {
 		return fmt.Errorf("funnel-enabled pass: %w", err)
 	}
@@ -157,7 +135,7 @@ func run(ctx context.Context) error {
 		"placed", funnelRes.TotalPlaced, "remoteOps", funnelOps.RemoteTotal, "localOps", funnelOps.LocalTotal)
 
 	// Pass 2: funnel DISABLED (poll-only convergence, short safety requeue).
-	pollRes, pollOps, err := runPass(ctx, topo, cfg, sinkRouter, false)
+	pollRes, pollOps, err := runScenario(ctx, cfg, sinkRouter, false)
 	if err != nil {
 		return fmt.Errorf("funnel-disabled pass: %w", err)
 	}
@@ -190,17 +168,39 @@ func run(ctx context.Context) error {
 	return nil
 }
 
-// startMemberAdmitters wires one admitter onto each member's manager, with that
-// member's configured admit delay. The admitters run for the whole process; the
-// sink they report admit timestamps to is the swappable router so both passes
-// can collect convergence data without restarting the members.
+// Each pass owns a fresh topology so retained plans and cleanup work cannot
+// add unmeasured background traffic to the other pass.
+func runScenario(ctx context.Context, cfg *config.Config, sink *admitSinkRouter, funnelEnabled bool) (recorder.PassResult, recorder.PassOps, error) {
+	names := make([]string, len(cfg.Members))
+	for i, member := range cfg.Members {
+		names[i] = member.Name
+	}
+	topo, err := clusters.BringUp(ctx, names, cfg.Placement.AcceleratorLabel, cfg.Placement.AcceleratorValue)
+	if err != nil {
+		return recorder.PassResult{}, recorder.PassOps{}, err
+	}
+	defer topo.Teardown()
+	if err := topo.EnsureNamespaceEverywhere(ctx, *loadNamespace); err != nil {
+		return recorder.PassResult{}, recorder.PassOps{}, err
+	}
+	if err := startMemberAdmitters(ctx, topo, cfg, sink); err != nil {
+		return recorder.PassResult{}, recorder.PassOps{}, err
+	}
+	return runPass(ctx, topo, cfg, sink, funnelEnabled)
+}
+
+// startMemberAdmitters wires one synthetic admission controller per member.
 func startMemberAdmitters(ctx context.Context, topo *clusters.Topology, cfg *config.Config, sink admitter.AdmitSink) error {
 	for i, m := range cfg.Members {
 		member := topo.Members[i]
+		if err := generator.SeedRuntimes(ctx, member.Client(), cfg, *loadNamespace); err != nil {
+			return err
+		}
 		delay := time.Duration(m.AdmitDelayMs) * time.Millisecond
 		conc := *admitterConcurrency
 		err := member.StartManager(ctx, func(_ context.Context, mgr ctrl.Manager) error {
-			return admitter.New(mgr.GetClient(), delay, conc, time.Now, sink).SetupWithManager(mgr)
+			// Admission writes and follow-up reads must share a live view.
+			return admitter.New(member.Client(), delay, conc, time.Now, sink).SetupWithManager(mgr)
 		})
 		if err != nil {
 			return fmt.Errorf("member %q: start admitter: %w", m.Name, err)
@@ -232,8 +232,7 @@ func runPass(ctx context.Context, topo *clusters.Topology, cfg *config.Config, r
 		}
 	}
 
-	// Route this pass's admit timestamps into this pass's recorder. The members'
-	// admitters keep running; only the sink target changes.
+	// Route member admission timestamps into this pass's recorder.
 	router.set(rec)
 	defer router.clear()
 
@@ -262,8 +261,7 @@ func runPass(ctx context.Context, topo *clusters.Topology, cfg *config.Config, r
 	recDone := make(chan error, 1)
 	go func() { recDone <- rec.Run(recCtx) }()
 
-	// Generate this pass's source ISVCs (name-suffixed so the two passes don't
-	// collide on the shared control apiserver).
+	// Source names identify the pass in diagnostics and recorder keys.
 	suffix := passSuffix(funnelEnabled)
 	gen := generator.New(topo.Control.Client(), cfg, *loadNamespace, suffix, rec)
 	if err := gen.Generate(ctx); err != nil {
@@ -275,6 +273,14 @@ func runPass(ctx context.Context, topo *clusters.Topology, cfg *config.Config, r
 	runErr := <-recDone
 	res := rec.Result()
 	if runErr != nil {
+		sources := &v1beta1.InferenceServiceList{}
+		if err := topo.Control.Client().List(ctx, sources, client.InNamespace(*loadNamespace)); err != nil {
+			log.Error(err, "reading stalled sources")
+		} else {
+			for _, source := range sources.Items {
+				log.Info("source at convergence timeout", "name", source.Name, "placement", source.Status.Placement, "conditions", source.Status.Conditions)
+			}
+		}
 		return res, ops(), fmt.Errorf("pass did not converge: %w", runErr)
 	}
 	return res, ops(), nil
@@ -305,6 +311,8 @@ func startControlPlane(ctx context.Context, topo *clusters.Topology, cfg *config
 			return fmt.Errorf("SetupWorkloadCluster: %w", err)
 		}
 
+		clusterMgr.SetClientTuning(workloadcluster.ClientTuning{QPS: cfg.Placement.ClientQPS, Burst: cfg.Placement.ClientBurst})
+
 		// Placement Reconciler, wired directly. Local (control-plane) client
 		// op-counted into localCounts; the per-cluster remote clients op-counted
 		// into remoteCounts via the counting ClusterClients wrapper.
@@ -328,6 +336,7 @@ func startControlPlane(ctx context.Context, topo *clusters.Topology, cfg *config
 		}
 		r := &placement.Reconciler{
 			Client:                  opcount.NewClient(mgr.GetClient(), localCounts),
+			APIReader:               opcount.NewReader(mgr.GetAPIReader(), localCounts),
 			InstanceStatusDecoder:   instanceStatusDecoder,
 			Scheme:                  mgr.GetScheme(),
 			Log:                     ctrl.Log.WithName("Placement"),
@@ -350,18 +359,19 @@ func startControlPlane(ctx context.Context, topo *clusters.Topology, cfg *config
 			// burst's add/update events are not dropped — a dropped event would fall
 			// back to the (long) safety requeue and understate the funnel's win.
 			convergeOpts = append(convergeOpts, placement.WithStatusSafetyRequeue(durMs(cfg.Funnel.EnabledSafetyRequeueMs)))
-			fcfg := placement.FunnelConfigFor(id)
-			fcfg.BufferSize = cfg.Total() * len(cfg.Members) * *funnelBufferSlack
-			// Notice newly-connected members promptly: they connect just after this
-			// manager starts, so a long resync would leave the funnel blind to the
-			// first members (and convergence would fall to the safety requeue) for
-			// that long.
-			fcfg.ResyncInterval = durMs(cfg.Funnel.ResyncIntervalMs)
-			funnel := workloadcluster.NewStatusFunnel(clusterMgr, fcfg)
-			if err := mgr.Add(funnel); err != nil {
-				return fmt.Errorf("add status funnel: %w", err)
+			for _, fcfg := range placement.StatusFunnelConfigsFor(id) {
+				fcfg.BufferSize = cfg.Total() * len(cfg.Members) * *funnelBufferSlack
+				// Notice newly-connected members promptly: they connect just after this
+				// manager starts, so a long resync would leave the funnel blind to the
+				// first members (and convergence would fall to the safety requeue) for
+				// that long.
+				fcfg.ResyncInterval = durMs(cfg.Funnel.ResyncIntervalMs)
+				funnel := workloadcluster.NewStatusFunnel(clusterMgr, fcfg)
+				if err := mgr.Add(funnel); err != nil {
+					return fmt.Errorf("add status funnel: %w", err)
+				}
+				convergeOpts = append(convergeOpts, placement.WithStatusEvents(funnel.Events()))
 			}
-			convergeOpts = append(convergeOpts, placement.WithStatusEvents(funnel.Events()))
 		} else {
 			// Funnel OFF: no funnel channel; the (short) safety requeue IS the
 			// convergence cadence (poll-only).
@@ -382,13 +392,8 @@ func startControlPlane(ctx context.Context, topo *clusters.Topology, cfg *config
 	})
 }
 
-// admitSinkRouter forwards admit timestamps to the recorder of the pass that is
-// currently running. The members' admitters hold a single sink for the whole
-// process, but each pass has its own recorder; the router swaps the live target
-// between passes and counts any stamp that arrives with no active recorder (a
-// late admit from the previous pass) so those are not silently lost. It also
-// accumulates each pass's recorder drop count so the summary can report a single
-// saturation number across both passes.
+// admitSinkRouter forwards admission timestamps to the active pass and combines
+// recorder drops and late events across the comparison.
 type admitSinkRouter struct {
 	mu        sync.Mutex
 	target    *recorder.Recorder

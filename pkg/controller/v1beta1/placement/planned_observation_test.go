@@ -172,12 +172,29 @@ func TestObservePlannedHome(t *testing.T) {
 			}
 		}, wantErr: true},
 		{name: "racing component version is unknown", edit: func(f *plannedObservationFixture) {
+			f.source.Status.Placement.Candidates[0].ReadyReplicas = 1
 			f.intercept.Get = func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 				if err := c.Get(ctx, key, obj, opts...); err != nil {
 					return err
 				}
 				if _, ir := obj.(*v1beta1.InferenceReplica); ir {
 					obj.SetResourceVersion("changed")
+				}
+				return nil
+			}
+		}, wantErr: true},
+		{name: "racing member version withholds previous ready capacity", edit: func(f *plannedObservationFixture) {
+			f.source.Status.Placement.Candidates[0].ReadyReplicas = 1
+			reads := 0
+			f.intercept.Get = func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if err := c.Get(ctx, key, obj, opts...); err != nil {
+					return err
+				}
+				if _, member := obj.(*v1beta1.InferenceService); member {
+					reads++
+					if reads == 2 {
+						obj.SetResourceVersion("changed")
+					}
 				}
 				return nil
 			}
@@ -209,6 +226,15 @@ func TestObservePlannedHome(t *testing.T) {
 				t.Fatalf("observation error = %v, want error %t", err, tt.wantErr)
 			}
 			if tt.wantErr {
+				type evidence struct {
+					AllocationKnown, ObservationKnown bool
+					AppliedPlan                       string
+					Ready                             int32
+				}
+				got := evidence{observation.Home.Known, observation.Candidate.ObservationKnown, observation.Candidate.AppliedPlanID, observation.Candidate.ReadyReplicas}
+				if diff := cmp.Diff(evidence{}, got); diff != "" {
+					t.Errorf("unverified inventory grants readiness or movement credit (-want +got):\n%s", diff)
+				}
 				return
 			}
 			got := result{Home: observation.Home, Reserved: observation.RolloutReserved, PauseAcknowledged: observation.PauseAcknowledged, Applied: observation.Candidate.AppliedPlanID, Ready: observation.Candidate.ReadyReplicas, Admitted: observation.Candidate.AdmittedReplicas}

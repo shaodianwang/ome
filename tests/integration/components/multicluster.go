@@ -337,11 +337,13 @@ func SetupPlacement(ctx context.Context, mgr ctrl.Manager, clusters *ClusterMana
 		convergeOpts = append(convergeOpts, placement.WithStatusSafetyRequeue(cfg.statusSafetyRequeue))
 	}
 	if cfg.funnelControlPlaneID != nil {
-		funnel := workloadcluster.NewStatusFunnel(clusters, placement.FunnelConfigFor(*cfg.funnelControlPlaneID))
-		if err := mgr.Add(funnel); err != nil {
-			return fmt.Errorf("SetupPlacement: add status funnel: %w", err)
+		for _, funnelCfg := range placement.StatusFunnelConfigsFor(*cfg.funnelControlPlaneID) {
+			funnel := workloadcluster.NewStatusFunnel(clusters, funnelCfg)
+			if err := mgr.Add(funnel); err != nil {
+				return fmt.Errorf("SetupPlacement: add status funnel: %w", err)
+			}
+			convergeOpts = append(convergeOpts, placement.WithStatusEvents(funnel.Events()))
 		}
-		convergeOpts = append(convergeOpts, placement.WithStatusEvents(funnel.Events()))
 	}
 
 	if err := r.SetupWithManager(mgr, convergeOpts...); err != nil {
