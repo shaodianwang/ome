@@ -3125,9 +3125,36 @@ def _print_failure_snapshot(case_id, hdr, ctx):
                 "conditions": conditions,
             })
 
+    # The run layer's view: what the spec asks for, which run is pinned or
+    # last closed, the plan conditions, and the events the layers recorded,
+    # so a stall names its layer without a second run.
+    spec_rollout = (isvc.get("spec") or {}).get("rollout") or {}
+    rollout_status = status.get("rollout") or {}
+    active = rollout_status.get("activeRun") or {}
+    last = rollout_status.get("lastRun") or {}
+    run_view = {
+        "specGroups": [
+            {"components": g.get("components"),
+             "kind": next((k for k in ("canary", "blueGreen", "rollingUpdate", "policyRef") if g.get(k)), None)}
+            for g in (spec_rollout.get("groups") or [])
+        ],
+        "pairingProtocol": spec_rollout.get("pairingProtocol"),
+        "activeRun": {
+            "runID": active.get("runID"),
+            "openedAt": active.get("openedAt"),
+            "targets": active.get("targetRevisions"),
+            "planGroups": len((active.get("plan") or {}).get("groups") or []),
+        } if active else None,
+        "lastRun": {"outcome": last.get("outcome"), "closedAt": last.get("closedAt"),
+                    "targets": last.get("targetRevisions")} if last else None,
+        "planConditions": [c for c in (status.get("conditions") or [])
+                           if str(c.get("type", "")).startswith("RolloutPlan")],
+        "events": [f"{reason}: {message}"[:300] for reason, message in _isvc_events(case_id)[-40:]],
+    }
     snapshot = {
         "observedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "canary": status.get("canary"),
+        "rollout": run_view,
         "components": components,
         "inferenceReplicas": replicas,
         "podRevisions": {
