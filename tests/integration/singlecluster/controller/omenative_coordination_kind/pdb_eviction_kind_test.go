@@ -43,14 +43,6 @@ var _ = ginkgo.Describe("OMENative PodDisruptionBudget", ginkgo.Ordered, func() 
 		)
 		maximum := intstr.FromInt(1)
 		fix.ISVC.Spec.Engine.MaxUnavailable = &maximum
-		fix.ISVC.Spec.Engine.PodSpec.Containers[0].ReadinessProbe = &corev1.Probe{
-			ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
-				Path: "/healthz",
-				Port: intstr.FromInt(8080),
-			}},
-			PeriodSeconds:    1,
-			FailureThreshold: 1,
-		}
 
 		applyFixture(Default, fix)
 		deferFixtureCleanup(fix)

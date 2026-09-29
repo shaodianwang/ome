@@ -12,9 +12,10 @@ import (
 	"github.com/ome-projects/ome/tests/integration/util"
 )
 
-// stalledGangLifecycleJSON keeps recovery paths within the test budget.
+// stalledGangLifecycleJSON keeps the escalation paths a gang repair can
+// touch within the test budget.
 const stalledGangLifecycleJSON = `{"updateRetry":{"maxAttempts":2,"initialDelay":"5s","maxDelay":"20s","multiplier":2.0},` +
-	`"stuckPodGracePeriod":"10s","stalledGangGracePeriod":"15s","autoMigrate":{"maxAttempts":2}}`
+	`"stuckPodGracePeriod":"10s","autoMigrate":{"maxAttempts":2}}`
 
 // A partially materialized gang that loses a member must restart as a unit.
 // Backfilling only the missing pod can leave a surviving placement anchor that
@@ -71,16 +72,12 @@ var _ = ginkgo.Describe("gang wedge — member lost while the Instance is not Re
 
 	// The forming case exercises the same member loss before readiness.
 	//
-	// Two conditions make the scenario meaningful:
-	//
-	//   - the Instance must be NOT Ready when the member is lost. The startup
-	//     delay holds it out of Ready; without it the window is milliseconds and
-	//     the race is unwinnable by hand.
-	//   - the replacement must be genuinely UNSCHEDULABLE. That is what turns the
-	//     survivor into a permanent anchor rather than a transient one, and it is
-	//     the discriminator the controller keys on: a gang whose replacement can
-	//     still be placed is merely slow and must NOT be recreated. Cordoning
-	//     every worker node prevents placement without evicting the survivor.
+	// The Instance must be NOT Ready when the member is lost: the startup delay
+	// and its readiness probe hold the gang in Creating for the whole spec.
+	// Member loss below Ready restarts the gang as a unit whether or not the
+	// replacement could be placed; cordoning the workers only keeps the
+	// recreated gang from re-forming, so the spec observes the survivor's
+	// teardown rather than a fresh gang under the same names.
 	ginkgo.It("Creating Instance: a stalled partial gang is recreated, not backfilled", func() {
 		const name = "gw-creating"
 		configureLifecycleConfig(stalledGangLifecycleJSON)
@@ -128,7 +125,7 @@ var _ = ginkgo.Describe("gang wedge — member lost while the Instance is not Re
 			insts := instanceStatuses(g, ns.Name, name, v1beta1.EngineComponent)
 			g.Expect(insts).To(HaveLen(1))
 			g.Expect(insts[0].Incarnation).To(BeNumerically(">", formingIncarnation),
-				"a non-Ready Instance whose replacement cannot be placed must ALSO restart the whole "+
+				"a non-Ready Instance that loses a member must ALSO restart the whole "+
 					"gang; an unchanged Incarnation means Create backfilled the missing pod alone, "+
 					"leaving the survivor bound as a permanent scheduling anchor")
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())

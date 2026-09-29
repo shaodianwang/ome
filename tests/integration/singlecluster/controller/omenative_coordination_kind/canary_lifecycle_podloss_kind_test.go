@@ -17,10 +17,10 @@ import (
 // Behavior test — canary capacity gate under real pod loss.
 //
 // The capacity gate is a live invariant, not a one-shot check: losing a READY
-// canary pod mid-hold must re-close the gate (phase back to Pending) without
-// advancing the step, resetting the state machine, or touching the stable
-// pods. Once the replacement canary pod serves, the hold resumes where it
-// was, and a subsequent promote still carries the rollout to completion.
+// canary pod mid-hold records the capacity wait and keeps the step from
+// moving, while the held step keeps its phase and its programmed split.
+// Once the replacement canary pod serves, the wait clears and a subsequent
+// promote still carries the rollout to completion.
 // Requires a real kubelet: the reopened-gate window exists only while a
 // replacement pod is actually starting.
 var _ = ginkgo.Describe("behavior — canary capacity gate under pod loss", ginkgo.Ordered, func() {

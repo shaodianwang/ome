@@ -158,9 +158,10 @@ func WithEngineImage(img string) FixtureOption {
 	return func(o *fixtureOptions) { o.engineImage = img }
 }
 
-// WithEngineReplicas sets engine.MinReplicas. Defaults to 1.
 // WithStartupDelay makes every container in the fixture sleep n seconds before
-// binding, via the fake-serving image's STARTUP_DELAY_SEC knob.
+// binding (fake-serving's STARTUP_DELAY_SEC) and attaches fake-serving's
+// readiness probe, so each pod stays NotReady for the whole delay; without the
+// probe the kubelet marks a probe-less pod Ready the moment it starts.
 //
 // For specs that assert on a TRANSIENT state — a two-entry Traffic[] window
 // mid-bump, one Component rolled while the next is still on the old revision, a
@@ -184,6 +185,7 @@ func WithEngineStartupDelay(n int) FixtureOption {
 	return func(o *fixtureOptions) { o.engineStartupDelaySec = n }
 }
 
+// WithEngineReplicas sets engine.MinReplicas. Defaults to 1.
 func WithEngineReplicas(n int) FixtureOption {
 	return func(o *fixtureOptions) { o.engineMinReplicas = n }
 }
@@ -611,9 +613,11 @@ func newCoordFixture(namespace string, opts ...FixtureOption) *coordFixture {
 	return &coordFixture{CBM: cbm, CSR: csr, ISVC: isvc}
 }
 
-// applyStartupDelay stamps STARTUP_DELAY_SEC on every container the fixture
-// renders — each Component and, for multi-pod shapes, both the leader and the
-// worker pod specs, so a gang's members come up on the same clock.
+// applyStartupDelay stamps STARTUP_DELAY_SEC and a readiness probe on every
+// container the fixture renders — each Component and, for multi-pod shapes,
+// both the leader and the worker pod specs, so a gang's members come up on
+// the same clock. fake-serving sleeps before it binds, so the probe fails
+// until the delay has elapsed and the pod stays NotReady for the whole window.
 func applyStartupDelay(isvc *v1beta1.InferenceService, sec int) {
 	val := strconv.Itoa(sec)
 	stamp := func(ps *v1beta1.PodSpec) {
@@ -623,6 +627,7 @@ func applyStartupDelay(isvc *v1beta1.InferenceService, sec int) {
 		for i := range ps.Containers {
 			ps.Containers[i].Env = append(ps.Containers[i].Env,
 				corev1.EnvVar{Name: "STARTUP_DELAY_SEC", Value: val})
+			ps.Containers[i].ReadinessProbe = fakeServingReadinessProbe()
 		}
 	}
 	if e := isvc.Spec.Engine; e != nil {
