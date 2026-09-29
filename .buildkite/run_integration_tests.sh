@@ -44,20 +44,4 @@ WRAP
   chmod +x "$ENVTEST_ASSETS/kube-apiserver"
 fi
 
-# TEMP DIAGNOSTIC (to be dropped): make integration-test, step by step; on
-# failure, encode which step/package failed in the job's finish time.
-encode() { echo "failure idx=$1"; now=$(date +%s); target=$(( (now/300+1)*300 + $1*6 )); sleep $((target-now)); exit 1; }
-make fmt vet manifests envtest dep-crds xet-build test-kindutil-unit || encode 50
-PKGS=$(go list ./tests/... | grep -v -E '/kindutil($|/)|_kind$|/tests/perf/|/tests/rolloutspec($|/)|/integration/multicluster$')
-TEST_ENV_ARGS="KUBEBUILDER_ASSETS=$ENVTEST_ASSETS LD_LIBRARY_PATH=$(pwd)/pkg/xet/target/release"
-env $TEST_ENV_ARGS go test -json -timeout=20m $PKGS -ginkgo.trace > /tmp/it.json || true
-failed=$(jq -R -r 'fromjson? | select(.Action=="fail" and .Test==null) | .Package' /tmp/it.json | sort -u)
-echo "failed packages:"; echo "$failed"
-jq -R -r 'fromjson? | select(.Action=="output") | .Output' /tmp/it.json | grep -E "^\s*\[FAIL\]|--- FAIL|panic:" | head -50 || true
-idx=0; n=0
-for p in $PKGS; do n=$((n+1)); if echo "$failed" | grep -qx "$p"; then idx=$n; break; fi; done
-if [ -n "$failed" ] && [ "$idx" -eq 0 ]; then idx=40; fi
-[ "$idx" -gt 0 ] && encode $idx
-env $TEST_ENV_ARGS go test -v -timeout=20m ./tests/integration/multicluster -ginkgo.trace || encode 45
-exit 0
 make integration-test
