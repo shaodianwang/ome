@@ -297,7 +297,8 @@ func syncPromotedThrough(in ReconcileInputs, cs *v1beta1.CanaryStatus, take func
 // consumeAnnotation removes an operator command annotation durably, before
 // the status flush. It is the right tool only where the decision it serves
 // does not depend on the annotation and is recomputed by the next pass if
-// the flush is lost (the rollback re-arm); every other verb is recorded in
+// the flush is lost (the re-arm of a rolled-back unit, in the executor and
+// at run open); every other verb is recorded in
 // status and handed to the controller for removal after the flush. The
 // patch targets a copy so the server response cannot clobber in-flight
 // status mutations on the working object. A nil client consumes in-memory

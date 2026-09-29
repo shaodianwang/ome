@@ -211,6 +211,21 @@ func evNewTarget(_ *v1beta1.InferenceService, in *ReconcileInputs) {
 	in.CanaryRevisionHash, in.TargetID = "newer", "t2"
 	in.PerRevisionPods = map[string]int32{"old": 4}
 }
+
+// evNewTargetAtRunOpen presents the new target the way the controller does:
+// the run layer reopens the run toward it and BindRun re-arms the unit before
+// the executor's pass, so the pass sees the run's target as its own.
+func evNewTargetAtRunOpen(isvc *v1beta1.InferenceService, in *ReconcileInputs) {
+	isvc.Status.Rollout.ActiveRun.TargetRevisions = []v1beta1.RolloutRunTarget{
+		{Component: v1beta1.EngineComponent, Revision: "newer", StableRevision: "old"},
+	}
+	g := rollout.CanaryGroup(isvc)
+	if err := BindRun(context.Background(), nil, isvc, g, false); err != nil {
+		panic(err)
+	}
+	in.CanaryRevisionHash, in.TargetID = "newer", activeCanaryTargetID(isvc, g)
+	in.PerRevisionPods = map[string]int32{"old": 4}
+}
 func evReplicasUp(_ *v1beta1.InferenceService, in *ReconcileInputs) { in.DesiredReplicas = 8 }
 func evCapacityDropped(_ *v1beta1.InferenceService, in *ReconcileInputs) {
 	in.PerRevisionPods = map[string]int32{"new": 1, "old": 2}
@@ -309,6 +324,7 @@ func TestReconcileCells(t *testing.T) {
 		{"canary/Draining/newTarget", fixtureDraining, evNewTarget, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, active: true}},
 		{"canary/Done/newTarget", fixtureDone, evNewTarget, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, active: true}},
 		{"canary/RolledBack/newTarget", fixtureRolledBack, evNewTarget, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, active: true}},
+		{"canary/RolledBack/newTarget[runOpen]", fixtureRolledBack, evNewTargetAtRunOpen, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, active: true}},
 		{"canary/Failed/newTarget", fixtureFailed, evNewTarget, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, active: true}},
 		// 10 replicas: more capacity to stage holds the step where it is.
 		{"canary/Serving/replicasUp", fixtureServingManual, evReplicasUp, cellWant{state: serving, phase: v1beta1.RolloutPhasePaused, active: true}},

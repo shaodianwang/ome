@@ -634,7 +634,10 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			// activeRun and its step state become visible atomically. Adoption is
 			// the exception: preserve the in-flight step and attach its target ID.
 			for _, g := range rollout.CanaryGroups(isvc) {
-				canary.BindRun(isvc, g, runOutcome.Adopted)
+				if err := canary.BindRun(ctx, r.Client, isvc, g, runOutcome.Adopted); err != nil {
+					log.Error(err, "Failed to bind canary state to the rollout run")
+					return reconcile.Result{}, errors.Wrapf(err, "fails to bind canary state to the rollout run")
+				}
 			}
 		}
 		// A run boundary (open/close/repin) is persisted IMMEDIATELY: the pin
