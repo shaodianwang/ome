@@ -1334,9 +1334,10 @@ RETARGET_VERBS = {"rebump", "rebump-fix", "pairing"}
 # loss is inert and the ladder still ends.
 RUNLOST_HOLD_HOOKS = {"canary-staging", "canary-serving", "canary-prehold", "canary-draining"}
 # Hooks where the run layer's next pass pins a run again: a live ladder is
-# adopted in place, a park is adopted under its hold. A rolled-back unit is
-# left alone (its revert runs without a run).
-RUNLOST_REPIN_HOOKS = RUNLOST_HOLD_HOOKS | {"canary-failed"}
+# adopted in place, a park is adopted under its hold, and a revert still
+# draining is adopted so the plan gate admits the roll back to stable. A
+# rolled-back unit is left alone (its run has closed).
+RUNLOST_REPIN_HOOKS = RUNLOST_HOLD_HOOKS | {"canary-failed", "canary-rollingback"}
 # Hooks where the run layer has closed the run: a missing run there is the
 # expected state, not a loss.
 RUNLOST_CLOSED_HOOKS = {"canary-done", "canary-rolledback"}
@@ -6050,10 +6051,13 @@ def _canary(case_id, yaml_file, desc, hdr):
                     good(True, f"the run layer pinned the run again under the park: {story}", "")
                 else:
                     checks.append(f"  ⓘ no pass acted on the missing run within {RUNLOST_HOLD_S}s (a park reconciles on its own cadence); the park is judged as found")
+            elif hook == "canary-rollingback":
+                if signals:
+                    good(True, f"the run layer pinned the run again around the revert: {story}", "")
+                else:
+                    checks.append(f"  ⓘ no pass acted on the missing run within {RUNLOST_HOLD_S}s; the RolledBack terminal carries the claim")
             else:
-                inert = ("the revert ran on without one (the run layer opens nothing for a rolled-back unit)"
-                         if hook == "canary-rollingback" else "nothing reopens a finished ladder")
-                checks.append(f"  ⓘ run lost at {hook}: {story or inert}; the terminal checks carry the claim")
+                checks.append(f"  ⓘ run lost at {hook}: {story or 'nothing reopens a finished ladder'}; the terminal checks carry the claim")
     pairing_fired = "pairing" in (verb, verb2) and (verb2_fired if verb2 == "pairing" else verb_fired)
     if pairing_fired:
         good(pairing_retargeted, f"pairing verb re-targeted the canary toward {pairto_target!r} (new canary hash observed)",

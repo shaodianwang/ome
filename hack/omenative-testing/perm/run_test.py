@@ -1399,7 +1399,9 @@ class RunLostTest(unittest.TestCase):
         self.assertTrue(run._runlost_repin_pending(t, 1.0))
         t["closed"] = {"outcome": "Completed"}
         self.assertFalse(run._runlost_repin_pending(t, 1.0))
-        self.assertFalse(run._runlost_repin_pending(self._removed("canary-rollingback", 0), 1.0))
+        self.assertTrue(run._runlost_repin_pending(self._removed("canary-rollingback", 0), 1.0),
+                        "a revert still draining is adopted in place, so its re-pin is waited for")
+        self.assertFalse(run._runlost_repin_pending(self._removed("canary-rolledback", 0), 1.0))
         self.assertFalse(run._runlost_repin_pending(run._runlost_record(None, None, "canary-serving", 0, 0.0), 1.0))
         self.assertFalse(run._runlost_repin_pending(None, 1.0))
 

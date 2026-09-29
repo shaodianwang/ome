@@ -539,6 +539,11 @@ func TestStickyRejectSuppressesReopen(t *testing.T) {
 		Canary:     canaryBody(10, 100),
 	})
 	isvc.Status.Canary = &v1beta1.CanaryStatus{RolledBackRevisionHash: "bbbbbbbb"}
+	// The primary reports the revert complete: a hold, not a revert in
+	// flight for a run to adopt.
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {RolloutPhase: v1beta1.RolloutPhaseRolledBack},
+	}
 	ir := irFixture(oldRev, newRev)
 	ir.Status.Replicas = 2
 	ir.Status.UpdatedReplicas = 0
@@ -569,6 +574,15 @@ func TestClearedRejectReopensRunForResume(t *testing.T) {
 			Canary:     canaryBody(10, 100),
 		})
 		isvc.Status.Canary = &v1beta1.CanaryStatus{RolledBackRevisionHash: rejection}
+		// The hold is settled while the rejection stands; resume re-arms the
+		// unit at Pending as it clears the rejection.
+		phase := v1beta1.RolloutPhaseRolledBack
+		if rejection == "" {
+			phase = v1beta1.RolloutPhasePending
+		}
+		isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+			v1beta1.EngineComponent: {RolloutPhase: phase},
+		}
 		isvc.Status.Rollout = &v1beta1.RolloutStatus{LastRun: &v1beta1.RolloutRunRecord{
 			Outcome: v1beta1.RolloutRunRolledBack,
 			TargetRevisions: []v1beta1.RolloutRunTarget{

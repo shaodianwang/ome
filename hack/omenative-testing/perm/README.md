@@ -313,9 +313,10 @@ such as the recovery half of a podkill, carries both ids.
   again before any sample saw it missing leaves nothing to hold, and a run
   never pinned again ends the case as held after `RUNLOST_HOLD_S`. At
   Failed the terminal waits up to `RUNLOST_HOLD_S` for the run layer's
-  re-pin and reports it; at RollingBack the revert runs without a run and
-  the RolledBack checks carry the claim; at Done and RolledBack the run is
-  already closed and nothing is removed), `pairing`
+  re-pin and reports it; at RollingBack it waits the same way for the run
+  layer to adopt the revert in place, and the RolledBack checks carry the
+  claim; at Done and RolledBack the run is already closed and nothing is
+  removed), `pairing`
   (patches `spec.rollout.pairingProtocol` to `pairto=<token|clear>` on a
   bump-triggered canary; needs `bump=`, Ne>0 and Nd>0; the verdict asserts a
   new canary hash followed the patch, nothing stays on a pre-re-target

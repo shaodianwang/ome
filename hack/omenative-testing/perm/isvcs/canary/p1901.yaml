@@ -1,5 +1,5 @@
-# p1901: canary engine run lost while rolling back still drains to stable  mode=canary Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 canary=manual rollback=1 during=canary-rollingback verb=runlost terminal=RolledBack cell=canary/RollingBack/runLost notimpl=1 issue=1864 co=none topo=engine
-# reason: a run lost in the first pass of the rollback leaves the revert behind the plan gate, which refuses the update with no run pinned while nothing re-opens one for a rolling-back unit; the Component keeps rolling toward the rejected revision and RolledBack is never reached
+# p1901: canary engine run lost while rolling back still drains to stable  mode=canary Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 canary=manual rollback=1 during=canary-rollingback verb=runlost terminal=RolledBack cell=canary/RollingBack/runLost co=none topo=engine
+# The run layer adopts a revert still draining in place, so the plan gate admits the roll back to stable and the unit ends RolledBack with the rejected pods gone.
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p1901 }
