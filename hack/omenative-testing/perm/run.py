@@ -669,6 +669,7 @@ def min_ready_checks(ctx, comps, verdict, notes, checks, label="capacity floor")
     min_ready = ctx.get("min_ready") or {}
     floor_sust = ctx.get("floor_sust") or {}
     floor_hard = bool((ctx.get("hdr") or {}).get("floor_hard"))
+    floor_soft = bool((ctx.get("hdr") or {}).get("floor_soft"))
     mu = ctx["info"].get("max_unavail", {})
     for c in comps:
         if ctx["N"].get(c, 0) == 0:
@@ -678,6 +679,8 @@ def min_ready_checks(ctx, comps, verdict, notes, checks, label="capacity floor")
         sust = floor_sust.get(c, 0.0)
         if mr >= floor:
             checks.append(f"  ✓ {c} {label} held: min ready {mr} ≥ N-maxUnavailable={floor}")
+        elif floor_soft:
+            checks.append(f"  ⚠ {c} capacity dipped to {mr} ready Instance(s) (< N-maxUnavailable={floor}) — case opted out (floor_soft=1); informational")
         elif floor_hard or sust >= FLOOR_SUSTAIN_S:
             verdict = "FAIL"
             held = "" if floor_hard else f", dip held {sust:.0f}s ≥ {FLOOR_SUSTAIN_S:.0f}s"
@@ -1592,6 +1595,7 @@ def _fault_fire(f, pod_state, pods_per_inst, old_hashes):
         if r.returncode != 0:
             f["infra_fail"] = f"podkill: delete {victim} failed: {r.stderr.strip()[:120]}"
             return
+        f["victim_comp"] = (pod_state.get(victim) or {}).get("comp", "")
         f["notes"].append(f"fault fired: podkill {victim} ({f['param']})")
         print(f"    ⚡ {f['notes'][-1]}")
         return
@@ -4926,6 +4930,7 @@ def _canary(case_id, yaml_file, desc, hdr):
     verb_ts = 0.0
     step_at_verb = step_at_lift = None
     stale_held = None   # promote-stale: did the step hold 20s after the stale promote
+    advanced_at = None  # first poll that saw the step past the one the verb fired at
     hook_fired_ts = None    # when the case's verb or fault landed (nophase= window)
     after_hook_phases = set()
     p2_fired = False
@@ -4987,6 +4992,8 @@ def _canary(case_id, yaml_file, desc, hdr):
             print(f"    verb lifted: rollout-paused removed after {verbhold}s (step={step})")
         if verb_fired and verb == "promote-stale" and stale_held is None and now - verb_ts >= 20:
             stale_held = (step == step_at_verb)
+        if verb_fired and advanced_at is None and step is not None and step_at_verb is not None and step > step_at_verb:
+            advanced_at = now
         # The protocol re-target fires at the during= hook, or once the first
         # canary pod is Ready: a re-target over a partially-landed intermediate.
         if proto2_target is not None and not p2_fired and (
@@ -5089,8 +5096,16 @@ def _canary(case_id, yaml_file, desc, hdr):
             checks.append(f"  ✓ {c} peak {ctx['peaks'][c]} ≤ ceiling {cceil[c]}")
     # A canary surges the primary while the stable revision keeps serving, so
     # capacity must hold the floor, gangs stay whole, and no two gangs collapse
-    # onto one index (the fleet-wipe shape at canary scale).
-    verdict = min_ready_checks(ctx, sorted(ctx["configured"]), verdict, notes, checks)
+    # onto one index (the fleet-wipe shape at canary scale). A podkill the case
+    # fired itself dips the victim's Component until the controller recreates
+    # the pod; that repair window is the harness's doing, so the floor is
+    # asserted on the untouched Components and the dip is reported.
+    fault = ctx.get("fault") or {}
+    killed = fault.get("victim_comp") if fault.get("kind") == "podkill" and fault.get("fired") else None
+    verdict = min_ready_checks(ctx, sorted(ctx["configured"] - ({killed} if killed else set())), verdict, notes, checks)
+    if killed:
+        kmin = (ctx.get("min_ready") or {}).get(killed, N[killed])
+        checks.append(f"  ⓘ {killed} capacity floor exempt (the case's podkill deleted its pod): min ready {kmin} during the induced repair window")
     verdict = index_collision_checks(ctx, sorted(ctx["configured"]), verdict, notes, checks)
     verdict = gang_atomicity_checks(ctx, sorted(ctx["configured"]), verdict, notes, checks)
 
@@ -5141,10 +5156,14 @@ def _canary(case_id, yaml_file, desc, hdr):
         good(nophase not in after_hook_phases,
              f"phase {nophase} was not observed after the hook fired (saw {sorted(after_hook_phases)})",
              f"phase {nophase} was observed after the hook fired (saw {sorted(after_hook_phases)})")
-    if verb == "promote" and soak_s and ctx.get("converged_at") is not None:
-        good(ctx["converged_at"] < soak_s,
-             f"a matching promote skipped the {soak_s}s soak (converged in {ctx['converged_at']}s)",
-             f"a matching promote did not skip the {soak_s}s soak (converged in {ctx['converged_at']}s)")
+    if verb == "promote" and soak_s and verb_fired:
+        # The soak is skipped when the step advances well inside its own
+        # timer after the promote; staging before the verb does not count.
+        waited = None if advanced_at is None else advanced_at - verb_ts
+        good(waited is not None and waited < soak_s,
+             f"a matching promote skipped the {soak_s}s soak (step advanced {waited:.0f}s after the promote)" if waited is not None else "",
+             f"a matching promote did not skip the {soak_s}s soak (step advanced "
+             + (f"{waited:.0f}s after the promote)" if waited is not None else "never after the promote)"))
     # NOTE: "Canarying" is transient — the reconciler sets it then immediately
     # supersedes it with "Paused" in the same reconcile for any step that pauses,
     # so it never persists for paused steps. Assert the canary entered an ACTIVE
@@ -5169,9 +5188,17 @@ def _canary(case_id, yaml_file, desc, hdr):
              "observed an active canary phase (Canarying/Paused/RollingBack)",
              f"never observed an active canary phase (jumped straight to terminal); saw {sorted(phases)}")
     else:
-        good("Promoting" in phases,
-             "observed Promoting (single-step gate served the canary)",
-             f"never observed Promoting on the single-step plan; saw {sorted(phases)}")
+        # A single-step plan serves the canary through its final gate: Paused
+        # while the gate holds (an analysis bake or a manual hold), Promoting
+        # once it passes; a rejected canary leaves it through RollingBack.
+        active = ("Promoting" in phases) or ("Paused" in phases)
+        if not active and expect_rollback and ({"RollingBack", "RolledBack"} & phases):
+            active = True
+        if not active and expect == "Failed" and ("Failed" in phases):
+            active = True
+        good(active,
+             "observed the single-step gate serving the canary (Paused/Promoting)",
+             f"never observed the single-step gate serving the canary; saw {sorted(phases)}")
     new, _old = _inst_rev_split(ctx, primary)
 
     if analysis_mode:

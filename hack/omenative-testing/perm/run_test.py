@@ -770,3 +770,31 @@ class PDCanaryHeaderTest(unittest.TestCase):
         self.assertTrue(any("requires notimpl=1 issue" in e for e in self._errs(self.PD + " proto=v2 xcheck=sectraffic", "# reason: x")))
         self.assertTrue(any("reason:" in e for e in self._errs(self.PD + " proto=v2 xcheck=sectraffic notimpl=1 issue=1346")))
         self.assertTrue(any("needs proto=" in e for e in self._errs(self.PD + " xcheck=sectraffic notimpl=1 issue=1346", "# reason: x")))
+
+
+class CanaryFloorAndSoakTest(unittest.TestCase):
+    """The capacity floor honors the soft opt-out in every handler, and a
+    podkill records the Component it hit so the canary verdict can exempt it."""
+
+    def _ctx(self, **hdr):
+        return {"min_ready": {"engine": 7}, "floor_sust": {"engine": 20.0}, "hdr": hdr,
+                "N": {"engine": 8}, "info": {"max_unavail": {"engine": 0}, "strat": {"engine": "SurgeThenDrain"}}}
+
+    def test_soft_floor_reports_instead_of_failing(self):
+        checks = []
+        self.assertEqual("FAIL", run.min_ready_checks(self._ctx(), ["engine"], "PASS", [], []))
+        self.assertEqual("PASS", run.min_ready_checks(self._ctx(floor_soft=1), ["engine"], "PASS", [], checks))
+        self.assertTrue(any("floor_soft=1" in c for c in checks), checks)
+
+    def test_podkill_records_the_victim_component(self):
+        pods = {"p1-decoder-0-default-0": {"alive": True, "hash": "new", "inst": "0", "comp": "decoder", "created": "1"}}
+        f = {"kind": "podkill", "param": "canary-serving", "victim": "canary", "victimcomp": "decoder",
+             "fired": False, "infra_fail": None, "notes": []}
+        saved = run.kubectl
+        run.kubectl = lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="", stderr="")
+        try:
+            run._fault_fire(f, pods, {"decoder": 1}, {"old"})
+        finally:
+            run.kubectl = saved
+        self.assertEqual("decoder", f["victim_comp"])
+        self.assertTrue(f["fired"])
