@@ -1,0 +1,24 @@
+# p1932: canary pd decoder scaled up while staging recomputes the step  mode=canary Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=5 ceil_r=0 canary=auto during=canary-staging verb=scale scale_d=4 cell=canary/Staging/scale[decoder] co=none topo=pd
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p1932 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine, decoder]
+          canary:
+            steps:
+              - { capacity: "50%", traffic: 50, pause: { duration: "20s" } }
+              - { capacity: "100%", traffic: 100 }
