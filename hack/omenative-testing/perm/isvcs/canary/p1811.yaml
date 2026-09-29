@@ -1,4 +1,4 @@
-# p1811: canary-analysis pd breach rolls both sides back  mode=canary Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=5 ceil_r=3 canary=auto analysis=breach failurelimit=1 cell=canary/Serving[A]/sampleFails[pdBoth] notimpl=1 issue=1835 co=none topo=pd
+# p1811: canary-analysis pd breach rolls both sides back  mode=canary Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=5 ceil_r=3 canary=auto analysis=breach failurelimit=1 cell=canary/Serving[A]/sampleFails[pdBoth] co=none topo=pd
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p1811 }

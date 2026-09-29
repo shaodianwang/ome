@@ -1,4 +1,4 @@
-# p1808: canary pd controller restart during the rollback drain  mode=canary Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=5 ceil_r=3 canary=manual rollback=1 fault=ctrlrestart:canary-rollingback cell=canary/RollingBack/ctrlRestart[pd] notimpl=1 issue=1835 co=none topo=pd
+# p1808: canary pd controller restart during the rollback drain  mode=canary Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=5 ceil_r=3 canary=manual rollback=1 fault=ctrlrestart:canary-rollingback cell=canary/RollingBack/ctrlRestart[pd] co=none topo=pd
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p1808 }
