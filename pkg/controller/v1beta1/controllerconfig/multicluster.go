@@ -84,6 +84,9 @@ type WorkloadClusterConfig struct {
 // PlacementConfig tunes the fan-out placement controller, its status
 // convergence, and its orphan GC.
 type PlacementConfig struct {
+	// MemberOperatorNamespace locates member configuration and pinned runtime
+	// revisions. Empty holds resolution whenever those inputs are required.
+	MemberOperatorNamespace string `json:"memberOperatorNamespace,omitempty"`
 	// Capacity opts into hardware-based placement. Nil keeps that mode pending.
 	Capacity *PlacementCapacityConfig `json:"capacity,omitempty"`
 	// RequeueInterval is the status-refresh poll cadence. With the cache/funnel off
@@ -128,17 +131,16 @@ type PlacementConfig struct {
 // PlacementCapacityConfig identifies reports and bounds their acceptance age.
 // All fields are required when the block is present; there are no Go defaults.
 type PlacementCapacityConfig struct {
-	RootName                string `json:"rootName"`
-	MemberOperatorNamespace string `json:"memberOperatorNamespace"`
-	MaxAge                  string `json:"maxAge"`
-	StabilityWindow         string `json:"stabilityWindow"`
-	RefreshInterval         string `json:"refreshInterval"`
+	RootName        string `json:"rootName"`
+	MaxAge          string `json:"maxAge"`
+	StabilityWindow string `json:"stabilityWindow"`
+	RefreshInterval string `json:"refreshInterval"`
 }
 
 func (c PlacementCapacityConfig) Validate() error {
 	var errs []error
-	if strings.TrimSpace(c.RootName) == "" || strings.TrimSpace(c.MemberOperatorNamespace) == "" {
-		errs = append(errs, errors.New("placement.capacity: rootName and memberOperatorNamespace are required"))
+	if strings.TrimSpace(c.RootName) == "" {
+		errs = append(errs, errors.New("placement.capacity: rootName is required"))
 	}
 	for _, field := range []struct{ name, value string }{{"maxAge", c.MaxAge}, {"stabilityWindow", c.StabilityWindow}, {"refreshInterval", c.RefreshInterval}} {
 		if d, err := time.ParseDuration(field.value); err != nil || d <= 0 {
@@ -495,6 +497,9 @@ func (c MultiClusterConfig) Validate() error {
 	sort.Strings(keys)
 	var errs []error
 	if c.Placement.Capacity != nil {
+		if strings.TrimSpace(c.Placement.MemberOperatorNamespace) == "" {
+			errs = append(errs, errors.New("placement.memberOperatorNamespace is required for capacity placement"))
+		}
 		if err := c.Placement.Capacity.Validate(); err != nil {
 			errs = append(errs, err)
 		}

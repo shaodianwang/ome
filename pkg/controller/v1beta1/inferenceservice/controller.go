@@ -569,10 +569,19 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	if mergedRouter != nil {
 		componentDeploymentModes[v1beta1.RouterComponent] = routerDeploymentMode
 	}
+	// Placement verifies the same resolved policy used by component projectors,
+	// including replica floors supplied by operator configuration.
+	specdefaults.Engine(mergedEngine, engineDeploymentMode, deployConfig)
+	specdefaults.Decoder(mergedDecoder, decoderDeploymentMode, deployConfig)
+	specdefaults.Router(mergedRouter, routerDeploymentMode, deployConfig)
 	if placementMember {
 		if err := protocol.ValidateNativeModes(componentDeploymentModes); err != nil {
 			return r.holdPlacementBackend(ctx, isvc, err)
 		}
+		if err := checkPlacementReplicaFloors(isvc, mergedEngine, mergedDecoder, mergedRouter); err != nil {
+			return r.holdPlacementCondition(ctx, isvc, v1beta1.PlacementReplicaFloorsReady, "ReplicaFloorsMismatch", err)
+		}
+		clearPlacementReplicaFloorsHold(isvc)
 		clearPlacementBackendHold(isvc)
 		if result, err := modelConfigReconciler.Reconcile(ctx, isvc); err != nil {
 			return result, err
@@ -584,15 +593,6 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	if mergedEngine != nil && mergedDecoder != nil {
 		log.V(1).Info("PD-disaggregated deployment detected")
 	}
-
-	// Step 4b: fill what neither the InferenceService nor its runtime set,
-	// from operator configuration and fixed fallbacks. The merged specs are
-	// reconcile-local copies, so the stored object is never written; every
-	// reader below, from the canary partition math to the renderers, sees
-	// the resolved values.
-	specdefaults.Engine(mergedEngine, engineDeploymentMode, deployConfig)
-	specdefaults.Decoder(mergedDecoder, decoderDeploymentMode, deployConfig)
-	specdefaults.Router(mergedRouter, routerDeploymentMode, deployConfig)
 
 	// Rollout run layer: resolve and pin the effective plan BEFORE the
 	// partition stamp and the dispatch engines, so every consumer in this

@@ -119,6 +119,9 @@ type Reconciler struct {
 	// for the whole backoff. Required: SetupWithManager defaults it to
 	// mgr.GetAPIReader() and rejects a reconciler still missing it.
 	APIReader client.Reader
+	// MemberOperatorNamespace locates member configuration and runtime pins.
+	// Missing configuration holds resolution of dependencies that need it.
+	MemberOperatorNamespace string
 	// Capacity locates verified hardware inputs for capacity allocations.
 	Capacity        *CapacityConfig
 	CapacityClock   clock.PassiveClock
@@ -274,10 +277,31 @@ func (r *Reconciler) reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 		return ctrl.Result{}, nil
 	}
 
+	// The committed winner is placement authority; informer lag cannot reopen
+	// its race or discard a terminal winner between status writes.
+	if r.APIReader == nil {
+		return ctrl.Result{}, fmt.Errorf("placement requires a direct source reader")
+	}
+	current := &v1beta1.InferenceService{}
+	if err := r.APIReader.Get(ctx, request.NamespacedName, current); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	if !current.DeletionTimestamp.IsZero() {
+		return r.reconcileDelete(ctx, current)
+	}
+	if !IsPlacementEligible(current) {
+		r.forgetCapacity(request.NamespacedName)
+		return ctrl.Result{}, nil
+	}
+	isvc = current
 	if !isvc.Spec.Placement.UsesClusterAffinity() {
+		r.forgetCapacity(request.NamespacedName)
 		return r.reconcileLegacy(ctx, isvc)
 	}
-
+	ctx = unverifiedBackend(ctx, isvc)
+	if placementMode(isvc) != v1beta1.PlacementModeSplitByCapacity {
+		r.forgetCapacity(request.NamespacedName)
+	}
 	clusters := &v1beta1.WorkloadClusterList{}
 	if err := r.List(ctx, clusters); err != nil {
 		return ctrl.Result{}, err
@@ -358,16 +382,28 @@ func (r *Reconciler) reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 	if (pf != nil && pf.hold) || (rf != nil && rf.hold) {
 		res, err = r.writeObservedPlacement(ctx, isvc, observations)
 	} else {
+		ctx, err = r.preflightBackends(ctx, isvc, clusters.Items, candidates)
+		if err != nil {
+			r.forgetCapacity(request.NamespacedName)
+			observations.projectAll = true
+			for _, name := range observations.standing {
+				if _, exists := observations.get(name); !exists {
+					observations.refresh(ctx, r, isvc, name)
+				}
+			}
+			return r.writeObservedPlacement(ctx, isvc, observations)
+		}
+		backendEligible := verifiedBackendCandidates(ctx, candidates)
 		// Branch on placement mode. Each mode owns its own reconcile: Single keeps one
 		// winner, All keeps every home that admits, and Split apportions the requested
 		// replicas across its candidate set.
 		switch mode := placementMode(isvc); mode {
 		case v1beta1.PlacementModeSingle:
-			res, err = r.reconcileSingle(ctx, isvc, candidates, observations)
+			res, err = r.reconcileSingle(ctx, isvc, backendEligible, candidates, observations)
 		case v1beta1.PlacementModeAll:
-			res, err = r.reconcileAll(ctx, isvc, candidates, observations)
+			res, err = r.reconcileAll(ctx, isvc, backendEligible, observations)
 		case v1beta1.PlacementModeSplit, v1beta1.PlacementModeSplitByCapacity:
-			res, err = r.reconcileSplit(ctx, isvc, clusters.Items, candidates, observations)
+			res, err = r.reconcileSplit(ctx, isvc, clusters.Items, backendEligible, observations)
 		default:
 			r.Log.Info("placement mode not supported by this build; holding Pending",
 				"mode", mode, "isvc", isvc.Namespace+"/"+isvc.Name)
@@ -392,7 +428,7 @@ func (r *Reconciler) reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 func (r *Reconciler) reconcileSingle(
 	ctx context.Context,
 	isvc *v1beta1.InferenceService,
-	candidates []string,
+	candidates, cleanupCandidates []string,
 	observations *placementObservations,
 ) (ctrl.Result, error) {
 	// A standing winner remains sticky while it can be observed or while its
@@ -443,7 +479,7 @@ func (r *Reconciler) reconcileSingle(
 				}
 				return res, err
 			}
-			cl, ok := r.Clusters.ClientFor(winner)
+			_, ok := r.Clusters.ClientFor(winner)
 			if !ok {
 				unknown := retainedUnknownCandidate(isvc, home.candidate)
 				res, err := r.writePlacement(ctx, isvc, placementResult{
@@ -456,10 +492,13 @@ func (r *Reconciler) reconcileSingle(
 				}
 				return res, err
 			}
-			if err := r.placeOnBounded(ctx, winner, cl, isvc); err != nil {
+			if err := r.placeOnBounded(ctx, winner, isvc, true); err != nil {
+				if errors.Is(err, errMemberAbsent) {
+					return r.writeSingleAbsentGrace(ctx, isvc, winner)
+				}
 				return r.observedStatusThenError(ctx, isvc, observations, err)
 			}
-			r.deleteLosers(ctx, isvc, candidates, winner)
+			r.deleteLosers(ctx, isvc, cleanupCandidates, winner)
 			return r.writePlacement(ctx, isvc, observedCandidateResult(home))
 		}
 	}
@@ -508,7 +547,7 @@ func (r *Reconciler) reconcileSingle(
 			continue
 		}
 		r.clearGrace(isvc.UID)
-		r.deleteLosers(ctx, isvc, candidates, cluster)
+		r.deleteLosers(ctx, isvc, cleanupCandidates, cluster)
 		return r.writePlacement(ctx, isvc, observedCandidateResult(home))
 	}
 	if len(cands) == 0 {
@@ -730,11 +769,11 @@ func (r *Reconciler) fanOut(ctx context.Context, isvc *v1beta1.InferenceService,
 		if !connected[c] {
 			continue // not connected this pass; the next poll re-attempts it
 		}
-		cl, ok := r.Clusters.ClientFor(c)
+		_, ok := r.Clusters.ClientFor(c)
 		if !ok {
 			continue // disconnected between snapshot and lookup; skip
 		}
-		if err := r.placeOnBounded(ctx, c, cl, isvc); err != nil {
+		if err := r.placeOnBounded(ctx, c, isvc, false); err != nil {
 			r.Log.Error(err, "fan out failed on cluster", "cluster", c, "isvc", isvc.Namespace+"/"+isvc.Name)
 			errs = append(errs, fmt.Errorf("%q: %w", c, err))
 			continue
@@ -751,10 +790,10 @@ func (r *Reconciler) fanOut(ctx context.Context, isvc *v1beta1.InferenceService,
 // cannot block the fan-out to the healthy candidates. A deadline overrun surfaces
 // as a (wrapped) context.DeadlineExceeded error the caller records per-cluster
 // and retries next poll.
-func (r *Reconciler) placeOnBounded(ctx context.Context, cluster string, cl client.Client, isvc *v1beta1.InferenceService) error {
+func (r *Reconciler) placeOnBounded(ctx context.Context, cluster string, isvc *v1beta1.InferenceService, existingOnly bool) error {
 	cctx, cancel := context.WithTimeout(ctx, r.placeTimeout())
 	defer cancel()
-	return r.placeOn(cctx, cluster, cl, isvc)
+	return r.placeOn(cctx, cluster, isvc, existingOnly)
 }
 
 func (r *Reconciler) deleteDerivedOnBounded(ctx context.Context, cluster string, isvc *v1beta1.InferenceService) error {
@@ -822,12 +861,17 @@ func (r *Reconciler) getDerived(ctx context.Context, cluster string, isvc *v1bet
 // merges the control-plane-owned keys into the existing maps rather than
 // replacing them wholesale — preserving worker-side reconciler state across the
 // poll-driven re-apply.
-func (r *Reconciler) placeOn(ctx context.Context, cluster string, cl client.Client, src *v1beta1.InferenceService) error {
+func (r *Reconciler) placeOn(ctx context.Context, cluster string, src *v1beta1.InferenceService, existingOnly bool) error {
+	cl, target, err := r.backendClient(ctx, src, cluster)
+	if err != nil {
+		return err
+	}
+	ctx = context.WithValue(ctx, backendTargetKey{}, target)
 	d, err := r.derivedFor(src)
 	if err != nil {
 		return err
 	}
-	return r.applyDerived(ctx, cluster, cl, src, d)
+	return r.applyDerived(ctx, cluster, cl, src, d, existingOnly)
 }
 
 // derivedFor builds the derived ISVC for src, inflating ref-only rollout
@@ -844,26 +888,25 @@ func (r *Reconciler) derivedFor(src *v1beta1.InferenceService) (*v1beta1.Inferen
 
 // applyDerived create-or-updates the derived ISVC `desired` on the target
 // cluster.
-func (r *Reconciler) applyDerived(ctx context.Context, cluster string, cl client.Client, src, desired *v1beta1.InferenceService) error {
+func (r *Reconciler) applyDerived(ctx context.Context, cluster string, cl client.Client, src, desired *v1beta1.InferenceService, existingOnly bool) error {
 	policy, err := protocol.FromDerived(desired)
 	if err != nil {
 		return err
 	}
 	target := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: desired.Name, Namespace: desired.Namespace}}
 	_, err = controllerutil.CreateOrUpdate(ctx, cl, target, func() error {
-		// Origin-guard the apply, mirroring the origin guard on the delete path
-		// (deleteDerivedOn): a target that already exists (CreateOrUpdate's Get
-		// populated it, so ResourceVersion is set) and is NOT a derived of THIS
-		// source must not be overwritten. Without this, a same-named ISVC a user
-		// created directly on the workload cluster — or another control plane's
-		// object — would have its Spec replaced and origin markers stamped onto
-		// it (cross-tenant data loss). Returning an error makes CreateOrUpdate a
-		// no-op write and surfaces per-cluster like any other fan-out failure. A
-		// first-time create (empty ResourceVersion) and a re-apply of our own
-		// derived (isOurDerived true) both proceed.
+		// A sticky refresh cannot recreate a winner before its absence grace.
+		if existingOnly && target.ResourceVersion == "" {
+			return errMemberAbsent
+		}
+		// A same-named local service or another source's copy cannot be adopted.
 		if target.ResourceVersion != "" && !isOurDerived(target, src) {
 			return fmt.Errorf("refusing to overwrite non-derived InferenceService %s/%s on candidate cluster: not a placement derived of control plane %q",
 				target.Namespace, target.Name, r.ControlPlaneID)
+		}
+		backend, err := r.resolveMemberBackend(ctx, cl, src, desired)
+		if err != nil {
+			return err
 		}
 		current, err := protocol.FromDerived(target)
 		if err != nil {
@@ -876,6 +919,15 @@ func (r *Reconciler) applyDerived(ctx context.Context, cluster string, cl client
 			if err := r.checkPlanCurrent(ctx, src); err != nil {
 				return err
 			}
+		}
+		if err := backend.Check(ctx); err != nil {
+			return err
+		}
+		if err := r.checkSourceSnapshot(ctx, src); err != nil {
+			return err
+		}
+		if err := r.checkBackendTransport(ctx, cluster); err != nil {
+			return err
 		}
 		// Before the wholesale re-stamp below overwrites it, the live remote
 		// spec is the evidence for the FieldPruned detector: a member apiserver
@@ -1070,6 +1122,9 @@ func (r *Reconciler) writePlacement(ctx context.Context, isvc *v1beta1.Inference
 		r.policyStatusForWrite(isvc, &res),
 		r.rolloutStatusForWrite(isvc, &res))
 	policyConds = mergePolicyConditions(policyConds, res.conditions)
+	if backend, _ := ctx.Value(backendContextKey{}).(*backendPreflight); backend != nil && backend.sourceUID == isvc.UID {
+		policyConds = mergePolicyConditions(policyConds, []policyCondition{backend.condition})
+	}
 	if placementMode(isvc) == v1beta1.PlacementModeSplitByCapacity && !slices.ContainsFunc(policyConds, func(c policyCondition) bool { return c.condType == apis.ConditionType(v1beta1.PlacementCapacityFresh) }) {
 		policyConds = append(policyConds, capacityFreshCondition("Unknown", "CapacityNotObserved", "Capacity inputs have not been verified in this reconcile"))
 	}

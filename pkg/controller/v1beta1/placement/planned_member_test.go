@@ -118,7 +118,7 @@ func TestPlannedMemberAuthority(t *testing.T) {
 			}
 			var clusters ClusterClients = identifiedTestClusters{fakeClusters: base, uid: "member-a-uid"}
 			if tt.legacy {
-				clusters = base
+				clusters = struct{ ClusterClients }{base}
 			}
 			r, _ := newPlacer(scheme, clusters, live, registration)
 			if tt.noReader {
@@ -197,9 +197,21 @@ func TestPlannedDeleteRequiresDrainAndConditionalIdentity(t *testing.T) {
 			if tt.editMember != nil {
 				tt.editMember(member)
 			}
+			withoutUID := member.UID == ""
 			worker := emptyWorker(testScheme(t))
 			if err := worker.Create(ctx, member); err != nil {
 				t.Fatal(err)
+			}
+			if withoutUID {
+				worker = interceptor.NewClient(worker, interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if err := c.Get(ctx, key, obj, opts...); err != nil {
+						return err
+					}
+					if _, ok := obj.(*v1beta1.InferenceService); ok {
+						obj.SetUID("")
+					}
+					return nil
+				}})
 			}
 			if tt.absent {
 				if err := worker.Delete(ctx, member); err != nil {

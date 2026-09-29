@@ -5493,6 +5493,25 @@
         }
       }
     },
+    "v1beta1.PlacementComponentFloor": {
+      "description": "PlacementComponentFloor records a resolved component's guaranteed count. Engine and Decoder use equal whole-replica floors; Router is independent.",
+      "type": "object",
+      "required": [
+        "component",
+        "replicas"
+      ],
+      "properties": {
+        "component": {
+          "type": "string",
+          "default": ""
+        },
+        "replicas": {
+          "type": "integer",
+          "format": "int32",
+          "default": 0
+        }
+      }
+    },
     "v1beta1.PlacementDemandContract": {
       "description": "PlacementDemandContract binds component rendering to normalized unit demand. Router is excluded because its replicas follow a per-home policy.",
       "type": "object",
@@ -5547,6 +5566,18 @@
         "planID": {
           "type": "string",
           "default": ""
+        },
+        "replicaFloors": {
+          "description": "ReplicaFloors binds the full per-home policy to the floors accepted by placement. Runtime changes cannot expand a paused placement reservation.",
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1beta1.PlacementComponentFloor"
+          },
+          "x-kubernetes-list-map-keys": [
+            "component"
+          ],
+          "x-kubernetes-list-type": "map"
         },
         "revision": {
           "type": "integer",

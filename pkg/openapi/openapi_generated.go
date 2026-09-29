@@ -146,6 +146,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementCapacityPool":            schema_pkg_apis_ome_v1beta1_PlacementCapacityPool(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementCapacitySample":          schema_pkg_apis_ome_v1beta1_PlacementCapacitySample(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementComponentDemand":         schema_pkg_apis_ome_v1beta1_PlacementComponentDemand(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementComponentFloor":          schema_pkg_apis_ome_v1beta1_PlacementComponentFloor(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementDemandContract":          schema_pkg_apis_ome_v1beta1_PlacementDemandContract(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementExecutionPolicy":         schema_pkg_apis_ome_v1beta1_PlacementExecutionPolicy(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementPlanStatus":              schema_pkg_apis_ome_v1beta1_PlacementPlanStatus(ref),
@@ -9755,6 +9756,34 @@ func schema_pkg_apis_ome_v1beta1_PlacementComponentDemand(ref common.ReferenceCa
 	}
 }
 
+func schema_pkg_apis_ome_v1beta1_PlacementComponentFloor(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "PlacementComponentFloor records a resolved component's guaranteed count. Engine and Decoder use equal whole-replica floors; Router is independent.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"component": {
+						SchemaProps: spec.SchemaProps{
+							Default: "",
+							Type:    []string{"string"},
+							Format:  "",
+						},
+					},
+					"replicas": {
+						SchemaProps: spec.SchemaProps{
+							Default: 0,
+							Type:    []string{"integer"},
+							Format:  "int32",
+						},
+					},
+				},
+				Required: []string{"component", "replicas"},
+			},
+		},
+	}
+}
+
 func schema_pkg_apis_ome_v1beta1_PlacementDemandContract(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -9850,12 +9879,34 @@ func schema_pkg_apis_ome_v1beta1_PlacementExecutionPolicy(ref common.ReferenceCa
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementDemandContract"),
 						},
 					},
+					"replicaFloors": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"component",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "ReplicaFloors binds the full per-home policy to the floors accepted by placement. Runtime changes cannot expand a paused placement reservation.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementComponentFloor"),
+									},
+								},
+							},
+						},
+					},
 				},
 				Required: []string{"planID", "revision", "sourceUID", "clusterUID", "pauseSurge"},
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementDemandContract"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementComponentFloor", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementDemandContract"},
 	}
 }
 

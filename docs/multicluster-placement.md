@@ -27,6 +27,19 @@ runtime or service resumes reconciliation. VirtualDeployment cannot participate.
 Member deletion still permits cleanup. Local services and Legacy members retain
 all deployment modes and do not gain this condition.
 
+The source checks each target through its identified direct member connection
+before granting workload updates, then verifies runtime dependencies and source
+identity again at application. Missing runtime inputs produce
+`PlacementBackendReady=Unknown`. Single and All continue on verified eligible
+members; a standing Single winner whose backend is unverified remains held.
+Static Split leaves a blocked member's assigned share pending. SplitByCapacity
+holds the entire accepted allocation when any matched backend cannot be verified.
+Backend conditions are advisory: standing serving health continues to be observed.
+Hardware reports are not required for Single, All, or static Split. Upgrade the
+member access role so the placement credential can read runtimes, models, pinned
+ControllerRevisions, and the named operator ConfigMap. These reads grant no
+runtime, model, quota, or configuration writes.
+
 ## Static shares
 
 ```yaml
@@ -125,13 +138,13 @@ model readiness, and other scheduling constraints remain member admission
 checks. These weights do not guarantee physical fit.
 
 Configure the input adapter through
-`ome.multicluster.placement.capacity` in the resources chart, emitted as
-`multicluster.placement.capacity` in `inferenceservice-config`:
+`ome.multicluster.config.placement` in the resources chart, emitted as
+`multicluster.placement` in `inferenceservice-config`:
 
 ```yaml
+memberOperatorNamespace: operator-system
 capacity:
   rootName: capacity-root
-  memberOperatorNamespace: operator-system
   maxAge: 5m
   stabilityWindow: 1m
   refreshInterval: 10s
@@ -140,8 +153,17 @@ capacity:
 These are example values, not binary defaults. The block defaults to null; every
 field is required when present, and `refreshInterval` must be shorter than
 `maxAge`. The root name must match the management and member quota collectors.
-All members must expose their configuration in `memberOperatorNamespace`.
+All members must expose their configuration in
+`multicluster.placement.memberOperatorNamespace`. This setting also locates
+pinned runtimes and sharded-model configuration for Single, All, and static
+Split. An absent namespace holds resolution when those dependencies are needed.
+When upgrading, move it from `placement.capacity.memberOperatorNamespace` to
+`placement.memberOperatorNamespace`.
 The adapter uses the existing placement `fanoutTimeout` for remote operations.
+
+The resources chart grants the control-plane manager read access to fleet quota
+reports only when capacity placement is configured. Member access also requires
+read access to quota roots, ResourceFlavors, and RuntimeClasses.
 
 Capacity collection must provide identified, complete per-cluster flavor reports.
 The placement credential needs reads for the local quota root, ResourceFlavors,

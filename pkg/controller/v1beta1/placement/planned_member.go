@@ -23,29 +23,34 @@ type identifiedClusterClients interface {
 // plannedClient binds both the registration and transport to the accepted UID.
 // A connection selected by name alone cannot authorize an allocation mutation.
 func (r *Reconciler) plannedClient(ctx context.Context, name string, uid types.UID) (client.WithWatch, error) {
+	direct, _, err := r.plannedTransport(ctx, name, uid)
+	return direct, err
+}
+
+func (r *Reconciler) plannedTransport(ctx context.Context, name string, uid types.UID) (client.WithWatch, workloadcluster.SelectivelyCachingClient, error) {
 	if r.APIReader == nil || uid == "" {
-		return nil, fmt.Errorf("planned placement requires a direct reader and cluster UID")
+		return nil, nil, fmt.Errorf("planned placement requires a direct reader and cluster UID")
 	}
 	registration := &v1beta1.WorkloadCluster{}
 	if err := r.APIReader.Get(ctx, client.ObjectKey{Name: name}, registration); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if registration.UID != uid {
-		return nil, fmt.Errorf("cluster %q registration identity changed", name)
+		return nil, nil, fmt.Errorf("cluster %q registration identity changed", name)
 	}
 	identified, ok := r.Clusters.(identifiedClusterClients)
 	if !ok {
-		return nil, fmt.Errorf("placement transport cannot verify cluster identity")
+		return nil, nil, fmt.Errorf("placement transport cannot verify cluster identity")
 	}
 	remote, ok := identified.ClientForUID(name, uid)
 	if !ok {
-		return nil, fmt.Errorf("cluster %q has no connection for its accepted UID", name)
+		return nil, nil, fmt.Errorf("cluster %q has no connection for its accepted UID", name)
 	}
 	direct, ok := workloadcluster.DirectClient(remote)
 	if !ok {
-		return nil, fmt.Errorf("cluster %q transport cannot provide direct observations", name)
+		return nil, nil, fmt.Errorf("cluster %q transport cannot provide direct observations", name)
 	}
-	return direct, nil
+	return direct, remote, nil
 }
 
 func (r *Reconciler) checkPlanCurrent(ctx context.Context, source *v1beta1.InferenceService) error {
@@ -118,10 +123,11 @@ func (r *Reconciler) placePlannedOn(ctx context.Context, source *v1beta1.Inferen
 	if assignment == nil || assignment.CurrentReplicas <= 0 {
 		return fmt.Errorf("positive planned assignment is required for member creation")
 	}
-	cl, err := r.plannedClient(ctx, candidate.Cluster, assignment.ClusterUID)
+	cl, transport, err := r.plannedTransport(ctx, candidate.Cluster, assignment.ClusterUID)
 	if err != nil {
 		return err
 	}
+	ctx = context.WithValue(ctx, backendTargetKey{}, backendTarget{cluster: candidate.Cluster, uid: assignment.ClusterUID, transport: transport})
 	if assignment.Capacity != nil && assignment.DesiredReplicas == 0 {
 		return r.retireCapacityFloor(ctx, cl, source, assignment)
 	}
@@ -149,7 +155,7 @@ func (r *Reconciler) placePlannedOn(ctx context.Context, source *v1beta1.Inferen
 	if err := r.checkPlanCurrent(ctx, source); err != nil {
 		return err
 	}
-	return r.applyDerived(ctx, candidate.Cluster, cl, source, desired)
+	return r.applyDerived(ctx, candidate.Cluster, cl, source, desired, false)
 }
 
 // setPlannedReplicas preserves an omitted maximum for member runtime inheritance.

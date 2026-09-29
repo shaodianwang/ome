@@ -214,6 +214,11 @@ func EnsureInferenceReplica(ctx context.Context, p Params) (*v1beta1.InferenceRe
 		return nil, err
 	}
 	p.placementExecution = policy
+	if policy != nil && len(policy.ReplicaFloors) > 0 {
+		if err := protocol.CheckComponentReplicaFloor(policy.ReplicaFloors, p.Component, p.ComponentExt); err != nil {
+			return nil, err
+		}
+	}
 	if policy != nil && policy.PauseSurge && (p.ComponentExt == nil || p.ComponentExt.MinReplicas == nil || *p.ComponentExt.MinReplicas <= 0 || int64(*p.ComponentExt.MinReplicas) > math.MaxInt32) {
 		return nil, fmt.Errorf("placement pause requires a resolved positive component floor")
 	}

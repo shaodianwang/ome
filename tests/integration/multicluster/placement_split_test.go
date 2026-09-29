@@ -6,7 +6,6 @@ import (
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -133,19 +132,8 @@ var _ = ginkgo.Describe("Multi-cluster placement split mode", func() {
 
 // splitSourceISVC declares a fleet floor with one Engine per replica unit.
 func splitSourceISVC(namespace, name, requirements string, split *v1beta1.SplitSpec) *v1beta1.InferenceService {
-	return &v1beta1.InferenceService{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: v1beta1.InferenceServiceSpec{
-			Placement: &v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity,
-				Mode:            v1beta1.PlacementModeSplit,
-				ClusterAffinity: affinityForRequirement(requirements),
-				Split:           split,
-			},
-			Engine: &v1beta1.EngineSpec{
-				Runner: &v1beta1.RunnerSpec{
-					Container: corev1.Container{Name: "ome-container", Image: "example/model-server:test"},
-				},
-			},
-		},
-	}
+	source := sourceISVC(namespace, name, requirements)
+	source.Spec.Placement.Mode = v1beta1.PlacementModeSplit
+	source.Spec.Placement.Split = split
+	return source
 }

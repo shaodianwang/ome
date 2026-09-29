@@ -24,6 +24,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/placement/protocol"
 	"github.com/ome-projects/ome/pkg/runtimeselector"
 )
 
@@ -31,12 +32,22 @@ func TestPlacementBackendReconcile(t *testing.T) {
 	type fixture struct {
 		service *v1beta1.InferenceService
 		runtime *v1beta1.ClusterServingRuntime
+		deploy  string
+	}
+	stampFloors := func(f *fixture, floor int32) {
+		raw, err := protocol.Encode(&v1beta1.PlacementExecutionPolicy{PlanID: "plan-a", Revision: 1, SourceUID: "source-a", ClusterUID: "cluster-a", PauseSurge: true,
+			ReplicaFloors: []v1beta1.PlacementComponentFloor{{Component: v1beta1.EngineComponent, Replicas: floor}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.service.Annotations[constants.PlacementExecution] = raw
 	}
 	for _, tt := range []struct {
-		name        string
-		change      func(*fixture)
-		wantHold    bool
-		wantVirtual bool
+		name          string
+		change        func(*fixture)
+		wantHold      bool
+		wantFloorHold bool
+		wantVirtual   bool
 	}{
 		{name: "native proceeds"},
 		{name: "legacy member retains raw deployment", change: func(f *fixture) {
@@ -46,6 +57,44 @@ func TestPlacementBackendReconcile(t *testing.T) {
 		{name: "legacy member retains multi-node deployment", change: func(f *fixture) {
 			delete(f.service.Annotations, constants.PlacementPolicy)
 			f.service.Spec.DeploymentMode = ptr.To(constants.MultiNode)
+		}},
+		{name: "configured replica floor", change: func(f *fixture) {
+			f.deploy = `{"defaultDeploymentMode":"RawDeployment","replicas":{"defaultMinReplicas":2}}`
+			stampFloors(f, 2)
+		}},
+		{name: "changed configured floor", wantFloorHold: true, change: func(f *fixture) {
+			f.deploy = `{"defaultDeploymentMode":"RawDeployment","replicas":{"defaultMinReplicas":4}}`
+			stampFloors(f, 2)
+		}},
+		{name: "accepted runtime floor", change: func(f *fixture) {
+			f.deploy = `{"defaultDeploymentMode":"RawDeployment","replicas":{"defaultMinReplicas":2}}`
+			f.runtime.Spec.EngineConfig.MinReplicas = ptr.To(4)
+			stampFloors(f, 4)
+		}},
+		{name: "source floor overrides runtime", change: func(f *fixture) {
+			f.runtime.Spec.EngineConfig.MinReplicas = ptr.To(4)
+			f.service.Spec.Engine.MinReplicas = ptr.To(2)
+			stampFloors(f, 2)
+		}},
+		{name: "runtime floor exceeds authority", wantFloorHold: true, change: func(f *fixture) {
+			f.runtime.Spec.EngineConfig.MinReplicas = ptr.To(4)
+			stampFloors(f, 2)
+		}},
+		{name: "runtime floor below authority", wantFloorHold: true, change: func(f *fixture) {
+			f.runtime.Spec.EngineConfig.MinReplicas = ptr.To(1)
+			stampFloors(f, 2)
+		}},
+		{name: "unresolved floor cannot use a default", wantFloorHold: true, change: func(f *fixture) { stampFloors(f, 2) }},
+		{name: "resolved router missing from authority", wantFloorHold: true, change: func(f *fixture) {
+			f.service.Spec.Router = &v1beta1.RouterSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: ptr.To(1)}}
+			f.runtime.Spec.EngineConfig.MinReplicas = ptr.To(2)
+			stampFloors(f, 2)
+		}},
+		{name: "ordinary local ignores accepted floor", change: func(f *fixture) {
+			f.runtime.Spec.EngineConfig.MinReplicas = ptr.To(4)
+			stampFloors(f, 2)
+			delete(f.service.Annotations, constants.PlacementOriginUID)
+			f.service.Spec.DeploymentMode = ptr.To(constants.RawDeployment)
 		}},
 		{name: "legacy member label", change: func(f *fixture) {
 			f.service.Annotations = nil
@@ -99,6 +148,7 @@ func TestPlacementBackendReconcile(t *testing.T) {
 				}
 			}
 			f := fixture{
+				deploy:  `{"defaultDeploymentMode":"RawDeployment"}`,
 				service: &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: "service", Namespace: "team-a", UID: "member-uid", Finalizers: []string{inferenceServiceFinalizer}, Annotations: map[string]string{constants.PlacementOriginUID: "source-a", constants.PlacementPolicy: string(v1beta1.PlacementPolicyClusterAffinity)}}, Spec: v1beta1.InferenceServiceSpec{DeploymentMode: ptr.To(constants.OMENative), Runtime: &v1beta1.ServingRuntimeRef{Name: "runtime-a"}, Model: &v1beta1.ModelRef{Name: "model-a"}, Engine: &v1beta1.EngineSpec{}}},
 				runtime: &v1beta1.ClusterServingRuntime{ObjectMeta: metav1.ObjectMeta{Name: "runtime-a"}, Spec: v1beta1.ServingRuntimeSpec{EngineConfig: &v1beta1.EngineSpec{Runner: &v1beta1.RunnerSpec{Container: corev1.Container{Name: "runner", Image: "example:v1"}}}}},
 			}
@@ -124,10 +174,10 @@ func TestPlacementBackendReconcile(t *testing.T) {
 			if err := cl.Get(t.Context(), key, before); err != nil {
 				t.Fatal(err)
 			}
-			r := &InferenceServiceReconciler{Client: cl, APIReader: cl, Scheme: s, Log: logr.Discard(), Recorder: record.NewFakeRecorder(20), RuntimeSelector: runtimeselector.New(cl), Clientset: fake.NewClientset(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: constants.InferenceServiceConfigMapName, Namespace: constants.OMENamespace}, Data: map[string]string{"deploy": `{"defaultDeploymentMode":"RawDeployment"}`}})}
+			r := &InferenceServiceReconciler{Client: cl, APIReader: cl, Scheme: s, Log: logr.Discard(), Recorder: record.NewFakeRecorder(20), RuntimeSelector: runtimeselector.New(cl), Clientset: fake.NewClientset(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: constants.InferenceServiceConfigMapName, Namespace: constants.OMENamespace}, Data: map[string]string{"deploy": f.deploy}})}
 			_, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: key})
 			wantWrites := 1
-			if tt.wantHold || tt.wantVirtual {
+			if tt.wantHold || tt.wantFloorHold || tt.wantVirtual {
 				wantWrites = 0
 				if err != nil {
 					t.Fatal(err)
@@ -150,6 +200,15 @@ func TestPlacementBackendReconcile(t *testing.T) {
 				stored.Status.Conditions = slices.DeleteFunc(stored.Status.Conditions, func(c apis.Condition) bool { return c.Type == v1beta1.PlacementBackendReady })
 			} else if condition != nil {
 				t.Fatalf("unexpected backend condition: %+v", condition)
+			}
+			floorCondition := stored.Status.GetCondition(v1beta1.PlacementReplicaFloorsReady)
+			if tt.wantFloorHold {
+				if floorCondition == nil || floorCondition.Status != corev1.ConditionFalse || floorCondition.Reason != "ReplicaFloorsMismatch" {
+					t.Fatalf("replica floor condition: %+v", floorCondition)
+				}
+				stored.Status.Conditions = slices.DeleteFunc(stored.Status.Conditions, func(c apis.Condition) bool { return c.Type == v1beta1.PlacementReplicaFloorsReady })
+			} else if floorCondition != nil {
+				t.Fatalf("unexpected replica floor condition: %+v", floorCondition)
 			}
 			if !tt.wantVirtual {
 				before.ResourceVersion = stored.ResourceVersion

@@ -30,6 +30,7 @@ func IsAffinityMember(service *v1beta1.InferenceService) bool {
 const (
 	executionVersion = 1
 	demandVersion    = 2
+	floorsVersion    = 3
 )
 
 type executionEnvelope struct {
@@ -86,11 +87,15 @@ func decode(raw string) (*v1beta1.PlacementExecutionPolicy, error) {
 		if err := decoder.Decode(&envelope); err != nil {
 			return nil, err
 		}
-		if envelope.Version != executionVersion && envelope.Version != demandVersion {
+		if envelope.Version != executionVersion && envelope.Version != demandVersion && envelope.Version != floorsVersion {
 			return nil, fmt.Errorf("unsupported execution policy version %d", envelope.Version)
 		}
 		hasDemand := envelope.Policy != nil && envelope.Policy.Demand != nil
-		if (envelope.Version == demandVersion) != hasDemand {
+		hasFloors := envelope.Policy != nil && len(envelope.Policy.ReplicaFloors) > 0
+		if (envelope.Version == floorsVersion) != hasFloors {
+			return nil, fmt.Errorf("execution policy version does not match its replica floor contract")
+		}
+		if envelope.Version != floorsVersion && (envelope.Version == demandVersion) != hasDemand {
 			return nil, fmt.Errorf("execution policy version does not match its demand contract")
 		}
 		return envelope.Policy, nil
@@ -99,8 +104,8 @@ func decode(raw string) (*v1beta1.PlacementExecutionPolicy, error) {
 	if err := decoder.Decode(&policy); err != nil {
 		return nil, err
 	}
-	if policy.Demand != nil {
-		return nil, fmt.Errorf("placement demand requires a versioned execution envelope")
+	if policy.Demand != nil || len(policy.ReplicaFloors) > 0 {
+		return nil, fmt.Errorf("placement demand and replica floors require a versioned execution envelope")
 	}
 	return &policy, nil
 }
@@ -112,7 +117,13 @@ func Validate(policy *v1beta1.PlacementExecutionPolicy) error {
 		return fmt.Errorf("placement execution policy requires plan, source, cluster identities and a positive revision")
 	}
 	if policy.Demand != nil {
-		return ValidateDemand(policy.Demand)
+		if err := ValidateDemand(policy.Demand); err != nil {
+			return err
+		}
+	}
+	if len(policy.ReplicaFloors) > 0 {
+		_, err := ValidateReplicaFloors(policy.ReplicaFloors)
+		return err
 	}
 	return nil
 }
@@ -173,6 +184,9 @@ func Encode(policy *v1beta1.PlacementExecutionPolicy) (string, error) {
 	version := executionVersion
 	if policy.Demand != nil {
 		version = demandVersion
+	}
+	if len(policy.ReplicaFloors) > 0 {
+		version = floorsVersion
 	}
 	data, err := json.Marshal(executionEnvelope{Version: version, Policy: policy})
 	return string(data), err

@@ -632,7 +632,7 @@ func TestReconcile_PolicyLiftEndToEnd(t *testing.T) {
 	s := testScheme(t)
 
 	derived := srcISVCWithRef("")
-	derived.UID = ""
+	derived.UID = "member-uid"
 	derived.CreationTimestamp = metav1.Now()
 	derived.Labels = map[string]string{PlacementOriginLabel: "uid-1"}
 	derived.Status = v1beta1.InferenceServiceStatus{
@@ -647,7 +647,7 @@ func TestReconcile_PolicyLiftEndToEnd(t *testing.T) {
 	}
 	w := fakeclient.NewClientBuilder().WithScheme(s).
 		WithStatusSubresource(&v1beta1.InferenceService{}).
-		WithObjects(derived, hpaPolicy(testPolicyName), irWithInstances(v1beta1.EngineComponent, true)).Build()
+		WithObjects(derived, backendTestRuntime(), hpaPolicy(testPolicyName), irWithInstances(v1beta1.EngineComponent, true)).Build()
 	cur := &v1beta1.InferenceService{}
 	require.NoError(t, w.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, cur))
 	if len(cur.Status.Components) == 0 {

@@ -18,10 +18,13 @@ var placementBackendConditions = apis.NewLivingConditionSet()
 // holdPlacementBackend writes only the advisory condition. Serving state and
 // child resources remain intact until every component resolves to OMENative.
 func (r *InferenceServiceReconciler) holdPlacementBackend(ctx context.Context, service *v1beta1.InferenceService, cause error) (ctrl.Result, error) {
+	return r.holdPlacementCondition(ctx, service, v1beta1.PlacementBackendReady, "UnsupportedPlacementBackend", cause)
+}
+
+func (r *InferenceServiceReconciler) holdPlacementCondition(ctx context.Context, service *v1beta1.InferenceService, condition apis.ConditionType, reason string, cause error) (ctrl.Result, error) {
 	base := service.DeepCopy()
 	placementBackendConditions.Manage(&service.Status).SetCondition(apis.Condition{
-		Type: v1beta1.PlacementBackendReady, Status: corev1.ConditionFalse,
-		Reason: "UnsupportedPlacementBackend", Message: cause.Error(),
+		Type: condition, Status: corev1.ConditionFalse, Reason: reason, Message: cause.Error(),
 	})
 	if equality.Semantic.DeepEqual(base.Status.Conditions, service.Status.Conditions) {
 		return ctrl.Result{}, nil

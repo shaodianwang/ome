@@ -37,7 +37,7 @@ type capacityProviderFixture struct {
 }
 
 func providerConfig() *CapacityConfig {
-	return &CapacityConfig{RootName: "capacity-root", MemberOperatorNamespace: "operator-system", MaxAge: 5 * time.Minute, StabilityWindow: time.Minute, RefreshInterval: 10 * time.Second}
+	return &CapacityConfig{RootName: "capacity-root", MaxAge: 5 * time.Minute, StabilityWindow: time.Minute, RefreshInterval: 10 * time.Second}
 }
 
 func capacityMemberObjects(name string, demand, available int64, now time.Time) []client.Object {
@@ -49,7 +49,7 @@ func capacityMemberObjects(name string, demand, available int64, now time.Time) 
 		Attribution: &v1beta1.AcceleratorCapacityAttribution{Complete: true, FlavorUID: flavor.UID, NodeLabels: flavor.Spec.NodeLabels, FlavorSetHash: hash},
 	}}}}
 	runtime := &v1beta1.ClusterServingRuntime{ObjectMeta: metav1.ObjectMeta{Name: "runtime-a", UID: types.UID(name + "-runtime"), ResourceVersion: "1"}, Spec: v1beta1.ServingRuntimeSpec{EngineConfig: &v1beta1.EngineSpec{PodSpec: v1beta1.PodSpec{NodeSelector: map[string]string{"hardware": "a"}}, Runner: &v1beta1.RunnerSpec{Container: corev1.Container{Name: "runner", Image: "example.com/serving:v1", Resources: corev1.ResourceRequirements{Requests: resources.DeepCopy(), Limits: resources}}}}}}
-	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: constants.InferenceServiceConfigMapName, Namespace: providerConfig().MemberOperatorNamespace, UID: types.UID(name + "-config"), ResourceVersion: "1"}, Data: map[string]string{controllerconfig.AcceleratorResourcesConfigName: `["example.com/gpu"]`}}
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: constants.InferenceServiceConfigMapName, Namespace: "operator-system", UID: types.UID(name + "-config"), ResourceVersion: "1"}, Data: map[string]string{controllerconfig.AcceleratorResourcesConfigName: `["example.com/gpu"]`}}
 	return []client.Object{flavor, root, runtime, cm}
 }
 
@@ -84,6 +84,7 @@ func newCapacityProviderFixture(t *testing.T) *capacityProviderFixture {
 	}
 	f.r, _ = newPlacer(scheme, connections, objects...)
 	f.r.Capacity, f.r.CapacityClock = providerConfig(), f.clock
+	f.r.MemberOperatorNamespace = "operator-system"
 	f.syncFleet(t)
 	return f
 }
@@ -191,7 +192,7 @@ func configureContractApplication(t *testing.T, source *v1beta1.InferenceService
 			t.Fatal(err)
 		}
 	}
-	r := &Reconciler{Capacity: providerConfig()}
+	r := &Reconciler{Capacity: providerConfig(), MemberOperatorNamespace: "operator-system"}
 	desired := DeriveISVC(source, "", "")
 	demand, err := r.resolveCapacityOn(t.Context(), worker, source, desired)
 	if err != nil {

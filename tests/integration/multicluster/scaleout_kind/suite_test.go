@@ -167,7 +167,8 @@ func startControlPlaneManager(c *cluster) {
 		}
 		cm = m
 		if err := components.SetupPlacement(setupCtx, mgr, m,
-			components.WithCapacityPlacement(&placement.CapacityConfig{RootName: v1beta1.AcceleratorQuotaRootName, MemberOperatorNamespace: constants.OMENamespace, MaxAge: 10 * time.Minute, StabilityWindow: 2 * time.Second, RefreshInterval: time.Second}),
+			components.WithMemberOperatorNamespace(constants.OMENamespace),
+			components.WithCapacityPlacement(&placement.CapacityConfig{RootName: v1beta1.AcceleratorQuotaRootName, MaxAge: 10 * time.Minute, StabilityWindow: 2 * time.Second, RefreshInterval: time.Second}),
 			components.WithPlacementRequeue(placementRequeue),
 			components.WithControlPlaneID(controlPlaneID),
 			components.WithStatusFunnel(controlPlaneID),

@@ -707,6 +707,29 @@ spec:
                       type: boolean
                     planID:
                       type: string
+                    replicaFloors:
+                      items:
+                        properties:
+                          component:
+                            enum:
+                              - engine
+                              - decoder
+                              - router
+                            type: string
+                          replicas:
+                            format: int32
+                            minimum: 1
+                            type: integer
+                        required:
+                          - component
+                          - replicas
+                        type: object
+                      maxItems: 3
+                      minItems: 1
+                      type: array
+                      x-kubernetes-list-map-keys:
+                        - component
+                      x-kubernetes-list-type: map
                     revision:
                       format: int64
                       minimum: 1

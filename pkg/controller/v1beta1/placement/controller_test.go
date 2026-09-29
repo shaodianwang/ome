@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -22,7 +23,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workloadcluster"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 func testScheme(t *testing.T) *runtime.Scheme {
@@ -40,6 +43,13 @@ type fakeClusters struct {
 func (f fakeClusters) ClientFor(name string) (workloadcluster.SelectivelyCachingClient, bool) {
 	c, ok := f.m[name]
 	return c, ok
+}
+
+func (f fakeClusters) ClientForUID(name string, uid types.UID) (workloadcluster.SelectivelyCachingClient, bool) {
+	if uid != types.UID(name+"-uid") {
+		return nil, false
+	}
+	return f.ClientFor(name)
 }
 
 func (f fakeClusters) Connected() []string {
@@ -66,15 +76,27 @@ func srcISVC(selector string) *v1beta1.InferenceService {
 			Annotations: map[string]string{},
 		},
 		Spec: v1beta1.InferenceServiceSpec{
-			Placement: &v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity, Mode: v1beta1.PlacementModeSingle, ClusterAffinity: testAffinity(selector)},
-			Engine:    &v1beta1.EngineSpec{Runner: &v1beta1.RunnerSpec{Container: corev1.Container{Name: "ome-container", Image: "img"}}},
+			DeploymentMode: ptr.To(constants.OMENative),
+			Runtime:        &v1beta1.ServingRuntimeRef{Name: "placement-runtime"},
+			Placement:      &v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity, Mode: v1beta1.PlacementModeSingle, ClusterAffinity: testAffinity(selector)},
+			Engine:         &v1beta1.EngineSpec{Runner: &v1beta1.RunnerSpec{Container: corev1.Container{Name: "ome-container", Image: "img"}}},
 		},
 	}
 }
 
+func backendTestRuntime() *v1beta1.ClusterServingRuntime {
+	return &v1beta1.ClusterServingRuntime{ObjectMeta: metav1.ObjectMeta{Name: "placement-runtime", UID: "runtime-uid"}, Spec: v1beta1.ServingRuntimeSpec{}}
+}
+
 // emptyWorker is a fresh fake worker client (status subresource registered).
 func emptyWorker(s *runtime.Scheme) client.WithWatch {
-	return fakeclient.NewClientBuilder().WithScheme(s).WithStatusSubresource(&v1beta1.InferenceService{}).Build()
+	return fakeclient.NewClientBuilder().WithScheme(s).WithStatusSubresource(&v1beta1.InferenceService{}).WithObjects(backendTestRuntime()).WithInterceptorFuncs(interceptor.Funcs{Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+		if _, ok := obj.(*v1beta1.InferenceService); ok && obj.GetUID() == "" {
+			obj.SetUID(types.UID("member-" + obj.GetName()))
+			obj.SetGeneration(1)
+		}
+		return cl.Create(ctx, obj, opts...)
+	}}).Build()
 }
 
 // workerWithAdmittedDerived returns a worker whose derived ISVC already reports
@@ -82,6 +104,7 @@ func emptyWorker(s *runtime.Scheme) client.WithWatch {
 func workerWithAdmittedDerived(t *testing.T, s *runtime.Scheme) client.WithWatch {
 	t.Helper()
 	derived := isvcWithInstances(v1beta1.EngineComponent, true) // from admission_test.go
+	derived.UID = "member-uid"
 	derived.Namespace = "prod"
 	derived.Name = "svc"
 	derived.Labels = map[string]string{PlacementOriginLabel: "uid-1"}
@@ -90,7 +113,7 @@ func workerWithAdmittedDerived(t *testing.T, s *runtime.Scheme) client.WithWatch
 	engineIR := irWithInstances(v1beta1.EngineComponent, true)
 	w := fakeclient.NewClientBuilder().WithScheme(s).
 		WithStatusSubresource(&v1beta1.InferenceService{}).
-		WithObjects(derived, engineIR).Build()
+		WithObjects(derived, engineIR, backendTestRuntime()).Build()
 	// Ensure the admitted status is stored (if the builder didn't persist it).
 	cur := &v1beta1.InferenceService{}
 	require.NoError(t, w.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, cur))
@@ -131,12 +154,13 @@ func cpPlacement(t *testing.T, cp client.Client) *v1beta1.PlacementStatus {
 func workerWithAdmittedURL(t *testing.T, s *runtime.Scheme, host string) client.WithWatch {
 	t.Helper()
 	derived := isvcWithInstances(v1beta1.EngineComponent, true)
+	derived.UID = "member-uid"
 	derived.Namespace, derived.Name = "prod", "svc"
 	derived.Labels = map[string]string{PlacementOriginLabel: "uid-1"}
 	derived.Status.URL = &apis.URL{Scheme: "https", Host: host}
 	engineIR := irWithInstances(v1beta1.EngineComponent, true)
 	w := fakeclient.NewClientBuilder().WithScheme(s).
-		WithStatusSubresource(&v1beta1.InferenceService{}).WithObjects(derived, engineIR).Build()
+		WithStatusSubresource(&v1beta1.InferenceService{}).WithObjects(derived, engineIR, backendTestRuntime()).Build()
 	cur := &v1beta1.InferenceService{}
 	require.NoError(t, w.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, cur))
 	if cur.Status.URL == nil {
@@ -153,6 +177,7 @@ func workerWithReadyURL(t *testing.T, s *runtime.Scheme, host string, ready int3
 func workerWithReplicaCounts(t *testing.T, s *runtime.Scheme, host string, admitted, ready int32) client.WithWatch {
 	t.Helper()
 	derived := isvcWithInstances(v1beta1.EngineComponent, true)
+	derived.UID = "member-uid"
 	derived.Namespace, derived.Name = "prod", "svc"
 	derived.Labels = map[string]string{PlacementOriginLabel: "uid-1"}
 	derived.Status.URL = &apis.URL{Scheme: "https", Host: host}
@@ -166,7 +191,7 @@ func workerWithReplicaCounts(t *testing.T, s *runtime.Scheme, host string, admit
 	engineIR := irWithInstances(v1beta1.EngineComponent, instances...)
 	engineIR.Status.ReadyReplicas = ready
 	return fakeclient.NewClientBuilder().WithScheme(s).
-		WithStatusSubresource(&v1beta1.InferenceService{}).WithObjects(derived, engineIR).Build()
+		WithStatusSubresource(&v1beta1.InferenceService{}).WithObjects(derived, engineIR, backendTestRuntime()).Build()
 }
 
 func workerWithPDReplicaCounts(
@@ -177,6 +202,7 @@ func workerWithPDReplicaCounts(
 ) client.WithWatch {
 	t.Helper()
 	derived := isvcWithInstances(v1beta1.EngineComponent, true)
+	derived.UID = "member-uid"
 	declareComponent(derived, v1beta1.DecoderComponent)
 	derived.Namespace, derived.Name = "prod", "svc"
 	derived.Labels = map[string]string{PlacementOriginLabel: "uid-1"}
@@ -201,7 +227,7 @@ func workerWithPDReplicaCounts(
 
 	return fakeclient.NewClientBuilder().WithScheme(s).
 		WithStatusSubresource(&v1beta1.InferenceService{}).
-		WithObjects(derived, engineIR, decoderIR).Build()
+		WithObjects(derived, engineIR, decoderIR, backendTestRuntime()).Build()
 }
 
 func cpStatusURL(t *testing.T, cp client.Client) *apis.URL {
@@ -712,11 +738,12 @@ func TestReconcile_ReplaceOnWinnerLostAfterGrace(t *testing.T) {
 func workerWithUnadmittedDerived(t *testing.T, s *runtime.Scheme) client.WithWatch {
 	t.Helper()
 	derived := isvcWithInstances(v1beta1.EngineComponent)
+	derived.UID = "member-uid"
 	derived.Namespace, derived.Name = "prod", "svc"
 	derived.Labels = map[string]string{PlacementOriginLabel: "uid-1"}
 	engineIR := irWithInstances(v1beta1.EngineComponent, false) // present, NOT admitted
 	return fakeclient.NewClientBuilder().WithScheme(s).
-		WithStatusSubresource(&v1beta1.InferenceService{}).WithObjects(derived, engineIR).Build()
+		WithStatusSubresource(&v1beta1.InferenceService{}).WithObjects(derived, engineIR, backendTestRuntime()).Build()
 }
 
 func TestReconcile_WinnerLostAdmissionWithinGraceHolds(t *testing.T) {
@@ -1323,17 +1350,17 @@ func TestPlaceOn_PreservesWorkerMetadata(t *testing.T) {
 	// Pre-existing derived that IS ours (carries the origin marker) plus a
 	// worker-added label + annotation the worker reconciler stamped on it.
 	existing := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{
-		Name: "svc", Namespace: "prod",
+		Name: "svc", Namespace: "prod", UID: "member-uid",
 		Labels:      map[string]string{"worker.io/managed": "yes", PlacementOriginLabel: "uid-1"},
 		Annotations: map[string]string{"worker.io/state": "bookkeeping"},
 	}}
-	w := fakeclient.NewClientBuilder().WithScheme(s).WithObjects(existing).Build()
+	w := fakeclient.NewClientBuilder().WithScheme(s).WithObjects(existing, backendTestRuntime()).Build()
 	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
 		"a": workloadcluster.NewNeverCachingClient(w),
 	}}
-	r, _ := newPlacer(s, clusters, srcISVC(""))
+	r, _ := newPlacer(s, clusters, srcISVC(""), readyWC("a", nil))
 
-	require.NoError(t, r.placeOn(context.Background(), "a", w, srcISVC("")))
+	require.NoError(t, r.placeOn(context.Background(), "a", srcISVC(""), false))
 
 	got := &v1beta1.InferenceService{}
 	require.NoError(t, w.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, got))
@@ -1352,7 +1379,7 @@ func TestPlaceOn_RefusesToClobberForeignISVC(t *testing.T) {
 	// A foreign object: same name/namespace, NO origin markers, a distinct Spec.
 	foreign := &v1beta1.InferenceService{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "svc", Namespace: "prod",
+			Name: "svc", Namespace: "prod", UID: "member-uid",
 			Labels:      map[string]string{"owner": "some-user"},
 			Annotations: map[string]string{"note": "hand-rolled"},
 		},
@@ -1360,13 +1387,13 @@ func TestPlaceOn_RefusesToClobberForeignISVC(t *testing.T) {
 			Router: &v1beta1.RouterSpec{Runner: &v1beta1.RunnerSpec{Container: corev1.Container{Name: "user-container", Image: "user-img"}}},
 		},
 	}
-	w := fakeclient.NewClientBuilder().WithScheme(s).WithObjects(foreign).Build()
+	w := fakeclient.NewClientBuilder().WithScheme(s).WithObjects(foreign, backendTestRuntime()).Build()
 	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
 		"a": workloadcluster.NewNeverCachingClient(w),
 	}}
-	r, _ := newPlacer(s, clusters, srcISVC(""))
+	r, _ := newPlacer(s, clusters, srcISVC(""), readyWC("a", nil))
 
-	err := r.placeOn(context.Background(), "a", w, srcISVC(""))
+	err := r.placeOn(context.Background(), "a", srcISVC(""), false)
 	require.Error(t, err, "placeOn must refuse to clobber a foreign same-named ISVC")
 
 	got := &v1beta1.InferenceService{}
@@ -1385,16 +1412,16 @@ func TestPlaceOn_RefusesToClobberForeignISVC(t *testing.T) {
 func TestPlaceOn_UpdatesOwnDerived(t *testing.T) {
 	s := testScheme(t)
 	existing := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{
-		Name: "svc", Namespace: "prod",
+		Name: "svc", Namespace: "prod", UID: "member-uid",
 		Labels: map[string]string{PlacementOriginLabel: "uid-1"},
 	}}
-	w := fakeclient.NewClientBuilder().WithScheme(s).WithObjects(existing).Build()
+	w := fakeclient.NewClientBuilder().WithScheme(s).WithObjects(existing, backendTestRuntime()).Build()
 	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
 		"a": workloadcluster.NewNeverCachingClient(w),
 	}}
-	r, _ := newPlacer(s, clusters, srcISVC(""))
+	r, _ := newPlacer(s, clusters, srcISVC(""), readyWC("a", nil))
 
-	require.NoError(t, r.placeOn(context.Background(), "a", w, srcISVC("")), "re-apply of our own derived must succeed")
+	require.NoError(t, r.placeOn(context.Background(), "a", srcISVC(""), false), "re-apply of our own derived must succeed")
 
 	got := &v1beta1.InferenceService{}
 	require.NoError(t, w.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, got))
@@ -1405,13 +1432,13 @@ func TestPlaceOn_UpdatesOwnDerived(t *testing.T) {
 // placeOn must create the derived when no object exists on the candidate.
 func TestPlaceOn_CreatesWhenAbsent(t *testing.T) {
 	s := testScheme(t)
-	w := fakeclient.NewClientBuilder().WithScheme(s).Build()
+	w := emptyWorker(s)
 	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
 		"a": workloadcluster.NewNeverCachingClient(w),
 	}}
-	r, _ := newPlacer(s, clusters, srcISVC(""))
+	r, _ := newPlacer(s, clusters, srcISVC(""), readyWC("a", nil))
 
-	require.NoError(t, r.placeOn(context.Background(), "a", w, srcISVC("")), "first-time create must succeed")
+	require.NoError(t, r.placeOn(context.Background(), "a", srcISVC(""), false), "first-time create must succeed")
 
 	got := &v1beta1.InferenceService{}
 	require.NoError(t, w.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, got))
@@ -1941,11 +1968,12 @@ func placedAllISVC() *v1beta1.InferenceService {
 func workerWithGatedDerived(t *testing.T, s *runtime.Scheme) client.WithWatch {
 	t.Helper()
 	derived := isvcWithInstances(v1beta1.EngineComponent)
+	derived.UID = "member-uid"
 	derived.Namespace, derived.Name = "prod", "svc"
 	derived.Labels = map[string]string{PlacementOriginLabel: "uid-1"}
 	engineIR := irWithInstances(v1beta1.EngineComponent, false) // present, NOT admitted
 	return fakeclient.NewClientBuilder().WithScheme(s).
-		WithStatusSubresource(&v1beta1.InferenceService{}).WithObjects(derived, engineIR).Build()
+		WithStatusSubresource(&v1beta1.InferenceService{}).WithObjects(derived, engineIR, backendTestRuntime()).Build()
 }
 
 func candidatesByCluster(cs []v1beta1.CandidatePlacement) map[string]v1beta1.CandidatePlacement {
@@ -2144,7 +2172,7 @@ func TestReconcile_AllModeUnreadableHomeDoesNotBorrowLegacyReady(t *testing.T) {
 		"an unproven carried count must not become routing weight")
 }
 
-func TestReconcile_AllModeDisconnectDoesNotRetainNonCandidateHome(t *testing.T) {
+func TestReconcile_AllModeBackendHoldRetainsOutgoingHome(t *testing.T) {
 	s := testScheme(t)
 	isvc := placedAllISVC()
 	r, cp := newPlacer(s, fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{}}, isvc,
@@ -2157,9 +2185,13 @@ func TestReconcile_AllModeDisconnectDoesNotRetainNonCandidateHome(t *testing.T) 
 	p := cpPlacement(t, cp)
 	require.NotNil(t, p)
 	assert.Equal(t, v1beta1.PlacementPhasePlaced, p.Phase)
-	require.Len(t, p.Candidates, 1)
-	assert.Equal(t, "a", p.Candidates[0].Cluster)
-	assert.Equal(t, "svc.a.example", p.Candidates[0].Endpoint.Host)
+	got := map[string]string{}
+	for _, candidate := range p.Candidates {
+		got[candidate.Cluster] = candidate.Endpoint.Host
+	}
+	if diff := cmp.Diff(map[string]string{"a": "svc.a.example", "b": "svc.b.example"}, got); diff != "" {
+		t.Fatalf("held homes (-want +got):\n%s", diff)
+	}
 }
 
 // TestReconcile_AllModePartialAdmitStaysPlaced: one home admitted, one still
@@ -2323,6 +2355,7 @@ func srcISVCSplit(requirements string, replicas int32) *v1beta1.InferenceService
 func workerWithReplicas(t *testing.T, s *runtime.Scheme, host string, admitted, ready int32) client.WithWatch {
 	t.Helper()
 	derived := isvcWithInstances(v1beta1.EngineComponent)
+	derived.UID = "member-uid"
 	derived.Namespace, derived.Name = "prod", "svc"
 	derived.Labels = map[string]string{PlacementOriginLabel: "uid-1"}
 	derived.Status.URL = &apis.URL{Scheme: "https", Host: host}
@@ -2336,7 +2369,7 @@ func workerWithReplicas(t *testing.T, s *runtime.Scheme, host string, admitted, 
 	ir := irWithInstances(v1beta1.EngineComponent, flags...)
 	ir.Status.ReadyReplicas = ready
 	w := fakeclient.NewClientBuilder().WithScheme(s).
-		WithStatusSubresource(&v1beta1.InferenceService{}).WithObjects(derived, ir).Build()
+		WithStatusSubresource(&v1beta1.InferenceService{}).WithObjects(derived, ir, backendTestRuntime()).Build()
 	cur := &v1beta1.InferenceService{}
 	require.NoError(t, w.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, cur))
 	if cur.Status.URL == nil {

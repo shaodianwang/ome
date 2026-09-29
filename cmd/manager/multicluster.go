@@ -39,20 +39,21 @@ type mcWiring struct {
 	reconnectBackoff  workloadcluster.ReconnectBackoffConfig
 
 	// Placement + its status convergence and GC (control plane only).
-	requeue                time.Duration
-	gcInterval             time.Duration
-	maxConcurrent          int
-	placeTimeout           time.Duration
-	winnerLostGrace        time.Duration
-	statusBatchPeriod      time.Duration
-	statusSafetyRequeue    time.Duration
-	dispatcherMode         placement.DispatcherMode
-	dispatcherStepSize     int
-	dispatcherRoundTimeout time.Duration
-	localQueue             string
-	capacity               *placement.CapacityConfig
-	funnelResyncInterval   time.Duration
-	funnelBufferSize       int
+	requeue                 time.Duration
+	gcInterval              time.Duration
+	maxConcurrent           int
+	placeTimeout            time.Duration
+	winnerLostGrace         time.Duration
+	statusBatchPeriod       time.Duration
+	statusSafetyRequeue     time.Duration
+	dispatcherMode          placement.DispatcherMode
+	dispatcherStepSize      int
+	dispatcherRoundTimeout  time.Duration
+	localQueue              string
+	capacity                *placement.CapacityConfig
+	memberOperatorNamespace string
+	funnelResyncInterval    time.Duration
+	funnelBufferSize        int
 
 	endpoint placementendpoint.Config
 	routing  placementrouting.Config
@@ -132,8 +133,8 @@ func resolveMCWiring(mc *controllerconfig.MultiClusterConfig) mcWiring {
 	var capacityConfig *placement.CapacityConfig
 	if pl.Capacity != nil {
 		capacityConfig = &placement.CapacityConfig{
-			RootName: pl.Capacity.RootName, MemberOperatorNamespace: pl.Capacity.MemberOperatorNamespace,
-			MaxAge: pl.Capacity.MaxAgeDuration(), StabilityWindow: pl.Capacity.StabilityWindowDuration(), RefreshInterval: pl.Capacity.RefreshIntervalDuration(),
+			RootName: pl.Capacity.RootName,
+			MaxAge:   pl.Capacity.MaxAgeDuration(), StabilityWindow: pl.Capacity.StabilityWindowDuration(), RefreshInterval: pl.Capacity.RefreshIntervalDuration(),
 		}
 	}
 
@@ -152,20 +153,21 @@ func resolveMCWiring(mc *controllerconfig.MultiClusterConfig) mcWiring {
 			EstablishMax:     wc.EstablishMaxDuration(),
 			RetryMax:         wc.ReconnectRetryMaxDuration(),
 		},
-		requeue:                pl.RequeueIntervalDuration(),
-		gcInterval:             pl.GCIntervalDuration(),
-		maxConcurrent:          pl.MaxConcurrentReconciles,
-		placeTimeout:           pl.FanoutTimeoutDuration(),
-		winnerLostGrace:        pl.WinnerLostGraceDuration(),
-		statusBatchPeriod:      pl.StatusBatchPeriodDuration(),
-		statusSafetyRequeue:    safetyRequeue,
-		dispatcherMode:         placement.DispatcherMode(pl.DispatcherMode),
-		dispatcherStepSize:     pl.DispatcherStepSize,
-		dispatcherRoundTimeout: pl.DispatcherRoundTimeoutDuration(),
-		localQueue:             pl.LocalQueue,
-		capacity:               capacityConfig,
-		funnelResyncInterval:   wc.FunnelResyncIntervalDuration(),
-		funnelBufferSize:       wc.FunnelBufferSize,
+		requeue:                 pl.RequeueIntervalDuration(),
+		gcInterval:              pl.GCIntervalDuration(),
+		maxConcurrent:           pl.MaxConcurrentReconciles,
+		placeTimeout:            pl.FanoutTimeoutDuration(),
+		winnerLostGrace:         pl.WinnerLostGraceDuration(),
+		statusBatchPeriod:       pl.StatusBatchPeriodDuration(),
+		statusSafetyRequeue:     safetyRequeue,
+		dispatcherMode:          placement.DispatcherMode(pl.DispatcherMode),
+		dispatcherStepSize:      pl.DispatcherStepSize,
+		dispatcherRoundTimeout:  pl.DispatcherRoundTimeoutDuration(),
+		localQueue:              pl.LocalQueue,
+		capacity:                capacityConfig,
+		memberOperatorNamespace: pl.MemberOperatorNamespace,
+		funnelResyncInterval:    wc.FunnelResyncIntervalDuration(),
+		funnelBufferSize:        wc.FunnelBufferSize,
 		endpoint: placementendpoint.Config{
 			GlobalHostTemplate: ep.GlobalHostTemplate,
 			GlobalGateway:      ep.GlobalGateway,
@@ -408,6 +410,7 @@ func setupMultiCluster(mgr manager.Manager, clientSet kubernetes.Interface, opti
 		DispatcherRoundTimeout:  w.dispatcherRoundTimeout,
 		LocalQueue:              w.localQueue,
 		Capacity:                w.capacity,
+		MemberOperatorNamespace: w.memberOperatorNamespace,
 	}).SetupWithManager(mgr, convergeOpts...); err != nil {
 		return fmt.Errorf("create Placement controller: %w", err)
 	}

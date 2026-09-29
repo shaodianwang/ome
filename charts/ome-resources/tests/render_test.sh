@@ -463,6 +463,47 @@ grep -Fqx '  - gateways' <<<"${multicluster_access}" ||
 grep -Fqx '  - httproutes' <<<"${multicluster_access}" ||
   fail "multicluster-access ClusterRole does not grant httproutes"
 
+# Placement input reads cannot grant writes to member-owned configuration.
+for resource in clusterservingruntimes servingruntimes clusterbasemodels basemodels controllerrevisions configmaps acceleratorquotas resourceflavors runtimeclasses; do
+  input_rule="$(awk -v resource="${resource}" '
+    /^- apiGroups:/ { if (matches) { printf "%s", rule; matches=0; exit }; rule=""; matches=0 }
+    { rule=rule $0 "\n" }
+    $0 == "  - " resource { matches=1 }
+    END { if (matches) printf "%s", rule }
+  ' <<<"${multicluster_access}")"
+  test -n "${input_rule}" || fail "multicluster-access lacks ${resource} input reads"
+  if grep -Eq '^  - (create|update|patch|delete|deletecollection|\*)$' <<<"${input_rule}"; then
+    fail "multicluster-access permits mutation of ${resource}"
+  fi
+  input_verb=get
+  if [[ "${resource}" == resourceflavors ]]; then input_verb=list; fi
+  grep -Fqx "  - ${input_verb}" <<<"${input_rule}" || fail "multicluster-access lacks ${resource} ${input_verb}"
+done
+grep -Fqx '  - inferenceservice-config' <<<"${multicluster_access}" ||
+  fail "member configuration reads must name the operator ConfigMap"
+
+capacity_reader="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace placement-system \
+  --set ome.multicluster.enabled=true \
+  --set ome.multicluster.role=control-plane \
+  --set ome.multicluster.config.placement.capacity.rootName=capacity-root \
+  --show-only templates/ome-controller/rbac/placement_capacity.yaml)"
+for verb in get list watch; do
+  grep -Fqx "  - ${verb}" <<<"${capacity_reader}" || fail "capacity reader lacks ${verb}"
+done
+if grep -Eq '^  - (create|update|patch|delete|deletecollection|\*)$' <<<"${capacity_reader}"; then
+  fail "capacity reader must not write quota objects"
+fi
+grep -Fqx '  - acceleratorquotas' <<<"${capacity_reader}" || fail "capacity reader lacks quota reports"
+grep -Fqx '  namespace: placement-system' <<<"${capacity_reader}" || fail "capacity reader binds the wrong namespace"
+for role in control-plane workload; do
+  without_capacity="$("${helm_bin}" template ome-resources "${chart_dir}" \
+    --namespace ome --set ome.multicluster.enabled=true --set "ome.multicluster.role=${role}")"
+  if grep -Fq 'ome-placement-capacity-reader' <<<"${without_capacity}"; then
+    fail "${role} acquired capacity reads without capacity configuration"
+  fi
+done
+
 routing_topology_error='ome.multicluster.config.routing.enabled=true requires ome.multicluster.enabled=true and ome.multicluster.role=control-plane'
 
 if routing_without_multicluster="$("${helm_bin}" template ome-resources "${chart_dir}" \

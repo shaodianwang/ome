@@ -19,6 +19,7 @@ import (
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -336,6 +337,14 @@ var _ = ginkgo.BeforeSuite(func() {
 		}()
 		wg.Wait()
 	})
+	if !memberWithKueue {
+		for _, member := range []cluster{member1Cluster, member2Cluster} {
+			runtime := ometesting.MakeClusterServingRuntime(placementRuntimeName).
+				SupportsModelFormat("safetensors", true, 10).
+				EngineRunner(corev1.Container{Name: "ome-container", Image: "example/model-server:test"}).Obj()
+			mustCreate(member, runtime)
+		}
+	}
 	// Every cluster's scheme registration (framework.Init) is now complete and the
 	// scheme is stable. Only now start the managers, so their cache informers read
 	// the scheme without racing a sibling cluster's Init write.

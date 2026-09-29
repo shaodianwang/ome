@@ -33,9 +33,9 @@ func TestDemandTransport(t *testing.T) {
 		{name: "flat cannot carry demand", flat: true, wantErr: true},
 		{name: "execution version cannot carry demand", version: 1, wantErr: true},
 		{name: "demand version requires demand", version: 2, omitDemand: true, wantErr: true},
-		{name: "unknown version", version: 3, wantErr: true},
+		{name: "unknown version", version: 4, wantErr: true},
 		{name: "local ignores demand envelope", version: 2, local: true},
-		{name: "local ignores unsupported version", version: 3, local: true},
+		{name: "local ignores unsupported version", version: 4, local: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			policy := demandPolicy()

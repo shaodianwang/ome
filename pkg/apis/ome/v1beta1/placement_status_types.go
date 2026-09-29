@@ -25,6 +25,10 @@ const PlacementCapacityFresh = "PlacementCapacityFresh"
 // OMENative. It is advisory and does not change observed serving readiness.
 const PlacementBackendReady = "PlacementBackendReady"
 
+// PlacementReplicaFloorsReady reports whether resolved member floors match
+// placement authority. It does not change observed serving readiness.
+const PlacementReplicaFloorsReady = "PlacementReplicaFloorsReady"
+
 // PlacementPlanStatus identifies the allocation persisted before member writes.
 // Original assignments remain fixed throughout a transition, including retargets.
 type PlacementPlanStatus struct {
@@ -124,6 +128,23 @@ type PlacementExecutionPolicy struct {
 	// inputs before a component can project workloads. Absent for static plans.
 	// +optional
 	Demand *PlacementDemandContract `json:"demand,omitempty"`
+	// ReplicaFloors binds the full per-home policy to the floors accepted by
+	// placement. Runtime changes cannot expand a paused placement reservation.
+	// +optional
+	// +listType=map
+	// +listMapKey=component
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=3
+	ReplicaFloors []PlacementComponentFloor `json:"replicaFloors,omitempty"`
+}
+
+// PlacementComponentFloor records a resolved component's guaranteed count.
+// Engine and Decoder use equal whole-replica floors; Router is independent.
+type PlacementComponentFloor struct {
+	// +kubebuilder:validation:Enum=engine;decoder;router
+	Component ComponentType `json:"component"`
+	// +kubebuilder:validation:Minimum=1
+	Replicas int32 `json:"replicas"`
 }
 
 // PlacementDemandContract binds component rendering to normalized unit demand.

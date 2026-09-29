@@ -102,8 +102,11 @@ ome:
         funnelBufferSize: 0      # depth of the funnel's buffered event channel
       # placement: the fan-out placement controller, its status convergence + GC.
       placement:
+        # Member namespace for pinned runtimes and model configuration; required
+        # for capacity placement. No namespace is assumed when this is empty.
+        memberOperatorNamespace: ""
         # Opt in after installing current member CRDs/controllers. Supply rootName,
-        # memberOperatorNamespace, maxAge, stabilityWindow, and refreshInterval.
+        # maxAge, stabilityWindow, and refreshInterval.
         capacity: null
         requeueInterval: ""         # status-refresh poll cadence
         gcInterval: ""              # orphan-sweep cadence

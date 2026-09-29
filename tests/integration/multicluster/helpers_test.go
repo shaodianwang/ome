@@ -10,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
@@ -46,6 +47,8 @@ func rotateSecret(c cluster, namespace, name string, kubeconfig []byte) {
 	}, eventuallyTimeout, eventuallyPoll).Should(gomega.Succeed())
 }
 
+const placementRuntimeName = "placement-runtime"
+
 // sourceISVC declares Single placement with one Engine and label affinity.
 func sourceISVC(namespace, name, acceleratorRequirements string) *v1beta1.InferenceService {
 	return &v1beta1.InferenceService{
@@ -54,7 +57,9 @@ func sourceISVC(namespace, name, acceleratorRequirements string) *v1beta1.Infere
 			Namespace: namespace,
 		},
 		Spec: v1beta1.InferenceServiceSpec{
-			Placement: &v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity, Mode: v1beta1.PlacementModeSingle, ClusterAffinity: affinityForRequirement(acceleratorRequirements)},
+			DeploymentMode: ptr.To(constants.OMENative),
+			Runtime:        &v1beta1.ServingRuntimeRef{Name: placementRuntimeName},
+			Placement:      &v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity, Mode: v1beta1.PlacementModeSingle, ClusterAffinity: affinityForRequirement(acceleratorRequirements)},
 			Engine: &v1beta1.EngineSpec{
 				Runner: &v1beta1.RunnerSpec{
 					Container: corev1.Container{Name: "ome-container", Image: "example/model-server:test"},

@@ -23,11 +23,10 @@ import (
 // CapacityConfig locates the shared-name quota roots and member configuration.
 // Every duration is explicit; missing configuration holds capacity placement.
 type CapacityConfig struct {
-	RootName                string
-	MemberOperatorNamespace string
-	MaxAge                  time.Duration
-	StabilityWindow         time.Duration
-	RefreshInterval         time.Duration
+	RootName        string
+	MaxAge          time.Duration
+	StabilityWindow time.Duration
+	RefreshInterval time.Duration
 }
 
 func (r *Reconciler) capacityNow() time.Time {
@@ -38,8 +37,8 @@ func (r *Reconciler) capacityNow() time.Time {
 }
 
 func (c *CapacityConfig) Validate() error {
-	if c == nil || strings.TrimSpace(c.RootName) == "" || strings.TrimSpace(c.MemberOperatorNamespace) == "" || c.MaxAge <= 0 || c.StabilityWindow <= 0 || c.RefreshInterval <= 0 {
-		return fmt.Errorf("capacity placement requires root name, member operator namespace, and positive freshness, stability, and refresh durations")
+	if c == nil || strings.TrimSpace(c.RootName) == "" || c.MaxAge <= 0 || c.StabilityWindow <= 0 || c.RefreshInterval <= 0 {
+		return fmt.Errorf("capacity placement requires root name and positive freshness, stability, and refresh durations")
 	}
 	if c.RefreshInterval >= c.MaxAge {
 		return fmt.Errorf("capacity refresh interval must be shorter than maximum report age")
@@ -135,7 +134,7 @@ func (r *Reconciler) resolveCapacityOn(ctx context.Context, cl client.Client, so
 	} else if !isOurDerived(standing, source) || standing.UID == "" || !standing.DeletionTimestamp.IsZero() {
 		return nil, fmt.Errorf("capacity member is not an identified live derived service")
 	}
-	resolver := resolution.Resolver{Client: cl, OperatorNamespace: r.Capacity.MemberOperatorNamespace}
+	resolver := resolution.Resolver{Client: cl, OperatorNamespace: r.MemberOperatorNamespace}
 	demand, err := resolver.ResolveDemand(ctx, desired, standing, r.Capacity.RootName)
 	if err != nil {
 		return nil, err

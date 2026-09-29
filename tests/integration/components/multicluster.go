@@ -224,9 +224,10 @@ func SetupWorkloadCluster(_ context.Context, mgr ctrl.Manager, opts ...WorkloadC
 type PlacementOption func(*placementOpts)
 
 type placementOpts struct {
-	capacity       *placement.CapacityConfig
-	requeue        time.Duration
-	controlPlaneID string
+	capacity                *placement.CapacityConfig
+	memberOperatorNamespace string
+	requeue                 time.Duration
+	controlPlaneID          string
 	// funnelControlPlaneID, when non-nil, wires the cross-cluster status watch
 	// funnel (requires the derived-ISVC cache enabled on the cluster Manager) so
 	// status converges on events rather than the poll.
@@ -234,6 +235,11 @@ type placementOpts struct {
 	statusSafetyRequeue  time.Duration
 	statusBatchPeriod    time.Duration
 	winnerLostGrace      time.Duration
+}
+
+// WithMemberOperatorNamespace locates member runtime pins and configuration.
+func WithMemberOperatorNamespace(namespace string) PlacementOption {
+	return func(o *placementOpts) { o.memberOperatorNamespace = namespace }
 }
 
 // WithCapacityPlacement supplies the hardware placement configuration explicitly.
@@ -311,15 +317,16 @@ func SetupPlacement(ctx context.Context, mgr ctrl.Manager, clusters *ClusterMana
 	}
 
 	r := &placement.Reconciler{
-		Client:                mgr.GetClient(),
-		Scheme:                mgr.GetScheme(),
-		Log:                   ctrl.Log.WithName("Placement"),
-		InstanceStatusDecoder: instanceStatusDecoder,
-		Clusters:              clusters,
-		Requeue:               cfg.requeue,
-		ControlPlaneID:        cfg.controlPlaneID,
-		WinnerLostGracePeriod: cfg.winnerLostGrace,
-		Capacity:              cfg.capacity,
+		Client:                  mgr.GetClient(),
+		Scheme:                  mgr.GetScheme(),
+		Log:                     ctrl.Log.WithName("Placement"),
+		InstanceStatusDecoder:   instanceStatusDecoder,
+		Clusters:                clusters,
+		Requeue:                 cfg.requeue,
+		ControlPlaneID:          cfg.controlPlaneID,
+		WinnerLostGracePeriod:   cfg.winnerLostGrace,
+		Capacity:                cfg.capacity,
+		MemberOperatorNamespace: cfg.memberOperatorNamespace,
 	}
 
 	var convergeOpts []placement.ConvergeOption
