@@ -1,4 +1,5 @@
 # p1807: canary pd partial quota refuses part of the surge  mode=canary Ne=2 Nd=2 Nr=2 ceil_e=3 ceil_d=3 ceil_r=3 canary=auto fault=quota:1 terminal=Failed cell=canary/Staging/readyTimeout[quotaPartial] co=none topo=pd
+# The +1 headroom admits one surge pod at a time, so the three components' surges serialize at roughly 20 s each; the ready timeout must be shorter than the step's serialized surge (about 55 s) for the step to park while part of it is still refused.
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p1807 }
@@ -24,7 +25,7 @@ spec:
     groups:
         - components: [engine, decoder, router]
           canary:
-            readyTimeout: "90s"
+            readyTimeout: "30s"
             steps:
               - { capacity: "50%", traffic: 50, pause: { duration: "20s" } }
               - { capacity: "100%", traffic: 100 }
