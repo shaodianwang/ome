@@ -1,4 +1,5 @@
-# p1916: canary engine resume left on the idle service is consumed  mode=canary Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 canary=auto prearm=resume cell=canary/Idle/resume co=none topo=engine
+# p1916: canary engine resume left on the idle service is consumed  mode=canary Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 canary=auto prearm=resume cell=canary/Idle/resume notimpl=1 issue=1859 co=none topo=engine
+# reason: a resume request that addresses no canary is left on the service instead of being consumed at the next arm; parked until the executor consumes unaddressed requests or the grid cell is decided as lingering
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p1916 }
