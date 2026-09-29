@@ -351,6 +351,49 @@ def control_plane():
         f'sum(rate(ome_canary_sampler_starved_total{{{job}}}[5m]))')], (12, y, 12, 7),
         unit="reqps", thresholds=[(None, "green"), (0.01, "yellow")],
         desc="Non-zero means the canary sampler could not get traffic to evaluate."))
+    y += 7
+
+    # TPU slice provisioning is opt-in (ome.controller.tpuSliceProvisioning in
+    # the chart), so most clusters have no series for this row. It comes last
+    # and starts folded, and a folded row's panels do not query until opened.
+    rows_open = sum(q["type"] == "row" for q in p)
+    p.append(row("TPU slice provisioning", y)); y += 1
+    # The gauge exports a state only while some slice is in it. Filling the
+    # gaps with 0 keeps the stack's height the number of slices that exist.
+    p.append(panel("timeseries", "Slices by state", [
+        target(f'sum(max by (slice_type, topology) '
+               f'(ome_tpu_slices{{{job},state="{state}"}})) or vector(0)', state)
+        for state in ("ready", "pending", "terminating", "orphaned")
+    ], (0, y, 12, 8), minv=0, stacked=True,
+        desc="TPU slices the controller provisioned that exist now. pending includes "
+             "a slice the provider failed to provision. orphaned means the slice's "
+             "InferenceReplica is gone, so no reconcile will release it: it holds TPU "
+             "capacity until deleted by hand. Any orphaned slice is a leak. Only the "
+             "leader reports; max by (slice_type, topology) collapses the per-pod series "
+             "so a leader change does not inflate the count."))
+    p.append(panel("timeseries", "Slice provisioning p90", [target(
+        f'histogram_quantile(0.90, sum by (slice_type, topology, le) '
+        f'(rate(ome_tpu_slice_provision_duration_seconds_bucket{{{job}}}[1h])))',
+        "{{slice_type}} {{topology}}")], (12, y, 12, 8), unit="s",
+        desc="From the controller creating a slice to the slice first reporting a "
+             "ready state, over the trailing hour. An opted-in pod is not created "
+             "until its slice is ready, so this adds directly to a scale-up. Only "
+             "slices the current leader created are timed."))
+    p.append(panel("timeseries", "Slices created and released per hour", [
+        target(f'sum(increase(ome_tpu_slice_created_total{{{job}}}[1h]))', "created"),
+        target(f'sum(increase(ome_tpu_slice_released_total{{{job}}}[1h]))', "released"),
+    ], (0, y + 8, 12, 7), minv=0,
+        desc="Over the trailing hour, counted by the leader. released counts a slice "
+             "when the API server removes it, whoever deleted it."))
+    p.append(panel("timeseries", "Slice create failures per hour", [target(
+        f'sum by (reason) (increase(ome_tpu_slice_create_failures_total{{{job}}}[1h]))',
+        "{{reason}}")], (12, y + 8, 12, 7), minv=0,
+        desc="Failed slice creates over the trailing hour, by the API server's status "
+             "reason. Forbidden, Invalid and OwnershipConflict need an operator; "
+             "InternalError, TooManyRequests and Unknown usually clear on retry. Every "
+             "retry counts, so a create that keeps failing keeps climbing. Empty until "
+             "a create fails. After a controller restart, the first failure of each "
+             "reason is not counted: it only starts that reason's series."))
 
     return dashboard(
         "ome-control-plane", "OME · Control plane",
@@ -363,7 +406,7 @@ def control_plane():
          var_query("pod", "Pod",
                    'label_values(ome_isvc_status_update_total{cluster="$cluster"}, pod)',
                    multi=True, include_all=True, all_value=".*")],
-        p, ["ome", "control-plane"])
+        collapse_after(p, expanded=rows_open), ["ome", "control-plane"])
 
 
 # ---------------------------------------------------------------------------

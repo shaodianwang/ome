@@ -1513,6 +1513,303 @@
           "sort": "desc"
         }
       }
+    },
+    {
+      "type": "row",
+      "title": "TPU slice provisioning",
+      "gridPos": {
+        "x": 0,
+        "y": 69,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": true,
+      "panels": [
+        {
+          "type": "timeseries",
+          "title": "Slices by state",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 70,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(max by (slice_type, topology) (ome_tpu_slices{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\",state=\"ready\"})) or vector(0)",
+              "refId": "A",
+              "legendFormat": "ready"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(max by (slice_type, topology) (ome_tpu_slices{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\",state=\"pending\"})) or vector(0)",
+              "refId": "B",
+              "legendFormat": "pending"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(max by (slice_type, topology) (ome_tpu_slices{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\",state=\"terminating\"})) or vector(0)",
+              "refId": "C",
+              "legendFormat": "terminating"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(max by (slice_type, topology) (ome_tpu_slices{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\",state=\"orphaned\"})) or vector(0)",
+              "refId": "D",
+              "legendFormat": "orphaned"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 8,
+                "showPoints": "never",
+                "spanNulls": true,
+                "stacking": {
+                  "mode": "normal",
+                  "group": "A"
+                }
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              },
+              "min": 0
+            },
+            "overrides": []
+          },
+          "description": "TPU slices the controller provisioned that exist now. pending includes a slice the provider failed to provision. orphaned means the slice's InferenceReplica is gone, so no reconcile will release it: it holds TPU capacity until deleted by hand. Any orphaned slice is a leak. Only the leader reports; max by (slice_type, topology) collapses the per-pod series so a leader change does not inflate the count.",
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Slice provisioning p90",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 70,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "histogram_quantile(0.90, sum by (slice_type, topology, le) (rate(ome_tpu_slice_provision_duration_seconds_bucket{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\"}[1h])))",
+              "refId": "E",
+              "legendFormat": "{{slice_type}} {{topology}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 8,
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "description": "From the controller creating a slice to the slice first reporting a ready state, over the trailing hour. An opted-in pod is not created until its slice is ready, so this adds directly to a scale-up. Only slices the current leader created are timed.",
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Slices created and released per hour",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 78,
+            "w": 12,
+            "h": 7
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(increase(ome_tpu_slice_created_total{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\"}[1h]))",
+              "refId": "F",
+              "legendFormat": "created"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(increase(ome_tpu_slice_released_total{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\"}[1h]))",
+              "refId": "G",
+              "legendFormat": "released"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 8,
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              },
+              "min": 0
+            },
+            "overrides": []
+          },
+          "description": "Over the trailing hour, counted by the leader. released counts a slice when the API server removes it, whoever deleted it.",
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Slice create failures per hour",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "x": 12,
+            "y": 78,
+            "w": 12,
+            "h": 7
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (reason) (increase(ome_tpu_slice_create_failures_total{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\"}[1h]))",
+              "refId": "H",
+              "legendFormat": "{{reason}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 8,
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "color": {
+                "mode": "palette-classic"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "text",
+                    "value": null
+                  }
+                ]
+              },
+              "min": 0
+            },
+            "overrides": []
+          },
+          "description": "Failed slice creates over the trailing hour, by the API server's status reason. Forbidden, Invalid and OwnershipConflict need an operator; InternalError, TooManyRequests and Unknown usually clear on retry. Every retry counts, so a create that keeps failing keeps climbing. Empty until a create fails. After a controller restart, the first failure of each reason is not counted: it only starts that reason's series.",
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        }
+      ]
     }
   ]
 }
