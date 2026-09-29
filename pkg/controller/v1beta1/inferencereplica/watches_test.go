@@ -9,6 +9,7 @@ import (
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -616,6 +617,70 @@ func TestTPUSliceToIR(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.r.tpuSliceToIR(context.Background(), tc.obj); !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("tpuSliceToIR = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// recordingQueue records Add, the only method the mapped enqueue handler
+// calls on a queue that is not a priority queue.
+type recordingQueue struct {
+	workqueue.TypedRateLimitingInterface[reconcile.Request]
+	added []reconcile.Request
+}
+
+func (q *recordingQueue) Add(req reconcile.Request) { q.added = append(q.added, req) }
+
+// TestTPUSliceEventHandler pins that every slice event enqueues what
+// tpuSliceToIR maps it to, and that only a delete counts a provisioned slice
+// as released.
+func TestTPUSliceEventHandler(t *testing.T) {
+	h := (&Reconciler{TPUSliceProvisioning: sliceTestConfig()}).tpuSliceEventHandler()
+	provisioned, err := gke.Build(gke.Spec{
+		Name:        "llama-engine-0-0-abc",
+		Type:        "type-a",
+		Topology:    "2x2x1",
+		Owner:       map[string]string{sliceprovision.LabelOwnerUID: "uid-a"},
+		Labels:      map[string]string{sliceOwnerKindLabel: irKind},
+		Annotations: map[string]string{sliceprovision.AnnotationOwner: "prod/llama-engine"},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	foreign, err := gke.Build(gke.Spec{
+		Name:     "training-0",
+		Type:     "type-a",
+		Topology: "2x2x1",
+		Owner:    map[string]string{"example.com/owner-uid": "uid-b"},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	owner := []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: "prod", Name: "llama-engine"}}}
+	releasedLabels := map[string]string{"slice_type": "type-a", "topology": "2x2x1"}
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name         string
+		send         func(*recordingQueue)
+		wantEnqueued []reconcile.Request
+		wantReleased float64
+	}{
+		{name: "create", send: func(q *recordingQueue) { h.Create(ctx, event.CreateEvent{Object: provisioned}, q) }, wantEnqueued: owner},
+		{name: "update", send: func(q *recordingQueue) {
+			h.Update(ctx, event.UpdateEvent{ObjectOld: provisioned, ObjectNew: provisioned}, q)
+		}, wantEnqueued: owner},
+		{name: "delete", send: func(q *recordingQueue) { h.Delete(ctx, event.DeleteEvent{Object: provisioned}, q) }, wantEnqueued: owner, wantReleased: 1},
+		{name: "delete of another producer's slice", send: func(q *recordingQueue) { h.Delete(ctx, event.DeleteEvent{Object: foreign}, q) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q := &recordingQueue{}
+			before := irStatusMetric(t, "ome_tpu_slice_released_total", releasedLabels)
+			tc.send(q)
+			if !reflect.DeepEqual(q.added, tc.wantEnqueued) {
+				t.Fatalf("enqueued %v, want %v", q.added, tc.wantEnqueued)
+			}
+			if got := irStatusMetric(t, "ome_tpu_slice_released_total", releasedLabels) - before; got != tc.wantReleased {
+				t.Fatalf("released slices counted = %v, want %v", got, tc.wantReleased)
 			}
 		})
 	}

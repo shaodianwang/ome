@@ -213,8 +213,12 @@ func (p *Provisioner) Ensure(ctx context.Context, d Demand, slot Slot) (Placemen
 		return Placement{}, err
 	}
 	if !found {
-		if s, err = p.live.Create(ctx, spec); err != nil {
+		var created bool
+		if s, created, err = p.live.Create(ctx, spec); err != nil {
 			return Placement{}, err
+		}
+		if created {
+			slicesCreated.WithLabelValues(spec.Type, spec.Topology).Inc()
 		}
 	}
 	return p.classify(s, spec)

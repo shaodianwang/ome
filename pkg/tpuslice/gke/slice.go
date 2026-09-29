@@ -257,29 +257,32 @@ func (c *Client) List(ctx context.Context, selector labels.Selector) ([]Slice, e
 // Create creates the Slice spec describes and returns it as stored. When a
 // Slice of that name already exists, Create returns it if it carries spec's
 // owner labels and ErrOwnershipConflict if it does not. It never modifies an
-// existing Slice.
-func (c *Client) Create(ctx context.Context, spec Spec) (Slice, error) {
+// existing Slice. created is true only when this call created the Slice.
+func (c *Client) Create(ctx context.Context, spec Spec) (s Slice, created bool, err error) {
 	u, err := Build(spec)
 	if err != nil {
-		return Slice{}, err
+		return Slice{}, false, err
 	}
 	if err := c.writer.Create(ctx, u); err != nil {
 		if !apierrors.IsAlreadyExists(err) {
-			return Slice{}, fmt.Errorf("create slice %s: %w", spec.Name, err)
+			return Slice{}, false, fmt.Errorf("create slice %s: %w", spec.Name, err)
 		}
 		existing, found, getErr := c.Get(ctx, spec.Name)
 		if getErr != nil {
-			return Slice{}, getErr
+			return Slice{}, false, getErr
 		}
 		if !found {
-			return Slice{}, fmt.Errorf("create slice %s: %w", spec.Name, err)
+			return Slice{}, false, fmt.Errorf("create slice %s: %w", spec.Name, err)
 		}
 		if !existing.OwnedBy(spec.Owner) {
-			return Slice{}, fmt.Errorf("%w: %s", ErrOwnershipConflict, spec.Name)
+			return Slice{}, false, fmt.Errorf("%w: %s", ErrOwnershipConflict, spec.Name)
 		}
-		return existing, nil
+		return existing, false, nil
 	}
-	return Parse(u)
+	if s, err = Parse(u); err != nil {
+		return Slice{}, false, err
+	}
+	return s, true, nil
 }
 
 // Release deletes s if it carries owner. The delete is preconditioned on s's

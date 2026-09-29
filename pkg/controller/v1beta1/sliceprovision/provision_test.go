@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -101,6 +102,13 @@ func withLabel(key, value string) func(*unstructured.Unstructured) {
 }
 
 func withFinalizer(u *unstructured.Unstructured) { u.SetFinalizers([]string{"example.com/hold"}) }
+
+// deleting marks u as being deleted. A zero time would read back as not
+// deleted.
+func deleting(u *unstructured.Unstructured) {
+	now := metav1.Now()
+	u.SetDeletionTimestamp(&now)
+}
 
 func getSlice(t *testing.T, c client.Client, name string) (*unstructured.Unstructured, bool) {
 	t.Helper()
@@ -429,6 +437,49 @@ func TestEnsureReadsLive(t *testing.T) {
 	pl, err := p.Ensure(context.Background(), d, Slot{})
 	if err != nil || !pl.Ready {
 		t.Fatalf("Ensure = %+v, %v; want the live read's ready slice", pl, err)
+	}
+}
+
+func TestEnsureCountsOnlySlicesItCreates(t *testing.T) {
+	d := demand(t, "2x2x1")
+	existing := stored(t, newProvisioner(t, newFakeClient(), testOwner), d, Slot{})
+	// createdAfterRead reports the slice missing to Ensure's read, as when it
+	// is created between that read and Ensure's create.
+	createdAfterRead := func(t *testing.T) client.Client {
+		gets := 0
+		t.Cleanup(func() {
+			if gets < 2 {
+				t.Errorf("Ensure read the slice %d times, want the read before and after its create", gets)
+			}
+		})
+		return fake.NewClientBuilder().WithObjects(existing.DeepCopy()).WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if gets++; gets == 1 {
+					return apierrors.NewNotFound(gke.GroupVersion.WithResource("slices").GroupResource(), key.Name)
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).Build()
+	}
+	for _, tc := range []struct {
+		name   string
+		client func(*testing.T) client.Client
+		want   float64
+	}{
+		{name: "no slice", client: func(*testing.T) client.Client { return newFakeClient() }, want: 1},
+		{name: "slice exists", client: func(*testing.T) client.Client { return newFakeClient(existing.DeepCopy()) }},
+		{name: "slice created after the read", client: createdAfterRead},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			created := slicesCreated.WithLabelValues("type-a", "2x2x1")
+			before := testutil.ToFloat64(created)
+			if _, err := newProvisioner(t, tc.client(t), testOwner).Ensure(context.Background(), d, Slot{}); err != nil {
+				t.Fatalf("Ensure: %v", err)
+			}
+			if got := testutil.ToFloat64(created) - before; got != tc.want {
+				t.Fatalf("created slices counted = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

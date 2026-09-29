@@ -145,7 +145,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		r.Log.Info("The InferenceReplica controller won't watch keda.sh/v1alpha1/ScaledObject resources because the CRD is not available; InferenceReplicas requesting KEDA autoscaling will fail on reconcile until KEDA is installed.")
 	}
 	if sliceFound {
-		b = b.Watches(gke.NewObject(), handler.EnqueueRequestsFromMapFunc(r.tpuSliceToIR))
+		b = b.Watches(gke.NewObject(), r.tpuSliceEventHandler())
 	}
 	return b.
 		Watches(

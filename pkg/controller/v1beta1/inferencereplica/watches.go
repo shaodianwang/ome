@@ -171,6 +171,21 @@ func (r *Reconciler) tpuSliceToIR(_ context.Context, obj client.Object) []reconc
 	return []reconcile.Request{{NamespacedName: owner}}
 }
 
+// tpuSliceEventHandler enqueues what tpuSliceToIR maps a slice event to, and
+// counts every provisioned slice the API server removes.
+func (r *Reconciler) tpuSliceEventHandler() handler.EventHandler {
+	return tpuSliceEvents{EventHandler: handler.EnqueueRequestsFromMapFunc(r.tpuSliceToIR)}
+}
+
+type tpuSliceEvents struct {
+	handler.EventHandler
+}
+
+func (h tpuSliceEvents) Delete(ctx context.Context, evt event.TypedDeleteEvent[client.Object], q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+	sliceprovision.ObserveDeleted(evt.Object)
+	h.EventHandler.Delete(ctx, evt, q)
+}
+
 // managedByOMENativePredicate keeps the pod watch to OMENative-managed
 // pods only (`ome.io/managed-by=OMENative`), so non-OMENative pod churn
 // in shared namespaces doesn't wake the handler.

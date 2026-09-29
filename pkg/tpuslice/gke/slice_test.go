@@ -264,9 +264,12 @@ func TestOwnedByAndMatches(t *testing.T) {
 func TestCreate(t *testing.T) {
 	c := newFakeClient()
 	slices := NewClient(c, c)
-	got, err := slices.Create(context.Background(), testSpec())
+	got, created, err := slices.Create(context.Background(), testSpec())
 	if err != nil {
 		t.Fatalf("Create: %v", err)
+	}
+	if !created {
+		t.Fatal("Create did not report creating the Slice")
 	}
 	if got.Name != "ns-svc-engine-0" || got.Type != "tpu-a" || got.Topology != "2x2x1" || !got.OwnedBy(ownerA) {
 		t.Fatalf("Create = %+v", got)
@@ -284,9 +287,12 @@ func TestCreate(t *testing.T) {
 func TestCreateReturnsOwnedExisting(t *testing.T) {
 	existing := stored(t, testSpec(), "uid-1", withState("ACTIVE", ""))
 	c := newFakeClient(existing)
-	got, err := NewClient(c, c).Create(context.Background(), testSpec())
+	got, created, err := NewClient(c, c).Create(context.Background(), testSpec())
 	if err != nil {
 		t.Fatalf("Create: %v", err)
+	}
+	if created {
+		t.Fatal("Create reported creating a Slice that already existed")
 	}
 	if got.UID != "uid-1" || got.State != "ACTIVE" {
 		t.Fatalf("Create = %+v, want the existing Slice", got)
@@ -298,7 +304,7 @@ func TestCreateRefusesForeignExisting(t *testing.T) {
 	foreignSpec.Owner = ownerB
 	foreignSpec.Topology = "2x2x2"
 	c := newFakeClient(stored(t, foreignSpec, "uid-foreign"))
-	_, err := NewClient(c, c).Create(context.Background(), testSpec())
+	_, _, err := NewClient(c, c).Create(context.Background(), testSpec())
 	if !errors.Is(err, ErrOwnershipConflict) {
 		t.Fatalf("Create error = %v, want ErrOwnershipConflict", err)
 	}
@@ -312,7 +318,7 @@ func TestCreateRejectsInvalidSpec(t *testing.T) {
 	c := newFakeClient()
 	spec := testSpec()
 	spec.Owner = nil
-	if _, err := NewClient(c, c).Create(context.Background(), spec); err == nil {
+	if _, _, err := NewClient(c, c).Create(context.Background(), spec); err == nil {
 		t.Fatal("Create accepted a Slice without owner labels")
 	}
 }
@@ -478,7 +484,7 @@ func TestCRDNotInstalled(t *testing.T) {
 	if got, err := slices.List(ctx, labels.SelectorFromSet(ownerA)); err != nil || len(got) != 0 {
 		t.Fatalf("List = %v, %v; want none", got, err)
 	}
-	if _, err := slices.Create(ctx, testSpec()); err == nil {
+	if _, _, err := slices.Create(ctx, testSpec()); err == nil {
 		t.Fatal("Create succeeded without the Slice CRD")
 	}
 	complete, err := slices.Release(ctx, Slice{Name: "ns-svc-engine-0", UID: "uid-1", Labels: ownerA}, ownerA)
