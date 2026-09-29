@@ -1,0 +1,26 @@
+# p1865: canary pd pairing change after a completed canary opens a new transition  mode=canary Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=3 ceil_r=0 canary=auto proto=pair-v2 proto2=pair-v3 during=canary-done xcheck=sectraffic notimpl=1 issue=1346 cell=canary/Done/pairing co=none topo=pd
+# reason: parked on the canary-secondary traffic gap — the secondaries publish no live traffic targets under a canary group, so their pairing targets cannot be checked until the issue is fixed; pods, Services, convergence and the pair-alive invariant stay hard
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p1865 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    pairingProtocol: pair-v1
+    groups:
+        - components: [engine, decoder]
+          canary:
+            steps:
+              - { capacity: "50%", traffic: 50, pause: { duration: "20s" } }
+              - { capacity: "100%", traffic: 100 }
