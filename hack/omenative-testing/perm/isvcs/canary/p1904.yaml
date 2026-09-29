@@ -1,0 +1,20 @@
+# p1904: canary engine repin after a rollback leaves the rolled-back pin in place  mode=canary Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 canary=manual rollback=1 during=canary-rolledback verb=repin terminal=RolledBack nophase=Pending cell=canary/RolledBack/repin co=none topo=engine
+# reason: the grid leaves this cell undecided (marked !); the case locks the observed outcome: the rejection holds, no run reopens and nothing re-enters the ladder
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p1904 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          canary:
+            steps:
+              - { capacity: "50%", traffic: 50, pause: {  } }
+              - { capacity: "100%", traffic: 100 }

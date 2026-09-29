@@ -1,0 +1,19 @@
+# p1907: canary engine group removed after a rollback keeps the hold  mode=canary Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 canary=manual rollback=1 during=canary-rolledback verb=groupremove terminal=RolledBack cell=canary/RolledBack/canaryRemoved co=none topo=engine
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p1907 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          canary:
+            steps:
+              - { capacity: "50%", traffic: 50, pause: {  } }
+              - { capacity: "100%", traffic: 100 }
