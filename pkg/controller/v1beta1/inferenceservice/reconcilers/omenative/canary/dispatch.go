@@ -227,31 +227,34 @@ func Dispatch(ctx context.Context, d DispatchDeps) (Outcome, error) {
 	if err != nil {
 		return Outcome{}, err
 	}
+	groupPods, groupStable := groupRollbackInputs(d.ISVC, d.Group, primary, perRev)
 	res, err := Reconcile(ctx, ReconcileInputs{
-		Client:                   d.Client,
-		Reader:                   d.Reader,
-		Recorder:                 d.Recorder,
-		ISVC:                     d.ISVC,
-		Group:                    d.Group,
-		Component:                primary,
-		CanaryRevisionHash:       canaryHash,
-		StableRevisionHash:       stableHash,
-		CanaryPairingProtocol:    canaryProtocol,
-		StablePairingProtocol:    stableProtocol,
-		ReadyCanaryInstances:     revisions.readyTargetInstanceCount(observedPods[primary]),
-		DesiredReplicas:          componentReplicas(d.ISVC, primary),
-		PerRevisionPods:          readyRev[primary],
-		SecondaryCapacityReady:   secondaryReady,
-		Now:                      now,
-		Sampler:                  samplerOrNil(d.Sampler),
-		Prometheus:               resolveCanarySource(d.Group, d.MetricProviders, d.DefaultProvider),
-		BundledPrometheusAddress: d.BundledPrometheusAddress,
-		QueryTimeout:             d.QueryTimeout,
-		RunActive:                v1beta1.RolloutRunActive(d.ISVC),
-		TargetID:                 activeCanaryTargetID(d.ISVC, d.Group),
-		DefaultReadyTimeout:      d.DefaultReadyTimeout,
-		Requeue:                  d.Requeue,
-		ParkedRequeue:            d.ParkedRequeue,
+		Client:                    d.Client,
+		Reader:                    d.Reader,
+		Recorder:                  d.Recorder,
+		ISVC:                      d.ISVC,
+		Group:                     d.Group,
+		Component:                 primary,
+		CanaryRevisionHash:        canaryHash,
+		StableRevisionHash:        stableHash,
+		CanaryPairingProtocol:     canaryProtocol,
+		StablePairingProtocol:     stableProtocol,
+		ReadyCanaryInstances:      revisions.readyTargetInstanceCount(observedPods[primary]),
+		DesiredReplicas:           componentReplicas(d.ISVC, primary),
+		PerRevisionPods:           readyRev[primary],
+		GroupTotalPerRevisionPods: groupPods,
+		GroupStableRevisionHashes: groupStable,
+		SecondaryCapacityReady:    secondaryReady,
+		Now:                       now,
+		Sampler:                   samplerOrNil(d.Sampler),
+		Prometheus:                resolveCanarySource(d.Group, d.MetricProviders, d.DefaultProvider),
+		BundledPrometheusAddress:  d.BundledPrometheusAddress,
+		QueryTimeout:              d.QueryTimeout,
+		RunActive:                 v1beta1.RolloutRunActive(d.ISVC),
+		TargetID:                  activeCanaryTargetID(d.ISVC, d.Group),
+		DefaultReadyTimeout:       d.DefaultReadyTimeout,
+		Requeue:                   d.Requeue,
+		ParkedRequeue:             d.ParkedRequeue,
 	})
 	if err != nil {
 		return Outcome{}, err
@@ -430,6 +433,20 @@ func activeRunStableRevisionHash(isvc *v1beta1.InferenceService, comp v1beta1.Co
 		return target.StableRevision
 	}
 	return ""
+}
+
+// groupRollbackInputs is the whole-unit view the rollback completion check
+// reads: every configured member's pods per revision, ready or not, and its
+// persisted stable revision, primary included.
+func groupRollbackInputs(isvc *v1beta1.InferenceService, g *v1beta1.RolloutGroup, primary v1beta1.ComponentType, totalRev map[v1beta1.ComponentType]map[string]int32) (map[v1beta1.ComponentType]map[string]int32, map[v1beta1.ComponentType]string) {
+	members := configuredComponents(g)
+	pods := make(map[v1beta1.ComponentType]map[string]int32, len(members))
+	stable := make(map[v1beta1.ComponentType]string, len(members))
+	for _, comp := range members {
+		pods[comp] = totalRev[comp]
+		stable[comp] = componentStableRevisionHash(isvc, comp, primary)
+	}
+	return pods, stable
 }
 
 // samplerOrNil converts a possibly-nil *Sampler into the stepSampler interface,

@@ -47,6 +47,16 @@ type ReconcileInputs struct {
 	ReadyCanaryInstances *int32
 	DesiredReplicas      int32
 	PerRevisionPods      map[string]int32
+	// GroupTotalPerRevisionPods counts every pod of every configured member
+	// of the canary group per revision hash, ready or not, keyed by
+	// Component (primary included). A revert is complete when the rejected
+	// pods are gone, not merely unready, so the revert-complete check reads
+	// it. nil (single-Component callers) checks the primary's ready pods alone.
+	GroupTotalPerRevisionPods map[v1beta1.ComponentType]map[string]int32
+	// GroupStableRevisionHashes is each member's persisted stable revision,
+	// keyed by Component; the primary's is the identity the executor resolves
+	// itself. A member with none recorded is not waited on.
+	GroupStableRevisionHashes map[v1beta1.ComponentType]string
 	// SecondaryCapacityReady is true when every NON-primary component's canary
 	// Instances have reached that component's step newCount. The primary uses its
 	// exact complete-PodReady target Instance count. Single-component canaries
@@ -532,12 +542,43 @@ func reconcileRollback(in ReconcileInputs, cs *v1beta1.CanaryStatus) *Result {
 			}
 		}
 	}
+	// The unit reverts as a whole, and a revert is complete only when the
+	// rejected pods are gone, ready or not. The run closes on the primary's
+	// phase, and a member's revert is an update the plan gate refuses once
+	// no run is pinned, so a primary declared RolledBack ahead of its
+	// members would strand them on the rejected revision.
+	if !rollingBack {
+		rollingBack = groupRollingBack(in, stableHash)
+	}
 	if rollingBack {
 		setPhase(in.ISVC, in.Component, v1beta1.RolloutPhaseRollingBack)
 		return (&Result{Active: true, RolledBack: true}).wake(in.Requeue)
 	}
 	setPhase(in.ISVC, in.Component, v1beta1.RolloutPhaseRolledBack)
 	return &Result{Active: true, RolledBack: true}
+}
+
+// groupRollingBack reports whether any member of the canary unit, the primary
+// included, still has a pod off its stable revision. primaryStable is the
+// identity the primary's own check resolved; the other members use their
+// persisted one. A member with no stable identity is not waited on: it is
+// sent no revert signal, so nothing is in flight for it.
+func groupRollingBack(in ReconcileInputs, primaryStable string) bool {
+	for member, pods := range in.GroupTotalPerRevisionPods {
+		stable := in.GroupStableRevisionHashes[member]
+		if member == in.Component {
+			stable = primaryStable
+		}
+		if stable == "" {
+			continue
+		}
+		for h, n := range pods {
+			if h != "" && h != stable && n > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // drainElapsed reports whether the ScaleDownDelaySeconds drain window has passed

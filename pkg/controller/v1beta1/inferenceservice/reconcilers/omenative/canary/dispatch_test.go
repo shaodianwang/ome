@@ -1740,3 +1740,132 @@ func TestDispatch_RollbackWithoutStableRevisionParksFailed(t *testing.T) {
 		}
 	}
 }
+
+// TestGroupRollbackInputs_EveryMember pins that the rollback completion check
+// is handed every configured member's view: its pods per revision, ready or
+// not, and its persisted stable revision, primary included.
+func TestGroupRollbackInputs_EveryMember(t *testing.T) {
+	isvc := &v1beta1.InferenceService{}
+	isvc.Spec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{{
+		Components: []v1beta1.ComponentType{v1beta1.RouterComponent, v1beta1.EngineComponent, v1beta1.DecoderComponent},
+		Canary:     &v1beta1.GroupCanary{Steps: twoStep()},
+	}}}
+	pinActiveRun(isvc)
+	isvc.Status.Rollout.ActiveRun.TargetRevisions = []v1beta1.RolloutRunTarget{
+		{Component: v1beta1.RouterComponent, Revision: "rtrNew", StableRevision: "rtrStable"},
+		{Component: v1beta1.EngineComponent, Revision: "engNew", StableRevision: "engStable"},
+		{Component: v1beta1.DecoderComponent, Revision: "decNew", StableRevision: "decStable"},
+	}
+	totalRev := map[v1beta1.ComponentType]map[string]int32{
+		v1beta1.RouterComponent:  {"rtrStable": 1},
+		v1beta1.EngineComponent:  {"engStable": 3, "engNew": 1},
+		v1beta1.DecoderComponent: {},
+	}
+	wantStable := map[v1beta1.ComponentType]string{
+		v1beta1.RouterComponent:  "rtrStable",
+		v1beta1.EngineComponent:  "engStable",
+		v1beta1.DecoderComponent: "decStable",
+	}
+	pods, stable := groupRollbackInputs(isvc, rollout.CanaryGroup(isvc), v1beta1.RouterComponent, totalRev)
+	if len(pods) != len(totalRev) || len(stable) != len(wantStable) {
+		t.Fatalf("every configured member must be present: pods=%v stable=%v", pods, stable)
+	}
+	for comp, want := range totalRev {
+		got, ok := pods[comp]
+		if !ok || len(got) != len(want) {
+			t.Fatalf("%s pods: got %v (present=%v), want %v", comp, got, ok, want)
+		}
+		for hash, n := range want {
+			if got[hash] != n {
+				t.Fatalf("%s pods[%s]: got %d, want %d", comp, hash, got[hash], n)
+			}
+		}
+		if stable[comp] != wantStable[comp] {
+			t.Fatalf("%s stable: got %q, want %q", comp, stable[comp], wantStable[comp])
+		}
+	}
+}
+
+// TestDispatch_PDRollbackWaitsForEveryMember pins that a group's rollback is
+// complete for the group, not for the primary alone, and counts rejected pods
+// whether or not they are ready. The router (primary) and the decoder are
+// back on stable, but one engine pod, not ready, still exists on the engine's
+// rejected revision, so the unit stays RollingBack; the run closes on the
+// primary's phase, so it stays open for the engine's revert. Once the engine
+// is back on stable the unit reads RolledBack.
+func TestDispatch_PDRollbackWaitsForEveryMember(t *testing.T) {
+	ns := "default"
+	n1 := 1
+	isvc := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "pd"}}
+	isvc.Spec.Router = &v1beta1.RouterSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n1}}
+	isvc.Spec.Engine = &v1beta1.EngineSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n1}}
+	isvc.Spec.Decoder = &v1beta1.DecoderSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n1}}
+	isvc.Spec.Rollout = &v1beta1.RolloutSpec{Groups: []v1beta1.RolloutGroup{{
+		Components: []v1beta1.ComponentType{v1beta1.RouterComponent, v1beta1.EngineComponent, v1beta1.DecoderComponent},
+		Canary:     &v1beta1.GroupCanary{Steps: twoStep()},
+	}}}
+	// The rollback is in flight: the router's rejected revision is recorded
+	// and the router itself has already drained back to stable.
+	isvc.Status.Canary = &v1beta1.CanaryStatus{CanaryRevisionHash: "rtrNew", StableRevisionHash: "rtrStable", RolledBackRevisionHash: "rtrNew", CurrentStep: 1}
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.RouterComponent: {RolloutPhase: v1beta1.RolloutPhaseRollingBack},
+	}
+	pinActiveRun(isvc)
+	isvc.Status.Rollout.ActiveRun.TargetRevisions = []v1beta1.RolloutRunTarget{
+		{Component: v1beta1.RouterComponent, Revision: "rtrNew", StableRevision: "rtrStable"},
+		{Component: v1beta1.EngineComponent, Revision: "engNew", StableRevision: "engStable"},
+		{Component: v1beta1.DecoderComponent, Revision: "decNew", StableRevision: "decStable"},
+	}
+	rtrIR := ir(ns, "pd", v1beta1.RouterComponent, "rtrNew")
+	rtrIR.Status.CurrentRevision = "pd-router-rtrStable"
+	engIR := ir(ns, "pd", v1beta1.EngineComponent, "engNew")
+	engIR.Status.CurrentRevision = "pd-engine-engStable"
+	decIR := ir(ns, "pd", v1beta1.DecoderComponent, "decNew")
+	decIR.Status.CurrentRevision = "pd-decoder-decStable"
+	// The straggler exists but is not ready (a crashlooping rejected pod):
+	// the ready view does not see it; the total view must.
+	straggler := canaryPod(ns, "pd", "engine", "engNew", "pd-engine-0")
+	straggler.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse}}
+	objs := []runtime.Object{isvc, rtrIR, engIR, decIR,
+		canaryPod(ns, "pd", "router", "rtrStable", "pd-router-0"),
+		straggler,
+		canaryPod(ns, "pd", "decoder", "decStable", "pd-decoder-0"),
+		canaryControllerRevision(ns, "pd", "router", "rtrStable", 1),
+		canaryControllerRevision(ns, "pd", "router", "rtrNew", 2),
+		canaryControllerRevision(ns, "pd", "engine", "engStable", 1),
+		canaryControllerRevision(ns, "pd", "engine", "engNew", 2),
+		canaryControllerRevision(ns, "pd", "decoder", "decStable", 1),
+		canaryControllerRevision(ns, "pd", "decoder", "decNew", 2),
+	}
+	c := fake.NewClientBuilder().WithScheme(canaryScheme(t)).WithRuntimeObjects(objs...).Build()
+	ctx := context.Background()
+	deps := DispatchDeps{Client: c, Reader: c, ISVC: isvc, ComponentRunnerPorts: canaryRunnerPorts(), Group: rollout.CanaryGroup(isvc)}
+
+	if _, err := Dispatch(ctx, deps); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if got := isvc.Status.Components[v1beta1.RouterComponent].RolloutPhase; got != v1beta1.RolloutPhaseRollingBack {
+		t.Fatalf("an engine pod still exists on the rejected revision: phase %q, want RollingBack", got)
+	}
+	gotIR := &v1beta1.InferenceReplica{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: ns, Name: "pd-engine"}, gotIR); err != nil {
+		t.Fatal(err)
+	}
+	if gotIR.Spec.Pacing == nil || gotIR.Spec.Pacing.RollbackToRevision == nil || *gotIR.Spec.Pacing.RollbackToRevision != "pd-engine-engStable" {
+		t.Fatalf("the engine must stay signaled to revert while the unit waits on it, got pacing=%+v", gotIR.Spec.Pacing)
+	}
+
+	// The straggler is replaced by a stable pod: every member is back on stable.
+	if err := c.Delete(ctx, straggler); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Create(ctx, canaryPod(ns, "pd", "engine", "engStable", "pd-engine-0")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Dispatch(ctx, deps); err != nil {
+		t.Fatalf("Dispatch: %v", err)
+	}
+	if got := isvc.Status.Components[v1beta1.RouterComponent].RolloutPhase; got != v1beta1.RolloutPhaseRolledBack {
+		t.Fatalf("every member back on stable: phase %q, want RolledBack", got)
+	}
+}

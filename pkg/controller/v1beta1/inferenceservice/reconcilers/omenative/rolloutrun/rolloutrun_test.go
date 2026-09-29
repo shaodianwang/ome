@@ -1151,3 +1151,44 @@ func TestDerivedProvenanceLeavesProgressionUnset(t *testing.T) {
 		t.Errorf("groups[1] = %+v", got[1])
 	}
 }
+
+// A rollback in progress keeps its run open: the run closes on the primary's
+// phase, and RollingBack is the unit still reverting (the primary's own pods
+// or a member's), so the members' reverts stay licensed by the pin.
+func TestRollingBackRunStaysOpen(t *testing.T) {
+	isvc := isvcFixture(v1beta1.RolloutGroup{
+		Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+		Canary:     canaryBody(10, 100),
+	})
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {
+			RolloutPhase: v1beta1.RolloutPhaseRollingBack,
+			Canary: &v1beta1.CanaryStatus{
+				CurrentStep:            1,
+				RolledBackRevisionHash: hashOf(t, newRev),
+				StableRevisionHash:     hashOf(t, oldRev),
+			},
+		},
+	}
+	isvc.Status.Rollout = &v1beta1.RolloutStatus{
+		ActiveRun: &v1beta1.RolloutRun{
+			RunID: "llm-a-run",
+			TargetRevisions: []v1beta1.RolloutRunTarget{
+				{Component: v1beta1.EngineComponent, Revision: hashOf(t, newRev), StableRevision: hashOf(t, oldRev)},
+			},
+			Plan: v1beta1.RolloutRunPlan{Groups: []v1beta1.RolloutRunGroup{{
+				Group: v1beta1.RolloutGroup{
+					Components: []v1beta1.ComponentType{v1beta1.EngineComponent},
+					Canary:     canaryBody(10, 100),
+				},
+			}}},
+		},
+	}
+	in := testInputs(t, isvc, namedIR("llm-a-engine", oldRev, newRev))
+	if _, err := Reconcile(context.Background(), in); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if isvc.Status.Rollout.ActiveRun == nil {
+		t.Fatalf("a rollback still in progress must keep its run pinned, got lastRun=%+v", isvc.Status.Rollout.LastRun)
+	}
+}

@@ -153,6 +153,41 @@ func fixtureFailed(t *testing.T) (*v1beta1.InferenceService, ReconcileInputs) {
 	return isvc, in
 }
 
+// fixtureRollingBackPD is a rollback in a two-member unit (engine primary,
+// decoder secondary) with both members still serving their rejected
+// revisions. The primary view carries the engine's ready pods; the group view
+// carries every pod of both members, ready or not, and their stable identities.
+func fixtureRollingBackPD(t *testing.T) (*v1beta1.InferenceService, ReconcileInputs) {
+	isvc := canaryISVC(twoStep(), nil)
+	isvc.Spec.Rollout.Groups[0].Components = []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}
+	runWithTargets(isvc,
+		v1beta1.RolloutRunTarget{Component: v1beta1.EngineComponent, Revision: "new", StableRevision: "old"},
+		v1beta1.RolloutRunTarget{Component: v1beta1.DecoderComponent, Revision: "dec-new", StableRevision: "dec-old"},
+	)
+	in := baseInputs(isvc, nil)
+	in.TargetID = "t1"
+	in.GroupStableRevisionHashes = map[v1beta1.ComponentType]string{v1beta1.EngineComponent: "old", v1beta1.DecoderComponent: "dec-old"}
+	setGroupPods(&in, map[string]int32{"new": 2, "old": 2}, nil, map[string]int32{"dec-new": 2, "dec-old": 2})
+	mustReconcile(t, isvc, in) // arms, gate met, split serving, manual hold
+	isvc.Annotations = map[string]string{constants.RolloutRollbackAnnotation: "true"}
+	mustReconcile(t, isvc, in)
+	return isvc, in
+}
+
+// setGroupPods writes the engine's ready pods (the primary view) and every
+// pod of the engine and the decoder (the group view). A nil engineTotal means
+// every engine pod is ready.
+func setGroupPods(in *ReconcileInputs, engineReady, engineTotal, decoderTotal map[string]int32) {
+	if engineTotal == nil {
+		engineTotal = engineReady
+	}
+	in.PerRevisionPods = engineReady
+	in.GroupTotalPerRevisionPods = map[v1beta1.ComponentType]map[string]int32{
+		v1beta1.EngineComponent:  engineTotal,
+		v1beta1.DecoderComponent: decoderTotal,
+	}
+}
+
 func annotate(isvc *v1beta1.InferenceService, key, value string) {
 	if isvc.Annotations == nil {
 		isvc.Annotations = map[string]string{}
@@ -194,6 +229,29 @@ func evClockElapsed(_ *v1beta1.InferenceService, in *ReconcileInputs) {
 }
 func evRejectedPodsGone(_ *v1beta1.InferenceService, in *ReconcileInputs) {
 	in.PerRevisionPods = map[string]int32{"old": 4}
+}
+
+// evPrimaryReverted: the engine is back on stable while a decoder pod still
+// exists on the decoder's rejected revision; the group view counts it whether
+// or not it is ready.
+func evPrimaryReverted(_ *v1beta1.InferenceService, in *ReconcileInputs) {
+	setGroupPods(in, map[string]int32{"old": 4}, nil, map[string]int32{"dec-old": 3, "dec-new": 1})
+}
+func evGroupReverted(_ *v1beta1.InferenceService, in *ReconcileInputs) {
+	setGroupPods(in, map[string]int32{"old": 4}, nil, map[string]int32{"dec-old": 4})
+}
+
+// evPrimaryRejectedPodUnready: every ready engine pod is on stable, but an
+// engine pod on the rejected revision still exists, not ready.
+func evPrimaryRejectedPodUnready(_ *v1beta1.InferenceService, in *ReconcileInputs) {
+	setGroupPods(in, map[string]int32{"old": 4}, map[string]int32{"old": 4, "new": 1}, map[string]int32{"dec-old": 4})
+}
+
+// evMemberStableUnknown: the decoder still has a rejected pod but no stable
+// identity on record, so it is sent no revert signal and is not waited on.
+func evMemberStableUnknown(isvc *v1beta1.InferenceService, in *ReconcileInputs) {
+	evPrimaryReverted(isvc, in)
+	in.GroupStableRevisionHashes[v1beta1.DecoderComponent] = ""
 }
 func evRunLost(_ *v1beta1.InferenceService, in *ReconcileInputs) { in.RunActive = false }
 func evRunLostAfterSoak(_ *v1beta1.InferenceService, in *ReconcileInputs) {
@@ -266,6 +324,13 @@ func TestReconcileCells(t *testing.T) {
 		{"canary/Draining/capacityDropped", fixtureDraining, evDrainingCapacityDropped, cellWant{state: draining, phase: v1beta1.RolloutPhasePromoting, step: 1, active: true}},
 		// 16 rejected pods gone
 		{"canary/RollingBack/rejectedPodsGone", fixtureRollingBack, evRejectedPodsGone, cellWant{state: rolledBack, phase: v1beta1.RolloutPhaseRolledBack, active: true, rolledBk: true}},
+		// 16 in a two-member unit: the rollback completes for the group, not the primary
+		// alone, and a rejected pod holds it for as long as it exists, ready or not.
+		{"canary/RollingBack[PD]/resync", fixtureRollingBackPD, evNothing, cellWant{state: rollingBack, phase: v1beta1.RolloutPhaseRollingBack, active: true, rolledBk: true}},
+		{"canary/RollingBack[PD]/primaryReverted", fixtureRollingBackPD, evPrimaryReverted, cellWant{state: rollingBack, phase: v1beta1.RolloutPhaseRollingBack, active: true, rolledBk: true}},
+		{"canary/RollingBack[PD]/primaryRejectedPodUnready", fixtureRollingBackPD, evPrimaryRejectedPodUnready, cellWant{state: rollingBack, phase: v1beta1.RolloutPhaseRollingBack, active: true, rolledBk: true}},
+		{"canary/RollingBack[PD]/groupReverted", fixtureRollingBackPD, evGroupReverted, cellWant{state: rolledBack, phase: v1beta1.RolloutPhaseRolledBack, active: true, rolledBk: true}},
+		{"canary/RollingBack[PD]/memberStableUnknown", fixtureRollingBackPD, evMemberStableUnknown, cellWant{state: rolledBack, phase: v1beta1.RolloutPhaseRolledBack, active: true, rolledBk: true}},
 		// 18 ready timeout
 		{"canary/Staging/readyTimeout", fixtureStaging, evReadyTimeout, cellWant{state: failed, phase: v1beta1.RolloutPhaseFailed, active: true}},
 		// 19 pause elapsed
@@ -315,6 +380,10 @@ func TestReconcileCells(t *testing.T) {
 			if res.Active != c.want.active || res.RolledBack != c.want.rolledBk || res.Complete != c.want.complete {
 				t.Errorf("result active=%v rolledBack=%v complete=%v, want active=%v rolledBack=%v complete=%v",
 					res.Active, res.RolledBack, res.Complete, c.want.active, c.want.rolledBk, c.want.complete)
+			}
+			// RollingBack is a wait on the drain: the pass must ask to come back.
+			if c.want.state == rollingBack && res.RequeueAfter == 0 && !res.Requeue {
+				t.Errorf("RollingBack must requeue, got %+v", res)
 			}
 		})
 	}
