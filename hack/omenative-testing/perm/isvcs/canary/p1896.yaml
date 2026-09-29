@@ -1,5 +1,4 @@
-# p1896: canary engine new target while rolling back re-arms toward it  mode=canary Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 canary=auto rollback=1 during=canary-rollingback verb=rebump terminal=Stable cell=canary/RollingBack/newTarget notimpl=1 issue=1858 co=none topo=engine
-# reason: a new target presented while the canary is still rolling back is recorded as the rejected revision at once on the scheduler lane; the cell is undecided and this park records the observed outcome until the request is scoped to its target
+# p1896: canary engine new target while rolling back re-arms toward it  mode=canary Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 canary=auto rollback=1 during=canary-rollingback verb=rebump terminal=Stable cell=canary/RollingBack/newTarget co=none topo=engine
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p1896 }
