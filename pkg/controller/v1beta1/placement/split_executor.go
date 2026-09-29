@@ -51,13 +51,31 @@ func (r *Reconciler) reconcileSplit(ctx context.Context, source *v1beta1.Inferen
 			return r.writeSplitHold(ctx, source, standing, "ObservationUnknown", err)
 		}
 	}
+	return r.executePlannedAllocation(ctx, source, eligible, standing, proposal)
+}
+
+func (r *Reconciler) executePlannedAllocation(ctx context.Context, source *v1beta1.InferenceService, eligible []string, standing *placementObservations, proposal plan.Proposal) (ctrl.Result, error) {
 	proposal.PauseSurge = splitPauseRequired(source, proposal)
+	if proposal.AdoptionDigest != "" {
+		proposal.PauseSurge = false
+	}
 	store := plan.Store{Client: r.Client, Reader: r.APIReader}
 	accepted, err := store.Persist(ctx, source, proposal)
 	if err != nil {
 		return r.writeSplitHold(ctx, source, standing, "PlanNotPersisted", err)
 	}
 	observations := r.observeSplitMembers(ctx, accepted, eligible)
+	if proposal.Mode == v1beta1.PlacementModeAll {
+		for name, observed := range observations {
+			if home, exists := standing.get(name); exists && !observed.Candidate.ObservationKnown {
+				candidate := *home.candidate.DeepCopy()
+				candidate.Allocation = observed.Candidate.Allocation
+				candidate.ObservationKnown, candidate.AppliedPlanID, candidate.ReadyReplicas = false, "", 0
+				observed.Candidate = candidate
+				observations[name] = observed
+			}
+		}
+	}
 	step, err := advanceSplitPlan(accepted, observations)
 	if err != nil {
 		return r.writeSplitObservations(ctx, accepted, observations, "ObservationUnknown", err.Error())
@@ -65,11 +83,17 @@ func (r *Reconciler) reconcileSplit(ctx context.Context, source *v1beta1.Inferen
 	for name, target := range step.Targets {
 		assignment := proposal.Assignments[name]
 		assignment.CurrentReplicas = target
+		if assignment.DesiredHome != nil && target == assignment.DesiredReplicas {
+			assignment.CurrentHome = assignment.DesiredHome.DeepCopy()
+		}
 		if slices.Contains(step.Drain, name) {
 			assignment.DrainRequested = true
 		}
 		if slices.Contains(step.Resume, name) {
 			assignment.DrainRequested = false
+		}
+		if target == 0 && observations[name].Home.Absent {
+			assignment.CurrentHome, assignment.DrainRequested = nil, false
 		}
 		proposal.Assignments[name] = assignment
 	}
@@ -80,6 +104,7 @@ func (r *Reconciler) reconcileSplit(ctx context.Context, source *v1beta1.Inferen
 			assignment.OriginalReplicas = assignment.CurrentReplicas
 			if assignment.CurrentReplicas == 0 && observations[name].Home.Absent {
 				assignment.DrainRequested = false
+				assignment.CurrentHome = nil
 			}
 			proposal.Assignments[name] = assignment
 		}
@@ -275,7 +300,19 @@ func advanceSplitPlan(source *v1beta1.InferenceService, observations map[string]
 	if accepted.PauseSurge && !pauseAcknowledged {
 		return allocation.Step{Targets: input.Current, Reason: "AwaitingSurgePause"}, nil
 	}
-	step, err := allocation.Advance(input)
+	if accepted.Mode == v1beta1.PlacementModeAll {
+		for _, candidate := range source.Status.Placement.Candidates {
+			a := candidate.Allocation
+			if a.InventoryPending || a.HomeInputsPending || (a.Matched && (a.DesiredHome == nil || a.DesiredHome.InputDigest != accepted.InputDigest)) {
+				return allocation.Step{Targets: input.Current, Reason: "AwaitingHomeInputs"}, nil
+			}
+		}
+	}
+	advance := allocation.Advance
+	if accepted.Mode == v1beta1.PlacementModeAll {
+		advance = allocation.AdvanceWholeHomes
+	}
+	step, err := advance(input)
 	if step.Complete && accepted.PauseSurge && occupied+reserved > accepted.AssignedReplicas {
 		step.Complete = false
 		step.Reason = "AwaitingMemberCleanup"
@@ -313,6 +350,9 @@ func (r *Reconciler) writeSplitObservations(ctx context.Context, source *v1beta1
 }
 
 func (r *Reconciler) writeSplitHold(ctx context.Context, source *v1beta1.InferenceService, standing *placementObservations, reason string, cause error) (ctrl.Result, error) {
+	if source.Status.Placement != nil && source.Status.Placement.Plan != nil && source.Status.Placement.Plan.Mode == v1beta1.PlacementModeSingle {
+		return r.writeSinglePlanStatus(ctx, source, standing, reason)
+	}
 	res := placementResult{phase: v1beta1.PlacementPhasePending, conditions: []policyCondition{splitProgressCondition(reason, cause.Error())}}
 	if placementMode(source) == v1beta1.PlacementModeSplitByCapacity {
 		status := corev1.ConditionTrue

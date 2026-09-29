@@ -32,3 +32,12 @@ func RenderingConfig(cm *corev1.ConfigMap) (*InferenceServicesConfig, *DeployCon
 	}
 	return cfg, deploy, nil
 }
+
+// DeploymentConfig parses replica and lifecycle defaults without requiring
+// unrelated ingress, storage, or model rendering configuration.
+func DeploymentConfig(cm *corev1.ConfigMap) (*DeployConfig, error) {
+	if cm == nil || strings.TrimSpace(cm.Data[DeployConfigName]) == "null" {
+		return nil, fmt.Errorf("deploy configuration must be an object")
+	}
+	return parseDeployConfig(cm)
+}

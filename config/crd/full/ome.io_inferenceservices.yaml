@@ -32506,15 +32506,83 @@ spec:
                                 type: object
                               clusterUID:
                                 type: string
+                              currentHome:
+                                properties:
+                                  inputDigest:
+                                    type: string
+                                  replicaFloors:
+                                    items:
+                                      properties:
+                                        component:
+                                          enum:
+                                            - engine
+                                            - decoder
+                                            - router
+                                          type: string
+                                        replicas:
+                                          format: int32
+                                          minimum: 1
+                                          type: integer
+                                      required:
+                                        - component
+                                        - replicas
+                                      type: object
+                                    maxItems: 3
+                                    minItems: 1
+                                    type: array
+                                    x-kubernetes-list-map-keys:
+                                      - component
+                                    x-kubernetes-list-type: map
+                                required:
+                                  - inputDigest
+                                  - replicaFloors
+                                type: object
                               currentReplicas:
                                 format: int32
                                 minimum: 0
                                 type: integer
+                              desiredHome:
+                                properties:
+                                  inputDigest:
+                                    type: string
+                                  replicaFloors:
+                                    items:
+                                      properties:
+                                        component:
+                                          enum:
+                                            - engine
+                                            - decoder
+                                            - router
+                                          type: string
+                                        replicas:
+                                          format: int32
+                                          minimum: 1
+                                          type: integer
+                                      required:
+                                        - component
+                                        - replicas
+                                      type: object
+                                    maxItems: 3
+                                    minItems: 1
+                                    type: array
+                                    x-kubernetes-list-map-keys:
+                                      - component
+                                    x-kubernetes-list-type: map
+                                required:
+                                  - inputDigest
+                                  - replicaFloors
+                                type: object
                               desiredReplicas:
                                 format: int32
                                 minimum: 0
                                 type: integer
                               drainRequested:
+                                type: boolean
+                              homeInputsPending:
+                                type: boolean
+                              inventoryPending:
+                                type: boolean
+                              matched:
                                 type: boolean
                               matchingTerms:
                                 items:
@@ -32526,6 +32594,8 @@ spec:
                                 format: int32
                                 minimum: 0
                                 type: integer
+                              raceCandidate:
+                                type: boolean
                               weight:
                                 format: int64
                                 minimum: 0
@@ -32637,6 +32707,8 @@ spec:
                       type: string
                     plan:
                       properties:
+                        adoptionDigest:
+                          type: string
                         assignedReplicas:
                           format: int64
                           minimum: 0
@@ -32644,6 +32716,19 @@ spec:
                         id:
                           type: string
                         inputDigest:
+                          type: string
+                        mode:
+                          allOf:
+                            - enum:
+                                - Single
+                                - All
+                                - Split
+                                - SplitByCapacity
+                            - enum:
+                                - Single
+                                - All
+                                - Split
+                                - SplitByCapacity
                           type: string
                         observedGeneration:
                           format: int64
@@ -32669,6 +32754,8 @@ spec:
                           format: int32
                           minimum: 0
                           type: integer
+                        winner:
+                          type: string
                       required:
                         - assignedReplicas
                         - id

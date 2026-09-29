@@ -235,8 +235,9 @@ func TestLegacyUnknownHomesRetainAllocation(t *testing.T) {
 		mode            v1beta1.PlacementMode
 		registeredReady bool
 		wantFloor       int
+		wantUnchanged   bool
 	}{
-		{name: "Single retains unknown winner", mode: v1beta1.PlacementModeSingle, registeredReady: true, wantFloor: -1},
+		{name: "Single retains unknown winner", mode: v1beta1.PlacementModeSingle, registeredReady: true, wantUnchanged: true},
 		{name: "All continues healthy home", mode: v1beta1.PlacementModeAll, registeredReady: true, wantFloor: 3},
 		{name: "Packed retains unknown admission", mode: v1beta1.PlacementModeSplit, registeredReady: true, wantFloor: 5},
 		{name: "Packed reserves unready home", mode: v1beta1.PlacementModeSplit, wantFloor: 3},
@@ -263,6 +264,10 @@ func TestLegacyUnknownHomesRetainAllocation(t *testing.T) {
 			if err := badBase.Get(t.Context(), client.ObjectKeyFromObject(source), before); err != nil {
 				t.Fatal(err)
 			}
+			goodBefore := &v1beta1.InferenceService{}
+			if err := good.Get(t.Context(), client.ObjectKeyFromObject(source), goodBefore); err != nil {
+				t.Fatal(err)
+			}
 			if _, err := r.Reconcile(t.Context(), req()); err != nil {
 				t.Fatal(err)
 			}
@@ -280,11 +285,11 @@ func TestLegacyUnknownHomesRetainAllocation(t *testing.T) {
 			if err := good.Get(t.Context(), client.ObjectKeyFromObject(source), after); err != nil {
 				t.Fatal(err)
 			}
-			floor := -1
-			if after.Spec.Engine.MinReplicas != nil {
-				floor = *after.Spec.Engine.MinReplicas
-			}
-			if diff := cmp.Diff(tt.wantFloor, floor); diff != "" {
+			if tt.wantUnchanged {
+				if diff := cmp.Diff(goodBefore, after); diff != "" {
+					t.Errorf("healthy member changed (-want +got):\n%s", diff)
+				}
+			} else if diff := cmp.Diff(ptr.To(tt.wantFloor), after.Spec.Engine.MinReplicas); diff != "" {
 				t.Errorf("healthy floor (-want +got):\n%s", diff)
 			}
 			candidates := candidatesByCluster(cpPlacement(t, cp).Candidates)

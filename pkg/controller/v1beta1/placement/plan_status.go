@@ -28,6 +28,11 @@ func placementSatisfactionConditions(source *v1beta1.InferenceService) []policyC
 		Status: corev1.ConditionUnknown, Reason: "AwaitingMemberApplication", Message: "Waiting for observations of the accepted placement plan",
 	}}
 	accepted := status.Plan
+	if accepted.Mode == v1beta1.PlacementModeSingle && accepted.Winner == "" {
+		condition.cond.Reason = "AwaitingSingleWinner"
+		condition.cond.Message = "The admission race has no committed winner"
+		return []policyCondition{condition}
+	}
 	if source.UID == "" || accepted.ID == "" || accepted.Revision <= 0 || accepted.SourceUID != source.UID || accepted.ObservedGeneration != source.Generation {
 		condition.cond.Reason = "AwaitingCurrentPlan"
 		condition.cond.Message = "Current source intent has no accepted allocation"
@@ -39,6 +44,9 @@ func placementSatisfactionConditions(source *v1beta1.InferenceService) []policyC
 		if candidate.Allocation == nil {
 			known = false
 			continue
+		}
+		if accepted.Mode == v1beta1.PlacementModeAll && (candidate.Allocation.InventoryPending || candidate.Allocation.HomeInputsPending || (candidate.Allocation.Matched && (candidate.Allocation.DesiredHome == nil || candidate.Allocation.DesiredHome.InputDigest != accepted.InputDigest))) {
+			known = false
 		}
 		floor := candidate.Allocation.DesiredReplicas
 		assigned += int64(floor)

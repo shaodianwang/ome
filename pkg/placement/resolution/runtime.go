@@ -178,7 +178,22 @@ func readPinState(ctx context.Context, reads client.Client, desired, standing *v
 	if err != nil {
 		return err
 	}
-	if standing == nil || current.UID != standing.UID || current.ResourceVersion != standing.ResourceVersion {
+	if standing == nil || current.UID != standing.UID {
+		return fmt.Errorf("standing member service identity changed")
+	}
+	// Pin state comes from the live read; the supplied observation fences the
+	// member's spec and metadata. The snapshot rechecks the live pin separately.
+	expected := standing.DeepCopy()
+	expected.Status = current.Status
+	want, err := objectIdentity(expected)
+	if err != nil {
+		return err
+	}
+	got, err := objectIdentity(current)
+	if err != nil {
+		return err
+	}
+	if got != want {
 		return fmt.Errorf("standing member service identity changed")
 	}
 	desired.Status.PinnedRevisionName = current.Status.PinnedRevisionName

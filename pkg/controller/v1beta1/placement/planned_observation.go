@@ -53,6 +53,9 @@ func (r *Reconciler) observePlannedHome(ctx context.Context, source *v1beta1.Inf
 	} else if !isOurDerived(member, source) || member.UID == "" || member.ResourceVersion == "" {
 		return out, fmt.Errorf("member service ownership is unverified")
 	}
+	if memberExists {
+		out.Candidate.Endpoint = member.Status.URL.DeepCopy()
+	}
 	irs := &v1beta1.InferenceReplicaList{}
 	selector := client.MatchingLabels{constants.InferenceServicePodLabelKey: source.Name}
 	if err := cl.List(ctx, irs, client.InNamespace(source.Namespace), selector); err != nil {

@@ -10,6 +10,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
 
 type snapshot struct {
@@ -122,6 +124,19 @@ func (c *snapshotClient) rememberError(err error) {
 func objectIdentity(object metav1.Object) (string, error) {
 	if object.GetName() == "" || object.GetUID() == "" || object.GetResourceVersion() == "" || !object.GetDeletionTimestamp().IsZero() {
 		return "", fmt.Errorf("runtime input %s/%s has no verified live identity", object.GetNamespace(), object.GetName())
+	}
+	if service, ok := object.(*v1beta1.InferenceService); ok {
+		// Runtime pin state is the only standing service status used by resolution.
+		// Serving observations must not invalidate otherwise unchanged inputs.
+		input := service.DeepCopy()
+		input.TypeMeta = metav1.TypeMeta{}
+		input.ResourceVersion, input.ManagedFields = "", nil
+		input.Status = v1beta1.InferenceServiceStatus{
+			PinnedRevisionName:   service.Status.PinnedRevisionName,
+			LastRuntimeSyncToken: service.Status.LastRuntimeSyncToken,
+		}
+		data, err := json.Marshal(input)
+		return string(data), err
 	}
 	data, err := json.Marshal([]string{object.GetNamespace(), object.GetName(), string(object.GetUID()), object.GetResourceVersion()})
 	return string(data), err

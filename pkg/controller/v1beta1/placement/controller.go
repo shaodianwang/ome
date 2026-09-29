@@ -184,7 +184,7 @@ type Reconciler struct {
 	DispatcherRoundTimeout time.Duration
 
 	// dispatcher is the resolved breadth policy (built once from DispatcherMode on
-	// first use). It is the nomination step fanOut applies to. dispatcherOnce
+	// first use). Its nominations feed the persisted race plan. dispatcherOnce
 	// guards lazy construction so the Reconciler stays usable when assembled as a
 	// bare struct literal (the cmd wiring and the tests both do that) without a
 	// constructor.
@@ -313,6 +313,10 @@ func (r *Reconciler) reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 	if err := validation.ValidatePlacementIntent(isvc); err != nil {
 		return r.writeObservedPlacement(ctx, isvc, observations)
 	}
+	if isvc.Status.Placement != nil && isvc.Status.Placement.Plan != nil && isvc.Status.Placement.Plan.Mode != "" && placementMode(isvc) != isvc.Status.Placement.Plan.Mode {
+		observations.projectAll = true
+		return r.writeSplitHold(ctx, isvc, observations, "PlacementModeChangeBlocked", fmt.Errorf("standing full-policy homes require their accepted execution mode"))
+	}
 	// Validate before a full-object write can normalize or prune invalid intent.
 	if controllerutil.AddFinalizer(isvc, PlacementFinalizer) {
 		if err := r.Update(ctx, isvc); err != nil {
@@ -322,18 +326,19 @@ func (r *Reconciler) reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 
 	candidates, reason, err := MatchCandidates(isvc, clusters.Items)
 	split := placementMode(isvc) == v1beta1.PlacementModeSplit || placementMode(isvc) == v1beta1.PlacementModeSplitByCapacity
-	if split {
+	if split || placementMode(isvc) == v1beta1.PlacementModeAll {
 		// Outgoing homes still serve during a move. Unreadable peers cannot
 		// prevent discovery of health on the remaining matched members.
 		observations.projectAll = true
 		for _, cluster := range clusters.Items {
-			if observations.matches[cluster.Name] && !slices.Contains(observations.standing, cluster.Name) {
+			if split && observations.matches[cluster.Name] && !slices.Contains(observations.standing, cluster.Name) {
 				observations.standing = append(observations.standing, cluster.Name)
 				observations.refresh(ctx, r, isvc, cluster.Name)
 			}
 		}
 	}
-	if err != nil || (len(candidates) == 0 && !split) {
+	retainedSingle := placementMode(isvc) == v1beta1.PlacementModeSingle && winnerCluster(isvc) != ""
+	if err != nil || (len(candidates) == 0 && !split && placementMode(isvc) != v1beta1.PlacementModeAll && !retainedSingle) {
 		// Surface WHY there are no candidates (malformed selector / no
 		// requirements declared / no Ready clusters / no match) so the empty
 		// set is diagnosable instead of an indistinguishable Pending.
@@ -399,9 +404,9 @@ func (r *Reconciler) reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 		// replicas across its candidate set.
 		switch mode := placementMode(isvc); mode {
 		case v1beta1.PlacementModeSingle:
-			res, err = r.reconcileSingle(ctx, isvc, backendEligible, candidates, observations)
+			res, err = r.reconcileSinglePlanned(ctx, isvc, clusters.Items, backendEligible, observations)
 		case v1beta1.PlacementModeAll:
-			res, err = r.reconcileAll(ctx, isvc, backendEligible, observations)
+			res, err = r.reconcileAllPlanned(ctx, isvc, clusters.Items, backendEligible, observations)
 		case v1beta1.PlacementModeSplit, v1beta1.PlacementModeSplitByCapacity:
 			res, err = r.reconcileSplit(ctx, isvc, clusters.Items, backendEligible, observations)
 		default:
@@ -420,254 +425,9 @@ func (r *Reconciler) reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 	return res, err
 }
 
-// reconcileSingle implements PlacementModeSingle: fan out to the candidates, race
-// on Kueue admission, keep the first fully-admitted cluster (lexical tie-break),
-// sweep the losers, and hold that winner sticky across polls — re-racing only if
-// it is lost (derived deleted, or admission lost past the grace window). This is
-// the default mode.
-func (r *Reconciler) reconcileSingle(
-	ctx context.Context,
-	isvc *v1beta1.InferenceService,
-	candidates, cleanupCandidates []string,
-	observations *placementObservations,
-) (ctrl.Result, error) {
-	// A standing winner remains sticky while it can be observed or while its
-	// absence is inside the grace window. Observation updates health even when
-	// actuation and re-racing are held.
-	if winner := winnerCluster(isvc); winner != "" &&
-		(observations.projects(winner) || !observations.known[winner]) {
-		home, ok := observations.get(winner)
-		if !ok {
-			home = observations.refresh(ctx, r, isvc, winner)
-		}
-		if home.err != nil {
-			r.Log.Error(home.err, "sticky winner: member read failed; holding placement",
-				"cluster", winner, "isvc", isvc.Namespace+"/"+isvc.Name)
-		}
-		switch home.state {
-		case homeUnknown:
-			res, err := r.writePlacement(ctx, isvc, observedSingleResult(isvc, winner, home))
-			if err == nil {
-				res.RequeueAfter = r.requeue()
-			}
-			return res, err
-		case homeAbsent:
-			if remaining := r.graceRemaining(isvc.UID, time.Now()); remaining > 0 {
-				return r.writeSingleAbsentGrace(ctx, isvc, winner)
-			}
-			r.clearGrace(isvc.UID)
-		case homePresent:
-			if home.terminal {
-				r.clearGrace(isvc.UID)
-				return r.writePlacement(ctx, isvc, placementResult{
-					winner: winner, phase: v1beta1.PlacementPhaseFailed,
-					candidates: []v1beta1.CandidatePlacement{home.candidate},
-				})
-			}
-			if home.candidate.Phase != v1beta1.CandidatePhaseAdmitted {
-				if remaining := r.graceRemaining(isvc.UID, time.Now()); remaining > 0 {
-					return r.writeSingleAdmissionGrace(ctx, isvc, winner)
-				}
-				r.clearGrace(isvc.UID)
-				break
-			}
-			r.clearGrace(isvc.UID)
-			if !slices.Contains(candidates, winner) {
-				res, err := r.writePlacement(ctx, isvc, observedCandidateResult(home))
-				if err == nil {
-					res.RequeueAfter = r.requeue()
-				}
-				return res, err
-			}
-			_, ok := r.Clusters.ClientFor(winner)
-			if !ok {
-				unknown := retainedUnknownCandidate(isvc, home.candidate)
-				res, err := r.writePlacement(ctx, isvc, placementResult{
-					winner: winner, phase: v1beta1.PlacementPhasePlaced,
-					candidates: []v1beta1.CandidatePlacement{unknown},
-					url:        unknown.Endpoint, readinessUnknown: true,
-				})
-				if err == nil {
-					res.RequeueAfter = r.requeue()
-				}
-				return res, err
-			}
-			if err := r.placeOnBounded(ctx, winner, isvc, true); err != nil {
-				if errors.Is(err, errMemberAbsent) {
-					return r.writeSingleAbsentGrace(ctx, isvc, winner)
-				}
-				return r.observedStatusThenError(ctx, isvc, observations, err)
-			}
-			r.deleteLosers(ctx, isvc, cleanupCandidates, winner)
-			return r.writePlacement(ctx, isvc, observedCandidateResult(home))
-		}
-	}
-
-	// Nominate the subset of candidates to clone onto this pass. AllAtOnce
-	// nominates the whole set (unchanged fleet-wide fan-out); Incremental probes
-	// in batches and may ask us to hold between rounds. fanOut then acts on the
-	// nominated set rather than directly on all candidates.
-	nominated, hold := r.nominate().Nominate(isvc.UID, candidates, time.Now())
-	if len(nominated) == 0 {
-		return r.writePlacement(ctx, isvc, placementResult{phase: v1beta1.PlacementPhasePending})
-	}
-
-	// Fan out to the connected nominated candidates.
-	placed, err := r.fanOut(ctx, isvc, nominated)
-	if err != nil {
-		return r.observedStatusThenError(ctx, isvc, observations, err)
-	}
-	placedNow := make(map[string]bool, len(placed))
-	for _, cluster := range placed {
-		placedNow[cluster] = true
-	}
-
-	// Race only on fully observed admission. Unknown homes remain represented
-	// with zero ready capacity but cannot win or trigger teardown elsewhere.
-	cands := make([]v1beta1.CandidatePlacement, 0, len(nominated))
-	unknown := false
-	for _, cluster := range nominated {
-		if !placedNow[cluster] && !observations.had(cluster) {
-			continue
-		}
-		home := observations.refresh(ctx, r, isvc, cluster)
-		if home.err != nil {
-			r.Log.Error(home.err, "race: member read failed; keeping unknown candidate",
-				"cluster", cluster, "isvc", isvc.Namespace+"/"+isvc.Name)
-		}
-		if home.state == homeAbsent {
-			if placedNow[cluster] {
-				cands = append(cands, identityCandidate(cluster))
-			}
-			continue
-		}
-		unknown = unknown || home.state == homeUnknown
-		cands = append(cands, home.candidate)
-		if home.state != homePresent || home.terminal || home.candidate.Phase != v1beta1.CandidatePhaseAdmitted {
-			continue
-		}
-		r.clearGrace(isvc.UID)
-		r.deleteLosers(ctx, isvc, cleanupCandidates, cluster)
-		return r.writePlacement(ctx, isvc, observedCandidateResult(home))
-	}
-	if len(cands) == 0 {
-		return r.writePlacement(ctx, isvc, placementResult{phase: v1beta1.PlacementPhasePending})
-	}
-	{
-		res, err := r.writePlacement(ctx, isvc, placementResult{
-			phase: v1beta1.PlacementPhaseAdmitting, candidates: cands,
-			readinessUnknown: unknown,
-		})
-		if err == nil {
-			// Admitting is an active wait for Kueue admission, so re-poll at the fast
-			// cadence to observe the winner promptly. writePlacement otherwise
-			// returns the long steady-state backstop, which only suffices when the
-			// status funnel event-drives re-reconciles; without the funnel that
-			// would leave the race unresolved until the backstop fires.
-			res.RequeueAfter = r.requeue()
-			// An incremental round in flight re-evaluates when it is due to elapse
-			// (or the poll cadence, whichever is sooner) so the next batch is
-			// nominated without waiting a full poll past the round deadline.
-			if hold > 0 {
-				res.RequeueAfter = min(hold, res.RequeueAfter)
-			}
-		}
-		return res, err
-	}
-}
-
 // placementMode resolves the default only for Legacy placement.
 func placementMode(isvc *v1beta1.InferenceService) v1beta1.PlacementMode {
 	return isvc.Spec.Placement.EffectiveMode()
-}
-
-// reconcileAll implements PlacementModeAll: run the ISVC on EVERY candidate that
-// admits and keep them all. There is no single winner and no loser sweep — a
-// candidate that has not admitted yet is retained and keeps trying (capacity may
-// free up), and a home that later loses admission simply drops out of the served
-// set while the others continue. All is best-effort: the placement is Placed
-// once at least one home is admitted, and stays Admitting only while every home is
-// still gated; it never fails just because some candidate cannot admit.
-//
-// There is deliberately no sticky-winner / re-race path here: those protect the
-// single-home invariant, which All does not have. Each home is independent.
-
-func (r *Reconciler) reconcileAll(
-	ctx context.Context,
-	isvc *v1beta1.InferenceService,
-	candidates []string,
-	observations *placementObservations,
-) (ctrl.Result, error) {
-	placed, err := r.fanOut(ctx, isvc, candidates)
-	if err != nil {
-		return r.observedStatusThenError(ctx, isvc, observations, err)
-	}
-	placedNow := make(map[string]bool, len(placed))
-	for _, c := range placed {
-		placedNow[c] = true
-	}
-
-	projected := observations.projectedClusters(candidates)
-	cands := make([]v1beta1.CandidatePlacement, 0, len(projected))
-	admitted := 0
-	serving := false
-	unobserved := false
-	for _, cluster := range projected {
-		actuatable := slices.Contains(candidates, cluster)
-		if actuatable && placedNow[cluster] {
-			observations.refresh(ctx, r, isvc, cluster)
-		}
-		home, observed := observations.get(cluster)
-		if !observed {
-			home = observations.refresh(ctx, r, isvc, cluster)
-		}
-		if actuatable && !placedNow[cluster] && !observations.had(cluster) {
-			continue
-		}
-		if home.err != nil {
-			r.Log.Error(home.err, "all: member read failed; keeping unknown home",
-				"cluster", cluster, "isvc", isvc.Namespace+"/"+isvc.Name)
-		}
-		if home.state == homeAbsent {
-			if actuatable && placedNow[cluster] {
-				cands = append(cands, identityCandidate(cluster))
-			}
-			continue
-		}
-		unobserved = unobserved || home.state == homeUnknown
-		cands = append(cands, home.candidate)
-		if home.candidate.Phase == v1beta1.CandidatePhaseAdmitted {
-			admitted++
-			serving = serving || home.serving
-		}
-	}
-	if len(placed) == 0 && len(cands) == 0 {
-		res, err := r.writePlacement(ctx, isvc, placementResult{phase: v1beta1.PlacementPhasePending})
-		if err == nil {
-			res.RequeueAfter = r.requeue()
-		}
-		return res, err
-	}
-
-	phase := v1beta1.PlacementPhaseAdmitting
-	if admitted > 0 {
-		phase = v1beta1.PlacementPhasePlaced
-	}
-	// No top-level winner cluster/URL in All: the per-home endpoints in
-	// candidates[] are the source of truth (Cluster/Endpoint stay empty).
-	res, err := r.writePlacement(ctx, isvc, placementResult{
-		phase: phase, candidates: cands, ready: serving,
-		readinessUnknown: unobserved && !serving,
-	})
-	// Re-poll at the normal cadence while ANY home is still gated. All admits
-	// homes independently and at different times, so a home that admits AFTER the
-	// first must be observed without waiting for the long steady-state backstop —
-	// even once the placement is Placed on the earlier home(s). Once every home is
-	// admitted, writePlacement's backstop requeue stands.
-	if err == nil && (admitted < len(cands) || unobserved) {
-		res.RequeueAfter = r.requeue()
-	}
-	return res, err
 }
 
 // splitDesiredReplicas is the Split desired replica count: spec.placement.split.
@@ -744,73 +504,10 @@ func placementReadyReplicas(comps []v1beta1.ComponentType, statuses map[v1beta1.
 	return mn
 }
 
-// fanOut ensures the derived ISVC exists on each connected candidate. A
-// per-cluster failure does not abort the others — one bad cluster must not deny
-// the race to the healthy ones. Returns the clusters actually placed on; returns
-// an error only when connected candidates existed but ALL failed.
-//
-// Fault isolation (scale hardening): the connected-cluster set is snapshotted
-// ONCE before the loop so membership does not shift mid-fan-out, and each placeOn
-// runs under a per-cluster deadline (placeTimeout) so a single wedged/slow remote
-// — one whose apiserver hangs rather than returning an error — cannot stall the
-// apply to its healthy peers. A cluster that is not connected at snapshot time is
-// silently skipped and retried next poll; a connected cluster whose apply errors
-// or deadlines out is recorded as a per-cluster error (logged, tolerated) and
-// likewise retried. Neither is allowed to block the race for the healthy ones.
-func (r *Reconciler) fanOut(ctx context.Context, isvc *v1beta1.InferenceService, candidates []string) ([]string, error) {
-	// Snapshot connectivity up front: a stable view for this whole fan-out, so a
-	// cluster connecting/disconnecting mid-loop can't make membership inconsistent
-	// between the skip check here and the per-cluster apply below.
-	connected := connectedSet(r.Clusters)
-
-	var placed []string
-	var errs []error
-	for _, c := range candidates {
-		if !connected[c] {
-			continue // not connected this pass; the next poll re-attempts it
-		}
-		_, ok := r.Clusters.ClientFor(c)
-		if !ok {
-			continue // disconnected between snapshot and lookup; skip
-		}
-		if err := r.placeOnBounded(ctx, c, isvc, false); err != nil {
-			r.Log.Error(err, "fan out failed on cluster", "cluster", c, "isvc", isvc.Namespace+"/"+isvc.Name)
-			errs = append(errs, fmt.Errorf("%q: %w", c, err))
-			continue
-		}
-		placed = append(placed, c)
-	}
-	if len(placed) == 0 && len(errs) > 0 {
-		return nil, fmt.Errorf("fan out %s/%s failed on all connected candidates: %w", isvc.Namespace, isvc.Name, errors.Join(errs...))
-	}
-	return placed, nil
-}
-
-// placeOnBounded runs placeOn under a per-cluster deadline so one stuck remote
-// cannot block the fan-out to the healthy candidates. A deadline overrun surfaces
-// as a (wrapped) context.DeadlineExceeded error the caller records per-cluster
-// and retries next poll.
-func (r *Reconciler) placeOnBounded(ctx context.Context, cluster string, isvc *v1beta1.InferenceService, existingOnly bool) error {
-	cctx, cancel := context.WithTimeout(ctx, r.placeTimeout())
-	defer cancel()
-	return r.placeOn(cctx, cluster, isvc, existingOnly)
-}
-
 func (r *Reconciler) deleteDerivedOnBounded(ctx context.Context, cluster string, isvc *v1beta1.InferenceService) error {
 	cctx, cancel := context.WithTimeout(ctx, r.placeTimeout())
 	defer cancel()
 	return r.deleteDerivedOn(cctx, cluster, isvc)
-}
-
-// connectedSet snapshots the currently-connected cluster names as a set for O(1)
-// membership checks during a single fan-out pass.
-func connectedSet(clusters ClusterClients) map[string]bool {
-	names := clusters.Connected()
-	set := make(map[string]bool, len(names))
-	for _, n := range names {
-		set[n] = true
-	}
-	return set
 }
 
 // deleteLosers best-effort deletes THIS ISVC's derived copy on each cluster in
@@ -818,7 +515,7 @@ func connectedSet(clusters ClusterClients) map[string]bool {
 // this source ISVC's origin label, so a same-named ISVC a user created directly
 // on a workload cluster is never touched (cross-tenant data-loss guard).
 //
-// Per-cluster failures are tolerated (like fanOut): one slow/unreachable cluster
+// Per-cluster failures are tolerated: one slow/unreachable cluster
 // must not block loser cleanup on the healthy ones, and must NOT block recording
 // the winner. Failures are logged; the next poll retries, and the GC sweep is a
 // backstop. Callers that must confirm full teardown (reconcileDelete) verify the
@@ -916,6 +613,11 @@ func (r *Reconciler) applyDerived(ctx context.Context, cluster string, cl client
 			return err
 		}
 		if policy != nil {
+			if target.ResourceVersion == "" {
+				if err := requireEmptyMemberInventory(ctx, cl, src); err != nil {
+					return err
+				}
+			}
 			if err := r.checkPlanCurrent(ctx, src); err != nil {
 				return err
 			}
@@ -1137,6 +839,9 @@ func (r *Reconciler) writePlacement(ctx context.Context, isvc *v1beta1.Inference
 		if !plan.SameSnapshot(isvc, cur) {
 			return plan.ErrStaleSnapshot
 		}
+		if cur.Status.Placement != nil && cur.Status.Placement.Plan != nil && cur.Status.Placement.Plan.Mode == v1beta1.PlacementModeSingle && res.winner != cur.Status.Placement.Plan.Winner {
+			return plan.ErrStaleSnapshot
+		}
 		readyBefore := cur.Status.GetCondition(apis.ConditionReady)
 		if cur.Status.Placement == nil {
 			cur.Status.Placement = &v1beta1.PlacementStatus{}
@@ -1255,6 +960,9 @@ func endpointFor(derived *v1beta1.InferenceService) *apis.URL {
 func winnerCluster(isvc *v1beta1.InferenceService) string {
 	if isvc.Status.Placement == nil {
 		return ""
+	}
+	if isvc.Status.Placement.Plan != nil && isvc.Status.Placement.Plan.Mode == v1beta1.PlacementModeSingle {
+		return isvc.Status.Placement.Plan.Winner
 	}
 	return isvc.Status.Placement.Cluster
 }

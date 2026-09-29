@@ -92,9 +92,20 @@ Member autoscaling otherwise retains its local policy.
 
 ## Moving replicas
 
-The transition coordination below applies to `Split` and `SplitByCapacity`.
-`Single` and `All` retain
-their existing admission and re-placement behavior.
+The transition coordination below applies to `All`, `Split`, and
+`SplitByCapacity`. `Single` retains its admission-race behavior.
+
+`Single` persists its nominated homes before creating workloads, then commits
+the observed winner before cleaning up race losers. One admitted instance of
+each declared component suffices to win; admission need not fill the requested
+floor. Simultaneously observed winners are ordered by cluster name. A restart
+retains accepted nominations and the committed winner. Only that winner can be
+published for routing, even while loser resources await cleanup.
+
+A matching Single winner remains sticky. Unknown member health holds its
+identity; confirmed loss uses the configured recovery grace. Healthy affinity
+changes currently report `MigrationBlocked` and retain the winner. The initial
+admission race does not authorize a deliberate move of a healthy service.
 
 `maxSurge` is a whole-replica allowance shared by placement and member rollout
 surge. An omitted allowance blocks moves between homes. Zero permits no excess;
@@ -113,6 +124,30 @@ serving home. Removing a home also requires publication of its zero traffic
 weight for the exact plan. A missing or stale publication holds the move.
 A settled positive allocation can release its pause without global routing;
 this does not authorize any further replica movement.
+
+## Full-policy homes
+
+`All` retains the complete source policy on each eligible member; `Single`
+applies it to nominated members and its retained winner. Placement
+resolves component minimums using source, runtime, then operator configuration
+precedence. It requires positive resolved floors, with equal Engine and Decoder
+counts; Router has its own floor. A zero or unresolved floor holds that home's
+allocation without changing local-service behavior. Operator defaults require
+the configured member operator namespace and an identified ConfigMap.
+
+The plan stores each current and desired home policy separately. A replacement
+must fit its entire floor within the shared allowance: a two-replica home cannot
+start with only one surge replica available. Outgoing homes retain their accepted
+floors and templates until replacement readiness and traffic drain permit
+removal. During a pause, inherited minimums are fixed to the accepted values;
+applying the approved source policy restores inheritance.
+
+Initial provisioning inventories standing member resources before allowing
+retirement. Missing matched members can be retried independently while that
+initial source intent stays unchanged. Unknown unmatched homes, changed intent
+during incomplete inventory, and unidentified registrations hold movement.
+`AwaitingHomeInputs` reports incomplete inventory or unresolved full-home floors.
+Placement mode changes involving an accepted full-policy plan remain held.
 
 ## Capacity input contract
 

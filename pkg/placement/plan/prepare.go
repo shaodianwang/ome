@@ -16,10 +16,14 @@ import (
 )
 
 func prepare(source *v1beta1.InferenceService, proposal Proposal) (*v1beta1.PlacementStatus, error) {
+	if proposal.Mode != "" && proposal.Mode != source.Spec.Placement.Mode {
+		return nil, fmt.Errorf("placement plan mode differs from source intent")
+	}
 	if proposal.InputDigest == "" || proposal.UnassignedReplicas < 0 || proposal.OriginalUnassignedReplicas < 0 {
 		return nil, fmt.Errorf("placement plan requires an input digest and nonnegative unassigned floors")
 	}
 	out := &v1beta1.PlacementStatus{Plan: &v1beta1.PlacementPlanStatus{
+		Mode: proposal.Mode, Winner: proposal.Winner, AdoptionDigest: proposal.AdoptionDigest,
 		SourceUID: source.UID, ObservedGeneration: source.Generation, InputDigest: proposal.InputDigest,
 		PauseSurge:         proposal.PauseSurge,
 		UnassignedReplicas: proposal.UnassignedReplicas, OriginalUnassignedReplicas: proposal.OriginalUnassignedReplicas,
@@ -30,6 +34,33 @@ func prepare(source *v1beta1.InferenceService, proposal Proposal) (*v1beta1.Plac
 			return nil, fmt.Errorf("cluster %q requires an identity and nonnegative floors", name)
 		}
 		assignment := input.DeepCopy()
+		if (proposal.Mode == v1beta1.PlacementModeAll || proposal.Mode == v1beta1.PlacementModeSingle) && ((assignment.CurrentReplicas > 0 && assignment.CurrentHome == nil) || (assignment.DesiredReplicas > 0 && assignment.DesiredHome == nil)) {
+			return nil, fmt.Errorf("cluster %q full-policy counts require resolved home authority", name)
+		}
+		for _, home := range []*v1beta1.PlacementHomePolicy{assignment.CurrentHome, assignment.DesiredHome} {
+			if home == nil {
+				continue
+			}
+			if home.InputDigest == "" {
+				return nil, fmt.Errorf("cluster %q full home requires source intent identity", name)
+			}
+			if _, err := protocol.ValidateReplicaFloors(home.ReplicaFloors); err != nil {
+				return nil, fmt.Errorf("cluster %q: %w", name, err)
+			}
+			slices.SortFunc(home.ReplicaFloors, func(a, b v1beta1.PlacementComponentFloor) int { return cmp.Compare(a.Component, b.Component) })
+		}
+		if assignment.DesiredHome != nil {
+			floor, _ := protocol.ValidateReplicaFloors(assignment.DesiredHome.ReplicaFloors)
+			if floor != assignment.DesiredReplicas {
+				return nil, fmt.Errorf("cluster %q desired home differs from its reserved floor", name)
+			}
+		}
+		if assignment.CurrentHome != nil {
+			floor, _ := protocol.ValidateReplicaFloors(assignment.CurrentHome.ReplicaFloors)
+			if floor != assignment.CurrentReplicas && !(assignment.CurrentReplicas == 0 && assignment.DrainRequested) {
+				return nil, fmt.Errorf("cluster %q current home differs from its reserved floor", name)
+			}
+		}
 		if assignment.Weight != nil && (*assignment.Weight < 0 || assignment.Capacity != nil) {
 			return nil, fmt.Errorf("cluster %q requires a nonnegative static weight or capacity, not both", name)
 		}
@@ -61,6 +92,22 @@ func prepare(source *v1beta1.InferenceService, proposal Proposal) (*v1beta1.Plac
 		out.Plan.AssignedReplicas += int64(input.DesiredReplicas)
 		originalTotal += int64(input.OriginalReplicas)
 		out.Candidates = append(out.Candidates, v1beta1.CandidatePlacement{Cluster: name, Allocation: assignment})
+	}
+	if proposal.Mode != v1beta1.PlacementModeSingle && proposal.Winner != "" {
+		return nil, fmt.Errorf("only Single placement can commit a winner")
+	}
+	if proposal.Mode == v1beta1.PlacementModeSingle {
+		if proposal.Winner != "" {
+			winner, exists := proposal.Assignments[proposal.Winner]
+			if !exists || winner.RaceCandidate || winner.DesiredHome == nil || winner.DesiredReplicas <= 0 {
+				return nil, fmt.Errorf("Single winner requires retained full-home authority")
+			}
+		}
+		for name, a := range proposal.Assignments {
+			if a.DesiredReplicas > 0 && ((proposal.Winner != "" && name != proposal.Winner) || (proposal.Winner == "" && !a.RaceCandidate)) {
+				return nil, fmt.Errorf("Single desired home is neither a race candidate nor its committed winner")
+			}
+		}
 	}
 	if int64(proposal.UnassignedReplicas) > math.MaxInt64-out.Plan.AssignedReplicas {
 		return nil, fmt.Errorf("requested floor exceeds int64")

@@ -33,6 +33,18 @@ const PlacementReplicaFloorsReady = "PlacementReplicaFloorsReady"
 // Original assignments remain fixed throughout a transition, including retargets.
 type PlacementPlanStatus struct {
 	ID string `json:"id"`
+	// Mode identifies the execution semantics of this accepted plan.
+	// +optional
+	// +kubebuilder:validation:Enum=Single;All;Split;SplitByCapacity
+	Mode PlacementMode `json:"mode,omitempty"`
+	// Winner commits the admitted Single home before race losers are removed.
+	// Empty means the persisted Single admission race has not selected a home.
+	// +optional
+	Winner string `json:"winner,omitempty"`
+	// AdoptionDigest fixes the initial intent while standing homes are being
+	// inventoried. A changed intent cannot expand an incomplete inventory.
+	// +optional
+	AdoptionDigest string `json:"adoptionDigest,omitempty"`
 	// Revision increases for every accepted allocation or drain instruction.
 	// +kubebuilder:validation:Minimum=1
 	Revision  int64     `json:"revision"`
@@ -61,6 +73,28 @@ type PlacementPlanStatus struct {
 // floors. A zero current floor does not authorize deletion before traffic drains.
 type CandidateAllocationStatus struct {
 	ClusterUID types.UID `json:"clusterUID"`
+	// InventoryPending prevents unknown standing resources from becoming free
+	// migration capacity. It is cleared only by an identified member inventory.
+	// +optional
+	InventoryPending bool `json:"inventoryPending,omitempty"`
+	// HomeInputsPending holds movement when current full-policy inputs cannot
+	// be verified, while retaining the last accepted desired floors.
+	// +optional
+	HomeInputsPending bool `json:"homeInputsPending,omitempty"`
+	// RaceCandidate authorizes cleanup of a Single race copy after another
+	// candidate wins. A retained winner does not carry this permission.
+	// +optional
+	RaceCandidate bool `json:"raceCandidate,omitempty"`
+	// Matched distinguishes a desired full-policy home from an outgoing home,
+	// including an affinity that matches every registration without terms.
+	// +optional
+	Matched bool `json:"matched,omitempty"`
+	// CurrentHome retains the full policy authorized at a home through draining.
+	// +optional
+	CurrentHome *PlacementHomePolicy `json:"currentHome,omitempty"`
+	// DesiredHome is present for every intended full-policy home.
+	// +optional
+	DesiredHome *PlacementHomePolicy `json:"desiredHome,omitempty"`
 	// MatchingTerms contains zero-based indexes into the source's affinity terms.
 	// +optional
 	// +listType=set
@@ -81,6 +115,17 @@ type CandidateAllocationStatus struct {
 	// DrainRequested withdraws this home from routing before physical removal.
 	// +optional
 	DrainRequested bool `json:"drainRequested,omitempty"`
+}
+
+// PlacementHomePolicy records the full component floors of one retained home.
+type PlacementHomePolicy struct {
+	// InputDigest binds these resolved floors to the accepted source intent.
+	InputDigest string `json:"inputDigest"`
+	// +listType=map
+	// +listMapKey=component
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=3
+	ReplicaFloors []PlacementComponentFloor `json:"replicaFloors"`
 }
 
 // PlacementCapacitySample records the identified hardware and resolved demand

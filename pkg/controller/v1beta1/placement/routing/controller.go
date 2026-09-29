@@ -770,6 +770,9 @@ func servingCandidates(isvc *v1beta1.InferenceService) []*v1beta1.CandidatePlace
 	var cs []*v1beta1.CandidatePlacement
 	for i := range pl.Candidates {
 		c := &pl.Candidates[i]
+		if pl.Plan != nil && pl.Plan.Mode == v1beta1.PlacementModeSingle && (pl.Plan.Winner == "" || c.Cluster != pl.Plan.Winner) {
+			continue
+		}
 		if c.Phase == v1beta1.CandidatePhaseAdmitted && c.Endpoint != nil && c.Endpoint.Host != "" {
 			cs = append(cs, c)
 		}

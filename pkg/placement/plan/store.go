@@ -26,6 +26,9 @@ var (
 // Proposal contains the complete allocation, including retained outgoing homes.
 // Callers carry original floors across partial application and retargets.
 type Proposal struct {
+	Mode                       v1beta1.PlacementMode
+	Winner                     string
+	AdoptionDigest             string
 	InputDigest                string
 	PauseSurge                 bool
 	OriginalUnassignedReplicas int32
@@ -151,13 +154,21 @@ func mergeAllocation(source *v1beta1.InferenceService, allocation *v1beta1.Place
 	for _, desired := range allocation.Candidates {
 		candidate := old[desired.Cluster]
 		if candidate.Allocation == nil || candidate.Allocation.ClusterUID != desired.Allocation.ClusterUID {
-			candidate = v1beta1.CandidatePlacement{Cluster: desired.Cluster}
+			if candidate.Allocation == nil && allocation.Plan.Mode == v1beta1.PlacementModeAll {
+				candidate.Cluster = desired.Cluster
+				candidate.ObservationKnown, candidate.AppliedPlanID = false, ""
+			} else {
+				candidate = v1beta1.CandidatePlacement{Cluster: desired.Cluster}
+			}
 		}
 		candidate.Allocation = desired.Allocation.DeepCopy()
 		candidates = append(candidates, candidate)
 	}
 	source.Status.Placement.Plan = allocation.Plan.DeepCopy()
 	source.Status.Placement.Candidates = candidates
+	if allocation.Plan.Mode == v1beta1.PlacementModeSingle {
+		source.Status.Placement.Cluster = allocation.Plan.Winner
+	}
 }
 
 func equalAllocation(a, b *v1beta1.PlacementStatus) bool {

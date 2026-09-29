@@ -45,7 +45,14 @@ func TestResolveStandingIdentity(t *testing.T) {
 		{name: "different member namespace", edit: func(_ *testing.T, f *runtimeFixture, _ client.Client) { f.standing.Namespace = "team-b" }, wantErr: true},
 		{name: "missing member UID", edit: func(_ *testing.T, f *runtimeFixture, _ client.Client) { f.standing.UID = "" }, wantErr: true},
 		{name: "missing member version", edit: func(_ *testing.T, f *runtimeFixture, _ client.Client) { f.standing.ResourceVersion = "" }, wantErr: true},
-		{name: "stale member version", edit: func(_ *testing.T, f *runtimeFixture, _ client.Client) { f.standing.ResourceVersion = "stale" }, wantErr: true},
+		{name: "different version with unchanged inputs", edit: func(_ *testing.T, f *runtimeFixture, _ client.Client) { f.standing.ResourceVersion = "earlier" }},
+		{name: "stale member spec", edit: func(_ *testing.T, f *runtimeFixture, _ client.Client) { f.standing.Spec.Engine.MinReplicas = ptr.To(7) }, wantErr: true},
+		{name: "stale member labels", edit: func(_ *testing.T, f *runtimeFixture, _ client.Client) {
+			f.standing.Labels = map[string]string{"selected": "earlier"}
+		}, wantErr: true},
+		{name: "stale member annotation", edit: func(_ *testing.T, f *runtimeFixture, _ client.Client) {
+			f.standing.Annotations = map[string]string{constants.RuntimeSyncAnnotationKey: "earlier"}
+		}, wantErr: true},
 		{name: "member disappeared", edit: func(t *testing.T, f *runtimeFixture, cl client.Client) {
 			if err := cl.Delete(t.Context(), f.standing); err != nil {
 				t.Fatal(err)

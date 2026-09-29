@@ -85,7 +85,7 @@ func srcISVC(selector string) *v1beta1.InferenceService {
 }
 
 func backendTestRuntime() *v1beta1.ClusterServingRuntime {
-	return &v1beta1.ClusterServingRuntime{ObjectMeta: metav1.ObjectMeta{Name: "placement-runtime", UID: "runtime-uid"}, Spec: v1beta1.ServingRuntimeSpec{}}
+	return &v1beta1.ClusterServingRuntime{ObjectMeta: metav1.ObjectMeta{Name: "placement-runtime", UID: "runtime-uid"}, Spec: v1beta1.ServingRuntimeSpec{EngineConfig: &v1beta1.EngineSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: ptr.To(1)}}}}
 }
 
 // emptyWorker is a fresh fake worker client (status subresource registered).
@@ -113,7 +113,7 @@ func workerWithAdmittedDerived(t *testing.T, s *runtime.Scheme) client.WithWatch
 	engineIR := irWithInstances(v1beta1.EngineComponent, true)
 	w := fakeclient.NewClientBuilder().WithScheme(s).
 		WithStatusSubresource(&v1beta1.InferenceService{}).
-		WithObjects(derived, engineIR, backendTestRuntime()).Build()
+		WithObjects(observedWorkerObjects(derived, engineIR)...).Build()
 	// Ensure the admitted status is stored (if the builder didn't persist it).
 	cur := &v1beta1.InferenceService{}
 	require.NoError(t, w.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, cur))
@@ -160,7 +160,7 @@ func workerWithAdmittedURL(t *testing.T, s *runtime.Scheme, host string) client.
 	derived.Status.URL = &apis.URL{Scheme: "https", Host: host}
 	engineIR := irWithInstances(v1beta1.EngineComponent, true)
 	w := fakeclient.NewClientBuilder().WithScheme(s).
-		WithStatusSubresource(&v1beta1.InferenceService{}).WithObjects(derived, engineIR, backendTestRuntime()).Build()
+		WithStatusSubresource(&v1beta1.InferenceService{}).WithObjects(observedWorkerObjects(derived, engineIR)...).Build()
 	cur := &v1beta1.InferenceService{}
 	require.NoError(t, w.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, cur))
 	if cur.Status.URL == nil {
@@ -191,7 +191,7 @@ func workerWithReplicaCounts(t *testing.T, s *runtime.Scheme, host string, admit
 	engineIR := irWithInstances(v1beta1.EngineComponent, instances...)
 	engineIR.Status.ReadyReplicas = ready
 	return fakeclient.NewClientBuilder().WithScheme(s).
-		WithStatusSubresource(&v1beta1.InferenceService{}).WithObjects(derived, engineIR, backendTestRuntime()).Build()
+		WithStatusSubresource(&v1beta1.InferenceService{}).WithObjects(observedWorkerObjects(derived, engineIR)...).Build()
 }
 
 func workerWithPDReplicaCounts(
@@ -227,7 +227,7 @@ func workerWithPDReplicaCounts(
 
 	return fakeclient.NewClientBuilder().WithScheme(s).
 		WithStatusSubresource(&v1beta1.InferenceService{}).
-		WithObjects(derived, engineIR, decoderIR, backendTestRuntime()).Build()
+		WithObjects(observedWorkerObjects(derived, engineIR, decoderIR)...).Build()
 }
 
 func cpStatusURL(t *testing.T, cp client.Client) *apis.URL {
@@ -743,7 +743,7 @@ func workerWithUnadmittedDerived(t *testing.T, s *runtime.Scheme) client.WithWat
 	derived.Labels = map[string]string{PlacementOriginLabel: "uid-1"}
 	engineIR := irWithInstances(v1beta1.EngineComponent, false) // present, NOT admitted
 	return fakeclient.NewClientBuilder().WithScheme(s).
-		WithStatusSubresource(&v1beta1.InferenceService{}).WithObjects(derived, engineIR, backendTestRuntime()).Build()
+		WithStatusSubresource(&v1beta1.InferenceService{}).WithObjects(observedWorkerObjects(derived, engineIR)...).Build()
 }
 
 func TestReconcile_WinnerLostAdmissionWithinGraceHolds(t *testing.T) {
@@ -854,7 +854,7 @@ func TestReconcile_StickyWinnerSweepsStrayLoser(t *testing.T) {
 	s := testScheme(t)
 	// a is connected and carries a STRAY derived (origin-labeled), not in status.
 	wa := fakeclient.NewClientBuilder().WithScheme(s).WithObjects(&v1beta1.InferenceService{
-		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "prod", Labels: map[string]string{PlacementOriginLabel: "uid-1"}},
+		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "prod", UID: "stray-uid", Labels: map[string]string{PlacementOriginLabel: "uid-1"}},
 	}).Build()
 	wb := workerWithAdmittedDerived(t, s) // winner b, admitted
 	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
@@ -883,10 +883,10 @@ func TestReconcile_StickyWinnerSweepsStrayLoser(t *testing.T) {
 func TestReconcile_DeleteRemovesDerivedEverywhere(t *testing.T) {
 	s := testScheme(t)
 	wa := fakeclient.NewClientBuilder().WithScheme(s).WithObjects(&v1beta1.InferenceService{
-		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "prod", Labels: map[string]string{PlacementOriginLabel: "uid-1"}},
+		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "prod", UID: "stray-uid", Labels: map[string]string{PlacementOriginLabel: "uid-1"}},
 	}).Build()
 	wb := fakeclient.NewClientBuilder().WithScheme(s).WithObjects(&v1beta1.InferenceService{
-		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "prod", Labels: map[string]string{PlacementOriginLabel: "uid-1"}},
+		ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "prod", UID: "stray-uid", Labels: map[string]string{PlacementOriginLabel: "uid-1"}},
 	}).Build()
 	clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{
 		"a": workloadcluster.NewNeverCachingClient(wa),
@@ -971,10 +971,16 @@ func TestReconcile_PublishesEndpointWhenAdmitted(t *testing.T) {
 
 	// The winner's per-candidate Endpoint is populated too (the per-home model
 	// All/Split build on; in Single the top-level Endpoint stays authoritative).
-	require.Len(t, p.Candidates, 1)
-	assert.Equal(t, "b", p.Candidates[0].Cluster)
-	require.NotNil(t, p.Candidates[0].Endpoint)
-	assert.Equal(t, "svc.prod.b.example", p.Candidates[0].Endpoint.Host)
+	winner := candidatesByCluster(p.Candidates)["b"]
+	require.NotNil(t, winner.Allocation)
+	assert.Positive(t, winner.Allocation.DesiredReplicas)
+	require.NotNil(t, winner.Endpoint)
+	assert.Equal(t, "svc.prod.b.example", winner.Endpoint.Host)
+	for _, candidate := range p.Candidates {
+		if candidate.Cluster != "b" {
+			assert.Zero(t, candidate.Allocation.DesiredReplicas)
+		}
+	}
 }
 
 func TestReconcile_PlacedButNoEndpointYet(t *testing.T) {
@@ -1973,7 +1979,7 @@ func workerWithGatedDerived(t *testing.T, s *runtime.Scheme) client.WithWatch {
 	derived.Labels = map[string]string{PlacementOriginLabel: "uid-1"}
 	engineIR := irWithInstances(v1beta1.EngineComponent, false) // present, NOT admitted
 	return fakeclient.NewClientBuilder().WithScheme(s).
-		WithStatusSubresource(&v1beta1.InferenceService{}).WithObjects(derived, engineIR, backendTestRuntime()).Build()
+		WithStatusSubresource(&v1beta1.InferenceService{}).WithObjects(observedWorkerObjects(derived, engineIR)...).Build()
 }
 
 func candidatesByCluster(cs []v1beta1.CandidatePlacement) map[string]v1beta1.CandidatePlacement {
@@ -2250,7 +2256,7 @@ func TestReconcile_AllModeRemoteIRFailureDoesNotHideHealthyHome(t *testing.T) {
 	assert.Equal(t, v1beta1.CandidatePhaseAdmitted, by["b"].Phase)
 }
 
-func TestReconcile_AllModePostApplyIRFailureKeepsFreshObservation(t *testing.T) {
+func TestReconcile_AllModeRepeatedIRFailureKeepsFreshObservation(t *testing.T) {
 	s := testScheme(t)
 	worker := &failIRGetAfterClient{
 		WithWatch:        workerWithReplicaCounts(t, s, "fresh.a.example", 3, 2),
@@ -2272,8 +2278,8 @@ func TestReconcile_AllModePostApplyIRFailureKeepsFreshObservation(t *testing.T) 
 	res, err := r.Reconcile(context.Background(), req())
 	require.NoError(t, err)
 	assert.Equal(t, time.Second, res.RequeueAfter)
-	assert.Equal(t, 2, worker.irGets, "the IR read after the successful apply must fail")
-	assert.Positive(t, worker.updates, "the derived apply must complete before the failed read")
+	assert.Greater(t, worker.irGets, worker.successfulIRGets, "the later authoritative inventory must fail")
+	assert.Zero(t, worker.updates, "unknown physical inventory cannot authorize a member refresh")
 
 	got := &v1beta1.InferenceService{}
 	require.NoError(t, cp.Get(context.Background(), req().NamespacedName, got))
@@ -2369,7 +2375,7 @@ func workerWithReplicas(t *testing.T, s *runtime.Scheme, host string, admitted, 
 	ir := irWithInstances(v1beta1.EngineComponent, flags...)
 	ir.Status.ReadyReplicas = ready
 	w := fakeclient.NewClientBuilder().WithScheme(s).
-		WithStatusSubresource(&v1beta1.InferenceService{}).WithObjects(derived, ir, backendTestRuntime()).Build()
+		WithStatusSubresource(&v1beta1.InferenceService{}).WithObjects(observedWorkerObjects(derived, ir)...).Build()
 	cur := &v1beta1.InferenceService{}
 	require.NoError(t, w.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, cur))
 	if cur.Status.URL == nil {

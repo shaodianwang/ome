@@ -1591,10 +1591,18 @@
           "type": "string",
           "default": ""
         },
+        "currentHome": {
+          "description": "CurrentHome retains the full policy authorized at a home through draining.",
+          "$ref": "#/definitions/v1beta1.PlacementHomePolicy"
+        },
         "currentReplicas": {
           "type": "integer",
           "format": "int32",
           "default": 0
+        },
+        "desiredHome": {
+          "description": "DesiredHome is present for every intended full-policy home.",
+          "$ref": "#/definitions/v1beta1.PlacementHomePolicy"
         },
         "desiredReplicas": {
           "type": "integer",
@@ -1603,6 +1611,18 @@
         },
         "drainRequested": {
           "description": "DrainRequested withdraws this home from routing before physical removal.",
+          "type": "boolean"
+        },
+        "homeInputsPending": {
+          "description": "HomeInputsPending holds movement when current full-policy inputs cannot be verified, while retaining the last accepted desired floors.",
+          "type": "boolean"
+        },
+        "inventoryPending": {
+          "description": "InventoryPending prevents unknown standing resources from becoming free migration capacity. It is cleared only by an identified member inventory.",
+          "type": "boolean"
+        },
+        "matched": {
+          "description": "Matched distinguishes a desired full-policy home from an outgoing home, including an affinity that matches every registration without terms.",
           "type": "boolean"
         },
         "matchingTerms": {
@@ -1619,6 +1639,10 @@
           "type": "integer",
           "format": "int32",
           "default": 0
+        },
+        "raceCandidate": {
+          "description": "RaceCandidate authorizes cleanup of a Single race copy after another candidate wins. A retained winner does not carry this permission.",
+          "type": "boolean"
         },
         "weight": {
           "description": "Weight is the effective static allocation weight, when applicable.",
@@ -5588,6 +5612,32 @@
         }
       }
     },
+    "v1beta1.PlacementHomePolicy": {
+      "description": "PlacementHomePolicy records the full component floors of one retained home.",
+      "type": "object",
+      "required": [
+        "inputDigest",
+        "replicaFloors"
+      ],
+      "properties": {
+        "inputDigest": {
+          "description": "InputDigest binds these resolved floors to the accepted source intent.",
+          "type": "string",
+          "default": ""
+        },
+        "replicaFloors": {
+          "type": "array",
+          "items": {
+            "default": {},
+            "$ref": "#/definitions/v1beta1.PlacementComponentFloor"
+          },
+          "x-kubernetes-list-map-keys": [
+            "component"
+          ],
+          "x-kubernetes-list-type": "map"
+        }
+      }
+    },
     "v1beta1.PlacementPlanStatus": {
       "description": "PlacementPlanStatus identifies the allocation persisted before member writes. Original assignments remain fixed throughout a transition, including retargets.",
       "type": "object",
@@ -5604,6 +5654,10 @@
         "originalUnassignedReplicas"
       ],
       "properties": {
+        "adoptionDigest": {
+          "description": "AdoptionDigest fixes the initial intent while standing homes are being inventoried. A changed intent cannot expand an incomplete inventory.",
+          "type": "string"
+        },
         "assignedReplicas": {
           "type": "integer",
           "format": "int64",
@@ -5617,6 +5671,10 @@
           "description": "InputDigest identifies resolved source intent and accepted allocation inputs. Heartbeat timestamps and report resource versions do not change this digest.",
           "type": "string",
           "default": ""
+        },
+        "mode": {
+          "description": "Mode identifies the execution semantics of this accepted plan.",
+          "type": "string"
         },
         "observedGeneration": {
           "type": "integer",
@@ -5654,6 +5712,10 @@
           "type": "integer",
           "format": "int32",
           "default": 0
+        },
+        "winner": {
+          "description": "Winner commits the admitted Single home before race losers are removed. Empty means the persisted Single admission race has not selected a home.",
+          "type": "string"
         }
       }
     },

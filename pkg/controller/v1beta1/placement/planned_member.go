@@ -83,6 +83,9 @@ func executionPolicy(source *v1beta1.InferenceService, assignment *v1beta1.Candi
 	if assignment.Capacity != nil {
 		policy.Demand = assignment.Capacity.DemandContract.DeepCopy()
 	}
+	if assignment.CurrentHome != nil {
+		policy.ReplicaFloors = assignment.CurrentHome.DeepCopy().ReplicaFloors
+	}
 	return policy
 }
 
@@ -113,6 +116,10 @@ func checkPlannedAssignment(source *v1beta1.InferenceService, candidate v1beta1.
 // placePlannedOn stamps member execution authority before any component can
 // acknowledge it. The member's later IR observation is the application signal.
 func (r *Reconciler) placePlannedOn(ctx context.Context, source *v1beta1.InferenceService, candidate v1beta1.CandidatePlacement) error {
+	return r.placePlannedMember(ctx, source, candidate, false)
+}
+
+func (r *Reconciler) placePlannedMember(ctx context.Context, source *v1beta1.InferenceService, candidate v1beta1.CandidatePlacement, existingOnly bool) error {
 	if err := r.checkPlanCurrent(ctx, source); err != nil {
 		return err
 	}
@@ -139,7 +146,11 @@ func (r *Reconciler) placePlannedOn(ctx context.Context, source *v1beta1.Inferen
 	if source.Spec.Placement.Split != nil {
 		ceiling = source.Spec.Placement.Split.MaxReplicasPerCluster
 	}
-	setPlannedReplicas(desired, assignment.CurrentReplicas, ceiling)
+	if assignment.CurrentHome == nil {
+		setPlannedReplicas(desired, assignment.CurrentReplicas, ceiling)
+	} else if assignment.CurrentHome.InputDigest != source.Status.Placement.Plan.InputDigest || !equality.Semantic.DeepEqual(assignment.CurrentHome, assignment.DesiredHome) {
+		return r.syncPlannedPolicy(ctx, source, candidate)
+	}
 	if err := r.checkCapacityApplication(ctx, cl, source, desired, assignment); err != nil {
 		return err
 	}
@@ -155,7 +166,7 @@ func (r *Reconciler) placePlannedOn(ctx context.Context, source *v1beta1.Inferen
 	if err := r.checkPlanCurrent(ctx, source); err != nil {
 		return err
 	}
-	return r.applyDerived(ctx, candidate.Cluster, cl, source, desired, false)
+	return r.applyDerived(ctx, candidate.Cluster, cl, source, desired, existingOnly)
 }
 
 // setPlannedReplicas preserves an omitted maximum for member runtime inheritance.
@@ -178,9 +189,9 @@ func setPlannedReplicas(member *v1beta1.InferenceService, replicas, ceiling int3
 	}
 }
 
-// syncPlannedPolicy updates coordination authority while retaining the member
-// spec. An ineligible home can acknowledge a pause or release without receiving
-// source template or replica changes that its preflight has not approved.
+// syncPlannedPolicy updates coordination authority without a source refresh.
+// Paused full-policy homes retain their accepted floors even when member
+// runtime or operator defaults change during the transition.
 func (r *Reconciler) syncPlannedPolicy(ctx context.Context, source *v1beta1.InferenceService, candidate v1beta1.CandidatePlacement) error {
 	if err := r.checkPlanCurrent(ctx, source); err != nil {
 		return err
@@ -211,14 +222,38 @@ func (r *Reconciler) syncPlannedPolicy(ctx context.Context, source *v1beta1.Infe
 	if err != nil {
 		return err
 	}
-	if member.Annotations[constants.PlacementExecution] == raw {
-		return nil
-	}
 	base := member.DeepCopy()
+	if policy.PauseSurge && candidate.Allocation.CurrentHome != nil {
+		for _, floor := range candidate.Allocation.CurrentHome.ReplicaFloors {
+			var component *v1beta1.ComponentExtensionSpec
+			switch floor.Component {
+			case v1beta1.EngineComponent:
+				if member.Spec.Engine != nil {
+					component = &member.Spec.Engine.ComponentExtensionSpec
+				}
+			case v1beta1.DecoderComponent:
+				if member.Spec.Decoder != nil {
+					component = &member.Spec.Decoder.ComponentExtensionSpec
+				}
+			case v1beta1.RouterComponent:
+				if member.Spec.Router != nil {
+					component = &member.Spec.Router.ComponentExtensionSpec
+				}
+			}
+			if component == nil {
+				return fmt.Errorf("standing home is missing its accepted %s component", floor.Component)
+			}
+			value := int(floor.Replicas)
+			component.MinReplicas = &value
+		}
+	}
 	if member.Annotations == nil {
 		member.Annotations = map[string]string{}
 	}
 	member.Annotations[constants.PlacementExecution] = raw
+	if equality.Semantic.DeepEqual(base.Spec, member.Spec) && base.Annotations[constants.PlacementExecution] == raw {
+		return nil
+	}
 	if err := r.checkPlanCurrent(ctx, source); err != nil {
 		return err
 	}

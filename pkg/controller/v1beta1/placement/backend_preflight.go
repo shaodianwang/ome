@@ -17,6 +17,7 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workloadcluster"
 	"github.com/ome-projects/ome/pkg/placement/plan"
+	"github.com/ome-projects/ome/pkg/placement/protocol"
 	"github.com/ome-projects/ome/pkg/placement/resolution"
 )
 
@@ -121,7 +122,22 @@ func (r *Reconciler) resolveMemberBackend(ctx context.Context, cl client.Client,
 	} else if !isOurDerived(standing, source) {
 		return nil, fmt.Errorf("backend target is not owned by this placement source")
 	}
-	return (resolution.Resolver{Client: cl, OperatorNamespace: r.MemberOperatorNamespace}).ResolveNative(ctx, desired, standing)
+	resolver := resolution.Resolver{Client: cl, OperatorNamespace: r.MemberOperatorNamespace}
+	policy, err := protocol.FromDerived(desired)
+	if err != nil {
+		return nil, err
+	}
+	if policy != nil && len(policy.ReplicaFloors) > 0 {
+		backend, _, err := resolver.ResolveHome(ctx, desired, standing)
+		if err != nil {
+			return nil, err
+		}
+		if err := protocol.CheckReplicaFloors(policy.ReplicaFloors, backend.Engine, backend.Decoder, backend.Router); err != nil {
+			return nil, err
+		}
+		return backend, nil
+	}
+	return resolver.ResolveNative(ctx, desired, standing)
 }
 
 // backendClient uses the registration identity checked before fan-out. Direct

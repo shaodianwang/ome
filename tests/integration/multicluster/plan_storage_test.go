@@ -32,11 +32,19 @@ func TestPlanStorageCompatibility(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tt := range []struct {
-		name  string
-		prune func(map[string]apiextensionsv1.JSONSchemaProps)
-		want  error
+		name   string
+		single bool
+		prune  func(map[string]apiextensionsv1.JSONSchemaProps)
+		want   error
 	}{
 		{name: "current schema"},
+		{name: "Single authority survives storage", single: true},
+		{name: "schema without Single winner", single: true, prune: func(fields map[string]apiextensionsv1.JSONSchemaProps) {
+			delete(fields["plan"].Properties, "winner")
+		}, want: plan.ErrSchemaUnsupported},
+		{name: "schema without race cleanup permission", single: true, prune: func(fields map[string]apiextensionsv1.JSONSchemaProps) {
+			delete(fields["candidates"].Items.Schema.Properties["allocation"].Properties, "raceCandidate")
+		}, want: plan.ErrSchemaUnsupported},
 		{name: "schema without surge coordination", prune: func(fields map[string]apiextensionsv1.JSONSchemaProps) {
 			stored := fields["plan"]
 			delete(stored.Properties, "pauseSurge")
@@ -92,6 +100,9 @@ func TestPlanStorageCompatibility(t *testing.T) {
 					source := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "team-a"}}
 					if participant {
 						source.Spec.Placement = &v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity, Mode: v1beta1.PlacementModeSplit}
+						if tt.single {
+							source.Spec.Placement.Mode = v1beta1.PlacementModeSingle
+						}
 					}
 					if err := cl.Create(t.Context(), source); err != nil {
 						t.Fatal(err)
@@ -110,6 +121,13 @@ func TestPlanStorageCompatibility(t *testing.T) {
 						Attribution: v1beta1.AcceleratorCapacityAttribution{FlavorUID: "flavor-a", FlavorSetHash: "mapping-a", Complete: true, NodeLabels: map[string]string{"accelerator": "gpu-a"}},
 					}}}
 					proposal.Assignments["member-b"] = assignment
+					if tt.single {
+						home := &v1beta1.PlacementHomePolicy{InputDigest: "intent-a", ReplicaFloors: []v1beta1.PlacementComponentFloor{{Component: v1beta1.EngineComponent, Replicas: 2}}}
+						proposal = plan.Proposal{Mode: v1beta1.PlacementModeSingle, Winner: "member-a", InputDigest: "intent-a", Assignments: map[string]v1beta1.CandidateAllocationStatus{
+							"member-a": {ClusterUID: "registration-a", OriginalReplicas: 2, CurrentReplicas: 2, DesiredReplicas: 2, CurrentHome: home.DeepCopy(), DesiredHome: home.DeepCopy()},
+							"member-b": {ClusterUID: "registration-b", RaceCandidate: true, DrainRequested: true},
+						}}
+					}
 					got, err := store.Persist(t.Context(), source, proposal)
 					if !participant {
 						if err == nil || got != nil {
@@ -137,6 +155,12 @@ func TestPlanStorageCompatibility(t *testing.T) {
 						ID: got.Status.Placement.Plan.ID, Revision: 1, SourceUID: source.UID, ObservedGeneration: source.Generation,
 						InputDigest: "intent-a", PauseSurge: true, RequestedReplicas: 6, AssignedReplicas: 4, UnassignedReplicas: 2,
 					}}
+					if tt.single {
+						want.Cluster = "member-a"
+						want.Plan.Mode, want.Plan.Winner = v1beta1.PlacementModeSingle, "member-a"
+						want.Plan.PauseSurge = false
+						want.Plan.RequestedReplicas, want.Plan.AssignedReplicas, want.Plan.UnassignedReplicas = 2, 2, 0
+					}
 					for _, cluster := range []string{"member-a", "member-b"} {
 						allocation := proposal.Assignments[cluster]
 						want.Candidates = append(want.Candidates, v1beta1.CandidatePlacement{Cluster: cluster, Allocation: &allocation})

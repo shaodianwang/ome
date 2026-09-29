@@ -1,6 +1,7 @@
 package multicluster
 
 import (
+	"github.com/google/go-cmp/cmp"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -109,7 +110,14 @@ var _ = ginkgo.Describe("Multi-cluster placement lifecycle", func() {
 			g.Expect(ps).NotTo(gomega.BeNil())
 			g.Expect(ps.Phase).To(gomega.Equal(v1beta1.PlacementPhasePending))
 			g.Expect(ps.Cluster).To(gomega.Equal(wc1Name))
-			g.Expect(ps.Candidates).To(gomega.BeEmpty())
+			g.Expect(ps.Plan).NotTo(gomega.BeNil())
+			g.Expect(cmp.Diff(wc1Name, ps.Plan.Winner)).To(gomega.BeEmpty())
+			for _, candidate := range ps.Candidates {
+				g.Expect(candidate.Allocation).NotTo(gomega.BeNil())
+				g.Expect(candidate.Endpoint).To(gomega.BeNil())
+				g.Expect(cmp.Diff(int32(0), candidate.ReadyReplicas)).To(gomega.BeEmpty())
+				g.Expect(cmp.Diff(int32(0), candidate.AdmittedReplicas)).To(gomega.BeEmpty())
+			}
 		}, eventuallyTimeout, eventuallyPoll).Should(gomega.Succeed())
 
 		// After the grace window the placer re-races: the derived reappears on the
@@ -147,10 +155,14 @@ var _ = ginkgo.Describe("Multi-cluster placement lifecycle", func() {
 			g.Expect(ps).NotTo(gomega.BeNil())
 			g.Expect(ps.Phase).To(gomega.Equal(v1beta1.PlacementPhaseAdmitting))
 			g.Expect(ps.Cluster).To(gomega.Equal(wc1Name))
-			g.Expect(ps.Candidates).To(gomega.ConsistOf(v1beta1.CandidatePlacement{
-				Cluster: wc1Name,
-				Phase:   v1beta1.CandidatePhaseAdmitting,
-			}))
+			g.Expect(ps.Plan).NotTo(gomega.BeNil())
+			g.Expect(cmp.Diff(wc1Name, ps.Plan.Winner)).To(gomega.BeEmpty())
+			for _, candidate := range ps.Candidates {
+				g.Expect(candidate.Allocation).NotTo(gomega.BeNil())
+				g.Expect(candidate.Endpoint).To(gomega.BeNil())
+				g.Expect(cmp.Diff(int32(0), candidate.ReadyReplicas)).To(gomega.BeEmpty())
+				g.Expect(cmp.Diff(int32(0), candidate.AdmittedReplicas)).To(gomega.BeEmpty())
+			}
 		}, eventuallyTimeout, eventuallyPoll).Should(gomega.Succeed())
 
 		ginkgo.By("admitting the surviving member so it wins the re-race")

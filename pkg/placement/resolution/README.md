@@ -17,12 +17,15 @@ without creating a ControllerRevision. Existing pins must have matching runtime
 name, kind, and namespace metadata. Ambiguous scope, missing revisions, disabled
 inputs, unacknowledged drift, and failed reads return no resolution.
 
-Each resolution retains object UID/resource-version observations, missing-object
-lookups, and the selected catalog's membership. `Runtime.Check` repeats those
-reads with its caller's context. Replacement, deletion, mutation, newly shadowing
-objects, partial catalogs, and API errors invalidate the observation. Concurrent
-checks use separate read objects. This is conservative revalidation, not an
-atomic snapshot across Kubernetes objects.
+Each resolution retains object observations, missing-object lookups, and the
+selected catalog's membership. The standing service observation includes its
+spec, identity, metadata, pinned revision, and runtime sync token. Unrelated
+serving status and managed-field updates do not invalidate runtime resolution.
+Other resources retain strict UID/resource-version observations. `Runtime.Check`
+repeats those reads with its caller's context. Replacement, deletion, input
+mutation, newly shadowing objects, partial catalogs, and API errors invalidate
+the observation. Concurrent checks use separate read objects. This is
+conservative revalidation, not an atomic snapshot across Kubernetes objects.
 
 The returned components precede deployment defaults, accelerator selection, and
 pod rendering. They are not final accelerator demand. Capacity consumers must
@@ -84,5 +87,6 @@ Before authorizing a capacity plan, the caller must match this report identity
 and version to the capacity reader's fleet evidence, revalidate dependencies and
 registration identity, and prove the member's actual applied/admitted demand.
 The resolver does not infer other admission mutations or prove that a member has
-refreshed its configuration. There is no placement-controller call site, and
-local service reconciliation uses its existing path.
+refreshed its configuration. Placement uses this resolver for member preflight,
+full-home floors, and capacity demand. Local service reconciliation uses its
+existing path.

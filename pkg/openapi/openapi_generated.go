@@ -149,6 +149,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementComponentFloor":          schema_pkg_apis_ome_v1beta1_PlacementComponentFloor(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementDemandContract":          schema_pkg_apis_ome_v1beta1_PlacementDemandContract(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementExecutionPolicy":         schema_pkg_apis_ome_v1beta1_PlacementExecutionPolicy(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementHomePolicy":              schema_pkg_apis_ome_v1beta1_PlacementHomePolicy(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementPlanStatus":              schema_pkg_apis_ome_v1beta1_PlacementPlanStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementSpec":                    schema_pkg_apis_ome_v1beta1_PlacementSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementStatus":                  schema_pkg_apis_ome_v1beta1_PlacementStatus(ref),
@@ -2988,6 +2989,46 @@ func schema_pkg_apis_ome_v1beta1_CandidateAllocationStatus(ref common.ReferenceC
 							Format:  "",
 						},
 					},
+					"inventoryPending": {
+						SchemaProps: spec.SchemaProps{
+							Description: "InventoryPending prevents unknown standing resources from becoming free migration capacity. It is cleared only by an identified member inventory.",
+							Type:        []string{"boolean"},
+							Format:      "",
+						},
+					},
+					"homeInputsPending": {
+						SchemaProps: spec.SchemaProps{
+							Description: "HomeInputsPending holds movement when current full-policy inputs cannot be verified, while retaining the last accepted desired floors.",
+							Type:        []string{"boolean"},
+							Format:      "",
+						},
+					},
+					"raceCandidate": {
+						SchemaProps: spec.SchemaProps{
+							Description: "RaceCandidate authorizes cleanup of a Single race copy after another candidate wins. A retained winner does not carry this permission.",
+							Type:        []string{"boolean"},
+							Format:      "",
+						},
+					},
+					"matched": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Matched distinguishes a desired full-policy home from an outgoing home, including an affinity that matches every registration without terms.",
+							Type:        []string{"boolean"},
+							Format:      "",
+						},
+					},
+					"currentHome": {
+						SchemaProps: spec.SchemaProps{
+							Description: "CurrentHome retains the full policy authorized at a home through draining.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementHomePolicy"),
+						},
+					},
+					"desiredHome": {
+						SchemaProps: spec.SchemaProps{
+							Description: "DesiredHome is present for every intended full-policy home.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementHomePolicy"),
+						},
+					},
 					"matchingTerms": {
 						VendorExtensible: spec.VendorExtensible{
 							Extensions: spec.Extensions{
@@ -3054,7 +3095,7 @@ func schema_pkg_apis_ome_v1beta1_CandidateAllocationStatus(ref common.ReferenceC
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementCapacitySample"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementCapacitySample", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementHomePolicy"},
 	}
 }
 
@@ -9909,6 +9950,51 @@ func schema_pkg_apis_ome_v1beta1_PlacementExecutionPolicy(ref common.ReferenceCa
 	}
 }
 
+func schema_pkg_apis_ome_v1beta1_PlacementHomePolicy(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "PlacementHomePolicy records the full component floors of one retained home.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"inputDigest": {
+						SchemaProps: spec.SchemaProps{
+							Description: "InputDigest binds these resolved floors to the accepted source intent.",
+							Default:     "",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"replicaFloors": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-map-keys": []interface{}{
+									"component",
+								},
+								"x-kubernetes-list-type": "map",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Type: []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: map[string]interface{}{},
+										Ref:     ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementComponentFloor"),
+									},
+								},
+							},
+						},
+					},
+				},
+				Required: []string{"inputDigest", "replicaFloors"},
+			},
+		},
+		Dependencies: []string{
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementComponentFloor"},
+	}
+}
+
 func schema_pkg_apis_ome_v1beta1_PlacementPlanStatus(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -9921,6 +10007,27 @@ func schema_pkg_apis_ome_v1beta1_PlacementPlanStatus(ref common.ReferenceCallbac
 							Default: "",
 							Type:    []string{"string"},
 							Format:  "",
+						},
+					},
+					"mode": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Mode identifies the execution semantics of this accepted plan.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"winner": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Winner commits the admitted Single home before race losers are removed. Empty means the persisted Single admission race has not selected a home.",
+							Type:        []string{"string"},
+							Format:      "",
+						},
+					},
+					"adoptionDigest": {
+						SchemaProps: spec.SchemaProps{
+							Description: "AdoptionDigest fixes the initial intent while standing homes are being inventoried. A changed intent cannot expand an incomplete inventory.",
+							Type:        []string{"string"},
+							Format:      "",
 						},
 					},
 					"revision": {

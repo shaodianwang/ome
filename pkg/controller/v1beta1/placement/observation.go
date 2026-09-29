@@ -8,6 +8,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 )
@@ -81,25 +82,6 @@ func (o *placementObservations) projects(cluster string) bool {
 	return o.projectAll || o.matches[cluster]
 }
 
-func (o *placementObservations) projectedClusters(candidates []string) []string {
-	seen := make(map[string]bool, len(candidates)+len(o.standing))
-	clusters := make([]string, 0, len(candidates)+len(o.standing))
-	for _, cluster := range candidates {
-		if !seen[cluster] {
-			seen[cluster] = true
-			clusters = append(clusters, cluster)
-		}
-	}
-	for _, cluster := range o.projectedStanding() {
-		if !seen[cluster] {
-			seen[cluster] = true
-			clusters = append(clusters, cluster)
-		}
-	}
-	sort.Strings(clusters)
-	return clusters
-}
-
 func (r *Reconciler) observeStandingHomes(ctx context.Context, isvc *v1beta1.InferenceService, clusters []v1beta1.WorkloadCluster) *placementObservations {
 	observations := newPlacementObservations(isvc, clusters)
 	for _, cluster := range observations.standing {
@@ -132,11 +114,6 @@ func (o *placementObservations) get(cluster string) (homeObservation, bool) {
 	return home, ok
 }
 
-func (o *placementObservations) had(cluster string) bool {
-	_, ok := o.previous[cluster]
-	return ok
-}
-
 // observeHome reads one member without changing it. A disconnected or
 // unreadable member is Unknown and loses routable ready capacity for this
 // observation. NotFound, a terminating copy, a foreign same-name object, or a
@@ -163,9 +140,25 @@ func (r *Reconciler) observeHome(
 		candidate := retainedUnknownCandidate(isvc, previous)
 		return homeObservation{state: homeUnknown, candidate: candidate, err: err}
 	}
-	cl, connected := r.Clusters.ClientFor(previous.Cluster)
-	if !connected {
-		return unknown(nil)
+	var cl client.Client
+	if isvc.Status.Placement != nil && isvc.Status.Placement.Plan != nil {
+		for _, candidate := range isvc.Status.Placement.Candidates {
+			if candidate.Cluster == previous.Cluster && candidate.Allocation != nil {
+				direct, err := r.plannedClient(ctx, previous.Cluster, candidate.Allocation.ClusterUID)
+				if err != nil {
+					return unknown(err)
+				}
+				cl = direct
+				break
+			}
+		}
+	}
+	if cl == nil {
+		remote, connected := r.Clusters.ClientFor(previous.Cluster)
+		if !connected {
+			return unknown(nil)
+		}
+		cl = remote
 	}
 
 	derived := &v1beta1.InferenceService{}
@@ -311,23 +304,14 @@ func (r *Reconciler) writeObservedPlacement(
 	return res, err
 }
 
-func (r *Reconciler) observedStatusThenError(
-	ctx context.Context,
-	isvc *v1beta1.InferenceService,
-	observations *placementObservations,
-	cause error,
-) (ctrl.Result, error) {
-	if _, err := r.writeObservedPlacement(ctx, isvc, observations); err != nil {
-		return ctrl.Result{}, err
-	}
-	return ctrl.Result{}, cause
-}
-
 func (r *Reconciler) writeObservedSingle(
 	ctx context.Context,
 	isvc *v1beta1.InferenceService,
 	observations *placementObservations,
 ) (ctrl.Result, error) {
+	if isvc.Status.Placement != nil && isvc.Status.Placement.Plan != nil && isvc.Status.Placement.Plan.Mode == v1beta1.PlacementModeSingle {
+		return r.writeSinglePlanStatus(ctx, isvc, observations, "")
+	}
 	winner := winnerCluster(isvc)
 	if winner != "" && observations.known[winner] && !observations.projects(winner) {
 		r.clearGrace(isvc.UID)

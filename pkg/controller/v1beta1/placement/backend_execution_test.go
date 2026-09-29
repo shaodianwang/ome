@@ -262,6 +262,11 @@ func TestStickyBackendRefreshRespectsMemberAbsence(t *testing.T) {
 				if err := f.workers["member-a"].Create(t.Context(), DeriveISVC(f.source, "", "")); err != nil {
 					t.Fatal(err)
 				}
+				ir := irWithInstances(v1beta1.EngineComponent, true)
+				ir.Namespace, ir.Name = f.source.Namespace, f.source.Name+"-engine"
+				if err := f.workers["member-a"].Create(t.Context(), ir); err != nil {
+					t.Fatal(err)
+				}
 			}
 			ctx, err := f.reconciler.preflightBackends(t.Context(), f.source, f.clusters, []string{"member-a", "member-b"})
 			if err != nil {
@@ -269,7 +274,7 @@ func TestStickyBackendRefreshRespectsMemberAbsence(t *testing.T) {
 			}
 			observations := newPlacementObservations(f.source, f.clusters)
 			observations.homes["member-a"] = homeObservation{state: homePresent, candidate: candidate}
-			if _, err := f.reconciler.reconcileSingle(ctx, f.source, []string{"member-a", "member-b"}, []string{"member-a", "member-b"}, observations); err != nil {
+			if _, err := f.reconciler.reconcileSinglePlanned(ctx, f.source, f.clusters, []string{"member-a", "member-b"}, observations); err != nil {
 				t.Fatal(err)
 			}
 			got := &v1beta1.InferenceService{}
@@ -287,8 +292,12 @@ func TestStickyBackendRefreshRespectsMemberAbsence(t *testing.T) {
 			if diff := cmp.Diff(!tt.present, apierrors.IsNotFound(err)); diff != "" {
 				t.Fatalf("winner absence (-want +got):\n%s: %v", diff, err)
 			}
-			if !tt.present && len(got.Status.Placement.Candidates) != 0 {
-				t.Fatal("absent winner retained admission evidence")
+			if !tt.present {
+				for _, candidate := range got.Status.Placement.Candidates {
+					if candidate.ReadyReplicas != 0 || candidate.AdmittedReplicas != 0 || candidate.Endpoint != nil {
+						t.Fatal("absent winner retained admission evidence")
+					}
+				}
 			}
 		})
 	}
