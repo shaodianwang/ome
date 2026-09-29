@@ -37,6 +37,9 @@ func observedWorkerObjects(member *v1beta1.InferenceService, components ...*v1be
 			role = v1beta1.RouterComponent
 		}
 		ir.Spec.Component = role
+		if ir.Spec.ParentRef == nil {
+			ir.Spec.ParentRef = &v1beta1.ParentReference{}
+		}
 		ir.Spec.ParentRef.Name = member.Name
 		ir.Spec.Replicas = ptr.To(int32(len(ir.Status.InstanceStatuses)))
 		ir.Spec.Runners = []v1beta1.Runner{{Name: "default", Size: 1}}
