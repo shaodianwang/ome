@@ -75,6 +75,10 @@ type CandidateAllocationStatus struct {
 // used to normalize one member into nominal whole-replica capacity.
 type PlacementCapacitySample struct {
 	DemandFingerprint string `json:"demandFingerprint"`
+	// DemandContract binds normalization to the member rendering authorized by
+	// this allocation. Its fingerprint must equal DemandFingerprint.
+	// +optional
+	DemandContract *PlacementDemandContract `json:"demandContract,omitempty"`
 	// +kubebuilder:validation:Minimum=0
 	Replicas int64 `json:"replicas"`
 	// +listType=map

@@ -9682,6 +9682,12 @@ func schema_pkg_apis_ome_v1beta1_PlacementCapacitySample(ref common.ReferenceCal
 							Format:  "",
 						},
 					},
+					"demandContract": {
+						SchemaProps: spec.SchemaProps{
+							Description: "DemandContract binds normalization to the member rendering authorized by this allocation. Its fingerprint must equal DemandFingerprint.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementDemandContract"),
+						},
+					},
 					"replicas": {
 						SchemaProps: spec.SchemaProps{
 							Default: 0,
@@ -9716,7 +9722,7 @@ func schema_pkg_apis_ome_v1beta1_PlacementCapacitySample(ref common.ReferenceCal
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementCapacityPool"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementCapacityPool", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementDemandContract"},
 	}
 }
 

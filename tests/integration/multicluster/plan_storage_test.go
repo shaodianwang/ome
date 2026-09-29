@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -45,6 +46,9 @@ func TestPlanStorageCompatibility(t *testing.T) {
 		{name: "schema without plan authority", prune: func(fields map[string]apiextensionsv1.JSONSchemaProps) { delete(fields, "plan") }, want: plan.ErrSchemaUnsupported},
 		{name: "schema without candidate allocations", prune: func(fields map[string]apiextensionsv1.JSONSchemaProps) {
 			delete(fields["candidates"].Items.Schema.Properties, "allocation")
+		}, want: plan.ErrSchemaUnsupported},
+		{name: "schema without rendering contracts", prune: func(fields map[string]apiextensionsv1.JSONSchemaProps) {
+			delete(fields["candidates"].Items.Schema.Properties["allocation"].Properties["capacity"].Properties, "demandContract")
 		}, want: plan.ErrSchemaUnsupported},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -98,7 +102,9 @@ func TestPlanStorageCompatibility(t *testing.T) {
 						"member-b": {ClusterUID: "registration-b", OriginalReplicas: 0, CurrentReplicas: 0, DesiredReplicas: 0},
 					}}
 					assignment := proposal.Assignments["member-b"]
-					assignment.Capacity = &v1beta1.PlacementCapacitySample{DemandFingerprint: "demand-a", Replicas: 0, Pools: []v1beta1.PlacementCapacityPool{{
+					assignment.Capacity = &v1beta1.PlacementCapacitySample{DemandFingerprint: strings.Repeat("a", 64), DemandContract: &v1beta1.PlacementDemandContract{
+						Fingerprint: strings.Repeat("a", 64), Components: []v1beta1.PlacementComponentDemand{{Component: v1beta1.EngineComponent, RenderingHash: strings.Repeat("b", 64)}},
+					}, Replicas: 0, Pools: []v1beta1.PlacementCapacityPool{{
 						ResourceName: "nvidia.com/gpu", ResourceFlavor: "gpu-a", Demand: 2, Allocatable: 0,
 						ObservedAt: metav1.NewTime(time.Unix(100, 0).UTC()), ReportUID: "report-a", ReportResourceVersion: "1",
 						Attribution: v1beta1.AcceleratorCapacityAttribution{FlavorUID: "flavor-a", FlavorSetHash: "mapping-a", Complete: true, NodeLabels: map[string]string{"accelerator": "gpu-a"}},

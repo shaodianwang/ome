@@ -53,6 +53,12 @@ func SameSnapshot(expected, current *v1beta1.InferenceService) bool {
 	return a.ID == b.ID && a.Revision == b.Revision
 }
 
+// SameAllocation verifies all persisted authority, independently of changing
+// serving observations. A retained plan ID cannot stand in for pruned evidence.
+func SameAllocation(expected, current *v1beta1.InferenceService) bool {
+	return expected != nil && current != nil && planOf(expected) != nil && planOf(current) != nil && equalAllocation(expected.Status.Placement, current.Status.Placement)
+}
+
 // Persist returns only a freshly read, verified allocation. Repeated proposals
 // retain their revision; a conflict never rebases old intent onto a newer plan.
 func (s Store) Persist(ctx context.Context, source *v1beta1.InferenceService, proposal Proposal) (*v1beta1.InferenceService, error) {
@@ -155,7 +161,7 @@ func mergeAllocation(source *v1beta1.InferenceService, allocation *v1beta1.Place
 }
 
 func equalAllocation(a, b *v1beta1.PlacementStatus) bool {
-	if a == nil || !equality.Semantic.DeepEqual(a.Plan, b.Plan) || len(a.Candidates) != len(b.Candidates) {
+	if a == nil || b == nil || !equality.Semantic.DeepEqual(a.Plan, b.Plan) || len(a.Candidates) != len(b.Candidates) {
 		return false
 	}
 	byName := map[string]*v1beta1.CandidateAllocationStatus{}
@@ -166,9 +172,11 @@ func equalAllocation(a, b *v1beta1.PlacementStatus) bool {
 		byName[candidate.Cluster] = candidate.Allocation
 	}
 	for _, candidate := range b.Candidates {
-		if !equality.Semantic.DeepEqual(byName[candidate.Cluster], candidate.Allocation) {
+		allocation, exists := byName[candidate.Cluster]
+		if !exists || !equality.Semantic.DeepEqual(allocation, candidate.Allocation) {
 			return false
 		}
+		delete(byName, candidate.Cluster)
 	}
 	return true
 }

@@ -5447,6 +5447,10 @@
         "pools"
       ],
       "properties": {
+        "demandContract": {
+          "description": "DemandContract binds normalization to the member rendering authorized by this allocation. Its fingerprint must equal DemandFingerprint.",
+          "$ref": "#/definitions/v1beta1.PlacementDemandContract"
+        },
         "demandFingerprint": {
           "type": "string",
           "default": ""

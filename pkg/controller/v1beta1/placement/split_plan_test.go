@@ -2,6 +2,7 @@ package placement
 
 import (
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +14,16 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/placement/capacity"
 )
+
+func plannedCapacitySample(cluster v1beta1.WorkloadCluster, weight int64) capacity.Sample {
+	return capacity.Sample{ClusterUID: cluster.UID, Weight: weight, DemandFingerprint: strings.Repeat("a", 64),
+		DemandContract: &v1beta1.PlacementDemandContract{Fingerprint: strings.Repeat("a", 64), Components: []v1beta1.PlacementComponentDemand{{Component: v1beta1.EngineComponent, RenderingHash: strings.Repeat("b", 64)}}},
+		Pools: []capacity.Evidence{{ResourceName: "example.com/gpu", ResourceFlavor: "gpu-a", Demand: 2, Allocatable: weight * 2,
+			ReportUID: "report-a", ReportResourceVersion: "1", ObservedAt: metav1.NewTime(time.Unix(100, 0)),
+			Attribution: v1beta1.AcceleratorCapacityAttribution{FlavorUID: "flavor-a", FlavorSetHash: "mapping-a", Complete: true},
+		}},
+	}
+}
 
 func TestDesiredSplitPlanUsesMatchedSet(t *testing.T) {
 	for _, tt := range []struct {
@@ -102,7 +113,7 @@ func TestDesiredCapacityPlan(t *testing.T) {
 			clusters := []v1beta1.WorkloadCluster{wc("member-a", true, nil), wc("member-b", false, nil), wc("member-c", true, nil)}
 			samples := map[string]capacity.Sample{}
 			for i, c := range clusters {
-				samples[c.Name] = capacity.Sample{ClusterUID: c.UID, Weight: tt.weights[i], DemandFingerprint: "resolved-demand"}
+				samples[c.Name] = plannedCapacitySample(c, tt.weights[i])
 			}
 			got, err := desiredSplitPlan(source, clusters, samples)
 			if err != nil {
@@ -177,21 +188,30 @@ func TestDesiredCapacityPlanDigest(t *testing.T) {
 		unchanged bool
 	}{
 		{name: "heartbeat refresh preserves desired intent", edit: func(sample *capacity.Sample) {
-			sample.Pools[0].ObservedAt = metav1.NewTime(time.Unix(200, 0))
-			sample.Pools[0].ReportResourceVersion = "2"
+			for i := range sample.Pools {
+				sample.Pools[i].ObservedAt = metav1.NewTime(time.Unix(200, 0))
+				sample.Pools[i].ReportResourceVersion = "2"
+			}
 		}, unchanged: true},
 		{name: "pool ordering preserves desired intent", edit: func(sample *capacity.Sample) {
 			slices.Reverse(sample.Pools)
 		}, unchanged: true},
 		{name: "hardware changes invalidate desired intent", edit: func(sample *capacity.Sample) { sample.Pools[0].Allocatable++ }},
 		{name: "flavor identity changes invalidate desired intent", edit: func(sample *capacity.Sample) { sample.Pools[0].Attribution.FlavorUID = "replacement" }},
-		{name: "demand changes invalidate desired intent", edit: func(sample *capacity.Sample) { sample.DemandFingerprint = "changed-demand" }},
+		{name: "demand changes invalidate desired intent", edit: func(sample *capacity.Sample) {
+			sample.DemandFingerprint = strings.Repeat("c", 64)
+			sample.DemandContract.Fingerprint = sample.DemandFingerprint
+		}},
+		{name: "member rendering changes invalidate desired intent", edit: func(sample *capacity.Sample) {
+			sample.DemandContract.Components[0].RenderingHash = strings.Repeat("c", 64)
+		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			source := srcISVCSplit("", 3)
 			source.Spec.Placement.Mode = v1beta1.PlacementModeSplitByCapacity
 			cluster := wc("member-a", true, nil)
-			sample := capacity.Sample{ClusterUID: cluster.UID, Weight: 8, DemandFingerprint: "resolved-demand"}
+			sample := plannedCapacitySample(cluster, 8)
+			sample.Pools = nil
 			for _, pool := range [][2]string{{"example.com/accelerator-b", "b"}, {"example.com/accelerator-a", "b"}, {"example.com/accelerator-a", "a"}} {
 				sample.Pools = append(sample.Pools, capacity.Evidence{
 					ResourceName: pool[0], ResourceFlavor: pool[1], Demand: 2, Allocatable: 16,

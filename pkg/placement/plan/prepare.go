@@ -12,6 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/placement/protocol"
 )
 
 func prepare(source *v1beta1.InferenceService, proposal Proposal) (*v1beta1.PlacementStatus, error) {
@@ -46,6 +47,14 @@ func prepare(source *v1beta1.InferenceService, proposal Proposal) (*v1beta1.Plac
 				return nil, fmt.Errorf("cluster %q: %w", name, err)
 			}
 		}
+		if source.Spec.Placement.Mode == v1beta1.PlacementModeSplitByCapacity && assignment.DesiredReplicas > 0 {
+			if assignment.Capacity == nil {
+				return nil, fmt.Errorf("cluster %q positive capacity allocation requires demand authority", name)
+			}
+			if err := protocol.ValidateDemandComponents(source, assignment.Capacity.DemandContract); err != nil {
+				return nil, fmt.Errorf("cluster %q: %w", name, err)
+			}
+		}
 		if int64(input.DesiredReplicas) > math.MaxInt64-out.Plan.AssignedReplicas || int64(input.OriginalReplicas) > math.MaxInt64-originalTotal {
 			return nil, fmt.Errorf("placement floor exceeds int64")
 		}
@@ -69,6 +78,15 @@ func normalizeCapacity(sample *v1beta1.PlacementCapacitySample) error {
 	if sample.DemandFingerprint == "" || sample.Replicas < 0 || len(sample.Pools) == 0 {
 		return fmt.Errorf("capacity requires a demand fingerprint, nonnegative replicas, and pool evidence")
 	}
+	if err := protocol.ValidateDemand(sample.DemandContract); err != nil {
+		return err
+	}
+	if sample.DemandFingerprint != sample.DemandContract.Fingerprint {
+		return fmt.Errorf("capacity and member rendering have different demand fingerprints")
+	}
+	slices.SortFunc(sample.DemandContract.Components, func(a, b v1beta1.PlacementComponentDemand) int {
+		return cmp.Compare(a.Component, b.Component)
+	})
 	slices.SortFunc(sample.Pools, func(a, b v1beta1.PlacementCapacityPool) int {
 		if a.ResourceName != b.ResourceName {
 			return cmp.Compare(a.ResourceName, b.ResourceName)
@@ -97,6 +115,19 @@ func normalizeCapacity(sample *v1beta1.PlacementCapacitySample) error {
 		return fmt.Errorf("capacity replicas do not match pool evidence")
 	}
 	return nil
+}
+
+// CanonicalCapacity validates evidence and its rendering contract on an owned
+// copy. Stable list ordering makes equivalent observations share plan identity.
+func CanonicalCapacity(sample *v1beta1.PlacementCapacitySample) (*v1beta1.PlacementCapacitySample, error) {
+	if sample == nil {
+		return nil, fmt.Errorf("capacity evidence is required")
+	}
+	out := sample.DeepCopy()
+	if err := normalizeCapacity(out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // identity removes report liveness data, retaining the hardware, source report

@@ -65,20 +65,8 @@ func FromDerived(service *v1beta1.InferenceService) (*v1beta1.PlacementExecution
 		return nil, fmt.Errorf("placement execution policy does not belong to the derived service's source")
 	}
 	if policy.Demand != nil {
-		declared := map[v1beta1.ComponentType]bool{
-			v1beta1.EngineComponent:  service.Spec.Engine != nil,
-			v1beta1.DecoderComponent: service.Spec.Decoder != nil,
-		}
-		for _, component := range policy.Demand.Components {
-			if !declared[component.Component] {
-				return nil, fmt.Errorf("placement demand names an undeclared component %q", component.Component)
-			}
-			delete(declared, component.Component)
-		}
-		for component, exists := range declared {
-			if exists {
-				return nil, fmt.Errorf("placement demand is missing component %q", component)
-			}
+		if err := ValidateDemandComponents(service, policy.Demand); err != nil {
+			return nil, err
 		}
 	}
 	return policy, nil
@@ -124,15 +112,49 @@ func Validate(policy *v1beta1.PlacementExecutionPolicy) error {
 		return fmt.Errorf("placement execution policy requires plan, source, cluster identities and a positive revision")
 	}
 	if policy.Demand != nil {
-		if !validHash(policy.Demand.Fingerprint) || len(policy.Demand.Components) == 0 {
-			return fmt.Errorf("placement demand requires a fingerprint and component renderings")
+		return ValidateDemand(policy.Demand)
+	}
+	return nil
+}
+
+// ValidateDemand checks the complete contract independently of an allocation's
+// execution revision, including before a source plan has been persisted.
+func ValidateDemand(demand *v1beta1.PlacementDemandContract) error {
+	if demand == nil || !validHash(demand.Fingerprint) || len(demand.Components) == 0 {
+		return fmt.Errorf("placement demand requires a fingerprint and component renderings")
+	}
+	seen := map[v1beta1.ComponentType]bool{}
+	for _, component := range demand.Components {
+		if (component.Component != v1beta1.EngineComponent && component.Component != v1beta1.DecoderComponent) || seen[component.Component] || !validHash(component.RenderingHash) {
+			return fmt.Errorf("placement demand has invalid or duplicate component %q", component.Component)
 		}
-		seen := map[v1beta1.ComponentType]bool{}
-		for _, component := range policy.Demand.Components {
-			if (component.Component != v1beta1.EngineComponent && component.Component != v1beta1.DecoderComponent) || seen[component.Component] || !validHash(component.RenderingHash) {
-				return fmt.Errorf("placement demand has invalid or duplicate component %q", component.Component)
-			}
-			seen[component.Component] = true
+		seen[component.Component] = true
+	}
+	return nil
+}
+
+// ValidateDemandComponents requires exactly the service's declared Engine and
+// Decoder renderings. Router has a separate per-home replica policy.
+func ValidateDemandComponents(service *v1beta1.InferenceService, demand *v1beta1.PlacementDemandContract) error {
+	if err := ValidateDemand(demand); err != nil {
+		return err
+	}
+	if service == nil {
+		return fmt.Errorf("placement demand requires a service component inventory")
+	}
+	declared := map[v1beta1.ComponentType]bool{
+		v1beta1.EngineComponent:  service.Spec.Engine != nil,
+		v1beta1.DecoderComponent: service.Spec.Decoder != nil,
+	}
+	for _, component := range demand.Components {
+		if !declared[component.Component] {
+			return fmt.Errorf("placement demand names an undeclared component %q", component.Component)
+		}
+		delete(declared, component.Component)
+	}
+	for component, exists := range declared {
+		if exists {
+			return fmt.Errorf("placement demand is missing component %q", component)
 		}
 	}
 	return nil

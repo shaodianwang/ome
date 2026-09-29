@@ -1,12 +1,10 @@
 package placement
 
 import (
-	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"slices"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
@@ -15,6 +13,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/placement/allocation"
 	"github.com/ome-projects/ome/pkg/placement/capacity"
 	"github.com/ome-projects/ome/pkg/placement/plan"
+	"github.com/ome-projects/ome/pkg/placement/protocol"
 )
 
 // desiredSplitPlan computes the whole matched set independently of readiness,
@@ -44,7 +43,10 @@ func desiredSplitPlan(source *v1beta1.InferenceService, clusters []v1beta1.Workl
 			}
 			assignment := *candidate.Allocation.DeepCopy()
 			assignment.DesiredReplicas = 0
-			assignment.MatchingTerms, assignment.Weight, assignment.Capacity = nil, nil, nil
+			assignment.MatchingTerms, assignment.Weight = nil, nil
+			if placementMode(source) != v1beta1.PlacementModeSplitByCapacity {
+				assignment.Capacity = nil
+			}
 			proposal.Assignments[candidate.Cluster] = assignment
 		}
 	}
@@ -77,7 +79,13 @@ func desiredSplitPlan(source *v1beta1.InferenceService, clusters []v1beta1.Workl
 			if !exists || sample.ClusterUID != cluster.UID {
 				return plan.Proposal{}, fmt.Errorf("CapacityUnknown: verified sample is missing for cluster %q", cluster.Name)
 			}
-			assignment.Capacity = capacityEvidence(sample)
+			assignment.Capacity, err = capacityEvidence(sample)
+			if err == nil {
+				err = protocol.ValidateDemandComponents(source, assignment.Capacity.DemandContract)
+			}
+			if err != nil {
+				return plan.Proposal{}, fmt.Errorf("CapacityUnknown: cluster %q: %w", cluster.Name, err)
+			}
 			weights[cluster.Name] = sample.Weight
 		}
 		proposal.Assignments[cluster.Name] = assignment
@@ -126,8 +134,8 @@ func desiredSplitPlan(source *v1beta1.InferenceService, clusters []v1beta1.Workl
 	return proposal, nil
 }
 
-func capacityEvidence(sample capacity.Sample) *v1beta1.PlacementCapacitySample {
-	out := &v1beta1.PlacementCapacitySample{DemandFingerprint: sample.DemandFingerprint, Replicas: sample.Weight}
+func capacityEvidence(sample capacity.Sample) (*v1beta1.PlacementCapacitySample, error) {
+	out := &v1beta1.PlacementCapacitySample{DemandFingerprint: sample.DemandFingerprint, DemandContract: sample.DemandContract.DeepCopy(), Replicas: sample.Weight}
 	for _, pool := range sample.Pools {
 		out.Pools = append(out.Pools, v1beta1.PlacementCapacityPool{
 			ResourceName: pool.ResourceName, ResourceFlavor: pool.ResourceFlavor,
@@ -135,11 +143,5 @@ func capacityEvidence(sample capacity.Sample) *v1beta1.PlacementCapacitySample {
 			ReportUID: pool.ReportUID, ReportResourceVersion: pool.ReportResourceVersion, Attribution: *pool.Attribution.DeepCopy(),
 		})
 	}
-	slices.SortFunc(out.Pools, func(a, b v1beta1.PlacementCapacityPool) int {
-		if a.ResourceName != b.ResourceName {
-			return cmp.Compare(a.ResourceName, b.ResourceName)
-		}
-		return cmp.Compare(a.ResourceFlavor, b.ResourceFlavor)
-	})
-	return out
+	return plan.CanonicalCapacity(out)
 }

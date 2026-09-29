@@ -72,3 +72,11 @@ pools. It never subtracts usage or quota. Missing or incompatible evidence
 rejects the whole matched-set observation; the controller must retain its last
 accepted plan. Aggregate hardware counts do not prove gang topology, CPU/memory
 fit, or quota admission.
+
+The hardware reader leaves `Sample.DemandContract` unset. A caller must join the
+resolver's contract to that sample before proposing capacity authority. The
+source rejects missing contracts, different demand fingerprints, incomplete
+component inventories, or weights inconsistent with the recorded pools. It
+persists the complete evidence and copies the accepted contract into member
+execution policies. Heartbeat times and report versions do not change plan
+identity; hardware, mapping, and rendering changes do.

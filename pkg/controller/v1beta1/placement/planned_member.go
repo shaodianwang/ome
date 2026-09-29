@@ -63,15 +63,22 @@ func (r *Reconciler) checkPlanCurrent(ctx context.Context, source *v1beta1.Infer
 	if !plan.SameSnapshot(source, live) {
 		return plan.ErrStaleSnapshot
 	}
+	if !plan.SameAllocation(source, live) {
+		return plan.ErrSchemaUnsupported
+	}
 	return nil
 }
 
 func executionPolicy(source *v1beta1.InferenceService, assignment *v1beta1.CandidateAllocationStatus) *v1beta1.PlacementExecutionPolicy {
 	accepted := source.Status.Placement.Plan
-	return &v1beta1.PlacementExecutionPolicy{
+	policy := &v1beta1.PlacementExecutionPolicy{
 		PlanID: accepted.ID, Revision: accepted.Revision, SourceUID: source.UID,
 		ClusterUID: assignment.ClusterUID, PauseSurge: accepted.PauseSurge,
 	}
+	if assignment.Capacity != nil {
+		policy.Demand = assignment.Capacity.DemandContract.DeepCopy()
+	}
+	return policy
 }
 
 func checkPlannedAssignment(source *v1beta1.InferenceService, candidate v1beta1.CandidatePlacement) error {
@@ -82,6 +89,13 @@ func checkPlannedAssignment(source *v1beta1.InferenceService, candidate v1beta1.
 		}
 		if found || candidate.Allocation == nil || !equality.Semantic.DeepEqual(accepted.Allocation, candidate.Allocation) {
 			return fmt.Errorf("member assignment does not match persisted allocation")
+		}
+		if accepted.Allocation.Capacity != nil {
+			if _, err := plan.CanonicalCapacity(accepted.Allocation.Capacity); err != nil {
+				return err
+			}
+		} else if placementMode(source) == v1beta1.PlacementModeSplitByCapacity && accepted.Allocation.DesiredReplicas > 0 {
+			return fmt.Errorf("positive capacity allocation requires persisted demand authority")
 		}
 		found = true
 	}

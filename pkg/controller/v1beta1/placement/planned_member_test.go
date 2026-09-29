@@ -55,6 +55,11 @@ func TestPlannedMemberAuthority(t *testing.T) {
 		wantErr       bool
 	}{
 		{name: "current plan applies"},
+		{name: "capacity plan needs persisted demand", editSnapshot: func(s *v1beta1.InferenceService) { s.Spec.Placement.Mode = v1beta1.PlacementModeSplitByCapacity }, wantErr: true},
+		{name: "invalid persisted capacity cannot apply", editSnapshot: func(s *v1beta1.InferenceService) {
+			attachCapacityContract(t, s)
+			s.Status.Placement.Candidates[0].Allocation.Capacity.DemandContract = nil
+		}, wantErr: true},
 		{name: "detached current floor cannot apply", editCandidate: func(c *v1beta1.CandidatePlacement) { c.Allocation.CurrentReplicas++ }, wantErr: true},
 		{name: "unplanned cluster cannot apply", editCandidate: func(c *v1beta1.CandidatePlacement) { c.Cluster = "member-b" }, wantErr: true},
 		{name: "missing plan cannot apply", editSnapshot: func(s *v1beta1.InferenceService) { s.Status.Placement.Plan = nil }, wantErr: true},

@@ -155,6 +155,32 @@ func TestDemandComponentInventory(t *testing.T) {
 	}
 }
 
+func TestDemandInventoryRequiresCompleteInput(t *testing.T) {
+	for _, tt := range []struct {
+		name                string
+		noService, noDemand bool
+	}{
+		{name: "complete input"},
+		{name: "missing service", noService: true},
+		{name: "missing demand", noDemand: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &v1beta1.InferenceService{Spec: v1beta1.InferenceServiceSpec{Engine: &v1beta1.EngineSpec{}}}
+			demand := demandPolicy().Demand
+			if tt.noService {
+				s = nil
+			}
+			if tt.noDemand {
+				demand = nil
+			}
+			err := ValidateDemandComponents(s, demand)
+			if diff := cmp.Diff(tt.noService || tt.noDemand, err != nil); diff != "" {
+				t.Fatalf("error: %s: %v", diff, err)
+			}
+		})
+	}
+}
+
 func TestAuthorizeDemand(t *testing.T) {
 	for _, tt := range []struct {
 		name    string

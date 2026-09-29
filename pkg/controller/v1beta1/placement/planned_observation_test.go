@@ -3,6 +3,7 @@ package placement
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -82,6 +83,19 @@ func TestObservePlannedHome(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "observed component acknowledges pause", want: steady},
+		{name: "complete contracted policy acknowledges pause", edit: func(f *plannedObservationFixture) { f.attachContract(t) }, want: steady},
+		{name: "pruned demand cannot acknowledge pause", edit: func(f *plannedObservationFixture) {
+			f.attachContract(t)
+			f.resources.ir.Spec.PlacementExecution.Demand = nil
+		}, want: result{Home: allocation.Home{Known: true, Occupied: 1, Ready: 1}, Ready: 1, Admitted: 1}},
+		{name: "different component rendering cannot acknowledge pause", edit: func(f *plannedObservationFixture) {
+			f.attachContract(t)
+			f.resources.ir.Spec.PlacementExecution.Demand.Components[0].RenderingHash = strings.Repeat("c", 64)
+		}, want: result{Home: allocation.Home{Known: true, Occupied: 1, Ready: 1}, Ready: 1, Admitted: 1}},
+		{name: "different demand fingerprint cannot acknowledge pause", edit: func(f *plannedObservationFixture) {
+			f.attachContract(t)
+			f.resources.ir.Spec.PlacementExecution.Demand.Fingerprint = strings.Repeat("c", 64)
+		}, want: result{Home: allocation.Home{Known: true, Occupied: 1, Ready: 1}, Ready: 1, Admitted: 1}},
 		{name: "generic generation observation cannot acknowledge placement guards", edit: func(f *plannedObservationFixture) {
 			f.resources.ir.Status.PlacementObservedGeneration = 0
 		}, want: result{Home: allocation.Home{Known: true, Occupied: 1, Ready: 1}, Ready: 1, Admitted: 1}},
@@ -203,6 +217,18 @@ func TestObservePlannedHome(t *testing.T) {
 			}
 		})
 	}
+}
+
+func (f *plannedObservationFixture) attachContract(t *testing.T) {
+	t.Helper()
+	attachCapacityContract(t, f.source)
+	policy := executionPolicy(f.source, f.source.Status.Placement.Candidates[0].Allocation)
+	raw, err := protocol.Encode(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.member.Annotations[constants.PlacementExecution] = raw
+	f.resources.ir.Spec.PlacementExecution = policy.DeepCopy()
 }
 
 func TestPlannedTrafficEvidence(t *testing.T) {

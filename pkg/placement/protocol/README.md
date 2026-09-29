@@ -37,9 +37,23 @@ an application observation must compare the complete stored policy with the
 expected policy and must not credit that partial result. Version `1` readers
 reject version `2`; flat-only readers cannot validate either envelope.
 
+The source persists a demand contract inside each capacity allocation. Its
+fingerprint must match the normalized pool demand, and its component renderings
+participate in plan identity. Member writes carry this accepted contract; a
+fresh computation cannot replace it without a new plan. Before writing, the
+source rereads the complete allocation, including its pool evidence and contract.
+A matching plan ID and revision alone cannot authorize a partially pruned plan.
+
+An outgoing capacity home retains its last contract while its existing spec
+drains. This allows the member to acknowledge pause or release even when the
+source's current component inventory differs. A switch to static Split removes
+capacity authority through a new execution revision. Serving observations can
+change independently without invalidating the persisted allocation.
+
 This check establishes agreement at component projection. It does not freeze a
 RuntimeClass after verification, validate arbitrary admission mutations, or
 establish deployment-backend support for shared surge accounting. Source-side
-capacity planning still requires persisted demand evidence, member identity and
-application fences, and admitted-resource observations. Rendering hashes are
-available from the resolver; they do not activate capacity-based placement.
+capacity activation still requires a provider that joins fresh hardware and
+resolved member demand, with dependency checks and application fences. Nominal
+weights do not require already-running workloads to establish initial placement.
+Persisted contracts alone do not activate capacity-based placement.
