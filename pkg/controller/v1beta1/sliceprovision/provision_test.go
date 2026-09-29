@@ -483,6 +483,67 @@ func TestEnsureCountsOnlySlicesItCreates(t *testing.T) {
 	}
 }
 
+func TestEnsureCountsCreateFailures(t *testing.T) {
+	d := demand(t, "2x2x1")
+	gr := gke.GroupVersion.WithResource("slices").GroupResource()
+	p := newProvisioner(t, newFakeClient(), testOwner)
+	failingCreate := func(err error) func(*testing.T) client.Client {
+		return func(*testing.T) client.Client {
+			return fake.NewClientBuilder().WithInterceptorFuncs(interceptor.Funcs{
+				Create: func(context.Context, client.WithWatch, client.Object, ...client.CreateOption) error {
+					return err
+				},
+			}).Build()
+		}
+	}
+	// appearsAfterRead reports existing missing to Ensure's read, as when it
+	// is created between that read and Ensure's create.
+	appearsAfterRead := func(existing *unstructured.Unstructured) func(*testing.T) client.Client {
+		return func(*testing.T) client.Client {
+			gets := 0
+			return fake.NewClientBuilder().WithObjects(existing.DeepCopy()).WithInterceptorFuncs(interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if gets++; gets == 1 {
+						return apierrors.NewNotFound(gr, key.Name)
+					}
+					return c.Get(ctx, key, obj, opts...)
+				},
+			}).Build()
+		}
+	}
+	for _, tc := range []struct {
+		name   string
+		client func(*testing.T) client.Client
+		want   string // the reason counted, empty when Ensure succeeds
+	}{
+		{name: "created", client: func(*testing.T) client.Client { return newFakeClient() }},
+		{name: "own slice created after the read", client: appearsAfterRead(stored(t, p, d, Slot{}))},
+		{name: "denied", client: failingCreate(apierrors.NewForbidden(gr, "s", errors.New("denied by webhook"))), want: "Forbidden"},
+		{name: "invalid", client: failingCreate(apierrors.NewInvalid(gke.GroupVersion.WithKind(gke.Kind).GroupKind(), "s", nil)), want: "Invalid"},
+		{name: "webhook unreachable", client: failingCreate(apierrors.NewInternalError(errors.New("connection refused"))), want: "InternalError"},
+		{name: "network error", client: failingCreate(errors.New("connection reset by peer")), want: "Unknown"},
+		{name: "another owner's slice created after the read", client: appearsAfterRead(stored(t, p, d, Slot{}, withLabel(LabelOwnerUID, "uid-b"))), want: "OwnershipConflict"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sliceCreateFailures.Reset()
+			_, err := newProvisioner(t, tc.client(t), testOwner).Ensure(context.Background(), d, Slot{})
+			if gotErr, wantErr := err != nil, tc.want != ""; gotErr != wantErr {
+				t.Fatalf("Ensure error = %v, want an error: %t", err, wantErr)
+			}
+			wantSeries := 0
+			if tc.want != "" {
+				wantSeries = 1
+				if got := testutil.ToFloat64(sliceCreateFailures.WithLabelValues("type-a", "2x2x1", tc.want)); got != 1 {
+					t.Fatalf("create failures{type-a,2x2x1,%s} = %v, want 1", tc.want, got)
+				}
+			}
+			if got := testutil.CollectAndCount(sliceCreateFailures); got != wantSeries {
+				t.Fatalf("create failure series = %d, want %d", got, wantSeries)
+			}
+		})
+	}
+}
+
 func TestObserve(t *testing.T) {
 	d := demand(t, "2x2x1")
 	slot := Slot{Instance: 1}

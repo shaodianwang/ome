@@ -2,9 +2,12 @@ package sliceprovision
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 
 	"github.com/prometheus/client_golang/prometheus"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
@@ -41,6 +44,11 @@ var (
 		Help: "TPU slices the controller provisioned that the API server has removed, whoever deleted them, by slice type and topology. A slice the provider holds behind a finalizer counts once the provider lets it go. Counted from the leader's watch, so a slice removed while no leader watches is not counted.",
 	}, sliceLabels)
 
+	sliceCreateFailures = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "ome_tpu_slice_create_failures_total",
+		Help: "TPU slice creates by the controller that failed, by slice type, topology and reason. The reason is the API server's status reason, such as Forbidden or Invalid; OwnershipConflict when another owner's slice has the name; or Unknown, as for a network error. The owner's reconcile retries the create, and each failed attempt counts.",
+	}, []string{"slice_type", "topology", "reason"})
+
 	sliceStates = &stateCollector{desc: prometheus.NewDesc(
 		"ome_tpu_slices",
 		"TPU slices the controller provisioned that exist now, by slice type, topology and state. A slice being deleted is terminating. Otherwise it is orphaned when the owner it was provisioned for no longer exists, ready when its state is a configured ready state, and pending in any other state, including a failed one. Reported by the leader only.",
@@ -49,7 +57,19 @@ var (
 )
 
 func init() {
-	ctrlmetrics.Registry.MustRegister(slicesCreated, slicesReleased, sliceStates)
+	ctrlmetrics.Registry.MustRegister(slicesCreated, slicesReleased, sliceCreateFailures, sliceStates)
+}
+
+// createFailureReason is the reason a failed create counts under: the API
+// server's status reason, OwnershipConflict, or Unknown.
+func createFailureReason(err error) string {
+	if errors.Is(err, gke.ErrOwnershipConflict) {
+		return "OwnershipConflict"
+	}
+	if reason := apierrors.ReasonForError(err); reason != metav1.StatusReasonUnknown {
+		return string(reason)
+	}
+	return "Unknown"
 }
 
 // ObserveDeleted counts obj as released when it is a slice provisioned for an

@@ -24,7 +24,8 @@ import (
 func TestMetricNames(t *testing.T) {
 	slicesCreated.WithLabelValues("type-a", "2x2x1")
 	slicesReleased.WithLabelValues("type-a", "2x2x1")
-	for _, name := range []string{"ome_tpu_slice_created_total", "ome_tpu_slice_released_total"} {
+	sliceCreateFailures.WithLabelValues("type-a", "2x2x1", "Forbidden")
+	for _, name := range []string{"ome_tpu_slice_created_total", "ome_tpu_slice_released_total", "ome_tpu_slice_create_failures_total"} {
 		if got, err := testutil.GatherAndCount(ctrlmetrics.Registry, name); err != nil || got == 0 {
 			t.Errorf("%s: %d series (err %v), want it registered", name, got, err)
 		}

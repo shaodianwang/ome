@@ -215,6 +215,7 @@ func (p *Provisioner) Ensure(ctx context.Context, d Demand, slot Slot) (Placemen
 	if !found {
 		var created bool
 		if s, created, err = p.live.Create(ctx, spec); err != nil {
+			sliceCreateFailures.WithLabelValues(spec.Type, spec.Topology, createFailureReason(err)).Inc()
 			return Placement{}, err
 		}
 		if created {
