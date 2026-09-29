@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ome-bot.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "ome-bot.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector: {{- include "ome-bot.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http

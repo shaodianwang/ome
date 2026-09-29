@@ -7,10 +7,12 @@ TAG          ?= $(GIT_TAG)
 ARCH         ?= linux/amd64
 MANAGER_IMG  ?= $(REGISTRY)/ome-manager:$(TAG)
 QUOTA_MANAGER_IMG ?= $(REGISTRY)/ome-quota-manager:$(TAG)
+OME_BOT_IMG ?= $(REGISTRY)/ome-bot:$(TAG)
 ALFRED_IMG   ?= $(REGISTRY)/alfred:$(TAG)
 # Upstream ome-projects/ome commit alfred is built from. .alfred-oss-ref is the
 # single source of truth; the Dockerfile requires it as a build-arg.
 ALFRED_OSS_REF ?= $(strip $(shell cat $(CURDIR)/.alfred-oss-ref))
+KUBECTL_OME_OSS_REF ?= $(strip $(shell cat $(CURDIR)/.kubectl-ome-oss-ref))
 
 # Git version and commit information for build
 version_pkg = github.com/ome-projects/ome/pkg/version
@@ -502,6 +504,23 @@ muse-image: ## Build the MUSE console image (read-plane API + web UI).
 	@echo "🚀 Building muse-server image..."
 	$(DOCKER_BUILD_CMD) build --platform=$(ARCH) \
 		. -f dockerfiles/muse-server.Dockerfile -t $(REGISTRY)/muse-server:$(TAG)
+	@echo "✅ Image built"
+
+.PHONY: ome-bot
+ome-bot: fmt vet ## Build the OME Slack bot core (meta-internal/omebot).
+	@echo "🤖 Building ome-bot..."
+	$(GO_CMD) build -tags meta_internal -o bin/ome-bot ./meta-internal/omebot/cmd/ome-bot
+	@echo "✅ Built bin/ome-bot"
+
+.PHONY: ome-bot-image
+ome-bot-image: ## Build the ome-bot image (bot core + kubectl-ome from the pinned upstream commit).
+	@echo "🤖 Building ome-bot image (kubectl-ome from upstream $(KUBECTL_OME_OSS_REF))..."
+	$(DOCKER_BUILD_CMD) build --platform=$(ARCH) \
+		--build-arg VERSION=$(GIT_TAG) \
+		--build-arg GIT_TAG=$(GIT_TAG) \
+		--build-arg GIT_COMMIT=$(shell git rev-parse HEAD) \
+		--build-arg KUBECTL_OME_REF=$(KUBECTL_OME_OSS_REF) \
+		. -f dockerfiles/ome-bot.Dockerfile -t $(OME_BOT_IMG)
 	@echo "✅ Image built"
 
 .PHONY: docker-buildx-setup

@@ -86,6 +86,9 @@ EVAL_CASE_DIR = REPO_ROOT / "hack/omenative-testing/perm/isvcs"
 # Upstream ome-projects/ome commit the alfred image is built from; the
 # Dockerfile fetches that source itself, so the pin is passed as a build-arg.
 ALFRED_OSS_REF_FILE = REPO_ROOT / ".alfred-oss-ref"
+# Upstream commit kubectl-ome is built from inside the ome-bot image; the CLI
+# lives on upstream main, so the pin is a commit rather than a release tag.
+KUBECTL_OME_OSS_REF_FILE = REPO_ROOT / ".kubectl-ome-oss-ref"
 
 # Multi-cluster groups, same shape and same exact-ownership rule as the
 # coordination groups below. Every job here stands up three KIND clusters, so a
@@ -349,6 +352,10 @@ IMAGES = [
     # An optional ome-resources component (alfred.enabled), so it is not part
     # of the release marker.
     ("alfred", "alfred", "dockerfiles/alfred.Dockerfile"),
+    # ome-bot: the OME Slack bot core (meta-internal/omebot) plus kubectl-ome
+    # built from the pinned upstream ref. Deployed to the management cluster
+    # by the ome-bot chart; not part of the release marker.
+    ("ome-bot", "ome-bot", "dockerfiles/ome-bot.Dockerfile"),
 ]
 
 
@@ -365,7 +372,7 @@ def _push_every_branch_images() -> frozenset[str]:
     return frozenset()
 
 
-CHARTS = ["ome-crd", "ome-resources", "ome-isvc", "muse", "ome-scheduler", "ome-quota-manager"]
+CHARTS = ["ome-crd", "ome-resources", "ome-isvc", "muse", "ome-scheduler", "ome-quota-manager", "ome-bot"]
 
 # The atomic marker is the Kargo-facing contract for an OME control-plane
 # release. Keep this deliberately narrower than CHARTS: only components that
@@ -387,7 +394,7 @@ RELEASE_MARKER_IMAGES = (
 # wait for that image to exist in the prod registry. Mirrors the per-chart
 # stamping blocks in push_chart.sh; a chart that stamps but is missing here
 # publishes ahead of its own image and installs as ErrImagePull.
-IMAGE_STAMPING_CHARTS = ("ome-resources", "ome-scheduler", "ome-quota-manager", "muse")
+IMAGE_STAMPING_CHARTS = ("ome-resources", "ome-scheduler", "ome-quota-manager", "muse", "ome-bot")
 
 
 # ---------------------------------------------------------------------------
@@ -1567,11 +1574,17 @@ def _image_build_args(label: str) -> list[str]:
     args = [f"GO_BUILDER_IMAGE={GO_BUILDER_IMAGE}"]
     if label == "alfred":
         args.append(f"ALFRED_OSS_REF={_alfred_oss_ref()}")
+    if label == "ome-bot":
+        args.append(f"KUBECTL_OME_REF={_kubectl_ome_oss_ref()}")
     return args
 
 
 def _alfred_oss_ref() -> str:
     return ALFRED_OSS_REF_FILE.read_text().strip()
+
+
+def _kubectl_ome_oss_ref() -> str:
+    return KUBECTL_OME_OSS_REF_FILE.read_text().strip()
 
 
 def _mirror_image_step(label: str, ecr_name: str) -> str:

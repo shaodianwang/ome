@@ -1,0 +1,110 @@
+# ome-bot — the deterministic core of the OME Slack bot. One image carrying the
+# bot and kubectl-ome. A relay (the Slack inbound handler) calls the HTTP API
+# and posts the reply; this Deployment holds no Slack credential.
+replicaCount: 1
+
+image:
+  # Under global.hub when set and repository has no "/", else used as a full ref.
+  repository: ome-bot
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# Optional registry prefix (matches the other OME charts' global.hub).
+global:
+  hub: ""
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# Pod annotations. On a cluster with platform pod identity, this is where the
+# identity and auth-tool injection annotations go; they give the pod the
+# exec-credential provider named in config.execCommand and a certificate to
+# run it with. The chart bakes in no platform-specific annotation.
+podAnnotations: {}
+podLabels: {}
+
+# Extra environment for the bot container, inherited by kubectl-ome and the
+# exec-credential provider it runs (for example the TLS cert paths the
+# injected provider reads).
+extraEnv: []
+
+# HOME for the container; kubectl-ome caches API discovery under it.
+homeDir: /tmp
+
+service:
+  port: 8080
+
+config:
+  # kubectl-ome inside the image.
+  kubectlOmePath: /usr/local/bin/kubectl-ome
+  # Where rendered per-cluster kubeconfigs are written (an emptyDir).
+  kubeconfigDir: /var/run/ome-bot/kubeconfigs
+  # The exec-credential provider named in rendered kubeconfigs. Required when
+  # any cluster entry uses tokenArgs. Empty ⇒ only kubeconfigPath/inCluster
+  # entries are valid.
+  execCommand: ""
+  # KEY=VALUE pairs exported to kubectl-ome in addition to the pod env.
+  env: []
+  timeouts:
+    commandSeconds: 25 # one kubectl-ome invocation
+    probeSeconds: 10 # one cluster reachability probe
+    fanoutSeconds: 60 # a command run on every cluster
+  # Bytes of CLI output kept per cluster per command.
+  outputLimitBytes: 12000
+  # The OME controller Deployment whose image tag is reported as the installed
+  # version. Both empty ⇒ the column is omitted.
+  ome:
+    namespace: ""
+    managerDeployment: ""
+  auth:
+    # "hmac": every request carries X-OME-Bot-Timestamp and
+    # X-OME-Bot-Signature = hex(HMAC-SHA256(key, timestamp + "\n" + body)).
+    # "none": only for a Deployment that is unreachable except by port-forward.
+    mode: hmac
+    # Secret in the release namespace holding the shared key under secretKey.
+    existingSecret: ""
+    secretKey: hmac
+    maxSkewSeconds: 300
+
+# The fleet registry, rendered verbatim into the config. Each entry names one
+# credential source:
+#   server + tokenArgs      exec-credential kubeconfig rendered at startup
+#   kubeconfigPath          a kubeconfig mounted by other means
+#   inCluster: true         the pod's own ServiceAccount
+# Optional: role (hub|member|standalone), hub, kargoStage,
+# insecureSkipTLSVerify, certificateAuthorityData (base64).
+clusters: []
+#  - name: member-a
+#    provider: gke
+#    role: member
+#    hub: hub-a
+#    server: https://member-a.example.com
+#    certificateAuthorityData: ""
+#    tokenArgs: [k8s, get-token, project-a, member-a, --provider, gcp, --output, exec-credential]
+
+# Attach to a shared Gateway API gateway. Off by default: with auth.mode
+# "none" the service must stay unreachable from outside the cluster.
+route:
+  enabled: false
+  gateway:
+    name: ""
+    namespace: ""
+    sectionNames: []
+  pathPrefix: /ome-bot
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

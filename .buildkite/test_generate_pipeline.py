@@ -492,6 +492,17 @@ class TestImageBuildEmission(unittest.TestCase):
             )
 
 
+    def test_ome_bot_build_passes_the_pinned_cli_commit(self):
+        # ome-bot builds kubectl-ome from upstream source the Dockerfile fetches
+        # itself, so the build step must hand it the commit from
+        # .kubectl-ome-oss-ref, and that pin must be a full commit sha: the CLI
+        # lives on upstream main and no release tag carries it.
+        pin = gp.KUBECTL_OME_OSS_REF_FILE.read_text().strip()
+        self.assertRegex(pin, r"^[0-9a-f]{40}$")
+        yaml_text = gp._build_image_step("ome-bot", "ome-bot", "dockerfiles/ome-bot.Dockerfile")
+        self.assertIn(f'- "KUBECTL_OME_REF={pin}"', yaml_text)
+        self.assertNotIn("ALFRED_OSS_REF", yaml_text)
+
 class TestDriftCheckEmission(unittest.TestCase):
     # A drift check installs its tooling with `go install` before it compares
     # anything, so a module-proxy blip fails the step and reads as drift. The

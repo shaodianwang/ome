@@ -1,0 +1,35 @@
+{{- if and (eq .Values.config.auth.mode "hmac") (not .Values.config.auth.existingSecret) }}
+{{- fail "config.auth.existingSecret is required when config.auth.mode is hmac" }}
+{{- end }}
+{{- if not .Values.clusters }}
+{{- fail "clusters must list at least one registry entry" }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ome-bot.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "ome-bot.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    listen: {{ printf ":%d" (int .Values.service.port) | quote }}
+    kubectlOmePath: {{ .Values.config.kubectlOmePath | quote }}
+    kubeconfigDir: {{ .Values.config.kubeconfigDir | quote }}
+    execCommand: {{ .Values.config.execCommand | quote }}
+    {{- with .Values.config.env }}
+    env: {{- toYaml . | nindent 6 }}
+    {{- end }}
+    timeouts: {{- toYaml .Values.config.timeouts | nindent 6 }}
+    outputLimitBytes: {{ int .Values.config.outputLimitBytes }}
+    auth:
+      mode: {{ .Values.config.auth.mode | quote }}
+      {{- if eq .Values.config.auth.mode "hmac" }}
+      secretFile: {{ include "ome-bot.authSecretFile" . | quote }}
+      maxSkewSeconds: {{ int .Values.config.auth.maxSkewSeconds }}
+      {{- end }}
+    {{- if or .Values.config.ome.namespace .Values.config.ome.managerDeployment }}
+    ome:
+      namespace: {{ .Values.config.ome.namespace | quote }}
+      managerDeployment: {{ .Values.config.ome.managerDeployment | quote }}
+    {{- end }}
+    clusters: {{- toYaml .Values.clusters | nindent 6 }}

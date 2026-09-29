@@ -80,6 +80,12 @@ if [ "${CHART}" = "muse" ]; then
   sed -i "s|tag: latest|tag: \"${SHORT_SHA}\"|" "charts/${CHART}/values.yaml"
 fi
 
+# Same for ome-bot: its image is built and mirrored from this commit.
+if [ "${CHART}" = "ome-bot" ]; then
+  sed -i "s|hub: \"\"|hub: \"${PROD_ECR_REGISTRY}/msl_infra\"|" "charts/${CHART}/values.yaml"
+  sed -i "s|tag: latest|tag: \"${SHORT_SHA}\"|" "charts/${CHART}/values.yaml"
+fi
+
 helm package "charts/${CHART}"
 
 . "$(dirname "$0")/_ecr_login.sh"

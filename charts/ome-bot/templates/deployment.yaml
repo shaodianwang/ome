@@ -1,0 +1,93 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ome-bot.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "ome-bot.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels: {{- include "ome-bot.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ome-bot.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # Restart on config change; the kubeconfig set is rendered at startup.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "ome-bot.serviceAccountName" . }}
+      containers:
+        - name: ome-bot
+          # Container-scoped so it does not constrain platform-injected init
+          # containers that copy auth tools into the pod as root.
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+          image: {{ include "ome-bot.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --config=/etc/ome-bot/config.yaml
+          env:
+            - name: HOME
+              value: {{ .Values.homeDir | quote }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/ome-bot
+              readOnly: true
+            - name: kubeconfigs
+              mountPath: {{ .Values.config.kubeconfigDir }}
+            - name: home
+              mountPath: {{ .Values.homeDir }}
+            {{- if eq .Values.config.auth.mode "hmac" }}
+            - name: auth
+              mountPath: /etc/ome-bot/auth
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "ome-bot.fullname" . }}
+        - name: kubeconfigs
+          emptyDir: {}
+        - name: home
+          emptyDir: {}
+        {{- if eq .Values.config.auth.mode "hmac" }}
+        - name: auth
+          secret:
+            secretName: {{ .Values.config.auth.existingSecret }}
+            items:
+              - key: {{ .Values.config.auth.secretKey }}
+                path: {{ .Values.config.auth.secretKey }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -40,7 +40,7 @@ SHIPPED = (
 # other path is scanned and exempted only per group, with a reason, in
 # hack/internal-tokens.allow.
 INTERNAL_ONLY = (
-    "muse/", "charts/muse/", "meta-internal/",
+    "muse/", "charts/muse/", "charts/ome-bot/", "meta-internal/",
 )
 # Everything else: scanned. Shipped paths additionally get the `upstream`
 # scope and the import guard.
@@ -49,7 +49,7 @@ CLEAN = (
     "oeps/", "tests/", "hack/", "docs/", "ome-client-rs/", "charts/", "config/",
     ".buildkite/", ".devcontainer/", ".github/", "dockerfiles/", "grafana/",
     "README.md", "CONTRIBUTING.md", "CLAUDE.md", "AGENTS.md", "Makefile", "Makefile-deps.mk",
-    ".golangci.yml", ".pre-commit-config.yaml", "go.mod", "go.sum", ".alfred-oss-ref",
+    ".golangci.yml", ".pre-commit-config.yaml", "go.mod", "go.sum", ".alfred-oss-ref", ".kubectl-ome-oss-ref",
     ".gitignore", ".dockerignore", ".envtest-k8s-version", ".kind-node-image",
     ".kueue-crd-version", "PROJECT",
 )
