@@ -380,8 +380,11 @@ if [ "$OFFLINE" -eq 1 ] && [ "$PROMETHEUS_ENABLED" = true ]; then
 fi
 
 echo "--- install CRDs ---"
+# The rollout policy feature is chart-gated on both charts from one key; the
+# eval exercises policy references, so the CRD and its controller are on.
 helm upgrade --install ome-crd charts/ome-crd/ \
   --kube-context "$KCTX" --namespace "$OME_NS" --create-namespace \
+  --set ome.rolloutPolicy.enabled=true \
   --wait --timeout 180s
 
 if [ "$OFFLINE" -eq 1 ]; then
@@ -417,6 +420,7 @@ HELM_ARGS=(
   --set prometheus.image.repository="$PROMETHEUS_REPOSITORY"
   --set prometheus.image.tag="$PROMETHEUS_TAG"
   --set ome.controller.replicaCount=1
+  --set ome.rolloutPolicy.enabled=true
   --set ome.controller.resources.requests.cpu=500m
   --set ome.controller.resources.requests.memory=512Mi
   --set ome.controller.resources.limits.cpu=2

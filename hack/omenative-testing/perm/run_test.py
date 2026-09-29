@@ -1313,6 +1313,23 @@ class RunLostTest(unittest.TestCase):
         self.assertIsNone(run._runlost_track(t, None, {"outcome": "Completed"}, 2, None, 42.0))
         self.assertEqual([1], t["unpinned"])
 
+    def test_a_run_that_closes_before_the_removal_is_not_a_failed_verb(self):
+        # The read found a run; by the time the removal lands the run layer has closed it.
+        statuses = iter([{"rollout": {"activeRun": {"runID": "r1"}, "lastRun": None}},
+                         {"rollout": {"lastRun": {"outcome": "Completed"}}}])
+        saved = run.fetch_status, run.kubectl
+        run.fetch_status = lambda cid: next(statuses)
+        run.kubectl = lambda *a, **k: subprocess.CompletedProcess(a, 1, stdout="", stderr="The request is invalid")
+        try:
+            ctx = {"case_id": "p1", "canary_hook": "canary-done", "canary_step": 2}
+            run._remove_active_run(ctx)
+        finally:
+            run.fetch_status, run.kubectl = saved
+        self.assertFalse(ctx["runlost"]["removed"])
+        self.assertEqual("r1", ctx["runlost"]["run_id"])
+        self.assertNotIn("verb_errors", ctx)
+        self.assertTrue(any("closed before the removal" in n for n in ctx.get("verb_notes", [])))
+
     def test_track_records_a_repin_the_sampler_saw_no_gap_before(self):
         t = self._removed()
         self.assertEqual("repinned", run._runlost_track(t, "r1", None, 1, "canary-serving", 2.0))

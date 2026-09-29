@@ -1323,6 +1323,12 @@ PLANEDIT_TRAFFIC = 75
 # the run the bump asks for parks instead of opening.
 PREARM_VERBS = {"rollback", "pause", "promote", "repin", "resume", "timeout-set",
                 "planedit", "groupremove", "scale", "planinvalid"}
+# Pre-arm verbs that edit the spec rather than an annotation: the bump that
+# follows must be reconciled against the edited spec.
+PREARM_SPEC_EDITS = {"planedit", "groupremove", "scale", "planinvalid"}
+# How long a spec edit is given to reach the manager's informer before the
+# bump lands on top of it.
+PREARM_SETTLE_S = int(5 * TIMEOUT_MULT)
 # Verbs that end a case whose second verb leaves a pre-step hold in place.
 RELEASE_VERBS = {"promote", "resume"}
 # Delay between the second verb and the release: the window the second
@@ -5341,7 +5347,7 @@ def _plan_invalidate(ctx):
     rr = kubectl("-n", NS, "patch", "isvc", cid, "--type=merge", "-p",
                  json.dumps({"spec": {"rollout": {"groups": groups}}}))
     if rr.returncode != 0:
-        return False, f"plan invalidate: patch denied: {(rr.stderr.strip().splitlines() or [''])[-1][:160]}"
+        return False, f"plan invalidate: patch denied: {(rr.stderr.strip().splitlines() or [''])[-1][:400]}"
     note = f"verb fired: planinvalid at idle (group {sorted(members)} now names policy {cid}-missing)"
     ctx.setdefault("verb_notes", []).append(note)
     print(f"    ⚡ {note}")
@@ -5385,6 +5391,12 @@ def _remove_active_run(ctx):
     rr = kubectl("-n", NS, "patch", "isvc", cid, "--subresource=status", "--type=json",
                  "-p", json.dumps([{"op": "remove", "path": ACTIVE_RUN_POINTER}]))
     if rr.returncode != 0:
+        # A run that closed between the read and the removal is gone already:
+        # the record keeps the run it found, and nothing was removed.
+        if _active_run(fetch_status(cid)) is None:
+            ctx.setdefault("verb_notes", []).append(
+                f"runlost: the run closed before the removal landed at {ctx.get('canary_hook')}; nothing to remove")
+            return
         ctx.setdefault("verb_errors", []).append(f"runlost: status patch failed: {rr.stderr.strip()[:120]}")
         return
     track["removed"], track["removed_at"] = True, time.time()
@@ -5534,6 +5546,11 @@ def _canary(case_id, yaml_file, desc, hdr):
         ok, msg = _prearm(ctx, prearm, primary, scale_to)
         if not ok:
             return _write_fail(case_id, desc, hdr, "PREARM_FAIL", msg)
+        if prearm in PREARM_SPEC_EDITS:
+            # The bump is judged against the edited spec, so the manager's
+            # informer must have seen the edit first; the service publishes
+            # no observed generation, so the window is a fixed settle.
+            time.sleep(PREARM_SETTLE_S)
         ctx["prearm_annos"] = _isvc_annotations(case_id)   # what still lingers when the bump lands
     # A plan edit left on the idle service is the plan the next run pins.
     nsteps = (len(cinfo.get("steps") or []) or 2) + (1 if prearm == "planedit" else 0)
