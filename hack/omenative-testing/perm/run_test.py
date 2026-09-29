@@ -830,3 +830,15 @@ class PairAliveOneByOneTest(unittest.TestCase):
         self.assertFalse(run._pairing_drain_first({"strat": {"engine": "SurgeThenDrain", "decoder": "InPlaceOnly"}}))
         self.assertTrue(run._pairing_drain_first({"strat": {"engine": "SurgeThenDrain", "decoder": "RecreatePod"}}))
         self.assertFalse(run._pairing_drain_first({"strat": {}}))
+
+class CanaryHandlerBindingsTest(unittest.TestCase):
+    """The canary handler keeps one meaning per name: `want` is the replica
+    target dict for the whole verdict, never rebound to a phase string."""
+
+    def test_want_is_bound_once_in_the_canary_handler(self):
+        import ast
+        tree = ast.parse(open("run.py").read())
+        fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_canary")
+        binds = [n.lineno for n in ast.walk(fn) if isinstance(n, ast.Assign)
+                 for tgt in n.targets if isinstance(tgt, ast.Name) and tgt.id == "want"]
+        self.assertEqual(1, len(binds), f"`want` rebound inside _canary at lines {binds}")

@@ -5165,10 +5165,9 @@ def _canary(case_id, yaml_file, desc, hdr):
              f"a promote naming the stable revision left the step at {step_at_verb}",
              f"a promote naming the stable revision moved the step off {step_at_verb}")
 
-    want = expect
     good(state == "CONVERGED",
-         f"reached {want} in {ctx.get('converged_at')}s",
-         f"did not reach {want} (state={state}, phases={sorted(phases)})")
+         f"reached {expect} in {ctx.get('converged_at')}s",
+         f"did not reach {expect} (state={state}, phases={sorted(phases)})")
     if nophase and hook_fired_ts is not None:
         good(nophase not in after_hook_phases,
              f"phase {nophase} was not observed after the hook fired (saw {sorted(after_hook_phases)})",
