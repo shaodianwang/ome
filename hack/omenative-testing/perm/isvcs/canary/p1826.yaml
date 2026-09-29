@@ -1,4 +1,5 @@
 # p1826: canary engine promote while draining completes after the drain  mode=canary Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 canary=auto during=canary-draining verb=promote cell=canary/Draining/promote co=none topo=engine
+# The drain window is what makes Draining observable: without scaleDownDelaySeconds the final step's Promoting lasts one reconcile, shorter than the sampler.
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p1826 }
@@ -14,6 +15,7 @@ spec:
     groups:
         - components: [engine]
           canary:
+            scaleDownDelaySeconds: 60
             steps:
               - { capacity: "50%", traffic: 50, pause: { duration: "20s" } }
               - { capacity: "100%", traffic: 100 }

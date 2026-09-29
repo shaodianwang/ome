@@ -1,4 +1,5 @@
 # p1832: canary engine rollback while draining reverts the final step  mode=canary Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 canary=manual during=canary-draining verb=rollback terminal=RolledBack cell=canary/Draining/rollback co=none topo=engine
+# The drain window is what makes Draining observable: without scaleDownDelaySeconds the final step's Promoting lasts one reconcile, shorter than the sampler.
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p1832 }
@@ -14,6 +15,7 @@ spec:
     groups:
         - components: [engine]
           canary:
+            scaleDownDelaySeconds: 60
             steps:
               - { capacity: "50%", traffic: 50, pause: {  } }
               - { capacity: "100%", traffic: 100 }
