@@ -539,6 +539,14 @@ class CanaryHeaderTest(unittest.TestCase):
         self.assertTrue(any("fault=" in e for e in self._errs(base + " fault=podkill:rotating")))
         self.assertTrue(any("cell=" in e for e in self._errs(base + " cell=nonsense")))
 
+    def test_cell_is_a_comma_list_of_cell_ids(self):
+        base = "# p999: x mode=canary Ne=1 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 canary=manual topo=engine"
+        self.assertEqual([], self._errs(base + " cell=canary/Staging/readyTimeout[quota]"))
+        self.assertEqual([], self._errs(base + " cell=canary/Staging/readyTimeout[quota],canary/Staging/unpullable[decoder]"))
+        self.assertTrue(any("cell=" in e for e in self._errs(base + " cell=canary/Staging/readyTimeout[quota],nonsense")))
+        self.assertTrue(any("cell=" in e for e in self._errs(base + " cell=canary/Staging/readyTimeout[quota],")))
+        self.assertTrue(any("cell=" in e for e in self._errs(base + " cell=canary/Idle/newTarget[secondaryOnly:engine]")))
+
 class ApplyCaseRuntimeLagTest(unittest.TestCase):
     """apply_case re-applies only the webhook's runtime-lag denial, only for a
     case that ships its own runtime, and only for a bounded window."""
@@ -740,7 +748,7 @@ class PDCanaryHeaderTest(unittest.TestCase):
 
     def test_pairing_trigger_validates_in_canary_mode(self):
         self.assertEqual([], self._errs(self.PD + " proto=v2 cell=canary/Serving/pairing"))
-        self.assertEqual([], self._errs(self.PD + " proto=v2 proto2=v3 during=canary-serving cell=canary/Serving/retarget"))
+        self.assertEqual([], self._errs(self.PD + " proto=v2 proto2=v3 during=canary-serving cell=canary/Serving/pairingRetarget"))
         self.assertEqual([], self._errs(self.PD + " proto=v2 ratio_tol=25 cell=canary/Staging/ratio"))
         self.assertTrue(any("needs Ne>0 and Nd>0" in e for e in self._errs(
             "# p999: x mode=canary Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 canary=auto topo=engine proto=v2")))

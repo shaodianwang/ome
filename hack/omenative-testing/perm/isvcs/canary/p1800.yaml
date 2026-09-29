@@ -1,4 +1,4 @@
-# p1800: canary pd cohort ratio with slow engines  mode=canary Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=3 ceil_r=0 canary=auto ratio_tol=25 cell=canary/Staging/ratio[slowEngine] co=none topo=pd
+# p1800: canary pd cohort ratio with slow engines  mode=canary Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=3 ceil_r=0 canary=auto ratio_tol=25 cell=canary/Staging/ratio[slowEngine],canary/Serving/ratio co=none topo=pd
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p1800 }

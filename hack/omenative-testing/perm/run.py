@@ -1370,6 +1370,15 @@ def _canary_hook_ok(v):
     return hook in CANARY_HOOKS and (not at or at.isdigit())
 
 
+_CELL_ID = re.compile(r"^canary/[A-Za-z]+(\[[A-Za-z]+\])?/[A-Za-z0-9]+(\[[A-Za-z]+\])?$")
+
+
+def _cell_ok(v):
+    """Header validator for cell=: a comma-separated list of grid cell ids,
+    each canary/<State>[gate]/<event>[variant]."""
+    return bool(str(v)) and all(_CELL_ID.match(c) for c in str(v).split(","))
+
+
 def _hook_due(spec, hook, step):
     """spec = <hook>[@<step>]: due when the hook matches and, if given, the step."""
     want, _, at = str(spec).partition("@")
@@ -1907,7 +1916,7 @@ HDR_VALIDATORS = {
     # leaves a rollback request on the idle ISVC before the bump; victim=
     # aims a podkill at the stable or the canary revision; skipsoak= states the
     # timed step's pause so a verb that skips it can be asserted; cell= names
-    # the grid cell the case covers.
+    # every grid cell the case proves, comma-separated.
     "verb": lambda v: v in CANARY_VERBS,
     "verbhold": _int_ge0,
     # A second verb at a second hook (fires once the first verb has fired);
@@ -1929,7 +1938,7 @@ HDR_VALIDATORS = {
     "xcheck": lambda v: v == "sectraffic",
     "skipsoak": _int_ge0,
     "nophase": lambda v: v in {"Pending", "Canarying", "Paused", "Promoting", "RollingBack", "RolledBack", "Failed"},
-    "cell": lambda v: re.match(r"^canary/[A-Za-z]+(\[[A-Za-z]+\])?/[A-Za-z0-9]+(\[[A-Za-z]+\])?$", str(v)) is not None,
+    "cell": _cell_ok,
     "infeasible": lambda v: v == 1,
     "notimpl": lambda v: v == 1,
     # GitHub issue number a notimpl=1 case is parked on. REQUIRED with notimpl:

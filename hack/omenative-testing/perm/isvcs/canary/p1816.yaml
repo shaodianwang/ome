@@ -1,4 +1,4 @@
-# p1816: canary pd pairing cleared through a canary  mode=canary Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=3 ceil_r=0 canary=auto proto=clear xcheck=sectraffic notimpl=1 issue=1346 cell=canary/Serving/pairing[clear] co=none topo=pd
+# p1816: canary pd pairing cleared through a canary  mode=canary Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=3 ceil_r=0 canary=auto proto=clear xcheck=sectraffic notimpl=1 issue=1346 cell=canary/Idle/pairing[clear] co=none topo=pd
 # reason: parked on the canary-secondary traffic gap — the secondaries publish no live traffic targets under a canary group, so their pairing targets cannot be checked until the issue is fixed; pods, Services, convergence and the pair-alive invariant stay hard
 apiVersion: ome.io/v1beta1
 kind: InferenceService

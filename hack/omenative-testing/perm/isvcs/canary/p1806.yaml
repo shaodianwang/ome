@@ -1,4 +1,4 @@
-# p1806: canary pd router canary unpullable with the secondaries staged  mode=canary Ne=2 Nd=2 Nr=2 ceil_e=3 ceil_d=3 ceil_r=3 canary=auto bump=engine,decoder,router img=example.com/canary-test/missing:none imgcomp=router terminal=Failed cell=canary/Staging/readyTimeout[router] co=none topo=pd
+# p1806: canary pd router canary unpullable with the secondaries staged  mode=canary Ne=2 Nd=2 Nr=2 ceil_e=3 ceil_d=3 ceil_r=3 canary=auto bump=engine,decoder,router img=example.com/canary-test/missing:none imgcomp=router terminal=Failed cell=canary/Staging/readyTimeout[router],canary/Staging/unpullable[router] co=none topo=pd
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p1806 }

@@ -1,4 +1,4 @@
-# p383: canary engine canary pod dies inside the drain window  mode=canary Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 canary=manual fault=podkill:canary-draining victim=canary nophase=Pending cell=canary/Draining/capacityDropped co=none topo=engine
+# p383: canary engine canary pod dies inside the drain window  mode=canary Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 canary=manual fault=podkill:canary-draining victim=canary nophase=Pending cell=canary/Draining/capacityDropped,canary/Draining/capacityReached co=none topo=engine
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p383 }

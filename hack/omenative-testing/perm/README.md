@@ -268,9 +268,11 @@ fails the case rather than passing quietly.
 
 The step machine is a state × event table, and p319 + p366–p383 aim an event at
 a named state instead of at "some time after the bump". Every one of them names
-the grid cell it covers in `cell=canary/<State>/<event>` (the states are
-`Staging`, `Serving`, `PreHold`, `Draining`, `Done`, `RollingBack`,
-`RolledBack`, `Failed`).
+the grid cells it proves in `cell=`, a comma-separated list of
+`canary/<State>/<event>` ids (the states are `Idle`, `Staging`, `Serving`,
+`PreHold`, `Draining`, `Done`, `RollingBack`, `RolledBack`, `Failed`); a case
+that exercises a second row, such as the recovery half of a podkill, carries
+both ids.
 
 - **`during=canary-<state>[@<step>]`** — when to act: `canary-staging`
   (`Pending`), `canary-serving` (`Canarying`/`Paused`), `canary-prehold`

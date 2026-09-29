@@ -1,4 +1,4 @@
-# p319: canary engine bad-image canary parks Failed on the ready timeout  mode=canary Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 canary=auto bump=engine img=example.com/canary-test/missing:none terminal=Failed cell=canary/Staging/readyTimeout co=none topo=engine
+# p319: canary engine bad-image canary parks Failed on the ready timeout  mode=canary Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 canary=auto bump=engine img=example.com/canary-test/missing:none terminal=Failed cell=canary/Staging/readyTimeout[unpullable] co=none topo=engine
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p319 }

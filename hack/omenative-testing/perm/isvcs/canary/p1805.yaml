@@ -1,4 +1,4 @@
-# p1805: canary pd decoder canary unpullable beside a healthy engine canary  mode=canary Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=3 ceil_r=0 canary=auto bump=engine,decoder img=example.com/canary-test/missing:none imgcomp=decoder terminal=Failed cell=canary/Staging/readyTimeout[decoder] co=none topo=pd
+# p1805: canary pd decoder canary unpullable beside a healthy engine canary  mode=canary Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=3 ceil_r=0 canary=auto bump=engine,decoder img=example.com/canary-test/missing:none imgcomp=decoder terminal=Failed cell=canary/Staging/readyTimeout[decoder],canary/Staging/secondary[stuck],canary/Staging/unpullable[decoder] co=none topo=pd
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p1805 }

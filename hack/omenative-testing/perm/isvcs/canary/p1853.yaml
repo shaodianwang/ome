@@ -1,4 +1,4 @@
-# p1853: canary engine scaled up while draining finishes the drain  mode=canary Ne=2 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 canary=auto during=canary-draining verb=scale scale_e=4 cell=canary/Draining/scale co=none topo=engine
+# p1853: canary engine scaled up while draining finishes the drain  mode=canary Ne=2 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 canary=auto during=canary-draining verb=scale scale_e=4 cell=canary/Draining/replicas co=none topo=engine
 # The drain window is what makes Draining observable: without scaleDownDelaySeconds the final step's Promoting lasts one reconcile, shorter than the sampler.
 apiVersion: ome.io/v1beta1
 kind: InferenceService
