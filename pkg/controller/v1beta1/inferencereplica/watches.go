@@ -171,14 +171,30 @@ func (r *Reconciler) tpuSliceToIR(_ context.Context, obj client.Object) []reconc
 	return []reconcile.Request{{NamespacedName: owner}}
 }
 
-// tpuSliceEventHandler enqueues what tpuSliceToIR maps a slice event to, and
+// tpuSliceEventHandler enqueues what tpuSliceToIR maps a slice event to. It
+// also times the provisioning of the slices the controller created, and
 // counts every provisioned slice the API server removes.
 func (r *Reconciler) tpuSliceEventHandler() handler.EventHandler {
-	return tpuSliceEvents{EventHandler: handler.EnqueueRequestsFromMapFunc(r.tpuSliceToIR)}
+	h := tpuSliceEvents{EventHandler: handler.EnqueueRequestsFromMapFunc(r.tpuSliceToIR)}
+	if r.TPUSliceProvisioning != nil {
+		h.readyStates = r.TPUSliceProvisioning.Slice.ReadyStates
+	}
+	return h
 }
 
 type tpuSliceEvents struct {
 	handler.EventHandler
+	readyStates []string
+}
+
+func (h tpuSliceEvents) Create(ctx context.Context, evt event.TypedCreateEvent[client.Object], q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+	sliceprovision.ObserveReady(evt.Object, h.readyStates)
+	h.EventHandler.Create(ctx, evt, q)
+}
+
+func (h tpuSliceEvents) Update(ctx context.Context, evt event.TypedUpdateEvent[client.Object], q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+	sliceprovision.ObserveReady(evt.ObjectNew, h.readyStates)
+	h.EventHandler.Update(ctx, evt, q)
 }
 
 func (h tpuSliceEvents) Delete(ctx context.Context, evt event.TypedDeleteEvent[client.Object], q workqueue.TypedRateLimitingInterface[reconcile.Request]) {

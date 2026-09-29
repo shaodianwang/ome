@@ -756,7 +756,8 @@ func (r *capturingRecorder) AnnotatedEventf(object k8sruntime.Object, _ map[stri
 }
 
 // irStatusMetric reads one sample of a write-boundary metric from the
-// controller-runtime registry; zero when the series does not exist.
+// controller-runtime registry; zero when the series does not exist. For a
+// histogram it reads the number of observations.
 func irStatusMetric(t *testing.T, name string, labels map[string]string) float64 {
 	t.Helper()
 	families, err := metrics.Registry.Gather()
@@ -776,6 +777,9 @@ func irStatusMetric(t *testing.T, name string, labels map[string]string) float64
 			}
 			if metric.Gauge != nil {
 				return metric.Gauge.GetValue()
+			}
+			if metric.Histogram != nil {
+				return float64(metric.Histogram.GetSampleCount())
 			}
 		}
 	}

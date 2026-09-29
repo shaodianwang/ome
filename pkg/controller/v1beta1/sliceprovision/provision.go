@@ -220,6 +220,7 @@ func (p *Provisioner) Ensure(ctx context.Context, d Demand, slot Slot) (Placemen
 		}
 		if created {
 			slicesCreated.WithLabelValues(spec.Type, spec.Topology).Inc()
+			provisionStarted(s)
 		}
 	}
 	return p.classify(s, spec)

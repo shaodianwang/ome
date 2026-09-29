@@ -12,6 +12,7 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	schedulingv1alpha1 "sigs.k8s.io/scheduler-plugins/apis/scheduling/v1alpha1"
 
@@ -681,6 +682,52 @@ func TestTPUSliceEventHandler(t *testing.T) {
 			}
 			if got := irStatusMetric(t, "ome_tpu_slice_released_total", releasedLabels) - before; got != tc.wantReleased {
 				t.Fatalf("released slices counted = %v, want %v", got, tc.wantReleased)
+			}
+		})
+	}
+}
+
+// TestTPUSliceEventHandlerTimesProvisioning pins that the create or update
+// event that first shows a slice the controller created as ready times its
+// provisioning, and that the events before and after it don't.
+func TestTPUSliceEventHandlerTimesProvisioning(t *testing.T) {
+	ir := optedInIR("llama-engine", "prod", 1)
+	labels := map[string]string{"slice_type": "type-a", "topology": "2x2x1"}
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name string
+		// send sends the handler an event that shows the slice as cur, which
+		// the watch last saw as prev.
+		send func(h handler.EventHandler, q *recordingQueue, prev, cur client.Object)
+	}{
+		{name: "update", send: func(h handler.EventHandler, q *recordingQueue, prev, cur client.Object) {
+			h.Update(ctx, event.UpdateEvent{ObjectOld: prev, ObjectNew: cur}, q)
+		}},
+		{name: "create", send: func(h handler.EventHandler, q *recordingQueue, _, cur client.Object) {
+			h.Create(ctx, event.CreateEvent{Object: cur}, q)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, c := newSliceReconciler(t, ir.DeepCopy())
+			name := seedSlice(t, r, c, ir, sliceprovision.Slot{Instance: 0}, "")
+			pending := getSlice(t, c, name)
+			setSliceState(t, c, name, sliceStateReady)
+			ready := getSlice(t, c, name)
+			h, q := r.tpuSliceEventHandler(), &recordingQueue{}
+			before := irStatusMetric(t, "ome_tpu_slice_provision_duration_seconds", labels)
+			for _, step := range []struct {
+				seen      string
+				prev, cur client.Object
+				want      float64 // provisioning times observed so far
+			}{
+				{seen: "pending", prev: pending, cur: pending, want: 0},
+				{seen: "ready", prev: pending, cur: ready, want: 1},
+				{seen: "ready again", prev: ready, cur: ready, want: 1},
+			} {
+				tc.send(h, q, step.prev, step.cur)
+				if got := irStatusMetric(t, "ome_tpu_slice_provision_duration_seconds", labels) - before; got != step.want {
+					t.Fatalf("seen %s: provisioning times observed = %v, want %v", step.seen, got, step.want)
+				}
 			}
 		})
 	}

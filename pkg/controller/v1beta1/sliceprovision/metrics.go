@@ -3,7 +3,9 @@ package sliceprovision
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -11,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/clock"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -49,6 +52,13 @@ var (
 		Help: "TPU slice creates by the controller that failed, by slice type, topology and reason. The reason is the API server's status reason, such as Forbidden or Invalid; OwnershipConflict when another owner's slice has the name; or Unknown, as for a network error. The owner's reconcile retries the create, and each failed attempt counts.",
 	}, []string{"slice_type", "topology", "reason"})
 
+	sliceProvisionSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "ome_tpu_slice_provision_duration_seconds",
+		Help: "Seconds from the controller creating a TPU slice to its watch first seeing the slice in a ready state, by slice type and topology. Only slices the current leader created are timed, and a slice released before it is ready is not observed.",
+		// OME's readiness buckets: one second to a little over four hours.
+		Buckets: prometheus.ExponentialBuckets(1, 2, 15),
+	}, sliceLabels)
+
 	sliceStates = &stateCollector{desc: prometheus.NewDesc(
 		"ome_tpu_slices",
 		"TPU slices the controller provisioned that exist now, by slice type, topology and state. A slice being deleted is terminating. Otherwise it is orphaned when the owner it was provisioned for no longer exists, ready when its state is a configured ready state, and pending in any other state, including a failed one. Reported by the leader only.",
@@ -57,7 +67,49 @@ var (
 )
 
 func init() {
-	ctrlmetrics.Registry.MustRegister(slicesCreated, slicesReleased, sliceCreateFailures, sliceStates)
+	ctrlmetrics.Registry.MustRegister(slicesCreated, slicesReleased, sliceCreateFailures, sliceProvisionSeconds, sliceStates)
+}
+
+// provisionStarts holds when this process created each slice its watch has
+// not yet seen ready, by UID.
+var provisionStarts = struct {
+	sync.Mutex
+	since map[types.UID]time.Time
+}{since: map[types.UID]time.Time{}}
+
+// provisionClock times provisioning. Tests replace it.
+var provisionClock clock.PassiveClock = clock.RealClock{}
+
+// provisionStarted starts timing s, which this process just created.
+func provisionStarted(s gke.Slice) {
+	if s.UID == "" {
+		return
+	}
+	provisionStarts.Lock()
+	defer provisionStarts.Unlock()
+	provisionStarts.since[s.UID] = provisionClock.Now()
+}
+
+// ObserveReady times obj's provisioning when it is a slice this process
+// created and readyStates make it ready for the first time. The caller calls
+// it for each slice its watch sees created or updated.
+func ObserveReady(obj client.Object, readyStates []string) {
+	u, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return
+	}
+	provisionStarts.Lock()
+	defer provisionStarts.Unlock()
+	since, ok := provisionStarts.since[u.GetUID()]
+	if !ok {
+		return
+	}
+	s, err := gke.Parse(u)
+	if err != nil || !s.Ready(readyStates) {
+		return
+	}
+	delete(provisionStarts.since, u.GetUID())
+	sliceProvisionSeconds.WithLabelValues(s.Type, s.Topology).Observe(provisionClock.Since(since).Seconds())
 }
 
 // createFailureReason is the reason a failed create counts under: the API
@@ -73,10 +125,17 @@ func createFailureReason(err error) string {
 }
 
 // ObserveDeleted counts obj as released when it is a slice provisioned for an
-// owner. The caller calls it once for each slice the API server removes.
+// owner, and stops timing its provisioning. The caller calls it once for each
+// slice the API server removes.
 func ObserveDeleted(obj client.Object) {
 	u, ok := obj.(*unstructured.Unstructured)
-	if !ok || u.GetLabels()[LabelOwnerUID] == "" {
+	if !ok {
+		return
+	}
+	provisionStarts.Lock()
+	delete(provisionStarts.since, u.GetUID())
+	provisionStarts.Unlock()
+	if u.GetLabels()[LabelOwnerUID] == "" {
 		return
 	}
 	s, err := gke.Parse(u)

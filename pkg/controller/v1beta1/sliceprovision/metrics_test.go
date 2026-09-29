@@ -5,6 +5,7 @@ import (
 	"errors"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/prometheus/client_golang/prometheus"
@@ -14,18 +15,26 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/clock"
+	clocktesting "k8s.io/utils/clock/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
-// TestMetricNames pins the counters' names, which dashboards and alerts key on.
+// TestMetricNames pins the metrics' names, which dashboards and alerts key on.
 func TestMetricNames(t *testing.T) {
 	slicesCreated.WithLabelValues("type-a", "2x2x1")
 	slicesReleased.WithLabelValues("type-a", "2x2x1")
 	sliceCreateFailures.WithLabelValues("type-a", "2x2x1", "Forbidden")
-	for _, name := range []string{"ome_tpu_slice_created_total", "ome_tpu_slice_released_total", "ome_tpu_slice_create_failures_total"} {
+	sliceProvisionSeconds.WithLabelValues("type-a", "2x2x1")
+	for _, name := range []string{
+		"ome_tpu_slice_created_total",
+		"ome_tpu_slice_released_total",
+		"ome_tpu_slice_create_failures_total",
+		"ome_tpu_slice_provision_duration_seconds",
+	} {
 		if got, err := testutil.GatherAndCount(ctrlmetrics.Registry, name); err != nil || got == 0 {
 			t.Errorf("%s: %d series (err %v), want it registered", name, got, err)
 		}
@@ -65,6 +74,145 @@ func TestObserveDeleted(t *testing.T) {
 			}
 			if got := testutil.CollectAndCount(slicesReleased); got != wantSeries {
 				t.Fatalf("released series = %d, want %d", got, wantSeries)
+			}
+		})
+	}
+}
+
+// fakeProvisionClock times provisioning on a fake clock until the test ends.
+func fakeProvisionClock(t *testing.T) *clocktesting.FakeClock {
+	t.Helper()
+	c := clocktesting.NewFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	provisionClock = c
+	t.Cleanup(func() { provisionClock = clock.RealClock{} })
+	return c
+}
+
+// provisionTimes is a series of the provisioning histogram.
+type provisionTimes struct {
+	Count uint64
+	Sum   float64
+}
+
+// collectProvisionTimes gathers the provisioning histogram, keyed
+// type/topology.
+func collectProvisionTimes(t *testing.T) map[string]provisionTimes {
+	t.Helper()
+	reg := prometheus.NewPedanticRegistry()
+	reg.MustRegister(sliceProvisionSeconds)
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	got := map[string]provisionTimes{}
+	for _, f := range families {
+		for _, m := range f.GetMetric() {
+			l := map[string]string{}
+			for _, p := range m.GetLabel() {
+				l[p.GetName()] = p.GetValue()
+			}
+			got[l["slice_type"]+"/"+l["topology"]] = provisionTimes{Count: m.GetHistogram().GetSampleCount(), Sum: m.GetHistogram().GetSampleSum()}
+		}
+	}
+	return got
+}
+
+// createSlice has a provisioner on c create the slot's slice for d, and
+// returns the slice as the API server stored it.
+func createSlice(t *testing.T, c client.Client, d Demand, slot Slot) *unstructured.Unstructured {
+	t.Helper()
+	p := newProvisioner(t, c, testOwner)
+	if _, err := p.Ensure(context.Background(), d, slot); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	u, found := getSlice(t, c, p.Name(slot))
+	if !found {
+		t.Fatalf("slice %s not created", p.Name(slot))
+	}
+	return u
+}
+
+func TestObserveReady(t *testing.T) {
+	d := demand(t, "2x2x1")
+	// timedOnce is the histogram after one slice took secs to be ready.
+	timedOnce := func(secs float64) map[string]provisionTimes {
+		return map[string]provisionTimes{"type-a/2x2x1": {Count: 1, Sum: secs}}
+	}
+	for _, tc := range []struct {
+		name string
+		// seen are the states the watch sees the created slice in, one
+		// every 30s. Empty is no state yet.
+		seen     []string
+		deleting bool // the slice is being deleted when seen
+		want     map[string]provisionTimes
+	}{
+		{name: "ready", seen: []string{"ACTIVE"}, want: timedOnce(30)},
+		{name: "ready in another ready state", seen: []string{"ACTIVE_DEGRADED"}, want: timedOnce(30)},
+		{name: "pending, then ready", seen: []string{"", "PROVISIONING", "ACTIVE"}, want: timedOnce(90)},
+		{name: "ready again after a failed health probe", seen: []string{"ACTIVE", "SliceHealthProbeFailed", "ACTIVE"}, want: timedOnce(30)},
+		{name: "never ready", seen: []string{"", "FAILED"}},
+		{name: "ready while being deleted", seen: []string{"ACTIVE"}, deleting: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clk := fakeProvisionClock(t)
+			sliceProvisionSeconds.Reset()
+			created := createSlice(t, newFakeClient(), d, Slot{})
+			for _, state := range tc.seen {
+				clk.Step(30 * time.Second)
+				u := created.DeepCopy()
+				if state != "" {
+					withState(state, "")(u)
+				}
+				if tc.deleting {
+					withFinalizer(u)
+					deleting(u)
+				}
+				ObserveReady(u, testConfig().Slice.ReadyStates)
+			}
+			want := tc.want
+			if want == nil {
+				want = map[string]provisionTimes{}
+			}
+			if diff := cmp.Diff(want, collectProvisionTimes(t)); diff != "" {
+				t.Fatalf("provisioning histogram (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestObserveReadyTimesOnlySlicesItCreated pins that only the slices this
+// process created are timed, and only until they are released.
+func TestObserveReadyTimesOnlySlicesItCreated(t *testing.T) {
+	d := demand(t, "2x2x1")
+	// seenReady is u as the watch sees it once the provider reports it ready.
+	seenReady := func(u *unstructured.Unstructured) *unstructured.Unstructured {
+		u = u.DeepCopy()
+		withState("ACTIVE", "")(u)
+		return u
+	}
+	for _, tc := range []struct {
+		name string
+		seen func(t *testing.T) client.Object // what the watch sees
+	}{
+		{name: "slice that already existed", seen: func(t *testing.T) client.Object {
+			existing := stored(t, newProvisioner(t, newFakeClient(), testOwner), d, Slot{})
+			return seenReady(createSlice(t, newFakeClient(existing), d, Slot{}))
+		}},
+		{name: "slice released before it was ready", seen: func(t *testing.T) client.Object {
+			created := createSlice(t, newFakeClient(), d, Slot{})
+			ObserveDeleted(created)
+			return seenReady(created)
+		}},
+		{name: "typed object", seen: func(t *testing.T) client.Object {
+			created := createSlice(t, newFakeClient(), d, Slot{})
+			return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{UID: created.GetUID()}}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sliceProvisionSeconds.Reset()
+			ObserveReady(tc.seen(t), testConfig().Slice.ReadyStates)
+			if got := collectProvisionTimes(t); len(got) != 0 {
+				t.Fatalf("provisioning histogram = %v, want nothing timed", got)
 			}
 		})
 	}
