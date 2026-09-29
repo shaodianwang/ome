@@ -98,7 +98,7 @@ KUBECTL_OME_OSS_REF_FILE = REPO_ROOT / ".kubectl-ome-oss-ref"
 MC_KIND_SPEC_GROUPS = (
     ("placement", "Multi-cluster placement", (
         "fanout", "lifecycle", "endpoint", "ownership", "reshard", "scale",
-        "trafficmap_gc", "capacity",
+        "trafficmap_gc", "capacity", "backend",
         "legacy_compatibility",
     )),
     ("quota", "Multi-cluster Kueue quota", (

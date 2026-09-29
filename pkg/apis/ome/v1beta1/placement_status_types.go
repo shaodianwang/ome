@@ -21,6 +21,10 @@ const PlacementConverged = "PlacementConverged"
 // and resolved demand for every matched capacity-placement member.
 const PlacementCapacityFresh = "PlacementCapacityFresh"
 
+// PlacementBackendReady reports whether all participating components resolve to
+// OMENative. It is advisory and does not change observed serving readiness.
+const PlacementBackendReady = "PlacementBackendReady"
+
 // PlacementPlanStatus identifies the allocation persisted before member writes.
 // Original assignments remain fixed throughout a transition, including retargets.
 type PlacementPlanStatus struct {

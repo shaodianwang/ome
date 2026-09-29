@@ -15,7 +15,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
-	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/placement/capacity"
 	"github.com/ome-projects/ome/pkg/placement/protocol"
 	"github.com/ome-projects/ome/pkg/placement/resolution"
@@ -141,10 +140,8 @@ func (r *Reconciler) resolveCapacityOn(ctx context.Context, cl client.Client, so
 	if err != nil {
 		return nil, err
 	}
-	for _, component := range demand.Unit.Runtime.Components() {
-		if demand.Unit.Modes[component] != constants.OMENative {
-			return nil, fmt.Errorf("capacity placement requires OMENative %s for member admission and shared surge accounting", component)
-		}
+	if err := protocol.ValidateNativeModes(demand.Unit.Modes); err != nil {
+		return nil, err
 	}
 	if err := protocol.ValidateDemandComponents(desired, demand.Contract); err != nil {
 		return nil, err

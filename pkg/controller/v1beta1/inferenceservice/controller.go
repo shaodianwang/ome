@@ -263,6 +263,10 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// per-Component dispatch is resolved from the merged specs below.
 	deploymentMode := isvcutils.InferenceServiceDeploymentMode(isvc, constants.DeploymentModeType(deployConfig.DefaultDeploymentMode))
 	log.V(1).Info("InferenceService deployment mode resolved", "deploymentMode", deploymentMode)
+	placementMember := protocol.IsAffinityMember(isvc)
+	if placementMember && isvc.DeletionTimestamp.IsZero() && deploymentMode == constants.VirtualDeployment {
+		return r.holdPlacementBackend(ctx, isvc, fmt.Errorf("multicluster placement requires OMENative; VirtualDeployment has no member admission or surge accounting"))
+	}
 
 	// examine DeletionTimestamp to determine if object is under deletion
 	if isvc.ObjectMeta.DeletionTimestamp.IsZero() {
@@ -335,9 +339,11 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	isvcConfig.ModelCache = r.ModelCache.Config
 
 	modelConfigReconciler := multimodelconfig.NewModelConfigReconciler(r.Client, r.Clientset, r.Scheme)
-	result, err := modelConfigReconciler.Reconcile(ctx, isvc) // Added ctx
-	if err != nil {
-		return result, err
+	// A member's mounted model configuration must wait for backend validation.
+	if !placementMember {
+		if result, err := modelConfigReconciler.Reconcile(ctx, isvc); err != nil {
+			return result, err
+		}
 	}
 
 	cdeps := r.buildComponentDeps(isvcConfig)
@@ -562,6 +568,15 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 	if mergedRouter != nil {
 		componentDeploymentModes[v1beta1.RouterComponent] = routerDeploymentMode
+	}
+	if placementMember {
+		if err := protocol.ValidateNativeModes(componentDeploymentModes); err != nil {
+			return r.holdPlacementBackend(ctx, isvc, err)
+		}
+		clearPlacementBackendHold(isvc)
+		if result, err := modelConfigReconciler.Reconcile(ctx, isvc); err != nil {
+			return result, err
+		}
 	}
 
 	// If both engine and decoder exist, it's PD-disaggregated. V(1):

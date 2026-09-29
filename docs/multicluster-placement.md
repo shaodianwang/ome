@@ -18,6 +18,15 @@ of a fleet floor across all matching registrations. Readiness and quota gate
 execution; they do not change those shares. `SplitByCapacity` uses nominal
 hardware weights for the same apportionment and bounded transition.
 
+Every `ClusterAffinity` member requires OMENative for its resolved Engine, Decoder,
+and Router components. This includes modes selected by a runtime or a component
+annotation. An unsupported backend sets the advisory
+`PlacementBackendReady=False` condition and holds workload and mounted model
+configuration updates. Existing serving resources remain intact; correcting the
+runtime or service resumes reconciliation. VirtualDeployment cannot participate.
+Member deletion still permits cleanup. Local services and Legacy members retain
+all deployment modes and do not gain this condition.
+
 ## Static shares
 
 ```yaml
