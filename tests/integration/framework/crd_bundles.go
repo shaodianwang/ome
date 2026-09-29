@@ -97,6 +97,21 @@ var PrometheusOperator = OptionalCRDBundle{
 	},
 }
 
+// GKESlice bundle: accelerator.gke.io/v1beta1.Slice, the cluster-scoped
+// object that binds a TPU partition on a node pool that provisions slices
+// on demand. Required for the InferenceReplica TPU slice provisioning
+// integration tests: the IR reconciler provisions slices only when the
+// CRD is served at setup. Slices are read and written unstructured
+// (pkg/tpuslice/gke), so the bundle has no schemes.
+//
+// The CRD YAML in dep-crds/gke-slice/ is a hand-authored stub; see that
+// directory's SOURCE file for what it models and the refresh procedure.
+var GKESlice = OptionalCRDBundle{
+	Name:    "gke-slice",
+	CRDDir:  "gke-slice",
+	Schemes: nil,
+}
+
 // Kueue bundle: kueue.x-k8s.io/v1beta2.{ResourceFlavor,ClusterQueue,
 // LocalQueue,Workload,Cohort,AdmissionCheck,Topology,…}. v1beta2 is the
 // storage version and the one Kueue's own controllers speak, so the

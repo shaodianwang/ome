@@ -146,6 +146,11 @@ tests/integration/dep-crds/*/
 # the PodMonitor CRD stub for envtest. See its SOURCE file.
 !tests/integration/dep-crds/prometheus-operator/
 !tests/integration/dep-crds/prometheus-operator/**
+# OME handles GKE Slices unstructured and depends on no provider Go module,
+# so the Slice CRD has none to vendor from. Hand-authored stub for envtest.
+# See its SOURCE file.
+!tests/integration/dep-crds/gke-slice/
+!tests/integration/dep-crds/gke-slice/**
 
 # OMENative coordination test harness (hack/omenative-testing): per-run results
 # are local-only (regenerated each run). The generated isvcs/ test matrix IS

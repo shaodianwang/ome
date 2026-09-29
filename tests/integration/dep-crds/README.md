@@ -19,6 +19,7 @@ dep-crds/
 ├── scheduler-plugins/    # scheduling.x-k8s.io PodGroup (module-sourced)
 ├── envoy-gateway/        # gateway.envoyproxy.io BackendTrafficPolicy (hand-vendored)
 ├── prometheus-operator/  # monitoring.coreos.com PodMonitor (hand-vendored)
+├── gke-slice/            # accelerator.gke.io Slice (hand-vendored)
 └── README.md
 ```
 

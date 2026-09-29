@@ -39,7 +39,9 @@ func WithIRMaxConcurrentReconciles(n int) InferenceReplicaOption {
 // controller turns it into pods + status (and flips
 // InstanceStatus.Admitted once the pods are created and not admission-
 // gated). SetupWithManager discovers the scheduler-plugins PodGroup CRD
-// and seeds an Expectations cache.
+// and seeds an Expectations cache. TPU slices are provisioned only when
+// the ConfigMap carries a tpuSliceProvisioning block and the Slice CRD is
+// served, as in production.
 func SetupInferenceReplica(ctx context.Context, mgr ctrl.Manager, opts ...InferenceReplicaOption) error {
 	cfg := &inferenceReplicaOpts{}
 	for _, o := range opts {
@@ -57,6 +59,10 @@ func SetupInferenceReplica(ctx context.Context, mgr ctrl.Manager, opts ...Infere
 	if err != nil {
 		return fmt.Errorf("SetupInferenceReplica: load omenativeStatus configuration: %w", err)
 	}
+	tpuSliceConfig, err := controllerconfig.NewTPUSliceProvisioningConfig(clientset)
+	if err != nil {
+		return fmt.Errorf("SetupInferenceReplica: load tpuSliceProvisioning configuration: %w", err)
+	}
 
 	r := &inferencereplica.Reconciler{
 		Client:                   mgr.GetClient(),
@@ -70,6 +76,7 @@ func SetupInferenceReplica(ctx context.Context, mgr ctrl.Manager, opts ...Infere
 		ScaleUpPodBatchSize:      podBatchSizes.ScaleUp,
 		ScaleDownPodBatchSize:    podBatchSizes.ScaleDown,
 		ScaleDownRequeueInterval: podBatchSizes.ScaleDownRequeueInterval,
+		TPUSliceProvisioning:     tpuSliceConfig,
 	}
 	if err := r.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("SetupInferenceReplica: SetupWithManager: %w", err)

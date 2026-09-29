@@ -785,10 +785,11 @@ KUEUE_MOD_DIR = GOTOOLCHAIN=auto go mod download sigs.k8s.io/kueue@$(KUEUE_CRD_V
 # at these directories (envtest via framework.OptionalCRDBundle, KIND via
 # kindfix CRDPaths). The module-vendored bundles (lws, keda, gateway-api,
 # scheduler-plugins) are gitignored and regenerated here — NOT committed;
-# only the hand-vendored bundles (envoy-gateway, prometheus-operator) are
-# tracked, with a SOURCE file. `make integration-test` runs dep-crds as a
-# prerequisite, and CI's dep-crds-drift step runs it to catch a forgotten
-# regen after a go.mod bump. Maintainers run it locally when bumping a dep.
+# only the hand-vendored bundles (envoy-gateway, prometheus-operator,
+# gke-slice) are tracked, with a SOURCE file. `make integration-test` runs
+# dep-crds as a prerequisite, and CI's dep-crds-drift step runs it to catch
+# a forgotten regen after a go.mod bump. Maintainers run it locally when
+# bumping a dep.
 #
 # Pattern follows kueue/Makefile-deps.mk: locate via `go list -m
 # -mod=readonly`, copy via `cp -f`, never write to GOPATH.

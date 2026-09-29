@@ -1,0 +1,20 @@
+Upstream: the provider's Slice CRD (GKE TPU dynamic slicing)
+Version: v1beta1 (accelerator.gke.io)
+
+Hand-authored CRD stub sufficient for envtest-based integration tests
+of InferenceReplica TPU slice provisioning. OME reads and writes Slices
+unstructured (pkg/tpuslice/gke) and takes no dependency on the
+provider's Go module, so there is no module to vendor the CRD from.
+
+.spec is modeled on the provider's schema: the required fields, the
+topology pattern and length, and the type enum. envtest therefore
+rejects a Slice the provider's API server would reject. .status
+preserves unknown fields (x-kubernetes-preserve-unknown-fields): only
+the provider writes it, and the tests write it in the provider's place.
+
+Production correctness is NOT validated by this stub — the provider's
+controllers do that on a live cluster.
+
+To refresh: when the provider's Slice API changes, update .spec here
+and pkg/tpuslice/gke (the pinned group, version and field paths) in the
+same change.
