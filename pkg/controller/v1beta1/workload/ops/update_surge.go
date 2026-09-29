@@ -469,6 +469,12 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 		if plan.Paused && surgeStepIs(input, inst.Index, workload.UpdateStepSurge) {
 			return false, nil
 		}
+		// The drain is also where a cross-Component gate can act with the
+		// replacement already serving; a held source keeps serving at
+		// Step=Surge, exactly as under a pause.
+		if surgeStepIs(input, inst.Index, workload.UpdateStepSurge) && !drainAdmitted(input, oldPods, surgeTargetName) {
+			return false, nil
+		}
 		// Transition Step Surge → Drain once. Subsequent passes idempotency-
 		// skip inside the helper.
 		if err := status.StampSurgeDrainStep(ctx, input, inst.Index); err != nil {

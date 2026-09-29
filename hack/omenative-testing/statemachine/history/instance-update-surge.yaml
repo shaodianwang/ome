@@ -81,3 +81,5 @@ history:
   - {state: Update/SurgeDrain, event: timer.operationDeadline, variants: [], windows: [before], transition: "", prs: ["#1507"]}
   - {state: Update/Surge, event: api.invalid, variants: [], windows: [], transition: "", prs: ["#1507"]}
   - {state: Update/Surge, event: api.throttled, variants: [], windows: [], transition: "", prs: ["#1507"]}
+  # --- drain-time pairing gate at Step=Surge ------------------------------
+  - {state: Update/Surge, event: gate.deny, variants: [Pairing], windows: [], transition: "", prs: ["#1820"]}

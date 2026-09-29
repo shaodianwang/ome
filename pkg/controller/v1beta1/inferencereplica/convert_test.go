@@ -1618,6 +1618,10 @@ func TestBuildReconcileInput_WiresSequentialGate(t *testing.T) {
 	input := r.buildReconcileInput(context.Background(), engineIR, parent, nil, nil, lifecycleSettings{}, 0, coordination.GroupDefaults{})
 	g.Expect(input.UpdateGate).NotTo(gomega.BeNil(),
 		"UpdateGate must be wired on the IR path when the parent declares coordination")
+	g.Expect(input.DrainGate).NotTo(gomega.BeNil(),
+		"DrainGate must be wired beside the update gate when the parent declares coordination")
+	g.Expect(input.DrainHolds).NotTo(gomega.BeNil(),
+		"a held drain must have a collector, or the gate holds without a RolloutHold")
 
 	allowed, gate, reason := input.UpdateGate(workloadtypes.UpdateStrategySurgeThenDrain, 0, 0)
 	g.Expect(allowed).To(gomega.BeFalse(),

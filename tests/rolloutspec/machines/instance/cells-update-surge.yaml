@@ -87,6 +87,17 @@ cells:
   - {state: Update/Surge, event: pod.ready, variants: [target], windows: [boundary], transition: T-surge-target-ready, outcome: transition, to: Update/SurgeDrain, note: "the same pass stamps SurgeDrain and flips the source's serving gate off under the surge-drain writer key; promotion of the step waits for PodReady rather than ContainersReady", invariants: [surge.le.budget, one.operation.per.instance], placement: kind, coverage: {perm: [], unit: [TestSurgeUpdate_HoldsSourceDrainUntilReplacementPodReady], kind: []}, status: decided}
   - {state: Update/Surge, event: pod.ready, variants: [target], windows: [after], transition: T-surge-target-ready, outcome: ignore, note: "the row is on SurgeDrain; re-observing the replacement's readiness changes nothing because the availability window is consulted only at Step=Surge", placement: perm, coverage: {perm: [], unit: [TestSurgeUpdate_WindowGatesOnlyStepSurge], kind: []}, status: current}
   - {state: Update/Surge, event: pod.ready, variants: [target], windows: [boundary], transition: T-surge-abandon-superseded, outcome: transition, to: Update/SurgeDrain, note: "a replacement that is runtime-ready when the superseded-surge abandon would fire keeps the pin: the abandon guard excludes a ready replacement, so the pass falls through and finishes the cycle on the pinned revision", placement: kind, coverage: {perm: [], unit: [TestSurgeUpdate_BumpDuringBump_ConvergesToFinalRev], kind: []}, status: decided}
+  - state: Update/Surge
+    event: gate.deny
+    variants: [Pairing]
+    outcome: defer
+    note: "the pairing drain gate runs when the replacement is past the promote bar and the source would leave rotation: a denial keeps the source serving at Step=Surge, records a RolloutHold with gate Pairing on the InferenceReplica, and requeues; the source leaves rotation on the first pass the gate admits. Every other gate is consulted only before a fresh dispatch"
+    placement: kind
+    coverage:
+      perm: [p1817, p1818, p1819]
+      unit: [TestSurgeUpdate_DrainGateHoldsTheSourceUntilAllowed, TestGangSurgeUpdate_DrainGateHoldsTheSourceGang]
+      kind: ["1x1 surge transition keeps the old pair serving until the new cohort serves on both sides"]
+    status: decided
   - {state: Update/Surge, event: pod.ready, variants: [target], windows: [after], transition: T-surge-abandon-superseded, outcome: ignore, note: "the abandon already deleted the replacement and reset the source to Ready; a readiness event from the deleted generation is dropped", placement: perm, coverage: {perm: [], unit: [], kind: []}, status: current}
   - {state: Update/Surge, event: pod.ready, variants: [target], windows: [boundary], transition: T-surge-deadline, outcome: ignore, note: "the failed-while-serving guard skips an Instance whose live pods are all ContainersReady and in rotation, so a replacement that reached serving before the deadline write prevents the escalation and the surge advances instead", placement: kind, coverage: {perm: [], unit: [], kind: []}, status: current}
   - {state: Update/Surge, event: pod.ready, variants: [target], windows: [after], transition: T-surge-deadline, outcome: ignore, note: "Phase=Failed is sticky in surge: the surge entry stamp refuses to resurrect a Failed row at the same target, so a late-Ready replacement does not un-fail the Instance", placement: perm, coverage: {perm: [], unit: [TestPatchInstanceStatusSurgingForUpdate_FailedStickyOnSameTarget], kind: []}, status: decided}

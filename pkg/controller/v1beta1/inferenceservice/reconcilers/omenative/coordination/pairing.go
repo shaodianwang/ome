@@ -100,8 +100,10 @@ var pairingComponents = []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1
 //   - When both pairing Components are down to a single serving instance with
 //     no target-cohort capacity anywhere (the 1×1 mutual wall), denying both
 //     first movers would deadlock the rollout permanently, so the step is
-//     allowed; for surge strategies the resulting unpaired window is bounded
-//     by the peer's concurrently-approved surge.
+//     allowed. For surge strategies the drain-time check
+//     (EvaluatePairingDrain) then holds each source until the peer's target
+//     cohort serves, so admitting the first movers costs no unpaired window;
+//     a drain-first strategy has no such point and keeps the window.
 //   - When the acting Component is down to its last serving instance and the
 //     peer already serves the target cohort (the last-hop shape), the step is
 //     the acting side's final unavoidable hop and no other step can create
@@ -118,16 +120,7 @@ func (ctx GateContext) CheckPairing(strategy workloadtypes.UpdateStrategyType, i
 	if ctx.ShortCircuit {
 		return true, ctx.ShortReason
 	}
-	spansEngine, spansDecoder := false, false
-	for _, c := range ctx.Group.Components {
-		switch c {
-		case v1beta1.EngineComponent:
-			spansEngine = true
-		case v1beta1.DecoderComponent:
-			spansDecoder = true
-		}
-	}
-	if !spansEngine || !spansDecoder {
+	if !groupPairsEngineAndDecoder(ctx.Group) {
 		return true, "group does not pair engine and decoder"
 	}
 	target := ctx.ISVC.Spec.RolloutPairingProtocol()

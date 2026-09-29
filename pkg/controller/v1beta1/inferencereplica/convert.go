@@ -226,6 +226,15 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 			allowed, gate, reason := coordination.EvaluateUpdateGate(ctx, r.liveReader(), parent, ir.Spec.Component, r.Recorder, coordDefaults, strategy, inFlightSurge, inFlightUnavail)
 			return allowed, workloadtypes.RolloutHoldGate(gate), reason
 		}
+		// The drain-time half of the pair floor: a surge update asks it with
+		// the replacement already serving, over live pod state.
+		input.DrainGate = func(sourcePods []string) (bool, workloadtypes.RolloutHoldGate, string) {
+			allowed, gate, reason := coordination.EvaluatePairingDrain(ctx, r.liveReader(), parent, ir.Spec.Component, coordDefaults, sourcePods)
+			return allowed, workloadtypes.RolloutHoldGate(gate), reason
+		}
+		// A held drain is reported through the same RolloutHold as a held
+		// start; without a collector the gate would hold silently.
+		input.DrainHolds = &workloadtypes.DrainHolds{}
 	}
 	if policy := ir.Spec.PlacementExecution; policy != nil {
 		input.PauseNewSurge = policy.PauseSurge || protocol.Validate(policy) != nil

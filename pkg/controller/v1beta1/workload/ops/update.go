@@ -41,6 +41,28 @@ func UpdateRequeueInterval(input workload.ReconcileInput) time.Duration {
 // rotation and the replacement's Ready age decides when it may leave. Past
 // that step the source is already draining, and a replacement that flaps
 // Ready must not hold the drained source out of service for another window.
+// drainAdmitted asks the adapter's DrainGate whether the source pods may
+// leave rotation now that their replacement serves. A denial keeps the
+// source at Step=Surge for this pass and records the hold; the next pass
+// asks again. No gate means the drain proceeds.
+func drainAdmitted(input workload.ReconcileInput, sourcePods []*corev1.Pod, target string) bool {
+	if input.DrainGate == nil {
+		return true
+	}
+	names := make([]string, 0, len(sourcePods))
+	for _, pod := range sourcePods {
+		if pod != nil && pod.DeletionTimestamp == nil {
+			names = append(names, pod.Name)
+		}
+	}
+	allowed, gate, reason := input.DrainGate(names)
+	if allowed {
+		return true
+	}
+	input.DrainHolds.Observe(workload.RolloutHold{Gate: gate, Reason: reason, Target: target})
+	return false
+}
+
 func surgeWindowApplies(s *workload.InstanceStatus) bool {
 	return s == nil || s.Operation == nil || s.Operation.Step == workload.UpdateStepSurge
 }

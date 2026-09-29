@@ -60,7 +60,7 @@ events:
   - {id: spec.policyTuning, family: spec, variants: [restartPolicy, migrationPolicy, instanceReadyTimeout, minReadySeconds, markNotReady], description: a lifecycle knob outside the pod template changes}
   - {id: config.changed, family: config, variants: [updateRetry, stuckPodGrace, forceDelete, teardownDeadline, scaleDownInterval, autoMigrateBudget, gangScheduleTimeout, audit, requeue, retryBlockHistoryLimit], description: the named operator configuration value changes while the Instance has work in flight}
   - {id: gate.allow, family: coordination, description: the rollout gate lets this Instance start updating its pods}
-  - {id: gate.deny, family: coordination, variants: [Plan, Pairing, Ratio, Sequential, Budget, RetryBlock, Held], description: the rollout gate holds this Instance back from starting an update}
+  - {id: gate.deny, family: coordination, variants: [Plan, Pairing, Ratio, Sequential, Budget, RetryBlock, Held], description: "the rollout gate holds this Instance back: from starting an update, or, for Pairing, from draining a surge source whose removal would leave no serving engine+decoder pair"}
   - {id: timer.operationDeadline, family: timer, description: "the deadline for the Instance's in-flight operation elapses"}
   - {id: timer.minReady, family: timer, description: the minReadySeconds window after Ready elapses}
   # Quoted: a plain scalar inside a flow mapping may not contain brackets.

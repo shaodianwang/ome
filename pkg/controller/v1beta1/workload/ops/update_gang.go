@@ -312,6 +312,13 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 			input.PromoteWindow.Observe(wait)
 			return false, nil
 		}
+		// The drain is also where a cross-Component gate can act with the
+		// replacement gang already serving; a held source keeps serving at
+		// Step=Surge, exactly as under a pause.
+		if !promotedSurgeTarget && src.Operation != nil && src.Operation.Step == workload.UpdateStepSurge &&
+			!drainAdmitted(input, sourcePods, surgeTargetName) {
+			return false, nil
+		}
 	}
 	if !promotedSurgeTarget && input.ApplyInstanceMutationsWithRetryBlock != nil {
 		claimed, err := claimGangSurgeDrain(ctx, input, src, surgeMarker)

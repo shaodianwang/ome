@@ -136,7 +136,12 @@ states:
       timer.retryAt: the retry gate is consulted before an attempt starts, never during one
       timer.migrationDeadline: no operation pins this index to a migration record
       gate.allow: the coordination update gate is consulted before a fresh Update dispatch, not mid-operation
-      gate.deny: the coordination update gate is consulted before a fresh Update dispatch, not mid-operation
+      gate.deny[Plan]: the coordination update gate is consulted before a fresh Update dispatch, not mid-operation
+      gate.deny[Ratio]: the coordination update gate is consulted before a fresh Update dispatch, not mid-operation
+      gate.deny[Sequential]: the coordination update gate is consulted before a fresh Update dispatch, not mid-operation
+      gate.deny[Budget]: the coordination update gate is consulted before a fresh Update dispatch, not mid-operation
+      gate.deny[RetryBlock]: the retry gate is consulted before an attempt starts, never during one
+      gate.deny[Held]: the retry gate is consulted before an attempt starts, never during one
   - id: Update/SurgeDrain
     phase: Updating
     op: {type: Update, step: SurgeDrain}
@@ -149,7 +154,7 @@ states:
       timer.retryAt: the retry gate is consulted before an attempt starts, never during one
       timer.migrationDeadline: no operation pins this index to a migration record
       gate.allow: the coordination update gate is consulted before a fresh Update dispatch, not mid-operation
-      gate.deny: the coordination update gate is consulted before a fresh Update dispatch, not mid-operation
+      gate.deny: the coordination update gate is consulted before a fresh Update dispatch and the pairing drain gate at Step=Surge; once the source is out of rotation neither is consulted
   - id: Update/GangSurgeTarget
     phase: Creating
     op: {type: Update, step: GangSurgeTarget}

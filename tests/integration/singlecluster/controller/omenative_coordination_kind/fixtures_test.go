@@ -105,8 +105,11 @@ type fixtureOptions struct {
 	engineImage       string
 	engineMinReplicas int
 	startupDelaySec   int
-	engineAnnots      map[string]string
-	engineTopologyKey string
+	// engineStartupDelaySec delays only the engine's containers, so a spec
+	// can make one side of a prefill/decode pair the slower one.
+	engineStartupDelaySec int
+	engineAnnots          map[string]string
+	engineTopologyKey     string
 
 	engineTopologySpread v1beta1.TopologySpreadPolicy
 	// engineWorkerSize > 0 promotes the engine to a multi-pod gang
@@ -171,6 +174,14 @@ func WithEngineImage(img string) FixtureOption {
 // it is opt-in per spec rather than a fixture default.
 func WithStartupDelay(n int) FixtureOption {
 	return func(o *fixtureOptions) { o.startupDelaySec = n }
+}
+
+// WithEngineStartupDelay is WithStartupDelay for the engine alone: the
+// decoder and router bind at once, so the engine's replacement is reliably
+// the last one Ready in a pairing transition. The engine's containers also
+// get a readiness probe, which is what turns the delay into a NotReady window.
+func WithEngineStartupDelay(n int) FixtureOption {
+	return func(o *fixtureOptions) { o.engineStartupDelaySec = n }
 }
 
 func WithEngineReplicas(n int) FixtureOption {
@@ -572,6 +583,9 @@ func newCoordFixture(namespace string, opts ...FixtureOption) *coordFixture {
 	if o.startupDelaySec > 0 {
 		applyStartupDelay(isvc, o.startupDelaySec)
 	}
+	if o.engineStartupDelaySec > 0 {
+		applyEngineStartupDelay(isvc, o.engineStartupDelaySec)
+	}
 	if len(o.coordGroups) > 0 {
 		// Translate the operator-facing v1 coordination groups the specs
 		// author into v2 spec.rollout.groups[]. Independent groups
@@ -631,6 +645,35 @@ func applyStartupDelay(isvc *v1beta1.InferenceService, sec int) {
 	}
 	if r := isvc.Spec.Router; r != nil {
 		stamp(&r.PodSpec)
+	}
+}
+
+// applyEngineStartupDelay stamps STARTUP_DELAY_SEC and a readiness probe on
+// the engine's containers only (single-pod, leader and worker shapes alike).
+// fake-serving sleeps before it binds, so the probe fails until the delay has
+// elapsed and the pod stays NotReady for the whole window.
+func applyEngineStartupDelay(isvc *v1beta1.InferenceService, sec int) {
+	e := isvc.Spec.Engine
+	if e == nil {
+		return
+	}
+	val := strconv.Itoa(sec)
+	stamp := func(ps *v1beta1.PodSpec) {
+		if ps == nil {
+			return
+		}
+		for i := range ps.Containers {
+			ps.Containers[i].Env = append(ps.Containers[i].Env,
+				corev1.EnvVar{Name: "STARTUP_DELAY_SEC", Value: val})
+			ps.Containers[i].ReadinessProbe = fakeServingReadinessProbe()
+		}
+	}
+	stamp(&e.PodSpec)
+	if e.Leader != nil {
+		stamp(&e.Leader.PodSpec)
+	}
+	if e.Worker != nil {
+		stamp(&e.Worker.PodSpec)
 	}
 }
 

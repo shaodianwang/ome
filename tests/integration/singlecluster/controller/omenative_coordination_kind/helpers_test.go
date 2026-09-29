@@ -373,7 +373,15 @@ func withNodeScopedFailure(c *corev1.Container, failNode, failPod string) {
 	if failPod != "" {
 		c.Env = append(c.Env, corev1.EnvVar{Name: "FAIL_ON_POD", Value: failPod})
 	}
-	c.ReadinessProbe = &corev1.Probe{
+	c.ReadinessProbe = fakeServingReadinessProbe()
+}
+
+// fakeServingReadinessProbe polls fake-serving's /healthz once a second. The
+// fixture runtime carries no probe and these suites run no pod webhook, so
+// without one the kubelet reports a pod Ready the moment its process starts;
+// the probe is what makes a startup delay or a served 503 visible as NotReady.
+func fakeServingReadinessProbe() *corev1.Probe {
+	return &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
 			Path: "/healthz", Port: intstr.FromInt(8080),
 		}},

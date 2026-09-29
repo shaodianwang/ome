@@ -196,6 +196,22 @@ type ReconcileInput struct {
 	// Nil is treated as always-allowed.
 	UpdateGate func(strategy UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (allowed bool, gate RolloutHoldGate, denyReason string)
 
+	// DrainGate, when non-nil, is asked by a surge update right before it
+	// takes its source out of rotation, with the replacement already
+	// serving. It is the drain-time half of a cross-Component gate that
+	// UpdateGate can only evaluate at operation start; sourcePods names the
+	// pods about to leave rotation. allowed=false keeps the source serving
+	// at Step=Surge for this pass, the op records the hold through
+	// DrainHolds, and the dispatcher requeues at the update cadence.
+	//
+	// Nil is treated as always-allowed.
+	DrainGate func(sourcePods []string) (allowed bool, gate RolloutHoldGate, denyReason string)
+
+	// DrainHolds receives the holds DrainGate produced this pass; the
+	// dispatcher allocates it before the Update pass and reports the first
+	// one through RecordRolloutHold.
+	DrainHolds *DrainHolds
+
 	// PauseNewSurge holds fresh migration reservations while an external
 	// placement plan owns the shared allowance. Allocated migrations continue.
 	// Fresh update surge is held by UpdateGate; ordinary floor creation is free.

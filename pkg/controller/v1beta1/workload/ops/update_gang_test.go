@@ -2789,3 +2789,89 @@ func TestGangSurgeUpdate_UnknownMemberHeldWithoutForceDeletePolicy(t *testing.T)
 	}
 	assertGangSourceUntouched(t, f)
 }
+
+// TestGangSurgeUpdate_DrainGateHoldsTheSourceGang is the gang counterpart of
+// the drain-time gate: a PodReady replacement gang with a denying DrainGate
+// leaves every source pod serving; once the gate allows, the source gang
+// drains.
+//
+// Cells: instance/Update/Surge/gate.deny[Pairing]/before
+func TestGangSurgeUpdate_DrainGateHoldsTheSourceGang(t *testing.T) {
+	legacyResetExpectations(t)
+	isvc, _ := surgeISVCReady("gang-d", "prod", 1)
+	plan := gangSurgePlan()
+
+	v1Name := "gang-d-engine-rev-v1hash"
+	v2Name := "gang-d-engine-rev-v2hash"
+	ir := gangSurgeInFlightIR(isvc, v1Name, v2Name)
+	c := gangSchedClient(t, isvc, ir)
+	makeCR(t, c, isvc, v1Name)
+	makeCR(t, c, isvc, v2Name)
+	v1Hash := query.RevisionHashFromControllerRevisionName(v1Name)
+	v2Hash := query.RevisionHashFromControllerRevisionName(v2Name)
+	for _, runner := range []string{"leader", "worker"} {
+		if err := c.Create(context.Background(), gangPodAt(isvc, 0, runner, v1Hash, true, true)); err != nil {
+			t.Fatalf("seed source pod (%s): %v", runner, err)
+		}
+		repl := gangPodAt(isvc, 1, runner, v2Hash, true, true)
+		repl.Status.Conditions = append(repl.Status.Conditions, corev1.PodCondition{Type: corev1.PodReady, Status: corev1.ConditionTrue})
+		if err := c.Create(context.Background(), repl); err != nil {
+			t.Fatalf("seed replacement pod (%s): %v", runner, err)
+		}
+	}
+
+	input := gangInputWithRemove(isvc, c)
+	input.DesiredSpec.GangSchedulingAvailable = true
+	input.DrainHolds = &workload.DrainHolds{}
+	allow := false
+	var asked [][]string
+	input.DrainGate = func(sourcePods []string) (bool, workload.RolloutHoldGate, string) {
+		asked = append(asked, sourcePods)
+		if allow {
+			return true, "", ""
+		}
+		return false, workload.RolloutHoldGatePairing, "peer cohort not serving"
+	}
+	deps := legacyTestDeps(c)
+	deps.EnsureGangPodGroup = gang.EnsureSurgePodGroup(deps)
+	v2 := &appsv1.ControllerRevision{}
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "prod", Name: v2Name}, v2); err != nil {
+		t.Fatalf("get v2 CR: %v", err)
+	}
+	srcServing := func(when string) (present int, serving int) {
+		pods, err := query.LiveListPodsForInstance(context.Background(), c, "prod", "gang-d", workload.ComponentEngine, 0)
+		if err != nil {
+			t.Fatalf("list source pods (%s): %v", when, err)
+		}
+		for _, p := range pods {
+			present++
+			if podreadiness.IsServing(p) {
+				serving++
+			}
+		}
+		return
+	}
+
+	// Denied: the whole source gang keeps serving and the hold is recorded.
+	if _, err := surgeUpdate(context.Background(), deps, input, plan, plan.Instances[0], v2, nil); err != nil {
+		t.Fatalf("gang surge under a denying drain gate: %v", err)
+	}
+	if present, serving := srcServing("held"); present == 0 || serving != present {
+		t.Fatalf("a held drain must leave the source gang serving (present=%d serving=%d)", present, serving)
+	}
+	if len(asked) != 1 || len(asked[0]) != 2 {
+		t.Fatalf("the gate must be asked once with both source pods, got %v", asked)
+	}
+	if hold := input.DrainHolds.First(); hold == nil || hold.Gate != workload.RolloutHoldGatePairing {
+		t.Fatalf("the hold must be recorded, got %+v", hold)
+	}
+
+	// Allowed: the source gang drains.
+	allow = true
+	if _, err := surgeUpdate(context.Background(), deps, input, plan, plan.Instances[0], v2, nil); err != nil {
+		t.Fatalf("gang surge under an allowing drain gate: %v", err)
+	}
+	if present, serving := srcServing("admitted"); present > 0 && serving > 0 {
+		t.Errorf("an admitted drain must take the source gang out of rotation (present=%d serving=%d)", present, serving)
+	}
+}

@@ -100,6 +100,11 @@ func executeUpdatePass(ctx context.Context, deps types.Deps, input types.Reconci
 		// promptly instead of lingering until the next denial-free pass.
 		firstDenial = nil
 	}
+	// A drain the gate held is progress withheld, not an admission denial:
+	// it is reported even when another Instance moved this pass.
+	if hold := input.DrainHolds.First(); hold != nil {
+		firstDenial = hold
+	}
 	if input.RecordRolloutHold != nil {
 		input.RecordRolloutHold(firstDenial)
 	}
