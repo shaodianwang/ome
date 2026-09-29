@@ -53,7 +53,7 @@ var sliceConfig = controllerconfig.TPUSliceProvisioningConfig{
 	},
 	ProvisionOnly: controllerconfig.TPUSliceLabel{Key: "example.com/tpu-provisioning", Value: "on-demand"},
 	Accelerators: map[string]controllerconfig.TPUSliceAccelerator{
-		onDemandAccelerator: {SliceType: "tpu7x", ChipsPerHost: 4, Topologies: []string{"2x2x1", "2x2x4"}},
+		onDemandAccelerator: {SliceType: "tpu7x", ChipsPerHost: 4, Topologies: []string{"2x2x1", metricsTopology, "2x2x4"}},
 		staticAccelerator:   {SliceType: "v6e", ChipsPerHost: 4, Topologies: []string{"2x2"}},
 	},
 	Slice: controllerconfig.TPUSliceObject{

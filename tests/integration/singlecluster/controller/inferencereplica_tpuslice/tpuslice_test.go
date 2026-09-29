@@ -184,8 +184,13 @@ func setFinalizer(obj client.Object, key client.ObjectKey, finalizer string, pre
 // create pass provisions for a new Instance when the status write that
 // would add the Instance's row does not land.
 func provisionForRowlessInstance(ir *v1beta1.InferenceReplica, idx int32) string {
-	demand, needed, err := sliceprovision.Resolve(suiteCtx, k8sClient, &sliceConfig,
-		[]*corev1.PodSpec{&ir.Spec.Runners[0].Template.Spec})
+	var pods []*corev1.PodSpec
+	for i := range ir.Spec.Runners {
+		for range ir.Spec.Runners[i].Size {
+			pods = append(pods, &ir.Spec.Runners[i].Template.Spec)
+		}
+	}
+	demand, needed, err := sliceprovision.Resolve(suiteCtx, k8sClient, &sliceConfig, pods)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(needed).To(BeTrue())
 	p, err := sliceprovision.New(&sliceConfig, k8sClient, k8sClient, k8sClient, sliceprovision.Owner{
