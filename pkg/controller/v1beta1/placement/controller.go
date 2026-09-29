@@ -20,6 +20,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
+	"k8s.io/utils/clock"
 	"knative.dev/pkg/apis"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -118,6 +119,9 @@ type Reconciler struct {
 	// for the whole backoff. Required: SetupWithManager defaults it to
 	// mgr.GetAPIReader() and rejects a reconciler still missing it.
 	APIReader client.Reader
+	// Capacity locates verified hardware inputs for capacity allocations.
+	Capacity      *CapacityConfig
+	CapacityClock clock.PassiveClock
 	// InstanceStatusDecoder decodes the per-Instance representation of the
 	// member-cluster InferenceReplica statuses this controller inspects, under
 	// the operator-configured ColumnarV2 row bound. The zero value carries no

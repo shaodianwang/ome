@@ -50,6 +50,7 @@ type mcWiring struct {
 	dispatcherStepSize     int
 	dispatcherRoundTimeout time.Duration
 	localQueue             string
+	capacity               *placement.CapacityConfig
 	funnelResyncInterval   time.Duration
 	funnelBufferSize       int
 
@@ -128,6 +129,13 @@ func resolveMCWiring(mc *controllerconfig.MultiClusterConfig) mcWiring {
 	if !wc.CacheEnabled {
 		safetyRequeue = pl.RequeueIntervalDuration()
 	}
+	var capacityConfig *placement.CapacityConfig
+	if pl.Capacity != nil {
+		capacityConfig = &placement.CapacityConfig{
+			RootName: pl.Capacity.RootName, MemberOperatorNamespace: pl.Capacity.MemberOperatorNamespace,
+			MaxAge: pl.Capacity.MaxAgeDuration(), StabilityWindow: pl.Capacity.StabilityWindowDuration(), RefreshInterval: pl.Capacity.RefreshIntervalDuration(),
+		}
+	}
 
 	return mcWiring{
 		clientTuning: workloadcluster.ClientTuning{
@@ -155,6 +163,7 @@ func resolveMCWiring(mc *controllerconfig.MultiClusterConfig) mcWiring {
 		dispatcherStepSize:     pl.DispatcherStepSize,
 		dispatcherRoundTimeout: pl.DispatcherRoundTimeoutDuration(),
 		localQueue:             pl.LocalQueue,
+		capacity:               capacityConfig,
 		funnelResyncInterval:   wc.FunnelResyncIntervalDuration(),
 		funnelBufferSize:       wc.FunnelBufferSize,
 		endpoint: placementendpoint.Config{
@@ -398,6 +407,7 @@ func setupMultiCluster(mgr manager.Manager, clientSet kubernetes.Interface, opti
 		DispatcherStepSize:      w.dispatcherStepSize,
 		DispatcherRoundTimeout:  w.dispatcherRoundTimeout,
 		LocalQueue:              w.localQueue,
+		Capacity:                w.capacity,
 	}).SetupWithManager(mgr, convergeOpts...); err != nil {
 		return fmt.Errorf("create Placement controller: %w", err)
 	}

@@ -157,8 +157,13 @@ func TestPlannedMutationsRecheckCompleteAuthority(t *testing.T) {
 						t.Fatal(err)
 					}
 					before := member.DeepCopy()
+					var config *CapacityConfig
+					if action.name == "apply" {
+						config = configureContractApplication(t, source, worker)
+					}
 					connections := identifiedTestClusters{fakeClusters: fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{"member-a": workloadcluster.NewNeverCachingClient(worker)}}, uid: candidate.Allocation.ClusterUID}
 					r, _ := newPlacer(testScheme(t), connections, source, plannedTestRegistration())
+					r.Capacity = config
 					reads := 0
 					r.APIReader = fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(source, plannedTestRegistration()).WithInterceptorFuncs(interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 						if err := c.Get(ctx, key, obj, opts...); err != nil {
@@ -210,8 +215,13 @@ func TestPlannedContractTransport(t *testing.T) {
 				t.Fatal(err)
 			}
 			before := member.DeepCopy()
+			var config *CapacityConfig
+			if !tt.outgoing {
+				config = configureContractApplication(t, source, worker)
+			}
 			connections := identifiedTestClusters{fakeClusters: fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{"member-a": workloadcluster.NewNeverCachingClient(worker)}}, uid: candidate.Allocation.ClusterUID}
 			r, _ := newPlacer(testScheme(t), connections, source, plannedTestRegistration())
+			r.Capacity = config
 			var err error
 			if tt.outgoing {
 				err = r.syncPlannedPolicy(t.Context(), source, candidate)

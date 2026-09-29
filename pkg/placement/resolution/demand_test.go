@@ -125,6 +125,7 @@ func TestResolveDemand(t *testing.T) {
 			}
 			got.Demand.Pools[0].NodeLabels["hardware"] = "mutated"
 			got.Report.Labels = map[string]string{"changed": "true"}
+			got.Hardware[0].Attribution.NodeLabels["hardware"] = "mutated"
 			got.Contract.Components[0].RenderingHash = "mutated"
 			if diff := cmp.Diff(contract.Components[0].RenderingHash, got.Unit.Rendering[v1beta1.EngineComponent]); diff != "" {
 				t.Fatalf("contract aliases unit rendering:\n%s", diff)
@@ -148,6 +149,7 @@ func TestResolveDemandRejectsUnknownInputs(t *testing.T) {
 		{name: "missing rendering", root: "capacity-root", wantErr: "not found", mutate: func(f *demandFixture) { f.service.Spec.Runtime.Name = "missing" }},
 		{name: "child cohort is not a root", root: "capacity-root", wantErr: "local quota root", mutate: func(f *demandFixture) { f.root.Spec.ParentRef = &v1beta1.AcceleratorQuotaParentRef{Name: "parent"} }},
 		{name: "leaf is not a root", root: "capacity-root", wantErr: "local quota root", mutate: func(f *demandFixture) { f.root.Spec.Role = v1beta1.AcceleratorQuotaRoleClusterQueue }},
+		{name: "projected cohort is not a local root", root: "capacity-root", wantErr: "local quota root", mutate: func(f *demandFixture) { f.root.Labels = map[string]string{v1beta1.AcceleratorQuotaOriginLabel: ""} }},
 		{name: "root identity missing", root: "capacity-root", wantErr: "live identity", mutate: func(f *demandFixture) { f.root.UID = "" }},
 		{name: "flavor identity missing", root: "capacity-root", wantErr: "live identity", mutate: func(f *demandFixture) { f.flavors[0].UID = "" }},
 		{name: "ambiguous hardware", root: "capacity-root", wantErr: "multiple", mutate: func(f *demandFixture) { f.service.Spec.Engine.NodeSelector = nil }},

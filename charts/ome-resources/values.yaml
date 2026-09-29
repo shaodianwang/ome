@@ -102,6 +102,9 @@ ome:
         funnelBufferSize: 0      # depth of the funnel's buffered event channel
       # placement: the fan-out placement controller, its status convergence + GC.
       placement:
+        # Opt in after installing current member CRDs/controllers. Supply rootName,
+        # memberOperatorNamespace, maxAge, stabilityWindow, and refreshInterval.
+        capacity: null
         requeueInterval: ""         # status-refresh poll cadence
         gcInterval: ""              # orphan-sweep cadence
         maxConcurrentReconciles: 0  # parallel placement reconciles (0 => single worker)

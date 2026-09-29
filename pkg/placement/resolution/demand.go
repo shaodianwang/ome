@@ -14,12 +14,13 @@ import (
 )
 
 // ResolvedDemand retains verified member rendering, hardware mapping, and root
-// identity. Consumers must match Report to fleet provenance and verify member
-// application before using Reader's fresh hardware sample to authorize a plan.
+// identity. Consumers match Report to fresh fleet provenance before planning,
+// then verify that members apply the rendering before advancing a transition.
 type ResolvedDemand struct {
 	Unit     *ResolvedUnit
 	Demand   capacity.Demand
 	Report   metav1.ObjectMeta
+	Hardware []v1beta1.AcceleratorCapacityStatus
 	Contract *v1beta1.PlacementDemandContract
 }
 
@@ -46,7 +47,8 @@ func (r Resolver) ResolveDemand(ctx context.Context, desired, standing *v1beta1.
 	if err := reads.Get(ctx, client.ObjectKey{Name: rootName}, root); err != nil {
 		return nil, err
 	}
-	if root.Spec.ParentRef != nil || root.Spec.Role != v1beta1.AcceleratorQuotaRoleCohort {
+	_, projected := root.Labels[v1beta1.AcceleratorQuotaOriginLabel]
+	if projected || root.Spec.ParentRef != nil || root.Spec.Role != v1beta1.AcceleratorQuotaRoleCohort {
 		return nil, fmt.Errorf("capacity report is not a local quota root")
 	}
 	var catalog kueuev1beta2.ResourceFlavorList
@@ -62,6 +64,7 @@ func (r Resolver) ResolveDemand(ctx context.Context, desired, standing *v1beta1.
 		return nil, err
 	}
 	out := &ResolvedDemand{Unit: unit, Demand: demand, Report: *root.ObjectMeta.DeepCopy()}
+	out.Hardware = root.DeepCopy().Status.Capacity
 	out.Contract = &v1beta1.PlacementDemandContract{Fingerprint: demand.Fingerprint}
 	for _, component := range []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent} {
 		if hash, exists := unit.Rendering[component]; exists {

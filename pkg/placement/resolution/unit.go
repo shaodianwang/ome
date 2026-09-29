@@ -32,6 +32,7 @@ type ResolvedUnit struct {
 	Engine    components.ReplicaTemplates
 	Decoder   *components.ReplicaTemplates
 	Rendering map[v1beta1.ComponentType]string
+	Modes     map[v1beta1.ComponentType]constants.DeploymentModeType
 }
 
 func (u *ResolvedUnit) Check(ctx context.Context) error {
@@ -65,7 +66,7 @@ func (r Resolver) ResolveUnit(ctx context.Context, desired, standing *v1beta1.In
 		return nil, fmt.Errorf("replica rendering requires configured member accelerator resources")
 	}
 	engine, decoder := rt.Engine.DeepCopy(), rt.Decoder.DeepCopy()
-	engineMode, decoderMode, _, err := isvcutils.DetermineDeploymentModes(engine, decoder, rt.Router, rt.Spec, service.Spec.DeploymentMode)
+	engineMode, decoderMode, routerMode, err := isvcutils.DetermineDeploymentModes(engine, decoder, rt.Router, rt.Spec, service.Spec.DeploymentMode)
 	if err != nil {
 		return nil, err
 	}
@@ -96,7 +97,13 @@ func (r Resolver) ResolveUnit(ctx context.Context, desired, standing *v1beta1.In
 		}
 		return in, nil
 	}
-	out := &ResolvedUnit{Runtime: rt}
+	out := &ResolvedUnit{Runtime: rt, Modes: map[v1beta1.ComponentType]constants.DeploymentModeType{v1beta1.EngineComponent: engineMode}}
+	if decoder != nil {
+		out.Modes[v1beta1.DecoderComponent] = decoderMode
+	}
+	if rt.Router != nil {
+		out.Modes[v1beta1.RouterComponent] = routerMode
+	}
 	engineInputs, err := selectInputs(v1beta1.EngineComponent, engineMode)
 	if err != nil {
 		return nil, err

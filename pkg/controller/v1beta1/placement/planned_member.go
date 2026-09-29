@@ -131,6 +131,9 @@ func (r *Reconciler) placePlannedOn(ctx context.Context, source *v1beta1.Inferen
 		ceiling = source.Spec.Placement.Split.MaxReplicasPerCluster
 	}
 	setPlannedReplicas(desired, assignment.CurrentReplicas, ceiling)
+	if err := r.checkCapacityApplication(ctx, cl, source, desired, assignment); err != nil {
+		return err
+	}
 	policy := executionPolicy(source, assignment)
 	raw, err := protocol.Encode(policy)
 	if err != nil {

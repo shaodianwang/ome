@@ -90,6 +90,60 @@ weight for the exact plan. A missing or stale publication holds the move.
 A settled positive allocation can release its pause without global routing;
 this does not authorize any further replica movement.
 
+## Capacity input contract
+
+The capacity adapter reads each matched member through its identified direct
+connection, resolves the declared Engine and Decoder from that member's runtime
+and configuration, and joins the result to the management root's fleet report.
+Report UID, version, flavor mapping, and registration UID must agree. An empty
+member can supply a complete sample; admission and running workloads are not
+prerequisites for computing nominal weights.
+
+One unit uses the combined Engine and Decoder demand, including all leader and
+worker pods. Each required resource/flavor pool contributes its whole-replica
+quotient of allocatable hardware divided by demand; the smallest quotient is the
+member's weight. Quota budgets, usage, routing weights, and high-water marks do
+not enter this calculation. Ambiguous flavors, stale reports, and unavailable
+members return no partial allocation or equal-share fallback.
+
+The adapter requires OMENative for every declared component because placement
+observes InferenceReplica execution and shared surge accounting. Local services
+retain their existing backend choices. Required node constraints are projected
+onto the complete flavor catalog's label keys for nominal attribution; topology,
+model readiness, and other scheduling constraints remain member admission
+checks. These weights do not guarantee physical fit.
+
+Configure the input adapter through
+`ome.multicluster.placement.capacity` in the resources chart, emitted as
+`multicluster.placement.capacity` in `inferenceservice-config`:
+
+```yaml
+capacity:
+  rootName: capacity-root
+  memberOperatorNamespace: operator-system
+  maxAge: 5m
+  stabilityWindow: 1m
+  refreshInterval: 10s
+```
+
+These are example values, not binary defaults. The block defaults to null; every
+field is required when present, and `refreshInterval` must be shorter than
+`maxAge`. The root name must match the management and member quota collectors.
+All members must expose their configuration in `memberOperatorNamespace`.
+The adapter uses the existing placement `fanoutTimeout` for remote operations.
+
+Capacity collection must provide identified, complete per-cluster flavor reports.
+The placement credential needs reads for the local quota root, ResourceFlavors,
+configuration, runtimes and their dependencies, and RuntimeClasses. Before
+applying a contracted allocation, the controller resolves through the exact
+write connection again and checks the accepted rendering, fresh hardware totals,
+and root identity. A heartbeat alone may advance the report version without
+invalidating an accepted allocation.
+
+The controller still holds `SplitByCapacity` pending until it consumes these
+samples. Upgrade member CRDs, RBAC, and controllers before enabling contracted
+allocations; missing support cannot acknowledge the accepted demand.
+
 ## Status and rollout
 
 `PlacementInputValid` reports syntax and obsolete fields. `PlacementSatisfied`
