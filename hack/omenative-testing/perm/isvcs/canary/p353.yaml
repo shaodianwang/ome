@@ -1,4 +1,4 @@
-# p353: canary-analysis engine XL fleet N=16 breach  mode=canary Ne=16 Nd=0 Nr=0 ceil_e=17 ceil_d=0 ceil_r=0 canary=auto analysis=breach failurelimit=1 co=none topo=engine
+# p353: canary-analysis engine XL fleet N=16 breach  mode=canary Ne=16 Nd=0 Nr=0 ceil_e=17 ceil_d=0 ceil_r=0 canary=auto analysis=breach failurelimit=1 cell=canary/Serving[A]/sampleFails[xl] co=none topo=engine
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p353 }

@@ -1,4 +1,4 @@
-# p307: canary pd-mn manual 50/100  mode=canary Ne=8 Nd=8 Nr=2 ceil_e=9 ceil_d=9 ceil_r=3 canary=manual co=none topo=pd-mn
+# p307: canary pd-mn manual 50/100  mode=canary Ne=8 Nd=8 Nr=2 ceil_e=9 ceil_d=9 ceil_r=3 canary=manual cell=canary/Serving[M]/promote[pdGang] co=none topo=pd-mn
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p307 }

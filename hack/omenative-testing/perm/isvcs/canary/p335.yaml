@@ -1,4 +1,4 @@
-# p335: canary-analysis pd inconclusive->Failed  mode=canary Ne=8 Nd=8 Nr=2 ceil_e=9 ceil_d=9 ceil_r=3 canary=auto analysis=inconclusive oninconclusive=hold failurelimit=1 co=none topo=pd
+# p335: canary-analysis pd inconclusive->Failed  mode=canary Ne=8 Nd=8 Nr=2 ceil_e=9 ceil_d=9 ceil_r=3 canary=auto analysis=inconclusive oninconclusive=hold failurelimit=1 cell=canary/Serving[A]/analysisStall[hold] co=none topo=pd
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p335, annotations: { ome.io/rollout-ready-timeout: "360s" } }

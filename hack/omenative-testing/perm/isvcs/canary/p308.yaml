@@ -1,4 +1,4 @@
-# p308: canary engine auto 25/50/100 3-step  mode=canary Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 canary=auto co=none topo=engine
+# p308: canary engine auto 25/50/100 3-step  mode=canary Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 canary=auto cell=canary/Serving/pauseElapsed[threeStep] co=none topo=engine
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p308 }

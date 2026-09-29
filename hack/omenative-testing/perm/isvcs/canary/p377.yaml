@@ -1,4 +1,4 @@
-# p377: canary pd-mn gang member lost mid-split  mode=canary Ne=8 Nd=8 Nr=2 ceil_e=9 ceil_d=9 ceil_r=3 canary=auto fault=podkill:canary-serving victim=canary floor_soft=1 order_soft=1 cell=canary/Serving/gangMemberLost co=none topo=pd-mn
+# p377: canary pd-mn gang member lost mid-split  mode=canary Ne=8 Nd=8 Nr=2 ceil_e=9 ceil_d=9 ceil_r=3 canary=auto fault=podkill:canary-serving victim=canary floor_soft=1 order_soft=1 cell=canary/Serving/capacityDropped[gang] co=none topo=pd-mn
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p377 }

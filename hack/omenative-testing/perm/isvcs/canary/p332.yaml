@@ -1,4 +1,4 @@
-# p332: canary-analysis engine breach->rollback fl=1  mode=canary Ne=12 Nd=0 Nr=0 ceil_e=13 ceil_d=0 ceil_r=0 canary=auto analysis=breach failurelimit=1 co=none topo=engine
+# p332: canary-analysis engine breach->rollback fl=1  mode=canary Ne=12 Nd=0 Nr=0 ceil_e=13 ceil_d=0 ceil_r=0 canary=auto analysis=breach failurelimit=1 cell=canary/Serving[A]/sampleFails co=none topo=engine
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p332 }

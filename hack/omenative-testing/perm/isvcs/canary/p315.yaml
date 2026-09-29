@@ -1,4 +1,4 @@
-# p315: canary ENGINE UNIT behind a router, pd manual 50/100 (router idle)  mode=canary Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=5 ceil_r=2 canary=manual co=none topo=pd
+# p315: canary ENGINE UNIT behind a router, pd manual 50/100 (router idle)  mode=canary Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=5 ceil_r=2 canary=manual cell=canary/Idle/newTarget[routerIdleManual] co=none topo=pd
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p315 }

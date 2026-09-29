@@ -1,4 +1,4 @@
-# p304: canary engine-mn auto 50/100  mode=canary Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 canary=auto co=none topo=engine-mn
+# p304: canary engine-mn auto 50/100  mode=canary Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 canary=auto cell=canary/Serving/pauseElapsed[gang] co=none topo=engine-mn
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p304 }

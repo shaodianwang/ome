@@ -1,4 +1,4 @@
-# p338: canary-analysis pd 3-step analysis each  mode=canary Ne=8 Nd=8 Nr=2 ceil_e=9 ceil_d=9 ceil_r=3 canary=auto analysis=pass failurelimit=1 co=none topo=pd
+# p338: canary-analysis pd 3-step analysis each  mode=canary Ne=8 Nd=8 Nr=2 ceil_e=9 ceil_d=9 ceil_r=3 canary=auto analysis=pass failurelimit=1 cell=canary/Serving[A]/samplePasses[pdThreeStep] co=none topo=pd
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p338 }

@@ -1,4 +1,4 @@
-# p369: canary engine manual hold with a stable pod dying mid-split  mode=canary Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 canary=manual fault=podkill:canary-serving victim=stable floor_soft=1 cell=canary/Serving/stablePodLost co=none topo=engine
+# p369: canary engine manual hold with a stable pod dying mid-split  mode=canary Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 canary=manual fault=podkill:canary-serving victim=stable floor_soft=1 cell=canary/Serving/capacityDropped[stable] co=none topo=engine
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p369 }

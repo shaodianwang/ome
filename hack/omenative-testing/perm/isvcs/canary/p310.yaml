@@ -1,4 +1,4 @@
-# p310: canary engine manual 25/50/100 3-step  mode=canary Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 canary=manual co=none topo=engine
+# p310: canary engine manual 25/50/100 3-step  mode=canary Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 canary=manual cell=canary/Serving[M]/promote[threeStep] co=none topo=engine
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p310 }

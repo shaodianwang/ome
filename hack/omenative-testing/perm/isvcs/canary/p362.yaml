@@ -1,4 +1,4 @@
-# p362: canary-analysis engine operator LT error pass  mode=canary Ne=12 Nd=0 Nr=0 ceil_e=13 ceil_d=0 ceil_r=0 canary=auto analysis=pass errorrate=0.01 failurelimit=1 co=none topo=engine
+# p362: canary-analysis engine operator LT error pass  mode=canary Ne=12 Nd=0 Nr=0 ceil_e=13 ceil_d=0 ceil_r=0 canary=auto analysis=pass errorrate=0.01 failurelimit=1 cell=canary/Serving[A]/samplePasses[lt] co=none topo=engine
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p362 }

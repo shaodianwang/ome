@@ -1,4 +1,4 @@
-# p331: canary-analysis pd pass->promote  mode=canary Ne=8 Nd=8 Nr=2 ceil_e=9 ceil_d=9 ceil_r=3 canary=auto analysis=pass failurelimit=1 co=none topo=pd
+# p331: canary-analysis pd pass->promote  mode=canary Ne=8 Nd=8 Nr=2 ceil_e=9 ceil_d=9 ceil_r=3 canary=auto analysis=pass failurelimit=1 cell=canary/Serving[A]/samplePasses[pd] co=none topo=pd
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p331 }

@@ -1,4 +1,4 @@
-# p341: canary-analysis engine mixed analysis+timed  mode=canary Ne=12 Nd=0 Nr=0 ceil_e=13 ceil_d=0 ceil_r=0 canary=auto analysis=pass failurelimit=1 co=none topo=engine
+# p341: canary-analysis engine mixed analysis+timed  mode=canary Ne=12 Nd=0 Nr=0 ceil_e=13 ceil_d=0 ceil_r=0 canary=auto analysis=pass failurelimit=1 cell=canary/Serving/pauseElapsed[mixed] co=none topo=engine
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p341 }

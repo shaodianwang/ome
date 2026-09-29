@@ -1,4 +1,4 @@
-# p354: canary-analysis pd XL fleet pd 12+12 breach  mode=canary Ne=12 Nd=12 Nr=2 ceil_e=13 ceil_d=13 ceil_r=3 canary=auto analysis=breach failurelimit=1 co=none topo=pd
+# p354: canary-analysis pd XL fleet pd 12+12 breach  mode=canary Ne=12 Nd=12 Nr=2 ceil_e=13 ceil_d=13 ceil_r=3 canary=auto analysis=breach failurelimit=1 cell=canary/Serving[A]/sampleFails[pdXl] co=none topo=pd
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p354 }

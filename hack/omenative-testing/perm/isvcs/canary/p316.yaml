@@ -1,4 +1,4 @@
-# p316: canary ENGINE UNIT behind a router, no decoder, auto 50/100 (router idle)  mode=canary Ne=6 Nd=0 Nr=2 ceil_e=7 ceil_d=0 ceil_r=2 canary=auto co=none topo=engine
+# p316: canary ENGINE UNIT behind a router, no decoder, auto 50/100 (router idle)  mode=canary Ne=6 Nd=0 Nr=2 ceil_e=7 ceil_d=0 ceil_r=2 canary=auto cell=canary/Idle/newTarget[routerIdleNoDecoder] co=none topo=engine
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p316 }

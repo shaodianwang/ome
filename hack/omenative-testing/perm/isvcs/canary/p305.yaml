@@ -1,4 +1,4 @@
-# p305: canary engine-mn manual 50/100  mode=canary Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 canary=manual co=none topo=engine-mn
+# p305: canary engine-mn manual 50/100  mode=canary Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 canary=manual cell=canary/Serving[M]/promote[gang] co=none topo=engine-mn
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p305 }

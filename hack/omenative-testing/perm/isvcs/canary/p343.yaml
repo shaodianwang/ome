@@ -1,4 +1,4 @@
-# p343: canary-analysis engine multi-metric AND strict-fail  mode=canary Ne=12 Nd=0 Nr=0 ceil_e=13 ceil_d=0 ceil_r=0 canary=auto analysis=breach health=pass failurelimit=1 co=none topo=engine
+# p343: canary-analysis engine multi-metric AND strict-fail  mode=canary Ne=12 Nd=0 Nr=0 ceil_e=13 ceil_d=0 ceil_r=0 canary=auto analysis=breach health=pass failurelimit=1 cell=canary/Serving[A]/sampleFails[multiMetric] co=none topo=engine
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p343 }

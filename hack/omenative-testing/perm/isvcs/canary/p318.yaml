@@ -1,4 +1,4 @@
-# p318: TWO canary units on one ISVC, drives the router unit (engine unit idle)  mode=canary unit=router Ne=4 Nd=4 Nr=2 ceil_e=4 ceil_d=4 ceil_r=3 canary=auto co=none topo=pd
+# p318: TWO canary units on one ISVC, drives the router unit (engine unit idle)  mode=canary unit=router Ne=4 Nd=4 Nr=2 ceil_e=4 ceil_d=4 ceil_r=3 canary=auto cell=canary/Idle/newTarget[twoUnitsRouter] co=none topo=pd
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p318 }

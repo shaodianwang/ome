@@ -1,4 +1,4 @@
-# p348: canary-analysis engine manual promote overrides analysis  mode=canary Ne=12 Nd=0 Nr=0 ceil_e=13 ceil_d=0 ceil_r=0 canary=manual analysis=pass health=breach failurelimit=5 co=none topo=engine
+# p348: canary-analysis engine manual promote overrides analysis  mode=canary Ne=12 Nd=0 Nr=0 ceil_e=13 ceil_d=0 ceil_r=0 canary=manual analysis=pass health=breach failurelimit=5 cell=canary/Serving[A]/promote co=none topo=engine
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p348 }

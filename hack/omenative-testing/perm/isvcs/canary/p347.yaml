@@ -1,4 +1,4 @@
-# p347: canary-analysis engine transient breach recovers  mode=canary Ne=12 Nd=0 Nr=0 ceil_e=13 ceil_d=0 ceil_r=0 canary=auto analysis=pass health=breach failurelimit=8 co=none topo=engine notimpl=1 issue=900
+# p347: canary-analysis engine transient breach recovers  mode=canary Ne=12 Nd=0 Nr=0 ceil_e=13 ceil_d=0 ceil_r=0 canary=auto analysis=pass health=breach failurelimit=8 cell=canary/Serving[A]/sampleFails[transient] co=none topo=engine notimpl=1 issue=900
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p347 }
