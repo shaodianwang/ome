@@ -43,7 +43,7 @@ states:
     phase: Pending
     applies: {strategies: [SurgeThenDrain, RecreatePod, InPlaceIfPossible, InPlaceOnly], shape: [single, gang]}
     decided_in: pkg/controller/v1beta1/workload/reconcile.go
-    note: status-only demotion of a Ready row with no live pods and no operation; written by the truth pass, which runs on paused reconciles only
+    note: status-only demotion of a Ready row with no live pods and no operation, written by the paused truth pass and by the status publication at the end of every pass; the running revision is kept for the pass that rebuilds the row
     not_applicable:
       spec.resetInstances: the reset verb addresses Failed Instances only, so a row in any other phase is skipped before anything about it is read
       timer.operationDeadline: no operation is in flight

@@ -270,10 +270,9 @@ type ComponentCounters struct {
 // The one lifecycle field the publication writes is the phase of a settled
 // Ready row the observation finds no pods for: it publishes Pending, the
 // phase the truth pass moves such a row to, so the phase never contradicts
-// the zero pod count published beside it. restartPolicy is the Component's,
-// because under RecreateInstanceOnPodRestart the restart trigger claims that
-// shape and the row keeps its phase for it (status.DemotableReady).
-func (o *ComponentObservation) TakeInlineV1Publication(desiredByIdx map[int32]int32, targetRevName string, restartPolicy types.RestartPolicy) ([]types.InstanceStatus, ComponentCounters, error) {
+// the zero pod count published beside it (status.DemotableReady). The
+// running revision stays on the row for the pass that rebuilds it.
+func (o *ComponentObservation) TakeInlineV1Publication(desiredByIdx map[int32]int32, targetRevName string) ([]types.InstanceStatus, ComponentCounters, error) {
 	var counters ComponentCounters
 	target := query.RevisionFromName(targetRevName)
 	statuses, err := o.takeInlineV1Statuses(func(row *types.InstanceStatus, current status.InstanceCounters) {
@@ -299,7 +298,7 @@ func (o *ComponentObservation) TakeInlineV1Publication(desiredByIdx map[int32]in
 		return nil, ComponentCounters{}, err
 	}
 	for i := range statuses {
-		if statuses[i].PodCount == 0 && status.DemotableReady(&statuses[i], restartPolicy) {
+		if statuses[i].PodCount == 0 && status.DemotableReady(&statuses[i]) {
 			statuses[i].Phase = types.InstancePhasePending
 		}
 	}

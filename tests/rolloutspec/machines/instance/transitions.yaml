@@ -51,10 +51,17 @@ transitions:
   - id: T-pending-create
     from: Pending
     event: spec.unpause
-    guard: pause is cleared so the Create pass runs again, pods are missing, and no RetryBlock denies the revision
+    guard: pause is cleared so the Create pass runs again, pods are missing, no RetryBlock denies the revision, and the row is not one the restart pass repairs (under RecreateInstanceOnPodRestart a row that records the revision it ran takes T-pending-restart instead)
     to: Create/CreatePods
     effects: [Phase Creating with a Create CreatePods operation committed, pods created]
     decided_in: pkg/controller/v1beta1/workload/ops/create.go
+  - id: T-pending-restart
+    from: Pending
+    event: spec.unpause
+    guard: policy RecreateInstanceOnPodRestart, the row records the revision it ran, the pause no longer suspends the restart pass, the live pod count is below the Instance's desired pod count, and no RetryBlock denies that revision
+    to: Restart/Drain
+    effects: [Incarnation bumped, Phase Restarting with the Restart Drain operation and the pod-count reason recorded, the pod set rebuilt at the running revision rather than the target]
+    decided_in: pkg/controller/v1beta1/workload/ops/restart.go
   - id: T-pending-promote
     from: Pending
     event: pod.containersReady
@@ -167,9 +174,9 @@ transitions:
     from: Ready
     event: pod.deleted
     variant: source
-    guard: paused, policy not RecreateInstanceOnPodRestart, no operation, and the live read confirms no pod backs the row
+    guard: paused with no restart pass repairing the row this reconcile (a frozen pause, or a policy other than RecreateInstanceOnPodRestart), no operation, and the live read confirms no pod backs the row
     to: Pending
-    effects: [Phase Pending with counters, revisions and Incarnation preserved, InstanceDemoted warning event]
+    effects: [Phase Pending with counters, revisions and Incarnation preserved so the pass that rebuilds the row still finds the revision it ran, InstanceDemoted warning event]
     decided_in: pkg/controller/v1beta1/workload/reconcile.go
   - id: T-ready-stuck-failed
     from: Ready

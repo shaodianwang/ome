@@ -4066,3 +4066,74 @@ func TestReadyRow_ServingGateFlipsStampNoTransition(t *testing.T) {
 		})
 	}
 }
+
+// TestPauseFreeze_RecreatePolicyTotalLossDemotesThenRepairs: the only pod
+// of a converged Instance under RecreateInstanceOnPodRestart is deleted
+// while the Component is frozen. Freeze suspends the repair, never the
+// truth: the row is demoted to Pending with its running revision kept, and
+// stays so with nothing recreated for the length of the freeze. Once the
+// pause is downgraded to a plain one the restart pass repairs the row at
+// the revision it ran, with the incarnation bump, although the Component's
+// target moved on under the freeze.
+//
+// Cells: instance/Ready/pod.deleted[source]/boundary@T-ready-demote, instance/Ready/spec.pauseFreeze/before, instance/Pending/spec.pauseFreeze/before, instance/Pending/spec.pauseTrue/before
+func TestPauseFreeze_RecreatePolicyTotalLossDemotesThenRepairs(t *testing.T) {
+	h := newRecoveryHarness(t, false)
+	policy := workloadtypes.RestartPolicyRecreateInstance
+	h.lifecycle.RestartPolicy = &policy
+	h.setTarget(h.revV1, goodImage)
+	if !h.run(30, func() bool { return h.allReady(1) }) {
+		h.dumpState("initial create")
+		t.Fatalf("initial create never converged")
+	}
+	ready := h.instance(0)
+	readyIncarnation, running := ready.Incarnation, ready.RunningRevision
+	if running != h.revV1.Name {
+		t.Fatalf("converged row records %q, want %s", running, h.revV1.Name)
+	}
+
+	h.setTarget(h.revFixed, fixedImage)
+	h.desired.Paused = true
+	h.desired.PauseFreeze = true
+	h.losePods(0)
+	h.step()
+
+	if s := h.instance(0); s == nil || s.Phase != workloadtypes.InstancePhasePending || s.Operation != nil ||
+		s.RunningRevision != running || s.Incarnation != readyIncarnation {
+		h.dumpState("frozen with no pods")
+		t.Fatalf("demotion: got %+v, want Phase=Pending with no operation, the running revision and the incarnation kept", s)
+	}
+	for i := 0; i < 2; i++ {
+		h.step()
+	}
+	if pods := h.podsOf(0); len(pods) != 0 {
+		t.Fatalf("frozen passes recreated %d pod(s)", len(pods))
+	}
+	if s := h.instance(0); s == nil || s.Phase != workloadtypes.InstancePhasePending || s.Incarnation != readyIncarnation {
+		t.Fatalf("demotion did not hold across frozen passes: %+v", s)
+	}
+
+	h.desired.PauseFreeze = false
+	repaired := func() bool {
+		s := h.instance(0)
+		return s != nil && s.Phase == workloadtypes.InstancePhaseReady && s.Operation == nil && s.Incarnation > readyIncarnation
+	}
+	if !h.run(30, repaired) {
+		h.dumpState("after the downgrade to a plain pause")
+		t.Fatalf("the plain pause never repaired the demoted Instance")
+	}
+	s := h.instance(0)
+	if s.RunningRevision != running {
+		t.Fatalf("repaired row records %q, want the running revision %s: repair never advances a rollout", s.RunningRevision, running)
+	}
+	pods := h.podsOf(0)
+	if len(pods) != 1 {
+		t.Fatalf("repaired Instance has %d live pod(s), want 1", len(pods))
+	}
+	if got, want := pods[0].Labels[query.LabelRevisionHash], query.RevisionFromName(running).Hash(); got != want {
+		t.Fatalf("rebuilt pod revision label = %q, want %q (the running revision, not the target minted under the freeze)", got, want)
+	}
+	if got := pods[0].Labels[query.LabelInstanceIncarnation]; got != strconv.FormatInt(s.Incarnation, 10) {
+		t.Fatalf("rebuilt pod incarnation label = %q, want %d", got, s.Incarnation)
+	}
+}

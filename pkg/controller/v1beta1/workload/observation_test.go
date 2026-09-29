@@ -113,7 +113,7 @@ func TestPublicationObservationReusesOwnedRowsWithoutMutatingSource(t *testing.T
 	if _, err := observation.TakeInlineV1Statuses(); err == nil {
 		t.Fatal("publication observation was consumed twice")
 	}
-	if _, _, err := observation.TakeInlineV1Publication(nil, "", types.RestartPolicyNone); err == nil {
+	if _, _, err := observation.TakeInlineV1Publication(nil, ""); err == nil {
 		t.Fatal("publication counters accepted a consumed observation")
 	}
 }
@@ -145,7 +145,7 @@ func TestComponentObservationProvenanceAndEpochGuard(t *testing.T) {
 	if _, err := observation.InlineV1Statuses(); err == nil {
 		t.Fatal("decision observation materialized publication rows")
 	}
-	if _, _, err := observation.TakeInlineV1Publication(nil, "", types.RestartPolicyNone); err == nil {
+	if _, _, err := observation.TakeInlineV1Publication(nil, ""); err == nil {
 		t.Fatal("decision observation produced publication counters")
 	}
 	if !reflect.DeepEqual(observation.PersistedStatuses(), persisted) {
@@ -289,7 +289,7 @@ func BenchmarkPublicationObservationMaterialization(b *testing.B) {
 				if err != nil {
 					b.Fatal(err)
 				}
-				rows, counters, err := observation.TakeInlineV1Publication(desired, "revision-a", types.RestartPolicyNone)
+				rows, counters, err := observation.TakeInlineV1Publication(desired, "revision-a")
 				if err != nil {
 					b.Fatal(err)
 				}
@@ -614,7 +614,7 @@ func TestTakeInlineV1PublicationCountersIgnorePersistedObservationFields(t *test
 			if err != nil {
 				t.Fatalf("NewOwnedPublicationObservation: %v", err)
 			}
-			statuses, got, err := observation.TakeInlineV1Publication(desired, test.target, types.RestartPolicyNone)
+			statuses, got, err := observation.TakeInlineV1Publication(desired, test.target)
 			if err != nil {
 				t.Fatalf("TakeInlineV1Publication: %v", err)
 			}
@@ -676,7 +676,7 @@ func TestTakeInlineV1PublicationUpdatedExcludesRowsPinnedOffTarget(t *testing.T)
 			if err != nil {
 				t.Fatalf("NewOwnedPublicationObservation: %v", err)
 			}
-			_, got, err := observation.TakeInlineV1Publication(map[int32]int32{0: 1, 1: 1, 2: 1}, test.target, types.RestartPolicyNone)
+			_, got, err := observation.TakeInlineV1Publication(map[int32]int32{0: 1, 1: 1, 2: 1}, test.target)
 			if err != nil {
 				t.Fatalf("TakeInlineV1Publication: %v", err)
 			}
@@ -692,11 +692,11 @@ func TestTakeInlineV1PublicationUpdatedExcludesRowsPinnedOffTarget(t *testing.T)
 
 // A settled Ready row publishes against the Pod observation of its own
 // pass. With no pods it publishes Pending, the phase the truth pass moves
-// such a row to, beside the zero pod count; an observation that finds a
-// Ready pod for it publishes Ready again. Presence is the rule, not
-// readiness: a pod that is not yet Ready keeps the phase and the counters
-// carry the readiness. Under RecreateInstanceOnPodRestart the restart
-// trigger claims Ready-with-pod-loss, so the row keeps its phase for it.
+// such a row to, beside the zero pod count, under every restart policy;
+// the running revision stays on the row for the pass that rebuilds it. An
+// observation that finds a Ready pod for it publishes Ready again.
+// Presence is the rule, not readiness: a pod that is not yet Ready keeps
+// the phase and the counters carry the readiness.
 func TestTakeInlineV1PublicationDemotesReadyRowWithoutPods(t *testing.T) {
 	readySince := metav1.Unix(1700000000, 0)
 	rows := func() []types.InstanceStatus {
@@ -707,14 +707,14 @@ func TestTakeInlineV1PublicationDemotesReadyRowWithoutPods(t *testing.T) {
 				Operation: &types.InstanceOperation{ID: "update-2", Type: types.InstanceOperationUpdate, Step: types.UpdateStepSurge, TargetRevision: "rev-b"}},
 		}
 	}
-	publish := func(t *testing.T, byInstance map[int32][]*corev1.Pod, policy types.RestartPolicy) ([]types.InstanceStatus, workload.ComponentCounters) {
+	publish := func(t *testing.T, byInstance map[int32][]*corev1.Pod) ([]types.InstanceStatus, workload.ComponentCounters) {
 		t.Helper()
 		observation, err := workload.NewOwnedPublicationObservation(
 			rows(), workload.NewCachedSelectorPodObservation(nil, byInstance), nil, status.AvailabilityWindow{})
 		if err != nil {
 			t.Fatalf("NewOwnedPublicationObservation: %v", err)
 		}
-		statuses, counters, err := observation.TakeInlineV1Publication(map[int32]int32{0: 1, 1: 1, 2: 1}, "rev-a", policy)
+		statuses, counters, err := observation.TakeInlineV1Publication(map[int32]int32{0: 1, 1: 1, 2: 1}, "rev-a")
 		if err != nil {
 			t.Fatalf("TakeInlineV1Publication: %v", err)
 		}
@@ -723,12 +723,15 @@ func TestTakeInlineV1PublicationDemotesReadyRowWithoutPods(t *testing.T) {
 	backed := observationPod("pod-0", "node-a", true, true, false)
 
 	t.Run("no pods publishes Pending", func(t *testing.T) {
-		statuses, counters := publish(t, map[int32][]*corev1.Pod{0: {backed}}, types.RestartPolicyNone)
+		statuses, counters := publish(t, map[int32][]*corev1.Pod{0: {backed}})
 		if statuses[0].Phase != types.InstancePhaseReady {
 			t.Errorf("backed row phase = %s, want Ready", statuses[0].Phase)
 		}
 		if statuses[1].Phase != types.InstancePhasePending || statuses[1].PodCount != 0 {
 			t.Errorf("unbacked row = phase %s with %d pod(s), want Pending with none", statuses[1].Phase, statuses[1].PodCount)
+		}
+		if statuses[1].RunningRevision != "rev-a" {
+			t.Errorf("unbacked row RunningRevision = %q, want rev-a kept for the pass that rebuilds it", statuses[1].RunningRevision)
 		}
 		if statuses[1].ReadySince == nil || !statuses[1].ReadySince.Equal(&readySince) {
 			t.Errorf("unbacked row ReadySince = %v, want the anchor preserved", statuses[1].ReadySince)
@@ -743,7 +746,7 @@ func TestTakeInlineV1PublicationDemotesReadyRowWithoutPods(t *testing.T) {
 
 	t.Run("a pod that is not yet Ready keeps the phase", func(t *testing.T) {
 		starting := observationPod("pod-1", "", false, false, false)
-		statuses, counters := publish(t, map[int32][]*corev1.Pod{0: {backed}, 1: {starting}}, types.RestartPolicyNone)
+		statuses, counters := publish(t, map[int32][]*corev1.Pod{0: {backed}, 1: {starting}})
 		if statuses[1].Phase != types.InstancePhaseReady || statuses[1].PodCount != 1 {
 			t.Errorf("row with a starting pod = phase %s with %d pod(s), want Ready with one", statuses[1].Phase, statuses[1].PodCount)
 		}
@@ -754,19 +757,12 @@ func TestTakeInlineV1PublicationDemotesReadyRowWithoutPods(t *testing.T) {
 
 	t.Run("a Ready pod publishes Ready again", func(t *testing.T) {
 		replacement := observationPod("pod-1", "node-b", true, true, false)
-		statuses, counters := publish(t, map[int32][]*corev1.Pod{0: {backed}, 1: {replacement}}, types.RestartPolicyNone)
+		statuses, counters := publish(t, map[int32][]*corev1.Pod{0: {backed}, 1: {replacement}})
 		if statuses[1].Phase != types.InstancePhaseReady || statuses[1].PodCount != 1 {
 			t.Errorf("rebacked row = phase %s with %d pod(s), want Ready with one", statuses[1].Phase, statuses[1].PodCount)
 		}
 		if counters.ReadyReplicas != 2 {
 			t.Errorf("ReadyReplicas = %d, want 2", counters.ReadyReplicas)
-		}
-	})
-
-	t.Run("restart-owned pod loss keeps Ready", func(t *testing.T) {
-		statuses, _ := publish(t, map[int32][]*corev1.Pod{0: {backed}}, types.RestartPolicyRecreateInstance)
-		if statuses[1].Phase != types.InstancePhaseReady {
-			t.Errorf("unbacked row phase = %s, want Ready left for the restart pass", statuses[1].Phase)
 		}
 	})
 }

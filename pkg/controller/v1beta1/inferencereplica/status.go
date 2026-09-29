@@ -219,7 +219,7 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 		if target != nil {
 			targetName = target.Name
 		}
-		publication, counters, err := observation.TakeInlineV1Publication(desiredByIdx, targetName, plan.RestartPolicy)
+		publication, counters, err := observation.TakeInlineV1Publication(desiredByIdx, targetName)
 		if err != nil {
 			return fmt.Errorf("aggregateAndWriteStatus: consume publication observation: %w", err)
 		}

@@ -239,16 +239,15 @@ func CountAvailableInstances(insts []types.InstanceStatus, desiredByIdx map[int3
 }
 
 // DemotableReady reports whether a settled Ready row — Ready with no
-// operation — is demoted to Pending once it has no pods, rather than
-// left Ready for a pass that keys on that phase. Under
-// RecreateInstanceOnPodRestart the restart trigger starts on
-// Ready-with-pod-loss and rebuilds at the running revision, so the row
-// keeps its phase for it; under every other policy nothing keys on it,
-// and the Create pass re-materializes a Pending row exactly as it would a
-// Ready one. The truth pass and the status publication both decide by
+// operation — is demoted to Pending once it has no pods. The demotion
+// keeps the running revision, so no recovery path keys on the phase: the
+// Create pass re-materializes a Pending row exactly as it would a Ready
+// one, and under RecreateInstanceOnPodRestart the restart trigger reads
+// the demoted row (types.DemotedReady) as it reads Ready and rebuilds at
+// that revision. The truth pass and the status publication both decide by
 // this, so a row never claims Ready beside a zero pod count.
-func DemotableReady(row *types.InstanceStatus, restartPolicy types.RestartPolicy) bool {
-	return restartPolicy != types.RestartPolicyRecreateInstance && types.StateOf(row) == types.StateReady
+func DemotableReady(row *types.InstanceStatus) bool {
+	return types.StateOf(row) == types.StateReady
 }
 
 // ReachedDesiredShape reports whether insts have converged to the desired

@@ -823,9 +823,13 @@ func allowCreateForMissingInstance(input workload.ReconcileInput, plan workload.
 			}
 		}
 	}
+	// A promoted row short of its pod set is the restart pass's under
+	// RecreateInstanceOnPodRestart — Ready, or demoted for losing every
+	// pod — and so is a gang that lost a member: filling either pod by pod
+	// would race the whole-Instance rebuild at the running revision.
 	if plan.RestartPolicy == workload.RestartPolicyRecreateInstance && len(existing) > 0 {
 		s := input.ObservedState.Instance(inst.Index)
-		if s != nil && s.Phase == workload.InstancePhaseReady {
+		if s != nil && (s.Phase == workload.InstancePhaseReady || workload.DemotedReady(s)) {
 			return false, false, 0
 		}
 		if _, lost := instanceLostGangMember(input, plan, s, inst.TotalPods(), existing); lost {

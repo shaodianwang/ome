@@ -1179,12 +1179,15 @@ func TestPlan_Paused_RepairRunsFleetChangesDoNot(t *testing.T) {
 		}
 	})
 
-	t.Run("frozen pause truncates after scale-down", func(t *testing.T) {
+	t.Run("frozen pause truncates after scale-down and the truth pass", func(t *testing.T) {
 		in, plan := build(t)
 		plan.PauseFreeze = true
 		d := planTargetOrFail(t, in, plan, updateTarget(), planSnapshot(in, nil))
-		if !kindsEqual(actionKinds(d), []workload.ActionKind{workload.ActionScaleDown}) {
-			t.Errorf("frozen decision = %v, want [ScaleDown] only", actionKinds(d))
+		// Index 0 is Ready with no pods: the freeze suspends the repair
+		// that a plain pause would open, so the truth pass demotes it.
+		want := []workload.ActionKind{workload.ActionScaleDown, workload.ActionDemote}
+		if !kindsEqual(actionKinds(d), want) {
+			t.Errorf("frozen decision = %v, want %v", actionKinds(d), want)
 		}
 		if d.Escalate {
 			t.Errorf("frozen decision must suspend escalation")
@@ -1423,17 +1426,81 @@ func TestPlan_Demote_UnbackedReadyInstances(t *testing.T) {
 		}
 	})
 
-	t.Run("RecreateInstance components never demote", func(t *testing.T) {
+	t.Run("a loss the restart pass repairs this reconcile is not demoted", func(t *testing.T) {
 		in := unbacked(t)
 		plan := minimalPlan()
 		plan.Paused = true
 		plan.RestartPolicy = types.RestartPolicyRecreateInstance
 		d := planOrFail(t, in, plan, planSnapshot(in, nil))
 		if findAction(d, workload.ActionDemote) != nil {
-			t.Errorf("RecreateInstance must leave Ready-with-pod-loss to the restart pass, got %v", actionKinds(d))
+			t.Errorf("a plain pause keeps the restart pass running, so the loss is its to repair, got %v", actionKinds(d))
 		}
 		if findAction(d, workload.ActionRestart) == nil {
 			t.Errorf("the restart pass must own the recovery, got %v", actionKinds(d))
+		}
+	})
+
+	t.Run("a frozen pause demotes the loss the recreate policy cannot repair", func(t *testing.T) {
+		in := unbacked(t)
+		in.ObservedState.InstanceStatuses[0].RunningRevision = "rev-a"
+		plan := minimalPlan()
+		plan.Paused = true
+		plan.PauseFreeze = true
+		plan.RestartPolicy = types.RestartPolicyRecreateInstance
+		d := planOrFail(t, in, plan, planSnapshot(in, nil))
+		if !kindsEqual(actionKinds(d), []workload.ActionKind{workload.ActionDemote}) {
+			t.Errorf("frozen recreate-policy decision = %v, want [Demote] only: freeze suspends the repair, never the truth", actionKinds(d))
+		}
+	})
+
+	t.Run("a demoted recreate-policy row is repaired once the restart pass runs", func(t *testing.T) {
+		in := unbacked(t)
+		in.ObservedState.InstanceStatuses[0].Phase = types.InstancePhasePending
+		in.ObservedState.InstanceStatuses[0].RunningRevision = "rev-a"
+		plan := minimalPlan()
+		plan.Paused = true
+		plan.RestartPolicy = types.RestartPolicyRecreateInstance
+		d := planOrFail(t, in, plan, planSnapshot(in, nil))
+		ra := findAction(d, workload.ActionRestart)
+		if ra == nil || len(ra.Restarts) != 1 || ra.Restarts[0].Instance.Index != 0 {
+			t.Fatalf("restart selection = %+v, want the demoted row repaired at its running revision", ra)
+		}
+		if ra.Restarts[0].Reason != "pod count 0 below desired 1" {
+			t.Errorf("restart reason = %q, want the pod-count trigger", ra.Restarts[0].Reason)
+		}
+		if ra.Restarts[0].OpensUnavailability {
+			t.Errorf("recovering lost capacity must not be put to the unavailability budget")
+		}
+		if findAction(d, workload.ActionDemote) != nil {
+			t.Errorf("a Pending row has nothing left to demote, got %v", actionKinds(d))
+		}
+	})
+
+	t.Run("a demoted recreate-policy row waits out a frozen pause", func(t *testing.T) {
+		in := unbacked(t)
+		in.ObservedState.InstanceStatuses[0].Phase = types.InstancePhasePending
+		in.ObservedState.InstanceStatuses[0].RunningRevision = "rev-a"
+		plan := minimalPlan()
+		plan.Paused = true
+		plan.PauseFreeze = true
+		plan.RestartPolicy = types.RestartPolicyRecreateInstance
+		d := planOrFail(t, in, plan, planSnapshot(in, nil))
+		if len(d.Actions) != 0 {
+			t.Errorf("frozen decision = %v, want nothing: no repair starts and nothing is left to demote", actionKinds(d))
+		}
+	})
+
+	t.Run("a Pending row that never ran a revision stays with Create", func(t *testing.T) {
+		in := unbacked(t)
+		in.ObservedState.InstanceStatuses[0].Phase = types.InstancePhasePending
+		plan := minimalPlan()
+		plan.RestartPolicy = types.RestartPolicyRecreateInstance
+		d := planOrFail(t, in, plan, planSnapshot(in, nil))
+		if findAction(d, workload.ActionRestart) != nil {
+			t.Errorf("a row with no running revision is a first materialization, got %v", actionKinds(d))
+		}
+		if findAction(d, workload.ActionCreate) == nil {
+			t.Errorf("Create must be planned to materialize it, got %v", actionKinds(d))
 		}
 	})
 

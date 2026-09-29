@@ -1,0 +1,50 @@
+# A Ready Instance under RecreateInstanceOnPodRestart loses its only pod
+# while the rollout is frozen. Freeze suspends the repair, never the truth:
+# the row is demoted with its running revision kept, and stays so for the
+# length of the freeze. Clearing the pause runs the restart pass again,
+# which rebuilds the Instance at the revision it ran, with the incarnation
+# bump, instead of handing the loss to a first materialization at the
+# target.
+scenario: ready-freeze-demote-then-restart
+arrows:
+  - T-ready-demote
+  - T-pending-restart
+  - T-restart-ready
+cells:
+  - instance/Ready/pod.deleted[source]/boundary@T-ready-demote
+  - instance/Pending/spec.unpause/boundary@T-pending-restart
+  - instance/Restart/Drain/pod.ready[target]/boundary@T-restart-ready
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+    paused: true
+    pauseFreeze: true
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: the Ready row is steady under the freeze
+  - tick: 2
+    note: the only pod disappears; the frozen restart pass cannot repair, so the truth pass demotes
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 3
+    note: a further frozen pass writes nothing, the demoted row waits with its running revision kept
+  - tick: 4
+    note: the pause is cleared and the restart pass rebuilds the row at its running revision
+    events:
+      - spec.unpause: {}
+  - tick: 5
+    note: the rebuilt pod reports Ready and the row returns to Ready on the same revision
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}

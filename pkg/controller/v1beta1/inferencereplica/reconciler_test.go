@@ -386,8 +386,13 @@ func TestReconcile_GangCleanupRetainsStatusUntilPodGroupAbsent(t *testing.T) {
 	if statusByIndex(stored.Status.InstanceStatuses, surgeIndex) != nil {
 		t.Fatal("cleanup marker remained after authoritative PodGroup absence")
 	}
+	// The reset clears the source's operation and Failed phase in the
+	// marker's own write. The fixture gives the source no pods, so the
+	// status publication that follows reports the settled row as Pending
+	// rather than Ready.
 	source := statusByIndex(stored.Status.InstanceStatuses, 0)
-	if source == nil || source.Phase != v1beta1.OMENativeInstanceReady || source.Operation != nil {
+	if source == nil || source.Operation != nil ||
+		(source.Phase != v1beta1.OMENativeInstanceReady && source.Phase != v1beta1.OMENativeInstancePending) {
 		t.Fatalf("source was not reset atomically with marker removal: %+v", source)
 	}
 }
@@ -1834,10 +1839,10 @@ func TestRestart_PendingGangMemberTerminal_RebuildsInstance(t *testing.T) {
 // pass where the RetryBlock recorded against its revision has come due,
 // and is not while the block still denies the revision.
 //
-// While the block denies, the rebuild is not merely postponed — the
-// Create pass fills the missing member instead, because below Ready it
-// owns an Instance the rebuild gate declined. That is the behavior the
-// held case records.
+// While the block denies, no whole-gang rebuild opens: below Ready the
+// repair answers to the revision's RetryBlock, and a Held block denies
+// the Create pass's fill of the missing member at that revision as well,
+// so the held case records a row that waits on the record.
 //
 // Arrows: T-pending-gang-restart
 func TestRestart_PendingGangMemberLost_RebuildsOnceRetryBlockIsDue(t *testing.T) {

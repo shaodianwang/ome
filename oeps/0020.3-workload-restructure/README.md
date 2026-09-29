@@ -264,7 +264,7 @@ The table's current content:
 
 | Phase | Operation | Owner | holds writable | Interruptible | escalation acts | notes |
 |---|---|---|---|---|---|---|
-| Empty, Pending | none | create (materialize) | no operation to hold | stuck-pod grace on Pending, as the leftover-pod escalation | no | the truth pass under pause demotes |
+| Empty, Pending | none | create (materialize) | no operation to hold | stuck-pod grace on Pending, as the leftover-pod escalation | no | the truth pass under pause demotes; under RecreateInstanceOnPodRestart the restart trigger claims a demoted row that records its running revision and rebuilds at it |
 | Creating | Create | create | yes | boundary: every hold; immediate: the two clocks | yes (deadline, stuck) | create retires its own superseded attempt |
 | Ready | none | none; triggers may start update, restart, repair, scale-down | no operation to hold | stuck-pod grace only | crash-loop repair after grace only | |
 | Updating | Update/Surge, SurgeDrain | update (surge machine) | yes; SourceUnrouted only here | boundary: every hold, including a pause arriving mid-surge; immediate: the two clocks | yes | |

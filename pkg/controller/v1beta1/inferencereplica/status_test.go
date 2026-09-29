@@ -239,9 +239,10 @@ func TestAggregateAndWriteStatusPersistsCompactRowsAndMirrorsCurrentObservations
 // TestAggregateAndWriteStatus_DemotesReadyRowWithoutPods pins the
 // aggregator's half of the rule: a persisted Ready row whose pod is gone is
 // written back as Pending in the same status write that publishes its zero
-// pod count, the caller's snapshot mirrors the demotion, and the next steady
-// pass writes nothing. The return to Ready is the lifecycle promote's. Under
-// RecreateInstanceOnPodRestart the row keeps Ready for the restart pass.
+// pod count, under every restart policy; the caller's snapshot mirrors the
+// demotion, and the next steady pass writes nothing. The running revision
+// stays on the row: the return to Ready is the lifecycle promote's, and
+// under RecreateInstanceOnPodRestart the restart pass rebuilds at it.
 func TestAggregateAndWriteStatus_DemotesReadyRowWithoutPods(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -249,7 +250,7 @@ func TestAggregateAndWriteStatus_DemotesReadyRowWithoutPods(t *testing.T) {
 		want   v1beta1.OMENativeInstancePhase
 	}{
 		{name: "create-owned pod loss publishes Pending", policy: workloadtypes.RestartPolicyNone, want: v1beta1.OMENativeInstancePending},
-		{name: "restart-owned pod loss keeps Ready", policy: workloadtypes.RestartPolicyRecreateInstance, want: v1beta1.OMENativeInstanceReady},
+		{name: "restart-owned pod loss publishes Pending", policy: workloadtypes.RestartPolicyRecreateInstance, want: v1beta1.OMENativeInstancePending},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -275,6 +276,8 @@ func TestAggregateAndWriteStatus_DemotesReadyRowWithoutPods(t *testing.T) {
 			g.Expect(stored.Get(context.Background(), client.ObjectKeyFromObject(ir), got)).To(gomega.Succeed())
 			g.Expect(got.Status.InstanceStatuses[0].Phase).To(gomega.Equal(test.want))
 			g.Expect(got.Status.InstanceStatuses[0].PodCount).To(gomega.BeZero())
+			g.Expect(got.Status.InstanceStatuses[0].RunningRevision).To(gomega.Equal("rev-a"),
+				"the running revision survives the demotion: it is what a repair rebuilds at")
 			g.Expect(got.Status.InstanceStatuses[0].ReadySince).NotTo(gomega.BeNil())
 			g.Expect(got.Status.InstanceStatuses[0].ReadySince.Time).To(gomega.BeTemporally("==", readySince.Time),
 				"the ready anchor survives the demotion; the next promote re-stamps it")
@@ -2361,7 +2364,7 @@ func TestPublicationObservationMatchesInlineV1Projection(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewOwnedPublicationObservation: %v", err)
 			}
-			materialized, gotCounters, err := observation.TakeInlineV1Publication(test.desired, "rev-running", workloadtypes.RestartPolicyNone)
+			materialized, gotCounters, err := observation.TakeInlineV1Publication(test.desired, "rev-running")
 			if err != nil {
 				t.Fatalf("TakeInlineV1Publication: %v", err)
 			}
@@ -2456,7 +2459,7 @@ func TestPublicationObservationMatchesInlineV1ProjectionAtScale(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewOwnedPublicationObservation: %v", err)
 			}
-			materialized, gotCounters, err := observation.TakeInlineV1Publication(desired, "rev-running", workloadtypes.RestartPolicyNone)
+			materialized, gotCounters, err := observation.TakeInlineV1Publication(desired, "rev-running")
 			if err != nil {
 				t.Fatalf("TakeInlineV1Publication: %v", err)
 			}
@@ -2891,7 +2894,7 @@ func TestPublicationCounters_DeriveFromPodsNotPhases(t *testing.T) {
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 
 	desired := map[int32]int32{0: 1, 1: 1, 2: 1}
-	_, counters, err := observation.TakeInlineV1Publication(desired, "rev-b", workloadtypes.RestartPolicyNone)
+	_, counters, err := observation.TakeInlineV1Publication(desired, "rev-b")
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 
 	g.Expect(counters.Replicas).To(gomega.Equal(int32(3)),
