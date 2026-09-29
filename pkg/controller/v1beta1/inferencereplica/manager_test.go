@@ -245,10 +245,10 @@ func TestSetupWithManager_GangSchedulingFollowsThePodGroupCRD(t *testing.T) {
 }
 
 // TestSetupWithManager_TPUSlicesFollowTheSliceCRD pins the gated half of
-// slice provisioning: slices are read, and so provisioned, only when
-// provisioning is configured and the Slice CRD is installed; a
-// configuration that would overwrite a label the controller sets fails
-// setup.
+// slice provisioning: slices are read, and so provisioned and reported by
+// state, only when provisioning is configured and the Slice CRD is
+// installed; a configuration that would overwrite a label the controller
+// sets fails setup.
 func TestSetupWithManager_TPUSlicesFollowTheSliceCRD(t *testing.T) {
 	overwriting := sliceTestConfig()
 	overwriting.Slice.OwnerKindLabel = sliceprovision.LabelOwnerUID
@@ -287,6 +287,12 @@ func TestSetupWithManager_TPUSlicesFollowTheSliceCRD(t *testing.T) {
 			}
 			if got := r.sliceReader != nil; got != tc.wantReader {
 				t.Fatalf("slices read = %v, want %v", got, tc.wantReader)
+			}
+			// The index can be registered once per cache, so a second
+			// registration fails exactly when setup registered it.
+			err = mgr.GetFieldIndexer().IndexField(context.Background(), &v1beta1.InferenceReplica{}, irUIDIndexField, irUIDIndexExtractor)
+			if got := err != nil; got != tc.wantReader {
+				t.Fatalf("InferenceReplica UID index registered = %v, want %v (second registration: %v)", got, tc.wantReader, err)
 			}
 		})
 	}

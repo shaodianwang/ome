@@ -423,6 +423,7 @@ func newReconciler(t *testing.T, objs ...client.Object) (*Reconciler, client.Cli
 		WithObjects(objs...).
 		WithStatusSubresource(&v1beta1.InferenceReplica{}).
 		WithIndex(&schedulingv1alpha1.PodGroup{}, workloadgang.PodGroupControllerUIDIndexField, workloadgang.PodGroupControllerUIDIndexExtractor).
+		WithIndex(&v1beta1.InferenceReplica{}, irUIDIndexField, irUIDIndexExtractor).
 		Build()
 	return &Reconciler{
 		Client:                   c,

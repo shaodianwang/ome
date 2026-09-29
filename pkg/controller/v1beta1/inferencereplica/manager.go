@@ -54,7 +54,7 @@ import (
 //     and the Slice CRD is present (probed at setup). A slice event
 //     enqueues the InferenceReplica it was provisioned for, so a slice
 //     turning ready releases its withheld pods and a released slice
-//     completes teardown.
+//     completes teardown. The leader also reports the slices by state.
 //
 // The parent InferenceService is NOT watched — the IR's owner ref to
 // its parent means the parent's controller already gets re-enqueued
@@ -124,6 +124,12 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		}
 		if sliceFound {
 			r.sliceReader = mgr.GetCache()
+			if err := mgr.GetFieldIndexer().IndexField(context.Background(), &v1beta1.InferenceReplica{}, irUIDIndexField, irUIDIndexExtractor); err != nil {
+				return fmt.Errorf("inferencereplica: register InferenceReplica UID index: %w", err)
+			}
+			if err := mgr.Add(r.reportSliceStates(mgr.GetCache(), mgr.GetCache())); err != nil {
+				return fmt.Errorf("inferencereplica: add TPU slice state reporting: %w", err)
+			}
 		} else {
 			r.Log.Info("The InferenceReplica controller won't provision TPU slices because the " + gke.GroupVersion.String() + " " + gke.Kind + " CRD is not available; pods are created without slices until it is installed and the manager restarts.")
 		}

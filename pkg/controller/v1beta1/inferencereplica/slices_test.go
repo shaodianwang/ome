@@ -3,6 +3,7 @@ package inferencereplica
 import (
 	"context"
 	"errors"
+	"maps"
 	"strings"
 	"testing"
 	"time"
@@ -10,9 +11,13 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/cache/informertest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
@@ -356,5 +361,172 @@ func TestReleaseSlicesPastDeadline_UnconfiguredDoesNothing(t *testing.T) {
 	r.releaseSlicesPastDeadline(context.Background(), ir)
 	if events := drainEvents(rec); len(events) != 0 {
 		t.Fatalf("an unconfigured controller must not warn about slices, got %v", events)
+	}
+}
+
+func TestIRUIDIndexExtractor(t *testing.T) {
+	ir := baselineIR("llama-engine", "prod", 1)
+	if got := irUIDIndexExtractor(ir); len(got) != 1 || got[0] != string(ir.UID) {
+		t.Fatalf("irUIDIndexExtractor = %v, want [%s]", got, ir.UID)
+	}
+	ir.UID = ""
+	if got := irUIDIndexExtractor(ir); got != nil {
+		t.Fatalf("an InferenceReplica without a UID must not be indexed, got %v", got)
+	}
+}
+
+func TestIRExists(t *testing.T) {
+	ir := baselineIR("llama-engine", "prod", 1)
+	_, c := newReconciler(t, ir)
+	for _, tc := range []struct {
+		name string
+		uid  types.UID
+		want bool
+	}{
+		{name: "the InferenceReplica", uid: ir.UID, want: true},
+		{name: "an earlier InferenceReplica of the same name", uid: "llama-engine-earlier-uid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got, err := irExists(c)(context.Background(), tc.uid); err != nil || got != tc.want {
+				t.Fatalf("irExists(%s) = %v, %v; want %v", tc.uid, got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestIRExists_ListFails(t *testing.T) {
+	_, base := newReconciler(t)
+	c := interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+		List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+			return errors.New("injected list failure")
+		},
+	})
+	if _, err := irExists(c)(context.Background(), "llama-engine-uid"); err == nil || !strings.Contains(err.Error(), "injected list failure") {
+		t.Fatalf("irExists must return the list error, got %v", err)
+	}
+}
+
+// reportedSliceStates reads the TPU slice gauge from the controller-runtime
+// registry, summed by state.
+func reportedSliceStates(t *testing.T) map[string]float64 {
+	t.Helper()
+	families, err := metrics.Registry.Gather()
+	if err != nil {
+		t.Fatalf("gather metrics: %v", err)
+	}
+	got := map[string]float64{}
+	for _, family := range families {
+		if family.GetName() != "ome_tpu_slices" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				if label.GetName() == "state" {
+					got[label.GetValue()] += metric.GetGauge().GetValue()
+				}
+			}
+		}
+	}
+	return got
+}
+
+// blockingInformers holds each GetInformer call until the test receives it
+// on entered and then sends on release, as a starting cache holds the call
+// until the informer syncs.
+type blockingInformers struct {
+	cache.Informers
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b *blockingInformers) GetInformer(ctx context.Context, obj client.Object, opts ...cache.InformerGetOption) (cache.Informer, error) {
+	select {
+	case b.entered <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	select {
+	case <-b.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return b.Informers.GetInformer(ctx, obj, opts...)
+}
+
+// startReportSliceStates runs r.reportSliceStates until ctx is done. Its
+// result arrives on the returned channel.
+func startReportSliceStates(ctx context.Context, r *Reconciler, informers cache.Informers, reader client.Reader) <-chan error {
+	done := make(chan error, 1)
+	go func() { done <- r.reportSliceStates(informers, reader)(ctx) }()
+	return done
+}
+
+// awaitReturn fails the test unless done delivers nil in time.
+func awaitReturn(t *testing.T, done <-chan error) {
+	t.Helper()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("reportSliceStates returned %v, want nil", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("reportSliceStates did not return")
+	}
+}
+
+func TestReportSliceStates(t *testing.T) {
+	ir := optedInIR("llama-engine", "prod", 1)
+	earlier := ir.DeepCopy()
+	earlier.UID = "llama-engine-earlier-uid"
+	gone := optedInIR("mistral-engine", "prod", 1)
+	r, c := newSliceReconciler(t, ir)
+	seedSlice(t, r, c, ir, sliceprovision.Slot{}, sliceStateReady)
+	seedSlice(t, r, c, earlier, sliceprovision.Slot{Instance: 1}, sliceStateReady)
+	seedSlice(t, r, c, gone, sliceprovision.Slot{}, sliceStateReady)
+	informers := &blockingInformers{
+		Informers: &informertest.FakeInformers{Scheme: testScheme(t)},
+		entered:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := startReportSliceStates(ctx, r, informers, c)
+
+	// Reporting waits for the slice and the InferenceReplica informers.
+	for synced := 0; synced < 2; synced++ {
+		select {
+		case <-informers.entered:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("reportSliceStates waited for %d informers, want 2", synced)
+		}
+		if got := reportedSliceStates(t); len(got) != 0 {
+			t.Fatalf("reported %v with %d of 2 informers synced, want nothing", got, synced)
+		}
+		informers.release <- struct{}{}
+	}
+	want := map[string]float64{"ready": 1, "orphaned": 2}
+	for deadline := time.Now().Add(10 * time.Second); !maps.Equal(reportedSliceStates(t), want); time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("slice gauge = %v, want %v", reportedSliceStates(t), want)
+		}
+	}
+	cancel()
+	awaitReturn(t, done)
+	if got := reportedSliceStates(t); len(got) != 0 {
+		t.Fatalf("reported %v after stopping, want nothing", got)
+	}
+}
+
+func TestReportSliceStates_InformerFails(t *testing.T) {
+	ir := optedInIR("llama-engine", "prod", 1)
+	r, c := newSliceReconciler(t, ir)
+	seedSlice(t, r, c, ir, sliceprovision.Slot{}, sliceStateReady)
+	informers := &informertest.FakeInformers{Scheme: testScheme(t), Error: errors.New("injected informer failure")}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	awaitReturn(t, startReportSliceStates(ctx, r, informers, c))
+	if got := reportedSliceStates(t); len(got) != 0 {
+		t.Fatalf("reported %v without synced informers, want nothing", got)
 	}
 }

@@ -4,12 +4,18 @@ import (
 	"context"
 	"fmt"
 
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
+
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/sliceprovision"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
+	"github.com/ome-projects/ome/pkg/tpuslice/gke"
 )
 
 // sliceProvisioner returns the provisioner of ir's TPU slices, or nil when
@@ -136,5 +142,56 @@ func (r *Reconciler) releaseSlicesPastDeadline(ctx context.Context, ir *v1beta1.
 		r.warnTeardown(ir, ReasonTeardownDeadlineExceeded, fmt.Sprintf(
 			"teardown deadline exceeded; releasing owned TPU slices failed: %v; delete the slices labeled %s=%s by hand",
 			err, sliceprovision.LabelOwnerUID, ir.UID))
+	}
+}
+
+// irUIDIndexField is the cache field index keyed by an InferenceReplica's
+// UID, which a TPU slice records as its owner. The field name is an internal
+// cache identifier, not a Kubernetes field.
+const irUIDIndexField = "ome.io/inferencereplica-uid"
+
+// irUIDIndexExtractor indexes InferenceReplicas by UID.
+func irUIDIndexExtractor(obj client.Object) []string {
+	if obj.GetUID() == "" {
+		return nil
+	}
+	return []string{string(obj.GetUID())}
+}
+
+// irExists reports whether reader, which carries irUIDIndexField, holds the
+// InferenceReplica with uid.
+func irExists(reader client.Reader) func(context.Context, types.UID) (bool, error) {
+	return func(ctx context.Context, uid types.UID) (bool, error) {
+		list := &v1beta1.InferenceReplicaList{}
+		if err := reader.List(ctx, list, client.MatchingFields{irUIDIndexField: string(uid)}, client.UnsafeDisableDeepCopy); err != nil {
+			return false, fmt.Errorf("list the InferenceReplica with UID %s: %w", uid, err)
+		}
+		return len(list.Items) > 0, nil
+	}
+}
+
+// reportSliceStates reports the controller's TPU slices by state, read
+// through reader, which carries irUIDIndexField. The manager runs it only on
+// the leader. It reports once the slice and InferenceReplica informers have
+// synced, so a scrape never waits for a sync.
+func (r *Reconciler) reportSliceStates(informers cache.Informers, reader client.Reader) manager.RunnableFunc {
+	return func(ctx context.Context) error {
+		for _, obj := range []client.Object{gke.NewObject(), &v1beta1.InferenceReplica{}} {
+			if _, err := informers.GetInformer(ctx, obj); err != nil {
+				if ctx.Err() == nil {
+					r.Log.Error(err, "Not reporting TPU slices by state because an informer failed to start")
+				}
+				return nil
+			}
+		}
+		stop := sliceprovision.ReportStates(sliceprovision.StateSource{
+			Slices:      reader,
+			Config:      r.TPUSliceProvisioning,
+			OwnerKind:   irKind,
+			OwnerExists: irExists(reader),
+		})
+		defer stop()
+		<-ctx.Done()
+		return nil
 	}
 }
