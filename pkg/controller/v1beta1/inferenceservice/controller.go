@@ -321,6 +321,10 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return r.handleVirtualDeployment(isvc)
 	}
 
+	// The canary executor's record as this pass read it. The status flush
+	// keeps the live record over decisions made from a stale copy of it.
+	base := canary.NewBase(&isvc.Status)
+
 	// Initialize status if not already initialized
 	if isvc.Status.Components == nil {
 		isvc.Status.Components = make(map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec)
@@ -646,9 +650,14 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		// in-memory pin — reopening the run next pass and flapping the
 		// projected spec under the executors.
 		if runOutcome.StateChanged {
-			if err := r.updateStatus(isvc, deploymentMode); err != nil {
+			if err := r.updateStatus(isvc, deploymentMode, base); err != nil {
 				r.Recorder.Event(isvc, v1.EventTypeWarning, "InternalError", err.Error())
 				return reconcile.Result{}, err
+			}
+			// A pass that read a stale record decides nothing further: the
+			// flush kept the live record, and the next pass decides from it.
+			if base.Stale() {
+				return reconcile.Result{Requeue: true}, nil
 			}
 		}
 	}
@@ -963,9 +972,12 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// flushing it here those writes are dropped on every requeuing pass,
 	// which is the steady state during active rollouts.
 	if pendingRequeue.Requeue || pendingRequeue.RequeueAfter > 0 {
-		if err := r.flushStatusThenConsume(ctx, isvc, deploymentMode, canaryConsume); err != nil {
+		if err := r.flushStatusThenConsume(ctx, isvc, deploymentMode, canaryConsume, base); err != nil {
 			r.Recorder.Event(isvc, v1.EventTypeWarning, "InternalError", err.Error())
 			return reconcile.Result{}, err
+		}
+		if base.Stale() {
+			pendingRequeue.Requeue = true
 		}
 		return pendingRequeue, nil
 	}
@@ -1100,7 +1112,7 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return reconcile.Result{}, err
 	}
 
-	if err = r.flushStatusThenConsume(ctx, isvc, deploymentMode, canaryConsume); err != nil {
+	if err = r.flushStatusThenConsume(ctx, isvc, deploymentMode, canaryConsume, base); err != nil {
 		// A terminal status conflict is benign — requeue and re-reconcile
 		// off fresh state instead of surfacing an ERROR-level failure.
 		if apierrors.IsConflict(err) {
@@ -1108,6 +1120,9 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 		r.Recorder.Event(isvc, v1.EventTypeWarning, "InternalError", err.Error())
 		return reconcile.Result{}, err
+	}
+	if base.Stale() {
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	return ctrl.Result{}, nil
@@ -1160,7 +1175,7 @@ func (r *InferenceServiceReconciler) handleVirtualDeployment(isvc *v1beta1.Infer
 		Message:            "InferenceService is in VirtualDeployment mode",
 	}})
 
-	if err := r.updateStatus(isvc, constants.VirtualDeployment); err != nil {
+	if err := r.updateStatus(isvc, constants.VirtualDeployment, nil); err != nil {
 		// A terminal status conflict is benign — requeue and re-reconcile
 		// off fresh state instead of surfacing an ERROR-level failure.
 		if apierrors.IsConflict(err) {
@@ -1194,7 +1209,7 @@ func (r *InferenceServiceReconciler) markRuntimeUnresolved(isvc *v1beta1.Inferen
 		Reason:  "RuntimeNotFound",
 		Message: cause.Error(),
 	})
-	if err := r.updateStatus(isvc, deploymentMode); err != nil {
+	if err := r.updateStatus(isvc, deploymentMode, nil); err != nil {
 		return reconcile.Result{}, err
 	}
 	return reconcile.Result{}, nil
@@ -1221,11 +1236,13 @@ func (r *InferenceServiceReconciler) clearRuntimeUnresolved(isvc *v1beta1.Infere
 // applied verb leaves a record in status that keeps a still-visible
 // annotation inert, so a removal that fails here is retried by a later pass
 // rather than re-applied.
-func (r *InferenceServiceReconciler) flushStatusThenConsume(ctx context.Context, isvc *v1beta1.InferenceService, deploymentMode constants.DeploymentModeType, consume []string) error {
-	if err := r.updateStatus(isvc, deploymentMode); err != nil {
+func (r *InferenceServiceReconciler) flushStatusThenConsume(ctx context.Context, isvc *v1beta1.InferenceService, deploymentMode constants.DeploymentModeType, consume []string, base *canary.Base) error {
+	if err := r.updateStatus(isvc, deploymentMode, base); err != nil {
 		return err
 	}
-	if len(consume) == 0 {
+	// Decisions made from a stale record were not written, so the verbs they
+	// took stay in place for the pass that decides from the current record.
+	if len(consume) == 0 || base.Stale() {
 		return nil
 	}
 	if err := canary.ConsumeAnnotations(ctx, r.Client, isvc, consume); err != nil {
@@ -1235,7 +1252,7 @@ func (r *InferenceServiceReconciler) flushStatusThenConsume(ctx context.Context,
 	return nil
 }
 
-func (r *InferenceServiceReconciler) updateStatus(desiredService *v1beta1.InferenceService, deploymentMode constants.DeploymentModeType) error {
+func (r *InferenceServiceReconciler) updateStatus(desiredService *v1beta1.InferenceService, deploymentMode constants.DeploymentModeType, base *canary.Base) error {
 	namespacedName := types.NamespacedName{Name: desiredService.Name, Namespace: desiredService.Namespace}
 
 	// Mirror the existing-status snapshot OUTSIDE the retry loop —
@@ -1315,10 +1332,19 @@ func (r *InferenceServiceReconciler) updateStatus(desiredService *v1beta1.Infere
 		if !livePreStepHold && latest.Status.Canary != nil {
 			livePreStepHold = latest.Status.Canary.PreStepHold
 		}
+		// The canary executor's record is guarded like the run pin: a pass
+		// that read a stale copy keeps the live record, phase and traffic,
+		// re-synced into its working copy so nothing after this write
+		// decides from the stale one.
+		base.PreserveFresh(&desiredService.Status, &latest.Status)
 		latest.Status = desiredService.Status
 		mergeLifecycleStatus(&latest.Status, preserved)
 		rolloutrun.PreserveNewerRun(&latest.Status, liveRollout, livePreStepHold)
-		return r.Status().Update(context.TODO(), latest)
+		if err := r.Status().Update(context.TODO(), latest); err != nil {
+			return err
+		}
+		base.Advance(&latest.Status)
+		return nil
 	}); err != nil {
 		// Same race as the top-of-function Get: if the ISVC vanished
 		// during the retry loop, there's nothing to update — drop the

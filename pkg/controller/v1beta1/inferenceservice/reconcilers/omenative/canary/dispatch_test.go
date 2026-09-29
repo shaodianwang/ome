@@ -2027,3 +2027,111 @@ func TestDispatch_RunReopenedAfterRollbackArmsTheNewTarget(t *testing.T) {
 		t.Fatalf("the new target must serve its first step, got %+v phase=%q", cs, phaseOf(isvc))
 	}
 }
+
+// A run reopened toward a new target while the rejected revision is still
+// draining re-arms the unit at run open: the spent request leaves with the
+// rejected hash, the new target arms while the old pods finish draining, and
+// no later pass rolls it back.
+func TestDispatch_RunReopenedWhileRollingBackArmsTheNewTarget(t *testing.T) {
+	ns := "default"
+	n4 := 4
+	isvc := canaryISVC(twoStep(), nil)
+	isvc.Namespace = ns
+	isvc.Name = "reopen-draining"
+	isvc.Spec.Engine = &v1beta1.EngineSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: &n4}}
+	pinActiveRun(isvc)
+	isvc.Status.Rollout.ActiveRun.TargetRevisions = []v1beta1.RolloutRunTarget{
+		{Component: v1beta1.EngineComponent, Revision: "new", StableRevision: "old"},
+	}
+	engineIR := ir(ns, isvc.Name, v1beta1.EngineComponent, "new")
+	engineIR.Status.CurrentRevision = isvc.Name + "-engine-old"
+	irKey := types.NamespacedName{Namespace: ns, Name: engineIR.Name}
+	c := fake.NewClientBuilder().WithScheme(canaryScheme(t)).WithRuntimeObjects(
+		isvc, engineIR,
+		canaryPod(ns, isvc.Name, "engine", "old", "old-0"),
+		canaryPod(ns, isvc.Name, "engine", "old", "old-1"),
+		canaryPod(ns, isvc.Name, "engine", "new", "new-2"),
+		canaryPod(ns, isvc.Name, "engine", "new", "new-3"),
+		canaryControllerRevision(ns, isvc.Name, "engine", "old", 1),
+		canaryControllerRevision(ns, isvc.Name, "engine", "new", 2),
+	).Build()
+	ctx := context.Background()
+	deps := DispatchDeps{Client: c, Reader: c, ISVC: isvc, ComponentRunnerPorts: canaryRunnerPorts(), Group: rollout.CanaryGroup(isvc)}
+	dispatch := func(pass string) {
+		t.Helper()
+		if _, err := Dispatch(ctx, deps); err != nil {
+			t.Fatalf("Dispatch (%s): %v", pass, err)
+		}
+	}
+	status := func() *v1beta1.CanaryStatus { return rollout.CanaryStatusFor(&isvc.Status, v1beta1.EngineComponent) }
+	rollbackTarget := func() *string {
+		t.Helper()
+		got := &v1beta1.InferenceReplica{}
+		if err := c.Get(ctx, irKey, got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Spec.Pacing == nil {
+			return nil
+		}
+		return got.Spec.Pacing.RollbackToRevision
+	}
+
+	dispatch("arm")
+	annotateStored(t, c, isvc, constants.RolloutRollbackAnnotation, "true")
+	dispatch("rollback")
+	if cs := status(); cs.RolledBackRevisionHash != "new" || phaseOf(isvc) != v1beta1.RolloutPhaseRollingBack {
+		t.Fatalf("the rollback must reject the canary revision and drain it, got %+v phase=%q", cs, phaseOf(isvc))
+	}
+	if got := rollbackTarget(); got == nil || *got != isvc.Name+"-engine-old" {
+		t.Fatalf("the IR must be pointed at the stable revision, got %v", got)
+	}
+
+	// The new target arrives before the rejected pods are gone: the run layer
+	// opens a fresh run toward it and the controller binds the unit first.
+	reopenRun(isvc, v1beta1.RolloutRunTarget{Component: v1beta1.EngineComponent, Revision: "v3", StableRevision: "old"})
+	deps.Group = rollout.CanaryGroup(isvc)
+	updateIR(t, c, irKey, func(ir *v1beta1.InferenceReplica) { ir.Status.UpdateRevision = isvc.Name + "-engine-v3" })
+	if err := c.Create(ctx, canaryControllerRevision(ns, isvc.Name, "engine", "v3", 3)); err != nil {
+		t.Fatal(err)
+	}
+	if err := BindRun(ctx, c, isvc, deps.Group, false); err != nil {
+		t.Fatal(err)
+	}
+	dispatch("reopen")
+	if _, ok := isvc.Annotations[constants.RolloutRollbackAnnotation]; ok {
+		t.Fatal("the spent request is still visible to the executor")
+	}
+	if _, ok := storedAnnotations(t, c, isvc)[constants.RolloutRollbackAnnotation]; ok {
+		t.Fatal("the spent request is still stored on the object")
+	}
+	if cs := status(); cs.RolledBackRevisionHash != "" || cs.CanaryRevisionHash != "v3" || cs.StableRevisionHash != "old" || cs.CurrentStep != 0 {
+		t.Fatalf("the new target must arm a fresh canary at step 0, got %+v", cs)
+	}
+	if phaseOf(isvc) != v1beta1.RolloutPhasePending {
+		t.Fatalf("the new target has no capacity yet and must stage, got %q", phaseOf(isvc))
+	}
+	if got := rollbackTarget(); got != nil {
+		t.Fatalf("the IR's rollback target must clear with the hold, got %q", *got)
+	}
+
+	// The rejected pods drain under the new run; no pass rolls the target back.
+	dispatch("stage")
+	for _, name := range []string{"new-2", "new-3"} {
+		if err := c.Delete(ctx, canaryPod(ns, isvc.Name, "engine", "new", name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dispatch("drained")
+	if cs := status(); cs.RolledBackRevisionHash != "" || phaseOf(isvc) != v1beta1.RolloutPhasePending {
+		t.Fatalf("a later pass rolled the new target back: %+v phase=%q", cs, phaseOf(isvc))
+	}
+	for _, name := range []string{"v3-2", "v3-3"} {
+		if err := c.Create(ctx, canaryPod(ns, isvc.Name, "engine", "v3", name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dispatch("serve")
+	if cs := status(); cs.RolledBackRevisionHash != "" || cs.CanaryRevisionHash != "v3" || phaseOf(isvc) != v1beta1.RolloutPhasePaused {
+		t.Fatalf("the new target must serve its first step, got %+v phase=%q", cs, phaseOf(isvc))
+	}
+}

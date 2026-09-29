@@ -226,6 +226,16 @@ func evNewTargetAtRunOpen(isvc *v1beta1.InferenceService, in *ReconcileInputs) {
 	in.CanaryRevisionHash, in.TargetID = "newer", activeCanaryTargetID(isvc, g)
 	in.PerRevisionPods = map[string]int32{"old": 4}
 }
+
+// The rejected revision is still draining when the new target appears.
+func evNewTargetWhileDraining(isvc *v1beta1.InferenceService, in *ReconcileInputs) {
+	evNewTarget(isvc, in)
+	in.PerRevisionPods = map[string]int32{"new": 2, "old": 2}
+}
+func evNewTargetAtRunOpenWhileDraining(isvc *v1beta1.InferenceService, in *ReconcileInputs) {
+	evNewTargetAtRunOpen(isvc, in)
+	in.PerRevisionPods = map[string]int32{"new": 2, "old": 2}
+}
 func evReplicasUp(_ *v1beta1.InferenceService, in *ReconcileInputs) { in.DesiredReplicas = 8 }
 func evCapacityDropped(_ *v1beta1.InferenceService, in *ReconcileInputs) {
 	in.PerRevisionPods = map[string]int32{"new": 1, "old": 2}
@@ -323,6 +333,8 @@ func TestReconcileCells(t *testing.T) {
 		{"canary/PreHold/newTarget", fixturePreHold, evNewTarget, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, active: true}},
 		{"canary/Draining/newTarget", fixtureDraining, evNewTarget, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, active: true}},
 		{"canary/Done/newTarget", fixtureDone, evNewTarget, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, active: true}},
+		{"canary/RollingBack/newTarget", fixtureRollingBack, evNewTargetWhileDraining, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, active: true}},
+		{"canary/RollingBack/newTarget[runOpen]", fixtureRollingBack, evNewTargetAtRunOpenWhileDraining, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, active: true}},
 		{"canary/RolledBack/newTarget", fixtureRolledBack, evNewTarget, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, active: true}},
 		{"canary/RolledBack/newTarget[runOpen]", fixtureRolledBack, evNewTargetAtRunOpen, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, active: true}},
 		{"canary/Failed/newTarget", fixtureFailed, evNewTarget, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, active: true}},
