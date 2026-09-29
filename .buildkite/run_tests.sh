@@ -49,6 +49,21 @@ export KUBEBUILDER_ATTACH_CONTROL_PLANE_OUTPUT=true
 make xet-build
 make envtest
 
+# A module proxy blip during the first compile is bring-up, not a test
+# result, and it would cancel every job that depends on this one. Fetch the
+# module graph up front with a few attempts, and leave with the exit code the
+# step's infra-retry preset reruns when the proxy stays unreachable.
+echo "--- go mod download ---"
+attempt=0
+until go mod download; do
+  attempt=$((attempt + 1))
+  if [ "$attempt" -ge 3 ]; then
+    echo "module download failed ${attempt} times; exiting 125 for infra retry" >&2
+    exit 125
+  fi
+  sleep 15
+done
+
 # Perm-corpus contract: every committed case YAML (hand-written and
 # generated) must parse with the Go loader — header fields, strict
 # InferenceService decode, gang worker sizes for pod-weight derivation.
