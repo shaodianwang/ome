@@ -244,7 +244,9 @@ def fetch_log(number, job: dict) -> str:
 
 
 def save_log(number, job: dict, text: str) -> Path:
-    path = scratch_dir() / f"b{number}-{job_name(job)}-{job['id'][:8]}.log"
+    # Job labels carry "/", ":" and spaces; keep the file name one flat component.
+    label = re.sub(r"[^A-Za-z0-9._-]+", "_", job_name(job)).strip("_")
+    path = scratch_dir() / f"b{number}-{label}-{job['id'][:8]}.log"
     path.write_text(text, encoding="utf-8")
     return path
 
