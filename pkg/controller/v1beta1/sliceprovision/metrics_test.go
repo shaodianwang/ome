@@ -218,6 +218,74 @@ func TestObserveReadyTimesOnlySlicesItCreated(t *testing.T) {
 	}
 }
 
+// collectCounts gathers counter c, keyed type/topology.
+func collectCounts(t *testing.T, c *prometheus.CounterVec) map[string]float64 {
+	t.Helper()
+	reg := prometheus.NewPedanticRegistry()
+	reg.MustRegister(c)
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	got := map[string]float64{}
+	for _, f := range families {
+		for _, m := range f.GetMetric() {
+			l := map[string]string{}
+			for _, p := range m.GetLabel() {
+				l[p.GetName()] = p.GetValue()
+			}
+			got[l["slice_type"]+"/"+l["topology"]] = m.GetCounter().GetValue()
+		}
+	}
+	return got
+}
+
+// TestInitSeries pins that each configured slice type and topology has its
+// created, released and provisioning series at zero from startup, and that a
+// slice counts under them.
+func TestInitSeries(t *testing.T) {
+	clk := fakeProvisionClock(t)
+	slicesCreated.Reset()
+	slicesReleased.Reset()
+	sliceCreateFailures.Reset()
+	sliceProvisionSeconds.Reset()
+	type series struct {
+		Created, Released map[string]float64
+		Provisioning      map[string]provisionTimes
+	}
+	collect := func() series {
+		return series{collectCounts(t, slicesCreated), collectCounts(t, slicesReleased), collectProvisionTimes(t)}
+	}
+
+	InitSeries(testConfig())
+	want := series{
+		Created:      map[string]float64{"type-a/2x2x1": 0, "type-a/2x2x2": 0},
+		Released:     map[string]float64{"type-a/2x2x1": 0, "type-a/2x2x2": 0},
+		Provisioning: map[string]provisionTimes{"type-a/2x2x1": {}, "type-a/2x2x2": {}},
+	}
+	if diff := cmp.Diff(want, collect()); diff != "" {
+		t.Fatalf("series at startup (-want +got):\n%s", diff)
+	}
+	if got := testutil.CollectAndCount(sliceCreateFailures); got != 0 {
+		t.Fatalf("create failure series at startup = %d, want none", got)
+	}
+
+	// A 2x2x1 slice, ready after 30s and then released, counts under its
+	// series, and adds none.
+	created := createSlice(t, newFakeClient(), demand(t, "2x2x1"), Slot{})
+	clk.Step(30 * time.Second)
+	ready := created.DeepCopy()
+	withState("ACTIVE", "")(ready)
+	ObserveReady(ready, testConfig().Slice.ReadyStates)
+	ObserveDeleted(ready)
+	want.Created["type-a/2x2x1"] = 1
+	want.Released["type-a/2x2x1"] = 1
+	want.Provisioning["type-a/2x2x1"] = provisionTimes{Count: 1, Sum: 30}
+	if diff := cmp.Diff(want, collect()); diff != "" {
+		t.Fatalf("series after a 2x2x1 slice (-want +got):\n%s", diff)
+	}
+}
+
 // collectStates gathers the slice gauge, keyed type/topology/state.
 func collectStates(t *testing.T) map[string]float64 {
 	t.Helper()

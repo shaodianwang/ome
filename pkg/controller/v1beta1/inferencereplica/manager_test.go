@@ -3,6 +3,8 @@ package inferencereplica
 import (
 	"context"
 	"net/http"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -246,13 +248,13 @@ func TestSetupWithManager_GangSchedulingFollowsThePodGroupCRD(t *testing.T) {
 
 // TestSetupWithManager_TPUSlicesFollowTheSliceCRD pins the gated half of
 // slice provisioning: slices are read, and so provisioned and reported by
-// state, only when provisioning is configured and the Slice CRD is
-// installed; a configuration that would overwrite a label the controller
-// sets fails setup.
+// state, and their series are exported at zero, only when provisioning is
+// configured and the Slice CRD is installed; a configuration that would
+// overwrite a label the controller sets fails setup.
 func TestSetupWithManager_TPUSlicesFollowTheSliceCRD(t *testing.T) {
 	overwriting := sliceTestConfig()
 	overwriting.Slice.OwnerKindLabel = sliceprovision.LabelOwnerUID
-	for _, tc := range []struct {
+	for i, tc := range []struct {
 		name       string
 		config     *controllerconfig.TPUSliceProvisioningConfig
 		crd        bool
@@ -274,6 +276,14 @@ func TestSetupWithManager_TPUSlicesFollowTheSliceCRD(t *testing.T) {
 			mgr := newSetupManager(t, true)
 			r := wiredReconciler(mgr)
 			r.TPUSliceProvisioning = tc.config
+			// Each case's slices have their own type, so the series a case
+			// finds are the ones its setup exported.
+			sliceType := "setup-" + strconv.Itoa(i)
+			if tc.config != nil {
+				a := tc.config.Accelerators["tpu-a"]
+				a.SliceType = sliceType
+				tc.config.Accelerators["tpu-a"] = a
+			}
 
 			err := r.SetupWithManager(mgr)
 			if tc.wantErr != "" {
@@ -293,6 +303,13 @@ func TestSetupWithManager_TPUSlicesFollowTheSliceCRD(t *testing.T) {
 			err = mgr.GetFieldIndexer().IndexField(context.Background(), &v1beta1.InferenceReplica{}, irUIDIndexField, irUIDIndexExtractor)
 			if got := err != nil; got != tc.wantReader {
 				t.Fatalf("InferenceReplica UID index registered = %v, want %v (second registration: %v)", got, tc.wantReader, err)
+			}
+			var wantSeries []string
+			if tc.wantReader {
+				wantSeries = []string{"2x2x1", "2x2x2"}
+			}
+			if got := createdSliceSeries(t, sliceType); !slices.Equal(got, wantSeries) {
+				t.Fatalf("created series of the configured topologies = %v, want %v", got, wantSeries)
 			}
 		})
 	}

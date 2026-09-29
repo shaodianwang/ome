@@ -124,6 +124,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		}
 		if sliceFound {
 			r.sliceReader = mgr.GetCache()
+			sliceprovision.InitSeries(r.TPUSliceProvisioning)
 			if err := mgr.GetFieldIndexer().IndexField(context.Background(), &v1beta1.InferenceReplica{}, irUIDIndexField, irUIDIndexExtractor); err != nil {
 				return fmt.Errorf("inferencereplica: register InferenceReplica UID index: %w", err)
 			}

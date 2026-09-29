@@ -70,6 +70,23 @@ func init() {
 	ctrlmetrics.Registry.MustRegister(slicesCreated, slicesReleased, sliceCreateFailures, sliceProvisionSeconds, sliceStates)
 }
 
+// InitSeries exports the created, released and provision duration series of
+// each slice type and topology cfg can provision, at zero. A series that
+// appears with its first slice is already past zero when first scraped, so
+// rate() and increase() would miss that slice. The create failure series are
+// left out: a failure's reason is known only when a create fails. The caller
+// calls it once at startup, on every replica, so that a replica's series
+// exist before it leads.
+func InitSeries(cfg *controllerconfig.TPUSliceProvisioningConfig) {
+	for _, a := range cfg.Accelerators {
+		for _, topology := range a.Topologies {
+			slicesCreated.WithLabelValues(a.SliceType, topology)
+			slicesReleased.WithLabelValues(a.SliceType, topology)
+			sliceProvisionSeconds.WithLabelValues(a.SliceType, topology)
+		}
+	}
+}
+
 // provisionStarts holds when this process created each slice its watch has
 // not yet seen ready, by UID.
 var provisionStarts = struct {

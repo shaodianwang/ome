@@ -430,6 +430,32 @@ func reportedSliceStates(t *testing.T) map[string]float64 {
 	return got
 }
 
+// createdSliceSeries reads the topologies that have a series of sliceType on
+// the TPU slice created counter in the controller-runtime registry.
+func createdSliceSeries(t *testing.T, sliceType string) []string {
+	t.Helper()
+	families, err := metrics.Registry.Gather()
+	if err != nil {
+		t.Fatalf("gather metrics: %v", err)
+	}
+	var got []string
+	for _, family := range families {
+		if family.GetName() != "ome_tpu_slice_created_total" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			labels := map[string]string{}
+			for _, label := range metric.GetLabel() {
+				labels[label.GetName()] = label.GetValue()
+			}
+			if labels["slice_type"] == sliceType {
+				got = append(got, labels["topology"])
+			}
+		}
+	}
+	return got
+}
+
 // blockingInformers holds each GetInformer call until the test receives it
 // on entered and then sends on release, as a starting cache holds the call
 // until the informer syncs.
