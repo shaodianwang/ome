@@ -303,6 +303,45 @@ the grid cell it covers in `cell=canary/<State>/<event>` (the states are
 Failure cases set `canary.readyTimeout: "90s"` in the group so the park lands
 inside the case budget.
 
+#### PD knobs (`proto=`, `verb=scale`, `victimcomp=`, `imgcomp=`, invariant E)
+
+The prefill/decode cases drive the pair through the canary and aim events at
+one side of it:
+
+- **`proto=<token|clear>`** — the trigger is the `spec.rollout.pairingProtocol`
+  patch instead of the annotation bump (the token re-mints engine and
+  decoder together, whatever the group lists; `bump=`/`img=` do not apply).
+  Invariant C (pair-alive) arms exactly as in `mode=pairing` for a
+  non-empty→non-empty transition, and the pairing surface (pod labels, live
+  traffic targets, Service metadata) is asserted at the terminal for the
+  protocol it implies: the target on `Stable`, the original on `RolledBack`.
+  **`proto2=`** re-targets the protocol at the `during=` hook, or at the first
+  Ready canary pod when no hook is named; convergence then requires every
+  bumped pod past the pre-re-target revisions (nothing stranded).
+- **`verb=scale`** with **`scale_e=`/`scale_d=`** — re-target one side's
+  replicas at the `during=` hook; the convergence target moves with it and the
+  capacity floor keeps `min(start, target)` as its basis.
+- **`victimcomp=engine|decoder|router`** — narrow a `fault=podkill:*` (with
+  or without `victim=`) to one Component. **`imgcomp=<member>`** — give only
+  that bumped member the unpullable `img=`, so one side of the pair parks
+  while the other's canary is up.
+- **Invariant E (cohort ratio, informational)** — whenever both engine and
+  decoder are bumped, every tick reads the canary cohort's serving
+  engine:decoder ratio while both sides have canary capacity and records any
+  sustained deviation beyond `ratio_tol=<percent>` (default 50) from the
+  fleet's ratio. It is reported (`⚠`), never failed, until the contract is
+  decided; the executor holds the ratio only at the traffic shift today.
+- **`xcheck=sectraffic`** with `notimpl=1 issue=<n>` and a line-2 `# reason:`
+  — a scoped park: the secondaries' traffic-target check records the tracked
+  bug as the XFAIL, and every other check stays red. Plain `notimpl=1`
+  softens every failure, which would hide a pair-alive violation behind the
+  park.
+
+A deliberately slow side needs no knob: the case YAML sets
+`runner.env: [{ name: TEST_STARTUP_DELAY, value: "75" }]` on that Component
+(the runner merges into the runtime container by env name), so its canary
+pods turn Ready later than the other side's.
+
 ### Canary analysis (`analysis=…`, OEP-0015.2)
 
 `isvcs/canary/` p330–p343 gate steps on a **Prometheus query** instead of a
@@ -388,7 +427,9 @@ Waive with `inv_off=C` + a line-2 `# reason:` comment.
 
 A `canary=auto` case with a canary group in the YAML drives the same protocol
 patch through the staged canary (steps advance on their own `pause.duration`
-timers; `canary=manual` is not supported in this mode).
+timers; `canary=manual` is not supported in this mode). For manual promotion,
+verbs at canary hooks, rollbacks and the failure edges, use `mode=canary` with
+`proto=` instead (see the PD knobs above).
 
 ### Negative cases (`expect=reject`)
 

@@ -831,6 +831,10 @@ def _inv_new(case_id, hdr):
         # (for any reason) the unpaired samples that follow are the product
         # legitimately progressing back toward a pair, not the gate breaking one.
         "pairing": None,
+        # Set by the canary handler when both pairing Components stage: the
+        # cohort-ratio observer (invariant E), informational until the
+        # contract is decided.
+        "ratio": None,
     }
 
 
@@ -1037,6 +1041,63 @@ def _inv_check_pair_alive(inv, pod_state, hits, now):
              f"(engine serves {eng_p}, decoder serves {dec_p})")
 
 
+INV_SUSTAIN_E = 2    # cohort-ratio ticks (10 s): a skew this long is not a startup transient
+
+
+def _cohort_serving_instances(pod_state, pods_per_inst, old_hashes):
+    """{component: (new, old)} fully serving Instance counts by revision
+    cohort: an Instance counts when every one of its pods is alive+Ready+serving
+    and all of them agree on the cohort (a mixed Instance counts as neither)."""
+    by = defaultdict(list)
+    for p in pod_state.values():
+        if p and p.get("alive"):
+            by[(p.get("comp"), p.get("inst", "0"))].append(p)
+    out = {}
+    for (comp, _), pods in by.items():
+        expected = max(1, pods_per_inst.get(comp, 1))
+        if len(pods) < expected or sum(1 for p in pods if p.get("ready") and p.get("serving")) < expected:
+            continue
+        cohorts = {bool(p.get("hash") and p["hash"] not in old_hashes) for p in pods}
+        new, old = out.get(comp, (0, 0))
+        if cohorts == {True}:
+            out[comp] = (new + 1, old)
+        elif cohorts == {False}:
+            out[comp] = (new, old + 1)
+    return out
+
+
+def _inv_check_cohort_ratio(inv, pod_state, pods_per_inst, now):
+    """Invariant E, one tick, informational: while a canary stages both pairing
+    Components, the canary cohort's engine:decoder serving ratio, read whenever
+    both sides have any canary capacity, should stay within the tolerance of
+    the fleet's ratio. The executor holds the ratio only at the traffic shift
+    today, so a sustained skew is recorded and reported, never failed, until
+    the contract is decided."""
+    st = inv.get("ratio")
+    if not st:
+        return
+    cohorts = _cohort_serving_instances(pod_state, pods_per_inst, st["old_hashes"])
+    ne, nd = cohorts.get("engine", (0, 0))[0], cohorts.get("decoder", (0, 0))[0]
+    if ne == 0 or nd == 0:
+        st["streak"] = 0
+        return
+    st["samples"] += 1
+    fleet = st["N"]["engine"] / st["N"]["decoder"]
+    dev = abs((ne / nd) / fleet - 1.0)
+    if dev <= st["tol"]:
+        st["streak"] = 0
+        return
+    st["streak"] += 1
+    if st["streak"] < INV_SUSTAIN_E:
+        return
+    if st["streak"] == INV_SUSTAIN_E:
+        st["excursions"] += 1
+    if dev > st["worst"]:
+        st["worst"] = dev
+        st["worst_detail"] = (f"canary cohort serves engine {ne} : decoder {nd} against a fleet of "
+                              f"{st['N']['engine']} : {st['N']['decoder']}")
+
+
 def _list_podgroups(case_id):
     """name → spec.minMember for the case's PodGroups; None when the API is unavailable."""
     r = kubectl("-n", NS, "get", "podgroups.scheduling.x-k8s.io", "-l",
@@ -1116,7 +1177,7 @@ def _inv_tick(inv, pod_state, pods_per_inst):
     every watch loop each iteration; a no-op between ticks and when every
     invariant is opted out. Streaks reset for keys not observed this tick
     (the CONSECUTIVE-tick sustain rule)."""
-    if not inv or not (inv["a_on"] or inv["b_on"] or inv["c_on"] or inv.get("d_on")):
+    if not inv or not (inv["a_on"] or inv["b_on"] or inv["c_on"] or inv.get("d_on") or inv.get("ratio")):
         return
     now = time.time()
     if now - inv["last"] < INV_TICK_S:
@@ -1131,6 +1192,8 @@ def _inv_tick(inv, pod_state, pods_per_inst):
         _inv_check_pair_alive(inv, pod_state, hits, now)
     if inv.get("d_on"):
         _inv_check_gang_scheduling(inv, pod_state, pods_per_inst, hits, now)
+    if inv.get("ratio"):
+        _inv_check_cohort_ratio(inv, pod_state, pods_per_inst, now)
     for k in [k for k in inv["streaks"] if k not in hits]:
         del inv["streaks"][k]
 
@@ -1160,6 +1223,15 @@ def invariant_checks(inv, verdict, notes, checks):
         checks.append("  ⓘ invariant D: PodGroup API unavailable on this cluster — pod-group checks skipped; scheduler name and gang binding still asserted")
     if inv.get("d_on") and inv.get("d_untyped"):
         checks.append("  ⓘ invariant D: some pod records carried no placement fields (a watcher builder lacks _pod_placement) — those records were not evaluated")
+    ratio = inv.get("ratio")
+    if ratio:
+        tol_pct = int(round(ratio["tol"] * 100))
+        if not ratio["samples"]:
+            checks.append("  ⓘ invariant E (cohort ratio) never saw canary capacity on both engine and decoder at a tick — vacuous (informational)")
+        elif not ratio["excursions"]:
+            checks.append(f"  ⓘ invariant E (cohort ratio, informational): the canary cohort stayed within {tol_pct}% of the fleet ratio across {ratio['samples']} tick(s)")
+        else:
+            checks.append(f"  ⚠ invariant E (cohort ratio, informational): {ratio['excursions']} sustained excursion(s) beyond {tol_pct}%, worst {int(round(ratio['worst'] * 100))}% — {ratio['worst_detail']}")
     if not inv["viol"]:
         active = [x for x, on in (("A", inv["a_on"] and inv["ir_seen"]),
                                   ("B", inv["b_on"] and inv["b_seen"]),
@@ -1212,7 +1284,7 @@ def invariant_checks(inv, verdict, notes, checks):
 CANARY_HOOKS = {"canary-staging", "canary-serving", "canary-draining", "canary-rollingback", "canary-failed"}
 FAULT_PHASES = {"rotating", "migrating", "settling"} | CANARY_HOOKS
 CANARY_VERBS = {"pause", "pause-freeze", "promote", "promote-stale", "rebump", "rebump-fix",
-                "rollback", "timeout-clear"}
+                "rollback", "timeout-clear", "scale"}
 
 
 def _canary_hook(phase):
@@ -1324,6 +1396,7 @@ def _fault_new(case_id, hdr):
     kind, _, param = v.partition(":")
     return {"case_id": case_id, "kind": kind, "param": param,
             "victim": str(hdr.get("victim") or ""),
+            "victimcomp": str(hdr.get("victimcomp") or ""),
             "fired": False, "infra_fail": None, "notes": []}
 
 
@@ -1467,20 +1540,24 @@ def _fault_setup(f, case_id, hdr):
         return False, f["infra_fail"]
 
 
-def _fault_pick_pod(pod_state, pods_per_inst, old_hashes, victim=None):
+def _fault_pick_pod(pod_state, pods_per_inst, old_hashes, victim=None, comp=None):
     """Deterministic podkill victim: (1) gang topology → the leader pod of the
     lowest live instance index (heads the whole gang); (2) surge in flight (an
     alive new-revision pod exists) → the newest surge pod (latest
     creationTimestamp, name tie-break) — hits the in-flight rollout, not
     settled capacity; (3) otherwise the first live pod sorted by name.
     victim="stable" overrides (2): the first live OLD-revision pod, so a case
-    can take capacity from the revision that keeps serving under a canary."""
+    can take capacity from the revision that keeps serving under a canary.
+    comp narrows every rule to one Component, so a PD case can aim at one
+    side of the pair."""
     def _idx(p):
         try:
             return int(p.get("inst", "0"))
         except (TypeError, ValueError):
             return 0
     live = [(n, p) for n, p in sorted(pod_state.items()) if p and p["alive"]]
+    if comp:
+        live = [(n, p) for n, p in live if p.get("comp") == comp]
     if not live:
         return None
     if victim == "stable" and old_hashes:
@@ -1506,7 +1583,8 @@ def _fault_fire(f, pod_state, pods_per_inst, old_hashes):
     """One-shot phase-fault action (latched by the caller's fired check)."""
     f["fired"] = True
     if f["kind"] == "podkill":
-        victim = _fault_pick_pod(pod_state, pods_per_inst, old_hashes, victim=f.get("victim"))
+        victim = _fault_pick_pod(pod_state, pods_per_inst, old_hashes, victim=f.get("victim"),
+                                 comp=f.get("victimcomp") or None)
         if not victim:
             f["infra_fail"] = "podkill: no live pod to delete"
             return
@@ -1735,12 +1813,14 @@ HDR_VALIDATORS = {
     "dup": lambda v: v == 1,      # migrate: re-file the same request UUID (dedup contract)
     "hint": lambda v: v == 1,     # migrate: carry hint_target_nodes (soft placement assert)
     "co": lambda v: v in {"none", "rolling", "ratio", "percomp", "seq", "bluegreen"},
-    # Pairing-mode knobs (mode=pairing). The trigger is a patch of
-    # spec.rollout.pairingProtocol: proto= is the target of the transition
-    # (`clear` removes the field); proto2= re-patches mid-roll (the X-2 shape);
-    # hold=1 asserts a rolloutHold gate=Pairing observation mid-transition;
-    # pkill=1 deletes the last old-cohort decoder pod mid-transition;
-    # scale_e=/scale_d= re-target a Component's replicas mid-transition.
+    # Pairing knobs (mode=pairing; proto=, proto2=, scale_e=, scale_d= also in
+    # mode=canary). The trigger is a patch of spec.rollout.pairingProtocol:
+    # proto= is the target of the transition (`clear` removes the field);
+    # proto2= re-patches mid-roll (the X-2 shape); hold=1 asserts a
+    # rolloutHold gate=Pairing observation mid-transition; pkill=1 deletes
+    # the last old-cohort decoder pod mid-transition; scale_e=/scale_d=
+    # re-target a Component's replicas mid-transition (in canary mode through
+    # verb=scale at a during= hook).
     "proto": _pairing_token,
     "proto2": _pairing_token,
     "hold": lambda v: v == 1,
@@ -1763,6 +1843,14 @@ HDR_VALIDATORS = {
     "terminal": lambda v: v in {"Stable", "RolledBack", "Failed"},
     "prearm": lambda v: v == "rollback",
     "victim": lambda v: v in {"stable", "canary"},
+    # victimcomp= narrows a podkill to one Component (one side of a PD pair);
+    # imgcomp= narrows img= to one bumped member; ratio_tol= is invariant E's
+    # tolerance in percent (default 50); xcheck=sectraffic scopes a notimpl
+    # park to the secondaries' pairing traffic-target check.
+    "victimcomp": lambda v: v in COMPS,
+    "imgcomp": lambda v: v in COMPS,
+    "ratio_tol": lambda v: isinstance(v, int) and 0 <= v <= 100,
+    "xcheck": lambda v: v == "sectraffic",
     "skipsoak": _int_ge0,
     "nophase": lambda v: v in {"Pending", "Canarying", "Paused", "Promoting", "RollingBack", "RolledBack", "Failed"},
     "cell": lambda v: re.match(r"^canary/[A-Za-z]+(\[[A-Za-z]+\])?/[A-Za-z0-9]+(\[[A-Za-z]+\])?$", str(v)) is not None,
@@ -1884,13 +1972,46 @@ def validate_case_file(path):
                                    "migrate": {"rollout"},
                                    "runtimerev": {"rollout"}}.get(mode, set()):
         errs.append(f"{path}:1: during={during} not supported for mode={mode}")
-    for k in ("verb", "verbhold", "bump", "terminal", "prearm", "skipsoak", "cell", "nophase"):
+    for k in ("verb", "verbhold", "bump", "terminal", "prearm", "skipsoak", "cell", "nophase",
+              "imgcomp", "ratio_tol", "xcheck"):
         if k in fields and mode != "canary":
             errs.append(f"{path}:1: {k}= is a canary-mode knob (mode=canary)")
     if "verb" in fields and not _canary_hook_ok(during):
         errs.append(f"{path}:1: verb= needs during=<canary hook> to say when it fires")
     if "victim" in fields and not str(fields.get("fault", "")).startswith("podkill:"):
         errs.append(f"{path}:1: victim= aims a podkill (needs fault=podkill:<hook>)")
+    if "victimcomp" in fields and not str(fields.get("fault", "")).startswith("podkill:"):
+        errs.append(f"{path}:1: victimcomp= aims a podkill at one Component (needs fault=podkill:<phase>)")
+    if mode == "canary":
+        if "proto" in fields:
+            if fields.get("Ne", 0) == 0 or fields.get("Nd", 0) == 0:
+                errs.append(f"{path}:1: proto= rolls engine and decoder together — needs Ne>0 and Nd>0")
+            if "bump" in fields:
+                errs.append(f"{path}:1: proto= re-mints both pairing Components — bump= does not apply")
+            if "img" in fields:
+                errs.append(f"{path}:1: proto= carries no image; break one revision with bump= + img= instead")
+        if "proto2" in fields and "proto" not in fields:
+            errs.append(f"{path}:1: proto2= re-targets a proto= transition (needs proto=)")
+        if "proto2" in fields and fields["proto2"] == fields.get("proto"):
+            errs.append(f"{path}:1: proto2= must differ from proto= (a mid-roll re-target)")
+        if str(fields.get("verb", "")) == "scale" and not any(k in fields for k in ("scale_e", "scale_d")):
+            errs.append(f"{path}:1: verb=scale needs scale_e=/scale_d= (the mid-canary replica targets)")
+        if any(k in fields for k in ("scale_e", "scale_d")) and str(fields.get("verb", "")) != "scale":
+            errs.append(f"{path}:1: scale_e=/scale_d= in canary mode fire through verb=scale during=<hook>")
+        if "imgcomp" in fields and "img" not in fields:
+            errs.append(f"{path}:1: imgcomp= narrows img= (needs img=)")
+        if "imgcomp" in fields and "bump" in fields and str(fields["imgcomp"]) not in str(fields["bump"]).split(","):
+            errs.append(f"{path}:1: imgcomp={fields['imgcomp']} must be one of the bumped members ({fields['bump']})")
+        if "ratio_tol" in fields and (fields.get("Ne", 0) == 0 or fields.get("Nd", 0) == 0):
+            errs.append(f"{path}:1: ratio_tol= tunes the engine:decoder cohort ratio — needs Ne>0 and Nd>0")
+        if "xcheck" in fields:
+            if "proto" not in fields:
+                errs.append(f"{path}:1: xcheck=sectraffic scopes the pairing traffic-target check (needs proto=)")
+            if not fields.get("notimpl") or "issue" not in fields:
+                errs.append(f"{path}:1: xcheck= is a scoped park — requires notimpl=1 issue=<n>")
+            second = text.splitlines()[1] if len(text.splitlines()) > 1 else ""
+            if not re.match(r"^\s*#\s*reason:\s*\S", second):
+                errs.append(f"{path}:2: xcheck={fields['xcheck']} requires an adjacent '# reason: <why>' comment on line 2")
     if mode == "canary" and "img" in fields and "bump" not in fields:
         errs.append(f"{path}:1: img= in canary mode needs bump=<members> (the revision it breaks)")
     if mode == "canary" and str(fields.get("fault", "")).partition(":")[2].partition("@")[0] in ("rotating", "migrating", "settling"):
@@ -1901,9 +2022,12 @@ def validate_case_file(path):
         errs.append(f"{path}:1: blocked=1 requires a fault= header")
     if mode == "pairing" and "proto" not in fields:
         errs.append(f"{path}:1: mode=pairing needs proto=<token|clear> (the transition target)")
-    for k in ("proto", "proto2", "hold", "pkill", "scale_e", "scale_d"):
+    for k in ("hold", "pkill"):
         if k in fields and mode != "pairing":
             errs.append(f"{path}:1: {k}= is a pairing-mode knob (mode=pairing)")
+    for k in ("proto", "proto2", "scale_e", "scale_d"):
+        if k in fields and mode not in ("pairing", "canary"):
+            errs.append(f"{path}:1: {k}= is a pairing- or canary-mode knob")
     if mode == "pairing":
         if "proto2" in fields and fields["proto2"] == fields.get("proto"):
             errs.append(f"{path}:1: proto2= must differ from proto= (a mid-roll re-target)")
@@ -2161,20 +2285,23 @@ def _bumped(ctx):
     return members or ({"engine"} & ctx["configured"])
 
 
-def _bump_rev(ctx, bumped, val=TRIGGER_VAL, extra=None, image=None):
+def _bump_rev(ctx, bumped, val=TRIGGER_VAL, extra=None, image=None, image_comps=None):
     # extra: additional pod annotations set on the bumped components (analysis
     # cases use it to carry the canary revision's health, e.g. perm.test/error-rate
     # — one patch both rolls the revision AND flips the canary pods' emitted metric).
     # image: a runner image override for the bumped components. A non-empty
     # value gives the new revision that image (an unpullable one is how a case
     # parks a canary on its capacity gate); "" drops a previous override so the
-    # next revision starts again; None leaves the runner alone.
+    # next revision starts again; None leaves the runner alone. image_comps
+    # narrows the override to those bumped members (one broken side of a pair).
     anns = {TRIGGER_ANNO: val, "ome.io/deploymentMode": "OMENative"}
     if extra:
         anns.update(extra)
     patch = {"spec": {c: {"annotations": dict(anns)} for c in sorted(bumped)}}
     if image is not None:
         for c in sorted(bumped):
+            if image_comps and c not in image_comps:
+                continue
             runner = {"image": image} if image else None
             # A multi-node component renders its leader's runner, so the
             # override has to sit under leader: for the pods to pick it up.
@@ -2379,6 +2506,10 @@ def soften_expected_fail(hdr, verdict, checks):
     by-design rationale lives on the case's line-2 '# reason:' comment and in
     batch.py's PARKED DEBT table."""
     if verdict != "FAIL":
+        return verdict
+    if hdr.get("notimpl") and hdr.get("xcheck"):
+        # A scoped park (xcheck=) softens only the check it names, which
+        # records the XFAIL itself; every other failure stays red.
         return verdict
     if hdr.get("notimpl"):
         ref = f"#{hdr['issue']}" if hdr.get("issue") else "UNLINKED"
@@ -4068,10 +4199,15 @@ def _kill(case_id, yaml_file, desc, hdr):
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
 
-def _pairing_patch(case_id, target):
+def _pairing_patch(case_id, target, extra=None, comps=()):
     """Patch spec.rollout.pairingProtocol to `target` ("" removes the field —
-    JSON merge patch null deletes the key). Returns (ok, last stderr line)."""
+    JSON merge patch null deletes the key). `extra` pod annotations ride the
+    same patch on `comps` (a canary analysis case sets the new cohort's health
+    with its trigger). Returns (ok, last stderr line)."""
     patch = {"spec": {"rollout": {"pairingProtocol": (target or None)}}}
+    if extra:
+        for c in sorted(comps):
+            patch["spec"][c] = {"annotations": dict(extra)}
     r = kubectl("-n", NS, "patch", "isvc", case_id, "--type=merge", "-p", json.dumps(patch))
     msg = (r.stderr.strip().splitlines() or [""])[-1]
     return r.returncode == 0, msg
@@ -4088,7 +4224,7 @@ def _sample_rollout_holds(case_id, bumped, holds):
             holds.setdefault(c, {})[rh["gate"]] = rh.get("reason", "")[:160]
 
 
-def pairing_surface_checks(case_id, ctx, target, bumped, verdict, notes, checks):
+def pairing_surface_checks(case_id, ctx, target, bumped, verdict, notes, checks, known_gap=()):
     """Post-convergence pairing surface verdicts. `target` is the protocol every
     engine/decoder revision must have converged onto ("" = cleared):
       1. every alive engine/decoder pod carries ome.io/pairing-protocol=target
@@ -4097,7 +4233,9 @@ def pairing_surface_checks(case_id, ctx, target, bumped, verdict, notes, checks)
          publishes pairingProtocol=target, and the traffic list is non-empty;
       3. every routing Service named by a live traffic target carries the
          label in METADATA only — and NO Service of the case ever carries it
-         in spec.selector (pod selection stays revision-hash based)."""
+         in spec.selector (pod selection stays revision-hash based).
+    `known_gap` names Components whose check 2 is a scoped park: a miss there
+    is recorded as the case's tracked bug (ctx["xhit"]) instead of a FAIL."""
     # 1. Pod labels (from the watcher's live pod state).
     bad_pods = [f"{n}={p.get('pairing', '')!r}" for n, p in sorted(ctx["pod_state"].items())
                 if p and p["alive"] and p["comp"] in ("engine", "decoder")
@@ -4118,20 +4256,23 @@ def pairing_surface_checks(case_id, ctx, target, bumped, verdict, notes, checks)
     for c in sorted(bumped):
         traffic = (comps_status.get(c) or {}).get("traffic") or []
         live = [t for t in traffic if t.get("percent", 0) > 0]
-        if not live:
-            verdict = "FAIL"
-            notes.append(f"{c} publishes no live traffic target")
-            checks.append(f"  ✗ pairing: {c} publishes no live (percent>0) traffic target at convergence")
-            continue
         bad = [t for t in live if str(t.get("pairingProtocol", "") or "") != target]
         live_rev_names.update(t.get("revisionName", "") for t in live)
-        if bad:
-            verdict = "FAIL"
-            notes.append(f"{c} traffic pairingProtocol != {target!r}")
-            checks.append(f"  ✗ pairing: {c} live traffic target(s) publish the wrong protocol: "
-                          + ", ".join(f"{t.get('revisionName', '?')}={t.get('pairingProtocol', '')!r}" for t in bad[:3]))
+        if not live:
+            problem = f"{c} publishes no live (percent>0) traffic target at convergence"
+        elif bad:
+            problem = (f"{c} live traffic target(s) publish the wrong protocol: "
+                       + ", ".join(f"{t.get('revisionName', '?')}={t.get('pairingProtocol', '')!r}" for t in bad[:3]))
         else:
             checks.append(f"  ✓ pairing: {c} live traffic targets all publish pairingProtocol={target!r}")
+            continue
+        if c in known_gap:
+            ctx["xhit"] = True
+            checks.append(f"  ⓘ pairing: {problem} — the tracked bug this case is parked on (xcheck=sectraffic)")
+            continue
+        verdict = "FAIL"
+        notes.append(f"{c} publishes no live traffic target" if not live else f"{c} traffic pairingProtocol != {target!r}")
+        checks.append(f"  ✗ pairing: {problem}")
 
     # 3. Services: metadata label on routed per-revision Services; NEVER the selector.
     r = kubectl("-n", NS, "get", "svc", "-l", f"ome.io/inferenceservice={case_id}", "-o", "json")
@@ -4581,9 +4722,40 @@ def _canary_verb(ctx, verb, canary_hash, primary):
         _bump_rev(ctx, ctx["bumped"], val="v3", image="")
     elif verb == "timeout-clear":
         kubectl("-n", NS, "annotate", "isvc", cid, "ome.io/rollout-ready-timeout-")
+    elif verb == "scale":
+        _canary_scale(ctx)
     note = f"verb fired: {verb} at {ctx.get('canary_hook')} step={ctx.get('canary_step')}"
     ctx.setdefault("verb_notes", []).append(note)
     print(f"    ⚡ {note}")
+
+
+def _canary_pairing_surface(case_id, ctx, hdr, target, group, primary, xcheck, verdict, notes, checks):
+    """The pairing surface at a canary's terminal (labels, traffic targets,
+    Services), for the protocol `target` the terminal implies. xcheck=sectraffic
+    scopes the secondaries' traffic-target check to the case's tracked bug: a
+    miss there records the XFAIL, anything else stays red."""
+    known_gap = set(group) - {primary} if xcheck == "sectraffic" else set()
+    verdict = pairing_surface_checks(case_id, ctx, target, sorted(group), verdict, notes, checks,
+                                     known_gap=known_gap)
+    if ctx.get("xhit") and verdict == "PASS":
+        ref = f"#{hdr['issue']}" if hdr.get("issue") else "UNLINKED"
+        verdict = f"XFAIL (known bug: {ref})"
+    return verdict
+
+
+def _canary_scale(ctx):
+    """verb=scale: re-target replicas mid-canary to the scale_e=/scale_d=
+    targets. The convergence target moves with them; the capacity floor keeps
+    min(start, target) as its basis, as the pairing handler does."""
+    targets = ctx.get("scale_to") or {}
+    patch = {"spec": {c: {"minReplicas": t, "maxReplicas": t} for c, t in sorted(targets.items())}}
+    rr = kubectl("-n", NS, "patch", "isvc", ctx["case_id"], "--type=merge", "-p", json.dumps(patch))
+    if rr.returncode != 0:
+        ctx.setdefault("verb_errors", []).append(f"scale patch failed: {rr.stderr.strip()[:120]}")
+        return
+    for c, t in targets.items():
+        ctx["want"][c] = t
+        ctx["N"][c] = min(ctx["N"][c], t)
 
 
 def _canary(case_id, yaml_file, desc, hdr):
@@ -4651,6 +4823,19 @@ def _canary(case_id, yaml_file, desc, hdr):
     terminal = str(hdr.get("terminal") or "")
     soak_s = int(hdr.get("skipsoak") or 0)
     nophase = str(hdr.get("nophase") or "")
+    # Pairing through the canary: proto= makes the protocol patch the trigger
+    # (the token re-mints both pairing Components), proto2= re-targets it at
+    # the during= hook (or at the first Ready canary pod), and the pairing
+    # surface is asserted at convergence for the protocol the terminal implies.
+    from_proto = ctx["info"].get("pairing") or ""
+    proto_target = None if hdr.get("proto") is None else ("" if str(hdr["proto"]) == "clear" else str(hdr["proto"]))
+    proto2_target = None if hdr.get("proto2") is None else ("" if str(hdr["proto2"]) == "clear" else str(hdr["proto2"]))
+    scale_to = {c: int(hdr[k]) for c, k in (("engine", "scale_e"), ("decoder", "scale_d"))
+                if isinstance(hdr.get(k), int) and ctx["N"].get(c, 0) > 0}
+    ctx["scale_to"] = scale_to
+    image_comps = {str(hdr["imgcomp"])} if hdr.get("imgcomp") else None
+    ratio_tol = int(hdr.get("ratio_tol") or 50) / 100.0
+    xcheck = str(hdr.get("xcheck") or "")
     if hdr.get("prearm") == "rollback":
         # A rollback request left on the idle service before any canary exists.
         kubectl("-n", NS, "annotate", "isvc", case_id, f"{ROLLBACK_ANNO}=true", "--overwrite")
@@ -4682,6 +4867,10 @@ def _canary(case_id, yaml_file, desc, hdr):
         # A partial bump: only the named members get the new revision, so the
         # unit's target changes while the primary's own revision may not.
         group = (bump_members & group) or group
+    if proto_target is not None:
+        # The protocol rides every engine and decoder revision: the patch
+        # alone re-mints both, whatever the group lists.
+        group = {"engine", "decoder"} & ctx["configured"]
     ctx["bumped"] = group
     # Components of every OTHER canary unit. Nothing bumps them, so they must
     # stay whole on their stable revision with no run of their own — the
@@ -4691,8 +4880,25 @@ def _canary(case_id, yaml_file, desc, hdr):
     print(f"  Phase 2: canary policy={policy} steps={nsteps} primary={primary} bump={sorted(group)}"
           + (f" idle_units={others}" if others else "")
           + ("  +rollback" if do_rollback else ""))
-    if not _bump_rev(ctx, group, extra=analysis_extra, image=bad_image or None):
+    if proto_target is not None:
+        ok, msg = _pairing_patch(case_id, proto_target, extra=analysis_extra, comps=group)
+        if not ok:
+            return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", f"protocol patch denied: {msg[:160]}")
+        ctx["trigger_ts"] = time.time()
+        # Pair-alive arms exactly as the pairing handler arms it: a non-empty→
+        # non-empty transition with both pairing Components rolling.
+        if from_proto and proto_target and group == {"engine", "decoder"}:
+            ctx["inv"]["pairing"] = {"frm": from_proto, "to": proto_target, "armed": False, "seen": False}
+    elif not _bump_rev(ctx, group, extra=analysis_extra, image=bad_image or None, image_comps=image_comps):
         return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", "rev bump patch failed")
+    if {"engine", "decoder"} <= group:
+        # Invariant E watches the canary cohort's engine:decoder ratio.
+        ctx["inv"]["ratio"] = {"N": {c: N[c] for c in ("engine", "decoder")}, "tol": ratio_tol,
+                               "old_hashes": ctx["old_hashes"], "samples": 0, "streak": 0,
+                               "excursions": 0, "worst": 0.0, "worst_detail": ""}
+    # want = the convergence replica target; verb=scale moves it mid-canary.
+    ctx["want"] = dict(N)
+    want = ctx["want"]
     ctx["track_comps"] = sorted(ctx["configured"])   # gang/floor bookkeeping in _read_one
     # Budget tracks the whole bumped group, not just the primary: a rollback (or a
     # full roll) drains every member, and the primary is merely where status/traffic
@@ -4700,6 +4906,8 @@ def _canary(case_id, yaml_file, desc, hdr):
     # too (18-26 pods), and the router's own readiness-gated SurgeThenDrain back to
     # stable runs ~100-300s — sizing on the primary alone starves the drain window.
     budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * sum(N[c] * ctx["pods_per_inst"][c] for c in group) + 120)
+    budget = min(MAX_BUDGET_S, budget + ROTATE_PER_POD_S * sum(
+        max(0, t - N[c]) * ctx["pods_per_inst"].get(c, 1) for c, t in scale_to.items()))
     if analysis_mode:
         # Analysis is paced by the bundled Prometheus scrape (~15s) plus each
         # step's initialDelay + failureLimit×interval (+ stall timeout for the
@@ -4720,7 +4928,19 @@ def _canary(case_id, yaml_file, desc, hdr):
     stale_held = None   # promote-stale: did the step hold 20s after the stale promote
     hook_fired_ts = None    # when the case's verb or fault landed (nophase= window)
     after_hook_phases = set()
+    p2_fired = False
+    pre_final = None    # hash universe before the proto2 re-target (nothing may stay on it)
     state, stable, last_poll = "ROLLING", None, 0.0
+
+    def canary_ready_pods():
+        return sum(1 for p in ctx["pod_state"].values()
+                   if p and p["alive"] and p["ready"] and p["comp"] in group
+                   and p.get("hash") and p["hash"] not in ctx["old_hashes"])
+
+    def stranded():
+        """Live bumped pods still on a pre-re-target revision."""
+        return [n for n, p in sorted(ctx["pod_state"].items())
+                if p and p["alive"] and p["comp"] in group and (not p.get("hash") or p["hash"] in pre_final)]
 
     while ctx["trigger_ts"] and time.time() - ctx["trigger_ts"] < budget and not ctx["closed"]:
         _read_one(ctx)                                   # fold pod events → peaks / per-revision split
@@ -4767,6 +4987,25 @@ def _canary(case_id, yaml_file, desc, hdr):
             print(f"    verb lifted: rollout-paused removed after {verbhold}s (step={step})")
         if verb_fired and verb == "promote-stale" and stale_held is None and now - verb_ts >= 20:
             stale_held = (step == step_at_verb)
+        # The protocol re-target fires at the during= hook, or once the first
+        # canary pod is Ready: a re-target over a partially-landed intermediate.
+        if proto2_target is not None and not p2_fired and (
+                _hook_due(during, ctx["canary_hook"], step) if during else canary_ready_pods() > 0):
+            p2_fired = True
+            pre_final = set(ctx["old_hashes"]) | set(ctx.get("seen_hashes", set()))
+            ok2, msg2 = _pairing_patch(case_id, proto2_target)
+            note = f"proto2 fired: pairingProtocol {proto_target!r}→{proto2_target!r} at {ctx.get('canary_hook')} step={step}"
+            if not ok2:
+                ctx.setdefault("verb_errors", []).append(f"proto2 re-patch denied: {msg2[:120]}")
+            ctx.setdefault("verb_notes", []).append(note)
+            print(f"    ⚡ {note}")
+            if ctx["inv"].get("pairing"):
+                if proto2_target:
+                    ctx["inv"]["pairing"]["to"] = proto2_target
+                else:
+                    ctx["inv"]["pairing"] = None   # →empty pairs with anything: gate + invariant inactive
+            if hook_fired_ts is None:
+                hook_fired_ts = now
 
         # Rollback probe: once the canary is in progress, request a rollback. The
         # canary reverts every Instance to the stable revision and HOLDS there
@@ -4813,7 +5052,9 @@ def _canary(case_id, yaml_file, desc, hdr):
         elif expect == "Failed":
             pods_settled = (phase == "Failed")   # parked at the failed step; pod count is whatever it reached
         else:                                    # Stable
-            pods_settled = (cur_new == N[primary])
+            pods_settled = (cur_new == want[primary]) and (pre_final is None or not stranded())
+        if proto2_target is not None and not p2_fired:
+            pods_settled = False   # the re-target must land before convergence counts
         if phase == expect and pods_settled:
             stable = stable or now
             if now - stable >= STABILITY_S:
@@ -4873,9 +5114,16 @@ def _canary(case_id, yaml_file, desc, hdr):
 
     for x in ctx.get("verb_notes", []):
         checks.append(f"  ⓘ {x}")
+    for e in ctx.get("verb_errors", []):
+        good(False, e, e)
     if verb:
         good(verb_fired, f"verb {verb} fired at {during}",
              f"verb {verb} never fired: the canary never reached {during} (phases={sorted(phases)})")
+    if verb == "scale" and verb_fired:
+        checks.append("  ⓘ scale fired mid-canary: " + " ".join(f"{c}→{t}" for c, t in sorted(scale_to.items())))
+    if proto2_target is not None:
+        good(p2_fired, f"proto2 re-target fired ({proto_target!r}→{proto2_target!r})",
+             f"proto2 re-target never fired (phases={sorted(phases)})")
     if verb in ("pause", "pause-freeze") and verb_fired:
         good(verb_lifted and step_at_lift == step_at_verb,
              f"paused canary held its step ({step_at_verb}) for {verbhold}s until the pause was lifted",
@@ -4937,8 +5185,8 @@ def _canary(case_id, yaml_file, desc, hdr):
             good(saw_metrics, "analysis sampled (status.canary.metricResults recorded)",
                  "no metricResults ever recorded — analysis never sampled")
         if expect == "Stable":
-            good(new == N[primary], f"{primary} promoted to canary after passing analysis ({new}/{N[primary]})",
-                 f"{primary} not fully on canary after analysis ({new}/{N[primary]})")
+            good(new == want[primary], f"{primary} promoted to canary after passing analysis ({new}/{want[primary]})",
+                 f"{primary} not fully on canary after analysis ({new}/{want[primary]})")
             fc = (fetch_status(case_id).get("components", {}) or {}).get(primary, {}) or {}
             canary_pct = next((t.get("percent", 0) for t in (fc.get("traffic") or []) if t.get("latestRevision")), 0)
             good(canary_pct == 100, "canary revision carries 100% traffic after passing analysis",
@@ -4946,6 +5194,10 @@ def _canary(case_id, yaml_file, desc, hdr):
         elif expect == "RolledBack":
             good(new == 0, f"{primary} drained to stable after analysis rollback (0 canary)",
                  f"{primary} still has {new} canary Instances after rollback")
+            for c in sorted(group - {primary}):
+                left, _ = _inst_rev_split(ctx, c)
+                good(left == 0, f"{c} drained to stable with the primary (0 canary)",
+                     f"{c} still has {left} canary Instances after the analysis rollback")
             good(bool(rejected), f"rejected revision recorded ({rejected})", "rolledBackRevisionHash not recorded")
             good(not rollback_set, "rollback was analysis-initiated (no manual rollback annotation)",
                  "rollback annotation was set by the harness (not analysis-initiated)")
@@ -4976,6 +5228,10 @@ def _canary(case_id, yaml_file, desc, hdr):
         # revision recorded + held, and RollingBack observed during the drain.
         good(new == 0, f"{primary} drained back to stable (0 canary Instances)",
              f"{primary} still has {new} canary Instances after rollback")
+        for c in sorted(group - {primary}):
+            left, _ = _inst_rev_split(ctx, c)
+            good(left == 0, f"{c} drained back to stable with the primary (0 canary Instances)",
+                 f"{c} still has {left} canary Instances after rollback")
         good(bool(rejected), f"rejected revision recorded ({rejected})", "rolledBackRevisionHash not recorded")
         # RollingBack is a transient drain phase between Paused and RolledBack; a
         # fast drain can advance to the RolledBack terminal within one poll gap.
@@ -4988,6 +5244,10 @@ def _canary(case_id, yaml_file, desc, hdr):
         else:
             verdict = "FAIL"; notes.append("never observed RollingBack")
             checks.append("  ✗ never observed RollingBack")
+        if proto_target is not None and state == "CONVERGED":
+            # Both cohorts revert: every pairing surface reads the protocol the
+            # stable revision carried before the transition.
+            verdict = _canary_pairing_surface(case_id, ctx, hdr, from_proto, group, primary, xcheck, verdict, notes, checks)
         return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
     # Producer-side traffic: at convergence the canary revision must carry 100%.
@@ -5003,9 +5263,16 @@ def _canary(case_id, yaml_file, desc, hdr):
          f"canary revision traffic at convergence is {canary_pct}% (want 100); per-step: {weights}")
     for c in sorted(ctx.get("bumped") or {primary}):
         rolled, _ = _inst_rev_split(ctx, c)
-        good(rolled == N[c],
-             f"{c} fully rolled to canary revision ({rolled}/{N[c]})",
-             f"{c} not fully on canary revision ({rolled}/{N[c]})")
+        good(rolled == want[c],
+             f"{c} fully rolled to canary revision ({rolled}/{want[c]})",
+             f"{c} not fully on canary revision ({rolled}/{want[c]})")
+    if pre_final is not None:
+        left = stranded()
+        good(not left, "proto2: no Instance stranded on the intermediate cohort",
+             f"proto2: {len(left)} pod(s) still on a pre-re-target revision: {left[:4]}")
+    if proto_target is not None and state == "CONVERGED":
+        final_proto = proto2_target if (proto2_target is not None and p2_fired) else proto_target
+        verdict = _canary_pairing_surface(case_id, ctx, hdr, final_proto, group, primary, xcheck, verdict, notes, checks)
 
     if policy == "manual":
         if promote_rejected:

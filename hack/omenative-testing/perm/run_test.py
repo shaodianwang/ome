@@ -612,3 +612,161 @@ class CaseImageSideLoadTest(unittest.TestCase):
 
     def test_committed_corpus_side_loads_no_unpullable_image(self):
         self.assertNotIn(runtime_fixtures.UNPULLABLE_IMAGE, runtime_fixtures.case_images(kind=True))
+
+class PDCanaryKnobTest(unittest.TestCase):
+    """The PD knobs of canary mode: a podkill aimed at one Component, the
+    cohort-ratio observer, the scoped park, and the pairing patch trigger."""
+
+    def test_victim_component_narrows_every_rule(self):
+        pods = {"e0": {"alive": True, "hash": "old", "inst": "0", "comp": "engine", "created": "1"},
+                "d0": {"alive": True, "hash": "old", "inst": "0", "comp": "decoder", "created": "2"},
+                "d1": {"alive": True, "hash": "new", "inst": "1", "comp": "decoder", "created": "3"}}
+        self.assertEqual("d1", run._fault_pick_pod(pods, {"engine": 1, "decoder": 1}, {"old"}, comp="decoder"))
+        self.assertEqual("d0", run._fault_pick_pod(pods, {"engine": 1, "decoder": 1}, {"old"}, victim="stable", comp="decoder"))
+        self.assertEqual("e0", run._fault_pick_pod(pods, {"engine": 1, "decoder": 1}, {"old"}, comp="engine"))
+        self.assertIsNone(run._fault_pick_pod(pods, {"engine": 1, "decoder": 1}, {"old"}, comp="router"))
+
+    @staticmethod
+    def _pod(comp, inst, hash_, ready=True):
+        return {"alive": True, "ready": ready, "serving": ready, "comp": comp, "inst": str(inst), "hash": hash_}
+
+    def test_cohort_counts_split_fully_serving_instances_by_revision(self):
+        pods = {"e0": self._pod("engine", 0, "old"), "e1": self._pod("engine", 1, "new"),
+                "e2": self._pod("engine", 2, "new", ready=False),
+                "d0": self._pod("decoder", 0, "old"), "d1": self._pod("decoder", 1, "new")}
+        got = run._cohort_serving_instances(pods, {"engine": 1, "decoder": 1}, {"old"})
+        self.assertEqual({"engine": (1, 1), "decoder": (1, 1)}, got)
+
+    def test_cohort_ratio_records_only_a_sustained_skew(self):
+        inv = run._inv_new("p1", {})
+        inv["ratio"] = {"N": {"engine": 4, "decoder": 2}, "tol": 0.25, "old_hashes": {"old"},
+                        "samples": 0, "streak": 0, "excursions": 0, "worst": 0.0, "worst_detail": ""}
+        skew = {"e1": self._pod("engine", 1, "new"), "d1": self._pod("decoder", 1, "new")}   # 1:1 in a 2:1 fleet
+        run._inv_check_cohort_ratio(inv, skew, {"engine": 1, "decoder": 1}, 1.0)
+        self.assertEqual((1, 0), (inv["ratio"]["samples"], inv["ratio"]["excursions"]))
+        run._inv_check_cohort_ratio(inv, skew, {"engine": 1, "decoder": 1}, 6.0)
+        self.assertEqual(1, inv["ratio"]["excursions"])
+        self.assertAlmostEqual(0.5, inv["ratio"]["worst"])
+        even = {**skew, "e2": self._pod("engine", 2, "new")}                                  # 2:1 again
+        run._inv_check_cohort_ratio(inv, even, {"engine": 1, "decoder": 1}, 11.0)
+        self.assertEqual(0, inv["ratio"]["streak"])
+        checks = []
+        run.invariant_checks(inv, "PASS", [], checks)
+        self.assertTrue(any("invariant E" in c and "1 sustained excursion" in c for c in checks), checks)
+        # informational: never a FAIL
+        self.assertEqual("PASS", run.invariant_checks(inv, "PASS", [], []))
+
+    def test_cohort_ratio_is_vacuous_without_canary_capacity_on_both_sides(self):
+        inv = run._inv_new("p1", {})
+        inv["ratio"] = {"N": {"engine": 4, "decoder": 2}, "tol": 0.25, "old_hashes": {"old"},
+                        "samples": 0, "streak": 0, "excursions": 0, "worst": 0.0, "worst_detail": ""}
+        run._inv_check_cohort_ratio(inv, {"e1": self._pod("engine", 1, "new")}, {"engine": 1, "decoder": 1}, 1.0)
+        self.assertEqual(0, inv["ratio"]["samples"])
+        checks = []
+        run.invariant_checks(inv, "PASS", [], checks)
+        self.assertTrue(any("invariant E" in c and "vacuous" in c for c in checks), checks)
+
+    def test_scoped_park_softens_only_its_own_check(self):
+        plain = {"notimpl": 1, "issue": 1346}
+        self.assertTrue(run.soften_expected_fail(plain, "FAIL", []).startswith("XFAIL"))
+        scoped = {"notimpl": 1, "issue": 1346, "xcheck": "sectraffic"}
+        self.assertEqual("FAIL", run.soften_expected_fail(scoped, "FAIL", []))
+        self.assertEqual("PASS", run.soften_expected_fail(scoped, "PASS", []))
+
+    def _surface(self, known_gap):
+        ctx = {"pod_state": {"e0": {**self._pod("engine", 0, "new"), "pairing": "v2"},
+                             "d0": {**self._pod("decoder", 0, "new"), "pairing": "v2"}}}
+        status = {"components": {
+            "engine": {"traffic": [{"revisionName": "p1-engine-rev-new", "percent": 100, "pairingProtocol": "v2"}]},
+            "decoder": {"traffic": []}}}
+        saved = (run.fetch_status, run.kubectl)
+        run.fetch_status = lambda cid: status
+        run.kubectl = lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=json.dumps({"items": [
+            {"metadata": {"name": "p1-engine-rev-new", "labels": {run.PAIRING_LABEL: "v2"}}, "spec": {"selector": {}}}]}), stderr="")
+        try:
+            notes, checks = [], []
+            verdict = run.pairing_surface_checks("p1", ctx, "v2", ["engine", "decoder"], "PASS", notes, checks,
+                                                 known_gap=known_gap)
+            return verdict, ctx, notes, checks
+        finally:
+            run.fetch_status, run.kubectl = saved
+
+    def test_secondary_traffic_gap_is_red_unless_scoped(self):
+        verdict, ctx, notes, _ = self._surface(known_gap=())
+        self.assertEqual("FAIL", verdict)
+        self.assertIn("decoder publishes no live traffic target", notes)
+        self.assertFalse(ctx.get("xhit"))
+
+    def test_scoped_secondary_traffic_gap_records_the_tracked_bug(self):
+        verdict, ctx, notes, checks = self._surface(known_gap={"decoder"})
+        self.assertEqual("PASS", verdict)
+        self.assertTrue(ctx.get("xhit"))
+        self.assertTrue(any("xcheck=sectraffic" in c for c in checks), checks)
+
+    def test_pairing_patch_carries_the_trigger_annotations(self):
+        seen = []
+        saved = run.kubectl
+        run.kubectl = lambda *a, **k: (seen.append(a), subprocess.CompletedProcess(a, 0, stdout="", stderr=""))[1]
+        try:
+            ok, _ = run._pairing_patch("p1", "v2", extra={"perm.test/error-rate": "0.9"}, comps={"engine", "decoder"})
+        finally:
+            run.kubectl = saved
+        self.assertTrue(ok)
+        body = json.loads(seen[0][-1])
+        self.assertEqual("v2", body["spec"]["rollout"]["pairingProtocol"])
+        self.assertEqual({"perm.test/error-rate": "0.9"}, body["spec"]["decoder"]["annotations"])
+        self.assertEqual({"perm.test/error-rate": "0.9"}, body["spec"]["engine"]["annotations"])
+        # a clear removes the field and carries nothing else
+        run.kubectl = lambda *a, **k: (seen.append(a), subprocess.CompletedProcess(a, 0, stdout="", stderr=""))[1]
+        try:
+            run._pairing_patch("p1", "")
+        finally:
+            run.kubectl = saved
+        self.assertEqual({"spec": {"rollout": {"pairingProtocol": None}}}, json.loads(seen[1][-1]))
+
+
+class PDCanaryHeaderTest(unittest.TestCase):
+    """validate-only knows the PD knobs of canary mode and their constraints."""
+
+    def _errs(self, header, second=""):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\n" + (second + "\n" if second else "") + "metadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    PD = "# p999: x mode=canary Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=3 ceil_r=0 canary=auto topo=pd"
+
+    def test_pairing_trigger_validates_in_canary_mode(self):
+        self.assertEqual([], self._errs(self.PD + " proto=v2 cell=canary/Serving/pairing"))
+        self.assertEqual([], self._errs(self.PD + " proto=v2 proto2=v3 during=canary-serving cell=canary/Serving/retarget"))
+        self.assertEqual([], self._errs(self.PD + " proto=v2 ratio_tol=25 cell=canary/Staging/ratio"))
+        self.assertTrue(any("needs Ne>0 and Nd>0" in e for e in self._errs(
+            "# p999: x mode=canary Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 canary=auto topo=engine proto=v2")))
+        self.assertTrue(any("bump= does not apply" in e for e in self._errs(self.PD + " proto=v2 bump=engine")))
+        self.assertTrue(any("carries no image" in e for e in self._errs(self.PD + " proto=v2 img=example.com/canary-test/missing:none")))
+        self.assertTrue(any("needs proto=" in e for e in self._errs(self.PD + " proto2=v3")))
+        self.assertTrue(any("must differ" in e for e in self._errs(self.PD + " proto=v2 proto2=v2")))
+        self.assertTrue(any("pairing- or canary-mode" in e for e in self._errs(
+            "# p999: x mode=rollout Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=3 ceil_r=0 topo=pd proto=v2")))
+
+    def test_scale_fires_through_the_verb(self):
+        self.assertEqual([], self._errs(self.PD + " during=canary-serving verb=scale scale_d=4 cell=canary/Serving/scale"))
+        self.assertTrue(any("verb=scale needs" in e for e in self._errs(self.PD + " during=canary-serving verb=scale")))
+        self.assertTrue(any("verb=scale during" in e for e in self._errs(self.PD + " scale_d=4")))
+
+    def test_component_aimed_knobs_need_their_base_knob(self):
+        self.assertEqual([], self._errs(self.PD + " fault=podkill:canary-serving victim=stable victimcomp=decoder"))
+        self.assertTrue(any("victimcomp=" in e for e in self._errs(self.PD + " victimcomp=decoder")))
+        self.assertEqual([], self._errs(self.PD + " bump=engine,decoder img=example.com/canary-test/missing:none imgcomp=decoder terminal=Failed"))
+        self.assertTrue(any("imgcomp=" in e for e in self._errs(self.PD + " imgcomp=decoder")))
+        self.assertTrue(any("must be one of the bumped" in e for e in self._errs(
+            self.PD + " bump=engine img=example.com/canary-test/missing:none imgcomp=decoder")))
+
+    def test_scoped_park_needs_the_parking_triple(self):
+        ok = self._errs(self.PD + " proto=v2 xcheck=sectraffic notimpl=1 issue=1346", "# reason: parked on the secondary traffic gap")
+        self.assertEqual([], ok)
+        self.assertTrue(any("requires notimpl=1 issue" in e for e in self._errs(self.PD + " proto=v2 xcheck=sectraffic", "# reason: x")))
+        self.assertTrue(any("reason:" in e for e in self._errs(self.PD + " proto=v2 xcheck=sectraffic notimpl=1 issue=1346")))
+        self.assertTrue(any("needs proto=" in e for e in self._errs(self.PD + " xcheck=sectraffic notimpl=1 issue=1346", "# reason: x")))

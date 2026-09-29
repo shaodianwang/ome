@@ -1,0 +1,25 @@
+# p1797: canary pd cohort ratio on an asymmetric fleet  mode=canary Ne=4 Nd=2 Nr=0 ceil_e=5 ceil_d=3 ceil_r=0 canary=auto ratio_tol=25 cell=canary/Staging/ratio[asymmetric] co=none topo=pd
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p1797 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine, decoder]
+          canary:
+            steps:
+              - { capacity: "25%", traffic: 25, pause: { duration: "20s" } }
+              - { capacity: "50%", traffic: 50, pause: { duration: "20s" } }
+              - { capacity: "100%", traffic: 100 }

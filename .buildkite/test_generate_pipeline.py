@@ -694,8 +694,8 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         }
         self.assertEqual(set(assignments), committed)
         self.assertEqual(shard_counts[("canary", "engine")], 8)
-        self.assertEqual(shard_counts[("canary", "pd")], 9)
-        self.assertEqual(job_count, 113)
+        self.assertEqual(shard_counts[("canary", "pd")], 10)
+        self.assertEqual(job_count, 115)
 
     def test_eval_group_emits_unique_subshard_keys_and_readable_labels(self):
         with mock.patch.dict(
@@ -710,7 +710,7 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         keys = re.findall(r'key: "(omenative-e2e-[^"]+)"', yaml_text)
         self.assertEqual(len(keys), len(set(keys)))
         self.assertIn("canary / engine [1/8]", yaml_text)
-        self.assertIn("canary / pd [9/9]", yaml_text)
+        self.assertIn("canary / pd [10/10]", yaml_text)
         commands = re.findall(
             r'command: "sh \.buildkite/run_omenative_eval_gke\.sh ([^"]+)"',
             yaml_text,
