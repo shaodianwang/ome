@@ -19,6 +19,9 @@ spec:
       priority: 1
 
   engineConfig: &cpuRunner
+    # The eval judges a case well inside the cluster's default pod grace; a
+    # pod that ignores its stop signal must not outlive the verdict.
+    terminationGracePeriodSeconds: 60
     nodeSelector: { kubernetes.io/arch: ${OME_EVAL_NODE_ARCH} }
     runner:
       name:  ome-container

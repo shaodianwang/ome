@@ -5896,7 +5896,8 @@ def _canary(case_id, yaml_file, desc, hdr):
             rollback_set = True
             kubectl("-n", NS, "annotate", "isvc", case_id, f"{ROLLBACK_ANNO}=true", "--overwrite")
             print("    set ome.io/rollout-rollback=true (expect: drain to stable -> RolledBack)")
-        rejected = can.get("rolledBackRevisionHash") or rejected
+        live_rejected = can.get("rolledBackRevisionHash")
+        rejected = live_rejected or rejected   # the verdict reads the rejection once recorded
 
         # Manual promotion: promote at EACH paused step (multi-step plans pause
         # more than once). Wait for the prior durable promotion record to clear
@@ -5917,7 +5918,7 @@ def _canary(case_id, yaml_file, desc, hdr):
 
         wsteps = " ".join(f"s{k}={v}%" for k, v in sorted(traffic_by_step.items()))
         print(f"    [t={int(now - ctx['trigger_ts']):3d}s] phase={phase:<11} step={step} "
-              f"canary={canary_hash} rejected={rejected} traffic[{wsteps}]")
+              f"canary={canary_hash} rejected={live_rejected} traffic[{wsteps}]")
 
         # Converged: rollback cases settle at RolledBack (drained to stable); normal
         # canaries at Stable. We key on the phase AND on pod convergence: the
