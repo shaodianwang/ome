@@ -1239,13 +1239,115 @@ class RunLostTest(unittest.TestCase):
         self.assertFalse(run._runlost_held(1, [1], 0), "a re-pin must adopt in place, not restart")
         self.assertFalse(run._runlost_held(None, [], None))
 
-    def test_acknowledgement_is_the_hold_event_or_an_in_place_adoption(self):
-        self.assertEqual("CanaryRunLost", run._runlost_acknowledged(
-            [("RolloutRunOpened", "run r1 opened"), ("CanaryRunLost", "engine canary has no pinned rollout run")]))
-        self.assertEqual("RolloutPlanRepinned", run._runlost_acknowledged(
-            [("RolloutPlanRepinned", "run r2 adopted the in-flight rollout in place")]))
-        self.assertIsNone(run._runlost_acknowledged([("RolloutPlanRepinned", "run r1 repinned to digest abc")]))
-        self.assertIsNone(run._runlost_acknowledged([]))
+    def test_a_repin_below_the_lost_step_is_a_restart(self):
+        self.assertTrue(run._runlost_restarted(1, 0))
+        for verb_step, repin_step in ((1, 1), (1, 2), (1, None), (None, 0)):
+            self.assertFalse(run._runlost_restarted(verb_step, repin_step), (verb_step, repin_step))
+
+    @staticmethod
+    def _removed(hook="canary-serving", step=1, last_run=None):
+        track = run._runlost_record("r1", last_run, hook, step, 0.0)
+        track["removed"] = True
+        return track
+
+    def test_track_counts_only_samples_that_saw_no_run(self):
+        t = self._removed()
+        self.assertIsNone(run._runlost_track(t, None, None, 1, "canary-serving", 2.0))
+        self.assertEqual(([1], 2.0), (t["unpinned"], t["since"]))
+        self.assertEqual("repinned", run._runlost_track(t, "r2", None, 1, "canary-serving", 4.0))
+        self.assertEqual((1, "r2", None), (t["repin_step"], t["repin_run"], t["since"]))
+        self.assertIsNone(run._runlost_track(t, "r2", None, 2, "canary-serving", 6.0), "only the first run seen again is the re-pin")
+        self.assertEqual([1], t["unpinned"], "a pinned sample is not a sample without a run")
+
+    def test_track_records_a_repin_the_sampler_saw_no_gap_before(self):
+        t = self._removed()
+        self.assertEqual("repinned", run._runlost_track(t, "r1", None, 1, "canary-serving", 2.0))
+        self.assertEqual((1, "r1", []), (t["repin_step"], t["repin_run"], t["unpinned"]))
+
+    def test_track_holds_after_the_window_only_where_the_grid_holds(self):
+        for hook, want in (("canary-staging", "held"), ("canary-draining", "held"), ("canary-rollingback", None), ("canary-failed", None)):
+            t = self._removed(hook, 0)
+            self.assertIsNone(run._runlost_track(t, None, None, 0, hook, 1.0), hook)
+            self.assertIsNone(run._runlost_track(t, None, None, 0, hook, run.RUNLOST_HOLD_S), hook)
+            self.assertEqual(want, run._runlost_track(t, None, None, 0, hook, 1.0 + run.RUNLOST_HOLD_S), hook)
+
+    def test_track_restarts_the_window_at_a_pinned_sample(self):
+        t = self._removed()
+        run._runlost_track(t, None, None, 1, "canary-serving", 1.0)
+        run._runlost_track(t, "r2", None, 1, "canary-serving", 3.0)
+        late = 1.0 + run.RUNLOST_HOLD_S
+        self.assertIsNone(run._runlost_track(t, None, None, 1, "canary-serving", late))
+        self.assertEqual(late, t["since"])
+
+    def test_track_reads_a_new_closed_record_at_a_terminal_as_closed_not_lost(self):
+        closed = {"outcome": "Completed", "closedAt": "2026-01-01T00:00:10Z"}
+        t = self._removed("canary-draining")
+        self.assertEqual("closed", run._runlost_track(t, None, closed, 2, "canary-done", 2.0))
+        self.assertEqual(([], closed), (t["unpinned"], t["closed"]))
+        self.assertIsNone(run._runlost_track(t, None, closed, 2, "canary-done", 4.0))
+        self.assertEqual([], t["unpinned"])
+        # The record the hook already had: nothing closed after the removal,
+        # so a terminal with no run is a ladder that ended unpinned.
+        t = self._removed("canary-draining", last_run=closed)
+        self.assertIsNone(run._runlost_track(t, None, closed, 2, "canary-done", 2.0))
+        self.assertEqual([2], t["unpinned"])
+        # A streak already open keeps counting through the terminal.
+        t = self._removed("canary-draining")
+        run._runlost_track(t, None, None, 1, "canary-draining", 2.0)
+        run._runlost_track(t, None, closed, 2, "canary-done", 4.0)
+        self.assertEqual(([1, 2], None), (t["unpinned"], t["closed"]))
+
+    def test_track_ignores_a_removal_that_did_not_happen(self):
+        t = run._runlost_record(None, None, "canary-done", 2, 0.0)
+        self.assertIsNone(run._runlost_track(t, None, None, 2, "canary-done", 2.0))
+        self.assertIsNone(run._runlost_track(t, "r1", None, 2, "canary-done", 4.0))
+        self.assertEqual(([], None), (t["unpinned"], t["repin_step"]))
+
+    def test_active_run_reads_the_pinned_run_id(self):
+        self.assertEqual("r1", run._active_run({"rollout": {"activeRun": {"runID": "r1"}}}))
+        self.assertEqual("unnamed", run._active_run({"rollout": {"activeRun": {"openedAt": "t"}}}))
+        self.assertIsNone(run._active_run({"rollout": {"lastRun": {"outcome": "Completed"}}}))
+        self.assertIsNone(run._active_run({}))
+
+    def test_signals_name_what_followed_the_removal(self):
+        t = run._runlost_record("r1", None, "canary-serving", 1, 0.0)
+        self.assertEqual(["held"], run._runlost_signals(
+            t, [("RolloutRunOpened", "run r1 opened"), ("CanaryRunLost", "engine canary has no pinned rollout run")]))
+        self.assertEqual(["adopted"], run._runlost_signals(t, [("RolloutPlanRepinned", "run r2 adopted the in-flight rollout in place")]))
+        self.assertEqual([], run._runlost_signals(t, [("RolloutPlanRepinned", "run r1 repinned to digest abc")]))
+        self.assertEqual([], run._runlost_signals(t, []))
+        t["repin_step"], t["repin_run"] = 1, "r1"
+        self.assertEqual(["restored"], run._runlost_signals(t, []))
+        t["repin_run"] = "r2"
+        self.assertEqual(["repinned"], run._runlost_signals(t, []))
+        self.assertEqual(["held", "adopted", "repinned"], run._runlost_signals(
+            t, [("CanaryRunLost", "held"), ("RolloutPlanRepinned", "run r2 adopted the in-flight rollout in place")]))
+        t = run._runlost_record("r1", None, "canary-draining", 1, 0.0)
+        t["closed"] = {"outcome": "Completed"}
+        self.assertEqual(["closed"], run._runlost_signals(t, []))
+
+    def test_story_names_every_signal(self):
+        t = run._runlost_record("r1", None, "canary-serving", 1, 0.0)
+        t["repin_step"], t["repin_run"] = 1, "r2"
+        story = run._runlost_story(t, ["held", "adopted", "repinned"])
+        for word in ("CanaryRunLost", "RolloutPlanRepinned", "r2", "step 1"):
+            self.assertIn(word, story)
+        self.assertIn("r1", run._runlost_story(t, ["restored"]))
+        self.assertEqual("", run._runlost_story(t, []))
+
+    def test_a_repin_is_waited_for_where_the_next_pass_pins_one(self):
+        t = self._removed("canary-failed", 0)
+        self.assertTrue(run._runlost_repin_pending(t, 1.0))
+        self.assertFalse(run._runlost_repin_pending(t, float(run.RUNLOST_HOLD_S)))
+        t["repin_step"] = 0
+        self.assertFalse(run._runlost_repin_pending(t, 1.0))
+        t = self._removed("canary-draining", 1)
+        self.assertTrue(run._runlost_repin_pending(t, 1.0))
+        t["closed"] = {"outcome": "Completed"}
+        self.assertFalse(run._runlost_repin_pending(t, 1.0))
+        self.assertFalse(run._runlost_repin_pending(self._removed("canary-rollingback", 0), 1.0))
+        self.assertFalse(run._runlost_repin_pending(run._runlost_record(None, None, "canary-serving", 0, 0.0), 1.0))
+        self.assertFalse(run._runlost_repin_pending(None, 1.0))
 
     def _fire(self, status):
         calls = []
@@ -1265,16 +1367,22 @@ class RunLostTest(unittest.TestCase):
         return calls, ctx
 
     def test_verb_removes_the_pinned_run_from_the_status_subresource(self):
-        calls, ctx = self._fire({"rollout": {"activeRun": {"runID": "r1"}}})
+        closed = {"outcome": "Superseded", "closedAt": "2026-01-01T00:00:01Z"}
+        calls, ctx = self._fire({"rollout": {"activeRun": {"runID": "r1"}, "lastRun": closed}})
         patch = next(c for c in calls if "patch" in c)
         self.assertIn("--subresource=status", patch)
         self.assertEqual([{"op": "remove", "path": "/status/rollout/activeRun"}], json.loads(patch[-1]))
         self.assertNotIn("verb_errors", ctx)
+        track = ctx["runlost"]
+        self.assertTrue(track["removed"])
+        self.assertEqual(("r1", closed, "canary-serving", 1), (track["run_id"], track["last_run"], track["hook"], track["step"]))
+        self.assertEqual(([], None, None), (track["unpinned"], track["repin_step"], track["closed"]))
 
     def test_verb_with_no_pinned_run_records_it_and_patches_nothing(self):
         calls, ctx = self._fire({"rollout": {}})
         self.assertFalse(any("patch" in c for c in calls))
         self.assertTrue(any("nothing to remove" in n for n in ctx["verb_notes"]))
+        self.assertEqual((False, None), (ctx["runlost"]["removed"], ctx["runlost"]["run_id"]))
 
     def test_isvc_events_are_read_oldest_first(self):
         items = [{"reason": "CanaryRunLost", "message": "held", "lastTimestamp": "2026-01-01T00:00:09Z"},

@@ -1326,7 +1326,15 @@ RETARGET_VERBS = {"rebump", "rebump-fix", "pairing"}
 # Hooks where a lost run holds the ladder in place; at the terminals the
 # loss is inert and the ladder still ends.
 RUNLOST_HOLD_HOOKS = {"canary-staging", "canary-serving", "canary-prehold", "canary-draining"}
-# How long a lost run must stay unpinned before the case ends as held.
+# Hooks where the run layer's next pass pins a run again: a live ladder is
+# adopted in place, a park is adopted under its hold. A rolled-back unit is
+# left alone (its revert runs without a run).
+RUNLOST_REPIN_HOOKS = RUNLOST_HOLD_HOOKS | {"canary-failed"}
+# Hooks where the run layer has closed the run: a missing run there is the
+# expected state, not a loss.
+RUNLOST_CLOSED_HOOKS = {"canary-done", "canary-rolledback"}
+# How long a lost run must stay unpinned before the case ends as held, and
+# how long a re-pin is waited for before a terminal is judged.
 RUNLOST_HOLD_S = int(45 * TIMEOUT_MULT)
 # Phases only a canary run projects; a bump with no group shows none.
 CANARY_RUN_PHASES = {"Pending", "Canarying", "Paused", "Promoting", "RollingBack", "RolledBack", "Failed"}
@@ -1527,16 +1535,94 @@ def _runlost_held(step_at_verb, steps_unpinned, step_at_repin):
     return step_at_repin is None or step_at_repin == step_at_verb
 
 
-def _runlost_acknowledged(events):
-    """The event reason that acknowledges a lost run, from (reason, message)
-    pairs: the executor's hold, or the run layer adopting the in-flight
-    ladder in place when it re-pinned before an executor pass saw the loss."""
-    for reason, msg in events:
-        if reason == "CanaryRunLost":
-            return reason
-        if reason == "RolloutPlanRepinned" and "adopted" in (msg or ""):
-            return reason
+def _runlost_restarted(step_at_verb, step_at_repin):
+    """A run pinned again below the step the loss found: the ladder was
+    restarted, not adopted in place."""
+    return step_at_verb is not None and step_at_repin is not None and step_at_repin < step_at_verb
+
+
+def _runlost_record(run_id, last_run, hook, step, now):
+    """The record a lost run is judged from: the run and the closed-run
+    record found at the hook, then what the sampler saw after the removal —
+    the streak of samples with no run, the first sample with one again, or a
+    run closed at a terminal (pinned again and finished between samples)."""
+    return {"run_id": run_id, "last_run": last_run, "hook": hook, "step": step,
+            "removed": False, "removed_at": now, "since": None, "unpinned": [],
+            "repin_step": None, "repin_run": None, "closed": None}
+
+
+def _active_run(st):
+    """The pinned run's id from a status sample; None when no run is pinned."""
+    run = (st.get("rollout") or {}).get("activeRun") or {}
+    return (run.get("runID") or "unnamed") if run else None
+
+
+def _runlost_track(track, run_id, last_run, step, hook, now):
+    """Fold one status sample taken after the removal into the record.
+    Returns "repinned" on the first sample with a run again, "closed" when a
+    closing terminal shows a new closed-run record instead of the lost run,
+    "held" once the samples with no run span RUNLOST_HOLD_S at a hook that
+    holds, else None."""
+    if not track.get("removed"):
+        return None
+    if run_id is not None:
+        first = track["repin_step"] is None
+        if first:
+            track["repin_step"], track["repin_run"] = step, run_id
+        track["since"] = None
+        return "repinned" if first else None
+    if track["since"] is None and hook in RUNLOST_CLOSED_HOOKS and last_run != track["last_run"]:
+        if track["closed"] is not None:
+            return None
+        track["closed"] = last_run
+        return "closed"
+    if track["since"] is None:
+        track["since"] = now
+    track["unpinned"].append(step)
+    if now - track["since"] >= RUNLOST_HOLD_S and _runlost_hold_expected(track["hook"]):
+        return "held"
     return None
+
+
+def _runlost_repin_pending(track, now):
+    """Whether a terminal still waits on the run layer: a run was removed at
+    a hook whose next pass pins one again, none has been seen since, and the
+    window is open."""
+    return bool(track and track.get("removed") and track.get("repin_step") is None
+                and track.get("closed") is None and track.get("hook") in RUNLOST_REPIN_HOOKS
+                and now - track["removed_at"] < RUNLOST_HOLD_S)
+
+
+def _runlost_signals(track, events):
+    """What followed a removed run, from the ISVC (reason, message) events
+    and the sampler's record: the executor's hold, the run layer's in-place
+    adoption, a run pinned again with a new id (no adoption event recorded)
+    or with the removed run's own id (a pass in flight at the removal wrote
+    its snapshot back), or a run closed at a terminal before a sample saw it
+    pinned. Empty when the run stayed missing."""
+    out = []
+    if any(r == "CanaryRunLost" for r, _ in events):
+        out.append("held")
+    if any(r == "RolloutPlanRepinned" and "adopted" in (m or "") for r, m in events):
+        out.append("adopted")
+    if track.get("repin_run") is not None:
+        out.append("restored" if track["repin_run"] == track.get("run_id") else "repinned")
+    elif track.get("closed") is not None:
+        out.append("closed")
+    return out
+
+
+def _runlost_story(track, signals):
+    """One clause per signal in _runlost_signals, joined for a verdict line."""
+    words = {
+        "held": "the executor held it (CanaryRunLost)",
+        "adopted": "the run layer adopted the ladder in place (RolloutPlanRepinned)",
+        "repinned": f"a run with a new id was pinned again at step {track.get('repin_step')} ({track.get('repin_run')})",
+        "restored": f"the removed run {track.get('run_id')} was back at the next sample with no event "
+                    "(a pass in flight at the removal wrote its snapshot back)",
+        "closed": "a run was pinned again and closed before a sample saw it",
+    }
+    return "; ".join(words[s] for s in signals)
 
 
 def _retargeted_by_hash(canary_hash, hashes_at_verb):
@@ -5183,16 +5269,22 @@ def _canary_scale(ctx):
 
 def _remove_active_run(ctx):
     """verb=runlost: drop the pinned run from the status subresource, which is
-    how a lost run looks to the executor. With no run pinned at the hook there
-    is nothing to lose; the verb records that and counts as fired."""
+    how a lost run looks to the executor, and start the record the sampler
+    folds every later sample into. With no run pinned at the hook there is
+    nothing to lose; the verb records that and counts as fired."""
     cid = ctx["case_id"]
-    if not (fetch_status(cid).get("rollout") or {}).get("activeRun"):
+    rollout = fetch_status(cid).get("rollout") or {}
+    track = ctx["runlost"] = _runlost_record(_active_run({"rollout": rollout}), rollout.get("lastRun"),
+                                             ctx.get("canary_hook"), ctx.get("canary_step"), time.time())
+    if track["run_id"] is None:
         ctx.setdefault("verb_notes", []).append(f"runlost: no run pinned at {ctx.get('canary_hook')}; nothing to remove")
         return
     rr = kubectl("-n", NS, "patch", "isvc", cid, "--subresource=status", "--type=json",
                  "-p", json.dumps([{"op": "remove", "path": ACTIVE_RUN_POINTER}]))
     if rr.returncode != 0:
         ctx.setdefault("verb_errors", []).append(f"runlost: status patch failed: {rr.stderr.strip()[:120]}")
+        return
+    track["removed"], track["removed_at"] = True, time.time()
 
 
 def _wait_fleet_at(ctx, targets, budget):
@@ -5425,11 +5517,6 @@ def _canary(case_id, yaml_file, desc, hdr):
     first_serving_ts = advance_ts = None   # step 0 served, then the step advanced: the first hold's soak
     failed_at = None
     released, step_at_release, hook_at_release = False, None, None
-    # A lost run: the window with no run pinned, and where a re-pin resumed.
-    runlost_armed = "runlost" in (verb, verb2)
-    runlost_during = during2 if verb2 == "runlost" else during
-    runlost_ts = runlost_step = step_at_repin = None
-    unpinned_seen, steps_unpinned = False, []
     # A pairing verb: the hashes that existed when it fired; a new one proves the re-target.
     hashes_at_verb, pairing_retargeted = None, False
     # A quota lift: the canary pods the parked step asks for must land.
@@ -5549,19 +5636,18 @@ def _canary(case_id, yaml_file, desc, hdr):
             stale_held = (step == step_at_verb)
         if verb_fired and advanced_at is None and step is not None and step_at_verb is not None and step > step_at_verb:
             advanced_at = now
-        if runlost_armed and (verb2_fired if verb2 == "runlost" else verb_fired):
-            # The window with no run pinned: the step may not move inside it,
-            # and a re-pin must resume where the loss found the ladder.
-            pinned = bool((st.get("rollout") or {}).get("activeRun"))
-            if runlost_ts is None:
-                runlost_ts, runlost_step = now, (step_at_verb2 if verb2 == "runlost" else step_at_verb)
-            if not pinned:
-                unpinned_seen = True
-                steps_unpinned.append(step)
-            elif unpinned_seen and step_at_repin is None:
-                step_at_repin = step
-                print(f"    run re-pinned at step={step}")
-            if not pinned and now - runlost_ts >= RUNLOST_HOLD_S and _runlost_hold_expected(runlost_during):
+        runlost = ctx.get("runlost")
+        if runlost and now > runlost["removed_at"]:
+            # Samples fetched after the removal (this pass's predates the
+            # verb): the step may not move while no run is pinned, and a
+            # re-pin must resume where the loss found the ladder.
+            seen = _runlost_track(runlost, _active_run(st), (st.get("rollout") or {}).get("lastRun"),
+                                  step, ctx["canary_hook"], now)
+            if seen == "repinned":
+                print(f"    run pinned again at step={step} ({runlost['repin_run']})")
+            elif seen == "closed":
+                print("    a run was pinned again and closed at the terminal")
+            elif seen == "held":
                 state = "HELD"
                 print(f"    held with no pinned run for {RUNLOST_HOLD_S}s")
                 break
@@ -5636,6 +5722,8 @@ def _canary(case_id, yaml_file, desc, hdr):
             pods_settled = False   # the park is judged once the lifted capacity is there
         if release and not released:
             pods_settled = False   # the hold is judged at the release
+        if _runlost_repin_pending(ctx.get("runlost"), now):
+            pods_settled = False   # the run layer's re-pin is owed before the terminal is judged
         # A bump with no group is a plain rollout: its phase is not the run's.
         phase_ok = phase == expect or (not _prearm_arms_canary(prearm) and expect == "Stable" and phase in ("", "Stable"))
         if phase_ok and pods_settled:
@@ -5780,19 +5868,42 @@ def _canary(case_id, yaml_file, desc, hdr):
             good(_prehold_survived(step_at_verb2, hook_at_release, step_at_release),
                  f"the pre-step hold survived {verb2}: still held at step {step_at_verb2} when {release} fired",
                  f"the hold did not survive {verb2}: step {step_at_verb2} → {step_at_release}, state {hook_at_release} at the release")
-    if runlost_armed and (verb2_fired if verb2 == "runlost" else verb_fired):
-        ack = _runlost_acknowledged(_isvc_events(case_id))
-        good(ack is not None, f"the controller acknowledged the lost run ({ack})",
-             "no CanaryRunLost event (nor an in-place adoption) followed the removed run")
-        if ack == "RolloutPlanRepinned":
-            checks.append("  ⓘ the run layer re-adopted the run in place before an executor pass observed the loss")
-        good(_runlost_held(runlost_step, steps_unpinned, step_at_repin),
-             f"the ladder held at step {runlost_step} while no run was pinned"
-             + (" and resumed there when re-pinned" if step_at_repin is not None else ""),
-             f"the ladder moved while no run was pinned (steps {steps_unpinned}, re-pinned at step {step_at_repin}, lost at {runlost_step})")
-        if state == "HELD":
-            checks.append(f"  ✓ held with no pinned run for {RUNLOST_HOLD_S}s: the decided outcome at {runlost_during}")
-            return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
+    runlost = ctx.get("runlost")
+    if runlost is not None:
+        hook = runlost["hook"]
+        if not runlost["removed"]:
+            if hook in RUNLOST_CLOSED_HOOKS:
+                checks.append(f"  ⓘ run lost at {hook}: no run was pinned to remove; the run layer had closed it, the state the grid expects there")
+            elif not ctx.get("verb_errors"):
+                good(False, "", f"run lost at {hook}: no run was pinned to remove, and a canary there must carry one")
+        else:
+            signals = _runlost_signals(runlost, _isvc_events(case_id))
+            story = _runlost_story(runlost, signals)
+            if hook in RUNLOST_HOLD_HOOKS:
+                good(bool(signals), f"the lost run was acknowledged: {story}",
+                     "the run stayed missing: no CanaryRunLost event, no adoption, no run pinned again")
+                if runlost["unpinned"]:
+                    good(_runlost_held(runlost["step"], runlost["unpinned"], runlost["repin_step"]),
+                         f"the ladder held at step {runlost['step']} while no run was pinned"
+                         + (" and resumed there when re-pinned" if runlost["repin_step"] is not None else ""),
+                         f"the ladder moved while no run was pinned (steps {runlost['unpinned']}, "
+                         f"re-pinned at step {runlost['repin_step']}, lost at {runlost['step']})")
+                elif _runlost_restarted(runlost["step"], runlost["repin_step"]):
+                    good(False, "", f"the re-pinned run restarted the ladder: lost at step {runlost['step']}, pinned again at step {runlost['repin_step']}")
+                else:
+                    checks.append("  ⓘ the run was re-pinned within a reconcile; no sample saw the ladder without one, so there was nothing to hold")
+                if state == "HELD":
+                    checks.append(f"  ✓ held with no pinned run for {RUNLOST_HOLD_S}s: the decided outcome at {hook}")
+                    return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
+            elif hook == "canary-failed":
+                if signals:
+                    good(True, f"the run layer pinned the run again under the park: {story}", "")
+                else:
+                    checks.append(f"  ⓘ no pass acted on the missing run within {RUNLOST_HOLD_S}s (a park reconciles on its own cadence); the park is judged as found")
+            else:
+                inert = ("the revert ran on without one (the run layer opens nothing for a rolled-back unit)"
+                         if hook == "canary-rollingback" else "nothing reopens a finished ladder")
+                checks.append(f"  ⓘ run lost at {hook}: {story or inert}; the terminal checks carry the claim")
     pairing_fired = "pairing" in (verb, verb2) and (verb2_fired if verb2 == "pairing" else verb_fired)
     if pairing_fired:
         good(pairing_retargeted, f"pairing verb re-targeted the canary toward {pairto_target!r} (new canary hash observed)",

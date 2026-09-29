@@ -304,11 +304,18 @@ such as the recovery half of a podkill, carries both ids.
   PreHold), `groupremove` (empties `spec.rollout.groups` mid-run; the pinned
   plan keeps stepping), `scale` (see the PD knobs below), `runlost` (removes
   the pinned run from the status subresource, `status.rollout.activeRun`,
-  which is how a lost run looks to the executor; the verdict asserts the step
-  never moved while no run was pinned, that a re-pinned run resumed at that
-  step, and that the controller acknowledged the loss with a `CanaryRunLost`
-  event or the run layer's in-place adoption; at a live hook a run that is
-  never re-pinned ends the case as held after `RUNLOST_HOLD_S`), `pairing`
+  which is how a lost run looks to the executor. At a live hook the verdict
+  asserts the loss was acknowledged — a `CanaryRunLost` hold, the run
+  layer's in-place adoption, or a run pinned again at the next sample, with
+  a new id or the removed run's own id when a pass in flight at the removal
+  wrote its snapshot back — and, over the samples that saw no run, that the
+  step never moved and a re-pinned run resumed at that step; a run pinned
+  again before any sample saw it missing leaves nothing to hold, and a run
+  never pinned again ends the case as held after `RUNLOST_HOLD_S`. At
+  Failed the terminal waits up to `RUNLOST_HOLD_S` for the run layer's
+  re-pin and reports it; at RollingBack the revert runs without a run and
+  the RolledBack checks carry the claim; at Done and RolledBack the run is
+  already closed and nothing is removed), `pairing`
   (patches `spec.rollout.pairingProtocol` to `pairto=<token|clear>` on a
   bump-triggered canary; needs `bump=`, Ne>0 and Nd>0; the verdict asserts a
   new canary hash followed the patch, nothing stays on a pre-re-target
