@@ -1594,7 +1594,11 @@ def _runlost_track(track, run_id, last_run, step, hook, now):
             track["repin_step"], track["repin_run"] = step, run_id
         track["since"] = None
         return "repinned" if first else None
-    if track["since"] is None and hook in RUNLOST_CLOSED_HOOKS and last_run != track["last_run"]:
+    # A new closed-run record with no run pinned is a run that finished: at
+    # a closing terminal, or anywhere once the lost run had been pinned again
+    # (the ladder it resumed ran to its end).
+    if (track["since"] is None and last_run != track["last_run"]
+            and (hook in RUNLOST_CLOSED_HOOKS or track["repin_step"] is not None)):
         if track["closed"] is not None:
             return None
         track["closed"] = last_run
@@ -2435,8 +2439,8 @@ def validate_case_file(path):
         if "ratio_tol" in fields and (fields.get("Ne", 0) == 0 or fields.get("Nd", 0) == 0):
             errs.append(f"{path}:1: ratio_tol= tunes the engine:decoder cohort ratio — needs Ne>0 and Nd>0")
         if "xcheck" in fields:
-            if "proto" not in fields:
-                errs.append(f"{path}:1: xcheck=sectraffic scopes the pairing traffic-target check (needs proto=)")
+            if "proto" not in fields and "pairto" not in fields:
+                errs.append(f"{path}:1: xcheck=sectraffic scopes the pairing traffic-target check (needs proto= or pairto=)")
             if not fields.get("notimpl") or "issue" not in fields:
                 errs.append(f"{path}:1: xcheck= is a scoped park — requires notimpl=1 issue=<n>")
             second = text.splitlines()[1] if len(text.splitlines()) > 1 else ""
@@ -5680,6 +5684,8 @@ def _canary(case_id, yaml_file, desc, hdr):
                           _awaiting_pause_lift(verb2, verb2_fired, verb2_lifted)):
             released, step_at_release, hook_at_release = True, step, ctx["canary_hook"]
             _canary_verb(ctx, release, canary_hash, primary)
+        if fired_now == "planedit-repin" and nsteps > 1:
+            nsteps -= 1   # the repin drops the first step: the ladder's end moves up by one
         if fired_now == "pairing":
             # The patch re-mints both pairing Components: the whole pair is
             # bumped from here, nothing may stay on a pre-re-target revision,

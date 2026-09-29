@@ -544,6 +544,12 @@ class CanaryHeaderTest(unittest.TestCase):
         self.assertTrue(any("terminal=Held" in e for e in self._errs(base + " prearm=planinvalid cell=canary/Idle/runLost")))
         self.assertTrue(any("terminal=Held" in e for e in self._errs(base + " terminal=Held cell=canary/Idle/runLost")))
 
+    def test_secondary_traffic_park_scopes_a_pairing_verb_too(self):
+        base = "# p999: x mode=canary Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=3 ceil_r=0 canary=auto topo=pd"
+        line = base + " bump=engine,decoder during=canary-staging verb=pairing pairto=pair-v2 xcheck=sectraffic notimpl=1 issue=1346 cell=canary/Staging/pairing"
+        self.assertEqual([], self._errs(line + "\n# reason: parked on the secondary traffic gap"))
+        self.assertTrue(any("pairto=" in e for e in self._errs(base + " xcheck=sectraffic notimpl=1 issue=1346 cell=canary/Staging/pairing\n# reason: x")))
+
     def test_idle_restart_is_a_controller_fault_only(self):
         base = "# p999: x mode=canary Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 canary=auto topo=engine"
         self.assertEqual([], self._errs(base + " fault=ctrlrestart:idle cell=canary/Idle/ctrlRestart"))
@@ -1293,6 +1299,15 @@ class RunLostTest(unittest.TestCase):
         self.assertEqual((1, "r2", None), (t["repin_step"], t["repin_run"], t["since"]))
         self.assertIsNone(run._runlost_track(t, "r2", None, 2, "canary-serving", 6.0), "only the first run seen again is the re-pin")
         self.assertEqual([1], t["unpinned"], "a pinned sample is not a sample without a run")
+
+    def test_a_repinned_run_that_finishes_is_closed_not_lost(self):
+        t = run._runlost_record("r1", None, "canary-prehold", 1, 0.0); t["removed"] = True
+        self.assertIsNone(run._runlost_track(t, None, None, 1, "canary-prehold", 2.0))
+        self.assertEqual("repinned", run._runlost_track(t, "r1", None, 1, "canary-prehold", 4.0))
+        # The resumed ladder ran to its end: a closed-run record and no run pinned, at a hook that is not a closing terminal.
+        self.assertEqual("closed", run._runlost_track(t, None, {"outcome": "Completed"}, 2, None, 40.0))
+        self.assertIsNone(run._runlost_track(t, None, {"outcome": "Completed"}, 2, None, 42.0))
+        self.assertEqual([1], t["unpinned"])
 
     def test_track_records_a_repin_the_sampler_saw_no_gap_before(self):
         t = self._removed()

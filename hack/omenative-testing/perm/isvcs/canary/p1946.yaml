@@ -1,5 +1,5 @@
-# p1946: canary pd pairing change after a rollback re-arms both sides  mode=canary Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=3 ceil_r=0 canary=auto bump=engine,decoder rollback=1 during=canary-rolledback verb=pairing pairto=pair-v2 terminal=Stable cell=canary/RolledBack/pairing co=none topo=pd
-# reason: the grid leaves this cell undecided (marked !); the case locks the observed outcome: both sides' rejected revisions keep draining while the new target arms, and the pair completes on it
+# p1946: canary pd pairing change after a rollback re-arms both sides  mode=canary Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=3 ceil_r=0 canary=auto bump=engine,decoder rollback=1 during=canary-rolledback verb=pairing pairto=pair-v2 terminal=Stable cell=canary/RolledBack/pairing xcheck=sectraffic notimpl=1 issue=1346 co=none topo=pd
+# reason: parked on the canary-secondary traffic gap — the secondaries publish no live traffic targets under a canary group, so their pairing targets cannot be checked until the issue is fixed; pods, Services, convergence and the pair-alive invariant stay hard
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p1946 }

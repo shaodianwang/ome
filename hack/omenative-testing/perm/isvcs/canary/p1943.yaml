@@ -1,4 +1,5 @@
-# p1943: canary pd pairing change at a pre-step hold re-targets both sides  mode=canary Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=3 ceil_r=0 canary=auto bump=engine,decoder during=canary-serving@1 verb=planedit-repin verb2=pairing pairto=pair-v2 during2=canary-prehold cell=canary/PreHold/pairing co=none topo=pd
+# p1943: canary pd pairing change at a pre-step hold re-targets both sides  mode=canary Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=3 ceil_r=0 canary=auto bump=engine,decoder during=canary-serving@1 verb=planedit-repin verb2=pairing pairto=pair-v2 during2=canary-prehold cell=canary/PreHold/pairing xcheck=sectraffic notimpl=1 issue=1346 co=none topo=pd
+# reason: parked on the canary-secondary traffic gap — the secondaries publish no live traffic targets under a canary group, so their pairing targets cannot be checked until the issue is fixed; pods, Services, convergence and the pair-alive invariant stay hard
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p1943 }
