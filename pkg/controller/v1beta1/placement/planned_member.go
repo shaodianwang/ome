@@ -122,6 +122,9 @@ func (r *Reconciler) placePlannedOn(ctx context.Context, source *v1beta1.Inferen
 	if err != nil {
 		return err
 	}
+	if assignment.Capacity != nil && assignment.DesiredReplicas == 0 {
+		return r.retireCapacityFloor(ctx, cl, source, assignment)
+	}
 	desired, err := r.derivedFor(source)
 	if err != nil {
 		return err

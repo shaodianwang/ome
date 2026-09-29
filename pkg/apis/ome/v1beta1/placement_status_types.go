@@ -17,6 +17,10 @@ const PlacementSatisfied = "PlacementSatisfied"
 // allocation. It does not imply admission or serving readiness.
 const PlacementConverged = "PlacementConverged"
 
+// PlacementCapacityFresh reports whether this reconcile verified usable hardware
+// and resolved demand for every matched capacity-placement member.
+const PlacementCapacityFresh = "PlacementCapacityFresh"
+
 // PlacementPlanStatus identifies the allocation persisted before member writes.
 // Original assignments remain fixed throughout a transition, including retargets.
 type PlacementPlanStatus struct {

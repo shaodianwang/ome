@@ -38,6 +38,8 @@ import (
 	kueuev1beta2 "sigs.k8s.io/kueue/apis/kueue/v1beta2"
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
+	"github.com/ome-projects/ome/pkg/constants"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/placement"
 	"github.com/ome-projects/ome/tests/integration/components"
 	"github.com/ome-projects/ome/tests/integration/kindfix"
 	"github.com/ome-projects/ome/tests/integration/kindutil"
@@ -153,7 +155,9 @@ func startControlPlaneManager(c *cluster) {
 	gomega.Expect(util.SeedDefaultConfigMaps(c.ctx, c.client)).To(gomega.Succeed(), "seed control-plane inferenceservice-config")
 
 	var cm *components.ClusterManager
-	mgr, stop, err := kindutil.StartManager(c.ctx, c.cfg, kindutil.BaseScheme(), func(setupCtx context.Context, mgr ctrl.Manager) error {
+	scheme := kindutil.BaseScheme()
+	gomega.Expect(kueuev1beta2.AddToScheme(scheme)).To(gomega.Succeed())
+	mgr, stop, err := kindutil.StartManager(c.ctx, c.cfg, scheme, func(setupCtx context.Context, mgr ctrl.Manager) error {
 		m, err := components.SetupWorkloadCluster(setupCtx, mgr,
 			components.WithClusterHealthInterval(clusterHealthInterval),
 			components.WithClusterConnectionGracePeriod(connectionGrace),
@@ -163,6 +167,7 @@ func startControlPlaneManager(c *cluster) {
 		}
 		cm = m
 		if err := components.SetupPlacement(setupCtx, mgr, m,
+			components.WithCapacityPlacement(&placement.CapacityConfig{RootName: v1beta1.AcceleratorQuotaRootName, MemberOperatorNamespace: constants.OMENamespace, MaxAge: 10 * time.Minute, StabilityWindow: 2 * time.Second, RefreshInterval: time.Second}),
 			components.WithPlacementRequeue(placementRequeue),
 			components.WithControlPlaneID(controlPlaneID),
 			components.WithStatusFunnel(controlPlaneID),

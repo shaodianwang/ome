@@ -120,8 +120,10 @@ type Reconciler struct {
 	// mgr.GetAPIReader() and rejects a reconciler still missing it.
 	APIReader client.Reader
 	// Capacity locates verified hardware inputs for capacity allocations.
-	Capacity      *CapacityConfig
-	CapacityClock clock.PassiveClock
+	Capacity        *CapacityConfig
+	CapacityClock   clock.PassiveClock
+	capacityMu      sync.Mutex
+	capacityPending map[types.NamespacedName]capacityPending
 	// InstanceStatusDecoder decodes the per-Instance representation of the
 	// member-cluster InferenceReplica statuses this controller inspects, under
 	// the operator-configured ColumnarV2 row bound. The zero value carries no
@@ -252,6 +254,7 @@ func (r *Reconciler) reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 	isvc := &v1beta1.InferenceService{}
 	if err := r.Get(ctx, request.NamespacedName, isvc); err != nil {
 		if apierrors.IsNotFound(err) {
+			r.forgetCapacity(request.NamespacedName)
 			// Source already gone. The winner-lost grace marker is keyed by UID
 			// (unknown here) and is cleared in reconcileDelete once the finalizer
 			// runs; the worst case if that never ran is one stale map entry that
@@ -267,6 +270,7 @@ func (r *Reconciler) reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 	// The primary watch and queued status events can include local services.
 	// Only placement sources may acquire placement state or remote allocations.
 	if !IsPlacementEligible(isvc) {
+		r.forgetCapacity(request.NamespacedName)
 		return ctrl.Result{}, nil
 	}
 
@@ -990,6 +994,7 @@ func (r *Reconciler) reconcileDelete(ctx context.Context, isvc *v1beta1.Inferenc
 	// Teardown complete: drop any winner-lost grace marker so the in-memory map
 	// does not retain an entry for a now-deleted source ISVC.
 	r.clearGrace(isvc.UID)
+	r.forgetCapacity(client.ObjectKeyFromObject(isvc))
 	// Likewise drop the AutoscalerPolicy preflight/skew bookkeeping for this
 	// source (staged condition, home observations, prune counters).
 	r.policyState().forget(isvc.UID)
@@ -1065,6 +1070,9 @@ func (r *Reconciler) writePlacement(ctx context.Context, isvc *v1beta1.Inference
 		r.policyStatusForWrite(isvc, &res),
 		r.rolloutStatusForWrite(isvc, &res))
 	policyConds = mergePolicyConditions(policyConds, res.conditions)
+	if placementMode(isvc) == v1beta1.PlacementModeSplitByCapacity && !slices.ContainsFunc(policyConds, func(c policyCondition) bool { return c.condType == apis.ConditionType(v1beta1.PlacementCapacityFresh) }) {
+		policyConds = append(policyConds, capacityFreshCondition("Unknown", "CapacityNotObserved", "Capacity inputs have not been verified in this reconcile"))
+	}
 	key := client.ObjectKeyFromObject(isvc)
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		cur := &v1beta1.InferenceService{}
@@ -1084,6 +1092,9 @@ func (r *Reconciler) writePlacement(ctx context.Context, isvc *v1beta1.Inference
 		cur.Status.Placement.Endpoint = res.url
 		cur.Status.URL = res.url
 		applyPolicyConditions(&cur.Status, policyConds)
+		if placementMode(isvc) != v1beta1.PlacementModeSplitByCapacity {
+			cur.Status.Conditions = slices.DeleteFunc(cur.Status.Conditions, func(c apis.Condition) bool { return c.Type == apis.ConditionType(v1beta1.PlacementCapacityFresh) })
+		}
 		applyPolicyConditions(&cur.Status, []policyCondition{placementInputCondition(isvc)})
 		applyPolicyConditions(&cur.Status, placementSatisfactionConditions(cur))
 		setSourcePlacementReady(&cur.Status, res, readyBefore)
@@ -1286,6 +1297,9 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager, opts ...ConvergeOption) 
 		WithOptions(controller.Options{MaxConcurrentReconciles: r.MaxConcurrentReconciles}).
 		Watches(&v1beta1.WorkloadCluster{}, handler.EnqueueRequestsFromMapFunc(r.isvcsForClusterChange),
 			builder.WithPredicates(placementRelevantClusterChange))
+	if r.Capacity != nil {
+		b = b.Watches(&v1beta1.AcceleratorQuota{}, handler.EnqueueRequestsFromMapFunc(r.isvcsForCapacityChange), builder.WithPredicates(capacityRelevantChange))
+	}
 	// Consume the remote watch-funnel channel: each event already carries the
 	// LOCAL source key (resolved funnel-side), so the handler just enqueues that
 	// key, debounced by the batch period so a burst of derived-status updates for

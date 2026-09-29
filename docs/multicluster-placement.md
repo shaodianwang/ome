@@ -15,7 +15,8 @@ matches every registration.
 `Single` races eligible members for admission and retains one winner. `All`
 places the full service on every eligible member. `Split` assigns exact shares
 of a fleet floor across all matching registrations. Readiness and quota gate
-execution; they do not change those shares.
+execution; they do not change those shares. `SplitByCapacity` uses nominal
+hardware weights for the same apportionment and bounded transition.
 
 ## Static shares
 
@@ -69,7 +70,8 @@ Member autoscaling otherwise retains its local policy.
 
 ## Moving replicas
 
-The transition coordination below applies to `Split`. `Single` and `All` retain
+The transition coordination below applies to `Split` and `SplitByCapacity`.
+`Single` and `All` retain
 their existing admission and re-placement behavior.
 
 `maxSurge` is a whole-replica allowance shared by placement and member rollout
@@ -140,8 +142,23 @@ write connection again and checks the accepted rendering, fresh hardware totals,
 and root identity. A heartbeat alone may advance the report version without
 invalidating an accepted allocation.
 
-The controller still holds `SplitByCapacity` pending until it consumes these
-samples. Upgrade member CRDs, RBAC, and controllers before enabling contracted
+Set `spec.placement.mode: SplitByCapacity` and provide the fleet floor with
+`split.replicas` or a positive Engine minimum. The first allocation can use a
+complete fresh snapshot immediately. A hardware, flavor mapping, or member
+identity change must remain consistent for `stabilityWindow` before the
+controller accepts it. Unknown reports restart that observation window. A
+controller restart also restarts an unaccepted window; the persisted allocation
+remains authoritative throughout. Source demand changes on unchanged hardware
+do not wait for a hardware stability window.
+
+Hardware events enqueue participating services; heartbeat versions and usage
+do not. `refreshInterval` bounds checks for stale reports, runtime/configuration
+changes, and missed events. Missing configuration holds this mode pending.
+An outgoing home's accepted floor can decrease while preserving its member
+specification and rendering contract; retirement does not apply a new source
+template or require hardware weights for a home outside the matched set.
+
+Upgrade member CRDs, RBAC, and controllers before enabling contracted
 allocations; missing support cannot acknowledge the accepted demand.
 
 ## Status and rollout
@@ -154,9 +171,12 @@ independent, so a held allocation can continue serving.
 
 The accepted plan records source and cluster identities, desired and current
 floors, matching terms, and weights. Unknown identity or member observations
-hold existing authority. `SplitByCapacity` is reserved in the API; the controller
-holds with `CapacityUnknown` until per-service demand and nominal capacity are
-resolved, without falling back to equal shares.
+hold existing authority. `PlacementCapacityFresh` is true when the matched
+hardware reports and demand are usable, false with `CapacityUnknown` when any
+required input is unavailable, and unknown when this reconcile has not checked
+them. `CapacityStabilizing` holds a changed hardware snapshot through the
+configured window. Both holds preserve the accepted plan and member floors;
+capacity placement never falls back to equal shares.
 
 Upgrade member CRDs and controllers before expecting moves to progress. Missing
 fields or missing member acknowledgements hold movement. Complete or stop an

@@ -224,6 +224,7 @@ func SetupWorkloadCluster(_ context.Context, mgr ctrl.Manager, opts ...WorkloadC
 type PlacementOption func(*placementOpts)
 
 type placementOpts struct {
+	capacity       *placement.CapacityConfig
 	requeue        time.Duration
 	controlPlaneID string
 	// funnelControlPlaneID, when non-nil, wires the cross-cluster status watch
@@ -233,6 +234,11 @@ type placementOpts struct {
 	statusSafetyRequeue  time.Duration
 	statusBatchPeriod    time.Duration
 	winnerLostGrace      time.Duration
+}
+
+// WithCapacityPlacement supplies the hardware placement configuration explicitly.
+func WithCapacityPlacement(config *placement.CapacityConfig) PlacementOption {
+	return func(o *placementOpts) { o.capacity = config }
 }
 
 // WithPlacementRequeue sets the placement poll cadence; suites pass a small
@@ -313,6 +319,7 @@ func SetupPlacement(ctx context.Context, mgr ctrl.Manager, clusters *ClusterMana
 		Requeue:               cfg.requeue,
 		ControlPlaneID:        cfg.controlPlaneID,
 		WinnerLostGracePeriod: cfg.winnerLostGrace,
+		Capacity:              cfg.capacity,
 	}
 
 	var convergeOpts []placement.ConvergeOption

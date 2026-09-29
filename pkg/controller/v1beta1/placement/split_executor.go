@@ -15,13 +15,34 @@ import (
 
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/placement/allocation"
+	"github.com/ome-projects/ome/pkg/placement/capacity"
 	"github.com/ome-projects/ome/pkg/placement/plan"
 )
 
 // reconcileSplit persists each allocation before granting member authority.
 // Readiness gates execution while the full affinity match determines shares.
-func (r *Reconciler) reconcileSplit(ctx context.Context, source *v1beta1.InferenceService, clusters []v1beta1.WorkloadCluster, eligible []string, standing *placementObservations) (ctrl.Result, error) {
-	proposal, err := desiredSplitPlan(source, clusters, nil)
+func (r *Reconciler) reconcileSplit(ctx context.Context, source *v1beta1.InferenceService, clusters []v1beta1.WorkloadCluster, eligible []string, standing *placementObservations) (result ctrl.Result, resultErr error) {
+	var samples map[string]capacity.Sample
+	if placementMode(source) == v1beta1.PlacementModeSplitByCapacity {
+		defer func() {
+			if r.Capacity != nil && r.Capacity.RefreshInterval > 0 && (result.RequeueAfter <= 0 || result.RequeueAfter > r.Capacity.RefreshInterval) {
+				result.RequeueAfter = r.Capacity.RefreshInterval
+			}
+		}()
+		now := r.capacityNow()
+		var err error
+		samples, err = r.readSplitCapacity(ctx, source, clusters, now)
+		if err != nil {
+			r.forgetCapacity(client.ObjectKeyFromObject(source))
+			return r.writeSplitHold(ctx, source, standing, "CapacityUnknown", err)
+		}
+		if err := r.stableCapacity(source, samples, now); err != nil {
+			return r.writeSplitHold(ctx, source, standing, "CapacityStabilizing", err)
+		}
+	} else {
+		r.forgetCapacity(client.ObjectKeyFromObject(source))
+	}
+	proposal, err := desiredSplitPlan(source, clusters, samples)
 	if err != nil {
 		return r.writeSplitHold(ctx, source, standing, "AllocationUnresolved", err)
 	}
@@ -264,6 +285,9 @@ func advanceSplitPlan(source *v1beta1.InferenceService, observations map[string]
 
 func (r *Reconciler) writeSplitObservations(ctx context.Context, source *v1beta1.InferenceService, observations map[string]plannedHomeObservation, reason, message string) (ctrl.Result, error) {
 	res := placementResult{phase: v1beta1.PlacementPhasePending, conditions: []policyCondition{splitProgressCondition(reason, message)}}
+	if placementMode(source) == v1beta1.PlacementModeSplitByCapacity {
+		res.conditions = append(res.conditions, capacityFreshCondition(corev1.ConditionTrue, "CapacityVerified", "Matched members have usable hardware and resolved demand"))
+	}
 	for _, previous := range source.Status.Placement.Candidates {
 		observed := observations[previous.Cluster]
 		candidate := observed.Candidate
@@ -290,6 +314,13 @@ func (r *Reconciler) writeSplitObservations(ctx context.Context, source *v1beta1
 
 func (r *Reconciler) writeSplitHold(ctx context.Context, source *v1beta1.InferenceService, standing *placementObservations, reason string, cause error) (ctrl.Result, error) {
 	res := placementResult{phase: v1beta1.PlacementPhasePending, conditions: []policyCondition{splitProgressCondition(reason, cause.Error())}}
+	if placementMode(source) == v1beta1.PlacementModeSplitByCapacity {
+		status := corev1.ConditionTrue
+		if reason == "CapacityUnknown" {
+			status = corev1.ConditionFalse
+		}
+		res.conditions = append(res.conditions, capacityFreshCondition(status, reason, cause.Error()))
+	}
 	for _, name := range standing.projectedStanding() {
 		home := standing.homes[name]
 		if home.state == homeAbsent {
