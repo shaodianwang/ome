@@ -1293,8 +1293,8 @@ def invariant_checks(inv, verdict, notes, checks):
 #                        gated on OME_TEST_ALLOW_CTRL_RESTART=1 (shared-cluster
 #                        safety); otherwise skipped with an ⓘ note. In canary
 #                        mode ctrlrestart:idle fires before the bump and waits
-#                        for the manager to come back, so the arm is the
-#                        restarted manager's.
+#                        for the manager, and its webhook, to come back, so
+#                        the arm is the restarted manager's.
 #   cordon:source      — pre-trigger: cordon the node hosting the source pod;
 #                        ALWAYS uncordoned in cleanup (failure-path safe).
 # Phase enum: settling (immediately after the trigger), rotating (first surge/
@@ -1683,6 +1683,19 @@ CTRL_SELECTOR = os.environ.get("OME_TEST_CTRL_SELECTOR", "control-plane=ome-cont
 # How long a restarted manager is given to report Ready before a case that
 # depends on it going first is an apparatus failure.
 CTRL_READY_S = int(180 * TIMEOUT_MULT)
+
+
+def _wait_webhook_admits(case_id, budget_s):
+    """Block until the ISVC admission webhook answers again: a server-side
+    dry-run patch runs admission without changing the object."""
+    deadline = time.time() + budget_s
+    probe = json.dumps({"metadata": {"annotations": {"perm.test/webhook-probe": "1"}}})
+    while time.time() < deadline:
+        r = kubectl("-n", NS, "patch", "isvc", case_id, "--type=merge", "-p", probe, "--dry-run=server")
+        if r.returncode == 0:
+            return True
+        time.sleep(2)
+    return False
 
 
 def _wait_ctrl_ready(budget_s):
@@ -2747,6 +2760,8 @@ def _bump_rev(ctx, bumped, val=TRIGGER_VAL, extra=None, image=None, image_comps=
                 patch["spec"][c]["runner"] = runner
     rr = kubectl("-n", NS, "patch", "isvc", ctx["case_id"], "--type=merge", "-p", json.dumps(patch))
     ctx["trigger_ts"] = time.time()
+    if rr.returncode != 0:
+        ctx["trigger_error"] = (rr.stderr.strip().splitlines() or ["patch failed"])[-1][:200]
     return rr.returncode == 0
 
 
@@ -5296,6 +5311,14 @@ def _canary_plan_edit(ctx, shrink=False):
         ctx.setdefault("verb_errors", []).append(f"plan edit: patch failed: {rr.stderr.strip()[:120]}")
 
 
+def _missing_policy_group(case_id, components):
+    """The driven group re-pointed at a policy that does not exist: the ref
+    must still declare the progression it stands in for, or admission
+    rejects the group before the run layer ever sees it."""
+    return {"components": list(components),
+            "policyRef": {"name": f"{case_id}-missing", "progression": "canary"}}
+
+
 def _plan_invalidate(ctx):
     """prearm=planinvalid: re-point the driven group at a policy that does not
     exist, keeping its members. The run the next bump asks for cannot compose
@@ -5310,7 +5333,7 @@ def _plan_invalidate(ctx):
     members = set((_canary_group(ctx) or {}).get("members") or [])
     for i, g in enumerate(groups):
         if isinstance(g.get("canary"), dict) and set(g.get("components") or []) == members:
-            groups[i] = {"components": g["components"], "policyRef": {"name": f"{cid}-missing"}}
+            groups[i] = _missing_policy_group(cid, g["components"])
             break
     else:
         return False, "plan invalidate: no canary group matches the driven unit"
@@ -5545,7 +5568,11 @@ def _canary(case_id, yaml_file, desc, hdr):
             return _write_fail(case_id, desc, hdr, "INFRA-FAIL", idle_fault["infra_fail"])
         if not _wait_ctrl_ready(CTRL_READY_S):
             return _write_fail(case_id, desc, hdr, "INFRA-FAIL", f"ctrlrestart: no Ready manager pod within {CTRL_READY_S}s")
-        idle_fault["notes"].append("manager Ready again before the bump")
+        # A Ready pod is not yet an answering webhook; the bump is admitted
+        # by it, so wait until a dry-run patch goes through.
+        if not _wait_webhook_admits(case_id, CTRL_READY_S):
+            return _write_fail(case_id, desc, hdr, "INFRA-FAIL", f"ctrlrestart: the admission webhook did not answer within {CTRL_READY_S}s")
+        idle_fault["notes"].append("manager Ready and admitting again before the bump")
     if proto_target is not None:
         ok, msg = _pairing_patch(case_id, proto_target, extra=analysis_extra, comps=group)
         if not ok:
@@ -5557,7 +5584,7 @@ def _canary(case_id, yaml_file, desc, hdr):
             ctx["inv"]["pairing"] = {"frm": from_proto, "to": proto_target, "armed": False, "seen": False,
                                      "drain_first": _pairing_drain_first(ctx["info"])}
     elif not _bump_rev(ctx, group, extra=analysis_extra, image=bad_image or None, image_comps=image_comps):
-        return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", "rev bump patch failed")
+        return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", "rev bump patch failed: " + str(ctx.get("trigger_error") or ""))
     if {"engine", "decoder"} <= group:
         # Invariant E watches the canary cohort's engine:decoder ratio.
         ctx["inv"]["ratio"] = {"N": {c: N[c] for c in ("engine", "decoder")}, "tol": ratio_tol,

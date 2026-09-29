@@ -1094,6 +1094,10 @@ class ParkedPlanTest(unittest.TestCase):
         self.assertTrue(run._canary_pods_settled("Held", "", {"engine": 0}, {"engine": 2}, False))
         self.assertFalse(run._canary_pods_settled("Held", "", {"engine": 1}, {"engine": 2}, False))
 
+    def test_the_missing_policy_group_declares_its_progression(self):
+        self.assertEqual({"components": ["engine"], "policyRef": {"name": "p1-missing", "progression": "canary"}},
+                         run._missing_policy_group("p1", ["engine"]))
+
     def test_a_missing_policy_arms_no_canary(self):
         self.assertFalse(run._prearm_arms_canary("planinvalid"))
         self.assertTrue(run._prearm_arms_canary("pause"))
