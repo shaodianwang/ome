@@ -794,6 +794,14 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	for _, reconciler := range reconcilers {
 		result, err := reconciler.Reconcile(ctx, isvc)
 		if err != nil {
+			// A component's failure is often a write the API server rejects,
+			// such as an InferenceReplica an admission webhook denies, which
+			// only a change to the InferenceService fixes. Record it where
+			// the owner looks. A conflict is retried at once and needs no
+			// report.
+			if !apierrors.IsConflict(err) {
+				r.Recorder.Event(isvc, v1.EventTypeWarning, "ComponentReconcileError", err.Error())
+			}
 			log.Error(err, "Failed to reconcile component",
 				"component", fmt.Sprintf("%T", reconciler))
 			return result, err
