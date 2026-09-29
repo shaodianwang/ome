@@ -1291,7 +1291,10 @@ def invariant_checks(inv, verdict, notes, checks):
 #   podkill:<phase>    — at the phase hook, delete one deterministic pod.
 #   ctrlrestart:<phase>— at the phase hook, delete the OME manager pod. ALWAYS
 #                        gated on OME_TEST_ALLOW_CTRL_RESTART=1 (shared-cluster
-#                        safety); otherwise skipped with an ⓘ note.
+#                        safety); otherwise skipped with an ⓘ note. In canary
+#                        mode ctrlrestart:idle fires before the bump and waits
+#                        for the manager to come back, so the arm is the
+#                        restarted manager's.
 #   cordon:source      — pre-trigger: cordon the node hosting the source pod;
 #                        ALWAYS uncordoned in cleanup (failure-path safe).
 # Phase enum: settling (immediately after the trigger), rotating (first surge/
@@ -1306,6 +1309,9 @@ def invariant_checks(inv, verdict, notes, checks):
 CANARY_HOOKS = {"canary-staging", "canary-serving", "canary-prehold", "canary-draining", "canary-done",
                 "canary-rollingback", "canary-rolledback", "canary-failed"}
 FAULT_PHASES = {"rotating", "migrating", "settling"} | CANARY_HOOKS
+# A controller restart on the idle service, before the bump (the grid's Idle
+# column has no hook); the only fault a pre-bump phase makes sense for.
+IDLE_FAULT_PHASE = "idle"
 CANARY_VERBS = {"pause", "pause-freeze", "promote", "promote-stale", "rebump", "rebump-fix",
                 "rollback", "timeout-clear", "timeout-set", "scale", "repin", "resume",
                 "planedit", "planedit-repin", "groupremove", "runlost", "pairing", "quotalift"}
@@ -1313,9 +1319,10 @@ CANARY_VERBS = {"pause", "pause-freeze", "promote", "promote-stale", "rebump", "
 PLANEDIT_TRAFFIC = 75
 # Verbs a case may leave on the idle service before the bump (the grid's
 # Idle column). A lost run is not one of them: at Idle there is no run to
-# lose; that cell needs an invalid policy fixture instead.
+# lose; planinvalid re-points the group at a policy that does not exist, so
+# the run the bump asks for parks instead of opening.
 PREARM_VERBS = {"rollback", "pause", "promote", "repin", "resume", "timeout-set",
-                "planedit", "groupremove", "scale"}
+                "planedit", "groupremove", "scale", "planinvalid"}
 # Verbs that end a case whose second verb leaves a pre-step hold in place.
 RELEASE_VERBS = {"promote", "resume"}
 # Delay between the second verb and the release: the window the second
@@ -1349,6 +1356,10 @@ REPIN_ANNO = "ome.io/rollout-repin"
 READY_TIMEOUT_ANNO = "ome.io/rollout-ready-timeout"
 # JSON pointer of the pinned run in the status subresource.
 ACTIVE_RUN_POINTER = "/status/rollout/activeRun"
+# The plan condition the run layer stamps, and the reason a group whose
+# policy does not exist parks under.
+PLAN_READY_COND = "RolloutPlanReady"
+PLAN_PARK_REASON = "PolicyNotFound"
 
 
 def _canary_hook(phase, can=None, nsteps=None):
@@ -1461,8 +1472,18 @@ def _step_new_count(step, n):
 
 def _prearm_arms_canary(prearm):
     """Whether the bump after a pre-armed verb still opens a canary run. A
-    group removal leaves nothing to arm: the bump is a plain rollout."""
-    return prearm != "groupremove"
+    group removal leaves nothing to arm: the bump is a plain rollout. A group
+    re-pointed at a missing policy parks the run before it opens."""
+    return prearm not in ("groupremove", "planinvalid")
+
+
+def _plan_park(st):
+    """The parked plan a status reports: reason and message from a False
+    plan condition, else None."""
+    for c in (st.get("conditions") or []):
+        if c.get("type") == PLAN_READY_COND and c.get("status") == "False":
+            return {"reason": c.get("reason") or "", "message": c.get("message") or ""}
+    return None
 
 
 def _prearm_pause_held(phases_before_lift, max_step_before_lift):
@@ -1507,9 +1528,11 @@ def _no_canary_phase(phases):
     return not (set(phases) & CANARY_RUN_PHASES)
 
 
-def _release_due(release, verb2_fired, verb2_ts, released, now, after_s):
-    """The release fires once, after_s seconds after the second verb."""
-    return bool(release) and verb2_fired and not released and now - verb2_ts >= after_s
+def _release_due(release, verb2_fired, anchor_ts, released, now, after_s, awaiting_lift=False):
+    """The release fires once, after_s seconds after the second verb; when
+    that verb is a pause the anchor is its lift, so the release lands on the
+    hold and not on the pause."""
+    return bool(release) and verb2_fired and not released and not awaiting_lift and now - anchor_ts >= after_s
 
 
 def _prehold_survived(step_at_verb2, hook_at_release, step_at_release):
@@ -1653,6 +1676,23 @@ CORDON_LABEL = "perm.test/cordoned"
 # selector (charts/ome-resources/templates/ome-controller/deployment.yaml).
 CTRL_NS = os.environ.get("OME_TEST_CTRL_NS", "ome")
 CTRL_SELECTOR = os.environ.get("OME_TEST_CTRL_SELECTOR", "control-plane=ome-controller-manager")
+# How long a restarted manager is given to report Ready before a case that
+# depends on it going first is an apparatus failure.
+CTRL_READY_S = int(180 * TIMEOUT_MULT)
+
+
+def _wait_ctrl_ready(budget_s):
+    """Block until every manager pod matching CTRL_SELECTOR reports Ready and
+    at least one exists; False when the budget runs out."""
+    deadline = time.time() + budget_s
+    while time.time() < deadline:
+        r = kubectl("-n", CTRL_NS, "get", "pod", "-l", CTRL_SELECTOR, "-o",
+                    "jsonpath={range .items[*]}{.status.conditions[?(@.type==\"Ready\")].status}{\"\\n\"}{end}")
+        states = [x.strip() for x in (r.stdout or "").splitlines() if x.strip()]
+        if r.returncode == 0 and states and all(x == "True" for x in states):
+            return True
+        time.sleep(2)
+    return False
 
 # Cleanup registry, flushed in __main__'s finally — runs on PASS, FAIL,
 # INFRA-FAIL and crash alike. Entries: ("quota", case_id) | ("uncordon", node).
@@ -1719,6 +1759,8 @@ def _fault_ok(v):
             return int(param) >= 0
         except ValueError:
             return False
+    if kind == "ctrlrestart" and param == IDLE_FAULT_PHASE:
+        return True
     if kind in ("podkill", "ctrlrestart"):
         return param in FAULT_PHASES
     if kind == "cordon":
@@ -2185,7 +2227,7 @@ HDR_VALIDATORS = {
     "during2": _canary_hook_ok,
     "timeout": lambda v: re.match(r"^[0-9]+(s|m|h)$", str(v)) is not None,
     "bump": lambda v: bool(str(v)) and all(m in COMPS for m in str(v).split(",")),
-    "terminal": lambda v: v in {"Stable", "RolledBack", "Failed"},
+    "terminal": lambda v: v in {"Stable", "RolledBack", "Failed", "Held"},
     "prearm": lambda v: v in PREARM_VERBS,
     # release= fires that verb releaseafter= seconds after the second verb,
     # so a case whose second verb leaves a pre-step hold in place can end;
@@ -2228,7 +2270,8 @@ HDR_VALIDATORS = {
     # notimpl=1 (whose issue= names the bug) + the line-2 '# reason:' comment.
     "inv_xfail": lambda v: v in {"A", "B", "C", "D", "all"},
     # Fault injection: fault=<kind>:<param> — quota:<n≥0>, podkill:<phase>,
-    # ctrlrestart:<phase> (phase ∈ FAULT_PHASES), cordon:<target ∈ FAULT_TARGETS>.
+    # ctrlrestart:<phase> (phase ∈ FAULT_PHASES, or idle: before the bump),
+    # cordon:<target ∈ FAULT_TARGETS>.
     "fault": _fault_ok,
     # Fault-case contract knobs. blocked=1 (rollout/scaledown): the fault is
     # expected to HOLD the operation — assert parked-no-churn + capacity floor
@@ -2360,6 +2403,8 @@ def validate_case_file(path):
             errs.append(f"{path}:1: scale_e=/scale_d= in canary mode fire through verb=scale during=<hook> (or verb2=scale during2=<hook>), or prearm=scale")
         prearm = str(fields.get("prearm", ""))
         verbs = {str(fields.get(k, "")) for k in ("verb", "verb2")} - {""}
+        if (prearm == "planinvalid") != (str(fields.get("terminal", "")) == "Held"):
+            errs.append(f"{path}:1: prearm=planinvalid parks the next run behind a missing policy and is judged as terminal=Held (both or neither)")
         if prearm == "timeout-set" and "timeout" not in fields:
             errs.append(f"{path}:1: prearm=timeout-set needs timeout=<duration> (the budget the arm inherits)")
         if prearm == "scale" and not any(k in fields for k in ("scale_e", "scale_d")):
@@ -5183,6 +5228,8 @@ def _canary_pods_settled(expect, phase, new_by_comp, want, stranded):
         return all(n == 0 for n in new_by_comp.values())
     if expect == "Failed":
         return phase == "Failed"
+    if expect == "Held":
+        return all(n == 0 for n in new_by_comp.values())
     return all(n == want[c] for c, n in new_by_comp.items()) and not stranded
 
 
@@ -5243,6 +5290,34 @@ def _canary_plan_edit(ctx, shrink=False):
                  json.dumps({"spec": {"rollout": {"groups": groups}}}))
     if rr.returncode != 0:
         ctx.setdefault("verb_errors", []).append(f"plan edit: patch failed: {rr.stderr.strip()[:120]}")
+
+
+def _plan_invalidate(ctx):
+    """prearm=planinvalid: re-point the driven group at a policy that does not
+    exist, keeping its members. The run the next bump asks for cannot compose
+    a plan, so the run layer parks it and the update is held whole behind
+    the previous revision. Returns (ok, message)."""
+    cid = ctx["case_id"]
+    r = kubectl("-n", NS, "get", "isvc", cid, "-o", "json")
+    if r.returncode != 0:
+        return False, f"plan invalidate: cannot read the live spec: {r.stderr.strip()[:120]}"
+    spec = json.loads(r.stdout).get("spec", {})
+    groups = (spec.get("rollout") or {}).get("groups") or []
+    members = set((_canary_group(ctx) or {}).get("members") or [])
+    for i, g in enumerate(groups):
+        if isinstance(g.get("canary"), dict) and set(g.get("components") or []) == members:
+            groups[i] = {"components": g["components"], "policyRef": {"name": f"{cid}-missing"}}
+            break
+    else:
+        return False, "plan invalidate: no canary group matches the driven unit"
+    rr = kubectl("-n", NS, "patch", "isvc", cid, "--type=merge", "-p",
+                 json.dumps({"spec": {"rollout": {"groups": groups}}}))
+    if rr.returncode != 0:
+        return False, f"plan invalidate: patch denied: {(rr.stderr.strip().splitlines() or [''])[-1][:160]}"
+    note = f"verb fired: planinvalid at idle (group {sorted(members)} now names policy {cid}-missing)"
+    ctx.setdefault("verb_notes", []).append(note)
+    print(f"    ⚡ {note}")
+    return True, ""
 
 
 def _scale_patch(case_id, targets):
@@ -5324,6 +5399,8 @@ def _prearm(ctx, verb, primary, scale_to):
         ctx.setdefault("verb_notes", []).append(note)
         print(f"    ⚡ {note}")
         return True, ""
+    if verb == "planinvalid":
+        return _plan_invalidate(ctx)
     stable = sorted(ctx["old_hashes"] or [""])[0]
     _canary_verb(ctx, verb, stable, primary)
     return True, ""
@@ -5455,6 +5532,16 @@ def _canary(case_id, yaml_file, desc, hdr):
     print(f"  Phase 2: canary policy={policy} steps={nsteps} primary={primary} bump={sorted(group)}"
           + (f" idle_units={others}" if others else "")
           + ("  +rollback" if do_rollback else ""))
+    idle_fault = ctx.get("fault")
+    if idle_fault and idle_fault["kind"] == "ctrlrestart" and idle_fault["param"] == IDLE_FAULT_PHASE:
+        # The restart lands on the idle service and the bump waits for the
+        # manager to return, so what arms the canary is the restarted manager.
+        _fault_fire(idle_fault, ctx["pod_state"], ctx["pods_per_inst"], ctx.get("old_hashes"))
+        if idle_fault["infra_fail"]:
+            return _write_fail(case_id, desc, hdr, "INFRA-FAIL", idle_fault["infra_fail"])
+        if not _wait_ctrl_ready(CTRL_READY_S):
+            return _write_fail(case_id, desc, hdr, "INFRA-FAIL", f"ctrlrestart: no Ready manager pod within {CTRL_READY_S}s")
+        idle_fault["notes"].append("manager Ready again before the bump")
     if proto_target is not None:
         ok, msg = _pairing_patch(case_id, proto_target, extra=analysis_extra, comps=group)
         if not ok:
@@ -5499,9 +5586,9 @@ def _canary(case_id, yaml_file, desc, hdr):
     promote_rejected = None
     rejected = None     # status.canary.rolledBackRevisionHash once a rollback is recorded
     verb_fired = verb_lifted = rebump_retargeted = False
-    verb2_fired = False
-    verb_ts = verb2_ts = 0.0
-    step_at_verb = step_at_verb2 = hook_at_verb2 = step_at_lift = None
+    verb2_fired = verb2_lifted = False
+    verb_ts = verb2_ts = release_anchor_ts = 0.0
+    step_at_verb = step_at_verb2 = hook_at_verb2 = step_at_lift = step_at_lift2 = None
     stale_held = None   # promote-stale: did the step hold 20s after the stale promote
     advanced_at = None  # first poll that saw the step past the one the verb fired at
     # When the case's verb or fault landed (nophase= window); a pre-armed
@@ -5547,6 +5634,8 @@ def _canary(case_id, yaml_file, desc, hdr):
         can = _canary_run(st, primary)
         if phase:
             phases.add(phase)
+        if expect == "Held" and _plan_park(st):
+            ctx["plan_park"] = _plan_park(st)
         previous_canary_hash = canary_hash
         canary_hash, promoted_step, canary_target_ready, promote_ready, target_changed = \
             _canary_command_state(can, canary_hash, ctx["old_hashes"], promoted_step)
@@ -5585,8 +5674,10 @@ def _canary(case_id, yaml_file, desc, hdr):
         elif (verb2 and verb_fired and not verb2_fired and _hook_due(during2, ctx["canary_hook"], step)
               and (verb != "quotalift" or capacity_landed)):
             verb2_fired, verb2_ts, step_at_verb2, hook_at_verb2, fired_now = True, now, step, ctx["canary_hook"], verb2
+            release_anchor_ts = now
             _canary_verb(ctx, verb2, canary_hash, primary)
-        elif _release_due(release, verb2_fired, verb2_ts, released, now, release_after):
+        elif _release_due(release, verb2_fired, release_anchor_ts, released, now, release_after,
+                          _awaiting_pause_lift(verb2, verb2_fired, verb2_lifted)):
             released, step_at_release, hook_at_release = True, step, ctx["canary_hook"]
             _canary_verb(ctx, release, canary_hash, primary)
         if fired_now == "pairing":
@@ -5616,6 +5707,10 @@ def _canary(case_id, yaml_file, desc, hdr):
             verb_lifted, step_at_lift = True, step
             _pause_annotation(case_id, "")
             print(f"    verb lifted: rollout-paused removed after {verbhold}s (step={step})")
+        if verb2_fired and verb2 in ("pause", "pause-freeze") and not verb2_lifted and now - verb2_ts >= verbhold:
+            verb2_lifted, step_at_lift2, release_anchor_ts = True, step, now
+            _pause_annotation(case_id, "")
+            print(f"    verb2 lifted: rollout-paused removed after {verbhold}s (step={step})")
         if not prearm_lifted:
             # A pause left on the idle service: record what the arm did under
             # it, then lift it verbhold s after the bump.
@@ -5716,7 +5811,8 @@ def _canary(case_id, yaml_file, desc, hdr):
                                             pre_final is not None and bool(stranded()))
         if proto2_target is not None and not p2_fired:
             pods_settled = False   # the re-target must land before convergence counts
-        if _awaiting_pause_lift(verb, verb_fired, verb_lifted) or not prearm_lifted:
+        if (_awaiting_pause_lift(verb, verb_fired, verb_lifted) or not prearm_lifted
+                or _awaiting_pause_lift(verb2, verb2_fired, verb2_lifted)):
             pods_settled = False   # a terminal reached under the pause is judged after the lift
         if quota_verb and not capacity_landed:
             pods_settled = False   # the park is judged once the lifted capacity is there
@@ -5725,11 +5821,14 @@ def _canary(case_id, yaml_file, desc, hdr):
         if _runlost_repin_pending(ctx.get("runlost"), now):
             pods_settled = False   # the run layer's re-pin is owed before the terminal is judged
         # A bump with no group is a plain rollout: its phase is not the run's.
-        phase_ok = phase == expect or (not _prearm_arms_canary(prearm) and expect == "Stable" and phase in ("", "Stable"))
+        phase_ok = (phase == expect or (not _prearm_arms_canary(prearm) and expect == "Stable" and phase in ("", "Stable"))
+                    or (expect == "Held" and not phase and bool(ctx.get("plan_park"))))
         if phase_ok and pods_settled:
             stable = stable or now
-            if now - stable >= STABILITY_S:
-                state = "CONVERGED"
+            # A held update is judged over the run-lost hold window, not the
+            # convergence window: nothing moves, so only time proves the hold.
+            if now - stable >= (RUNLOST_HOLD_S if expect == "Held" else STABILITY_S):
+                state = "HELD" if expect == "Held" else "CONVERGED"
                 ctx["converged_at"] = stable - ctx["trigger_ts"]
                 break
         else:
@@ -5744,6 +5843,24 @@ def _canary(case_id, yaml_file, desc, hdr):
             checks.append(f"  ✓ {msg_ok}")
         else:
             verdict = "FAIL"; notes.append(msg_bad); checks.append(f"  ✗ {msg_bad}")
+
+    if expect == "Held":
+        # A run parked before it opened: the plan condition names the park,
+        # no canary phase is ever projected, and the bump lands nothing.
+        park = ctx.get("plan_park") or {}
+        good(state == "HELD", f"the update held behind the parked plan for {RUNLOST_HOLD_S}s",
+             f"the update did not hold behind the parked plan (state={state}, phases={sorted(phases)})")
+        good(park.get("reason") == PLAN_PARK_REASON,
+             f"the plan parked as {PLAN_PARK_REASON}: {park.get('message', '')[:140]}",
+             f"the plan never parked as {PLAN_PARK_REASON} (condition seen: {park or 'none'})")
+        good(not (phases & CANARY_RUN_PHASES), "no run opened under the parked plan: no canary phase was projected",
+             f"a run opened under the parked plan (phases {sorted(phases & CANARY_RUN_PHASES)})")
+        for c in sorted(group):
+            rolled, kept = _inst_rev_split(ctx, c)
+            good(rolled == 0 and kept == N[c],
+                 f"{c} stayed whole on the previous revision ({kept}/{N[c]}), nothing on the held one",
+                 f"{c} moved under the parked plan ({kept}/{N[c]} on the previous revision, {rolled} on the held one)")
+        return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
     # Peak/ceiling: the canary surges the primary +1 while the stable revision
     # keeps serving (ceil = N+1 from the case header; NR+1 for PD router). A step
@@ -5927,6 +6044,11 @@ def _canary(case_id, yaml_file, desc, hdr):
              f"paused canary held its step ({step_at_verb}) for {verbhold}s until the pause was lifted",
              f"paused canary moved from step {step_at_verb} to {step_at_lift} under rollout-paused" if verb_lifted
              else f"the pause was never lifted within the budget (held {verbhold}s from step {step_at_verb})")
+    if verb2 in ("pause", "pause-freeze") and verb2_fired:
+        good(verb2_lifted and step_at_lift2 == step_at_verb2,
+             f"paused canary held its step ({step_at_verb2}) for {verbhold}s until the pause was lifted",
+             f"paused canary moved from step {step_at_verb2} to {step_at_lift2} under rollout-paused" if verb2_lifted
+             else f"the pause was never lifted within the budget (held {verbhold}s from step {step_at_verb2})")
     if verb == "promote-stale" and verb_fired:
         good(stale_held is True,
              f"a promote naming the stable revision left the step at {step_at_verb}",

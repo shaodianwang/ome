@@ -537,6 +537,17 @@ class CanaryHeaderTest(unittest.TestCase):
         self.assertTrue(any("victim=" in e for e in self._errs(base + " victim=stable")))
         self.assertTrue(any("img=" in e for e in self._errs(base + " img=example.com/canary-test/missing:none")))
         self.assertTrue(any("fault=" in e for e in self._errs(base + " fault=podkill:rotating")))
+
+    def test_a_missing_policy_is_judged_as_held(self):
+        base = "# p999: x mode=canary Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 canary=auto topo=engine"
+        self.assertEqual([], self._errs(base + " prearm=planinvalid terminal=Held cell=canary/Idle/runLost"))
+        self.assertTrue(any("terminal=Held" in e for e in self._errs(base + " prearm=planinvalid cell=canary/Idle/runLost")))
+        self.assertTrue(any("terminal=Held" in e for e in self._errs(base + " terminal=Held cell=canary/Idle/runLost")))
+
+    def test_idle_restart_is_a_controller_fault_only(self):
+        base = "# p999: x mode=canary Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 canary=auto topo=engine"
+        self.assertEqual([], self._errs(base + " fault=ctrlrestart:idle cell=canary/Idle/ctrlRestart"))
+        self.assertTrue(any("fault=" in e for e in self._errs(base + " fault=podkill:idle")))
         self.assertTrue(any("cell=" in e for e in self._errs(base + " cell=nonsense")))
 
     def test_cell_is_a_comma_list_of_cell_ids(self):
@@ -1065,6 +1076,23 @@ class PauseLiftTest(unittest.TestCase):
         self.assertFalse(run._awaiting_pause_lift(None, False, False))
 
 
+class ParkedPlanTest(unittest.TestCase):
+    def test_plan_park_reads_the_false_plan_condition(self):
+        st = {"conditions": [{"type": "Ready", "status": "True"},
+                             {"type": "RolloutPlanReady", "status": "False", "reason": "PolicyNotFound", "message": "no such policy"}]}
+        self.assertEqual({"reason": "PolicyNotFound", "message": "no such policy"}, run._plan_park(st))
+        self.assertIsNone(run._plan_park({"conditions": [{"type": "RolloutPlanReady", "status": "True", "reason": "Pinned"}]}))
+        self.assertIsNone(run._plan_park({}))
+
+    def test_a_held_update_settles_with_nothing_on_the_new_revision(self):
+        self.assertTrue(run._canary_pods_settled("Held", "", {"engine": 0}, {"engine": 2}, False))
+        self.assertFalse(run._canary_pods_settled("Held", "", {"engine": 1}, {"engine": 2}, False))
+
+    def test_a_missing_policy_arms_no_canary(self):
+        self.assertFalse(run._prearm_arms_canary("planinvalid"))
+        self.assertTrue(run._prearm_arms_canary("pause"))
+
+
 class PrearmPredicateTest(unittest.TestCase):
     """Verdict rules for a verb left on the idle service before the bump."""
 
@@ -1216,6 +1244,13 @@ class ReleaseTest(unittest.TestCase):
         self.assertTrue(run._release_due("promote", True, 80.0, False, 100.0, 20))
         self.assertFalse(run._release_due("promote", True, 80.0, True, 100.0, 20))
         self.assertFalse(run._release_due("", True, 80.0, False, 100.0, 20))
+
+    def test_release_waits_for_a_second_verb_pause_to_lift(self):
+        # Under an unlifted pause the release is not due however long ago the verb fired.
+        self.assertFalse(run._release_due("promote", True, 0.0, False, 100.0, 20, awaiting_lift=True))
+        # After the lift the window counts from the lift (the caller re-anchors).
+        self.assertFalse(run._release_due("promote", True, 90.0, False, 100.0, 20, awaiting_lift=False))
+        self.assertTrue(run._release_due("promote", True, 80.0, False, 100.0, 20, awaiting_lift=False))
 
     def test_hold_must_survive_the_second_verb_until_the_release(self):
         self.assertTrue(run._prehold_survived(1, "canary-prehold", 1))
