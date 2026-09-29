@@ -25,11 +25,12 @@ const (
 // Unknown means the home could not be read, while Absent is reserved for
 // conclusive evidence that the placement copy is gone.
 type homeObservation struct {
-	state     homeObservationState
-	candidate v1beta1.CandidatePlacement
-	serving   bool
-	terminal  bool
-	err       error
+	state          homeObservationState
+	candidate      v1beta1.CandidatePlacement
+	serving        bool
+	terminal       bool
+	err            error
+	terminalMember *v1beta1.InferenceService
 }
 
 // placementObservations caches the observations made before placement gates.
@@ -176,7 +177,7 @@ func (r *Reconciler) observeHome(
 	r.observeDerivedPolicyStatus(isvc, previous.Cluster, derived)
 	r.observeDerivedRolloutStatus(isvc, previous.Cluster, derived)
 	if IsTerminallyFailed(derived, nil) {
-		return terminalHome(previous.Cluster)
+		return terminalHome(previous.Cluster, derived)
 	}
 
 	statuses, err := componentIRStatuses(ctx, r.instanceStatusReader(cl), derived)
@@ -193,7 +194,7 @@ func (r *Reconciler) observeHome(
 		}
 	}
 	if IsTerminallyFailed(derived, statuses) {
-		return terminalHome(previous.Cluster)
+		return terminalHome(previous.Cluster, derived)
 	}
 
 	candidate := v1beta1.CandidatePlacement{
@@ -217,14 +218,15 @@ func (r *Reconciler) observeHome(
 	}
 }
 
-func terminalHome(cluster string) homeObservation {
+func terminalHome(cluster string, member *v1beta1.InferenceService) homeObservation {
 	return homeObservation{
 		state: homePresent,
 		candidate: v1beta1.CandidatePlacement{
 			Cluster: cluster,
 			Phase:   v1beta1.CandidatePhaseAdmitting,
 		},
-		terminal: true,
+		terminal:       true,
+		terminalMember: member,
 	}
 }
 

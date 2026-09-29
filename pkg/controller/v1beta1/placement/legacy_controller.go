@@ -12,6 +12,7 @@ import (
 	"github.com/ome-projects/ome/pkg/placement/plan"
 	"github.com/ome-projects/ome/pkg/placement/protocol"
 	"github.com/ome-projects/ome/pkg/validation"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -128,6 +129,13 @@ func (r *Reconciler) legacyReconcileSingle(
 		case homePresent:
 			if home.terminal {
 				r.clearGrace(isvc.UID)
+				if slices.Contains(candidates, winner) {
+					if cl, ok := r.Clusters.ClientFor(winner); ok {
+						if err := r.legacyUpdateTerminalMember(ctx, winner, cl, isvc, home.terminalMember); err != nil {
+							return r.legacyObservedStatusThenError(ctx, isvc, observations, err)
+						}
+					}
+				}
 				return r.writePlacement(ctx, isvc, placementResult{
 					winner: winner, phase: v1beta1.PlacementPhaseFailed,
 					candidates: []v1beta1.CandidatePlacement{home.candidate},
@@ -539,6 +547,39 @@ func (r *Reconciler) legacyPlaceOnBounded(ctx context.Context, cluster string, c
 	cctx, cancel := context.WithTimeout(ctx, r.placeTimeout())
 	defer cancel()
 	return r.legacyPlaceOn(cctx, cluster, cl, isvc)
+}
+
+// A terminal placement can receive a corrected spec without being re-placed.
+// The observed member's UID and resource version fence the update against
+// replacement, deletion, and concurrent ownership changes.
+func (r *Reconciler) legacyUpdateTerminalMember(ctx context.Context, cluster string, cl client.Client, src, member *v1beta1.InferenceService) error {
+	cctx, cancel := context.WithTimeout(ctx, r.placeTimeout())
+	defer cancel()
+	if member == nil || member.UID == "" || member.ResourceVersion == "" || !member.DeletionTimestamp.IsZero() {
+		return fmt.Errorf("terminal placement update requires a live member identity")
+	}
+	if protocol.IsAffinityMember(member) || !isOurDerived(member, src) {
+		return fmt.Errorf("terminal placement update requires an owned legacy member")
+	}
+	desired, err := r.derivedFor(src)
+	if err != nil {
+		return err
+	}
+	if protocol.IsAffinityMember(desired) {
+		return fmt.Errorf("legacy placement cannot apply ClusterAffinity authority")
+	}
+	if err := r.checkLegacySource(cctx, src); err != nil {
+		return err
+	}
+	r.observePolicyRefStamp(src, cluster, member, desired)
+	target := member.DeepCopy()
+	target.Labels = mergeOwnedKeys(target.Labels, desired.Labels)
+	target.Annotations = mergeOwnedKeys(target.Annotations, desired.Annotations)
+	target.Spec = desired.Spec
+	if equality.Semantic.DeepEqual(member, target) {
+		return nil
+	}
+	return cl.Update(cctx, target)
 }
 
 func (r *Reconciler) legacyPlaceOnReplicasBounded(ctx context.Context, cluster string, cl client.Client, isvc *v1beta1.InferenceService, replicas, maxPer int32) error {
