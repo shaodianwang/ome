@@ -289,7 +289,10 @@ the grid cell it covers in `cell=canary/<State>/<event>` (the states are
   canary pod or at an old-revision pod.
 - **`bump=<members>`** — bump only these group members (an engine-only or
   decoder-only change under a router unit); `img=<ref>` gives the bumped
-  revision an unpullable image so the capacity gate never opens.
+  revision an image so the capacity gate never opens. Name the harness's
+  unpullable image for that, `example.com/canary-test/missing:none`
+  (`runtime_fixtures.UNPULLABLE_IMAGE`): it is the one case image the deploy
+  step never side-loads, so it fails to pull offline as well as online.
 - **`terminal=Stable|RolledBack|Failed`** — the expected terminal phase when the
   derivation from `analysis=`/`rollback=` does not apply; `Failed` asserts the
   park (no canary traffic, not fully rolled, nothing rolled back).

@@ -13,6 +13,7 @@ import batch
 import generate_cases
 import irstatus
 import run
+import runtime_fixtures
 
 HERE = Path(__file__).parent.resolve()
 
@@ -583,3 +584,31 @@ class ApplyCaseRuntimeLagTest(unittest.TestCase):
         r, calls = self._run(body, [(1, self.DENIAL)], clock=clock)
         self.assertEqual(r.returncode, 1)
         self.assertEqual(len(calls), 3)
+
+class CaseImageSideLoadTest(unittest.TestCase):
+    """The deploy step side-loads every image a case embeds, except the one a
+    case names precisely because it must never start."""
+
+    def test_unpullable_image_is_left_out_of_the_side_load_list(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "p1.yaml").write_text(
+                "# p1: x mode=canary bump=engine img=%s terminal=Failed\n"
+                "spec: {}\n" % runtime_fixtures.UNPULLABLE_IMAGE)
+            (root / "p2.yaml").write_text(
+                "# p2: y mode=runtimerev img=${OME_EVAL_NGINX_ALT_IMAGE}\n"
+                "      image: ${OME_EVAL_NGINX_IMAGE}\n")
+            saved = runtime_fixtures.CASE_DIR
+            runtime_fixtures.CASE_DIR = root
+            try:
+                images = runtime_fixtures.case_images(kind=True)
+            finally:
+                runtime_fixtures.CASE_DIR = saved
+        self.assertNotIn(runtime_fixtures.UNPULLABLE_IMAGE, images)
+        self.assertEqual(2, len(images))
+        self.assertTrue(all("nginx-unprivileged" in i for i in images), images)
+
+    def test_committed_corpus_side_loads_no_unpullable_image(self):
+        self.assertNotIn(runtime_fixtures.UNPULLABLE_IMAGE, runtime_fixtures.case_images(kind=True))

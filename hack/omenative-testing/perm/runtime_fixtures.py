@@ -49,6 +49,11 @@ KIND_BOOTSTRAP_FIXTURES = ("pv-kind.yaml",)
 # .buildkite/eval_image_mirror.sh). canary-metrics is built from this repo
 # (dockerfiles/canary-metrics.Dockerfile) and has no public registry, so its
 # default is a bare tag that must be overridden or side-loaded.
+# The image a case names when it needs a revision that can never start (the
+# canary capacity-gate failures). It is never side-loaded: case_images() leaves
+# it out, so an offline cluster fails to pull it exactly as the case intends.
+UNPULLABLE_IMAGE = "example.com/canary-test/missing:none"
+
 DEFAULTS = {
     "OME_TEST_NS": "sandbox",
     "OME_EVAL_STORAGE_CLASS": "shared-vast",
@@ -178,7 +183,8 @@ def images(kind=False, stage=STAGE_ALL):
 
 def case_images(kind=False):
     """Container image references embedded directly in case manifests, as they
-    resolve for the target cluster."""
+    resolve for the target cluster. The unpullable image is not one of them:
+    a case that names it wants a pod that never starts."""
     values = resolve(kind=kind)
     seen = []
     for path in sorted(CASE_DIR.glob("**/*.yaml")):
@@ -186,8 +192,9 @@ def case_images(kind=False):
             match = re.match(r"^\s*image:\s*[\"']?([^\"'\s]+)", line)
             if match is None:
                 match = re.search(r"(?:^|\s)img=([^\s]+)", line)
-            if match is not None and match.group(1) not in seen:
-                seen.append(match.group(1))
+            if match is None or match.group(1) == UNPULLABLE_IMAGE or match.group(1) in seen:
+                continue
+            seen.append(match.group(1))
     return seen
 
 
