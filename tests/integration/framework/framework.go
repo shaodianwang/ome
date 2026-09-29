@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"go.uber.org/zap/zaptest/observer"
@@ -207,11 +208,56 @@ func (f *Framework) Init() (*rest.Config, error) {
 	utilruntime.Must(v1beta1.AddToScheme(envtestScheme()))
 	f.testEnv.Scheme = envtestScheme()
 
-	cfg, err := f.testEnv.Start()
+	cfg, err := startControlPlane(f.testEnv)
 	if err != nil {
 		return nil, fmt.Errorf("framework.Init: envtest.Start: %w", err)
 	}
 	return cfg, nil
+}
+
+// controlPlaneStartAttempts bounds the restarts of an envtest control plane
+// whose apiserver stops answering while envtest is still installing CRDs.
+const controlPlaneStartAttempts = 3
+
+// startControlPlane starts the envtest control plane, restarting it when its
+// apiserver drops the connection during bring-up. On a loaded agent several
+// suites start apiservers at once and one can lose its client connection or
+// refuse it before envtest finishes installing CRDs; that is the process
+// dying under the load, not a test result, and Ginkgo would otherwise fail
+// the whole suite in BeforeSuite. Any other error returns as is.
+func startControlPlane(env *envtest.Environment) (*rest.Config, error) {
+	var err error
+	for attempt := 1; attempt <= controlPlaneStartAttempts; attempt++ {
+		var cfg *rest.Config
+		cfg, err = env.Start()
+		if err == nil {
+			return cfg, nil
+		}
+		if !controlPlaneDropped(err) || attempt == controlPlaneStartAttempts {
+			break
+		}
+		_ = env.Stop()
+		time.Sleep(time.Duration(attempt) * 5 * time.Second)
+	}
+	return nil, err
+}
+
+// controlPlaneDropped reports the bring-up failures that mean the apiserver
+// process stopped answering rather than rejected a request.
+func controlPlaneDropped(err error) bool {
+	msg := err.Error()
+	for _, sig := range []string{
+		"http2: client connection lost",
+		"connection refused",
+		"connection reset by peer",
+		"context deadline exceeded",
+		"unexpected EOF",
+	} {
+		if strings.Contains(msg, sig) {
+			return true
+		}
+	}
+	return false
 }
 
 // SetupClient assembles a client-side runtime.Scheme (OME + core/batch
