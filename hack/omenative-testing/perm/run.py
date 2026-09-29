@@ -1363,6 +1363,9 @@ REPIN_ANNO = "ome.io/rollout-repin"
 READY_TIMEOUT_ANNO = "ome.io/rollout-ready-timeout"
 # JSON pointer of the pinned run in the status subresource.
 ACTIVE_RUN_POINTER = "/status/rollout/activeRun"
+# How long the initial rollout's run is given to close after the fleet has
+# settled before a canary case gives up on reaching Idle.
+IDLE_RUN_CLOSE_S = int(90 * TIMEOUT_MULT)
 # The plan condition the run layer stamps, and the reason a group whose
 # policy does not exist parks under.
 PLAN_READY_COND = "RolloutPlanReady"
@@ -1579,6 +1582,18 @@ def _runlost_record(run_id, last_run, hook, step, now):
     return {"run_id": run_id, "last_run": last_run, "hook": hook, "step": step,
             "removed": False, "removed_at": now, "since": None, "unpinned": [],
             "repin_step": None, "repin_run": None, "closed": None}
+
+
+def _wait_no_active_run(case_id, budget_s):
+    """Block until the service pins no run; returns how long that took, or
+    None when a run is still pinned at the end of the budget."""
+    t0 = time.time()
+    while True:
+        if _active_run(fetch_status(case_id)) is None:
+            return time.time() - t0
+        if time.time() - t0 >= budget_s:
+            return None
+        time.sleep(2)
 
 
 def _active_run(st):
@@ -5489,6 +5504,15 @@ def _canary(case_id, yaml_file, desc, hdr):
     ctx, err = _setup_and_ready(case_id, yaml_file, hdr)
     if err:
         return _write_fail(case_id, desc, hdr, *err)
+    # The grid's Idle column is a service with no run pinned. The initial
+    # rollout's run closes on a pass after the fleet settles, so a pre-arm
+    # or a bump that lands before it reads a closing run, not Idle.
+    idle_after = _wait_no_active_run(case_id, IDLE_RUN_CLOSE_S)
+    if idle_after is None:
+        return _write_fail(case_id, desc, hdr, "IDLE_NOT_REACHED",
+                           f"a run was still pinned {IDLE_RUN_CLOSE_S}s after the initial fleet settled; the service never reached Idle")
+    if idle_after > 0:
+        ctx.setdefault("verb_notes", []).append(f"idle: the initial run closed {idle_after:.0f}s after the fleet settled")
     cgroup = _canary_group(ctx)
     if hdr.get("unit") and cgroup is None:
         return _write_fail(case_id, desc, hdr, "NO_PRIMARY",

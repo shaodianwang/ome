@@ -1082,6 +1082,28 @@ class PauseLiftTest(unittest.TestCase):
         self.assertFalse(run._awaiting_pause_lift(None, False, False))
 
 
+class IdleMeansNoRunTest(unittest.TestCase):
+    def test_waits_for_the_initial_run_to_close(self):
+        statuses = iter([{"rollout": {"activeRun": {"runID": "r0"}}}, {"rollout": {"lastRun": {"outcome": "Completed"}}}])
+        saved = run.fetch_status, run.time.sleep
+        run.fetch_status = lambda cid: next(statuses)
+        run.time.sleep = lambda s: None
+        try:
+            waited = run._wait_no_active_run("p1", 10)
+        finally:
+            run.fetch_status, run.time.sleep = saved
+        self.assertIsNotNone(waited)
+
+    def test_a_run_that_never_closes_is_reported(self):
+        saved = run.fetch_status, run.time.sleep
+        run.fetch_status = lambda cid: {"rollout": {"activeRun": {"runID": "r0"}}}
+        run.time.sleep = lambda s: None
+        try:
+            self.assertIsNone(run._wait_no_active_run("p1", 0))
+        finally:
+            run.fetch_status, run.time.sleep = saved
+
+
 class ParkedPlanTest(unittest.TestCase):
     def test_plan_park_reads_the_false_plan_condition(self):
         st = {"conditions": [{"type": "Ready", "status": "True"},
