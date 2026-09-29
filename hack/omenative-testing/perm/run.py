@@ -5213,7 +5213,7 @@ def _canary_verb(ctx, verb, canary_hash, primary):
         if verb == "planedit-repin":
             kubectl("-n", NS, "annotate", "isvc", cid, "ome.io/rollout-repin=now", "--overwrite")
     elif verb == "groupremove":
-        kubectl("-n", NS, "patch", "isvc", cid, "--type=merge", "-p", json.dumps({"spec": {"rollout": {"groups": []}}}))
+        _remove_rollout_groups(ctx)
     elif verb == "runlost":
         _remove_active_run(ctx)
     elif verb == "pairing":
@@ -5374,6 +5374,23 @@ def _canary_scale(ctx):
     for c, t in targets.items():
         ctx["want"][c] = t
         ctx["N"][c] = min(ctx["N"][c], t)
+
+
+def _remove_rollout_groups(ctx):
+    """verb=groupremove: empty spec.rollout.groups, then read the live spec
+    back so the record says whether the removal took; a denied patch or a
+    group still present is the verb's error, not a later verdict's puzzle."""
+    cid = ctx["case_id"]
+    rr = kubectl("-n", NS, "patch", "isvc", cid, "--type=merge", "-p", json.dumps({"spec": {"rollout": {"groups": []}}}))
+    if rr.returncode != 0:
+        ctx.setdefault("verb_errors", []).append(f"groupremove: patch denied: {(rr.stderr.strip().splitlines() or [''])[-1][:300]}")
+        return
+    r = kubectl("-n", NS, "get", "isvc", cid, "-o", "jsonpath={.spec.rollout.groups}")
+    left = (r.stdout or "").strip()
+    if r.returncode == 0 and left not in ("", "[]"):
+        ctx.setdefault("verb_errors", []).append(f"groupremove: the live spec still carries groups after the patch: {left[:300]}")
+        return
+    ctx.setdefault("verb_notes", []).append("groupremove: the live spec carries no rollout groups after the patch")
 
 
 def _remove_active_run(ctx):
@@ -5872,8 +5889,10 @@ def _canary(case_id, yaml_file, desc, hdr):
         if _runlost_repin_pending(ctx.get("runlost"), now):
             pods_settled = False   # the run layer's re-pin is owed before the terminal is judged
         # A bump with no group is a plain rollout: its phase is not the run's.
+        # A held update projects no run phase: the Component reads idle
+        # (Stable) or nothing at all while the plan stays parked.
         phase_ok = (phase == expect or (not _prearm_arms_canary(prearm) and expect == "Stable" and phase in ("", "Stable"))
-                    or (expect == "Held" and not phase and bool(ctx.get("plan_park"))))
+                    or (expect == "Held" and phase in ("", "Stable") and bool(ctx.get("plan_park"))))
         if phase_ok and pods_settled:
             stable = stable or now
             # A held update is judged over the run-lost hold window, not the
