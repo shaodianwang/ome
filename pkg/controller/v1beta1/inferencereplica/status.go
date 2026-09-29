@@ -120,8 +120,11 @@ const (
 
 // aggregateAndWriteStatus publishes cached Pod and EndpointSlice facts over
 // freshly read lifecycle rows, then computes the IR summaries and conditions.
-// Lifecycle fields and CurrentRevision retain their dedicated writers. A nil
-// target leaves revision pointers untouched while counters still publish.
+// Lifecycle fields and CurrentRevision retain their dedicated writers, with
+// one exception the publication owns: a settled Ready row with no pods is
+// written back as Pending (workloadstatus.DemotableReady), so the phase never
+// contradicts the zero pod count published beside it. A nil target leaves
+// revision pointers untouched while counters still publish.
 //
 // holdObserved/hold carry this pass's Update-pass rollout-hold verdict
 // (ReconcileInput.RecordRolloutHold): holdObserved is true when the Update
@@ -216,12 +219,13 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 		if target != nil {
 			targetName = target.Name
 		}
-		publication, counters, err := observation.TakeInlineV1Publication(desiredByIdx, targetName)
+		publication, counters, err := observation.TakeInlineV1Publication(desiredByIdx, targetName, plan.RestartPolicy)
 		if err != nil {
 			return fmt.Errorf("aggregateAndWriteStatus: consume publication observation: %w", err)
 		}
 		nextAvailableIn = counters.NextAvailableIn
 		for i := range fresh.Status.InstanceStatuses {
+			fresh.Status.InstanceStatuses[i].Phase = v1beta1convert.InstancePhaseFromWorkload(publication[i].Phase)
 			fresh.Status.InstanceStatuses[i].PodCount = publication[i].PodCount
 			fresh.Status.InstanceStatuses[i].ReadyPodCount = publication[i].ReadyPodCount
 			fresh.Status.InstanceStatuses[i].ServingPodCount = publication[i].ServingPodCount
@@ -336,7 +340,8 @@ func (r *Reconciler) aggregateAndWriteStatus(ctx context.Context, ir *v1beta1.In
 
 // mirrorBack copies Component fields and transient publication counters onto
 // the caller's in-memory IR. Lifecycle fields remain owned by workload
-// operations and are left untouched.
+// operations and are left untouched, except the phase, which comes along so
+// the caller's snapshot shows the demotion the publication wrote.
 func mirrorBack(ir, fresh *v1beta1.InferenceReplica, publication []workloadtypes.InstanceStatus) {
 	ir.Status.Replicas = fresh.Status.Replicas
 	ir.Status.ReadyReplicas = fresh.Status.ReadyReplicas
@@ -423,8 +428,9 @@ func (r *Reconciler) buildDeadlineParkInput(ir *v1beta1.InferenceReplica) worklo
 	}
 }
 
-// mirrorInstanceCounters copies transient Pod counters by Instance index.
-// Lifecycle and admission fields remain untouched.
+// mirrorInstanceCounters copies the published phase and the transient Pod
+// counters by Instance index. Other lifecycle fields and admission remain
+// untouched.
 func mirrorInstanceCounters(status *v1beta1.InferenceReplicaStatus, publication []workloadtypes.InstanceStatus) {
 	if status == nil {
 		return
@@ -439,6 +445,7 @@ func mirrorInstanceCounters(status *v1beta1.InferenceReplicaStatus, publication 
 		if !ok {
 			continue
 		}
+		s.Phase = v1beta1convert.InstancePhaseFromWorkload(observed.Phase)
 		s.PodCount = observed.PodCount
 		s.ReadyPodCount = observed.ReadyPodCount
 		s.ServingPodCount = observed.ServingPodCount

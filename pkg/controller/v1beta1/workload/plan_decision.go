@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -162,7 +163,8 @@ type Decision struct {
 	// The truth pass (ActionDemote) is status-only, selected only while
 	// paused (in every depth): pause suspends lifecycle operations,
 	// never status truth, while unpaused reconciles leave the correction
-	// to Create.
+	// to the status publication, which demotes the same shape at the end
+	// of every pass, and to Create.
 	Actions []PlannedAction
 
 	// RequeueAfter is the earliest not-yet-due Backoff RetryBlock
@@ -223,8 +225,11 @@ func Plan(ctx context.Context, input types.ReconcileInput, plan types.ComponentP
 	// Create pass that would otherwise re-materialize it), must not keep
 	// claiming Ready. Status-only; selected here, applied by Execute; runs
 	// in every pause depth because pause suspends lifecycle operations,
-	// never status truth. Unpaused reconciles skip it: Create both
-	// recovers the pods and re-stamps the phase in the same pass.
+	// never status truth. Unpaused reconciles skip it: the status
+	// publication demotes the same shape (status.DemotableReady) at the
+	// end of every pass, and Create re-materializes the row when it runs.
+	// The paused pass keeps its own correction because it confirms the
+	// loss against a live read and announces it.
 	if plan.Paused {
 		demotions, err := planUnbackedDemotions(ctx, input, plan, snapshot)
 		if err != nil {
@@ -460,17 +465,15 @@ func anyRestartTrigger(input types.ReconcileInput, plan types.ComponentPlan, byI
 // planUnbackedDemotions selects Ready Instances with no live pods and no
 // in-flight Operation for a status-only demotion to Pending. Phase is
 // op-owned, so this narrow observation-only correction fires exclusively
-// where no op pass will: components under RecreateInstanceOnPodRestart are
-// excluded outright (their restart pass owns Ready-with-pod-loss and
-// recreates at the running revision), and an Operation in any state keeps
-// ownership with its op. Extras belong to scale-down. Candidates are
-// screened on the cached read and confirmed against the live read, so the
-// demotion can never fire on cache lag; a Terminating pod still counts as
-// live, deferring the correction until the loss is total and settled.
+// where no op pass will (status.DemotableReady): components under
+// RecreateInstanceOnPodRestart are excluded outright (their restart pass
+// owns Ready-with-pod-loss and recreates at the running revision), and an
+// Operation in any state keeps ownership with its op. Extras belong to
+// scale-down. Candidates are screened on the cached read and confirmed
+// against the live read, so the demotion can never fire on cache lag; a
+// Terminating pod still counts as live, deferring the correction until the
+// loss is total and settled.
 func planUnbackedDemotions(ctx context.Context, input types.ReconcileInput, plan types.ComponentPlan, snapshot *ObservedSnapshot) ([]types.DemotionSelection, error) {
-	if plan.RestartPolicy == types.RestartPolicyRecreateInstance {
-		return nil, nil
-	}
 	planned := make(map[int32]struct{}, len(plan.Instances))
 	for _, inst := range plan.Instances {
 		planned[inst.Index] = struct{}{}
@@ -481,7 +484,7 @@ func planUnbackedDemotions(ctx context.Context, input types.ReconcileInput, plan
 		if _, ok := planned[row.Index]; !ok {
 			continue
 		}
-		if row.Phase != types.InstancePhaseReady || row.Operation != nil {
+		if !status.DemotableReady(row, plan.RestartPolicy) {
 			continue
 		}
 		candidates = append(candidates, row.Index)

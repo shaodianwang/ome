@@ -29,7 +29,7 @@ func irPublished(t *testing.T, current, target string, rows []workloadtypes.Inst
 	for _, row := range rows {
 		desired[row.Index] = 1
 	}
-	_, counters, err := observation.TakeInlineV1Publication(desired, target)
+	_, counters, err := observation.TakeInlineV1Publication(desired, target, workloadtypes.RestartPolicyNone)
 	if err != nil {
 		t.Fatalf("TakeInlineV1Publication: %v", err)
 	}

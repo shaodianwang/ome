@@ -236,18 +236,76 @@ func TestAggregateAndWriteStatusPersistsCompactRowsAndMirrorsCurrentObservations
 		"legacy compaction writes once and the steady compact pass writes nothing")
 }
 
+// TestAggregateAndWriteStatus_DemotesReadyRowWithoutPods pins the
+// aggregator's half of the rule: a persisted Ready row whose pod is gone is
+// written back as Pending in the same status write that publishes its zero
+// pod count, the caller's snapshot mirrors the demotion, and the next steady
+// pass writes nothing. The return to Ready is the lifecycle promote's. Under
+// RecreateInstanceOnPodRestart the row keeps Ready for the restart pass.
+func TestAggregateAndWriteStatus_DemotesReadyRowWithoutPods(t *testing.T) {
+	tests := []struct {
+		name   string
+		policy workloadtypes.RestartPolicy
+		want   v1beta1.OMENativeInstancePhase
+	}{
+		{name: "create-owned pod loss publishes Pending", policy: workloadtypes.RestartPolicyNone, want: v1beta1.OMENativeInstancePending},
+		{name: "restart-owned pod loss keeps Ready", policy: workloadtypes.RestartPolicyRecreateInstance, want: v1beta1.OMENativeInstanceReady},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			g := gomega.NewWithT(t)
+			ir := baselineIR("model-engine", "default", 1)
+			readySince := metav1.NewTime(time.Date(2026, time.March, 1, 12, 0, 0, 0, time.UTC))
+			ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{
+				Index: 0, Incarnation: 1, Phase: v1beta1.OMENativeInstanceReady,
+				RunningRevision: "rev-a", ReadySince: &readySince,
+			}}
+			r, stored := newReconciler(t, ir)
+			plan := workloadtypes.ComponentPlan{
+				Component:     v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component),
+				Replicas:      1,
+				RestartPolicy: test.policy,
+				Instances: []workloadtypes.InstancePlan{{
+					Index: 0, Incarnation: 1, Runners: []workloadtypes.RunnerPlan{{Name: "default", Size: 1}},
+				}},
+			}
+
+			g.Expect(writeStatus(r, ir, plan, nil, false, nil)).To(gomega.Succeed())
+			got := &v1beta1.InferenceReplica{}
+			g.Expect(stored.Get(context.Background(), client.ObjectKeyFromObject(ir), got)).To(gomega.Succeed())
+			g.Expect(got.Status.InstanceStatuses[0].Phase).To(gomega.Equal(test.want))
+			g.Expect(got.Status.InstanceStatuses[0].PodCount).To(gomega.BeZero())
+			g.Expect(got.Status.InstanceStatuses[0].ReadySince).NotTo(gomega.BeNil())
+			g.Expect(got.Status.InstanceStatuses[0].ReadySince.Time).To(gomega.BeTemporally("==", readySince.Time),
+				"the ready anchor survives the demotion; the next promote re-stamps it")
+			g.Expect(got.Status.ReadyReplicas).To(gomega.BeZero())
+			g.Expect(ir.Status.InstanceStatuses[0].Phase).To(gomega.Equal(test.want),
+				"the caller's snapshot mirrors the published phase")
+
+			steadyRV := got.ResourceVersion
+			g.Expect(writeStatus(r, got.DeepCopy(), plan, nil, false, nil)).To(gomega.Succeed())
+			steady := &v1beta1.InferenceReplica{}
+			g.Expect(stored.Get(context.Background(), client.ObjectKeyFromObject(ir), steady)).To(gomega.Succeed())
+			g.Expect(steady.ResourceVersion).To(gomega.Equal(steadyRV),
+				"a steady publication performs no status write")
+		})
+	}
+}
+
 func TestMirrorInstanceCountersUsesTransientPublicationIntersection(t *testing.T) {
 	g := gomega.NewWithT(t)
 	status := &v1beta1.InferenceReplicaStatus{InstanceStatuses: []v1beta1.OMENativeInstanceStatus{
 		{Index: 3, Phase: v1beta1.OMENativeInstanceDeleting, Admitted: true, PodCount: 9, NodesOccupied: []string{"old-node"}},
 		{Index: 9, Phase: v1beta1.OMENativeInstanceReady, PodCount: 7, ReadyPodCount: 6},
 		{Index: 1, Phase: v1beta1.OMENativeInstanceUpdating},
+		{Index: 5, Phase: v1beta1.OMENativeInstanceReady, PodCount: 1, ReadyPodCount: 1},
 	}}
 	publication := []workloadtypes.InstanceStatus{
-		{Index: 1, PodCount: 1, ReadyPodCount: 1, ServingPodCount: 1, ScheduledPodCount: 1, AvailablePodCount: 1, NodesOccupied: []string{"node-a"}},
-		{Index: 3, PodCount: 2, ReadyPodCount: 2, NodesOccupied: []string{"superseded"}},
-		{Index: 3, PodCount: 4, ReadyPodCount: 3, ServingPodCount: 2, ScheduledPodCount: 4, AvailablePodCount: 1},
-		{Index: 7, PodCount: 1, ReadyPodCount: 1},
+		{Index: 1, Phase: workloadtypes.InstancePhaseUpdating, PodCount: 1, ReadyPodCount: 1, ServingPodCount: 1, ScheduledPodCount: 1, AvailablePodCount: 1, NodesOccupied: []string{"node-a"}},
+		{Index: 3, Phase: workloadtypes.InstancePhaseDeleting, PodCount: 2, ReadyPodCount: 2, NodesOccupied: []string{"superseded"}},
+		{Index: 3, Phase: workloadtypes.InstancePhaseDeleting, PodCount: 4, ReadyPodCount: 3, ServingPodCount: 2, ScheduledPodCount: 4, AvailablePodCount: 1},
+		{Index: 5, Phase: workloadtypes.InstancePhasePending},
+		{Index: 7, Phase: workloadtypes.InstancePhaseReady, PodCount: 1, ReadyPodCount: 1},
 	}
 
 	mirrorInstanceCounters(status, publication)
@@ -261,6 +319,9 @@ func TestMirrorInstanceCountersUsesTransientPublicationIntersection(t *testing.T
 	}), "caller-only rows remain untouched")
 	g.Expect(status.InstanceStatuses[2].Phase).To(gomega.Equal(v1beta1.OMENativeInstanceUpdating))
 	g.Expect(status.InstanceStatuses[2].NodesOccupied).To(gomega.Equal([]string{"node-a"}))
+	g.Expect(status.InstanceStatuses[3]).To(gomega.Equal(v1beta1.OMENativeInstanceStatus{
+		Index: 5, Phase: v1beta1.OMENativeInstancePending,
+	}), "the published phase is mirrored with the counters, so a demotion shows on the caller's snapshot")
 
 	publication[0].NodesOccupied[0] = "mutated"
 	g.Expect(status.InstanceStatuses[2].NodesOccupied).To(gomega.Equal([]string{"node-a"}),
@@ -2300,7 +2361,7 @@ func TestPublicationObservationMatchesInlineV1Projection(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewOwnedPublicationObservation: %v", err)
 			}
-			materialized, gotCounters, err := observation.TakeInlineV1Publication(test.desired, "rev-running")
+			materialized, gotCounters, err := observation.TakeInlineV1Publication(test.desired, "rev-running", workloadtypes.RestartPolicyNone)
 			if err != nil {
 				t.Fatalf("TakeInlineV1Publication: %v", err)
 			}
@@ -2395,7 +2456,7 @@ func TestPublicationObservationMatchesInlineV1ProjectionAtScale(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewOwnedPublicationObservation: %v", err)
 			}
-			materialized, gotCounters, err := observation.TakeInlineV1Publication(desired, "rev-running")
+			materialized, gotCounters, err := observation.TakeInlineV1Publication(desired, "rev-running", workloadtypes.RestartPolicyNone)
 			if err != nil {
 				t.Fatalf("TakeInlineV1Publication: %v", err)
 			}
@@ -2830,7 +2891,7 @@ func TestPublicationCounters_DeriveFromPodsNotPhases(t *testing.T) {
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 
 	desired := map[int32]int32{0: 1, 1: 1, 2: 1}
-	_, counters, err := observation.TakeInlineV1Publication(desired, "rev-b")
+	_, counters, err := observation.TakeInlineV1Publication(desired, "rev-b", workloadtypes.RestartPolicyNone)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 
 	g.Expect(counters.Replicas).To(gomega.Equal(int32(3)),
