@@ -31,6 +31,10 @@ import (
 //
 // Watches:
 //   - InferenceReplica (primary): re-enqueue on spec / status changes.
+//   - InferenceReplica (peers): a replica's generation, projected parent
+//     generation or revision status changing enqueues the serving peers
+//     of its parent, which pair their pods on its roll target and hold
+//     while it lags.
 //   - Pods: a custom handler that BOTH updates the Expectations cache
 //     (ObservedCreate / ObservedDelete) AND re-enqueues the owning IR.
 //     The expectations update is load-bearing: the workload dispatcher's
@@ -162,6 +166,15 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 			&corev1.Pod{},
 			newPodEventHandler(r.Expectations),
 			builder.WithPredicates(managedByOMENativePredicate()),
+		).
+		// A serving peer's roll target and status freshness gate what this
+		// replica renders (resolvePeerRevisions), so the peer's projection
+		// and status transitions enqueue its siblings: a pass held on a
+		// lagging peer is released by the catch-up it waits for.
+		Watches(
+			&v1beta1.InferenceReplica{},
+			handler.EnqueueRequestsFromMapFunc(r.peerReplicasOf),
+			builder.WithPredicates(peerRevisionPredicate()),
 		).
 		// EndpointSlice events for OMENative drain Services (per-Component
 		// headless + per-revision routed) enqueue the owning IR so the
