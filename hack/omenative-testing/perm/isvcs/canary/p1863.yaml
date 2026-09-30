@@ -1,5 +1,4 @@
-# p1863: canary pd pairing re-target while staging  mode=canary Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=3 ceil_r=0 canary=auto proto=pair-v2 proto2=pair-v3 during=canary-staging notimpl=1 issue=1347 cell=canary/Staging/pairingRetarget co=none topo=pd
-# reason: parked on the mid-surge protocol re-target — the continuation seam parks the rollout permanently; the case states the intended outcome (converge on the final cohort, nothing stranded)
+# p1863: canary pd pairing re-target while staging  mode=canary Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=3 ceil_r=0 canary=auto proto=pair-v2 proto2=pair-v3 during=canary-staging cell=canary/Staging/pairingRetarget co=none topo=pd
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p1863 }

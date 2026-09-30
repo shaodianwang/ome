@@ -1,5 +1,4 @@
-# p1792: canary pd pairing swap rolled back mid-step  mode=canary Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=3 ceil_r=0 canary=auto proto=pair-v2 during=canary-serving verb=rollback terminal=RolledBack notimpl=1 issue=1855 cell=canary/Serving/rollback[pairing] co=none topo=pd
-# reason: the rollback of the protocol swap stalls on the scheduler lane with the engine's stable replacement pod never admitted to serving; the pairing-surface gap the case was scoped to before is tracked separately
+# p1792: canary pd pairing swap rolled back mid-step  mode=canary Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=3 ceil_r=0 canary=auto proto=pair-v2 during=canary-serving verb=rollback terminal=RolledBack cell=canary/Serving/rollback[pairing] co=none topo=pd
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p1792 }

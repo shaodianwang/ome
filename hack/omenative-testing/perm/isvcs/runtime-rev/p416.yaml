@@ -1,4 +1,4 @@
-# p416: runtime-rev engine corrective-rollout-deadlocks-behind-stuck-surge (KNOWN BUG: deadlocks today) mode=runtimerev rt=ome-coordtest-rt-p416 expect=recover break=stuck Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 topo=engine notimpl=1 issue=1355
+# p416: runtime-rev engine corrective-rollout-deadlocks-behind-stuck-surge (KNOWN BUG: deadlocks today) mode=runtimerev rt=ome-coordtest-rt-p416 expect=recover break=stuck Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 topo=engine
 # Surge-budget deadlock guard: with maxSurge=1, a prior rollout's ONE surge pod
 # runs but never becomes Ready (readinessProbe forced to fail; container stays
 # up via startup/liveness → no crash, no ImagePullBackOff → the fast stuck-pod
