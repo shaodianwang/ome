@@ -25,19 +25,37 @@ generics — there is no client-go-style code generator for it in Rust.
 ## Regenerate
 
 ```sh
-make rust-client          # kopium over ../config/crd/full/
+make kopium-install          # install the version pinned in the Makefile
+make rust-client             # all CRDs in ../config/crd/full/
+make rust-placement-client   # InferenceService, InferenceReplica, TrafficMap, WorkloadCluster
 ```
+
+The placement target keeps source intent, member execution, capacity evidence,
+and routing types aligned. Regeneration requires Python with PyYAML and
+`rustfmt`; CI uses Rust 1.95. Generate complete modules rather than editing
+individual fields. Generation or formatting failures leave the affected
+module unchanged.
 
 ## Test
 
 ```sh
+make rust-test               # library tests and placement serialization tables
+make ci-placement            # regenerate placement types, reject drift, run rust-test
 make rust-integration-test   # boots etcd + kube-apiserver from the controller-runtime
                              # envtest assets (no Docker), installs the OME CRDs, and
                              # exercises clientset CRUD + informer/lister convergence
                              # + event subscription against a real apiserver.
 ```
 
-> The pod-template slimming above keeps the generated types small, so they
-> deserialize cheaply with no special stack size. (Regenerating without
-> `hack/slim_crd.py` brings back the giant PodSpec trees, which then need a large
-> tokio `thread_stack_size`.)
+Placement fixtures cover all affinity modes, ordinary local services, omitted
+and explicit Legacy policy, zero and false values, accepted home floors,
+movement state, capacity provenance, and routing authority. The integration
+test compares raw API-server JSON after typed create/read/replace and status
+replacement, and checks schema rejection of invalid placement. It installs
+CRDs without OME controllers or webhooks, so it verifies client and schema
+compatibility rather than placement reconciliation.
+
+Unoptimized watch deserialization can exceed the default Rust test-thread
+stack even with pod-template slimming. A test-only override can be supplied
+as `RUST_MIN_STACK=16777216 make rust-integration-test`; consumers control their
+own Tokio runtime stack configuration.

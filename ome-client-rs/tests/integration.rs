@@ -14,7 +14,9 @@ mod common;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use kube::api::{DeleteParams, PostParams};
+use kube::api::{DeleteParams, Patch, PatchParams, PostParams};
+use kube::core::{ApiResource, DynamicObject};
+use kube::Api;
 use serde_json::json;
 use tokio::sync::broadcast;
 
@@ -26,6 +28,82 @@ use ome_client::k8s_openapi::apimachinery::pkg::apis::meta::v1::{
 };
 use ome_client::workloadclusters::WorkloadClusterSpec;
 use ome_client::{InferenceService, WorkloadCluster};
+
+/// Typed read-modify-write must retain placement intent and execution evidence.
+/// Dynamic reads verify the stored JSON independently of the generated types.
+#[tokio::test]
+async fn placement_intent_and_status_roundtrip() -> anyhow::Result<()> {
+    let cluster = common::start().await?;
+    let api = OmeClient::new(cluster.client.clone()).inference_services("default");
+    let raw: Api<DynamicObject> = Api::namespaced_with(
+        cluster.client.clone(),
+        "default",
+        &ApiResource::erase::<InferenceService>(&()),
+    );
+    let fixtures: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/placement.json"))?;
+    for case in fixtures["intents"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let spec = serde_json::from_value(case["spec"].clone())?;
+        api.create(&PostParams::default(), &InferenceService::new(name, spec))
+            .await?;
+        let mut got = api.get(name).await?;
+        got.metadata.annotations = Some(BTreeMap::from([(
+            "example.com/reviewed".into(),
+            "true".into(),
+        )]));
+        api.replace(name, &PostParams::default(), &got).await?;
+        let stored = raw.get(name).await?;
+        assert_eq!(
+            stored.data["spec"]["placement"], case["spec"]["placement"],
+            "{name}"
+        );
+        assert_eq!(
+            stored.data["spec"]["engine"]["minReplicas"], case["spec"]["engine"]["minReplicas"],
+            "{name}"
+        );
+    }
+    for case in fixtures["statuses"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let created = api
+            .create(
+                &PostParams::default(),
+                &InferenceService::new(name, serde_json::from_value(json!({}))?),
+            )
+            .await?;
+        let mut want = case["status"].clone();
+        want["placement"]["plan"]["sourceUID"] = json!(created.metadata.uid);
+        want["placement"]["plan"]["observedGeneration"] = json!(created.metadata.generation);
+        raw.patch_status(
+            name,
+            &PatchParams::default(),
+            &Patch::Merge(json!({"status": want})),
+        )
+        .await?;
+        let got = api.get(name).await?;
+        api.replace_status(name, &PostParams::default(), &got)
+            .await?;
+        assert_eq!(raw.get(name).await?.data["status"], want, "{name}");
+    }
+    for (name, placement) in [
+        ("missing-mode", json!({"policy": "ClusterAffinity"})),
+        (
+            "negative-surge",
+            json!({"policy": "ClusterAffinity", "mode": "All", "maxSurge": -1}),
+        ),
+    ] {
+        let spec = serde_json::from_value(json!({"placement": placement}))?;
+        let err = api
+            .create(&PostParams::default(), &InferenceService::new(name, spec))
+            .await
+            .expect_err("invalid placement must reach API validation");
+        assert!(
+            matches!(err, kube::Error::Api(ref response) if response.code == 422),
+            "{name}: {err}"
+        );
+    }
+    Ok(())
+}
 
 /// Poll `cond` until it holds or `timeout` elapses.
 async fn eventually(timeout: Duration, mut cond: impl FnMut() -> bool) -> anyhow::Result<()> {
@@ -114,7 +192,10 @@ async fn namespaced_clientset_informer_lister() -> anyhow::Result<()> {
     // with a label so list_matching has something to filter on.
     let spec: InferenceServiceSpec = serde_json::from_value(json!({}))?;
     let mut isvc = InferenceService::new("test-isvc", spec);
-    isvc.metadata.labels = Some(BTreeMap::from([("app".to_string(), "muse".to_string())]));
+    isvc.metadata.labels = Some(BTreeMap::from([(
+        "app".to_string(),
+        "example-app".to_string(),
+    )]));
 
     let created = api.create(&PostParams::default(), &isvc).await?;
     assert_eq!(created.metadata.namespace.as_deref(), Some(ns));
@@ -131,7 +212,7 @@ async fn namespaced_clientset_informer_lister() -> anyhow::Result<()> {
     assert_eq!(lister.list_namespaced(ns).len(), 1);
     assert!(lister.list_namespaced("kube-system").is_empty());
 
-    let hit = BTreeMap::from([("app".to_string(), "muse".to_string())]);
+    let hit = BTreeMap::from([("app".to_string(), "example-app".to_string())]);
     let miss = BTreeMap::from([("app".to_string(), "nope".to_string())]);
     assert_eq!(lister.list_matching(&hit).len(), 1);
     assert!(lister.list_matching(&miss).is_empty());
@@ -148,12 +229,15 @@ async fn namespaced_clientset_informer_lister() -> anyhow::Result<()> {
     assert_eq!(lister.list_by_selector(&req("Exists", None)).len(), 1);
     assert_eq!(
         lister
-            .list_namespaced_by_selector(ns, &req("In", Some(vec!["muse".into(), "other".into()])))
+            .list_namespaced_by_selector(
+                ns,
+                &req("In", Some(vec!["example-app".into(), "other".into()]))
+            )
             .len(),
         1
     );
     assert!(lister
-        .list_by_selector(&req("NotIn", Some(vec!["muse".into()])))
+        .list_by_selector(&req("NotIn", Some(vec!["example-app".into()])))
         .is_empty());
     assert!(lister
         .list_by_selector(&req("DoesNotExist", None))

@@ -1,0 +1,562 @@
+{
+  "intents": [
+    {
+      "name": "local-service",
+      "spec": {
+        "engine": {
+          "minReplicas": 1
+        }
+      }
+    },
+    {
+      "name": "single-zero",
+      "spec": {
+        "engine": {
+          "minReplicas": 0
+        },
+        "placement": {
+          "policy": "ClusterAffinity",
+          "mode": "Single",
+          "clusterAffinity": [
+            {
+              "matchFields": [
+                {
+                  "key": "metadata.name",
+                  "operator": "In",
+                  "values": [
+                    "member-a",
+                    "member-b"
+                  ]
+                }
+              ]
+            }
+          ],
+          "maxSurge": 2,
+          "replacementTimeout": "2m"
+        }
+      }
+    },
+    {
+      "name": "all-zero-surge",
+      "spec": {
+        "placement": {
+          "policy": "ClusterAffinity",
+          "mode": "All",
+          "maxSurge": 0
+        }
+      }
+    },
+    {
+      "name": "weighted-split",
+      "spec": {
+        "placement": {
+          "policy": "ClusterAffinity",
+          "mode": "Split",
+          "clusterAffinity": [
+            {
+              "matchExpressions": [
+                {
+                  "key": "region",
+                  "operator": "In",
+                  "values": [
+                    "west"
+                  ]
+                }
+              ],
+              "weight": 3
+            },
+            {
+              "matchExpressions": [
+                {
+                  "key": "region",
+                  "operator": "In",
+                  "values": [
+                    "east"
+                  ]
+                }
+              ],
+              "weight": 1
+            }
+          ],
+          "split": {
+            "replicas": 18,
+            "maxReplicasPerCluster": 16
+          },
+          "maxSurge": 2
+        }
+      }
+    },
+    {
+      "name": "capacity",
+      "spec": {
+        "placement": {
+          "policy": "ClusterAffinity",
+          "mode": "SplitByCapacity",
+          "clusterAffinity": [
+            {
+              "matchExpressions": [
+                {
+                  "key": "serving",
+                  "operator": "Exists"
+                }
+              ]
+            }
+          ],
+          "split": {
+            "replicas": 12,
+            "maxReplicasPerCluster": 0
+          },
+          "maxSurge": 4
+        }
+      }
+    },
+    {
+      "name": "legacy-implicit",
+      "spec": {
+        "placement": {
+          "mode": "Split",
+          "requirements": "tier=serving",
+          "clusterSelector": "region=west",
+          "split": {
+            "spread": false,
+            "minReplicasPerCluster": 0
+          },
+          "capacityFactors": {
+            "member-a": 0,
+            "member-b": "1.5"
+          }
+        }
+      }
+    },
+    {
+      "name": "legacy-explicit",
+      "spec": {
+        "placement": {
+          "policy": "Legacy",
+          "mode": "Split",
+          "requirements": "",
+          "clusterSelector": "",
+          "split": {
+            "spread": false,
+            "minReplicasPerCluster": 0
+          },
+          "capacityFactors": {}
+        }
+      }
+    }
+  ],
+  "statuses": [
+    {
+      "name": "all-idle",
+      "status": {
+        "placement": {
+          "phase": "Placed",
+          "plan": {
+            "id": "plan-a",
+            "revision": 1,
+            "mode": "All",
+            "sourceUID": "source-uid",
+            "observedGeneration": 1,
+            "inputDigest": "intent-a",
+            "pauseSurge": false,
+            "requestedReplicas": 0,
+            "assignedReplicas": 0,
+            "unassignedReplicas": 0,
+            "originalUnassignedReplicas": 0
+          },
+          "candidates": [
+            {
+              "cluster": "member-a",
+              "phase": "Admitting",
+              "admittedReplicas": 0,
+              "readyReplicas": 0,
+              "observationKnown": true,
+              "appliedPlanID": "plan-a",
+              "allocation": {
+                "clusterUID": "member-a-uid",
+                "originalReplicas": 0,
+                "currentReplicas": 0,
+                "desiredReplicas": 0,
+                "currentHome": {
+                  "inputDigest": "intent-a",
+                  "replicaFloors": [
+                    {
+                      "component": "engine",
+                      "replicas": 0
+                    },
+                    {
+                      "component": "decoder",
+                      "replicas": 0
+                    },
+                    {
+                      "component": "router",
+                      "replicas": 1
+                    }
+                  ]
+                },
+                "desiredHome": {
+                  "inputDigest": "intent-a",
+                  "replicaFloors": [
+                    {
+                      "component": "engine",
+                      "replicas": 0
+                    },
+                    {
+                      "component": "decoder",
+                      "replicas": 0
+                    },
+                    {
+                      "component": "router",
+                      "replicas": 1
+                    }
+                  ]
+                },
+                "matched": true,
+                "matchingTerms": [
+                  0
+                ],
+                "drainRequested": false,
+                "inventoryPending": false,
+                "homeInputsPending": false
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "single-move",
+      "status": {
+        "placement": {
+          "phase": "Placed",
+          "cluster": "member-a",
+          "plan": {
+            "id": "plan-a",
+            "revision": 1,
+            "mode": "Single",
+            "sourceUID": "source-uid",
+            "observedGeneration": 1,
+            "inputDigest": "intent-a",
+            "pauseSurge": true,
+            "requestedReplicas": 2,
+            "assignedReplicas": 2,
+            "unassignedReplicas": 0,
+            "originalUnassignedReplicas": 0,
+            "winner": "member-a",
+            "singleMove": {
+              "cursor": "member-b",
+              "selected": "member-b"
+            }
+          },
+          "candidates": [
+            {
+              "cluster": "member-a",
+              "phase": "Admitted",
+              "admittedReplicas": 2,
+              "readyReplicas": 2,
+              "observationKnown": true,
+              "appliedPlanID": "plan-a",
+              "endpoint": "http://member-a.example.com",
+              "allocation": {
+                "clusterUID": "member-a-uid",
+                "originalReplicas": 2,
+                "currentReplicas": 2,
+                "desiredReplicas": 0,
+                "currentHome": {
+                  "inputDigest": "intent-a",
+                  "replicaFloors": [
+                    {
+                      "component": "engine",
+                      "replicas": 2
+                    },
+                    {
+                      "component": "decoder",
+                      "replicas": 2
+                    },
+                    {
+                      "component": "router",
+                      "replicas": 1
+                    }
+                  ]
+                },
+                "matched": true,
+                "matchingTerms": [
+                  0
+                ],
+                "drainRequested": false,
+                "inventoryPending": false,
+                "homeInputsPending": false
+              }
+            },
+            {
+              "cluster": "member-b",
+              "phase": "Admitted",
+              "admittedReplicas": 2,
+              "readyReplicas": 2,
+              "observationKnown": true,
+              "appliedPlanID": "plan-a",
+              "endpoint": "http://member-b.example.com",
+              "allocation": {
+                "clusterUID": "member-b-uid",
+                "originalReplicas": 0,
+                "currentReplicas": 2,
+                "desiredReplicas": 2,
+                "currentHome": {
+                  "inputDigest": "intent-a",
+                  "replicaFloors": [
+                    {
+                      "component": "engine",
+                      "replicas": 2
+                    },
+                    {
+                      "component": "decoder",
+                      "replicas": 2
+                    },
+                    {
+                      "component": "router",
+                      "replicas": 1
+                    }
+                  ]
+                },
+                "desiredHome": {
+                  "inputDigest": "intent-a",
+                  "replicaFloors": [
+                    {
+                      "component": "engine",
+                      "replicas": 2
+                    },
+                    {
+                      "component": "decoder",
+                      "replicas": 2
+                    },
+                    {
+                      "component": "router",
+                      "replicas": 1
+                    }
+                  ]
+                },
+                "matched": true,
+                "matchingTerms": [
+                  0
+                ],
+                "drainRequested": false,
+                "inventoryPending": false,
+                "homeInputsPending": false,
+                "replacementStartedAt": "2025-01-01T00:00:00Z"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "capacity-evidence",
+      "status": {
+        "placement": {
+          "phase": "Placed",
+          "plan": {
+            "id": "plan-a",
+            "revision": 1,
+            "mode": "SplitByCapacity",
+            "sourceUID": "source-uid",
+            "observedGeneration": 1,
+            "inputDigest": "intent-a",
+            "pauseSurge": false,
+            "requestedReplicas": 4,
+            "assignedReplicas": 4,
+            "unassignedReplicas": 0,
+            "originalUnassignedReplicas": 0
+          },
+          "candidates": [
+            {
+              "cluster": "member-a",
+              "phase": "Admitted",
+              "admittedReplicas": 4,
+              "readyReplicas": 4,
+              "observationKnown": true,
+              "appliedPlanID": "plan-a",
+              "allocation": {
+                "clusterUID": "member-a-uid",
+                "originalReplicas": 4,
+                "currentReplicas": 4,
+                "desiredReplicas": 4,
+                "matched": true,
+                "matchingTerms": [
+                  0
+                ],
+                "capacity": {
+                  "replicas": 8,
+                  "demandFingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "demandContract": {
+                    "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "components": [
+                      {
+                        "component": "engine",
+                        "renderingHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                      },
+                      {
+                        "component": "decoder",
+                        "renderingHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                      }
+                    ]
+                  },
+                  "pools": [
+                    {
+                      "resourceName": "nvidia.com/gpu",
+                      "resourceFlavor": "gpu",
+                      "allocatable": 16,
+                      "demand": 2,
+                      "observedAt": "2025-01-01T00:00:00Z",
+                      "reportUID": "report-a",
+                      "reportResourceVersion": "3",
+                      "attribution": {
+                        "complete": true,
+                        "flavorUID": "flavor-a",
+                        "flavorSetHash": "flavors-a",
+                        "nodeLabels": {
+                          "accelerator": "gpu"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "unassigned",
+      "status": {
+        "placement": {
+          "phase": "Pending",
+          "plan": {
+            "id": "plan-a",
+            "revision": 1,
+            "mode": "Split",
+            "sourceUID": "source-uid",
+            "observedGeneration": 1,
+            "inputDigest": "intent-a",
+            "pauseSurge": false,
+            "requestedReplicas": 5,
+            "assignedReplicas": 0,
+            "unassignedReplicas": 5,
+            "originalUnassignedReplicas": 5
+          },
+          "candidates": []
+        }
+      }
+    }
+  ],
+  "memberPolicies": [
+    {
+      "name": "zero-home",
+      "policy": {
+        "planID": "plan-a",
+        "revision": 1,
+        "sourceUID": "source-uid",
+        "clusterUID": "member-a-uid",
+        "pauseSurge": false,
+        "replicaFloors": [
+          {
+            "component": "engine",
+            "replicas": 0
+          },
+          {
+            "component": "decoder",
+            "replicas": 0
+          },
+          {
+            "component": "router",
+            "replicas": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "paused-home",
+      "policy": {
+        "planID": "plan-a",
+        "revision": 1,
+        "sourceUID": "source-uid",
+        "clusterUID": "member-a-uid",
+        "pauseSurge": true,
+        "replicaFloors": [
+          {
+            "component": "engine",
+            "replicas": 2
+          },
+          {
+            "component": "decoder",
+            "replicas": 2
+          },
+          {
+            "component": "router",
+            "replicas": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "capacity-rendering",
+      "policy": {
+        "planID": "plan-a",
+        "revision": 1,
+        "sourceUID": "source-uid",
+        "clusterUID": "member-a-uid",
+        "pauseSurge": true,
+        "demand": {
+          "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "components": [
+            {
+              "component": "engine",
+              "renderingHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            {
+              "component": "decoder",
+              "renderingHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "trafficMaps": [
+    {
+      "name": "capacity-routing",
+      "object": {
+        "apiVersion": "ome.io/v1beta1",
+        "kind": "TrafficMap",
+        "metadata": {
+          "name": "example-service"
+        },
+        "spec": {
+          "service": "example-service",
+          "mode": "SplitByCapacity",
+          "observedISVCGeneration": 1,
+          "placementPlanID": "plan-a",
+          "entries": [
+            {
+              "cluster": "member-a",
+              "endpoint": "http://service.example.com",
+              "healthy": true,
+              "weight": 1,
+              "capacity": {
+                "allocated": 4,
+                "ready": 4,
+                "factor": "1.5",
+                "source": "ControlPlane"
+              }
+            }
+          ]
+        },
+        "status": {
+          "sourceUID": "source-uid",
+          "published": true,
+          "observedTrafficMapGeneration": 1
+        }
+      }
+    }
+  ]
+}

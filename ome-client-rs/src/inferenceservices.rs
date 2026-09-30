@@ -24,6 +24,12 @@ use self::prelude::*;
 #[kube(status = "InferenceServiceStatus")]
 #[kube(schema = "disabled")]
 pub struct InferenceServiceSpec {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "acceleratorSelector"
+    )]
+    pub accelerator_selector: Option<InferenceServiceAcceleratorSelector>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decoder: Option<InferenceServiceDecoder>,
     #[serde(
@@ -37,9 +43,13 @@ pub struct InferenceServiceSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<InferenceServiceModel>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<InferenceServicePlacement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rollout: Option<InferenceServiceRollout>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub router: Option<InferenceServiceRouter>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<InferenceServiceRouting>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<InferenceServiceRuntime>,
     #[serde(
@@ -53,7 +63,79 @@ pub struct InferenceServiceSpec {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceAcceleratorSelector {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "acceleratorClass"
+    )]
+    pub accelerator_class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constraints: Option<InferenceServiceAcceleratorSelectorConstraints>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<InferenceServiceAcceleratorSelectorPolicy>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceAcceleratorSelectorConstraints {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "architectureFamilies"
+    )]
+    pub architecture_families: Option<Vec<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "excludedClasses"
+    )]
+    pub excluded_classes: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "maxMemory")]
+    pub max_memory: Option<i64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "minArchitectureVersion"
+    )]
+    pub min_architecture_version: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "minComputePerformanceTFLOPS"
+    )]
+    pub min_compute_performance_tflops: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "minMemory")]
+    pub min_memory: Option<i64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "preferredPrecisions"
+    )]
+    pub preferred_precisions: Option<Vec<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "requiredFeatures"
+    )]
+    pub required_features: Option<Vec<String>>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceAcceleratorSelectorPolicy {
+    BestFit,
+    Cheapest,
+    MostCapable,
+    FirstAvailable,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InferenceServiceDecoder {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "acceleratorOverride"
+    )]
+    pub accelerator_override: Option<InferenceServiceDecoderAcceleratorOverride>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -72,6 +154,12 @@ pub struct InferenceServiceDecoder {
     pub automount_service_account_token: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autoscaler: Option<InferenceServiceDecoderAutoscaler>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "autoscalerPolicyRef"
+    )]
+    pub autoscaler_policy_ref: Option<InferenceServiceDecoderAutoscalerPolicyRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub containers: Option<Vec<BTreeMap<String, serde_json::Value>>>,
     #[serde(
@@ -237,6 +325,12 @@ pub struct InferenceServiceDecoder {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
+        rename = "servicePortAppProtocols"
+    )]
+    pub service_port_app_protocols: Option<BTreeMap<String, String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
         rename = "setHostnameAsFQDN"
     )]
     pub set_hostname_as_fqdn: Option<bool>,
@@ -271,13 +365,91 @@ pub struct InferenceServiceDecoder {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
+        rename = "topologySpread"
+    )]
+    pub topology_spread: Option<InferenceServiceDecoderTopologySpread>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
         rename = "topologySpreadConstraints"
     )]
     pub topology_spread_constraints: Option<Vec<BTreeMap<String, serde_json::Value>>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "topologySpreadKey"
+    )]
+    pub topology_spread_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volumes: Option<Vec<BTreeMap<String, serde_json::Value>>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker: Option<InferenceServiceDecoderWorker>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceDecoderAcceleratorOverride {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "acceleratorClass"
+    )]
+    pub accelerator_class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constraints: Option<InferenceServiceDecoderAcceleratorOverrideConstraints>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<InferenceServiceDecoderAcceleratorOverridePolicy>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceDecoderAcceleratorOverrideConstraints {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "architectureFamilies"
+    )]
+    pub architecture_families: Option<Vec<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "excludedClasses"
+    )]
+    pub excluded_classes: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "maxMemory")]
+    pub max_memory: Option<i64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "minArchitectureVersion"
+    )]
+    pub min_architecture_version: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "minComputePerformanceTFLOPS"
+    )]
+    pub min_compute_performance_tflops: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "minMemory")]
+    pub min_memory: Option<i64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "preferredPrecisions"
+    )]
+    pub preferred_precisions: Option<Vec<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "requiredFeatures"
+    )]
+    pub required_features: Option<Vec<String>>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceDecoderAcceleratorOverridePolicy {
+    BestFit,
+    Cheapest,
+    MostCapable,
+    FirstAvailable,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -757,16 +929,39 @@ pub struct InferenceServiceDecoderAutoscalerKedaAdvancedScalingModifiers {
         skip_serializing_if = "Option::is_none",
         rename = "metricType"
     )]
-    pub metric_type: Option<String>,
+    pub metric_type:
+        Option<InferenceServiceDecoderAutoscalerKedaAdvancedScalingModifiersMetricType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceDecoderAutoscalerKedaAdvancedScalingModifiersMetricType {
+    AverageValue,
+    Value,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InferenceServiceDecoderAutoscalerKedaFallback {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behavior: Option<InferenceServiceDecoderAutoscalerKedaFallbackBehavior>,
     #[serde(rename = "failureThreshold")]
     pub failure_threshold: i32,
     pub replicas: i32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceDecoderAutoscalerKedaFallbackBehavior {
+    #[serde(rename = "static")]
+    Static,
+    #[serde(rename = "currentReplicas")]
+    CurrentReplicas,
+    #[serde(rename = "currentReplicasIfHigher")]
+    CurrentReplicasIfHigher,
+    #[serde(rename = "currentReplicasIfLower")]
+    CurrentReplicasIfLower,
+    #[serde(rename = "scalingModifiers")]
+    ScalingModifiers,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -799,8 +994,28 @@ pub struct InferenceServiceDecoderAutoscalerKedaTriggers {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InferenceServiceDecoderAutoscalerKedaTriggersAuthenticationRef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
+    pub kind: Option<InferenceServiceDecoderAutoscalerKedaTriggersAuthenticationRefKind>,
     pub name: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceDecoderAutoscalerKedaTriggersAuthenticationRefKind {
+    TriggerAuthentication,
+    ClusterTriggerAuthentication,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceDecoderAutoscalerPolicyRef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<InferenceServiceDecoderAutoscalerPolicyRefKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceDecoderAutoscalerPolicyRefKind {
+    AutoscalerPolicy,
+    ClusterAutoscalerPolicy,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -873,12 +1088,6 @@ pub struct InferenceServiceDecoderLeader {
         rename = "enableServiceLinks"
     )]
     pub enable_service_links: Option<bool>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "ephemeralContainers"
-    )]
-    pub ephemeral_containers: Option<Vec<BTreeMap<String, serde_json::Value>>>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1065,6 +1274,12 @@ pub struct InferenceServiceDecoderLifecycle {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
+        rename = "minReadySeconds"
+    )]
+    pub min_ready_seconds: Option<i32>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
         rename = "readyPolicy"
     )]
     pub ready_policy: Option<InferenceServiceDecoderLifecycleReadyPolicy>,
@@ -1084,20 +1299,8 @@ pub struct InferenceServiceDecoderLifecycle {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InferenceServiceDecoderLifecycleMigrationPolicy {
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "maxAutoRetries"
-    )]
-    pub max_auto_retries: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<InferenceServiceDecoderLifecycleMigrationPolicyMode>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "progressDeadlineSeconds"
-    )]
-    pub progress_deadline_seconds: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -1183,6 +1386,12 @@ pub struct InferenceServiceDecoderOs {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceDecoderTopologySpread {
+    Preferred,
+    Required,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InferenceServiceDecoderWorker {
     #[serde(
         default,
@@ -1210,12 +1419,6 @@ pub struct InferenceServiceDecoderWorker {
         rename = "enableServiceLinks"
     )]
     pub enable_service_links: Option<bool>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "ephemeralContainers"
-    )]
-    pub ephemeral_containers: Option<Vec<BTreeMap<String, serde_json::Value>>>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1399,6 +1602,12 @@ pub struct InferenceServiceEngine {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
+        rename = "acceleratorOverride"
+    )]
+    pub accelerator_override: Option<InferenceServiceEngineAcceleratorOverride>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
         rename = "activeDeadlineSeconds"
     )]
     pub active_deadline_seconds: Option<i64>,
@@ -1414,6 +1623,12 @@ pub struct InferenceServiceEngine {
     pub automount_service_account_token: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autoscaler: Option<InferenceServiceEngineAutoscaler>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "autoscalerPolicyRef"
+    )]
+    pub autoscaler_policy_ref: Option<InferenceServiceEngineAutoscalerPolicyRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub containers: Option<Vec<BTreeMap<String, serde_json::Value>>>,
     #[serde(
@@ -1579,6 +1794,12 @@ pub struct InferenceServiceEngine {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
+        rename = "servicePortAppProtocols"
+    )]
+    pub service_port_app_protocols: Option<BTreeMap<String, String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
         rename = "setHostnameAsFQDN"
     )]
     pub set_hostname_as_fqdn: Option<bool>,
@@ -1613,13 +1834,91 @@ pub struct InferenceServiceEngine {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
+        rename = "topologySpread"
+    )]
+    pub topology_spread: Option<InferenceServiceEngineTopologySpread>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
         rename = "topologySpreadConstraints"
     )]
     pub topology_spread_constraints: Option<Vec<BTreeMap<String, serde_json::Value>>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "topologySpreadKey"
+    )]
+    pub topology_spread_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volumes: Option<Vec<BTreeMap<String, serde_json::Value>>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker: Option<InferenceServiceEngineWorker>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceEngineAcceleratorOverride {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "acceleratorClass"
+    )]
+    pub accelerator_class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constraints: Option<InferenceServiceEngineAcceleratorOverrideConstraints>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<InferenceServiceEngineAcceleratorOverridePolicy>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceEngineAcceleratorOverrideConstraints {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "architectureFamilies"
+    )]
+    pub architecture_families: Option<Vec<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "excludedClasses"
+    )]
+    pub excluded_classes: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "maxMemory")]
+    pub max_memory: Option<i64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "minArchitectureVersion"
+    )]
+    pub min_architecture_version: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "minComputePerformanceTFLOPS"
+    )]
+    pub min_compute_performance_tflops: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "minMemory")]
+    pub min_memory: Option<i64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "preferredPrecisions"
+    )]
+    pub preferred_precisions: Option<Vec<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "requiredFeatures"
+    )]
+    pub required_features: Option<Vec<String>>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceEngineAcceleratorOverridePolicy {
+    BestFit,
+    Cheapest,
+    MostCapable,
+    FirstAvailable,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -2098,16 +2397,38 @@ pub struct InferenceServiceEngineAutoscalerKedaAdvancedScalingModifiers {
         skip_serializing_if = "Option::is_none",
         rename = "metricType"
     )]
-    pub metric_type: Option<String>,
+    pub metric_type: Option<InferenceServiceEngineAutoscalerKedaAdvancedScalingModifiersMetricType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceEngineAutoscalerKedaAdvancedScalingModifiersMetricType {
+    AverageValue,
+    Value,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InferenceServiceEngineAutoscalerKedaFallback {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behavior: Option<InferenceServiceEngineAutoscalerKedaFallbackBehavior>,
     #[serde(rename = "failureThreshold")]
     pub failure_threshold: i32,
     pub replicas: i32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceEngineAutoscalerKedaFallbackBehavior {
+    #[serde(rename = "static")]
+    Static,
+    #[serde(rename = "currentReplicas")]
+    CurrentReplicas,
+    #[serde(rename = "currentReplicasIfHigher")]
+    CurrentReplicasIfHigher,
+    #[serde(rename = "currentReplicasIfLower")]
+    CurrentReplicasIfLower,
+    #[serde(rename = "scalingModifiers")]
+    ScalingModifiers,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -2140,8 +2461,28 @@ pub struct InferenceServiceEngineAutoscalerKedaTriggers {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InferenceServiceEngineAutoscalerKedaTriggersAuthenticationRef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
+    pub kind: Option<InferenceServiceEngineAutoscalerKedaTriggersAuthenticationRefKind>,
     pub name: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceEngineAutoscalerKedaTriggersAuthenticationRefKind {
+    TriggerAuthentication,
+    ClusterTriggerAuthentication,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceEngineAutoscalerPolicyRef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<InferenceServiceEngineAutoscalerPolicyRefKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceEngineAutoscalerPolicyRefKind {
+    AutoscalerPolicy,
+    ClusterAutoscalerPolicy,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -2214,12 +2555,6 @@ pub struct InferenceServiceEngineLeader {
         rename = "enableServiceLinks"
     )]
     pub enable_service_links: Option<bool>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "ephemeralContainers"
-    )]
-    pub ephemeral_containers: Option<Vec<BTreeMap<String, serde_json::Value>>>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -2406,6 +2741,12 @@ pub struct InferenceServiceEngineLifecycle {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
+        rename = "minReadySeconds"
+    )]
+    pub min_ready_seconds: Option<i32>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
         rename = "readyPolicy"
     )]
     pub ready_policy: Option<InferenceServiceEngineLifecycleReadyPolicy>,
@@ -2425,20 +2766,8 @@ pub struct InferenceServiceEngineLifecycle {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InferenceServiceEngineLifecycleMigrationPolicy {
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "maxAutoRetries"
-    )]
-    pub max_auto_retries: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<InferenceServiceEngineLifecycleMigrationPolicyMode>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "progressDeadlineSeconds"
-    )]
-    pub progress_deadline_seconds: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -2524,6 +2853,12 @@ pub struct InferenceServiceEngineOs {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceEngineTopologySpread {
+    Preferred,
+    Required,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InferenceServiceEngineWorker {
     #[serde(
         default,
@@ -2551,12 +2886,6 @@ pub struct InferenceServiceEngineWorker {
         rename = "enableServiceLinks"
     )]
     pub enable_service_links: Option<bool>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "ephemeralContainers"
-    )]
-    pub ephemeral_containers: Option<Vec<BTreeMap<String, serde_json::Value>>>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -2755,9 +3084,153 @@ pub struct InferenceServiceModelOverlays {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServicePlacement {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "capacityFactors"
+    )]
+    pub capacity_factors: Option<BTreeMap<String, IntOrString>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "clusterAffinity"
+    )]
+    pub cluster_affinity: Option<Vec<InferenceServicePlacementClusterAffinity>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "clusterSelector"
+    )]
+    pub cluster_selector: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "maxSurge")]
+    pub max_surge: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<InferenceServicePlacementMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<InferenceServicePlacementPolicy>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "replacementTimeout"
+    )]
+    pub replacement_timeout: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requirements: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split: Option<InferenceServicePlacementSplit>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServicePlacementClusterAffinity {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "matchExpressions"
+    )]
+    pub match_expressions: Option<Vec<InferenceServicePlacementClusterAffinityMatchExpressions>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "matchFields"
+    )]
+    pub match_fields: Option<Vec<InferenceServicePlacementClusterAffinityMatchFields>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<i32>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServicePlacementClusterAffinityMatchExpressions {
+    pub key: String,
+    pub operator: InferenceServicePlacementClusterAffinityMatchExpressionsOperator,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub values: Option<Vec<String>>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServicePlacementClusterAffinityMatchExpressionsOperator {
+    In,
+    NotIn,
+    Exists,
+    DoesNotExist,
+    Gt,
+    Lt,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServicePlacementClusterAffinityMatchFields {
+    pub key: String,
+    pub operator: InferenceServicePlacementClusterAffinityMatchFieldsOperator,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub values: Option<Vec<String>>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServicePlacementClusterAffinityMatchFieldsOperator {
+    In,
+    NotIn,
+    Exists,
+    DoesNotExist,
+    Gt,
+    Lt,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServicePlacementMode {
+    Single,
+    All,
+    Split,
+    SplitByCapacity,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServicePlacementPolicy {
+    Legacy,
+    ClusterAffinity,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServicePlacementSplit {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "maxReplicasPerCluster"
+    )]
+    pub max_replicas_per_cluster: Option<i32>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "minReplicasPerCluster"
+    )]
+    pub min_replicas_per_cluster: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replicas: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spread: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InferenceServiceRollout {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "groupOrdering"
+    )]
+    pub group_ordering: Option<InferenceServiceRolloutGroupOrdering>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub groups: Option<Vec<InferenceServiceRolloutGroups>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "pairingProtocol"
+    )]
+    pub pairing_protocol: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceRolloutGroupOrdering {
+    Sequential,
+    Concurrent,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -2775,6 +3248,8 @@ pub struct InferenceServiceRolloutGroups {
     pub maintain_ratio: Option<InferenceServiceRolloutGroupsMaintainRatio>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "policyRef")]
+    pub policy_ref: Option<InferenceServiceRolloutGroupsPolicyRef>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -2795,6 +3270,12 @@ pub struct InferenceServiceRolloutGroupsCanary {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
+        rename = "readyTimeout"
+    )]
+    pub ready_timeout: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
         rename = "scaleDownDelaySeconds"
     )]
     pub scale_down_delay_seconds: Option<i32>,
@@ -2811,6 +3292,12 @@ pub struct InferenceServiceRolloutGroupsCanaryPrometheus {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
+        rename = "providerRef"
+    )]
+    pub provider_ref: Option<InferenceServiceRolloutGroupsCanaryPrometheusProviderRef>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
         rename = "serverAddress"
     )]
     pub server_address: Option<String>,
@@ -2823,6 +3310,11 @@ pub struct InferenceServiceRolloutGroupsCanaryPrometheusAuthRef {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub optional: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceRolloutGroupsCanaryPrometheusProviderRef {
+    pub name: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -2879,6 +3371,7 @@ pub enum InferenceServiceRolloutGroupsCanaryStepsAnalysisMetricsOperator {
 pub enum InferenceServiceRolloutGroupsCanaryStepsAnalysisOnInconclusive {
     Hold,
     Rollback,
+    RollbackOnStall,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -2889,7 +3382,26 @@ pub struct InferenceServiceRolloutGroupsCanaryStepsPause {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InferenceServiceRolloutGroupsMaintainRatio {
-    pub tolerance: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tolerance: Option<i32>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceRolloutGroupsPolicyRef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    pub name: String,
+    pub progression: InferenceServiceRolloutGroupsPolicyRefProgression,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceRolloutGroupsPolicyRefProgression {
+    #[serde(rename = "canary")]
+    Canary,
+    #[serde(rename = "blueGreen")]
+    BlueGreen,
+    #[serde(rename = "rollingUpdate")]
+    RollingUpdate,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -2924,6 +3436,12 @@ pub struct InferenceServiceRouter {
     pub automount_service_account_token: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autoscaler: Option<InferenceServiceRouterAutoscaler>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "autoscalerPolicyRef"
+    )]
+    pub autoscaler_policy_ref: Option<InferenceServiceRouterAutoscalerPolicyRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3086,6 +3604,12 @@ pub struct InferenceServiceRouter {
         rename = "serviceAccountName"
     )]
     pub service_account_name: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "servicePortAppProtocols"
+    )]
+    pub service_port_app_protocols: Option<BTreeMap<String, String>>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -3600,16 +4124,38 @@ pub struct InferenceServiceRouterAutoscalerKedaAdvancedScalingModifiers {
         skip_serializing_if = "Option::is_none",
         rename = "metricType"
     )]
-    pub metric_type: Option<String>,
+    pub metric_type: Option<InferenceServiceRouterAutoscalerKedaAdvancedScalingModifiersMetricType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceRouterAutoscalerKedaAdvancedScalingModifiersMetricType {
+    AverageValue,
+    Value,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InferenceServiceRouterAutoscalerKedaFallback {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behavior: Option<InferenceServiceRouterAutoscalerKedaFallbackBehavior>,
     #[serde(rename = "failureThreshold")]
     pub failure_threshold: i32,
     pub replicas: i32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceRouterAutoscalerKedaFallbackBehavior {
+    #[serde(rename = "static")]
+    Static,
+    #[serde(rename = "currentReplicas")]
+    CurrentReplicas,
+    #[serde(rename = "currentReplicasIfHigher")]
+    CurrentReplicasIfHigher,
+    #[serde(rename = "currentReplicasIfLower")]
+    CurrentReplicasIfLower,
+    #[serde(rename = "scalingModifiers")]
+    ScalingModifiers,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -3642,8 +4188,28 @@ pub struct InferenceServiceRouterAutoscalerKedaTriggers {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InferenceServiceRouterAutoscalerKedaTriggersAuthenticationRef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
+    pub kind: Option<InferenceServiceRouterAutoscalerKedaTriggersAuthenticationRefKind>,
     pub name: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceRouterAutoscalerKedaTriggersAuthenticationRefKind {
+    TriggerAuthentication,
+    ClusterTriggerAuthentication,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceRouterAutoscalerPolicyRef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<InferenceServiceRouterAutoscalerPolicyRefKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceRouterAutoscalerPolicyRefKind {
+    AutoscalerPolicy,
+    ClusterAutoscalerPolicy,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -3705,6 +4271,12 @@ pub struct InferenceServiceRouterLifecycle {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
+        rename = "minReadySeconds"
+    )]
+    pub min_ready_seconds: Option<i32>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
         rename = "readyPolicy"
     )]
     pub ready_policy: Option<InferenceServiceRouterLifecycleReadyPolicy>,
@@ -3724,20 +4296,8 @@ pub struct InferenceServiceRouterLifecycle {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InferenceServiceRouterLifecycleMigrationPolicy {
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "maxAutoRetries"
-    )]
-    pub max_auto_retries: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<InferenceServiceRouterLifecycleMigrationPolicyMode>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "progressDeadlineSeconds"
-    )]
-    pub progress_deadline_seconds: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -3820,6 +4380,124 @@ pub enum InferenceServiceRouterLifecycleUpdateStrategyType {
 pub struct InferenceServiceRouterOs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceRouting {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<InferenceServiceRoutingCapacity>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "capacityFactors"
+    )]
+    pub capacity_factors: Option<BTreeMap<String, IntOrString>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe: Option<InferenceServiceRoutingProbe>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publisher: Option<InferenceServiceRoutingPublisher>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceRoutingCapacity {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "maxAge")]
+    pub max_age: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<InferenceServiceRoutingCapacityMethod>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quorum: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub samples: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceRoutingCapacityMethod {
+    #[serde(rename = "GET")]
+    Get,
+    #[serde(rename = "HEAD")]
+    Head,
+    #[serde(rename = "POST")]
+    Post,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceRoutingProbe {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "acceptStatuses"
+    )]
+    pub accept_statuses: Option<Vec<i64>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "allFailedPolicy"
+    )]
+    pub all_failed_policy: Option<InferenceServiceRoutingProbeAllFailedPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled: Option<bool>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "failureThreshold"
+    )]
+    pub failure_threshold: Option<i32>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "gateStatuses"
+    )]
+    pub gate_statuses: Option<Vec<i64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<InferenceServiceRoutingProbeMethod>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "successThreshold"
+    )]
+    pub success_threshold: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceRoutingProbeAllFailedPolicy {
+    PreserveTraffic,
+    Drain,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceRoutingProbeMethod {
+    #[serde(rename = "GET")]
+    Get,
+    #[serde(rename = "HEAD")]
+    Head,
+    #[serde(rename = "POST")]
+    Post,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceRoutingPublisher {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -3944,6 +4622,8 @@ pub struct InferenceServiceStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub address: Option<InferenceServiceStatusAddress>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub addresses: Option<Vec<InferenceServiceStatusAddresses>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub annotations: Option<BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canary: Option<InferenceServiceStatusCanary>,
@@ -3989,6 +4669,8 @@ pub struct InferenceServiceStatus {
     pub pinned_revision_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<InferenceServiceStatusPlacement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollout: Option<InferenceServiceStatusRollout>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -4014,6 +4696,18 @@ pub struct InferenceServiceStatusAddress {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusAddresses {
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "CACerts")]
+    pub ca_certs: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InferenceServiceStatusCanary {
     #[serde(
         default,
@@ -4027,8 +4721,16 @@ pub struct InferenceServiceStatusCanary {
         rename = "canaryRevisionHash"
     )]
     pub canary_revision_hash: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "capacityWaitSince"
+    )]
+    pub capacity_wait_since: Option<String>,
     #[serde(rename = "currentStep")]
     pub current_step: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed: Option<InferenceServiceStatusCanaryFailed>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -4052,15 +4754,49 @@ pub struct InferenceServiceStatusCanary {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
+        rename = "preStepHold"
+    )]
+    pub pre_step_hold: Option<bool>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "promotedThrough"
+    )]
+    pub promoted_through: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
         rename = "rolledBackRevisionHash"
     )]
     pub rolled_back_revision_hash: Option<String>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
+        rename = "stableRevisionHash"
+    )]
+    pub stable_revision_hash: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
         rename = "stepEnteredTime"
     )]
     pub step_entered_time: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "targetID")]
+    pub target_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusCanaryFailed {
+    pub reason: InferenceServiceStatusCanaryFailedReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceStatusCanaryFailedReason {
+    CapacityTimeout,
+    AnalysisStalled,
+    StableRevisionMissing,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -4085,6 +4821,8 @@ pub struct InferenceServiceStatusComponents {
     pub address: Option<InferenceServiceStatusComponentsAddress>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autoscaler: Option<InferenceServiceStatusComponentsAutoscaler>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canary: Option<InferenceServiceStatusComponentsCanary>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -4119,6 +4857,12 @@ pub struct InferenceServiceStatusComponents {
         rename = "scaleTargetRef"
     )]
     pub scale_target_ref: Option<InferenceServiceStatusComponentsScaleTargetRef>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "selectedAccelerator"
+    )]
+    pub selected_accelerator: Option<InferenceServiceStatusComponentsSelectedAccelerator>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub traffic: Option<Vec<InferenceServiceStatusComponentsTraffic>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4163,6 +4907,14 @@ pub struct InferenceServiceStatusComponentsAutoscaler {
     pub last_scale_time: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "managedBy")]
     pub managed_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<InferenceServiceStatusComponentsAutoscalerPolicy>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "shadowedPolicyRef"
+    )]
+    pub shadowed_policy_ref: Option<InferenceServiceStatusComponentsAutoscalerShadowedPolicyRef>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -4179,6 +4931,154 @@ pub enum InferenceServiceStatusComponentsAutoscalerClass {
     Keda,
     External,
     None,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusComponentsAutoscalerPolicy {
+    pub name: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "observedGeneration"
+    )]
+    pub observed_generation: Option<i64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "portableDigest"
+    )]
+    pub portable_digest: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "resolvedDigest"
+    )]
+    pub resolved_digest: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusComponentsAutoscalerShadowedPolicyRef {
+    pub name: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "portableDigest"
+    )]
+    pub portable_digest: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "wouldRenderDigest"
+    )]
+    pub would_render_digest: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusComponentsCanary {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "analysisFailedChecks"
+    )]
+    pub analysis_failed_checks: Option<i32>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "canaryRevisionHash"
+    )]
+    pub canary_revision_hash: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "capacityWaitSince"
+    )]
+    pub capacity_wait_since: Option<String>,
+    #[serde(rename = "currentStep")]
+    pub current_step: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed: Option<InferenceServiceStatusComponentsCanaryFailed>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "lastConclusiveEvaluationTime"
+    )]
+    pub last_conclusive_evaluation_time: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "lastEvaluationTime"
+    )]
+    pub last_evaluation_time: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "metricResults"
+    )]
+    pub metric_results: Option<Vec<InferenceServiceStatusComponentsCanaryMetricResults>>,
+    #[serde(rename = "observedTrafficWeight")]
+    pub observed_traffic_weight: i32,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "preStepHold"
+    )]
+    pub pre_step_hold: Option<bool>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "promotedThrough"
+    )]
+    pub promoted_through: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "rolledBackRevisionHash"
+    )]
+    pub rolled_back_revision_hash: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "stableRevisionHash"
+    )]
+    pub stable_revision_hash: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "stepEnteredTime"
+    )]
+    pub step_entered_time: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "targetID")]
+    pub target_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusComponentsCanaryFailed {
+    pub reason: InferenceServiceStatusComponentsCanaryFailedReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceStatusComponentsCanaryFailedReason {
+    CapacityTimeout,
+    AnalysisStalled,
+    StableRevisionMissing,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusComponentsCanaryMetricResults {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator: Option<String>,
+    pub passed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -4206,12 +5106,6 @@ pub struct InferenceServiceStatusComponentsLifecycle {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        rename = "instanceStatuses"
-    )]
-    pub instance_statuses: Option<Vec<InferenceServiceStatusComponentsLifecycleInstanceStatuses>>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
         rename = "labelSelector"
     )]
     pub label_selector: Option<String>,
@@ -4229,6 +5123,12 @@ pub struct InferenceServiceStatusComponentsLifecycle {
     pub ready_replicas: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replicas: Option<i32>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "rolloutHold"
+    )]
+    pub rollout_hold: Option<InferenceServiceStatusComponentsLifecycleRolloutHold>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -4256,162 +5156,23 @@ pub struct InferenceServiceStatusComponentsLifecycle {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct InferenceServiceStatusComponentsLifecycleInstanceStatuses {
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "activeOrdinal"
-    )]
-    pub active_ordinal: Option<i32>,
+pub struct InferenceServiceStatusComponentsLifecycleRolloutHold {
+    pub gate: InferenceServiceStatusComponentsLifecycleRolloutHoldGate,
+    pub reason: String,
+    pub since: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub admitted: Option<bool>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "availablePodCount"
-    )]
-    pub available_pod_count: Option<i32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub conditions: Option<Vec<Condition>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub incarnation: Option<i64>,
-    pub index: i32,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "lastFailure"
-    )]
-    pub last_failure: Option<InferenceServiceStatusComponentsLifecycleInstanceStatusesLastFailure>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "nodesOccupied"
-    )]
-    pub nodes_occupied: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub operation: Option<InferenceServiceStatusComponentsLifecycleInstanceStatusesOperation>,
-    pub phase: InferenceServiceStatusComponentsLifecycleInstanceStatusesPhase,
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "podCount")]
-    pub pod_count: Option<i32>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "readyPodCount"
-    )]
-    pub ready_pod_count: Option<i32>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "runningRevision"
-    )]
-    pub running_revision: Option<String>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "scheduledPodCount"
-    )]
-    pub scheduled_pod_count: Option<i32>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "servingPodCount"
-    )]
-    pub serving_pod_count: Option<i32>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "targetRevision"
-    )]
-    pub target_revision: Option<String>,
+    pub target: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct InferenceServiceStatusComponentsLifecycleInstanceStatusesLastFailure {
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "containerName"
-    )]
-    pub container_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "exitCode")]
-    pub exit_code: Option<i32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    #[serde(rename = "podName")]
-    pub pod_name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub time: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct InferenceServiceStatusComponentsLifecycleInstanceStatusesOperation {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deadline: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "fromNode")]
-    pub from_node: Option<String>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "hintTargetNodes"
-    )]
-    pub hint_target_nodes: Option<Vec<String>>,
-    pub id: String,
-    #[serde(rename = "lastProgressAt")]
-    pub last_progress_at: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "requestUUID"
-    )]
-    pub request_uuid: Option<String>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "retryCount"
-    )]
-    pub retry_count: Option<i32>,
-    #[serde(rename = "startedAt")]
-    pub started_at: String,
-    pub step: String,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "surgeIndex"
-    )]
-    pub surge_index: Option<i32>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        rename = "targetRevision"
-    )]
-    pub target_revision: Option<String>,
-    #[serde(rename = "type")]
-    pub r#type: InferenceServiceStatusComponentsLifecycleInstanceStatusesOperationType,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub enum InferenceServiceStatusComponentsLifecycleInstanceStatusesOperationType {
-    Create,
-    Update,
-    Restart,
-    Migrate,
-    Delete,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub enum InferenceServiceStatusComponentsLifecycleInstanceStatusesPhase {
-    Pending,
-    Creating,
-    Ready,
-    Updating,
-    Restarting,
-    Migrating,
-    Failed,
-    Deleting,
+pub enum InferenceServiceStatusComponentsLifecycleRolloutHoldGate {
+    Pairing,
+    Ratio,
+    Sequential,
+    Budget,
+    RetryBlock,
+    Held,
+    Plan,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -4436,6 +5197,26 @@ pub struct InferenceServiceStatusComponentsScaleTargetRef {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusComponentsSelectedAccelerator {
+    #[serde(rename = "acceleratorClass")]
+    pub accelerator_class: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "nodeSelector"
+    )]
+    pub node_selector: Option<BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "resourceRequests"
+    )]
+    pub resource_requests: Option<BTreeMap<String, String>>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InferenceServiceStatusComponentsTraffic {
     #[serde(
         default,
@@ -4443,6 +5224,12 @@ pub struct InferenceServiceStatusComponentsTraffic {
         rename = "latestRevision"
     )]
     pub latest_revision: Option<bool>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "pairingProtocol"
+    )]
+    pub pairing_protocol: Option<String>,
     pub percent: i32,
     #[serde(rename = "revisionName")]
     pub revision_name: String,
@@ -4504,10 +5291,15 @@ pub enum InferenceServiceStatusMigrationHistoryMode {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum InferenceServiceStatusMigrationHistoryPhase {
-    Pending,
-    InProgress,
+    Accepted,
+    SurgePending,
+    SurgeReady,
+    Draining,
     Completed,
     Failed,
+    Relocated,
+    Pending,
+    InProgress,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -4646,13 +5438,269 @@ pub struct InferenceServiceStatusPlacement {
     pub endpoint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<InferenceServiceStatusPlacementPhase>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<InferenceServiceStatusPlacementPlan>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InferenceServiceStatusPlacementCandidates {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "admittedReplicas"
+    )]
+    pub admitted_replicas: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allocation: Option<InferenceServiceStatusPlacementCandidatesAllocation>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "appliedPlanID"
+    )]
+    pub applied_plan_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autoscaling: Option<InferenceServiceStatusPlacementCandidatesAutoscaling>,
     pub cluster: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "observationKnown"
+    )]
+    pub observation_known: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<InferenceServiceStatusPlacementCandidatesPhase>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "readyReplicas"
+    )]
+    pub ready_replicas: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollout: Option<InferenceServiceStatusPlacementCandidatesRollout>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusPlacementCandidatesAllocation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<InferenceServiceStatusPlacementCandidatesAllocationCapacity>,
+    #[serde(rename = "clusterUID")]
+    pub cluster_uid: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "currentHome"
+    )]
+    pub current_home: Option<InferenceServiceStatusPlacementCandidatesAllocationCurrentHome>,
+    #[serde(rename = "currentReplicas")]
+    pub current_replicas: i32,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "desiredHome"
+    )]
+    pub desired_home: Option<InferenceServiceStatusPlacementCandidatesAllocationDesiredHome>,
+    #[serde(rename = "desiredReplicas")]
+    pub desired_replicas: i32,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "drainRequested"
+    )]
+    pub drain_requested: Option<bool>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "homeInputsPending"
+    )]
+    pub home_inputs_pending: Option<bool>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "inventoryPending"
+    )]
+    pub inventory_pending: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched: Option<bool>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "matchingTerms"
+    )]
+    pub matching_terms: Option<Vec<i64>>,
+    #[serde(rename = "originalReplicas")]
+    pub original_replicas: i32,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "raceCandidate"
+    )]
+    pub race_candidate: Option<bool>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "replacementStartedAt"
+    )]
+    pub replacement_started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusPlacementCandidatesAllocationCapacity {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "demandContract"
+    )]
+    pub demand_contract:
+        Option<InferenceServiceStatusPlacementCandidatesAllocationCapacityDemandContract>,
+    #[serde(rename = "demandFingerprint")]
+    pub demand_fingerprint: String,
+    pub pools: Vec<InferenceServiceStatusPlacementCandidatesAllocationCapacityPools>,
+    pub replicas: i64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusPlacementCandidatesAllocationCapacityDemandContract {
+    pub components:
+        Vec<InferenceServiceStatusPlacementCandidatesAllocationCapacityDemandContractComponents>,
+    pub fingerprint: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusPlacementCandidatesAllocationCapacityDemandContractComponents {
+    pub component: InferenceServiceStatusPlacementCandidatesAllocationCapacityDemandContractComponentsComponent,
+    #[serde(rename = "renderingHash")]
+    pub rendering_hash: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceStatusPlacementCandidatesAllocationCapacityDemandContractComponentsComponent
+{
+    #[serde(rename = "engine")]
+    Engine,
+    #[serde(rename = "decoder")]
+    Decoder,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusPlacementCandidatesAllocationCapacityPools {
+    pub allocatable: i64,
+    pub attribution: InferenceServiceStatusPlacementCandidatesAllocationCapacityPoolsAttribution,
+    pub demand: i64,
+    #[serde(rename = "observedAt")]
+    pub observed_at: String,
+    #[serde(rename = "reportResourceVersion")]
+    pub report_resource_version: String,
+    #[serde(rename = "reportUID")]
+    pub report_uid: String,
+    #[serde(rename = "resourceFlavor")]
+    pub resource_flavor: String,
+    #[serde(rename = "resourceName")]
+    pub resource_name: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusPlacementCandidatesAllocationCapacityPoolsAttribution {
+    pub complete: bool,
+    #[serde(rename = "flavorSetHash")]
+    pub flavor_set_hash: String,
+    #[serde(rename = "flavorUID")]
+    pub flavor_uid: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "nodeLabels"
+    )]
+    pub node_labels: Option<BTreeMap<String, String>>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusPlacementCandidatesAllocationCurrentHome {
+    #[serde(rename = "inputDigest")]
+    pub input_digest: String,
+    #[serde(rename = "replicaFloors")]
+    pub replica_floors:
+        Vec<InferenceServiceStatusPlacementCandidatesAllocationCurrentHomeReplicaFloors>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusPlacementCandidatesAllocationCurrentHomeReplicaFloors {
+    pub component:
+        InferenceServiceStatusPlacementCandidatesAllocationCurrentHomeReplicaFloorsComponent,
+    pub replicas: i32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceStatusPlacementCandidatesAllocationCurrentHomeReplicaFloorsComponent {
+    #[serde(rename = "engine")]
+    Engine,
+    #[serde(rename = "decoder")]
+    Decoder,
+    #[serde(rename = "router")]
+    Router,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusPlacementCandidatesAllocationDesiredHome {
+    #[serde(rename = "inputDigest")]
+    pub input_digest: String,
+    #[serde(rename = "replicaFloors")]
+    pub replica_floors:
+        Vec<InferenceServiceStatusPlacementCandidatesAllocationDesiredHomeReplicaFloors>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusPlacementCandidatesAllocationDesiredHomeReplicaFloors {
+    pub component:
+        InferenceServiceStatusPlacementCandidatesAllocationDesiredHomeReplicaFloorsComponent,
+    pub replicas: i32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceStatusPlacementCandidatesAllocationDesiredHomeReplicaFloorsComponent {
+    #[serde(rename = "engine")]
+    Engine,
+    #[serde(rename = "decoder")]
+    Decoder,
+    #[serde(rename = "router")]
+    Router,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusPlacementCandidatesAutoscaling {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub components:
+        Option<BTreeMap<String, InferenceServiceStatusPlacementCandidatesAutoscalingComponents>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policies: Option<Vec<InferenceServiceStatusPlacementCandidatesAutoscalingPolicies>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusPlacementCandidatesAutoscalingComponents {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready: Option<bool>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "resolvedDigest"
+    )]
+    pub resolved_digest: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusPlacementCandidatesAutoscalingPolicies {
+    pub name: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "portableDigest"
+    )]
+    pub portable_digest: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -4663,12 +5711,521 @@ pub enum InferenceServiceStatusPlacementCandidatesPhase {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusPlacementCandidatesRollout {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "activeGroups"
+    )]
+    pub active_groups: Option<Vec<InferenceServiceStatusPlacementCandidatesRolloutActiveGroups>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "activeRunID"
+    )]
+    pub active_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "lastRun")]
+    pub last_run: Option<InferenceServiceStatusPlacementCandidatesRolloutLastRun>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusPlacementCandidatesRolloutActiveGroups {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "policyName"
+    )]
+    pub policy_name: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "portableDigest"
+    )]
+    pub portable_digest: Option<String>,
+    pub source: InferenceServiceStatusPlacementCandidatesRolloutActiveGroupsSource,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceStatusPlacementCandidatesRolloutActiveGroupsSource {
+    Inline,
+    Policy,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusPlacementCandidatesRolloutLastRun {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+    pub outcome: InferenceServiceStatusPlacementCandidatesRolloutLastRunOutcome,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceStatusPlacementCandidatesRolloutLastRunOutcome {
+    Completed,
+    RolledBack,
+    Superseded,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum InferenceServiceStatusPlacementPhase {
     Pending,
     Admitting,
     Racing,
     Placed,
     Failed,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusPlacementPlan {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "adoptionDigest"
+    )]
+    pub adoption_digest: Option<String>,
+    #[serde(rename = "assignedReplicas")]
+    pub assigned_replicas: i64,
+    pub id: String,
+    #[serde(rename = "inputDigest")]
+    pub input_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(rename = "observedGeneration")]
+    pub observed_generation: i64,
+    #[serde(rename = "originalUnassignedReplicas")]
+    pub original_unassigned_replicas: i32,
+    #[serde(rename = "pauseSurge")]
+    pub pause_surge: bool,
+    #[serde(rename = "requestedReplicas")]
+    pub requested_replicas: i64,
+    pub revision: i64,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "singleMove"
+    )]
+    pub single_move: Option<InferenceServiceStatusPlacementPlanSingleMove>,
+    #[serde(rename = "sourceUID")]
+    pub source_uid: String,
+    #[serde(rename = "unassignedReplicas")]
+    pub unassigned_replicas: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub winner: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusPlacementPlanSingleMove {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusRollout {
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "activeRun")]
+    pub active_run: Option<InferenceServiceStatusRolloutActiveRun>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub groups: Option<Vec<InferenceServiceStatusRolloutGroups>>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "lastRun")]
+    pub last_run: Option<InferenceServiceStatusRolloutLastRun>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusRolloutActiveRun {
+    #[serde(rename = "openedAt")]
+    pub opened_at: String,
+    #[serde(rename = "pinnedAt")]
+    pub pinned_at: String,
+    pub plan: InferenceServiceStatusRolloutActiveRunPlan,
+    #[serde(rename = "runID")]
+    pub run_id: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "targetRevisions"
+    )]
+    pub target_revisions: Option<Vec<InferenceServiceStatusRolloutActiveRunTargetRevisions>>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusRolloutActiveRunPlan {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub groups: Option<Vec<InferenceServiceStatusRolloutActiveRunPlanGroups>>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusRolloutActiveRunPlanGroups {
+    pub group: InferenceServiceStatusRolloutActiveRunPlanGroupsGroup,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "policyGeneration"
+    )]
+    pub policy_generation: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "policyRef")]
+    pub policy_ref: Option<InferenceServiceStatusRolloutActiveRunPlanGroupsPolicyRef>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "portableDigest"
+    )]
+    pub portable_digest: Option<String>,
+    pub source: InferenceServiceStatusRolloutActiveRunPlanGroupsSource,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusRolloutActiveRunPlanGroupsGroup {
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "blueGreen")]
+    pub blue_green: Option<InferenceServiceStatusRolloutActiveRunPlanGroupsGroupBlueGreen>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canary: Option<InferenceServiceStatusRolloutActiveRunPlanGroupsGroupCanary>,
+    pub components: Vec<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "maintainRatio"
+    )]
+    pub maintain_ratio: Option<InferenceServiceStatusRolloutActiveRunPlanGroupsGroupMaintainRatio>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "policyRef")]
+    pub policy_ref: Option<InferenceServiceStatusRolloutActiveRunPlanGroupsGroupPolicyRef>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "rollingUpdate"
+    )]
+    pub rolling_update: Option<InferenceServiceStatusRolloutActiveRunPlanGroupsGroupRollingUpdate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub soak: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusRolloutActiveRunPlanGroupsGroupBlueGreen {}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusRolloutActiveRunPlanGroupsGroupCanary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prometheus: Option<InferenceServiceStatusRolloutActiveRunPlanGroupsGroupCanaryPrometheus>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "readyTimeout"
+    )]
+    pub ready_timeout: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "scaleDownDelaySeconds"
+    )]
+    pub scale_down_delay_seconds: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steps: Option<Vec<InferenceServiceStatusRolloutActiveRunPlanGroupsGroupCanarySteps>>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusRolloutActiveRunPlanGroupsGroupCanaryPrometheus {
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "authRef")]
+    pub auth_ref:
+        Option<InferenceServiceStatusRolloutActiveRunPlanGroupsGroupCanaryPrometheusAuthRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<BTreeMap<String, String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "providerRef"
+    )]
+    pub provider_ref:
+        Option<InferenceServiceStatusRolloutActiveRunPlanGroupsGroupCanaryPrometheusProviderRef>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "serverAddress"
+    )]
+    pub server_address: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusRolloutActiveRunPlanGroupsGroupCanaryPrometheusAuthRef {
+    pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optional: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusRolloutActiveRunPlanGroupsGroupCanaryPrometheusProviderRef {
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusRolloutActiveRunPlanGroupsGroupCanarySteps {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analysis: Option<InferenceServiceStatusRolloutActiveRunPlanGroupsGroupCanaryStepsAnalysis>,
+    pub capacity: IntOrString,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause: Option<InferenceServiceStatusRolloutActiveRunPlanGroupsGroupCanaryStepsPause>,
+    pub traffic: i32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusRolloutActiveRunPlanGroupsGroupCanaryStepsAnalysis {
+    #[serde(rename = "failureLimit")]
+    pub failure_limit: i32,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "initialDelay"
+    )]
+    pub initial_delay: Option<String>,
+    pub interval: String,
+    pub metrics:
+        Vec<InferenceServiceStatusRolloutActiveRunPlanGroupsGroupCanaryStepsAnalysisMetrics>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "onInconclusive"
+    )]
+    pub on_inconclusive: Option<
+        InferenceServiceStatusRolloutActiveRunPlanGroupsGroupCanaryStepsAnalysisOnInconclusive,
+    >,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusRolloutActiveRunPlanGroupsGroupCanaryStepsAnalysisMetrics {
+    pub name: String,
+    pub operator:
+        InferenceServiceStatusRolloutActiveRunPlanGroupsGroupCanaryStepsAnalysisMetricsOperator,
+    pub query: String,
+    pub threshold: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceStatusRolloutActiveRunPlanGroupsGroupCanaryStepsAnalysisMetricsOperator {
+    #[serde(rename = "LT")]
+    Lt,
+    #[serde(rename = "LTE")]
+    Lte,
+    #[serde(rename = "GT")]
+    Gt,
+    #[serde(rename = "GTE")]
+    Gte,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceStatusRolloutActiveRunPlanGroupsGroupCanaryStepsAnalysisOnInconclusive {
+    Hold,
+    Rollback,
+    RollbackOnStall,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusRolloutActiveRunPlanGroupsGroupCanaryStepsPause {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusRolloutActiveRunPlanGroupsGroupMaintainRatio {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tolerance: Option<i32>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusRolloutActiveRunPlanGroupsGroupPolicyRef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    pub name: String,
+    pub progression: InferenceServiceStatusRolloutActiveRunPlanGroupsGroupPolicyRefProgression,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceStatusRolloutActiveRunPlanGroupsGroupPolicyRefProgression {
+    #[serde(rename = "canary")]
+    Canary,
+    #[serde(rename = "blueGreen")]
+    BlueGreen,
+    #[serde(rename = "rollingUpdate")]
+    RollingUpdate,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusRolloutActiveRunPlanGroupsGroupRollingUpdate {
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "maxSurge")]
+    pub max_surge: Option<IntOrString>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "maxUnavailable"
+    )]
+    pub max_unavailable: Option<IntOrString>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusRolloutActiveRunPlanGroupsPolicyRef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    pub name: String,
+    pub progression: InferenceServiceStatusRolloutActiveRunPlanGroupsPolicyRefProgression,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceStatusRolloutActiveRunPlanGroupsPolicyRefProgression {
+    #[serde(rename = "canary")]
+    Canary,
+    #[serde(rename = "blueGreen")]
+    BlueGreen,
+    #[serde(rename = "rollingUpdate")]
+    RollingUpdate,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceStatusRolloutActiveRunPlanGroupsSource {
+    Inline,
+    Policy,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusRolloutActiveRunTargetRevisions {
+    pub component: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "stableRevision"
+    )]
+    pub stable_revision: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusRolloutGroups {
+    pub index: i32,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "observedDigest"
+    )]
+    pub observed_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "policyRef")]
+    pub policy_ref: Option<InferenceServiceStatusRolloutGroupsPolicyRef>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "shadowedPolicyRef"
+    )]
+    pub shadowed_policy_ref: Option<InferenceServiceStatusRolloutGroupsShadowedPolicyRef>,
+    pub source: InferenceServiceStatusRolloutGroupsSource,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusRolloutGroupsPolicyRef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    pub name: String,
+    pub progression: InferenceServiceStatusRolloutGroupsPolicyRefProgression,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceStatusRolloutGroupsPolicyRefProgression {
+    #[serde(rename = "canary")]
+    Canary,
+    #[serde(rename = "blueGreen")]
+    BlueGreen,
+    #[serde(rename = "rollingUpdate")]
+    RollingUpdate,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusRolloutGroupsShadowedPolicyRef {
+    pub name: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "wouldPinDigest"
+    )]
+    pub would_pin_digest: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceStatusRolloutGroupsSource {
+    Inline,
+    Policy,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusRolloutLastRun {
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "closedAt")]
+    pub closed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub groups: Option<Vec<InferenceServiceStatusRolloutLastRunGroups>>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "openedAt")]
+    pub opened_at: Option<String>,
+    pub outcome: InferenceServiceStatusRolloutLastRunOutcome,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "targetRevisions"
+    )]
+    pub target_revisions: Option<Vec<InferenceServiceStatusRolloutLastRunTargetRevisions>>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusRolloutLastRunGroups {
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "policyRef")]
+    pub policy_ref: Option<InferenceServiceStatusRolloutLastRunGroupsPolicyRef>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "portableDigest"
+    )]
+    pub portable_digest: Option<String>,
+    pub source: InferenceServiceStatusRolloutLastRunGroupsSource,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusRolloutLastRunGroupsPolicyRef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    pub name: String,
+    pub progression: InferenceServiceStatusRolloutLastRunGroupsPolicyRefProgression,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceStatusRolloutLastRunGroupsPolicyRefProgression {
+    #[serde(rename = "canary")]
+    Canary,
+    #[serde(rename = "blueGreen")]
+    BlueGreen,
+    #[serde(rename = "rollingUpdate")]
+    RollingUpdate,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceStatusRolloutLastRunGroupsSource {
+    Inline,
+    Policy,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum InferenceServiceStatusRolloutLastRunOutcome {
+    Completed,
+    RolledBack,
+    Superseded,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceStatusRolloutLastRunTargetRevisions {
+    pub component: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "stableRevision"
+    )]
+    pub stable_revision: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -4746,6 +6303,7 @@ pub enum InferenceServiceStatusRolloutCoordinationGroupsPhase {
     Shifting,
     Draining,
     ScalingDown,
+    Staged,
     Failed,
     RollingBack,
     Paused,

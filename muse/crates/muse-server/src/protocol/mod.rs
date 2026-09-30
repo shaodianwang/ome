@@ -1351,7 +1351,7 @@ fn coordination_rollout_attention(
     use InferenceServiceStatusRolloutCoordinationGroupsPhase as Phase;
 
     let (state, priority) = match phase {
-        Phase::Idle => return None,
+        Phase::Idle | Phase::Staged => return None,
         Phase::Failed => (RolloutState::Terminal, 100),
         Phase::RollingBack => (RolloutState::Active, 80),
         Phase::Paused => (RolloutState::Active, 60),
@@ -2296,6 +2296,37 @@ mod tests {
 
         assert!(component_rollout_attention(&ComponentPhase::Stable).is_none());
         assert!(coordination_rollout_attention(&CoordinationPhase::Idle).is_none());
+    }
+
+    #[test]
+    fn staged_rollouts_rest_without_hiding_other_groups() {
+        for (other_phase, want) in [
+            ("Idle", None),
+            ("Staged", None),
+            ("Surging", Some(("Surging", RolloutState::Active))),
+            ("Failed", Some(("Failed", RolloutState::Terminal))),
+        ] {
+            let isvc: InferenceService = serde_json::from_value(serde_json::json!({
+                "apiVersion": "ome.io/v1beta1",
+                "kind": "InferenceService",
+                "metadata": { "name": "example-service", "generation": 1 },
+                "spec": {},
+                "status": {
+                    "observedGeneration": 1,
+                    "rolloutCoordination": { "groups": [
+                        { "name": "engine", "phase": "Staged" },
+                        { "name": "decoder", "phase": other_phase }
+                    ] }
+                }
+            }))
+            .expect("InferenceService JSON is valid");
+            let got = RolloutView::noteworthy(&isvc);
+            assert_eq!(
+                got.as_ref().map(|view| (view.phase.as_str(), view.state)),
+                want,
+                "{other_phase}"
+            );
+        }
     }
 
     #[test]

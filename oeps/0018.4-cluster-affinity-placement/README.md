@@ -795,6 +795,12 @@ activation and operational graduation remain open. New capacity timing inputs
 and transition allowances are explicit configuration; existing controller and
 transport timing fallbacks require separate compatibility review before removal.
 
+The generated Rust client preserves placement intent, persisted allocations,
+member execution policies, and TrafficMap modes. Serialization fixtures cover
+Legacy field presence and ClusterAffinity data; API-server tests verify that
+typed spec and status updates retain their raw JSON representation. CI checks
+the four placement protocol clients against the generated CRDs.
+
 ### Migration
 
 The field audit covers every field in the existing
@@ -1020,13 +1026,11 @@ Remaining work:
    zero floors. Extend All's transition accounting to retain zero-floor homes
    while preserving the positive-floor requirement for deliberate moves.
    Owner: API/placement owners.
-2. **SDK coverage:** regenerate the Rust InferenceService client to include
-   placement intent and verify API round trips. Owner: API/client owners.
-3. **Operational graduation:** calibrate report freshness, stability windows,
+2. **Operational graduation:** calibrate report freshness, stability windows,
    and movement allowances against fleet measurements. Choose a compatibility
    window for removing the bridge schema and rehearse deployed-binary upgrades
    and rollback. Owner: deployment and placement owners.
 
-Next action: implement and verify zero-floor All activation and client coverage,
+Next action: implement and verify zero-floor All activation,
 then validate deployment-specific settings and migration procedures. Local tests
 do not establish a production soak or complete operational graduation.

@@ -1450,9 +1450,10 @@ def ci_steps() -> str:
 {_infra_retry()}
             command: |
               apt-get update
-              apt-get install -y --no-install-recommends build-essential cmake perl pkg-config
+              apt-get install -y --no-install-recommends build-essential cmake perl pkg-config python3-yaml
               rustup component add rustfmt clippy
               rustc --version
+              make -C ome-client-rs kopium-install ci-placement
               make -C muse ci-rust
             agents:
               queue: "{DEFAULT_QUEUE}"
