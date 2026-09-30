@@ -55,7 +55,7 @@ func TestReconcile_SecondaryRollbackWaitsForItsServingStableCapacity(t *testing.
 	isvc, in := pdInputs(map[string]int32{"new": 2, "old": 2}, bumpedDecoder())
 	in.GroupReadyPerRevisionPods = map[v1beta1.ComponentType]map[string]int32{
 		v1beta1.EngineComponent:  {"new": 2, "old": 2},
-		v1beta1.DecoderComponent: {"dNew": 2},
+		v1beta1.DecoderComponent: {"decnew": 2},
 	}
 	mustReconcile(t, isvc, in)
 	annotate(isvc, constants.RolloutRollbackAnnotation, "true")
@@ -66,13 +66,13 @@ func TestReconcile_SecondaryRollbackWaitsForItsServingStableCapacity(t *testing.
 		"old": {percent: 100, protocol: pdStableProtocol},
 	})
 	expectTargets(t, isvc, v1beta1.DecoderComponent, map[string]trafficWant{
-		"dNew": {percent: 50, protocol: pdCanaryProtocol, latest: true},
-		"dOld": {percent: 50, protocol: pdStableProtocol},
+		"decnew": {percent: 50, protocol: pdCanaryProtocol, latest: true},
+		"decold": {percent: 50, protocol: pdStableProtocol},
 	})
-	in.GroupReadyPerRevisionPods[v1beta1.DecoderComponent] = map[string]int32{"dNew": 1, "dOld": 1}
+	in.GroupReadyPerRevisionPods[v1beta1.DecoderComponent] = map[string]int32{"decnew": 1, "decold": 1}
 	mustReconcile(t, isvc, in)
 	expectTargets(t, isvc, v1beta1.DecoderComponent, map[string]trafficWant{
-		"dOld": {percent: 100, protocol: pdStableProtocol},
+		"decold": {percent: 100, protocol: pdStableProtocol},
 	})
 }
 

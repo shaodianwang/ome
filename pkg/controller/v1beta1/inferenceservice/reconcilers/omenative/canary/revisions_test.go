@@ -44,21 +44,21 @@ func TestDispatch_MembersRecordTheRolledOutRevisions(t *testing.T) {
 	f.dispatch("serve")
 	// The split serves: each member's target has reached Ready, nothing has
 	// completed.
-	expectRevisions(t, f.isvc, v1beta1.EngineComponent, revisionWant{ready: "engNew"})
-	expectRevisions(t, f.isvc, v1beta1.DecoderComponent, revisionWant{ready: "dNew"})
+	expectRevisions(t, f.isvc, v1beta1.EngineComponent, revisionWant{ready: "engnew"})
+	expectRevisions(t, f.isvc, v1beta1.DecoderComponent, revisionWant{ready: "decnew"})
 
-	annotate(f.isvc, constants.RolloutPromoteAnnotation, "engNew")
+	annotate(f.isvc, constants.RolloutPromoteAnnotation, "engnew")
 	f.dispatch("advance")
-	f.movePod("engine", "engOld", "engNew", "0")
-	f.movePod("decoder", "dOld", "dNew", "0")
+	f.movePod("engine", "engold", "engnew", "0")
+	f.movePod("decoder", "decold", "decnew", "0")
 	f.dispatch("cut over")
 	if f.phase() != v1beta1.RolloutPhaseStable {
 		t.Fatalf("the ladder must complete, got %q", f.phase())
 	}
 	done := func() {
 		t.Helper()
-		expectRevisions(t, f.isvc, v1beta1.EngineComponent, revisionWant{ready: "engNew", latest: "engNew", previous: "engOld"})
-		expectRevisions(t, f.isvc, v1beta1.DecoderComponent, revisionWant{ready: "dNew", latest: "dNew", previous: "dOld"})
+		expectRevisions(t, f.isvc, v1beta1.EngineComponent, revisionWant{ready: "engnew", latest: "engnew", previous: "engold"})
+		expectRevisions(t, f.isvc, v1beta1.DecoderComponent, revisionWant{ready: "decnew", latest: "decnew", previous: "decold"})
 	}
 	done()
 	// The done sentinel keeps the record.
@@ -74,10 +74,10 @@ func TestDispatch_MembersRecordTheRolledOutRevisions(t *testing.T) {
 func TestDispatch_RollbackStableResolvesFromTheRolledOutRevision(t *testing.T) {
 	f := newPDCanary(t, "pdfb", true)
 	f.dispatch("serve")
-	annotate(f.isvc, constants.RolloutPromoteAnnotation, "engNew")
+	annotate(f.isvc, constants.RolloutPromoteAnnotation, "engnew")
 	f.dispatch("advance")
-	f.movePod("engine", "engOld", "engNew", "0")
-	f.movePod("decoder", "dOld", "dNew", "0")
+	f.movePod("engine", "engold", "engnew", "0")
+	f.movePod("decoder", "decold", "decnew", "0")
 	f.dispatch("cut over")
 	if f.phase() != v1beta1.RolloutPhaseStable {
 		t.Fatalf("the ladder must complete, got %q", f.phase())
@@ -91,11 +91,11 @@ func TestDispatch_RollbackStableResolvesFromTheRolledOutRevision(t *testing.T) {
 		TargetRevisions: append([]v1beta1.RolloutRunTarget(nil), closed.TargetRevisions...),
 	}
 	reopenRun(f.isvc,
-		v1beta1.RolloutRunTarget{Component: v1beta1.EngineComponent, Revision: "engNext"},
-		v1beta1.RolloutRunTarget{Component: v1beta1.DecoderComponent, Revision: "dNext"})
+		v1beta1.RolloutRunTarget{Component: v1beta1.EngineComponent, Revision: "engnext"},
+		v1beta1.RolloutRunTarget{Component: v1beta1.DecoderComponent, Revision: "decnext"})
 	next := map[v1beta1.ComponentType][2]string{
-		v1beta1.EngineComponent:  {"engNew", "engNext"},
-		v1beta1.DecoderComponent: {"dNew", "dNext"},
+		v1beta1.EngineComponent:  {"engnew", "engnext"},
+		v1beta1.DecoderComponent: {"decnew", "decnext"},
 	}
 	for comp, pair := range next {
 		key := types.NamespacedName{Namespace: f.ns, Name: f.name + "-" + string(comp)}
@@ -105,10 +105,10 @@ func TestDispatch_RollbackStableResolvesFromTheRolledOutRevision(t *testing.T) {
 		})
 	}
 	f.dispatch("arm")
-	if cs := rollout.CanaryStatusFor(&f.isvc.Status, v1beta1.EngineComponent); cs == nil || cs.CanaryRevisionHash != "engNext" || cs.CurrentStep != 0 {
+	if cs := rollout.CanaryStatusFor(&f.isvc.Status, v1beta1.EngineComponent); cs == nil || cs.CanaryRevisionHash != "engnext" || cs.CurrentStep != 0 {
 		t.Fatalf("the new target must arm a fresh ladder, got %+v", cs)
 	}
-	if got := componentStableRevisionHash(f.isvc, v1beta1.DecoderComponent, v1beta1.EngineComponent); got != "dNew" {
+	if got := componentStableRevisionHash(f.isvc, v1beta1.DecoderComponent, v1beta1.EngineComponent); got != "decnew" {
 		t.Fatalf("the decoder's stable revision = %q, want dNew from its LatestRolledoutRevision", got)
 	}
 
@@ -128,10 +128,10 @@ func TestDispatch_RollbackStableResolvesFromTheRolledOutRevision(t *testing.T) {
 		}
 	}
 	f.expectTraffic(v1beta1.DecoderComponent, map[string]trafficWant{
-		"dNew": {percent: 100, protocol: pdCanaryProtocol},
+		"decnew": {percent: 100, protocol: pdCanaryProtocol},
 	})
-	expectRevisions(t, f.isvc, v1beta1.EngineComponent, revisionWant{ready: "engNew", latest: "engNew", previous: "engOld"})
-	expectRevisions(t, f.isvc, v1beta1.DecoderComponent, revisionWant{ready: "dNew", latest: "dNew", previous: "dOld"})
+	expectRevisions(t, f.isvc, v1beta1.EngineComponent, revisionWant{ready: "engnew", latest: "engnew", previous: "engold"})
+	expectRevisions(t, f.isvc, v1beta1.DecoderComponent, revisionWant{ready: "decnew", latest: "decnew", previous: "decold"})
 }
 
 // pdReadyDecoder is a bumped decoder whose target has Ready capacity.
@@ -146,7 +146,7 @@ func TestReconcile_CompletionRecordsEveryMembersRevisions(t *testing.T) {
 	mustReconcile(t, isvc, in)
 	// In flight: each target has reached Ready; nothing owns the traffic yet.
 	expectRevisions(t, isvc, v1beta1.EngineComponent, revisionWant{ready: "new"})
-	expectRevisions(t, isvc, v1beta1.DecoderComponent, revisionWant{ready: "dNew"})
+	expectRevisions(t, isvc, v1beta1.DecoderComponent, revisionWant{ready: "decnew"})
 
 	annotate(isvc, constants.RolloutPromoteAnnotation, "new")
 	mustReconcile(t, isvc, in)
@@ -156,7 +156,7 @@ func TestReconcile_CompletionRecordsEveryMembersRevisions(t *testing.T) {
 		t.Fatalf("the ungated final step completes, got %+v", res)
 	}
 	expectRevisions(t, isvc, v1beta1.EngineComponent, revisionWant{ready: "new", latest: "new", previous: "old"})
-	expectRevisions(t, isvc, v1beta1.DecoderComponent, revisionWant{ready: "dNew", latest: "dNew", previous: "dOld"})
+	expectRevisions(t, isvc, v1beta1.DecoderComponent, revisionWant{ready: "decnew", latest: "decnew", previous: "decold"})
 }
 
 // A target with no Ready capacity is not a ready revision yet.
@@ -186,7 +186,7 @@ func TestReconcile_RollbackCompletionRecordsTheStableRevision(t *testing.T) {
 		t.Fatalf("the rejected pods still serve, got phase=%q res=%+v", phaseOf(isvc), res)
 	}
 	expectRevisions(t, isvc, v1beta1.EngineComponent, revisionWant{ready: "new", latest: "older"})
-	expectRevisions(t, isvc, v1beta1.DecoderComponent, revisionWant{ready: "dNew"})
+	expectRevisions(t, isvc, v1beta1.DecoderComponent, revisionWant{ready: "decnew"})
 
 	in.PerRevisionPods = map[string]int32{"old": 4}
 	if res := mustReconcile(t, isvc, in); !res.RolledBack || phaseOf(isvc) != v1beta1.RolloutPhaseRolledBack {
@@ -195,7 +195,7 @@ func TestReconcile_RollbackCompletionRecordsTheStableRevision(t *testing.T) {
 	reverted := func() {
 		t.Helper()
 		expectRevisions(t, isvc, v1beta1.EngineComponent, revisionWant{ready: "old", latest: "old", previous: "older"})
-		expectRevisions(t, isvc, v1beta1.DecoderComponent, revisionWant{ready: "dOld", latest: "dOld"})
+		expectRevisions(t, isvc, v1beta1.DecoderComponent, revisionWant{ready: "decold", latest: "decold"})
 	}
 	reverted()
 	mustReconcile(t, isvc, in)
@@ -205,7 +205,7 @@ func TestReconcile_RollbackCompletionRecordsTheStableRevision(t *testing.T) {
 // A member that was not bumped records its one revision without demoting it.
 func TestReconcile_UnbumpedMemberRecordsItsRevisionWithoutDemotion(t *testing.T) {
 	isvc, in := pdInputs(map[string]int32{"new": 2, "old": 2}, MemberRevisions{
-		CanaryRevisionHash: "dOld", StableRevisionHash: "dOld", ReadyCanaryCapacity: 2,
+		CanaryRevisionHash: "decold", StableRevisionHash: "decold", ReadyCanaryCapacity: 2,
 	})
 	mustReconcile(t, isvc, in)
 	annotate(isvc, constants.RolloutPromoteAnnotation, "new")
@@ -215,5 +215,5 @@ func TestReconcile_UnbumpedMemberRecordsItsRevisionWithoutDemotion(t *testing.T)
 	if res := mustReconcile(t, isvc, in); !res.Complete {
 		t.Fatalf("the ungated final step completes, got %+v", res)
 	}
-	expectRevisions(t, isvc, v1beta1.DecoderComponent, revisionWant{ready: "dOld", latest: "dOld"})
+	expectRevisions(t, isvc, v1beta1.DecoderComponent, revisionWant{ready: "decold", latest: "decold"})
 }
