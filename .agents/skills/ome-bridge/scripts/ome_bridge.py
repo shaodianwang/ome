@@ -21,6 +21,10 @@ Environment:
   OME_BRIDGE_URL       base URL of the bridge, including any path prefix (required)
   OME_BRIDGE_KEY_CMD   command whose stdout is the HMAC key; split with shlex,
                        run without a shell (required). The key is never printed.
+  OME_BRIDGE_SERVICE_ENDPOINT
+                       SMC tier name sent as the service_endpoint header; the
+                       MKS HTTP frontend in front of the bridge routes on it
+                       (optional)
   OME_BOT_ACTOR_FBID   numeric id of the person who asked (optional)
   OME_BOT_SLACK_USER   Slack user id of the person who asked (optional)
   OME_BOT_CHANNEL_ID   Slack channel the question came from (optional)
@@ -186,6 +190,13 @@ def build_request(args: argparse.Namespace) -> tuple[str, str, bytes]:
     return "POST", path, json.dumps(payload, separators=(",", ":")).encode()
 
 
+def routing_headers() -> dict[str, str]:
+    """The MKS HTTP frontend picks the backend from the service_endpoint header;
+    a request without it never reaches the bridge and answers 4xx."""
+    endpoint = os.environ.get("OME_BRIDGE_SERVICE_ENDPOINT", "").strip()
+    return {"service_endpoint": endpoint} if endpoint else {}
+
+
 def send(base_url: str, key: bytes, method: str, path: str, body: bytes, timeout: float) -> tuple[int, bytes]:
     timestamp = str(int(time.time()))
     headers = {
@@ -193,6 +204,7 @@ def send(base_url: str, key: bytes, method: str, path: str, body: bytes, timeout
         "X-OME-Bot-Signature": sign(key, timestamp, body),
         "Accept": "application/json",
         "User-Agent": "ome-bridge-skill",
+        **routing_headers(),
     }
     if method == "POST":
         headers["Content-Type"] = "application/json"

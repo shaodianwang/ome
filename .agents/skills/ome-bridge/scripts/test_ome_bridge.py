@@ -41,7 +41,10 @@ class FakeBridge(BaseHTTPRequestHandler):
         ts = self.headers.get("X-OME-Bot-Timestamp", "")
         sig = self.headers.get("X-OME-Bot-Signature", "")
         want = hmac.new(KEY.encode(), ts.encode() + b"\n" + body, hashlib.sha256).hexdigest()
-        self.server.requests.append({"method": method, "path": self.path, "body": body, "ts": ts})
+        self.server.requests.append({
+            "method": method, "path": self.path, "body": body, "ts": ts,
+            "endpoint": self.headers.get("service_endpoint"),
+        })
         if not ts.isdigit() or abs(time.time() - int(ts)) > 300 or not hmac.compare_digest(want, sig):
             self._reply(401, b"signature mismatch", "text/plain")
             return
@@ -86,7 +89,8 @@ class BridgeTestCase(unittest.TestCase):
         self.server.requests = []
         self.env = mock.patch.dict(os.environ, {"OME_BRIDGE_URL": self.base, "OME_BRIDGE_KEY_CMD": KEY_CMD})
         self.env.start()
-        for name in ("OME_BOT_ACTOR_FBID", "OME_BOT_SLACK_USER", "OME_BOT_CHANNEL_ID", "OME_BOT_REQUEST_ID"):
+        for name in ("OME_BOT_ACTOR_FBID", "OME_BOT_SLACK_USER", "OME_BOT_CHANNEL_ID", "OME_BOT_REQUEST_ID",
+                     "OME_BRIDGE_SERVICE_ENDPOINT"):
             os.environ.pop(name, None)
 
     def tearDown(self) -> None:
@@ -109,6 +113,21 @@ class BridgeTestCase(unittest.TestCase):
 
     def last_body(self) -> dict:
         return json.loads(self.server.requests[-1]["body"])
+
+
+class RoutingHeaderTest(BridgeTestCase):
+    def test_service_endpoint_header_sent_when_set(self) -> None:
+        self.route("GET", "/healthz", 200, b"")
+        with mock.patch.dict(os.environ, {"OME_BRIDGE_SERVICE_ENDPOINT": "ome-bot.ome-bot.example.mks"}):
+            code, _, _ = self.run_cli("health")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.server.requests[-1]["endpoint"], "ome-bot.ome-bot.example.mks")
+
+    def test_no_service_endpoint_header_when_unset(self) -> None:
+        self.route("GET", "/healthz", 200, b"")
+        code, _, _ = self.run_cli("health")
+        self.assertEqual(code, 0)
+        self.assertIsNone(self.server.requests[-1]["endpoint"])
 
 
 class SubcommandTest(BridgeTestCase):

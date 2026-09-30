@@ -50,6 +50,7 @@ the bridge is unreachable or hung.
 |---|---|---|
 | `OME_BRIDGE_URL` | yes | base URL of the bridge including its path prefix; the only place the address comes from |
 | `OME_BRIDGE_KEY_CMD` | yes | command whose stdout is the HMAC key, split with shell quoting rules and run without a shell; the bot's runtime sets it to the secrets-CLI call that reads the bridge key |
+| `OME_BRIDGE_SERVICE_ENDPOINT` | no | SMC tier name sent as the `service_endpoint` header; the MKS HTTP frontend in front of the bridge routes on it, and a request without it answers 4xx before reaching the bridge |
 | `OME_BOT_ACTOR_FBID` | no | numeric id of the person who asked; sent as `actor.employeeFbid` |
 | `OME_BOT_SLACK_USER` | no | Slack user id of the person who asked; sent as `actor.slackUserId` |
 | `OME_BOT_CHANNEL_ID` | no | Slack channel of the question; sent as `channelId` |
