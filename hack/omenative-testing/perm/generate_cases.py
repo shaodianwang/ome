@@ -126,19 +126,9 @@ HAND_PINNED_KILL = {
 #   ("rollout", topo, w, strat, surge, unavail)
 #   ("podkill", phase, topo, w, size, strat, surge, unavail, rp)
 #   ("kill", topo, w, strat, rp, pause, target)
-_FREEZE_TOTAL_LOSS = (
-    "under freeze, RecreateInstance total pod loss is neither repaired "
-    "(frozen, correct) nor demoted (truth-pass carve-out), so Phase=Ready "
-    "persists over podCount=0 until the fix couples truthful demotion with "
-    "a repair-eligibility path")
-# The single-pod freeze x RecreateInstance cells: every strategy (dormant
-# under a kill) on both single-pod topologies shows the same stale-Ready
-# window; gang shapes keep podCount > 0, so only these cells can observe it.
-PARKED = {
-    ("kill", topo, 0, strat, "RecreateInstance", "freeze", None): (1354, _FREEZE_TOTAL_LOSS, "A")
-    for topo in ("engine", "pd")
-    for strat in ("SurgeThenDrain", "RecreatePod", "InPlaceIfPossible", "InPlaceOnly")
-}
+# No generated cell is parked today; a park is added here as
+# (key): (issue, reason, invariant scope) and rendered into the header.
+PARKED = {}
 
 # Runner verbs/hooks this corpus needs but the runners do not implement yet.
 # Kept in the manifest so the follow-up surface stays visible next to the

@@ -56,19 +56,6 @@ Total generated cases: **579**. The whole-corpus per-PR cap (hand + generated) i
 | off | 465 |
 | true | 76 |
 
-### Parked cells (XFAIL on a tracked issue)
-
-| case | folder | issue |
-|---|---|---|
-| p1600 | gen-restart | #1354 |
-| p1605 | gen-restart | #1354 |
-| p1610 | gen-restart | #1354 |
-| p1615 | gen-restart | #1354 |
-| p1617 | gen-restart | #1354 |
-| p1622 | gen-restart | #1354 |
-| p1627 | gen-restart | #1354 |
-| p1632 | gen-restart | #1354 |
-
 ## Constraint ledger (tuples excluded during construction)
 
 - `pause` multiplies only `mode=kill`: run.py consumes the pause header nowhere else, so a paused rollout case would carry a dead knob.

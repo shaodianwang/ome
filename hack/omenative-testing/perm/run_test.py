@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import copy
 import json
+import os
 import subprocess
 import sys
 import time
@@ -408,8 +409,18 @@ class ParkedInvariantVerdictTest(unittest.TestCase):
         verdict = run.soften_expected_fail(hdr, "PASS", checks)
         return run.invariant_checks(inv, verdict, notes, checks), checks
 
+    def _parked(self, line):
+        """A parked header as parse_header reads it, independent of which
+        corpus cases happen to be parked today."""
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+            f.write(line + "\n")
+        self.addCleanup(os.unlink, f.name)
+        return run.parse_header(f.name)[1]
+
     def test_in_scope_invariant_violation_records_as_known_bug_xfail(self):
-        _first, hdr = run.parse_header(run.find_isvc("p1632"))
+        hdr = self._parked("# p1632: a parked case with its invariant scoped  mode=restart Ne=1 Nd=0 Nr=0 "
+                           "ceil_e=1 ceil_d=0 ceil_r=0 notimpl=1 issue=1354 inv_xfail=A co=none topo=engine")
         self.assertEqual(hdr.get("notimpl"), 1)
         self.assertEqual(hdr.get("inv_xfail"), "A")
         verdict, checks = self._verdict(hdr, self._violation(
@@ -420,7 +431,8 @@ class ParkedInvariantVerdictTest(unittest.TestCase):
         self.assertTrue(any("tracked bug this case is parked on" in c for c in checks))
 
     def test_out_of_scope_invariant_violation_still_fails(self):
-        _first, hdr = run.parse_header(run.find_isvc("p1632"))
+        hdr = self._parked("# p1632: a parked case with its invariant scoped  mode=restart Ne=1 Nd=0 Nr=0 "
+                           "ceil_e=1 ceil_d=0 ceil_r=0 notimpl=1 issue=1354 inv_xfail=A co=none topo=engine")
         verdict, _checks = self._verdict(hdr, self._violation(
             "B", "missing-endpoint", "engine/0",
             "Ready+serving pod is not an endpoint of its Service"))
@@ -430,7 +442,8 @@ class ParkedInvariantVerdictTest(unittest.TestCase):
     def test_unscoped_parked_case_still_hardens_on_invariants(self):
         """A notimpl case without inv_xfail keeps today's contract: an
         invariant violation fails it even though ordinary checks are parked."""
-        _first, hdr = run.parse_header(run.find_isvc("p416"))
+        hdr = self._parked("# p416: a parked case with no invariant scoped  mode=rollout Ne=1 Nd=0 Nr=0 "
+                           "ceil_e=2 ceil_d=0 ceil_r=0 notimpl=1 issue=1355 co=none topo=engine")
         self.assertEqual(hdr.get("notimpl"), 1)
         self.assertNotIn("inv_xfail", hdr)
         verdict, _checks = self._verdict(hdr, self._violation(

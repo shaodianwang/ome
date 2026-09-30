@@ -1,5 +1,5 @@
-# p1600: [gen] kill engine N=4 SurgeThenDrain rp RecreateInstance pause freeze  mode=kill Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 restart=RecreateInstance pause=freeze co=none topo=engine notimpl=1 issue=1354 inv_xfail=A
-# reason: under freeze, RecreateInstance total pod loss is neither repaired (frozen, correct) nor demoted (truth-pass carve-out), so Phase=Ready persists over podCount=0 until the fix couples truthful demotion with a repair-eligibility path
+# p1600: [gen] kill engine N=4 SurgeThenDrain rp RecreateInstance pause freeze  mode=kill Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 restart=RecreateInstance pause=freeze co=none topo=engine
+# reason: freeze holds every repair; downgrading to a plain pause must repair without ever unpausing
 apiVersion: ome.io/v1beta1
 kind: InferenceService
 metadata: { name: p1600 }
