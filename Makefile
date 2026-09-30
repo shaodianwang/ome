@@ -707,6 +707,12 @@ INTERNAL_PACKAGES_NO_XET := $(filter-out github.com/ome-projects/ome/internal/om
 # run in the unit lane: the gate must fail a PR that leaves a cell undecided.
 ROLLOUTSPEC_PACKAGES := $(shell go list ./tests/rolloutspec/...)
 
+# Every envtest suite boots its own control plane (etcd + kube-apiserver) next
+# to its test binary, so package parallelism multiplies memory: the Go default,
+# one test binary per CPU, stacks a control plane per core and starves or kills
+# a shared CI agent. Bounded here; override per machine.
+INTEGRATION_TEST_PARALLELISM ?= 4
+
 # Centralized Environment
 TEST_ENV = \
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" \
@@ -934,13 +940,13 @@ integration-test: fmt vet manifests envtest dep-crds xet-build test-kindutil-uni
 	@# without masking a genuine deadlock — any real loop bug would
 	@# still hang past 20m.
 	@PKGS=$$(go list ./tests/... | grep -v -E '/kindutil($$|/)|_kind$$|/tests/perf/|/tests/rolloutspec($$|/)|/integration/multicluster$$') ; \
-		$(TEST_ENV) go test -v -timeout=20m $$PKGS $(if $(GINKGO_VERBOSE),-ginkgo.v) -ginkgo.trace
+		$(TEST_ENV) go test -v -p $(INTEGRATION_TEST_PARALLELISM) -timeout=20m $$PKGS $(if $(GINKGO_VERBOSE),-ginkgo.v) -ginkgo.trace
 	@# The multicluster suite owns three envtest control planes. Run it after the
 	@# package-parallel suites so periodic cross-apiserver assertions get a
 	@# responsive API server rather than competing with every suite's startup.
 	@# Exact package, NOT /... — the KIND-backed suites nested under it need
 	@# Docker and belong to the test-kind lane, not this one.
-	@$(TEST_ENV) go test -v -timeout=20m ./tests/integration/multicluster \
+	@$(TEST_ENV) go test -v -p $(INTEGRATION_TEST_PARALLELISM) -timeout=20m ./tests/integration/multicluster \
 		$(if $(GINKGO_VERBOSE),-ginkgo.v) -ginkgo.trace
 	@echo "✅ Integration tests passed"
 

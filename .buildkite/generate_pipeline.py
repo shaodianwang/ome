@@ -465,10 +465,13 @@ def _auto_retry(limit: int = 2, indent: int = 12) -> str:
 def _infra_retry(limit: int = 2, indent: int = 12) -> str:
     """Preset: retry ONLY on infrastructure failure — the TW dind daemon dying
     (exit_status 125: docker.sock gone mid-run, or the pre-command docker
-    health-repair hook failing before the step runs) or the agent being lost
-    (signal_reason agent_stop). It never matches exit 1, so a real test/lint/
-    -race failure still blocks merge — safe on merge gates precisely because it
-    cannot match a code failure. Seen on build 2523 (scheduler-test: dind
+    health-repair hook failing before the step runs), the agent being lost
+    (signal_reason agent_stop), or the job's process being lost under it
+    (signal_reason process_run_error: the container died and the job was
+    recorded with exit -1, which no exit_status condition matches). It never
+    matches exit 1, so a real test/lint/-race failure still blocks merge —
+    safe on merge gates precisely because it cannot match a code failure.
+    Seen on build 2523 (scheduler-test: dind
     vanished during `go mod download`) and 2548 (helm-lint: pre-command docker
     health failed before the lint ran).
     """
@@ -482,6 +485,7 @@ def _infra_retry_automatic(limit: int = 2) -> list:
     return [
         {"exit_status": 125, "limit": limit},
         {"signal_reason": "agent_stop", "limit": limit},
+        {"signal_reason": "process_run_error", "limit": limit},
     ]
 
 

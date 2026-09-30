@@ -29,6 +29,8 @@ INFRA_RETRY_BLOCK = (
     "            - exit_status: 125\n"
     "              limit: 2\n"
     '            - signal_reason: "agent_stop"\n'
+    "              limit: 2\n"
+    '            - signal_reason: "process_run_error"\n'
     "              limit: 2"
 )
 
