@@ -537,6 +537,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 			rollbackRevision = cr
 		}
 	}
+	// The coordination gates orient by the roll target, so they are wired
+	// only now that it is resolved.
+	r.wireCoordinationGates(ctx, &input, ir, parent, coordDefaults, rollTarget)
 
 	plan, perr := workload.BuildPlan(v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component), input.DesiredSpec, input.ObservedState)
 	if perr != nil {

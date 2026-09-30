@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -34,21 +35,27 @@ import (
 // replacement inside the source's Instance until the promote, so only the
 // pods' cohort labels tell the two cohorts apart. A serving pod is PodReady
 // (the serving gate is folded into it) and routable; workers never carry
-// traffic. Fails closed on a list error, like the start-time gate.
-func EvaluatePairingDrain(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, defaults GroupDefaults, sourcePods []string) (allowed bool, gate v1beta1.RolloutHoldGate, reason string) {
+// traffic. targetRevision is the ControllerRevision the Component's Instances
+// move to in this pass, the same one the start-time gate orients by. Fails
+// closed on a list error, like the start-time gate.
+func EvaluatePairingDrain(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, component v1beta1.ComponentType, targetRevision *appsv1.ControllerRevision, defaults GroupDefaults, sourcePods []string) (allowed bool, gate v1beta1.RolloutHoldGate, reason string) {
 	gateCtx := ResolveGateContextWithDefaults(ctx, reads, isvc, component, defaults)
+	gateCtx.TargetRevision = targetRevision
 	if gateCtx.ShortCircuit {
 		return true, "", gateCtx.ShortReason
 	}
 	if !groupPairsEngineAndDecoder(gateCtx.Group) {
 		return true, "", "group does not pair engine and decoder"
 	}
-	target := isvc.Spec.RolloutPairingProtocol()
-	if target == "" {
-		return true, "", "no pairing protocol declared"
-	}
 	if component != v1beta1.EngineComponent && component != v1beta1.DecoderComponent {
 		return true, "", "component does not participate in pairing"
+	}
+	target, ok, reason := gateCtx.targetPairingProtocol()
+	if !ok {
+		return false, v1beta1.RolloutHoldGatePairing, reason
+	}
+	if target == "" {
+		return true, "", "target revision declares no pairing protocol"
 	}
 
 	pods := &corev1.PodList{}
