@@ -123,6 +123,21 @@ case "$ARTIFACT_BUNDLE" in
     ;;
 esac
 
+# Scheduler bundles carry an exact-commit static binary usable on PRs. Other
+# suites use the image package_kind_test_image.sh publishes on main.
+if [ -n "${OME_TEST_SCHEDULER:-}" ] && [ -d "$artifact_stage/scheduler" ]; then
+  sh .buildkite/build_kind_scheduler.sh "$artifact_stage"
+  export OME_TEST_SCHEDULER_IMAGE=ome-scheduler:kind-local
+elif [ -f "$IMAGES_DIR/ome-scheduler.tar" ]; then
+  docker load -i "$IMAGES_DIR/ome-scheduler.tar"
+  scheduler_ref="${PROD_ECR_REGISTRY:-168653207203.dkr.ecr.us-east-2.amazonaws.com}/msl_infra/ome-scheduler:$(printf '%.8s' "$BUILDKITE_COMMIT")"
+  docker image inspect "$scheduler_ref" >/dev/null
+  docker tag "$scheduler_ref" ome-scheduler:kind-local
+  export OME_TEST_SCHEDULER_IMAGE=ome-scheduler:kind-local
+elif [ -n "${OME_TEST_SCHEDULER:-}" ]; then
+  echo "FATAL: OME_TEST_SCHEDULER=${OME_TEST_SCHEDULER} but neither a scheduler bundle nor ${IMAGES_DIR}/ome-scheduler.tar is available" >&2
+  exit 1
+fi
 # Raise the inotify ceilings on the Docker daemon's kernel before any cluster
 # exists. Each shard runs a 3-node cluster and every nested kubelet/containerd
 # holds watches and instances; at the distro defaults they exhaust silently —
@@ -131,20 +146,6 @@ esac
 # privileged throwaway container because this container is unprivileged; busybox
 # is already loaded, so it costs no pull. Advisory: a daemon that refuses the
 # write still runs the suite, just closer to the ceiling.
-# The scheduler dimension: package_kind_test_image.sh bakes this commit's
-# ome-scheduler image on main; the suite loads it into its cluster under the
-# tag OME_TEST_SCHEDULER_IMAGE names and installs the chart when
-# OME_TEST_SCHEDULER is set. Without the archive a scheduler run cannot start.
-if [ -f "$IMAGES_DIR/ome-scheduler.tar" ]; then
-  docker load -i "$IMAGES_DIR/ome-scheduler.tar"
-  scheduler_ref="${PROD_ECR_REGISTRY:-168653207203.dkr.ecr.us-east-2.amazonaws.com}/msl_infra/ome-scheduler:$(printf '%.8s' "$BUILDKITE_COMMIT")"
-  docker image inspect "$scheduler_ref" >/dev/null
-  docker tag "$scheduler_ref" ome-scheduler:kind-local
-  export OME_TEST_SCHEDULER_IMAGE=ome-scheduler:kind-local
-elif [ -n "${OME_TEST_SCHEDULER:-}" ]; then
-  echo "FATAL: OME_TEST_SCHEDULER=${OME_TEST_SCHEDULER} but ${IMAGES_DIR}/ome-scheduler.tar is not baked (main-only artifact)" >&2
-  exit 1
-fi
 echo "--- raise inotify limits on the docker daemon ---"
 docker run --rm --privileged busybox sh -c '
   sysctl -w fs.inotify.max_user_watches=1048576

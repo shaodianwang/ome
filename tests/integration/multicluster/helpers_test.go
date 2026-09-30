@@ -139,36 +139,10 @@ func getDerivedOn(member cluster, namespace, name string) (*v1beta1.InferenceSer
 	return derived, ok
 }
 
-// admitDerivedOn simulates the member-side admission path: it stamps the Engine
-// component's InferenceReplica (<name>-engine) with an admitted instance, which
-// is the authoritative signal the control plane's placer reads to declare this
-// cluster the race winner. No OME reconciler runs on the members, so the suite
-// plays the role Kueue + the worker reconciler would in production.
+// admitDerivedOn projects a member component and materializes the admitted
+// instance on the bare member API used by the simulation suite.
 func admitDerivedOn(member cluster, namespace, name string) {
-	irName := name + "-" + string(v1beta1.EngineComponent)
-	gomega.EventuallyWithOffset(1, func(g gomega.Gomega) {
-		ir := &v1beta1.InferenceReplica{
-			ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: irName},
-			// Minimal valid spec so the Create passes CRD schema validation on
-			// bare members (the sim path has no manager to pre-create the IR).
-			Spec: v1beta1.InferenceReplicaSpec{
-				ParentRef: &v1beta1.ParentReference{Name: name},
-				Component: v1beta1.EngineComponent,
-				Runners: []v1beta1.Runner{{
-					Name: v1beta1.RunnerNameDefault,
-					Size: 1,
-					Template: corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "sim:latest"}}},
-					},
-				}},
-			},
-		}
-		g.Expect(client.IgnoreAlreadyExists(member.client.Create(member.ctx, ir))).To(gomega.Succeed())
-		g.Expect(member.client.Get(member.ctx, types.NamespacedName{Namespace: namespace, Name: irName}, ir)).To(gomega.Succeed())
-		g.Expect(util.WriteDenseInstanceStatuses(member.ctx, member.client, ir, []v1beta1.OMENativeInstanceStatus{
-			{Index: 0, Phase: v1beta1.OMENativeInstanceReady, Admitted: true},
-		})).To(gomega.Succeed())
-	}, eventuallyTimeout, eventuallyPoll).Should(gomega.Succeed())
+	upsertPlannedEngineStatusOn(member, namespace, name, []v1beta1.OMENativeInstanceStatus{{Index: 0, Phase: v1beta1.OMENativeInstanceReady, Admitted: true}})
 }
 
 // placementStatusOf reads the source ISVC's placement status from the control
@@ -222,6 +196,8 @@ func upsertPlannedEngineStatusOn(member cluster, namespace, name string, instanc
 		g.Expect(err).NotTo(gomega.HaveOccurred())
 		ir.Status.ObservedGeneration = ir.Generation
 		ir.Status.PlacementObservedGeneration = ir.Generation
-		g.Expect(util.WriteDenseInstanceStatuses(member.ctx, member.client, ir, instances)).To(gomega.Succeed())
+		rows, err := util.MaterializeSinglePodInstances(member.ctx, member.client, ir, instances)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(util.WriteDenseInstanceStatuses(member.ctx, member.client, ir, rows)).To(gomega.Succeed())
 	}, eventuallyTimeout, eventuallyPoll).Should(gomega.Succeed())
 }

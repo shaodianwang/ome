@@ -647,7 +647,8 @@ func TestReconcile_PolicyLiftEndToEnd(t *testing.T) {
 	}
 	w := fakeclient.NewClientBuilder().WithScheme(s).
 		WithStatusSubresource(&v1beta1.InferenceService{}).
-		WithObjects(derived, backendTestRuntime(), hpaPolicy(testPolicyName), irWithInstances(v1beta1.EngineComponent, true)).Build()
+		WithObjects(observedWorkerObjects(derived, irWithInstances(v1beta1.EngineComponent, true))...).
+		WithObjects(hpaPolicy(testPolicyName)).Build()
 	cur := &v1beta1.InferenceService{}
 	require.NoError(t, w.Get(context.Background(), types.NamespacedName{Namespace: "prod", Name: "svc"}, cur))
 	if len(cur.Status.Components) == 0 {

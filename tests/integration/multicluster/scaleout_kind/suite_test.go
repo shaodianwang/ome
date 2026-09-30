@@ -48,11 +48,20 @@ import (
 
 // KIND cluster names for the two members. One cluster per member so the placer
 // exercises genuinely separate apiservers, schedulers, and kubelets.
-const (
-	controlPlaneClusterName = "ome-mc-cp-kind"
-	member1ClusterName      = "ome-mc-m1-kind"
-	member2ClusterName      = "ome-mc-m2-kind"
+var (
+	controlPlaneClusterName = suiteClusterName("ome-mc-cp-kind")
+	member1ClusterName      = suiteClusterName("ome-mc-m1-kind")
+	member2ClusterName      = suiteClusterName("ome-mc-m2-kind")
 )
+
+// Scheduler fixtures need multiple workers; separate names prevent reuse of
+// the default suite's single-node members.
+func suiteClusterName(name string) string {
+	if kindfix.SchedulerName() != "" {
+		return name + "-scheduler"
+	}
+	return name
+}
 
 // controlPlaneID identifies this control plane on the members, so the GC sweep
 // and the origin guards can tell our deriveds from anyone else's.
@@ -190,23 +199,20 @@ func startControlPlaneManager(c *cluster) {
 // same BaseModel / InferenceService / InferenceReplica reconcilers a real member
 // would. This is what turns a placed derived ISVC into pods on a real kubelet.
 func startMember(ctx context.Context, name string) cluster {
-	// Single-node members. What this suite exercises is placement ACROSS
-	// clusters, not scheduling spread within one, so extra worker nodes buy
-	// nothing and cost a container each — with two members that is the
-	// difference between four nodes and two. A single-node KIND cluster also
-	// leaves its control plane schedulable, whereas a multi-node one keeps the
-	// control-plane NoSchedule taint and so has nowhere to run pods if a worker
-	// fails to join (`kind create --wait` only waits on the control plane, so a
-	// half-built cluster otherwise surfaces much later as unschedulable pods).
-	cfg, err := kindutil.EnsureCluster(ctx, name, 0)
+	scheduler := kindfix.SchedulerFromEnv()
+	workers := 0
+	if scheduler != nil {
+		workers = scheduler.WorkerCount()
+	}
+	cfg, err := kindutil.EnsureCluster(ctx, name, workers)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "EnsureCluster %s", name)
 
 	gomega.Expect(kindutil.BuildAndLoadImages(ctx, name, kindfix.FakeServingImages())).
 		To(gomega.Succeed(), "BuildAndLoadImages %s", name)
-	gomega.Expect(kindutil.ApplyCRDs(ctx, cfg, kindfix.OMECRDPaths())).
+	gomega.Expect(kindutil.ApplyCRDs(ctx, cfg, kindfix.GangCRDPaths())).
 		To(gomega.Succeed(), "ApplyCRDs %s", name)
 
-	scheme := kindfix.OMEScheme()
+	scheme := kindfix.GangScheme()
 	// Quota objects are created through framework.ApplyKueueQuota, which builds
 	// v1beta2; nothing here touches the older version.
 	gomega.Expect(kueuev1beta2.AddToScheme(scheme)).To(gomega.Succeed(), "register Kueue types")
@@ -214,6 +220,7 @@ func startMember(ctx context.Context, name string) cluster {
 	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "client.New %s", name)
 
 	purgeLeftovers(ctx, cl, name)
+	gomega.Expect(kindutil.InstallScheduler(ctx, name, scheduler)).To(gomega.Succeed(), "install scheduler on %s", name)
 
 	// Kueue runs on every member, but manages only namespaces labelled
 	// kindfix.KueueManagedLabel. Specs that assert on admission opt in; the

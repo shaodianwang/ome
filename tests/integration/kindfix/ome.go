@@ -73,12 +73,9 @@ func OMEScheme() *runtime.Scheme {
 	return s
 }
 
-// GangScheme is OMEScheme plus the scheduler-plugins PodGroup type. Only the
-// multi-node gang suite needs it: registering PodGroup makes the controller's
-// gang-availability discovery succeed, and the reconciler then sets a gang
-// schedulerName — which leaves pods Pending on a KIND cluster that has no gang
-// scheduler. So the single-pod suites use OMEScheme and stay on
-// the non-gang path; only the gang suite opts into this.
+// GangScheme adds the scheduler-plugins PodGroup type to OMEScheme. Suites
+// that install GangCRDPaths use it for multi-pod Instance reconciliation.
+// Fixture runtimes select their scheduler separately through SchedulerName.
 func GangScheme() *runtime.Scheme {
 	s := OMEScheme()
 	utilruntime.Must(schedulingv1alpha1.AddToScheme(s))
@@ -108,10 +105,9 @@ func OMECRDPaths() []string {
 	}
 }
 
-// GangCRDPaths is OMECRDPaths plus the scheduler-plugins PodGroup CRD. Installing
-// it makes the controller's gang-availability discovery succeed, so the IR-managed
-// multi-node suite can assert PodGroup creation. Only that suite uses it (see
-// GangScheme for why the others stay off the gang path).
+// GangCRDPaths adds the scheduler-plugins PodGroup CRD to OMECRDPaths so the
+// controller can discover and create per-Instance groups. Suites pair it with
+// GangScheme to exercise multi-pod Instances.
 func GangCRDPaths() []string {
 	return append(OMECRDPaths(), "tests/integration/dep-crds/scheduler-plugins")
 }

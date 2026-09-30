@@ -155,8 +155,8 @@ func RunKindSuite(t *testing.T, opts SuiteOpts) *SuiteState {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	if opts.Scheduler != nil && opts.Workers < opts.Scheduler.minWorkers() {
-		opts.Workers = opts.Scheduler.minWorkers()
+	if opts.Scheduler != nil && opts.Workers < opts.Scheduler.WorkerCount() {
+		opts.Workers = opts.Scheduler.WorkerCount()
 	}
 	cfg, err := EnsureCluster(ctx, opts.ClusterName, opts.Workers, opts.ExtraMounts...)
 	if err != nil {
@@ -182,7 +182,7 @@ func RunKindSuite(t *testing.T, opts SuiteOpts) *SuiteState {
 	}
 	// The scheduler lists PodGroups at startup, so it follows the CRDs; the
 	// manager and a deployed OME follow it so their first gang finds it.
-	if err := installScheduler(ctx, opts.ClusterName, opts.Scheduler); err != nil {
+	if err := InstallScheduler(ctx, opts.ClusterName, opts.Scheduler); err != nil {
 		t.Fatalf("RunKindSuite: %v", err)
 	}
 

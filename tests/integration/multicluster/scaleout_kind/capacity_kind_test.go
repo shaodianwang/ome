@@ -34,36 +34,10 @@ var _ = ginkgo.Describe("Hardware capacity placement (KIND)", func() {
 	ginkgo.It("uses reported hardware independently of serving usage and rebalances within shared surge", func() {
 		env := setupSpecEnv()
 		label := uniqueName("capacity")
-		var reporters []*acceleratorquota.Reconciler
-		for i, m := range env.members {
-			member := m.c
-			setupCapacityHardware(member, label, []int64{4, 2}[i])
-			reporter := &acceleratorquota.Reconciler{Client: member.client, APIReader: member.client, Scheme: member.client.Scheme(), Log: logr.Discard(), Options: tree.Options{RootName: v1beta1.AcceleratorQuotaRootName, MaxDepth: 5}, Capacity: acceleratorquota.CapacityOptions{Resources: []string{syntheticAccelerator}}}
-			reporters = append(reporters, reporter)
-			registerCapacityRootCleanup(member.ctx, member.client, reporter)
+		for i, member := range env.members {
+			setupCapacityHardware(member.c, label, []int64{4, 2}[i])
 		}
-		fleet := &acceleratorquota.Reconciler{Client: controlCluster.client, APIReader: controlCluster.client, Scheme: controlCluster.client.Scheme(), Log: logr.Discard(), Options: tree.Options{RootName: v1beta1.AcceleratorQuotaRootName, MaxDepth: 5}, Project: acceleratorquota.ProjectOptions{Clusters: controlCluster.clusters, Origin: controlPlaneID, FieldManager: "capacity-test"}}
-		root := &v1beta1.AcceleratorQuota{ObjectMeta: metav1.ObjectMeta{Name: v1beta1.AcceleratorQuotaRootName}, Spec: v1beta1.AcceleratorQuotaSpec{Role: v1beta1.AcceleratorQuotaRoleCohort}}
-		mustCreate(controlCluster, root)
-		registerCapacityRootCleanup(controlCluster.ctx, controlCluster.client, fleet)
-		collect := func() {
-			for i, reporter := range reporters {
-				gomega.Eventually(func(g gomega.Gomega) {
-					_, err := reporter.Reconcile(env.members[i].c.ctx, ctrl.Request{})
-					g.Expect(err).NotTo(gomega.HaveOccurred())
-					r := &v1beta1.AcceleratorQuota{}
-					g.Expect(env.members[i].c.client.Get(env.members[i].c.ctx, client.ObjectKey{Name: root.Name}, r)).To(gomega.Succeed())
-					g.Expect(r.Status.Capacity).NotTo(gomega.BeEmpty())
-				}).WithTimeout(mediumTimeout).WithPolling(pollInterval).Should(gomega.Succeed())
-			}
-			gomega.Eventually(func(g gomega.Gomega) {
-				_, err := fleet.Reconcile(controlCluster.ctx, ctrl.Request{})
-				g.Expect(err).NotTo(gomega.HaveOccurred())
-				g.Expect(controlCluster.client.Get(controlCluster.ctx, client.ObjectKey{Name: root.Name}, root)).To(gomega.Succeed())
-				g.Expect(root.Status.Capacity).NotTo(gomega.BeEmpty())
-				g.Expect(root.Status.Capacity[0].PerCluster).To(gomega.HaveLen(2))
-			}).WithTimeout(mediumTimeout).WithPolling(pollInterval).Should(gomega.Succeed())
-		}
+		collect := capacityCollector(env)
 		collect()
 		model, runtime := env.seedModelRuntimeOnMembers()
 		source := runnableSourceISVC(env.isvcNS, env.isvcName, model, runtime, v1beta1.PlacementModeSplitByCapacity, 3)
@@ -143,6 +117,13 @@ var _ = ginkgo.Describe("Hardware capacity placement (KIND)", func() {
 })
 
 func setupCapacityHardware(member cluster, label string, amount int64) {
+	nodes := &corev1.NodeList{}
+	gomega.Expect(member.client.List(member.ctx, nodes)).To(gomega.Succeed())
+	gomega.Expect(nodes.Items).To(gomega.HaveLen(1))
+	setupCapacityHardwareNodes(member, label, amount, nodes.Items)
+}
+
+func setupCapacityHardwareNodes(member cluster, label string, amount int64, nodes []corev1.Node) {
 	cm := &corev1.ConfigMap{}
 	key := client.ObjectKey{Name: constants.InferenceServiceConfigMapName, Namespace: constants.OMENamespace}
 	gomega.Expect(member.client.Get(member.ctx, key, cm)).To(gomega.Succeed())
@@ -153,28 +134,33 @@ func setupCapacityHardware(member cluster, label string, amount int64) {
 	gomega.Expect(member.client.Update(member.ctx, cm)).To(gomega.Succeed())
 	flavor := &kueuev1beta2.ResourceFlavor{ObjectMeta: metav1.ObjectMeta{Name: label}, Spec: kueuev1beta2.ResourceFlavorSpec{NodeLabels: map[string]string{syntheticAccelerator: label}}}
 	mustCreate(member, flavor)
-	nodes := &corev1.NodeList{}
-	gomega.Expect(member.client.List(member.ctx, nodes)).To(gomega.Succeed())
-	gomega.Expect(nodes.Items).To(gomega.HaveLen(1))
-	node := nodes.Items[0].DeepCopy()
-	base := node.DeepCopy()
-	node.Labels[syntheticAccelerator] = label
-	gomega.Expect(member.client.Patch(member.ctx, node, client.MergeFrom(base))).To(gomega.Succeed())
-	setCapacityHardware(member, amount)
 	ginkgo.DeferCleanup(func() {
 		deleteIfExists(member, flavor)
 		gomega.Expect(member.client.Get(member.ctx, key, cm)).To(gomega.Succeed())
 		cm.Data = before.Data
 		gomega.Expect(member.client.Update(member.ctx, cm)).To(gomega.Succeed())
-		gomega.Expect(member.client.Get(member.ctx, client.ObjectKeyFromObject(node), node)).To(gomega.Succeed())
-		base := node.DeepCopy()
-		delete(node.Labels, syntheticAccelerator)
-		gomega.Expect(member.client.Patch(member.ctx, node, client.MergeFrom(base))).To(gomega.Succeed())
-		base = node.DeepCopy()
-		delete(node.Status.Capacity, syntheticAccelerator)
-		delete(node.Status.Allocatable, syntheticAccelerator)
-		gomega.Expect(member.client.Status().Patch(member.ctx, node, client.MergeFrom(base))).To(gomega.Succeed())
 	})
+	for _, node := range nodes {
+		gomega.Expect(node.Labels).NotTo(gomega.HaveKey(syntheticAccelerator))
+		gomega.Expect(node.Status.Capacity).NotTo(gomega.HaveKey(corev1.ResourceName(syntheticAccelerator)))
+		base := node.DeepCopy()
+		node.Labels[syntheticAccelerator] = label
+		gomega.Expect(member.client.Patch(member.ctx, &node, client.MergeFrom(base))).To(gomega.Succeed())
+		base = node.DeepCopy()
+		node.Status.Capacity[syntheticAccelerator] = *resource.NewQuantity(amount, resource.DecimalSI)
+		node.Status.Allocatable[syntheticAccelerator] = *resource.NewQuantity(amount, resource.DecimalSI)
+		gomega.Expect(member.client.Status().Patch(member.ctx, &node, client.MergeFrom(base))).To(gomega.Succeed())
+		ginkgo.DeferCleanup(func() {
+			gomega.Expect(member.client.Get(member.ctx, client.ObjectKeyFromObject(&node), &node)).To(gomega.Succeed())
+			base := node.DeepCopy()
+			delete(node.Labels, syntheticAccelerator)
+			gomega.Expect(member.client.Patch(member.ctx, &node, client.MergeFrom(base))).To(gomega.Succeed())
+			base = node.DeepCopy()
+			delete(node.Status.Capacity, syntheticAccelerator)
+			delete(node.Status.Allocatable, syntheticAccelerator)
+			gomega.Expect(member.client.Status().Patch(member.ctx, &node, client.MergeFrom(base))).To(gomega.Succeed())
+		})
+	}
 }
 
 func setCapacityHardware(member cluster, amount int64) {
@@ -237,5 +223,37 @@ func capacityRoutePublisher(env *specEnv) func(gomega.Gomega) {
 		g.Expect(err).NotTo(gomega.HaveOccurred())
 		_, err = publisher.Reconcile(controlCluster.ctx, ctrl.Request{NamespacedName: key})
 		g.Expect(err).NotTo(gomega.HaveOccurred())
+	}
+}
+
+func capacityCollector(env *specEnv) func() {
+	var reporters []*acceleratorquota.Reconciler
+	for _, m := range env.members {
+		member := m.c
+		reporter := &acceleratorquota.Reconciler{Client: member.client, APIReader: member.client, Scheme: member.client.Scheme(), Log: logr.Discard(), Options: tree.Options{RootName: v1beta1.AcceleratorQuotaRootName, MaxDepth: 5}, Capacity: acceleratorquota.CapacityOptions{Resources: []string{syntheticAccelerator}}}
+		reporters = append(reporters, reporter)
+		registerCapacityRootCleanup(member.ctx, member.client, reporter)
+	}
+	fleet := &acceleratorquota.Reconciler{Client: controlCluster.client, APIReader: controlCluster.client, Scheme: controlCluster.client.Scheme(), Log: logr.Discard(), Options: tree.Options{RootName: v1beta1.AcceleratorQuotaRootName, MaxDepth: 5}, Project: acceleratorquota.ProjectOptions{Clusters: controlCluster.clusters, Origin: controlPlaneID, FieldManager: "capacity-test"}}
+	root := &v1beta1.AcceleratorQuota{ObjectMeta: metav1.ObjectMeta{Name: v1beta1.AcceleratorQuotaRootName}, Spec: v1beta1.AcceleratorQuotaSpec{Role: v1beta1.AcceleratorQuotaRoleCohort}}
+	mustCreate(controlCluster, root)
+	registerCapacityRootCleanup(controlCluster.ctx, controlCluster.client, fleet)
+	return func() {
+		for i, reporter := range reporters {
+			gomega.Eventually(func(g gomega.Gomega) {
+				_, err := reporter.Reconcile(env.members[i].c.ctx, ctrl.Request{})
+				g.Expect(err).NotTo(gomega.HaveOccurred())
+				r := &v1beta1.AcceleratorQuota{}
+				g.Expect(env.members[i].c.client.Get(env.members[i].c.ctx, client.ObjectKey{Name: root.Name}, r)).To(gomega.Succeed())
+				g.Expect(r.Status.Capacity).NotTo(gomega.BeEmpty())
+			}).WithTimeout(mediumTimeout).WithPolling(pollInterval).Should(gomega.Succeed())
+		}
+		gomega.Eventually(func(g gomega.Gomega) {
+			_, err := fleet.Reconcile(controlCluster.ctx, ctrl.Request{})
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			g.Expect(controlCluster.client.Get(controlCluster.ctx, client.ObjectKey{Name: root.Name}, root)).To(gomega.Succeed())
+			g.Expect(root.Status.Capacity).NotTo(gomega.BeEmpty())
+			g.Expect(root.Status.Capacity[0].PerCluster).To(gomega.HaveLen(2))
+		}).WithTimeout(mediumTimeout).WithPolling(pollInterval).Should(gomega.Succeed())
 	}
 }

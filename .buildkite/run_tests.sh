@@ -142,6 +142,12 @@ package_kind_bundle() {
   stage="$(mktemp -d)"
   mkdir -p "$stage/dep-crds"
   go test -c -o "$stage/$binary_name" "$package_path"
+  # The multi-cluster physical-fit lane needs this commit's scheduler even on
+  # PRs, whose image builds do not publish. A static binary needs no base pull.
+  if [ "$bundle_name" = multicluster-kind-test.tgz ]; then
+    mkdir -p "$stage/scheduler"
+    (cd scheduler && CGO_ENABLED=0 go build -trimpath -o "$stage/scheduler/ome-scheduler" ./cmd/ome-scheduler)
+  fi
   # Only the gitignored, vendored dep-crds travel with the bundle; the committed
   # ones (prometheus-operator, envoy-gateway) arrive with the agent's checkout.
   # kueue-install is a rendered install manifest rather than a CRD set, and it
@@ -158,6 +164,9 @@ package_kind_bundle() {
     printf 'goarch=%s\n' "$(go env GOARCH)"
     printf 'binary=%s\n' "$binary_name"
     printf 'sha256=%s\n' "$(sha256sum "$stage/$binary_name" | awk '{print $1}')"
+    if [ -f "$stage/scheduler/ome-scheduler" ]; then
+      printf 'scheduler_sha256=%s\n' "$(sha256sum "$stage/scheduler/ome-scheduler" | awk '{print $1}')"
+    fi
   } >"$stage/manifest"
   tar -C "$stage" -czf "$PWD/$kind_artifact_dir/$bundle_name" .
   rm -rf -- "$stage"

@@ -918,6 +918,20 @@ class TestMulticlusterKindGroup(PipelineTestCase):
         )
         self.assertIn("soft_fail: true", self.yaml_text)
 
+    def test_scheduler_shard_runs_on_prs_with_two_workers(self):
+        with mock.patch.object(gp, "BRANCH", "feature/test"):
+            output = gp._mc_kind_group()
+        blocks = output.split("- label:")[1:]
+        for block in blocks:
+            with self.subTest(block=block.splitlines()[0]):
+                if 'key: "kind-gke-mc-scheduling"' in block:
+                    self.assertIn('OME_TEST_SCHEDULER: "ome-scheduler"', block)
+                    self.assertIn('OME_TEST_SCHEDULER_WORKERS: "2"', block)
+                    self.assertIn("scheduling_kind_test", block)
+                else:
+                    self.assertNotIn("OME_TEST_SCHEDULER", block)
+        self.assertIn('key: "kind-gke-mc-scheduling"', output)
+
     def test_shards_partition_the_suite(self):
         patterns = _focus_patterns(self.yaml_text)
         groups = gp._mc_kind_spec_groups()

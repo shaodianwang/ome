@@ -102,8 +102,9 @@ MC_KIND_SPEC_GROUPS = (
         "legacy_compatibility",
     )),
     ("quota", "Multi-cluster Kueue quota", (
-        "admission", "split_quota", "queue_routing", "single_race", "single_move", "single_loss",
+        "admission", "split_quota", "queue_routing", "single_race", "single_move", "single_loss", "gang",
     )),
+    ("scheduling", "Multi-cluster gang physical fit", ("scheduling",)),
 )
 
 # The alfred lane: one three-worker KIND cluster per group, exact ownership like
@@ -768,6 +769,9 @@ def _mc_kind_group() -> str:
     plugins = _gke_kind_plugins(_kind_ci_image(f"test-{COMMIT[:8]}-{BUILD_NUMBER}"))
     steps = []
     for slug, label, files in _mc_kind_spec_groups():
+        scheduler_env = {}
+        if slug == "scheduling":
+            scheduler_env = {"OME_TEST_SCHEDULER": EVAL_GANG_SCHEDULER, "OME_TEST_SCHEDULER_WORKERS": "2"}
         file_label = "file" if len(files) == 1 else "files"
         steps.append(
             {
@@ -779,6 +783,7 @@ def _mc_kind_group() -> str:
                     "OME_KIND_TEST_BUNDLE": "/kind-test/multicluster-kind-test.tgz",
                     "OME_KIND_FOCUS": _kind_focus(files),
                     "OME_KIND_TIMEOUT": "60m",
+                    **scheduler_env,
                 },
                 "agents": {"queue": GKE_QUEUE},
                 "command": "sh .buildkite/run_kind_tests_gke.sh",

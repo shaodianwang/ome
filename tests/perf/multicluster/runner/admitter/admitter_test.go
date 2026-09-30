@@ -50,6 +50,9 @@ func TestAdmitterFollowsExecutionPolicy(t *testing.T) {
 			if err := v1beta1.AddToScheme(scheme); err != nil {
 				t.Fatal(err)
 			}
+			if err := corev1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
 			statusWrites := 0
 			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(derived).
 				WithStatusSubresource(&v1beta1.InferenceService{}, &v1beta1.InferenceReplica{}).
@@ -126,10 +129,22 @@ func TestAdmitterFollowsExecutionPolicy(t *testing.T) {
 			}
 			wantRows := make([]v1beta1.OMENativeInstanceStatus, int(tt.floor))
 			for i := range wantRows {
-				wantRows[i] = v1beta1.OMENativeInstanceStatus{Index: int32(i), Phase: v1beta1.OMENativeInstancePending, Admitted: true}
+				wantRows[i] = v1beta1.OMENativeInstanceStatus{Index: int32(i), Phase: v1beta1.OMENativeInstancePending, Admitted: true, RunningRevision: ir.Name + "-fixture", PodCount: 1}
 			}
 			if diff := cmp.Diff(wantRows, rows); diff != "" {
 				t.Errorf("admitted rows (-want +got):\n%s", diff)
+			}
+			pods := &corev1.PodList{}
+			if err := c.List(t.Context(), pods, client.InNamespace(ir.Namespace)); err != nil {
+				t.Fatal(err)
+			}
+			if diff := cmp.Diff(int(tt.floor), len(pods.Items)); diff != "" {
+				t.Fatalf("physical instances (-want +got):\n%s", diff)
+			}
+			for _, pod := range pods.Items {
+				if !metav1.IsControlledBy(&pod, ir) {
+					t.Fatal("Pod is not owned by its component")
+				}
 			}
 			before := statusWrites
 			if _, err := r.Reconcile(t.Context(), req); err != nil {

@@ -85,17 +85,31 @@ var _ = ginkgo.Describe("Multi-cluster re-shard and failure (KIND)", func() {
 
 		gomega.Eventually(func(g gomega.Gomega) {
 			g.Expect(runningEnginePodsOn(g, winner.c, env.isvcNS, env.isvcName)).
-				To(gomega.BeNumerically(">=", 1))
+				To(gomega.Equal(1))
+			ps := placementStatusOf(env.isvcNS, env.isvcName)
+			g.Expect(ps).NotTo(gomega.BeNil())
+			g.Expect(ps.Plan).NotTo(gomega.BeNil())
+			candidate := candidateFor(ps, winner.wcName)
+			g.Expect(candidate).NotTo(gomega.BeNil())
+			g.Expect(cmp.Diff(ps.Plan.ID, candidate.AppliedPlanID)).To(gomega.BeEmpty())
+			g.Expect(cmp.Diff(int32(1), candidate.ReadyReplicas)).To(gomega.BeEmpty())
+			for _, member := range env.members {
+				if member.wcName != winner.wcName {
+					g.Expect(derivedSweptOn(member.c, env.isvcNS, env.isvcName)).To(gomega.BeTrue())
+				}
+			}
 		}).WithTimeout(longTimeout).WithPolling(pollInterval).Should(gomega.Succeed())
+		accepted := placementStatusOf(env.isvcNS, env.isvcName).Plan.DeepCopy()
+		derived := &v1beta1.InferenceService{}
+		gomega.Expect(winner.c.client.Get(winner.c.ctx, types.NamespacedName{Namespace: env.isvcNS, Name: env.isvcName}, derived)).To(gomega.Succeed())
+		derivedUID := derived.UID
 
 		pods := enginePodsOn(gomega.Default, winner.c, env.isvcNS, env.isvcName)
 		gomega.Expect(pods).NotTo(gomega.BeEmpty())
 		oldUID := pods[0].UID
 
-		// An Instance reports Admitted only while it has pods, so the window
-		// between delete and replacement looks momentarily like lost admission.
-		// The placement must ride that out rather than re-race — pod churn is
-		// routine, and re-placing on it would move a healthy service.
+		// Admission can lapse during Pod replacement. The persisted winner and
+		// member identity must survive that gap without opening another race.
 		ginkgo.By("deleting the winner's engine pod")
 		victim := &corev1.Pod{}
 		gomega.Expect(winner.c.client.Get(winner.c.ctx,
@@ -106,8 +120,18 @@ var _ = ginkgo.Describe("Multi-cluster re-shard and failure (KIND)", func() {
 		gomega.Consistently(func(g gomega.Gomega) {
 			ps := placementStatusOf(env.isvcNS, env.isvcName)
 			g.Expect(ps).NotTo(gomega.BeNil())
-			g.Expect(ps.Cluster).To(gomega.Equal(winner.wcName))
-			g.Expect(ps.Phase).To(gomega.Equal(v1beta1.PlacementPhasePlaced))
+			g.Expect(ps.Plan).NotTo(gomega.BeNil())
+			g.Expect(cmp.Diff(winner.wcName, ps.Cluster)).To(gomega.BeEmpty())
+			g.Expect(cmp.Diff(accepted.Winner, ps.Plan.Winner)).To(gomega.BeEmpty())
+			g.Expect(cmp.Diff(accepted.ID, ps.Plan.ID)).To(gomega.BeEmpty())
+			g.Expect(winner.c.client.Get(winner.c.ctx, client.ObjectKeyFromObject(derived), derived)).To(gomega.Succeed())
+			g.Expect(cmp.Diff(derivedUID, derived.UID)).To(gomega.BeEmpty())
+			g.Expect(derived.DeletionTimestamp.IsZero()).To(gomega.BeTrue())
+			for _, member := range env.members {
+				if member.wcName != winner.wcName {
+					g.Expect(derivedSweptOn(member.c, env.isvcNS, env.isvcName)).To(gomega.BeTrue())
+				}
+			}
 		}).WithTimeout(20*time.Second).WithPolling(time.Second).Should(gomega.Succeed(),
 			"pod-UID rotation must not re-race the placement")
 
@@ -123,6 +147,9 @@ var _ = ginkgo.Describe("Multi-cluster re-shard and failure (KIND)", func() {
 				}
 			}
 			g.Expect(running).To(gomega.BeTrue(), "the replacement should reach Running")
+			ps := placementStatusOf(env.isvcNS, env.isvcName)
+			g.Expect(cmp.Diff(winner.wcName, ps.Cluster)).To(gomega.BeEmpty())
+			g.Expect(cmp.Diff(v1beta1.PlacementPhasePlaced, ps.Phase)).To(gomega.BeEmpty())
 		}).WithTimeout(longTimeout).WithPolling(pollInterval).Should(gomega.Succeed())
 	})
 

@@ -106,6 +106,22 @@ func TestObservePlannedHome(t *testing.T) {
 			f.resources.addGang()
 			f.extraObjects = []client.Object{testMemberPodGroup(f.resources.ir)}
 		}, want: steady},
+		{name: "partial gang cannot claim whole replica admission", edit: func(f *plannedObservationFixture) {
+			f.resources.addGang()
+			f.extraObjects = []client.Object{testMemberPodGroup(f.resources.ir)}
+			f.resources.pods = f.resources.pods[:1]
+			f.resources.ir.Status.InstanceStatuses[0].PodCount = 1
+			f.resources.ir.Status.InstanceStatuses[0].ServingPodCount = 1
+		}, want: result{Home: allocation.Home{Known: true, Applied: true, Occupied: 1}, PauseAcknowledged: true, Applied: "plan-a"}},
+		{name: "creating partial gang has no admitted replica", edit: func(f *plannedObservationFixture) {
+			f.resources.addGang()
+			f.extraObjects = []client.Object{testMemberPodGroup(f.resources.ir)}
+			f.resources.pods = f.resources.pods[:1]
+			f.resources.ir.Status.ReadyReplicas = 0
+			f.resources.ir.Status.InstanceStatuses[0].Phase = v1beta1.OMENativeInstanceCreating
+			f.resources.ir.Status.InstanceStatuses[0].PodCount = 1
+			f.resources.ir.Status.InstanceStatuses[0].ServingPodCount = 0
+		}, want: result{Home: allocation.Home{Known: true, Applied: true, Occupied: 1}, PauseAcknowledged: true, Applied: "plan-a"}},
 		{name: "unresolved desired replicas are unknown", edit: func(f *plannedObservationFixture) { f.resources.ir.Spec.Replicas = nil }, wantErr: true},
 		{name: "router replicas remain a shared per home policy", edit: func(f *plannedObservationFixture) {
 			ir := f.resources.ir.DeepCopy()

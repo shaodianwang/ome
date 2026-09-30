@@ -124,9 +124,15 @@ var _ = ginkgo.Describe("Multi-cluster placement lifecycle", func() {
 			}
 		}, eventuallyTimeout, eventuallyPoll).Should(gomega.Succeed())
 
-		// After the grace window the placer re-races: the derived reappears on the
-		// candidates, member1's still-admitted engine wins again, and the loser
-		// copy on member2 is swept.
+		ginkgo.By("collecting the old member inventory before admitting a fresh derived identity")
+		gomega.Expect(member1Cluster.client.DeleteAllOf(member1Cluster.ctx, &corev1.Pod{}, client.InNamespace(isvcNS),
+			client.MatchingLabels{constants.InferenceServicePodLabelKey: isvcName}, client.GracePeriodSeconds(0))).To(gomega.Succeed())
+		gomega.Expect(member1Cluster.client.Delete(member1Cluster.ctx, &v1beta1.InferenceReplica{ObjectMeta: metav1.ObjectMeta{Namespace: isvcNS, Name: isvcName + "-engine"}})).To(gomega.Succeed())
+		gomega.Eventually(func() bool {
+			_, exists := getDerivedOn(member1Cluster, isvcNS, isvcName)
+			return exists
+		}, eventuallyTimeout, eventuallyPoll).Should(gomega.BeTrue())
+		admitDerivedOn(member1Cluster, isvcNS, isvcName)
 		ginkgo.By("asserting the re-race resolves back to the admitted member after the window")
 		gomega.Eventually(func(g gomega.Gomega) {
 			_, ok := getDerivedOn(member1Cluster, isvcNS, isvcName)
@@ -278,6 +284,9 @@ var _ = ginkgo.Describe("Multi-cluster placement lifecycle", func() {
 			{Index: 1, Phase: v1beta1.OMENativeInstanceReady, Admitted: true, ServingPodCount: 1},
 		}
 		upsertEngineIRStatusOn(member1Cluster, isvcNS, isvcName, failed)
+		persistedRows, err := util.GetInstanceStatuses(member1Cluster.ctx, member1Cluster.client,
+			client.ObjectKey{Namespace: isvcNS, Name: isvcName + "-engine"})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Eventually(func(g gomega.Gomega) {
 			ps := placementStatusOf(isvcNS, isvcName)
 			g.Expect(ps).NotTo(gomega.BeNil())
@@ -309,7 +318,7 @@ var _ = ginkgo.Describe("Multi-cluster placement lifecycle", func() {
 			rows, err := util.GetInstanceStatuses(member1Cluster.ctx, member1Cluster.client,
 				client.ObjectKey{Namespace: isvcNS, Name: isvcName + "-engine"})
 			g.Expect(err).To(gomega.Succeed())
-			g.Expect(rows).To(gomega.Equal(failed))
+			g.Expect(cmp.Diff(persistedRows, rows)).To(gomega.BeEmpty())
 		}, 2*placementRequeue, eventuallyPoll).Should(gomega.Succeed())
 	})
 
@@ -362,35 +371,10 @@ var _ = ginkgo.Describe("Multi-cluster placement lifecycle", func() {
 	})
 })
 
-// upsertEngineIRStatusOn creates (if needed) the engine-component
-// InferenceReplica for a derived ISVC on a member and sets its InstanceStatuses
-// wholesale — the authoritative per-instance admission/phase signal the
-// control-plane placer reads. The sim path has no member reconciler, so the
-// suite plays the worker's role here (a generalization of admitDerivedOn for
-// arbitrary instance sets).
+// upsertEngineIRStatusOn projects the member's policy and materializes the
+// instance inventory before publishing simulated status.
 func upsertEngineIRStatusOn(member cluster, namespace, name string, instances []v1beta1.OMENativeInstanceStatus) {
-	irName := name + "-" + string(v1beta1.EngineComponent)
-	gomega.EventuallyWithOffset(1, func(g gomega.Gomega) {
-		ir := &v1beta1.InferenceReplica{
-			ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: irName},
-			// Minimal valid spec so the Create passes CRD schema validation on
-			// bare members (the sim path has no manager to pre-create the IR).
-			Spec: v1beta1.InferenceReplicaSpec{
-				ParentRef: &v1beta1.ParentReference{Name: name},
-				Component: v1beta1.EngineComponent,
-				Runners: []v1beta1.Runner{{
-					Name: v1beta1.RunnerNameDefault,
-					Size: 1,
-					Template: corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "sim:latest"}}},
-					},
-				}},
-			},
-		}
-		g.Expect(client.IgnoreAlreadyExists(member.client.Create(member.ctx, ir))).To(gomega.Succeed())
-		g.Expect(member.client.Get(member.ctx, types.NamespacedName{Namespace: namespace, Name: irName}, ir)).To(gomega.Succeed())
-		g.Expect(util.WriteDenseInstanceStatuses(member.ctx, member.client, ir, instances)).To(gomega.Succeed())
-	}, eventuallyTimeout, eventuallyPoll).Should(gomega.Succeed())
+	upsertPlannedEngineStatusOn(member, namespace, name, instances)
 }
 
 // admittedEngineInstances builds n admitted, Ready engine instance statuses —

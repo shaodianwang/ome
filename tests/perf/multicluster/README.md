@@ -15,8 +15,9 @@ topologies contributes to the reported wall time.
 
 Sources select OMENative and reference a namespaced runtime seeded on every
 member. Each class supplies `runtimeName`, `image`, and a positive `minReplicas`.
-The synthetic member controller writes owned InferenceReplicas, admits every
-configured replica, acknowledges the execution policy and parent generation,
+The synthetic member controller writes owned InferenceReplicas and matching
+single-Pod instances, admits every configured replica, acknowledges the execution
+policy and parent generation,
 and triggers the metadata admission funnel through IR updates. The member
 summary can remain unchanged during admission. These fixtures
 measure initial admission and placement; they do not simulate physical Pod

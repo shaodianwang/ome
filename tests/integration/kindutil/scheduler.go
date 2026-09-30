@@ -13,8 +13,8 @@ import (
 
 // SchedulerInstall puts the gang scheduler into the suite's KIND cluster so
 // the fixtures' pods are placed by it instead of kube-scheduler. The chart is
-// installed with the values a single-node cluster needs (one replica, no
-// PodDisruptionBudget, small requests); the PodGroup CRD it consumes is added
+// installed with small test-cluster values (one replica, no PodDisruptionBudget,
+// small requests); the PodGroup CRD it consumes is added
 // to the suite's CRD paths by RunKindSuite.
 type SchedulerInstall struct {
 	// Name is the scheduler profile pods select through spec.schedulerName.
@@ -67,7 +67,8 @@ func (s *SchedulerInstall) topologyKey() string {
 	return "topology.kubernetes.io/zone"
 }
 
-func (s *SchedulerInstall) minWorkers() int {
+// WorkerCount is the minimum number of worker nodes the scheduler fixtures need.
+func (s *SchedulerInstall) WorkerCount() int {
 	if s.MinWorkers > 0 {
 		return s.MinWorkers
 	}
@@ -95,9 +96,9 @@ func withSchedulerCRDs(paths []string, s *SchedulerInstall) []string {
 	return append(append([]string{}, paths...), schedulerCRDPath)
 }
 
-// installScheduler loads the scheduler image into clusterName and installs
+// InstallScheduler loads the scheduler image into clusterName and installs
 // the chart under the given profile name, waiting for the Deployment.
-func installScheduler(ctx context.Context, clusterName string, s *SchedulerInstall) error {
+func InstallScheduler(ctx context.Context, clusterName string, s *SchedulerInstall) error {
 	if s == nil {
 		return nil
 	}

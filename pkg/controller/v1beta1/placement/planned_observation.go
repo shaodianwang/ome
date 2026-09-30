@@ -118,6 +118,11 @@ func (r *Reconciler) observePlannedHome(ctx context.Context, source *v1beta1.Inf
 		if err != nil {
 			return out, err
 		}
+		status, err := verifiedMemberAdmission(ir, byOwner[ir.UID], gangSizes)
+		if err != nil {
+			return out, err
+		}
+		ir.Status = *status
 		count, err := countMemberResources(ir, byOwner[ir.UID], gangSizes)
 		if err != nil {
 			return out, err

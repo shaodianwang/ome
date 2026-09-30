@@ -242,6 +242,10 @@ func (r *Reconciler) markAdmitted(ctx context.Context, derived *v1beta1.Inferenc
 		}
 		ir.Status.ObservedGeneration = ir.Generation
 		ir.Status.PlacementObservedGeneration = ir.Generation
+		rows, err = util.MaterializeSinglePodInstances(ctx, r.client, ir, rows)
+		if err != nil {
+			return err
+		}
 		if err := util.WriteDenseInstanceStatuses(ctx, r.client, ir, rows); err != nil {
 			return err
 		}

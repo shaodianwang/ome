@@ -29,7 +29,7 @@ func TestWithSchedulerCRDsAddsThePodGroupCRDOnce(t *testing.T) {
 }
 
 func TestInstallSchedulerValidation(t *testing.T) {
-	if err := installScheduler(context.Background(), "any", nil); err != nil {
+	if err := InstallScheduler(context.Background(), "any", nil); err != nil {
 		t.Fatalf("nil install must be a no-op, got %v", err)
 	}
 	for _, s := range []*SchedulerInstall{
@@ -38,7 +38,7 @@ func TestInstallSchedulerValidation(t *testing.T) {
 		{Name: "ome-scheduler", Image: "no-tag"},
 		{Name: "ome-scheduler", Image: "registry:5000/ome-scheduler"},
 	} {
-		if err := installScheduler(context.Background(), "any", s); err == nil {
+		if err := InstallScheduler(context.Background(), "any", s); err == nil {
 			t.Fatalf("expected a validation error for %+v", s)
 		}
 	}
@@ -49,7 +49,7 @@ func TestInstallSchedulerValidation(t *testing.T) {
 	if s.topologyKey() != "topology.kubernetes.io/zone" || s.topologyDomain() != "ome-kind" {
 		t.Fatalf("topology defaults: key %q domain %q", s.topologyKey(), s.topologyDomain())
 	}
-	if s.minWorkers() != 6 || (&SchedulerInstall{MinWorkers: 3}).minWorkers() != 3 {
-		t.Fatalf("worker defaults: %d", s.minWorkers())
+	if s.WorkerCount() != 6 || (&SchedulerInstall{MinWorkers: 3}).WorkerCount() != 3 {
+		t.Fatalf("worker defaults: %d", s.WorkerCount())
 	}
 }

@@ -48,7 +48,11 @@ func TestLegacySingleUpdatesFailedMember(t *testing.T) {
 			worker := workerWithReplicaCounts(t, scheme, "svc.a.example.com", 3, 3)
 			if tt.component == v1beta1.RouterComponent {
 				source.Spec.Router = &v1beta1.RouterSpec{}
-				require.NoError(t, worker.Create(t.Context(), irWithInstances(v1beta1.RouterComponent, true, true)))
+				member := &v1beta1.InferenceService{}
+				require.NoError(t, worker.Get(t.Context(), client.ObjectKeyFromObject(source), member))
+				for _, object := range observedWorkerObjects(member, irWithInstances(v1beta1.RouterComponent, true, true))[2:] {
+					require.NoError(t, worker.Create(t.Context(), object))
+				}
 			}
 			other := emptyWorker(scheme)
 			mutations := 0

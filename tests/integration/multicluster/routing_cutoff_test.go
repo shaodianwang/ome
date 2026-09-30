@@ -17,7 +17,9 @@ import (
 	"github.com/ome-projects/ome/pkg/apis/ome/v1beta1"
 	placementendpoint "github.com/ome-projects/ome/pkg/controller/v1beta1/placement/endpoint"
 	placementrouting "github.com/ome-projects/ome/pkg/controller/v1beta1/placement/routing"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	ometesting "github.com/ome-projects/ome/pkg/utils/testing/v1beta1"
+	"github.com/ome-projects/ome/tests/integration/util"
 )
 
 var _ = ginkgo.Describe("Multi-cluster routing cutoff", func() {
@@ -222,7 +224,20 @@ func setEngineReadyReplicasOn(member cluster, namespace, name string, ready int3
 		ir.Status.ReadyReplicas = ready
 		ir.Status.ServingReplicas = ready
 		ir.Status.AvailableReplicas = ready
-		g.Expect(member.client.Status().Update(member.ctx, ir)).To(gomega.Succeed())
+		rows, err := util.DecodedInstanceStatuses(ir)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		g.Expect(rows).To(gomega.HaveLen(1))
+		rows[0].ServingPodCount = ready
+		pod := &corev1.Pod{}
+		g.Expect(member.client.Get(member.ctx, client.ObjectKey{Namespace: namespace, Name: ir.Name + "-0"}, pod)).To(gomega.Succeed())
+		condition := corev1.ConditionFalse
+		if ready > 0 {
+			condition = corev1.ConditionTrue
+		}
+		pod.Status.Phase = corev1.PodRunning
+		pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: condition}, {Type: query.ServingConditionType, Status: condition}}
+		g.Expect(member.client.Status().Update(member.ctx, pod)).To(gomega.Succeed())
+		g.Expect(util.WriteDenseInstanceStatuses(member.ctx, member.client, ir, rows)).To(gomega.Succeed())
 	}, eventuallyTimeout, eventuallyPoll).Should(gomega.Succeed())
 }
 
