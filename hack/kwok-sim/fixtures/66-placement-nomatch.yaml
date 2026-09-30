@@ -4,11 +4,13 @@
 #
 # No WorkloadCluster carries this label, so candidate matching returns nothing
 # and the ISVC is never fanned out. Worth applying once, because "no derived
-# anywhere" is also what a broken transport looks like, and the two are only
-# distinguishable by the reason the control plane records:
+# anywhere" is also what a broken transport looks like. The ISVC status reads
+# the same for both — phase Pending, Ready=Unknown/PlacementPending — and only
+# the manager's log names the reason, NoMatch here, NoReadyClusters for the
+# transport:
 #
-#   kubectl --context kind-ome-quota-hub -n kwok-sim get isvc place-nomatch -o yaml \
-#     | sed -n '/^  placement:/,/^  [a-z]/p'
+#   kubectl --context kind-ome-quota-hub -n ome logs deploy/ome-controller-manager \
+#     | grep 'no placement candidates' | grep place-nomatch
 #
 # The same shape is a live source the orphan GC must never touch, so leaving it
 # applied while exercising the others costs nothing and keeps a survivor in the
@@ -16,7 +18,9 @@
 #
 # Note the distinction it does NOT show: an ISVC with no spec.placement at all
 # is not a fleet object and is never considered. Declaring a requirement that
-# matches no cluster is a different state, and this is that one.
+# matches no cluster is a different state, and this is that one. Dropping the
+# clusterAffinity term is a third: under ClusterAffinity an omitted affinity
+# matches every registration.
 #
 # Needs the enrolled namespace kwok-sim, which up.sh and fleet-up.sh create on
 # every cluster. No fixture declares it: it is shared, so a file that owned it
@@ -38,6 +42,7 @@ metadata:
     kwok-sim/managed: "true"
 spec:
   placement:
+    policy: ClusterAffinity
     mode: Single
     clusterAffinity:
       - matchExpressions:

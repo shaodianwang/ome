@@ -197,7 +197,14 @@ data:
         "dispatcherMode": "{{ .Values.ome.multicluster.config.placement.dispatcherMode | default "" }}",
         "dispatcherStepSize": {{ .Values.ome.multicluster.config.placement.dispatcherStepSize | default 0 }},
         "dispatcherRoundTimeout": "{{ .Values.ome.multicluster.config.placement.dispatcherRoundTimeout | default "" }}",
-        "localQueue": "{{ .Values.ome.multicluster.config.placement.localQueue | default "" }}"
+        "localQueue": "{{ .Values.ome.multicluster.config.placement.localQueue | default "" }}"{{- with .Values.ome.multicluster.config.placement.memberOperatorNamespace }},
+        "memberOperatorNamespace": {{ . | quote }}{{- end }}{{- with .Values.ome.multicluster.config.placement.capacity }},
+        "capacity": {
+          "rootName": {{ .rootName | default "" | quote }},
+          "maxAge": {{ .maxAge | default "" | quote }},
+          "stabilityWindow": {{ .stabilityWindow | default "" | quote }},
+          "refreshInterval": {{ .refreshInterval | default "" | quote }}
+        }{{- end }}
       },
       "endpoint": {
         "globalHostTemplate": "{{ .Values.ome.multicluster.config.endpoint.globalHostTemplate | default "" }}",

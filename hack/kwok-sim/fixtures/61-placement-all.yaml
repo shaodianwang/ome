@@ -10,11 +10,13 @@
 # workers = 16 pods = 16 nodes = 64 chips. Member A holds two cubes, member B
 # one, so this leaves A with a spare cube and fills B.
 #
-# Needs a tree applied first (any of the 5*-fleet-*.yaml). This names
-# sim-tenants.serving, and a workload naming a LocalQueue that does not exist is
-# never queued — the pods are created and gated, and stay there. Drop the
-# annotation to place without quota instead: with placement.localQueue empty the
-# derived pods carry no queue-name label at all, so Kueue leaves them alone.
+# Needs 50-fleet-proportional.yaml applied first, the one tree that funds a
+# whole cube on BOTH members — 51 gives member A 32 chips and 52 gives member B
+# 32, so under either one home stays gated. This names sim-tenants.serving, and
+# a workload naming a LocalQueue that does not exist is never queued — the pods
+# are created and gated, and stay there. Drop the annotation to place without
+# quota instead: with placement.localQueue empty the derived pods carry no
+# queue-name label at all, so Kueue leaves them alone.
 #
 # Needs the enrolled namespace kwok-sim, which up.sh and fleet-up.sh create on
 # every cluster. No fixture declares it: it is shared, so a file that owned it
@@ -36,6 +38,9 @@ metadata:
     kwok-sim/managed: "true"
 spec:
   placement:
+    # The OEP-0018.4 contract. Omitted, the placement is Legacy, which rejects
+    # clusterAffinity and holds the ISVC Pending with InvalidPlacementIntent.
+    policy: ClusterAffinity
     mode: All
     clusterAffinity:
       - matchExpressions:

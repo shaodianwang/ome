@@ -30,6 +30,7 @@ metadata:
     kwok-sim/managed: "true"
 spec:
   placement:
+    policy: ClusterAffinity
     mode: Split
     clusterAffinity:
       - matchExpressions:

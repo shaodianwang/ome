@@ -31,6 +31,14 @@
 #
 #   kubectl --context kind-ome-quota-a get aq -o wide
 #
+# Admitted, not Running. fleet-up.sh's default sizing carves every cube 4x4x4,
+# so there is no 2x2x2 slice to bind to: the gangs stay Pending with "no domain
+# has room for gang", and the hub reports Ready=False. Quota admission is
+# settled before the scheduler looks, so the figures above hold either way. To
+# see the pods Running too, size the fleet with a 2x2x2 cube on each member,
+# e.g. --cubes '4x4x4,2x2x2;2x2x2' — the same 128 and 64 chips, so this tree's
+# split is unchanged, but member B then has no 4x4x4 slice for 61-65.
+#
 # The point is the two lines side by side, from workloads that are neighbours in
 # one namespace. Neither leaf's admitted figure counts the other's pods, and
 # sim-tenants.batch's 16 on member-a is untouched by a sim-tenants.serving
@@ -58,6 +66,7 @@ metadata:
     kwok-sim/managed: "true"
 spec:
   placement:
+    policy: ClusterAffinity
     mode: All
     clusterAffinity:
       - matchExpressions:
@@ -88,6 +97,7 @@ metadata:
     kwok-sim/managed: "true"
 spec:
   placement:
+    policy: ClusterAffinity
     mode: All
     clusterAffinity:
       - matchExpressions:

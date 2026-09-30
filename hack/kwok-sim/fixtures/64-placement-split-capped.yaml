@@ -12,7 +12,8 @@
 #   kubectl --context kind-ome-quota-a -n kwok-sim get isvc place-split-capped \
 #     -o jsonpath='{.spec.engine.minReplicas}/{.spec.engine.maxReplicas}{"\n"}'
 #
-# Needs a tree applied first (any of the 5*-fleet-*.yaml).
+# Needs 50-fleet-proportional.yaml applied first, the one tree that funds a
+# whole cube on both members.
 #
 # Needs the enrolled namespace kwok-sim, which up.sh and fleet-up.sh create on
 # every cluster. No fixture declares it: it is shared, so a file that owned it
@@ -34,6 +35,7 @@ metadata:
     kwok-sim/managed: "true"
 spec:
   placement:
+    policy: ClusterAffinity
     mode: Split
     clusterAffinity:
       - matchExpressions:

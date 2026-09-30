@@ -699,6 +699,24 @@ for role in control-plane workload; do
   fi
 done
 
+# The manager reads both from multicluster.placement, so a value that is not
+# rendered there leaves capacity placement pending however the chart is set.
+placement_config="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set ome.multicluster.config.placement.memberOperatorNamespace=operator-system \
+  --set ome.multicluster.config.placement.capacity.rootName=capacity-root \
+  --set ome.multicluster.config.placement.capacity.maxAge=5m \
+  --set ome.multicluster.config.placement.capacity.stabilityWindow=1m \
+  --set ome.multicluster.config.placement.capacity.refreshInterval=10s \
+  --show-only templates/ome-controller/configmap.yaml | tr -d '[:space:]')"
+grep -Fq '"memberOperatorNamespace":"operator-system"' <<<"${placement_config}" ||
+  fail "placement.memberOperatorNamespace is not rendered into the manager configuration"
+grep -Fq '"capacity":{"rootName":"capacity-root","maxAge":"5m","stabilityWindow":"1m","refreshInterval":"10s"}' <<<"${placement_config}" ||
+  fail "placement.capacity is not rendered into the manager configuration"
+if tr -d '[:space:]' <<<"${controller_config}" | grep -Eq '"memberOperatorNamespace"|"capacity":\{"rootName"'; then
+  fail "default placement configuration names a member namespace or a capacity block"
+fi
+
 routing_topology_error='ome.multicluster.config.routing.enabled=true requires ome.multicluster.enabled=true and ome.multicluster.role=control-plane'
 
 if routing_without_multicluster="$("${helm_bin}" template ome-resources "${chart_dir}" \

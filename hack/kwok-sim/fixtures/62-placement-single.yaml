@@ -17,7 +17,9 @@
 #
 #   kubectl --context kind-ome-quota-b -n kwok-sim get isvc,pods -w
 #
-# Needs a tree applied first (any of the 5*-fleet-*.yaml).
+# Needs 50-fleet-proportional.yaml applied first. It funds a whole cube on both
+# members; under 51 or 52 only one member can admit, so the race is decided
+# before it starts.
 #
 # Needs the enrolled namespace kwok-sim, which up.sh and fleet-up.sh create on
 # every cluster. No fixture declares it: it is shared, so a file that owned it
@@ -39,6 +41,7 @@ metadata:
     kwok-sim/managed: "true"
 spec:
   placement:
+    policy: ClusterAffinity
     mode: Single
     clusterAffinity:
       - matchExpressions:

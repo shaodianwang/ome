@@ -1,0 +1,71 @@
+# A service split in proportion to the hardware each member holds.
+#
+#   kubectl --context kind-ome-quota-hub apply -f hack/kwok-sim/fixtures/50-fleet-proportional.yaml
+#   kubectl --context kind-ome-quota-hub apply -f hack/kwok-sim/fixtures/69-placement-split-by-capacity.yaml
+#
+# The weights are not authored. Each member's is its allocatable google.com/tpu,
+# read from the fleet report on the hub's reserved root, divided by what one
+# replica demands on that member: 128/64 = 2 for member A, 64/64 = 1 for member
+# B. Three replicas therefore land 2 and 1. Expect 32 running pods on member A
+# and 16 on member B.
+#
+# That is also where 63 lands, because three equal shares give their remainder
+# to member-a by name. The difference is where the ratio comes from, and status
+# records it: each candidate's allocation carries a capacity sample (replicas,
+# allocatable, report UID) where 63's carries a weight.
+#
+#   kubectl --context kind-ome-quota-hub -n kwok-sim get isvc place-split-capacity \
+#     -o jsonpath='{range .status.placement.candidates[*]}{.cluster} {.allocation.desiredReplicas} {.allocation.capacity.replicas}{"\n"}{end}'
+#
+# Capacity sets the ratio, not a ceiling. Raise split.replicas to 4 and member A
+# is assigned 3 against room for 2: the hub reports AllocationShortfall rather
+# than spilling the extra replica to member B. Static Split would assign 2 and
+# 2 and leave member B short instead.
+#
+# Needs the hub configured for capacity placement (placement.capacity and
+# memberOperatorNamespace, which up.sh sets for --multicluster-role
+# control-plane) and a management-mode quota manager keeping the fleet report.
+# Without either, the ISVC holds with PlacementCapacityFresh=False,
+# CapacityUnknown. Needs 50-fleet-proportional.yaml applied first, the one tree
+# that funds these shares; this consumes every chip in the fleet, so run it
+# alone.
+#
+# Needs the enrolled namespace kwok-sim, which up.sh and fleet-up.sh create on
+# every cluster. No fixture declares it: it is shared, so a file that owned it
+# would take every other tenant down on `kubectl delete -f`. If it is missing:
+# `kubectl create namespace kwok-sim`.
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata:
+  name: place-split-capacity
+  namespace: kwok-sim
+  annotations:
+    # The leaf this workload charges. Placement resolves the queue from this
+    # first and the operator-configured default second, and that default is
+    # empty on purpose: a LocalQueue is named for its leaf, so no one fleet-wide
+    # name can address more than one tenant. Until the ISVC->(queue, priority)
+    # resolver lands, a workload names its own leaf.
+    ome.io/local-queue: sim-tenants.serving
+  labels:
+    kwok-sim/managed: "true"
+spec:
+  placement:
+    policy: ClusterAffinity
+    mode: SplitByCapacity
+    clusterAffinity:
+      - matchExpressions:
+          - key: accelerator
+            operator: In
+            values: [tpu7x]
+    split:
+      replicas: 3
+  model:
+    name: demo-noop
+  runtime:
+    name: tpu7x-4x4x4
+  engine:
+    minReplicas: 3
+    maxReplicas: 3
+    leader: {}
+    worker:
+      size: 15

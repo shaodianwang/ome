@@ -509,6 +509,7 @@ a management plane holds no silicon and schedules nothing.
 | `ome-quota-access` SA + token | — | ✅ | ✅ |
 | placement grant on the SA | — | 🅿️ | 🅿️ |
 | `WorkloadCluster` CRs | ✅ `member-a`, `member-b` | — | — |
+| placement member namespace + capacity config | ✅ | — | — |
 
 🅿️ `--with-placement`  🚦 `--with-kueue`
 
@@ -547,13 +548,28 @@ unforgettable:
    the registration's actual `metadata.name`. Omitted affinity matches every
    registration; an ISVC without `spec.placement` remains local.
 
+Every `6*-placement-*.yaml` sets `spec.placement.policy: ClusterAffinity`, the
+OEP-0018.4 contract. Without it the placement is Legacy, which rejects
+`clusterAffinity`: the ISVC holds `Pending` with `PlacementInputValid=False`,
+reason `InvalidPlacementIntent`, and nothing fans out.
+
+The hub is also configured for `SplitByCapacity`. `up.sh --multicluster-role
+control-plane` points `placement.memberOperatorNamespace` at `ome`, where this
+script installs every member, and sets a `placement.capacity` block that reads
+the fleet report the management-mode quota manager keeps on the hub's `root`.
+Without that block the mode holds with `PlacementCapacityFresh=False`, reason
+`CapacityUnknown`.
+
 `--topology` becomes forwardable under this flag, since it is what puts a
 scheduler on the members for the mode to mean anything.
 
-**Apply a quota tree first.** Each `6*-placement-*.yaml` names
+**Apply `50-fleet-proportional.yaml` first.** Each `6*-placement-*.yaml` names
 `sim-tenants.serving` in its `ome.io/local-queue` annotation, and a workload
 naming a `LocalQueue` that does not exist is never queued — its pods are created,
-gated, and stay there. Any `5*-fleet-*.yaml` provides that leaf.
+gated, and stay there. Every `5*-fleet-*.yaml` provides that leaf, but only 50
+funds a whole cube of it on both members: 51 gives member A 32 chips and 52
+gives member B 32, half a replica, so that home stays gated. `67` is the
+exception and needs `52-fleet-mixed.yaml` for its second leaf.
 
 The workload names the leaf because nothing else can. `placement.localQueue` —
 one operator-wide string stamped on every derived workload — is empty by default,
@@ -581,6 +597,9 @@ kubectl --context kind-ome-quota-hub apply -f hack/kwok-sim/fixtures/63-placemen
 | `64-placement-split-capped.yaml` | equal shares with a per-cluster ceiling | 1 each |
 | `65-placement-pinned.yaml` | `clusterAffinity.matchFields` selects `metadata.name=member-b` | member-b only |
 | `66-placement-nomatch.yaml` | a requirement nothing carries | never placed |
+| `67-placement-two-tenants.yaml` | two leaves in one namespace, on `52` | 8 admitted per leaf per member; Pending, no 2x2x2 slice |
+| `68-placement-misrouted-queue.yaml` | a queue no tree provisions | gated on both, `AllocationShortfall` on the hub |
+| `69-placement-split-by-capacity.yaml` | 3 replicas weighted by each member's hardware | 2 on a, 1 on b, each with a capacity sample |
 
 One replica is one whole cube — the `tpu7x-4x4x4` runtime is 1 leader + 15
 workers = 16 pods = 16 nodes = 64 chips — so `50-fleet-proportional`'s 128/64
@@ -694,7 +713,7 @@ it here.
 | `fixtures/40-job-batch.yaml` | a kwok Job charging the `sim-tenants.batch` leaf, so the tree reports usage |
 | `fixtures/5*-fleet-*.yaml` | fleet quota trees for `fleet-up.sh`; not applied by it |
 | `fixtures/60-placement-rbac.yaml` | binds the chart's placement ClusterRole onto the members' quota SA |
-| `fixtures/6[1-6]-placement-*.yaml` | one OEP-0018 placement scenario each; needs `--with-placement` |
+| `fixtures/6[1-9]-placement-*.yaml` | one OEP-0018.4 placement scenario each; needs `--with-placement` |
 
 ## Install notes
 
@@ -729,6 +748,13 @@ Things `up.sh` does that are not obvious, if you are reproducing it by hand:
 - **The release namespace must be `ome`.** The `inferenceservice-config`
   ConfigMap name, every webhook's `inject-ca-from`, and the manager's
   leader-election namespace all assume it.
+- **`acceleratorResources` names `google.com/tpu`.** OME counts accelerators
+  only by the names listed there, and the chart lists `nvidia.com/gpu` alone,
+  so a TPU gang would measure zero accelerator demand and capacity placement
+  could not size it. Listing it also puts `PARALLELISM_SIZE` on multi-node pods.
+  The quota manager's `capacity.resources` is narrowed the same way: every
+  listed resource gets a row per flavor, so the chart's `nvidia.com/gpu` would
+  otherwise show on the root as an explicit zero pool under `tpu7x`.
 - **`modelAgent`, `prometheus` and `multiclusterAccess` are switched off**, and
   the controller is dropped to one replica — the chart default of 3 × (2 CPU /
   4Gi) does not fit one kind node.

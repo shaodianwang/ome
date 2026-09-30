@@ -67,7 +67,7 @@
 #                   Adds `manager` and `scheduler` to the member component set,
 #                   widens the members' grant so the hub may write derived
 #                   InferenceServices there, and labels each WorkloadCluster so
-#                   an ISVC's placement requirements have something to match.
+#                   an ISVC's clusterAffinity has something to match.
 #                   Pair it with --with-kueue: a derived workload carries Kueue's
 #                   queue-name label, so without an admitting Kueue and a tree
 #                   its pods gate and never run. See fixtures/6*-placement-*.
@@ -160,7 +160,7 @@ while [ $# -gt 0 ]; do
     --no-scheduler)
       echo "$1 would subtract the component --with-placement adds; omit --with-placement instead" >&2
       exit 2 ;;
-    -h|--help) sed -n '2,71p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,77p' "$0"; exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
 done
@@ -395,6 +395,13 @@ docker save "$QUOTA_IMAGE" -o "$TAR"
 "$KIND" load image-archive "$TAR" --name "$HUB" >/dev/null
 rm -f "$TAR"
 
+# Helm 4 applies server-side, and the component's own cert rotator owns the
+# webhook caBundle, so every upgrade after the first conflicts on that field.
+# Forcing hands it to helm, which blanks it until the rotator writes it back;
+# the wait below covers that window. Helm 3 merges client-side and needs neither.
+FORCE_CONFLICTS=""
+helm version --short 2>/dev/null | grep -q '^v3' || FORCE_CONFLICTS="--force-conflicts"
+
 helm upgrade --install ome-quota-manager charts/ome-quota-manager/ \
   --kube-context "kind-${HUB}" --namespace "$OME_NS" --create-namespace \
   --set global.hub="" \
@@ -408,7 +415,15 @@ helm upgrade --install ome-quota-manager charts/ome-quota-manager/ \
   --set quotaManager.projection.fieldManager="$PROJECTOR" \
   --set quotaManager.projection.defaultDistributionPolicy=Proportional \
   --set quotaManager.podAnnotations.kwok-sim/image-id="$(image_id "$QUOTA_IMAGE")" \
-  --wait --timeout 300s >/dev/null
+  $FORCE_CONFLICTS --wait --timeout 300s >/dev/null
+
+# The AcceleratorQuota webhook is failurePolicy=Fail, so a tree applied before
+# the rotator restores the caBundle is refused.
+for _ in $(seq 90); do
+  b="$(hubctl get validatingwebhookconfiguration ome-quota-manager.ome.io \
+        -o jsonpath='{.webhooks[0].clientConfig.caBundle}' 2>/dev/null || true)"
+  case "$b" in ""|"Cg==") sleep 2 ;; *) break ;; esac
+done
 
 echo "==> registering the members with the hub"
 # The hub authenticates as ome-quota-access, NOT as an admin. That is the point:
@@ -452,11 +467,11 @@ current-context: member
 YAML
 )" >/dev/null
 
-  # The labels are the placer's whole candidate-selection input: an ISVC's
-  # spec.placement.requirements is matched against them and nothing else, and an
-  # ISVC declaring no requirement matches no cluster. accelerator is what every
-  # placement fixture requires; zone tells the two members apart so one can be
-  # singled out. Harmless to the quota plane, which never reads them.
+  # What an ISVC's clusterAffinity matches, together with the registration's own
+  # metadata.name. Under policy ClusterAffinity an omitted affinity matches every
+  # registration. accelerator is what every placement fixture requires; zone
+  # tells the two members apart so a label term can single one out. Harmless to
+  # the quota plane, which never reads them.
   hubctl apply -f - >/dev/null <<YAML
 apiVersion: ome.io/v1beta1
 kind: WorkloadCluster
@@ -530,11 +545,14 @@ DONE
 if [ "$WITH_PLACEMENT" -eq 1 ]; then
   cat <<'DONE'
 Placement is wired: both members are labelled accelerator=tpu7x (zone=a, zone=b)
-and the hub may write derived InferenceServices there. Apply a tree FIRST: each
-of these names sim-tenants.serving in ome.io/local-queue, and a workload naming
-a LocalQueue that does not exist is never queued -- its pods are created, gated,
-and stay there. Drop that annotation to place without quota instead.
+and the hub may write derived InferenceServices there. Apply
+50-fleet-proportional.yaml FIRST, the tree that funds a whole cube of
+sim-tenants.serving on both members: each of these names that leaf in
+ome.io/local-queue, and a workload naming a LocalQueue that does not exist is
+never queued -- its pods are created, gated, and stay there. Drop that
+annotation to place without quota instead.
 
+  kubectl --context kind-ome-quota-hub apply -f hack/kwok-sim/fixtures/50-fleet-proportional.yaml
   kubectl --context kind-ome-quota-hub apply -f hack/kwok-sim/fixtures/<one of>
 
   61-placement-all.yaml           every member serves        -> 16 pods each
@@ -543,13 +561,14 @@ and stay there. Drop that annotation to place without quota instead.
   64-placement-split-capped.yaml  a per-cluster ceiling      -> 1 each
   65-placement-pinned.yaml        metadata.name=member-b      -> member-b only
   66-placement-nomatch.yaml       matches nothing            -> never placed
+  69-placement-split-by-capacity.yaml  hardware-weighted     -> 2 on a, 1 on b
 
 They all charge sim-tenants.serving, so run one at a time.
 
-67-placement-two-tenants.yaml is the one that shows why the queue name matters:
-two tenants sharing one namespace, told apart only by the leaf each names. A
-LocalQueue is named for its leaf, so no single operator-wide default could
-address both -- which is why placement.localQueue is empty and each workload
-names its own.
+67-placement-two-tenants.yaml, against 52-fleet-mixed.yaml, is the one that
+shows why the queue name matters: two tenants sharing one namespace, told apart
+only by the leaf each names. A LocalQueue is named for its leaf, so no single
+operator-wide default could address both -- which is why placement.localQueue
+is empty and each workload names its own.
 DONE
 fi

@@ -18,13 +18,14 @@
 #
 #   kubectl --context kind-ome-quota-a get aq sim-tenants.serving -o wide
 #   kubectl --context kind-ome-quota-a -n kwok-sim get pods
-#   kubectl --context kind-ome-quota-a -n kwok-sim get pods -o jsonpath=
-#     '{.items[0].spec.schedulingGates}{"\n"}'
+#   kubectl --context kind-ome-quota-a -n kwok-sim get pods \
+#     -o jsonpath='{.items[0].spec.schedulingGates}{"\n"}'
 #
-# Why it is worth having: a misrouted queue looks exactly like a working one from
-# the hub. Placement succeeds, the derived object is healthy, status.placement
-# names its homes — and nothing runs. The only signal is at the pods, which is
-# not where an operator looks first.
+# Why it is worth having: from the hub it is a shortfall with no cause attached.
+# The allocation converges and status.placement names both homes, but the phase
+# stays Admitting and PlacementSatisfied is False with AllocationShortfall —
+# exactly what an exhausted budget reports. Which of the two it is shows only at
+# the pods, in a queue-name label no LocalQueue answers to.
 #
 # The opposite failure needs no fixture either, only a deletion: strip the
 # annotation from 61-placement-all.yaml and the operator's default is empty, so
@@ -57,6 +58,7 @@ metadata:
     ome.io/local-queue: no-such-queue
 spec:
   placement:
+    policy: ClusterAffinity
     mode: All
     clusterAffinity:
       - matchExpressions:

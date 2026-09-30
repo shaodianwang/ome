@@ -123,7 +123,7 @@ while [ $# -gt 0 ]; do
     --topology) TOPOLOGY_MODE="$2"; shift 2 ;;
     --with-isvcs) WITH_ISVCS=1; shift ;;
     --with-kueue) WITH_KUEUE=1; shift ;;
-    -h|--help) sed -n '2,48p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,63p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -485,11 +485,25 @@ if [ "$WITH_MANAGER" -eq 1 ]; then
     --set ome.controller.resources.requests.memory=512Mi
     --set ome.controller.resources.limits.cpu=2
     --set ome.controller.resources.limits.memory=2Gi
+    # The simulated silicon. OME counts accelerators only by the names listed
+    # here and the chart lists nvidia.com/gpu alone, so without this a TPU gang
+    # measures zero accelerator demand and capacity placement cannot size it.
+    --set 'ome.controller.acceleratorResources={google.com/tpu}'
   )
   if [ -n "$MC_ROLE" ]; then
+    # Every member is installed by this script into $OME_NS, which is therefore
+    # where placement finds each member's configuration and runtime pins.
+    # Capacity reads the fleet report the management-mode quota manager keeps on
+    # the reserved root; members refresh theirs every minute, so maxAge
+    # tolerates a few missed refreshes.
     HELM_ARGS+=(
       --set ome.multicluster.enabled=true
       --set ome.multicluster.role="$MC_ROLE"
+      --set ome.multicluster.config.placement.memberOperatorNamespace="$OME_NS"
+      --set ome.multicluster.config.placement.capacity.rootName=root
+      --set ome.multicluster.config.placement.capacity.maxAge=5m
+      --set ome.multicluster.config.placement.capacity.stabilityWindow=1m
+      --set ome.multicluster.config.placement.capacity.refreshInterval=10s
     )
   fi
 
@@ -561,9 +575,11 @@ if [ "$WITH_QUOTA" -eq 1 ]; then
   # projects per-cluster shares onto members, and there are none here.
   # crd.install stays off — ome-crd above owns the CRD.
   #
-  # The chart's own capacity.resources already names google.com/tpu, so the fake
-  # nodes are measured without an override. One replica and no leader election,
-  # for the same reason as ome-scheduler: it is one kind node.
+  # capacity.resources is narrowed to google.com/tpu, the only accelerator the
+  # fake nodes carry. The chart also lists nvidia.com/gpu, and every listed
+  # resource gets a row per flavor, so the root would report an explicit zero
+  # GPU pool under the tpu7x flavor. One replica and no leader election, for the
+  # same reason as ome-scheduler: it is one kind node.
   echo "==> ome-quota-manager"
   helm upgrade --install ome-quota-manager charts/ome-quota-manager/ \
     --kube-context "$KCTX" --namespace "$OME_NS" --create-namespace \
@@ -576,6 +592,7 @@ if [ "$WITH_QUOTA" -eq 1 ]; then
     --set quotaManager.podDisruptionBudget.enabled=false \
     --set quotaManager.podAnnotations.kwok-sim/image-id="$(image_id "$QUOTA_IMAGE")" \
     --set "quotaManager.materialize.enrolledNamespaces={$(enrolled_namespaces_csv)}" \
+    --set 'quotaManager.capacity.resources={google.com/tpu}' \
     "${FORCE_CONFLICTS[@]+"${FORCE_CONFLICTS[@]}"}" --wait --timeout 300s >/dev/null
 
   # The AcceleratorQuota webhook is failurePolicy=Fail, and it gates the

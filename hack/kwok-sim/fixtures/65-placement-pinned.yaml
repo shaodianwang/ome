@@ -1,4 +1,4 @@
-# Pinned to one home, and what happens when that home goes away.
+# Pinned to one home by name.
 #
 #   kubectl --context kind-ome-quota-hub apply -f hack/kwok-sim/fixtures/65-placement-pinned.yaml
 #
@@ -6,7 +6,8 @@
 # affinity term. The field reads the registration's actual name, independently
 # of labels. Expect a derived copy on member B only.
 #
-# Needs a tree applied first (any of the 5*-fleet-*.yaml).
+# Needs 50-fleet-proportional.yaml applied first: 52 gives member B's
+# sim-tenants.serving 32 chips, half a cube, so the home stays gated.
 #
 # Needs the enrolled namespace kwok-sim, which up.sh and fleet-up.sh create on
 # every cluster. No fixture declares it: it is shared, so a file that owned it
@@ -28,6 +29,7 @@ metadata:
     kwok-sim/managed: "true"
 spec:
   placement:
+    policy: ClusterAffinity
     mode: Single
     clusterAffinity:
       - matchExpressions:
