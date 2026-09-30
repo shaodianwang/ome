@@ -28,7 +28,10 @@ type CommandRequest struct {
 	ChannelID string `json:"channelId,omitempty"`
 	// RequestID correlates the audit line with the caller's own logs.
 	RequestID string `json:"requestId,omitempty"`
-	// Text is everything the user typed after "/ome".
+	// Surface names how the text reached the relay, such as a slash command
+	// or a mention. It is recorded in the audit line and changes nothing else.
+	Surface string `json:"surface,omitempty"`
+	// Text is everything the user typed after the command or the mention.
 	Text string `json:"text"`
 }
 
@@ -39,7 +42,12 @@ type CommandResponse struct {
 	Text     string          `json:"text"`
 	Sections []Result        `json:"sections,omitempty"`
 	Clusters []ClusterStatus `json:"clusters,omitempty"`
-	Error    string          `json:"error,omitempty"`
+	// Question and QuestionMode carry a KindQuestion back to the relay for
+	// the answer worker; ErrorClass is ErrQuestion and OK is false because
+	// this service ran nothing.
+	Question     string `json:"question,omitempty"`
+	QuestionMode string `json:"questionMode,omitempty"`
+	Error        string `json:"error,omitempty"`
 	// ErrorClass is empty on success; see the Err* constants.
 	ErrorClass string `json:"errorClass,omitempty"`
 }
@@ -96,6 +104,7 @@ type auditEntry struct {
 	requestID string
 	actor     Actor
 	channel   string
+	surface   string
 	text      string
 	tool      string
 	args      []string
@@ -143,7 +152,10 @@ func (s *Server) acquire() bool {
 
 func (s *Server) release() { <-s.slots }
 
-const busyMsg = "the bot is busy; retry in a moment"
+const (
+	busyMsg     = "the bot is busy; retry in a moment"
+	questionMsg = "that is a question rather than a kubectl-ome command; the relay hands questions to the answer worker"
+)
 
 // readBody reads and verifies a request body, writing the error reply itself
 // when it returns false.
@@ -189,8 +201,12 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 	}
 	start := time.Now()
 	resp, status := s.execute(r.Context(), req)
-	e := auditEntry{kind: "command", requestID: req.RequestID, actor: req.Actor, channel: req.ChannelID, text: req.Text,
-		ok: resp.OK, errClass: resp.ErrorClass, err: resp.Error}
+	e := auditEntry{kind: "command", requestID: req.RequestID, actor: req.Actor, channel: req.ChannelID, surface: req.Surface,
+		text: req.Text, ok: resp.OK, errClass: resp.ErrorClass, err: resp.Error}
+	if resp.ErrorClass == ErrQuestion {
+		// A question is the person's own words; the audit line never carries it.
+		e.text = ""
+	}
 	for _, sec := range resp.Sections {
 		e.clusters = append(e.clusters, sec.Cluster)
 		e.exits = append(e.exits, sec.ExitCode)
@@ -286,6 +302,15 @@ func (s *Server) execute(ctx context.Context, req CommandRequest) (CommandRespon
 	if parsed.Kind == KindHelp {
 		return CommandResponse{OK: true, Text: HelpText(s.Config.ClusterNames())}, http.StatusOK
 	}
+	if parsed.Kind == KindQuestion {
+		return CommandResponse{
+			Question:     parsed.Question,
+			QuestionMode: parsed.QuestionMode,
+			Error:        questionMsg,
+			ErrorClass:   ErrQuestion,
+			Text:         ":speech_balloon: " + questionMsg,
+		}, http.StatusOK
+	}
 	if !s.acquire() {
 		return refusal(ErrBusy, busyMsg), http.StatusTooManyRequests
 	}
@@ -344,6 +369,7 @@ func (s *Server) audit(e auditEntry, d time.Duration) {
 		"actor_fbid", e.actor.EmployeeFBID,
 		"slack_user", e.actor.SlackUserID,
 		"channel", e.channel,
+		"surface", e.surface,
 		"text", e.text,
 		"tool", e.tool,
 		"args", e.args,

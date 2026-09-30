@@ -79,7 +79,7 @@ bodies empty. A clock far off the bridge's shows up as HTTP 401.
 |---|---|---|---|
 | `health` | `GET /healthz` | none | 200, empty body (printed as `ok`) |
 | `clusters` | `GET /v1/clusters` | none | `ok`, `text` (fleet table), `clusters[]` (`name`, `provider`, `role`, `hub`, `reachable`, `omeInstalled`, `omeVersion`, `error`) |
-| `command` | `POST /v1/command` | `actor`, `channelId`, `requestId`, `text` | `ok`, `text`, `errorClass`, `error`, `sections[]` (per-cluster output and exit code) |
+| `command` | `POST /v1/command` | `actor`, `channelId`, `requestId`, `surface` (how the text arrived, for the audit line), `text` | `ok`, `text`, `errorClass`, `error`, `sections[]` (per-cluster output and exit code); for a question, `question` and `questionMode` (`ask`, `recipe` or empty) |
 | `tool` | `POST /v1/tool` | `actor`, `channelId`, `requestId`, `tool`, `args[]` | `ok`, `text`, `errorClass`, `result` (`tool`, `exitCode`, `output`, `truncated`, `error`) |
 | `release` | `GET /v1/release` | none | `ok`, `text` (release table), `errorClass` |
 
@@ -90,7 +90,8 @@ when ok). Refusals of a parsed request stay HTTP 200 with `ok:false`.
 
 | Endpoint | Class | Meaning | Next step |
 |---|---|---|---|
-| command | `not_a_verb` | the first words are not one of the read verbs below (a question, a typo, or a guarded verb) | treat the text as a question, or fix the verb |
+| command | `question` | the text is for the answer worker: it starts with `ask` or `recipe`, or contains a question mark; `question` carries it without the prefix | answer it as a question; the bridge ran nothing |
+| command | `not_a_verb` | the first words are not one of the read verbs below (a typo or a guarded verb) | treat the text as a question, or fix the verb |
 | command | `forbidden_flag` | a flag that changes identity, endpoint or guards (`--kubeconfig`, `--context`, `--as`, `--token`, `--server`, `--yes`, ...) | drop the flag; the bridge picks the credentials |
 | command | `unknown_cluster` | `--cluster` names no registry entry | run `clusters`, use a listed name |
 | command | `needs_cluster` | the verb is not a fan-out verb and `--cluster` is missing | pick the cluster from `clusters` (hub or member, see below) |
@@ -120,8 +121,10 @@ verb and its flags is the kubectl-ome README, readable with
 | autoscale and accelerator | `autoscale status`, `autoscale explain`, `accelerator explain` |
 | control plane | `admin doctor`, `admin recommendations`, `cluster status` |
 
-The bridge also answers `help` and `clusters` (or `installed clusters`)
-through `command`.
+The bridge also answers `help` (and `help me`, `help?`, `?help`) and
+`clusters` (or `installed clusters`) through `command`, and classifies a
+question (`ask …`, `recipe …`, or any text with a `?`) as `question` instead
+of running it.
 
 **Fan-out rule.** Only `get` and `status` may run without `--cluster`; they
 run on every registry cluster and the reply has one section per cluster.

@@ -18,6 +18,9 @@ const (
 	ErrBadArgs              = "bad_args"
 	ErrTimeout              = "timeout"
 	ErrNotConfigured        = "not_configured"
+	// ErrQuestion marks text meant for the answer worker, not a verb; the
+	// reply carries the question for the relay to hand on.
+	ErrQuestion = "question"
 )
 
 // ParseError is a refusal with a machine-readable class.

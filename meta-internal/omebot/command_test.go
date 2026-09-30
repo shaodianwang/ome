@@ -10,15 +10,27 @@ import (
 
 func TestParseCommand(t *testing.T) {
 	cases := []struct {
-		text    string
-		kind    Kind
-		verb    string
-		args    string
-		cluster string
-		wantErr string
+		text     string
+		kind     Kind
+		verb     string
+		args     string
+		cluster  string
+		question string
+		mode     string
+		wantErr  string
 	}{
 		{text: "", kind: KindHelp},
 		{text: "help", kind: KindHelp},
+		{text: "  Help me  ", kind: KindHelp},
+		{text: "help?", kind: KindHelp},
+		{text: "?help", kind: KindHelp},
+		{text: "--help", kind: KindHelp},
+		{text: "ask why is chat slow", kind: KindQuestion, question: "why is chat slow", mode: "ask"},
+		{text: "Recipe  scale chat down\nto one replica", kind: KindQuestion, question: "scale chat down\nto one replica", mode: "recipe"},
+		{text: "why is chat failing?", kind: KindQuestion, question: "why is chat failing?"},
+		{text: "what's wrong with chat?", kind: KindQuestion, question: "what's wrong with chat?"},
+		{text: "get isvc -A?", kind: KindQuestion, question: "get isvc -A?"},
+		{text: "ask", wantErr: "not a read-only"},
 		{text: "installed clusters", kind: KindClusters},
 		{text: "clusters", kind: KindClusters},
 		{text: "get isvc -A", kind: KindCLI, verb: "get", args: "isvc -A"},
@@ -47,7 +59,8 @@ func TestParseCommand(t *testing.T) {
 			t.Errorf("%q: unexpected error %v", tc.text, err)
 			continue
 		}
-		if p.Kind != tc.kind || strings.Join(p.Verb, " ") != tc.verb || strings.Join(p.Args, " ") != tc.args || p.Cluster != tc.cluster {
+		if p.Kind != tc.kind || strings.Join(p.Verb, " ") != tc.verb || strings.Join(p.Args, " ") != tc.args || p.Cluster != tc.cluster ||
+			p.Question != tc.question || p.QuestionMode != tc.mode {
 			t.Errorf("%q: got %+v", tc.text, p)
 		}
 	}
@@ -83,6 +96,7 @@ func TestParseErrorClasses(t *testing.T) {
 		"get isvc --cluster":                              ErrMalformed,
 		"get isvc \"unterminated":                         ErrMalformed,
 		"get isvc \x01":                                   ErrMalformed,
+		"ask why\x01?":                                    ErrMalformed,
 	}
 	for text, want := range cases {
 		_, err := ParseCommand(text)

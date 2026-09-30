@@ -3,6 +3,7 @@
 package omebot
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -14,6 +15,8 @@ const (
 	KindHelp     Kind = "help"
 	KindClusters Kind = "clusters"
 	KindCLI      Kind = "cli"
+	// KindQuestion is free text for the answer worker rather than a verb.
+	KindQuestion Kind = "question"
 )
 
 // Parsed is a validated command ready to run.
@@ -26,7 +29,21 @@ type Parsed struct {
 	// Cluster is the registry name the command targets; empty means every
 	// cluster when the verb allows fan-out.
 	Cluster string
+	// Question is the text for the answer worker, without its ask or recipe
+	// prefix, for KindQuestion.
+	Question string
+	// QuestionMode is "ask", "recipe", or "" when a question mark alone
+	// marked the text as a question.
+	QuestionMode string
 }
+
+var (
+	// helpRE accepts the bare word and the variants people type in chat:
+	// "help me", "help?", "?help".
+	helpRE = regexp.MustCompile(`(?i)^\??help(?:\s|\?|$)`)
+	// questionPrefixRE marks text for the answer worker by its first word.
+	questionPrefixRE = regexp.MustCompile(`(?is)^(ask|recipe)\s+(.+)$`)
+)
 
 // readVerbs is the closed set of kubectl-ome verbs the bot will run. Every
 // entry is read-only; guarded verbs never appear here, so no prompt or
@@ -91,8 +108,20 @@ func ReadVerbs() []string {
 	return out
 }
 
-// ParseCommand turns the text after "/ome" into a Parsed command.
+// ParseCommand turns the text after the command or mention into a Parsed
+// command. Help and questions are recognised on the raw text first, so a
+// question keeps its apostrophes and quotes; only a command is tokenized.
 func ParseCommand(text string) (Parsed, error) {
+	if strings.ContainsFunc(text, isControl) {
+		return Parsed{}, refuse(ErrMalformed, "control character in command")
+	}
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" || helpRE.MatchString(trimmed) {
+		return Parsed{Kind: KindHelp}, nil
+	}
+	if q, ok := parseQuestion(trimmed); ok {
+		return q, nil
+	}
 	tokens, err := tokenize(text)
 	if err != nil {
 		return Parsed{}, err
@@ -101,7 +130,7 @@ func ParseCommand(text string) (Parsed, error) {
 		return Parsed{Kind: KindHelp}, nil
 	}
 	switch strings.ToLower(tokens[0]) {
-	case "help", "-h", "--help":
+	case "-h", "--help":
 		return Parsed{Kind: KindHelp}, nil
 	case "clusters":
 		return Parsed{Kind: KindClusters}, nil
@@ -150,6 +179,24 @@ func ParseCommand(text string) (Parsed, error) {
 	return p, nil
 }
 
+// parseQuestion recognises text for the answer worker: an ask or recipe
+// prefix, or a question mark anywhere in the text.
+func parseQuestion(text string) (Parsed, bool) {
+	if m := questionPrefixRE.FindStringSubmatch(text); m != nil {
+		return Parsed{Kind: KindQuestion, Question: strings.TrimSpace(m[2]), QuestionMode: strings.ToLower(m[1])}, true
+	}
+	if strings.Contains(text, "?") {
+		return Parsed{Kind: KindQuestion, Question: text}, true
+	}
+	return Parsed{}, false
+}
+
+// isControl reports a character no command or question may carry; tab and
+// newline are ordinary whitespace.
+func isControl(r rune) bool {
+	return r < 0x20 && r != '\t' && r != '\n' || r == 0x7f
+}
+
 // tokenize splits like a POSIX shell for quotes and whitespace, without any
 // expansion, and refuses control characters.
 func tokenize(text string) ([]string, error) {
@@ -167,7 +214,7 @@ func tokenize(text string) ([]string, error) {
 		}
 	}
 	for _, r := range text {
-		if r < 0x20 && r != '\t' && r != '\n' || r == 0x7f {
+		if isControl(r) {
 			return nil, refuse(ErrMalformed, "control character in command")
 		}
 		switch {

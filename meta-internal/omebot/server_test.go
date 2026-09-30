@@ -84,6 +84,33 @@ func TestServerFanoutAndSingleCluster(t *testing.T) {
 	}
 }
 
+func TestServerQuestion(t *testing.T) {
+	s, logs := toolServer(t)
+	h := s.Handler()
+	rec, resp := post(t, h, `{"requestId":"r-q","surface":"mention","actor":{"employeeFbid":7},"text":"ask what's wrong with chat?"}`, true)
+	if rec.Code != 200 || resp.OK || resp.ErrorClass != ErrQuestion {
+		t.Fatalf("question: code %d resp %+v", rec.Code, resp)
+	}
+	if resp.Question != "what's wrong with chat?" || resp.QuestionMode != "ask" || !strings.Contains(resp.Text, "question") {
+		t.Errorf("question fields: %+v", resp)
+	}
+	audit := logs.String()
+	for _, want := range []string{`"kind":"command"`, `"request_id":"r-q"`, `"surface":"mention"`, `"error_class":"question"`} {
+		if !strings.Contains(audit, want) {
+			t.Errorf("audit lacks %s: %s", want, audit)
+		}
+	}
+	if strings.Contains(audit, "wrong with chat") {
+		t.Error("audit must not carry the question")
+	}
+
+	s.slots = make(chan struct{}, 1)
+	s.slots <- struct{}{}
+	if rec, _ := post(t, h, `{"text":"why is chat slow?"}`, true); rec.Code != http.StatusOK {
+		t.Errorf("a question needs no slot: %d", rec.Code)
+	}
+}
+
 func TestRenderClusters(t *testing.T) {
 	text := RenderClusters([]ClusterStatus{
 		{Name: "member-a", Provider: "gke", Role: "member", Reachable: true, K8sVersion: "v1.33.1", OMEInstalled: true, OMEVersion: "abc1234", KargoStage: "stage-1"},
