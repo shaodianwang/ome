@@ -44,12 +44,13 @@ func refuseRollback(in ReconcileInputs, cs *v1beta1.CanaryStatus, take func(stri
 }
 
 // rearmRule says which observed targets a state treats as new. Every state
-// re-arms when the run's TargetID changed; the hash test is the fallback for
-// status recorded before targets carried an id, and its exclusions differ by
-// state because the observed target means different things there: in a
-// live canary a target equal to the stable revision is a revert to apply,
-// while a parked or rolled-back unit observes the stable revision as the
-// hold it already sits in, and must not re-arm toward it.
+// re-arms when the run's TargetID changed for a target the run offered the
+// unit; the hash test is the fallback for status recorded before targets
+// carried an id, and its exclusions differ by state because the observed
+// target means different things there: in a live canary a target equal to
+// the stable revision is a revert to apply, while a parked or rolled-back
+// unit observes the stable revision as the hold it already sits in, and
+// must not re-arm toward it.
 type rearmRule struct {
 	// excludeCurrent: the recorded canary hash is not a new target.
 	excludeCurrent bool
@@ -70,11 +71,18 @@ var (
 // shouldRearm reports whether a pinned run names a target this state treats
 // as new. Without a pinned run nothing re-arms: the run layer opens or parks
 // the run, and starting a canary outside one would execute an unpinned plan.
+//
+// For a unit holding a rejected revision, a changed TargetID counts only when
+// the run retargeted the unit. A run opened by another group's retarget pins
+// such a unit at its stable revision in place of the rejected one, which
+// changes the unit's TargetID without offering it a target; re-arming on it
+// would present the rejected revision again. The unit falls through to the
+// hash test, which reads the rejected and stable revisions as its hold.
 func shouldRearm(in ReconcileInputs, cs *v1beta1.CanaryStatus, targetChanged bool, rule rearmRule) bool {
 	if !in.RunActive || in.CanaryRevisionHash == "" {
 		return false
 	}
-	if targetChanged {
+	if targetChanged && (cs.RolledBackRevisionHash == "" || unitRetargeted(in)) {
 		return true
 	}
 	if rule.excludeCurrent && in.CanaryRevisionHash == cs.CanaryRevisionHash {

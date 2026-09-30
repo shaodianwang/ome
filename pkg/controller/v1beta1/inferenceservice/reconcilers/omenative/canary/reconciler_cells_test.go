@@ -256,6 +256,18 @@ func evNewTargetAtRunOpenWhileDraining(isvc *v1beta1.InferenceService, in *Recon
 	evNewTargetAtRunOpen(isvc, in)
 	in.PerRevisionPods = map[string]int32{"new": 2, "old": 2}
 }
+
+// evOtherGroupRun: another group's retarget opened a fresh run for the whole
+// service. The run layer pins a unit holding a rejected revision at its
+// stable revision, so the unit's TargetID changes while its IR target is
+// still the rejected revision and BindRun leaves it alone.
+func evOtherGroupRun(isvc *v1beta1.InferenceService, in *ReconcileInputs) {
+	isvc.Status.Rollout.ActiveRun.TargetRevisions = []v1beta1.RolloutRunTarget{
+		{Component: v1beta1.RouterComponent, Revision: "rnew", StableRevision: "rold"},
+		{Component: v1beta1.EngineComponent, Revision: "old", StableRevision: "old"},
+	}
+	in.TargetID = activeCanaryTargetID(isvc, rollout.CanaryGroup(isvc))
+}
 func evReplicasUp(_ *v1beta1.InferenceService, in *ReconcileInputs) { in.DesiredReplicas = 8 }
 func evCapacityDropped(_ *v1beta1.InferenceService, in *ReconcileInputs) {
 	in.PerRevisionPods = map[string]int32{"new": 1, "old": 2}
@@ -377,6 +389,9 @@ func TestReconcileCells(t *testing.T) {
 		{"canary/RollingBack/newTarget[runOpen]", fixtureRollingBack, evNewTargetAtRunOpenWhileDraining, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, active: true}},
 		{"canary/RolledBack/newTarget", fixtureRolledBack, evNewTarget, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, active: true}},
 		{"canary/RolledBack/newTarget[runOpen]", fixtureRolledBack, evNewTargetAtRunOpen, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, active: true}},
+		// A run another group opened offers the held unit no target: the hold stays.
+		{"canary/RollingBack/newTarget[otherGroup]", fixtureRollingBack, evOtherGroupRun, cellWant{state: rollingBack, phase: v1beta1.RolloutPhaseRollingBack, active: true, rolledBk: true}},
+		{"canary/RolledBack/newTarget[otherGroup]", fixtureRolledBack, evOtherGroupRun, cellWant{state: rolledBack, phase: v1beta1.RolloutPhaseRolledBack, active: true, rolledBk: true}},
 		{"canary/Failed/newTarget", fixtureFailed, evNewTarget, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, active: true}},
 		{"canary/Failed[stableMissing]/newTarget", fixtureFailedStableMissing, evNewTarget, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, active: true}},
 		// replicas: more capacity to stage holds the step where it is.
