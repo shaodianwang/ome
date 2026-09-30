@@ -3963,3 +3963,19 @@ func (w *conflictOnceStatusWriter) Patch(
 	}
 	return w.SubResourceWriter.Patch(ctx, obj, patch, opts...)
 }
+
+func TestTrafficMapPublicationWatchFiltersAcknowledgements(t *testing.T) {
+	_, old := publisherTestObjects()
+	current := old.DeepCopy()
+	current.Status.Published = true
+	current.Status.ObservedTrafficMapGeneration = current.Generation
+	current.Status.Conditions = []metav1.Condition{{Type: v1beta1.TrafficMapPublished, Status: metav1.ConditionTrue}}
+	require.False(t, trafficMapPublicationChange.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: current}))
+	for _, kind := range []string{v1beta1.TrafficMapRoutable, v1beta1.TrafficMapCapacityFallback, v1beta1.TrafficMapOverrideActive} {
+		current = old.DeepCopy()
+		current.Status.Conditions = []metav1.Condition{{Type: kind, Status: metav1.ConditionFalse}}
+		require.True(t, trafficMapPublicationChange.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: current}), kind)
+	}
+	require.True(t, trafficMapPublicationChange.Create(event.CreateEvent{Object: old}))
+	require.True(t, trafficMapPublicationChange.Delete(event.DeleteEvent{Object: old}))
+}

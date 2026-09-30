@@ -657,7 +657,10 @@ probe that could become the winner.
 One admitted instance of every component selects a replacement, preserving the
 Single admission predicate. Selection alone cannot retire the current winner:
 the replacement must reach its complete Engine, Decoder, and Router floors and
-have published routing. The persisted serving winner changes with the request
+have positive routing intent in the current source-owned `TrafficMap` for the
+accepted plan. Publisher acknowledgement is independent of placement; a requested
+drain requires zero weight in that table, not proof of external propagation.
+The persisted serving winner changes with the request
 to drain the original, or after verifying the original is absent. Unselected
 probes receive no traffic. A cancelled selection that already serves retains
 its route until the allocator can safely drain it. Physical cleanup

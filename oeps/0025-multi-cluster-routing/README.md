@@ -177,7 +177,18 @@ Placement answers *where the workload runs*. Routing answers *how traffic is
 measured and published after placement*. Nesting routing under placement would
 make a data-plane policy look like a placement algorithm input, and copying the
 source object to a workload cluster could accidentally start another routing
-loop. Therefore, the source ISVC carries the two as siblings:
+loop. The two policies therefore live as siblings on the source ISVC.
+
+Publication is downstream of the routing table. A placement transition reads
+the current, source-owned `TrafficMap` for its accepted allocation and source
+generation; it does not wait for `status.published` or the publisher's observed
+generation. A zero weight acknowledges a requested removal in routing intent,
+not completion in an external gateway. This allows placement to converge when
+the publisher is disabled or unavailable. Operators needing traffic handoff
+before retiring a workload must account for their publisher's propagation delay;
+placement does not provide that external acknowledgement guarantee. Member
+readiness, surge budgets, ownership checks, and physical cleanup still gate the
+transition. Missing or stale routing intent cannot acknowledge a drain.
 
 ```yaml
 apiVersion: ome.io/v1beta1
