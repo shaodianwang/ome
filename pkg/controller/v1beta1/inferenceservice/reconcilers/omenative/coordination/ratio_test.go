@@ -1617,7 +1617,7 @@ func TestEvaluateUpdateGate_RatioWaiverFollowsTheMechanism(t *testing.T) {
 	pinActiveRun(isvc) // re-pin: the budget edit must be part of the pinned plan
 	client := fakeClientForISVC(isvc)
 
-	allowed, gate, reason := EvaluateUpdateGate(context.Background(), client, isvc, v1beta1.DecoderComponent, nil, GroupDefaults{},
+	allowed, gate, reason := EvaluateUpdateGate(context.Background(), client, isvc, v1beta1.DecoderComponent, forwardTarget(isvc, v1beta1.DecoderComponent), nil, GroupDefaults{},
 		workloadtypes.UpdateStrategyRecreatePod, 0, 0)
 	if allowed || gate != v1beta1.RolloutHoldGateRatio {
 		t.Errorf("decoder RecreatePod on 4:2 tol=25%% must be held on Ratio (4:1 = 4.0 leaves the band); got allowed=%v gate=%q reason=%q", allowed, gate, reason)
@@ -1625,12 +1625,12 @@ func TestEvaluateUpdateGate_RatioWaiverFollowsTheMechanism(t *testing.T) {
 	for _, mechanism := range []workloadtypes.UpdateStrategyType{
 		workloadtypes.UpdateStrategyInPlaceIfPossible, workloadtypes.UpdateStrategyInPlaceOnly,
 	} {
-		if allowed, gate, reason := EvaluateUpdateGate(context.Background(), client, isvc, v1beta1.DecoderComponent, nil, GroupDefaults{},
+		if allowed, gate, reason := EvaluateUpdateGate(context.Background(), client, isvc, v1beta1.DecoderComponent, forwardTarget(isvc, v1beta1.DecoderComponent), nil, GroupDefaults{},
 			mechanism, 0, 0); !allowed {
 			t.Errorf("decoder %s on 4:2 tol=25%% must be waived past the ratio gate; got held gate=%q reason=%q", mechanism, gate, reason)
 		}
 	}
-	if allowed, gate, reason := EvaluateUpdateGate(context.Background(), client, isvc, v1beta1.EngineComponent, nil, GroupDefaults{},
+	if allowed, gate, reason := EvaluateUpdateGate(context.Background(), client, isvc, v1beta1.EngineComponent, forwardTarget(isvc, v1beta1.EngineComponent), nil, GroupDefaults{},
 		workloadtypes.UpdateStrategyRecreatePod, 0, 0); !allowed {
 		t.Errorf("engine RecreatePod on 4:2 tol=25%% must be admitted (3:2 = 1.5 stays in band); got held gate=%q reason=%q", gate, reason)
 	}
