@@ -171,6 +171,9 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 		// gang-level holds. Zero (unconfigured) leaves an unplaceable pod
 		// or gang parking the deadline until an operator acts.
 		UnschedulableGrace: settings.Unschedulable,
+		// Termination grace of a replacement a rollout abandons before it
+		// ever served. Zero (unconfigured) leaves such a pod its own grace.
+		AbandonedReplacementGrace: settings.AbandonedReplacement,
 		// Migration admission caps. Nil (unconfigured) holds requests:
 		// the caps are the only bound on destructive migration churn.
 		MigrationAudit: settings.MigrationAudit,

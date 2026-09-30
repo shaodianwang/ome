@@ -139,6 +139,9 @@ data:
   {{- with .unschedulableGracePeriod }}
   {{- $fields = append $fields (dict "unschedulableGracePeriod" .) }}
   {{- end }}
+  {{- with .abandonedReplacementGracePeriod }}
+  {{- $fields = append $fields (dict "abandonedReplacementGracePeriod" .) }}
+  {{- end }}
   {{- with .gangScheduleTimeout }}
   {{- $fields = append $fields (dict "gangScheduleTimeout" (dict "min" .min "max" .max)) }}
   {{- end }}

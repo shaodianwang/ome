@@ -1757,6 +1757,61 @@ func TestAbandonFailedGangSurge_PersistsCleanupMarkerAcrossRemovalFailure(t *tes
 	}
 }
 
+// TestAbandonFailedGangSurge_AbandonGraceBoundsUnservedMembers pins the
+// grace the gang abandon deletes the retired replacement gang with. The
+// source keeps its surge step, and so the budget, until the members are
+// gone: a member that never carried the serving gate goes on the
+// configured abandoned-replacement grace, one that has carried it keeps
+// the pod's own grace.
+//
+// Cells: instance/Update/Surge/spec.revision/before
+func TestAbandonFailedGangSurge_AbandonGraceBoundsUnservedMembers(t *testing.T) {
+	legacyResetExpectations(t)
+	isvc, _ := surgeISVCReady("llama-70b", "prod", 1)
+	plan := gangSurgePlan()
+	v1Name := "llama-70b-engine-rev-v1hash"
+	v2Name := "llama-70b-engine-rev-v2hash"
+	v2Hash := query.RevisionHashFromControllerRevisionName(v2Name)
+	ir := gangSurgeInFlightIR(isvc, v1Name, v2Name)
+
+	var deletes []recordedDeleteOpts
+	funcs := fdDeleteRecorder(&deletes)
+	c := fdFakeClient(t, &funcs, isvc, ir)
+	// The replacement gang at the surge index: the leader has been marked
+	// serving, the worker never was.
+	leader := gangPodAt(isvc, 1, "leader", v2Hash, false, true)
+	worker := gangPodAt(isvc, 1, "worker", v2Hash, false, false)
+	for _, pod := range []*corev1.Pod{leader, worker} {
+		if err := c.Create(context.Background(), pod); err != nil {
+			t.Fatalf("seed replacement pod %s: %v", pod.Name, err)
+		}
+	}
+	input := gangInputWithRemove(isvc, c)
+	input.AbandonedReplacementGrace = 7 * time.Second
+
+	done, err := abandonFailedGangSurge(context.Background(), legacyTestDeps(c), input, plan, 0, 1, v1Name, v2Name, "", false)
+	if err != nil || done {
+		t.Fatalf("abandon pass: done=%v err=%v", done, err)
+	}
+	if len(deletes) != 2 {
+		t.Fatalf("deletes = %+v, want both replacement members", deletes)
+	}
+	for _, d := range deletes {
+		switch d.name {
+		case leader.Name:
+			if d.grace != nil {
+				t.Errorf("leader that has served deleted with grace %d, want the pod's own grace", *d.grace)
+			}
+		case worker.Name:
+			if d.grace == nil || *d.grace != 7 {
+				t.Errorf("never-served worker deleted with grace %v, want 7", d.grace)
+			}
+		default:
+			t.Errorf("unexpected delete of %s", d.name)
+		}
+	}
+}
+
 // Cells: instance/Failed/pod.deleted[target]/before
 func TestAbandonFailedGangSurge_AtomicallyRemovesMarkerAndResetsSource(t *testing.T) {
 	legacyResetExpectations(t)

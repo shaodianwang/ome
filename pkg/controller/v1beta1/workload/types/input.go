@@ -262,6 +262,17 @@ type ReconcileInput struct {
 	// InstanceReadyTimeout clock for as long as it lasts.
 	UnschedulableGrace time.Duration
 
+	// AbandonedReplacementGrace is the termination grace a rollout gives a
+	// replacement pod it abandons before the pod ever carried the serving
+	// gate: a surge replacement superseded by a newer revision, or retired
+	// after its attempt failed, while still pulling, scheduling or failing
+	// readiness. Such a pod has never been in rotation and owes no
+	// in-flight work, and its own terminationGracePeriodSeconds would
+	// otherwise hold its surge slot for that long. Operator config
+	// (lifecycle.abandonedReplacementGracePeriod); zero or negative leaves
+	// every abandoned replacement its own grace.
+	AbandonedReplacementGrace time.Duration
+
 	// MigrationAudit bounds migration admission against the owner's
 	// migration records. nil = unconfigured → a request is held until
 	// the caps exist (they are the only thing bounding destructive

@@ -617,6 +617,17 @@ ome:
       # way. Removing this field disables the escalation, so an unplaceable pod
       # waits for an operator instead.
       unschedulableGracePeriod: 15m
+      # abandonedReplacementGracePeriod is the termination grace given to a
+      # replacement pod a rollout abandons before it ever entered the serving
+      # rotation: a surge replacement superseded by a newer revision, or
+      # retired after its attempt failed, while still pulling, scheduling or
+      # failing readiness. Such a pod owes no in-flight work, and its own
+      # terminationGracePeriodSeconds (the pod grace default above) would
+      # otherwise hold its surge slot — with maxSurge 1, the whole rollout —
+      # for that long before a corrective revision can land. A replacement
+      # that has served keeps its own grace. Removing this field leaves every
+      # abandoned replacement its own grace.
+      abandonedReplacementGracePeriod: 30s
       # gangScheduleTimeout bounds the PodGroup scheduleTimeoutSeconds a
       # multi-pod Instance derives from its Component's instanceReadyTimeout,
       # so gang admission releases an infeasible attempt on a cluster-wide

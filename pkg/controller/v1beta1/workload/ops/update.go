@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"time"
 
@@ -65,6 +66,37 @@ func drainAdmitted(input workload.ReconcileInput, sourcePods []*corev1.Pod, targ
 
 func surgeWindowApplies(s *workload.InstanceStatus) bool {
 	return s == nil || s.Operation == nil || s.Operation.Step == workload.UpdateStepSurge
+}
+
+// abandonedReplacementDeleteOptions bounds the termination grace of a
+// replacement the rollout abandons before it ever carried the serving
+// gate: it has never been in rotation and owes no in-flight work, so
+// waiting out its own grace would only hold its surge slot, and with it
+// the budget, against the revision that supersedes it. A pod that has
+// carried the gate in either direction, and an unconfigured bound, keep
+// the pod's own grace.
+func abandonedReplacementDeleteOptions(input workload.ReconcileInput, pod *corev1.Pod) []client.DeleteOption {
+	if input.AbandonedReplacementGrace <= 0 || podHasServingCondition(pod) {
+		return nil
+	}
+	seconds := int64(math.Ceil(input.AbandonedReplacementGrace.Seconds()))
+	return []client.DeleteOption{client.GracePeriodSeconds(seconds)}
+}
+
+// podHasServingCondition reports whether any writer has set the serving
+// gate on the pod. The renderer only declares the gate on the spec; the
+// condition appears the first time the rollout marks the pod serving or
+// holds it out of rotation, so its absence proves the pod never served.
+func podHasServingCondition(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type == podreadiness.ConditionType {
+			return true
+		}
+	}
+	return false
 }
 
 // Update drives one Instance toward the target ControllerRevision.

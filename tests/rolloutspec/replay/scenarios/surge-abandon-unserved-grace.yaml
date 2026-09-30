@@ -1,0 +1,46 @@
+# A second template edit lands while the replacement is still coming up, on
+# a Component whose operator has bounded the grace of an abandoned
+# replacement. The replacement never carried the serving gate, so the
+# abandon deletes it on that bound rather than on the pod's own termination
+# grace: the slot its name holds frees on the bound, and the source is reset
+# to Ready on its running revision once it is gone.
+scenario: surge-abandon-unserved-grace
+arrows:
+  - T-ready-surge
+  - T-surge-abandon-superseded
+cells:
+  - instance/Update/Surge/spec.revision/before
+intentional: >-
+  a replacement that never carried the serving gate is deleted with
+  lifecycle.abandonedReplacementGracePeriod, so its slot frees on that bound
+  rather than on the pod's own termination grace
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    abandonedReplacementGrace: 10s
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: a further edit supersedes the pinned target while the replacement has never carried the serving gate, so it is abandoned on the bounded grace
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v3}
+  - tick: 5
+    note: the abandoned replacement is gone, so the source is reset to Ready on the revision it runs
+    events:
+      - pod.deleted[target]: {pod: {index: 0, ordinal: 1}}

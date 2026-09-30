@@ -502,7 +502,7 @@ transitions:
     event: spec.revision
     guard: the in-flight surge is pinned to a revision the desired state no longer asks for and its replacement is not yet runtime-ready
     to: Ready
-    effects: [replacement pods deleted, source reset to Ready on its running revision so the next pass re-enters through the gates]
+    effects: [replacement pods deleted (on the abandoned-replacement grace when they never carried the serving gate), source reset to Ready on its running revision so the next pass re-enters through the gates]
     decided_in: pkg/controller/v1beta1/workload/ops/update_surge.go
   - id: T-surge-deadline
     from: Update/Surge

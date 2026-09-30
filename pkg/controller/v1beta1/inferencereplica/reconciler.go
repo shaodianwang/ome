@@ -1027,6 +1027,10 @@ type lifecycleSettings struct {
 	// Unschedulable bounds a pod the scheduler cannot place. Zero leaves
 	// the hold parking the clock until an operator resolves it.
 	Unschedulable time.Duration
+	// AbandonedReplacement bounds the termination grace of a replacement
+	// pod a rollout abandons before it ever served. Zero leaves such a pod
+	// its own grace.
+	AbandonedReplacement time.Duration
 	// GangScheduleTimeout bounds the PodGroup schedule timeout derived
 	// from InstanceReadyTimeout. Nil passes the derived value through to
 	// the scheduler.
@@ -1060,11 +1064,17 @@ func (r *Reconciler) resolveLifecycleSettings(log logr.Logger) lifecycleSettings
 	if settings.Unschedulable, err = cfg.ToUnschedulableGracePeriod(); err != nil {
 		log.V(1).Info("unschedulable grace invalid; scheduler-hold escalation disabled this pass", "error", err.Error())
 	}
+	if settings.AbandonedReplacement, err = cfg.ToAbandonedReplacementGracePeriod(); err != nil {
+		log.V(1).Info("abandoned-replacement grace invalid; an abandoned replacement keeps its own grace this pass", "error", err.Error())
+	}
 	if settings.StuckPod == 0 {
 		log.V(1).Info("stuck-pod grace unconfigured (no lifecycle.stuckPodGracePeriod); skipping fast escalation this pass")
 	}
 	if settings.Unschedulable == 0 {
 		log.V(1).Info("unschedulable grace unconfigured (no lifecycle.unschedulableGracePeriod); scheduler-hold escalation disabled this pass")
+	}
+	if settings.AbandonedReplacement == 0 {
+		log.V(1).Info("abandoned-replacement grace unconfigured (no lifecycle.abandonedReplacementGracePeriod); an abandoned replacement keeps its own termination grace")
 	}
 	if settings.GangScheduleTimeout, err = cfg.GangScheduleTimeout.ToClamp(); err != nil {
 		log.V(1).Info("gang schedule timeout invalid; the derived timeout is unclamped this pass", "error", err.Error())
