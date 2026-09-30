@@ -819,6 +819,31 @@ func TestChooseUpdateMode_MultiPodInPlaceFallsBackToRecreate(t *testing.T) {
 	}
 }
 
+// TestInPlaceFallsBackToRecreate pins the one fallback the plan can
+// classify without a revision read: a multi-pod Instance under either
+// in-place variant rebuilds, while a single-pod Instance and every
+// non-in-place strategy keep their declared mechanism.
+func TestInPlaceFallsBackToRecreate(t *testing.T) {
+	cases := []struct {
+		strategy workload.UpdateStrategyType
+		multiPod bool
+		want     bool
+	}{
+		{workload.UpdateStrategyInPlaceIfPossible, true, true},
+		{workload.UpdateStrategyInPlaceOnly, true, true},
+		{workload.UpdateStrategyInPlaceIfPossible, false, false},
+		{workload.UpdateStrategyInPlaceOnly, false, false},
+		{workload.UpdateStrategyRecreatePod, true, false},
+		{workload.UpdateStrategySurgeThenDrain, true, false},
+		{"", true, false},
+	}
+	for _, tc := range cases {
+		if got := InPlaceFallsBackToRecreate(tc.strategy, tc.multiPod); got != tc.want {
+			t.Errorf("InPlaceFallsBackToRecreate(%q, multiPod=%v) = %v, want %v", tc.strategy, tc.multiPod, got, tc.want)
+		}
+	}
+}
+
 // TestInPlaceEligible_OnlyImageDiff confirms image-only diff is
 // eligible for in-place rollout.
 func TestInPlaceEligible_OnlyImageDiff(t *testing.T) {

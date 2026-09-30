@@ -185,6 +185,13 @@ type ReconcileInput struct {
 	// pacing, surge / unavailability budgets, sequential rollout
 	// ordering) that workload code MUST NOT know about.
 	//
+	// strategy is the mechanism the start runs on, not merely the
+	// Component's declared strategy: a start that rebuilds its pods under
+	// another declaration — a crash-loop repair, a gang whose in-place
+	// strategy resolves to a recreate — is consulted as RecreatePod. A
+	// gate that waives its capacity checks for an in-place start therefore
+	// waives them only for a start that returns the same pod.
+	//
 	// allowed=false skips this Instance for this reconcile pass; the
 	// dispatcher emits a short requeue. inFlightSurge / inFlightUnavail
 	// are the dispatcher's within-pass counters so the gate can

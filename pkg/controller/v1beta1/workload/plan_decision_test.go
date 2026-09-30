@@ -967,6 +967,61 @@ func TestPlan_UpdateCoordGateExemptSurgeKeepsConsult(t *testing.T) {
 	}
 }
 
+// TestPlan_Update_RecreateFallback_GangInPlace asserts the selection
+// marks the fresh starts whose in-place strategy runs as a recreate — a
+// multi-pod Instance under either in-place variant — and nothing else.
+// The executor consults the coordination gate for such a start as a
+// RecreatePod start: it takes the pods out of rotation before anything
+// returns, the capacity loss the gate waives only for a same-pod patch.
+func TestPlan_Update_RecreateFallback_GangInPlace(t *testing.T) {
+	gang := []types.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 1}}
+	single := []types.RunnerPlan{{Name: "default", Size: 1}}
+	cases := []struct {
+		name     string
+		strategy types.UpdateStrategyType
+		runners  []types.RunnerPlan
+		want     bool
+	}{
+		{"gang InPlaceIfPossible", types.UpdateStrategyInPlaceIfPossible, gang, true},
+		{"gang InPlaceOnly", types.UpdateStrategyInPlaceOnly, gang, true},
+		{"single-pod InPlaceIfPossible", types.UpdateStrategyInPlaceIfPossible, single, false},
+		{"single-pod InPlaceOnly", types.UpdateStrategyInPlaceOnly, single, false},
+		{"gang RecreatePod", types.UpdateStrategyRecreatePod, gang, false},
+		{"gang SurgeThenDrain", types.UpdateStrategySurgeThenDrain, gang, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			target := updateTarget()
+			in := minimalInput(t)
+			forbidMutations(t, &in)
+			podCount := int32(len(tc.runners))
+			in.ObservedState.InstanceStatuses = []types.InstanceStatus{
+				{Index: 0, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: "prior-rev",
+					PodCount: podCount, ServingPodCount: podCount},
+			}
+			plan := types.ComponentPlan{
+				Component:      types.ComponentEngine,
+				Replicas:       1,
+				Instances:      []types.InstancePlan{{Index: 0, Incarnation: 1, Runners: tc.runners}},
+				UpdateStrategy: types.UpdateStrategy{Type: tc.strategy},
+			}
+
+			d := planTargetOrFail(t, in, plan, target, planSnapshot(in, nil))
+			ua := findAction(d, workload.ActionUpdate)
+			if ua == nil {
+				t.Fatalf("expected an Update action, got %v", actionKinds(d))
+			}
+			items := ua.Update.Items
+			if len(items) != 1 || !items[0].StartingFresh {
+				t.Fatalf("update items = %+v, want one fresh start", items)
+			}
+			if items[0].RecreateFallback != tc.want {
+				t.Errorf("RecreateFallback = %v, want %v", items[0].RecreateFallback, tc.want)
+			}
+		})
+	}
+}
+
 // TestPlan_Update_AdoptRevision asserts the empty-RunningRevision
 // adoption selection: runtime-ready pods already carrying the target
 // revision's hash select the backfill stamp as an Item (the write

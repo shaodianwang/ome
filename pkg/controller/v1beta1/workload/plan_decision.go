@@ -81,6 +81,12 @@ type UpdateItem struct {
 	// CoordGateExempt: the fresh start skips the coordination gate consult
 	// (types.RecreateOfDarkFailedRow); the per-Component budget still applies.
 	CoordGateExempt bool
+	// RecreateFallback: the Component's in-place strategy runs as a
+	// recreate on this Instance (ops.InPlaceFallsBackToRecreate), so the
+	// fresh start is consulted with the coordination gate as a RecreatePod
+	// start: it takes the pods out of rotation before anything returns,
+	// which is the capacity loss the gate waives only for a same-pod patch.
+	RecreateFallback bool
 	// CleanupOnly: the update trigger declined (zero revision distance —
 	// the corrective roll-back — or a third-party-revision leftover) but
 	// the instance carries superseded-revision wreckage
@@ -620,10 +626,11 @@ func planUpdateSelection(ctx context.Context, input types.ReconcileInput, plan t
 		row := input.ObservedState.Instance(inst.Index)
 		startingFresh := !types.UpdateContinuation(row)
 		gateExempt := types.RecreateOfDarkFailedRow(row, strategy)
+		recreateFallback := workloadops.InPlaceFallsBackToRecreate(strategy, inst.TotalPods() > 1)
 		logf.FromContext(ctx).V(1).Info("update selected",
 			"component", plan.Component, "instance", inst.Index, "target", target.Name,
-			"startingFresh", startingFresh, "coordGateExempt", gateExempt)
-		selection.Items = append(selection.Items, UpdateItem{Instance: inst, StartingFresh: startingFresh, CoordGateExempt: gateExempt})
+			"startingFresh", startingFresh, "coordGateExempt", gateExempt, "recreateFallback", recreateFallback)
+		selection.Items = append(selection.Items, UpdateItem{Instance: inst, StartingFresh: startingFresh, CoordGateExempt: gateExempt, RecreateFallback: recreateFallback})
 	}
 	// Budgets are decided here but spent in Execute, so record them with the
 	// selection they apply to: a selection that is non-empty yet starts

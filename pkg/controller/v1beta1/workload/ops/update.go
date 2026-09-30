@@ -229,35 +229,32 @@ const (
 	updateModeSurge
 )
 
+// InPlaceFallsBackToRecreate reports whether an in-place strategy runs as
+// a recreate on this Instance. inPlaceEligible compares only the leader's
+// PodSpec, so a multi-pod Instance always rebuilds: a worker-only image
+// bump patched in place would leave the workers on the old image
+// (split-brain). Both in-place variants fall back the same way, whatever
+// the diff; InPlaceOnly's strict rejection applies to single-pod
+// Instances only. The update pass reads this ahead of the coordination
+// gate consult, since a fallback recreate takes capacity out of rotation
+// the way any drain-first start does.
+func InPlaceFallsBackToRecreate(strategy workload.UpdateStrategyType, multiPod bool) bool {
+	return multiPod && (strategy == workload.UpdateStrategyInPlaceIfPossible ||
+		strategy == workload.UpdateStrategyInPlaceOnly)
+}
+
 // chooseUpdateModeForInstance is chooseUpdateMode with the multi-pod
-// adjustment layered on top.
-//
-// Multi-pod adjustment:
-//   - In-place modes → recreate: inPlaceEligible compares only the
-//     leader's PodSpec, so a worker-only image bump would produce an
-//     in-place rollout that patches only the leader, leaving workers
-//     on the old image (split-brain).
-//
-// SurgeThenDrain keeps updateModeSurge for gangs — surgeUpdate performs a
-// per-gang index surge (a whole replacement gang at a fresh instance
-// index, gang-scheduled via its own PodGroup, then the source gang is
-// drained). RecreatePod is already recreate; multiPod has no additional
-// effect on it.
+// adjustment layered on top: in-place modes route to recreate for a gang
+// (InPlaceFallsBackToRecreate). SurgeThenDrain keeps updateModeSurge for
+// gangs — surgeUpdate performs a per-gang index surge (a whole
+// replacement gang at a fresh instance index, gang-scheduled via its own
+// PodGroup, then the source gang is drained). RecreatePod is already
+// recreate; multiPod has no additional effect on it.
 func chooseUpdateModeForInstance(strategy workload.UpdateStrategyType, running, target *corev1.PodSpec, multiPod bool) (updateMode, error) {
-	mode, err := chooseUpdateMode(strategy, running, target)
-	if err != nil {
-		// InPlaceOnly + ineligible diff is the only error path. For
-		// multi-pod fall back to recreate: in-place cannot safely roll
-		// a worker-only change. Single-pod keeps the strict semantic.
-		if multiPod && strategy == workload.UpdateStrategyInPlaceOnly {
-			return updateModeRecreate, nil
-		}
-		return mode, err
-	}
-	if multiPod && mode == updateModeInPlace {
+	if InPlaceFallsBackToRecreate(strategy, multiPod) {
 		return updateModeRecreate, nil
 	}
-	return mode, nil
+	return chooseUpdateMode(strategy, running, target)
 }
 
 // chooseUpdateMode resolves strategy + eligibility into a mode. nil

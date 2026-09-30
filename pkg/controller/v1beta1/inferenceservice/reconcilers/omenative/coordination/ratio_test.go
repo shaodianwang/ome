@@ -1601,6 +1601,41 @@ func TestEvaluateUpdateGate_RecreatePodSymmetricCleared(t *testing.T) {
 	}
 }
 
+// TestEvaluateUpdateGate_RatioWaiverFollowsTheMechanism pins the ratio
+// waiver to the mechanism the caller reports. On an asymmetric 4:2 pair
+// (tol 25%, band [1.5, 2.5]) a decoder recreate projects 4:1 = 4.0, past
+// even the 2x-band tiebreaker, so a RecreatePod consult — the consult a
+// gang's in-place fallback arrives as — is held on Ratio. The same
+// consult as an in-place mechanism is waived, since a same-pod patch
+// keeps the decoder's capacity, and passes on the unavailability budget.
+// A recreate that stays in band (the engine's, 3:2 = 1.5) is admitted,
+// so the mechanism decides which check runs, not whether the start runs.
+func TestEvaluateUpdateGate_RatioWaiverFollowsTheMechanism(t *testing.T) {
+	isvc := mkRatioProgressFixture(25, 4, 0, 2, 0)
+	mu := intstr.FromInt(1)
+	isvc.Spec.Rollout.Groups[0].RollingUpdate.MaxUnavailable = &mu
+	pinActiveRun(isvc) // re-pin: the budget edit must be part of the pinned plan
+	client := fakeClientForISVC(isvc)
+
+	allowed, gate, reason := EvaluateUpdateGate(context.Background(), client, isvc, v1beta1.DecoderComponent, nil, GroupDefaults{},
+		workloadtypes.UpdateStrategyRecreatePod, 0, 0)
+	if allowed || gate != v1beta1.RolloutHoldGateRatio {
+		t.Errorf("decoder RecreatePod on 4:2 tol=25%% must be held on Ratio (4:1 = 4.0 leaves the band); got allowed=%v gate=%q reason=%q", allowed, gate, reason)
+	}
+	for _, mechanism := range []workloadtypes.UpdateStrategyType{
+		workloadtypes.UpdateStrategyInPlaceIfPossible, workloadtypes.UpdateStrategyInPlaceOnly,
+	} {
+		if allowed, gate, reason := EvaluateUpdateGate(context.Background(), client, isvc, v1beta1.DecoderComponent, nil, GroupDefaults{},
+			mechanism, 0, 0); !allowed {
+			t.Errorf("decoder %s on 4:2 tol=25%% must be waived past the ratio gate; got held gate=%q reason=%q", mechanism, gate, reason)
+		}
+	}
+	if allowed, gate, reason := EvaluateUpdateGate(context.Background(), client, isvc, v1beta1.EngineComponent, nil, GroupDefaults{},
+		workloadtypes.UpdateStrategyRecreatePod, 0, 0); !allowed {
+		t.Errorf("engine RecreatePod on 4:2 tol=25%% must be admitted (3:2 = 1.5 stays in band); got held gate=%q reason=%q", gate, reason)
+	}
+}
+
 // TestEvaluateSurge_DrainTiebreaker_InFlightOpBoundsAcrossWakeups pins the
 // cross-wake-up bound: when a prior recreate's drain is still in flight
 // (operation-tracked InFlightUnavail=1) but the cache-derived Serving still
