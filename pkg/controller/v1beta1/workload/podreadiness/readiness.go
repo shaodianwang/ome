@@ -323,6 +323,19 @@ func IsServing(pod *corev1.Pod) bool {
 	return cond != nil && cond.Status == corev1.ConditionTrue
 }
 
+// HeldNotServing reports whether a writer currently holds the pod out of
+// rotation: the condition exists with Status != True. A pod without the
+// condition is not held, which is what separates this from !IsServing: a
+// reader keyed on kubelet PodReady can honor the hold while PodReady still
+// reads True, since kubelet re-evaluates the gate asynchronously.
+func HeldNotServing(pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	cond := findCondition(pod, ConditionType)
+	return cond != nil && cond.Status != corev1.ConditionTrue
+}
+
 // IsContainersReady reports whether the kubelet-owned ContainersReady
 // condition is True — i.e., all containers in the pod have passed their
 // readiness probes.

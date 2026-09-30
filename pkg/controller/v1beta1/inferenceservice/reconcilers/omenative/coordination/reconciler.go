@@ -17,6 +17,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/irstatus"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/obsmetrics"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	workloadstatus "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
 	"github.com/ome-projects/ome/pkg/rollout"
@@ -463,11 +464,20 @@ func observePerRevisionPods(ctx context.Context, reads client.Reader, isvc *v1be
 }
 
 // podReadyAndServing reports whether a pod is currently serving traffic: Running,
-// not being deleted, and reporting the PodReady condition True. Pods without a
-// readiness probe are marked Ready by the kubelet once their containers start, so
-// this holds for both real runtimes and probe-less test fixtures.
+// not being deleted, not held out of rotation by the controller's serving gate,
+// and reporting the PodReady condition True. Pods without a readiness probe are
+// marked Ready by the kubelet once their containers start, so this holds for
+// both real runtimes and probe-less test fixtures.
+//
+// The gate is read in its own right, not only through PodReady: every drain
+// holds it False first, kubelet folds the hold into PodReady asynchronously,
+// and the pass that observes the hold must already stop publishing the
+// drained revision as live traffic.
 func podReadyAndServing(pod *corev1.Pod) bool {
 	if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
+		return false
+	}
+	if podreadiness.HeldNotServing(pod) {
 		return false
 	}
 	for _, cond := range pod.Status.Conditions {
