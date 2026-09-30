@@ -296,7 +296,7 @@ The `model-agent` DaemonSet deployed by `charts/ome-resources/` runs an image bu
 | `internal/ome-agent` | Agent implementations dispatched as `ome-agent` subcommands: `replica` (cross-region replication), `serving-agent` (sidecar), `fine-tuned-adapter`, `model-metadata`. |
 
 ### Helm Charts (`charts/`)
-- **ome-crd** — CRD-only chart. CRDs are copied from `config/crd/full/` during `make manifests`.
+- **ome-crd** — CRD-only chart. `make manifests` generates its templates from `config/crd/full/` through `crd-gen helmchart`, which factors repeated schema subtrees into shared partials (`_schemas.tpl`) so the Helm release record stays well under its 1 MiB limit. The rendered CRDs equal `config/crd/full/`; the chart render test enforces it. Never edit the templates by hand.
 - **ome-resources** — Controller deployment, model-agent DaemonSet, RBAC, webhooks, cluster resources.
 
 ### Sample Manifests (`config/samples/`)
