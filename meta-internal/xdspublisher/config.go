@@ -38,8 +38,10 @@ const (
 	optNoPositivePlanPolicy = "noPositivePlanPolicy"
 	clusterURLPlaceholder   = "{cluster}"
 
+	weightModeAbsolute                            = "absolute"
 	weightModeNormalized                          = "normalized"
 	weightModeRelative                            = "relative"
+	defaultWeightMode                             = weightModeAbsolute
 	noPositivePlanPolicyApplyCurrent              = string(placementendpoint.TrafficMapNoPositivePlanPolicyApplyCurrent)
 	noPositivePlanPolicyRetainLastPositive        = string(placementendpoint.TrafficMapNoPositivePlanPolicyRetainLastPositive)
 	maxXDSWeight                           uint64 = 1<<32 - 1
@@ -274,31 +276,32 @@ func parseSourceSelector(raw string) (labels.Selector, string, error) {
 func parseWeightMode(raw string) (string, error) {
 	mode := strings.TrimSpace(raw)
 	if mode == "" {
-		return "", fmt.Errorf("routing.publisher.options[%q] is required by %q", optWeightMode, Name)
+		return defaultWeightMode, nil
 	}
 	switch mode {
-	case weightModeNormalized, weightModeRelative:
+	case weightModeAbsolute, weightModeNormalized, weightModeRelative:
 		return mode, nil
 	default:
 		return "", fmt.Errorf(
-			"routing.publisher.options[%q] must be %q or %q",
-			optWeightMode, weightModeNormalized, weightModeRelative,
+			"routing.publisher.options[%q] must be %q, %q, or %q",
+			optWeightMode, weightModeAbsolute, weightModeNormalized, weightModeRelative,
 		)
 	}
 }
 
 func parseNormalizedTotal(options map[string]string, weightMode string) (uint32, string, error) {
 	raw, found := options[optNormalizedTotal]
-	if weightMode == weightModeRelative {
+	switch weightMode {
+	case weightModeAbsolute, weightModeRelative:
 		if found {
 			return 0, "", fmt.Errorf(
 				"routing.publisher.options[%q] is not accepted when %q is %q",
-				optNormalizedTotal, optWeightMode, weightModeRelative,
+				optNormalizedTotal, optWeightMode, weightMode,
 			)
 		}
 		return 0, "", nil
-	}
-	if weightMode != weightModeNormalized {
+	case weightModeNormalized:
+	default:
 		return 0, "", fmt.Errorf("cannot parse %q for unsupported weight mode %q", optNormalizedTotal, weightMode)
 	}
 	raw = strings.TrimSpace(raw)

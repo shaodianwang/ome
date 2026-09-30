@@ -135,6 +135,26 @@ func TestParseConfigCanonicalizesRelativeWeightMode(t *testing.T) {
 	assert.Empty(t, cfg.normalizedTotal)
 }
 
+func TestParseConfigDefaultsToAbsoluteWeightMode(t *testing.T) {
+	options := validOptions()
+	delete(options, optWeightMode)
+	delete(options, optNormalizedTotal)
+
+	cfg, err := parseConfig(options)
+	require.NoError(t, err)
+	assert.Equal(t, weightModeAbsolute, cfg.weightMode)
+	assert.Empty(t, cfg.normalizedTotal)
+}
+
+func TestParseConfigRejectsNormalizedTotalInAbsoluteMode(t *testing.T) {
+	options := validOptions()
+	options[optWeightMode] = weightModeAbsolute
+
+	_, err := parseConfig(options)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), optNormalizedTotal)
+}
+
 func TestParseConfigCanonicalizesNormalizedTotal(t *testing.T) {
 	for _, tt := range []struct {
 		name string

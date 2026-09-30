@@ -14,6 +14,7 @@ import (
 	"strings"
 	"text/template"
 
+	"gopkg.in/inf.v0"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -419,13 +420,57 @@ func desiredTargets(
 			return nil, fmt.Errorf("xDS target template maps more than one entry to %q", name)
 		}
 		seen[name] = struct{}{}
-		targets = append(targets, weightedTarget{name: name, weight: uint32(entry.Weight)})
+		weight := uint32(entry.Weight)
+		if weightMode == weightModeAbsolute {
+			weight, err = absoluteWeight(entry)
+			if err != nil {
+				return nil, err
+			}
+		}
+		targets = append(targets, weightedTarget{name: name, weight: weight})
 	}
-	if weightMode == weightModeNormalized {
+	switch weightMode {
+	case weightModeNormalized:
 		normalizeTargetWeights(targets, normalizedTotal)
+	case weightModeAbsolute:
+		var total uint64
+		for _, target := range targets {
+			total += uint64(target.weight)
+		}
+		// Envoy rejects a weighted_clusters route whose weights sum past uint32.
+		if total > maxXDSWeight {
+			return nil, fmt.Errorf("absolute xDS weights sum to %d, maximum is %d", total, maxXDSWeight)
+		}
 	}
 	sortWeightedTargets(targets)
 	return targets, nil
+}
+
+// absoluteWeight is the entry's serving capacity, round(min(allocated, ready) *
+// factor), so weights stay comparable across TrafficMaps and with other
+// capacity-denominated shards. The reduced ratio in entry.Weight remains the
+// gate: drains, probe failures, and unready homes publish zero.
+func absoluteWeight(entry v1beta1.TrafficMapEntry) (uint32, error) {
+	if entry.Weight == 0 {
+		return 0, nil
+	}
+	if entry.Capacity == nil {
+		return 0, fmt.Errorf("TrafficMap entry %q has no capacity provenance for absolute weight", entry.Cluster)
+	}
+	replicas := min(entry.Capacity.Allocated, entry.Capacity.Ready)
+	scaled := inf.NewDec(int64(max(replicas, 0)), 0)
+	if factor := entry.Capacity.Factor; factor != nil && factor.Sign() > 0 {
+		scaled.Mul(scaled, factor.AsDec())
+	}
+	rounded := new(inf.Dec).Round(scaled, 0, inf.RoundHalfUp).UnscaledBig()
+	if rounded.Sign() <= 0 {
+		// A positive gate never disappears through rounding.
+		return 1, nil
+	}
+	if !rounded.IsUint64() || rounded.Uint64() > maxXDSWeight {
+		return 0, fmt.Errorf("TrafficMap entry %q absolute weight %s exceeds %d", entry.Cluster, rounded, maxXDSWeight)
+	}
+	return uint32(rounded.Uint64()), nil
 }
 
 func sortWeightedTargets(targets []weightedTarget) {

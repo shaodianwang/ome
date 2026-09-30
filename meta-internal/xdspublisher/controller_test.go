@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -157,7 +158,6 @@ func TestResolveOptionsValidatesSanitizedGlobals(t *testing.T) {
 		{name: "missing", options: nil, want: "required"},
 		{name: "invalid template", options: targetOptions("{{"), want: optTargetTemplate},
 		{name: "invalid source selector", options: targetOptionsWithSelector("{{.Cluster}}", "publish in ("), want: optSourceSelector},
-		{name: "missing weight mode", options: map[string]string{optTargetTemplate: "{{.Cluster}}"}, want: optWeightMode},
 		{name: "invalid weight mode", options: map[string]string{
 			optTargetTemplate: "{{.Cluster}}", optWeightMode: "percent",
 		}, want: optWeightMode},
@@ -169,6 +169,12 @@ func TestResolveOptionsValidatesSanitizedGlobals(t *testing.T) {
 		}, want: optNormalizedTotal},
 		{name: "normalized total with relative mode", options: map[string]string{
 			optTargetTemplate: "{{.Cluster}}", optWeightMode: weightModeRelative, optNormalizedTotal: "100",
+		}, want: optNormalizedTotal},
+		{name: "normalized total with absolute mode", options: map[string]string{
+			optTargetTemplate: "{{.Cluster}}", optWeightMode: weightModeAbsolute, optNormalizedTotal: "100",
+		}, want: optNormalizedTotal},
+		{name: "normalized total with default mode", options: map[string]string{
+			optTargetTemplate: "{{.Cluster}}", optNormalizedTotal: "100",
 		}, want: optNormalizedTotal},
 		{name: "missing no-positive plan policy", options: map[string]string{
 			optTargetTemplate: "{{.Cluster}}", optWeightMode: weightModeNormalized, optNormalizedTotal: "100",
@@ -491,6 +497,128 @@ func TestPlanWeightModes(t *testing.T) {
 			for i := range tt.want {
 				assert.Equal(t, tt.want[i], xdsPlan.targets[i].weight)
 			}
+		})
+	}
+}
+
+func TestResolveOptionsDefaultsToAbsoluteWeightMode(t *testing.T) {
+	effective, err := newTestPublisher(&recordingPublisher{}).ResolveOptions(map[string]string{
+		optTargetTemplate:       "{{.Cluster}}",
+		optNoPositivePlanPolicy: noPositivePlanPolicyApplyCurrent,
+	}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{
+		optTargetTemplate:       "{{.Cluster}}",
+		optWeightMode:           weightModeAbsolute,
+		optNoPositivePlanPolicy: noPositivePlanPolicyApplyCurrent,
+	}, effective)
+}
+
+func absoluteOptions() map[string]string {
+	options := targetOptions("{{.Cluster}}")
+	options[optWeightMode] = weightModeAbsolute
+	delete(options, optNormalizedTotal)
+	return options
+}
+
+func TestPlanAbsoluteWeightsPublishServingCapacity(t *testing.T) {
+	factor := func(s string) *resource.Quantity {
+		q := resource.MustParse(s)
+		return &q
+	}
+	tests := []struct {
+		name     string
+		weights  []int32
+		capacity []*v1beta1.TrafficMapCapacity
+		want     []uint32
+	}{
+		{
+			name:    "replica counts survive ratio reduction",
+			weights: []int32{3, 2},
+			capacity: []*v1beta1.TrafficMapCapacity{
+				{Allocated: 6, Ready: 6}, {Allocated: 4, Ready: 4},
+			},
+			want: []uint32{4, 6},
+		},
+		{
+			name:    "ready caps allocated",
+			weights: []int32{1, 1},
+			capacity: []*v1beta1.TrafficMapCapacity{
+				{Allocated: 6, Ready: 3}, {Allocated: 3, Ready: 9},
+			},
+			want: []uint32{3, 3},
+		},
+		{
+			name:    "factor scales and rounds half up",
+			weights: []int32{47, 10},
+			capacity: []*v1beta1.TrafficMapCapacity{
+				{Allocated: 10, Ready: 10, Factor: factor("4.7")},
+				{Allocated: 5, Ready: 5, Factor: factor("0.5")},
+			},
+			want: []uint32{3, 47},
+		},
+		{
+			name:    "zero gate wins over capacity",
+			weights: []int32{0, 1},
+			capacity: []*v1beta1.TrafficMapCapacity{
+				{Allocated: 6, Ready: 6}, {Allocated: 4, Ready: 4},
+			},
+			want: []uint32{0, 4},
+		},
+		{
+			name:    "positive gate never rounds to zero",
+			weights: []int32{1, 1},
+			capacity: []*v1beta1.TrafficMapCapacity{
+				{Allocated: 1, Ready: 1, Factor: factor("0.1")}, {Allocated: 1, Ready: 1},
+			},
+			want: []uint32{1, 1},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			trafficMap := testTrafficMap()
+			for i := range tt.weights {
+				trafficMap.Spec.Entries[i].Weight = tt.weights[i]
+				trafficMap.Spec.Entries[i].Capacity = tt.capacity[i]
+			}
+			plan, err := newTestPublisher(&recordingPublisher{}).Plan(testISVC("model-a"), trafficMap, absoluteOptions())
+			require.NoError(t, err)
+			xdsPlan := plan.(*publishPlan)
+			got := make([]uint32, len(xdsPlan.targets))
+			for i := range xdsPlan.targets {
+				got[i] = xdsPlan.targets[i].weight
+			}
+			// Entries are home-b, home-a; targets sort zero weights first, then by name.
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestPlanAbsoluteWeightsRejectUnrepresentableInput(t *testing.T) {
+	huge := resource.MustParse("3e9")
+	tests := []struct {
+		name     string
+		capacity []*v1beta1.TrafficMapCapacity
+		want     string
+	}{
+		{name: "missing capacity", capacity: []*v1beta1.TrafficMapCapacity{nil, {Allocated: 1, Ready: 1}}, want: "capacity provenance"},
+		{name: "single target overflow", capacity: []*v1beta1.TrafficMapCapacity{
+			{Allocated: 2, Ready: 2, Factor: &huge}, {Allocated: 1, Ready: 1},
+		}, want: "exceeds"},
+		{name: "sum overflow", capacity: []*v1beta1.TrafficMapCapacity{
+			{Allocated: 1, Ready: 1, Factor: &huge}, {Allocated: 1, Ready: 1, Factor: &huge},
+		}, want: "sum to"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			trafficMap := testTrafficMap()
+			for i := range tt.capacity {
+				trafficMap.Spec.Entries[i].Weight = 1
+				trafficMap.Spec.Entries[i].Capacity = tt.capacity[i]
+			}
+			_, err := newTestPublisher(&recordingPublisher{}).Plan(testISVC("model-a"), trafficMap, absoluteOptions())
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.want)
 		})
 	}
 }

@@ -126,17 +126,24 @@ tier (`cluster` becomes `xds_auto:cluster`), creating that tier when necessary.
 It does not mutate EDS membership or create a route arm, so the target must
 already exist in the xDS route graph.
 
-The required `weightMode` option selects the xDS wire representation.
-`normalized` uses largest-remainder apportionment to publish nonnegative integer
-weights that sum exactly to the required positive integer `normalizedTotal`; an
-all-zero map remains all-zero. Equal remainders are resolved by canonical target
-name, so input order does not affect rounding. A small positive share can round
-to zero when the configured total is too coarse to represent it. The total must
-be from 1 through 4,294,967,295. `relative` publishes the TrafficMap's integer
-ratios directly and rejects `normalizedTotal`. With the routing probe's explicit
-all-failed `Drain` policy, either mode publishes zero for every target. Changing
-either option changes the publisher options digest and republishes each selected
-TrafficMap.
+The `weightMode` option selects the xDS wire representation and defaults to
+`absolute`. `absolute` publishes each home's serving capacity,
+`round(min(allocated, ready) * factor)` from the entry's capacity provenance,
+so weights stay comparable across services and with other capacity-denominated
+arms on the same route; a zero TrafficMap weight (unready, probe-gated, drained)
+still publishes zero, and a positive one never rounds below 1. Authored fallback
+weights on the route must use the same replica units, because an arm without a
+published value keeps its authored weight. `normalized` uses largest-remainder
+apportionment to publish nonnegative integer weights that sum exactly to the
+required positive integer `normalizedTotal`; an all-zero map remains all-zero.
+Equal remainders are resolved by canonical target name, so input order does not
+affect rounding. A small positive share can round to zero when the configured
+total is too coarse to represent it. The total must be from 1 through
+4,294,967,295. `relative` publishes the TrafficMap's reduced integer ratios
+directly. `absolute` and `relative` reject `normalizedTotal`. With the routing
+probe's explicit all-failed `Drain` policy, every mode publishes zero for every
+target. Changing either option changes the publisher options digest and
+republishes each selected TrafficMap.
 
 The required installation-only `noPositivePlanPolicy` option controls how the
 publisher handles a valid plan with no positive weight. `ApplyCurrent` preserves
@@ -153,12 +160,10 @@ probe-failure, and withdrawal states remain authoritative. Unknown or
 inconsistent status preserves the journal and performs no external mutation.
 The publisher rejects missing, unknown, or per-InferenceService values.
 
-Existing xDS deployments must add `weightMode` when adopting a binary with this
-option, and normalized deployments must also set `normalizedTotal`. Use
-`relative` without `normalizedTotal` for the first rollout when the wire
-representation must remain unchanged, then switch every leader candidate to
-`normalized` with the intended total; binaries that predate these options reject
-them during configuration validation.
+Deployments that set `weightMode: normalized` keep that representation. To
+adopt `absolute`, first re-author the route's fallback weights in replica units,
+then remove `weightMode` and `normalizedTotal` (or set `weightMode: absolute`)
+on every leader candidate.
 
 Deploy `noPositivePlanPolicy: ApplyCurrent` while establishing snapshot coverage
 before opting into `RetainLastPositive`. Changing only this policy does not
@@ -175,7 +180,7 @@ two TrafficMaps in one control plane from claiming the same target. Because
 these external mutations are stateful, manager leader election must be enabled
 when this publisher is selected.
 
-Configuration is deliberately explicit and has no defaults:
+Configuration is explicit apart from the `absolute` weight mode default:
 
 ```yaml
 routing:
@@ -187,8 +192,7 @@ routing:
       oncall: ome
       acl: ome-xds-publisher       # optional
       sourceSelector: 'routing.example.com/publish=true'  # optional
-      weightMode: normalized
-      normalizedTotal: "100"
+      weightMode: absolute         # optional; the default
       noPositivePlanPolicy: ApplyCurrent
       targetTemplate: 'gke_llm_tpu_{{replaceAll "-" "_" .Service}}_{{replaceAll "-" "_" (mustTrimSuffix "-tpu" (mustTrimPrefix "msl-gcp-" .Cluster))}}'
       urlTemplate: 'https://xds-automation.mrpc.fbinfra.net/api/v1/clusters/{cluster}/weight'
