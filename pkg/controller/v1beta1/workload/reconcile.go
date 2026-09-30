@@ -259,12 +259,13 @@ func executeActions(ctx context.Context, deps types.Deps, input types.ReconcileI
 				return types.RequeueNow(), false, nil
 			}
 
-		// 5. Per-Component migration pass, one record per pass.
+		// 5. Per-Component migration pass: the records parked on their
+		// source teardown, tended in order, then the one head record.
 		// Constraint: a migration in flight paces the pass and a completed
 		// one leaves the plan stale, so both end it; a fresh-record defer
 		// falls through so the in-flight op it waits on converges.
 		case ActionMigrate:
-			res, stop, err := executeMigratePass(ctx, deps, input, plan, action.Migration.Record)
+			res, stop, err := executeMigratePass(ctx, deps, input, plan, *action.Migration)
 			if err != nil {
 				return res, false, err
 			}

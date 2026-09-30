@@ -187,6 +187,36 @@ func TestStuckTerminating_Branches(t *testing.T) {
 	}
 }
 
+// TestAllPodsTerminatingOverdue: a teardown reads as stalled only when
+// every pod in it is deleted and past the deadline the pod itself
+// declared. One live pod, one pod inside its grace, or no pods at all
+// is a teardown the drive still owns or has finished.
+func TestAllPodsTerminatingOverdue(t *testing.T) {
+	overdue := tTerminatingPod("node-a", tNow.Add(-time.Minute))
+	inGrace := tTerminatingPod("node-a", tNow.Add(time.Minute))
+	atDeadline := tTerminatingPod("node-a", tNow)
+	live := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "live"}, Spec: corev1.PodSpec{NodeName: "node-a"}}
+	for _, tc := range []struct {
+		name string
+		pods []*corev1.Pod
+		want bool
+	}{
+		{name: "no pods", pods: nil, want: false},
+		{name: "one pod past its deadline", pods: []*corev1.Pod{overdue}, want: true},
+		{name: "every pod past its deadline", pods: []*corev1.Pod{overdue, overdue}, want: true},
+		{name: "a pod inside its grace", pods: []*corev1.Pod{overdue, inGrace}, want: false},
+		{name: "a pod exactly at its deadline", pods: []*corev1.Pod{atDeadline}, want: false},
+		{name: "a pod not Terminating", pods: []*corev1.Pod{overdue, live}, want: false},
+		{name: "a nil entry", pods: []*corev1.Pod{overdue, nil}, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := evidence.AllPodsTerminatingOverdue(tc.pods, tNow); got != tc.want {
+				t.Fatalf("AllPodsTerminatingOverdue = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestNodeDeath_Branches walks the node half: a current Ready=True vetoes
 // every death branch including a stale unreachable taint, evidence
 // younger than the threshold is a blip, and only a gone, long-tainted or

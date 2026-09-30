@@ -258,6 +258,27 @@ func NodeDeath(ctx context.Context, reader client.Reader, pod *corev1.Pod, polic
 	}
 }
 
+// AllPodsTerminatingOverdue reports whether pods is non-empty and every
+// pod in it is Terminating past its own DeletionTimestamp — the deadline
+// the pod itself declared (its deletion request plus its own grace),
+// which a live kubelet meets within moments of it. A set in that state
+// is a teardown no further delete can move: the pods are already
+// deleted, and only their kubelet, a finalizer owner or the force-delete
+// escalation can remove them. No slack is applied, because nothing
+// destructive hangs on the reading — a teardown grazing its deadline on
+// a slow node reads as stalled for a pass and then completes.
+func AllPodsTerminatingOverdue(pods []*corev1.Pod, now time.Time) bool {
+	if len(pods) == 0 {
+		return false
+	}
+	for _, pod := range pods {
+		if pod == nil || pod.DeletionTimestamp == nil || !now.After(pod.DeletionTimestamp.Time) {
+			return false
+		}
+	}
+	return true
+}
+
 // SingleLiveNode returns the one node name hosting every pod of the
 // instance (single-pod, or a single-host gang), or "" when there are no
 // pods, any pod is unscheduled, or pods span multiple nodes — a

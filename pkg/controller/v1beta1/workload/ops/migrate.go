@@ -708,6 +708,18 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 					"pod", pod.Name, "error", escErr.Error())
 			}
 		}
+		// Every source pod deleted and every one of them past its own
+		// deadline: the drive has issued all it owns and the teardown is
+		// the kubelet's. The record is parked on that evidence — the same
+		// reading the dispatcher takes to move the head past it — and the
+		// pass returns without the delete loop, which would skip every
+		// pod anyway.
+		if evidence.AllPodsTerminatingOverdue(sourcePods, input.Now()) {
+			if err := parkMigrationOnSourceTeardown(ctx, deps, input, entry, sourcePods); err != nil {
+				return false, accepted, fmt.Errorf("Migrate: park on source teardown (uuid=%s): %w", requestUUID, err)
+			}
+			return false, accepted, nil
+		}
 		if !deps.ExpectationsCache().Satisfied(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, sourceIdx) {
 			return false, accepted, nil
 		}
@@ -1175,6 +1187,58 @@ func holdMigrationForUnconfiguredCapacity(ctx context.Context, deps workload.Dep
 	}
 	workload.RecordWarning(deps.Recorder, workload.EventTarget(input), workload.EventReasonMigrationPolicyUnconfigured,
 		"OMENative migration uuid=%s held: %s", uuid, migrationCapacityUnconfiguredMessage)
+	return nil
+}
+
+// migrationParkedMessage is what a record parked on its source teardown
+// carries: the first source pod (by name) the kubelet has not removed
+// past the pod's own deadline, and — when no force-delete policy is
+// configured — that nothing automated will remove it. Deterministic
+// across passes so the stamp below stays edge-triggered.
+func migrationParkedMessage(input workload.ReconcileInput, sourcePods []*corev1.Pod) string {
+	name := ""
+	for _, pod := range sourcePods {
+		if pod != nil && (name == "" || pod.Name < name) {
+			name = pod.Name
+		}
+	}
+	msg := fmt.Sprintf("parked on source teardown: pod %s is Terminating past its own deletion deadline", name)
+	if input.ForceDelete == nil {
+		msg += "; no forceDelete policy is configured, so only its kubelet or an operator can remove it"
+	}
+	return msg
+}
+
+// parkMigrationOnSourceTeardown records that the migration is waiting on
+// a kubelet that missed the source pods' own deadlines: the record keeps
+// its Draining phase and carries the reason, and one Warning names the
+// pod. Edge-triggered on the message, so the event fires on the pass
+// that starts the wait, not on every pass of it. The dispatcher reads
+// the same evidence to move the head past the record, which the event
+// says; the drive keeps tending the record and completes it once the
+// pods are gone.
+func parkMigrationOnSourceTeardown(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, entry *workload.MigrationRecord, sourcePods []*corev1.Pod) error {
+	msg := migrationParkedMessage(input, sourcePods)
+	if entry.Message == msg {
+		return nil
+	}
+	opened := false
+	if err := input.MutateMigration(ctx, entry.RequestUUID, func(m *workload.MigrationRecord) bool {
+		if m.Phase.Terminal() || m.Message == msg {
+			return false
+		}
+		m.Message = msg
+		opened = true
+		return true
+	}); err != nil {
+		return fmt.Errorf("record parked migration: %w", err)
+	}
+	if !opened {
+		return nil
+	}
+	workload.RecordWarning(deps.Recorder, workload.EventTarget(input), workload.EventReasonMigrationParked,
+		"OMENative migration uuid=%s %s; later migration requests for %s dispatch ahead of it",
+		entry.RequestUUID, msg, workload.InstanceKey(input.Key.Component, entry.SourceInstance))
 	return nil
 }
 

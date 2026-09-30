@@ -239,9 +239,12 @@ cells:
     note: the drive force-deletes a wedged source pod before the expectations gate,
       because a pod the delete loop skips would otherwise block every terminal
       phase; unconfigured, the migration parks and expiry defers rather than tearing
-      down a serving surge. A wedged surge pod is not covered by this loop
+      down a serving surge. A parked record — every source pod Terminating past its
+      own deletion deadline — carries the reason, raises one MigrationParked warning
+      and yields the dispatch head, so later Manual requests are driven ahead of it
+      while the pass keeps tending it. A wedged surge pod is not covered by this loop
     placement: kind
-    coverage: {perm: [], unit: [TestMigrate_SourceStuckTerminating_EscalationRuns, TestMigrateExpiry_SourceWedgedUnconfigured_Parks], kind: []}
+    coverage: {perm: [], unit: [TestMigrate_SourceStuckTerminating_EscalationRuns, TestMigrateExpiry_SourceWedgedUnconfigured_Parks, TestMigrate_SourceTeardownStalled_ParksThenCompletesOnRemoval], kind: []}
     status: decided
   - state: Migrate/CreateSurge
     event: pod.nodeLost
@@ -302,9 +305,12 @@ cells:
     outcome: ignore
     note: the drive's own delete loop puts the source pods here and then skips them on
       every later pass; the record stays Draining until they are gone, with the
-      stuck-Terminating escalation the only accelerant
+      stuck-Terminating escalation the only accelerant. Once every source pod is past
+      its own deletion deadline the record is parked — message and one MigrationParked
+      warning name the pod — and it yields the dispatch head while the pass keeps
+      tending it, completing the move as soon as the pods are gone
     placement: kind
-    coverage: {perm: [], unit: [], kind: []}
+    coverage: {perm: [], unit: [TestMigrate_SourceTeardownStalled_ParksThenCompletesOnRemoval], kind: []}
     status: current
   - state: Migrate/CreateSurge
     event: pod.terminating
@@ -508,10 +514,14 @@ cells:
     outcome: defer
     note: a second request is consumed into status.migrations as a queued Accepted
       record — at most one accept per pass — and dispatch is serial oldest-first, so
-      it never touches the in-flight pair; a re-delivery of the same uuid is deduped
-      and its annotation dropped
+      it never touches the in-flight pair. The one exception to that seriality is a
+      pair parked on its source teardown, every source pod Terminating past its own
+      deletion deadline, where the drive has nothing left to do but wait on the
+      kubelet - the queued record is driven behind it in the same pass while the
+      parked pair is tended in place, so a wait with no bound of its own never holds
+      the head; a re-delivery of the same uuid is deduped and its annotation dropped
     placement: perm
-    coverage: {perm: [], unit: [TestMigrate_SecondRequestQueuesBehindTheInFlightPair], kind: []}
+    coverage: {perm: [], unit: [TestMigrate_SecondRequestQueuesBehindTheInFlightPair, TestPlan_Migrate_ParkedDrainYieldsTheHead, TestReconcile_ParkedDrainTendsTheRecordAndDispatchesTheNext], kind: []}
     status: decided
   - state: Migrate/CreateSurge
     event: spec.partition

@@ -3629,6 +3629,86 @@ func TestMigrate_WedgedSourcePodLeavesTheMigrationDriving(t *testing.T) {
 	}
 }
 
+// TestMigrate_SourceTeardownStalled_ParksThenCompletesOnRemoval: once
+// the drive has deleted the source pods, a kubelet that does not remove
+// them past their own deadline parks the migration. The record keeps its
+// Draining phase and its serving surge, carries the reason once, and one
+// Warning names the pod; a pod still inside its own grace parks nothing.
+// The wait is tended, not abandoned: the same drive completes the move
+// as soon as the pod is gone.
+//
+// Cells: instance/Migrate/CreateSurge/pod.terminating[source]/before, instance/Migrate/CreateSurge/pod.stuckTerminating/before
+func TestMigrate_SourceTeardownStalled_ParksThenCompletesOnRemoval(t *testing.T) {
+	f := newSinglePodMigFixture(t)
+	clk := f.withFakeClock()
+	f.recorder = record.NewFakeRecorder(16)
+	const uuid = "mig-parked-teardown"
+	f.records = []workload.MigrationRecord{
+		mkMigRecordWithDeadline(uuid, 0, "node-a", clk.Now().Add(4*time.Hour)),
+	}
+	driveToDrainingDrainIncomplete(t, f, uuid)
+	f.react(t) // drain settles — the tail is one delete away
+	migWedgeEvents(t, f)
+
+	// The source pod wedges Terminating (finalizer-pinned so the fake
+	// client keeps the object, as a dead node's kubelet would). The
+	// fixture clock is set inside the pod's own grace first.
+	srcPod := terminatingPod(t, f.c, migPodsForInstance(t, f, 0)[0])
+	clk.SetTime(srcPod.DeletionTimestamp.Add(-30 * time.Second))
+	before := f.record(t, uuid).Message
+	if done, accepted := f.pass(t, uuid); done || !accepted {
+		t.Fatalf("inside the grace: got done=%v accepted=%v, want in-flight", done, accepted)
+	}
+	if got := f.record(t, uuid); got.Message != before {
+		t.Fatalf("a pod inside its own grace parks nothing; message went from %q to %q", before, got.Message)
+	}
+	if events := migWedgeEvents(t, f); len(events) != 0 {
+		t.Fatalf("a pod inside its own grace raises no event; got %v", events)
+	}
+
+	// Past the pod's deadline the record parks: reason stamped, one
+	// Warning, phase and surge untouched — and the next pass adds nothing.
+	clk.Step(time.Minute)
+	for i := 0; i < 2; i++ {
+		if done, accepted := f.pass(t, uuid); done || !accepted {
+			t.Fatalf("parked pass %d: got done=%v accepted=%v, want in-flight", i+1, done, accepted)
+		}
+	}
+	rec := f.record(t, uuid)
+	if rec.Phase != workload.MigrationPhaseDraining {
+		t.Fatalf("a parked record keeps its phase; got %+v", *rec)
+	}
+	for _, want := range []string{"parked on source teardown", srcPod.Name, "no forceDelete policy"} {
+		if !strings.Contains(rec.Message, want) {
+			t.Errorf("record message %q must name %q", rec.Message, want)
+		}
+	}
+	events := migWedgeEvents(t, f)
+	if n := countEventsWithReason(events, workload.EventReasonMigrationParked); n != 1 || len(events) != 1 {
+		t.Fatalf("parking announces itself exactly once; got %v", events)
+	}
+	if surge := findInstanceStatusOnIRForFixture(t, f, 1); surge == nil || surge.Operation == nil || surge.Operation.RequestUUID != uuid {
+		t.Fatalf("the serving surge stays pinned to the parked migration; got %+v", surge)
+	}
+	if len(migPodsForInstance(t, f, 1)) != 1 {
+		t.Fatalf("the serving surge pod must survive the park")
+	}
+
+	// The kubelet finally removes the pod: the same drive completes.
+	live := &corev1.Pod{}
+	if err := f.c.Get(context.Background(), client.ObjectKeyFromObject(srcPod), live); err != nil {
+		t.Fatalf("re-read the parked source pod: %v", err)
+	}
+	live.Finalizers = nil
+	if err := f.c.Update(context.Background(), live); err != nil {
+		t.Fatalf("release the parked source pod: %v", err)
+	}
+	f.drive(t, uuid, 6)
+	if rec := f.record(t, uuid); rec.Phase != workload.MigrationPhaseCompleted {
+		t.Fatalf("the parked migration completes once its source pod is gone; got %+v", *rec)
+	}
+}
+
 // One wedged member is enough for a gang surge: the whole replacement
 // can never be admitted, so the record closes on that member's evidence
 // and the gang source goes back to serving intact.

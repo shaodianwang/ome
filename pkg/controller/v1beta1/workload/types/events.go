@@ -230,7 +230,14 @@ const (
 	// surge unpinned for the scale-down pipeline, source restored from
 	// observation — so the event names the pod and the reason.
 	EventReasonMigrationSurgeWedged EventReason = "MigrationSurgeWedged"
-	EventReasonRateLimited          EventReason = "RateLimited"
+	// EventReasonMigrationParked is a Warning fired once when a Draining
+	// migration's source pods are all Terminating past their own deletion
+	// deadlines: the drive has issued every delete it owns and only the
+	// kubelet, a finalizer owner or the force-delete escalation can
+	// finish the teardown. The record keeps its phase and its serving
+	// surge, and later Manual requests dispatch ahead of it.
+	EventReasonMigrationParked EventReason = "MigrationParked"
+	EventReasonRateLimited     EventReason = "RateLimited"
 	// EventReasonMigrationPolicyUnconfigured is a Warning fired when a
 	// migration request is held because the operator configured no
 	// migration capacity policy. Distinct from RateLimited: no cap was

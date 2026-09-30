@@ -383,8 +383,8 @@ func TestPlan_Migrate_SelectsOldestManualRecord(t *testing.T) {
 		t.Fatalf("decision = %v, want prefix %v", kinds, wantPrefix)
 	}
 	ma := findAction(d, workload.ActionMigrate)
-	if ma.Migration == nil || ma.Migration.Record.RequestUUID != "u-older" {
-		t.Errorf("drive selection = %+v, want oldest non-terminal Manual record u-older", ma.Migration)
+	if ma.Migration == nil || ma.Migration.Head == nil || ma.Migration.Head.RequestUUID != "u-older" || len(ma.Migration.Parked) != 0 {
+		t.Errorf("drive selection = %+v, want oldest non-terminal Manual record u-older as the head", ma.Migration)
 	}
 
 	// Only terminal/Auto records: nothing to drive.
@@ -392,6 +392,100 @@ func TestPlan_Migrate_SelectsOldestManualRecord(t *testing.T) {
 	d = planOrFail(t, in, plan, planSnapshot(in, nil))
 	if findAction(d, workload.ActionMigrate) != nil || findAction(d, workload.ActionMigrateExpiry) != nil {
 		t.Errorf("terminal/Auto records must plan no migration work, got %v", actionKinds(d))
+	}
+}
+
+// TestPlan_Migrate_ParkedDrainYieldsTheHead: a Draining record whose
+// every live source pod is Terminating past its own deletion deadline
+// has nothing left for the drive to do but wait on the kubelet, so it
+// is tended without holding the dispatch head — the oldest record that
+// is not parked is the head, driven in the same pass. A source pod
+// still inside its own grace, or not Terminating at all, keeps the head
+// as any in-flight record does.
+//
+// Cells: instance/Migrate/CreateSurge/spec.migrateRequest/before
+func TestPlan_Migrate_ParkedDrainYieldsTheHead(t *testing.T) {
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	surgeIdx := int32(1)
+	migratePin := func(uuid string) *types.InstanceOperation {
+		return &types.InstanceOperation{Type: types.InstanceOperationMigrate, Step: "CreateSurge", RequestUUID: uuid}
+	}
+	records := func() []types.MigrationRecord {
+		return []types.MigrationRecord{
+			{RequestUUID: "u-queued", Trigger: types.MigrationTriggerManual,
+				Phase: types.MigrationPhaseAccepted, SourceInstance: 2, FromNode: "node-b",
+				StartedAt: metav1.NewTime(now.Add(-time.Minute)), Deadline: metav1.NewTime(now.Add(30 * time.Minute))},
+			{RequestUUID: "u-parked", Trigger: types.MigrationTriggerManual,
+				Phase: types.MigrationPhaseDraining, SourceInstance: 0, SurgeInstance: &surgeIdx, FromNode: "node-a",
+				StartedAt: metav1.NewTime(now.Add(-time.Hour)), Deadline: metav1.NewTime(now.Add(30 * time.Minute))},
+		}
+	}
+	plan := types.ComponentPlan{
+		Component:     types.ComponentEngine,
+		Replicas:      2,
+		MigrationMode: types.MigrationModeAuto,
+		Instances: []types.InstancePlan{
+			{Index: 0, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 1, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 2, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
+		},
+	}
+	sourcePod := func(deletedAt *time.Time) *corev1.Pod {
+		pod := enginePod("llama-70b", "prod", 0)
+		pod.Spec.NodeName = "node-a"
+		if deletedAt != nil {
+			pod.Finalizers = []string{"example.com/hold"}
+			ts := metav1.NewTime(*deletedAt)
+			pod.DeletionTimestamp = &ts
+		}
+		return pod
+	}
+	overdue, inGrace := now.Add(-time.Minute), now.Add(time.Minute)
+
+	for _, tc := range []struct {
+		name       string
+		pod        *corev1.Pod
+		wantParked []string
+		wantHead   string
+	}{
+		{name: "source Terminating past its deadline yields the head", pod: sourcePod(&overdue),
+			wantParked: []string{"u-parked"}, wantHead: "u-queued"},
+		{name: "source Terminating inside its grace holds the head", pod: sourcePod(&inGrace),
+			wantHead: "u-parked"},
+		{name: "source not Terminating holds the head", pod: sourcePod(nil),
+			wantHead: "u-parked"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := minimalInput(t)
+			forbidMutations(t, &in)
+			in.Clock = clocktesting.NewFakeClock(now)
+			in.ObservedState.InstanceStatuses = []types.InstanceStatus{
+				{Index: 0, Incarnation: 1, Phase: types.InstancePhaseMigrating, RunningRevision: "prior-rev", Operation: migratePin("u-parked")},
+				{Index: 1, Incarnation: 1, Phase: types.InstancePhaseCreating, Operation: migratePin("u-parked")},
+				{Index: 2, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: "prior-rev"},
+			}
+			in.ObservedState.Migrations = records()
+			surgePod := enginePod("llama-70b", "prod", 1)
+			queuedSource := enginePod("llama-70b", "prod", 2)
+			queuedSource.Spec.NodeName = "node-b"
+			pods := map[int32][]*corev1.Pod{0: {tc.pod}, 1: {surgePod}, 2: {queuedSource}}
+
+			d := planOrFail(t, in, plan, planSnapshot(in, pods))
+			ma := findAction(d, workload.ActionMigrate)
+			if ma == nil || ma.Migration == nil {
+				t.Fatalf("no Migrate action planned; actions %v", actionKinds(d))
+			}
+			var parked []string
+			for _, r := range ma.Migration.Parked {
+				parked = append(parked, r.RequestUUID)
+			}
+			if !reflect.DeepEqual(parked, tc.wantParked) {
+				t.Fatalf("parked records = %v, want %v", parked, tc.wantParked)
+			}
+			if ma.Migration.Head == nil || ma.Migration.Head.RequestUUID != tc.wantHead {
+				t.Fatalf("head = %+v, want %s", ma.Migration.Head, tc.wantHead)
+			}
+		})
 	}
 }
 

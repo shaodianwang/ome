@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/evidence"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 
@@ -38,7 +39,9 @@ const (
 	ActionRestart ActionKind = "Restart"
 	// ActionMigrateExpiry consumes expired Manual migration records.
 	ActionMigrateExpiry ActionKind = "MigrateExpiry"
-	// ActionMigrate drives the selected Manual migration record.
+	// ActionMigrate runs the migrate pass over its selection: the
+	// records parked on their source teardown, tended in place, then the
+	// head record it drives.
 	ActionMigrate ActionKind = "Migrate"
 	// ActionUpdate runs the update pass over the selected Instances.
 	ActionUpdate ActionKind = "Update"
@@ -62,10 +65,23 @@ type RestartSelection struct {
 	OpensUnavailability bool
 }
 
-// MigrationSelection is the Manual migration record the migrate pass
-// drives this reconcile (a copy of the ObservedState record).
+// MigrationSelection is the migrate pass's work for one reconcile
+// (copies of the ObservedState records), in the order the pass runs it.
 type MigrationSelection struct {
-	Record types.MigrationRecord
+	// Parked are the Draining records whose every live source pod is
+	// Terminating past its own deletion deadline, oldest first. The
+	// drive has issued every delete it owns for such a record and can
+	// only wait for the kubelet, a finalizer owner or the force-delete
+	// escalation to remove the pods, so the pass tends it — re-reads the
+	// pair, runs the escalation it is configured for, completes it once
+	// the pods are gone — ahead of the head instead of letting it be the
+	// head.
+	Parked []types.MigrationRecord
+
+	// Head is the record the pass drives: the oldest one that is not
+	// parked. Nil when every record is parked, or when the oldest one
+	// is a fresh record the surge gate holds back.
+	Head *types.MigrationRecord
 }
 
 // UpdateItem is one Instance the update pass touches, in plan order.
@@ -144,7 +160,7 @@ type PlannedAction struct {
 	// (ActionRestart).
 	Restarts []RestartSelection
 
-	// Migration is the record the migrate pass drives (ActionMigrate).
+	// Migration is the migrate pass's selection (ActionMigrate).
 	Migration *MigrationSelection
 
 	// Update is the update pass's selection (ActionUpdate).
@@ -297,18 +313,18 @@ func Plan(ctx context.Context, input types.ReconcileInput, plan types.ComponentP
 		}
 
 		// Migration drive selection. Work comes from the owner's
-		// status.migrations records: the oldest non-terminal Manual record
-		// is driven, one per pass. Terminal records and Auto records (born
-		// terminal) are excluded structurally — records, never work. Skip
-		// when mode is Never.
+		// status.migrations records, oldest first: the records parked on
+		// their source teardown are tended, and the oldest record that is
+		// not parked is the head the pass drives. Terminal records and
+		// Auto records (born terminal) are excluded structurally —
+		// records, never work. Skip when mode is Never.
 		if plan.MigrationMode != types.MigrationModeNever {
-			if record := types.NextManualMigration(input.ObservedState.Migrations); record != nil {
-				// A fresh migration adds one surge Instance. Let an existing update
-				// surge finish first so the two operations do not stack extra capacity.
-				// Allocated migrations always resume from their durable record.
-				if record.SurgeAllocated() || escalation.CurrentSurgeInFlight(input.ObservedState.InstanceStatuses) == 0 {
-					decision.Actions = append(decision.Actions, PlannedAction{Kind: ActionMigrate, Migration: &MigrationSelection{Record: *record}})
-				}
+			selection, err := planMigrationDrive(ctx, input, snapshot)
+			if err != nil {
+				return Decision{}, err
+			}
+			if selection != nil {
+				decision.Actions = append(decision.Actions, PlannedAction{Kind: ActionMigrate, Migration: selection})
 			}
 		}
 	}
@@ -656,4 +672,54 @@ func planUpdateSelection(ctx context.Context, input types.ReconcileInput, plan t
 		"priorSurgeInFlight", selection.PriorSurgeInFlight,
 		"priorUnavailInFlight", selection.PriorUnavailInFlight)
 	return selection, retryBlockWait, nil
+}
+
+// planMigrationDrive selects the migrate pass's work in dispatch order:
+// every record parked on its source teardown (oldest first, each tended
+// in place), then the head — the oldest record that is not parked. One
+// head per pass keeps migrations serial; a parked record is excluded
+// from that seriality because the drive has nothing left to do for it
+// but wait, and a wait on a kubelet that missed its own deadline has no
+// bound of its own — held at the head it would starve every later
+// request for as long as the pod stays. The pods are read from the
+// snapshot's cache view: a stale reading costs a pass either way, since
+// the parked record's own drive re-lists live pods and the head is
+// re-selected on the next reconcile. Nil when there is no work.
+func planMigrationDrive(ctx context.Context, input types.ReconcileInput, snapshot *ObservedSnapshot) (*MigrationSelection, error) {
+	var selection MigrationSelection
+	var pods map[int32][]*corev1.Pod
+	for _, record := range types.ManualMigrationsOldestFirst(input.ObservedState.Migrations) {
+		if migrationInSourceTeardown(record) {
+			if pods == nil {
+				var err error
+				if pods, err = snapshot.CachedPods(ctx); err != nil {
+					return nil, fmt.Errorf("workload.Plan: observe pods for migration dispatch: %w", err)
+				}
+			}
+			if evidence.AllPodsTerminatingOverdue(pods[record.SourceInstance], input.Now()) {
+				selection.Parked = append(selection.Parked, record)
+				continue
+			}
+		}
+		// A fresh migration adds one surge Instance. Let an existing update
+		// surge finish first so the two operations do not stack extra capacity.
+		// Allocated migrations always resume from their durable record.
+		if record.SurgeAllocated() || escalation.CurrentSurgeInFlight(input.ObservedState.InstanceStatuses) == 0 {
+			head := record
+			selection.Head = &head
+		}
+		break
+	}
+	if len(selection.Parked) == 0 && selection.Head == nil {
+		return nil, nil
+	}
+	return &selection, nil
+}
+
+// migrationInSourceTeardown reports whether a record is in its source
+// teardown — Draining with its surge allocated — the one phase the
+// drive's delete loop runs in, so the only one in which every source
+// pod can be a pod the drive already deleted.
+func migrationInSourceTeardown(record types.MigrationRecord) bool {
+	return record.Phase == types.MigrationPhaseDraining && record.SurgeAllocated()
 }

@@ -13,6 +13,13 @@
 #   #1106 migration and update surges serialized on one Instance
 #   #1122 a promoted surge resumes instead of re-promoting after a crash
 #   #1147 a quota-blocked surge create is polled, not failed
+#
+# The decision reference parked-drain-yields-dispatch-head records the
+# dispatch-head rule for a migration parked on its source teardown: a
+# Draining record whose every source pod is Terminating past its own
+# deletion deadline is tended in place and yields the head, so a queued
+# Manual request is driven behind it instead of waiting on a kubelet that
+# missed its own deadline.
 history:
   - {state: Migrate/CreateSurge, event: pod.stuckTerminating, variants: [], windows: [], transition: "", prs: ["#878"]}
   - {state: Migrate/CreateSurge, event: pod.waiting, variants: [], windows: [], transition: "", prs: ["#871", "#878"]}
@@ -48,6 +55,10 @@ history:
   - {state: Migrate/SurgeTarget, event: api.throttled, variants: [], windows: [], transition: "", prs: ["#1501"]}
   - {state: Migrate/SurgeTarget, event: api.namespaceTerminating, variants: [], windows: [], transition: "", prs: ["#1501"]}
   - {state: Migrate/CreateSurge, event: pod.unschedulable, variants: [], windows: [], transition: "", prs: ["#1503"]}
+
+  # --- the dispatch head under a parked source teardown ------------------
+  - {state: Migrate/CreateSurge, event: pod.stuckTerminating, variants: [], windows: [], transition: "", decision: parked-drain-yields-dispatch-head}
+  - {state: Migrate/CreateSurge, event: spec.migrateRequest, variants: [], windows: [], transition: "", decision: parked-drain-yields-dispatch-head}
   - {state: Migrate/SurgeTarget, event: pod.unschedulable, variants: [], windows: [], transition: "", prs: ["#1503"]}
   - {state: Migrate/CreateSurge, event: pod.admissionRejected, variants: [], windows: [before], transition: "", prs: ["#1503"]}
   - {state: Migrate/SurgeTarget, event: pod.admissionRejected, variants: [], windows: [before], transition: "", prs: ["#1503"]}
