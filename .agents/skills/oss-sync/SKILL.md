@@ -294,7 +294,7 @@ Name/host/ticket regexes are not enough. Read every added line for:
   "we control";
 - paths that look like real endpoints (`/health_deep` → `/healthz/deep`).
 Fix internal-first, mirror, then re-grep the pushed tips. Also: codespell
-reads identifiers (homeState → "home state"), so run it on new Go files.
+reads identifiers (a camelCase name can split into dictionary words), so run it on new Go files.
 
 - **Cascade guard (2026-09-17 near-miss):** before ANY `git rebase --onto`
   in a stack, resolve the parent PR's merge commit with `gh pr view <n>

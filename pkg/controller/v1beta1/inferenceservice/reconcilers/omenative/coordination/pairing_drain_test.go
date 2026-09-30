@@ -56,7 +56,7 @@ func drainGate(t *testing.T, isvc *v1beta1.InferenceService, comp v1beta1.Compon
 	return EvaluatePairingDrain(context.Background(), c, isvc, comp, forwardTarget(isvc, comp), GroupDefaults{}, sources)
 }
 
-// The incident shape: a 1×1 surge transition whose decoder replacement is
+// The shape under test: a 1×1 surge transition whose decoder replacement is
 // Ready first. Draining the old decoder would leave the old engine unpaired,
 // so the drain is held; once the engine's replacement serves it is allowed.
 func TestEvaluatePairingDrain_HoldsTheLastPartnerUntilThePeerServesTarget(t *testing.T) {

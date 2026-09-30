@@ -1322,6 +1322,17 @@ def ci_steps() -> str:
             plugins:
 {_tw_docker_plugin(CI_IMAGE, indent=14)}
 
+          - label: ":abc: Spelling"
+            key: "spelling"
+{_gh_status("spelling")}
+{_infra_retry()}
+            command: |
+              bash .buildkite/check_spelling.sh
+            agents:
+              queue: "{DEFAULT_QUEUE}"
+            plugins:
+{_tw_docker_plugin(CI_IMAGE, indent=14)}
+
           - label: ":golangci-lint: Lint"
             key: "lint"
 {_gh_status("lint")}

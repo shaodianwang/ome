@@ -114,16 +114,16 @@ var _ = ginkgo.Describe("ClusterCache ModelCacheStatus content", ginkgo.Ordered,
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())
 	})
 
-	ginkgo.It("metadata unparseable: status.cache stays populated (cache mapping is independent of metadata parse outcome)", func() {
+	ginkgo.It("metadata unparsable: status.cache stays populated (cache mapping is independent of metadata parse outcome)", func() {
 		// Same invariant as the unreachable case, but at the next
 		// boundary: the source IS reachable, but it lacks
 		// config.json / model_index.json so InspectSource lands in
 		// terminal MetadataUnparseable. status.cache must still
 		// reflect the chosen provider + source — debugging an
-		// unparseable model needs both. Catches a regression where
-		// the terminal-unparseable status writer clears Cache as part
+		// unparsable model needs both. Catches a regression where
+		// the terminal-unparsable status writer clears Cache as part
 		// of its reset.
-		const root = "s3://bucket/llama-unparseable"
+		const root = "s3://bucket/llama-unparsable"
 		setHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path != "/file_metadata" {
 				http.NotFound(w, r)
@@ -140,7 +140,7 @@ var _ = ginkgo.Describe("ClusterCache ModelCacheStatus content", ginkgo.Ordered,
 			})
 		}))
 
-		cbm := v1beta1testing.MakeClusterBaseModel("cc-cache-unparseable").
+		cbm := v1beta1testing.MakeClusterBaseModel("cc-cache-unparsable").
 			StorageURI(root).
 			Distribution(v1beta1.DistributionSharded).
 			ModelFormat("safetensors").Obj()
@@ -149,9 +149,9 @@ var _ = ginkgo.Describe("ClusterCache ModelCacheStatus content", ginkgo.Ordered,
 
 		Eventually(func(g Gomega) {
 			got := &v1beta1.ClusterBaseModel{}
-			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "cc-cache-unparseable"}, got)).To(Succeed())
+			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "cc-cache-unparsable"}, got)).To(Succeed())
 
-			// Confirm we landed in the unparseable branch.
+			// Confirm we landed in the unparsable branch.
 			metadata := apimeta.FindStatusCondition(got.Status.Conditions, v1beta1.ModelConditionMetadataExtracted)
 			g.Expect(metadata).NotTo(BeNil())
 			g.Expect(string(metadata.Status)).To(Equal("False"))
@@ -160,7 +160,7 @@ var _ = ginkgo.Describe("ClusterCache ModelCacheStatus content", ginkgo.Ordered,
 
 			// Cache mapping must still be populated.
 			g.Expect(got.Status.Cache).NotTo(BeNil(),
-				"status.cache must be set even when the source is unparseable — operators need it to debug")
+				"status.cache must be set even when the source is unparsable — operators need it to debug")
 			g.Expect(got.Status.Cache.Backend).To(Equal("cluster_cache"))
 			g.Expect(got.Status.Cache.SourceUri).To(Equal(root))
 		}).WithTimeout(util.LongTimeout).WithPolling(util.PollInterval).Should(Succeed())

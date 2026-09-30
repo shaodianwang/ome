@@ -2091,7 +2091,7 @@ New, from the Caretaker reframing:
 
 1. **Is the predictive planner worth Phase 3 at all?** The greedy heuristic is
    reactive: it defrags and evacuates after fragmentation or failure is
-   observed. A forecasting layer would let the Arbiter pre-empt — e.g.,
+   observed. A forecasting layer would let the Arbiter preempt — e.g.,
    evacuate ahead of a predicted GPU failure. Open question: does the
    prediction accuracy justify the complexity and the false-positive cost
    (evacuating a node that would have been fine)? The engine is built to accept

@@ -1448,7 +1448,7 @@ def _hook_due(spec, hook, step):
 
 
 def _duration_s(v):
-    """Seconds in a Go-style duration (45s, 3m, 1h); None when unparseable."""
+    """Seconds in a Go-style duration (45s, 3m, 1h); None when unparsable."""
     m = re.match(r"^([0-9]+(?:\.[0-9]+)?)(s|m|h)$", str(v or ""))
     if not m:
         return None

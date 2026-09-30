@@ -292,7 +292,7 @@ soft-fail).
 - Conversion: an ISVC applied with legacy `spec.rolloutCoordination` is defaulted
   into `spec.rollout.coordination` and behaves identically (one-release window).
 - Webhook: `spec.rollout.canary` rejected with the friendly message (and `canary:
-  {}` is NOT pre-empted by an apiserver structural error); `ratioBalanced` outside
+  {}` is NOT preempted by an apiserver structural error); `ratioBalanced` outside
   `RollingUpdate` rejected; every existing coordination rejection case passes
   against the new path.
 - `dep-crds`/manifest drift after regen; spec-gen/openapi round-trips.

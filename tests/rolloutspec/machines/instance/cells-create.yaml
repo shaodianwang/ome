@@ -604,7 +604,7 @@ cells:
     event: spec.policyTuning
     variants: [instanceReadyTimeout]
     outcome: ignore
-    note: ops/create.go stamps Operation.Deadline once at operation entry and never re-stamps it, so a retuned timeout leaves the in-flight clock alone; it first applies to the next operation, to the gate-exit re-arm in deadline.go, and to the PodGroup ScheduleTimeoutSeconds the next ensure derives from it — bounded by lifecycle.gangScheduleTimeout when the operator configured one, and passed through unbounded when none is set
+    note: ops/create.go stamps Operation.Deadline once at operation entry and never re-stamps it, so a changed timeout leaves the in-flight clock alone; it first applies to the next operation, to the gate-exit re-arm in deadline.go, and to the PodGroup ScheduleTimeoutSeconds the next ensure derives from it — bounded by lifecycle.gangScheduleTimeout when the operator configured one, and passed through unbounded when none is set
     placement: unit
     coverage: {perm: [], unit: [], kind: []}
     status: current

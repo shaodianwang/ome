@@ -169,12 +169,12 @@ var _ = ginkgo.Describe("ClusterCache InspectSource → MetadataExtracted state 
 	ginkgo.It("file_metadata 200, remote_object returns malformed JSON → MetadataPending (NOT terminal, retries)", func() {
 		// Parser failure path (reconcile.go:133-137). The cache
 		// provider successfully delivered bytes — that's not a source
-		// fault, so the controller must NOT terminate as Unparseable.
+		// fault, so the controller must NOT terminate as Unparsable.
 		// Instead it sits in MetadataPending with the parser error
 		// surfaced, and reconcile.go's RequeueAfter:pollInterval
 		// re-tries on the chance the source is being rewritten.
 		// Catches a regression where a parser blow-up gets misrouted
-		// into the terminal Unparseable branch (subtle but it'd ground
+		// into the terminal Unparsable branch (subtle but it'd ground
 		// a model permanently for a transient upload race).
 		const root = "s3://bucket/llama-malformed"
 		const configPath = root + "/config.json"

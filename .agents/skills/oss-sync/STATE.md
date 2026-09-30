@@ -185,7 +185,7 @@ admits terminating ISVC), #1483 (port of OSS #868, destinationrules RBAC),
 #1484 (port of OSS #866, basemodel orphan ConfigMap GC), #1481 hygiene
 — CAUTION: its squash (54f4dd7c) carries only the first two commits
 (MKS/OEP comment neutralization, unparsable spelling, msl-mks-ome-lco
-fixtures, usc1-1 incident comment, homeState → homeProbeState). The
+fixtures, usc1-1 incident comment, a camelCase probe field renamed). The
 third commit (fleet-sizing table → generic example, "dozens routinely
 share one namespace" wording, dedicated.team-a / control-plane-nickname fixtures,
 routing test wording, synthetic UID) was mirrored into OSS #915/#918/#920
@@ -208,7 +208,7 @@ borderline-major comment ("the optional tree / deletion contract") plus
 fleet-shape wording and internal design vocabulary in fixtures
 (dedicated.<tenant>, hub-*) — add "internal design vocabulary" and
 "fleet numbers" to every future leak sweep; codespell reads identifiers
-(homeState → "home state"); builders that background heavy jobs stall
+(a camelCase name can split into dictionary words); builders that background heavy jobs stall
 until nudged; zsh does not word-split unquoted variables (multi-package
 `go test $pkgs` silently ran nothing).
 

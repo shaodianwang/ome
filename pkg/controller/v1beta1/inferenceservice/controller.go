@@ -809,14 +809,12 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// rollout engines gate on component readiness, that freeze sustains
 	// itself: stale NotReady conditions hold the rollout at its step, the
 	// held rollout keeps requeueing, and the requeue keeps the projection
-	// stale. Observed in production as an ISVC pinned
-	// Ready=False/Initializing for seven days with its live IR eleven
-	// generations ahead, no reconcile errors, and no recovery across
-	// controller restarts.
+	// stale. The ISVC then stays Ready=False/Initializing while its live
+	// IR advances arbitrarily far, with no reconcile error and no recovery
+	// across controller restarts.
 	//
-	// Deliberately an ADDITIONAL call rather than a move: the tail call
-	// keeps its position after ingress / traffic / component-status
-	// cleanup, so the no-requeue path's write ordering is unchanged. An
+	// The tail call stays in place after ingress / traffic / component-status
+	// cleanup, so the no-requeue path's write ordering is preserved. An
 	// unchanged rollup performs zero writes (AggregateIRStatus skips the
 	// Status().Update when the recomputed status DeepEquals the live one),
 	// so the pass that runs both calls still writes at most once.

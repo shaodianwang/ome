@@ -17,13 +17,13 @@ import (
 )
 
 // Pins the provider contract: providers signal "this source layout is
-// structurally unparseable, retrying won't help" via
+// structurally unparsable, retrying won't help" via
 // sharded.ErrSourceUnparseable; the BaseModel controller must transition
 // the model to state=Failed with reason=MetadataUnparseable instead of
 // looping forever in state=Importing reason=MetadataPending. Catches the
 // regression where the controller treats every InspectSource error as
 // transient (the historical behavior — wedged ISVCs with no operator signal).
-var _ = ginkgo.Describe("Sharded BaseModel with unparseable source", ginkgo.Ordered, func() {
+var _ = ginkgo.Describe("Sharded BaseModel with unparsable source", ginkgo.Ordered, func() {
 
 	ginkgo.It("ErrSourceUnparseable from InspectSource → state=Failed, reason=MetadataUnparseable", func() {
 		// Source is reachable (CheckSource succeeds with default
@@ -41,7 +41,7 @@ var _ = ginkgo.Describe("Sharded BaseModel with unparseable source", ginkgo.Orde
 			suiteFakeMC.InspectSourceFunc = nil
 		})
 
-		cbm := v1beta1testing.MakeClusterBaseModel("sharded-unparseable").
+		cbm := v1beta1testing.MakeClusterBaseModel("sharded-unparsable").
 			StorageURI("s3://bucket/no-config-model").
 			Distribution(v1beta1.DistributionSharded).
 			ModelFormat("safetensors").Obj()
@@ -50,13 +50,13 @@ var _ = ginkgo.Describe("Sharded BaseModel with unparseable source", ginkgo.Orde
 
 		Eventually(func(g Gomega) {
 			got := &v1beta1.ClusterBaseModel{}
-			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "sharded-unparseable"}, got)).To(Succeed())
+			g.Expect(k8sClient.Get(suiteCtx, types.NamespacedName{Name: "sharded-unparsable"}, got)).To(Succeed())
 
 			// state must be Failed, NOT Importing — the controller has to
 			// surface "this is permanent" or operators stare at Importing
 			// for hours waiting for a model that will never become Ready.
 			g.Expect(got.Status.State).To(Equal(v1beta1.LifeCycleStateFailed),
-				"unparseable source must flip state=Failed; staying in Importing hides the permanent failure")
+				"unparsable source must flip state=Failed; staying in Importing hides the permanent failure")
 
 			// SourceReachable=True (we successfully reached the source),
 			// but Ready=False with the new terminal reason.

@@ -3,7 +3,7 @@
 # Apply once per cluster (idempotent — re-apply is fine).
 #
 # The placeholders here are substituted by runtime_fixtures.py; this file is a
-# template, not directly appliable. The namespace must match $OME_TEST_NS:
+# template, not directly applicable. The namespace must match $OME_TEST_NS:
 # pods cannot mount a PVC from another namespace, and the OME validating
 # webhook rejects an InferenceService whose model points at one that does.
 apiVersion: v1

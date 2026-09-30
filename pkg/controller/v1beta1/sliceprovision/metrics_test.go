@@ -47,7 +47,7 @@ func TestObserveDeleted(t *testing.T) {
 	notSlice := &unstructured.Unstructured{}
 	notSlice.SetGroupVersionKind(schema.GroupVersionKind{Group: "example.com", Version: "v1", Kind: "Widget"})
 	notSlice.SetLabels(map[string]string{LabelOwnerUID: "uid-a"})
-	unparseable := stored(t, p, d, Slot{}, func(u *unstructured.Unstructured) {
+	unparsable := stored(t, p, d, Slot{}, func(u *unstructured.Unstructured) {
 		u.Object["spec"].(map[string]interface{})["topology"] = int64(2)
 	})
 	for _, tc := range []struct {
@@ -58,7 +58,7 @@ func TestObserveDeleted(t *testing.T) {
 		{name: "provisioned slice", obj: stored(t, p, d, Slot{}), want: true},
 		{name: "provisioned slice being released", obj: stored(t, p, d, Slot{}, withFinalizer, deleting), want: true},
 		{name: "slice without the owner label", obj: stored(t, p, d, Slot{}, withLabel(LabelOwnerUID, ""))},
-		{name: "unparseable slice", obj: unparseable},
+		{name: "unparsable slice", obj: unparsable},
 		{name: "another kind", obj: notSlice},
 		{name: "typed object", obj: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{LabelOwnerUID: "uid-a"}}}},
 	} {

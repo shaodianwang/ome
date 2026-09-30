@@ -101,7 +101,7 @@ var _ = ginkgo.Describe("BaseModel PVC metadata Job PodSpec wiring", func() {
 				"Job name must be a valid DNS-1123 label (no underscores, dots, or uppercase)")
 		}).WithTimeout(util.MediumTimeout).WithPolling(util.PollInterval).Should(Succeed())
 
-		// Same Job name should be re-used across reconciles (no
+		// Same Job name should be reused across reconciles (no
 		// per-reconcile churn). Verify by reading Get'ing twice
 		// and asserting the same name still exists.
 		Consistently(func(g Gomega) {

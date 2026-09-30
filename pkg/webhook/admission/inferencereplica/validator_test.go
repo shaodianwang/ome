@@ -980,10 +980,10 @@ func sliceConfig(t *testing.T) *controllerconfig.TPUSliceProvisioningConfig {
 
 // sliceIR returns a controller-written IR whose pods select topology on
 // tpu-a and request chips each: one default runner when workers is zero,
-// otherwise a leader and that many workers. optIn marks every template.
-func sliceIR(optIn bool, topology string, chips int64, workers int32) *v1beta1.InferenceReplica {
+// otherwise a leader and that many workers. optedIn marks every template.
+func sliceIR(optedIn bool, topology string, chips int64, workers int32) *v1beta1.InferenceReplica {
 	var annotations map[string]string
-	if optIn {
+	if optedIn {
 		annotations = map[string]string{constants.TPUSliceProvisioningAnnotationKey: "true"}
 	}
 	template := corev1.PodTemplateSpec{

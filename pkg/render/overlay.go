@@ -52,9 +52,9 @@ func AppendOverlayEnvVars(p *Piece, overlays []isvcutils.ResolvedOverlay, contai
 	}
 }
 
-// AnyOverlayIsSharded gates cluster_cache env injection when the
-// primary isn't Sharded — a Sharded overlay still needs the daemon
-// envs to fetch its data at runtime.
+// AnyOverlayIsSharded reports whether any resolved overlay is a Sharded
+// model. A Sharded overlay needs the model cache client even when the
+// primary model is not Sharded, because its data is fetched at runtime.
 func AnyOverlayIsSharded(overlays []isvcutils.ResolvedOverlay) bool {
 	for _, ov := range overlays {
 		if !ov.Skipped() && isvcutils.IsShardedBaseModel(ov.Spec) {

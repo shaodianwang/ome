@@ -116,7 +116,7 @@ type ModelRef struct {
 }
 ```
 
-Each overlay is a recursive `ModelRef` (re-uses the existing kind /
+Each overlay is a recursive `ModelRef` (reuses the existing kind /
 apiGroup / fine-tuned-weights fields). Overlays cannot themselves
 declare nested overlays — webhook rejects depth > 1.
 
@@ -288,7 +288,7 @@ field-level diffs on the list.
 
 ### Why not `Overlays []ModelRef`?
 
-Re-using `ModelRef` for overlay items would have been one fewer type to
+Reusing `ModelRef` for overlay items would have been one fewer type to
 introduce, but creates three real problems:
 
 1. **Unbounded nesting at the type level**: a `ModelRef` whose

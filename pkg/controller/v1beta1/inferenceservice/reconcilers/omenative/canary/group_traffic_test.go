@@ -66,9 +66,9 @@ func pairedRevision(ns, isvc, comp, hash string, rev int64, protocol string) *ap
 
 // pdCanary is an [engine, decoder] canary group, engine primary, two
 // replicas per Component, on the first step of the manual two-step ladder:
-// one ready pod per revision per Component, the run pinned toward eNew/dNew
-// over the stable eOld/dOld, every revision minted under a pairing protocol.
-// An unbumped decoder keeps dOld as both its target and its stable revision.
+// one ready pod per revision per Component, the run pinned toward engnew/decnew
+// over the stable engold/decold, every revision minted under a pairing protocol.
+// An unbumped decoder keeps decold as both its target and its stable revision.
 type pdCanary struct {
 	t    *testing.T
 	ns   string
@@ -89,30 +89,30 @@ func newPDCanary(t *testing.T, name string, decoderBumped bool) *pdCanary {
 		Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
 		Canary:     &v1beta1.GroupCanary{Steps: twoStep()},
 	}}}
-	decoderTarget := "dNew"
+	decoderTarget := "decnew"
 	if !decoderBumped {
-		decoderTarget = "dOld"
+		decoderTarget = "decold"
 	}
 	pinActiveRun(isvc)
 	isvc.Status.Rollout.ActiveRun.TargetRevisions = []v1beta1.RolloutRunTarget{
-		{Component: v1beta1.EngineComponent, Revision: "eNew", StableRevision: "eOld"},
-		{Component: v1beta1.DecoderComponent, Revision: decoderTarget, StableRevision: "dOld"},
+		{Component: v1beta1.EngineComponent, Revision: "engnew", StableRevision: "engold"},
+		{Component: v1beta1.DecoderComponent, Revision: decoderTarget, StableRevision: "decold"},
 	}
-	engineIR := ir(ns, name, v1beta1.EngineComponent, "eNew")
-	engineIR.Status.CurrentRevision = name + "-engine-eOld"
+	engineIR := ir(ns, name, v1beta1.EngineComponent, "engnew")
+	engineIR.Status.CurrentRevision = name + "-engine-engold"
 	decoderIR := ir(ns, name, v1beta1.DecoderComponent, decoderTarget)
-	decoderIR.Status.CurrentRevision = name + "-decoder-dOld"
+	decoderIR.Status.CurrentRevision = name + "-decoder-decold"
 	objs := []runtime.Object{isvc, engineIR, decoderIR,
-		canaryPod(ns, name, "engine", "eOld", name+"-engine-0"),
-		canaryPod(ns, name, "engine", "eNew", name+"-engine-1"),
-		canaryPod(ns, name, "decoder", "dOld", name+"-decoder-0"),
+		canaryPod(ns, name, "engine", "engold", name+"-engine-0"),
+		canaryPod(ns, name, "engine", "engnew", name+"-engine-1"),
+		canaryPod(ns, name, "decoder", "decold", name+"-decoder-0"),
 		canaryPod(ns, name, "decoder", decoderTarget, name+"-decoder-1"),
-		pairedRevision(ns, name, "engine", "eOld", 1, pdStableProtocol),
-		pairedRevision(ns, name, "engine", "eNew", 2, pdCanaryProtocol),
-		pairedRevision(ns, name, "decoder", "dOld", 1, pdStableProtocol),
+		pairedRevision(ns, name, "engine", "engold", 1, pdStableProtocol),
+		pairedRevision(ns, name, "engine", "engnew", 2, pdCanaryProtocol),
+		pairedRevision(ns, name, "decoder", "decold", 1, pdStableProtocol),
 	}
 	if decoderBumped {
-		objs = append(objs, pairedRevision(ns, name, "decoder", "dNew", 2, pdCanaryProtocol))
+		objs = append(objs, pairedRevision(ns, name, "decoder", "decnew", 2, pdCanaryProtocol))
 	}
 	c := fake.NewClientBuilder().WithScheme(canaryScheme(t)).WithRuntimeObjects(objs...).Build()
 	return &pdCanary{t: t, ns: ns, name: name, isvc: isvc, c: c, deps: DispatchDeps{
@@ -165,26 +165,26 @@ func TestDispatch_SecondaryPublishesTheStepWeights(t *testing.T) {
 		t.Fatalf("the split must serve at the manual step, got %q", f.phase())
 	}
 	f.expectTraffic(v1beta1.EngineComponent, map[string]trafficWant{
-		"eNew": {percent: 50, protocol: pdCanaryProtocol, latest: true},
-		"eOld": {percent: 50, protocol: pdStableProtocol},
+		"engnew": {percent: 50, protocol: pdCanaryProtocol, latest: true},
+		"engold": {percent: 50, protocol: pdStableProtocol},
 	})
 	f.expectTraffic(v1beta1.DecoderComponent, map[string]trafficWant{
-		"dNew": {percent: 50, protocol: pdCanaryProtocol, latest: true},
-		"dOld": {percent: 50, protocol: pdStableProtocol},
+		"decnew": {percent: 50, protocol: pdCanaryProtocol, latest: true},
+		"decold": {percent: 50, protocol: pdStableProtocol},
 	})
 }
 
 func TestDispatch_SecondaryConvergesWithThePromotion(t *testing.T) {
 	f := newPDCanary(t, "pddone", true)
 	f.dispatch("serve")
-	annotate(f.isvc, constants.RolloutPromoteAnnotation, "eNew")
+	annotate(f.isvc, constants.RolloutPromoteAnnotation, "engnew")
 	f.dispatch("advance")
 	if f.phase() != v1beta1.RolloutPhasePending {
 		t.Fatalf("the final step stages its capacity first, got %q", f.phase())
 	}
 	// The final step's capacity: every instance of every member on its target.
-	f.movePod("engine", "eOld", "eNew", "0")
-	f.movePod("decoder", "dOld", "dNew", "0")
+	f.movePod("engine", "engold", "engnew", "0")
+	f.movePod("decoder", "decold", "decnew", "0")
 	f.dispatch("cut over")
 	cs := rollout.CanaryStatusFor(&f.isvc.Status, v1beta1.EngineComponent)
 	if cs == nil || cs.CurrentStep != 2 || f.phase() != v1beta1.RolloutPhaseStable {
@@ -193,10 +193,10 @@ func TestDispatch_SecondaryConvergesWithThePromotion(t *testing.T) {
 	done := func() {
 		t.Helper()
 		f.expectTraffic(v1beta1.EngineComponent, map[string]trafficWant{
-			"eNew": {percent: 100, protocol: pdCanaryProtocol, latest: true},
+			"engnew": {percent: 100, protocol: pdCanaryProtocol, latest: true},
 		})
 		f.expectTraffic(v1beta1.DecoderComponent, map[string]trafficWant{
-			"dNew": {percent: 100, protocol: pdCanaryProtocol, latest: true},
+			"decnew": {percent: 100, protocol: pdCanaryProtocol, latest: true},
 		})
 	}
 	done()
@@ -216,18 +216,18 @@ func TestDispatch_SecondaryFollowsTheRollback(t *testing.T) {
 	stable := func() {
 		t.Helper()
 		f.expectTraffic(v1beta1.EngineComponent, map[string]trafficWant{
-			"eOld": {percent: 100, protocol: pdStableProtocol},
+			"engold": {percent: 100, protocol: pdStableProtocol},
 		})
 		f.expectTraffic(v1beta1.DecoderComponent, map[string]trafficWant{
-			"dOld": {percent: 100, protocol: pdStableProtocol},
+			"decold": {percent: 100, protocol: pdStableProtocol},
 		})
 	}
 	stable()
 	// The rejected pods drain and each IR republishes its stable revision.
-	f.movePod("engine", "eNew", "eOld", "1")
-	f.movePod("decoder", "dNew", "dOld", "1")
-	f.retarget(v1beta1.EngineComponent, "eOld")
-	f.retarget(v1beta1.DecoderComponent, "dOld")
+	f.movePod("engine", "engnew", "engold", "1")
+	f.movePod("decoder", "decnew", "decold", "1")
+	f.retarget(v1beta1.EngineComponent, "engold")
+	f.retarget(v1beta1.DecoderComponent, "decold")
 	f.dispatch("drained")
 	if f.phase() != v1beta1.RolloutPhaseRolledBack {
 		t.Fatalf("every member is back on stable, got %q", f.phase())
@@ -242,11 +242,11 @@ func TestDispatch_UnbumpedSecondaryKeepsOneTarget(t *testing.T) {
 		t.Fatalf("the split must serve at the manual step, got %q", f.phase())
 	}
 	f.expectTraffic(v1beta1.EngineComponent, map[string]trafficWant{
-		"eNew": {percent: 50, protocol: pdCanaryProtocol, latest: true},
-		"eOld": {percent: 50, protocol: pdStableProtocol},
+		"engnew": {percent: 50, protocol: pdCanaryProtocol, latest: true},
+		"engold": {percent: 50, protocol: pdStableProtocol},
 	})
 	f.expectTraffic(v1beta1.DecoderComponent, map[string]trafficWant{
-		"dOld": {percent: 100, protocol: pdStableProtocol, latest: true},
+		"decold": {percent: 100, protocol: pdStableProtocol, latest: true},
 	})
 }
 
@@ -263,7 +263,7 @@ func pdInputs(pods map[string]int32, decoder MemberRevisions) (*v1beta1.Inferenc
 
 func bumpedDecoder() MemberRevisions {
 	return MemberRevisions{
-		CanaryRevisionHash: "dNew", StableRevisionHash: "dOld",
+		CanaryRevisionHash: "decnew", StableRevisionHash: "decold",
 		CanaryPairingProtocol: pdCanaryProtocol, StablePairingProtocol: pdStableProtocol,
 	}
 }
@@ -276,8 +276,8 @@ func TestReconcile_SecondaryTrafficFollowsTheLadder(t *testing.T) {
 		"old": {percent: 50, protocol: pdStableProtocol},
 	})
 	expectTargets(t, isvc, v1beta1.DecoderComponent, map[string]trafficWant{
-		"dNew": {percent: 50, protocol: pdCanaryProtocol, latest: true},
-		"dOld": {percent: 50, protocol: pdStableProtocol},
+		"decnew": {percent: 50, protocol: pdCanaryProtocol, latest: true},
+		"decold": {percent: 50, protocol: pdStableProtocol},
 	})
 
 	// The promote advances to the final step, which stages before it shifts.
@@ -288,8 +288,8 @@ func TestReconcile_SecondaryTrafficFollowsTheLadder(t *testing.T) {
 		t.Fatalf("the final step waits for its capacity, got %q", phaseOf(isvc))
 	}
 	expectTargets(t, isvc, v1beta1.DecoderComponent, map[string]trafficWant{
-		"dNew": {percent: 50, protocol: pdCanaryProtocol, latest: true},
-		"dOld": {percent: 50, protocol: pdStableProtocol},
+		"decnew": {percent: 50, protocol: pdCanaryProtocol, latest: true},
+		"decold": {percent: 50, protocol: pdStableProtocol},
 	})
 
 	in.PerRevisionPods = map[string]int32{"new": 4}
@@ -300,7 +300,7 @@ func TestReconcile_SecondaryTrafficFollowsTheLadder(t *testing.T) {
 		"new": {percent: 100, protocol: pdCanaryProtocol, latest: true},
 	})
 	expectTargets(t, isvc, v1beta1.DecoderComponent, map[string]trafficWant{
-		"dNew": {percent: 100, protocol: pdCanaryProtocol, latest: true},
+		"decnew": {percent: 100, protocol: pdCanaryProtocol, latest: true},
 	})
 }
 
@@ -315,7 +315,7 @@ func TestReconcile_SecondaryTrafficReturnsToStableOnRollback(t *testing.T) {
 		"old": {percent: 100, protocol: pdStableProtocol},
 	})
 	expectTargets(t, isvc, v1beta1.DecoderComponent, map[string]trafficWant{
-		"dOld": {percent: 100, protocol: pdStableProtocol},
+		"decold": {percent: 100, protocol: pdStableProtocol},
 	})
 }
 
@@ -324,9 +324,9 @@ func TestReconcile_SecondaryTrafficReturnsToStableOnRollback(t *testing.T) {
 // a rollback.
 func TestReconcile_SecondaryWithoutStableServesItsTarget(t *testing.T) {
 	isvc, in := pdInputs(map[string]int32{"new": 2, "old": 2},
-		MemberRevisions{CanaryRevisionHash: "dNew", CanaryPairingProtocol: pdCanaryProtocol})
+		MemberRevisions{CanaryRevisionHash: "decnew", CanaryPairingProtocol: pdCanaryProtocol})
 	mustReconcile(t, isvc, in)
-	only := map[string]trafficWant{"dNew": {percent: 100, protocol: pdCanaryProtocol, latest: true}}
+	only := map[string]trafficWant{"decnew": {percent: 100, protocol: pdCanaryProtocol, latest: true}}
 	expectTargets(t, isvc, v1beta1.DecoderComponent, only)
 	annotate(isvc, constants.RolloutRollbackAnnotation, "true")
 	mustReconcile(t, isvc, in)
@@ -335,7 +335,7 @@ func TestReconcile_SecondaryWithoutStableServesItsTarget(t *testing.T) {
 
 func TestReconcile_UnbumpedSecondaryKeepsItsRevision(t *testing.T) {
 	isvc, in := pdInputs(map[string]int32{"new": 2, "old": 2}, MemberRevisions{
-		CanaryRevisionHash: "dOld", StableRevisionHash: "dOld",
+		CanaryRevisionHash: "decold", StableRevisionHash: "decold",
 		CanaryPairingProtocol: pdStableProtocol, StablePairingProtocol: pdStableProtocol,
 	})
 	mustReconcile(t, isvc, in)
@@ -344,31 +344,31 @@ func TestReconcile_UnbumpedSecondaryKeepsItsRevision(t *testing.T) {
 		"old": {percent: 50, protocol: pdStableProtocol},
 	})
 	expectTargets(t, isvc, v1beta1.DecoderComponent, map[string]trafficWant{
-		"dOld": {percent: 100, protocol: pdStableProtocol, latest: true},
+		"decold": {percent: 100, protocol: pdStableProtocol, latest: true},
 	})
 }
 
 func TestMemberWeights(t *testing.T) {
 	bumped := bumpedDecoder()
 	if w := memberWeights(bumped, 30); len(w) != 2 ||
-		w[0].RevisionHash != "dNew" || w[0].Percent != 30 || !w[0].LatestRevision || w[0].PairingProtocol != pdCanaryProtocol ||
-		w[1].RevisionHash != "dOld" || w[1].Percent != 70 || w[1].LatestRevision || w[1].PairingProtocol != pdStableProtocol {
+		w[0].RevisionHash != "decnew" || w[0].Percent != 30 || !w[0].LatestRevision || w[0].PairingProtocol != pdCanaryProtocol ||
+		w[1].RevisionHash != "decold" || w[1].Percent != 70 || w[1].LatestRevision || w[1].PairingProtocol != pdStableProtocol {
 		t.Fatalf("a bumped member splits like the primary, got %+v", w)
 	}
 	if w := memberWeights(MemberRevisions{CanaryRevisionHash: "d", StableRevisionHash: "d", CanaryPairingProtocol: "p"}, 30); len(w) != 1 ||
 		w[0].RevisionHash != "d" || w[0].Percent != 100 || !w[0].LatestRevision || w[0].PairingProtocol != "p" {
 		t.Fatalf("an unbumped member serves its revision alone, got %+v", w)
 	}
-	if w := memberWeights(MemberRevisions{CanaryRevisionHash: "dNew"}, 30); len(w) != 1 || w[0].RevisionHash != "dNew" || w[0].Percent != 100 {
+	if w := memberWeights(MemberRevisions{CanaryRevisionHash: "decnew"}, 30); len(w) != 1 || w[0].RevisionHash != "decnew" || w[0].Percent != 100 {
 		t.Fatalf("a member with no stable revision serves its target alone, got %+v", w)
 	}
-	if w := memberWeights(MemberRevisions{StableRevisionHash: "dOld"}, 30); w != nil {
+	if w := memberWeights(MemberRevisions{StableRevisionHash: "decold"}, 30); w != nil {
 		t.Fatalf("a member with no target has no weights, got %+v", w)
 	}
-	if w := memberStableWeights(bumped); len(w) != 1 || w[0].RevisionHash != "dOld" || w[0].Percent != 100 || w[0].LatestRevision || w[0].PairingProtocol != pdStableProtocol {
+	if w := memberStableWeights(bumped); len(w) != 1 || w[0].RevisionHash != "decold" || w[0].Percent != 100 || w[0].LatestRevision || w[0].PairingProtocol != pdStableProtocol {
 		t.Fatalf("a rolled-back member returns to its stable revision, got %+v", w)
 	}
-	if w := memberStableWeights(MemberRevisions{CanaryRevisionHash: "dNew"}); w != nil {
+	if w := memberStableWeights(MemberRevisions{CanaryRevisionHash: "decnew"}); w != nil {
 		t.Fatalf("a member with no stable revision has nothing to return to, got %+v", w)
 	}
 }

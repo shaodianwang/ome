@@ -220,6 +220,8 @@ pre-commit run --all-files
 ```
 Hooks run: go-fmt, go-vet, helm-lint, helm-template, codespell, go-mod-tidy, branch naming check (`<type>/<desc>` or `<username>/<desc>`).
 
+CI runs the codespell hook's configuration over every tracked text file as the `spelling` step (`.buildkite/check_spelling.sh`, which reads the version, word list and exclusions from `.pre-commit-config.yaml` through `hack/check_spelling.py`). A new legitimate word goes into the hook's `-L` list; the CI step follows it.
+
 ### Deployment
 ```bash
 make install              # Deploy to cluster via kustomize (interactive confirmation)

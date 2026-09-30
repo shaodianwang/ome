@@ -64,7 +64,7 @@ perm/
 ├── gen_mn.py              — generator: multi-node (gang) rollout cases → isvcs/rollout/
 ├── generate_cases.py      — generator: hot-core permutation corpus → isvcs/gen-*/ (byte-stable; --check)
 ├── runtime_fixtures.py    — renders runtime/ for a target cluster (ns, storage, arch, images)
-├── runtime/               — fixture TEMPLATES (see runtime_fixtures.py; not directly appliable)
+├── runtime/               — fixture TEMPLATES (see runtime_fixtures.py; not directly applicable)
 │   ├── csr.yaml            — single-pod ClusterServingRuntime (nginx + a startup sleep)
 │   ├── csr-multinode.yaml  — gang ClusterServingRuntime (leader + N workers, LeaderWorkerSet)
 │   ├── csr-metrics.yaml    — metrics-emitting ClusterServingRuntime (canary-analysis cases; Downward-API health)

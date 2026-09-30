@@ -37,7 +37,7 @@ func (s *stubClient) InspectSource(ctx context.Context, src Source) (*SourceInsp
 // providers returning ErrSourceUnparseable drive the ClusterBaseModel to
 // state=Failed with reason MetadataUnparseable and an empty ctrl.Result
 // (no 5s requeue loop). Retrying indefinitely as MetadataPending would
-// silently wedge any ISVC pointing at an unparseable model.
+// silently wedge any ISVC pointing at an unparsable model.
 func TestReconcileMetadataMarksFailedOnUnparseableSource(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 
@@ -45,7 +45,7 @@ func TestReconcileMetadataMarksFailedOnUnparseableSource(t *testing.T) {
 	g.Expect(v1beta1.AddToScheme(scheme)).To(gomega.Succeed())
 
 	cbm := &v1beta1.ClusterBaseModel{
-		ObjectMeta: metav1.ObjectMeta{Name: "unparseable-cbm", Generation: 1},
+		ObjectMeta: metav1.ObjectMeta{Name: "unparsable-cbm", Generation: 1},
 		Spec: v1beta1.BaseModelSpec{
 			Storage: &v1beta1.StorageSpec{StorageUri: ptr.To("s3://bucket/no-config")},
 		},
@@ -69,9 +69,9 @@ func TestReconcileMetadataMarksFailedOnUnparseableSource(t *testing.T) {
 	)
 
 	g.Expect(err).NotTo(gomega.HaveOccurred(),
-		"unparseable should NOT bubble up as a controller error — that'd cause controller-runtime backoff retries; we want a terminal status write and no requeue")
+		"unparsable should NOT bubble up as a controller error — that'd cause controller-runtime backoff retries; we want a terminal status write and no requeue")
 	g.Expect(inspection).To(gomega.BeNil(),
-		"caller must not receive a partial inspection on the unparseable path")
+		"caller must not receive a partial inspection on the unparsable path")
 	g.Expect(result.Requeue).To(gomega.BeFalse(),
 		"terminal state must not auto-requeue; operator action (spec change) re-triggers via the informer")
 	g.Expect(result.RequeueAfter).To(gomega.BeZero(),
@@ -80,7 +80,7 @@ func TestReconcileMetadataMarksFailedOnUnparseableSource(t *testing.T) {
 	got := &v1beta1.ClusterBaseModel{}
 	g.Expect(kubeClient.Get(context.Background(), client.ObjectKeyFromObject(cbm), got)).To(gomega.Succeed())
 	g.Expect(got.Status.State).To(gomega.Equal(v1beta1.LifeCycleStateFailed),
-		"unparseable source must transition the ClusterBaseModel to state=Failed; staying in Importing hides the permanent error from operators")
+		"unparsable source must transition the ClusterBaseModel to state=Failed; staying in Importing hides the permanent error from operators")
 
 	ready := findCondition(got.Status.Conditions, v1beta1.ModelConditionReady)
 	g.Expect(ready).NotTo(gomega.BeNil())

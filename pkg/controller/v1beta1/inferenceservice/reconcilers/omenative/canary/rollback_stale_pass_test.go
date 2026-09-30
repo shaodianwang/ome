@@ -40,10 +40,10 @@ type passSim struct {
 }
 
 const (
-	simEngineStable  = "eOld"
-	simEngineCanary  = "eNew"
-	simDecoderStable = "dOld"
-	simDecoderCanary = "dNew"
+	simEngineStable  = "engold"
+	simEngineCanary  = "engnew"
+	simDecoderStable = "decold"
+	simDecoderCanary = "decnew"
 )
 
 // newPassSim is an [engine, decoder] canary group under a pairing-protocol

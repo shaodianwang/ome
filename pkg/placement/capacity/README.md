@@ -56,7 +56,8 @@ unattributed nodes cannot silently contribute to a weight.
 The reporter attributes nodes to their unique most-specific flavor and reports
 ties as incomplete. Empty-valued flavor labels are rejected by this consumer:
 the report's label comparison cannot distinguish an absent label from a present
-empty value. Existing quota reporting retains its behavior.
+empty value. The quota reporter itself accepts such labels; only capacity
+attribution rejects them.
 
 Engine, Decoder, and worker demand sharing a pool is combined in whole units.
 Different accelerator resources remain separate. The resulting demand fingerprint

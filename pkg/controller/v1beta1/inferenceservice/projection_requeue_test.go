@@ -42,10 +42,9 @@ import (
 // bug into a wedge: the rollout engines gate on component readiness, so
 // stale NotReady conditions hold the canary at its current step, the held
 // canary keeps asking to requeue, and the requeue keeps the projection
-// stale. Observed in production as an ISVC pinned
-// Ready=False/Initializing for seven days whose live InferenceReplica was
-// eleven generations ahead and fully Ready, with no reconcile errors and
-// no recovery across controller restarts.
+// stale. The InferenceService then stays Ready=False/Initializing while
+// its live InferenceReplica advances arbitrarily far and is fully Ready,
+// with no reconcile error and no recovery across controller restarts.
 //
 // The requeue here comes from an unresolvable autoscalerPolicyRef: that
 // hold recovers only via an operator-config edit (which emits no ISVC
@@ -206,13 +205,12 @@ func TestReconcileProjectsIRStatusOnRequeuingPass(t *testing.T) {
 }
 
 // TestReconcileProjectionConvergesAcrossRepeatedRequeues pins the
-// convergence property the freeze violated: an ISVC that requeues on
-// every pass must still track its InferenceReplica as the IR advances.
+// convergence property: an ISVC that requeues on every pass must still
+// track its InferenceReplica as the IR advances.
 //
-// The production signature was a projection eleven IR generations behind
-// after seven days of uninterrupted reconciles. One passing reconcile is
-// not enough to rule that out — the projection must keep up while the
-// requeue persists.
+// A projection can fall many IR generations behind under uninterrupted
+// reconciles, so one passing reconcile proves nothing: the projection
+// must keep up while the requeue persists.
 func TestReconcileProjectionConvergesAcrossRepeatedRequeues(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 

@@ -63,7 +63,7 @@ if mode == "podgroup" and pin:
         "      affinity:\n"
         "        podAffinity:\n"
         "          requiredDuringSchedulingIgnoredDuringExecution:\n"
-        "            # Pre-empts OME's worker->leader term on this same key.\n"
+        "            # Preempts OME's worker->leader term on this same key.\n"
         "            # kube-proxy runs on every node, so this is true in every\n"
         "            # pool and constrains nothing; OMEGangPack does the real\n"
         "            # co-location off the PodGroup annotation.\n"

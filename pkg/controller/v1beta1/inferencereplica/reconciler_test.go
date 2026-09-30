@@ -3220,7 +3220,7 @@ func TestReconcile_TPUSlices_WithholdsPodsUntilTheirSliceIsReady(t *testing.T) {
 
 // TestReconcile_TPUSlices_OptedOutPodsAreNotConfined pins the opt-in: a
 // pod that selects a provision-only pool, of an owner that does not opt
-// in, is created as before and no slice is provisioned for it.
+// in, is created unconfined and no slice is provisioned for it.
 func TestReconcile_TPUSlices_OptedOutPodsAreNotConfined(t *testing.T) {
 	ir := optedInIR("llama-engine", "prod", 1)
 	ir.Spec.Runners[0].Template.Annotations = nil

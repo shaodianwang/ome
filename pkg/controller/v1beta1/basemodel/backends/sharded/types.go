@@ -28,7 +28,7 @@ import (
 // visible and well-formed, but the layout doesn't match what the
 // parser needs. Network errors, auth failures, and truncated reads
 // must NOT be wrapped with this sentinel.
-var ErrSourceUnparseable = errors.New("model cache source has unparseable layout")
+var ErrSourceUnparseable = errors.New("model cache source has unparsable layout")
 
 const (
 	// ProviderClusterCache is the provider label for the cluster_cache

@@ -1660,8 +1660,7 @@ func irRevisionKey(ir *v1beta1.InferenceReplica) revision.Key {
 // hash and therefore the revision name; listing, numbering and retention
 // select by the key's labels (irRevisionKey). A projected replica's revision
 // names and pod revision labels are computed in its InferenceService's UID
-// scope, so that scope is kept and nothing re-rolls; a standalone replica
-// scopes by its own UID. A replica that names a parent but has no
+// scope; a standalone replica scopes by its own UID. A replica that names a parent but has no
 // InferenceService controlling it, or whose controlling InferenceService
 // reference has no UID, is refused: it is a projected replica in a broken
 // state, not a standalone one.

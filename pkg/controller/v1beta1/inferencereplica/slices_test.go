@@ -26,7 +26,7 @@ import (
 )
 
 func TestSlicesOptedIn(t *testing.T) {
-	optIn := map[string]string{constants.TPUSliceProvisioningAnnotationKey: "true"}
+	optedIn := map[string]string{constants.TPUSliceProvisioningAnnotationKey: "true"}
 	runner := func(name v1beta1.RunnerName, annotations map[string]string) v1beta1.Runner {
 		return v1beta1.Runner{Name: name, Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Annotations: annotations}}}
 	}
@@ -35,9 +35,9 @@ func TestSlicesOptedIn(t *testing.T) {
 		runners []v1beta1.Runner
 		want    bool
 	}{
-		{"default runner opts in", []v1beta1.Runner{runner(v1beta1.RunnerNameDefault, optIn)}, true},
-		{"leader runner opts in", []v1beta1.Runner{runner(v1beta1.RunnerNameWorker, nil), runner(v1beta1.RunnerNameLeader, optIn)}, true},
-		{"worker runner alone does not", []v1beta1.Runner{runner(v1beta1.RunnerNameLeader, nil), runner(v1beta1.RunnerNameWorker, optIn)}, false},
+		{"default runner opts in", []v1beta1.Runner{runner(v1beta1.RunnerNameDefault, optedIn)}, true},
+		{"leader runner opts in", []v1beta1.Runner{runner(v1beta1.RunnerNameWorker, nil), runner(v1beta1.RunnerNameLeader, optedIn)}, true},
+		{"worker runner alone does not", []v1beta1.Runner{runner(v1beta1.RunnerNameLeader, nil), runner(v1beta1.RunnerNameWorker, optedIn)}, false},
 		{"another value does not", []v1beta1.Runner{runner(v1beta1.RunnerNameDefault, map[string]string{constants.TPUSliceProvisioningAnnotationKey: "yes"})}, false},
 		{"no annotation", []v1beta1.Runner{runner(v1beta1.RunnerNameDefault, nil)}, false},
 		{"no runners", nil, false},

@@ -15,9 +15,9 @@ import (
 // Eventually/Consistently call omits explicit .WithTimeout/.WithPolling.
 // They are exported vars (not consts) so a suite or CI lane can override
 // them before calling SetDefaultEventually() — e.g. a slow KIND lane can
-// raise the timeout without editing per-assertion tiers. The per-call
-// Short/Medium/Long tiers in tests/integration/util remain available for
-// assertions that need a deliberately different bound; the global default
+// raise the timeout without editing per-assertion tiers. Per-assertion
+// tiers remain available for assertions that need a deliberately different
+// bound; the global default
 // just removes the need to annotate every routine create→reconcile→status
 // poll.
 //
