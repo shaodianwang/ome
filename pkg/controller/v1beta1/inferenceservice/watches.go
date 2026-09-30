@@ -28,12 +28,24 @@ import (
 // when generation changed OR labels/annotations changed, and drop updates that
 // only touched status / resourceVersion / managedFields.
 //
+// An InferenceService under deletion passes on every update, whatever the
+// update touched. The delete of a finalizer-bearing object is an UPDATE
+// (deletionTimestamp set) and the reconciler's finalizer pass is what the
+// deletion waits on, so the filter keys on the deletion state itself, not
+// on the transition that set it: any later write to the object — a foreign
+// finalizer dropping, a status write, a resync replay — re-enqueues it. A
+// deleting object's pass writes no status and is a no-op once the controller
+// finalizer is gone, so this reopens no churn.
+//
 // Create / Delete / Generic always pass — they are not status-churn sources and
 // the reconciler must see object lifecycle transitions.
 func isvcReconcileTriggerPredicate() predicate.Predicate {
 	return predicate.Funcs{
 		UpdateFunc: func(e event.UpdateEvent) bool {
 			if e.ObjectOld == nil || e.ObjectNew == nil {
+				return true
+			}
+			if e.ObjectNew.GetDeletionTimestamp() != nil {
 				return true
 			}
 			return metaOrSpecChanged(e.ObjectOld, e.ObjectNew)
