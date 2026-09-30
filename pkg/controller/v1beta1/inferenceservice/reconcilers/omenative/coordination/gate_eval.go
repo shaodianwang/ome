@@ -122,3 +122,14 @@ func EvaluateUpdateGate(
 	}
 	return true, "", ""
 }
+
+// GateWaitsOnPeerCounters reports whether a hold on gate is released by a
+// peer Component's serving counters moving. The pair floor and the ratio
+// band simulate the step against the peers' live serving counts, so a
+// replica they deny waits on exactly those transitions. Every other gate
+// waits on something else: a peer's revision or the plan pin (Sequential,
+// Plan), the Component's own budget (Budget), or its own retry state
+// (RetryBlock, Held).
+func GateWaitsOnPeerCounters(gate v1beta1.RolloutHoldGate) bool {
+	return gate == v1beta1.RolloutHoldGatePairing || gate == v1beta1.RolloutHoldGateRatio
+}

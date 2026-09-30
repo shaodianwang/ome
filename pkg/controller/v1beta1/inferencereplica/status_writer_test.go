@@ -652,6 +652,10 @@ const (
 	// a chosen representation and inspect the stored fields to prove the union
 	// and the conversion against the API server; no decision consumes them.
 	representationQualification = "qualification spec inspecting the stored representation on purpose"
+	// storedRepresentationTransition: a watch predicate compares the stored
+	// per-Instance representation of an event's old and new objects, in
+	// either encoding, to tell that rows moved; no row is decoded or consumed.
+	storedRepresentationTransition = "watch predicate comparing the stored representation of an event's old and new objects; no row consumed"
 )
 
 type accessCounts struct {
@@ -716,6 +720,9 @@ func TestInferenceReplicaStatusReadInventory(t *testing.T) {
 	approve("pkg/controller/v1beta1/inferencereplica/reset_instances.go", "Reconciler.resetInstances", accessCounts{reads: 2, readWrites: 2}, decodedObjectRows, rows)
 	approve("pkg/controller/v1beta1/inferencereplica/retention.go", "Reconciler.sweepRevisions", read(1), decodedObjectRows, rows)
 	approve("pkg/controller/v1beta1/inferencereplica/status_transition.go", "Reconciler.convertStoredRepresentation", read(1), decodedObjectRows, rows)
+	// The held-peer watch: the event carries the raw cached objects, and the
+	// predicate compares their stored rows as opaque values in both encodings.
+	approve("pkg/controller/v1beta1/inferencereplica/peer_watch.go", "peerCountersChanged", read(2), storedRepresentationTransition, rows, "InstanceStatusColumns")
 
 	// Break-glass repair: the only writer entry point registered with no
 	// reconciler. It installs validated replacement rows on a deep copy of
@@ -800,6 +807,7 @@ func TestInferenceReplicaFetchInventory(t *testing.T) {
 	approve("pkg/controller/v1beta1/inferencereplica/slices.go", "irExists", "List", 1, passThroughSpecMetadata+" (TPU slice owner existence by UID)")
 	approve("pkg/controller/v1beta1/inferencereplica/watches.go", "Reconciler.runtimeToReplicas", "List", 2, passThroughSpecMetadata+" (runtime watch fan-out through the reference indexes)")
 	approve("pkg/controller/v1beta1/inferencereplica/watches.go", "Reconciler.modelToReplicas", "List", 1, passThroughSpecMetadata+" (model watch fan-out through the reference index)")
+	approve("pkg/controller/v1beta1/inferencereplica/peer_watch.go", "Reconciler.heldPeerReplicasOf", "Get", 1, passThroughTopLevelStatus+" (RolloutHold of a sibling held on the peer's counters)")
 
 	// Replay harness pass-through reads.
 	approve("pkg/controller/v1beta1/workload/replay/driver.go", "driver.bumpGeneration", "Get", 1, passThroughSpecMetadata+" (replay owner generation bump)")

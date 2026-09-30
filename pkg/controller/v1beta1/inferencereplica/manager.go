@@ -35,6 +35,9 @@ import (
 //     generation or revision status changing enqueues the serving peers
 //     of its parent, which pair their pods on its roll target and hold
 //     while it lags.
+//   - InferenceReplica (held peers): a replica's serving counters changing
+//     enqueues the serving peers whose recorded RolloutHold waits on them
+//     (a pairing or ratio denial); a peer nothing is held on wakes no one.
 //   - Pods: a custom handler that BOTH updates the Expectations cache
 //     (ObservedCreate / ObservedDelete) AND re-enqueues the owning IR.
 //     The expectations update is load-bearing: the workload dispatcher's
@@ -175,6 +178,16 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 			&v1beta1.InferenceReplica{},
 			handler.EnqueueRequestsFromMapFunc(r.peerReplicasOf),
 			builder.WithPredicates(peerRevisionPredicate()),
+		).
+		// A pairing or ratio denial simulates the step against the peers'
+		// serving counters, which the watch above leaves out. A peer's
+		// counter transition enqueues only the siblings whose recorded
+		// hold waits on it, so the denial lifts with the transition
+		// instead of with the denied replica's own backoff.
+		Watches(
+			&v1beta1.InferenceReplica{},
+			handler.EnqueueRequestsFromMapFunc(r.heldPeerReplicasOf),
+			builder.WithPredicates(peerCounterPredicate()),
 		).
 		// EndpointSlice events for OMENative drain Services (per-Component
 		// headless + per-revision routed) enqueue the owning IR so the
