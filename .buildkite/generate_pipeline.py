@@ -478,7 +478,9 @@ def _infra_retry(limit: int = 2, indent: int = 12) -> str:
     health-repair hook failing before the step runs), the agent being lost
     (signal_reason agent_stop), or the job's process being lost under it
     (signal_reason process_run_error: the container died and the job was
-    recorded with exit -1, which no exit_status condition matches). It never
+    recorded with exit -1, which no exit_status condition matches), or the
+    agent stack failing to run the job at all (signal_reason stack_error, the
+    same exit -1). It never
     matches exit 1, so a real test/lint/-race failure still blocks merge —
     safe on merge gates precisely because it cannot match a code failure.
     Seen on build 2523 (scheduler-test: dind
@@ -496,6 +498,7 @@ def _infra_retry_automatic(limit: int = 2) -> list:
         {"exit_status": 125, "limit": limit},
         {"signal_reason": "agent_stop", "limit": limit},
         {"signal_reason": "process_run_error", "limit": limit},
+        {"signal_reason": "stack_error", "limit": limit},
     ]
 
 
