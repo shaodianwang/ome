@@ -229,7 +229,7 @@ func Dispatch(ctx context.Context, d DispatchDeps) (Outcome, error) {
 		return Outcome{}, err
 	}
 	groupPods, groupStable := groupRollbackInputs(d.ISVC, d.Group, primary, perRev)
-	secondaries, err := secondaryRevisions(ctx, d.Client, d.ISVC, primary, d.Group, secondaryObserved, groupStable)
+	secondaries, err := secondaryRevisions(ctx, d.Client, d.ISVC, primary, d.Group, secondaryObserved, groupStable, readyRev, observedPods)
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -409,9 +409,13 @@ func stableRevisionName(ctx context.Context, reads client.Reader, isvc *v1beta1.
 	return "", nil
 }
 
-// componentStableRevisionHash reads the run-scoped per-Component identity.
-// The scalar canary field and component rollout status support objects written
-// before per-Component run targets carried stable revisions.
+// componentStableRevisionHash resolves one member's stable revision: the
+// run-scoped identity first (the active run's target, then the rolled-back
+// run's record), then the primary's canary record, then the Component's
+// LatestRolledoutRevision. That last field is the durable per-Component
+// identity every OMENative writer keeps, coordination for its Components and
+// the canary executor at each completed promotion and rollback for its
+// members, so a secondary resolves even when no run records it.
 func componentStableRevisionHash(isvc *v1beta1.InferenceService, comp, primary v1beta1.ComponentType) string {
 	if stable := activeRunStableRevisionHash(isvc, comp); stable != "" {
 		return stable
@@ -459,15 +463,23 @@ func groupRollbackInputs(isvc *v1beta1.InferenceService, g *v1beta1.RolloutGroup
 // traffic writer: the target the capacity gate observed on its IR, so a
 // member's targets name the revision whose capacity was verified, and the
 // persisted stable revision the rollback check uses, so a rollback returns
-// traffic to the revision the member reverts to. The protocols come from the
-// two ControllerRevisions through the cached client, as the primary's do.
-func secondaryRevisions(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, primary v1beta1.ComponentType, g *v1beta1.RolloutGroup, observed map[v1beta1.ComponentType]observedCanaryRevisions, stable map[v1beta1.ComponentType]string) (map[v1beta1.ComponentType]MemberRevisions, error) {
+// traffic to the revision the member reverts to. The Ready capacity on the
+// target is counted as the capacity gate counts it, so the member's latest
+// ready revision is published on the same evidence the gate reads. The
+// protocols come from the two ControllerRevisions through the cached client,
+// as the primary's do.
+func secondaryRevisions(ctx context.Context, reads client.Reader, isvc *v1beta1.InferenceService, primary v1beta1.ComponentType, g *v1beta1.RolloutGroup, observed map[v1beta1.ComponentType]observedCanaryRevisions, stable map[v1beta1.ComponentType]string, readyPerRev map[v1beta1.ComponentType]map[string]int32, observedPods map[v1beta1.ComponentType][]*corev1.Pod) (map[v1beta1.ComponentType]MemberRevisions, error) {
 	out := map[v1beta1.ComponentType]MemberRevisions{}
 	for _, comp := range configuredComponents(g) {
 		if comp == primary {
 			continue
 		}
-		m := MemberRevisions{CanaryRevisionHash: observed[comp].targetHash, StableRevisionHash: stable[comp]}
+		target := observed[comp].targetHash
+		m := MemberRevisions{
+			CanaryRevisionHash:  target,
+			StableRevisionHash:  stable[comp],
+			ReadyCanaryCapacity: readyCapacityCount(readyPerRev[comp][target], observed[comp].readyTargetInstanceCount(observedPods[comp])),
+		}
 		var err error
 		if m.CanaryPairingProtocol, _, err = coordination.PairingProtocolForRevision(ctx, reads, isvc.Namespace, isvc.Name, comp, m.CanaryRevisionHash); err != nil {
 			return nil, err

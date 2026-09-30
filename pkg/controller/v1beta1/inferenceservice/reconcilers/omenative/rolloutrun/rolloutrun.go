@@ -401,9 +401,14 @@ func closeRun(isvc *v1beta1.InferenceService, active *v1beta1.RolloutRun, outcom
 }
 
 // componentStableRevision resolves the last promoted revision for a Component.
-// A distinct IR current revision is authoritative at run open. The scalar
-// primary and per-Component rollout status cover adoption of an older run that
-// has already advanced CurrentRevision to its target.
+// A distinct IR current revision is authoritative at run open. When the IR has
+// already advanced CurrentRevision to its target (a run adopted mid-flight),
+// the unit's canary record names the stable it shifts from, and the
+// Component's LatestRolledoutRevision names the revision that last owned its
+// traffic: the durable identity every OMENative writer keeps, coordination
+// for its Components and the canary executor at each completed promotion and
+// rollback for its members, so a secondary with no record of its own still
+// resolves.
 func componentStableRevision(isvc *v1beta1.InferenceService, comp v1beta1.ComponentType, pinnedRevision string, target targetPair, adopting bool) string {
 	if target.current != "" && target.current != pinnedRevision {
 		return target.current

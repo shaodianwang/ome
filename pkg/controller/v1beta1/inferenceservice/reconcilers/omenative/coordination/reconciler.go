@@ -480,8 +480,9 @@ func podReadyAndServing(pod *corev1.Pod) bool {
 
 // dropCanaryOwned removes Components driven by a canary group from comps. Those
 // Components, the group's primary and its secondaries alike, belong to the
-// canary engine (canary.Dispatch), which owns their per-revision Services and
-// traffic status; coordination must not touch them.
+// canary engine (canary.Dispatch), which owns their per-revision Services,
+// traffic status and rolled-out revision fields; coordination must not touch
+// them.
 func dropCanaryOwned(comps []v1beta1.ComponentType, isvc *v1beta1.InferenceService) []v1beta1.ComponentType {
 	owned := rollout.CanaryOwnedComponents(isvc)
 	if len(owned) == 0 {
@@ -533,26 +534,15 @@ func updateTrafficStatus(ctx context.Context, reads client.Reader, isvc *v1beta1
 		}
 		// Revision metadata is reconciled independently from traffic weights so
 		// an already-correct traffic split cannot strand stale companion fields.
-		if latestHash != "" && hashes[latestHash] > 0 {
-			latestReady := PerRevisionServiceName(isvc.Name, c, latestHash)
-			if cs.LatestReadyRevision != latestReady {
-				cs.LatestReadyRevision = latestReady
-				changed = true
-			}
+		if latestHash != "" && hashes[latestHash] > 0 && SetLatestReadyRevision(&cs, isvc.Name, c, latestHash) {
+			changed = true
 		}
-		// LatestRolledoutRevision advances to the per-revision Service
-		// name once the rollout is at 100% on a single revision. The
-		// prior value is demoted to PreviousRolledoutRevision on a real
-		// advance so consumers can identify the immediately-prior
-		// rolled-out revision during diagnosis and partial rollbacks.
+		// LatestRolledoutRevision advances once the rollout is at 100% on a
+		// single revision; the pod view knows no superseded revision, so the
+		// prior value is the one demoted to PreviousRolledoutRevision.
 		if len(hashes) == 1 {
 			for hash := range hashes {
-				rolledOut := PerRevisionServiceName(isvc.Name, c, hash)
-				if cs.LatestRolledoutRevision != rolledOut {
-					if cs.LatestRolledoutRevision != "" {
-						cs.PreviousRolledoutRevision = cs.LatestRolledoutRevision
-					}
-					cs.LatestRolledoutRevision = rolledOut
+				if RecordRolledOutRevision(&cs, isvc.Name, c, hash, "") {
 					changed = true
 				}
 			}

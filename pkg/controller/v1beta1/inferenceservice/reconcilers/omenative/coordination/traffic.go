@@ -319,3 +319,50 @@ func absInt32(v int32) int32 {
 	}
 	return v
 }
+
+// SetLatestReadyRevision publishes revisionHash's per-revision Service name
+// as the Component's LatestReadyRevision: the most recent revision whose
+// pods reached Ready. It leads LatestRolledoutRevision while a rollout is in
+// flight and equals it once the rollout completes. Reports whether the
+// status changed.
+func SetLatestReadyRevision(cs *v1beta1.ComponentStatusSpec, isvcName string, component v1beta1.ComponentType, revisionHash string) bool {
+	if revisionHash == "" {
+		return false
+	}
+	name := PerRevisionServiceName(isvcName, component, revisionHash)
+	if cs.LatestReadyRevision == name {
+		return false
+	}
+	cs.LatestReadyRevision = name
+	return true
+}
+
+// RecordRolledOutRevision publishes revisionHash's per-revision Service name
+// as the Component's LatestRolledoutRevision, the revision that fully owns
+// its traffic, and demotes the revision it supersedes to
+// PreviousRolledoutRevision: supersededHash when the writer knows which
+// revision owned the traffic before, else the prior LatestRolledoutRevision.
+// Recording the current LatestRolledoutRevision again changes nothing, so
+// Previous never collapses onto Latest. Every OMENative writer of these
+// fields goes through here, coordination for the Components it owns and the
+// canary executor for the members of its groups, so one Component has one
+// writer and both writers keep one meaning. Reports whether the status
+// changed.
+func RecordRolledOutRevision(cs *v1beta1.ComponentStatusSpec, isvcName string, component v1beta1.ComponentType, revisionHash, supersededHash string) bool {
+	if revisionHash == "" {
+		return false
+	}
+	name := PerRevisionServiceName(isvcName, component, revisionHash)
+	if cs.LatestRolledoutRevision == name {
+		return false
+	}
+	previous := cs.LatestRolledoutRevision
+	if supersededHash != "" {
+		previous = PerRevisionServiceName(isvcName, component, supersededHash)
+	}
+	if previous != "" && previous != name {
+		cs.PreviousRolledoutRevision = previous
+	}
+	cs.LatestRolledoutRevision = name
+	return true
+}

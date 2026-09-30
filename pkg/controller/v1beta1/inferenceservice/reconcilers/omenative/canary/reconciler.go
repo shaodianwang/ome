@@ -109,13 +109,18 @@ type ReconcileInputs struct {
 
 // MemberRevisions is one secondary's revision pair: the target its capacity
 // gate verified and its persisted stable revision, with the pairing protocol
-// each was minted under. A member that was not bumped names the same revision
-// twice; a member with no stable revision leaves it empty.
+// each was minted under, and the Ready capacity the gate counted on the
+// target. A member that was not bumped names the same revision twice; a
+// member with no stable revision leaves it empty.
 type MemberRevisions struct {
 	CanaryRevisionHash    string
 	StableRevisionHash    string
 	CanaryPairingProtocol string
 	StablePairingProtocol string
+	// ReadyCanaryCapacity is the member's Ready capacity on its target
+	// revision, as the capacity gate counts it; above zero, the target's
+	// pods have reached Ready.
+	ReadyCanaryCapacity int32
 }
 
 // The ready Pod count bounds the exact ready Instance count and remains the
@@ -336,6 +341,9 @@ func reconcile(ctx context.Context, in ReconcileInputs, take func(string)) (*Res
 	// budget and a dip cannot restart the soak; past the ready timeout the
 	// canary parks Failed with the stable revision still serving.
 	readyCanary := readyCanaryCapacity(in)
+	// A target with Ready pods is the member's latest ready revision whether
+	// or not the step's capacity is met yet.
+	publishReadyRevisions(in)
 	state := rollout.StateOf(cs, in.ISVC.Status.Components[in.Component].RolloutPhase, len(plan.Steps))
 	if (readyCanary < newCount || !in.SecondaryCapacityReady) && state != rollout.CanaryStateDraining {
 		// A drain is exempt: the final traffic write has landed, and capacity
@@ -428,6 +436,9 @@ func reconcile(ctx context.Context, in ReconcileInputs, take func(string)) (*Res
 				take(constants.RolloutPromoteAnnotation)
 			}
 			setPhase(in.ISVC, in.Component, v1beta1.RolloutPhaseStable)
+			// Every member's target owns its traffic now; the pre-canary
+			// stable is the revision each superseded.
+			recordPromotedRevisions(in, cs.StableRevisionHash)
 			// Mark done (sentinel), don't clear: keeps EffectivePartition at
 			// partition 0 so the old revision drains instead of being re-held by
 			// a step-0 partition. ObservedTrafficWeight stays 100 (all on canary).
@@ -572,6 +583,9 @@ func reconcileRollback(in ReconcileInputs, cs *v1beta1.CanaryStatus) *Result {
 		setPhase(in.ISVC, in.Component, v1beta1.RolloutPhaseRollingBack)
 		return (&Result{Active: true, RolledBack: true}).wake(in.Requeue)
 	}
+	// The revert is complete: every member's stable revision owns its
+	// traffic again.
+	recordRolledBackRevisions(in, stableHash)
 	setPhase(in.ISVC, in.Component, v1beta1.RolloutPhaseRolledBack)
 	return &Result{Active: true, RolledBack: true}
 }

@@ -1206,3 +1206,40 @@ func TestRollingBackRunStaysOpen(t *testing.T) {
 		t.Fatalf("a rollback still in progress must keep its run pinned, got lastRun=%+v", isvc.Status.Rollout.LastRun)
 	}
 }
+
+// A run adopted around an in-flight canary finds the IRs already advanced
+// to their targets, so the current revision names no stable. The unit's
+// record may carry none either, and a secondary has no record at all; each
+// Component's LatestRolledoutRevision, the revision that last owned its
+// traffic, is what the pin then records as its stable revision.
+func TestAdoptedRunPinsStableFromTheRolledOutRevision(t *testing.T) {
+	isvc := isvcFixture(v1beta1.RolloutGroup{
+		Components: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent},
+		Canary:     canaryBody(10, 100),
+	})
+	isvc.Status.Components = map[v1beta1.ComponentType]v1beta1.ComponentStatusSpec{
+		v1beta1.EngineComponent: {
+			Canary:                  &v1beta1.CanaryStatus{CanaryRevisionHash: "bbbbbbbb", CurrentStep: 0},
+			RolloutPhase:            v1beta1.RolloutPhasePending,
+			LatestRolledoutRevision: "llm-a-engine-rev-aaaaaaaa",
+		},
+		v1beta1.DecoderComponent: {LatestRolledoutRevision: "llm-a-decoder-rev-cccccccc"},
+	}
+	in := testInputs(t, isvc, irFixture(newRev, newRev), namedIR("llm-a-decoder", "llm-a-decoder-dddddddd", "llm-a-decoder-dddddddd"))
+
+	out, err := Reconcile(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !out.Opened || !out.Adopted {
+		t.Fatalf("run boundary = %+v, want adopted open", out)
+	}
+	engine := pinnedTargetFor(t, isvc.Status.Rollout.ActiveRun, v1beta1.EngineComponent)
+	if engine.Revision != "bbbbbbbb" || engine.StableRevision != "aaaaaaaa" {
+		t.Fatalf("engine pin = %+v, want stable aaaaaaaa from its rolled-out revision", engine)
+	}
+	decoder := pinnedTargetFor(t, isvc.Status.Rollout.ActiveRun, v1beta1.DecoderComponent)
+	if decoder.Revision != "dddddddd" || decoder.StableRevision != "cccccccc" {
+		t.Fatalf("decoder pin = %+v, want stable cccccccc from its rolled-out revision", decoder)
+	}
+}
