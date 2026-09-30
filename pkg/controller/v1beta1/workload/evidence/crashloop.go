@@ -5,6 +5,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
@@ -54,6 +55,46 @@ func CrashLoopWedge(input types.ReconcileInput, s *types.InstanceStatus, expecte
 		return fmt.Sprintf("pod %s wedged in %s past the stuck-pod grace", pod.Name, reason), true
 	}
 	return "", false
+}
+
+// PodSetServesNothing reports whether a non-empty pod set is provably
+// out of service: no pod is in rotation, and every live pod is either in
+// a terminal phase or parked in a terminal kubelet waiting reason. A
+// start that replaces such a set opens no new unavailability, and the
+// coordination gate already counts the outage in its serving-based
+// unavailability. A pod that is merely not yet Ready is not counted:
+// its wait may still resolve, so replacing it is charged like any start.
+func PodSetServesNothing(pods []*corev1.Pod) bool {
+	live := 0
+	for _, pod := range pods {
+		if pod == nil || pod.DeletionTimestamp != nil {
+			continue
+		}
+		live++
+		if query.IsTerminalPod(pod) {
+			continue
+		}
+		if podreadiness.IsContainersReady(pod) && podreadiness.IsServing(pod) {
+			return false
+		}
+		if !podHoldsTerminalWaitingReason(pod) {
+			return false
+		}
+	}
+	return live > 0
+}
+
+// podHoldsTerminalWaitingReason reports whether any container of the
+// pod, regular or init, is parked in a terminal kubelet waiting reason.
+func podHoldsTerminalWaitingReason(pod *corev1.Pod) bool {
+	for _, statuses := range [][]corev1.ContainerStatus{pod.Status.ContainerStatuses, pod.Status.InitContainerStatuses} {
+		for _, cs := range statuses {
+			if cs.State.Waiting != nil && types.IsTerminalWaitingReason(cs.State.Waiting.Reason) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // podOnCurrentRevision reports whether a pod belongs to the Component's

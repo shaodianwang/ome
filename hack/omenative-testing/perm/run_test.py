@@ -1895,3 +1895,108 @@ class CanaryWave3HeaderTest(unittest.TestCase):
     def test_new_verbs_are_hook_verbs(self):
         self.assertEqual([], self._errs(self.BASE + " during=canary-serving verb=runlost cell=canary/Serving/runLost"))
         self.assertTrue(any("verb=" in e for e in self._errs(self.BASE + " verb=runlost")))
+
+
+class CrashloopFaultTest(unittest.TestCase):
+    """The crashloop:old fault: an old-revision pod made to crash on every
+    start once the bump has landed, and the verdict that the fix landed on
+    that Instance through the roll."""
+
+    BASE = "# p999: x mode=rollout Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 topo=engine"
+
+    def _errs(self, header):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def test_fault_verb_names_its_victim_only(self):
+        self.assertTrue(run._fault_ok("crashloop:old"))
+        self.assertFalse(run._fault_ok("crashloop:settling"))
+        self.assertFalse(run._fault_ok("crashloop"))
+
+    def test_header_needs_a_form_and_a_rollout_with_an_engine(self):
+        self.assertEqual([], self._errs(self.BASE + " fault=crashloop:old form=start"))
+        self.assertEqual([], self._errs(self.BASE + " fault=crashloop:old form=load"))
+        self.assertTrue(any("form=" in e for e in self._errs(self.BASE + " fault=crashloop:old")))
+        self.assertTrue(any("form=" in e for e in self._errs(self.BASE + " fault=podkill:settling form=start")))
+        self.assertTrue(any("form=" in e for e in self._errs(self.BASE + " fault=crashloop:old form=later")))
+        kill = "# p999: x mode=kill Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 restart=None topo=engine"
+        self.assertTrue(any("mode=rollout" in e for e in self._errs(kill + " fault=crashloop:old form=start")))
+
+    def test_victim_is_the_highest_old_revision_engine_leader(self):
+        pods = {
+            "e0": {"alive": True, "hash": "old", "inst": "0", "comp": "engine", "runner": "default"},
+            "e2": {"alive": True, "hash": "new", "inst": "2", "comp": "engine", "runner": "default"},
+            "e1": {"alive": True, "hash": "old", "inst": "1", "comp": "engine", "runner": "default"},
+            "d3": {"alive": True, "hash": "old", "inst": "3", "comp": "decoder", "runner": "default"},
+            "w1": {"alive": True, "hash": "old", "inst": "1", "comp": "engine", "runner": "worker"},
+        }
+        self.assertEqual("e1", run._crashloop_pick_pod(pods, {"old"}))
+        self.assertIsNone(run._crashloop_pick_pod({"d3": pods["d3"]}, {"old"}))
+
+    def test_fires_at_the_settling_hook_once(self):
+        f = run._fault_new("p999", {"fault": "crashloop:old", "form": "start"})
+        fired = []
+        orig = run._fault_fire
+        run._fault_fire = lambda *a, **k: fired.append(a) or f.__setitem__("fired", True)
+        try:
+            ctx = {"fault": f, "trigger_ts": None, "pod_state": {}, "pods_per_inst": {}, "old_hashes": {"old"}}
+            run._fault_tick(ctx)
+            self.assertEqual(0, len(fired), "nothing fires before the bump has landed")
+            ctx["trigger_ts"] = 1.0
+            run._fault_tick(ctx)
+            run._fault_tick(ctx)
+            self.assertEqual(1, len(fired), "the crash is armed once, right after the bump")
+        finally:
+            run._fault_fire = orig
+
+    def test_verdict_requires_the_new_revision_serving_and_no_repair(self):
+        f = {"kind": "crashloop", "fired": True, "infra_fail": None, "form": "start", "case_id": "p999",
+             "crash_inst": "1", "crash_comp": "engine", "crash_hash": "old", "kills": 0}
+        healed = {"e1": {"alive": True, "hash": "new", "inst": "1", "comp": "engine", "ready": True, "serving": True}}
+        stale = {"e1": {"alive": True, "hash": "old", "inst": "1", "comp": "engine", "ready": True, "serving": True}}
+        orig = run._isvc_events_since
+        try:
+            run._isvc_events_since = lambda case_id, since: []
+            notes, checks = [], []
+            self.assertEqual("PASS", run._crashloop_checks(f, healed, {"old"}, 1.0, "PASS", notes, checks))
+            notes, checks = [], []
+            self.assertEqual("FAIL", run._crashloop_checks(f, stale, {"old"}, 1.0, "PASS", notes, checks))
+            self.assertTrue(any("new revision" in n for n in notes))
+            run._isvc_events_since = lambda case_id, since: [
+                ("RestartTriggered", "OMENative component=engine instance=1 restart triggered: pod e1 wedged")]
+            notes, checks = [], []
+            self.assertEqual("FAIL", run._crashloop_checks(f, healed, {"old"}, 1.0, "PASS", notes, checks))
+            self.assertTrue(any("repaired after the bump" in n for n in notes))
+            run._isvc_events_since = lambda case_id, since: [
+                ("RestartTriggered", "OMENative component=engine instance=0 restart triggered: pod e0 wedged")]
+            notes, checks = [], []
+            self.assertEqual("PASS", run._crashloop_checks(f, healed, {"old"}, 1.0, "PASS", notes, checks),
+                             "a repair on another Instance is not this verdict's")
+        finally:
+            run._isvc_events_since = orig
+
+    def test_generated_family_crosses_every_axis(self):
+        _outputs, rows = generate_cases.build_outputs()
+        fam = [(kv, m) for folder, _n, kv, m in rows if folder == "gen-crashloop"]
+        self.assertEqual(48, len(fam))
+        self.assertEqual({"crashloop:start", "crashloop:load"}, {m["verb"] for _kv, m in fam})
+        self.assertEqual(set(generate_cases.CRASH_BUDGETS), {m["strat"] for _kv, m in fam})
+        self.assertEqual({"None", "RecreateInstance"}, {m["rp"] for _kv, m in fam})
+        self.assertEqual({("start", "None"), ("load", "RecreateInstance")},
+                         {(kv["form"], m["rp"]) for kv, m in fam},
+                         "each crash form runs under the policy whose trigger it exercises")
+        self.assertEqual({"engine", "pd", "engine-mn", "pd-mn"}, {kv["topo"] for kv, _m in fam})
+        for kv, _m in fam:
+            self.assertEqual("crashloop:old", kv["fault"])
+            self.assertIn(kv["form"], generate_cases.CRASH_FORMS)
+            self.assertEqual(1, kv["floor_soft"])
+            self.assertNotIn("mode", kv)
+            if kv["topo"].startswith("pd"):
+                self.assertIn(kv["co"], {"none", "rolling"})
+                if kv["co"] == "rolling":
+                    self.assertEqual(kv["Nd"] + 1, kv["ceil_d"], "a rolling group surges the decoder too")
+            else:
+                self.assertEqual("none", kv["co"])

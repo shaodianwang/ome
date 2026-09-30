@@ -93,6 +93,30 @@ func PodsForStuckCheck(s types.InstanceStatus, byIdx map[int32][]*corev1.Pod) []
 	return out
 }
 
+// AttemptStuckPods narrows the pods a stuck check may blame an Update
+// attempt for to the pods that carry the attempt's revision. The pod an
+// update is replacing may be the broken workload the roll corrects: a
+// single-pod surge shares its index with the source it will drain, a
+// recreate holds the old incarnation until its drain deletes it, and an
+// in-place patch carries the old revision until the patch restamps it.
+// A wedge on any of those is the roll's reason, never its failure; the
+// gang surge reads the same rule through its replacement bucket. A pod
+// with no revision label stays in scope, as does every pod of an attempt
+// that is not an Update. attemptRev names the revision the attempt is
+// converging toward; empty leaves the scope open.
+func AttemptStuckPods(s types.InstanceStatus, pods []*corev1.Pod, attemptRev string) []*corev1.Pod {
+	if s.Operation == nil || s.Operation.Type != types.InstanceOperationUpdate {
+		return pods
+	}
+	out := make([]*corev1.Pod, 0, len(pods))
+	for _, pod := range pods {
+		if pod != nil && podOnAttemptRevision(pod, attemptRev) {
+			out = append(out, pod)
+		}
+	}
+	return out
+}
+
 // FirstWorkloadCausedPod returns the first live (non-deleting) pod whose
 // failure is deterministically scoped to the revision, plus the matched
 // reason: a workload-caused container or init-container waiting reason

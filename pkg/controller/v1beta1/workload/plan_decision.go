@@ -95,7 +95,9 @@ type UpdateItem struct {
 	// continuing one (!types.UpdateContinuation), so it is admitted and charged.
 	StartingFresh bool
 	// CoordGateExempt: the fresh start skips the coordination gate consult
-	// (types.RecreateOfDarkFailedRow); the per-Component budget still applies.
+	// because it takes nothing further offline (types.RecreateOfDarkRow, or
+	// a Ready row whose pod set is provably out of service —
+	// evidence.PodSetServesNothing); the per-Component budget still applies.
 	CoordGateExempt bool
 	// RecreateFallback: the Component's in-place strategy runs as a
 	// recreate on this Instance (ops.InPlaceFallsBackToRecreate: a gang, or
@@ -250,7 +252,7 @@ func Plan(ctx context.Context, input types.ReconcileInput, plan types.ComponentP
 	// finish.
 	var restarts []RestartSelection
 	if !plan.PauseFreeze || anyRestartContinuation(input) {
-		selected, err := planRestartSelections(ctx, input, plan, snapshot)
+		selected, err := planRestartSelections(ctx, input, plan, target, snapshot)
 		if err != nil {
 			return Decision{}, err
 		}
@@ -285,7 +287,8 @@ func Plan(ctx context.Context, input types.ReconcileInput, plan types.ComponentP
 	// Paused is an operator circuit breaker over WHAT MAY BEGIN:
 	// scale-down above still releases capacity, the restart pass below
 	// keeps repairing existing Instances at their current revision
-	// (RunningRevision — repair can never advance a rollout), and an
+	// (RunningRevision — repair can never advance a rollout, and an
+	// Instance whose revision is not the roll target is the roll's), and an
 	// attempt already in flight still runs the step it is on to that
 	// step's boundary. What a pause withholds is the next operation and
 	// the next step, so a pause never leaves an Instance mid-step — dark
@@ -447,18 +450,27 @@ func restartContinuations(input types.ReconcileInput, restarts []RestartSelectio
 // evaluated against the LIVE pod read — restart is destructive and must
 // not select from a stale cache.
 //
+// A repair rebuilds the revision the Instance already runs, so it is
+// selected only while that revision is still the Component's target. An
+// Instance off the target belongs to the pass that rebuilds it AT the
+// target (workloadops.RepairYieldsToTarget): its outage is one the roll
+// crosses anyway, and a repair would rebuild what the roll is about to
+// tear down. An open Restart is driven on regardless, and a paused
+// Component keeps every repair, because the roll it would yield to is
+// the very thing the pause withholds.
+//
 // The live read is unconditional only under the policy whose triggers
 // fire on ordinary pod churn. The two policy-independent triggers are
 // rare, so for every other policy the cached view screens for a
 // candidate first and the live read confirms it; a healthy Component
 // therefore costs no extra live List per reconcile.
-func planRestartSelections(ctx context.Context, input types.ReconcileInput, plan types.ComponentPlan, snapshot *ObservedSnapshot) ([]RestartSelection, error) {
+func planRestartSelections(ctx context.Context, input types.ReconcileInput, plan types.ComponentPlan, target *appsv1.ControllerRevision, snapshot *ObservedSnapshot) ([]RestartSelection, error) {
 	if plan.RestartPolicy != types.RestartPolicyRecreateInstance {
 		cachedByInstance, err := snapshot.CachedPods(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("workload.Reconcile: list pods to screen the restart pass (component=%s): %w", plan.Component, err)
 		}
-		if !anyRestartTrigger(input, plan, cachedByInstance) {
+		if !anyRestartTrigger(input, plan, target, cachedByInstance) {
 			return nil, nil
 		}
 	}
@@ -468,7 +480,7 @@ func planRestartSelections(ctx context.Context, input types.ReconcileInput, plan
 	}
 	var restarts []RestartSelection
 	for _, inst := range plan.Instances {
-		needs, reason := workloadops.DetectRestartTriggerWithPods(input, plan, inst, liveByInstance[inst.Index])
+		needs, reason := restartTrigger(input, plan, inst, target, liveByInstance[inst.Index])
 		if !needs {
 			continue
 		}
@@ -481,11 +493,21 @@ func planRestartSelections(ctx context.Context, input types.ReconcileInput, plan
 	return restarts, nil
 }
 
+// restartTrigger is the restart pass's selection for one Instance: the
+// trigger, bounded by the roll target.
+func restartTrigger(input types.ReconcileInput, plan types.ComponentPlan, inst types.InstancePlan, target *appsv1.ControllerRevision, pods []*corev1.Pod) (bool, string) {
+	needs, reason := workloadops.DetectRestartTriggerWithPods(input, plan, inst, pods)
+	if !needs || workloadops.RepairYieldsToTarget(input, plan, inst, target, pods) {
+		return false, ""
+	}
+	return true, reason
+}
+
 // anyRestartTrigger reports whether any planned Instance would be
 // selected against the supplied pod buckets.
-func anyRestartTrigger(input types.ReconcileInput, plan types.ComponentPlan, byInstance map[int32][]*corev1.Pod) bool {
+func anyRestartTrigger(input types.ReconcileInput, plan types.ComponentPlan, target *appsv1.ControllerRevision, byInstance map[int32][]*corev1.Pod) bool {
 	for _, inst := range plan.Instances {
-		if needs, _ := workloadops.DetectRestartTriggerWithPods(input, plan, inst, byInstance[inst.Index]); needs {
+		if needs, _ := restartTrigger(input, plan, inst, target, byInstance[inst.Index]); needs {
 			return true
 		}
 	}
@@ -643,7 +665,10 @@ func planUpdateSelection(ctx context.Context, input types.ReconcileInput, plan t
 		}
 		row := input.ObservedState.Instance(inst.Index)
 		startingFresh := !types.UpdateContinuation(row)
-		gateExempt := types.RecreateOfDarkFailedRow(row, strategy)
+		gateExempt := types.RecreateOfDarkRow(row, strategy) ||
+			(startingFresh && strategy != types.UpdateStrategySurgeThenDrain &&
+				row != nil && row.Phase == types.InstancePhaseReady &&
+				evidence.PodSetServesNothing(updateByInstance[inst.Index]))
 		// The mechanism the start runs on: the shared rule the update op
 		// dispatches on, judged against the same target and the same
 		// recorded running revision (a snapshot read, memoized per revision).

@@ -1556,49 +1556,57 @@ func TestRestart_PodLostAsTheRepairStampCommitsStillDrains(t *testing.T) {
 	}
 }
 
-// A new target revision arriving while the repair is stamped or open
-// waits for it: the update trigger declines any row below Ready, so the
-// roll re-enters from Ready — or from Failed — once the repair resolves.
+// A new target revision meets a crash-loop repair in one of two windows.
+// While the repair is open the target waits: the update trigger declines
+// a row below Ready, and the roll re-enters from Ready or from Failed once
+// the repair resolves. Before the repair has opened, the row is a Ready
+// row off the target, so the trigger fires and the roll takes the row —
+// the repair never opens on it.
 //
 // Cells: instance/Ready/spec.revision/boundary@T-ready-crashloop-restart, instance/Ready/spec.revision/after@T-ready-crashloop-restart
-func TestDetectUpdateTrigger_NewTargetWaitsForAnOpenCrashLoopRepair(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		step string
-	}{
-		{name: "stamp landing", step: ""},
-		{name: "repair open", step: "Drain"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			resetExpectations(t)
-			isvc := minimalISVC("llama-70b", "prod", 1)
-			op := &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationRestart, Reason: "pod CrashLoopBackOff"}
-			op.Step = tc.step
-			ir := instanceIR(isvc, workload.ComponentEngine, v1beta1.OMENativeInstanceStatus{
-				Index:           0,
-				Incarnation:     2,
-				Phase:           v1beta1.OMENativeInstanceRestarting,
-				RunningRevision: crashLoopRevision,
-				Operation:       op,
-			})
-			c := newFakeClient(t, isvc, ir)
-			input := buildTestInput(isvc, c, workload.ComponentEngine)
-			input.ObservedState.CurrentRevision = crashLoopRevision
-			plan := buildPlanSinglePodEngineForRestart(c, isvc)
+func TestDetectUpdateTrigger_NewTargetAgainstACrashLoopRepair(t *testing.T) {
+	target := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{
+		Namespace: "prod", Name: "llama-70b-engine-newtarget",
+	}}
 
-			target := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{
-				Namespace: "prod", Name: "llama-70b-engine-newtarget",
-			}}
-			trigger, _, err := ops.DetectUpdateTriggerWithPods(context.Background(), workload.Deps{Client: c},
-				input, plan, plan.Instances[0], target, nil)
-			if err != nil {
-				t.Fatalf("DetectUpdateTriggerWithPods: %v", err)
-			}
-			if trigger {
-				t.Fatalf("a row below Ready must not be rolled; the new target waits for the repair")
-			}
+	t.Run("repair open: the target waits", func(t *testing.T) {
+		resetExpectations(t)
+		isvc := minimalISVC("llama-70b", "prod", 1)
+		ir := instanceIR(isvc, workload.ComponentEngine, v1beta1.OMENativeInstanceStatus{
+			Index:           0,
+			Incarnation:     2,
+			Phase:           v1beta1.OMENativeInstanceRestarting,
+			RunningRevision: crashLoopRevision,
+			Operation:       &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationRestart, Step: "Drain", Reason: "pod CrashLoopBackOff"},
 		})
-	}
+		c := newFakeClient(t, isvc, ir)
+		input := buildTestInput(isvc, c, workload.ComponentEngine)
+		input.ObservedState.CurrentRevision = crashLoopRevision
+		plan := buildPlanSinglePodEngineForRestart(c, isvc)
+
+		trigger, _, err := ops.DetectUpdateTriggerWithPods(context.Background(), workload.Deps{Client: c},
+			input, plan, plan.Instances[0], target, nil)
+		if err != nil {
+			t.Fatalf("DetectUpdateTriggerWithPods: %v", err)
+		}
+		if trigger {
+			t.Fatalf("a row below Ready must not be rolled; the new target waits for the open repair")
+		}
+	})
+
+	t.Run("repair not yet open: the roll takes the row", func(t *testing.T) {
+		input, plan, pod := crashLoopInput(t, time.Minute)
+		if needs, _ := ops.DetectRestartTriggerWithPods(input, plan, plan.Instances[0], []*corev1.Pod{pod}); !needs {
+			t.Fatalf("the fixture must hold a crash loop the repair would otherwise open on")
+		}
+		if !ops.RepairYieldsToTarget(input, plan, plan.Instances[0], target, []*corev1.Pod{pod}) {
+			t.Fatalf("a Ready row off the target must be yielded to the roll")
+		}
+		dec := ops.EvaluateUpdateTrigger(input, plan.Instances[0], target, []*corev1.Pod{pod})
+		if !dec.Trigger {
+			t.Fatalf("the update trigger must take the off-target row; decision = %+v", dec)
+		}
+	})
 }
 
 // gangMarkerRevision is the replacement gang's target.
@@ -1860,5 +1868,72 @@ func TestRestart_DemotedRowRebuildsAtRunningRevision(t *testing.T) {
 	}
 	if want := query.RevisionFromName(running).Hash(); labels[query.LabelRevisionHash] != want {
 		t.Errorf("rebuilt pod revision label = %q, want the running revision %q, never the target", labels[query.LabelRevisionHash], want)
+	}
+}
+
+// The restart pass repairs an Instance only at a revision the Component
+// still wants. RepairYieldsToTarget is the selection's question: a row
+// whose rebuild revision is not the roll target is left to the pass that
+// rebuilds it AT the target — the update pass for a Ready or Failed row,
+// the Create pass for a superseded first materialization and for a
+// demoted row with no pod left. An open Restart, a Migrate-owned row and
+// a demoted row that holds pods again are never yielded.
+//
+// Cells: instance/Ready/spec.revision/boundary@T-ready-crashloop-restart, instance/Ready/spec.revision/after@T-ready-crashloop-restart, instance/Failed/pod.deleted[source]/before, instance/Create/CreatePods/pod.deleted[source]/before, instance/Pending/spec.unpause/boundary@T-pending-restart, instance/Restart/Drain/spec.revision/before, instance/Ready/spec.pauseTrue/before
+func TestRepairYieldsToTarget(t *testing.T) {
+	const running = "llama-70b-engine-" + testRevisionHash
+	target := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-0000next", Namespace: "prod"}}
+	sameTarget := &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: running, Namespace: "prod"}}
+	survivor := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "survivor"}, Status: corev1.PodStatus{Phase: corev1.PodRunning}}
+	dead := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "dead"}, Status: corev1.PodStatus{Phase: corev1.PodFailed}}
+	inst := workload.InstancePlan{Index: 0, Incarnation: 1, Runners: []workload.RunnerPlan{{Name: "default", Size: 1}}}
+
+	cases := []struct {
+		name   string
+		row    *workload.InstanceStatus
+		target *appsv1.ControllerRevision
+		pods   []*corev1.Pod
+		paused bool
+		blocks []workload.RetryBlock
+		want   bool
+	}{
+		{name: "Ready on the target is repaired", row: &workload.InstanceStatus{Phase: workload.InstancePhaseReady, RunningRevision: running}, target: sameTarget, want: false},
+		{name: "Ready off the target yields", row: &workload.InstanceStatus{Phase: workload.InstancePhaseReady, RunningRevision: running}, target: target, want: true},
+		{name: "a paused Component keeps the repair", row: &workload.InstanceStatus{Phase: workload.InstancePhaseReady, RunningRevision: running}, target: target, paused: true, want: false},
+		{name: "a target the RetryBlock holds keeps the repair", row: &workload.InstanceStatus{Phase: workload.InstancePhaseReady, RunningRevision: running}, target: target,
+			blocks: []workload.RetryBlock{{TargetRevision: target.Name, State: workload.RetryBlockHeld}}, want: false},
+		{name: "a target in Backoff only paces the roll and yields", row: &workload.InstanceStatus{Phase: workload.InstancePhaseReady, RunningRevision: running}, target: target,
+			blocks: []workload.RetryBlock{{TargetRevision: target.Name, State: workload.RetryBlockBackoff}}, want: true},
+		{name: "Failed off the target yields", row: &workload.InstanceStatus{Phase: workload.InstancePhaseFailed, RunningRevision: running}, target: target, want: true},
+		{name: "a superseded first materialization yields to its retirement", row: &workload.InstanceStatus{
+			Phase:     workload.InstancePhaseCreating,
+			Operation: &workload.InstanceOperation{Type: workload.InstanceOperationCreate, Step: "CreatePods", TargetRevision: running},
+		}, target: target, pods: []*corev1.Pod{survivor}, want: true},
+		{name: "an open Restart is driven whatever the target", row: &workload.InstanceStatus{
+			Phase: workload.InstancePhaseRestarting, RunningRevision: running,
+			Operation: &workload.InstanceOperation{Type: workload.InstanceOperationRestart, Step: workload.RestartStepDrain},
+		}, target: target, want: false},
+		{name: "a Migrate-owned row is its record's", row: &workload.InstanceStatus{Phase: workload.InstancePhaseMigrating, RunningRevision: running}, target: target, want: false},
+		{name: "a demoted row with no pod left yields to Create", row: &workload.InstanceStatus{Phase: workload.InstancePhasePending, RunningRevision: running}, target: target, want: true},
+		{name: "a demoted row whose only pod is terminal yields to Create", row: &workload.InstanceStatus{Phase: workload.InstancePhasePending, RunningRevision: running}, target: target, pods: []*corev1.Pod{dead}, want: true},
+		{name: "a demoted row holding a survivor keeps its repair", row: &workload.InstanceStatus{Phase: workload.InstancePhasePending, RunningRevision: running}, target: target, pods: []*corev1.Pod{survivor}, want: false},
+		{name: "a row recording no revision has nothing to compare", row: &workload.InstanceStatus{Phase: workload.InstancePhaseReady}, target: target, want: false},
+		{name: "no target, nothing to yield to", row: &workload.InstanceStatus{Phase: workload.InstancePhaseReady, RunningRevision: running}, target: nil, want: false},
+		{name: "no row", row: nil, target: target, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input := workload.ReconcileInput{}
+			input.ObservedState.RetryBlocks = tc.blocks
+			if tc.row != nil {
+				row := *tc.row
+				row.Index = 0
+				input.ObservedState.InstanceStatuses = []workload.InstanceStatus{row}
+			}
+			plan := workload.ComponentPlan{Component: workload.ComponentEngine, Paused: tc.paused}
+			if got := ops.RepairYieldsToTarget(input, plan, inst, tc.target, tc.pods); got != tc.want {
+				t.Fatalf("RepairYieldsToTarget = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

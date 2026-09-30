@@ -1,0 +1,59 @@
+# A Ready Instance wedges in a crash loop on the revision it runs while
+# the template moves to a fixed revision. The row is off the target, so
+# the restart pass yields it: no repair opens on the broken revision, the
+# surge brings the fixed replacement up beside the crash-looping source,
+# and the source is drained away once the replacement serves.
+scenario: ready-crashloop-retarget-surge
+arrows:
+  - T-empty-create
+  - T-create-ready
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-promote
+cells:
+  - instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-surge
+  - instance/Ready/spec.revision/boundary@T-ready-crashloop-restart
+  - instance/Update/Surge/pod.waiting[CrashLoopBackOff]/before
+intentional: >-
+  the crash loop and the new target reach the pass together, and the pass
+  starts the surge rather than a repair; the escalation reads the attempt
+  on its replacement alone, so the wedged source never fails it
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: cold start opens the attempt on the Component's current revision
+  - tick: 2
+    note: the pod becomes Ready and enters rotation, so the Instance promotes
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the pod runs for two minutes, which is longer than the grace
+    events:
+      - clock.advance: 2m
+  - tick: 4
+    note: the pod falls into a crash loop and leaves rotation as the template moves to the fixed revision, so the roll surges a replacement instead of repairing the broken revision
+    events:
+      - pod.servingOff[source]: {pod: {index: 0}}
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+      - pod.waiting[CrashLoopBackOff]: {pod: {index: 0}, message: "back-off restarting failed container"}
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 5
+    note: the replacement is serving and in rotation, so the source, already out of rotation, is deleted
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 6
+    note: the crash-looping source is gone and the Instance promotes on the fixed revision
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}

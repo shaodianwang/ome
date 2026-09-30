@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
@@ -257,8 +258,12 @@ func TestPlan_FullPrecedenceOrder(t *testing.T) {
 	forbidMutations(t, &in)
 	in.Clock = clocktesting.NewFakeClock(now)
 	in.ObservedState.InstanceStatuses = []types.InstanceStatus{
-		// Pod lost → restart trigger; prior revision → update trigger.
+		// Prior revision → update trigger. Its pod is present, so nothing
+		// else claims it.
 		{Index: 0, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: "prior-rev"},
+		// Runs the target and lost its pod → restart trigger: a repair is
+		// selected only for a row whose revision is still the target.
+		{Index: 1, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: target.Name},
 		// Extra → scale-down.
 		{Index: 9, Incarnation: 1, Phase: types.InstancePhaseReady},
 	}
@@ -270,11 +275,19 @@ func TestPlan_FullPrecedenceOrder(t *testing.T) {
 			Phase: types.MigrationPhaseAccepted, SourceInstance: 0,
 			StartedAt: metav1.NewTime(now.Add(-time.Hour))},
 	}
-	plan := minimalPlan()
-	plan.RestartPolicy = types.RestartPolicyRecreateInstance
-	plan.MigrationMode = types.MigrationModeAuto
+	plan := types.ComponentPlan{
+		Component:     types.ComponentEngine,
+		Replicas:      2,
+		RestartPolicy: types.RestartPolicyRecreateInstance,
+		MigrationMode: types.MigrationModeAuto,
+		Instances: []types.InstancePlan{
+			{Index: 0, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
+			{Index: 1, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}},
+		},
+	}
+	pods := map[int32][]*corev1.Pod{0: {enginePod("llama-70b", "prod", 0)}}
 
-	d := planTargetOrFail(t, in, plan, target, planSnapshot(in, nil))
+	d := planTargetOrFail(t, in, plan, target, planSnapshot(in, pods))
 	want := []workload.ActionKind{
 		workload.ActionScaleDown,
 		workload.ActionRestart,
@@ -285,6 +298,9 @@ func TestPlan_FullPrecedenceOrder(t *testing.T) {
 	}
 	if !kindsEqual(actionKinds(d), want) {
 		t.Errorf("decision = %v, want %v", actionKinds(d), want)
+	}
+	if ra := findAction(d, workload.ActionRestart); len(ra.Restarts) != 1 || ra.Restarts[0].Instance.Index != 1 {
+		t.Errorf("restart selection = %+v, want index 1 only", ra.Restarts)
 	}
 	if !d.Escalate {
 		t.Errorf("non-paused decision must enable escalation")
@@ -1367,7 +1383,9 @@ func TestPlan_Paused_RepairRunsFleetChangesDoNot(t *testing.T) {
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
 	// The all-passes fixture: pod-lost + prior-revision Instance
 	// (restart + update triggers), an extra index (scale-down), an
-	// expired and a drivable Manual migration record.
+	// expired and a drivable Manual migration record. The lost pod is
+	// repaired at the prior revision while paused: the roll that would
+	// otherwise take the row is what the pause withholds.
 	build := func(t *testing.T) (types.ReconcileInput, types.ComponentPlan) {
 		in := minimalInput(t)
 		forbidMutations(t, &in)
@@ -1464,10 +1482,11 @@ func maximalPlanInput(t *testing.T, now time.Time) (types.ReconcileInput, types.
 	forbidMutations(t, &in)
 	in.Clock = clocktesting.NewFakeClock(now)
 	in.ObservedState.InstanceStatuses = []types.InstanceStatus{
-		// Prior revision → update trigger; index 1 also lost its pod →
-		// restart trigger.
+		// Prior revision → update trigger. Index 1 runs the target and lost
+		// its pod → restart trigger; a repair is selected only for a row
+		// whose revision is still the target.
 		{Index: 0, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: "prior-rev"},
-		{Index: 1, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: "prior-rev"},
+		{Index: 1, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: updateTarget().Name},
 		// Extra → scale-down.
 		{Index: 9, Incarnation: 1, Phase: types.InstancePhaseReady},
 	}
@@ -2092,4 +2111,261 @@ func TestPlan_PauseFreeze_AdvancesTheOpenDrain(t *testing.T) {
 			}
 		}
 	})
+}
+
+// podOnRevision stamps the pod with the hash of the named revision, the
+// label every pass reads the pod's revision from.
+func podOnRevision(pod *corev1.Pod, revision string) *corev1.Pod {
+	pod.Labels[query.LabelRevisionHash] = query.RevisionFromName(revision).Hash()
+	return pod
+}
+
+// offTargetRepairPlan is the two-Instance plan the yield tests run:
+// single-pod Instances, or a leader+worker gang when gang is set.
+func offTargetRepairPlan(gang bool, strategy types.UpdateStrategyType) types.ComponentPlan {
+	runners := []types.RunnerPlan{{Name: "default", Size: 1}}
+	if gang {
+		runners = []types.RunnerPlan{{Name: "leader", Size: 1}, {Name: "worker", Size: 1}}
+	}
+	return types.ComponentPlan{
+		Component:      types.ComponentEngine,
+		Replicas:       2,
+		RestartPolicy:  types.RestartPolicyRecreateInstance,
+		UpdateStrategy: types.UpdateStrategy{Type: strategy},
+		Instances: []types.InstancePlan{
+			{Index: 0, Incarnation: 1, Runners: runners},
+			{Index: 1, Incarnation: 1, Runners: runners},
+		},
+	}
+}
+
+// TestPlan_Restart_YieldsARowOffTheTargetToTheUpdatePass pins the
+// ownership rule between the two passes: an Instance whose running
+// revision is not the roll target belongs to the update pass, whatever
+// evidence the restart trigger holds against it — a crash loop, a lost
+// pod or a lost gang member — because the roll replaces the pod set at
+// the target and a repair would rebuild a revision the Component does not want. The
+// same evidence on a row that still runs the target opens the repair.
+//
+// Cells: instance/Ready/spec.revision/boundary@T-ready-crashloop-restart, instance/Ready/spec.revision/boundary@T-ready-restart, instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-recreate, instance/Ready/pod.deleted[source]/boundary@T-ready-recreate, instance/Ready/pod.waiting[CrashLoopBackOff]/before, instance/Ready/pod.deleted[source]/boundary@T-ready-restart
+func TestPlan_Restart_YieldsARowOffTheTargetToTheUpdatePass(t *testing.T) {
+	target := updateTarget()
+	cases := []struct {
+		name string
+		gang bool
+		// pods of the row under test, stamped with the revision it runs
+		pods func(running string) []*corev1.Pod
+	}{
+		{name: "crash loop", pods: func(running string) []*corev1.Pod {
+			return []*corev1.Pod{podOnRevision(wedgedEnginePod(1), running)}
+		}},
+		{name: "pod lost", pods: func(string) []*corev1.Pod { return nil }},
+		{name: "gang member lost", gang: true, pods: func(running string) []*corev1.Pod {
+			leader := podOnRevision(enginePod("llama-70b", "prod", 1), running)
+			leader.Labels[query.LabelRunner] = "leader"
+			return []*corev1.Pod{leader}
+		}},
+	}
+	for _, tc := range cases {
+		for _, onTarget := range []bool{false, true} {
+			name := tc.name + " off the target"
+			if onTarget {
+				name = tc.name + " on the target"
+			}
+			t.Run(name, func(t *testing.T) {
+				in := minimalInput(t)
+				forbidMutations(t, &in)
+				in.StuckPodGrace = time.Minute
+				running := crashLoopRepairRevision
+				if onTarget {
+					running = target.Name
+				}
+				// The Component's promoted revision is the one the row under
+				// test runs; the crash-loop evidence is scoped to it.
+				in.ObservedState.CurrentRevision = running
+				in.ObservedState.InstanceStatuses = []types.InstanceStatus{
+					{Index: 0, Incarnation: 1, Phase: types.InstancePhaseReady, PodCount: 1, RunningRevision: target.Name},
+					{Index: 1, Incarnation: 1, Phase: types.InstancePhaseReady, PodCount: 1, RunningRevision: running},
+				}
+				plan := offTargetRepairPlan(tc.gang, types.UpdateStrategyRecreatePod)
+				healthy := []*corev1.Pod{podOnRevision(enginePod("llama-70b", "prod", 0), target.Name)}
+				if tc.gang {
+					in.ObservedState.InstanceStatuses[0].PodCount = 2
+					in.ObservedState.InstanceStatuses[1].PodCount = 2
+					healthy[0].Labels[query.LabelRunner] = "leader"
+					worker := podOnRevision(enginePod("llama-70b", "prod", 0), target.Name)
+					worker.Name += "-worker"
+					worker.Labels[query.LabelRunner] = "worker"
+					healthy = append(healthy, worker)
+				}
+				pods := map[int32][]*corev1.Pod{0: healthy, 1: tc.pods(running)}
+				d := planTargetOrFail(t, in, plan, target, planSnapshot(in, pods))
+
+				ra := findAction(d, workload.ActionRestart)
+				ua := findAction(d, workload.ActionUpdate)
+				if onTarget {
+					if ra == nil || len(ra.Restarts) != 1 || ra.Restarts[0].Instance.Index != 1 {
+						t.Fatalf("a row on the target is repaired; restart action = %+v (actions %v)", ra, actionKinds(d))
+					}
+					if ua != nil {
+						t.Fatalf("nothing is off the target, so no update is selected; got %+v", ua.Update.Items)
+					}
+					return
+				}
+				if ra != nil {
+					t.Fatalf("a row off the target is never repaired; restart selection = %+v", ra.Restarts)
+				}
+				if ua == nil || len(ua.Update.Items) != 1 || ua.Update.Items[0].Instance.Index != 1 || !ua.Update.Items[0].StartingFresh {
+					t.Fatalf("the update pass must start on the off-target row; update action = %+v (actions %v)", ua, actionKinds(d))
+				}
+			})
+		}
+	}
+}
+
+// TestPlan_Restart_OpenRepairIsDrivenWhateverTheTarget: a Restart
+// already in flight is driven to completion even though the target has
+// moved on; the roll starts once the repair ends. Only a repair that has
+// not opened yields.
+//
+// Cells: instance/Ready/spec.revision/after@T-ready-crashloop-restart, instance/Ready/spec.revision/after@T-ready-restart, instance/Restart/Drain/spec.revision/before
+func TestPlan_Restart_OpenRepairIsDrivenWhateverTheTarget(t *testing.T) {
+	target := updateTarget()
+	in := minimalInput(t)
+	forbidMutations(t, &in)
+	in.ObservedState.InstanceStatuses = []types.InstanceStatus{{
+		Index: 0, Incarnation: 2, Phase: types.InstancePhaseRestarting, RunningRevision: crashLoopRepairRevision,
+		Operation: &types.InstanceOperation{ID: "restart-0", Type: types.InstanceOperationRestart, Step: types.RestartStepDrain},
+	}}
+	plan := minimalPlan()
+	plan.RestartPolicy = types.RestartPolicyRecreateInstance
+
+	d := planTargetOrFail(t, in, plan, target, planSnapshot(in, nil))
+	ra := findAction(d, workload.ActionRestart)
+	if ra == nil || len(ra.Restarts) != 1 || ra.Restarts[0].Instance.Index != 0 {
+		t.Fatalf("an open repair must keep advancing; actions = %v", actionKinds(d))
+	}
+	if ua := findAction(d, workload.ActionUpdate); ua != nil {
+		t.Fatalf("the roll waits for the open repair; update action = %+v", ua.Update.Items)
+	}
+}
+
+// TestPlan_Restart_DemotedRowOffTarget: a row demoted for losing every
+// pod keeps the revision it ran. Off the target with no pod left it is
+// the Create pass's, which materializes it at the target; one that holds
+// survivors again is still rebuilt by the repair at the revision it
+// records, because no update trigger reads a Pending row.
+//
+// Cells: instance/Pending/spec.revision/before, instance/Pending/spec.unpause/boundary@T-pending-create, instance/Pending/spec.unpause/boundary@T-pending-restart
+func TestPlan_Restart_DemotedRowOffTarget(t *testing.T) {
+	target := updateTarget()
+	build := func(t *testing.T, gang bool) (types.ReconcileInput, types.ComponentPlan) {
+		in := minimalInput(t)
+		forbidMutations(t, &in)
+		podCount := int32(1)
+		if gang {
+			podCount = 2
+		}
+		in.ObservedState.InstanceStatuses = []types.InstanceStatus{
+			{Index: 0, Incarnation: 1, Phase: types.InstancePhaseReady, PodCount: podCount, RunningRevision: target.Name},
+			{Index: 1, Incarnation: 1, Phase: types.InstancePhasePending, PodCount: podCount, RunningRevision: crashLoopRepairRevision},
+		}
+		return in, offTargetRepairPlan(gang, types.UpdateStrategyRecreatePod)
+	}
+
+	t.Run("no pod left is materialized by Create at the target", func(t *testing.T) {
+		in, plan := build(t, false)
+		d := planTargetOrFail(t, in, plan, target, planSnapshot(in, map[int32][]*corev1.Pod{0: {podOnRevision(enginePod("llama-70b", "prod", 0), target.Name)}}))
+		if ra := findAction(d, workload.ActionRestart); ra != nil {
+			t.Fatalf("a demoted row off the target with no pod is not repaired; restart selection = %+v", ra.Restarts)
+		}
+		if findAction(d, workload.ActionCreate) == nil {
+			t.Fatalf("the Create pass must be planned to materialize the row; actions = %v", actionKinds(d))
+		}
+	})
+
+	t.Run("a survivor keeps the gang with the repair", func(t *testing.T) {
+		in, plan := build(t, true)
+		leader := podOnRevision(enginePod("llama-70b", "prod", 0), target.Name)
+		leader.Labels[query.LabelRunner] = "leader"
+		worker := podOnRevision(enginePod("llama-70b", "prod", 0), target.Name)
+		worker.Name += "-worker"
+		worker.Labels[query.LabelRunner] = "worker"
+		survivor := enginePod("llama-70b", "prod", 1)
+		survivor.Labels[query.LabelRunner] = "leader"
+		d := planTargetOrFail(t, in, plan, target, planSnapshot(in, map[int32][]*corev1.Pod{0: {leader, worker}, 1: {survivor}}))
+		ra := findAction(d, workload.ActionRestart)
+		if ra == nil || len(ra.Restarts) != 1 || ra.Restarts[0].Instance.Index != 1 {
+			t.Fatalf("a demoted gang holding a survivor is rebuilt by the repair; actions = %v", actionKinds(d))
+		}
+	})
+}
+
+// servingEnginePod is an engine pod in rotation: ContainersReady with
+// the serving gate set.
+func servingEnginePod(idx int32) *corev1.Pod {
+	pod := enginePod("llama-70b", "prod", idx)
+	pod.Status.Phase = corev1.PodRunning
+	pod.Status.Conditions = []corev1.PodCondition{
+		{Type: corev1.ContainersReady, Status: corev1.ConditionTrue},
+		{Type: query.ServingConditionType, Status: corev1.ConditionTrue},
+	}
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: constants.MainContainerName, Ready: true,
+		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+	}}
+	return pod
+}
+
+// TestPlan_Update_CoordGateExempt_ReadyRowServingNothing: a fresh update
+// start on a Ready row whose pod set is provably out of service takes
+// nothing further offline, so it skips the coordination gate consult on
+// a non-surge strategy exactly as a dark Failed row does. A surge start
+// keeps the consult, and so does a row that still serves or whose pod is
+// merely not yet Ready.
+//
+// Cells: instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-recreate, instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-inplace, instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-surge
+func TestPlan_Update_CoordGateExempt_ReadyRowServingNothing(t *testing.T) {
+	target := updateTarget()
+	notReady := enginePod("llama-70b", "prod", 0)
+	notReady.Status.Phase = corev1.PodRunning
+	notReady.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: constants.MainContainerName, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+	}}
+	cases := []struct {
+		name     string
+		strategy types.UpdateStrategyType
+		pods     []*corev1.Pod
+		exempt   bool
+	}{
+		{name: "crash loop, recreate", strategy: types.UpdateStrategyRecreatePod, pods: []*corev1.Pod{wedgedEnginePod(0)}, exempt: true},
+		{name: "crash loop, in-place", strategy: types.UpdateStrategyInPlaceIfPossible, pods: []*corev1.Pod{wedgedEnginePod(0)}, exempt: true},
+		{name: "crash loop, surge", strategy: types.UpdateStrategySurgeThenDrain, pods: []*corev1.Pod{wedgedEnginePod(0)}, exempt: false},
+		{name: "serving pod, recreate", strategy: types.UpdateStrategyRecreatePod, pods: []*corev1.Pod{servingEnginePod(0)}, exempt: false},
+		{name: "running not ready, recreate", strategy: types.UpdateStrategyRecreatePod, pods: []*corev1.Pod{notReady}, exempt: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := minimalInput(t)
+			forbidMutations(t, &in)
+			in.ObservedState.InstanceStatuses = []types.InstanceStatus{
+				{Index: 0, Incarnation: 1, Phase: types.InstancePhaseReady, PodCount: 1, RunningRevision: crashLoopRepairRevision},
+			}
+			plan := minimalPlan()
+			plan.UpdateStrategy = types.UpdateStrategy{Type: tc.strategy}
+			// The running revision's template differs from the desired one by
+			// its image alone, the diff an in-place strategy keeps in place.
+			running := in.DesiredSpec.PodSpec.DeepCopy()
+			running.Containers[0].Image = "test:v0"
+			d := planTargetOrFail(t, in, plan, target, planSnapshotWithRevisions(in,
+				map[int32][]*corev1.Pod{0: tc.pods}, map[string]*corev1.PodSpec{crashLoopRepairRevision: running}))
+			ua := findAction(d, workload.ActionUpdate)
+			if ua == nil || len(ua.Update.Items) != 1 || !ua.Update.Items[0].StartingFresh {
+				t.Fatalf("the off-target row must be a fresh update start; actions = %v", actionKinds(d))
+			}
+			if got := ua.Update.Items[0].CoordGateExempt; got != tc.exempt {
+				t.Fatalf("CoordGateExempt = %v, want %v", got, tc.exempt)
+			}
+		})
+	}
 }

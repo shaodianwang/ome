@@ -1099,6 +1099,14 @@ const (
 	// stuckImage runs but never passes readiness: no terminal waiting
 	// reason, so nothing escalates it before the operation deadline.
 	stuckImage = "registry.test/serving:never-ready"
+	// crashStartImage dies at every start: the kubelet parks it in
+	// CrashLoopBackOff and it is never Ready again. crashLoadImage dies
+	// once it is up: it alternates between serving and CrashLoopBackOff,
+	// the shape of a pod that keeps crashing under load. Both are what a
+	// live pod is pointed at to induce the failure; the template keeps
+	// its healthy image, so a rebuild or an in-place patch heals it.
+	crashStartImage = "registry.test/serving:crash-start"
+	crashLoadImage  = "registry.test/serving:crash-load"
 
 	// terminationFinalizer is the harness's stand-in for a kubelet that
 	// has not finished terminating a deleted pod: the fake client keeps a
@@ -1149,16 +1157,46 @@ type recoveryHarness struct {
 	// terminatingUntil is, per Terminating pod, the fake-clock instant the
 	// kubelet model finishes its termination.
 	terminatingUntil map[string]time.Time
+
+	// container names the single container the template renders. The
+	// restart trigger reads restart evidence off the runner container by
+	// the name production renders it under, so a harness driving that
+	// evidence renders that name.
+	container string
+	// recorder, when set, receives the pass's events; stepResult drains
+	// them into events after every pass so the buffer never fills.
+	recorder *record.FakeRecorder
+	events   []string
+	// gate, when set, is the coordination UpdateGate the passes consult
+	// before a fresh start opens.
+	gate func(strategy workloadtypes.UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, workloadtypes.RolloutHoldGate, string)
+	// crashes counts, per pod, the kubelet steps a crash image has been
+	// observed on it; lastCrash is the instant of its latest crash.
+	crashes   map[string]int
+	lastCrash map[string]time.Time
 }
 
 func recoveryPodSpec(image string) *corev1.PodSpec {
 	return &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: image}}}
 }
 
+// podSpec is the harness template for image, rendered under the
+// harness's container name.
+func (h *recoveryHarness) podSpec(image string) *corev1.PodSpec {
+	return &corev1.PodSpec{Containers: []corev1.Container{{Name: h.container, Image: image}}}
+}
+
 // newRecoveryHarness builds the harness plus the three ControllerRevisions
 // (v1 good, bad, fixed) minted through the real revision machinery so
 // names, hashes, and payloads match production exactly.
 func newRecoveryHarness(t *testing.T, multiPod bool) *recoveryHarness {
+	t.Helper()
+	return newRecoveryHarnessFor(t, multiPod, "main")
+}
+
+// newRecoveryHarnessFor is newRecoveryHarness with the template's
+// container name chosen by the test.
+func newRecoveryHarnessFor(t *testing.T, multiPod bool, container string) *recoveryHarness {
 	t.Helper()
 	scheme := makeScheme(t)
 	isvc := &v1beta1.InferenceService{ObjectMeta: metav1.ObjectMeta{
@@ -1173,15 +1211,18 @@ func newRecoveryHarness(t *testing.T, multiPod bool) *recoveryHarness {
 		replicas:         1,
 		requeue:          testRequeueIntervals,
 		terminatingUntil: map[string]time.Time{},
+		container:        container,
+		crashes:          map[string]int{},
+		lastCrash:        map[string]time.Time{},
 	}
 	h.c = fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&v1beta1.InferenceService{}, &v1beta1.InferenceReplica{}).
 		WithObjects(isvc).
 		WithInterceptorFuncs(interceptor.Funcs{Delete: h.interceptDelete}).
 		Build()
-	h.revV1 = h.ensureRevision(recoveryPodSpec(goodImage))
-	h.revBad = h.ensureRevision(recoveryPodSpec(badImage))
-	h.revFixed = h.ensureRevision(recoveryPodSpec(fixedImage))
+	h.revV1 = h.ensureRevision(h.podSpec(goodImage))
+	h.revBad = h.ensureRevision(h.podSpec(badImage))
+	h.revFixed = h.ensureRevision(h.podSpec(fixedImage))
 	h.setTarget(h.revV1, goodImage)
 	h.currentRevision = ""
 	return h
@@ -1216,7 +1257,7 @@ func (h *recoveryHarness) ensureRevision(spec *corev1.PodSpec) *appsv1.Controlle
 // republishes the target ControllerRevision.
 func (h *recoveryHarness) setTarget(cr *appsv1.ControllerRevision, image string) {
 	h.target = cr
-	spec := recoveryPodSpec(image)
+	spec := h.podSpec(image)
 	h.desired = workloadtypes.WorkloadDesiredSpec{
 		Replicas:  h.replicas,
 		PodSpec:   spec,
@@ -1255,19 +1296,23 @@ func (h *recoveryHarness) kubelet() {
 				h.t.Fatalf("kubelet stamp creation %s: %v", pod.Name, err)
 			}
 		}
-		if pod.Spec.Containers[0].Image == stuckImage {
+		image := pod.Spec.Containers[0].Image
+		switch {
+		case image == stuckImage:
 			pod.Status.Phase = corev1.PodRunning
 			pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
 				Name:  pod.Spec.Containers[0].Name,
+				Image: image,
 				Ready: false,
 				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
 			}}
 			setPodCondition(pod, corev1.ContainersReady, corev1.ConditionFalse, h.clk.Now())
 			setPodCondition(pod, corev1.PodReady, corev1.ConditionFalse, h.clk.Now())
-		} else if pod.Spec.Containers[0].Image == badImage {
+		case image == badImage:
 			pod.Status.Phase = corev1.PodPending
 			pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
-				Name: pod.Spec.Containers[0].Name,
+				Name:  pod.Spec.Containers[0].Name,
+				Image: image,
 				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
 					Reason:  "ImagePullBackOff",
 					Message: "Back-off pulling image " + badImage,
@@ -1275,21 +1320,57 @@ func (h *recoveryHarness) kubelet() {
 			}}
 			setPodCondition(pod, corev1.ContainersReady, corev1.ConditionFalse, h.clk.Now())
 			setPodCondition(pod, corev1.PodReady, corev1.ConditionFalse, h.clk.Now())
-		} else {
+		case image == crashStartImage || (image == crashLoadImage && h.crashes[pod.Name]%2 == 0):
+			// The container died again: a run that ended after the pod
+			// became Ready, and a kubelet back-off before the next start.
+			h.crashes[pod.Name]++
+			h.lastCrash[pod.Name] = h.clk.Now()
+			pod.Status.Phase = corev1.PodRunning
+			pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+				Name:         pod.Spec.Containers[0].Name,
+				Image:        image,
+				RestartCount: int32(h.crashes[pod.Name]),
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+					Reason:  "CrashLoopBackOff",
+					Message: "back-off restarting failed container",
+				}},
+				LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+					ExitCode:   1,
+					Reason:     "Error",
+					FinishedAt: metav1.NewTime(h.clk.Now()),
+				}},
+			}}
+			setPodCondition(pod, corev1.ContainersReady, corev1.ConditionFalse, h.clk.Now())
+			setPodCondition(pod, corev1.PodReady, corev1.ConditionFalse, h.clk.Now())
+		case image == crashLoadImage:
+			// Back up between crashes: serving again, with the previous
+			// run's termination still on the container status.
+			h.crashes[pod.Name]++
+			pod.Status.Phase = corev1.PodRunning
+			pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+				Name:         pod.Spec.Containers[0].Name,
+				Image:        image,
+				Ready:        true,
+				RestartCount: int32(h.crashes[pod.Name] / 2),
+				State:        corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(h.clk.Now())}},
+				LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+					ExitCode:   1,
+					Reason:     "Error",
+					FinishedAt: metav1.NewTime(h.lastCrash[pod.Name]),
+				}},
+			}}
+			setPodCondition(pod, corev1.ContainersReady, corev1.ConditionTrue, h.clk.Now())
+			setPodCondition(pod, corev1.PodReady, h.servingGate(pod), h.clk.Now())
+		default:
 			pod.Status.Phase = corev1.PodRunning
 			pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
 				Name:  pod.Spec.Containers[0].Name,
+				Image: image,
 				Ready: true,
 				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
 			}}
 			setPodCondition(pod, corev1.ContainersReady, corev1.ConditionTrue, h.clk.Now())
-			ready := corev1.ConditionFalse
-			for _, cond := range pod.Status.Conditions {
-				if cond.Type == query.ServingConditionType && cond.Status == corev1.ConditionTrue {
-					ready = corev1.ConditionTrue
-				}
-			}
-			setPodCondition(pod, corev1.PodReady, ready, h.clk.Now())
+			setPodCondition(pod, corev1.PodReady, h.servingGate(pod), h.clk.Now())
 		}
 		// Pod status is a built-in subresource on the fake client — a
 		// plain Update silently drops status changes.
@@ -1297,6 +1378,99 @@ func (h *recoveryHarness) kubelet() {
 			h.t.Fatalf("kubelet update %s: %v", pod.Name, err)
 		}
 	}
+}
+
+// servingGate is the PodReady value kubelet derives for a pod whose
+// containers are ready: True once the controller's serving gate is on.
+func (h *recoveryHarness) servingGate(pod *corev1.Pod) corev1.ConditionStatus {
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type == query.ServingConditionType && cond.Status == corev1.ConditionTrue {
+			return corev1.ConditionTrue
+		}
+	}
+	return corev1.ConditionFalse
+}
+
+// crashPod points the live pod of runner at index idx at image, the way
+// a pod is made to fail without touching the template: only the image
+// field of a running pod is mutable. An empty runner names the single
+// runner of a single-pod Instance.
+func (h *recoveryHarness) crashPod(idx int32, runner, image string) {
+	h.t.Helper()
+	for _, pod := range h.podsOf(idx) {
+		if runner != "" && pod.Labels[query.LabelRunner] != runner {
+			continue
+		}
+		pod.Spec.Containers[0].Image = image
+		if err := h.c.Update(h.ctx, pod); err != nil {
+			h.t.Fatalf("point pod %s at %s: %v", pod.Name, image, err)
+		}
+		return
+	}
+	h.t.Fatalf("no pod of instance %d runner %q to crash", idx, runner)
+}
+
+// settledOn reports whether the Component is at rest on rev with n
+// Instances: every row Ready on rev with no operation, and every live pod
+// carrying rev's hash, the desired image and no crash image.
+func (h *recoveryHarness) settledOn(rev *appsv1.ControllerRevision, n int32) bool {
+	sts := h.irStatuses()
+	if int32(len(sts)) != n {
+		return false
+	}
+	for _, s := range sts {
+		if s.Phase != workloadtypes.InstancePhaseReady || s.RunningRevision != rev.Name || s.Operation != nil {
+			return false
+		}
+	}
+	perInstance := len(h.desired.Runners)
+	pods := h.livePods()
+	if len(pods) != int(n)*perInstance {
+		return false
+	}
+	hash := query.RevisionOf(rev).Hash()
+	for _, pod := range pods {
+		if pod.Labels[query.LabelRevisionHash] != hash || pod.Spec.Containers[0].Image != h.desired.PodSpec.Containers[0].Image {
+			return false
+		}
+	}
+	return true
+}
+
+// repairInFlight reports whether any row is under a Restart.
+func (h *recoveryHarness) repairInFlight() bool {
+	for _, s := range h.irStatuses() {
+		if s.Phase == workloadtypes.InstancePhaseRestarting ||
+			(s.Operation != nil && s.Operation.Type == workloadtypes.InstanceOperationRestart) {
+			return true
+		}
+	}
+	return false
+}
+
+// drainEvents moves every event the recorder holds into events.
+func (h *recoveryHarness) drainEvents() {
+	if h.recorder == nil {
+		return
+	}
+	for {
+		select {
+		case e := <-h.recorder.Events:
+			h.events = append(h.events, e)
+		default:
+			return
+		}
+	}
+}
+
+// sawEvent reports whether an event carrying reason has been recorded.
+func (h *recoveryHarness) sawEvent(reason workloadtypes.EventReason) bool {
+	for _, e := range h.events {
+		if strings.Contains(e, string(reason)) {
+			return true
+		}
+	}
+	return false
 }
 
 func setPodCondition(pod *corev1.Pod, condType corev1.PodConditionType, status corev1.ConditionStatus, now time.Time) {
@@ -1454,6 +1628,7 @@ func (h *recoveryHarness) buildInput() workloadtypes.ReconcileInput {
 		},
 		MutateInstance:    h.mutateInstance(),
 		RemoveInstance:    h.removeInstance(),
+		UpdateGate:        h.gate,
 		UpdateRetryPolicy: &workloadtypes.RetryPolicy{MaxAttempts: 2, InitialDelay: 20 * time.Second, MaxDelay: time.Minute, Multiplier: 2},
 		StuckPodGrace:     30 * time.Second,
 		Requeue:           h.requeue,
@@ -1508,12 +1683,16 @@ func (h *recoveryHarness) stepResult() (ctrl.Result, error) {
 	h.t.Helper()
 	h.kubelet()
 	deps := workloadtypes.Deps{Client: h.c, APIReader: h.c, Expectations: workloadtypes.NewExpectations()}
+	if h.recorder != nil {
+		deps.Recorder = h.recorder
+	}
 	in := h.buildInput()
 	plan, err := workload.BuildPlan(workloadtypes.ComponentEngine, h.desired, in.ObservedState)
 	if err != nil {
 		h.t.Fatalf("BuildPlan: %v", err)
 	}
 	res, err := workload.Reconcile(h.ctx, deps, in, plan, h.target)
+	h.drainEvents()
 	if status.RolloutComplete(h.irStatuses(), h.target.Name) {
 		h.currentRevision = h.target.Name
 	}

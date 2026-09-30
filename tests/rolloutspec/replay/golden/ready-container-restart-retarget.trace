@@ -1,0 +1,48 @@
+tick=1 note the index is planned and no row exists, so the Create pass opens the attempt
+tick=1 row=0 write incarnation=1 phase=Creating runningRevision=nil readySince=nil op=op#1{type=Create step=CreatePods target=svc-a-engine-8aa14b8b started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=1 event Normal InstanceCreated OMENative component=engine instance=0 materialized; 1 pod(s) requested
+tick=1 pod create name=svc-a-engine-0-default-0 revision=8aa14b8b incarnation=1 ordinal=0
+tick=1 pass result=after:5s
+tick=2 note the pod reports Ready and enters rotation, which stamps the ReadySince the restart trigger dates evidence against
+tick=2 apply pod.ready[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 apply endpoint.rotationIn[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 pod status-patch name=svc-a-engine-0-default-0 serving=absent→True
+tick=2 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-8aa14b8b readySince=t+0s op=nil precondition=ok
+tick=2 event Normal InstanceReady OMENative component=engine instance=0 is Ready (1 pod(s) serving)
+tick=2 pass result=none
+tick=3 note a minute of steady serving, so the restart that follows is unambiguously after Ready
+tick=3 apply clock.advance by=1m0s now=t+1m0s
+tick=3 row=0 write no-op precondition=no-change
+tick=3 pass result=none
+tick=4 note the runner dies and comes back under the same pod as the template moves to the fixed revision, so the roll surges a replacement instead of rebuilding the broken revision
+tick=4 apply pod.containerRestart pod=svc-a-engine-0-default-0 container=ome-container reason=OOMKilled now=t+1m0s
+tick=4 apply spec.revision image=registry.example.com/runtime:v2 generation=1 now=t+1m0s
+tick=4 gate consult strategy=SurgeThenDrain surge=0 unavail=0 verdict=allow
+tick=4 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-8aa14b8b targetRevision=svc-a-engine-c500c9bc readySince=t+0s op=op#2{type=Update step=Surge target=svc-a-engine-c500c9bc strategy=SurgeThenDrain started=t+1m0s lastProgressAt=t+1m0s deadline=t+31m0s} precondition=ok
+tick=4 event Normal RecreateUpdateStarted OMENative component=engine instance=0 surge to revision svc-a-engine-c500c9bc (newOrdinal=1)
+tick=4 pod create name=svc-a-engine-0-default-1 revision=c500c9bc incarnation=1 ordinal=1
+tick=4 hold cleared
+tick=4 pass result=after:5s
+tick=5 note the replacement is serving and in rotation beside the source
+tick=5 apply pod.ready[target] pod=svc-a-engine-0-default-1 now=t+1m0s
+tick=5 apply endpoint.rotationIn[target] pod=svc-a-engine-0-default-1 now=t+1m0s
+tick=5 row=0 write no-op precondition=no-change
+tick=5 pod status-patch name=svc-a-engine-0-default-1 serving=absent→True
+tick=5 row=0 write incarnation=1 phase=Updating runningRevision=svc-a-engine-8aa14b8b targetRevision=svc-a-engine-c500c9bc readySince=t+0s op=op#2{type=Update step=SurgeDrain target=svc-a-engine-c500c9bc strategy=SurgeThenDrain started=t+1m0s lastProgressAt=t+1m0s deadline=t+31m0s} precondition=ok
+tick=5 pod status-patch name=svc-a-engine-0-default-0 serving=True→False
+tick=5 hold cleared
+tick=5 pass result=after:5s
+tick=6 note the source leaves rotation, so the drain has converged
+tick=6 apply endpoint.rotationOut[source] pod=svc-a-engine-0-default-0 now=t+1m0s
+tick=6 row=0 write no-op precondition=no-change
+tick=6 row=0 write no-op precondition=no-change
+tick=6 pod delete name=svc-a-engine-0-default-0 grace=default
+tick=6 hold cleared
+tick=6 pass result=after:5s
+tick=7 note the drained source is gone and the Instance promotes on the fixed revision
+tick=7 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+1m0s
+tick=7 row=0 write no-op precondition=no-change
+tick=7 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-c500c9bc activeOrdinal=1 readySince=t+1m0s op=nil precondition=ok
+tick=7 event Normal RecreateUpdateCompleted OMENative component=engine instance=0 surge to revision svc-a-engine-c500c9bc complete (activeOrdinal=1)
+tick=7 hold cleared
+tick=7 pass result=requeue

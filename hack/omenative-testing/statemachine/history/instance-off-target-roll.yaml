@@ -1,0 +1,42 @@
+# Provenance for the instance-machine cells decided when the ownership
+# rule between the restart pass and the update pass was settled: an
+# Instance whose revision is not the roll target belongs to the
+# update pass, whatever evidence the restart trigger holds against it. A
+# crash loop, a runner restart after Ready, a dead pod or a lost gang
+# member on such a row is unavailability the roll must cross anyway, so
+# the update pass replaces the pod set at the target and no repair opens
+# - admitted or denied - on a revision the Component does not want. A
+# repair already open is driven to completion and the roll takes the row
+# at Ready. A paused Component, and a target the RetryBlock holds, keep
+# the repair, because the roll the row would be left to cannot start. A
+# demoted row with no pod left is the Create pass's at the target; one
+# that holds survivors again is still rebuilt at the revision it records.
+# The escalation reads an update attempt on the pods carrying its own
+# revision, so the wedge a corrective roll replaces is never blamed on it.
+history:
+  - {state: Ready, event: pod.waiting, variants: [], windows: [before], transition: "", decision: "off-target repair rule: a wedge on a row off the roll target is the update pass's"}
+  - {state: Ready, event: pod.waiting, variants: [], windows: [boundary, after], transition: "", decision: "off-target repair rule: on an update transition the wedge is the roll's reason, not the attempt's failure"}
+  - {state: Ready, event: pod.containerRestart, variants: [], windows: [], transition: "", decision: "off-target repair rule: a runner restart on a row off the roll target is the update pass's"}
+  - {state: Ready, event: pod.phaseTerminal, variants: [Failed, Succeeded], windows: [before], transition: "", decision: "off-target repair rule: a dead pod on a row off the roll target is the roll's to replace"}
+  - {state: Ready, event: pod.deleted, variants: [source], windows: [], transition: T-ready-restart, decision: "off-target repair rule: a lost pod on a row off the roll target is the update pass's"}
+  - {state: Ready, event: pod.deleted, variants: [source], windows: [], transition: T-ready-surge, decision: "off-target repair rule: the surge absorbs the loss on the row it is starting on"}
+  - {state: Ready, event: pod.deleted, variants: [source], windows: [], transition: T-ready-inplace, decision: "off-target repair rule: the in-place roll absorbs the loss, re-resolving to a recreate on an empty set"}
+  - {state: Ready, event: pod.deleted, variants: [source], windows: [], transition: T-ready-recreate, decision: "off-target repair rule: the recreate folds the loss into its drain"}
+  - {state: Ready, event: spec.revision, variants: [], windows: [boundary], transition: T-ready-restart, decision: "off-target repair rule: a repair not yet open yields to the roll when the target moves"}
+  - {state: Ready, event: spec.revision, variants: [], windows: [after], transition: T-ready-restart, decision: "off-target repair rule: an open repair is driven to completion whatever the target"}
+  - {state: Ready, event: spec.revision, variants: [], windows: [boundary], transition: T-ready-restart-crash, decision: "off-target repair rule: a repair not yet open yields to the roll when the target moves"}
+  - {state: Ready, event: spec.revision, variants: [], windows: [after], transition: T-ready-restart-crash, decision: "off-target repair rule: an open repair is driven to completion whatever the target"}
+  - {state: Ready, event: spec.revision, variants: [], windows: [boundary], transition: T-ready-restart-podterminal, decision: "off-target repair rule: a repair not yet open yields to the roll when the target moves"}
+  - {state: Ready, event: spec.revision, variants: [], windows: [after], transition: T-ready-restart-podterminal, decision: "off-target repair rule: an open repair is driven to completion whatever the target"}
+  - {state: Ready, event: spec.revision, variants: [], windows: [boundary], transition: T-ready-gangwidth-restart, decision: "off-target repair rule: a widening that lands with a new revision is the roll's"}
+  - {state: Ready, event: spec.revision, variants: [], windows: [after], transition: T-ready-gangwidth-restart, decision: "off-target repair rule: an open repair is driven to completion whatever the target"}
+  - {state: Ready, event: spec.revision, variants: [], windows: [boundary], transition: T-ready-crashloop-restart, decision: "off-target repair rule: a crash-loop repair not yet open yields to the roll when the target moves"}
+  - {state: Ready, event: spec.revision, variants: [], windows: [after], transition: T-ready-crashloop-restart, decision: "off-target repair rule: an open crash-loop repair is driven to completion whatever the target"}
+  - {state: Pending, event: spec.revision, variants: [], windows: [], transition: "", decision: "off-target repair rule: a demoted row with no pod left is the Create pass's at the target"}
+  - {state: Pending, event: spec.unpause, variants: [], windows: [], transition: T-pending-create, decision: "off-target repair rule: a demoted row off the target with no pod left is materialized at the target once the pause clears"}
+  - {state: Pending, event: spec.unpause, variants: [], windows: [], transition: T-pending-restart, decision: "off-target repair rule: a plain pause keeps the repair on the revision the roll is held on"}
+  - {state: Failed, event: pod.deleted, variants: [source], windows: [before], transition: "", decision: "off-target repair rule: a Failed gang off the target re-enters through its corrective roll"}
+  - {state: Create/CreatePods, event: pod.deleted, variants: [source], windows: [before], transition: "", decision: "off-target repair rule: a superseded attempt is retired at the target rather than repaired"}
+  - {state: Restart/Drain, event: spec.revision, variants: [], windows: [], transition: "", decision: "off-target repair rule: an open repair is driven to completion whatever the target"}
+  - {state: Update/Surge, event: pod.waiting, variants: [CrashLoopBackOff, RunContainerError], windows: [], transition: "", decision: "off-target repair rule: an update attempt is judged on the pods carrying its own revision"}
+  - {state: Update/InPlace, event: pod.waiting, variants: [CreateContainerError, CrashLoopBackOff, RunContainerError], windows: [], transition: "", decision: "off-target repair rule: an update attempt is judged on the pods carrying its own revision"}

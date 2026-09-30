@@ -2028,6 +2028,115 @@ func TestEscalateStuckPodFailures_GangSurgeIgnoresFailedSource(t *testing.T) {
 	}
 }
 
+// TestEscalateStuckPodFailures_UpdateAttemptIgnoresTheWedgedSource pins
+// the single-pod half of the rule the gang surge already follows: an
+// update attempt is judged on the pods that carry its revision. The pod
+// it replaces may be the very wedge the roll corrects — a source crash-
+// looping on the prior revision beside a single-pod surge's replacement,
+// or a pod an in-place patch has not yet restamped — and blaming the
+// attempt for it would fail every corrective roll on the row and charge
+// the corrective revision's retry ladder for the old revision's crash.
+// A replacement wedged on the attempt's own revision still fails it.
+//
+// Cells: instance/Update/Surge/pod.waiting[CrashLoopBackOff]/before, instance/Update/InPlace/pod.waiting[CrashLoopBackOff]/before
+func TestEscalateStuckPodFailures_UpdateAttemptIgnoresTheWedgedSource(t *testing.T) {
+	grace := 1 * time.Millisecond
+	now := time.Now()
+	wedged := func(name, hash string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              name,
+				CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
+				Labels:            map[string]string{"ome.io/revision-hash": hash},
+			},
+			Status: corev1.PodStatus{
+				ContainerStatuses: []corev1.ContainerStatus{{
+					Name:  "main",
+					State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+				}},
+			},
+		}
+	}
+	replacement := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "engine-0-default-1",
+			CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
+			Labels:            map[string]string{"ome.io/revision-hash": "newhash"},
+		},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  "main",
+				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			}},
+		},
+	}
+
+	for _, tc := range []struct {
+		name      string
+		step      string
+		pods      []*corev1.Pod
+		wantPhase workloadtypes.InstancePhase
+		wantPod   string
+	}{
+		{name: "surge: source wedged, replacement coming up", step: workloadtypes.UpdateStepSurge,
+			pods: []*corev1.Pod{wedged("engine-0-default-0", "oldhash"), replacement}, wantPhase: workloadtypes.InstancePhaseUpdating},
+		{name: "surge: replacement wedged on the attempt's revision", step: workloadtypes.UpdateStepSurge,
+			pods: []*corev1.Pod{wedged("engine-0-default-1", "newhash")}, wantPhase: workloadtypes.InstancePhaseFailed, wantPod: "engine-0-default-1"},
+		{name: "in-place: pod wedged before the patch restamped it", step: workloadtypes.UpdateStepInPlace,
+			pods: []*corev1.Pod{wedged("engine-0-default-0", "oldhash")}, wantPhase: workloadtypes.InstancePhaseUpdating},
+		{name: "in-place: pod wedged after the patch restamped it", step: workloadtypes.UpdateStepInPlace,
+			pods: []*corev1.Pod{wedged("engine-0-default-0", "newhash")}, wantPhase: workloadtypes.InstancePhaseFailed, wantPod: "engine-0-default-0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			insts := []workloadtypes.InstanceStatus{{
+				Index:           0,
+				Phase:           workloadtypes.InstancePhaseUpdating,
+				PodCount:        1,
+				RunningRevision: "own-engine-oldhash",
+				Operation: &workloadtypes.InstanceOperation{
+					Type:           workloadtypes.InstanceOperationUpdate,
+					Step:           tc.step,
+					TargetRevision: "own-engine-newhash",
+					Deadline:       metav1.NewTime(now.Add(time.Hour)),
+				},
+			}}
+			input := workloadtypes.ReconcileInput{
+				StuckPodGrace: grace,
+				MutateInstance: func(_ context.Context, idx int32, mutate func(*workloadtypes.InstanceStatus) bool) error {
+					for i := range insts {
+						if insts[i].Index == idx {
+							mutate(&insts[i])
+						}
+					}
+					return nil
+				},
+				WarnInstanceFailed: func(int32, string, string) {},
+			}
+			input.ObservedState.InstanceStatuses = insts
+			input.ObservedState.CurrentRevision = "own-engine-oldhash"
+
+			if err := runEscalationPass(t, workloadtypes.Deps{}, input, singleInstancePlan(0, 1),
+				map[int32][]*corev1.Pod{0: tc.pods}); err != nil {
+				t.Fatalf("escalation pass: %v", err)
+			}
+			if insts[0].Phase != tc.wantPhase {
+				t.Errorf("Phase: got %q want %q", insts[0].Phase, tc.wantPhase)
+			}
+			if tc.wantPod == "" {
+				// The hold pass may still record the source's rotation state
+				// as evidence; what must not appear is the wedge as a failure.
+				if lf := insts[0].LastFailure; lf != nil && lf.Reason == "CrashLoopBackOff" {
+					t.Errorf("LastFailure: got %+v, want the wedge the roll corrects left unblamed", lf)
+				}
+				return
+			}
+			if insts[0].LastFailure == nil || insts[0].LastFailure.PodName != tc.wantPod {
+				t.Errorf("LastFailure: got %+v, want the wedged pod %q blamed", insts[0].LastFailure, tc.wantPod)
+			}
+		})
+	}
+}
+
 // TestEscalateStuckPodFailures_AlreadyFailedNoOp pins the idempotency:
 // the escalator must not re-fire on an already-Failed Instance even
 // though the wedged pod is still in front of it.

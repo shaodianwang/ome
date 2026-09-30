@@ -3,6 +3,7 @@ package workload_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 	appsv1 "k8s.io/api/apps/v1"
@@ -295,7 +297,7 @@ func TestReconcile_CrashLoopRepair_PacedByUnavailabilityBudget(t *testing.T) {
 	store := installRepairStore(&in)
 	deps := workloadtypes.Deps{Client: c, APIReader: c, Expectations: workloadtypes.NewExpectations()}
 
-	if _, err := workload.Reconcile(ctx, deps, in, plan, updateTarget()); err != nil {
+	if _, err := workload.Reconcile(ctx, deps, in, plan, crashLoopRepairTarget()); err != nil {
 		t.Fatalf("first pass: %v", err)
 	}
 	if got := countRestarting(store, 3); got != 1 {
@@ -306,7 +308,7 @@ func TestReconcile_CrashLoopRepair_PacedByUnavailabilityBudget(t *testing.T) {
 	// so the next pass opens none of its peers — whether or not the
 	// first one finishes in that pass.
 	store.sync(&in)
-	if _, err := workload.Reconcile(ctx, deps, in, plan, updateTarget()); err != nil {
+	if _, err := workload.Reconcile(ctx, deps, in, plan, crashLoopRepairTarget()); err != nil {
 		t.Fatalf("second pass: %v", err)
 	}
 	for _, idx := range []int32{1, 2} {
@@ -328,7 +330,7 @@ func TestReconcile_CrashLoopRepair_UncappedRepairsEveryWedge(t *testing.T) {
 	store := installRepairStore(&in)
 	deps := workloadtypes.Deps{Client: c, APIReader: c, Expectations: workloadtypes.NewExpectations()}
 
-	if _, err := workload.Reconcile(ctx, deps, in, plan, updateTarget()); err != nil {
+	if _, err := workload.Reconcile(ctx, deps, in, plan, crashLoopRepairTarget()); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 	if got := countRestarting(store, 3); got != 3 {
@@ -358,7 +360,7 @@ func TestReconcile_CrashLoopRepair_HeldByCoordinationGate(t *testing.T) {
 	rec := record.NewFakeRecorder(16)
 	deps := workloadtypes.Deps{Client: c, APIReader: c, Recorder: rec, Expectations: workloadtypes.NewExpectations()}
 
-	result, err := workload.Reconcile(ctx, deps, in, plan, updateTarget())
+	result, err := workload.Reconcile(ctx, deps, in, plan, crashLoopRepairTarget())
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -397,7 +399,7 @@ func TestReconcile_CrashLoopRepair_AllDeniedRequeuesAndReports(t *testing.T) {
 	rec := record.NewFakeRecorder(16)
 	deps := workloadtypes.Deps{Client: c, APIReader: c, Recorder: rec, Expectations: workloadtypes.NewExpectations()}
 
-	result, err := workload.Reconcile(ctx, deps, in, plan, updateTarget())
+	result, err := workload.Reconcile(ctx, deps, in, plan, crashLoopRepairTarget())
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -613,6 +615,16 @@ func wedgedEnginePod(idx int32) *corev1.Pod {
 	return pod
 }
 
+// crashLoopRepairTarget is the roll target the repair tests reconcile
+// toward: the revision the wedged rows already run. A repair is selected
+// only while that revision is still the target; a Component wedged on a
+// revision that is not the target is the update pass's.
+func crashLoopRepairTarget() *appsv1.ControllerRevision {
+	return &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{Name: crashLoopRepairRevision, Namespace: "prod"},
+	}
+}
+
 // crashLoopRepairFixture wires n Ready, operation-free rows whose pods
 // are all wedged on the current revision — the shape one bad argument
 // or one bad image produces across a whole Component.
@@ -710,4 +722,184 @@ func newRestartHarness(t *testing.T, replicas int32) *recoveryHarness {
 		t.Fatalf("initial create never converged on v1 for %d instances", replicas)
 	}
 	return h
+}
+
+// crashForm names how the old-revision Instance breaks: its pod dies at
+// every start and is never Ready again, its pod dies after it is up and
+// keeps coming back between crashes, or a gang loses a member outright.
+type crashForm string
+
+const (
+	crashAtStart   crashForm = "crash-at-start"
+	crashAfterUp   crashForm = "crash-after-ready"
+	gangMemberLost crashForm = "member-lost"
+)
+
+// offTargetStrategies is every update strategy with the budget the closed
+// loop runs it under: one surge, or one Instance offline at a time.
+var offTargetStrategies = []struct {
+	strategy       workloadtypes.UpdateStrategyType
+	surge, unavail int32
+}{
+	{workloadtypes.UpdateStrategySurgeThenDrain, 1, 0},
+	{workloadtypes.UpdateStrategyRecreatePod, 0, 1},
+	{workloadtypes.UpdateStrategyInPlaceIfPossible, 0, 1},
+	{workloadtypes.UpdateStrategyInPlaceOnly, 0, 1},
+}
+
+// offTargetCrashHarness converges replicas Instances on v1 under the
+// named strategy, budget and restart policy, with the runner container
+// named as production names it so container-restart evidence is read.
+func offTargetCrashHarness(t *testing.T, gang bool, strategy workloadtypes.UpdateStrategyType, surge, unavail int32, policy workloadtypes.RestartPolicy, replicas int32) *recoveryHarness {
+	t.Helper()
+	h := newRecoveryHarnessFor(t, gang, constants.MainContainerName)
+	h.recorder = record.NewFakeRecorder(64)
+	h.replicas = replicas
+	maxSurge := intstr.FromInt32(surge)
+	maxUnavailable := intstr.FromInt32(unavail)
+	h.lifecycle = workloadtypes.Lifecycle{
+		RestartPolicy: &policy,
+		UpdateStrategy: &workloadtypes.UpdateStrategy{
+			Type:          strategy,
+			RollingUpdate: &workloadtypes.RollingUpdate{MaxSurge: &maxSurge, MaxUnavailable: &maxUnavailable},
+		},
+	}
+	h.setTarget(h.revV1, goodImage)
+	if !h.run(40, func() bool { return h.settledOn(h.revV1, replicas) }) {
+		h.dumpState("initial create")
+		t.Fatalf("initial create never settled on v1 for %d instances", replicas)
+	}
+	return h
+}
+
+// breakInstance applies form to the Instance at idx on the running
+// revision: the leader (or single) pod is pointed at the crash image, or
+// the gang's worker is deleted.
+func breakInstance(t *testing.T, h *recoveryHarness, idx int32, gang bool, form crashForm) {
+	t.Helper()
+	runner := ""
+	if gang {
+		runner = "leader"
+	}
+	switch form {
+	case crashAtStart:
+		h.crashPod(idx, runner, crashStartImage)
+	case crashAfterUp:
+		h.crashPod(idx, runner, crashLoadImage)
+	case gangMemberLost:
+		for _, pod := range h.podsOf(idx) {
+			if pod.Labels[query.LabelRunner] != "worker" {
+				continue
+			}
+			if err := h.c.Delete(h.ctx, pod); err != nil {
+				t.Fatalf("delete worker %s: %v", pod.Name, err)
+			}
+			return
+		}
+		t.Fatalf("instance %d has no worker to lose", idx)
+	}
+}
+
+// TestReconcile_OffTargetCrash_RollsForwardAcrossTheMatrix is the
+// closed-loop lock for the ownership rule, over every shape the engine
+// alone can express: single-pod and leader+worker Instances, every update
+// strategy, both restart policies, and the two forms a persistent crash
+// takes plus a lost gang member. One Instance on v1 breaks while the
+// target moves to the fixed revision. Whatever evidence the restart
+// trigger holds — a crash loop, a runner restart after Ready, a member
+// short — the fix lands on the broken Instance through the update pass:
+// no repair is recorded, the roll stays inside its budget, and every
+// Instance ends Ready on the fixed revision with pods on the fixed image.
+//
+// Cells: instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-surge, instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-inplace, instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-recreate, instance/Ready/pod.containerRestart/boundary@T-ready-surge, instance/Ready/pod.containerRestart/boundary@T-ready-inplace, instance/Ready/pod.containerRestart/boundary@T-ready-recreate, instance/Ready/pod.deleted[source]/boundary@T-ready-surge, instance/Ready/pod.deleted[source]/boundary@T-ready-recreate, instance/Ready/spec.revision/boundary@T-ready-crashloop-restart, instance/Ready/spec.revision/boundary@T-ready-restart-crash, instance/Ready/spec.revision/boundary@T-ready-restart
+func TestReconcile_OffTargetCrash_RollsForwardAcrossTheMatrix(t *testing.T) {
+	const replicas = 3
+	for _, gang := range []bool{false, true} {
+		shape := "single"
+		forms := []crashForm{crashAtStart, crashAfterUp}
+		if gang {
+			shape = "gang"
+			forms = append(forms, gangMemberLost)
+		}
+		for _, sc := range offTargetStrategies {
+			for _, policy := range []workloadtypes.RestartPolicy{workloadtypes.RestartPolicyNone, workloadtypes.RestartPolicyRecreateInstance} {
+				for _, form := range forms {
+					t.Run(fmt.Sprintf("%s/%s/%s/%s", shape, sc.strategy, policy, form), func(t *testing.T) {
+						h := offTargetCrashHarness(t, gang, sc.strategy, sc.surge, sc.unavail, policy, replicas)
+						// The last Instance breaks: the roll reaches it last, so
+						// the crash is observed on a Ready row with no operation
+						// for as long as the roll takes to get there.
+						victim := int32(replicas - 1)
+						breakInstance(t, h, victim, gang, form)
+						h.events = nil
+						h.setTarget(h.revFixed, fixedImage)
+
+						withinBudget := func() {
+							if h.repairInFlight() {
+								h.dumpState("repair opened")
+								t.Fatalf("a repair opened on an Instance whose revision is not the roll target")
+							}
+							sts := h.irStatuses()
+							if sc.strategy == workloadtypes.UpdateStrategySurgeThenDrain {
+								if n := escalation.CurrentSurgeInFlight(sts); n > sc.surge {
+									t.Fatalf("%d surges in flight, budget %d", n, sc.surge)
+								}
+							} else if n := escalation.CurrentUnavailableInFlight(sts); n > sc.unavail {
+								t.Fatalf("%d Instances offline for the roll, budget %d", n, sc.unavail)
+							}
+						}
+						if !h.runWithInvariant(80, func() bool { return h.settledOn(h.revFixed, replicas) }, withinBudget) {
+							h.dumpState("after the bump")
+							t.Fatalf("the Component never settled on the fixed revision with the broken Instance healed")
+						}
+						if h.sawEvent(workloadtypes.EventReasonRestartTriggered) {
+							t.Fatalf("a restart was recorded for an Instance the roll owned: %v", h.events)
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+// TestReconcile_OffTargetCrash_StartIsAdmittedLikeAnyOther pins the
+// admission of the broken Instance's roll: it is a fresh start like its
+// peers', paced by the same per-Component budget, and the coordination
+// gate is consulted for it exactly as for a dark Failed row — not on a
+// non-surge strategy, where the crash-looping pod set serves nothing and
+// the gate already counts the outage, and once on a surge strategy, where
+// the replacement genuinely adds a pod. The same gate stands in for a
+// coordination group: every start that opens is admitted through it.
+//
+// Cells: instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-recreate, instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-surge
+func TestReconcile_OffTargetCrash_StartIsAdmittedLikeAnyOther(t *testing.T) {
+	const replicas = 3
+	for _, sc := range offTargetStrategies[:2] {
+		t.Run(string(sc.strategy), func(t *testing.T) {
+			h := offTargetCrashHarness(t, false, sc.strategy, sc.surge, sc.unavail, workloadtypes.RestartPolicyNone, replicas)
+			consults := 0
+			h.gate = func(strategy workloadtypes.UpdateStrategyType, _, _ int32) (bool, workloadtypes.RolloutHoldGate, string) {
+				if strategy != sc.strategy {
+					t.Errorf("gate consulted with mechanism %q, want %q", strategy, sc.strategy)
+				}
+				consults++
+				return true, "", ""
+			}
+			breakInstance(t, h, replicas-1, false, crashAtStart)
+			h.setTarget(h.revFixed, fixedImage)
+			if !h.run(80, func() bool { return h.settledOn(h.revFixed, replicas) }) {
+				h.dumpState("after the bump")
+				t.Fatalf("the Component never settled on the fixed revision")
+			}
+			want := replicas
+			if sc.strategy != workloadtypes.UpdateStrategySurgeThenDrain {
+				// The broken Instance serves nothing: its recreate opens no
+				// new unavailability and skips the consult.
+				want = replicas - 1
+			}
+			if consults != want {
+				t.Fatalf("gate consults = %d, want %d", consults, want)
+			}
+		})
+	}
 }

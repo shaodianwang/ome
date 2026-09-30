@@ -169,13 +169,13 @@ func Run(ctx context.Context, in PassInput) error {
 		// operator-facing event fires exactly once per escalation. Its
 		// recorded evidence still gets one refresh, which takes no edge.
 		if row.Phase == types.InstancePhaseFailed {
-			rowEvidence := evidenceFor(input.ObservedState.InstanceStatuses, byIdx, row.Index, now, input.StuckPodGrace)
+			rowEvidence := evidenceFor(input.ObservedState.InstanceStatuses, byIdx, row.Index, now, input.StuckPodGrace, attemptTargetRevision(input, row))
 			if t := refreshedFailureEvidence(row, rowEvidence); t != nil {
 				stamps.add(row.Index, status.RecordRefreshedFailure(t, DeadlineExceededReason), nil)
 			}
 			continue
 		}
-		rowEvidence := evidenceFor(input.ObservedState.InstanceStatuses, byIdx, row.Index, now, input.StuckPodGrace)
+		rowEvidence := evidenceFor(input.ObservedState.InstanceStatuses, byIdx, row.Index, now, input.StuckPodGrace, attemptTargetRevision(input, row))
 		pods := evidence.PodsForStuckCheck(row, byIdx)
 		desired := status.DesiredFor(desiredByIdx, row.Index, row.PodCount)
 		gang := types.GangReadingFor(input, row)
@@ -382,10 +382,14 @@ type InstanceEvidence struct {
 // only — no Phase write. Stuck detection attributes pods the same way the
 // pass blames them (evidence.PodsForStuckCheck: a gang Update surge is
 // inspected through its replacement gang, a Migrate pair through
-// own-plus-sibling). A non-positive grace disables stuck-pod evidence
-// entirely (fast escalation off; the deadline backstop and the scheduler
-// hold still report). now/grace are supplied by the caller (clock seam).
-func evidenceFor(insts []types.InstanceStatus, byIdx map[int32][]*corev1.Pod, idx int32, now time.Time, grace time.Duration) InstanceEvidence {
+// own-plus-sibling), and an Update attempt only through the pods on the
+// revision it converges toward (evidence.AttemptStuckPods): the pod it is
+// replacing may be the broken workload the roll corrects. A non-positive
+// grace disables stuck-pod evidence entirely (fast escalation off; the
+// deadline backstop and the scheduler hold still report). now/grace are
+// supplied by the caller (clock seam); attemptRev is the attempt's
+// resolved target revision.
+func evidenceFor(insts []types.InstanceStatus, byIdx map[int32][]*corev1.Pod, idx int32, now time.Time, grace time.Duration, attemptRev string) InstanceEvidence {
 	var ev InstanceEvidence
 	var inst *types.InstanceStatus
 	for i := range insts {
@@ -400,7 +404,7 @@ func evidenceFor(insts []types.InstanceStatus, byIdx map[int32][]*corev1.Pod, id
 	ev.Unschedulable, ev.UnschedulableMessage, ev.UnschedulableSince = types.FirstUnschedulablePod(byIdx[idx])
 	pods := byIdx[idx]
 	if inst != nil {
-		pods = evidence.PodsForStuckCheck(*inst, byIdx)
+		pods = evidence.AttemptStuckPods(*inst, evidence.PodsForStuckCheck(*inst, byIdx), attemptRev)
 	}
 	if grace <= 0 {
 		return ev

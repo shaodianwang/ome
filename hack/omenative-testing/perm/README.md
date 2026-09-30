@@ -75,7 +75,7 @@ perm/
 ├── isvcs/                 — generated case YAMLs (committed; `topo=` in each header)
 │   ├── rollout/           — 96 rollout cases (topology × lifecycle × coordination)
 │   ├── migration/ restart/ partition/ scale/ edge/  — feature cases (see ../DESIGN.md)
-│   └── gen-rollout/ gen-fault/ gen-restart/  — generated hot core (see isvcs/MANIFEST.md)
+│   └── gen-rollout/ gen-fault/ gen-restart/ gen-crashloop/  — generated hot core (see isvcs/MANIFEST.md)
 └── results/
     └── <RUN_TS>/<feature>/<topo>/
         ├── pNN-<ts>.tsv   — one verdict row per case
@@ -572,6 +572,27 @@ shared by its subprocesses, so a run's results land together under
 
 ### Fault cases: quota isolation, cordon impact, leak remediation
 
+- **`fault=crashloop:old` with `form=start|load`** breaks one old-revision
+  engine pod the moment the bump lands — the highest-index Instance's leader
+  (or single) pod, so the roll reaches it last and the crash is observed on a
+  settled row for the whole roll. `form=start` points the live pod at the
+  fixture's metrics image, which has no shell, so the fixture command dies at
+  every start and the kubelet parks it in CrashLoopBackOff, never Ready again.
+  `form=load` execs `kill 1` into the runner every
+  `OME_TEST_CRASH_KILL_INTERVAL_S` (default 15) seconds while it is up, so it
+  dies after Ready and comes back between crashes; the killer stops as soon as
+  the pod leaves the old revision or is gone. Only the image and an exec are
+  available against a live pod, which is why neither form edits the template.
+  On top of the usual rollout checks the verdict requires that Instance to end
+  on the new revision with its pods serving, and no `RestartTriggered` event
+  naming it after the bump: an Instance whose revision is not the roll target
+  belongs to the roll, never to a repair on the revision it was running. The
+  generated `isvcs/gen-crashloop/` family crosses the verb with topology,
+  strategy and (on PD) a rolling group, at one budget per strategy and with
+  each crash form under the restart policy whose trigger it exercises; the
+  closed-loop matrix in the workload package decides the full product of
+  budgets and policies, and the cluster adds the shapes and the real kubelet.
+
 - **`fault=quota` cases run serially.** A quota case creates a *namespace-wide*
   ResourceQuota sized from a live usage snapshot, so run concurrently it both
   blocks other cases' pod admissions and mis-sizes its own headroom.
@@ -617,10 +638,10 @@ Four generators write into `isvcs/`; re-run one after editing it:
   `isvcs/rollout/` (`p500`+ is the continuation block: `p100`+ belongs to
   `gen_cases.py`'s feature counters).
 - `gen_runtime.py` — the runtime-triggered cases (`p400`+) → `isvcs/runtime-rev/`.
-- `generate_cases.py` — the hot-core permutation corpus (`p1000`–`p1999`) →
-  `isvcs/gen-rollout/`, `isvcs/gen-fault/`, `isvcs/gen-restart/`, plus
-  `isvcs/MANIFEST.md` (per-dimension counts, constraint ledger, missing-hook
-  catalog).
+- `generate_cases.py` — the hot-core permutation corpus (`p1000`–`p2399`) →
+  `isvcs/gen-rollout/`, `isvcs/gen-fault/`, `isvcs/gen-restart/`,
+  `isvcs/gen-crashloop/`, plus `isvcs/MANIFEST.md` (per-dimension counts,
+  constraint ledger, missing-hook catalog).
 
 A generator owns exactly the case ids it mints. Hand-written cases share the
 feature folders with generated ones (`restart/`, `canary/`, `scale/` and

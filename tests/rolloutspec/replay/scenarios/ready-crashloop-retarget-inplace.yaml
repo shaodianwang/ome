@@ -1,0 +1,62 @@
+# A Ready Instance wedges in a crash loop on the revision it runs while an
+# image-only template change moves it to a fixed revision under
+# InPlaceIfPossible. The row is off the target, so the restart pass yields
+# it: the crash-looping pod is patched in place to the fixed image, and
+# the attempt is judged on the pod once it carries the target revision,
+# never on the wedge the patch replaces.
+scenario: ready-crashloop-retarget-inplace
+arrows:
+  - T-empty-create
+  - T-create-ready
+  - T-ready-inplace
+  - T-inplace-ready
+cells:
+  - instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-inplace
+  - instance/Ready/spec.revision/boundary@T-ready-crashloop-restart
+  - instance/Update/InPlace/pod.waiting[CrashLoopBackOff]/before
+intentional: >-
+  the crash loop and the new target reach the pass together, and the pass
+  starts the in-place roll rather than a repair; the wedged pod is already
+  out of rotation, so the patch lands on the first pass
+initial:
+  spec:
+    replicas: 1
+    strategy: InPlaceIfPossible
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: cold start opens the attempt on the Component's current revision
+  - tick: 2
+    note: the pod becomes Ready and enters rotation, so the Instance promotes
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the pod runs for two minutes, which is longer than the grace
+    events:
+      - clock.advance: 2m
+  - tick: 4
+    note: the pod falls into a crash loop and leaves rotation as the image moves to the fixed one, so the roll patches it in place instead of a repair rebuilding the broken revision
+    events:
+      - pod.servingOff[source]: {pod: {index: 0}}
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+      - pod.waiting[CrashLoopBackOff]: {pod: {index: 0}, message: "back-off restarting failed container"}
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 5
+    note: the image patch lands while the pod is out of rotation
+  - tick: 6
+    note: the kubelet has rolled the container with the fixed image, so the runtime reports it and the marker is cleared
+    events:
+      - pod.ready[target]: {pod: {index: 0}}
+  - tick: 7
+    note: the pod returns to rotation on the fixed revision and the Instance promotes
+    events:
+      - endpoint.rotationIn[target]: {pod: {index: 0}}
+  - tick: 8
+    note: nothing is left in flight

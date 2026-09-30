@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -53,6 +54,9 @@ func RestartRequeueInterval(input workload.ReconcileInput) time.Duration {
 //
 // Returns (needsRestart, reason, err). When needsRestart is true the
 // reason lands on Operation.Reason on the first pass through Restart.
+// The trigger reads the row against its own revision; whether that
+// revision is still the Component's target is the selection's question
+// (RepairYieldsToTarget), asked with the roll target in hand.
 //
 // Self-lists this Instance's pods live. The dispatcher's per-reconcile
 // restart pass instead calls DetectRestartTriggerWithPods after a single
@@ -495,26 +499,82 @@ func firstFailedPodTermination(pods []*corev1.Pod) *workload.InstanceTermination
 
 // revisionForInstance returns the revision to stamp on pods
 // being recreated for one Instance. Restart keeps the Instance on its
-// existing revision, so we read RunningRevision from the observed
-// status. An Instance that never ran a revision (a gang rebuilt after
-// losing a member while still forming) has only the revision its attempt
-// pinned on the Operation. Returns the zero RevisionID when nothing
-// records a revision.
+// existing revision (rebuildRevision). Returns the zero RevisionID when
+// nothing records a revision.
 func revisionForInstance(input workload.ReconcileInput, idx int32) query.RevisionID {
-	s := input.ObservedState.Instance(idx)
-	if s == nil {
+	rev := rebuildRevision(input.ObservedState.Instance(idx))
+	if rev == "" {
 		return query.RevisionID{}
 	}
+	return query.RevisionFromName(rev)
+}
+
+// rebuildRevision names the revision a repair of this row would rebuild
+// at: the revision the Instance runs, else the one it was converging to,
+// else the one its attempt pinned — an Instance that never ran a revision
+// (a gang rebuilt after losing a member while still forming) has only the
+// pin on its Operation. Empty when nothing records a revision.
+func rebuildRevision(s *workload.InstanceStatus) string {
+	if s == nil {
+		return ""
+	}
 	if s.RunningRevision != "" {
-		return query.RevisionFromName(s.RunningRevision)
+		return s.RunningRevision
 	}
 	if s.TargetRevision != "" {
-		return query.RevisionFromName(s.TargetRevision)
+		return s.TargetRevision
 	}
-	if s.Operation != nil && s.Operation.TargetRevision != "" {
-		return query.RevisionFromName(s.Operation.TargetRevision)
+	if s.Operation != nil {
+		return s.Operation.TargetRevision
 	}
-	return query.RevisionID{}
+	return ""
+}
+
+// RepairYieldsToTarget reports whether a restart selection for inst is
+// left to the pass that rebuilds the Instance at the Component's roll
+// target instead of opening a repair: the revision the repair would
+// rebuild (rebuildRevision) is not target. A crash loop, a lost pod or a
+// lost gang member on such a row is unavailability its roll must cross
+// anyway, so the update pass replacing the pod set at the target opens
+// no further outage, while a repair would rebuild a revision the
+// Component does not want and the roll would tear it down again.
+// The update pass takes a Ready or Failed row, the Create pass retires a
+// first materialization pinned to a superseded revision and materializes
+// a demoted row that has no pod left.
+//
+// Three rows are never yielded: an open Restart, which is driven to
+// completion whatever the target says; a Migrate-owned row, which its
+// record owns; and a row demoted for losing every pod that holds pods
+// again, which no update trigger reads, so its repair rebuilds the
+// revision it records and the roll follows once it is Ready. A row that
+// records no revision, or a pass with no target, has nothing to compare.
+//
+// The roll the row is left to must be one that can start. A paused
+// Component yields nothing: the pause withholds the roll, and an Instance
+// kept dark for the length of the pause is worse than one rebuilt at the
+// revision the roll is held on. A target the RetryBlock holds admits no
+// fresh attempt until an operator releases it, so it keeps the repair the
+// same way; a Backoff block merely paces the start and yields. The roll
+// takes the row once the pause or the hold clears.
+func RepairYieldsToTarget(input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, target *appsv1.ControllerRevision, instancePods []*corev1.Pod) bool {
+	if target == nil || plan.Paused {
+		return false
+	}
+	s := input.ObservedState.Instance(inst.Index)
+	if s == nil || s.Phase == workload.InstancePhaseRestarting || isMigrateOwnedStatus(s) {
+		return false
+	}
+	rev := rebuildRevision(s)
+	if rev == "" || rev == target.Name {
+		return false
+	}
+	if b := workload.FindRetryBlock(input.ObservedState.RetryBlocks, target.Name); b != nil && b.State == workload.RetryBlockHeld {
+		return false
+	}
+	if workload.DemotedReady(s) && len(query.ExcludeTerminalPods(instancePods)) > 0 {
+		return false
+	}
+	return true
 }
 
 // runnerRestartedSinceReady reports whether pod's runner container carries

@@ -144,3 +144,48 @@ func TestCrashLoopWedge_FullyServingSetIsNeverAWedge(t *testing.T) {
 		t.Error("fully serving pod set: got a wedge, want none")
 	}
 }
+
+// TestPodSetServesNothing: the pod set is provably out of service only
+// when nothing serves and every live pod is wedged or terminal. A pod
+// that is merely not yet Ready keeps the set out of the predicate, and
+// so does an empty set.
+func TestPodSetServesNothing(t *testing.T) {
+	hash := query.RevisionFromName(clRevision).Hash()
+	wedged := crashLoopPod("engine-0-default-0", 10*time.Minute, hash)
+	serving := servingPod("engine-0-default-0")
+	notReady := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "engine-0-default-0"},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  "main",
+				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			}},
+		},
+	}
+	terminal := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "engine-0-default-0"}, Status: corev1.PodStatus{Phase: corev1.PodFailed}}
+	deleting := crashLoopPod("engine-0-default-0", 10*time.Minute, hash)
+	ts := metav1.NewTime(tNow)
+	deleting.DeletionTimestamp = &ts
+
+	for _, tc := range []struct {
+		name string
+		pods []*corev1.Pod
+		want bool
+	}{
+		{name: "crash-looping pod", pods: []*corev1.Pod{wedged}, want: true},
+		{name: "terminal pod", pods: []*corev1.Pod{terminal}, want: true},
+		{name: "wedged beside terminal", pods: []*corev1.Pod{wedged, terminal}, want: true},
+		{name: "serving pod", pods: []*corev1.Pod{serving}, want: false},
+		{name: "wedged beside serving", pods: []*corev1.Pod{wedged, serving}, want: false},
+		{name: "running, not yet ready", pods: []*corev1.Pod{notReady}, want: false},
+		{name: "only a deleting pod", pods: []*corev1.Pod{deleting}, want: false},
+		{name: "no pods", pods: nil, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := evidence.PodSetServesNothing(tc.pods); got != tc.want {
+				t.Fatalf("PodSetServesNothing = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

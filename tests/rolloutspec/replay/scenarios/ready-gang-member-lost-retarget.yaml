@@ -1,0 +1,62 @@
+# A Ready gang loses its worker while the template moves to a fixed
+# revision. Under the multi-pod default policy a lost member opens a
+# repair on a gang that still runs the target; here the gang is off the
+# target, so the restart pass yields it and the roll replaces the whole
+# gang at the fixed revision through its surge index.
+scenario: ready-gang-member-lost-retarget
+arrows:
+  - T-empty-create
+  - T-create-ready
+  - T-ready-surge
+  - T-empty-gang-surge-target
+  - T-surgedrain-gang-complete
+  - T-gangtarget-ready
+cells:
+  - instance/Ready/pod.deleted[source]/boundary@T-ready-surge
+  - instance/Ready/spec.revision/boundary@T-ready-restart
+intentional: >-
+  the lost member and the new target reach the pass together, and the pass
+  claims a replacement index for the gang rather than repairing it at the
+  revision it runs
+initial:
+  spec:
+    replicas: 1
+    workers: 1
+    topologyKey: topology.example.com/fabric-domain
+    gangScheduling: true
+    schedulerName: gang-scheduler
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the gang's PodGroup is announced before its first member, and the Create pass materializes both
+  - tick: 2
+    note: both members report Ready and the leader enters rotation, so the Instance promotes as one
+    events:
+      - pod.ready[source]: {pod: {index: 0, runner: leader}}
+      - pod.ready[source]: {pod: {index: 0, runner: worker}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, runner: leader}}
+  - tick: 3
+    note: the worker is lost as the template moves to the fixed revision, so the source claims index 1 as its replacement instead of rebuilding the gang at the revision it runs
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: worker}}
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement's PodGroup is announced before its first member, and both members are created
+  - tick: 5
+    note: the replacement gang reports Ready, so the source advances to the drain and leaves rotation
+    events:
+      - pod.ready[target]: {pod: {index: 1, runner: leader}}
+      - pod.ready[target]: {pod: {index: 1, runner: worker}}
+  - tick: 6
+    note: the leader's endpoint goes not-ready, which is the guard the drain waits on, so the surviving source pod is deleted
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0, runner: leader}}
+  - tick: 7
+    note: the source's last pod is gone, so its row is finalized and removed and the replacement index is the Instance
+    events:
+      - pod.deleted[source]: {pod: {index: 0, runner: leader}}

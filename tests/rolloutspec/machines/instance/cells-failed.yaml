@@ -126,13 +126,13 @@ cells:
     windows: [before]
     outcome: transition
     to: Restart/Drain
-    guard: RecreateInstanceOnPodRestart, a multi-pod Instance with at least one survivor once terminal-phase pods are excluded from the live count, no preserved Update or Migrate operation, and no RetryBlock denying the rebuild
-    note: partial gang loss is repaired from Failed because the recovery can no longer be gated on a Ready the gang cannot reach; total loss instead falls to the Create pass's fresh start. A Restart parked at Failed is read as a spent attempt rather than an owner, so it re-arms the whole gang - only another Restart can rebuild it as one, with the incarnation bumped and the survivors drained - and each cycle is bounded by the attempt deadline; an Update or Migrate continuation still blocks the trigger because its own pass owns the row (ops/restart.go)
+    guard: RecreateInstanceOnPodRestart, a multi-pod Instance with at least one survivor once terminal-phase pods are excluded from the live count, no preserved Update or Migrate operation, no RetryBlock denying the rebuild, and the revision the rebuild would land on still the roll target
+    note: partial gang loss is repaired from Failed because the recovery cannot be gated on a Ready the gang cannot reach; total loss instead falls to the Create pass's fresh start. A Failed row off the target is never repaired - the restart pass yields it and its corrective roll (spec.revision) replaces the gang at the target. A Restart parked at Failed is read as a spent attempt rather than an owner, so it re-arms the whole gang - only another Restart can rebuild it as one, with the incarnation bumped and the survivors drained - and each cycle is bounded by the attempt deadline; an Update or Migrate continuation still blocks the trigger because its own pass owns the row (ops/restart.go)
     invariants: [one.operation.per.instance]
     placement: unit
     coverage:
       perm: []
-      unit: [TestDetectRestartTrigger_GangMemberLossBelowReady]
+      unit: [TestDetectRestartTrigger_GangMemberLossBelowReady, TestRepairYieldsToTarget]
       kind: []
       replay: [failed-restart]
     status: decided

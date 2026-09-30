@@ -273,13 +273,15 @@ func UpdateContinuation(s *InstanceStatus) bool {
 		(s.Phase == InstancePhaseFailed && ClaimOf(s) == OwnerUpdate)
 }
 
-// RecreateOfDarkFailedRow reports a fresh update start that takes
-// nothing further offline: a Failed row with no serving pod, recreated
-// in place on a non-surge strategy. The coordination gate already counts
-// its outage in its serving-based unavailability, so this start skips
-// the gate consult; a surge strategy keeps it, because its gate counts
-// surge pods and the recreate genuinely adds one.
-func RecreateOfDarkFailedRow(s *InstanceStatus, strategy UpdateStrategyType) bool {
+// RecreateOfDarkRow reports a fresh update start that takes nothing
+// further offline: a Failed row with no serving pod, recreated in place
+// on a non-surge strategy. The coordination gate already counts its
+// outage in its serving-based unavailability, so this start skips the
+// gate consult; a surge strategy keeps it, because its gate counts surge
+// pods and the recreate genuinely adds one. A Ready row is dark on pod
+// evidence rather than on the published counter (evidence.PodSetServesNothing),
+// because the counter trails the pods by a pass.
+func RecreateOfDarkRow(s *InstanceStatus, strategy UpdateStrategyType) bool {
 	return s != nil && !UpdateContinuation(s) &&
 		strategy != UpdateStrategySurgeThenDrain &&
 		s.Phase == InstancePhaseFailed && s.ServingPodCount == 0

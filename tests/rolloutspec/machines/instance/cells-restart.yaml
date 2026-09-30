@@ -231,10 +231,10 @@ cells:
     event: spec.revision
     outcome: defer
     guard: the recreate stamps the Instance's running revision, so the fresh pods come back on the revision the repair started from
-    note: the new target is taken up by the update pass once the promote lands Ready; while the pods are gone the repair still rebuilds the running revision rather than adopting the target (revisionHashForInstance)
+    note: an open repair is driven to completion whatever the target says - while the pods are gone the rebuild lands on the running revision rather than adopting the target (revisionForInstance) - and the update pass takes the row once the promote lands Ready. Only a repair that has not opened yields to the roll (RepairYieldsToTarget)
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestPlan_Restart_OpenRepairIsDrivenWhateverTheTarget, TestRepairYieldsToTarget, TestDetectUpdateTrigger_NewTargetAgainstACrashLoopRepair], kind: []}
+    status: decided
   - state: Restart/Drain
     event: spec.annotationOnly
     outcome: ignore

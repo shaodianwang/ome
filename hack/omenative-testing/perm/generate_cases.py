@@ -4,12 +4,17 @@
 Emits the constraint-filtered cross product of
     topology x updateStrategy x failure verb x injection phase x
     restartPolicy x pause
-into three generator-owned folders, using ONLY verbs and hooks the runners
+into four generator-owned folders, using ONLY verbs and hooks the runners
 (run.py + the KIND CI lane) already implement:
 
-    gen-rollout/  p1000+  baseline revision-bump rollouts (failure=none)
-    gen-fault/    p1200+  rollouts with fault=podkill:settling|rotating
-    gen-restart/  p1600+  mode=kill (steady-state pod kill), pause off|true|freeze
+    gen-rollout/   p1000+  baseline revision-bump rollouts (failure=none)
+    gen-fault/     p1200+  rollouts with fault=podkill:settling|rotating
+    gen-restart/   p1600+  mode=kill (steady-state pod kill), pause off|true|freeze
+    gen-crashloop/ p2000+  rollouts where one old-revision Instance crashes
+                          (fault=crashloop:old, form=start|load) from the
+                          moment the bump lands, crossed with topology x
+                          strategy x coordination at one budget per strategy;
+                          the fix must land on that Instance
 
 Ownership and determinism:
   - The gen-* folders belong ENTIRELY to this generator: every case there
@@ -42,6 +47,15 @@ Constraint ledger (why the raw product is filtered — derived from run.py):
     under a steady-state kill, so the kill family uses canonical budgets only.
   - Cells already pinned by hand-written restart/ cases are excluded
     (HAND_PINNED_KILL) so the corpus grows coverage instead of echoing pins.
+  - crashloop breaks an engine pod, so its coordination axis rolls engine and
+    decoder together only where a decoder exists (pd, pd-mn): co=none and
+    co=rolling. Each strategy runs at one budget (SurgeThenDrain under
+    maxUnavailable=0, which a drain-first strategy can never roll under; the
+    others under maxUnavailable=1), and each crash form runs under the restart
+    policy whose trigger path it exercises: a crash at start under None, a
+    crash after Ready under RecreateInstance. Budgets, policies and the rest
+    of the product are decided by the closed-loop matrix in the workload
+    package; the cluster adds the shapes and the real kubelet.
 
 The t=3 covering fill over the deferred dimensions (coordination/rollout
 groups, canary promotion, budget x coordination interactions) is the --fill
@@ -63,7 +77,10 @@ GEN_BLOCKS = {
     "gen-rollout": (1000, 1200),
     "gen-fault": (1200, 1600),
     "gen-restart": (1600, 2000),
+    "gen-crashloop": (2000, 2400),
 }
+GEN_ID_LO = min(lo for lo, _hi in GEN_BLOCKS.values())
+GEN_ID_HI = max(hi for _lo, hi in GEN_BLOCKS.values())
 MANIFEST_REL = "MANIFEST.md"
 # Every generated description starts with this mark; it is what tells a
 # generated file in a gen-* folder from a hand-written one.
@@ -74,6 +91,24 @@ RESTARTS = ["None", "RecreateInstance"]
 PHASES = ["settling", "rotating"]
 PAUSES = ["", "true", "freeze"]
 IN_PLACE = {"InPlaceIfPossible", "InPlaceOnly"}
+
+# The crashloop family: how the old-revision pod fails, paired with the
+# restart policy whose trigger path that form exercises (a crash at start is
+# the crash-loop repair under every policy; a crash after Ready is the
+# runner-restart trigger, which only RecreateInstance has), the one budget
+# each strategy runs at (maxSurge, maxUnavailable), the shapes (one gang width
+# per topology; the crash is on the leader, so the width adds nothing), and
+# the coordination axis per topology.
+CRASH_FORMS = ["start", "load"]
+CRASH_FORM_POLICIES = [("start", "None"), ("load", "RecreateInstance")]
+CRASH_BUDGETS = {
+    "SurgeThenDrain": [(1, 0)],
+    "RecreatePod": [(0, 1)],
+    "InPlaceIfPossible": [(0, 1)],
+    "InPlaceOnly": [(0, 1)],
+}
+CRASH_SHAPES = [("engine", 4, 0), ("pd", 4, 0), ("engine-mn", 2, 1), ("pd-mn", 2, 1)]
+CRASH_COORDS = {"engine": ["none"], "engine-mn": ["none"], "pd": ["none", "rolling"], "pd-mn": ["none", "rolling"]}
 
 # Canonical shapes: (topo, N, W). Gangs at N=2 with widths 1 and 2; singles at
 # N=4 (pd: engine+decoder N, router lib.NR). Percentage budgets additionally
@@ -139,8 +174,6 @@ PARKED = {}
 # Kept in the manifest so the follow-up surface stays visible next to the
 # corpus it would grow.
 MISSING_HOOKS = [
-    "container-exit failure verb (in-container crash vs pod delete) — needs a "
-    "fake-serving crash endpoint or exec-kill runner verb",
     "kill-instance verb (atomic delete of a whole gang) — today only reachable "
     "as the RecreateInstanceOnPodRestart cascade from one pod death",
     "component-scoped podkill victim (fault=podkill:<phase>:<component>) — "
@@ -213,9 +246,9 @@ def comps(topo, n, w, e_life, d_life=None, r_life=None):
     return cs
 
 
-def case_yaml(name, desc, kv, case_comps, reason):
+def case_yaml(name, desc, kv, case_comps, reason, coord=None):
     lines = [header(name, desc, kv), f"# reason: {reason}"]
-    return "\n".join(lines) + "\n" + lib.render(name, case_comps)
+    return "\n".join(lines) + "\n" + lib.render(name, case_comps, coord=coord)
 
 
 # ── gen-rollout: failure=none baselines ─────────────────────────────────────
@@ -393,6 +426,54 @@ def emit_restart(add):
                             cell=("kill", topo, w, strat, rp, pause, target))
 
 
+# ── gen-crashloop: one old-revision Instance crashes while the roll lands ───
+def _crash_reason(form, strat, co):
+    how = ("one old-revision engine pod is pointed at an image with no shell as the bump "
+           "lands, so it crashes at every start and is never Ready again"
+           if form == "start" else
+           "one old-revision engine pod has its runner killed every few seconds while it "
+           "is up, so it dies after Ready and comes back between crashes")
+    lands = {"SurgeThenDrain": "the surge brings the fixed replacement up beside it and drains it",
+             "RecreatePod": "the recreate drains it and rebuilds the Instance at the fixed revision",
+             "InPlaceIfPossible": "the patch lands the fixed image in place",
+             "InPlaceOnly": "the patch lands the fixed image in place"}[strat]
+    out = (f"{how}; its Instance is off the target from that moment, so the roll owns it: "
+           f"{lands}, admitted within the same budget as its peers, and no repair is recorded "
+           f"for it after the bump; every Instance ends on the new revision")
+    if co != "none":
+        out += "; the group paces engine and decoder together as on any coordinated roll"
+    out += "; floor waived — the crash itself costs settled capacity for the length of the roll"
+    return out
+
+
+def emit_crashloop(add):
+    for topo, n, w in CRASH_SHAPES:
+        mid = MID_SHAPE.get((topo, w))
+        for strat, budgets in CRASH_BUDGETS.items():
+            for surge, unavail in budgets:
+                size = mid if (isinstance(unavail, str) and mid) else n
+                for form, rp in CRASH_FORM_POLICIES:
+                    for co in CRASH_COORDS[topo]:
+                        kv = dict(**counts(topo, size), **ceilings(topo, size, strat, surge),
+                                  fault="crashloop:old", form=form, floor_soft=1,
+                                  co=co, topo=topo)
+                        if co != "none":
+                            # The group rolls the decoder too, on its own surge.
+                            kv["ceil_d"] = size + 1
+                        meta = dict(strat=strat, verb=f"crashloop:{form}", rp=rp)
+                        desc = (f"[gen] crashloop {form} {shape_tag(topo, w)} N={size} {strat} "
+                                f"{budget_tag(strat, surge, unavail)} rp {rp} co {co}")
+                        life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail,
+                                             restart=RP_FULL[rp])
+                        d_life = (lib.lifecycle(restart=RP_FULL[rp])
+                                  if is_pd(topo) else None)
+                        add("gen-crashloop", desc, kv,
+                            comps(topo, size, w, life, d_life=d_life),
+                            _crash_reason(form, strat, co), meta,
+                            cell=("crashloop", form, topo, w, size, strat, surge, unavail, rp, co),
+                            coord=lib.coord_for(co) if co != "none" else None)
+
+
 # ── assembly ─────────────────────────────────────────────────────────────────
 def build_outputs():
     """{relative path under isvcs/: file text} — the entire owned output set."""
@@ -401,7 +482,7 @@ def build_outputs():
     rows = []   # (folder, case id, kv, meta) for the manifest
     parked_used = set()
 
-    def add(folder, desc, kv, case_comps, reason, meta, cell):
+    def add(folder, desc, kv, case_comps, reason, meta, cell, coord=None):
         lo, hi = GEN_BLOCKS[folder]
         cid = counters[folder]
         if cid >= hi:
@@ -416,12 +497,13 @@ def build_outputs():
                 kv["inv_xfail"] = inv_scope
             reason = parked_reason
             meta = dict(meta, parked=issue)
-        outputs[f"{folder}/{name}.yaml"] = case_yaml(name, desc, kv, case_comps, reason)
+        outputs[f"{folder}/{name}.yaml"] = case_yaml(name, desc, kv, case_comps, reason, coord)
         rows.append((folder, name, dict(kv), dict(meta)))
 
     emit_rollout(add)
     emit_fault(add)
     emit_restart(add)
+    emit_crashloop(add)
     stale = set(PARKED) - parked_used
     if stale:
         sys.exit("PARKED keys match no emitted cell (stale after a matrix change): "
@@ -478,6 +560,7 @@ def manifest(rows):
     lines += table("By failure verb / phase", tally(lambda kv, m: m["verb"]))
     lines += table("By restartPolicy", tally(lambda kv, m: m.get("rp", "(unset — baseline)")))
     lines += table("By pause", tally(lambda kv, m: m.get("pause", "off")))
+    lines += table("By coordination", tally(lambda kv, m: kv.get("co", "none")))
     parked_rows = [(f, n, m["parked"]) for f, n, _kv, m in rows if "parked" in m]
     if parked_rows:
         lines += ["### Parked cells (XFAIL on a tracked issue)", "",
@@ -500,6 +583,12 @@ def manifest(rows):
         "- Kill targets (`kill=leader|worker`) exist only on gang topologies.",
         "- Update budgets are dormant under a steady-state kill: the kill family"
         " permutes strategies at their canonical budget only.",
+        "- crashloop breaks an engine pod, so its coordination axis (co=none |"
+        " co=rolling) exists only on the PD topologies; each strategy runs at"
+        " one budget (SurgeThenDrain under maxUnavailable=0, the others under"
+        " maxUnavailable=1) and each crash form under the restart policy whose"
+        " trigger it exercises (start under None, load under RecreateInstance);"
+        " the workload package's closed-loop matrix decides the full product.",
         "- Kill-family cells pinned by hand-written restart/ cases are excluded:",
         "",
     ]
@@ -594,7 +683,7 @@ def guard_foreign(outputs, root=ISVCS):
             continue
         if f.stem in owned_ids:
             problems.append(f"{f}: case id {f.stem} collides with the generated id block — "
-                            f"renumber the hand-written case out of p1000-p1999")
+                            f"renumber the hand-written case out of p{GEN_ID_LO}-p{GEN_ID_HI - 1}")
     if problems:
         sys.exit("\n".join(problems))
 

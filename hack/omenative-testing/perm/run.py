@@ -33,7 +33,10 @@ Architecture:
      pairable pair exists. Sustained violations FAIL the verdict (INV_*).
   6. Optional fault injection (header fault=<kind>:<param>): quota:<n> (derived
      ResourceQuota admitting exactly +n case-shaped pods), podkill:<phase>,
-     ctrlrestart:<phase> (gated on OME_TEST_ALLOW_CTRL_RESTART=1), cordon:source.
+     ctrlrestart:<phase> (gated on OME_TEST_ALLOW_CTRL_RESTART=1), cordon:source,
+     crashloop:old (one old-revision pod made to crash on every start, form=start
+     or form=load, from the moment the bump lands; the verdict requires that
+     Instance to end on the new revision with no repair recorded for it).
      Apparatus errors record the distinct INFRA-FAIL verdict — harness
      infrastructure broke, not the product.
 
@@ -55,6 +58,7 @@ Update detection per strategy:
     blind to it. Instead a pod is "updated" once it carries the new
     `perm.test/rev=v2` annotation, and we separately assert its UID never rotated.
 """
+import datetime
 import json
 import os
 import queue
@@ -1308,6 +1312,23 @@ def invariant_checks(inv, verdict, notes, checks):
 #                        the arm is the restarted manager's.
 #   cordon:source      — pre-trigger: cordon the node hosting the source pod;
 #                        ALWAYS uncordoned in cleanup (failure-path safe).
+#   crashloop:old      — at the settling hook, right after the bump: make one
+#                        OLD-revision pod of the bumped engine crash on every
+#                        start, for as long as it runs the old revision. The
+#                        pod is the highest-index Instance's leader (or single)
+#                        pod, so the roll reaches it last and the crash is
+#                        observed on a settled row for the whole roll. form=
+#                        picks the failure: start points the live pod at an
+#                        image with no shell, so the fixture command dies at
+#                        every start and the kubelet parks it in
+#                        CrashLoopBackOff, never Ready again; load kills the
+#                        runner (PID 1) every CRASH_KILL_INTERVAL_S while the
+#                        container is up, so it dies after Ready and comes
+#                        back between crashes. Only the image and an exec are
+#                        available against a live pod, which is why neither
+#                        form edits the template. The verdict adds: that
+#                        Instance ends on the new revision and serving, and
+#                        no RestartTriggered event names it after the bump.
 # Phase enum: settling (immediately after the trigger), rotating (first surge/
 # updated pod observed post-trigger), migrating (migration accept observed).
 # One firing per case (latched). Any fault-APPARATUS error → the distinct
@@ -1323,6 +1344,13 @@ FAULT_PHASES = {"rotating", "migrating", "settling"} | CANARY_HOOKS
 # A controller restart on the idle service, before the bump (the grid's Idle
 # column has no hook); the only fault a pre-bump phase makes sense for.
 IDLE_FAULT_PHASE = "idle"
+# crashloop's one parameter names its victim: a pod of the revision the bump
+# leaves behind.
+CRASHLOOP_VICTIM = "old"
+CRASHLOOP_FORMS = {"start", "load"}
+# form=load kills the runner this often while it is up; the kubelet's own
+# back-off then holds each restart longer than the last.
+CRASH_KILL_INTERVAL_S = float(os.environ.get("OME_TEST_CRASH_KILL_INTERVAL_S", "15"))
 CANARY_VERBS = {"pause", "pause-freeze", "promote", "promote-stale", "rebump", "rebump-fix",
                 "rollback", "timeout-clear", "timeout-set", "scale", "repin", "resume",
                 "planedit", "planedit-repin", "groupremove", "runlost", "pairing", "quotalift"}
@@ -1745,7 +1773,8 @@ def _wait_ctrl_ready(budget_s):
     return False
 
 # Cleanup registry, flushed in __main__'s finally — runs on PASS, FAIL,
-# INFRA-FAIL and crash alike. Entries: ("quota", case_id) | ("uncordon", node).
+# INFRA-FAIL and crash alike. Entries: ("quota", case_id) | ("uncordon", node)
+# | ("crashloop", fault) — the last stops a form=load killer thread.
 _FAULT_CLEANUPS = []
 
 
@@ -1758,6 +1787,8 @@ def _run_fault_cleanups():
         elif kind == "uncordon":
             kubectl("uncordon", arg)
             kubectl("label", "node", arg, f"{CORDON_LABEL}-")   # drop the harness marker
+        elif kind == "crashloop":
+            _crashloop_stop(arg)
 
 
 def _lift_quota(case_id):
@@ -1815,6 +1846,8 @@ def _fault_ok(v):
         return param in FAULT_PHASES
     if kind == "cordon":
         return param in FAULT_TARGETS
+    if kind == "crashloop":
+        return param == CRASHLOOP_VICTIM
     return False
 
 
@@ -1828,6 +1861,7 @@ def _fault_new(case_id, hdr):
     return {"case_id": case_id, "kind": kind, "param": param,
             "victim": str(hdr.get("victim") or ""),
             "victimcomp": str(hdr.get("victimcomp") or ""),
+            "form": str(hdr.get("form") or ""),
             "fired": False, "infra_fail": None, "notes": []}
 
 
@@ -2013,6 +2047,9 @@ def _fault_pick_pod(pod_state, pods_per_inst, old_hashes, victim=None, comp=None
 def _fault_fire(f, pod_state, pods_per_inst, old_hashes):
     """One-shot phase-fault action (latched by the caller's fired check)."""
     f["fired"] = True
+    if f["kind"] == "crashloop":
+        _fault_crashloop_fire(f, pod_state, old_hashes)
+        return
     if f["kind"] == "podkill":
         victim = _fault_pick_pod(pod_state, pods_per_inst, old_hashes, victim=f.get("victim"),
                                  comp=f.get("victimcomp") or None)
@@ -2047,6 +2084,162 @@ def _fault_fire(f, pod_state, pods_per_inst, old_hashes):
     print(f"    ⚡ {f['notes'][-1]}")
 
 
+def _crashloop_pick_pod(pod_state, old_hashes):
+    """The crashloop victim: among the live engine pods still on an old
+    revision, the leader (or single) pod of the highest Instance index. The
+    highest index is what the roll reaches last, so the crash is observed on
+    a settled row for as long as the roll takes to get there."""
+    def _idx(p):
+        try:
+            return int(p.get("inst", "0"))
+        except (TypeError, ValueError):
+            return 0
+    live = [(n, p) for n, p in sorted(pod_state.items())
+            if p and p["alive"] and p.get("comp") == "engine"
+            and p.get("hash") and (old_hashes is None or p["hash"] in old_hashes)
+            and p.get("runner", "default") in ("default", "leader")]
+    if not live:
+        return None
+    return max(live, key=lambda x: (_idx(x[1]), x[0]))[0]
+
+
+def _crashloop_image():
+    """The image a live pod is pointed at to crash at every start: the
+    fixture's metrics image, which has no shell, so the runtime command the
+    fixture pod carries cannot even be exec'd. Resolved through the fixture
+    tokens, so a cluster that pulls through a mirror uses its mirror path."""
+    return _fixture_values()["OME_EVAL_METRICS_IMAGE"]
+
+
+def _crashloop_pod_state(name):
+    """(exists, alive, revision hash, main container running) of one pod,
+    read live."""
+    r = kubectl("-n", NS, "get", "pod", name, "-o", "json")
+    if r.returncode != 0:
+        return False, False, "", False
+    try:
+        obj = json.loads(r.stdout)
+    except Exception:
+        return False, False, "", False
+    meta = obj.get("metadata") or {}
+    running = any(cs.get("name") == MAIN_CONTAINER and (cs.get("state") or {}).get("running")
+                  for cs in (obj.get("status", {}).get("containerStatuses") or []))
+    return True, meta.get("deletionTimestamp") is None, (meta.get("labels") or {}).get(REV_LABEL, ""), running
+
+
+def _crashloop_killer(f, stop):
+    """form=load: kill the runner (PID 1 of the fixture container) every
+    CRASH_KILL_INTERVAL_S while the victim pod is up and still on the old
+    revision. The name outlives a recreate, so the revision label is what
+    says the pod is still the one the case is breaking; a pod patched or
+    replaced onto the new revision is left alone."""
+    while not stop.is_set():
+        exists, alive, rev, running = _crashloop_pod_state(f["crash_pod"])
+        if not exists or not alive or rev != f["crash_hash"]:
+            return
+        if running:
+            r = kubectl("-n", NS, "exec", f["crash_pod"], "-c", MAIN_CONTAINER, "--", "sh", "-c", "kill 1")
+            if r.returncode == 0:
+                f["kills"] += 1
+        stop.wait(CRASH_KILL_INTERVAL_S)
+
+
+def _crashloop_stop(f):
+    stop = f.get("crash_stop")
+    if stop is not None:
+        stop.set()
+    thread = f.get("crash_thread")
+    if thread is not None:
+        thread.join(timeout=30)
+
+
+def _fault_crashloop_fire(f, pod_state, old_hashes):
+    victim = _crashloop_pick_pod(pod_state, old_hashes)
+    if not victim:
+        f["infra_fail"] = "crashloop: no live old-revision engine pod to break"
+        return
+    state = pod_state.get(victim) or {}
+    f["crash_pod"] = victim
+    f["crash_inst"] = str(state.get("inst", "0"))
+    f["crash_comp"] = state.get("comp", "engine")
+    f["crash_hash"] = state.get("hash", "")
+    f["kills"] = 0
+    if f["form"] == "start":
+        image = _crashloop_image()
+        patch = {"spec": {"containers": [{"name": MAIN_CONTAINER, "image": image}]}}
+        r = kubectl("-n", NS, "patch", "pod", victim, "--type=strategic", "-p", json.dumps(patch))
+        if r.returncode != 0:
+            f["infra_fail"] = f"crashloop: point {victim} at {image} failed: {r.stderr.strip()[:120]}"
+            return
+        f["notes"].append(f"fault fired: crashloop form=start on {victim} (instance {f['crash_inst']}, image {image})")
+    else:
+        stop = threading.Event()
+        f["crash_stop"] = stop
+        f["crash_thread"] = threading.Thread(target=_crashloop_killer, args=(f, stop), daemon=True)
+        f["crash_thread"].start()
+        _FAULT_CLEANUPS.append(("crashloop", f))
+        f["notes"].append(f"fault fired: crashloop form=load on {victim} (instance {f['crash_inst']}, kill every {CRASH_KILL_INTERVAL_S:.0f}s)")
+    print(f"    ⚡ {f['notes'][-1]}")
+
+
+def _isvc_events_since(case_id, since_epoch):
+    """(reason, message) of every event recorded on the case's
+    InferenceService whose latest occurrence is at or after since_epoch."""
+    r = kubectl("-n", NS, "get", "events", "--field-selector",
+                f"involvedObject.kind=InferenceService,involvedObject.name={case_id}", "-o", "json")
+    if r.returncode != 0:
+        return []
+    try:
+        items = json.loads(r.stdout).get("items", []) or []
+    except Exception:
+        return []
+    out = []
+    for it in items:
+        stamp = it.get("lastTimestamp") or it.get("eventTime") or (it.get("metadata") or {}).get("creationTimestamp") or ""
+        try:
+            when = datetime.datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            continue
+        if when >= since_epoch:
+            out.append((str(it.get("reason") or ""), str(it.get("message") or "")))
+    return out
+
+
+def _crashloop_checks(f, pod_state, old_hashes, trigger_ts, verdict, notes, checks):
+    """The crashloop verdict: the broken Instance ended on the new revision
+    with its pods serving, and no repair was recorded for it after the bump.
+    A repair on the old revision is the failure this fault exists to catch:
+    the Instance's revision is not the roll target, so the roll owns it."""
+    if not f or f.get("kind") != "crashloop" or not f.get("fired") or f.get("infra_fail"):
+        return verdict
+    inst, comp = f["crash_inst"], f["crash_comp"]
+    pods = [(n, p) for n, p in sorted(pod_state.items())
+            if p and p["alive"] and p.get("comp") == comp and str(p.get("inst", "0")) == inst]
+    off = [n for n, p in pods if not p.get("hash") or p["hash"] in (old_hashes or set())]
+    down = [n for n, p in pods if not (p.get("ready") and p.get("serving"))]
+    if not pods or off or down:
+        verdict = "FAIL"
+        notes.append(f"crashloop Instance {comp}/{inst} did not end on the new revision serving "
+                     f"(pods={len(pods)} old-revision={off} not-serving={down})")
+        checks.append(f"  ✗ crashloop: {comp} Instance {inst} must end on the new revision and serving; "
+                      f"pods={len(pods)} still old-revision={off} not-serving={down}")
+    else:
+        checks.append(f"  ✓ crashloop: {comp} Instance {inst} ended on the new revision with {len(pods)} pod(s) serving")
+    key = f"component={comp} instance={inst}"
+    repairs = [m for reason, m in _isvc_events_since(f["case_id"], trigger_ts or 0)
+               if reason == "RestartTriggered" and key in m]
+    if repairs:
+        verdict = "FAIL"
+        notes.append(f"crashloop Instance {comp}/{inst} was repaired after the bump: {repairs[0][:120]}")
+        checks.append(f"  ✗ crashloop: a repair was recorded for {comp} Instance {inst} after the bump "
+                      f"(its revision was not the roll target): {repairs[0][:160]}")
+    else:
+        checks.append(f"  ✓ crashloop: no RestartTriggered event named {comp} Instance {inst} after the bump")
+    if f.get("kills") is not None and f["form"] == "load":
+        checks.append(f"  ⓘ crashloop: runner killed {f['kills']} time(s) while the pod ran the old revision")
+    return verdict
+
+
 def _fault_tick(ctx):
     """Phase-hook dispatcher for the in-flight faults (podkill/ctrlrestart),
     called every watch iteration; one firing per case (latched):
@@ -2054,12 +2247,14 @@ def _fault_tick(ctx):
       rotating  → first observation of a surge/updated pod post-trigger;
       migrating → migration accept observed (_migrate sets ctx['fault_migrating'])."""
     f = ctx.get("fault")
-    if not f or f["fired"] or f["kind"] not in ("podkill", "ctrlrestart"):
+    if not f or f["fired"] or f["kind"] not in ("podkill", "ctrlrestart", "crashloop"):
         return
     if ctx.get("trigger_ts") is None:
         return
     ph = f["param"]
-    if ph == "settling":
+    if ph == "settling" or f["kind"] == "crashloop":
+        # A crashloop breaks its pod the moment the bump has landed, so the
+        # Instance is off the target before the crash is ever observed.
         due = True
     elif ph == "rotating":
         old = ctx.get("old_hashes")
@@ -2083,7 +2278,7 @@ def _fault_finalize(f, verdict, notes, checks):
     for x in f["notes"]:
         notes.append(x)
         checks.append(f"  ⓘ {x}")
-    if f["kind"] in ("podkill", "ctrlrestart") and not f["fired"]:
+    if f["kind"] in ("podkill", "ctrlrestart", "crashloop") and not f["fired"]:
         checks.append(f"  ⓘ fault {f['kind']}:{f['param']} never reached its phase hook (not fired)")
     if f["infra_fail"]:
         verdict = "INFRA-FAIL"
@@ -2300,6 +2495,9 @@ HDR_VALIDATORS = {
     # tolerance in percent (default 50); xcheck=sectraffic scopes a notimpl
     # park to the secondaries' pairing traffic-target check.
     "victimcomp": lambda v: v in COMPS,
+    # form= is how a crashloop:old victim fails: at every start, or after it
+    # is up.
+    "form": lambda v: v in CRASHLOOP_FORMS,
     "imgcomp": lambda v: v in COMPS,
     "ratio_tol": lambda v: isinstance(v, int) and 0 <= v <= 100,
     "xcheck": lambda v: v == "sectraffic",
@@ -2330,7 +2528,7 @@ HDR_VALIDATORS = {
     "inv_xfail": lambda v: v in {"A", "B", "C", "D", "all"},
     # Fault injection: fault=<kind>:<param> — quota:<n≥0>, podkill:<phase>,
     # ctrlrestart:<phase> (phase ∈ FAULT_PHASES, or idle: before the bump),
-    # cordon:<target ∈ FAULT_TARGETS>.
+    # cordon:<target ∈ FAULT_TARGETS>, crashloop:old (with form=).
     "fault": _fault_ok,
     # Fault-case contract knobs. blocked=1 (rollout/scaledown): the fault is
     # expected to HOLD the operation — assert parked-no-churn + capacity floor
@@ -2445,6 +2643,15 @@ def validate_case_file(path):
         errs.append(f"{path}:1: victim= aims a podkill (needs fault=podkill:<hook>)")
     if "victimcomp" in fields and not str(fields.get("fault", "")).startswith("podkill:"):
         errs.append(f"{path}:1: victimcomp= aims a podkill at one Component (needs fault=podkill:<phase>)")
+    crashloop = str(fields.get("fault", "")) == f"crashloop:{CRASHLOOP_VICTIM}"
+    if "form" in fields and not crashloop:
+        errs.append(f"{path}:1: form= says how a crashloop victim fails (needs fault=crashloop:{CRASHLOOP_VICTIM})")
+    if crashloop and "form" not in fields:
+        errs.append(f"{path}:1: fault=crashloop:{CRASHLOOP_VICTIM} needs form=start|load")
+    if crashloop and mode != "rollout":
+        errs.append(f"{path}:1: fault=crashloop:{CRASHLOOP_VICTIM} breaks a pod of the revision a rollout leaves behind (mode=rollout)")
+    if crashloop and fields.get("Ne", 0) == 0:
+        errs.append(f"{path}:1: fault=crashloop:{CRASHLOOP_VICTIM} breaks an engine pod (needs Ne>0)")
     if mode == "canary":
         if "proto" in fields:
             if fields.get("Ne", 0) == 0 or fields.get("Nd", 0) == 0:
@@ -7382,6 +7589,13 @@ def run_case(case_id):
                 checks.append(f"  ⚠ {c} no UID rotation, but 0 pods carry the new revision — nothing was patched (see convergence check)")
             else:
                 checks.append(f"  ✓ {c} updated in place ({new_final[c]}/{N[c]} pods patched, UIDs stable)")
+
+    # Check 6b: the crashloop victim landed the fix. Its Instance was off the
+    # target from the moment it broke, so the roll owns it: it must end on
+    # the new revision and serving, with no repair recorded for it after the
+    # bump. Read against the final watcher state and the ISVC's events.
+    if state == "CONVERGED":
+        verdict = _crashloop_checks(fault, pod_state, old_hashes, trigger_ts, verdict, notes, checks)
 
     # Check 7: Sequential ordering + soak (only meaningful with ≥2 bumped members in order).
     if state == "CONVERGED" and policy == "Sequential":

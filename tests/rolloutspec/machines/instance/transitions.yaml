@@ -51,14 +51,14 @@ transitions:
   - id: T-pending-create
     from: Pending
     event: spec.unpause
-    guard: pause is cleared so the Create pass runs again, pods are missing, no RetryBlock denies the revision, and the row is not one the restart pass repairs (under RecreateInstanceOnPodRestart a row that records the revision it ran takes T-pending-restart instead)
+    guard: pause is cleared so the Create pass runs again, pods are missing, no RetryBlock denies the revision, and the row is not one the restart pass repairs (under RecreateInstanceOnPodRestart a row that records the revision it ran takes T-pending-restart instead, unless that revision is not the roll target and no pod is left, in which case the Create pass materializes it at the target)
     to: Create/CreatePods
     effects: [Phase Creating with a Create CreatePods operation committed, pods created]
     decided_in: pkg/controller/v1beta1/workload/ops/create.go
   - id: T-pending-restart
     from: Pending
     event: spec.unpause
-    guard: policy RecreateInstanceOnPodRestart, the row records the revision it ran, the pause no longer suspends the restart pass, the live pod count is below the Instance's desired pod count, and no RetryBlock denies that revision
+    guard: policy RecreateInstanceOnPodRestart, the row records the revision it ran, the pause does not suspend the restart pass, the live pod count is below the Instance's desired pod count, no RetryBlock denies that revision, and that revision is still the roll target or the Component remains paused (a plain pause withholds the roll, so the repair keeps the row); once the pause clears, a demoted row off the target with no pod left is the Create pass's at the target
     to: Restart/Drain
     effects: [Incarnation bumped, Phase Restarting with the Restart Drain operation and the pod-count reason recorded, the pod set rebuilt at the running revision rather than the target]
     decided_in: pkg/controller/v1beta1/workload/ops/restart.go
@@ -159,14 +159,14 @@ transitions:
     from: Ready
     event: pod.deleted
     variant: source
-    guard: policy RecreateInstanceOnPodRestart and the live pod count is below the Instance's desired pod count
+    guard: policy RecreateInstanceOnPodRestart, the live pod count is below the Instance's desired pod count, and the revision the row runs is still the roll target (or the Component is paused or the target is Held, which withhold the roll the row would otherwise be left to)
     to: Restart/Drain
     effects: [Incarnation bumped, Phase Restarting with the Restart Drain operation and the trigger reason recorded]
     decided_in: pkg/controller/v1beta1/workload/ops/restart.go
   - id: T-ready-restart-crash
     from: Ready
     event: pod.containerRestart
-    guard: policy RecreateInstanceOnPodRestart and the runner container started or terminated after ReadySince
+    guard: policy RecreateInstanceOnPodRestart, the runner container started or terminated after ReadySince, and the revision the row runs is still the roll target (or the Component is paused or the target is Held)
     to: Restart/Drain
     effects: [Incarnation bumped, Phase Restarting, the failing pod's termination captured into LastFailure before the drain]
     decided_in: pkg/controller/v1beta1/workload/ops/restart.go
@@ -188,7 +188,7 @@ transitions:
   - id: T-ready-crashloop-restart
     from: Ready
     event: pod.waiting
-    guard: a pod of a Ready row with no operation holds a terminal waiting reason past lifecycle.stuckPodGracePeriod while its revision-hash label still matches the Component's current revision, whatever the restart policy says, and the coordination gate, the unavailability budget and the RetryBlock for that revision all admit a fresh attempt
+    guard: a pod of a Ready row with no operation holds a terminal waiting reason past lifecycle.stuckPodGracePeriod while its revision-hash label still matches the Component's current revision, whatever the restart policy says, the revision the row runs is still the roll target (or the Component is paused or the target is Held), and the coordination gate, the unavailability budget and the RetryBlock for that revision all admit a fresh attempt
     to: Restart/Drain
     effects: [Incarnation bumped, Phase Restarting with the crash-loop reason recorded on LastFailure, the rebuild paced by the per-Component budget and gated by the revision's RetryBlock]
     decided_in: pkg/controller/v1beta1/workload/ops/restart.go
@@ -217,7 +217,7 @@ transitions:
   - id: T-ready-restart-podterminal
     from: Ready
     event: pod.phaseTerminal
-    guard: policy RecreateInstanceOnPodRestart and a pod of the Instance reaches a terminal phase - Failed, which the Ready-phase restart detector reads as an explicit phase check, or Succeeded, which drops the pod out of the live count that detector compares against the desired one; phase Unknown is neither
+    guard: policy RecreateInstanceOnPodRestart, the revision the row runs is still the roll target (or the Component is paused or the target is Held), and a pod of the Instance reaches a terminal phase - Failed, which the Ready-phase restart detector reads as an explicit phase check, or Succeeded, which drops the pod out of the live count that detector compares against the desired one; phase Unknown is neither
     to: Restart/Drain
     effects: [Incarnation bumped, Phase Restarting with the Restart Drain operation, the terminated pod's termination captured into LastFailure before the drain]
     decided_in: pkg/controller/v1beta1/workload/ops/restart.go
@@ -233,7 +233,7 @@ transitions:
     from: Ready
     event: spec.gangWidth
     variant: grow
-    guard: policy RecreateInstanceOnPodRestart, so the restart detector reads the live pod count as below the widened expectation and claims the row ahead of the Create pass
+    guard: policy RecreateInstanceOnPodRestart and the revision the row runs is still the roll target, so the restart detector reads the live pod count as below the widened expectation and claims the row ahead of the Create pass; a widening that lands with a new revision is the roll's, which rebuilds the gang at the new width and the target
     to: Restart/Drain
     effects: [Incarnation bumped, Phase Restarting, the whole gang drained and deleted before it is rebuilt at the new width]
     decided_in: pkg/controller/v1beta1/workload/ops/restart.go
@@ -360,7 +360,7 @@ transitions:
     from: Failed
     event: pod.deleted
     variant: source
-    guard: policy RecreateInstanceOnPodRestart, a multi-pod Instance with at least one surviving member below the desired count and terminal-phase pods counted as lost rather than live, no preserved Update or Migrate operation, and no RetryBlock denying the rebuild; a Restart parked at Failed is a spent attempt rather than an owner, so the gang may re-arm as a whole under a fresh deadline
+    guard: policy RecreateInstanceOnPodRestart, a multi-pod Instance with at least one surviving member below the desired count and terminal-phase pods counted as lost rather than live, no preserved Update or Migrate operation, no RetryBlock denying the rebuild, and the revision the rebuild would land on still the roll target (a Failed row off the target re-enters through its corrective roll instead); a Restart parked at Failed is a spent attempt rather than an owner, so the gang may re-arm as a whole under a fresh deadline
     to: Restart/Drain
     effects: [Incarnation bumped, Phase Restarting with the gang-member-lost reason recorded, a gang that never ran a revision carrying the interrupted attempt's Operation.TargetRevision onto the rebuild so the per-revision Service selects the new pods]
     decided_in: pkg/controller/v1beta1/workload/ops/restart.go
@@ -430,7 +430,7 @@ transitions:
   - id: T-create-retire-superseded
     from: Create/CreatePods
     event: spec.revision
-    guard: the attempt's pinned revision is no longer the target, or an unpinned attempt's pod label proves it belongs to another revision
+    guard: the attempt's pinned revision is not the roll target, or an unpinned attempt's pod label proves it belongs to another revision
     to: Create/CreatePods
     effects: [the half-built attempt retired and replaced by a fresh Create CreatePods operation pinned to the current target, with no Failed phase, no failure event and no RetryBlock, because a superseded spec is not a failure of the retired revision; the pods of the retired attempt are cleaned up under the new operation]
     decided_in: pkg/controller/v1beta1/workload/ops/create.go
@@ -438,7 +438,7 @@ transitions:
     from: Create/CreatePods
     event: pod.deleted
     variant: source
-    guard: policy RecreateInstanceOnPodRestart, a multi-pod Instance whose Create step is committed, at least one member alive but fewer than expected, and no RetryBlock denying the rebuild
+    guard: policy RecreateInstanceOnPodRestart, a multi-pod Instance whose Create step is committed, at least one member alive but fewer than expected, no RetryBlock denying the rebuild, and the attempt's pinned revision still the roll target (a superseded attempt is retired at the new target instead, T-create-retire-superseded)
     to: Restart/Drain
     effects: [the restart pass runs ahead of Create and takes ownership, Incarnation bumped, Phase Restarting with the gang-member-lost reason recorded]
     decided_in: pkg/controller/v1beta1/workload/ops/restart.go

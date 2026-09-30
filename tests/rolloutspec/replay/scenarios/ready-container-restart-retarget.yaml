@@ -1,0 +1,60 @@
+# The runner container of a Ready Instance dies and is restarted in place
+# after Ready, the shape a pod that keeps crashing under load shows, while
+# the template moves to a fixed revision. Under RecreateInstanceOnPodRestart
+# that evidence opens a repair on a row that still runs the target; here
+# the row is off the target, so the restart pass yields it and the roll
+# surges the fixed replacement instead.
+scenario: ready-container-restart-retarget
+arrows:
+  - T-empty-create
+  - T-create-ready
+  - T-ready-surge
+  - T-surge-target-ready
+  - T-surgedrain-promote
+cells:
+  - instance/Ready/pod.containerRestart/boundary@T-ready-surge
+  - instance/Ready/spec.revision/boundary@T-ready-restart-crash
+intentional: >-
+  the runner restart and the new target reach the pass together, and the
+  pass starts the surge rather than a repair
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    containerName: ome-container
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+timeline:
+  - tick: 1
+    note: the index is planned and no row exists, so the Create pass opens the attempt
+  - tick: 2
+    note: the pod reports Ready and enters rotation, which stamps the ReadySince the restart trigger dates evidence against
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: a minute of steady serving, so the restart that follows is unambiguously after Ready
+    events:
+      - clock.advance: 1m
+  - tick: 4
+    note: the runner dies and comes back under the same pod as the template moves to the fixed revision, so the roll surges a replacement instead of rebuilding the broken revision
+    events:
+      - pod.containerRestart: {pod: {index: 0}, message: OOMKilled}
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 5
+    note: the replacement is serving and in rotation beside the source
+    events:
+      - pod.ready[target]: {pod: {index: 0, ordinal: 1}}
+      - endpoint.rotationIn[target]: {pod: {index: 0, ordinal: 1}}
+  - tick: 6
+    note: the source leaves rotation, so the drain has converged
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+  - tick: 7
+    note: the drained source is gone and the Instance promotes on the fixed revision
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}

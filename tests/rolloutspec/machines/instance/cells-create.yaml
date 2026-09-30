@@ -79,10 +79,10 @@ cells:
     windows: [before]
     outcome: transition
     to: Restart/Drain
-    guard: RecreateInstanceOnPodRestart, a multi-pod Instance that still has a surviving member, and no RetryBlock denying the rebuild revision
-    note: partial gang loss hands the whole Instance to the restart pass, which runs ahead of Create and which the create gate defers to; every other shape — single pod, total loss, or a policy without instance recreate — stays in this state and the missing pod is re-created inside the same attempt at the same operation and deadline, unless a Held block denies the revision that pod would carry
+    guard: RecreateInstanceOnPodRestart, a multi-pod Instance that still has a surviving member, no RetryBlock denying the rebuild revision, and the attempt's pinned revision still the roll target
+    note: partial gang loss hands the whole Instance to the restart pass, which runs ahead of Create and which the create gate defers to; an attempt pinned to a superseded revision is not repaired - the restart pass yields it and the Create pass retires it into a fresh attempt at the target (T-create-retire-superseded); every other shape — single pod, total loss, or a policy without instance recreate — stays in this state and the missing pod is re-created inside the same attempt at the same operation and deadline, unless a Held block denies the revision that pod would carry
     placement: unit
-    coverage: {perm: [], unit: [TestCreate_RecreateInstance_DefersPartialGangToRestart, TestCreate_NonRecreatePolicy_SelfHealsMissingPod, TestCreate_PartialPods_CreatesOnlyMissing, TestCreate_RetryBlockHeld_DeniesRemainderOfInFlightAttempt], kind: [], replay: [T-create-gang-restart]}
+    coverage: {perm: [], unit: [TestCreate_RecreateInstance_DefersPartialGangToRestart, TestCreate_NonRecreatePolicy_SelfHealsMissingPod, TestCreate_PartialPods_CreatesOnlyMissing, TestCreate_RetryBlockHeld_DeniesRemainderOfInFlightAttempt, TestRepairYieldsToTarget], kind: [], replay: [T-create-gang-restart]}
     status: decided
 
   - state: Create/CreatePods
@@ -202,7 +202,7 @@ cells:
     windows: [before]
     outcome: transition
     to: Create/CreatePods
-    guard: the attempt's pinned revision is no longer the target, or an unpinned attempt's pod label proves it belongs to another revision
+    guard: the attempt's pinned revision is not the roll target, or an unpinned attempt's pod label proves it belongs to another revision
     note: a superseded spec is not a failure of the retired revision, so the half-built attempt is retired straight into a fresh Create at the new target — the operation is replaced in one write with no Failed phase, no failure event and no RetryBlock, for a single pod and for a gang alike. An attempt whose pin still matches is untouched and finishes, and three shapes are held back from retirement — an attempt whose pods are all runtime-ready is one promote from serving, so it promotes and the update machinery rolls it through a surge instead; a row with a recorded RunningRevision is a serving materialization being rebuilt, which is the update machinery's business and never Create's; and a retirement onto a revision the RetryBlock currently denies is deferred, because the replacement is a fresh attempt that gate would refuse, which would tear the old attempt down with nothing to take its place. The pods the retired attempt leaves behind are the fresh attempt's to clear — it takes a still-routed one out of rotation first and deletes it on a later pass, so a gang is never mixed-revision and no pod is dropped while it is still carrying traffic
     invariants: [one.operation.per.instance]
     placement: perm

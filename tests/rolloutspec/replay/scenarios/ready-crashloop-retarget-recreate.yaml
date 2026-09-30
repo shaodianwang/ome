@@ -1,0 +1,56 @@
+# A Ready Instance wedges in a crash loop on the revision it runs while
+# the template moves to a fixed revision under RecreatePod. The row is
+# off the target, so the restart pass yields it: the recreate drains and
+# deletes the crash-looping pod and rebuilds the Instance at the fixed
+# revision, with no repair opened on the broken one.
+scenario: ready-crashloop-retarget-recreate
+arrows:
+  - T-empty-create
+  - T-create-ready
+  - T-ready-recreate
+  - T-drain-ready
+cells:
+  - instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-recreate
+  - instance/Ready/spec.revision/boundary@T-ready-crashloop-restart
+intentional: >-
+  the crash loop and the new target reach the pass together, and the pass
+  starts the recreate rather than a repair; the pod set serves nothing, so
+  the start skips the coordination gate consult
+initial:
+  spec:
+    replicas: 1
+    strategy: RecreatePod
+    restartPolicy: None
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+timeline:
+  - tick: 1
+    note: cold start opens the attempt on the Component's current revision
+  - tick: 2
+    note: the pod becomes Ready and enters rotation, so the Instance promotes
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 3
+    note: the pod runs for two minutes, which is longer than the grace
+    events:
+      - clock.advance: 2m
+  - tick: 4
+    note: the pod falls into a crash loop and leaves rotation as the template moves to the fixed revision, so the recreate drains it instead of a repair rebuilding the broken revision
+    events:
+      - pod.servingOff[source]: {pod: {index: 0}}
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+      - pod.waiting[CrashLoopBackOff]: {pod: {index: 0}, message: "back-off restarting failed container"}
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 5
+    note: the crash-looping pod is gone, so the rebuild lands at the bumped incarnation on the fixed revision
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 6
+    note: the rebuilt pod reports Ready and the Instance promotes on the fixed revision
+    events:
+      - pod.ready[target]: {pod: {index: 0}}
