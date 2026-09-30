@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
+import contextlib
 import copy
+import io
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import re
 import unittest
@@ -11,12 +15,20 @@ from pathlib import Path
 from unittest import mock
 
 import batch
+import casefiles
+import gen_cases
+import gen_mn
 import generate_cases
 import irstatus
 import run
 import runtime_fixtures
 
 HERE = Path(__file__).parent.resolve()
+
+
+def _tree(root):
+    """{relative path: bytes} of every file under root."""
+    return {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()}
 
 
 def pod(component, index, runner="default", ready=True, serving=True):
@@ -355,6 +367,36 @@ class GeneratedCorpusTest(unittest.TestCase):
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, msg=(r.stdout + r.stderr))
 
+    def test_feature_regeneration_is_byte_stable(self):
+        """The cases gen_cases.py mints are a pure function of the generator
+        plus the hand-maintained header layer it carries over (the cell= tags
+        on its canary cases): regenerating changes nothing."""
+        r = subprocess.run([sys.executable, str(HERE / "gen_cases.py"), "--check"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, msg=(r.stdout + r.stderr))
+
+    def test_multinode_regeneration_is_byte_stable(self):
+        r = subprocess.run([sys.executable, str(HERE / "gen_mn.py"), "--check"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, msg=(r.stdout + r.stderr))
+
+    def test_regenerating_the_corpus_writes_nothing_and_deletes_nothing(self):
+        """Regenerating a copy of the committed tree through the real write
+        paths leaves every file byte-identical and deletes none — including
+        the hand-written cases that share folders with generated ones."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "isvcs"
+            shutil.copytree(HERE / "isvcs", root)
+            before = _tree(root)
+            feature = gen_cases.cases()
+            self.assertTrue(casefiles.unminted(feature, root),
+                            "the feature folders hold hand-written cases")
+            self.assertEqual([], casefiles.write(feature, root))
+            self.assertEqual([], casefiles.write(gen_mn.cases(), root))
+            outputs, _rows = generate_cases.build_outputs()
+            generate_cases.write(outputs, root)
+            self.assertEqual(before, _tree(root))
+
     def test_corpus_stays_under_lane_cap(self):
         # 3000 committed case files is the agreed ceiling for running the
         # whole corpus in one eval lane; growth past it needs a lane split
@@ -389,6 +431,176 @@ class GeneratedCorpusTest(unittest.TestCase):
         with mock.patch.dict(generate_cases.PARKED, {cell: (999999, "stale", "")}):
             with self.assertRaises(SystemExit):
                 generate_cases.build_outputs()
+
+
+class GeneratedFolderGuardTest(unittest.TestCase):
+    """generate_cases owns its gen-* folders wholesale and knows its files by
+    the [gen] mark: an unmarked file there is hand-written and stops the regen
+    before anything is written or swept, whatever its id; a marked file
+    outside the emitted set is stale and swept."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root)
+        self.outputs, _rows = generate_cases.build_outputs()
+
+    def _put(self, rel, text):
+        p = self.root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+        return p
+
+    def test_hand_written_case_in_a_generated_folder_is_refused_not_swept(self):
+        at_generated_id = self._put("gen-fault/p1300.yaml",
+                                    "# p1300: kill engine, hand-pinned  mode=kill Ne=4 co=none topo=engine\n"
+                                    "apiVersion: ome.io/v1beta1\n")
+        at_free_id = self._put("gen-fault/p1599.yaml",
+                               "# p1599: kill pd, hand-pinned  mode=kill Ne=4 co=none topo=pd\n"
+                               "apiVersion: ome.io/v1beta1\n")
+        with self.assertRaises(SystemExit) as cm:
+            generate_cases.write(self.outputs, self.root)
+        self.assertIn("hand-written case in a generator-owned folder", str(cm.exception))
+        self.assertEqual({at_generated_id, at_free_id}, set(self.root.rglob("*.yaml")))
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(1, generate_cases.check(self.outputs, self.root))
+        self.assertIn("hand-written case at a generated id", err.getvalue())
+        self.assertIn("hand-written case in a generator-owned folder", err.getvalue())
+
+    def test_stale_generated_file_is_swept_and_the_corpus_written(self):
+        stale = self._put("gen-rollout/p1199.yaml",
+                          "# p1199: [gen] rollout engine N=4 SurgeThenDrain s1  Ne=4 co=none topo=engine\n"
+                          "apiVersion: ome.io/v1beta1\n")
+        generate_cases.write(self.outputs, self.root)
+        self.assertFalse(stale.exists())
+        self.assertEqual(sorted(self.outputs), sorted(_tree(self.root)))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(0, generate_cases.check(self.outputs, self.root))
+
+
+class GeneratorWritePathTest(unittest.TestCase):
+    """casefiles, the write path of the generators that share folders with
+    hand-written cases: only minted ids are written, nothing is deleted, a
+    file the generator does not recognise stops the run, and the
+    hand-maintained header layer rides through a regeneration."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root)
+        (self.root / "restart").mkdir()
+
+    def _put(self, rel, text):
+        p = self.root / rel
+        p.write_text(text)
+        return p
+
+    @staticmethod
+    def _case(cid, desc="kill engine restartPolicy=None", ceil_e=8,
+              body="apiVersion: ome.io/v1beta1\nkind: InferenceService\n"):
+        kv = [("mode", "kill"), ("Ne", 8), ("ceil_e", ceil_e), ("restart", "None"),
+              ("co", "none"), ("topo", "engine")]
+        return casefiles.Case("restart", cid, desc, kv, body)
+
+    def test_writes_only_minted_ids_and_deletes_nothing(self):
+        hand = "# p148: kill engine under pause=true  mode=kill Ne=4 pause=true co=none topo=engine\napiVersion: ome.io/v1beta1\n"
+        unminted = "# p131: kill engine restartPolicy=RecreateInstance  mode=kill Ne=8 co=none topo=engine\napiVersion: ome.io/v1beta1\n"
+        self._put("restart/p148.yaml", hand)
+        self._put("restart/p131.yaml", unminted)
+        minted = [self._case("p130")]
+        self.assertEqual(["restart/p130.yaml"], casefiles.write(minted, self.root))
+        self.assertEqual(minted[0].text(), (self.root / "restart/p130.yaml").read_text())
+        self.assertEqual(hand, (self.root / "restart/p148.yaml").read_text())
+        self.assertEqual(unminted, (self.root / "restart/p131.yaml").read_text())
+        self.assertEqual({"restart": ["p131", "p148"]}, casefiles.unminted(minted, self.root))
+        self.assertEqual([], casefiles.write(minted, self.root), "a second run is a no-op")
+
+    def test_hand_layer_rides_through_a_regeneration(self):
+        """Keys the generator does not emit keep their place among its keys,
+        the line-2 reason stays, while an owned value and the body follow the
+        generator."""
+        self._put("restart/p130.yaml",
+                  "# p130: kill engine restartPolicy=None  mode=kill Ne=8 ceil_e=8 restart=None "
+                  "cell=restart/engine/none notimpl=1 issue=7 co=none topo=engine\n"
+                  "# reason: parked on a tracked bug\n"
+                  "apiVersion: ome.io/v1beta1\nkind: InferenceService\n")
+        c = self._case("p130", ceil_e=9,
+                       body="apiVersion: ome.io/v1beta1\nkind: InferenceService\nspec: {}\n")
+        casefiles.write([c], self.root)
+        self.assertEqual(
+            "# p130: kill engine restartPolicy=None  mode=kill Ne=8 ceil_e=9 restart=None "
+            "cell=restart/engine/none notimpl=1 issue=7 co=none topo=engine\n"
+            "# reason: parked on a tracked bug\n"
+            "apiVersion: ome.io/v1beta1\nkind: InferenceService\nspec: {}\n",
+            (self.root / "restart/p130.yaml").read_text())
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(0, casefiles.check([c], self.root, "t"))
+
+    def test_tokens_the_generator_does_not_emit_keep_their_place(self):
+        """Whatever the generator does not emit for the case is kept where it
+        sits — a token ahead of every emitted key included, and a key the
+        generator stops emitting, which is removed by hand."""
+        self._put("restart/p130.yaml",
+                  "# p130: kill engine restartPolicy=None  cell=restart/engine/none mode=kill Ne=8 "
+                  "ceil_e=8 restart=None pause=true co=none topo=engine\n"
+                  "apiVersion: ome.io/v1beta1\nkind: InferenceService\n")
+        c = casefiles.Case("restart", "p130", "kill engine restartPolicy=None",
+                           [("mode", "kill"), ("Ne", 8), ("ceil_e", 8), ("co", "none"), ("topo", "engine")],
+                           "apiVersion: ome.io/v1beta1\nkind: InferenceService\n")
+        self.assertEqual("# p130: kill engine restartPolicy=None  cell=restart/engine/none mode=kill Ne=8 "
+                         "ceil_e=8 restart=None pause=true co=none topo=engine",
+                         c.text((self.root / "restart/p130.yaml").read_text()).splitlines()[0])
+
+    def test_the_generator_owns_its_keys_the_description_and_the_body(self):
+        """A hand edit to an owned key or the body is drift: check reports it
+        and a regeneration puts the generator's value back."""
+        self._put("restart/p130.yaml",
+                  "# p130: kill engine restartPolicy=None  mode=kill Ne=8 ceil_e=99 restart=None "
+                  "co=none topo=engine\napiVersion: ome.io/v1beta1\nkind: InferenceService\n")
+        c = self._case("p130")
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(1, casefiles.check([c], self.root, "t"))
+        self.assertIn("drifted from the generator", err.getvalue())
+        casefiles.write([c], self.root)
+        self.assertEqual(c.text(), (self.root / "restart/p130.yaml").read_text())
+
+    def test_a_case_it_does_not_recognise_stops_the_regeneration(self):
+        """A minted id held by a different case — hand-written, or the matrix
+        renumbered — refuses the whole run: nothing written, nothing lost."""
+        hand = "# p131: kill engine under pause=true  mode=kill Ne=4 pause=true co=none topo=engine\napiVersion: ome.io/v1beta1\n"
+        self._put("restart/p131.yaml", hand)
+        minted = [self._case("p130"), self._case("p131", desc="kill engine restartPolicy=RecreateInstance")]
+        with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit) as cm:
+            casefiles.write(minted, self.root)
+        self.assertIn("nothing was written", str(cm.exception))
+        self.assertIn("p131.yaml: holds 'p131: kill engine under pause=true", err.getvalue())
+        self.assertEqual(hand, (self.root / "restart/p131.yaml").read_text())
+        self.assertFalse((self.root / "restart/p130.yaml").exists())
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(1, casefiles.check(minted, self.root, "t"))
+
+    def test_check_reports_a_missing_minted_file(self):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(1, casefiles.check([self._case("p130")], self.root, "t"))
+        self.assertIn("missing on disk", err.getvalue())
+
+    def test_only_reason_lines_belong_to_the_header_layer(self):
+        """A body that opens with its own comments (a runtime fixture) is body:
+        it is neither carried over nor duplicated."""
+        body = "# Test runtime fixture\n# second line\napiVersion: ome.io/v1beta1\n"
+        c = casefiles.Case("runtime-rev", "p400", "runtime-rev engine roll (autoSync=true, material edit)",
+                           [("mode", "runtimerev"), ("Ne", 4)], body, sep=" ")
+        on_disk = c.text()
+        self.assertEqual(on_disk, c.text(on_disk))
+        self.assertEqual(("# p400: runtime-rev engine roll (autoSync=true, material edit) mode=runtimerev Ne=4",
+                          [], body), casefiles.split(on_disk))
+
+    def test_single_space_headers_recognise_only_a_key_value_region(self):
+        c = casefiles.Case("runtime-rev", "p400", "runtime-rev engine roll (autoSync=true, material edit)",
+                           [("mode", "runtimerev"), ("Ne", 4)], "apiVersion: ome.io/v1beta1\n", sep=" ")
+        head = "# p400: runtime-rev engine roll (autoSync=true, material edit)"
+        self.assertTrue(c.recognises(f"{head} mode=runtimerev Ne=4\n"))
+        self.assertTrue(c.recognises(f"{head} cell=x mode=runtimerev Ne=4\n"))
+        self.assertFalse(c.recognises(f"{head} reworded mode=runtimerev Ne=4\n"))
+        self.assertFalse(c.recognises("# p400: another case mode=runtimerev Ne=4\n"))
 
 
 class ParkedInvariantVerdictTest(unittest.TestCase):

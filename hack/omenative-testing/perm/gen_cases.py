@@ -12,8 +12,10 @@ value, scale target, %-budget, ReadyPolicy, in-place tuning). Default scale N=4
 
 Each case's first line is the harness header: mode= (run.py dispatch), topo=
 (grouping), co= (coordination kind), Ne/Nd/Nr, ceil_*, + per-mode params (to_*,
-partition, mig=, restart=, kill=, inst=). Re-run after editing; overwrites the
-pNNN.yaml it owns.
+partition, mig=, restart=, kill=, inst=). Re-run after editing: it writes only
+the ids it mints, leaves the hand-written cases sharing its folders alone and
+carries the hand-maintained header layer (cell=, notimpl=, issue=, # reason:)
+through unchanged (casefiles.py); `--check` compares without writing.
 
 Runnable today: edge/ (mode=rollout) + scale/ (mode=scaledown). migration/,
 restart/, partition/, rebump record MODE_TODO until their run.py mode lands — the
@@ -27,10 +29,13 @@ CRD field paths (pkg/apis/ome/v1beta1/lifecycle_types.go):
   ...rollingUpdate.{maxSurge,maxUnavailable}  int OR "NN%" ; ...rollingUpdate.partition  int
   ...inPlaceUpdateStrategy.markNotReadyDuringLifecycle
 """
+import argparse
 import math
 import subprocess
 import sys
 from pathlib import Path
+
+import casefiles
 
 HERE = Path(__file__).parent.resolve()
 ISVCS = HERE / "isvcs"
@@ -239,21 +244,20 @@ HDR_ORDER = ["mode", "Ne", "Nd", "Nr", "ceil_e", "ceil_d", "ceil_r", "to_e", "to
              "co", "topo", "infeasible", "floor_hard"]
 
 
-def header(name, desc, kv):
-    parts = [f"{k}={kv[k]}" for k in HDR_ORDER if k in kv]
-    parts += [f"{k}={v}" for k, v in kv.items() if k not in HDR_ORDER]
-    return f"# {name}: {desc}  " + " ".join(parts)
+def tokens(kv):
+    """The header's key=value tokens in HDR_ORDER, then any other in kv order."""
+    return ([(k, kv[k]) for k in HDR_ORDER if k in kv]
+            + [(k, v) for k, v in kv.items() if k not in HDR_ORDER])
 
 
 CASES = []
 COUNTERS = {"migration": 100, "restart": 130, "partition": 160, "scale": 190, "edge": 220, "canary": 300}
-# Hand-written cases parked inside generator-owned folders: main()'s idempotency
-# sweep preserves them and C() must never mint their ids. (p188/p189 are the
-# former scale/p97+p98, renamed out from under rollout/p97+p98's shadow.)
-HAND_WRITTEN = {"scale": {"p188", "p189"}}
+# Hand-written cases share these folders under ids outside the minted runs:
+# casefiles.write leaves every id it does not mint alone and refuses to mint
+# over a case it does not recognise as its own, so a counter that grows into a
+# hand-written id fails the regen instead of replacing the case.
 # isvcs/fault/ (p600+), isvcs/scenario/ (p700+) and isvcs/pairing/ (p800+) are
-# entirely hand-written and NOT in COUNTERS — the regen sweep never touches
-# them; keep the feature counters below 600.
+# entirely hand-written and NOT in COUNTERS; keep the feature counters below 600.
 
 
 def C(folder, desc, comps, coord=None, runtime=None, meta_ann=None, **kv):
@@ -756,37 +760,39 @@ Canalysis("breach at final 100pct step", "pd", "breach", n=PDN,
           steps=[astep("100%", 100, analysis_spec(failure_limit=1))])
 
 
-def main():
-    # Idempotency: drop previously-generated 3-digit cases (p100+) in the feature
-    # folders so renumbering never leaves stale duplicates (a duplicate case-id
-    # across folders makes run.py.find_isvc pick the wrong file — and run.py now
-    # hard-errors on one). HAND_WRITTEN cases are preserved, not regenerated.
-    for folder in COUNTERS:
-        d = ISVCS / folder
-        for f in (d.glob("p[0-9][0-9][0-9].yaml") if d.exists() else []):
-            if f.stem in HAND_WRITTEN.get(folder, set()):
-                continue
-            f.unlink()
+def cases():
+    """Every minted case, rendered — the generator's whole owned output."""
+    return [casefiles.Case(folder, name, desc, tokens(kv),
+                           render(name, comps, coord, runtime=opts["runtime"], meta_ann=opts["meta_ann"]))
+            for folder, name, desc, comps, coord, kv, opts in CASES]
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--check", action="store_true",
+                    help="regenerate in memory and byte-compare against the committed "
+                         "tree without writing; nonzero on any drift")
+    args = ap.parse_args(argv)
+    minted = cases()
+    if args.check:
+        return casefiles.check(minted, ISVCS, "gen_cases.py")
+    written = casefiles.write(minted, ISVCS)
     per_folder = {}
-    for folder, name, desc, comps, coord, kv, opts in CASES:
-        if name in HAND_WRITTEN.get(folder, set()):
-            sys.exit(f"generated {folder}/{name} collides with a hand-written case — renumber the counter block or move the hand-written id")
-        path = ISVCS / folder / f"{name}.yaml"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(header(name, desc, kv) + "\n"
-                        + render(name, comps, coord, runtime=opts["runtime"], meta_ann=opts["meta_ann"]))
-        per_folder.setdefault(folder, []).append(name)
-    total = sum(len(v) for v in per_folder.values())
-    print(f"generated {total} cases:")
+    for c in minted:
+        per_folder.setdefault(c.folder, []).append(c.cid)
+    print(f"generated {len(minted)} cases ({len(written)} file(s) written):")
     for folder in sorted(per_folder):
         names = per_folder[folder]
         print(f"  {folder:10s} {len(names):2d}  {names[0]}..{names[-1]}")
+    for folder, ids in casefiles.unminted(minted, ISVCS).items():
+        print(f"  {folder:10s} left alone, not minted here: {len(ids)} case(s) ({ids[0]}..{ids[-1]})")
     # A regen must never reintroduce a duplicate/shadowed case id or a malformed
     # header — fail the generation, not the next harness run.
     rc = subprocess.run([sys.executable, str(HERE / "run.py"), "--validate-only"]).returncode
     if rc:
         sys.exit(rc)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -10,12 +10,18 @@ Each multi-node Instance is a gang of 1 leader + W worker pods (LeaderWorkerSet
 N[comp] is the #Instances (minReplicas); the harness counts INSTANCES not raw
 pods. Ceilings are in Instance units: a SurgeThenDrain surge peaks at N+maxSurge
 Instances; recreate/in-place peak at N. Requires the ome-coordtest-multinode
-runtime (leader.runner + worker.runner). Run: python3 gen_mn.py
+runtime (leader.runner + worker.runner). Run: python3 gen_mn.py (`--check`
+compares against the committed tree without writing). isvcs/rollout/ also
+holds the static hand-written p01-p65: the write path (casefiles.py) touches
+only the ids minted here.
 """
+import argparse
 import math
 import os
 import subprocess
 import sys
+
+import casefiles
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RT = "ome-coordtest-multinode"
@@ -50,26 +56,25 @@ def _block(c):
 
 
 def emit(cid, desc, comps, coord=None, reason=None):
+    """Render one multi-node case for isvcs/rollout/ (the canonical location)."""
     by = {c["name"]: c for c in comps}
     N = {k: by.get(k, {}).get("N", 0) for k in ("engine", "decoder", "router")}
     ce = {k: (_ceil(by[k]) if k in by else 0) for k in ("engine", "decoder", "router")}
     topo = "pd-mn" if "decoder" in by else "engine-mn"   # categorization tag run.py keys on
     if "infeasible=1" in desc and not reason:
         sys.exit(f"{cid}: infeasible=1 requires a reason (validate rejects it without a line-2 '# reason:')")
-    lines = [f"# {cid}: {desc}  Ne={N['engine']} Nd={N['decoder']} Nr={N['router']} "
-             f"ceil_e={ce['engine']} ceil_d={ce['decoder']} ceil_r={ce['router']} topo={topo}"]
-    if reason:   # line 2, adjacent to the header — run.py --validate-only enforces this for infeasible=1
-        lines.append(f"# reason: {reason}")
-    lines += ["apiVersion: ome.io/v1beta1", "kind: InferenceService",
+    kv = [("Ne", N["engine"]), ("Nd", N["decoder"]), ("Nr", N["router"]),
+          ("ceil_e", ce["engine"]), ("ceil_d", ce["decoder"]), ("ceil_r", ce["router"]), ("topo", topo)]
+    # line 2, adjacent to the header — run.py --validate-only enforces this for infeasible=1
+    extra = [f"# reason: {reason}"] if reason else []
+    lines = ["apiVersion: ome.io/v1beta1", "kind: InferenceService",
              f"metadata: {{ name: {cid} }}", "spec:",
              "  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }",
              f"  runtime: {{ apiGroup: ome.io, kind: ClusterServingRuntime, name: {RT}, autoSync: true }}"]
     lines += [_block(c) for c in comps]
     if coord:
         lines += _coord_groups(coord)   # OEP-0017 (v2): spec.rollout.groups
-    with open(os.path.join(HERE, "isvcs", "rollout", f"{cid}.yaml"), "w") as f:  # canonical location
-        f.write("\n".join(lines) + "\n")
-    print(f"  {cid}: {desc}")
+    return casefiles.Case("rollout", cid, desc, kv, "\n".join(lines) + "\n", extra=extra)
 
 
 def _coord_groups(coord):
@@ -255,19 +260,38 @@ COMBOS = [
      [C("engine", 8, 12, 1, "SurgeThenDrain", "50%", 0)], None),
 ]
 
-if __name__ == "__main__":
+
+def cases():
+    """Every minted multi-node case, rendered."""
+    return [emit(*entry[:4], reason=entry[4] if len(entry) > 4 else None) for entry in COMBOS]
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--check", action="store_true",
+                    help="regenerate in memory and byte-compare against the committed "
+                         "tree without writing; nonzero on any drift")
+    args = ap.parse_args(argv)
     for cid, *_ in COMBOS:
         if 1 <= int(cid[1:]) <= 65:
             sys.exit(f"{cid} would overwrite the static hand-written p01-p65 rollout set")
-    for entry in COMBOS:
-        cid, desc, comps, coord = entry[:4]
-        emit(cid, desc, comps, coord, reason=entry[4] if len(entry) > 4 else None)
-    ids = [cid for cid, *_ in COMBOS]
-    lo = min(int(c[1:]) for c in ids)
-    hi = max(int(c[1:]) for c in ids)
-    print(f"generated {len(COMBOS)} multi-node cases (p{lo}-p{hi})")
+    minted = cases()
+    root = os.path.join(HERE, "isvcs")
+    if args.check:
+        return casefiles.check(minted, root, "gen_mn.py")
+    written = casefiles.write(minted, root)
+    for c in minted:
+        print(f"  {c.cid}: {c.desc}")
+    ids = [int(c.cid[1:]) for c in minted]
+    print(f"generated {len(minted)} multi-node cases (p{min(ids)}-p{max(ids)}); "
+          f"{len(written)} file(s) written")
     # A regen must never reintroduce a duplicate/shadowed case id (rollout/p100
     # vs migration/p100) — fail the generation, not the next harness run.
     rc = subprocess.run([sys.executable, os.path.join(HERE, "run.py"), "--validate-only"]).returncode
     if rc:
         sys.exit(rc)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

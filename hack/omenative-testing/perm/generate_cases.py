@@ -12,11 +12,13 @@ into three generator-owned folders, using ONLY verbs and hooks the runners
     gen-restart/  p1600+  mode=kill (steady-state pod kill), pause off|true|freeze
 
 Ownership and determinism:
-  - The gen-* folders belong ENTIRELY to this generator: a regen sweeps and
-    rewrites them wholesale. Hand-written cases must never be parked there —
-    a foreign file in a gen-* folder fails the regen. When a generated case
-    finds a bug worth pinning, copy it into a hand-owned folder under a fresh
-    hand id; never edit the generated file.
+  - The gen-* folders belong ENTIRELY to this generator: every case there
+    carries the `[gen]` mark on line 1, and a regen sweeps and rewrites the
+    marked files wholesale. A file without the mark is hand-written, whatever
+    its id: it stops the regen before anything is written or swept, and must
+    move to a hand-owned folder. When a generated case finds a bug worth
+    pinning, copy it into a hand-owned folder under a fresh hand id; never
+    edit the generated file.
   - Output is a pure function of this file: no timestamps, no environment.
     `--check` regenerates in memory and byte-compares against the committed
     tree (run_test.py runs it in CI), so hand-edits to generated files are
@@ -63,6 +65,9 @@ GEN_BLOCKS = {
     "gen-restart": (1600, 2000),
 }
 MANIFEST_REL = "MANIFEST.md"
+# Every generated description starts with this mark; it is what tells a
+# generated file in a gen-* folder from a hand-written one.
+GEN_MARK = "[gen]"
 
 RP_FULL = {"None": "None", "RecreateInstance": "RecreateInstanceOnPodRestart"}
 RESTARTS = ["None", "RecreateInstance"]
@@ -221,7 +226,7 @@ def emit_rollout(add):
                 kv = dict(**counts(topo, n), **ceilings(topo, n, strat, surge),
                           co="none", topo=topo)
                 meta = dict(strat=strat, verb="none")
-                desc = (f"[gen] rollout {shape_tag(topo, w)} N={n} {strat} "
+                desc = (f"{GEN_MARK} rollout {shape_tag(topo, w)} N={n} {strat} "
                         f"{budget_tag(strat, surge, unavail)}")
                 if strat == "SurgeThenDrain":
                     reason = (f"plain bump: rolls within the surge budget "
@@ -313,7 +318,7 @@ def emit_fault(add):
                                       fault=f"podkill:{phase}", **waivers,
                                       co="none", topo=topo)
                             meta = dict(strat=strat, verb=f"podkill:{phase}", rp=rp)
-                            desc = (f"[gen] podkill {phase} {shape_tag(topo, w)} "
+                            desc = (f"{GEN_MARK} podkill {phase} {shape_tag(topo, w)} "
                                     f"N={size} {strat} "
                                     f"{budget_tag(strat, surge, unavail)} rp {rp}")
                             reason = _podkill_reason(topo, strat, phase, waivers)
@@ -373,7 +378,7 @@ def emit_restart(add):
                         meta = dict(strat=strat, verb="kill", rp=rp,
                                     pause=pause or "off")
                         strat_note = "" if strat == "SurgeThenDrain" else f" ({strat} dormant)"
-                        desc = (f"[gen] kill {shape_tag(topo, w)} N={n} {strat} "
+                        desc = (f"{GEN_MARK} kill {shape_tag(topo, w)} N={n} {strat} "
                                 f"rp {rp}"
                                 + (f" target {target}" if target else "")
                                 + (f" pause {pause}" if pause else "")
@@ -524,29 +529,42 @@ def manifest(rows):
 
 
 # ── modes ────────────────────────────────────────────────────────────────────
-def owned_files_on_disk():
+def hand_written(path):
+    """A yaml in a gen-* folder is hand-written when line 1 lacks the mark."""
+    with open(path) as f:
+        return not f.readline().startswith(f"# {path.stem}: {GEN_MARK} ")
+
+
+def owned_files_on_disk(root=ISVCS):
     files = {}
     for folder in GEN_BLOCKS:
-        d = ISVCS / folder
+        d = Path(root) / folder
         if d.exists():
             for f in sorted(d.glob("*.yaml")):
                 files[f"{folder}/{f.name}"] = f
-    mf = ISVCS / MANIFEST_REL
+    mf = Path(root) / MANIFEST_REL
     if mf.exists():
         files[MANIFEST_REL] = mf
     return files
 
 
-def check(outputs):
-    disk = owned_files_on_disk()
+def check(outputs, root=ISVCS):
+    disk = owned_files_on_disk(root)
     problems = []
     for rel, text in sorted(outputs.items()):
         if rel not in disk:
             problems.append(f"missing on disk (regenerate): isvcs/{rel}")
+        elif rel.endswith(".yaml") and hand_written(disk[rel]):
+            problems.append(f"hand-written case at a generated id (the regen refuses to run "
+                            f"over it; move it to a hand-owned folder): isvcs/{rel}")
         elif disk[rel].read_text() != text:
             problems.append(f"drifted from generator output (hand-edited?): isvcs/{rel}")
     for rel in sorted(set(disk) - set(outputs)):
-        problems.append(f"not produced by the generator (stale or foreign): isvcs/{rel}")
+        if rel.endswith(".yaml") and hand_written(disk[rel]):
+            problems.append(f"hand-written case in a generator-owned folder (the regen refuses "
+                            f"to run over it; move it to a hand-owned folder): isvcs/{rel}")
+        else:
+            problems.append(f"stale generated file (regenerate to sweep it): isvcs/{rel}")
     if problems:
         for p in problems:
             print(p, file=sys.stderr)
@@ -558,39 +576,39 @@ def check(outputs):
     return 0
 
 
-def guard_foreign(outputs):
-    """A yaml in a gen-* folder the generator did not emit is either stale
-    (in-block id: swept) or foreign (hand case parked in an owned folder:
-    hard error). Also refuse generated ids appearing OUTSIDE the owned folders."""
-    for folder, (lo, hi) in GEN_BLOCKS.items():
-        d = ISVCS / folder
+def guard_foreign(outputs, root=ISVCS):
+    """Refuse to run over anything that is not this generator's: a yaml in a
+    gen-* folder without the `[gen]` mark (hand-written, whatever its id —
+    never overwritten, never swept), and a generated id used by a case
+    outside the gen-* folders. Exits before anything is written."""
+    problems = []
+    for folder in GEN_BLOCKS:
+        d = Path(root) / folder
         for f in sorted(d.glob("*.yaml")) if d.exists() else []:
-            if f"{folder}/{f.name}" in outputs:
-                continue
-            stem = f.stem
-            in_block = stem.startswith("p") and stem[1:].isdigit() and lo <= int(stem[1:]) < hi
-            if not in_block:
-                sys.exit(f"{f}: not generator-owned (id outside p{lo}..p{hi - 1}) — "
-                         f"hand-written cases must not live in {folder}/")
+            if hand_written(f):
+                problems.append(f"{f}: hand-written case in a generator-owned folder — move "
+                                f"it to a hand-owned folder; nothing was written or swept")
     owned_ids = {Path(rel).stem for rel in outputs if rel.endswith(".yaml")}
-    for f in sorted(ISVCS.glob("**/*.yaml")):
+    for f in sorted(Path(root).glob("**/*.yaml")):
         if f.parent.name in GEN_BLOCKS:
             continue
         if f.stem in owned_ids:
-            sys.exit(f"{f}: case id {f.stem} collides with the generated id block — "
-                     f"renumber the hand-written case out of p1000-p1999")
+            problems.append(f"{f}: case id {f.stem} collides with the generated id block — "
+                            f"renumber the hand-written case out of p1000-p1999")
+    if problems:
+        sys.exit("\n".join(problems))
 
 
-def write(outputs):
-    guard_foreign(outputs)
+def write(outputs, root=ISVCS):
+    guard_foreign(outputs, root)
     for folder in GEN_BLOCKS:
-        d = ISVCS / folder
+        d = Path(root) / folder
         d.mkdir(parents=True, exist_ok=True)
         for f in sorted(d.glob("*.yaml")):
             if f"{folder}/{f.name}" not in outputs:
-                f.unlink()
+                f.unlink()   # stale: the guard proved every file here carries the mark
     for rel, text in sorted(outputs.items()):
-        path = ISVCS / rel
+        path = Path(root) / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
 

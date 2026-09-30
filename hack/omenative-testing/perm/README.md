@@ -60,8 +60,10 @@ perm/
 ├── README.md              — this
 ├── run.py                 — single-case runner (state machine + verdict)
 ├── batch.py               — parallel fan-out over many cases (--conc, ranges)
-├── gen_cases.py           — generator: feature cases (migration/restart/partition/scale/edge)
-├── gen_mn.py              — generator: multi-node (gang) rollout cases → isvcs/rollout/
+├── casefiles.py           — the generators' shared write path: only minted ids, hand-maintained header layer kept, nothing deleted
+├── gen_cases.py           — generator: feature cases (migration/restart/partition/scale/edge/canary; --check)
+├── gen_mn.py              — generator: multi-node (gang) rollout cases → isvcs/rollout/ (--check)
+├── gen_runtime.py         — generator: runtime-triggered cases → isvcs/runtime-rev/ (--check)
 ├── generate_cases.py      — generator: hot-core permutation corpus → isvcs/gen-*/ (byte-stable; --check)
 ├── runtime_fixtures.py    — renders runtime/ for a target cluster (ns, storage, arch, images)
 ├── runtime/               — fixture TEMPLATES (see runtime_fixtures.py; not directly applicable)
@@ -468,7 +470,7 @@ Both assume OME (+ bundled prometheus) in ns `ome` (see `perf/prom-delay-proxy.y
 
 ### Pairing protocol (`mode=pairing`)
 
-`isvcs/pairing/` (p800+, hand-written — outside both generators' sweep) covers
+`isvcs/pairing/` (p800+, hand-written; no generator mints into it) covers
 `spec.rollout.pairingProtocol`: the trigger is a **patch of the protocol
 field** (not an annotation bump) — the token rides every engine+decoder
 revision, so the patch alone re-mints and rolls both pairing Components
@@ -608,30 +610,49 @@ surviving pod's UID never rotated (skipped for gangs, where pods are recreated).
 
 ## Regenerating cases
 
-Three generators (re-run after editing; all write into `isvcs/`):
-- `gen_cases.py` — the feature matrix (migration/restart/partition/scale/edge),
+Four generators write into `isvcs/`; re-run one after editing it:
+- `gen_cases.py` — the feature matrix (migration/restart/partition/scale/edge/canary),
   permuting topology × lifecycle × coordination.
 - `gen_mn.py` — the multi-node (gang) rollout cases (`p66`–`p99`, `p500`+) →
   `isvcs/rollout/` (`p500`+ is the continuation block: `p100`+ belongs to
   `gen_cases.py`'s feature counters).
+- `gen_runtime.py` — the runtime-triggered cases (`p400`+) → `isvcs/runtime-rev/`.
 - `generate_cases.py` — the hot-core permutation corpus (`p1000`–`p1999`) →
   `isvcs/gen-rollout/`, `isvcs/gen-fault/`, `isvcs/gen-restart/`, plus
   `isvcs/MANIFEST.md` (per-dimension counts, constraint ledger, missing-hook
-  catalog). The gen-* folders are generator-owned WHOLESALE: regeneration is
-  byte-stable and `generate_cases.py --check` (run by `run_test.py` in CI)
-  rejects any hand edit — promote a bug-finding case into a hand-owned folder
-  under a fresh id instead of editing it in place.
+  catalog).
+
+A generator owns exactly the case ids it mints. Hand-written cases share the
+feature folders with generated ones (`restart/`, `canary/`, `scale/` and
+`runtime-rev/` all hold some) and need no registration: the shared write path
+(`casefiles.py`) never deletes a file, writes only the ids it mints, and
+refuses — writing nothing — to mint an id held by a case it does not
+recognise as its own (same id and description on line 1). The header keys a
+generator does not emit (`cell=`, `notimpl=`, `issue=`, `inv_xfail=`, …) and
+the line-2 `# reason:` comment are the hand-maintained layer and ride through
+a regeneration unchanged, each key where it sits on disk; the description, the
+emitted keys and the body are generator-owned, so a hand edit to those is
+drift. A case a generator stops minting stays on disk until removed by hand
+(the regen summary lists every unminted id in its folders). Each generator's
+`--check` regenerates in memory and byte-compares against the committed tree
+without writing; `run_test.py` runs it in CI for `gen_cases.py`, `gen_mn.py`
+and `generate_cases.py`, and regenerates a copy of the whole tree through the
+real write paths to prove nothing changes and nothing is deleted.
+
+The gen-* folders are generator-owned WHOLESALE: every case there carries the
+`[gen]` mark on line 1, regeneration is byte-stable and `--check` rejects any
+hand edit — promote a bug-finding case into a hand-owned folder under a fresh
+id instead of editing it in place. A file without the mark in a gen-* folder
+is hand-written: it stops the regeneration before anything is written or
+swept, and must move to a hand-owned folder.
 
 Every generator finishes with `run.py --validate-only`, so a regeneration that
 would reintroduce a duplicate (shadowed) case id or a malformed header fails
-the generation itself. Hand-written cases parked in generator-owned folders
-(`scale/p188`+`p189` — the renamed former `scale/p97`+`p98`, `runtime-rev/p416`)
-are registered in each generator's `HAND_WRITTEN` set: the regen sweeps
-preserve them and the generators refuse to mint their ids.
+the generation itself.
 
 `isvcs/fault/` (`p600`+ — fault-injection cases: `fault=` header, plus the
 `blocked=1` / `expect=fail` / `lift=1` contract knobs) is entirely
-hand-written and outside both generators' sweep; the `p600`+ id block is
+hand-written; no generator mints into it and the `p600`+ id block is
 reserved for it. `isvcs/pairing/` (`p800`+ — the `mode=pairing` protocol
 cases) is likewise hand-written, with the `p800`+ block reserved.
 

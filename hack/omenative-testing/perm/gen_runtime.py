@@ -15,22 +15,23 @@ references it, emitted as one multi-doc file. Covers all four topologies so the
 runtime-triggered roll is tested against PD coordination and multi-node gang
 atomicity, not just single-pod engine.
 
-Run:  python3 gen_runtime.py    (writes isvcs/runtime-rev/*.yaml)
+Run:  python3 gen_runtime.py    (writes isvcs/runtime-rev/*.yaml; `--check`
+compares against the committed tree without writing). Hand-written cases share
+the folder: the write path (casefiles.py) touches only the ids minted here.
 """
+import argparse
 import subprocess
 import sys
 from pathlib import Path
 
+import casefiles
+
 HERE = Path(__file__).parent
-OUT = HERE / "isvcs" / "runtime-rev"
 CBM = "ome-coordtest-noop"
 CSR_SP = (HERE / "runtime" / "csr.yaml").read_text()           # single-pod base
 CSR_MN = (HERE / "runtime" / "csr-multinode.yaml").read_text() # gang base
 
 TOPOS = ["engine", "pd", "engine-mn", "pd-mn"]
-# Hand-written cases parked in the generated folder (p416 = the break=stuck
-# surge-budget-deadlock guard): the regen sweep must preserve them.
-HAND_WRITTEN = {"p416"}
 BEHAVIORS = [  # (tag, autoSync, expect, edit)
     ("roll",   "true",  "roll",   "material"),
     ("noop",   "true",  "noroll", "noop"),
@@ -68,57 +69,60 @@ def isvc(cid, topo, autosync, rt):
     return "\n".join(lines) + "\n"
 
 
-def main():
-    if OUT.exists():
-        for f in OUT.glob("*.yaml"):
-            if f.stem not in HAND_WRITTEN:   # regen everything generated; keep hand-written
-                f.unlink()
-    OUT.mkdir(parents=True, exist_ok=True)
+def _case(cid, topo, desc, autosync, **hdr):
+    """One case: its dedicated runtime and the ISVC referencing it. Ceilings are
+    SurgeThenDrain maxSurge=1 on every rolled component."""
+    rt = f"ome-coordtest-rt-{cid}"
+    n = N_MN if topo.endswith("-mn") else N_SP
+    pd = topo.startswith("pd")
+    kv = ([("mode", "runtimerev"), ("rt", rt)] + list(hdr.items())
+          + [("Ne", n), ("Nd", n if pd else 0), ("Nr", 0),
+             ("ceil_e", n + 1), ("ceil_d", n + 1 if pd else 0), ("ceil_r", 0), ("topo", topo)])
+    body = dedicated_csr(topo, rt) + "\n---\n" + isvc(cid, topo, autosync, rt)
+    # Single-space header: the key region starts at the first key=value token.
+    return casefiles.Case("runtime-rev", cid, desc, kv, body, sep=" ")
+
+
+def cases():
+    """Every minted runtime-rev case, rendered."""
+    out = []
     n = 400
     for topo in TOPOS:
-        mn = topo.endswith("-mn")
-        N = N_MN if mn else N_SP
-        pd = topo.startswith("pd")
-        Ne, Nd = N, (N if pd else 0)
-        ce, cd = Ne + 1, (Nd + 1 if pd else 0)  # SurgeThenDrain maxSurge=1
         for tag, autosync, expect, edit in BEHAVIORS:
             cid = f"p{n}"; n += 1
-            if cid in HAND_WRITTEN:
-                sys.exit(f"generated {cid} collides with a hand-written case — renumber")
-            rt = f"ome-coordtest-rt-{cid}"
-            desc = (f"{cid}: runtime-rev {topo} {tag} (autoSync={autosync}, {edit} edit) "
-                    f"mode=runtimerev rt={rt} expect={expect} edit={edit} "
-                    f"Ne={Ne} Nd={Nd} Nr=0 ceil_e={ce} ceil_d={cd} ceil_r=0 topo={topo}")
-            body = f"# {desc}\n" + dedicated_csr(topo, rt) + "\n---\n" + isvc(cid, topo, autosync, rt)
-            (OUT / f"{cid}.yaml").write_text(body)
-            print(f"  {cid}: {topo:10s} {tag}")
-
+            out.append(_case(cid, topo, f"runtime-rev {topo} {tag} (autoSync={autosync}, {edit} edit)",
+                             autosync, expect=expect, edit=edit))
     # Recovery guards: drive a FAILED rollout (bad runtime image) then a corrective
     # runtime edit — the ISVC must recover with zero manual intervention,
     # across all four topologies.
     for topo in TOPOS:
-        mn = topo.endswith("-mn")
-        N = N_MN if mn else N_SP
-        pd = topo.startswith("pd")
-        Ne, Nd = N, (N if pd else 0)
-        ce, cd = Ne + 1, (Nd + 1 if pd else 0)
         cid = f"p{n}"; n += 1
-        if cid in HAND_WRITTEN:
-            sys.exit(f"generated {cid} collides with a hand-written case — renumber")
-        rt = f"ome-coordtest-rt-{cid}"
-        desc = (f"{cid}: runtime-rev {topo} recover-after-failed-rollout "
-                f"mode=runtimerev rt={rt} expect=recover "
-                f"Ne={Ne} Nd={Nd} Nr=0 ceil_e={ce} ceil_d={cd} ceil_r=0 topo={topo}")
-        body = f"# {desc}\n" + dedicated_csr(topo, rt) + "\n---\n" + isvc(cid, topo, "true", rt)
-        (OUT / f"{cid}.yaml").write_text(body)
-        print(f"  {cid}: {topo:10s} recover")
+        out.append(_case(cid, topo, f"runtime-rev {topo} recover-after-failed-rollout",
+                         "true", expect="recover"))
+    return out
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--check", action="store_true",
+                    help="regenerate in memory and byte-compare against the committed "
+                         "tree without writing; nonzero on any drift")
+    args = ap.parse_args(argv)
+    minted = cases()
+    if args.check:
+        return casefiles.check(minted, HERE / "isvcs", "gen_runtime.py")
+    written = casefiles.write(minted, HERE / "isvcs")
+    for c in minted:
+        print(f"  {c.cid}: {c.desc}")
+    print(f"generated {len(minted)} runtime-rev cases; {len(written)} file(s) written")
 
     # A regen must never reintroduce a duplicate/shadowed case id or a malformed
     # header — fail the generation, not the next harness run.
     rc = subprocess.run([sys.executable, str(HERE / "run.py"), "--validate-only"]).returncode
     if rc:
         sys.exit(rc)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
