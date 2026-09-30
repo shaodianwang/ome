@@ -3,7 +3,7 @@ oep-number: "0018.4"
 authors:
   - "@Huang-Wei"
 status: implemented
-# state: placement policy, capacity allocation, persisted plans, bounded transitions, and member zero-floor contracts are implemented; zero-floor source activation and operational graduation remain open.
+# state: placement policy, capacity allocation, persisted plans, bounded transitions, and zero-floor member and source contracts are implemented; operational graduation remains open.
 creation-date: 2026-09-24
 reviewers:
   - TBD

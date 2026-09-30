@@ -164,10 +164,23 @@ grace before a fresh initial race can begin.
 `All` retains the complete source policy on each eligible member; `Single`
 applies it to nominated members and its retained winner. Placement
 resolves component minimums using source, runtime, then operator configuration
-precedence. It requires positive resolved floors, with equal Engine and Decoder
-counts; Router has its own floor. A zero or unresolved floor holds that home's
+precedence. It requires nonnegative resolved floors, with equal Engine and Decoder
+counts; Router has its own floor. An unresolved floor holds that home's
 allocation without changing local-service behavior. Operator defaults require
 the configured member operator namespace and an identified ConfigMap.
+
+An unpaused zero-floor home retains its service and autoscaler through scale to
+zero. Single still needs actual admission to select a winner; an idle established
+winner remains selected. All keeps each eligible full home, including homes with
+different inherited floors. Zero floors grant no ready or routable capacity.
+
+Retiring a home or adding a positive All allocation after initial provisioning
+requires positive component floors. `PositiveFloorRequired` retains the accepted
+plan while those guarantees are absent. Configuring positive minimums refreshes
+retained homes before shared movement accounting begins; observed autoscaled
+replicas do not substitute for these minimums. Outside a move, a retained home's
+minimum can change to or from zero. A zero-floor update during a paused move
+holds that move until positive floors are restored.
 
 The plan stores each current and desired home policy separately. A replacement
 must fit its entire floor within the shared allowance: a two-replica home cannot

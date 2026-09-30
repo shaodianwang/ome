@@ -471,9 +471,20 @@ home before beginning the bounded move. Observed autoscaled replicas do not
 substitute for the configured guarantee. Zero-floor race losers must be
 physically absent before their contracts can leave movement accounting.
 
-All source homes still require positive resolved component floors; their
-zero-floor activation remains open. These limits do not reject zero targets
-produced by Split apportionment or change local services' zero-floor behavior.
+All retains a full home on each eligible member even when its resolved floor
+is zero. Idle homes keep their services and external scaling authority; only
+actual admission and readiness grant traffic. Initial fan-out can combine zero
+and positive runtime floors, and a known home can progress independently while
+another matched member's initial inventory is unknown.
+
+With no active move, changing a retained home's floor is local scaling. Retiring
+a home or adding a positive allocation after initial fan-out requires positive
+component floors on participating homes. The controller reports
+`PositiveFloorRequired` while those guarantees are absent. Once configured, it
+applies the positive floors to retained homes before starting shared movement
+accounting. A zero-floor update during a paused move holds the accepted plan.
+These limits do not reject zero targets produced by Split apportionment or
+change local services' zero-floor behavior.
 
 ### Capacity contract
 
@@ -793,8 +804,8 @@ size limit.
 
 These layers are implemented across the allocator, member protocol, capacity
 resolution, and placement controllers. Integration tests cover admission,
-bounded movement, migration, recovery, and physical gang fit. Zero-floor source
-activation and operational graduation remain open. New capacity timing inputs
+bounded movement, migration, recovery, physical gang fit, and zero-floor source
+activation. Operational graduation remains open. New capacity timing inputs
 and transition allowances are explicit configuration; existing controller and
 transport timing fallbacks require separate compatibility review before removal.
 
@@ -1025,15 +1036,10 @@ Confirmed in the design discussion:
 
 Remaining work:
 
-1. **Zero-floor All activation:** members and Single sources preserve accepted
-   zero floors. Extend All's transition accounting to retain zero-floor homes
-   while preserving the positive-floor requirement for deliberate moves.
-   Owner: API/placement owners.
-2. **Operational graduation:** calibrate report freshness, stability windows,
-   and movement allowances against fleet measurements. Choose a compatibility
-   window for removing the bridge schema and rehearse deployed-binary upgrades
-   and rollback. Owner: deployment and placement owners.
+**Operational graduation:** calibrate report freshness, stability windows,
+and movement allowances against fleet measurements. Choose a compatibility
+window for removing the bridge schema and rehearse deployed-binary upgrades
+and rollback. Owner: deployment and placement owners.
 
-Next action: implement and verify zero-floor All activation,
-then validate deployment-specific settings and migration procedures. Local tests
-do not establish a production soak or complete operational graduation.
+Next action: validate deployment-specific settings and migration procedures.
+Local tests do not establish a production soak or complete operational graduation.

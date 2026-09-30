@@ -83,6 +83,30 @@ func TestAllPlanInitialApplication(t *testing.T) {
 		want map[string]int32
 	}{
 		{name: "full source policy on every home", want: map[string]int32{"member-a": 3, "member-b": 3}},
+		{name: "zero floor retains every full home", edit: func(_ *testing.T, f *backendFixture) {
+			f.source.Spec.Engine.MinReplicas = ptr.To(0)
+		}, want: map[string]int32{"member-a": 0, "member-b": 0}},
+		{name: "zero floor progresses independently of an unreachable peer", edit: func(_ *testing.T, f *backendFixture) {
+			f.source.Spec.Engine.MinReplicas = ptr.To(0)
+			delete(f.connections.m, "member-b")
+		}, want: map[string]int32{"member-a": 0}},
+		{name: "mixed inherited floors retain the full per-home policy", edit: func(t *testing.T, f *backendFixture) {
+			f.source.Spec.Engine.MinReplicas = nil
+			for name, cl := range f.workers {
+				rt := backendTestRuntime()
+				if err := cl.Get(t.Context(), client.ObjectKeyFromObject(rt), rt); err != nil {
+					t.Fatal(err)
+				}
+				floor := 0
+				if name == "member-b" {
+					floor = 3
+				}
+				rt.Spec.EngineConfig = &v1beta1.EngineSpec{ComponentExtensionSpec: v1beta1.ComponentExtensionSpec{MinReplicas: ptr.To(floor)}}
+				if err := cl.Update(t.Context(), rt); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}, want: map[string]int32{"member-a": 0, "member-b": 3}},
 		{name: "unreachable matched peer permits independent provisioning", edit: func(_ *testing.T, f *backendFixture) { delete(f.connections.m, "member-b") }, want: map[string]int32{"member-a": 3}},
 		{name: "runtime floor remains inherited", edit: func(t *testing.T, f *backendFixture) {
 			f.source.Spec.Engine.MinReplicas = nil
