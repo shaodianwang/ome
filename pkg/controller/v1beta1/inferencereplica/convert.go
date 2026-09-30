@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -74,23 +75,14 @@ func IRGVK() schema.GroupVersionKind { return irGVK }
 // for phase advancement. The migration-request annotation is consumed
 // into status.migrations by consumeMigrationRequests before dispatch.
 //
-// UpdateGate IS wired (when the parent ISVC is resolvable) onto the
-// shared coordination.EvaluateUpdateGate decision site. Without it, a
-// projected replica would skip ALL cross-Component coordination:
-// Sequential ordering, RatioBalanced, and the group-wide surge /
-// unavailability budgets would go unenforced (both Components of a
-// Sequential group recreated concurrently; a group MaxSurge never capping
-// a Component whose per-Component budget is larger). The gate
-// reads only the parent ISVC's Spec + Status, so the resolved parent is
-// all it needs. When parent is nil (a standalone replica, or the fetch
-// failed) the gate stays nil and the dispatcher falls back to "always
-// allowed" — coordination is meaningless without the parent's
-// RolloutCoordination block, so there is nothing to enforce anyway.
+// The coordination UpdateGate / DrainGate are not wired here: they read
+// the pass's roll target, which is resolved after the input is built, so
+// wireCoordinationGates installs them once it is known.
 //
 // Taking the typed *InferenceService (not client.Object) is deliberate:
 // a nil parent passed as client.Object becomes a non-nil interface
 // wrapping a nil pointer, so the `parent != nil` guards below (event
-// target + gate wiring) would both misfire. The typed parameter makes
+// target + ledger owner) would both misfire. The typed parameter makes
 // the nil check correct.
 // updateRetryPolicy is the same-target update retry policy resolved
 // ONCE per reconcile by the caller (from the operator lifecycle config);
@@ -216,26 +208,55 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 		},
 	}
 
-	// Wire the coordination UpdateGate onto the shared decision site so a
-	// projected replica enforces its parent's Sequential / RatioBalanced /
-	// surge / unavailability rules. The gate reads the parent ISVC's
-	// RolloutCoordination block + authoritative per-Component IR status
-	// directly via ComponentIRStatus, so it only runs when the parent is
-	// resolvable; a nil parent means there is no coordination block to
-	// enforce and the dispatcher's nil-gate fallback ("always allowed") is
-	// correct.
+	if policy := ir.Spec.PlacementExecution; policy != nil {
+		input.PauseNewSurge = policy.PauseSurge || protocol.Validate(policy) != nil
+	}
+	// The migration audit ledger (history) lives on the user-facing
+	// parent ISVC when resolvable; Migrate drives the IR's own pods and
+	// resumes from IR.Status.Migrations. Nil parent (brief foreground-GC
+	// window) → the ledger falls back to the IR via the workload-side
+	// owner resolution.
 	if parent != nil {
-		// The gate reads peer Component status, which must be live:
+		input.LedgerOwner = parent
+		input.LedgerOwnerGVK = isvcGVK
+	}
+
+	return input
+}
+
+// wireCoordinationGates installs the coordination UpdateGate and DrainGate
+// on input, so a projected replica enforces its parent's Sequential /
+// RatioBalanced / surge / unavailability / pairing rules through the shared
+// coordination decision sites. Without them a projected replica would skip
+// ALL cross-Component coordination (both Components of a Sequential group
+// recreated concurrently; a group MaxSurge never capping a Component whose
+// per-Component budget is larger).
+//
+// target is the ControllerRevision this pass moves Instances to: the
+// rollback revision while a rollback is pinned, else the spec target. The
+// pairing gate reads the target cohort's protocol from it, so a canary
+// revert is simulated toward the stable cohort rather than toward the live
+// spec field, which still names the rejected protocol until the rollback
+// completes. Wired after the roll target is resolved for that reason.
+//
+// The gates read the parent ISVC's rollout block and authoritative
+// per-Component IR status, so they only run when the parent is resolvable;
+// a nil parent means there is no coordination block to enforce and the
+// dispatcher's nil-gate fallback ("always allowed") is correct. A placement
+// execution policy wraps the coordination gate with its own holds.
+func (r *Reconciler) wireCoordinationGates(ctx context.Context, input *workloadtypes.ReconcileInput, ir *v1beta1.InferenceReplica, parent *v1beta1.InferenceService, coordDefaults coordination.GroupDefaults, target *appsv1.ControllerRevision) {
+	if parent != nil {
+		// The gates read peer Component status, which must be live:
 		// cross-Component coordination against a cache-lagged peer would
 		// admit a rollout the peer's real state forbids.
 		input.UpdateGate = func(strategy workloadtypes.UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, workloadtypes.RolloutHoldGate, string) {
-			allowed, gate, reason := coordination.EvaluateUpdateGate(ctx, r.liveReader(), parent, ir.Spec.Component, r.Recorder, coordDefaults, strategy, inFlightSurge, inFlightUnavail)
+			allowed, gate, reason := coordination.EvaluateUpdateGate(ctx, r.liveReader(), parent, ir.Spec.Component, target, r.Recorder, coordDefaults, strategy, inFlightSurge, inFlightUnavail)
 			return allowed, workloadtypes.RolloutHoldGate(gate), reason
 		}
 		// The drain-time half of the pair floor: a surge update asks it with
 		// the replacement already serving, over live pod state.
 		input.DrainGate = func(sourcePods []string) (bool, workloadtypes.RolloutHoldGate, string) {
-			allowed, gate, reason := coordination.EvaluatePairingDrain(ctx, r.liveReader(), parent, ir.Spec.Component, coordDefaults, sourcePods)
+			allowed, gate, reason := coordination.EvaluatePairingDrain(ctx, r.liveReader(), parent, ir.Spec.Component, target, coordDefaults, sourcePods)
 			return allowed, workloadtypes.RolloutHoldGate(gate), reason
 		}
 		// A held drain is reported through the same RolloutHold as a held
@@ -243,7 +264,6 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 		input.DrainHolds = &workloadtypes.DrainHolds{}
 	}
 	if policy := ir.Spec.PlacementExecution; policy != nil {
-		input.PauseNewSurge = policy.PauseSurge || protocol.Validate(policy) != nil
 		coordinationGate := input.UpdateGate
 		input.UpdateGate = func(strategy workloadtypes.UpdateStrategyType, surge, unavailable int32) (bool, workloadtypes.RolloutHoldGate, string) {
 			if err := protocol.Validate(policy); err != nil {
@@ -258,17 +278,6 @@ func (r *Reconciler) buildReconcileInput(ctx context.Context, ir *v1beta1.Infere
 			return true, "", ""
 		}
 	}
-	// The migration audit ledger (history) lives on the user-facing
-	// parent ISVC when resolvable; Migrate drives the IR's own pods and
-	// resumes from IR.Status.Migrations. Nil parent (brief foreground-GC
-	// window) → the ledger falls back to the IR via the workload-side
-	// owner resolution.
-	if parent != nil {
-		input.LedgerOwner = parent
-		input.LedgerOwnerGVK = isvcGVK
-	}
-
-	return input
 }
 
 // instanceFailedMsg formats the operator-facing InstanceFailed Warning:

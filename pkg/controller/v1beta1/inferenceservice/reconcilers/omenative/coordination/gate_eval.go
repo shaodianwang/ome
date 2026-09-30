@@ -3,6 +3,7 @@ package coordination
 import (
 	"context"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -52,15 +53,19 @@ import (
 // did not run.
 //
 // Reads authoritative InferenceReplica status via the provided context and
-// reader. recorder may be nil (the event is best-effort observability).
-// defaults carries the operator-configured group fill-ins (e.g. the ratio
-// tolerance default) so the gates see the same resolved groups as the
-// coordination reconciler.
+// reader. targetRevision is the ControllerRevision the Component's Instances
+// move to in this pass (the rollback revision while a rollback is pinned,
+// else the spec target); the pairing gate orients its cohort simulation by
+// that revision's protocol. recorder may be nil (the event is best-effort
+// observability). defaults carries the operator-configured group fill-ins
+// (e.g. the ratio tolerance default) so the gates see the same resolved
+// groups as the coordination reconciler.
 func EvaluateUpdateGate(
 	ctx context.Context,
 	reads client.Reader,
 	isvc *v1beta1.InferenceService,
 	component v1beta1.ComponentType,
+	targetRevision *appsv1.ControllerRevision,
 	recorder record.EventRecorder,
 	defaults GroupDefaults,
 	strategy workloadtypes.UpdateStrategyType,
@@ -70,6 +75,7 @@ func EvaluateUpdateGate(
 	// MembershipFor + nil-isvc / no-coord short-circuit) runs once instead of
 	// four times -- see the coordination.GateContext docs.
 	gateCtx := ResolveGateContextWithDefaults(ctx, reads, isvc, component, defaults)
+	gateCtx.TargetRevision = targetRevision
 
 	// The plan gate precedes every content gate: with no pinned run there is
 	// no validated plan to evaluate the other gates against.

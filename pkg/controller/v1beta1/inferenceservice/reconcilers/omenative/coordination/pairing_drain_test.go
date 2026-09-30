@@ -53,7 +53,7 @@ func drainScheme(t *testing.T) *runtime.Scheme {
 func drainGate(t *testing.T, isvc *v1beta1.InferenceService, comp v1beta1.ComponentType, sources []string, objs ...client.Object) (bool, v1beta1.RolloutHoldGate, string) {
 	t.Helper()
 	c := fake.NewClientBuilder().WithScheme(drainScheme(t)).WithObjects(objs...).Build()
-	return EvaluatePairingDrain(context.Background(), c, isvc, comp, GroupDefaults{}, sources)
+	return EvaluatePairingDrain(context.Background(), c, isvc, comp, forwardTarget(isvc, comp), GroupDefaults{}, sources)
 }
 
 // The incident shape: a 1×1 surge transition whose decoder replacement is
@@ -162,7 +162,7 @@ func TestEvaluatePairingDrain_FailsClosedWhenPodsCannotBeListed(t *testing.T) {
 			return cl.List(ctx, list, opts...)
 		},
 	}).Build()
-	allowed, gate, reason := EvaluatePairingDrain(context.Background(), c, isvc, v1beta1.DecoderComponent, GroupDefaults{}, []string{"x"})
+	allowed, gate, reason := EvaluatePairingDrain(context.Background(), c, isvc, v1beta1.DecoderComponent, forwardTarget(isvc, v1beta1.DecoderComponent), GroupDefaults{}, []string{"x"})
 	if allowed || gate != v1beta1.RolloutHoldGatePairing || !strings.Contains(reason, "failing closed") {
 		t.Fatalf("a list error must fail closed with a retryable Pairing hold: allowed=%v gate=%q reason=%s", allowed, gate, reason)
 	}
