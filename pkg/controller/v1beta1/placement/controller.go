@@ -306,6 +306,7 @@ func (r *Reconciler) reconcile(ctx context.Context, request ctrl.Request) (ctrl.
 	if err := r.List(ctx, clusters); err != nil {
 		return ctrl.Result{}, err
 	}
+	ctx = withPlacementInputCondition(ctx, isvc, clusters.Items)
 	// Member observation is independent from placement eligibility. Status homes
 	// are read before any readiness or policy gate so those gates can stop
 	// actuation without freezing the source's view of serving health.
@@ -855,7 +856,7 @@ func (r *Reconciler) writePlacement(ctx context.Context, isvc *v1beta1.Inference
 		if placementMode(isvc) != v1beta1.PlacementModeSplitByCapacity {
 			cur.Status.Conditions = slices.DeleteFunc(cur.Status.Conditions, func(c apis.Condition) bool { return c.Type == apis.ConditionType(v1beta1.PlacementCapacityFresh) })
 		}
-		applyPolicyConditions(&cur.Status, []policyCondition{placementInputCondition(isvc)})
+		applyPolicyConditions(&cur.Status, []policyCondition{placementInputForWrite(ctx, isvc)})
 		applyPolicyConditions(&cur.Status, placementSatisfactionConditions(cur))
 		setSourcePlacementReady(&cur.Status, res, readyBefore)
 		// res was computed from the reconciled snapshot, not the live object read

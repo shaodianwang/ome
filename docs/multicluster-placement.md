@@ -282,6 +282,12 @@ not compensate for another home's shortfall. `PlacementConverged` reports
 whether members have applied the allocation. Serving readiness remains
 independent, so a held allocation can continue serving.
 
+For valid affinity, the `PlacementInputValid` message lists zero-based term
+indexes with no matching registered WorkloadCluster. An unready matching member
+still counts as a match. Unmatched terms do not invalidate the request or change
+allocation; they help distinguish inventory or selector mistakes from member
+availability problems.
+
 The accepted plan records source and cluster identities, desired and current
 floors, matching terms, and weights. Unknown identity or member observations
 hold existing authority. `PlacementCapacityFresh` is true when the matched

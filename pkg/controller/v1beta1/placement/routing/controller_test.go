@@ -367,6 +367,70 @@ func TestReconcile_NonPlacementISVCDoesNotCreateTrafficMap(t *testing.T) {
 	assert.False(t, exists)
 }
 
+func TestReconcileModeOnlyPlacement(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		policy v1beta1.PlacementPolicy
+		mode   v1beta1.PlacementMode
+		want   bool
+	}{
+		{name: "single", policy: v1beta1.PlacementPolicyClusterAffinity, mode: v1beta1.PlacementModeSingle, want: true},
+		{name: "all", policy: v1beta1.PlacementPolicyClusterAffinity, mode: v1beta1.PlacementModeAll, want: true},
+		{name: "split", policy: v1beta1.PlacementPolicyClusterAffinity, mode: v1beta1.PlacementModeSplit, want: true},
+		{name: "capacity", policy: v1beta1.PlacementPolicyClusterAffinity, mode: v1beta1.PlacementModeSplitByCapacity, want: true},
+		{name: "legacy", policy: v1beta1.PlacementPolicyLegacy, mode: v1beta1.PlacementModeAll},
+		{name: "omitted policy", mode: v1beta1.PlacementModeSingle},
+		{name: "local"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			source := splitISVC([]string{"member-a"}, []int32{3}, []int32{3})
+			source.Spec.Placement = nil
+			if tt.mode != "" {
+				source.Spec.Placement = &v1beta1.PlacementSpec{Policy: tt.policy, Mode: tt.mode}
+			}
+			r, c := newReconciler(t, controllerTestConfig(), source)
+			for _, stage := range []struct {
+				name    string
+				ready   int32
+				weight  int32
+				healthy bool
+			}{
+				{name: "ready", ready: 3, weight: 1, healthy: true},
+				{name: "unready"},
+			} {
+				t.Run(stage.name, func(t *testing.T) {
+					source.Status.Placement.Candidates[0].ReadyReplicas = stage.ready
+					if err := c.Status().Update(t.Context(), source); err != nil {
+						t.Fatal(err)
+					}
+					reconcile(t, r)
+					tm, exists := getTrafficMap(t, c)
+					if diff := cmp.Diff(tt.want, exists); diff != "" {
+						t.Fatalf("TrafficMap existence (-want +got):\n%s", diff)
+					}
+					if !exists {
+						return
+					}
+					want := v1beta1.TrafficMapSpec{
+						Service: source.Name, Mode: tt.mode, ObservedISVCGeneration: source.Generation,
+						Entries: []v1beta1.TrafficMapEntry{{
+							Cluster: "member-a", Endpoint: apis.HTTPS("member-a.example"),
+							Weight: stage.weight, Healthy: stage.healthy,
+							Capacity: &v1beta1.TrafficMapCapacity{Allocated: 3, Ready: stage.ready, Source: v1beta1.CapacitySourceControlPlane},
+						}},
+					}
+					if diff := cmp.Diff(want, tm.Spec); diff != "" {
+						t.Fatalf("TrafficMap spec (-want +got):\n%s", diff)
+					}
+					if diff := cmp.Diff(source.UID, tm.Status.SourceUID); diff != "" {
+						t.Fatalf("source identity (-want +got):\n%s", diff)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestReconcile_ObsoletePlacementIntentPreservesTrafficMap(t *testing.T) {
 	for _, tt := range []struct {
 		name string
