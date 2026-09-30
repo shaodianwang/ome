@@ -106,8 +106,11 @@ type CanaryStatus struct {
 	// gate stayed unmet past the ready timeout, analysis stayed inconclusive
 	// past the stall timeout, or a rollback found no stable revision to
 	// return to. While set the step machine does not run, the phase reads
-	// Failed and the stable revision keeps serving. Cleared by a re-arm
-	// toward a new target and by a rollback request.
+	// Failed and the stable revision keeps serving. A re-arm toward a new
+	// target clears any park. A rollback request clears a capacity-timeout
+	// or analysis park and drains the rejected revision; a park for a
+	// missing stable revision refuses the request and removes it, since the
+	// revert it asks for is the one that could not run.
 	// +optional
 	Failed *CanaryFailure `json:"failed,omitempty"`
 }

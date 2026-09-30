@@ -30,6 +30,19 @@ func ignoreRollback(in ReconcileInputs, take func(string)) {
 	take(constants.RolloutRollbackAnnotation)
 }
 
+// refuseRollback hands back a rollback request against a unit parked because
+// its stable revision is not retained, and says so. The request is spent:
+// the rejected hash it recorded keeps a copy still visible after the flush
+// inert, and the park is the only answer it can get.
+func refuseRollback(in ReconcileInputs, cs *v1beta1.CanaryStatus, take func(string)) {
+	if !parkedWithoutStable(cs) || !isRollbackRequested(in.ISVC) {
+		return
+	}
+	emit(in.Recorder, in.ISVC, corev1.EventTypeWarning, EventReasonCanaryRollbackIgnored,
+		"rollback requested for %s, which is parked because no ControllerRevision is retained for its stable revision; the request is removed", in.Component)
+	take(constants.RolloutRollbackAnnotation)
+}
+
 // rearmRule says which observed targets a state treats as new. Every state
 // re-arms when the run's TargetID changed; the hash test is the fallback for
 // status recorded before targets carried an id, and its exclusions differ by
@@ -103,13 +116,17 @@ func applyHolds(ctx context.Context, in ReconcileInputs, cs *v1beta1.CanaryStatu
 		}
 	}
 
-	// Rollback: the hold rejects the rolled-back revision until a genuinely
-	// new target appears (clearing the annotation alone never retries it);
-	// a request records the rejected revision and starts the revert. The
-	// revert itself is driven by the controller, which points the IR at the
-	// stable ControllerRevision while cs.RolledBackRevisionHash is set.
+	// Rollback: a request records the rejected revision and starts the
+	// revert; the hold rejects the rolled-back revision until a genuinely
+	// new target appears (clearing the annotation alone never retries it).
+	// The revert itself is driven by the controller, which points the IR at
+	// the stable ControllerRevision while cs.RolledBackRevisionHash is set.
+	// The recorded rejection is also the record that the request was
+	// applied: a unit carrying one never takes a request again, so a copy
+	// still visible after the flush is inert, whether the revert is
+	// draining or parked because the stable revision is not retained.
 	if cs != nil {
-		if cs.RolledBackRevisionHash != "" && !parkedWithoutStable(cs) {
+		if cs.RolledBackRevisionHash != "" {
 			if shouldRearm(in, cs, targetChanged, rearmRolledBack) {
 				// The re-arm does not depend on the annotation, so a lost
 				// status flush recomputes it; consuming after the flush
@@ -118,7 +135,7 @@ func applyHolds(ctx context.Context, in ReconcileInputs, cs *v1beta1.CanaryStatu
 					return cs, nil, err
 				}
 				resetCanaryStatus(in.ISVC, in.Component, cs, in.TargetID, in.CanaryRevisionHash, in.Now)
-			} else {
+			} else if !parkedWithoutStable(cs) {
 				return cs, reconcileRollback(in, cs), nil
 			}
 		} else if isRollbackRequested(in.ISVC) && int(cs.CurrentStep) < steps {
@@ -143,6 +160,7 @@ func applyHolds(ctx context.Context, in ReconcileInputs, cs *v1beta1.CanaryStatu
 			// every pass, so a status write that dropped the phase cannot
 			// un-park the canary.
 			setPhase(in.ISVC, in.Component, v1beta1.RolloutPhaseFailed)
+			refuseRollback(in, cs, take)
 			return cs, (&Result{Active: true}).wake(in.ParkedRequeue), nil
 		}
 	}

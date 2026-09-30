@@ -215,8 +215,9 @@ type Result struct {
 	Requeue bool
 	// Consume lists the operator annotations this pass applied. The controller
 	// removes them after the status write that carries their effect has
-	// landed; each applied verb leaves a record in status (PromotedThrough)
-	// that keeps the still-visible annotation inert until then.
+	// landed; each applied verb leaves a record in status (PromotedThrough,
+	// the rejected revision of a rollback) that keeps the still-visible
+	// annotation inert until then.
 	Consume []string
 }
 

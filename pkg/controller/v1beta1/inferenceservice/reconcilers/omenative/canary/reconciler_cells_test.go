@@ -153,6 +153,17 @@ func fixtureFailed(t *testing.T) (*v1beta1.InferenceService, ReconcileInputs) {
 	return isvc, in
 }
 
+// fixtureFailedStableMissing is a rollback that found no stable revision to
+// return to. The park is decided where the revision history is read, in
+// Dispatch, so the fixture records it the way Dispatch does; the request is
+// gone the way the controller's removal after the park's flush leaves it.
+func fixtureFailedStableMissing(t *testing.T) (*v1beta1.InferenceService, ReconcileInputs) {
+	isvc, in := fixtureRollingBack(t)
+	parkFailed(isvc, v1beta1.EngineComponent, rollout.CanaryStatusFor(&isvc.Status, v1beta1.EngineComponent), v1beta1.CanaryFailureStableRevisionMissing, in.Now)
+	delete(isvc.Annotations, constants.RolloutRollbackAnnotation)
+	return isvc, in
+}
+
 // fixtureRollingBackPD is a rollback in a two-member unit (engine primary,
 // decoder secondary) with both members still serving their rejected
 // revisions. The primary view carries the engine's ready pods; the group view
@@ -336,6 +347,9 @@ func TestReconcileCells(t *testing.T) {
 		{"canary/Done/rollback", fixtureDone, evRollback, cellWant{state: done, phase: v1beta1.RolloutPhaseStable, step: 2, consume: []string{constants.RolloutRollbackAnnotation}}},
 		{"canary/RolledBack/rollback", fixtureRolledBack, evRollback, cellWant{state: rolledBack, phase: v1beta1.RolloutPhaseRolledBack, active: true, rolledBk: true}},
 		{"canary/Failed/rollback", fixtureFailed, evRollback, cellWant{state: rolledBack, phase: v1beta1.RolloutPhaseRolledBack, active: true, rolledBk: true}},
+		// A park for a missing stable revision already carries the rejection the
+		// request asked for: the request is refused and handed back, the park unmoved.
+		{"canary/Failed[stableMissing]/rollback", fixtureFailedStableMissing, evRollback, cellWant{state: failed, phase: v1beta1.RolloutPhaseFailed, active: true, consume: []string{constants.RolloutRollbackAnnotation}}},
 		// resume: honored at a park it names; everywhere else, and for a hash
 		// no canary carries, consumed and ignored.
 		{"canary/Idle/resume", fixtureIdle, evResumeStale, cellWant{state: idle, phase: v1beta1.RolloutPhaseStable, consume: []string{constants.RolloutResumeAnnotation}}},
@@ -352,6 +366,7 @@ func TestReconcileCells(t *testing.T) {
 		{"canary/RolledBack/resume[stale]", fixtureRolledBack, evResumeStale, cellWant{state: rolledBack, phase: v1beta1.RolloutPhaseRolledBack, active: true, rolledBk: true, consume: []string{constants.RolloutResumeAnnotation}}},
 		{"canary/Failed/resume", fixtureFailed, evResumeOwn, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, active: true, consume: []string{constants.RolloutResumeAnnotation}}},
 		{"canary/Failed/resume[stale]", fixtureFailed, evResumeStale, cellWant{state: failed, phase: v1beta1.RolloutPhaseFailed, active: true, consume: []string{constants.RolloutResumeAnnotation}}},
+		{"canary/Failed[stableMissing]/resume", fixtureFailedStableMissing, evResumeOwn, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, active: true, consume: []string{constants.RolloutResumeAnnotation}}},
 		// new target
 		{"canary/Staging/newTarget", fixtureStaging, evNewTarget, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, active: true}},
 		{"canary/Serving/newTarget", fixtureServingManual, evNewTarget, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, active: true}},
@@ -363,6 +378,7 @@ func TestReconcileCells(t *testing.T) {
 		{"canary/RolledBack/newTarget", fixtureRolledBack, evNewTarget, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, active: true}},
 		{"canary/RolledBack/newTarget[runOpen]", fixtureRolledBack, evNewTargetAtRunOpen, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, active: true}},
 		{"canary/Failed/newTarget", fixtureFailed, evNewTarget, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, active: true}},
+		{"canary/Failed[stableMissing]/newTarget", fixtureFailedStableMissing, evNewTarget, cellWant{state: staging, phase: v1beta1.RolloutPhasePending, active: true}},
 		// replicas: more capacity to stage holds the step where it is.
 		{"canary/Serving/replicasUp", fixtureServingManual, evReplicasUp, cellWant{state: serving, phase: v1beta1.RolloutPhasePaused, active: true}},
 		// run lost: the canary holds where it is; even an elapsed soak does not advance it.
@@ -403,6 +419,7 @@ func TestReconcileCells(t *testing.T) {
 		{"canary/Done/resync", fixtureDone, evNothing, cellWant{state: done, phase: v1beta1.RolloutPhaseStable, step: 2}},
 		{"canary/RolledBack/resync", fixtureRolledBack, evNothing, cellWant{state: rolledBack, phase: v1beta1.RolloutPhaseRolledBack, active: true, rolledBk: true}},
 		{"canary/Failed/resync", fixtureFailed, evNothing, cellWant{state: failed, phase: v1beta1.RolloutPhaseFailed, active: true}},
+		{"canary/Failed[stableMissing]/resync", fixtureFailedStableMissing, evNothing, cellWant{state: failed, phase: v1beta1.RolloutPhaseFailed, active: true}},
 	}
 	for _, c := range cells {
 		t.Run(c.id, func(t *testing.T) {

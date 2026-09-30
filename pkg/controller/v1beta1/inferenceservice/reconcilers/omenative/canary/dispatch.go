@@ -285,11 +285,17 @@ func Dispatch(ctx context.Context, d DispatchDeps) (Outcome, error) {
 	if missingStable {
 		// A rollback with no stable revision to return to cannot be carried
 		// out. Park it, loudly, rather than report a revert in progress that
-		// never completes; a new target re-arms the unit.
+		// never completes; a new target re-arms the unit. The request is
+		// spent with the park: the rejected hash it recorded keeps a copy
+		// still visible after the flush inert, so it is handed back for
+		// removal once the flush has carried the park.
 		if cs := rollout.CanaryStatusFor(&d.ISVC.Status, primary); cs != nil && cs.Failed == nil {
 			parkFailed(d.ISVC, primary, cs, v1beta1.CanaryFailureStableRevisionMissing, now)
 			emit(d.Recorder, d.ISVC, corev1.EventTypeWarning, EventReasonCanaryStableRevisionMissing,
 				"%s cannot roll back: no ControllerRevision is retained for its stable revision; parked Failed until a new target appears", primary)
+			if isRollbackRequested(d.ISVC) {
+				res.Consume = append(res.Consume, constants.RolloutRollbackAnnotation)
+			}
 		}
 	}
 

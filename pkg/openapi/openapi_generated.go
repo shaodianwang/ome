@@ -2964,7 +2964,7 @@ func schema_pkg_apis_ome_v1beta1_CanaryStatus(ref common.ReferenceCallback) comm
 					},
 					"failed": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Failed records that the canary is parked at CurrentStep: the capacity gate stayed unmet past the ready timeout, analysis stayed inconclusive past the stall timeout, or a rollback found no stable revision to return to. While set the step machine does not run, the phase reads Failed and the stable revision keeps serving. Cleared by a re-arm toward a new target and by a rollback request.",
+							Description: "Failed records that the canary is parked at CurrentStep: the capacity gate stayed unmet past the ready timeout, analysis stayed inconclusive past the stall timeout, or a rollback found no stable revision to return to. While set the step machine does not run, the phase reads Failed and the stable revision keeps serving. A re-arm toward a new target clears any park. A rollback request clears a capacity-timeout or analysis park and drains the rejected revision; a park for a missing stable revision refuses the request and removes it, since the revert it asks for is the one that could not run.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CanaryFailure"),
 						},
 					},
