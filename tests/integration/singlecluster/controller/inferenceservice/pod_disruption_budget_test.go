@@ -161,6 +161,9 @@ var _ = ginkgo.Describe("InferenceService PodDisruptionBudget lifecycle", ginkgo
 		Eventually(func(g Gomega) {
 			deployment := &appsv1.Deployment{}
 			g.Expect(k8sClient.Get(suiteCtx, pdbKey, deployment)).To(Succeed())
+			// The InferenceReplica belongs to the backend the component left.
+			err := k8sClient.Get(suiteCtx, pdbKey, &v1beta1.InferenceReplica{})
+			g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "the OMENative InferenceReplica must be removed, got err=%v", err)
 			budget := &policyv1.PodDisruptionBudget{}
 			g.Expect(k8sClient.Get(suiteCtx, pdbKey, budget)).To(Succeed())
 			g.Expect(budget.UID).To(Equal(pdbUID))
@@ -194,21 +197,23 @@ var _ = ginkgo.Describe("InferenceService PodDisruptionBudget lifecycle", ginkgo
 		ginkgo.By("switching back to OMENative without an OMENative policy")
 		rawOnlyConfig := `{"rawDeployment":{"maxUnavailable":1}}`
 		setPDBConfig(&rawOnlyConfig)
-		priorIR := &v1beta1.InferenceReplica{}
-		Expect(k8sClient.Get(suiteCtx, pdbKey, priorIR)).To(Succeed())
-		priorIRGeneration := priorIR.Generation
+		targetReplicas := 4
 		updateISVC(func(fresh *v1beta1.InferenceService) {
 			mode := constants.OMENative
 			fresh.Spec.DeploymentMode = &mode
-			targetReplicas := 4
 			fresh.Spec.Engine.MinReplicas = &targetReplicas
 		})
 		Eventually(func(g Gomega) {
+			// A fresh InferenceReplica is projected for the component; the
+			// Deployment belongs to the backend it left.
 			ir := &v1beta1.InferenceReplica{}
 			g.Expect(k8sClient.Get(suiteCtx, pdbKey, ir)).To(Succeed())
-			g.Expect(ir.Generation).To(BeNumerically(">", priorIRGeneration))
+			g.Expect(ir.DeletionTimestamp).To(BeNil())
 			g.Expect(ir.Spec.Replicas).NotTo(BeNil())
+			g.Expect(*ir.Spec.Replicas).To(BeEquivalentTo(targetReplicas))
 			g.Expect(ir.Status.ReadyReplicas).To(BeNumerically("<", *ir.Spec.Replicas))
+			err := k8sClient.Get(suiteCtx, pdbKey, &appsv1.Deployment{})
+			g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "the RawDeployment Deployment must be removed, got err=%v", err)
 			budget := &policyv1.PodDisruptionBudget{}
 			g.Expect(k8sClient.Get(suiteCtx, pdbKey, budget)).To(Succeed())
 			g.Expect(budget.UID).To(Equal(pdbUID))
