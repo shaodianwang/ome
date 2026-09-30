@@ -1,0 +1,18 @@
+{{- if .Values.service.api.enabled }}
+{{- $smcTierName := required "service.api.smcTierName is required when service.api.enabled is true" .Values.service.api.smcTierName }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ome-bot.fullname" . }}-{{ .Values.service.api.nameSuffix }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "ome-bot.labels" . | nindent 4 }}
+  annotations:
+    mks.meta.com/smc-tier-name: {{ $smcTierName | quote }}
+spec:
+  clusterIP: None
+  selector: {{- include "ome-bot.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+{{- end }}

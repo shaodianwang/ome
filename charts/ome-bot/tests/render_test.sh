@@ -71,4 +71,19 @@ if grep -Eq '^    docs:' <<<"${nodocs}"; then
   fail "empty docs values rendered a config block"
 fi
 
+# --- the SMC-registered headless Service is opt-in and needs a tier name ---
+
+if grep -Fq 'clusterIP: None' <<<"${default}"; then
+  fail "the headless api Service rendered without service.api.enabled"
+fi
+if render --set-json "${cluster}" --set-json "${secrets}" --set service.api.enabled=true >/dev/null 2>&1; then
+  fail "service.api.enabled without smcTierName rendered instead of failing"
+fi
+api="$(render --set-json "${cluster}" --set-json "${secrets}" \
+  --set service.api.enabled=true --set service.api.smcTierName=ome-bot.ome-bot.example.mks)"
+for key in 'name: rel-ome-bot-api' 'clusterIP: None' 'mks.meta.com/smc-tier-name: "ome-bot.ome-bot.example.mks"'; do
+  grep -Fq -- "${key}" <<<"${api}" || fail "the api Service lacks ${key}"
+done
+grep -Fq 'type: ClusterIP' <<<"${api}" || fail "the api Service replaced the ClusterIP Service"
+
 echo "ome-bot chart test: ok"

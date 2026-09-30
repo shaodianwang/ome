@@ -38,6 +38,13 @@ homeDir: /tmp
 
 service:
   port: 8080
+  api:
+    # Headless Service whose pod endpoints the platform registers as the SMC
+    # tier named in smcTierName, so mks-http-fe routes requests carrying that
+    # name in the service_endpoint header to the bot. Required when enabled.
+    enabled: false
+    nameSuffix: api
+    smcTierName: ""
 
 # Volume holding the bot's secret files, mounted read-only at
 # /etc/ome-bot/secrets: the HMAC key under config.auth.secretKey and every

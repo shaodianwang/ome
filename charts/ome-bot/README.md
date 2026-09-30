@@ -77,6 +77,17 @@ secrets:
         secretProviderClass: ome-bot-secrets
 ```
 
+## Server-to-server access
+
+With `service.api.enabled=true` the chart adds a headless Service annotated
+with `service.api.smcTierName`. The platform registers its pod endpoints as
+that SMC tier, and `mks-http-fe` routes to it by the `service_endpoint`
+header (the HMAC headers still apply):
+
+```bash
+curl -H "service_endpoint: <smcTierName>" https://mks-http-fe.fbinfra.net/v1/clusters
+```
+
 ## Install
 
 ```sh
