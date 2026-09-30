@@ -56,9 +56,11 @@ type GangPack struct {
 	// newer retry of the same PodGroup.
 	attemptMu    sync.RWMutex
 	attemptByPod map[string]uint64
-	// reservationBlocked holds ordinary pods rejected only because a forming gang
-	// owns their candidate domain. They are explicitly activated when that
-	// in-memory reservation drains; no Kubernetes object event represents it.
+	// reservationBlocked holds pods rejected only because a forming gang owns the
+	// domain they would fit: ordinary pods turned away by Filter, and gang members
+	// whose planning found room only in reserved domains. They are explicitly
+	// activated when a reservation drains or is released; no Kubernetes object
+	// event represents either transition.
 	blockedMu          sync.Mutex
 	reservationBlocked map[string]*v1.Pod
 	// templatesIncomplete records gangs that parked a member because the live
@@ -277,10 +279,14 @@ func (g *GangPack) pinGang(state framework.CycleState, nodes []framework.NodeInf
 	}
 
 	// A stale pin must be dropped and re-planned, else the gang wedges on it
-	// forever. Releasing also returns the pin's leaked capacity reservation. Only
-	// safe when no member has landed in the domain yet (see pinStale).
+	// forever. Releasing also returns the pin's leaked capacity reservation, which
+	// may be what kept other pods out of the domain, so they are woken like on
+	// any other release. Only safe when no member has landed in the domain yet
+	// (see pinStale).
 	if pinned && pinStale(len(planningNodes), placement.count, free, need, domain) {
-		g.pins.ReleaseIf(gang.key, commitment, nil)
+		if g.pins.ReleaseIf(gang.key, commitment, nil) {
+			g.activateReservationBlocked()
+		}
 		gangPinTotal.WithLabelValues("stale_replan").Inc()
 		pinnedGroups.Set(float64(g.pins.Len()))
 		pinned = false
@@ -296,7 +302,7 @@ func (g *GangPack) pinGang(state framework.CycleState, nodes []framework.NodeInf
 	}
 
 	if !pinned {
-		d, id, status := g.planDomain(nodes, gang, placement, free, need)
+		d, id, status := g.planDomain(nodes, gang, placement, free, need, pod)
 		if status != nil {
 			klog.V(4).InfoS("gangpack.pinGang.no_fit", "gang", gang.key, "status", status.Message())
 			return nil, status
@@ -319,7 +325,13 @@ func (g *GangPack) pinGang(state framework.CycleState, nodes []framework.NodeInf
 // already-placed members (failover / lost pin), else best-fits a fresh one. It
 // records the pin and the placement metric. status is non-nil (Unschedulable)
 // only when the gang fits in no domain.
-func (g *GangPack) planDomain(nodes []framework.NodeInfo, gang gangInfo, bound boundGangPlacement, free topology.FreeByDomain, need int) (string, uint64, *framework.Status) {
+//
+// Room the snapshot has but Choose withholds belongs to another gang's
+// outstanding reservation. That reservation draining or unwinding produces no
+// cluster event, so pod is remembered and woken with the reservation's other
+// blocked pods; a gang short of capacity everywhere is left to the registered
+// pod and node events.
+func (g *GangPack) planDomain(nodes []framework.NodeInfo, gang gangInfo, bound boundGangPlacement, free topology.FreeByDomain, need int, pod *v1.Pod) (string, uint64, *framework.Status) {
 	if bound.split {
 		return "", 0, framework.NewStatus(framework.UnschedulableAndUnresolvable,
 			"gang "+gang.key+" already has members in multiple topology domains")
@@ -346,6 +358,12 @@ func (g *GangPack) planDomain(nodes []framework.NodeInfo, gang gangInfo, bound b
 			nodeNamesByDomain(nodes, gang.topologyKey), need)
 	}
 	if !fits {
+		if _, room := topology.BestFit(free, need); room {
+			g.rememberReservationBlocked(pod)
+			gangPinTotal.WithLabelValues("reserved").Inc()
+			return "", 0, framework.NewStatus(framework.Unschedulable,
+				"no domain has room for gang "+gang.key+": every fitting domain is reserved for a forming gang")
+		}
 		gangPinTotal.WithLabelValues("no_fit").Inc()
 		return "", 0, framework.NewStatus(framework.Unschedulable, "no domain has room for gang "+gang.key)
 	}

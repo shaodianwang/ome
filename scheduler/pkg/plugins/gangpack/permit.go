@@ -69,12 +69,18 @@ const (
 	// member parked on the incomplete set would otherwise wait for the
 	// periodic unschedulable flush.
 	activationTriggerTemplatesComplete = "templates_complete"
+	// activationTriggerReservationReleased: a forming gang's domain reservation
+	// drained or was released. The pods it kept out of the domain, ordinary or
+	// gang members, would otherwise wait for the periodic unschedulable flush.
+	activationTriggerReservationReleased = "reservation_released"
 )
 
 // activateGangMembers force-activates every live member of the gang. Gang
 // progress is plugin-internal state with no cluster event behind it, so each
 // transition that can unblock a parked sibling must be turned into queue
-// activity explicitly; the triggers above are the two such transitions.
+// activity explicitly; the permit and templates_complete triggers are the
+// gang-wide transitions, while a reservation release wakes only the pods it
+// parked (see activateReservationBlocked).
 // Activation bypasses backoff, so callers must fire it on a real transition,
 // not on every failed attempt. except, when non-nil, is the in-flight member
 // observing the transition; it is already being scheduled and needs no wake-up.
