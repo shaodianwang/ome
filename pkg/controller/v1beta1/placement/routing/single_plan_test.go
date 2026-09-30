@@ -39,6 +39,40 @@ func TestSingleRoutingUsesCommittedWinner(t *testing.T) {
 	}
 }
 
+func TestSingleZeroFloorRouting(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		winner   string
+		admitted int32
+		want     []string
+	}{
+		{name: "idle nominees have no route"},
+		{name: "uncommitted admitted nominee has no route", admitted: 1},
+		{name: "idle winner has no route", winner: "member-a"},
+		{name: "autoscaled winner can serve above its zero floor", winner: "member-a", admitted: 2, want: []string{"member-a"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			source := splitISVC([]string{"member-a", "member-b"}, []int32{tt.admitted, tt.admitted}, []int32{tt.admitted, tt.admitted})
+			source.Spec.Placement.Mode = v1beta1.PlacementModeSingle
+			source.Status.Placement.Plan = &v1beta1.PlacementPlanStatus{Mode: v1beta1.PlacementModeSingle, Winner: tt.winner}
+			for i := range source.Status.Placement.Candidates {
+				c := &source.Status.Placement.Candidates[i]
+				c.Allocation = &v1beta1.CandidateAllocationStatus{CurrentHome: &v1beta1.PlacementHomePolicy{ReplicaFloors: []v1beta1.PlacementComponentFloor{{Component: v1beta1.EngineComponent}}}}
+				if tt.admitted == 0 {
+					c.Phase = v1beta1.CandidatePhaseAdmitting
+				}
+			}
+			var got []string
+			for _, c := range servingCandidates(source) {
+				got = append(got, c.Cluster)
+			}
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Fatal(diff)
+			}
+		})
+	}
+}
+
 func TestCancelledSingleSelectionKeepsServingUntilDrain(t *testing.T) {
 	for _, tt := range []struct {
 		name       string

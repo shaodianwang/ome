@@ -47,6 +47,11 @@ func prepare(source *v1beta1.InferenceService, proposal Proposal) (*v1beta1.Plac
 			if _, err := protocol.ValidateReplicaFloors(home.ReplicaFloors); err != nil {
 				return nil, fmt.Errorf("cluster %q: %w", name, err)
 			}
+			if proposal.PauseSurge {
+				if _, err := protocol.ValidatePositiveReplicaFloors(home.ReplicaFloors); err != nil {
+					return nil, fmt.Errorf("cluster %q: %w", name, err)
+				}
+			}
 			slices.SortFunc(home.ReplicaFloors, func(a, b v1beta1.PlacementComponentFloor) int { return cmp.Compare(a.Component, b.Component) })
 		}
 		if assignment.DesiredHome != nil {
@@ -106,7 +111,7 @@ func prepare(source *v1beta1.InferenceService, proposal Proposal) (*v1beta1.Plac
 		}
 		if proposal.Winner != "" {
 			winner, exists := proposal.Assignments[proposal.Winner]
-			if !exists || winner.RaceCandidate || (proposal.SingleMove == nil && (winner.DesiredHome == nil || winner.DesiredReplicas <= 0)) || (proposal.SingleMove != nil && winner.OriginalReplicas <= 0 && (winner.CurrentHome == nil || winner.CurrentReplicas <= 0)) {
+			if !exists || winner.RaceCandidate || (proposal.SingleMove == nil && winner.DesiredHome == nil) || (proposal.SingleMove != nil && winner.OriginalReplicas <= 0 && (winner.CurrentHome == nil || winner.CurrentReplicas <= 0)) {
 				return nil, fmt.Errorf("Single winner requires retained full-home authority")
 			}
 		}
@@ -118,7 +123,7 @@ func prepare(source *v1beta1.InferenceService, proposal Proposal) (*v1beta1.Plac
 			}
 		}
 		for name, a := range proposal.Assignments {
-			if a.DesiredReplicas > 0 && ((selected != "" && name != selected) || (selected == "" && !a.RaceCandidate && name != proposal.Winner)) {
+			if (a.DesiredReplicas > 0 || a.DesiredHome != nil) && ((selected != "" && name != selected) || (selected == "" && !a.RaceCandidate && name != proposal.Winner)) {
 				return nil, fmt.Errorf("Single desired home is neither a race candidate nor its committed winner")
 			}
 		}

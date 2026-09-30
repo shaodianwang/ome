@@ -51,6 +51,19 @@ func TestPlacementSatisfaction(t *testing.T) {
 			s.Status.Placement.Candidates[0].ObservationKnown = false
 			s.Status.Placement.Plan.AssignedReplicas, s.Status.Placement.Plan.RequestedReplicas = 12, 12
 		}, status: corev1.ConditionTrue, reason: "AssignedFloorsAdmitted"},
+		{name: "zero home requires member acknowledgement", edit: func(s *v1beta1.InferenceService) {
+			c := &s.Status.Placement.Candidates[0]
+			c.Allocation.DesiredReplicas = 0
+			c.Allocation.DesiredHome = &v1beta1.PlacementHomePolicy{InputDigest: "source-intent", ReplicaFloors: []v1beta1.PlacementComponentFloor{{Component: v1beta1.EngineComponent}}}
+			c.AppliedPlanID = ""
+			s.Status.Placement.Plan.AssignedReplicas, s.Status.Placement.Plan.RequestedReplicas = 12, 12
+		}, status: corev1.ConditionUnknown, reason: "AwaitingMemberApplication"},
+		{name: "acknowledged zero home needs no admitted replicas", edit: func(s *v1beta1.InferenceService) {
+			c := &s.Status.Placement.Candidates[0]
+			c.Allocation.DesiredReplicas, c.AdmittedReplicas = 0, 0
+			c.Allocation.DesiredHome = &v1beta1.PlacementHomePolicy{InputDigest: "source-intent", ReplicaFloors: []v1beta1.PlacementComponentFloor{{Component: v1beta1.EngineComponent}}}
+			s.Status.Placement.Plan.AssignedReplicas, s.Status.Placement.Plan.RequestedReplicas = 12, 12
+		}, status: corev1.ConditionTrue, reason: "AssignedFloorsAdmitted"},
 		{name: "source changed", edit: func(s *v1beta1.InferenceService) { s.Generation++ }, status: corev1.ConditionUnknown, reason: "AwaitingCurrentPlan"},
 		{name: "source recreated", edit: func(s *v1beta1.InferenceService) { s.UID = "source-b" }, status: corev1.ConditionUnknown, reason: "AwaitingCurrentPlan"},
 		{name: "plan identity missing", edit: func(s *v1beta1.InferenceService) { s.Status.Placement.Plan.ID = "" }, status: corev1.ConditionUnknown, reason: "AwaitingCurrentPlan"},

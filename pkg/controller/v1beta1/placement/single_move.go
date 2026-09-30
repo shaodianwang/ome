@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -26,6 +27,12 @@ func (r *Reconciler) reconcileSingleMove(ctx context.Context, source *v1beta1.In
 	if !active && source.Spec.Placement.MaxSurge == nil {
 		return r.writeSinglePlanStatus(ctx, source, standing, "MigrationBlocked")
 	}
+	if !active && source.Status.Placement != nil && source.Status.Placement.Plan != nil {
+		r.sweepPlannedRace(ctx, source)
+	}
+	if handled, result, err := r.refreshSingleMovementFloor(ctx, source, clusters, standing); handled {
+		return result, err
+	}
 	if active {
 		if r.singleMoveEmpty(ctx, source, clusters, standing) {
 			if r.graceRemaining(source.UID, time.Now()) > 0 || len(eligible) == 0 {
@@ -43,6 +50,9 @@ func (r *Reconciler) reconcileSingleMove(ctx context.Context, source *v1beta1.In
 	}
 	proposal, err := r.singleMoveProposal(ctx, source, clusters, eligible, standing)
 	if err != nil {
+		if errors.Is(err, errPositiveMovementFloor) {
+			return r.writeSplitHold(ctx, source, standing, "PositiveFloorRequired", err)
+		}
 		return r.writeSplitHold(ctx, source, standing, "AwaitingHomeInputs", err)
 	}
 	return r.executePlannedAllocation(ctx, source, eligible, standing, proposal)
@@ -106,6 +116,9 @@ func (r *Reconciler) singleMoveProposal(ctx context.Context, source *v1beta1.Inf
 		if err != nil {
 			return out, err
 		}
+		if err := positiveMovementFloor(a.CurrentHome); err != nil {
+			return out, err
+		}
 		if a.CurrentHome == nil || a.CurrentReplicas <= 0 {
 			return out, fmt.Errorf("retained winner has no verified full home")
 		}
@@ -124,6 +137,18 @@ func (r *Reconciler) singleMoveProposal(ctx context.Context, source *v1beta1.Inf
 	}
 	for _, name := range slices.Sorted(maps.Keys(out.Assignments)) {
 		a := out.Assignments[name]
+		if a.RaceCandidate && a.CurrentReplicas == 0 && a.DrainRequested && zeroHomeFloor(a.CurrentHome) {
+			cctx, cancel := context.WithTimeout(ctx, r.placeTimeout())
+			observed, err := r.observePlannedHome(cctx, source, v1beta1.CandidatePlacement{Cluster: name, Allocation: &a}, declaredComponents(source))
+			cancel()
+			if err != nil {
+				return out, err
+			}
+			if !observed.Home.Absent {
+				return out, fmt.Errorf("zero-floor race loser %q still requires cleanup", name)
+			}
+			a.CurrentHome = nil
+		}
 		a.Matched, a.HomeInputsPending = matched[name] != "", false
 		selected := out.SingleMove.Selected
 		switch {
@@ -147,6 +172,11 @@ func (r *Reconciler) singleMoveProposal(ctx context.Context, source *v1beta1.Inf
 			}
 		}
 		out.Assignments[name] = a
+		for _, home := range []*v1beta1.PlacementHomePolicy{a.CurrentHome, a.DesiredHome} {
+			if err := positiveMovementFloor(home); err != nil {
+				return out, err
+			}
+		}
 	}
 	if out.SingleMove.Selected == out.Winner {
 		if err := r.restoreSingleWinner(ctx, source, standing, eligible, desired, &out); err != nil {
@@ -186,6 +216,9 @@ func (r *Reconciler) restoreSingleWinner(ctx context.Context, source *v1beta1.In
 	home, err := r.resolveFullHome(cctx, source, desired, proposal.Winner, a.ClusterUID, proposal.InputDigest)
 	cancel()
 	if err != nil {
+		return err
+	}
+	if err := positiveMovementFloor(home); err != nil {
 		return err
 	}
 	a.DesiredHome = home

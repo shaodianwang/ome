@@ -55,7 +55,7 @@ func placementSatisfactionConditions(source *v1beta1.InferenceService) []policyC
 		}
 		floor := candidate.Allocation.DesiredReplicas
 		assigned += int64(floor)
-		if floor == 0 {
+		if floor == 0 && candidate.Allocation.DesiredHome == nil {
 			continue
 		}
 		if candidate.Allocation.ClusterUID == "" || !candidate.ObservationKnown || candidate.AppliedPlanID != accepted.ID {

@@ -59,6 +59,7 @@ func TestSingleRacePersistsBeforeMemberWrites(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
 		pd     bool
+		floor  *int
 		a, b   []v1beta1.ComponentType
 		winner string
 	}{
@@ -66,9 +67,23 @@ func TestSingleRacePersistsBeforeMemberWrites(t *testing.T) {
 		{name: "lexical tie", a: []v1beta1.ComponentType{v1beta1.EngineComponent}, b: []v1beta1.ComponentType{v1beta1.EngineComponent}, winner: "member-a"},
 		{name: "every declared component is required", pd: true, a: []v1beta1.ComponentType{v1beta1.EngineComponent}, b: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, winner: "member-b"},
 		{name: "partial component admission keeps race open", pd: true, a: []v1beta1.ComponentType{v1beta1.EngineComponent}},
+		{name: "zero nominees await external admission", floor: ptr.To(0)},
+		{name: "zero floor winner retains its home", floor: ptr.To(0), a: []v1beta1.ComponentType{v1beta1.EngineComponent}, winner: "member-a"},
+		{name: "zero floor disaggregated race", floor: ptr.To(0), pd: true, a: []v1beta1.ComponentType{v1beta1.EngineComponent}, b: []v1beta1.ComponentType{v1beta1.EngineComponent, v1beta1.DecoderComponent}, winner: "member-b"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			f := singleFixture(t, tt.pd)
+			floor := 3
+			if tt.floor != nil {
+				floor = *tt.floor
+				f.source.Spec.Engine.MinReplicas = ptr.To(floor)
+				if f.source.Spec.Decoder != nil {
+					f.source.Spec.Decoder.MinReplicas = ptr.To(floor)
+				}
+				if err := f.reconciler.Update(t.Context(), f.source); err != nil {
+					t.Fatal(err)
+				}
+			}
 			created, deleted := []string{}, []string{}
 			for name, worker := range f.workers {
 				watched := interceptor.NewClient(worker, interceptor.Funcs{
@@ -136,7 +151,7 @@ func TestSingleRacePersistsBeforeMemberWrites(t *testing.T) {
 					loser = "member-a"
 				}
 				wantDeleted = append(wantDeleted, loser)
-				if diff := cmp.Diff(int64(3), got.Status.Placement.Plan.AssignedReplicas); diff != "" {
+				if diff := cmp.Diff(int64(floor), got.Status.Placement.Plan.AssignedReplicas); diff != "" {
 					t.Fatal(diff)
 				}
 				if got.Status.Placement.Plan.ID == race.Status.Placement.Plan.ID {

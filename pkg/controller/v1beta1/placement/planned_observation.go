@@ -27,6 +27,8 @@ type plannedHomeObservation struct {
 	RolloutReserved   int32
 	PauseAcknowledged bool
 	FullHomeReady     bool
+	IdleZeroFloor     bool
+	ScalingToZero     bool
 	Terminal          bool
 }
 
@@ -78,6 +80,8 @@ func (r *Reconciler) observePlannedHome(ctx context.Context, source *v1beta1.Inf
 	policy := executionPolicy(source, previous.Allocation)
 	statuses := map[v1beta1.ComponentType]*v1beta1.InferenceReplicaStatus{}
 	counts := map[v1beta1.ComponentType]memberResourceCount{}
+	idleComponents := map[v1beta1.ComponentType]bool{}
+	zeroRequests := map[v1beta1.ComponentType]bool{}
 	applied := memberExists && member.DeletionTimestamp.IsZero()
 	if memberExists {
 		memberPolicy, err := protocol.FromDerived(member)
@@ -132,6 +136,8 @@ func (r *Reconciler) observePlannedHome(ctx context.Context, source *v1beta1.Inf
 		if ir.Spec.Replicas == nil || *ir.Spec.Replicas < 0 {
 			return out, fmt.Errorf("component %q has unresolved desired replicas", ir.Name)
 		}
+		zeroRequests[ir.Spec.Component] = *ir.Spec.Replicas == 0 && protocol.HasZeroReplicaFloor(policy, ir.Spec.Component)
+		idleComponents[ir.Spec.Component] = zeroRequests[ir.Spec.Component] && count.Occupied == 0 && count.Reserved == 0
 		// Whole replica units contain Engine and Decoder. Router stays shared
 		// within each home, with its own replica policy and readiness gate.
 		if ir.Spec.Component != v1beta1.RouterComponent {
@@ -183,10 +189,17 @@ func (r *Reconciler) observePlannedHome(ctx context.Context, source *v1beta1.Inf
 	scaled := make([]v1beta1.ComponentType, 0, len(components))
 	ready := int32(math.MaxInt32)
 	allAdmitted, allServing := true, true
+	idleZeroFloor := true
+	zeroRequested := true
 	for _, component := range components {
 		count, exists := counts[component]
 		applied = applied && exists
-		allAdmitted = allAdmitted && componentHasAdmittedInstance(statuses[component])
+		admitted := componentHasAdmittedInstance(statuses[component])
+		allAdmitted = allAdmitted && admitted
+		if !admitted {
+			idleZeroFloor = idleZeroFloor && idleComponents[component]
+			zeroRequested = zeroRequested && zeroRequests[component]
+		}
 		if component == v1beta1.RouterComponent {
 			allServing = allServing && statuses[component] != nil && statuses[component].ReadyReplicas > 0
 			if count.Ready == 0 {
@@ -215,6 +228,10 @@ func (r *Reconciler) observePlannedHome(ctx context.Context, source *v1beta1.Inf
 	if memberExists {
 		out.Terminal = IsTerminallyFailed(member, statuses)
 	}
+	// Zero demand preserves home identity without inventing admission. Pending
+	// cleanup is distinct from an idle home and cannot establish convergence.
+	out.IdleZeroFloor = applied && memberExists && !out.Terminal && !allAdmitted && idleZeroFloor
+	out.ScalingToZero = applied && memberExists && !out.Terminal && !allAdmitted && zeroRequested && !idleZeroFloor
 	out.FullHomeReady = out.FullHomeReady && !out.Terminal
 	out.Candidate = v1beta1.CandidatePlacement{Cluster: previous.Cluster, Allocation: previous.Allocation.DeepCopy(), ObservationKnown: true, Phase: v1beta1.CandidatePhaseAdmitting}
 	if applied {

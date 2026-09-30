@@ -173,6 +173,11 @@ func (r *Reconciler) resolveFullHome(ctx context.Context, source, desired *v1bet
 	if err != nil {
 		return nil, err
 	}
+	if placementMode(source) != v1beta1.PlacementModeSingle {
+		if _, err := protocol.ValidatePositiveReplicaFloors(floors); err != nil {
+			return nil, err
+		}
+	}
 	return &v1beta1.PlacementHomePolicy{InputDigest: digest, ReplicaFloors: floors}, nil
 }
 

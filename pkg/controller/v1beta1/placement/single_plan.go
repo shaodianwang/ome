@@ -33,7 +33,11 @@ func (r *Reconciler) reconcileSinglePlanned(ctx context.Context, source *v1beta1
 		if home.state == homeUnknown || home.terminal {
 			return r.writeSinglePlanStatus(ctx, source, observations, "")
 		}
-		if home.state == homeAbsent || home.candidate.Phase != v1beta1.CandidatePhaseAdmitted {
+		retainZero, err := r.retainZeroFloorWinner(ctx, source, winner)
+		if err != nil {
+			return r.writeSinglePlanStatus(ctx, source, observations, "AwaitingMemberConvergence")
+		}
+		if home.state == homeAbsent || (home.candidate.Phase != v1beta1.CandidatePhaseAdmitted && !retainZero) {
 			if r.graceRemaining(source.UID, time.Now()) > 0 {
 				return r.writeSinglePlanStatus(ctx, source, observations, "AwaitingWinnerRecovery")
 			}
@@ -58,7 +62,7 @@ func (r *Reconciler) reconcileSinglePlanned(ctx context.Context, source *v1beta1
 		nominated, roundWait = r.nominate().Nominate(source.UID, eligible, time.Now())
 		if source.Status.Placement != nil && source.Status.Placement.Plan != nil && source.Status.Placement.Plan.Mode == v1beta1.PlacementModeSingle && source.Status.Placement.Plan.Winner == "" {
 			for _, candidate := range source.Status.Placement.Candidates {
-				if candidate.Allocation != nil && candidate.Allocation.RaceCandidate && candidate.Allocation.DesiredReplicas > 0 && slices.Contains(eligible, candidate.Cluster) && !slices.Contains(nominated, candidate.Cluster) {
+				if candidate.Allocation != nil && candidate.Allocation.RaceCandidate && candidate.Allocation.DesiredHome != nil && slices.Contains(eligible, candidate.Cluster) && !slices.Contains(nominated, candidate.Cluster) {
 					nominated = append(nominated, candidate.Cluster)
 				}
 			}
@@ -79,7 +83,7 @@ func (r *Reconciler) reconcileSinglePlanned(ctx context.Context, source *v1beta1
 	applied := map[string]bool{}
 	for _, candidate := range accepted.Status.Placement.Candidates {
 		a := candidate.Allocation
-		if a.CurrentReplicas <= 0 || a.HomeInputsPending || !slices.Contains(nominated, candidate.Cluster) {
+		if a.CurrentHome == nil || a.DrainRequested || a.HomeInputsPending || !slices.Contains(nominated, candidate.Cluster) {
 			continue
 		}
 		cctx, cancel := context.WithTimeout(ctx, r.placeTimeout())
@@ -224,7 +228,7 @@ func (r *Reconciler) singleProposal(ctx context.Context, source *v1beta1.Inferen
 				}
 			}
 		}
-		if a.DesiredReplicas == 0 {
+		if a.DesiredHome == nil {
 			a.CurrentReplicas = 0
 			a.DrainRequested = a.CurrentHome != nil || winner != ""
 		}
@@ -250,7 +254,7 @@ func (r *Reconciler) sweepPlannedRace(ctx context.Context, source *v1beta1.Infer
 }
 
 func (r *Reconciler) deletePlannedRaceLoser(ctx context.Context, source *v1beta1.InferenceService, candidate v1beta1.CandidatePlacement) error {
-	if source.Status.Placement == nil || source.Status.Placement.Plan == nil || source.Status.Placement.Plan.Mode != v1beta1.PlacementModeSingle || source.Status.Placement.Plan.Winner == "" || candidate.Cluster == source.Status.Placement.Plan.Winner || candidate.Allocation == nil || !candidate.Allocation.RaceCandidate || candidate.Allocation.DesiredReplicas != 0 {
+	if source.Status.Placement == nil || source.Status.Placement.Plan == nil || source.Status.Placement.Plan.Mode != v1beta1.PlacementModeSingle || source.Status.Placement.Plan.Winner == "" || candidate.Cluster == source.Status.Placement.Plan.Winner || candidate.Allocation == nil || !candidate.Allocation.RaceCandidate || candidate.Allocation.DesiredReplicas != 0 || candidate.Allocation.DesiredHome != nil {
 		return fmt.Errorf("race cleanup requires a committed winner and explicit loser authority")
 	}
 	return r.deletePlannedOn(ctx, source, candidate, true)
@@ -267,7 +271,7 @@ func (r *Reconciler) writeSinglePlanStatus(ctx context.Context, source *v1beta1.
 func (r *Reconciler) singlePlanStatus(ctx context.Context, source *v1beta1.InferenceService, observations *placementObservations, reason string) placementResult {
 	winner := winnerCluster(source)
 	res := placementResult{winner: winner, phase: v1beta1.PlacementPhasePending}
-	cleanupPending, winnerApplied := false, false
+	cleanupPending, winnerApplied, winnerIdle := false, false, false
 	names := observations.standing
 	if source.Status.Placement != nil && source.Status.Placement.Plan != nil {
 		names = nil
@@ -309,6 +313,7 @@ func (r *Reconciler) singlePlanStatus(ctx context.Context, source *v1beta1.Infer
 			}
 			if name == winner && candidate.AppliedPlanID == source.Status.Placement.Plan.ID {
 				winnerApplied = true
+				winnerIdle = observed.IdleZeroFloor
 			}
 		}
 		if candidate.Allocation != nil || (home.state != homeAbsent && !sourceHasPendingWinnerIdentity(source)) {
@@ -333,7 +338,7 @@ func (r *Reconciler) singlePlanStatus(ctx context.Context, source *v1beta1.Infer
 			res.phase = source.Status.Placement.Phase
 			res.readinessUnknown = true
 			res.url = candidate.Endpoint
-		case candidate.Phase == v1beta1.CandidatePhaseAdmitted:
+		case candidate.Phase == v1beta1.CandidatePhaseAdmitted || winnerIdle:
 			res.phase = v1beta1.PlacementPhasePlaced
 			res.ready = home.serving
 			res.url = candidate.Endpoint

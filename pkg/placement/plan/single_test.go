@@ -136,6 +136,78 @@ func TestSingleWinnerPersistenceReadback(t *testing.T) {
 	}
 }
 
+func TestZeroFloorSingleAuthority(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		edit    func(*Proposal)
+		wantErr bool
+	}{
+		{name: "zero nominations"},
+		{name: "retained zero winner", edit: func(p *Proposal) { chooseSingleWinner(p, "member-a") }},
+		{name: "zero home needs nomination", wantErr: true, edit: func(p *Proposal) {
+			a := p.Assignments["member-a"]
+			a.RaceCandidate = false
+			p.Assignments["member-a"] = a
+		}},
+		{name: "zero loser cannot retain desired home", wantErr: true, edit: func(p *Proposal) {
+			chooseSingleWinner(p, "member-a")
+			a := p.Assignments["member-b"]
+			a.DesiredHome = a.CurrentHome.DeepCopy()
+			p.Assignments["member-b"] = a
+		}},
+		{name: "zero winner needs home authority", wantErr: true, edit: func(p *Proposal) {
+			chooseSingleWinner(p, "member-a")
+			a := p.Assignments["member-a"]
+			a.DesiredHome = nil
+			p.Assignments["member-a"] = a
+		}},
+		{name: "zero cannot reserve movement", wantErr: true, edit: func(p *Proposal) {
+			chooseSingleWinner(p, "member-a")
+			p.PauseSurge = true
+			p.SingleMove = &v1beta1.PlacementSingleMoveStatus{}
+		}},
+		{name: "zero router cannot reserve movement", wantErr: true, edit: func(p *Proposal) {
+			*p = singleProposalFixture()
+			chooseSingleWinner(p, "member-a")
+			a := p.Assignments["member-a"]
+			a.CurrentHome.ReplicaFloors = append(a.CurrentHome.ReplicaFloors, v1beta1.PlacementComponentFloor{Component: v1beta1.RouterComponent})
+			p.Assignments["member-a"] = a
+			p.PauseSurge = true
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p := singleProposalFixture()
+			for name, a := range p.Assignments {
+				a.CurrentReplicas, a.DesiredReplicas = 0, 0
+				a.CurrentHome.ReplicaFloors[0].Replicas, a.DesiredHome.ReplicaFloors[0].Replicas = 0, 0
+				p.Assignments[name] = a
+			}
+			if tt.edit != nil {
+				tt.edit(&p)
+			}
+			source := sourceFixture()
+			source.Spec.Placement.Mode = v1beta1.PlacementModeSingle
+			store := storeFixture(t, source, interceptor.Funcs{})
+			got, err := store.Persist(t.Context(), source, p)
+			if diff := cmp.Diff(tt.wantErr, err != nil); diff != "" {
+				t.Fatalf("%s: %v", diff, err)
+			}
+			if tt.wantErr {
+				return
+			}
+			if diff := cmp.Diff(int64(0), got.Status.Placement.Plan.AssignedReplicas); diff != "" {
+				t.Fatal(diff)
+			}
+			if diff := cmp.Diff(p.Winner, got.Status.Placement.Plan.Winner); diff != "" {
+				t.Fatal(diff)
+			}
+			if diff := cmp.Diff(got, mustPersist(t, store, got, p)); diff != "" {
+				t.Fatalf("restart changed authority: %s", diff)
+			}
+		})
+	}
+}
+
 func TestSingleMoveAuthority(t *testing.T) {
 	for _, tt := range []struct {
 		name    string

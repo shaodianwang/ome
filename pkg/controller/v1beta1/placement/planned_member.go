@@ -127,8 +127,8 @@ func (r *Reconciler) placePlannedMember(ctx context.Context, source *v1beta1.Inf
 		return err
 	}
 	assignment := candidate.Allocation
-	if assignment == nil || assignment.CurrentReplicas <= 0 {
-		return fmt.Errorf("positive planned assignment is required for member creation")
+	if assignment == nil || assignment.CurrentReplicas < 0 || (assignment.CurrentReplicas == 0 && (assignment.CurrentHome == nil || assignment.DrainRequested)) {
+		return fmt.Errorf("member creation requires a positive allocation or an active full home")
 	}
 	cl, transport, err := r.plannedTransport(ctx, candidate.Cluster, assignment.ClusterUID)
 	if err != nil {

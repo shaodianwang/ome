@@ -455,12 +455,25 @@ and controller rollout must not impose those guards on local services.
 
 The member protocol accepts explicit zero floors in an unpaused version 3
 execution policy and preserves them through projection and external scaling.
-Source placement still requires positive resolved component floors for a
-complete Single or All home, with equal Engine/Decoder counts when both exist.
-Zero-floor source activation remains open; member support alone does not enable
-it. A movement pause requires positive floors for every component. These limits
-do not reject zero targets produced by Split apportionment or change local
-services' zero-floor behavior.
+Single can nominate a complete home with zero floors, with equal Engine/Decoder
+counts when both exist. A nominee with no admitted replicas does not win:
+external scaling must request replicas and member admission must succeed first.
+An established winner retains its service and scaling authority when its
+components return to zero. Its zero floor grants no ready or routable capacity.
+Pending policy acknowledgements and scale-down cleanup retain that winner;
+unreadable inventory holds placement. Positive pending demand still follows the
+admission-loss grace policy.
+
+A deliberate Single move requires positive floors for every component. If a
+retained home has a zero floor, the controller reports `PositiveFloorRequired`.
+After a positive floor is configured, it applies that floor to the retained
+home before beginning the bounded move. Observed autoscaled replicas do not
+substitute for the configured guarantee. Zero-floor race losers must be
+physically absent before their contracts can leave movement accounting.
+
+All source homes still require positive resolved component floors; their
+zero-floor activation remains open. These limits do not reject zero targets
+produced by Split apportionment or change local services' zero-floor behavior.
 
 ### Capacity contract
 
@@ -1003,17 +1016,17 @@ Confirmed in the design discussion:
 
 Remaining work:
 
-1. **Zero-floor source activation:** members preserve accepted zero floors, but
-   source placement conservatively holds Single and All when a declared
-   component resolves to zero. Define admission, routing, and transition
-   accounting before accepting such homes, retaining the positive-floor
-   requirement for movement. Split's computed zero targets and local services
-   are unaffected. Owner: API/placement owners.
-2. **Operational graduation:** calibrate report freshness, stability windows,
+1. **Zero-floor All activation:** members and Single sources preserve accepted
+   zero floors. Extend All's transition accounting to retain zero-floor homes
+   while preserving the positive-floor requirement for deliberate moves.
+   Owner: API/placement owners.
+2. **SDK coverage:** regenerate the Rust InferenceService client to include
+   placement intent and verify API round trips. Owner: API/client owners.
+3. **Operational graduation:** calibrate report freshness, stability windows,
    and movement allowances against fleet measurements. Choose a compatibility
    window for removing the bridge schema and rehearse deployed-binary upgrades
    and rollback. Owner: deployment and placement owners.
 
-Next action: implement and verify zero-floor source activation, then validate
-deployment-specific settings and migration procedures. Local tests do not
-establish a production soak or complete operational graduation.
+Next action: implement and verify zero-floor All activation and client coverage,
+then validate deployment-specific settings and migration procedures. Local tests
+do not establish a production soak or complete operational graduation.

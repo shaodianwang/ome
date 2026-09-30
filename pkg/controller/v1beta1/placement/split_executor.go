@@ -457,6 +457,8 @@ func splitProgressCondition(reason, message string) policyCondition {
 		condition.cond.Message = "Members have applied the accepted allocation"
 	} else if reason == "ReplacementFailed" && message == "" {
 		condition.cond.Message = "Selected replacement is terminally failed; the serving winner remains retained"
+	} else if reason == "PositiveFloorRequired" && message == "" {
+		condition.cond.Message = "Configure positive component minReplicas before moving the retained home"
 	} else if message == "" {
 		condition.cond.Message = "Waiting for member execution and routing to converge on the accepted allocation"
 	}
