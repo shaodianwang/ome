@@ -43,7 +43,8 @@ def job_blocks(yaml_text: str) -> list[str]:
 class EvalSchedulerDimension(unittest.TestCase):
     def test_default_emits_both_schedulers_and_gates_the_twins(self):
         gp = load({"GKE_EVAL_SCHEDULER_ENABLED": "1"})
-        out = gp._gke_eval_group()
+        with mock.patch.object(gp, "EVAL_SCHEDULER_SOFT_TOPOLOGIES", []):
+            out = gp._gke_eval_group()
         self.assertIn("omenative-e2e-", out)
         self.assertIn("-ome-scheduler", out)
         self.assertIn('OME_EVAL_SCHEDULER: "ome-scheduler"', out)
@@ -58,7 +59,8 @@ class EvalSchedulerDimension(unittest.TestCase):
 
     def test_advisory_switch_softens_the_twins_only(self):
         gp = load({"GKE_EVAL_SCHEDULER_ENABLED": "1", "GKE_EVAL_SCHEDULER_HARD_FAIL": "0"})
-        out = gp._gke_eval_group()
+        with mock.patch.object(gp, "EVAL_SCHEDULER_SOFT_TOPOLOGIES", []):
+            out = gp._gke_eval_group()
         seen_twin = seen_default = False
         for block in job_blocks(out):
             if "-skipped" in block:
@@ -225,3 +227,63 @@ class SchedulerTwinNodeSizing(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EvalSchedulerSoftTopologies(unittest.TestCase):
+    def soft_entry(self, gp, topology, **overrides):
+        entry = {
+            "topology": topology,
+            "owner": "tester",
+            "reason": "known gang-scheduler defect",
+            "expires": (gp._today() + datetime.timedelta(days=7)).isoformat(),
+        }
+        entry.update(overrides)
+        return entry
+
+    def test_soft_listed_topology_softens_only_its_scheduler_twins(self):
+        gp = load({"GKE_EVAL_SCHEDULER_ENABLED": "1"})
+        topology = gp._eval_case_groups()[0][1]
+        entry = self.soft_entry(gp, topology)
+        with mock.patch.object(gp, "EVAL_SCHEDULER_SOFT_TOPOLOGIES", [entry]):
+            out = gp._gke_eval_group()
+        soft = [b for b in job_blocks(out) if "soft_fail: true" in b]
+        self.assertGreater(len(soft), 0)
+        for block in soft:
+            self.assertIn("-ome-scheduler", block)
+            self.assertIn(f"/ {topology}", block)
+            self.assertIn(f"advisory until {entry['expires']}", block)
+        hard = [b for b in job_blocks(out) if "soft_fail" not in b and 'key: "omenative-e2e-' in b]
+        self.assertTrue(any("-ome-scheduler" in b for b in hard), "twins of other topologies must still gate")
+        self.assertTrue(any("-ome-scheduler" not in b and f"/ {topology}" in b for b in hard), "the default-scheduler shards of the topology must still gate")
+
+    def test_soft_list_rejects_stale_or_anonymous_entries(self):
+        gp = load({"GKE_EVAL_SCHEDULER_ENABLED": "1"})
+        topology = gp._eval_case_groups()[0][1]
+        yesterday = (gp._today() - datetime.timedelta(days=1)).isoformat()
+        for entry, message in (
+            (self.soft_entry(gp, "no-such-topology"), "not a corpus topology"),
+            (self.soft_entry(gp, topology, owner=""), "has no owner"),
+            (self.soft_entry(gp, topology, reason=" "), "has no reason"),
+            (self.soft_entry(gp, topology, expires="soon"), "needs an expires date"),
+            (self.soft_entry(gp, topology, expires=yesterday), "were soft until"),
+        ):
+            with self.subTest(message=message):
+                with mock.patch.object(gp, "EVAL_SCHEDULER_SOFT_TOPOLOGIES", [entry]):
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        gp._eval_scheduler_soft_topologies()
+        twice = [self.soft_entry(gp, topology), self.soft_entry(gp, topology)]
+        with mock.patch.object(gp, "EVAL_SCHEDULER_SOFT_TOPOLOGIES", twice):
+            with self.assertRaisesRegex(RuntimeError, "duplicate"):
+                gp._eval_scheduler_soft_topologies()
+
+    def test_checked_in_soft_list_is_valid(self):
+        gp = load({})
+        soft = gp._eval_scheduler_soft_topologies()
+        known = {topology for _, topology, _ in gp._eval_case_groups()}
+        self.assertTrue(set(soft) <= known)
+
+    def test_empty_soft_list_keeps_every_twin_gating(self):
+        gp = load({"GKE_EVAL_SCHEDULER_ENABLED": "1"})
+        with mock.patch.object(gp, "EVAL_SCHEDULER_SOFT_TOPOLOGIES", []):
+            out = gp._gke_eval_group()
+        self.assertNotIn("soft_fail", out)

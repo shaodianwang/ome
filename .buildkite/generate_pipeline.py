@@ -280,6 +280,27 @@ KIND_SCHEDULER_SOFT_GROUPS: list[dict[str, str]] = [
     },
 ]
 
+# Eval-twin soft list: the same escape hatch for the eval shards under the gang
+# scheduler, keyed by topology because a gang-scheduler defect shows on every
+# feature of the shape it breaks. A topology whose scheduler twins are red on
+# main while their default-scheduler shards are green stays advisory here,
+# visibly and briefly, with an owner, a one-line reason and an expiry;
+# generation fails on an unknown topology, an empty owner or reason, and on the
+# day after `expires`. To promote the twins, delete the entry in the fix PR.
+EVAL_SCHEDULER_SOFT_TOPOLOGIES: list[dict[str, str]] = [
+    {
+        "topology": "pd-mn",
+        "owner": "slin1237",
+        "expires": "2026-10-14",
+        "reason": (
+            "a gang the gang scheduler rejects for a full domain while the "
+            "previous case's pods terminate is not retried when the domain "
+            "empties, so a multi-node P/D case times out in its init window; "
+            "the default-scheduler shards pass"
+        ),
+    },
+]
+
 
 def _truthy(val: str) -> bool:
     return val.strip().lower() in ("1", "true", "yes", "on")
@@ -295,7 +316,8 @@ GKE_EVAL_ENABLED = _truthy(os.environ.get("GKE_EVAL_ENABLED", "1"))
 # Second scheduler dimension of the eval: every feature/topology job again with
 # the fixtures stamped schedulerName=ome-scheduler and the gang scheduler
 # installed in the KIND cluster. The twins gate the build like the default
-# jobs; GKE_EVAL_SCHEDULER_HARD_FAIL=0 is the emergency switch that makes them
+# jobs except the topologies in EVAL_SCHEDULER_SOFT_TOPOLOGIES;
+# GKE_EVAL_SCHEDULER_HARD_FAIL=0 is the emergency switch that makes every twin
 # advisory again, to be reported the moment it is flipped.
 GKE_EVAL_SCHEDULER_ENABLED = _truthy(os.environ.get("GKE_EVAL_SCHEDULER_ENABLED", "1"))
 GKE_EVAL_SCHEDULER_HARD_FAIL = _truthy(os.environ.get("GKE_EVAL_SCHEDULER_HARD_FAIL", "1"))
@@ -691,6 +713,33 @@ def _kind_scheduler_soft_groups() -> dict[str, str]:
             expired=lambda raw, owner: (
                 f"KIND scheduler twin {group} was soft until {raw} (owner {owner}): "
                 "fix it under the gang scheduler, or extend the entry with a reason"
+            ),
+        )
+    return soft
+
+
+def _eval_scheduler_soft_topologies() -> dict[str, str]:
+    """Validate EVAL_SCHEDULER_SOFT_TOPOLOGIES; return {topology: expiry}.
+
+    Same rejections as the KIND soft list: an entry that names no topology the
+    corpus carries, that nobody owns or explains, or whose time is up has
+    stopped carrying information.
+    """
+    known = {topology for _, topology, _ in _eval_case_groups()}
+    soft: dict[str, str] = {}
+    for entry in EVAL_SCHEDULER_SOFT_TOPOLOGIES:
+        topology = str(entry.get("topology", "")).strip()
+        if not topology:
+            raise RuntimeError("eval scheduler soft-list entry without a topology")
+        if topology not in known:
+            raise RuntimeError(f"soft-listed eval scheduler twin is not a corpus topology: {topology}")
+        if topology in soft:
+            raise RuntimeError(f"duplicate eval scheduler soft-list entry: {topology}")
+        soft[topology] = _owned_until(
+            entry, f"eval scheduler soft-list entry for {topology}",
+            expired=lambda raw, owner: (
+                f"eval scheduler twins of {topology} were soft until {raw} (owner {owner}): "
+                "fix them under the gang scheduler, or extend the entry with a reason"
             ),
         )
     return soft
@@ -1161,6 +1210,7 @@ def _gke_eval_group() -> str:
     concurrency = int(os.environ.get("GKE_EVAL_CASE_CONCURRENCY", "4"))
     default_target_waves = int(os.environ.get("GKE_EVAL_TARGET_WAVES", "4"))
     canary_target_waves = int(os.environ.get("GKE_EVAL_CANARY_TARGET_WAVES", "2"))
+    soft = _eval_scheduler_soft_topologies()
     children = []
     for scheduler in EVAL_SCHEDULERS:
       for feature, topology, cases in _eval_case_groups():
@@ -1235,7 +1285,9 @@ def _gke_eval_group() -> str:
                 "retry": {"automatic": _infra_retry_automatic()},
                 "plugins": plugins,
             }
-            if scheduler and not GKE_EVAL_SCHEDULER_HARD_FAIL:
+            if scheduler and topology in soft:
+                child["label"] += f" (advisory until {soft[topology]})"
+            if scheduler and (topology in soft or not GKE_EVAL_SCHEDULER_HARD_FAIL):
                 child["soft_fail"] = True
             children.append(child)
     group = {

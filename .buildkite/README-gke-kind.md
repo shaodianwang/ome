@@ -202,7 +202,9 @@ default job is green is a gang-scheduler defect with an owner; it goes into
 `KIND_SCHEDULER_SOFT_GROUPS` in `generate_pipeline.py` with an owner, a
 one-line reason and an expiry, and its job label says `advisory until <date>`.
 Generation fails on an unknown group, a missing owner or reason, and the day
-after the expiry, on every branch. `GKE_EVAL_SCHEDULER_HARD_FAIL=0` and
+after the expiry, on every branch. The eval shards have the same list keyed by
+topology, `EVAL_SCHEDULER_SOFT_TOPOLOGIES`, because a gang-scheduler defect
+shows on every feature of the shape it breaks. `GKE_EVAL_SCHEDULER_HARD_FAIL=0` and
 `GKE_KIND_SCHEDULER_HARD_FAIL=0` make every twin advisory again; they are
 emergency switches, to be reported the moment they are flipped.
 
