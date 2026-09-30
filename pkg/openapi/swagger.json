@@ -3774,6 +3774,10 @@
           "description": "Placement declares how the multi-cluster control plane selects and orders the workload clusters this InferenceService is placed onto. When nil, the control plane falls back to the ome.io/accelerator-requirements and ome.io/cluster-selector annotations (unchanged legacy behavior). Only consulted on the control-plane cluster; ignored in single-cluster deployments. Alpha; the API may change without notice.",
           "$ref": "#/definitions/v1beta1.PlacementSpec"
         },
+        "replicaRefs": {
+          "description": "ReplicaRefs names, per role, the standalone InferenceReplicas this service fronts instead of rendering the role itself. The service creates the role's stable Service (\u003cname\u003e-engine, -decoder, -router) and the route in front of their pods and writes nothing on the replicas: their specs, rollouts and scaling stay with their owner. A service references either all of its roles this way or none, so spec.engine, spec.decoder and spec.router are unset with it, as are spec.model and spec.runtime (the replicas carry their own); engine is required. Fixed at create. A replica that needs a peer's address (an engine its decoder, a router its engine and decoder) is configured by its owner with the stable Service names, which exist once the service does.",
+          "$ref": "#/definitions/v1beta1.ReplicaRefs"
+        },
         "rollout": {
           "description": "Rollout is the single home for rollout configuration on this InferenceService: an ordered list of rollout groups, each polymorphic in its progression (canary | blueGreen | rollingUpdate). Sequencing is the group list order; a group's Components roll together.",
           "$ref": "#/definitions/v1beta1.RolloutSpec"
@@ -6125,6 +6129,39 @@
           "additionalProperties": {
             "$ref": "#/definitions/resource.Quantity"
           }
+        }
+      }
+    },
+    "v1beta1.ReplicaRefs": {
+      "description": "ReplicaRefs names the standalone InferenceReplicas an InferenceService fronts, per role. Each list names one replica of that component in the service's namespace.",
+      "type": "object",
+      "properties": {
+        "decoder": {
+          "description": "Decoder names the replicas that serve the decoder role.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "default": ""
+          },
+          "x-kubernetes-list-type": "set"
+        },
+        "engine": {
+          "description": "Engine names the replicas that serve the engine role.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "default": ""
+          },
+          "x-kubernetes-list-type": "set"
+        },
+        "router": {
+          "description": "Router names the replicas that serve the router role.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "default": ""
+          },
+          "x-kubernetes-list-type": "set"
         }
       }
     },

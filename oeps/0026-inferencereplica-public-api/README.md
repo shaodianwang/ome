@@ -122,9 +122,9 @@ Each term is defined once; the consequence is part of the definition.
   `ome.io/inferenceservice` pod label.
 - **Name prefix:** the parent ISVC name for a projected IR, the IR's own name
   for a standalone IR; pod, Service and revision names start with it.
-- **Referenced form:** the ISVC role names existing IRs
-  (`engine: {replicaRefs: […]}`); the user owns them. A referenced IR is a
-  standalone replica an ISVC names.
+- **Referenced form:** the ISVC names existing IRs per role
+  (`spec.replicaRefs: {engine: […], decoder: […], router: […]}`); the user
+  owns them. A referenced IR is a standalone replica an ISVC names.
 - **Owner:** the actor allowed to write an IR's user fields. Projected: the
   ISVC controller. Standalone and referenced: the user, meaning any principal
   RBAC lets write the IR except the ISVC controller; admission does not track
@@ -168,15 +168,19 @@ Two forms per role, never one:
 ```yaml
 kind: InferenceService
 spec:
-  engine:  {replicaRefs: [llama-prefill-h100, llama-prefill-a100]}
-  decoder: {replicaRefs: [llama-decode-h100]}
-  router:  {replicaRef: llama-router}
-  rollout: …   # groups name replica refs
-  traffic: …   # weights across the refs in a role
+  replicaRefs:
+    router:  [router-a]
+    engine:  [pool-a]
+    decoder: [pool-d]
+  rollout: …   # Phase 3b: groups over the referenced replicas
+  traffic: …   # Phase 4: weights across the refs in a role
 ```
 
-The inline form is unchanged: `engine: {model…, runner…, lifecycle…}` still
-creates `<isvc>-engine`.
+The lists sit at the top of the spec, not under `engine`/`decoder`/`router`:
+those blocks are also the runtime's `engineConfig`/`decoderConfig`/
+`routerConfig` types, so a field inside them would leak into the
+ServingRuntime CRDs. The inline form is unchanged: `engine: {model…,
+runner…, lifecycle…}` still creates `<isvc>-engine`.
 
 ### 3. Ownership follows the form
 
@@ -279,7 +283,8 @@ Each phase leaves every existing ISVC untouched.
 |---|---|---|
 | 1 | Spec split documented as three groups, with the controller-only group enforced (the user/rollout-control split is enforced with the referenced form, Phase 3); owner rule enforced; `parentRef` optional; a bare-pod IR (`runners` only) is usable standalone | existing KIND suites through the inline path; workload goldens; webhook unit tests; **new** envtest suites `webhook/inferencereplica` (ownership rules per form) and `controller/inferencereplica_standalone` (naming, events, idle router, teardown); **new** KIND spec `standalone_replica`; the `ome-resources` render test (identity block, webhook configuration) |
 | 2 | `modelRef`/`runtimeRef` on the IR; rendering library `pkg/render` extracted; the inline form keeps `runners`; a standalone IR renders from refs | a byte golden of the projector's rendered runners and revision hash, captured before the extraction; existing merge, component, projector, hash and placement unit tests; KIND suites through the inline path; **new** envtest specs (webhook: `runners` vs refs exclusivity, piece-missing rejection; controller: refs render the runtime image and model path, auto-selection, `RuntimePieceMissing`, re-render on runtime change); **new** KIND spec `standalone_replica_refs`; one unit test asserting the inline path and the refs path produce identical runners and hash |
-| 3 | Referenced form on the ISVC, one ref per role | new KIND specs: ISVC over a pre-created IR, router over a referenced engine |
+| 3a | Fronting: `spec.replicaRefs` names one standalone IR per role (engine required; router and decoder optional) and the ISVC creates the stable Service per role and the route in front of them. The ISVC writes nothing on the IRs, and admission rejects `spec.rollout`, `spec.placement`, `spec.scalingPolicy` and an inline role beside a reference. Answers Open Question 1 with *no* for this step | `pkg/validation` table test; webhook envtest (missing, projected, wrong-component and twice-named replicas denied; the reference fixed at create; the three cases admitted without model or runtime); controller unit tests (Service selector, ports from runners and from a ControllerRevision, missing replica, the replica watch) and envtest (router + engine: two Services, external route to the router, counters mirrored, replicas untouched on delete); the KIND spec (one engine IR with real pods → `<isvc>-engine` has endpoints → Ready) follows in a test-only PR |
+| 3b | The ISVC's rollout spec over referenced IRs: the ISVC writes the rollout-control fields (pacing, paused, pairing token, rollback target) on them, per-revision Services keyed on the IR, and the peer endpoints. Answers Open Question 1 with *yes* for those fields | new KIND specs: rollout group over a referenced engine, router over a referenced engine |
 | 4 | Multiple refs per role: traffic across refs (`TrafficMap` as actuator), pairing across sets, groups naming refs | new KIND specs per case in Motivation; TrafficMap envtest |
 
 ## API
@@ -344,14 +349,24 @@ Rules:
 
 | Field | Type | Validation |
 |---|---|---|
-| `spec.engine.replicaRefs` | `[]string` | 1..N names in the ISVC's namespace; each IR must have `component: engine`; mutually exclusive with every inline engine field |
-| `spec.decoder.replicaRefs` | `[]string` | same, `component: decoder` |
-| `spec.router.replicaRef` | `string` | one name, `component: router`; mutually exclusive with inline router fields |
-| `spec.rollout.groups[].components` | today `[]ComponentType` | extended to accept `<role>/<irName>` when the role is referenced; a bare role means every ref in that role |
+| `spec.replicaRefs.engine` | `[]string`, list type set | names in the ISVC's namespace; each IR must have `component: engine`; required when `spec.replicaRefs` is set; Phase 3a admits one entry |
+| `spec.replicaRefs.decoder` | `[]string` | same, `component: decoder`; optional |
+| `spec.replicaRefs.router` | `[]string` | same, `component: router`; optional |
+| `spec.rollout.groups[].components` | today `[]ComponentType` | extended to accept `<role>/<irName>` when the role is referenced; a bare role means every ref in that role (Phase 3b) |
 | `spec.traffic` | today LB policy | gains per-ref weights (shape **TBD**, Phase 4) |
 
-A referenced IR may be named by at most one ISVC. Two ISVCs naming the same IR
-would give it two composers; admission rejects the second.
+A service references either all of its roles or none: with `spec.replicaRefs`
+set, `spec.engine`, `spec.decoder` and `spec.router` must be unset, and so
+must `spec.model` and `spec.runtime` (the IRs carry their own; the ISVC
+renders nothing).
+The block is fixed at create; fronting other replicas is a new ISVC, because
+the Services and the route are named for the ISVC. A referenced IR may be
+named by at most one ISVC. Two ISVCs naming the same IR would give it two
+composers; admission rejects the second. In Phase 3a the ISVC writes nothing
+on a referenced IR, so a replica that needs a peer's address (an engine its
+decoder, a router its engine and decoder) is configured by its owner with the
+stable Service names, `<isvc>-engine`, `<isvc>-decoder`, `<isvc>-router`,
+which exist once the ISVC does; Phase 3b wires the peers.
 
 Whether `router` allows a list is left at one ref: a router is the external
 entrypoint and two of them is a gateway question, not an IR question.
@@ -556,7 +571,7 @@ contract and needs its own decision).
 | Risk | What breaks | Mitigation |
 |---|---|---|
 | Two writers of one IR field | rollout flaps between the user's value and the composer's | the spec split plus admission rule 3; a field has one writer per form |
-| A referenced IR is deleted while an ISVC names it | the role loses capacity; the ISVC cannot recreate what it does not own | `status.components[c]` reports `ReplicaRefMissing`; the ISVC does not recreate (no inference) |
+| A referenced IR is deleted while an ISVC names it | the role loses capacity; the ISVC cannot recreate what it does not own | the role's ready condition goes False with reason `ReplicaRefMissing` (`ReplicaRefInvalid` when the IR is no longer standalone or of the role's component), with a Warning event; the ISVC does not recreate (no inference) and the IR watch brings it back when the IR reappears |
 | The canary partition and the user's rolling-update partition disagree | canary holds the wrong Instances | no field moves: the projector writes the canary partition to `spec.pacing.partition`, the engine reads it ahead of the user's partition (`escalation.EffectivePartition`, section 4), and a unit test pins that order |
 | A user edits a projected IR | the projector would overwrite the edit on its next reconcile | the webhook denies a spec write by anyone but the controller identity, and the denial names the parent ISVC to edit instead |
 | An ISVC is deleted with the orphan cascade | its IRs stay frozen under the projected rules: only the controller may write their spec, and the IR controller stops each pass before the workload pass, so the pods keep running with no rollout, scaling or pod replacement | recreate the ISVC, which re-adopts the IRs and moves their Instances onto a new revision, or delete the IRs; deletion runs the usual teardown |
@@ -610,10 +625,10 @@ contract and needs its own decision).
 ## Graduation Criteria
 
 - **Alpha:** Phases 1-2 merged; inline path byte-identical (golden- and KIND-asserted);
-  standalone IR usable. State: Phase 1 is merged and the standalone IR is
-  usable; Phase 2 is pending, so alpha is not reached.
-- **Beta:** Phase 3 merged; the three Motivation cases run in KIND; Open
-  Questions 1 and 2 closed.
+  standalone IR usable. State: Phases 1 and 2 are merged and the standalone IR
+  is usable, so alpha is reached.
+- **Beta:** Phases 3a and 3b merged; the three Motivation cases run in KIND;
+  Open Questions 1 and 2 closed.
 - **Stable:** Phase 4 merged; `TrafficMap` per-ref weights published; IR API
   documented on the reference site.
 
@@ -709,8 +724,10 @@ needs.
    on a user-owned object. No: rollouts across referenced sets are driven only
    by `RolloutPolicy` objects the user binds, and the ISVC is read-only over
    referenced IRs. Design Details names the one code path that differs.
-   *Deferred to Phase 3.* Phase 1 does not depend on it: no ISVC names a
-   standalone IR, so no composer writes one.
+   *Answered per step.* Phase 3a: no; the ISVC fronts the referenced IRs and
+   writes nothing on them, and admission rejects the rollout spec that would
+   need a write. Phase 3b: yes, for the rollout-control fields only, while
+   the ISVC's rollout spec governs the IRs.
 2. **Does the rendering library move into the IR controller?** *Answered
    yes.* The package is `pkg/render` with two callers; the inline ISVC path
    keeps writing `runners` and stays byte-identical; a refs IR carries no
@@ -726,5 +743,5 @@ needs.
    *Answered no for Phase 1:* the field stays `component`, for the same reason:
    a rename changes the spec bytes of every projected IR.
 
-Next action: the owner decides Open Question 1 before Phase 3, whose
-admission rules extend rule 3 to the composer.
+Next action: Phase 3b, in small PRs on the Phase 3a shape, whose admission
+rules extend rule 3 to the composer.

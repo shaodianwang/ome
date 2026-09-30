@@ -821,9 +821,11 @@ func TestInferenceReplicaFetchInventory(t *testing.T) {
 	approve("pkg/controller/v1beta1/inferenceservice/reconcilers/omenative/rolloutrun/observe.go", "observeGroupTargets", "Get", 1, passThroughTopLevelStatus+" (revision pointers and replica counters)")
 	approve("pkg/controller/v1beta1/inferenceservice/reconcilers/pdb/cutover.go", "OMENativeCutoverReady", "Get", 1, passThroughTopLevelStatus+" (ready and available counters)")
 	approve("pkg/controller/v1beta1/inferenceservice/reconcilers/autoscaler/dispatch.go", "controlledByVerifiedModeBridge", "Get", 1, passThroughSpecMetadata+" (ownership: UID, labels, parentRef)")
+	approve("pkg/controller/v1beta1/inferenceservice/replica_refs.go", "InferenceServiceReconciler.frontReferencedReplica", "Get", 1, passThroughTopLevelStatus+" (referenced replica: component, parentRef, runners, revision pointers)")
 
 	// Admission pass-through reads.
 	approve("pkg/webhook/admission/isvc/inference_service_validation.go", "InferenceServiceValidator.validateNoStandaloneReplicaCollision", "Get", 1, passThroughSpecMetadata+" (standalone-name collision: parentRef)")
+	approve("pkg/webhook/admission/isvc/replica_refs.go", "InferenceServiceValidator.validateReferencedReplica", "Get", 1, passThroughSpecMetadata+" (referenced replica: component, parentRef, owner)")
 
 	// Placement discovers identities before fetching bounded decoded rows.
 	approve("pkg/controller/v1beta1/placement/planned_observation.go", "Reconciler.observePlannedHome", "List", 1, passThroughSpecMetadata+" (inventory identities; each object is fetched through GetDecoded before resource accounting)")

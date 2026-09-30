@@ -156,6 +156,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementStatus":                  schema_pkg_apis_ome_v1beta1_PlacementStatus(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PodSpec":                          schema_pkg_apis_ome_v1beta1_PodSpec(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ProportionalPolicy":               schema_pkg_apis_ome_v1beta1_ProportionalPolicy(ref),
+		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ReplicaRefs":                      schema_pkg_apis_ome_v1beta1_ReplicaRefs(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ReplicaValueSource":               schema_pkg_apis_ome_v1beta1_ReplicaValueSource(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RetryBlock":                       schema_pkg_apis_ome_v1beta1_RetryBlock(ref),
 		"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RollingUpdate":                    schema_pkg_apis_ome_v1beta1_RollingUpdate(ref),
@@ -6810,6 +6811,12 @@ func schema_pkg_apis_ome_v1beta1_InferenceServiceSpec(ref common.ReferenceCallba
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RouterSpec"),
 						},
 					},
+					"replicaRefs": {
+						SchemaProps: spec.SchemaProps{
+							Description: "ReplicaRefs names, per role, the standalone InferenceReplicas this service fronts instead of rendering the role itself. The service creates the role's stable Service (<name>-engine, -decoder, -router) and the route in front of their pods and writes nothing on the replicas: their specs, rollouts and scaling stay with their owner. A service references either all of its roles this way or none, so spec.engine, spec.decoder and spec.router are unset with it, as are spec.model and spec.runtime (the replicas carry their own); engine is required. Fixed at create. A replica that needs a peer's address (an engine its decoder, a router its engine and decoder) is configured by its owner with the stable Service names, which exist once the service does.",
+							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ReplicaRefs"),
+						},
+					},
 					"acceleratorSelector": {
 						SchemaProps: spec.SchemaProps{
 							Description: "AcceleratorSelector specifies accelerator selection preferences",
@@ -6850,7 +6857,7 @@ func schema_pkg_apis_ome_v1beta1_InferenceServiceSpec(ref common.ReferenceCallba
 			},
 		},
 		Dependencies: []string{
-			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorSelector", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DecoderSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EngineSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelRef", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RouterSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RoutingSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ScalingPolicy", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeRef", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficSpec"},
+			"github.com/ome-projects/ome/pkg/apis/ome/v1beta1.AcceleratorSelector", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.DecoderSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.EngineSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ModelRef", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.PlacementSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ReplicaRefs", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RolloutSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RouterSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.RoutingSpec", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ScalingPolicy", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.ServingRuntimeRef", "github.com/ome-projects/ome/pkg/apis/ome/v1beta1.TrafficSpec"},
 	}
 }
 
@@ -10835,6 +10842,79 @@ func schema_pkg_apis_ome_v1beta1_ProportionalPolicy(ref common.ReferenceCallback
 		},
 		Dependencies: []string{
 			"k8s.io/apimachinery/pkg/api/resource.Quantity"},
+	}
+}
+
+func schema_pkg_apis_ome_v1beta1_ReplicaRefs(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Description: "ReplicaRefs names the standalone InferenceReplicas an InferenceService fronts, per role. Each list names one replica of that component in the service's namespace.",
+				Type:        []string{"object"},
+				Properties: map[string]spec.Schema{
+					"engine": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "set",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Engine names the replicas that serve the engine role.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
+					"decoder": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "set",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Decoder names the replicas that serve the decoder role.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
+					"router": {
+						VendorExtensible: spec.VendorExtensible{
+							Extensions: spec.Extensions{
+								"x-kubernetes-list-type": "set",
+							},
+						},
+						SchemaProps: spec.SchemaProps{
+							Description: "Router names the replicas that serve the router role.",
+							Type:        []string{"array"},
+							Items: &spec.SchemaOrArray{
+								Schema: &spec.Schema{
+									SchemaProps: spec.SchemaProps{
+										Default: "",
+										Type:    []string{"string"},
+										Format:  "",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
 	}
 }
 

@@ -344,6 +344,12 @@ func (r *InferenceServiceReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 	isvcConfig.ModelCache = r.ModelCache.Config
 
+	// A service over referenced replicas renders and projects nothing; its
+	// pass is the fronting alone.
+	if irprojector.ReferencesReplicas(isvc) {
+		return r.reconcileReferencedReplicas(ctx, isvc, deploymentMode, isvcConfig, base)
+	}
+
 	modelConfigReconciler := multimodelconfig.NewModelConfigReconciler(r.Client, r.Clientset, r.Scheme)
 	// A member's mounted model configuration must wait for backend validation.
 	if !placementMember {
@@ -1555,6 +1561,13 @@ func (r *InferenceServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// lets the ISVC status aggregator pick up IR-side counter
 		// updates without polling.
 		Owns(&v1beta1.InferenceReplica{}).
+		// A standalone replica a service fronts through spec.replicaRefs
+		// carries no owner reference to it; its events reach the service
+		// through this mapping.
+		Watches(
+			&v1beta1.InferenceReplica{},
+			handler.EnqueueRequestsFromMapFunc(r.servicesReferencingReplica),
+		).
 		// EndpointSlice events for OMENative headless Services enqueue
 		// the parent ISVC so drain checks (IsPodDrained / IsPodInRotation)
 		// react to kube-proxy convergence without waiting on the periodic

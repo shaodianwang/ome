@@ -666,13 +666,33 @@ func ReconcileOMENativeSubresources(
 	if podSpec == nil {
 		return nil
 	}
+	return ReconcileStableSubresources(ctx, b, isvc, componentType, isvc.Name, isvcutils.IsMultiPodComponent(isvc, componentType), componentExt, objectMeta, podSpec)
+}
+
+// ReconcileStableSubresources is ReconcileOMENativeSubresources with the pod
+// set spelled out, for a role whose pods a replica of another name runs:
+// podPrefix is the ome.io/inferenceservice label value of the role's pods
+// (the service's name for a projected replica, the replica's own name for a
+// referenced one) and leaderOnly says whether each Instance has a leader the
+// stable Service selects.
+func ReconcileStableSubresources(
+	ctx context.Context,
+	b *BaseComponentFields,
+	isvc *v1beta1.InferenceService,
+	componentType v1beta1.ComponentType,
+	podPrefix string,
+	leaderOnly bool,
+	componentExt *v1beta1.ComponentExtensionSpec,
+	objectMeta metav1.ObjectMeta,
+	podSpec *corev1.PodSpec,
+) error {
 	// Base selector — narrows to OMENative-managed pods of this (ISVC,
 	// Component) pair. Used as-is for PodMonitor; augmented with a
 	// `runner=leader` + `pod-ordinal=0` filter when the ISVC declares a
 	// multi-pod shape (see function-level docstring for rationale).
-	baseSelector := omeNativeComponentSelector(isvc, componentType)
+	baseSelector := omeNativePodSelector(podPrefix, componentType)
 	stableSelector := baseSelector
-	if isvcutils.IsMultiPodComponent(isvc, componentType) {
+	if leaderOnly {
 		stableSelector = make(map[string]string, len(baseSelector)+2)
 		for k, v := range baseSelector {
 			stableSelector[k] = v
