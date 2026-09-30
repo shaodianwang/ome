@@ -5179,7 +5179,6 @@ pub enum InferenceServiceStatusComponentsLifecycleRolloutHoldGate {
 pub enum InferenceServiceStatusComponentsRolloutPhase {
     Stable,
     Canarying,
-    BlueGreenStandby,
     Pending,
     Paused,
     Promoting,

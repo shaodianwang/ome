@@ -352,12 +352,11 @@ func TestReconcile_FinalStepCompletes(t *testing.T) {
 	}
 }
 
-// TestReconcile_AlreadyConvergedNoRestart guards completion idempotency: once a
-// canary finishes it clears Status.Canary, but the canary spec stays on the
-// ISVC. A reconcile that then sees a nil status alongside a component already
-// fully on the target revision must NOT re-initialize a fresh canary — otherwise
-// the rollout loops forever (verified on KIND). A canary only starts when there
-// is an actual revision change still to roll out.
+// TestReconcile_AlreadyConvergedNoRestart guards arming idempotency: the canary
+// spec stays on the ISVC after a rollout, so a reconcile that sees no canary
+// status alongside a component already fully on the target revision must NOT
+// initialize a fresh canary — otherwise the rollout loops forever. A canary
+// only starts when there is an actual revision change still to roll out.
 func TestReconcile_AlreadyConvergedNoRestart(t *testing.T) {
 	isvc := canaryISVC(twoStep(), nil)
 	res, _ := Reconcile(context.Background(), baseInputs(isvc, map[string]int32{"new": 4}))

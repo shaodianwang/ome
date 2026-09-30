@@ -1467,7 +1467,6 @@ spec:
                       enum:
                       - Stable
                       - Canarying
-                      - BlueGreenStandby
                       - Pending
                       - Paused
                       - Promoting

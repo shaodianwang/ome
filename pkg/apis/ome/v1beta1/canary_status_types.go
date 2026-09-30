@@ -2,10 +2,15 @@ package v1beta1
 
 import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-// CanaryStatus tracks progress of a spec.rollout.groups[].canary rollout. It is the
-// executor's persistent state machine: which step is active, when it was
+// CanaryStatus is the canary executor's persistent state machine for one
+// unit's spec.rollout.groups[].canary run: which step is active, when it was
 // entered (Auto promotion measures Pause.Duration from here), and which
-// revision is the canary. Absent when no canary is in progress.
+// revisions are the canary and the stable. It is written when a canary arms
+// and replaced in place when a new target re-arms the unit; it is never
+// cleared, so it also records how the last run ended. A completed run keeps
+// CurrentStep equal to the number of steps with ObservedTrafficWeight 100
+// and StableRevisionHash empty; a rollback keeps RolledBackRevisionHash; a
+// park keeps Failed. Absent only until the unit's first canary arms.
 type CanaryStatus struct {
 	// TargetID identifies the canary group's pinned Component target set. A new
 	// target set re-arms the canary even when the externally routed Component's
@@ -26,7 +31,8 @@ type CanaryStatus struct {
 	// +optional
 	StableRevisionHash string `json:"stableRevisionHash,omitempty"`
 
-	// CurrentStep is the zero-based index into spec.rollout.groups[i].canary.steps.
+	// CurrentStep is the zero-based index into spec.rollout.groups[i].canary.steps;
+	// equal to the number of steps once the canary has completed.
 	CurrentStep int32 `json:"currentStep"`
 
 	// StepEnteredTime is when CurrentStep was entered. Auto promotion measures

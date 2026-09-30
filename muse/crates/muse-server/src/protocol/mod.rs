@@ -1335,7 +1335,6 @@ fn component_rollout_attention(
         Phase::Promoting => (RolloutState::Active, 70),
         Phase::Paused => (RolloutState::Active, 60),
         Phase::Canarying => (RolloutState::Active, 50),
-        Phase::BlueGreenStandby => (RolloutState::Active, 40),
         Phase::Pending => (RolloutState::Active, 30),
     };
     Some(RolloutAttention {

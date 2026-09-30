@@ -2848,7 +2848,7 @@ func schema_pkg_apis_ome_v1beta1_CanaryStatus(ref common.ReferenceCallback) comm
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "CanaryStatus tracks progress of a spec.rollout.groups[].canary rollout. It is the executor's persistent state machine: which step is active, when it was entered (Auto promotion measures Pause.Duration from here), and which revision is the canary. Absent when no canary is in progress.",
+				Description: "CanaryStatus is the canary executor's persistent state machine for one unit's spec.rollout.groups[].canary run: which step is active, when it was entered (Auto promotion measures Pause.Duration from here), and which revisions are the canary and the stable. It is written when a canary arms and replaced in place when a new target re-arms the unit; it is never cleared, so it also records how the last run ended. A completed run keeps CurrentStep equal to the number of steps with ObservedTrafficWeight 100 and StableRevisionHash empty; a rollback keeps RolledBackRevisionHash; a park keeps Failed. Absent only until the unit's first canary arms.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"targetID": {
@@ -2874,7 +2874,7 @@ func schema_pkg_apis_ome_v1beta1_CanaryStatus(ref common.ReferenceCallback) comm
 					},
 					"currentStep": {
 						SchemaProps: spec.SchemaProps{
-							Description: "CurrentStep is the zero-based index into spec.rollout.groups[i].canary.steps.",
+							Description: "CurrentStep is the zero-based index into spec.rollout.groups[i].canary.steps; equal to the number of steps once the canary has completed.",
 							Default:     0,
 							Type:        []string{"integer"},
 							Format:      "int32",
@@ -4044,7 +4044,7 @@ func schema_pkg_apis_ome_v1beta1_ComponentStatusSpec(ref common.ReferenceCallbac
 					},
 					"rolloutPhase": {
 						SchemaProps: spec.SchemaProps{
-							Description: "RolloutPhase reflects the current rollout state for this Component. One of Stable, Canarying, BlueGreenStandby, Pending, Paused, Promoting, RollingBack, RolledBack, Failed. Empty when no rollout is in flight on this Component (also empty for Components on deployment modes without the rollout contract — e.g. RawDeployment).",
+							Description: "RolloutPhase is the canary step machine's state for this Component when a spec.rollout canary group governs it. One of Stable, Canarying, Pending, Paused, Promoting, RollingBack, RolledBack, Failed. Written on the Component the step machine drives (the unit's entrypoint) and never cleared: it reads Stable between runs, a completed canary included. Empty for Components no canary group governs (blueGreen/rollingUpdate groups report under status.rolloutCoordination) and on deployment modes without the rollout contract — e.g. RawDeployment.",
 							Type:        []string{"string"},
 							Format:      "",
 						},
@@ -4094,7 +4094,7 @@ func schema_pkg_apis_ome_v1beta1_ComponentStatusSpec(ref common.ReferenceCallbac
 					},
 					"canary": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Canary tracks the canary step machine for the unit this Component belongs to — the router alone, or engine+decoder together. It is written on the unit's entrypoint Component (the router, or the engine) and is absent on a secondary, so a reader never sees two copies of one run. Absent when the unit has no canary running.\n\nUnits advance independently, which is why the state cannot live in the single InferenceServiceStatus.Canary: two runs would overwrite each other's step counter and revision pair. That field is retained as an alias for the entrypoint unit's run so existing readers keep working.",
+							Description: "Canary tracks the canary step machine for the unit this Component belongs to — the router alone, or engine+decoder together. It is written on the unit's entrypoint Component (the router, or the engine) and is absent on a secondary, so a reader never sees two copies of one run. Absent until the unit's first canary arms; afterwards it carries the unit's most recent run, a finished one included (see CanaryStatus).\n\nUnits advance independently, which is why the state cannot live in the single InferenceServiceStatus.Canary: two runs would overwrite each other's step counter and revision pair. That field is retained as an alias for the entrypoint unit's run so existing readers keep working.",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CanaryStatus"),
 						},
 					},
@@ -7013,7 +7013,7 @@ func schema_pkg_apis_ome_v1beta1_InferenceServiceStatus(ref common.ReferenceCall
 					},
 					"canary": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Canary tracks an in-progress spec.rollout.canary rollout (the step state machine). Absent when no canary is running.",
+							Description: "Canary mirrors the canary run of the unit that owns the ISVC entrypoint (the router's when it has one, else the engine's); the per-unit copy on ComponentStatusSpec.Canary is authoritative. Absent until a canary first arms; afterwards it carries that unit's most recent run, a finished one included (see CanaryStatus).",
 							Ref:         ref("github.com/ome-projects/ome/pkg/apis/ome/v1beta1.CanaryStatus"),
 						},
 					},
