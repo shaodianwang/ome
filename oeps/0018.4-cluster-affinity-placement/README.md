@@ -1,12 +1,15 @@
 # OEP-0018.4: Cluster affinity and replica allocation for placement
 
-**Status: provisional, 2026-09-24.** This is an API and behavior proposal, not an
-implementation report. Single keeps its admission race, overlapping weighted
-terms add, capacity means total eligible hardware, and static Split preserves
-ratios during an admission shortfall. Cluster changes trigger bounded, gradual
-rebalancing. Autoscaling changes are deferred to a future OEP. Recommendations
-still needing agreement are collected in
-[Open Questions](#open-questions).
+**Implementation status, 2026-09-29.** Single keeps
+its admission race, overlapping weighted terms add, capacity means total
+eligible hardware, and static Split preserves ratios during an admission
+shortfall. Cluster changes trigger bounded, gradual rebalancing. The confirmed
+implementation contracts require OMENative members, nominal whole-replica
+capacity, and a shared surge allowance that pauses new rollout and autoscaler
+growth during moves. General autoscaling redesign remains deferred.
+Outstanding review and operational decisions are in
+[Open Questions](#open-questions); this status does not claim deployment or
+production graduation.
 
 <!-- toc -->
 - [Summary](#summary)
@@ -20,6 +23,7 @@ still needing agreement are collected in
   - [Affinity matching](#affinity-matching)
   - [Weights and allocation](#weights-and-allocation)
   - [Replica counts and autoscaling](#replica-counts-and-autoscaling)
+  - [Supported member backends](#supported-member-backends)
   - [Capacity contract](#capacity-contract)
 - [Design Details](#design-details)
   - [Scheduling and reconciliation](#scheduling-and-reconciliation)
@@ -37,8 +41,8 @@ still needing agreement are collected in
 
 ## Summary
 
-OME cannot currently express an exact even or weighted replica split. Its
-selector strings also combine labels with a synthetic `metadata.name` label,
+The legacy placement API cannot express an exact even or weighted replica split.
+Its selector strings also combine labels with a synthetic `metadata.name` label,
 and omitting both selectors prevents placement altogether. This OEP replaces
 those selectors with `clusterAffinity`, makes an omitted affinity unconstrained,
 and separates two allocation contracts:
@@ -73,6 +77,9 @@ separate admission decision. A fixed ratio and a hardware-derived ratio should
 not be confused with the current admission-driven fill behavior.
 
 ### Current design and implementation
+
+This section records the design baseline audited on 2026-09-24. The proposal
+and implementation contracts below describe its replacement.
 
 The following is a source audit as of 2026-09-24. Older prose contains historical
 API shapes and unfinished plans; its status label alone is insufficient evidence
@@ -424,6 +431,37 @@ ratios together.
 `split.minReplicasPerCluster` is removed because dropping a small admitted home
 would violate static ratios. There is no new anti-sliver or packing algorithm.
 
+### Supported member backends
+
+**Confirmed decision: require OMENative for participating homes.** OMENative
+manages workload instances through InferenceReplicas, which provide the
+identity, gang membership, and reservation accounting required for admission
+and bounded movement. Every resolved Engine, Decoder, and Router component at
+a target home must use this backend, including components inherited from the
+member runtime. Checking only the source's explicit mode is insufficient.
+
+A resolved RawDeployment, MultiNode, or other backend produces
+`PlacementBackendReady=False` with `UnsupportedPlacementBackend`. Unreadable
+runtime inputs produce an unknown condition. The controller withholds writes
+to an unverified target and retains existing allocations. Other verified
+targets may progress in Single, All, and static Split; SplitByCapacity requires
+usable inputs for the entire matched set before accepting a new plan.
+
+An ordinary workload-cluster service without multicluster intent retains its
+existing deployment modes, replica policy, and rollout behavior. Membership in
+a workload cluster does not opt a service into placement. Member growth guards
+require derived ownership and matching placement authority; the shared CRD
+and controller rollout must not impose those guards on local services.
+
+The member protocol accepts explicit zero floors in an unpaused version 3
+execution policy and preserves them through projection and external scaling.
+Source placement still requires positive resolved component floors for a
+complete Single or All home, with equal Engine/Decoder counts when both exist.
+Zero-floor source activation remains open; member support alone does not enable
+it. A movement pause requires positive floors for every component. These limits
+do not reject zero targets produced by Split apportionment or change local
+services' zero-floor behavior.
+
 ### Capacity contract
 
 **Confirmed decision: use total eligible hardware capacity.** In this OEP,
@@ -461,7 +499,7 @@ For example, 16 GPUs scattered across incompatible domains may produce a
 positive weight for a 16-GPU gang that remains pending. Preserve the target and
 report the failure to admit; do not call it a successful placement.
 
-The first implementation should reuse the observed, per-cluster
+The confirmed adapter reads the observed, per-cluster
 `AcceleratorQuota.status.capacity[].perCluster[].{allocatable,observedAt}`
 reports from OEP-0024 through an internal capacity-reader interface. Use
 **allocatable**, not highWaterMark, budget nominal, admitted, reserved, or
@@ -488,8 +526,22 @@ without it, other modes still work and SplitByCapacity remains pending.
 Recompute capacity proportions when accepted hardware totals or source intent
 change, not when usage changes. Debounce hardware changes with configured
 stability/freshness policy so one transient node report does not repeatedly move
-serving replicas. Exact configuration names and defaults belong in the
-implementation review and Helm configuration; no hidden Go defaults are added.
+serving replicas. Configure the following fields in the `multicluster` block
+of `inferenceservice-config`, or the chart's `ome.multicluster.config` values:
+
+| Field | Contract |
+|---|---|
+| `placement.memberOperatorNamespace` | Explicit member namespace for runtime revisions and operator configuration; required when capacity placement is configured. |
+| `placement.capacity.rootName` | Control-plane AcceleratorQuota containing the per-cluster hardware reports. |
+| `placement.capacity.maxAge` | Positive maximum accepted report age. Choose it to cover the configured report heartbeat and expected delivery delay. |
+| `placement.capacity.stabilityWindow` | Positive period during which changed hardware inputs must remain stable before acceptance. |
+| `placement.capacity.refreshInterval` | Positive recheck interval, strictly shorter than `maxAge`. |
+
+The capacity block is optional. When present, every field above is required;
+there are no Go defaults for these inputs. When absent, SplitByCapacity waits
+with an actionable condition. The manager reads this configuration at startup;
+direct ConfigMap edits require a restart, and the chart rolls the manager when
+its rendered configuration changes.
 
 ## Design Details
 
@@ -570,6 +622,16 @@ records old and new assignments separately so transient surge is visible.
 Absent a transition budget, hold a disruptive move with `MigrationBlocked`;
 do not invent a hidden make-before-break allowance. Operators can perform a
 manual maintenance-window migration if spare capacity does not exist.
+
+The per-service allowance is `spec.placement.maxSurge`, a nonnegative whole
+replica count shared with existing rollout reservations and occupied replicas.
+Before moving replicas, the source persists the plan and waits for member
+acknowledgements that new rollout surge and autoscaler-driven growth are paused.
+Placement-authorized growth and physical cleanup can continue. Existing
+reservations still consume the allowance; a pause does not erase them. This
+coordination prevents a member's independent growth from spending capacity
+already promised to the move. Releasing the pause requires a new accepted plan
+revision after the allocation and cleanup have converged.
 
 For Single, a **replacement probe** is a complete candidate home started while
 the current winner continues serving. Probes share `spec.placement.maxSurge`
@@ -684,8 +746,12 @@ a sufficient implementation.
 
 Use an atomic list for affinity terms so server-side apply replaces the selector
 expression as a unit. Merging an independently managed term would widen the OR
-and could unexpectedly add homes. Bound list sizes in the CRD; the exact limits
-are an API-review item rather than an arbitrary runtime truncation.
+and could unexpectedly add homes. The CRD permits at most 64 affinity terms,
+64 requirements in each term's expression or field list, and 64 values per
+requirement. Reconciliation rejects oversized expressions rather than
+truncating them. Candidate status reuses the existing per-cluster list and
+grows with matched and retained homes; these expression bounds are not a fleet
+size limit.
 
 ### Implementation sequence
 
@@ -709,10 +775,12 @@ are an API-review item rather than an arbitrary runtime truncation.
    mode switches and TrafficMap schemas, and prove migration/rollback. Run
    `make manifests` and `make generate` for API changes and update SDKs/samples.
 
-This OEP change implements none of those steps. It adds the design and migration
-record only. Existing hardcoded fallback behavior around the mode and dispatcher
-must be reviewed when touching those paths; new operational values must be
-configuration-driven, as required by the repository guidance.
+These layers are implemented across the allocator, member protocol, capacity
+resolution, and placement controllers. Integration tests cover admission,
+bounded movement, migration, recovery, and physical gang fit. Zero-floor source
+activation and operational graduation remain open. New capacity timing inputs
+and transition allowances are explicit configuration; existing controller and
+transport timing fallbacks require separate compatibility review before removal.
 
 ### Migration
 
@@ -850,9 +918,16 @@ Implementation tests must verify behavior rather than only mirror the allocator:
   admitted, health-qualified serving capacity receives traffic; placement weights
   never bypass the OEP-0025 routing contract.
 
-For this documentation change, validate metadata, local links, embedded YAML,
-example arithmetic, and the generated OEP status index. No implementation tests
-are added by the draft.
+The implementation's real-cluster tests run member OME controllers, Kueue, and
+the OME scheduler with synthetic accelerator resources and serving fixtures.
+They verify complete gang admission, topology-dependent physical scheduling,
+bounded moves, and retained targets through failures. They do not establish
+accelerator-device execution or model performance. Migration fixtures verify
+bridge-schema and webhook behavior, writer exclusion, and lossless rollback
+storage; they do not claim a rolling upgrade between deployed operator binaries.
+
+Documentation changes validate metadata, local links, embedded YAML, example
+arithmetic, and the generated OEP status index.
 
 ## Graduation Criteria
 
@@ -918,18 +993,27 @@ Confirmed in the design discussion:
 - Autoscaling changes are deferred to a future autoscaling OEP.
 - Label, membership, and accepted hardware-total changes trigger automatic
   rebalancing with bounded, gradual movement.
+- Capacity normalization uses nominal whole-replica equivalents from resolved
+  Engine/Decoder demand, with verified resource/flavor and cluster provenance.
+- Participating homes require OMENative for every resolved component. Local
+  services retain their existing backend choices.
+- Explicit per-service surge is shared with existing rollout occupancy and
+  reservations. Participating members pause new rollout and autoscaler growth
+  during moves, while allowing placement growth and cleanup.
 
-Remaining review decisions:
+Remaining work:
 
-1. **Capacity normalization:** accept nominal whole-replica equivalents from
-   total hardware and resolved accelerator demand? Confirm supported
-   resource/flavor mappings and required report identity provenance. Owner:
-   scheduler/quota owners.
-2. **API limits and transitions:** finalize affinity list limits, status fields,
-   and configured migration-surge accounting, including rollout surge. Confirm
-   that removal of anti-sliver behavior is acceptable; keep existing local
-   ceilings until the autoscaling follow-up. Owner: API/placement owners.
+1. **Zero-floor source activation:** members preserve accepted zero floors, but
+   source placement conservatively holds Single and All when a declared
+   component resolves to zero. Define admission, routing, and transition
+   accounting before accepting such homes, retaining the positive-floor
+   requirement for movement. Split's computed zero targets and local services
+   are unaffected. Owner: API/placement owners.
+2. **Operational graduation:** calibrate report freshness, stability windows,
+   and movement allowances against fleet measurements. Choose a compatibility
+   window for removing the bridge schema and rehearse deployed-binary upgrades
+   and rollback. Owner: deployment and placement owners.
 
-Next action: review capacity normalization, then pin the capacity-reader and
-transition/status contracts. Keep this OEP provisional until those implementation
-boundaries are concrete.
+Next action: implement and verify zero-floor source activation, then validate
+deployment-specific settings and migration procedures. Local tests do not
+establish a production soak or complete operational graduation.

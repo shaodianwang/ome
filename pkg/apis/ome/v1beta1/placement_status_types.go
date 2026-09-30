@@ -203,10 +203,11 @@ type PlacementExecutionPolicy struct {
 
 // PlacementComponentFloor records a resolved component's guaranteed count.
 // Engine and Decoder use equal whole-replica floors; Router is independent.
+// Zero permits steady scale-to-zero; movement requires positive floors.
 type PlacementComponentFloor struct {
 	// +kubebuilder:validation:Enum=engine;decoder;router
 	Component ComponentType `json:"component"`
-	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Minimum=0
 	Replicas int32 `json:"replicas"`
 }
 

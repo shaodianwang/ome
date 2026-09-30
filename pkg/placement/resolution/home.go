@@ -44,6 +44,9 @@ func (r Resolver) ResolveHome(ctx context.Context, desired, standing *v1beta1.In
 	if err != nil {
 		return nil, nil, err
 	}
+	if _, err := protocol.ValidatePositiveReplicaFloors(floors); err != nil {
+		return nil, nil, err
+	}
 	if err := runtime.Check(ctx); err != nil {
 		return nil, nil, err
 	}

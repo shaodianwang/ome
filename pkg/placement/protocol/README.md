@@ -7,6 +7,19 @@ contract: the resolved resource/flavor fingerprint and exactly one rendering
 hash for each declared Engine/Decoder component. These versions identify fixed
 wire formats; they are not operator configuration or behavior defaults.
 
+Version `3` carries each resolved component's replica floor and may also carry
+the demand contract. Engine and Decoder floors must be equal when both exist;
+Router has an independent floor. An unpaused contract accepts explicit zero
+floors so members can retain their service and external autoscaler while no
+replicas are running. Omitted, negative, or mismatched floors do not authorize
+projection. A surge pause requires positive floors for every component;
+observed autoscaled replicas do not substitute for that guarantee.
+
+The member CRD must accept zero floor values before such a contract is written.
+A positive-only member reader rejects it, so source placement must wait for a
+complete policy acknowledgment before crediting application. Ordinary local
+services ignore the execution annotation and retain their scaling policy.
+
 Members accept these envelopes and existing flat policies without demand.
 Demand is invalid in a flat policy or a version `1` envelope; version `2` is
 invalid without it. Unknown versions,

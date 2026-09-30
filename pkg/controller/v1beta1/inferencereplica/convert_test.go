@@ -2566,6 +2566,49 @@ func TestPlacementSurgeGate(t *testing.T) {
 	}
 }
 
+func TestZeroFloorWorkloadProjection(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		requested *int32
+		edit      func(*v1beta1.InferenceReplica)
+		want      int32
+	}{
+		{name: "accepted zero", requested: ptr.To[int32](0)},
+		{name: "external growth", requested: ptr.To[int32](3), want: 3},
+		{name: "unresolved request", want: 1},
+		{name: "negative request", requested: ptr.To[int32](-1), want: 1},
+		{name: "local zero uses local policy", requested: ptr.To[int32](0), want: 1, edit: func(ir *v1beta1.InferenceReplica) { ir.Spec.PlacementExecution = nil }},
+		{name: "positive contract uses existing policy", requested: ptr.To[int32](0), want: 1, edit: func(ir *v1beta1.InferenceReplica) { ir.Spec.PlacementExecution.ReplicaFloors[0].Replicas = 2 }},
+		{name: "unbound component", requested: ptr.To[int32](0), want: 1, edit: func(ir *v1beta1.InferenceReplica) { ir.Spec.Component = v1beta1.DecoderComponent }},
+		{name: "invalid authority", requested: ptr.To[int32](0), want: 1, edit: func(ir *v1beta1.InferenceReplica) { ir.Spec.PlacementExecution.SourceUID = "" }},
+		{name: "paused zero cannot authorize projection", requested: ptr.To[int32](0), want: 1, edit: func(ir *v1beta1.InferenceReplica) { ir.Spec.PlacementExecution.PauseSurge = true }},
+		{name: "independent zero router", requested: ptr.To[int32](0), edit: func(ir *v1beta1.InferenceReplica) {
+			ir.Spec.Component = v1beta1.RouterComponent
+			ir.Spec.PlacementExecution.ReplicaFloors = []v1beta1.PlacementComponentFloor{{Component: v1beta1.EngineComponent, Replicas: 2}, {Component: v1beta1.RouterComponent}}
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ir := &v1beta1.InferenceReplica{Spec: v1beta1.InferenceReplicaSpec{Component: v1beta1.EngineComponent, Replicas: tt.requested,
+				PlacementExecution: &v1beta1.PlacementExecutionPolicy{PlanID: "plan-a", Revision: 1, SourceUID: "source-a", ClusterUID: "cluster-a",
+					ReplicaFloors: []v1beta1.PlacementComponentFloor{{Component: v1beta1.EngineComponent}}}}}
+			if tt.edit != nil {
+				tt.edit(ir)
+			}
+			desired := desiredFromIR(ir, ir.Spec.Runners)
+			if diff := cmp.Diff(tt.want, desired.Replicas); diff != "" {
+				t.Fatal(diff)
+			}
+			plan, err := workload.BuildPlan(v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component), desired, workloadtypes.WorkloadObservedState{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if diff := cmp.Diff(tt.want, plan.Replicas); diff != "" {
+				t.Fatalf("workload count: %s", diff)
+			}
+		})
+	}
+}
+
 func TestPlacementReplicaLimit(t *testing.T) {
 	for _, tt := range []struct {
 		name         string

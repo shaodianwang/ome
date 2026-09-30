@@ -122,6 +122,10 @@ func Validate(policy *v1beta1.PlacementExecutionPolicy) error {
 		}
 	}
 	if len(policy.ReplicaFloors) > 0 {
+		if policy.PauseSurge {
+			_, err := ValidatePositiveReplicaFloors(policy.ReplicaFloors)
+			return err
+		}
 		_, err := ValidateReplicaFloors(policy.ReplicaFloors)
 		return err
 	}

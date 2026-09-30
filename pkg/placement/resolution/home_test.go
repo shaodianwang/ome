@@ -37,6 +37,10 @@ func TestResolveHome(t *testing.T) {
 			cm.Data["deploy"] = `{"defaultDeploymentMode":"RawDeployment"}`
 		}, wantErr: true},
 		{name: "zero floor cannot authorize movement", edit: func(f *runtimeFixture, _ *corev1.ConfigMap) { f.service.Spec.Engine.MinReplicas = ptr.To(0) }, wantErr: true},
+		{name: "zero whole home cannot authorize movement", edit: func(f *runtimeFixture, _ *corev1.ConfigMap) {
+			f.service.Spec.Engine.MinReplicas, f.service.Spec.Decoder.MinReplicas = ptr.To(0), ptr.To(0)
+		}, wantErr: true},
+		{name: "zero router cannot authorize movement", edit: func(f *runtimeFixture, _ *corev1.ConfigMap) { f.service.Spec.Router.MinReplicas = ptr.To(0) }, wantErr: true},
 		{name: "unequal whole units", edit: func(f *runtimeFixture, _ *corev1.ConfigMap) { f.service.Spec.Decoder.MinReplicas = ptr.To(5) }, wantErr: true},
 		{name: "router backend is required", edit: func(f *runtimeFixture, _ *corev1.ConfigMap) {
 			f.service.Spec.Router.Annotations = map[string]string{constants.DeploymentMode: string(constants.RawDeployment)}

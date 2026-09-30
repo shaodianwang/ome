@@ -35,7 +35,7 @@ func TestPlacementBackendReconcile(t *testing.T) {
 		deploy  string
 	}
 	stampFloors := func(f *fixture, floor int32) {
-		raw, err := protocol.Encode(&v1beta1.PlacementExecutionPolicy{PlanID: "plan-a", Revision: 1, SourceUID: "source-a", ClusterUID: "cluster-a", PauseSurge: true,
+		raw, err := protocol.Encode(&v1beta1.PlacementExecutionPolicy{PlanID: "plan-a", Revision: 1, SourceUID: "source-a", ClusterUID: "cluster-a", PauseSurge: floor > 0,
 			ReplicaFloors: []v1beta1.PlacementComponentFloor{{Component: v1beta1.EngineComponent, Replicas: floor}}})
 		if err != nil {
 			t.Fatal(err)
@@ -57,6 +57,26 @@ func TestPlacementBackendReconcile(t *testing.T) {
 		{name: "legacy member retains multi-node deployment", change: func(f *fixture) {
 			delete(f.service.Annotations, constants.PlacementPolicy)
 			f.service.Spec.DeploymentMode = ptr.To(constants.MultiNode)
+		}},
+		{name: "explicit zero overrides runtime floor", change: func(f *fixture) {
+			f.service.Spec.Engine.MinReplicas = ptr.To(0)
+			f.runtime.Spec.EngineConfig.MinReplicas = ptr.To(4)
+			stampFloors(f, 0)
+		}},
+		{name: "runtime zero overrides configured floor", change: func(f *fixture) {
+			f.deploy = `{"defaultDeploymentMode":"RawDeployment","replicas":{"defaultMinReplicas":2}}`
+			f.runtime.Spec.EngineConfig.MinReplicas = ptr.To(0)
+			stampFloors(f, 0)
+		}},
+		{name: "unaccepted zero floor holds", wantFloorHold: true, change: func(f *fixture) {
+			f.service.Spec.Engine.MinReplicas = ptr.To(0)
+			stampFloors(f, 2)
+		}},
+		{name: "ordinary local zero ignores accepted floor", change: func(f *fixture) {
+			f.service.Spec.Engine.MinReplicas = ptr.To(0)
+			stampFloors(f, 2)
+			delete(f.service.Annotations, constants.PlacementOriginUID)
+			f.service.Spec.DeploymentMode = ptr.To(constants.RawDeployment)
 		}},
 		{name: "configured replica floor", change: func(f *fixture) {
 			f.deploy = `{"defaultDeploymentMode":"RawDeployment","replicas":{"defaultMinReplicas":2}}`

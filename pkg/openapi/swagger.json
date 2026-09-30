@@ -5527,7 +5527,7 @@
       }
     },
     "v1beta1.PlacementComponentFloor": {
-      "description": "PlacementComponentFloor records a resolved component's guaranteed count. Engine and Decoder use equal whole-replica floors; Router is independent.",
+      "description": "PlacementComponentFloor records a resolved component's guaranteed count. Engine and Decoder use equal whole-replica floors; Router is independent. Zero permits steady scale-to-zero; movement requires positive floors.",
       "type": "object",
       "required": [
         "component",

@@ -359,7 +359,7 @@ func buildHeadlessServiceSpec(ir *v1beta1.InferenceReplica) workloadtypes.PerCom
 // every emitted pod.
 func desiredFromIR(ir *v1beta1.InferenceReplica, runners []v1beta1.Runner) workloadtypes.WorkloadDesiredSpec {
 	replicas := int32(1)
-	if ir.Spec.Replicas != nil && *ir.Spec.Replicas > 0 {
+	if ir.Spec.Replicas != nil && (*ir.Spec.Replicas > 0 || *ir.Spec.Replicas == 0 && protocol.HasZeroReplicaFloor(ir.Spec.PlacementExecution, ir.Spec.Component)) {
 		replicas = *ir.Spec.Replicas
 	}
 	if policy := ir.Spec.PlacementExecution; policy != nil && policy.PauseSurge && ir.Spec.PlacementReplicaLimit != nil {
@@ -371,11 +371,12 @@ func desiredFromIR(ir *v1beta1.InferenceReplica, runners []v1beta1.Runner) workl
 	// (see WorkloadPacing). Pacing.RollbackToRevision is handled in
 	// reconciler.go.
 	desired := workloadtypes.WorkloadDesiredSpec{
-		Replicas:        replicas,
-		MinReadySeconds: ir.Spec.MinReadySeconds,
-		Runners:         runnersFromIR(runners),
-		Paused:          ir.Spec.Paused,
-		PauseFreeze:     ir.Spec.Paused && ir.Spec.PauseMode == v1beta1.PauseModeFreeze,
+		Replicas:          replicas,
+		AllowZeroReplicas: protocol.HasZeroReplicaFloor(ir.Spec.PlacementExecution, ir.Spec.Component),
+		MinReadySeconds:   ir.Spec.MinReadySeconds,
+		Runners:           runnersFromIR(runners),
+		Paused:            ir.Spec.Paused,
+		PauseFreeze:       ir.Spec.Paused && ir.Spec.PauseMode == v1beta1.PauseModeFreeze,
 	}
 	if ir.Spec.TopologyKey != nil {
 		desired.TopologyKey = *ir.Spec.TopologyKey

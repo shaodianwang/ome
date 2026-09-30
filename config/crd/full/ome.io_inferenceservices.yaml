@@ -32528,7 +32528,7 @@ spec:
                                           type: string
                                         replicas:
                                           format: int32
-                                          minimum: 1
+                                          minimum: 0
                                           type: integer
                                       required:
                                         - component
@@ -32563,7 +32563,7 @@ spec:
                                           type: string
                                         replicas:
                                           format: int32
-                                          minimum: 1
+                                          minimum: 0
                                           type: integer
                                       required:
                                         - component

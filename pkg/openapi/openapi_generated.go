@@ -9819,7 +9819,7 @@ func schema_pkg_apis_ome_v1beta1_PlacementComponentFloor(ref common.ReferenceCal
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
 			SchemaProps: spec.SchemaProps{
-				Description: "PlacementComponentFloor records a resolved component's guaranteed count. Engine and Decoder use equal whole-replica floors; Router is independent.",
+				Description: "PlacementComponentFloor records a resolved component's guaranteed count. Engine and Decoder use equal whole-replica floors; Router is independent. Zero permits steady scale-to-zero; movement requires positive floors.",
 				Type:        []string{"object"},
 				Properties: map[string]spec.Schema{
 					"component": {

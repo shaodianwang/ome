@@ -38,7 +38,12 @@ func TestReplicaFloorValidation(t *testing.T) {
 		{name: "unequal units", floors: []v1beta1.PlacementComponentFloor{{Component: v1beta1.EngineComponent, Replicas: 4}, {Component: v1beta1.DecoderComponent, Replicas: 2}}, wantErr: true},
 		{name: "duplicate", floors: append(acceptedFloors(), acceptedFloors()[0]), wantErr: true},
 		{name: "unknown component", floors: []v1beta1.PlacementComponentFloor{{Component: "unknown", Replicas: 4}}, wantErr: true},
-		{name: "zero", floors: []v1beta1.PlacementComponentFloor{{Component: v1beta1.EngineComponent}}, wantErr: true},
+		{name: "zero engine", floors: []v1beta1.PlacementComponentFloor{{Component: v1beta1.EngineComponent}}},
+		{name: "zero decoder", floors: []v1beta1.PlacementComponentFloor{{Component: v1beta1.DecoderComponent}}},
+		{name: "zero whole units with shared router", floors: []v1beta1.PlacementComponentFloor{{Component: v1beta1.EngineComponent}, {Component: v1beta1.DecoderComponent}, {Component: v1beta1.RouterComponent, Replicas: 2}}},
+		{name: "zero router with positive units", floors: []v1beta1.PlacementComponentFloor{{Component: v1beta1.EngineComponent, Replicas: 3}, {Component: v1beta1.RouterComponent}}, want: 3},
+		{name: "zero engine differs from decoder", floors: []v1beta1.PlacementComponentFloor{{Component: v1beta1.EngineComponent}, {Component: v1beta1.DecoderComponent, Replicas: 1}}, wantErr: true},
+		{name: "zero decoder differs from engine", floors: []v1beta1.PlacementComponentFloor{{Component: v1beta1.EngineComponent, Replicas: 1}, {Component: v1beta1.DecoderComponent}}, wantErr: true},
 		{name: "negative", floors: []v1beta1.PlacementComponentFloor{{Component: v1beta1.EngineComponent, Replicas: -1}}, wantErr: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -59,8 +64,17 @@ func TestResolveAndCheckReplicaFloors(t *testing.T) {
 		change     func(*v1beta1.InferenceServiceSpec, *[]v1beta1.PlacementComponentFloor)
 		resolveErr bool
 		checkErr   bool
+		want       []v1beta1.PlacementComponentFloor
 	}{
 		{name: "exact policy"},
+		{name: "zero whole-unit floors", want: []v1beta1.PlacementComponentFloor{{Component: v1beta1.EngineComponent}, {Component: v1beta1.DecoderComponent}, {Component: v1beta1.RouterComponent, Replicas: 1}}, change: func(spec *v1beta1.InferenceServiceSpec, floors *[]v1beta1.PlacementComponentFloor) {
+			spec.Engine.MinReplicas, spec.Decoder.MinReplicas = ptr.To(0), ptr.To(0)
+			(*floors)[0].Replicas, (*floors)[1].Replicas = 0, 0
+		}},
+		{name: "zero shared router floor", want: []v1beta1.PlacementComponentFloor{{Component: v1beta1.EngineComponent, Replicas: 4}, {Component: v1beta1.DecoderComponent, Replicas: 4}, {Component: v1beta1.RouterComponent}}, change: func(spec *v1beta1.InferenceServiceSpec, floors *[]v1beta1.PlacementComponentFloor) {
+			spec.Router.MinReplicas = ptr.To(0)
+			(*floors)[2].Replicas = 0
+		}},
 		{name: "unordered authority", change: func(_ *v1beta1.InferenceServiceSpec, floors *[]v1beta1.PlacementComponentFloor) {
 			slices.Reverse(*floors)
 		}},
@@ -70,7 +84,7 @@ func TestResolveAndCheckReplicaFloors(t *testing.T) {
 		{name: "missing engine floor", resolveErr: true, checkErr: true, change: func(spec *v1beta1.InferenceServiceSpec, _ *[]v1beta1.PlacementComponentFloor) {
 			spec.Engine.MinReplicas = nil
 		}},
-		{name: "zero floor", resolveErr: true, checkErr: true, change: func(spec *v1beta1.InferenceServiceSpec, _ *[]v1beta1.PlacementComponentFloor) {
+		{name: "unequal zero floor", resolveErr: true, checkErr: true, change: func(spec *v1beta1.InferenceServiceSpec, _ *[]v1beta1.PlacementComponentFloor) {
 			spec.Engine.MinReplicas = ptr.To(0)
 		}},
 		{name: "negative floor", resolveErr: true, checkErr: true, change: func(spec *v1beta1.InferenceServiceSpec, _ *[]v1beta1.PlacementComponentFloor) {
@@ -120,7 +134,11 @@ func TestResolveAndCheckReplicaFloors(t *testing.T) {
 				t.Fatal("unresolved policy returned authority")
 			}
 			if !tt.resolveErr && !tt.checkErr {
-				if diff := cmp.Diff(acceptedFloors(), got); diff != "" {
+				want := tt.want
+				if want == nil {
+					want = acceptedFloors()
+				}
+				if diff := cmp.Diff(want, got); diff != "" {
 					t.Fatal(diff)
 				}
 			}
@@ -140,10 +158,13 @@ func TestReplicaFloorTransport(t *testing.T) {
 		name                            string
 		version                         int
 		flat, local, demand, omitFloors bool
+		zeroFloors, unpaused            bool
 		wantErr                         bool
 	}{
 		{name: "floor envelope", version: 3},
 		{name: "floor and demand contracts", version: 3, demand: true},
+		{name: "unpaused zero floors", version: 3, zeroFloors: true, unpaused: true},
+		{name: "paused zero floors", version: 3, zeroFloors: true, wantErr: true},
 		{name: "flat cannot carry floors", flat: true, wantErr: true},
 		{name: "execution envelope cannot carry floors", version: 1, wantErr: true},
 		{name: "demand envelope cannot carry floors", version: 2, demand: true, wantErr: true},
@@ -155,6 +176,12 @@ func TestReplicaFloorTransport(t *testing.T) {
 			policy := executionPolicy()
 			if !tt.omitFloors {
 				policy.ReplicaFloors = acceptedFloors()
+			}
+			if tt.zeroFloors {
+				policy.ReplicaFloors[0].Replicas, policy.ReplicaFloors[1].Replicas = 0, 0
+			}
+			if tt.unpaused {
+				policy.PauseSurge = false
 			}
 			if tt.demand {
 				policy.Demand = demandPolicy().Demand
@@ -238,7 +265,12 @@ func TestAuthorizeReplicaFloors(t *testing.T) {
 		{name: "removed floor", wantErr: true, edit: func(p *v1beta1.PlacementExecutionPolicy) { p.ReplicaFloors = nil }},
 		{name: "new authority changes floor", edit: func(p *v1beta1.PlacementExecutionPolicy) { p.Revision++; p.ReplicaFloors[2].Replicas++ }},
 		{name: "new authority removes contract", edit: func(p *v1beta1.PlacementExecutionPolicy) { p.Revision++; p.ReplicaFloors = nil }},
-		{name: "invalid floor", wantErr: true, edit: func(p *v1beta1.PlacementExecutionPolicy) { p.Revision++; p.ReplicaFloors[2].Replicas = 0 }},
+		{name: "paused zero floor", wantErr: true, edit: func(p *v1beta1.PlacementExecutionPolicy) { p.Revision++; p.ReplicaFloors[2].Replicas = 0 }},
+		{name: "released zero floor", edit: func(p *v1beta1.PlacementExecutionPolicy) {
+			p.Revision++
+			p.PauseSurge = false
+			p.ReplicaFloors[2].Replicas = 0
+		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			current := executionPolicy()

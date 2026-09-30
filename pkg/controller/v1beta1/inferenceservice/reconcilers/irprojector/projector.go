@@ -597,7 +597,9 @@ func boundPatchForLog(data []byte) string {
 // The IR exposes a /scale subresource at .spec.replicas
 // (inferencereplica_types.go), so for an autoscaler-managed Component the
 // HPA / KEDA / external scaler is the authoritative writer of
-// spec.replicas. The decision:
+// spec.replicas. An accepted zero-floor placement contract preserves explicit
+// zero in initial projection and external scale requests. Other components use
+// the following rules:
 //
 //   - CREATE (no live IR yet — ir.ResourceVersion == ""): stamp
 //     MinReplicas. There is nothing for the autoscaler to have written
@@ -630,6 +632,13 @@ func desiredReplicas(ir *v1beta1.InferenceReplica, p Params) *int32 {
 	effective := p.ResolvedAutoscaler
 	if p.PreserveAutoscaler && !creating {
 		effective = ir.Spec.Autoscaler
+	}
+	if protocol.HasZeroReplicaFloor(p.placementExecution, p.Component) {
+		if !creating && isAutoscalerManaged(effective) && ir.Spec.Replicas != nil && *ir.Spec.Replicas >= 0 {
+			return ir.Spec.Replicas
+		}
+		floor := int32(*p.ComponentExt.MinReplicas)
+		return &floor
 	}
 	if creating || !isAutoscalerManaged(effective) {
 		return replicasFromComponentExt(p.ComponentExt)

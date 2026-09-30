@@ -3,7 +3,7 @@ oep-number: "0018.4"
 authors:
   - "@Huang-Wei"
 status: implemented
-# state: placement.policy ClusterAffinity + cluster_affinity_types.go, SplitByCapacity apportionment (split_plan.go/split_executor.go, #1718/#1743), persisted allocation plans (#1736), AllocationShortfall reporting (plan_status.go), bounded transitions (#1724) and legacy preservation (#1796)
+# state: placement policy, capacity allocation, persisted plans, bounded transitions, and member zero-floor contracts are implemented; zero-floor source activation and operational graduation remain open.
 creation-date: 2026-09-24
 reviewers:
   - TBD

@@ -4,8 +4,11 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -16,6 +19,75 @@ import (
 )
 
 var _ = ginkgo.Describe("placement member replica floors", func() {
+	ginkgo.It("retains zero-floor member authority while external scaling grows and returns to zero", func() {
+		ns, err := util.CreateNamespaceFromPrefix(suiteCtx, k8sClient, "placement-zero-floor-")
+		Expect(err).NotTo(HaveOccurred())
+		ginkgo.DeferCleanup(func() { Expect(util.DeleteNamespace(suiteCtx, k8sClient, ns.Name)).To(Succeed()) })
+		member := newCoordFixture(ns.Name, WithISVCName("member-zero-floor"), WithoutDecoder())
+		local := newCoordFixture(ns.Name, WithISVCName("local-zero-floor"), WithoutDecoder())
+		policy := &v1beta1.PlacementExecutionPolicy{PlanID: "plan-a", Revision: 1, SourceUID: "source-a", ClusterUID: "cluster-a",
+			ReplicaFloors: []v1beta1.PlacementComponentFloor{{Component: v1beta1.EngineComponent}}}
+		raw, err := protocol.Encode(policy)
+		Expect(err).NotTo(HaveOccurred())
+		member.ISVC.Labels = map[string]string{constants.PlacementOrigin: string(policy.SourceUID)}
+		for _, fixture := range []*coordFixture{member, local} {
+			fixture.ISVC.Spec.Engine.MinReplicas = ptr.To(0)
+			fixture.ISVC.Spec.Engine.Autoscaler = &v1beta1.ComponentAutoscaler{Class: v1beta1.AutoscalerExternal}
+			if fixture.ISVC.Annotations == nil {
+				fixture.ISVC.Annotations = map[string]string{}
+			}
+			fixture.ISVC.Annotations[constants.PlacementExecution] = raw
+			deferFixtureCleanup(fixture)
+			applyFixture(Default, fixture)
+		}
+
+		identities := map[string]types.UID{}
+		check := func(replicas int32) {
+			Eventually(func(g Gomega) {
+				for _, fixture := range []*coordFixture{member, local} {
+					wantReplicas := replicas
+					if fixture == local && replicas == 0 {
+						wantReplicas = 1
+					}
+					service := freshISVC(g, ns.Name, fixture.ISVC.Name)
+					g.Expect(cmp.Diff(ptr.To(0), service.Spec.Engine.MinReplicas)).To(BeEmpty())
+					ir := freshInferenceReplica(g, ns.Name, fixture.ISVC.Name, v1beta1.EngineComponent)
+					if uid, tracked := identities[fixture.ISVC.Name]; tracked {
+						g.Expect(cmp.Diff(uid, ir.UID)).To(BeEmpty())
+					}
+					wantPolicy := policy
+					if fixture == local {
+						wantPolicy = nil
+					}
+					g.Expect(cmp.Diff(wantPolicy, ir.Spec.PlacementExecution)).To(BeEmpty())
+					g.Expect(cmp.Diff(ptr.To(wantReplicas), ir.Spec.Replicas)).To(BeEmpty())
+					g.Expect(ir.Spec.PlacementReplicaLimit).To(BeNil())
+					g.Expect(ir.Status.ObservedGeneration).To(Equal(ir.Generation))
+					g.Expect(ir.Status.ReadyReplicas).To(Equal(wantReplicas))
+					pods := listOMENativePods(g, ns.Name, fixture.ISVC.Name)
+					g.Expect(pods).To(HaveLen(int(wantReplicas)))
+					for i := range pods {
+						g.Expect(podIsReady(&pods[i])).To(BeTrue())
+					}
+				}
+			}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
+		}
+		check(0)
+		for _, fixture := range []*coordFixture{member, local} {
+			identities[fixture.ISVC.Name] = freshInferenceReplica(Default, ns.Name, fixture.ISVC.Name, v1beta1.EngineComponent).UID
+		}
+		for _, replicas := range []int32{2, 0} {
+			for _, fixture := range []*coordFixture{member, local} {
+				Eventually(func(g Gomega) {
+					ir := freshInferenceReplica(g, ns.Name, fixture.ISVC.Name, v1beta1.EngineComponent)
+					scale := &autoscalingv1.Scale{ObjectMeta: metav1.ObjectMeta{Name: ir.Name, Namespace: ir.Namespace, ResourceVersion: ir.ResourceVersion}, Spec: autoscalingv1.ScaleSpec{Replicas: replicas}}
+					g.Expect(k8sClient.SubResource("scale").Update(suiteCtx, ir, client.WithSubResourceBody(scale))).To(Succeed())
+				}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+			}
+			check(replicas)
+		}
+	})
+
 	ginkgo.It("requires accepted runtime floors while local services follow runtime scaling", func() {
 		ns, err := util.CreateNamespaceFromPrefix(suiteCtx, k8sClient, "placement-floors-")
 		Expect(err).NotTo(HaveOccurred())
