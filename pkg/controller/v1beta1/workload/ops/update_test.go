@@ -2,6 +2,7 @@ package ops
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -819,29 +820,61 @@ func TestChooseUpdateMode_MultiPodInPlaceFallsBackToRecreate(t *testing.T) {
 	}
 }
 
-// TestInPlaceFallsBackToRecreate pins the one fallback the plan can
-// classify without a revision read: a multi-pod Instance under either
-// in-place variant rebuilds, while a single-pod Instance and every
+// TestInPlaceFallsBackToRecreate pins the fallbacks the plan classifies
+// ahead of the gate consult: a multi-pod Instance under either in-place
+// variant rebuilds without a revision read; a single-pod InPlaceIfPossible
+// start rebuilds when its diff against the running revision exceeds
+// regular-container images or no baseline is recorded, and only then is
+// the running PodSpec loaded; a single-pod InPlaceOnly start and every
 // non-in-place strategy keep their declared mechanism.
 func TestInPlaceFallsBackToRecreate(t *testing.T) {
+	target := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "v2"}}}
+	imageOnly := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "v1"}}}
+	envDiff := &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "v1", Env: []corev1.EnvVar{{Name: "X"}}}}}
 	cases := []struct {
+		name     string
 		strategy workload.UpdateStrategyType
 		multiPod bool
+		running  *corev1.PodSpec
 		want     bool
+		wantRead bool
 	}{
-		{workload.UpdateStrategyInPlaceIfPossible, true, true},
-		{workload.UpdateStrategyInPlaceOnly, true, true},
-		{workload.UpdateStrategyInPlaceIfPossible, false, false},
-		{workload.UpdateStrategyInPlaceOnly, false, false},
-		{workload.UpdateStrategyRecreatePod, true, false},
-		{workload.UpdateStrategySurgeThenDrain, true, false},
-		{"", true, false},
+		{"gang InPlaceIfPossible", workload.UpdateStrategyInPlaceIfPossible, true, imageOnly, true, false},
+		{"gang InPlaceOnly", workload.UpdateStrategyInPlaceOnly, true, imageOnly, true, false},
+		{"single-pod InPlaceIfPossible image-only diff", workload.UpdateStrategyInPlaceIfPossible, false, imageOnly, false, true},
+		{"single-pod InPlaceIfPossible diff beyond images", workload.UpdateStrategyInPlaceIfPossible, false, envDiff, true, true},
+		{"single-pod InPlaceIfPossible no baseline", workload.UpdateStrategyInPlaceIfPossible, false, nil, true, true},
+		{"single-pod InPlaceOnly diff beyond images rejects, no fallback", workload.UpdateStrategyInPlaceOnly, false, envDiff, false, false},
+		{"gang RecreatePod", workload.UpdateStrategyRecreatePod, true, envDiff, false, false},
+		{"gang SurgeThenDrain", workload.UpdateStrategySurgeThenDrain, true, envDiff, false, false},
+		{"single-pod unset strategy", "", false, envDiff, false, false},
 	}
 	for _, tc := range cases {
-		if got := InPlaceFallsBackToRecreate(tc.strategy, tc.multiPod); got != tc.want {
-			t.Errorf("InPlaceFallsBackToRecreate(%q, multiPod=%v) = %v, want %v", tc.strategy, tc.multiPod, got, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			read := false
+			got, err := InPlaceFallsBackToRecreate(tc.strategy, tc.multiPod, target, func() (*corev1.PodSpec, error) {
+				read = true
+				return tc.running, nil
+			})
+			if err != nil {
+				t.Fatalf("InPlaceFallsBackToRecreate: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("InPlaceFallsBackToRecreate(%q, multiPod=%v) = %v, want %v", tc.strategy, tc.multiPod, got, tc.want)
+			}
+			if read != tc.wantRead {
+				t.Errorf("running PodSpec read = %v, want %v", read, tc.wantRead)
+			}
+		})
 	}
+	t.Run("a failed baseline read is the caller's error", func(t *testing.T) {
+		wantErr := fmt.Errorf("revision read failed")
+		if _, err := InPlaceFallsBackToRecreate(workload.UpdateStrategyInPlaceIfPossible, false, target, func() (*corev1.PodSpec, error) {
+			return nil, wantErr
+		}); !errors.Is(err, wantErr) {
+			t.Errorf("error = %v, want %v", err, wantErr)
+		}
+	})
 }
 
 // TestInPlaceEligible_OnlyImageDiff confirms image-only diff is

@@ -708,7 +708,12 @@ func TestReconcile_GangInPlaceFallbackIsGatedAsRecreate(t *testing.T) {
 			isvc := &v1beta1.InferenceService{
 				ObjectMeta: metav1.ObjectMeta{Name: "llama-70b", Namespace: "prod", UID: "uid-1"},
 			}
-			objs := []client.Object{isvc}
+			in := minimalInput(t)
+			// The running revision differs from the target by an image only,
+			// so a single-pod start is genuinely an in-place patch.
+			running := in.DesiredSpec.PodSpec.DeepCopy()
+			running.Containers[0].Image = "test:v0"
+			objs := []client.Object{isvc, revisionWithPodSpec(t, "llama-70b-engine-priorrev", isvc.Namespace, running)}
 			for _, r := range tc.runners {
 				objs = append(objs, runnerPod(isvc.Name, isvc.Namespace, 0, r.Name))
 			}
@@ -717,7 +722,6 @@ func TestReconcile_GangInPlaceFallbackIsGatedAsRecreate(t *testing.T) {
 				WithObjects(objs...).Build()
 			deps := types.Deps{Client: c, Expectations: types.NewExpectations()}
 
-			in := minimalInput(t)
 			in.MutateInstance = roundTripMutateInstance(c, isvc, types.ComponentEngine)
 			podCount := int32(len(tc.runners))
 			in.ObservedState.InstanceStatuses = []types.InstanceStatus{{
@@ -771,6 +775,116 @@ func TestReconcile_GangInPlaceFallbackIsGatedAsRecreate(t *testing.T) {
 			}
 			if len(pods.Items) != len(tc.runners) {
 				t.Errorf("held start left %d pods, want %d", len(pods.Items), len(tc.runners))
+			}
+			for i := range pods.Items {
+				if pods.Items[i].DeletionTimestamp != nil {
+					t.Errorf("held start is draining %s", pods.Items[i].Name)
+				}
+			}
+			if s := instanceStatusByIndex(c, isvc, v1beta1.EngineComponent, 0); s != nil && s.Phase != v1beta1.OMENativeInstanceReady {
+				t.Errorf("held start moved the row to %s, want Ready", s.Phase)
+			}
+		})
+	}
+}
+
+// TestReconcile_SinglePodInPlaceDiffIsGatedAsRecreate pins the mechanism a
+// single-pod InPlaceIfPossible start reports to the coordination gate. The
+// gate waives its capacity checks for an in-place start because the patch
+// returns the same pod; a diff beyond regular-container images, or a
+// running revision that is gone, resolves the start to a recreate, which
+// drains the pod before anything returns, so it must reach the gate as
+// RecreatePod and be held whenever the gate would hold a recreate. An
+// image-only diff keeps the waiver. The gate here models the waiver: it
+// admits an in-place mechanism and holds every other one on Ratio.
+func TestReconcile_SinglePodInPlaceDiffIsGatedAsRecreate(t *testing.T) {
+	const runningName = "llama-70b-engine-priorrev"
+	cases := []struct {
+		name        string
+		running     func(target *corev1.PodSpec) *corev1.PodSpec // nil: the revision is gone
+		wantConsult types.UpdateStrategyType
+		wantHeld    bool
+	}{
+		{"image-only diff keeps the waiver", func(target *corev1.PodSpec) *corev1.PodSpec {
+			running := target.DeepCopy()
+			running.Containers[0].Image = "test:v0"
+			return running
+		}, types.UpdateStrategyInPlaceIfPossible, false},
+		{"diff beyond images is consulted as a recreate and held", func(target *corev1.PodSpec) *corev1.PodSpec {
+			running := target.DeepCopy()
+			running.Containers[0].Env = []corev1.EnvVar{{Name: "MODE", Value: "batch"}}
+			return running
+		}, types.UpdateStrategyRecreatePod, true},
+		{"gone running revision is consulted as a recreate and held", nil, types.UpdateStrategyRecreatePod, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := makeScheme(t)
+			isvc := &v1beta1.InferenceService{
+				ObjectMeta: metav1.ObjectMeta{Name: "llama-70b", Namespace: "prod", UID: "uid-1"},
+			}
+			in := minimalInput(t)
+			objs := []client.Object{isvc, enginePod(isvc.Name, isvc.Namespace, 0)}
+			if tc.running != nil {
+				objs = append(objs, revisionWithPodSpec(t, runningName, isvc.Namespace, tc.running(in.DesiredSpec.PodSpec)))
+			}
+			c := fake.NewClientBuilder().WithScheme(scheme).
+				WithStatusSubresource(&v1beta1.InferenceService{}, &v1beta1.InferenceReplica{}).
+				WithObjects(objs...).Build()
+			deps := types.Deps{Client: c, Expectations: types.NewExpectations()}
+
+			in.MutateInstance = roundTripMutateInstance(c, isvc, types.ComponentEngine)
+			in.ObservedState.InstanceStatuses = []types.InstanceStatus{{
+				Index: 0, Incarnation: 1, Phase: types.InstancePhaseReady,
+				RunningRevision: runningName, PodCount: 1, ServingPodCount: 1,
+			}}
+			var consulted []types.UpdateStrategyType
+			in.UpdateGate = func(strategy types.UpdateStrategyType, _, _ int32) (bool, types.RolloutHoldGate, string) {
+				consulted = append(consulted, strategy)
+				if strategy == types.UpdateStrategyInPlaceIfPossible || strategy == types.UpdateStrategyInPlaceOnly {
+					return true, "", ""
+				}
+				return false, types.RolloutHoldGateRatio, "projected serving ratio leaves the band"
+			}
+			var hold *types.RolloutHold
+			in.RecordRolloutHold = func(h *types.RolloutHold) { hold = h }
+
+			plan := types.ComponentPlan{
+				Component:      types.ComponentEngine,
+				Replicas:       1,
+				Instances:      []types.InstancePlan{{Index: 0, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}}},
+				UpdateStrategy: types.UpdateStrategy{Type: types.UpdateStrategyInPlaceIfPossible},
+			}
+			target := &appsv1.ControllerRevision{
+				ObjectMeta: metav1.ObjectMeta{Name: "llama-70b-engine-newtarget", Namespace: "prod"},
+			}
+
+			_, err := workload.Reconcile(context.Background(), deps, in, plan, target)
+			if want := []types.UpdateStrategyType{tc.wantConsult}; !slices.Equal(consulted, want) {
+				t.Errorf("gate consulted with %v, want %v", consulted, want)
+			}
+			if !tc.wantHeld {
+				// The admitted start runs its op against the fake client; the
+				// op's outcome belongs to the op's own tests.
+				if err != nil {
+					t.Logf("op error after an admitted start: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Reconcile: %v", err)
+			}
+			if hold == nil || hold.Gate != types.RolloutHoldGateRatio {
+				t.Errorf("RolloutHold = %+v, want the gate's Ratio hold", hold)
+			}
+			// A held start touches nothing: the pod is still there, not
+			// terminating, and the row is still Ready.
+			pods := &corev1.PodList{}
+			if err := c.List(context.Background(), pods, client.InNamespace("prod")); err != nil {
+				t.Fatalf("list pods: %v", err)
+			}
+			if len(pods.Items) != 1 {
+				t.Errorf("held start left %d pods, want 1", len(pods.Items))
 			}
 			for i := range pods.Items {
 				if pods.Items[i].DeletionTimestamp != nil {

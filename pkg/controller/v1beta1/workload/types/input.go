@@ -187,10 +187,11 @@ type ReconcileInput struct {
 	//
 	// strategy is the mechanism the start runs on, not merely the
 	// Component's declared strategy: a start that rebuilds its pods under
-	// another declaration — a crash-loop repair, a gang whose in-place
-	// strategy resolves to a recreate — is consulted as RecreatePod. A
-	// gate that waives its capacity checks for an in-place start therefore
-	// waives them only for a start that returns the same pod.
+	// another declaration — a crash-loop repair, an in-place strategy that
+	// resolves to a recreate on the Instance (a gang, or a single-pod diff
+	// beyond container images) — is consulted as RecreatePod. A gate that
+	// waives its capacity checks for an in-place start therefore waives
+	// them only for a start that returns the same pod.
 	//
 	// allowed=false skips this Instance for this reconcile pass; the
 	// dispatcher emits a short requeue. inFlightSurge / inFlightUnavail

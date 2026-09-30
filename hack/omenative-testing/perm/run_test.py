@@ -585,6 +585,33 @@ class CanaryHeaderTest(unittest.TestCase):
         self.assertTrue(any("cell=" in e for e in self._errs(base + " cell=canary/Staging/readyTimeout[quota],")))
         self.assertTrue(any("cell=" in e for e in self._errs(base + " cell=canary/Idle/newTarget[secondaryOnly:engine]")))
 
+class RolloutEditHeaderTest(unittest.TestCase):
+    """edit=env is a rollout-mode pod-template edit: it validates, and it
+    turns an in-place strategy's update mode into the hash-counted recreate
+    the controller resolves it to."""
+
+    def _errs(self, header):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def test_edit_env_validates_on_a_rollout_case(self):
+        base = "# p999: x Ne=2 Nd=2 Nr=0 ceil_e=2 ceil_d=3 ceil_r=0 topo=pd"
+        self.assertEqual([], self._errs(base.replace(" Ne=", " edit=env Ne=")))
+        self.assertTrue(any("malformed header value edit=" in e for e in self._errs(base.replace(" Ne=", " edit=labels Ne="))))
+
+    def test_edit_env_counts_an_in_place_strategy_by_hash(self):
+        info = {"strat": {"engine": "InPlaceIfPossible", "decoder": "SurgeThenDrain", "router": "InPlaceOnly"}}
+        configured = {"engine", "decoder", "router"}
+        self.assertEqual({"engine": "inplace", "decoder": "surge", "router": "inplace"},
+                         run.update_modes(info, configured))
+        self.assertEqual({"engine": "surge", "decoder": "surge", "router": "surge"},
+                         run.update_modes(info, configured, "env"))
+
+
 class ApplyCaseRuntimeLagTest(unittest.TestCase):
     """apply_case re-applies only the webhook's runtime-lag denial, only for a
     case that ships its own runtime, and only for a bounded window."""

@@ -161,7 +161,12 @@ For each case:
 1. `kubectl apply` the runtime (idempotent) and the ISVC.
 2. Wait until the expected pods are all Ready (bounded).
 3. Start a pod watcher streaming events with timestamps.
-4. Trigger a rotation by patching `engine.annotations[perm.test/rev]: v2`.
+4. Trigger a rotation by patching `engine.annotations[perm.test/rev]: v2`
+   (every coordination-group member when the case declares a group). With
+   `edit=env` the same patch also sets the bumped runner's `TEST_REV` env, a
+   pod-template diff beyond container images: an in-place strategy then
+   resolves to a recreate, UID rotation is expected, and the drain-first
+   checks (ratio band, capacity floor) judge the roll.
 5. Sample the trajectory until convergence or the budget expires (the budget
    scales with pod count and is extended for Sequential coordination).
 6. Replay the trajectory → **peak** alive and **final** alive per Component +

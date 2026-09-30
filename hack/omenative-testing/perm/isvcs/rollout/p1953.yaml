@@ -1,0 +1,29 @@
+# p1953: PD e=8 d=8 r=2 RatioBalanced: engine InPlaceIfPossible(maxUnavail=3) rolls a pod-template env edit, so every single-pod start resolves to a recreate, while decoder only surges; tol=25 — the ratio gate must hold engine serving >=6  edit=env Ne=8 Nd=8 Nr=2 ceil_e=8 ceil_d=9 ceil_r=3 topo=pd
+# The env edit is a diff beyond container images, so the in-place strategy recreates each engine pod drain-first. Consulted as an in-place start (ratio waiver kept) the engine recreates 3 at once -> serving 5 while decoder stays 8 -> 5:8 (37% dev >> 25% tol) -> ratio-band check FAILs.
+# Consulted as the RecreatePod it runs on, engine is held to serving >=6 (75% of decoder's 8) and recreates two at a time -> PASS.
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p1953 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,        name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime,   name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: InPlaceIfPossible, rollingUpdate: { maxSurge: 0, maxUnavailable: 3 } } }
+  decoder:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: SurgeThenDrain, rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: SurgeThenDrain, rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine, decoder]
+          rollingUpdate: { maxUnavailable: 3 }
+          maintainRatio: { tolerance: 25 }

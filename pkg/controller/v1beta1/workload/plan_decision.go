@@ -82,10 +82,12 @@ type UpdateItem struct {
 	// (types.RecreateOfDarkFailedRow); the per-Component budget still applies.
 	CoordGateExempt bool
 	// RecreateFallback: the Component's in-place strategy runs as a
-	// recreate on this Instance (ops.InPlaceFallsBackToRecreate), so the
-	// fresh start is consulted with the coordination gate as a RecreatePod
-	// start: it takes the pods out of rotation before anything returns,
-	// which is the capacity loss the gate waives only for a same-pod patch.
+	// recreate on this Instance (ops.InPlaceFallsBackToRecreate: a gang, or
+	// a single-pod diff beyond container images), so the fresh start is
+	// consulted with the coordination gate as a RecreatePod start: it takes
+	// the pods out of rotation before anything returns, which is the
+	// capacity loss the gate waives only for a same-pod patch. Decided for
+	// fresh starts only; a continuation is neither admitted nor consulted.
 	RecreateFallback bool
 	// CleanupOnly: the update trigger declined (zero revision distance —
 	// the corrective roll-back — or a third-party-revision leftover) but
@@ -626,7 +628,18 @@ func planUpdateSelection(ctx context.Context, input types.ReconcileInput, plan t
 		row := input.ObservedState.Instance(inst.Index)
 		startingFresh := !types.UpdateContinuation(row)
 		gateExempt := types.RecreateOfDarkFailedRow(row, strategy)
-		recreateFallback := workloadops.InPlaceFallsBackToRecreate(strategy, inst.TotalPods() > 1)
+		// The mechanism the start runs on: the shared rule the update op
+		// dispatches on, judged against the same target and the same
+		// recorded running revision (a snapshot read, memoized per revision).
+		recreateFallback := false
+		if startingFresh {
+			fallback, ferr := workloadops.InPlaceFallsBackToRecreate(strategy, inst.TotalPods() > 1, input.DesiredSpec.PodSpec,
+				func() (*corev1.PodSpec, error) { return snapshot.RunningRevisionPodSpec(ctx, inst.Index) })
+			if ferr != nil {
+				return UpdateSelection{}, 0, fmt.Errorf("workload.Reconcile: resolve update mechanism (instance=%d): %w", inst.Index, ferr)
+			}
+			recreateFallback = fallback
+		}
 		logf.FromContext(ctx).V(1).Info("update selected",
 			"component", plan.Component, "instance", inst.Index, "target", target.Name,
 			"startingFresh", startingFresh, "coordGateExempt", gateExempt, "recreateFallback", recreateFallback)

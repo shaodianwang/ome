@@ -444,6 +444,17 @@ def spec_default(info):
     return info
 
 
+def update_modes(info, configured, edit=None):
+    """Per-Component update mode the watcher counts by: "inplace" when the
+    strategy patches the live pod (the new revision shows as the bumped
+    annotation on the same pod), else "surge" (a new pod at a new revision
+    hash). A rollout with edit=env changes the pod template beyond container
+    images, so an in-place strategy resolves to a recreate and its pods are
+    counted by hash like any drain-first roll."""
+    return {c: ("inplace" if info["strat"].get(c) in IN_PLACE_TYPES and edit != "env" else "surge")
+            for c in configured}
+
+
 def aggregate(state, old_hashes, modes, pods_per_inst, measures=None):
     """state: pod_name → {comp, inst, runner, alive, ready, hash, uid, newanno} | None.
 
@@ -2225,7 +2236,12 @@ HDR_VALIDATORS = {
     "expect": lambda v: v in {"reject", "roll", "noroll", "recover", "fail"},
     "reason": lambda v: bool(str(v)),
     "rt": lambda v: bool(str(v)),
-    "edit": lambda v: v in {"material", "noop", "image", "resources"},
+    # edit= names the field the trigger changes. runtimerev: which runtime
+    # field (material/env, image, resources, or a noop label touch). rollout:
+    # edit=env adds a TEST_REV runner env override to the annotation bump, a
+    # pod-template diff beyond container images, so an in-place strategy on a
+    # single-pod Component resolves to a recreate.
+    "edit": lambda v: v in {"material", "noop", "image", "resources", "env"},
     "img": lambda v: bool(str(v)) and not runtime_fixtures.unknown_tokens(str(v)),
     "break": lambda v: v == "stuck",
     # Scenario knobs. during= times a destructive op against an in-flight one:
@@ -6870,8 +6886,8 @@ def run_case(case_id):
     info = get_spec_info(case_id)
     policy, members, order, soak = info["policy"], info["members"], info["order"], info["soak"]
     pacing, ratio_tol = info["pacing"], info["ratio_tol"]
-    modes = {c: ("inplace" if info["strat"].get(c) in IN_PLACE_TYPES else "surge")
-             for c in configured}
+    edit = hdr.get("edit")
+    modes = update_modes(info, configured, edit)
     # Pods per Instance: 1 ('default' single-pod runner) or 1 + worker.size
     # (multi-node leader + workers). The Instance-level counters use this to
     # know when a whole Instance is present/ready. N[c] stays the INSTANCE count
@@ -6997,7 +7013,20 @@ def run_case(case_id):
                         patch = {"spec": {c: {"annotations": {TRIGGER_ANNO: TRIGGER_VAL,
                                                               "ome.io/deploymentMode": "OMENative"}}
                                           for c in sorted(bumped)}}
-                        print(f"\n  Phase 2: triggering rotation (bump {TRIGGER_ANNO}→{TRIGGER_VAL} on {sorted(bumped)})")
+                        if edit == "env":
+                            # A pod-template diff beyond container images: the
+                            # runner env rides the revision, so the new revision
+                            # cannot be patched in place. A multi-node Component
+                            # renders its leader's runner, and a leader runner
+                            # must name the container it overrides.
+                            env = [{"name": "TEST_REV", "value": TRIGGER_VAL}]
+                            for c in sorted(bumped):
+                                if pods_per_inst.get(c, 1) > 1:
+                                    patch["spec"][c]["leader"] = {"runner": {"name": MAIN_CONTAINER, "env": env}}
+                                else:
+                                    patch["spec"][c]["runner"] = {"env": env}
+                        print(f"\n  Phase 2: triggering rotation (bump {TRIGGER_ANNO}→{TRIGGER_VAL}"
+                              f"{' + runner env edit' if edit == 'env' else ''} on {sorted(bumped)})")
                         rr = kubectl("-n", NS, "patch", "isvc", case_id, "--type=merge",
                                      "-p", json.dumps(patch))
                         if rr.returncode != 0:
@@ -7322,6 +7351,13 @@ def run_case(case_id):
 
     # Check 6: in-place strategies must update IN PLACE (no UID rotation).
     for c in sorted(bumped):
+        if edit == "env" and info["strat"].get(c) in IN_PLACE_TYPES:
+            # The env edit is a pod-template diff beyond container images, so
+            # the controller resolves the in-place strategy to a recreate; UID
+            # rotation is the expected outcome and the drain-first checks
+            # (ratio band, capacity floor) judge the roll.
+            checks.append(f"  ⓘ {c} in-place on a pod-template env edit → recreate (UID rotation expected; the diff exceeds container images)")
+            continue
         if modes.get(c) == "inplace":
             # Multi-node (gang) in-place legitimately RECREATES: in-place
             # eligibility compares only the leader's PodSpec, so the

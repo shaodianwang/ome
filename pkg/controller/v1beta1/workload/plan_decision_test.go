@@ -77,6 +77,13 @@ func planSnapshot(input types.ReconcileInput, byIdx map[int32][]*corev1.Pod) *wo
 	return workload.SnapshotWithPodsForTest(input, byIdx)
 }
 
+// planSnapshotWithRevisions is planSnapshot with the running revisions'
+// recorded PodSpecs supplied by name, for a Plan that judges a single-pod
+// in-place start's diff.
+func planSnapshotWithRevisions(input types.ReconcileInput, byIdx map[int32][]*corev1.Pod, specs map[string]*corev1.PodSpec) *workload.ObservedSnapshot {
+	return workload.SnapshotWithRevisionsForTest(input, byIdx, specs)
+}
+
 // planOrFail runs Plan (nil target) and fails the test on error.
 func planOrFail(t *testing.T, input types.ReconcileInput, plan types.ComponentPlan, snapshot *workload.ObservedSnapshot) workload.Decision {
 	t.Helper()
@@ -968,8 +975,9 @@ func TestPlan_UpdateCoordGateExemptSurgeKeepsConsult(t *testing.T) {
 }
 
 // TestPlan_Update_RecreateFallback_GangInPlace asserts the selection
-// marks the fresh starts whose in-place strategy runs as a recreate — a
-// multi-pod Instance under either in-place variant — and nothing else.
+// marks the fresh starts whose in-place strategy runs as a recreate on a
+// multi-pod Instance, under either in-place variant, and nothing else
+// when the running revision differs from the target by an image only.
 // The executor consults the coordination gate for such a start as a
 // RecreatePod start: it takes the pods out of rotation before anything
 // returns, the capacity loss the gate waives only for a same-pod patch.
@@ -1005,8 +1013,79 @@ func TestPlan_Update_RecreateFallback_GangInPlace(t *testing.T) {
 				Instances:      []types.InstancePlan{{Index: 0, Incarnation: 1, Runners: tc.runners}},
 				UpdateStrategy: types.UpdateStrategy{Type: tc.strategy},
 			}
+			running := in.DesiredSpec.PodSpec.DeepCopy()
+			running.Containers[0].Image = "test:v0"
 
-			d := planTargetOrFail(t, in, plan, target, planSnapshot(in, nil))
+			d := planTargetOrFail(t, in, plan, target, planSnapshotWithRevisions(in, nil, map[string]*corev1.PodSpec{"prior-rev": running}))
+			ua := findAction(d, workload.ActionUpdate)
+			if ua == nil {
+				t.Fatalf("expected an Update action, got %v", actionKinds(d))
+			}
+			items := ua.Update.Items
+			if len(items) != 1 || !items[0].StartingFresh {
+				t.Fatalf("update items = %+v, want one fresh start", items)
+			}
+			if items[0].RecreateFallback != tc.want {
+				t.Errorf("RecreateFallback = %v, want %v", items[0].RecreateFallback, tc.want)
+			}
+		})
+	}
+}
+
+// TestPlan_Update_RecreateFallback_SinglePodDiff asserts the selection
+// marks a fresh single-pod InPlaceIfPossible start whose diff against the
+// running revision exceeds regular-container images, or whose running
+// revision is gone, as a recreate fallback: the update op resolves such a
+// start to a recreate, which drains the pod before anything returns, so
+// the executor consults the coordination gate for it as RecreatePod. An
+// image-only diff stays an in-place start, and InPlaceOnly rejects the
+// diff rather than falling back. The classification is a snapshot read:
+// Plan writes nothing.
+func TestPlan_Update_RecreateFallback_SinglePodDiff(t *testing.T) {
+	cases := []struct {
+		name     string
+		strategy types.UpdateStrategyType
+		running  func(target *corev1.PodSpec) *corev1.PodSpec // nil: the revision is gone
+		want     bool
+	}{
+		{"InPlaceIfPossible image-only diff", types.UpdateStrategyInPlaceIfPossible, func(target *corev1.PodSpec) *corev1.PodSpec {
+			running := target.DeepCopy()
+			running.Containers[0].Image = "test:v0"
+			return running
+		}, false},
+		{"InPlaceIfPossible diff beyond images", types.UpdateStrategyInPlaceIfPossible, func(target *corev1.PodSpec) *corev1.PodSpec {
+			running := target.DeepCopy()
+			running.Containers[0].Env = []corev1.EnvVar{{Name: "MODE", Value: "batch"}}
+			return running
+		}, true},
+		{"InPlaceIfPossible gone running revision", types.UpdateStrategyInPlaceIfPossible, nil, true},
+		{"InPlaceOnly diff beyond images", types.UpdateStrategyInPlaceOnly, func(target *corev1.PodSpec) *corev1.PodSpec {
+			running := target.DeepCopy()
+			running.Containers[0].Env = []corev1.EnvVar{{Name: "MODE", Value: "batch"}}
+			return running
+		}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			target := updateTarget()
+			in := minimalInput(t)
+			forbidMutations(t, &in)
+			in.ObservedState.InstanceStatuses = []types.InstanceStatus{
+				{Index: 0, Incarnation: 1, Phase: types.InstancePhaseReady, RunningRevision: "prior-rev",
+					PodCount: 1, ServingPodCount: 1},
+			}
+			plan := types.ComponentPlan{
+				Component:      types.ComponentEngine,
+				Replicas:       1,
+				Instances:      []types.InstancePlan{{Index: 0, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}}},
+				UpdateStrategy: types.UpdateStrategy{Type: tc.strategy},
+			}
+			specs := map[string]*corev1.PodSpec{}
+			if tc.running != nil {
+				specs["prior-rev"] = tc.running(in.DesiredSpec.PodSpec)
+			}
+
+			d := planTargetOrFail(t, in, plan, target, planSnapshotWithRevisions(in, nil, specs))
 			ua := findAction(d, workload.ActionUpdate)
 			if ua == nil {
 				t.Fatalf("expected an Update action, got %v", actionKinds(d))

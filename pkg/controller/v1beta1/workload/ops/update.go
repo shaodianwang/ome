@@ -229,29 +229,52 @@ const (
 	updateModeSurge
 )
 
+// RunningPodSpecFunc loads the PodSpec recorded by an Instance's running
+// revision on demand. nil with no error is no recorded baseline.
+type RunningPodSpecFunc func() (*corev1.PodSpec, error)
+
 // InPlaceFallsBackToRecreate reports whether an in-place strategy runs as
-// a recreate on this Instance. inPlaceEligible compares only the leader's
-// PodSpec, so a multi-pod Instance always rebuilds: a worker-only image
-// bump patched in place would leave the workers on the old image
-// (split-brain). Both in-place variants fall back the same way, whatever
-// the diff; InPlaceOnly's strict rejection applies to single-pod
-// Instances only. The update pass reads this ahead of the coordination
+// a recreate on this Instance. A multi-pod Instance always rebuilds under
+// either in-place variant: inPlaceEligible compares only the leader's
+// PodSpec, so a worker-only image bump patched in place would leave the
+// workers on the old image (split-brain). A single-pod InPlaceIfPossible
+// start rebuilds when its diff against the running revision's PodSpec
+// exceeds regular-container images, or when no baseline is recorded; the
+// running PodSpec is loaded only for that case. InPlaceOnly's strict
+// rejection of such a diff on a single-pod Instance is not a fallback:
+// nothing starts. The update pass reads this ahead of the coordination
 // gate consult, since a fallback recreate takes capacity out of rotation
 // the way any drain-first start does.
-func InPlaceFallsBackToRecreate(strategy workload.UpdateStrategyType, multiPod bool) bool {
-	return multiPod && (strategy == workload.UpdateStrategyInPlaceIfPossible ||
-		strategy == workload.UpdateStrategyInPlaceOnly)
+func InPlaceFallsBackToRecreate(strategy workload.UpdateStrategyType, multiPod bool, target *corev1.PodSpec, running RunningPodSpecFunc) (bool, error) {
+	switch strategy {
+	case workload.UpdateStrategyInPlaceOnly:
+		return multiPod, nil
+	case workload.UpdateStrategyInPlaceIfPossible:
+		if multiPod {
+			return true, nil
+		}
+		runningSpec, err := running()
+		if err != nil {
+			return false, err
+		}
+		return !inPlaceEligible(runningSpec, target), nil
+	}
+	return false, nil
 }
 
-// chooseUpdateModeForInstance is chooseUpdateMode with the multi-pod
-// adjustment layered on top: in-place modes route to recreate for a gang
-// (InPlaceFallsBackToRecreate). SurgeThenDrain keeps updateModeSurge for
-// gangs — surgeUpdate performs a per-gang index surge (a whole
-// replacement gang at a fresh instance index, gang-scheduled via its own
-// PodGroup, then the source gang is drained). RecreatePod is already
-// recreate; multiPod has no additional effect on it.
+// chooseUpdateModeForInstance is chooseUpdateMode with the fallback rule
+// layered on top: an in-place strategy routes to recreate wherever
+// InPlaceFallsBackToRecreate says it rebuilds. SurgeThenDrain keeps
+// updateModeSurge for gangs — surgeUpdate performs a per-gang index surge
+// (a whole replacement gang at a fresh instance index, gang-scheduled via
+// its own PodGroup, then the source gang is drained). RecreatePod is
+// already recreate; multiPod has no additional effect on it.
 func chooseUpdateModeForInstance(strategy workload.UpdateStrategyType, running, target *corev1.PodSpec, multiPod bool) (updateMode, error) {
-	if InPlaceFallsBackToRecreate(strategy, multiPod) {
+	fallback, err := InPlaceFallsBackToRecreate(strategy, multiPod, target, func() (*corev1.PodSpec, error) { return running, nil })
+	if err != nil {
+		return 0, err
+	}
+	if fallback {
 		return updateModeRecreate, nil
 	}
 	return chooseUpdateMode(strategy, running, target)
@@ -328,17 +351,34 @@ func loadRunningRevisionPayload(ctx context.Context, reads client.Reader, input 
 	if s == nil || s.RunningRevision == "" {
 		return nil, nil
 	}
+	return loadRevisionPayload(ctx, reads, input.Key.Namespace, s.RunningRevision)
+}
+
+// RevisionPodSpec returns the PodSpec the named ControllerRevision records,
+// read through reads: the baseline a single-pod in-place start's diff is
+// judged against. (nil, nil) when the revision is gone — no baseline,
+// which the mode choice reads as a recreate.
+func RevisionPodSpec(ctx context.Context, reads client.Reader, namespace, name string) (*corev1.PodSpec, error) {
+	payload, err := loadRevisionPayload(ctx, reads, namespace, name)
+	if err != nil || payload == nil {
+		return nil, err
+	}
+	return payload.PodSpec, nil
+}
+
+// loadRevisionPayload reads the named ControllerRevision through reads and
+// decodes its payload. (nil, nil) when the revision is gone.
+func loadRevisionPayload(ctx context.Context, reads client.Reader, namespace, name string) (*revision.DataPayload, error) {
 	cr := &appsv1.ControllerRevision{}
-	key := client.ObjectKey{Namespace: input.Key.Namespace, Name: s.RunningRevision}
-	if err := reads.Get(ctx, key, cr); err != nil {
+	if err := reads.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, cr); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("get running CR %s: %w", s.RunningRevision, err)
+		return nil, fmt.Errorf("get running CR %s: %w", name, err)
 	}
 	var payload revision.DataPayload
 	if err := json.Unmarshal(cr.Data.Raw, &payload); err != nil {
-		return nil, fmt.Errorf("unmarshal running CR %s data: %w", s.RunningRevision, err)
+		return nil, fmt.Errorf("unmarshal running CR %s data: %w", name, err)
 	}
 	return &payload, nil
 }
