@@ -44,12 +44,12 @@ func TestDispatch_MembersRecordTheRolledOutRevisions(t *testing.T) {
 	f.dispatch("serve")
 	// The split serves: each member's target has reached Ready, nothing has
 	// completed.
-	expectRevisions(t, f.isvc, v1beta1.EngineComponent, revisionWant{ready: "eNew"})
+	expectRevisions(t, f.isvc, v1beta1.EngineComponent, revisionWant{ready: "engNew"})
 	expectRevisions(t, f.isvc, v1beta1.DecoderComponent, revisionWant{ready: "dNew"})
 
-	annotate(f.isvc, constants.RolloutPromoteAnnotation, "eNew")
+	annotate(f.isvc, constants.RolloutPromoteAnnotation, "engNew")
 	f.dispatch("advance")
-	f.movePod("engine", "eOld", "eNew", "0")
+	f.movePod("engine", "engOld", "engNew", "0")
 	f.movePod("decoder", "dOld", "dNew", "0")
 	f.dispatch("cut over")
 	if f.phase() != v1beta1.RolloutPhaseStable {
@@ -57,7 +57,7 @@ func TestDispatch_MembersRecordTheRolledOutRevisions(t *testing.T) {
 	}
 	done := func() {
 		t.Helper()
-		expectRevisions(t, f.isvc, v1beta1.EngineComponent, revisionWant{ready: "eNew", latest: "eNew", previous: "eOld"})
+		expectRevisions(t, f.isvc, v1beta1.EngineComponent, revisionWant{ready: "engNew", latest: "engNew", previous: "engOld"})
 		expectRevisions(t, f.isvc, v1beta1.DecoderComponent, revisionWant{ready: "dNew", latest: "dNew", previous: "dOld"})
 	}
 	done()
@@ -74,9 +74,9 @@ func TestDispatch_MembersRecordTheRolledOutRevisions(t *testing.T) {
 func TestDispatch_RollbackStableResolvesFromTheRolledOutRevision(t *testing.T) {
 	f := newPDCanary(t, "pdfb", true)
 	f.dispatch("serve")
-	annotate(f.isvc, constants.RolloutPromoteAnnotation, "eNew")
+	annotate(f.isvc, constants.RolloutPromoteAnnotation, "engNew")
 	f.dispatch("advance")
-	f.movePod("engine", "eOld", "eNew", "0")
+	f.movePod("engine", "engOld", "engNew", "0")
 	f.movePod("decoder", "dOld", "dNew", "0")
 	f.dispatch("cut over")
 	if f.phase() != v1beta1.RolloutPhaseStable {
@@ -91,10 +91,10 @@ func TestDispatch_RollbackStableResolvesFromTheRolledOutRevision(t *testing.T) {
 		TargetRevisions: append([]v1beta1.RolloutRunTarget(nil), closed.TargetRevisions...),
 	}
 	reopenRun(f.isvc,
-		v1beta1.RolloutRunTarget{Component: v1beta1.EngineComponent, Revision: "eNext"},
+		v1beta1.RolloutRunTarget{Component: v1beta1.EngineComponent, Revision: "engNext"},
 		v1beta1.RolloutRunTarget{Component: v1beta1.DecoderComponent, Revision: "dNext"})
 	next := map[v1beta1.ComponentType][2]string{
-		v1beta1.EngineComponent:  {"eNew", "eNext"},
+		v1beta1.EngineComponent:  {"engNew", "engNext"},
 		v1beta1.DecoderComponent: {"dNew", "dNext"},
 	}
 	for comp, pair := range next {
@@ -105,7 +105,7 @@ func TestDispatch_RollbackStableResolvesFromTheRolledOutRevision(t *testing.T) {
 		})
 	}
 	f.dispatch("arm")
-	if cs := rollout.CanaryStatusFor(&f.isvc.Status, v1beta1.EngineComponent); cs == nil || cs.CanaryRevisionHash != "eNext" || cs.CurrentStep != 0 {
+	if cs := rollout.CanaryStatusFor(&f.isvc.Status, v1beta1.EngineComponent); cs == nil || cs.CanaryRevisionHash != "engNext" || cs.CurrentStep != 0 {
 		t.Fatalf("the new target must arm a fresh ladder, got %+v", cs)
 	}
 	if got := componentStableRevisionHash(f.isvc, v1beta1.DecoderComponent, v1beta1.EngineComponent); got != "dNew" {
@@ -130,7 +130,7 @@ func TestDispatch_RollbackStableResolvesFromTheRolledOutRevision(t *testing.T) {
 	f.expectTraffic(v1beta1.DecoderComponent, map[string]trafficWant{
 		"dNew": {percent: 100, protocol: pdCanaryProtocol},
 	})
-	expectRevisions(t, f.isvc, v1beta1.EngineComponent, revisionWant{ready: "eNew", latest: "eNew", previous: "eOld"})
+	expectRevisions(t, f.isvc, v1beta1.EngineComponent, revisionWant{ready: "engNew", latest: "engNew", previous: "engOld"})
 	expectRevisions(t, f.isvc, v1beta1.DecoderComponent, revisionWant{ready: "dNew", latest: "dNew", previous: "dOld"})
 }
 
