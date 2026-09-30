@@ -1,0 +1,16 @@
+# Publication-only routing for the KWOK hub. The Gateway reference is a test
+# parent for HTTPRoutes; no Gateway controller or data plane is installed.
+ome:
+  multicluster:
+    config:
+      routing:
+        enabled: true
+        publisher:
+          name: gatewayapi
+        # KWOK readiness is simulated; these pods cannot answer HTTP probes.
+        probe: []
+        capacity: {}
+      endpoint:
+        globalHostTemplate: "{{.Name}}.{{.Namespace}}.routing.example.com"
+        globalGateway: kwok-sim/local-gateway
+        backendPort: 8080

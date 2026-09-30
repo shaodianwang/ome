@@ -4,7 +4,7 @@
 # Usage:
 #   hack/kwok-sim/up.sh [--skip-build] [--cluster NAME] [--cubes 4x4x4,2x2x2]
 #                       [--component NAME]... [--no-scheduler] [--with-isvcs]
-#                       [--with-kueue]
+#                       [--with-kueue] [--with-routing]
 #
 #   --component NAME
 #                   build and deploy only this OME component; repeat the flag
@@ -34,6 +34,10 @@
 #                   InferenceService, BaseModel and ServingRuntime controllers,
 #                   which would otherwise churn against an empty local catalog.
 #                   Needs the manager component.
+#   --with-routing enable TrafficMap and HTTPRoute publication using
+#                   routing-values.yaml. Needs --multicluster-role control-plane.
+#                   Installs the HTTPRoute CRD before the manager starts; no
+#                   Gateway controller or HTTP serving is installed.
 #   --topology M    podgroup (default) | plugin | strict — where slice
 #                   co-location comes from. See render-runtimes.sh, and the
 #                   README on why strict + ome-scheduler wedges.
@@ -93,6 +97,7 @@ NO_NODES=0
 MC_ROLE=""
 WITH_ISVCS=0
 WITH_KUEUE=0
+WITH_ROUTING=0
 TOPOLOGY_MODE=""
 ALL_COMPONENTS="manager scheduler quota-manager"
 REQUESTED=""
@@ -123,7 +128,8 @@ while [ $# -gt 0 ]; do
     --topology) TOPOLOGY_MODE="$2"; shift 2 ;;
     --with-isvcs) WITH_ISVCS=1; shift ;;
     --with-kueue) WITH_KUEUE=1; shift ;;
-    -h|--help) sed -n '2,63p' "$0"; exit 0 ;;
+    --with-routing) WITH_ROUTING=1; shift ;;
+    -h|--help) sed -n '2,/^set -/ { /^set -/d; p; }' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -181,6 +187,11 @@ if [ -n "$MC_ROLE" ]; then
     echo "--multicluster-role needs the manager component; nothing else reads it" >&2; exit 2; }
 fi
 
+if [ "$WITH_ROUTING" -eq 1 ] && [ "$MC_ROLE" != control-plane ]; then
+  echo "--with-routing needs --multicluster-role control-plane" >&2
+  exit 2
+fi
+
 if [ "$NO_NODES" -eq 1 ] && [ "$WITH_ISVCS" -eq 1 ]; then
   echo "--with-isvcs has nowhere to place a pod with --no-nodes" >&2
   exit 2
@@ -209,10 +220,10 @@ SCHED_IMAGE="ome-scheduler:${TAG}"
 QUOTA_IMAGE="ome-quota-manager:${TAG}"
 k() { kubectl --context "$KCTX" "$@"; }
 
-# Helm 4 applies server-side, so its placeholder caBundle collides with the one
-# cert-manager's cainjector owns. Helm 3 has no such flag and needs none.
-FORCE_CONFLICTS=()
-helm version --short 2>/dev/null | grep -q '^v3' || FORCE_CONFLICTS=(--force-conflicts)
+# Client-side merging preserves cert-manager's webhook caBundle. Helm 4 needs
+# an explicit flag; Helm 3 already uses that apply mode.
+HELM_APPLY_ARGS=()
+helm version --short 2>/dev/null | grep -q '^v3' || HELM_APPLY_ARGS=(--server-side=false)
 
 echo "==> components: ${COMPONENTS}"
 
@@ -289,6 +300,15 @@ if [ "$WITH_MANAGER" -eq 1 ] || [ "$WITH_SCHEDULER" -eq 1 ]; then
   fi
 fi
 
+# The routing publisher watches HTTPRoutes from startup. Vendor the CRD from
+# the pinned Gateway API module before enabling that controller.
+if [ "$WITH_ROUTING" -eq 1 ]; then
+  echo "==> Gateway API HTTPRoute CRD"
+  make gateway-api-crds >/dev/null
+  k apply --server-side -f tests/integration/dep-crds/gateway-api/gateway.networking.k8s.io_httproutes.yaml >/dev/null
+  k wait --for=condition=Established crd/httproutes.gateway.networking.k8s.io --timeout=60s >/dev/null
+fi
+
 # ome-quota-manager reads Kueue's ResourceFlavors to decide which hardware class
 # a node's accelerators belong to; without them every chip comes back
 # unattributed and the reserved root reports no capacity at all. Only the CRDs
@@ -353,7 +373,7 @@ if [ "$WITH_QUOTA" -eq 1 ] && [ "$WITH_KUEUE" -eq 1 ]; then
     --set "controllerManager.manager.image.tag=${KUEUE_IMAGE##*:}" \
     --set controllerManager.manager.image.pullPolicy=Never \
     --set enableCertManager=false \
-    "${FORCE_CONFLICTS[@]+"${FORCE_CONFLICTS[@]}"}" --wait --timeout 300s >/dev/null
+    "${HELM_APPLY_ARGS[@]+"${HELM_APPLY_ARGS[@]}"}" --wait --timeout 300s >/dev/null
 
   # A ready pod is not a serving webhook, and --wait only knows about the pod.
   # Kueue generates its own certificate in process and its webhooks are
@@ -506,13 +526,16 @@ if [ "$WITH_MANAGER" -eq 1 ]; then
       --set ome.multicluster.config.placement.capacity.refreshInterval=10s
     )
   fi
+  if [ "$WITH_ROUTING" -eq 1 ]; then
+    HELM_ARGS+=(-f hack/kwok-sim/routing-values.yaml)
+  fi
 
   # Two passes. The chart registers failurePolicy=Fail webhooks and, in the same
   # apply, a ClusterServingRuntime those webhooks intercept — which cannot succeed
   # before the controller serves and cainjector has replaced the placeholder
   # caBundle. Pass 1 is expected to report that rejection.
   echo "==> OME controller (pass 1 of 2; the runtime rejection here is expected)"
-  helm upgrade --install ome charts/ome-resources/ "${HELM_ARGS[@]}" "${FORCE_CONFLICTS[@]+"${FORCE_CONFLICTS[@]}"}" >/dev/null 2>&1 || true
+  helm upgrade --install ome charts/ome-resources/ "${HELM_ARGS[@]}" "${HELM_APPLY_ARGS[@]+"${HELM_APPLY_ARGS[@]}"}" >/dev/null 2>&1 || true
   k -n "$OME_NS" rollout status deployment/ome-controller-manager --timeout=300s
 
   echo "==> wait for webhook cert and endpoints"
@@ -535,7 +558,7 @@ if [ "$WITH_MANAGER" -eq 1 ]; then
   # TLS accept are independent events, and pass 2 needs both.
   for attempt in 1 2 3 4 5 6; do
     if helm upgrade --install ome charts/ome-resources/ "${HELM_ARGS[@]}" \
-         "${FORCE_CONFLICTS[@]+"${FORCE_CONFLICTS[@]}"}" --wait --timeout 300s >/dev/null 2>&1; then
+         "${HELM_APPLY_ARGS[@]+"${HELM_APPLY_ARGS[@]}"}" --wait --timeout 300s >/dev/null 2>&1; then
       break
     fi
     [ "$attempt" -lt 6 ] || { echo "FATAL: ome-resources did not converge" >&2; exit 1; }
@@ -566,7 +589,7 @@ if [ "$WITH_SCHEDULER" -eq 1 ]; then
     --set scheduler.resources.requests.memory=256Mi \
     --set scheduler.resources.limits.cpu=1 \
     --set scheduler.resources.limits.memory=1Gi \
-    "${FORCE_CONFLICTS[@]+"${FORCE_CONFLICTS[@]}"}" --wait --timeout 300s >/dev/null
+    "${HELM_APPLY_ARGS[@]+"${HELM_APPLY_ARGS[@]}"}" --wait --timeout 300s >/dev/null
 fi
 
 if [ "$WITH_QUOTA" -eq 1 ]; then
@@ -593,7 +616,7 @@ if [ "$WITH_QUOTA" -eq 1 ]; then
     --set quotaManager.podAnnotations.kwok-sim/image-id="$(image_id "$QUOTA_IMAGE")" \
     --set "quotaManager.materialize.enrolledNamespaces={$(enrolled_namespaces_csv)}" \
     --set 'quotaManager.capacity.resources={google.com/tpu}' \
-    "${FORCE_CONFLICTS[@]+"${FORCE_CONFLICTS[@]}"}" --wait --timeout 300s >/dev/null
+    "${HELM_APPLY_ARGS[@]+"${HELM_APPLY_ARGS[@]}"}" --wait --timeout 300s >/dev/null
 
   # The AcceleratorQuota webhook is failurePolicy=Fail, and it gates the
   # controller's own creation of the reserved root as much as any hand-written

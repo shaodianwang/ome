@@ -478,10 +478,21 @@ transport, a member-issued credential, and a split taken against capacity the
 members derived from their own hardware rather than numbers a fixture wrote.
 
 ```sh
+export KUBECONFIG="$(mktemp -t ome-kwok-fleet-XXXXXX)"
 hack/kwok-sim/fleet-up.sh                                   # quota plane only
-hack/kwok-sim/fleet-up.sh --with-kueue --with-placement     # everything
+hack/kwok-sim/fleet-up.sh --with-kueue --with-placement      # placement + admission
+hack/kwok-sim/fleet-up.sh --with-kueue --with-routing        # also publish TrafficMaps
 hack/kwok-sim/fleet-status.sh                               # what landed where
 hack/kwok-sim/fleet-down.sh
+```
+
+Keep the dedicated kubeconfig for subsequent fleet commands and rebuilds. If
+the clusters already exist, populate that file before running the scripts:
+
+```sh
+for cluster in ome-quota-hub ome-quota-a ome-quota-b; do
+  kind export kubeconfig --name "$cluster" --kubeconfig "$KUBECONFIG"
+done
 ```
 
 The two members are deliberately unequal — two cubes against one, 128 chips
@@ -490,8 +501,9 @@ and a bug that handed both the fleet total is visible rather than plausible.
 
 ### What goes where
 
-Every flag reaches the members only; the hub's component set is fixed, because
-a management plane holds no silicon and schedules nothing.
+Component selection reaches the members only; the hub's component set is
+fixed, because a management plane holds no silicon and schedules nothing.
+`--with-routing` configures publication on the hub.
 
 | | hub `ome-quota-hub` | member `ome-quota-a` | member `ome-quota-b` |
 |---|---|---|---|
@@ -510,6 +522,7 @@ a management plane holds no silicon and schedules nothing.
 | placement grant on the SA | — | 🅿️ | 🅿️ |
 | `WorkloadCluster` CRs | ✅ `member-a`, `member-b` | — | — |
 | placement member namespace + capacity config | ✅ | — | — |
+| HTTPRoute CRD + TrafficMap publication | `--with-routing` | — | — |
 
 🅿️ `--with-placement`  🚦 `--with-kueue`
 
@@ -614,6 +627,48 @@ assuming one.
 kubectl --context kind-ome-quota-hub -n kwok-sim get isvc \
   -o custom-columns=NAME:.metadata.name,PHASE:.status.placement.phase,WINNER:.status.placement.cluster
 ```
+
+### `--with-routing`
+
+`--with-routing` implies `--with-placement` and enables the hub's TrafficMap
+controller and Gateway API publisher. It installs the HTTPRoute CRD from the
+Gateway API version pinned in `go.mod` before starting the manager. Keep this
+flag on subsequent `fleet-up.sh` invocations, including `--skip-build` runs;
+omitting it restores the chart's routing-disabled default.
+
+```sh
+# Use the dedicated fleet KUBECONFIG from above.
+hack/kwok-sim/fleet-up.sh --with-kueue --with-routing --skip-build
+kubectl --context kind-ome-quota-hub -n kwok-sim get trafficmaps,httproutes
+```
+
+[routing-values.yaml](routing-values.yaml) supplies the Helm settings under
+`ome.multicluster.config`: `routing.enabled=true`, publisher `gatewayapi`,
+global hostname template `{{.Name}}.{{.Namespace}}.routing.example.com`, Gateway
+reference `kwok-sim/local-gateway`, and backend port `8080`. The chart writes
+them into the hub's `ome/inferenceservice-config` ConfigMap, under
+`data.multicluster`, and rolls the manager when that configuration changes.
+Edit the values file to configure these settings for a different simulation.
+
+For a placed `place-all` ISVC, inspect the corresponding objects:
+
+```sh
+kubectl --context kind-ome-quota-hub -n kwok-sim get trafficmap place-all -o yaml
+kubectl --context kind-ome-quota-hub -n kwok-sim get httproute place-all-global -o yaml
+```
+
+The TrafficMap records each member's weight. Check `Published=True`,
+`status.observedTrafficMapGeneration == metadata.generation`, and that
+`spec.placementPlanID` matches the source ISVC's `status.placement.plan.id`
+before treating that plan as published. A ready member can carry positive
+weight while an unready member has weight zero. This exercises the publication
+acknowledgement used by placement transitions.
+
+This setup tests publication only: the Gateway reference is a test parent,
+and no Gateway controller, xDS publisher, or HTTP data plane is installed.
+`Published=True` confirms the routing objects were written, not that a gateway
+accepted them or that inference requests can be served. KWOK simulates pod
+readiness, so active HTTP probes and capacity polling stay disabled.
 
 ## What it is good for
 

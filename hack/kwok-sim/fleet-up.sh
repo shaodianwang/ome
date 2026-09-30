@@ -26,7 +26,7 @@
 #
 # Usage:
 #   hack/kwok-sim/fleet-up.sh [--skip-build] [--component NAME]... [--with-kueue]
-#                             [--with-placement] [--topology MODE]
+#                             [--with-placement] [--with-routing] [--topology MODE]
 #                             [--cubes A-SPEC;B-SPEC]
 #
 #   --cubes A;B     the silicon each member starts with, one spec per member,
@@ -71,12 +71,15 @@
 #                   Pair it with --with-kueue: a derived workload carries Kueue's
 #                   queue-name label, so without an admitting Kueue and a tree
 #                   its pods gate and never run. See fixtures/6*-placement-*.
+#   --with-routing enable TrafficMap and HTTPRoute publication on the hub;
+#                   implies --with-placement. Uses routing-values.yaml. No
+#                   Gateway controller or HTTP serving is installed.
 #   --topology M    podgroup (default) | plugin | strict, forwarded to each
 #                   member. Needs --with-placement, which is what puts a
 #                   scheduler there for the mode to mean anything.
 #   --skip-build    reuse the images already in the host docker daemon.
 #
-# Every flag above reaches the members only; the hub's component set is fixed.
+# Component selection reaches the members only; the hub's component set is fixed.
 # It runs the quota manager in management mode, which never reads or writes a
 # Kueue object — capacity derivation and the Kueue backend are both
 # workload-mode-only — so there is nothing there for Kueue to do. It schedules
@@ -117,6 +120,7 @@ SKIP_BUILD=0
 COMPONENTS=""
 WITH_KUEUE=0
 WITH_PLACEMENT=0
+WITH_ROUTING=0
 # Per-member silicon, "<member-a cubes>;<member-b cubes>". Deliberately unequal:
 # see --cubes above.
 DEFAULT_CUBES="4x4x4,4x4x4;4x4x4"
@@ -142,6 +146,7 @@ while [ $# -gt 0 ]; do
     --component) COMPONENTS="${COMPONENTS} $2"; shift 2 ;;
     --with-kueue) WITH_KUEUE=1; shift ;;
     --with-placement) WITH_PLACEMENT=1; shift ;;
+    --with-routing) WITH_ROUTING=1; WITH_PLACEMENT=1; shift ;;
     --topology) TOPOLOGY="$2"; shift 2 ;;
     --cubes) CUBES="$2"; shift 2 ;;
     --skip-build) SKIP_BUILD=1; shift ;;
@@ -160,7 +165,7 @@ while [ $# -gt 0 ]; do
     --no-scheduler)
       echo "$1 would subtract the component --with-placement adds; omit --with-placement instead" >&2
       exit 2 ;;
-    -h|--help) sed -n '2,77p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,/^set -/ { /^set -/d; p; }' "$0"; exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
 done
@@ -383,6 +388,7 @@ echo "==> hub: ome-manager in the control-plane role"
 OME_KWOK_CLUSTER="$HUB" hack/kwok-sim/up.sh \
   --cluster "$HUB" --component manager \
   --no-nodes --multicluster-role control-plane \
+  $([ "$WITH_ROUTING" -eq 1 ] && echo --with-routing) \
   $([ "$SKIP_BUILD" -eq 1 ] && echo --skip-build) >/dev/null
 
 echo "==> hub: the management-mode quota manager"
@@ -395,12 +401,10 @@ docker save "$QUOTA_IMAGE" -o "$TAR"
 "$KIND" load image-archive "$TAR" --name "$HUB" >/dev/null
 rm -f "$TAR"
 
-# Helm 4 applies server-side, and the component's own cert rotator owns the
-# webhook caBundle, so every upgrade after the first conflicts on that field.
-# Forcing hands it to helm, which blanks it until the rotator writes it back;
-# the wait below covers that window. Helm 3 merges client-side and needs neither.
-FORCE_CONFLICTS=""
-helm version --short 2>/dev/null | grep -q '^v3' || FORCE_CONFLICTS="--force-conflicts"
+# Client-side merging preserves the cert rotator's webhook caBundle. Helm 4
+# needs an explicit flag; Helm 3 already uses that apply mode.
+HELM_APPLY_ARGS=""
+helm version --short 2>/dev/null | grep -q '^v3' || HELM_APPLY_ARGS="--server-side=false"
 
 helm upgrade --install ome-quota-manager charts/ome-quota-manager/ \
   --kube-context "kind-${HUB}" --namespace "$OME_NS" --create-namespace \
@@ -415,7 +419,7 @@ helm upgrade --install ome-quota-manager charts/ome-quota-manager/ \
   --set quotaManager.projection.fieldManager="$PROJECTOR" \
   --set quotaManager.projection.defaultDistributionPolicy=Proportional \
   --set quotaManager.podAnnotations.kwok-sim/image-id="$(image_id "$QUOTA_IMAGE")" \
-  $FORCE_CONFLICTS --wait --timeout 300s >/dev/null
+  $HELM_APPLY_ARGS --wait --timeout 300s >/dev/null
 
 # The AcceleratorQuota webhook is failurePolicy=Fail, so a tree applied before
 # the rotator restores the caBundle is refused.
@@ -570,5 +574,17 @@ shows why the queue name matters: two tenants sharing one namespace, told apart
 only by the leaf each names. A LocalQueue is named for its leaf, so no single
 operator-wide default could address both -- which is why placement.localQueue
 is empty and each workload names its own.
+DONE
+fi
+
+if [ "$WITH_ROUTING" -eq 1 ]; then
+  cat <<DONE
+
+TrafficMap publication is enabled on the hub. Inspect a placed workload with:
+
+  kubectl --context kind-${HUB} -n kwok-sim get trafficmaps,httproutes
+
+Published=True confirms publication of routing objects. This simulator has no
+Gateway controller or HTTP serving. Keep --with-routing on fleet-up.sh reruns.
 DONE
 fi
