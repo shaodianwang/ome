@@ -42,6 +42,7 @@ vs. recreate updates.
 | Single-replica safe default | single_replica_kind |
 | Standalone InferenceReplica | standalone_replica_kind |
 | Standalone InferenceReplica from refs | standalone_replica_refs_kind |
+| InferenceService over a referenced replica | referenced_engine_kind |
 | In-place opt-in | inplace_kind |
 | Sequential | sequential_kind |
 | Independent | independent_kind |

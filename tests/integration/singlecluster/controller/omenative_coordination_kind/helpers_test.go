@@ -10,6 +10,7 @@ import (
 	"github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -59,6 +60,31 @@ func listPerRevisionServices(g gomega.Gomega, namespace string) []corev1.Service
 		}
 	}
 	return out
+}
+
+// =========================================================================
+// EndpointSlice assertions
+// =========================================================================
+
+// readyEndpointCount returns how many Ready endpoints the EndpointSlices of
+// one Service publish. kube-controller-manager builds the slices from the
+// Service selector and the matching pods' readiness, so the count is the
+// pods the Service routes to.
+func readyEndpointCount(g gomega.Gomega, namespace, serviceName string) int {
+	slices := &discoveryv1.EndpointSliceList{}
+	g.ExpectWithOffset(1, k8sClient.List(suiteCtx, slices,
+		client.InNamespace(namespace),
+		client.MatchingLabels{discoveryv1.LabelServiceName: serviceName},
+	)).To(gomega.Succeed())
+	ready := 0
+	for i := range slices.Items {
+		for _, endpoint := range slices.Items[i].Endpoints {
+			if endpoint.Conditions.Ready != nil && *endpoint.Conditions.Ready {
+				ready++
+			}
+		}
+	}
+	return ready
 }
 
 // =========================================================================
