@@ -249,6 +249,7 @@ func Dispatch(ctx context.Context, d DispatchDeps) (Outcome, error) {
 		PerRevisionPods:           readyRev[primary],
 		GroupTotalPerRevisionPods: groupPods,
 		GroupStableRevisionHashes: groupStable,
+		GroupReadyPerRevisionPods: readyRev,
 		SecondaryCapacityReady:    secondaryReady,
 		Secondaries:               secondaries,
 		Now:                       now,
@@ -573,11 +574,12 @@ func configuredComponents(g *v1beta1.RolloutGroup) []v1beta1.ComponentType {
 }
 
 // secondaryCapacityReady reports whether every NON-primary Component's canary
-// Instances have reached that Component's current-step newCount. The step
-// machine and external traffic run through the primary, but traffic must not
-// shift until EVERY Component's canary capacity is up — otherwise a Ready router
-// can advance while the engine/decoder canary pods are still coming up. True
-// when there are no secondaries. The step index mirrors EffectivePartition.
+// Instances have reached that Component's current-step staged count (its
+// newCount under the held floor). The step machine and external traffic run
+// through the primary, but traffic must not shift until EVERY Component's
+// canary capacity is up — otherwise a Ready router can advance while the
+// engine/decoder canary pods are still coming up. True when there are no
+// secondaries. The step index mirrors EffectivePartition.
 //
 // Each secondary gates on ITS OWN canary target hash (revision hashes are
 // per-Component, so the primary's hash never names a secondary's pods). A
@@ -636,7 +638,7 @@ func secondaryCapacityReady(ctx context.Context, reads client.Reader, isvc *v1be
 		}
 		readyInstances := revisions.readyTargetInstanceCount(observedPods[c])
 		readyCapacity := readyCapacityCount(readyPerRev[c][secHash], readyInstances)
-		if readyCapacity < resolveStepNewCount(step, componentReplicas(isvc, c)) {
+		if readyCapacity < stepStagedCount(step, componentReplicas(isvc, c)) {
 			ready = false
 		}
 	}

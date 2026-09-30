@@ -94,9 +94,13 @@ func applyGroupTraffic(in ReconcileInputs, weight int32) {
 }
 
 // applyGroupStableTraffic returns every secondary to its stable revision
-// alongside the primary's rollback write.
+// alongside the primary's rollback write. A member whose stable revision is
+// observed with no ready pod keeps its programmed split until one serves.
 func applyGroupStableTraffic(in ReconcileInputs) {
 	for c, m := range in.Secondaries {
+		if ready, observed := in.GroupReadyPerRevisionPods[c]; observed && ready[m.StableRevisionHash] == 0 {
+			continue
+		}
 		applyMemberTraffic(in.ISVC, c, memberStableWeights(m))
 	}
 }

@@ -198,8 +198,7 @@ func applyHolds(ctx context.Context, in ReconcileInputs, cs *v1beta1.CanaryStatu
 	if cs != nil && !in.RunActive {
 		emit(in.Recorder, in.ISVC, corev1.EventTypeWarning, EventReasonCanaryRunLost,
 			"%s canary has no pinned rollout run; holding at step %d until the run layer reopens or adopts it", in.Component, cs.CurrentStep)
-		step := plan.Steps[cs.CurrentStep]
-		partition := partitionForNewCount(in.DesiredReplicas, resolveStepNewCount(step, in.DesiredReplicas))
+		partition := stepPartition(plan.Steps[cs.CurrentStep], in.DesiredReplicas)
 		return cs, (&Result{Active: true, Partition: partition}).wake(in.Requeue), nil
 	}
 

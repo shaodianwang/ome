@@ -57,6 +57,11 @@ type ReconcileInputs struct {
 	// keyed by Component; the primary's is the identity the executor resolves
 	// itself. A member with none recorded is not waited on.
 	GroupStableRevisionHashes map[v1beta1.ComponentType]string
+	// GroupReadyPerRevisionPods counts each member's ready serving pods per
+	// revision hash, keyed by Component. A rollback moves a member's traffic
+	// onto its stable revision only when that revision has serving capacity;
+	// a member absent here is written on the primary's view alone.
+	GroupReadyPerRevisionPods map[v1beta1.ComponentType]map[string]int32
 	// SecondaryCapacityReady is true when every NON-primary component's canary
 	// Instances have reached that component's step newCount. The primary uses its
 	// exact complete-PodReady target Instance count. Single-component canaries
@@ -235,7 +240,8 @@ func (r *Result) wake(d time.Duration) *Result {
 // Reconcile advances the canary toward the declared plan, mutating isvc.Status
 // in-memory. No-op (Active=false) when spec.rollout.canary is unset. Per step it
 // performs capacity → traffic → pause, advancing on promotion; the final step
-// (TrafficWeight 100) drains and scales the stable revision down.
+// (TrafficWeight 100) shifts traffic off the stable revision, drains it, and
+// completes, which releases its last instance to roll.
 func Reconcile(ctx context.Context, in ReconcileInputs) (*Result, error) {
 	// Operator annotations are applied in status first and removed by the
 	// controller after the flush; the pass only records which ones it took,
@@ -331,8 +337,12 @@ func reconcile(ctx context.Context, in ReconcileInputs, take func(string)) (*Res
 	syncPromotedThrough(in, cs, take)
 	step := plan.Steps[cs.CurrentStep]
 
-	newCount := resolveStepNewCount(step, in.DesiredReplicas)
-	partition := partitionForNewCount(in.DesiredReplicas, newCount)
+	// The step's partition keeps the stable revision's last instance (the
+	// held floor) for as long as the canary is in flight, so the capacity a
+	// step stages, and its gate waits for, is what the remaining instances can
+	// reach.
+	partition := stepPartition(step, in.DesiredReplicas)
+	newCount := in.DesiredReplicas - partition
 
 	// Capacity gate: don't shift traffic until the canary pods are Ready — the
 	// primary's own newCount AND every secondary component's canary capacity (PD,
@@ -392,7 +402,9 @@ func reconcile(ctx context.Context, in ReconcileInputs, take func(string)) (*Res
 	weightBefore := cs.ObservedTrafficWeight
 	applyGroupTraffic(in, step.Traffic)
 
-	// Final step (TrafficWeight 100): drain the stable revision, then complete.
+	// Final step (TrafficWeight 100): shift traffic off the stable revision,
+	// hold its last instance through the drain window, then complete; the
+	// done sentinel releases that instance to roll.
 	if int(cs.CurrentStep) == len(plan.Steps)-1 {
 		// Anchor the drain window and the final gate to the moment 100%
 		// traffic actually shifts, not to step entry: on slow capacity the
@@ -416,12 +428,12 @@ func reconcile(ctx context.Context, in ReconcileInputs, take func(string)) (*Res
 				return reconcileRollback(in, cs), nil
 			case decFailed:
 				parkFailed(in.ISVC, in.Component, cs, v1beta1.CanaryFailureAnalysisStalled, in.Now)
-				return (&Result{Active: true, Partition: 0}).wake(in.ParkedRequeue), nil
+				return (&Result{Active: true, Partition: partition}).wake(in.ParkedRequeue), nil
 			case decHold:
 				// A held gate reads Paused on every step: the phase names the
 				// wait, and Promoting is the drain that follows the gate.
 				setPhase(in.ISVC, in.Component, v1beta1.RolloutPhasePaused)
-				return (&Result{Active: true, Partition: 0}).wake(stepWake(in, step)), nil
+				return (&Result{Active: true, Partition: partition}).wake(stepWake(in, step)), nil
 			case decAdvance:
 				// gate passed at 100% — fall through to the drain window + completion.
 			}
@@ -441,8 +453,9 @@ func reconcile(ctx context.Context, in ReconcileInputs, take func(string)) (*Res
 			// stable is the revision each superseded.
 			recordPromotedRevisions(in, cs.StableRevisionHash)
 			// Mark done (sentinel), don't clear: keeps EffectivePartition at
-			// partition 0 so the old revision drains instead of being re-held by
-			// a step-0 partition. ObservedTrafficWeight stays 100 (all on canary).
+			// partition 0 so the held stable instance rolls now that traffic
+			// has left it and drained, instead of being re-held by a step-0
+			// partition. ObservedTrafficWeight stays 100 (all on canary).
 			cs.CurrentStep = int32(len(plan.Steps))
 			cs.ObservedTrafficWeight = 100
 			// The canary revision is the stable revision now: drop the pre-canary
@@ -450,7 +463,7 @@ func reconcile(ctx context.Context, in ReconcileInputs, take func(string)) (*Res
 			cs.StableRevisionHash = ""
 			return &Result{Active: true, Complete: true, Partition: 0}, nil
 		}
-		return (&Result{Active: true, Partition: 0}).wake(in.Requeue), nil
+		return (&Result{Active: true, Partition: partition}).wake(in.Requeue), nil
 	}
 
 	// Intermediate step: serving a split. Anchor the pause to the moment the split
@@ -497,8 +510,7 @@ func pausedResult(in ReconcileInputs, cs *v1beta1.CanaryStatus, plan *v1beta1.Gr
 	if cs.RolledBackRevisionHash != "" {
 		return (&Result{Active: true, RolledBack: true}).wake(in.Requeue)
 	}
-	step := plan.Steps[cs.CurrentStep]
-	partition := partitionForNewCount(in.DesiredReplicas, resolveStepNewCount(step, in.DesiredReplicas))
+	partition := stepPartition(plan.Steps[cs.CurrentStep], in.DesiredReplicas)
 	return (&Result{Active: true, Partition: partition}).wake(in.Requeue)
 }
 
@@ -538,11 +550,12 @@ func stableHashFor(cs *v1beta1.CanaryStatus, pods map[string]int32, rejectedHash
 }
 
 // reconcileRollback drives the component back to the stable revision and holds
-// there, rejecting cs.RolledBackRevisionHash. Traffic goes 100% to stable; the
-// controller reads cs.RolledBackRevisionHash and makes the IR roll every Instance
-// back to the stable ControllerRevision, so the rejected-revision pods drain.
-// While they drain → RollingBack; once gone → RolledBack (held until a different
-// target appears).
+// there, rejecting cs.RolledBackRevisionHash. Traffic goes 100% to stable once
+// stable has serving capacity to take it; the controller reads
+// cs.RolledBackRevisionHash and makes the IR roll every Instance back to the
+// stable ControllerRevision, so the rejected-revision pods drain. While they
+// drain → RollingBack; once gone → RolledBack (held until a different target
+// appears).
 func reconcileRollback(in ReconcileInputs, cs *v1beta1.CanaryStatus) *Result {
 	stableHash := stableHashFor(cs, in.PerRevisionPods, cs.RolledBackRevisionHash)
 	// The rejected entry is written at 0% (dropped), so only the stable
@@ -553,7 +566,12 @@ func reconcileRollback(in ReconcileInputs, cs *v1beta1.CanaryStatus) *Result {
 	if stableHash == in.StableRevisionHash {
 		stableProtocol = in.StablePairingProtocol
 	}
-	applyTraffic(in.ISVC, in.Component, cs.RolledBackRevisionHash, stableHash, "", stableProtocol, 0)
+	// Traffic moves only onto capacity that serves: a stable revision with
+	// no ready pod keeps the programmed split until the revert brings one
+	// back, rather than being handed traffic it cannot carry.
+	if in.PerRevisionPods[stableHash] > 0 {
+		applyTraffic(in.ISVC, in.Component, cs.RolledBackRevisionHash, stableHash, "", stableProtocol, 0)
+	}
 	applyGroupStableTraffic(in)
 	// RolledBack is the revert-COMPLETE phase, so it must wait out every
 	// non-stable revision — not just the rejected one. A retargeted canary

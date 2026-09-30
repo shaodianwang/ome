@@ -136,16 +136,18 @@ func TestEffectivePartition(t *testing.T) {
 		t.Fatalf("step0: want partition 2, got %v ok=%v", p, ok)
 	}
 
-	// Advance to the final step → 100% new → partition 0.
+	// Advance to the final step → 100% new, less the held floor: the last
+	// stable instance stays until the cutover completes → partition 1.
 	isvc.Status.Canary = &v1beta1.CanaryStatus{CurrentStep: 1}
 	p, ok = EffectivePartition(isvc, v1beta1.EngineComponent, 4)
-	if !ok || p == nil || *p != 0 {
-		t.Fatalf("final: want partition 0, got %v ok=%v", p, ok)
+	if !ok || p == nil || *p != 1 {
+		t.Fatalf("final: want partition 1, got %v ok=%v", p, ok)
 	}
 
 	// Done sentinel (CurrentStep == len(steps)) → partition 0 (all on the canary
-	// revision, old drains). A finished canary must NOT re-default to step 0's
-	// partition, which would hold instances on the old revision after completion.
+	// revision, the held instance rolls). A finished canary must NOT re-default
+	// to a step's partition, which would hold instances on the old revision
+	// after completion.
 	isvc.Status.Canary = &v1beta1.CanaryStatus{CurrentStep: 2}
 	p, ok = EffectivePartition(isvc, v1beta1.EngineComponent, 4)
 	if !ok || p == nil || *p != 0 {

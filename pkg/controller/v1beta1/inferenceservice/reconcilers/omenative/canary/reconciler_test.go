@@ -133,7 +133,8 @@ func TestReconcile_CapacityUsesReadyInstanceCount(t *testing.T) {
 		readyInstances int32
 	}{
 		{name: "half-capacity-instance-shortfall", step: 0, readyPods: 16, readyInstances: 3},
-		{name: "full-capacity-instance-shortfall", step: 1, readyPods: 16, readyInstances: 7},
+		// The final step stages every instance but the held stable one: 7 of 8.
+		{name: "full-capacity-instance-shortfall", step: 1, readyPods: 16, readyInstances: 6},
 		{name: "pod-readiness-shortfall", step: 0, readyPods: 3, readyInstances: 8},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
