@@ -55,13 +55,16 @@ var _ = ginkgo.Describe("OMENative auto-relocation on stuck Instance (KIND)", gi
 		workers := schedulableWorkerNodes(Default)
 		Expect(len(workers)).To(BeNumerically(">=", 2),
 			"relocation needs a second schedulable worker; got %v", workers)
-		failNode, spareNode := workers[0], workers[1]
+		failNode, spareNodes := workers[0], workers[1:]
 
 		configureFastDisposition()
 
-		// Cordon the spare so the first pod deterministically lands on
-		// the failing node. cordonNode's cleanup uncordons on any exit.
-		cordonNode(spareNode)
+		// Cordon every other worker so the first pod deterministically
+		// lands on the failing node whatever the worker count or the
+		// scheduler. cordonNode's cleanup uncordons on any exit.
+		for _, node := range spareNodes {
+			cordonNode(node)
+		}
 
 		fix := newCoordFixture(ns.Name, WithISVCName(isvcName),
 			WithoutDecoder(),
@@ -81,7 +84,7 @@ var _ = ginkgo.Describe("OMENative auto-relocation on stuck Instance (KIND)", gi
 			pod := &corev1.Pod{}
 			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKey{Namespace: ns.Name, Name: podName}, pod)).To(Succeed())
 			g.Expect(pod.Spec.NodeName).To(Equal(failNode),
-				"initial placement must hit the failing node (spare is cordoned)")
+				"initial placement must hit the failing node (every spare is cordoned)")
 			g.Expect(pod.Status.Phase).To(Equal(corev1.PodRunning),
 				"the node-scoped fault must leave the container Running (no kubelet waiting reason)")
 			stuckUID = pod.UID
@@ -93,7 +96,9 @@ var _ = ginkgo.Describe("OMENative auto-relocation on stuck Instance (KIND)", gi
 
 		// Give the rebuild somewhere off-suspect to land BEFORE the
 		// deadline disposition fires.
-		setNodeUnschedulable(spareNode, false)
+		for _, node := range spareNodes {
+			setNodeUnschedulable(node, false)
+		}
 
 		ginkgo.By("waiting for the terminal AutoRecover relocation directive in the audit ledger")
 		Eventually(func(g Gomega) {

@@ -52,13 +52,16 @@ var _ = ginkgo.Describe("OMENative auto-relocation multi-Instance isolation (KIN
 		workers := schedulableWorkerNodes(Default)
 		Expect(len(workers)).To(BeNumerically(">=", 2),
 			"relocation needs a second schedulable worker; got %v", workers)
-		failNode, spareNode := workers[0], workers[1]
+		failNode, spareNodes := workers[0], workers[1:]
 
 		configureFastDisposition()
 
-		// Cordon the spare so BOTH pods deterministically land on the
-		// failing node (only Instance 0's pod breaks there).
-		cordonNode(spareNode)
+		// Cordon every other worker so BOTH pods deterministically land
+		// on the failing node whatever the worker count or the scheduler
+		// (only Instance 0's pod breaks there).
+		for _, node := range spareNodes {
+			cordonNode(node)
+		}
 
 		fix := newCoordFixture(ns.Name, WithISVCName(isvcName),
 			WithoutDecoder(),
@@ -104,7 +107,7 @@ var _ = ginkgo.Describe("OMENative auto-relocation multi-Instance isolation (KIN
 					continue
 				}
 				g.Expect(p.Spec.NodeName).To(Equal(failNode),
-					"sibling pod must share the failing node (spare is cordoned)")
+					"sibling pod must share the failing node (every spare is cordoned)")
 				siblingName, siblingUID = p.Name, p.UID
 			}
 			g.Expect(siblingName).NotTo(BeEmpty(), "expected a healthy sibling pod")
@@ -112,7 +115,9 @@ var _ = ginkgo.Describe("OMENative auto-relocation multi-Instance isolation (KIN
 
 		// Give the rebuild somewhere off-suspect to land BEFORE the
 		// deadline disposition fires.
-		setNodeUnschedulable(spareNode, false)
+		for _, node := range spareNodes {
+			setNodeUnschedulable(node, false)
+		}
 
 		// Standing isolation invariant, threaded through every poll
 		// below: the healthy sibling is never torn down or recreated
