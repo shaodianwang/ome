@@ -26,7 +26,7 @@ func RenderingConfig(cm *corev1.ConfigMap) (*InferenceServicesConfig, *DeployCon
 			return nil, nil, fmt.Errorf("unable to parse model cache config json: %w", err)
 		}
 	}
-	deploy, err := parseDeployConfig(cm)
+	deploy, err := ParseDeployConfig(cm)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -39,5 +39,5 @@ func DeploymentConfig(cm *corev1.ConfigMap) (*DeployConfig, error) {
 	if cm == nil || strings.TrimSpace(cm.Data[DeployConfigName]) == "null" {
 		return nil, fmt.Errorf("deploy configuration must be an object")
 	}
-	return parseDeployConfig(cm)
+	return ParseDeployConfig(cm)
 }
