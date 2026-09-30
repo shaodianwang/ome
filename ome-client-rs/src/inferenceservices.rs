@@ -44,6 +44,12 @@ pub struct InferenceServiceSpec {
     pub model: Option<InferenceServiceModel>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<InferenceServicePlacement>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "replicaRefs"
+    )]
+    pub replica_refs: Option<InferenceServiceReplicaRefs>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rollout: Option<InferenceServiceRollout>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3207,6 +3213,16 @@ pub struct InferenceServicePlacementSplit {
     pub replicas: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spread: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct InferenceServiceReplicaRefs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decoder: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
