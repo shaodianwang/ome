@@ -147,8 +147,8 @@ KIND_SPEC_GROUPS = (
         "bluegreen_revision_status", "inplace_maxunavailable",
     )),
     ("canary-rollouts", "Canary rollouts", (
-        "canary_secondary_only", "rolloutpolicy_run", "canary_per_unit",
-        "policyref_canary_coordination",
+        "canary_retarget_rollback", "canary_secondary_only", "rolloutpolicy_run",
+        "canary_per_unit", "policyref_canary_coordination",
     )),
     ("canary-lifecycle", "Canary lifecycle", (
         "canary_lifecycle_promote", "canary_lifecycle_pausefreeze",
@@ -236,19 +236,7 @@ KIND_SPEC_GROUPS = (
 # on the day after `expires`: an expired quarantine blocks the build until
 # someone fixes the spec or extends the entry with a reason. To un-quarantine,
 # delete the entry and put the stem back in its group above, in the fix PR.
-KIND_QUARANTINE: list[dict[str, str]] = [
-    {
-        "spec": "canary_retarget_rollback_kind_test",
-        "owner": "slin1237",
-        "expires": "2026-10-04",
-        "reason": (
-            "rolled-back hold wedges intermittently: the InferenceReplica spec "
-            "is rewritten every pass, so ObservedGeneration never catches "
-            "Generation and the canary executor's fresh-snapshot gate starves "
-            "before it can write RolledBack; the revert itself converges"
-        ),
-    },
-]
+KIND_QUARANTINE: list[dict[str, str]] = []
 
 # Scheduler-twin soft list: the escape hatch that keeps the gating twins
 # meaningful, the way KIND_QUARANTINE does for a spec. A group whose twin is
