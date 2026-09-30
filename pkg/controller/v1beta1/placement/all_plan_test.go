@@ -2,6 +2,7 @@ package placement
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"testing"
 
@@ -255,45 +256,83 @@ func TestAllPlanWholeHomeBudget(t *testing.T) {
 	}
 }
 
-func TestAllIncompleteInventoryCannotRetarget(t *testing.T) {
-	f := newBackendFixture(t, v1beta1.PlacementModeAll)
-	delete(f.connections.m, "member-b")
-	if err := f.reconciler.Get(t.Context(), client.ObjectKeyFromObject(f.source), f.source); err != nil {
-		t.Fatal(err)
-	}
-	f.source.Spec.Engine.MinReplicas = ptr.To(3)
-	if err := f.reconciler.Update(t.Context(), f.source); err != nil {
-		t.Fatal(err)
-	}
-	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(f.source)}
-	if _, err := f.reconciler.Reconcile(t.Context(), request); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.reconciler.Get(t.Context(), request.NamespacedName, f.source); err != nil {
-		t.Fatal(err)
-	}
-	original := f.source.Status.Placement.Plan.AdoptionDigest
-	if original == "" {
-		t.Fatal("unreachable home inventory was treated as complete")
-	}
-	// Add a destination after the original intent has been persisted.
-	wc := readyWC("member-c", nil)
-	if err := f.reconciler.Create(t.Context(), wc); err != nil {
-		t.Fatal(err)
-	}
-	worker := emptyWorker(f.reconciler.Scheme)
-	f.connections.m[wc.Name] = workloadcluster.NewNeverCachingClient(worker)
-	if _, err := f.reconciler.Reconcile(t.Context(), request); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.reconciler.Get(t.Context(), request.NamespacedName, f.source); err != nil {
-		t.Fatal(err)
-	}
-	if diff := cmp.Diff(original, f.source.Status.Placement.Plan.AdoptionDigest); diff != "" {
-		t.Fatal(diff)
-	}
-	if err := worker.Get(t.Context(), request.NamespacedName, &v1beta1.InferenceService{}); !apierrors.IsNotFound(err) {
-		t.Fatalf("retarget created a destination before inventory completed: %v", err)
+func TestAllInventoryRecoveryAcceptsRetarget(t *testing.T) {
+	for _, failure := range []string{"disconnected member", "unreadable member inventory"} {
+		t.Run(failure, func(t *testing.T) {
+			f := newBackendFixture(t, v1beta1.PlacementModeAll)
+			connected := f.connections.m["member-b"]
+			if failure == "disconnected member" {
+				delete(f.connections.m, "member-b")
+			} else {
+				unreadable := interceptor.NewClient(f.workers["member-b"], interceptor.Funcs{List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					if _, ok := list.(*v1beta1.InferenceReplicaList); ok {
+						return errors.New("member inventory unavailable")
+					}
+					return cl.List(ctx, list, opts...)
+				}})
+				f.connections.m["member-b"] = workloadcluster.NewNeverCachingClient(unreadable)
+			}
+			if err := f.reconciler.Get(t.Context(), client.ObjectKeyFromObject(f.source), f.source); err != nil {
+				t.Fatal(err)
+			}
+			f.source.Spec.Engine.MinReplicas = ptr.To(3)
+			if err := f.reconciler.Update(t.Context(), f.source); err != nil {
+				t.Fatal(err)
+			}
+			initial := f.reconcile(t)
+			original := initial.Status.Placement.Plan.AdoptionDigest
+			if original == "" {
+				t.Fatal("unknown home inventory was treated as complete")
+			}
+			if err := f.workers["member-a"].Get(t.Context(), client.ObjectKeyFromObject(f.source), &v1beta1.InferenceService{}); err != nil {
+				t.Fatalf("independent home was not provisioned: %v", err)
+			}
+			wc := readyWC("member-c", nil)
+			if err := f.reconciler.Create(t.Context(), wc); err != nil {
+				t.Fatal(err)
+			}
+			worker := emptyWorker(f.reconciler.Scheme)
+			f.connections.m[wc.Name] = workloadcluster.NewNeverCachingClient(worker)
+			held := f.reconcile(t)
+			if diff := cmp.Diff(original, held.Status.Placement.Plan.AdoptionDigest); diff != "" {
+				t.Fatal(diff)
+			}
+			if err := worker.Get(t.Context(), client.ObjectKeyFromObject(f.source), &v1beta1.InferenceService{}); !apierrors.IsNotFound(err) {
+				t.Fatalf("retarget created a destination before inventory completed: %v", err)
+			}
+
+			f.connections.m["member-b"] = connected
+			recovered := f.reconcile(t)
+			if diff := cmp.Diff("", recovered.Status.Placement.Plan.AdoptionDigest); diff != "" {
+				t.Fatalf("inventory hold survived recovery (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(int64(9), recovered.Status.Placement.Plan.AssignedReplicas); diff != "" {
+				t.Fatal(diff)
+			}
+			got := map[string]v1beta1.CandidateAllocationStatus{}
+			for _, candidate := range recovered.Status.Placement.Candidates {
+				allocation := candidate.Allocation
+				if allocation == nil || allocation.DesiredHome == nil {
+					t.Fatalf("%s has no desired home policy", candidate.Cluster)
+				}
+				if diff := cmp.Diff(recovered.Status.Placement.Plan.InputDigest, allocation.DesiredHome.InputDigest); diff != "" {
+					t.Fatal(diff)
+				}
+				got[candidate.Cluster] = v1beta1.CandidateAllocationStatus{
+					OriginalReplicas: allocation.OriginalReplicas, CurrentReplicas: allocation.CurrentReplicas,
+					DesiredReplicas: allocation.DesiredReplicas, InventoryPending: allocation.InventoryPending,
+					HomeInputsPending: allocation.HomeInputsPending,
+				}
+			}
+			want := map[string]v1beta1.CandidateAllocationStatus{
+				"member-a": {CurrentReplicas: 3, DesiredReplicas: 3},
+				"member-b": {DesiredReplicas: 3},
+				"member-c": {DesiredReplicas: 3},
+			}
+			if diff := cmp.Diff(want, got); diff != "" {
+				t.Fatalf("recovered plan changed its original budget (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 
