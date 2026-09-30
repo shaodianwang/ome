@@ -5,7 +5,8 @@
 // a single-pod Instance has one slice per pod-naming ordinal, so a surge pod
 // gets its own slice while the pod it replaces keeps its own. A slot's pods
 // are created only once its slice is ready, and a node selector on the
-// slice's name confines them to it.
+// slice's name confines them to it. A ready slice that no pod holds, with a
+// host its pods cannot be scheduled on, is released and provisioned again.
 //
 // Slices are cluster-scoped, so no owner reference collects them. The owner
 // UID label alone makes a slice an owner's: a slice without it is never
@@ -288,6 +289,21 @@ func (p *Provisioner) Pinned(pods []*corev1.Pod) map[string]struct{} {
 		}
 	}
 	return pinned
+}
+
+// Held returns the names of the slices that pods not being deleted are
+// confined to: the slices a pod still runs, or may yet run, on.
+func (p *Provisioner) Held(pods []*corev1.Pod) map[string]struct{} {
+	held := map[string]struct{}{}
+	for _, pod := range pods {
+		if pod == nil || pod.DeletionTimestamp != nil || query.IsTerminalPod(pod) {
+			continue
+		}
+		if name := pod.Spec.NodeSelector[p.cfg.NodeLabels.Slice]; name != "" {
+			held[name] = struct{}{}
+		}
+	}
+	return held
 }
 
 // Fits reports whether s is the slice Ensure places slot's pods on for d.

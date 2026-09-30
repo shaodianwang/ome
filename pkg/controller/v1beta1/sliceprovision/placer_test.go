@@ -18,22 +18,25 @@ import (
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
-// placerFixture is the slice store, the node store, and the event sink a
-// reconcile pass's Placer works against.
+// placerFixture is the slice store, the node store, the owner's pods, and
+// the event sink a reconcile pass's Placer works against.
 type placerFixture struct {
 	slices    client.WithWatch
 	nodes     client.WithWatch
 	p         *Provisioner
 	recorder  *record.FakeRecorder
 	nodeLists *int
+	// owned are the owner's pods; podReads counts their reads.
+	owned    *[]*corev1.Pod
+	podReads *int
 }
 
 // newPlacerFixture serves nodes from a store holding only the given nodes,
-// counting each list.
+// counting each list. The owner has no pods.
 func newPlacerFixture(t *testing.T, nodes ...client.Object) placerFixture {
 	t.Helper()
 	slices := newFakeClient()
-	var lists int
+	var lists, reads int
 	return placerFixture{
 		slices: slices,
 		nodes: fake.NewClientBuilder().WithObjects(nodes...).WithInterceptorFuncs(interceptor.Funcs{
@@ -45,6 +48,8 @@ func newPlacerFixture(t *testing.T, nodes ...client.Object) placerFixture {
 		p:         newProvisioner(t, slices, testOwner),
 		recorder:  record.NewFakeRecorder(16),
 		nodeLists: &lists,
+		owned:     &[]*corev1.Pod{},
+		podReads:  &reads,
 	}
 }
 
@@ -54,7 +59,30 @@ func provisioning(t *testing.T) placerFixture {
 	return newPlacerFixture(t, provisionOnlyNode("node-a", "tpu-a"))
 }
 
-func (f placerFixture) placer() *Placer { return NewPlacer(f.p, f.nodes, f.recorder) }
+func (f placerFixture) placer() *Placer { return NewPlacer(f.p, f.nodes, f.pods, f.recorder) }
+
+func (f placerFixture) pods(context.Context) ([]*corev1.Pod, error) {
+	*f.podReads++
+	return *f.owned, nil
+}
+
+// addNodes adds the nodes to the node store.
+func (f placerFixture) addNodes(t *testing.T, nodes ...*corev1.Node) {
+	t.Helper()
+	for _, n := range nodes {
+		if err := f.nodes.Create(context.Background(), n); err != nil {
+			t.Fatalf("add node %s: %v", n.Name, err)
+		}
+	}
+}
+
+// own gives the owner the pods.
+func (f placerFixture) own(pods ...*corev1.Pod) { *f.owned = pods }
+
+// onSlice is a running pod confined to slice name.
+func onSlice(podName, name string) *corev1.Pod {
+	return pod(podName, map[string]string{keySlice: name}, corev1.PodRunning)
+}
 
 // events drains the warnings recorded so far.
 func (f placerFixture) events() []string {
@@ -162,6 +190,7 @@ func TestPlaceConfinesThePodOnceItsSliceIsReady(t *testing.T) {
 		t.Fatalf("Pending = %q, %v; want the slice named", reason, held)
 	}
 
+	f.addNodes(t, sliceNode("node-b", name))
 	f.update(t, name, withState("ACTIVE", ""))
 	selector, placed := place(t, f.placer(), input, inst, workload.RunnerDefault, 1)
 	if !placed {
@@ -175,6 +204,9 @@ func TestPlaceConfinesThePodOnceItsSliceIsReady(t *testing.T) {
 	}
 	if got := f.events(); len(got) != 0 {
 		t.Fatalf("events = %v, want none", got)
+	}
+	if *f.podReads != 0 {
+		t.Fatalf("read pods %d times, want none for a slice whose hosts can take pods", *f.podReads)
 	}
 }
 
@@ -210,8 +242,8 @@ func TestPlaceGivesAGangOnePlacementPerPass(t *testing.T) {
 	if !placedLeader || !placedWorker || !cmp.Equal(leader, worker) {
 		t.Fatalf("members placed %v %v on %v and %v, want both on the one slice", placedLeader, placedWorker, leader, worker)
 	}
-	if *f.nodeLists != 2 {
-		t.Fatalf("listed nodes %d times over two passes, want once per pass", *f.nodeLists)
+	if *f.nodeLists != 3 {
+		t.Fatalf("listed nodes %d times over two passes, want the demand resolved once per pass and the ready slice's hosts vetted once", *f.nodeLists)
 	}
 }
 
@@ -369,8 +401,8 @@ func TestPlacerSweep(t *testing.T) {
 	if _, placed := place(t, pl, input, singlePod(9), workload.RunnerDefault, 0); !placed {
 		t.Fatal("Place withheld a pod whose slice is ready")
 	}
-	var calls int
-	if err := pl.Sweep(context.Background(), input, plan, pinnedSet(&calls, seed["scaled away, but pinned"].GetName())); err != nil {
+	f.own(onSlice("pinning", seed["scaled away, but pinned"].GetName()))
+	if err := pl.Sweep(context.Background(), input, plan); err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}
 	for key, want := range map[string]bool{
@@ -396,8 +428,7 @@ func TestPlacerSweepKeepsNothingForAnInvalidDemand(t *testing.T) {
 	f := provisioning(t)
 	f.seed(t, stored(t, f.p, demand(t, "2x2x1"), Slot{}))
 	input := placerInput(podSpec("tpu-a", "2x2x2", 4), nil)
-	var calls int
-	if err := f.placer().Sweep(context.Background(), input, workload.ComponentPlan{Instances: []workload.InstancePlan{singlePod(0)}}, pinnedSet(&calls)); err != nil {
+	if err := f.placer().Sweep(context.Background(), input, workload.ComponentPlan{Instances: []workload.InstancePlan{singlePod(0)}}); err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}
 	if held, err := f.p.Holds(context.Background()); err != nil || held {
@@ -414,8 +445,7 @@ func TestPlacerSweepReleasesNothingWhenADemandCannotBeRead(t *testing.T) {
 	stale := stored(t, f.p, demand(t, "2x2x1"), Slot{Instance: 5})
 	f.seed(t, stale)
 	input := placerInput(podSpec("tpu-a", "2x2x1", 4), nil)
-	var calls int
-	err := f.placer().Sweep(context.Background(), input, workload.ComponentPlan{Instances: []workload.InstancePlan{singlePod(0)}}, pinnedSet(&calls))
+	err := f.placer().Sweep(context.Background(), input, workload.ComponentPlan{Instances: []workload.InstancePlan{singlePod(0)}})
 	if !errors.Is(err, boom) {
 		t.Fatalf("Sweep error = %v, want the node read's", err)
 	}
@@ -484,17 +514,170 @@ func TestPlacerSweepKeepsSlicesAcrossSliceStates(t *testing.T) {
 		stored(t, f.p, d, Slot{Instance: 1}, withState("FAILED", "")),
 	)
 	input := placerInput(podSpec("tpu-a", "2x2x1", 4), nil)
-	var calls int
 	plan := workload.ComponentPlan{Instances: []workload.InstancePlan{singlePod(0), singlePod(1)}}
-	if err := f.placer().Sweep(context.Background(), input, plan, pinnedSet(&calls)); err != nil {
+	if err := f.placer().Sweep(context.Background(), input, plan); err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}
-	if calls != 0 {
-		t.Fatalf("Sweep read pins %d times, want none: every slice is wanted", calls)
+	if *f.podReads != 0 {
+		t.Fatalf("Sweep read pods %d times, want none: every slice is wanted", *f.podReads)
 	}
 	for _, slot := range []Slot{{}, {Instance: 1}} {
 		if _, found := getSlice(t, f.slices, f.p.Name(slot)); !found {
 			t.Errorf("slice for %+v released while its slot is planned", slot)
 		}
+	}
+}
+
+// A ready slice that no pod holds cannot start its slot on a host no pod can
+// be scheduled on: its pods are withheld and reported, Sweep releases it, and
+// the next pass provisions the slot again.
+func TestPlaceReplacesASliceWithAnUnavailableHost(t *testing.T) {
+	f := provisioning(t)
+	name := f.p.Name(Slot{})
+	f.seed(t, stored(t, f.p, demand(t, "2x2x1"), Slot{}, withState("ACTIVE", "")))
+	f.addNodes(t, sliceNode("node-b", name, cordoned))
+	old, _ := getSlice(t, f.slices, name)
+	input := placerInput(podSpec("tpu-a", "2x2x1", 4), nil)
+	plan := workload.ComponentPlan{Instances: []workload.InstancePlan{singlePod(0)}}
+
+	pl := f.placer()
+	for range 2 {
+		if selector, placed := place(t, pl, input, singlePod(0), workload.RunnerDefault, 0); placed || selector != nil {
+			t.Fatalf("Place = %v, %v; want the pod withheld from a slice with a cordoned host", selector, placed)
+		}
+	}
+	got := f.events()
+	if len(got) != 1 || !strings.Contains(got[0], string(EventReasonSliceHostUnavailable)) ||
+		!strings.Contains(got[0], "instance=0") || !strings.Contains(got[0], "node node-b is cordoned") {
+		t.Fatalf("events = %v, want one %s warning naming the Instance and the host", got, EventReasonSliceHostUnavailable)
+	}
+	for _, p := range []*Placer{pl, f.placer()} {
+		if reason, held := pending(t, p, input, singlePod(0), 0); !held || !strings.Contains(reason, name) || !strings.Contains(reason, "node node-b is cordoned") {
+			t.Fatalf("Pending = %q, %v; want the slice and its host named", reason, held)
+		}
+	}
+	if err := pl.Sweep(context.Background(), input, plan); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if _, found := getSlice(t, f.slices, name); found {
+		t.Fatal("Sweep kept a slice its slot cannot start on")
+	}
+
+	if _, placed := place(t, f.placer(), input, singlePod(0), workload.RunnerDefault, 0); placed {
+		t.Fatal("Place placed a pod on a slice it just created")
+	}
+	fresh, found := getSlice(t, f.slices, name)
+	if !found || fresh.GetUID() == old.GetUID() {
+		t.Fatalf("slice %s found = %v; want the slot provisioned again", name, found)
+	}
+}
+
+// A slice a pod holds is left to the scheduler: the pods its slot still needs
+// may fit on the hosts that can take them.
+func TestPlaceLeavesAHeldSliceToTheScheduler(t *testing.T) {
+	f := provisioning(t)
+	name := f.p.Name(Slot{})
+	f.seed(t, stored(t, f.p, demand(t, "2x2x2"), Slot{}, withState("ACTIVE", "")))
+	f.addNodes(t, sliceNode("node-b", name, cordoned), sliceNode("node-c", name))
+	f.own(onSlice("leader", name))
+	spec := podSpec("tpu-a", "2x2x2", 4)
+	input := placerInput(spec, spec.DeepCopy())
+	inst := leaderWorkers(0, 1)
+
+	pl := f.placer()
+	selector, placed := place(t, pl, input, inst, workload.RunnerWorker, 0)
+	if !placed {
+		t.Fatal("Place withheld a pod from a slice a pod holds")
+	}
+	if diff := cmp.Diff(map[string]string{keySlice: name}, selector); diff != "" {
+		t.Fatalf("Place node selector mismatch (-want +got):\n%s", diff)
+	}
+	if reason, held := pending(t, pl, input, inst, 0); held {
+		t.Fatalf("Pending = %q, want nothing withheld", reason)
+	}
+	if err := pl.Sweep(context.Background(), input, workload.ComponentPlan{Instances: []workload.InstancePlan{inst}}); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if _, found := getSlice(t, f.slices, name); !found {
+		t.Fatal("Sweep released a slice a pod holds")
+	}
+	if got := f.events(); len(got) != 0 {
+		t.Fatalf("events = %v, want none", got)
+	}
+}
+
+// A pod being deleted pins its slice but no longer holds it: the slot's next
+// pod is withheld, and the slice is released once the pod is gone.
+func TestPlaceReplacesASliceOnceItsLastPodIsGone(t *testing.T) {
+	f := provisioning(t)
+	name := f.p.Name(Slot{})
+	f.seed(t, stored(t, f.p, demand(t, "2x2x1"), Slot{}, withState("ACTIVE", "")))
+	f.addNodes(t, sliceNode("node-b", name, readiness(corev1.ConditionFalse)))
+	leaving := onSlice("leaving", name)
+	leaving.DeletionTimestamp = &metav1.Time{}
+	f.own(leaving)
+	input := placerInput(podSpec("tpu-a", "2x2x1", 4), nil)
+	plan := workload.ComponentPlan{Instances: []workload.InstancePlan{singlePod(0)}}
+
+	for _, tt := range []struct {
+		pods  []*corev1.Pod
+		found bool
+	}{
+		{pods: []*corev1.Pod{leaving}, found: true},
+		{pods: nil, found: false},
+	} {
+		f.own(tt.pods...)
+		pl := f.placer()
+		if _, placed := place(t, pl, input, singlePod(0), workload.RunnerDefault, 0); placed {
+			t.Fatalf("Place placed a pod on a slice whose host is not ready, with pods %v", tt.pods)
+		}
+		if err := pl.Sweep(context.Background(), input, plan); err != nil {
+			t.Fatalf("Sweep: %v", err)
+		}
+		if _, found := getSlice(t, f.slices, name); found != tt.found {
+			t.Fatalf("slice present = %v with pods %v, want %v", found, tt.pods, tt.found)
+		}
+	}
+}
+
+func TestPlacerSweepNeedsAPodSource(t *testing.T) {
+	f := provisioning(t)
+	f.seed(t, stored(t, f.p, demand(t, "2x2x1"), Slot{Instance: 5}))
+	input := placerInput(podSpec("tpu-a", "2x2x1", 4), nil)
+	if err := NewPlacer(f.p, f.nodes, nil, f.recorder).Sweep(context.Background(), input, workload.ComponentPlan{}); err == nil {
+		t.Fatal("Sweep released slices without reading which pods pin them")
+	}
+	if held, err := f.p.Holds(context.Background()); err != nil || !held {
+		t.Fatalf("Holds = %v, %v; want the slice kept", held, err)
+	}
+}
+
+func TestPlaceRetriesFailedPodReads(t *testing.T) {
+	boom := errors.New("boom")
+	f := provisioning(t)
+	name := f.p.Name(Slot{})
+	f.seed(t, stored(t, f.p, demand(t, "2x2x1"), Slot{}, withState("ACTIVE", "")))
+	f.addNodes(t, sliceNode("node-b", name, cordoned))
+	fail := true
+	pl := NewPlacer(f.p, f.nodes, func(ctx context.Context) ([]*corev1.Pod, error) {
+		if fail {
+			return nil, boom
+		}
+		return f.pods(ctx)
+	}, f.recorder)
+	input := placerInput(podSpec("tpu-a", "2x2x1", 4), nil)
+	ctx := context.Background()
+	if _, _, err := pl.Place(ctx, input, workload.ComponentPlan{}, singlePod(0), workload.RunnerPlan{}, 0); !errors.Is(err, boom) {
+		t.Fatalf("Place error = %v, want the pod read's", err)
+	}
+	if _, _, err := pl.Pending(ctx, input, workload.ComponentPlan{}, singlePod(0), workload.RunnerPlan{}, 0); !errors.Is(err, boom) {
+		t.Fatalf("Pending error = %v, want the pod read's", err)
+	}
+	fail = false
+	if _, placed := place(t, pl, input, singlePod(0), workload.RunnerDefault, 0); placed {
+		t.Fatal("Place placed a pod on a slice with a cordoned host")
+	}
+	if got := f.events(); len(got) != 1 || !strings.Contains(got[0], string(EventReasonSliceHostUnavailable)) {
+		t.Fatalf("events = %v, want the retried vet reported once", got)
 	}
 }

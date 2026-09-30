@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -73,24 +74,34 @@ func releasingSlices(finalize func(context.Context, int32) (bool, error), p *sli
 	}
 }
 
-// pinnedSlices returns a live read of the slices ir's component pods are
-// confined to. Every component pod counts, whatever its controller: a pod
-// holds its slice's chips until it is gone.
-func (r *Reconciler) pinnedSlices(ir *v1beta1.InferenceReplica, p *sliceprovision.Provisioner) func(context.Context) (map[string]struct{}, error) {
-	return func(ctx context.Context) (map[string]struct{}, error) {
-		pods, err := query.LiveListPodsForComponent(ctx, r.APIReader, ir.Namespace, ir.NamePrefix(),
+// componentPods returns a live read of ir's component pods, terminating ones
+// included. Every component pod counts, whatever its controller: a pod holds
+// its slice's chips until it is gone.
+func (r *Reconciler) componentPods(ir *v1beta1.InferenceReplica) func(context.Context) ([]*corev1.Pod, error) {
+	return func(ctx context.Context) ([]*corev1.Pod, error) {
+		return query.LiveListPodsForComponent(ctx, r.APIReader, ir.Namespace, ir.NamePrefix(),
 			v1beta1convert.ComponentTypeToWorkload(ir.Spec.Component))
+	}
+}
+
+// pinnedSlices returns a live read of the slices ir's component pods are
+// confined to.
+func (r *Reconciler) pinnedSlices(ir *v1beta1.InferenceReplica, p *sliceprovision.Provisioner) func(context.Context) (map[string]struct{}, error) {
+	pods := r.componentPods(ir)
+	return func(ctx context.Context) (map[string]struct{}, error) {
+		list, err := pods(ctx)
 		if err != nil {
 			return nil, err
 		}
-		return p.Pinned(pods), nil
+		return p.Pinned(list), nil
 	}
 }
 
 // slicePass is one reconcile pass's slice provisioning.
 type slicePass struct {
 	p *sliceprovision.Provisioner
-	// placer is set when ir opts in; without it the pass only releases.
+	// placer is set when ir opts in; without it the pass only releases, and
+	// pinned is its source of pinned slices.
 	placer *sliceprovision.Placer
 	pinned func(context.Context) (map[string]struct{}, error)
 }
@@ -108,10 +119,12 @@ func (r *Reconciler) provisionSlices(ctx context.Context, ir *v1beta1.InferenceR
 	if err != nil || !inUse {
 		return nil, err
 	}
-	pass := &slicePass{p: p, pinned: r.pinnedSlices(ir, p)}
+	pass := &slicePass{p: p}
 	if slicesOptedIn(ir) {
-		pass.placer = sliceprovision.NewPlacer(p, r.Client, r.Recorder)
+		pass.placer = sliceprovision.NewPlacer(p, r.Client, r.componentPods(ir), r.Recorder)
 		deps.Provisioner = pass.placer
+	} else {
+		pass.pinned = r.pinnedSlices(ir, p)
 	}
 	input.FinalizeInstanceResources = releasingSlices(input.FinalizeInstanceResources, p)
 	return pass, nil
@@ -124,7 +137,7 @@ func (s *slicePass) sweep(ctx context.Context, input workloadtypes.ReconcileInpu
 		return nil
 	}
 	if s.placer != nil {
-		return s.placer.Sweep(ctx, input, plan, s.pinned)
+		return s.placer.Sweep(ctx, input, plan)
 	}
 	return s.p.Sweep(ctx, nil, s.pinned)
 }

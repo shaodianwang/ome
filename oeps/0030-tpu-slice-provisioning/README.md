@@ -225,6 +225,13 @@ Common to both options (under Option 1 all of this lives in `ome-controller`):
   object prevents release while pods still hold the partition.
 - **Static-pool short-circuit.** No `PROVISION_ONLY` on the candidate nodes → no
   slice work at all.
+- **Host health.** A `Ready` slice that no pod holds, with a host its pods
+  cannot be scheduled on (cordoned or not ready, after the pods' tolerations), is
+  released and provisioned again. Its pods are withheld meanwhile, with a
+  `SliceHostUnavailable` warning. A slice a pod still holds is left to the
+  scheduler. *Failure mode if skipped:* a node that goes bad after the slice is
+  `ACTIVE` leaves the pods `Pending`, and a recreated pod lands on the same
+  slice.
 
 Deferred deliberately: retry/backoff policy on a failed create, and behavior when
 the cube has free chips but no free *partition* of the requested shape. Both need

@@ -253,6 +253,46 @@ func TestSlicePassSweep(t *testing.T) {
 	}
 }
 
+// TestSlicePassSweep_OptedIn pins that an opted-in pass's placer reads the
+// component's pods live to decide which slices are pinned.
+func TestSlicePassSweep_OptedIn(t *testing.T) {
+	ctx := context.Background()
+	ir := optedInIR("llama-engine", "prod", 1)
+	r, c := newSliceReconciler(t, ir)
+	unpinned := seedSlice(t, r, c, ir, sliceprovision.Slot{Instance: 5}, sliceStateReady)
+	pinned := seedSlice(t, r, c, ir, sliceprovision.Slot{Instance: 6}, sliceStateReady)
+	pod := podForIR(ir, 6, "default", 0, true, true)
+	pod.Spec.NodeSelector = map[string]string{sliceKeySlice: pinned}
+	if err := c.Create(ctx, pod); err != nil {
+		t.Fatalf("create pod: %v", err)
+	}
+	var deps workloadtypes.Deps
+	var input workloadtypes.ReconcileInput
+	pass, err := r.provisionSlices(ctx, ir, &deps, &input)
+	if err != nil || pass == nil || pass.placer == nil {
+		t.Fatalf("provisionSlices = %+v, %v; want a placing pass", pass, err)
+	}
+	if err := pass.sweep(ctx, input, workloadtypes.ComponentPlan{}); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if getSlice(t, c, unpinned) != nil {
+		t.Error("a slice no pod is confined to and no Instance wants must be released")
+	}
+	if getSlice(t, c, pinned) == nil {
+		t.Error("a slice a pod is confined to must be kept")
+	}
+
+	seedSlice(t, r, c, ir, sliceprovision.Slot{Instance: 7}, sliceStateReady)
+	r.APIReader = podListFailingReader{Reader: c}
+	pass, err = r.provisionSlices(ctx, ir, &deps, &input)
+	if err != nil || pass == nil {
+		t.Fatalf("provisionSlices = %+v, %v; want a placing pass", pass, err)
+	}
+	if err := pass.sweep(ctx, input, workloadtypes.ComponentPlan{}); err == nil {
+		t.Fatal("the placer must read pods through the live reader")
+	}
+}
+
 // TestPinnedSlices pins the live read Sweep relies on: every pod of the
 // component counts, whatever controls it, and a terminal pod pins nothing.
 func TestPinnedSlices(t *testing.T) {

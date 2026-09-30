@@ -652,6 +652,25 @@ func TestPinned(t *testing.T) {
 	}
 }
 
+func TestHeld(t *testing.T) {
+	p := newProvisioner(t, newFakeClient(), testOwner)
+	terminating := pod("terminating", map[string]string{keySlice: "s-terminating"}, corev1.PodRunning)
+	terminating.DeletionTimestamp = &metav1.Time{}
+	got := p.Held([]*corev1.Pod{
+		pod("running", map[string]string{keySlice: "s-running"}, corev1.PodRunning),
+		pod("pending", map[string]string{keySlice: "s-pending"}, corev1.PodPending),
+		terminating,
+		pod("failed", map[string]string{keySlice: "s-failed"}, corev1.PodFailed),
+		pod("succeeded", map[string]string{keySlice: "s-succeeded"}, corev1.PodSucceeded),
+		pod("unpinned", map[string]string{keyTopology: "2x2x1"}, corev1.PodRunning),
+		nil,
+	})
+	want := map[string]struct{}{"s-running": {}, "s-pending": {}}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("Held mismatch (-want +got):\n%s", diff)
+	}
+}
+
 // pinnedSet is a pinned-slice source that counts its calls.
 func pinnedSet(calls *int, names ...string) func(context.Context) (map[string]struct{}, error) {
 	return func(context.Context) (map[string]struct{}, error) {
