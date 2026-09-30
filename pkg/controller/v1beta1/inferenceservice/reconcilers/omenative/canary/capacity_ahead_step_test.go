@@ -30,8 +30,11 @@ func TestReconcile_CapacityAheadStepIsAPausedStep(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.Active || res.Partition != 0 {
-		t.Fatalf("a Ready capacity-ahead step is an active step at full canary capacity, got %+v", res)
+	// The step stages its capacity on every instance but the held stable one:
+	// the stable revision keeps its last instance (the held floor) while it
+	// still carries traffic, so 100% capacity on 4 instances is partition 1.
+	if !res.Active || res.Partition != 1 {
+		t.Fatalf("a Ready capacity-ahead step is an active step staged on all but the held stable instance, got %+v", res)
 	}
 	if got := phaseOf(isvc); got != v1beta1.RolloutPhasePaused {
 		t.Fatalf("phase = %q, want Paused: the 0%% step holds at its manual gate like any other step", got)
