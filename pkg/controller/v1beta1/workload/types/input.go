@@ -296,9 +296,10 @@ type ReconcileInput struct {
 	// backoff.
 	Requeue RequeueIntervals
 
-	// PassWake collects a wake-up an op pass owes for work held on
-	// operator configuration, which raises no watch event of its own.
-	// The dispatcher allocates it per pass and folds it into the result.
+	// PassWake collects a wake-up an op pass owes for a wait that raises
+	// no watch event of its own: work held on operator configuration, or
+	// a pod read inside the stuck-pod grace. The dispatcher allocates it
+	// per pass and folds it into the result.
 	PassWake *PassWake
 
 	// Gangs carries what each multi-pod Instance's PodGroup says about

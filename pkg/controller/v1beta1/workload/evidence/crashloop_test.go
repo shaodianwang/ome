@@ -118,12 +118,15 @@ func TestCrashLoopWedge_NamesAStuckPodOnTheCurrentRevision(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			reason, got := evidence.CrashLoopWedge(tc.input, tc.row, 1, tc.pods)
+			reason, got, graceLeft := evidence.CrashLoopWedge(tc.input, tc.row, 1, tc.pods)
 			if got != tc.want {
 				t.Fatalf("wedged: got %v (%q) want %v", got, reason, tc.want)
 			}
 			if got && reason == "" {
 				t.Error("a wedge must name itself for the repair's reason")
+			}
+			if got && graceLeft != 0 {
+				t.Errorf("a wedge past the grace reports %s of grace left, want none", graceLeft)
 			}
 		})
 	}
@@ -140,8 +143,73 @@ func TestCrashLoopWedge_FullyServingSetIsNeverAWedge(t *testing.T) {
 		State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
 	})
 	row := &types.InstanceStatus{Index: 0, Phase: types.InstancePhaseReady}
-	if _, got := evidence.CrashLoopWedge(crashLoopInput(time.Minute), row, 1, []*corev1.Pod{serving}); got {
+	if _, got, _ := evidence.CrashLoopWedge(crashLoopInput(time.Minute), row, 1, []*corev1.Pod{serving}); got {
 		t.Error("fully serving pod set: got a wedge, want none")
+	}
+}
+
+// TestCrashLoopWedge_ReportsTheGraceLeftOnAParkedPod: a pod parked in a
+// terminal waiting reason inside the grace is not a wedge yet, and the
+// reading says how long until it is. A gang reports the earliest grace
+// end among its parked members, in either order; a pod that is merely
+// not ready, an off-revision leftover, a deleting pod and a fully
+// serving set report none, as does a wedge already past the grace.
+func TestCrashLoopWedge_ReportsTheGraceLeftOnAParkedPod(t *testing.T) {
+	hash := query.RevisionFromName(clRevision).Hash()
+	ready := &types.InstanceStatus{Index: 0, Phase: types.InstancePhaseReady}
+	notReady := crashLoopPod("engine-0-default-0", 10*time.Second, hash)
+	notReady.Status.ContainerStatuses[0].State = corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
+	deleting := crashLoopPod("engine-0-default-0", 10*time.Second, hash)
+	ts := metav1.NewTime(tNow)
+	deleting.DeletionTimestamp = &ts
+
+	for _, tc := range []struct {
+		name     string
+		expected int32
+		pods     []*corev1.Pod
+		want     time.Duration
+	}{
+		{name: "ten seconds into a minute", expected: 1, pods: []*corev1.Pod{crashLoopPod("engine-0-default-0", 10*time.Second, hash)}, want: 50 * time.Second},
+		{name: "gang, leader older", expected: 2, pods: []*corev1.Pod{crashLoopPod("engine-0-leader-0", 40*time.Second, hash), crashLoopPod("engine-0-worker-0", 10*time.Second, hash)}, want: 20 * time.Second},
+		{name: "gang, worker older", expected: 2, pods: []*corev1.Pod{crashLoopPod("engine-0-leader-0", 10*time.Second, hash), crashLoopPod("engine-0-worker-0", 40*time.Second, hash)}, want: 20 * time.Second},
+		{name: "gang, one member past the grace", expected: 2, pods: []*corev1.Pod{crashLoopPod("engine-0-leader-0", 10*time.Second, hash), crashLoopPod("engine-0-worker-0", 2*time.Minute, hash)}},
+		{name: "running, not yet ready", expected: 1, pods: []*corev1.Pod{notReady}},
+		{name: "off-revision leftover", expected: 1, pods: []*corev1.Pod{crashLoopPod("engine-0-default-0", 10*time.Second, "deadbeef")}},
+		{name: "deleting pod", expected: 1, pods: []*corev1.Pod{deleting}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, got := evidence.CrashLoopWedge(crashLoopInput(time.Minute), ready, tc.expected, tc.pods)
+			if got != tc.want {
+				t.Fatalf("grace left = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTerminalWaitingGraceLeft pins the per-pod reading: the grace left
+// counts from the pod's creation, is zero once past, and needs both a
+// terminal waiting reason and a creation stamp.
+func TestTerminalWaitingGraceLeft(t *testing.T) {
+	hash := query.RevisionFromName(clRevision).Hash()
+	unstamped := crashLoopPod("engine-0-default-0", 10*time.Second, hash)
+	unstamped.CreationTimestamp = metav1.Time{}
+	for _, tc := range []struct {
+		name string
+		pod  *corev1.Pod
+		want time.Duration
+	}{
+		{name: "inside the grace", pod: crashLoopPod("engine-0-default-0", 10*time.Second, hash), want: 50 * time.Second},
+		{name: "at the grace end", pod: crashLoopPod("engine-0-default-0", time.Minute, hash)},
+		{name: "past the grace", pod: crashLoopPod("engine-0-default-0", 2*time.Minute, hash)},
+		{name: "no creation stamp", pod: unstamped},
+		{name: "serving", pod: servingPod("engine-0-default-0")},
+		{name: "no pod", pod: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := evidence.TerminalWaitingGraceLeft(tc.pod, tNow, time.Minute); got != tc.want {
+				t.Fatalf("grace left = %s, want %s", got, tc.want)
+			}
+		})
 	}
 }
 

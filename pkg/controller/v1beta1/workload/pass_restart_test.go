@@ -25,6 +25,7 @@ import (
 	types "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
+	clocktesting "k8s.io/utils/clock/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -2045,6 +2046,185 @@ func TestReconcile_DarkInstance_PreferredInsideTheCanaryStep(t *testing.T) {
 			if !h.runWithInvariant(100, func() bool { return h.settledOn(h.revFixed, replicas) }, withinBudget) {
 				h.dumpState("after the step was lifted")
 				t.Fatalf("the Component never settled on the fixed revision after the step was lifted")
+			}
+		})
+	}
+}
+
+// wakeTestGrace is the stuck-pod grace the wake-up stories run under,
+// and kubeletBackOff the kubelet's capped back-off between image pulls:
+// the next pod event a controller that asked for no wake-up is woken by.
+const (
+	wakeTestGrace  = 10 * time.Second
+	kubeletBackOff = 5 * time.Minute
+)
+
+// wakeCadences are the dispatcher cadences the wake-up stories run
+// under: none, which leaves a pass with work left to the rate-limited
+// backoff, and the one the chart ships.
+var wakeCadences = []struct {
+	name    string
+	requeue workloadtypes.RequeueIntervals
+}{
+	{"no cadence", workloadtypes.RequeueIntervals{}},
+	{"chart cadence", workloadtypes.RequeueIntervals{Operation: 5 * time.Second, Gate: 3 * time.Second}},
+}
+
+// graceWakeHarness converges one Instance Ready on v1 at a one-second
+// step under a ten-second stuck-pod grace, so its pods are still inside
+// the grace once it is Ready: the shape of a pod that comes up and fails
+// within its first seconds.
+func graceWakeHarness(t *testing.T, gang bool, policy workloadtypes.RestartPolicy, requeue workloadtypes.RequeueIntervals) *recoveryHarness {
+	t.Helper()
+	h := newRecoveryHarnessFor(t, gang, constants.MainContainerName)
+	h.recorder = record.NewFakeRecorder(64)
+	h.stuckGrace = wakeTestGrace
+	h.stepFloor = time.Second
+	h.requeue = requeue
+	zero, one := intstr.FromInt32(0), intstr.FromInt32(1)
+	h.lifecycle = workloadtypes.Lifecycle{
+		RestartPolicy: &policy,
+		UpdateStrategy: &workloadtypes.UpdateStrategy{
+			Type:          workloadtypes.UpdateStrategyRecreatePod,
+			RollingUpdate: &workloadtypes.RollingUpdate{MaxSurge: &zero, MaxUnavailable: &one},
+		},
+	}
+	h.setTarget(h.revV1, goodImage)
+	if !h.run(40, func() bool { return h.settledOn(h.revV1, 1) }) {
+		h.dumpState("initial create")
+		t.Fatalf("initial create never settled on v1")
+	}
+	return h
+}
+
+// TestReconcile_CrashLoop_RepairOpensWhenTheGraceEnds is the closed-loop
+// story of a wedge first read inside the stuck-pod grace. A Ready
+// single-pod Instance's pod is parked in ImagePullBackOff a second or
+// two into a ten-second grace, and the kubelet never touches it again:
+// its back-off between pulls is minutes. Only the controller's own
+// wake-ups bring it back, and the pass that read the pod inside the
+// grace owes itself the remainder, so the repair opens the moment the
+// grace ends - not on the next cadence tick, and not on the rate-limited
+// backoff a pass with no cadence falls to, which doubles per pass - and
+// the Instance is rebuilt Ready on its revision. Either restart policy,
+// with and without a cadence.
+//
+// Cells: instance/Ready/timer.stuckPodGrace/before, instance/Ready/pod.waiting[CrashLoopBackOff]/before
+func TestReconcile_CrashLoop_RepairOpensWhenTheGraceEnds(t *testing.T) {
+	for _, policy := range []workloadtypes.RestartPolicy{workloadtypes.RestartPolicyNone, workloadtypes.RestartPolicyRecreateInstance} {
+		for _, cadence := range wakeCadences {
+			t.Run(string(policy)+"/"+cadence.name, func(t *testing.T) {
+				h := graceWakeHarness(t, false, policy, cadence.requeue)
+				graceEnd := h.podOf(0, "").CreationTimestamp.Add(wakeTestGrace)
+				if !h.clk.Now().Before(graceEnd) {
+					t.Fatalf("the pod is already past its grace at Ready: the story needs a pod that fails inside it")
+				}
+				h.crashPod(0, "", badImage)
+				h.events = nil
+				repairOpened := func() bool { return h.restartsRecorded() > 0 }
+				if !h.runOnWakeUps(20, kubeletBackOff, repairOpened) {
+					h.dumpState("after the crash")
+					t.Fatalf("no repair opened on a pod parked past the grace")
+				}
+				if late := h.clk.Now().Sub(graceEnd); late != 0 {
+					t.Fatalf("the repair opened %s after the grace ended: the pass that read the pod inside the grace scheduled no wake-up for the grace end", late)
+				}
+				if !h.run(40, func() bool { return h.settledOn(h.revV1, 1) && h.atIncarnation(0, 2) }) {
+					h.dumpState("after the repair")
+					t.Fatalf("the Instance was never rebuilt Ready on its revision")
+				}
+			})
+		}
+	}
+}
+
+// TestReconcile_CrashLoop_GangWakesForTheOldestMembersGrace: a
+// leader+worker gang whose members the apiserver admitted a second
+// apart is parked whole, inside the grace. The gang is rebuilt as soon
+// as any member is past the grace, so the pass wakes for the older
+// member's grace end, whichever runner that is.
+//
+// Cells: instance/Ready/timer.stuckPodGrace/before, instance/Ready/pod.waiting[CrashLoopBackOff]/before
+func TestReconcile_CrashLoop_GangWakesForTheOldestMembersGrace(t *testing.T) {
+	for _, members := range [][2]string{{"leader", "worker"}, {"worker", "leader"}} {
+		older, younger := members[0], members[1]
+		for _, cadence := range wakeCadences {
+			t.Run(younger+" admitted later/"+cadence.name, func(t *testing.T) {
+				h := graceWakeHarness(t, true, workloadtypes.RestartPolicyNone, cadence.requeue)
+				h.admitLater(0, younger, time.Second)
+				graceEnd := h.podOf(0, older).CreationTimestamp.Add(wakeTestGrace)
+				if !h.clk.Now().Before(graceEnd) {
+					t.Fatalf("the gang is already past its grace at Ready: the story needs members that fail inside it")
+				}
+				h.crashPod(0, "leader", badImage)
+				h.crashPod(0, "worker", badImage)
+				h.events = nil
+				repairOpened := func() bool { return h.restartsRecorded() > 0 }
+				if !h.runOnWakeUps(20, kubeletBackOff, repairOpened) {
+					h.dumpState("after the crash")
+					t.Fatalf("no repair opened on a gang parked past the grace")
+				}
+				if late := h.clk.Now().Sub(graceEnd); late != 0 {
+					t.Fatalf("the repair opened %s after the older member's grace ended, want the earliest grace end among the gang's parked pods", late)
+				}
+			})
+		}
+	}
+}
+
+// TestReconcile_CrashLoopInsideGrace_WakesForTheGraceLeft pins the
+// wake-up a pass owes when it reads a Ready row's pod parked in a
+// terminal waiting reason inside the stuck-pod grace: it opens nothing
+// and asks to come back when the grace ends, in place of the
+// rate-limited backoff a pass with no cadence falls to and ahead of a
+// cadence longer than the remainder. For a gang that is the earliest
+// grace end among its parked members, whichever member is the older.
+//
+// Cells: instance/Ready/timer.stuckPodGrace/before
+func TestReconcile_CrashLoopInsideGrace_WakesForTheGraceLeft(t *testing.T) {
+	ctx := context.Background()
+	// Creation stamps carry whole seconds, as the apiserver stores them.
+	now := time.Now().Truncate(time.Second)
+	for _, tc := range []struct {
+		name string
+		// ages is how long ago each member was created: one entry for a
+		// single-pod Instance, leader then worker for a gang.
+		ages    []time.Duration
+		requeue workloadtypes.RequeueIntervals
+		want    time.Duration
+	}{
+		{name: "single pod ten seconds into a minute", ages: []time.Duration{10 * time.Second}, want: 50 * time.Second},
+		{name: "ahead of a longer cadence", ages: []time.Duration{10 * time.Second}, requeue: workloadtypes.RequeueIntervals{Operation: 2 * time.Minute, Gate: time.Minute}, want: 50 * time.Second},
+		{name: "gang, leader older", ages: []time.Duration{40 * time.Second, 10 * time.Second}, want: 20 * time.Second},
+		{name: "gang, worker older", ages: []time.Duration{10 * time.Second, 40 * time.Second}, want: 20 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var in workloadtypes.ReconcileInput
+			var plan workloadtypes.ComponentPlan
+			var pods []client.Object
+			if len(tc.ages) == 1 {
+				in, plan, pods = crashLoopRepairFixture(t, 1, nil)
+			} else {
+				in, plan, pods = gangCrashLoopFixture(t, 1, nil)
+			}
+			in.Clock = clocktesting.NewFakeClock(now)
+			in.Requeue = tc.requeue
+			for i, age := range tc.ages {
+				pods[i].(*corev1.Pod).CreationTimestamp = metav1.NewTime(now.Add(-age))
+			}
+			c := fake.NewClientBuilder().WithScheme(makeScheme(t)).WithObjects(pods...).Build()
+			store := installRepairStore(&in)
+			deps := workloadtypes.Deps{Client: c, APIReader: c, Expectations: workloadtypes.NewExpectations()}
+
+			result, err := workload.Reconcile(ctx, deps, in, plan, crashLoopRepairTarget())
+			if err != nil {
+				t.Fatalf("reconcile: %v", err)
+			}
+			if got := countRestarting(store, 1); got != 0 {
+				t.Fatalf("repairs opened = %d, want 0 while every parked pod is inside the grace", got)
+			}
+			if result.RequeueAfter != tc.want {
+				t.Fatalf("result = %+v, want a wake-up in %s, when the oldest parked pod's grace ends", result, tc.want)
 			}
 		})
 	}

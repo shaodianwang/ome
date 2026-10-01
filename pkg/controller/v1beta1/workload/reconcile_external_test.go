@@ -1166,6 +1166,16 @@ type recoveryHarness struct {
 	podGrace time.Duration
 	// abandonGrace is the input's AbandonedReplacementGrace.
 	abandonGrace time.Duration
+	// stuckGrace is the input's StuckPodGrace.
+	stuckGrace time.Duration
+	// stepFloor is the least the clock advances per step: a pass that asks
+	// for no later wake-up still moves the clock this far.
+	// recoveryStepFloor unless a story needs a finer clock.
+	stepFloor time.Duration
+	// bareRequeues counts the consecutive passes that asked for the
+	// rate-limited backoff, which runOnWakeUps doubles per ask as the
+	// controller's per-item rate limiter does.
+	bareRequeues int
 	// terminatingUntil is, per Terminating pod, the fake-clock instant the
 	// kubelet model finishes its termination.
 	terminatingUntil map[string]time.Time
@@ -1256,6 +1266,8 @@ func newRecoveryHarnessFor(t *testing.T, multiPod bool, container string) *recov
 		multiPod:         multiPod,
 		replicas:         1,
 		requeue:          testRequeueIntervals,
+		stuckGrace:       30 * time.Second,
+		stepFloor:        recoveryStepFloor,
 		terminatingUntil: map[string]time.Time{},
 		container:        container,
 		crashes:          map[string]int{},
@@ -1912,7 +1924,7 @@ func (h *recoveryHarness) buildInput() workloadtypes.ReconcileInput {
 		RemoveInstance:    h.removeInstance(),
 		UpdateGate:        h.gate,
 		UpdateRetryPolicy: h.retryPolicy,
-		StuckPodGrace:     30 * time.Second,
+		StuckPodGrace:     h.stuckGrace,
 		ForceDelete:       h.forceDelete,
 		Requeue:           h.requeue,
 		Clock:             h.clk,
@@ -1951,7 +1963,7 @@ func (h *recoveryHarness) buildInput() workloadtypes.ReconcileInput {
 
 // step runs one reconcile: kubelet convergence, fresh expectations
 // (watch caught up), Reconcile, aggregate CurrentRevision, clock
-// advance (the op's own requeue interval, or a 10s baseline). A
+// advance (the op's own requeue interval, or the step floor). A
 // Reconcile error fails the test.
 func (h *recoveryHarness) step() {
 	h.t.Helper()
@@ -1963,6 +1975,23 @@ func (h *recoveryHarness) step() {
 // stepResult is step returning the pass's result and error, for tests
 // that expect a pass to fail.
 func (h *recoveryHarness) stepResult() (ctrl.Result, error) {
+	h.t.Helper()
+	res, err := h.pass()
+	// The floor keeps stuck-pod grace and Backoff windows crossing in
+	// a handful of passes, and lets an 80-pass wedge run outlive the 30m
+	// Operation deadline — proving the deadline backstop is also inert.
+	advance := h.stepFloor
+	if res.RequeueAfter > advance {
+		advance = res.RequeueAfter
+	}
+	h.clk.Step(advance)
+	return res, err
+}
+
+// pass runs one reconcile and leaves the clock where it is: kubelet
+// convergence, fresh expectations (watch caught up), Reconcile,
+// aggregate CurrentRevision.
+func (h *recoveryHarness) pass() (ctrl.Result, error) {
 	h.t.Helper()
 	h.kubelet()
 	deps := workloadtypes.Deps{Client: h.c, APIReader: h.c, Expectations: workloadtypes.NewExpectations()}
@@ -1979,15 +2008,103 @@ func (h *recoveryHarness) stepResult() (ctrl.Result, error) {
 	if status.RolloutComplete(h.irStatuses(), h.target.Name) {
 		h.currentRevision = h.target.Name
 	}
-	// The floor keeps stuck-pod grace and Backoff windows crossing in
-	// a handful of passes, and lets an 80-pass wedge run outlive the 30m
-	// Operation deadline — proving the deadline backstop is also inert.
-	advance := recoveryStepFloor
-	if res.RequeueAfter > advance {
-		advance = res.RequeueAfter
-	}
-	h.clk.Step(advance)
 	return res, err
+}
+
+// runOnWakeUps is run for a controller that reconciles only when it is
+// woken: by the wait its last pass asked for, or, when the pass asked
+// for none, by the kubelet's next status change nextPodEvent away. The
+// clock is left at the pass that satisfied pred, so a test can read
+// when the controller acted.
+func (h *recoveryHarness) runOnWakeUps(max int, nextPodEvent time.Duration, pred func() bool) bool {
+	h.t.Helper()
+	for i := 0; i < max; i++ {
+		if pred() {
+			return true
+		}
+		res, err := h.pass()
+		if err != nil {
+			h.t.Fatalf("Reconcile: %v", err)
+		}
+		if pred() {
+			return true
+		}
+		h.clk.Step(h.sleepAfter(res, nextPodEvent))
+	}
+	return pred()
+}
+
+// sleepAfter is how long a controller with no pod event coming sleeps
+// after a pass: the explicit wait the pass asked for, the rate-limited
+// backoff a bare requeue asks for, or the next pod event when the pass
+// asked for nothing, whichever comes first.
+func (h *recoveryHarness) sleepAfter(res ctrl.Result, nextPodEvent time.Duration) time.Duration {
+	wait := nextPodEvent
+	switch {
+	case res.RequeueAfter > 0:
+		h.bareRequeues = 0
+		if res.RequeueAfter < wait {
+			wait = res.RequeueAfter
+		}
+	case res.Requeue: //nolint:staticcheck // the bare backoff has no non-deprecated spelling
+		h.bareRequeues++
+		if backoff := rateLimitedBackoff(h.bareRequeues); backoff < wait {
+			wait = backoff
+		}
+	default:
+		h.bareRequeues = 0
+	}
+	return wait
+}
+
+// The controller's default per-item rate limiter: a bare requeue sleeps
+// the base delay doubled for every consecutive bare requeue before it,
+// up to the cap.
+const (
+	rateLimitedBackoffBase = 5 * time.Millisecond
+	rateLimitedBackoffCap  = 1000 * time.Second
+)
+
+// rateLimitedBackoff is the sleep the controller's per-item rate limiter
+// imposes on the nth consecutive bare requeue.
+func rateLimitedBackoff(n int) time.Duration {
+	backoff := rateLimitedBackoffBase
+	for i := 1; i < n && backoff < rateLimitedBackoffCap; i++ {
+		backoff *= 2
+	}
+	if backoff > rateLimitedBackoffCap {
+		return rateLimitedBackoffCap
+	}
+	return backoff
+}
+
+// podOf is the live pod of runner at index idx. An empty runner names
+// the single pod of a single-pod Instance.
+func (h *recoveryHarness) podOf(idx int32, runner string) *corev1.Pod {
+	h.t.Helper()
+	for _, pod := range h.podsOf(idx) {
+		if runner == "" || pod.Labels[query.LabelRunner] == runner {
+			return pod
+		}
+	}
+	h.t.Fatalf("no pod of instance %d runner %q", idx, runner)
+	return nil
+}
+
+// admitLater moves the creation of the pod of runner at idx later by
+// skew: the apiserver admits a gang's pods one at a time, so the
+// members' ages differ. The creation stays in the past.
+func (h *recoveryHarness) admitLater(idx int32, runner string, skew time.Duration) {
+	h.t.Helper()
+	pod := h.podOf(idx, runner)
+	admitted := pod.CreationTimestamp.Add(skew)
+	if admitted.After(h.clk.Now()) {
+		h.t.Fatalf("pod %s would be admitted %s from now", pod.Name, admitted.Sub(h.clk.Now()))
+	}
+	pod.CreationTimestamp = metav1.NewTime(admitted)
+	if err := h.c.Update(h.ctx, pod); err != nil {
+		h.t.Fatalf("restamp creation of %s: %v", pod.Name, err)
+	}
 }
 
 // run steps until pred returns true, up to max iterations. Returns

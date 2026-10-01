@@ -71,9 +71,10 @@ func Reconcile(ctx context.Context, deps types.Deps, input types.ReconcileInput,
 	if input.PromoteWindow == nil {
 		input.PromoteWindow = &types.PromoteWindow{}
 	}
-	// One held-work sink per pass, for the same reason: an operator
-	// supplying a missing configuration key raises no watch event, so a
-	// pass that held work on it deposits its wake-up here.
+	// One owed-wake sink per pass, for the same reason: an operator
+	// supplying a missing configuration key, or a stuck-pod grace ending,
+	// raises no watch event, so a pass waiting on either deposits its
+	// wake-up here.
 	if input.PassWake == nil {
 		input.PassWake = &types.PassWake{}
 	}

@@ -666,10 +666,15 @@ func runnerRestartedSinceReady(pod *corev1.Pod, readySince *metav1.Time) (string
 // wedge the restart pass may repair: the wedge itself is
 // evidence.CrashLoopWedge, and the RetryBlock held against the revision
 // is what denies the rebuild — the same authority a repair of a
-// never-Ready Instance answers to.
+// never-Ready Instance answers to. A pod parked inside the grace is not
+// a wedge yet, and the grace ending raises no watch event, so the pass
+// deposits the grace left and comes back when the repair can open.
 func crashLoopRepairReason(input workload.ReconcileInput, s *workload.InstanceStatus, expected int32, pods []*corev1.Pod) (string, bool) {
-	reason, wedged := evidence.CrashLoopWedge(input, s, expected, pods)
+	reason, wedged, graceLeft := evidence.CrashLoopWedge(input, s, expected, pods)
 	if !wedged {
+		if graceLeft > 0 {
+			input.PassWake.Observe(graceLeft)
+		}
 		return "", false
 	}
 	if rebuildRetryBlockDenies(input, s) {

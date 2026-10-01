@@ -2,6 +2,7 @@ package evidence
 
 import (
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -13,7 +14,10 @@ import (
 // CrashLoopWedge reports whether a Ready, operation-free row holds a pod
 // wedged in a terminal kubelet waiting reason on the Component's current
 // revision for longer than the configured stuck-pod grace, and names the
-// wedge for the repair's Reason.
+// wedge for the repair's Reason. When no pod is past the grace yet, the
+// third result is how long the earliest such pod has left in it, zero
+// when none is parked: a gang is a wedge as soon as any member is, so
+// the earliest grace end is when this reading can change.
 //
 // Three things keep it narrow:
 //
@@ -29,18 +33,19 @@ import (
 // Evidence only. Whether the repair may actually open — the RetryBlock
 // held against the revision, the unavailability budget, the coordination
 // gate — belongs to the restart pass that reads this.
-func CrashLoopWedge(input types.ReconcileInput, s *types.InstanceStatus, expected int32, pods []*corev1.Pod) (string, bool) {
+func CrashLoopWedge(input types.ReconcileInput, s *types.InstanceStatus, expected int32, pods []*corev1.Pod) (string, bool, time.Duration) {
 	if s == nil || s.Phase != types.InstancePhaseReady || s.Operation != nil {
-		return "", false
+		return "", false, 0
 	}
 	if input.StuckPodGrace <= 0 {
-		return "", false
+		return "", false, 0
 	}
 	if query.PodSetFullyServing(pods, expected) {
-		return "", false
+		return "", false, 0
 	}
 	currentHash := query.RevisionFromName(input.ObservedState.CurrentRevision).Hash()
 	now := input.Now()
+	var graceLeft time.Duration
 	for _, pod := range pods {
 		if pod == nil || pod.DeletionTimestamp != nil {
 			continue
@@ -48,13 +53,14 @@ func CrashLoopWedge(input types.ReconcileInput, s *types.InstanceStatus, expecte
 		if !podOnCurrentRevision(pod, currentHash) {
 			continue
 		}
-		reason, stuck := PodStuckInTerminalWaiting(pod, now, input.StuckPodGrace)
-		if !stuck {
-			continue
+		if reason, stuck := PodStuckInTerminalWaiting(pod, now, input.StuckPodGrace); stuck {
+			return fmt.Sprintf("pod %s wedged in %s past the stuck-pod grace", pod.Name, reason), true, 0
 		}
-		return fmt.Sprintf("pod %s wedged in %s past the stuck-pod grace", pod.Name, reason), true
+		if left := TerminalWaitingGraceLeft(pod, now, input.StuckPodGrace); left > 0 && (graceLeft == 0 || left < graceLeft) {
+			graceLeft = left
+		}
 	}
-	return "", false
+	return "", false, graceLeft
 }
 
 // PodSetServesNothing reports whether a non-empty pod set is provably
@@ -82,24 +88,11 @@ func PodSetServesNothing(pods []*corev1.Pod) bool {
 		if podreadiness.IsContainersReady(pod) && podreadiness.IsServing(pod) {
 			return false
 		}
-		if !podHoldsTerminalWaitingReason(pod) {
+		if _, parked := terminalWaitingReason(pod); !parked {
 			return false
 		}
 	}
 	return live > 0
-}
-
-// podHoldsTerminalWaitingReason reports whether any container of the
-// pod, regular or init, is parked in a terminal kubelet waiting reason.
-func podHoldsTerminalWaitingReason(pod *corev1.Pod) bool {
-	for _, statuses := range [][]corev1.ContainerStatus{pod.Status.ContainerStatuses, pod.Status.InitContainerStatuses} {
-		for _, cs := range statuses {
-			if cs.State.Waiting != nil && types.IsTerminalWaitingReason(cs.State.Waiting.Reason) {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // podOnCurrentRevision reports whether a pod belongs to the Component's

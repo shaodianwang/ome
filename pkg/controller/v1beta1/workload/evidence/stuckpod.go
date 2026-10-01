@@ -26,12 +26,34 @@ func PodStuckInTerminalWaiting(pod *corev1.Pod, now time.Time, grace time.Durati
 	if now.Sub(pod.CreationTimestamp.Time) < grace {
 		return "", false
 	}
+	return terminalWaitingReason(pod)
+}
+
+// TerminalWaitingGraceLeft is how much of grace a pod parked in a
+// terminal waiting reason has left before PodStuckInTerminalWaiting
+// reads it as stuck: zero once the grace has passed, for a pod parked in
+// no such reason, and for a pod with no creation stamp. The grace
+// ending raises no event, so a pass that read the pod inside it owes
+// itself this wait.
+func TerminalWaitingGraceLeft(pod *corev1.Pod, now time.Time, grace time.Duration) time.Duration {
+	if pod == nil || pod.CreationTimestamp.IsZero() {
+		return 0
+	}
+	if _, parked := terminalWaitingReason(pod); !parked {
+		return 0
+	}
+	if left := grace - now.Sub(pod.CreationTimestamp.Time); left > 0 {
+		return left
+	}
+	return 0
+}
+
+// terminalWaitingReason names the terminal kubelet waiting reason a
+// container of the pod, regular or init, is parked in.
+func terminalWaitingReason(pod *corev1.Pod) (string, bool) {
 	for _, statuses := range [][]corev1.ContainerStatus{pod.Status.ContainerStatuses, pod.Status.InitContainerStatuses} {
 		for _, cs := range statuses {
-			if cs.State.Waiting == nil {
-				continue
-			}
-			if types.IsTerminalWaitingReason(cs.State.Waiting.Reason) {
+			if cs.State.Waiting != nil && types.IsTerminalWaitingReason(cs.State.Waiting.Reason) {
 				return cs.State.Waiting.Reason, true
 			}
 		}
