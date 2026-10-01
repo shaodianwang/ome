@@ -327,6 +327,16 @@ GKE_KIND_SCHEDULER_ENABLED = _truthy(os.environ.get("GKE_KIND_SCHEDULER_ENABLED"
 GKE_KIND_SCHEDULER_HARD_FAIL = _truthy(os.environ.get("GKE_KIND_SCHEDULER_HARD_FAIL", "1"))
 # "" is the cluster default scheduler; every eval job is emitted once per entry.
 EVAL_SCHEDULERS = [""] + ([EVAL_GANG_SCHEDULER] if GKE_EVAL_SCHEDULER_ENABLED else [])
+# Force-delete dimension of the eval: a case whose header carries
+# needs=forcedelete reads the outcome the controller's lifecycle.forceDelete
+# policy produces, so it runs in a twin of its lane that deploys the policy
+# (deploy-ome-kind.sh reads the switch) and nowhere else; every other case
+# of the lane stays on the plain deploy, where the runner would otherwise
+# SKIP the policy-bound ones. The twin exists only for lanes that have such
+# cases and is emitted per scheduler like any lane.
+EVAL_FORCE_DELETE_NEED = "forcedelete"
+EVAL_FORCE_DELETE_ENV = "OME_EVAL_FORCE_DELETE"
+EVAL_FORCE_DELETE_SLUG = "forcedelete"
 # Kill switch for the deployed-mode operator-upgrade identity gate (see
 # _gke_upgrade_identity_step). The step resolves its own previous-image
 # reference at run time, so this only needs to gate whether the step exists.
@@ -1102,6 +1112,41 @@ def _eval_case_groups() -> list[tuple[str, str, list[str]]]:
     ]
 
 
+def _eval_case_header_fields(case_id: str) -> dict[str, str]:
+    """The case's line-1 key=value fields (last wins), {} when the case is
+    not exactly one committed file."""
+    matches = sorted(EVAL_CASE_DIR.glob(f"*/{case_id}.yaml"))
+    if len(matches) != 1:
+        return {}
+    header = matches[0].read_text().splitlines()[0].lstrip("#").strip()
+    return dict(token.split("=", 1) for token in header.split() if "=" in token)
+
+
+def _eval_lane_variants(cases: list[str]) -> list[tuple[str, dict[str, str], list[str]]]:
+    """[(variant slug, extra env, cases)] for one feature/topology group: the
+    plain lane with every case that reads the default deploy, and, when any
+    case needs the force-delete policy, the policy-on twin with exactly
+    those cases."""
+    policy = [c for c in cases if _eval_case_header_fields(c).get("needs") == EVAL_FORCE_DELETE_NEED]
+    plain = [c for c in cases if c not in policy]
+    variants: list[tuple[str, dict[str, str], list[str]]] = []
+    if plain:
+        variants.append(("", {}, plain))
+    if policy:
+        variants.append((EVAL_FORCE_DELETE_SLUG, {EVAL_FORCE_DELETE_ENV: "1"}, policy))
+    return variants
+
+
+def _eval_lanes() -> list[tuple[str, str, str, dict[str, str], list[str]]]:
+    """Every eval lane before sharding: (feature, topology, variant, env,
+    cases), each committed case in exactly one."""
+    return [
+        (feature, topology, variant, env, cases)
+        for feature, topology, group in _eval_case_groups()
+        for variant, env, cases in _eval_lane_variants(group)
+    ]
+
+
 def _eval_case_peak_pods(case_id: str) -> int | None:
     """Return the case's declared peak pod count, including runtime workers."""
     matches = sorted(EVAL_CASE_DIR.glob(f"*/{case_id}.yaml"))
@@ -1206,10 +1251,13 @@ def _gke_eval_group() -> str:
     soft = _eval_scheduler_soft_topologies()
     children = []
     for scheduler in EVAL_SCHEDULERS:
-      for feature, topology, cases in _eval_case_groups():
+      for feature, topology, variant, variant_env, cases in _eval_lanes():
         slug = f"{feature}-{topology}".replace("_", "-")
         if scheduler:
             slug += "-" + scheduler.replace("_", "-")
+        if variant:
+            slug += "-" + variant
+        variant_part = f" [{variant}]" if variant else ""
         prometheus = "true" if feature in ("canary", "reject") else "false"
         pod_budget = configured_pod_budget or ("35" if feature == "canary" else "64")
         if feature == "canary":
@@ -1230,7 +1278,7 @@ def _gke_eval_group() -> str:
                 # Nothing fits the cap: say so in the build instead of dropping
                 # the twin silently.
                 children.append({
-                    "label": f":information_source: {feature} / {topology} [{scheduler}] needs more than {GKE_EVAL_SCHEDULER_MAX_WORKERS} nodes ({len(skipped)} cases skipped)",
+                    "label": f":information_source: {feature} / {topology} [{scheduler}]{variant_part} needs more than {GKE_EVAL_SCHEDULER_MAX_WORKERS} nodes ({len(skipped)} cases skipped)",
                     "key": f"omenative-e2e-{slug}-skipped",
                     "command": "echo 'whole-node gang placement: cases above the node cap are not run in this twin: "
                     + " ".join(skipped) + "'",
@@ -1255,6 +1303,7 @@ def _gke_eval_group() -> str:
                 "OME_EVAL_CASE_CONCURRENCY": str(concurrency),
                 "OME_EVAL_POD_BUDGET": pod_budget,
                 "PROD_ECR_REGISTRY": PROD_ECR_REGISTRY,
+                **variant_env,
             }
             if scheduler:
                 env["OME_EVAL_SCHEDULER"] = scheduler
@@ -1263,7 +1312,7 @@ def _gke_eval_group() -> str:
             if skipped:
                 env["OME_EVAL_SCHEDULER_SKIPPED"] = " ".join(skipped)
             child = {
-                "label": f":test_tube: {feature} / {topology}{part}{sched_part} ({len(shard_cases)} cases)",
+                "label": f":test_tube: {feature} / {topology}{part}{sched_part}{variant_part} ({len(shard_cases)} cases)",
                 "key": f"omenative-e2e-{slug}{key_part}",
                 "depends_on": "package-kind-eval-image",
                 "timeout_in_minutes": 180,

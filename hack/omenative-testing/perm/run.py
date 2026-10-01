@@ -47,8 +47,11 @@ Architecture:
      expect=heals|parked, node:notready (the victim's KIND node kubelet
      stopped, started again at lift=after-settle|after-failed|after-recover)
      as expect=relocated|repaired|parked, or SKIP where this host's docker
-     does not own the nodes. Apparatus errors record the distinct INFRA-FAIL
-     verdict — harness infrastructure broke, not the product.
+     does not own the nodes; needs=forcedelete|no-forcedelete names the
+     force-delete policy the outcome is read against, SKIP where the
+     deployed controller config differs. Apparatus errors record the
+     distinct INFRA-FAIL verdict — harness infrastructure broke, not the
+     product.
   7. Optional mid-roll edit (edit=strategy:<type> | edit=restartPolicy:<policy>
      at during=settling|rotating): every bumped member's lifecycle is patched
      at the hook, and the verdict adds that the edit was applied and landed.
@@ -1417,6 +1420,15 @@ LIFT_EXPECTS = {"heals", "parked"}
 NODE_EXPECTS = {"relocated", "repaired", "parked"}
 # The lift phase each node outcome is read against.
 NODE_LIFTS = {"relocated": {"after-recover"}, "repaired": {"after-settle", "after-failed"}, "parked": {"after-settle"}}
+# needs=<policy> names the deployed controller configuration a node outcome
+# is read against: forcedelete needs lifecycle.forceDelete in the
+# controller's ConfigMap (relocation is the outcome that policy produces),
+# no-forcedelete needs it absent (the park is the fate without it). A
+# cluster whose config does not match records SKIP, as a host without the
+# docker that owns the nodes does; repaired holds either way and names none.
+NEEDS_FORCE_DELETE, NEEDS_NO_FORCE_DELETE = "forcedelete", "no-forcedelete"
+NEEDS = {NEEDS_FORCE_DELETE, NEEDS_NO_FORCE_DELETE}
+NODE_NEEDS = {"relocated": NEEDS_FORCE_DELETE, "parked": NEEDS_NO_FORCE_DELETE}
 # Persistent faults a rollout case may fire on the idle service (during=idle)
 # instead of at the settling hook after the bump; no bump follows, and the
 # verdict reads what the product does about the fault on its own.
@@ -1936,6 +1948,12 @@ CORDON_LABEL = "perm.test/cordoned"
 # selector (charts/ome-resources/templates/ome-controller/deployment.yaml).
 CTRL_NS = os.environ.get("OME_TEST_CTRL_NS", "ome")
 CTRL_SELECTOR = os.environ.get("OME_TEST_CTRL_SELECTOR", "control-plane=ome-controller-manager")
+# The controller's ConfigMap and the key of its lifecycle block, where the
+# force-delete policy a node case is read against is declared.
+CTRL_CONFIGMAP = os.environ.get("OME_TEST_CTRL_CONFIGMAP", "inferenceservice-config")
+LIFECYCLE_CONFIG_KEY = "lifecycle"
+FORCE_DELETE_KEY = "forceDelete"
+FORCE_DELETE_THRESHOLD_KEY = "nodeUnreachableThreshold"
 # How long a restarted manager is given to report Ready before a case that
 # depends on it going first is an apparatus failure.
 CTRL_READY_S = int(180 * TIMEOUT_MULT)
@@ -2572,6 +2590,50 @@ def _node_fault_capability():
     return None
 
 
+def _controller_lifecycle_config():
+    """(the lifecycle block of the deployed controller config as a dict, None),
+    an absent block reading as {}; or (None, why it could not be read)."""
+    r = kubectl("-n", CTRL_NS, "get", "configmap", CTRL_CONFIGMAP, "-o", "json")
+    if r.returncode != 0:
+        return None, f"ConfigMap {CTRL_NS}/{CTRL_CONFIGMAP} could not be read: {(r.stderr or '').strip()[:120]}"
+    try:
+        data = json.loads(r.stdout).get("data") or {}
+        block = data.get(LIFECYCLE_CONFIG_KEY)
+        return (json.loads(block) if block else {}), None
+    except (ValueError, TypeError, AttributeError) as e:
+        return None, f"ConfigMap {CTRL_NS}/{CTRL_CONFIGMAP} {LIFECYCLE_CONFIG_KEY} block is not JSON: {e}"
+
+
+def _needs_unmet(needs, lifecycle, err):
+    """Why the deployed controller config does not match the case's needs=,
+    or None when it does (or the case names none)."""
+    if not needs:
+        return None
+    if err:
+        return f"needs={needs} cannot be read off the deployed controller config: {err}"
+    policy = (lifecycle or {}).get(FORCE_DELETE_KEY)
+    if needs == NEEDS_FORCE_DELETE and not policy:
+        return (f"needs={needs}: the deployed controller config has no {LIFECYCLE_CONFIG_KEY}.{FORCE_DELETE_KEY} "
+                f"({CTRL_NS}/{CTRL_CONFIGMAP}); relocation is the outcome that policy produces")
+    if needs == NEEDS_NO_FORCE_DELETE and policy:
+        return (f"needs={needs}: the deployed controller config carries {LIFECYCLE_CONFIG_KEY}.{FORCE_DELETE_KEY} "
+                f"({FORCE_DELETE_THRESHOLD_KEY} {policy.get(FORCE_DELETE_THRESHOLD_KEY)}); "
+                f"this cell reads the fate without it")
+    return None
+
+
+def _relocation_budget(ctx, comp, policy):
+    """How long a relocation may take from the fault: the policy's unreachable
+    threshold plus the rotate budget of one Instance's pods, within the
+    fleet's idle budget. The node turns NotReady on the cluster's own grace
+    before the threshold starts counting; the base budget covers that and
+    the rebuild."""
+    threshold = _duration_s((policy or {}).get(FORCE_DELETE_THRESHOLD_KEY))
+    if threshold is None:
+        return _idle_budget(ctx)
+    return min(_idle_budget(ctx), int(threshold + ROTATE_BASE_S + ROTATE_PER_POD_S * ctx["pods_per_inst"][comp]))
+
+
 def _manager_nodes():
     """The nodes hosting a manager pod; losing one would stop the controller
     under test along with the victim."""
@@ -2645,10 +2707,18 @@ def _fault_node_fire(f, pod_state, old_hashes):
     print(f"    ⚡ {f['notes'][-1]}")
 
 
-def _instance_relocated(pods, pre_uids, node):
-    """True when the Instance is Ready and serving on pods that are all new
-    and none of which sits on `node`."""
-    return _instance_rebuilt(pods, pre_uids) and all(p.get("node") and p["node"] != node for _n, p in pods)
+def _instance_relocated(pods, lost_uids, node):
+    """True when the Instance is Ready and serving with no pod on `node` and
+    none of the pods the node held (lost_uids): each of those is replaced,
+    while members on live nodes may keep theirs."""
+    return bool(pods) and all(p.get("ready") and p.get("serving") and p.get("uid") and p["uid"] not in lost_uids
+                              and p.get("node") and p["node"] != node for _n, p in pods)
+
+
+def _uids_present(pod_state, uids):
+    """True while any pod carrying one of `uids` is still in the API, alive
+    or on its way out."""
+    return any(p and p.get("uid") in uids for p in pod_state.values())
 
 
 def _node_bite_held(node, pods):
@@ -3008,6 +3078,34 @@ def _lift_checks(f, expect, lift, out, hdr, verdict, notes, checks):
         f["infra_fail"] = f"{kind}: {cause} could not be lifted"
         return verdict
     checks.append(f"  ✓ {kind}: {cause} lifted {out['lifted_at']:.0f}s after the fault")
+    if expect == "relocated":
+        if out.get("reaped_at") is None:
+            verdict = "FAIL"
+            notes.append(f"{kind}: pods the node held were still in the API {IDLE_HOLD_S}s after the lift")
+            checks.append(f"  ✗ {kind}: the pods the node held were still in the API {IDLE_HOLD_S}s after the lift "
+                          f"(the kubelet's return must leave nothing of the Instance behind)")
+        else:
+            checks.append(f"  ✓ {kind}: every pod the node held is gone {out['reaped_at']:.0f}s after the lift")
+        if out.get("serving_after_lift"):
+            checks.append(f"  ✓ {kind}: {comp} Instance {inst} still Ready and serving on its new pods after the lift")
+        else:
+            verdict = "FAIL"
+            notes.append(f"{kind}: {comp} Instance {inst} not serving after the lift (row {out.get('phase_after') or '?'})")
+            checks.append(f"  ✗ {kind}: {comp} Instance {inst} is not Ready and serving after the lift "
+                          f"(row phase {out.get('phase_after') or '?'})")
+        if out.get("new_hash"):
+            verdict = "FAIL"
+            notes.append(f"{kind}: a new revision appeared while relocating")
+            checks.append(f"  ✗ {kind}: a new revision appeared — the rebuild must land the running revision, with no bump")
+        else:
+            checks.append(f"  ✓ {kind}: running revision unchanged (no bump)")
+        if out.get("reset_used"):
+            verdict = "FAIL"
+            notes.append(f"{kind}: the reset mailbox was written")
+            checks.append(f"  ✗ {kind}: {RESET_ANNO} is set on the ISVC — a relocation that needed the reset mailbox is not the policy's")
+        else:
+            checks.append(f"  ✓ {kind}: relocated without the reset mailbox ({RESET_ANNO} absent)")
+        return verdict
     if expect in ("heals", "repaired"):
         if out.get("healed_at") is None:
             verdict = "FAIL"
@@ -3050,8 +3148,14 @@ def _idle_lift(ctx, f, hdr):
     case_id, comp, inst = ctx["case_id"], f["crash_comp"], f["crash_inst"]
     lift, expect = str(hdr.get("lift")), str(hdr.get("expect"))
     budget, t0 = _idle_budget(ctx), ctx["trigger_ts"]
+    if lift == "after-recover":
+        budget = _relocation_budget(ctx, comp, ctx.get("force_delete"))
     pre_uids = {p["uid"] for _n, p in _instance_pods(ctx["pod_state"], comp, inst) if p.get("uid")}
+    # The pods the fault took: on a node fault those on the stopped node.
+    lost_uids = {p["uid"] for _n, p in _instance_pods(ctx["pod_state"], comp, inst)
+                 if p.get("uid") and (f["kind"] != "node" or p.get("node") == f.get("node"))}
     out = {"bitten_at": None, "failed_at": None, "recovered_at": None, "lifted_at": None, "healed_at": None,
+           "reaped_at": None, "serving_after_lift": False,
            "park_broken": None, "phase_after": "", "new_hash": False, "reset_used": False}
 
     def pods():
@@ -3084,7 +3188,7 @@ def _idle_lift(ctx, f, hdr):
         if lift == "after-settle":
             due = bitten_since is not None and now - bitten_since >= LIFT_SETTLE_S
         elif lift == "after-recover":
-            if out["bitten_at"] is not None and _instance_relocated(pods(), pre_uids, f.get("node")):
+            if out["bitten_at"] is not None and _instance_relocated(pods(), lost_uids, f.get("node")):
                 out["recovered_at"] = now - t0
                 due = True
         elif out["bitten_at"] is not None and now - last_ir >= 2.0:
@@ -3125,7 +3229,18 @@ def _idle_lift(ctx, f, hdr):
                     else:
                         stable = None
             elif expect == "relocated":
-                state = "RELOCATED"
+                # The kubelet is back: the pods the node held must leave the
+                # API and the rebuilt Instance must keep serving.
+                print(f"  Phase 5: watching {comp} Instance {inst} after the lift — the pods the node held gone, "
+                      f"the Instance serving (≤{IDLE_HOLD_S}s)")
+                state, hold_end = "RELOCATED", time.time() + IDLE_HOLD_S
+                while time.time() < hold_end and not ctx["closed"]:
+                    _read_one(ctx)
+                    if out["reaped_at"] is None and not _uids_present(ctx["pod_state"], lost_uids):
+                        out["reaped_at"] = time.time() - lifted_ts
+                    if out["reaped_at"] is not None and serving():
+                        break
+                out["serving_after_lift"] = serving()
                 ctx["converged_at"] = out["recovered_at"]
             elif f["kind"] == "configkey":
                 print(f"  Phase 5: watching {comp} Instance {inst} for the park (≤{IDLE_HOLD_S}s)")
@@ -3155,14 +3270,22 @@ def _idle_fault(case_id, yaml_file, desc, hdr):
     group holds the repair and records the hold. A lift fault is judged on
     what the Instance does once its cause is lifted. A fault whose apparatus
     this cluster lacks records SKIP with the reason."""
+    lifecycle = {}
     if str(hdr.get("fault", "")).partition(":")[0] == "node":
         reason = _node_fault_capability()
         if reason:
             print(f"  ⓘ node fault unavailable here: {reason}")
             return _write_fail(case_id, desc, hdr, "SKIP", f"node fault unavailable here: {reason}")
+        if hdr.get("needs"):
+            lifecycle, read_err = _controller_lifecycle_config()
+            reason = _needs_unmet(str(hdr["needs"]), lifecycle, read_err)
+            if reason:
+                print(f"  ⓘ {reason}")
+                return _write_fail(case_id, desc, hdr, "SKIP", reason)
     ctx, err = _setup_and_ready(case_id, yaml_file, hdr)
     if err:
         return _write_fail(case_id, desc, hdr, *err)
+    ctx["force_delete"] = (lifecycle or {}).get(FORCE_DELETE_KEY)
     f = ctx["fault"]
     N, configured, ppi = ctx["N"], ctx["configured"], ctx["pods_per_inst"]
     expect = hdr.get("expect") if f["kind"] in LIFT_FAULTS else _idle_break_expect(f, ctx["info"], hdr)
@@ -3472,6 +3595,9 @@ HDR_VALIDATORS = {
     # cause is lifted — after-settle once it has visibly bitten, after-failed
     # once the victim's Instance row is Failed.
     "lift": lambda v: v == 1 or v in LIFT_PHASES,
+    # needs=<policy> (fault=node): the deployed force-delete policy the
+    # outcome is read against; SKIP where the controller config differs.
+    "needs": lambda v: v in NEEDS,
 }
 HDR_REQUIRED = ("Ne", "Nd", "Nr", "ceil_e", "ceil_d", "ceil_r")
 
@@ -3734,6 +3860,12 @@ def validate_case_file(path):
         if fault_kind == "node" and expect in NODE_LIFTS and lift in phases and lift not in NODE_LIFTS[expect]:
             errs.append(f"{path}:1: expect={expect} under fault=node:{NODE_PARAM} is read at "
                         f"lift={'|'.join(sorted(NODE_LIFTS[expect]))}, not lift={lift}")
+        if fault_kind == "node" and expect in NODE_NEEDS and str(fields.get("needs", "")) != NODE_NEEDS[expect]:
+            errs.append(f"{path}:1: expect={expect} under fault=node:{NODE_PARAM} is read against the deployed "
+                        f"force-delete policy (needs={NODE_NEEDS[expect]}; SKIP where the controller config differs)")
+    if "needs" in fields and fault_kind != "node":
+        errs.append(f"{path}:1: needs={fields['needs']} names the force-delete policy a node outcome is read against "
+                    f"(needs fault=node:{NODE_PARAM})")
     if not re.search(rf"\bname:\s*{re.escape(cid)}\b", text):
         errs.append(f"{path}:1: no document with metadata name '{cid}' (run.py gets the ISVC by case id)")
     return errs

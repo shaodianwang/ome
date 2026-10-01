@@ -193,6 +193,9 @@ HEADER_VALUES = {
     "verb2": CANARY_VERBS,
     "prearm": PREARM_VERBS,
     "release": {"promote", "resume"},
+    # The deployed controller config a cell is read against; the runner SKIPs
+    # the cell where the config differs.
+    "needs": {"forcedelete", "no-forcedelete"},
 }
 
 

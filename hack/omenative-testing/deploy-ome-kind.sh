@@ -23,6 +23,9 @@
 #   OME_KIND_PROMETHEUS_ENABLED  install Prometheus  (default: true)
 #   OME_KIND_PROMETHEUS_REPOSITORY  Prometheus repository (default: chart value)
 #   OME_KIND_PROMETHEUS_TAG  Prometheus tag            (default: chart value)
+#   OME_EVAL_FORCE_DELETE  set the controller's lifecycle.forceDelete policy (default: false)
+#   OME_EVAL_FORCE_DELETE_THRESHOLD  its nodeUnreachableThreshold (default: 90s)
+#   OME_EVAL_FORCE_DELETE_SLACK  its overdueSlack             (default: 30s)
 #
 # Images are built locally and loaded into the cluster's nodes, never pushed.
 # global.hub is set empty so the chart renders bare `ome-manager:<tag>` /
@@ -118,6 +121,22 @@ case "${OME_KIND_PROMETHEUS_ENABLED:-true}" in
   0|false|FALSE|no|NO) PROMETHEUS_ENABLED=false ;;
   *) echo "FATAL: OME_KIND_PROMETHEUS_ENABLED must be true or false" >&2; exit 2 ;;
 esac
+# Force-delete dimension: the controller's lifecycle.forceDelete policy, off
+# by chart default. On, the harness's node-loss cases that need the policy
+# run (relocation of a Ready Instance off a dead node) and those that read
+# the fate without it SKIP. The threshold is the age the node's unreachable
+# evidence must reach before the policy acts: longer than the harness's
+# settle window, after which a repaired case starts the kubelet again (the
+# node reads NotReady for about 30-40 s then), and short enough that a
+# relocation lands well inside the case budget. The slack is how long past
+# a Terminating pod's own deadline before it counts as wedged.
+case "${OME_EVAL_FORCE_DELETE:-false}" in
+  1|true|TRUE|yes|YES) FORCE_DELETE_ENABLED=1 ;;
+  0|false|FALSE|no|NO|"") FORCE_DELETE_ENABLED=0 ;;
+  *) echo "FATAL: OME_EVAL_FORCE_DELETE must be true or false" >&2; exit 2 ;;
+esac
+FORCE_DELETE_THRESHOLD="${OME_EVAL_FORCE_DELETE_THRESHOLD:-90s}"
+FORCE_DELETE_SLACK="${OME_EVAL_FORCE_DELETE_SLACK:-30s}"
 
 require_file() {
   [ -s "$1" ] || { echo "FATAL: required offline artifact is missing: $1" >&2; exit 1; }
@@ -426,6 +445,13 @@ HELM_ARGS=(
   --set ome.controller.resources.limits.cpu=2
   --set ome.controller.resources.limits.memory=2Gi
 )
+if [ "$FORCE_DELETE_ENABLED" -eq 1 ]; then
+  echo "    force-delete policy on: nodeUnreachableThreshold=${FORCE_DELETE_THRESHOLD} overdueSlack=${FORCE_DELETE_SLACK}"
+  HELM_ARGS+=(
+    --set ome.controller.lifecycle.forceDelete.nodeUnreachableThreshold="$FORCE_DELETE_THRESHOLD"
+    --set ome.controller.lifecycle.forceDelete.overdueSlack="$FORCE_DELETE_SLACK"
+  )
+fi
 
 # Two passes, because the chart both registers webhooks with failurePolicy=Fail
 # and ships a ClusterServingRuntime those webhooks intercept. Helm submits the

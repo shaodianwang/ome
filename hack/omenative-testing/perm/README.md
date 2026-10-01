@@ -47,6 +47,24 @@ scale behavior. Targets whatever cluster your kubeconfig points at — override 
 > agent) leaves with exit 125 and the pipeline reruns it; a red case is never
 > retried.
 >
+> **Force-delete dimension.** `OME_EVAL_FORCE_DELETE=1` makes
+> `deploy-ome-kind.sh` set the controller's `lifecycle.forceDelete` policy
+> (off by chart default): `OME_EVAL_FORCE_DELETE_THRESHOLD` (default `90s`)
+> becomes `nodeUnreachableThreshold`, the age the node's unreachable evidence
+> must reach before the policy acts, and `OME_EVAL_FORCE_DELETE_SLACK`
+> (default `30s`) becomes `overdueSlack`, how long past a Terminating pod's own
+> deadline before it counts as wedged. A node-loss case names the policy its
+> outcome is read against with `needs=forcedelete|no-forcedelete`, and the
+> runner reads the deployed `inferenceservice-config` lifecycle block before
+> anything is applied: where it differs the case records `SKIP` with the
+> reason. CI emits a policy-on twin (`omenative-e2e-<feature>-<topology>-forcedelete`,
+> and its scheduler twin) for every lane that has `needs=forcedelete` cases,
+> carrying exactly those cases; the plain lane keeps the rest. The threshold
+> is longer than the settle window after which a `repaired` case starts the
+> kubelet again (the node has read NotReady for 30–40 s by then, so the
+> policy never acts on that half) and short enough that a relocation lands
+> about three minutes after the stop, well inside the case budget.
+>
 > **Canary-analysis cases (`analysis=…`) additionally need:** the bundled
 > `ome-prometheus` enabled in the cluster (chart `prometheus.enabled`, now the
 > default) scraping `$OME_TEST_NS`, and the `canary-metrics` image (built from
@@ -746,28 +764,34 @@ crashloop case).
   default, comes first; a gang whose other members sit on live nodes keeps
   them serving, so the bite is read on the stopped node's pods alone), and
   `expect=` says what the Instance's fate is under the restart policy and
-  the force-delete policy as configured:
-  `expect=relocated` with `lift=after-recover` — while the node is down the
-  Instance comes back Ready and serving on new pods on other nodes (the
-  force-delete policy frees its names), then the kubelet is restored;
+  the force-delete policy as configured, and `needs=` names that policy:
+  `expect=relocated` with `lift=after-recover` and `needs=forcedelete` —
+  while the node is down the policy frees the pod names it holds once the
+  node's unreachable evidence is older than the threshold, and the Instance
+  comes back Ready and serving on other nodes (every pod the node held
+  replaced; members on live nodes may keep theirs) within the threshold plus
+  one Instance's rotate budget; then the kubelet is restored, every pod the
+  node held must leave the API within the hold window and the Instance must
+  still serve on its running revision with no reset mailbox;
   `expect=repaired` with `lift=after-settle|after-failed` — the kubelet is
   restored once the bite has held (or once the row reads `Failed`) and the
   Instance must be Ready and serving again within the budget, on its running
-  revision, with no reset mailbox; `expect=parked` with `lift=after-settle` —
-  across the hold window with the node down nothing rebuilds the Instance
-  (no force delete configured), then the kubelet is restored and only the
-  teardown is required to converge. A relocation may bring the replacement
-  up beside the stuck pods, so the no-surge claim is informational there.
+  revision, with no reset mailbox; `expect=parked` with `lift=after-settle`
+  and `needs=no-forcedelete` — across the hold window with the node down
+  nothing rebuilds the Instance (no force delete configured), then the
+  kubelet is restored and only the teardown is required to converge. A
+  relocation may bring the replacement up beside the stuck pods, so the
+  no-surge claim is informational there.
   The generated `isvcs/gen-node/` family crosses the verb with topology,
   restart policy, migration mode (Auto and Never) and an idle rolling
-  group, and asserts the configured outcome in every cell: `parked` while
-  the node is down and `repaired` once the kubelet is back, both at
-  `lift=after-settle`. Without `lifecycle.forceDelete` in the lane's chart
-  values nothing frees the names a dead node holds, so `relocated` is not a
-  configured outcome there and the family does not emit it; neither
-  migration mode moves a Ready Instance (Auto relocates on an expired
-  attempt's deadline, which a Ready Instance never has), and each cell's
-  line-2 reason says why its restart policy and group change nothing.
+  group, in two halves that each run on the lane whose controller config
+  they read: without the policy, `parked` while the node is down and
+  `repaired` once the kubelet is back, both at `lift=after-settle`; with the
+  policy (the force-delete twin), `relocated` at `lift=after-recover`.
+  Neither migration mode plays a part (Auto relocates on an expired
+  attempt's deadline, which a Ready Instance never has; the relocation is
+  the force-delete sweep plus the ordinary rebuild), and each cell's line-2
+  reason says what its restart policy and group do.
 
 - **`fault=ctrlrestart:<hook>` under an operation in flight** is what the
   generated `isvcs/gen-ctrlrestart/` family drives: the manager pod is

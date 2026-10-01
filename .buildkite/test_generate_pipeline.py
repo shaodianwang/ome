@@ -676,7 +676,7 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         assignments = {}
         job_count = 0
         shard_counts = {}
-        for feature, topology, cases in gp._eval_case_groups():
+        for feature, topology, variant, _env, cases in gp._eval_lanes():
             pod_budget = 35 if feature == "canary" else 64
             target_waves = 2 if feature == "canary" else 4
             shards = gp._split_eval_cases(
@@ -686,7 +686,7 @@ class TestCheckedInTreeClassification(unittest.TestCase):
                 pod_budget=pod_budget,
                 target_waves=target_waves,
             )
-            shard_counts[(feature, topology)] = len(shards)
+            shard_counts[(feature, topology, variant)] = len(shards)
             job_count += len(shards)
             for shard_index, shard in enumerate(shards):
                 self.assertTrue(shard)
@@ -700,7 +700,7 @@ class TestCheckedInTreeClassification(unittest.TestCase):
                 self.assertLessEqual(len(waves), target_waves)
                 for case_id in shard:
                     self.assertNotIn(case_id, assignments)
-                    assignments[case_id] = (feature, topology, shard_index)
+                    assignments[case_id] = (feature, topology, variant, shard_index)
 
         committed = {
             case_id
@@ -708,33 +708,75 @@ class TestCheckedInTreeClassification(unittest.TestCase):
             for case_id in cases
         }
         self.assertEqual(set(assignments), committed)
-        self.assertEqual(shard_counts[("canary", "engine")], 21)
-        self.assertEqual(shard_counts[("canary", "pd")], 13)
-        self.assertEqual(shard_counts[("gen-crashloop", "engine")], 3)
-        self.assertEqual(shard_counts[("gen-crashloop", "engine-mn")], 3)
-        self.assertEqual(shard_counts[("gen-crashloop", "pd")], 5)
-        self.assertEqual(shard_counts[("gen-crashloop", "pd-mn")], 5)
-        self.assertEqual(shard_counts[("gen-switch", "engine")], 2)
-        self.assertEqual(shard_counts[("gen-switch", "engine-mn")], 2)
-        self.assertEqual(shard_counts[("gen-switch", "pd")], 4)
-        self.assertEqual(shard_counts[("gen-switch", "pd-mn")], 4)
-        self.assertEqual(shard_counts[("gen-crashloop-idle", "engine")], 1)
-        self.assertEqual(shard_counts[("gen-crashloop-idle", "engine-mn")], 1)
-        self.assertEqual(shard_counts[("gen-crashloop-idle", "pd")], 2)
-        self.assertEqual(shard_counts[("gen-crashloop-idle", "pd-mn")], 2)
-        self.assertEqual(shard_counts[("gen-crashloop-sibling", "pd")], 1)
-        self.assertEqual(shard_counts[("gen-crashloop-sibling", "pd-mn")], 1)
+        self.assertEqual(shard_counts[("canary", "engine", "")], 21)
+        self.assertEqual(shard_counts[("canary", "pd", "")], 13)
+        self.assertEqual(shard_counts[("gen-crashloop", "engine", "")], 3)
+        self.assertEqual(shard_counts[("gen-crashloop", "engine-mn", "")], 3)
+        self.assertEqual(shard_counts[("gen-crashloop", "pd", "")], 5)
+        self.assertEqual(shard_counts[("gen-crashloop", "pd-mn", "")], 5)
+        self.assertEqual(shard_counts[("gen-switch", "engine", "")], 2)
+        self.assertEqual(shard_counts[("gen-switch", "engine-mn", "")], 2)
+        self.assertEqual(shard_counts[("gen-switch", "pd", "")], 4)
+        self.assertEqual(shard_counts[("gen-switch", "pd-mn", "")], 4)
+        self.assertEqual(shard_counts[("gen-crashloop-idle", "engine", "")], 1)
+        self.assertEqual(shard_counts[("gen-crashloop-idle", "engine-mn", "")], 1)
+        self.assertEqual(shard_counts[("gen-crashloop-idle", "pd", "")], 2)
+        self.assertEqual(shard_counts[("gen-crashloop-idle", "pd-mn", "")], 2)
+        self.assertEqual(shard_counts[("gen-crashloop-sibling", "pd", "")], 1)
+        self.assertEqual(shard_counts[("gen-crashloop-sibling", "pd-mn", "")], 1)
         for topology in ("engine", "engine-mn", "pd", "pd-mn"):
-            self.assertEqual(shard_counts[("gen-heal", topology)], 1)
-        self.assertEqual(shard_counts[("gen-imagepull", "engine")], 1)
-        self.assertEqual(shard_counts[("gen-imagepull", "engine-mn")], 1)
-        self.assertEqual(shard_counts[("gen-imagepull", "pd")], 2)
-        self.assertEqual(shard_counts[("gen-imagepull", "pd-mn")], 2)
+            self.assertEqual(shard_counts[("gen-heal", topology, "")], 1)
+        self.assertEqual(shard_counts[("gen-imagepull", "engine", "")], 1)
+        self.assertEqual(shard_counts[("gen-imagepull", "engine-mn", "")], 1)
+        self.assertEqual(shard_counts[("gen-imagepull", "pd", "")], 2)
+        self.assertEqual(shard_counts[("gen-imagepull", "pd-mn", "")], 2)
         for topology in ("engine", "pd", "engine-mn", "pd-mn"):
-            self.assertEqual(shard_counts[("gen-node", topology)], 1)
+            self.assertEqual(shard_counts[("gen-node", topology, "")], 1)
+            self.assertEqual(shard_counts[("gen-node", topology, gp.EVAL_FORCE_DELETE_SLUG)], 1)
         for topology in ("engine", "pd", "engine-mn"):
-            self.assertEqual(shard_counts[("gen-ctrlrestart", topology)], 1)
-        self.assertEqual(job_count, 185)
+            self.assertEqual(shard_counts[("gen-ctrlrestart", topology, "")], 1)
+        self.assertEqual(job_count, 189)
+
+    def test_force_delete_twin_runs_exactly_the_cases_that_need_the_policy(self):
+        """A lane whose cases carry needs=forcedelete gets a policy-on twin
+        with exactly those cases and the deploy switch; the plain lane keeps
+        the rest and no switch, and lanes without such cases get no twin."""
+        with mock.patch.dict(
+            os.environ,
+            {
+                "GKE_EVAL_CASE_CONCURRENCY": "4",
+                "GKE_EVAL_TARGET_WAVES": "4",
+                "GKE_EVAL_CANARY_TARGET_WAVES": "2",
+            },
+        ):
+            yaml_text = gp._gke_eval_group()
+        needing = {
+            case_id
+            for _, _, cases in gp._eval_case_groups()
+            for case_id in cases
+            if gp._eval_case_header_fields(case_id).get("needs") == gp.EVAL_FORCE_DELETE_NEED
+        }
+        self.assertTrue(needing)
+        self.assertTrue(all(gp._eval_case_header_fields(c).get("fault", "").startswith("node:") for c in needing))
+        twin_cases, plain_cases = set(), set()
+        for block in yaml_text.split("- label:")[1:]:
+            key = re.search(r'key: "(omenative-e2e-[^"]+)"', block)
+            command = re.search(r'command: "sh \.buildkite/run_omenative_eval_gke\.sh ([^"]+)"', block)
+            if not key or not command:
+                continue
+            cases = set(command.group(1).split()[2:])
+            if f"-{gp.EVAL_FORCE_DELETE_SLUG}" in key.group(1):
+                self.assertIn(f'{gp.EVAL_FORCE_DELETE_ENV}: "1"', block)
+                self.assertTrue(key.group(1).startswith("omenative-e2e-gen-node-"), key.group(1))
+                twin_cases |= cases
+            else:
+                self.assertNotIn(gp.EVAL_FORCE_DELETE_ENV, block)
+                plain_cases |= cases
+        self.assertEqual(twin_cases, needing)
+        self.assertFalse(plain_cases & needing)
+        self.assertIn("gen-node / engine [forcedelete]", yaml_text)
+        self.assertIn("gen-node / engine [ome-scheduler] [forcedelete]", yaml_text)
+        self.assertIn('key: "omenative-e2e-gen-node-engine-ome-scheduler-forcedelete"', yaml_text)
 
     def test_eval_group_emits_unique_subshard_keys_and_readable_labels(self):
         with mock.patch.dict(

@@ -51,8 +51,12 @@ into eleven generator-owned folders, using ONLY verbs and hooks the runners
                           at idle: the kubelet under it is stopped, then
                           started again at the lift), crossed with topology x
                           restartPolicy x migration mode x an idle rolling
-                          group x the configured outcome (parked while the
-                          node is down, repaired once it is back)
+                          group x the outcome: parked while the node is down
+                          and repaired once it is back without a force-delete
+                          policy (needs=no-forcedelete), relocated while the
+                          node is down with one (needs=forcedelete, the
+                          force-delete lane); each half SKIPs on the other
+                          lane's controller config
     gen-ctrlrestart/ p4600+ the manager pod is deleted under an operation in
                           flight (fault=ctrlrestart:<hook>): mid-surge,
                           mid-drain, mid-migration, mid-canary and
@@ -134,13 +138,16 @@ Constraint ledger (why the raw product is filtered — derived from run.py):
   - imagepull has one form (an image that never pulls has no after-Ready
     form) and runs each strategy at its canonical budget only; the idle half
     carries no group, since a grouped repair's hold is its own family.
-  - node:notready reads the configured fate of a Ready Instance on a dead
-    node. Without lifecycle.forceDelete (the chart default, and the lanes'),
-    nothing frees the pod names a silent node holds, so the only outcomes
-    the lift can read are parked (nothing rebuilds it while the node is down)
-    and repaired (the kubelet returns and the pods it never stopped serve
-    again), both at lift=after-settle; relocated needs that policy and is
-    not emitted. The migration axis renders as Auto (the default) and Never:
+  - node:notready reads the fate of a Ready Instance on a dead node under
+    the deployed force-delete policy, which the lanes set as a dimension.
+    Without lifecycle.forceDelete (the chart default) nothing frees the pod
+    names a silent node holds: parked (nothing rebuilds it while the node is
+    down) and repaired (the kubelet returns and the pods it never stopped
+    serve again), both at lift=after-settle. With the policy the names are
+    freed once the node's unreachable evidence is older than its threshold
+    and the Instance is rebuilt elsewhere while the node is down: relocated
+    at lift=after-recover. needs= pins each cell to the config it reads, so
+    the other lane SKIPs it. The migration axis renders as Auto (the default) and Never:
     the API has no mode that admits explicit requests but not relocation,
     and neither mode moves a Ready Instance (Auto relocates on an expired
     attempt's deadline, which a Ready Instance never has). Restart policy
@@ -291,6 +298,18 @@ NODE_SHAPES = [("engine", 4, 0), ("pd", 4, 0), ("engine-mn", 2, 1), ("pd-mn", 2,
 NODE_MIGRATIONS = ["Auto", "Never"]
 NODE_COORDS = ["none", "rolling"]
 NODE_OUTCOMES = [("parked", "after-settle"), ("repaired", "after-settle")]
+# The relocation half, emitted after the first: the force-delete lane's
+# outcome, read once the Instance serves again on other nodes.
+NODE_RELOCATION = ("relocated", "after-recover")
+# The deployed force-delete policy each outcome is read against (run.py
+# SKIPs the cell where the controller config differs); repaired holds under
+# both and names none.
+NODE_NEEDS = {"parked": "no-forcedelete", "relocated": "forcedelete"}
+NODE_RELOCATION_REBUILD = {
+    "None": ("the pod the node held is recreated at the same index on another node, and members on live "
+             "nodes keep theirs"),
+    "RecreateInstance": ("the lost pod re-arms the whole-Instance rebuild on other nodes"),
+}
 NODE_NO_TRIGGER = {
     "None": "a pod that is NotReady but neither restarted nor Failed is no repair trigger under restart policy None",
     "RecreateInstance": ("a NotReady pod is still present, so RecreateInstanceOnPodRestart reads neither a runner "
@@ -417,10 +436,6 @@ MISSING_HOOKS = [
     "controller restart while a repair is open (a crash loop at idle with the "
     "manager deleted once the rebuild has started) — the runner fires one fault "
     "per case and the idle-break handler fires no second one",
-    "relocation of a Ready Instance off a dead node (fault=node:notready with "
-    "expect=relocated) — needs lifecycle.forceDelete in the lane's chart values; "
-    "without it nothing frees the names the node holds and relocated is not a "
-    "configured outcome",
 ]
 
 
@@ -1082,6 +1097,17 @@ def _node_group(topo, co):
 
 
 def _node_reason(outcome, rp, mig, co):
+    if outcome == "relocated":
+        out = (f"the kubelet under the highest-index engine Instance is stopped; the node reads NotReady and no "
+               f"pod of the Instance on it serves; once the node's unreachable evidence is older than the deployed "
+               f"force-delete threshold the policy frees the pod names it holds and the Instance is rebuilt on other "
+               f"nodes while the node is still down: {NODE_RELOCATION_REBUILD[rp]}; it serves on its running revision "
+               f"with no new revision and no reset mailbox; then the kubelet is started again and every pod the node "
+               f"held is gone; the move is the force-delete sweep plus the ordinary rebuild, not a migration, so "
+               f"migration mode {mig} plays no part")
+        if co != "none":
+            out += "; a rebuild that recovers capacity already lost opens no new outage, so the rolling group does not hold it"
+        return out
     still = f"{NODE_NO_TRIGGER[rp]}; {NODE_NO_RELOCATION[mig]}"
     if co != "none":
         still += "; the rolling group would hold a repair while no run is open, and none opens"
@@ -1106,17 +1132,32 @@ def emit_node(add):
                 d_life = lib.lifecycle(restart=RP_FULL[rp], mig={"mode": mig}) if is_pd(topo) else None
                 for co in NODE_COORDS:
                     for outcome, lift in NODE_OUTCOMES:
-                        # Nobody bumps the service: every ceiling is N.
-                        kv = dict(**counts(topo, n), **ceilings(topo, n, "SurgeThenDrain", 0),
-                                  fault=f"node:{NODE_PARAM}", during="idle", lift=lift, expect=outcome,
-                                  co=co, topo=topo)
-                        meta = dict(strat="SurgeThenDrain", verb=f"node:{outcome}", rp=rp, mig=mig)
-                        desc = (f"{GEN_MARK} node notready {shape_tag(topo, w)} N={n} rp {rp} mig {mig} "
-                                f"co {co} {outcome}")
-                        add("gen-node", desc, kv, comps(topo, n, w, life, d_life=d_life),
-                            _node_reason(outcome, rp, mig, co), meta,
-                            cell=("node", outcome, topo, w, rp, mig, co),
-                            coord=_node_group(topo, co))
+                        _add_node_cell(add, topo, n, w, rp, mig, co, outcome, lift, life, d_life)
+
+
+def _add_node_cell(add, topo, n, w, rp, mig, co, outcome, lift, life, d_life):
+    # Nobody bumps the service: every ceiling is N.
+    kv = dict(**counts(topo, n), **ceilings(topo, n, "SurgeThenDrain", 0),
+              fault=f"node:{NODE_PARAM}", during="idle", lift=lift, expect=outcome, co=co, topo=topo)
+    if outcome in NODE_NEEDS:
+        kv["needs"] = NODE_NEEDS[outcome]
+    meta = dict(strat="SurgeThenDrain", verb=f"node:{outcome}", rp=rp, mig=mig)
+    desc = f"{GEN_MARK} node notready {shape_tag(topo, w)} N={n} rp {rp} mig {mig} co {co} {outcome}"
+    add("gen-node", desc, kv, comps(topo, n, w, life, d_life=d_life),
+        _node_reason(outcome, rp, mig, co), meta,
+        cell=("node", outcome, topo, w, rp, mig, co), coord=_node_group(topo, co))
+
+
+def emit_node_relocation(add):
+    """The force-delete lane's half of the node family, after the other."""
+    outcome, lift = NODE_RELOCATION
+    for topo, n, w in NODE_SHAPES:
+        for rp in RESTARTS:
+            for mig in NODE_MIGRATIONS:
+                life = lib.lifecycle(restart=RP_FULL[rp], mig={"mode": mig})
+                d_life = lib.lifecycle(restart=RP_FULL[rp], mig={"mode": mig}) if is_pd(topo) else None
+                for co in NODE_COORDS:
+                    _add_node_cell(add, topo, n, w, rp, mig, co, outcome, lift, life, d_life)
 
 
 # ── gen-ctrlrestart: the manager restarts under an operation in flight ──────
@@ -1243,6 +1284,7 @@ def build_outputs():
     emit_heal(add)
     emit_imagepull(add)
     emit_node(add)
+    emit_node_relocation(add)
     emit_ctrlrestart(add)
     stale = set(PARKED) - parked_used
     if stale:
@@ -1383,13 +1425,18 @@ def manifest(rows):
         " form) and runs each strategy at its canonical budget only; its idle"
         " half carries no group, since a grouped repair's hold is its own"
         " family.",
-        "- node:notready reads the configured fate of a Ready Instance on a dead"
-        " node: without `lifecycle.forceDelete` (the chart default, and the"
-        " lanes') nothing frees the pod names a silent node holds, so the"
-        " outcomes are `parked` (nothing rebuilds it while the node is down) and"
-        " `repaired` (the kubelet returns and the pods it never stopped serve"
-        " again), both at `lift=after-settle`; `relocated` needs that policy and"
-        " is not emitted. The migration axis is Auto (the default) and Never —"
+        "- node:notready reads the fate of a Ready Instance on a dead node under"
+        " the deployed force-delete policy, a lane dimension: without"
+        " `lifecycle.forceDelete` (the chart default) nothing frees the pod names"
+        " a silent node holds, so the outcomes are `parked` (nothing rebuilds it"
+        " while the node is down) and `repaired` (the kubelet returns and the"
+        " pods it never stopped serve again), both at `lift=after-settle`; with"
+        " the policy the names are freed once the node's unreachable evidence"
+        " is older than the threshold and the Instance is rebuilt elsewhere while"
+        " the node is down, `relocated` at `lift=after-recover`. `needs=`"
+        " pins parked to the plain lane and relocated to the force-delete lane"
+        " (the runner SKIPs where the controller config differs); repaired"
+        " holds under both. The migration axis is Auto (the default) and Never —"
         " the API has no mode that admits explicit requests but not relocation,"
         " and neither mode moves a Ready Instance (Auto relocates on an expired"
         " attempt's deadline, which a Ready Instance never has); restart policy"

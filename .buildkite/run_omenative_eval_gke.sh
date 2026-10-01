@@ -19,7 +19,13 @@ done
 
 short_sha=$(printf '%.8s' "${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}")
 scheduler="${OME_EVAL_SCHEDULER:-}"
-lane="${feature}-${topology}${scheduler:+-${scheduler}}"
+# The force-delete dimension names its lane too, so the cluster and the
+# JUnit report of the policy-on twin never collide with the plain lane's.
+case "${OME_EVAL_FORCE_DELETE:-}" in
+  1|true|TRUE|yes|YES) force_delete=forcedelete ;;
+  *) force_delete="" ;;
+esac
+lane="${feature}-${topology}${scheduler:+-${scheduler}}${force_delete:+-${force_delete}}"
 cluster=$(printf 'ome-eval-%s' "$lane" | tr '_' '-')
 images_dir="${OME_KIND_IMAGES_DIR:-/images}"
 repo="${PROD_ECR_REGISTRY:-168653207203.dkr.ecr.us-east-2.amazonaws.com}/msl_infra"

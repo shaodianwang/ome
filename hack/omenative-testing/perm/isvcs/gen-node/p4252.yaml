@@ -1,4 +1,4 @@
-# p4252: [gen] node notready pd-mn W1 N=2 rp None mig Never co none parked  Ne=2 Nd=2 Nr=2 ceil_e=2 ceil_d=2 ceil_r=2 fault=node:notready co=none topo=pd-mn during=idle lift=after-settle expect=parked
+# p4252: [gen] node notready pd-mn W1 N=2 rp None mig Never co none parked  Ne=2 Nd=2 Nr=2 ceil_e=2 ceil_d=2 ceil_r=2 fault=node:notready co=none topo=pd-mn during=idle lift=after-settle expect=parked needs=no-forcedelete
 # reason: the kubelet under the highest-index engine Instance is stopped; the node reads NotReady and no pod of the Instance on it serves; nothing may rebuild the Instance while the node is down: a pod that is NotReady but neither restarted nor Failed is no repair trigger under restart policy None; migration mode Never allows no migration at all; with no force-delete policy configured (the chart default) nothing frees its pod names, so across the hold window no new pod appears for it; then the kubelet is started again and only the teardown must converge; a rebuild elsewhere while the node is down is the force-delete path and fails this cell as configured
 apiVersion: ome.io/v1beta1
 kind: InferenceService

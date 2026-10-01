@@ -3,7 +3,7 @@
 Emitted by `generate_cases.py` — regenerate with `python3 generate_cases.py`; CI rejects hand edits via `python3 generate_cases.py --check` (run_test.py).
 The gen-* folders are generator-owned wholesale; promote a bug-finding case to a hand-owned folder under a fresh id instead of editing it here.
 
-Total generated cases: **1275**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
+Total generated cases: **1307**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
 
 ## Folders
 
@@ -18,17 +18,17 @@ Total generated cases: **1275**. The whole-corpus per-PR cap (hand + generated) 
 | gen-crashloop-sibling | 30 | p2600..p2629 |
 | gen-heal | 32 | p3000..p3031 |
 | gen-imagepull | 56 | p3400..p3455 |
-| gen-node | 64 | p4200..p4263 |
+| gen-node | 96 | p4200..p4295 |
 | gen-ctrlrestart | 34 | p4600..p4633 |
 
 ### By topology
 
 | value | cases |
 |---|---|
-| engine | 182 |
-| engine-mn | 333 |
-| pd | 326 |
-| pd-mn | 434 |
+| engine | 190 |
+| engine-mn | 341 |
+| pd | 334 |
+| pd-mn | 442 |
 
 ### By update strategy
 
@@ -38,7 +38,7 @@ Total generated cases: **1275**. The whole-corpus per-PR cap (hand + generated) 
 | InPlaceIfPossible | 236 |
 | InPlaceOnly | 236 |
 | RecreatePod | 275 |
-| SurgeThenDrain | 488 |
+| SurgeThenDrain | 520 |
 
 ### By failure verb / phase
 
@@ -64,6 +64,7 @@ Total generated cases: **1275**. The whole-corpus per-PR cap (hand + generated) 
 | imagepull:settling | 48 |
 | kill | 187 |
 | node:parked | 32 |
+| node:relocated | 32 |
 | node:repaired | 32 |
 | none | 72 |
 | podkill:rotating | 160 |
@@ -74,15 +75,15 @@ Total generated cases: **1275**. The whole-corpus per-PR cap (hand + generated) 
 | value | cases |
 |---|---|
 | (unset — baseline) | 262 |
-| None | 471 |
-| RecreateInstance | 542 |
+| None | 487 |
+| RecreateInstance | 558 |
 
 ### By pause
 
 | value | cases |
 |---|---|
 | freeze | 38 |
-| off | 1161 |
+| off | 1193 |
 | true | 76 |
 
 ### By coordination
@@ -91,8 +92,8 @@ Total generated cases: **1275**. The whole-corpus per-PR cap (hand + generated) 
 |---|---|
 | bluegreen | 24 |
 | canary | 24 |
-| none | 985 |
-| rolling | 224 |
+| none | 1001 |
+| rolling | 240 |
 | seq | 18 |
 
 ### By mid-roll edit (gen-switch)
@@ -134,7 +135,7 @@ Total generated cases: **1275**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no break) | 945 |
+| (no break) | 977 |
 | decoder | 60 |
 | engine | 270 |
 
@@ -142,8 +143,8 @@ Total generated cases: **1275**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| Auto | 32 |
-| Never | 32 |
+| Auto | 48 |
+| Never | 48 |
 
 ### By controller-restart condition
 
@@ -307,7 +308,7 @@ Total generated cases: **1275**. The whole-corpus per-PR cap (hand + generated) 
 - The grouped cells of both families state the intended repair (`expect=repaired`; the engine converges and the decoder is repaired) and are parked, through `issue=`, on the issue that tracks it; the no-group cells run live.
 - heal breaks the engine runner, so its coordination axis is a rollingUpdate group over the engine alone or, where a decoder exists, over engine and decoder; nothing rolls, so the update strategy stays canonical and is not an axis. `lift=after-failed` carries `instanceReadyTimeout: 90s` on the victim so the row escalates inside the case budget.
 - imagepull has one form (an image that never pulls has no after-Ready form) and runs each strategy at its canonical budget only; its idle half carries no group, since a grouped repair's hold is its own family.
-- node:notready reads the configured fate of a Ready Instance on a dead node: without `lifecycle.forceDelete` (the chart default, and the lanes') nothing frees the pod names a silent node holds, so the outcomes are `parked` (nothing rebuilds it while the node is down) and `repaired` (the kubelet returns and the pods it never stopped serve again), both at `lift=after-settle`; `relocated` needs that policy and is not emitted. The migration axis is Auto (the default) and Never — the API has no mode that admits explicit requests but not relocation, and neither mode moves a Ready Instance (Auto relocates on an expired attempt's deadline, which a Ready Instance never has); restart policy and an idle rolling group change nothing either, and each cell says why. The update strategy is dormant at idle (one canonical budget).
+- node:notready reads the fate of a Ready Instance on a dead node under the deployed force-delete policy, a lane dimension: without `lifecycle.forceDelete` (the chart default) nothing frees the pod names a silent node holds, so the outcomes are `parked` (nothing rebuilds it while the node is down) and `repaired` (the kubelet returns and the pods it never stopped serve again), both at `lift=after-settle`; with the policy the names are freed once the node's unreachable evidence is older than the threshold and the Instance is rebuilt elsewhere while the node is down, `relocated` at `lift=after-recover`. `needs=` pins parked to the plain lane and relocated to the force-delete lane (the runner SKIPs where the controller config differs); repaired holds under both. The migration axis is Auto (the default) and Never — the API has no mode that admits explicit requests but not relocation, and neither mode moves a Ready Instance (Auto relocates on an expired attempt's deadline, which a Ready Instance never has); restart policy and an idle rolling group change nothing either, and each cell says why. The update strategy is dormant at idle (one canonical budget).
 - ctrlrestart has no hook inside a repair (one fault per case; the idle-break handler fires no second one), so a restart while a crash-loop repair is open is not emitted. The strategy axis is live for the two rollout conditions and dormant under a migration and a scale-down, where both strategies still run for the family's symmetry; a rolling group is crossed in on the PD rollout conditions only.
 - Kill-family cells pinned by hand-written restart/ cases are excluded:
 
@@ -340,7 +341,6 @@ The family asserts the intended behaviour, `expect=heals`, on every cell; the ce
 - pause-under-rollout hook (ome.io/rollout-paused is only exercised inside mode=kill; no verb pauses an in-flight rotation)
 - decoder-targeted mode=kill (the kill handler always picks the engine when one is configured)
 - controller restart while a repair is open (a crash loop at idle with the manager deleted once the rebuild has started) — the runner fires one fault per case and the idle-break handler fires no second one
-- relocation of a Ready Instance off a dead node (fault=node:notready with expect=relocated) — needs lifecycle.forceDelete in the lane's chart values; without it nothing frees the names the node holds and relocated is not a configured outcome
 
 ## Deferred fill
 

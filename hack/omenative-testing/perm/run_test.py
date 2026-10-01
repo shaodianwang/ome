@@ -2651,10 +2651,10 @@ class NodeFaultTest(unittest.TestCase):
     def test_header_reads_each_outcome_at_its_lift(self):
         self.assertTrue(run._fault_ok("node:notready"))
         self.assertFalse(run._fault_ok("node:drained"))
-        self.assertEqual([], self._errs(self.BASE + " fault=node:notready during=idle lift=after-recover expect=relocated"))
+        self.assertEqual([], self._errs(self.BASE + " fault=node:notready during=idle lift=after-recover expect=relocated needs=forcedelete"))
         self.assertEqual([], self._errs(self.BASE + " fault=node:notready during=idle lift=after-settle expect=repaired"))
         self.assertEqual([], self._errs(self.BASE + " fault=node:notready during=idle lift=after-failed expect=repaired"))
-        self.assertEqual([], self._errs(self.BASE + " fault=node:notready during=idle lift=after-settle expect=parked"))
+        self.assertEqual([], self._errs(self.BASE + " fault=node:notready during=idle lift=after-settle expect=parked needs=no-forcedelete"))
         self.assertTrue(any("lift=after-recover, not lift=after-settle" in e
                             for e in self._errs(self.BASE + " fault=node:notready during=idle lift=after-settle expect=relocated")))
         self.assertTrue(any("lift=after-settle, not lift=after-failed" in e
@@ -2742,12 +2742,22 @@ class NodeFaultTest(unittest.TestCase):
         finally:
             run._FAULT_CLEANUPS[:] = saved
 
-    def test_relocation_needs_new_pods_on_other_nodes(self):
+    def test_relocation_replaces_the_pods_the_node_held_on_other_nodes(self):
         pods = [("e1", {"ready": True, "serving": True, "uid": "n1", "node": "kind-worker"})]
         self.assertTrue(run._instance_relocated(pods, {"u1"}, "kind-worker2"))
         self.assertFalse(run._instance_relocated(pods, {"u1"}, "kind-worker"))
         self.assertFalse(run._instance_relocated(pods, {"n1"}, "kind-worker2"))
         self.assertFalse(run._instance_relocated([], {"u1"}, "kind-worker2"))
+        # A gang: the leader the dead node held is new elsewhere, the worker on a live node keeps its pod.
+        gang = [("e1-leader", {"ready": True, "serving": True, "uid": "n1", "node": "kind-worker3"}),
+                ("e1-worker", {"ready": True, "serving": True, "uid": "w1", "node": "kind-worker2"})]
+        self.assertTrue(run._instance_relocated(gang, {"u1"}, "kind-worker"))
+        self.assertFalse(run._instance_relocated(gang, {"u1", "w1"}, "kind-worker"), "a pod the node held must be replaced")
+        self.assertFalse(run._instance_relocated(gang, {"u1"}, "kind-worker2"), "no pod may sit on the stopped node")
+        dark = [("e1-leader", dict(gang[0][1], ready=False))] + gang[1:]
+        self.assertFalse(run._instance_relocated(dark, {"u1"}, "kind-worker"))
+        self.assertTrue(run._uids_present({"a": {"uid": "u1", "alive": False}, "b": None}, {"u1"}))
+        self.assertFalse(run._uids_present({"a": {"uid": "n1", "alive": True}, "b": None}, {"u1"}))
 
     def test_lift_verdict_reads_each_node_outcome(self):
         def f():
@@ -2756,7 +2766,8 @@ class NodeFaultTest(unittest.TestCase):
         base = {"bitten_at": 45.0, "failed_at": None, "recovered_at": None, "lifted_at": 70.0, "healed_at": None,
                 "park_broken": None, "phase_after": "Ready", "new_hash": False, "reset_used": False}
         notes = []
-        self.assertEqual("PASS", run._lift_checks(f(), "relocated", "after-recover", dict(base, recovered_at=60.0), {}, "PASS", notes, []))
+        relocated = dict(base, recovered_at=60.0, reaped_at=0.0, serving_after_lift=True)
+        self.assertEqual("PASS", run._lift_checks(f(), "relocated", "after-recover", relocated, {}, "PASS", notes, []))
         notes = []
         self.assertEqual("FAIL", run._lift_checks(f(), "relocated", "after-recover", base, {}, "PASS", notes, []))
         self.assertTrue(any("not relocated" in n for n in notes))
@@ -3147,18 +3158,23 @@ class GeneratedNodeFamilyTest(unittest.TestCase):
 
     def test_generated_family_crosses_every_axis(self):
         outputs, fam = self._rows()
-        self.assertEqual(64, len(fam))
+        self.assertEqual(96, len(fam))
         self.assertEqual({"engine", "pd", "engine-mn", "pd-mn"}, {kv["topo"] for _n, kv, _m in fam})
         self.assertEqual({"None", "RecreateInstance"}, {m["rp"] for _n, _kv, m in fam})
         self.assertEqual(set(generate_cases.NODE_MIGRATIONS), {m["mig"] for _n, _kv, m in fam})
         self.assertEqual({"none", "rolling"}, {kv["co"] for _n, kv, _m in fam})
-        self.assertEqual({"parked", "repaired"}, {kv["expect"] for _n, kv, _m in fam})
+        self.assertEqual({"parked", "repaired", "relocated"}, {kv["expect"] for _n, kv, _m in fam})
         tuples = {(kv["topo"], m["rp"], m["mig"], kv["co"], kv["expect"]) for _n, kv, m in fam}
-        self.assertEqual(64, len(tuples), "every (shape, restart policy, migration mode, group, outcome) once")
+        self.assertEqual(96, len(tuples), "every (shape, restart policy, migration mode, group, outcome) once")
+        relocated = [int(n[1:]) for n, kv, _m in fam if kv["expect"] == "relocated"]
+        others = [int(n[1:]) for n, kv, _m in fam if kv["expect"] != "relocated"]
+        self.assertGreater(min(relocated), max(others), "the relocation half is minted after the other")
         for name, kv, m in fam:
             self.assertEqual("node:notready", kv["fault"])
             self.assertEqual("idle", kv["during"])
-            self.assertEqual("after-settle", kv["lift"], "both outcomes are read at the settle lift")
+            self.assertEqual("after-recover" if kv["expect"] == "relocated" else "after-settle", kv["lift"])
+            self.assertEqual(generate_cases.NODE_NEEDS.get(kv["expect"]), kv.get("needs"),
+                             "parked reads the plain deploy, relocated the force-delete one, repaired either")
             self.assertEqual(f"node:{kv['expect']}", m["verb"])
             self.assertNotIn("mode", kv)
             for c in ("e", "d", "r"):
@@ -3172,6 +3188,13 @@ class GeneratedNodeFamilyTest(unittest.TestCase):
             else:
                 self.assertNotIn("rollout:", text)
             reason = text.splitlines()[1]
+            if kv["expect"] == "relocated":
+                self.assertIn(generate_cases.NODE_RELOCATION_REBUILD[m["rp"]], reason)
+                self.assertIn("rebuilt on other nodes while the node is still down", reason)
+                self.assertIn("every pod the node held is gone", reason)
+                self.assertIn(f"migration mode {m['mig']} plays no part", reason)
+                self.assertEqual(kv["co"] != "none", "does not hold it" in reason)
+                continue
             self.assertIn(generate_cases.NODE_NO_TRIGGER[m["rp"]], reason)
             self.assertIn(generate_cases.NODE_NO_RELOCATION[m["mig"]], reason)
             self.assertIn("no force-delete policy" if kv["expect"] == "parked" else "never stopped", reason)
@@ -3263,3 +3286,94 @@ class NodeBiteTest(unittest.TestCase):
         self.assertFalse(run._node_bite_held("kind-worker", [leader_up]))
         self.assertTrue(run._node_bite_held("kind-worker", [leader_down]))
         self.assertTrue(run._node_bite_held("kind-worker", []), "evicted pods leave nothing serving there")
+
+
+class NodePolicyNeedTest(unittest.TestCase):
+    """needs=forcedelete|no-forcedelete pins a node outcome to the deployed
+    force-delete policy: the runner reads the controller's lifecycle block
+    and SKIPs where it differs; the relocation window follows the policy's
+    threshold."""
+
+    BASE = "# p999: x mode=rollout Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 topo=engine"
+    POLICY = {"forceDelete": {"overdueSlack": "30s", "nodeUnreachableThreshold": "90s"}}
+
+    def _errs(self, header):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "p999.yaml"
+            path.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(path)
+
+    def test_header_pins_each_outcome_to_its_policy(self):
+        node = self.BASE + " fault=node:notready during=idle"
+        self.assertEqual([], self._errs(node + " lift=after-recover expect=relocated needs=forcedelete"))
+        self.assertEqual([], self._errs(node + " lift=after-settle expect=parked needs=no-forcedelete"))
+        self.assertEqual([], self._errs(node + " lift=after-settle expect=repaired"))
+        self.assertEqual([], self._errs(node + " lift=after-settle expect=repaired needs=forcedelete"))
+        self.assertTrue(any("needs=forcedelete" in e for e in self._errs(node + " lift=after-recover expect=relocated")))
+        self.assertTrue(any("needs=no-forcedelete" in e for e in self._errs(node + " lift=after-settle expect=parked")))
+        self.assertTrue(any("needs=no-forcedelete" in e
+                            for e in self._errs(node + " lift=after-settle expect=parked needs=forcedelete")))
+        self.assertTrue(any("needs fault=node" in e for e in self._errs(self.BASE + " needs=forcedelete")))
+        self.assertTrue(any("malformed header value needs=" in e
+                            for e in self._errs(node + " lift=after-recover expect=relocated needs=sometimes")))
+
+    def test_unmet_need_names_the_deployed_config(self):
+        self.assertIsNone(run._needs_unmet("", {}, None))
+        self.assertIsNone(run._needs_unmet("forcedelete", self.POLICY, None))
+        self.assertIsNone(run._needs_unmet("no-forcedelete", {}, None))
+        self.assertIsNone(run._needs_unmet("no-forcedelete", {"instanceReadyTimeout": "30m"}, None))
+        self.assertIn("has no lifecycle.forceDelete", run._needs_unmet("forcedelete", {}, None))
+        self.assertIn("carries lifecycle.forceDelete", run._needs_unmet("no-forcedelete", self.POLICY, None))
+        self.assertIn("90s", run._needs_unmet("no-forcedelete", self.POLICY, None))
+        self.assertIn("cannot be read", run._needs_unmet("forcedelete", None, "ConfigMap ome/x could not be read"))
+
+    def test_lifecycle_block_is_read_off_the_controller_configmap(self):
+        def cm(data):
+            return json.dumps({"data": data})
+        answers = {}
+
+        def kubectl(*a, **k):
+            self.assertEqual(("-n", run.CTRL_NS, "get", "configmap", run.CTRL_CONFIGMAP), a[:5])
+            return answers["r"]
+        with mock.patch.object(run, "kubectl", kubectl):
+            answers["r"] = subprocess.CompletedProcess((), 0, cm({"lifecycle": json.dumps(self.POLICY)}), "")
+            self.assertEqual((self.POLICY, None), run._controller_lifecycle_config())
+            answers["r"] = subprocess.CompletedProcess((), 0, cm({"ingress": "{}"}), "")
+            self.assertEqual(({}, None), run._controller_lifecycle_config())
+            answers["r"] = subprocess.CompletedProcess((), 1, "", "not found")
+            block, err = run._controller_lifecycle_config()
+            self.assertIsNone(block)
+            self.assertIn("could not be read", err)
+            answers["r"] = subprocess.CompletedProcess((), 0, cm({"lifecycle": "{not json"}), "")
+            block, err = run._controller_lifecycle_config()
+            self.assertIsNone(block)
+            self.assertIn("not JSON", err)
+
+    def test_relocation_window_follows_the_policy_threshold(self):
+        ctx = {"N": {"engine": 4, "decoder": 0, "router": 0}, "pods_per_inst": {"engine": 2},
+               "configured": {"engine"}}
+        fleet = run._idle_budget(ctx)
+        self.assertEqual(min(fleet, int(90 + run.ROTATE_BASE_S + 2 * run.ROTATE_PER_POD_S)),
+                         run._relocation_budget(ctx, "engine", self.POLICY["forceDelete"]))
+        self.assertEqual(fleet, run._relocation_budget(ctx, "engine", None))
+        self.assertEqual(fleet, run._relocation_budget(ctx, "engine", {"nodeUnreachableThreshold": "soon"}))
+
+    def test_relocated_verdict_reads_the_rebuild_and_the_reap(self):
+        def f():
+            return {"kind": "node", "crash_inst": "1", "crash_comp": "engine", "infra_fail": None,
+                    "bite": "its node NotReady with no pod of it serving there", "cause": "the kubelet of node kind-worker"}
+        good = {"bitten_at": 45.0, "recovered_at": 150.0, "lifted_at": 151.0, "reaped_at": 0.0,
+                "serving_after_lift": True, "park_broken": None, "phase_after": "Ready", "new_hash": False,
+                "reset_used": False, "failed_at": None, "healed_at": None}
+        checks = []
+        self.assertEqual("PASS", run._lift_checks(f(), "relocated", "after-recover", good, {}, "PASS", [], checks))
+        self.assertTrue(any("every pod the node held is gone" in c for c in checks))
+        self.assertTrue(any("still Ready and serving" in c for c in checks))
+        for broken, text in ((dict(good, reaped_at=None), "still in the API"),
+                             (dict(good, serving_after_lift=False), "not Ready and serving after the lift"),
+                             (dict(good, new_hash=True), "new revision appeared"),
+                             (dict(good, reset_used=True), "reset mailbox"),
+                             (dict(good, recovered_at=None), "never came back Ready and serving on another node")):
+            checks = []
+            self.assertEqual("FAIL", run._lift_checks(f(), "relocated", "after-recover", broken, {}, "PASS", [], checks), text)
+            self.assertTrue(any(text in c for c in checks), text)
