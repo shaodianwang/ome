@@ -17,7 +17,8 @@ Architecture:
                    Instances Ready+serving and its IR reports a settled revision.
        (trigger) → snapshot OLD revision hashes + pod UIDs, then bump the
                    `perm.test/rev` annotation on EVERY group member (engine-only
-                   when there is no coordination group). → ROTATING
+                   when there is no coordination group), or on the `bump=`
+                   members alone. → ROTATING
        ROTATING  → wait until every Component is back at N alive AND N ready, AND
                    every BUMPED Component has all N pods on the new revision,
                    sustained STABILITY_S.
@@ -3368,7 +3369,9 @@ HDR_VALIDATORS = {
     "readd": lambda v: v == 1,    # compremove: re-apply the manifest, assert round-trip
     "dup": lambda v: v == 1,      # migrate: re-file the same request UUID (dedup contract)
     "hint": lambda v: v == 1,     # migrate: carry hint_target_nodes (soft placement assert)
-    "co": lambda v: v in {"none", "rolling", "ratio", "percomp", "seq", "bluegreen"},
+    # co= names the coordination group kind the case carries; canary is a
+    # canary group on a rollout case (its ladder is observed only in mode=canary).
+    "co": lambda v: v in {"none", "rolling", "ratio", "percomp", "seq", "bluegreen", "canary"},
     # Pairing knobs (mode=pairing; proto=, proto2=, scale_e=, scale_d= also in
     # mode=canary). The trigger is a patch of spec.rollout.pairingProtocol:
     # proto= is the target of the transition (`clear` removes the field);
@@ -3387,8 +3390,9 @@ HDR_VALIDATORS = {
     # Canary-mode knobs (mode=canary). verb= fires one operator verb when the
     # canary reaches the during= hook; verbhold= is how long a pause verb holds
     # before it is lifted; bump= names the group members to bump (default: the
-    # whole group); img= with bump= gives the bumped revision an unstartable
-    # image; terminal= overrides the expected terminal phase; prearm=<verb>
+    # whole group; in mode=rollout too, where the members left out are the
+    # negative controls); img= with bump= gives the bumped revision an
+    # unstartable image; terminal= overrides the expected terminal phase; prearm=<verb>
     # applies a verb to the idle ISVC before the bump; victim= aims a podkill
     # at the stable or the canary revision; skipsoak= states the timed step's
     # pause so a verb that skips it can be asserted; cell= names every grid
@@ -3570,10 +3574,18 @@ def validate_case_file(path):
         errs.append(f"{path}:1: expect={expect} reads a persistent fault's outcome on the idle service "
                     f"(needs during={IDLE_FAULT_PHASE}; fault={fields.get('fault') or '(none)'} has outcomes "
                     f"{', '.join(sorted(outcomes)) or 'none'})")
-    for k in ("verb", "verbhold", "bump", "terminal", "prearm", "skipsoak", "cell", "nophase", "verb2", "during2", "timeout",
+    for k in ("verb", "verbhold", "terminal", "prearm", "skipsoak", "cell", "nophase", "verb2", "during2", "timeout",
               "imgcomp", "ratio_tol", "xcheck", "release", "releaseafter", "pairto", "minfails"):
         if k in fields and mode != "canary":
             errs.append(f"{path}:1: {k}= is a canary-mode knob (mode=canary)")
+    if "bump" in fields:
+        if mode not in ("rollout", "canary"):
+            errs.append(f"{path}:1: bump= names the members a rollout or a canary bumps (mode=rollout|canary)")
+        if mode == "rollout":
+            for m in str(fields["bump"]).split(","):
+                count_key = {"engine": "Ne", "decoder": "Nd", "router": "Nr"}.get(m)
+                if count_key and fields.get(count_key, 0) == 0:
+                    errs.append(f"{path}:1: bump={fields['bump']}: {m} is not a configured Component of this case")
     if "minfails" in fields and str(fields.get("analysis", "")).lower() != "pass":
         errs.append(f"{path}:1: minfails= counts the failing samples a promoted canary accrued (needs analysis=pass)")
     if "verb" in fields and not _canary_hook_ok(during):
@@ -3953,10 +3965,18 @@ def _read_one(ctx, timeout=1.0):
     return agg
 
 
+def _bump_set(hdr, members, configured):
+    """Components the trigger acts on: the header's bump= members, else the
+    coordination group members, else the engine."""
+    named = {m.strip() for m in str((hdr or {}).get("bump") or "").split(",") if m.strip()}
+    if named:
+        return named & configured
+    members = set(members) & configured
+    return members or ({"engine"} & configured)
+
+
 def _bumped(ctx):
-    """Components the trigger acts on: the coordination group members, else engine."""
-    members = set(ctx["info"]["members"]) & ctx["configured"]
-    return members or ({"engine"} & ctx["configured"])
+    return _bump_set(ctx["hdr"], ctx["info"]["members"], ctx["configured"])
 
 
 def _bump_rev(ctx, bumped, val=TRIGGER_VAL, extra=None, image=None, image_comps=None):
@@ -8079,10 +8099,9 @@ def run_case(case_id):
     # (minReplicas); ceilings are in Instance units (a surge = +1 Instance).
     pods_per_inst = {c: 1 + info["workers"].get(c, 0) for c in COMPS}
     multinode = {c: pods_per_inst[c] for c in configured if pods_per_inst[c] > 1}
-    # Bumped = every member of the coordination group; engine-only when no group.
-    bumped = set(members) & configured
-    if not bumped:
-        bumped = {"engine"} & configured
+    # Bumped = the bump= members, else every member of the coordination
+    # group; engine-only when no group.
+    bumped = _bump_set(hdr, members, configured)
     controls = configured - bumped   # non-bumped configured comps = negative control
     # RatioBalanced pair: the two bumped members whose live serving ratio the
     # CheckRatio gate must hold within ratioTolerancePercent. Only meaningful for a

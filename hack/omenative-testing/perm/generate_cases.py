@@ -4,7 +4,7 @@
 Emits the constraint-filtered cross product of
     topology x updateStrategy x failure verb x injection phase x
     restartPolicy x pause
-into five generator-owned folders, using ONLY verbs and hooks the runners
+into seven generator-owned folders, using ONLY verbs and hooks the runners
 (run.py + the KIND CI lane) already implement:
 
     gen-rollout/   p1000+  baseline revision-bump rollouts (failure=none)
@@ -24,6 +24,15 @@ into five generator-owned folders, using ONLY verbs and hooks the runners
                           and the two most informative strategy pairs with
                           an old-revision Instance crashing while the
                           strategy flips
+    gen-crashloop-idle/    p2400+  a crash loop on the settled service, no bump
+                          (during=idle), crossed with topology x rollout-group
+                          kind x break victim (engine, or decoder) x crash form
+                          x restartPolicy; every cell expects the repair
+    gen-crashloop-sibling/ p2600+  the decoder's running revision breaks as an
+                          engine-only bump lands (bump=engine, victimcomp=
+                          decoder), crossed with the PD topologies x group
+                          kind x crash form x restartPolicy; the engine roll
+                          converges and the decoder is repaired
 
 Ownership and determinism:
   - The gen-* folders belong ENTIRELY to this generator: every case there
@@ -78,6 +87,18 @@ Constraint ledger (why the raw product is filtered — derived from run.py):
     whole-gang recreate, so no strategy pair is impossible and none is
     skipped; a strategy flip carries no restart policy and the policy
     flips run under the canonical surge budget, where the floor is N.
+  - The steady-state and sibling families leave out form=load under
+    restartPolicy None: a runner that dies after Ready and comes back is a
+    container restart the kubelet owns under that policy, not a wedge, so no
+    repair is promised and neither family can read one. On the engine-only
+    topologies a Sequential group as the generators express it (one
+    single-Component blueGreen group per member) is one blueGreen group over
+    the engine, so the steady-state family emits it as co=bluegreen only. The
+    sibling family rolls the engine under the default strategy at its canonical
+    budget: the sibling's break is independent of how the engine's own pods
+    are replaced. The grouped cells of both families state the intended repair
+    and are parked, through issue=, on the issue that tracks it; the no-group
+    cells run live.
 
 The t=3 covering fill over the deferred dimensions (coordination/rollout
 groups, canary promotion, budget x coordination interactions) is the --fill
@@ -101,6 +122,8 @@ GEN_BLOCKS = {
     "gen-restart": (1600, 2000),
     "gen-crashloop": (2000, 2400),
     "gen-switch": (3800, 4200),
+    "gen-crashloop-idle": (2400, 2600),
+    "gen-crashloop-sibling": (2600, 2800),
 }
 GEN_ID_LO = min(lo for lo, _hi in GEN_BLOCKS.values())
 GEN_ID_HI = max(hi for _lo, hi in GEN_BLOCKS.values())
@@ -151,6 +174,22 @@ def switch_budget(a, b):
     surge step needs headroom above N, a drain-first or in-place step needs
     headroom below it, and the merge patch keeps the budget as declared."""
     return (1 if "SurgeThenDrain" in (a, b) else 0, 1)
+# The steady-state and sibling crash-loop families. A service carries no group
+# or one of the four group kinds, Sequential and canary as the other generators
+# express them (one single-Component blueGreen group per member; a two-step
+# timed canary over every Component); the break victim is the engine, or the
+# decoder where one exists. A crash after Ready under restartPolicy None is a
+# container restart the kubelet owns, not a wedge: no repair is promised there,
+# so neither family emits that (form, policy) pair.
+BREAK_GROUPS = ["none", "bluegreen", "rolling", "seq", "canary"]
+BREAK_VICTIMS = {"engine": ["engine"], "engine-mn": ["engine"], "pd": ["engine", "decoder"], "pd-mn": ["engine", "decoder"]}
+SIBLING_SHAPES = [("pd", 4, 0), ("pd-mn", 2, 1)]
+UNPROMISED_REPAIR = {("load", "None")}
+GROUP_NAMES = {"bluegreen": "blueGreen", "rolling": "rollingUpdate", "seq": "Sequential", "canary": "canary"}
+IDLE_PHASE = "idle"
+# The grouped cells of both families assert the intended repair and are parked,
+# through the issue= header key, on the issue that tracks it.
+GROUPED_REPAIR_ISSUE = 1977
 
 # Canonical shapes: (topo, N, W). Gangs at N=2 with widths 1 and 2; singles at
 # N=4 (pd: engine+decoder N, router lib.NR). Percentage budgets additionally
@@ -201,9 +240,12 @@ HAND_PINNED_KILL = {
 # ("A"|"B"|"C"|"all", or "" when the bug fails an ordinary check) additionally
 # emits inv_xfail=<scope>: it names the continuous invariant whose violation
 # IS the tracked bug, which would otherwise fail the verdict after the
-# notimpl softening. This is the ONLY way a generated case goes quiet:
+# notimpl softening. A single cell goes quiet only through this table:
 # entries require a filed issue number, and a key that matches no emitted
-# cell fails the regen (stale parking is invisible debt). Cell keys are the
+# cell fails the regen (stale parking is invisible debt). A family whose
+# grouped half is tracked under one issue parks those cells from its emitter
+# instead (the `parked=` argument of `add`), naming the park in each case's
+# reason; the manifest lists every parked case either way. Cell keys are the
 # per-family tuples the emitters build:
 #   ("rollout", topo, w, strat, surge, unavail)
 #   ("podkill", phase, topo, w, size, strat, surge, unavail, rp)
@@ -212,8 +254,10 @@ HAND_PINNED_KILL = {
 #   ("switch", "strategy", hook, topo, w, n, from, to, co)
 #   ("switch", "restartPolicy", hook, topo, w, n, from, to, co)
 #   ("switch-crash", hook, topo, w, n, from, to, co)
-# No generated cell is parked today; a park is added here as
-# (key): (issue, reason, invariant scope) and rendered into the header.
+#   ("crashloop-idle", form, topo, w, size, co, victim, rp)
+#   ("crashloop-sibling", form, topo, w, size, co, rp)
+# A park is added here as (key): (issue, reason, invariant scope) and
+# rendered into the header.
 PARKED = {}
 
 # Runner verbs/hooks this corpus needs but the runners do not implement yet.
@@ -515,7 +559,7 @@ def emit_crashloop(add):
                         if co != "none":
                             # The group rolls the decoder too, on its own surge.
                             kv["ceil_d"] = size + 1
-                        meta = dict(strat=strat, verb=f"crashloop:{form}", rp=rp)
+                        meta = dict(strat=strat, verb=f"crashloop:{form}", rp=rp, victim="engine")
                         desc = (f"[gen] crashloop {form} {shape_tag(topo, w)} N={size} {strat} "
                                 f"{budget_tag(strat, surge, unavail)} rp {rp} co {co}")
                         life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail,
@@ -644,6 +688,103 @@ def emit_switch(add):
                 add("gen-switch", desc, kv, comps(topo, n, w, life, d_life=d_life),
                     _switch_crash_reason(from_, to, co), meta,
                     cell=("switch-crash", SWITCH_CRASH_HOOK, topo, w, n, from_, to, co), coord=coord)
+# ── gen-crashloop-idle / gen-crashloop-sibling: a break under a rollout group ─
+def group_for(co, topo):
+    """The spec.rollout.groups block a crash-loop family case carries: the
+    coordination helpers over engine and decoder (the engine alone without a
+    decoder), or a two-step timed canary over every Component."""
+    if co == "none":
+        return None
+    members = ["engine", "decoder"] if is_pd(topo) else ["engine"]
+    if co == "canary":
+        comps_ = members + (["router"] if is_pd(topo) else [])
+        return lib.canary_block(lib.canary_steps("auto", ("50%", 50), ("100%", 100)), components=comps_)
+    return lib.coord_for(co, comps=members)
+
+
+def _break_how(form, victim, where=""):
+    pod = f"the {victim}'s highest Instance's pod" + (f" {where}" if where else "")
+    if form == "start":
+        return f"{pod} is pointed at an image with no shell, so it crashes at every start and is never Ready again"
+    return (f"{pod} has its runner killed every few seconds while it is up, so it dies after Ready and comes "
+            f"back between crashes")
+
+
+def _idle_reason(form, victim, co):
+    out = (f"{_break_how(form, victim, 'on the settled service')}; no bump follows, and an Instance that "
+           f"serves nothing is repaired within its Component's budget whatever group it sits in: it is "
+           f"rebuilt (every pod new) Ready and serving on its running revision within the budget, a "
+           f"RestartTriggered event names it, and nothing surges above N")
+    if co != "none":
+        out += (f"; the {GROUP_NAMES[co]} group lists the {victim}, and a repair that takes nothing further "
+                f"offline is not a consult for a group with no run open; parked: the repair is still put to "
+                f"the group's gate, which holds every consult while no run is open")
+    return out
+
+
+def _sibling_reason(form, co):
+    out = (f"the engine is bumped alone and, as the bump lands, {_break_how(form, 'decoder')}; the engine "
+           f"roll converges within its budget with every engine Instance on the new revision, while the "
+           f"decoder, which nothing bumped, keeps N with nothing rotated and its broken Instance is rebuilt "
+           f"by a repair (every pod new, Ready and serving on its running revision) that a RestartTriggered "
+           f"event names")
+    if co != "none":
+        out += (f"; the {GROUP_NAMES[co]} group lists both Components, so the engine's run is open while the "
+                f"decoder's repair is admitted; parked: with the run open the group's unavailability and "
+                f"ratio projections count the dark Instance twice, so the repair is denied, and whether the "
+                f"engine's roll completes beside it is undecided")
+    return out
+
+
+def emit_crashloop_idle(add):
+    for topo, n, w in CRASH_SHAPES:
+        for co in BREAK_GROUPS:
+            if co == "seq" and not is_pd(topo):
+                continue   # constraint ledger: one member makes Sequential a blueGreen group
+            for victim in BREAK_VICTIMS[topo]:
+                for rp in RESTARTS:
+                    for form in CRASH_FORMS:
+                        if (form, rp) in UNPROMISED_REPAIR:
+                            continue   # constraint ledger: no repair is promised there
+                        kv = dict(**counts(topo, n), ceil_e=n, ceil_d=(n if is_pd(topo) else 0),
+                                  ceil_r=(lib.NR if is_pd(topo) else 0),
+                                  fault="crashloop:old", co=co, topo=topo, form=form, during=IDLE_PHASE,
+                                  victimcomp=victim, expect="repaired")
+                        if co == "canary":
+                            kv["canary"] = "auto"
+                        meta = dict(strat="SurgeThenDrain", verb=f"crashloop:{form}@idle", rp=rp, victim=victim)
+                        desc = (f"{GEN_MARK} crashloop idle {form} {shape_tag(topo, w)} N={n} co {co} "
+                                f"victim {victim} rp {rp}")
+                        life = lib.lifecycle(restart=RP_FULL[rp])
+                        add("gen-crashloop-idle", desc, kv,
+                            comps(topo, n, w, life, d_life=(life if is_pd(topo) else None)),
+                            _idle_reason(form, victim, co), meta,
+                            cell=("crashloop-idle", form, topo, w, n, co, victim, rp),
+                            coord=group_for(co, topo),
+                            parked=(GROUPED_REPAIR_ISSUE, ""))
+
+
+def emit_crashloop_sibling(add):
+    for topo, n, w in SIBLING_SHAPES:
+        for co in BREAK_GROUPS:
+            for rp in RESTARTS:
+                for form in CRASH_FORMS:
+                    if (form, rp) in UNPROMISED_REPAIR:
+                        continue   # constraint ledger: no repair is promised there
+                    kv = dict(**counts(topo, n), **ceilings(topo, n, "SurgeThenDrain", 1),
+                              fault="crashloop:old", co=co, topo=topo, form=form,
+                              victimcomp="decoder", bump="engine")
+                    if co == "canary":
+                        kv["canary"] = "auto"
+                    meta = dict(strat="SurgeThenDrain", verb=f"crashloop:{form}@sibling", rp=rp, victim="decoder")
+                    desc = f"{GEN_MARK} crashloop sibling {form} {shape_tag(topo, w)} N={n} co {co} rp {rp}"
+                    life = lib.lifecycle(strat="SurgeThenDrain", surge=1, unavail=0, restart=RP_FULL[rp])
+                    add("gen-crashloop-sibling", desc, kv,
+                        comps(topo, n, w, life, d_life=lib.lifecycle(restart=RP_FULL[rp])),
+                        _sibling_reason(form, co), meta,
+                        cell=("crashloop-sibling", form, topo, w, n, co, rp),
+                        coord=group_for(co, topo),
+                        parked=(GROUPED_REPAIR_ISSUE, ""))
 
 
 # ── assembly ─────────────────────────────────────────────────────────────────
@@ -654,20 +795,23 @@ def build_outputs():
     rows = []   # (folder, case id, kv, meta) for the manifest
     parked_used = set()
 
-    def add(folder, desc, kv, case_comps, reason, meta, cell, coord=None):
+    def add(folder, desc, kv, case_comps, reason, meta, cell, coord=None, parked=None):
         lo, hi = GEN_BLOCKS[folder]
         cid = counters[folder]
         if cid >= hi:
             sys.exit(f"{folder}: id block exhausted at p{cid} (block ends before p{hi})")
         counters[folder] += 1
         name = f"p{cid}"
+        issue = inv_scope = None
         if cell in PARKED:
             parked_used.add(cell)
-            issue, parked_reason, inv_scope = PARKED[cell]
+            issue, reason, inv_scope = PARKED[cell]
+        elif parked:
+            issue, inv_scope = parked
+        if issue:
             kv = dict(kv, notimpl=1, issue=issue)
             if inv_scope:
                 kv["inv_xfail"] = inv_scope
-            reason = parked_reason
             meta = dict(meta, parked=issue)
         outputs[f"{folder}/{name}.yaml"] = case_yaml(name, desc, kv, case_comps, reason, coord)
         rows.append((folder, name, dict(kv), dict(meta)))
@@ -677,6 +821,8 @@ def build_outputs():
     emit_restart(add)
     emit_crashloop(add)
     emit_switch(add)
+    emit_crashloop_idle(add)
+    emit_crashloop_sibling(add)
     stale = set(PARKED) - parked_used
     if stale:
         sys.exit("PARKED keys match no emitted cell (stale after a matrix change): "
@@ -740,6 +886,7 @@ def manifest(rows):
             edits[m["edit"]] = edits.get(m["edit"], 0) + 1
     if edits:
         lines += table("By mid-roll edit (gen-switch)", edits)
+    lines += table("By break victim", tally(lambda kv, m: m.get("victim", "(no break)")))
     parked_rows = [(f, n, m["parked"]) for f, n, _kv, m in rows if "parked" in m]
     if parked_rows:
         lines += ["### Parked cells (XFAIL on a tracked issue)", "",
@@ -783,6 +930,22 @@ def manifest(rows):
         " diff, which both in-place variants apply, and a gang runs either"
         " variant as a whole-gang recreate, so a flip into InPlaceOnly has no"
         " diff it cannot apply.",
+        "- The steady-state family (`during=idle`) and the sibling family"
+        " (`bump=engine victimcomp=decoder`) leave out `form=load` under"
+        " `restartPolicy: None`: a runner that dies after Ready and comes back"
+        " is a container restart the kubelet owns under that policy, not a"
+        " wedge, so no repair is promised and neither family can read one.",
+        "- On the engine-only topologies a Sequential group as the generators"
+        " express it (one single-Component blueGreen group per member) is one"
+        " blueGreen group over the engine, so the steady-state family emits it"
+        " as `co=bluegreen` only.",
+        "- The sibling family rolls the engine under the default strategy at its"
+        " canonical budget: the sibling's break is independent of how the"
+        " engine's own pods are replaced.",
+        "- The grouped cells of both families state the intended repair"
+        " (`expect=repaired`; the engine converges and the decoder is repaired)"
+        " and are parked, through `issue=`, on the issue that tracks it; the"
+        " no-group cells run live.",
         "- Kill-family cells pinned by hand-written restart/ cases are excluded:",
         "",
     ]
@@ -923,7 +1086,7 @@ def main():
     for f in GEN_BLOCKS:
         names = per_folder.get(f, [])
         if names:
-            print(f"  {f:12s} {len(names):3d}  {names[0]}..{names[-1]}")
+            print(f"  {f:22s} {len(names):3d}  {names[0]}..{names[-1]}")
     # A regen must never reintroduce a duplicate/shadowed case id or a
     # malformed header — fail the generation, not the next harness run.
     rc = subprocess.run([sys.executable, str(HERE / "run.py"), "--validate-only"]).returncode

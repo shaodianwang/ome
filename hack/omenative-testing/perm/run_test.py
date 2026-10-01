@@ -2135,6 +2135,135 @@ class CrashloopFaultTest(unittest.TestCase):
             else:
                 self.assertEqual("none", kv["co"])
 
+    def _grouped_or_live(self, kv, text):
+        """Every cell is parked on the dark-repair issue in its header, with
+        the park named in its reason: each victim carries maxUnavailable 0,
+        under which the repair of a dark Instance is denied. A grouped cell
+        also carries its group block; a no-group cell does not."""
+        self.assertEqual((1, generate_cases.GROUPED_REPAIR_ISSUE), (kv["notimpl"], kv["issue"]))
+        if kv["co"] == "none":
+            self.assertNotIn("  rollout:\n    groups:", text)
+        else:
+            self.assertIn("  rollout:\n    groups:", text)
+            self.assertIn("parked:", text.splitlines()[1])
+        if kv["co"] == "canary":
+            self.assertEqual("auto", kv["canary"])
+            self.assertIn("          canary:", text)
+        else:
+            self.assertNotIn("canary", kv)
+            self.assertNotIn("canary:", text)
+        if kv["co"] == "seq":
+            self.assertEqual(2, text.count("blueGreen: {}"), "Sequential is one blueGreen group per member")
+
+    def test_generated_idle_family_crosses_every_axis(self):
+        """The steady-state family: a crash loop on the settled service under
+        every group kind, on the engine and on the decoder where one exists,
+        under every (crash form, restart policy) pair a repair is promised
+        for; every cell expects the repair, nothing surges at idle."""
+        outputs, rows = generate_cases.build_outputs()
+        fam = [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-crashloop-idle"]
+        self.assertEqual(84, len(fam))
+        self.assertEqual(set(generate_cases.BREAK_GROUPS), {kv["co"] for _n, kv, _m in fam})
+        self.assertEqual({"engine", "pd", "engine-mn", "pd-mn"}, {kv["topo"] for _n, kv, _m in fam})
+        self.assertEqual({("start", "None"), ("start", "RecreateInstance"), ("load", "RecreateInstance")},
+                         {(kv["form"], m["rp"]) for _n, kv, m in fam},
+                         "a crash after Ready under policy None promises no repair")
+        self.assertEqual({"engine", "decoder"}, {kv["victimcomp"] for _n, kv, _m in fam if kv["topo"].startswith("pd")})
+        for n, kv, m in fam:
+            self.assertEqual(("crashloop:old", "idle", "repaired"), (kv["fault"], kv["during"], kv["expect"]))
+            self.assertEqual(kv["victimcomp"], m["victim"])
+            if kv["victimcomp"] == "decoder":
+                self.assertTrue(kv["topo"].startswith("pd"))
+            if kv["co"] == "seq":
+                self.assertTrue(kv["topo"].startswith("pd"), "one member makes Sequential a blueGreen group")
+            self.assertEqual((kv["Ne"], kv["Nd"], kv["Nr"]), (kv["ceil_e"], kv["ceil_d"], kv["ceil_r"]),
+                             "nothing surges on a service nobody bumped")
+            self.assertNotIn("mode", kv)
+            self.assertNotIn("floor_soft", kv)
+            self.assertNotIn("bump", kv)
+            self._grouped_or_live(kv, outputs[f"gen-crashloop-idle/{n}.yaml"])
+        parked = [n for n, kv, m in fam if m.get("parked")]
+        self.assertEqual(len(fam), len(parked))
+
+    def test_generated_sibling_family_crosses_every_axis(self):
+        """The sibling family: the decoder breaks as an engine-only bump lands,
+        on both PD topologies under every group kind, under every (crash
+        form, restart policy) pair a repair is promised for; the engine
+        surges within its own budget and the decoder is a negative control."""
+        outputs, rows = generate_cases.build_outputs()
+        fam = [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-crashloop-sibling"]
+        self.assertEqual(30, len(fam))
+        self.assertEqual(set(generate_cases.BREAK_GROUPS), {kv["co"] for _n, kv, _m in fam})
+        self.assertEqual({"pd", "pd-mn"}, {kv["topo"] for _n, kv, _m in fam})
+        self.assertEqual({("start", "None"), ("start", "RecreateInstance"), ("load", "RecreateInstance")},
+                         {(kv["form"], m["rp"]) for _n, kv, m in fam})
+        for n, kv, m in fam:
+            self.assertEqual(("crashloop:old", "decoder", "engine"), (kv["fault"], kv["victimcomp"], kv["bump"]))
+            self.assertEqual("decoder", m["victim"])
+            self.assertEqual((kv["Ne"] + 1, kv["Nd"], kv["Nr"]), (kv["ceil_e"], kv["ceil_d"], kv["ceil_r"]))
+            self.assertNotIn("during", kv)
+            self.assertNotIn("expect", kv)
+            self.assertNotIn("floor_soft", kv, "the break is on the decoder; the engine keeps its floor")
+            self._grouped_or_live(kv, outputs[f"gen-crashloop-sibling/{n}.yaml"])
+        self.assertEqual(len(fam), len([n for n, kv, m in fam if m.get("parked")]))
+
+    def test_family_park_rides_the_cell_park_path(self):
+        """A family park emits the same header keys as a PARKED cell and never
+        touches a cell the emitter did not park; a PARKED entry still wins on
+        a cell it names."""
+        cell = ("crashloop-idle", "start", "engine", 0, 4, "none", "engine", "None")
+        with mock.patch.dict(generate_cases.PARKED, {cell: (999999, "parked on a tracked bug (fixture)", "A")}):
+            outputs, rows = generate_cases.build_outputs()
+        hit = [(f, n, kv) for f, n, kv, m in rows if m.get("parked") == 999999]
+        self.assertEqual(1, len(hit))
+        folder, name, kv = hit[0]
+        self.assertEqual(("gen-crashloop-idle", "none"), (folder, kv["co"]))
+        self.assertEqual((1, 999999, "A"), (kv["notimpl"], kv["issue"], kv["inv_xfail"]))
+        self.assertEqual("# reason: parked on a tracked bug (fixture)", outputs[f"{folder}/{name}.yaml"].splitlines()[1])
+        grouped = [kv for f, _n, kv, m in rows if f == "gen-crashloop-idle" and kv["co"] != "none"]
+        self.assertTrue(grouped and all(kv["issue"] == generate_cases.GROUPED_REPAIR_ISSUE
+                                        and "inv_xfail" not in kv for kv in grouped))
+
+
+class RolloutBumpMembersTest(unittest.TestCase):
+    """bump= on a rollout case names the members the trigger bumps; the
+    members left out are the negative controls."""
+
+    BASE = "# p999: x mode=rollout Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=2 ceil_r=0 topo=pd"
+
+    def _errs(self, header):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def test_header_names_configured_members(self):
+        self.assertEqual([], self._errs(self.BASE + " bump=engine"))
+        self.assertEqual([], self._errs(self.BASE + " bump=engine,decoder"))
+        self.assertEqual([], self._errs(self.BASE + " bump=engine fault=crashloop:old form=start victimcomp=decoder"))
+        self.assertTrue(any("not a configured Component" in e for e in self._errs(self.BASE + " bump=router")))
+        self.assertTrue(any("not a configured Component" in e
+                            for e in self._errs(self.BASE.replace("Nd=2", "Nd=0") + " bump=decoder")))
+        self.assertTrue(any("malformed header value bump=" in e for e in self._errs(self.BASE + " bump=sidecar")))
+        kill = "# p999: x mode=kill Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 restart=None topo=engine"
+        self.assertTrue(any("mode=rollout|canary" in e for e in self._errs(kill + " bump=engine")))
+
+    def test_canary_group_is_a_coordination_kind(self):
+        self.assertEqual([], self._errs(self.BASE + " co=canary canary=auto"))
+        self.assertTrue(any("malformed header value co=" in e for e in self._errs(self.BASE + " co=staged")))
+
+    def test_named_members_win_over_the_group(self):
+        configured = {"engine", "decoder", "router"}
+        self.assertEqual({"engine"}, run._bump_set({"bump": "engine"}, ["engine", "decoder"], configured))
+        self.assertEqual({"engine", "decoder"}, run._bump_set({"bump": "engine, decoder"}, [], configured))
+        self.assertEqual({"engine", "decoder"}, run._bump_set({}, ["engine", "decoder"], configured))
+        self.assertEqual({"engine"}, run._bump_set({}, [], configured))
+        self.assertEqual({"engine"}, run._bump_set({"bump": "engine,decoder"}, [], {"engine"}),
+                         "a member the case does not configure is not bumped")
+        self.assertEqual({"engine"}, run._bump_set(None, ["engine", "decoder"], {"engine"}))
+        ctx = {"hdr": {"bump": "decoder"}, "info": {"members": ["engine", "decoder"]}, "configured": configured}
+        self.assertEqual({"decoder"}, run._bumped(ctx))
+
 
 class IdleBreakFaultTest(unittest.TestCase):
     """A break aimed at one Component (victimcomp=) and fired on the idle

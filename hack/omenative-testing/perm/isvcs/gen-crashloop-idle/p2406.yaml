@@ -1,0 +1,17 @@
+# p2406: [gen] crashloop idle start engine N=4 co rolling victim engine rp None  Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 fault=crashloop:old co=rolling topo=engine form=start during=idle victimcomp=engine expect=repaired notimpl=1 issue=1977
+# reason: the engine's highest Instance's pod on the settled service is pointed at an image with no shell, so it crashes at every start and is never Ready again; no bump follows, and an Instance that serves nothing is repaired within its Component's budget whatever group it sits in: it is rebuilt (every pod new) Ready and serving on its running revision within the budget, a RestartTriggered event names it, and nothing surges above N; the rollingUpdate group lists the engine, and a repair that takes nothing further offline is not a consult for a group with no run open; parked: the repair is still put to the group's gate, which holds every consult while no run is open
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p2406 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          rollingUpdate: {}

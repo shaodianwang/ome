@@ -75,7 +75,8 @@ perm/
 ├── isvcs/                 — generated case YAMLs (committed; `topo=` in each header)
 │   ├── rollout/           — 96 rollout cases (topology × lifecycle × coordination)
 │   ├── migration/ restart/ partition/ scale/ edge/  — feature cases (see ../DESIGN.md)
-│   └── gen-rollout/ gen-fault/ gen-restart/ gen-crashloop/ gen-switch/  — generated hot core (see isvcs/MANIFEST.md)
+│   └── gen-rollout/ gen-fault/ gen-restart/ gen-crashloop/ gen-switch/ gen-crashloop-idle/ gen-crashloop-sibling/
+│                           — generated hot core (see isvcs/MANIFEST.md)
 └── results/
     └── <RUN_TS>/<feature>/<topo>/
         ├── pNN-<ts>.tsv   — one verdict row per case
@@ -164,7 +165,10 @@ For each case:
 2. Wait until the expected pods are all Ready (bounded).
 3. Start a pod watcher streaming events with timestamps.
 4. Trigger a rotation by patching `engine.annotations[perm.test/rev]: v2`
-   (every coordination-group member when the case declares a group). With
+   (every coordination-group member when the case declares a group;
+   `bump=<members>` names the members to bump instead, so an engine-only
+   change can land under a group whose other members stay as negative
+   controls). With
    `edit=env` the same patch also sets the bumped runner's `TEST_REV` env, a
    pod-template diff beyond container images: an in-place strategy then
    resolves to a recreate, UID rotation is expected, and the drain-first
@@ -644,7 +648,19 @@ crashloop case).
   the sibling at N with nothing rotated. The generated `isvcs/gen-crashloop/`
   family crosses the verb with topology, strategy, maxUnavailable, restart
   policy and (on PD) a rolling group, so every path the closed-loop matrix in
-  the workload package decides is also driven against a real kubelet.
+  the workload package decides is also driven against a real kubelet. Two
+  more generated families put the verb under every rollout-group kind
+  (`co=none|bluegreen|rolling|seq|canary`; a canary group on a rollout case
+  is only a group here, its ladder is not observed):
+  `isvcs/gen-crashloop-idle/` breaks the engine, or the decoder,
+  on the settled service (`during=idle`, below) and expects the repair on
+  every shape, and `isvcs/gen-crashloop-sibling/` breaks the decoder as an
+  engine-only bump lands (`bump=engine victimcomp=decoder`) and expects the
+  engine roll to converge while the decoder's Instance is repaired. In both,
+  the grouped cells are parked on the issue their header names, and
+  `form=load` under `restartPolicy: None` is left out: a runner that dies
+  after Ready is a container restart the kubelet owns under that policy, not
+  a wedge, so no repair is promised there.
 
 - **`fault=imagepull:old`** is the same break with an image that cannot be
   pulled: the victim's live pod is pointed at the harness's unpullable
@@ -743,8 +759,9 @@ crashloop case).
   hold fails. Absent, `expect=` is derived from the spec: held when the
   victim Component is a member of a `spec.rollout.groups` entry, repaired
   otherwise, so a family that asserts the repair on a grouped service states
-  `expect=repaired` and parks it with `notimpl=1 issue=<n>` until the rule
-  lands. Either way no Component may ever exceed N alive: a repair rebuilds
+  `expect=repaired` and parks it with `notimpl=1 issue=<n>` while the rule
+  is missing (`isvcs/gen-crashloop-idle/` does). Either way no Component may
+  ever exceed N alive: a repair rebuilds
   in place. `form=load` under `restartPolicy: None` is kept alive by the
   kubelet alone between kills; whether a repair opens there is the product's
   answer, and the killer stops the moment the pod is rebuilt.
@@ -794,9 +811,10 @@ Four generators write into `isvcs/`; re-run one after editing it:
   `isvcs/rollout/` (`p500`+ is the continuation block: `p100`+ belongs to
   `gen_cases.py`'s feature counters).
 - `gen_runtime.py` — the runtime-triggered cases (`p400`+) → `isvcs/runtime-rev/`.
-- `generate_cases.py` — the hot-core permutation corpus (`p1000`–`p2399`
+- `generate_cases.py` — the hot-core permutation corpus (`p1000`–`p2799`
   and `p3800`–`p4199`) → `isvcs/gen-rollout/`, `isvcs/gen-fault/`,
-  `isvcs/gen-restart/`, `isvcs/gen-crashloop/`, `isvcs/gen-switch/`, plus
+  `isvcs/gen-restart/`, `isvcs/gen-crashloop/`, `isvcs/gen-switch/`,
+  `isvcs/gen-crashloop-idle/`, `isvcs/gen-crashloop-sibling/`, plus
   `isvcs/MANIFEST.md` (per-dimension counts, constraint ledger,
   missing-hook catalog).
 
@@ -837,7 +855,8 @@ cases) is likewise hand-written, with the `p800`+ block reserved.
 Coordination is emitted under `spec.rollout.groups[]` (OEP-0017 v2: BlueGreen ->
 one `blueGreen` group; RollingUpdate -> a `rollingUpdate` group, +`maintainRatio`
 for RatioBalanced; Sequential -> one single-Component `blueGreen` group per member
-in order). Keep
+in order; a canary group, `co=canary`, on a rollout case whose ladder is not
+driven). Keep
 the `topo=` tag and any `infeasible=1` / `notimpl=1` header flags so the harness
 groups and scores correctly.
 ```
