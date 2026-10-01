@@ -187,6 +187,17 @@ runners (run.py + the KIND CI lane) already implement:
                           at idle is repaired by a rebuild, and under a push
                           it is fixed in place or waits for the corrective
                           push
+    gen-fault-scale/     p7600+  one Instance of the settled service is broken
+                          (a crash at start or after Ready, an image that
+                          cannot be pulled, readiness that stops passing) and
+                          the engine is scaled down by one, by two, to one, or
+                          up by one (mode=scaledown with during=idle, inst=0):
+                          the broken Instance goes first on a scale-down and
+                          is repaired or left as the policy says on a scale-up
+    gen-fault-delete/    p7700+  the same breaks, then the service is deleted
+                          (mode=recreate with during=idle): everything goes
+                          within budget, the broken pod included, and the same
+                          name comes back clean
 
 Ownership and determinism:
   - The gen-* folders belong ENTIRELY to this generator: every case there
@@ -366,6 +377,18 @@ Constraint ledger (why the raw product is filtered — derived from run.py):
     surge roll held to the end by that quota is the tight-cluster family's
     cell, so the pending family leaves its quota:<members-1> lift=never cell
     out.
+  - The broken-Instance families aim the break at Instance 0, the lowest
+    index, so a scale-down's natural victim (the highest index) and the
+    broken Instance differ and the order of removal can be told apart. The
+    engine runs under maxUnavailable 1 in both families: nothing rolls, so
+    the strategy is dormant, and a budget of one admits the repair that
+    takes a broken Instance offline (a budget of zero holds it). Readiness
+    loss is repaired under neither policy, so its
+    restart-policy axis is collapsed to None; the other breaks run under
+    both. A gang fleet of two runs down by one and up by one only: "to one"
+    is "down by one" there, and "down by two" asks for zero, which the API
+    does not run as zero. A rolling group is crossed in where a decoder
+    exists, as in the crashloop family.
 
 The t=3 covering fill over the deferred dimensions (coordination/rollout
 groups, canary promotion, budget x coordination interactions) is the --fill
@@ -420,6 +443,8 @@ GEN_BLOCKS = {
     "gen-pending": (7500, 7600),
     "gen-budget": (8200, 8330),
     "gen-inplaceonly": (8330, 8400),
+    "gen-fault-scale": (7600, 7700),
+    "gen-fault-delete": (7700, 7800),
 }
 GEN_ID_LO = min(lo for lo, _hi in GEN_BLOCKS.values())
 GEN_ID_HI = max(hi for _lo, hi in GEN_BLOCKS.values())
@@ -3459,6 +3484,178 @@ def emit_inplaceonly(add):
                 comps(topo, n, w, life, d_life=d_life), _ipo_crash_held_reason(topo, rp),
                 dict(strat=IPO_STRAT, verb=f"crashloop:start+env@{landing}", rp=rp, victim="engine"),
                 cell=("inplaceonly", "crash-env", topo, w, rp))
+# ── gen-fault-scale / gen-fault-delete: an operation on a service with a broken Instance ──
+# One Instance of the settled service is broken and the operator scales the
+# engine, or deletes the service. The break hits Instance 0, the lowest
+# index, so a scale-down's natural victim (the highest index) and the broken
+# Instance differ and the family can tell the order of removal apart.
+# Singles at N=4, the gang at N=2 with one worker; a rolling group where a
+# decoder exists. The engine runs under maxUnavailable 1 everywhere: nothing
+# rolls, so the strategy is dormant, and a budget of one admits the repair
+# that takes the broken Instance offline (a budget of zero holds it).
+BROKEN_SHAPES = [("engine", 4, 0), ("pd", 4, 0), ("engine-mn", 2, 1)]
+BROKEN_GROUPS = {"engine": ["none"], "pd": ["none", "rolling"], "engine-mn": ["none"]}
+BROKEN_FAULTS = [("crashloop", "start"), ("crashloop", "load"), ("imagepull", None), ("readiness", "persist")]
+BROKEN_INST = 0
+BROKEN_BUDGET = (1, 1)
+# Readiness loss is repaired under neither policy, so its restart-policy axis
+# is collapsed; every other break runs under both.
+BROKEN_RESTARTS = {"readiness": ["None"]}
+# The operations per fleet size: (label, target). On a fleet of two, "to
+# one" is "down by one" and "down by two" asks for zero, which the API does
+# not run as zero, so the gang runs down by one and up by one.
+BROKEN_OPS = {4: [("down1", 3), ("down2", 2), ("toone", 1), ("up1", 5)], 2: [("down1", 1), ("up1", 3)]}
+
+
+def _broken_label(kind, form):
+    return kind if form is None or kind == "readiness" else f"{kind}:{form}"
+
+
+def _broken_how(kind, form, topo):
+    victim = ("the leader pod of the engine's gang 0" if is_mn(topo) else "the pod of the engine's Instance 0")
+    if kind == "readiness":
+        return f"{victim} stops passing its readiness probe while it keeps running, so it leaves rotation"
+    if kind == "imagepull":
+        return (f"{victim} is pointed at an image that cannot be pulled on the settled service, so the kubelet parks "
+                f"it in ImagePullBackOff and it is never Ready again")
+    if form == "start":
+        return (f"{victim} is pointed at an image with no shell on the settled service, so it crashes at every start "
+                f"and is never Ready again")
+    return (f"{victim} has its runner killed every few seconds while it is up, so it dies after Ready and comes back "
+            f"between crashes")
+
+
+def _broken_fate(kind):
+    """What a scale-up leaves the broken Instance at: readiness loss is the
+    runtime's own out-of-rotation signal and nothing rebuilds it; every other
+    break parks the pod in a terminal kubelet waiting state, which the
+    crash-loop repair rebuilds under every restart policy."""
+    return "left" if kind == "readiness" else "repaired"
+
+
+def _broken_fate_words(kind, form, rp):
+    if kind == "readiness":
+        return ("left as the fault left it: no new pod for its index and no repair recorded, since readiness is the "
+                "runtime's own out-of-rotation signal and no restart policy rebuilds a pod that runs")
+    out = "rebuilt, every pod new, Ready and serving on its running revision, and a RestartTriggered event names it: "
+    if kind == "imagepull":
+        out += ("a pod parked in ImagePullBackOff past the stuck-pod grace is a wedge the crash-loop repair rebuilds "
+                "under every restart policy")
+        if rp == "RecreateInstance":
+            out += ("; under RecreateInstanceOnPodRestart the kubelet's kill of the running container ahead of the "
+                    "failed pull reads as a runner restart after Ready and triggers it at once")
+        return out
+    if form == "start":
+        out += ("a pod that dies at every start is parked in CrashLoopBackOff, a wedge the crash-loop repair rebuilds "
+                "under every restart policy once the pod is past the stuck-pod grace")
+        if rp == "RecreateInstance":
+            out += "; under RecreateInstanceOnPodRestart the runner's restart after Ready triggers it at once"
+        return out
+    if rp == "RecreateInstance":
+        return out + "the first runner restart after Ready triggers the rebuild under RecreateInstanceOnPodRestart"
+    return out + ("the policy promises nothing for a runner that dies after Ready and comes back, but the kubelet "
+                  "backs off its restarts and parks the pod in CrashLoopBackOff between them, a wedge the crash-loop "
+                  "repair rebuilds under every restart policy once the pod is past the stuck-pod grace")
+
+
+def _broken_removal_words(n, target):
+    """The order a scale-down from n to target removes Instances in, with the
+    broken Instance 0 going first and the highest healthy indexes after it."""
+    extra = list(range(n - 1, 0, -1))[:n - target - 1]
+    kept = [i for i in range(n) if i not in extra and i != BROKEN_INST]
+    kept_words = (f"Instance {kept[0]} stays" if len(kept) == 1
+                  else f"Instances {', '.join(str(i) for i in kept[:-1])} and {kept[-1]} stay")
+    if not extra:
+        return f"the broken Instance {BROKEN_INST} goes and {kept_words}"
+    then = (f"the highest healthy Instance {extra[0]}" if len(extra) == 1
+            else f"the highest healthy Instances {' and '.join(str(i) for i in extra)}")
+    return f"the broken Instance {BROKEN_INST} goes first, then {then}; {kept_words}"
+
+
+def _broken_tail(topo, co, op="a scale", repaired_up=False):
+    out = ""
+    if is_pd(topo):
+        out += "; decoder and router are neither broken nor scaled and stay as they were"
+    if co != "none":
+        out += f"; the rollingUpdate group lists engine and decoder, and {op} is not a run it paces"
+        if repaired_up:
+            out += ", nor is the repair of an Instance that serves nothing a consult it may hold"
+    if is_mn(topo):
+        out += "; each Instance is a gang of a leader and a worker, counted whole"
+    return out
+
+
+def _broken_scale_reason(kind, form, rp, topo, co, n, target):
+    how = _broken_how(kind, form, topo)
+    if target < n:
+        return (f"{how}; once the status reports Instance {BROKEN_INST} broken the engine is scaled from {n} to {target}: "
+                f"{_broken_removal_words(n, target)}; the survivors keep their pods and keep serving throughout (never "
+                f"below {target} Ready), nothing is rebuilt during the scale, no Component surges, and every row "
+                f"settles Ready with no operation open" + _broken_tail(topo, co))
+    fate = _broken_fate(kind)
+    return (f"{how}; once the status reports Instance {BROKEN_INST} broken the engine is scaled from {n} to {target}: a "
+            f"new Instance {n} comes up on the running revision and serves, the healthy Instances keep their pods and "
+            f"never leave rotation (never below {n - 1} Ready), nothing surges above {target}, and the broken Instance "
+            f"is {_broken_fate_words(kind, form, rp)}" + _broken_tail(topo, co, repaired_up=(fate == "repaired")))
+
+
+def _broken_delete_reason(kind, form, topo, co):
+    return (f"{_broken_how(kind, form, topo)}; once the status reports Instance {BROKEN_INST} broken the service is "
+            f"deleted: every pod goes within the teardown budget, the broken one included, no pod stays Terminating "
+            f"and no finalizer wedges, and the same name comes back Ready on fresh pods with nothing of the break left"
+            + _broken_tail(topo, co, op="a delete"))
+
+
+def _broken_kv(mode, topo, n, kind, form, co, ceil_e):
+    kv = dict(mode=mode, **counts(topo, n), ceil_e=ceil_e, ceil_d=(n if is_pd(topo) else 0),
+              ceil_r=(lib.NR if is_pd(topo) else 0), fault=f"{kind}:old")
+    if form is not None:
+        kv["form"] = form
+    kv.update(during=IDLE_PHASE, co=co, topo=topo)
+    return kv
+
+
+def _broken_comps(topo, n, w, rp):
+    surge, unavail = BROKEN_BUDGET
+    life = lib.lifecycle(strat="SurgeThenDrain", surge=surge, unavail=unavail, restart=RP_FULL[rp])
+    d_life = lib.lifecycle(restart=RP_FULL[rp]) if is_pd(topo) else None
+    return comps(topo, n, w, life, d_life=d_life)
+
+
+def emit_fault_scale(add):
+    for topo, n, w in BROKEN_SHAPES:
+        for co in BROKEN_GROUPS[topo]:
+            for kind, form in BROKEN_FAULTS:
+                for rp in BROKEN_RESTARTS.get(kind, RESTARTS):
+                    for op, target in BROKEN_OPS[n]:
+                        kv = _broken_kv("scaledown", topo, n, kind, form, co, max(n, target))
+                        kv.update(to_e=target, inst=BROKEN_INST)
+                        if target > n:
+                            kv["expect"] = _broken_fate(kind)
+                        meta = dict(strat="(dormant: nothing rolls)", verb=f"{_broken_label(kind, form)}@{op}",
+                                    rp=rp, op=op, victim="engine")
+                        desc = (f"{GEN_MARK} broken {_broken_label(kind, form)} {op} {shape_tag(topo, w)} "
+                                f"N={n} rp {rp} co {co}")
+                        add("gen-fault-scale", desc, kv, _broken_comps(topo, n, w, rp),
+                            _broken_scale_reason(kind, form, rp, topo, co, n, target), meta,
+                            cell=("broken-scale", kind, form, topo, w, co, rp, op),
+                            coord=lib.coord_for(co) if co != "none" else None)
+
+
+def emit_fault_delete(add):
+    for topo, n, w in BROKEN_SHAPES:
+        for co in BROKEN_GROUPS[topo]:
+            for kind, form in BROKEN_FAULTS:
+                for rp in BROKEN_RESTARTS.get(kind, RESTARTS):
+                    kv = _broken_kv("recreate", topo, n, kind, form, co, n)
+                    kv["inst"] = BROKEN_INST
+                    meta = dict(strat="(dormant: nothing rolls)", verb=f"{_broken_label(kind, form)}@delete",
+                                rp=rp, op="delete", victim="engine")
+                    desc = f"{GEN_MARK} broken {_broken_label(kind, form)} delete {shape_tag(topo, w)} N={n} rp {rp} co {co}"
+                    add("gen-fault-delete", desc, kv, _broken_comps(topo, n, w, rp),
+                        _broken_delete_reason(kind, form, topo, co), meta,
+                        cell=("broken-delete", kind, form, topo, w, co, rp),
+                        coord=lib.coord_for(co) if co != "none" else None)
 
 
 # ── assembly ─────────────────────────────────────────────────────────────────
@@ -3539,6 +3736,8 @@ def build_outputs():
     emit_pending(add)
     emit_budget(add)
     emit_inplaceonly(add)
+    emit_fault_scale(add)
+    emit_fault_delete(add)
     stale = set(PARKED) - parked_used
     if stale:
         sys.exit("PARKED keys match no emitted cell (stale after a matrix change): "
@@ -3630,6 +3829,8 @@ def manifest(rows):
                    tally(lambda kv, m: m["lift"], where=lambda kv, m: "lift" in m))
     lines += table("By percent budget (gen-budget)",
                    tally(lambda kv, m: m["budget"], where=lambda kv, m: "budget" in m))
+    lines += table("By operation on a service with a broken Instance",
+                   tally(lambda kv, m: m["op"], where=lambda kv, m: "op" in m))
     parked_rows = [(f, n, m["parked"]) for f, n, _kv, m in rows if "parked" in m]
     if parked_rows:
         lines += ["### Parked cells (XFAIL on a tracked issue)", "",
@@ -3928,6 +4129,22 @@ def manifest(rows):
         " corrective push, which patches it in place. One fleet size (4), both"
         " restart policies everywhere (live under the crash loops, a negative"
         " control under the pushes), the canonical budget maxUnavailable 1.",
+        "- gen-fault-scale and gen-fault-delete break Instance 0 of the settled"
+        " service, the lowest index, so a scale-down's natural victim (the"
+        " highest index) and the broken Instance differ and the order of"
+        " removal can be told apart. The engine runs under SurgeThenDrain with"
+        f" maxSurge {BROKEN_BUDGET[0]} and maxUnavailable {BROKEN_BUDGET[1]} in"
+        " both families: nothing rolls, so the strategy is dormant, and the"
+        " unavailability budget of one admits the repair that takes the broken"
+        " Instance offline (the canonical budget of zero holds it). Readiness"
+        " loss is repaired under neither restart policy, so its policy axis is"
+        " collapsed to None; a crash at start, a crash after Ready and a pull"
+        " failure run under both, and each scale-up cell states on line two"
+        " what becomes of the broken Instance (expect=repaired|left) and why."
+        " On the gang fleet of two only down by one and up by one are emitted:"
+        " to one is down by one there, and down by two asks for zero, which the"
+        " API does not run as zero. A rolling group is crossed in where a"
+        " decoder exists; the delete family keeps the same axes.",
         "- Kill-family cells pinned by hand-written restart/ cases are excluded:",
         "",
     ]

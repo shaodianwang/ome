@@ -196,6 +196,25 @@ class OperationTest(unittest.TestCase):
                          self.op(fault="crashloop:old", form="start", during="idle", expect="repaired", topo="engine"))
         self.assertEqual(("admission reject", ""), self.op(mode="canary", expect="reject", topo="engine"))
 
+    def test_a_scale_or_a_delete_on_a_broken_instance_keeps_its_operation(self):
+        """A break fired before a scale or a delete (during=idle in those modes)
+        is the operation plus a fault on the running revision, landing at
+        steady state."""
+        down = self.corpus.write(mode="scaledown", to_e=3, fault="crashloop:old", form="start", during="idle", inst=0,
+                                 topo="engine", **counts(4, ceil_e=4))
+        self.assertEqual(("scale down", "", "steady state", ["operation+fault"]),
+                         (down.operation, down.second_operation, down.timing, down.overlap))
+        self.assertEqual([("crash at start", "persistent", "running", "engine")], down.faults)
+        up = self.corpus.write(mode="scaledown", to_e=5, fault="readiness:old", form="persist", during="idle", inst=0,
+                               expect="left", topo="engine", **counts(4, ceil_e=5))
+        self.assertEqual(("scale up", "expect=left"), (up.operation, up.outcome))
+        self.assertEqual([("readiness never passes", "persistent", "running", "engine")], up.faults)
+        self.assertEqual([], up.problems)
+        delete = self.corpus.write(mode="recreate", fault="imagepull:old", during="idle", inst=0, topo="engine",
+                                   **counts(4, ceil_e=4))
+        self.assertEqual(("delete", "", "steady state"), (delete.operation, delete.second_operation, delete.timing))
+        self.assertEqual([("image pull", "persistent", "running", "engine")], delete.faults)
+
 
 class FaultTest(unittest.TestCase):
     def setUp(self):
@@ -220,6 +239,15 @@ class FaultTest(unittest.TestCase):
         self.assertEqual([("sibling broken", "persistent", "running", "decoder")],
                          self.fault(fault="crashloop:old", form="start", victimcomp="decoder",
                                     comps=pd(), topo="pd", **counts(2, 2, 2)))
+
+    def test_readiness_that_stops_passing_is_a_persistent_break_of_the_running_revision(self):
+        self.assertEqual([("readiness never passes", "persistent", "running", "engine")],
+                         self.fault(mode="recreate", fault="readiness:old", form="persist", during="idle", topo="engine"))
+        self.assertEqual([("sibling broken", "persistent", "running", "decoder")],
+                         self.fault(mode="recreate", fault="readiness:old", form="persist", during="idle",
+                                    victimcomp="decoder", comps=pd(), topo="pd", **counts(2, 2, 2)))
+        self.assertEqual([("readiness never passes", "persistent", "new", "engine")],
+                         self.fault(fault="readiness:new", topo="engine"))
 
     def test_lifted_causes_are_the_one_shot_form(self):
         self.assertEqual([("config missing", "one-shot", "running", "engine")],

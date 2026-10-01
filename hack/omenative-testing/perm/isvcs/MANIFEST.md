@@ -3,7 +3,7 @@
 Emitted by `generate_cases.py` — regenerate with `python3 generate_cases.py`; CI rejects hand edits via `python3 generate_cases.py --check` (run_test.py).
 The gen-* folders are generator-owned wholesale; promote a bug-finding case to a hand-owned folder under a fresh id instead of editing it here.
 
-Total generated cases: **2926**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
+Total generated cases: **3052**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
 
 ## Folders
 
@@ -42,21 +42,23 @@ Total generated cases: **2926**. The whole-corpus per-PR cap (hand + generated) 
 | gen-pending | 70 | p7500..p7569 |
 | gen-budget | 114 | p8200..p8313 |
 | gen-inplaceonly | 45 | p8330..p8374 |
+| gen-fault-scale | 98 | p7600..p7697 |
+| gen-fault-delete | 28 | p7700..p7727 |
 
 ### By topology
 
 | value | cases |
 |---|---|
-| engine | 734 |
-| engine-mn | 684 |
-| pd | 902 |
+| engine | 769 |
+| engine-mn | 705 |
+| pd | 972 |
 | pd-mn | 606 |
 
 ### By update strategy
 
 | value | cases |
 |---|---|
-| (dormant: nothing rolls) | 40 |
+| (dormant: nothing rolls) | 166 |
 | InPlaceIfPossible | 404 |
 | InPlaceOnly | 281 |
 | RecreatePod | 676 |
@@ -79,12 +81,17 @@ Total generated cases: **2926**. The whole-corpus per-PR cap (hand + generated) 
 | crashloop:load | 212 |
 | crashloop:load@canary | 16 |
 | crashloop:load@capacity | 16 |
+| crashloop:load@delete | 8 |
+| crashloop:load@down1 | 8 |
+| crashloop:load@down2 | 6 |
 | crashloop:load@gate | 4 |
 | crashloop:load@idle | 91 |
 | crashloop:load@prestart | 16 |
 | crashloop:load@promote | 8 |
 | crashloop:load@sibling | 10 |
+| crashloop:load@toone | 6 |
 | crashloop:load@traffic | 16 |
+| crashloop:load@up1 | 8 |
 | crashloop:new:crashAfterSoak | 16 |
 | crashloop:new:crashInSoak | 16 |
 | crashloop:new:crashStart | 8 |
@@ -97,12 +104,17 @@ Total generated cases: **2926**. The whole-corpus per-PR cap (hand + generated) 
 | crashloop:start+image | 6 |
 | crashloop:start@canary | 16 |
 | crashloop:start@capacity | 16 |
+| crashloop:start@delete | 8 |
+| crashloop:start@down1 | 8 |
+| crashloop:start@down2 | 6 |
 | crashloop:start@gate | 4 |
 | crashloop:start@idle | 182 |
 | crashloop:start@prestart | 16 |
 | crashloop:start@promote | 8 |
 | crashloop:start@sibling | 20 |
+| crashloop:start@toone | 6 |
 | crashloop:start@traffic | 16 |
+| crashloop:start@up1 | 8 |
 | ctrlrestart:canary | 6 |
 | ctrlrestart:drain | 8 |
 | ctrlrestart:migration | 6 |
@@ -121,10 +133,15 @@ Total generated cases: **2926**. The whole-corpus per-PR cap (hand + generated) 
 | imagepull@analysis | 8 |
 | imagepull@canary | 16 |
 | imagepull@capacity | 16 |
+| imagepull@delete | 8 |
+| imagepull@down1 | 8 |
+| imagepull@down2 | 6 |
 | imagepull@gate | 4 |
 | imagepull@prestart | 16 |
 | imagepull@promote | 8 |
+| imagepull@toone | 6 |
 | imagepull@traffic | 16 |
+| imagepull@up1 | 8 |
 | kill | 187 |
 | move-at-last | 24 |
 | move-at-rotating | 26 |
@@ -161,6 +178,11 @@ Total generated cases: **2926**. The whole-corpus per-PR cap (hand + generated) 
 | readiness:new | 18 |
 | readiness:old:persist | 6 |
 | readiness:old:recover | 6 |
+| readiness@delete | 4 |
+| readiness@down1 | 4 |
+| readiness@down2 | 3 |
+| readiness@toone | 3 |
+| readiness@up1 | 4 |
 | rebump@canary-serving@0 | 8 |
 | rebump@canary-staging | 8 |
 | resources@held | 4 |
@@ -180,22 +202,22 @@ Total generated cases: **2926**. The whole-corpus per-PR cap (hand + generated) 
 | value | cases |
 |---|---|
 | (unset — baseline) | 758 |
-| None | 1048 |
-| RecreateInstance | 1120 |
+| None | 1120 |
+| RecreateInstance | 1174 |
 
 ### By pause
 
 | value | cases |
 |---|---|
 | freeze | 110 |
-| off | 2632 |
+| off | 2758 |
 | true | 184 |
 
 ### By pause moment
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 2746 |
+| (no pause around a repair) | 2872 |
 | after | 36 |
 | before | 72 |
 | during | 72 |
@@ -204,7 +226,7 @@ Total generated cases: **2926**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 2746 |
+| (no pause around a repair) | 2872 |
 | fix | 90 |
 | none | 90 |
 
@@ -214,9 +236,9 @@ Total generated cases: **2926**. The whole-corpus per-PR cap (hand + generated) 
 |---|---|
 | bluegreen | 48 |
 | canary | 24 |
-| none | 2278 |
+| none | 2369 |
 | ratio | 16 |
-| rolling | 526 |
+| rolling | 561 |
 | seq | 34 |
 
 ### By mid-roll edit (gen-switch)
@@ -262,7 +284,7 @@ Total generated cases: **2926**. The whole-corpus per-PR cap (hand + generated) 
 |---|---|
 | (no break) | 2289 |
 | decoder | 60 |
-| engine | 577 |
+| engine | 703 |
 
 ### By migration mode (node family)
 
@@ -299,10 +321,14 @@ Total generated cases: **2926**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| delete | 16 |
+| delete | 44 |
+| down1 | 28 |
+| down2 | 21 |
 | scale-down | 16 |
 | scale-up | 16 |
 | scale-zero | 16 |
+| toone | 21 |
+| up1 | 28 |
 
 ### By overlap order (runtime-edit-repair)
 
@@ -365,6 +391,19 @@ Total generated cases: **2926**. The whole-corpus per-PR cap (hand + generated) 
 | maxUnavailable 10% | 19 |
 | maxUnavailable 25% | 19 |
 | maxUnavailable 50% | 19 |
+
+### By operation on a service with a broken Instance
+
+| value | cases |
+|---|---|
+| delete | 44 |
+| down1 | 28 |
+| down2 | 21 |
+| scale-down | 16 |
+| scale-up | 16 |
+| scale-zero | 16 |
+| toone | 21 |
+| up1 | 28 |
 
 ### Parked cells (XFAIL on a tracked issue)
 
@@ -433,6 +472,7 @@ Total generated cases: **2926**. The whole-corpus per-PR cap (hand + generated) 
 - a pending cell's quota admits one pod fewer than the operation needs: `quota:0` for a single-pod surge, `quota:<members-1>` for a surge gang (room for all but one member), and `quota:-1` (one pod fewer than run) under a repair or a drain-first roll, which create after a pod is gone; on a gang under RecreateInstance that leaves the whole gang short of one member. A gang surge roll held to the end by that quota is the tight-cluster family's cell, so the pending family leaves its `quota:<members-1> lift=never` cell out.
 - gen-budget drives the percent budgets the engine resolves: maxSurge under SurgeThenDrain and maxUnavailable under RecreatePod at 10%, 25%, 50% on fleets of 4 and 8 Instances, for a plain push, a push with one engine Instance crash-looping on the running revision (form=start, restart policy None: the roll owns the broken Instance under either policy) and the story families' four-step auto canary. The engine resolves a percent budget as N x percent rounded up and clamped to N, for both budgets alike (the Deployment convention of rounding maxUnavailable down is not its rule), and every case states the rule with its own numbers: at 10 percent both fleets round up to 1, where rounding down would leave 0 and no roll could start, so the roll converging is the proof; at 25 and 50 percent the ceiling or floor scales with N. Left out, with the reason: the in-place strategies, whose maxUnavailable the drain-first cells already read and whose own family is gen-inplaceonly; the prefill/decode gang at 8 Instances, a 34-pod fleet that would cost a lane shard per case while the rounding is a function of N and the percent, which the single-pod cells at 8 carry; the crash form load and the restart policy under the crash loop (gen-crashloop crosses both at 25 percent); and the gangs under the canary beyond the engine gang at 4 (the pod budget of a canary lane). The capacity floor is waived on the crash-loop cells as on every crash-loop case; the ceiling stays hard.
 - gen-inplaceonly drives InPlaceOnly on what sets it apart. An image change is the one diff it patches onto the live pod: on a single-pod Instance the roll lands in place with UIDs stable; a gang runs every in-place strategy as a whole-gang recreate (eligibility reads the leader's spec alone), so it is rebuilt whole and never refused. An env, a resources or a probe change exceeds container images: on a single-pod Instance the push is refused (`expect=held`: nothing is recreated, patched or surged for the hold window, an InPlaceUpdateNotPossible event says why, then the corrective push drops the override and lands in place); on a gang it is a whole-gang recreate. A crash loop at idle is repaired by a rebuild, since a repair is not an update (form=load under restart policy None is left out, as in every idle family: no repair is promised there). A crash loop under a push belongs to the roll: an image push patches the crashing pod itself and it serves again; an env push is refused, the repair yields to the roll, and the Instance waits broken for the corrective push, which patches it in place. One fleet size (4), both restart policies everywhere (live under the crash loops, a negative control under the pushes), the canonical budget maxUnavailable 1.
+- gen-fault-scale and gen-fault-delete break Instance 0 of the settled service, the lowest index, so a scale-down's natural victim (the highest index) and the broken Instance differ and the order of removal can be told apart. The engine runs under SurgeThenDrain with maxSurge 1 and maxUnavailable 1 in both families: nothing rolls, so the strategy is dormant, and the unavailability budget of one admits the repair that takes the broken Instance offline (the canonical budget of zero holds it). Readiness loss is repaired under neither restart policy, so its policy axis is collapsed to None; a crash at start, a crash after Ready and a pull failure run under both, and each scale-up cell states on line two what becomes of the broken Instance (expect=repaired|left) and why. On the gang fleet of two only down by one and up by one are emitted: to one is down by one there, and down by two asks for zero, which the API does not run as zero. A rolling group is crossed in where a decoder exists; the delete family keeps the same axes.
 - Kill-family cells pinned by hand-written restart/ cases are excluded:
 
   - p130: engine SurgeThenDrain rp=None

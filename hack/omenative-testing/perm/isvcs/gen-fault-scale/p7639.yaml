@@ -1,0 +1,23 @@
+# p7639: [gen] broken crashloop:load up1 pd N=4 rp None co none  mode=scaledown Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=4 ceil_r=2 fault=crashloop:old co=none topo=pd form=load during=idle to_e=5 inst=0 expect=repaired
+# reason: the pod of the engine's Instance 0 has its runner killed every few seconds while it is up, so it dies after Ready and comes back between crashes; once the status reports Instance 0 broken the engine is scaled from 4 to 5: a new Instance 4 comes up on the running revision and serves, the healthy Instances keep their pods and never leave rotation (never below 3 Ready), nothing surges above 5, and the broken Instance is rebuilt, every pod new, Ready and serving on its running revision, and a RestartTriggered event names it: the policy promises nothing for a runner that dies after Ready and comes back, but the kubelet backs off its restarts and parks the pod in CrashLoopBackOff between them, a wedge the crash-loop repair rebuilds under every restart policy once the pod is past the stuck-pod grace; decoder and router are neither broken nor scaled and stay as they were
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p7639 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }
+  decoder:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

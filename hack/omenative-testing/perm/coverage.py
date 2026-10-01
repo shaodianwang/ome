@@ -166,6 +166,8 @@ RESTART_POLICY_NAMES = {"None", "RecreateInstanceOnPodRestart"}
 # The rollout-mode runner edits a push carries beside its annotation bump.
 ROLLOUT_EDITS = {"image", "env", "resources", "probe"}
 IDLE_EXPECTS = {"repaired", "held", "heals", "parked", "relocated"}
+# What a scale-up leaves a broken Instance at: repaired, or left as the fault left it.
+BROKEN_UP_EXPECTS = {"repaired", "left"}
 
 HEADER_VALUES = {
     "mode": {"rollout", "scaledown", "partition", "rebump", "migrate", "kill", "canary", "runtimerev",
@@ -177,7 +179,7 @@ HEADER_VALUES = {
     "analysis": {"pass", "breach", "inconclusive"},
     "health": {"pass", "breach", "inconclusive"},
     "oninconclusive": {"hold", "rollback"},
-    "expect": {"reject", "roll", "noroll", "recover", "fail"} | IDLE_EXPECTS,
+    "expect": {"reject", "roll", "noroll", "recover", "fail"} | IDLE_EXPECTS | BROKEN_UP_EXPECTS,
     "break": {"stuck"},
     "remove": {"decoder", "router"},
     "mig": {"Auto", "Surge", "Never"},
@@ -652,9 +654,10 @@ def classify_faults(h, mode, pods, strategy, verbs):
         faults.append(("node", "persistent", "-", "cordoned source node"))
     elif kind == "readiness":
         # a serving pod that stops passing readiness (kept, or lifted) or a pushed revision that never passes it
+        component = str(h.get("victimcomp", "engine"))
         persistent = param == "new" or h.get("form") != "recover"
-        faults.append(("readiness never passes", "persistent" if persistent else "one-shot",
-                       "new" if param == "new" else "running", str(h.get("victimcomp", "engine"))))
+        faults.append(("sibling broken" if component != "engine" else "readiness never passes",
+                       "persistent" if persistent else "one-shot", "new" if param == "new" else "running", component))
     elif kind == "quota":
         faults.append(("quota", "one-shot" if lifted else "persistent", "-", f"headroom {param}"))
     elif kind == "ctrlrestart":

@@ -1,0 +1,13 @@
+# p7604: [gen] broken crashloop:start down1 engine N=4 rp RecreateInstance co none  mode=scaledown Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 fault=crashloop:old co=none topo=engine form=start during=idle to_e=3 inst=0
+# reason: the pod of the engine's Instance 0 is pointed at an image with no shell on the settled service, so it crashes at every start and is never Ready again; once the status reports Instance 0 broken the engine is scaled from 4 to 3: the broken Instance 0 goes and Instances 1, 2 and 3 stay; the survivors keep their pods and keep serving throughout (never below 3 Ready), nothing is rebuilt during the scale, no Component surges, and every row settles Ready with no operation open
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p7604 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }

@@ -99,7 +99,8 @@ perm/
 │   ├── gen-canary-crash/ gen-canary-second-rev/ gen-canary-podkill/ gen-canary-fault-old/ gen-canary-fault-new/  — generated operator stories driven through a canary
 │   ├── gen-size/ gen-router-gang/  — generated small fleets (one and two Instances per Component) and the engine gang behind a router
 │   ├── gen-readiness/ gen-gang-member/ gen-tight/ gen-evict/ gen-preempt/ gen-pending/  — generated fault families (see isvcs/MANIFEST.md)
-│   └── gen-budget/ gen-inplaceonly/  — percent budgets as the engine resolves them; the strict in-place strategy on its own terms
+│   ├── gen-budget/ gen-inplaceonly/  — percent budgets as the engine resolves them; the strict in-place strategy on its own terms
+│   └── gen-fault-scale/ gen-fault-delete/  — generated: a scale or a delete on a service with a broken Instance
 └── results/
     └── <RUN_TS>/<feature>/<topo>/
         ├── pNN-<ts>.tsv   — one verdict row per case
@@ -129,6 +130,15 @@ of exiting immediately. After the `exec`, nginx's own SIGQUIT handling takes
 over, so a Ready pod always drains fast.
 `csr-multinode.yaml` applies the same startup delay to the gang runtime (leader +
 workers), so multi-node cases catch their peaks too.
+
+Readiness is an `exec` probe with two switches, each enough to fail it while
+the startup and liveness probes (plain `httpGet /`) keep passing, so a pod can
+run, leave rotation and never be restarted: the `/tmp/perm-unready` file (a
+serving pod that stops passing readiness, `fault=readiness:old`) and the
+`TEST_UNREADY` runner env (a revision whose pods never pass it). With neither
+set the probe is an HTTP check of nginx on its port. `run.py` names both
+switches (`READINESS_SWITCH_FILE`, `READINESS_SWITCH_ENV`); the metrics
+runtime keeps its HTTP readiness probe, its image has no shell.
 
 `TEST_EXIT_AFTER` is the runtime's one fault switch. Unset (every fixture and
 every case leaves it unset), the command execs nginx exactly as above. Set to
@@ -990,6 +1000,65 @@ pod, so the fault hook and the hold are ticked between watch events. The
 generated `isvcs/gen-inplaceonly/` family drives the three template edits,
 the image edit, and the crash loop under each, on the single-pod and gang
 shapes.
+### A scale or a delete on a service with a broken Instance (`during=idle` in `mode=scaledown|recreate`)
+
+`during=idle` in `mode=scaledown` and `mode=recreate` breaks one Instance of
+the settled service first and lands the mode's operation once the status has
+reported it. The break is one of `fault=crashloop:old form=start|load`,
+`fault=imagepull:old` or `fault=readiness:old form=persist` (the fixture's
+readiness switch set in the live pod with `kubectl exec`, so the pod keeps
+running, leaves rotation and is never restarted; the switch stays set until
+the case ends and the end-of-case cleanup lifts it). `inst=<index>` aims the
+break at one Instance; the generated families use Instance 0, the lowest
+index, so a scale-down's natural victim (the highest index) and the broken
+Instance differ and the order of removal can be told apart.
+
+The operator acts as the status lets them: once the broken Instance's row
+leaves Ready (a repair opening on it, which waits for the pod to be older
+than the stuck-pod grace), or once it has reported fewer serving pods than it
+has for `BROKEN_STATUS_WAIT_S` (120 s scaled) while staying Ready, which is
+where readiness loss leaves it. A row that never reports the break fails the
+case before the operation is judged: the status told the operator nothing.
+Then the operation, judged on what the operator wanted:
+
+- **a scale-down** (`to_e=` below N) removes the broken Instance first, then
+  the highest healthy indexes. The verdict snapshots the rows as the scale
+  lands and right after (a repair may open on the broken Instance between
+  the patch and the engine's first look) and accepts the removal either
+  snapshot calls for: the rows that existed at the scale and are still
+  present must be exactly the kept set, with no pod left on a removed index.
+  The survivors keep their pods (no UID changes) and keep serving throughout
+  (never below the target Ready, debounced like the rollout floor), no
+  Component surges above N, and every row settles Ready with no operation
+  open within `BROKEN_ROWS_SETTLE_S`. A broken Instance that was already
+  repaired when the scale landed is reported; the removal then follows the
+  index order alone.
+- **a scale-up** (`to_e=` above N) brings a new Instance up on the running
+  revision, whole and serving; the healthy Instances keep their pods and
+  never leave rotation (never below N-1 Ready); nothing surges above the new
+  count; and the broken Instance meets `expect=`: `repaired` (rebuilt, every
+  pod new, Ready and serving, with a `RestartTriggered` event naming it) or
+  `left` (no new pod for its index across the scale-up and a hold of
+  `IDLE_HOLD_S`, and no repair recorded). The generated family states
+  `repaired` for a crash at start, a crash after Ready and a pull failure
+  under both restart policies, since a pod the kubelet parks in a terminal
+  waiting state (CrashLoopBackOff, ImagePullBackOff) past the stuck-pod grace
+  is a wedge the crash-loop repair rebuilds under every policy, and `left`
+  for readiness loss, the runtime's own out-of-rotation signal.
+- **a delete** (`mode=recreate`) is the recreate contract on a fleet with a
+  broken Instance: every pod goes within the teardown budget, the broken one
+  included, no pod stays Terminating and no finalizer wedges, and the same
+  name comes back Ready on fresh pods.
+
+On every operation the Components the operator did not scale stay as they
+were (peak at N, the same pods). The generated `isvcs/gen-fault-scale/` and
+`isvcs/gen-fault-delete/` families cross the four breaks with both restart
+policies (readiness loss under `None` only, since no policy rebuilds it), the
+engine, PD and gang shapes, a rolling group on PD, and the operations down by
+one, down by two, to one, up by one and delete; the engine runs under
+`maxUnavailable: 1`, the budget that admits the repair a scale-up expects (a
+budget of zero holds it). `isvcs/MANIFEST.md` lists the cells left out and
+why.
 
 ### Fault cases: quota isolation, cordon impact, leak remediation
 
@@ -1583,7 +1652,11 @@ Four generators write into `isvcs/`; re-run one after editing it:
   `isvcs/MANIFEST.md` (per-dimension counts, the
   constraint ledger with every omitted cell and its reason, missing-hook
   catalog). The story families are canary lanes in CI: the pipeline gives
-  every `gen-canary-*` folder the canary pod budget and Prometheus.
+  every `gen-canary-*` folder the canary pod budget and Prometheus. The
+  broken-Instance operations (`p7600`–`p7799`) → `isvcs/gen-fault-scale/` (one
+  Instance broken, then the engine scaled down by one, by two, to one, or up
+  by one) and `isvcs/gen-fault-delete/` (the same breaks, then the service
+  deleted and re-created under the same name).
 
 A generator owns exactly the case ids it mints. Hand-written cases share the
 feature folders with generated ones (`restart/`, `canary/`, `scale/` and
@@ -1654,7 +1727,8 @@ The ledger's cell is (shape family, operation, fault row):
   `push` (a plain bump, `edit=env`, `mode=partition`, `mode=rebump`, a
   pairing-protocol patch), `rollback` (of a plain rollout; a canary's
   rollback is a step kind), `scale up` / `scale down` (`mode=scaledown` by
-  its targets), `migrate`, `delete` (`mode=recreate`), `pause` / `freeze`
+  its targets), `migrate`, `delete` (`mode=recreate`; with `during=idle` and
+  a break either lands on a service with one broken Instance), `pause` / `freeze`
   (`pause=` under a kill, lifted by the harness), `canary`, `strategy or
   policy edit` (`edit=strategy:*` / `edit=restartPolicy:*`), `runtime edit`
   (`mode=runtimerev`). `admission reject` and `remove component` are counted
@@ -1663,6 +1737,7 @@ The ledger's cell is (shape family, operation, fault row):
   the `operation+operation` overlap;
 - **fault row** — (kind, form, side). `fault=crashloop:old` is `crash at
   start` / `crash after Ready` by `form=`, `imagepull:old` is `image pull`,
+  `readiness:old` is `readiness never passes` on the running revision,
   `configkey:missing` is `config missing`, `node:notready` and
   `cordon:source` are `node`, `quota:<n>` is `quota`, `ctrlrestart` is
   `controller restart`; `mode=kill`, `podkill` and `pkill=1` are `pod

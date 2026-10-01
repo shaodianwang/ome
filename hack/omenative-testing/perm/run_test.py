@@ -8079,3 +8079,243 @@ class GeneratedDisruptionFamiliesTest(unittest.TestCase):
         for folder in ("gen-evict", "gen-preempt", "gen-pending"):
             lo, hi = generate_cases.GEN_BLOCKS[folder]
             self.assertTrue(7400 <= lo < hi <= 7600, folder)
+
+
+class BrokenOperationTest(unittest.TestCase):
+    """during=idle in mode=scaledown|recreate breaks one Instance of the
+    settled service (inst= names it) and lands the scale or the delete once
+    the status has reported it. The header rules, the aimed break victim,
+    the readiness switch, and the pure parts of the verdict: the operator's
+    order of removal, which plan the engine followed, the survivors' pods,
+    the broken Instance's fate on a scale-up, and the rows settling."""
+
+    DOWN = "# p999: x mode=scaledown Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 to_e=3 topo=engine"
+    UP = "# p999: x mode=scaledown Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 to_e=5 topo=engine"
+    DELETE = "# p999: x mode=recreate Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 topo=engine"
+    ROLLOUT = "# p999: x mode=rollout Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 topo=engine"
+
+    def _errs(self, header):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def test_header_breaks_one_instance_before_a_scale_or_a_delete(self):
+        self.assertEqual([], self._errs(self.DOWN + " fault=crashloop:old form=start during=idle inst=0"))
+        self.assertEqual([], self._errs(self.DOWN + " fault=crashloop:old form=load during=idle inst=0"))
+        self.assertEqual([], self._errs(self.DOWN + " fault=imagepull:old during=idle inst=0"))
+        self.assertEqual([], self._errs(self.DOWN + " fault=readiness:old form=persist during=idle inst=0"))
+        self.assertEqual([], self._errs(self.DOWN + " fault=crashloop:old form=start during=idle"))
+        self.assertEqual([], self._errs(self.DELETE + " fault=crashloop:old form=load during=idle inst=0"))
+        self.assertEqual([], self._errs(self.DELETE + " fault=readiness:old form=persist during=idle inst=0"))
+        self.assertEqual([], self._errs(self.UP + " fault=crashloop:old form=start during=idle inst=0 expect=repaired"))
+        self.assertEqual([], self._errs(self.UP + " fault=readiness:old form=persist during=idle inst=0 expect=left"))
+        self.assertTrue(run._fault_ok("readiness:old"))
+
+    def test_the_break_must_be_one_of_the_three_and_name_the_running_revision(self):
+        self.assertTrue(any("needs fault=crashloop|imagepull|readiness:old" in e
+                            for e in self._errs(self.DOWN + " fault=configkey:missing during=idle")))
+        self.assertTrue(any("needs fault=crashloop|imagepull|readiness:old" in e
+                            for e in self._errs(self.DOWN + " fault=podkill:settling during=idle")))
+        self.assertTrue(any("needs form=start|load" in e for e in self._errs(self.DOWN + " fault=crashloop:old during=idle")))
+        self.assertTrue(any("needs form=persist" in e for e in self._errs(self.DOWN + " fault=readiness:old during=idle")))
+        self.assertTrue(any("needs form=persist (the switch stays set" in e
+                            for e in self._errs(self.DOWN + " fault=readiness:old form=recover during=idle")))
+        # readiness:new is a push whose revision never passes readiness, not a break of the running revision
+        self.assertTrue(any("needs fault=crashloop|imagepull|readiness:old" in e
+                            for e in self._errs(self.DOWN + " fault=readiness:new form=persist during=idle")))
+        migrate = "# p999: x mode=migrate Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 mig=Auto topo=engine"
+        self.assertTrue(any("mode=recreate|scaledown" in e
+                            for e in self._errs(migrate + " fault=crashloop:old form=start during=idle")))
+        self.assertTrue(any("mode=recreate|scaledown during=idle" in e
+                            for e in self._errs(self.DOWN + " fault=crashloop:old form=start")))
+        # under a push the same break at idle is the readiness family's cell
+        self.assertEqual([], self._errs(self.ROLLOUT + " fault=readiness:old form=persist during=idle"))
+        self.assertTrue(any("needs during=idle" in e for e in self._errs(self.ROLLOUT + " fault=readiness:old form=persist")))
+
+    def test_a_scale_up_states_the_broken_instances_fate_and_nothing_else_does(self):
+        self.assertTrue(any("states what becomes of it" in e
+                            for e in self._errs(self.UP + " fault=crashloop:old form=start during=idle inst=0")))
+        self.assertTrue(any("states what becomes of it" in e
+                            for e in self._errs(self.UP + " fault=crashloop:old form=start during=idle inst=0 expect=held")))
+        self.assertTrue(any("no outcome is stated" in e
+                            for e in self._errs(self.DOWN + " fault=crashloop:old form=start during=idle inst=0 expect=repaired")))
+        self.assertTrue(any("no outcome is stated" in e
+                            for e in self._errs(self.DELETE + " fault=crashloop:old form=start during=idle inst=0 expect=left")))
+        self.assertTrue(any("what a scale-up leaves a broken Instance at" in e
+                            for e in self._errs(self.ROLLOUT + " fault=crashloop:old form=start during=idle expect=left")))
+
+    def test_inst_names_one_instance_below_the_count_and_only_with_a_break_at_idle(self):
+        self.assertTrue(any("needs during=idle" in e for e in self._errs(self.DOWN + " inst=0")))
+        self.assertTrue(any("names the one Instance the break hits" in e
+                            for e in self._errs(self.DOWN + " fault=crashloop:old form=start during=idle inst=0,1")))
+        self.assertTrue(any("names the one Instance the break hits" in e
+                            for e in self._errs(self.DOWN + " fault=crashloop:old form=start during=idle inst=4")))
+
+    def test_the_break_victim_can_be_aimed_at_one_instance(self):
+        pods = {"e0": {"alive": True, "hash": "old", "inst": "0", "comp": "engine", "runner": "default", "uid": "u0"},
+                "e1": {"alive": True, "hash": "old", "inst": "1", "comp": "engine", "runner": "default", "uid": "u1"},
+                "e2": {"alive": True, "hash": "old", "inst": "2", "comp": "engine", "runner": "default", "uid": "u2"}}
+        self.assertEqual(["e2"], run._crashloop_pick_pods(pods, {"old"}, "engine", 1))
+        self.assertEqual(["e0"], run._crashloop_pick_pods(pods, {"old"}, "engine", 1, inst="0"))
+        self.assertEqual("e1", run._crashloop_pick_pod(pods, {"old"}, "engine", inst=1))
+        gang = {"g0l": {"alive": True, "hash": "old", "inst": "0", "comp": "engine", "runner": "leader", "uid": "l0"},
+                "g0w": {"alive": True, "hash": "old", "inst": "0", "comp": "engine", "runner": "worker", "uid": "w0"},
+                "g1l": {"alive": True, "hash": "old", "inst": "1", "comp": "engine", "runner": "leader", "uid": "l1"}}
+        self.assertEqual("g0l", run._crashloop_pick_pod(gang, {"old"}, "engine", inst="0"))
+        self.assertIsNone(run._crashloop_pick_pod(pods, {"old"}, "engine", inst="7"))
+
+    def test_readiness_switch_is_set_in_the_aimed_pod_and_lifted_once(self):
+        calls = []
+
+        def kubectl(*a, **k):
+            calls.append(a)
+            return subprocess.CompletedProcess(a, 0, "", "")
+        pods = {"e0": {"alive": True, "hash": "old", "inst": "0", "comp": "engine", "runner": "default", "uid": "u0"},
+                "e1": {"alive": True, "hash": "old", "inst": "1", "comp": "engine", "runner": "default", "uid": "u1"}}
+        f = run._fault_new("p999", {"fault": "readiness:old", "form": "persist", "during": "idle"})
+        f["inst"] = "0"
+        before = len(run._FAULT_CLEANUPS)
+        with mock.patch.object(run, "kubectl", kubectl):
+            run._fault_fire(f, pods, {"engine": 1}, {"old"})
+            self.assertIsNone(f["infra_fail"])
+            self.assertEqual(("e0", "0", "u0"), (f["crash_pod"], f["crash_inst"], f["crash_uid"]))
+            self.assertEqual(1, len(calls))
+            self.assertIn(f"touch {run.READINESS_SWITCH_FILE}", calls[0][-1])
+            self.assertEqual(("readiness", f), run._FAULT_CLEANUPS[-1])
+            run._run_fault_cleanups()
+            self.assertEqual(before, len(run._FAULT_CLEANUPS))
+            self.assertIn(f"rm -f {run.READINESS_SWITCH_FILE}", calls[-1][-1])
+            self.assertTrue(f["switch_lifted"])
+            self.assertTrue(run._readiness_restore(f))
+            self.assertEqual(2, len(calls), "a lifted switch is not lifted again")
+        self.assertTrue(run._break_bitten(f, {"e0": dict(pods["e0"], ready=False)}))
+        self.assertFalse(run._break_bitten(f, {"e0": dict(pods["e0"], ready=True)}))
+
+    def test_a_row_is_not_healthy_when_not_ready_or_serving_short(self):
+        self.assertFalse(run._row_not_healthy(None))
+        self.assertFalse(run._row_not_healthy({"phase": "Ready", "podCount": 1, "servingPodCount": 1}))
+        self.assertTrue(run._row_not_healthy({"phase": "Ready", "podCount": 1, "servingPodCount": 0}))
+        self.assertTrue(run._row_not_healthy({"phase": "Restarting", "podCount": 1, "servingPodCount": 1}))
+        self.assertFalse(run._row_not_healthy({"phase": "Ready"}))
+
+    def test_removals_take_the_broken_rows_first_then_the_highest_index(self):
+        rows = [("0", False), ("1", True), ("2", True), ("3", True)]
+        self.assertEqual(["0"], run._broken_removals(rows, 1))
+        self.assertEqual(["0", "3"], run._broken_removals(rows, 2))
+        self.assertEqual(["0", "3", "2"], run._broken_removals(rows, 3))
+        self.assertEqual(["3"], run._broken_removals([("0", True), ("1", True), ("2", True), ("3", True)], 1))
+        self.assertEqual(["2", "0"], run._broken_removals([("0", False), ("1", True), ("2", False)], 2))
+        self.assertEqual([], run._broken_removals(rows, 0))
+
+    def test_the_plan_the_engine_followed_is_read_off_the_rows_left(self):
+        plans = {"at the scale": ["0"], "right after the scale": ["3"]}
+        pre = {"0", "1", "2", "3"}
+        self.assertEqual(("at the scale", []), run._broken_plan_followed(plans, pre, {"1", "2", "3"}, {"1", "2", "3"}))
+        self.assertEqual(("right after the scale", []), run._broken_plan_followed(plans, pre, {"0", "1", "2"}, {"0", "1", "2"}))
+        self.assertEqual((None, []), run._broken_plan_followed(plans, pre, {"1", "2"}, {"1", "2"}), "one too many went")
+        self.assertEqual((None, []), run._broken_plan_followed(plans, pre, {"1", "2", "3"}, {"0", "1", "2", "3"}),
+                         "a pod left on a removed index is not a removal")
+        self.assertEqual(("at the scale", ["4"]), run._broken_plan_followed(plans, pre, {"1", "2", "3", "4"}, {"1", "2", "3", "4"}),
+                         "a row that did not exist at the scale is reported, not judged")
+
+    def test_survivors_whose_pod_set_changed_are_named(self):
+        pre = {"1": {"a"}, "2": {"b"}, "3": {"c", "cw"}}
+        self.assertEqual([], run._survivor_pods_changed(pre, dict(pre)))
+        self.assertEqual(["1"], run._survivor_pods_changed(pre, {"1": {"a2"}, "2": {"b"}, "3": {"c", "cw"}}))
+        self.assertEqual(["2"], run._survivor_pods_changed(pre, {"1": {"a"}, "3": {"c", "cw"}}))
+        self.assertEqual(["3"], run._survivor_pods_changed(pre, {"1": {"a"}, "2": {"b"}, "3": {"c", "cw2"}}))
+        self.assertEqual(["1", "3"], run._survivor_pods_changed(pre, {"1": {"a", "x"}, "2": {"b"}, "3": {"c"}}))
+
+    def _ctx(self, alive, ready, new_pods=(), measures=None):
+        pods = {f"e{i}": {"alive": True, "ready": True, "serving": True, "hash": "old", "inst": str(i),
+                          "comp": "engine", "uid": f"u{i}"} for i in range(alive)}
+        for name, spec in new_pods:
+            pods[name] = spec
+        return {"configured": {"engine"}, "pods_per_inst": {"engine": 1}, "old_hashes": {"old"},
+                "pod_state": pods, "agg": {"engine": (alive, ready, 0)},
+                "measures": {"engine": (measures if measures is not None else alive, 0, 0)}}
+
+    def test_a_scale_up_has_landed_when_the_new_instance_serves_and_the_fate_matches(self):
+        fresh = {"4": (True, True)}
+        ctx = self._ctx(5, 5)
+        self.assertTrue(run._broken_up_converged(ctx, "engine", {"engine": 5}, "repaired", fresh, True))
+        self.assertFalse(run._broken_up_converged(ctx, "engine", {"engine": 5}, "repaired", {}, True), "no new Instance yet")
+        self.assertFalse(run._broken_up_converged(ctx, "engine", {"engine": 5}, "repaired", {"4": (False, True)}, True))
+        self.assertFalse(run._broken_up_converged(ctx, "engine", {"engine": 5}, "repaired", {"4": (True, False)}, True),
+                         "a new Instance on another revision is not the one")
+        self.assertFalse(run._broken_up_converged(self._ctx(5, 4), "engine", {"engine": 5}, "repaired", fresh, True),
+                         "the repaired Instance counts toward Ready")
+        self.assertTrue(run._broken_up_converged(self._ctx(5, 4), "engine", {"engine": 5}, "left", fresh, False))
+        self.assertFalse(run._broken_up_converged(self._ctx(5, 4), "engine", {"engine": 5}, "left", fresh, True),
+                         "a rebuilt Instance is not left as the fault left it")
+        self.assertFalse(run._broken_up_converged(self._ctx(5, 5, measures=4), "engine", {"engine": 5}, "repaired", fresh, True),
+                         "five pods on four indices are not five Instances")
+
+    def test_new_instances_are_read_whole_serving_and_on_the_running_revision(self):
+        ctx = self._ctx(4, 4, new_pods=[("e4", {"alive": True, "ready": True, "serving": True, "hash": "old", "inst": "4",
+                                                "comp": "engine", "uid": "u4"})])
+        self.assertEqual({"4": (True, True)}, run._broken_new_instances(ctx, "engine", {"0", "1", "2", "3"}))
+        ctx["pod_state"]["e4"]["serving"] = False
+        self.assertEqual({"4": (False, True)}, run._broken_new_instances(ctx, "engine", {"0", "1", "2", "3"}))
+        ctx["pod_state"]["e4"].update(serving=True, hash="new")
+        self.assertEqual({"4": (True, False)}, run._broken_new_instances(ctx, "engine", {"0", "1", "2", "3"}))
+
+    def test_the_broken_instances_fate_is_judged_as_the_header_states(self):
+        f = {"crash_comp": "engine", "crash_inst": "0", "kind": "crashloop"}
+        named = [("RestartTriggered", "OMENative component=engine instance=0 crash-loop repair: pod e0 wedged")]
+        other = [("RestartTriggered", "OMENative component=engine instance=3 ...")]
+        notes, checks = [], []
+        self.assertEqual("PASS", run._broken_fate_checks(f, "repaired", {"u0b"}, {"u0"}, 12.0, named, "PASS", notes, checks))
+        notes, checks = [], []
+        self.assertEqual("FAIL", run._broken_fate_checks(f, "repaired", {"u0b"}, {"u0"}, 12.0, other, "PASS", notes, checks))
+        self.assertTrue(any("no RestartTriggered event named" in c for c in checks))
+        notes, checks = [], []
+        self.assertEqual("FAIL", run._broken_fate_checks(f, "repaired", {"u0"}, {"u0"}, None, named, "PASS", notes, checks))
+        self.assertTrue(any("was not rebuilt" in c for c in checks))
+        f["kind"] = "readiness"
+        notes, checks = [], []
+        self.assertEqual("PASS", run._broken_fate_checks(f, "left", {"u0"}, {"u0"}, None, other, "PASS", notes, checks))
+        notes, checks = [], []
+        self.assertEqual("FAIL", run._broken_fate_checks(f, "left", {"u0b"}, {"u0"}, 30.0, [], "PASS", notes, checks))
+        self.assertTrue(any("got a new pod" in c for c in checks))
+        notes, checks = [], []
+        self.assertEqual("FAIL", run._broken_fate_checks(f, "left", {"u0"}, {"u0"}, None, named, "PASS", notes, checks))
+        self.assertTrue(any("though no repair was due" in c for c in checks))
+
+    def test_the_status_must_have_reported_the_broken_instance(self):
+        f = {"crash_comp": "engine", "crash_inst": "0", "kind": "imagepull"}
+        notes, checks = [], []
+        self.assertEqual("PASS", run._broken_report_checks(f, {"bitten_at": 3.0, "reported_at": 9.0, "acted_on": "its row reads Restarting"},
+                                                           "PASS", notes, checks))
+        self.assertTrue(any("acts as its row reads Restarting" in c for c in checks))
+        notes, checks = [], []
+        self.assertEqual("FAIL", run._broken_report_checks(f, {"bitten_at": 3.0, "reported_at": None, "acted_on": ""}, "PASS", notes, checks))
+        self.assertTrue(any("never reported" in c for c in checks))
+
+    def test_rows_settle_with_sparse_indexes_and_no_operation_open(self):
+        def items(rows, replicas=3):
+            return [{"spec": {"component": "engine"},
+                     "status": {"replicas": replicas,
+                                "instanceStatuses": [{"index": i, "phase": ph, "operation": op} for i, ph, op in rows]}}]
+        with mock.patch.object(run, "_fetch_initial_ir_items", lambda cid: items([(1, "Ready", None), (2, "Ready", None), (3, "Ready", None)])):
+            self.assertEqual((True, "settled"), run._broken_rows_settled("p999", {"engine": 3}, {"engine"}))
+        with mock.patch.object(run, "_fetch_initial_ir_items", lambda cid: items([(1, "Ready", None), (2, "Restarting", {"type": "Restart"}), (3, "Ready", None)])):
+            settled, why = run._broken_rows_settled("p999", {"engine": 3}, {"engine"})
+            self.assertFalse(settled)
+            self.assertIn("engine/2: Restarting with an operation open", why)
+        with mock.patch.object(run, "_fetch_initial_ir_items", lambda cid: items([(1, "Ready", None), (2, "Ready", None), (3, "Ready", None)], replicas=4)):
+            self.assertEqual((False, "engine: replicas 4/3"), run._broken_rows_settled("p999", {"engine": 3}, {"engine"}))
+        with mock.patch.object(run, "_fetch_initial_ir_items", lambda cid: []):
+            self.assertEqual((False, "engine: observed 0 InferenceReplicas, want 1"), run._broken_rows_settled("p999", {"engine": 3}, {"engine"}))
+
+    def test_rows_are_read_with_their_health(self):
+        item = [{"spec": {"component": "engine"},
+                 "status": {"instanceStatuses": [{"index": 0, "phase": "Ready", "podCount": 1, "servingPodCount": 0},
+                                                 {"index": 1, "phase": "Ready", "podCount": 1, "servingPodCount": 1},
+                                                 {"index": 2, "phase": "Deleting"}]}}]
+        with mock.patch.object(run, "_fetch_initial_ir_items", lambda cid: item):
+            self.assertEqual([("0", False, "Ready"), ("1", True, "Ready"), ("2", False, "Deleting")], run._broken_rows("p999", "engine"))
+            self.assertEqual([], run._broken_rows("p999", "decoder"))
+            self.assertEqual("Deleting", run._broken_row("p999", "engine", 2).get("phase"))
+            self.assertIsNone(run._broken_row("p999", "engine", 5))

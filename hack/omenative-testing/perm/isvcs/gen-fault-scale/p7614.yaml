@@ -1,0 +1,13 @@
+# p7614: [gen] broken crashloop:load toone engine N=4 rp RecreateInstance co none  mode=scaledown Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 fault=crashloop:old co=none topo=engine form=load during=idle to_e=1 inst=0
+# reason: the pod of the engine's Instance 0 has its runner killed every few seconds while it is up, so it dies after Ready and comes back between crashes; once the status reports Instance 0 broken the engine is scaled from 4 to 1: the broken Instance 0 goes first, then the highest healthy Instances 3 and 2; Instance 1 stays; the survivors keep their pods and keep serving throughout (never below 1 Ready), nothing is rebuilt during the scale, no Component surges, and every row settles Ready with no operation open
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p7614 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 1 } } }
