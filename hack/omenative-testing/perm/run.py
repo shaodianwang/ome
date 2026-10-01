@@ -2103,6 +2103,318 @@ def _midroll_checks(edit, spec, bumped, verdict, notes, checks):
     return verdict
 
 
+# ── A move and a revision bump that overlap (mode=migrate) ───────────────────
+# Two shapes of one story: an Instance is being moved by request while a
+# revision rolls. then=bump at=<moment of the move> pushes the revision while
+# the move is in flight: at accept (the request is recorded, before its
+# replacement exists), at surge (the replacement pod has appeared), at drain
+# (the old pod is being taken down). during=<moment of the roll> requests the
+# move while the roll is in flight: at settling (the bump has landed, nothing
+# moved yet), at rotating (the first pod of the new revision), at last
+# (exactly one Instance of the moved Component is still off the new revision;
+# inst=last names that Instance, resolved when the hook fires). Either way
+# the verdict is the operator's end state: both operations finish, every
+# Instance of the bumped members ends on the new revision, the moved one
+# among them and off the node it left, the controller's rows carry no open
+# operation and name the new revision, the move is recorded once and consumed
+# once, and untouched Components stay untouched. Which operation finished
+# first is reported, never asserted.
+MIGRATE_THEN = {"bump"}
+BUMP_AT_HOOKS = {"accept", "surge", "drain"}
+MIGRATE_ROLL_HOOKS = {"settling", "rotating", "last"}
+# during=rollout is the older spelling of during=rotating on a migrate case.
+MIGRATE_ROLL_HOOK_ALIASES = {"rollout": "rotating"}
+LAST_INSTANCE = "last"
+# How often the move's record is read while an overlap hook is still armed.
+OVERLAP_POLL_S = 2.0
+# The record phases (status.migrations) at or past which the replacement pod
+# exists, and the one in which the source is being taken down.
+RECORD_SURGE_PHASES = {"SurgeReady", "Draining"}
+RECORD_DRAIN_PHASE = "Draining"
+
+
+def _overlap_hook(hdr):
+    """The roll moment a migrate case files its request at (or None)."""
+    during = str(hdr.get("during") or "")
+    during = MIGRATE_ROLL_HOOK_ALIASES.get(during, during)
+    return during if during in MIGRATE_ROLL_HOOKS else None
+
+
+def _overlap_new(hdr):
+    """Parsed overlap state (or None) of a migrate case: the change filed at a
+    moment of the move (then=bump at=...), or the moment of the roll the
+    request is filed at (during=...), and the bookkeeping the verdict reads."""
+    if hdr.get("mode") != "migrate":
+        return None
+    change, roll_hook = str(hdr.get("then") or ""), _overlap_hook(hdr)
+    if not change and not roll_hook:
+        return None
+    return {"change": change or None, "at": str(hdr.get("at") or "") or None, "roll_hook": roll_hook,
+            "t0": None, "fired": False, "fired_at": None, "fired_phase": None, "missed": None, "error": None,
+            "moved_index": None, "moved_uids": set(), "moved_nodes": {},
+            "move_done_at": None, "rows": None}
+
+
+def _overlap_moment(ov):
+    """The named moment, as the verdict lines say it."""
+    if ov["change"]:
+        return f"{ov['change']} at {ov['at']} of the move"
+    return f"the request at {ov['roll_hook']} of the roll"
+
+
+def _migration_record(case_id, comp, req_uuid):
+    """The controller's own record of a request (status.migrations of the
+    Component's InferenceReplica), or None while it has none."""
+    return next((m for m in _ir_status_migrations(case_id, comp) or []
+                 if m.get("requestUUID") == req_uuid), None)
+
+
+def _overlap_bump_due(ov, pod_state, record, ledger_entry, anno_consumed, mcomp, src_uids, orig_uids):
+    """Whether the move has reached the moment the bump is filed at: accept
+    once the request is recorded anywhere (the controller's record, the
+    ledger row, or the consumed annotation); surge once a pod the fleet did
+    not have is up for the migrated Component (or the record says so); drain
+    once a source pod is being taken down or gone (or the record says so)."""
+    phase = (record or {}).get("phase")
+    if ov["at"] == "accept":
+        return record is not None or ledger_entry is not None or bool(anno_consumed)
+    if ov["at"] == "surge":
+        return phase in RECORD_SURGE_PHASES or any(
+            p and p["alive"] and p.get("comp") == mcomp and p.get("uid") and p["uid"] not in orig_uids
+            for p in pod_state.values())
+    live = {p["uid"] for p in pod_state.values() if p and p["alive"] and p.get("uid")}
+    return phase == RECORD_DRAIN_PHASE or bool(set(src_uids) - live)
+
+
+def _pod_on_new(p, old_hashes):
+    """A pod carries the new revision: a hash the starting fleet never had, or
+    the bumped annotation (an in-place patch may land either first)."""
+    return bool(p.get("hash") and p["hash"] not in (old_hashes or set())) or bool(p.get("newanno"))
+
+
+def _instances_by_index(pod_state, comps):
+    """Alive pods of the named Components, grouped by (Component, index)."""
+    by = defaultdict(list)
+    for p in pod_state.values():
+        if p and p["alive"] and p.get("comp") in comps:
+            by[(p["comp"], str(p.get("inst", "0")))].append(p)
+    return by
+
+
+def _instances_on_new(pod_state, old_hashes, pods_per_inst, comps):
+    """Instances promoted to the new revision: the full pod set, every pod on
+    it, Ready and serving."""
+    n = 0
+    for (c, _i), pods in _instances_by_index(pod_state, comps).items():
+        if len(pods) >= max(1, pods_per_inst.get(c, 1)) and all(
+                _pod_on_new(p, old_hashes) and p.get("ready") and p.get("serving") for p in pods):
+            n += 1
+    return n
+
+
+def _roll_hook_due(hook, pod_state, old_hashes, pods_per_inst, N, comps):
+    """Whether the roll has reached the moment the request is filed at; last
+    counts the Instances of `comps` (the moved Component), so the Instance
+    it names is always one the request can move."""
+    if hook == "settling":
+        return True
+    if hook == "rotating":
+        return _midroll_due("rotating", pod_state, old_hashes)
+    want = sum(N.get(c, 0) for c in comps) - 1
+    return want >= 0 and _instances_on_new(pod_state, old_hashes, pods_per_inst, comps) == want
+
+
+def _pick_last_instance(pod_state, old_hashes, mcomp):
+    """The Instance of the migrated Component still off the new revision: a
+    steady one (every pod Ready) before one mid-operation, the highest index
+    first. None once every Instance carries the new revision."""
+    off = {}
+    for (_c, i), pods in _instances_by_index(pod_state, {mcomp}).items():
+        if not any(_pod_on_new(p, old_hashes) for p in pods):
+            off[i] = all(p.get("ready") for p in pods)
+    if not off:
+        return None
+    steady = [i for i, ready in off.items() if ready]
+    return max(steady or list(off), key=int)
+
+
+def _overlap_track_moved(ov, pod_state, surge_index, mcomp, orig_uids):
+    """Remember the move's replacement pods (fresh pods at the index the
+    record names) and the nodes they came up on."""
+    if surge_index is None:
+        return
+    ov["moved_index"] = str(surge_index)
+    for p in pod_state.values():
+        if (p and p["alive"] and p.get("comp") == mcomp and str(p.get("inst")) == ov["moved_index"]
+                and p.get("uid") and p["uid"] not in orig_uids):
+            ov["moved_uids"].add(p["uid"])
+            if p.get("node"):
+                ov["moved_nodes"][p["uid"]] = p["node"]
+
+
+def _rows_settled_on_new(items, N, configured, bumped, old_hashes):
+    """The controller's own view once both operations are over: N rows per
+    Component at whichever indices the move left, every one Ready with no
+    open operation, the counters at N, current and update revision equal,
+    and on the bumped members a revision the starting fleet never had."""
+    by = defaultdict(list)
+    for it in items or []:
+        c = (it.get("spec") or {}).get("component")
+        if c in configured:
+            by[c].append(it)
+    for c in sorted(configured):
+        if len(by.get(c, [])) != 1:
+            return False, f"{c}: observed {len(by.get(c, []))} InferenceReplicas, want 1"
+        st = by[c][0].get("status") or {}
+        for field in ("replicas", "readyReplicas", "servingReplicas", "updatedReplicas", "updatedReadyReplicas"):
+            try:
+                actual = int(st.get(field) or 0)
+            except (TypeError, ValueError):
+                return False, f"{c}: {field} is malformed"
+            if actual != N[c]:
+                return False, f"{c}: {field} {actual}/{N[c]}"
+        current, update = str(st.get("currentRevision") or ""), str(st.get("updateRevision") or "")
+        if not current or current != update:
+            return False, f"{c}: currentRevision and updateRevision have not converged"
+        if c in bumped and current.rsplit("-", 1)[-1] in (old_hashes or set()):
+            return False, f"{c}: currentRevision {current} is not the new revision"
+        try:
+            rows = irstatus.instance_statuses(st)
+        except irstatus.DecodeError as e:
+            return False, f"{c}: per-Instance status undecodable: {e}"
+        if not isinstance(rows, list) or len(rows) != N[c]:
+            return False, f"{c}: instanceStatuses {len(rows) if isinstance(rows, list) else 0}/{N[c]}"
+        for row in rows:
+            if row.get("phase") != "Ready" or row.get("operation") is not None:
+                return False, f"{c}/{row.get('index', '?')}: Instance is not settled"
+    return True, "settled on the new revision"
+
+
+def _overlap_settle_rows(ov, ctx, case_id, bumped, deadline):
+    """Wait, within the deadline, for the controller's rows to settle on the
+    new revision; the verdict reads the last answer."""
+    last_why = None
+    while not ctx["closed"]:
+        settled, why = _rows_settled_on_new(_fetch_initial_ir_items(case_id), ctx["N"], ctx["configured"],
+                                            bumped, ctx["old_hashes"])
+        ov["rows"] = (settled, why)
+        if settled or time.time() >= deadline:
+            return settled
+        if why != last_why:
+            print(f"    … waiting for the controller's rows ({why})")
+            last_why = why
+        t_end = time.time() + 5
+        while time.time() < t_end and not ctx["closed"]:
+            _read_one(ctx)
+
+
+def _overlap_checks(ov, ctx, mcomp, reqs, entries, ir_entries, rollout_conv_ts, verdict, notes, checks):
+    """The operator's end state when a move and a revision bump overlapped:
+    the second operation was filed at its named moment; the roll converged on
+    the new revision; the moved Instance ends on it, Ready and serving, off
+    the node it left; the controller's rows carry no open operation and name
+    the new revision; the move is recorded once; untouched Components stayed
+    untouched. Which operation finished first is reported, never asserted."""
+    inst = next(iter(reqs))
+    req_uuid, _ak, from_node = reqs[inst]
+    moment = _overlap_moment(ov)
+    t0 = ov["t0"] or ctx["trigger_ts"]
+
+    def rel(ts):
+        return f"{ts - t0:.0f}s"
+
+    def fail(note, line):
+        nonlocal verdict
+        verdict = "FAIL" if verdict != "INFRA-FAIL" else verdict
+        notes.append(note)
+        checks.append(line)
+
+    if ov["error"]:
+        notes.append(f"INFRA-FAIL: {ov['error']}")
+        checks.append(f"  ✗ INFRA-FAIL (overlap apparatus): {ov['error']}")
+        return "INFRA-FAIL"
+    if not ov["fired"]:
+        fail(f"{moment} never filed ({ov['missed'] or 'hook not reached'})",
+             f"  ✗ {moment}: the hook was never reached ({ov['missed'] or 'not observed'}), "
+             f"so the two operations never overlapped; nothing else is judged")
+        return verdict
+    checks.append(f"  ✓ {moment}: filed at {rel(ov['fired_at'])}"
+                  + (f" (record {ov['fired_phase']})" if ov["fired_phase"] else ""))
+    bumped = _bumped(ctx)
+    if rollout_conv_ts is None:
+        fail("the roll never converged beside the move (wedge)",
+             "  ✗ the roll never converged onto its new revision within budget — one operation wedged the other")
+    else:
+        checks.append(f"  ✓ the roll converged onto its new revision at {rel(rollout_conv_ts)}")
+    # The moved Instance: the index the record names, as the fleet ends.
+    moved = ov["moved_index"] if ov["moved_index"] is not None else (
+        None if (entries.get(inst) or {}).get("surgeInstance") is None else str(entries[inst]["surgeInstance"]))
+    ppi = max(1, ctx["pods_per_inst"].get(mcomp, 1))
+    pods = [p for p in ctx["pod_state"].values()
+            if p and p["alive"] and p.get("comp") == mcomp and str(p.get("inst")) == str(moved)]
+    gang_surge = ppi > 1 and ctx["info"]["strat"].get(mcomp) == "SurgeThenDrain"
+    if moved is None:
+        fail("the move never named a replacement Instance",
+             "  ✗ the moved Instance cannot be judged: the move's record never named its replacement index")
+    elif not pods and gang_surge:
+        checks.append(f"  ⓘ the roll rebuilt the moved Instance (index {moved}) under another index, as a gang "
+                      f"surge does; the fleet is whole on the new revision (asserted above)")
+    elif len(pods) >= ppi and all(p.get("hash") and p["hash"] not in ctx["old_hashes"]
+                                  and p.get("ready") and p.get("serving") for p in pods):
+        checks.append(f"  ✓ the moved Instance (index {moved}) ends on the new revision, Ready and serving")
+    else:
+        stale = sorted(p.get("hash") or "?" for p in pods if not (p.get("hash") and p["hash"] not in ctx["old_hashes"]))
+        fail(f"the moved Instance (index {moved}) is not on the new revision and serving",
+             f"  ✗ the moved Instance (index {moved}) must end on the new revision, Ready and serving: "
+             f"{len(pods)}/{ppi} pod(s), stale revisions {stale or 'none'}, "
+             f"not serving {sum(1 for p in pods if not (p.get('ready') and p.get('serving')))}")
+    nodes = sorted(set(ov["moved_nodes"].values()))
+    if nodes and from_node and all(n != from_node for n in nodes):
+        checks.append(f"  ✓ the moved Instance came up off the node it left ({', '.join(nodes)} != {from_node})")
+    else:
+        checks.append(f"  ⓘ node compare inconclusive for the moved Instance (replacement on {nodes or '?'}, "
+                      f"left {from_node or '?'})")
+    settled, why = ov["rows"] or (False, "not read")
+    if settled:
+        checks.append("  ✓ controller rows settled: every Instance Ready with no open operation, current and update "
+                      "revision the new one")
+    else:
+        fail(f"controller rows not settled after both operations: {why}",
+             f"  ✗ controller rows not settled after both operations: {why} — an Instance is left mid-operation")
+    cm_rows = _migration_ledger_entries(ctx["case_id"])
+    mine = sum(1 for e in cm_rows if e.get("requestUUID") == req_uuid)
+    if mine == 1 and len(cm_rows) == len(reqs):
+        checks.append("  ✓ the move is recorded once: one ledger row for the request and no other move")
+    else:
+        fail(f"ledger rows: {mine} for the request, {len(cm_rows)} in all (want 1 and {len(reqs)})",
+             f"  ✗ the move must be recorded once: {mine} ledger row(s) carry the request and {len(cm_rows)} "
+             f"row(s) exist in all (want 1 and {len(reqs)}) — a move was dropped or repeated")
+    if ir_entries is None:
+        checks.append("  ⓘ IR status.migrations unavailable on this build — the once-recorded check reads the ledger alone")
+    else:
+        n_ir = sum(1 for m in ir_entries if m.get("requestUUID") == req_uuid)
+        if n_ir == 1:
+            checks.append("  ✓ the controller holds one record for the request")
+        else:
+            fail(f"IR status.migrations holds {n_ir} records for the request",
+                 f"  ✗ the controller holds {n_ir} records for the request (want exactly one)")
+    for c in sorted(ctx["configured"] - set(bumped)):
+        now_uids = {p["uid"] for p in ctx["pod_state"].values() if p and p["alive"] and p.get("comp") == c and p.get("uid")}
+        rolled = any(p and p["alive"] and p.get("comp") == c and _pod_on_new(p, ctx["old_hashes"])
+                     for p in ctx["pod_state"].values())
+        if now_uids == ctx["old_uids"].get(c, set()) and not rolled:
+            checks.append(f"  ✓ {c} untouched: the same pods, still on their revision")
+        else:
+            fail(f"{c} was touched by the overlap",
+                 f"  ✗ {c} must stay untouched: pods changed {sorted(now_uids ^ ctx['old_uids'].get(c, set()))[:4]}"
+                 f"{', a pod carries the new revision' if rolled else ''}")
+    if ov["move_done_at"] is not None and rollout_conv_ts is not None:
+        first = "the move" if ov["move_done_at"] <= rollout_conv_ts else "the roll"
+        checks.append(f"  ⓘ order (not asserted): {first} finished first (move {rel(ov['move_done_at'])}, "
+                      f"roll {rel(rollout_conv_ts)})")
+    return verdict
+
+
 def _isvc_spec(case_id):
     r = kubectl("-n", NS, "get", "isvc", case_id, "-o", "json")
     if r.returncode != 0:
@@ -2177,32 +2489,6 @@ def _rollback_break_patch(patch, bumped, pods_per_inst):
         else:
             patch["spec"][c]["runner"] = {"readinessProbe": probe}
     return patch
-
-
-def _pod_on_new(p, old_hashes):
-    """A pod carries the new revision: a hash the starting fleet never had, or
-    the bumped annotation (an in-place patch may land either first)."""
-    return bool(p.get("hash") and p["hash"] not in (old_hashes or set())) or bool(p.get("newanno"))
-
-
-def _instances_by_index(pod_state, comps):
-    """Alive pods of the named Components, grouped by (Component, index)."""
-    by = defaultdict(list)
-    for p in pod_state.values():
-        if p and p["alive"] and p.get("comp") in comps:
-            by[(p["comp"], str(p.get("inst", "0")))].append(p)
-    return by
-
-
-def _instances_on_new(pod_state, old_hashes, pods_per_inst, comps):
-    """Instances promoted to the new revision: the full pod set, every pod on
-    it, Ready and serving."""
-    n = 0
-    for (c, _i), pods in _instances_by_index(pod_state, comps).items():
-        if len(pods) >= max(1, pods_per_inst.get(c, 1)) and all(
-                _pod_on_new(p, old_hashes) and p.get("ready") and p.get("serving") for p in pods):
-            n += 1
-    return n
 
 
 def _rollback_observe(rb, comp, rev, draining, bumped, old_hashes, now):
@@ -5367,7 +5653,9 @@ HDR_VALIDATORS = {
     "restart": lambda v: v in {"None", "RecreateInstance"},
     "kill": lambda v: v in {"leader", "worker"},
     "pause": lambda v: v in {"true", "freeze"},
-    "inst": _int_list,
+    # inst= names the Instance(s) a migrate case moves; last is the Instance a
+    # roll has not reached when the request is filed at during=last.
+    "inst": lambda v: _int_list(v) or v == LAST_INSTANCE,
     "canary": lambda v: str(v).lower() in {"auto", "manual"},
     # Which canary unit's ladder to drive when the ISVC carries a group per unit
     # (router, or engine+decoder). The units not named are asserted idle.
@@ -5404,11 +5692,16 @@ HDR_VALIDATORS = {
     # preempt the rollout); runtimerev edits the CSR mid-rotate. In rollout
     # mode during=idle fires a persistent fault on the settled service and
     # never bumps.
-    "during": lambda v: v in {"rollout", "migrate", IDLE_FAULT_PHASE, REPAIR_HOOK} | ROLLBACK_HOOKS or _canary_hook_ok(v),
+    "during": lambda v: v in {"rollout", "migrate", IDLE_FAULT_PHASE, REPAIR_HOOK} | ROLLBACK_HOOKS | MIGRATE_ROLL_HOOKS or _canary_hook_ok(v),
     "remove": lambda v: v in {"decoder", "router"},   # compremove: component patched out
     "readd": lambda v: v == 1,    # compremove: re-apply the manifest, assert round-trip
     "dup": lambda v: v == 1,      # migrate: re-file the same request UUID (dedup contract)
     "hint": lambda v: v == 1,     # migrate: carry hint_target_nodes (soft placement assert)
+    # migrate: the revision bump filed at a moment of the move (then=bump
+    # at=accept|surge|drain); during=settling|rotating|last is the reverse,
+    # the request filed at a moment of a roll.
+    "then": lambda v: v in MIGRATE_THEN,
+    "at": lambda v: v in BUMP_AT_HOOKS,
     # co= names the coordination group kind the case carries; canary is a
     # canary group on a rollout case (its ladder is observed only in mode=canary).
     "co": lambda v: v in {"none", "rolling", "ratio", "percomp", "seq", "bluegreen", "canary"},
@@ -5640,6 +5933,8 @@ def validate_case_file(path):
         if fault_kind not in BREAK_FAULTS:
             errs.append(f"{path}:1: during={REPAIR_HOOK} needs the break whose repair the edit lands on "
                         f"(fault={'|'.join(sorted(BREAK_FAULTS))}:{CRASHLOOP_VICTIM})")
+    elif mode == "migrate" and (during in MIGRATE_ROLL_HOOKS or during in MIGRATE_ROLL_HOOK_ALIASES):
+        pass   # the moment of the roll the request is filed at; the overlap rules below check the rest
     elif during in ROLLBACK_HOOKS:
         if mode != "rollout":
             errs.append(f"{path}:1: during={during} is a mid-roll hook of a rollout case (mode=rollout)")
@@ -5826,6 +6121,34 @@ def validate_case_file(path):
         errs.append(f"{path}:1: fault= in canary mode fires at a canary hook (fault=<kind>:canary-<state>)")
     if ("dup" in fields or "hint" in fields) and mode != "migrate":
         errs.append(f"{path}:1: dup=/hint= are migrate-mode knobs")
+    # A move and a revision bump that overlap: then=bump at=<moment of the
+    # move>, or during=<moment of the roll>; one Instance, one overlap, a
+    # request the policy admits.
+    if ("then" in fields or "at" in fields) and mode != "migrate":
+        errs.append(f"{path}:1: then=/at= are migrate-mode knobs (the bump filed at a moment of the move)")
+    if ("then" in fields) != ("at" in fields):
+        errs.append(f"{path}:1: then={'|'.join(sorted(MIGRATE_THEN))} and at={'|'.join(sorted(BUMP_AT_HOOKS))} "
+                    f"name the change and the moment of the move it is filed at (both or neither)")
+    if "then" in fields and during:
+        errs.append(f"{path}:1: during= files the request at a moment of the roll; then= files the bump at a "
+                    f"moment of the move — one or the other")
+    overlap = mode == "migrate" and ("then" in fields or _overlap_hook(fields) is not None)
+    if overlap:
+        if fields.get("mig") == "Never":
+            errs.append(f"{path}:1: an overlap needs a move the policy admits (mig=Never rejects the request)")
+        if len(str(fields.get("inst", 0)).split(",")) != 1:
+            errs.append(f"{path}:1: an overlap moves one Instance beside the roll (inst= names one)")
+        for k in ("dup", "hint", "fault", "blocked", "lift"):
+            if k in fields:
+                errs.append(f"{path}:1: {k}= does not combine with an overlap (one overlap per case)")
+        if fields.get("expect") == "fail":
+            errs.append(f"{path}:1: expect=fail is the bounded-failure contract; an overlap's move must complete")
+    last_inst = str(fields.get("inst", "")) == LAST_INSTANCE
+    if last_inst and not (mode == "migrate" and during == "last"):
+        errs.append(f"{path}:1: inst={LAST_INSTANCE} is the Instance a roll has not reached when the request is "
+                    f"filed at its last one (needs mode=migrate during=last)")
+    if mode == "migrate" and during == "last" and not last_inst:
+        errs.append(f"{path}:1: during=last moves the Instance the roll has not reached (needs inst={LAST_INSTANCE})")
     if fields.get("blocked") and "fault" not in fields:
         errs.append(f"{path}:1: blocked=1 requires a fault= header")
     if mode == "pairing" and "proto" not in fields:
@@ -7572,13 +7895,50 @@ def _migrate(case_id, yaml_file, desc, hdr):
     # inst is a comma list ("0,1") for the concurrent multi-instance case; a bare
     # "0" is the single-instance path (unchanged). Concurrent migrations must
     # surge DISTINCT replacement indices — many sources collapsing onto one surge
-    # index is the fleet-wipe class at migration scale.
+    # index is the fleet-wipe class at migration scale. inst=last is resolved
+    # once the roll reaches its last Instance (during=last).
     req_insts = [s.strip() for s in str(hdr.get("inst", 0)).split(",") if s.strip() != ""]
-    inst = req_insts[0]
     orig_insts = {p["inst"] for p in ctx["pod_state"].values()
                   if p and p["alive"] and p["comp"] == mcomp}
     dup = bool(hdr.get("dup"))
-    defer_rollout = hdr.get("during") == "rollout"
+    # A move and a revision bump that overlap: then=bump at=<moment of the
+    # move> files the bump once the move is there; during=<moment of the
+    # roll> starts the roll first and files the request at its moment.
+    ov = _overlap_new(hdr)
+    bumped = _bumped(ctx)
+    rotate_budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * N[mcomp] * ctx["pods_per_inst"][mcomp])
+
+    def _rollout_done():
+        live = [p for p in ctx["pod_state"].values()
+                if p and p["alive"] and p["comp"] in bumped and p.get("hash")]
+        return bool(live and all(p["hash"] not in ctx["old_hashes"] for p in live)
+                    and all(ctx["agg"].get(c, (0, 0, 0))[1] >= N[c] for c in ctx["configured"]))
+
+    if ov and ov["roll_hook"]:
+        print(f"  Phase 2a: ISVC revision bump (v2) on {sorted(bumped)} — migration request filed at {ov['roll_hook']}")
+        if not _bump_rev(ctx, bumped, "v2"):
+            return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", "isvc bump failed")
+        ov["t0"] = ctx["trigger_ts"]
+        t0 = time.time()
+        while time.time() - t0 < rotate_budget and not ctx["closed"]:
+            _read_one(ctx)
+            if _roll_hook_due(ov["roll_hook"], ctx["pod_state"], ctx["old_hashes"], ctx["pods_per_inst"], N, {mcomp}):
+                ov["fired"], ov["fired_at"] = True, time.time()
+                print(f"    ⚡ the roll is at {ov['roll_hook']} ({ov['fired_at'] - ov['t0']:.0f}s after the bump) — filing the request")
+                break
+            if _rollout_done():
+                ov["missed"] = "the roll completed before the hook"
+                break
+        else:
+            ov["missed"] = f"the hook was not reached within {rotate_budget}s"
+        if LAST_INSTANCE in req_insts:
+            picked = _pick_last_instance(ctx["pod_state"], ctx["old_hashes"], mcomp)
+            if picked is None:
+                picked = max(orig_insts, key=int)
+                ov["missed"] = ov["missed"] or "every Instance was already on the new revision"
+            req_insts = [picked if i == LAST_INSTANCE else i for i in req_insts]
+            print(f"    inst={LAST_INSTANCE} → Instance {picked}")
+    inst = req_insts[0]
     hint_node = None
     if hdr.get("hint"):
         # Hint target: a node already hosting a DIFFERENT instance of the same
@@ -7586,39 +7946,25 @@ def _migrate(case_id, yaml_file, desc, hdr):
         fn0 = ctx["old_nodes"].get((mcomp, inst), "")
         hint_node = next((n for (c, i), n in sorted(ctx["old_nodes"].items())
                           if c == mcomp and i != inst and n and n != fn0), None)
+
+    def _live_node(i):
+        """Where the Instance's pod runs now: a roll in flight may have moved it."""
+        return next((p.get("node", "") for p in ctx["pod_state"].values()
+                     if p and p["alive"] and p["comp"] == mcomp and str(p.get("inst")) == i and p.get("node")),
+                    ctx["old_nodes"].get((mcomp, i), ""))
+
     reqs = {}   # src inst -> (req_uuid, anno_key, from_node)
     annos = {}
     for i in req_insts:
         ru = str(uuid.uuid4())
         ak = f"ome.io/migration-request-v1-{ru}"
-        fn = ctx["old_nodes"].get((mcomp, i), "")
+        fn = _live_node(i)
         reqs[i] = (ru, ak, fn)
         body = {"schemaVersion": "v1", "component": mcomp, "instance": int(i),
                 "from_node": fn, "reason": "perm-test"}
         if hint_node:
             body["hint_target_nodes"] = [hint_node]
         annos[ak] = json.dumps(body)
-    if defer_rollout:
-        # Mid-rotate migration: start an ISVC rollout and file the migration
-        # request only once the rotation is visibly in flight.
-        bumped = _bumped(ctx)
-        print(f"  Phase 2a: ISVC revision bump (v2) on {sorted(bumped)} — migration request filed mid-rotate")
-        if not _bump_rev(ctx, bumped, "v2"):
-            return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", "isvc bump failed")
-        t0 = time.time()
-        while time.time() - t0 < 60 and not ctx["closed"]:
-            _read_one(ctx)
-            if any(p and p["alive"] and p.get("hash") and p["hash"] not in ctx["old_hashes"]
-                   for p in ctx["pod_state"].values()):
-                break
-        for i, (ru, ak, fn) in reqs.items():
-            live_fn = next((p.get("node", "") for p in ctx["pod_state"].values()
-                            if p and p["alive"] and p["comp"] == mcomp
-                            and str(p.get("inst")) == i and p.get("node")), fn)
-            reqs[i] = (ru, ak, live_fn)
-            body = json.loads(annos[ak])
-            body["from_node"] = live_fn
-            annos[ak] = json.dumps(body)
     from_node = reqs[inst][2]
     print(f"  Phase 2: migration request (mig={mig_mode}) component={mcomp} instances={req_insts}"
           + (f" hint={hint_node}" if hint_node else ""))
@@ -7628,6 +7974,8 @@ def _migrate(case_id, yaml_file, desc, hdr):
         return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", rr.stderr[:200])
     ctx["trigger_ts"] = time.time()
     ctx["track_comps"] = sorted(ctx["configured"])   # gang/floor bookkeeping in _read_one
+    if ov and ov["t0"] is None:
+        ov["t0"] = ctx["trigger_ts"]
     # Identity baseline for drain + surge detection. A migration legitimately
     # REUSES the source's own index for the replacement pod (on a different
     # node), so index-keyed checks false-positive ("source still present" /
@@ -7639,20 +7987,18 @@ def _migrate(case_id, yaml_file, desc, hdr):
                 and str(p.get("inst")) in req_insts and p.get("uid")}
     orig_uids = {p["uid"] for p in ctx["pod_state"].values()
                  if p and p["alive"] and p["comp"] == mcomp and p.get("uid")}
-    budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * N[mcomp] * ctx["pods_per_inst"][mcomp])
-    if defer_rollout:
+    budget = rotate_budget
+    if ov:
         budget = min(MAX_BUDGET_S, 2 * budget)   # two ops (rollout + migration) share the window
     never_grace = 90
     print(f"  Phase 3: watching migration (ledger {case_id}-ome-migration-audit; ≤{budget}s)")
     surge_seen, surge_nodes, last_poll, state = set(), {}, 0.0, "WATCHING"
     surge_uids = {}   # fresh pod UID -> node: identity-based surge count (index-reuse safe)
     dup_refiled, rollout_conv_ts = False, None
-
-    def _rollout_done():
-        live = [p for p in ctx["pod_state"].values()
-                if p and p["alive"] and p["comp"] in _bumped(ctx) and p.get("hash")]
-        return bool(live and all(p["hash"] not in ctx["old_hashes"] for p in live)
-                    and all(ctx["agg"].get(c, (0, 0, 0))[1] >= N[c] for c in ctx["configured"]))
+    # The move's own record, its ledger row and the consumed annotation, read
+    # every OVERLAP_POLL_S while a then= hook is armed; the index the record
+    # names for the replacement, once it has one.
+    seen, last_record_poll, moved_idx = (None, None, False), 0.0, None
 
     while time.time() - ctx["trigger_ts"] < budget and not ctx["closed"]:
         _read_one(ctx)
@@ -7667,13 +8013,37 @@ def _migrate(case_id, yaml_file, desc, hdr):
                     and p["uid"] not in orig_uids):
                 surge_uids[p["uid"]] = p.get("node", "") or surge_uids.get(p["uid"], "")
         now = time.time()
-        if defer_rollout and rollout_conv_ts is None and _rollout_done():
-            rollout_conv_ts = now
-            print(f"    ↷ in-flight rollout converged at {now - ctx['trigger_ts']:.0f}s")
+        if ov and ov["change"] and not ov["fired"] and not ov["error"]:
+            if now - last_record_poll >= OVERLAP_POLL_S:
+                last_record_poll = now
+                seen = (_migration_record(case_id, mcomp, reqs[inst][0]),
+                        _migration_ledger_entry(case_id, reqs[inst][0]),
+                        reqs[inst][1] not in _isvc_annotations(case_id))
+            if _overlap_bump_due(ov, ctx["pod_state"], *seen, mcomp, src_uids, orig_uids):
+                ov["fired_phase"] = (seen[0] or {}).get("phase")
+                if _bump_rev(ctx, bumped, "v2"):
+                    ov["fired"], ov["fired_at"] = True, time.time()
+                    ctx["trigger_ts"] = ov["t0"]      # the budget stays anchored on the request
+                    print(f"    ⚡ then={ov['change']} at {ov['at']} of the move: revision bump (v2) on {sorted(bumped)} "
+                          f"({ov['fired_at'] - ov['t0']:.0f}s after the request; record {ov['fired_phase'] or 'not yet written'})")
+                else:
+                    ov["error"] = f"the bump at {ov['at']} failed: {ctx.get('trigger_error')}"
+        if ov:
+            if seen[0] is not None and seen[0].get("surgeInstance") is not None:
+                moved_idx = seen[0]["surgeInstance"]
+            _overlap_track_moved(ov, ctx["pod_state"], moved_idx, mcomp, orig_uids)
+            if ov["fired"] and rollout_conv_ts is None and _rollout_done():
+                rollout_conv_ts = now
+                print(f"    ↷ in-flight rollout converged at {now - ov['t0']:.0f}s")
         if now - last_poll >= 5:
             last_poll = now
-            phs = {i: (_migration_ledger_entry(case_id, ru) or {}).get("phase")
-                   for i, (ru, _, _) in reqs.items()}
+            ents = {i: (_migration_ledger_entry(case_id, ru) or {}) for i, (ru, _, _) in reqs.items()}
+            phs = {i: e.get("phase") for i, e in ents.items()}
+            if ov and moved_idx is None and ents[inst].get("surgeInstance") is not None:
+                moved_idx = ents[inst]["surgeInstance"]
+            if ov and moved_idx is None and now - last_record_poll >= OVERLAP_POLL_S:
+                last_record_poll = now
+                seen = (_migration_record(case_id, mcomp, reqs[inst][0]), ents[inst] or None, seen[2])
             if any(phs.values()):
                 ctx["fault_migrating"] = True   # accept observed → migrating fault phase hook
                 if dup and not dup_refiled:
@@ -7689,16 +8059,19 @@ def _migrate(case_id, yaml_file, desc, hdr):
                 state = "FAILED"; break
             if mig_mode == "Never" and now - ctx["trigger_ts"] > never_grace:
                 state = "NEVER_GRACE"; break
-    if defer_rollout and rollout_conv_ts is None:
+    if ov and state in ("COMPLETED", "FAILED"):
+        ov["move_done_at"] = time.time()
+    if ov and ov["fired"] and rollout_conv_ts is None:
         # The product may PREEMPT: an accepted migration's requeue skips the
         # update pass, so the rollout can finish AFTER the migration completed
         # (the loop above breaks on the ledger phase). Keep watching, within
         # the same overall budget, for the rollout to converge.
         while time.time() - ctx["trigger_ts"] < budget and not ctx["closed"]:
             _read_one(ctx)
+            _overlap_track_moved(ov, ctx["pod_state"], moved_idx, mcomp, orig_uids)
             if _rollout_done():
                 rollout_conv_ts = time.time()
-                print(f"    ↷ in-flight rollout converged at {rollout_conv_ts - ctx['trigger_ts']:.0f}s (post-migration)")
+                print(f"    ↷ in-flight rollout converged at {rollout_conv_ts - ov['t0']:.0f}s (post-migration)")
                 break
     # Collapse the per-source ledger into the single-inst vars the verdict block
     # below already consumes; ph=="Completed" only when EVERY request completed.
@@ -7744,6 +8117,9 @@ def _migrate(case_id, yaml_file, desc, hdr):
                 anno_cleared = _anno_cleared()
             if anno_cleared and src_gone:
                 break
+
+    if ov and ov["fired"] and rollout_conv_ts is not None and ph == "Completed":
+        _overlap_settle_rows(ov, ctx, case_id, bumped, time.time() + migrate_settle_budget(len(req_insts)))
 
     verdict, notes, checks = "PASS", [], []
     # Peak/ceiling: a migration surges +1 (ceil = N+1 from the case header; N for
@@ -7966,19 +8342,15 @@ def _migrate(case_id, yaml_file, desc, hdr):
                 notes.append(f"migration collision: {len(req_insts)} sources surged only {n_surge} distinct replacement(s)")
                 checks.append(f"  ✗ migration collision: {len(req_insts)} migrations surged only {n_surge} distinct replacement(s) "
                               f"(fresh pods {len(surge_uids)}, watcher indices {sorted(surge_seen)}, ledger surgeInstances {sorted(ledger_surges)}) — sources collapsed onto a shared replacement (fleet-wipe shape)")
-        if defer_rollout:
+        if ov:
             # Ordering deliberately UNASSERTED: the product PREEMPTS — an
             # accepted migration's requeue skips the update pass (there is no
             # defer-then-run queue). Whether preempt or defer is the contract is
-            # an open product-design decision, so this case only asserts both
-            # operations complete without wedging each other in bounded total
-            # time (migration Completed is gated above).
-            if rollout_conv_ts is None:
-                verdict = "FAIL"
-                notes.append("mid-rotate migration: the in-flight rollout never converged (wedge)")
-                checks.append("  ✗ mid-rotate migration: the concurrent rollout never converged onto its new revision within budget — the migration wedged the rollout")
-            else:
-                checks.append(f"  ✓ mid-rotate migration: rollout converged onto its new revision at {rollout_conv_ts - ctx['trigger_ts']:.0f}s (ordering vs the migration deliberately unasserted)")
+            # an open product-design decision, so the overlap verdict asserts
+            # both operations complete and the operator's end state, never
+            # which finished first (migration Completed is gated above).
+            verdict = _overlap_checks(ov, ctx, mcomp, reqs, entries, _ir_status_migrations(case_id, mcomp),
+                                      rollout_conv_ts, verdict, notes, checks)
         if dup:
             cnt = sum(1 for e in _migration_ledger_entries(case_id)
                       if e.get("requestUUID") == reqs[inst][0])

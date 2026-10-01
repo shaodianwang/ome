@@ -331,6 +331,7 @@ EVAL_SOFT_FEATURES: list[dict[str, str]] = [
         "gen-router-gang",
         "gen-ops-held",
         "gen-runtime-edit-repair",
+        "gen-migrate-bump",
     )
 ]
 

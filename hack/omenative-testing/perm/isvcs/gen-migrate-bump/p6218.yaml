@@ -1,0 +1,13 @@
+# p6218: [gen] bump then move at settling engine N=4 SurgeThenDrain s2 co none  mode=migrate Ne=4 Nd=0 Nr=0 ceil_e=6 ceil_d=0 ceil_r=0 co=none topo=engine during=settling mig=Auto inst=0
+# reason: the move is requested as the bump lands, before any Instance moved; both finish: every Instance ends on the new revision, the moved one among them and off the node it left, no Instance is left mid-operation, the move is recorded once and consumed once, the capacity floor holds throughout and the peak never exceeds N+2 (the move and the roll together stay within the roll's budget); the roll's surge and the move's replacement share the headroom
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p6218 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 2, maxUnavailable: 0 } } }

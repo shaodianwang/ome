@@ -1,0 +1,27 @@
+# p6273: [gen] move then bump at surge pd N=4 InPlaceIfPossible u1 co rolling  mode=migrate Ne=4 Nd=4 Nr=2 ceil_e=5 ceil_d=4 ceil_r=2 co=rolling topo=pd mig=Auto inst=0 then=bump at=surge
+# reason: the revision is pushed as the move's replacement pod starts; both finish: every Instance ends on the new revision, the moved one among them and off the node it left, no Instance is left mid-operation, the move is recorded once and consumed once, the capacity floor holds throughout and the peak never exceeds N+1 (the move and the roll together stay within the roll's budget); the roll patches in place, the move is the only surge; the roll runs under a rollingUpdate group that paces engine and decoder together
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p6273 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "InPlaceIfPossible", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
+  decoder:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "InPlaceIfPossible", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine, decoder]
+          rollingUpdate: {}

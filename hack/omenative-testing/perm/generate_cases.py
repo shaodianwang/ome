@@ -4,7 +4,7 @@
 Emits the constraint-filtered cross product of
     topology x updateStrategy x failure verb x injection phase x
     restartPolicy x pause
-into twenty-four generator-owned folders, using ONLY verbs and hooks the runners
+into twenty-five generator-owned folders, using ONLY verbs and hooks the runners
 (run.py + the KIND CI lane) already implement:
 
     gen-rollout/   p1000+  baseline revision-bump rollouts (failure=none)
@@ -133,6 +133,14 @@ into twenty-four generator-owned folders, using ONLY verbs and hooks the runners
                           crash lands as the edit does), crossed with shape x
                           strategy x restartPolicy x crash form x edit verb;
                           the last change wins and nothing is rebuilt twice
+    gen-migrate-bump/ p6200+  a move and a revision bump that overlap: an
+                          Instance is moved by request while a revision
+                          rolls (then=bump at=accept|surge|drain pushes the
+                          revision at a moment of the move; during=settling|
+                          rotating|last requests the move at a moment of the
+                          roll), crossed with topology x strategy x moment x
+                          group; both finish and every Instance ends on the
+                          new revision, the moved one among them
 
 Ownership and determinism:
   - The gen-* folders belong ENTIRELY to this generator: every case there
@@ -280,6 +288,14 @@ Constraint ledger (why the raw product is filtered — derived from run.py):
     recreate, the recreate cell) and runs the scale and the canary under the
     surge strategy: the strategy is dormant under a scale, and the gang
     canary under a recreate is the controller-restart family's shape.
+  - The migrate-and-bump family moves one Instance by request only: the
+    engine's own (automatic) migration is a born-terminal relocation record,
+    written when an Instance whose node is gone is rebuilt elsewhere; it has
+    no in-flight phase for a roll to overlap, and the one verb that provokes
+    it, a node loss, belongs to the node-loss family. during=last is not
+    emitted with maxSurge 2: a surge of two promotes its last pair together,
+    so the moment with exactly one Instance still off the new revision is not
+    reliably observable.
 
 The t=3 covering fill over the deferred dimensions (coordination/rollout
 groups, canary promotion, budget x coordination interactions) is the --fill
@@ -325,6 +341,7 @@ GEN_BLOCKS = {
     "gen-router-gang": (8100, 8200),
     "gen-ops-held": (6800, 6900),
     "gen-runtime-edit-repair": (6900, 7000),
+    "gen-migrate-bump": (6200, 6400),
 }
 GEN_ID_LO = min(lo for lo, _hi in GEN_BLOCKS.values())
 GEN_ID_HI = max(hi for _lo, hi in GEN_BLOCKS.values())
@@ -561,6 +578,40 @@ EDIT_REPAIR_ORDERS = ["edit-during-repair", "crash-during-edit"]
 EDIT_REPAIR_EDITS = ["image", "env"]
 ALT_IMAGE_TOKEN = "${OME_EVAL_NGINX_ALT_IMAGE}"
 
+
+# The migrate-and-bump family: an Instance is moved by request while a
+# revision rolls. then=bump at=<moment of the move> pushes the revision once
+# the move is accepted, once its replacement pod has appeared, or once its old
+# pod is being taken down; during=<moment of the roll> files the request once
+# the bump has landed, at the first pod of the new revision, or when exactly
+# one Instance of the moved Component is still off it (inst=last names that
+# Instance). One gang
+# width per topology (the move copies the whole gang); budget 1 per strategy,
+# plus maxSurge 2 on the single-pod engine; a rollingUpdate group puts the
+# roll under the run model (a single-member group on the engine-only shapes).
+# The move always surges one replacement, so the ceiling is N plus the larger
+# of the roll's surge and that one replacement: the move and the roll together
+# never exceed the roll's budget.
+MIGRATE_BUMP_SHAPES = [("engine", 4, 0), ("pd", 4, 0), ("engine-mn", 2, 1), ("pd-mn", 2, 1)]
+MIGRATE_BUMP_BUDGETS = {
+    "SurgeThenDrain": [(1, 0)],
+    "RecreatePod": [(0, 1)],
+    "InPlaceIfPossible": [(0, 1)],
+}
+MIGRATE_BUMP_ENGINE_BUDGETS = {"SurgeThenDrain": [(1, 0), (2, 0)]}
+# (the operation that starts first, the moment of it the second is filed at)
+MIGRATE_BUMP_ORDERS = [("move", "accept"), ("move", "surge"), ("move", "drain"),
+                       ("roll", "settling"), ("roll", "rotating"), ("roll", "last")]
+MIGRATE_BUMP_COORDS = ["none", "rolling"]
+MIGRATE_BUMP_MOMENT = {
+    ("move", "accept"): "the revision is pushed as the move is accepted, before its replacement exists",
+    ("move", "surge"): "the revision is pushed as the move's replacement pod starts",
+    ("move", "drain"): "the revision is pushed as the move takes its old pod down",
+    ("roll", "settling"): "the move is requested as the bump lands, before any Instance moved",
+    ("roll", "rotating"): "the move is requested at the first pod of the new revision",
+    ("roll", "last"): "the move is requested when the roll has one Instance of the moved Component left, and names that Instance",
+}
+
 # Canonical shapes: (topo, N, W). Gangs at N=2 with widths 1 and 2; singles at
 # N=4 (pd: engine+decoder N, router lib.NR). Percentage budgets additionally
 # run a mid-size variant (MID_SHAPE) so the ceil() rounding actually differs.
@@ -635,6 +686,7 @@ HAND_PINNED_KILL = {
 #   ("imagepull", "settling", topo, w, strat, rp, co) / ("imagepull", "idle", topo, w, rp)
 #   ("rollback", hook, topo, w, strat, surge, unavail, co)
 #   ("pause-repair", topo, w, form, rp, co, pause, moment, push)
+#   ("migrate-bump", first, hook, topo, w, strat, surge, unavail, co)
 # A park is added here as (key): (issue, reason, invariant scope) and
 # rendered into the header. The heal family's lift=after-failed cells are
 # parked on HEAL_ISSUE with a per-axis reason, filled in next to its emitter.
@@ -660,6 +712,9 @@ MISSING_HOOKS = [
     "controller restart while a repair is open (a crash loop at idle with the "
     "manager deleted once the rebuild has started) — the runner fires one fault "
     "per case and the idle-break handler fires no second one",
+    "an automatic migration verb — the engine's own migration is a born-terminal "
+    "relocation record written when a lost Instance is rebuilt elsewhere, so only a "
+    "node loss provokes it and the migrate-and-bump family moves by request only",
 ]
 
 
@@ -2589,6 +2644,88 @@ def emit_runtime_edit_repair(add):
                                 edit_runtime=True)
 
 
+# ── gen-migrate-bump: a move and a revision bump that overlap ───────────────
+def _migrate_bump_budgets(topo, strat):
+    if topo == "engine" and strat in MIGRATE_BUMP_ENGINE_BUDGETS:
+        return MIGRATE_BUMP_ENGINE_BUDGETS[strat]
+    return MIGRATE_BUMP_BUDGETS[strat]
+
+
+def _migrate_bump_reachable(first, hook, surge):
+    """A surge of two promotes its last pair together, so the moment with
+    exactly one Instance still off the new revision is not reliably seen."""
+    return not (first == "roll" and hook == "last" and isinstance(surge, int) and surge > 1)
+
+
+def _migrate_bump_extra(n, strat, surge):
+    """Pods above N the move and the roll may hold together: the move's one
+    replacement, or the roll's surge when that is larger."""
+    return max(surge_count(n, surge), 1) if strat == "SurgeThenDrain" else 1
+
+
+def _migrate_bump_comps(topo, n, w, life, co):
+    """The engine is moved and rolled; a grouped decoder shares the engine's
+    strategy so the group paces both on the same budget."""
+    cw = w if is_mn(topo) else 0
+    cs = [lib.comp("engine", n, cw, life)]
+    if is_pd(topo):
+        cs.append(lib.comp("decoder", n, cw, life if co != "none" else lib.lifecycle()))
+        cs.append(lib.comp("router", lib.NR, 0, lib.lifecycle()))
+    return cs
+
+
+def _migrate_bump_reason(first, hook, topo, strat, extra, co):
+    out = (f"{MIGRATE_BUMP_MOMENT[(first, hook)]}; both finish: every Instance ends on the new revision, "
+           f"the moved one among them and off the node it left, no Instance is left mid-operation, the move "
+           f"is recorded once and consumed once, the capacity floor holds throughout and the peak never "
+           f"exceeds N+{extra} (the move and the roll together stay within the roll's budget)")
+    if strat == "SurgeThenDrain" and is_mn(topo):
+        out += "; a gang roll may rebuild the moved Instance under another index"
+    elif strat == "SurgeThenDrain":
+        out += "; the roll's surge and the move's replacement share the headroom"
+    elif strat == "RecreatePod":
+        out += "; the roll drains first within the unavailable budget, the move is the only surge"
+    elif is_mn(topo):
+        out += "; the gang roll falls back to a whole-gang recreate, the move is the only surge"
+    else:
+        out += "; the roll patches in place, the move is the only surge"
+    if co != "none":
+        out += "; the roll runs under a rollingUpdate group" + (
+            " that paces engine and decoder together" if is_pd(topo) else "")
+    return out
+
+
+def emit_migrate_bump(add):
+    for topo, n, w in MIGRATE_BUMP_SHAPES:
+        for strat in MIGRATE_BUMP_BUDGETS:
+            for surge, unavail in _migrate_bump_budgets(topo, strat):
+                for first, hook in MIGRATE_BUMP_ORDERS:
+                    if not _migrate_bump_reachable(first, hook, surge):
+                        continue
+                    for co in MIGRATE_BUMP_COORDS:
+                        extra = _migrate_bump_extra(n, strat, surge)
+                        kv = dict(mode="migrate", **counts(topo, n), ceil_e=n + extra,
+                                  ceil_d=(n if is_pd(topo) else 0), ceil_r=(lib.NR if is_pd(topo) else 0),
+                                  co=co, topo=topo, mig="Auto")
+                        if co != "none" and is_pd(topo) and strat == "SurgeThenDrain":
+                            kv["ceil_d"] = n + surge_count(n, surge)   # the grouped decoder rolls on its own surge
+                        if first == "move":
+                            kv.update(inst=0, then="bump", at=hook)
+                        else:
+                            kv.update(inst=("last" if hook == "last" else 0), during=hook)
+                        meta = dict(strat=strat, verb=f"{'bump' if first == 'move' else 'move'}-at-{hook}",
+                                    first=first, hook=hook, surge=surge)
+                        desc = (f"{GEN_MARK} {'move then bump' if first == 'move' else 'bump then move'} at {hook} "
+                                f"{shape_tag(topo, w)} N={n} {strat} {budget_tag(strat, surge, unavail)} co {co}")
+                        life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail)
+                        coord = None
+                        if co != "none":
+                            coord = lib.coord_for(co, comps=("engine", "decoder") if is_pd(topo) else ("engine",))
+                        add("gen-migrate-bump", desc, kv, _migrate_bump_comps(topo, n, w, life, co),
+                            _migrate_bump_reason(first, hook, topo, strat, extra, co), meta,
+                            cell=("migrate-bump", first, hook, topo, w, strat, surge, unavail, co), coord=coord)
+
+
 # ── assembly ─────────────────────────────────────────────────────────────────
 def build_outputs():
     """{relative path under isvcs/: file text} — the entire owned output set."""
@@ -2658,6 +2795,7 @@ def build_outputs():
     emit_router_gang(add)
     emit_ops_held(add)
     emit_runtime_edit_repair(add)
+    emit_migrate_bump(add)
     stale = set(PARKED) - parked_used
     if stale:
         sys.exit("PARKED keys match no emitted cell (stale after a matrix change): "
@@ -2957,6 +3095,14 @@ def manifest(rows):
         " cell (the roll must still land on a pod the kubelet alone restarts)."
         " The PD shape carries no router, as the runtime-rev cases do: the"
         " edit rolls engine and decoder, each onto its own revision.",
+        "- The migrate-and-bump family moves one Instance by request only: the"
+        " engine's own (automatic) migration is a born-terminal relocation record,"
+        " written when an Instance whose node is gone is rebuilt elsewhere; it has"
+        " no in-flight phase for a roll to overlap, and the one verb that provokes"
+        " it, a node loss, belongs to the node-loss family.",
+        "- `during=last` is not emitted with maxSurge 2: a surge of two promotes its"
+        " last pair together, so the moment with exactly one Instance still off the"
+        " new revision is not reliably observable.",
         "- Kill-family cells pinned by hand-written restart/ cases are excluded:",
         "",
     ]

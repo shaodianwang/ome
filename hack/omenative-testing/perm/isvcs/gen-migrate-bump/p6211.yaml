@@ -1,0 +1,17 @@
+# p6211: [gen] bump then move at last engine N=4 SurgeThenDrain s1 co rolling  mode=migrate Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 co=rolling topo=engine during=last mig=Auto inst=last
+# reason: the move is requested when the roll has one Instance of the moved Component left, and names that Instance; both finish: every Instance ends on the new revision, the moved one among them and off the node it left, no Instance is left mid-operation, the move is recorded once and consumed once, the capacity floor holds throughout and the peak never exceeds N+1 (the move and the roll together stay within the roll's budget); the roll's surge and the move's replacement share the headroom; the roll runs under a rollingUpdate group
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p6211 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          rollingUpdate: {}

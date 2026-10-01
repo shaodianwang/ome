@@ -95,7 +95,7 @@ perm/
 │   ├── rollout/           — 96 rollout cases (topology × lifecycle × coordination)
 │   ├── migration/ restart/ partition/ scale/ edge/  — feature cases (see ../DESIGN.md)
 │   ├── gen-rollout/ gen-fault/ gen-restart/ gen-crashloop/ gen-switch/ gen-crashloop-idle/ gen-crashloop-sibling/
-│   │   gen-heal/ gen-imagepull/ gen-node/ gen-ctrlrestart/ gen-rollback/ gen-crashloop-new/ gen-crashloop-group/ gen-pause-repair/ gen-ops-held/ gen-runtime-edit-repair/  — generated hot core (see isvcs/MANIFEST.md)
+│   │   gen-heal/ gen-imagepull/ gen-node/ gen-ctrlrestart/ gen-rollback/ gen-crashloop-new/ gen-crashloop-group/ gen-pause-repair/ gen-ops-held/ gen-runtime-edit-repair/ gen-migrate-bump/  — generated hot core (see isvcs/MANIFEST.md)
 │   ├── gen-canary-crash/ gen-canary-second-rev/ gen-canary-podkill/ gen-canary-fault-old/ gen-canary-fault-new/  — generated operator stories driven through a canary
 │   └── gen-size/ gen-router-gang/  — generated small fleets (one and two Instances per Component) and the engine gang behind a router
 └── results/
@@ -890,6 +890,59 @@ strategies, both restart policies, both crash forms and the image and env
 edits; the edit-during-repair order skips a crash after Ready under
 `restartPolicy: None`, where no repair opens.
 
+### A move and a revision bump that overlap (`mode=migrate then=bump at=…`, `during=settling|rotating|last`)
+
+An Instance is being moved to another node by request and, while the move
+is in flight, the operator pushes a new revision; or the reverse, a roll is
+in flight and a move is requested. Both are migrate cases, so the usual
+migration checks apply (the ledger reaches Completed, the replacement
+surges off the node it left, the source drains, the request is consumed,
+the peak ceiling, the capacity floor, gang atomicity, index partition), and
+one of two knobs says which operation comes first and when the other lands:
+
+- **`then=bump at=accept|surge|drain`** — the move first. The request is
+  filed on the settled service and the bump of the bumped members (the
+  group members, else the engine) is filed at the named moment of the move:
+  `accept` once the request is recorded (the controller's record in
+  `status.migrations`, the ledger row or the consumed annotation, whichever
+  shows first), `surge` once the replacement pod has appeared (a pod the
+  fleet did not have, or the record at `SurgeReady`), `drain` once a source
+  pod is being taken down or gone (or the record at `Draining`). The record
+  is read every 2 s while the hook is armed, the pods at every tick.
+- **`during=settling|rotating|last`** — the roll first. The bump lands, then
+  the request is filed at the named moment of the roll: `settling` at once,
+  `rotating` at the first pod of the new revision, `last` when exactly one
+  Instance of the moved Component is still off the new revision (every
+  other one promoted: full pod set on it, Ready and serving; a grouped
+  decoder's own progress does not count). `last` is paired with
+  **`inst=last`**: the request names the Instance the roll has not
+  reached, resolved when the hook fires (a steady one before one
+  mid-operation, the highest index first). `during=rollout` is the older
+  spelling of `rotating`. A hook the roll or the move completes before is
+  recorded as missed and fails the case; nothing else is judged then.
+
+The verdict is the operator's end state, whichever operation finished first
+(the order is reported, never asserted): the roll converges onto the new
+revision on every Instance of the bumped members; the moved Instance (the
+index the record names) ends among them, Ready and serving (a gang roll
+under SurgeThenDrain may rebuild that index under another one, which is
+reported); the controller's rows are settled with no open operation and
+name the new revision; the move is recorded once and consumed once (one
+ledger row for the request, no other row, one controller record);
+Components outside the roll keep the same pods on their revision. The node
+the replacement came up on is compared with the node it left and reported
+(a one-node pool cannot satisfy it). Ceilings count the move's one
+replacement against the roll's surge: `N + max(maxSurge, 1)` under
+SurgeThenDrain, `N + 1` otherwise — the move and the roll together never
+exceed the roll's budget. The generated `isvcs/gen-migrate-bump/` family
+(`p6200`+) crosses the six moments with topology, strategy (budget 1, plus
+maxSurge 2 on the single-pod engine, where `last` is not observable: a
+surge of two promotes its last pair together) and a `rollingUpdate` group
+(a single-member group on the engine-only shapes). The move is always by
+request: the engine's own migration is a born-terminal relocation record
+written when a lost Instance is rebuilt elsewhere, so only a node loss
+provokes it, and that belongs to the node-loss family.
+
 ### Fault cases: quota isolation, cordon impact, leak remediation
 
 - **`fault=crashloop:old` with `form=start|load`** breaks one old-revision
@@ -1303,11 +1356,11 @@ Four generators write into `isvcs/`; re-run one after editing it:
   `gen_cases.py`'s feature counters).
 - `gen_runtime.py` — the runtime-triggered cases (`p400`+) → `isvcs/runtime-rev/`.
 - `generate_cases.py` — the hot-core permutation corpus (`p1000`–`p2799`,
-  `p3000`–`p4999`, `p5000`–`p5799`, `p5800`–`p5999` `p6000`–`p6199` and `p6800`–`p6999`) → `isvcs/gen-rollout/`, `isvcs/gen-fault/`,
+  `p3000`–`p4999`, `p5000`–`p5799`, `p5800`–`p5999` `p6000`–`p6199`, `p6200`–`p6399` and `p6800`–`p6999`) → `isvcs/gen-rollout/`, `isvcs/gen-fault/`,
   `isvcs/gen-restart/`, `isvcs/gen-crashloop/`, `isvcs/gen-switch/`,
   `isvcs/gen-crashloop-idle/`, `isvcs/gen-crashloop-sibling/`,
   `isvcs/gen-heal/`, `isvcs/gen-imagepull/`, `isvcs/gen-node/`,
-  `isvcs/gen-ctrlrestart/`, `isvcs/gen-rollback/`, `isvcs/gen-crashloop-new/`, `isvcs/gen-crashloop-group/`, `isvcs/gen-pause-repair/`, `isvcs/gen-ops-held/`, `isvcs/gen-runtime-edit-repair/`, and the operator stories driven through a canary (`p5200`–`p5399`) →
+  `isvcs/gen-ctrlrestart/`, `isvcs/gen-rollback/`, `isvcs/gen-crashloop-new/`, `isvcs/gen-crashloop-group/`, `isvcs/gen-pause-repair/`, `isvcs/gen-ops-held/`, `isvcs/gen-runtime-edit-repair/`, `isvcs/gen-migrate-bump/`, and the operator stories driven through a canary (`p5200`–`p5399`) →
   `isvcs/gen-canary-crash/` (a canary rolls the fix while the running
   revision breaks under it), `isvcs/gen-canary-second-rev/` (a second revision
   lands while the first canary is staging or serving) and

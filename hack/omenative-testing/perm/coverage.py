@@ -182,6 +182,8 @@ HEADER_VALUES = {
     "restart": {"None", "RecreateInstance"},
     "kill": {"leader", "worker"},
     "pause": {"true", "freeze"},
+    "then": {"bump"},
+    "at": {"accept", "surge", "drain"},
     "stuck": {"held", "failed"},
     "pauseat": {"before", "during", "after"},
     "push": {"fix"},
@@ -285,7 +287,7 @@ HEADER_CHECKS = {
     "blocked": _flag, "infeasible": _flag, "notimpl": _flag, "floor_hard": _flag, "floor_soft": _flag,
     "order_soft": _flag,
     "fault": _fault, "during": _during, "during2": _hook, "edit": _edit, "lift": _lift,
-    "inst": _int_list, "errorrate": _number, "timeout": _duration, "cell": _cells, "bump": _members,
+    "inst": lambda v: _int_list(v) or v == "last", "errorrate": _number, "timeout": _duration, "cell": _cells, "bump": _members,
     "img": _text, "rt": _text, "reason": _text, "proto": _text, "proto2": _text, "pairto": _text,
 }
 HEADER_KEYS = set(HEADER_VALUES) | set(HEADER_CHECKS)
@@ -513,7 +515,10 @@ def classify_operation(h, mode, size):
         return direction, f"engine {h.get('Ne')}->{h.get('to_e', h.get('Ne'))}", ""
     if mode == "migrate":
         detail = f"mig={h.get('mig', 'Auto')} inst={h.get('inst', 0)}" + (" dup" if h.get("dup") else "") + (" hint" if h.get("hint") else "")
-        return "migrate", detail, "push" if during == "rollout" else ""
+        # a push overlapping the move: filed at a moment of the move (then=bump at=), or the move
+        # requested at a moment of a roll (during=)
+        pushed = h.get("then") == "bump" or during in ("rollout", "settling", "rotating", "last")
+        return "migrate", detail, "push" if pushed else ""
     if mode == "recreate":
         return "delete", "delete and re-create the service", {"rollout": "push", "migrate": "migrate"}.get(during, "")
     if mode == "compremove":
@@ -721,6 +726,8 @@ def classify_timing(h, mode, operation, verbs, canary_steps):
         return "canary analysis"
     if str(h.get("fault", "")).startswith(("crashloop:", "imagepull:")):
         return "settling"
+    if h.get("at"):
+        return "migrating"   # the bump lands at a moment of the move
     if h.get("stuck"):
         # the operation lands on a push whose retry ladder is spent (held) or whose first attempt failed
         return "held floor" if h["stuck"] == "held" else "rotating"

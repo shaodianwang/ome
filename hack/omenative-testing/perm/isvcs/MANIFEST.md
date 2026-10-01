@@ -3,7 +3,7 @@
 Emitted by `generate_cases.py` — regenerate with `python3 generate_cases.py`; CI rejects hand edits via `python3 generate_cases.py --check` (run_test.py).
 The gen-* folders are generator-owned wholesale; promote a bug-finding case to a hand-owned folder under a fresh id instead of editing it here.
 
-Total generated cases: **2357**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
+Total generated cases: **2511**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
 
 ## Folders
 
@@ -33,30 +33,34 @@ Total generated cases: **2357**. The whole-corpus per-PR cap (hand + generated) 
 | gen-router-gang | 30 | p8100..p8129 |
 | gen-ops-held | 64 | p6800..p6863 |
 | gen-runtime-edit-repair | 84 | p6900..p6983 |
+| gen-migrate-bump | 154 | p6200..p6353 |
 
 ### By topology
 
 | value | cases |
 |---|---|
-| engine | 585 |
-| engine-mn | 489 |
-| pd | 763 |
-| pd-mn | 520 |
+| engine | 631 |
+| engine-mn | 525 |
+| pd | 799 |
+| pd-mn | 556 |
 
 ### By update strategy
 
 | value | cases |
 |---|---|
 | (dormant: nothing rolls) | 40 |
-| InPlaceIfPossible | 350 |
+| InPlaceIfPossible | 398 |
 | InPlaceOnly | 236 |
-| RecreatePod | 475 |
-| SurgeThenDrain | 1256 |
+| RecreatePod | 523 |
+| SurgeThenDrain | 1314 |
 
 ### By failure verb / phase
 
 | value | cases |
 |---|---|
+| bump-at-accept | 26 |
+| bump-at-drain | 26 |
+| bump-at-surge | 26 |
 | canary:auto | 6 |
 | canary:manual | 4 |
 | configkey:after-failed | 16 |
@@ -103,6 +107,9 @@ Total generated cases: **2357**. The whole-corpus per-PR cap (hand + generated) 
 | imagepull@promote | 8 |
 | imagepull@traffic | 16 |
 | kill | 187 |
+| move-at-last | 24 |
+| move-at-rotating | 26 |
+| move-at-settling | 26 |
 | node:parked | 32 |
 | node:relocated | 32 |
 | node:repaired | 32 |
@@ -131,7 +138,7 @@ Total generated cases: **2357**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (unset — baseline) | 504 |
+| (unset — baseline) | 658 |
 | None | 871 |
 | RecreateInstance | 982 |
 
@@ -140,14 +147,14 @@ Total generated cases: **2357**. The whole-corpus per-PR cap (hand + generated) 
 | value | cases |
 |---|---|
 | freeze | 110 |
-| off | 2063 |
+| off | 2217 |
 | true | 184 |
 
 ### By pause moment
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 2177 |
+| (no pause around a repair) | 2331 |
 | after | 36 |
 | before | 72 |
 | during | 72 |
@@ -156,7 +163,7 @@ Total generated cases: **2357**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 2177 |
+| (no pause around a repair) | 2331 |
 | fix | 90 |
 | none | 90 |
 
@@ -166,9 +173,9 @@ Total generated cases: **2357**. The whole-corpus per-PR cap (hand + generated) 
 |---|---|
 | bluegreen | 48 |
 | canary | 24 |
-| none | 1786 |
+| none | 1863 |
 | ratio | 16 |
-| rolling | 449 |
+| rolling | 526 |
 | seq | 34 |
 
 ### By mid-roll edit (gen-switch)
@@ -212,7 +219,7 @@ Total generated cases: **2357**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no break) | 1783 |
+| (no break) | 1937 |
 | decoder | 60 |
 | engine | 514 |
 
@@ -357,6 +364,8 @@ Total generated cases: **2357**. The whole-corpus per-PR cap (hand + generated) 
 - gen-router-gang runs the engine as a gang (W1 and W2) behind a single-pod router at 2 Instances: the push under each strategy, the crash loop under the surge and recreate strategies only (a gang runs the in-place variants as a whole-gang recreate, the recreate cell), and the scale and the canary under the surge strategy (the strategy is dormant under a scale; the gang canary under a recreate is the controller-restart family's shape). The router is never bumped: every cell asserts it stays in rotation on the same pods.
 - ops-held pushes a revision that cannot be pulled and lands one operation on the stuck Component; a rolling group exists only where a decoder does (pd). A request for zero is kept: the API runs one Instance for it, and the verdict reads the count the controller accepted rather than assuming either answer.
 - runtime-edit-repair lands an edit on an open repair only where a repair opens: a crash after Ready opens one only under RecreateInstanceOnPodRestart, so the edit-during-repair order skips form=load under policy None; the crash-during-edit order keeps that cell (the roll must still land on a pod the kubelet alone restarts). The PD shape carries no router, as the runtime-rev cases do: the edit rolls engine and decoder, each onto its own revision.
+- The migrate-and-bump family moves one Instance by request only: the engine's own (automatic) migration is a born-terminal relocation record, written when an Instance whose node is gone is rebuilt elsewhere; it has no in-flight phase for a roll to overlap, and the one verb that provokes it, a node loss, belongs to the node-loss family.
+- `during=last` is not emitted with maxSurge 2: a surge of two promotes its last pair together, so the moment with exactly one Instance still off the new revision is not reliably observable.
 - Kill-family cells pinned by hand-written restart/ cases are excluded:
 
   - p130: engine SurgeThenDrain rp=None
@@ -388,6 +397,7 @@ The family asserts the intended behaviour, `expect=heals`, on every cell; the ce
 - pause-under-rollout hook (ome.io/rollout-paused is exercised inside mode=kill and around a repair at idle, pauseat=; no verb pauses an in-flight rotation)
 - decoder-targeted mode=kill (the kill handler always picks the engine when one is configured)
 - controller restart while a repair is open (a crash loop at idle with the manager deleted once the rebuild has started) — the runner fires one fault per case and the idle-break handler fires no second one
+- an automatic migration verb — the engine's own migration is a born-terminal relocation record written when a lost Instance is rebuilt elsewhere, so only a node loss provokes it and the migrate-and-bump family moves by request only
 
 ## Deferred fill
 
