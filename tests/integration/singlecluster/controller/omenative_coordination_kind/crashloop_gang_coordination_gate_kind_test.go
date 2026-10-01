@@ -78,7 +78,7 @@ var _ = ginkgo.Describe("behavior — a gang with a wedged leader is rolled unde
 		applyFixture(Default, fix)
 		deferFixtureCleanup(fix)
 
-		var v1Hash, v1EngineRev string
+		var v1Hash, v1EngineRev, v1Target string
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, isvcName)
 			g.Expect(c.Status.RolloutCoordination).NotTo(BeNil())
@@ -91,6 +91,7 @@ var _ = ginkgo.Describe("behavior — a gang with a wedged leader is rolled unde
 				"engine CurrentRevision must be promoted before the bump")
 			v1EngineRev = engCS.Lifecycle.CurrentRevision
 			v1Hash = query.RevisionHashFromControllerRevisionName(v1EngineRev)
+			v1Target = engineTargetRevision(g, ns.Name, isvcName)
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("wedging the leader of gang " + wedgedIndex + " on the running revision")
@@ -112,7 +113,6 @@ var _ = ginkgo.Describe("behavior — a gang with a wedged leader is rolled unde
 		}).WithTimeout(3 * time.Minute).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("bumping the engine image while the wedge stands")
-		bumpedAt := time.Now()
 		Eventually(func(g Gomega) {
 			cur := freshISVC(g, ns.Name, isvcName)
 			// A gang renders the leader and the worker templates; both move
@@ -121,6 +121,8 @@ var _ = ginkgo.Describe("behavior — a gang with a wedged leader is rolled unde
 			cur.Spec.Engine.Worker.PodSpec.Containers[0].Image = "fake-serving:v2"
 			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+		ginkgo.By("waiting for the bump to reach the engine replica")
+		bumpSeenAt := awaitEngineTargetMoved(ns.Name, isvcName, v1Target)
 
 		// Both gangs, the wedged one included, end serving on the fixed
 		// revision at their own index, and nothing still carries v1: the
@@ -145,7 +147,7 @@ var _ = ginkgo.Describe("behavior — a gang with a wedged leader is rolled unde
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("confirming no repair was recorded for the wedged gang after the bump")
-		Expect(restartsRecordedForInstance(ns.Name, isvcName, wedgedIndex, bumpedAt)).To(BeEmpty(),
+		Expect(restartsRecordedForInstance(ns.Name, isvcName, wedgedIndex, bumpSeenAt)).To(BeEmpty(),
 			"an Instance off the roll target is the update pass's; a repair on the broken revision is the defect")
 	})
 })

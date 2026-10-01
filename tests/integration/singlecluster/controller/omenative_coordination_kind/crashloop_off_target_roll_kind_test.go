@@ -74,7 +74,7 @@ var _ = ginkgo.Describe("behavior — a wedged Instance is rolled to the fixed r
 		applyFixture(Default, fix)
 		deferFixtureCleanup(fix)
 
-		var v1Hash string
+		var v1Hash, v1Target string
 		Eventually(func(g Gomega) {
 			c := freshISVC(g, ns.Name, isvcName)
 			engCS := c.Status.Components[v1beta1.EngineComponent]
@@ -83,6 +83,7 @@ var _ = ginkgo.Describe("behavior — a wedged Instance is rolled to the fixed r
 			g.Expect(engCS.Lifecycle.CurrentRevision).NotTo(BeEmpty(),
 				"engine CurrentRevision must be promoted before the bump")
 			v1Hash = query.RevisionHashFromControllerRevisionName(engCS.Lifecycle.CurrentRevision)
+			v1Target = engineTargetRevision(g, ns.Name, isvcName)
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("wedging instance " + wedgedIndex + " on the running revision")
@@ -104,12 +105,13 @@ var _ = ginkgo.Describe("behavior — a wedged Instance is rolled to the fixed r
 		}).WithTimeout(3 * time.Minute).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("bumping the engine image while the wedge stands")
-		bumpedAt := time.Now()
 		Eventually(func(g Gomega) {
 			cur := freshISVC(g, ns.Name, isvcName)
 			cur.Spec.Engine.PodSpec.Containers[0].Image = "fake-serving:v2"
 			g.Expect(k8sClient.Update(suiteCtx, cur)).To(Succeed())
 		}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+		ginkgo.By("waiting for the bump to reach the engine replica")
+		bumpSeenAt := awaitEngineTargetMoved(ns.Name, isvcName, v1Target)
 
 		// Every Instance, the wedged one included, must end serving on the
 		// fixed revision, and nothing may still carry v1: the wedged pod is
@@ -126,7 +128,7 @@ var _ = ginkgo.Describe("behavior — a wedged Instance is rolled to the fixed r
 		}).WithTimeout(kindLongTimeout).WithPolling(kindPollInterval).Should(Succeed())
 
 		ginkgo.By("confirming no repair was recorded for the wedged Instance after the bump")
-		Expect(restartsRecordedForInstance(ns.Name, isvcName, wedgedIndex, bumpedAt)).To(BeEmpty(),
+		Expect(restartsRecordedForInstance(ns.Name, isvcName, wedgedIndex, bumpSeenAt)).To(BeEmpty(),
 			"an Instance off the roll target is the update pass's; a repair on the broken revision is the defect")
 	})
 })
@@ -216,6 +218,28 @@ func restartsRecordedForInstance(namespace, isvcName, index string, since time.T
 		out = append(out, ev.Message)
 	}
 	return out
+}
+
+// engineTargetRevision returns the engine InferenceReplica's
+// status.updateRevision. Fails g (retryable inside Eventually) until it
+// is stamped.
+func engineTargetRevision(g Gomega, namespace, isvcName string) string {
+	rev := freshInferenceReplica(g, namespace, isvcName, v1beta1.EngineComponent).Status.UpdateRevision
+	g.ExpectWithOffset(1, rev).NotTo(BeEmpty(), "the engine InferenceReplica must carry an updateRevision")
+	return rev
+}
+
+// awaitEngineTargetMoved blocks until the engine InferenceReplica's
+// status.updateRevision has left before, then returns the time. The
+// engine decides against the target its replica carries, so a repair
+// opened before the replica has seen the new target is not a repair
+// after the bump.
+func awaitEngineTargetMoved(namespace, isvcName, before string) time.Time {
+	EventuallyWithOffset(1, func(g Gomega) {
+		g.Expect(engineTargetRevision(g, namespace, isvcName)).NotTo(Equal(before),
+			"the bump must reach the engine InferenceReplica as a new updateRevision")
+	}).WithTimeout(kindMediumTimeout).WithPolling(kindPollInterval).Should(Succeed())
+	return time.Now()
 }
 
 func mustAtoi(s string) int32 {
