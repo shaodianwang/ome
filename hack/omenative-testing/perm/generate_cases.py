@@ -4,7 +4,7 @@
 Emits the constraint-filtered cross product of
     topology x updateStrategy x failure verb x injection phase x
     restartPolicy x pause
-into twenty generator-owned folders, using ONLY verbs and hooks the runners
+into twenty-four generator-owned folders, using ONLY verbs and hooks the runners
 (run.py + the KIND CI lane) already implement:
 
     gen-rollout/   p1000+  baseline revision-bump rollouts (failure=none)
@@ -119,6 +119,20 @@ into twenty generator-owned folders, using ONLY verbs and hooks the runners
                           running revision, a scale and a canary ladder; the
                           router is never rolled by an engine push and stays
                           in rotation, and the gang rules hold throughout
+    gen-ops-held/  p6800+  a scale-down, a request for zero, a delete or a
+                          scale-up lands on a Component stuck on a revision
+                          that cannot be pulled (stuck=failed: the first
+                          attempt has failed; stuck=held: the retry ladder
+                          is spent), crossed with shape x strategy x group;
+                          the stuck Instances go first, survivors stay
+                          untouched, the unlanded push stays visible
+    gen-runtime-edit-repair/ p6900+  a repair of a crash-looping Instance and
+                          an edit of the inherited runtime overlap, in both
+                          orders (mode=runtimerev with a break: during=repair
+                          lands the edit on the open repair; without it the
+                          crash lands as the edit does), crossed with shape x
+                          strategy x restartPolicy x crash form x edit verb;
+                          the last change wins and nothing is rebuilt twice
 
 Ownership and determinism:
   - The gen-* folders belong ENTIRELY to this generator: every case there
@@ -151,6 +165,16 @@ Constraint ledger (why the raw product is filtered — derived from run.py):
     under a steady-state kill, so the kill family uses canonical budgets only.
   - Cells already pinned by hand-written restart/ cases are excluded
     (HAND_PINNED_KILL) so the corpus grows coverage instead of echoing pins.
+  - ops-held pushes a revision that cannot be pulled; a rolling group exists
+    only where a decoder does (pd), as in the crashloop family. A request
+    for zero is kept: the API runs one Instance for it, and the case reads
+    the count the controller accepted instead of assuming either answer.
+  - runtime-edit-repair lands an edit on an open repair only where a repair
+    opens: a crash at start reaches the crash-loop repair under every restart
+    policy, a crash after Ready reaches the runner-restart trigger only under
+    RecreateInstanceOnPodRestart, so the edit-during-repair order skips
+    form=load under policy None (the crash-during-edit order keeps it: the
+    roll must still land on a pod the kubelet alone keeps restarting).
   - crashloop breaks an engine pod, so its coordination axis rolls engine and
     decoder together only where a decoder exists (pd, pd-mn): co=none and
     co=rolling. maxUnavailable=0 is a SurgeThenDrain budget only: a
@@ -269,7 +293,8 @@ import sys
 from pathlib import Path
 
 import gen_cases as lib   # single source of truth for YAML body rendering
-import runtime_fixtures
+import gen_runtime        # the dedicated per-case ClusterServingRuntime a runtime edit patches
+import runtime_fixtures   # the one image no deploy step side-loads
 
 HERE = Path(__file__).parent.resolve()
 ISVCS = HERE / "isvcs"
@@ -298,6 +323,8 @@ GEN_BLOCKS = {
     "gen-pause-repair": (6000, 6200),
     "gen-size": (8000, 8100),
     "gen-router-gang": (8100, 8200),
+    "gen-ops-held": (6800, 6900),
+    "gen-runtime-edit-repair": (6900, 7000),
 }
 GEN_ID_LO = min(lo for lo, _hi in GEN_BLOCKS.values())
 GEN_ID_HI = max(hi for _lo, hi in GEN_BLOCKS.values())
@@ -508,6 +535,31 @@ BUDGET_ZERO_SHAPES = [("engine", 4, 0), ("pd", 4, 0)]
 # maintainRatio tolerance by fleet size: at N=2 one crashing Instance is
 # already half the engine, so the band must admit 1:2.
 RATIO_TOL_BY_N = {2: 50, 4: 25}
+
+# The ops-held family: an operation lands on a Component stuck on a revision
+# that cannot be pulled. One size per shape (the engine's victim order and
+# its hold do not depend on the fleet size), the strategy that surges and
+# the one that drains first, both stuck kinds, every operation, and a
+# rolling group where a decoder exists (a one-member group has nobody to
+# pace with, as in the crashloop family).
+OPS_HELD_SHAPES = [("engine", 3, 0), ("pd", 3, 0), ("engine-mn", 2, 1)]
+OPS_HELD_STUCK = ["failed", "held"]
+OPS_HELD_OPS = ["scale-down", "scale-zero", "delete", "scale-up"]
+OPS_HELD_STRATS = {"SurgeThenDrain": (1, 0), "RecreatePod": (0, 1)}
+OPS_HELD_GROUPS = {"engine": ["none"], "pd": ["none", "rolling"], "engine-mn": ["none"]}
+
+# The runtime-edit-repair family: a repair of a crash-looping Instance and
+# an edit of the runtime every Component inherits overlap. One fleet size
+# (the interplay does not depend on it), the strategies that surge, drain or
+# patch, both restart policies, both crash forms, the two edit verbs, and
+# the order: the edit lands on the open repair, or the crash lands as the
+# edit does. A PD shape here has no router, as in the runtime-rev cases: the
+# edit rolls engine and decoder, each onto its own new revision.
+EDIT_REPAIR_SHAPES = [("engine", 3), ("pd", 3)]
+EDIT_REPAIR_STRATS = {"SurgeThenDrain": (1, 0), "RecreatePod": (0, 1), "InPlaceIfPossible": (0, 1)}
+EDIT_REPAIR_ORDERS = ["edit-during-repair", "crash-during-edit"]
+EDIT_REPAIR_EDITS = ["image", "env"]
+ALT_IMAGE_TOKEN = "${OME_EVAL_NGINX_ALT_IMAGE}"
 
 # Canonical shapes: (topo, N, W). Gangs at N=2 with widths 1 and 2; singles at
 # N=4 (pd: engine+decoder N, router lib.NR). Percentage budgets additionally
@@ -2396,6 +2448,147 @@ def emit_router_gang(add):
                 coord=lib.canary_block(lib.canary_steps(policy, *SIZE_LADDER), components=["engine"]))
 
 
+# ── gen-ops-held: an operation lands on a stuck Component ───────────────────
+def _ops_held_target(op, n):
+    """The replica count the operation asks for; None for a delete."""
+    return {"scale-down": n - 1, "scale-zero": 0, "scale-up": n + 1}.get(op)
+
+
+def _ops_held_reason(stuck, op, strat, topo, co):
+    how = ("the push lands a revision whose image cannot be pulled; " +
+           ("its first attempt has failed (an Instance row reads Failed, the retry ladder is still running)"
+            if stuck == "failed" else
+            "every attempt of the retry ladder has failed and the push is held (only a new revision or a release lifts it)"))
+    members = "engine and decoder are" if co != "none" else "the engine is"
+    if strat == "SurgeThenDrain":
+        shape = "the running Instances kept serving beside the failed replacements"
+    else:
+        shape = "the Instance each attempt drained is dark on the pushed revision"
+    if op == "scale-down":
+        what = (f"then {members} scaled down by one: the Instances that are not Ready go first, then the highest "
+                f"index, so a stuck Instance is removed before a healthy one; the survivors keep their pods on the "
+                f"running revision")
+    elif op == "scale-zero":
+        what = (f"then {members} asked for zero: the API runs one Instance for that request, so the fleet "
+                f"converges on the count the controller accepted with the stuck Instances gone first and no pod left "
+                f"behind on a removed index")
+    elif op == "delete":
+        what = ("then the service is deleted: every pod goes, stuck ones included, no pod stays Terminating and no "
+                "finalizer wedges, and the same name comes back clean on fresh pods with nothing of the push left")
+    else:
+        what = (f"then {members} scaled up by one: " +
+                ("while held nothing starts (the new index waits as an empty slot) and nothing is rendered from the "
+                 "running revision" if stuck == "held" else
+                 "the new Instance is admitted on the pushed revision when the retry window allows it, never on the "
+                 "running revision, and is stuck like its peers") +
+                "; the survivors stay as they were")
+    out = f"{how}; {shape}; {what}"
+    if op != "delete":
+        out += "; the healthy survivors keep serving throughout and the status keeps reporting the push that has not landed"
+    if is_pd(topo) and co == "none":
+        out += "; decoder and router are neither pushed nor scaled and stay as they were"
+    elif is_pd(topo):
+        out += "; the router is neither pushed nor scaled and stays as it is"
+    if is_mn(topo):
+        out += "; each Instance is a gang, counted whole"
+    return out
+
+
+def emit_ops_held(add):
+    for topo, n, w in OPS_HELD_SHAPES:
+        for strat, (surge, unavail) in OPS_HELD_STRATS.items():
+            for co in OPS_HELD_GROUPS[topo]:
+                for stuck in OPS_HELD_STUCK:
+                    for op in OPS_HELD_OPS:
+                        target = _ops_held_target(op, n)
+                        bump = surge if strat == "SurgeThenDrain" else 0
+                        reach = max(n, target or 0)
+                        kv = dict(**counts(topo, n), ceil_e=reach + bump,
+                                  ceil_d=((reach + bump if co != "none" else n) if is_pd(topo) else 0),
+                                  ceil_r=(lib.NR if is_pd(topo) else 0))
+                        if op == "delete":
+                            kv["mode"] = "recreate"
+                        else:
+                            kv["mode"] = "scaledown"
+                            kv["to_e"] = target
+                            if co != "none":
+                                kv["to_d"] = target
+                        kv.update(stuck=stuck, img=runtime_fixtures.UNPULLABLE_IMAGE, co=co, topo=topo)
+                        meta = dict(strat=strat, verb=f"push:{stuck}", stuck=stuck, op=op)
+                        desc = f"{GEN_MARK} stuck {stuck} {op} {shape_tag(topo, w)} N={n} {strat} group {co}"
+                        life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail)
+                        d_life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail) if co != "none" else None
+                        add("gen-ops-held", desc, kv, comps(topo, n, w, life, d_life=d_life),
+                            _ops_held_reason(stuck, op, strat, topo, co), meta,
+                            cell=("ops-held", stuck, op, topo, w, strat, co),
+                            coord=lib.coord_for(co) if co != "none" else None)
+
+
+# ── gen-runtime-edit-repair: a repair and a runtime edit overlap ────────────
+def _edit_repair_opens(order, form, rp):
+    """Whether the cell exists: the edit-during-repair order needs a repair
+    to land on, which a crash after Ready opens only under RecreateInstance."""
+    return not (order == "edit-during-repair" and form == "load" and rp == "None")
+
+
+def _edit_repair_reason(order, form, edit, strat, topo):
+    how = ("one engine pod is pointed at an image with no shell, so it crashes at every start and "
+           "is never Ready again" if form == "start" else
+           "one engine pod has its runner killed every few seconds while it is up, so it dies after "
+           "Ready and comes back between crashes")
+    what = ("the runtime every Component inherits gets a new image" if edit == "image" else
+            "the runtime every Component inherits gets a new runner env")
+    if order == "edit-during-repair":
+        out = (f"{how}; the product opens a repair of its Instance, and while the repair's replacement pod "
+               f"is coming up {what}; the last change wins: every Instance, the repaired one included, ends on the "
+               f"edited runtime's revision and serving, the repaired Instance is rebuilt at most once "
+               f"after the edit with no repair recorded for it from then on, and no Instance is left "
+               f"mid-operation")
+    else:
+        out = (f"{what} and, as the edit lands, {how}; its Instance is off the target from that moment, "
+               f"so the roll owns it: it ends on the edited runtime's revision and serving with no repair "
+               f"recorded for it, every other Instance converges the same way, and no Instance is left "
+               f"mid-operation")
+    if strat in IN_PLACE and edit == "env":
+        out += "; the env edit is a pod-template change beyond the image, so the in-place strategy rebuilds instead of patching"
+    elif strat in IN_PLACE:
+        out += "; the image edit is patched in place on every pod that is up"
+    if is_pd(topo):
+        out += "; engine and decoder each roll onto their own new revision"
+    return out
+
+
+def emit_runtime_edit_repair(add):
+    for topo, n in EDIT_REPAIR_SHAPES:
+        for strat, (surge, unavail) in EDIT_REPAIR_STRATS.items():
+            for rp in RESTARTS:
+                for form in CRASH_FORMS:
+                    for order in EDIT_REPAIR_ORDERS:
+                        for edit in EDIT_REPAIR_EDITS:
+                            if not _edit_repair_opens(order, form, rp):
+                                continue
+                            kv = dict(mode="runtimerev", Ne=n, Nd=(n if is_pd(topo) else 0), Nr=0,
+                                      ceil_e=(n + surge if strat == "SurgeThenDrain" else n),
+                                      ceil_d=((n + surge if strat == "SurgeThenDrain" else n) if is_pd(topo) else 0),
+                                      ceil_r=0, fault="crashloop:old", co="none", topo=topo,
+                                      expect="roll", edit=edit, form=form)
+                            if edit == "image":
+                                kv["img"] = ALT_IMAGE_TOKEN
+                            if order == "edit-during-repair":
+                                kv["during"] = "repair"
+                            meta = dict(strat=strat, verb=f"crashloop:{form}", rp=rp, order=order, edit=edit)
+                            desc = (f"{GEN_MARK} runtime-edit {order} {form} {topo} N={n} {strat} "
+                                    f"rp {rp} edit {edit}")
+                            life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp])
+                            case_comps = [lib.comp("engine", n, 0, life)]
+                            if is_pd(topo):
+                                case_comps.append(lib.comp("decoder", n, 0, life))
+                            add("gen-runtime-edit-repair", desc, kv, case_comps,
+                                _edit_repair_reason(order, form, edit, strat, topo), meta,
+                                cell=("runtime-edit-repair", order, edit, form, topo, strat, rp),
+                                edit_runtime=True)
+
+
 # ── assembly ─────────────────────────────────────────────────────────────────
 def build_outputs():
     """{relative path under isvcs/: file text} — the entire owned output set."""
@@ -2405,11 +2598,13 @@ def build_outputs():
     parked_used = set()
 
     def add(folder, desc, kv, case_comps, reason, meta, cell, coord=None, body=None,
-            runtime=None, dedicated=False):
+            runtime=None, dedicated=False, edit_runtime=False):
         """body: the case body as a function of the minted name, for a family
         whose fixtures carry the case id; the plain render otherwise. A
         dedicated case ships its own runtime under a per-case name, so a
-        runtime edit touches this case alone."""
+        runtime edit touches this case alone; edit_runtime ships the
+        runtime-rev generator's ClusterServingRuntime for the case's topology
+        under that name, the one the runtime-edit verbs patch."""
         lo, hi = GEN_BLOCKS[folder]
         cid = counters[folder]
         if cid >= hi:
@@ -2426,10 +2621,11 @@ def build_outputs():
                 kv["inv_xfail"] = inv_scope
             meta = dict(meta, parked=issue)
         before = None
-        if dedicated:
+        if dedicated or edit_runtime:
             rt_name = f"ome-coordtest-rt-{name}"
             kv = dict(kv, rt=rt_name)
-            before = dedicated_runtime(rt_name, metrics=(runtime == lib.CSR_METRICS))
+            before = (gen_runtime.dedicated_csr(kv["topo"], rt_name) if edit_runtime
+                      else dedicated_runtime(rt_name, metrics=(runtime == lib.CSR_METRICS)))
             runtime = rt_name
         text = body(name) if body else lib.render(name, case_comps, coord=coord, runtime=runtime)
         if before:
@@ -2460,6 +2656,8 @@ def build_outputs():
     emit_pause_repair(add)
     emit_size(add)
     emit_router_gang(add)
+    emit_ops_held(add)
+    emit_runtime_edit_repair(add)
     stale = set(PARKED) - parked_used
     if stale:
         sys.exit("PARKED keys match no emitted cell (stale after a matrix change): "
@@ -2482,6 +2680,15 @@ def manifest(rows):
         out = [f"### {title}", "", "| value | cases |", "|---|---|"]
         out += [f"| {k} | {v} |" for k, v in sorted(t.items())]
         return out + [""]
+
+    def table_if(title, key):
+        """A table over the cases that carry `key` in their meta; nothing
+        when no family emits it."""
+        t = {}
+        for _f, _n, _kv, meta in rows:
+            if key in meta:
+                t[meta[key]] = t.get(meta[key], 0) + 1
+        return table(title, t) if t else []
 
     per_folder = {}
     id_range = {}
@@ -2534,6 +2741,10 @@ def manifest(rows):
                    tally(lambda kv, m: m["cond"], where=lambda kv, m: "cond" in m))
     lines += table("By Instances per Component (size and router-gang families)",
                    tally(lambda kv, m: m["size"], where=lambda kv, m: "size" in m))
+    lines += table_if("By stuck kind (ops-held)", "stuck")
+    lines += table_if("By operation on the stuck Component (ops-held)", "op")
+    lines += table_if("By overlap order (runtime-edit-repair)", "order")
+    lines += table_if("By runtime edit (runtime-edit-repair)", "edit")
     parked_rows = [(f, n, m["parked"]) for f, n, _kv, m in rows if "parked" in m]
     if parked_rows:
         lines += ["### Parked cells (XFAIL on a tracked issue)", "",
@@ -2734,6 +2945,18 @@ def manifest(rows):
         " (the strategy is dormant under a scale; the gang canary under a"
         " recreate is the controller-restart family's shape). The router is"
         " never bumped: every cell asserts it stays in rotation on the same pods.",
+        "- ops-held pushes a revision that cannot be pulled and lands one"
+        " operation on the stuck Component; a rolling group exists only where"
+        " a decoder does (pd). A request for zero is kept: the API runs one"
+        " Instance for it, and the verdict reads the count the controller"
+        " accepted rather than assuming either answer.",
+        "- runtime-edit-repair lands an edit on an open repair only where a"
+        " repair opens: a crash after Ready opens one only under"
+        " RecreateInstanceOnPodRestart, so the edit-during-repair order skips"
+        " form=load under policy None; the crash-during-edit order keeps that"
+        " cell (the roll must still land on a pod the kubelet alone restarts)."
+        " The PD shape carries no router, as the runtime-rev cases do: the"
+        " edit rolls engine and decoder, each onto its own revision.",
         "- Kill-family cells pinned by hand-written restart/ cases are excluded:",
         "",
     ]

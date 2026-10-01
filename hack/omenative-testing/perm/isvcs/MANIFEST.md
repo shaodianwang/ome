@@ -3,7 +3,7 @@
 Emitted by `generate_cases.py` — regenerate with `python3 generate_cases.py`; CI rejects hand edits via `python3 generate_cases.py --check` (run_test.py).
 The gen-* folders are generator-owned wholesale; promote a bug-finding case to a hand-owned folder under a fresh id instead of editing it here.
 
-Total generated cases: **2209**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
+Total generated cases: **2357**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
 
 ## Folders
 
@@ -31,14 +31,16 @@ Total generated cases: **2209**. The whole-corpus per-PR cap (hand + generated) 
 | gen-pause-repair | 180 | p6000..p6179 |
 | gen-size | 86 | p8000..p8085 |
 | gen-router-gang | 30 | p8100..p8129 |
+| gen-ops-held | 64 | p6800..p6863 |
+| gen-runtime-edit-repair | 84 | p6900..p6983 |
 
 ### By topology
 
 | value | cases |
 |---|---|
-| engine | 527 |
-| engine-mn | 473 |
-| pd | 689 |
+| engine | 585 |
+| engine-mn | 489 |
+| pd | 763 |
 | pd-mn | 520 |
 
 ### By update strategy
@@ -46,10 +48,10 @@ Total generated cases: **2209**. The whole-corpus per-PR cap (hand + generated) 
 | value | cases |
 |---|---|
 | (dormant: nothing rolls) | 40 |
-| InPlaceIfPossible | 322 |
+| InPlaceIfPossible | 350 |
 | InPlaceOnly | 236 |
-| RecreatePod | 415 |
-| SurgeThenDrain | 1196 |
+| RecreatePod | 475 |
+| SurgeThenDrain | 1256 |
 
 ### By failure verb / phase
 
@@ -59,7 +61,7 @@ Total generated cases: **2209**. The whole-corpus per-PR cap (hand + generated) 
 | canary:manual | 4 |
 | configkey:after-failed | 16 |
 | configkey:after-settle | 16 |
-| crashloop:load | 176 |
+| crashloop:load | 212 |
 | crashloop:load@canary | 16 |
 | crashloop:load@capacity | 16 |
 | crashloop:load@gate | 4 |
@@ -73,7 +75,7 @@ Total generated cases: **2209**. The whole-corpus per-PR cap (hand + generated) 
 | crashloop:new:crashStart | 8 |
 | crashloop:new:load | 36 |
 | crashloop:new:start | 36 |
-| crashloop:start | 176 |
+| crashloop:start | 224 |
 | crashloop:start+edit:rotating | 12 |
 | crashloop:start@canary | 16 |
 | crashloop:start@capacity | 16 |
@@ -111,6 +113,8 @@ Total generated cases: **2209**. The whole-corpus per-PR cap (hand + generated) 
 | podkill@held | 4 |
 | podkill@heldpaused | 4 |
 | podkill@paused | 4 |
+| push:failed | 32 |
+| push:held | 32 |
 | rebump@canary-serving@0 | 8 |
 | rebump@canary-staging | 8 |
 | rollback:draining | 22 |
@@ -127,23 +131,23 @@ Total generated cases: **2209**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (unset — baseline) | 440 |
-| None | 835 |
-| RecreateInstance | 934 |
+| (unset — baseline) | 504 |
+| None | 871 |
+| RecreateInstance | 982 |
 
 ### By pause
 
 | value | cases |
 |---|---|
 | freeze | 110 |
-| off | 1915 |
+| off | 2063 |
 | true | 184 |
 
 ### By pause moment
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 2029 |
+| (no pause around a repair) | 2177 |
 | after | 36 |
 | before | 72 |
 | during | 72 |
@@ -152,7 +156,7 @@ Total generated cases: **2209**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 2029 |
+| (no pause around a repair) | 2177 |
 | fix | 90 |
 | none | 90 |
 
@@ -162,15 +166,17 @@ Total generated cases: **2209**. The whole-corpus per-PR cap (hand + generated) 
 |---|---|
 | bluegreen | 48 |
 | canary | 24 |
-| none | 1654 |
+| none | 1786 |
 | ratio | 16 |
-| rolling | 433 |
+| rolling | 449 |
 | seq | 34 |
 
 ### By mid-roll edit (gen-switch)
 
 | value | cases |
 |---|---|
+| env | 42 |
+| image | 42 |
 | restartPolicy None to RecreateInstance at rotating | 6 |
 | restartPolicy None to RecreateInstance at settling | 6 |
 | restartPolicy RecreateInstance to None at rotating | 6 |
@@ -206,7 +212,7 @@ Total generated cases: **2209**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no break) | 1635 |
+| (no break) | 1783 |
 | decoder | 60 |
 | engine | 514 |
 
@@ -233,6 +239,66 @@ Total generated cases: **2209**. The whole-corpus per-PR cap (hand + generated) 
 |---|---|
 | 1 | 40 |
 | 2 | 76 |
+
+### By stuck kind (ops-held)
+
+| value | cases |
+|---|---|
+| failed | 32 |
+| held | 32 |
+
+### By operation on the stuck Component (ops-held)
+
+| value | cases |
+|---|---|
+| delete | 16 |
+| scale-down | 16 |
+| scale-up | 16 |
+| scale-zero | 16 |
+
+### By overlap order (runtime-edit-repair)
+
+| value | cases |
+|---|---|
+| crash-during-edit | 48 |
+| edit-during-repair | 36 |
+
+### By runtime edit (runtime-edit-repair)
+
+| value | cases |
+|---|---|
+| env | 42 |
+| image | 42 |
+| restartPolicy None to RecreateInstance at rotating | 6 |
+| restartPolicy None to RecreateInstance at settling | 6 |
+| restartPolicy RecreateInstance to None at rotating | 6 |
+| restartPolicy RecreateInstance to None at settling | 6 |
+| strategy InPlaceIfPossible to InPlaceOnly at rotating | 6 |
+| strategy InPlaceIfPossible to InPlaceOnly at settling | 6 |
+| strategy InPlaceIfPossible to RecreatePod at rotating | 6 |
+| strategy InPlaceIfPossible to RecreatePod at settling | 6 |
+| strategy InPlaceIfPossible to SurgeThenDrain at rotating | 6 |
+| strategy InPlaceIfPossible to SurgeThenDrain at settling | 6 |
+| strategy InPlaceOnly to InPlaceIfPossible at rotating | 6 |
+| strategy InPlaceOnly to InPlaceIfPossible at settling | 6 |
+| strategy InPlaceOnly to RecreatePod at rotating | 6 |
+| strategy InPlaceOnly to RecreatePod at settling | 6 |
+| strategy InPlaceOnly to SurgeThenDrain at rotating | 6 |
+| strategy InPlaceOnly to SurgeThenDrain at settling | 6 |
+| strategy RecreatePod to InPlaceIfPossible at rotating | 6 |
+| strategy RecreatePod to InPlaceIfPossible at settling | 6 |
+| strategy RecreatePod to InPlaceOnly at rotating | 6 |
+| strategy RecreatePod to InPlaceOnly at settling | 6 |
+| strategy RecreatePod to SurgeThenDrain at rotating | 6 |
+| strategy RecreatePod to SurgeThenDrain at rotating while an Instance crashes | 6 |
+| strategy RecreatePod to SurgeThenDrain at settling | 6 |
+| strategy SurgeThenDrain to InPlaceIfPossible at rotating | 6 |
+| strategy SurgeThenDrain to InPlaceIfPossible at settling | 6 |
+| strategy SurgeThenDrain to InPlaceOnly at rotating | 6 |
+| strategy SurgeThenDrain to InPlaceOnly at settling | 6 |
+| strategy SurgeThenDrain to RecreatePod at rotating | 6 |
+| strategy SurgeThenDrain to RecreatePod at rotating while an Instance crashes | 6 |
+| strategy SurgeThenDrain to RecreatePod at settling | 6 |
 
 ### Parked cells (XFAIL on a tracked issue)
 
@@ -289,6 +355,8 @@ Total generated cases: **2209**. The whole-corpus per-PR cap (hand + generated) 
 - The grouped pause-and-repair cells run live: a repair of an Instance that serves nothing is admitted without the budget or the gate, so the rollingUpdate group changes nothing.
 - The engine resolves a percent budget as ceil(replicas * percent / 100), clamped to replicas (the per-Component budget's documented rule, which the canary step capacity shares), so at one and two Instances 25 and 50 percent both resolve to one and no budget rounds to zero. gen-size (1 and 2 Instances per Component, the router sized with the fleet) drives the percent budgets on the plain push, where the resolved budget is read off the peak and the floor, and runs the crash loop (both forms, both restart policies), the scale (one to two and two to one) and the canary (10/50/100 percent capacity and traffic, on 2 Instances) under the integer budgets they resolve to. The canary runs on two Instances only: a canary on one Instance has no Instance to hold on the stable revision and stages in place, a shape with its own verdict to write; on two the first two steps resolve to the same single Instance, so the second moves traffic and adds no capacity. Group policies are left out: the group pacing budget rounds the same way and the group axis belongs to the crashloop family.
 - gen-router-gang runs the engine as a gang (W1 and W2) behind a single-pod router at 2 Instances: the push under each strategy, the crash loop under the surge and recreate strategies only (a gang runs the in-place variants as a whole-gang recreate, the recreate cell), and the scale and the canary under the surge strategy (the strategy is dormant under a scale; the gang canary under a recreate is the controller-restart family's shape). The router is never bumped: every cell asserts it stays in rotation on the same pods.
+- ops-held pushes a revision that cannot be pulled and lands one operation on the stuck Component; a rolling group exists only where a decoder does (pd). A request for zero is kept: the API runs one Instance for it, and the verdict reads the count the controller accepted rather than assuming either answer.
+- runtime-edit-repair lands an edit on an open repair only where a repair opens: a crash after Ready opens one only under RecreateInstanceOnPodRestart, so the edit-during-repair order skips form=load under policy None; the crash-during-edit order keeps that cell (the roll must still land on a pod the kubelet alone restarts). The PD shape carries no router, as the runtime-rev cases do: the edit rolls engine and decoder, each onto its own revision.
 - Kill-family cells pinned by hand-written restart/ cases are excluded:
 
   - p130: engine SurgeThenDrain rp=None

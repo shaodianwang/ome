@@ -67,6 +67,17 @@ Architecture:
      revision and serving, no pod of the new revision left, the controller's
      rows settled with no open operation, and on a grouped service the run
      that targeted the new revision closed as superseded.
+  9. Operations on a stuck Component (stuck=held|failed with img=, in
+     mode=scaledown|recreate): the bumped members are pushed onto a revision
+     that cannot be pulled, the handler waits for the first failed attempt or
+     for the spent retry ladder, and only then scales or deletes; the verdict
+     reads the engine's victim order, the untouched survivors, the healthy
+     capacity, and the push the status must keep reporting.
+ 10. A runtime edit and a repair overlapping (mode=runtimerev with a break
+     fault): the crash lands as the edit does and the roll owns it, or with
+     during=repair the edit lands while the repair's replacement pod comes up;
+     either way every Instance ends on the edited revision, the repaired one
+     is rebuilt at most once after the edit, and no row is left mid-operation.
 
 Why bump ALL group members (the 2026-06-01 fix):
   OMENative coordination is a status-only layer + *restrictive* gates. It never
@@ -1879,6 +1890,28 @@ CRASH_KILL_INTERVAL_S = float(os.environ.get("OME_TEST_CRASH_KILL_INTERVAL_S", "
 # be pulled, so it never starts again); the Components such a victim may be
 # drawn from (a router never carries the revision a roll targets here).
 BREAK_FAULTS = {"crashloop", "imagepull"}
+# stuck=held|failed (mode=scaledown|recreate): before the operation the
+# bumped members are pushed onto a revision that cannot be pulled (img=).
+# failed is the first failed attempt (an Instance row reads Failed, or the
+# retry block for the pushed revision records an attempt); held is the
+# retry ladder spent (a retry block in state Held). The ladder's length
+# comes from the cluster's lifecycle configuration, so the wait for held
+# covers every attempt and backoff a chart-sized ladder can take.
+STUCK_KINDS = {"held", "failed"}
+STUCK_MODES = {"scaledown", "recreate"}
+STUCK_HELD_WAIT_S = int(900 * TIMEOUT_MULT)
+RETRY_BLOCK_HELD = "Held"
+# The modes a break may ride: a rollout, or a runtime edit that rolls. A
+# break fires as the roll's trigger lands, so the Instance is off the target
+# from that moment and the roll owns it.
+BREAK_MODES = {"rollout", "runtimerev"}
+# during=repair (runtimerev): the break fires on the settled service, the
+# handler waits until the repair of the broken Instance is in flight, and
+# only then edits the runtime, so the edit lands on an open repair.
+REPAIR_HOOK = "repair"
+# How long the handler waits, after the edit, for every Instance row to
+# settle (Ready, no operation) once the pods have converged.
+ROWS_SETTLE_S = int(60 * TIMEOUT_MULT)
 # imagepull has one form: an image that cannot be pulled never runs.
 IMAGEPULL_FORMS = {"start"}
 BREAK_VICTIM_COMPS = {"engine", "decoder"}
@@ -2911,6 +2944,13 @@ def _fault_before_push(f):
     (fault=<kind>:idle under a canary): the stable side is already broken
     when the push lands, and no phase hook fires it."""
     return bool(f) and f.get("kind") in BREAK_FAULTS and f.get("param") == IDLE_FAULT_PHASE
+
+
+def _fault_fired_by_handler(f):
+    """True when the handler fires the fault itself, on the settled service:
+    at idle, or ahead of a runtime edit that lands on the repair (during=repair).
+    The phase hooks must then leave it alone."""
+    return bool(f) and f.get("during") in (IDLE_FAULT_PHASE, REPAIR_HOOK)
 
 
 _QTY_BIN = {"Ki": 1024, "Mi": 1024**2, "Gi": 1024**3, "Ti": 1024**4, "Pi": 1024**5, "Ei": 1024**6}
@@ -3973,7 +4013,7 @@ def _fault_tick(ctx):
     f = ctx.get("fault")
     if not f or f["fired"] or (f["kind"] not in ("podkill", "ctrlrestart") and f["kind"] not in BREAK_FAULTS):
         return
-    if ctx.get("trigger_ts") is None or _fault_at_idle(f) or _fault_on_new(f) or _fault_before_push(f):
+    if ctx.get("trigger_ts") is None or _fault_fired_by_handler(f) or _fault_on_new(f) or _fault_before_push(f):
         return
     ph = f["param"]
     if ph.partition("@")[0] in CANARY_HOOKS:
@@ -5364,7 +5404,7 @@ HDR_VALIDATORS = {
     # preempt the rollout); runtimerev edits the CSR mid-rotate. In rollout
     # mode during=idle fires a persistent fault on the settled service and
     # never bumps.
-    "during": lambda v: v in {"rollout", "migrate", IDLE_FAULT_PHASE} | ROLLBACK_HOOKS or _canary_hook_ok(v),
+    "during": lambda v: v in {"rollout", "migrate", IDLE_FAULT_PHASE, REPAIR_HOOK} | ROLLBACK_HOOKS or _canary_hook_ok(v),
     "remove": lambda v: v in {"decoder", "router"},   # compremove: component patched out
     "readd": lambda v: v == 1,    # compremove: re-apply the manifest, assert round-trip
     "dup": lambda v: v == 1,      # migrate: re-file the same request UUID (dedup contract)
@@ -5387,6 +5427,10 @@ HDR_VALIDATORS = {
     "scale_e": lambda v: isinstance(v, int) and v >= 1,
     "scale_d": lambda v: isinstance(v, int) and v >= 1,
     "topo": lambda v: v in {"engine", "pd", "engine-mn", "pd-mn"},
+    # stuck= (mode=scaledown|recreate): the operation lands on a Component
+    # stuck on a revision that cannot be pulled (img=): failed at the first
+    # failed attempt, held once the retry ladder is spent.
+    "stuck": lambda v: v in STUCK_KINDS,
     # Canary-mode knobs (mode=canary). verb= fires one operator verb when the
     # canary reaches the during= hook; verbhold= is how long a pause verb holds
     # before it is lifted; bump= names the group members to bump (default: the
@@ -5554,6 +5598,18 @@ def validate_case_file(path):
     mode = fields.get("mode", "rollout")
     if mode == "scaledown" and not any(k in fields for k in ("to_e", "to_d", "to_r")):
         errs.append(f"{path}:1: mode=scaledown needs a to_e/to_d/to_r target")
+    if "stuck" in fields:
+        if mode not in STUCK_MODES:
+            errs.append(f"{path}:1: stuck= lands an operation on a Component stuck on an unpullable revision "
+                        f"(mode={'|'.join(sorted(STUCK_MODES))})")
+        if "img" not in fields:
+            errs.append(f"{path}:1: stuck={fields['stuck']} needs img=<unpullable image> (the revision the push cannot pull)")
+        if "fault" in fields:
+            errs.append(f"{path}:1: stuck= is the case's break; fault= does not combine with it")
+        if "during" in fields:
+            errs.append(f"{path}:1: stuck= decides when the operation lands; during= does not combine with it")
+    elif "img" in fields and mode in STUCK_MODES:
+        errs.append(f"{path}:1: img= in mode={mode} is the revision stuck= pushes (needs stuck=held|failed)")
     if mode == "runtimerev" and "rt" not in fields:
         errs.append(f"{path}:1: mode=runtimerev needs rt=<dedicated CSR name>")
     if fields.get("edit") == "image" and "img" not in fields:
@@ -5578,6 +5634,12 @@ def validate_case_file(path):
         if fault_kind not in IDLE_FAULTS:
             errs.append(f"{path}:1: during={IDLE_FAULT_PHASE} needs a persistent fault to fire "
                         f"(fault={'|'.join(sorted(IDLE_FAULTS))}:…)")
+    elif during == REPAIR_HOOK:
+        if mode != "runtimerev":
+            errs.append(f"{path}:1: during={REPAIR_HOOK} lands a runtime edit on an open repair (mode=runtimerev)")
+        if fault_kind not in BREAK_FAULTS:
+            errs.append(f"{path}:1: during={REPAIR_HOOK} needs the break whose repair the edit lands on "
+                        f"(fault={'|'.join(sorted(BREAK_FAULTS))}:{CRASHLOOP_VICTIM})")
     elif during in ROLLBACK_HOOKS:
         if mode != "rollout":
             errs.append(f"{path}:1: during={during} is a mid-roll hook of a rollout case (mode=rollout)")
@@ -5660,8 +5722,8 @@ def validate_case_file(path):
                         f"(needs fault={'|'.join(sorted(BREAK_FAULTS))}:{CRASHLOOP_VICTIM} after a bump)")
     if fault_kind == "imagepull" and str(fields.get("form", "start")) not in IMAGEPULL_FORMS:
         errs.append(f"{path}:1: fault=imagepull:{break_param} has only form=start: an image that cannot be pulled never runs")
-    if fault_kind in BREAK_FAULTS and break_param == CRASHLOOP_VICTIM and mode != "rollout":
-        errs.append(f"{path}:1: fault={fields.get('fault')} breaks a pod of the revision a rollout leaves behind (mode=rollout); "
+    if fault_kind in BREAK_FAULTS and break_param == CRASHLOOP_VICTIM and mode not in BREAK_MODES:
+        errs.append(f"{path}:1: fault={fields.get('fault')} breaks a pod of the revision a rollout leaves behind (mode={'|'.join(sorted(BREAK_MODES))}); "
                     f"under a canary name the grid state it breaks it in (fault={fault_kind}:canary-<state>)")
     pushed_crash = fault_kind == "crashloop" and break_param == CRASHLOOP_NEW
     if fault_kind in BREAK_FAULTS and break_param != CRASHLOOP_VICTIM and mode != "canary" and not (pushed_crash and mode == "rollout"):
@@ -5682,6 +5744,12 @@ def validate_case_file(path):
     if "exitafter" in fields and not (new_break and fault_kind == "crashloop" and str(fields.get("form", "")) == "load"):
         errs.append(f"{path}:1: exitafter= is how long a pushed runner serves before it exits "
                     f"(needs fault=crashloop:{CRASHLOOP_NEW} form=load)")
+    if fault_kind in BREAK_FAULTS and mode == "runtimerev":
+        # The roll a runtime edit starts must own the broken Instance, so the
+        # edit has to roll; the recovery guards drive their own breaks.
+        if str(fields.get("expect", "roll")) != "roll" or "break" in fields:
+            errs.append(f"{path}:1: fault={fields.get('fault')} under mode=runtimerev needs an edit that rolls "
+                        f"(expect=roll, no break=)")
     if fault_kind in BREAK_FAULTS:
         victim_comp = str(fields.get("victimcomp") or BREAK_DEFAULT_COMP)
         count_key = {"engine": "Ne", "decoder": "Nd"}.get(victim_comp, "Ne")
@@ -7102,6 +7170,199 @@ def _runtimerev_during(case_id, yaml_file, desc, hdr, csr):
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
 
+def _repair_in_flight(events, row_phase, pods, pre_uids):
+    """Why the repair of an Instance counts as open: a RestartTriggered event
+    names it, its row reads Restarting, or a pod the fault never hit has
+    appeared for its index. "" while none of these holds. `events` are the
+    Instance's (reason, message) pairs since the fault."""
+    if any(reason == "RestartTriggered" for reason, _m in events):
+        return "a RestartTriggered event names it"
+    if row_phase == "Restarting":
+        return "its row reads Restarting"
+    if any(p.get("uid") and p["uid"] not in pre_uids for _n, p in pods):
+        return "a new pod appeared for its index"
+    return ""
+
+
+def _repair_rebuilding(pods, pre_uids):
+    """Why the repaired Instance counts as coming back up: a pod the fault
+    never hit is present for its index and not yet Ready (the moment the
+    edit lands on), or already Ready (a late catch; the edit still lands
+    on an Instance the repair just rebuilt). "" while no such pod exists."""
+    fresh = [p for _n, p in pods if p.get("uid") and p["uid"] not in pre_uids]
+    if not fresh:
+        return ""
+    if all(p.get("ready") for p in fresh):
+        return "its replacement pod is already Ready"
+    return "its replacement pod is up and not yet Ready"
+
+
+def _rebuild_count_checks(f, rebuilt_after, ppi, verdict, notes, checks):
+    """After the edit the repaired Instance is rebuilt once at most: no more
+    new pods for its index than it has pod slots. More is the repair and the
+    roll each rebuilding it."""
+    comp, inst, kind = f["crash_comp"], f["crash_inst"], f["kind"]
+    if rebuilt_after > ppi:
+        verdict = "FAIL"
+        notes.append(f"{kind} Instance {comp}/{inst} was rebuilt more than once after the edit "
+                     f"({rebuilt_after} new pods for {ppi} slot(s))")
+        checks.append(f"  ✗ {kind}: {comp} Instance {inst} got {rebuilt_after} new pod(s) after the edit for "
+                      f"{ppi} pod slot(s) — rebuilt twice (the repair and the roll each rebuilt it)")
+    else:
+        checks.append(f"  ✓ {kind}: {comp} Instance {inst} got {rebuilt_after} new pod(s) after the edit for "
+                      f"{ppi} pod slot(s) — rebuilt at most once")
+    return verdict
+
+
+def _wait_rows_settled(case_id, N, configured, budget_s):
+    """Poll the InferenceReplicas until every row of every configured
+    Component is Ready with no operation open and the counters agree, or
+    the budget ends. Returns (settled, the last reason it was not)."""
+    deadline = time.time() + budget_s
+    while True:
+        items = _fetch_initial_ir_items(case_id)
+        settled, why = _initial_ir_settled(items or [], N, configured)
+        if settled or time.time() >= deadline:
+            return settled, why
+        time.sleep(2.0)
+
+
+def _rows_settled_checks(settled, why, verdict, notes, checks):
+    """No Instance is left mid-operation once the pods have converged."""
+    if settled:
+        checks.append("  ✓ every Instance row settled after the roll: Ready, no operation open")
+        return verdict
+    notes.append(f"an Instance was left mid-operation after the roll ({why})")
+    checks.append(f"  ✗ an Instance row did not settle within {ROWS_SETTLE_S}s after the roll ({why}) — left mid-operation")
+    return "FAIL"
+
+
+def _break_after_roll_checks(ctx, pre_final, since_ts, verdict, notes, checks):
+    """The break's claims once a runtime edit's roll has converged: the
+    broken Instance ended on the post-edit revision serving with no repair
+    recorded for it since `since_ts`, and no row is left mid-operation."""
+    f = ctx.get("fault")
+    if not f or f.get("kind") not in BREAK_FAULTS:
+        return verdict
+    verdict = _crashloop_checks(f, ctx["pod_state"], pre_final, since_ts, verdict, notes, checks,
+                                bumped=ctx["configured"])
+    settled, why = _wait_rows_settled(ctx["case_id"], ctx["N"], ctx["configured"], ROWS_SETTLE_S)
+    return _rows_settled_checks(settled, why, verdict, notes, checks)
+
+
+def _runtimerev_repair(case_id, yaml_file, desc, hdr, csr):
+    """Edit the runtime while the repair of a broken Instance is in flight.
+    The break fires on the settled service; once the product has opened the
+    repair (an event names it, the row reads Restarting, or a rebuilt pod
+    appears) the runtime is edited, so the edit lands on an open repair. The
+    last change wins: every Instance, the repaired one included, ends on the
+    post-edit revision serving; after the edit the repaired Instance is
+    rebuilt at most once and no repair is recorded for it; no row is left
+    mid-operation."""
+    ctx, err = _setup_and_ready(case_id, yaml_file, hdr)
+    if err:
+        return _write_fail(case_id, desc, hdr, *err)
+    N, configured, ppi = ctx["N"], ctx["configured"], ctx["pods_per_inst"]
+    ceil = {"engine": hdr.get("ceil_e", N["engine"]), "decoder": hdr.get("ceil_d", N["decoder"]),
+            "router": hdr.get("ceil_r", N["router"])}
+    f = ctx["fault"]
+    edit = hdr.get("edit", "material")
+    kind = edit if edit in ("image", "resources") else "env"
+    print(f"  Phase 2: {f['kind']} fault on the settled service; the runtime edit waits for the repair")
+    _fault_fire(f, ctx["pod_state"], ppi, ctx["old_hashes"])
+    fault_ts = time.time()
+    if f["infra_fail"]:
+        return _finish(case_id, desc, hdr, ctx, "INFRA-FAIL", "INFRA-FAIL", [], [])
+    comp, inst = f["crash_comp"], f["crash_inst"]
+    key = f"component={comp} instance={inst}"
+
+    def victim_pods():
+        return _instance_pods(ctx["pod_state"], comp, inst)
+
+    pre_uids = {p["uid"] for _n, p in victim_pods() if p.get("uid")}
+    budget = _idle_budget(ctx)
+    print(f"  Phase 3: waiting for the repair of {comp} Instance {inst} to open and rebuild it (≤{budget}s)")
+    # The edit lands once the repair's replacement pod is up: the one moment
+    # that is the same on every run (the pod is in its startup window), so
+    # the verdict never depends on a race with the repair's own writes.
+    opened, opened_at, rebuilding, last_poll = "", None, "", 0.0
+    while time.time() - fault_ts < budget and not ctx["closed"]:
+        _read_one(ctx)
+        rebuilding = _repair_rebuilding(victim_pods(), pre_uids)
+        if rebuilding:
+            break
+        now = time.time()
+        if opened or now - last_poll < 2.0:
+            continue
+        last_poll = now
+        named = [(r, m) for r, m in _isvc_events_since(case_id, fault_ts) if key in m]
+        opened = _repair_in_flight(named, _ir_row_phase(case_id, comp, inst), victim_pods(), pre_uids)
+        if opened:
+            opened_at = now - fault_ts
+            print(f"    repair of {comp} Instance {inst} opened at {opened_at:.0f}s ({opened})")
+    verdict, notes, checks = "PASS", [], []
+    if not rebuilding:
+        how = f"it opened at {opened_at:.0f}s ({opened}) but" if opened else "no RestartTriggered event, no Restarting row, and"
+        notes.append(f"the repair of {comp} Instance {inst} never rebuilt it within {budget}s; the edit was not applied")
+        checks.append(f"  ✗ {f['kind']}: {how} no replacement pod for {comp} Instance {inst} appeared within {budget}s "
+                      f"— nothing for the edit to land on")
+        return _finish(case_id, desc, hdr, ctx, "NO_REPAIR", "FAIL", notes, checks)
+    checks.append(f"  ✓ {f['kind']}: the repair of {comp} Instance {inst} rebuilt it {time.time() - fault_ts:.0f}s "
+                  f"after the fault ({rebuilding})")
+    # Everything seen before the edit is what the edit must supersede, the
+    # repair's own rebuild included.
+    seen_uids = set(pre_uids) | {p["uid"] for _n, p in victim_pods() if p.get("uid")}
+    pre_edit_uids = set(seen_uids)
+    pre_final = set(ctx["old_hashes"]) | set(ctx.get("seen_hashes", set()))
+    print(f"  Phase 4: {edit} runtime edit on CSR {csr} while the repair is open")
+    if not _bump_runtime(ctx, csr, sorted(configured), True, kind=kind, image=hdr.get("img")):
+        return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", "csr patch failed")
+    edit_ts = ctx["trigger_ts"]
+    budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * sum(N[c] * ppi[c] for c in configured))
+    print(f"  Phase 5: watching convergence onto the post-edit revision (≤{budget}s)")
+
+    def converged():
+        for c in configured:
+            a, rd, _ = ctx["agg"].get(c, (0, 0, 0))
+            if a != N[c] or rd != N[c]:
+                return False
+        for c in configured:
+            live = [p for p in ctx["pod_state"].values()
+                    if p and p["alive"] and p["comp"] == c and p.get("hash")]
+            if not live or any(p["hash"] in pre_final for p in live):
+                return False
+        return True
+
+    state, stable = "ROTATING", None
+    while time.time() - edit_ts < budget and not ctx["closed"]:
+        _read_one(ctx)
+        seen_uids |= {p["uid"] for _n, p in victim_pods() if p.get("uid")}
+        if converged():
+            if stable is None:
+                stable = time.time()
+            elif time.time() - stable >= STABILITY_S:
+                state = "CONVERGED"
+                ctx["converged_at"] = stable - edit_ts
+                break
+        else:
+            stable = None
+    for c in COMPS:
+        if N[c] and ctx["peaks"][c] > ceil[c]:
+            verdict = "FAIL"; notes.append(f"{c} peak {ctx['peaks'][c]}>ceil {ceil[c]}")
+            checks.append(f"  ✗ {c} peak {ctx['peaks'][c]} > ceiling {ceil[c]}")
+        elif N[c]:
+            checks.append(f"  ✓ {c} peak {ctx['peaks'][c]} ≤ ceiling {ceil[c]}")
+    if state != "CONVERGED":
+        verdict = "FAIL"
+        notes.append(f"runtime edit on an open repair did not converge (state={state})")
+        checks.append(f"  ✗ the runtime edit that landed on the open repair never converged onto the post-edit revision (state={state})")
+    else:
+        checks.append("  ✓ the runtime edit that landed on the open repair converged onto the post-edit revision")
+        verdict = _rebuild_count_checks(f, len(seen_uids - pre_edit_uids), ppi[comp], verdict, notes, checks)
+        verdict = _break_after_roll_checks(ctx, pre_final, edit_ts, verdict, notes, checks)
+    return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
+
+
 def _runtimerev(case_id, yaml_file, desc, hdr):
     """Modify the ISVC's RUNTIME (not the ISVC) and assert the dependent ISVC
     behaves per autoSync — the one rollout trigger the rest of the suite never
@@ -7115,6 +7376,10 @@ def _runtimerev(case_id, yaml_file, desc, hdr):
 
     The CSR is dedicated per case (`rt=` header, applied as a second doc in the
     case file) so the edit is isolated from concurrently-running cases.
+
+    A break (fault=crashloop|imagepull:old) may ride an edit that rolls: it
+    fires as the edit lands and the roll owns the broken Instance, or with
+    during=repair it fires first and the edit lands on the open repair.
     """
     csr = hdr.get("rt")
     if not csr:
@@ -7125,6 +7390,8 @@ def _runtimerev(case_id, yaml_file, desc, hdr):
         return _runtime_recover(case_id, yaml_file, desc, hdr, csr)
     if hdr.get("during") == "rollout":
         return _runtimerev_during(case_id, yaml_file, desc, hdr, csr)
+    if hdr.get("during") == REPAIR_HOOK:
+        return _runtimerev_repair(case_id, yaml_file, desc, hdr, csr)
     expect_roll = hdr.get("expect", "roll") == "roll"
     # Whether the runtime edit is material (changes the pod spec) is independent of
     # whether a roll is expected: a material edit on a PINNED (autoSync=false) ISVC
@@ -7197,6 +7464,9 @@ def _runtimerev(case_id, yaml_file, desc, hdr):
             checks.append(f"  ✗ autoSync roll: never converged onto a new runtime revision (state={state})")
         else:
             checks.append(f"  ✓ autoSync roll: converged onto new runtime revision {sorted(new_hashes())}")
+            # A break that fired as the edit landed: the roll owns the broken
+            # Instance, so it ends on the new revision with no repair recorded.
+            verdict = _break_after_roll_checks(ctx, old, ctx["trigger_ts"], verdict, notes, checks)
         return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
     # expect=noroll — assert nothing rolls for the grace window.
@@ -7734,6 +8004,474 @@ def _migrate(case_id, yaml_file, desc, hdr):
     return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
 
+# ── Operations on a stuck Component (stuck=held|failed) ─────────────────────
+def _ir_by_component(case_id):
+    """{component: InferenceReplica item} for the case, read live."""
+    return {((it.get("spec") or {}).get("component") or "?"): it
+            for it in (_fetch_initial_ir_items(case_id) or [])}
+
+
+def _retry_blocks(item):
+    return [b for b in ((item.get("status") or {}).get("retryBlocks") or []) if isinstance(b, dict)]
+
+
+def _stuck_signal(by_comp, bumped, stuck):
+    """Why a bumped Component counts as stuck the way the header names, or
+    "" while none does. held: a retry block in state Held (or the hold the
+    status derives from it). failed: an Instance row reads Failed, or the
+    retry block for the pushed revision records a started attempt."""
+    for comp in sorted(bumped):
+        item = by_comp.get(comp)
+        if not item:
+            continue
+        status = item.get("status") or {}
+        blocks = _retry_blocks(item)
+        gate = (status.get("rolloutHold") or {}).get("gate")
+        if stuck == "held":
+            for b in blocks:
+                if b.get("state") == RETRY_BLOCK_HELD:
+                    return (f"{comp}: the retry block for {b.get('targetRevision', '?')} is Held after "
+                            f"{b.get('attemptsStarted', '?')} attempt(s)")
+            if gate == RETRY_BLOCK_HELD:
+                return f"{comp}: rolloutHold gate=Held ({(status.get('rolloutHold') or {}).get('reason', '')[:120]})"
+            continue
+        for row in _instance_rows(status):
+            if row.get("phase") == "Failed":
+                return f"{comp} Instance {row.get('index', '?')} reads Failed"
+        for b in blocks:
+            try:
+                attempts = int(b.get("attemptsStarted") or 0)
+            except (TypeError, ValueError):
+                attempts = 0
+            if attempts >= 1:
+                return (f"{comp}: the retry block for {b.get('targetRevision', '?')} records "
+                        f"{attempts} failed attempt(s) ({b.get('state', '?')})")
+    return ""
+
+
+def _push_unlanded(by_comp, bumped):
+    """Per bumped Component, how the status still reports the push that
+    has not landed: the update revision differs from the current one and a
+    hold, a retry block or a Failed row says why. {comp: reason or ""}."""
+    out = {}
+    for comp in sorted(bumped):
+        item = by_comp.get(comp)
+        status = (item or {}).get("status") or {}
+        current, update = status.get("currentRevision") or "", status.get("updateRevision") or ""
+        why = []
+        gate = (status.get("rolloutHold") or {}).get("gate")
+        if gate:
+            why.append(f"rolloutHold gate={gate}")
+        blocks = _retry_blocks(item or {})
+        if blocks:
+            why.append("retry block " + ", ".join(f"{b.get('state', '?')}" for b in blocks))
+        failed = [str(r.get("index", "?")) for r in _instance_rows(status) if r.get("phase") == "Failed"]
+        if failed:
+            why.append("Failed row(s) " + ",".join(failed))
+        if item and current and update and current != update and why:
+            out[comp] = "; ".join(why)
+        else:
+            out[comp] = ""
+    return out
+
+
+def _scale_victims(rows, remove_count):
+    """The Instances a scale-down removes, in the engine's order: rows that
+    are not Ready first, highest index first within that tier, then Ready
+    rows highest index first. `rows` are (index, phase) pairs."""
+    def _idx(row):
+        try:
+            return int(row[0])
+        except (TypeError, ValueError):
+            return -1
+    broken = sorted((r for r in rows if r[1] != "Ready"), key=_idx, reverse=True)
+    healthy = sorted((r for r in rows if r[1] == "Ready"), key=_idx, reverse=True)
+    return [str(r[0]) for r in (broken + healthy)[:max(0, remove_count)]]
+
+
+def _removal_plans(snapshots, n, want):
+    """{label: expected victims} for each row snapshot of a Component (the
+    rows at the scale and right after it: a row may change phase between
+    the two reads, and the engine plans from whichever it saw), for a
+    scale from n to the accepted count `want`."""
+    return {label: _scale_victims(rows, n - want) for label, rows in snapshots.items() if rows is not None}
+
+
+def _removal_outcome(plans, pre_indices, rows_now, pod_indices_now):
+    """Which plan the engine followed: the pre-existing rows still present
+    are exactly that plan's kept set and no alive pod remains on a removed
+    index. Returns (label or None, extra rows): rows that did not exist at
+    the scale (a retry attempt's surge gang) are not the scale's doing and
+    are reported, not judged."""
+    pre = set(pre_indices)
+    survivors = set(rows_now) & pre
+    extra = sorted(set(rows_now) - pre)
+    for label, victims in plans.items():
+        kept = pre - set(victims)
+        if survivors == kept and not any(idx in pod_indices_now for idx in victims):
+            return label, extra
+    return None, extra
+
+
+def _survivor_changes(pre, now, old_hashes):
+    """How each surviving Instance's pods changed across the operation.
+    pre/now: {index: [(uid, hash)]} of alive pods before and after. A
+    survivor whose running-revision pod was replaced by another pod on the
+    running revision was rebuilt for nothing (needless); one whose
+    running-revision pod gave way to a pushed-revision pod was taken by
+    the roll (rolled). Returns (needless, rolled) as sorted index lists."""
+    needless, rolled = [], []
+    for idx, before in sorted(pre.items()):
+        olds_before = {u for u, h in before if h in old_hashes}
+        if not olds_before:
+            continue
+        after = now.get(idx, [])
+        olds_after = {u for u, h in after if h in old_hashes}
+        news_after = {u for u, h in after if h and h not in old_hashes}
+        if olds_before & olds_after:
+            continue
+        if olds_after:
+            needless.append(idx)
+        elif news_after:
+            rolled.append(idx)
+        else:
+            needless.append(idx)
+    return needless, rolled
+
+
+def _pods_by_index(ctx, comp):
+    """{index: [(uid, hash)]} of the Component's alive pods."""
+    out = defaultdict(list)
+    for p in ctx["pod_state"].values():
+        if p and p["alive"] and p["comp"] == comp:
+            out[str(p.get("inst", "0"))].append((p.get("uid", ""), p.get("hash", "")))
+    return dict(out)
+
+
+def _ir_spec_replicas(by_comp):
+    """{component: spec.replicas} as the controller projected it."""
+    out = {}
+    for comp, item in by_comp.items():
+        r = (item.get("spec") or {}).get("replicas")
+        if isinstance(r, int):
+            out[comp] = r
+    return out
+
+
+def _replica_patch(targets):
+    """The merge patch for the operation's replica targets. minReplicas is
+    the request; maxReplicas follows it but never drops below one, the least
+    the API admits, so a request for zero is the operator's minReplicas: 0."""
+    return {"spec": {c: {"minReplicas": t, "maxReplicas": max(t, 1)} for c, t in sorted(targets.items())}}
+
+
+def _drive_stuck(ctx, hdr):
+    """Push the bumped members onto the header's unpullable image and wait
+    for the stuck state the header names. Returns the signal that reached
+    it, "" when the budget ended first, None when the push itself failed."""
+    stuck = str(hdr.get("stuck"))
+    bumped = _bumped(ctx)
+    image = str(hdr.get("img") or "")
+    N, ppi = ctx["N"], ctx["pods_per_inst"]
+    print(f"  Phase 2: push {sorted(bumped)} onto an image that cannot be pulled; waiting for {stuck}")
+    if not _bump_rev(ctx, bumped, TRIGGER_VAL, image=image):
+        return None
+    budget = STUCK_HELD_WAIT_S if stuck == "held" else min(
+        MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * sum(N[c] * ppi[c] for c in bumped))
+    last_poll = 0.0
+    while time.time() - ctx["trigger_ts"] < budget and not ctx["closed"]:
+        _read_one(ctx)
+        now = time.time()
+        if now - last_poll < 3.0:
+            continue
+        last_poll = now
+        signal = _stuck_signal(_ir_by_component(ctx["case_id"]), bumped, stuck)
+        if signal:
+            print(f"    {stuck} reached {now - ctx['trigger_ts']:.0f}s after the push: {signal}")
+            return signal
+    return ""
+
+
+def _stuck_reached_checks(stuck, reached, after_s, verdict, notes, checks):
+    if reached:
+        checks.append(f"  ✓ {stuck}: reached {after_s:.0f}s after the push — {reached}")
+        return verdict
+    notes.append(f"the push never reached {stuck} within budget; the operation was not applied")
+    checks.append(f"  ✗ {stuck}: the push onto the unpullable revision never reached {stuck} within budget "
+                  f"({after_s:.0f}s) — the operation had nothing to land on")
+    return "FAIL"
+
+
+def _stuck_delete_checks(ctx2, verdict, notes, checks):
+    """After the delete and the same-name recreate nothing of the push is
+    left: the recreated service reports no hold and no retry block."""
+    by_comp = _ir_by_component(ctx2["case_id"])
+    carried = {c: _push_unlanded(by_comp, {c})[c] for c in sorted(ctx2["configured"])}
+    bad = {c: why for c, why in carried.items() if why}
+    if bad:
+        verdict = "FAIL"
+        notes.append("the recreated service still carries the deleted service's push: " + "; ".join(f"{c}: {w}" for c, w in bad.items()))
+        checks.append("  ✗ the same-name recreate still reports the deleted service's unlanded push — " + "; ".join(f"{c}: {w}" for c, w in bad.items()))
+    else:
+        checks.append("  ✓ the same-name recreate carries nothing of the deleted service's push (no hold, no retry block, no Failed row)")
+    return verdict
+
+
+def _stuck_scale(case_id, yaml_file, desc, hdr):
+    """A scale lands on a Component stuck on a revision that cannot be
+    pulled (stuck=failed: the first attempt has failed; stuck=held: the
+    retry ladder is spent). What the engine promises and the verdict reads:
+    a scale-down removes Instances that are not Ready first, highest index
+    first within each tier, and never rebuilds a survivor on the running
+    revision; a request for zero converges on the replica count the API
+    accepted for it (it runs one Instance for zero), the stuck Instances
+    going first; a scale-up while held starts nothing (the new index waits
+    as an empty slot) and while failed starts the new Instance on the pushed
+    revision when the retry window admits it, never on the running
+    revision; the healthy survivors keep serving throughout; the sibling
+    Components the push never touched stay as they were; and the status
+    keeps reporting the push that has not landed."""
+    ctx, err = _setup_and_ready(case_id, yaml_file, hdr)
+    if err:
+        return _write_fail(case_id, desc, hdr, *err)
+    stuck = str(hdr.get("stuck"))
+    N, configured, ppi = ctx["N"], ctx["configured"], ctx["pods_per_inst"]
+    ceil = {"engine": hdr.get("ceil_e", N["engine"]), "decoder": hdr.get("ceil_d", N["decoder"]),
+            "router": hdr.get("ceil_r", N["router"])}
+    bumped = _bumped(ctx)
+    target = {c: int(hdr.get(TO_KEYS[c], N[c])) for c in configured}
+    scaled = {c for c in configured if target[c] != N[c]}
+    controls = configured - scaled - bumped
+    if any(target[c] > N[c] for c in scaled):
+        direction = "up"
+    elif any(target[c] == 0 for c in scaled):
+        direction = "zero"
+    else:
+        direction = "down"
+    verdict, notes, checks = "PASS", [], []
+    reached = _drive_stuck(ctx, hdr)
+    if reached is None:
+        return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", ctx.get("trigger_error") or "isvc bump failed")
+    verdict = _stuck_reached_checks(stuck, reached, time.time() - ctx["trigger_ts"], verdict, notes, checks)
+    if not reached:
+        return _finish(case_id, desc, hdr, ctx, "NOT_STUCK", verdict, notes, checks)
+
+    # The fleet at the moment the operation lands.
+    by_comp = _ir_by_component(case_id)
+    rows_at_op = {c: [(str(r.get("index", "?")), str(r.get("phase") or "")) for r in _instance_rows((by_comp.get(c) or {}).get("status") or {})]
+                  for c in configured}
+    pre_pods = {c: _pods_by_index(ctx, c) for c in configured}
+    pre_ready = {c: ctx["agg"].get(c, (0, 0, 0))[1] for c in configured}
+    control_uids = {c: {u for pods in pre_pods[c].values() for u, _h in pods} for c in controls}
+    expected_victims = {c: _scale_victims(rows_at_op[c], N[c] - target[c]) for c in scaled if target[c] < N[c]}
+    rows_after_op = {c: None for c in configured}
+    print(f"  Phase 3: scale {' '.join(f'{c} {N[c]}→{target[c]}' for c in sorted(scaled))} while {stuck}"
+          + (f" (expected to go first: {expected_victims})" if expected_victims else ""))
+    rr = kubectl("-n", NS, "patch", "isvc", case_id, "--type=merge",
+                 "-p", json.dumps(_replica_patch({c: target[c] for c in scaled})))
+    if rr.returncode != 0:
+        msg = (rr.stderr.strip().splitlines() or [""])[-1]
+        return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", f"scale patch failed: {msg[:160]}")
+    op_ts = time.time()
+    want = dict(target)
+    budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * sum(N[c] * ppi[c] for c in configured))
+    if direction == "up":
+        # held: nothing may start; the window is the hold's. failed: the
+        # ladder decides when (and whether) the new Instance is admitted,
+        # so the watch runs until the ladder is spent.
+        budget = IDLE_HOLD_S if stuck == "held" else min(MAX_BUDGET_S, STUCK_HELD_WAIT_S)
+    print(f"  Phase 4: watching the {direction} land on the {stuck} Component (≤{budget}s)")
+    min_ready = dict(pre_ready)
+    floor_since, floor_sust = {}, {}
+    # The healthy survivors keep serving: under held the ladder is frozen,
+    # so their count is exact; under failed a drain-first strategy may take
+    # one more Instance into its next attempt.
+    floor = {}
+    for c in configured:
+        going = len(expected_victims.get(c, []))
+        going_ready = sum(1 for idx, ph in rows_at_op[c] if ph == "Ready" and idx in expected_victims.get(c, []))
+        drains_first = ctx["info"]["strat"].get(c) in {"RecreatePod"} | IN_PLACE_TYPES
+        extra = (resolve_max_unavailable(ctx["info"]["max_unavail"].get(c, 0), N[c])
+                 if stuck == "failed" and c in bumped and drains_first else 0)
+        floor[c] = max(0, pre_ready[c] - going_ready - extra)
+    state, stable, last_poll, ladder_done = "WATCHING", None, 0.0, ""
+    new_index_seen = {}
+    while time.time() - op_ts < budget and not ctx["closed"]:
+        _read_one(ctx)
+        now = time.time()
+        for c in configured:
+            rd = ctx["agg"].get(c, (0, 0, 0))[1]
+            min_ready[c] = min(min_ready.get(c, rd), rd)
+            if rd < floor[c]:
+                floor_since.setdefault(c, now)
+                floor_sust[c] = max(floor_sust.get(c, 0.0), now - floor_since[c])
+            else:
+                floor_since.pop(c, None)
+        for c in scaled:
+            for idx, pods in _pods_by_index(ctx, c).items():
+                if idx not in pre_pods[c] and idx not in new_index_seen.get(c, {}):
+                    new_index_seen.setdefault(c, {})[idx] = sorted({h for _u, h in pods})
+        if now - last_poll >= 3.0:
+            last_poll = now
+            by_comp = _ir_by_component(case_id)
+            for c in configured:
+                if rows_after_op[c] is None:
+                    rows_after_op[c] = [(str(r.get("index", "?")), str(r.get("phase") or ""))
+                                        for r in _instance_rows((by_comp.get(c) or {}).get("status") or {})]
+            if direction == "zero":
+                for c, r in _ir_spec_replicas(by_comp).items():
+                    if c in scaled and r != N[c]:
+                        want[c] = r
+            if direction == "up" and stuck == "failed" and not ladder_done:
+                ladder_done = _stuck_signal(by_comp, bumped, "held")
+                if ladder_done:
+                    print(f"    the ladder is spent {now - op_ts:.0f}s after the scale: {ladder_done}")
+        if direction == "up":
+            if stuck == "failed" and ladder_done and now - op_ts >= STABILITY_S:
+                state = "LADDER_SPENT"
+                break
+            continue
+        at_target = all(ctx.get("measures", {}).get(c, (0, 0, 0))[0] == want[c] for c in scaled)
+        if at_target:
+            stable = stable or now
+            if now - stable >= STABILITY_S:
+                state = "CONVERGED"
+                ctx["converged_at"] = stable - op_ts
+                break
+        else:
+            stable = None
+    if direction == "up" and state == "WATCHING":
+        state = "HELD_UP" if stuck == "held" else "WINDOW_ENDED"
+
+    # Checks.
+    for c in COMPS:
+        if N[c] and ctx["peaks"][c] > ceil[c]:
+            verdict = "FAIL"; notes.append(f"{c} peak {ctx['peaks'][c]}>ceil {ceil[c]}")
+            checks.append(f"  ✗ {c} peak {ctx['peaks'][c]} > ceiling {ceil[c]}")
+        elif N[c]:
+            checks.append(f"  ✓ {c} peak {ctx['peaks'][c]} ≤ ceiling {ceil[c]}")
+    by_comp = _ir_by_component(case_id)
+    now_pods = {c: _pods_by_index(ctx, c) for c in configured}
+    if direction in ("down", "zero"):
+        if state != "CONVERGED":
+            verdict = "FAIL"
+            got = " ".join(f"{c}={ctx.get('measures', {}).get(c, (0, 0, 0))[0]}/{want[c]}" for c in sorted(scaled))
+            notes.append(f"the scale did not converge (state={state}, instances {got})")
+            checks.append(f"  ✗ the scale did not converge within {budget}s (state={state}; Instances {got})")
+        else:
+            got = " ".join(f"{c} {ctx.get('measures', {}).get(c, (0, 0, 0))[0]}/{want[c]}" for c in sorted(scaled))
+            floor_note = (" — the API runs one Instance for a request of zero, so that is the count it converges on"
+                          if direction == "zero" and any(want[c] > 0 for c in scaled) else "")
+            checks.append(f"  ✓ converged on the accepted count at {ctx['converged_at']:.1f}s ({got}){floor_note}")
+        for c in sorted(scaled):
+            rows_now = {str(r.get("index", "?")) for r in _instance_rows((by_comp.get(c) or {}).get("status") or {})}
+            pre_indices = {idx for idx, _ph in rows_at_op[c]}
+            # The expected victims follow from the count the API accepted,
+            # planned from the rows as the engine may have seen them.
+            plans = _removal_plans({"at the scale": rows_at_op[c], "right after the scale": rows_after_op[c]}, N[c], want[c])
+            followed, extra_rows = _removal_outcome(plans, pre_indices, rows_now, set(now_pods[c]))
+            expected = set(plans.get(followed or "at the scale", []))
+            kept = pre_indices - expected
+            snapshot = dict(rows_at_op[c] if followed != "right after the scale" else rows_after_op[c])
+            stuck_gone = sorted(idx for idx in expected if snapshot.get(idx) != "Ready")
+            if followed is None:
+                verdict = "FAIL"
+                notes.append(f"{c}: the scale removed the wrong Instances (rows now {sorted(rows_now)}, expected {sorted(kept)} to stay)")
+                checks.append(f"  ✗ {c}: expected Instances {sorted(expected)} to go (not Ready first, then the highest index) "
+                              f"and {sorted(kept)} to stay; rows now {sorted(rows_now)}, pods on removed indices "
+                              f"{sorted(idx for idx in expected if idx in now_pods[c])}")
+            else:
+                checks.append(f"  ✓ {c}: Instances {sorted(expected)} went (not Ready first, then the highest index, "
+                              f"as the rows read {followed}) and {sorted(kept)} stayed"
+                              + (f"; the stuck Instance(s) {stuck_gone} were among them" if stuck_gone else ""))
+            if extra_rows:
+                checks.append(f"  ⓘ {c}: row(s) {extra_rows} did not exist at the scale (a retry attempt's replacement) and are not judged")
+            needless, rolled = _survivor_changes({i: v for i, v in pre_pods[c].items() if i in kept}, now_pods[c], ctx["old_hashes"])
+            if needless:
+                verdict = "FAIL"
+                notes.append(f"{c}: survivors {needless} were rebuilt on the running revision by the scale")
+                checks.append(f"  ✗ {c}: surviving Instance(s) {needless} lost their running-revision pods to the scale and were rebuilt on the same revision — a needless recreate")
+            else:
+                checks.append(f"  ✓ {c}: no survivor was rebuilt on the running revision")
+            if rolled and stuck == "held":
+                verdict = "FAIL"
+                notes.append(f"{c}: the held roll took survivors {rolled} after the scale")
+                checks.append(f"  ✗ {c}: surviving Instance(s) {rolled} were taken onto the pushed revision after the scale — the hold did not freeze the roll")
+            elif rolled:
+                checks.append(f"  ⓘ {c}: the retry ladder took surviving Instance(s) {rolled} into its next attempt after the scale")
+    else:
+        fresh = {c: new_index_seen.get(c, {}) for c in scaled}
+        on_running = {c: [idx for idx, hashes in fresh[c].items() if any(h in ctx["old_hashes"] for h in hashes)] for c in scaled}
+        for c in sorted(scaled):
+            if on_running[c]:
+                verdict = "FAIL"
+                notes.append(f"{c}: new Instance(s) {on_running[c]} started on the running revision")
+                checks.append(f"  ✗ {c}: new Instance(s) {on_running[c]} came up on the running revision — a new Instance is rendered from the pushed revision only")
+            if stuck == "held":
+                if fresh[c]:
+                    verdict = "FAIL"
+                    notes.append(f"{c}: the scale-up started Instance(s) {sorted(fresh[c])} while held")
+                    checks.append(f"  ✗ {c}: while held the scale-up started new Instance(s) {sorted(fresh[c])} (pushed-revision pods) — a held revision admits no new Instance")
+                else:
+                    checks.append(f"  ✓ {c}: while held the scale-up started nothing across {budget}s — the new index waits as an empty slot")
+            elif fresh[c]:
+                checks.append(f"  ⓘ {c}: the retry window admitted new Instance(s) {sorted(fresh[c])} on the pushed revision; they are stuck like their peers")
+            else:
+                checks.append(f"  ⓘ {c}: no new Instance was admitted before the ladder was spent ({state})")
+            needless, rolled = _survivor_changes(pre_pods[c], now_pods[c], ctx["old_hashes"])
+            if needless:
+                verdict = "FAIL"
+                notes.append(f"{c}: survivors {needless} were rebuilt on the running revision by the scale-up")
+                checks.append(f"  ✗ {c}: Instance(s) {needless} lost their running-revision pods to the scale-up and were rebuilt on the same revision")
+            else:
+                checks.append(f"  ✓ {c}: the scale-up left every running-revision Instance untouched")
+            if rolled and stuck == "held":
+                verdict = "FAIL"
+                notes.append(f"{c}: the held roll took Instances {rolled} after the scale-up")
+                checks.append(f"  ✗ {c}: Instance(s) {rolled} were taken onto the pushed revision after the scale-up — the hold did not freeze the roll")
+            elif rolled:
+                checks.append(f"  ⓘ {c}: the retry ladder took Instance(s) {rolled} into its next attempt after the scale-up")
+    # The healthy survivors kept serving.
+    for c in sorted(configured):
+        mr, sust = min_ready.get(c, 0), floor_sust.get(c, 0.0)
+        if mr >= floor[c]:
+            checks.append(f"  ✓ {c} kept {mr} Instance(s) Ready throughout (floor {floor[c]})")
+        elif sust >= FLOOR_SUSTAIN_S:
+            verdict = "FAIL"
+            notes.append(f"{c} dropped to {mr} Ready (floor {floor[c]}) for {sust:.0f}s")
+            checks.append(f"  ✗ {c} dropped to {mr} Ready Instance(s) (floor {floor[c]}) for {sust:.0f}s — the operation cost healthy capacity")
+        else:
+            checks.append(f"  ⚠ {c} dipped to {mr} Ready (floor {floor[c]}) for <{FLOOR_SUSTAIN_S:.0f}s — debounced as a readiness flap")
+    # Siblings the push never touched stay as they were.
+    for c in sorted(controls):
+        uids_now = {u for pods in now_pods[c].values() for u, _h in pods}
+        rotated = any(h and h not in ctx["old_hashes"] for pods in now_pods[c].values() for _u, h in pods)
+        if ctx["peaks"][c] > N[c] or rotated or uids_now != control_uids[c]:
+            verdict = "FAIL"
+            notes.append(f"{c} (untouched) changed: peak={ctx['peaks'][c]} rotated={rotated} pods changed={uids_now != control_uids[c]}")
+            checks.append(f"  ✗ {c} was neither pushed nor scaled but changed (peak {ctx['peaks'][c]}/{N[c]}, rotated={rotated}, pods changed={uids_now != control_uids[c]}) — isolation violated")
+        else:
+            checks.append(f"  ✓ {c} (neither pushed nor scaled) stayed as it was")
+    # The push that has not landed is still reported.
+    unlanded = _push_unlanded(by_comp, bumped)
+    for c in sorted(bumped):
+        rows_now = _instance_rows((by_comp.get(c) or {}).get("status") or {})
+        if direction == "zero" and not rows_now:
+            checks.append(f"  ⓘ {c}: no Instance left; the unlanded push is reported as {unlanded[c] or 'nothing'}")
+            continue
+        if not unlanded[c]:
+            verdict = "FAIL"
+            notes.append(f"{c}: the status stopped reporting the push that has not landed")
+            checks.append(f"  ✗ {c}: after the operation the status stopped saying the push has not landed (no hold, no retry block, no Failed row, or the revisions read converged)")
+        elif stuck == "held" and RETRY_BLOCK_HELD not in unlanded[c]:
+            verdict = "FAIL"
+            notes.append(f"{c}: the hold is not reported after the operation ({unlanded[c]})")
+            checks.append(f"  ✗ {c}: the hold is not reported after the operation ({unlanded[c]}) — only a new revision or a release may lift it")
+        else:
+            checks.append(f"  ✓ {c}: the status still reports the push that has not landed ({unlanded[c]})")
+    return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
+
+
 def _recreate(case_id, yaml_file, desc, hdr):
     """Delete the case ISVC (optionally mid-rollout / mid-migration), require the
     universal teardown to converge, then IMMEDIATELY re-apply the same manifest:
@@ -7746,7 +8484,17 @@ def _recreate(case_id, yaml_file, desc, hdr):
         return _write_fail(case_id, desc, hdr, *err)
     verdict, notes, checks = "PASS", [], []
     during = hdr.get("during")
-    if during == "rollout":
+    if hdr.get("stuck"):
+        # The delete lands on a Component stuck on a revision that cannot be
+        # pulled: everything must still go, stuck pods included, and the
+        # same name must come back clean.
+        reached = _drive_stuck(ctx, hdr)
+        if reached is None:
+            return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", ctx.get("trigger_error") or "isvc bump failed")
+        verdict = _stuck_reached_checks(hdr["stuck"], reached, time.time() - ctx["trigger_ts"], verdict, notes, checks)
+        if not reached:
+            return _finish(case_id, desc, hdr, ctx, "NOT_STUCK", verdict, notes, checks)
+    elif during == "rollout":
         print("  Phase 2: ISVC revision bump (v2) — delete lands mid-rotate")
         if not _bump_rev(ctx, _bumped(ctx), "v2"):
             return _write_fail(case_id, desc, hdr, "TRIGGER_FAIL", "isvc bump failed")
@@ -7783,6 +8531,7 @@ def _recreate(case_id, yaml_file, desc, hdr):
     verdict = teardown_check(case_id, total_pods, verdict, notes, checks)
     hdr2 = dict(hdr)
     hdr2.pop("fault", None)   # pass-1 apparatus (quota/cordon) stays armed; never re-arm
+    hdr2.pop("stuck", None)   # the recreate applies the manifest's good revision; nothing is pushed again
     t_re = time.time()
     ctx2, err2 = _setup_and_ready(case_id, yaml_file, hdr2)
     if err2:
@@ -7797,6 +8546,8 @@ def _recreate(case_id, yaml_file, desc, hdr):
         checks.append(f"  ✗ recreate reused {len(reused)} pre-delete pod UID(s) — pods survived the teardown")
     else:
         checks.append("  ✓ same-name recreate reached Ready on all-fresh pod UIDs (no AlreadyExists wedge, no adopted pods)")
+    if hdr.get("stuck"):
+        verdict = _stuck_delete_checks(ctx2, verdict, notes, checks)
     f = ctx.get("fault")
     if f and f["kind"] == "cordon" and f.get("node"):
         on_bad = sorted({f"{p['comp']}-{p['inst']}" for p in ctx2["pod_state"].values()
@@ -10051,6 +10802,8 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
         return _compremove(case_id, yaml_file, desc, hdr)
     if mode == "pairing":
         return _pairing(case_id, yaml_file, desc, hdr)
+    if hdr.get("stuck"):
+        return _stuck_scale(case_id, yaml_file, desc, hdr)
 
     target = {c: int(hdr.get(TO_KEYS[c], N[c])) for c in COMPS}
     # Survivor set: instances with index < min(start,target) must be left UNTOUCHED

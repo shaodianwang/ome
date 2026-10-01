@@ -3697,6 +3697,230 @@ class NodeFaultTest(unittest.TestCase):
             self.assertIn('<skipped message="SKIP"', text)
 
 
+class RuntimeEditRepairTest(unittest.TestCase):
+    """A break may ride a runtime edit that rolls: it fires as the edit lands
+    and the roll owns the broken Instance, or with during=repair it fires
+    first and the edit lands on the open repair. The header rules, the phase
+    hook that must leave a handler-fired break alone, and the pure parts of
+    the verdict: when a repair counts as open, the rebuild count, and the
+    rows left mid-operation."""
+
+    BASE = ("# p999: x mode=runtimerev rt=ome-coordtest-rt-p999 expect=roll "
+            "Ne=3 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 topo=engine")
+
+    def _errs(self, header):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def test_header_lets_a_break_ride_a_runtime_edit_that_rolls(self):
+        self.assertEqual([], self._errs(self.BASE + " edit=env fault=crashloop:old form=start"))
+        self.assertEqual([], self._errs(self.BASE + " edit=image img=${OME_EVAL_NGINX_ALT_IMAGE} fault=crashloop:old form=load"))
+        self.assertEqual([], self._errs(self.BASE + " edit=env fault=imagepull:old"))
+        self.assertEqual([], self._errs(self.BASE + " edit=env fault=crashloop:old form=start during=repair"))
+        self.assertEqual([], self._errs(self.BASE + " edit=image img=${OME_EVAL_NGINX_ALT_IMAGE} fault=imagepull:old during=repair"))
+        noroll = self.BASE.replace("expect=roll", "expect=noroll")
+        self.assertTrue(any("expect=roll" in e for e in self._errs(noroll + " edit=noop fault=crashloop:old form=start")))
+        recover = self.BASE.replace("expect=roll", "expect=recover break=stuck")
+        self.assertTrue(any("no break=" in e for e in self._errs(recover + " fault=crashloop:old form=start")))
+        kill = "# p999: x mode=kill Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 restart=None topo=engine"
+        self.assertTrue(any("mode=rollout|runtimerev" in e for e in self._errs(kill + " fault=crashloop:old form=start")))
+
+    def test_repair_hook_needs_a_runtime_edit_and_a_break(self):
+        self.assertTrue(any("needs the break" in e for e in self._errs(self.BASE + " edit=env during=repair")))
+        self.assertTrue(any("needs the break" in e for e in self._errs(self.BASE + " edit=env fault=podkill:settling during=repair")))
+        rollout = "# p999: x mode=rollout Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 topo=engine"
+        self.assertTrue(any("mode=runtimerev" in e for e in self._errs(rollout + " fault=crashloop:old form=start during=repair")))
+
+    def test_phase_hook_leaves_a_handler_fired_break_alone(self):
+        repair = run._fault_new("p999", {"fault": "crashloop:old", "form": "start", "during": "repair"})
+        idle = run._fault_new("p999", {"fault": "crashloop:old", "form": "start", "during": "idle"})
+        plain = run._fault_new("p999", {"fault": "crashloop:old", "form": "start"})
+        self.assertTrue(run._fault_fired_by_handler(repair))
+        self.assertTrue(run._fault_fired_by_handler(idle))
+        self.assertFalse(run._fault_fired_by_handler(plain))
+        self.assertFalse(run._fault_fired_by_handler(None))
+        fired = []
+        orig = run._fault_fire
+        run._fault_fire = lambda *a, **k: fired.append(a)
+        try:
+            ctx = {"trigger_ts": 1.0, "pod_state": {}, "pods_per_inst": {}, "old_hashes": {"old"}}
+            run._fault_tick(dict(ctx, fault=repair))
+            self.assertEqual([], fired, "the repair handler fires its break before the edit; the hook must not")
+            run._fault_tick(dict(ctx, fault=plain))
+            self.assertEqual(1, len(fired), "a plain break fires the moment the edit has landed")
+        finally:
+            run._fault_fire = orig
+
+    def test_repair_counts_as_open_on_event_row_or_rebuilt_pod(self):
+        pods = [("e2", {"uid": "u-old", "alive": True})]
+        self.assertEqual("", run._repair_in_flight([], "Ready", pods, {"u-old"}))
+        self.assertEqual("", run._repair_in_flight([("RepairHeld", "component=engine instance=2")], "Ready", pods, {"u-old"}))
+        self.assertEqual("a RestartTriggered event names it",
+                         run._repair_in_flight([("RestartTriggered", "component=engine instance=2")], "Ready", pods, {"u-old"}))
+        self.assertEqual("its row reads Restarting", run._repair_in_flight([], "Restarting", pods, {"u-old"}))
+        rebuilt = pods + [("e2b", {"uid": "u-new", "alive": True})]
+        self.assertEqual("a new pod appeared for its index", run._repair_in_flight([], "Ready", rebuilt, {"u-old"}))
+
+    def test_rebuild_count_allows_one_new_pod_per_slot(self):
+        f = {"crash_comp": "engine", "crash_inst": "2", "kind": "crashloop"}
+        for rebuilt, ppi, want in ((0, 1, "PASS"), (1, 1, "PASS"), (2, 1, "FAIL"), (2, 2, "PASS"), (3, 2, "FAIL")):
+            notes, checks = [], []
+            self.assertEqual(want, run._rebuild_count_checks(f, rebuilt, ppi, "PASS", notes, checks), (rebuilt, ppi))
+            self.assertEqual(want == "FAIL", any("rebuilt twice" in c for c in checks))
+
+    def test_rows_left_mid_operation_fail_the_case(self):
+        notes, checks = [], []
+        self.assertEqual("PASS", run._rows_settled_checks(True, "settled", "PASS", notes, checks))
+        self.assertTrue(any("no operation open" in c for c in checks))
+        notes, checks = [], []
+        self.assertEqual("FAIL", run._rows_settled_checks(False, "engine/2: Instance is not settled", "PASS", notes, checks))
+        self.assertTrue(any("left mid-operation" in c for c in checks))
+
+    def test_break_checks_skip_cases_without_a_break(self):
+        ctx = {"fault": None, "pod_state": {}, "configured": {"engine"}, "case_id": "p999", "N": {"engine": 1}}
+        self.assertEqual("PASS", run._break_after_roll_checks(ctx, {"old"}, 1.0, "PASS", [], []))
+        ctx["fault"] = run._fault_new("p999", {"fault": "podkill:settling"})
+        self.assertEqual("PASS", run._break_after_roll_checks(ctx, {"old"}, 1.0, "PASS", [], []))
+
+
+class StuckOperationTest(unittest.TestCase):
+    """stuck=held|failed pushes the bumped members onto a revision that
+    cannot be pulled before a scale or a delete lands. The header rules and
+    the pure parts of the verdict: when a Component counts as stuck, how the
+    unlanded push is read back, which Instances a scale-down removes, and
+    how a survivor's pods may change."""
+
+    SCALE = "# p999: x mode=scaledown Ne=3 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 to_e=2 topo=engine"
+    RECREATE = "# p999: x mode=recreate Ne=3 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 topo=engine"
+    IMG = " img=example.com/canary-test/missing:none"
+
+    def _errs(self, header):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    @staticmethod
+    def _ir(component, rows=(), blocks=(), hold=None, current="rev-a", update="rev-b", replicas=None):
+        status = {"currentRevision": current, "updateRevision": update,
+                  "instanceStatuses": [{"index": i, "phase": ph} for i, ph in rows]}
+        if blocks:
+            status["retryBlocks"] = list(blocks)
+        if hold:
+            status["rolloutHold"] = hold
+        spec = {"component": component}
+        if replicas is not None:
+            spec["replicas"] = replicas
+        return {"spec": spec, "status": status}
+
+    def test_header_names_the_stuck_kind_and_its_revision(self):
+        self.assertEqual([], self._errs(self.SCALE + " stuck=held" + self.IMG))
+        self.assertEqual([], self._errs(self.SCALE + " stuck=failed" + self.IMG))
+        self.assertEqual([], self._errs(self.RECREATE + " stuck=held" + self.IMG))
+        self.assertEqual([], self._errs(self.SCALE.replace("to_e=2", "to_e=0") + " stuck=failed" + self.IMG))
+        self.assertTrue(any("needs img=" in e for e in self._errs(self.SCALE + " stuck=held")))
+        self.assertTrue(any("needs stuck=" in e for e in self._errs(self.SCALE + self.IMG)))
+        self.assertTrue(any("malformed header value stuck=" in e for e in self._errs(self.SCALE + " stuck=soon" + self.IMG)))
+        rollout = "# p999: x mode=rollout Ne=3 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 topo=engine"
+        self.assertTrue(any("mode=recreate|scaledown" in e for e in self._errs(rollout + " stuck=held" + self.IMG)))
+        self.assertTrue(any("does not combine" in e for e in self._errs(self.SCALE + " stuck=held fault=podkill:settling" + self.IMG)))
+        self.assertTrue(any("does not combine" in e for e in self._errs(self.RECREATE + " stuck=held during=rollout" + self.IMG)))
+
+    def test_stuck_signal_reads_the_ladder_and_the_rows(self):
+        held = self._ir("engine", rows=[(0, "Ready"), (1, "Failed")],
+                        blocks=[{"targetRevision": "rev-b", "state": "Held", "attemptsStarted": 3}])
+        backoff = self._ir("engine", rows=[(0, "Ready"), (1, "Ready")],
+                           blocks=[{"targetRevision": "rev-b", "state": "Backoff", "attemptsStarted": 1}])
+        failed_row = self._ir("engine", rows=[(0, "Ready"), (2, "Failed")])
+        fresh = self._ir("engine", rows=[(0, "Ready"), (1, "Updating")])
+        hold_only = self._ir("engine", rows=[(0, "Ready")], hold={"gate": "Held", "reason": "update held"})
+        self.assertIn("Held after 3 attempt(s)", run._stuck_signal({"engine": held}, {"engine"}, "held"))
+        self.assertIn("gate=Held", run._stuck_signal({"engine": hold_only}, {"engine"}, "held"))
+        self.assertEqual("", run._stuck_signal({"engine": backoff}, {"engine"}, "held"))
+        self.assertEqual("", run._stuck_signal({"engine": failed_row}, {"engine"}, "held"))
+        self.assertIn("Instance 2 reads Failed", run._stuck_signal({"engine": failed_row}, {"engine"}, "failed"))
+        self.assertIn("1 failed attempt(s) (Backoff)", run._stuck_signal({"engine": backoff}, {"engine"}, "failed"))
+        self.assertIn("Instance 1 reads Failed", run._stuck_signal({"engine": held}, {"engine"}, "failed"))
+        self.assertEqual("", run._stuck_signal({"engine": fresh}, {"engine"}, "failed"))
+        self.assertEqual("", run._stuck_signal({"decoder": held}, {"engine"}, "held"), "only the bumped members count")
+
+    def test_unlanded_push_needs_diverged_revisions_and_a_visible_reason(self):
+        held = self._ir("engine", rows=[(0, "Ready")], blocks=[{"targetRevision": "rev-b", "state": "Held", "attemptsStarted": 3}],
+                        hold={"gate": "Held"})
+        landed = self._ir("engine", rows=[(0, "Ready")], current="rev-b", update="rev-b")
+        silent = self._ir("engine", rows=[(0, "Ready")])
+        failed = self._ir("engine", rows=[(0, "Failed")])
+        out = run._push_unlanded({"engine": held, "decoder": landed}, {"engine", "decoder"})
+        self.assertIn("gate=Held", out["engine"])
+        self.assertIn("retry block Held", out["engine"])
+        self.assertEqual("", out["decoder"])
+        self.assertEqual("", run._push_unlanded({"engine": silent}, {"engine"})["engine"])
+        self.assertIn("Failed row(s) 0", run._push_unlanded({"engine": failed}, {"engine"})["engine"])
+        self.assertEqual("", run._push_unlanded({}, {"engine"})["engine"])
+
+    def test_scale_victims_take_the_broken_rows_first_then_the_highest_index(self):
+        rows = [("0", "Ready"), ("1", "Failed"), ("2", "Ready")]
+        self.assertEqual(["1"], run._scale_victims(rows, 1))
+        self.assertEqual(["1", "2"], run._scale_victims(rows, 2))
+        self.assertEqual(["1", "2", "0"], run._scale_victims(rows, 3))
+        self.assertEqual(["2"], run._scale_victims([("0", "Ready"), ("1", "Ready"), ("2", "Ready")], 1))
+        self.assertEqual(["2", "0"], run._scale_victims([("0", "Updating"), ("1", "Ready"), ("2", "Creating")], 2))
+        self.assertEqual([], run._scale_victims(rows, 0))
+
+    def test_survivor_changes_tell_a_needless_rebuild_from_the_rolls_attempt(self):
+        olds = {"old"}
+        pre = {"0": [("u0", "old")], "1": [("u1", "old")], "2": [("u2", "old")], "3": [("u3", "new")]}
+        same = dict(pre)
+        self.assertEqual(([], []), run._survivor_changes(pre, same, olds))
+        needless = dict(pre, **{"1": [("u1b", "old")]})
+        self.assertEqual((["1"], []), run._survivor_changes(pre, needless, olds))
+        rolled = dict(pre, **{"2": [("u2b", "new")]})
+        self.assertEqual(([], ["2"]), run._survivor_changes(pre, rolled, olds))
+        beside = dict(pre, **{"2": [("u2", "old"), ("u2b", "new")]})
+        self.assertEqual(([], []), run._survivor_changes(pre, beside, olds), "a surge beside the running pod is not a change")
+        gone = {k: v for k, v in pre.items() if k != "0"}
+        self.assertEqual((["0"], []), run._survivor_changes(pre, gone, olds), "a survivor with no pod left was taken for nothing")
+
+    def test_replica_patch_keeps_max_at_the_least_the_api_admits(self):
+        self.assertEqual({"spec": {"engine": {"minReplicas": 2, "maxReplicas": 2}}}, run._replica_patch({"engine": 2}))
+        self.assertEqual({"spec": {"decoder": {"minReplicas": 0, "maxReplicas": 1},
+                                   "engine": {"minReplicas": 0, "maxReplicas": 1}}},
+                         run._replica_patch({"engine": 0, "decoder": 0}))
+        self.assertEqual({"spec": {"engine": {"minReplicas": 4, "maxReplicas": 4}}}, run._replica_patch({"engine": 4}))
+
+    def test_removal_is_judged_against_the_plan_the_engine_could_have_seen(self):
+        at_op = [("0", "Ready"), ("1", "Failed"), ("2", "Ready")]
+        after = [("0", "Ready"), ("1", "Ready"), ("2", "Ready")]
+        plans = run._removal_plans({"at the scale": at_op, "right after the scale": after}, 3, 2)
+        self.assertEqual({"at the scale": ["1"], "right after the scale": ["2"]}, plans)
+        pre = {"0", "1", "2"}
+        self.assertEqual(("at the scale", []), run._removal_outcome(plans, pre, {"0", "2"}, {"0", "2"}))
+        self.assertEqual(("right after the scale", []), run._removal_outcome(plans, pre, {"0", "1"}, {"0", "1"}))
+        self.assertEqual((None, []), run._removal_outcome(plans, pre, {"1", "2"}, {"1", "2"}), "the lowest Ready row is never the victim")
+        self.assertEqual((None, []), run._removal_outcome(plans, pre, {"0", "2"}, {"0", "1", "2"}), "a pod left on a removed index is not a removal")
+        self.assertEqual(("at the scale", ["3"]), run._removal_outcome(plans, pre, {"0", "2", "3"}, {"0", "2", "3"}),
+                         "a row that did not exist at the scale is reported, not judged")
+        zero = run._removal_plans({"at the scale": at_op, "right after the scale": None}, 3, 1)
+        self.assertEqual({"at the scale": ["1", "2"]}, zero, "a request for zero plans from the accepted count")
+        self.assertEqual(("at the scale", []), run._removal_outcome(zero, pre, {"0"}, {"0"}))
+
+    def test_ir_spec_replicas_reads_what_the_controller_projected(self):
+        by_comp = {"engine": self._ir("engine", replicas=1), "decoder": self._ir("decoder")}
+        self.assertEqual({"engine": 1}, run._ir_spec_replicas(by_comp))
+
+    def test_repair_rebuilding_reads_the_replacement_pod(self):
+        pre = {"u-old"}
+        self.assertEqual("", run._repair_rebuilding([("e2", {"uid": "u-old", "ready": False})], pre))
+        self.assertEqual("its replacement pod is up and not yet Ready",
+                         run._repair_rebuilding([("e2b", {"uid": "u-new", "ready": False})], pre))
+        self.assertEqual("its replacement pod is already Ready",
+                         run._repair_rebuilding([("e2b", {"uid": "u-new", "ready": True})], pre))
+
+
 class MidRollEditTest(unittest.TestCase):
     """edit=strategy:<type> / edit=restartPolicy:<policy> patch every bumped
     member's lifecycle at during=settling|rotating; the verdict adds that the

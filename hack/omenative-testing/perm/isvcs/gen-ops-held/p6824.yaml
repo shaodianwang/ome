@@ -1,0 +1,27 @@
+# p6824: [gen] stuck failed scale-down pd N=3 SurgeThenDrain group rolling  mode=scaledown Ne=3 Nd=3 Nr=2 ceil_e=4 ceil_d=4 ceil_r=2 co=rolling topo=pd img=example.com/canary-test/missing:none to_e=2 to_d=2 stuck=failed
+# reason: the push lands a revision whose image cannot be pulled; its first attempt has failed (an Instance row reads Failed, the retry ladder is still running); the running Instances kept serving beside the failed replacements; then engine and decoder are scaled down by one: the Instances that are not Ready go first, then the highest index, so a stuck Instance is removed before a healthy one; the survivors keep their pods on the running revision; the healthy survivors keep serving throughout and the status keeps reporting the push that has not landed; the router is neither pushed nor scaled and stays as it is
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p6824 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 3
+    maxReplicas: 3
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 3
+    maxReplicas: 3
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine, decoder]
+          rollingUpdate: {}

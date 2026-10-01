@@ -119,6 +119,8 @@ TIMINGS = [
     "canary staging", "canary step", "canary soak", "canary analysis", "canary pre-hold",
     "canary draining", "canary rolling back", "canary rolled back", "canary done", "canary failed",
     "last Instance", "held floor",
+    # a runtime edit landing while the repair of a broken Instance is open
+    "repair in flight",
 ]
 OVERLAPS = ["operation+fault", "operation+operation", "two revisions in a row"]
 CANARY_STEP_KINDS = [
@@ -180,6 +182,7 @@ HEADER_VALUES = {
     "restart": {"None", "RecreateInstance"},
     "kill": {"leader", "worker"},
     "pause": {"true", "freeze"},
+    "stuck": {"held", "failed"},
     "pauseat": {"before", "during", "after"},
     "push": {"fix"},
     "terminal": {"Stable", "RolledBack", "Failed", "Held"},
@@ -240,7 +243,7 @@ def _edit(v):
 
 def _during(v):
     # the mid-roll hooks, the rollback's draining / last / held moments, or a canary hook
-    return v in {"rollout", "migrate", "idle", "settling", "rotating", "draining", "last", "held"} or _hook(v)
+    return v in {"rollout", "migrate", "idle", "settling", "rotating", "draining", "last", "held", "repair"} or _hook(v)
 
 
 def _lift(v):
@@ -685,6 +688,7 @@ def hook_timing(hook, h, canary_steps):
         "settling": "settling", "rotating": "rotating", "migrating": "migrating",
         "rollout": "rotating", "migrate": "migrating", "idle": "steady state",
         "draining": "draining", "last": "last Instance", "held": "held floor",
+        "repair": "repair in flight",
         "canary-staging": "canary staging", "canary-prehold": "canary pre-hold",
         "canary-draining": "canary draining", "canary-rollingback": "canary rolling back",
         "canary-rolledback": "canary rolled back", "canary-done": "canary done",
@@ -717,6 +721,9 @@ def classify_timing(h, mode, operation, verbs, canary_steps):
         return "canary analysis"
     if str(h.get("fault", "")).startswith(("crashloop:", "imagepull:")):
         return "settling"
+    if h.get("stuck"):
+        # the operation lands on a push whose retry ladder is spent (held) or whose first attempt failed
+        return "held floor" if h["stuck"] == "held" else "rotating"
     return "-"
 
 

@@ -1,0 +1,75 @@
+# p6982: [gen] runtime-edit crash-during-edit load pd N=3 InPlaceIfPossible rp RecreateInstance edit image  mode=runtimerev Ne=3 Nd=3 Nr=0 ceil_e=3 ceil_d=3 ceil_r=0 fault=crashloop:old co=none topo=pd img=${OME_EVAL_NGINX_ALT_IMAGE} form=load rt=ome-coordtest-rt-p6982 expect=roll edit=image
+# reason: the runtime every Component inherits gets a new image and, as the edit lands, one engine pod has its runner killed every few seconds while it is up, so it dies after Ready and comes back between crashes; its Instance is off the target from that moment, so the roll owns it: it ends on the edited runtime's revision and serving with no repair recorded for it, every other Instance converges the same way, and no Instance is left mid-operation; the image edit is patched in place on every pod that is up; engine and decoder each roll onto their own new revision
+# Test ClusterServingRuntime — CPU-only, nginx, artificial 15s startup delay.
+# The sleep is the critical part: without it nginx is Ready in ~150ms and the
+# pod sampler misses every transition.
+apiVersion: ome.io/v1beta1
+kind: ClusterServingRuntime
+metadata:
+  name: ome-coordtest-rt-p6982
+  labels:
+    ome-coordtest/managed: "true"
+spec:
+  schedulerName: ${OME_EVAL_SCHEDULER}
+  disabled: false
+  protocolVersions: [openAI]
+  supportedModelFormats:
+    - autoSelect: false
+      modelArchitecture: TestArchitecture
+      modelFormat:    { name: noop, operator: Equal, version: "1.0.0", weight: 1 }
+      modelFramework: { name: noop, operator: Equal,                  weight: 1 }
+      priority: 1
+
+  engineConfig: &cpuRunner
+    # The eval judges a case well inside the cluster's default pod grace; a
+    # pod that ignores its stop signal must not outlive the verdict.
+    terminationGracePeriodSeconds: 60
+    nodeSelector: { kubernetes.io/arch: ${OME_EVAL_NODE_ARCH} }
+    runner:
+      name:  ome-container
+      image: ${OME_EVAL_NGINX_IMAGE}
+      # The critical line: sleep before starting nginx so pod startup
+      # takes ~15s. Without this, peak/drain transitions complete in
+      # ~2s and the sampler misses them.
+      # The trap keeps sh (PID 1 until the exec) responsive to pod deletion.
+      # The kubelet delivers the image's declared stop signal — nginx images
+      # declare SIGQUIT, not SIGTERM — and an untrapped PID-1 shell ignores it,
+      # leaving a deleted pod Terminating for its full termination grace.
+      # Cap nginx workers (NOT 'auto', which = one worker per NODE core and
+      # ignores the CPU cgroup quota → OOM on a big node). The image conf already
+      # sets worker_processes, so sed a copy into /tmp (conf is read-only) and
+      # nginx -c it — preserving the image's writable pid path + 8080 server.
+      command: ["sh", "-c", "trap 'exit 0' QUIT TERM INT; sleep ${TEST_STARTUP_DELAY:-15} & wait $! && sed 's/^worker_processes.*/worker_processes 2;/' /etc/nginx/nginx.conf > /tmp/nginx.conf || exit 1; [ -n \"${TEST_EXIT_AFTER}\" ] || exec nginx -c /tmp/nginx.conf -g 'daemon off;'; nginx -c /tmp/nginx.conf -g 'daemon off;' & sleep ${TEST_EXIT_AFTER} & wait $!; exit 1"]
+      env:
+        - { name: TEST_REV,            value: "v1" }
+        - { name: TEST_STARTUP_DELAY,  value: "15" }
+      ports: [ { containerPort: 8080, name: http, protocol: TCP } ]
+      # Startup probe absorbs the artificial 15s sleep — kubelet won't run liveness
+      # until startupProbe succeeds. failureThreshold * periodSeconds = 60s grace.
+      startupProbe:   { httpGet: { path: /, port: 8080 }, periodSeconds: 2, failureThreshold: 30 }
+      readinessProbe: { httpGet: { path: /, port: 8080 }, periodSeconds: 2, failureThreshold: 2 }
+      livenessProbe:  { httpGet: { path: /, port: 8080 }, periodSeconds: 5, failureThreshold: 3 }
+      resources:
+        requests: { cpu: 50m,  memory: 64Mi }
+        limits:   { cpu: 200m, memory: 128Mi }
+
+  decoderConfig: *cpuRunner
+  routerConfig:  *cpuRunner
+
+---
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p6982 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-rt-p6982, autoSync: true }
+  engine:
+    minReplicas: 3
+    maxReplicas: 3
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "InPlaceIfPossible", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
+  decoder:
+    minReplicas: 3
+    maxReplicas: 3
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "InPlaceIfPossible", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }

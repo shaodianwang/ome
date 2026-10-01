@@ -95,7 +95,7 @@ perm/
 │   ├── rollout/           — 96 rollout cases (topology × lifecycle × coordination)
 │   ├── migration/ restart/ partition/ scale/ edge/  — feature cases (see ../DESIGN.md)
 │   ├── gen-rollout/ gen-fault/ gen-restart/ gen-crashloop/ gen-switch/ gen-crashloop-idle/ gen-crashloop-sibling/
-│   │   gen-heal/ gen-imagepull/ gen-node/ gen-ctrlrestart/ gen-rollback/ gen-crashloop-new/ gen-crashloop-group/ gen-pause-repair/  — generated hot core (see isvcs/MANIFEST.md)
+│   │   gen-heal/ gen-imagepull/ gen-node/ gen-ctrlrestart/ gen-rollback/ gen-crashloop-new/ gen-crashloop-group/ gen-pause-repair/ gen-ops-held/ gen-runtime-edit-repair/  — generated hot core (see isvcs/MANIFEST.md)
 │   ├── gen-canary-crash/ gen-canary-second-rev/ gen-canary-podkill/ gen-canary-fault-old/ gen-canary-fault-new/  — generated operator stories driven through a canary
 │   └── gen-size/ gen-router-gang/  — generated small fleets (one and two Instances per Component) and the engine gang behind a router
 └── results/
@@ -801,6 +801,95 @@ alone, as `p316` does without a decoder). The router is never bumped: every
 cell holds it at its count on the same pods, and the gang invariants
 (atomicity, index partition) judge the engine.
 
+### Operations on a stuck Component (`stuck=held|failed`)
+
+`stuck=held|failed` with `img=<unpullable image>` (`mode=scaledown` and
+`mode=recreate`) lands the mode's operation on a Component that is stuck
+on a revision it cannot pull. After the initial settle the runner pushes
+every bumped member (the coordination group's members, else the engine)
+onto `img=` — name the harness's unpullable reference,
+`example.com/canary-test/missing:none` (`runtime_fixtures.UNPULLABLE_IMAGE`)
+— and waits, reading the InferenceReplica: `stuck=failed` is the first
+failed attempt (an Instance row reads `Failed`, or the retry block for the
+pushed revision records a started attempt), `stuck=held` is the retry
+ladder spent (a retry block in state `Held`, or the hold the status derives
+from it). The ladder's length is the cluster's lifecycle configuration
+(every attempt waits out the stuck-pod grace, then its backoff), so the
+wait for `held` has its own budget (`STUCK_HELD_WAIT_S`, scaled). A push
+that never reaches the named state within budget ends the case as `FAIL`
+with the operation not applied.
+
+Then the operation, judged on what the engine promises:
+
+- **a scale-down** (`to_e=` below N; `to_d=` too when the decoder is a
+  bumped member) removes the Instances that are not Ready first, highest
+  index first within that tier, then Ready Instances highest index first,
+  so a stuck Instance goes before a healthy one. The verdict snapshots the
+  rows at the moment the scale lands and asserts exactly those Instances
+  went and the rest stayed; that no survivor lost its running-revision pods
+  to be rebuilt on the same revision; that under `held` no survivor was
+  taken onto the pushed revision afterwards (the hold freezes the roll;
+  under `failed` the ladder's next attempt may take one, reported `ⓘ`);
+  and that the healthy survivors kept serving throughout (a floor of the
+  Ready survivors, less the unavailability budget under `failed` on a
+  drain-first strategy, debounced like the rollout floor).
+- **a request for zero** (`to_e=0`, patched as `minReplicas: 0` with
+  `maxReplicas` at one, the least the API admits) is kept as the API
+  answers it: a plain Component runs one Instance for zero, so the verdict converges on the
+  replica count the controller accepted (read from the InferenceReplica,
+  never assumed) with the same victim order, which leaves the healthy
+  Instance and takes the stuck ones.
+- **a delete** (`mode=recreate`) is the recreate contract on a stuck fleet:
+  every pod goes, stuck ones included, the teardown converges within its
+  budget (no pod left Terminating, no finalizer wedge), and the same name
+  comes back Ready on fresh pods carrying nothing of the push (no hold, no
+  retry block, no Failed row).
+- **a scale-up** (`to_e=` above N) while `held` starts nothing: the new
+  index waits as an empty slot across the hold window, no pod is rendered
+  from the running revision, and the survivors stay as they were. While
+  `failed` the new Instance is admitted on the pushed revision when the
+  retry window allows it, never on the running revision, and is stuck like
+  its peers; the watch runs until the ladder is spent and reports whether
+  the window admitted it.
+
+On every operation the Components the push never touched (a PD decoder and
+router with no group, the router with one) must stay as they were, and the
+status must keep reporting the push that has not landed: the update
+revision still differs from the current one and a hold, a retry block or a
+Failed row says why; under `held` the hold itself must still be reported
+(only a new revision or a release lifts it). The generated
+`isvcs/gen-ops-held/` family crosses the two stuck kinds with the four
+operations, the surge and the drain-first strategies, the engine, PD and
+gang shapes, and a rolling group on PD.
+
+### A runtime edit and a repair overlapping (`mode=runtimerev` with a break)
+
+A break (`fault=crashloop:old form=start|load`, or `fault=imagepull:old`)
+may ride a runtime edit that rolls (`expect=roll`), in either order:
+
+- without `during=`, the break fires as the edit lands on the dedicated
+  runtime, so the broken Instance is off the target from that moment and
+  the roll owns it: it ends on the edited runtime's revision serving, with
+  no `RestartTriggered` event naming it after the edit — the same verdict
+  as a break under an ISVC bump;
+- with **`during=repair`**, the break fires on the settled service and the
+  runner waits for the product to open the repair (a `RestartTriggered`
+  event, a `Restarting` row, or a rebuilt pod) and then for the repair's
+  replacement pod to be up and not yet Ready — the one moment that is the
+  same on every run — before editing the runtime. The last change wins:
+  every Instance, the repaired one included, ends on the post-edit revision
+  serving; after the edit the repaired Instance got no more new pods than
+  it has pod slots (rebuilt at most once; more is the repair and the roll
+  each rebuilding it) and no repair is recorded for it from then on.
+
+Both orders add that every Instance row settles after the roll (Ready, no
+operation open; polled for `ROWS_SETTLE_S`): no Instance is left
+mid-operation. The generated `isvcs/gen-runtime-edit-repair/` family crosses
+the order with the engine and PD shapes, the surge, drain-first and in-place
+strategies, both restart policies, both crash forms and the image and env
+edits; the edit-during-repair order skips a crash after Ready under
+`restartPolicy: None`, where no repair opens.
+
 ### Fault cases: quota isolation, cordon impact, leak remediation
 
 - **`fault=crashloop:old` with `form=start|load`** breaks one old-revision
@@ -1214,11 +1303,11 @@ Four generators write into `isvcs/`; re-run one after editing it:
   `gen_cases.py`'s feature counters).
 - `gen_runtime.py` — the runtime-triggered cases (`p400`+) → `isvcs/runtime-rev/`.
 - `generate_cases.py` — the hot-core permutation corpus (`p1000`–`p2799`,
-  `p3000`–`p4999`, `p5000`–`p5799`, `p5800`–`p5999` and `p6000`–`p6199`) → `isvcs/gen-rollout/`, `isvcs/gen-fault/`,
+  `p3000`–`p4999`, `p5000`–`p5799`, `p5800`–`p5999` `p6000`–`p6199` and `p6800`–`p6999`) → `isvcs/gen-rollout/`, `isvcs/gen-fault/`,
   `isvcs/gen-restart/`, `isvcs/gen-crashloop/`, `isvcs/gen-switch/`,
   `isvcs/gen-crashloop-idle/`, `isvcs/gen-crashloop-sibling/`,
   `isvcs/gen-heal/`, `isvcs/gen-imagepull/`, `isvcs/gen-node/`,
-  `isvcs/gen-ctrlrestart/`, `isvcs/gen-rollback/`, `isvcs/gen-crashloop-new/`, `isvcs/gen-crashloop-group/`, `isvcs/gen-pause-repair/`, and the operator stories driven through a canary (`p5200`–`p5399`) →
+  `isvcs/gen-ctrlrestart/`, `isvcs/gen-rollback/`, `isvcs/gen-crashloop-new/`, `isvcs/gen-crashloop-group/`, `isvcs/gen-pause-repair/`, `isvcs/gen-ops-held/`, `isvcs/gen-runtime-edit-repair/`, and the operator stories driven through a canary (`p5200`–`p5399`) →
   `isvcs/gen-canary-crash/` (a canary rolls the fix while the running
   revision breaks under it), `isvcs/gen-canary-second-rev/` (a second revision
   lands while the first canary is staging or serving) and
