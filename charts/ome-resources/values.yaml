@@ -506,7 +506,10 @@ ome:
     # required, the binary has no default for any of them, and a malformed
     # block stops the manager from starting. Pools without the provisionOnly
     # label hold static slices and are never provisioned or released.
-    # slice.annotations may be {} but must be present. Example for GKE dynamic
+    # slice.annotations may be {} but must be present. The one optional field,
+    # slice.readyTimeout (e.g. 10m), releases and provisions again a slice that
+    # has partitions but stays out of a ready state longer than it, while no
+    # pod holds it; unset never times a slice out. Example for GKE dynamic
     # slicing with single-host Ironwood slices:
     #   tpuSliceProvisioning:
     #     chipResource: google.com/tpu

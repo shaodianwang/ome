@@ -2,8 +2,8 @@
 // InferenceReplica controller's TPU slice provisioning. Only the IR
 // reconciler runs, against a stub of the provider's Slice CRD: no slice
 // provider, no scheduler, no kubelet. The specs create InferenceReplica
-// objects directly and act as the provider themselves, reporting a
-// slice's state by writing its status. Pods never bind to a node.
+// objects directly and act as the provider themselves, exposing a ready
+// slice's hosts and reporting its state. Pods never bind to a node.
 package inferencereplicatpuslice
 
 import (

@@ -48,7 +48,10 @@ data:
   # demand. Omit this key to provision no slices. Read once at manager startup;
   # when present every field is required (slice.annotations may be {}), the
   # binary has no default for any of them, and an invalid block prevents
-  # startup. Pools without the provisionOnly label are never provisioned or
+  # startup. The one optional field, slice.readyTimeout, releases and
+  # provisions again a slice that has partitions but stays out of a ready state
+  # longer than it (e.g. "10m"), while no pod holds it; unset never times a
+  # slice out. Pools without the provisionOnly label are never provisioned or
   # released. Example for GKE dynamic slicing with single-host Ironwood slices:
   #
   # tpuSliceProvisioning: |-

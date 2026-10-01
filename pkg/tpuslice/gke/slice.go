@@ -16,9 +16,11 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -118,8 +120,16 @@ type Slice struct {
 	// State is the Ready condition's reason, empty until the provider reports
 	// one.
 	State string
+	// ReadyStatus is the Ready condition's status, empty until the provider
+	// reports the condition.
+	ReadyStatus string
+	// StateSince is when the Ready condition last transitioned, zero until the
+	// provider reports a time.
+	StateSince time.Time
 	// Message is the Ready condition's message.
 	Message string
+	// Created is when the Slice was created.
+	Created time.Time
 	// PartitionIDs are the partitions the provider's scheduler assigned to
 	// the Slice, nil until it assigns any.
 	PartitionIDs []string
@@ -153,6 +163,7 @@ func Parse(u *unstructured.Unstructured) (Slice, error) {
 		Type:        sliceType,
 		Topology:    topology,
 		Terminating: u.GetDeletionTimestamp() != nil,
+		Created:     u.GetCreationTimestamp().Time,
 	}
 	if len(partitionIDs) > 0 {
 		s.PartitionIDs = partitionIDs
@@ -167,6 +178,12 @@ func Parse(u *unstructured.Unstructured) (Slice, error) {
 		}
 		s.State, _ = c["reason"].(string)
 		s.Message, _ = c["message"].(string)
+		s.ReadyStatus, _ = c["status"].(string)
+		if raw, _ := c["lastTransitionTime"].(string); raw != "" {
+			if at, err := time.Parse(time.RFC3339, raw); err == nil {
+				s.StateSince = at
+			}
+		}
 		break
 	}
 	return s, nil
@@ -191,10 +208,12 @@ func (s Slice) Matches(spec Spec) bool {
 	return s.Type == spec.Type && s.Topology == spec.Topology
 }
 
-// Ready reports whether pods may bind to s: it is not being deleted and its
-// state is one of readyStates.
+// Ready reports whether pods may bind to s: it is not being deleted, its
+// state is one of readyStates, and the provider does not report its
+// readiness as unknown.
 func (s Slice) Ready(readyStates []string) bool {
-	return !s.Terminating && s.State != "" && slices.Contains(readyStates, s.State)
+	return !s.Terminating && s.State != "" && slices.Contains(readyStates, s.State) &&
+		s.ReadyStatus != string(metav1.ConditionUnknown)
 }
 
 // Client creates, observes and deletes Slices.

@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -291,6 +292,10 @@ func notReadyReason(s gke.Slice) string {
 		return fmt.Sprintf("slice %s is waiting for partition assignment", s.Name)
 	case s.State == "":
 		return fmt.Sprintf("slice %s has partitions assigned and no state yet", s.Name)
+	case s.ReadyStatus == string(metav1.ConditionUnknown) && s.Message != "":
+		return fmt.Sprintf("slice %s is %s, but its readiness is unknown: %s", s.Name, s.State, s.Message)
+	case s.ReadyStatus == string(metav1.ConditionUnknown):
+		return fmt.Sprintf("slice %s is %s, but its readiness is unknown", s.Name, s.State)
 	case s.Message == "":
 		return fmt.Sprintf("slice %s is %s", s.Name, s.State)
 	default:

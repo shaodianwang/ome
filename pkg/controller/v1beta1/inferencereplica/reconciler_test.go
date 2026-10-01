@@ -3205,6 +3205,14 @@ func TestReconcile_TPUSlices_WithholdsPodsUntilTheirSliceIsReady(t *testing.T) {
 		t.Fatalf("Instance 0 operation = %+v, want it waiting on %s", row.Operation, workloadtypes.WaitingReasonCapacityProvisioning)
 	}
 
+	// The provider labels the slice's host as it activates the slice.
+	host := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "slice-host", Labels: map[string]string{sliceKeySlice: name}},
+		Status:     corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}},
+	}
+	if err := c.Create(ctx, host); err != nil {
+		t.Fatalf("create slice host: %v", err)
+	}
 	setSliceState(t, c, name, sliceStateReady)
 	if _, err := r.Reconcile(ctx, req); err != nil {
 		t.Fatalf("ready pass: %v", err)

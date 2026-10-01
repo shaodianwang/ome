@@ -1,6 +1,7 @@
 package inferencereplicatpuslice
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/ome-projects/ome/pkg/constants"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/sliceprovision"
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
+	"github.com/ome-projects/ome/pkg/tpuslice"
 	"github.com/ome-projects/ome/pkg/tpuslice/gke"
 	"github.com/ome-projects/ome/tests/integration/util"
 )
@@ -144,11 +146,13 @@ func getSlice(g Gomega, name string) *unstructured.Unstructured {
 }
 
 // reportSliceState writes state as the slice's Ready condition reason, as
-// the provider does.
+// the provider does. Before reporting a ready state, it also exposes the
+// slice's ready hosts with the labels the provider adds during activation.
 func reportSliceState(name, state, message string) {
 	status := metav1.ConditionFalse
 	if slices.Contains(sliceConfig.Slice.ReadyStates, state) {
 		status = metav1.ConditionTrue
+		exposeSliceHosts(name)
 	}
 	Eventually(func(g Gomega) {
 		slice := getSlice(g, name)
@@ -163,6 +167,56 @@ func reportSliceState(name, state, message string) {
 		}
 		g.Expect(k8sClient.Status().Update(suiteCtx, slice)).To(Succeed())
 	}).WithTimeout(waitTimeout).WithPolling(pollInterval).Should(Succeed())
+}
+
+// exposeSliceHosts creates the nodes that back a ready slice. The suite has
+// no provider, so this stands in for the provider labeling the activated
+// partition's hosts before it reports the slice ready.
+func exposeSliceHosts(name string) {
+	slice := getSlice(Default, name)
+	topologyName, found, err := unstructured.NestedString(slice.Object, "spec", "topology")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(found).To(BeTrue())
+	sliceType, found, err := unstructured.NestedString(slice.Object, "spec", "type")
+	Expect(err).NotTo(HaveOccurred())
+	Expect(found).To(BeTrue())
+
+	acceleratorName := ""
+	chipsPerHost := int64(0)
+	for candidate, accelerator := range sliceConfig.Accelerators {
+		if accelerator.SliceType == sliceType {
+			acceleratorName = candidate
+			chipsPerHost = accelerator.ChipsPerHost
+			break
+		}
+	}
+	Expect(acceleratorName).NotTo(BeEmpty(), "slice type %s must name a configured accelerator", sliceType)
+	topology, err := tpuslice.ParseTopology(topologyName)
+	Expect(err).NotTo(HaveOccurred())
+	hosts, err := topology.Hosts(chipsPerHost)
+	Expect(err).NotTo(HaveOccurred())
+
+	for i := range hosts {
+		node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+			Name: fmt.Sprintf("%s-host-%d", name, i),
+			Labels: map[string]string{
+				sliceConfig.NodeLabels.Accelerator: acceleratorName,
+				sliceConfig.NodeLabels.Topology:    topologyName,
+				sliceConfig.NodeLabels.Slice:       name,
+			},
+		}}
+		err := k8sClient.Create(suiteCtx, node)
+		if !apierrors.IsAlreadyExists(err) {
+			Expect(err).To(Succeed())
+		}
+		Eventually(func(g Gomega) {
+			g.Expect(k8sClient.Get(suiteCtx, client.ObjectKeyFromObject(node), node)).To(Succeed())
+			node.Status.Conditions = []corev1.NodeCondition{{
+				Type: corev1.NodeReady, Status: corev1.ConditionTrue,
+			}}
+			g.Expect(k8sClient.Status().Update(suiteCtx, node)).To(Succeed())
+		}).WithTimeout(waitTimeout).WithPolling(pollInterval).Should(Succeed())
+	}
 }
 
 // setFinalizer adds finalizer to, or with present false removes it from,

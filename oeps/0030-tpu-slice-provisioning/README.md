@@ -231,9 +231,15 @@ Common to both options (under Option 1 all of this lives in `ome-controller`):
   cannot be scheduled on (cordoned or not ready, after the pods' tolerations), is
   released and provisioned again. Its pods are withheld meanwhile, with a
   `SliceHostUnavailable` warning. A slice a pod still holds is left to the
-  scheduler. *Failure mode if skipped:* a node that goes bad after the slice is
-  `ACTIVE` leaves the pods `Pending`, and a recreated pod lands on the same
-  slice.
+  scheduler. The pods also wait until every host the slice needs is visible,
+  since hosts are found by a label that can lag the slice's state, and a slice
+  whose readiness the provider reports as unknown is not ready. With
+  `slice.readyTimeout` set, a slice that has partitions but stays out of a ready
+  state longer than that, while no pod holds it, is released and provisioned
+  again with a `SliceReadyTimeout` warning. *Failure mode if skipped:* a node
+  that goes bad after the slice is `ACTIVE` leaves the pods `Pending`, a
+  recreated pod lands on the same slice, and a slice that never activates
+  parks its Instance with no deadline.
 
 Deferred deliberately: retry/backoff policy on a failed create, and behavior when
 the cube has free chips but no free *partition* of the requested shape. Both need

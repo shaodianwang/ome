@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	v1 "k8s.io/api/core/v1"
@@ -270,6 +271,16 @@ func TestParseTPUSliceProvisioningConfig(t *testing.T) {
 			raw:     ptr.To(tpuSliceBlock(t, func(b map[string]any) { field(b, "slice")["readyStates"] = []any{"ACTIVE", "ACTIVE"} })),
 			wantErr: []string{`slice.readyStates[1]: "ACTIVE" is listed twice`},
 		},
+		{
+			name:    "ready timeout that does not parse",
+			raw:     ptr.To(tpuSliceBlock(t, func(b map[string]any) { field(b, "slice")["readyTimeout"] = "soon" })),
+			wantErr: []string{`slice.readyTimeout: "soon" must be a positive duration`},
+		},
+		{
+			name:    "ready timeout that is not positive",
+			raw:     ptr.To(tpuSliceBlock(t, func(b map[string]any) { field(b, "slice")["readyTimeout"] = "0s" })),
+			wantErr: []string{`slice.readyTimeout: "0s" must be a positive duration`},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -365,5 +376,18 @@ func TestTPUSliceProvisioningConfigShapeKeys(t *testing.T) {
 	want := tpuslice.Keys{Accelerator: "example.com/accelerator", Topology: "example.com/topology"}
 	if got != want {
 		t.Fatalf("ShapeKeys() = %+v, want %+v", got, want)
+	}
+}
+
+func TestReadyTimeoutDuration(t *testing.T) {
+	for raw, want := range map[string]time.Duration{"": 0, "10m": 10 * time.Minute, "90s": 90 * time.Second} {
+		if got := (TPUSliceObject{ReadyTimeout: raw}).ReadyTimeoutDuration(); got != want {
+			t.Errorf("ReadyTimeoutDuration(%q) = %v, want %v", raw, got, want)
+		}
+	}
+	raw := tpuSliceBlock(t, func(b map[string]any) { field(b, "slice")["readyTimeout"] = "10m" })
+	got, err := ParseTPUSliceProvisioningConfig(&v1.ConfigMap{Data: map[string]string{TPUSliceProvisioningConfigName: raw}})
+	if err != nil || got.Slice.ReadyTimeoutDuration() != 10*time.Minute {
+		t.Fatalf("Parse = %+v, %v; want a 10m ready timeout", got, err)
 	}
 }
