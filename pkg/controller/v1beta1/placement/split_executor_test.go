@@ -50,6 +50,14 @@ func TestReconcileSplitInitialAllocation(t *testing.T) {
 		wantNoPlan     bool
 	}{
 		{name: "exact remainder across matched members", wantDesired: map[string]int32{"a": 2, "b": 2, "c": 1}, wantCurrent: map[string]int32{"a": 2, "b": 2, "c": 1}, wantReason: "AwaitingMemberConvergence"},
+		{name: "equal weights split fixed source bounds", edit: func(s *v1beta1.InferenceService, _ []*v1beta1.WorkloadCluster) {
+			s.Spec.Engine.MinReplicas, s.Spec.Engine.MaxReplicas = ptr.To(20), 20
+			s.Spec.Placement.Split = nil
+			s.Spec.Placement.ClusterAffinity = []v1beta1.ClusterAffinityTerm{
+				{Weight: ptr.To[int32](10), MatchFields: []v1beta1.ClusterSelectorRequirement{{Key: "metadata.name", Operator: corev1.NodeSelectorOpIn, Values: []string{"a"}}}},
+				{Weight: ptr.To[int32](10), MatchFields: []v1beta1.ClusterSelectorRequirement{{Key: "metadata.name", Operator: corev1.NodeSelectorOpIn, Values: []string{"b"}}}},
+			}
+		}, wantDesired: map[string]int32{"a": 10, "b": 10}, wantCurrent: map[string]int32{"a": 10, "b": 10}, wantReason: "AwaitingMemberConvergence"},
 		{name: "not ready member retains assigned share", edit: func(_ *v1beta1.InferenceService, clusters []*v1beta1.WorkloadCluster) {
 			clusters[1].Status.Conditions[0].Status = metav1.ConditionFalse
 		}, wantDesired: map[string]int32{"a": 2, "b": 2, "c": 1}, wantCurrent: map[string]int32{"a": 2, "b": 0, "c": 1}, wantReason: "AwaitingMemberConvergence"},
@@ -59,7 +67,7 @@ func TestReconcileSplitInitialAllocation(t *testing.T) {
 		{name: "ceiling overflow holds whole allocation", edit: func(s *v1beta1.InferenceService, _ []*v1beta1.WorkloadCluster) {
 			s.Spec.Placement.Split.MaxReplicasPerCluster = 1
 		}, wantNoPlan: true, wantReason: "AllocationUnresolved"},
-		{name: "runtime maximum remains inherited", edit: func(s *v1beta1.InferenceService, _ []*v1beta1.WorkloadCluster) {
+		{name: "omitted source maximum follows allocation", edit: func(s *v1beta1.InferenceService, _ []*v1beta1.WorkloadCluster) {
 			s.Spec.Engine.MaxReplicas = 0
 		}, wantDesired: map[string]int32{"a": 2, "b": 2, "c": 1}, wantCurrent: map[string]int32{"a": 2, "b": 2, "c": 1}, wantReason: "AwaitingMemberConvergence"},
 	} {
@@ -133,7 +141,7 @@ func TestReconcileSplitInitialAllocation(t *testing.T) {
 				if diff := cmp.Diff(ptr.To(int(floor)), member.Spec.Engine.MinReplicas); diff != "" {
 					t.Error(diff)
 				}
-				if diff := cmp.Diff(source.Spec.Engine.MaxReplicas, member.Spec.Engine.MaxReplicas); diff != "" {
+				if diff := cmp.Diff(int(floor), member.Spec.Engine.MaxReplicas); diff != "" {
 					t.Error(diff)
 				}
 				if member.Spec.Placement != nil {
@@ -838,7 +846,7 @@ func TestSplitMemberUpdatesRequireEligibility(t *testing.T) {
 				if diff := cmp.Diff(*before, got.Spec); diff != "" {
 					t.Errorf("ineligible member spec changed:\n%s", diff)
 				}
-			} else if diff := cmp.Diff(9, got.Spec.Engine.MaxReplicas); diff != "" {
+			} else if diff := cmp.Diff(1, got.Spec.Engine.MaxReplicas); diff != "" {
 				t.Error(diff)
 			}
 			policy, err := protocol.FromDerived(got)

@@ -80,9 +80,18 @@ var _ = ginkgo.Describe("Multi-cluster placement split mode", func() {
 		return *derived.Spec.Engine.MinReplicas
 	}
 
-	ginkgo.DescribeTable("assigns exact initial floors",
+	derivedEngineBounds := func(member cluster) [2]int {
+		derived, ok := getDerivedOn(member, isvcNS, isvcName)
+		if !ok || derived.Spec.Engine == nil || derived.Spec.Engine.MinReplicas == nil {
+			return [2]int{-1, -1}
+		}
+		return [2]int{*derived.Spec.Engine.MinReplicas, derived.Spec.Engine.MaxReplicas}
+	}
+
+	ginkgo.DescribeTable("assigns exact initial bounds",
 		func(replicas int32, weighted bool, want []int) {
-			source := splitSourceISVC(isvcNS, isvcName, requirement(), &v1beta1.SplitSpec{Replicas: ptr.To(replicas)})
+			source := splitSourceISVC(isvcNS, isvcName, requirement(), nil)
+			source.Spec.Engine.MinReplicas, source.Spec.Engine.MaxReplicas = ptr.To(int(replicas)), int(replicas)
 			if weighted {
 				source.Spec.Placement.ClusterAffinity = []v1beta1.ClusterAffinityTerm{
 					{Weight: ptr.To[int32](3), MatchFields: []v1beta1.ClusterSelectorRequirement{{Key: "metadata.name", Operator: corev1.NodeSelectorOpIn, Values: []string{wc1Name}}}},
@@ -90,14 +99,16 @@ var _ = ginkgo.Describe("Multi-cluster placement split mode", func() {
 				}
 			}
 			mustCreate(controlCluster, source)
+			wantBounds := [][2]int{{want[0], want[0]}, {want[1], want[1]}}
 			gomega.Eventually(func() string {
-				return cmp.Diff(want, []int{derivedEngineMin(member1Cluster), derivedEngineMin(member2Cluster)})
+				return cmp.Diff(wantBounds, [][2]int{derivedEngineBounds(member1Cluster), derivedEngineBounds(member2Cluster)})
 			}, eventuallyTimeout, eventuallyPoll).Should(gomega.BeEmpty())
 			gomega.Consistently(func() string {
-				return cmp.Diff(want, []int{derivedEngineMin(member1Cluster), derivedEngineMin(member2Cluster)})
+				return cmp.Diff(wantBounds, [][2]int{derivedEngineBounds(member1Cluster), derivedEngineBounds(member2Cluster)})
 			}, "1.5s", eventuallyPoll).Should(gomega.BeEmpty())
 		},
 		ginkgo.Entry("divisible floor", int32(4), false, []int{2, 2}),
+		ginkgo.Entry("fixed twenty replica source", int32(20), false, []int{10, 10}),
 		ginkgo.Entry("remainder uses deterministic name order", int32(3), false, []int{2, 1}),
 		ginkgo.Entry("zero share creates no member service", int32(1), false, []int{1, -1}),
 		ginkgo.Entry("explicit weights allocate exact ratios", int32(4), true, []int{3, 1}),

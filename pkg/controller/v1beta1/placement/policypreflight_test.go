@@ -42,7 +42,7 @@ func hpaPolicy(name string) *v1beta1.AutoscalerPolicy {
 }
 
 // maxConsumingPolicy derives its fallback replicas from the component's
-// MaxReplicas, which trips the Split hard gate.
+// MaxReplicas, which requires a bounded member ceiling.
 func maxConsumingPolicy(name string) *v1beta1.AutoscalerPolicy {
 	return &v1beta1.AutoscalerPolicy{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "prod", Name: name},
@@ -315,21 +315,29 @@ func TestPreflightPolicies_DisconnectedCandidateStaysEligible(t *testing.T) {
 	assert.Equal(t, []string{"a"}, out.eligible)
 }
 
-func TestPreflightPolicies_SplitHardGate(t *testing.T) {
-	for _, mode := range []v1beta1.PlacementMode{v1beta1.PlacementModeSplit, v1beta1.PlacementModeSplitByCapacity} {
-		t.Run(string(mode), func(t *testing.T) {
+func TestPreflightPolicies_SplitCeilings(t *testing.T) {
+	for _, placement := range []struct {
+		name   string
+		mode   v1beta1.PlacementMode
+		policy v1beta1.PlacementPolicy
+	}{
+		{name: "static split", mode: v1beta1.PlacementModeSplit, policy: v1beta1.PlacementPolicyClusterAffinity},
+		{name: "capacity split", mode: v1beta1.PlacementModeSplitByCapacity, policy: v1beta1.PlacementPolicyClusterAffinity},
+		{name: "legacy split", mode: v1beta1.PlacementModeSplit, policy: v1beta1.PlacementPolicyLegacy},
+	} {
+		t.Run(placement.name, func(t *testing.T) {
 			for _, tc := range []struct {
 				name     string
 				cap      int32
 				wantHold bool
 			}{
-				{name: "unset ceiling holds", wantHold: true},
+				{name: "unset ceiling", wantHold: placement.policy == v1beta1.PlacementPolicyLegacy},
 				{name: "explicit ceiling permits placement", cap: 45},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					s := testScheme(t)
 					isvc := srcISVCWithRef("")
-					isvc.Spec.Placement = &v1beta1.PlacementSpec{Policy: v1beta1.PlacementPolicyClusterAffinity, Mode: mode, Split: &v1beta1.SplitSpec{MaxReplicasPerCluster: tc.cap}}
+					isvc.Spec.Placement = &v1beta1.PlacementSpec{Policy: placement.policy, Mode: placement.mode, Split: &v1beta1.SplitSpec{MaxReplicasPerCluster: tc.cap}}
 					clusters := fakeClusters{m: map[string]workloadcluster.SelectivelyCachingClient{"a": memberWith(s, maxConsumingPolicy(testPolicyName))}}
 					r, _ := newPlacer(s, clusters, isvc, maxConsumingPolicy(testPolicyName))
 					out := r.preflightPolicies(t.Context(), isvc, []string{"a"}, []v1beta1.WorkloadCluster{*readyWC("a", capabilityLabels())})

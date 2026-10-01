@@ -374,10 +374,12 @@ func distinctPolicyNames(refs []componentPolicyRef) []string {
 	return names
 }
 
-// splitCeilingUnset reports whether Split placement lacks a per-cluster
-// replica ceiling. Callers check the mode first (Split implies spec.placement
-// is set).
+// splitCeilingUnset reports whether a legacy Split member can inherit the
+// source maximum. Cluster-affinity allocations supply concrete member bounds.
 func splitCeilingUnset(isvc *v1beta1.InferenceService) bool {
+	if isvc.Spec.Placement.UsesClusterAffinity() {
+		return false
+	}
 	sp := isvc.Spec.Placement.Split
 	return sp == nil || sp.MaxReplicasPerCluster <= 0
 }
@@ -518,9 +520,8 @@ func (r *Reconciler) preflightPolicies(ctx context.Context, isvc *v1beta1.Infere
 		anchorSpecs[name] = &pol.Spec
 	}
 
-	// Split hard gate: with no per-cluster ceiling, every home renders the
-	// GLOBAL MaxReplicas, so a fleet-wide metric outage would drive each home
-	// to the full budget (N x max). Hold loudly; the fix is one spec field.
+	// Legacy Split inherits the source maximum without a local ceiling, so a
+	// metric outage could drive every home to the full source budget.
 	if mode := placementMode(isvc); (mode == v1beta1.PlacementModeSplit || mode == v1beta1.PlacementModeSplitByCapacity) && splitCeilingUnset(isvc) {
 		for _, name := range names {
 			consumes, err := render.ConsumesMaxReplicas(anchorSpecs[name])

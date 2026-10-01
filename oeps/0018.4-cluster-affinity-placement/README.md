@@ -152,9 +152,9 @@ admission; a Ready WorkloadCluster alone does not establish it.
   introducing cross-cluster prefill/decode communication.
 - Soft cluster preferences for Single, cluster taints/tolerations, topology
   spread constraints, or a general scheduler plugin API.
-- Changing autoscaling semantics, apportioning a global autoscaling ceiling,
-  or computing fleet demand from traffic. These decisions belong to a future
-  autoscaling OEP; existing per-home scaling behavior remains.
+- Apportioning a global autoscaling ceiling or computing fleet demand from
+  traffic. These decisions belong to a future autoscaling OEP; local autoscaling
+  above a Split allocation requires an explicit per-cluster ceiling.
 - Supporting Packed allocation within ClusterAffinity or silently translating
   old manifests at runtime. Legacy remains a separate compatibility contract.
 
@@ -230,8 +230,8 @@ local-ceiling controls are described in
 [Replica counts and autoscaling](#replica-counts-and-autoscaling). `mode` is
 required for ClusterAffinity. Legacy retains its implicit Single mode.
 Each Split recipe below assumes a fleet floor N=18 unless stated otherwise.
-Targets describe the assigned floor. Local autoscaling can increase actual
-replicas independently under the existing local ceilings.
+Targets describe the assigned floor and default maximum. An explicit local
+ceiling permits autoscaling above that allocation.
 
 **Recipe 1: one cluster, no affinity required.**
 
@@ -406,12 +406,21 @@ the fleet's requested **floor**, using the existing source of N:
 `engine.minReplicas`. If neither provides a positive count, report
 `ReplicaCountUnresolved`; do not invent a floor.
 
-Retain `split.replicas` with its current floor semantics. Retain
-`split.maxReplicasPerCluster` as the existing optional local ceiling, including
-its role in AutoscalerPolicy preflight. When unset, derived homes retain their
-source component maximum, raised to the assigned floor if necessary, as today.
-This OEP neither splits that maximum nor promises a fleet-wide maximum. Local
-autoscaling can therefore change the observed ratio and total above N.
+Retain `split.replicas` with its current floor semantics. In both Split modes,
+each derived Engine and Decoder defaults to `minReplicas = maxReplicas =` its
+current allocation. Copying the source maximum to every home would multiply
+the available autoscaling budget: a source with bounds `20/20` split equally
+across two homes must produce `10/10` on each home. An omitted source maximum
+also becomes the assigned count, so runtime inheritance cannot widen it.
+
+`split.maxReplicasPerCluster` remains an explicit optional local autoscaling
+ceiling. When set, the member maximum is the greater of that ceiling and its
+current allocation, so a retained allocation stays valid during a bounded
+reduction. Explicit local ceilings can change the observed ratio and total
+above N; they do not promise a fleet-wide maximum. Without that override,
+changing N is how the owner changes the steady-state replica count.
+AutoscalerPolicy preflight accepts policies that consume these member maxima without
+requiring an explicit ceiling. Legacy placement keeps its existing ceiling rules.
 
 Exact allocation requires one clarification to the existing cap behavior:
 if a computed target exceeds a configured maxReplicasPerCluster, hold the new
@@ -792,9 +801,10 @@ size limit.
    Keep the confirmed Single race and All behavior.
 3. **Member compatibility.** Strip the whole control-plane placement block from
    derived ISVCs, in addition to the existing routing/directive stripping.
-   Members need concrete floors, existing local ceilings, and provenance.
-   Extend existing autoscaler preflight to SplitByCapacity without changing
-   its bounds contract; defer global maxima to the future autoscaling OEP.
+   Members need concrete bounds and provenance. Both Split modes default the
+   maximum to the current allocation; an explicit local ceiling permits growth.
+   Autoscaler preflight recognizes these bounded maxima; proportional global
+   autoscaling maxima remain deferred.
 4. **Capacity integration.** Adapt existing quota hardware reports; implement
    normalization, identity/freshness checks, and hardware-proportional allocation.
    Report absent or incompatible data explicitly; never fall back to equal Split.
@@ -829,7 +839,7 @@ The field audit covers every field in the existing
 | `PlacementSpec.CapacityFactors` | Remove this already-deprecated alias; use spec.routing.capacityFactors. |
 | `SplitSpec.Replicas` | Retain the fleet-floor override pending the replica/autoscaling follow-up. |
 | `SplitSpec.Spread` | Remove; unweighted Split is even, and weights express other ratios. Packed has no equivalent. |
-| `SplitSpec.MaxReplicasPerCluster` | Retain the local ceiling and existing AutoscalerPolicy preflight dependency pending the autoscaling follow-up. |
+| `SplitSpec.MaxReplicasPerCluster` | Retain as an optional local ceiling; without it, member minimum and maximum both follow the allocation. |
 | `SplitSpec.MinReplicasPerCluster` | Remove; dropping an admitted sliver would violate the requested allocation. |
 
 The dispositions above apply to the ClusterAffinity contract. During the
@@ -987,8 +997,8 @@ hardware reweighting can move serving replicas; bounded movement needs spare
 resources or a maintenance window. Capacity collection becomes a dependency
 for SplitByCapacity, even though the other modes need no hardware reports.
 
-Autoscaling remains a limitation: exact target floors do not guarantee exact
-running ratios or a global maximum. Migration also remains real work for Packed
+Explicit local autoscaling ceilings can change running ratios and do not impose
+a global maximum. Migration also remains real work for Packed
 placements and deployments relying on sliver removal.
 
 ## Alternatives
