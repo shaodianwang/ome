@@ -1978,6 +1978,140 @@ class CrashloopFaultTest(unittest.TestCase):
         finally:
             run._isvc_events_since = orig
 
+    SURGED = [
+        ("RecreateUpdateStarted", "OMENative component=engine instance=1 gang surge to revision engine-new (surge-index=2)"),
+    ]
+
+    @staticmethod
+    def _gang(inst, hash_, ready=True, serving=True):
+        return {
+            f"e{inst}l": {"alive": True, "hash": hash_, "inst": str(inst), "comp": "engine", "runner": "leader",
+                          "ready": ready, "serving": serving},
+            f"e{inst}w": {"alive": True, "hash": hash_, "inst": str(inst), "comp": "engine", "runner": "worker",
+                          "ready": ready, "serving": serving},
+        }
+
+    def _verdict(self, pod_state, events):
+        f = {"kind": "crashloop", "fired": True, "infra_fail": None, "form": "start", "case_id": "p999",
+             "crash_inst": "1", "crash_comp": "engine", "crash_hash": "old", "kills": 0}
+        orig = run._isvc_events_since
+        try:
+            run._isvc_events_since = lambda case_id, since: events
+            notes, checks = [], []
+            return run._crashloop_checks(f, pod_state, {"old"}, 1.0, "PASS", notes, checks), notes, checks
+        finally:
+            run._isvc_events_since = orig
+
+    def test_gang_surge_replacements_follow_the_surge_index(self):
+        events = self.SURGED + [
+            ("RecreateUpdateStarted", "OMENative component=decoder instance=1 gang surge to revision decoder-new (surge-index=3)"),
+            ("RecreateUpdateStarted", "OMENative component=engine instance=0 recreate (revision engine-old -> engine-new, incarnation=2)"),
+            ("RecreateUpdateCompleted", "OMENative component=engine instance=0 recreate to revision engine-new complete"),
+        ]
+        self.assertEqual([("1", "2")], run._gang_surge_replacements(events, "engine"))
+        self.assertEqual([("1", "3")], run._gang_surge_replacements(events, "decoder"))
+        # A replacement the source retired is not where the Instance went;
+        # the retry that stood is, even at the same index.
+        abandoned = self.SURGED + [
+            ("GangSurgeAbandoned", "OMENative component=engine instance=1 abandoned failed gang surge (surge-index=2); resetting to revision engine-old for a fresh rollout")]
+        self.assertEqual([], run._gang_surge_replacements(abandoned, "engine"))
+        retried = abandoned + [
+            ("RecreateUpdateStarted", "OMENative component=engine instance=1 gang surge to revision engine-new (surge-index=3)")]
+        self.assertEqual([("1", "3")], run._gang_surge_replacements(retried, "engine"))
+        same_index = abandoned + self.SURGED
+        self.assertEqual([("1", "2")], run._gang_surge_replacements(same_index, "engine"))
+        self.assertEqual(["1", "2"], run._follow_gang_surges("1", [("1", "2")]))
+        self.assertEqual(["1", "2", "4"], run._follow_gang_surges("1", [("1", "2"), ("2", "4")]),
+                         "a replacement surged again by a later bump is followed too")
+        self.assertEqual(["0"], run._follow_gang_surges("0", [("1", "2")]))
+        self.assertEqual(["1", "2"], run._follow_gang_surges("1", [("1", "2"), ("2", "1")]),
+                         "a stale pair never loops the chain")
+
+    def test_chain_reads_surges_in_the_order_they_happened(self):
+        # Two gangs roll in turn: gang 0 surges to the fresh index 2, then
+        # gang 1 surges to index 0, freed by the first surge. Gang 1's
+        # Instance ended at index 0; the earlier surge away from index 0
+        # was another gang's and is not a later hop of this chain.
+        events = [
+            ("RecreateUpdateStarted", "OMENative component=engine instance=0 gang surge to revision engine-new (surge-index=2)"),
+            ("RecreateUpdateStarted", "OMENative component=engine instance=1 gang surge to revision engine-new (surge-index=0)"),
+        ]
+        pairs = run._gang_surge_replacements(events, "engine")
+        self.assertEqual([("0", "2"), ("1", "0")], pairs)
+        self.assertEqual(["1", "0"], run._follow_gang_surges("1", pairs))
+        self.assertEqual(["0", "2"], run._follow_gang_surges("0", pairs))
+        healed = {**self._gang(2, "new"), **self._gang(0, "new")}
+        verdict, _notes, checks = self._verdict(healed, events)
+        self.assertEqual("PASS", verdict)
+        self.assertTrue(any("replaced at Instance 0" in c for c in checks), checks)
+        verdict, notes, _checks = self._verdict({**self._gang(2, "new"), **self._gang(0, "old")}, events)
+        self.assertEqual("FAIL", verdict, "the verdict reads the victim's own replacement, not the other gang's")
+        self.assertTrue(any("read at Instance 0" in n for n in notes), notes)
+
+    def test_verdict_follows_a_gang_surge_to_the_replacement_index(self):
+        # The victim gang at index 1 was replaced at index 2 and its own
+        # index retired: the roll landed the fix on it.
+        healed = {**self._gang(0, "new"), **self._gang(2, "new")}
+        verdict, notes, checks = self._verdict(healed, self.SURGED)
+        self.assertEqual("PASS", verdict, notes)
+        self.assertTrue(any("replaced at Instance 2" in c and "ended on the new revision with 2 pod(s)" in c
+                            for c in checks), checks)
+        # Without the surge the retired index reads as a gang with no pods.
+        verdict, notes, _checks = self._verdict(healed, [])
+        self.assertEqual("FAIL", verdict)
+        self.assertTrue(any("read at Instance 1: pods=0" in n for n in notes), notes)
+        # A replacement still on the old revision, or not serving, is read
+        # where the Instance ended.
+        verdict, notes, _checks = self._verdict({**self._gang(0, "new"), **self._gang(2, "old")}, self.SURGED)
+        self.assertEqual("FAIL", verdict)
+        self.assertTrue(any("read at Instance 2" in n and "old-revision=['e2l', 'e2w']" in n for n in notes), notes)
+        verdict, _notes, _checks = self._verdict({**self._gang(0, "new"), **self._gang(2, "new", ready=False)}, self.SURGED)
+        self.assertEqual("FAIL", verdict)
+
+    def test_verdict_follows_a_chain_of_gang_surges(self):
+        twice = self.SURGED + [
+            ("RecreateUpdateStarted", "OMENative component=engine instance=2 gang surge to revision engine-newer (surge-index=3)"),
+        ]
+        healed = {**self._gang(0, "new"), **self._gang(3, "new")}
+        verdict, notes, checks = self._verdict(healed, twice)
+        self.assertEqual("PASS", verdict, notes)
+        self.assertTrue(any("replaced at Instance 3" in c for c in checks), checks)
+
+    def test_events_since_counts_a_folded_repeat_once_per_occurrence(self):
+        import subprocess
+        items = {"items": [
+            {"reason": "RecreateUpdateStarted", "count": 2, "lastTimestamp": "2026-01-01T00:00:10Z",
+             "message": "OMENative component=engine instance=1 gang surge to revision engine-new (surge-index=2)"},
+            {"reason": "GangSurgeAbandoned", "count": 1, "lastTimestamp": "2026-01-01T00:00:05Z",
+             "message": "OMENative component=engine instance=1 abandoned failed gang surge (surge-index=2); resetting to revision engine-old for a fresh rollout"},
+            {"reason": "InstanceReady", "lastTimestamp": "2025-12-31T00:00:00Z",
+             "message": "OMENative component=engine instance=0 is Ready (2 pod(s) serving)"},
+        ]}
+        saved = run.kubectl
+        run.kubectl = lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=json.dumps(items), stderr="")
+        try:
+            events = run._isvc_events_since("p999", 1767225600.0)  # 2026-01-01T00:00:00Z
+        finally:
+            run.kubectl = saved
+        self.assertEqual(3, len(events), "a folded repeat is one entry per occurrence; the stale event is dropped")
+        self.assertEqual(["GangSurgeAbandoned", "RecreateUpdateStarted", "RecreateUpdateStarted"],
+                         [reason for reason, _m in events], "oldest first")
+        self.assertEqual([("1", "2")], run._gang_surge_replacements(events, "engine"),
+                         "two starts against one abandon leave the retry at the same index standing")
+
+    def test_repair_on_any_index_of_the_chain_fails_the_verdict(self):
+        healed = {**self._gang(0, "new"), **self._gang(2, "new")}
+        repaired = self.SURGED + [
+            ("RestartTriggered", "OMENative component=engine instance=2 restart triggered: pod e2l wedged (incarnation=2)")]
+        verdict, notes, _checks = self._verdict(healed, repaired)
+        self.assertEqual("FAIL", verdict)
+        self.assertTrue(any("repaired after the bump" in n for n in notes), notes)
+        elsewhere = self.SURGED + [
+            ("RestartTriggered", "OMENative component=engine instance=12 restart triggered: pod e12l wedged (incarnation=2)"),
+            ("RestartTriggered", "OMENative component=decoder instance=1 restart triggered: pod d1 wedged (incarnation=2)")]
+        verdict, notes, _checks = self._verdict(healed, elsewhere)
+        self.assertEqual("PASS", verdict, "a repair on another Instance, or another Component, is not this verdict's")
+
     def test_generated_family_crosses_every_axis(self):
         _outputs, rows = generate_cases.build_outputs()
         fam = [(kv, m) for folder, _n, kv, m in rows if folder == "gen-crashloop"]

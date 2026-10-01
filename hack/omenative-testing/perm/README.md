@@ -628,15 +628,23 @@ crashloop case).
   requires that Instance to end on the new revision with its pods serving,
   and no `RestartTriggered` event naming it after the bump: an Instance whose
   revision is not the roll target belongs to the roll, never to a repair on
-  the revision it was running. A victim on a Component the bump never touches
-  (`victimcomp=decoder` with no group) has no new revision to reach, so the
-  repair owns it instead: it must be rebuilt — no pod the fault hit survives —
-  Ready and serving on its running revision, with a `RestartTriggered` event
-  naming it; the usual isolation check still holds the sibling at N with
-  nothing rotated. The generated `isvcs/gen-crashloop/` family crosses the
-  verb with topology, strategy, maxUnavailable, restart policy and (on PD) a
-  rolling group, so every path the closed-loop matrix in the workload package
-  decides is also driven against a real kubelet.
+  the revision it was running. A gang under SurgeThenDrain is replaced at a
+  fresh Instance index and its source index retired, so the verdict follows
+  the Instance across the gang surges by the start events the ISVC records —
+  a `RecreateUpdateStarted` names the replacement index, a
+  `GangSurgeAbandoned` retires one, and the starts the abandons do not cancel
+  out are where the Instance went — and reads the index it ended at; the
+  start is the record to follow because the source row is gone once the
+  surge completes, so nothing in the status names the pair. A repair on any
+  index of that chain fails the verdict. A victim on a Component the bump
+  never touches (`victimcomp=decoder` with no group) has no new revision to
+  reach, so the repair owns it instead: it must be rebuilt — no pod the fault
+  hit survives — Ready and serving on its running revision, with a
+  `RestartTriggered` event naming it; the usual isolation check still holds
+  the sibling at N with nothing rotated. The generated `isvcs/gen-crashloop/`
+  family crosses the verb with topology, strategy, maxUnavailable, restart
+  policy and (on PD) a rolling group, so every path the closed-loop matrix in
+  the workload package decides is also driven against a real kubelet.
 
 - **`fault=imagepull:old`** is the same break with an image that cannot be
   pulled: the victim's live pod is pointed at the harness's unpullable

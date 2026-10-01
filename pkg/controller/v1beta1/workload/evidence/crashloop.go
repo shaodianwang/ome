@@ -58,12 +58,17 @@ func CrashLoopWedge(input types.ReconcileInput, s *types.InstanceStatus, expecte
 }
 
 // PodSetServesNothing reports whether a non-empty pod set is provably
-// out of service: no pod is in rotation, and every live pod is either in
-// a terminal phase or parked in a terminal kubelet waiting reason. A
-// start that replaces such a set opens no new unavailability, and the
-// coordination gate already counts the outage in its serving-based
+// out of service: no routed pod is in rotation, and every live routed pod
+// is either in a terminal phase or parked in a terminal kubelet waiting
+// reason. A start that replaces such a set opens no new unavailability,
+// and the coordination gate already counts the outage in its serving-based
 // unavailability. A pod that is merely not yet Ready is not counted:
 // its wait may still resolve, so replacing it is charged like any start.
+//
+// A gang serves through its leader. Its workers are never members of the
+// routing Service (query.RoutedRunner), so a worker that is Ready proves
+// no service and a worker that is not has no wedge to show: the verdict
+// rests on the routed members alone.
 func PodSetServesNothing(pods []*corev1.Pod) bool {
 	live := 0
 	for _, pod := range pods {
@@ -71,7 +76,7 @@ func PodSetServesNothing(pods []*corev1.Pod) bool {
 			continue
 		}
 		live++
-		if query.IsTerminalPod(pod) {
+		if query.IsTerminalPod(pod) || !query.RoutedRunner(pod) {
 			continue
 		}
 		if podreadiness.IsContainersReady(pod) && podreadiness.IsServing(pod) {

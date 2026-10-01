@@ -13,6 +13,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/v1beta1convert"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 	appsv1 "k8s.io/api/apps/v1"
@@ -906,5 +907,112 @@ func TestReconcile_OffTargetCrash_StartIsAdmittedLikeAnyOther(t *testing.T) {
 				t.Fatalf("gate consults = %d, want %d", consults, want)
 			}
 		})
+	}
+}
+
+// servingInstances counts the Instances whose full pod set is in rotation
+// (ContainersReady with the serving gate), which is how the Component's
+// published ServingReplicas counts a gang: one member out of rotation
+// takes the whole Instance out of the count.
+func (h *recoveryHarness) servingInstances() int32 {
+	perInstance := len(h.desired.Runners)
+	serving := map[int32]int{}
+	for _, pod := range h.livePods() {
+		idx, ok := query.InstanceIdxFromLabels(pod)
+		if !ok || !podreadiness.IsContainersReady(pod) || !podreadiness.IsServing(pod) {
+			continue
+		}
+		serving[idx]++
+	}
+	var n int32
+	for _, count := range serving {
+		if count >= perInstance {
+			n++
+		}
+	}
+	return n
+}
+
+// coordinationUnavailabilityGate stands in for a coordination group's
+// unavailability gate, read the way the group gate reads the Component's
+// published counters: the Instances not serving are the unavailability
+// already open, and a drain-first start is admitted while that count, plus
+// the starts this pass has opened, plus this one, stays within
+// maxUnavailable. A surge start never reaches it.
+func coordinationUnavailabilityGate(h *recoveryHarness, replicas, maxUnavailable int32, consults *int) func(workloadtypes.UpdateStrategyType, int32, int32) (bool, workloadtypes.RolloutHoldGate, string) {
+	return func(strategy workloadtypes.UpdateStrategyType, _, inFlightUnavail int32) (bool, workloadtypes.RolloutHoldGate, string) {
+		h.t.Helper()
+		*consults++
+		if strategy == workloadtypes.UpdateStrategySurgeThenDrain {
+			h.t.Fatalf("a drain-first roll consulted the gate as a surge start")
+		}
+		unavailable := replicas - h.servingInstances()
+		if unavailable < 0 {
+			unavailable = 0
+		}
+		projected := unavailable + inFlightUnavail + 1
+		if projected > maxUnavailable {
+			return false, workloadtypes.RolloutHoldGateBudget, fmt.Sprintf(
+				"unavailable budget %d exhausted (current %d, in-flight %d, would become %d)",
+				maxUnavailable, unavailable, inFlightUnavail, projected)
+		}
+		return true, "", ""
+	}
+}
+
+// TestReconcile_OffTargetCrash_GangStartIsExemptFromTheCoordinationGate
+// pins the gate exemption on the gang shape. A gang serves through its
+// leader: with the leader wedged the Instance is already out of the
+// coordination gate's serving count, whatever the workers report, so the
+// roll's drain-first start on it opens no new unavailability and must skip
+// the gate consult. Consulting it would count the Instance's own outage a
+// second time, and under maxUnavailable=1 the gate would deny the only
+// start that can end the outage on every pass.
+//
+// The healthy Instance rolls first, so the wedged one is reached with the
+// roll's own budget free and the gate as the only layer left to answer to.
+//
+// Cells: instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-recreate, instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-inplace
+func TestReconcile_OffTargetCrash_GangStartIsExemptFromTheCoordinationGate(t *testing.T) {
+	const replicas = 2
+	for _, sc := range offTargetStrategies[1:] {
+		for _, policy := range []workloadtypes.RestartPolicy{workloadtypes.RestartPolicyNone, workloadtypes.RestartPolicyRecreateInstance} {
+			t.Run(fmt.Sprintf("%s/%s", sc.strategy, policy), func(t *testing.T) {
+				h := offTargetCrashHarness(t, true, sc.strategy, sc.surge, sc.unavail, policy, replicas)
+				consults := 0
+				h.gate = coordinationUnavailabilityGate(h, replicas, sc.unavail, &consults)
+				h.events = nil
+				h.setTarget(h.revFixed, fixedImage)
+				h.step()
+				if first := h.instance(0); first == nil || first.Phase != workloadtypes.InstancePhaseUpdating {
+					h.dumpState("after the bump")
+					t.Fatalf("instance 0 = %+v, want the healthy Instance rolling first", first)
+				}
+				victim := int32(replicas - 1)
+				breakInstance(t, h, victim, true, crashAtStart)
+
+				withinBudget := func() {
+					if h.repairInFlight() {
+						h.dumpState("repair opened")
+						t.Fatalf("a repair opened on an Instance whose revision is not the roll target")
+					}
+					if n := escalation.CurrentUnavailableInFlight(h.irStatuses()); n > sc.unavail {
+						t.Fatalf("%d Instances offline for the roll, budget %d", n, sc.unavail)
+					}
+				}
+				if !h.runWithInvariant(80, func() bool { return h.settledOn(h.revFixed, replicas) }, withinBudget) {
+					h.dumpState("after the bump")
+					t.Fatalf("the Component never settled on the fixed revision: the wedged gang was held behind its own outage")
+				}
+				if h.sawEvent(workloadtypes.EventReasonRestartTriggered) {
+					t.Fatalf("a restart was recorded for an Instance the roll owned: %v", h.events)
+				}
+				// Only the healthy Instance's start was anything the gate
+				// had to pace.
+				if consults != replicas-1 {
+					t.Fatalf("gate consults = %d, want %d: the wedged gang serves nothing and skips the consult", consults, replicas-1)
+				}
+			})
+		}
 	}
 }

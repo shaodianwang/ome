@@ -190,7 +190,7 @@ KIND_SPEC_GROUPS = (
         "rolling_cancel_revert",
     )),
     ("gang-recovery", "Gang recovery and wedge", (
-        "gang_corrective_rollout", "gang_wedge_nonready",
+        "gang_corrective_rollout", "gang_wedge_nonready", "crashloop_gang_coordination_gate",
     )),
     ("gang-surge-multipod", "Gang surge and multi-pod", (
         "concurrent_gang_surge", "gang_surge_floor", "multipod_inplace",

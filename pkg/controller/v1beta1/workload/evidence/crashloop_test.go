@@ -189,3 +189,48 @@ func TestPodSetServesNothing(t *testing.T) {
 		})
 	}
 }
+
+// TestPodSetServesNothing_GangServesThroughItsLeader: a gang's workers are
+// never in rotation, so the verdict reads the leader alone. A wedged
+// leader puts the gang out of service whatever its worker reports, and a
+// serving leader keeps it in service whatever happens to the worker.
+func TestPodSetServesNothing_GangServesThroughItsLeader(t *testing.T) {
+	hash := query.RevisionFromName(clRevision).Hash()
+	runner := func(pod *corev1.Pod, name string) *corev1.Pod {
+		pod.Labels = map[string]string{query.LabelRevisionHash: hash, query.LabelRunner: name}
+		return pod
+	}
+	wedgedLeader := runner(crashLoopPod("engine-0-leader-0", 10*time.Minute, hash), "leader")
+	servingLeader := runner(servingPod("engine-0-leader-0"), "leader")
+	servingWorker := runner(servingPod("engine-0-worker-0"), "worker")
+	wedgedWorker := runner(crashLoopPod("engine-0-worker-0", 10*time.Minute, hash), "worker")
+	bootingWorker := runner(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "engine-0-worker-0"},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  "main",
+				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			}},
+		},
+	}, "worker")
+
+	for _, tc := range []struct {
+		name string
+		pods []*corev1.Pod
+		want bool
+	}{
+		{name: "wedged leader beside a serving worker", pods: []*corev1.Pod{wedgedLeader, servingWorker}, want: true},
+		{name: "wedged leader beside a booting worker", pods: []*corev1.Pod{wedgedLeader, bootingWorker}, want: true},
+		{name: "wedged leader beside a wedged worker", pods: []*corev1.Pod{wedgedLeader, wedgedWorker}, want: true},
+		{name: "serving leader beside a wedged worker", pods: []*corev1.Pod{servingLeader, wedgedWorker}, want: false},
+		{name: "serving leader beside a serving worker", pods: []*corev1.Pod{servingLeader, servingWorker}, want: false},
+		{name: "only the worker is left", pods: []*corev1.Pod{servingWorker}, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := evidence.PodSetServesNothing(tc.pods); got != tc.want {
+				t.Fatalf("PodSetServesNothing = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

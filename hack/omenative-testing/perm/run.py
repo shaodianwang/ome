@@ -1342,6 +1342,12 @@ def invariant_checks(inv, verdict, notes, checks):
 #                        form edits the template. The verdict adds: that
 #                        Instance ends on the new revision and serving, and
 #                        no RestartTriggered event names it after the bump.
+#                        A gang under SurgeThenDrain is replaced at a fresh
+#                        Instance index and its source index retired, so
+#                        the verdict follows the Instance through the gang
+#                        surges the ISVC events record (a surge start names
+#                        the replacement index; an abandon retires one) and
+#                        reads the index it ended at.
 # Phase enum: settling (immediately after the trigger), rotating (first surge/
 # updated pod observed post-trigger), migrating (migration accept observed).
 # One firing per case (latched). Any fault-APPARATUS error → the distinct
@@ -2646,7 +2652,8 @@ def _instance_relocated(pods, pre_uids, node):
 
 def _isvc_events_since(case_id, since_epoch):
     """(reason, message) of every event recorded on the case's
-    InferenceService whose latest occurrence is at or after since_epoch."""
+    InferenceService whose latest occurrence is at or after since_epoch,
+    oldest first, a folded repeat listed once per occurrence."""
     r = kubectl("-n", NS, "get", "events", "--field-selector",
                 f"involvedObject.kind=InferenceService,involvedObject.name={case_id}", "-o", "json")
     if r.returncode != 0:
@@ -2655,15 +2662,66 @@ def _isvc_events_since(case_id, since_epoch):
         items = json.loads(r.stdout).get("items", []) or []
     except Exception:
         return []
-    out = []
+    found = []
     for it in items:
         stamp = it.get("lastTimestamp") or it.get("eventTime") or (it.get("metadata") or {}).get("creationTimestamp") or ""
         try:
             when = datetime.datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).timestamp()
         except ValueError:
             continue
-        if when >= since_epoch:
-            out.append((str(it.get("reason") or ""), str(it.get("message") or "")))
+        if when < since_epoch:
+            continue
+        # The apiserver folds a repeat of an identical event into the
+        # first one's count; one entry per occurrence keeps a tally of
+        # starts against abandons honest.
+        try:
+            count = max(1, int(it.get("count") or 1))
+        except (TypeError, ValueError):
+            count = 1
+        found.append((when, [(str(it.get("reason") or ""), str(it.get("message") or ""))] * count))
+    # Oldest first: a chain of gang surges is followed in the order the
+    # surges happened, and the list order is not that order.
+    found.sort(key=lambda x: x[0])
+    return [ev for _when, evs in found for ev in evs]
+
+
+# The events a gang surge records on the ISVC: the start names the fresh
+# index the replacement is created at, and an abandon names a replacement
+# the source retired instead (a failed one, or one a newer revision
+# superseded).
+GANG_SURGE_START_RE = re.compile(
+    r"component=(?P<comp>\S+) instance=(?P<src>\d+) gang surge to revision \S+ \(surge-index=(?P<dst>\d+)\)")
+GANG_SURGE_ABANDON_RE = re.compile(
+    r"component=(?P<comp>\S+) instance=(?P<src>\d+) abandoned (?:failed|superseded) gang surge \(surge-index=(?P<dst>\d+)\)")
+
+
+def _gang_surge_replacements(events, comp):
+    """(source index, replacement index) for every gang surge of comp whose
+    replacement stood, oldest first: the surge starts the abandons do not
+    cancel out, a pair's last starts being the ones that stand. A gang under
+    SurgeThenDrain is replaced at a fresh Instance index and its source index
+    retired, so the Instance a verdict follows moves. The start is the record
+    to read because the source row is removed as the surge completes, so the
+    completion leaves no row behind to name the pair. events must be oldest
+    first (_isvc_events_since)."""
+    starts, abandoned = [], {}
+    for reason, m in events:
+        if reason == "RecreateUpdateStarted":
+            mm = GANG_SURGE_START_RE.search(m)
+            if mm and mm.group("comp") == comp:
+                starts.append((mm.group("src"), mm.group("dst")))
+        elif reason == "GangSurgeAbandoned":
+            mm = GANG_SURGE_ABANDON_RE.search(m)
+            if mm and mm.group("comp") == comp:
+                pair = (mm.group("src"), mm.group("dst"))
+                abandoned[pair] = abandoned.get(pair, 0) + 1
+    standing = {pair: starts.count(pair) - abandoned.get(pair, 0) for pair in set(starts)}
+    out = []
+    for pair in reversed(starts):
+        if standing[pair] > 0:
+            standing[pair] -= 1
+            out.append(pair)
+    out.reverse()
     return out
 
 
@@ -2680,6 +2738,23 @@ def _instance_rebuilt(pods, pre_uids):
                               and p["uid"] not in pre_uids for _n, p in pods)
 
 
+def _follow_gang_surges(inst, replacements):
+    """The Instance indices inst passed through: inst itself, then every
+    replacement a gang surge created for the Instance at the head of the
+    chain, read in the order the surges happened so a freed index another
+    gang surged earlier is not mistaken for a later hop. Just [inst] when
+    it was never surged away."""
+    chain = [inst]
+    for src, dst in replacements:
+        if src == chain[-1] and dst not in chain:
+            chain.append(dst)
+    return chain
+
+
+def _event_names_instance(message, comp, inst):
+    return re.search(rf"component={re.escape(comp)} instance={inst}\b", message) is not None
+
+
 def _crashloop_checks(f, pod_state, old_hashes, trigger_ts, verdict, notes, checks, bumped=None):
     """The break verdict after a roll. A victim on a bumped Component ended
     on the new revision with its pods serving, and no repair was recorded for
@@ -2687,53 +2762,59 @@ def _crashloop_checks(f, pod_state, old_hashes, trigger_ts, verdict, notes, chec
     exists to catch, since the Instance's revision is not the roll target and
     the roll owns it. A victim on a sibling nobody bumped has no new revision
     to reach, so the repair owns it: it must be rebuilt, Ready and serving on
-    its running revision, with the repair recorded."""
+    its running revision, with the repair recorded. Either way the Instance
+    is followed through the gang surges that replaced it at a fresh index:
+    the pods are read at the index it ended at, and a repair on any index of
+    the chain counts."""
     if not f or f.get("kind") not in BREAK_FAULTS or not f.get("fired") or f.get("infra_fail"):
         return verdict
-    inst, comp = f["crash_inst"], f["crash_comp"]
-    pods = _instance_pods(pod_state, comp, inst)
-    key = f"component={comp} instance={inst}"
-    repairs = [m for reason, m in _isvc_events_since(f["case_id"], trigger_ts or 0)
-               if reason == "RestartTriggered" and key in m]
+    inst, comp, kind = f["crash_inst"], f["crash_comp"], f["kind"]
+    events = _isvc_events_since(f["case_id"], trigger_ts or 0)
+    chain = _follow_gang_surges(inst, _gang_surge_replacements(events, comp))
+    final = chain[-1]
+    moved = f" (replaced at Instance {final} by its gang surge)" if final != inst else ""
+    where = f"{comp} Instance {inst}{moved}"
+    pods = _instance_pods(pod_state, comp, final)
+    repairs = [m for reason, m in events
+               if reason == "RestartTriggered" and any(_event_names_instance(m, comp, i) for i in chain)]
+    down = [n for n, p in pods if not (p.get("ready") and p.get("serving"))]
     if bumped is not None and comp not in bumped:
+        sibling = f"sibling {where}"
         survivors = [n for n, p in pods if p.get("uid") and p["uid"] == f.get("crash_uid")]
-        down = [n for n, p in pods if not (p.get("ready") and p.get("serving"))]
         if not pods or survivors or down:
             verdict = "FAIL"
-            notes.append(f"{f['kind']} sibling Instance {comp}/{inst} was not rebuilt to serving "
-                         f"(pods={len(pods)} broken-pod-survives={survivors} not-serving={down})")
-            checks.append(f"  ✗ {f['kind']}: sibling {comp} Instance {inst} (not bumped) must be rebuilt and serving; "
+            notes.append(f"{kind} sibling Instance {comp}/{inst} was not rebuilt to serving "
+                         f"(read at Instance {final}: pods={len(pods)} broken-pod-survives={survivors} not-serving={down})")
+            checks.append(f"  ✗ {kind}: {sibling} (not bumped) must be rebuilt and serving; "
                           f"pods={len(pods)} broken pod still there={survivors} not-serving={down}")
         else:
-            checks.append(f"  ✓ {f['kind']}: sibling {comp} Instance {inst} (not bumped) was rebuilt with {len(pods)} pod(s) serving")
+            checks.append(f"  ✓ {kind}: {sibling} (not bumped) was rebuilt with {len(pods)} pod(s) serving")
         if repairs:
-            checks.append(f"  ✓ {f['kind']}: a RestartTriggered event names sibling {comp} Instance {inst}: {repairs[0][:160]}")
+            checks.append(f"  ✓ {kind}: a RestartTriggered event names {sibling}: {repairs[0][:160]}")
         else:
             verdict = "FAIL"
-            notes.append(f"{f['kind']} sibling Instance {comp}/{inst}: no RestartTriggered event named it")
-            checks.append(f"  ✗ {f['kind']}: no RestartTriggered event named sibling {comp} Instance {inst} "
+            notes.append(f"{kind} sibling Instance {comp}/{inst}: no RestartTriggered event named it")
+            checks.append(f"  ✗ {kind}: no RestartTriggered event named {sibling} "
                           f"(nothing bumped it, so only a repair can own its rebuild)")
         if f.get("kills") is not None and f["form"] == "load":
-            checks.append(f"  ⓘ {f['kind']}: runner killed {f['kills']} time(s) while the pod ran the old revision")
+            checks.append(f"  ⓘ {kind}: runner killed {f['kills']} time(s) while the pod ran the old revision")
         return verdict
     off = [n for n, p in pods if not p.get("hash") or p["hash"] in (old_hashes or set())]
-    down = [n for n, p in pods if not (p.get("ready") and p.get("serving"))]
-    kind = f["kind"]
     if not pods or off or down:
         verdict = "FAIL"
         notes.append(f"{kind} Instance {comp}/{inst} did not end on the new revision serving "
-                     f"(pods={len(pods)} old-revision={off} not-serving={down})")
-        checks.append(f"  ✗ {kind}: {comp} Instance {inst} must end on the new revision and serving; "
+                     f"(read at Instance {final}: pods={len(pods)} old-revision={off} not-serving={down})")
+        checks.append(f"  ✗ {kind}: {where} must end on the new revision and serving; "
                       f"pods={len(pods)} still old-revision={off} not-serving={down}")
     else:
-        checks.append(f"  ✓ {kind}: {comp} Instance {inst} ended on the new revision with {len(pods)} pod(s) serving")
+        checks.append(f"  ✓ {kind}: {where} ended on the new revision with {len(pods)} pod(s) serving")
     if repairs:
         verdict = "FAIL"
         notes.append(f"{kind} Instance {comp}/{inst} was repaired after the bump: {repairs[0][:120]}")
-        checks.append(f"  ✗ {kind}: a repair was recorded for {comp} Instance {inst} after the bump "
+        checks.append(f"  ✗ {kind}: a repair was recorded for {where} after the bump "
                       f"(its revision was not the roll target): {repairs[0][:160]}")
     else:
-        checks.append(f"  ✓ {kind}: no RestartTriggered event named {comp} Instance {inst} after the bump")
+        checks.append(f"  ✓ {kind}: no RestartTriggered event named {where} after the bump")
     if f.get("kills") is not None and f["form"] == "load":
         checks.append(f"  ⓘ {kind}: runner killed {f['kills']} time(s) while the pod ran the old revision")
     return verdict
