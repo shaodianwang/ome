@@ -192,10 +192,18 @@ def case_images(kind=False):
             match = re.match(r"^\s*image:\s*[\"']?([^\"'\s]+)", line)
             if match is None:
                 match = re.search(r"(?:^|\s)img=([^\s]+)", line)
-            if match is None or match.group(1) == UNPULLABLE_IMAGE or match.group(1) in seen:
+            if match is None or match.group(1) in seen or not side_loadable(match.group(1), values):
                 continue
             seen.append(match.group(1))
     return seen
+
+
+def side_loadable(image, values):
+    """Whether a case image is one the cluster must load from an archive. The
+    unpullable image is meant to fail to pull, and the metrics image is built
+    from this repository and loaded by the fixture path, so a case that embeds
+    either in its own runtime adds nothing to the side-load list."""
+    return image != UNPULLABLE_IMAGE and image != values["OME_EVAL_METRICS_IMAGE"]
 
 
 def resolved_value(token, kind=False):
