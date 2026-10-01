@@ -34,11 +34,23 @@ Architecture:
   6. Optional fault injection (header fault=<kind>:<param>): quota:<n> (derived
      ResourceQuota admitting exactly +n case-shaped pods), podkill:<phase>,
      ctrlrestart:<phase> (gated on OME_TEST_ALLOW_CTRL_RESTART=1), cordon:source,
-     crashloop:old (one old-revision pod made to crash on every start, form=start
-     or form=load, from the moment the bump lands; the verdict requires that
-     Instance to end on the new revision with no repair recorded for it).
-     Apparatus errors record the distinct INFRA-FAIL verdict — harness
-     infrastructure broke, not the product.
+     crashloop:old (one old-revision pod of victimcomp= made to crash on every
+     start, form=start, or after Ready, form=load) and imagepull:old (the same
+     pod pointed at an image that cannot be pulled), both from the moment the
+     bump lands; the verdict requires that Instance to end on the new revision
+     with no repair recorded for it (a victim nobody bumped must be rebuilt by
+     a recorded repair instead). during=idle fires a persistent fault on the
+     settled service with no bump: a break is read as expect=repaired|held,
+     configkey:missing (the runner's ConfigMap key removed and the runner
+     restarted, put back at lift=after-settle|after-failed) as
+     expect=heals|parked, node:notready (the victim's KIND node kubelet
+     stopped, started again at lift=after-settle|after-failed|after-recover)
+     as expect=relocated|repaired|parked, or SKIP where this host's docker
+     does not own the nodes. Apparatus errors record the distinct INFRA-FAIL
+     verdict — harness infrastructure broke, not the product.
+  7. Optional mid-roll edit (edit=strategy:<type> | edit=restartPolicy:<policy>
+     at during=settling|rotating): every bumped member's lifecycle is patched
+     at the hook, and the verdict adds that the edit was applied and landed.
 
 Why bump ALL group members (the 2026-06-01 fix):
   OMENative coordination is a status-only layer + *restrictive* gates. It never
@@ -64,6 +76,7 @@ import os
 import queue
 import re
 import select
+import shutil
 import subprocess
 import sys
 import threading
@@ -1345,12 +1358,187 @@ FAULT_PHASES = {"rotating", "migrating", "settling"} | CANARY_HOOKS
 # column has no hook); the only fault a pre-bump phase makes sense for.
 IDLE_FAULT_PHASE = "idle"
 # crashloop's one parameter names its victim: a pod of the revision the bump
-# leaves behind.
+# leaves behind (on the idle service, the only revision there is).
 CRASHLOOP_VICTIM = "old"
 CRASHLOOP_FORMS = {"start", "load"}
 # form=load kills the runner this often while it is up; the kubelet's own
 # back-off then holds each restart longer than the last.
 CRASH_KILL_INTERVAL_S = float(os.environ.get("OME_TEST_CRASH_KILL_INTERVAL_S", "15"))
+# The faults that break one live pod of the running revision and share the
+# crashloop victim rule and verdict: crashloop (the pod dies at every start,
+# or after Ready) and imagepull (the pod is pointed at an image that cannot
+# be pulled, so it never starts again); the Components such a victim may be
+# drawn from (a router never carries the revision a roll targets here).
+BREAK_FAULTS = {"crashloop", "imagepull"}
+# imagepull has one form: an image that cannot be pulled never runs.
+IMAGEPULL_FORMS = {"start"}
+BREAK_VICTIM_COMPS = {"engine", "decoder"}
+BREAK_DEFAULT_COMP = "engine"
+# configkey:missing removes the ConfigMap key the victim's runner env reads
+# and restarts the runner, so its next start fails with
+# CreateContainerConfigError until the key is put back at lift=<phase>.
+CONFIGKEY_PARAM = "missing"
+CONFIGKEY_WAITING = "CreateContainerConfigError"
+# node:notready stops the kubelet of the KIND node hosting the victim
+# (docker exec <node> systemctl stop kubelet) and starts it again at the
+# lift. The node is a container of the docker that owns the KIND cluster,
+# named after the Node; without that the case is skipped, never failed.
+NODE_PARAM = "notready"
+DOCKER_BIN = os.environ.get("OME_TEST_DOCKER", "docker")
+# Marker on a node whose kubelet the harness stopped, so batch.py's
+# end-of-run sweep can start it again; and the role label that keeps the
+# control plane out of the victim pool.
+KUBELET_LABEL = "perm.test/kubelet-stopped"
+CONTROL_PLANE_LABEL = "node-role.kubernetes.io/control-plane"
+# Faults whose cause the case lifts at lift=<phase>: after-settle once the
+# fault has visibly bitten for LIFT_SETTLE_S, after-failed once the victim's
+# Instance row is Failed, after-recover once the Instance is Ready and
+# serving on another node with the cause still in place.
+LIFT_FAULTS = {"configkey", "node"}
+LIFT_PHASES = {"after-settle", "after-failed", "after-recover"}
+LIFT_PHASES_BY_FAULT = {"configkey": {"after-settle", "after-failed"}, "node": set(LIFT_PHASES)}
+LIFT_SETTLE_S = int(20 * TIMEOUT_MULT)
+# What a lifted cause comes to. configkey: heals (the Instance is Ready and
+# serving again on its running revision, no bump, no reset mailbox) or
+# parked (the Failed row stays Failed with the cause gone; the documented
+# behaviour, which the header ties to the issue it is tracked under with
+# issue=). node: relocated (rebuilt Ready and serving on another node while
+# the node is down, which needs the force-delete policy), repaired (Ready and
+# serving again once the kubelet is back) or parked (nothing rebuilds it
+# while the node is down, as configured without a force delete).
+LIFT_EXPECTS = {"heals", "parked"}
+NODE_EXPECTS = {"relocated", "repaired", "parked"}
+# The lift phase each node outcome is read against.
+NODE_LIFTS = {"relocated": {"after-recover"}, "repaired": {"after-settle", "after-failed"}, "parked": {"after-settle"}}
+# Persistent faults a rollout case may fire on the idle service (during=idle)
+# instead of at the settling hook after the bump; no bump follows, and the
+# verdict reads what the product does about the fault on its own.
+IDLE_FAULTS = BREAK_FAULTS | LIFT_FAULTS
+# What a break at idle comes to: a repair that rebuilds the Instance, or the
+# hold a rollout group keeps on repairs. Derived from the spec when the header
+# does not state it (held when the victim Component is a group member).
+IDLE_BREAK_EXPECTS = {"repaired", "held"}
+IDLE_EXPECTS_ALL = IDLE_BREAK_EXPECTS | LIFT_EXPECTS | NODE_EXPECTS
+
+
+def _idle_expects(fault_kind):
+    """The outcomes a persistent fault at idle can be judged against."""
+    if fault_kind in BREAK_FAULTS:
+        return IDLE_BREAK_EXPECTS
+    if fault_kind == "node":
+        return NODE_EXPECTS
+    if fault_kind in LIFT_FAULTS:
+        return LIFT_EXPECTS
+    return set()
+# How long a held repair, or a park, must hold before it is believed.
+IDLE_HOLD_S = int(90 * TIMEOUT_MULT)
+# The operator mailbox that tears Failed Instances down for a rebuild; a
+# heal the harness claims must have happened without it.
+RESET_ANNO = "ome.io/reset-instances"
+# Mid-roll edits: edit=strategy:<type> or edit=restartPolicy:<policy> patches
+# every bumped member's lifecycle at a named hook (during=settling right
+# after the bump lands, during=rotating at the first updated pod), so a roll
+# that started under one shape finishes under another.
+UPDATE_STRATEGIES = {"SurgeThenDrain", "RecreatePod", "InPlaceIfPossible", "InPlaceOnly"}
+RESTART_POLICIES = {"None", "RecreateInstanceOnPodRestart"}
+MIDROLL_EDIT_KINDS = {"strategy": UPDATE_STRATEGIES, "restartPolicy": RESTART_POLICIES}
+EDIT_HOOKS = {"settling", "rotating"}
+
+
+def _midroll_edit(v):
+    """(kind, value) of a mid-roll edit header value, or None when the value
+    is not one."""
+    kind, sep, value = str(v or "").partition(":")
+    if sep and value in MIDROLL_EDIT_KINDS.get(kind, set()):
+        return kind, value
+    return None
+
+
+def _midroll_new(hdr):
+    """Parsed mid-roll edit state (or None): the field, its value, the hook,
+    and whether it has fired."""
+    parsed = _midroll_edit(hdr.get("edit"))
+    if not parsed:
+        return None
+    return {"kind": parsed[0], "value": parsed[1], "hook": str(hdr.get("during") or ""),
+            "fired": False, "fired_at": None, "error": None}
+
+
+def _midroll_due(hook, pod_state, old_hashes):
+    """settling is due as soon as the bump has landed; rotating at the first
+    pod seen on the new revision (or carrying the new annotation)."""
+    if hook == "settling":
+        return True
+    return old_hashes is not None and any(
+        p and p["alive"] and ((p.get("hash") and p["hash"] not in old_hashes) or p.get("newanno"))
+        for p in pod_state.values())
+
+
+def _midroll_patch(edit, bumped):
+    """The merge patch that lands the edit on every bumped member's
+    lifecycle; a merge keeps the rollingUpdate budget beside the new type."""
+    if edit["kind"] == "strategy":
+        life = {"updateStrategy": {"type": edit["value"]}}
+    else:
+        life = {"restartPolicy": edit["value"]}
+    return {"spec": {c: {"lifecycle": dict(life)} for c in sorted(bumped)}}
+
+
+def _midroll_tick(edit, case_id, bumped, pod_state, old_hashes, now_rel):
+    """Fire the edit once its hook is due (latched)."""
+    if not edit or edit["fired"] or not _midroll_due(edit["hook"], pod_state, old_hashes):
+        return
+    edit["fired"] = True
+    rr = kubectl("-n", NS, "patch", "isvc", case_id, "--type=merge", "-p", json.dumps(_midroll_patch(edit, bumped)))
+    if rr.returncode != 0:
+        edit["error"] = f"{edit['kind']} edit at {edit['hook']} failed: {rr.stderr.strip()[:160]}"
+        print(f"    ✗ {edit['error']}")
+        return
+    edit["fired_at"] = now_rel
+    print(f"    ✎ mid-roll edit: {edit['kind']} → {edit['value']} on {sorted(bumped)} at {edit['hook']} (t={now_rel:.0f}s)")
+
+
+def _midroll_value(spec, comp, kind):
+    """The live value of the edited field on one Component."""
+    life = ((spec or {}).get(comp) or {}).get("lifecycle") or {}
+    if kind == "strategy":
+        return (life.get("updateStrategy") or {}).get("type")
+    return life.get("restartPolicy")
+
+
+def _midroll_checks(edit, spec, bumped, verdict, notes, checks):
+    """The edit's own claims: it was applied at its hook (a refused patch is
+    apparatus) and the live spec carries it on every bumped member at the
+    end. How the roll behaved under it is the ordinary verdict's business."""
+    if not edit:
+        return verdict
+    if edit["error"]:
+        notes.append(f"INFRA-FAIL: {edit['error']}")
+        checks.append(f"  ✗ INFRA-FAIL (mid-roll edit): {edit['error']}")
+        return "INFRA-FAIL"
+    if not edit["fired"]:
+        checks.append(f"  ⓘ mid-roll edit {edit['kind']}:{edit['value']} never reached its {edit['hook']} hook (not applied)")
+        return verdict
+    checks.append(f"  ✓ mid-roll edit {edit['kind']}:{edit['value']} applied at {edit['hook']} (t={edit['fired_at']:.0f}s)")
+    for c in sorted(bumped):
+        got = _midroll_value(spec, c, edit["kind"])
+        if got != edit["value"]:
+            verdict = "FAIL" if verdict != "INFRA-FAIL" else verdict
+            notes.append(f"mid-roll edit did not land on {c} ({edit['kind']}={got})")
+            checks.append(f"  ✗ mid-roll edit: {c} ended with {edit['kind']}={got}, not {edit['value']}")
+        else:
+            checks.append(f"  ✓ mid-roll edit: {c} carries {edit['kind']}={edit['value']}")
+    return verdict
+
+
+def _isvc_spec(case_id):
+    r = kubectl("-n", NS, "get", "isvc", case_id, "-o", "json")
+    if r.returncode != 0:
+        return {}
+    try:
+        return json.loads(r.stdout).get("spec", {}) or {}
+    except Exception:
+        return {}
 CANARY_VERBS = {"pause", "pause-freeze", "promote", "promote-stale", "rebump", "rebump-fix",
                 "rollback", "timeout-clear", "timeout-set", "scale", "repin", "resume",
                 "planedit", "planedit-repin", "groupremove", "runlost", "pairing", "quotalift"}
@@ -1774,12 +1962,15 @@ def _wait_ctrl_ready(budget_s):
 
 # Cleanup registry, flushed in __main__'s finally — runs on PASS, FAIL,
 # INFRA-FAIL and crash alike. Entries: ("quota", case_id) | ("uncordon", node)
-# | ("crashloop", fault) — the last stops a form=load killer thread.
+# | ("crashloop", fault) — stops a form=load killer thread | ("configkey",
+# fault) — puts the removed ConfigMap key back | ("kubelet", fault) — starts
+# the stopped kubelet again.
 _FAULT_CLEANUPS = []
 
 
 def _run_fault_cleanups():
-    """Idempotent failure-path-safe fault teardown (quota delete + uncordon)."""
+    """Idempotent failure-path-safe fault teardown (quota delete, uncordon,
+    killer stop, ConfigMap key restore, kubelet start)."""
     while _FAULT_CLEANUPS:
         kind, arg = _FAULT_CLEANUPS.pop()
         if kind == "quota":
@@ -1789,6 +1980,10 @@ def _run_fault_cleanups():
             kubectl("label", "node", arg, f"{CORDON_LABEL}-")   # drop the harness marker
         elif kind == "crashloop":
             _crashloop_stop(arg)
+        elif kind == "configkey":
+            _configkey_restore(arg)
+        elif kind == "kubelet":
+            _node_restore(arg)
 
 
 def _lift_quota(case_id):
@@ -1846,8 +2041,12 @@ def _fault_ok(v):
         return param in FAULT_PHASES
     if kind == "cordon":
         return param in FAULT_TARGETS
-    if kind == "crashloop":
+    if kind in BREAK_FAULTS:
         return param == CRASHLOOP_VICTIM
+    if kind == "configkey":
+        return param == CONFIGKEY_PARAM
+    if kind == "node":
+        return param == NODE_PARAM
     return False
 
 
@@ -1862,7 +2061,16 @@ def _fault_new(case_id, hdr):
             "victim": str(hdr.get("victim") or ""),
             "victimcomp": str(hdr.get("victimcomp") or ""),
             "form": str(hdr.get("form") or ""),
+            "during": str(hdr.get("during") or ""),
+            "expect": str(hdr.get("expect") or ""),
+            "lift": str(hdr.get("lift") or ""),
             "fired": False, "infra_fail": None, "notes": []}
+
+
+def _fault_at_idle(f):
+    """True when the case fires its fault on the idle service (during=idle)
+    and never bumps; the phase hooks must then leave it alone."""
+    return bool(f) and f.get("during") == IDLE_FAULT_PHASE
 
 
 _QTY_BIN = {"Ki": 1024, "Mi": 1024**2, "Gi": 1024**3, "Ti": 1024**4, "Pi": 1024**5, "Ei": 1024**6}
@@ -2047,8 +2255,14 @@ def _fault_pick_pod(pod_state, pods_per_inst, old_hashes, victim=None, comp=None
 def _fault_fire(f, pod_state, pods_per_inst, old_hashes):
     """One-shot phase-fault action (latched by the caller's fired check)."""
     f["fired"] = True
-    if f["kind"] == "crashloop":
+    if f["kind"] in BREAK_FAULTS:
         _fault_crashloop_fire(f, pod_state, old_hashes)
+        return
+    if f["kind"] == "configkey":
+        _fault_configkey_fire(f, pod_state, old_hashes)
+        return
+    if f["kind"] == "node":
+        _fault_node_fire(f, pod_state, old_hashes)
         return
     if f["kind"] == "podkill":
         victim = _fault_pick_pod(pod_state, pods_per_inst, old_hashes, victim=f.get("victim"),
@@ -2084,8 +2298,8 @@ def _fault_fire(f, pod_state, pods_per_inst, old_hashes):
     print(f"    ⚡ {f['notes'][-1]}")
 
 
-def _crashloop_pick_pod(pod_state, old_hashes):
-    """The crashloop victim: among the live engine pods still on an old
+def _crashloop_pick_pod(pod_state, old_hashes, comp=BREAK_DEFAULT_COMP):
+    """The break victim: among the live pods of `comp` still on an old
     revision, the leader (or single) pod of the highest Instance index. The
     highest index is what the roll reaches last, so the crash is observed on
     a settled row for as long as the roll takes to get there."""
@@ -2095,7 +2309,7 @@ def _crashloop_pick_pod(pod_state, old_hashes):
         except (TypeError, ValueError):
             return 0
     live = [(n, p) for n, p in sorted(pod_state.items())
-            if p and p["alive"] and p.get("comp") == "engine"
+            if p and p["alive"] and p.get("comp") == comp
             and p.get("hash") and (old_hashes is None or p["hash"] in old_hashes)
             and p.get("runner", "default") in ("default", "leader")]
     if not live:
@@ -2111,31 +2325,40 @@ def _crashloop_image():
     return _fixture_values()["OME_EVAL_METRICS_IMAGE"]
 
 
+def _break_image(kind):
+    """The image a break points the live pod at: for crashloop one that
+    starts and dies, for imagepull the harness's unpullable reference, which
+    no deploy step side-loads, so the pull fails offline and online alike."""
+    return runtime_fixtures.UNPULLABLE_IMAGE if kind == "imagepull" else _crashloop_image()
+
+
 def _crashloop_pod_state(name):
-    """(exists, alive, revision hash, main container running) of one pod,
-    read live."""
+    """(exists, alive, revision hash, main container running, uid) of one
+    pod, read live."""
     r = kubectl("-n", NS, "get", "pod", name, "-o", "json")
     if r.returncode != 0:
-        return False, False, "", False
+        return False, False, "", False, ""
     try:
         obj = json.loads(r.stdout)
     except Exception:
-        return False, False, "", False
+        return False, False, "", False, ""
     meta = obj.get("metadata") or {}
     running = any(cs.get("name") == MAIN_CONTAINER and (cs.get("state") or {}).get("running")
                   for cs in (obj.get("status", {}).get("containerStatuses") or []))
-    return True, meta.get("deletionTimestamp") is None, (meta.get("labels") or {}).get(REV_LABEL, ""), running
+    return (True, meta.get("deletionTimestamp") is None, (meta.get("labels") or {}).get(REV_LABEL, ""),
+            running, meta.get("uid", ""))
 
 
 def _crashloop_killer(f, stop):
     """form=load: kill the runner (PID 1 of the fixture container) every
-    CRASH_KILL_INTERVAL_S while the victim pod is up and still on the old
-    revision. The name outlives a recreate, so the revision label is what
-    says the pod is still the one the case is breaking; a pod patched or
-    replaced onto the new revision is left alone."""
+    CRASH_KILL_INTERVAL_S while the victim pod is up, still on the old
+    revision and still the pod the case broke. The name outlives a recreate,
+    so the revision label and the UID are what say the pod is still that one;
+    a pod patched or replaced onto the new revision, or rebuilt by a repair,
+    is left alone."""
     while not stop.is_set():
-        exists, alive, rev, running = _crashloop_pod_state(f["crash_pod"])
-        if not exists or not alive or rev != f["crash_hash"]:
+        exists, alive, rev, running, uid = _crashloop_pod_state(f["crash_pod"])
+        if not exists or not alive or rev != f["crash_hash"] or uid != f.get("crash_uid", uid):
             return
         if running:
             r = kubectl("-n", NS, "exec", f["crash_pod"], "-c", MAIN_CONTAINER, "--", "sh", "-c", "kill 1")
@@ -2154,24 +2377,26 @@ def _crashloop_stop(f):
 
 
 def _fault_crashloop_fire(f, pod_state, old_hashes):
-    victim = _crashloop_pick_pod(pod_state, old_hashes)
+    comp = f.get("victimcomp") or BREAK_DEFAULT_COMP
+    victim = _crashloop_pick_pod(pod_state, old_hashes, comp)
     if not victim:
-        f["infra_fail"] = "crashloop: no live old-revision engine pod to break"
+        f["infra_fail"] = f"{f['kind']}: no live old-revision {comp} pod to break"
         return
     state = pod_state.get(victim) or {}
     f["crash_pod"] = victim
     f["crash_inst"] = str(state.get("inst", "0"))
-    f["crash_comp"] = state.get("comp", "engine")
+    f["crash_comp"] = state.get("comp", comp)
     f["crash_hash"] = state.get("hash", "")
+    f["crash_uid"] = state.get("uid", "")
     f["kills"] = 0
-    if f["form"] == "start":
-        image = _crashloop_image()
+    if f["kind"] != "crashloop" or f["form"] == "start":
+        image = _break_image(f["kind"])
         patch = {"spec": {"containers": [{"name": MAIN_CONTAINER, "image": image}]}}
         r = kubectl("-n", NS, "patch", "pod", victim, "--type=strategic", "-p", json.dumps(patch))
         if r.returncode != 0:
-            f["infra_fail"] = f"crashloop: point {victim} at {image} failed: {r.stderr.strip()[:120]}"
+            f["infra_fail"] = f"{f['kind']}: point {victim} at {image} failed: {r.stderr.strip()[:120]}"
             return
-        f["notes"].append(f"fault fired: crashloop form=start on {victim} (instance {f['crash_inst']}, image {image})")
+        f["notes"].append(f"fault fired: {f['kind']} form=start on {victim} (instance {f['crash_inst']}, image {image})")
     else:
         stop = threading.Event()
         f["crash_stop"] = stop
@@ -2180,6 +2405,243 @@ def _fault_crashloop_fire(f, pod_state, old_hashes):
         _FAULT_CLEANUPS.append(("crashloop", f))
         f["notes"].append(f"fault fired: crashloop form=load on {victim} (instance {f['crash_inst']}, kill every {CRASH_KILL_INTERVAL_S:.0f}s)")
     print(f"    ⚡ {f['notes'][-1]}")
+
+
+def _get_pod(name):
+    """One pod of the case namespace, read live; None when gone or unreadable."""
+    r = kubectl("-n", NS, "get", "pod", name, "-o", "json")
+    if r.returncode != 0:
+        return None
+    try:
+        return json.loads(r.stdout)
+    except Exception:
+        return None
+
+
+def _configkey_ref(pod_obj):
+    """(ConfigMap name, key) of the first ConfigMap key the main container's
+    env reads, or None when the runner reads none."""
+    for c in ((pod_obj or {}).get("spec") or {}).get("containers") or []:
+        if c.get("name") != MAIN_CONTAINER:
+            continue
+        for e in c.get("env") or []:
+            ref = (e.get("valueFrom") or {}).get("configMapKeyRef") or {}
+            if ref.get("name") and ref.get("key"):
+                return ref["name"], ref["key"]
+    return None
+
+
+def _pod_waiting_reason(pod_obj):
+    """The main container's waiting reason ("" when it is not waiting)."""
+    for cs in ((pod_obj or {}).get("status") or {}).get("containerStatuses") or []:
+        if cs.get("name") == MAIN_CONTAINER:
+            return str(((cs.get("state") or {}).get("waiting") or {}).get("reason") or "")
+    return ""
+
+
+def _json_pointer_token(key):
+    return key.replace("~", "~0").replace("/", "~1")
+
+
+def _configkey_restore(f):
+    """Put the removed key back under its value. Idempotent: the lift calls
+    it once the lift phase is reached, the end-of-case cleanup calls it again
+    (a no-op after the lift, and harmless once the case's ConfigMap is gone)."""
+    if f.get("key_restored") or not f.get("cm_name"):
+        return True
+    patch = {"data": {f["cm_key"]: f["cm_value"]}}
+    r = kubectl("-n", NS, "patch", "configmap", f["cm_name"], "--type=merge", "-p", json.dumps(patch))
+    if r.returncode == 0:
+        f["key_restored"] = True
+    return r.returncode == 0
+
+
+def _fault_configkey_fire(f, pod_state, old_hashes):
+    """Remove the ConfigMap key the victim's runner env reads and restart the
+    runner, so its next start fails with CreateContainerConfigError. The
+    victim is picked by the break rule; the reference is read off its live
+    pod, so a runtime-level or an ISVC-level env works alike. The restore is
+    registered before the key is removed."""
+    comp = f.get("victimcomp") or BREAK_DEFAULT_COMP
+    victim = _crashloop_pick_pod(pod_state, old_hashes, comp)
+    if not victim:
+        f["infra_fail"] = f"configkey: no live {comp} pod to break"
+        return
+    obj = _get_pod(victim)
+    ref = _configkey_ref(obj)
+    if ref is None:
+        f["infra_fail"] = (f"configkey: the runner of {victim} reads no ConfigMap key "
+                           f"(the case must give the {comp} runner an env valueFrom.configMapKeyRef)")
+        return
+    cm_name, cm_key = ref
+    r = kubectl("-n", NS, "get", "configmap", cm_name, "-o", "json")
+    try:
+        data = json.loads(r.stdout).get("data") or {} if r.returncode == 0 else {}
+    except Exception:
+        data = {}
+    if cm_key not in data:
+        f["infra_fail"] = f"configkey: ConfigMap {cm_name} has no key {cm_key} to remove"
+        return
+    state = pod_state.get(victim) or {}
+    f.update(crash_pod=victim, crash_inst=str(state.get("inst", "0")), crash_comp=state.get("comp", comp),
+             crash_hash=state.get("hash", ""), crash_uid=state.get("uid", ""),
+             cm_name=cm_name, cm_key=cm_key, cm_value=data[cm_key], key_restored=False,
+             bite=CONFIGKEY_WAITING, cause=f"ConfigMap key {cm_name}/{cm_key}")
+    _FAULT_CLEANUPS.append(("configkey", f))   # registered BEFORE the key goes
+    rr = kubectl("-n", NS, "patch", "configmap", cm_name, "--type=json", "-p",
+                 json.dumps([{"op": "remove", "path": f"/data/{_json_pointer_token(cm_key)}"}]))
+    if rr.returncode != 0:
+        f["infra_fail"] = f"configkey: removing {cm_name}/{cm_key} failed: {rr.stderr.strip()[:120]}"
+        return
+    rx = kubectl("-n", NS, "exec", victim, "-c", MAIN_CONTAINER, "--", "sh", "-c", "kill 1")
+    if rx.returncode != 0:
+        f["infra_fail"] = f"configkey: restarting the runner of {victim} failed: {rx.stderr.strip()[:120]}"
+        return
+    f["notes"].append(f"fault fired: configkey {cm_name}/{cm_key} removed and the runner of {victim} "
+                      f"restarted (instance {f['crash_inst']})")
+    print(f"    ⚡ {f['notes'][-1]}")
+
+
+def _ir_row_phase(case_id, comp, inst):
+    """Phase of one Instance's row in its Component's InferenceReplica status
+    ("" when the row or the object cannot be read)."""
+    r = kubectl("-n", NS, "get", "inferencereplicas", "-l", f"ome.io/inferenceservice={case_id}", "-o", "json")
+    if r.returncode != 0:
+        return ""
+    try:
+        items = json.loads(r.stdout).get("items", []) or []
+    except Exception:
+        return ""
+    for it in items:
+        if (it.get("spec") or {}).get("component") != comp:
+            continue
+        for row in _instance_rows(it.get("status") or {}):
+            if str(row.get("index")) == str(inst):
+                return str(row.get("phase") or "")
+    return ""
+
+
+def _docker(*args):
+    """The docker CLI that owns the KIND nodes."""
+    return subprocess.run([DOCKER_BIN, *args], capture_output=True, text=True)
+
+
+def _nodes_info():
+    """{node: {"control_plane": bool}} of the cluster's Nodes; {} when they
+    cannot be listed."""
+    r = kubectl("get", "nodes", "-o", "json")
+    if r.returncode != 0:
+        return {}
+    try:
+        items = json.loads(r.stdout).get("items", []) or []
+    except Exception:
+        return {}
+    out = {}
+    for it in items:
+        meta = it.get("metadata") or {}
+        if meta.get("name"):
+            out[meta["name"]] = {"control_plane": CONTROL_PLANE_LABEL in (meta.get("labels") or {})}
+    return out
+
+
+def _node_is_container(node):
+    """True when a running container of this host's docker carries the
+    Node's name, which is how KIND names its nodes."""
+    d = _docker("inspect", "--format", "{{.State.Running}}", node)
+    return d.returncode == 0 and (d.stdout or "").strip() == "true"
+
+
+def _node_fault_capability():
+    """None when node:notready can run here, else why it cannot: the docker
+    CLI must be on PATH and some Node must be a running container of that
+    name — a KIND cluster this host's docker owns."""
+    if shutil.which(DOCKER_BIN) is None:
+        return f"{DOCKER_BIN} is not on PATH"
+    nodes = _nodes_info()
+    if not nodes:
+        return "the cluster's Nodes cannot be listed"
+    if not any(_node_is_container(n) for n in sorted(nodes)):
+        return "no Node is a running container of this host's docker (not a KIND cluster it owns)"
+    return None
+
+
+def _manager_nodes():
+    """The nodes hosting a manager pod; losing one would stop the controller
+    under test along with the victim."""
+    r = kubectl("-n", CTRL_NS, "get", "pod", "-l", CTRL_SELECTOR, "-o", "jsonpath={.items[*].spec.nodeName}")
+    return set((r.stdout or "").split()) if r.returncode == 0 else set()
+
+
+def _node_pick(pod_state, old_hashes, comp):
+    """(victim pod, its node) by the break rule over the pods whose node may
+    lose its kubelet: a worker that is a running container and hosts no
+    manager pod. (None, reason) when no pod qualifies."""
+    nodes, managers, allowed = _nodes_info(), _manager_nodes(), {}
+    eligible = {}
+    for name, p in pod_state.items():
+        node = (p or {}).get("node")
+        if not p or not node:
+            continue
+        if node not in allowed:
+            info = nodes.get(node)
+            allowed[node] = (bool(info) and not info["control_plane"] and node not in managers
+                             and _node_is_container(node))
+        if allowed[node]:
+            eligible[name] = p
+    victim = _crashloop_pick_pod(eligible, old_hashes, comp)
+    if not victim:
+        return None, (f"no {comp} pod sits on a worker that is a running container and hosts no manager pod "
+                      f"(nodes under the case: {', '.join(sorted(allowed)) or 'none'})")
+    return victim, pod_state[victim]["node"]
+
+
+def _node_ready(node):
+    r = kubectl("get", "node", node, "-o", 'jsonpath={.status.conditions[?(@.type=="Ready")].status}')
+    return r.returncode == 0 and (r.stdout or "").strip() == "True"
+
+
+def _node_restore(f):
+    """Start the kubelet again and drop the marker. Idempotent: the lift
+    calls it once its phase arrives, the end-of-case cleanup calls it again."""
+    if f.get("kubelet_restored") or not f.get("node"):
+        return True
+    d = _docker("exec", f["node"], "systemctl", "start", "kubelet")
+    if d.returncode == 0:
+        f["kubelet_restored"] = True
+        kubectl("label", "node", f["node"], f"{KUBELET_LABEL}-")
+    return d.returncode == 0
+
+
+def _fault_node_fire(f, pod_state, old_hashes):
+    """Stop the kubelet of the node hosting the victim. The restore is
+    registered and the node marked before the stop, so the cleanup and the
+    end-of-run sweep find it however the case ends. No eligible node is a
+    skip, not a failure."""
+    comp = f.get("victimcomp") or BREAK_DEFAULT_COMP
+    victim, node = _node_pick(pod_state, old_hashes, comp)
+    if not victim:
+        f["skip"] = f"node fault unavailable here: {node}"
+        f["notes"].append(f"ⓘ {f['skip']}")
+        return
+    state = pod_state.get(victim) or {}
+    f.update(crash_pod=victim, crash_inst=str(state.get("inst", "0")), crash_comp=state.get("comp", comp),
+             crash_hash=state.get("hash", ""), crash_uid=state.get("uid", ""), node=node,
+             bite="its node NotReady with no pod serving", cause=f"the kubelet of node {node}",
+             kubelet_restored=False)
+    _FAULT_CLEANUPS.append(("kubelet", f))   # registered BEFORE the stop
+    kubectl("label", "node", node, f"{KUBELET_LABEL}={f['case_id']}", "--overwrite")
+    d = _docker("exec", node, "systemctl", "stop", "kubelet")
+    if d.returncode != 0:
+        f["infra_fail"] = f"node: stopping the kubelet of {node} failed: {(d.stderr or '').strip()[:120]}"
+        return
+    f["notes"].append(f"fault fired: node {node} kubelet stopped under {victim} ({comp} instance {f['crash_inst']})")
+    print(f"    ⚡ {f['notes'][-1]}")
+
+
+def _instance_relocated(pods, pre_uids, node):
+    """True when the Instance is Ready and serving on pods that are all new
+    and none of which sits on `node`."""
+    return _instance_rebuilt(pods, pre_uids) and all(p.get("node") and p["node"] != node for _n, p in pods)
 
 
 def _isvc_events_since(case_id, since_epoch):
@@ -2205,38 +2667,75 @@ def _isvc_events_since(case_id, since_epoch):
     return out
 
 
-def _crashloop_checks(f, pod_state, old_hashes, trigger_ts, verdict, notes, checks):
-    """The crashloop verdict: the broken Instance ended on the new revision
-    with its pods serving, and no repair was recorded for it after the bump.
-    A repair on the old revision is the failure this fault exists to catch:
-    the Instance's revision is not the roll target, so the roll owns it."""
-    if not f or f.get("kind") != "crashloop" or not f.get("fired") or f.get("infra_fail"):
+def _instance_pods(pod_state, comp, inst):
+    """The alive pods of one Instance, sorted by name."""
+    return [(n, p) for n, p in sorted(pod_state.items())
+            if p and p["alive"] and p.get("comp") == comp and str(p.get("inst", "0")) == str(inst)]
+
+
+def _instance_rebuilt(pods, pre_uids):
+    """True when the Instance's alive pods are all Ready and serving and none
+    of them is a pod the fault hit (every UID is new)."""
+    return bool(pods) and all(p.get("ready") and p.get("serving") and p.get("uid")
+                              and p["uid"] not in pre_uids for _n, p in pods)
+
+
+def _crashloop_checks(f, pod_state, old_hashes, trigger_ts, verdict, notes, checks, bumped=None):
+    """The break verdict after a roll. A victim on a bumped Component ended
+    on the new revision with its pods serving, and no repair was recorded for
+    it after the bump: a repair on the old revision is the failure this fault
+    exists to catch, since the Instance's revision is not the roll target and
+    the roll owns it. A victim on a sibling nobody bumped has no new revision
+    to reach, so the repair owns it: it must be rebuilt, Ready and serving on
+    its running revision, with the repair recorded."""
+    if not f or f.get("kind") not in BREAK_FAULTS or not f.get("fired") or f.get("infra_fail"):
         return verdict
     inst, comp = f["crash_inst"], f["crash_comp"]
-    pods = [(n, p) for n, p in sorted(pod_state.items())
-            if p and p["alive"] and p.get("comp") == comp and str(p.get("inst", "0")) == inst]
-    off = [n for n, p in pods if not p.get("hash") or p["hash"] in (old_hashes or set())]
-    down = [n for n, p in pods if not (p.get("ready") and p.get("serving"))]
-    if not pods or off or down:
-        verdict = "FAIL"
-        notes.append(f"crashloop Instance {comp}/{inst} did not end on the new revision serving "
-                     f"(pods={len(pods)} old-revision={off} not-serving={down})")
-        checks.append(f"  ✗ crashloop: {comp} Instance {inst} must end on the new revision and serving; "
-                      f"pods={len(pods)} still old-revision={off} not-serving={down}")
-    else:
-        checks.append(f"  ✓ crashloop: {comp} Instance {inst} ended on the new revision with {len(pods)} pod(s) serving")
+    pods = _instance_pods(pod_state, comp, inst)
     key = f"component={comp} instance={inst}"
     repairs = [m for reason, m in _isvc_events_since(f["case_id"], trigger_ts or 0)
                if reason == "RestartTriggered" and key in m]
+    if bumped is not None and comp not in bumped:
+        survivors = [n for n, p in pods if p.get("uid") and p["uid"] == f.get("crash_uid")]
+        down = [n for n, p in pods if not (p.get("ready") and p.get("serving"))]
+        if not pods or survivors or down:
+            verdict = "FAIL"
+            notes.append(f"{f['kind']} sibling Instance {comp}/{inst} was not rebuilt to serving "
+                         f"(pods={len(pods)} broken-pod-survives={survivors} not-serving={down})")
+            checks.append(f"  ✗ {f['kind']}: sibling {comp} Instance {inst} (not bumped) must be rebuilt and serving; "
+                          f"pods={len(pods)} broken pod still there={survivors} not-serving={down}")
+        else:
+            checks.append(f"  ✓ {f['kind']}: sibling {comp} Instance {inst} (not bumped) was rebuilt with {len(pods)} pod(s) serving")
+        if repairs:
+            checks.append(f"  ✓ {f['kind']}: a RestartTriggered event names sibling {comp} Instance {inst}: {repairs[0][:160]}")
+        else:
+            verdict = "FAIL"
+            notes.append(f"{f['kind']} sibling Instance {comp}/{inst}: no RestartTriggered event named it")
+            checks.append(f"  ✗ {f['kind']}: no RestartTriggered event named sibling {comp} Instance {inst} "
+                          f"(nothing bumped it, so only a repair can own its rebuild)")
+        if f.get("kills") is not None and f["form"] == "load":
+            checks.append(f"  ⓘ {f['kind']}: runner killed {f['kills']} time(s) while the pod ran the old revision")
+        return verdict
+    off = [n for n, p in pods if not p.get("hash") or p["hash"] in (old_hashes or set())]
+    down = [n for n, p in pods if not (p.get("ready") and p.get("serving"))]
+    kind = f["kind"]
+    if not pods or off or down:
+        verdict = "FAIL"
+        notes.append(f"{kind} Instance {comp}/{inst} did not end on the new revision serving "
+                     f"(pods={len(pods)} old-revision={off} not-serving={down})")
+        checks.append(f"  ✗ {kind}: {comp} Instance {inst} must end on the new revision and serving; "
+                      f"pods={len(pods)} still old-revision={off} not-serving={down}")
+    else:
+        checks.append(f"  ✓ {kind}: {comp} Instance {inst} ended on the new revision with {len(pods)} pod(s) serving")
     if repairs:
         verdict = "FAIL"
-        notes.append(f"crashloop Instance {comp}/{inst} was repaired after the bump: {repairs[0][:120]}")
-        checks.append(f"  ✗ crashloop: a repair was recorded for {comp} Instance {inst} after the bump "
+        notes.append(f"{kind} Instance {comp}/{inst} was repaired after the bump: {repairs[0][:120]}")
+        checks.append(f"  ✗ {kind}: a repair was recorded for {comp} Instance {inst} after the bump "
                       f"(its revision was not the roll target): {repairs[0][:160]}")
     else:
-        checks.append(f"  ✓ crashloop: no RestartTriggered event named {comp} Instance {inst} after the bump")
+        checks.append(f"  ✓ {kind}: no RestartTriggered event named {comp} Instance {inst} after the bump")
     if f.get("kills") is not None and f["form"] == "load":
-        checks.append(f"  ⓘ crashloop: runner killed {f['kills']} time(s) while the pod ran the old revision")
+        checks.append(f"  ⓘ {kind}: runner killed {f['kills']} time(s) while the pod ran the old revision")
     return verdict
 
 
@@ -2247,14 +2746,14 @@ def _fault_tick(ctx):
       rotating  → first observation of a surge/updated pod post-trigger;
       migrating → migration accept observed (_migrate sets ctx['fault_migrating'])."""
     f = ctx.get("fault")
-    if not f or f["fired"] or f["kind"] not in ("podkill", "ctrlrestart", "crashloop"):
+    if not f or f["fired"] or (f["kind"] not in ("podkill", "ctrlrestart") and f["kind"] not in BREAK_FAULTS):
         return
-    if ctx.get("trigger_ts") is None:
+    if ctx.get("trigger_ts") is None or _fault_at_idle(f):
         return
     ph = f["param"]
-    if ph == "settling" or f["kind"] == "crashloop":
-        # A crashloop breaks its pod the moment the bump has landed, so the
-        # Instance is off the target before the crash is ever observed.
+    if ph == "settling" or f["kind"] in BREAK_FAULTS:
+        # A break hits its pod the moment the bump has landed, so the
+        # Instance is off the target before the break is ever observed.
         due = True
     elif ph == "rotating":
         old = ctx.get("old_hashes")
@@ -2278,13 +2777,346 @@ def _fault_finalize(f, verdict, notes, checks):
     for x in f["notes"]:
         notes.append(x)
         checks.append(f"  ⓘ {x}")
-    if f["kind"] in ("podkill", "ctrlrestart", "crashloop") and not f["fired"]:
+    if f["kind"] not in ("quota", "cordon") and not f["fired"]:
         checks.append(f"  ⓘ fault {f['kind']}:{f['param']} never reached its phase hook (not fired)")
     if f["infra_fail"]:
         verdict = "INFRA-FAIL"
         notes.append(f"INFRA-FAIL: {f['infra_fail']}")
         checks.append(f"  ✗ INFRA-FAIL (fault apparatus): {f['infra_fail']}")
     return verdict
+
+
+# ── Persistent faults on the idle service (during=idle) ──────────────────────
+def _idle_break_expect(f, info, hdr):
+    """What a break at idle is expected to come to: the header's expect=,
+    else held when the victim Component is a rollout-group member (a group
+    holds repairs while no run is open), else repaired."""
+    if hdr.get("expect") in IDLE_BREAK_EXPECTS:
+        return hdr["expect"]
+    comp = (f or {}).get("victimcomp") or BREAK_DEFAULT_COMP
+    return "held" if comp in (info.get("members") or []) else "repaired"
+
+
+def _idle_break_checks(f, expect, rebuilt, rebuilt_at, events, verdict, notes, checks):
+    """The idle-break verdict. repaired: the Instance was rebuilt (every pod
+    new, Ready and serving) within the budget and a RestartTriggered event
+    names it. held: nothing rebuilt it across the hold window and a
+    RepairHeld event names it; a silent hold is not the documented one."""
+    inst, comp, kind = f["crash_inst"], f["crash_comp"], f["kind"]
+    key = f"component={comp} instance={inst}"
+    repairs = [m for reason, m in events if reason == "RestartTriggered" and key in m]
+    holds = [m for reason, m in events if reason == "RepairHeld" and key in m]
+    if expect == "repaired":
+        if rebuilt:
+            checks.append(f"  ✓ {kind} at idle: {comp} Instance {inst} was rebuilt and serves again")
+        else:
+            verdict = "FAIL"
+            notes.append(f"{kind} at idle: {comp} Instance {inst} was not repaired within budget")
+            checks.append(f"  ✗ {kind} at idle: {comp} Instance {inst} was never rebuilt to Ready+serving within budget")
+        if repairs:
+            checks.append(f"  ✓ {kind} at idle: a RestartTriggered event names {comp} Instance {inst}: {repairs[0][:160]}")
+        else:
+            verdict = "FAIL"
+            notes.append(f"{kind} at idle: no RestartTriggered event named {comp} Instance {inst}")
+            checks.append(f"  ✗ {kind} at idle: no RestartTriggered event named {comp} Instance {inst} "
+                          f"(a rebuild the product did not record as a repair is not its repair)")
+        if holds:
+            checks.append(f"  ⓘ {kind} at idle: the repair was held before it ran: {holds[0][:160]}")
+        return verdict
+    if rebuilt_at is not None:
+        verdict = "FAIL"
+        notes.append(f"{kind} at idle: {comp} Instance {inst} was rebuilt {rebuilt_at:.0f}s in despite the expected hold")
+        checks.append(f"  ✗ {kind} at idle: {comp} Instance {inst} was rebuilt {rebuilt_at:.0f}s after the fault "
+                      f"(the rollout group was expected to hold the repair)")
+    else:
+        checks.append(f"  ✓ {kind} at idle: {comp} Instance {inst} stayed as the fault left it across the {IDLE_HOLD_S}s hold")
+    if holds:
+        checks.append(f"  ✓ {kind} at idle: a RepairHeld event names {comp} Instance {inst}: {holds[0][:160]}")
+    else:
+        verdict = "FAIL"
+        notes.append(f"{kind} at idle: no RepairHeld event named {comp} Instance {inst}")
+        checks.append(f"  ✗ {kind} at idle: no RepairHeld event named {comp} Instance {inst} (a silent hold is not the documented one)")
+    if repairs:
+        checks.append(f"  ⓘ {kind} at idle: a RestartTriggered event also names it: {repairs[0][:160]}")
+    return verdict
+
+
+def _idle_budget(ctx):
+    """The idle handlers' watch budget: the rotate budget for the fleet."""
+    N, ppi = ctx["N"], ctx["pods_per_inst"]
+    return min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * sum(N[c] * ppi[c] for c in ctx["configured"]))
+
+
+def _idle_peak_checks(ctx, verdict, notes, checks, hard=True):
+    """Nobody bumped the service: a repair rebuilds in place, so no Component
+    may ever have had more Instances alive than it was given. Informational
+    (hard=False) where a replacement may legitimately come up beside the
+    pods it replaces."""
+    for c in sorted(ctx["configured"]):
+        n, peak = ctx["N"][c], ctx["peaks"][c]
+        if peak > n and hard:
+            verdict = "FAIL"
+            notes.append(f"{c} surged to {peak} on an idle service")
+            checks.append(f"  ✗ {c} peak {peak} > N={n} — something surged a service nobody bumped")
+        elif peak > n:
+            checks.append(f"  ⓘ {c} peak {peak} > N={n} (a replacement came up beside the pods it replaced)")
+        else:
+            checks.append(f"  ✓ {c} peak {peak} ≤ N={n} (a repair rebuilds in place)")
+    return verdict
+
+
+def _lift_cause(f):
+    """Lift the fault's cause; True when it is gone."""
+    if f["kind"] == "configkey":
+        return _configkey_restore(f)
+    if f["kind"] == "node":
+        return _node_restore(f)
+    return False
+
+
+def _lift_checks(f, expect, lift, out, hdr, verdict, notes, checks):
+    """The lift verdict. The fault must have bitten (apparatus otherwise) and
+    the lift phase must have arrived: a Failed row for after-failed, the
+    Instance back on another node for after-recover. A park under a dead
+    node is judged before the lift (nothing rebuilt the Instance while the
+    node was down, as configured without a force delete). Once the cause is
+    gone, heals and repaired need the Instance Ready and serving again on
+    its running revision with no bump and no reset mailbox, and a parked
+    Failed row must stay Failed with nothing serving across the hold window
+    — the documented behaviour, tied to the issue the header names."""
+    inst, comp, kind = f["crash_inst"], f["crash_comp"], f["kind"]
+    bite, cause = f.get("bite", "the fault"), f.get("cause", "the cause")
+    if out.get("bitten_at") is None:
+        f["infra_fail"] = f"{kind}: {comp} Instance {inst} never showed {bite}"
+        return verdict
+    checks.append(f"  ✓ {kind}: {comp} Instance {inst} showed {bite} {out['bitten_at']:.0f}s after the fault")
+    if lift == "after-failed":
+        if out.get("failed_at") is None:
+            verdict = "FAIL"
+            notes.append(f"{kind}: {comp} Instance {inst} never escalated to Failed within budget")
+            checks.append(f"  ✗ {kind}: {comp} Instance {inst} never escalated to Failed within budget (lift={lift} waits for it)")
+            return verdict
+        checks.append(f"  ✓ {kind}: {comp} Instance {inst} row went Failed {out['failed_at']:.0f}s after the fault")
+    if lift == "after-recover":
+        if out.get("recovered_at") is None:
+            verdict = "FAIL"
+            notes.append(f"{kind}: {comp} Instance {inst} was not relocated while {cause} was down")
+            checks.append(f"  ✗ {kind}: {comp} Instance {inst} never came back Ready and serving on another node "
+                          f"while {cause} was down (relocation needs the force-delete policy)")
+            return verdict
+        checks.append(f"  ✓ {kind}: {comp} Instance {inst} relocated — Ready and serving on another node "
+                      f"{out['recovered_at']:.0f}s after the fault")
+    if expect == "parked" and kind == "node":
+        if out.get("park_broken") is not None:
+            verdict = "FAIL"
+            notes.append(f"{kind}: {comp} Instance {inst} was rebuilt {out['park_broken']:.0f}s after the fault despite the expected park")
+            checks.append(f"  ✗ {kind}: {comp} Instance {inst} was rebuilt {out['park_broken']:.0f}s after the fault "
+                          f"(expected to stay down: no force delete configured)")
+        else:
+            checks.append(f"  ✓ {kind}: {comp} Instance {inst} stayed down, not rebuilt elsewhere, across the {IDLE_HOLD_S}s hold "
+                          f"while {cause} was down (as configured)")
+    if out.get("lifted_at") is None:
+        f["infra_fail"] = f"{kind}: {cause} could not be lifted"
+        return verdict
+    checks.append(f"  ✓ {kind}: {cause} lifted {out['lifted_at']:.0f}s after the fault")
+    if expect in ("heals", "repaired"):
+        if out.get("healed_at") is None:
+            verdict = "FAIL"
+            notes.append(f"{kind}: {comp} Instance {inst} did not return to Ready+serving after the lift (row {out.get('phase_after') or '?'})")
+            checks.append(f"  ✗ {kind}: {comp} Instance {inst} never returned to Ready+serving within budget after the lift "
+                          f"(row phase {out.get('phase_after') or '?'})")
+        else:
+            checks.append(f"  ✓ {kind}: {comp} Instance {inst} Ready and serving again {out['healed_at']:.0f}s after the lift")
+        if out.get("new_hash"):
+            verdict = "FAIL"
+            notes.append(f"{kind}: a new revision appeared while healing")
+            checks.append(f"  ✗ {kind}: a new revision appeared — the heal must happen on the running revision, with no bump")
+        else:
+            checks.append(f"  ✓ {kind}: running revision unchanged (no bump)")
+        if out.get("reset_used"):
+            verdict = "FAIL"
+            notes.append(f"{kind}: the reset mailbox was written")
+            checks.append(f"  ✗ {kind}: {RESET_ANNO} is set on the ISVC — a heal that needed the reset mailbox is not a self-heal")
+        else:
+            checks.append(f"  ✓ {kind}: healed without the reset mailbox ({RESET_ANNO} absent)")
+        return verdict
+    if expect != "parked" or kind != "configkey":
+        return verdict
+    issue = f"issue #{hdr.get('issue')}" if hdr.get("issue") else "no issue named"
+    if out.get("park_broken") is not None:
+        verdict = "FAIL"
+        notes.append(f"{kind}: the Failed row healed {out['park_broken']:.0f}s after the lift — the park is stale ({issue})")
+        checks.append(f"  ✗ {kind}: {comp} Instance {inst} left the park {out['park_broken']:.0f}s after the lift "
+                      f"(it served or its row left Failed): the documented behaviour changed, flip expect=heals ({issue})")
+    else:
+        checks.append(f"  ✓ {kind}: {comp} Instance {inst} stayed Failed with nothing serving across the {IDLE_HOLD_S}s hold "
+                      f"after the lift — the documented behaviour ({issue})")
+    return verdict
+
+
+def _idle_lift(ctx, f, hdr):
+    """Watch a lift fault: the bite, the lift phase (and, under a dead node,
+    the park before the lift), the lift, and what the Instance does once
+    the cause is gone."""
+    case_id, comp, inst = ctx["case_id"], f["crash_comp"], f["crash_inst"]
+    lift, expect = str(hdr.get("lift")), str(hdr.get("expect"))
+    budget, t0 = _idle_budget(ctx), ctx["trigger_ts"]
+    pre_uids = {p["uid"] for _n, p in _instance_pods(ctx["pod_state"], comp, inst) if p.get("uid")}
+    out = {"bitten_at": None, "failed_at": None, "recovered_at": None, "lifted_at": None, "healed_at": None,
+           "park_broken": None, "phase_after": "", "new_hash": False, "reset_used": False}
+
+    def pods():
+        return _instance_pods(ctx["pod_state"], comp, inst)
+
+    def serving():
+        ps = pods()
+        return bool(ps) and all(p.get("ready") and p.get("serving") for _n, p in ps)
+
+    def rebuilt_pod():
+        return any(p.get("uid") and p["uid"] not in pre_uids for _n, p in pods())
+
+    def bitten():
+        if f["kind"] == "node":
+            return not _node_ready(f["node"]) and not any(p.get("ready") and p.get("serving") for _n, p in pods())
+        return _pod_waiting_reason(_get_pod(f["crash_pod"])) == f.get("bite")
+
+    print(f"  Phase 3: waiting for the fault to bite, then for lift={lift} (≤{budget}s)")
+    bitten_since, due, last_ir = None, False, 0.0
+    while time.time() - t0 < budget and not ctx["closed"]:
+        _read_one(ctx)
+        now = time.time()
+        if bitten():
+            bitten_since = bitten_since or now
+            if out["bitten_at"] is None:
+                out["bitten_at"] = now - t0
+                print(f"    bite: {comp} Instance {inst} shows {f.get('bite')} ({out['bitten_at']:.0f}s)")
+        else:
+            bitten_since = None
+        if lift == "after-settle":
+            due = bitten_since is not None and now - bitten_since >= LIFT_SETTLE_S
+        elif lift == "after-recover":
+            if out["bitten_at"] is not None and _instance_relocated(pods(), pre_uids, f.get("node")):
+                out["recovered_at"] = now - t0
+                due = True
+        elif out["bitten_at"] is not None and now - last_ir >= 2.0:
+            last_ir = now
+            if _ir_row_phase(case_id, comp, inst) == "Failed":
+                out["failed_at"] = now - t0
+                due = True
+        if due:
+            break
+    state = "LIFT_NOT_DUE"
+    if due and expect == "parked" and f["kind"] == "node":
+        # The park is the fault's own window: hold it before the lift.
+        print(f"  Phase 4a: holding {IDLE_HOLD_S}s with {f.get('cause')} down — nothing may rebuild {comp} Instance {inst}")
+        hold_end = time.time() + IDLE_HOLD_S
+        while time.time() < hold_end and not ctx["closed"]:
+            _read_one(ctx)
+            if rebuilt_pod():
+                out["park_broken"] = time.time() - t0
+                break
+        state = "PARKED" if out["park_broken"] is None else "REBUILT"
+    if due:
+        print(f"  Phase 4: lift — {f.get('cause', 'the cause')} put back")
+        if _lift_cause(f):
+            lifted_ts = time.time()
+            out["lifted_at"] = lifted_ts - t0
+            if expect in ("heals", "repaired"):
+                print(f"  Phase 5: watching {comp} Instance {inst} for the heal (≤{budget}s)")
+                stable, state = None, "NOT_HEALED"
+                while time.time() - lifted_ts < budget and not ctx["closed"]:
+                    _read_one(ctx)
+                    if serving():
+                        stable = stable or time.time()
+                        if time.time() - stable >= STABILITY_S:
+                            out["healed_at"] = stable - lifted_ts
+                            ctx["converged_at"] = stable - t0
+                            state = "HEALED"
+                            break
+                    else:
+                        stable = None
+            elif expect == "relocated":
+                state = "RELOCATED"
+                ctx["converged_at"] = out["recovered_at"]
+            elif f["kind"] == "configkey":
+                print(f"  Phase 5: watching {comp} Instance {inst} for the park (≤{IDLE_HOLD_S}s)")
+                hold_end, state = time.time() + IDLE_HOLD_S, "PARKED"
+                while time.time() < hold_end and not ctx["closed"]:
+                    _read_one(ctx)
+                    if serving() or _ir_row_phase(case_id, comp, inst) != "Failed":
+                        out["park_broken"] = time.time() - lifted_ts
+                        state = "HEALED"
+                        break
+    out["phase_after"] = _ir_row_phase(case_id, comp, inst)
+    out["new_hash"] = any(p and p["alive"] and p.get("hash") and p["hash"] not in ctx["old_hashes"]
+                          for p in ctx["pod_state"].values())
+    out["reset_used"] = RESET_ANNO in (_isvc_annotations(case_id) or {})
+    verdict, notes, checks = "PASS", [], []
+    verdict = _lift_checks(f, expect, lift, out, hdr, verdict, notes, checks)
+    # A relocation may bring the replacement up beside the stuck pods, so
+    # the no-surge claim is informational there.
+    verdict = _idle_peak_checks(ctx, verdict, notes, checks, hard=(expect != "relocated"))
+    return state, verdict, notes, checks
+
+
+def _idle_fault(case_id, yaml_file, desc, hdr):
+    """during=idle: fire the case's persistent fault on the settled service
+    and never bump. A break is judged on what the product does about it on
+    its own: a repair rebuilds the Instance within the budget, or a rollout
+    group holds the repair and records the hold. A lift fault is judged on
+    what the Instance does once its cause is lifted. A fault whose apparatus
+    this cluster lacks records SKIP with the reason."""
+    if str(hdr.get("fault", "")).partition(":")[0] == "node":
+        reason = _node_fault_capability()
+        if reason:
+            print(f"  ⓘ node fault unavailable here: {reason}")
+            return _write_fail(case_id, desc, hdr, "SKIP", f"node fault unavailable here: {reason}")
+    ctx, err = _setup_and_ready(case_id, yaml_file, hdr)
+    if err:
+        return _write_fail(case_id, desc, hdr, *err)
+    f = ctx["fault"]
+    N, configured, ppi = ctx["N"], ctx["configured"], ctx["pods_per_inst"]
+    expect = hdr.get("expect") if f["kind"] in LIFT_FAULTS else _idle_break_expect(f, ctx["info"], hdr)
+    print(f"  Phase 2: {f['kind']} fault on the idle service (expect {expect}; no bump follows)")
+    _fault_fire(f, ctx["pod_state"], ppi, ctx["old_hashes"])
+    ctx["trigger_ts"] = time.time()
+    if f.get("skip"):
+        return _finish(case_id, desc, hdr, ctx, "SKIP", "SKIP", [f["skip"]], [])
+    if f["infra_fail"]:
+        return _finish(case_id, desc, hdr, ctx, "INFRA-FAIL", "INFRA-FAIL", [], [])
+    if f["kind"] in LIFT_FAULTS:
+        return _finish(case_id, desc, hdr, ctx, *_idle_lift(ctx, f, hdr))
+    comp, inst = f["crash_comp"], f["crash_inst"]
+    pre_uids = {p["uid"] for _n, p in _instance_pods(ctx["pod_state"], comp, inst) if p.get("uid")}
+    budget = _idle_budget(ctx)
+    window = budget if expect == "repaired" else IDLE_HOLD_S
+    print(f"  Phase 3: watching {comp} Instance {inst} for {'a repair' if expect == 'repaired' else 'the hold'} (≤{window}s)")
+    state, stable, rebuilt_at = "WATCHING", None, None
+    while time.time() - ctx["trigger_ts"] < window and not ctx["closed"]:
+        _read_one(ctx)
+        pods = _instance_pods(ctx["pod_state"], comp, inst)
+        if rebuilt_at is None and any(p.get("uid") and p["uid"] not in pre_uids for _n, p in pods):
+            rebuilt_at = time.time() - ctx["trigger_ts"]
+        if expect == "held":
+            if rebuilt_at is not None:
+                break
+            continue
+        if _instance_rebuilt(pods, pre_uids):
+            stable = stable or time.time()
+            if time.time() - stable >= STABILITY_S:
+                state = "REPAIRED"
+                ctx["converged_at"] = stable - ctx["trigger_ts"]
+                break
+        else:
+            stable = None
+    if expect == "held":
+        state = "HELD" if rebuilt_at is None else "REPAIRED"
+    verdict, notes, checks = "PASS", [], []
+    events = _isvc_events_since(case_id, ctx["trigger_ts"])
+    verdict = _idle_break_checks(f, expect, state == "REPAIRED" and expect == "repaired",
+                                 rebuilt_at if expect == "held" else None, events, verdict, notes, checks)
+    verdict = _idle_peak_checks(ctx, verdict, notes, checks)
+    return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
 
 
 def write_result(case_id, desc, Ne, Nd, Nr, ce, cd, cr, peaks, final,
@@ -2428,7 +3260,10 @@ HDR_VALIDATORS = {
     # accrued (the peak of status.canary.analysisFailedChecks) — the transient
     # shape's proof that the breach was sampled under the budget, not skipped.
     "minfails": lambda v: isinstance(v, int) and v >= 1,
-    "expect": lambda v: v in {"reject", "roll", "noroll", "recover", "fail"},
+    # expect= states the outcome a case is judged against where more than one
+    # is possible: reject/roll/noroll/recover/fail for their modes, and for a
+    # persistent fault at idle what the product does about the break.
+    "expect": lambda v: v in {"reject", "roll", "noroll", "recover", "fail"} | IDLE_EXPECTS_ALL,
     "reason": lambda v: bool(str(v)),
     "rt": lambda v: bool(str(v)),
     # edit= names the field the trigger changes. runtimerev: which runtime
@@ -2436,14 +3271,18 @@ HDR_VALIDATORS = {
     # edit=env adds a TEST_REV runner env override to the annotation bump, a
     # pod-template diff beyond container images, so an in-place strategy on a
     # single-pod Component resolves to a recreate.
-    "edit": lambda v: v in {"material", "noop", "image", "resources", "env"},
+    # edit=strategy:<type> / edit=restartPolicy:<policy> are mid-roll edits of
+    # every bumped member's lifecycle at during=settling|rotating.
+    "edit": lambda v: v in {"material", "noop", "image", "resources", "env"} or _midroll_edit(v) is not None,
     "img": lambda v: bool(str(v)) and not runtime_fixtures.unknown_tokens(str(v)),
     "break": lambda v: v == "stuck",
     # Scenario knobs. during= times a destructive op against an in-flight one:
     # recreate deletes mid-rollout/mid-migration; migrate files its request
     # mid-rotate (both must complete; ordering unasserted — the product may
-    # preempt the rollout); runtimerev edits the CSR mid-rotate.
-    "during": lambda v: v in {"rollout", "migrate"} or _canary_hook_ok(v),
+    # preempt the rollout); runtimerev edits the CSR mid-rotate. In rollout
+    # mode during=idle fires a persistent fault on the settled service and
+    # never bumps.
+    "during": lambda v: v in {"rollout", "migrate", IDLE_FAULT_PHASE} | EDIT_HOOKS or _canary_hook_ok(v),
     "remove": lambda v: v in {"decoder", "router"},   # compremove: component patched out
     "readd": lambda v: v == 1,    # compremove: re-apply the manifest, assert round-trip
     "dup": lambda v: v == 1,      # migrate: re-file the same request UUID (dedup contract)
@@ -2537,7 +3376,10 @@ HDR_VALIDATORS = {
     # consumed. lift=1 (migrate + fault=quota): after the bounded-failure
     # contract passes, lift the quota and assert a follow-up request completes.
     "blocked": lambda v: v == 1,
-    "lift": lambda v: v == 1,
+    # lift=<phase> (rollout + a persistent fault at idle): when the fault's
+    # cause is lifted — after-settle once it has visibly bitten, after-failed
+    # once the victim's Instance row is Failed.
+    "lift": lambda v: v == 1 or v in LIFT_PHASES,
 }
 HDR_REQUIRED = ("Ne", "Nd", "Nr", "ceil_e", "ceil_d", "ceil_r")
 
@@ -2611,18 +3453,42 @@ def validate_case_file(path):
         errs.append(f"{path}:1: mode=runtimerev needs rt=<dedicated CSR name>")
     if fields.get("edit") == "image" and "img" not in fields:
         errs.append(f"{path}:1: edit=image needs img=<image-ref>")
+    if _midroll_edit(fields.get("edit")) is not None:
+        if mode != "rollout":
+            errs.append(f"{path}:1: edit={fields['edit']} is a mid-roll edit of a rollout case (mode=rollout)")
+        if str(fields.get("during", "")) not in EDIT_HOOKS:
+            errs.append(f"{path}:1: edit={fields['edit']} needs during={'|'.join(sorted(EDIT_HOOKS))} (the hook it fires at)")
     if mode == "compremove" and "remove" not in fields:
         errs.append(f"{path}:1: mode=compremove needs remove=<component>")
     if "readd" in fields and mode != "compremove":
         errs.append(f"{path}:1: readd=1 only applies to mode=compremove")
     during = str(fields.get("during", ""))
+    fault_kind = str(fields.get("fault", "")).partition(":")[0]
     if during and _canary_hook_ok(during):
         if mode != "canary":
             errs.append(f"{path}:1: during={during} is a canary hook (mode=canary)")
+    elif during == IDLE_FAULT_PHASE:
+        if mode != "rollout":
+            errs.append(f"{path}:1: during={IDLE_FAULT_PHASE} fires a persistent fault on the idle service (mode=rollout)")
+        if fault_kind not in IDLE_FAULTS:
+            errs.append(f"{path}:1: during={IDLE_FAULT_PHASE} needs a persistent fault to fire "
+                        f"(fault={'|'.join(sorted(IDLE_FAULTS))}:…)")
+    elif during in EDIT_HOOKS:
+        if mode != "rollout":
+            errs.append(f"{path}:1: during={during} is a mid-roll edit's hook on a rollout case (mode=rollout)")
+        if _midroll_edit(fields.get("edit")) is None:
+            errs.append(f"{path}:1: during={during} names a mid-roll edit's hook "
+                        f"(needs edit=strategy:<type> or edit=restartPolicy:<policy>)")
     elif during and during not in {"recreate": {"rollout", "migrate"},
                                    "migrate": {"rollout"},
                                    "runtimerev": {"rollout"}}.get(mode, set()):
         errs.append(f"{path}:1: during={during} not supported for mode={mode}")
+    expect = str(fields.get("expect", ""))
+    outcomes = _idle_expects(fault_kind)
+    if expect in IDLE_EXPECTS_ALL and (during != IDLE_FAULT_PHASE or expect not in outcomes):
+        errs.append(f"{path}:1: expect={expect} reads a persistent fault's outcome on the idle service "
+                    f"(needs during={IDLE_FAULT_PHASE}; fault={fields.get('fault') or '(none)'} has outcomes "
+                    f"{', '.join(sorted(outcomes)) or 'none'})")
     for k in ("verb", "verbhold", "bump", "terminal", "prearm", "skipsoak", "cell", "nophase", "verb2", "during2", "timeout",
               "imgcomp", "ratio_tol", "xcheck", "release", "releaseafter", "pairto", "minfails"):
         if k in fields and mode != "canary":
@@ -2641,17 +3507,26 @@ def validate_case_file(path):
         errs.append(f"{path}:1: timeout= is the value verb=timeout-set (or prearm=timeout-set) writes")
     if "victim" in fields and not str(fields.get("fault", "")).startswith("podkill:"):
         errs.append(f"{path}:1: victim= aims a podkill (needs fault=podkill:<hook>)")
-    if "victimcomp" in fields and not str(fields.get("fault", "")).startswith("podkill:"):
-        errs.append(f"{path}:1: victimcomp= aims a podkill at one Component (needs fault=podkill:<phase>)")
+    if "victimcomp" in fields and fault_kind != "podkill" and fault_kind not in BREAK_FAULTS:
+        errs.append(f"{path}:1: victimcomp= aims a podkill or a break at one Component "
+                    f"(needs fault=podkill:<phase> or fault={'|'.join(sorted(BREAK_FAULTS))}:{CRASHLOOP_VICTIM})")
+    if fault_kind in BREAK_FAULTS and "victimcomp" in fields and str(fields["victimcomp"]) not in BREAK_VICTIM_COMPS:
+        errs.append(f"{path}:1: victimcomp={fields['victimcomp']}: a break victim is a pod of "
+                    f"{' or '.join(sorted(BREAK_VICTIM_COMPS))} (the Components a roll targets)")
     crashloop = str(fields.get("fault", "")) == f"crashloop:{CRASHLOOP_VICTIM}"
-    if "form" in fields and not crashloop:
-        errs.append(f"{path}:1: form= says how a crashloop victim fails (needs fault=crashloop:{CRASHLOOP_VICTIM})")
+    if "form" in fields and fault_kind not in BREAK_FAULTS:
+        errs.append(f"{path}:1: form= says how a break victim fails (needs fault={'|'.join(sorted(BREAK_FAULTS))}:{CRASHLOOP_VICTIM})")
     if crashloop and "form" not in fields:
         errs.append(f"{path}:1: fault=crashloop:{CRASHLOOP_VICTIM} needs form=start|load")
-    if crashloop and mode != "rollout":
-        errs.append(f"{path}:1: fault=crashloop:{CRASHLOOP_VICTIM} breaks a pod of the revision a rollout leaves behind (mode=rollout)")
-    if crashloop and fields.get("Ne", 0) == 0:
-        errs.append(f"{path}:1: fault=crashloop:{CRASHLOOP_VICTIM} breaks an engine pod (needs Ne>0)")
+    if fault_kind == "imagepull" and str(fields.get("form", "start")) not in IMAGEPULL_FORMS:
+        errs.append(f"{path}:1: fault=imagepull:{CRASHLOOP_VICTIM} has only form=start: an image that cannot be pulled never runs")
+    if fault_kind in BREAK_FAULTS and mode != "rollout":
+        errs.append(f"{path}:1: fault={fields.get('fault')} breaks a pod of the revision a rollout leaves behind (mode=rollout)")
+    if fault_kind in BREAK_FAULTS:
+        victim_comp = str(fields.get("victimcomp") or BREAK_DEFAULT_COMP)
+        count_key = {"engine": "Ne", "decoder": "Nd"}.get(victim_comp, "Ne")
+        if fields.get(count_key, 0) == 0:
+            errs.append(f"{path}:1: fault={fields.get('fault')} breaks a {victim_comp} pod (needs {count_key}>0)")
     if mode == "canary":
         if "proto" in fields:
             if fields.get("Ne", 0) == 0 or fields.get("Nd", 0) == 0:
@@ -2737,8 +3612,28 @@ def validate_case_file(path):
             errs.append(f"{path}:1: expect=reject with mode=pairing asserts the protocol PATCH is denied — no rotation-phase knobs apply")
     if fields.get("expect") == "fail" and (mode != "migrate" or "fault" not in fields):
         errs.append(f"{path}:1: expect=fail is the migrate-mode bounded-failure contract — needs mode=migrate + fault=")
-    if fields.get("lift") and not (mode == "migrate" and str(fields.get("fault", "")).startswith("quota:")):
+    lift = fields.get("lift")
+    if lift == 1 and not (mode == "migrate" and str(fields.get("fault", "")).startswith("quota:")):
         errs.append(f"{path}:1: lift=1 requires mode=migrate + fault=quota:<n>")
+    if lift in LIFT_PHASES and fault_kind not in LIFT_FAULTS:
+        errs.append(f"{path}:1: lift={lift} lifts a persistent fault's cause "
+                    f"(needs fault=configkey:{CONFIGKEY_PARAM} or fault=node:{NODE_PARAM})")
+    if fault_kind in LIFT_FAULTS:
+        phases = LIFT_PHASES_BY_FAULT[fault_kind]
+        if during != IDLE_FAULT_PHASE:
+            errs.append(f"{path}:1: fault={fields.get('fault')} fires on the idle service (needs during={IDLE_FAULT_PHASE})")
+        if lift not in phases:
+            errs.append(f"{path}:1: fault={fields.get('fault')} needs lift={'|'.join(sorted(phases))} (when the cause is lifted)")
+        if expect not in outcomes:
+            errs.append(f"{path}:1: fault={fields.get('fault')} needs expect={'|'.join(sorted(outcomes))} (what the Instance comes to)")
+        if fault_kind == "configkey" and expect == "parked":
+            if lift != "after-failed":
+                errs.append(f"{path}:1: expect=parked is the Failed row the cause's return does not heal (needs lift=after-failed)")
+            if "issue" not in fields:
+                errs.append(f"{path}:1: expect=parked names the issue the self-heal is tracked under (needs issue=<n>)")
+        if fault_kind == "node" and expect in NODE_LIFTS and lift in phases and lift not in NODE_LIFTS[expect]:
+            errs.append(f"{path}:1: expect={expect} under fault=node:{NODE_PARAM} is read at "
+                        f"lift={'|'.join(sorted(NODE_LIFTS[expect]))}, not lift={lift}")
     if not re.search(rf"\bname:\s*{re.escape(cid)}\b", text):
         errs.append(f"{path}:1: no document with metadata name '{cid}' (run.py gets the ISVC by case id)")
     return errs
@@ -7063,6 +7958,8 @@ def run_case(case_id):
     mode = hdr.get("mode", "rollout")
     if mode != "rollout":
         return run_mode_case(case_id, yaml_file, desc, hdr, mode)
+    if hdr.get("during") == IDLE_FAULT_PHASE:
+        return _idle_fault(case_id, yaml_file, desc, hdr)
     Ne, Nd, Nr = hdr.get("Ne", 0), hdr.get("Nd", 0), hdr.get("Nr", 0)
     ce, cd, cr = hdr.get("ceil_e", Ne), hdr.get("ceil_d", Nd), hdr.get("ceil_r", Nr)
     N = {"engine": Ne, "decoder": Nd, "router": Nr}
@@ -7144,6 +8041,7 @@ def run_case(case_id):
     state = "INIT"
     inv = _inv_new(case_id, hdr)     # continuous invariants (status-truth + endpoints)
     fault = _fault_new(case_id, hdr)  # optional fault=<kind>:<param> plumbing
+    medit = _midroll_new(hdr)        # optional edit=strategy:|restartPolicy: at during=settling|rotating
     pod_state = {}                   # pod_name → {comp, alive, ready, hash, uid, newanno} | None
     peaks = {"engine": 0, "decoder": 0, "router": 0}
     last_counts = None
@@ -7359,6 +8257,8 @@ def run_case(case_id):
                 # iteration; rotating fires once a surge/updated pod is seen.
                 _fault_tick({"fault": fault, "trigger_ts": trigger_ts, "old_hashes": old_hashes,
                              "pod_state": pod_state, "pods_per_inst": pods_per_inst})
+                # Mid-roll edit hook: same settling/rotating rule as the faults.
+                _midroll_tick(medit, case_id, bumped, pod_state, old_hashes, tnow)
                 # Per-Component timing for Sequential ordering/soak.
                 for c in bumped:
                     a, rd, up = agg.get(c, (0, 0, 0))
@@ -7557,7 +8457,15 @@ def run_case(case_id):
             checks.append(f"  ✓ {c} (not bumped) stayed put (peak={peaks[c]}=N, 0 rotated) — isolation held")
 
     # Check 6: in-place strategies must update IN PLACE (no UID rotation).
+    strategy_switched = bool(medit and medit["kind"] == "strategy" and medit["fired"])
     for c in sorted(bumped):
+        if strategy_switched:
+            # The roll finished under another strategy than it started under;
+            # which pods were patched and which rebuilt is not one strategy's
+            # claim. Convergence and the capacity floor still judge the roll.
+            checks.append(f"  ⓘ {c} strategy switched mid-roll ({info['strat'].get(c)} → {medit['value']}): "
+                          f"UID stability is not a claim across the switch")
+            continue
         if edit == "env" and info["strat"].get(c) in IN_PLACE_TYPES:
             # The env edit is a pod-template diff beyond container images, so
             # the controller resolves the in-place strategy to a recreate; UID
@@ -7595,7 +8503,12 @@ def run_case(case_id):
     # the new revision and serving, with no repair recorded for it after the
     # bump. Read against the final watcher state and the ISVC's events.
     if state == "CONVERGED":
-        verdict = _crashloop_checks(fault, pod_state, old_hashes, trigger_ts, verdict, notes, checks)
+        verdict = _crashloop_checks(fault, pod_state, old_hashes, trigger_ts, verdict, notes, checks, bumped=bumped)
+
+    # Check 6c: the mid-roll edit was applied at its hook and the live spec
+    # carries it on every bumped member.
+    if medit:
+        verdict = _midroll_checks(medit, _isvc_spec(case_id), bumped, verdict, notes, checks)
 
     # Check 7: Sequential ordering + soak (only meaningful with ≥2 bumped members in order).
     if state == "CONVERGED" and policy == "Sequential":
@@ -7725,7 +8638,11 @@ def run_case(case_id):
     surge_bumped = [c for c in sorted(bumped) if modes.get(c) == "surge"]
     if surge_bumped:
         ord_viol = {c: order_viol.get(c, 0) for c in surge_bumped if order_viol.get(c, 0) > 0}
-        if ord_viol and hdr.get("order_soft"):
+        if ord_viol and strategy_switched:
+            wc = max(ord_viol, key=ord_viol.get)
+            checks.append(f"  ⚠ surge-before-drain: {wc} drained {ord_viol[wc]} pod(s) ahead of ready surges — "
+                          f"the strategy switched mid-roll to {medit['value']}, which may drain first; informational")
+        elif ord_viol and hdr.get("order_soft"):
             wc = max(ord_viol, key=ord_viol.get)
             checks.append(f"  ⚠ surge-before-drain: {wc} drained {ord_viol[wc]} pod(s) ahead of ready surges — case opted out (order_soft=1, fault-induced drain); informational")
         elif ord_viol:

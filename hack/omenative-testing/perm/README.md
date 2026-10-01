@@ -570,27 +570,156 @@ production-scale improvement too.) Each `batch.py` invocation stamps one `RUN_TS
 shared by its subprocesses, so a run's results land together under
 `results/<RUN_TS>/<feature>/<topo>/` with a `summary.txt`.
 
+### Mid-roll edits (`edit=strategy:<type>`, `edit=restartPolicy:<policy>`)
+
+`edit=strategy:SurgeThenDrain|RecreatePod|InPlaceIfPossible|InPlaceOnly` and
+`edit=restartPolicy:None|RecreateInstanceOnPodRestart` (rollout mode) patch
+`spec.<member>.lifecycle` on every bumped member at a named hook —
+`during=settling` (right after the bump lands) or `during=rotating` (the
+first updated pod observed), the same rule the phase faults use — so a roll
+that started under one strategy or policy finishes under another. The merge
+patch changes only the named field: the `rollingUpdate` budget stays as the
+case declared it, so it has to be valid for both strategies (a drain-first
+strategy cannot roll under `maxUnavailable: 0`), and the header's ceilings
+and floor must be stated for the worse of the two shapes. The usual rollout
+checks judge the roll as a whole; the verdict adds that the edit was applied
+at its hook (a refused patch is `INFRA-FAIL`) and that the live spec carries
+it on every bumped member at the end. Across a strategy switch in-place UID
+stability and surge-before-drain are informational, since the second strategy
+legitimately breaks the first one's shape; convergence onto the new revision,
+isolation, gang atomicity, index partition and the capacity floor stay hard.
+A phase fault (`fault=podkill:rotating`) may share the case.
+
 ### Fault cases: quota isolation, cordon impact, leak remediation
 
 - **`fault=crashloop:old` with `form=start|load`** breaks one old-revision
-  engine pod the moment the bump lands — the highest-index Instance's leader
-  (or single) pod, so the roll reaches it last and the crash is observed on a
+  pod the moment the bump lands — the highest-index Instance's leader (or
+  single) pod of the victim Component (`victimcomp=engine|decoder`, default
+  engine), so the roll reaches it last and the crash is observed on a
   settled row for the whole roll. `form=start` points the live pod at the
   fixture's metrics image, which has no shell, so the fixture command dies at
   every start and the kubelet parks it in CrashLoopBackOff, never Ready again.
   `form=load` execs `kill 1` into the runner every
   `OME_TEST_CRASH_KILL_INTERVAL_S` (default 15) seconds while it is up, so it
   dies after Ready and comes back between crashes; the killer stops as soon as
-  the pod leaves the old revision or is gone. Only the image and an exec are
-  available against a live pod, which is why neither form edits the template.
-  On top of the usual rollout checks the verdict requires that Instance to end
-  on the new revision with its pods serving, and no `RestartTriggered` event
-  naming it after the bump: an Instance whose revision is not the roll target
-  belongs to the roll, never to a repair on the revision it was running. The
-  generated `isvcs/gen-crashloop/` family crosses the verb with topology,
-  strategy, maxUnavailable, restart policy and (on PD) a rolling group, so
-  every path the closed-loop matrix in the workload package decides is also
-  driven against a real kubelet.
+  the pod leaves the old revision, is rebuilt (a new UID) or is gone. Only the
+  image and an exec are available against a live pod, which is why neither
+  form edits the template. On top of the usual rollout checks the verdict
+  requires that Instance to end on the new revision with its pods serving,
+  and no `RestartTriggered` event naming it after the bump: an Instance whose
+  revision is not the roll target belongs to the roll, never to a repair on
+  the revision it was running. A victim on a Component the bump never touches
+  (`victimcomp=decoder` with no group) has no new revision to reach, so the
+  repair owns it instead: it must be rebuilt — no pod the fault hit survives —
+  Ready and serving on its running revision, with a `RestartTriggered` event
+  naming it; the usual isolation check still holds the sibling at N with
+  nothing rotated. The generated `isvcs/gen-crashloop/` family crosses the
+  verb with topology, strategy, maxUnavailable, restart policy and (on PD) a
+  rolling group, so every path the closed-loop matrix in the workload package
+  decides is also driven against a real kubelet.
+
+- **`fault=imagepull:old`** is the same break with an image that cannot be
+  pulled: the victim's live pod is pointed at the harness's unpullable
+  reference (`runtime_fixtures.UNPULLABLE_IMAGE`, the one image no deploy
+  step side-loads), so the kubelet parks it in ImagePullBackOff on the
+  running revision, never Ready again. It has only `form=start` (optional;
+  an image that never runs has no after-Ready form), takes the same
+  `victimcomp=` and `during=idle`, fires at the same hooks, and is judged by
+  the same verdict: after a bump the Instance ends on the new revision
+  serving with no repair recorded for it; at idle, `expect=repaired|held`.
+  Nothing outlives the case: the patched pod belongs to the case's ISVC and
+  goes with it at teardown.
+
+- **`fault=configkey:missing` with `lift=after-settle|after-failed` and
+  `expect=heals|parked`** (rollout mode, `during=idle` only) takes a cause
+  away and gives it back. The case's victim Component reads a ConfigMap key
+  through its runner env, and the case file carries that ConfigMap as a
+  second document, so the apply creates it and the teardown removes it:
+
+  ```yaml
+  # on the victim Component (under leader: on a multi-node one, with name: ome-container)
+  runner:
+    env:
+      - name: TEST_CONFIG_VALUE
+        valueFrom: { configMapKeyRef: { name: p2500-config, key: value } }
+  ---
+  apiVersion: v1
+  kind: ConfigMap
+  metadata: { name: p2500-config }
+  data: { value: "1" }
+  ```
+
+  The runner reads the reference off the victim's live pod (the break
+  victim rule, `victimcomp=` as above), registers the restore, removes the
+  key with a JSON-patch and restarts the runner with `kill 1`, so its next
+  start waits with `CreateContainerConfigError` — on the same pod under
+  `restartPolicy: None`, on the rebuilt one under
+  `RecreateInstanceOnPodRestart`. `lift=after-settle` puts the key back
+  once that wait has held for `LIFT_SETTLE_S` (20 s scaled); `lift=after-failed`
+  once the victim's InferenceReplica row reads `Failed`, which needs the
+  case's `lifecycle.instanceReadyTimeout` short enough to arrive inside the
+  rotate budget (a row that never escalates fails the case). Then
+  `expect=heals` asserts the Instance is Ready and serving again on its
+  running revision within the budget, with no new revision and
+  `ome.io/reset-instances` never written; `expect=parked` (with
+  `lift=after-failed` and `issue=<n>`, the issue the self-heal is tracked
+  under) asserts the documented behaviour instead: the row stays `Failed` and
+  nothing of the Instance serves across the hold window after the lift, and
+  a row that heals fails the case as a stale park, so the flip to
+  `expect=heals` is forced the day the rule lands. `batch.py` lists
+  `expect=parked` cases in its PARKED DEBT table. The restore also runs from
+  the end-of-case cleanup (a no-op after the lift, harmless once the case's
+  ConfigMap is gone with the case).
+
+- **`fault=node:notready` with `lift=<phase>` and
+  `expect=relocated|repaired|parked`** (rollout mode, `during=idle` only)
+  stops the kubelet of the KIND node under the victim and starts it again at
+  the lift. The harness must run on the host whose docker owns the KIND
+  nodes (the eval lanes do): the Node is a running container of the same
+  name, and `docker exec <node> systemctl stop|start kubelet` is the fault
+  and its lift (`OME_TEST_DOCKER` names another CLI). The capability is
+  checked before anything is applied — docker on PATH and some Node a
+  running container — and again when the victim is picked: the break victim
+  rule (`victimcomp=` as above) runs over the pods on workers that are
+  containers and host no manager pod (the control plane and the manager's
+  node are never stopped). Either check failing records the verdict `SKIP`
+  with the reason instead of a failure; `batch.py` counts it green and
+  writes it as skipped in the JUnit report. The node is labelled
+  `perm.test/kubelet-stopped=<case>` and the restart registered before the
+  stop, so the end-of-case cleanup and `batch.py`'s end-of-run sweep both
+  find it; node cases run serially (a dead node takes every pod on it). The
+  fault has bitten once the Node reads NotReady and no pod of the Instance
+  serves (the node lifecycle controller's grace, 40 s by default, comes
+  first), and `expect=` says what the Instance's fate is under the restart
+  policy and the force-delete policy as configured:
+  `expect=relocated` with `lift=after-recover` — while the node is down the
+  Instance comes back Ready and serving on new pods on other nodes (the
+  force-delete policy frees its names), then the kubelet is restored;
+  `expect=repaired` with `lift=after-settle|after-failed` — the kubelet is
+  restored once the bite has held (or once the row reads `Failed`) and the
+  Instance must be Ready and serving again within the budget, on its running
+  revision, with no reset mailbox; `expect=parked` with `lift=after-settle` —
+  across the hold window with the node down nothing rebuilds the Instance
+  (no force delete configured), then the kubelet is restored and only the
+  teardown is required to converge. A relocation may bring the replacement
+  up beside the stuck pods, so the no-surge claim is informational there.
+
+- **`during=idle`** (rollout mode, with a persistent fault) fires the fault
+  on the settled service and never bumps; the verdict reads what the product
+  does about the break on its own, stated by `expect=`. `expect=repaired`:
+  within the rotate budget the victim Instance is rebuilt (every pod new,
+  Ready and serving) and a `RestartTriggered` event names it.
+  `expect=held`: nothing rebuilds it across the hold window (`IDLE_HOLD_S`,
+  90 s scaled by `OME_TEST_TIMEOUT_MULT`) and a `RepairHeld` event names it —
+  the hold a rollout group keeps on repairs while no run is open; a silent
+  hold fails. Absent, `expect=` is derived from the spec: held when the
+  victim Component is a member of a `spec.rollout.groups` entry, repaired
+  otherwise, so a family that asserts the repair on a grouped service states
+  `expect=repaired` and parks it with `notimpl=1 issue=<n>` until the rule
+  lands. Either way no Component may ever exceed N alive: a repair rebuilds
+  in place. `form=load` under `restartPolicy: None` is kept alive by the
+  kubelet alone between kills; whether a repair opens there is the product's
+  answer, and the killer stops the moment the pod is rebuilt.
 
 - **`fault=quota` cases run serially.** A quota case creates a *namespace-wide*
   ResourceQuota sized from a live usage snapshot, so run concurrently it both

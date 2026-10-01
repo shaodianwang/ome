@@ -2000,3 +2000,619 @@ class CrashloopFaultTest(unittest.TestCase):
                     self.assertEqual(kv["Nd"] + 1, kv["ceil_d"], "a rolling group surges the decoder too")
             else:
                 self.assertEqual("none", kv["co"])
+
+
+class IdleBreakFaultTest(unittest.TestCase):
+    """A break aimed at one Component (victimcomp=) and fired on the idle
+    service (during=idle): the header, the victim rule, the phase hook that
+    must leave it alone, the killer's cleanup, and the repair-or-hold
+    verdict."""
+
+    BASE = "# p999: x mode=rollout Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=3 ceil_r=0 topo=pd"
+
+    def _errs(self, header):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def test_header_aims_the_break_and_times_it(self):
+        self.assertEqual([], self._errs(self.BASE + " fault=crashloop:old form=start victimcomp=decoder"))
+        self.assertEqual([], self._errs(self.BASE + " fault=crashloop:old form=start during=idle"))
+        self.assertEqual([], self._errs(self.BASE + " fault=crashloop:old form=load during=idle victimcomp=decoder expect=held"))
+        self.assertEqual([], self._errs(self.BASE + " fault=crashloop:old form=start during=idle expect=repaired"))
+        self.assertTrue(any("victimcomp=router" in e for e in self._errs(self.BASE + " fault=crashloop:old form=start victimcomp=router")))
+        no_decoder = self.BASE.replace("Nd=2", "Nd=0")
+        self.assertTrue(any("Nd>0" in e for e in self._errs(no_decoder + " fault=crashloop:old form=start victimcomp=decoder")))
+        self.assertEqual([], self._errs(no_decoder + " fault=crashloop:old form=start"))
+        self.assertTrue(any("during=idle" in e for e in self._errs(self.BASE + " during=idle")))
+        self.assertTrue(any("during=idle" in e for e in self._errs(self.BASE + " fault=podkill:settling during=idle")))
+        self.assertTrue(any("expect=held" in e for e in self._errs(self.BASE + " fault=crashloop:old form=start expect=held")))
+        self.assertTrue(any("malformed header value expect=" in e
+                            for e in self._errs(self.BASE + " fault=crashloop:old form=start during=idle expect=fixed")))
+        kill = "# p999: x mode=kill Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 restart=None topo=engine"
+        self.assertTrue(any("mode=rollout" in e for e in self._errs(kill + " fault=crashloop:old form=start during=idle")))
+
+    def test_victim_component_selects_that_components_highest_leader(self):
+        pods = {
+            "e0": {"alive": True, "hash": "old", "inst": "0", "comp": "engine", "runner": "default"},
+            "e1": {"alive": True, "hash": "old", "inst": "1", "comp": "engine", "runner": "default"},
+            "d0": {"alive": True, "hash": "old", "inst": "0", "comp": "decoder", "runner": "default"},
+            "d1": {"alive": True, "hash": "old", "inst": "1", "comp": "decoder", "runner": "leader"},
+            "w1": {"alive": True, "hash": "old", "inst": "1", "comp": "decoder", "runner": "worker"},
+        }
+        self.assertEqual("d1", run._crashloop_pick_pod(pods, {"old"}, "decoder"))
+        self.assertEqual("e1", run._crashloop_pick_pod(pods, {"old"}))
+        f = run._fault_new("p999", {"fault": "crashloop:old", "form": "start", "victimcomp": "decoder"})
+        orig = run.kubectl
+        run.kubectl = lambda *a, **k: subprocess.CompletedProcess(a, 0, "", "")
+        try:
+            run._fault_crashloop_fire(f, pods, {"old"})
+        finally:
+            run.kubectl = orig
+        self.assertEqual(("d1", "decoder", "1"), (f["crash_pod"], f["crash_comp"], f["crash_inst"]))
+
+    def test_idle_fault_is_not_fired_by_the_phase_hook(self):
+        f = run._fault_new("p999", {"fault": "crashloop:old", "form": "start", "during": "idle"})
+        self.assertTrue(run._fault_at_idle(f))
+        self.assertFalse(run._fault_at_idle(run._fault_new("p999", {"fault": "crashloop:old", "form": "start"})))
+        fired = []
+        orig = run._fault_fire
+        run._fault_fire = lambda *a, **k: fired.append(a)
+        try:
+            run._fault_tick({"fault": f, "trigger_ts": 1.0, "pod_state": {}, "pods_per_inst": {}, "old_hashes": {"old"}})
+            self.assertEqual([], fired, "an idle fault is fired by the idle handler, never by a phase hook")
+        finally:
+            run._fault_fire = orig
+
+    def test_expectation_derives_from_group_membership(self):
+        f = run._fault_new("p999", {"fault": "crashloop:old", "form": "start", "during": "idle", "victimcomp": "decoder"})
+        self.assertEqual("held", run._idle_break_expect(f, {"members": ["engine", "decoder"]}, {}))
+        self.assertEqual("repaired", run._idle_break_expect(f, {"members": ["engine"]}, {}))
+        self.assertEqual("repaired", run._idle_break_expect(f, {"members": ["engine", "decoder"]}, {"expect": "repaired"}))
+        engine = run._fault_new("p999", {"fault": "crashloop:old", "form": "start", "during": "idle"})
+        self.assertEqual("held", run._idle_break_expect(engine, {"members": ["engine"]}, {}))
+
+    def test_load_killer_is_registered_for_cleanup_and_stops_on_a_rebuild(self):
+        f = run._fault_new("p999", {"fault": "crashloop:old", "form": "load", "during": "idle"})
+        pods = {"e0": {"alive": True, "hash": "old", "inst": "0", "comp": "engine", "runner": "default", "uid": "u0"}}
+        orig_state, orig_cleanups = run._crashloop_pod_state, list(run._FAULT_CLEANUPS)
+        # The live pod reads as rebuilt (a new UID on the old revision): the
+        # killer must leave it alone and return without an exec.
+        run._crashloop_pod_state = lambda name: (True, True, "old", True, "u-rebuilt")
+        try:
+            run._fault_crashloop_fire(f, pods, {"old"})
+            self.assertEqual("u0", f["crash_uid"])
+            self.assertIn(("crashloop", f), run._FAULT_CLEANUPS)
+            f["crash_thread"].join(timeout=5)
+            self.assertFalse(f["crash_thread"].is_alive(), "the killer stops once the pod is a rebuilt one")
+            self.assertEqual(0, f["kills"])
+            run._run_fault_cleanups()
+            self.assertTrue(f["crash_stop"].is_set())
+            self.assertEqual([], run._FAULT_CLEANUPS)
+        finally:
+            run._crashloop_pod_state = orig_state
+            run._FAULT_CLEANUPS[:] = orig_cleanups
+
+    def test_idle_verdict_reads_repair_or_hold(self):
+        f = {"kind": "crashloop", "crash_inst": "1", "crash_comp": "decoder"}
+        repair = [("RestartTriggered", "OMENative component=decoder instance=1 restart triggered: pod d1 wedged")]
+        hold = [("RepairHeld", "OMENative component=decoder instance=1 crash-loop repair held by Plan: no run open")]
+        other = [("RepairHeld", "OMENative component=decoder instance=0 crash-loop repair held by Plan: no run open")]
+        notes, checks = [], []
+        self.assertEqual("PASS", run._idle_break_checks(f, "repaired", True, None, repair, "PASS", notes, checks))
+        notes, checks = [], []
+        self.assertEqual("FAIL", run._idle_break_checks(f, "repaired", False, None, repair, "PASS", notes, checks))
+        self.assertTrue(any("not repaired" in n for n in notes))
+        notes, checks = [], []
+        self.assertEqual("FAIL", run._idle_break_checks(f, "repaired", True, None, [], "PASS", notes, checks))
+        self.assertTrue(any("no RestartTriggered" in n for n in notes))
+        notes, checks = [], []
+        self.assertEqual("PASS", run._idle_break_checks(f, "held", False, None, hold, "PASS", notes, checks))
+        notes, checks = [], []
+        self.assertEqual("FAIL", run._idle_break_checks(f, "held", False, 23.0, hold, "PASS", notes, checks))
+        self.assertTrue(any("despite the expected hold" in n for n in notes))
+        notes, checks = [], []
+        self.assertEqual("FAIL", run._idle_break_checks(f, "held", False, None, other, "PASS", notes, checks),
+                         "a hold recorded for another Instance is not this verdict's")
+        self.assertTrue(any("no RepairHeld" in n for n in notes))
+
+    def test_imagepull_breaks_the_same_victim_with_the_unpullable_image(self):
+        self.assertTrue(run._fault_ok("imagepull:old"))
+        self.assertFalse(run._fault_ok("imagepull:settling"))
+        self.assertEqual([], self._errs(self.BASE + " fault=imagepull:old"))
+        self.assertEqual([], self._errs(self.BASE + " fault=imagepull:old form=start victimcomp=decoder"))
+        self.assertEqual([], self._errs(self.BASE + " fault=imagepull:old during=idle expect=repaired"))
+        self.assertTrue(any("only form=start" in e for e in self._errs(self.BASE + " fault=imagepull:old form=load")))
+        no_decoder = self.BASE.replace("Nd=2", "Nd=0")
+        self.assertTrue(any("Nd>0" in e for e in self._errs(no_decoder + " fault=imagepull:old victimcomp=decoder")))
+        kill = "# p999: x mode=kill Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 restart=None topo=engine"
+        self.assertTrue(any("mode=rollout" in e for e in self._errs(kill + " fault=imagepull:old")))
+        f = run._fault_new("p999", {"fault": "imagepull:old"})
+        pods = {"e0": {"alive": True, "hash": "old", "inst": "0", "comp": "engine", "runner": "default", "uid": "u0"},
+                "e1": {"alive": True, "hash": "old", "inst": "1", "comp": "engine", "runner": "default", "uid": "u1"}}
+        patches = []
+        orig = run.kubectl
+        run.kubectl = lambda *a, **k: patches.append(a) or subprocess.CompletedProcess(a, 0, "", "")
+        try:
+            ctx = {"fault": f, "trigger_ts": 1.0, "pod_state": pods, "pods_per_inst": {"engine": 1}, "old_hashes": {"old"}}
+            run._fault_tick(ctx)
+            run._fault_tick(ctx)
+        finally:
+            run.kubectl = orig
+        self.assertTrue(f["fired"])
+        self.assertEqual(1, len(patches), "the break fires once, at the settling hook")
+        self.assertEqual(("patch", "pod", "e1"), patches[0][2:5])
+        self.assertIn(runtime_fixtures.UNPULLABLE_IMAGE, patches[0][-1])
+        self.assertEqual(("e1", "1", "u1"), (f["crash_pod"], f["crash_inst"], f["crash_uid"]))
+        self.assertNotIn(("crashloop", f), run._FAULT_CLEANUPS, "an image patch dies with the case's pod; the ISVC teardown owns it")
+        notes, checks = [], []
+        healed = {"e1": {"alive": True, "hash": "new", "inst": "1", "comp": "engine", "ready": True, "serving": True, "uid": "u-new"}}
+        orig_ev = run._isvc_events_since
+        try:
+            run._isvc_events_since = lambda case_id, since: []
+            self.assertEqual("PASS", run._crashloop_checks(f, healed, {"old"}, 1.0, "PASS", notes, checks, bumped={"engine"}))
+            self.assertTrue(any(c.startswith("  ✓ imagepull:") for c in checks))
+        finally:
+            run._isvc_events_since = orig_ev
+
+    def test_sibling_victim_after_a_roll_is_owned_by_the_repair(self):
+        f = {"kind": "crashloop", "fired": True, "infra_fail": None, "form": "start", "case_id": "p999",
+             "crash_inst": "1", "crash_comp": "decoder", "crash_hash": "old", "crash_uid": "u-old", "kills": 0}
+        rebuilt = {"d1": {"alive": True, "hash": "old", "inst": "1", "comp": "decoder", "ready": True, "serving": True, "uid": "u-new"}}
+        survived = {"d1": {"alive": True, "hash": "old", "inst": "1", "comp": "decoder", "ready": True, "serving": True, "uid": "u-old"}}
+        repair = [("RestartTriggered", "OMENative component=decoder instance=1 restart triggered: pod d1 wedged")]
+        orig = run._isvc_events_since
+        try:
+            run._isvc_events_since = lambda case_id, since: repair
+            notes, checks = [], []
+            self.assertEqual("PASS", run._crashloop_checks(f, rebuilt, {"old"}, 1.0, "PASS", notes, checks, bumped={"engine"}))
+            notes, checks = [], []
+            self.assertEqual("FAIL", run._crashloop_checks(f, survived, {"old"}, 1.0, "PASS", notes, checks, bumped={"engine"}))
+            self.assertTrue(any("not rebuilt" in n for n in notes))
+            notes, checks = [], []
+            self.assertEqual("FAIL", run._crashloop_checks(f, rebuilt, {"old"}, 1.0, "PASS", notes, checks, bumped={"engine", "decoder"}),
+                             "a bumped victim keeps the roll's claim: it must reach the new revision")
+            run._isvc_events_since = lambda case_id, since: []
+            notes, checks = [], []
+            self.assertEqual("FAIL", run._crashloop_checks(f, rebuilt, {"old"}, 1.0, "PASS", notes, checks, bumped={"engine"}))
+            self.assertTrue(any("no RestartTriggered" in n for n in notes))
+        finally:
+            run._isvc_events_since = orig
+
+
+class ConfigKeyFaultTest(unittest.TestCase):
+    """configkey:missing removes the ConfigMap key the victim's runner reads
+    and restarts the runner; the key comes back at lift=<phase>, and the
+    verdict reads what the Instance does once its cause is gone."""
+
+    BASE = "# p999: x mode=rollout Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 topo=engine"
+    POD = {"metadata": {"name": "e1", "uid": "u1"},
+           "spec": {"containers": [
+               {"name": "sidecar", "env": [{"name": "X", "valueFrom": {"configMapKeyRef": {"name": "other", "key": "k"}}}]},
+               {"name": run.MAIN_CONTAINER, "env": [
+                   {"name": "TEST_STARTUP_DELAY", "value": "15"},
+                   {"name": "TEST_CONFIG_VALUE", "valueFrom": {"configMapKeyRef": {"name": "p999-config", "key": "value"}}}]}]},
+           "status": {"containerStatuses": [{"name": run.MAIN_CONTAINER,
+                                             "state": {"waiting": {"reason": "CreateContainerConfigError"}}}]}}
+    PODS = {"e0": {"alive": True, "hash": "old", "inst": "0", "comp": "engine", "runner": "default", "uid": "u0"},
+            "e1": {"alive": True, "hash": "old", "inst": "1", "comp": "engine", "runner": "default", "uid": "u1"}}
+
+    def _errs(self, header):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def _fake_kubectl(self, calls, pod=None, data=None):
+        pod = self.POD if pod is None else pod
+        data = {"value": "1"} if data is None else data
+
+        def fake(*a, **k):
+            calls.append((a, len(run._FAULT_CLEANUPS)))
+            if a[2:4] == ("get", "pod"):
+                return subprocess.CompletedProcess(a, 0, json.dumps(pod), "")
+            if a[2:4] == ("get", "configmap"):
+                return subprocess.CompletedProcess(a, 0, json.dumps({"data": data}), "")
+            return subprocess.CompletedProcess(a, 0, "", "")
+        return fake
+
+    def test_header_ties_the_fault_to_its_lift_and_its_expectation(self):
+        self.assertTrue(run._fault_ok("configkey:missing"))
+        self.assertFalse(run._fault_ok("configkey:gone"))
+        self.assertEqual([], self._errs(self.BASE + " fault=configkey:missing during=idle lift=after-settle expect=heals"))
+        self.assertEqual([], self._errs(self.BASE + " fault=configkey:missing during=idle lift=after-failed expect=heals"))
+        self.assertEqual([], self._errs(self.BASE + " fault=configkey:missing during=idle lift=after-failed expect=parked issue=1234"))
+        self.assertTrue(any("needs during=idle" in e for e in self._errs(self.BASE + " fault=configkey:missing lift=after-settle expect=heals")))
+        self.assertTrue(any("needs lift=" in e for e in self._errs(self.BASE + " fault=configkey:missing during=idle expect=heals")))
+        self.assertTrue(any("needs expect=" in e for e in self._errs(self.BASE + " fault=configkey:missing during=idle lift=after-settle")))
+        self.assertTrue(any("needs lift=after-failed" in e
+                            for e in self._errs(self.BASE + " fault=configkey:missing during=idle lift=after-settle expect=parked issue=1")))
+        self.assertTrue(any("needs issue=" in e
+                            for e in self._errs(self.BASE + " fault=configkey:missing during=idle lift=after-failed expect=parked")))
+        self.assertTrue(any("lifts a persistent fault's cause" in e for e in self._errs(self.BASE + " lift=after-settle")))
+        self.assertTrue(any("reads a persistent fault's outcome" in e for e in self._errs(self.BASE + " expect=heals")))
+        self.assertTrue(any("lift=after-failed|after-settle" in e
+                            for e in self._errs(self.BASE + " fault=configkey:missing during=idle lift=after-recover expect=heals")))
+        self.assertTrue(any("malformed header value lift=" in e
+                            for e in self._errs(self.BASE + " fault=configkey:missing during=idle lift=now expect=heals")))
+        migrate = "# p999: x mode=migrate Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 topo=engine"
+        self.assertEqual([], self._errs(migrate + " fault=quota:0 expect=fail lift=1"))
+        self.assertTrue(any("lift=1 requires" in e for e in self._errs(migrate + " lift=1")))
+
+    def test_reference_and_bite_are_read_off_the_main_container(self):
+        self.assertEqual(("p999-config", "value"), run._configkey_ref(self.POD))
+        bare = {"spec": {"containers": [{"name": run.MAIN_CONTAINER, "env": [{"name": "A", "value": "1"}]}]}}
+        self.assertIsNone(run._configkey_ref(bare))
+        self.assertIsNone(run._configkey_ref(None))
+        self.assertEqual("CreateContainerConfigError", run._pod_waiting_reason(self.POD))
+        self.assertEqual("", run._pod_waiting_reason(bare))
+        self.assertEqual("a~1b~0c", run._json_pointer_token("a/b~c"))
+
+    def test_fire_registers_the_restore_then_removes_the_key_and_restarts_the_runner(self):
+        f = run._fault_new("p999", {"fault": "configkey:missing", "during": "idle", "lift": "after-failed", "expect": "heals"})
+        calls, orig, saved = [], run.kubectl, list(run._FAULT_CLEANUPS)
+        run.kubectl = self._fake_kubectl(calls)
+        try:
+            run._fault_configkey_fire(f, self.PODS, {"old"})
+            self.assertIsNone(f["infra_fail"])
+            self.assertEqual(("e1", "1", "u1", "p999-config", "value", "1"),
+                             (f["crash_pod"], f["crash_inst"], f["crash_uid"], f["cm_name"], f["cm_key"], f["cm_value"]))
+            self.assertEqual("CreateContainerConfigError", f["bite"])
+            verbs = [(a[2], a[3]) for a, _n in calls]
+            self.assertEqual([("get", "pod"), ("get", "configmap"), ("patch", "configmap"), ("exec", "e1")], verbs)
+            remove, registered = calls[2]
+            self.assertEqual(1, registered - len(saved), "the restore is registered before the key is removed")
+            self.assertEqual([{"op": "remove", "path": "/data/value"}], json.loads(remove[-1]))
+            self.assertEqual(("sh", "-c", "kill 1"), calls[3][0][-3:])
+            self.assertIn(("configkey", f), run._FAULT_CLEANUPS)
+            calls.clear()
+            self.assertTrue(run._configkey_restore(f))
+            self.assertEqual([("patch", "configmap")], [(a[2], a[3]) for a, _n in calls])
+            self.assertEqual({"data": {"value": "1"}}, json.loads(calls[0][0][-1]))
+            calls.clear()
+            self.assertTrue(run._configkey_restore(f))
+            self.assertEqual([], calls, "a restored key is not patched again")
+            run._run_fault_cleanups()
+            self.assertEqual([], calls, "the end-of-case cleanup finds nothing left to restore")
+        finally:
+            run.kubectl = orig
+            run._FAULT_CLEANUPS[:] = saved
+
+    def test_fire_without_a_reference_or_a_key_is_an_apparatus_failure(self):
+        orig, saved = run.kubectl, list(run._FAULT_CLEANUPS)
+        try:
+            bare = {"spec": {"containers": [{"name": run.MAIN_CONTAINER, "env": [{"name": "A", "value": "1"}]}]}}
+            f = run._fault_new("p999", {"fault": "configkey:missing", "during": "idle", "lift": "after-settle", "expect": "heals"})
+            calls = []
+            run.kubectl = self._fake_kubectl(calls, pod=bare)
+            run._fault_configkey_fire(f, self.PODS, {"old"})
+            self.assertIn("reads no ConfigMap key", f["infra_fail"])
+            self.assertEqual(saved, run._FAULT_CLEANUPS)
+            self.assertEqual([("get", "pod")], [(a[2], a[3]) for a, _n in calls])
+            f = run._fault_new("p999", {"fault": "configkey:missing", "during": "idle", "lift": "after-settle", "expect": "heals"})
+            calls = []
+            run.kubectl = self._fake_kubectl(calls, data={})
+            run._fault_configkey_fire(f, self.PODS, {"old"})
+            self.assertIn("has no key", f["infra_fail"])
+            self.assertEqual(saved, run._FAULT_CLEANUPS)
+        finally:
+            run.kubectl = orig
+            run._FAULT_CLEANUPS[:] = saved
+
+    def test_lift_verdict_reads_heal_or_park(self):
+        def f():
+            return {"kind": "configkey", "crash_inst": "1", "crash_comp": "engine", "infra_fail": None,
+                    "bite": "CreateContainerConfigError", "cause": "ConfigMap key p999-config/value"}
+        good = {"bitten_at": 5.0, "failed_at": 70.0, "lifted_at": 71.0, "healed_at": 30.0,
+                "park_broken": None, "phase_after": "Ready", "new_hash": False, "reset_used": False}
+        notes, checks = [], []
+        self.assertEqual("PASS", run._lift_checks(f(), "heals", "after-failed", good, {}, "PASS", notes, checks))
+        self.assertEqual("PASS", run._lift_checks(f(), "heals", "after-settle", dict(good, failed_at=None), {}, "PASS", [], []))
+        notes = []
+        self.assertEqual("FAIL", run._lift_checks(f(), "heals", "after-failed", dict(good, failed_at=None), {}, "PASS", notes, []))
+        self.assertTrue(any("never escalated" in n for n in notes))
+        notes = []
+        self.assertEqual("FAIL", run._lift_checks(f(), "heals", "after-failed", dict(good, healed_at=None), {}, "PASS", notes, []))
+        self.assertTrue(any("did not return" in n for n in notes))
+        notes = []
+        self.assertEqual("FAIL", run._lift_checks(f(), "heals", "after-failed", dict(good, new_hash=True), {}, "PASS", notes, []))
+        self.assertTrue(any("new revision" in n for n in notes))
+        notes = []
+        self.assertEqual("FAIL", run._lift_checks(f(), "heals", "after-failed", dict(good, reset_used=True), {}, "PASS", notes, []))
+        self.assertTrue(any("reset mailbox" in n for n in notes))
+        unbitten = f()
+        self.assertEqual("PASS", run._lift_checks(unbitten, "heals", "after-settle", dict(good, bitten_at=None), {}, "PASS", [], []))
+        self.assertIn("never showed", unbitten["infra_fail"])
+        unlifted = f()
+        self.assertEqual("PASS", run._lift_checks(unlifted, "heals", "after-failed", dict(good, lifted_at=None), {}, "PASS", [], []))
+        self.assertIn("could not be lifted", unlifted["infra_fail"])
+        parked = dict(good, healed_at=None, phase_after="Failed")
+        checks = []
+        self.assertEqual("PASS", run._lift_checks(f(), "parked", "after-failed", parked, {"issue": 1234}, "PASS", [], checks))
+        self.assertTrue(any("issue #1234" in c for c in checks))
+        notes = []
+        self.assertEqual("FAIL", run._lift_checks(f(), "parked", "after-failed", dict(parked, park_broken=40.0), {"issue": 1234}, "PASS", notes, []))
+        self.assertTrue(any("stale" in n for n in notes))
+
+
+class NodeFaultTest(unittest.TestCase):
+    """node:notready stops the kubelet under the victim through the docker
+    that owns the KIND nodes, restores it at the lift, and is skipped with a
+    reason where that docker is not at hand."""
+
+    BASE = "# p999: x mode=rollout Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 topo=engine"
+    PODS = {"e0": {"alive": True, "hash": "old", "inst": "0", "comp": "engine", "runner": "default", "uid": "u0", "node": "kind-worker"},
+            "e1": {"alive": True, "hash": "old", "inst": "1", "comp": "engine", "runner": "default", "uid": "u1", "node": "kind-worker2"},
+            "e2": {"alive": True, "hash": "old", "inst": "2", "comp": "engine", "runner": "default", "uid": "u2", "node": "kind-control-plane"}}
+    NODES = {"items": [
+        {"metadata": {"name": "kind-control-plane", "labels": {"node-role.kubernetes.io/control-plane": ""}}},
+        {"metadata": {"name": "kind-worker", "labels": {}}},
+        {"metadata": {"name": "kind-worker2", "labels": {}}}]}
+
+    def _errs(self, header):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def _fakes(self, calls, managers="kind-worker", containers=("kind-control-plane", "kind-worker", "kind-worker2"),
+               docker_rc=0):
+        def kubectl(*a, **k):
+            calls.append(("kubectl",) + a + (len(run._FAULT_CLEANUPS),))
+            if a[:2] == ("get", "nodes"):
+                return subprocess.CompletedProcess(a, 0, json.dumps(self.NODES), "")
+            if a[2:4] == ("get", "pod") and "jsonpath" in a[-1]:
+                return subprocess.CompletedProcess(a, 0, managers, "")
+            return subprocess.CompletedProcess(a, 0, "", "")
+
+        def docker(*a):
+            calls.append(("docker",) + a + (len(run._FAULT_CLEANUPS),))
+            if a[0] == "inspect":
+                return subprocess.CompletedProcess(a, 0 if a[-1] in containers else 1, "true\n" if a[-1] in containers else "", "")
+            return subprocess.CompletedProcess(a, docker_rc, "", "" if docker_rc == 0 else "no such container")
+        return kubectl, docker
+
+    def test_header_reads_each_outcome_at_its_lift(self):
+        self.assertTrue(run._fault_ok("node:notready"))
+        self.assertFalse(run._fault_ok("node:drained"))
+        self.assertEqual([], self._errs(self.BASE + " fault=node:notready during=idle lift=after-recover expect=relocated"))
+        self.assertEqual([], self._errs(self.BASE + " fault=node:notready during=idle lift=after-settle expect=repaired"))
+        self.assertEqual([], self._errs(self.BASE + " fault=node:notready during=idle lift=after-failed expect=repaired"))
+        self.assertEqual([], self._errs(self.BASE + " fault=node:notready during=idle lift=after-settle expect=parked"))
+        self.assertTrue(any("lift=after-recover, not lift=after-settle" in e
+                            for e in self._errs(self.BASE + " fault=node:notready during=idle lift=after-settle expect=relocated")))
+        self.assertTrue(any("lift=after-settle, not lift=after-failed" in e
+                            for e in self._errs(self.BASE + " fault=node:notready during=idle lift=after-failed expect=parked")))
+        self.assertTrue(any("needs expect=parked|relocated|repaired" in e
+                            for e in self._errs(self.BASE + " fault=node:notready during=idle lift=after-settle expect=heals")))
+        self.assertTrue(any("needs during=idle" in e for e in self._errs(self.BASE + " fault=node:notready lift=after-settle expect=repaired")))
+        self.assertTrue(any("needs lift=" in e for e in self._errs(self.BASE + " fault=node:notready during=idle expect=repaired")))
+        self.assertTrue(any("reads a persistent fault's outcome" in e for e in self._errs(self.BASE + " expect=relocated")))
+
+    def test_capability_is_detected_before_anything_is_applied(self):
+        calls = []
+        kubectl, docker = self._fakes(calls)
+        with mock.patch.object(run, "kubectl", kubectl), mock.patch.object(run, "_docker", docker), \
+                mock.patch.object(shutil, "which", lambda name: None):
+            self.assertIn("not on PATH", run._node_fault_capability())
+        with mock.patch.object(run, "kubectl", kubectl), mock.patch.object(run, "_docker", docker), \
+                mock.patch.object(shutil, "which", lambda name: "/usr/bin/docker"):
+            self.assertIsNone(run._node_fault_capability())
+        kubectl, docker = self._fakes(calls, containers=())
+        with mock.patch.object(run, "kubectl", kubectl), mock.patch.object(run, "_docker", docker), \
+                mock.patch.object(shutil, "which", lambda name: "/usr/bin/docker"):
+            self.assertIn("not a KIND cluster", run._node_fault_capability())
+
+    def test_victim_avoids_the_control_plane_and_the_managers_node(self):
+        calls = []
+        kubectl, docker = self._fakes(calls, managers="kind-worker2")
+        with mock.patch.object(run, "kubectl", kubectl), mock.patch.object(run, "_docker", docker):
+            # e2 sits on the control plane and e1 shares a node with the manager: e0 is left.
+            self.assertEqual(("e0", "kind-worker"), run._node_pick(self.PODS, {"old"}, "engine"))
+            # With no manager in the way the break rule picks the highest index on a worker.
+            with mock.patch.object(run, "_manager_nodes", lambda: set()):
+                self.assertEqual(("e1", "kind-worker2"), run._node_pick(self.PODS, {"old"}, "engine"))
+            victim, reason = run._node_pick({"e2": self.PODS["e2"]}, {"old"}, "engine")
+            self.assertIsNone(victim)
+            self.assertIn("no engine pod sits on a worker", reason)
+
+    def test_fire_marks_and_registers_before_the_stop_and_the_restore_is_idempotent(self):
+        f = run._fault_new("p999", {"fault": "node:notready", "during": "idle", "lift": "after-settle", "expect": "repaired"})
+        calls, saved = [], list(run._FAULT_CLEANUPS)
+        kubectl, docker = self._fakes(calls, managers="")
+        try:
+            with mock.patch.object(run, "kubectl", kubectl), mock.patch.object(run, "_docker", docker):
+                run._fault_node_fire(f, self.PODS, {"old"})
+                self.assertIsNone(f["infra_fail"])
+                self.assertNotIn("skip", f)
+                self.assertEqual(("e1", "kind-worker2", "1"), (f["crash_pod"], f["node"], f["crash_inst"]))
+                stop = [c for c in calls if c[0] == "docker" and c[1] == "exec"]
+                self.assertEqual([("docker", "exec", "kind-worker2", "systemctl", "stop", "kubelet", len(saved) + 1)], stop,
+                                 "the restore is registered before the kubelet is stopped")
+                label = [c for c in calls if c[0] == "kubectl" and c[1] == "label"]
+                self.assertEqual(("label", "node", "kind-worker2", "perm.test/kubelet-stopped=p999", "--overwrite"), label[0][1:6])
+                self.assertIn(("kubelet", f), run._FAULT_CLEANUPS)
+                calls.clear()
+                self.assertTrue(run._node_restore(f))
+                self.assertEqual([("docker", "exec", "kind-worker2", "systemctl", "start", "kubelet")],
+                                 [c[:6] for c in calls if c[0] == "docker"])
+                self.assertEqual(("label", "node", "kind-worker2", "perm.test/kubelet-stopped-"),
+                                 [c for c in calls if c[0] == "kubectl"][0][1:5])
+                calls.clear()
+                self.assertTrue(run._node_restore(f))
+                run._run_fault_cleanups()
+                self.assertEqual([], calls, "a restored kubelet is not started twice")
+                self.assertEqual([], run._FAULT_CLEANUPS)
+        finally:
+            run._FAULT_CLEANUPS[:] = saved
+
+    def test_no_eligible_node_is_a_skip_and_a_failed_stop_is_apparatus(self):
+        saved = list(run._FAULT_CLEANUPS)
+        try:
+            f = run._fault_new("p999", {"fault": "node:notready", "during": "idle", "lift": "after-settle", "expect": "repaired"})
+            calls = []
+            kubectl, docker = self._fakes(calls, managers="kind-worker kind-worker2")
+            with mock.patch.object(run, "kubectl", kubectl), mock.patch.object(run, "_docker", docker):
+                run._fault_node_fire(f, self.PODS, {"old"})
+            self.assertIn("node fault unavailable here", f["skip"])
+            self.assertEqual(saved, run._FAULT_CLEANUPS)
+            self.assertFalse(any(c[0] == "docker" and c[1] == "exec" for c in calls))
+            f = run._fault_new("p999", {"fault": "node:notready", "during": "idle", "lift": "after-settle", "expect": "repaired"})
+            kubectl, docker = self._fakes([], managers="", docker_rc=1)
+            with mock.patch.object(run, "kubectl", kubectl), mock.patch.object(run, "_docker", docker):
+                run._fault_node_fire(f, self.PODS, {"old"})
+            self.assertIn("stopping the kubelet", f["infra_fail"])
+            self.assertIn(("kubelet", f), run._FAULT_CLEANUPS, "the restore stays registered when the stop fails")
+        finally:
+            run._FAULT_CLEANUPS[:] = saved
+
+    def test_relocation_needs_new_pods_on_other_nodes(self):
+        pods = [("e1", {"ready": True, "serving": True, "uid": "n1", "node": "kind-worker"})]
+        self.assertTrue(run._instance_relocated(pods, {"u1"}, "kind-worker2"))
+        self.assertFalse(run._instance_relocated(pods, {"u1"}, "kind-worker"))
+        self.assertFalse(run._instance_relocated(pods, {"n1"}, "kind-worker2"))
+        self.assertFalse(run._instance_relocated([], {"u1"}, "kind-worker2"))
+
+    def test_lift_verdict_reads_each_node_outcome(self):
+        def f():
+            return {"kind": "node", "crash_inst": "1", "crash_comp": "engine", "infra_fail": None,
+                    "bite": "its node NotReady with no pod serving", "cause": "the kubelet of node kind-worker2"}
+        base = {"bitten_at": 45.0, "failed_at": None, "recovered_at": None, "lifted_at": 70.0, "healed_at": None,
+                "park_broken": None, "phase_after": "Ready", "new_hash": False, "reset_used": False}
+        notes = []
+        self.assertEqual("PASS", run._lift_checks(f(), "relocated", "after-recover", dict(base, recovered_at=60.0), {}, "PASS", notes, []))
+        notes = []
+        self.assertEqual("FAIL", run._lift_checks(f(), "relocated", "after-recover", base, {}, "PASS", notes, []))
+        self.assertTrue(any("not relocated" in n for n in notes))
+        notes = []
+        self.assertEqual("PASS", run._lift_checks(f(), "repaired", "after-settle", dict(base, healed_at=20.0), {}, "PASS", notes, []))
+        notes = []
+        self.assertEqual("FAIL", run._lift_checks(f(), "repaired", "after-settle", base, {}, "PASS", notes, []))
+        self.assertTrue(any("did not return" in n for n in notes))
+        checks = []
+        self.assertEqual("PASS", run._lift_checks(f(), "parked", "after-settle", base, {}, "PASS", [], checks))
+        self.assertTrue(any("stayed down" in c for c in checks))
+        notes = []
+        self.assertEqual("FAIL", run._lift_checks(f(), "parked", "after-settle", dict(base, park_broken=50.0), {}, "PASS", notes, []))
+        self.assertTrue(any("despite the expected park" in n for n in notes))
+
+    def test_skip_is_green_and_recorded_as_skipped(self):
+        self.assertTrue(batch.is_green("SKIP"))
+        self.assertTrue(batch.is_skipped("SKIP"))
+        self.assertTrue(batch.is_skipped("XFAIL (known bug: #1)"))
+        self.assertFalse(batch.is_skipped("PASS"))
+        self.assertFalse(batch.is_green("INFRA-FAIL"))
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "junit.xml"
+            batch.write_junit(path, {"p1": "PASS", "p2": "SKIP", "p3": "FAIL"}, 1.0)
+            text = path.read_text()
+            self.assertIn('skipped="1"', text)
+            self.assertIn('failures="1"', text)
+            self.assertIn('<skipped message="SKIP"', text)
+
+
+class MidRollEditTest(unittest.TestCase):
+    """edit=strategy:<type> / edit=restartPolicy:<policy> patch every bumped
+    member's lifecycle at during=settling|rotating; the verdict adds that the
+    edit was applied at its hook and landed on every member."""
+
+    BASE = "# p999: x mode=rollout Ne=2 Nd=2 Nr=0 ceil_e=3 ceil_d=3 ceil_r=0 topo=pd"
+
+    def _errs(self, header):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def test_header_names_the_edit_and_its_hook(self):
+        for strat in sorted(run.UPDATE_STRATEGIES):
+            self.assertEqual([], self._errs(self.BASE + f" edit=strategy:{strat} during=rotating"))
+        for rp in sorted(run.RESTART_POLICIES):
+            self.assertEqual([], self._errs(self.BASE + f" edit=restartPolicy:{rp} during=settling"))
+        self.assertTrue(any("malformed header value edit=" in e for e in self._errs(self.BASE + " edit=strategy:Fast during=rotating")))
+        self.assertTrue(any("malformed header value edit=" in e for e in self._errs(self.BASE + " edit=restartPolicy:RecreateInstance during=rotating")))
+        self.assertTrue(any("needs during=rotating|settling" in e for e in self._errs(self.BASE + " edit=strategy:RecreatePod")))
+        self.assertTrue(any("names a mid-roll edit's hook" in e for e in self._errs(self.BASE + " during=rotating")))
+        self.assertTrue(any("names a mid-roll edit's hook" in e for e in self._errs(self.BASE + " edit=env during=settling")))
+        kill = "# p999: x mode=kill Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 restart=None topo=engine"
+        self.assertTrue(any("mode=rollout" in e for e in self._errs(kill + " edit=strategy:RecreatePod during=rotating")))
+        idle = self._errs(self.BASE + " edit=strategy:RecreatePod during=idle")
+        self.assertTrue(any("needs during=rotating|settling" in e for e in idle))
+        self.assertTrue(any("needs a persistent fault" in e for e in idle))
+        self.assertEqual([], self._errs(self.BASE + " fault=podkill:rotating edit=restartPolicy:None during=settling"),
+                         "a phase fault and a mid-roll edit may share a case")
+
+    def test_edit_parses_and_patches_every_bumped_member(self):
+        self.assertEqual(("strategy", "InPlaceOnly"), run._midroll_edit("strategy:InPlaceOnly"))
+        self.assertEqual(("restartPolicy", "RecreateInstanceOnPodRestart"), run._midroll_edit("restartPolicy:RecreateInstanceOnPodRestart"))
+        for bad in ("env", "strategy", "strategy:", "strategy:Nope", "restartPolicy:RecreateInstance", None):
+            self.assertIsNone(run._midroll_edit(bad))
+        self.assertIsNone(run._midroll_new({"edit": "env", "during": "rotating"}))
+        e = run._midroll_new({"edit": "strategy:RecreatePod", "during": "rotating"})
+        self.assertEqual({"spec": {"decoder": {"lifecycle": {"updateStrategy": {"type": "RecreatePod"}}},
+                                   "engine": {"lifecycle": {"updateStrategy": {"type": "RecreatePod"}}}}},
+                         run._midroll_patch(e, {"engine", "decoder"}))
+        r = run._midroll_new({"edit": "restartPolicy:None", "during": "settling"})
+        self.assertEqual({"spec": {"engine": {"lifecycle": {"restartPolicy": "None"}}}}, run._midroll_patch(r, {"engine"}))
+        self.assertEqual({"engine": "inplace", "decoder": "surge"},
+                         run.update_modes({"strat": {"engine": "InPlaceOnly", "decoder": "SurgeThenDrain"}},
+                                          {"engine", "decoder"}, "strategy:RecreatePod"),
+                         "the start strategy decides how updated pods are counted")
+
+    def test_hook_fires_once_at_its_phase(self):
+        olds = {"old"}
+        settled = {"e0": {"alive": True, "hash": "old", "newanno": False}}
+        rolling = {"e0": {"alive": True, "hash": "old", "newanno": False}, "e1": {"alive": True, "hash": "new", "newanno": False}}
+        self.assertTrue(run._midroll_due("settling", settled, olds))
+        self.assertFalse(run._midroll_due("rotating", settled, olds))
+        self.assertTrue(run._midroll_due("rotating", rolling, olds))
+        self.assertTrue(run._midroll_due("rotating", {"e0": {"alive": True, "hash": "old", "newanno": True}}, olds))
+        self.assertFalse(run._midroll_due("rotating", rolling, None))
+        e = run._midroll_new({"edit": "strategy:RecreatePod", "during": "rotating"})
+        calls = []
+        orig = run.kubectl
+        run.kubectl = lambda *a, **k: calls.append(a) or subprocess.CompletedProcess(a, 0, "", "")
+        try:
+            run._midroll_tick(e, "p999", {"engine"}, settled, olds, 3.0)
+            self.assertFalse(e["fired"])
+            run._midroll_tick(e, "p999", {"engine"}, rolling, olds, 12.0)
+            run._midroll_tick(e, "p999", {"engine"}, rolling, olds, 13.0)
+            self.assertEqual((True, 12.0, None), (e["fired"], e["fired_at"], e["error"]))
+            self.assertEqual(1, len(calls))
+            self.assertEqual(("patch", "isvc", "p999", "--type=merge"), calls[0][2:6])
+            self.assertEqual({"spec": {"engine": {"lifecycle": {"updateStrategy": {"type": "RecreatePod"}}}}}, json.loads(calls[0][-1]))
+            run.kubectl = lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "admission webhook denied the patch")
+            e2 = run._midroll_new({"edit": "restartPolicy:None", "during": "settling"})
+            run._midroll_tick(e2, "p999", {"engine"}, settled, olds, 1.0)
+            self.assertTrue(e2["fired"])
+            self.assertIn("denied", e2["error"])
+        finally:
+            run.kubectl = orig
+
+    def test_verdict_requires_the_edit_applied_and_landed(self):
+        spec = {"engine": {"lifecycle": {"updateStrategy": {"type": "RecreatePod"}, "restartPolicy": "None"}},
+                "decoder": {"lifecycle": {"updateStrategy": {"type": "SurgeThenDrain"}}}}
+        fired = {"kind": "strategy", "value": "RecreatePod", "hook": "rotating", "fired": True, "fired_at": 12.0, "error": None}
+        notes, checks = [], []
+        self.assertEqual("PASS", run._midroll_checks(fired, spec, {"engine"}, "PASS", notes, checks))
+        self.assertTrue(any("applied at rotating" in c for c in checks))
+        notes = []
+        self.assertEqual("FAIL", run._midroll_checks(fired, spec, {"engine", "decoder"}, "PASS", notes, []))
+        self.assertTrue(any("did not land on decoder" in n for n in notes))
+        rp = dict(fired, kind="restartPolicy", value="None")
+        self.assertEqual("PASS", run._midroll_checks(rp, spec, {"engine"}, "PASS", [], []))
+        self.assertEqual("FAIL", run._midroll_checks(rp, spec, {"decoder"}, "PASS", [], []))
+        broken = dict(fired, error="strategy edit at rotating failed: denied")
+        notes = []
+        self.assertEqual("INFRA-FAIL", run._midroll_checks(broken, spec, {"engine"}, "PASS", notes, []))
+        self.assertTrue(any(n.startswith("INFRA-FAIL") for n in notes))
+        unfired = dict(fired, fired=False, fired_at=None)
+        checks = []
+        self.assertEqual("FAIL", run._midroll_checks(unfired, spec, {"engine"}, "FAIL", [], checks))
+        self.assertTrue(any("never reached" in c for c in checks))
+        self.assertEqual("PASS", run._midroll_checks(None, spec, {"engine"}, "PASS", [], []))

@@ -24,6 +24,7 @@ import glob
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -185,6 +186,11 @@ def parked_debt_rows(cases):
         if fields.get("notimpl") == "1":
             kind = "notimpl"
             ref = f"#{fields['issue']}" if fields.get("issue") else "NO ISSUE"
+        elif fields.get("expect") == "parked":
+            # The case asserts a documented behaviour the product is meant
+            # to outgrow; it names the issue that tracks the change.
+            kind = "parked"
+            ref = f"#{fields['issue']}" if fields.get("issue") else "NO ISSUE"
         elif fields.get("infeasible") == "1":
             kind = "infeasible"
             m = re.match(r"^\s*#\s*reason:\s*(.+)", lines[1]) if len(lines) > 1 else None
@@ -301,7 +307,15 @@ def is_green(verdict):
     case and is reported as a failure.
     """
     v = (verdict or "").strip()
-    return v == "PASS" or v.startswith("XFAIL")
+    return v == "PASS" or v.startswith("XFAIL") or v == "SKIP"
+
+
+def is_skipped(verdict):
+    """A verdict recorded as skipped in the report: parked debt (XFAIL), or a
+    case whose fault apparatus this cluster lacks (SKIP, with the reason in
+    the case's note)."""
+    v = str(verdict or "").strip()
+    return v.startswith("XFAIL") or v == "SKIP"
 
 
 def apply_shard(cases, spec):
@@ -326,18 +340,19 @@ def write_junit(path, results, elapsed):
     """Emit a JUnit report so CI annotates per case instead of only the summary.
 
     Parked debt (XFAIL) is recorded as skipped, not passed: it is tracked debt
-    and should read that way in the CI UI.
+    and should read that way in the CI UI. So is a SKIP, a case whose fault
+    apparatus this cluster lacks.
     """
     suite = ET.Element("testsuite", name="omenative-eval",
                        tests=str(len(results)),
                        failures=str(sum(1 for v in results.values() if not is_green(v))),
-                       skipped=str(sum(1 for v in results.values() if str(v).startswith("XFAIL"))),
+                       skipped=str(sum(1 for v in results.values() if is_skipped(v))),
                        time=f"{elapsed:.1f}")
     for case in sorted(results):
         verdict = results[case]
         tc = ET.SubElement(suite, "testcase", classname="omenative-eval",
                            name=f"{case} ({case_category(case)})")
-        if str(verdict).startswith("XFAIL"):
+        if is_skipped(verdict):
             ET.SubElement(tc, "skipped", message=str(verdict))
         elif not is_green(verdict):
             ET.SubElement(tc, "failure", message=str(verdict),
@@ -367,6 +382,34 @@ def sweep_fault_artifacts():
             print(f"=== sweeping leftover harness cordon: uncordon {node} ===")
             subprocess.run(["kubectl", "uncordon", node], env=ENV)
         subprocess.run(["kubectl", "label", "node", node, "perm.test/cordoned-"], env=ENV)
+    sweep_stopped_kubelets()
+
+
+def sweep_stopped_kubelets(docker=None):
+    """Start the kubelet again on every node the harness marked as stopped
+    (a node fault whose case died before its cleanup), through the docker
+    that owns the KIND nodes; without that docker the marker is left for the
+    host that has it."""
+    docker = docker or os.environ.get("OME_TEST_DOCKER", "docker")
+    r = subprocess.run(["kubectl", "get", "nodes", "-l", "perm.test/kubelet-stopped", "-o", "json"],
+                       env=ENV, capture_output=True, text=True)
+    if r.returncode != 0:
+        return
+    try:
+        marked = json.loads(r.stdout).get("items", [])
+    except Exception:
+        marked = []
+    if marked and shutil.which(docker) is None:
+        print(f"=== {len(marked)} node(s) marked {'perm.test/kubelet-stopped'} but {docker} is not on PATH; left for the host that owns them ===")
+        return
+    for item in marked:
+        node = (item.get("metadata") or {}).get("name", "")
+        if not node:
+            continue
+        print(f"=== sweeping leftover harness kubelet stop: start kubelet on {node} ===")
+        d = subprocess.run([docker, "exec", node, "systemctl", "start", "kubelet"], capture_output=True, text=True)
+        if d.returncode == 0:
+            subprocess.run(["kubectl", "label", "node", node, "perm.test/kubelet-stopped-"], env=ENV)
 
 
 def main():
@@ -400,7 +443,8 @@ def main():
 
     def needs_exclusive_run(case_id):
         fault = str(case_header_fields(case_id).get("fault", "")).split(":", 1)[0]
-        if fault in ("quota", "cordon", "ctrlrestart"):
+        # A dead node takes every pod on it with the victim: no neighbours.
+        if fault in ("quota", "cordon", "ctrlrestart", "node"):
             return True
         if pod_budget is None:
             return False
