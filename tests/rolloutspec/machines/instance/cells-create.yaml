@@ -125,10 +125,10 @@ cells:
     outcome: escalate
     to: Failed
     guard: the pod has held the reason past the stuck-pod grace and the pod set is not fully serving
-    note: these reasons are terminal but ambiguous between a bad revision and bad hardware, so the disposition never blames the revision — it records a relocation directive when migration is automatic, the attempt sits on one resolvable node and the budget allows, and otherwise disposes terminal; either way the operation is cleared and the row stamps Failed
-    placement: perm
-    coverage: {perm: [], unit: [TestExpireOperations_SinglePodCrashLoopRecordsDirective, TestDispose_RelocationDirective_GPUCase, TestDispose_Terminal], kind: []}
-    status: current
+    note: these reasons are terminal but ambiguous between a bad revision and bad hardware, so the disposition never blames the revision — it records a relocation directive when migration is automatic, the attempt sits on one resolvable node and the budget allows, and otherwise disposes terminal; either way the operation is cleared and the row stamps Failed. A terminal disposition counts the attempt on the target revision's RetryBlock toward lifecycle.updateRetry.maxAttempts like any failed attempt, so the Create is paced by the block and denied once the revision is Held; with no updateRetry configured it writes no RetryBlock and the Create pass re-materializes the row on the next pass
+    placement: unit
+    coverage: {perm: [], unit: [TestExpireOperations_SinglePodCrashLoopRecordsDirective, TestDispose_RelocationDirective_GPUCase, TestDispose_Terminal, TestDispose_Terminal_WaveCountsOnTheLadder], kind: []}
+    status: decided
 
   - state: Create/CreatePods
     event: pod.waiting

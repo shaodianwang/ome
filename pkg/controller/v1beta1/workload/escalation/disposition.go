@@ -36,8 +36,10 @@ const (
 	// ran. RetryBlocks untouched.
 	DispositionRelocationDirective
 	// DispositionTerminal — everything else: Operation cleared,
-	// Phase=Failed, no RetryBlock. The owning operation reconciler may
-	// retry only when its own safety and authorization checks pass.
+	// Phase=Failed. The wave is counted on the target revision's
+	// RetryBlock first when it is an attempt the ladder covers (see
+	// terminalChargeRevision); the owning operation reconciler may retry
+	// when the block and its own safety and authorization checks allow.
 	DispositionTerminal
 	// DispositionSkippedSuperseded — the only workload-caused pod belongs
 	// to a SUPERSEDED revision (its revision-hash label is not the current
@@ -86,8 +88,14 @@ const (
 //     was recorded). An exclusion the template's required node affinity
 //     can never satisfy also falls through to branch 3 — see
 //     DispositionDeps.PodSpec.
-//  3. TERMINAL — everything else: clear Operation + Phase=Failed. No
-//     RetryBlock; a repeat failure re-enters the disposition and takes
+//  3. TERMINAL — everything else: clear Operation + Phase=Failed. The
+//     wave is one more failed attempt at the target revision and counts
+//     on its RetryBlock toward UpdateRetryPolicy.MaxAttempts — the block
+//     is written ahead of the clear, exactly as in branch 1, and the
+//     bound Holds the revision — except for an environment cause (a
+//     scheduler hold), which is never counted, and for evidence that
+//     belongs to another revision. With no policy configured no block is
+//     written; a repeat failure re-enters the disposition and takes
 //     branch 1 if it is genuinely revision-scoped.
 //
 // reason is the caller's escalation summary (kubelet waiting reason for
@@ -141,10 +149,10 @@ func DisposeExpiredAttempt(ctx context.Context, deps types.Deps, input types.Rec
 			// that clears the failed attempt's Operation. Crash-safe: a
 			// re-entered disposition (block landed, clear didn't) refreshes
 			// the block via the writer's wave dedup without recounting.
-			// Whether the wave charges the ladder is read off the matched
-			// reason rather than asserted here, so this branch and the gang
-			// abandon answer that question from the same set.
-			if err := types.RecordUpdateFailureInRetryBlock(ctx, input, targetRev, matched, types.IsWorkloadCausedReason(matched)); err != nil {
+			// The wave's cause is read off the matched reason rather than
+			// asserted here, so this branch and the gang abandon classify it
+			// from the same set.
+			if err := types.RecordUpdateFailureInRetryBlock(ctx, input, targetRev, matched, types.FailureCauseOf(matched)); err != nil {
 				return DispositionHeldRevision, fmt.Errorf("record retry block for disposed attempt (instance=%d rev=%s): %w", inst.Index, targetRev, err)
 			}
 			termination := types.PodTerminationWithReason(pod, matched, now)
@@ -188,26 +196,31 @@ func DisposeExpiredAttempt(ctx context.Context, deps types.Deps, input types.Rec
 		Time:    now,
 	}
 	limboDetail := ""
+	var evidencePod *corev1.Pod
 	if causePod != nil {
 		// Workload-caused evidence without a resolvable revision still
 		// carries the wedged pod's diagnostics into LastFailure.
 		termination = types.PodTerminationWithReason(causePod, matched, now)
+		evidencePod = causePod
 	} else if pod := evidence.FirstPodWaitingForReason(pods, shortReason); pod != nil {
 		// Ambiguous runtime-start failures still identify the exact failed
 		// pod so operation-specific cleanup can remove only that object.
 		termination = types.PodTerminationWithReason(pod, shortReason, now)
+		evidencePod = pod
 	} else if pod, _ := evidence.FirstRunningNotReadyPod(pods, attemptTargetRevision(input, inst)); pod != nil {
 		// Readiness limbo: the branch above chose the disposition, this
 		// only says what an operator will read. Without it the record is
 		// the bare elapsed timeout and says nothing about the probe.
 		termination = evidence.ContainersNotReadyTermination(pod, now)
 		limboDetail = termination.Message
+		evidencePod = pod
 	} else if pod := evidence.FirstGateNotFoldedPod(pods, attemptTargetRevision(input, inst)); pod != nil {
 		// Gate limbo: the probes passed but a readiness gate keeps the pod
 		// out of its Service, so no promote can fire. Same standing as the
 		// limbo above — evidence, not a branch.
 		termination = evidence.GateNotFoldedTermination(pod, now)
 		limboDetail = termination.Message
+		evidencePod = pod
 	}
 
 	directiveRecorded := false
@@ -223,6 +236,15 @@ func DisposeExpiredAttempt(ctx context.Context, deps types.Deps, input types.Rec
 	if directiveRecorded {
 		outcome = DispositionRelocationDirective
 		detail = "attempt disposed with relocation directive; the rebuild is steered off the recorded node"
+	} else if chargeRev := terminalChargeRevision(input, inst, evidencePod, shortReason); chargeRev != "" {
+		// One wave counts once: the relocation ledger took the waves above,
+		// the revision's ladder takes this one. Written ahead of the
+		// op-clear so a crash between the two re-enters here and the
+		// writer's wave dedup refreshes without recounting.
+		if err := types.RecordUpdateFailureInRetryBlock(ctx, input, chargeRev, terminalWaveReason(shortReason, termination), types.CauseUnattributed); err != nil {
+			return DispositionTerminal, fmt.Errorf("record retry block for disposed attempt (instance=%d rev=%s): %w", inst.Index, chargeRev, err)
+		}
+		detail = "attempt disposed terminal (no workload-caused evidence, relocation unavailable) and counted on the revision's retry ladder"
 	}
 	if err := status.StampFailed(ctx, input, inst.Index, termination); err != nil {
 		return outcome, fmt.Errorf("clear operation + stamp Failed (instance=%d): %w", inst.Index, err)
@@ -239,6 +261,40 @@ func DisposeExpiredAttempt(ctx context.Context, deps types.Deps, input types.Rec
 		input.WarnInstanceFailed(inst.Index, "", fmt.Sprintf("%s: %s", reason, detail))
 	}
 	return outcome, nil
+}
+
+// terminalChargeRevision names the revision a terminal wave counts
+// against on the retry ladder, or "" when the wave is not counted: no
+// ladder is configured, the cause is the environment's (a scheduler
+// hold), the attempt has no resolvable target, or the only evidence is a
+// pod on a known, different revision — a leftover of a superseded
+// attempt, whose crash must not charge the revision that replaced it.
+func terminalChargeRevision(input types.ReconcileInput, inst types.InstanceStatus, evidencePod *corev1.Pod, shortReason string) string {
+	if input.UpdateRetryPolicy == nil || types.FailureCauseOf(shortReason) == types.CauseEnvironment {
+		return ""
+	}
+	targetRev := attemptTargetRevision(input, inst)
+	if targetRev == "" {
+		return ""
+	}
+	if evidencePod != nil {
+		podRev, tgtRev := query.RevisionFromPod(evidencePod), query.RevisionFromName(targetRev)
+		if !podRev.IsZero() && !tgtRev.IsZero() && !podRev.Same(tgtRev) {
+			return ""
+		}
+	}
+	return targetRev
+}
+
+// terminalWaveReason is what the counted wave records on the block: the
+// kubelet waiting reason the escalation classified (the crash loop an
+// operator reads on the hold), else the evidence's own reason (the probe
+// limbo or the bare deadline).
+func terminalWaveReason(shortReason string, termination *types.InstanceTermination) string {
+	if types.IsTerminalWaitingReason(shortReason) || termination == nil || termination.Reason == "" {
+		return shortReason
+	}
+	return termination.Reason
 }
 
 // sameTerminalFailure reports whether the instance's prior LastFailure already

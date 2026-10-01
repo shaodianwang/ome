@@ -11,6 +11,11 @@ arrows:
   - T-failed-gang-surge-reset
 cells:
   - instance/Failed/pod.deleted[target]/before
+intentional: >-
+  the abandon of a replacement gang that ran out its deadline counts the
+  wave on the target revision's retry ladder like any failed attempt
+  (AttemptsStarted=1), so a gang whose replacement keeps timing out is
+  Held at updateRetry.maxAttempts instead of being re-surged forever
 initial:
   spec:
     replicas: 1

@@ -516,7 +516,7 @@ transitions:
     event: pod.waiting
     guard: a replacement pod held a terminal waiting reason past the stuck-pod grace and the pod set is not fully serving
     to: Failed
-    effects: [the replacement's waiting reason is recorded on LastFailure and a workload-caused reason holds its revision]
+    effects: [the replacement's waiting reason is recorded on LastFailure and counts toward the revision's updateRetry.maxAttempts whatever its cause, a scheduler hold excepted]
     decided_in: pkg/controller/v1beta1/workload/escalation/escalation.go
   - id: T-surge-force-clock
     from: Update/Surge
@@ -544,7 +544,7 @@ transitions:
     event: timer.stuckPodGrace
     guard: the grace elapsed on a replacement pod that holds a terminal waiting reason, and the pod set is not fully serving
     to: Failed
-    effects: [the replacement waiting reason is recorded on LastFailure and a workload-caused reason holds its revision]
+    effects: [the replacement waiting reason is recorded on LastFailure and counts toward the revision's updateRetry.maxAttempts whatever its cause, a scheduler hold excepted]
     decided_in: pkg/controller/v1beta1/workload/escalation/escalation.go
   - id: T-surge-teardown-deadline
     from: Update/Surge

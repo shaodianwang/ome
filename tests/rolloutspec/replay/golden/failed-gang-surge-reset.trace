@@ -59,7 +59,7 @@ tick=7 row=1 write no-op precondition=no-change
 tick=7 row=0 write no-op precondition=no-change
 tick=7 row=0 write incarnation=1 phase=Ready runningRevision=svc-a-engine-3363fef6 readySince=t+30m1s op=nil lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Update/Surge exceeded InstanceReadyTimeout} precondition=ok
 tick=7 row=1 remove incarnation=1 phase=Failed runningRevision=nil targetRevision=svc-a-engine-367ef4b7 readySince=nil op=op#3{type=Update step=GangSurgeTargetCleanup target=svc-a-engine-367ef4b7 started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod= reason=DeadlineExceeded message=DeadlineExceeded: Update/GangSurgeTarget exceeded InstanceReadyTimeout} precondition=ok
-tick=7 retryblock target=svc-a-engine-367ef4b7 persist nil→{state=Backoff attempts=0 nextRetryAt=t+32m1s reason=DeadlineExceeded: Update/Surge exceeded InstanceReadyTimeout}
+tick=7 retryblock target=svc-a-engine-367ef4b7 persist nil→{state=Backoff attempts=1 nextRetryAt=t+32m1s reason=DeadlineExceeded: Update/Surge exceeded InstanceReadyTimeout}
 tick=7 event Warning GangSurgeAbandoned OMENative component=engine instance=0 abandoned failed gang surge (surge-index=1); resetting to revision svc-a-engine-3363fef6 for a fresh rollout
 tick=7 hold cleared
 tick=7 pass result=after:5s

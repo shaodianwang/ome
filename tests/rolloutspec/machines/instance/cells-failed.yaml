@@ -152,12 +152,12 @@ cells:
     outcome: transition
     to: Ready
     guard: the retired replacement's pods are all gone and the cleanup marker is claimed by this source
-    note: the abandon finalizes the replacement index, removes its row and resets the source Ready on its running revision in one transaction, recording the failed revision's RetryBlock; that block is charged toward Held only when the source's LastFailure reason is workload-caused, so an environment-caused wave paces the next attempt at the current rung instead of counting toward a hold. A recycled single-pod CreateContainerError target instead lets the ordinary surge path stamp a fresh attempt
+    note: the abandon finalizes the replacement index, removes its row and resets the source Ready on its running revision in one transaction, recording the failed revision's RetryBlock; that block counts the wave toward updateRetry.maxAttempts whatever the source's LastFailure reason (a crash-looping replacement gang ends Held at that bound the way a bad image does), except a scheduler hold, which is the environment's and records nothing; with no updateRetry configured a wave the revision is not blamed for records nothing and the source re-surges on the next pass. A recycled single-pod CreateContainerError target instead lets the ordinary surge path stamp a fresh attempt
     invariants: [serving.source.untouched]
     placement: perm
     coverage:
       perm: []
-      unit: [TestAbandonFailedGangSurge_ResetsSourceAfterPodsGone, TestAbandonFailedGangSurge_AtomicallyRemovesMarkerAndResetsSource, TestAbandonFailedGangSurge_RecordsRetryBlockWithPolicy]
+      unit: [TestAbandonFailedGangSurge_ResetsSourceAfterPodsGone, TestAbandonFailedGangSurge_AtomicallyRemovesMarkerAndResetsSource, TestAbandonFailedGangSurge_RecordsRetryBlockWithPolicy, TestAbandonFailedGangSurge_WavesHoldAtMaxAttempts, TestCrashLoopBound_NewRevisionCrashesAtStart]
       kind: []
       replay: [failed-gang-surge-reset, failed-recycle-resurge]
     status: decided
@@ -500,7 +500,7 @@ cells:
     coverage:
       perm: []
       unit: [TestDetectUpdate_RetryBlockDue_AllowsWithoutFlip, TestDetectUpdate_RetryBlockDueBoundaryExact, TestCreate_RetryBlockBackoffDue_AllowsAndFlips, TestPatchSurgingForUpdate_FlipsBackoffOnAttemptStart]
-      replay: [T-failed-retry, failed-retry-inplace, failed-retry-recreate, failed-retry-surge]
+      replay: [T-failed-retry, failed-retry-inplace, failed-retry-recreate, failed-retry-surge, surge-crashloop-bound]
       kind: []
     status: current
   - state: Failed

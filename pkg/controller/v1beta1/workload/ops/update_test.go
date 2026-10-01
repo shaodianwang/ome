@@ -2132,7 +2132,7 @@ func TestRecordUpdateFailure_FirstFailureBacksOff(t *testing.T) {
 	t0 := time.Now()
 	input, calls, warns := retryWriterInput(t0, nil, retryTestPolicy())
 
-	if err := recordUpdateFailureInRetryBlock(context.Background(), *input, "rev-bad", "ImagePullBackOff", true); err != nil {
+	if err := recordUpdateFailureInRetryBlock(context.Background(), *input, "rev-bad", "ImagePullBackOff", workload.CauseWorkload); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 	if len(*calls) != 1 {
@@ -2180,7 +2180,7 @@ func TestRecordUpdateFailure_SecondWaveCounts(t *testing.T) {
 		Reason:          "old evidence",
 	}}, retryTestPolicy())
 
-	if err := recordUpdateFailureInRetryBlock(context.Background(), *input, "rev-bad", "still ImagePullBackOff", true); err != nil {
+	if err := recordUpdateFailureInRetryBlock(context.Background(), *input, "rev-bad", "still ImagePullBackOff", workload.CauseWorkload); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 	if len(*calls) != 1 {
@@ -2223,7 +2223,7 @@ func TestRecordUpdateFailure_SameWaveRefreshOnly(t *testing.T) {
 		Reason:          "first instance failed",
 	}}, retryTestPolicy())
 
-	if err := recordUpdateFailureInRetryBlock(context.Background(), *input, "rev-bad", "second instance failed", true); err != nil {
+	if err := recordUpdateFailureInRetryBlock(context.Background(), *input, "rev-bad", "second instance failed", workload.CauseWorkload); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 	if len(*calls) != 1 {
@@ -2262,7 +2262,7 @@ func TestRecordUpdateFailure_ExhaustionHolds(t *testing.T) {
 		AttemptsStarted: 2,
 	}}, retryTestPolicy())
 
-	if err := recordUpdateFailureInRetryBlock(context.Background(), *input, "rev-bad", "third strike", true); err != nil {
+	if err := recordUpdateFailureInRetryBlock(context.Background(), *input, "rev-bad", "third strike", workload.CauseWorkload); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 	if len(*calls) != 1 {
@@ -2287,7 +2287,7 @@ func TestRecordUpdateFailure_ExhaustionHolds(t *testing.T) {
 
 	// A subsequent failure against the persisted Held block: refresh only.
 	input.ObservedState.RetryBlocks = []workload.RetryBlock{b}
-	if err := recordUpdateFailureInRetryBlock(context.Background(), *input, "rev-bad", "post-hold noise", true); err != nil {
+	if err := recordUpdateFailureInRetryBlock(context.Background(), *input, "rev-bad", "post-hold noise", workload.CauseWorkload); err != nil {
 		t.Fatalf("record on Held: %v", err)
 	}
 	held := (*calls)[1].block
@@ -2308,7 +2308,7 @@ func TestRecordUpdateFailure_NilPolicyHoldsFirstFailure(t *testing.T) {
 	t0 := time.Now()
 	input, calls, warns := retryWriterInput(t0, nil, nil)
 
-	if err := recordUpdateFailureInRetryBlock(context.Background(), *input, "rev-bad", "no policy configured", true); err != nil {
+	if err := recordUpdateFailureInRetryBlock(context.Background(), *input, "rev-bad", "no policy configured", workload.CauseWorkload); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 	if len(*calls) != 1 {
@@ -2335,12 +2335,12 @@ func TestRecordUpdateFailure_UnwiredNoOp(t *testing.T) {
 	t0 := time.Now()
 
 	unwired := &workload.ReconcileInput{Clock: clocktesting.NewFakeClock(t0)}
-	if err := recordUpdateFailureInRetryBlock(context.Background(), *unwired, "rev-bad", "x", true); err != nil {
+	if err := recordUpdateFailureInRetryBlock(context.Background(), *unwired, "rev-bad", "x", workload.CauseWorkload); err != nil {
 		t.Fatalf("nil closure must no-op: %v", err)
 	}
 
 	input, calls, _ := retryWriterInput(t0, nil, retryTestPolicy())
-	if err := recordUpdateFailureInRetryBlock(context.Background(), *input, "", "x", true); err != nil {
+	if err := recordUpdateFailureInRetryBlock(context.Background(), *input, "", "x", workload.CauseWorkload); err != nil {
 		t.Fatalf("empty targetRev must no-op: %v", err)
 	}
 	if len(*calls) != 0 {
@@ -2370,30 +2370,33 @@ func TestInstanceFailureReason(t *testing.T) {
 	}
 }
 
-// TestInstanceFailureWorkloadCaused pins the call-site cause attribution:
-// only a LastFailure whose Reason is in the workload-caused set charges
-// the ladder; an elapsed deadline, an ambiguous kubelet reason, and
-// missing evidence do not.
-func TestInstanceFailureWorkloadCaused(t *testing.T) {
-	if instanceFailureWorkloadCaused(nil) {
-		t.Error("nil status must not be workload-caused")
+// TestInstanceFailureCause pins the call-site cause attribution: a
+// LastFailure whose Reason is in the workload-caused set blames the
+// revision, a scheduler hold or a gang name conflict names the
+// environment, and an elapsed deadline, an ambiguous kubelet reason or
+// missing evidence is a failed attempt the revision is not blamed for.
+func TestInstanceFailureCause(t *testing.T) {
+	if got := instanceFailureCause(nil); got != workload.CauseUnattributed {
+		t.Errorf("nil status: got %v want CauseUnattributed", got)
 	}
 	s := &workload.InstanceStatus{}
-	if instanceFailureWorkloadCaused(s) {
-		t.Error("nil LastFailure must not be workload-caused")
+	if got := instanceFailureCause(s); got != workload.CauseUnattributed {
+		t.Errorf("nil LastFailure: got %v want CauseUnattributed", got)
 	}
-	for reason, want := range map[string]bool{
-		"ImagePullBackOff":           true,
-		"ErrImagePull":               true,
-		"InvalidImageName":           true,
-		"CreateContainerConfigError": true,
-		"DeadlineExceeded":           false,
-		"CrashLoopBackOff":           false,
-		"RunContainerError":          false,
-		"":                           false,
+	for reason, want := range map[string]workload.FailureCause{
+		"ImagePullBackOff":                       workload.CauseWorkload,
+		"ErrImagePull":                           workload.CauseWorkload,
+		"InvalidImageName":                       workload.CauseWorkload,
+		"CreateContainerConfigError":             workload.CauseWorkload,
+		workload.WaitingReasonUnschedulable:      workload.CauseEnvironment,
+		workload.PodGroupOwnershipConflictReason: workload.CauseEnvironment,
+		"DeadlineExceeded":                       workload.CauseUnattributed,
+		"CrashLoopBackOff":                       workload.CauseUnattributed,
+		"RunContainerError":                      workload.CauseUnattributed,
+		"":                                       workload.CauseUnattributed,
 	} {
 		s.LastFailure = &workload.InstanceTermination{PodName: "p-0", Reason: reason}
-		if got := instanceFailureWorkloadCaused(s); got != want {
+		if got := instanceFailureCause(s); got != want {
 			t.Errorf("reason %q: got %v want %v", reason, got, want)
 		}
 	}
@@ -2553,7 +2556,7 @@ func TestDetectUpdate_WedgedPodsReachHeld(t *testing.T) {
 		// The attempt wedges on the same bad image: the disposition charges
 		// the revision's ladder and disposes the row back to Failed with the
 		// Operation cleared.
-		if err := recordUpdateFailureInRetryBlock(ctx, *input, tcr.Name, "ImagePullBackOff", true /* workloadCaused */); err != nil {
+		if err := recordUpdateFailureInRetryBlock(ctx, *input, tcr.Name, "ImagePullBackOff", workload.CauseWorkload); err != nil {
 			t.Fatalf("record failure %d: %v", attempt, err)
 		}
 		if err := input.MutateInstance(ctx, 0, func(s *workload.InstanceStatus) bool {

@@ -815,7 +815,7 @@ func CleanupWreckage(ctx context.Context, deps workload.Deps, input workload.Rec
 	if failedGangSurgeContinuation(s, target.Name) {
 		return abandonFailedGangSurge(ctx, deps, input, plan, inst.Index, *s.Operation.SurgeIndex,
 			s.RunningRevision, s.Operation.TargetRevision,
-			instanceFailureReason(s, "gang surge abandoned after a corrective edit"), instanceFailureWorkloadCaused(s))
+			instanceFailureReason(s, "gang surge abandoned after a corrective edit"), instanceFailureCause(s))
 	}
 
 	aliens := alienRevisionPods(s, target.Name, instancePods)

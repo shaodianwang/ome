@@ -1,0 +1,62 @@
+# A single-pod surge whose replacement crashes on every start. No
+# relocation budget is configured, so each disposed attempt is terminal
+# and counts on the target revision's RetryBlock like any failed attempt:
+# the first wave records a Backoff block with one attempt and the crash
+# loop as its reason, the due block re-drives the surge once, and the
+# wave that reaches updateRetry.maxAttempts Holds the revision with the
+# RetryHeld warning while the source keeps serving.
+scenario: surge-crashloop-bound
+arrows:
+  - T-ready-surge
+  - T-surge-stuck
+  - T-failed-retry-surge
+cells:
+  - instance/Update/Surge/pod.waiting[CrashLoopBackOff]/before
+  - instance/Failed/timer.retryAt/before
+intentional: >-
+  a crash loop the revision is not blamed for is bounded by the one
+  retry ladder, updateRetry.maxAttempts: each terminal disposition counts
+  one attempt on the revision's block, and the bound Holds it
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+    stuckPodGrace: 1m
+    updateRetry: {maxAttempts: 2, initialDelay: 2m, maxDelay: 10m, multiplier: 2}
+timeline:
+  - tick: 1
+    note: cold start
+  - tick: 2
+    note: the source becomes Ready and enters rotation
+    events:
+      - pod.ready[source]: {pod: {index: 0, ordinal: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0, ordinal: 0}}
+  - tick: 3
+    note: the pod template changes, so the rollout surges a replacement
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the replacement is two minutes old, longer than the grace, before the kubelet names its failure
+    events:
+      - clock.advance: 2m
+  - tick: 5
+    note: the replacement crashes on every start; the attempt is disposed and the first wave counts on the revision's block
+    events:
+      - pod.waiting[CrashLoopBackOff]: {pod: {index: 0, ordinal: 1}, message: "back-off restarting failed container"}
+  - tick: 6
+    note: the block comes due and the surge re-drives the Instance at the same target, adopting the replacement that is still crash-looping
+    events:
+      - timer.retryAt: {slack: 1s}
+  - tick: 7
+    note: the next pass disposes the second wave on the same crash loop, and the bound Holds the revision with the RetryHeld warning while the source stays in rotation
+    events:
+      - clock.advance: 5m
+  - tick: 8
+    note: nothing re-drives a Held revision
+    events:
+      - clock.advance: 10m

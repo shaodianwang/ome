@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	types "k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/tools/record"
 	clocktesting "k8s.io/utils/clock/testing"
@@ -1107,6 +1108,13 @@ const (
 	// its healthy image, so a rebuild or an in-place patch heals it.
 	crashStartImage = "registry.test/serving:crash-start"
 	crashLoadImage  = "registry.test/serving:crash-load"
+	// crashAfterReadyImage reports ContainersReady once and then crashes
+	// on every later pass the way crashStartImage does.
+	crashAfterReadyImage = "registry.test/serving:crash-after-ready"
+	// crashAfterServingImage serves (PodReady with the serving gate) for
+	// two passes, long enough for the handoff to promote it, and then
+	// crashes on every later pass the way crashStartImage does.
+	crashAfterServingImage = "registry.test/serving:crash-after-serving"
 
 	// terminationFinalizer is the harness's stand-in for a kubelet that
 	// has not finished terminating a deleted pod: the fake client keeps a
@@ -1174,6 +1182,12 @@ type recoveryHarness struct {
 	// observed on it; lastCrash is the instant of its latest crash.
 	crashes   map[string]int
 	lastCrash map[string]time.Time
+	// servedPasses counts, per pod, the kubelet passes it ended PodReady;
+	// crashAfterServingImage crashes once it has served for two.
+	servedPasses map[string]int
+	// retryPolicy is the input's UpdateRetryPolicy; nil models an operator
+	// config with no updateRetry block.
+	retryPolicy *workloadtypes.RetryPolicy
 }
 
 func recoveryPodSpec(image string) *corev1.PodSpec {
@@ -1214,6 +1228,8 @@ func newRecoveryHarnessFor(t *testing.T, multiPod bool, container string) *recov
 		container:        container,
 		crashes:          map[string]int{},
 		lastCrash:        map[string]time.Time{},
+		servedPasses:     map[string]int{},
+		retryPolicy:      &workloadtypes.RetryPolicy{MaxAttempts: 2, InitialDelay: 20 * time.Second, MaxDelay: time.Minute, Multiplier: 2},
 	}
 	h.c = fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&v1beta1.InferenceService{}, &v1beta1.InferenceReplica{}).
@@ -1320,7 +1336,7 @@ func (h *recoveryHarness) kubelet() {
 			}}
 			setPodCondition(pod, corev1.ContainersReady, corev1.ConditionFalse, h.clk.Now())
 			setPodCondition(pod, corev1.PodReady, corev1.ConditionFalse, h.clk.Now())
-		case image == crashStartImage || (image == crashLoadImage && h.crashes[pod.Name]%2 == 0):
+		case image == crashStartImage || h.crashesAfterRunning(pod) || (image == crashLoadImage && h.crashes[pod.Name]%2 == 0):
 			// The container died again: a run that ended after the pod
 			// became Ready, and a kubelet back-off before the next start.
 			h.crashes[pod.Name]++
@@ -1372,12 +1388,41 @@ func (h *recoveryHarness) kubelet() {
 			setPodCondition(pod, corev1.ContainersReady, corev1.ConditionTrue, h.clk.Now())
 			setPodCondition(pod, corev1.PodReady, h.servingGate(pod), h.clk.Now())
 		}
+		if podConditionTrue(pod, corev1.PodReady) {
+			h.servedPasses[pod.Name]++
+		}
 		// Pod status is a built-in subresource on the fake client — a
 		// plain Update silently drops status changes.
 		if err := h.c.Status().Update(h.ctx, pod); err != nil {
 			h.t.Fatalf("kubelet update %s: %v", pod.Name, err)
 		}
 	}
+}
+
+// crashesAfterRunning reports whether the kubelet model crashes pod on
+// this pass for an image that runs first and dies later: once it has
+// reported ContainersReady for crashAfterReadyImage, once it has served
+// for two passes for crashAfterServingImage, and on every later pass
+// while the pod still runs that image. An in-place patch to a sound
+// image starts the container over, so a pod that has crashed before
+// runs again once its image is not one of these.
+func (h *recoveryHarness) crashesAfterRunning(pod *corev1.Pod) bool {
+	switch pod.Spec.Containers[0].Image {
+	case crashAfterReadyImage:
+		return h.crashes[pod.Name] > 0 || podConditionTrue(pod, corev1.ContainersReady)
+	case crashAfterServingImage:
+		return h.crashes[pod.Name] > 0 || h.servedPasses[pod.Name] >= 2
+	}
+	return false
+}
+
+func podConditionTrue(pod *corev1.Pod, condType corev1.PodConditionType) bool {
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type == condType {
+			return cond.Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }
 
 // servingGate is the PodReady value kubelet derives for a pod whose
@@ -1629,7 +1674,7 @@ func (h *recoveryHarness) buildInput() workloadtypes.ReconcileInput {
 		MutateInstance:    h.mutateInstance(),
 		RemoveInstance:    h.removeInstance(),
 		UpdateGate:        h.gate,
-		UpdateRetryPolicy: &workloadtypes.RetryPolicy{MaxAttempts: 2, InitialDelay: 20 * time.Second, MaxDelay: time.Minute, Multiplier: 2},
+		UpdateRetryPolicy: h.retryPolicy,
 		StuckPodGrace:     30 * time.Second,
 		Requeue:           h.requeue,
 		Clock:             h.clk,
@@ -4730,5 +4775,306 @@ func TestRepair_HoldsWhenTheStampedRevisionIsGone(t *testing.T) {
 	if !h.run(80, func() bool { return h.settledOn(h.revFixed, 1) }) {
 		h.dumpState("after the deadline")
 		t.Fatalf("the Instance never reached the current revision after the held repair's deadline")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// A new revision that crashes: the attempts at it are bounded.
+// ---------------------------------------------------------------------------
+
+// crashRevision publishes a revision on image and points the loop at it.
+func (h *recoveryHarness) crashRevision(image string) *appsv1.ControllerRevision {
+	h.t.Helper()
+	rev := h.ensureRevision(h.podSpec(image))
+	h.setTarget(rev, image)
+	return rev
+}
+
+// trackPodsOnImage returns a per-step hook that records every live pod UID
+// on image into seen, so a run can count how many attempts materialized.
+func (h *recoveryHarness) trackPodsOnImage(image string, seen map[types.UID]struct{}) func() {
+	return func() {
+		for _, pod := range h.livePods() {
+			if pod.Spec.Containers[0].Image == image {
+				seen[pod.UID] = struct{}{}
+			}
+		}
+	}
+}
+
+// namesTheCrash reports whether a recorded reason tells the operator the
+// container crashed: the kubelet's waiting reason on a disposed single-pod
+// attempt, or the crashed container's exit on a retired gang replacement,
+// whose LastFailure the gang abandon carries into the block.
+func namesTheCrash(reason string) bool {
+	return reason == "CrashLoopBackOff" || strings.Contains(reason, "failed (Error, exit 1)")
+}
+
+// heldOn reports whether the RetryBlock for rev is Held.
+func (h *recoveryHarness) heldOn(rev string) bool {
+	b := h.findBlock(rev)
+	return b != nil && b.State == workloadtypes.RetryBlockHeld
+}
+
+// useStrategy sets the Component's update strategy for the next setTarget.
+func (h *recoveryHarness) useStrategy(strategy workloadtypes.UpdateStrategyType) {
+	h.lifecycle.UpdateStrategy = &workloadtypes.UpdateStrategy{Type: strategy}
+	h.setTarget(h.target, h.desired.PodSpec.Containers[0].Image)
+}
+
+// crashBoundCase is one (shape, strategy) path of a new revision that
+// crashes at start under the retry ladder.
+type crashBoundCase struct {
+	name     string
+	multiPod bool
+	strategy workloadtypes.UpdateStrategyType
+	// keepsServing is true where the strategy leaves the source serving
+	// while the replacement is retried (surge shapes).
+	keepsServing bool
+}
+
+var crashBoundCases = []crashBoundCase{
+	{name: "single-pod SurgeThenDrain", strategy: workloadtypes.UpdateStrategySurgeThenDrain, keepsServing: true},
+	{name: "single-pod RecreatePod", strategy: workloadtypes.UpdateStrategyRecreatePod},
+	{name: "single-pod InPlaceIfPossible", strategy: workloadtypes.UpdateStrategyInPlaceIfPossible},
+	{name: "single-pod InPlaceOnly", strategy: workloadtypes.UpdateStrategyInPlaceOnly},
+	{name: "gang SurgeThenDrain", multiPod: true, strategy: workloadtypes.UpdateStrategySurgeThenDrain, keepsServing: true},
+}
+
+// TestCrashLoopBound_NewRevisionCrashesAtStart pins the rule for a
+// revision whose container dies on every start: each attempt the
+// disposition ends without a relocation directive counts toward
+// updateRetry.maxAttempts like any failed attempt, the revision is Held
+// at the bound with one RetryHeld warning naming the crash loop, no
+// further attempt materializes while it is Held, and a corrected
+// revision releases it.
+//
+// Cells: instance/Update/Surge/pod.waiting[CrashLoopBackOff]/before, instance/Update/InPlace/pod.waiting[CrashLoopBackOff]/before, instance/Update/Drain/pod.waiting[CrashLoopBackOff]/before
+func TestCrashLoopBound_NewRevisionCrashesAtStart(t *testing.T) {
+	for _, tc := range crashBoundCases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRecoveryHarness(t, tc.multiPod)
+			h.useStrategy(tc.strategy)
+			h.driveToReadyOnV1()
+
+			seen := map[types.UID]struct{}{}
+			revCrash := h.crashRevision(crashStartImage)
+			held := h.runWithInvariant(120, func() bool { return h.heldOn(revCrash.Name) }, func() {
+				h.trackPodsOnImage(crashStartImage, seen)()
+				if tc.keepsServing && len(h.servingPods()) == 0 {
+					t.Fatalf("the source left rotation while the crashing replacement was retried")
+				}
+			})
+			if !held {
+				h.dumpState("crash loop never held")
+				t.Fatalf("the crashing revision was never Held: attempts at it are unbounded")
+			}
+			b := h.findBlock(revCrash.Name)
+			if b.AttemptsStarted != h.retryPolicy.MaxAttempts || !namesTheCrash(b.Reason) {
+				t.Fatalf("held block: got (attempts=%d, reason=%q) want (%d, a reason naming the crash)", b.AttemptsStarted, b.Reason, h.retryPolicy.MaxAttempts)
+			}
+			if len(h.heldWarnings) != 1 || !strings.HasPrefix(h.heldWarnings[0], revCrash.Name) {
+				t.Fatalf("WarnRetryHeld: got %v, want exactly one warning for %s", h.heldWarnings, revCrash.Name)
+			}
+			attemptsAtHeld := len(seen)
+			h.settle(2)
+			h.runWithInvariant(8, func() bool { return false }, func() {
+				h.trackPodsOnImage(crashStartImage, seen)()
+				if s := h.instance(0); s == nil || s.Operation != nil || s.Phase == workloadtypes.InstancePhaseUpdating {
+					h.dumpState("attempt after Held")
+					t.Fatalf("an attempt at the held revision was reopened: %+v", s)
+				}
+			})
+			if len(seen) != attemptsAtHeld {
+				h.dumpState("attempt after Held")
+				t.Fatalf("a new replacement materialized after Held: %d pods seen before, %d after", attemptsAtHeld, len(seen))
+			}
+
+			h.setTarget(h.revFixed, fixedImage)
+			if !h.run(80, func() bool { return h.converged(h.revFixed.Name) }) {
+				h.dumpState("release by corrected revision")
+				t.Fatalf("the corrected revision did not converge after the crash loop was Held")
+			}
+		})
+	}
+}
+
+// TestCrashLoopBound_NewRevisionCrashesAfterReady pins the same rule for a
+// replacement that reports ContainersReady and then dies before it ever
+// serves: the surge never hands off, the attempt is disposed on the crash
+// loop and counted, and the revision is Held at the bound.
+//
+// Cells: instance/Update/Surge/pod.waiting[CrashLoopBackOff]/before
+func TestCrashLoopBound_NewRevisionCrashesAfterReady(t *testing.T) {
+	h := newRecoveryHarness(t, false)
+	h.driveToReadyOnV1()
+
+	revCrash := h.crashRevision(crashAfterReadyImage)
+	held := h.runWithInvariant(120, func() bool { return h.heldOn(revCrash.Name) }, func() {
+		if len(h.servingPods()) == 0 {
+			t.Fatalf("the source left rotation while the replacement crashed after readiness")
+		}
+	})
+	if !held {
+		h.dumpState("crash after ready never held")
+		t.Fatalf("a replacement that crashes after reporting ready was never Held")
+	}
+	b := h.findBlock(revCrash.Name)
+	if b.AttemptsStarted != h.retryPolicy.MaxAttempts || b.Reason != "CrashLoopBackOff" {
+		t.Fatalf("held block: got (attempts=%d, reason=%q) want (%d, CrashLoopBackOff)", b.AttemptsStarted, b.Reason, h.retryPolicy.MaxAttempts)
+	}
+	if s := h.instance(0); s == nil || s.Phase != workloadtypes.InstancePhaseFailed || s.RunningRevision != h.revV1.Name {
+		h.dumpState("held row")
+		t.Fatalf("the row must be Failed on its running v1 revision, got %+v", s)
+	}
+}
+
+// TestCrashLoopBound_CrashAfterPromotionIsNotThisBound pins the edge of
+// the rule: a replacement that serves long enough to be promoted makes
+// its revision the running one, so a later crash is a running-revision
+// failure for the repair path, not an attempt at a target revision. No
+// RetryBlock for the promoted revision reaches Held.
+func TestCrashLoopBound_CrashAfterPromotionIsNotThisBound(t *testing.T) {
+	h := newRecoveryHarness(t, false)
+	h.driveToReadyOnV1()
+
+	revCrash := h.crashRevision(crashAfterServingImage)
+	promoted := h.run(40, func() bool {
+		s := h.instance(0)
+		return s != nil && s.RunningRevision == revCrash.Name
+	})
+	if !promoted {
+		h.dumpState("promotion")
+		t.Fatalf("a replacement that served was never promoted")
+	}
+	h.settle(20)
+	if h.heldOn(revCrash.Name) {
+		h.dumpState("held after promotion")
+		t.Fatalf("the promoted revision was Held for a crash that happened after it became the running revision")
+	}
+}
+
+// TestCrashLoopBound_NoRetryPolicyKeepsRetrying pins the arm with no
+// updateRetry configured: the crashing revision carries no RetryBlock,
+// is never Held, and attempts keep materializing. The source keeps
+// serving throughout.
+func TestCrashLoopBound_NoRetryPolicyKeepsRetrying(t *testing.T) {
+	h := newRecoveryHarness(t, false)
+	h.retryPolicy = nil
+	h.driveToReadyOnV1()
+
+	revCrash := h.crashRevision(crashStartImage)
+	reopened := 0
+	h.runWithInvariant(40, func() bool { return false }, func() {
+		if len(h.servingPods()) == 0 {
+			t.Fatalf("the source left rotation while the crashing replacement was retried")
+		}
+		// A disposed attempt that is opened again is one more retry.
+		if s := h.instance(0); s != nil && s.Phase == workloadtypes.InstancePhaseFailed {
+			reopened++
+		}
+	})
+	if h.findBlock(revCrash.Name) != nil {
+		t.Fatalf("with no updateRetry configured the crashing revision must carry no RetryBlock, got %+v", *h.findBlock(revCrash.Name))
+	}
+	if reopened < 3 {
+		h.dumpState("unbounded retries")
+		t.Fatalf("with no updateRetry configured the revision must keep being retried; only %d attempts were disposed and reopened", reopened)
+	}
+}
+
+// TestCrashLoopBound_ReleasingTheHeldBlockReopensTheRevision pins the
+// operator release: removing the Held block (what the release annotation
+// does) admits a fresh attempt at the same revision, which is counted
+// from zero again.
+func TestCrashLoopBound_ReleasingTheHeldBlockReopensTheRevision(t *testing.T) {
+	h := newRecoveryHarness(t, false)
+	h.driveToReadyOnV1()
+
+	revCrash := h.crashRevision(crashStartImage)
+	if !h.run(120, func() bool { return h.heldOn(revCrash.Name) }) {
+		h.dumpState("crash loop never held")
+		t.Fatalf("the crashing revision was never Held")
+	}
+	h.settle(4)
+
+	h.blocks = nil
+	attemptReopened := false
+	counted := h.runWithInvariant(20, func() bool {
+		b := h.findBlock(revCrash.Name)
+		return attemptReopened && b != nil && b.AttemptsStarted == 1
+	}, func() {
+		if s := h.instance(0); s != nil && s.Operation != nil && s.Operation.TargetRevision == revCrash.Name {
+			attemptReopened = true
+		}
+	})
+	if !counted {
+		h.dumpState("release")
+		t.Fatalf("removing the Held block did not admit a fresh attempt counted from zero: reopened=%v block=%+v", attemptReopened, h.findBlock(revCrash.Name))
+	}
+}
+
+// TestCrashLoopBound_PeersKeepServingWhileTheTargetIsRetried pins the
+// peer story inside one Component: two Instances roll toward a crashing
+// revision under maxSurge=1; while the attempts are retried both sources
+// keep serving and at most one replacement is alive, and once the
+// revision is Held both Instances are Ready on their running revision
+// with no operation. A corrected revision then converges both.
+func TestCrashLoopBound_PeersKeepServingWhileTheTargetIsRetried(t *testing.T) {
+	h := newRecoveryHarness(t, false)
+	h.replicas = 2
+	maxSurge, maxUnavailable := intstr.FromInt(1), intstr.FromInt(0)
+	h.lifecycle.UpdateStrategy = &workloadtypes.UpdateStrategy{
+		Type:          workloadtypes.UpdateStrategySurgeThenDrain,
+		RollingUpdate: &workloadtypes.RollingUpdate{MaxSurge: &maxSurge, MaxUnavailable: &maxUnavailable},
+	}
+	h.setTarget(h.revV1, goodImage)
+	if !h.run(30, func() bool { return h.allReady(2) }) {
+		h.dumpState("initial create")
+		t.Fatalf("initial create never converged on v1 for two instances")
+	}
+
+	revCrash := h.crashRevision(crashStartImage)
+	held := h.runWithInvariant(160, func() bool { return h.heldOn(revCrash.Name) }, func() {
+		if got := len(h.servingPods()); got != 2 {
+			h.dumpState("serving dropped")
+			t.Fatalf("both sources must keep serving while the crashing replacement is retried, got %d serving", got)
+		}
+		alive := 0
+		for _, pod := range h.livePods() {
+			if pod.Spec.Containers[0].Image == crashStartImage {
+				alive++
+			}
+		}
+		if alive > 1 {
+			t.Fatalf("more replacements alive than maxSurge admits: %d", alive)
+		}
+	})
+	if !held {
+		h.dumpState("crash loop never held")
+		t.Fatalf("the crashing revision was never Held")
+	}
+	h.settle(4)
+	for _, s := range h.irStatuses() {
+		if s.Operation != nil || s.RunningRevision != h.revV1.Name || s.Phase == workloadtypes.InstancePhaseUpdating {
+			h.dumpState("peers at Held")
+			t.Fatalf("instance %d is not parked on v1 with no operation: %+v", s.Index, s)
+		}
+	}
+
+	h.setTarget(h.revFixed, fixedImage)
+	if !h.run(120, func() bool {
+		if !h.allReady(2) {
+			return false
+		}
+		for _, s := range h.irStatuses() {
+			if s.RunningRevision != h.revFixed.Name {
+				return false
+			}
+		}
+		return true
+	}) {
+		h.dumpState("corrected revision")
+		t.Fatalf("both instances did not converge on the corrected revision")
 	}
 }

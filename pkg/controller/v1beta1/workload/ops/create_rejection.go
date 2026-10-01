@@ -190,7 +190,7 @@ func disposeAPIRejection(ctx context.Context, input workload.ReconcileInput, ins
 	if rejection.Class == workload.APIRejectionPermanentWorkload && blameRevision {
 		heldRevision = rejectionTargetRevision(input, inst)
 		if heldRevision != "" {
-			if err := workload.RecordUpdateFailureInRetryBlock(ctx, input, heldRevision, rejection.Reason, true); err != nil {
+			if err := workload.RecordUpdateFailureInRetryBlock(ctx, input, heldRevision, rejection.Reason, workload.CauseWorkload); err != nil {
 				return "", fmt.Errorf("record retry block for rejected attempt (instance=%d rev=%s): %w", inst.Index, heldRevision, err)
 			}
 		}
@@ -285,8 +285,8 @@ func anyInFlightCreateAttempt(input workload.ReconcileInput, except int32) bool 
 // implementation for the gang abandon here and the workload-root
 // deadline disposition, under the package-local name the ops-side call
 // sites and invariant tests use.
-func recordUpdateFailureInRetryBlock(ctx context.Context, input workload.ReconcileInput, targetRev, reason string, workloadCaused bool) error {
-	return workload.RecordUpdateFailureInRetryBlock(ctx, input, targetRev, reason, workloadCaused)
+func recordUpdateFailureInRetryBlock(ctx context.Context, input workload.ReconcileInput, targetRev, reason string, cause workload.FailureCause) error {
+	return workload.RecordUpdateFailureInRetryBlock(ctx, input, targetRev, reason, cause)
 }
 
 // instanceFailureReason summarizes the failure evidence the escalators
@@ -306,11 +306,13 @@ func instanceFailureReason(s *workload.InstanceStatus, fallback string) string {
 	return fallback
 }
 
-// instanceFailureWorkloadCaused reports whether the failure evidence the
-// escalators stamped on the instance (LastFailure.Reason) blames the
-// revision itself. Only that evidence charges the revision's retry
-// ladder; an elapsed deadline or an ambiguous kubelet reason paces the
-// next attempt without counting toward Held.
-func instanceFailureWorkloadCaused(s *workload.InstanceStatus) bool {
-	return s != nil && s.LastFailure != nil && workload.IsWorkloadCausedReason(s.LastFailure.Reason)
+// instanceFailureCause classifies the failure evidence the escalators
+// stamped on the instance (LastFailure.Reason): whether it blames the
+// revision itself, says nothing about it, or names the environment. An
+// instance with no evidence is read as a failed attempt at the revision.
+func instanceFailureCause(s *workload.InstanceStatus) workload.FailureCause {
+	if s == nil || s.LastFailure == nil {
+		return workload.CauseUnattributed
+	}
+	return workload.FailureCauseOf(s.LastFailure.Reason)
 }

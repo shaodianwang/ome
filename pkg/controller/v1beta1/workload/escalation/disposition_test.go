@@ -1323,3 +1323,310 @@ func TestDispose_UnschedulableCannotSuppressRelocation(t *testing.T) {
 		t.Errorf("LastFailure.Reason: got %+v want Unschedulable", got)
 	}
 }
+
+// ladderPolicy is a retry policy whose ladder Holds a revision after two
+// failed attempts, whatever their cause.
+func ladderPolicy() *types.RetryPolicy {
+	return &types.RetryPolicy{MaxAttempts: 2, InitialDelay: time.Minute, MaxDelay: 30 * time.Minute, Multiplier: 2}
+}
+
+// storeRetryBlocks replaces the fixture's zero-block recorder with a
+// store seeded from persisted, so a wave observes what earlier waves
+// wrote, and records the commits already landed when each block write
+// arrives, so a test can check the write-ahead order. WarnRetryHeld
+// calls are collected in heldWarnings.
+func storeRetryBlocks(input *types.ReconcileInput, rec *dispositionRecorders, persisted []types.RetryBlock) (blocks *[]types.RetryBlock, commitsAtBlockWrite *[]int, heldWarnings *[]string) {
+	store := append([]types.RetryBlock(nil), persisted...)
+	blocks, commitsAtBlockWrite, heldWarnings = &store, &[]int{}, &[]string{}
+	input.MutateRetryBlock = func(_ context.Context, rev string, mutate func(*types.RetryBlock) types.RetryBlockDisposition) error {
+		pos := -1
+		b := types.RetryBlock{TargetRevision: rev}
+		for i := range *blocks {
+			if (*blocks)[i].TargetRevision == rev {
+				pos, b = i, (*blocks)[i]
+			}
+		}
+		d := mutate(&b)
+		rec.blockCalls = append(rec.blockCalls, struct {
+			rev   string
+			disp  types.RetryBlockDisposition
+			block types.RetryBlock
+		}{rev: rev, disp: d, block: b})
+		*commitsAtBlockWrite = append(*commitsAtBlockWrite, len(rec.commits))
+		switch d {
+		case types.RetryBlockPersist:
+			if pos == -1 {
+				*blocks = append(*blocks, b)
+			} else {
+				(*blocks)[pos] = b
+			}
+		case types.RetryBlockRemove:
+			if pos != -1 {
+				*blocks = append((*blocks)[:pos], (*blocks)[pos+1:]...)
+			}
+		}
+		return nil
+	}
+	input.WarnRetryHeld = func(rev string, attempts int32, reason string) {
+		*heldWarnings = append(*heldWarnings, fmt.Sprintf("%s attempts=%d %s", rev, attempts, reason))
+	}
+	return blocks, commitsAtBlockWrite, heldWarnings
+}
+
+// crashingSurgeAttempt is a single-pod surge attempt at targetRev whose
+// replacement is parked in CrashLoopBackOff on node, with the fixture's
+// recorders wired under policy and owner.
+func crashingSurgeAttempt(fc *clocktesting.FakeClock, targetRev string, policy *types.RetryPolicy, owner client.Object) ([]types.InstanceStatus, types.ReconcileInput, *dispositionRecorders) {
+	insts := []types.InstanceStatus{{
+		Index:     0,
+		Phase:     types.InstancePhaseUpdating,
+		Operation: &types.InstanceOperation{Type: types.InstanceOperationUpdate, Step: types.UpdateStepSurge, TargetRevision: targetRev},
+	}}
+	input, rec := dispositionFixtureInput(fc, &insts, targetRev, policy, owner)
+	return insts, input, rec
+}
+
+// TestDispose_Terminal_WaveCountsOnTheLadder pins the terminal branch: a
+// crash-looping attempt that no relocation directive claims charges the
+// target revision's block (Backoff, one attempt, the crash loop as its
+// reason) before the Operation is cleared, exactly as a workload-caused
+// wave does, and the wave that reaches MaxAttempts Holds the revision
+// with one RetryHeld warning.
+//
+// Cells: instance/Update/Surge/pod.waiting[CrashLoopBackOff]/before, instance/Create/CreatePods/pod.waiting[CrashLoopBackOff]/before
+func TestDispose_Terminal_WaveCountsOnTheLadder(t *testing.T) {
+	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	fc := clocktesting.NewFakeClock(t0)
+	pod := waitingPod("engine-0-default-1", "CrashLoopBackOff", "node-a", t0.Add(-time.Minute))
+	dd := types.DispositionDeps{AutoMigrateMaxAttempts: 3, MigrationMode: types.MigrationModeNever}
+
+	dispose := func(persisted []types.RetryBlock) (escalation.DispositionOutcome, *dispositionRecorders, *[]types.RetryBlock, *[]int, *[]string) {
+		insts, input, rec := crashingSurgeAttempt(fc, "own-engine-crash", ladderPolicy(), ledgerOwnerCM())
+		blocks, order, warns := storeRetryBlocks(&input, rec, persisted)
+		outcome, err := escalation.DisposeExpiredAttempt(context.Background(), types.Deps{Client: fakeLedgerClient(t), Clock: fc}, input, dd, insts[0], []*corev1.Pod{pod}, "CrashLoopBackOff")
+		if err != nil {
+			t.Fatalf("DisposeExpiredAttempt: %v", err)
+		}
+		if len(rec.commits) != 1 || rec.commits[0].after.Phase != types.InstancePhaseFailed || rec.commits[0].after.Operation != nil {
+			t.Fatalf("commit: got %+v want single Failed-no-op commit", rec.commits)
+		}
+		return outcome, rec, blocks, order, warns
+	}
+
+	outcome, rec, blocks, order, warns := dispose(nil)
+	if outcome != escalation.DispositionTerminal {
+		t.Fatalf("first wave outcome: got %v want DispositionTerminal", outcome)
+	}
+	if len(rec.blockCalls) != 1 || (*order)[0] != 0 {
+		t.Fatalf("first wave: got block calls %+v (commits landed before each: %v) want one write ahead of the op-clear", rec.blockCalls, *order)
+	}
+	first := (*blocks)[0]
+	if first.TargetRevision != "own-engine-crash" || first.State != types.RetryBlockBackoff || first.AttemptsStarted != 1 || first.Reason != "CrashLoopBackOff" {
+		t.Fatalf("first wave block: got %+v want Backoff attempts=1 reason=CrashLoopBackOff on own-engine-crash", first)
+	}
+	if first.NextRetryAt == nil || !first.NextRetryAt.Time.Equal(t0.Add(time.Minute)) {
+		t.Fatalf("first wave NextRetryAt: got %v want %v", first.NextRetryAt, t0.Add(time.Minute))
+	}
+	if len(*warns) != 0 {
+		t.Fatalf("first wave must not warn Held: %v", *warns)
+	}
+
+	// The retry gate admitted the next attempt and flipped the block.
+	first.State = types.RetryBlockRetryInProgress
+	outcome, rec, blocks, _, warns = dispose([]types.RetryBlock{first})
+	if outcome != escalation.DispositionTerminal {
+		t.Fatalf("second wave outcome: got %v want DispositionTerminal", outcome)
+	}
+	if len(rec.blockCalls) != 1 {
+		t.Fatalf("second wave: got %d block calls want 1", len(rec.blockCalls))
+	}
+	held := (*blocks)[0]
+	if held.State != types.RetryBlockHeld || held.AttemptsStarted != 2 || held.NextRetryAt != nil || held.Reason != "CrashLoopBackOff" {
+		t.Fatalf("second wave block: got %+v want Held attempts=2 with no retry time", held)
+	}
+	if len(*warns) != 1 || (*warns)[0] != "own-engine-crash attempts=2 CrashLoopBackOff" {
+		t.Fatalf("RetryHeld warning: got %v want exactly one for the held revision", *warns)
+	}
+}
+
+// TestDispose_Terminal_DeadlineWaveCountsOnTheLadder pins that a bare
+// elapsed deadline with no pod evidence is still an attempt at the target
+// that failed, so it counts on the ladder with the deadline as its
+// reason.
+//
+// Cells: instance/Update/Surge/timer.operationDeadline/before
+func TestDispose_Terminal_DeadlineWaveCountsOnTheLadder(t *testing.T) {
+	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	fc := clocktesting.NewFakeClock(t0)
+	insts, input, rec := crashingSurgeAttempt(fc, "own-engine-slow", ladderPolicy(), nil)
+	blocks, _, _ := storeRetryBlocks(&input, rec, nil)
+
+	outcome, err := escalation.DisposeExpiredAttempt(context.Background(), types.Deps{}, input, types.DispositionDeps{}, insts[0], nil, "DeadlineExceeded: Update/Surge exceeded InstanceReadyTimeout")
+	if err != nil {
+		t.Fatalf("DisposeExpiredAttempt: %v", err)
+	}
+	if outcome != escalation.DispositionTerminal {
+		t.Fatalf("outcome: got %v want DispositionTerminal", outcome)
+	}
+	if len(*blocks) != 1 || (*blocks)[0].State != types.RetryBlockBackoff || (*blocks)[0].AttemptsStarted != 1 || (*blocks)[0].Reason != "DeadlineExceeded" {
+		t.Fatalf("block: got %+v want one Backoff attempt with reason DeadlineExceeded", *blocks)
+	}
+}
+
+// TestDispose_Terminal_NoRetryPolicyWritesNoBlock pins the arm with no
+// updateRetry configured: the terminal branch writes no RetryBlock, so a
+// crash-looping attempt is reopened by its operation reconciler rather
+// than Held.
+func TestDispose_Terminal_NoRetryPolicyWritesNoBlock(t *testing.T) {
+	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	fc := clocktesting.NewFakeClock(t0)
+	insts, input, rec := crashingSurgeAttempt(fc, "own-engine-crash", nil, nil)
+	pod := waitingPod("engine-0-default-1", "CrashLoopBackOff", "node-a", t0.Add(-time.Minute))
+
+	outcome, err := escalation.DisposeExpiredAttempt(context.Background(), types.Deps{}, input, types.DispositionDeps{}, insts[0], []*corev1.Pod{pod}, "CrashLoopBackOff")
+	if err != nil {
+		t.Fatalf("DisposeExpiredAttempt: %v", err)
+	}
+	if outcome != escalation.DispositionTerminal || len(rec.blockCalls) != 0 {
+		t.Fatalf("got (outcome=%v, block calls=%+v) want (Terminal, none)", outcome, rec.blockCalls)
+	}
+}
+
+// TestDispose_RelocationDirective_DoesNotCountOnTheLadder pins that one
+// wave counts once: an attempt the relocation branch claims is counted in
+// the relocation ledger alone and writes no block.
+//
+// Cells: instance/Update/Surge/pod.waiting[CrashLoopBackOff]/before
+func TestDispose_RelocationDirective_DoesNotCountOnTheLadder(t *testing.T) {
+	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	fc := clocktesting.NewFakeClock(t0)
+	c := fakeLedgerClient(t)
+	insts, input, rec := crashingSurgeAttempt(fc, "own-engine-crash", ladderPolicy(), ledgerOwnerCM())
+	pod := waitingPod("engine-0-default-1", "CrashLoopBackOff", "node-a", t0.Add(-time.Minute))
+	dd := types.DispositionDeps{AutoMigrateMaxAttempts: 3, MigrationMode: types.MigrationModeAuto}
+
+	outcome, err := escalation.DisposeExpiredAttempt(context.Background(), types.Deps{Client: c, Clock: fc}, input, dd, insts[0], []*corev1.Pod{pod}, "CrashLoopBackOff")
+	if err != nil {
+		t.Fatalf("DisposeExpiredAttempt: %v", err)
+	}
+	if outcome != escalation.DispositionRelocationDirective {
+		t.Fatalf("outcome: got %v want DispositionRelocationDirective", outcome)
+	}
+	if len(rec.blockCalls) != 0 {
+		t.Fatalf("a relocated wave must write no RetryBlock; got %+v", rec.blockCalls)
+	}
+	if got := len(loadLedger(t, c).Entries); got != 1 {
+		t.Fatalf("ledger entries: got %d want 1 (the relocation directive)", got)
+	}
+}
+
+// TestDispose_RelocationBudgetRunsOutBeforeTheLadderHolds pins the whole
+// ladder for a revision that crashes on every node it is tried on, with
+// auto-migration on: the relocation branch spends autoMigrate.maxAttempts
+// first, each wave steering the rebuild off another node and touching no
+// block, and only then do the waves count on the revision's ladder, Held
+// at updateRetry.maxAttempts like any other failure. A revision that
+// failed on that many nodes in a row was not the node's fault; one held
+// wrongly is released by the operator with the release annotation.
+//
+// Cells: instance/Update/Surge/pod.waiting[CrashLoopBackOff]/before
+func TestDispose_RelocationBudgetRunsOutBeforeTheLadderHolds(t *testing.T) {
+	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	fc := clocktesting.NewFakeClock(t0)
+	c := fakeLedgerClient(t)
+	deps := types.Deps{Client: c, Clock: fc}
+	dd := types.DispositionDeps{AutoMigrateMaxAttempts: 2, MigrationMode: types.MigrationModeAuto}
+	policy := ladderPolicy()
+	nodes := []string{"node-a", "node-b", "node-c", "node-d"}
+
+	var persisted []types.RetryBlock
+	for wave := 1; wave <= int(dd.AutoMigrateMaxAttempts)+int(policy.MaxAttempts); wave++ {
+		insts, input, rec := crashingSurgeAttempt(fc, "own-engine-crash", policy, ledgerOwnerCM())
+		blocks, _, warns := storeRetryBlocks(&input, rec, persisted)
+		pod := waitingPod("engine-0-default-1", "CrashLoopBackOff", nodes[wave-1], t0.Add(-time.Minute))
+		outcome, err := escalation.DisposeExpiredAttempt(context.Background(), deps, input, dd, insts[0], []*corev1.Pod{pod}, "CrashLoopBackOff")
+		if err != nil {
+			t.Fatalf("wave %d: DisposeExpiredAttempt: %v", wave, err)
+		}
+		if len(rec.commits) != 1 || rec.commits[0].after.Phase != types.InstancePhaseFailed || rec.commits[0].after.Operation != nil {
+			t.Fatalf("wave %d: commit got %+v want single Failed-no-op commit", wave, rec.commits)
+		}
+		relocations := len(loadLedger(t, c).Entries)
+		if wave <= int(dd.AutoMigrateMaxAttempts) {
+			if outcome != escalation.DispositionRelocationDirective || relocations != wave || len(*blocks) != 0 {
+				t.Fatalf("wave %d: got (outcome=%v, directives=%d, blocks=%+v) want (RelocationDirective, %d, none): the relocation budget is spent first", wave, outcome, relocations, *blocks, wave)
+			}
+			continue
+		}
+		counted := int32(wave) - dd.AutoMigrateMaxAttempts
+		if outcome != escalation.DispositionTerminal || relocations != int(dd.AutoMigrateMaxAttempts) {
+			t.Fatalf("wave %d: got (outcome=%v, directives=%d) want (Terminal, %d): past the budget nothing relocates", wave, outcome, relocations, dd.AutoMigrateMaxAttempts)
+		}
+		if len(*blocks) != 1 || (*blocks)[0].AttemptsStarted != counted || (*blocks)[0].Reason != "CrashLoopBackOff" {
+			t.Fatalf("wave %d: block got %+v want attempts=%d reason=CrashLoopBackOff", wave, *blocks, counted)
+		}
+		if counted < policy.MaxAttempts {
+			if (*blocks)[0].State != types.RetryBlockBackoff || len(*warns) != 0 {
+				t.Fatalf("wave %d: got (state=%q, warnings=%v) want (Backoff, none)", wave, (*blocks)[0].State, *warns)
+			}
+			// The retry gate admitted the next attempt and flipped the block.
+			next := (*blocks)[0]
+			next.State = types.RetryBlockRetryInProgress
+			persisted = []types.RetryBlock{next}
+			continue
+		}
+		if (*blocks)[0].State != types.RetryBlockHeld || (*blocks)[0].NextRetryAt != nil {
+			t.Fatalf("wave %d: block got %+v want Held with no retry time", wave, (*blocks)[0])
+		}
+		if len(*warns) != 1 || (*warns)[0] != fmt.Sprintf("own-engine-crash attempts=%d CrashLoopBackOff", policy.MaxAttempts) {
+			t.Fatalf("wave %d: RetryHeld warning got %v want exactly one for the held revision", wave, *warns)
+		}
+	}
+}
+
+// TestDispose_Terminal_SupersededLeftoverDoesNotChargeTheTarget pins the
+// same guard branch 1 applies: when the only evidence is a pod on a
+// known, different revision than the attempt's target, the wave charges
+// nothing — the corrective revision must not inherit the leftover's crash.
+func TestDispose_Terminal_SupersededLeftoverDoesNotChargeTheTarget(t *testing.T) {
+	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	fc := clocktesting.NewFakeClock(t0)
+	insts, input, rec := crashingSurgeAttempt(fc, "own-engine-newgood", ladderPolicy(), nil)
+	pod := waitingPod("engine-0-default-1", "CrashLoopBackOff", "node-a", t0.Add(-time.Minute))
+	pod.Labels = map[string]string{"ome.io/revision-hash": "oldcrash"}
+
+	outcome, err := escalation.DisposeExpiredAttempt(context.Background(), types.Deps{}, input, types.DispositionDeps{}, insts[0], []*corev1.Pod{pod}, "CrashLoopBackOff")
+	if err != nil {
+		t.Fatalf("DisposeExpiredAttempt: %v", err)
+	}
+	if outcome != escalation.DispositionTerminal || len(rec.blockCalls) != 0 {
+		t.Fatalf("got (outcome=%v, block calls=%+v) want (Terminal, none: the leftover's crash is not the target's)", outcome, rec.blockCalls)
+	}
+}
+
+// TestDispose_Terminal_SchedulerHoldCountsNothing pins that a pod the
+// scheduler could not place is an environment cause: the attempt is
+// disposed terminal and the revision's block is untouched, however the
+// ladder is configured.
+func TestDispose_Terminal_SchedulerHoldCountsNothing(t *testing.T) {
+	t0 := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	fc := clocktesting.NewFakeClock(t0)
+	insts := []types.InstanceStatus{{
+		Index:     0,
+		Phase:     types.InstancePhaseCreating,
+		Operation: &types.InstanceOperation{Type: types.InstanceOperationCreate, TargetRevision: "own-engine-big"},
+	}}
+	input, rec := dispositionFixtureInput(fc, &insts, "own-engine-big", ladderPolicy(), nil)
+	pending := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "engine-0-default-0", Namespace: "ns", CreationTimestamp: metav1.NewTime(t0.Add(-time.Hour))},
+		Status:     corev1.PodStatus{Phase: corev1.PodPending},
+	}
+
+	outcome, err := escalation.DisposeExpiredAttempt(context.Background(), types.Deps{}, input, types.DispositionDeps{}, insts[0], []*corev1.Pod{pending}, types.WaitingReasonUnschedulable+": 0/3 nodes are available")
+	if err != nil {
+		t.Fatalf("DisposeExpiredAttempt: %v", err)
+	}
+	if outcome != escalation.DispositionTerminal || len(rec.blockCalls) != 0 {
+		t.Fatalf("got (outcome=%v, block calls=%+v) want (Terminal, none: no placement is not the revision's fault)", outcome, rec.blockCalls)
+	}
+}
