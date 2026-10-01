@@ -7172,3 +7172,740 @@ class GeneratedFaultFamiliesTest(unittest.TestCase):
                 for name, _kv, _m in self.by_folder[folder]:
                     (root / folder / f"{name}.yaml").write_text(self.outputs[f"{folder}/{name}.yaml"])
             self.assertEqual(0, run.validate_cases(root))
+
+
+class EvictFaultTest(unittest.TestCase):
+    """evict removes the podkill victim through the Eviction API, the way a
+    drain does: a disruption-budget refusal is retried, an eviction never
+    admitted is red, and mode=kill evicts through via=evict."""
+
+    BASE = "# p999: x Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 topo=engine"
+    KILL = "# p999: x mode=kill Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 restart=None topo=engine"
+    PODS = {"e0": {"alive": True, "hash": "old", "inst": "0", "comp": "engine", "runner": "default", "uid": "u0", "created": "1"},
+            "e1": {"alive": True, "hash": "old", "inst": "1", "comp": "engine", "runner": "default", "uid": "u1", "created": "2"}}
+
+    def _errs(self, header):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    @staticmethod
+    def _kubectl(calls, rc=0, stderr=""):
+        def kubectl(*a, **k):
+            calls.append((a, k.get("input")))
+            return subprocess.CompletedProcess(a, rc, "", stderr)
+        return kubectl
+
+    def test_header_evicts_at_a_hook_or_through_via(self):
+        self.assertTrue(run._fault_ok("evict:rotating"))
+        self.assertTrue(run._fault_ok("evict:settling"))
+        self.assertFalse(run._fault_ok("evict:idle"))
+        self.assertEqual([], self._errs(self.BASE + " fault=evict:rotating"))
+        self.assertEqual([], self._errs(self.BASE + " fault=evict:rotating victim=stable victimcomp=engine"))
+        self.assertEqual([], self._errs(self.KILL + " via=evict"))
+        self.assertEqual([], self._errs(self.KILL.replace("topo=engine", "topo=engine-mn") + " via=delete kill=leader"))
+        self.assertTrue(any("mode=kill" in e for e in self._errs(self.BASE + " via=evict")))
+        self.assertTrue(any("via=evict" in e for e in self._errs(self.KILL + " fault=evict:rotating")))
+        self.assertTrue(any("malformed header value via" in e for e in self._errs(self.KILL + " via=drain")))
+
+    def test_capability_reads_the_eviction_api(self):
+        calls = []
+        with mock.patch.object(run, "kubectl", self._kubectl(calls)):
+            self.assertIsNone(run._fault_capability("evict"))
+        self.assertEqual(("get", "--raw", run.EVICTION_API), calls[0][0])
+        with mock.patch.object(run, "kubectl", self._kubectl([], rc=1, stderr="the server could not find the requested resource")):
+            self.assertIn("not served", run._fault_capability("evict"))
+        self.assertIsNone(run._fault_capability("podkill"))
+
+    def test_eviction_posts_the_eviction_subresource(self):
+        calls = []
+        with mock.patch.object(run, "kubectl", self._kubectl(calls)):
+            self.assertEqual((True, False, ""), run._evict_pod("e1"))
+        args, body = calls[0]
+        self.assertEqual(("create", "--raw", f"/api/v1/namespaces/{run.NS}/pods/e1/eviction", "-f", "-"), args)
+        self.assertEqual({"apiVersion": "policy/v1", "kind": "Eviction", "metadata": {"name": "e1", "namespace": run.NS}},
+                         json.loads(body))
+        refused = "Error from server (TooManyRequests): Cannot evict pod as it would violate the pod's disruption budget."
+        with mock.patch.object(run, "kubectl", self._kubectl([], rc=1, stderr=refused)):
+            admitted, denied, msg = run._evict_pod("e1")
+        self.assertEqual((False, True), (admitted, denied))
+        self.assertIn("disruption budget", msg)
+        with mock.patch.object(run, "kubectl", self._kubectl([], rc=1, stderr='pods "e1" not found')):
+            self.assertEqual((False, False), run._evict_pod("e1")[:2])
+
+    def test_refusal_leaves_the_fault_due_again_and_admission_fires_it(self):
+        f = run._fault_new("p999", {"fault": "evict:rotating"})
+        refused = "Cannot evict pod as it would violate the pod's disruption budget."
+        # The revision snapshot predates both pods, so the rotating hook is due
+        # and the newest pod is the surge the rule aims at.
+        with mock.patch.object(run, "kubectl", self._kubectl([], rc=1, stderr=refused)):
+            run._fault_fire(f, self.PODS, {"engine": 1}, {"older"})
+        self.assertFalse(f["fired"])
+        self.assertEqual(1, f["denials"])
+        self.assertGreater(f["retry_at"], time.time())
+        self.assertIsNone(f["infra_fail"])
+        fired = []
+        ctx = {"fault": f, "trigger_ts": 1.0, "pod_state": self.PODS, "pods_per_inst": {"engine": 1}, "old_hashes": {"older"}}
+        with mock.patch.object(run, "_fault_fire", lambda *a, **k: fired.append(a)):
+            run._fault_tick(ctx)
+            self.assertEqual([], fired, "a refused eviction waits for its retry cadence")
+            f["retry_at"] = time.time() - 1
+            run._fault_tick(ctx)
+            self.assertEqual(1, len(fired), "once the cadence has passed the hook asks again")
+        with mock.patch.object(run, "kubectl", self._kubectl([])):
+            run._fault_fire(f, self.PODS, {"engine": 1}, {"older"})
+        self.assertTrue(f["fired"])
+        self.assertEqual(("e1", "engine"), (f["crash_pod"], f["victim_comp"]))
+        self.assertTrue(any("after 1 budget refusal" in n for n in f["notes"]))
+
+    def test_finalize_reds_an_eviction_the_budget_never_admitted(self):
+        f = run._fault_new("p999", {"fault": "evict:rotating"})
+        f.update(fired=False, denials=4)
+        notes, checks = [], []
+        self.assertEqual("FAIL", run._fault_finalize(f, "PASS", notes, checks))
+        self.assertTrue(any("never admitted" in n for n in notes))
+        admitted = run._fault_new("p999", {"fault": "evict:rotating"})
+        admitted["fired"] = True
+        self.assertEqual("PASS", run._fault_finalize(admitted, "PASS", [], []))
+        unfired = run._fault_new("p999", {"fault": "evict:rotating"})
+        checks = []
+        self.assertEqual("PASS", run._fault_finalize(unfired, "PASS", [], checks))
+        self.assertTrue(any("never reached its phase hook" in c for c in checks))
+
+    def test_kill_removal_follows_via(self):
+        calls = []
+        with mock.patch.object(run, "kubectl", self._kubectl(calls)):
+            self.assertEqual(("ok", ""), run._kill_remove("e0", "delete"))
+        self.assertEqual(("-n", run.NS, "delete", "pod", "e0", "--wait=false"), calls[0][0])
+        calls = []
+        with mock.patch.object(run, "kubectl", self._kubectl(calls)):
+            self.assertEqual(("ok", ""), run._kill_remove("e0", "evict"))
+        self.assertEqual("create", calls[0][0][0])
+        refused = "Cannot evict pod as it would violate the pod's disruption budget."
+        with mock.patch.object(run, "kubectl", self._kubectl([], rc=1, stderr=refused)), \
+                mock.patch.object(run, "LIFT_SETTLE_S", 0), mock.patch.object(run, "FAULT_RETRY_S", 0):
+            state, why = run._kill_remove("e0", "evict")
+        self.assertEqual("denied", state)
+        self.assertIn("refused the eviction", why)
+        with mock.patch.object(run, "kubectl", self._kubectl([], rc=1, stderr="forbidden")):
+            self.assertEqual("error", run._kill_remove("e0", "evict")[0])
+
+
+class PreemptFaultTest(unittest.TestCase):
+    """preempt has the scheduler remove the pod: fillers take every node's
+    spare CPU and a higher-priority filler presses on the aimed pod's node;
+    the victim is read back from the scheduler's own record, and the fillers
+    are dropped at the lift or by the cleanup."""
+
+    BASE = "# p999: x Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 topo=engine"
+    KILL = "# p999: x mode=kill Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 restart=None topo=engine"
+    NODES = {"items": [
+        {"metadata": {"name": "kind-control-plane"}, "spec": {"taints": [{"key": "node-role.kubernetes.io/control-plane", "effect": "NoSchedule"}]},
+         "status": {"conditions": [{"type": "Ready", "status": "True"}]}},
+        {"metadata": {"name": "kind-worker"}, "spec": {}, "status": {"conditions": [{"type": "Ready", "status": "True"}]}},
+        {"metadata": {"name": "kind-worker2"}, "spec": {"taints": [{"key": "soft", "effect": "PreferNoSchedule"}]},
+         "status": {"conditions": [{"type": "Ready", "status": "True"}]}},
+        {"metadata": {"name": "kind-worker3"}, "spec": {"unschedulable": True}, "status": {"conditions": [{"type": "Ready", "status": "True"}]}},
+        {"metadata": {"name": "kind-worker4"}, "spec": {}, "status": {"conditions": [{"type": "Ready", "status": "False"}]}}]}
+
+    def _errs(self, header):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def test_header_ties_the_preemption_to_its_lift(self):
+        self.assertTrue(run._fault_ok("preempt:rotating"))
+        self.assertFalse(run._fault_ok("preempt:idle"))
+        self.assertEqual([], self._errs(self.BASE + " fault=preempt:rotating lift=after-settle"))
+        self.assertEqual([], self._errs(self.BASE + " fault=preempt:rotating lift=never floor_soft=1 order_soft=1"))
+        self.assertEqual([], self._errs(self.KILL + " via=preempt lift=never"))
+        self.assertEqual([], self._errs(self.KILL + " via=preempt lift=after-settle"))
+        self.assertTrue(any("needs lift=" in e for e in self._errs(self.BASE + " fault=preempt:rotating")))
+        self.assertTrue(any("via=preempt" in e for e in self._errs(self.KILL + " fault=preempt:rotating lift=never")))
+        self.assertTrue(any("needs lift=" in e for e in self._errs(self.KILL + " via=preempt")))
+        self.assertTrue(any("kill= does not apply" in e for e in self._errs(self.KILL + " via=preempt kill=leader lift=never")))
+        self.assertTrue(any("does not combine" in e for e in self._errs(self.KILL + " via=preempt fault=cordon:source lift=never")))
+        self.assertTrue(any("pending cause is removed" in e for e in self._errs(self.BASE + " fault=podkill:rotating lift=never")))
+        self.assertTrue(any("use one" in e for e in self._errs(self.BASE + " fault=preempt:rotating lift=never blocked=1")))
+        self.assertTrue(any("pause=" in e for e in self._errs(self.KILL + " via=preempt lift=never pause=true")))
+
+    def test_capability_needs_an_owned_cluster_and_the_priority_api(self):
+        with mock.patch.object(run, "_node_fault_capability", lambda: None), mock.patch.object(run, "_api_served", lambda p: True):
+            self.assertIsNone(run._fault_capability("preempt"))
+        with mock.patch.object(run, "_node_fault_capability", lambda: "not a KIND cluster it owns"):
+            self.assertIn("owns", run._fault_capability("preempt"))
+        with mock.patch.object(run, "_node_fault_capability", lambda: None), mock.patch.object(run, "_api_served", lambda p: False):
+            self.assertIn(run.PRIORITY_CLASS_API, run._fault_capability("preempt"))
+
+    def test_eligible_nodes_are_ready_uncordoned_and_untainted(self):
+        def kubectl(*a, **k):
+            return subprocess.CompletedProcess(a, 0, json.dumps(self.NODES), "")
+        with mock.patch.object(run, "kubectl", kubectl):
+            self.assertEqual(["kind-worker", "kind-worker2"], run._eligible_nodes())
+
+    def test_spare_cpu_is_allocatable_minus_bound_requests(self):
+        pods = {"items": [
+            {"status": {"phase": "Running"}, "spec": {"containers": [{"resources": {"requests": {"cpu": "500m"}}}]}},
+            {"status": {"phase": "Running"}, "spec": {"containers": [{"resources": {"requests": {"cpu": "50m", "memory": "64Mi"}}}]}},
+            {"status": {"phase": "Succeeded"}, "spec": {"containers": [{"resources": {"requests": {"cpu": "1"}}}]}},
+            {"status": {"phase": "Pending"}, "spec": {"containers": [{}]}}]}
+        calls = []
+
+        def kubectl(*a, **k):
+            calls.append(a)
+            if a[:2] == ("get", "node"):
+                return subprocess.CompletedProcess(a, 0, json.dumps({"status": {"allocatable": {"cpu": "4"}}}), "")
+            return subprocess.CompletedProcess(a, 0, json.dumps(pods), "")
+        with mock.patch.object(run, "kubectl", kubectl):
+            self.assertEqual(3450, run._node_cpu_free("kind-worker"))
+        self.assertIn("spec.nodeName=kind-worker", calls[1])
+        with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "no")):
+            self.assertIsNone(run._node_cpu_free("kind-worker"))
+
+    def test_filler_is_pinned_through_the_scheduler_and_requests_only_cpu(self):
+        with mock.patch.object(run, "_fixture_values", lambda: {"OME_EVAL_NGINX_IMAGE": "nginx:test"}):
+            pod = run._filler_manifest("perm-p999-press", "p999", "kind-worker", 1050, "perm-p999-preempt")
+            plain = run._filler_manifest("perm-p999-fill-kind-worker2", "p999", "kind-worker2", 2000)
+        self.assertEqual({"kubernetes.io/hostname": "kind-worker"}, pod["spec"]["nodeSelector"])
+        self.assertNotIn("nodeName", pod["spec"])
+        self.assertEqual("perm-p999-preempt", pod["spec"]["priorityClassName"])
+        self.assertEqual({"cpu": "1050m"}, pod["spec"]["containers"][0]["resources"]["requests"])
+        self.assertEqual({run.FILLER_LABEL: "p999"}, pod["metadata"]["labels"])
+        self.assertEqual("nginx:test", pod["spec"]["containers"][0]["image"])
+        self.assertNotIn("priorityClassName", plain["spec"])
+
+    def test_arm_registers_the_cleanup_then_creates_a_class_above_the_case(self):
+        f = run._fault_new("p999", {"fault": "preempt:rotating", "lift": "after-settle"})
+        calls, saved = [], list(run._FAULT_CLEANUPS)
+        pods = {"items": [{"spec": {"priority": 0}}, {"spec": {"priority": 10}}]}
+
+        def kubectl(*a, **k):
+            calls.append((a, k.get("input"), len(run._FAULT_CLEANUPS)))
+            if a[2:4] == ("get", "pod"):
+                return subprocess.CompletedProcess(a, 0, json.dumps(pods), "")
+            return subprocess.CompletedProcess(a, 0, "", "")
+        try:
+            with mock.patch.object(run, "kubectl", kubectl):
+                self.assertEqual((True, ""), run._fault_preempt_arm(f, "p999"))
+            apply = [c for c in calls if c[0][0] == "apply"][0]
+            self.assertEqual(len(saved) + 1, apply[2], "the cleanup is registered before the class is created")
+            pc = json.loads(apply[1])
+            self.assertEqual(("PriorityClass", "perm-p999-preempt", 11, False, "PreemptLowerPriority"),
+                             (pc["kind"], pc["metadata"]["name"], pc["value"], pc["globalDefault"], pc["preemptionPolicy"]))
+            self.assertEqual("p999", pc["metadata"]["labels"]["perm.test/fault"])
+            self.assertIn(("preempt", f), run._FAULT_CLEANUPS)
+        finally:
+            run._FAULT_CLEANUPS[:] = saved
+
+    def _armed(self):
+        f = run._fault_new("p999", {"fault": "preempt:rotating", "lift": "after-settle"})
+        f.update(pc_name="perm-p999-preempt", pc_value=1, fillers=[], pc_deleted=False, fillers_dropped=False)
+        return f
+
+    def test_fill_takes_every_other_node_then_presses_on_the_targets_node(self):
+        f = self._armed()
+        pod_state = {"e0": {"alive": True, "comp": "engine", "inst": "0", "ready": True, "serving": True, "node": "kind-worker"},
+                     "e1": {"alive": True, "comp": "engine", "inst": "1", "ready": True, "serving": True, "node": "kind-worker2"}}
+        manifests = []
+
+        def kubectl(*a, **k):
+            if a[0] == "apply":
+                manifests.append(json.loads(k["input"]))
+            return subprocess.CompletedProcess(a, 0, "", "")
+        free = {"kind-worker": 1000, "kind-worker2": 2000}
+        target = {"spec": {"containers": [{"resources": {"requests": {"cpu": "50m"}}}]}}
+        with mock.patch.object(run, "kubectl", kubectl), mock.patch.object(run, "_get_pod", lambda n: target), \
+                mock.patch.object(run, "_eligible_nodes", lambda: ["kind-worker", "kind-worker2"]), \
+                mock.patch.object(run, "_node_cpu_free", lambda n: free[n]), mock.patch.object(run, "_pod_bound", lambda n: "bound"), \
+                mock.patch.object(run, "_fixture_values", lambda: {"OME_EVAL_NGINX_IMAGE": "nginx:test"}):
+            run._preempt_fill(f, "e0", "kind-worker", pod_state)
+        self.assertIsNone(f["infra_fail"])
+        self.assertTrue(f["fired"])
+        self.assertEqual(["perm-p999-fill-kind-worker2", "perm-p999-press"], f["fillers"])
+        by_name = {m["metadata"]["name"]: m for m in manifests}
+        block = by_name["perm-p999-fill-kind-worker2"]
+        self.assertEqual(("kind-worker2", "2000m"), (block["spec"]["nodeSelector"]["kubernetes.io/hostname"],
+                                                     block["spec"]["containers"][0]["resources"]["requests"]["cpu"]))
+        self.assertNotIn("priorityClassName", block["spec"], "a blocking filler fits without preempting anything")
+        press = by_name["perm-p999-press"]
+        self.assertEqual(("kind-worker", "1050m", "perm-p999-preempt"),
+                         (press["spec"]["nodeSelector"]["kubernetes.io/hostname"],
+                          press["spec"]["containers"][0]["resources"]["requests"]["cpu"], press["spec"]["priorityClassName"]))
+        self.assertEqual({"e0": {"comp": "engine", "inst": "0", "serving": True}, "e1": {"comp": "engine", "inst": "1", "serving": True}},
+                         f["pre_alive"])
+        self.assertEqual(("e0", "kind-worker", 50), (f["aim_pod"], f["aim_node"], f["victim_cpu"]))
+        self.assertTrue(any("must preempt one pod there" in n for n in f["notes"]))
+
+    def test_fill_refuses_a_cpu_less_target_or_an_ineligible_node(self):
+        f = self._armed()
+        with mock.patch.object(run, "_get_pod", lambda n: {"spec": {"containers": [{}]}}):
+            run._preempt_fill(f, "e0", "kind-worker", {})
+        self.assertIn("requests no CPU", f["infra_fail"])
+        f = self._armed()
+        target = {"spec": {"containers": [{"resources": {"requests": {"cpu": "50m"}}}]}}
+        with mock.patch.object(run, "_get_pod", lambda n: target), mock.patch.object(run, "_eligible_nodes", lambda: ["kind-worker2"]):
+            run._preempt_fill(f, "e0", "kind-worker", {})
+        self.assertIn("not a node a case pod can be placed on", f["infra_fail"])
+
+    def test_fire_waits_for_the_aimed_pod_to_bind(self):
+        f = self._armed()
+        unbound = {"e0": {"alive": True, "comp": "engine", "inst": "0", "hash": "new", "runner": "default", "created": "9", "node": ""}}
+        run._fault_fire(f, unbound, {"engine": 1}, {"old"})
+        self.assertFalse(f["fired"])
+        self.assertGreater(f["retry_at"], time.time())
+        filled = []
+        bound = {"e0": dict(unbound["e0"], node="kind-worker")}
+        with mock.patch.object(run, "_preempt_fill", lambda *a: filled.append(a)):
+            run._fault_fire(f, bound, {"engine": 1}, {"old"})
+        self.assertEqual([(f, "e0", "kind-worker", bound)], filled)
+
+    def test_victim_is_the_preempted_case_pod_not_a_drained_one(self):
+        f = self._armed()
+        f.update(pre_alive={"e0": {"comp": "engine", "inst": "0", "serving": True}, "d0": {"comp": "decoder", "inst": "0", "serving": True},
+                            "e1": {"comp": "engine", "inst": "1", "serving": True}},
+                 aim_node="kind-worker", fire_ts=1.0, not_victim=set(), preempted=[])
+        pod_state = {"e0": None, "d0": {"alive": False}, "e1": {"alive": True}}
+        preempted = {"e0": True, "d0": False}
+        with mock.patch.object(run, "_pod_preempted", lambda n: preempted[n]):
+            self.assertEqual("e0", run._preempt_victim(f, pod_state))
+        self.assertEqual(("e0", "engine", "0", True), (f["crash_pod"], f["crash_comp"], f["crash_inst"], f["victim_was_serving"]))
+        self.assertEqual({"d0"}, f["not_victim"])
+        self.assertEqual(["e0"], f["preempted"])
+        with mock.patch.object(run, "_pod_preempted", lambda n: self.fail("a recorded victim is not read again")):
+            self.assertEqual("e0", run._preempt_victim(f, pod_state))
+
+    def test_preemption_is_read_off_the_condition_or_the_event(self):
+        marked = {"status": {"conditions": [{"type": "DisruptionTarget", "reason": "PreemptionByScheduler"}]},
+                  "metadata": {"deletionTimestamp": "t"}}
+        live = {"status": {"conditions": []}, "metadata": {}}
+        with mock.patch.object(run, "_get_pod", lambda n: marked):
+            self.assertTrue(run._pod_preempted("e0"))
+        with mock.patch.object(run, "_get_pod", lambda n: live):
+            self.assertFalse(run._pod_preempted("e0"))
+        calls = []
+
+        def kubectl(*a, **k):
+            calls.append(a)
+            return subprocess.CompletedProcess(a, 0, json.dumps({"items": [{"reason": "Preempted"}]}), "")
+        with mock.patch.object(run, "_get_pod", lambda n: None), mock.patch.object(run, "kubectl", kubectl):
+            self.assertTrue(run._pod_preempted("e0"))
+        self.assertIn("involvedObject.kind=Pod,involvedObject.name=e0,reason=Preempted", calls[0])
+
+    def test_lift_and_cleanup_drop_fillers_and_the_class_once(self):
+        f = self._armed()
+        f["fillers"] = ["perm-p999-press"]
+        calls = []
+
+        def kubectl(*a, **k):
+            calls.append(a)
+            return subprocess.CompletedProcess(a, 0, "", "")
+        with mock.patch.object(run, "kubectl", kubectl):
+            self.assertTrue(run._preempt_lift(f))
+            self.assertTrue(run._preempt_lift(f))
+            run._preempt_cleanup(f)
+            run._preempt_cleanup(f)
+        self.assertEqual([("-n", run.NS, "delete", "pod", "-l", f"{run.FILLER_LABEL}=p999", "--ignore-not-found=true", "--wait=false"),
+                          ("delete", "priorityclass", "perm-p999-preempt", "--ignore-not-found=true")], calls)
+        self.assertTrue(run._preempt_lift(self._armed()), "nothing to drop is already lifted")
+
+    def test_kill_record_is_a_hookless_preempt_fault(self):
+        f = run._preempt_record("p999", {"via": "preempt", "lift": "never"})
+        self.assertEqual(("preempt", "never", run.IDLE_FAULT_PHASE), (f["kind"], f["lift"], f["during"]))
+        self.assertTrue(run._fault_at_idle(f), "the phase hook leaves it alone; the kill drives it")
+
+
+class PendingHoldTest(unittest.TestCase):
+    """A pod the cluster cannot place or admit: the Instance row names the
+    wait, nothing is taken down meanwhile, and the operation completes once
+    the cause is lifted or holds with the reason to the end."""
+
+    IR = {"items": [{"spec": {"component": "engine"}, "status": {"instanceStatuses": [
+        {"index": 0, "phase": "Ready"},
+        {"index": 1, "phase": "Creating", "operation": {"type": "Restart", "waiting": "Unschedulable"},
+         "lastFailure": {"reason": "Unschedulable", "message": "0/3 nodes are available: 3 Insufficient cpu."}}]}},
+        {"spec": {"component": "decoder"}, "status": {"instanceStatuses": [{"index": 0, "phase": "Failed"}]}}]}
+
+    def test_rows_and_the_waiting_row_are_read_off_the_replicas(self):
+        with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 0, json.dumps(self.IR), "")):
+            rows = run._ir_rows_by_index("p999", ["engine", "decoder"])
+            engine_only = run._ir_rows_by_index("p999", ["engine"])
+        self.assertEqual({("engine", "0"), ("engine", "1"), ("decoder", "0")}, set(rows))
+        self.assertEqual({("engine", "0"), ("engine", "1")}, set(engine_only))
+        self.assertEqual(("engine", "1", "Unschedulable", "0/3 nodes are available: 3 Insufficient cpu."),
+                         run._pending_row(rows, {"Unschedulable"}))
+        self.assertIsNone(run._pending_row(rows, {"Unschedulable"}, inst="0"))
+        self.assertIsNone(run._pending_row(rows, {"QuotaExceeded"}))
+        with mock.patch.object(run, "kubectl", lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "no")):
+            self.assertEqual({}, run._ir_rows_by_index("p999", ["engine"]))
+
+    def _f(self, lift):
+        return {"case_id": "p999", "kind": "preempt", "param": "rotating", "lift": lift, "fired": True,
+                "infra_fail": None, "notes": [], "cause": "the filler pods holding every node's spare CPU"}
+
+    def _out(self, **kw):
+        out = {"bitten_at": 12.0, "token": "Unschedulable", "row": ("engine", "1"), "message": "Insufficient cpu",
+               "failed": [], "lifted_at": None, "done_at": None, "held_s": None, "waiting_at_end": False,
+               "escaped_at": None, "unbound_at": None}
+        out.update(kw)
+        return out
+
+    def _ctx(self, min_ready):
+        return {"N": {"engine": 4, "decoder": 0, "router": 0}, "min_ready": min_ready}
+
+    def test_verdict_table(self):
+        ctx, comps, allow = self._ctx({"engine": 3}), ["engine"], {"engine": 1}
+        f = self._f("after-settle")
+        self.assertEqual("PASS", run._pending_checks(f, "after-settle", "UNBOUND", self._out(bitten_at=None, unbound_at=5.0),
+                                                     ctx, comps, allow, "PASS", [], []))
+        self.assertIn("never bound", f["infra_fail"])
+        notes = []
+        self.assertEqual("FAIL", run._pending_checks(self._f("after-settle"), "after-settle", "NO_WAIT", self._out(bitten_at=None),
+                                                     ctx, comps, allow, "PASS", notes, []))
+        self.assertTrue(any("no Instance reported a wait reason" in n for n in notes))
+        f = self._f("after-settle")
+        run._pending_checks(f, "after-settle", "ESCAPED", self._out(escaped_at=30.0), ctx, comps, allow, "PASS", [], [])
+        self.assertIn("did not hold", f["infra_fail"])
+        checks = []
+        self.assertEqual("PASS", run._pending_checks(self._f("after-settle"), "after-settle", "DONE",
+                                                     self._out(lifted_at=40.0, done_at=25.0), ctx, comps, allow, "PASS", [], checks))
+        self.assertTrue(any("waits with reason Unschedulable" in c for c in checks))
+        self.assertTrue(any("completed 25s after the lift" in c for c in checks))
+        self.assertTrue(any("kept 3 serving" in c for c in checks))
+        notes = []
+        self.assertEqual("FAIL", run._pending_checks(self._f("after-settle"), "after-settle", "NOT_DONE", self._out(lifted_at=40.0),
+                                                     ctx, comps, allow, "PASS", notes, []))
+        self.assertTrue(any("did not complete after the lift" in n for n in notes))
+        f = self._f("after-settle")
+        run._pending_checks(f, "after-settle", "HOLD_TIMEOUT", self._out(), ctx, comps, allow, "PASS", [], [])
+        self.assertIn("never lifted", f["infra_fail"])
+        checks = []
+        self.assertEqual("PASS", run._pending_checks(self._f("never"), "never", "HELD", self._out(held_s=90.0, waiting_at_end=True),
+                                                     ctx, comps, allow, "PASS", [], checks))
+        self.assertTrue(any("still waiting with reason Unschedulable" in c for c in checks))
+        notes = []
+        self.assertEqual("FAIL", run._pending_checks(self._f("never"), "never", "HELD", self._out(held_s=90.0),
+                                                     ctx, comps, allow, "PASS", notes, []))
+        self.assertTrue(any("dropped before the hold ended" in n for n in notes))
+        notes = []
+        self.assertEqual("FAIL", run._pending_checks(self._f("never"), "never", "HOLD_TIMEOUT", self._out(),
+                                                     ctx, comps, allow, "PASS", notes, []))
+        self.assertTrue(any("hold did not complete" in n for n in notes))
+
+    def test_a_failed_row_or_a_lost_instance_reds_the_hold(self):
+        allow = {"engine": 1}
+        notes = []
+        self.assertEqual("FAIL", run._pending_checks(self._f("never"), "never", "HELD",
+                                                     self._out(waiting_at_end=True, failed=[("engine", "1")]),
+                                                     self._ctx({"engine": 3}), ["engine"], allow, "PASS", notes, []))
+        self.assertTrue(any("read Failed" in n for n in notes))
+        notes = []
+        self.assertEqual("FAIL", run._pending_checks(self._f("never"), "never", "HELD", self._out(waiting_at_end=True),
+                                                     self._ctx({"engine": 2}), ["engine"], allow, "PASS", notes, []))
+        self.assertTrue(any("dropped to 2 serving" in n for n in notes))
+
+    def _watch_ctx(self):
+        return {"case_id": "p999", "trigger_ts": time.time(), "closed": False, "pod_state": {}, "N": {"engine": 2}}
+
+    def test_watch_lifts_after_the_settle_then_waits_for_done(self):
+        f = self._f("after-settle")
+        lifted = []
+        waiting = {"on": True}
+
+        def rows(case_id, comps):
+            if not waiting["on"]:
+                return {("engine", "1"): {"phase": "Ready"}}
+            return {("engine", "1"): {"phase": "Creating", "operation": {"waiting": "Unschedulable"}}}
+
+        def lift(ff):
+            lifted.append(ff)
+            waiting["on"] = False
+            return True
+        ctx = self._watch_ctx()
+        with mock.patch.object(run, "_read_one", lambda c, timeout=1.0: None), mock.patch.object(run, "_ir_rows_by_index", rows), \
+                mock.patch.object(run, "_pending_lift", lift), mock.patch.object(run, "LIFT_SETTLE_S", 0), \
+                mock.patch.object(run, "STABILITY_S", 0), mock.patch.object(run, "ROW_POLL_S", 0):
+            state, out = run._pending_watch(ctx, f, ["engine"], "after-settle", lambda: not waiting["on"], 30)
+        self.assertEqual("DONE", state)
+        self.assertEqual([f], lifted)
+        self.assertEqual(("engine", "1", "Unschedulable"), (out["row"][0], out["row"][1], out["token"]))
+        self.assertIsNotNone(out["lifted_at"])
+        self.assertIsNotNone(out["done_at"])
+        self.assertIn("converged_at", ctx)
+
+    def test_watch_holds_to_the_end_and_reads_a_cause_that_never_bound(self):
+        f = self._f("never")
+        waiting_rows = {("engine", "1"): {"phase": "Creating", "operation": {"waiting": "Unschedulable"}}}
+        ctx = self._watch_ctx()
+        with mock.patch.object(run, "_read_one", lambda c, timeout=1.0: None), mock.patch.object(run, "_ir_rows_by_index", lambda a, b: waiting_rows), \
+                mock.patch.object(run, "IDLE_HOLD_S", 0), mock.patch.object(run, "ROW_POLL_S", 0):
+            state, out = run._pending_watch(ctx, f, ["engine"], "never", lambda: False, 30)
+        self.assertEqual("HELD", state)
+        self.assertTrue(out["waiting_at_end"])
+        self.assertIsNotNone(out["held_s"])
+        with mock.patch.object(run, "_read_one", lambda c, timeout=1.0: None), mock.patch.object(run, "_ir_rows_by_index", lambda a, b: {}), \
+                mock.patch.object(run, "ROW_POLL_S", 0):
+            state, out = run._pending_watch(self._watch_ctx(), self._f("never"), ["engine"], "never", lambda: True, 30)
+        self.assertEqual("UNBOUND", state)
+        self.assertIsNotNone(out["unbound_at"])
+        with mock.patch.object(run, "_read_one", lambda c, timeout=1.0: None), mock.patch.object(run, "_ir_rows_by_index", lambda a, b: waiting_rows), \
+                mock.patch.object(run, "ROW_POLL_S", 0), mock.patch.object(run, "IDLE_HOLD_S", 3600):
+            state, out = run._pending_watch(self._watch_ctx(), self._f("never"), ["engine"], "never", lambda: True, 30)
+        self.assertEqual("ESCAPED", state)
+        with mock.patch.object(run, "_read_one", lambda c, timeout=1.0: None), mock.patch.object(run, "_ir_rows_by_index", lambda a, b: {}), \
+                mock.patch.object(run, "ROW_POLL_S", 0):
+            state, out = run._pending_watch(self._watch_ctx(), self._f("never"), ["engine"], "never", lambda: False, 0)
+        self.assertEqual("NO_WAIT", state)
+
+
+class PendingCauseTest(unittest.TestCase):
+    """taint:all and quota:<n> as pending causes: every schedulable node
+    tainted and untainted again, a quota admitting fewer pods than run, the
+    lift dispatch, and the header rules that tie each to its lift."""
+
+    BASE = "# p999: x Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 topo=engine"
+    KILL = "# p999: x mode=kill Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 restart=None topo=engine"
+
+    def _errs(self, header):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def test_header_ties_each_cause_to_its_lift(self):
+        self.assertTrue(run._fault_ok("taint:all"))
+        self.assertFalse(run._fault_ok("taint:source"))
+        self.assertTrue(run._fault_ok("quota:-1"))
+        self.assertTrue(run._fault_ok("quota:0"))
+        self.assertFalse(run._fault_ok("quota:none"))
+        self.assertEqual([], self._errs(self.BASE + " fault=taint:all lift=after-settle"))
+        self.assertEqual([], self._errs(self.BASE + " fault=quota:0 lift=never"))
+        self.assertEqual([], self._errs(self.BASE + " fault=quota:0 blocked=1"), "a quota with no lift keeps its plain contract")
+        self.assertEqual([], self._errs(self.KILL.replace("topo=engine", "topo=engine-mn") + " fault=taint:all lift=never kill=leader"))
+        self.assertEqual([], self._errs(self.KILL + " fault=quota:-1 lift=after-settle"))
+        self.assertTrue(any("needs lift=" in e for e in self._errs(self.BASE + " fault=taint:all")))
+        self.assertTrue(any("needs lift=" in e for e in self._errs(self.KILL + " fault=quota:-1")))
+        self.assertTrue(any("use one" in e for e in self._errs(self.BASE + " fault=quota:0 lift=never blocked=1")))
+        self.assertTrue(any("mode=idle" not in e for e in self._errs(self.BASE + " fault=taint:all during=idle lift=never")))
+        self.assertTrue(self._errs(self.BASE + " fault=taint:all during=idle lift=never"), "a taint is not an idle break")
+
+    def test_capability_needs_an_owned_cluster(self):
+        with mock.patch.object(run, "_node_fault_capability", lambda: None):
+            self.assertIsNone(run._fault_capability("taint"))
+        with mock.patch.object(run, "_node_fault_capability", lambda: "not a KIND cluster it owns"):
+            self.assertIn("owns", run._fault_capability("taint"))
+        self.assertIsNone(run._fault_capability("quota"), "a quota is namespaced and runs anywhere")
+
+    def test_arm_taints_every_schedulable_node_after_registering_the_lift(self):
+        f = run._fault_new("p999", {"fault": "taint:all", "lift": "after-settle"})
+        calls, saved = [], list(run._FAULT_CLEANUPS)
+
+        def kubectl(*a, **k):
+            calls.append((a, len(run._FAULT_CLEANUPS)))
+            return subprocess.CompletedProcess(a, 0, "", "")
+        try:
+            with mock.patch.object(run, "kubectl", kubectl), mock.patch.object(run, "_eligible_nodes", lambda: ["kind-worker", "kind-worker2"]):
+                self.assertEqual((True, ""), run._fault_taint_arm(f, "p999"))
+            self.assertEqual([("taint", "nodes", "kind-worker", "perm.test/pending=p999:NoSchedule", "--overwrite"),
+                              ("taint", "nodes", "kind-worker2", "perm.test/pending=p999:NoSchedule", "--overwrite")],
+                             [c[0] for c in calls])
+            self.assertTrue(all(c[1] == len(saved) + 1 for c in calls), "the lift is registered before the first taint")
+            self.assertTrue(f["fired"])
+            self.assertEqual(["kind-worker", "kind-worker2"], f["tainted"])
+            self.assertIn("every schedulable node", f["cause"])
+            calls.clear()
+            with mock.patch.object(run, "kubectl", kubectl):
+                self.assertTrue(run._taint_lift(f))
+                self.assertTrue(run._taint_lift(f))
+                run._run_fault_cleanups()
+            self.assertEqual([("taint", "nodes", "kind-worker", "perm.test/pending:NoSchedule-"),
+                              ("taint", "nodes", "kind-worker2", "perm.test/pending:NoSchedule-")],
+                             [c[0] for c in calls], "a lifted taint is not removed twice")
+            self.assertEqual([], f["tainted"])
+            with mock.patch.object(run, "_eligible_nodes", lambda: []):
+                g = run._fault_new("p999", {"fault": "taint:all", "lift": "never"})
+                self.assertFalse(run._fault_taint_arm(g, "p999")[0])
+                self.assertIn("no Ready, schedulable node", g["infra_fail"])
+        finally:
+            run._FAULT_CLEANUPS[:] = saved
+
+    def test_lift_dispatch_covers_every_pending_cause(self):
+        calls = []
+        with mock.patch.object(run, "kubectl", lambda *a, **k: calls.append(a) or subprocess.CompletedProcess(a, 0, "", "")):
+            self.assertTrue(run._pending_lift({"kind": "quota", "case_id": "p999"}))
+            self.assertTrue(run._pending_lift({"kind": "taint", "case_id": "p999", "tainted": ["kind-worker"]}))
+            self.assertTrue(run._pending_lift({"kind": "preempt", "case_id": "p999", "fillers": ["x"], "fillers_dropped": False}))
+            self.assertFalse(run._pending_lift({"kind": "podkill", "case_id": "p999"}))
+        self.assertEqual(("-n", run.NS, "delete", "resourcequota", "perm-p999-quota", "--ignore-not-found=true"), calls[0])
+        self.assertEqual("taint", calls[1][0])
+        self.assertIn(f"{run.FILLER_LABEL}=p999", calls[2])
+
+    def test_negative_quota_admits_fewer_pods_than_run(self):
+        case_pods = {"items": [{"metadata": {"labels": {"component": "engine"}},
+                                "spec": {"containers": [{"resources": {"requests": {"cpu": "50m", "memory": "64Mi"}}}]}}] * 2}
+        applied, saved = [], list(run._FAULT_CLEANUPS)
+
+        def kubectl(*a, **k):
+            if "apply" in a:
+                applied.append(json.loads(k["input"]))
+                return subprocess.CompletedProcess(a, 0, "", "")
+            return subprocess.CompletedProcess(a, 0, json.dumps(case_pods), "")
+        try:
+            f = run._fault_new("p999", {"fault": "quota:-1", "lift": "never"})
+            with mock.patch.object(run, "kubectl", kubectl):
+                self.assertEqual((True, ""), run._fault_quota_create(f, "p999"))
+            hard = applied[0]["spec"]["hard"]
+            self.assertEqual({"requests.cpu": "50m", "requests.memory": str(64 * 1024 * 1024)}, hard,
+                             "two pods run, the quota admits one: the next create is refused")
+            self.assertIn("1 pod(s) fewer than run", f["cause"])
+            self.assertTrue(any("quota -1 pod(s)" in n for n in f["notes"]))
+            f = run._fault_new("p999", {"fault": "quota:-3", "lift": "never"})
+            with mock.patch.object(run, "kubectl", kubectl):
+                run._fault_quota_create(f, "p999")
+            self.assertEqual("0m", applied[1]["spec"]["hard"]["requests.cpu"], "a quota never goes negative")
+        finally:
+            run._FAULT_CLEANUPS[:] = saved
+
+    def test_pending_tokens_name_each_causes_reason(self):
+        self.assertEqual({"Unschedulable"}, run.PENDING_TOKENS["taint"])
+        self.assertEqual({"Unschedulable"}, run.PENDING_TOKENS["preempt"])
+        self.assertEqual({"QuotaExceeded", "Unschedulable"}, run.PENDING_TOKENS["quota"])
+        self.assertEqual(set(run.PENDING_TOKENS), run.PENDING_FAULTS)
+
+    def test_batch_runs_cluster_wide_causes_serially_and_sweeps_them(self):
+        self.assertTrue(batch.cluster_wide_fault({"fault": "taint:all"}))
+        self.assertTrue(batch.cluster_wide_fault({"fault": "preempt:rotating"}))
+        self.assertTrue(batch.cluster_wide_fault({"fault": "quota:-1"}))
+        self.assertTrue(batch.cluster_wide_fault({"mode": "kill", "via": "preempt"}))
+        self.assertFalse(batch.cluster_wide_fault({"mode": "kill", "via": "evict"}))
+        self.assertFalse(batch.cluster_wide_fault({"fault": "evict:rotating"}))
+        self.assertFalse(batch.cluster_wide_fault({"fault": "podkill:rotating"}))
+        nodes = {"items": [{"metadata": {"name": "kind-worker"}, "spec": {"taints": [{"key": "perm.test/pending", "effect": "NoSchedule"}]}},
+                           {"metadata": {"name": "kind-worker2"}, "spec": {}}]}
+        calls = []
+
+        def run_cmd(args, **k):
+            calls.append(tuple(args))
+            if args[:3] == ["kubectl", "get", "nodes"]:
+                return subprocess.CompletedProcess(args, 0, json.dumps(nodes), "")
+            return subprocess.CompletedProcess(args, 0, "", "")
+        with mock.patch.object(batch.subprocess, "run", run_cmd):
+            batch.sweep_pending_taints()
+            batch.sweep_preempt_apparatus()
+        self.assertIn(("kubectl", "taint", "nodes", "kind-worker", "perm.test/pending:NoSchedule-"), calls)
+        self.assertFalse(any(c[:4] == ("kubectl", "taint", "nodes", "kind-worker2") for c in calls))
+        self.assertIn(("kubectl", "-n", batch.NS, "delete", "pod", "-l", "perm.test/filler", "--ignore-not-found", "--wait=false"), calls)
+        self.assertIn(("kubectl", "delete", "priorityclass", "-l", "perm.test/fault", "--ignore-not-found"), calls)
+
+
+class GeneratedDisruptionFamiliesTest(unittest.TestCase):
+    """gen-evict, gen-preempt and gen-pending: a pod of a Ready Instance
+    evicted, preempted, or a new pod that cannot be placed or admitted, at
+    steady state and while a roll is in flight."""
+
+    SHAPES = {("engine", 0), ("pd", 0), ("engine-mn", 1)}
+
+    def _rows(self, folder):
+        outputs, rows = generate_cases.build_outputs()
+        return outputs, [(n, kv, m) for f, n, kv, m in rows if f == folder]
+
+    def _validates(self, outputs, folder, fam):
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, _kv, _m in fam:
+                path = Path(tmp) / f"{name}.yaml"
+                path.write_text(outputs[f"{folder}/{name}.yaml"])
+                self.assertEqual([], run.validate_case_file(path), name)
+
+    def test_evict_family_crosses_shape_policy_and_strategy(self):
+        outputs, fam = self._rows("gen-evict")
+        self.assertEqual(20, len(fam))
+        self.assertEqual(self.SHAPES, {(kv["topo"], 1 if kv["topo"].endswith("-mn") else 0) for _n, kv, _m in fam})
+        steady = [(n, kv, m) for n, kv, m in fam if kv.get("mode") == "kill"]
+        rolling = [(n, kv, m) for n, kv, m in fam if kv.get("mode") != "kill"]
+        self.assertEqual((8, 12), (len(steady), len(rolling)))
+        for name, kv, m in steady:
+            self.assertEqual("evict", kv["via"])
+            self.assertNotIn("fault", kv)
+            self.assertNotIn("lift", kv, "an eviction is one-shot: nothing to lift")
+            self.assertEqual(kv["Ne"], kv["ceil_e"], "nobody bumps the service")
+            self.assertIn("Eviction API", outputs[f"gen-evict/{name}.yaml"].splitlines()[1])
+        self.assertEqual({("engine-mn", "leader"), ("engine-mn", "worker")},
+                         {(kv["topo"], kv["kill"]) for _n, kv, _m in steady if "kill" in kv})
+        for name, kv, m in rolling:
+            self.assertEqual("evict:rotating", kv["fault"])
+            self.assertIn(m["strat"], ("SurgeThenDrain", "RecreatePod"))
+            self.assertEqual(kv["Ne"] + (1 if m["strat"] == "SurgeThenDrain" else 0), kv["ceil_e"])
+            text = outputs[f"gen-evict/{name}.yaml"]
+            self.assertIn(f'restartPolicy: "{generate_cases.RP_FULL[m["rp"]]}"', text)
+            self.assertIn("no pod comes back under the old label", text.splitlines()[1])
+        self.assertEqual({("engine-mn", 1)}, {(kv["topo"], kv.get("floor_soft")) for _n, kv, _m in rolling if "floor_soft" in kv},
+                         "only the gang's settled-leader victim waives the floor, as the podkill rule does")
+        self._validates(outputs, "gen-evict", fam)
+
+    def test_preempt_family_crosses_lift_at_both_moments(self):
+        outputs, fam = self._rows("gen-preempt")
+        self.assertEqual(36, len(fam))
+        self.assertEqual({"after-settle", "never"}, {m["lift"] for _n, _kv, m in fam})
+        steady = [(n, kv, m) for n, kv, m in fam if kv.get("mode") == "kill"]
+        rolling = [(n, kv, m) for n, kv, m in fam if kv.get("mode") != "kill"]
+        self.assertEqual((12, 24), (len(steady), len(rolling)))
+        for name, kv, m in steady:
+            self.assertEqual(("preempt", m["lift"]), (kv["via"], kv["lift"]))
+            self.assertNotIn("kill", kv, "the scheduler picks the victim")
+            self.assertNotIn("fault", kv)
+        for name, kv, m in rolling:
+            self.assertEqual(("preempt:rotating", m["lift"], 1, 1), (kv["fault"], kv["lift"], kv["floor_soft"], kv["order_soft"]))
+            self.assertEqual(kv["Ne"] + (1 if m["strat"] == "SurgeThenDrain" else 0), kv["ceil_e"])
+        tuples = {(kv["topo"], m["rp"], m["lift"], m["strat"] if kv.get("mode") != "kill" else "steady") for _n, kv, m in fam}
+        self.assertEqual(36, len(tuples), "every (shape, restart policy, lift, moment) once")
+        for name, _kv, m in fam:
+            reason = outputs[f"gen-preempt/{name}.yaml"].splitlines()[1]
+            self.assertIn("reason Unschedulable", reason)
+            self.assertIn("fillers are dropped" if m["lift"] == "after-settle" else "fillers stay to the end", reason)
+        self._validates(outputs, "gen-preempt", fam)
+
+    def test_pending_family_arms_the_quota_the_operation_needs(self):
+        outputs, fam = self._rows("gen-pending")
+        self.assertEqual(70, len(fam), "the tight-cluster family owns the gang surge roll held to the end by a quota")
+        self.assertEqual({"pending:taint:steady", "pending:taint:roll", "pending:quota:steady", "pending:quota:roll"},
+                         {m["verb"] for _n, _kv, m in fam})
+        steady = [(n, kv, m) for n, kv, m in fam if kv.get("mode") == "kill"]
+        rolling = [(n, kv, m) for n, kv, m in fam if kv.get("mode") != "kill"]
+        self.assertEqual((24, 46), (len(steady), len(rolling)))
+        self.assertFalse([n for n, kv, m in rolling if kv["topo"].endswith("-mn") and kv["fault"].startswith("quota:")
+                          and m["strat"] == "SurgeThenDrain" and kv["lift"] == "never"],
+                         "a gang surge roll held to the end by a quota is the tight-cluster family's cell")
+        for name, kv, m in fam:
+            self.assertIn(kv["lift"], ("after-settle", "never"))
+            fault = kv["fault"]
+            if fault.startswith("taint:"):
+                self.assertEqual("taint:all", fault)
+                continue
+            n = int(fault.partition(":")[2])
+            gang = kv["topo"].endswith("-mn")
+            if kv.get("mode") != "kill" and m["strat"] == "SurgeThenDrain":
+                self.assertEqual(1 if gang else 0, n, "a surge gets room for all but one of the pods it adds")
+            else:
+                self.assertEqual(-1, n, "a repair or a drain-first roll creates after a pod is gone")
+        for name, kv, m in steady:
+            self.assertEqual(kv["Ne"], kv["ceil_e"])
+            if kv["topo"].endswith("-mn"):
+                self.assertEqual("leader", kv["kill"])
+            reason = outputs[f"gen-pending/{name}.yaml"].splitlines()[1]
+            self.assertIn("inside its unschedulable grace", reason)
+            self.assertIn("repair completes" if m["lift"] == "after-settle" else "holds with its reason", reason)
+        gang_quota = [(n, kv, m) for n, kv, m in fam if kv["topo"].endswith("-mn") and kv["fault"].startswith("quota:")]
+        self.assertEqual(10, len(gang_quota))
+        for name, kv, m in gang_quota:
+            reason = outputs[f"gen-pending/{name}.yaml"].splitlines()[1]
+            if kv.get("mode") == "kill" and m["rp"] == "None":
+                self.assertIn("leader's replacement alone", reason)
+            else:
+                self.assertIn("the gang cannot form", reason)
+        self._validates(outputs, "gen-pending", fam)
+
+    def test_ids_stay_inside_the_reserved_block(self):
+        for folder in ("gen-evict", "gen-preempt", "gen-pending"):
+            lo, hi = generate_cases.GEN_BLOCKS[folder]
+            self.assertTrue(7400 <= lo < hi <= 7600, folder)

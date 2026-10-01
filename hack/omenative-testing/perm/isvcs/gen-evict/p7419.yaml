@@ -1,0 +1,15 @@
+# p7419: [gen] evict rotating engine-mn W1 N=2 RecreatePod u1 rp RecreateInstance  Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 fault=evict:rotating floor_soft=1 co=none topo=engine-mn
+# reason: once the roll is in flight the lowest settled gang's leader is evicted through the Eviction API, as a node drain would, asked again while the disruption budget refuses it under RecreatePod; the controller replaces it, the roll converges with every Instance on the new revision and no pod comes back under the old label; floor waived — the eviction itself costs settled capacity the update budget cannot absorb
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p7419 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "RecreatePod", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }

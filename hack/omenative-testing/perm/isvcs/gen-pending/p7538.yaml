@@ -1,0 +1,23 @@
+# p7538: [gen] pending taint roll pd N=4 RecreatePod u1 rp RecreateInstance lift after-settle  Ne=4 Nd=4 Nr=2 ceil_e=4 ceil_d=4 ceil_r=2 fault=taint:all co=none topo=pd lift=after-settle
+# reason: a NoSchedule taint on every schedulable node is in place when the bump lands under RecreatePod; the drained Instance's replacement cannot be placed, so the roll waits with reason Unschedulable inside its unschedulable grace, the capacity floor (N minus maxUnavailable) holds and nothing settled is taken down to make room; once the cause is lifted the roll converges with every Instance on the new revision; decoder and router are negative controls (co=none)
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p7538 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "RecreatePod", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
+  decoder:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

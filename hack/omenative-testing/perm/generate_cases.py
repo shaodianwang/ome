@@ -4,8 +4,8 @@
 Emits the constraint-filtered cross product of
     topology x updateStrategy x failure verb x injection phase x
     restartPolicy x pause
-into twenty-eight generator-owned folders, using ONLY verbs and hooks the runners
-(run.py + the KIND CI lane) already implement:
+into the generator-owned folders below, using ONLY verbs and hooks the
+runners (run.py + the KIND CI lane) already implement:
 
     gen-rollout/   p1000+  baseline revision-bump rollouts (failure=none)
     gen-fault/     p1200+  rollouts with fault=podkill:settling|rotating
@@ -155,6 +155,22 @@ into twenty-eight generator-owned folders, using ONLY verbs and hooks the runner
                           gang (fault=quota:<w> or cordon:all) that must wait
                           with a reason, tear nothing down and complete once
                           the squeeze lifts (lift=after-hold|never)
+    gen-evict/     p7400+  a pod of a Ready Instance is evicted through the
+                          Eviction API, as a node drain would: at steady state
+                          (mode=kill via=evict) and while a roll is in flight
+                          (fault=evict:rotating), crossed with topology x
+                          restartPolicy (x strategy under the roll)
+    gen-preempt/   p7440+  a pod of a Ready Instance is preempted by a
+                          higher-priority filler (via=preempt at steady state,
+                          fault=preempt:rotating under a roll) with every
+                          node's spare CPU taken, so the Instance waits until
+                          the fillers are dropped (lift=after-settle) or to
+                          the end (lift=never)
+    gen-pending/   p7500+  a new pod cannot be placed or admitted: a NoSchedule
+                          taint on every node (fault=taint:all) or a quota
+                          short of one pod (fault=quota:<n>; on a gang, room
+                          for all but one member), under a repair at steady
+                          state (mode=kill) and under a roll, lifted or never
 
 Ownership and determinism:
   - The gen-* folders belong ENTIRELY to this generator: every case there
@@ -310,6 +326,30 @@ Constraint ledger (why the raw product is filtered — derived from run.py):
     emitted with maxSurge 2: a surge of two promotes its last pair together,
     so the moment with exactly one Instance still off the new revision is not
     reliably observable.
+  - evict has no lift: the Eviction API is a one-shot removal, so the family
+    crosses topology x restartPolicy (x strategy under the roll) only. Its
+    steady-state cells are the kill verdict (the restart policy's exact
+    recreate scope) with the removal done by the Eviction API, which the
+    product's disruption budget may refuse while a pod is already down; the
+    runner retries as a drain does, and a budget that never admits one
+    eviction fails the case.
+  - preempt and pending cross lift=after-settle|never: the cause is removed
+    once the wait has held, or kept to the end so the hold itself is judged.
+    Both run on one gang width (the pod removed or refused is one member
+    whatever the width), with co=none (a group changes nothing about where a
+    pod can be placed) and with the two strategies a roll waits under
+    (in-place strategies create no pod to place). The preempt roll cells
+    waive the floor and the order: the preemption itself takes a pod the
+    budget cannot absorb; the pending verdict keeps its own floor.
+  - the quota a pending cell arms depends on the pod the operation creates:
+    a surge roll creates before anything is gone, so quota:0 (single-pod) or
+    quota:<members-1> (a gang: room for all but one member) refuses it; a
+    repair and a drain-first roll create after a pod is gone, so quota:-1
+    (one pod fewer than run) is what refuses the replacement, and on a gang
+    under RecreateInstance that is the whole gang short of one member. A gang
+    surge roll held to the end by that quota is the tight-cluster family's
+    cell, so the pending family leaves its quota:<members-1> lift=never cell
+    out.
 
 The t=3 covering fill over the deferred dimensions (coordination/rollout
 groups, canary promotion, budget x coordination interactions) is the --fill
@@ -359,6 +399,9 @@ GEN_BLOCKS = {
     "gen-readiness": (7000, 7100),
     "gen-gang-member": (7100, 7300),
     "gen-tight": (7300, 7400),
+    "gen-evict": (7400, 7440),
+    "gen-preempt": (7440, 7500),
+    "gen-pending": (7500, 7600),
 }
 GEN_ID_LO = min(lo for lo, _hi in GEN_BLOCKS.values())
 GEN_ID_HI = max(hi for _lo, hi in GEN_BLOCKS.values())
@@ -654,6 +697,18 @@ TIGHT_STRATS = ["SurgeThenDrain", "RecreatePod"]
 TIGHT_SQUEEZES = ["quota", "cordon"]
 TIGHT_LIFTS = ["after-hold", "never"]
 
+# The eviction, preemption and pending families: the shapes the fault list
+# names at one gang width, the two strategies a roll waits under, the
+# rotating hook for the in-flight moment, and for the causes that can be
+# lifted whether they are. A pending cell's quota admits one pod fewer than
+# the operation needs (see _pending_quota).
+DISRUPT_SHAPES = [("engine", 4, 0), ("pd", 4, 0), ("engine-mn", 2, 1)]
+DISRUPT_STRATS = [("SurgeThenDrain", 1, 0), ("RecreatePod", 0, 1)]
+DISRUPT_PHASE = "rotating"
+PENDING_CAUSES = ["taint", "quota"]
+PENDING_LIFTS = ["after-settle", "never"]
+PENDING_TOKEN = {"taint": "Unschedulable", "quota": "QuotaExceeded"}
+
 # Canonical shapes: (topo, N, W). Gangs at N=2 with widths 1 and 2; singles at
 # N=4 (pd: engine+decoder N, router lib.NR). Percentage budgets additionally
 # run a mid-size variant (MID_SHAPE) so the ceil() rounding actually differs.
@@ -757,6 +812,9 @@ MISSING_HOOKS = [
     "an automatic migration verb — the engine's own migration is a born-terminal "
     "relocation record written when a lost Instance is rebuilt elsewhere, so only a "
     "node loss provokes it and the migrate-and-bump family moves by request only",
+    "a pending cause armed mid-roll (a taint or a quota at the rotating hook) — "
+    "taint:all and quota:<n> are armed before the bump; only preempt fires at a "
+    "hook",
 ]
 
 
@@ -2916,6 +2974,203 @@ def emit_tight(add):
                         cell=("tight", topo, w, strat, squeeze, lift))
 
 
+# ── gen-evict: a pod of a Ready Instance is evicted ─────────────────────────
+def _recreate_scope(topo, rp):
+    """What the restart policy rebuilds after one pod of an Instance is gone."""
+    if rp == "RecreateInstance" and is_mn(topo):
+        return "the whole Instance (leader and workers) is rebuilt"
+    if is_mn(topo):
+        return "exactly the removed pod is recreated"
+    return "the Instance (one pod) is recreated"
+
+
+def _evict_steady_reason(topo, rp, target):
+    who = f"the {target} pod of one gang" if target else "one engine pod"
+    return (f"{who} is evicted through the Eviction API, as a node drain would; the disruption budget admits it with "
+            f"every Instance serving, {_recreate_scope(topo, rp)} under restart policy {RP_FULL[rp]}, no other Instance "
+            f"is touched and the fleet is back at N serving; nothing surges on a service nobody bumped")
+
+
+def _evict_roll_reason(topo, strat, waivers):
+    victim = _podkill_victim(topo, strat, DISRUPT_PHASE)
+    out = (f"once the roll is in flight {victim} is evicted through the Eviction API, as a node drain would, asked again "
+           f"while the disruption budget refuses it under {strat}; the controller replaces it, the roll converges with "
+           f"every Instance on the new revision and no pod comes back under the old label")
+    if is_pd(topo):
+        out += "; decoder and router are negative controls (co=none)"
+    if waivers.get("floor_soft"):
+        out += "; floor waived — the eviction itself costs settled capacity the update budget cannot absorb"
+    if waivers.get("order_soft"):
+        out += "; order waived — the eviction is a drain with no preceding surge"
+    return out
+
+
+def _kill_counts(topo, n):
+    return dict(**counts(topo, n), ceil_e=n, ceil_d=(n if is_pd(topo) else 0), ceil_r=(lib.NR if is_pd(topo) else 0))
+
+
+def emit_evict(add):
+    for topo, n, w in DISRUPT_SHAPES:
+        for rp in RESTARTS:
+            life = lib.lifecycle(restart=RP_FULL[rp])
+            d_life = lib.lifecycle(restart=RP_FULL[rp]) if is_pd(topo) else None
+            for target in (["leader", "worker"] if is_mn(topo) else [None]):
+                kv = dict(mode="kill", **_kill_counts(topo, n), restart=rp)
+                if target:
+                    kv["kill"] = target
+                kv.update(co="none", topo=topo, via="evict")
+                meta = dict(strat="SurgeThenDrain", verb="evict:steady", rp=rp)
+                desc = (f"{GEN_MARK} evict steady {shape_tag(topo, w)} N={n} rp {rp}"
+                        + (f" target {target}" if target else ""))
+                add("gen-evict", desc, kv, comps(topo, n, w, life, d_life=d_life),
+                    _evict_steady_reason(topo, rp, target), meta,
+                    cell=("evict", "steady", topo, w, rp, target))
+            for strat, surge, unavail in DISRUPT_STRATS:
+                waivers = _podkill_waivers(topo, strat, DISRUPT_PHASE)
+                kv = dict(**counts(topo, n), **ceilings(topo, n, strat, surge),
+                          fault=f"evict:{DISRUPT_PHASE}", **waivers, co="none", topo=topo)
+                meta = dict(strat=strat, verb=f"evict:{DISRUPT_PHASE}", rp=rp)
+                desc = (f"{GEN_MARK} evict {DISRUPT_PHASE} {shape_tag(topo, w)} N={n} {strat} "
+                        f"{budget_tag(strat, surge, unavail)} rp {rp}")
+                roll_life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp])
+                add("gen-evict", desc, kv, comps(topo, n, w, roll_life, d_life=d_life),
+                    _evict_roll_reason(topo, strat, waivers), meta,
+                    cell=("evict", DISRUPT_PHASE, topo, w, strat, rp))
+
+
+# ── gen-preempt: a pod of a Ready Instance is preempted ─────────────────────
+def _preempt_reason(moment, topo, rp, lift, strat=None):
+    base = ("fillers take the spare CPU of every node and a higher-priority filler presses on the node of the aimed "
+            "pod, so the scheduler preempts one pod of the case there")
+    if moment == "steady":
+        out = (f"{base}; {_recreate_scope(topo, rp)} under restart policy {RP_FULL[rp]} and its new pod waits with "
+               f"reason Unschedulable while every other Instance keeps serving and nothing is taken down to make room")
+    else:
+        out = (f"{base} while the roll is in flight under {strat}; the roll's next pod waits with reason Unschedulable, "
+               f"nothing settled is taken down to make room and the capacity floor holds")
+    if lift == "after-settle":
+        out += ("; once the fillers are dropped the Instance is placed again and serves, back at N" if moment == "steady"
+                else "; once the fillers are dropped the roll converges with every Instance on the new revision")
+    else:
+        out += ("; the fillers stay to the end, so the wait holds with its reason across the hold window and no "
+                "Instance reads Failed")
+    if is_pd(topo) and moment != "steady":
+        out += "; decoder and router are negative controls (co=none)"
+    if moment != "steady":
+        out += "; floor and order waived — the preemption itself takes a pod the update budget cannot absorb"
+    return out
+
+
+def emit_preempt(add):
+    for topo, n, w in DISRUPT_SHAPES:
+        for rp in RESTARTS:
+            d_life = lib.lifecycle(restart=RP_FULL[rp]) if is_pd(topo) else None
+            for lift in PENDING_LIFTS:
+                kv = dict(mode="kill", **_kill_counts(topo, n), restart=rp, co="none", topo=topo, via="preempt", lift=lift)
+                meta = dict(strat="SurgeThenDrain", verb="preempt:steady", rp=rp, lift=lift)
+                desc = f"{GEN_MARK} preempt steady {shape_tag(topo, w)} N={n} rp {rp} lift {lift}"
+                add("gen-preempt", desc, kv, comps(topo, n, w, lib.lifecycle(restart=RP_FULL[rp]), d_life=d_life),
+                    _preempt_reason("steady", topo, rp, lift), meta,
+                    cell=("preempt", "steady", topo, w, rp, lift))
+                for strat, surge, unavail in DISRUPT_STRATS:
+                    kv = dict(**counts(topo, n), **ceilings(topo, n, strat, surge),
+                              fault=f"preempt:{DISRUPT_PHASE}", floor_soft=1, order_soft=1, co="none", topo=topo, lift=lift)
+                    meta = dict(strat=strat, verb=f"preempt:{DISRUPT_PHASE}", rp=rp, lift=lift)
+                    desc = (f"{GEN_MARK} preempt {DISRUPT_PHASE} {shape_tag(topo, w)} N={n} {strat} "
+                            f"{budget_tag(strat, surge, unavail)} rp {rp} lift {lift}")
+                    roll_life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp])
+                    add("gen-preempt", desc, kv, comps(topo, n, w, roll_life, d_life=d_life),
+                        _preempt_reason(DISRUPT_PHASE, topo, rp, lift, strat), meta,
+                        cell=("preempt", DISRUPT_PHASE, topo, w, strat, rp, lift))
+
+
+# ── gen-pending: a new pod cannot be placed or admitted ─────────────────────
+def _pending_quota(moment, strat, w):
+    """The quota headroom that refuses exactly the pod the operation creates:
+    a surge roll creates before anything is gone (room for all but one of the
+    pods it adds); a repair and a drain-first roll create after a pod is
+    gone (one pod fewer than run)."""
+    if moment == "roll" and strat == "SurgeThenDrain":
+        return w   # a gang surge adds 1 + w pods; a single-pod surge adds one
+    return -1
+
+
+def _pending_cause(cause, topo, moment, strat, rp):
+    """The cause in the operator's words. On a gang the quota is what keeps
+    the gang from forming, except under a repair with restart policy None,
+    where only the one deleted pod is recreated and refused."""
+    if cause == "taint":
+        return "a NoSchedule taint on every schedulable node"
+    if not is_mn(topo):
+        return "a quota with no room for the one pod"
+    if moment == "roll" and strat == "SurgeThenDrain":
+        return "a quota with room for all but one member of the surge gang (the gang cannot form)"
+    if moment == "roll":
+        return "a quota one pod short of the recreated gang (all members but one admitted, the gang cannot form)"
+    if rp == "RecreateInstance":
+        return "a quota one pod short of the rebuilt gang (all members but one admitted, the gang cannot form)"
+    return "a quota one pod short (the leader's replacement alone is refused)"
+
+
+def _pending_reason(cause, moment, topo, rp, lift, strat, w):
+    token = PENDING_TOKEN[cause]
+    what = _pending_cause(cause, topo, moment, strat, rp)
+    how = "placed" if cause == "taint" else "admitted"
+    if moment == "steady":
+        pod = ("the leader's replacement" if is_mn(topo) and rp == "None"
+               else "the rebuilt gang" if is_mn(topo) else "the replacement pod")
+        out = (f"{what} is in place when one engine pod is deleted; {pod} cannot be {how}, so the Instance waits with "
+               f"reason {token} inside its unschedulable grace, nothing is taken down to make room, every other "
+               f"Instance keeps serving and no row reads Failed")
+        if lift == "after-settle":
+            out += f"; once the cause is lifted the repair completes: {_recreate_scope(topo, rp)} and the fleet is back at N serving"
+        else:
+            out += "; the cause stays to the end, so the wait holds with its reason across the hold window"
+        return out
+    pod = "the surge" if strat == "SurgeThenDrain" else "the drained Instance's replacement"
+    out = (f"{what} is in place when the bump lands under {strat}; {pod} cannot be {how}, so the roll waits with reason "
+           f"{token} inside its unschedulable grace, the capacity floor (N minus maxUnavailable) holds and nothing settled "
+           f"is taken down to make room")
+    if lift == "after-settle":
+        out += "; once the cause is lifted the roll converges with every Instance on the new revision"
+    else:
+        out += "; the cause stays to the end, so the roll holds with its reason across the hold window and no Instance reads Failed"
+    if is_pd(topo):
+        out += "; decoder and router are negative controls (co=none)"
+    return out
+
+
+def emit_pending(add):
+    for topo, n, w in DISRUPT_SHAPES:
+        for rp in RESTARTS:
+            d_life = lib.lifecycle(restart=RP_FULL[rp]) if is_pd(topo) else None
+            for cause in PENDING_CAUSES:
+                for lift in PENDING_LIFTS:
+                    fault = "taint:all" if cause == "taint" else f"quota:{_pending_quota('steady', None, w)}"
+                    kv = dict(mode="kill", **_kill_counts(topo, n), restart=rp)
+                    if is_mn(topo):
+                        kv["kill"] = "leader"
+                    kv.update(fault=fault, co="none", topo=topo, lift=lift)
+                    meta = dict(strat="SurgeThenDrain", verb=f"pending:{cause}:steady", rp=rp, lift=lift)
+                    desc = f"{GEN_MARK} pending {cause} steady {shape_tag(topo, w)} N={n} rp {rp} lift {lift}"
+                    add("gen-pending", desc, kv, comps(topo, n, w, lib.lifecycle(restart=RP_FULL[rp]), d_life=d_life),
+                        _pending_reason(cause, "steady", topo, rp, lift, None, w), meta,
+                        cell=("pending", cause, "steady", topo, w, rp, lift))
+                    for strat, surge, unavail in DISRUPT_STRATS:
+                        if cause == "quota" and lift == "never" and is_mn(topo) and strat == "SurgeThenDrain":
+                            continue   # constraint ledger: the tight-cluster family's cell
+                        fault = "taint:all" if cause == "taint" else f"quota:{_pending_quota('roll', strat, w)}"
+                        kv = dict(**counts(topo, n), **ceilings(topo, n, strat, surge), fault=fault,
+                                  co="none", topo=topo, lift=lift)
+                        meta = dict(strat=strat, verb=f"pending:{cause}:roll", rp=rp, lift=lift)
+                        desc = (f"{GEN_MARK} pending {cause} roll {shape_tag(topo, w)} N={n} {strat} "
+                                f"{budget_tag(strat, surge, unavail)} rp {rp} lift {lift}")
+                        roll_life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp])
+                        add("gen-pending", desc, kv, comps(topo, n, w, roll_life, d_life=d_life),
+                            _pending_reason(cause, "roll", topo, rp, lift, strat, w), meta,
+                            cell=("pending", cause, "roll", topo, w, strat, rp, lift))
+
+
 # ── assembly ─────────────────────────────────────────────────────────────────
 def build_outputs():
     """{relative path under isvcs/: file text} — the entire owned output set."""
@@ -2989,6 +3244,9 @@ def build_outputs():
     emit_readiness(add)
     emit_gang_member(add)
     emit_tight(add)
+    emit_evict(add)
+    emit_preempt(add)
+    emit_pending(add)
     stale = set(PARKED) - parked_used
     if stale:
         sys.exit("PARKED keys match no emitted cell (stale after a matrix change): "
@@ -3076,6 +3334,8 @@ def manifest(rows):
     lines += table_if("By operation on the stuck Component (ops-held)", "op")
     lines += table_if("By overlap order (runtime-edit-repair)", "order")
     lines += table_if("By runtime edit (runtime-edit-repair)", "edit")
+    lines += table("By lift (preempt and pending families)",
+                   tally(lambda kv, m: m["lift"], where=lambda kv, m: "lift" in m))
     parked_rows = [(f, n, m["parked"]) for f, n, _kv, m in rows if "parked" in m]
     if parked_rows:
         lines += ["### Parked cells (XFAIL on a tracked issue)", "",
@@ -3309,6 +3569,30 @@ def manifest(rows):
         "- tight: RecreatePod under the quota squeeze has no lift axis — the drain"
         " frees the gang's own room, so the roll completes with no wait, and the"
         " cell asserts that instead.",
+        "- evict has no lift: the Eviction API is a one-shot removal, so the"
+        " family crosses topology x restartPolicy (x strategy under the roll)"
+        " only. Its steady-state cells are the kill verdict with the removal"
+        " done by the Eviction API; the product's disruption budget"
+        " (`podDisruptionBudget.omeNative` in the chart) may refuse it while a"
+        " pod is already down, the runner asks again as a drain does, and a"
+        " budget that never admits one eviction fails the case.",
+        "- preempt and pending cross `lift=after-settle|never` (the cause"
+        " removed once the wait has held, or kept to the end so the hold is"
+        " judged), run on one gang width, with `co=none` (a group changes"
+        " nothing about where a pod can be placed) and under the two"
+        " strategies a roll waits under (in-place strategies create no pod to"
+        " place). Both verbs need a cluster the harness owns (every node is"
+        " blocked); elsewhere the case is SKIP with the reason. The preempt"
+        " roll cells waive the floor and the order (the preemption takes a pod"
+        " the budget cannot absorb); the pending verdict keeps its own floor.",
+        "- a pending cell's quota admits one pod fewer than the operation"
+        " needs: `quota:0` for a single-pod surge, `quota:<members-1>` for a"
+        " surge gang (room for all but one member), and `quota:-1` (one pod"
+        " fewer than run) under a repair or a drain-first roll, which create"
+        " after a pod is gone; on a gang under RecreateInstance that leaves"
+        " the whole gang short of one member. A gang surge roll held to the"
+        " end by that quota is the tight-cluster family's cell, so the pending"
+        " family leaves its `quota:<members-1> lift=never` cell out.",
         "- Kill-family cells pinned by hand-written restart/ cases are excluded:",
         "",
     ]

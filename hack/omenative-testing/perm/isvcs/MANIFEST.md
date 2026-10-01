@@ -3,7 +3,7 @@
 Emitted by `generate_cases.py` — regenerate with `python3 generate_cases.py`; CI rejects hand edits via `python3 generate_cases.py --check` (run_test.py).
 The gen-* folders are generator-owned wholesale; promote a bug-finding case to a hand-owned folder under a fresh id instead of editing it here.
 
-Total generated cases: **2641**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
+Total generated cases: **2767**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
 
 ## Folders
 
@@ -37,14 +37,17 @@ Total generated cases: **2641**. The whole-corpus per-PR cap (hand + generated) 
 | gen-readiness | 30 | p7000..p7029 |
 | gen-gang-member | 72 | p7100..p7171 |
 | gen-tight | 28 | p7300..p7327 |
+| gen-evict | 20 | p7400..p7419 |
+| gen-preempt | 36 | p7440..p7475 |
+| gen-pending | 70 | p7500..p7569 |
 
 ### By topology
 
 | value | cases |
 |---|---|
-| engine | 641 |
-| engine-mn | 597 |
-| pd | 809 |
+| engine | 683 |
+| engine-mn | 639 |
+| pd | 851 |
 | pd-mn | 594 |
 
 ### By update strategy
@@ -54,8 +57,8 @@ Total generated cases: **2641**. The whole-corpus per-PR cap (hand + generated) 
 | (dormant: nothing rolls) | 40 |
 | InPlaceIfPossible | 404 |
 | InPlaceOnly | 236 |
-| RecreatePod | 577 |
-| SurgeThenDrain | 1384 |
+| RecreatePod | 619 |
+| SurgeThenDrain | 1468 |
 
 ### By failure verb / phase
 
@@ -101,6 +104,8 @@ Total generated cases: **2641**. The whole-corpus per-PR cap (hand + generated) 
 | ctrlrestart:surge | 8 |
 | edit:rotating | 84 |
 | edit:settling | 84 |
+| evict:rotating | 12 |
+| evict:steady | 8 |
 | imagepull:idle | 8 |
 | imagepull:new:imagePull | 12 |
 | imagepull:settling | 48 |
@@ -119,6 +124,10 @@ Total generated cases: **2641**. The whole-corpus per-PR cap (hand + generated) 
 | node:relocated | 32 |
 | node:repaired | 32 |
 | none | 98 |
+| pending:quota:roll | 22 |
+| pending:quota:steady | 12 |
+| pending:taint:roll | 24 |
+| pending:taint:steady | 12 |
 | podkill:draining:leader | 12 |
 | podkill:draining:worker | 12 |
 | podkill:rotating | 160 |
@@ -131,6 +140,8 @@ Total generated cases: **2641**. The whole-corpus per-PR cap (hand + generated) 
 | podkill@held | 4 |
 | podkill@heldpaused | 4 |
 | podkill@paused | 4 |
+| preempt:rotating | 24 |
+| preempt:steady | 12 |
 | push:failed | 32 |
 | push:held | 32 |
 | quota:after-hold | 4 |
@@ -156,22 +167,22 @@ Total generated cases: **2641**. The whole-corpus per-PR cap (hand + generated) 
 | value | cases |
 |---|---|
 | (unset — baseline) | 686 |
-| None | 922 |
-| RecreateInstance | 1033 |
+| None | 985 |
+| RecreateInstance | 1096 |
 
 ### By pause
 
 | value | cases |
 |---|---|
 | freeze | 110 |
-| off | 2347 |
+| off | 2473 |
 | true | 184 |
 
 ### By pause moment
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 2461 |
+| (no pause around a repair) | 2587 |
 | after | 36 |
 | before | 72 |
 | during | 72 |
@@ -180,7 +191,7 @@ Total generated cases: **2641**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no pause around a repair) | 2461 |
+| (no pause around a repair) | 2587 |
 | fix | 90 |
 | none | 90 |
 
@@ -190,7 +201,7 @@ Total generated cases: **2641**. The whole-corpus per-PR cap (hand + generated) 
 |---|---|
 | bluegreen | 48 |
 | canary | 24 |
-| none | 1993 |
+| none | 2119 |
 | ratio | 16 |
 | rolling | 526 |
 | seq | 34 |
@@ -236,7 +247,7 @@ Total generated cases: **2641**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no break) | 2067 |
+| (no break) | 2193 |
 | decoder | 60 |
 | engine | 514 |
 
@@ -324,6 +335,13 @@ Total generated cases: **2641**. The whole-corpus per-PR cap (hand + generated) 
 | strategy SurgeThenDrain to RecreatePod at rotating while an Instance crashes | 6 |
 | strategy SurgeThenDrain to RecreatePod at settling | 6 |
 
+### By lift (preempt and pending families)
+
+| value | cases |
+|---|---|
+| after-settle | 54 |
+| never | 52 |
+
 ### Parked cells (XFAIL on a tracked issue)
 
 | case | folder | issue |
@@ -386,6 +404,9 @@ Total generated cases: **2641**. The whole-corpus per-PR cap (hand + generated) 
 - readiness:old runs on the idle service at the canonical SurgeThenDrain budget: update budgets are dormant with no roll, so strategy multiplies only the readiness:new side; readiness:new has one form, since a revision that never passes readiness has no one-shot shape (a slow start is the startup delay, not a readiness failure).
 - gang-member cells at steady state are the mode=kill cells gen-restart already emits (kill=leader|worker x restart policy x strategy); this family adds the mid-roll timings, each bound to the gang it aims at (settling: a settled gang; rotating: the gang forming on the new revision; draining: a serving gang beside the first one leaving).
 - tight: RecreatePod under the quota squeeze has no lift axis — the drain frees the gang's own room, so the roll completes with no wait, and the cell asserts that instead.
+- evict has no lift: the Eviction API is a one-shot removal, so the family crosses topology x restartPolicy (x strategy under the roll) only. Its steady-state cells are the kill verdict with the removal done by the Eviction API; the product's disruption budget (`podDisruptionBudget.omeNative` in the chart) may refuse it while a pod is already down, the runner asks again as a drain does, and a budget that never admits one eviction fails the case.
+- preempt and pending cross `lift=after-settle|never` (the cause removed once the wait has held, or kept to the end so the hold is judged), run on one gang width, with `co=none` (a group changes nothing about where a pod can be placed) and under the two strategies a roll waits under (in-place strategies create no pod to place). Both verbs need a cluster the harness owns (every node is blocked); elsewhere the case is SKIP with the reason. The preempt roll cells waive the floor and the order (the preemption takes a pod the budget cannot absorb); the pending verdict keeps its own floor.
+- a pending cell's quota admits one pod fewer than the operation needs: `quota:0` for a single-pod surge, `quota:<members-1>` for a surge gang (room for all but one member), and `quota:-1` (one pod fewer than run) under a repair or a drain-first roll, which create after a pod is gone; on a gang under RecreateInstance that leaves the whole gang short of one member. A gang surge roll held to the end by that quota is the tight-cluster family's cell, so the pending family leaves its `quota:<members-1> lift=never` cell out.
 - Kill-family cells pinned by hand-written restart/ cases are excluded:
 
   - p130: engine SurgeThenDrain rp=None
@@ -418,6 +439,7 @@ The family asserts the intended behaviour, `expect=heals`, on every cell; the ce
 - decoder-targeted mode=kill (the kill handler always picks the engine when one is configured)
 - controller restart while a repair is open (a crash loop at idle with the manager deleted once the rebuild has started) — the runner fires one fault per case and the idle-break handler fires no second one
 - an automatic migration verb — the engine's own migration is a born-terminal relocation record written when a lost Instance is rebuilt elsewhere, so only a node loss provokes it and the migrate-and-bump family moves by request only
+- a pending cause armed mid-roll (a taint or a quota at the rotating hook) — taint:all and quota:<n> are armed before the bump; only preempt fires at a hook
 
 ## Deferred fill
 

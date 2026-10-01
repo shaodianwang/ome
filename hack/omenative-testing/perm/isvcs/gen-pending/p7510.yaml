@@ -1,0 +1,13 @@
+# p7510: [gen] pending quota roll engine N=4 SurgeThenDrain s1 rp None lift never  Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 fault=quota:0 co=none topo=engine lift=never
+# reason: a quota with no room for the one pod is in place when the bump lands under SurgeThenDrain; the surge cannot be admitted, so the roll waits with reason QuotaExceeded inside its unschedulable grace, the capacity floor (N minus maxUnavailable) holds and nothing settled is taken down to make room; the cause stays to the end, so the roll holds with its reason across the hold window and no Instance reads Failed
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p7510 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

@@ -182,6 +182,7 @@ HEADER_VALUES = {
     "restart": {"None", "RecreateInstance"},
     "kill": {"leader", "worker"},
     "pause": {"true", "freeze"},
+    "via": {"delete", "evict", "preempt"},
     "then": {"bump"},
     "at": {"accept", "surge", "drain"},
     "stuck": {"held", "failed"},
@@ -226,8 +227,10 @@ def _hook(v):
 def _fault(v):
     kind, _, param = str(v).partition(":")
     if kind == "quota":
-        return param.isdigit()
-    if kind in ("podkill", "ctrlrestart"):
+        return param.lstrip("-").isdigit()   # a negative headroom admits fewer pods than run
+    if kind == "taint":
+        return param == "all"
+    if kind in ("podkill", "ctrlrestart", "evict", "preempt"):
         return param in FAULT_PHASES or _hook(param) or (kind == "ctrlrestart" and param == "idle")
     if kind in ("crashloop", "imagepull"):
         # a break names the revision a rollout leaves behind (old), the one the
@@ -611,13 +614,18 @@ def classify_faults(h, mode, pods, strategy, verbs):
     kind, _, param = str(h.get("fault", "")).partition(":")
     lifted = fault_lifted(h, verbs)
     if mode == "kill":
-        faults.append((pod_delete_kind(pods), "one-shot", "running", "engine"))
+        removed = "evicted or preempted" if h.get("via") in ("evict", "preempt") else pod_delete_kind(pods)
+        faults.append((removed, "one-shot", "running", "engine"))
     if h.get("pkill"):
         faults.append((pod_delete_kind(pods), "one-shot", "running", "decoder"))
     if "podkill" in verbs:
         # the canary verb deletes one old-revision engine pod by hand
         faults.append((pod_delete_kind(pods), "one-shot", "running", "engine"))
-    if kind == "podkill":
+    if kind in ("evict", "preempt"):
+        faults.append(("evicted or preempted", "one-shot", "running", str(h.get("victimcomp", "engine"))))
+    elif kind == "taint":
+        faults.append(("pod Pending", "one-shot" if lifted else "persistent", "-", "every node tainted"))
+    elif kind == "podkill":
         component, side = podkill_victim(h, param.partition("@")[0], strategy, pods)
         faults.append((pod_delete_kind(pods), "one-shot", side, component))
     elif kind == "crashloop":

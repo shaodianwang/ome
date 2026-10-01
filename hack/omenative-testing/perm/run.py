@@ -2000,6 +2000,50 @@ NODE_LIFTS = {"relocated": {"after-recover"}, "repaired": {"after-settle", "afte
 NEEDS_FORCE_DELETE, NEEDS_NO_FORCE_DELETE = "forcedelete", "no-forcedelete"
 NEEDS = {NEEDS_FORCE_DELETE, NEEDS_NO_FORCE_DELETE}
 NODE_NEEDS = {"relocated": NEEDS_FORCE_DELETE, "parked": NEEDS_NO_FORCE_DELETE}
+# evict:<phase> removes the podkill victim through the Eviction API, the way
+# a node drain does, so a PodDisruptionBudget the product keeps on the pods
+# may refuse it: a refusal is retried at the cadence a drain retries at, and
+# an eviction never admitted fails the case. In mode=kill the same removal is
+# via=evict; via=delete (the default) is kubectl delete.
+EVICTION_API = "/apis/policy/v1"
+# preempt:<phase> (via=preempt in mode=kill) has the scheduler remove the
+# pod: fillers take the spare CPU of every node a case pod could land on,
+# then one filler under a PriorityClass a notch above the case's pods asks
+# for the victim's node's spare CPU plus the victim's own, so the scheduler
+# must preempt a pod there. Nothing of the case can be placed again until
+# the fillers are dropped at lift=after-settle; lift=never keeps them to the
+# end. The verb needs a cluster this harness owns (it blocks every node) and
+# the PriorityClass API; elsewhere the case is skipped with the reason.
+PRIORITY_CLASS_API = "/apis/scheduling.k8s.io/v1"
+FILLER_LABEL = "perm.test/filler"
+PREEMPT_WAIT_S = int(60 * TIMEOUT_MULT)
+KILL_VIAS = {"delete", "evict", "preempt"}
+FAULT_RETRY_S = 5.0
+# Hook faults fire once at a phase hook; armed faults are in place before the
+# trigger and have no hook to miss.
+HOOK_FAULTS = {"podkill", "ctrlrestart", "evict", "preempt"} | BREAK_FAULTS
+ARMED_FAULTS = {"quota", "cordon", "taint"}
+# taint:all puts a NoSchedule taint on every node a case pod could be placed
+# on (Ready, uncordoned, otherwise untainted), so no new pod of the case can
+# be placed until the lift removes it; running pods are untouched. The key
+# itself marks the node for batch.py's end-of-run sweep. Like preempt it
+# needs a cluster this harness owns, since it blocks every node.
+TAINT_KEY = "perm.test/pending"
+TAINT_TARGETS = {"all"}
+# Pending causes: a pod of the operation cannot be placed or admitted until
+# the cause is lifted (taint and preempt through the scheduler, quota
+# through admission; quota:<n> with n<0 admits n fewer pods than run, so the
+# pod a repair or a drain-first roll creates is the one refused). The
+# product reports the wait on the Instance row's operation.waiting with one
+# of these tokens (fixed Kubernetes semantics, not operator-tunable), which
+# is what a case reads as its reason; a quota short of one gang member can
+# also surface as the scheduler's token when the admitted members cannot
+# bind without the last one.
+PENDING_FAULTS = {"preempt", "taint", "quota"}
+PENDING_LIFTS = {"after-settle", "never"}
+PENDING_TOKENS = {"preempt": {"Unschedulable"}, "taint": {"Unschedulable"},
+                  "quota": {"QuotaExceeded", "Unschedulable"}}
+ROW_POLL_S = 2.0
 # Persistent faults a rollout case may fire on the idle service (during=idle)
 # instead of at the settling hook after the bump; no bump follows, and the
 # verdict reads what the product does about the fault on its own.
@@ -2055,6 +2099,21 @@ RESET_ANNO = "ome.io/reset-instances"
 # event the engine records.
 TIGHT_LIFTS = {"after-hold", "never"}
 TIGHT_FAULTS = {"quota", "cordon"}
+
+
+def _tight_cell(fields):
+    """True when a header is the tight-cluster family's: a plain rollout held by
+    a quota or a cordon under its own lifts. A quota kept to the end names that
+    family only on a gang with a non-negative headroom; the pending family's
+    gang cells count one pod fewer than run (a negative headroom)."""
+    mode = str(fields.get("mode") or "rollout")
+    kind, _, param = str(fields.get("fault", "")).partition(":")
+    lift = str(fields.get("lift", ""))
+    if mode != "rollout" or kind not in TIGHT_FAULTS or lift not in TIGHT_LIFTS or fields.get("during"):
+        return False
+    if lift == "after-hold" or kind == "cordon":
+        return True
+    return str(fields.get("topo", "")).endswith("-mn") and not param.startswith("-")
 HOLD_TOKENS = {"QuotaExceeded", "Unschedulable"}
 HOLD_EVENT = "InstanceQuotaBlocked"
 # A gang short a member this long must not be counted as serving by its row:
@@ -3186,6 +3245,10 @@ def _run_fault_cleanups():
             _node_restore(arg)
         elif kind == "readiness":
             _readiness_restore(arg)
+        elif kind == "preempt":
+            _preempt_cleanup(arg)
+        elif kind == "taint":
+            _taint_lift(arg)
 
 
 def _lift_quota(case_id):
@@ -3233,13 +3296,17 @@ def _fault_ok(v):
     if kind == "quota":
         try:
             # n=0 = zero headroom: every further pod admission is rejected
-            # (the only way to bound a single-pod surge).
-            return int(param) >= 0
+            # (the only way to bound a single-pod surge); n<0 admits n fewer
+            # pods than run, so a pod created after one is gone is refused.
+            int(param)
+            return True
         except ValueError:
             return False
+    if kind == "taint":
+        return param in TAINT_TARGETS
     if kind == "ctrlrestart" and param == IDLE_FAULT_PHASE:
         return True
-    if kind in ("podkill", "ctrlrestart"):
+    if kind in ("podkill", "ctrlrestart", "evict", "preempt"):
         return param in FAULT_PHASES
     if kind == "cordon":
         return param in FAULT_TARGETS
@@ -3374,7 +3441,9 @@ def _fault_quota_create(f, case_id):
             continue
         for k, v in _pod_requests(it).items():
             usage[k] += v
-    hard = {f"requests.{k}": _qty_str(k, usage[k] + n * shape[k]) for k in shape}
+    hard = {f"requests.{k}": _qty_str(k, max(0, usage[k] + n * shape[k])) for k in shape}
+    f["cause"] = (f"the ResourceQuota admitting {-n} pod(s) fewer than run" if n < 0
+                  else f"the ResourceQuota admitting {n} pod(s) beyond the running fleet")
     rq = {"apiVersion": "v1", "kind": "ResourceQuota",
           "metadata": {"name": f"perm-{case_id}-quota", "labels": {"perm.test/fault": case_id}},
           "spec": {"hard": hard}}
@@ -3383,7 +3452,7 @@ def _fault_quota_create(f, case_id):
         f["infra_fail"] = f"quota: create failed: {rr.stderr.strip()[:120]}"
         return False, f["infra_fail"]
     _FAULT_CLEANUPS.append(("quota", case_id))
-    f["notes"].append(f"fault armed: quota +{n} pod(s) ({' '.join(f'{k}={v}' for k, v in sorted(hard.items()))})")
+    f["notes"].append(f"fault armed: quota {n:+d} pod(s) ({' '.join(f'{k}={v}' for k, v in sorted(hard.items()))})")
     print(f"    ⚡ {f['notes'][-1]}")
     return True, ""
 
@@ -3489,11 +3558,15 @@ def _fault_cordon(f, case_id, hdr):
 def _fault_setup(f, case_id, hdr):
     """Pre-trigger fault apparatus (quota / cordon), run once Initial Ready is
     reached and before the trigger. Returns (ok, msg); not-ok → INFRA-FAIL."""
-    if not f or f["kind"] not in ("quota", "cordon"):
+    if not f or f["kind"] not in ("quota", "cordon", "preempt", "taint"):
         return True, ""
     try:
         if f["kind"] == "quota":
             return _fault_quota_create(f, case_id)
+        if f["kind"] == "preempt":
+            return _fault_preempt_arm(f, case_id)
+        if f["kind"] == "taint":
+            return _fault_taint_arm(f, case_id)
         return _fault_cordon(f, case_id, hdr)
     except Exception as e:
         f["infra_fail"] = f"{f['kind']} setup error: {e}"
@@ -3548,6 +3621,74 @@ def _fault_pick_pod(pod_state, pods_per_inst, old_hashes, victim=None, comp=None
     return live[0][0]
 
 
+def _api_served(path):
+    """True when the apiserver answers a GET of this API group path."""
+    return kubectl("get", "--raw", path).returncode == 0
+
+
+def _evict_capability():
+    """None when the Eviction API is served here, else why evict cannot run."""
+    if not _api_served(EVICTION_API):
+        return f"the Eviction API ({EVICTION_API}) is not served by this apiserver"
+    return None
+
+
+def _fault_capability(kind):
+    """None when this cluster has the apparatus for a fault kind, else why it
+    cannot run here; a case reads that as SKIP before it applies anything."""
+    if kind == "evict":
+        return _evict_capability()
+    if kind == "preempt":
+        return _preempt_capability()
+    if kind == "taint":
+        return _taint_capability()
+    if kind == "node":
+        return _node_fault_capability()
+    return None
+
+
+def _evict_pod(name):
+    """Evict one pod through the Eviction API. (admitted, denied, message):
+    denied is a disruption-budget refusal, which a drain retries; anything
+    else that is not admitted is an apparatus error."""
+    body = {"apiVersion": "policy/v1", "kind": "Eviction",
+            "metadata": {"name": name, "namespace": NS}}
+    r = kubectl("create", "--raw", f"/api/v1/namespaces/{NS}/pods/{name}/eviction", "-f", "-",
+                input=json.dumps(body))
+    if r.returncode == 0:
+        return True, False, ""
+    msg = (r.stderr or "").strip()
+    return False, ("disruption budget" in msg or "TooManyRequests" in msg), msg[:160]
+
+
+def _fault_evict_fire(f, pod_state, pods_per_inst, old_hashes):
+    """Evict the podkill victim. A budget refusal leaves the fault unfired
+    and due again after FAULT_RETRY_S, the way a drain keeps asking; the
+    victim is picked again each time, since the roll moves on meanwhile."""
+    victim = _fault_pick_pod(pod_state, pods_per_inst, old_hashes, victim=f.get("victim"),
+                             comp=f.get("victimcomp") or None)
+    if not victim:
+        f["infra_fail"] = "evict: no live pod to evict"
+        return
+    admitted, denied, msg = _evict_pod(victim)
+    if denied:
+        f["fired"] = False
+        f["denials"] = f.get("denials", 0) + 1
+        f["retry_at"] = time.time() + FAULT_RETRY_S
+        if f["denials"] == 1:
+            f["notes"].append(f"eviction of {victim} refused by the disruption budget; asking again every {FAULT_RETRY_S:.0f}s")
+            print(f"    ⓘ {f['notes'][-1]}")
+        return
+    if not admitted:
+        f["infra_fail"] = f"evict: evicting {victim} failed: {msg}"
+        return
+    f["victim_comp"] = (pod_state.get(victim) or {}).get("comp", "")
+    f["crash_pod"] = victim
+    f["notes"].append(f"fault fired: evict {victim} ({f['param']})"
+                      + (f" after {f['denials']} budget refusal(s)" if f.get("denials") else ""))
+    print(f"    ⚡ {f['notes'][-1]}")
+
+
 def _fault_fire(f, pod_state, pods_per_inst, old_hashes, inv=None):
     """One-shot phase-fault action (latched by the caller's fired check). inv
     is the watcher's invariant state: a fault that changes a live pod's spec
@@ -3556,6 +3697,12 @@ def _fault_fire(f, pod_state, pods_per_inst, old_hashes, inv=None):
     f["fired_ts"] = time.time()
     if f["kind"] in BREAK_FAULTS:
         _fault_crashloop_fire(f, pod_state, old_hashes, inv)
+        return
+    if f["kind"] == "evict":
+        _fault_evict_fire(f, pod_state, pods_per_inst, old_hashes)
+        return
+    if f["kind"] == "preempt":
+        _fault_preempt_fire(f, pod_state, pods_per_inst, old_hashes)
         return
     if f["kind"] == "configkey":
         _fault_configkey_fire(f, pod_state, old_hashes)
@@ -4644,9 +4791,11 @@ def _fault_tick(ctx):
       draining  → first old-revision pod observed on its way out;
       migrating → migration accept observed (_migrate sets ctx['fault_migrating'])."""
     f = ctx.get("fault")
-    if not f or f["fired"] or (f["kind"] not in ("podkill", "ctrlrestart") and f["kind"] not in BREAK_FAULTS):
+    if not f or f["fired"] or f["kind"] not in HOOK_FAULTS:
         return
     if ctx.get("trigger_ts") is None or _fault_fired_by_handler(f) or _fault_on_new(f) or _fault_before_push(f):
+        return
+    if f.get("retry_at") and time.time() < f["retry_at"]:
         return
     ph = f["param"]
     if ph.partition("@")[0] in CANARY_HOOKS:
@@ -4683,7 +4832,12 @@ def _fault_finalize(f, verdict, notes, checks):
     for x in f["notes"]:
         notes.append(x)
         checks.append(f"  ⓘ {x}")
-    if f["kind"] not in ("quota", "cordon") and not f["fired"]:
+    if f["kind"] == "evict" and not f["fired"] and f.get("denials"):
+        verdict = "FAIL"
+        notes.append(f"eviction never admitted ({f['denials']} budget refusal(s))")
+        checks.append(f"  ✗ evict: the disruption budget refused the eviction {f['denials']} time(s) and never "
+                      f"admitted it while the roll ran — a drain of that node would never finish")
+    elif f["kind"] not in ARMED_FAULTS and not f["fired"]:
         checks.append(f"  ⓘ fault {f['kind']}:{f['param']} never reached its phase hook (not fired)")
     if f["infra_fail"]:
         verdict = "INFRA-FAIL"
@@ -6353,6 +6507,578 @@ def _tight_checks(ctx, f, lift, bumped, out, state, verdict, notes, checks):
     return verdict
 
 
+
+
+# ── Preemption and pending holds ─────────────────────────────────────────────
+def _preempt_capability():
+    """None when a preemption can be staged here: a cluster this harness owns
+    (the fillers take every node's spare CPU) and the PriorityClass API."""
+    reason = _node_fault_capability()
+    if reason:
+        return f"filling every node needs a cluster this harness owns: {reason}"
+    if not _api_served(PRIORITY_CLASS_API):
+        return f"the PriorityClass API ({PRIORITY_CLASS_API}) is not served by this apiserver"
+    return None
+
+
+def _eligible_nodes():
+    """Nodes a pod with no tolerations can be placed on: Ready, not cordoned,
+    with no NoSchedule or NoExecute taint."""
+    r = kubectl("get", "nodes", "-o", "json")
+    if r.returncode != 0:
+        return []
+    try:
+        items = json.loads(r.stdout).get("items", []) or []
+    except Exception:
+        return []
+    out = []
+    for it in items:
+        spec, status, meta = it.get("spec") or {}, it.get("status") or {}, it.get("metadata") or {}
+        if spec.get("unschedulable") or not meta.get("name"):
+            continue
+        if any(t.get("effect") in ("NoSchedule", "NoExecute") for t in spec.get("taints") or []):
+            continue
+        if any(c.get("type") == "Ready" and c.get("status") == "True" for c in status.get("conditions") or []):
+            out.append(meta["name"])
+    return sorted(out)
+
+
+def _node_cpu_free(node):
+    """Millicores of CPU on `node` that no bound, non-terminal pod requests:
+    allocatable minus the requests of every pod bound there, read live across
+    namespaces. None when either side cannot be read."""
+    r = kubectl("get", "node", node, "-o", "json")
+    if r.returncode != 0:
+        return None
+    try:
+        alloc = _qty("cpu", ((json.loads(r.stdout).get("status") or {}).get("allocatable") or {}).get("cpu", "0"))
+    except Exception:
+        return None
+    r2 = kubectl("get", "pods", "-A", "--field-selector", f"spec.nodeName={node}", "-o", "json")
+    if r2.returncode != 0:
+        return None
+    try:
+        items = json.loads(r2.stdout).get("items", []) or []
+    except Exception:
+        return None
+    used = 0
+    for it in items:
+        if ((it.get("status") or {}).get("phase")) in ("Succeeded", "Failed"):
+            continue
+        used += _pod_requests(it).get("cpu", 0)
+    return alloc - used
+
+
+def _filler_manifest(name, case_id, node, cpu_m, priority_class=""):
+    """A pod that holds `cpu_m` millicores of `node` and nothing else: pinned
+    through the hostname label (a nodeName would skip the scheduler), the
+    fixture image kept idle by a shell loop, no memory request. Under a
+    priority class it is the pod the scheduler preempts for."""
+    spec = {"nodeSelector": {"kubernetes.io/hostname": node},
+            "containers": [{"name": "filler", "image": _fixture_values()["OME_EVAL_NGINX_IMAGE"],
+                            "command": ["sh", "-c", "trap 'exit 0' QUIT TERM INT; while :; do sleep 1; done"],
+                            "resources": {"requests": {"cpu": _qty_str("cpu", cpu_m)}}}]}
+    if priority_class:
+        spec["priorityClassName"] = priority_class
+    return {"apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": name, "namespace": NS, "labels": {FILLER_LABEL: case_id}},
+            "spec": spec}
+
+
+def _pod_bound(name):
+    """The node a pod is bound to, or "" while it is unscheduled or gone."""
+    return str((((_get_pod(name) or {}).get("spec") or {}).get("nodeName")) or "")
+
+
+def _filler_create(f, name, node, cpu_m, priority_class=""):
+    r = kubectl("apply", "-f", "-", input=json.dumps(_filler_manifest(name, f["case_id"], node, cpu_m, priority_class)))
+    if r.returncode == 0:
+        f["fillers"].append(name)
+        return True, ""
+    return False, f"creating filler {name} on {node} failed: {(r.stderr or '').strip()[:160]}"
+
+
+def _fault_preempt_arm(f, case_id):
+    """Create the PriorityClass the preempting filler runs under, one notch
+    above the highest priority a pod of the case carries. The cleanup is
+    registered before anything is created."""
+    r = kubectl("-n", NS, "get", "pod", "-l", f"ome.io/inferenceservice={case_id}", "-o", "json")
+    if r.returncode != 0:
+        f["infra_fail"] = f"preempt: cannot read case pods: {r.stderr.strip()[:120]}"
+        return False, f["infra_fail"]
+    try:
+        highest = max([int(((it.get("spec") or {}).get("priority")) or 0)
+                       for it in json.loads(r.stdout).get("items", [])] or [0])
+    except Exception as e:
+        f["infra_fail"] = f"preempt: cannot parse case pods: {e}"
+        return False, f["infra_fail"]
+    name = f"perm-{case_id}-preempt"
+    f.update(pc_name=name, pc_value=highest + 1, fillers=[], pc_deleted=False, fillers_dropped=False)
+    _FAULT_CLEANUPS.append(("preempt", f))   # registered BEFORE the class exists
+    pc = {"apiVersion": "scheduling.k8s.io/v1", "kind": "PriorityClass",
+          "metadata": {"name": name, "labels": {"perm.test/fault": case_id}},
+          "value": highest + 1, "globalDefault": False, "preemptionPolicy": "PreemptLowerPriority",
+          "description": f"perm harness: the filler that preempts one pod of {case_id}"}
+    rr = kubectl("apply", "-f", "-", input=json.dumps(pc))
+    if rr.returncode != 0:
+        f["infra_fail"] = f"preempt: creating PriorityClass {name} failed: {rr.stderr.strip()[:120]}"
+        return False, f["infra_fail"]
+    f["notes"].append(f"fault armed: PriorityClass {name} (value {highest + 1}, one above the case's pods)")
+    print(f"    ⚡ {f['notes'][-1]}")
+    return True, ""
+
+
+def _preempt_block_node(f, node):
+    """A filler that takes exactly the node's spare CPU and fits without
+    preempting anything (no priority class). Sized again when the room moved
+    between the read and the bind. (ok, message)."""
+    name = f"perm-{f['case_id']}-fill-{node}"
+    for _attempt in range(3):
+        free = _node_cpu_free(node)
+        if free is None:
+            return False, f"cannot read the spare CPU of {node}"
+        if free <= 0:
+            return True, f"{node} has no spare CPU to take"
+        ok, msg = _filler_create(f, name, node, free)
+        if not ok:
+            return False, msg
+        deadline = time.time() + LIFT_SETTLE_S
+        while time.time() < deadline:
+            if _pod_bound(name):
+                return True, f"filler {name} holds {free}m on {node}"
+            time.sleep(1.0)
+        kubectl("-n", NS, "delete", "pod", name, "--ignore-not-found=true", "--wait=true")
+        f["fillers"].remove(name)
+    return False, f"the filler on {node} never bound in 3 sizings"
+
+
+def _preempt_fill(f, target, node, pod_state):
+    """Take the spare CPU of every other eligible node, then press on the
+    target pod's node with a filler under the case's PriorityClass that needs
+    that node's spare CPU plus the target's: the scheduler has to preempt a
+    pod there (the latest-started one of equal priority — read back once it
+    is deleted), and nothing of the case can be placed anywhere until the
+    fillers are dropped."""
+    f["fired"] = True
+    f["pre_alive"] = {n: {"comp": q["comp"], "inst": q["inst"], "serving": bool(q.get("ready") and q.get("serving"))}
+                      for n, q in pod_state.items() if q and q["alive"]}
+    obj = _get_pod(target)
+    victim_cpu = _pod_requests(obj).get("cpu", 0) if obj else 0
+    if victim_cpu <= 0:
+        f["infra_fail"] = f"preempt: {target} requests no CPU, so no filler can need its room"
+        return
+    nodes = _eligible_nodes()
+    if node not in nodes:
+        f["infra_fail"] = (f"preempt: {target} sits on {node}, which is not a node a case pod can be placed on "
+                           f"({', '.join(nodes) or 'none'})")
+        return
+    f.update(aim_pod=target, aim_node=node, victim_cpu=victim_cpu, fire_ts=time.time(),
+             cause="the filler pods holding every node's spare CPU", not_victim=set(), preempted=[])
+    for other in nodes:
+        if other == node:
+            continue
+        ok, msg = _preempt_block_node(f, other)
+        if not ok:
+            f["infra_fail"] = f"preempt: {msg}"
+            return
+        f["notes"].append(f"fault armed: {msg}")
+    free = _node_cpu_free(node)
+    if free is None:
+        f["infra_fail"] = f"preempt: cannot read the spare CPU of {node}"
+        return
+    press = f"perm-{f['case_id']}-press"
+    need = max(free, 0) + victim_cpu
+    ok, msg = _filler_create(f, press, node, need, f["pc_name"])
+    if not ok:
+        f["infra_fail"] = f"preempt: {msg}"
+        return
+    f["press_pod"] = press
+    f["notes"].append(f"fault fired: filler {press} under {f['pc_name']} needs {need}m on {node} "
+                      f"({max(free, 0)}m spare + {victim_cpu}m of {target}); the scheduler must preempt one pod there")
+    print(f"    ⚡ {f['notes'][-1]}")
+
+
+def _fault_preempt_fire(f, pod_state, pods_per_inst, old_hashes):
+    """Aim the preemption at the node of the podkill victim. A victim not
+    bound yet leaves the fault due again after FAULT_RETRY_S."""
+    target = _fault_pick_pod(pod_state, pods_per_inst, old_hashes, victim=f.get("victim"),
+                             comp=f.get("victimcomp") or None)
+    if not target:
+        f["infra_fail"] = "preempt: no live pod to aim at"
+        return
+    node = (pod_state.get(target) or {}).get("node") or ""
+    if not node:
+        f["fired"] = False
+        f["retry_at"] = time.time() + FAULT_RETRY_S
+        return
+    _preempt_fill(f, target, node, pod_state)
+
+
+def _pod_preempted(name):
+    """True when the scheduler preempted this pod: the live pod carries the
+    DisruptionTarget condition from the scheduler, or (once it is gone) the
+    scheduler's Preempted event names it."""
+    obj = _get_pod(name)
+    if obj is not None:
+        for c in (obj.get("status") or {}).get("conditions") or []:
+            if c.get("type") == "DisruptionTarget" and c.get("reason") == "PreemptionByScheduler":
+                return True
+        if (obj.get("metadata") or {}).get("deletionTimestamp") is None:
+            return False
+    r = kubectl("-n", NS, "get", "events", "--field-selector",
+                f"involvedObject.kind=Pod,involvedObject.name={name},reason=Preempted", "-o", "json")
+    if r.returncode != 0:
+        return False
+    try:
+        return bool(json.loads(r.stdout).get("items"))
+    except Exception:
+        return False
+
+
+def _preempt_victim(f, pod_state):
+    """The case pods the scheduler preempted: alive at the fire, gone or
+    deleting now, confirmed by the scheduler's own record (a pod the roll
+    drained has none). The first one is the fault's victim."""
+    if not f.get("pre_alive"):
+        return f.get("crash_pod")
+    for name, was in sorted(f["pre_alive"].items()):
+        if name in f["preempted"] or name in f["not_victim"]:
+            continue
+        q = pod_state.get(name)
+        if q is not None and q["alive"]:
+            continue
+        if not _pod_preempted(name):
+            f["not_victim"].add(name)
+            continue
+        f["preempted"].append(name)
+        if not f.get("crash_pod"):
+            f.update(crash_pod=name, crash_comp=was["comp"], crash_inst=was["inst"], victim_comp=was["comp"],
+                     victim_was_serving=was["serving"])
+            f["notes"].append(f"fault bit: the scheduler preempted {name} ({was['comp']} instance {was['inst']}) "
+                              f"for the filler on {f.get('aim_node')}")
+            print(f"    ⚡ {f['notes'][-1]}")
+    return f.get("crash_pod")
+
+
+def _preempt_lift(f):
+    """Drop the fillers so the room is free again. Idempotent."""
+    if f.get("fillers_dropped") or not f.get("fillers"):
+        return True
+    r = kubectl("-n", NS, "delete", "pod", "-l", f"{FILLER_LABEL}={f['case_id']}", "--ignore-not-found=true", "--wait=false")
+    if r.returncode == 0:
+        f["fillers_dropped"] = True
+    return r.returncode == 0
+
+
+def _preempt_cleanup(f):
+    """Drop the fillers and the PriorityClass. Idempotent; runs at the end
+    of every case that armed one."""
+    _preempt_lift(f)
+    if f.get("pc_name") and not f.get("pc_deleted"):
+        r = kubectl("delete", "priorityclass", f["pc_name"], "--ignore-not-found=true")
+        if r.returncode == 0:
+            f["pc_deleted"] = True
+
+
+def _taint_capability():
+    """None when every node may be tainted here: a cluster this harness owns."""
+    reason = _node_fault_capability()
+    if reason:
+        return f"tainting every node needs a cluster this harness owns: {reason}"
+    return None
+
+
+def _fault_taint_arm(f, case_id):
+    """Put the NoSchedule taint on every node a case pod could be placed on.
+    The lift is registered before the first taint lands, so the cleanup and
+    the end-of-run sweep find every node however the case ends."""
+    nodes = _eligible_nodes()
+    if not nodes:
+        f["infra_fail"] = "taint: no Ready, schedulable node to taint"
+        return False, f["infra_fail"]
+    f.update(tainted=[], cause=f"the {TAINT_KEY} NoSchedule taint on every schedulable node ({', '.join(nodes)})")
+    _FAULT_CLEANUPS.append(("taint", f))   # registered BEFORE the first taint
+    for node in nodes:
+        r = kubectl("taint", "nodes", node, f"{TAINT_KEY}={case_id}:NoSchedule", "--overwrite")
+        if r.returncode != 0:
+            f["infra_fail"] = f"taint: tainting {node} failed: {(r.stderr or '').strip()[:120]}"
+            return False, f["infra_fail"]
+        f["tainted"].append(node)
+    f["fired"] = True
+    f["notes"].append(f"fault armed: {TAINT_KEY}=NoSchedule on {len(nodes)} node(s) ({', '.join(nodes)})")
+    print(f"    ⚡ {f['notes'][-1]}")
+    return True, ""
+
+
+def _taint_lift(f):
+    """Remove the taint from every node it was put on. Idempotent: a node
+    without the taint counts as done."""
+    for node in list(f.get("tainted") or []):
+        r = kubectl("taint", "nodes", node, f"{TAINT_KEY}:NoSchedule-")
+        if r.returncode == 0 or "not found" in (r.stderr or ""):
+            f["tainted"].remove(node)
+    return not f.get("tainted")
+
+
+def _preempt_record(case_id, hdr):
+    """The fault record a kill case keeps for via=preempt: a preempt fault
+    with no hook, since the kill drives it."""
+    f = _fault_new(case_id, dict(hdr, fault=f"preempt:{IDLE_FAULT_PHASE}"))
+    f["during"] = IDLE_FAULT_PHASE
+    return f
+
+
+def _ir_rows_by_index(case_id, comps):
+    """{(component, index): row} of the case's InferenceReplica rows for
+    these Components, read live; {} when they cannot be read."""
+    r = kubectl("-n", NS, "get", "inferencereplicas", "-l", f"ome.io/inferenceservice={case_id}", "-o", "json")
+    if r.returncode != 0:
+        return {}
+    try:
+        items = json.loads(r.stdout).get("items", []) or []
+    except Exception:
+        return {}
+    out = {}
+    for it in items:
+        comp = (it.get("spec") or {}).get("component")
+        if comp not in comps:
+            continue
+        for row in _instance_rows(it.get("status") or {}):
+            out[(comp, str(row.get("index")))] = row
+    return out
+
+
+def _pending_row(rows, tokens, inst=None):
+    """(component, index, token, recorded message) of the first row whose
+    operation waits on one of `tokens`, narrowed to one Instance index when
+    given; None when no row waits."""
+    for (comp, idx), row in sorted(rows.items()):
+        if inst is not None and idx != str(inst):
+            continue
+        op = row.get("operation") or {}
+        if op.get("waiting") in tokens:
+            return comp, idx, op["waiting"], str((row.get("lastFailure") or {}).get("message") or "")
+    return None
+
+
+def _pending_lift(f):
+    """Lift a pending cause; True when it is gone."""
+    if f["kind"] == "preempt":
+        return _preempt_lift(f)
+    if f["kind"] == "taint":
+        return _taint_lift(f)
+    if f["kind"] == "quota":
+        _lift_quota(f["case_id"])
+        return True
+    return False
+
+
+def _pending_watch(ctx, f, comps, lift, done, budget, inst=None):
+    """Watch an operation whose pod the cluster cannot place or admit: the
+    wait the product reports on the Instance row, any row that reads Failed
+    meanwhile, the lift once the wait has held LIFT_SETTLE_S (lift=after-settle)
+    and done() sustained after it, or the hold across IDLE_HOLD_S (lift=never).
+    done() before any wait, or after one with the cause still in place, means
+    the cause never bound. Returns (state, observations)."""
+    case_id, t0 = ctx["case_id"], ctx["trigger_ts"]
+    tokens = PENDING_TOKENS[f["kind"]]
+    out = {"bitten_at": None, "token": "", "row": None, "message": "", "failed": [], "lifted_at": None,
+           "done_at": None, "held_s": None, "waiting_at_end": False, "escaped_at": None, "unbound_at": None}
+    bitten_since, last_poll, stable, lifted_ts, state = None, 0.0, None, None, "WATCHING"
+    while time.time() - t0 < budget and not ctx["closed"]:
+        _read_one(ctx)
+        now = time.time()
+        if f["kind"] == "preempt" and f.get("fire_ts") and not f.get("crash_pod"):
+            _preempt_victim(f, ctx["pod_state"])
+        if now - last_poll >= ROW_POLL_S:
+            last_poll = now
+            rows = _ir_rows_by_index(case_id, comps)
+            hit = _pending_row(rows, tokens, inst)
+            for key, row in sorted(rows.items()):
+                if row.get("phase") == "Failed" and key not in out["failed"]:
+                    out["failed"].append(key)
+            if hit:
+                bitten_since = bitten_since or now
+                if out["bitten_at"] is None:
+                    out.update(bitten_at=now - t0, token=hit[2], row=(hit[0], hit[1]), message=hit[3])
+                    print(f"    wait: {hit[0]} Instance {hit[1]} reports {hit[2]} ({out['bitten_at']:.0f}s)"
+                          + (f": {hit[3][:120]}" if hit[3] else ""))
+            else:
+                bitten_since = None
+            out["waiting_at_end"] = bool(hit)
+        if lifted_ts is None:
+            if done():
+                if out["bitten_at"] is None:
+                    out["unbound_at"], state = now - t0, "UNBOUND"
+                else:
+                    out["escaped_at"], state = now - t0, "ESCAPED"
+                break
+            if lift == "after-settle" and bitten_since is not None and now - bitten_since >= LIFT_SETTLE_S:
+                print(f"  Phase 4: lift — {f.get('cause', 'the cause')} removed")
+                if not _pending_lift(f):
+                    f["infra_fail"] = f"{f['kind']}: {f.get('cause', 'the cause')} could not be lifted"
+                    state = "LIFT_FAILED"
+                    break
+                lifted_ts = time.time()
+                out["lifted_at"], state = lifted_ts - t0, "LIFTED"
+            elif lift == "never" and out["bitten_at"] is not None and now - (t0 + out["bitten_at"]) >= IDLE_HOLD_S:
+                out["held_s"], state = now - (t0 + out["bitten_at"]), "HELD"
+                break
+        elif done():
+            stable = stable or now
+            if now - stable >= STABILITY_S:
+                out["done_at"], state = stable - lifted_ts, "DONE"
+                ctx["converged_at"] = stable - t0
+                break
+        else:
+            stable = None
+    if state == "WATCHING":
+        state = "NO_WAIT" if out["bitten_at"] is None else "HOLD_TIMEOUT"
+    elif state == "LIFTED":
+        state = "NOT_DONE"
+    return state, out
+
+
+def _pending_checks(f, lift, state, out, ctx, comps, allowance, verdict, notes, checks):
+    """The pending verdict. The product must name the wait on the Instance
+    row; while the cause holds no row may read Failed and no Component may
+    drop below N minus its allowance (the budget's and the fault's own
+    Instance) — nothing is taken down to make room. Then lift=after-settle
+    needs the cause gone and the operation done; lift=never needs the wait
+    still reported at the end of the hold."""
+    kind, cause, tokens = f["kind"], f.get("cause") or "the cause", sorted(PENDING_TOKENS[f["kind"]])
+    if state == "UNBOUND":
+        f["infra_fail"] = (f"{kind}: the operation completed {out['unbound_at']:.0f}s in with {cause} in place "
+                           f"and no wait reported — the cause never bound")
+        return verdict
+    if out["bitten_at"] is None:
+        verdict = "FAIL"
+        notes.append(f"{kind}: no Instance reported a wait reason while {cause} held ({state})")
+        checks.append(f"  ✗ {kind}: no Instance of {', '.join(comps)} ever reported operation.waiting in {tokens} "
+                      f"while {cause} held ({state}) — every wait has a reason")
+        return verdict
+    comp, idx = out["row"]
+    checks.append(f"  ✓ {kind}: {comp} Instance {idx} waits with reason {out['token']} {out['bitten_at']:.0f}s after the trigger")
+    if out["message"]:
+        checks.append(f"  ⓘ {kind}: the recorded cause: {out['message'][:160]}")
+    if state == "ESCAPED":
+        f["infra_fail"] = (f"{kind}: the operation completed {out['escaped_at']:.0f}s in with {cause} still in place "
+                           f"— the cause did not hold")
+        return verdict
+    if out["failed"]:
+        rows = ", ".join(f"{c}/{i}" for c, i in out["failed"])
+        verdict = "FAIL"
+        notes.append(f"{kind}: Instance(s) {rows} read Failed while {cause} held")
+        checks.append(f"  ✗ {kind}: Instance(s) {rows} read Failed while {cause} held — a wait on the cluster is not "
+                      f"a failure inside the configured grace")
+    else:
+        checks.append(f"  ✓ {kind}: no Instance read Failed while {cause} held")
+    min_ready = ctx.get("min_ready") or {}
+    for c in comps:
+        n = ctx["N"].get(c, 0)
+        if not n:
+            continue
+        floor, mr = n - allowance.get(c, 0), min_ready.get(c, n)
+        if mr < floor:
+            verdict = "FAIL"
+            notes.append(f"{c} dropped to {mr} serving while the wait held (floor {floor})")
+            checks.append(f"  ✗ {kind}: {c} dropped to {mr} serving Instance(s) while {cause} held (floor {floor}) — "
+                          f"something was taken down to make room")
+        else:
+            checks.append(f"  ✓ {kind}: {c} kept {mr} serving Instance(s) while {cause} held (floor {floor})")
+    if lift == "after-settle":
+        if out["lifted_at"] is None:
+            f["infra_fail"] = f"{kind}: {cause} was never lifted ({state})"
+            return verdict
+        checks.append(f"  ✓ {kind}: {cause} lifted {out['lifted_at']:.0f}s after the trigger")
+        if state == "DONE":
+            checks.append(f"  ✓ {kind}: the operation completed {out['done_at']:.0f}s after the lift")
+        else:
+            verdict = "FAIL"
+            notes.append(f"{kind}: the operation did not complete after the lift ({state})")
+            checks.append(f"  ✗ {kind}: the operation did not complete within budget after the lift ({state})")
+        return verdict
+    if state == "HELD" and out["waiting_at_end"]:
+        checks.append(f"  ✓ {kind}: still waiting with reason {out['token']} after the {IDLE_HOLD_S}s hold with {cause} "
+                      f"in place; nothing was taken down to make room")
+    elif state == "HELD":
+        verdict = "FAIL"
+        notes.append(f"{kind}: the wait reason was dropped before the hold ended")
+        checks.append(f"  ✗ {kind}: the wait reason was dropped before the {IDLE_HOLD_S}s hold ended while {cause} still held")
+    else:
+        verdict = "FAIL"
+        notes.append(f"{kind}: the hold did not complete ({state})")
+        checks.append(f"  ✗ {kind}: the hold did not complete ({state})")
+    return verdict
+
+
+def _pending_roll(case_id, yaml_file, desc, hdr):
+    """A roll whose new pod the cluster cannot place or admit: the bump
+    lands, the pod waits with the product's own reason, nothing settled is
+    taken down to make room, and the roll completes once the cause is lifted
+    (lift=after-settle) or holds with the reason to the end (lift=never)."""
+    ctx, err = _setup_and_ready(case_id, yaml_file, hdr)
+    if err:
+        return _write_fail(case_id, desc, hdr, *err)
+    f, N, configured = ctx["fault"], ctx["N"], ctx["configured"]
+    bumped = _bumped(ctx)
+    controls = configured - bumped
+    lift = str(hdr.get("lift"))
+    ctx["track_comps"] = sorted(configured)
+    ceil = {"engine": hdr.get("ceil_e", N["engine"]), "decoder": hdr.get("ceil_d", N["decoder"]),
+            "router": hdr.get("ceil_r", N["router"])}
+    print(f"  Phase 2: bump {sorted(bumped)} under {f['kind']}:{f['param']} (lift={lift})")
+    if not _bump_rev(ctx, bumped):
+        return _finish(case_id, desc, hdr, ctx, "TRIGGER_FAIL", "FAIL",
+                       [f"trigger failed: {ctx.get('trigger_error')}"], [f"  ✗ trigger failed: {ctx.get('trigger_error')}"])
+    budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * sum(N[c] for c in bumped))
+
+    def done():
+        agg = ctx.get("agg") or {}
+        for c in configured:
+            alive, ready, updated = agg.get(c, (0, 0, 0))
+            if alive != N[c] or ready != N[c] or (c in bumped and updated != N[c]):
+                return False
+        return True
+
+    print(f"  Phase 3: watching the roll wait on the cause (≤{budget}s)")
+    state, out = _pending_watch(ctx, f, sorted(configured), lift, done, budget)
+    verdict, notes, checks = "PASS", [], []
+    for c in sorted(configured):
+        if ctx["peaks"][c] > ceil[c]:
+            verdict = "FAIL"
+            notes.append(f"{c} peak {ctx['peaks'][c]} > ceiling {ceil[c]}")
+            checks.append(f"  ✗ {c} peak {ctx['peaks'][c]} exceeded ceiling {ceil[c]} (surge budget violated)")
+        else:
+            checks.append(f"  ✓ {c} peak {ctx['peaks'][c]} ≤ ceiling {ceil[c]}")
+    allowance = {c: (resolve_max_unavailable(ctx["info"]["max_unavail"].get(c, 0), N[c]) if c in bumped else 0)
+                 for c in configured}
+    if f.get("crash_comp") in allowance and f.get("victim_was_serving"):
+        allowance[f["crash_comp"]] += 1   # the fault itself took a serving Instance down
+    verdict = _pending_checks(f, lift, state, out, ctx, sorted(configured), allowance, verdict, notes, checks)
+    if lift == "after-settle" and state == "DONE":
+        agg = ctx.get("agg") or {}
+        unrotated = [c for c in sorted(bumped) if agg.get(c, (0, 0, 0))[2] != N[c]]
+        if unrotated:
+            verdict = "FAIL"
+            notes.append("bumped members not fully rotated: " + " ".join(f"{c}={agg.get(c, (0, 0, 0))[2]}/{N[c]}" for c in unrotated))
+            checks.append("  ✗ bumped members NOT fully rotated: " + " ".join(f"{c}={agg.get(c, (0, 0, 0))[2]}/{N[c]}" for c in unrotated))
+        else:
+            checks.append("  ✓ all bumped members fully rotated to the new revision ("
+                          + " ".join(f"{c} {agg.get(c, (0, 0, 0))[2]}/{N[c]}" for c in sorted(bumped)) + ")")
+        for c in sorted(controls):
+            if ctx["peaks"][c] > N[c] or agg.get(c, (0, 0, 0))[2] > 0:
+                verdict = "FAIL"
+                notes.append(f"{c} (not bumped) changed: peak={ctx['peaks'][c]} updated={agg.get(c, (0, 0, 0))[2]}")
+                checks.append(f"  ✗ {c} is not a bumped member but it surged/rotated — isolation violated")
+            else:
+                checks.append(f"  ✓ {c} (not bumped) stayed put (peak={ctx['peaks'][c]}=N, 0 rotated) — isolation held")
+        verdict = gang_atomicity_checks(ctx, sorted(bumped), verdict, notes, checks)
+        verdict = index_collision_checks(ctx, sorted(bumped), verdict, notes, checks)
+        verdict = surge_before_drain_checks(ctx, sorted(bumped), verdict, notes, checks)
+    return _finish(case_id, desc, hdr, ctx, state, verdict, notes, checks)
+
+
 def write_result(case_id, desc, Ne, Nd, Nr, ce, cd, cr, peaks, final,
                  converged_at, policy, verdict, note, new_final):
     ts = int(time.time())
@@ -6478,6 +7204,9 @@ HDR_VALIDATORS = {
     "mig": lambda v: v in {"Auto", "Surge", "Never"},
     "restart": lambda v: v in {"None", "RecreateInstance"},
     "kill": lambda v: v in {"leader", "worker"},
+    # via= is how mode=kill removes the pod: kubectl delete (the default) or
+    # the Eviction API, the way a drain does.
+    "via": lambda v: v in KILL_VIAS,
     "pause": lambda v: v in {"true", "freeze"},
     # inst= names the Instance(s) a migrate case moves; last is the Instance a
     # roll has not reached when the request is filed at during=last.
@@ -6646,7 +7375,7 @@ HDR_VALIDATORS = {
     # lift=after-hold|never (rollout + fault=quota:<n>|cordon:all): lift the
     # squeeze once the roll has visibly waited on it, or keep it and judge
     # the wait.
-    "lift": lambda v: v == 1 or v in LIFT_PHASES or v in TIGHT_LIFTS,
+    "lift": lambda v: v == 1 or v in LIFT_PHASES or v in TIGHT_LIFTS or v in PENDING_LIFTS,
     # needs=<policy> (fault=node): the deployed force-delete policy the
     # outcome is read against; SKIP where the controller config differs.
     "needs": lambda v: v in NEEDS,
@@ -6824,11 +7553,40 @@ def validate_case_file(path):
                                                      str(fields.get("prearm", ""))):
         errs.append(f"{path}:1: timeout= is the value verb=timeout-set (or prearm=timeout-set) writes")
     hook_verbs = {str(fields.get(k, "")) for k in ("verb", "verb2")} - {""}
-    if "victim" in fields and not (str(fields.get("fault", "")).startswith("podkill:") or "podkill" in hook_verbs):
-        errs.append(f"{path}:1: victim= aims a podkill (needs fault=podkill:<hook> or verb=podkill)")
-    if "victimcomp" in fields and fault_kind != "podkill" and fault_kind not in BREAK_FAULTS and "podkill" not in hook_verbs and fault_kind != READINESS_FAULT:
-        errs.append(f"{path}:1: victimcomp= aims a podkill or a break at one Component "
-                    f"(needs fault=podkill:<phase>, verb=podkill or fault={'|'.join(sorted(BREAK_FAULTS))}:{CRASHLOOP_VICTIM})")
+    if "victim" in fields and not (str(fields.get("fault", "")).startswith(("podkill:", "evict:")) or "podkill" in hook_verbs):
+        errs.append(f"{path}:1: victim= aims a podkill or an eviction (needs fault=podkill:<hook>, fault=evict:<hook> or verb=podkill)")
+    if "victimcomp" in fields and fault_kind not in ("podkill", "evict") and fault_kind not in BREAK_FAULTS and "podkill" not in hook_verbs and fault_kind != READINESS_FAULT:
+        errs.append(f"{path}:1: victimcomp= aims a podkill, an eviction or a break at one Component "
+                    f"(needs fault=podkill:<phase>, fault=evict:<phase>, verb=podkill or fault={'|'.join(sorted(BREAK_FAULTS))}:{CRASHLOOP_VICTIM})")
+    via = str(fields.get("via", ""))
+    if via and mode != "kill":
+        errs.append(f"{path}:1: via={via} says how mode=kill removes the pod (mode=kill)")
+    if fault_kind == "evict" and mode != "rollout":
+        errs.append(f"{path}:1: fault=evict:<phase> evicts the podkill victim of a rollout case (mode=rollout); "
+                    f"a kill case evicts through via=evict")
+    lift = fields.get("lift")
+    pending = (fault_kind in PENDING_FAULTS and mode in ("rollout", "kill") and during != IDLE_FAULT_PHASE
+               and (fault_kind != "quota" or mode == "kill" or lift in PENDING_LIFTS) and not _tight_cell(fields))
+    if via == "preempt":
+        if "kill" in fields:
+            errs.append(f"{path}:1: via=preempt leaves the victim to the scheduler — kill= does not apply")
+        if lift not in PENDING_LIFTS:
+            errs.append(f"{path}:1: via=preempt needs lift={'|'.join(sorted(PENDING_LIFTS))} (when the filler pods are dropped)")
+        if "fault" in fields:
+            errs.append(f"{path}:1: via=preempt is the kill's own cause; fault= does not combine with it")
+    if fault_kind == "preempt" and mode != "rollout":
+        errs.append(f"{path}:1: fault=preempt:<phase> preempts the podkill victim of a rollout case (mode=rollout); "
+                    f"a kill case preempts through via=preempt")
+    if pending and lift not in PENDING_LIFTS:
+        errs.append(f"{path}:1: fault={fields.get('fault')} holds a pod the cluster cannot place or admit and needs "
+                    f"lift={'|'.join(sorted(PENDING_LIFTS))} (when the cause is removed)")
+    if lift in PENDING_LIFTS and fault_kind not in LIFT_FAULTS and not (pending or via == "preempt") and not _tight_cell(fields):
+        errs.append(f"{path}:1: lift={lift} is when a pending cause is removed (fault={'|'.join(sorted(PENDING_FAULTS))} "
+                    f"on a rollout or kill case, or via=preempt)")
+    if (pending or via == "preempt") and fields.get("blocked"):
+        errs.append(f"{path}:1: lift= and blocked=1 both describe a held roll; use one")
+    if (pending or via == "preempt") and "pause" in fields:
+        errs.append(f"{path}:1: pause= is not combined with a pending cause in mode=kill")
     if fault_kind in BREAK_FAULTS | {READINESS_FAULT} and "victimcomp" in fields and str(fields["victimcomp"]) not in BREAK_VICTIM_COMPS:
         errs.append(f"{path}:1: victimcomp={fields['victimcomp']}: a break victim is a pod of "
                     f"{' or '.join(sorted(BREAK_VICTIM_COMPS))} (the Components a roll targets)")
@@ -7027,16 +7785,15 @@ def validate_case_file(path):
             errs.append(f"{path}:1: expect=reject with mode=pairing asserts the protocol PATCH is denied — no rotation-phase knobs apply")
     if fields.get("expect") == "fail" and (mode != "migrate" or "fault" not in fields):
         errs.append(f"{path}:1: expect=fail is the migrate-mode bounded-failure contract — needs mode=migrate + fault=")
-    lift = fields.get("lift")
     if lift == 1 and not (mode == "migrate" and str(fields.get("fault", "")).startswith("quota:")):
         errs.append(f"{path}:1: lift=1 requires mode=migrate + fault=quota:<n>")
-    if lift in TIGHT_LIFTS:
+    if lift in TIGHT_LIFTS and not (pending or via == "preempt"):
         if mode != "rollout" or fault_kind not in TIGHT_FAULTS or during:
             errs.append(f"{path}:1: lift={lift} lifts a capacity squeeze on a rollout (needs mode=rollout and "
                         f"fault=quota:<n> or fault=cordon:all, no during=)")
         if fields.get("blocked"):
             errs.append(f"{path}:1: lift={lift} judges the wait itself; blocked=1 does not combine with it")
-    if lift in LIFT_PHASES and fault_kind not in LIFT_FAULTS:
+    if lift in LIFT_PHASES and fault_kind not in LIFT_FAULTS and not (pending or via == "preempt"):
         errs.append(f"{path}:1: lift={lift} lifts a persistent fault's cause "
                     f"(needs fault=configkey:{CONFIGKEY_PARAM} or fault=node:{NODE_PARAM})")
     if fault_kind in LIFT_FAULTS:
@@ -9914,6 +10671,30 @@ def _isvc_pause_value(case_id):
     return (r.stdout or "").strip() if r.returncode == 0 else ""
 
 
+def _kill_remove(name, via):
+    """Remove a pod the way via= says. ("ok", note) when it is gone or going;
+    ("denied", why) when the Eviction API kept refusing through LIFT_SETTLE_S
+    with every Instance serving, which is the product's budget refusing a
+    drain; ("error", why) for an apparatus failure."""
+    if via != "evict":
+        r = kubectl("-n", NS, "delete", "pod", name, "--wait=false")
+        if r.returncode != 0:
+            return "error", f"delete {name} failed: {(r.stderr or '').strip()[:160]}"
+        return "ok", ""
+    deadline, denials = time.time() + LIFT_SETTLE_S, 0
+    while True:
+        admitted, denied, msg = _evict_pod(name)
+        if admitted:
+            return "ok", (f"eviction of {name} admitted after {denials} budget refusal(s)" if denials else "")
+        if not denied:
+            return "error", f"evict: evicting {name} failed: {msg}"
+        denials += 1
+        if time.time() >= deadline:
+            return "denied", (f"evict: the disruption budget refused the eviction of {name} {denials} time(s) "
+                              f"across {LIFT_SETTLE_S}s with every Instance serving: {msg}")
+        time.sleep(FAULT_RETRY_S)
+
+
 def _kill(case_id, yaml_file, desc, hdr):
     """Delete a live pod and assert the RestartPolicy outcome by which pods get
     new UIDs (recreated):
@@ -9926,7 +10707,23 @@ def _kill(case_id, yaml_file, desc, hdr):
                       suspends fleet changes, not the RestartPolicy); policy
                       None must hold degraded until the annotation is removed.
       pause=freeze -> no repair while frozen; downgrading the annotation to
-                      "true" must repair without ever unpausing."""
+                      "true" must repair without ever unpausing.
+
+    `via=evict` removes the pod through the Eviction API instead (a drain),
+    so the product's disruption budget may refuse it; the refusal is retried
+    through LIFT_SETTLE_S and a budget that never admits one eviction of a
+    fully serving fleet fails the case. `via=preempt` leaves the removal to
+    the scheduler (fillers on every node, a higher-priority filler pressing
+    on the aimed pod's node), and a pending cause (`fault=` with `lift=`)
+    holds the repair's new pod: both read the wait the product reports and
+    its lift through _pending_watch before the repair is judged."""
+    via = str(hdr.get("via") or "delete")
+    fault_kind = str(hdr.get("fault", "")).partition(":")[0]
+    for kind in dict.fromkeys((via, fault_kind)):
+        reason = _fault_capability(kind)
+        if reason:
+            print(f"  ⓘ {kind} unavailable here: {reason}")
+            return _write_fail(case_id, desc, hdr, "SKIP", f"{kind} unavailable here: {reason}")
     ctx, err = _setup_and_ready(case_id, yaml_file, hdr)
     if err:
         return _write_fail(case_id, desc, hdr, *err)
@@ -9934,6 +10731,13 @@ def _kill(case_id, yaml_file, desc, hdr):
     ppi = ctx["pods_per_inst"]
     policy = hdr.get("restart", "RecreateInstance")
     pmode = str(hdr.get("pause", ""))  # "" | true | freeze
+    lift = str(hdr.get("lift") or "")
+    pending = ctx["fault"] if (ctx["fault"] and ctx["fault"]["kind"] in PENDING_FAULTS and lift in PENDING_LIFTS) else None
+    if via == "preempt":
+        pending = ctx["fault"] = _preempt_record(case_id, hdr)
+        ok_f, fmsg = _fault_preempt_arm(pending, case_id)
+        if not ok_f:
+            return _finish(case_id, desc, hdr, ctx, "INFRA-FAIL", "INFRA-FAIL", [], [])
     kcomp = "engine" if "engine" in configured else sorted(configured)[0]
     ktgt = str(hdr.get("kill", ""))   # leader | worker | ""
     if pmode:
@@ -9948,9 +10752,31 @@ def _kill(case_id, yaml_file, desc, hdr):
     kill_name, kill_pod = cands[0]
     killed_inst = kill_pod["inst"]
     pre_uids = {p["uid"] for p in ctx["pod_state"].values() if p and p["alive"] and p.get("uid")}
-    print(f"  Phase 2: delete pod {kill_name} (comp={kcomp} inst={killed_inst} runner={kill_pod['runner']}) restartPolicy={policy} pause={pmode or 'off'}")
-    kubectl("-n", NS, "delete", "pod", kill_name, "--wait=false")
-    ctx["trigger_ts"] = time.time()
+    remove_note = ""
+    if via == "preempt":
+        print(f"  Phase 2: fill every node, then press on {kill_pod.get('node') or '?'} so the scheduler preempts one pod "
+              f"there (aimed at {kill_name}, comp={kcomp} inst={killed_inst}) restartPolicy={policy}")
+        _preempt_fill(pending, kill_name, kill_pod.get("node") or "", ctx["pod_state"])
+        ctx["trigger_ts"] = time.time()
+        if not pending["infra_fail"]:
+            deadline = time.time() + PREEMPT_WAIT_S
+            while time.time() < deadline and not ctx["closed"] and not _preempt_victim(pending, ctx["pod_state"]):
+                _read_one(ctx)
+            if not pending.get("crash_pod"):
+                pending["infra_fail"] = (f"preempt: the scheduler preempted no pod of the case within {PREEMPT_WAIT_S}s "
+                                         f"(filler {pending.get('press_pod')} bound to {_pod_bound(pending.get('press_pod', '')) or 'nothing'})")
+        if pending["infra_fail"]:
+            return _finish(case_id, desc, hdr, ctx, "INFRA-FAIL", "INFRA-FAIL", [], [])
+        kill_name, kcomp, killed_inst = pending["crash_pod"], pending["crash_comp"], pending["crash_inst"]
+    else:
+        print(f"  Phase 2: {via} pod {kill_name} (comp={kcomp} inst={killed_inst} runner={kill_pod['runner']}) restartPolicy={policy} pause={pmode or 'off'}")
+        removed, remove_note = _kill_remove(kill_name, via)
+        if removed == "error":
+            return _finish(case_id, desc, hdr, ctx, "INFRA-FAIL", "INFRA-FAIL", [f"INFRA-FAIL: {remove_note}"],
+                           [f"  ✗ INFRA-FAIL (fault apparatus): {remove_note}"])
+        if removed == "denied":
+            return _finish(case_id, desc, hdr, ctx, "EVICT_DENIED", "FAIL", [remove_note], [f"  ✗ {remove_note}"])
+        ctx["trigger_ts"] = time.time()
     budget = min(MAX_BUDGET_S, ROTATE_BASE_S + ROTATE_PER_POD_S * sum(N[c] * ppi[c] for c in configured))
     exp = {"None": 1, "RecreateInstance": ppi[kcomp]}.get(policy, 1)
 
@@ -9959,6 +10785,8 @@ def _kill(case_id, yaml_file, desc, hdr):
                 if p and p["alive"] and p.get("uid") and p["uid"] not in pre_uids]
 
     verdict, notes, checks = "PASS", [], []
+    if remove_note:
+        checks.append(f"  ⓘ {remove_note}")
 
     # A pause that must hold: freeze holds every policy; plain pause holds
     # policy None (its recovery path is the Create pass, which pause parks).
@@ -9985,9 +10813,30 @@ def _kill(case_id, yaml_file, desc, hdr):
         _pause_annotation(case_id, lift)
         ctx["trigger_ts"] = time.time()
 
-    print(f"  Phase 3: watching recovery (≤{budget}s)")
     state, stable, dipped = "RECOVERING", None, False
-    while time.time() - ctx["trigger_ts"] < budget and not ctx["closed"]:
+    if pending:
+        ctx["track_comps"] = sorted(configured)
+
+        def recovered():
+            agg = ctx.get("agg") or {}
+            return (all(agg.get(c, (0, 0, 0))[1] == N[c] for c in configured)
+                    and len(recreated_now()) >= exp)
+
+        print(f"  Phase 3: watching the repair of {kcomp} Instance {killed_inst} wait on {pending.get('cause', pending['kind'])} "
+              f"(lift={lift}, ≤{budget}s)")
+        pstate, pout = _pending_watch(ctx, pending, [kcomp], lift, recovered, budget, inst=killed_inst)
+        allowance = {c: (1 if c == kcomp else 0) for c in configured}   # the killed Instance itself
+        verdict = _pending_checks(pending, lift, pstate, pout, ctx, sorted(configured), allowance, verdict, notes, checks)
+        verdict = _idle_peak_checks(ctx, verdict, notes, checks)
+        if len(pending.get("preempted") or []) > 1:
+            pending["infra_fail"] = (f"preempt: the scheduler preempted {len(pending['preempted'])} pods "
+                                     f"({', '.join(pending['preempted'])}); the filler was sized for one")
+        if lift == "never" or pstate != "DONE":
+            return _finish(case_id, desc, hdr, ctx, pstate, verdict, notes, checks)
+        state = "RECOVERED"   # the repair landed inside the pending watch; the kill checks below read it
+    else:
+        print(f"  Phase 3: watching recovery (≤{budget}s)")
+    while state == "RECOVERING" and time.time() - ctx["trigger_ts"] < budget and not ctx["closed"]:
         agg = _read_one(ctx)
         if any(agg.get(c, (0, 0, 0))[1] < N[c] for c in configured):
             dipped = True
@@ -12448,12 +13297,19 @@ def run_case(case_id):
         if hdr.get("pauseat"):
             return _pause_repair(case_id, yaml_file, desc, hdr)
         return _idle_fault(case_id, yaml_file, desc, hdr)
+    fault_kind = str(hdr.get("fault", "")).partition(":")[0]
+    reason = _fault_capability(fault_kind)
+    if reason:
+        print(f"  ⓘ {fault_kind} fault unavailable here: {reason}")
+        return _write_fail(case_id, desc, hdr, "SKIP", f"{fault_kind} fault unavailable here: {reason}")
     if str(hdr.get("fault", "")) == f"crashloop:{CRASHLOOP_NEW}":
         return _crashloop_new(case_id, yaml_file, desc, hdr)
     if str(hdr.get("fault", "")) == f"{READINESS_FAULT}:new":
         return _readiness_new_roll(case_id, yaml_file, desc, hdr)
-    if str(hdr.get("lift", "")) in TIGHT_LIFTS:
+    if _tight_cell(hdr):
         return _tight_roll(case_id, yaml_file, desc, hdr)
+    if fault_kind in PENDING_FAULTS and str(hdr.get("lift")) in PENDING_LIFTS:
+        return _pending_roll(case_id, yaml_file, desc, hdr)
     Ne, Nd, Nr = hdr.get("Ne", 0), hdr.get("Nd", 0), hdr.get("Nr", 0)
     ce, cd, cr = hdr.get("ceil_e", Ne), hdr.get("ceil_d", Nd), hdr.get("ceil_r", Nr)
     N = {"engine": Ne, "decoder": Nd, "router": Nr}

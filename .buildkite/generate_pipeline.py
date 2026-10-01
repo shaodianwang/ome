@@ -336,6 +336,9 @@ EVAL_SOFT_FEATURES: list[dict[str, str]] = [
         "gen-readiness",
         "gen-gang-member",
         "gen-tight",
+        "gen-evict",
+        "gen-preempt",
+        "gen-pending",
     )
 ]
 

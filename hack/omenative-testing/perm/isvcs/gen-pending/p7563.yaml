@@ -1,0 +1,15 @@
+# p7563: [gen] pending taint roll engine-mn W1 N=2 SurgeThenDrain s1 rp RecreateInstance lift never  Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 fault=taint:all co=none topo=engine-mn lift=never
+# reason: a NoSchedule taint on every schedulable node is in place when the bump lands under SurgeThenDrain; the surge cannot be placed, so the roll waits with reason Unschedulable inside its unschedulable grace, the capacity floor (N minus maxUnavailable) holds and nothing settled is taken down to make room; the cause stays to the end, so the roll holds with its reason across the hold window and no Instance reads Failed
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p7563 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

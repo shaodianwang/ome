@@ -1,0 +1,13 @@
+# p7449: [gen] preempt steady engine N=4 rp RecreateInstance lift never  mode=kill Ne=4 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 restart=RecreateInstance co=none topo=engine via=preempt lift=never
+# reason: fillers take the spare CPU of every node and a higher-priority filler presses on the node of the aimed pod, so the scheduler preempts one pod of the case there; the Instance (one pod) is recreated under restart policy RecreateInstanceOnPodRestart and its new pod waits with reason Unschedulable while every other Instance keeps serving and nothing is taken down to make room; the fillers stay to the end, so the wait holds with its reason across the hold window and no Instance reads Failed
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p7449 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

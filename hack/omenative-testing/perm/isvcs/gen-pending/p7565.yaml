@@ -1,0 +1,15 @@
+# p7565: [gen] pending quota steady engine-mn W1 N=2 rp RecreateInstance lift after-settle  mode=kill Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 restart=RecreateInstance kill=leader fault=quota:-1 co=none topo=engine-mn lift=after-settle
+# reason: a quota one pod short of the rebuilt gang (all members but one admitted, the gang cannot form) is in place when one engine pod is deleted; the rebuilt gang cannot be admitted, so the Instance waits with reason QuotaExceeded inside its unschedulable grace, nothing is taken down to make room, every other Instance keeps serving and no row reads Failed; once the cause is lifted the repair completes: the whole Instance (leader and workers) is rebuilt and the fleet is back at N serving
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p7565 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

@@ -362,10 +362,21 @@ def write_junit(path, results, elapsed):
     ET.ElementTree(suite).write(out, encoding="utf-8", xml_declaration=True)
 
 
+def cluster_wide_fault(fields):
+    """True when a case's apparatus reaches past its own pods, so it runs
+    serially after the concurrent pool: a namespace-wide quota, a cordoned or
+    dead node, the manager restarted, every node tainted, or every node's
+    spare CPU taken by fillers (a preemption, as a fault or as the kill)."""
+    fault = str(fields.get("fault", "")).split(":", 1)[0]
+    return fault in ("quota", "cordon", "ctrlrestart", "node", "taint", "preempt") or fields.get("via") == "preempt"
+
+
 def sweep_fault_artifacts():
     """Remove only resources marked as harness-owned fault apparatus."""
     subprocess.run(["kubectl", "-n", NS, "delete", "resourcequota",
                     "-l", "perm.test/fault", "--ignore-not-found"], env=ENV)
+    sweep_preempt_apparatus()
+    sweep_pending_taints()
     r = subprocess.run(["kubectl", "get", "nodes", "-l", "perm.test/cordoned", "-o", "json"],
                        env=ENV, capture_output=True, text=True)
     if r.returncode != 0:
@@ -383,6 +394,31 @@ def sweep_fault_artifacts():
             subprocess.run(["kubectl", "uncordon", node], env=ENV)
         subprocess.run(["kubectl", "label", "node", node, "perm.test/cordoned-"], env=ENV)
     sweep_stopped_kubelets()
+
+
+def sweep_preempt_apparatus():
+    """Delete the filler pods and PriorityClasses a preempt case left behind
+    (a case that died before its cleanup); both carry harness labels."""
+    subprocess.run(["kubectl", "-n", NS, "delete", "pod", "-l", "perm.test/filler", "--ignore-not-found",
+                    "--wait=false"], env=ENV)
+    subprocess.run(["kubectl", "delete", "priorityclass", "-l", "perm.test/fault", "--ignore-not-found"], env=ENV)
+
+
+def sweep_pending_taints():
+    """Remove the harness NoSchedule taint from every node still carrying it."""
+    r = subprocess.run(["kubectl", "get", "nodes", "-o", "json"], env=ENV, capture_output=True, text=True)
+    if r.returncode != 0:
+        return
+    try:
+        items = json.loads(r.stdout).get("items", [])
+    except Exception:
+        items = []
+    for item in items:
+        node = (item.get("metadata") or {}).get("name", "")
+        taints = (item.get("spec") or {}).get("taints") or []
+        if node and any(t.get("key") == "perm.test/pending" for t in taints):
+            print(f"=== sweeping leftover harness taint: untaint {node} ===")
+            subprocess.run(["kubectl", "taint", "nodes", node, "perm.test/pending:NoSchedule-"], env=ENV)
 
 
 def sweep_stopped_kubelets(docker=None):
@@ -442,9 +478,7 @@ def main():
             return 0
 
     def needs_exclusive_run(case_id):
-        fault = str(case_header_fields(case_id).get("fault", "")).split(":", 1)[0]
-        # A dead node takes every pod on it with the victim: no neighbours.
-        if fault in ("quota", "cordon", "ctrlrestart", "node"):
+        if cluster_wide_fault(case_header_fields(case_id)):
             return True
         if pod_budget is None:
             return False

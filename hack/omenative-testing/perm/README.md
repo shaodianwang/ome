@@ -98,7 +98,7 @@ perm/
 │   │   gen-heal/ gen-imagepull/ gen-node/ gen-ctrlrestart/ gen-rollback/ gen-crashloop-new/ gen-crashloop-group/ gen-pause-repair/ gen-ops-held/ gen-runtime-edit-repair/ gen-migrate-bump/  — generated hot core (see isvcs/MANIFEST.md)
 │   ├── gen-canary-crash/ gen-canary-second-rev/ gen-canary-podkill/ gen-canary-fault-old/ gen-canary-fault-new/  — generated operator stories driven through a canary
 │   ├── gen-size/ gen-router-gang/  — generated small fleets (one and two Instances per Component) and the engine gang behind a router
-│   └── gen-readiness/ gen-gang-member/ gen-tight/  — generated fault families (see isvcs/MANIFEST.md)
+│   └── gen-readiness/ gen-gang-member/ gen-tight/ gen-evict/ gen-preempt/ gen-pending/  — generated fault families (see isvcs/MANIFEST.md)
 └── results/
     └── <RUN_TS>/<feature>/<topo>/
         ├── pNN-<ts>.tsv   — one verdict row per case
@@ -1305,7 +1305,78 @@ provokes it, and that belongs to the node-loss family.
   live: a repair of an Instance that serves nothing is admitted without the
   budget or the gate.
 
-- **`fault=quota` cases run serially.** A quota case creates a *namespace-wide*
+- **`via=evict` (mode=kill) and `fault=evict:<phase>` (rollout mode)**
+  remove the pod through the Eviction API, the way a node drain does,
+  instead of `kubectl delete`. The product keeps a PodDisruptionBudget on
+  OMENative pods (`podDisruptionBudget.omeNative` in the chart, one
+  disruption at a time), so the API may refuse an eviction while a pod is
+  already down: the runner asks again every `FAULT_RETRY_S` seconds as a
+  drain would, reports the refusals, and reds a case whose eviction is
+  never admitted (at steady state a budget that refuses one eviction of a
+  fully serving fleet through `LIFT_SETTLE_S` is `FAIL`; the apparatus is
+  checked first, so an apiserver without `policy/v1` records `SKIP`). In
+  kill mode the verdict is the usual restart-policy one: exactly the
+  evicted pod (policy `None`) or the whole Instance
+  (`RecreateInstanceOnPodRestart`) is rebuilt, nothing else moves, the
+  fleet is back at N; in rollout mode the victim is the podkill rule's
+  (`victim=`, `victimcomp=` apply) and the roll must still converge with
+  every Instance on the new revision. The generated `isvcs/gen-evict/`
+  family crosses both moments with topology, restart policy and (under the
+  roll) strategy.
+
+- **`via=preempt` (mode=kill) and `fault=preempt:<phase>` (rollout mode),
+  with `lift=after-settle|never`** have the scheduler remove the pod: a
+  PriorityClass one notch above the case's pods is created, fillers take
+  the spare CPU of every node a case pod could be placed on (Ready,
+  uncordoned, untainted), and one filler under that class, pinned to the
+  node of the aimed pod (the kill target, or the podkill rule's victim at
+  the hook), asks for that node's spare CPU plus the aimed pod's own — so
+  the scheduler must preempt one pod there (the latest-started pod of equal
+  priority; the runner reads the victim back off the scheduler's
+  `DisruptionTarget` condition or its `Preempted` event, never off a drain).
+  Nothing of the case can be placed anywhere until the fillers are dropped:
+  the Instance waits with the product's own reason (`operation.waiting`
+  `Unschedulable` on its InferenceReplica row), and `lift=after-settle`
+  drops the fillers once that wait has held `LIFT_SETTLE_S`, after which
+  the repair (or the roll) must complete; `lift=never` keeps them to the
+  end and judges the hold instead (below). The verb needs a cluster this
+  harness owns, since it blocks every node (the same check as
+  `node:notready`), and the PriorityClass API; elsewhere the case is `SKIP`
+  with the reason. Fillers carry `perm.test/filler=<case>` and the class
+  `perm.test/fault=<case>`; both go at the end of the case and in
+  `batch.py`'s sweep. `isvcs/gen-preempt/` crosses both moments with
+  topology, restart policy, lift and (under the roll) strategy.
+
+- **`fault=taint:all` and `fault=quota:<n>` with `lift=after-settle|never`**
+  (mode=kill, or rollout mode without `during=idle`) are the pending
+  causes: a new pod cannot be placed (a `perm.test/pending` NoSchedule
+  taint on every schedulable node; running pods are untouched) or admitted
+  (a ResourceQuota short of the pod; `n<0` admits `n` fewer pods than run,
+  so the pod a repair or a drain-first roll creates after one is gone is
+  refused, and on a gang that leaves room for all but one member, so the
+  gang cannot form). Both are armed before the kill or the bump. The case
+  then reads the wait the product reports — `operation.waiting`
+  `Unschedulable` from the scheduler, `QuotaExceeded` from admission (a
+  quota short of one gang member may also surface as `Unschedulable` once
+  the admitted members cannot bind without the last one) — and asserts that
+  while the cause holds no Instance reads `Failed` (the configured
+  `unschedulableGracePeriod` is longer than any hold here) and no Component
+  drops below N minus its allowance (the kill's own Instance, or the roll's
+  `maxUnavailable` plus a settled pod the fault itself took): nothing is
+  taken down to make room. `lift=after-settle` removes the cause once the
+  wait has held `LIFT_SETTLE_S` and then requires the repair to land
+  (exact restart-policy scope, fleet at N) or the roll to converge with
+  every Instance on the new revision; `lift=never` holds `IDLE_HOLD_S`
+  after the wait appeared and requires the wait still reported at the end.
+  An operation that completes with the cause in place and no wait reported
+  is `INFRA-FAIL` (the cause never bound), never a pass. The taint needs a
+  cluster this harness owns (`SKIP` elsewhere); the quota runs anywhere.
+  `isvcs/gen-pending/` crosses both causes with both moments, topology,
+  restart policy, lift and (under the roll) strategy, with the quota sized
+  per cell as above.
+
+- **`fault=quota`, `fault=taint`, `fault=preempt` and `via=preempt` cases
+  run serially.** A quota case creates a *namespace-wide*
   ResourceQuota sized from a live usage snapshot, so run concurrently it both
   blocks other cases' pod admissions and mis-sizes its own headroom.
   `batch.py` partitions automatically: all other cases keep the concurrent
@@ -1323,6 +1394,9 @@ provokes it, and that belongs to the node-loss family.
   ```bash
   kubectl -n $OME_TEST_NS delete resourcequota -l perm.test/fault --ignore-not-found
   kubectl get nodes -l perm.test/cordoned -o name | xargs -r -n1 kubectl uncordon
+  kubectl -n $OME_TEST_NS delete pod -l perm.test/filler --ignore-not-found
+  kubectl delete priorityclass -l perm.test/fault --ignore-not-found
+  kubectl get nodes -o name | xargs -r -n1 kubectl taint nodes perm.test/pending:NoSchedule- 2>/dev/null
   ```
 
 ## Verdicts
@@ -1431,7 +1505,7 @@ Four generators write into `isvcs/`; re-run one after editing it:
   `gen_cases.py`'s feature counters).
 - `gen_runtime.py` — the runtime-triggered cases (`p400`+) → `isvcs/runtime-rev/`.
 - `generate_cases.py` — the hot-core permutation corpus (`p1000`–`p2799`,
-  `p3000`–`p4999`, `p5000`–`p5799`, `p5800`–`p5999` `p6000`–`p6199`, `p6200`–`p6399` and `p6800`–`p6999`) → `isvcs/gen-rollout/`, `isvcs/gen-fault/`,
+  `p3000`–`p4999`, `p5000`–`p5799`, `p5800`–`p5999` `p6000`–`p6199`, `p6200`–`p6399`, `p6800`–`p6999` and `p7400`–`p7599`) → `isvcs/gen-rollout/`, `isvcs/gen-fault/`,
   `isvcs/gen-restart/`, `isvcs/gen-crashloop/`, `isvcs/gen-switch/`,
   `isvcs/gen-crashloop-idle/`, `isvcs/gen-crashloop-sibling/`,
   `isvcs/gen-heal/`, `isvcs/gen-imagepull/`, `isvcs/gen-node/`,
@@ -1449,8 +1523,8 @@ Four generators write into `isvcs/`; re-run one after editing it:
   soak, or cannot be pulled; the ladder parks where it bites and a rollback or
   a fix push lands), the small fleets and the engine gang behind a router
   (`p8000`–`p8199`) → `isvcs/gen-size/` and `isvcs/gen-router-gang/`, the fault
-  families (`p7000`–`p7399`) → `isvcs/gen-readiness/`, `isvcs/gen-gang-member/`
-  and `isvcs/gen-tight/`, plus
+  families (`p7000`–`p7399`) → `isvcs/gen-readiness/`, `isvcs/gen-gang-member/`,
+  `isvcs/gen-tight/`, `isvcs/gen-evict/`, `isvcs/gen-preempt/` and `isvcs/gen-pending/`, plus
   `isvcs/MANIFEST.md` (per-dimension counts, the
   constraint ledger with every omitted cell and its reason, missing-hook
   catalog). The story families are canary lanes in CI: the pipeline gives
