@@ -16,7 +16,10 @@ or fatal-rate alert on a serving model belongs to the human oncall's
 say so, then answer the workload question from here. A
 question that spans clusters, names a cluster `clusters` does not list, or
 asks about incidents, nodes or capacity also needs `ome-fleet`: the registry
-is a subset of the fleet, and the reply must say which clusters it covers.
+is a subset of the fleet, and the reply must say which clusters it covers. A
+number over time, a rate or a latency (requests, error codes, time to first
+token) is not in any bridge verb: `ome-sources` names the dataset that has
+it, and model startup time is `ome-fleet` section 4.
 
 ## 1. Locate the object
 

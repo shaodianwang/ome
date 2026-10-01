@@ -235,7 +235,11 @@ class PlaybooksTest(BridgeTestCase):
 
     def files(self, **extra: str) -> dict[str, str]:
         files = {f"skills/{s}/SKILL.md": f"# {s}\n" for s in ome_bridge.PLAYBOOKS}
-        files["skills/ome-answer/SKILL.md"] = "# ome-answer\nread `ome-docs/references/ome-primer.md` first\n"
+        files["skills/ome-answer/SKILL.md"] = (
+            "# ome-answer\nread `ome-docs/references/ome-primer.md` first\n"
+            "and `ome-other/references/elsewhere.md` is another skill's file, read it through the docs tool\n"
+        )
+        files["skills/ome-other/references/elsewhere.md"] = "not a playbook file\n"
         # A docs-tool path into another skill's tree is read by the model, not fetched.
         files["skills/ome-oncall/SKILL.md"] = "# ome-oncall\n$B tool docs read skills/ci-triage/references/classification.md\n"
         files["skills/ome-docs/SKILL.md"] = "# ome-docs\nthen `references/ome-primer.md` in this skill\n"
@@ -255,9 +259,14 @@ class PlaybooksTest(BridgeTestCase):
             self.assertEqual(written.count("ome-docs/references/ome-primer.md"), 1)
             self.assertEqual((Path(tmp) / "ome-docs/references/ome-primer.md").read_text(), self.PRIMER)
             self.assertEqual((Path(tmp) / "ome-answer/SKILL.md").read_text().splitlines()[0], "# ome-answer")
-            self.assertFalse(any("classification" in w for w in written))
+            self.assertFalse(any("classification" in w or "elsewhere" in w for w in written))
+            # Nothing of the staging survives: only the skill directories remain.
+            self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), sorted(ome_bridge.PLAYBOOKS))
+            self.assertFalse(any(p.name.endswith(".partial") for p in Path(tmp).rglob("*")))
         reads = [json.loads(r["body"])["args"][1] for r in self.server.requests]
         self.assertNotIn("skills/ome-oncall/references/classification.md", reads)
+        # A reference owned by a skill that is not a playbook is neither fetched nor written.
+        self.assertNotIn("skills/ome-other/references/elsewhere.md", reads)
 
     def test_follows_the_truncation_marker_across_pages(self) -> None:
         self.docs(self.files(), page_lines=2)
@@ -283,14 +292,82 @@ class PlaybooksTest(BridgeTestCase):
             self.assertFalse((Path(tmp) / "ome-docs/references/ome-primer.md").exists())
             self.assertNotIn("references/ome-primer.md", out)
 
-    def test_a_missing_skill_is_a_transport_failure(self) -> None:
+    def test_a_missing_skill_is_reported_and_the_others_written(self) -> None:
+        # The bridge's build may predate a skill the helper already lists.
         files = self.files()
         del files["skills/ome-fleet/SKILL.md"]
         self.docs(files)
         with tempfile.TemporaryDirectory() as tmp:
-            code, _, err = self.run_cli("playbooks", "--dir", tmp)
-            self.assertEqual(code, 1)
+            # An earlier run's copy of the unreadable skill is kept, not emptied.
+            earlier = Path(tmp) / "ome-fleet" / "SKILL.md"
+            earlier.parent.mkdir()
+            earlier.write_text("# ome-fleet from an earlier run\n")
+            code, out, err = self.run_cli("playbooks", "--dir", tmp)
+            self.assertEqual(code, 0)
             self.assertIn("skills/ome-fleet/SKILL.md", err)
+            self.assertEqual(earlier.read_text(), "# ome-fleet from an earlier run\n")
+            self.assertNotIn("ome-fleet/SKILL.md", out)
+            self.assertTrue((Path(tmp) / "ome-memory/SKILL.md").exists())
+            self.assertEqual((Path(tmp) / "ome-docs/references/ome-primer.md").read_text(), self.PRIMER)
+
+    def test_a_reference_of_an_unreadable_skill_is_not_fetched(self) -> None:
+        # ome-answer names ome-docs' primer; with ome-docs unreadable the primer
+        # is neither fetched nor written, and ome-docs' directory stays as it was.
+        files = self.files()
+        del files["skills/ome-docs/SKILL.md"]
+        # Two readable skills name the same unreadable owner's reference.
+        files["skills/ome-recipe/SKILL.md"] = "# ome-recipe\nsee `ome-docs/references/ome-primer.md`\n"
+        self.docs(files)
+        with tempfile.TemporaryDirectory() as tmp:
+            earlier = Path(tmp) / "ome-docs" / "SKILL.md"
+            earlier.parent.mkdir()
+            earlier.write_text("# ome-docs from an earlier run\n")
+            code, out, err = self.run_cli("playbooks", "--dir", tmp)
+            self.assertEqual(code, 0)
+            self.assertIn("skills/ome-docs/SKILL.md", err)
+            self.assertEqual(err.count("ome-docs/references/ome-primer.md not fetched"), 1)
+            self.assertNotIn("ome-primer.md", out)
+            self.assertEqual(sorted(p.name for p in (Path(tmp) / "ome-docs").iterdir()), ["SKILL.md"])
+            self.assertEqual(earlier.read_text(), "# ome-docs from an earlier run\n")
+        reads = [json.loads(r["body"])["args"][1] for r in self.server.requests]
+        self.assertNotIn("skills/ome-docs/references/ome-primer.md", reads)
+
+    def test_a_reference_that_cannot_be_reread_keeps_its_previous_copy(self) -> None:
+        files = self.files()
+        del files["skills/ome-docs/references/ome-primer.md"]
+        self.docs(files)
+        with tempfile.TemporaryDirectory() as tmp:
+            previous = Path(tmp) / "ome-docs" / "references" / "ome-primer.md"
+            previous.parent.mkdir(parents=True)
+            previous.write_text("primer from an earlier run\n")
+            code, out, err = self.run_cli("playbooks", "--dir", tmp)
+            self.assertEqual(code, 0)
+            self.assertIn("ome-primer.md", err)
+            self.assertEqual(previous.read_text(), "primer from an earlier run\n")
+            self.assertIn(str(previous), out.split())
+            self.assertEqual((Path(tmp) / "ome-docs/SKILL.md").read_text().splitlines()[0], "# ome-docs")
+
+    def test_no_readable_skill_is_a_transport_failure_that_leaves_the_dir_alone(self) -> None:
+        self.docs({})
+        with tempfile.TemporaryDirectory() as tmp:
+            stale = Path(tmp) / "ome-answer" / "SKILL.md"
+            stale.parent.mkdir()
+            stale.write_text("# from an earlier run\n")
+            code, out, err = self.run_cli("playbooks", "--dir", tmp)
+            self.assertEqual((code, out), (1, ""))
+            self.assertIn("skills/ome-bridge/SKILL.md", err)
+            self.assertEqual(stale.read_text(), "# from an earlier run\n")
+
+    def test_a_rerun_drops_what_the_skill_no_longer_names(self) -> None:
+        self.docs(self.files())
+        with tempfile.TemporaryDirectory() as tmp:
+            gone = Path(tmp) / "ome-docs" / "references" / "old.md"
+            gone.parent.mkdir(parents=True)
+            gone.write_text("named by an older ome-docs\n")
+            code, _, err = self.run_cli("playbooks", "--dir", tmp)
+            self.assertEqual((code, err), (0, ""))
+            self.assertFalse(gone.exists())
+            self.assertTrue((Path(tmp) / "ome-docs/references/ome-primer.md").exists())
 
 
 class RefusalTest(BridgeTestCase):

@@ -12,7 +12,8 @@ allowlists of verbs, tools, subcommands and flags), bounds every call and
 redacts credential-shaped strings. The agent holds no cluster credential and
 runs nothing else: no `kubectl`, no `kubectl-ome`, no direct CI API calls.
 The playbooks (`ome-answer`, `ome-recipe`, `ome-oncall`, `ome-docs`,
-`ome-fleet`) say what to read; the bot's runtime posts the reply.
+`ome-fleet`, `ome-sources`, `ome-memory`) say what to read; the bot's
+runtime posts the reply.
 
 Rules that never bend:
 
@@ -44,8 +45,10 @@ by days. `playbooks` writes the versions the bridge was built from (the bridge
 is rebuilt from `main` within the hour of a merge) under `--dir`, one
 directory per skill with the references each names, and prints the files.
 Run it right after `health`, read the playbooks from there, and prefer them
-whenever they differ from the installed copies. If it fails, the installed
-copies are what you have.
+whenever they differ from the installed copies. A skill it reports as
+unreadable is one the bridge's build does not carry yet: use the installed
+copy of that one. If it fails outright, the installed copies are what you
+have.
 
 Pass a command as one quoted argument; several arguments are re-quoted and
 joined. Global flags (`--json`, `--timeout`) go before the subcommand;
@@ -92,7 +95,7 @@ bodies empty. A clock far off the bridge's shows up as HTTP 401.
 | `command` | `POST /v1/command` | `actor`, `channelId`, `requestId`, `surface` (how the text arrived, for the audit line), `text` | `ok`, `text`, `errorClass`, `error`, `sections[]` (per-cluster output and exit code); for a question, `question` and `questionMode` (`ask`, `recipe` or empty) |
 | `tool` | `POST /v1/tool` | `actor`, `channelId`, `requestId`, `tool`, `args[]` | `ok`, `text`, `errorClass`, `result` (`tool`, `exitCode`, `output`, `truncated`, `error`) |
 | `release` | `GET /v1/release` | none | `ok`, `text` (release table), `errorClass` |
-| `playbooks` | `POST /v1/tool` (docs `read` of `skills/<skill>/SKILL.md` and the references it names, paged on the truncation marker) | as `tool` | the files written under `--dir`; exit 1 when a skill cannot be read, a missing reference is only reported |
+| `playbooks` | `POST /v1/tool` (docs `read` of `skills/<skill>/SKILL.md` and the references it names, four reads at a time, paged on the truncation marker) | as `tool` | the files under `--dir`, each skill's directory replaced whole; a skill the docs cannot serve is reported on stderr and its directory left alone, a reference that cannot be re-read keeps its earlier copy; exit 1, with `--dir` untouched, only when no skill could be read |
 
 Every response carries `ok`, `text` (Slack mrkdwn) and `errorClass` (empty
 when ok). Refusals of a parsed request stay HTTP 200 with `ok:false`.

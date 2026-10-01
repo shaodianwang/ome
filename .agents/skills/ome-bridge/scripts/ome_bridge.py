@@ -56,12 +56,14 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -74,7 +76,9 @@ DEFAULT_TIMEOUT_SECONDS = 90.0
 DEFAULT_PLAYBOOK_DIR = "/tmp/ome-playbooks"
 
 # The bot's skills, as the docs tool's `skills` root holds them.
-PLAYBOOKS = ("ome-bridge", "ome-answer", "ome-recipe", "ome-oncall", "ome-docs", "ome-fleet", "ome-memory")
+PLAYBOOKS = (
+    "ome-bridge", "ome-answer", "ome-recipe", "ome-oncall", "ome-docs", "ome-fleet", "ome-memory", "ome-sources",
+)
 # A reference a playbook names, optionally qualified with the bot skill it
 # lives in. A path into another skill's tree (`skills/ci-triage/references/...`)
 # is a docs-tool path for the model to read, not a playbook file.
@@ -82,6 +86,9 @@ REFERENCE_RE = re.compile(r"(?<![\w/-])(?:(ome-[a-z]+)/)?references/([A-Za-z0-9_
 # The docs tool ends a capped read with this line; the next page starts there.
 TRUNCATED_RE = re.compile(r"… truncated after line \d+; continue with --from (\d+)\n?\Z")
 MAX_PAGES = 50
+# Concurrent docs reads while fetching playbooks; the bridge admits eight
+# requests in flight in total.
+PLAYBOOK_READERS = 4
 
 # errorClass reported for a refusal whose body does not carry one, keyed by
 # HTTP status.
@@ -345,31 +352,123 @@ def docs_read(base_url: str, key: bytes, timeout: float, path: str) -> str:
 
 
 def write_playbook(out_dir: str, rel: str, text: str) -> str:
+    """Writes the file whole: a previous copy is replaced by one rename, never half-overwritten."""
     target = Path(out_dir) / rel
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(text, encoding="utf-8")
+    partial = target.with_name(target.name + ".partial")
+    partial.write_text(text, encoding="utf-8")
+    partial.replace(target)
     return str(target)
 
 
-def fetch_playbooks(base_url: str, key: bytes, timeout: float, out_dir: str, out: Output) -> int:
-    """Every bot skill and the references it names, from the docs tool's `skills` root."""
-    written: list[str] = []
-    fetched: set[str] = set()
-    for skill in PLAYBOOKS:
-        text = docs_read(base_url, key, timeout, f"skills/{skill}/SKILL.md")
-        written.append(write_playbook(out_dir, f"{skill}/SKILL.md", text))
+def playbook_references(skills: dict[str, str], out: Output) -> list[str]:
+    """The references the readable skills name, each once, in the order met.
+
+    A reference owned by a skill that could not be read is reported and left
+    out, since that skill's directory is not rewritten.
+    """
+    references: list[str] = []
+    seen: set[str] = set()
+    for skill, text in skills.items():
         for owner, name in sorted(set(REFERENCE_RE.findall(text))):
-            rel = f"{owner or skill}/references/{name}"
-            if rel in fetched:
+            owner = owner or skill
+            rel = f"{owner}/references/{name}"
+            if owner not in PLAYBOOKS or rel in seen:
+                # A reference in some other skill's tree is a docs path for the model to read.
                 continue
-            fetched.add(rel)
-            try:
-                ref_text = docs_read(base_url, key, timeout, f"skills/{rel}")
-            except BridgeError as exc:
-                # A reference the docs cannot serve costs that file, not the run.
-                out.err(f"ome_bridge: {exc}")
+            seen.add(rel)
+            if owner not in skills:
+                out.err(f"ome_bridge: {rel} not fetched: {owner}'s playbook could not be read")
                 continue
-            written.append(write_playbook(out_dir, rel, ref_text))
+            references.append(rel)
+    return references
+
+
+def stage_playbook_file(out_dir: str, staged: dict[str, Path], rel: str, text: str | BridgeError) -> str | None:
+    """Writes one fetched file into its skill's staging directory; returns its live path.
+
+    A file that could not be re-read keeps its previous copy, when there is one.
+    """
+    owner, _, inside = rel.partition("/")
+    if owner not in staged:
+        return None
+    if isinstance(text, BridgeError):
+        previous = Path(out_dir) / rel
+        if not previous.is_file():
+            return None
+        text = previous.read_text(encoding="utf-8")
+    write_playbook(str(staged[owner]), inside, text)
+    return str(Path(out_dir) / rel)
+
+
+def swap_in(out_dir: str, staged: dict[str, Path]) -> None:
+    """Replaces each skill's live directory with its staged one, a rename at a time.
+
+    The previous copy is moved aside, not deleted, until the new one is in
+    place, and moved back if that rename fails, so no skill is ever left
+    without a live directory.
+    """
+    for skill, new_dir in staged.items():
+        live = Path(out_dir) / skill
+        old = Path(out_dir) / f".{skill}.old"
+        shutil.rmtree(old, ignore_errors=True)
+        had_previous = live.exists()
+        if had_previous:
+            live.rename(old)
+        try:
+            new_dir.rename(live)
+        except OSError:
+            if had_previous:
+                old.rename(live)
+            raise
+        shutil.rmtree(old, ignore_errors=True)
+
+
+def fetch_playbooks(base_url: str, key: bytes, timeout: float, out_dir: str, out: Output) -> int:
+    """Every bot skill and the references it names, from the docs tool's `skills` root.
+
+    The worker runs this at the start of every answer and each read is a signed
+    round trip, so the skills are read together and then their references. A
+    file the docs cannot serve (a skill the bridge's build predates, a renamed
+    reference) is reported and costs that file alone; only when no skill at
+    all can be read is the run a failure, and then --dir is left untouched.
+    The live tree changes last: a skill's new files are staged beside its
+    directory and swapped in with a rename once everything for it is written,
+    so a failure while writing leaves the previous copy in place, and a
+    reference a newer skill no longer names does not survive from an earlier
+    run. A reference that could not be re-read keeps its previous copy. The
+    directory of a skill that could not be read is left as it was, and the
+    references it owns are not fetched.
+    """
+
+    def read_file(rel: str) -> str | BridgeError:
+        try:
+            return docs_read(base_url, key, timeout, f"skills/{rel}")
+        except BridgeError as exc:
+            return exc
+
+    skill_files = [f"{skill}/SKILL.md" for skill in PLAYBOOKS]
+    with ThreadPoolExecutor(max_workers=PLAYBOOK_READERS) as pool:
+        skill_texts = list(pool.map(read_file, skill_files))
+        skills = {skill: text for skill, text in zip(PLAYBOOKS, skill_texts) if not isinstance(text, BridgeError)}
+        references = playbook_references(skills, out)
+        reference_texts = list(pool.map(read_file, references))
+
+    fetched = list(zip(skill_files + references, skill_texts + reference_texts))
+    for _, text in fetched:
+        if isinstance(text, BridgeError):
+            out.err(f"ome_bridge: {text}")
+    if not skills:
+        return EXIT_TRANSPORT
+    staged = {skill: Path(out_dir) / f".{skill}.new" for skill in skills}
+    for new_dir in staged.values():
+        shutil.rmtree(new_dir, ignore_errors=True)
+    written: list[str] = []
+    for rel, text in fetched:
+        path = stage_playbook_file(out_dir, staged, rel, text)
+        if path is not None:
+            written.append(path)
+    swap_in(out_dir, staged)
     for path in written:
         out.out(path)
     return EXIT_OK

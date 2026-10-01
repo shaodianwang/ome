@@ -37,9 +37,12 @@ turns out wrong is corrected in the write-back rather than repeated.
 The month's log, always one line:
 
 ```sh
-meta agents.memory append --namespace 1606613020945253 --path "bot/log/$(date -u +%Y-%m).md" \
-  --content "- $(date -u +%Y-%m-%dT%H:%MZ) <request id> <class> [<clusters searched>] <the reply's first sentence>"
+meta agents.memory append --namespace 1606613020945253 --path="bot/log/$(date -u +%Y-%m).md" \
+  --content="- $(date -u +%Y-%m-%dT%H:%MZ) <request id> <class> [<clusters searched>] <the reply's first sentence>"
 ```
+
+The `=` matters: the line starts with a dash, and a value passed as a
+separate word is read as a flag.
 
 The cluster facts file, only when the run observed something durable about a
 cluster: a service not Ready and since when, cordoned or not-Ready node
@@ -48,7 +51,7 @@ file, keep what is still true, replace what changed, drop anything older than
 fourteen days, and write the whole file back:
 
 ```sh
-meta agents.space memory-write --id 1606613020945253 --path "bot/facts/<cluster>.md" --content "<the file>"
+meta agents.space memory-write --id 1606613020945253 --path="bot/facts/<cluster>.md" --content="<the file>"
 ```
 
 At most 1,500 characters, every fact with the date it was seen, plain
