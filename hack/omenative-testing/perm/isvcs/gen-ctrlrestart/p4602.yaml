@@ -1,0 +1,13 @@
+# p4602: [gen] ctrlrestart migration engine N=4 SurgeThenDrain s1 co none  mode=migrate Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 fault=ctrlrestart:migrating co=none topo=engine mig=Auto inst=0
+# reason: the manager pod is deleted at the migration accept; the restarted manager carries nothing in memory and resumes the operation from status; nothing is created twice (peaks within the ceiling, no index collision) and nothing is deleted twice (every Component ends at its count); the replacement comes up on another node at a distinct index, the source drains once, the request is consumed exactly once and the ledger reaches Completed; the update strategy is dormant under a migration
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p4602 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

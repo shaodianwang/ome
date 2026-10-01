@@ -1,0 +1,20 @@
+# p4603: [gen] ctrlrestart canary engine N=4 SurgeThenDrain s1 co none  mode=canary Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 fault=ctrlrestart:canary-serving co=none topo=engine canary=auto cell=canary/Serving/ctrlRestart[gen]
+# reason: the manager pod is deleted while the first step serves its canary; the restarted manager carries nothing in memory and resumes the operation from status; nothing is created twice (peaks within the ceiling, no index collision) and nothing is deleted twice (every Component ends at its count); the step clock and the run are status, so the ladder resumes at the same step, the timed hold elapses and the run promotes to Stable with every member on the canary revision; capacity steps run under the member's strategy: a surge of one beside the stable Instances
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p4603 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          canary:
+            steps:
+              - { capacity: "50%", traffic: 50, pause: { duration: "20s" } }
+              - { capacity: "100%", traffic: 100 }

@@ -4,7 +4,7 @@
 Emits the constraint-filtered cross product of
     topology x updateStrategy x failure verb x injection phase x
     restartPolicy x pause
-into nine generator-owned folders, using ONLY verbs and hooks the runners
+into eleven generator-owned folders, using ONLY verbs and hooks the runners
 (run.py + the KIND CI lane) already implement:
 
     gen-rollout/   p1000+  baseline revision-bump rollouts (failure=none)
@@ -47,6 +47,18 @@ into nine generator-owned folders, using ONLY verbs and hooks the runners
                           that Instance; and fired on the idle service
                           (during=idle), crossed with topology x restartPolicy,
                           the repair must rebuild it
+    gen-node/      p4200+  a Ready Instance loses its node (fault=node:notready
+                          at idle: the kubelet under it is stopped, then
+                          started again at the lift), crossed with topology x
+                          restartPolicy x migration mode x an idle rolling
+                          group x the configured outcome (parked while the
+                          node is down, repaired once it is back)
+    gen-ctrlrestart/ p4600+ the manager pod is deleted under an operation in
+                          flight (fault=ctrlrestart:<hook>): mid-surge,
+                          mid-drain, mid-migration, mid-canary and
+                          mid-scale-down, crossed with topology x strategy
+                          (x a rolling group on PD rolls); the operation
+                          resumes from status and converges
 
 Ownership and determinism:
   - The gen-* folders belong ENTIRELY to this generator: every case there
@@ -122,6 +134,22 @@ Constraint ledger (why the raw product is filtered — derived from run.py):
   - imagepull has one form (an image that never pulls has no after-Ready
     form) and runs each strategy at its canonical budget only; the idle half
     carries no group, since a grouped repair's hold is its own family.
+  - node:notready reads the configured fate of a Ready Instance on a dead
+    node. Without lifecycle.forceDelete (the chart default, and the lanes'),
+    nothing frees the pod names a silent node holds, so the only outcomes
+    the lift can read are parked (nothing rebuilds it while the node is down)
+    and repaired (the kubelet returns and the pods it never stopped serve
+    again), both at lift=after-settle; relocated needs that policy and is
+    not emitted. The migration axis renders as Auto (the default) and Never:
+    the API has no mode that admits explicit requests but not relocation,
+    and neither mode moves a Ready Instance (Auto relocates on an expired
+    attempt's deadline, which a Ready Instance never has). Restart policy
+    and an idle rolling group change nothing either, and each cell says why.
+  - ctrlrestart has no hook inside a repair: the runner fires one fault per
+    case and the idle-break handler fires no second one, so a restart while
+    a crash-loop repair is open is not emitted (MISSING_HOOKS). The update
+    strategy is dormant under a migration and a scale-down; those cells run
+    under both strategies for the family's symmetry and say so.
 
 The t=3 covering fill over the deferred dimensions (coordination/rollout
 groups, canary promotion, budget x coordination interactions) is the --fill
@@ -150,6 +178,8 @@ GEN_BLOCKS = {
     "gen-crashloop-sibling": (2600, 2800),
     "gen-heal": (3000, 3400),
     "gen-imagepull": (3400, 3800),
+    "gen-node": (4200, 4600),
+    "gen-ctrlrestart": (4600, 5000),
 }
 GEN_ID_LO = min(lo for lo, _hi in GEN_BLOCKS.values())
 GEN_ID_HI = max(hi for _lo, hi in GEN_BLOCKS.values())
@@ -247,6 +277,47 @@ HEAL_FAILED_READY_TIMEOUT = "90s"
 # but the row stays Failed. Every lift=after-failed cell is parked on it.
 HEAL_ISSUE = 1978
 
+# The node family: the kubelet under the highest-index engine Instance of a
+# settled service is stopped, and the lift starts it again. The outcome is
+# the configured one, read at lift=after-settle: parked holds the node down
+# across the hold window and asserts nothing rebuilds the Instance (no
+# force-delete policy frees its names); repaired lifts once the bite has held
+# and asserts the Instance serves again on the pods the kubelet never
+# stopped. Both restart policies, both migration modes a running Instance can
+# carry (Auto is the default) and an idle rolling group are crossed in; none
+# of them changes the fate, and every cell states why.
+NODE_PARAM = "notready"
+NODE_SHAPES = [("engine", 4, 0), ("pd", 4, 0), ("engine-mn", 2, 1), ("pd-mn", 2, 1)]
+NODE_MIGRATIONS = ["Auto", "Never"]
+NODE_COORDS = ["none", "rolling"]
+NODE_OUTCOMES = [("parked", "after-settle"), ("repaired", "after-settle")]
+NODE_NO_TRIGGER = {
+    "None": "a pod that is NotReady but neither restarted nor Failed is no repair trigger under restart policy None",
+    "RecreateInstance": ("a NotReady pod is still present, so RecreateInstanceOnPodRestart reads neither a runner "
+                         "restart nor a lost gang member"),
+}
+NODE_NO_RELOCATION = {
+    "Auto": ("migration mode Auto relocates only when an open attempt's deadline expires, and a Ready Instance "
+             "has no attempt open"),
+    "Never": "migration mode Never allows no migration at all",
+}
+
+# The controller-restart family: the manager pod is deleted at a hook inside
+# an operation, and the operation must resume from status and converge with
+# nothing created twice (ceilings, index partition) and nothing deleted twice
+# (every Instance ends at its count). Each condition is one runner mode and
+# one hook; the strategy axis is live for the two rollout conditions and
+# dormant under a migration and a scale-down.
+CTRL_SHAPES = [("engine", 4, 0), ("pd", 4, 0), ("engine-mn", 2, 1)]
+CTRL_STRATS = [("SurgeThenDrain", 1, 0), ("RecreatePod", 0, 1)]
+CTRL_CONDITIONS = ["surge", "drain", "migration", "canary", "scaledown"]
+CTRL_FAULTS = {"surge": "ctrlrestart:settling", "drain": "ctrlrestart:rotating",
+               "migration": "ctrlrestart:migrating", "canary": "ctrlrestart:canary-serving",
+               "scaledown": "ctrlrestart:settling"}
+CTRL_ROLL_CONDITIONS = {"surge", "drain"}
+CTRL_CANARY_STEPS = (("50%", 50), ("100%", 100))
+CTRL_CANARY_CELL = "canary/Serving/ctrlRestart[gen]"
+
 # Canonical shapes: (topo, N, W). Gangs at N=2 with widths 1 and 2; singles at
 # N=4 (pd: engine+decoder N, router lib.NR). Percentage budgets additionally
 # run a mid-size variant (MID_SHAPE) so the ceil() rounding actually differs.
@@ -343,6 +414,13 @@ MISSING_HOOKS = [
     "mode=kill; no verb pauses an in-flight rotation)",
     "decoder-targeted mode=kill (the kill handler always picks the engine when "
     "one is configured)",
+    "controller restart while a repair is open (a crash loop at idle with the "
+    "manager deleted once the rebuild has started) — the runner fires one fault "
+    "per case and the idle-break handler fires no second one",
+    "relocation of a Ready Instance off a dead node (fault=node:notready with "
+    "expect=relocated) — needs lifecycle.forceDelete in the lane's chart values; "
+    "without it nothing frees the names the node holds and relocated is not a "
+    "configured outcome",
 ]
 
 
@@ -994,6 +1072,135 @@ def emit_imagepull(add):
                 _imagepull_idle_reason(topo), meta, cell=("imagepull", "idle", topo, w, rp))
 
 
+# ── gen-node: a Ready Instance loses its node ───────────────────────────────
+def _node_group(topo, co):
+    """The idle rolling group a node cell carries: engine and decoder on PD,
+    the engine alone otherwise."""
+    if co == "none":
+        return None
+    return lib.coord_for(co, comps=("engine", "decoder") if is_pd(topo) else ("engine",))
+
+
+def _node_reason(outcome, rp, mig, co):
+    still = f"{NODE_NO_TRIGGER[rp]}; {NODE_NO_RELOCATION[mig]}"
+    if co != "none":
+        still += "; the rolling group would hold a repair while no run is open, and none opens"
+    if outcome == "parked":
+        return (f"the kubelet under the highest-index engine Instance is stopped; the node reads NotReady and "
+                f"no pod of the Instance on it serves; nothing may rebuild the Instance while the node is down: "
+                f"{still}; with no force-delete policy configured (the chart default) nothing frees its pod names, "
+                f"so across the hold window no new pod appears for it; then the kubelet is started again and only "
+                f"the teardown must converge; a rebuild elsewhere while the node is down is the force-delete path "
+                f"and fails this cell as configured")
+    return (f"the kubelet under the highest-index engine Instance is stopped and, once the node has read NotReady "
+            f"with no pod of the Instance on it serving for the settle window, started again; the pods it ran "
+            f"were never stopped, so the Instance returns to Ready and serving on its running revision within the "
+            f"budget, with no new revision and no reset mailbox; nothing else moves while the node is down: {still}")
+
+
+def emit_node(add):
+    for topo, n, w in NODE_SHAPES:
+        for rp in RESTARTS:
+            for mig in NODE_MIGRATIONS:
+                life = lib.lifecycle(restart=RP_FULL[rp], mig={"mode": mig})
+                d_life = lib.lifecycle(restart=RP_FULL[rp], mig={"mode": mig}) if is_pd(topo) else None
+                for co in NODE_COORDS:
+                    for outcome, lift in NODE_OUTCOMES:
+                        # Nobody bumps the service: every ceiling is N.
+                        kv = dict(**counts(topo, n), **ceilings(topo, n, "SurgeThenDrain", 0),
+                                  fault=f"node:{NODE_PARAM}", during="idle", lift=lift, expect=outcome,
+                                  co=co, topo=topo)
+                        meta = dict(strat="SurgeThenDrain", verb=f"node:{outcome}", rp=rp, mig=mig)
+                        desc = (f"{GEN_MARK} node notready {shape_tag(topo, w)} N={n} rp {rp} mig {mig} "
+                                f"co {co} {outcome}")
+                        add("gen-node", desc, kv, comps(topo, n, w, life, d_life=d_life),
+                            _node_reason(outcome, rp, mig, co), meta,
+                            cell=("node", outcome, topo, w, rp, mig, co),
+                            coord=_node_group(topo, co))
+
+
+# ── gen-ctrlrestart: the manager restarts under an operation in flight ──────
+def _ctrl_reason(cond, strat, topo, co):
+    resumes = ("the restarted manager carries nothing in memory and resumes the operation from status; "
+               "nothing is created twice (peaks within the ceiling, no index collision) and nothing is "
+               "deleted twice (every Component ends at its count)")
+    if cond == "surge":
+        at = ("right after the bump, while the first replacement is being created"
+              if strat == "SurgeThenDrain" else "right after the bump, while the first source is being drained")
+    elif cond == "drain":
+        at = ("at the first replacement observed, while its source drains and the next replacement is due"
+              if strat == "SurgeThenDrain" else "at the first rebuilt pod observed, while the next source is due to drain")
+    elif cond == "migration":
+        at = "at the migration accept"
+    elif cond == "canary":
+        at = "while the first step serves its canary"
+    else:
+        at = "as the drain of the tail Instances starts"
+    out = f"the manager pod is deleted {at}; {resumes}"
+    if cond in CTRL_ROLL_CONDITIONS:
+        out += ("; the roll finishes within the same surge budget, every source drained once"
+                if strat == "SurgeThenDrain" else
+                "; the roll finishes within the same unavailable budget, each drained index rebuilt once")
+        out += " and every Instance ends on the new revision"
+        if is_pd(topo):
+            out += ("; the rolling group paces engine and decoder together and its run resumes with the roll"
+                    if co != "none" else "; decoder and router are negative controls (co=none)")
+    elif cond == "migration":
+        out += ("; the replacement comes up on another node at a distinct index, the source drains once, the "
+                "request is consumed exactly once and the ledger reaches Completed; the update strategy is "
+                "dormant under a migration")
+    elif cond == "canary":
+        out += ("; the step clock and the run are status, so the ladder resumes at the same step, the timed "
+                "hold elapses and the run promotes to Stable with every member on the canary revision; "
+                "capacity steps run under the member's strategy: ")
+        out += ("a surge of one beside the stable Instances" if strat == "SurgeThenDrain"
+                else "each stepped Instance rebuilt in place, no surge above N")
+    else:
+        out += ("; exactly the tail is torn down, the survivors are untouched and never below the target; "
+                "the update strategy is dormant under a scale-down")
+    return out
+
+
+def emit_ctrlrestart(add):
+    for topo, n, w in CTRL_SHAPES:
+        for strat, surge, unavail in CTRL_STRATS:
+            life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail)
+            for cond in CTRL_CONDITIONS:
+                coords = ["none", "rolling"] if cond in CTRL_ROLL_CONDITIONS and is_pd(topo) else ["none"]
+                for co in coords:
+                    kv, coord, d_life = dict(**counts(topo, n)), None, None
+                    case_comps = None
+                    if cond in CTRL_ROLL_CONDITIONS:
+                        kv.update(ceilings(topo, n, strat, surge))
+                        if co != "none":
+                            # The group rolls the decoder too, under the same strategy.
+                            d_life = life
+                            kv["ceil_d"] = n + surge
+                            coord = lib.coord_for(co)
+                    elif cond == "migration":
+                        # The replacement surges at a new index whatever the strategy.
+                        kv.update(mode="migrate", **ceilings(topo, n, "SurgeThenDrain", 1), mig="Auto", inst=0)
+                    elif cond == "canary":
+                        kv.update(mode="canary", **ceilings(topo, n, strat, surge), canary="auto",
+                                  cell=CTRL_CANARY_CELL)
+                        if is_pd(topo):
+                            # Decoder and router are group members on their default surge lifecycle.
+                            kv.update(ceil_d=n + 1, ceil_r=lib.NR + 1)
+                        case_comps = comps(topo, n, w, life)
+                        coord = lib.canary_block(lib.canary_steps("auto", *CTRL_CANARY_STEPS),
+                                                 components=[c["comp"] for c in case_comps])
+                    else:
+                        kv.update(mode="scaledown", **ceilings(topo, n, "SurgeThenDrain", 0), to_e=n // 2)
+                    kv.update(fault=CTRL_FAULTS[cond], co=co, topo=topo)
+                    meta = dict(strat=strat, verb=f"ctrlrestart:{cond}", cond=cond)
+                    desc = (f"{GEN_MARK} ctrlrestart {cond} {shape_tag(topo, w)} N={n} {strat} "
+                            f"{budget_tag(strat, surge, unavail)} co {co}")
+                    add("gen-ctrlrestart", desc, kv,
+                        case_comps if case_comps is not None else comps(topo, n, w, life, d_life=d_life),
+                        _ctrl_reason(cond, strat, topo, co), meta,
+                        cell=("ctrlrestart", cond, topo, w, strat, co), coord=coord)
+
+
 # ── assembly ─────────────────────────────────────────────────────────────────
 def build_outputs():
     """{relative path under isvcs/: file text} — the entire owned output set."""
@@ -1035,6 +1242,8 @@ def build_outputs():
     emit_crashloop_sibling(add)
     emit_heal(add)
     emit_imagepull(add)
+    emit_node(add)
+    emit_ctrlrestart(add)
     stale = set(PARKED) - parked_used
     if stale:
         sys.exit("PARKED keys match no emitted cell (stale after a matrix change): "
@@ -1044,9 +1253,11 @@ def build_outputs():
 
 
 def manifest(rows):
-    def tally(key):
+    def tally(key, where=lambda kv, m: True):
         t = {}
         for _f, _n, kv, meta in rows:
+            if not where(kv, meta):
+                continue
             k = key(kv, meta)
             t[k] = t.get(k, 0) + 1
         return t
@@ -1099,6 +1310,10 @@ def manifest(rows):
     if edits:
         lines += table("By mid-roll edit (gen-switch)", edits)
     lines += table("By break victim", tally(lambda kv, m: m.get("victim", "(no break)")))
+    lines += table("By migration mode (node family)",
+                   tally(lambda kv, m: m["mig"], where=lambda kv, m: "mig" in m))
+    lines += table("By controller-restart condition",
+                   tally(lambda kv, m: m["cond"], where=lambda kv, m: "cond" in m))
     parked_rows = [(f, n, m["parked"]) for f, n, _kv, m in rows if "parked" in m]
     if parked_rows:
         lines += ["### Parked cells (XFAIL on a tracked issue)", "",
@@ -1168,6 +1383,24 @@ def manifest(rows):
         " form) and runs each strategy at its canonical budget only; its idle"
         " half carries no group, since a grouped repair's hold is its own"
         " family.",
+        "- node:notready reads the configured fate of a Ready Instance on a dead"
+        " node: without `lifecycle.forceDelete` (the chart default, and the"
+        " lanes') nothing frees the pod names a silent node holds, so the"
+        " outcomes are `parked` (nothing rebuilds it while the node is down) and"
+        " `repaired` (the kubelet returns and the pods it never stopped serve"
+        " again), both at `lift=after-settle`; `relocated` needs that policy and"
+        " is not emitted. The migration axis is Auto (the default) and Never —"
+        " the API has no mode that admits explicit requests but not relocation,"
+        " and neither mode moves a Ready Instance (Auto relocates on an expired"
+        " attempt's deadline, which a Ready Instance never has); restart policy"
+        " and an idle rolling group change nothing either, and each cell says"
+        " why. The update strategy is dormant at idle (one canonical budget).",
+        "- ctrlrestart has no hook inside a repair (one fault per case; the"
+        " idle-break handler fires no second one), so a restart while a"
+        " crash-loop repair is open is not emitted. The strategy axis is live"
+        " for the two rollout conditions and dormant under a migration and a"
+        " scale-down, where both strategies still run for the family's symmetry;"
+        " a rolling group is crossed in on the PD rollout conditions only.",
         "- Kill-family cells pinned by hand-written restart/ cases are excluded:",
         "",
     ]

@@ -3133,3 +3133,133 @@ class GeneratedHealAndImagepullFamiliesTest(unittest.TestCase):
         self.assertTrue(text.endswith('---\napiVersion: v1\nkind: ConfigMap\nmetadata: { name: p1-config }\ndata: { k: "v" }\n'))
         self.assertIn('instanceReadyTimeout: "90s"', gen_cases.lifecycle(ready_timeout="90s"))
         self.assertNotIn("instanceReadyTimeout", gen_cases.lifecycle())
+
+
+class GeneratedNodeFamilyTest(unittest.TestCase):
+    """gen-node: a Ready Instance loses its node. Every cell fires
+    node:notready on the idle service and asserts the configured outcome
+    at lift=after-settle; the restart policy, migration mode and group axes
+    are crossed in full and change nothing but the reason."""
+
+    def _rows(self):
+        outputs, rows = generate_cases.build_outputs()
+        return outputs, [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-node"]
+
+    def test_generated_family_crosses_every_axis(self):
+        outputs, fam = self._rows()
+        self.assertEqual(64, len(fam))
+        self.assertEqual({"engine", "pd", "engine-mn", "pd-mn"}, {kv["topo"] for _n, kv, _m in fam})
+        self.assertEqual({"None", "RecreateInstance"}, {m["rp"] for _n, _kv, m in fam})
+        self.assertEqual(set(generate_cases.NODE_MIGRATIONS), {m["mig"] for _n, _kv, m in fam})
+        self.assertEqual({"none", "rolling"}, {kv["co"] for _n, kv, _m in fam})
+        self.assertEqual({"parked", "repaired"}, {kv["expect"] for _n, kv, _m in fam})
+        tuples = {(kv["topo"], m["rp"], m["mig"], kv["co"], kv["expect"]) for _n, kv, m in fam}
+        self.assertEqual(64, len(tuples), "every (shape, restart policy, migration mode, group, outcome) once")
+        for name, kv, m in fam:
+            self.assertEqual("node:notready", kv["fault"])
+            self.assertEqual("idle", kv["during"])
+            self.assertEqual("after-settle", kv["lift"], "both outcomes are read at the settle lift")
+            self.assertEqual(f"node:{kv['expect']}", m["verb"])
+            self.assertNotIn("mode", kv)
+            for c in ("e", "d", "r"):
+                self.assertEqual(kv[f"N{c}"], kv[f"ceil_{c}"], "nobody bumps the service: every ceiling is N")
+            text = outputs[f"gen-node/{name}.yaml"]
+            self.assertIn(f'migrationPolicy: {{ mode: "{m["mig"]}" }}', text)
+            self.assertIn(f'restartPolicy: "{generate_cases.RP_FULL[m["rp"]]}"', text)
+            members = "[engine, decoder]" if kv["topo"].startswith("pd") else "[engine]"
+            if kv["co"] == "rolling":
+                self.assertIn(f"- components: {members}\n          rollingUpdate: {{}}", text)
+            else:
+                self.assertNotIn("rollout:", text)
+            reason = text.splitlines()[1]
+            self.assertIn(generate_cases.NODE_NO_TRIGGER[m["rp"]], reason)
+            self.assertIn(generate_cases.NODE_NO_RELOCATION[m["mig"]], reason)
+            self.assertIn("no force-delete policy" if kv["expect"] == "parked" else "never stopped", reason)
+
+    def test_every_cell_validates_as_a_case_file(self):
+        outputs, fam = self._rows()
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, _kv, _m in fam:
+                path = Path(tmp) / f"{name}.yaml"
+                path.write_text(outputs[f"gen-node/{name}.yaml"])
+                self.assertEqual([], run.validate_case_file(path))
+
+
+class GeneratedCtrlRestartFamilyTest(unittest.TestCase):
+    """gen-ctrlrestart: the manager pod is deleted under an operation in
+    flight. One runner mode and one hook per condition, crossed with the
+    shapes and both strategies; the PD rollout conditions also run under a
+    rolling group."""
+
+    def _rows(self):
+        outputs, rows = generate_cases.build_outputs()
+        return outputs, [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-ctrlrestart"]
+
+    def test_generated_family_crosses_every_axis(self):
+        outputs, fam = self._rows()
+        self.assertEqual(34, len(fam))
+        self.assertEqual(set(generate_cases.CTRL_CONDITIONS), {m["cond"] for _n, _kv, m in fam})
+        self.assertEqual({"SurgeThenDrain", "RecreatePod"}, {m["strat"] for _n, _kv, m in fam})
+        self.assertEqual({"engine", "pd", "engine-mn"}, {kv["topo"] for _n, kv, _m in fam})
+        tuples = {(kv["topo"], m["strat"], m["cond"], kv["co"]) for _n, kv, m in fam}
+        self.assertEqual(34, len(tuples))
+        for topo in ("engine", "pd", "engine-mn"):
+            for strat in ("SurgeThenDrain", "RecreatePod"):
+                for cond in generate_cases.CTRL_CONDITIONS:
+                    self.assertIn((topo, strat, cond, "none"), tuples)
+        for name, kv, m in fam:
+            cond, strat = m["cond"], m["strat"]
+            surge = 1 if strat == "SurgeThenDrain" else 0
+            self.assertEqual(generate_cases.CTRL_FAULTS[cond], kv["fault"])
+            self.assertEqual(f"ctrlrestart:{cond}", m["verb"])
+            text = outputs[f"gen-ctrlrestart/{name}.yaml"]
+            self.assertIn(f'type: "{strat}"', text)
+            if cond in ("surge", "drain"):
+                self.assertNotIn("mode", kv)
+                self.assertEqual(kv["Ne"] + surge, kv["ceil_e"])
+                if kv["co"] == "rolling":
+                    self.assertTrue(kv["topo"].startswith("pd"), "the group axis exists on PD rolls only")
+                    self.assertEqual(kv["Nd"] + surge, kv["ceil_d"], "the group rolls the decoder under the same strategy")
+                    self.assertIn("- components: [engine, decoder]\n          rollingUpdate: {}", text)
+                else:
+                    self.assertEqual(kv["Nd"], kv["ceil_d"])
+            else:
+                self.assertEqual("none", kv["co"])
+            if cond == "migration":
+                self.assertEqual(("migrate", "Auto", 0), (kv["mode"], kv["mig"], kv["inst"]))
+                self.assertEqual(kv["Ne"] + 1, kv["ceil_e"], "the replacement surges at a new index")
+            elif cond == "canary":
+                self.assertEqual(("canary", "auto"), (kv["mode"], kv["canary"]))
+                self.assertEqual(generate_cases.CTRL_CANARY_CELL, kv["cell"])
+                self.assertEqual(kv["Ne"] + surge, kv["ceil_e"], "capacity steps run under the member's strategy")
+                members = "[engine, decoder, router]" if kv["topo"].startswith("pd") else "[engine]"
+                self.assertIn(f"- components: {members}\n          canary:", text)
+                if kv["topo"].startswith("pd"):
+                    self.assertEqual((kv["Nd"] + 1, kv["Nr"] + 1), (kv["ceil_d"], kv["ceil_r"]))
+            elif cond == "scaledown":
+                self.assertEqual("scaledown", kv["mode"])
+                self.assertEqual(kv["Ne"] // 2, kv["to_e"])
+                self.assertEqual(kv["Ne"], kv["ceil_e"])
+
+    def test_every_cell_validates_as_a_case_file(self):
+        outputs, fam = self._rows()
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, _kv, _m in fam:
+                path = Path(tmp) / f"{name}.yaml"
+                path.write_text(outputs[f"gen-ctrlrestart/{name}.yaml"])
+                self.assertEqual([], run.validate_case_file(path))
+
+
+class NodeBiteTest(unittest.TestCase):
+    """The kubelet stop has bitten once no pod of the Instance on the stopped
+    node serves; a gang member on another node does not hide it."""
+
+    def test_bite_reads_the_stopped_nodes_pods_only(self):
+        leader_down = ("e1-leader", {"ready": False, "serving": True, "node": "kind-worker"})
+        leader_up = ("e1-leader", {"ready": True, "serving": True, "node": "kind-worker"})
+        worker_up = ("e1-worker", {"ready": True, "serving": True, "node": "kind-worker2"})
+        self.assertTrue(run._node_bite_held("kind-worker", [leader_down, worker_up]))
+        self.assertFalse(run._node_bite_held("kind-worker", [leader_up, worker_up]))
+        self.assertFalse(run._node_bite_held("kind-worker", [leader_up]))
+        self.assertTrue(run._node_bite_held("kind-worker", [leader_down]))
+        self.assertTrue(run._node_bite_held("kind-worker", []), "evicted pods leave nothing serving there")

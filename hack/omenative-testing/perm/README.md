@@ -77,7 +77,7 @@ perm/
 │   ├── rollout/           — 96 rollout cases (topology × lifecycle × coordination)
 │   ├── migration/ restart/ partition/ scale/ edge/  — feature cases (see ../DESIGN.md)
 │   └── gen-rollout/ gen-fault/ gen-restart/ gen-crashloop/ gen-switch/ gen-crashloop-idle/ gen-crashloop-sibling/
-│       gen-heal/ gen-imagepull/  — generated hot core (see isvcs/MANIFEST.md)
+│       gen-heal/ gen-imagepull/ gen-node/ gen-ctrlrestart/  — generated hot core (see isvcs/MANIFEST.md)
 └── results/
     └── <RUN_TS>/<feature>/<topo>/
         ├── pNN-<ts>.tsv   — one verdict row per case
@@ -742,9 +742,11 @@ crashloop case).
   stop, so the end-of-case cleanup and `batch.py`'s end-of-run sweep both
   find it; node cases run serially (a dead node takes every pod on it). The
   fault has bitten once the Node reads NotReady and no pod of the Instance
-  serves (the node lifecycle controller's grace, 40 s by default, comes
-  first), and `expect=` says what the Instance's fate is under the restart
-  policy and the force-delete policy as configured:
+  on that node serves (the node lifecycle controller's grace, 40 s by
+  default, comes first; a gang whose other members sit on live nodes keeps
+  them serving, so the bite is read on the stopped node's pods alone), and
+  `expect=` says what the Instance's fate is under the restart policy and
+  the force-delete policy as configured:
   `expect=relocated` with `lift=after-recover` — while the node is down the
   Instance comes back Ready and serving on new pods on other nodes (the
   force-delete policy frees its names), then the kubelet is restored;
@@ -756,6 +758,31 @@ crashloop case).
   (no force delete configured), then the kubelet is restored and only the
   teardown is required to converge. A relocation may bring the replacement
   up beside the stuck pods, so the no-surge claim is informational there.
+  The generated `isvcs/gen-node/` family crosses the verb with topology,
+  restart policy, migration mode (Auto and Never) and an idle rolling
+  group, and asserts the configured outcome in every cell: `parked` while
+  the node is down and `repaired` once the kubelet is back, both at
+  `lift=after-settle`. Without `lifecycle.forceDelete` in the lane's chart
+  values nothing frees the names a dead node holds, so `relocated` is not a
+  configured outcome there and the family does not emit it; neither
+  migration mode moves a Ready Instance (Auto relocates on an expired
+  attempt's deadline, which a Ready Instance never has), and each cell's
+  line-2 reason says why its restart policy and group change nothing.
+
+- **`fault=ctrlrestart:<hook>` under an operation in flight** is what the
+  generated `isvcs/gen-ctrlrestart/` family drives: the manager pod is
+  deleted mid-surge (`settling`), mid-drain (`rotating`), mid-migration
+  (`mode=migrate`, `migrating`), mid-canary (`mode=canary`,
+  `canary-serving`) and mid-scale-down (`mode=scaledown`, `settling`), on
+  engine, pd and engine-mn under SurgeThenDrain and RecreatePod, with a
+  rolling group crossed in on the PD rollout conditions. The usual verdict of
+  each mode carries the claim: the operation resumes from status and
+  converges, peaks stay within the ceiling, no index collides and every
+  Component ends at its count. The fault is gated on
+  `OME_TEST_ALLOW_CTRL_RESTART=1`, which the GKE eval lanes export; without
+  it the case passes with a note and proves nothing. A restart while a
+  crash-loop repair is open needs a second fault slot the runner lacks and
+  is listed in the manifest's missing hooks.
 
 - **`during=idle`** (rollout mode, with a persistent fault) fires the fault
   on the settled service and never bumps; the verdict reads what the product
@@ -821,12 +848,12 @@ Four generators write into `isvcs/`; re-run one after editing it:
   `gen_cases.py`'s feature counters).
 - `gen_runtime.py` — the runtime-triggered cases (`p400`+) → `isvcs/runtime-rev/`.
 - `generate_cases.py` — the hot-core permutation corpus (`p1000`–`p2799`
-  and `p3000`–`p4199`) → `isvcs/gen-rollout/`, `isvcs/gen-fault/`,
+  and `p3000`–`p4999`) → `isvcs/gen-rollout/`, `isvcs/gen-fault/`,
   `isvcs/gen-restart/`, `isvcs/gen-crashloop/`, `isvcs/gen-switch/`,
   `isvcs/gen-crashloop-idle/`, `isvcs/gen-crashloop-sibling/`,
-  `isvcs/gen-heal/`, `isvcs/gen-imagepull/`, plus `isvcs/MANIFEST.md`
-  (per-dimension counts, constraint ledger, parked cells, missing-hook
-  catalog).
+  `isvcs/gen-heal/`, `isvcs/gen-imagepull/`, `isvcs/gen-node/`,
+  `isvcs/gen-ctrlrestart/`, plus `isvcs/MANIFEST.md` (per-dimension
+  counts, constraint ledger, parked cells, missing-hook catalog).
 
 A generator owns exactly the case ids it mints. Hand-written cases share the
 feature folders with generated ones (`restart/`, `canary/`, `scale/` and

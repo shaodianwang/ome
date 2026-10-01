@@ -1,0 +1,13 @@
+# p4601: [gen] ctrlrestart drain engine N=4 SurgeThenDrain s1 co none  Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 fault=ctrlrestart:rotating co=none topo=engine
+# reason: the manager pod is deleted at the first replacement observed, while its source drains and the next replacement is due; the restarted manager carries nothing in memory and resumes the operation from status; nothing is created twice (peaks within the ceiling, no index collision) and nothing is deleted twice (every Component ends at its count); the roll finishes within the same surge budget, every source drained once and every Instance ends on the new revision
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p4601 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

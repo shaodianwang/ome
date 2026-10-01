@@ -2633,7 +2633,7 @@ def _fault_node_fire(f, pod_state, old_hashes):
     state = pod_state.get(victim) or {}
     f.update(crash_pod=victim, crash_inst=str(state.get("inst", "0")), crash_comp=state.get("comp", comp),
              crash_hash=state.get("hash", ""), crash_uid=state.get("uid", ""), node=node,
-             bite="its node NotReady with no pod serving", cause=f"the kubelet of node {node}",
+             bite="its node NotReady with no pod of it serving there", cause=f"the kubelet of node {node}",
              kubelet_restored=False)
     _FAULT_CLEANUPS.append(("kubelet", f))   # registered BEFORE the stop
     kubectl("label", "node", node, f"{KUBELET_LABEL}={f['case_id']}", "--overwrite")
@@ -2649,6 +2649,13 @@ def _instance_relocated(pods, pre_uids, node):
     """True when the Instance is Ready and serving on pods that are all new
     and none of which sits on `node`."""
     return _instance_rebuilt(pods, pre_uids) and all(p.get("node") and p["node"] != node for _n, p in pods)
+
+
+def _node_bite_held(node, pods):
+    """True when no pod of the Instance on `node` is Ready and serving: the
+    kubelet stop has bitten. Read on that node's pods alone, since a gang
+    whose other members sit on live nodes keeps those members serving."""
+    return not any(p.get("ready") and p.get("serving") for _n, p in pods if p.get("node") == node)
 
 
 def _isvc_events_since(case_id, since_epoch):
@@ -3059,7 +3066,7 @@ def _idle_lift(ctx, f, hdr):
 
     def bitten():
         if f["kind"] == "node":
-            return not _node_ready(f["node"]) and not any(p.get("ready") and p.get("serving") for _n, p in pods())
+            return not _node_ready(f["node"]) and _node_bite_held(f["node"], pods())
         return _pod_waiting_reason(_get_pod(f["crash_pod"])) == f.get("bite")
 
     print(f"  Phase 3: waiting for the fault to bite, then for lift={lift} (≤{budget}s)")

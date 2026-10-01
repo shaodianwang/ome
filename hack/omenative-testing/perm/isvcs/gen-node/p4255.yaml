@@ -1,0 +1,31 @@
+# p4255: [gen] node notready pd-mn W1 N=2 rp None mig Never co rolling repaired  Ne=2 Nd=2 Nr=2 ceil_e=2 ceil_d=2 ceil_r=2 fault=node:notready co=rolling topo=pd-mn during=idle lift=after-settle expect=repaired
+# reason: the kubelet under the highest-index engine Instance is stopped and, once the node has read NotReady with no pod of the Instance on it serving for the settle window, started again; the pods it ran were never stopped, so the Instance returns to Ready and serving on its running revision within the budget, with no new revision and no reset mailbox; nothing else moves while the node is down: a pod that is NotReady but neither restarted nor Failed is no repair trigger under restart policy None; migration mode Never allows no migration at all; the rolling group would hold a repair while no run is open, and none opens
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p4255 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "None", migrationPolicy: { mode: "Never" }, updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "None", migrationPolicy: { mode: "Never" }, updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine, decoder]
+          rollingUpdate: {}
