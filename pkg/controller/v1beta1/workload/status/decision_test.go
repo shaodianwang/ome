@@ -163,3 +163,37 @@ func TestStampFailedOnStuckPod_NeedsNoOperation(t *testing.T) {
 		t.Fatal("a nil termination leaves LastFailure alone")
 	}
 }
+
+// A Restart stamped over a Failed row that already carries a Restart is
+// that repair's next attempt, so the new operation continues the spent
+// one's retry count; a Restart opened on any other row starts at zero.
+func TestStampRestarting_ContinuesASpentRepairsRetryCount(t *testing.T) {
+	now := time.Date(2026, time.September, 21, 0, 0, 0, 0, time.UTC)
+	rows := map[int32]*types.InstanceStatus{
+		0: {Index: 0, Incarnation: 2, Phase: types.InstancePhaseFailed, RunningRevision: "rev-a",
+			Operation: &types.InstanceOperation{ID: "restart-0-1", Type: types.InstanceOperationRestart, Step: types.RestartStepDrain, RetryCount: 1}},
+		1: {Index: 1, Incarnation: 2, Phase: types.InstancePhaseReady, RunningRevision: "rev-a"},
+		2: {Index: 2, Incarnation: 2, Phase: types.InstancePhaseFailed, RunningRevision: "rev-a",
+			Operation: &types.InstanceOperation{ID: "update-2-1", Type: types.InstanceOperationUpdate, Step: types.UpdateStepDrain, RetryCount: 1}},
+	}
+	input := types.ReconcileInput{
+		Clock: clocktesting.NewFakeClock(now),
+		MutateInstance: func(_ context.Context, idx int32, mutate func(*types.InstanceStatus) bool) error {
+			mutate(rows[idx])
+			return nil
+		},
+	}
+	for idx, want := range map[int32]int32{0: 2, 1: 0, 2: 0} {
+		inc, err := StampRestarting(context.Background(), input, idx, "again", time.Hour)
+		if err != nil {
+			t.Fatalf("row %d: %v", idx, err)
+		}
+		got := rows[idx]
+		if inc != 3 || got.Incarnation != 3 || got.Phase != types.InstancePhaseRestarting || got.Operation == nil {
+			t.Fatalf("row %d = %+v, want Restarting at incarnation 3", idx, got)
+		}
+		if got.Operation.RetryCount != want {
+			t.Errorf("row %d: RetryCount = %d, want %d", idx, got.Operation.RetryCount, want)
+		}
+	}
+}

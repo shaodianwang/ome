@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 
+	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	types "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
@@ -59,6 +60,7 @@ func init() {
 		"timer.operationDeadline": applyOperationDeadline,
 		"timer.stuckPodGrace":     applyStuckPodGrace,
 		"timer.retryAt":           applyRetryAt,
+		"timer.repairRetry":       applyRepairRetry,
 		"timer.migrationDeadline": applyMigrationDeadline,
 		"timer.forceDelete":       applyForceDelete,
 	}
@@ -633,6 +635,35 @@ func applyRetryAt(_ context.Context, d *driver, ev TimelineEvent) (string, error
 		return "", fmt.Errorf("replay: timer.retryAt: no RetryBlock carries a nextRetryAt")
 	}
 	return d.advanceOnto("timer.retryAt", earliest, ev)
+}
+
+// applyRepairRetry advances the clock onto the earliest instant a repair
+// parked at Failed may re-arm: the recorded failure plus the configured
+// ladder's delay for its next attempt.
+func applyRepairRetry(_ context.Context, d *driver, ev TimelineEvent) (string, error) {
+	policy, err := retryPolicyOf("config.updateRetry", d.cfg.UpdateRetry)
+	if err != nil {
+		return "", err
+	}
+	if policy == nil {
+		return "", fmt.Errorf("replay: timer.repairRetry: config.updateRetry is not set, so no retry ladder runs")
+	}
+	input := types.ReconcileInput{UpdateRetryPolicy: policy, Clock: d.clock}
+	var earliest time.Time
+	for _, row := range d.store.Rows() {
+		row := row
+		at, owed := workloadops.RepairRetryAt(input, &row)
+		if !owed {
+			continue
+		}
+		if earliest.IsZero() || at.Before(earliest) {
+			earliest = at
+		}
+	}
+	if earliest.IsZero() {
+		return "", fmt.Errorf("replay: timer.repairRetry: no repair parked at Failed owes a re-arm")
+	}
+	return d.advanceOnto("timer.repairRetry", earliest, ev)
 }
 
 // applyMigrationDeadline advances the clock onto the earliest deadline a

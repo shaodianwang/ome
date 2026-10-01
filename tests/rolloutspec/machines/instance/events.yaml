@@ -65,6 +65,7 @@ events:
   - {id: timer.minReady, family: timer, description: the minReadySeconds window after Ready elapses}
   # Quoted: a plain scalar inside a flow mapping may not contain brackets.
   - {id: timer.retryAt, family: timer, description: "retryBlocks[].nextRetryAt elapses"}
+  - {id: timer.repairRetry, family: timer, description: "the retry ladder's (lifecycle.updateRetry) delay since a Restart parked at Failed elapses, so the repair may re-arm; a distinct clock from timer.retryAt, which is a revision's, where this one is the Instance's"}
   - {id: timer.expectationsTTL, family: timer, description: a pod create or delete stays unobserved until the controller stops waiting for it}
   - {id: timer.migrationDeadline, family: timer, description: an accepted migration has not finished by the time its deadline elapses}
   - {id: timer.stuckPodGrace, family: timer, description: "a pod is still not running when its stuck-pod grace period since creation elapses"}

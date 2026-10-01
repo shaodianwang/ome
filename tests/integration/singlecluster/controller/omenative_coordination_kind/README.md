@@ -67,6 +67,7 @@ vs. recreate updates.
 | Runtime+model resolution (CBM/CSR stall, missing CSR) | runtime_resolution_kind (RT-4/5) |
 | Partial failure recovery | partial_failure_kind (PF-1/2/3) |
 | Bad-image failure → Failed | bad_image_kind |
+| Parked repair heals when its cause disappears | failed_repair_heal_kind |
 | ISVC delete cascade (pods/Services/CRs) | cleanup_lifecycle_kind (LIFE-DEL) |
 | Per-pod headless DNS + EndpointSlice hostname | peer_discovery_kind (PEER-DNS) |
 | Per-revision Service emission + drift correction | producer_services_kind (SVC-1/2) |

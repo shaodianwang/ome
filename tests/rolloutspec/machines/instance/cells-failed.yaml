@@ -20,6 +20,15 @@
 # and a row whose remaining pods are all in a terminal phase has them
 # recycled and is rebuilt by the Create pass (T-failed-recycle-rebuild).
 #
+# A parked repair - a kept Restart operation - has two exits of its own,
+# both decided in the restart pass: its rebuilt set coming up resumes the
+# promote at the incarnation the pods carry (T-failed-repair-resume), and a
+# set that stays wedged is rebuilt again on the operator's retry ladder,
+# lifecycle.updateRetry (T-failed-repair-rearm), whose delay runs from the
+# recorded failure and whose attempts are counted on the operation. No
+# ladder configured leaves the row parked for the reset mailbox or a new
+# revision.
+#
 # GAP: no event models the unconditioned re-create. A Failed row with no
 # pods and no RetryBlock at all is re-materialized by the Create pass on
 # the very next pass (ops/create.go allowCreateForMissingInstance treats
@@ -47,15 +56,15 @@ cells:
     variants: [source]
     outcome: transition
     to: Ready
-    guard: RunningRevision empty, every pod carries the target revision's hash AND is ContainersReady, and no RetryBlock denies that target
-    note: a pod's revision is its revision-hash label, which is what the renderer stamps and what every other pass reads, so the pods the engine already wrote at the target are recognised as being on it; the adoption path then stamps Ready-on-target from ContainersReady alone and prunes that revision's RetryBlock. Adoption is that one shape and nothing wider - a pod carrying another hash or no hash at all is not on the target, an on-target pod set that is not runtime-ready is a row to recover, and both take the ordinary roll, which is the retry, recreate or relocation the row's strategy and disposition resolve; a Failed row with a recorded RunningRevision is never adopted
+    guard: either RunningRevision is empty, every pod carries the target revision's hash AND is ContainersReady, and no RetryBlock denies that target (the AdoptRevision backfill), or the row is a Restart parked at Failed whose live set is complete, at the row's incarnation and ContainersReady (the repair resume)
+    note: two routes. A parked repair whose rebuilt set came up on its own - the kubelet's retry succeeded once a missing image tag or ConfigMap key was back - is resumed by the restart pass at the incarnation the pods carry - serving gate, then Ready on the running revision with the spent operation cleared, with no operator action and whether or not a retry ladder is configured (ops/restart.go). Otherwise a pod's revision is its revision-hash label, which is what the renderer stamps and what every other pass reads, so the pods the engine already wrote at the target are recognised as being on it; the adoption path then stamps Ready-on-target from ContainersReady alone and prunes that revision's RetryBlock. Adoption is that one shape and nothing wider - a pod carrying another hash or no hash at all is not on the target, an on-target pod set that is not runtime-ready is a row to recover, and both take the ordinary roll, which is the retry, recreate or relocation the row's strategy and disposition resolve; a Failed row with a recorded RunningRevision is never adopted
     invariants: [ready.requires.proof]
     placement: unit
     coverage:
       perm: []
-      unit: [TestDetectUpdate_BackfillAdoptsRuntimeReadyPods, TestDetectUpdate_BackfillAdoptsEngineRenderedPods, TestDetectUpdate_BackfillRefusesWedgedPods, TestDetectUpdate_BackfillRollsPodSetWithAForeignRevision, TestDetectUpdate_WedgedPodsReachHeld, TestDetectUpdate_StuckPodOnTargetRelocates, TestPatchReadyOnRevision_PrunesBlock, TestPlan_Update_AdoptRevision]
+      unit: [TestDetectUpdate_BackfillAdoptsRuntimeReadyPods, TestDetectUpdate_BackfillAdoptsEngineRenderedPods, TestDetectUpdate_BackfillRefusesWedgedPods, TestDetectUpdate_BackfillRollsPodSetWithAForeignRevision, TestDetectUpdate_WedgedPodsReachHeld, TestDetectUpdate_StuckPodOnTargetRelocates, TestPatchReadyOnRevision_PrunesBlock, TestPlan_Update_AdoptRevision, TestSpentRepair_RebuiltSetComesUp_ResumesThePromote, TestRestart_DeadlineFailedRowResumesItsPromote]
       kind: []
-      replay: [failed-runtime-ready-adopt]
+      replay: [failed-runtime-ready-adopt, failed-repair-resume]
     status: decided
   - state: Failed
     event: pod.containersReady
@@ -88,7 +97,7 @@ cells:
     event: pod.servingOn
     variants: [source]
     outcome: ignore
-    note: rejoining the rotation updates ServingPodCount only; the escalation pass never un-stamps Failed, so a recovered pod set stays Failed until a trigger re-drives the row
+    note: rejoining the rotation updates ServingPodCount only; the escalation pass never un-stamps Failed, and recovery is by promotion rather than by un-stamping - a parked repair whose set is complete and ContainersReady re-enters through T-failed-repair-resume on that readiness, not on the gate
     invariants: [failed.is.sticky]
     placement: perm
     coverage: {perm: [], unit: [], kind: []}
@@ -127,7 +136,7 @@ cells:
     outcome: transition
     to: Restart/Drain
     guard: RecreateInstanceOnPodRestart, a multi-pod Instance with at least one survivor once terminal-phase pods are excluded from the live count, no preserved Update or Migrate operation, no RetryBlock denying the rebuild, and the revision the rebuild would land on still the roll target
-    note: partial gang loss is repaired from Failed because the recovery cannot be gated on a Ready the gang cannot reach; total loss instead falls to the Create pass's fresh start. A Failed row off the target is never repaired - the restart pass yields it and its corrective roll (spec.revision) replaces the gang at the target. A Restart parked at Failed is read as a spent attempt rather than an owner, so it re-arms the whole gang - only another Restart can rebuild it as one, with the incarnation bumped and the survivors drained - and each cycle is bounded by the attempt deadline; an Update or Migrate continuation still blocks the trigger because its own pass owns the row (ops/restart.go)
+    note: partial gang loss is repaired from Failed because the recovery cannot be gated on a Ready the gang cannot reach; total loss instead falls to the Create pass's fresh start. A Failed row off the target is never repaired - the restart pass yields it and its corrective roll (spec.revision) replaces the gang at the target. A Restart parked at Failed is read as a spent attempt rather than an owner, so it re-arms the whole gang - only another Restart can rebuild it as one, with the incarnation bumped, the survivors drained and the fresh operation's RetryCount continuing the spent one's - and each cycle is bounded by the attempt deadline; an Update or Migrate continuation still blocks the trigger because its own pass owns the row (ops/restart.go)
     invariants: [one.operation.per.instance]
     placement: unit
     coverage:
@@ -489,6 +498,32 @@ cells:
     coverage: {perm: [], unit: [], kind: []}
     status: current
   - state: Failed
+    event: timer.repairRetry
+    windows: [before]
+    outcome: transition
+    to: Restart/Drain
+    guard: a Restart parked at Failed whose live set is complete and wedged, lifecycle.updateRetry configured, its delay for the next attempt elapsed since the recorded failure, attempts not spent, and no RetryBlock denying the running revision
+    note: the ladder is lifecycle.updateRetry, the one retry ladder, but the clock is the Instance's own, distinct from a revision's RetryBlock. It runs from LastFailure.Time (the Failed stamps write it with the phase) and is indexed by the operation's RetryCount, which the re-armed Restart carries forward, so no per-Instance timestamp is added to the row. The re-arm is not a fresh open - the pods are not serving - so it is neither budget-charged nor gated, and it holds under the plain pause like every repair; a frozen pause suspends the pass. Not yet due, the pass deposits the remaining wait as its wake-up. With the attempts spent the row parks for good and the escalation pass announces RepairRetriesExhausted once; with no ladder configured nothing runs and the row waits for the reset mailbox or a new revision. A gang short of a member does not wait for this clock - the lost-member trigger re-arms it at once, and a row with no pod left is the Create pass's fresh start (ops/restart.go)
+    invariants: [one.operation.per.instance]
+    placement: unit
+    coverage:
+      perm: []
+      unit: [TestSpentRepair_WedgedSet_ReArmsOnTheLadderAndHeals, TestSpentRepair_Gang_AllMembersWedged_ReArmsOnTheLadder, TestSpentRepair_CrashLoopRepairUnderPolicyNone_ReArmsOnTheLadder, TestSpentRepair_NeverHeals_ParksAfterTheLadderIsSpent, TestSpentRepair_NoLadder_StaysParked, TestDetectRestartTrigger_SpentRepairReArmsWhenTheLadderIsDue, TestDetectRestartTrigger_SpentRepairWaitsForTheLadder, TestDetectRestartTrigger_SpentRepairLadderGrows, TestDetectRestartTrigger_SpentRepairWithoutALadderStaysParked, TestDetectRestartTrigger_SpentRepairStopsAtMaxAttempts, TestDetectRestartTrigger_SpentRepairOldIncarnationSetReArms, TestDetectRestartTrigger_SpentRepairWithNoPodsIsNotDecidedHere, TestEscalation_ExhaustedRepairIsAnnouncedOnce]
+      kind: [failed_repair_heal]
+      replay: [failed-repair-rearm]
+    status: decided
+  - state: Failed
+    event: timer.repairRetry
+    windows: [boundary, after]
+    outcome: ignore
+    note: the re-arm is written once; after it lands the row is Restarting and the open repair is driven on, never re-armed again until it parks anew and the ladder restarts from that failure
+    placement: unit
+    coverage:
+      perm: []
+      unit: [TestDetectRestartTrigger_SpentRepairReArmsWhenTheLadderIsDue]
+      kind: []
+    status: decided
+  - state: Failed
     event: timer.retryAt
     windows: [before]
     outcome: transition
@@ -841,7 +876,7 @@ cells:
   - state: Failed
     event: ctrl.resync
     outcome: defer
-    note: the requeue cadences are the whole level-triggered surface for this row — a tick re-reads the roll target, re-evaluates the RetryBlock due time and the scale-down wave, and re-arms the requeue with the remaining wait — but by itself it changes nothing
+    note: the requeue cadences are the whole level-triggered surface for this row — a tick re-reads the roll target, re-evaluates the RetryBlock due time, a parked repair's due time and the scale-down wave, and re-arms the requeue with the remaining wait — but by itself it changes nothing; what a tick observes about the pods or the clocks is those events' own cells
     placement: unit
     coverage: {perm: [], unit: [], kind: []}
     status: current

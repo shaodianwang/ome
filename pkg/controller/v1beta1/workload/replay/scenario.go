@@ -165,7 +165,8 @@ type MigrationAudit struct {
 	Window       string `json:"window"`
 }
 
-// RetrySpec is the same-target update retry budget.
+// RetrySpec is the retry ladder: the same-target update budget, which
+// also paces a parked repair's re-arms.
 type RetrySpec struct {
 	MaxAttempts  int32   `json:"maxAttempts"`
 	InitialDelay string  `json:"initialDelay"`
@@ -380,6 +381,7 @@ var eventArgKeys = map[string][]string{
 	"timer.operationDeadline": {"slack"},
 	"timer.stuckPodGrace":     {"slack"},
 	"timer.retryAt":           {"slack"},
+	"timer.repairRetry":       {"slack"},
 	"timer.migrationDeadline": {"slack"},
 	"timer.forceDelete":       {"slack"},
 }

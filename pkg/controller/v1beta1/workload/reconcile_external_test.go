@@ -1188,6 +1188,23 @@ type recoveryHarness struct {
 	// retryPolicy is the input's UpdateRetryPolicy; nil models an operator
 	// config with no updateRetry block.
 	retryPolicy *workloadtypes.RetryPolicy
+
+	// wedge is the fault the kubelet model applies to every pod created at
+	// or after wedgeSince: the pod parks in the named terminal waiting
+	// reason instead of starting. Clearing it lets those pods start on the
+	// next kubelet pass, the way a kubelet retry succeeds once a missing
+	// ConfigMap key or image tag is back. With wedgeSticky the pods parked
+	// while the wedge was armed stay parked after it clears — the cause is
+	// gone but the pod cannot recover in place — so only a rebuilt pod
+	// comes up; wedgedPods remembers them.
+	wedge       string
+	wedgeSince  time.Time
+	wedgeSticky bool
+	wedgedPods  map[string]string
+
+	// badImageHeals makes the kubelet model treat the bad image as
+	// pullable from now on: the registry has the tag again.
+	badImageHeals bool
 }
 
 func recoveryPodSpec(image string) *corev1.PodSpec {
@@ -1313,7 +1330,20 @@ func (h *recoveryHarness) kubelet() {
 			}
 		}
 		image := pod.Spec.Containers[0].Image
+		wedged := h.wedgeReasonFor(pod)
 		switch {
+		case wedged != "":
+			pod.Status.Phase = corev1.PodPending
+			pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+				Name:  pod.Spec.Containers[0].Name,
+				Image: image,
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+					Reason:  wedged,
+					Message: "container cannot start: " + wedged,
+				}},
+			}}
+			setPodCondition(pod, corev1.ContainersReady, corev1.ConditionFalse, h.clk.Now())
+			setPodCondition(pod, corev1.PodReady, corev1.ConditionFalse, h.clk.Now())
 		case image == stuckImage:
 			pod.Status.Phase = corev1.PodRunning
 			pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
@@ -1324,7 +1354,7 @@ func (h *recoveryHarness) kubelet() {
 			}}
 			setPodCondition(pod, corev1.ContainersReady, corev1.ConditionFalse, h.clk.Now())
 			setPodCondition(pod, corev1.PodReady, corev1.ConditionFalse, h.clk.Now())
-		case image == badImage:
+		case image == badImage && !h.badImageHeals:
 			pod.Status.Phase = corev1.PodPending
 			pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
 				Name:  pod.Spec.Containers[0].Name,
@@ -1516,6 +1546,58 @@ func (h *recoveryHarness) sawEvent(reason workloadtypes.EventReason) bool {
 		}
 	}
 	return false
+}
+
+// armWedge starts the fault: every pod created from now on parks in
+// reason. sticky keeps those pods parked after clearWedge.
+func (h *recoveryHarness) armWedge(reason string, sticky bool) {
+	h.wedge = reason
+	h.wedgeSince = h.clk.Now()
+	h.wedgeSticky = sticky
+	if h.wedgedPods == nil {
+		h.wedgedPods = map[string]string{}
+	}
+}
+
+// clearWedge ends the fault: pods created from now on start normally, and
+// so do the parked ones unless the wedge was sticky.
+func (h *recoveryHarness) clearWedge() {
+	h.wedge = ""
+	if !h.wedgeSticky {
+		h.wedgedPods = map[string]string{}
+	}
+}
+
+// wedgeLivePods parks every live pod in reason, whatever its age: the
+// fault hits a set that was already running, as a crash loop does.
+func (h *recoveryHarness) wedgeLivePods(reason string) {
+	if h.wedgedPods == nil {
+		h.wedgedPods = map[string]string{}
+	}
+	for _, pod := range h.livePods() {
+		h.wedgedPods[wedgeKey(pod)] = reason
+	}
+}
+
+// wedgeKey identifies one pod object across the kubelet model's passes: the
+// fake client mints no UID, and a rebuilt pod reuses its name, so the
+// creation instant the model stamps is what tells the two apart.
+func wedgeKey(pod *corev1.Pod) string {
+	return pod.Name + "@" + pod.CreationTimestamp.UTC().Format(time.RFC3339)
+}
+
+// wedgeReasonFor is the kubelet model's fault decision for one pod: the
+// armed reason for a pod created under the wedge, the remembered reason for
+// a sticky pod parked under an earlier wedge, otherwise none.
+func (h *recoveryHarness) wedgeReasonFor(pod *corev1.Pod) string {
+	if reason, ok := h.wedgedPods[wedgeKey(pod)]; ok {
+		return reason
+	}
+	if h.wedge == "" || pod.CreationTimestamp.Time.Before(h.wedgeSince) {
+		return ""
+	}
+	h.wedgedPods[wedgeKey(pod)] = h.wedge
+	return h.wedge
 }
 
 func setPodCondition(pod *corev1.Pod, condType corev1.PodConditionType, status corev1.ConditionStatus, now time.Time) {

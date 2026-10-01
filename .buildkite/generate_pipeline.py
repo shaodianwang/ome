@@ -137,7 +137,7 @@ KIND_SPEC_GROUPS = (
     ("runtime-retry-recovery", "Runtime, retry, and recovery", (
         "bad_image", "crashloop_new_revision_bound", "crashloop_off_target_roll",
         "disposition", "retry_block", "runtime_corrective_recovery",
-        "runtime_owned_runner_shape", "runtime_resolution",
+        "runtime_owned_runner_shape", "runtime_resolution", "failed_repair_heal",
     )),
     ("pd-topology-isolation", "PD topology and isolation", (
         "pd", "pd_isolation", "pd_three_way", "pd_concurrent", "independent",

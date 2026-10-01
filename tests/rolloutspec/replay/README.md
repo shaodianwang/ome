@@ -256,6 +256,7 @@ moves nothing.
 | `timer.operationDeadline` | the earliest in-flight `Operation.Deadline` |
 | `timer.stuckPodGrace` | the earliest `pod.creationTimestamp + config.stuckPodGrace` over the pods holding a terminal waiting reason |
 | `timer.retryAt` | the earliest `retryBlocks[].nextRetryAt` |
+| `timer.repairRetry` | the earliest `lastFailure.time` plus the `config.updateRetry` delay for the next attempt, over the Restarts parked at Failed |
 | `timer.migrationDeadline` | the earliest `Deadline` over the non-terminal migration records |
 | `timer.forceDelete[overdueSlack]` | the earliest `pod.deletionTimestamp + config.forceDelete.overdueSlack` over the Terminating pods |
 
@@ -433,7 +434,7 @@ The table events the driver can stage are the ones the scenarios here need:
 `spec.migrateRequest`, `spec.rollbackTarget`, `spec.gangWidth`,
 `gang.podGroup`,
 `timer.operationDeadline`, `timer.stuckPodGrace`, `timer.retryAt`,
-`timer.migrationDeadline`, `timer.forceDelete[overdueSlack]`,
+`timer.repairRetry`, `timer.migrationDeadline`, `timer.forceDelete[overdueSlack]`,
 and `clock.advance`. A scenario naming any other declared event fails to load
 with that as the reason, so the gap is always visible rather than silent.
 

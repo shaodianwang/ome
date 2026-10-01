@@ -94,3 +94,15 @@ history:
   - {state: Failed, event: gang.podGroup, variants: [PhaseFailed], windows: [], transition: "", prs: ["#1506"]}
   - {state: Failed, event: gang.podGroup, variants: [Terminating], windows: [], transition: "", prs: ["#1506"]}
   - {state: Failed, event: gang.podGroup, variants: [Unschedulable, ScheduleTimeout], windows: [], transition: "", prs: ["#1506"]}
+  - state: Failed
+    event: timer.repairRetry
+    variants: []
+    windows: []
+    transition: ""
+    decision: owner-decision-failed-row-exits
+  - state: Failed
+    event: pod.containersReady
+    variants: [source]
+    windows: [before]
+    transition: ""
+    decision: owner-decision-failed-row-exits

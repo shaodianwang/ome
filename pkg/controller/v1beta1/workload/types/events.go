@@ -259,9 +259,15 @@ const (
 	// lifecycle.instanceReadyTimeout is set. Nothing is failed: an Instance
 	// that never becomes Ready waits for an operator instead.
 	EventReasonInstanceReadyTimeoutUnconfigured EventReason = "InstanceReadyTimeoutUnconfigured"
-	EventReasonMigrationSurgeCreateBlocked      EventReason = "MigrationSurgeCreateBlocked"
-	EventReasonMigrationFromNodeMismatch        EventReason = "MigrationFromNodeMismatch"
-	EventReasonMigrationNodeAffinityConflict    EventReason = "MigrationNodeAffinityConflict"
+	// EventReasonRepairRetriesExhausted is a Warning fired once per parked
+	// attempt when a repair has spent every re-arm the operator's retry
+	// ladder (lifecycle.updateRetry) allows and its pods are still wedged.
+	// The row stays Failed until an operator resets it or a new revision
+	// arrives.
+	EventReasonRepairRetriesExhausted        EventReason = "RepairRetriesExhausted"
+	EventReasonMigrationSurgeCreateBlocked   EventReason = "MigrationSurgeCreateBlocked"
+	EventReasonMigrationFromNodeMismatch     EventReason = "MigrationFromNodeMismatch"
+	EventReasonMigrationNodeAffinityConflict EventReason = "MigrationNodeAffinityConflict"
 
 	// EventReasonPodGroupReset is a Warning fired when an Instance's
 	// PodGroup is deleted so a fresh one can be built, because the gang

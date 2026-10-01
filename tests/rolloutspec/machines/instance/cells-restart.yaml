@@ -65,10 +65,14 @@ cells:
     variants: [source]
     windows: [after]
     transition: T-restart-deadline
-    outcome: ignore
-    note: the row is Failed with the Restart operation preserved, and no promote reads a healthy pod set from there, so recovery belongs to the Failed machine - a gang short of a member re-arms the whole Restart over the spent attempt, while a complete single-pod set waits for a corrective revision or a due block
-    placement: perm
-    coverage: {perm: [], unit: [TestRestart_DeadlineFailedRowIsNotPromotedByAHealthyPodSet], kind: []}
+    outcome: transition
+    to: Ready
+    note: the row is Failed with the Restart operation preserved, and the restart pass resumes the promote from there once the rebuilt set is complete, at the row's incarnation and ContainersReady - serving gate, then Ready on the running revision with the spent operation cleared, no new attempt (T-failed-repair-resume); a gang short of a member instead re-arms the whole Restart over the spent attempt, and a set still wedged waits for the retry ladder
+    placement: unit
+    coverage:
+      perm: []
+      unit: [TestRestart_DeadlineFailedRowResumesItsPromote]
+      kind: []
     status: decided
   - state: Restart/Drain
     event: pod.containersReady
@@ -86,11 +90,15 @@ cells:
     variants: [source]
     windows: [after]
     transition: T-restart-stuck
-    outcome: ignore
-    note: the row is Failed with the Restart operation preserved and nothing re-promotes it from the pod side
-    placement: perm
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    outcome: transition
+    to: Ready
+    note: the row is Failed with the Restart operation preserved, and the restart pass resumes the promote from there once the rebuilt set is complete, at the row's incarnation and ContainersReady (T-failed-repair-resume); the kubelet's retry succeeding once the cause is gone is exactly this readiness
+    placement: unit
+    coverage:
+      perm: []
+      unit: [TestSpentRepair_RebuiltSetComesUp_ResumesThePromote]
+      kind: [failed_repair_heal]
+    status: decided
   - state: Restart/Drain
     event: pod.containersReady
     variants: [source]
@@ -484,11 +492,15 @@ cells:
     variants: [source]
     windows: [after]
     transition: T-restart-stuckgrace
-    outcome: ignore
-    note: the row is Failed with the Restart operation preserved and nothing re-promotes it from the pod side
-    placement: perm
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    outcome: transition
+    to: Ready
+    note: the row is Failed with the Restart operation preserved, and the restart pass resumes the promote from there once the rebuilt set is complete, at the row's incarnation and ContainersReady (T-failed-repair-resume); the kubelet's retry succeeding once the cause is gone is exactly this readiness
+    placement: unit
+    coverage:
+      perm: []
+      unit: [TestSpentRepair_RebuiltSetComesUp_ResumesThePromote]
+      kind: [failed_repair_heal]
+    status: decided
   - state: Restart/Drain
     event: pod.containersReady
     variants: [source]

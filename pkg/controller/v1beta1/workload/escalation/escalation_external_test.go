@@ -14,6 +14,7 @@ import (
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/record"
 	clocktesting "k8s.io/utils/clock/testing"
 )
 
@@ -2283,5 +2284,63 @@ func TestEscalateStuckPodFailures_CapturesLastFailure(t *testing.T) {
 	// A stuck waiting-state wedge never ran a process → no exit code.
 	if lf.ExitCode != nil {
 		t.Errorf("LastFailure.ExitCode: got %v want nil for a waiting-state wedge", lf.ExitCode)
+	}
+}
+
+// A repair parked at Failed with every re-arm of the ladder spent is
+// announced once per parked attempt, so an operator learns the row will
+// not move again on its own. Attempts still left, or no ladder at all,
+// announce nothing.
+//
+// Cells: instance/Failed/timer.repairRetry/before
+func TestEscalation_ExhaustedRepairIsAnnouncedOnce(t *testing.T) {
+	now := time.Now()
+	parked := func(retries int32) []workloadtypes.InstanceStatus {
+		rows := failedOnDeadline(now)
+		rows[0].Operation.ID = "restart-0-1"
+		rows[0].Operation.RetryCount = retries
+		return rows
+	}
+	ladder := &workloadtypes.RetryPolicy{MaxAttempts: 2, InitialDelay: time.Minute, MaxDelay: 10 * time.Minute, Multiplier: 2}
+	for _, tc := range []struct {
+		name   string
+		rows   []workloadtypes.InstanceStatus
+		ladder *workloadtypes.RetryPolicy
+		want   int
+	}{
+		{"ladder spent", parked(2), ladder, 1},
+		{"attempts left", parked(1), ladder, 0},
+		{"no ladder", parked(2), nil, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input, rec := escalationFixture(tc.rows)
+			input.UpdateRetryPolicy = tc.ladder
+			input.EventTarget = &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: "ns"}}
+			recorder := record.NewFakeRecorder(8)
+			deps := workloadtypes.Deps{Recorder: recorder}
+			for pass := 0; pass < 2; pass++ {
+				input.ObservedState.InstanceStatuses = append([]workloadtypes.InstanceStatus(nil), rec.store...)
+				if err := runEscalationPass(t, deps, input, singleInstancePlan(0, 1), nil); err != nil {
+					t.Fatalf("escalation pass %d: %v", pass, err)
+				}
+			}
+			got := 0
+			for done := false; !done; {
+				select {
+				case e := <-recorder.Events:
+					if strings.Contains(e, string(workloadtypes.EventReasonRepairRetriesExhausted)) {
+						got++
+					}
+				default:
+					done = true
+				}
+			}
+			if got != tc.want {
+				t.Errorf("RepairRetriesExhausted events over two passes = %d, want %d", got, tc.want)
+			}
+			if rec.store[0].Phase != workloadtypes.InstancePhaseFailed || rec.store[0].Operation == nil {
+				t.Errorf("row = %+v, want the parked repair left as it is", rec.store[0])
+			}
+		})
 	}
 }

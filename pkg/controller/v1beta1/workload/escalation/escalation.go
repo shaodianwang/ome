@@ -22,6 +22,7 @@ import (
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/evidence"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/holds"
+	workloadops "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
@@ -172,6 +173,9 @@ func Run(ctx context.Context, in PassInput) error {
 			rowEvidence := evidenceFor(input.ObservedState.InstanceStatuses, byIdx, row.Index, now, input.StuckPodGrace, attemptTargetRevision(input, row))
 			if t := refreshedFailureEvidence(row, rowEvidence); t != nil {
 				stamps.add(row.Index, status.RecordRefreshedFailure(t, DeadlineExceededReason), nil)
+			}
+			if err := announceRepairExhausted(ctx, deps, input, plan, row); err != nil {
+				return fmt.Errorf("announce exhausted repair (instance=%d): %w", row.Index, err)
 			}
 			continue
 		}
@@ -338,6 +342,28 @@ func Run(ctx context.Context, in PassInput) error {
 	if err := stamps.flush(ctx); err != nil {
 		return fmt.Errorf("flush escalation stamps (component=%s): %w", plan.Component, err)
 	}
+	return nil
+}
+
+// announceRepairExhausted warns once per parked attempt that a repair has
+// spent every re-arm the operator's ladder allows: the row stays Failed
+// until an operator resets it or a new revision arrives, and nothing else
+// in the cluster is going to say so.
+func announceRepairExhausted(ctx context.Context, deps types.Deps, input types.ReconcileInput, plan types.ComponentPlan, row types.InstanceStatus) error {
+	if deps.Recorder == nil || !workloadops.RepairRetriesExhausted(input, &row) {
+		return nil
+	}
+	target := types.EventTarget(input)
+	if target == nil {
+		return nil
+	}
+	announced, err := status.Announce(ctx, input, row.Index, types.EventReasonRepairRetriesExhausted)
+	if err != nil || !announced {
+		return err
+	}
+	deps.Recorder.Eventf(target, corev1.EventTypeWarning, string(types.EventReasonRepairRetriesExhausted),
+		"OMENative component=%s instance=%d repair parked at Failed after %d re-arm(s): %s; reset the Instance or publish a corrected revision",
+		plan.Component, row.Index, row.Operation.RetryCount, workloadops.RepairFailureSummary(&row))
 	return nil
 }
 

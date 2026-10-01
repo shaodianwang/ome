@@ -243,8 +243,12 @@ type ReconcileInput struct {
 	// in ObservedState.RetryBlocks.
 	MutateRetryBlock func(ctx context.Context, targetRevision string, mutate func(*RetryBlock) RetryBlockDisposition) error
 
-	// UpdateRetryPolicy bounds automatic same-target update retries.
-	// nil = unconfigured → fail-safe: first failure Holds.
+	// UpdateRetryPolicy is the operator's retry ladder
+	// (lifecycle.updateRetry). It bounds automatic same-target update
+	// retries and paces the re-arms of a repair parked at Failed, measured
+	// from the recorded failure and counted on the operation.
+	// nil = unconfigured → fail-safe: first failure Holds, and a parked
+	// repair never re-arms.
 	UpdateRetryPolicy *RetryPolicy
 
 	// ForceDelete gates the stuck-Terminating force-delete escalation

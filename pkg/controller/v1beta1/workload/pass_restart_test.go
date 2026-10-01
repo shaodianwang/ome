@@ -15,6 +15,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/status"
 	workloadtypes "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -1014,5 +1015,317 @@ func TestReconcile_OffTargetCrash_GangStartIsExemptFromTheCoordinationGate(t *te
 				}
 			})
 		}
+	}
+}
+
+// A repair that parked at Failed — its rebuilt pods wedged past the
+// stuck-pod grace or the attempt deadline — has two exits of its own, and
+// the stories below drive each of them end to end through Reconcile: the
+// set coming up on its own resumes the promote, and a set that stays
+// wedged is rebuilt again on the operator's retry ladder until it heals
+// or the ladder is spent.
+
+// retryLadder is the seconds-scale lifecycle.updateRetry the stories run
+// under, read here for a parked repair's re-arms; the fake clock steps at
+// least 30s per pass.
+func retryLadder(maxAttempts int32, initial time.Duration) *workloadtypes.RetryPolicy {
+	return &workloadtypes.RetryPolicy{MaxAttempts: maxAttempts, InitialDelay: initial, MaxDelay: 10 * time.Minute, Multiplier: 2}
+}
+
+// parkedRepair reports whether the Instance is Failed with its Restart
+// operation preserved.
+func parkedRepair(h *recoveryHarness, idx int32) bool {
+	s := h.instance(idx)
+	return s != nil && s.Phase == workloadtypes.InstancePhaseFailed &&
+		s.Operation != nil && s.Operation.Type == workloadtypes.InstanceOperationRestart
+}
+
+// servingReady reports whether the Instance is Ready with no operation
+// and exactly n live pods, all in rotation.
+func servingReady(h *recoveryHarness, idx int32, n int) bool {
+	s := h.instance(idx)
+	if s == nil || s.Phase != workloadtypes.InstancePhaseReady || s.Operation != nil {
+		return false
+	}
+	serving := 0
+	for _, pod := range h.podsOf(idx) {
+		if podreadiness.IsServing(pod) {
+			serving++
+		}
+	}
+	return len(h.podsOf(idx)) == n && serving == n
+}
+
+// parkRepair drives a converged Instance into the parked shape: the pod
+// set is lost, the rebuild wedges in reason, and the escalation fails the
+// attempt with its Restart preserved.
+func parkRepair(t *testing.T, h *recoveryHarness, reason string, sticky bool) {
+	t.Helper()
+	h.armWedge(reason, sticky)
+	h.losePods(0)
+	if !h.run(40, func() bool { return parkedRepair(h, 0) }) {
+		h.dumpState("park")
+		t.Fatalf("the rebuild never parked at Failed with its Restart preserved")
+	}
+}
+
+// eventCount is how many of the events recorded so far carry reason.
+func eventCount(h *recoveryHarness, reason string) int {
+	n := 0
+	for _, e := range h.events {
+		if strings.Contains(e, reason) {
+			n++
+		}
+	}
+	return n
+}
+
+// The rebuilt set comes up on its own — the kubelet's retry succeeds once
+// the missing ConfigMap key is back — and the parked repair finishes with
+// its promote: serving gate written, Ready on the running revision, the
+// incarnation the pods already carry, no operator action. The ladder is
+// not consulted, so an unconfigured one changes nothing here.
+//
+// Cells: instance/Failed/pod.containersReady[source]/before, instance/Restart/Drain/pod.containersReady[source]/after@T-restart-stuck, instance/Restart/Drain/pod.containersReady[source]/after@T-restart-stuckgrace
+func TestSpentRepair_RebuiltSetComesUp_ResumesThePromote(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		ladder *workloadtypes.RetryPolicy
+	}{
+		{"ladder configured", retryLadder(3, 2*time.Minute)},
+		{"ladder unconfigured", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRestartHarness(t, 1)
+			h.retryPolicy = tc.ladder
+			parkRepair(t, h, "CreateContainerConfigError", false)
+			parked := h.instance(0)
+
+			h.clearWedge()
+			if !h.run(20, func() bool { return servingReady(h, 0, 1) }) {
+				h.dumpState("resume")
+				t.Fatalf("the healed set was never promoted")
+			}
+			got := h.instance(0)
+			if got.Incarnation != parked.Incarnation {
+				t.Errorf("incarnation = %d, want %d: a set that came up is promoted, not rebuilt", got.Incarnation, parked.Incarnation)
+			}
+			if got.RunningRevision != h.revV1.Name {
+				t.Errorf("running revision = %q, want %q", got.RunningRevision, h.revV1.Name)
+			}
+		})
+	}
+}
+
+// The rebuilt set stays wedged even after the cause is gone — the pods
+// cannot recover in place — so the parked repair re-arms on the ladder:
+// not before the configured delay from the recorded failure, then as a
+// whole rebuild at the next incarnation, which heals.
+//
+// Cells: instance/Failed/timer.repairRetry/before
+func TestSpentRepair_WedgedSet_ReArmsOnTheLadderAndHeals(t *testing.T) {
+	h := newRestartHarness(t, 1)
+	h.retryPolicy = retryLadder(3, 2*time.Minute)
+	parkRepair(t, h, "CreateContainerConfigError", true)
+	parked := h.instance(0)
+	anchor := parked.LastFailure.Time.Time
+	notBefore := anchor.Add(2 * time.Minute)
+
+	// The cause clears at once; the parked pod stays wedged regardless.
+	h.clearWedge()
+	healed := h.runWithInvariant(40,
+		func() bool { return servingReady(h, 0, 1) },
+		func() {
+			if h.clk.Now().Before(notBefore) && !parkedRepair(h, 0) {
+				h.dumpState("early re-arm")
+				t.Fatalf("the repair re-armed at %v, before the ladder's first delay elapsed at %v", h.clk.Now(), notBefore)
+			}
+		})
+	if !healed {
+		h.dumpState("re-arm")
+		t.Fatalf("the re-armed repair never healed")
+	}
+	got := h.instance(0)
+	if got.Incarnation != parked.Incarnation+1 {
+		t.Errorf("incarnation = %d, want %d: one rebuild on the ladder", got.Incarnation, parked.Incarnation+1)
+	}
+}
+
+// A gang whose members are all alive but wedged has no member to lose, so
+// only the ladder rebuilds it; the rebuild is the whole gang.
+//
+// Cells: instance/Failed/timer.repairRetry/before
+func TestSpentRepair_Gang_AllMembersWedged_ReArmsOnTheLadder(t *testing.T) {
+	h := newRecoveryHarness(t, true)
+	h.retryPolicy = retryLadder(3, time.Minute)
+	h.driveToReadyOnV1()
+	parkRepair(t, h, "CreateContainerConfigError", true)
+	parked := h.instance(0)
+	if pods := h.podsOf(0); len(pods) != 2 {
+		t.Fatalf("parked gang has %d pods, want both members present and wedged", len(pods))
+	}
+
+	h.clearWedge()
+	if !h.run(40, func() bool { return servingReady(h, 0, 2) }) {
+		h.dumpState("gang re-arm")
+		t.Fatalf("the re-armed gang never healed")
+	}
+	if got := h.instance(0); got.Incarnation != parked.Incarnation+1 {
+		t.Errorf("incarnation = %d, want %d", got.Incarnation, parked.Incarnation+1)
+	}
+}
+
+// Under RestartPolicy=None the only repair is the crash-loop one, and its
+// parked attempt re-arms the same way: the policy governs whether a repair
+// starts, not whether one that started may try again.
+//
+// Cells: instance/Failed/timer.repairRetry/before
+func TestSpentRepair_CrashLoopRepairUnderPolicyNone_ReArmsOnTheLadder(t *testing.T) {
+	h := newRecoveryHarness(t, false)
+	h.retryPolicy = retryLadder(3, time.Minute)
+	h.driveToReadyOnV1()
+
+	// The running pod crash-loops, and so does every rebuild while the
+	// cause stands.
+	h.armWedge("CrashLoopBackOff", true)
+	h.wedgeLivePods("CrashLoopBackOff")
+	if !h.run(40, func() bool { return parkedRepair(h, 0) }) {
+		h.dumpState("crash-loop park")
+		t.Fatalf("the crash-loop repair never parked at Failed")
+	}
+	parked := h.instance(0)
+
+	h.clearWedge()
+	if !h.run(40, func() bool { return servingReady(h, 0, 1) }) {
+		h.dumpState("crash-loop re-arm")
+		t.Fatalf("the re-armed crash-loop repair never healed")
+	}
+	if got := h.instance(0); got.Incarnation != parked.Incarnation+1 {
+		t.Errorf("incarnation = %d, want %d", got.Incarnation, parked.Incarnation+1)
+	}
+}
+
+// A cause that never clears spends the ladder: each re-arm rebuilds once
+// more, and after maxAttempts the row parks for good — no further
+// incarnation, one RepairRetriesExhausted warning — until an operator
+// resets it or publishes a corrected revision.
+//
+// Cells: instance/Failed/timer.repairRetry/before
+func TestSpentRepair_NeverHeals_ParksAfterTheLadderIsSpent(t *testing.T) {
+	h := newRestartHarness(t, 1)
+	h.retryPolicy = retryLadder(2, 30*time.Second)
+	h.recorder = record.NewFakeRecorder(64)
+	parkRepair(t, h, "CreateContainerConfigError", true)
+	first := h.instance(0).Incarnation
+
+	spent := func() bool {
+		s := h.instance(0)
+		return parkedRepair(h, 0) && s.Operation.RetryCount == 2
+	}
+	if !h.run(60, spent) {
+		h.dumpState("ladder")
+		t.Fatalf("the ladder was never spent")
+	}
+	final := h.instance(0)
+	if final.Incarnation != first+2 {
+		t.Errorf("incarnation = %d, want %d: one rebuild per re-arm", final.Incarnation, first+2)
+	}
+	h.settle(20)
+	if got := h.instance(0); !parkedRepair(h, 0) || got.Incarnation != final.Incarnation {
+		h.dumpState("parked for good")
+		t.Fatalf("the spent ladder re-armed again: %+v", got)
+	}
+	if n := eventCount(h, string(workloadtypes.EventReasonRepairRetriesExhausted)); n != 1 {
+		t.Errorf("RepairRetriesExhausted events = %d, want exactly 1", n)
+	}
+}
+
+// No ladder configured is the fail-safe: a wedged set stays parked, with
+// no rebuild and no attempt counted, until an operator acts.
+//
+// Cells: instance/Failed/timer.repairRetry/before
+func TestSpentRepair_NoLadder_StaysParked(t *testing.T) {
+	h := newRestartHarness(t, 1)
+	h.retryPolicy = nil
+	h.recorder = record.NewFakeRecorder(64)
+	parkRepair(t, h, "CreateContainerConfigError", true)
+	parked := h.instance(0)
+
+	h.settle(40)
+	got := h.instance(0)
+	if !parkedRepair(h, 0) || got.Incarnation != parked.Incarnation || got.Operation.RetryCount != 0 {
+		h.dumpState("unconfigured")
+		t.Fatalf("an unconfigured ladder must leave the repair parked as it was: %+v", got)
+	}
+	if n := eventCount(h, string(workloadtypes.EventReasonRepairRetriesExhausted)); n != 0 {
+		t.Errorf("RepairRetriesExhausted events = %d, want none: there is no ladder to exhaust", n)
+	}
+}
+
+// The reset mailbox stays the immediate escape from a parked repair: with
+// the pods deleted and the spent operation cleared, the Create pass
+// rebuilds the Instance on the next pass, ladder or no ladder.
+//
+// Cells: instance/Failed/spec.resetInstances[all]/before
+func TestSpentRepair_ResetMailboxStillRebuilds(t *testing.T) {
+	h := newRestartHarness(t, 1)
+	h.retryPolicy = retryLadder(1, 30*time.Second)
+	parkRepair(t, h, "CreateContainerConfigError", true)
+	if !h.run(40, func() bool { return parkedRepair(h, 0) && h.instance(0).Operation.RetryCount == 1 }) {
+		h.dumpState("ladder")
+		t.Fatalf("the ladder was never spent")
+	}
+
+	// What the mailbox does: the pods go, the operation is cleared.
+	h.clearWedge()
+	h.losePods(0)
+	cleared, err := status.ClearFailedInstanceOperation(h.ctx, h.mutateInstance(), 0)
+	if err != nil || !cleared {
+		t.Fatalf("clear the parked operation: cleared=%v err=%v", cleared, err)
+	}
+	if !h.run(30, func() bool { return servingReady(h, 0, 1) }) {
+		h.dumpState("reset")
+		t.Fatalf("the reset Instance was never rebuilt")
+	}
+}
+
+// A revision Held after its retry budget is spent stays Held when the
+// cause of its failures clears: only a new revision or the release
+// mailbox admits another attempt at it. The Instance keeps serving the
+// revision it ran.
+//
+// Cells: instance/Failed/gate.deny[Held]/before
+func TestHeldRevision_StaysHeldWhenItsCauseHeals(t *testing.T) {
+	h := newRecoveryHarness(t, false)
+	h.driveToReadyOnV1()
+	h.driveToHeld()
+	h.settle(3)
+
+	// The wreckage of the last attempt may still be parked on the bad
+	// revision; what the hold forbids is a new attempt.
+	badPodsBefore := len(h.badPods())
+	h.badImageHeals = true
+	h.settle(12)
+	if b := h.findBlock(h.revBad.Name); b == nil || b.State != workloadtypes.RetryBlockHeld {
+		t.Fatalf("block = %+v, want Held: a healed cause releases nothing on its own", b)
+	}
+	if s := h.instance(0); s == nil || s.Phase != workloadtypes.InstancePhaseReady || s.Operation != nil || s.RunningRevision != h.revV1.Name {
+		h.dumpState("held")
+		t.Fatalf("the Instance must keep serving v1 while the revision is Held: %+v", s)
+	}
+	if got := len(h.badPods()); got > badPodsBefore {
+		h.dumpState("held")
+		t.Fatalf("bad-revision pods grew from %d to %d: no attempt at a Held revision may open", badPodsBefore, got)
+	}
+
+	// The release mailbox's effect: the block is gone, and the next pass
+	// attempts the revision again, which now converges.
+	h.blocks = nil
+	if !h.run(40, func() bool {
+		s := h.instance(0)
+		return s != nil && s.Phase == workloadtypes.InstancePhaseReady && s.Operation == nil && s.RunningRevision == h.revBad.Name
+	}) {
+		h.dumpState("released")
+		t.Fatalf("the released revision never converged")
 	}
 }

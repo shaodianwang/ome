@@ -101,6 +101,13 @@ func DetectRestartTriggerWithPods(input workload.ReconcileInput, plan workload.C
 		return true, ""
 	}
 	expected := inst.TotalPods()
+	// A repair parked at Failed has its own two exits, whatever the policy
+	// says: the policy governs whether a repair STARTS, and this one did.
+	if SpentRepair(s) {
+		if reason, fires := spentRepairTrigger(input, s, expected, instancePods); fires {
+			return true, reason
+		}
+	}
 	// A pod wedged in a terminal kubelet waiting reason cannot recover on
 	// its own and no other pass owns an operation-free Ready row, so the
 	// repair starts regardless of the restart policy.
@@ -270,25 +277,37 @@ func Restart(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		return false, fmt.Errorf("Restart: nil client")
 	}
 
-	// Use the post-patch Incarnation, not inst.Incarnation — BuildPlan
-	// ran against an earlier read.
-	wasNotRestarting := true
-	if s := input.ObservedState.Instance(inst.Index); s != nil && s.Phase == workload.InstancePhaseRestarting {
-		wasNotRestarting = false
-	}
-	newInc, err := status.StampRestarting(ctx, input, inst.Index, reason, plan.InstanceReadyTimeout)
-	if err != nil {
-		return false, fmt.Errorf("patch status Restarting (instance=%d): %w", inst.Index, err)
-	}
-	if wasNotRestarting {
-		workload.RecordWarning(deps.Recorder, workload.EventTarget(input), workload.EventReasonRestartTriggered,
-			"OMENative %s restart triggered: %s (incarnation=%d)",
-			workload.InstanceKey(input.Key.Component, inst.Index), reason, newInc)
-	}
-
 	pods, err := query.LiveListPodsForInstance(ctx, deps.Client, input.Key.Namespace, input.Key.OwnerName, plan.Component, inst.Index)
 	if err != nil {
 		return false, fmt.Errorf("Restart: list pods (instance=%d): %w", inst.Index, err)
+	}
+
+	// Use the post-patch Incarnation, not inst.Incarnation — BuildPlan
+	// ran against an earlier read.
+	observed := input.ObservedState.Instance(inst.Index)
+	wasNotRestarting := observed == nil || observed.Phase != workload.InstancePhaseRestarting
+	var newInc int64
+	switch {
+	case RepairResumes(observed, inst.TotalPods(), pods):
+		// The rebuilt set of a spent repair came up on its own. No new
+		// attempt opens: the pods already carry the row's incarnation, and
+		// the repair ends with the promote below.
+		newInc = observed.Incarnation
+		wasNotRestarting = false
+	case spentRepairParked(input, observed, inst.TotalPods(), pods):
+		// Wedged and not yet due on the retry ladder: the trigger declined
+		// this row, and a pass that reaches it anyway leaves it parked.
+		return false, nil
+	default:
+		newInc, err = status.StampRestarting(ctx, input, inst.Index, reason, plan.InstanceReadyTimeout)
+		if err != nil {
+			return false, fmt.Errorf("patch status Restarting (instance=%d): %w", inst.Index, err)
+		}
+		if wasNotRestarting {
+			workload.RecordWarning(deps.Recorder, workload.EventTarget(input), workload.EventReasonRestartTriggered,
+				"OMENative %s restart triggered: %s (incarnation=%d)",
+				workload.InstanceKey(input.Key.Component, inst.Index), reason, newInc)
+		}
 	}
 
 	// On the first pass, preserve the failing pod's diagnostics into
@@ -671,4 +690,164 @@ func RestartOpensUnavailability(input workload.ReconcileInput, inst workload.Ins
 	s := input.ObservedState.Instance(inst.Index)
 	_, wedged := crashLoopRepairReason(input, s, inst.TotalPods(), instancePods)
 	return wedged
+}
+
+// A spent repair: a Restart parked at Failed by the deadline or a wedged
+// pod. No pass drives the row, but the repair it records keeps two exits
+// here. A rebuilt set that comes up on its own — the kubelet's retry
+// succeeded once a missing image tag or ConfigMap key was back — resumes
+// the promote at the incarnation the pods already carry, so the Instance
+// returns to rotation on its running revision with no operator action. A
+// set that stays wedged is rebuilt again on the operator's retry ladder
+// (lifecycle.updateRetry, the one ladder every attempt is paced by),
+// measured from the recorded failure and bounded by its attempt count, so
+// a cause that needs a fresh pod set to clear — a gang whose members
+// hung, a node-local fault — heals once it is gone. No ladder configured
+// means no re-arm: the row waits for the reset mailbox or a new revision.
+
+// SpentRepair reports whether the row is a Restart parked at Failed.
+func SpentRepair(s *workload.InstanceStatus) bool {
+	return s != nil && s.Phase == workload.InstancePhaseFailed &&
+		s.Operation != nil && s.Operation.Type == workload.InstanceOperationRestart
+}
+
+// repairPodSet is the pods a spent repair's exits are judged on: live,
+// not deleting, not terminal. A pod still terminating holds its name and
+// belongs to no exit until it is gone.
+func repairPodSet(pods []*corev1.Pod) []*corev1.Pod {
+	set := make([]*corev1.Pod, 0, len(pods))
+	for _, pod := range query.ExcludeTerminalPods(pods) {
+		if pod.DeletionTimestamp != nil {
+			continue
+		}
+		set = append(set, pod)
+	}
+	return set
+}
+
+// RepairResumes reports whether a spent repair's rebuilt set is one
+// promote away: complete, every pod at the row's incarnation, and every
+// pod ContainersReady. A set carrying an older incarnation is a drain the
+// attempt never finished, not a set that came up, and is rebuilt instead.
+func RepairResumes(s *workload.InstanceStatus, expected int32, pods []*corev1.Pod) bool {
+	if !SpentRepair(s) || expected <= 0 {
+		return false
+	}
+	set := repairPodSet(pods)
+	if int32(len(set)) < expected {
+		return false
+	}
+	for _, pod := range set {
+		if inc, ok := query.InstanceIncarnationFromLabels(pod); !ok || inc != s.Incarnation {
+			return false
+		}
+	}
+	return query.AllPodsRuntimeReady(set)
+}
+
+// RepairRetryAt returns the instant a spent repair may re-arm — the
+// recorded failure plus the ladder's delay for the next attempt — and
+// false when no re-arm is owed: no ladder configured, every re-arm
+// spent, or no spent repair on the row.
+func RepairRetryAt(input workload.ReconcileInput, s *workload.InstanceStatus) (time.Time, bool) {
+	policy := input.UpdateRetryPolicy
+	if !SpentRepair(s) || policy == nil || policy.Exhausted(s.Operation.RetryCount) {
+		return time.Time{}, false
+	}
+	return repairParkedAt(s).Add(policy.NextRetryDelay(s.Operation.RetryCount + 1)), true
+}
+
+// repairParkedAt is when the repair parked: the recorded failure, which
+// the Failed stamps write in the same transaction as the phase, else the
+// operation's own timestamps for a row that recorded no failure.
+func repairParkedAt(s *workload.InstanceStatus) time.Time {
+	if s.LastFailure != nil && !s.LastFailure.Time.IsZero() {
+		return s.LastFailure.Time.Time
+	}
+	if !s.Operation.LastProgressAt.IsZero() {
+		return s.Operation.LastProgressAt.Time
+	}
+	return s.Operation.StartedAt.Time
+}
+
+// RepairRetriesExhausted reports whether a spent repair has spent every
+// re-arm the operator's ladder allows, so the row stays parked until an
+// operator resets it or a new revision arrives.
+func RepairRetriesExhausted(input workload.ReconcileInput, s *workload.InstanceStatus) bool {
+	return SpentRepair(s) && input.UpdateRetryPolicy != nil &&
+		input.UpdateRetryPolicy.Exhausted(s.Operation.RetryCount)
+}
+
+// spentRepairTrigger decides the exits of a spent repair whose pod set is
+// complete. An incomplete set is not decided here: a gang short of a
+// member re-arms through the lost-member trigger, and a row with no pod
+// left is the Create pass's fresh start.
+//
+// A resume stamps no operation, so it carries no reason. A re-arm that is
+// owed but not yet due deposits its wake-up on the pass: the ladder
+// coming due raises no watch event.
+func spentRepairTrigger(input workload.ReconcileInput, s *workload.InstanceStatus, expected int32, pods []*corev1.Pod) (string, bool) {
+	if expected <= 0 || int32(len(repairPodSet(pods))) < expected {
+		return "", false
+	}
+	if RepairResumes(s, expected, pods) {
+		return "", true
+	}
+	if rebuildRetryBlockDenies(input, s) {
+		return "", false
+	}
+	at, owed := RepairRetryAt(input, s)
+	if !owed {
+		return "", false
+	}
+	if now := input.Now(); now.Before(at) {
+		input.PassWake.Observe(at.Sub(now))
+		return "", false
+	}
+	return repairRearmReason(s), true
+}
+
+// spentRepairParked reports whether a spent repair with a complete pod set
+// has nothing to do this pass: the set is wedged and the ladder has not
+// come due, is spent, or is denied by the revision's RetryBlock.
+func spentRepairParked(input workload.ReconcileInput, s *workload.InstanceStatus, expected int32, pods []*corev1.Pod) bool {
+	if !SpentRepair(s) || expected <= 0 || int32(len(repairPodSet(pods))) < expected {
+		return false
+	}
+	if RepairResumes(s, expected, pods) {
+		return false
+	}
+	if rebuildRetryBlockDenies(input, s) {
+		return true
+	}
+	at, owed := RepairRetryAt(input, s)
+	return !owed || input.Now().Before(at)
+}
+
+// repairRearmReason names the re-arm on the new attempt: which attempt it
+// is and the failure that parked the last one.
+func repairRearmReason(s *workload.InstanceStatus) string {
+	return fmt.Sprintf("repair re-armed (attempt %d) after %s", s.Operation.RetryCount+1, RepairFailureSummary(s))
+}
+
+// RepairFailureSummary names what parked the repair, for events and the
+// re-armed attempt's reason: the recorded failure when there is one — by
+// pod when it names one, by its own message otherwise, as an elapsed
+// deadline does — else the reason the repair opened with.
+func RepairFailureSummary(s *workload.InstanceStatus) string {
+	switch {
+	case s == nil:
+		return ""
+	case s.LastFailure == nil:
+		if s.Operation != nil {
+			return s.Operation.Reason
+		}
+		return ""
+	case s.LastFailure.PodName != "":
+		return s.LastFailure.ShortString()
+	case s.LastFailure.Message != "":
+		return s.LastFailure.Message
+	default:
+		return s.LastFailure.Reason
+	}
 }

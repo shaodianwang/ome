@@ -184,7 +184,9 @@ type InstanceOperation struct {
 	LastProgressAt metav1.Time
 	// Deadline is the hard timeout for the current Step.
 	Deadline metav1.Time
-	// RetryCount is the per-step escalation counter.
+	// RetryCount counts the retries the operation has spent: the
+	// terminal-pod recycles inside an attempt and, for a Restart, the
+	// re-arms after it parked at Failed. The retry ladder indexes by it.
 	RetryCount int32
 
 	// TargetRevision is the ControllerRevision the operation is

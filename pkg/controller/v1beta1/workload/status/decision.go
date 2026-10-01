@@ -253,6 +253,10 @@ func StampRecreating(ctx context.Context, input types.ReconcileInput, idx int32,
 // An Instance that never ran a revision has only the revision its
 // interrupted attempt pinned; the rebuilt pods carry it so the
 // per-revision Service selects them.
+//
+// A Restart stamped over a Failed row that already carries a Restart is
+// that repair's next attempt: the new operation's RetryCount continues
+// the spent one's, which is what the retry ladder is indexed by.
 func StampRestarting(ctx context.Context, input types.ReconcileInput, idx int32, reason string, timeout time.Duration) (int64, error) {
 	var observedIncarnation int64
 	err := input.MutateInstance(ctx, idx, func(s *types.InstanceStatus) bool {
@@ -262,8 +266,14 @@ func StampRestarting(ctx context.Context, input types.ReconcileInput, idx int32,
 			return false
 		}
 		pinned := ""
-		if s.RunningRevision == "" && s.TargetRevision == "" && s.Operation != nil {
-			pinned = s.Operation.TargetRevision
+		retries := int32(0)
+		if s.Operation != nil {
+			if s.RunningRevision == "" && s.TargetRevision == "" {
+				pinned = s.Operation.TargetRevision
+			}
+			if s.Phase == types.InstancePhaseFailed && s.Operation.Type == types.InstanceOperationRestart {
+				retries = s.Operation.RetryCount + 1
+			}
 		}
 		if s.Incarnation == 0 {
 			s.Incarnation = 1
@@ -280,6 +290,7 @@ func StampRestarting(ctx context.Context, input types.ReconcileInput, idx int32,
 			StartedAt:      now,
 			LastProgressAt: now,
 			Deadline:       types.DeadlineAt(now, timeout),
+			RetryCount:     retries,
 			TargetRevision: pinned,
 		}
 		return true

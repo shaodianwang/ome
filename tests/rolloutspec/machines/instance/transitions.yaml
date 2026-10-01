@@ -356,6 +356,21 @@ transitions:
     to: Update/Surge
     effects: [Phase Updating with the Surge step restamped at the same target, a fresh replacement pod created away from the excluded node]
     decided_in: pkg/controller/v1beta1/workload/ops/update_surge.go
+  - id: T-failed-repair-resume
+    from: Failed
+    event: pod.containersReady
+    variant: source
+    guard: a Restart parked at Failed whose live pod set is complete, every pod at the row's incarnation and ContainersReady, whatever the restart policy says and whether or not a retry ladder is configured
+    to: Ready
+    effects: [the serving gate written on the rebuilt pods, then once they clear the shared promote bar Phase Ready with the spent operation cleared and RunningRevision untouched, at the incarnation the pods already carry, RestartCompleted event]
+    decided_in: pkg/controller/v1beta1/workload/ops/restart.go
+  - id: T-failed-repair-rearm
+    from: Failed
+    event: timer.repairRetry
+    guard: a Restart parked at Failed whose live pod set is complete but not one the resume takes, lifecycle.updateRetry is configured, its delay for the next attempt has elapsed since the recorded failure, the attempts are not spent, and no RetryBlock denies rebuilding the running revision
+    to: Restart/Drain
+    effects: [Incarnation bumped, Phase Restarting with a fresh Restart whose RetryCount continues the spent one's, the re-arm and the failure that parked the last attempt on its Reason, RestartTriggered event, the wedged set drained and rebuilt under a fresh deadline]
+    decided_in: pkg/controller/v1beta1/workload/ops/restart.go
   - id: T-failed-restart
     from: Failed
     event: pod.deleted
