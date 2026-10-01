@@ -1,0 +1,13 @@
+# p7013: [gen] readiness never engine N=4 SurgeThenDrain s1 rp RecreateInstance  Ne=4 Nd=0 Nr=0 ceil_e=5 ceil_d=0 ceil_r=0 restart=RecreateInstance fault=readiness:new co=none topo=engine
+# reason: the pushed revision carries the readiness switch, so its pods run and never pass readiness: the roll holds at the Instance ready timeout with the new Instance failed and the reason recorded, the old revision keeps serving at the floor and the broken revision never serves; a fix push without the switch then lands on every Instance; the surge Instance is the one that fails and nothing drains (floor N)
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p7013 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", instanceReadyTimeout: "90s", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

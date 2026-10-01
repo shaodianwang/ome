@@ -1,0 +1,15 @@
+# p7313: [gen] tight cordon never engine-mn W2 N=2 RecreatePod  Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 fault=cordon:all co=none topo=engine-mn lift=never
+# reason: every schedulable node is cordoned, so once the first gang drains within its own budget its 3-pod gang replacement has no placement: the roll waits at N-1 serving with the operation naming the capacity and drains no second gang; the wait holds across the window with no churn and nothing torn down; the case ends with the squeeze in place
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p7313 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 2 }
+    lifecycle: { updateStrategy: { type: "RecreatePod", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }

@@ -1,0 +1,15 @@
+# p7009: [gen] readiness lost persist engine-mn W1 N=2 rp RecreateInstance  Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 restart=RecreateInstance fault=readiness:old co=none topo=engine-mn form=persist during=idle
+# reason: the leader pod of the engine's highest gang stops passing its readiness probe while it keeps running; readiness is the runtime's own out-of-rotation signal, not a failure, so no restart policy rebuilds it: the Instance leaves the Ready endpoints at once, its row reports the drop (serving count below pod count), and nothing is rebuilt or surged; the pod stays out of rotation and reported across the hold window, until an operator acts
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p7009 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

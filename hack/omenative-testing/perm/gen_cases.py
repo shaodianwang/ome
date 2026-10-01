@@ -85,6 +85,8 @@ def lifecycle(strat="SurgeThenDrain", surge=1, unavail=0, partition=None,
         life["readyPolicy"] = ready
     if mig is not None:
         life["migrationPolicy"] = mig
+    if ready_timeout is not None:
+        life["instanceReadyTimeout"] = ready_timeout
     life["updateStrategy"] = us
     return flow(life)
 

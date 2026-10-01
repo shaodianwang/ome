@@ -5301,8 +5301,9 @@ class PlainRollbackTest(unittest.TestCase):
 
     def test_break_patch_aims_the_fixture_probe_at_an_unserved_path(self):
         probe = run._stuck_readiness()
-        self.assertEqual(run.STUCK_READINESS_PATH, probe["httpGet"]["path"])
-        self.assertEqual(run._GOOD_READINESS["httpGet"]["port"], probe["httpGet"]["port"])
+        self.assertTrue(probe["exec"]["command"][-1].endswith(f"http://127.0.0.1:8080{run.STUCK_READINESS_PATH}"),
+                        probe["exec"]["command"][-1])
+        self.assertEqual(run._GOOD_READINESS["periodSeconds"], probe["periodSeconds"])
         patch = {"spec": {"engine": {"annotations": {}}, "decoder": {"annotations": {}}}}
         run._rollback_break_patch(patch, {"engine", "decoder"}, {"engine": 1, "decoder": 2})
         self.assertEqual(probe, patch["spec"]["engine"]["runner"]["readinessProbe"])
@@ -6473,3 +6474,701 @@ class MigrateBumpFamilyTest(unittest.TestCase):
         self.assertEqual({"engine"}, {kv["topo"] for kv, _m in two})
         self.assertNotIn("last", {m["hook"] for _kv, m in two}, "a surge of two never sees the last Instance")
         self.assertEqual(10, len(two))
+
+
+# ── readiness, gang-member and tight-cluster verbs ────────────────────────
+class _Resp:
+    def __init__(self, stdout="", rc=0, stderr=""):
+        self.stdout, self.returncode, self.stderr = stdout, rc, stderr
+
+
+def _kubectl_with(responses):
+    """A kubectl stand-in: the first (predicate, body) whose predicate accepts
+    the argument tuple answers (body may be a callable of the args); anything
+    else succeeds with an empty object."""
+    calls = []
+
+    def kubectl(*args, **kw):
+        calls.append(args)
+        for pred, body in responses:
+            if pred(args):
+                out = body(args) if callable(body) else body
+                return out if isinstance(out, _Resp) else _Resp(out)
+        return _Resp("{}")
+    kubectl.calls = calls
+    return kubectl
+
+
+def _rec(comp, inst, hash_, ready=True, alive=True, uid=None, runner="default", serving=None, created="1"):
+    return {"comp": comp, "inst": str(inst), "runner": runner, "ord": "0", "alive": alive, "ready": ready,
+            "hash": hash_, "uid": uid or f"{comp}-{inst}-{runner}-{hash_}", "newanno": False,
+            "serving": ready if serving is None else serving, "created": created, "pairing": "",
+            "node": "", "sched": "", "pg": ""}
+
+
+def _ir_items(comp, rows):
+    return json.dumps({"items": [{"spec": {"component": comp}, "status": {"instanceStatuses": rows}}]})
+
+
+class ReadinessHeaderTest(unittest.TestCase):
+    """fault=readiness:<old|new>: old breaks a serving pod at idle and says
+    whether the switch stays (form), new is the bump itself."""
+
+    def _errs(self, header):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    base = "# p999: x Ne=2 Nd=0 Nr=0 ceil_e=2 ceil_d=0 ceil_r=0 topo=engine"
+
+    def test_old_side_is_an_idle_fault_with_a_form(self):
+        self.assertEqual([], self._errs(self.base + " fault=readiness:old form=persist during=idle"))
+        self.assertEqual([], self._errs(self.base + " fault=readiness:old form=recover during=idle restart=RecreateInstance"))
+        self.assertTrue(any("needs form=persist|recover" in e for e in self._errs(self.base + " fault=readiness:old during=idle")))
+        self.assertTrue(any("needs form=persist|recover" in e for e in self._errs(self.base + " fault=readiness:old form=start during=idle")))
+        self.assertTrue(any("needs during=idle" in e for e in self._errs(self.base + " fault=readiness:old form=persist")))
+        self.assertTrue(any("expect=" in e for e in self._errs(self.base + " fault=readiness:old form=persist during=idle expect=repaired")))
+
+    def test_new_side_is_the_bump_itself(self):
+        self.assertEqual([], self._errs(self.base.replace("ceil_e=2", "ceil_e=3") + " fault=readiness:new"))
+        self.assertTrue(any("no during=" in e for e in self._errs(self.base + " fault=readiness:new during=settling")))
+        self.assertTrue(any("has no form=" in e for e in self._errs(self.base + " fault=readiness:new form=persist")))
+        self.assertTrue(any("malformed header value fault=" in e for e in self._errs(self.base + " fault=readiness:stable")))
+        self.assertTrue(any("mode=rollout" in e for e in self._errs(self.base.replace(" Ne=", " mode=kill Ne=") + " fault=readiness:new")))
+
+    def test_crashloop_forms_stay_their_own(self):
+        self.assertTrue(any("form=start|load" in e for e in self._errs(self.base + " fault=crashloop:old form=persist")))
+        self.assertTrue(any("form=" in e for e in self._errs(self.base + " form=persist")))
+
+
+class GangMemberHeaderTest(unittest.TestCase):
+    def _errs(self, header):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    mn = "# p999: x Ne=3 Nd=0 Nr=0 ceil_e=4 ceil_d=0 ceil_r=0 restart=None co=none topo=engine-mn"
+
+    def test_member_kill_knobs_validate_on_a_gang_podkill(self):
+        self.assertEqual([], self._errs(self.mn + " fault=podkill:draining kill=worker victim=stable floor_slack=1 order_soft=1"))
+        self.assertEqual([], self._errs(self.mn + " fault=podkill:rotating kill=leader victim=canary floor_slack=1"))
+        self.assertTrue(any("needs mode=kill or fault=podkill" in e for e in self._errs(self.mn + " kill=worker")))
+        self.assertTrue(any("needs a multi-node topo" in e
+                            for e in self._errs(self.mn.replace("topo=engine-mn", "topo=engine") + " fault=podkill:settling kill=worker")))
+        self.assertTrue(any("floor_slack=" in e for e in self._errs(self.mn + " floor_slack=1")))
+        self.assertTrue(any("malformed header value floor_slack=0" in e for e in self._errs(self.mn + " fault=podkill:settling floor_slack=0")))
+
+
+class TightHeaderTest(unittest.TestCase):
+    def _errs(self, header):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    mn = "# p999: x Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 co=none topo=engine-mn"
+
+    def test_lift_names_a_squeeze_on_a_rollout(self):
+        self.assertEqual([], self._errs(self.mn + " fault=cordon:all lift=after-hold"))
+        self.assertEqual([], self._errs(self.mn + " fault=quota:1 lift=never"))
+        self.assertEqual([], self._errs(self.mn + " fault=quota:1"))
+        self.assertTrue(any("lift=never lifts a capacity squeeze" in e for e in self._errs(self.mn + " lift=never")))
+        self.assertTrue(any("lift=after-hold lifts a capacity squeeze" in e for e in self._errs(self.mn + " fault=podkill:settling lift=after-hold")))
+        self.assertTrue(any("blocked=1 does not combine" in e for e in self._errs(self.mn + " fault=quota:1 lift=never blocked=1")))
+        self.assertTrue(any("malformed header value fault=" in e for e in self._errs(self.mn + " fault=cordon:everything")))
+
+
+class GangMemberVictimTest(unittest.TestCase):
+    """kill=<member> narrows the podkill victim to one gang runner and skips a
+    gang already on its way out; the phase hooks wait for the member."""
+
+    def _pods(self):
+        return {"e0-l": _rec("engine", 0, "old", runner="leader"), "e0-w": _rec("engine", 0, "old", runner="worker"),
+                "e1-l": _rec("engine", 1, "old", runner="leader"), "e1-w": _rec("engine", 1, "old", runner="worker"),
+                "e2-l": _rec("engine", 2, "new", runner="leader", created="5"),
+                "e2-w": _rec("engine", 2, "new", runner="worker", created="6")}
+
+    def test_member_rules(self):
+        pods, ppi = self._pods(), {"engine": 2}
+        self.assertEqual("e0-l", run._fault_pick_pod(pods, ppi, {"old"}))
+        self.assertEqual("e0-w", run._fault_pick_pod(pods, ppi, {"old"}, member="worker"))
+        self.assertEqual("e0-l", run._fault_pick_pod(pods, ppi, {"old"}, victim="stable", member="leader"))
+        self.assertEqual("e2-w", run._fault_pick_pod(pods, ppi, {"old"}, victim="canary", member="worker"))
+        self.assertEqual("e2-l", run._fault_pick_pod(pods, ppi, {"old"}, victim="canary", member="leader"))
+
+    def test_a_gang_on_its_way_out_is_never_the_victim(self):
+        pods, ppi = self._pods(), {"engine": 2}
+        pods["e0-l"]["alive"] = False
+        self.assertEqual("e1-w", run._fault_pick_pod(pods, ppi, {"old"}, victim="stable", member="worker"))
+        self.assertEqual("e1-l", run._fault_pick_pod(pods, ppi, {"old"}, member="leader"))
+        self.assertIsNone(run._fault_pick_pod({"e0-w": pods["e0-w"]}, ppi, {"old"}, member="leader"))
+
+    def test_draining_and_member_aware_rotating_hooks(self):
+        fired = []
+        f = {"case_id": "p1", "kind": "podkill", "param": "draining", "victim": "stable", "member": "worker",
+             "fired": False, "infra_fail": None, "notes": []}
+        pods = self._pods()
+        ctx = {"fault": f, "trigger_ts": 1.0, "pod_state": pods, "pods_per_inst": {"engine": 2}, "old_hashes": {"old"}}
+        with mock.patch.object(run, "_fault_fire", lambda *a, **k: fired.append(a)):
+            run._fault_tick(ctx)
+            self.assertEqual([], fired)
+            pods["e1-l"]["alive"] = False
+            run._fault_tick(ctx)
+            self.assertEqual(1, len(fired))
+        fired.clear()
+        f = {"case_id": "p1", "kind": "podkill", "param": "rotating", "victim": "canary", "member": "worker",
+             "fired": False, "infra_fail": None, "notes": []}
+        pods = self._pods()
+        del pods["e2-w"]
+        ctx = {"fault": f, "trigger_ts": 1.0, "pod_state": pods, "pods_per_inst": {"engine": 2}, "old_hashes": {"old"}}
+        with mock.patch.object(run, "_fault_fire", lambda *a, **k: fired.append(a)):
+            run._fault_tick(ctx)
+            self.assertEqual([], fired, "no new-revision worker yet")
+            pods["e2-w"] = _rec("engine", 2, "new", runner="worker", created="6")
+            run._fault_tick(ctx)
+            self.assertEqual(1, len(fired))
+
+    def test_podkill_records_the_member_it_took(self):
+        pods = self._pods()
+        f = {"case_id": "p1", "kind": "podkill", "param": "settling", "victim": "", "member": "worker",
+             "fired": False, "infra_fail": None, "notes": []}
+        with mock.patch.object(run, "kubectl", _kubectl_with([])):
+            run._fault_fire(f, pods, {"engine": 2}, {"old"})
+        self.assertEqual(("engine", "0", "worker", False), (f["victim_comp"], f["victim_inst"], f["victim_runner"], f["victim_new"]))
+        self.assertEqual(pods["e0-w"]["uid"], f["victim_uid"])
+
+
+class GangMemberVerdictTest(unittest.TestCase):
+    def _fault(self, **kw):
+        f = {"case_id": "p1", "kind": "podkill", "param": "settling", "member": "worker", "fired": True,
+             "infra_fail": None, "notes": [], "victim_comp": "engine", "victim_inst": "0",
+             "victim_uid": "dead", "victim_runner": "worker"}
+        f.update(kw)
+        return f
+
+    def test_short_gang_counted_serving_is_a_finding(self):
+        f = self._fault()
+        pods = {"e0-l": _rec("engine", 0, "new", runner="leader"), "e0-w": _rec("engine", 0, "new", runner="worker", ready=False)}
+        with mock.patch.object(run, "GANG_SHORT_REPORT_S", 10), mock.patch.object(run, "INV_TICK_S", 5), \
+                mock.patch.object(run, "_ir_row", lambda *a: {"index": 0, "podCount": 2, "servingPodCount": 2}):
+            run._gang_member_tick(f, "p1", pods, {"engine": 2}, 100.0)
+            self.assertNotIn("short_samples", f)       # gap just opened: not sampled yet
+            run._gang_member_tick(f, "p1", pods, {"engine": 2}, 111.0)
+            self.assertEqual(1, f["short_samples"])
+            self.assertEqual(1, f["half_served"])
+            pods["e0-w"]["ready"] = True
+            run._gang_member_tick(f, "p1", pods, {"engine": 2}, 120.0)
+            self.assertIsNone(f["short_since"])
+        verdict, notes, checks = "PASS", [], []
+        with mock.patch.object(run, "_isvc_events_since", lambda *a: []):
+            verdict = run._gang_member_checks(f, pods, 1.0, {"restart": "None"}, verdict, notes, checks)
+        self.assertEqual("FAIL", verdict)
+        self.assertTrue(any("counted as serving while short" in c for c in checks))
+
+    def test_policy_none_must_not_rebuild_the_whole_gang(self):
+        f = self._fault(short_samples=2)
+        pods = {"e0-l": _rec("engine", 0, "new", runner="leader"), "e0-w": _rec("engine", 0, "new", runner="worker")}
+        events = [("RestartTriggered", "OMENative component=engine instance=0 restart triggered: pod count 1 below desired 2")]
+        with mock.patch.object(run, "_isvc_events_since", lambda *a: events):
+            n, c = [], []
+            v = run._gang_member_checks(f, pods, 1.0, {"restart": "None"}, "PASS", n, c)
+            self.assertEqual("FAIL", v)
+            self.assertTrue(any("restartPolicy None must bring back only" in x for x in c))
+            n, c = [], []
+            v = run._gang_member_checks(f, pods, 1.0, {"restart": "RecreateInstance"}, "PASS", n, c)
+            self.assertEqual("PASS", v)
+            self.assertTrue(any("rebuilt as a whole" in x for x in c))
+        with mock.patch.object(run, "_isvc_events_since", lambda *a: []):
+            n, c = [], []
+            v = run._gang_member_checks(f, pods, 1.0, {"restart": "RecreateInstance"}, "PASS", n, c)
+            self.assertEqual("PASS", v)
+            self.assertTrue(any("the roll took the gang" in x for x in c))
+            pods["e0-w"]["uid"] = "dead"
+            n, c = [], []
+            v = run._gang_member_checks(f, pods, 1.0, {"restart": "None"}, "PASS", n, c)
+            self.assertEqual("FAIL", v)
+            self.assertTrue(any("is still alive" in x for x in c))
+
+    def test_floor_slack_lowers_the_shared_floor(self):
+        ctx = {"hdr": {"floor_slack": 1}, "N": {"engine": 3}, "info": {"max_unavail": {"engine": 0}},
+               "min_ready": {"engine": 2}, "floor_sust": {"engine": 30.0}}
+        n, c = [], []
+        v = run.min_ready_checks(ctx, ["engine"], "PASS", n, c)
+        self.assertEqual("PASS", v)
+        ctx["hdr"] = {}
+        n, c = [], []
+        v = run.min_ready_checks(ctx, ["engine"], "PASS", n, c)
+        self.assertEqual("FAIL", v)
+
+
+class CapacityHoldReadersTest(unittest.TestCase):
+    def test_cordon_all_takes_schedulable_workers_only(self):
+        nodes = [{"metadata": {"name": "cp", "labels": {run.CONTROL_PLANE_LABEL: ""}}, "spec": {}},
+                 {"metadata": {"name": "w2", "labels": {}}, "spec": {}},
+                 {"metadata": {"name": "w1", "labels": {}}, "spec": {}},
+                 {"metadata": {"name": "w3", "labels": {}}, "spec": {"unschedulable": True}},
+                 {"metadata": {}, "spec": {}}]
+        self.assertEqual(["w1", "w2"], run._cordon_targets(nodes))
+
+    def test_cordon_all_registers_every_uncordon_before_judging(self):
+        nodes = json.dumps({"items": [{"metadata": {"name": "w1", "labels": {}}, "spec": {}},
+                                      {"metadata": {"name": "w2", "labels": {}}, "spec": {}}]})
+        k = _kubectl_with([(lambda a: a[:2] == ("get", "nodes"), nodes),
+                           (lambda a: a[:2] == ("cordon", "w2"), _Resp("", 1, "boom"))])
+        f = {"kind": "cordon", "param": "all", "notes": [], "infra_fail": None}
+        with mock.patch.object(run, "kubectl", k), mock.patch.object(run, "_FAULT_CLEANUPS", []) as cleanups:
+            ok, msg = run._fault_cordon(f, "p1", {})
+            self.assertFalse(ok)
+            self.assertIn("w2", msg)
+            self.assertEqual([("uncordon", "w1"), ("uncordon", "w2")], cleanups)
+        self.assertEqual(["w1", "w2"], f["nodes"])
+
+    def test_row_hold_and_serving_short(self):
+        self.assertEqual(("QuotaExceeded", "exceeded quota: pods"),
+                         run._row_hold({"operation": {"waiting": "QuotaExceeded"}, "lastFailure": {"message": "exceeded quota: pods"}}))
+        self.assertEqual(("Unschedulable", ""), run._row_hold({"operation": {"waiting": "Unschedulable"}}))
+        self.assertIsNone(run._row_hold({"operation": {"waiting": "PodGroupTerminating"}}))
+        self.assertIsNone(run._row_hold({}))
+        self.assertTrue(run._row_serving_short({"phase": "Ready", "podCount": 2, "servingPodCount": 1}))
+        self.assertTrue(run._row_serving_short({"phase": "Pending", "podCount": 1, "servingPodCount": 1}))
+        self.assertFalse(run._row_serving_short({"phase": "Ready", "podCount": 2, "servingPodCount": 2}))
+        self.assertFalse(run._row_serving_short(None))
+        self.assertEqual("abc12", run._revision_hash("p7000-engine-abc12"))
+
+    def test_ready_endpoint_uids_reads_routed_services_only(self):
+        svcs = json.dumps({"items": [
+            {"metadata": {"name": "routed"}, "spec": {"clusterIP": "10.0.0.1", "selector": {"component": "engine", run.REV_LABEL: "a"}}},
+            {"metadata": {"name": "peers"}, "spec": {"clusterIP": "None", "selector": {"component": "engine"}}}]})
+        slices = json.dumps({"items": [
+            {"metadata": {"labels": {"kubernetes.io/service-name": "routed"}},
+             "endpoints": [{"targetRef": {"uid": "u1"}, "conditions": {"ready": True}},
+                           {"targetRef": {"uid": "u2"}, "conditions": {"ready": False}},
+                           {"targetRef": {"uid": "u3"}}]},
+            {"metadata": {"labels": {"kubernetes.io/service-name": "peers"}},
+             "endpoints": [{"targetRef": {"uid": "u4"}, "conditions": {"ready": True}}]}]})
+        k = _kubectl_with([(lambda a: "svc" in a, svcs), (lambda a: "endpointslices" in a, slices)])
+        with mock.patch.object(run, "kubectl", k):
+            self.assertEqual({"u1", "u3"}, run._ready_endpoint_uids("p1"))
+        with mock.patch.object(run, "kubectl", _kubectl_with([(lambda a: "svc" in a, _Resp("", 1))])):
+            self.assertIsNone(run._ready_endpoint_uids("p1"))
+
+    def test_capacity_hold_reads_rows_then_the_quota_event(self):
+        rows = [{"index": 0, "phase": "Ready"}, {"index": 2, "phase": "Creating",
+                "operation": {"type": "Create", "waiting": "Unschedulable"},
+                "lastFailure": {"message": "0/3 nodes are available: 3 node(s) were unschedulable"}}]
+        with mock.patch.object(run, "kubectl", _kubectl_with([(lambda a: "inferencereplicas" in a, _ir_items("engine", rows))])), \
+                mock.patch.object(run, "_isvc_events_since", lambda *a: []):
+            tok, detail = run._capacity_hold("p1", {"engine"}, 0)
+            self.assertEqual("Unschedulable", tok)
+            self.assertIn("engine Instance 2", detail)
+            self.assertIn("unschedulable", detail)
+        events = [("InstanceQuotaBlocked", "OMENative component=engine instance=2 waiting on capacity: exceeded quota")]
+        with mock.patch.object(run, "kubectl", _kubectl_with([(lambda a: "inferencereplicas" in a, _ir_items("engine", rows[:1]))])), \
+                mock.patch.object(run, "_isvc_events_since", lambda *a: events):
+            self.assertEqual(run.HOLD_EVENT, run._capacity_hold("p1", {"engine"}, 0)[0])
+            self.assertIsNone(run._capacity_hold("p1", {"decoder"}, 0))
+
+    def test_broken_revision_hold_skips_failed_rows_of_the_old_revision(self):
+        rows = [{"index": 0, "phase": "Failed", "runningRevision": "p1-engine-old1", "lastFailure": {"reason": "X"}},
+                {"index": 2, "phase": "Failed", "targetRevision": "p1-engine-new1",
+                 "lastFailure": {"reason": "InstanceReadyTimeout", "message": "not Ready within 90s"}}]
+        with mock.patch.object(run, "kubectl", _kubectl_with([(lambda a: "inferencereplicas" in a, _ir_items("engine", rows))])), \
+                mock.patch.object(run, "_isvc_events_since", lambda *a: []):
+            hold = run._broken_revision_hold("p1", {"engine"}, {"old1"}, 0)
+            self.assertIn("Instance 2 Failed: InstanceReadyTimeout", hold)
+            self.assertEqual("", run._broken_revision_hold("p1", {"engine"}, {"old1", "new1"}, 0))
+        with mock.patch.object(run, "kubectl", _kubectl_with([(lambda a: "inferencereplicas" in a, _ir_items("engine", []))])), \
+                mock.patch.object(run, "_isvc_events_since",
+                                  lambda *a: [("InstanceFailed", "OMENative component=engine instance=2 Failed: InstanceReadyTimeout")]):
+            self.assertTrue(run._broken_revision_hold("p1", {"engine"}, {"old1"}, 0).startswith("InstanceFailed"))
+
+
+class ReadinessVerdictTest(unittest.TestCase):
+    def _out(self, **kw):
+        out = {"left_at": 4.0, "unrouted_at": 6.0, "reported_at": 9.0, "rebuilt_at": None, "lifted_at": None,
+               "returned_at": None, "phases": {"Ready"}, "final_ready": False, "final_routed": False,
+               "new_hash": False, "reset_used": False}
+        out.update(kw)
+        return out
+
+    def test_persist_passes_when_it_leaves_rotation_reports_and_stays_untouched(self):
+        f = {"crash_comp": "engine", "crash_inst": "3"}
+        n, c = [], []
+        v = run._readiness_checks(f, "persist", self._out(), "PASS", n, c)
+        self.assertEqual("PASS", v, c)
+        self.assertEqual(5, sum(1 for x in c if x.startswith("  ✓")))
+        n, c = [], []
+        v = run._readiness_checks(f, "persist", self._out(rebuilt_at=30.0), "PASS", n, c)
+        self.assertEqual("FAIL", v)
+        self.assertTrue(any("no restart policy rebuilds" in x for x in c))
+        n, c = [], []
+        v = run._readiness_checks(f, "persist", self._out(reported_at=None), "PASS", n, c)
+        self.assertTrue(any("kept claiming every pod serving" in x for x in c))
+        n, c = [], []
+        v = run._readiness_checks(f, "persist", self._out(final_ready=True), "PASS", n, c)
+        self.assertTrue(any("with the switch still set" in x for x in c))
+        n, c = [], []
+        v = run._readiness_checks(f, "persist", self._out(left_at=None), "PASS", n, c)
+        self.assertTrue(any("kept reporting Ready" in x for x in c))
+
+    def test_recover_needs_the_same_pod_back(self):
+        f = {"crash_comp": "engine", "crash_inst": "3"}
+        n, c = [], []
+        v = run._readiness_checks(f, "recover", self._out(lifted_at=25.0, returned_at=12.0, final_ready=True, final_routed=True), "PASS", n, c)
+        self.assertEqual("PASS", v, c)
+        n, c = [], []
+        v = run._readiness_checks(f, "recover", self._out(lifted_at=25.0, final_ready=False), "PASS", n, c)
+        self.assertEqual("FAIL", v)
+        self.assertTrue(any("did not return" in x for x in c))
+        n, c = [], []
+        v = run._readiness_checks(f, "recover", self._out(), "PASS", n, c)
+        self.assertTrue(any("never lifted" in x for x in c))
+
+
+class TightVerdictTest(unittest.TestCase):
+    def _ctx(self):
+        return {"info": {"max_unavail": {"engine": 0}}, "N": {"engine": 2}, "pods_per_inst": {"engine": 2}, "converged_at": 40.0}
+
+    def test_never_judges_the_wait(self):
+        f = {"kind": "quota", "param": "1"}
+        out = {"hold_at": 8.0, "token": "QuotaExceeded", "detail": "engine Instance 2: exceeded quota: requests.cpu",
+               "torn": {"engine": 0}, "hold_kept": True, "churn": (True, "still"), "lifted_at": None}
+        n, c = [], []
+        v = run._tight_checks(self._ctx(), f, "never", {"engine"}, out, "HELD", "PASS", n, c)
+        self.assertEqual("PASS", v, c)
+        self.assertTrue(any("names the capacity" in x for x in c))
+        out["torn"] = {"engine": 2}
+        n, c = [], []
+        v = run._tight_checks(self._ctx(), f, "never", {"engine"}, out, "HELD", "PASS", n, c)
+        self.assertEqual("FAIL", v)
+        self.assertTrue(any("torn down to make room" in x for x in c))
+        out["torn"], out["hold_kept"] = {"engine": 0}, False
+        n, c = [], []
+        v = run._tight_checks(self._ctx(), f, "never", {"engine"}, out, "RELEASED", "PASS", n, c)
+        self.assertTrue(any("disappeared" in x for x in c))
+
+    def test_after_hold_needs_the_completion(self):
+        f = {"kind": "cordon", "param": "all"}
+        out = {"hold_at": 8.0, "token": "Unschedulable", "detail": "engine Instance 2: 0/2 nodes are available",
+               "torn": {"engine": 0}, "hold_kept": True, "churn": None, "lifted_at": 30.0}
+        n, c = [], []
+        v = run._tight_checks(self._ctx(), f, "after-hold", {"engine"}, out, "CONVERGED", "PASS", n, c)
+        self.assertEqual("PASS", v, c)
+        n, c = [], []
+        v = run._tight_checks(self._ctx(), f, "after-hold", {"engine"}, out, "ROTATE_TIMEOUT", "PASS", n, c)
+        self.assertEqual("FAIL", v)
+        out["hold_at"] = None
+        n, c = [], []
+        v = run._tight_checks(self._ctx(), f, "after-hold", {"engine"}, out, "NO_HOLD", "PASS", n, c)
+        self.assertTrue(any("never reported a wait" in x for x in c))
+
+    def test_recreate_may_drain_its_own_budget(self):
+        ctx = self._ctx()
+        ctx["info"]["max_unavail"]["engine"] = 1
+        f = {"kind": "cordon", "param": "all"}
+        out = {"hold_at": 8.0, "token": "Unschedulable", "detail": "x", "torn": {"engine": 2},
+               "hold_kept": True, "churn": (True, "still"), "lifted_at": None}
+        n, c = [], []
+        v = run._tight_checks(ctx, f, "never", {"engine"}, out, "HELD", "PASS", n, c)
+        self.assertEqual("PASS", v, c)
+
+
+class NewRevisionReadinessVerdictTest(unittest.TestCase):
+    def test_held_then_fixed(self):
+        ctx = {"converged_at": 60.0, "first_fresh": "engine Instance 2"}
+        out = {"held_at": 95.0, "hold": "engine Instance 2 Failed: InstanceReadyTimeout", "broken_served": None,
+               "fix_at": 100.0, "timeout": 90, "leftover": []}
+        n, c = [], []
+        v = run._readiness_new_checks(ctx, out, "CONVERGED", "PASS", n, c)
+        self.assertEqual("PASS", v, c)
+        n, c = [], []
+        v = run._readiness_new_checks(ctx, dict(out, leftover=["p1-engine-2-0"]), "CONVERGED", "PASS", n, c)
+        self.assertEqual("FAIL", v)
+        n, c = [], []
+        v = run._readiness_new_checks(ctx, dict(out, broken_served=20.0), "ROTATE_TIMEOUT", "PASS", n, c)
+        self.assertEqual("FAIL", v)
+        self.assertTrue(any("was Ready and serving" in x for x in c))
+        n, c = [], []
+        v = run._readiness_new_checks(ctx, dict(out, held_at=None), "NO_HOLD", "PASS", n, c)
+        self.assertTrue(any("never held" in x for x in c))
+
+
+class _FakeFleet:
+    """A scripted fleet for the handler smoke runs: _read_one folds the
+    scripted pod_state into ctx exactly as the real one does (aggregate,
+    peaks), and the script may change pod_state per call."""
+
+    def __init__(self, ctx, script=None):
+        self.ctx, self.script, self.calls = ctx, script or (lambda ctx, n: None), 0
+
+    def read_one(self, ctx, timeout=1.0):
+        self.calls += 1
+        self.script(ctx, self.calls)
+        meas = {}
+        agg = run.aggregate(ctx["pod_state"], ctx["old_hashes"], ctx["modes"], ctx["pods_per_inst"], measures=meas)
+        for c in run.COMPS:
+            ctx["peaks"][c] = max(ctx["peaks"][c], agg.get(c, (0, 0, 0))[0])
+        ctx["agg"], ctx["measures"] = agg, meas
+        if ctx.get("trigger_ts") is not None:
+            run._track_gang_and_floor(ctx, ctx.get("track_comps") or sorted(ctx["configured"]))
+        time.sleep(0.01)
+        return agg
+
+
+def _ctx_for(hdr, pods, info=None, workers=0):
+    N = {"engine": hdr.get("Ne", 0), "decoder": hdr.get("Nd", 0), "router": hdr.get("Nr", 0)}
+    configured = {c for c in run.COMPS if N[c] > 0}
+    info = info or {"strat": {c: "SurgeThenDrain" for c in configured}, "max_unavail": {c: 0 for c in configured},
+                    "workers": ({"engine": workers} if workers else {}), "members": [], "policy": None}
+    ppi = {c: 1 + info["workers"].get(c, 0) for c in run.COMPS}
+    return {"case_id": "p999", "N": N, "configured": configured, "info": info, "hdr": hdr,
+            "pods_per_inst": ppi, "modes": {c: "surge" for c in configured},
+            "pod_state": pods, "peaks": {"engine": 0, "decoder": 0, "router": 0}, "agg": {},
+            "buf": "", "closed": False, "old_hashes": {p["hash"] for p in pods.values()},
+            "old_uids": {}, "old_nodes": {}, "seen_hashes": set(), "trigger_ts": None, "converged_at": None,
+            "watcher": None, "inv": run._inv_new("p999", hdr), "fault": run._fault_new("p999", hdr)}
+
+
+class HandlerSmokeTest(unittest.TestCase):
+    """Each new handler runs end to end against a scripted fleet, so its
+    phases, bookkeeping and verdict wiring execute without a cluster."""
+
+    def _run(self, handler, ctx, fleet, patches):
+        finished = {}
+
+        def finish(case_id, desc, hdr, ctx_, state, verdict, notes, checks):
+            finished.update(state=state, verdict=verdict, notes=notes, checks=checks)
+            return 0
+        base = {"_setup_and_ready": lambda *a: (ctx, None), "_read_one": fleet.read_one, "_finish": finish,
+                "_isvc_annotations": lambda *a: {}, "_isvc_events_since": lambda *a: [],
+                "STABILITY_S": 0.05, "LIFT_SETTLE_S": 0.2, "IDLE_HOLD_S": 0.4, "READINESS_RECOVER_AFTER_S": 0.1,
+                "INV_TICK_S": 0.05, "ROTATE_BASE_S": 3, "ROTATE_PER_POD_S": 0, "MAX_BUDGET_S": 10}
+        base.update(patches)
+        with contextlib.ExitStack() as stack:
+            for name, value in base.items():
+                stack.enter_context(mock.patch.object(run, name, value))
+            handler(*(["p999", Path("p999.yaml"), "desc", ctx["hdr"]]))
+        return finished
+
+    def test_idle_readiness_recover(self):
+        hdr = {"Ne": 2, "Nd": 0, "Nr": 0, "ceil_e": 2, "ceil_d": 0, "ceil_r": 0, "fault": "readiness:old",
+               "form": "recover", "during": "idle", "topo": "engine"}
+        pods = {"p999-engine-0-0": _rec("engine", 0, "old"), "p999-engine-1-0": _rec("engine", 1, "old")}
+        ctx = _ctx_for(hdr, pods)
+        f = ctx["fault"]
+        f.update(fired=True, crash_pod="p999-engine-1-0", crash_inst="1", crash_comp="engine", crash_hash="old",
+                 crash_uid=pods["p999-engine-1-0"]["uid"], switch_lifted=False)
+        ctx["trigger_ts"] = time.time()
+        lifted = []
+
+        def script(ctx_, n):
+            ctx_["pod_state"]["p999-engine-1-0"]["ready"] = bool(lifted)
+        rows = lambda *a: {"index": 1, "phase": "Ready", "podCount": 1, "servingPodCount": 1 if lifted else 0}
+        uids = lambda *a: {pods["p999-engine-0-0"]["uid"]} | ({pods["p999-engine-1-0"]["uid"]} if lifted else set())
+        fleet = _FakeFleet(ctx, script)
+        out = {}
+
+        def finish(case_id, desc, hdr_, ctx_, state, verdict, notes, checks):
+            out.update(state=state, verdict=verdict, checks=checks)
+            return 0
+        with mock.patch.object(run, "_read_one", fleet.read_one), mock.patch.object(run, "_ir_row", rows), \
+                mock.patch.object(run, "_ready_endpoint_uids", uids), \
+                mock.patch.object(run, "_readiness_restore", lambda f_: lifted.append(1) or True), \
+                mock.patch.object(run, "_isvc_annotations", lambda *a: {}), \
+                mock.patch.object(run, "STABILITY_S", 0.05), mock.patch.object(run, "READINESS_RECOVER_AFTER_S", 0.1), \
+                mock.patch.object(run, "ROTATE_BASE_S", 5), mock.patch.object(run, "ROTATE_PER_POD_S", 0):
+            state, verdict, notes, checks = run._idle_readiness(ctx, f, hdr)
+        self.assertEqual(("RECOVERED", "PASS"), (state, verdict), checks)
+        self.assertTrue(any("the same pod returned" in c for c in checks))
+
+    def test_idle_readiness_persist(self):
+        hdr = {"Ne": 1, "Nd": 0, "Nr": 0, "ceil_e": 1, "ceil_d": 0, "ceil_r": 0, "fault": "readiness:old",
+               "form": "persist", "during": "idle", "topo": "engine", "restart": "RecreateInstance"}
+        pods = {"p999-engine-0-0": _rec("engine", 0, "old")}
+        ctx = _ctx_for(hdr, pods)
+        f = ctx["fault"]
+        f.update(fired=True, crash_pod="p999-engine-0-0", crash_inst="0", crash_comp="engine", crash_hash="old",
+                 crash_uid=pods["p999-engine-0-0"]["uid"], switch_lifted=False)
+        ctx["trigger_ts"] = time.time()
+        fleet = _FakeFleet(ctx, lambda c, n: c["pod_state"]["p999-engine-0-0"].__setitem__("ready", False))
+        with mock.patch.object(run, "_read_one", fleet.read_one), \
+                mock.patch.object(run, "_ir_row", lambda *a: {"index": 0, "phase": "Ready", "podCount": 1, "servingPodCount": 0}), \
+                mock.patch.object(run, "_ready_endpoint_uids", lambda *a: set()), \
+                mock.patch.object(run, "_isvc_annotations", lambda *a: {}), mock.patch.object(run, "IDLE_HOLD_S", 0.3):
+            state, verdict, notes, checks = run._idle_readiness(ctx, f, hdr)
+        self.assertEqual(("PERSISTED", "PASS"), (state, verdict), checks)
+
+    def test_readiness_new_roll_holds_then_lands_the_fix(self):
+        hdr = {"Ne": 2, "Nd": 0, "Nr": 0, "ceil_e": 3, "ceil_d": 0, "ceil_r": 0, "fault": "readiness:new", "topo": "engine"}
+        pods = {"p999-engine-0-0": _rec("engine", 0, "old"), "p999-engine-1-0": _rec("engine", 1, "old")}
+        ctx = _ctx_for(hdr, pods)
+        bumps = []
+
+        def bump(ctx_, bumped, env, val):
+            bumps.append((env, val))
+            ctx_["trigger_ts"] = time.time()
+            return True
+
+        def script(ctx_, n):
+            ps = ctx_["pod_state"]
+            if len(bumps) == 1 and "p999-engine-2-0" not in ps:
+                ps["p999-engine-2-0"] = _rec("engine", 2, "broken", ready=False)
+            if len(bumps) == 2:
+                ps.pop("p999-engine-2-0", None)
+                for name in ("p999-engine-0-0", "p999-engine-1-0"):
+                    ps[name] = _rec("engine", name.split("-")[2], "fix", created="9")
+        fleet = _FakeFleet(ctx, script)
+        hold = lambda *a: "engine Instance 2 Failed: InstanceReadyTimeout" if len(bumps) == 1 and fleet.calls > 2 else ""
+        out = self._run(run._readiness_new_roll, ctx, fleet,
+                        {"_bump_with_env": bump, "_broken_revision_hold": hold,
+                         "_isvc_spec": lambda *a: {"engine": {"lifecycle": {"instanceReadyTimeout": "90s"}}}})
+        self.assertEqual(("CONVERGED", "PASS"), (out["state"], out["verdict"]), out["checks"])
+        self.assertEqual([[{"name": run.READINESS_SWITCH_ENV, "value": "1"}], [{"name": "TEST_REV", "value": "v3"}]],
+                         [e for e, _v in bumps])
+        self.assertTrue(any("the fix push landed" in c for c in out["checks"]))
+
+    def test_tight_roll_lifts_the_squeeze_and_completes(self):
+        hdr = {"Ne": 2, "Nd": 0, "Nr": 0, "ceil_e": 3, "ceil_d": 0, "ceil_r": 0, "fault": "quota:1",
+               "lift": "after-hold", "topo": "engine-mn"}
+        pods = {}
+        for i in (0, 1):
+            pods[f"p999-engine-{i}-0"] = _rec("engine", i, "old", runner="leader")
+            pods[f"p999-engine-{i}-1"] = _rec("engine", i, "old", runner="worker")
+        ctx = _ctx_for(hdr, pods, workers=1)
+        lifted = []
+
+        def script(ctx_, n):
+            ps = ctx_["pod_state"]
+            if ctx_.get("trigger_ts") and "p999-engine-2-0" not in ps:
+                ps["p999-engine-2-0"] = _rec("engine", 2, "new", runner="leader", ready=False)
+            if lifted:
+                for i in (0, 1):
+                    ps[f"p999-engine-{i}-0"] = _rec("engine", i, "new", runner="leader", created="9")
+                    ps[f"p999-engine-{i}-1"] = _rec("engine", i, "new", runner="worker", created="9")
+                ps.pop("p999-engine-2-0", None)
+        fleet = _FakeFleet(ctx, script)
+
+        def bump(ctx_, bumped):
+            ctx_["trigger_ts"] = time.time()
+            return True
+        out = self._run(run._tight_roll, ctx, fleet,
+                        {"_bump_rev": bump,
+                         "_capacity_hold": lambda *a: None if lifted else ("QuotaExceeded", "engine Instance 2: exceeded quota"),
+                         "_lift_quota": lambda cid: lifted.append(1) or _Resp("")})
+        self.assertEqual(("CONVERGED", "PASS"), (out["state"], out["verdict"]), out["checks"])
+        self.assertTrue(any("kept its running gangs" in c for c in out["checks"]))
+
+    def test_tight_roll_never_judges_the_wait(self):
+        hdr = {"Ne": 2, "Nd": 0, "Nr": 0, "ceil_e": 3, "ceil_d": 0, "ceil_r": 0, "fault": "cordon:all",
+               "lift": "never", "topo": "engine-mn"}
+        pods = {}
+        for i in (0, 1):
+            pods[f"p999-engine-{i}-0"] = _rec("engine", i, "old", runner="leader")
+            pods[f"p999-engine-{i}-1"] = _rec("engine", i, "old", runner="worker")
+        ctx = _ctx_for(hdr, pods, workers=1)
+        fleet = _FakeFleet(ctx, lambda c, n: c["pod_state"].setdefault("p999-engine-2-0", _rec("engine", 2, "new", runner="leader", ready=False)))
+
+        def bump(ctx_, bumped):
+            ctx_["trigger_ts"] = time.time()
+            return True
+        out = self._run(run._tight_roll, ctx, fleet,
+                        {"_bump_rev": bump, "_churn_stopped": lambda cid: (True, "still"),
+                         "_capacity_hold": lambda *a: ("Unschedulable", "engine Instance 2: 0/2 nodes are available: 2 node(s) were unschedulable")})
+        self.assertEqual(("HELD", "PASS"), (out["state"], out["verdict"]), out["checks"])
+        self.assertTrue(any("still reported at the end" in c for c in out["checks"]))
+
+
+class GeneratedFaultFamiliesTest(unittest.TestCase):
+    """The readiness, gang-member and tight families: their size, and that
+    every emitted header carries the knobs its runner path reads."""
+
+    @classmethod
+    def setUpClass(cls):
+        outputs, rows = generate_cases.build_outputs()
+        cls.outputs, cls.rows = outputs, rows
+        cls.by_folder = {}
+        for folder, name, kv, meta in rows:
+            cls.by_folder.setdefault(folder, []).append((name, kv, meta))
+
+    def _hdr(self, folder, name):
+        return self.outputs[f"{folder}/{name}.yaml"].splitlines()[0]
+
+    def test_family_sizes_and_id_blocks(self):
+        self.assertEqual(30, len(self.by_folder["gen-readiness"]))
+        self.assertEqual(72, len(self.by_folder["gen-gang-member"]))
+        self.assertEqual(28, len(self.by_folder["gen-tight"]))
+        for folder in ("gen-readiness", "gen-gang-member", "gen-tight"):
+            lo, hi = generate_cases.GEN_BLOCKS[folder]
+            for name, _kv, _m in self.by_folder[folder]:
+                self.assertTrue(lo <= int(name[1:]) < hi, (folder, name))
+        manifest = self.outputs[generate_cases.MANIFEST_REL]
+        for folder in ("gen-readiness", "gen-gang-member", "gen-tight"):
+            self.assertIn(f"| {folder} |", manifest)
+
+    def test_readiness_cells(self):
+        old = [(n, kv) for n, kv, _m in self.by_folder["gen-readiness"] if kv["fault"] == "readiness:old"]
+        new = [(n, kv) for n, kv, _m in self.by_folder["gen-readiness"] if kv["fault"] == "readiness:new"]
+        self.assertEqual((12, 18), (len(old), len(new)))
+        for name, kv in old:
+            self.assertEqual("idle", kv["during"])
+            self.assertIn(kv["form"], ("persist", "recover"))
+            self.assertEqual(kv["Ne"], kv["ceil_e"], "no surge on the idle service")
+            self.assertNotIn("instanceReadyTimeout", self.outputs[f"gen-readiness/{name}.yaml"])
+        for name, kv in new:
+            self.assertNotIn("during", kv)
+            self.assertNotIn("form", kv)
+            self.assertIn(f'instanceReadyTimeout: "{generate_cases.READINESS_NEW_TIMEOUT}"',
+                          self.outputs[f"gen-readiness/{name}.yaml"])
+        strats = {m["strat"] for _n, kv, m in self.by_folder["gen-readiness"] if kv["fault"] == "readiness:new"}
+        self.assertEqual(set(generate_cases.READINESS_STRATS), strats)
+        self.assertEqual({"None", "RecreateInstance"}, {kv["restart"] for _n, kv, _m in self.by_folder["gen-readiness"]})
+
+    def test_gang_member_cells_bind_the_victim_to_the_timing(self):
+        victim_for = dict(generate_cases.GANG_MEMBER_TIMINGS)
+        seen = set()
+        for name, kv, meta in self.by_folder["gen-gang-member"]:
+            phase = kv["fault"].partition(":")[2]
+            self.assertEqual(victim_for[phase], kv["victim"], name)
+            self.assertIn(kv["kill"], ("leader", "worker"))
+            self.assertEqual(1, kv["floor_slack"])
+            self.assertIn(kv["restart"], ("None", "RecreateInstance"))
+            self.assertTrue(kv["topo"].endswith("-mn"))
+            self.assertEqual(meta["strat"] == "SurgeThenDrain", kv.get("order_soft") == 1, name)
+            seen.add((phase, kv["kill"], kv["topo"], meta["strat"], kv["restart"]))
+        # 3 timings x 2 members x 2 topologies x 2 strategies x 2 policies (the
+        # two engine widths fold into one key here; the per-shape count is below).
+        self.assertEqual(48, len(seen))
+
+    def test_gang_member_cells_count_per_shape(self):
+        per_topo = {}
+        for _n, kv, _m in self.by_folder["gen-gang-member"]:
+            per_topo[kv["topo"]] = per_topo.get(kv["topo"], 0) + 1
+        self.assertEqual({"engine-mn": 48, "pd-mn": 24}, per_topo)
+
+    def test_tight_cells(self):
+        lifted, plain = [], []
+        for name, kv, meta in self.by_folder["gen-tight"]:
+            kind = kv["fault"].partition(":")[0]
+            self.assertIn(kind, ("quota", "cordon"))
+            self.assertTrue(kv["topo"].endswith("-mn"))
+            if "lift" in kv:
+                self.assertIn(kv["lift"], ("after-hold", "never"))
+                self.assertFalse(meta["strat"] == "RecreatePod" and kind == "quota", name)
+                lifted.append(name)
+            else:
+                self.assertEqual(("RecreatePod", "quota"), (meta["strat"], kind), name)
+                plain.append(name)
+        self.assertEqual((24, 4), (len(lifted), len(plain)))
+        quotas = {kv["fault"] for _n, kv, _m in self.by_folder["gen-tight"] if kv["fault"].startswith("quota:")}
+        self.assertEqual({"quota:1", "quota:2"}, quotas, "one pod short of a gang at each width")
+
+    def test_every_new_case_validates(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            for folder in ("gen-readiness", "gen-gang-member", "gen-tight"):
+                (root / folder).mkdir()
+                for name, _kv, _m in self.by_folder[folder]:
+                    (root / folder / f"{name}.yaml").write_text(self.outputs[f"{folder}/{name}.yaml"])
+            self.assertEqual(0, run.validate_cases(root))

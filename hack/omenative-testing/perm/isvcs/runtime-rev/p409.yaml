@@ -43,7 +43,16 @@ spec:
           - { name: TEST_STARTUP_DELAY,  value: "15" }
         ports: [ { containerPort: 8080, name: http, protocol: TCP } ]
         startupProbe:   { httpGet: { path: /, port: 8080 }, periodSeconds: 2, failureThreshold: 30 }
-        readinessProbe: { httpGet: { path: /, port: 8080 }, periodSeconds: 2, failureThreshold: 2 }
+        # Readiness carries two switches, each enough to fail it while startup
+        # and liveness keep passing, so the pod runs, leaves rotation and is
+        # never restarted: the TEST_UNREADY env (a revision whose pods never
+        # pass readiness) and the /tmp/perm-unready file (a serving pod that
+        # stops passing it). run.py names both.
+        readinessProbe:
+          exec:
+            command: ["sh", "-c", "[ -z \"$TEST_UNREADY\" ] && [ ! -e /tmp/perm-unready ] && wget -q -O /dev/null -T 2 http://127.0.0.1:8080/"]
+          periodSeconds: 2
+          failureThreshold: 2
         livenessProbe:  { httpGet: { path: /, port: 8080 }, periodSeconds: 5, failureThreshold: 3 }
         resources:
           requests: { cpu: 50m,  memory: 64Mi }

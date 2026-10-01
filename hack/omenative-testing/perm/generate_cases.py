@@ -4,7 +4,7 @@
 Emits the constraint-filtered cross product of
     topology x updateStrategy x failure verb x injection phase x
     restartPolicy x pause
-into twenty-five generator-owned folders, using ONLY verbs and hooks the runners
+into twenty-eight generator-owned folders, using ONLY verbs and hooks the runners
 (run.py + the KIND CI lane) already implement:
 
     gen-rollout/   p1000+  baseline revision-bump rollouts (failure=none)
@@ -141,6 +141,20 @@ into twenty-five generator-owned folders, using ONLY verbs and hooks the runners
                           roll), crossed with topology x strategy x moment x
                           group; both finish and every Instance ends on the
                           new revision, the moved one among them
+    gen-readiness/ p7000+  a pod that runs but never passes readiness: on the
+                          running revision at idle (fault=readiness:old,
+                          form=persist|recover) and on a pushed revision
+                          (fault=readiness:new, then a fix push), crossed
+                          with shape x strategy x restartPolicy
+    gen-gang-member/ p7100+  a gang's leader or worker deleted mid-roll
+                          (fault=podkill:<phase> kill=<member>) while a gang
+                          settles, forms on the new revision, or serves beside
+                          a draining one, crossed with shape x strategy x
+                          restartPolicy
+    gen-tight/     p7300+  a gang roll on a cluster with no room for its surge
+                          gang (fault=quota:<w> or cordon:all) that must wait
+                          with a reason, tear nothing down and complete once
+                          the squeeze lifts (lift=after-hold|never)
 
 Ownership and determinism:
   - The gen-* folders belong ENTIRELY to this generator: every case there
@@ -342,6 +356,9 @@ GEN_BLOCKS = {
     "gen-ops-held": (6800, 6900),
     "gen-runtime-edit-repair": (6900, 7000),
     "gen-migrate-bump": (6200, 6400),
+    "gen-readiness": (7000, 7100),
+    "gen-gang-member": (7100, 7300),
+    "gen-tight": (7300, 7400),
 }
 GEN_ID_LO = min(lo for lo, _hi in GEN_BLOCKS.values())
 GEN_ID_HI = max(hi for _lo, hi in GEN_BLOCKS.values())
@@ -412,7 +429,6 @@ PAUSE_BUDGET = (1, 1)
 UNPROMISED_REPAIR = {("load", "None")}
 # The grouped cells whose repair the group's gate holds today are parked,
 # through the issue= header key, on the issue that tracks it.
-GROUPED_REPAIR_ISSUE = 1977
 
 
 # The steady-state and sibling crash-loop families. A service carries no group
@@ -611,6 +627,32 @@ MIGRATE_BUMP_MOMENT = {
     ("roll", "rotating"): "the move is requested at the first pod of the new revision",
     ("roll", "last"): "the move is requested when the roll has one Instance of the moved Component left, and names that Instance",
 }
+
+# The readiness family: the running side at idle (form = whether the switch
+# stays or is lifted) and the new side (a pushed revision that never passes
+# readiness, then a fix push) with a short Instance ready timeout so the hold
+# arrives inside the case budget; shapes with one gang width (the switch is
+# on the leader, so the width adds nothing).
+READINESS_SHAPES = [("engine", 4, 0), ("pd", 4, 0), ("engine-mn", 2, 1)]
+READINESS_STRATS = ["SurgeThenDrain", "RecreatePod", "InPlaceIfPossible"]
+READINESS_FORMS = ["persist", "recover"]
+READINESS_NEW_TIMEOUT = "90s"
+
+# The gang-member family: which member dies, when in the roll (and which gang:
+# a settled one, the one forming on the new revision, a serving neighbour of
+# the first gang on its way out), under which strategy and restart policy.
+# N=3 engine gangs give the untouched-gang floor a value under RecreatePod.
+GANG_MEMBER_SHAPES = [("engine-mn", 3, 1), ("engine-mn", 3, 2), ("pd-mn", 2, 1)]
+GANG_MEMBER_STRATS = ["SurgeThenDrain", "RecreatePod"]
+GANG_MEMBER_TIMINGS = [("settling", "stable"), ("rotating", "canary"), ("draining", "stable")]
+GANG_MEMBERS = ["leader", "worker"]
+
+# The tight-cluster family: gang shapes at two widths, the squeeze (a quota
+# one pod short of a gang, or every node cordoned) and whether it lifts.
+TIGHT_SHAPES = [("engine-mn", 2, 1), ("engine-mn", 2, 2), ("pd-mn", 2, 1), ("pd-mn", 2, 2)]
+TIGHT_STRATS = ["SurgeThenDrain", "RecreatePod"]
+TIGHT_SQUEEZES = ["quota", "cordon"]
+TIGHT_LIFTS = ["after-hold", "never"]
 
 # Canonical shapes: (topo, N, W). Gangs at N=2 with widths 1 and 2; singles at
 # N=4 (pd: engine+decoder N, router lib.NR). Percentage budgets additionally
@@ -2726,6 +2768,154 @@ def emit_migrate_bump(add):
                             cell=("migrate-bump", first, hook, topo, w, strat, surge, unavail, co), coord=coord)
 
 
+# ── gen-readiness: a pod that runs but never passes readiness ────────────────
+def _canonical_budget(strat):
+    return dict(STRATS)[strat][0]
+
+
+def _readiness_old_reason(form, topo):
+    victim = ("the leader pod of the engine's highest gang" if is_mn(topo)
+              else "the pod of the engine's highest Instance")
+    out = (f"{victim} stops passing its readiness probe while it keeps running; readiness is "
+           f"the runtime's own out-of-rotation signal, not a failure, so no restart policy rebuilds it: the "
+           f"Instance leaves the Ready endpoints at once, its row reports the drop (serving count below pod "
+           f"count), and nothing is rebuilt or surged")
+    if form == "persist":
+        out += "; the pod stays out of rotation and reported across the hold window, until an operator acts"
+    else:
+        out += ("; when the probe passes again the same pod returns to rotation and the row recovers, with no "
+                "rebuild and no new revision")
+    if is_pd(topo):
+        out += "; decoder and router are untouched"
+    return out
+
+
+def _readiness_new_reason(strat, topo):
+    how = {"SurgeThenDrain": "the surge Instance is the one that fails and nothing drains (floor N)",
+           "RecreatePod": "the first drained Instance's replacement is the one that fails (floor N-1)",
+           "InPlaceIfPossible": ("the switch is a template change beyond images, so the strategy recreates and "
+                                 "the first drained Instance's replacement is the one that fails (floor N-1)")}[strat]
+    out = ("the pushed revision carries the readiness switch, so its pods run and never pass readiness: the roll "
+           "holds at the Instance ready timeout with the new Instance failed and the reason recorded, the old "
+           "revision keeps serving at the floor and the broken revision never serves; a fix push without the "
+           f"switch then lands on every Instance; {how}")
+    if is_pd(topo):
+        out += "; decoder and router are untouched"
+    return out
+
+
+def emit_readiness(add):
+    for topo, n, w in READINESS_SHAPES:
+        pd = is_pd(topo)
+        for form in READINESS_FORMS:
+            for rp in RESTARTS:
+                kv = dict(**counts(topo, n), ceil_e=n, ceil_d=(n if pd else 0), ceil_r=(lib.NR if pd else 0),
+                          restart=rp, fault="readiness:old", co="none", topo=topo, form=form, during="idle")
+                desc = f"{GEN_MARK} readiness lost {form} {shape_tag(topo, w)} N={n} rp {rp}"
+                life = lib.lifecycle(strat="SurgeThenDrain", surge=1, unavail=0, restart=RP_FULL[rp])
+                d_life = lib.lifecycle(restart=RP_FULL[rp]) if pd else None
+                add("gen-readiness", desc, kv, comps(topo, n, w, life, d_life=d_life),
+                    _readiness_old_reason(form, topo),
+                    dict(strat="SurgeThenDrain", verb=f"readiness:old:{form}", rp=rp),
+                    cell=("readiness", "old", form, topo, w, rp))
+    for topo, n, w in READINESS_SHAPES:
+        pd = is_pd(topo)
+        for strat in READINESS_STRATS:
+            surge, unavail = _canonical_budget(strat)
+            for rp in RESTARTS:
+                kv = dict(**counts(topo, n), **ceilings(topo, n, strat, surge),
+                          restart=rp, fault="readiness:new", co="none", topo=topo)
+                desc = (f"{GEN_MARK} readiness never {shape_tag(topo, w)} N={n} {strat} "
+                        f"{budget_tag(strat, surge, unavail)} rp {rp}")
+                life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp],
+                                     ready_timeout=READINESS_NEW_TIMEOUT)
+                d_life = lib.lifecycle(restart=RP_FULL[rp]) if pd else None
+                add("gen-readiness", desc, kv, comps(topo, n, w, life, d_life=d_life),
+                    _readiness_new_reason(strat, topo),
+                    dict(strat=strat, verb="readiness:new", rp=rp),
+                    cell=("readiness", "new", topo, w, strat, rp))
+
+
+# ── gen-gang-member: a gang's leader or worker dies mid-roll ────────────────
+def _gang_member_reason(phase, member, strat, rp):
+    when = {"settling": "from a settled gang the moment the bump lands",
+            "rotating": "from the gang forming on the new revision, at its first pod of that member",
+            "draining": "from a serving gang while the first gang is on its way out"}[phase]
+    scope = ("the engine rebuilds the gang as a whole (a RestartTriggered names it) unless the roll takes it "
+             "first, in which case every pod of it is new on the target"
+             if rp == "RecreateInstance" else
+             f"only the lost {member} comes back; no whole-gang rebuild and no RestartTriggered")
+    out = (f"the {member} is deleted {when}: {scope}; the gang is never counted as serving while a member "
+           f"is missing, the untouched gangs keep serving (floor N-maxUnavailable-1), and the roll ends with "
+           f"every gang whole on the new revision")
+    if strat == "SurgeThenDrain":
+        out += "; order waived — the deletion is a drain with no preceding surge"
+    return out
+
+
+def emit_gang_member(add):
+    for topo, n, w in GANG_MEMBER_SHAPES:
+        for strat in GANG_MEMBER_STRATS:
+            surge, unavail = _canonical_budget(strat)
+            for phase, victim in GANG_MEMBER_TIMINGS:
+                for member in GANG_MEMBERS:
+                    for rp in RESTARTS:
+                        kv = dict(**counts(topo, n), **ceilings(topo, n, strat, surge), restart=rp, kill=member,
+                                  fault=f"podkill:{phase}", co="none", topo=topo, victim=victim, floor_slack=1)
+                        if strat == "SurgeThenDrain":
+                            kv["order_soft"] = 1
+                        desc = f"{GEN_MARK} gang {member} lost {phase} {shape_tag(topo, w)} N={n} {strat} rp {rp}"
+                        life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail, restart=RP_FULL[rp])
+                        d_life = lib.lifecycle(restart=RP_FULL[rp]) if is_pd(topo) else None
+                        add("gen-gang-member", desc, kv, comps(topo, n, w, life, d_life=d_life),
+                            _gang_member_reason(phase, member, strat, rp),
+                            dict(strat=strat, verb=f"podkill:{phase}:{member}", rp=rp),
+                            cell=("gang-member", phase, member, topo, w, strat, rp))
+
+
+# ── gen-tight: a gang roll with no room for its surge gang ──────────────────
+def _tight_reason(strat, squeeze, lift, w):
+    gang = f"{w + 1}-pod gang"
+    squeezed = (f"the quota admits {w} more pod(s), one short of a {gang}" if squeeze == "quota"
+                else "every schedulable node is cordoned")
+    if strat == "RecreatePod" and squeeze == "quota":
+        return (f"{squeezed}; the first gang drains within its own budget and its {gang} replacement is admitted "
+                f"once the old pods are gone (at most a brief quota refusal while they terminate): the roll "
+                f"completes with no wait, at the floor N-1, and no second gang drains")
+    if strat == "SurgeThenDrain":
+        waits = (f"so the surge {gang} cannot be placed: the roll waits with the Instance's operation naming the "
+                 f"capacity, no running gang drains (floor N) and every running gang keeps serving")
+    else:
+        waits = (f"so once the first gang drains within its own budget its {gang} replacement has no placement: "
+                 f"the roll waits at N-1 serving with the operation naming the capacity and drains no second gang")
+    ends = ("once the squeeze is lifted the gang is placed and the roll lands on every Instance"
+            if lift == "after-hold" else
+            "the wait holds across the window with no churn and nothing torn down; the case ends with the squeeze in place")
+    return f"{squeezed}, {waits}; {ends}"
+
+
+def emit_tight(add):
+    for topo, n, w in TIGHT_SHAPES:
+        for strat in TIGHT_STRATS:
+            surge, unavail = _canonical_budget(strat)
+            life = lib.lifecycle(strat=strat, surge=surge, unavail=unavail)
+            for squeeze in TIGHT_SQUEEZES:
+                fault = f"quota:{w}" if squeeze == "quota" else "cordon:all"
+                base = dict(**counts(topo, n), **ceilings(topo, n, strat, surge), fault=fault, co="none", topo=topo)
+                if strat == "RecreatePod" and squeeze == "quota":
+                    desc = f"{GEN_MARK} tight {squeeze} completes {shape_tag(topo, w)} N={n} {strat}"
+                    add("gen-tight", desc, base, comps(topo, n, w, life), _tight_reason(strat, squeeze, None, w),
+                        dict(strat=strat, verb=f"{squeeze}:completes"),
+                        cell=("tight", topo, w, strat, squeeze, "completes"))
+                    continue
+                for lift in TIGHT_LIFTS:
+                    desc = f"{GEN_MARK} tight {squeeze} {lift} {shape_tag(topo, w)} N={n} {strat}"
+                    add("gen-tight", desc, dict(base, lift=lift), comps(topo, n, w, life),
+                        _tight_reason(strat, squeeze, lift, w),
+                        dict(strat=strat, verb=f"{squeeze}:{lift}"),
+                        cell=("tight", topo, w, strat, squeeze, lift))
+
+
 # ── assembly ─────────────────────────────────────────────────────────────────
 def build_outputs():
     """{relative path under isvcs/: file text} — the entire owned output set."""
@@ -2796,6 +2986,9 @@ def build_outputs():
     emit_ops_held(add)
     emit_runtime_edit_repair(add)
     emit_migrate_bump(add)
+    emit_readiness(add)
+    emit_gang_member(add)
+    emit_tight(add)
     stale = set(PARKED) - parked_used
     if stale:
         sys.exit("PARKED keys match no emitted cell (stale after a matrix change): "
@@ -3103,6 +3296,19 @@ def manifest(rows):
         "- `during=last` is not emitted with maxSurge 2: a surge of two promotes its"
         " last pair together, so the moment with exactly one Instance still off the"
         " new revision is not reliably observable.",
+        "- readiness:old runs on the idle service at the canonical SurgeThenDrain"
+        " budget: update budgets are dormant with no roll, so strategy multiplies"
+        " only the readiness:new side; readiness:new has one form, since a revision"
+        " that never passes readiness has no one-shot shape (a slow start is the"
+        " startup delay, not a readiness failure).",
+        "- gang-member cells at steady state are the mode=kill cells gen-restart"
+        " already emits (kill=leader|worker x restart policy x strategy); this"
+        " family adds the mid-roll timings, each bound to the gang it aims at"
+        " (settling: a settled gang; rotating: the gang forming on the new"
+        " revision; draining: a serving gang beside the first one leaving).",
+        "- tight: RecreatePod under the quota squeeze has no lift axis — the drain"
+        " frees the gang's own room, so the roll completes with no wait, and the"
+        " cell asserts that instead.",
         "- Kill-family cells pinned by hand-written restart/ cases are excluded:",
         "",
     ]

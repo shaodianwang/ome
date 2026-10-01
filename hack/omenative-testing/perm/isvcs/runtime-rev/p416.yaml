@@ -40,7 +40,11 @@ spec:
       # the guard forces readinessProbe to fail at runtime to make the surge pod
       # run-but-never-Ready WITHOUT crashing (so it never escalates).
       startupProbe:   { httpGet: { path: /, port: 8080 }, periodSeconds: 2, failureThreshold: 30 }
-      readinessProbe: { httpGet: { path: /, port: 8080 }, periodSeconds: 2, failureThreshold: 2 }
+      readinessProbe:
+        exec:
+          command: ["sh", "-c", "[ -z \"$TEST_UNREADY\" ] && [ ! -e /tmp/perm-unready ] && wget -q -O /dev/null -T 2 http://127.0.0.1:8080/"]
+        periodSeconds: 2
+        failureThreshold: 2
       livenessProbe:  { httpGet: { path: /, port: 8080 }, periodSeconds: 5, failureThreshold: 3 }
       resources:
         requests: { cpu: 50m,  memory: 64Mi }

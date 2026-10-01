@@ -97,7 +97,8 @@ perm/
 │   ├── gen-rollout/ gen-fault/ gen-restart/ gen-crashloop/ gen-switch/ gen-crashloop-idle/ gen-crashloop-sibling/
 │   │   gen-heal/ gen-imagepull/ gen-node/ gen-ctrlrestart/ gen-rollback/ gen-crashloop-new/ gen-crashloop-group/ gen-pause-repair/ gen-ops-held/ gen-runtime-edit-repair/ gen-migrate-bump/  — generated hot core (see isvcs/MANIFEST.md)
 │   ├── gen-canary-crash/ gen-canary-second-rev/ gen-canary-podkill/ gen-canary-fault-old/ gen-canary-fault-new/  — generated operator stories driven through a canary
-│   └── gen-size/ gen-router-gang/  — generated small fleets (one and two Instances per Component) and the engine gang behind a router
+│   ├── gen-size/ gen-router-gang/  — generated small fleets (one and two Instances per Component) and the engine gang behind a router
+│   └── gen-readiness/ gen-gang-member/ gen-tight/  — generated fault families (see isvcs/MANIFEST.md)
 └── results/
     └── <RUN_TS>/<feature>/<topo>/
         ├── pNN-<ts>.tsv   — one verdict row per case
@@ -135,6 +136,16 @@ after it is up, then exits 1 — every time the kubelet restarts the container �
 so the pod passes readiness and crashes after it. Only `fault=crashloop:new
 form=load` sets it, on the pushed revision's runner env; the trap still answers
 a stop signal during the window, so such a pod drains fast too.
+
+Readiness is an `exec` probe with two switches, each enough to fail it while
+the startup and liveness probes (plain `httpGet /`) keep passing, so a pod can
+run, leave rotation and never be restarted: the `TEST_UNREADY` runner env (a
+bumped revision whose pods never pass readiness, `fault=readiness:new`) and the
+`/tmp/perm-unready` file (a serving pod that stops passing it,
+`fault=readiness:old`). With neither set the probe is an HTTP check of nginx on
+its port. `run.py` names both switches (`READINESS_SWITCH_ENV`,
+`READINESS_SWITCH_FILE`); the metrics runtime keeps its HTTP readiness probe,
+its image has no shell.
 
 The CBM points at a 1 Mi PVC in `$OME_TEST_NS`; the seed Job writes a minimal
 `config.json`, and OME's own metadata-extraction Job (built from the `omeAgent`
@@ -1173,6 +1184,70 @@ provokes it, and that belongs to the node-loss family.
   crash-loop repair is open needs a second fault slot the runner lacks and
   is listed in the manifest's missing hooks.
 
+- **`fault=readiness:old` with `form=persist|recover`** (rollout mode,
+  `during=idle` only) makes one serving pod of the running revision — the
+  break victim, `victimcomp=` as above — stop passing its readiness probe
+  while it keeps running: the runner sets the fixture's readiness switch
+  file in the live pod (see the runtime section), so startup and liveness
+  keep passing and the kubelet never restarts it. Readiness is the runtime's
+  own out-of-rotation signal, not a failure, and no restart policy rebuilds
+  such a pod, so the verdict asserts the pod stops reporting Ready and leaves
+  the Ready endpoints of its routed Service within `READINESS_DROP_S`, that
+  the Instance's row reports the drop (its serving count falls below its pod
+  count, or its phase leaves Ready), and that nothing is rebuilt, surged or
+  re-revisioned. `form=persist` holds that across the hold window
+  (`IDLE_HOLD_S`); `form=recover` lifts the switch `READINESS_RECOVER_AFTER_S`
+  after the drop and requires the same pod (same UID) to return Ready,
+  serving and routed, with the row recovered. The lift also runs from the
+  end-of-case cleanup.
+
+- **`fault=readiness:new`** (rollout mode, no `during=`) is the bump itself:
+  the trigger sets the switch in the bumped runners' env (`TEST_UNREADY`), so
+  the pushed revision's pods run and never pass readiness. The roll must hold
+  at the Instance ready timeout — a bumped Instance on the new revision reads
+  `Failed` with its recorded reason, or an `InstanceFailed` event names it —
+  while the old revision keeps serving at the floor and no pod of the broken
+  revision ever serves; the runner then pushes a fix (a bump that drops the
+  switch) and requires it to land on every Instance with nothing of the
+  broken revision left. Cases set a short `lifecycle.instanceReadyTimeout` so
+  the hold arrives inside the budget. The switch is a template change beyond
+  images, so an in-place strategy recreates and its pods are counted by hash.
+
+- **`fault=podkill:<phase>` with `kill=leader|worker`** (gang topologies)
+  aims the podkill at one gang member instead of the lowest gang's leader,
+  and `victim=stable|canary` picks the gang: the lowest serving old-revision
+  gang, or the newest gang on the new revision (the hook then waits for a
+  pod of that member to exist). `podkill:draining` fires at the first
+  old-revision pod observed on its way out. A gang already draining is never
+  the victim. The verdict adds the gang-member contract: the killed pod is
+  gone; under `RecreateInstanceOnPodRestart` the gang is rebuilt as a whole
+  (a `RestartTriggered` names it) unless the roll took it first, under `None`
+  no whole-gang repair is recorded; and while the gang is short a Ready
+  member its row never counts every pod as serving (sampled once the gap has
+  lasted `GANG_SHORT_REPORT_S`). `floor_slack=<k>` lowers the capacity floor
+  by the `k` Instances the fault takes, so the untouched gangs stay a hard
+  claim (`N - maxUnavailable - k`) instead of a `floor_soft=1` waiver.
+  `restart=` in the header names the policy the verdict reads.
+
+- **`fault=cordon:all`** cordons every schedulable worker (the control plane
+  and nodes already cordoned are left alone), so nothing new can be placed
+  until the lift; each node is labelled `perm.test/cordoned=<case>` and
+  uncordoned in cleanup. **`lift=after-hold|never`** (rollout mode, with
+  `fault=quota:<n>` or `fault=cordon:all`) squeezes a roll out of room: the
+  verdict first requires the roll to report its wait on capacity — a bumped
+  Instance's operation waiting on `QuotaExceeded` or `Unschedulable`, or an
+  `InstanceQuotaBlocked` event — and prints whether the reason names the
+  capacity; while the wait holds no more pods of the running gangs may leave
+  than the strategy's own `maxUnavailable` budget allows (nothing is torn
+  down to make room) and the floor holds. `after-hold` then lifts the squeeze
+  once the wait has held `LIFT_SETTLE_S` and requires the roll to complete;
+  `never` keeps the squeeze across `IDLE_HOLD_S`, requires the wait to still
+  be reported at the end and the pod set to be still (no churn), and ends
+  with the squeeze in place. A quota one pod short of a gang (`quota:<w>` for
+  a `w+1`-pod gang) is how a surge gang is kept from being placed; a
+  drain-first strategy frees its own room under that quota, so its cell is a
+  plain roll that must complete.
+
 - **`during=idle`** (rollout mode, with a persistent fault) fires the fault
   on the settled service and never bumps; the verdict reads what the product
   does about the break on its own, stated by `expect=`. `expect=repaired`:
@@ -1373,7 +1448,9 @@ Four generators write into `isvcs/`; re-run one after editing it:
   revision that crashes at start, crashes after Ready inside or past the first
   soak, or cannot be pulled; the ladder parks where it bites and a rollback or
   a fix push lands), the small fleets and the engine gang behind a router
-  (`p8000`–`p8199`) → `isvcs/gen-size/` and `isvcs/gen-router-gang/`, plus
+  (`p8000`–`p8199`) → `isvcs/gen-size/` and `isvcs/gen-router-gang/`, the fault
+  families (`p7000`–`p7399`) → `isvcs/gen-readiness/`, `isvcs/gen-gang-member/`
+  and `isvcs/gen-tight/`, plus
   `isvcs/MANIFEST.md` (per-dimension counts, the
   constraint ledger with every omitted cell and its reason, missing-hook
   catalog). The story families are canary lanes in CI: the pipeline gives

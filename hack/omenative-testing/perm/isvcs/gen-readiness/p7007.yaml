@@ -1,0 +1,23 @@
+# p7007: [gen] readiness lost recover pd N=4 rp RecreateInstance  Ne=4 Nd=4 Nr=2 ceil_e=4 ceil_d=4 ceil_r=2 restart=RecreateInstance fault=readiness:old co=none topo=pd form=recover during=idle
+# reason: the pod of the engine's highest Instance stops passing its readiness probe while it keeps running; readiness is the runtime's own out-of-rotation signal, not a failure, so no restart policy rebuilds it: the Instance leaves the Ready endpoints at once, its row reports the drop (serving count below pod count), and nothing is rebuilt or surged; when the probe passes again the same pod returns to rotation and the row recovers, with no rebuild and no new revision; decoder and router are untouched
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p7007 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 4
+    maxReplicas: 4
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

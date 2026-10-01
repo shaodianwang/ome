@@ -1,0 +1,27 @@
+# p7169: [gen] gang leader lost draining pd-mn W1 N=2 RecreatePod rp RecreateInstance  Ne=2 Nd=2 Nr=2 ceil_e=2 ceil_d=2 ceil_r=2 restart=RecreateInstance kill=leader fault=podkill:draining co=none topo=pd-mn victim=stable floor_slack=1
+# reason: the leader is deleted from a serving gang while the first gang is on its way out: the engine rebuilds the gang as a whole (a RestartTriggered names it) unless the roll takes it first, in which case every pod of it is new on the target; the gang is never counted as serving while a member is missing, the untouched gangs keep serving (floor N-maxUnavailable-1), and the roll ends with every gang whole on the new revision
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p7169 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-multinode, autoSync: true }
+  engine:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "RecreatePod", rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } } }
+  decoder:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    leader: {}
+    worker: { size: 1 }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }

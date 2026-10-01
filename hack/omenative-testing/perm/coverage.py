@@ -155,7 +155,7 @@ EXCLUDED_CELLS = [
 COMPONENTS = ("engine", "decoder", "router")
 CANARY_HOOKS = {"canary-staging", "canary-serving", "canary-prehold", "canary-draining", "canary-done",
                 "canary-rollingback", "canary-rolledback", "canary-failed"}
-FAULT_PHASES = {"settling", "rotating", "migrating"}
+FAULT_PHASES = {"settling", "rotating", "migrating", "draining"}
 CANARY_VERBS = {"pause", "pause-freeze", "promote", "promote-stale", "rebump", "rebump-fix", "rtedit", "podkill",
                 "rollback", "timeout-clear", "timeout-set", "scale", "repin", "resume",
                 "planedit", "planedit-repin", "groupremove", "runlost", "pairing", "quotalift"}
@@ -191,7 +191,7 @@ HEADER_VALUES = {
     "victim": {"stable", "canary"},
     "victimcomp": set(COMPONENTS),
     "imgcomp": set(COMPONENTS),
-    "form": {"start", "load"},
+    "form": {"start", "load", "persist", "recover"},
     "nophase": {"Pending", "Canarying", "Paused", "Promoting", "RollingBack", "RolledBack", "Failed"},
     "inv_off": {"A", "B", "C", "D", "F", "G", "H", "all"},
     "inv_xfail": {"A", "B", "C", "D", "F", "G", "H", "all"},
@@ -233,7 +233,11 @@ def _fault(v):
         # a break names the revision a rollout leaves behind (old), the one the
         # push brings (new), the idle service before the push, or a canary hook
         return param in ("old", "new", "idle") or _hook(param)
-    return {"cordon": "source", "configkey": "missing", "node": "notready"}.get(kind) == param
+    if kind == "readiness":
+        return param in ("old", "new")   # a serving pod stops passing readiness, or a pushed revision never does
+    if kind == "cordon":
+        return param in ("source", "all")   # the source node, or every node (a roll with no room)
+    return {"configkey": "missing", "node": "notready"}.get(kind) == param
 
 
 def _edit(v):
@@ -249,7 +253,7 @@ def _during(v):
 
 
 def _lift(v):
-    return v == 1 or v in {"after-settle", "after-failed", "after-recover"}
+    return v == 1 or v in {"after-settle", "after-failed", "after-recover", "after-hold", "never"}
 
 
 def _int_list(v):
@@ -282,7 +286,7 @@ HEADER_CHECKS = {
     "to_e": _count, "to_d": _count, "to_r": _count, "partition": _count, "failurelimit": _count,
     "minfails": _count, "verbhold": _count, "releaseafter": _count, "skipsoak": _count,
     "ratio_tol": _count, "scale_e": _count, "scale_d": _count, "issue": _count, "victims": _count,
-    "exitafter": _count,
+    "exitafter": _count, "floor_slack": _count,
     "rollback": _flag, "readd": _flag, "dup": _flag, "hint": _flag, "hold": _flag, "pkill": _flag, "fixfirst": _flag,
     "blocked": _flag, "infeasible": _flag, "notimpl": _flag, "floor_hard": _flag, "floor_soft": _flag,
     "order_soft": _flag,
@@ -629,8 +633,15 @@ def classify_faults(h, mode, pods, strategy, verbs):
         faults.append(("config missing", "one-shot" if lifted else "persistent", "running", str(h.get("victimcomp", "engine"))))
     elif kind == "node":
         faults.append(("node", "persistent" if h.get("lift") == "after-recover" else "one-shot", "-", str(h.get("victimcomp", "engine"))))
+    elif kind == "cordon" and param == "all":
+        faults.append(("quota", "one-shot" if lifted else "persistent", "-", "every node cordoned"))
     elif kind == "cordon":
         faults.append(("node", "persistent", "-", "cordoned source node"))
+    elif kind == "readiness":
+        # a serving pod that stops passing readiness (kept, or lifted) or a pushed revision that never passes it
+        persistent = param == "new" or h.get("form") != "recover"
+        faults.append(("readiness never passes", "persistent" if persistent else "one-shot",
+                       "new" if param == "new" else "running", str(h.get("victimcomp", "engine"))))
     elif kind == "quota":
         faults.append(("quota", "one-shot" if lifted else "persistent", "-", f"headroom {param}"))
     elif kind == "ctrlrestart":
@@ -653,7 +664,7 @@ def classify_faults(h, mode, pods, strategy, verbs):
 def fault_lifted(h, verbs):
     """The harness takes the cause away again: a lift phase, a quota lift verb,
     or a metric breach that decays while the analysis still promotes."""
-    return (h.get("lift") is not None or "quotalift" in verbs
+    return (h.get("lift") not in (None, "never") or "quotalift" in verbs
             or (h.get("health") == "breach" and h.get("analysis") == "pass"))
 
 
