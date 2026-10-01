@@ -27,7 +27,7 @@ func executeUpdatePass(ctx context.Context, deps types.Deps, input types.Reconci
 	anyGated := false
 	// First StartingFresh denial this pass (Budget or UpdateGate), for
 	// RecordRolloutHold — one Component has one hold slot, so the first
-	// denial found (plan order) wins, matching the gate stack's own
+	// denial found (selection order) wins, matching the gate stack's own
 	// first-denial-wins precedence.
 	var firstDenial *types.RolloutHold
 	// anyUpdateRan tracks whether ANY Update call fired this pass,

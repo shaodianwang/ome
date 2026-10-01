@@ -2369,3 +2369,60 @@ func TestPlan_Update_CoordGateExempt_ReadyRowServingNothing(t *testing.T) {
 		})
 	}
 }
+
+// TestPlan_Update_DarkInstancesListedFirst: the update selection lists
+// the fresh starts that replace an Instance serving nothing — a Ready
+// row whose pod set is provably out of service, a Failed row with no
+// serving pod — ahead of the starts that take a serving Instance
+// offline, each group in plan order, under a surge and a drain-first
+// strategy alike; a continuation keeps its place among the rest. The
+// budget the executor spends in that order restores the dark Instances
+// before it touches a serving one.
+//
+// Cells: instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-surge, instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-recreate
+func TestPlan_Update_DarkInstancesListedFirst(t *testing.T) {
+	target := updateTarget()
+	for _, strategy := range []types.UpdateStrategyType{types.UpdateStrategySurgeThenDrain, types.UpdateStrategyRecreatePod} {
+		t.Run(string(strategy), func(t *testing.T) {
+			in := minimalInput(t)
+			forbidMutations(t, &in)
+			in.ObservedState.InstanceStatuses = []types.InstanceStatus{
+				{Index: 0, Incarnation: 1, Phase: types.InstancePhaseReady, PodCount: 1, ServingPodCount: 1, RunningRevision: crashLoopRepairRevision},
+				{Index: 1, Incarnation: 1, Phase: types.InstancePhaseUpdating, PodCount: 1, RunningRevision: crashLoopRepairRevision},
+				{Index: 2, Incarnation: 1, Phase: types.InstancePhaseReady, PodCount: 1, ServingPodCount: 1, RunningRevision: crashLoopRepairRevision},
+				{Index: 3, Incarnation: 1, Phase: types.InstancePhaseReady, PodCount: 1, RunningRevision: crashLoopRepairRevision},
+				{Index: 4, Incarnation: 1, Phase: types.InstancePhaseFailed, RunningRevision: crashLoopRepairRevision},
+			}
+			plan := types.ComponentPlan{
+				Component:      types.ComponentEngine,
+				Replicas:       5,
+				UpdateStrategy: types.UpdateStrategy{Type: strategy},
+			}
+			for idx := int32(0); idx < 5; idx++ {
+				plan.Instances = append(plan.Instances, types.InstancePlan{Index: idx, Incarnation: 1, Runners: []types.RunnerPlan{{Name: "default", Size: 1}}})
+			}
+			pods := map[int32][]*corev1.Pod{
+				0: {servingEnginePod(0)}, 1: {servingEnginePod(1)}, 2: {servingEnginePod(2)}, 3: {wedgedEnginePod(3)},
+			}
+			d := planTargetOrFail(t, in, plan, target, planSnapshot(in, pods))
+			ua := findAction(d, workload.ActionUpdate)
+			if ua == nil {
+				t.Fatalf("expected an Update action, got %v", actionKinds(d))
+			}
+			want := []int32{3, 4, 0, 1, 2}
+			var got []int32
+			for _, item := range ua.Update.Items {
+				got = append(got, item.Instance.Index)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("update items = %v, want %v: the dark Instances first, then plan order", got, want)
+			}
+			for _, item := range ua.Update.Items {
+				dark := item.Instance.Index == 3 || item.Instance.Index == 4
+				if item.ReplacesDarkPodSet != dark {
+					t.Errorf("instance %d: ReplacesDarkPodSet = %v, want %v", item.Instance.Index, item.ReplacesDarkPodSet, dark)
+				}
+			}
+		})
+	}
+}

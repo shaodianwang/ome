@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -1754,6 +1755,296 @@ func TestReconcile_CrashLoop_RepairInFlightWhenTheTargetMoves(t *testing.T) {
 			}
 			if h.sawEvent(workloadtypes.EventReasonRepairHeld) {
 				t.Fatalf("a repair was announced held: %v", h.events)
+			}
+		})
+	}
+}
+
+// landedOn lists the Instances Ready on rev with no operation, lowest
+// index first: the Instances whose roll to rev is finished.
+func (h *recoveryHarness) landedOn(rev *appsv1.ControllerRevision) []int32 {
+	var out []int32
+	for _, s := range h.irStatuses() {
+		if s.Phase == workloadtypes.InstancePhaseReady && s.Operation == nil && s.RunningRevision == rev.Name {
+			out = append(out, s.Index)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+// untouchedOn reports whether the Instance at idx is Ready on rev with no
+// operation: no roll and no repair has taken it.
+func (h *recoveryHarness) untouchedOn(idx int32, rev *appsv1.ControllerRevision) bool {
+	s := h.instance(idx)
+	return s != nil && s.Phase == workloadtypes.InstancePhaseReady && s.Operation == nil && s.RunningRevision == rev.Name
+}
+
+// instanceServes reports whether the Instance at idx has its full pod set
+// in rotation (ContainersReady with the serving gate), whatever else is
+// alive under its index: a surge replacement standing beside a serving
+// source does not take the source out of rotation.
+func (h *recoveryHarness) instanceServes(idx int32) bool {
+	serving := 0
+	for _, pod := range h.podsOf(idx) {
+		if podreadiness.IsContainersReady(pod) && podreadiness.IsServing(pod) {
+			serving++
+		}
+	}
+	return serving >= len(h.desired.Runners)
+}
+
+// rollingGroupGate stands in for the gate stack of a rollout group with a
+// run open, read the way the group gate reads the Component's published
+// counters. A surge start is admitted while the surges in flight, plus
+// the surges this pass opened, plus this one, stay within maxSurge; a
+// drain-first start while the Instances not serving, plus the starts this
+// pass opened, plus this one, stay within maxUnavailable; an in-place
+// start returns the same pod and is waived. consults counts the calls.
+func rollingGroupGate(h *recoveryHarness, replicas, maxSurge, maxUnavailable int32, consults *int) func(workloadtypes.UpdateStrategyType, int32, int32) (bool, workloadtypes.RolloutHoldGate, string) {
+	drainFirst := coordinationUnavailabilityGate(h, replicas, maxUnavailable, consults)
+	return func(strategy workloadtypes.UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, workloadtypes.RolloutHoldGate, string) {
+		switch strategy {
+		case workloadtypes.UpdateStrategySurgeThenDrain:
+			*consults++
+			projected := escalation.CurrentSurgeInFlight(h.irStatuses()) + inFlightSurge + 1
+			if projected > maxSurge {
+				return false, workloadtypes.RolloutHoldGateBudget, fmt.Sprintf("surge budget %d exhausted (would become %d)", maxSurge, projected)
+			}
+			return true, "", ""
+		case workloadtypes.UpdateStrategyInPlaceIfPossible, workloadtypes.UpdateStrategyInPlaceOnly:
+			*consults++
+			return true, "", ""
+		default:
+			return drainFirst(strategy, inFlightSurge, inFlightUnavail)
+		}
+	}
+}
+
+// rollShapes are the two places a Component rolls from: standalone, with
+// no gate in front of it, and listed in a rollout group with a run open.
+var rollShapes = []struct {
+	name  string
+	gated bool
+}{
+	{"standalone", false},
+	{"rolling group", true},
+}
+
+// requireDarkInstanceRollsFirst drives the roll on the fixed revision
+// until done holds and checks, after every pass, the story of a fix
+// pushed over a dark Instance: the roll stays inside its budget, no
+// repair opens, every pod created after the bump runs the fix, the
+// Instances in held never move, and until the first new landing every
+// Instance in serving is untouched on v1 and in rotation, so the first
+// landing is the dark Instance's and costs no capacity. Landings that
+// predate the call are not counted.
+func requireDarkInstanceRollsFirst(t *testing.T, h *recoveryHarness, victim int32, serving, held []int32, strategy workloadtypes.UpdateStrategyType, surge, unavail int32, done func() bool) {
+	t.Helper()
+	bumpedAt := h.clk.Now()
+	fixedHash := query.RevisionOf(h.revFixed).Hash()
+	alreadyLanded := map[int32]bool{}
+	for _, idx := range h.landedOn(h.revFixed) {
+		alreadyLanded[idx] = true
+	}
+	var firstLanded []int32
+	invariant := func() {
+		if h.repairInFlight() {
+			h.dumpState("repair opened")
+			t.Fatalf("a repair opened on an Instance whose revision is not the roll target")
+		}
+		sts := h.irStatuses()
+		if strategy == workloadtypes.UpdateStrategySurgeThenDrain {
+			if n := escalation.CurrentSurgeInFlight(sts); n > surge {
+				t.Fatalf("%d surges in flight, budget %d", n, surge)
+			}
+		} else if n := escalation.CurrentUnavailableInFlight(sts); n > unavail {
+			t.Fatalf("%d Instances offline for the roll, budget %d", n, unavail)
+		}
+		for _, pod := range h.livePods() {
+			if !pod.CreationTimestamp.Time.After(bumpedAt) {
+				continue
+			}
+			if pod.Labels[query.LabelRevisionHash] != fixedHash || pod.Spec.Containers[0].Image != fixedImage {
+				h.dumpState("pod created off the fix")
+				t.Fatalf("pod %s was created on %s after the fix was pushed", pod.Name, pod.Spec.Containers[0].Image)
+			}
+		}
+		for _, idx := range held {
+			if !h.untouchedOn(idx, h.revV1) {
+				h.dumpState("held instance moved")
+				t.Fatalf("instance %d is held and must not move", idx)
+			}
+		}
+		if firstLanded != nil {
+			return
+		}
+		var landed []int32
+		for _, idx := range h.landedOn(h.revFixed) {
+			if !alreadyLanded[idx] {
+				landed = append(landed, idx)
+			}
+		}
+		if len(landed) > 0 {
+			firstLanded = landed
+			for _, peer := range serving {
+				if !h.untouchedOn(peer, h.revV1) {
+					h.dumpState("first landing")
+					t.Fatalf("instance %d was rolled before the dark instance %d landed the fix (landed %v)", peer, victim, landed)
+				}
+			}
+			return
+		}
+		for _, peer := range serving {
+			if !h.untouchedOn(peer, h.revV1) || !h.instanceServes(peer) {
+				h.dumpState("peer taken first")
+				t.Fatalf("instance %d was taken by the roll before the dark instance %d landed the fix", peer, victim)
+			}
+		}
+	}
+	if !h.runWithInvariant(100, done, invariant) {
+		h.dumpState("after the bump")
+		t.Fatalf("the roll never reached its end state")
+	}
+	if firstLanded == nil {
+		t.Fatalf("no Instance landed the fix")
+	}
+	if h.sawEvent(workloadtypes.EventReasonRestartTriggered) {
+		t.Fatalf("a restart was recorded for an Instance the roll owned: %v", h.events)
+	}
+}
+
+// TestReconcile_DarkInstance_RollsFirst is the closed-loop story for the
+// order a roll takes its Instances in. Four Instances, the highest index
+// crash-looping on the running revision, and a fix pushed as a new
+// revision: the broken Instance serves nothing, so replacing it costs no
+// capacity, and it is the first to land the fix and serve again; the
+// healthy peers stay in rotation until then and roll after it within the
+// budget; no pod is rebuilt on the broken revision; the Component ends
+// with every Instance on the fix. Single-pod and leader+worker shapes,
+// the surge and both drain-first strategies, both crash forms, standalone
+// and listed in a rollout group with a run open.
+//
+// Cells: instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-surge, instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-recreate, instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-inplace, instance/Ready/spec.revision/boundary@T-ready-crashloop-restart
+func TestReconcile_DarkInstance_RollsFirst(t *testing.T) {
+	const replicas = 4
+	for _, gang := range []bool{false, true} {
+		shape := "single"
+		if gang {
+			shape = "gang"
+		}
+		for _, sc := range offTargetStrategies[:3] {
+			for _, roll := range rollShapes {
+				for _, form := range []crashForm{crashAtStart, crashAfterUp} {
+					t.Run(fmt.Sprintf("%s/%s/%s/%s", shape, sc.strategy, roll.name, form), func(t *testing.T) {
+						h := offTargetCrashHarness(t, gang, sc.strategy, sc.surge, sc.unavail, workloadtypes.RestartPolicyNone, replicas)
+						consults := 0
+						if roll.gated {
+							h.gate = rollingGroupGate(h, replicas, sc.surge, sc.unavail, &consults)
+						}
+						const victim = int32(replicas - 1)
+						breakWholeInstance(t, h, victim, form)
+						h.events = nil
+						h.setTarget(h.revFixed, fixedImage)
+						requireDarkInstanceRollsFirst(t, h, victim, []int32{0, 1, 2}, nil, sc.strategy, sc.surge, sc.unavail,
+							func() bool { return h.settledOn(h.revFixed, replicas) })
+					})
+				}
+			}
+		}
+	}
+}
+
+// TestReconcile_DarkInstance_HeldByPartitionStaysPut: the preference for
+// a dark Instance never moves one the partition holds. Four Instances
+// under a partition of two, the higher of the two held indices
+// crash-looping on the running revision: the two released Instances roll
+// while the dark Instance and its held peer stay untouched on their
+// revision, neither rolled nor repaired; once the partition is lifted the
+// dark Instance is the first of the two to land the fix.
+//
+// Cells: instance/Ready/spec.partition/before, instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-surge, instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-recreate
+func TestReconcile_DarkInstance_HeldByPartitionStaysPut(t *testing.T) {
+	const replicas = 4
+	for _, sc := range offTargetStrategies[:2] {
+		t.Run(string(sc.strategy), func(t *testing.T) {
+			h := offTargetCrashHarness(t, false, sc.strategy, sc.surge, sc.unavail, workloadtypes.RestartPolicyNone, replicas)
+			partition := int32(2)
+			h.lifecycle.UpdateStrategy.RollingUpdate.Partition = &partition
+			const dark, heldPeer = int32(1), int32(0)
+			breakWholeInstance(t, h, dark, crashAtStart)
+			h.events = nil
+			h.setTarget(h.revFixed, fixedImage)
+
+			releasedLanded := func() bool {
+				landed := h.landedOn(h.revFixed)
+				return len(landed) == 2 && landed[0] == 2 && landed[1] == 3
+			}
+			heldStayPut := func() {
+				for _, idx := range []int32{dark, heldPeer} {
+					if !h.untouchedOn(idx, h.revV1) {
+						h.dumpState("held instance moved")
+						t.Fatalf("instance %d is held by the partition and must not move", idx)
+					}
+				}
+			}
+			if !h.runWithInvariant(100, releasedLanded, heldStayPut) {
+				h.dumpState("under the partition")
+				t.Fatalf("the released Instances never landed the fix under the partition")
+			}
+			if h.sawEvent(workloadtypes.EventReasonRestartTriggered) {
+				t.Fatalf("a restart was recorded for a held Instance off the roll target: %v", h.events)
+			}
+
+			partition = 0
+			requireDarkInstanceRollsFirst(t, h, dark, []int32{heldPeer}, nil, sc.strategy, sc.surge, sc.unavail,
+				func() bool { return h.settledOn(h.revFixed, replicas) })
+		})
+	}
+}
+
+// TestReconcile_DarkInstance_PreferredInsideTheCanaryStep: a canary step
+// releases a quota of Instances through the projected partition, and the
+// preference works inside that quota. Four Instances, a step releasing
+// two, the highest index crash-looping on the running revision: the dark
+// Instance lands the fix first and its released peer second, the two
+// Instances the step holds never move while it stands, and lifting the
+// step rolls them within the budget.
+//
+// Cells: instance/Ready/spec.partition/before, instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-surge, instance/Ready/pod.waiting[CrashLoopBackOff]/boundary@T-ready-recreate
+func TestReconcile_DarkInstance_PreferredInsideTheCanaryStep(t *testing.T) {
+	const replicas = 4
+	for _, sc := range offTargetStrategies[:2] {
+		t.Run(string(sc.strategy), func(t *testing.T) {
+			h := offTargetCrashHarness(t, false, sc.strategy, sc.surge, sc.unavail, workloadtypes.RestartPolicyNone, replicas)
+			const dark, releasedPeer = int32(3), int32(2)
+			held := []int32{0, 1}
+			breakWholeInstance(t, h, dark, crashAtStart)
+			h.events = nil
+			h.setTarget(h.revFixed, fixedImage)
+			step := int32(2)
+			h.desired.Pacing = &workloadtypes.WorkloadPacing{Partition: &step}
+
+			quotaLanded := func() bool {
+				landed := h.landedOn(h.revFixed)
+				return len(landed) == 2 && landed[0] == releasedPeer && landed[1] == dark
+			}
+			requireDarkInstanceRollsFirst(t, h, dark, []int32{releasedPeer}, held, sc.strategy, sc.surge, sc.unavail, quotaLanded)
+
+			step = 0
+			withinBudget := func() {
+				sts := h.irStatuses()
+				if sc.strategy == workloadtypes.UpdateStrategySurgeThenDrain {
+					if n := escalation.CurrentSurgeInFlight(sts); n > sc.surge {
+						t.Fatalf("%d surges in flight, budget %d", n, sc.surge)
+					}
+				} else if n := escalation.CurrentUnavailableInFlight(sts); n > sc.unavail {
+					t.Fatalf("%d Instances offline for the roll, budget %d", n, sc.unavail)
+				}
+			}
+			if !h.runWithInvariant(100, func() bool { return h.settledOn(h.revFixed, replicas) }, withinBudget) {
+				h.dumpState("after the step was lifted")
+				t.Fatalf("the Component never settled on the fixed revision after the step was lifted")
 			}
 		})
 	}

@@ -9,6 +9,7 @@ package workload
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/escalation"
@@ -100,6 +101,11 @@ type UpdateItem struct {
 	// a Ready row whose pod set is provably out of service —
 	// evidence.PodSetServesNothing); the per-Component budget still applies.
 	CoordGateExempt bool
+	// ReplacesDarkPodSet: the fresh start replaces an Instance that serves
+	// nothing (replacesDarkPodSet). Such starts restore capacity rather
+	// than spend it, so they are listed ahead of the rest and the budget
+	// reaches them before any serving Instance is taken offline.
+	ReplacesDarkPodSet bool
 	// RecreateFallback: the Component's in-place strategy runs as a
 	// recreate on this Instance (ops.InPlaceFallsBackToRecreate: a gang, or
 	// a single-pod diff beyond container images), so the fresh start is
@@ -123,8 +129,10 @@ type UpdateItem struct {
 // plus the pure budget inputs the executor's within-pass counters
 // project against.
 type UpdateSelection struct {
-	// Items in plan order. Instances held by the effective partition
-	// (canary) and Instances with no trigger are not listed.
+	// Items in the order the executor admits them: the fresh starts that
+	// replace a dark Instance first, then plan order. Instances held by
+	// the effective partition (canary) and Instances with no trigger are
+	// not listed.
 	Items []UpdateItem
 	// Strategy is the resolved update strategy (empty Type defaults to
 	// SurgeThenDrain — matches workload.BuildPlan's defaulting).
@@ -682,11 +690,21 @@ func planUpdateSelection(ctx context.Context, input types.ReconcileInput, plan t
 			}
 			recreateFallback = fallback
 		}
+		dark := startingFresh && replacesDarkPodSet(row, updateByInstance[inst.Index])
 		logf.FromContext(ctx).V(1).Info("update selected",
 			"component", plan.Component, "instance", inst.Index, "target", target.Name,
-			"startingFresh", startingFresh, "coordGateExempt", gateExempt, "recreateFallback", recreateFallback)
-		selection.Items = append(selection.Items, UpdateItem{Instance: inst, StartingFresh: startingFresh, CoordGateExempt: gateExempt, RecreateFallback: recreateFallback})
+			"startingFresh", startingFresh, "coordGateExempt", gateExempt, "recreateFallback", recreateFallback,
+			"replacesDarkPodSet", dark)
+		selection.Items = append(selection.Items, UpdateItem{Instance: inst, StartingFresh: startingFresh, CoordGateExempt: gateExempt, ReplacesDarkPodSet: dark, RecreateFallback: recreateFallback})
 	}
+	// A start that replaces a dark Instance restores capacity while every
+	// other start spends it, so the budget is offered to the dark ones
+	// first; within each group plan order stands. The order is all this
+	// decides: the budgets and the gate admit or deny each start on their
+	// own terms, and the partition has already chosen who is listed.
+	sort.SliceStable(selection.Items, func(i, j int) bool {
+		return selection.Items[i].ReplacesDarkPodSet && !selection.Items[j].ReplacesDarkPodSet
+	})
 	// Budgets are decided here but spent in Execute, so record them with the
 	// selection they apply to: a selection that is non-empty yet starts
 	// nothing is a budget or gate outcome, not a selection one.
@@ -698,6 +716,18 @@ func planUpdateSelection(ctx context.Context, input types.ReconcileInput, plan t
 		"priorSurgeInFlight", selection.PriorSurgeInFlight,
 		"priorUnavailInFlight", selection.PriorUnavailInFlight)
 	return selection, retryBlockWait, nil
+}
+
+// replacesDarkPodSet reports whether a fresh start on row replaces an
+// Instance that serves nothing: a Failed row with no serving pod (the
+// counter types.RecreateOfDarkRow reads), or a pod set provably out of
+// service (evidence.PodSetServesNothing, the reading a Ready row is dark
+// on). Replacing such an Instance takes no capacity out of rotation.
+func replacesDarkPodSet(row *types.InstanceStatus, pods []*corev1.Pod) bool {
+	if row != nil && row.Phase == types.InstancePhaseFailed && row.ServingPodCount == 0 {
+		return true
+	}
+	return evidence.PodSetServesNothing(pods)
 }
 
 // planMigrationDrive selects the migrate pass's work in dispatch order:
