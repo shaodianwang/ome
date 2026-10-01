@@ -653,13 +653,18 @@ crashloop case).
   revision is not the roll target belongs to the roll, never to a repair on
   the revision it was running. A gang under SurgeThenDrain is replaced at a
   fresh Instance index and its source index retired, so the verdict follows
-  the Instance across the gang surges by the start events the ISVC records —
-  a `RecreateUpdateStarted` names the replacement index, a
-  `GangSurgeAbandoned` retires one, and the starts the abandons do not cancel
-  out are where the Instance went — and reads the index it ended at; the
-  start is the record to follow because the source row is gone once the
-  surge completes, so nothing in the status names the pair. A repair on any
-  index of that chain fails the verdict. A victim on a Component the bump
+  the Instance across the gang surges and reads the index it ended at. Two
+  records name the pairs. The InferenceReplica's status rows: a source row
+  carries its replacement index from the claim until the row is removed as
+  the surge completes, and the invariant poll, which reads the rows every
+  few seconds, keeps every pair it sees claimed (a source seen again on its
+  running revision without the claim was reset, and its pair is dropped).
+  Then the ISVC's events: a `RecreateUpdateStarted` names the replacement
+  index, a `GangSurgeAbandoned` retires one, and the starts the abandons do
+  not cancel out are where the Instance went. The rows are read first
+  because the Kubernetes event recorder drops an object's events past a
+  burst, which a many-Instance fleet reaches before its surges start. A
+  repair on any index of that chain fails the verdict. A victim on a Component the bump
   never touches (`victimcomp=decoder` with no group) has no new revision to
   reach, so the repair owns it instead: it must be rebuilt — no pod the fault
   hit survives — Ready and serving on its running revision, with a

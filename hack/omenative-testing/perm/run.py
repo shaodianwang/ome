@@ -1006,6 +1006,9 @@ def _inv_new(case_id, hdr):
         "streaks": {},      # streak_key → consecutive-tick observation count
         "viol": {},         # viol_key → {first, last, n, detail}
         "ir_seen": False,   # instanceStatuses observed at least once (version tolerance)
+        # (comp, source, replacement, source revision) for every gang surge
+        # the status rows were seen to claim, oldest claim first.
+        "surges": [],
         "b_seen": False,    # invariant B evaluated ≥1 Ready+serving pod against a routed Service
         "dead_uids": set(), # pod UIDs whose DELETED watch event was observed
         # uid → pod name of the live pods whose spec the harness changed itself
@@ -1052,6 +1055,36 @@ def _inv_hit(inv, hits, streak_key, viol_key, sustain, now, detail):
         v["detail"] = detail
 
 
+def _note_gang_surges(inv, comp, rows):
+    """Keep inv["surges"] current with one tick's rows of a Component: the
+    gang surge pairs (comp, source, replacement, source revision) the rows
+    claim, oldest claim first. A source row names its replacement index
+    from the claim until the row's removal, so a tick anywhere in that
+    window records the pair whether or not the ISVC events kept the start.
+    The source seen again on its running revision without that claim was
+    reset (the surge abandoned, or retried at another index) and its pair
+    goes; its index gone, or held by a row on another revision, is the
+    surge complete."""
+    pairs = inv.setdefault("surges", [])
+    by_index = {str(r.get("index")): r for r in rows}
+    claims = {}
+    for idx, r in by_index.items():
+        op = r.get("operation") or {}
+        if op.get("type") == "Update" and op.get("surgeIndex") is not None:
+            claims[idx] = str(op["surgeIndex"])
+
+    def reset(pair):
+        c, src, dst, rev = pair
+        row = by_index.get(src)
+        return c == comp and row is not None and row.get("runningRevision") == rev and claims.get(src) != dst
+
+    pairs[:] = [pair for pair in pairs if not reset(pair)]
+    for src, dst in claims.items():
+        pair = (comp, src, dst, by_index[src].get("runningRevision"))
+        if pair not in pairs:
+            pairs.append(pair)
+
+
 def _inv_check_status_truth(inv, pod_state, pods_per_inst, ir_items, hits, now):
     """Invariant A, one tick: compare each IR Instance's claimed phase against
     the watcher's live pods for its index. Version-tolerant: a build without
@@ -1075,6 +1108,7 @@ def _inv_check_status_truth(inv, pod_state, pods_per_inst, ir_items, hits, now):
         if insts is None:
             continue   # pre-IR-status build — field absent
         inv["ir_seen"] = True
+        _note_gang_surges(inv, comp, insts)
         ppi = max(1, pods_per_inst.get(comp, 1))
         for ist in insts:
             phase = ist.get("phase")
@@ -1769,10 +1803,12 @@ def invariant_checks(inv, verdict, notes, checks):
 #                        no RestartTriggered event names it after the bump.
 #                        A gang under SurgeThenDrain is replaced at a fresh
 #                        Instance index and its source index retired, so
-#                        the verdict follows the Instance through the gang
-#                        surges the ISVC events record (a surge start names
-#                        the replacement index; an abandon retires one) and
-#                        reads the index it ended at.
+#                        the verdict follows the Instance through its gang
+#                        surges and reads the index it ended at: the pairs
+#                        the status rows claimed while each surge was in
+#                        flight, then the ones the ISVC events kept (a start
+#                        names the replacement index; an abandon retires
+#                        one), since the recorder drops events past a burst.
 # Phase enum: settling (immediately after the trigger), rotating (first surge/
 # updated pod observed post-trigger), migrating (migration accept observed).
 # One firing per case (latched). Any fault-APPARATUS error → the distinct
@@ -3257,7 +3293,7 @@ def _event_names_instance(message, comp, inst):
     return re.search(rf"component={re.escape(comp)} instance={inst}\b", message) is not None
 
 
-def _crashloop_checks(f, pod_state, old_hashes, trigger_ts, verdict, notes, checks, bumped=None):
+def _crashloop_checks(f, pod_state, old_hashes, trigger_ts, verdict, notes, checks, bumped=None, surges=None):
     """The break verdict after a roll. A victim on a bumped Component ended
     on the new revision with its pods serving, and no repair was recorded for
     it after the bump: a repair on the old revision is the failure this fault
@@ -3267,12 +3303,16 @@ def _crashloop_checks(f, pod_state, old_hashes, trigger_ts, verdict, notes, chec
     its running revision, with the repair recorded. Either way the Instance
     is followed through the gang surges that replaced it at a fresh index:
     the pods are read at the index it ended at, and a repair on any index of
-    the chain counts."""
+    the chain counts. The surges are the pairs the status rows were seen to
+    claim (surges, oldest claim first), then the ones the ISVC events kept:
+    the recorder drops an object's events past a burst, the rows do not."""
     if not f or f.get("kind") not in BREAK_FAULTS or not f.get("fired") or f.get("infra_fail"):
         return verdict
     inst, comp, kind = f["crash_inst"], f["crash_comp"], f["kind"]
     events = _isvc_events_since(f["case_id"], trigger_ts or 0)
-    chain = _follow_gang_surges(inst, _gang_surge_replacements(events, comp))
+    pairs = [(src, dst) for c, src, dst, _rev in (surges or []) if c == comp]
+    pairs += [pair for pair in _gang_surge_replacements(events, comp) if pair not in pairs]
+    chain = _follow_gang_surges(inst, pairs)
     final = chain[-1]
     moved = f" (replaced at Instance {final} by its gang surge)" if final != inst else ""
     where = f"{comp} Instance {inst}{moved}"
@@ -9169,9 +9209,11 @@ def run_case(case_id):
     # Check 6b: the crashloop victim landed the fix. Its Instance was off the
     # target from the moment it broke, so the roll owns it: it must end on
     # the new revision and serving, with no repair recorded for it after the
-    # bump. Read against the final watcher state and the ISVC's events.
+    # bump. Read against the final watcher state, the surge pairs the status
+    # rows claimed during the roll, and the ISVC's events.
     if state == "CONVERGED":
-        verdict = _crashloop_checks(fault, pod_state, old_hashes, trigger_ts, verdict, notes, checks, bumped=bumped)
+        verdict = _crashloop_checks(fault, pod_state, old_hashes, trigger_ts, verdict, notes, checks,
+                                    bumped=bumped, surges=inv.get("surges"))
 
     # Check 6c: the mid-roll edit was applied at its hook and the live spec
     # carries it on every bumped member.

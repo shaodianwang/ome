@@ -2549,14 +2549,15 @@ class CrashloopFaultTest(unittest.TestCase):
                           "ready": ready, "serving": serving},
         }
 
-    def _verdict(self, pod_state, events):
+    def _verdict(self, pod_state, events, surges=None):
         f = {"kind": "crashloop", "fired": True, "infra_fail": None, "form": "start", "case_id": "p999",
              "crash_inst": "1", "crash_comp": "engine", "crash_hash": "old", "kills": 0}
         orig = run._isvc_events_since
         try:
             run._isvc_events_since = lambda case_id, since: events
             notes, checks = [], []
-            return run._crashloop_checks(f, pod_state, {"old"}, 1.0, "PASS", notes, checks), notes, checks
+            return (run._crashloop_checks(f, pod_state, {"old"}, 1.0, "PASS", notes, checks, surges=surges),
+                    notes, checks)
         finally:
             run._isvc_events_since = orig
 
@@ -2669,6 +2670,123 @@ class CrashloopFaultTest(unittest.TestCase):
             ("RestartTriggered", "OMENative component=decoder instance=1 restart triggered: pod d1 wedged (incarnation=2)")]
         verdict, notes, _checks = self._verdict(healed, elsewhere)
         self.assertEqual("PASS", verdict, "a repair on another Instance, or another Component, is not this verdict's")
+
+    @staticmethod
+    def _row(index, phase, rev=None, op=None, pods=0):
+        row = {"index": index, "phase": phase, "podCount": pods}
+        if rev:
+            row["runningRevision"] = rev
+        if op:
+            row["operation"] = op
+        return row
+
+    def _status_tick(self, inv, items):
+        """One status-truth observation over the given InferenceReplica
+        items, as a tick hands them to the check."""
+        run._inv_check_status_truth(inv, {}, {"engine": 2, "decoder": 2}, items, set(), 1.0)
+
+    def test_switch_case_replay_follows_the_surge_the_events_lost(self):
+        # The pd-mn switch case: a roll from RecreatePod to SurgeThenDrain
+        # at the first updated pod, engine/1 crashing from the bump. The
+        # Instances already rolling finished as recreates at their own
+        # index; engine/1 and decoder/1, admitted after the edit, were each
+        # surged to index 2 and drained. Of the events after the bump the
+        # ISVC kept only the two recreate starts: the recorder drops an
+        # object's events past a burst, and the surge starts came after it.
+        # The status rows claimed both pairs for the whole surge window.
+        events = [
+            ("RecreateUpdateStarted", "OMENative component=decoder instance=0 recreate (revision decoder-old -> decoder-new, incarnation=2)"),
+            ("RecreateUpdateStarted", "OMENative component=engine instance=0 recreate (revision engine-old -> engine-new, incarnation=2)"),
+        ]
+        recreate = {"type": "Update", "step": "Drain", "targetRevision": "engine-new", "strategy": "RecreatePod"}
+        surge = {"type": "Update", "step": "Surge", "surgeIndex": 2, "targetRevision": "engine-new", "strategy": "SurgeThenDrain"}
+        drain = {**surge, "step": "SurgeDrain"}
+        marker = {"type": "Update", "step": "GangSurgeTarget", "targetRevision": "engine-new"}
+
+        def ir(comp, rows):
+            return {"spec": {"component": comp}, "status": {"instanceStatuses": rows}}
+        claimed = [ir("engine", [self._row(0, "Updating", "engine-old", recreate),
+                                 self._row(1, "Updating", "engine-old", surge, pods=2),
+                                 self._row(2, "Pending", op=marker)]),
+                   ir("decoder", [self._row(0, "Updating", "decoder-old", recreate),
+                                  self._row(1, "Updating", "decoder-old", {**surge, "targetRevision": "decoder-new"}, pods=2),
+                                  self._row(2, "Pending", op={**marker, "targetRevision": "decoder-new"})])]
+        draining = [ir("engine", [self._row(0, "Ready", "engine-new", pods=2),
+                                  self._row(1, "Updating", "engine-old", drain, pods=2),
+                                  self._row(2, "Ready", "engine-new", pods=2)]),
+                    ir("decoder", [self._row(0, "Ready", "decoder-new", pods=2),
+                                   self._row(1, "Updating", "decoder-old", {**drain, "targetRevision": "decoder-new"}, pods=2),
+                                   self._row(2, "Ready", "decoder-new", pods=2)])]
+        settled = [ir("engine", [self._row(0, "Ready", "engine-new", pods=2), self._row(2, "Ready", "engine-new", pods=2)]),
+                   ir("decoder", [self._row(0, "Ready", "decoder-new", pods=2), self._row(2, "Ready", "decoder-new", pods=2)])]
+        inv = run._inv_new("p3979", {})
+        for items in (claimed, claimed, draining, settled, settled):
+            self._status_tick(inv, items)
+        self.assertEqual({("engine", "1", "2", "engine-old"), ("decoder", "1", "2", "decoder-old")}, set(inv["surges"]))
+        healed = {**self._gang(0, "new"), **self._gang(2, "new")}
+        verdict, notes, checks = self._verdict(healed, events, surges=inv["surges"])
+        self.assertEqual("PASS", verdict, notes)
+        self.assertTrue(any("replaced at Instance 2 by its gang surge" in c and "ended on the new revision with 2 pod(s) serving" in c
+                            for c in checks), checks)
+        # The events alone cannot see the hop: they read the retired index.
+        verdict, notes, _checks = self._verdict(healed, events)
+        self.assertEqual("FAIL", verdict)
+        self.assertTrue(any("read at Instance 1: pods=0" in n for n in notes), notes)
+
+    def test_status_rows_name_a_gang_surge_pair_until_the_source_is_reset(self):
+        inv = run._inv_new("p999", {})
+        surge = {"type": "Update", "step": "Surge", "surgeIndex": 2, "targetRevision": "new"}
+        marker = {"type": "Update", "step": "GangSurgeTarget", "targetRevision": "new"}
+        run._note_gang_surges(inv, "engine", [self._row(0, "Ready", "old"), self._row(1, "Updating", "old", surge),
+                                              self._row(2, "Pending", op=marker)])
+        self.assertEqual([("engine", "1", "2", "old")], inv["surges"])
+        # The pair stands with the source row gone (the surge completed) ...
+        run._note_gang_surges(inv, "engine", [self._row(0, "Ready", "old"), self._row(2, "Ready", "new")])
+        self.assertEqual([("engine", "1", "2", "old")], inv["surges"])
+        # ... and with its index held again by a row on another revision.
+        run._note_gang_surges(inv, "engine", [self._row(1, "Pending", op=marker), self._row(2, "Ready", "new")])
+        run._note_gang_surges(inv, "engine", [self._row(1, "Ready", "new"), self._row(2, "Ready", "new")])
+        self.assertEqual([("engine", "1", "2", "old")], inv["surges"])
+        # Another Component's rows, a Migrate operation's surge index and a
+        # single-pod surge (no surge index) are not this Component's pairs.
+        run._note_gang_surges(inv, "decoder", [self._row(1, "Updating", "old", surge), self._row(2, "Pending", op=marker)])
+        run._note_gang_surges(inv, "engine", [self._row(1, "Ready", "new"), self._row(2, "Ready", "new"),
+                                              self._row(3, "Migrating", "new", {**surge, "type": "Migrate", "surgeIndex": 4}),
+                                              self._row(5, "Updating", "old", {"type": "Update", "step": "Surge", "targetRevision": "new"})])
+        self.assertEqual([("engine", "1", "2", "old"), ("decoder", "1", "2", "old")], inv["surges"])
+        # The source seen again on its running revision without the claim
+        # was reset: the surge was abandoned ...
+        inv = run._inv_new("p999", {})
+        run._note_gang_surges(inv, "engine", [self._row(1, "Updating", "old", surge), self._row(2, "Pending", op=marker)])
+        run._note_gang_surges(inv, "engine", [self._row(1, "Ready", "old")])
+        self.assertEqual([], inv["surges"])
+        # ... or retried at another index, which is then the latest claim.
+        run._note_gang_surges(inv, "engine", [self._row(0, "Updating", "old", {**surge, "surgeIndex": 3}),
+                                              self._row(1, "Updating", "old", surge)])
+        run._note_gang_surges(inv, "engine", [self._row(0, "Updating", "old", {**surge, "surgeIndex": 3}),
+                                              self._row(1, "Updating", "old", {**surge, "surgeIndex": 4})])
+        self.assertEqual([("engine", "0", "3", "old"), ("engine", "1", "4", "old")], inv["surges"])
+
+    def test_verdict_reads_the_claimed_pairs_before_the_events(self):
+        # Gang 0 surged to the fresh index 2, then gang 1 to the freed index
+        # 0; the events kept only the second start. The claimed pairs carry
+        # the order the surges happened, so the earlier surge away from
+        # index 0 is not read as a later hop of gang 1's chain.
+        surges = [("engine", "0", "2", "old"), ("engine", "1", "0", "old")]
+        events = [("RecreateUpdateStarted", "OMENative component=engine instance=1 gang surge to revision engine-new (surge-index=0)")]
+        healed = {**self._gang(2, "new"), **self._gang(0, "new")}
+        verdict, _notes, checks = self._verdict(healed, events, surges=surges)
+        self.assertEqual("PASS", verdict)
+        self.assertTrue(any("replaced at Instance 0" in c for c in checks), checks)
+        verdict, notes, _checks = self._verdict({**self._gang(2, "new"), **self._gang(0, "old")}, events, surges=surges)
+        self.assertEqual("FAIL", verdict)
+        self.assertTrue(any("read at Instance 0" in n for n in notes), notes)
+        # A start the events kept for a surge the rows were never seen to
+        # claim still extends the chain.
+        later = events + [("RecreateUpdateStarted", "OMENative component=engine instance=0 gang surge to revision engine-newer (surge-index=4)")]
+        verdict, _notes, checks = self._verdict({**self._gang(2, "new"), **self._gang(4, "new")}, later, surges=surges)
+        self.assertEqual("PASS", verdict)
+        self.assertTrue(any("replaced at Instance 4" in c for c in checks), checks)
 
     def test_generated_family_crosses_every_axis(self):
         _outputs, rows = generate_cases.build_outputs()
