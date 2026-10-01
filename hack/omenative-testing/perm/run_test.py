@@ -1164,6 +1164,46 @@ class LabelTruthInvariantTest(unittest.TestCase):
         self.assertEqual({}, inv["viol"])
         self.assertTrue(inv["f_seen"])
 
+    def test_harness_mutated_victim_is_skipped_and_its_replacement_is_judged(self):
+        """A break's victim runs the harness's image under its old label and is
+        not judged; the pod the engine rebuilds in its place (same name, new
+        UID) running a newer template under the old label is."""
+        inv = run._inv_new("p1", {})
+        victim = pod_object("engine-3", "engine", 3, self.OLD, "crash:none", "v1")
+        pods = {"engine-0": watcher_record(pod_object("engine-0", "engine", 0, self.OLD, "img:1", "v1")),
+                "engine-3": watcher_record(victim)}
+        run._pod_mutated_by_harness(inv, "engine-3", victim["metadata"]["uid"])
+        observe_ticks(inv, pods, run.INV_SUSTAIN_SETTLE + 1, revisions=self._revisions())
+        self.assertEqual({}, inv["viol"])
+        checks = []
+        self.assertEqual("PASS", run.invariant_checks(inv, "PASS", [], checks))
+        self.assertTrue(any("whose spec the harness changed itself were not judged: engine-3 (uid-engi)" in c
+                            for c in checks), checks)
+        rebuilt = pod_object("engine-3", "engine", 3, self.OLD, "img:2", "v2")
+        rebuilt["metadata"]["uid"] = "uid-engine-3-rebuilt"
+        pods["engine-3"] = watcher_record(rebuilt)
+        observe_ticks(inv, pods, run.INV_SUSTAIN_SETTLE, start=999.0)
+        key = ("F", "label-template-mismatch", "engine", "engine-3")
+        self.assertEqual([key], list(inv["viol"]))
+        self.assertIn("image: revision 'img:1' vs pod 'img:2'", inv["viol"][key]["detail"])
+
+    def test_a_break_records_its_victim_on_the_watcher_state(self):
+        """The fire path is what fills the set: an imagepull break patching a
+        live pod records that pod's UID; a failed patch records nothing."""
+        pods = {"engine-0": watcher_record(pod_object("engine-0", "engine", 0, self.OLD, "img:1", "v1"))}
+        for rc, want in ((0, {"uid-engine-0": "engine-0"}), (1, {})):
+            inv = run._inv_new("p1", {})
+            fault = run._fault_new("p1", {"fault": "imagepull:old"})
+            with mock.patch.object(run, "kubectl", return_value=subprocess.CompletedProcess([], rc, stdout="", stderr="no")):
+                run._fault_fire(fault, pods, {"engine": 1}, {self.OLD}, inv=inv)
+            self.assertEqual(want, inv["mutated_uids"], rc)
+            self.assertEqual(rc != 0, bool(fault["infra_fail"]))
+        inv = run._inv_new("p1", {})
+        fault = run._fault_new("p1", {"fault": "podkill:settling"})
+        with mock.patch.object(run, "kubectl", return_value=subprocess.CompletedProcess([], 0, stdout="", stderr="")):
+            run._fault_fire(fault, pods, {"engine": 1}, {self.OLD}, inv=inv)
+        self.assertEqual({}, inv["mutated_uids"], "a deletion changes no spec")
+
     def test_parked_by_inv_xfail_records_the_tracked_bug(self):
         hdr = {"notimpl": 1, "issue": 4242, "inv_xfail": "F"}
         inv = run._inv_new("p1", hdr)

@@ -952,6 +952,15 @@ def _pod_role(p):
     return "worker" if p.get("runner") == "worker" else "pod"
 
 
+def _pod_mutated_by_harness(inv, name, uid):
+    """Record a live pod whose spec the harness changed itself, so invariant F
+    never judges that UID against its revision. Every verb that patches a
+    live pod's spec calls this; deletions need no record, the pod leaves the
+    live set and its replacement is a new UID."""
+    if inv is not None and uid:
+        inv["mutated_uids"][uid] = name
+
+
 def _inv_new(case_id, hdr):
     """Fresh invariant-poller state. Header `inv_off=<class>|all` over
     INV_CLASSES (which requires an adjacent '# reason:' comment — enforced by
@@ -999,6 +1008,10 @@ def _inv_new(case_id, hdr):
         "ir_seen": False,   # instanceStatuses observed at least once (version tolerance)
         "b_seen": False,    # invariant B evaluated ≥1 Ready+serving pod against a routed Service
         "dead_uids": set(), # pod UIDs whose DELETED watch event was observed
+        # uid → pod name of the live pods whose spec the harness changed itself
+        # (a break pointing a pod at another image). Invariant F does not judge
+        # them; a replacement the engine builds is a new UID and is judged.
+        "mutated_uids": {},
         # Set by the pairing handler for a non-empty→non-empty transition:
         # {"frm": F, "to": T, "armed": bool, "seen": bool}. armed flips True on
         # every pairable sample and gates the violation — once the pair is gone
@@ -1368,6 +1381,8 @@ def _inv_check_label_truth(inv, pod_state, hits, now):
     for pname, p in sorted(pod_state.items()):
         if not p or not p["alive"] or not p.get("hash") or "tmpl" not in p:
             continue
+        if p.get("uid") in inv["mutated_uids"]:
+            continue   # the harness changed this pod's spec itself
         key = (p["hash"], _pod_role(p))
         entry = inv["revisions"].get(key)
         if entry is None:
@@ -1669,6 +1684,9 @@ def invariant_checks(inv, verdict, notes, checks):
         checks.append("  ⓘ invariant D: some pod records carried no placement fields (a watcher builder lacks _pod_placement) — those records were not evaluated")
     if inv.get("f_on") and not inv.get("f_seen"):
         checks.append("  ⓘ invariant F (label-truth) compared no pod against its revision's template — vacuous (no assertion made)")
+    if inv.get("f_on") and inv.get("mutated_uids"):
+        touched = ", ".join(f"{name} ({uid[:8]})" for uid, name in sorted(inv["mutated_uids"].items(), key=lambda kv: kv[1]))
+        checks.append(f"  ⓘ invariant F: {len(inv['mutated_uids'])} pod(s) whose spec the harness changed itself were not judged: {touched}")
     if inv.get("g_on") and not inv.get("g_seen"):
         checks.append("  ⓘ invariant G (ready-serving) never saw a Ready Instance with its pod set Ready — vacuous (no assertion made)")
     if inv.get("g_on") and inv.get("g_seen") and not inv.get("g_routing_seen"):
@@ -2680,11 +2698,13 @@ def _fault_pick_pod(pod_state, pods_per_inst, old_hashes, victim=None, comp=None
     return live[0][0]
 
 
-def _fault_fire(f, pod_state, pods_per_inst, old_hashes):
-    """One-shot phase-fault action (latched by the caller's fired check)."""
+def _fault_fire(f, pod_state, pods_per_inst, old_hashes, inv=None):
+    """One-shot phase-fault action (latched by the caller's fired check). inv
+    is the watcher's invariant state: a fault that changes a live pod's spec
+    records the pod there."""
     f["fired"] = True
     if f["kind"] in BREAK_FAULTS:
-        _fault_crashloop_fire(f, pod_state, old_hashes)
+        _fault_crashloop_fire(f, pod_state, old_hashes, inv)
         return
     if f["kind"] == "configkey":
         _fault_configkey_fire(f, pod_state, old_hashes)
@@ -2804,7 +2824,7 @@ def _crashloop_stop(f):
         thread.join(timeout=30)
 
 
-def _fault_crashloop_fire(f, pod_state, old_hashes):
+def _fault_crashloop_fire(f, pod_state, old_hashes, inv=None):
     comp = f.get("victimcomp") or BREAK_DEFAULT_COMP
     victim = _crashloop_pick_pod(pod_state, old_hashes, comp)
     if not victim:
@@ -2824,6 +2844,7 @@ def _fault_crashloop_fire(f, pod_state, old_hashes):
         if r.returncode != 0:
             f["infra_fail"] = f"{f['kind']}: point {victim} at {image} failed: {r.stderr.strip()[:120]}"
             return
+        _pod_mutated_by_harness(inv, victim, f["crash_uid"])
         f["notes"].append(f"fault fired: {f['kind']} form=start on {victim} (instance {f['crash_inst']}, image {image})")
     else:
         stop = threading.Event()
@@ -3327,7 +3348,7 @@ def _fault_tick(ctx):
     else:   # migrating
         due = bool(ctx.get("fault_migrating"))
     if due:
-        _fault_fire(f, ctx["pod_state"], ctx["pods_per_inst"], ctx.get("old_hashes"))
+        _fault_fire(f, ctx["pod_state"], ctx["pods_per_inst"], ctx.get("old_hashes"), inv=ctx.get("inv"))
 
 
 def _fault_finalize(f, verdict, notes, checks):
@@ -3693,7 +3714,7 @@ def _idle_fault(case_id, yaml_file, desc, hdr):
     N, configured, ppi = ctx["N"], ctx["configured"], ctx["pods_per_inst"]
     expect = hdr.get("expect") if f["kind"] in LIFT_FAULTS else _idle_break_expect(f, ctx["info"], hdr)
     print(f"  Phase 2: {f['kind']} fault on the idle service (expect {expect}; no bump follows)")
-    _fault_fire(f, ctx["pod_state"], ppi, ctx["old_hashes"])
+    _fault_fire(f, ctx["pod_state"], ppi, ctx["old_hashes"], inv=ctx.get("inv"))
     ctx["trigger_ts"] = time.time()
     if f.get("skip"):
         return _finish(case_id, desc, hdr, ctx, "SKIP", "SKIP", [f["skip"]], [])
@@ -7419,7 +7440,7 @@ def _canary(case_id, yaml_file, desc, hdr):
     if idle_fault and idle_fault["kind"] == "ctrlrestart" and idle_fault["param"] == IDLE_FAULT_PHASE:
         # The restart lands on the idle service and the bump waits for the
         # manager to return, so what arms the canary is the restarted manager.
-        _fault_fire(idle_fault, ctx["pod_state"], ctx["pods_per_inst"], ctx.get("old_hashes"))
+        _fault_fire(idle_fault, ctx["pod_state"], ctx["pods_per_inst"], ctx.get("old_hashes"), inv=ctx.get("inv"))
         if idle_fault["infra_fail"]:
             return _write_fail(case_id, desc, hdr, "INFRA-FAIL", idle_fault["infra_fail"])
         if not _wait_ctrl_ready(CTRL_READY_S):
@@ -8361,7 +8382,7 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
             elif state == "DRAINING":
                 # Fault phase hook (settling fires right after the trigger).
                 _fault_tick({"fault": fault, "trigger_ts": trigger_ts, "old_hashes": None,
-                             "pod_state": pod_state, "pods_per_inst": pods_per_inst})
+                             "pod_state": pod_state, "pods_per_inst": pods_per_inst, "inv": inv})
                 # Check C: capacity floor — every CONFIGURED component (not just the
                 # scaled one) must keep >= its target ready throughout the drain. A
                 # scaled component drains N→target (never below target); a non-scaled
@@ -8903,7 +8924,7 @@ def run_case(case_id):
                 # Fault phase hook: settling fires on the first ROTATING
                 # iteration; rotating fires once a surge/updated pod is seen.
                 _fault_tick({"fault": fault, "trigger_ts": trigger_ts, "old_hashes": old_hashes,
-                             "pod_state": pod_state, "pods_per_inst": pods_per_inst})
+                             "pod_state": pod_state, "pods_per_inst": pods_per_inst, "inv": inv})
                 # Mid-roll edit hook: same settling/rotating rule as the faults.
                 _midroll_tick(medit, case_id, bumped, pod_state, old_hashes, tnow)
                 # Per-Component timing for Sequential ordering/soak.

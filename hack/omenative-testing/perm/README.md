@@ -887,7 +887,10 @@ renderer's `OME_*` env never count. Until a hash's revision is visible the
 first pod seen under that hash stands in, so a pod rebuilt from a newer
 template under an old label — what an operator deleting a pod under a held
 or paused roll produces — still disagrees with the pods that carried the
-label first. A violation reads `invariant F violated
+label first. A pod whose spec the harness changed itself — the `crashloop`
+and `imagepull` breaks point a live pod at another image — is not judged
+and the verdict lists it; the replacement the engine builds is a new UID
+and is judged. A violation reads `invariant F violated
 (label-template-mismatch): engine/1 pod <name> carries
 ome.io/revision-hash=<old> but runs a different template from its
 ControllerRevision: container ome-container image: revision 'img:1' vs pod
