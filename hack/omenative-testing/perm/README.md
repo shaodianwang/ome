@@ -795,7 +795,8 @@ a removal. `rollback=1` in canary mode keeps its own meaning (the
   every shape, and `isvcs/gen-crashloop-sibling/` breaks the decoder as an
   engine-only bump lands (`bump=engine victimcomp=decoder`) and expects the
   engine roll to converge while the decoder's Instance is repaired. In both,
-  the grouped cells are parked on the issue their header names, and
+  every cell runs live, grouped or not (an Instance that serves nothing is
+  repaired without touching its Component's budget or a group's gate), and
   `form=load` under `restartPolicy: None` is left out: a runner that dies
   after Ready is a container restart the kubelet owns under that policy, not
   a wedge, so no repair is promised there.
@@ -986,11 +987,12 @@ a removal. `rollback=1` in canary mode keeps its own meaning (the
   the hold a rollout group keeps on repairs while no run is open; a silent
   hold fails. Absent, `expect=` is derived from the spec: held when the
   victim Component is a member of a `spec.rollout.groups` entry, repaired
-  otherwise, so a family that asserts the repair on a grouped service states
-  `expect=repaired` and parks it with `notimpl=1 issue=<n>` while the rule
-  is missing (`isvcs/gen-crashloop-idle/` does). Either way no Component may
-  ever exceed N alive: a repair rebuilds
-  in place. `form=load` under `restartPolicy: None` is kept alive by the
+  otherwise; a family that asserts the repair on a grouped service states
+  `expect=repaired` (`isvcs/gen-crashloop-idle/` does on every cell: an
+  Instance that serves nothing is repaired without touching the budget or
+  the gate, whatever group it sits in). Either way no Component may ever
+  exceed N alive: a repair rebuilds in place. `form=load` under
+  `restartPolicy: None` is kept alive by the
   kubelet alone between kills; whether a repair opens there is the product's
   answer, and the killer stops the moment the pod is rebuilt.
 

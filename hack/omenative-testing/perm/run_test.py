@@ -2811,17 +2811,22 @@ class CrashloopFaultTest(unittest.TestCase):
             else:
                 self.assertEqual("none", kv["co"])
 
-    def _grouped_or_live(self, kv, text):
-        """Every cell is parked on the dark-repair issue in its header, with
-        the park named in its reason: each victim carries maxUnavailable 0,
-        under which the repair of a dark Instance is denied. A grouped cell
-        also carries its group block; a no-group cell does not."""
-        self.assertEqual((1, generate_cases.GROUPED_REPAIR_ISSUE), (kv["notimpl"], kv["issue"]))
+    def _grouped_or_plain(self, kv, text):
+        """No cell is parked: a repair of an Instance that serves nothing is
+        admitted without the budget or the gate, so the header carries no
+        notimpl or issue and the reason names no park. A grouped cell carries
+        its group block and its reason names the group and the gate it does
+        not consult; a no-group cell carries no group block."""
+        self.assertNotIn("notimpl", kv)
+        self.assertNotIn("issue", kv)
+        reason = text.splitlines()[1]
+        self.assertNotIn("parked", reason)
         if kv["co"] == "none":
             self.assertNotIn("  rollout:\n    groups:", text)
         else:
             self.assertIn("  rollout:\n    groups:", text)
-            self.assertIn("parked:", text.splitlines()[1])
+            self.assertIn(f"the {generate_cases.GROUP_NAMES[kv['co']]} group", reason)
+            self.assertIn("gate", reason)
         if kv["co"] == "canary":
             self.assertEqual("auto", kv["canary"])
             self.assertIn("          canary:", text)
@@ -2835,7 +2840,8 @@ class CrashloopFaultTest(unittest.TestCase):
         """The steady-state family: a crash loop on the settled service under
         every group kind, on the engine and on the decoder where one exists,
         under every (crash form, restart policy) pair a repair is promised
-        for; every cell expects the repair, nothing surges at idle."""
+        for; every cell expects the repair, nothing surges at idle, and no
+        cell is parked."""
         outputs, rows = generate_cases.build_outputs()
         fam = [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-crashloop-idle"]
         self.assertEqual(84, len(fam))
@@ -2857,15 +2863,15 @@ class CrashloopFaultTest(unittest.TestCase):
             self.assertNotIn("mode", kv)
             self.assertNotIn("floor_soft", kv)
             self.assertNotIn("bump", kv)
-            self._grouped_or_live(kv, outputs[f"gen-crashloop-idle/{n}.yaml"])
-        parked = [n for n, kv, m in fam if m.get("parked")]
-        self.assertEqual(len(fam), len(parked))
+            self._grouped_or_plain(kv, outputs[f"gen-crashloop-idle/{n}.yaml"])
+        self.assertEqual([], [n for n, _kv, m in fam if "parked" in m], "every cell runs live")
 
     def test_generated_sibling_family_crosses_every_axis(self):
         """The sibling family: the decoder breaks as an engine-only bump lands,
         on both PD topologies under every group kind, under every (crash
         form, restart policy) pair a repair is promised for; the engine
-        surges within its own budget and the decoder is a negative control."""
+        surges within its own budget and the decoder is a negative control;
+        no cell is parked."""
         outputs, rows = generate_cases.build_outputs()
         fam = [(n, kv, m) for folder, n, kv, m in rows if folder == "gen-crashloop-sibling"]
         self.assertEqual(30, len(fam))
@@ -2880,13 +2886,13 @@ class CrashloopFaultTest(unittest.TestCase):
             self.assertNotIn("during", kv)
             self.assertNotIn("expect", kv)
             self.assertNotIn("floor_soft", kv, "the break is on the decoder; the engine keeps its floor")
-            self._grouped_or_live(kv, outputs[f"gen-crashloop-sibling/{n}.yaml"])
-        self.assertEqual(len(fam), len([n for n, kv, m in fam if m.get("parked")]))
+            self._grouped_or_plain(kv, outputs[f"gen-crashloop-sibling/{n}.yaml"])
+        self.assertEqual([], [n for n, _kv, m in fam if "parked" in m], "every cell runs live")
 
-    def test_family_park_rides_the_cell_park_path(self):
-        """A family park emits the same header keys as a PARKED cell and never
-        touches a cell the emitter did not park; a PARKED entry still wins on
-        a cell it names."""
+    def test_idle_cell_parks_through_the_table_alone(self):
+        """A PARKED entry keyed as the table documents parks exactly that
+        crashloop-idle cell, replacing the family's reason with its own, and
+        touches no other cell of either family."""
         cell = ("crashloop-idle", "start", "engine", 0, 4, "none", "engine", "None")
         with mock.patch.dict(generate_cases.PARKED, {cell: (999999, "parked on a tracked bug (fixture)", "A")}):
             outputs, rows = generate_cases.build_outputs()
@@ -2896,9 +2902,9 @@ class CrashloopFaultTest(unittest.TestCase):
         self.assertEqual(("gen-crashloop-idle", "none"), (folder, kv["co"]))
         self.assertEqual((1, 999999, "A"), (kv["notimpl"], kv["issue"], kv["inv_xfail"]))
         self.assertEqual("# reason: parked on a tracked bug (fixture)", outputs[f"{folder}/{name}.yaml"].splitlines()[1])
-        grouped = [kv for f, _n, kv, m in rows if f == "gen-crashloop-idle" and kv["co"] != "none"]
-        self.assertTrue(grouped and all(kv["issue"] == generate_cases.GROUPED_REPAIR_ISSUE
-                                        and "inv_xfail" not in kv for kv in grouped))
+        others = [n for f, n, _kv, m in rows if f in ("gen-crashloop-idle", "gen-crashloop-sibling")
+                  and "parked" in m and n != name]
+        self.assertEqual([], others)
 
 
 class RolloutBumpMembersTest(unittest.TestCase):

@@ -162,9 +162,9 @@ Constraint ledger (why the raw product is filtered — derived from run.py):
     the engine, so the steady-state family emits it as co=bluegreen only. The
     sibling family rolls the engine under the default strategy at its canonical
     budget: the sibling's break is independent of how the engine's own pods
-    are replaced. The grouped cells of both families state the intended repair
-    and are parked, through issue=, on the issue that tracks it; the no-group
-    cells run live.
+    are replaced. Every cell of both families runs live and asserts the
+    repair: an Instance that serves nothing is rebuilt without touching its
+    Component's budget or a group's gate, whatever group it sits in.
   - heal breaks the engine runner, so its coordination axis is a rollingUpdate
     group over the engine alone or, where a decoder exists, over engine and
     decoder: the hold a group keeps on repairs while no run is open. Nothing
@@ -313,9 +313,6 @@ SIBLING_SHAPES = [("pd", 4, 0), ("pd-mn", 2, 1)]
 UNPROMISED_REPAIR = {("load", "None")}
 GROUP_NAMES = {"bluegreen": "blueGreen", "rolling": "rollingUpdate", "seq": "Sequential", "canary": "canary"}
 IDLE_PHASE = "idle"
-# The grouped cells of both families assert the intended repair and are parked,
-# through the issue= header key, on the issue that tracks it.
-GROUPED_REPAIR_ISSUE = 1977
 
 # The heal family: the engine runner's ConfigMap key is removed on the idle
 # service and put back at the lift. Shapes as the crashloop family; nothing
@@ -498,13 +495,10 @@ HAND_PINNED_KILL = {
 # ("A"|"B"|"C"|"all", or "" when the bug fails an ordinary check) additionally
 # emits inv_xfail=<scope>: it names the continuous invariant whose violation
 # IS the tracked bug, which would otherwise fail the verdict after the
-# notimpl softening. A single cell goes quiet only through this table:
-# entries require a filed issue number, and a key that matches no emitted
-# cell fails the regen (stale parking is invisible debt). A family whose
-# grouped half is tracked under one issue parks those cells from its emitter
-# instead (the `parked=` argument of `add`), naming the park in each case's
-# reason; the manifest lists every parked case either way. Cell keys are the
-# per-family tuples the emitters build:
+# notimpl softening. A cell goes quiet only through this table: entries
+# require a filed issue number, and a key that matches no emitted cell fails
+# the regen (stale parking is invisible debt); the manifest lists every
+# parked case. Cell keys are the per-family tuples the emitters build:
 #   ("rollout", topo, w, strat, surge, unavail)
 #   ("podkill", phase, topo, w, size, strat, surge, unavail, rp)
 #   ("kill", topo, w, strat, rp, pause, target)
@@ -985,13 +979,13 @@ def _break_how(form, victim, where=""):
 
 def _idle_reason(form, victim, co):
     out = (f"{_break_how(form, victim, 'on the settled service')}; no bump follows, and an Instance that "
-           f"serves nothing is repaired within its Component's budget whatever group it sits in: it is "
-           f"rebuilt (every pod new) Ready and serving on its running revision within the budget, a "
-           f"RestartTriggered event names it, and nothing surges above N")
+           f"serves nothing is repaired without touching its Component's budget or a group's gate, whatever "
+           f"group it sits in: it is rebuilt (every pod new) Ready and serving on its running revision "
+           f"within the rotate budget, a RestartTriggered event names it, and nothing surges above N")
     if co != "none":
-        out += (f"; the {GROUP_NAMES[co]} group lists the {victim}, and a repair that takes nothing further "
-                f"offline is not a consult for a group with no run open; parked: the repair is still put to "
-                f"the group's gate, which holds every consult while no run is open")
+        out += (f"; the {GROUP_NAMES[co]} group lists the {victim}, and its gate holds every consult while "
+                f"no run is open, but a rebuild that takes no serving capacity offline is not a consult, so "
+                f"the group holds nothing")
     return out
 
 
@@ -1003,9 +997,9 @@ def _sibling_reason(form, co):
            f"event names")
     if co != "none":
         out += (f"; the {GROUP_NAMES[co]} group lists both Components, so the engine's run is open while the "
-                f"decoder's repair is admitted; parked: with the run open the group's unavailability and "
-                f"ratio projections count the dark Instance twice, so the repair is denied, and whether the "
-                f"engine's roll completes beside it is undecided")
+                f"decoder breaks, and a rebuild of an Instance that serves nothing takes no capacity offline "
+                f"and is put to neither the decoder's budget nor the group's gate: the repair opens beside "
+                f"the open run, and the engine's roll completes beside the repair")
     return out
 
 
@@ -1033,8 +1027,7 @@ def emit_crashloop_idle(add):
                             comps(topo, n, w, life, d_life=(life if is_pd(topo) else None)),
                             _idle_reason(form, victim, co), meta,
                             cell=("crashloop-idle", form, topo, w, n, co, victim, rp),
-                            coord=group_for(co, topo),
-                            parked=(GROUPED_REPAIR_ISSUE, ""))
+                            coord=group_for(co, topo))
 
 
 def emit_crashloop_sibling(add):
@@ -1056,8 +1049,7 @@ def emit_crashloop_sibling(add):
                         comps(topo, n, w, life, d_life=lib.lifecycle(restart=RP_FULL[rp])),
                         _sibling_reason(form, co), meta,
                         cell=("crashloop-sibling", form, topo, w, n, co, rp),
-                        coord=group_for(co, topo),
-                        parked=(GROUPED_REPAIR_ISSUE, ""))
+                        coord=group_for(co, topo))
 
 
 # ── gen-heal: a cause that disappears ───────────────────────────────────────
@@ -1925,7 +1917,7 @@ def build_outputs():
     rows = []   # (folder, case id, kv, meta) for the manifest
     parked_used = set()
 
-    def add(folder, desc, kv, case_comps, reason, meta, cell, coord=None, parked=None, body=None,
+    def add(folder, desc, kv, case_comps, reason, meta, cell, coord=None, body=None,
             runtime=None, dedicated=False):
         """body: the case body as a function of the minted name, for a family
         whose fixtures carry the case id; the plain render otherwise. A
@@ -1941,8 +1933,6 @@ def build_outputs():
         if cell in PARKED:
             parked_used.add(cell)
             issue, reason, inv_scope = PARKED[cell]
-        elif parked:
-            issue, inv_scope = parked
         if issue:
             kv = dict(kv, notimpl=1, issue=issue)
             if inv_scope:
@@ -2105,10 +2095,10 @@ def manifest(rows):
         "- The sibling family rolls the engine under the default strategy at its"
         " canonical budget: the sibling's break is independent of how the"
         " engine's own pods are replaced.",
-        "- The grouped cells of both families state the intended repair"
-        " (`expect=repaired`; the engine converges and the decoder is repaired)"
-        " and are parked, through `issue=`, on the issue that tracks it; the"
-        " no-group cells run live.",
+        "- Every cell of both families runs live and asserts the repair"
+        " (`expect=repaired`; the engine converges and the decoder is repaired):"
+        " an Instance that serves nothing is rebuilt without touching its"
+        " Component's budget or a group's gate, whatever group it sits in.",
         "- heal breaks the engine runner, so its coordination axis is a"
         " rollingUpdate group over the engine alone or, where a decoder"
         " exists, over engine and decoder; nothing rolls, so the update"

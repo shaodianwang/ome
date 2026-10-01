@@ -1,4 +1,4 @@
-# p2616: [gen] crashloop sibling start pd-mn W1 N=2 co none rp RecreateInstance  Ne=2 Nd=2 Nr=2 ceil_e=3 ceil_d=2 ceil_r=2 fault=crashloop:old co=none topo=pd-mn bump=engine form=start victimcomp=decoder notimpl=1 issue=1977
+# p2616: [gen] crashloop sibling start pd-mn W1 N=2 co none rp RecreateInstance  Ne=2 Nd=2 Nr=2 ceil_e=3 ceil_d=2 ceil_r=2 fault=crashloop:old co=none topo=pd-mn bump=engine form=start victimcomp=decoder
 # reason: the engine is bumped alone and, as the bump lands, the decoder's highest Instance's pod is pointed at an image with no shell, so it crashes at every start and is never Ready again; the engine roll converges within its budget with every engine Instance on the new revision, while the decoder, which nothing bumped, keeps N with nothing rotated and its broken Instance is rebuilt by a repair (every pod new, Ready and serving on its running revision) that a RestartTriggered event names
 apiVersion: ome.io/v1beta1
 kind: InferenceService
