@@ -82,6 +82,9 @@ spec:
   choosing silently.
 - Runtime and model catalogs are authored in the operators' GitOps
   repositories, not in the OME repository; point there for changes.
-- Reply with `*Verdict*` (the runtime), `*Evidence*` (the matching catalog
-  line and the precedent, each prefixed by cluster), `*Next action*` (the
-  skeleton), `*Scope*`, closing `read-only, nothing changed`.
+- Reply in the `ome-answer` shape: the recommendation first in one plain
+  sentence ("*Use `<runtime>` on `<cluster>`*: it already serves <precedent>,
+  the same architecture on the same accelerator."), then *What I checked*
+  bullets naming the matching catalog line and the precedent in words, then
+  the skeleton under *What to do*, then the `Looked at ...` line and
+  `_read-only, nothing changed_`.

@@ -6,11 +6,17 @@ description: Answer an operator's question about a live OME workload from the OM
 # ome-answer — triage from evidence, reply with a verdict
 
 Read `ome-bridge` first for the helper, the verbs, the fan-out rule and how
-to pick clusters. Every command below is
+to pick clusters, and `ome-docs/references/ome-primer.md` once for the object
+model, the status vocabulary and the failure signatures. Every command below is
 `$B command "<verb and args>"` with
 `B="python3 <ome-bridge skill dir>/scripts/ome_bridge.py"`. Everything here
 is read-only; if the fix needs a guarded verb, name it and stop. An error-rate
-or fatal-rate alert on a serving model goes to `serving-incident` instead.
+or fatal-rate alert on a serving model belongs to the human oncall's
+`serving-incident` runbook in this repository, which the bot does not carry:
+say so, then answer the workload question from here. A
+question that spans clusters, names a cluster `clusters` does not list, or
+asks about incidents, nodes or capacity also needs `ome-fleet`: the registry
+is a subset of the fleet, and the reply must say which clusters it covers.
 
 ## 1. Locate the object
 
@@ -61,16 +67,26 @@ finding (see `ome-bridge`).
 
 ## 4. Reply
 
-Slack mrkdwn, under 3,500 characters:
+Write for a person who did not run the commands. Slack mrkdwn, under 3,500
+characters, no headers, no tables, no section labels such as Verdict or
+Evidence:
 
-```
-*Verdict* — one sentence: what is wrong and since when.
-*Evidence* — 2 to 5 lines quoted from the CLI, each prefixed by cluster/namespace.
-*Next action* — the exact command or change; if it is a guarded verb, say
-"needs the oncall" and stop.
-*Scope* — clusters searched; clusters unreachable or timed out.
-read-only, nothing changed
-```
+- First line: the answer in one plain sentence with the key fact in bold,
+  for example "*Two deployments are stuck* in `def-sandbox`, one for 7 days
+  and one for 14."
+- *What I checked*: two to five bullets, one fact each, written as sentences
+  that name the service, the cluster and the number. Say what a condition
+  means instead of naming it: "its router pods never became ready", not
+  `ComponentNotReady`. Quote a CLI line only when the exact words matter,
+  keep it under 100 characters, and explain it in the same bullet.
+- *What to do*: one or two bullets naming who does what. Leave it out when
+  nothing needs doing. A guarded verb reads "the oncall would need to ...";
+  never present it as something the asker should run.
+- Last line: `Looked at <clusters>; could not see <clusters or sources>.`
+  followed by `_read-only, nothing changed_`.
+
+The structured result still carries the raw quoted lines in `evidence`; the
+posted reply is for the reader.
 
 ## Rules
 
@@ -81,6 +97,10 @@ read-only, nothing changed
   expected answer, not something to work around.
 - Time-box: if the fleet lookup exceeds two minutes, answer with what you
   have and name the clusters that did not respond.
+- Fan out with `-o wide`, never `-o json`: a reply is capped at about
+  12,000 characters and a fleet-wide JSON dump arrives truncated and will
+  not parse. `-o json` is for one object on one cluster (`--cluster` and a
+  name), when you need a field the table does not show.
 - Prefer the hub's view for placement and the member's view for pods.
 - `Unavailable`, `Unreadable` or `forbidden` mean the bridge could not reach
   or read something; say so, and do not describe that as the workload being

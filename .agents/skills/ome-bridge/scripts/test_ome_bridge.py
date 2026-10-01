@@ -14,6 +14,7 @@ import os
 import shlex
 import socket
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -51,6 +52,10 @@ class FakeBridge(BaseHTTPRequestHandler):
         status, payload, delay = self.server.routes.get((method, self.path), (404, b"404 page not found", 0))
         if delay:
             time.sleep(delay)
+        if callable(payload):
+            # A route that answers from the request body, for tools whose
+            # arguments pick the reply.
+            status, payload = payload(json.loads(body) if body else {})
         if isinstance(payload, (dict, list)):
             self._reply(status, json.dumps(payload).encode(), "application/json")
         else:
@@ -197,6 +202,95 @@ class SubcommandTest(BridgeTestCase):
         code, _, err = self.run_cli("tool", "docs", "read", "oeps/STATUS.md")
         self.assertEqual(code, 0)
         self.assertIn("truncated", err)
+
+
+class PlaybooksTest(BridgeTestCase):
+    """`playbooks` copies every skill and its references out of the docs tool."""
+
+    PRIMER = "".join(f"primer line {n}\n" for n in range(1, 7))
+
+    def docs(self, files: dict[str, str], page_lines: int = 0):
+        """A docs tool over `files`, paging reads every `page_lines` lines when set."""
+
+        def answer(body: dict) -> tuple[int, dict]:
+            if body.get("tool") != "docs" or body.get("args", [])[:1] != ["read"]:
+                return 200, {"ok": False, "text": "", "errorClass": "unknown_tool", "error": "docs only"}
+            args = body["args"]
+            path = args[1]
+            start = int(args[args.index("--from") + 1]) if "--from" in args else 1
+            if path not in files:
+                return 200, {"ok": False, "text": "", "errorClass": "bad_args", "error": f"{path} not readable"}
+            lines = files[path].splitlines(keepends=True)[start - 1:]
+            truncated = bool(page_lines) and len(lines) > page_lines
+            if truncated:
+                lines = lines[:page_lines]
+            output = "".join(lines)
+            if truncated:
+                last = start + page_lines - 1
+                output += f"… truncated after line {last}; continue with --from {last + 1}\n"
+            return 200, {"ok": True, "text": "", "errorClass": "",
+                         "result": {"tool": "docs", "exitCode": 0, "output": output, "truncated": truncated}}
+
+        self.route("POST", "/v1/tool", 200, answer)
+
+    def files(self, **extra: str) -> dict[str, str]:
+        files = {f"skills/{s}/SKILL.md": f"# {s}\n" for s in ome_bridge.PLAYBOOKS}
+        files["skills/ome-answer/SKILL.md"] = "# ome-answer\nread `ome-docs/references/ome-primer.md` first\n"
+        # A docs-tool path into another skill's tree is read by the model, not fetched.
+        files["skills/ome-oncall/SKILL.md"] = "# ome-oncall\n$B tool docs read skills/ci-triage/references/classification.md\n"
+        files["skills/ome-docs/SKILL.md"] = "# ome-docs\nthen `references/ome-primer.md` in this skill\n"
+        files["skills/ome-docs/references/ome-primer.md"] = self.PRIMER
+        files.update(extra)
+        return files
+
+    def test_writes_every_skill_and_the_references_they_name(self) -> None:
+        self.docs(self.files())
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out, err = self.run_cli("playbooks", "--dir", tmp)
+            self.assertEqual((code, err), (0, ""))
+            written = sorted(Path(p).relative_to(tmp).as_posix() for p in out.split())
+            self.assertIn("ome-fleet/SKILL.md", written)
+            self.assertIn("ome-docs/references/ome-primer.md", written)
+            # Named by two skills, fetched and written once.
+            self.assertEqual(written.count("ome-docs/references/ome-primer.md"), 1)
+            self.assertEqual((Path(tmp) / "ome-docs/references/ome-primer.md").read_text(), self.PRIMER)
+            self.assertEqual((Path(tmp) / "ome-answer/SKILL.md").read_text().splitlines()[0], "# ome-answer")
+            self.assertFalse(any("classification" in w for w in written))
+        reads = [json.loads(r["body"])["args"][1] for r in self.server.requests]
+        self.assertNotIn("skills/ome-oncall/references/classification.md", reads)
+
+    def test_follows_the_truncation_marker_across_pages(self) -> None:
+        self.docs(self.files(), page_lines=2)
+        with tempfile.TemporaryDirectory() as tmp:
+            code, _, err = self.run_cli("playbooks", "--dir", tmp)
+            self.assertEqual((code, err), (0, ""))
+            text = (Path(tmp) / "ome-docs/references/ome-primer.md").read_text()
+            self.assertEqual(text, self.PRIMER)
+            self.assertNotIn("truncated", text)
+        reads = [json.loads(r["body"])["args"] for r in self.server.requests]
+        primer_pages = [a for a in reads if a[1] == "skills/ome-docs/references/ome-primer.md"]
+        self.assertEqual([int(a[3]) for a in primer_pages], [1, 3, 5])
+
+    def test_a_missing_reference_is_reported_not_fatal(self) -> None:
+        files = self.files()
+        del files["skills/ome-docs/references/ome-primer.md"]
+        self.docs(files)
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out, err = self.run_cli("playbooks", "--dir", tmp)
+            self.assertEqual(code, 0)
+            self.assertIn("ome-primer.md", err)
+            self.assertTrue((Path(tmp) / "ome-docs/SKILL.md").exists())
+            self.assertFalse((Path(tmp) / "ome-docs/references/ome-primer.md").exists())
+            self.assertNotIn("references/ome-primer.md", out)
+
+    def test_a_missing_skill_is_a_transport_failure(self) -> None:
+        files = self.files()
+        del files["skills/ome-fleet/SKILL.md"]
+        self.docs(files)
+        with tempfile.TemporaryDirectory() as tmp:
+            code, _, err = self.run_cli("playbooks", "--dir", tmp)
+            self.assertEqual(code, 1)
+            self.assertIn("skills/ome-fleet/SKILL.md", err)
 
 
 class RefusalTest(BridgeTestCase):

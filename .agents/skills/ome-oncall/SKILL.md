@@ -1,6 +1,6 @@
 ---
 name: ome-oncall
-description: Answer CI and release oncall questions about the OME repository from the OME bot - "why is main red", "is this failure flaky", "what broke build N", "did my commit pass", "what is promoted where", "what runs on cluster X" - through the ome-bridge tools builds, ci and docs and the release endpoint, and reply with a verdict, quoted evidence and the next action. Read-only; never retries, promotes or files anything. Serving alerts belong to serving-incident. Load after ome-bridge.
+description: Answer CI and release oncall questions about the OME repository from the OME bot - "why is main red", "is this failure flaky", "what broke build N", "did my commit pass", "what is promoted where", "what runs on cluster X" - through the ome-bridge tools builds, ci and docs and the release endpoint, and reply with a verdict, quoted evidence and the next action. Read-only; never retries, promotes or files anything. Serving alerts belong to the human oncall's serving-incident runbook, which the bot does not carry. Load after ome-bridge.
 ---
 
 # ome-oncall — CI and release questions, answered from the bridge
@@ -57,16 +57,14 @@ the query, not retry it.
 2. `builds diff <build>`: which step keys are new and which persist.
 3. `ci classify <build>`, then `ci log` on each red key for the first real
    error line (not the last line; the table explains how to find it).
-4. Reply:
-
-```
-*Verdict* — main is red since build <N> (<age>) on <step keys>; <class>.
-*Evidence* —
-> build <N> <step-key>: <first error line>
-> build <N> diff: <step-key> new since build <N-1> / persists since <first red>
-*Next action* — <what the oncall should do: fix owner area, retry once for an infra signature with its retries spent, or nothing for advisory steps>
-*Scope* — builds <range> read; compare <URL from builds diff>
-```
+4. Reply in the `ome-answer` shape, for someone who has not opened Buildkite:
+   first line "*main has been red since build <N>* (<age>): <step in plain
+   words> fails with <class in plain words>"; then *What I checked* bullets,
+   one per build or step, each giving the first error line in under 100
+   characters and what it means; then *What to do* naming the owner area,
+   a single retry for an infra signature with its retries spent, or nothing
+   for an advisory step; then `Looked at builds <range>; compare <URL from
+   builds diff>.` and `_read-only, nothing changed_`.
 
 Name suspects only by the compare range the diff prints; the bot cannot list
 commits, so do not guess authors or PRs.
@@ -75,13 +73,11 @@ commits, so do not guess authors or PRs.
 
 Apply the table's decision in order: known flake, persists, new with a
 related change, new with an infra signature, passed on automatic retry.
-Answer with one of those names and its basis:
-
-```
-*Verdict* — not flaky: persists since build <N> with the same first error.
-*Evidence* — two quoted first-error lines from different builds, or the known-flake entry that matches.
-*Next action* — retry once (oncall) / fix / ignore advisory.
-```
+Answer with one of those names and its basis, in the `ome-answer` shape:
+"*Not flaky*: the same error has failed every build since <N>" or "*A known
+flake*: <entry name>", then the two first-error lines or the matching
+known-flake entry as *What I checked* bullets, then *What to do*: retry once
+(the oncall), fix, or ignore an advisory step.
 
 A red Go test or Ginkgo spec that passed on retry is a nondeterministic
 defect, not noise; say so.
@@ -109,15 +105,15 @@ the running manager image tag is the short SHA.
 
 ### "What is promoted where?"
 
-Reply as a table built only from what `release` and `clusters` returned:
-
-```
-*Release* — <newest freight> (<age>) is on <stages>; <stages> still run <older freight>.
-STAGE        FREIGHT (ome-resources)      PROMOTED   HEALTH   RUNNING
-<stage>      1.0.0-<ts>.<sha>             <age>      Healthy  <sha>
-*Waiting* — <freight> since <age>, not yet on <stage> (<phase or health reason from the stage>)
-*Mismatch* — <cluster> runs <sha> while its stage holds <sha>: the sync has not landed
-```
+Reply only from what `release` and `clusters` returned, in the `ome-answer`
+shape: first line "*Every stage runs the newest release* (<short SHA>,
+promoted <age>)" or "*<N> of <M> stages are behind*: <stages> still run
+<older SHA>"; then one *What I checked* bullet per stage that is behind,
+unhealthy or mismatched, in words ("`usc1-4` was promoted <age> and is
+healthy", "`<cluster>` still runs <sha> while its stage holds <sha>, so the
+sync has not landed"); healthy, current stages are summarised in one bullet.
+Then *What to do* only if a promotion is waiting on someone, then
+`Looked at <N> stages and <M> clusters.` and `_read-only, nothing changed_`.
 
 A stage whose freight is older than the newest freight is a pending
 promotion: say which and how old. A cluster running a different SHA than

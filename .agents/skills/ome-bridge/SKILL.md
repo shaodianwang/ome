@@ -1,6 +1,6 @@
 ---
 name: ome-bridge
-description: The OME bot's only tool - scripts/ome_bridge.py calls the read-only ome-bot bridge, which runs kubectl-ome read verbs across the fleet, the allowlisted CI tools (builds, ci), the built-in docs tool, and the release report. Covers the environment the helper needs, endpoints, exit codes and errorClass meanings, the 31 read verbs and the fan-out rule, budgets, how to pick clusters, and how to read Unavailable, Unreadable and admin doctor output. Load first in every OME bot session, before ome-answer, ome-recipe, ome-oncall or ome-docs.
+description: The OME bot's only tool - scripts/ome_bridge.py calls the read-only ome-bot bridge, which runs kubectl-ome read verbs across the fleet, the allowlisted CI tools (builds, ci), the built-in docs tool, and the release report. Covers the environment the helper needs, endpoints, exit codes and errorClass meanings, the 31 read verbs and the fan-out rule, budgets, how to pick clusters, and how to read Unavailable, Unreadable and admin doctor output. Load first in every OME bot session, before ome-answer, ome-recipe, ome-oncall, ome-docs or ome-fleet.
 ---
 
 # ome-bridge — the OME bot's tool contract
@@ -11,8 +11,8 @@ cluster, a CI read token, a Kargo read role), owns the grammar (closed
 allowlists of verbs, tools, subcommands and flags), bounds every call and
 redacts credential-shaped strings. The agent holds no cluster credential and
 runs nothing else: no `kubectl`, no `kubectl-ome`, no direct CI API calls.
-The playbooks (`ome-answer`, `ome-recipe`, `ome-oncall`, `ome-docs`) say what
-to read; the bot's runtime posts the reply.
+The playbooks (`ome-answer`, `ome-recipe`, `ome-oncall`, `ome-docs`,
+`ome-fleet`) say what to read; the bot's runtime posts the reply.
 
 Rules that never bend:
 
@@ -34,8 +34,18 @@ $B command "status chat -n team-a --cluster <name>"
 $B tool builds list --limit 5               # an allowlisted tool
 $B tool docs search RatioBalanced
 $B release                                  # Kargo stages, freight, running versions
+$B playbooks --dir /tmp/ome-playbooks       # the repository's current skills, see Freshness
 $B --json clusters                          # raw response JSON for parsing
 ```
+
+**Freshness.** The skills installed in the session are a bootstrap copy that
+reaches the bot through a second repository and can lag the ome repository
+by days. `playbooks` writes the versions the bridge was built from (the bridge
+is rebuilt from `main` within the hour of a merge) under `--dir`, one
+directory per skill with the references each names, and prints the files.
+Run it right after `health`, read the playbooks from there, and prefer them
+whenever they differ from the installed copies. If it fails, the installed
+copies are what you have.
 
 Pass a command as one quoted argument; several arguments are re-quoted and
 joined. Global flags (`--json`, `--timeout`) go before the subcommand;
@@ -82,6 +92,7 @@ bodies empty. A clock far off the bridge's shows up as HTTP 401.
 | `command` | `POST /v1/command` | `actor`, `channelId`, `requestId`, `surface` (how the text arrived, for the audit line), `text` | `ok`, `text`, `errorClass`, `error`, `sections[]` (per-cluster output and exit code); for a question, `question` and `questionMode` (`ask`, `recipe` or empty) |
 | `tool` | `POST /v1/tool` | `actor`, `channelId`, `requestId`, `tool`, `args[]` | `ok`, `text`, `errorClass`, `result` (`tool`, `exitCode`, `output`, `truncated`, `error`) |
 | `release` | `GET /v1/release` | none | `ok`, `text` (release table), `errorClass` |
+| `playbooks` | `POST /v1/tool` (docs `read` of `skills/<skill>/SKILL.md` and the references it names, paged on the truncation marker) | as `tool` | the files written under `--dir`; exit 1 when a skill cannot be read, a missing reference is only reported |
 
 Every response carries `ok`, `text` (Slack mrkdwn) and `errorClass` (empty
 when ok). Refusals of a parsed request stay HTTP 200 with `ok:false`.
@@ -134,9 +145,12 @@ Every other verb needs `--cluster <name>`.
 the budget show as timed out in their section. Report those clusters as not
 checked rather than waiting for them.
 
-**Output.** `-o json` when you will parse, `-o wide` for what the reader sees
-(some verbs have no `wide`; the README lists them). Quote only the lines that
-carry the answer.
+**Output.** `-o wide` for what the reader sees (some verbs have no `wide`;
+the README lists them); `-o json` only for one object on one cluster. Every
+reply is capped at about 12,000 characters and ends with `… output truncated`
+(the section's `truncated` is true) past that, so a fleet-wide `-o json` is
+cut mid-document and will not parse. Quote only the lines that carry the
+answer.
 
 ## Picking clusters
 

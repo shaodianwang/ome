@@ -5,7 +5,10 @@ description: Answer concept, how-to and design-status questions about OME from t
 
 # ome-docs — answers from the docs, with sources
 
-Read `ome-bridge` first. Every call is
+Read `ome-bridge` first, then `references/ome-primer.md` in this skill: one
+page with the object model, what each status means in plain words, the
+usual failure signatures and which verb a question starts with. Every
+playbook assumes it. Every call below is
 `$B tool docs ...` with `B="python3 <ome-bridge skill dir>/scripts/ome_bridge.py"`.
 The docs tool reads the trees baked into the bridge image, as fresh as the
 last `main` build:
@@ -72,15 +75,14 @@ The upstream `tasks/kubectl-ome-<verb>.md` pages carry worked examples.
 
 ## Reply
 
-Slack mrkdwn, under 3,500 characters:
-
-```
-*Answer* — two to six sentences, or a short list; commands in code spans.
-*Sources* —
-• upstream-docs/concepts/<page>.md
-• oeps/0017-unified-rollout-v2/README.md (lines 120-180)
-*Caveats* — what the docs do not say, anything provisional, and that the docs are as of the last main build.
-```
+Slack mrkdwn, under 3,500 characters, written for someone who has not read
+the page: the answer first, in two to six plain sentences or a short list
+with commands in code spans and every term the asker did not use explained
+in passing; then *Sources*, one bullet per path exactly as the docs tool
+printed it (with the line range when you paged); then *Caveats*: what the
+docs do not say, anything provisional, and that the docs are as of the last
+`main` build. End with `_read-only, nothing changed_`. No headers, no
+tables, no label on the answer itself.
 
 Every source is a path exactly as the docs tool printed it. No path you did
 not read goes into *Sources*.

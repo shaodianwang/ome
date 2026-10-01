@@ -12,10 +12,16 @@ request and maps the answer to an exit code. Standard library only.
   ome_bridge.py tool builds list --limit 5      # POST /v1/tool
   ome_bridge.py tool docs search RatioBalanced
   ome_bridge.py release                         # GET /v1/release
+  ome_bridge.py playbooks --dir /tmp/ome-playbooks
+                                                # copy the repository's current
+                                                # skills out of the bridge's docs
   ome_bridge.py --json clusters                 # raw response JSON
 
 Global flags (--json, --timeout) go before the subcommand; everything after
-`tool <name>` is passed to the tool verbatim.
+`tool <name>` is passed to the tool verbatim. `playbooks` reads every bot
+skill (SKILL.md and the references it names) through the docs tool, which
+serves the repository as of the bridge's last build, and writes them under
+--dir, one directory per skill; it prints the files it wrote.
 
 Environment:
   OME_BRIDGE_URL       base URL of the bridge, including any path prefix (required)
@@ -48,6 +54,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -55,6 +62,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from pathlib import Path
 from typing import Any, NoReturn
 
 EXIT_OK = 0
@@ -63,6 +71,17 @@ EXIT_REFUSED = 2
 EXIT_CLI_FAILED = 3
 
 DEFAULT_TIMEOUT_SECONDS = 90.0
+DEFAULT_PLAYBOOK_DIR = "/tmp/ome-playbooks"
+
+# The bot's skills, as the docs tool's `skills` root holds them.
+PLAYBOOKS = ("ome-bridge", "ome-answer", "ome-recipe", "ome-oncall", "ome-docs", "ome-fleet", "ome-memory")
+# A reference a playbook names, optionally qualified with the bot skill it
+# lives in. A path into another skill's tree (`skills/ci-triage/references/...`)
+# is a docs-tool path for the model to read, not a playbook file.
+REFERENCE_RE = re.compile(r"(?<![\w/-])(?:(ome-[a-z]+)/)?references/([A-Za-z0-9_.-]+\.md)")
+# The docs tool ends a capped read with this line; the next page starts there.
+TRUNCATED_RE = re.compile(r"… truncated after line \d+; continue with --from (\d+)\n?\Z")
+MAX_PAGES = 50
 
 # errorClass reported for a refusal whose body does not carry one, keyed by
 # HTTP status.
@@ -102,6 +121,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p = sub.add_parser("tool", parents=[common], help="POST /v1/tool")
     p.add_argument("name", help="tool name: builds, ci, docs")
     p.add_argument("args", nargs=argparse.REMAINDER, help="subcommand and arguments, verbatim")
+    p = sub.add_parser("playbooks", parents=[common],
+                       help="copy the bot's skills out of the bridge's docs tool into --dir")
+    p.add_argument("--dir", default=DEFAULT_PLAYBOOK_DIR,
+                   help=f"where to write them, one directory per skill (default {DEFAULT_PLAYBOOK_DIR})")
     args = parser.parse_args(argv)
     if args.cmd == "command" and not "".join(args.text).strip():
         parser.error("command needs the command text")
@@ -224,7 +247,7 @@ def send(base_url: str, key: bytes, method: str, path: str, body: bytes, timeout
 def decode(body: bytes) -> dict[str, Any] | None:
     try:
         doc = json.loads(body)
-    except (ValueError, UnicodeDecodeError):
+    except ValueError:
         return None
     return doc if isinstance(doc, dict) else None
 
@@ -296,14 +319,73 @@ def report(args: argparse.Namespace, status: int, body: bytes, out: Output) -> i
     return EXIT_OK
 
 
+def docs_read(base_url: str, key: bytes, timeout: float, path: str) -> str:
+    """One file of the docs tool, whole: follows the truncation marker page by page."""
+    chunks: list[str] = []
+    start = 1
+    for _ in range(MAX_PAGES):
+        payload = request_meta()
+        payload["tool"] = "docs"
+        payload["args"] = ["read", path, "--from", str(start)]
+        body = json.dumps(payload, separators=(",", ":")).encode()
+        status, resp = send(base_url, key, "POST", "/v1/tool", body, timeout)
+        doc = decode(resp)
+        result = (doc or {}).get("result") if isinstance((doc or {}).get("result"), dict) else None
+        if status != 200 or doc is None or doc.get("ok") is not True or result is None:
+            detail = (doc or {}).get("error") or (doc or {}).get("errorClass") or resp.decode(errors="replace")[:200]
+            raise BridgeError(f"docs read {path} failed (HTTP {status}): {detail}")
+        text = result.get("output") or ""
+        marker = TRUNCATED_RE.search(text)
+        if marker is None:
+            chunks.append(text)
+            return "".join(chunks)
+        chunks.append(text[:marker.start()])
+        start = int(marker.group(1))
+    raise BridgeError(f"docs read {path}: more than {MAX_PAGES} pages")
+
+
+def write_playbook(out_dir: str, rel: str, text: str) -> str:
+    target = Path(out_dir) / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
+    return str(target)
+
+
+def fetch_playbooks(base_url: str, key: bytes, timeout: float, out_dir: str, out: Output) -> int:
+    """Every bot skill and the references it names, from the docs tool's `skills` root."""
+    written: list[str] = []
+    fetched: set[str] = set()
+    for skill in PLAYBOOKS:
+        text = docs_read(base_url, key, timeout, f"skills/{skill}/SKILL.md")
+        written.append(write_playbook(out_dir, f"{skill}/SKILL.md", text))
+        for owner, name in sorted(set(REFERENCE_RE.findall(text))):
+            rel = f"{owner or skill}/references/{name}"
+            if rel in fetched:
+                continue
+            fetched.add(rel)
+            try:
+                ref_text = docs_read(base_url, key, timeout, f"skills/{rel}")
+            except BridgeError as exc:
+                # A reference the docs cannot serve costs that file, not the run.
+                out.err(f"ome_bridge: {exc}")
+                continue
+            written.append(write_playbook(out_dir, rel, ref_text))
+    for path in written:
+        out.out(path)
+    return EXIT_OK
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     out = Output(None)
     try:
         base_url = required_env("OME_BRIDGE_URL")
-        method, path, body = build_request(args)
+        if args.cmd != "playbooks":
+            method, path, body = build_request(args)
         key = read_key(args.timeout)
         out = Output(key)
+        if args.cmd == "playbooks":
+            return fetch_playbooks(base_url, key, args.timeout, args.dir, out)
         status, resp = send(base_url, key, method, path, body, args.timeout)
     except BridgeError as exc:
         out.err(f"ome_bridge: {exc}")
