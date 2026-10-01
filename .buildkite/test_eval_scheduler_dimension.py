@@ -15,7 +15,7 @@ sys.path.insert(0, HERE)
 
 
 def load(env: dict[str, str]):
-    with mock.patch.dict(os.environ, {"BUILDKITE_BRANCH": "main", "BUILDKITE_COMMIT": "0123456789abcdef", **env}, clear=False):
+    with mock.patch.dict(os.environ, {"BUILDKITE_BRANCH": "main", "BUILDKITE_COMMIT": "HEAD", **env}, clear=False):
         import generate_pipeline as module
         return importlib.reload(module)
 
@@ -160,7 +160,7 @@ class KindSchedulerDimension(unittest.TestCase):
         self.assertTrue(set(soft) <= known)
 
     def test_soft_list_is_validated_on_every_branch(self):
-        with mock.patch.dict(os.environ, {"BUILDKITE_BRANCH": "feature/x", "BUILDKITE_COMMIT": "0123456789abcdef", "GKE_KIND_SCHEDULER_ENABLED": "1"}, clear=False):
+        with mock.patch.dict(os.environ, {"BUILDKITE_BRANCH": "feature/x", "BUILDKITE_COMMIT": "HEAD", "GKE_KIND_SCHEDULER_ENABLED": "1"}, clear=False):
             import generate_pipeline as module
             pr = importlib.reload(module)
             with mock.patch.object(pr, "KIND_SCHEDULER_SOFT_GROUPS", [self.soft_entry(pr, "no-such-group")]):
@@ -175,7 +175,7 @@ class KindSchedulerDimension(unittest.TestCase):
         self.assertEqual(out.count("soft_fail: true"), len(twins))
 
     def test_twins_are_main_only_and_switchable(self):
-        with mock.patch.dict(os.environ, {"BUILDKITE_BRANCH": "feature/x", "BUILDKITE_COMMIT": "0123456789abcdef", "GKE_KIND_SCHEDULER_ENABLED": "1"}, clear=False):
+        with mock.patch.dict(os.environ, {"BUILDKITE_BRANCH": "feature/x", "BUILDKITE_COMMIT": "HEAD", "GKE_KIND_SCHEDULER_ENABLED": "1"}, clear=False):
             import generate_pipeline as module
             pr = importlib.reload(module).generate_pipeline()
         self.assertNotIn("integration-test-kind-scheduler-gke", pr)

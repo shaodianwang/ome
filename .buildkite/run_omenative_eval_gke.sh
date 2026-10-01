@@ -41,7 +41,6 @@ esac
 cluster=$(python3 "$(dirname "$0")/eval_cluster_name.py" "$lane" "$workers")
 [ -n "$cluster" ] || { echo "could not name the KIND cluster for lane ${lane}" >&2; exit 2; }
 images_dir="${OME_KIND_IMAGES_DIR:-/images}"
-repo="${PROD_ECR_REGISTRY:-168653207203.dkr.ecr.us-east-2.amazonaws.com}/msl_infra"
 run_stamp="${BUILDKITE_BUILD_NUMBER:-local}-${BUILDKITE_JOB_ID:-$$}"
 results_root="hack/omenative-testing/perm/results/${run_stamp}"
 diagnostics_dir="${results_root}/diagnostics"
@@ -130,18 +129,24 @@ done
 node_image=$(tr -d '[:space:]' <.kind-node-image | cut -d@ -f1)
 [ -n "$node_image" ] || { echo ".kind-node-image is empty" >&2; exit 1; }
 
-manager_ref="${repo}/ome-manager:${short_sha}"
-agent_ref="${repo}/ome-agent:${short_sha}"
-metrics_ref="${repo}/canary-metrics:${short_sha}"
-scheduler_ref="${repo}/ome-scheduler:${short_sha}"
-docker image inspect "$manager_ref" >/dev/null
-docker image inspect "$agent_ref" >/dev/null
-docker image inspect "$metrics_ref" >/dev/null
-docker image inspect "$scheduler_ref" >/dev/null
-docker tag "$manager_ref" "ome-manager:${short_sha}"
-docker tag "$agent_ref" "ome-agent:${short_sha}"
-docker tag "$metrics_ref" canary-metrics:kind-local
-docker tag "$scheduler_ref" "ome-scheduler:${short_sha}"
+# The archives load under the refs package_kind_eval_image.sh pulled them by,
+# which it records next to them: a reused eval image carries the refs of the
+# commit that first packaged it, so the commit tag cannot be assumed here.
+refs_file="${images_dir}/runtime-image-refs.txt"
+[ -s "$refs_file" ] || { echo "missing runtime image refs: $refs_file" >&2; exit 1; }
+runtime_ref() {
+  awk -F '\t' -v name="$1" '$1 == name { print $2; exit }' "$refs_file"
+}
+for image in ome-manager ome-agent canary-metrics ome-scheduler; do
+  ref=$(runtime_ref "$image")
+  [ -n "$ref" ] || { echo "no ref for ${image} in ${refs_file}" >&2; exit 1; }
+  docker image inspect "$ref" >/dev/null
+  echo "${image}: ${ref}"
+done
+docker tag "$(runtime_ref ome-manager)" "ome-manager:${short_sha}"
+docker tag "$(runtime_ref ome-agent)" "ome-agent:${short_sha}"
+docker tag "$(runtime_ref canary-metrics)" canary-metrics:kind-local
+docker tag "$(runtime_ref ome-scheduler)" "ome-scheduler:${short_sha}"
 
 docker run --rm --privileged busybox sh -c '
   sysctl -w fs.inotify.max_user_watches=1048576

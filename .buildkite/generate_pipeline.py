@@ -7,6 +7,18 @@ publishing. The exception is _push_every_branch_images(): those images
 push their commit tag from every branch because a KIND lane pulls them
 back out of the dev registry.
 
+Image steps reuse before they build. The generator hashes the tracked
+content each image build reads (IMAGE_INPUTS) and every published image
+carries that hash as a tag next to its commit tag. The step that owns
+build-<label> probes the dev registry for the hash tag: when it exists the
+image is retagged for this commit and nothing is built; otherwise the
+plugin build step is uploaded behind the probe, and the steps waiting on
+the key wait for it too. The eval image package step reuses the same way,
+keyed on its source images' hashes. OME_IMAGE_REBUILD=1 is the kill
+switch: every image step builds and republishes its hash tag, which is
+also how base-image and tool refreshes reach an image whose inputs have
+not changed.
+
 Usage:
     python3 .buildkite/generate_pipeline.py | buildkite-agent pipeline upload
 
@@ -20,14 +32,20 @@ Environment variables read at runtime:
     PROD_AWS_ACCOUNT_ID       – prod AWS account for ECR (default: 168653207203)
     AWS_REGION                – AWS region for ECR (default: us-east-2)
     ECR_REGISTRY              – full dev ECR registry override (takes precedence)
+    OME_IMAGE_REBUILD         – "1" forces every image step to rebuild instead
+                                of reusing a published image with the same inputs
 """
 
 from __future__ import annotations
 
+import base64
 import datetime
+import functools
+import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import textwrap
 from pathlib import Path
@@ -474,6 +492,72 @@ IMAGES = [
     # by the ome-bot chart; not part of the release marker.
     ("ome-bot", "ome-bot", "dockerfiles/ome-bot.Dockerfile"),
 ]
+
+IMAGE_PLATFORMS = ("linux/amd64", "linux/arm64")
+# Kill switch for image reuse: "1" makes every image step build and republish
+# its inputs tag, and the eval image package step package and retag, so later
+# builds reuse the refreshed images. Base images, apt packages and downloaded
+# tools are not inputs: they refresh when an input changes or on a forced
+# rebuild, not on every merge.
+IMAGE_REBUILD = _truthy(os.environ.get("OME_IMAGE_REBUILD", "0"))
+IMAGE_INPUTS_TAG_PREFIX = "inputs-"
+EVAL_IMAGE_INPUTS_TAG_PREFIX = "eval-inputs-"
+# Hashed into every image: the context filter decides what each COPY sees.
+COMMON_IMAGE_INPUTS = (".dockerignore",)
+# Everything an image build reads from the tree, by label: its Dockerfile, the
+# paths the Dockerfile's COPY lines name (a directory covers its whole tracked
+# tree) and the pin files its build args come from. The build args and the
+# platforms are hashed with the listing. The one-line reason says why the set
+# is what it is; the unit tests fail on a COPY source outside its image's set
+# and on a path that matches no tracked file.
+IMAGE_INPUTS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "ome-manager": (
+        "copies go.mod/go.sum, cmd/, pkg/ (the xet crate it links) and meta-internal/",
+        ("dockerfiles/manager.Dockerfile", "go.mod", "go.sum", "cmd", "pkg", "meta-internal"),
+    ),
+    "ome-agent": (
+        "copies go.mod/go.sum, cmd/, pkg/, internal/ and the agent config file",
+        (
+            "dockerfiles/ome-agent.Dockerfile", "go.mod", "go.sum", "cmd", "pkg", "internal",
+            "config/ome-agent/ome-agent.yaml",
+        ),
+    ),
+    "canary-metrics": (
+        "a stdlib-only Go program; its own directory is all the build copies",
+        ("dockerfiles/canary-metrics.Dockerfile", "hack/omenative-testing/metrics-server"),
+    ),
+    "muse-server": (
+        "copies the muse tree and the Rust client crate it depends on by path",
+        ("dockerfiles/muse-server.Dockerfile", "muse", "ome-client-rs"),
+    ),
+    "ome-scheduler": (
+        "its own Go module; the scheduler/ tree is all the build copies",
+        ("dockerfiles/ome-scheduler.Dockerfile", "scheduler"),
+    ),
+    "kind-ci": (
+        "caches the root module graph and the xet crate; every tool, node and fixture image pin is an ARG in the Dockerfile",
+        ("dockerfiles/kind-ci.Dockerfile", "go.mod", "go.sum", "pkg/xet"),
+    ),
+    "ome-quota-manager": (
+        "copies go.mod/go.sum, pkg/ and only its own cmd/ directory",
+        ("dockerfiles/ome-quota-manager.Dockerfile", "go.mod", "go.sum", "pkg", "cmd/ome-quota-manager"),
+    ),
+    "alfred": (
+        "built from upstream source at the pinned commit; nothing from this tree but the pin",
+        ("dockerfiles/alfred.Dockerfile", ".alfred-oss-ref"),
+    ),
+    "ome-bot": (
+        "copies go.mod/go.sum and meta-internal/omebot/, ships docs/, oeps/ and the skills, and builds the CLI from the pinned upstream commit",
+        (
+            "dockerfiles/ome-bot.Dockerfile", "go.mod", "go.sum", "meta-internal/omebot", "docs", "oeps",
+            ".agents/skills", ".kubectl-ome-oss-ref",
+        ),
+    ),
+}
+# The eval image is these images' published tags appended onto kind-ci by the
+# packaging script, so its inputs are their inputs tags plus that script.
+EVAL_IMAGE_SOURCES = ("kind-ci", "ome-manager", "ome-agent", "ome-scheduler", "canary-metrics")
+EVAL_IMAGE_SCRIPT = ".buildkite/package_kind_eval_image.sh"
 
 
 def _push_every_branch_images() -> frozenset[str]:
@@ -1818,29 +1902,206 @@ def ci_steps() -> str:
 # ---------------------------------------------------------------------------
 
 
-def _build_image_step(label: str, ecr_name: str, dockerfile: str) -> str:
-    """Emit a cf-docker-image plugin step that builds + pushes to dev ECR.
+def _image_entry(label: str) -> tuple[str, str]:
+    """The (ECR name, Dockerfile) IMAGES declares for a label."""
+    for name, ecr_name, dockerfile in IMAGES:
+        if name == label:
+            return ecr_name, dockerfile
+    raise RuntimeError(f"the pipeline builds no image named {label}")
 
-    Builds on every branch (validates the Dockerfile); pushes only on
-    main via push-branches, except the images whose build pushes on every
-    branch (_push_every_branch_images): their commit tag from every branch
-    and `latest` from main only.
-    Mirror to prod ECR is handled by _mirror_image_step which copies the
-    manifest at the registry layer — no rebuild, no layer re-upload.
+
+def _image_inputs(label: str) -> tuple[str, ...]:
+    """The tracked paths hashed for an image: the common set plus its entry."""
+    if label not in IMAGE_INPUTS:
+        raise RuntimeError(f"image {label} has no IMAGE_INPUTS entry")
+    return COMMON_IMAGE_INPUTS + tuple(IMAGE_INPUTS[label][1])
+
+
+def _check_image_inputs_table() -> None:
+    """Every built image has exactly one inputs entry, and no entry is stale."""
+    labels = {label for label, _, _ in IMAGES}
+    if stale := sorted(set(IMAGE_INPUTS) - labels):
+        raise RuntimeError(
+            "IMAGE_INPUTS names images the pipeline does not build: " + ", ".join(stale)
+        )
+    if missing := sorted(labels - set(IMAGE_INPUTS)):
+        raise RuntimeError("images without an IMAGE_INPUTS entry: " + ", ".join(missing))
+
+
+@functools.lru_cache(maxsize=None)
+def _tracked_listing(repo_root: str, commit: str, paths: tuple[str, ...]) -> tuple[str, ...] | None:
+    """`git ls-tree` entries (mode, type, blob, path) under paths at commit.
+
+    Tracked content only, so build outputs and ignored files never enter a
+    hash. None when git cannot answer where the pipeline is generated: reuse
+    is an optimisation, so the caller then builds as if nothing were
+    published and says so on stderr. Cached per commit, so pass a resolved
+    SHA when the same process looks at a moving ref.
     """
-    build_args = _image_build_args(label)
-    args_block = ""
-    if build_args:
-        args_block = "                  args:\n" + "\n".join(
-            f'                    - "{arg}"' for arg in build_args
-        ) + "\n"
+    command = [
+        "git", "-c", "safe.directory=*", "-C", repo_root,
+        "ls-tree", "-r", "-z", "--full-tree", commit, "--", *paths,
+    ]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+    except OSError as exc:
+        sys.stderr.write(f"image reuse off: git is not runnable here ({exc})\n")
+        return None
+    if result.returncode != 0:
+        sys.stderr.write(f"image reuse off: git ls-tree failed: {result.stderr.strip()}\n")
+        return None
+    return tuple(entry for entry in result.stdout.split("\0") if entry)
+
+
+def _covers(path: str, entry_path: str) -> bool:
+    """Whether an input path names this tracked file or a directory above it."""
+    return entry_path == path or entry_path.startswith(path.rstrip("/") + "/")
+
+
+def _inputs_tag(prefix: str, preimage: list[str]) -> str:
+    return prefix + hashlib.sha256("\n".join(preimage).encode()).hexdigest()[:32]
+
+
+def _image_inputs_tag(label: str, dockerfile: str) -> str | None:
+    """The registry tag naming everything this image's build reads.
+
+    The preimage is the image's recipe as the plugin is told it (Dockerfile,
+    context, platforms, build args) and the tracked listing of its inputs,
+    so a bump to a builder image or a pin changes the tag as surely as a
+    source edit. None when git is unavailable; a RuntimeError when an input
+    matches no tracked file, which is a table mistake to fix, not a miss.
+    """
+    inputs = _image_inputs(label)
+    listing = _tracked_listing(str(REPO_ROOT), COMMIT, inputs)
+    if listing is None:
+        return None
+    entry_paths = [entry.split("\t", 1)[1] for entry in listing]
+    for path in inputs:
+        if not any(_covers(path, entry_path) for entry_path in entry_paths):
+            raise RuntimeError(
+                f"image input {path} of {label} matches no tracked file at {COMMIT}"
+            )
+    recipe = {
+        "dockerfile": dockerfile,
+        "build-context": ".",
+        "platforms": list(IMAGE_PLATFORMS),
+        "args": _image_build_args(label),
+    }
+    preimage = ["ome-image-inputs/1", label, json.dumps(recipe, sort_keys=True), *listing]
+    return _inputs_tag(IMAGE_INPUTS_TAG_PREFIX, preimage)
+
+
+def _eval_image_inputs() -> tuple[str, dict[str, str]] | None:
+    """The eval image's inputs tag and the source-image tags it is made from."""
+    sources: dict[str, str] = {}
+    for label in EVAL_IMAGE_SOURCES:
+        _, dockerfile = _image_entry(label)
+        tag = _image_inputs_tag(label, dockerfile)
+        if tag is None:
+            return None
+        sources[label] = tag
+    script = _tracked_listing(str(REPO_ROOT), COMMIT, (EVAL_IMAGE_SCRIPT,))
+    if script is None:
+        return None
+    if not script:
+        raise RuntimeError(f"{EVAL_IMAGE_SCRIPT} is not a tracked file at {COMMIT}")
+    preimage = ["ome-eval-image-inputs/1", json.dumps(sources, sort_keys=True), *script]
+    return _inputs_tag(EVAL_IMAGE_INPUTS_TAG_PREFIX, preimage), sources
+
+
+def _image_tags(label: str) -> list[str]:
+    """The commit-facing tags a build publishes.
+
+    `latest` is main-only: the mirror step copies it to the prod registry, so
+    a branch build of an every-branch image publishes its commit tag only.
+    """
+    every_branch = label in _push_every_branch_images()
+    return [COMMIT[:8]] if every_branch and BRANCH != "main" else ["latest", COMMIT[:8]]
+
+
+def _image_pushes_from_this_branch(label: str) -> bool:
+    return BRANCH == "main" or label in _push_every_branch_images()
+
+
+def _image_build_plugin_step(
+    label: str,
+    ecr_name: str,
+    dockerfile: str,
+    *,
+    key: str,
+    tags: list[str],
+    depends_on: str | None = None,
+) -> str:
+    """The cf-docker-image step for one image, rendered at column 0.
+
+    The plugin's command hook generates the real build job and uploads it
+    behind this step, so this step is thin and the build runs as the job it
+    uploads. Builds on every branch (validates the Dockerfile); pushes only on
+    main via push-branches, except the images whose build pushes on every
+    branch (_push_every_branch_images). Mirror to prod ECR is handled by
+    _mirror_image_step, which copies the manifest at the registry layer.
+    """
     every_branch = label in _push_every_branch_images()
     push_line = "push: true" if every_branch else 'push-branches: "main"'
-    # `latest` is main-only: the mirror step copies it to the prod registry,
-    # so a branch build of an every-branch image publishes its commit tag only.
-    tags = [COMMIT[:8]] if every_branch and BRANCH != "main" else ["latest", COMMIT[:8]]
-    tags_line = "tags: [" + ", ".join(f'"{tag}"' for tag in tags) + "]"
+    lines = [
+        f'- label: ":docker: Build {label}"',
+        f'  key: "{key}"',
+        _gh_status(key, indent=2),
+    ]
+    if depends_on:
+        lines.append(f'  depends_on: "{depends_on}"')
+    lines += [
+        _auto_retry(indent=2),
+        "  agents:",
+        f'    queue: "{BUILD_QUEUE}"',
+        "  env:",
+        '    BUILDX_NO_DEFAULT_ATTESTATIONS: "1"',
+        "  plugins:",
+        f'    - "{CF_DOCKER_IMAGE_PLUGIN}":',
+        f'        ecr-name: "msl_infra/{ecr_name}"',
+        '        environment: "dev"',
+        f'        region: "{AWS_REGION}"',
+        f'        dockerfile: "{dockerfile}"',
+        '        build-context: "."',
+    ]
+    build_args = _image_build_args(label)
+    if build_args:
+        lines.append("        args:")
+        lines += [f'          - "{arg}"' for arg in build_args]
+    lines += [
+        "        platforms: [" + ", ".join(f'"{platform}"' for platform in IMAGE_PLATFORMS) + "]",
+        f"        {push_line}",
+        "        tags: [" + ", ".join(f'"{tag}"' for tag in tags) + "]",
+        "        login: true",
+        _auto_retry(indent=8),
+        "        tw-buildkit: true",
+    ]
+    return "\n".join(lines) + "\n"
 
+
+def _build_image_step(label: str, ecr_name: str, dockerfile: str) -> str:
+    """Emit the step that owns the key build-<label>.
+
+    With an inputs hash it is the reuse probe (build_image.sh): it retags the
+    dev image already published under that hash for this commit, or uploads
+    the plugin build step behind itself on a miss. A step that waits on this
+    key also waits for the steps it uploads, so the mirror, package and chart
+    steps need no other dependency. The uploaded step carries the hash as a
+    tag, which is what makes the next build's probe hit. Without git, or
+    under OME_IMAGE_REBUILD, the plugin build step itself owns the key.
+    """
+    inputs_tag = _image_inputs_tag(label, dockerfile)
+    tags = _image_tags(label) + ([inputs_tag] if inputs_tag else [])
+    if inputs_tag is None or IMAGE_REBUILD:
+        return _image_build_plugin_step(
+            label, ecr_name, dockerfile, key=f"build-{label}", tags=tags, depends_on="test"
+        )
+    uploaded = _image_build_plugin_step(
+        label, ecr_name, dockerfile, key=f"build-{label}-image", tags=tags
+    )
+    # One line of base64 so the fragment survives the docker plugin's env file.
+    fragment = base64.b64encode(("steps:\n" + textwrap.indent(uploaded, "  ")).encode()).decode()
+    publish = " ".join(_image_tags(label)) if _image_pushes_from_this_branch(label) else ""
     return textwrap.dedent(
         f"""\
           - label: ":docker: Build {label}"
@@ -1848,24 +2109,23 @@ def _build_image_step(label: str, ecr_name: str, dockerfile: str) -> str:
 {_gh_status(f"build-{label}")}
             depends_on: "test"
 {_auto_retry()}
+            # The dev-registry probe and retag use the same Buildkite cluster
+            # secret as the mirror steps (_ecr_login.sh tier 2).
+            secrets:
+              - "ECR_AUTH_TOKEN"
+            env:
+              AWS_REGION: "{AWS_REGION}"
+              ECR_REGISTRY: "{ECR_REGISTRY}"
+              OME_IMAGE_INPUTS_TAG: "{inputs_tag}"
+              OME_IMAGE_INPUTS: "{' '.join(_image_inputs(label))}"
+              OME_IMAGE_PUBLISH_TAGS: "{publish}"
+              OME_IMAGE_BUILD_STEP_B64: "{fragment}"
             agents:
               queue: "{BUILD_QUEUE}"
-            env:
-              BUILDX_NO_DEFAULT_ATTESTATIONS: "1"
+            command: |
+              sh .buildkite/build_image.sh msl_infra/{ecr_name}
             plugins:
-              - "{CF_DOCKER_IMAGE_PLUGIN}":
-                  ecr-name: "msl_infra/{ecr_name}"
-                  environment: "dev"
-                  region: "{AWS_REGION}"
-                  dockerfile: "{dockerfile}"
-                  build-context: "."
-{args_block.rstrip()}
-                  platforms: ["linux/amd64", "linux/arm64"]
-                  {push_line}
-                  {tags_line}
-                  login: true
-{_auto_retry(indent=18)}
-                  tw-buildkit: true
+{_tw_docker_plugin(CF_DOCKER_PLUGIN_RUNTIME_IMAGE, indent=14)}
         """
     )
 
@@ -1924,7 +2184,24 @@ def _mirror_image_step(label: str, ecr_name: str) -> str:
 
 
 def _package_kind_eval_image_step() -> str:
-    """Add exact main runtime-image archives to the offline KIND runner."""
+    """Add exact main runtime-image archives to the offline KIND runner.
+
+    The step reuses like the image steps: the generator hands it the tag
+    naming its source images' inputs, and the script retags the eval image
+    already published under it instead of packaging again. Under
+    OME_IMAGE_REBUILD the script packages and retags, so the refreshed
+    runtime images reach the eval image too.
+    """
+    env: dict[str, str] = {}
+    if (eval_inputs := _eval_image_inputs()) is not None:
+        tag, sources = eval_inputs
+        env["OME_EVAL_IMAGE_INPUTS_TAG"] = tag
+        env["OME_EVAL_IMAGE_INPUTS"] = " ".join(
+            [f"{label}={source_tag}" for label, source_tag in sources.items()] + [EVAL_IMAGE_SCRIPT]
+        )
+        if IMAGE_REBUILD:
+            env["OME_IMAGE_REBUILD"] = "1"
+    env_block = _yaml_block({"env": env}, indent=12) if env else ""
     return textwrap.dedent(
         f"""\
           - label: ":package: Package exact OMENative eval images"
@@ -1937,6 +2214,7 @@ def _package_kind_eval_image_step() -> str:
               - "mirror-ome-scheduler"
               - "mirror-canary-metrics"
 {_auto_retry()}
+{env_block}
             secrets:
               - "PROD_ECR_AUTH_TOKEN"
             agents:
@@ -2005,6 +2283,7 @@ def _release_marker_step() -> str:
 
 
 def cd_steps() -> str:
+    _check_image_inputs_table()
     parts: list[str] = []
     # A chart that stamps an image ref (prod-ECR hub + tag) into its values at
     # publish time must wait for both the build (dev push) AND the mirror (prod

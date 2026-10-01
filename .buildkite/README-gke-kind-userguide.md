@@ -57,6 +57,7 @@ click **Retry**. It re-runs that job's file group only.
 |---|---|---|---|
 | `GKE_KIND_ENABLED` | pipeline upload | `1` | Emit the group. Set to `0` only as a kill switch. |
 | `GKE_KIND_QUEUE` | pipeline upload | `gke-tpu-v7x` | Agent queue for the named jobs. |
+| `OME_IMAGE_REBUILD` | pipeline upload | `0` | `1` makes every image step rebuild instead of reusing the image published for the same inputs (see "Image reuse" in README-gke-kind.md). |
 
 ## Reading results
 

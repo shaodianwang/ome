@@ -14,12 +14,16 @@ Run from the repo root (stdlib only; pytest also collects it):
 
 from __future__ import annotations
 
+import base64
+import contextlib
 import datetime
 import importlib.util
+import io
 import itertools
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -46,6 +50,29 @@ _cluster_name_spec.loader.exec_module(ecn)
 SPEC_BODY = 'package kind\n\nvar _ = ginkgo.Describe("suite", func() {})\n'
 TABLE_BODY = 'package kind\n\nvar _ = ginkgo.DescribeTable("cases", func() {})\n'
 HELPER_BODY = "package kind\n\nfunc sharedHelper() {}\n"
+
+
+def uploaded_build_step(label, ecr_name, dockerfile):
+    """The plugin build step a probe uploads on a miss, decoded from its env."""
+    probe = gp._build_image_step(label, ecr_name, dockerfile)
+    match = re.search(r'OME_IMAGE_BUILD_STEP_B64: "([^"]+)"', probe)
+    if not match:
+        raise AssertionError(f"the {label} step carries no uploaded build step")
+    return base64.b64decode(match.group(1)).decode()
+
+
+def dockerfile_copy_sources(dockerfile):
+    """Build-context paths a Dockerfile's COPY lines read (stage copies skipped)."""
+    sources = []
+    for line in dockerfile.read_text().splitlines():
+        parts = line.split()
+        if not parts or parts[0] != "COPY":
+            continue
+        if any(part.startswith("--from=") for part in parts[1:]):
+            continue
+        operands = [part for part in parts[1:] if not part.startswith("--")]
+        sources += [source.rstrip("/") for source in operands[:-1]]
+    return sources
 
 
 class PipelineTestCase(unittest.TestCase):
@@ -464,18 +491,23 @@ class TestReleaseMarkerEmission(unittest.TestCase):
 
 
 class TestImageBuildEmission(unittest.TestCase):
-    def test_wrapper_and_generated_build_job_have_automatic_retries(self):
-        yaml_text = gp._build_image_step(
-            "ome-manager", "ome-manager", "dockerfiles/manager.Dockerfile"
-        )
-        self.assertIn(
+    def test_probe_and_generated_build_job_have_automatic_retries(self):
+        step_retry = (
             '  retry:\n'
             '    automatic:\n'
             '      - exit_status: "*"\n'
-            '        limit: 2',
-            yaml_text,
+            '        limit: 2'
         )
-        plugin_config = yaml_text.split(gp.CF_DOCKER_IMAGE_PLUGIN, 1)[1]
+        probe = gp._build_image_step(
+            "ome-manager", "ome-manager", "dockerfiles/manager.Dockerfile"
+        )
+        self.assertIn(step_retry, probe)
+        plugin_step = gp._image_build_plugin_step(
+            "ome-manager", "ome-manager", "dockerfiles/manager.Dockerfile",
+            key="build-ome-manager-image", tags=["latest"],
+        )
+        self.assertIn(step_retry, plugin_step)
+        plugin_config = plugin_step.split(gp.CF_DOCKER_IMAGE_PLUGIN, 1)[1]
         self.assertIn(
             '        retry:\n'
             '          automatic:\n'
@@ -492,7 +524,7 @@ class TestImageBuildEmission(unittest.TestCase):
         # alfred is built from upstream source the Dockerfile fetches itself, so
         # the build step must hand it the commit from .alfred-oss-ref.
         pin = gp.ALFRED_OSS_REF_FILE.read_text().strip()
-        yaml_text = gp._build_image_step("alfred", "alfred", "dockerfiles/alfred.Dockerfile")
+        yaml_text = uploaded_build_step("alfred", "alfred", "dockerfiles/alfred.Dockerfile")
         self.assertIn(f'- "ALFRED_OSS_REF={pin}"', yaml_text)
         self.assertIn(f'- "GO_BUILDER_IMAGE={gp.GO_BUILDER_IMAGE}"', yaml_text)
         self.assertIn(("alfred", "alfred", "dockerfiles/alfred.Dockerfile"), gp.IMAGES)
@@ -514,9 +546,273 @@ class TestImageBuildEmission(unittest.TestCase):
         # lives on upstream main and no release tag carries it.
         pin = gp.KUBECTL_OME_OSS_REF_FILE.read_text().strip()
         self.assertRegex(pin, r"^[0-9a-f]{40}$")
-        yaml_text = gp._build_image_step("ome-bot", "ome-bot", "dockerfiles/ome-bot.Dockerfile")
+        yaml_text = uploaded_build_step("ome-bot", "ome-bot", "dockerfiles/ome-bot.Dockerfile")
         self.assertIn(f'- "KUBECTL_OME_REF={pin}"', yaml_text)
         self.assertNotIn("ALFRED_OSS_REF", yaml_text)
+
+
+class GitRepoTestCase(PipelineTestCase):
+    """Helpers for tests that hash image inputs out of a throwaway git repo."""
+
+    GIT_ENV = {
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_AUTHOR_NAME": "tester",
+        "GIT_AUTHOR_EMAIL": "tester@example.com",
+        "GIT_COMMITTER_NAME": "tester",
+        "GIT_COMMITTER_EMAIL": "tester@example.com",
+    }
+
+    def setUp(self):
+        if shutil.which("git") is None:
+            self.skipTest("git is required to hash image inputs")
+        gp._tracked_listing.cache_clear()
+        self.addCleanup(gp._tracked_listing.cache_clear)
+
+    def git(self, repo, *args):
+        return subprocess.run(
+            ["git", "-c", "commit.gpgsign=false", "-C", str(repo), *args],
+            check=True, capture_output=True, text=True, env={**os.environ, **self.GIT_ENV},
+        ).stdout.strip()
+
+    def make_git_repo(self, files):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        repo = Path(tmp.name)
+        self.git(repo, "init", "-q")
+        self.commit(repo, files)
+        return repo
+
+    def commit(self, repo, files):
+        for name, body in files.items():
+            path = repo / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(body)
+        self.git(repo, "add", "-A")
+        self.git(repo, "commit", "-q", "-m", "change")
+        return self.git(repo, "rev-parse", "HEAD")
+
+    def tag_at(self, repo, label, dockerfile="Dockerfile"):
+        """The inputs tag at the repo's current HEAD, keyed by its resolved SHA."""
+        self.patch_attr("COMMIT", self.git(repo, "rev-parse", "HEAD"))
+        return gp._image_inputs_tag(label, dockerfile)
+
+
+class TestImageInputs(GitRepoTestCase):
+    """The table behind image reuse: complete, tracked and sensitive to its inputs."""
+
+    def test_table_covers_every_image_once_with_a_reason(self):
+        gp._check_image_inputs_table()
+        self.assertEqual(set(gp.IMAGE_INPUTS), {label for label, _, _ in gp.IMAGES})
+        for label, (reason, paths) in gp.IMAGE_INPUTS.items():
+            with self.subTest(image=label):
+                self.assertTrue(reason.strip(), "every image states why its inputs are what they are")
+                self.assertEqual(len(paths), len(set(paths)), "an input is listed twice")
+
+    def test_stale_or_missing_entry_fails_generation(self):
+        self.patch_attr("IMAGE_INPUTS", {**gp.IMAGE_INPUTS, "ghost": ("gone", ("go.mod",))})
+        with self.assertRaisesRegex(RuntimeError, "ghost"):
+            gp._check_image_inputs_table()
+        table = {label: entry for label, entry in gp.IMAGE_INPUTS.items() if label not in ("ghost", "ome-manager")}
+        self.patch_attr("IMAGE_INPUTS", table)
+        with self.assertRaisesRegex(RuntimeError, "ome-manager"):
+            gp._check_image_inputs_table()
+        with self.assertRaisesRegex(RuntimeError, "ome-manager"):
+            gp._image_inputs("ome-manager")
+
+    def test_every_checked_in_image_hashes_from_tracked_inputs(self):
+        # The table against the real tree: every input names tracked content,
+        # the Dockerfile is among them, and no two images share a tag.
+        tags = {}
+        for label, _, dockerfile in gp.IMAGES:
+            with self.subTest(image=label):
+                self.assertIn(dockerfile, gp._image_inputs(label))
+                self.assertIn(".dockerignore", gp._image_inputs(label))
+                tag = gp._image_inputs_tag(label, dockerfile)
+                self.assertRegex(tag, r"^inputs-[0-9a-f]{32}$")
+                tags[label] = tag
+        self.assertEqual(len(set(tags.values())), len(tags), "two images hash alike")
+
+    def test_dockerfile_copy_sources_are_inputs(self):
+        # A COPY from the build context that no input covers would change the
+        # image without changing its hash, so the next build would reuse a
+        # stale image.
+        for label, _, dockerfile in gp.IMAGES:
+            inputs = gp._image_inputs(label)
+            sources = dockerfile_copy_sources(gp.REPO_ROOT / dockerfile)
+            for source in sources:
+                with self.subTest(image=label, source=source):
+                    self.assertTrue(
+                        any(gp._covers(path, source) for path in inputs),
+                        f"{dockerfile} copies {source}, which no input of {label} covers",
+                    )
+
+    def test_a_change_to_an_input_changes_the_hash_and_one_outside_does_not(self):
+        repo = self.make_git_repo({
+            "Dockerfile": "FROM scratch\nCOPY src /src\n",
+            "src/a.go": "package a\n",
+            "docs/readme.md": "hello\n",
+        })
+        self.patch_attr("REPO_ROOT", repo)
+        self.patch_attr("COMMON_IMAGE_INPUTS", ())
+        self.patch_attr("IMAGE_INPUTS", {"demo": ("test image", ("Dockerfile", "src"))})
+        before = self.tag_at(repo, "demo")
+        self.assertRegex(before, r"^inputs-[0-9a-f]{32}$")
+
+        self.commit(repo, {"docs/readme.md": "changed\n"})
+        self.assertEqual(self.tag_at(repo, "demo"), before, "a file outside the inputs moved the hash")
+
+        self.commit(repo, {"src/b.go": "package a\n"})
+        added = self.tag_at(repo, "demo")
+        self.assertNotEqual(added, before, "a new file under an input directory left the hash alone")
+
+        self.commit(repo, {"src/a.go": "package a // edited\n"})
+        edited = self.tag_at(repo, "demo")
+        self.assertNotEqual(edited, added, "an edit under an input directory left the hash alone")
+
+        self.commit(repo, {"Dockerfile": "FROM scratch\nCOPY src /src\nUSER 65532\n"})
+        self.assertNotEqual(self.tag_at(repo, "demo"), edited, "a Dockerfile edit left the hash alone")
+
+    def test_the_recipe_is_part_of_the_hash(self):
+        repo = self.make_git_repo({"Dockerfile": "FROM scratch\n"})
+        self.patch_attr("REPO_ROOT", repo)
+        self.patch_attr("COMMON_IMAGE_INPUTS", ())
+        self.patch_attr("IMAGE_INPUTS", {"demo": ("test image", ("Dockerfile",))})
+        base = self.tag_at(repo, "demo")
+        self.patch_attr("IMAGE_PLATFORMS", ("linux/amd64",))
+        fewer_platforms = self.tag_at(repo, "demo")
+        self.assertNotEqual(fewer_platforms, base)
+        self.patch_attr("GO_BUILDER_IMAGE", "example.com/golang:next")
+        self.assertNotEqual(self.tag_at(repo, "demo"), fewer_platforms)
+        self.assertNotEqual(self.tag_at(repo, "demo", dockerfile="Other.Dockerfile"), self.tag_at(repo, "demo"))
+
+    def test_an_input_that_matches_nothing_fails_generation(self):
+        repo = self.make_git_repo({"Dockerfile": "FROM scratch\n"})
+        self.patch_attr("REPO_ROOT", repo)
+        self.patch_attr("COMMON_IMAGE_INPUTS", ())
+        self.patch_attr("IMAGE_INPUTS", {"demo": ("test image", ("Dockerfile", "missing-dir"))})
+        with self.assertRaisesRegex(RuntimeError, "missing-dir"):
+            self.tag_at(repo, "demo")
+
+    def test_without_git_reuse_is_off_and_the_plugin_step_owns_the_key(self):
+        with mock.patch.object(gp.subprocess, "run", side_effect=FileNotFoundError("git")):
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                step = gp._build_image_step("ome-manager", "ome-manager", "dockerfiles/manager.Dockerfile")
+                eval_step = gp._package_kind_eval_image_step()
+        self.assertIn("image reuse off", err.getvalue())
+        self.assertIn('key: "build-ome-manager"', step)
+        self.assertIn('depends_on: "test"', step)
+        self.assertIn(gp.CF_DOCKER_IMAGE_PLUGIN, step)
+        self.assertNotIn("build_image.sh", step)
+        self.assertNotIn("inputs-", step)
+        self.assertNotIn("OME_EVAL_IMAGE_INPUTS_TAG", eval_step)
+
+
+class TestImageReuseEmission(GitRepoTestCase):
+    """The emitted steps carry the hash and the reuse logic."""
+
+    MANAGER = ("ome-manager", "ome-manager", "dockerfiles/manager.Dockerfile")
+    ALFRED = ("alfred", "alfred", "dockerfiles/alfred.Dockerfile")
+
+    def test_probe_owns_the_build_key_and_names_what_it_compares(self):
+        self.patch_attr("BRANCH", "main")
+        step = gp._build_image_step(*self.MANAGER)
+        tag = gp._image_inputs_tag("ome-manager", "dockerfiles/manager.Dockerfile")
+        self.assertIn('key: "build-ome-manager"', step)
+        self.assertIn('depends_on: "test"', step)
+        self.assertIn(f'OME_IMAGE_INPUTS_TAG: "{tag}"', step)
+        self.assertIn(
+            'OME_IMAGE_INPUTS: ".dockerignore dockerfiles/manager.Dockerfile go.mod go.sum cmd pkg meta-internal"',
+            step,
+        )
+        self.assertIn(f'OME_IMAGE_PUBLISH_TAGS: "latest {gp.COMMIT[:8]}"', step)
+        self.assertIn('- "ECR_AUTH_TOKEN"', step)
+        self.assertIn(f'ECR_REGISTRY: "{gp.ECR_REGISTRY}"', step)
+        self.assertIn("sh .buildkite/build_image.sh msl_infra/ome-manager", step)
+        # The plugin step travels encoded; it must not also run under this key.
+        self.assertNotIn(gp.CF_DOCKER_IMAGE_PLUGIN, step)
+
+    def test_uploaded_step_is_the_plugin_build_tagged_with_the_hash(self):
+        self.patch_attr("BRANCH", "main")
+        uploaded = uploaded_build_step(*self.MANAGER)
+        tag = gp._image_inputs_tag("ome-manager", "dockerfiles/manager.Dockerfile")
+        self.assertTrue(uploaded.startswith("steps:\n"))
+        self.assertIn('key: "build-ome-manager-image"', uploaded)
+        self.assertNotIn("depends_on", uploaded)
+        self.assertIn(gp.CF_DOCKER_IMAGE_PLUGIN, uploaded)
+        self.assertIn('dockerfile: "dockerfiles/manager.Dockerfile"', uploaded)
+        self.assertIn(f'tags: ["latest", "{gp.COMMIT[:8]}", "{tag}"]', uploaded)
+        self.assertIn('push-branches: "main"', uploaded)
+        self.assertNotIn("$", uploaded, "the fragment is uploaded without interpolation")
+
+    def test_publish_tags_follow_the_push_policy(self):
+        sha = gp.COMMIT[:8]
+        self.patch_attr("BRANCH", "feature/anything")
+        self.assertIn('OME_IMAGE_PUBLISH_TAGS: ""', gp._build_image_step(*self.MANAGER))
+        self.assertIn(f'OME_IMAGE_PUBLISH_TAGS: "{sha}"', gp._build_image_step(*self.ALFRED))
+        self.patch_attr("BRANCH", "main")
+        self.assertIn(f'OME_IMAGE_PUBLISH_TAGS: "latest {sha}"', gp._build_image_step(*self.MANAGER))
+        self.assertIn(f'OME_IMAGE_PUBLISH_TAGS: "latest {sha}"', gp._build_image_step(*self.ALFRED))
+
+    def test_kill_switch_builds_under_the_key_and_still_tags_the_hash(self):
+        self.patch_attr("IMAGE_REBUILD", True)
+        step = gp._build_image_step(*self.MANAGER)
+        tag = gp._image_inputs_tag("ome-manager", "dockerfiles/manager.Dockerfile")
+        self.assertIn('key: "build-ome-manager"', step)
+        self.assertIn('depends_on: "test"', step)
+        self.assertIn(gp.CF_DOCKER_IMAGE_PLUGIN, step)
+        self.assertIn(f'"{tag}"]', step)
+        self.assertNotIn("build_image.sh", step)
+        eval_step = gp._package_kind_eval_image_step()
+        self.assertIn('OME_IMAGE_REBUILD: "1"', eval_step)
+        self.assertIn("OME_EVAL_IMAGE_INPUTS_TAG", eval_step)
+
+    def test_eval_package_step_hashes_its_source_images(self):
+        step = gp._package_kind_eval_image_step()
+        tag, sources = gp._eval_image_inputs()
+        self.assertRegex(tag, r"^eval-inputs-[0-9a-f]{32}$")
+        self.assertEqual(tuple(sources), gp.EVAL_IMAGE_SOURCES)
+        self.assertIn(f'OME_EVAL_IMAGE_INPUTS_TAG: "{tag}"', step)
+        for label, source_tag in sources.items():
+            self.assertIn(f"{label}={source_tag}", step)
+        self.assertIn(gp.EVAL_IMAGE_SCRIPT, step)
+        self.assertNotIn("OME_IMAGE_REBUILD", step)
+        # A source image's hash moving moves the eval hash with it.
+        with mock.patch.object(gp, "_image_inputs_tag", side_effect=lambda label, _: f"inputs-{label}"):
+            moved, _ = gp._eval_image_inputs()
+        self.assertNotEqual(moved, tag)
+
+    def test_main_pipeline_probes_every_image_and_the_eval_image(self):
+        self.patch_attr("BRANCH", "main")
+        pipeline = gp.generate_pipeline()
+        for _, ecr_name, _ in gp.IMAGES:
+            self.assertIn(f"sh .buildkite/build_image.sh msl_infra/{ecr_name}", pipeline)
+        self.assertIn("OME_EVAL_IMAGE_INPUTS_TAG", pipeline)
+
+    def test_scripts_compare_probe_retag_and_upload(self):
+        script = (gp.REPO_ROOT / ".buildkite/build_image.sh").read_text()
+        for needle in (
+            'echo "inputs tag:',
+            'echo "inputs hashed:',
+            'echo "publish tags:',
+            'crane digest "$candidate"',
+            'crane tag "$candidate" "$tag"',
+            "buildkite-agent pipeline upload --no-interpolation",
+            "OME_IMAGE_BUILD_STEP_B64",
+        ):
+            self.assertIn(needle, script)
+        eval_script = (gp.REPO_ROOT / gp.EVAL_IMAGE_SCRIPT).read_text()
+        for needle in (
+            "OME_EVAL_IMAGE_INPUTS_TAG",
+            'echo "inputs hashed:',
+            'crane tag "$candidate" "eval-${short_sha}"',
+            'crane tag "$target" "$inputs_tag"',
+            'OME_IMAGE_REBUILD',
+        ):
+            self.assertIn(needle, eval_script)
+        runner = (gp.REPO_ROOT / ".buildkite/run_omenative_eval_gke.sh").read_text()
+        self.assertIn("runtime-image-refs.txt", runner)
+
 
 class TestDriftCheckEmission(unittest.TestCase):
     # A drift check installs its tooling with `go install` before it compares
@@ -1042,24 +1338,26 @@ class TestAlfredKindGroup(PipelineTestCase):
             self.assertEqual(len(owners), 1, f"{name} matched by {owners or 'no shard'}")
 
     def test_alfred_image_pushes_on_every_branch(self):
-        alfred = gp._build_image_step("alfred", "alfred", "dockerfiles/alfred.Dockerfile")
+        alfred = uploaded_build_step("alfred", "alfred", "dockerfiles/alfred.Dockerfile")
         self.assertIn("push: true", alfred)
         self.assertNotIn("push-branches", alfred)
-        manager = gp._build_image_step("ome-manager", "ome-manager", "dockerfiles/manager.Dockerfile")
+        manager = uploaded_build_step("ome-manager", "ome-manager", "dockerfiles/manager.Dockerfile")
         self.assertIn('push-branches: "main"', manager)
         self.assertNotIn("push: true", manager)
 
     def test_every_branch_image_tags_latest_only_on_main(self):
         sha = gp.COMMIT[:8]
+        alfred_inputs = gp._image_inputs_tag("alfred", "dockerfiles/alfred.Dockerfile")
+        manager_inputs = gp._image_inputs_tag("ome-manager", "dockerfiles/manager.Dockerfile")
         self.patch_attr("BRANCH", "feature/anything")
-        alfred = gp._build_image_step("alfred", "alfred", "dockerfiles/alfred.Dockerfile")
-        self.assertIn(f'tags: ["{sha}"]', alfred)
+        alfred = uploaded_build_step("alfred", "alfred", "dockerfiles/alfred.Dockerfile")
+        self.assertIn(f'tags: ["{sha}", "{alfred_inputs}"]', alfred)
         self.assertNotIn('"latest"', alfred)
-        manager = gp._build_image_step("ome-manager", "ome-manager", "dockerfiles/manager.Dockerfile")
-        self.assertIn(f'tags: ["latest", "{sha}"]', manager)
+        manager = uploaded_build_step("ome-manager", "ome-manager", "dockerfiles/manager.Dockerfile")
+        self.assertIn(f'tags: ["latest", "{sha}", "{manager_inputs}"]', manager)
         self.patch_attr("BRANCH", "main")
-        alfred = gp._build_image_step("alfred", "alfred", "dockerfiles/alfred.Dockerfile")
-        self.assertIn(f'tags: ["latest", "{sha}"]', alfred)
+        alfred = uploaded_build_step("alfred", "alfred", "dockerfiles/alfred.Dockerfile")
+        self.assertIn(f'tags: ["latest", "{sha}", "{alfred_inputs}"]', alfred)
 
     def test_package_step_waits_for_the_alfred_build(self):
         step = gp._package_kind_test_image_step()
@@ -1078,14 +1376,14 @@ class TestAlfredKindGroup(PipelineTestCase):
         self.assertNotIn("OME_ALFRED_IMAGE_REQUIRED", step)
         # Nothing consumes a branch build of the image with the lane off, so it
         # publishes on main only like every other image.
-        alfred = gp._build_image_step("alfred", "alfred", "dockerfiles/alfred.Dockerfile")
+        alfred = uploaded_build_step("alfred", "alfred", "dockerfiles/alfred.Dockerfile")
         self.assertIn('push-branches: "main"', alfred)
         self.assertNotIn("push: true", alfred)
 
     def test_lane_is_nested_under_the_kind_switch(self):
         self.patch_attr("GKE_KIND_ENABLED", False)
         self.assertNotIn("kind-gke-alfred-", gp.ci_steps())
-        alfred = gp._build_image_step("alfred", "alfred", "dockerfiles/alfred.Dockerfile")
+        alfred = uploaded_build_step("alfred", "alfred", "dockerfiles/alfred.Dockerfile")
         self.assertIn('push-branches: "main"', alfred)
 
 

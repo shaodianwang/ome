@@ -161,9 +161,36 @@ kubectl -n <agent-ns> create secret generic buildkite-agent-token \
   github via proxy or an in-cluster mirror (#3). If neither is available, bake
   the repo into a CI image variant (heavier; only if unavoidable).
 - **Image freshness**: `kind-ci` bakes the Go module + cargo caches at build
-  time; it rebuilds every main build, so caches track `go.mod`/`Cargo.lock`. A
-  PR that changes deps but doesn't rebuild `kind-ci` first could miss modules
-  (`GOPROXY=off` fails fast, so it's visible, not silent).
+  time. Its build step rebuilds when one of its inputs changes (`go.mod`,
+  `go.sum`, `pkg/xet`, its Dockerfile, `.dockerignore`; see `IMAGE_INPUTS` in
+  `generate_pipeline.py`) and otherwise retags the image already published for
+  those inputs, so the caches track the module files exactly. A PR that changes
+  deps but doesn't rebuild `kind-ci` first could miss modules (`GOPROXY=off`
+  fails fast, so it's visible, not silent).
+
+## Image reuse
+
+Every image the pipeline builds is tagged with a hash of what its build reads
+(`inputs-<hex>`) as well as with the commit. The step that owns `build-<label>`
+runs `build_image.sh`: it probes the dev registry for the hash tag and, when it
+exists, retags that image for the commit (`<sha8>`, plus `latest` on main) and
+uploads no build; on a miss it uploads the plugin build step behind itself,
+and because the mirror, package and chart steps wait on `build-<label>`, they
+wait for the uploaded build too. The log of each probe names the hash, the
+paths hashed, the registry's answer and the tags published, and the build
+carries an `image-reuse` annotation with one line per image.
+
+`package-kind-eval-image` reuses the same way: its hash (`eval-inputs-<hex>`)
+is made of its source images' input hashes and the packaging script, so a
+merge that touches neither the Go trees nor `kind-ci` retags the previous eval
+image. `run_omenative_eval_gke.sh` therefore reads the runtime image refs from
+`/images/runtime-image-refs.txt` rather than assuming the commit tag.
+
+`OME_IMAGE_REBUILD=1` on a build is the kill switch: every image step builds,
+the eval image is packaged again, and each republishes its hash tag, so the
+rebuilt images are the ones later builds reuse. That is also how base-image,
+package and tool refreshes reach an image whose inputs have not changed.
+
 ## Version pins
 
 `.kind-node-image` at the repo root is the single source of truth for the node

@@ -1,5 +1,12 @@
 #!/bin/sh
 # Package exact main-build runtime images into the offline GKE KIND runner.
+#
+# Reuses before it packages: generate_pipeline.py passes the tag naming the
+# source images' inputs (OME_EVAL_IMAGE_INPUTS_TAG), and an eval image already
+# published under it is retagged for this commit instead of being assembled
+# again. The archives inside such an image carry the refs of the commit that
+# first packaged them; runtime-image-refs.txt records them for the runner.
+# OME_IMAGE_REBUILD=1 skips the probe and still retags what it packages.
 set -eu
 
 [ "${BUILDKITE_BRANCH:-}" = "main" ] || {
@@ -36,6 +43,25 @@ stage=$(mktemp -d)
 trap 'rm -rf -- "$stage"' EXIT
 mkdir -p "$stage/images"
 
+inputs_tag="${OME_EVAL_IMAGE_INPUTS_TAG:-}"
+if [ -n "$inputs_tag" ]; then
+  candidate="${repo}/kind-ci:${inputs_tag}"
+  echo "--- eval image reuse check: ${target}"
+  echo "commit:        ${BUILDKITE_COMMIT}"
+  echo "inputs tag:    ${inputs_tag}"
+  echo "inputs hashed: ${OME_EVAL_IMAGE_INPUTS:-?}"
+  if [ "${OME_IMAGE_REBUILD:-0}" = 1 ]; then
+    echo "OME_IMAGE_REBUILD=1: packaging without probing"
+  elif digest=$(crane digest "$candidate" 2>"$stage/probe.err"); then
+    echo "found ${candidate}@${digest}; retagging as ${target}"
+    crane tag "$candidate" "eval-${short_sha}"
+    echo "reused ${candidate}@${digest} as ${target}"
+    exit 0
+  else
+    echo "no eval image for these inputs: $(tr '\n' ' ' <"$stage/probe.err"); packaging"
+  fi
+fi
+
 for image in ome-manager ome-agent ome-scheduler canary-metrics; do
   ref="${repo}/${image}:${short_sha}"
   echo "--- pull ${ref}"
@@ -54,3 +80,7 @@ crane append --platform linux/amd64 \
 
 digest=$(crane digest "$target")
 echo "published ${target}@${digest}"
+if [ -n "$inputs_tag" ]; then
+  crane tag "$target" "$inputs_tag"
+  echo "tagged ${target} as ${repo}/kind-ci:${inputs_tag} for reuse"
+fi
