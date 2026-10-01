@@ -1709,6 +1709,15 @@
               "expr": "sum(increase(ome_tpu_slice_released_total{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\"}[1h]))",
               "refId": "G",
               "legendFormat": "released"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(increase(ome_tpu_slice_release_deferred_total{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\"}[1h]))",
+              "refId": "H",
+              "legendFormat": "release deferred"
             }
           ],
           "fieldConfig": {
@@ -1735,7 +1744,7 @@
             },
             "overrides": []
           },
-          "description": "Over the trailing hour, counted by the leader. released counts a slice when the API server removes it, whoever deleted it.",
+          "description": "Over the trailing hour, counted by the leader. released counts a slice when the API server removes it, whoever deleted it. release deferred counts each attempt to release a slice kept back because pods of another workload hold chips on its hosts.",
           "options": {
             "legend": {
               "displayMode": "list",
@@ -1768,7 +1777,7 @@
                 "uid": "${datasource}"
               },
               "expr": "sum by (reason) (increase(ome_tpu_slice_create_failures_total{cluster=\"$cluster\",pod=~\"ome-controller-manager.*\",pod=~\"$pod\"}[1h]))",
-              "refId": "H",
+              "refId": "I",
               "legendFormat": "{{reason}}"
             }
           ],

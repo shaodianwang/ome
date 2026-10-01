@@ -9,6 +9,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
@@ -594,5 +595,46 @@ func TestReportSliceStates_InformerFails(t *testing.T) {
 	awaitReturn(t, startReportSliceStates(ctx, r, informers, c))
 	if got := reportedSliceStates(t); len(got) != 0 {
 		t.Fatalf("reported %v without synced informers, want nothing", got)
+	}
+}
+
+// TestSliceReleaseDeferredIsReported pins that a release kept back by another
+// workload's pods on the slice's hosts is reported on the InferenceReplica,
+// and that the slice survives it.
+func TestSliceReleaseDeferredIsReported(t *testing.T) {
+	ctx := context.Background()
+	ir := optedInIR("llama-engine", "prod", 1)
+	r, c := newSliceReconciler(t, ir)
+	rec := &capturingRecorder{}
+	r.Recorder = rec
+	name := seedSlice(t, r, c, ir, sliceprovision.Slot{Instance: 0}, sliceStateReady)
+	host := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "host-a", Labels: map[string]string{sliceKeySlice: name}}}
+	holder := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "holder", Namespace: "other"},
+		Spec: corev1.PodSpec{NodeName: "host-a", Containers: []corev1.Container{{
+			Name:      "main",
+			Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{sliceChipResource: resource.MustParse("4")}},
+		}}},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	for _, o := range []client.Object{host, holder} {
+		if err := c.Create(ctx, o); err != nil {
+			t.Fatalf("create %s: %v", o.GetName(), err)
+		}
+	}
+	p, err := r.sliceProvisioner(ir)
+	if err != nil {
+		t.Fatalf("sliceProvisioner: %v", err)
+	}
+	complete, err := p.ReleaseAll(ctx)
+	if err != nil || complete {
+		t.Fatalf("ReleaseAll = %v, %v; want the slice kept", complete, err)
+	}
+	if getSlice(t, c, name) == nil {
+		t.Fatal("a slice another workload holds chips on must be kept")
+	}
+	if len(rec.events) != 1 || rec.events[0].reason != string(sliceprovision.EventReasonSliceReleaseDeferred) ||
+		rec.events[0].kind != corev1.EventTypeWarning || !strings.Contains(rec.events[0].message, "other/holder") || rec.events[0].object != ir {
+		t.Fatalf("events = %+v, want one %s warning on the InferenceReplica naming other/holder", rec.events, sliceprovision.EventReasonSliceReleaseDeferred)
 	}
 }

@@ -3,6 +3,7 @@ package inferencereplica
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -25,12 +26,24 @@ func (r *Reconciler) sliceProvisioner(ir *v1beta1.InferenceReplica) (*sliceprovi
 	if r.TPUSliceProvisioning == nil || r.sliceReader == nil {
 		return nil, nil
 	}
-	return sliceprovision.New(r.TPUSliceProvisioning, r.sliceReader, r.APIReader, r.Client, sliceprovision.Owner{
+	p, err := sliceprovision.New(r.TPUSliceProvisioning, r.sliceReader, r.APIReader, r.Client, sliceprovision.Owner{
 		Kind:      irKind,
 		Namespace: ir.Namespace,
 		Name:      ir.Name,
 		UID:       ir.UID,
 	})
+	if err != nil {
+		return nil, err
+	}
+	p.OnReleaseDeferred(func(s gke.Slice, holders []string) {
+		if r.Recorder == nil {
+			return
+		}
+		r.Recorder.Eventf(ir, corev1.EventTypeWarning, string(sliceprovision.EventReasonSliceReleaseDeferred),
+			"TPU slice %s is kept: pods of other workloads hold chips on its hosts (%s); it is released once they are gone",
+			s.Name, strings.Join(holders, ", "))
+	})
+	return p, nil
 }
 
 // slicesOptedIn reports whether ir's pods run on provisioned slices. It reads

@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -33,6 +34,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/controllerconfig"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
+	"github.com/ome-projects/ome/pkg/tpuslice"
 	"github.com/ome-projects/ome/pkg/tpuslice/gke"
 )
 
@@ -47,6 +49,13 @@ const (
 
 // hashLength is how many hex digits of the owner hash end a slice name.
 const hashLength = 8
+
+// EventReasonSliceReleaseDeferred is recorded when a slice is kept because
+// pods of another workload hold chips on its hosts.
+const EventReasonSliceReleaseDeferred workload.EventReason = "SliceReleaseDeferred"
+
+// podNodeNameField selects pods by the node they are bound to.
+const podNodeNameField = "spec.nodeName"
 
 // Slot is what one slice serves.
 type Slot struct {
@@ -109,10 +118,16 @@ type Provisioner struct {
 	// complete.
 	cached *gke.Client
 	live   *gke.Client
-	owner  Owner
+	// hosts serves the live node and pod reads that decide whether a
+	// release would cut another workload off from its chips.
+	hosts client.Reader
+	owner Owner
 	// ownerLabels are the labels that make a slice owner's.
 	ownerLabels map[string]string
 	hash        string
+	// onDeferred, when set, is told about each release kept back by other
+	// workloads' pods.
+	onDeferred func(s gke.Slice, holders []string)
 }
 
 // New returns a Provisioner for owner's slices. It reads through cached,
@@ -141,10 +156,17 @@ func New(cfg *controllerconfig.TPUSliceProvisioningConfig, cached, live client.R
 		cfg:         cfg,
 		cached:      gke.NewClient(cached, w),
 		live:        gke.NewClient(live, w),
+		hosts:       live,
 		owner:       owner,
 		ownerLabels: map[string]string{LabelOwnerUID: string(owner.UID)},
 		hash:        hex.EncodeToString(sum[:])[:hashLength],
 	}, nil
+}
+
+// OnReleaseDeferred sets fn to be told about each release kept back because
+// pods of another workload hold chips on the slice's hosts.
+func (p *Provisioner) OnReleaseDeferred(fn func(s gke.Slice, holders []string)) {
+	p.onDeferred = fn
 }
 
 // Name is the name of slot's slice: the owner name, cut to fit, then the slot
@@ -357,6 +379,14 @@ func (p *Provisioner) Sweep(ctx context.Context, keep func(Slot, gke.Slice) bool
 		if _, ok := held[s.Name]; ok {
 			continue
 		}
+		releasable, err := p.releasable(ctx, s)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if !releasable {
+			continue
+		}
 		if _, err := p.cached.Release(ctx, s, p.ownerLabels); err != nil {
 			errs = append(errs, err)
 		}
@@ -401,6 +431,15 @@ func (p *Provisioner) release(ctx context.Context, selector labels.Selector) (bo
 	complete := true
 	var errs []error
 	for _, s := range held {
+		releasable, err := p.releasable(ctx, s)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if !releasable {
+			complete = false
+			continue
+		}
 		gone, err := p.live.Release(ctx, s, p.ownerLabels)
 		if err != nil {
 			errs = append(errs, err)
@@ -411,4 +450,50 @@ func (p *Provisioner) release(ctx context.Context, selector labels.Selector) (bo
 		return false, errors.Join(errs...)
 	}
 	return complete, nil
+}
+
+// releasable reports whether s may be released: no pod of another workload
+// holds chips on its hosts. A slice being deleted needs no check.
+func (p *Provisioner) releasable(ctx context.Context, s gke.Slice) (bool, error) {
+	if s.Terminating {
+		return true, nil
+	}
+	holders, err := p.foreignHolders(ctx, s)
+	if err != nil || len(holders) == 0 {
+		return err == nil, err
+	}
+	sliceReleasesDeferred.WithLabelValues(s.Type, s.Topology).Inc()
+	if p.onDeferred != nil {
+		p.onDeferred(s, holders)
+	}
+	return false, nil
+}
+
+// foreignHolders returns, sorted as namespace/name, the pods that hold chips
+// on the hosts of s without being confined to it. Releasing s deactivates
+// the partition under them.
+func (p *Provisioner) foreignHolders(ctx context.Context, s gke.Slice) ([]string, error) {
+	nodes := &corev1.NodeList{}
+	if err := p.hosts.List(ctx, nodes, client.MatchingLabels{p.cfg.NodeLabels.Slice: s.Name}); err != nil {
+		return nil, fmt.Errorf("list the hosts of slice %s: %w", s.Name, err)
+	}
+	var holders []string
+	for i := range nodes.Items {
+		pods := &corev1.PodList{}
+		if err := p.hosts.List(ctx, pods, client.MatchingFields{podNodeNameField: nodes.Items[i].Name}); err != nil {
+			return nil, fmt.Errorf("list the pods on node %s of slice %s: %w", nodes.Items[i].Name, s.Name, err)
+		}
+		for j := range pods.Items {
+			pod := &pods.Items[j]
+			if query.IsTerminalPod(pod) || pod.Spec.NodeSelector[p.cfg.NodeLabels.Slice] == s.Name {
+				continue
+			}
+			if tpuslice.ContainerChips(pod.Spec.Containers, p.cfg.ChipResource) == 0 {
+				continue
+			}
+			holders = append(holders, pod.Namespace+"/"+pod.Name)
+		}
+	}
+	sort.Strings(holders)
+	return holders, nil
 }

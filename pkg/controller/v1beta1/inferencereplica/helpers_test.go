@@ -424,6 +424,7 @@ func newReconciler(t *testing.T, objs ...client.Object) (*Reconciler, client.Cli
 		WithStatusSubresource(&v1beta1.InferenceReplica{}).
 		WithIndex(&schedulingv1alpha1.PodGroup{}, workloadgang.PodGroupControllerUIDIndexField, workloadgang.PodGroupControllerUIDIndexExtractor).
 		WithIndex(&v1beta1.InferenceReplica{}, irUIDIndexField, irUIDIndexExtractor).
+		WithIndex(&corev1.Pod{}, "spec.nodeName", func(o client.Object) []string { return []string{o.(*corev1.Pod).Spec.NodeName} }).
 		Build()
 	return &Reconciler{
 		Client:                   c,

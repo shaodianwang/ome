@@ -222,7 +222,9 @@ Common to both options (under Option 1 all of this lives in `ome-controller`):
   object, mirroring `slice-scheduler`'s existing
   `cloud.google.com/slice-owner-{kind,name}`.
 - **Release.** On owner deletion the slice is deleted; a finalizer on the OME
-  object prevents release while pods still hold the partition.
+  object prevents release while pods still hold the partition. A slice is also
+  kept while pods of another workload hold chips on its hosts: deleting it
+  deactivates the partition under them.
 - **Static-pool short-circuit.** No `PROVISION_ONLY` on the candidate nodes → no
   slice work at all.
 - **Host health.** A `Ready` slice that no pod holds, with a host its pods

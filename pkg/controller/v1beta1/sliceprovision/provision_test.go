@@ -28,9 +28,12 @@ import (
 
 var testOwner = Owner{Kind: "Replica", Namespace: "ns", Name: "svc-engine", UID: "uid-a"}
 
-// newFakeClient assigns UIDs on create, as the API server does.
+// newFakeClient assigns UIDs on create, as the API server does, and selects
+// pods by node, as the API server's field selector does.
 func newFakeClient(objs ...client.Object) client.WithWatch {
-	return fake.NewClientBuilder().WithObjects(objs...).WithInterceptorFuncs(interceptor.Funcs{
+	return fake.NewClientBuilder().WithObjects(objs...).WithIndex(&corev1.Pod{}, podNodeNameField, func(o client.Object) []string {
+		return []string{o.(*corev1.Pod).Spec.NodeName}
+	}).WithInterceptorFuncs(interceptor.Funcs{
 		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 			if obj.GetUID() == "" {
 				obj.SetUID(uuid.NewUUID())
@@ -1007,5 +1010,141 @@ func TestReleaseReadsLiveAndReportsErrors(t *testing.T) {
 	}
 	if _, err := p.Holds(context.Background()); !errors.Is(err, boom) {
 		t.Fatalf("Holds error = %v, want the list error", err)
+	}
+}
+
+// hostPod is a pod bound to node that requests chips, selecting the slices
+// in selector.
+func hostPod(name, node string, chips int64, phase corev1.PodPhase, selector map[string]string) *corev1.Pod {
+	p := pod(name, selector, phase)
+	p.Namespace = "other"
+	p.Spec.NodeName = node
+	p.Spec.Containers = podSpec("tpu-a", "2x2x1", chips).Containers
+	return p
+}
+
+func sliceHost(name, slice string) *corev1.Node {
+	return node(name, map[string]string{keySlice: slice})
+}
+
+// Releasing a slice deactivates its partition, so a slice is kept while a pod
+// of another workload holds chips on its hosts, on every release path.
+func TestReleaseKeepsSlicesOtherWorkloadsHold(t *testing.T) {
+	d := demand(t, "2x2x1")
+	for _, tt := range []struct {
+		name string
+		pods func(slice string) []client.Object
+		kept bool
+	}{
+		{name: "another workload's pod holds chips", kept: true, pods: func(slice string) []client.Object {
+			return []client.Object{hostPod("holder", "host-a", 4, corev1.PodRunning, nil)}
+		}},
+		{name: "a pending pod already bound to the host", kept: true, pods: func(slice string) []client.Object {
+			return []client.Object{hostPod("holder", "host-a", 4, corev1.PodPending, nil)}
+		}},
+		{name: "a pod with no chips", pods: func(slice string) []client.Object {
+			return []client.Object{hostPod("cpu-only", "host-a", 0, corev1.PodRunning, nil)}
+		}},
+		{name: "a finished pod", pods: func(slice string) []client.Object {
+			return []client.Object{hostPod("done", "host-a", 4, corev1.PodSucceeded, nil)}
+		}},
+		{name: "the slice's own pod", pods: func(slice string) []client.Object {
+			return []client.Object{hostPod("own", "host-a", 4, corev1.PodRunning, map[string]string{keySlice: slice})}
+		}},
+		{name: "a pod on another node", pods: func(slice string) []client.Object {
+			return []client.Object{hostPod("elsewhere", "host-b", 4, corev1.PodRunning, nil)}
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, path := range []string{"ReleaseInstance", "ReleaseAll", "Sweep"} {
+				t.Run(path, func(t *testing.T) {
+					p := newProvisioner(t, newFakeClient(), testOwner)
+					u := stored(t, p, d, Slot{})
+					objs := append([]client.Object{u, sliceHost("host-a", u.GetName()), sliceHost("host-b", "other-slice")}, tt.pods(u.GetName())...)
+					c := newFakeClient(objs...)
+					p = newProvisioner(t, c, testOwner)
+					var told []string
+					p.OnReleaseDeferred(func(s gke.Slice, holders []string) { told = append(told, holders...) })
+					before := testutil.ToFloat64(sliceReleasesDeferred.WithLabelValues("type-a", "2x2x1"))
+
+					ctx := context.Background()
+					switch path {
+					case "ReleaseInstance":
+						complete, err := p.ReleaseInstance(ctx, 0)
+						if err != nil || (tt.kept && complete) {
+							t.Fatalf("ReleaseInstance = %v, %v; want an incomplete release while the slice is kept", complete, err)
+						}
+					case "ReleaseAll":
+						complete, err := p.ReleaseAll(ctx)
+						if err != nil || (tt.kept && complete) {
+							t.Fatalf("ReleaseAll = %v, %v; want an incomplete release while the slice is kept", complete, err)
+						}
+					case "Sweep":
+						var calls int
+						if err := p.Sweep(ctx, nil, pinnedSet(&calls)); err != nil {
+							t.Fatalf("Sweep: %v", err)
+						}
+					}
+					if _, found := getSlice(t, c, u.GetName()); found != tt.kept {
+						t.Fatalf("slice present = %v, want %v", found, tt.kept)
+					}
+					deferred := testutil.ToFloat64(sliceReleasesDeferred.WithLabelValues("type-a", "2x2x1")) - before
+					if tt.kept && (deferred != 1 || len(told) != 1 || told[0] != "other/holder") {
+						t.Fatalf("deferred %v times, told %v; want once, naming other/holder", deferred, told)
+					}
+					if !tt.kept && (deferred != 0 || len(told) != 0) {
+						t.Fatalf("deferred %v times, told %v; want no deferral", deferred, told)
+					}
+				})
+			}
+		})
+	}
+}
+
+// A slice is released once the other workload's pods are gone.
+func TestReleaseCompletesOnceOtherWorkloadsLeave(t *testing.T) {
+	d := demand(t, "2x2x1")
+	p := newProvisioner(t, newFakeClient(), testOwner)
+	u := stored(t, p, d, Slot{})
+	holder := hostPod("holder", "host-a", 4, corev1.PodRunning, nil)
+	c := newFakeClient(u, sliceHost("host-a", u.GetName()), holder)
+	p = newProvisioner(t, c, testOwner)
+	ctx := context.Background()
+	if complete, err := p.ReleaseInstance(ctx, 0); err != nil || complete {
+		t.Fatalf("ReleaseInstance = %v, %v; want the slice kept", complete, err)
+	}
+	if err := c.Delete(ctx, holder); err != nil {
+		t.Fatalf("delete holder: %v", err)
+	}
+	if _, err := p.ReleaseInstance(ctx, 0); err != nil {
+		t.Fatalf("ReleaseInstance: %v", err)
+	}
+	if complete, err := p.ReleaseInstance(ctx, 0); err != nil || !complete {
+		t.Fatalf("ReleaseInstance = %v, %v; want the release complete once the holder left", complete, err)
+	}
+}
+
+// A failed read of the hosts keeps the slice: releasing it blind could cut a
+// workload off from its chips.
+func TestReleaseKeepsSlicesWhenHostsCannotBeRead(t *testing.T) {
+	boom := errors.New("boom")
+	d := demand(t, "2x2x1")
+	p := newProvisioner(t, newFakeClient(), testOwner)
+	u := stored(t, p, d, Slot{})
+	base := newFakeClient(u)
+	c := interceptor.NewClient(base, interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if _, ok := list.(*corev1.NodeList); ok {
+				return boom
+			}
+			return c.List(ctx, list, opts...)
+		},
+	})
+	p = newProvisioner(t, c, testOwner)
+	if _, err := p.ReleaseInstance(context.Background(), 0); !errors.Is(err, boom) {
+		t.Fatalf("ReleaseInstance error = %v, want the node read's", err)
+	}
+	if _, found := getSlice(t, base, u.GetName()); !found {
+		t.Fatal("slice released although its hosts could not be read")
 	}
 }
