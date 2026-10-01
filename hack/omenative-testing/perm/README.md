@@ -170,7 +170,7 @@ description, replica counts (`Ne/Nd/Nr`), peak ceilings (`ceil_e/ceil_d/ceil_r`)
 (requires `issue=<github issue number>` — an XFAIL with no tracked issue is
 invisible debt; validate-only rejects both omissions). A notimpl case whose
 tracked bug is itself a continuous-invariant violation adds
-`inv_xfail=A|B|C|all` (requires the line-2 `# reason:` too): exactly that
+`inv_xfail=A|B|C|D|F|G|H|all` (requires the line-2 `# reason:` too): exactly that
 invariant's violations record as the case's `XFAIL (known bug: #N)` instead of
 hardening the verdict — the invariant is still evaluated and printed (nothing
 is blinded, unlike `inv_off`), and any other invariant still fails hard, so
@@ -861,6 +861,83 @@ Coordination check: in a PD group with a coordination policy, the decoder is
 expected to **surge with** the engine; an *independent* (un-grouped) decoder must
 **not** surge from an engine-only bump. Single-pod cases additionally assert the
 surviving pod's UID never rotated (skipped for gangs, where pods are recreated).
+
+### Continuous invariants
+
+Every case, whatever its verb, is also judged on conditions the verb's own
+verdict cannot see. The watcher samples them every `INV_TICK_S` for the whole
+case, from the first pod to the handler's last read; a condition has to hold
+across consecutive ticks before it fires, and a fired one FAILs the verdict
+unless the case parks exactly that class with `inv_xfail=` (or waives it with
+`inv_off=` and a line-2 reason). Every fired violation names the pod or
+Instance and the two values that disagree. The classes: **A status-truth**
+and **B endpoints-membership** (the parking paragraph above), **C pair-alive**
+(*Pairing protocol*), **D gang-scheduling** (*Scheduler dimension*), **E
+cohort ratio** (the informational PD observer under *PD knobs*), and:
+
+**F label-truth** — every live pod runs the template its
+`ome.io/revision-hash` label names. The reading is the ControllerRevision of
+that hash (OMENative stores each revision's `podSpec`, `podMeta` and, for a
+gang, `workerPodSpec`; the list is fetched only while a live pod carries a
+hash the ledger has not read, and re-listed a bounded number of times): the
+pod's container images, its `perm.test/rev` annotation, and the literal env
+values and resource requests of every template container must match,
+template-is-a-subset-of-pod, so sidecars, admission defaults and the
+renderer's `OME_*` env never count. Until a hash's revision is visible the
+first pod seen under that hash stands in, so a pod rebuilt from a newer
+template under an old label — what an operator deleting a pod under a held
+or paused roll produces — still disagrees with the pods that carried the
+label first. A violation reads `invariant F violated
+(label-template-mismatch): engine/1 pod <name> carries
+ome.io/revision-hash=<old> but runs a different template from its
+ControllerRevision: container ome-container image: revision 'img:1' vs pod
+'img:2'; annotation perm.test/rev: revision 'v1' vs pod 'v2'`. Limits: a
+difference confined to fields outside the fingerprint (probes, volumes,
+affinity) is invisible; so is a hash whose every pod and whose revision lie
+together; and an admission webhook that rewrites images would make every pod
+disagree with its revision. The settle window (`INV_SETTLE_S`, scaled by
+`OME_TEST_TIMEOUT_MULT`) absorbs an in-place update's separate image, label
+and annotation writes.
+
+**G ready-serving** — an Instance the InferenceReplica reports `Ready`,
+whose full pod set the watcher also sees container-Ready, has at least one
+pod in rotation: the `ome.io/serving` readiness gate `True` and the pod a
+Ready endpoint of a per-revision routed Service whose selector matches it.
+The reading is the IR row (phase) plus the watcher's pods for that index
+and the same Service and EndpointSlice lists invariant B reads; the endpoint
+half is asserted only once the case has a routed Service at all (otherwise
+only the gate is), and an Instance whose pod set is incomplete or not all
+Ready is left to A. A violation reads `invariant G violated
+(ready-not-serving): engine/2 Phase=Ready with all 1 pod(s) Ready, but no
+pod has the ome.io/serving gate True` or `… pod(s) <name> serving but not a
+Ready endpoint of any routed Service that selects them`. Limits: it says
+nothing about an Instance the IR does not call Ready (a Ready pod under a
+`Creating` or `Updating` row is a transition, not a lie), nothing about
+traffic weights (a 0% canary step keeps its pods in rotation and passes),
+and it reads the gate and the endpoints, not the request path. The settle
+window absorbs the controller's serving flip and endpoint propagation after
+a pod turns Ready.
+
+**H superseded-revision** — once a Component's rollout reports done, no
+Instance of it runs any other revision. "Done" is read two ways: a Component
+the ISVC run model pins (any grouped Component — canary, blueGreen,
+rollingUpdate) is done when `status.rollout.activeRun` is absent,
+`lastRun.outcome` is `Completed`, its `rolloutPhase` (where a canary reports
+one) is `Stable`, and the IR's `updateRevision` is the run's pinned target
+for it; a Component outside the run model is done when its IR's
+`currentRevision` has reached `updateRevision`. From then on every IR row's
+`runningRevision` and every live pod's `ome.io/revision-hash` must be that
+revision. A violation reads `invariant H violated (superseded-instance):
+engine/2 runs revision <old> after the rollout reported done on <new> (IR
+runningRevision=…, updateRevision=…)` or `(superseded-pod): engine/2 pod
+<name> carries ome.io/revision-hash=<old> after the rollout reported done on
+<new>`. It is not evaluated under `mode=partition`, whose own verdict owns
+the staged split (k Instances rest on the old revision by design). Limits: a
+rollout that never reports done (a `Failed` park, an open run, a
+`RolledBack` hold) is outside its claim, as is the straggler the run close
+itself waits for; a revision the IR calls `updateRevision` while the ISVC
+spec already moved on is caught only once the next run opens and closes.
+The settle window absorbs the run close and the next render.
 
 ## Regenerating cases
 

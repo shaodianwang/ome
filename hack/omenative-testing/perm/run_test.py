@@ -687,6 +687,515 @@ class PodRecordBuilders(unittest.TestCase):
             # the closing brace of a nested dict literal ends the block early; look a bit further
             block = src[start:start + 1200]
             self.assertIn("_pod_placement(obj, labels)", block, src[start:start + 200])
+            self.assertIn("_pod_template(obj)", block, src[start:start + 200])
+
+
+def pod_object(name, component, index, revision, image, anno, *, runner="default",
+               test_rev="v1", cpu="50m", ready=True, serving=True):
+    """A pod as kubectl -w hands it to the watcher: the labels, annotation,
+    container spec and conditions the record builders and invariants read."""
+    return {
+        "metadata": {"name": name, "uid": f"uid-{name}",
+                     "labels": {"component": component, "ome.io/instance-index": str(index),
+                                "ome.io/runner": runner, "ome.io/pod-ordinal": "0",
+                                run.REV_LABEL: revision},
+                     "annotations": {run.TRIGGER_ANNO: anno} if anno else {}},
+        "spec": {"containers": [{
+            "name": run.MAIN_CONTAINER, "image": image,
+            "env": [{"name": "TEST_REV", "value": test_rev},
+                    {"name": "OME_INSTANCE_INDEX", "value": str(index)},
+                    {"name": "POD_NAME", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}}],
+            "resources": {"requests": {"cpu": cpu, "memory": "64Mi"}}}]},
+        "status": {"containerStatuses": [{"name": run.MAIN_CONTAINER, "ready": ready}],
+                   "conditions": [{"type": run.SERVING_COND, "status": "True" if serving else "False"}]},
+    }
+
+
+def watcher_record(obj):
+    """The watcher record the real event builder makes of a pod object."""
+    ctx = {"pod_state": {}, "info": {}}
+    run._apply_event(ctx, {"type": "ADDED", "object": obj})
+    return ctx["pod_state"][obj["metadata"]["name"]]
+
+
+def revision_payload(image, anno, *, test_rev="v1", cpu="50m", worker_image=None):
+    """A ControllerRevision's stored data: the pod template, its metadata
+    and, for a gang, the worker template."""
+    def spec(img):
+        return {"containers": [{"name": run.MAIN_CONTAINER, "image": img,
+                                "env": [{"name": "TEST_REV", "value": test_rev}],
+                                "resources": {"requests": {"cpu": cpu, "memory": "64Mi"}}}]}
+    out = {"podSpec": spec(image), "podMeta": {"annotations": {run.TRIGGER_ANNO: anno}}}
+    if worker_image:
+        out["workerPodSpec"] = spec(worker_image)
+    return out
+
+
+def observe_ticks(inv, pods, ticks, *, start=0.0, pods_per_inst=None, **snapshots):
+    """Drive consecutive invariant ticks over fixed snapshots."""
+    for i in range(ticks):
+        run._inv_observe(inv, pods, pods_per_inst or {"engine": 1},
+                         start + i * run.INV_TICK_S, **snapshots)
+    return start + ticks * run.INV_TICK_S
+
+
+def routed_service(case_id, component, revision, *uids, ready=True, runner=None):
+    """A per-revision routed Service and the EndpointSlice mirroring it, as
+    the invariant poller lists them: the Service selects the Component's
+    revision (optionally one runner), the slice carries the given pod UIDs."""
+    name = f"{case_id}-{component}-rev-{revision}"
+    selector = {"ome.io/inferenceservice": case_id, "component": component, run.REV_LABEL: revision}
+    if runner:
+        selector["ome.io/runner"] = runner
+    svc = {"metadata": {"name": name}, "spec": {"clusterIP": "10.0.0.7", "selector": selector}}
+    sl = {"metadata": {"labels": {"kubernetes.io/service-name": name}},
+          "endpoints": [{"targetRef": {"uid": u}, "conditions": {"ready": ready}} for u in uids]}
+    return svc, sl
+
+
+def routing_of(*pairs):
+    """(Services, EndpointSlices) from routed_service pairs."""
+    return [s for s, _ in pairs], [sl for _, sl in pairs]
+
+
+class EndpointsMembershipInvariantTest(unittest.TestCase):
+    """Invariant B over fetched snapshots: a Ready+serving member missing
+    from its Service's Ready endpoints, and a deleted pod still referenced."""
+
+    def test_missing_and_stale_endpoints_fire_after_their_sustain(self):
+        rev = "a1b2c3d4"
+        pods = {"engine-0": watcher_record(pod_object("engine-0", "engine", 0, rev, "img:1", "v1"))}
+        inv = run._inv_new("p1", {})
+        inv["dead_uids"].add("uid-gone")
+        routing = routing_of(routed_service("p1", "engine", rev, "uid-gone"))
+        observe_ticks(inv, pods, run.INV_SUSTAIN_B_MISSING - 1, routing=routing)
+        self.assertNotIn(("B", "missing-endpoint", "p1-engine-rev-" + rev), inv["viol"])
+        observe_ticks(inv, pods, 1, start=99.0, routing=routing)
+        self.assertIn(("B", "missing-endpoint", "p1-engine-rev-" + rev), inv["viol"])
+        self.assertIn(("B", "stale-endpoint", "p1-engine-rev-" + rev), inv["viol"])
+        self.assertTrue(inv["b_seen"])
+
+    def test_a_member_in_the_ready_endpoints_holds(self):
+        rev = "a1b2c3d4"
+        pods = {"engine-0": watcher_record(pod_object("engine-0", "engine", 0, rev, "img:1", "v1"))}
+        inv = run._inv_new("p1", {})
+        observe_ticks(inv, pods, run.INV_SUSTAIN_B_MISSING + 1,
+                      routing=routing_of(routed_service("p1", "engine", rev, "uid-engine-0")))
+        self.assertEqual({}, inv["viol"])
+        self.assertTrue(inv["b_seen"])
+
+
+def ir_item(case_id, component, rows, *, current, update=None):
+    """An InferenceReplica as the poller lists it: per-Instance rows with
+    their phase and running revision (ControllerRevision names), plus the
+    IR's current and update revisions."""
+    update = update or current
+    return {"spec": {"component": component},
+            "status": {"currentRevision": f"{case_id}-{component}-{current}",
+                       "updateRevision": f"{case_id}-{component}-{update}",
+                       "instanceStatuses": [
+                           {"index": index, "phase": phase,
+                            "runningRevision": f"{case_id}-{component}-{running}", "podCount": 1}
+                           for index, phase, running in rows]}}
+
+
+class ReadyServingInvariantTest(unittest.TestCase):
+    """Invariant G: an Instance the IR reports Ready, with its pod set Ready,
+    has a pod in rotation — serving gate True and a Ready endpoint of a
+    routed Service that selects it."""
+
+    REV = "a1b2c3d4"
+
+    def _pods(self, serving=True, ready=True):
+        return {"engine-0": watcher_record(pod_object("engine-0", "engine", 0, self.REV, "img:1", "v1",
+                                                      serving=serving, ready=ready))}
+
+    def _ir(self, phase="Ready"):
+        return [ir_item("p1", "engine", [(0, phase, self.REV)], current=self.REV)]
+
+    def _routing(self, *uids, ready=True):
+        return routing_of(routed_service("p1", "engine", self.REV, *uids, ready=ready))
+
+    def test_ready_instance_whose_pod_holds_the_gate_closed_is_a_violation(self):
+        inv = run._inv_new("p1", {})
+        snap = dict(ir_items=self._ir(), routing=self._routing())
+        observe_ticks(inv, self._pods(serving=False), run.INV_SUSTAIN_SETTLE - 1, **snap)
+        self.assertEqual({}, inv["viol"], "the settle window has not elapsed")
+        observe_ticks(inv, self._pods(serving=False), 1, start=99.0, **snap)
+        key = ("G", "ready-not-serving", "engine", "0")
+        self.assertEqual([key], list(inv["viol"]))
+        self.assertIn(f"engine/0 Phase=Ready with all 1 pod(s) Ready, but no pod has the {run.SERVING_COND} gate True",
+                      inv["viol"][key]["detail"])
+        checks = []
+        self.assertEqual("FAIL", run.invariant_checks(inv, "PASS", [], checks))
+        self.assertTrue(any("invariant G violated (ready-not-serving)" in c for c in checks), checks)
+
+    def test_serving_pod_absent_from_its_routed_service_is_a_violation(self):
+        inv = run._inv_new("p1", {})
+        observe_ticks(inv, self._pods(), run.INV_SUSTAIN_SETTLE,
+                      ir_items=self._ir(), routing=self._routing("uid-engine-0", ready=False))
+        detail = inv["viol"][("G", "ready-not-serving", "engine", "0")]["detail"]
+        self.assertIn("pod(s) engine-0 serving but not a Ready endpoint of any routed Service", detail)
+
+    def test_a_pod_in_rotation_holds_and_the_verdict_says_so(self):
+        inv = run._inv_new("p1", {})
+        observe_ticks(inv, self._pods(), run.INV_SUSTAIN_SETTLE + 1,
+                      ir_items=self._ir(), routing=self._routing("uid-engine-0"))
+        self.assertEqual({}, inv["viol"])
+        self.assertTrue(inv["g_seen"] and inv["g_routing_seen"])
+        checks = []
+        self.assertEqual("PASS", run.invariant_checks(inv, "PASS", [], checks))
+        self.assertTrue(any("continuous invariants held" in c and "G" in c for c in checks), checks)
+
+    def test_without_any_routed_service_only_the_gate_is_asserted(self):
+        inv = run._inv_new("p1", {})
+        observe_ticks(inv, self._pods(), run.INV_SUSTAIN_SETTLE + 1, ir_items=self._ir(), routing=([], []))
+        self.assertEqual({}, inv["viol"])
+        checks = []
+        run.invariant_checks(inv, "PASS", [], checks)
+        self.assertTrue(any("invariant G: no routed Service observed" in c for c in checks), checks)
+        inv = run._inv_new("p1", {})
+        observe_ticks(inv, self._pods(serving=False), run.INV_SUSTAIN_SETTLE, ir_items=self._ir(), routing=None)
+        self.assertIn(("G", "ready-not-serving", "engine", "0"), inv["viol"])
+
+    def test_instances_not_reported_ready_or_not_fully_ready_are_not_its_claim(self):
+        inv = run._inv_new("p1", {})
+        observe_ticks(inv, self._pods(serving=False), run.INV_SUSTAIN_SETTLE,
+                      ir_items=self._ir(phase="Updating"), routing=self._routing())
+        observe_ticks(inv, self._pods(serving=False, ready=False), run.INV_SUSTAIN_SETTLE, start=500.0,
+                      ir_items=self._ir(), routing=self._routing())
+        observe_ticks(inv, self._pods(serving=False), run.INV_SUSTAIN_SETTLE, start=1000.0,
+                      pods_per_inst={"engine": 2}, ir_items=self._ir(), routing=self._routing())
+        self.assertEqual({}, inv["viol"])
+        self.assertFalse(inv["g_seen"])
+        checks = []
+        run.invariant_checks(inv, "PASS", [], checks)
+        self.assertTrue(any("invariant G (ready-serving)" in c and "vacuous" in c for c in checks), checks)
+
+    def test_a_gang_is_in_rotation_through_its_leader(self):
+        pods = {"engine-0-leader": watcher_record(pod_object("engine-0-leader", "engine", 0, self.REV, "l:1", "v1", runner="leader")),
+                "engine-0-worker": watcher_record(pod_object("engine-0-worker", "engine", 0, self.REV, "w:1", "v1", runner="worker"))}
+        inv = run._inv_new("p1", {})
+        observe_ticks(inv, pods, run.INV_SUSTAIN_SETTLE + 1, pods_per_inst={"engine": 2}, ir_items=self._ir(),
+                      routing=routing_of(routed_service("p1", "engine", self.REV, "uid-engine-0-leader", runner="leader")))
+        self.assertEqual({}, inv["viol"])
+        self.assertTrue(inv["g_seen"])
+
+    def test_settle_window_resets_when_the_gate_opens(self):
+        inv = run._inv_new("p1", {})
+        snap = dict(ir_items=self._ir(), routing=self._routing("uid-engine-0"))
+        t = observe_ticks(inv, self._pods(serving=False), run.INV_SUSTAIN_SETTLE - 1, **snap)
+        t = observe_ticks(inv, self._pods(), 1, start=t, **snap)
+        observe_ticks(inv, self._pods(serving=False), run.INV_SUSTAIN_SETTLE - 1, start=t, **snap)
+        self.assertEqual({}, inv["viol"])
+
+    def test_parked_by_inv_xfail_records_the_tracked_bug(self):
+        hdr = {"notimpl": 1, "issue": 4242, "inv_xfail": "G"}
+        inv = run._inv_new("p1", hdr)
+        observe_ticks(inv, self._pods(serving=False), run.INV_SUSTAIN_SETTLE, ir_items=self._ir(), routing=self._routing())
+        checks = []
+        verdict = run.invariant_checks(inv, run.soften_expected_fail(hdr, "PASS", checks), [], checks)
+        self.assertEqual("XFAIL (known bug: #4242)", verdict)
+        self.assertTrue(batch.is_green(verdict))
+        hdr = {"notimpl": 1, "issue": 4242, "inv_xfail": "F"}
+        inv = run._inv_new("p1", hdr)
+        observe_ticks(inv, self._pods(serving=False), run.INV_SUSTAIN_SETTLE, ir_items=self._ir(), routing=self._routing())
+        self.assertEqual("FAIL", run.invariant_checks(inv, run.soften_expected_fail(hdr, "PASS", []), [], []))
+
+    def test_not_evaluated_when_the_case_waives_it(self):
+        inv = run._inv_new("p1", {"inv_off": "G"})
+        self.assertFalse(inv["g_on"])
+        observe_ticks(inv, self._pods(serving=False), run.INV_SUSTAIN_SETTLE, ir_items=self._ir(), routing=self._routing())
+        self.assertEqual({}, inv["viol"])
+        for knob in ("inv_off", "inv_xfail"):
+            self.assertTrue(run.HDR_VALIDATORS[knob]("G"))
+
+
+def isvc_rollout_status(component, target, *, outcome="Completed", phase="Stable", open_run=False):
+    """An ISVC status as the poller reads it: the run record (bare revision
+    hashes) and the Component's rollout phase."""
+    targets = [{"component": component, "revision": target}]
+    rollout = {"lastRun": {"outcome": outcome, "targetRevisions": targets}}
+    if open_run:
+        rollout["activeRun"] = {"runID": "r2", "targetRevisions": targets}
+    components = {component: {"rolloutPhase": phase}} if phase else {}
+    return {"rollout": rollout, "components": components}
+
+
+class SupersededRevisionInvariantTest(unittest.TestCase):
+    """Invariant H: once a Component's rollout reports done, every Instance
+    row and every live pod of it is on the revision the rollout targeted."""
+
+    OLD, NEW = "a1b2c3d4", "e5f6a7b8"
+
+    def _pods(self, straggler=True):
+        """Two Instances on the new revision, or one left on the old one; each
+        pod runs the template of the revision it is labelled with, so F stays
+        quiet and what fires is H."""
+        second = (self.OLD, "img:1", "v1") if straggler else (self.NEW, "img:2", "v2")
+        return {"engine-0": watcher_record(pod_object("engine-0", "engine", 0, self.NEW, "img:2", "v2")),
+                "engine-1": watcher_record(pod_object("engine-1", "engine", 1, *second))}
+
+    def _ir(self, straggler=True, current=None):
+        rows = [(0, "Ready", self.NEW), (1, "Ready", self.OLD if straggler else self.NEW)]
+        return [ir_item("p1", "engine", rows, current=current or self.NEW, update=self.NEW)]
+
+    def test_straggler_after_a_completed_stable_run_is_a_violation(self):
+        inv = run._inv_new("p1", {})
+        snap = dict(ir_items=self._ir(), isvc_status=isvc_rollout_status("engine", self.NEW))
+        observe_ticks(inv, self._pods(), run.INV_SUSTAIN_SETTLE - 1, **snap)
+        self.assertEqual({}, inv["viol"], "the settle window has not elapsed")
+        observe_ticks(inv, self._pods(), 1, start=99.0, **snap)
+        row_key = ("H", "superseded-instance", "engine", "1")
+        pod_key = ("H", "superseded-pod", "engine", "engine-1")
+        self.assertEqual({row_key, pod_key}, set(inv["viol"]))
+        self.assertIn(f"engine/1 runs revision {self.OLD} after the rollout reported done on {self.NEW}",
+                      inv["viol"][row_key]["detail"])
+        self.assertIn(f"pod engine-1 carries {run.REV_LABEL}={self.OLD} after the rollout reported done on {self.NEW}",
+                      inv["viol"][pod_key]["detail"])
+        checks = []
+        self.assertEqual("FAIL", run.invariant_checks(inv, "PASS", [], checks))
+        self.assertTrue(any("invariant H violated (superseded-instance)" in c for c in checks), checks)
+
+    def test_a_rollout_that_has_not_reported_done_is_outside_its_claim(self):
+        for status in (isvc_rollout_status("engine", self.NEW, open_run=True),
+                       isvc_rollout_status("engine", self.NEW, outcome="RolledBack", phase="RolledBack"),
+                       isvc_rollout_status("engine", self.NEW, phase="Paused"),
+                       isvc_rollout_status("engine", "0badbad0")):   # the run record names another target
+            inv = run._inv_new("p1", {})
+            observe_ticks(inv, self._pods(), run.INV_SUSTAIN_SETTLE + 1, ir_items=self._ir(), isvc_status=status)
+            self.assertEqual({}, inv["viol"], status)
+            self.assertFalse(inv["h_seen"], status)
+
+    def test_a_component_outside_the_run_model_is_done_when_its_ir_converges(self):
+        inv = run._inv_new("p1", {})
+        observe_ticks(inv, self._pods(), run.INV_SUSTAIN_SETTLE + 1, ir_items=self._ir(current=self.OLD), isvc_status={})
+        self.assertEqual({}, inv["viol"], "currentRevision still trails updateRevision")
+        observe_ticks(inv, self._pods(), run.INV_SUSTAIN_SETTLE, start=500.0, ir_items=self._ir(), isvc_status={})
+        self.assertIn(("H", "superseded-instance", "engine", "1"), inv["viol"])
+
+    def test_a_converged_fleet_holds_and_the_verdict_says_so(self):
+        inv = run._inv_new("p1", {})
+        observe_ticks(inv, self._pods(straggler=False), run.INV_SUSTAIN_SETTLE + 1,
+                      ir_items=self._ir(straggler=False), isvc_status=isvc_rollout_status("engine", self.NEW))
+        self.assertEqual({}, inv["viol"])
+        self.assertTrue(inv["h_seen"])
+        checks = []
+        self.assertEqual("PASS", run.invariant_checks(inv, "PASS", [], checks))
+        self.assertTrue(any("continuous invariants held" in c and "H" in c for c in checks), checks)
+
+    def test_settle_window_resets_when_the_straggler_rolls(self):
+        inv = run._inv_new("p1", {})
+        status = isvc_rollout_status("engine", self.NEW)
+        t = observe_ticks(inv, self._pods(), run.INV_SUSTAIN_SETTLE - 1, ir_items=self._ir(), isvc_status=status)
+        t = observe_ticks(inv, self._pods(straggler=False), 1, start=t, ir_items=self._ir(straggler=False), isvc_status=status)
+        observe_ticks(inv, self._pods(), run.INV_SUSTAIN_SETTLE - 1, start=t, ir_items=self._ir(), isvc_status=status)
+        self.assertEqual({}, inv["viol"])
+
+    def test_parked_by_inv_xfail_records_the_tracked_bug(self):
+        hdr = {"notimpl": 1, "issue": 4242, "inv_xfail": "H"}
+        inv = run._inv_new("p1", hdr)
+        observe_ticks(inv, self._pods(), run.INV_SUSTAIN_SETTLE, ir_items=self._ir(), isvc_status=isvc_rollout_status("engine", self.NEW))
+        checks = []
+        verdict = run.invariant_checks(inv, run.soften_expected_fail(hdr, "PASS", checks), [], checks)
+        self.assertEqual("XFAIL (known bug: #4242)", verdict)
+        self.assertTrue(batch.is_green(verdict))
+        hdr = {"notimpl": 1, "issue": 4242, "inv_xfail": "G"}
+        inv = run._inv_new("p1", hdr)
+        observe_ticks(inv, self._pods(), run.INV_SUSTAIN_SETTLE, ir_items=self._ir(), isvc_status=isvc_rollout_status("engine", self.NEW))
+        self.assertEqual("FAIL", run.invariant_checks(inv, run.soften_expected_fail(hdr, "PASS", []), [], []))
+
+    def test_not_evaluated_under_the_partition_verb_or_when_waived(self):
+        for hdr in ({"mode": "partition"}, {"inv_off": "H"}):
+            inv = run._inv_new("p1", hdr)
+            self.assertFalse(inv["h_on"], hdr)
+            observe_ticks(inv, self._pods(), run.INV_SUSTAIN_SETTLE, ir_items=self._ir(),
+                          isvc_status=isvc_rollout_status("engine", self.NEW))
+            self.assertEqual({}, inv["viol"], hdr)
+        self.assertTrue(run._inv_new("p1", {"mode": "rollout"})["h_on"])
+        for knob in ("inv_off", "inv_xfail"):
+            self.assertTrue(run.HDR_VALIDATORS[knob]("H"))
+
+
+class InvariantTickTest(unittest.TestCase):
+    """The tick reads each snapshot once through kubectl and hands them to
+    the pure observation; the revision list is read only while a live pod
+    carries a hash the ledger has not read, and a tick inside INV_TICK_S is
+    a no-op."""
+
+    REV = "a1b2c3d4"
+
+    def _fake_kubectl(self, calls):
+        case = "p1"
+        objects = {
+            "inferencereplicas": [ir_item(case, "engine", [(0, "Ready", self.REV)], current=self.REV)],
+            "svc": routing_of(routed_service(case, "engine", self.REV, "uid-engine-0"))[0],
+            "endpointslices": routing_of(routed_service(case, "engine", self.REV, "uid-engine-0"))[1],
+            "controllerrevisions": [{"metadata": {"name": f"{case}-engine-{self.REV}"},
+                                     "data": revision_payload("img:1", "v1")}],
+        }
+
+        def kubectl(*args, **_kw):
+            calls.append(args)
+            kind = args[args.index("get") + 1]
+            if kind == "isvc":
+                body = {"status": isvc_rollout_status("engine", self.REV)}
+            else:
+                body = {"items": objects[kind]}
+            return subprocess.CompletedProcess(args, 0, stdout=json.dumps(body), stderr="")
+        return kubectl
+
+    def test_one_tick_reads_every_snapshot_and_learns_the_revision(self):
+        calls = []
+        pods = {"engine-0": watcher_record(pod_object("engine-0", "engine", 0, self.REV, "img:1", "v1"))}
+        inv = run._inv_new("p1", {})
+        with mock.patch.object(run, "kubectl", self._fake_kubectl(calls)), \
+                mock.patch.object(run.time, "time", side_effect=[100.0, 101.0, 100.0 + run.INV_TICK_S]):
+            run._inv_tick(inv, pods, {"engine": 1})
+            first = [c[c.index("get") + 1] for c in calls]
+            run._inv_tick(inv, pods, {"engine": 1})      # inside INV_TICK_S: no reads
+            self.assertEqual(len(first), len(calls))
+            run._inv_tick(inv, pods, {"engine": 1})      # the ledger is read: no revision list
+        self.assertEqual(["inferencereplicas", "svc", "endpointslices", "isvc", "controllerrevisions"], first)
+        self.assertNotIn("controllerrevisions", [c[c.index("get") + 1] for c in calls[len(first):]])
+        self.assertEqual("revision", inv["revisions"][(self.REV, "pod")]["src"])
+        self.assertEqual({}, inv["viol"])
+        self.assertTrue(inv["ir_seen"] and inv["b_seen"] and inv["g_seen"] and inv["h_seen"])
+
+
+class LabelTruthInvariantTest(unittest.TestCase):
+    """Invariant F: a pod runs the template its revision-hash label names,
+    read against the ControllerRevision of that hash or, until one is
+    visible, against the first pod seen under the label."""
+
+    OLD, NEW = "a1b2c3d4", "e5f6a7b8"
+
+    def _fleet(self, liar=True):
+        honest = watcher_record(pod_object("engine-0", "engine", 0, self.OLD, "img:1", "v1"))
+        rebuilt = watcher_record(pod_object("engine-1", "engine", 1, self.OLD if liar else self.NEW,
+                                            "img:2", "v2"))
+        return {"engine-0": honest, "engine-1": rebuilt}
+
+    def _revisions(self):
+        return {self.OLD: revision_payload("img:1", "v1"), self.NEW: revision_payload("img:2", "v2")}
+
+    def test_pod_rebuilt_from_a_newer_template_under_the_old_label_is_a_violation(self):
+        inv = run._inv_new("p1", {})
+        pods = self._fleet()
+        observe_ticks(inv, pods, run.INV_SUSTAIN_SETTLE - 1, revisions=self._revisions())
+        self.assertEqual({}, inv["viol"], "the settle window has not elapsed")
+        observe_ticks(inv, pods, 1, start=99.0)
+        key = ("F", "label-template-mismatch", "engine", "engine-1")
+        self.assertEqual([key], list(inv["viol"]))
+        detail = inv["viol"][key]["detail"]
+        self.assertIn(f"pod engine-1 carries {run.REV_LABEL}={self.OLD}", detail)
+        self.assertIn("from its ControllerRevision", detail)
+        self.assertIn("image: revision 'img:1' vs pod 'img:2'", detail)
+        self.assertIn(f"annotation {run.TRIGGER_ANNO}: revision 'v1' vs pod 'v2'", detail)
+        checks = []
+        self.assertEqual("FAIL", run.invariant_checks(inv, "PASS", [], checks))
+        self.assertTrue(any("invariant F violated (label-template-mismatch)" in c for c in checks), checks)
+
+    def test_an_honest_fleet_holds_and_the_verdict_says_so(self):
+        inv = run._inv_new("p1", {})
+        observe_ticks(inv, self._fleet(liar=False), run.INV_SUSTAIN_SETTLE + 1, revisions=self._revisions())
+        self.assertEqual({}, inv["viol"])
+        checks = []
+        self.assertEqual("PASS", run.invariant_checks(inv, "PASS", [], checks))
+        self.assertTrue(any("continuous invariants held" in c and "F" in c for c in checks), checks)
+
+    def test_without_a_revision_the_first_pod_under_a_label_is_the_reference(self):
+        inv = run._inv_new("p1", {})
+        pods = self._fleet()
+        observe_ticks(inv, pods, run.INV_SUSTAIN_SETTLE, revisions={})
+        key = ("F", "label-template-mismatch", "engine", "engine-1")
+        self.assertIn(key, inv["viol"])
+        self.assertIn("the template the first pod engine-0 ran under that label", inv["viol"][key]["detail"])
+
+    def test_a_revision_that_appears_later_replaces_the_first_pod_reference(self):
+        inv = run._inv_new("p1", {})
+        pods = self._fleet(liar=False)
+        observe_ticks(inv, pods, 1, revisions={})
+        self.assertEqual("first pod engine-0", inv["revisions"][(self.OLD, "pod")]["src"])
+        self.assertTrue(run._inv_revisions_wanted(inv, pods))
+        observe_ticks(inv, pods, 1, start=5.0, revisions=self._revisions())
+        self.assertEqual("revision", inv["revisions"][(self.OLD, "pod")]["src"])
+        self.assertFalse(run._inv_revisions_wanted(inv, pods))
+
+    def test_re_listing_a_missing_revision_is_bounded(self):
+        inv = run._inv_new("p1", {})
+        pods = self._fleet(liar=False)
+        for i in range(run.INV_SUSTAIN_SETTLE):
+            self.assertTrue(run._inv_revisions_wanted(inv, pods))
+            observe_ticks(inv, pods, 1, start=5.0 * i, revisions={})
+        self.assertFalse(run._inv_revisions_wanted(inv, pods))
+
+    def test_settle_window_resets_on_a_clean_tick(self):
+        inv = run._inv_new("p1", {})
+        liar, honest = self._fleet(), self._fleet(liar=False)
+        t = observe_ticks(inv, liar, run.INV_SUSTAIN_SETTLE - 1, revisions=self._revisions())
+        t = observe_ticks(inv, honest, 1, start=t)
+        observe_ticks(inv, liar, run.INV_SUSTAIN_SETTLE - 1, start=t)
+        self.assertEqual({}, inv["viol"])
+
+    def test_env_and_request_differences_count_images_alone_do_not_decide(self):
+        inv = run._inv_new("p1", {})
+        pods = {"engine-0": watcher_record(pod_object("engine-0", "engine", 0, self.OLD, "img:1", "v1",
+                                                      test_rev="v2", cpu="55m"))}
+        observe_ticks(inv, pods, run.INV_SUSTAIN_SETTLE, revisions=self._revisions())
+        detail = inv["viol"][("F", "label-template-mismatch", "engine", "engine-0")]["detail"]
+        self.assertIn("env TEST_REV: revision 'v1' vs pod 'v2'", detail)
+        self.assertIn("requests.cpu: revision 50 vs pod 55", detail)
+
+    def test_renderer_env_sidecars_and_valuefrom_entries_are_outside_the_fingerprint(self):
+        obj = pod_object("engine-0", "engine", 0, self.OLD, "img:1", "v1")
+        obj["spec"]["containers"].append({"name": "sidecar", "image": "side:1"})
+        obj["spec"]["containers"][0]["env"].append({"name": "INJECTED", "value": "x"})
+        inv = run._inv_new("p1", {})
+        observe_ticks(inv, {"engine-0": watcher_record(obj)}, run.INV_SUSTAIN_SETTLE, revisions=self._revisions())
+        self.assertEqual({}, inv["viol"])
+
+    def test_worker_pods_read_the_worker_template(self):
+        revisions = {self.OLD: revision_payload("leader:1", "v1", worker_image="worker:1")}
+        pods = {"engine-0-leader": watcher_record(pod_object("engine-0-leader", "engine", 0, self.OLD, "leader:1", "v1", runner="leader")),
+                "engine-0-worker": watcher_record(pod_object("engine-0-worker", "engine", 0, self.OLD, "worker:1", "v1", runner="worker"))}
+        inv = run._inv_new("p1", {})
+        observe_ticks(inv, pods, run.INV_SUSTAIN_SETTLE, pods_per_inst={"engine": 2}, revisions=revisions)
+        self.assertEqual({}, inv["viol"])
+        self.assertTrue(inv["f_seen"])
+
+    def test_parked_by_inv_xfail_records_the_tracked_bug(self):
+        hdr = {"notimpl": 1, "issue": 4242, "inv_xfail": "F"}
+        inv = run._inv_new("p1", hdr)
+        observe_ticks(inv, self._fleet(), run.INV_SUSTAIN_SETTLE, revisions=self._revisions())
+        checks, notes = [], []
+        verdict = run.invariant_checks(inv, run.soften_expected_fail(hdr, "PASS", checks), notes, checks)
+        self.assertEqual("XFAIL (known bug: #4242)", verdict)
+        self.assertTrue(batch.is_green(verdict))
+        hdr = {"notimpl": 1, "issue": 4242, "inv_xfail": "A"}
+        inv = run._inv_new("p1", hdr)
+        observe_ticks(inv, self._fleet(), run.INV_SUSTAIN_SETTLE, revisions=self._revisions())
+        self.assertEqual("FAIL", run.invariant_checks(inv, run.soften_expected_fail(hdr, "PASS", []), [], []))
+
+    def test_not_evaluated_when_the_case_waives_it(self):
+        inv = run._inv_new("p1", {"inv_off": "F"})
+        self.assertFalse(inv["f_on"])
+        observe_ticks(inv, self._fleet(), run.INV_SUSTAIN_SETTLE, revisions=self._revisions())
+        self.assertEqual({}, inv["viol"])
+        checks = []
+        run.invariant_checks(inv, "PASS", [], checks)
+        self.assertTrue(any("disabled by header inv_off=F" in c for c in checks), checks)
+
+    def test_header_grammar_knows_the_class(self):
+        for knob in ("inv_off", "inv_xfail"):
+            self.assertTrue(run.HDR_VALIDATORS[knob]("F"))
+            self.assertTrue(run.HDR_VALIDATORS[knob]("all"))
+            self.assertFalse(run.HDR_VALIDATORS[knob]("E"), "the cohort-ratio observer is informational")
+            self.assertFalse(run.HDR_VALIDATORS[knob]("Z"))
+
+    def test_settle_window_scales_with_the_timeout_multiplier(self):
+        self.assertEqual(run.INV_SETTLE_S, 15.0 * run.TIMEOUT_MULT)
+        self.assertGreaterEqual((run.INV_SUSTAIN_SETTLE - 1) * run.INV_TICK_S, run.INV_SETTLE_S)
 
 
 if __name__ == "__main__":

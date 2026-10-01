@@ -31,7 +31,11 @@ Architecture:
      endpoint of its per-revision routed Service and no endpoint references a
      deleted pod; (C) pair-alive (armed only by mode=pairing for a non-empty→
      non-empty protocol transition): whenever both engine and decoder serve, a
-     pairable pair exists. Sustained violations FAIL the verdict (INV_*).
+     pairable pair exists; (F) label-truth: every pod runs the template its
+     revision-hash label names; (G) ready-serving: an Instance the IR reports
+     Ready has a pod in rotation; (H) superseded-revision: once a rollout
+     reports done, no Instance runs another revision. Sustained violations
+     FAIL the verdict (INV_*).
   6. Optional fault injection (header fault=<kind>:<param>): quota:<n> (derived
      ResourceQuota admitting exactly +n case-shaped pods), podkill:<phase>,
      ctrlrestart:<phase> (gated on OME_TEST_ALLOW_CTRL_RESTART=1), cordon:source,
@@ -76,6 +80,7 @@ Update detection per strategy:
 """
 import datetime
 import json
+import math
 import os
 import queue
 import re
@@ -128,14 +133,16 @@ FLOOR_SUSTAIN_S = 5.0  # capacity-floor debounce (mirrors RATIO_SUSTAIN_S): the 
 TEARDOWN_BASE_S, TEARDOWN_PER_POD_S = 120, 5   # post-delete teardown-convergence budget
 TEARDOWN_POLL_S = 5.0
 
-# ── Continuous invariants (status-truth + endpoints-membership) ──────────────
+# ── Continuous invariants (status-truth + endpoints-membership + …) ─────────
 # Polled for the WHOLE duration of every case, in every mode. API-load bound
-# (shared cluster): the poller adds at most 3 label-selected namespaced GETs
-# per tick per running case — one InferenceReplica list (invariant A), one
-# Service list + one EndpointSlice list (invariant B). Pod state is reused
-# from the watcher (no extra pod reads). At INV_TICK_S=5 that is 0.6 req/s
-# per case, ~5 req/s at batch conc-8 — the same order as the existing status
-# polls (canary 0.5/s, migrate ledger 0.2/s).
+# (shared cluster): the poller reads at most 4 label-selected namespaced GETs
+# per tick per running case — one InferenceReplica list (invariants A, G, H),
+# one Service list + one EndpointSlice list (B, G), one ISVC status (H) — plus
+# a ControllerRevision list only while a live pod carries a revision hash the
+# label-truth ledger (F) has not read yet. Pod state is reused from the
+# watcher (no extra pod reads). At INV_TICK_S=5 that is 0.8 req/s per case,
+# ~6.5 req/s at batch conc-8 — the same order as the existing status polls
+# (canary 0.5/s, migrate ledger 0.2/s).
 INV_TICK_S = 5.0
 INV_SUSTAIN_D = 6    # gang-scheduling ticks (30 s): a gang half-bound this long is not still arriving
 SCHED_NAME = os.environ.get("OME_EVAL_SCHEDULER", "").strip()   # non-empty: invariant D asserts gang scheduling
@@ -164,6 +171,10 @@ INV_SUSTAIN_C = 2
 # that would read as a lie if sampled mid-transition.
 INV_TRANSIENT_PHASES = {"Pending", "Creating", "Updating", "Restarting", "Migrating", "Deleting"}
 SERVING_COND = "ome.io/serving"   # controller-managed pod readiness gate (query.ServingConditionType)
+# The invariant classes a header may waive (inv_off) or park (inv_xfail). E,
+# the cohort-ratio observer, is informational and never fails, so it is not
+# a class here.
+INV_CLASSES = {"A", "B", "C", "D", "F", "G", "H"}
 
 # Dynamic timeouts: real kubelet + a 15s artificial startup sleep per pod, and
 # surge=1 rolls serialize. Static 240s was too tight for N=8 and for two-member
@@ -189,6 +200,14 @@ MAX_BUDGET_S = int(1800 * TIMEOUT_MULT)
 # case must survive before the lift step.
 PAUSE_PROJECT_S = int(15 * TIMEOUT_MULT)
 KILL_PAUSE_HOLD_S = int(60 * TIMEOUT_MULT)
+# Settle window shared by the invariants whose condition the controller may
+# pass through briefly on its way to the truth — F (an in-place update patches
+# images, labels and annotations in separate writes), G (the serving flip and
+# endpoint propagation after a pod turns Ready), H (the run close and the next
+# render). A condition fires only once observed on consecutive ticks spanning
+# at least INV_SETTLE_S, which scales with the cluster budget like every wait.
+INV_SETTLE_S = 15.0 * TIMEOUT_MULT
+INV_SUSTAIN_SETTLE = 1 + math.ceil(INV_SETTLE_S / INV_TICK_S)
 # Post-Completed source-drain grace. A source can't drain until its surge
 # replacement is Ready (~one pod-init cycle), and multi-instance migrations
 # SERIALIZE on a surge budget of 1 (reusing freed indices), so the drain is
@@ -820,6 +839,21 @@ def teardown_check(case_id, total_pods, verdict, notes, checks):
 #                         both engine and decoder serve, a pairable pair must
 #                         exist; the gate's no-pair and 1×1-wall escapes are
 #                         exempt.
+#   F label-truth       — every live pod runs the template its revision-hash
+#                         label names: images, the trigger annotation, literal
+#                         env and requests match the ControllerRevision of
+#                         that hash (or, until one is visible, the first pod
+#                         seen under the hash).
+#   G ready-serving     — an Instance the IR reports Ready, whose full pod set
+#                         the watcher sees Ready, has a pod in rotation: the
+#                         serving gate True and a Ready endpoint of a routed
+#                         Service that selects it.
+#   H superseded-revision — once a Component's rollout reports done (run closed
+#                         Completed with the phase at Stable, or for a Component
+#                         outside the run model the IR's currentRevision at
+#                         updateRevision), every Instance row and every live pod
+#                         is on that revision. Not evaluated under mode=partition,
+#                         whose verdict owns the staged split.
 # A violation must hold for its sustain count of CONSECUTIVE ticks to fire
 # (see the INV_* constants for the carve-out arithmetic); fired violations
 # dedup per (invariant, kind, subject) with first/last timestamps and an
@@ -846,9 +880,82 @@ def _pod_placement(obj, labels):
     }
 
 
+def _pod_template(obj):
+    """Template-derived field every watcher record carries, whichever loop
+    builds it: the fingerprint of what the pod actually runs. Invariant F
+    compares it with the template the pod's revision-hash label names; a
+    record without it is never evaluated."""
+    meta = obj.get("metadata") or {}
+    return {"tmpl": _template_fingerprint(obj.get("spec") or {}, meta.get("annotations") or {})}
+
+
+def _template_fingerprint(pod_spec, annotations):
+    """The parts of a pod template a revision pins and a rendered pod keeps
+    verbatim: every container's image, the rollout trigger annotation, each
+    container's literal env values and resource requests. Env the renderer
+    owns (OME_*) and anything admission adds are outside the comparison,
+    which reads template-is-a-subset-of-pod. An unnamed template container
+    is the main container, which is what the renderer names it."""
+    images, env, requests = {}, {}, {}
+    for ctn in list(pod_spec.get("initContainers") or []) + list(pod_spec.get("containers") or []):
+        name = ctn.get("name") or MAIN_CONTAINER
+        images[name] = ctn.get("image") or ""
+        env[name] = {e["name"]: str(e.get("value", "")) for e in (ctn.get("env") or [])
+                     if isinstance(e, dict) and e.get("name") and "valueFrom" not in e
+                     and not str(e["name"]).startswith("OME_")}
+        reqs = {}
+        for res, val in (((ctn.get("resources") or {}).get("requests")) or {}).items():
+            try:
+                reqs[res] = _qty(res, val)
+            except (TypeError, ValueError):
+                continue
+        requests[name] = reqs
+    return {"images": images, "anno": str(annotations.get(TRIGGER_ANNO, "") or ""),
+            "env": env, "requests": requests}
+
+
+def _template_mismatch(expected, actual):
+    """Where a rendered pod departs from its revision's template, as
+    'field: revision value vs pod value' lines; empty when the pod runs the
+    template. Only the template's own entries are compared."""
+    diffs = []
+    if expected["anno"] != actual["anno"]:
+        diffs.append(f"annotation {TRIGGER_ANNO}: revision {expected['anno']!r} vs pod {actual['anno']!r}")
+    for name, image in expected["images"].items():
+        got = actual["images"].get(name)
+        if got is None:
+            diffs.append(f"container {name}: in the revision, not on the pod")
+        elif got != image:
+            diffs.append(f"container {name} image: revision {image!r} vs pod {got!r}")
+    for name, env in expected["env"].items():
+        pod_env = actual["env"].get(name) or {}
+        for var, val in env.items():
+            if pod_env.get(var) != val:
+                diffs.append(f"container {name} env {var}: revision {val!r} vs pod {pod_env.get(var)!r}")
+    for name, reqs in expected["requests"].items():
+        pod_reqs = actual["requests"].get(name) or {}
+        for res, val in reqs.items():
+            if pod_reqs.get(res) != val:
+                diffs.append(f"container {name} requests.{res}: revision {val} vs pod {pod_reqs.get(res)}")
+    return diffs
+
+
+def _rev_hash(name):
+    """The hash segment of a revision reference — a ControllerRevision name
+    (`<isvc>-<component>-<hash>`) or an already bare hash."""
+    return (name or "").rsplit("-", 1)[-1]
+
+
+def _pod_role(p):
+    """Which stored template a pod renders from: workers the worker template,
+    every other runner the pod template."""
+    return "worker" if p.get("runner") == "worker" else "pod"
+
+
 def _inv_new(case_id, hdr):
-    """Fresh invariant-poller state. Header `inv_off=A|B|C|D|all` (which requires
-    an adjacent '# reason:' comment — enforced by validate-only) disables checks.
+    """Fresh invariant-poller state. Header `inv_off=<class>|all` over
+    INV_CLASSES (which requires an adjacent '# reason:' comment — enforced by
+    validate-only) disables checks.
     Invariant C (pair-alive) additionally requires arming: a pairing-mode
     handler sets inv["pairing"] at trigger time for a non-empty→non-empty
     protocol transition; without that it never evaluates."""
@@ -859,6 +966,22 @@ def _inv_new(case_id, hdr):
         "a_on": off not in ("A", "all"),
         "b_on": off not in ("B", "all"),
         "c_on": off not in ("C", "all"),
+        # Invariant F (label truth): (hash, role) → {"fp": template fingerprint,
+        # "src": "revision" | "first pod <name>"}, and per hash how many
+        # ControllerRevision lists lacked it (re-listing is bounded).
+        "f_on": off not in ("F", "all"),
+        "f_seen": False,        # ≥1 pod compared against its revision's template
+        "revisions": {},
+        "rev_tries": {},
+        # Invariant G (ready implies serving).
+        "g_on": off not in ("G", "all"),
+        "g_seen": False,          # ≥1 Ready Instance with its pod set Ready was evaluated
+        "g_routing_seen": False,  # ≥1 routed Service observed: the endpoint half asserted
+        # Invariant H (no superseded revision once the rollout reports done).
+        # The partition verb's verdict owns its staged split — k Instances
+        # rest on the old revision by design — so H is not evaluated there.
+        "h_on": off not in ("H", "all") and str(hdr.get("mode") or "") != "partition",
+        "h_seen": False,          # ≥1 Component reporting its rollout done was evaluated
         # Invariant D (gang scheduling) exists only when the fixtures name a
         # scheduler (OME_EVAL_SCHEDULER): every pod must run under it and every
         # gang must bind as one PodGroup.
@@ -916,24 +1039,18 @@ def _inv_hit(inv, hits, streak_key, viol_key, sustain, now, detail):
         v["detail"] = detail
 
 
-def _inv_check_status_truth(inv, pod_state, pods_per_inst, hits, now):
+def _inv_check_status_truth(inv, pod_state, pods_per_inst, ir_items, hits, now):
     """Invariant A, one tick: compare each IR Instance's claimed phase against
     the watcher's live pods for its index. Version-tolerant: a build without
     the IR CRD / instanceStatuses field leaves ir_seen False and the verdict
     prints one ⓘ note instead of asserting."""
-    r = kubectl("-n", NS, "get", "inferencereplicas", "-l",
-                f"ome.io/inferenceservice={inv['case_id']}", "-o", "json")
-    if r.returncode != 0:
-        return
-    try:
-        items = json.loads(r.stdout).get("items", [])
-    except Exception:
+    if ir_items is None:
         return
     existing = defaultdict(list)   # (comp, inst-index) → pod records still existing
     for p in pod_state.values():
         if p:
             existing[(p["comp"], p.get("inst", "0"))].append(p)
-    for it in items:
+    for it in ir_items:
         comp = (it.get("spec") or {}).get("component", "?")
         try:
             insts = irstatus.instance_statuses(it.get("status") or {})
@@ -981,27 +1098,33 @@ _INV_SEL_KEYS = ("component", REV_LABEL, "ome.io/runner", "ome.io/pod-ordinal")
 _INV_SEL_UNIVERSAL = {"ome.io/inferenceservice", "ome.io/managed-by"}
 
 
-def _inv_check_endpoints(inv, pod_state, hits, now):
-    """Invariant B, one tick: for each per-revision ROUTED Service (selector
-    carries the revision-hash label; headless peer-DNS Services excluded —
-    they publish not-ready addresses by design), every alive+Ready+serving pod
-    matching the selector must appear as a Ready endpoint, and no endpoint may
-    reference a pod UID whose DELETED event the watcher has seen."""
-    sel = f"ome.io/inferenceservice={inv['case_id']}"
+def _inv_fetch_routing(case_id):
+    """(Services, EndpointSlices) of the case; None when either list cannot be read."""
+    sel = f"ome.io/inferenceservice={case_id}"
     rs = kubectl("-n", NS, "get", "svc", "-l", sel, "-o", "json")
     re_ = kubectl("-n", NS, "get", "endpointslices", "-l", sel, "-o", "json")
     if rs.returncode != 0 or re_.returncode != 0:
-        return
+        return None
     try:
-        svcs = json.loads(rs.stdout).get("items", [])
-        slices = json.loads(re_.stdout).get("items", [])
+        return json.loads(rs.stdout).get("items", []), json.loads(re_.stdout).get("items", [])
     except Exception:
-        return
+        return None
+
+
+def _routed_services(routing):
+    """The per-revision ROUTED Services the watcher can evaluate, as
+    [(name, selector, ready_uids, all_uids)]: the selector carries the
+    revision-hash label and only labels the records track; headless peer-DNS
+    Services are excluded (they publish not-ready addresses by design).
+    Endpoints are merged across a Service's slices; the EndpointConditions
+    contract reads a nil ready as ready."""
+    svcs, slices = routing
     eps = defaultdict(list)   # service name → endpoints (slices merged; labels are service-mirrored)
     for sl in slices:
         svc_name = ((sl.get("metadata") or {}).get("labels") or {}).get("kubernetes.io/service-name")
         if svc_name:
             eps[svc_name].extend(sl.get("endpoints") or [])
+    out = []
     for s in svcs:
         spec = s.get("spec") or {}
         selector = spec.get("selector") or {}
@@ -1016,16 +1139,32 @@ def _inv_check_endpoints(inv, pod_state, hits, now):
             if not u:
                 continue
             all_uids.add(u)
-            # EndpointConditions contract: nil ready reads as ready.
             if (ep.get("conditions") or {}).get("ready") is not False:
                 ready_uids.add(u)
+        out.append((name, selector, ready_uids, all_uids))
+    return out
+
+
+def _pod_selected(p, selector):
+    """True when a routed Service's selector matches the watcher record."""
+    view = {"component": p["comp"], REV_LABEL: p.get("hash", ""),
+            "ome.io/runner": p.get("runner", "default"),
+            "ome.io/pod-ordinal": p.get("ord", "0")}
+    return not any(k in selector and view[k] != selector[k] for k in _INV_SEL_KEYS)
+
+
+def _inv_check_endpoints(inv, pod_state, routing, hits, now):
+    """Invariant B, one tick: for each per-revision ROUTED Service, every
+    alive+Ready+serving pod matching the selector must appear as a Ready
+    endpoint, and no endpoint may reference a pod UID whose DELETED event the
+    watcher has seen."""
+    if routing is None:
+        return
+    for name, selector, ready_uids, all_uids in _routed_services(routing):
         for pname, p in pod_state.items():
             if not p or not p["alive"] or not p["ready"] or not p.get("serving") or not p.get("uid"):
                 continue
-            view = {"component": p["comp"], REV_LABEL: p.get("hash", ""),
-                    "ome.io/runner": p.get("runner", "default"),
-                    "ome.io/pod-ordinal": p.get("ord", "0")}
-            if any(k in selector and view[k] != selector[k] for k in _INV_SEL_KEYS):
+            if not _pod_selected(p, selector):
                 continue   # pod is not a member of this Service
             inv["b_seen"] = True   # membership actually evaluated (non-vacuous)
             if p["uid"] not in ready_uids:
@@ -1152,6 +1291,228 @@ def _inv_check_cohort_ratio(inv, pod_state, pods_per_inst, now):
                               f"{st['N']['engine']} : {st['N']['decoder']}")
 
 
+def _inv_fetch_ir_items(case_id):
+    """The case's InferenceReplica objects; None when the list cannot be read."""
+    return _fetch_initial_ir_items(case_id)
+
+
+def _inv_fetch_revisions(case_id):
+    """revision hash → stored template payload (podSpec, podMeta,
+    workerPodSpec) of the case's ControllerRevisions; None when the list
+    cannot be read."""
+    r = kubectl("-n", NS, "get", "controllerrevisions", "-l",
+                f"ome.io/inferenceservice={case_id}", "-o", "json")
+    if r.returncode != 0:
+        return None
+    try:
+        items = json.loads(r.stdout).get("items", [])
+    except Exception:
+        return None
+    out = {}
+    for it in items:
+        name = (it.get("metadata") or {}).get("name") or ""
+        data = it.get("data")
+        if name and isinstance(data, dict):
+            out[_rev_hash(name)] = data
+    return out
+
+
+def _revision_template(payload, role):
+    """Fingerprint of a stored revision for one pod role: workers render from
+    workerPodSpec when the revision carries one, every other runner from
+    podSpec; both share podMeta's annotations."""
+    spec = payload.get("podSpec") or {}
+    if role == "worker" and isinstance(payload.get("workerPodSpec"), dict):
+        spec = payload["workerPodSpec"]
+    annos = ((payload.get("podMeta") or {}).get("annotations")) or {}
+    return _template_fingerprint(spec, annos)
+
+
+def _inv_revisions_wanted(inv, pod_state):
+    """True while a live pod carries a revision hash the ledger has not read
+    off a ControllerRevision and that hash's re-list budget remains."""
+    for p in pod_state.values():
+        if not p or not p["alive"] or not p.get("hash") or "tmpl" not in p:
+            continue
+        entry = inv["revisions"].get((p["hash"], _pod_role(p)))
+        if (entry is None or entry["src"] != "revision") \
+                and inv["rev_tries"].get(p["hash"], 0) < INV_SUSTAIN_SETTLE:
+            return True
+    return False
+
+
+def _inv_learn_revisions(inv, pod_state, revisions):
+    """Fold a ControllerRevision list into the ledger: every (hash, role) a
+    live pod needs reads its template off the stored revision, replacing a
+    first-pod stand-in; a hash absent from the list spends one attempt."""
+    for p in pod_state.values():
+        if not p or not p["alive"] or not p.get("hash") or "tmpl" not in p:
+            continue
+        key = (p["hash"], _pod_role(p))
+        entry = inv["revisions"].get(key)
+        if entry is not None and entry["src"] == "revision":
+            continue
+        payload = revisions.get(p["hash"])
+        if payload is None:
+            inv["rev_tries"][p["hash"]] = inv["rev_tries"].get(p["hash"], 0) + 1
+            continue
+        inv["revisions"][key] = {"fp": _revision_template(payload, key[1]), "src": "revision"}
+
+
+def _inv_check_label_truth(inv, pod_state, hits, now):
+    """Invariant F, one tick: every live pod runs the template its
+    revision-hash label names. The template is the ControllerRevision of that
+    hash; until one is visible (or when none exists) the first pod seen under
+    the hash stands in, so a pod rebuilt from a newer template under an old
+    label still disagrees with the pods that carried the label first."""
+    for pname, p in sorted(pod_state.items()):
+        if not p or not p["alive"] or not p.get("hash") or "tmpl" not in p:
+            continue
+        key = (p["hash"], _pod_role(p))
+        entry = inv["revisions"].get(key)
+        if entry is None:
+            inv["revisions"][key] = {"fp": p["tmpl"], "src": f"first pod {pname}"}
+            continue
+        inv["f_seen"] = True
+        diffs = _template_mismatch(entry["fp"], p["tmpl"])
+        if not diffs:
+            continue
+        source = ("its ControllerRevision" if entry["src"] == "revision"
+                  else f"the template the {entry['src']} ran under that label")
+        key = ("F", "label-template-mismatch", p["comp"], pname)
+        _inv_hit(inv, hits, key, key, INV_SUSTAIN_SETTLE, now,
+                 f"{p['comp']}/{p.get('inst', '0')} pod {pname} carries {REV_LABEL}={p['hash']} "
+                 f"but runs a different template from {source}: " + "; ".join(diffs[:3]))
+
+
+def _rotation_uids(routing, pod_state):
+    """UIDs of the pods in rotation — Ready endpoints of a routed Service
+    whose selector matches them. None when no routed Service is visible at
+    all (a build without per-revision routing cannot assert membership)."""
+    routed = _routed_services(routing) if routing is not None else []
+    if not routed:
+        return None
+    uids = set()
+    for _name, selector, ready_uids, _all in routed:
+        for p in pod_state.values():
+            if p and p.get("uid") in ready_uids and _pod_selected(p, selector):
+                uids.add(p["uid"])
+    return uids
+
+
+def _inv_check_ready_serving(inv, pod_state, pods_per_inst, ir_items, routing, hits, now):
+    """Invariant G, one tick: an Instance the IR reports Ready, whose full pod
+    set the watcher sees Ready, has at least one pod in rotation — the serving
+    gate True and a Ready endpoint of a routed Service that selects it. The
+    endpoint half is asserted only once a routed Service is visible; the
+    gate half always. An Instance whose pod set is incomplete or not all
+    Ready is some other invariant's business."""
+    if ir_items is None:
+        return
+    in_rotation = _rotation_uids(routing, pod_state)
+    if in_rotation is not None:
+        inv["g_routing_seen"] = True
+    existing = defaultdict(list)   # (comp, inst-index) → [(name, live record)]
+    for pname, p in sorted(pod_state.items()):
+        if p and p["alive"]:
+            existing[(p["comp"], p.get("inst", "0"))].append((pname, p))
+    for it in ir_items:
+        comp = (it.get("spec") or {}).get("component", "?")
+        try:
+            rows = irstatus.instance_statuses(it.get("status") or {})
+        except irstatus.DecodeError:
+            continue   # invariant A reports an undecodable status
+        ppi = max(1, pods_per_inst.get(comp, 1))
+        for row in rows or []:
+            if row.get("phase") != "Ready":
+                continue
+            idx = str(row.get("index", "?"))
+            pods = existing.get((comp, idx), [])
+            if len(pods) < ppi or not all(p["ready"] for _n, p in pods):
+                continue
+            inv["g_seen"] = True
+            serving = [(n, p) for n, p in pods if p.get("serving")]
+            if not serving:
+                detail = (f"{comp}/{idx} Phase=Ready with all {len(pods)} pod(s) Ready, "
+                          f"but no pod has the {SERVING_COND} gate True")
+            elif in_rotation is not None and not any(p.get("uid") in in_rotation for _n, p in serving):
+                names = ", ".join(n for n, _p in serving)
+                detail = (f"{comp}/{idx} Phase=Ready, pod(s) {names} serving but not a Ready "
+                          f"endpoint of any routed Service that selects them")
+            else:
+                continue
+            key = ("G", "ready-not-serving", comp, idx)
+            _inv_hit(inv, hits, key, key, INV_SUSTAIN_SETTLE, now, detail)
+
+
+def _rollout_done_target(comp, ir_status, isvc_status):
+    """The revision every Instance of comp must run once its rollout reports
+    done, or None while it does not. A Component the ISVC run model pins is
+    done when no run is open, the last run closed Completed, its
+    rolloutPhase (where a canary reports one) is Stable and the IR's
+    updateRevision is the run's pinned target; any other Component is done
+    when the IR's own currentRevision has reached updateRevision."""
+    update = ir_status.get("updateRevision") or ""
+    if not update:
+        return None
+    rollout = (isvc_status or {}).get("rollout") or {}
+    active = rollout.get("activeRun")
+    last = rollout.get("lastRun") or {}
+    pinned = {}
+    for run_record in (active or {}, last):
+        for target in (run_record.get("targetRevisions") or []):
+            if isinstance(target, dict) and target.get("component") == comp:
+                pinned.setdefault(comp, target.get("revision") or "")
+    if comp in pinned:
+        if active is not None or last.get("outcome") != "Completed":
+            return None
+        phase = (((isvc_status or {}).get("components") or {}).get(comp) or {}).get("rolloutPhase")
+        if phase and phase != "Stable":
+            return None
+        if _rev_hash(pinned[comp]) != _rev_hash(update):
+            return None   # the run record and the IR name different targets: between runs
+        return update
+    if (ir_status.get("currentRevision") or "") != update:
+        return None
+    return update
+
+
+def _inv_check_superseded(inv, pod_state, ir_items, isvc_status, hits, now):
+    """Invariant H, one tick: once a Component's rollout reports done, every
+    IR row (runningRevision) and every live pod (revision-hash label) of that
+    Component is on the revision the rollout targeted. A row with no running
+    revision has nothing running yet and is skipped."""
+    if ir_items is None:
+        return
+    for it in ir_items:
+        comp = (it.get("spec") or {}).get("component", "?")
+        st = it.get("status") or {}
+        target = _rollout_done_target(comp, st, isvc_status)
+        if target is None:
+            continue
+        try:
+            rows = irstatus.instance_statuses(st)
+        except irstatus.DecodeError:
+            continue   # invariant A reports an undecodable status
+        want = _rev_hash(target)
+        inv["h_seen"] = True
+        for row in rows or []:
+            running = row.get("runningRevision") or ""
+            if not running or _rev_hash(running) == want:
+                continue
+            idx = str(row.get("index", "?"))
+            key = ("H", "superseded-instance", comp, idx)
+            _inv_hit(inv, hits, key, key, INV_SUSTAIN_SETTLE, now,
+                     f"{comp}/{idx} runs revision {_rev_hash(running)} after the rollout reported done on "
+                     f"{want} (IR runningRevision={running}, updateRevision={target})")
+        for pname, p in sorted(pod_state.items()):
+            if p and p["alive"] and p["comp"] == comp and p.get("hash") and p["hash"] != want:
+                key = ("H", "superseded-pod", comp, pname)
+                _inv_hit(inv, hits, key, key, INV_SUSTAIN_SETTLE, now,
+                         f"{comp}/{p.get('inst', '0')} pod {pname} carries {REV_LABEL}={p['hash']} "
+                         f"after the rollout reported done on {want}")
+
+
 def _list_podgroups(case_id):
     """name → spec.minMember for the case's PodGroups; None when the API is unavailable."""
     r = kubectl("-n", NS, "get", "podgroups.scheduling.x-k8s.io", "-l",
@@ -1226,28 +1587,57 @@ def _inv_check_gang_scheduling(inv, pod_state, pods_per_inst, hits, now):
                      f"{comp}/{inst}: PodGroup {name!r} minMember={pgs[name]}, expected {want}")
 
 
+def _inv_any_on(inv):
+    return any(inv.get(k) for k in ("a_on", "b_on", "c_on", "d_on", "f_on", "g_on", "h_on", "ratio"))
+
+
 def _inv_tick(inv, pod_state, pods_per_inst):
     """One invariant observation, self-rate-limited to INV_TICK_S. Called from
     every watch loop each iteration; a no-op between ticks and when every
-    invariant is opted out. Streaks reset for keys not observed this tick
-    (the CONSECUTIVE-tick sustain rule)."""
-    if not inv or not (inv["a_on"] or inv["b_on"] or inv["c_on"] or inv.get("d_on") or inv.get("ratio")):
+    invariant is opted out. Reads the cluster once per tick and hands the
+    snapshots to _inv_observe."""
+    if not inv or not _inv_any_on(inv):
         return
     now = time.time()
     if now - inv["last"] < INV_TICK_S:
         return
     inv["last"] = now
+    case_id = inv["case_id"]
+    ir_items = _inv_fetch_ir_items(case_id) if (inv["a_on"] or inv["g_on"] or inv["h_on"]) else None
+    routing = _inv_fetch_routing(case_id) if (inv["b_on"] or inv["g_on"]) else None
+    isvc_status = fetch_status(case_id) if inv["h_on"] else None
+    revisions = (_inv_fetch_revisions(case_id)
+                 if inv["f_on"] and _inv_revisions_wanted(inv, pod_state) else None)
+    _inv_observe(inv, pod_state, pods_per_inst, now, ir_items=ir_items, routing=routing,
+                 isvc_status=isvc_status, revisions=revisions)
+
+
+def _inv_observe(inv, pod_state, pods_per_inst, now, ir_items=None, routing=None,
+                 isvc_status=None, revisions=None):
+    """One observation over already-fetched snapshots: every enabled check
+    runs, then streaks reset for keys not observed this tick (the
+    CONSECUTIVE-tick sustain rule). Pure, so tests drive ticks with synthetic
+    pods, InferenceReplicas, Services and revisions. A None snapshot is one
+    that could not be read this tick: its checks make no observation."""
     hits = set()
     if inv["a_on"]:
-        _inv_check_status_truth(inv, pod_state, pods_per_inst, hits, now)
+        _inv_check_status_truth(inv, pod_state, pods_per_inst, ir_items, hits, now)
     if inv["b_on"]:
-        _inv_check_endpoints(inv, pod_state, hits, now)
+        _inv_check_endpoints(inv, pod_state, routing, hits, now)
     if inv["c_on"]:
         _inv_check_pair_alive(inv, pod_state, hits, now)
     if inv.get("d_on"):
         _inv_check_gang_scheduling(inv, pod_state, pods_per_inst, hits, now)
     if inv.get("ratio"):
         _inv_check_cohort_ratio(inv, pod_state, pods_per_inst, now)
+    if inv["f_on"]:
+        if revisions is not None:
+            _inv_learn_revisions(inv, pod_state, revisions)
+        _inv_check_label_truth(inv, pod_state, hits, now)
+    if inv["g_on"]:
+        _inv_check_ready_serving(inv, pod_state, pods_per_inst, ir_items, routing, hits, now)
+    if inv["h_on"]:
+        _inv_check_superseded(inv, pod_state, ir_items, isvc_status, hits, now)
     for k in [k for k in inv["streaks"] if k not in hits]:
         del inv["streaks"][k]
 
@@ -1277,6 +1667,14 @@ def invariant_checks(inv, verdict, notes, checks):
         checks.append("  ⓘ invariant D: PodGroup API unavailable on this cluster — pod-group checks skipped; scheduler name and gang binding still asserted")
     if inv.get("d_on") and inv.get("d_untyped"):
         checks.append("  ⓘ invariant D: some pod records carried no placement fields (a watcher builder lacks _pod_placement) — those records were not evaluated")
+    if inv.get("f_on") and not inv.get("f_seen"):
+        checks.append("  ⓘ invariant F (label-truth) compared no pod against its revision's template — vacuous (no assertion made)")
+    if inv.get("g_on") and not inv.get("g_seen"):
+        checks.append("  ⓘ invariant G (ready-serving) never saw a Ready Instance with its pod set Ready — vacuous (no assertion made)")
+    if inv.get("g_on") and inv.get("g_seen") and not inv.get("g_routing_seen"):
+        checks.append("  ⓘ invariant G: no routed Service observed — the serving gate was asserted, endpoint membership was not")
+    if inv.get("h_on") and not inv.get("h_seen"):
+        checks.append("  ⓘ invariant H (superseded-revision) never saw a Component report its rollout done — vacuous (no assertion made)")
     ratio = inv.get("ratio")
     if ratio:
         tol_pct = int(round(ratio["tol"] * 100))
@@ -1290,9 +1688,14 @@ def invariant_checks(inv, verdict, notes, checks):
         active = [x for x, on in (("A", inv["a_on"] and inv["ir_seen"]),
                                   ("B", inv["b_on"] and inv["b_seen"]),
                                   ("C", inv["c_on"] and bool(pairing) and pairing.get("seen", False)),
-                                  ("D", inv.get("d_on", False) and inv.get("d_seen", False))) if on]
+                                  ("D", inv.get("d_on", False) and inv.get("d_seen", False)),
+                                  ("F", inv.get("f_on", False) and inv.get("f_seen", False)),
+                                  ("G", inv.get("g_on", False) and inv.get("g_seen", False)),
+                                  ("H", inv.get("h_on", False) and inv.get("h_seen", False))) if on]
         if active:
-            checks.append(f"  ✓ continuous invariants held ({'+'.join(active)}): no sustained status-truth / endpoints-membership / pair-alive / gang-scheduling violation")
+            checks.append(f"  ✓ continuous invariants held ({'+'.join(active)}): no sustained "
+                          "status-truth / endpoints-membership / pair-alive / gang-scheduling / "
+                          "label-truth / ready-serving / superseded-revision violation")
         return verdict
     scope = inv.get("xfail") or ""
     ref = f"#{inv['xfail_issue']}" if inv.get("xfail_issue") else "UNLINKED"
@@ -3570,16 +3973,18 @@ HDR_VALIDATORS = {
     #                                   podkill:rotating, deletes a pod → drain with no
     #                                   preceding surge; informational, not a FAIL)
     # Opt out of the continuous invariants (A=status-truth, B=endpoints-
-    # membership, C=pair-alive). REQUIRES an adjacent '# reason: <why>' comment
-    # on line 2 of the case file — validate-only rejects an inv_off without one.
-    "inv_off": lambda v: v in {"A", "B", "C", "D", "all"},
+    # membership, C=pair-alive, D=gang-scheduling, F=label-truth,
+    # G=ready-serving, H=superseded-revision). REQUIRES an adjacent
+    # '# reason: <why>' comment on line 2 of the case file — validate-only
+    # rejects an inv_off without one.
+    "inv_off": lambda v: v in INV_CLASSES | {"all"},
     # Scope a notimpl parking to a continuous invariant: a sustained violation
     # of the NAMED invariant is the tracked bug itself, so it records as the
     # case's XFAIL instead of hardening the verdict to FAIL. The invariant is
     # still evaluated and printed (unlike inv_off, nothing is blinded), and a
     # violation of any OTHER invariant fails hard as always. Requires
     # notimpl=1 (whose issue= names the bug) + the line-2 '# reason:' comment.
-    "inv_xfail": lambda v: v in {"A", "B", "C", "D", "all"},
+    "inv_xfail": lambda v: v in INV_CLASSES | {"all"},
     # Fault injection: fault=<kind>:<param> — quota:<n≥0>, podkill:<phase>,
     # ctrlrestart:<phase> (phase ∈ FAULT_PHASES, or idle: before the bump),
     # cordon:<target ∈ FAULT_TARGETS>, crashloop:old (with form=).
@@ -4022,6 +4427,7 @@ def _apply_event(ctx, ev):
             "newanno": annos.get(TRIGGER_ANNO) == TRIGGER_VAL,
             "created": meta.get("creationTimestamp", ""),
             **_pod_placement(obj, labels),
+            **_pod_template(obj),
         }
         if rev:
             ctx.setdefault("seen_hashes", set()).add(rev)   # every revision-hash ever observed
@@ -7943,7 +8349,8 @@ def run_mode_case(case_id, yaml_file, desc, hdr, mode):
                                    "uid": meta.get("uid", ""), "newanno": False,
                                    "serving": _pod_serving(obj),
                                    "created": meta.get("creationTimestamp", ""),
-                                   **_pod_placement(obj, labels)}
+                                   **_pod_placement(obj, labels),
+                                   **_pod_template(obj)}
             agg = aggregate(pod_state, None, surge_modes, pods_per_inst)
             for c in COMPS:
                 if agg.get(c, (0, 0, 0))[0] > peaks[c]:
@@ -8465,7 +8872,8 @@ def run_case(case_id):
                                    "pairing": labels.get(PAIRING_LABEL, ""),
                                    "serving": _pod_serving(obj),
                                    "created": meta.get("creationTimestamp", ""),
-                                   **_pod_placement(obj, labels)}
+                                   **_pod_placement(obj, labels),
+                                   **_pod_template(obj)}
 
             meas = {}
             agg = aggregate(pod_state, old_hashes, modes, pods_per_inst, measures=meas)
