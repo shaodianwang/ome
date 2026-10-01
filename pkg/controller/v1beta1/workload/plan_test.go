@@ -776,6 +776,69 @@ func TestInstancePlanIndices_SharedUpdateTargetKeepsAllParticipants(t *testing.T
 	}
 }
 
+// Cells: instance/Ready/spec.replicasDown/before
+func TestInstancePlanIndices_ReadyRowOutOfRotationLeavesBeforeAHealthyOne(t *testing.T) {
+	healthy := func(idx, pods int32) types.InstanceStatus {
+		return types.InstanceStatus{Index: idx, Phase: types.InstancePhaseReady, PodCount: pods, ServingPodCount: pods}
+	}
+	singlePodOut := types.InstanceStatus{Index: 0, Phase: types.InstancePhaseReady, PodCount: 1, ServingPodCount: 0}
+	gangMemberOut := types.InstanceStatus{Index: 0, Phase: types.InstancePhaseReady, PodCount: 2, ServingPodCount: 1}
+	tests := []struct {
+		name      string
+		instances []types.InstanceStatus
+		replicas  int32
+		want      []int32
+	}{
+		{
+			name:      "single pod out of rotation, down by one",
+			instances: []types.InstanceStatus{singlePodOut, healthy(1, 1), healthy(2, 1), healthy(3, 1)},
+			replicas:  3,
+			want:      []int32{1, 2, 3},
+		},
+		{
+			name:      "single pod out of rotation, down by two",
+			instances: []types.InstanceStatus{singlePodOut, healthy(1, 1), healthy(2, 1), healthy(3, 1)},
+			replicas:  2,
+			want:      []int32{1, 2},
+		},
+		{
+			name:      "gang with a member out of rotation, down by one",
+			instances: []types.InstanceStatus{gangMemberOut, healthy(1, 2), healthy(2, 2), healthy(3, 2)},
+			replicas:  3,
+			want:      []int32{1, 2, 3},
+		},
+		{
+			name:      "gang with a member out of rotation, down by two",
+			instances: []types.InstanceStatus{gangMemberOut, healthy(1, 2), healthy(2, 2), healthy(3, 2)},
+			replicas:  2,
+			want:      []int32{1, 2},
+		},
+		{
+			name: "the healthy rows keep the lowest indices among themselves",
+			instances: []types.InstanceStatus{
+				healthy(0, 1),
+				{Index: 1, Phase: types.InstancePhaseReady, PodCount: 1, ServingPodCount: 0},
+				healthy(2, 1), healthy(3, 1),
+			},
+			replicas: 2,
+			want:     []int32{0, 2},
+		},
+		{
+			name:      "a row out of rotation is kept when no healthy row fills the budget",
+			instances: []types.InstanceStatus{singlePodOut, healthy(1, 1)},
+			replicas:  2,
+			want:      []int32{0, 1},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if diff := cmp.Diff(test.want, instancePlanIndices(test.instances, test.replicas)); diff != "" {
+				t.Fatalf("a Ready row with a pod out of rotation must leave before a healthy one (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 func TestInstancePlanIndices_NonRetiringSelectionControls(t *testing.T) {
 	tests := []struct {
 		name      string

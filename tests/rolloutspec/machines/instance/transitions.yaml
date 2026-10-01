@@ -203,7 +203,7 @@ transitions:
   - id: T-ready-scaledown
     from: Ready
     event: spec.replicasDown
-    guard: the index is beyond the new desired set and the scale-down wave admits it within its pod budget
+    guard: the index leaves the desired set - a Ready row with a pod out of rotation before a healthy one, then the highest index - and the scale-down wave admits it within its pod budget
     to: Delete/Drain
     effects: [Phase Deleting and the Delete Drain operation committed in one status transaction]
     decided_in: pkg/controller/v1beta1/workload/ops/delete_batch.go

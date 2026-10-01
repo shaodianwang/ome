@@ -3,6 +3,7 @@ package workload_test
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -29,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	types "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/tools/record"
 	clocktesting "k8s.io/utils/clock/testing"
@@ -1233,6 +1235,15 @@ type recoveryHarness struct {
 	// them is updated or finishes terminating until the node recovers.
 	nodeNames []string
 	deadNodes map[string]bool
+
+	// readinessFails names the pods whose readiness probe fails from now
+	// on: the kubelet model keeps their container running and takes the
+	// pod out of rotation.
+	readinessFails map[string]bool
+	// atomicStatus wires the owner-aware atomic status adapter the
+	// scale-down wave requires; off, the passes take the one-row write
+	// path.
+	atomicStatus bool
 }
 
 func recoveryPodSpec(image string) *corev1.PodSpec {
@@ -1277,11 +1288,12 @@ func newRecoveryHarnessFor(t *testing.T, multiPod bool, container string) *recov
 		lastCrash:        map[string]time.Time{},
 		servedPasses:     map[string]int{},
 		retryPolicy:      &workloadtypes.RetryPolicy{MaxAttempts: 2, InitialDelay: 20 * time.Second, MaxDelay: time.Minute, Multiplier: 2},
+		readinessFails:   map[string]bool{},
 	}
 	h.c = fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&v1beta1.InferenceService{}, &v1beta1.InferenceReplica{}).
 		WithObjects(isvc).
-		WithInterceptorFuncs(interceptor.Funcs{Delete: h.interceptDelete}).
+		WithInterceptorFuncs(interceptor.Funcs{Create: h.interceptCreate, Delete: h.interceptDelete}).
 		Build()
 	h.revV1 = h.ensureRevision(h.podSpec(goodImage))
 	h.revBad = h.ensureRevision(h.podSpec(badImage))
@@ -1448,6 +1460,19 @@ func (h *recoveryHarness) kubelet() {
 			}}
 			setPodCondition(pod, corev1.ContainersReady, corev1.ConditionTrue, h.clk.Now())
 			setPodCondition(pod, corev1.PodReady, h.servingGate(pod), h.clk.Now())
+		case h.readinessFails[pod.Name]:
+			// The readiness probe fails: the container keeps running, and
+			// the kubelet clears ContainersReady and Ready while the serving
+			// gate keeps the value the controller wrote.
+			pod.Status.Phase = corev1.PodRunning
+			pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+				Name:  pod.Spec.Containers[0].Name,
+				Image: image,
+				Ready: false,
+				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			}}
+			setPodCondition(pod, corev1.ContainersReady, corev1.ConditionFalse, h.clk.Now())
+			setPodCondition(pod, corev1.PodReady, corev1.ConditionFalse, h.clk.Now())
 		default:
 			pod.Status.Phase = corev1.PodRunning
 			pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
@@ -1524,6 +1549,25 @@ func (h *recoveryHarness) crashPod(idx int32, runner, image string) {
 		return
 	}
 	h.t.Fatalf("no pod of instance %d runner %q to crash", idx, runner)
+}
+
+// failReadiness makes the readiness probe of the live pods of runner at
+// index idx fail from the next kubelet pass on (every pod of the Instance
+// when runner is empty): the containers keep running and the pods leave
+// rotation.
+func (h *recoveryHarness) failReadiness(idx int32, runner string) {
+	h.t.Helper()
+	failed := 0
+	for _, pod := range h.podsOf(idx) {
+		if runner != "" && pod.Labels[query.LabelRunner] != runner {
+			continue
+		}
+		h.readinessFails[pod.Name] = true
+		failed++
+	}
+	if failed == 0 {
+		h.t.Fatalf("no pod of instance %d runner %q to fail readiness on", idx, runner)
+	}
 }
 
 // settledOn reports whether the Component is at rest on rev with n
@@ -1651,6 +1695,15 @@ func setPodCondition(pod *corev1.Pod, condType corev1.PodConditionType, status c
 	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
 		Type: condType, Status: status, LastTransitionTime: metav1.NewTime(now),
 	})
+}
+
+// interceptCreate stamps the UID the API server mints onto a new pod; the
+// delete wave preconditions every pod delete on the UID it observed.
+func (h *recoveryHarness) interceptCreate(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+	if pod, ok := obj.(*corev1.Pod); ok && pod.UID == "" {
+		pod.UID = uuid.NewUUID()
+	}
+	return cl.Create(ctx, obj, opts...)
 }
 
 // interceptDelete is the kubelet termination model's apiserver half: with
@@ -1938,31 +1991,85 @@ func (h *recoveryHarness) buildInput() workloadtypes.ReconcileInput {
 			h.heldWarnings = append(h.heldWarnings, fmt.Sprintf("%s attempts=%d %s", rev, attempts, reason))
 		},
 		MutateRetryBlock: func(_ context.Context, rev string, mutate func(*workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition) error {
-			pos := -1
-			b := workloadtypes.RetryBlock{TargetRevision: rev}
-			for i := range h.blocks {
-				if h.blocks[i].TargetRevision == rev {
-					pos, b = i, h.blocks[i]
-					break
-				}
-			}
-			switch mutate(&b) {
-			case workloadtypes.RetryBlockPersist:
-				if pos == -1 {
-					h.blocks = append(h.blocks, b)
-				} else {
-					h.blocks[pos] = b
-				}
-			case workloadtypes.RetryBlockRemove:
-				if pos != -1 {
-					h.blocks = append(h.blocks[:pos], h.blocks[pos+1:]...)
-				}
-			}
+			h.mutateRetryBlock(rev, mutate)
 			return nil
 		},
 	}
+	if h.atomicStatus {
+		in.ApplyInstanceMutationsWithRetryBlock = h.applyInstanceMutations
+	}
 	stubInputCallbacks(&in)
 	return in
+}
+
+// mutateRetryBlock applies one RetryBlock mutation to the harness's block
+// list, which stands in for the IR's RetryBlocks.
+func (h *recoveryHarness) mutateRetryBlock(rev string, mutate func(*workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition) {
+	pos := -1
+	b := workloadtypes.RetryBlock{TargetRevision: rev}
+	for i := range h.blocks {
+		if h.blocks[i].TargetRevision == rev {
+			pos, b = i, h.blocks[i]
+			break
+		}
+	}
+	switch mutate(&b) {
+	case workloadtypes.RetryBlockPersist:
+		if pos == -1 {
+			h.blocks = append(h.blocks, b)
+		} else {
+			h.blocks[pos] = b
+		}
+	case workloadtypes.RetryBlockRemove:
+		if pos != -1 {
+			h.blocks = append(h.blocks[:pos], h.blocks[pos+1:]...)
+		}
+	}
+}
+
+// applyInstanceMutations is the harness's owner-aware atomic status
+// adapter: one IR read, every mutation applied to its slot with the
+// precondition, removal and commit-callback semantics of the in-memory
+// store, one status write, and the RetryBlock mutation applied to the
+// harness's block list alongside it. A row whose status writes mutateErr
+// rejects fails the whole batch, as the API server refusing the IR status
+// update would.
+func (h *recoveryHarness) applyInstanceMutations(ctx context.Context, mutations []workloadtypes.InstanceMutation, targetRevision string, mutateRetryBlock func(*workloadtypes.RetryBlock) workloadtypes.RetryBlockDisposition) error {
+	for _, mutation := range mutations {
+		if err := h.mutateErr[mutation.Index]; err != nil {
+			return err
+		}
+	}
+	ir := &v1beta1.InferenceReplica{}
+	create := false
+	if err := h.c.Get(ctx, h.irKey(), ir); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("get IR: %w", err)
+		}
+		ir = &v1beta1.InferenceReplica{ObjectMeta: metav1.ObjectMeta{Namespace: h.irKey().Namespace, Name: h.irKey().Name}}
+		create = true
+	}
+	store := &testAtomicMutationStore{owner: h.isvc, statuses: v1beta1convert.InstanceStatusSliceToWorkload(ir.Status.InstanceStatuses)}
+	if err := store.apply(ctx, mutations, targetRevision, nil); err != nil {
+		return err
+	}
+	if mutateRetryBlock != nil {
+		h.mutateRetryBlock(targetRevision, mutateRetryBlock)
+	}
+	if store.writes == 0 {
+		return nil
+	}
+	rows := make([]v1beta1.OMENativeInstanceStatus, 0, len(store.statuses))
+	for _, row := range store.statuses {
+		rows = append(rows, v1beta1convert.InstanceStatusFromWorkload(row))
+	}
+	if create {
+		if err := h.c.Create(ctx, ir); err != nil {
+			return fmt.Errorf("create IR: %w", err)
+		}
+	}
+	ir.Status.InstanceStatuses = rows
+	return h.c.Status().Update(ctx, ir)
 }
 
 // step runs one reconcile: kubelet convergence, fresh expectations
@@ -2009,6 +2116,7 @@ func (h *recoveryHarness) pass() (ctrl.Result, error) {
 	}
 	res, err := workload.Reconcile(h.ctx, deps, in, plan, h.target)
 	h.drainEvents()
+	h.publish(plan)
 	if status.RolloutComplete(h.irStatuses(), h.target.Name) {
 		h.currentRevision = h.target.Name
 	}
@@ -2108,6 +2216,60 @@ func (h *recoveryHarness) admitLater(idx int32, runner string, skew time.Duratio
 	pod.CreationTimestamp = metav1.NewTime(admitted)
 	if err := h.c.Update(h.ctx, pod); err != nil {
 		h.t.Fatalf("restamp creation of %s: %v", pod.Name, err)
+	}
+}
+
+// publish is the status write the InferenceReplica adapter makes after
+// every pass: the phase the publication derives and the pod counters of
+// the pass's pod observation land on the rows the next pass reads. Only
+// the fields the adapter persists are written, a row whose status writes
+// mutateErr rejects is left as it is, and the harness has no
+// EndpointSlices, so the Available counters read zero.
+func (h *recoveryHarness) publish(plan workloadtypes.ComponentPlan) {
+	h.t.Helper()
+	ir := &v1beta1.InferenceReplica{}
+	if err := h.c.Get(h.ctx, h.irKey(), ir); err != nil {
+		if apierrors.IsNotFound(err) {
+			return
+		}
+		h.t.Fatalf("publish: get IR: %v", err)
+	}
+	if len(ir.Status.InstanceStatuses) == 0 {
+		return
+	}
+	list := &corev1.PodList{}
+	if err := h.c.List(h.ctx, list, client.InNamespace(recoveryNS)); err != nil {
+		h.t.Fatalf("publish: list pods: %v", err)
+	}
+	pods := make([]*corev1.Pod, 0, len(list.Items))
+	for i := range list.Items {
+		pods = append(pods, &list.Items[i])
+	}
+	observation, err := workload.NewOwnedPublicationObservation(
+		v1beta1convert.InstanceStatusSliceToWorkload(ir.Status.InstanceStatuses),
+		workload.NewCachedSelectorPodObservation(pods, query.BucketPodsByInstanceIdx(pods)),
+		map[string]struct{}{},
+		status.AvailabilityWindow{MinReadySeconds: plan.MinReadySeconds, Now: h.clk.Now()},
+	)
+	if err != nil {
+		h.t.Fatalf("publish: build observation: %v", err)
+	}
+	publication, _, err := observation.TakeInlineV1Publication(status.DesiredPodCountByInstance(plan), h.target.Name)
+	if err != nil {
+		h.t.Fatalf("publish: consume observation: %v", err)
+	}
+	for i := range ir.Status.InstanceStatuses {
+		if h.mutateErr[ir.Status.InstanceStatuses[i].Index] != nil {
+			continue
+		}
+		ir.Status.InstanceStatuses[i].Phase = v1beta1convert.InstancePhaseFromWorkload(publication[i].Phase)
+		ir.Status.InstanceStatuses[i].PodCount = publication[i].PodCount
+		ir.Status.InstanceStatuses[i].ServingPodCount = publication[i].ServingPodCount
+		ir.Status.InstanceStatuses[i].AvailablePodCount = publication[i].AvailablePodCount
+		ir.Status.InstanceStatuses[i].Admitted = publication[i].Admitted
+	}
+	if err := h.c.Status().Update(h.ctx, ir); err != nil {
+		h.t.Fatalf("publish: write IR status: %v", err)
 	}
 }
 
@@ -4910,6 +5072,23 @@ func (h *recoveryHarness) terminatingPods() int {
 	return n
 }
 
+// instanceIdentity is the row's incarnation and its live pod set by name
+// and creation instant, so a rebuild under a reused name is as visible as
+// a delete; empty when the row is gone.
+func (h *recoveryHarness) instanceIdentity(idx int32) string {
+	h.t.Helper()
+	row := h.instance(idx)
+	if row == nil {
+		return ""
+	}
+	var keys []string
+	for _, pod := range h.podsOf(idx) {
+		keys = append(keys, wedgeKey(pod))
+	}
+	sort.Strings(keys)
+	return fmt.Sprintf("incarnation=%d pods=%s", row.Incarnation, strings.Join(keys, ","))
+}
+
 // repairedAbove reports whether Instance idx is Ready with no operation
 // at an incarnation above incarnation, holding its full pod set.
 func (h *recoveryHarness) repairedAbove(idx int32, incarnation int64) bool {
@@ -5696,4 +5875,127 @@ func (h *recoveryHarness) servingPodsOf(idx int32) int {
 		}
 	}
 	return n
+}
+
+// TestScaleDown_RemovesTheInstanceThatServesNothingFirst: four Instances
+// at rest, and a pod of Instance 0 leaves rotation while its row stays
+// Ready — its readiness probe fails, or it crash-loops under restart policy
+// None with a stuck-pod grace no pass reaches. A scale-down by one removes
+// Instance 0, not the healthy Instance 3; a scale-down by two removes
+// Instance 0 and then Instance 3. The survivors keep the pods they had,
+// nothing is rebuilt, and the rows settle at the new count. Single pod,
+// and gang where the leader is the pod that leaves rotation.
+//
+// Cells: instance/Ready/spec.replicasDown/before
+func TestScaleDown_RemovesTheInstanceThatServesNothingFirst(t *testing.T) {
+	shapes := []struct {
+		name     string
+		multiPod bool
+		runner   string
+	}{
+		{"single pod", false, ""},
+		{"gang leader", true, "leader"},
+	}
+	faults := []struct {
+		name  string
+		apply func(h *recoveryHarness, runner string)
+	}{
+		{"readiness probe fails", func(h *recoveryHarness, runner string) { h.failReadiness(0, runner) }},
+		{"crash-loops under policy None", func(h *recoveryHarness, runner string) { h.crashPod(0, runner, crashStartImage) }},
+	}
+	reductions := []struct {
+		name    string
+		down    int32
+		removed []int32
+		kept    []int32
+	}{
+		{"down by one", 1, []int32{0}, []int32{1, 2, 3}},
+		{"down by two", 2, []int32{0, 3}, []int32{1, 2}},
+	}
+	for _, shape := range shapes {
+		for _, fault := range faults {
+			for _, reduction := range reductions {
+				t.Run(shape.name+"/"+fault.name+"/"+reduction.name, func(t *testing.T) {
+					h := newRecoveryHarness(t, shape.multiPod)
+					h.atomicStatus = true
+					h.replicas = 4
+					none := workloadtypes.RestartPolicyNone
+					h.lifecycle.RestartPolicy = &none
+					// The stuck-pod grace outlasts the story: the controller is woken
+					// by the kubelet's back-off ticks, not by the grace end, so a
+					// crash-looping pod opens no repair.
+					h.stuckGrace = 24 * time.Hour
+					h.setTarget(h.revV1, goodImage)
+					if !h.run(40, func() bool { return h.settledOn(h.revV1, 4) }) {
+						h.dumpState("initial create")
+						t.Fatalf("four instances never settled on v1")
+					}
+					before := map[int32]string{}
+					for _, idx := range reduction.kept {
+						before[idx] = h.instanceIdentity(idx)
+					}
+
+					fault.apply(h, shape.runner)
+					res, err := h.pass()
+					if err != nil {
+						t.Fatalf("Reconcile: %v", err)
+					}
+					h.clk.Step(h.sleepAfter(res, kubeletBackOff))
+					row := h.instance(0)
+					if row == nil || row.Phase != workloadtypes.InstancePhaseReady || row.Operation != nil ||
+						row.PodCount == 0 || row.ServingPodCount >= row.PodCount {
+						h.dumpState("after the fault")
+						t.Fatalf("instance 0 after the fault = %+v, want a Ready row with a pod out of rotation", row)
+					}
+					if n := len(h.irStatuses()); n != 4 {
+						t.Fatalf("rows after the fault = %d, want 4", n)
+					}
+
+					h.replicas = 4 - reduction.down
+					h.setTarget(h.revV1, goodImage)
+					atRest := func() bool {
+						rows := h.irStatuses()
+						if int32(len(rows)) != h.replicas {
+							return false
+						}
+						for _, row := range rows {
+							if row.Phase != workloadtypes.InstancePhaseReady || row.Operation != nil {
+								return false
+							}
+						}
+						return len(h.livePods()) == int(h.replicas)*len(h.desired.Runners)
+					}
+					if !h.runOnWakeUps(40, kubeletBackOff, atRest) {
+						h.dumpState("scale-down")
+						t.Fatalf("the component never came to rest at %d instances", h.replicas)
+					}
+					requireRemovedAndKept := func() {
+						t.Helper()
+						for _, idx := range reduction.removed {
+							if h.instance(idx) != nil || len(h.podsOf(idx)) != 0 {
+								h.dumpState("scale-down")
+								t.Fatalf("instance %d serves nothing, or is the highest healthy index, and should have left; row=%+v pods=%d",
+									idx, h.instance(idx), len(h.podsOf(idx)))
+							}
+						}
+						for _, idx := range reduction.kept {
+							if got := h.instanceIdentity(idx); got != before[idx] {
+								h.dumpState("scale-down")
+								t.Fatalf("instance %d should have kept its pods:\n got %q\nwant %q", idx, got, before[idx])
+							}
+						}
+						if !h.settledOn(h.revV1, h.replicas) {
+							h.dumpState("scale-down")
+							t.Fatalf("the component is not settled on v1 at %d instances", h.replicas)
+						}
+					}
+					requireRemovedAndKept()
+					for i := 0; i < 4; i++ {
+						h.step()
+						requireRemovedAndKept()
+					}
+				})
+			}
+		}
+	}
 }

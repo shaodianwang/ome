@@ -172,9 +172,10 @@ func MigrationModeOrDefault(p *types.MigrationPolicy) types.MigrationMode {
 }
 
 // instancePlanIndices computes the per-Instance index set the plan should
-// drive: active surge pairs (unbounded by replicas), then the oldest existing
-// steady indices up to the replica cap, excluding sources whose replacements
-// are proven promoted, then new indices to round out scale-up.
+// drive: active surge pairs (unbounded by replicas), then the existing
+// steady indices up to the replica cap — the Ready ones in rotation first,
+// oldest first within a tier — excluding sources whose replacements are
+// proven promoted, then new indices to round out scale-up.
 //
 // The replica cap counts only non-migration indices. Counting the
 // surge against it would drop a healthy non-migrating sibling out of
@@ -209,14 +210,15 @@ func instancePlanIndices(instances []types.InstanceStatus, replicas int32) []int
 		}
 	}
 
-	// Ready instances are stable replicas, preferred to keep.
-	readyByIndex := map[int32]bool{}
+	// Ready instances in rotation are the stable replicas, preferred to
+	// keep; a scale-down removes the others first.
+	preferredByIndex := map[int32]bool{}
 	statusByIndex := map[int32]types.InstanceStatus{}
 	retiringSources := map[int32]struct{}{}
 	for _, s := range instances {
 		statusByIndex[s.Index] = s
-		if s.Phase == types.InstancePhaseReady {
-			readyByIndex[s.Index] = true
+		if keepsPreference(s) {
+			preferredByIndex[s.Index] = true
 		}
 	}
 
@@ -273,10 +275,10 @@ func instancePlanIndices(instances []types.InstanceStatus, replicas int32) []int
 		}
 	}
 
-	// Pass 2: fill the steady replica budget. Prefer Ready (stable) instances
-	// over not-yet-Ready ones, then keep the oldest eligible index within each
-	// readiness tier.
-	fill := func(wantReady bool) {
+	// Pass 2: fill the steady replica budget. Prefer the Ready instances in
+	// rotation over the rest, then keep the oldest eligible index within
+	// each tier.
+	fill := func(wantPreferred bool) {
 		for _, idx := range sorted {
 			if steadyCount >= replicas {
 				return
@@ -289,7 +291,7 @@ func instancePlanIndices(instances []types.InstanceStatus, replicas int32) []int
 			if _, retiring := retiringSources[idx]; retiring {
 				continue
 			}
-			if readyByIndex[idx] != wantReady {
+			if preferredByIndex[idx] != wantPreferred {
 				continue
 			}
 			indices = append(indices, idx)
@@ -317,6 +319,18 @@ func instancePlanIndices(instances []types.InstanceStatus, replicas int32) []int
 
 	sort.Slice(indices, func(i, j int) bool { return indices[i] < indices[j] })
 	return indices
+}
+
+// keepsPreference reports whether a row is a stable replica the plan keeps
+// ahead of the rest: Ready, with every pod its published counts hold in
+// rotation. A Ready row that serves fewer pods than it has serves nothing
+// the Component can count on, whatever its phase says. A row with no
+// published pods is read by its phase alone.
+func keepsPreference(s types.InstanceStatus) bool {
+	if s.Phase != types.InstancePhaseReady {
+		return false
+	}
+	return s.PodCount == 0 || s.ServingPodCount >= s.PodCount
 }
 
 func migrationHandoffPromoted(source, target types.InstanceStatus, targetReferences int) bool {
