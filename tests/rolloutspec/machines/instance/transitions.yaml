@@ -188,9 +188,9 @@ transitions:
   - id: T-ready-crashloop-restart
     from: Ready
     event: pod.waiting
-    guard: a pod of a Ready row with no operation holds a terminal waiting reason past lifecycle.stuckPodGracePeriod while its revision-hash label still matches the Component's current revision, whatever the restart policy says, the revision the row runs is still the roll target (or the Component is paused or the target is Held), and the coordination gate, the unavailability budget and the RetryBlock for that revision all admit a fresh attempt
+    guard: a pod of a Ready row with no operation holds a terminal waiting reason past lifecycle.stuckPodGracePeriod while its revision-hash label still matches the Component's current revision, whatever the restart policy says, the revision the row runs is still the roll target (or the Component is paused or the target is Held), and the RetryBlock for that revision admits a fresh attempt, as must the unavailability budget and the coordination gate when the pod set still serves (a pod set that serves nothing is admitted by neither)
     to: Restart/Drain
-    effects: [Incarnation bumped, Phase Restarting with the crash-loop reason recorded on LastFailure, the rebuild paced by the per-Component budget and gated by the revision's RetryBlock]
+    effects: [Incarnation bumped, Phase Restarting with the crash-loop reason recorded on LastFailure, the rebuild paced by the per-Component budget when the pod set still serves and gated by the revision's RetryBlock]
     decided_in: pkg/controller/v1beta1/workload/ops/restart.go
 
   - id: T-ready-migrate

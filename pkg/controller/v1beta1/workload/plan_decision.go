@@ -58,10 +58,11 @@ type RestartSelection struct {
 
 	// OpensUnavailability marks a selection that takes serving capacity
 	// offline rather than recovering capacity already lost: a fresh
-	// crash-loop repair. The executor puts exactly those to the
-	// unavailability budget and the coordination gate before they open,
-	// so a wedge shared by the whole Component repairs at the
-	// operator's pace instead of recycling every Instance at once.
+	// crash-loop repair of a pod set that still serves. The executor puts
+	// exactly those to the unavailability budget and the coordination
+	// gate before they open, so a wedge shared by the whole Component
+	// repairs at the operator's pace instead of recycling every serving
+	// Instance at once.
 	OpensUnavailability bool
 }
 

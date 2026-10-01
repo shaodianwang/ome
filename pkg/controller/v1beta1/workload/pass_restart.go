@@ -116,15 +116,18 @@ func planExcludingRestartSelections(plan types.ComponentPlan, restarts []Restart
 }
 
 // repairAdmission paces the restart repairs that OPEN a new
-// unavailability. A wedge is usually a property of the revision, not of
-// one Instance, so without pacing a bad image or a bad argument
-// qualifies every Ready Instance in the same pass and the Component
-// recycles itself whole. The two layers an update start answers to
-// answer here too, in the same order and against the same numbers: the
-// per-Component MaxUnavailable budget, then the cross-Component
-// coordination gate. Selections denied by either wait for a later pass;
-// a repair already in flight is anchored in prior, so the pace holds
-// across passes and not merely within one.
+// unavailability: rebuilds of a pod set that still serves. A wedge is
+// usually a property of the revision, not of one Instance, so without
+// pacing a bad image or a bad argument qualifies every Ready Instance in
+// the same pass and the Component takes every serving pod offline at
+// once. The two layers an update start answers to answer here too, in
+// the same order and against the same numbers: the per-Component
+// MaxUnavailable budget, then the cross-Component coordination gate.
+// Selections denied by either wait for a later pass; a repair already in
+// flight is anchored in prior, so the pace holds across passes and not
+// merely within one. A pod set that serves nothing never reaches this
+// admission (ops.RestartOpensUnavailability): its rebuild removes no
+// serving capacity and is charged to neither layer.
 //
 // Lives at the executor's position, not the plan's: the coordination
 // gate reads live peer state, so it must be consulted where the pass's

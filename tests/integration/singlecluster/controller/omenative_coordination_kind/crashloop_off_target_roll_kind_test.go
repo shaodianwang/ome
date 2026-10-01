@@ -25,9 +25,8 @@ import (
 // the roll replaces the pod set at the target and no repair opens on the
 // revision the Component does not want. The shape here is three engine
 // Instances under SurgeThenDrain with maxSurge=1 / maxUnavailable=0 and one
-// Instance wedged before the bump. maxUnavailable=0 denies the crash-loop
-// repair on every pass, so the wedge stands until the bump; the roll then
-// surges the fixed replacement beside the wedged pod and drains it away.
+// Instance wedged before the bump; the roll surges the fixed replacement
+// beside the wedged pod and drains it away.
 //
 // The wedge is a live pod pointed at an image the cluster cannot pull: a
 // running pod's image is its only mutable field, and the fake serving image
@@ -35,9 +34,12 @@ import (
 // waiting reason of the same class as a crash at start, and the crash-loop
 // repair reads both the same way.
 //
-// A seconds-scale stuck-pod grace so the wedge is classified within the
-// suite budget. Nothing else about the shape depends on its value.
-const offTargetRollLifecycleJSON = `{"stuckPodGracePeriod":"10s"}`
+// A stuck-pod grace longer than the spec: the crash-loop repair reads a
+// wedge only past that grace, and a wedged pod set that serves nothing is
+// admitted by neither the budget nor the gate, so a short grace would let
+// the repair rebuild the Instance on the broken revision before the bump
+// lands. The grace keeps the wedge standing so the roll is what reaches it.
+const offTargetRollLifecycleJSON = `{"stuckPodGracePeriod":"10m"}`
 
 // Cells: instance/Ready/pod.waiting[ImagePullBackOff]/boundary@T-ready-surge, instance/Ready/spec.revision/boundary@T-ready-crashloop-restart
 var _ = ginkgo.Describe("behavior — a wedged Instance is rolled to the fixed revision, never repaired on the broken one", ginkgo.Ordered, func() {

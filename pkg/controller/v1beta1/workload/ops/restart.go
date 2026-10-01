@@ -653,15 +653,14 @@ func runnerRestartedSinceReady(pod *corev1.Pod, readySince *metav1.Time) (string
 // restarts, because a container that died and came back is not a wedge.
 //
 // The repair is a Restart, not a Failed stamp: the pod set can be
-// rebuilt. Routing it through the restart pass means the rebuild is
-// admitted the way any attempt that takes capacity offline is — the
-// per-Component unavailability budget and the cross-Component
-// coordination gate must both admit it before it opens, and the
-// RetryBlock recorded against the revision denies it once the attempts
-// are spent. A Component wedged on a bad revision therefore repairs at
-// the operator's configured pace instead of recycling every Instance in
-// one pass, and a revision that keeps crash-looping is held rather than
-// recycled forever.
+// rebuilt. Routing it through the restart pass means a rebuild that
+// takes a serving pod offline is admitted the way any such attempt is —
+// the per-Component unavailability budget and the cross-Component
+// coordination gate must both admit it before it opens — while a rebuild
+// of a pod set that serves nothing removes no serving capacity and is
+// admitted by neither. The RetryBlock recorded against the revision
+// denies either once the attempts are spent, so a revision that keeps
+// crash-looping is held rather than recycled forever.
 
 // crashLoopRepairReason reports whether this row holds a crash-loop
 // wedge the restart pass may repair: the wedge itself is
@@ -680,16 +679,19 @@ func crashLoopRepairReason(input workload.ReconcileInput, s *workload.InstanceSt
 }
 
 // RestartOpensUnavailability reports whether a restart selection for
-// inst would OPEN a fresh crash-loop repair this pass, as opposed to
-// driving one already in flight or recovering capacity that is already
-// gone. Only a fresh open takes serving capacity offline, so only a
-// fresh open is put to the unavailability budget and the coordination
-// gate; a Restart already in flight must be driven to completion, and
-// the pod-loss triggers repair an outage rather than causing one.
+// inst would OPEN a fresh crash-loop repair this pass that takes serving
+// capacity offline, as opposed to driving one already in flight or
+// recovering capacity that is already gone. Only such an open is put to
+// the unavailability budget and the coordination gate: a Restart already
+// in flight must be driven to completion, the pod-loss triggers repair an
+// outage rather than causing one, and a wedged pod set that serves
+// nothing (evidence.PodSetServesNothing, the reading the update pass
+// makes for a dark row) removes no serving capacity, so its rebuild is
+// admitted and charged by neither layer.
 func RestartOpensUnavailability(input workload.ReconcileInput, inst workload.InstancePlan, instancePods []*corev1.Pod) bool {
 	s := input.ObservedState.Instance(inst.Index)
 	_, wedged := crashLoopRepairReason(input, s, inst.TotalPods(), instancePods)
-	return wedged
+	return wedged && !evidence.PodSetServesNothing(instancePods)
 }
 
 // A spent repair: a Restart parked at Failed by the deadline or a wedged

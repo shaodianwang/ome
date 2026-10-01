@@ -9,6 +9,10 @@ arrows:
   - T-ready-crashloop-restart
 cells:
   - instance/Ready/pod.waiting[CrashLoopBackOff]/before
+intentional: >-
+  the wedged pod set serves nothing, so the repair removes no serving
+  capacity and is admitted by neither the per-Component budget nor the
+  coordination gate: no consult appears in the trace
 initial:
   spec:
     replicas: 1
