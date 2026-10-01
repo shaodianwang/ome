@@ -1,0 +1,23 @@
+# p6601: [gen] canary fault-new crashStart exit rollback engine N=8 s1 rp RecreateInstance  mode=canary Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 fault=crashloop:new co=none topo=engine canary=auto form=start during=canary-failed verb=rollback victimcomp=engine terminal=RolledBack cell=canary/Staging/canaryBroken[crashStart],canary/Failed/rollback
+# reason: the pushed engine revision dies at every start, under restart policy RecreateInstanceOnPodRestart; the ladder stops at the step where the break bites and parks with a reason, no traffic names the broken revision at the park while the stable side keeps serving every Instance the broken revision had not replaced, nothing promotes the broken revision, and then a rollback drains the broken revision and holds at RolledBack with the rejected revision recorded
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p6601 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          canary:
+            readyTimeout: "90s"
+            steps:
+              - { capacity: "10%", traffic: 10, pause: { duration: "20s" } }
+              - { capacity: "30%", traffic: 30, pause: { duration: "20s" } }
+              - { capacity: "60%", traffic: 60, pause: { duration: "20s" } }
+              - { capacity: "100%", traffic: 100 }

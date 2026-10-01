@@ -223,8 +223,9 @@ def _fault(v):
     if kind in ("podkill", "ctrlrestart"):
         return param in FAULT_PHASES or _hook(param) or (kind == "ctrlrestart" and param == "idle")
     if kind in ("crashloop", "imagepull"):
-        # the running revision breaks: from the bump (old) or at a canary hook
-        return param == "old" or _hook(param)
+        # a break names the revision a rollout leaves behind (old), the one the
+        # push brings (new), the idle service before the push, or a canary hook
+        return param in ("old", "new", "idle") or _hook(param)
     return {"cordon": "source", "configkey": "missing", "node": "notready"}.get(kind) == param
 
 
@@ -273,6 +274,7 @@ HEADER_CHECKS = {
     "to_e": _count, "to_d": _count, "to_r": _count, "partition": _count, "failurelimit": _count,
     "minfails": _count, "verbhold": _count, "releaseafter": _count, "skipsoak": _count,
     "ratio_tol": _count, "scale_e": _count, "scale_d": _count, "issue": _count, "victims": _count,
+    "exitafter": _count,
     "rollback": _flag, "readd": _flag, "dup": _flag, "hint": _flag, "hold": _flag, "pkill": _flag,
     "blocked": _flag, "infeasible": _flag, "notimpl": _flag, "floor_hard": _flag, "floor_soft": _flag,
     "order_soft": _flag,
@@ -601,10 +603,12 @@ def classify_faults(h, mode, pods, strategy, verbs):
     elif kind == "crashloop":
         component = str(h.get("victimcomp", "engine"))
         crash = "crash at start" if h.get("form") == "start" else "crash after Ready"
-        faults.append(("sibling broken" if component != "engine" else crash, "persistent", "running", component))
+        side = "new" if param == "new" else "running"
+        faults.append(("sibling broken" if component != "engine" else crash, "persistent", side, component))
     elif kind == "imagepull":
         component = str(h.get("victimcomp", "engine"))
-        faults.append(("sibling broken" if component != "engine" else "image pull", "persistent", "running", component))
+        side = "new" if param == "new" else "running"
+        faults.append(("sibling broken" if component != "engine" else "image pull", "persistent", side, component))
     elif kind == "configkey":
         faults.append(("config missing", "one-shot" if lifted else "persistent", "running", str(h.get("victimcomp", "engine"))))
     elif kind == "node":

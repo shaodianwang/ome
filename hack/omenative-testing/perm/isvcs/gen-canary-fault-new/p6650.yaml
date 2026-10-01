@@ -1,0 +1,33 @@
+# p6650: [gen] canary fault-new crashAfterSoak exit rebump-fix pd N=8 s2 rp None  mode=canary Ne=8 Nd=8 Nr=2 ceil_e=10 ceil_d=9 ceil_r=3 fault=crashloop:new co=none topo=pd canary=auto form=load exitafter=40 during=canary-failed verb=rebump-fix victimcomp=engine terminal=Stable cell=canary/Staging[next]/canaryBroken[crashAfterSoak],canary/Failed/newTarget
+# reason: the pushed engine revision passes readiness and exits 40s later, after the first step's 20s soak has advanced the ladder, every time the kubelet restarts it, under restart policy None; the ladder stops at the step where the break bites and parks with a reason, no traffic names the broken revision at the park while the stable side keeps serving every Instance the broken revision had not replaced, nothing promotes the broken revision, and then a fix push that drops the broken runner lands on every Instance, serving, with nothing left on the broken revision
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p6650 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 2, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine, decoder, router]
+          canary:
+            readyTimeout: "90s"
+            steps:
+              - { capacity: "10%", traffic: 10, pause: { duration: "20s" } }
+              - { capacity: "30%", traffic: 30, pause: { duration: "20s" } }
+              - { capacity: "60%", traffic: 60, pause: { duration: "20s" } }
+              - { capacity: "100%", traffic: 100 }

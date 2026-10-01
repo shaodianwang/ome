@@ -1,0 +1,52 @@
+# p6559: [gen] canary fault-old imagepull at analysis engine N=8 s1 rp RecreateInstance victims 3 analysis  mode=canary Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 fault=imagepull:canary-serving@1 co=none topo=engine canary=auto victims=3 analysis=pass failurelimit=1 nophase=Failed cell=canary/Serving[analysis]/stableBroken[imagePull]
+# reason: 3 old-revision engine Instance(s) sit in ImagePullBackOff while the second step's analysis gate samples, under restart policy RecreateInstanceOnPodRestart; the ladder walks every step to Stable inside its budgets, every broken Instance ends on the canary revision serving, no repair is recorded for one after the push, and the healthy Instances keep serving above N-3; every step before the cutover is gated on a passing analysis, which the broken stable pods do not feed
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p6559 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-metrics, autoSync: true }
+  engine:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: "OMENative", perm.test/error-rate: "0.0", perm.test/emit: "true", prometheus.io/scrape: "true", prometheus.io/port: "8080", prometheus.io/path: "/metrics" }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          canary:
+            steps:
+              - capacity: "10%"
+                traffic: 10
+                analysis:
+                  interval: "20s"
+                  failureLimit: 1
+                  initialDelay: "20s"
+                  metrics:
+                    - name: error_rate
+                      query: 'max(canary_error_rate{inferenceservice="{{.ISVCName}}",component="{{.Component}}"})'
+                      operator: LTE
+                      threshold: "0.05"
+              - capacity: "30%"
+                traffic: 30
+                analysis:
+                  interval: "20s"
+                  failureLimit: 1
+                  initialDelay: "20s"
+                  metrics:
+                    - name: error_rate
+                      query: 'max(canary_error_rate{inferenceservice="{{.ISVCName}}",component="{{.Component}}"})'
+                      operator: LTE
+                      threshold: "0.05"
+              - capacity: "60%"
+                traffic: 60
+                analysis:
+                  interval: "20s"
+                  failureLimit: 1
+                  initialDelay: "20s"
+                  metrics:
+                    - name: error_rate
+                      query: 'max(canary_error_rate{inferenceservice="{{.ISVCName}}",component="{{.Component}}"})'
+                      operator: LTE
+                      threshold: "0.05"
+              - { capacity: "100%", traffic: 100 }

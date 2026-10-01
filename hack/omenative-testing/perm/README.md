@@ -96,7 +96,7 @@ perm/
 │   ├── migration/ restart/ partition/ scale/ edge/  — feature cases (see ../DESIGN.md)
 │   ├── gen-rollout/ gen-fault/ gen-restart/ gen-crashloop/ gen-switch/ gen-crashloop-idle/ gen-crashloop-sibling/
 │   │   gen-heal/ gen-imagepull/ gen-node/ gen-ctrlrestart/  — generated hot core (see isvcs/MANIFEST.md)
-│   └── gen-canary-crash/ gen-canary-second-rev/ gen-canary-podkill/  — generated operator stories driven through a canary
+│   └── gen-canary-crash/ gen-canary-second-rev/ gen-canary-podkill/ gen-canary-fault-old/ gen-canary-fault-new/  — generated operator stories driven through a canary
 └── results/
     └── <RUN_TS>/<feature>/<topo>/
         ├── pNN-<ts>.tsv   — one verdict row per case
@@ -109,7 +109,7 @@ perm/
 Read `runtime/csr.yaml`. The critical line:
 
 ```yaml
-command: ["sh", "-c", "trap 'exit 0' QUIT TERM INT; sleep ${TEST_STARTUP_DELAY:-15} & wait $! && … && exec nginx …"]   # TEST_STARTUP_DELAY=15
+command: ["sh", "-c", "trap 'exit 0' QUIT TERM INT; sleep ${TEST_STARTUP_DELAY:-15} & wait $! && … || exit 1; [ -n \"${TEST_EXIT_AFTER}\" ] || exec nginx …; nginx … & sleep ${TEST_EXIT_AFTER} & wait $!; exit 1"]   # TEST_STARTUP_DELAY=15
 ```
 
 Plain nginx goes Ready in ~150 ms, so a pod sampler misses every transition. The
@@ -126,6 +126,14 @@ of exiting immediately. After the `exec`, nginx's own SIGQUIT handling takes
 over, so a Ready pod always drains fast.
 `csr-multinode.yaml` applies the same startup delay to the gang runtime (leader +
 workers), so multi-node cases catch their peaks too.
+
+`TEST_EXIT_AFTER` is the runtime's one fault switch. Unset (every fixture and
+every case leaves it unset), the command execs nginx exactly as above. Set to
+a number of seconds, the shell stays PID 1, serves through nginx for that long
+after it is up, then exits 1 — every time the kubelet restarts the container —
+so the pod passes readiness and crashes after it. Only `fault=crashloop:new
+form=load` sets it, on the pushed revision's runner env; the trap still answers
+a stop signal during the window, so such a pod drains fast too.
 
 The CBM points at a 1 Mi PVC in `$OME_TEST_NS`; the seed Job writes a minimal
 `config.json`, and OME's own metadata-extraction Job (built from the `omeAgent`
@@ -382,6 +390,13 @@ such as the recovery half of a podkill, carries both ids.
   does (each ends on the canary revision serving, no `RestartTriggered` event
   names one after the bump), and the capacity floor is read with the victims
   allowed for: the healthy Instances must hold `N - maxUnavailable - n`.
+  `fault=<kind>:idle` lands the same break on the settled service before the
+  push: the push waits until the break has visibly bitten (`BREAK_BITE_S`,
+  60 s scaled), so it meets a fleet that is already broken, and the verdict
+  reads the victims as above. Under `canary=manual` the harness holds its
+  promote `verbhold=` seconds (default 45) after a break fired at a hook, so
+  the broken stable side is observed while the gate holds, as an operator
+  would see it before promoting.
   Every re-target verb (`rebump`, `rebump-fix`, `rtedit`) additionally
   asserts, at a live hook, that the run open when it fired closed as
   `Superseded`, that no Instance is left on a pre-re-target revision at
@@ -394,6 +409,29 @@ such as the recovery half of a podkill, carries both ids.
   unpullable image for that, `example.com/canary-test/missing:none`
   (`runtime_fixtures.UNPULLABLE_IMAGE`): it is the one case image the deploy
   step never side-loads, so it fails to pull offline as well as online.
+- **`fault=crashloop:new` with `form=start|load`, `fault=imagepull:new`** —
+  the push itself brings a broken revision. The break is armed on the runner
+  of one bumped member (`victimcomp=`, default engine) before the push lands,
+  never injected into a running pod: `form=start` gives it the fixture's
+  shell-less metrics image, so the fixture command dies at every start;
+  `imagepull:new` gives it the unpullable image; `form=load` sets the fixture
+  runtime's `TEST_EXIT_AFTER` switch to `exitafter=` seconds
+  (`OME_TEST_CRASH_EXIT_AFTER_S`, default 20, when the header leaves it out),
+  so the pod passes readiness and exits that long after it is up, every time
+  the kubelet restarts it. `img=` and `victims=` do not apply. The exit is the
+  case's verb at `during=canary-failed`: `rollback` (`terminal=RolledBack`) or
+  `rebump-fix` (`terminal=Stable`; the fix push drops the runner override, env
+  and image alike). The verdict is the operator's end state: the break bit (a
+  pushed revision that never breaks is `INFRA-FAIL`), the ladder parked at the
+  step where it bit with the unit's `canary.failed.reason` set, no traffic
+  named the broken revision at the park while the stable side kept serving
+  every Instance the broken revision had not replaced, nothing reached
+  `Promoting` before the exit landed, and then the exit's own terminal checks
+  (drained back with the rejected revision recorded, or every Instance on the
+  fixed revision with nothing left on the broken one). The capacity floor is
+  read with the Instances the broken revision reached allowed for. Under an
+  analysis gate only the pull failure is armed: the metrics image is a static
+  binary with no shell and no exit switch.
 - **`terminal=Stable|RolledBack|Failed`** — the expected terminal phase when the
   derivation from `analysis=`/`rollback=` does not apply; `Failed` asserts the
   park (no canary traffic, not fully rolled, nothing rolled back).
@@ -993,10 +1031,17 @@ Four generators write into `isvcs/`; re-run one after editing it:
   revision breaks under it), `isvcs/gen-canary-second-rev/` (a second revision
   lands while the first canary is staging or serving) and
   `isvcs/gen-canary-podkill/` (a pod deleted by hand while the roll is paused
-  or held), plus `isvcs/MANIFEST.md` (per-dimension counts, constraint
-  ledger, missing-hook catalog). The story families are canary lanes in
-  CI: the pipeline gives every `gen-canary-*` folder the canary pod budget
-  and Prometheus.
+  or held), the step kinds crossed with the persistent faults (`p6400`–`p6799`) →
+  `isvcs/gen-canary-fault-old/` (the stable side breaks before the push, at
+  the capacity step, during a soak, at a manual gate, at an analysis gate and
+  at the last gate before the cutover; the ladder still lands the fix on every
+  broken Instance) and `isvcs/gen-canary-fault-new/` (the push brings a
+  revision that crashes at start, crashes after Ready inside or past the first
+  soak, or cannot be pulled; the ladder parks where it bites and a rollback or
+  a fix push lands), plus `isvcs/MANIFEST.md` (per-dimension counts, the
+  constraint ledger with every omitted cell and its reason, missing-hook
+  catalog). The story families are canary lanes in CI: the pipeline gives
+  every `gen-canary-*` folder the canary pod budget and Prometheus.
 
 A generator owns exactly the case ids it mints. Hand-written cases share the
 feature folders with generated ones (`restart/`, `canary/`, `scale/` and

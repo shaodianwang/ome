@@ -752,7 +752,11 @@ class TestCheckedInTreeClassification(unittest.TestCase):
         self.assertEqual(shard_counts[("gen-canary-second-rev", "pd", "")], 8)
         self.assertEqual(shard_counts[("gen-canary-podkill", "engine", "")], 2)
         self.assertEqual(shard_counts[("gen-canary-podkill", "pd", "")], 4)
-        self.assertEqual(job_count, 222)
+        self.assertEqual(shard_counts[("gen-canary-fault-old", "engine", "")], 16)
+        self.assertEqual(shard_counts[("gen-canary-fault-old", "pd", "")], 47)
+        self.assertEqual(shard_counts[("gen-canary-fault-new", "engine", "")], 5)
+        self.assertEqual(shard_counts[("gen-canary-fault-new", "pd", "")], 13)
+        self.assertEqual(job_count, 303)
 
     def test_force_delete_twin_runs_exactly_the_cases_that_need_the_policy(self):
         """A lane whose cases carry needs=forcedelete gets a policy-on twin

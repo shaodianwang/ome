@@ -1,0 +1,22 @@
+# p6566: [gen] canary fault-old crashloop:start at promote engine N=8 s1 rp RecreateInstance victims 1  mode=canary Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 fault=crashloop:canary-serving@2 co=none topo=engine canary=manual form=start victims=1 verbhold=30 nophase=Failed cell=canary/Serving[lastGate]/stableBroken[crashStart]
+# reason: 1 old-revision engine Instance(s) crash at every start while the last gate waits for the promote that cuts over, under restart policy RecreateInstanceOnPodRestart; the ladder walks every step to Stable inside its budgets, every broken Instance ends on the canary revision serving, no repair is recorded for one after the push, and the healthy Instances keep serving above N-1
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p6566 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "RecreateInstanceOnPodRestart", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine]
+          canary:
+            steps:
+              - { capacity: "10%", traffic: 10, pause: {  } }
+              - { capacity: "30%", traffic: 30, pause: {  } }
+              - { capacity: "60%", traffic: 60, pause: {  } }
+              - { capacity: "100%", traffic: 100 }

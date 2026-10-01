@@ -1,0 +1,32 @@
+# p6577: [gen] canary fault-old crashloop:start at promote pd N=8 s1 rp None victims 3  mode=canary Ne=8 Nd=8 Nr=2 ceil_e=9 ceil_d=9 ceil_r=3 fault=crashloop:canary-serving@2 co=none topo=pd canary=manual form=start victims=3 verbhold=30 nophase=Failed cell=canary/Serving[lastGate]/stableBroken[crashStart]
+# reason: 3 old-revision engine Instance(s) crash at every start while the last gate waits for the promote that cuts over, so every stable Instance left is broken and the split names a revision with no serving pod until the cutover (reported, not failed), under restart policy None; the ladder walks every step to Stable inside its budgets, every broken Instance ends on the canary revision serving, no repair is recorded for one after the push, and the healthy Instances keep serving above N-3
+apiVersion: ome.io/v1beta1
+kind: InferenceService
+metadata: { name: p6577 }
+spec:
+  model:   { apiGroup: ome.io, kind: ClusterBaseModel,      name: ome-coordtest-noop }
+  runtime: { apiGroup: ome.io, kind: ClusterServingRuntime, name: ome-coordtest-cpu, autoSync: true }
+  engine:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  decoder:
+    minReplicas: 8
+    maxReplicas: 8
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { restartPolicy: "None", updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  router:
+    minReplicas: 2
+    maxReplicas: 2
+    annotations: { ome.io/deploymentMode: OMENative }
+    lifecycle: { updateStrategy: { type: "SurgeThenDrain", rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } } }
+  rollout:
+    groups:
+        - components: [engine, decoder, router]
+          canary:
+            steps:
+              - { capacity: "10%", traffic: 10, pause: {  } }
+              - { capacity: "30%", traffic: 30, pause: {  } }
+              - { capacity: "60%", traffic: 60, pause: {  } }
+              - { capacity: "100%", traffic: 100 }

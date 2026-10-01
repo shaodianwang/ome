@@ -37,7 +37,7 @@ spec:
         # sets worker_processes (so -g would be a duplicate directive); instead
         # sed a copy into /tmp (the conf is read-only) and nginx -c it, which
         # preserves the image's writable pid path + its 8080 server.
-        command: ["sh", "-c", "trap 'exit 0' QUIT TERM INT; sleep ${TEST_STARTUP_DELAY:-15} & wait $! && sed 's/^worker_processes.*/worker_processes 2;/' /etc/nginx/nginx.conf > /tmp/nginx.conf && exec nginx -c /tmp/nginx.conf -g 'daemon off;'"]
+        command: ["sh", "-c", "trap 'exit 0' QUIT TERM INT; sleep ${TEST_STARTUP_DELAY:-15} & wait $! && sed 's/^worker_processes.*/worker_processes 2;/' /etc/nginx/nginx.conf > /tmp/nginx.conf || exit 1; [ -n \"${TEST_EXIT_AFTER}\" ] || exec nginx -c /tmp/nginx.conf -g 'daemon off;'; nginx -c /tmp/nginx.conf -g 'daemon off;' & sleep ${TEST_EXIT_AFTER} & wait $!; exit 1"]
         env:
           - { name: TEST_REV,            value: "v1" }
           - { name: TEST_STARTUP_DELAY,  value: "15" }

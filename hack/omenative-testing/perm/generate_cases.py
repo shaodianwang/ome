@@ -72,6 +72,16 @@ into fourteen generator-owned folders, using ONLY verbs and hooks the runners
     gen-canary-podkill/  p5290+  a pod deleted by hand while the roll is
                           paused or held; the replacement is labelled as
                           what it runs and the roll finishes
+    gen-canary-fault-old/ p6400+  a persistent fault on the stable side at
+                          each step kind of the ladder (before the push,
+                          the capacity step, a soak, a manual gate, an
+                          analysis gate, the last gate before the promote);
+                          the ladder still lands the fix on every Instance
+    gen-canary-fault-new/ p6600+  the push itself brings a broken revision
+                          (crash at start, crash after Ready inside or past
+                          the soak, an image that cannot be pulled); the
+                          ladder stops where it bites, says why, and a
+                          rollback or a fix push lands
 
 Ownership and determinism:
   - The gen-* folders belong ENTIRELY to this generator: every case there
@@ -200,6 +210,8 @@ GEN_BLOCKS = {
     "gen-canary-crash": (5200, 5250),
     "gen-canary-second-rev": (5250, 5290),
     "gen-canary-podkill": (5290, 5400),
+    "gen-canary-fault-old": (6400, 6600),
+    "gen-canary-fault-new": (6600, 6800),
 }
 GEN_ID_LO = min(lo for lo, _hi in GEN_BLOCKS.values())
 GEN_ID_HI = max(hi for _lo, hi in GEN_BLOCKS.values())
@@ -482,7 +494,7 @@ def shape_tag(topo, w):
 GEN_HDR_ORDER = ["mode", "Ne", "Nd", "Nr", "ceil_e", "ceil_d", "ceil_r",
                  "restart", "kill", "pause", "fault", "floor_soft", "order_soft",
                  "co", "topo",
-                 "canary", "bump", "img", "form", "victims", "during", "verb", "verbhold",
+                 "canary", "bump", "img", "form", "victims", "exitafter", "during", "verb", "verbhold",
                  "verb2", "during2", "victim", "victimcomp", "release", "releaseafter", "rt",
                  "analysis", "failurelimit", "terminal", "nophase", "cell"]
 
@@ -1465,6 +1477,180 @@ def emit_canary_podkill(add):
                                          ready_timeout=ready_timeout))
 
 
+# ── gen-canary-fault-old: the stable side breaks at each step kind ───────────
+# The step kinds that differ in mechanism, each a hook of the story ladder:
+#   prestart  the break lands on the idle service and the push meets a fleet
+#             that is already broken (fault=<kind>:idle);
+#   capacity  the first step builds canary capacity ahead of any traffic
+#             (Pending);
+#   traffic   the second step soaks its split (auto): part of the stable
+#             side is already replaced;
+#   gate      the second step waits at a manual gate, which the harness
+#             promotes BREAK_GATE_HOLD_S after the break, as an operator would;
+#   analysis  the second step is gated on a passing analysis (the metrics
+#             runtime);
+#   promote   the last gate (manual, the third step): the promote after the
+#             break is the cutover that drains what is left of the stable side.
+# (name, fault hook, promotion, analysis gate)
+STABLE_BREAK_STEPS = [
+    ("prestart", "idle", "auto", None),
+    ("capacity", "canary-staging", "auto", None),
+    ("traffic", "canary-serving@1", "auto", None),
+    ("gate", "canary-serving@1", "manual", None),
+    ("analysis", "canary-serving@1", "auto", "pass"),
+    ("promote", "canary-serving@2", "manual", None),
+]
+# The surge budget is live where capacity builds right after the break (the
+# push on a broken fleet, the capacity step, a soak whose end opens the next
+# step) and dormant while a gate holds; the storm shape (three victims)
+# matters where the stable side's remaining capacity does, which the manual
+# gate at the second step does not change against the first split's storm.
+STABLE_BREAK_SURGES = {"prestart": [1, 2], "capacity": [1, 2], "traffic": [1, 2],
+                       "gate": [1], "analysis": [1], "promote": [1]}
+STABLE_BREAK_VICTIMS = {"prestart": [1, 3], "capacity": [1, 3], "traffic": [1, 3],
+                        "gate": [1], "analysis": [1, 3], "promote": [1, 3]}
+# The break kinds per gate. The metrics runtime can be broken only by a pull
+# failure: its image is a static binary with no shell to exec a kill into,
+# and no fixture image fails to start under its entrypoint.
+STABLE_BREAK_KINDS = {None: STORM_BREAKS, "pass": [("imagepull", "start")]}
+BREAK_GATE_HOLD_S = 30
+STABLE_BREAK_STATE = {"prestart": "Idle", "capacity": "Staging", "traffic": "Serving[soak]",
+                      "gate": "Serving[gate]", "analysis": "Serving[analysis]", "promote": "Serving[lastGate]"}
+
+
+def _stable_break_when(step, victims):
+    when = {"prestart": "before the push lands (the break bites on the idle service first)",
+            "capacity": "while the first step builds canary capacity ahead of any traffic",
+            "traffic": "while the second step soaks its split",
+            "gate": f"while the second step waits at its manual gate, promoted {BREAK_GATE_HOLD_S}s after the break",
+            "analysis": "while the second step's analysis gate samples",
+            "promote": "while the last gate waits for the promote that cuts over"}[step]
+    if step == "promote" and victims == 3:
+        when += (", so every stable Instance left is broken and the split names a revision with no serving pod "
+                 "until the cutover (reported, not failed)")
+    return when
+
+
+def _stable_break_reason(step, kind, form, victims, rp, gate):
+    how = {("crashloop", "start"): "crash at every start",
+           ("crashloop", "load"): "die after Ready and come back between crashes",
+           ("imagepull", "start"): "sit in ImagePullBackOff"}[(kind, form)]
+    out = (f"{victims} old-revision engine Instance(s) {how} {_stable_break_when(step, victims)}, under restart policy "
+           f"{RP_FULL[rp]}; the ladder walks every step to Stable inside its budgets, every broken Instance ends on "
+           f"the canary revision serving, no repair is recorded for one after the push, and the healthy Instances "
+           f"keep serving above N-{victims}")
+    if gate:
+        out += "; every step before the cutover is gated on a passing analysis, which the broken stable pods do not feed"
+    return out
+
+
+def emit_canary_fault_old(add):
+    for step, hook, policy, gate in STABLE_BREAK_STEPS:
+        for topo in STORY_TOPOS:
+            for surge in STABLE_BREAK_SURGES[step]:
+                for kind, form in STABLE_BREAK_KINDS[gate]:
+                    for rp in RESTARTS:
+                        for victims in STABLE_BREAK_VICTIMS[step]:
+                            kv = story_kv(topo, surge)
+                            kv.update(canary=policy, fault=f"{kind}:{hook}")
+                            if kind == "crashloop":
+                                kv["form"] = form
+                            kv["victims"] = victims
+                            if policy == "manual":
+                                kv["verbhold"] = BREAK_GATE_HOLD_S
+                            if gate:
+                                kv.update(analysis=gate, failurelimit=1)
+                            kv.update(nophase="Failed",
+                                      cell=f"canary/{STABLE_BREAK_STATE[step]}/stableBroken[{_storm_cell(kind, form)}]",
+                                      co="none", topo=topo)
+                            case_comps = story_comps(topo, surge, rp, ann=(lib.METRICS_ANN if gate else None))
+                            desc = (f"{GEN_MARK} canary fault-old {_storm_label(kind, form)} at {step} {shape_tag(topo, 0)} "
+                                    f"N={STORY_N} s{surge} rp {rp} victims {victims}" + (" analysis" if gate else ""))
+                            meta = dict(strat="SurgeThenDrain", verb=f"{_storm_label(kind, form)}@{step}", rp=rp)
+                            add("gen-canary-fault-old", desc, kv, case_comps,
+                                _stable_break_reason(step, kind, form, victims, rp, gate), meta,
+                                cell=("fault-old", step, kind, form, topo, surge, rp, victims, gate),
+                                coord=story_group(case_comps, story_ladder(policy, gate)),
+                                runtime=(lib.CSR_METRICS if gate else None))
+
+
+# ── gen-canary-fault-new: the push brings a broken revision ─────────────────
+# Where the break bites is the axis. A crash at start and an image that cannot
+# be pulled bite at staging (the capacity gate never fills); a crash after
+# Ready bites inside the first step's soak (the runner exits before the soak
+# ends) or past it (it outlives the soak and dies while the next step's
+# capacity builds). The exit at the park is a rollback or a fix push that
+# drops the broken runner. (name, kind, form, exitafter)
+STORY_SOAK_S = int(lib.CANARY_PAUSE["auto"]["duration"].rstrip("s"))
+CRASH_EXIT_IN_SOAK_S, CRASH_EXIT_AFTER_SOAK_S = 10, 40
+NEW_BREAKS = [
+    ("crashStart", "crashloop", "start", None),
+    ("imagePull", "imagepull", None, None),
+    ("crashInSoak", "crashloop", "load", CRASH_EXIT_IN_SOAK_S),
+    ("crashAfterSoak", "crashloop", "load", CRASH_EXIT_AFTER_SOAK_S),
+]
+NEW_BREAK_EXITS = [("rollback", "RolledBack"), ("rebump-fix", "Stable")]
+# The surge budget is dormant where the ladder parks at its first capacity
+# step, which asks one Instance, and live once the step advanced. The metrics
+# runtime carries only the pull failure (see STABLE_BREAK_KINDS), and only
+# with the fix exit: a park before the first gate yields no analysis sample,
+# which the rollback terminal's verdict requires, while the fix push walks
+# the gated ladder.
+NEW_BREAK_SURGES = {"crashStart": [1], "imagePull": [1], "crashInSoak": [1, 2], "crashAfterSoak": [1, 2]}
+NEW_BREAK_GATES = {"crashStart": [None], "imagePull": [None, "pass"], "crashInSoak": [None], "crashAfterSoak": [None]}
+NEW_BREAK_STATE = {"crashStart": "Staging", "imagePull": "Staging", "crashInSoak": "Serving", "crashAfterSoak": "Staging[next]"}
+NEW_BREAK_EXIT_CELL = {"rollback": "canary/Failed/rollback", "rebump-fix": "canary/Failed/newTarget"}
+
+
+def _new_break_reason(name, exit_verb, rp, gate):
+    how = {"crashStart": "the pushed engine revision dies at every start",
+           "imagePull": "the pushed engine revision's image cannot be pulled",
+           "crashInSoak": (f"the pushed engine revision passes readiness and exits {CRASH_EXIT_IN_SOAK_S}s later, inside "
+                           f"the first step's {STORY_SOAK_S}s soak, every time the kubelet restarts it"),
+           "crashAfterSoak": (f"the pushed engine revision passes readiness and exits {CRASH_EXIT_AFTER_SOAK_S}s later, "
+                              f"after the first step's {STORY_SOAK_S}s soak has advanced the ladder, every time the "
+                              f"kubelet restarts it")}[name]
+    then = {"rollback": "a rollback drains the broken revision and holds at RolledBack with the rejected revision recorded",
+            "rebump-fix": ("a fix push that drops the broken runner lands on every Instance, serving, with nothing left "
+                           "on the broken revision")}[exit_verb]
+    out = (f"{how}, under restart policy {RP_FULL[rp]}; the ladder stops at the step where the break bites and parks "
+           f"with a reason, no traffic names the broken revision at the park while the stable side keeps serving every "
+           f"Instance the broken revision had not replaced, nothing promotes the broken revision, and then {then}")
+    if gate:
+        out += "; the steps before the cutover are gated on a passing analysis, which the park precedes and the fix walks"
+    return out
+
+
+def emit_canary_fault_new(add):
+    for name, kind, form, exit_after in NEW_BREAKS:
+        for topo in STORY_TOPOS:
+            for surge in NEW_BREAK_SURGES[name]:
+                for gate in NEW_BREAK_GATES[name]:
+                    for exit_verb, terminal in NEW_BREAK_EXITS:
+                        if gate and exit_verb != "rebump-fix":
+                            continue
+                        for rp in RESTARTS:
+                            kv = story_kv(topo, surge)
+                            kv.update(canary="auto", fault=f"{kind}:new")
+                            if form:
+                                kv["form"] = form
+                            if exit_after:
+                                kv["exitafter"] = exit_after
+                            if gate:
+                                kv.update(analysis=gate, failurelimit=1)
+                            kv.update(during="canary-failed", verb=exit_verb, victimcomp="engine", terminal=terminal,
+                                      cell=f"canary/{NEW_BREAK_STATE[name]}/canaryBroken[{name}],{NEW_BREAK_EXIT_CELL[exit_verb]}",
+                                      co="none", topo=topo)
+                            case_comps = story_comps(topo, surge, rp, ann=(lib.METRICS_ANN if gate else None))
+                            desc = (f"{GEN_MARK} canary fault-new {name} exit {exit_verb} {shape_tag(topo, 0)} "
+                                    f"N={STORY_N} s{surge} rp {rp}" + (" analysis" if gate else ""))
+                            meta = dict(strat="SurgeThenDrain", verb=f"{kind}:new:{name}", rp=rp)
+                            add("gen-canary-fault-new", desc, kv, case_comps, _new_break_reason(name, exit_verb, rp, gate), meta,
+                                cell=("fault-new", name, exit_verb, topo, surge, rp, gate),
+                                coord=story_group(case_comps, story_ladder("auto", gate), ready_timeout=HELD_READY_TIMEOUT),
+                                runtime=(lib.CSR_METRICS if gate else None))
+
+
 # ── assembly ─────────────────────────────────────────────────────────────────
 def build_outputs():
     """{relative path under isvcs/: file text} — the entire owned output set."""
@@ -1523,6 +1709,8 @@ def build_outputs():
     emit_canary_crash(add)
     emit_canary_retarget(add)
     emit_canary_podkill(add)
+    emit_canary_fault_old(add)
+    emit_canary_fault_new(add)
     stale = set(PARKED) - parked_used
     if stale:
         sys.exit("PARKED keys match no emitted cell (stale after a matrix change): "
@@ -1704,6 +1892,42 @@ def manifest(rows):
         " gate, under the operator's pause, under a capacity gate held by an"
         " image that cannot start, and under that gate paused; the engine surge"
         " is 1 (the budget is dormant while the roll is held).",
+        "- gen-canary-fault-old breaks the stable side at the step kinds that"
+        " differ in mechanism: before the push (the push meets a broken fleet),"
+        " the capacity step ahead of traffic, the second step's timed soak, the"
+        " same step at a manual gate (promoted"
+        f" {BREAK_GATE_HOLD_S}s after the break), the same step at an analysis"
+        " gate, and the last gate before the cutover. Left out, with the reason:"
+        " the first split, which gen-canary-crash drives with the same faults,"
+        " victims and policies; the cutover itself (Promoting), where at most"
+        " the surge budget of stable Instances is left and already draining, so"
+        " a break has no settled row to land on (the last gate carries that"
+        " claim); a traffic step apart from its soak, since every traffic step"
+        " of the story ladder but the cutover soaks; the surge budget at the"
+        " gates, where no capacity builds while they hold (surge 1 only); three"
+        " victims at the manual gate, whose storm is the first split's under"
+        " another release; the crash forms under the analysis gate, since the"
+        " metrics image is a static binary with no shell to exec a kill into"
+        " and no fixture image fails to start under its entrypoint (the pull"
+        " failure alone breaks it); the analysis gate crossed with the other"
+        " step kinds, since the gate changes only what ends a hold, not how a"
+        " break meets it; and a missing ConfigMap key, whose reference both"
+        " revisions share, so a push is never its fix (the idle configkey"
+        " family lifts the cause instead).",
+        "- gen-canary-fault-new arms the break on the pushed engine revision"
+        " and crosses where it bites (a crash at start and a pull failure at"
+        " staging; a crash after Ready inside the first soak and past it) with"
+        " the exit at the park (a rollback, or a fix push that drops the broken"
+        " runner), both shapes and both restart policies. Left out, with the"
+        " reason: the surge budget where the ladder parks at its first capacity"
+        " step, which asks one Instance (surge 1 only); the crash forms under"
+        " the analysis gate (the metrics image carries no shell and no exit"
+        " switch); the rollback exit under the analysis gate, whose terminal"
+        " verdict requires an analysis sample a park before the first gate"
+        " never yields (the fix exit walks the gated ladder); a missing"
+        " ConfigMap key, which no verb arms on a template and whose bite is a"
+        " container that never starts, the crash-at-start cell; and a manual"
+        " policy, since a broken revision parks before any gate is reached.",
         "- Kill-family cells pinned by hand-written restart/ cases are excluded:",
         "",
     ]

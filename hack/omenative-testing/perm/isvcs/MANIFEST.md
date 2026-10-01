@@ -3,7 +3,7 @@
 Emitted by `generate_cases.py` — regenerate with `python3 generate_cases.py`; CI rejects hand edits via `python3 generate_cases.py --check` (run_test.py).
 The gen-* folders are generator-owned wholesale; promote a bug-finding case to a hand-owned folder under a fresh id instead of editing it here.
 
-Total generated cases: **1403**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
+Total generated cases: **1643**. The whole-corpus per-PR cap (hand + generated) is enforced by run_test.py, not baked in here.
 
 ## Folders
 
@@ -23,14 +23,16 @@ Total generated cases: **1403**. The whole-corpus per-PR cap (hand + generated) 
 | gen-canary-crash | 48 | p5200..p5247 |
 | gen-canary-second-rev | 32 | p5250..p5281 |
 | gen-canary-podkill | 16 | p5290..p5305 |
+| gen-canary-fault-old | 188 | p6400..p6587 |
+| gen-canary-fault-new | 52 | p6600..p6651 |
 
 ### By topology
 
 | value | cases |
 |---|---|
-| engine | 238 |
+| engine | 358 |
 | engine-mn | 341 |
-| pd | 382 |
+| pd | 502 |
 | pd-mn | 442 |
 
 ### By update strategy
@@ -41,7 +43,7 @@ Total generated cases: **1403**. The whole-corpus per-PR cap (hand + generated) 
 | InPlaceIfPossible | 236 |
 | InPlaceOnly | 236 |
 | RecreatePod | 275 |
-| SurgeThenDrain | 616 |
+| SurgeThenDrain | 856 |
 
 ### By failure verb / phase
 
@@ -51,13 +53,26 @@ Total generated cases: **1403**. The whole-corpus per-PR cap (hand + generated) 
 | configkey:after-settle | 16 |
 | crashloop:load | 108 |
 | crashloop:load@canary | 16 |
+| crashloop:load@capacity | 16 |
+| crashloop:load@gate | 4 |
 | crashloop:load@idle | 28 |
+| crashloop:load@prestart | 16 |
+| crashloop:load@promote | 8 |
 | crashloop:load@sibling | 10 |
+| crashloop:load@traffic | 16 |
+| crashloop:new:crashAfterSoak | 16 |
+| crashloop:new:crashInSoak | 16 |
+| crashloop:new:crashStart | 8 |
 | crashloop:start | 108 |
 | crashloop:start+edit:rotating | 12 |
 | crashloop:start@canary | 16 |
+| crashloop:start@capacity | 16 |
+| crashloop:start@gate | 4 |
 | crashloop:start@idle | 56 |
+| crashloop:start@prestart | 16 |
+| crashloop:start@promote | 8 |
 | crashloop:start@sibling | 20 |
+| crashloop:start@traffic | 16 |
 | ctrlrestart:canary | 6 |
 | ctrlrestart:drain | 8 |
 | ctrlrestart:migration | 6 |
@@ -66,8 +81,15 @@ Total generated cases: **1403**. The whole-corpus per-PR cap (hand + generated) 
 | edit:rotating | 84 |
 | edit:settling | 84 |
 | imagepull:idle | 8 |
+| imagepull:new:imagePull | 12 |
 | imagepull:settling | 48 |
+| imagepull@analysis | 8 |
 | imagepull@canary | 16 |
+| imagepull@capacity | 16 |
+| imagepull@gate | 4 |
+| imagepull@prestart | 16 |
+| imagepull@promote | 8 |
+| imagepull@traffic | 16 |
 | kill | 187 |
 | node:parked | 32 |
 | node:relocated | 32 |
@@ -89,15 +111,15 @@ Total generated cases: **1403**. The whole-corpus per-PR cap (hand + generated) 
 | value | cases |
 |---|---|
 | (unset — baseline) | 262 |
-| None | 551 |
-| RecreateInstance | 590 |
+| None | 671 |
+| RecreateInstance | 710 |
 
 ### By pause
 
 | value | cases |
 |---|---|
 | freeze | 38 |
-| off | 1289 |
+| off | 1529 |
 | true | 76 |
 
 ### By coordination
@@ -106,7 +128,7 @@ Total generated cases: **1403**. The whole-corpus per-PR cap (hand + generated) 
 |---|---|
 | bluegreen | 24 |
 | canary | 24 |
-| none | 1097 |
+| none | 1337 |
 | rolling | 240 |
 | seq | 18 |
 
@@ -149,7 +171,7 @@ Total generated cases: **1403**. The whole-corpus per-PR cap (hand + generated) 
 
 | value | cases |
 |---|---|
-| (no break) | 1073 |
+| (no break) | 1313 |
 | decoder | 60 |
 | engine | 270 |
 
@@ -328,6 +350,8 @@ Total generated cases: **1403**. The whole-corpus per-PR cap (hand + generated) 
 - gen-canary-crash breaks the stable side at the first split (canary-serving@0): every break kind and form, both restart policies, 1 and 3 victim Instances at once. The floor is read with the victims allowed for, not waived.
 - gen-canary-second-rev lands the second revision as an ISVC re-bump or a runtime edit (a dedicated runtime per case), at staging and at the first split, with and without an analysis gate on every step before the cutover; the restart policy is None (a re-target repairs nothing).
 - gen-canary-podkill deletes one old-revision engine pod at a manual gate, under the operator's pause, under a capacity gate held by an image that cannot start, and under that gate paused; the engine surge is 1 (the budget is dormant while the roll is held).
+- gen-canary-fault-old breaks the stable side at the step kinds that differ in mechanism: before the push (the push meets a broken fleet), the capacity step ahead of traffic, the second step's timed soak, the same step at a manual gate (promoted 30s after the break), the same step at an analysis gate, and the last gate before the cutover. Left out, with the reason: the first split, which gen-canary-crash drives with the same faults, victims and policies; the cutover itself (Promoting), where at most the surge budget of stable Instances is left and already draining, so a break has no settled row to land on (the last gate carries that claim); a traffic step apart from its soak, since every traffic step of the story ladder but the cutover soaks; the surge budget at the gates, where no capacity builds while they hold (surge 1 only); three victims at the manual gate, whose storm is the first split's under another release; the crash forms under the analysis gate, since the metrics image is a static binary with no shell to exec a kill into and no fixture image fails to start under its entrypoint (the pull failure alone breaks it); the analysis gate crossed with the other step kinds, since the gate changes only what ends a hold, not how a break meets it; and a missing ConfigMap key, whose reference both revisions share, so a push is never its fix (the idle configkey family lifts the cause instead).
+- gen-canary-fault-new arms the break on the pushed engine revision and crosses where it bites (a crash at start and a pull failure at staging; a crash after Ready inside the first soak and past it) with the exit at the park (a rollback, or a fix push that drops the broken runner), both shapes and both restart policies. Left out, with the reason: the surge budget where the ladder parks at its first capacity step, which asks one Instance (surge 1 only); the crash forms under the analysis gate (the metrics image carries no shell and no exit switch); the rollback exit under the analysis gate, whose terminal verdict requires an analysis sample a park before the first gate never yields (the fix exit walks the gated ladder); a missing ConfigMap key, which no verb arms on a template and whose bite is a container that never starts, the crash-at-start cell; and a manual policy, since a broken revision parks before any gate is reached.
 - Kill-family cells pinned by hand-written restart/ cases are excluded:
 
   - p130: engine SurgeThenDrain rp=None

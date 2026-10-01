@@ -4175,6 +4175,203 @@ class CanaryBreakFaultTest(unittest.TestCase):
         self.assertEqual("FAIL", run.min_ready_checks(ctx, ["engine"], "PASS", [], []))
 
 
+class CanaryStepBreakTest(unittest.TestCase):
+    """Under a canary a break may land before the push (the stable side is
+    already broken when the push lands) or ride the push itself (the new
+    revision is broken): the headers that name them, what the push carries,
+    how the bite is read, the manual gate's hold after a break, and the
+    end-state checks a broken new revision is judged by."""
+
+    BASE = "# p999: x mode=canary Ne=8 Nd=0 Nr=0 ceil_e=9 ceil_d=0 ceil_r=0 canary=auto topo=engine"
+    PD = "# p999: x mode=canary Ne=8 Nd=8 Nr=2 ceil_e=9 ceil_d=9 ceil_r=3 canary=auto topo=pd"
+    ROLLOUT = "# p999: x mode=rollout Ne=2 Nd=0 Nr=0 ceil_e=3 ceil_d=0 ceil_r=0 topo=engine"
+
+    def _errs(self, header):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "p999.yaml"
+            p.write_text(header + "\nmetadata: { name: p999 }\n")
+            return run.validate_case_file(p)
+
+    def test_fault_names_the_pushed_revision_or_the_idle_service(self):
+        for v in ("crashloop:new", "imagepull:new", "crashloop:idle", "imagepull:idle"):
+            self.assertTrue(run._fault_ok(v), v)
+        self.assertFalse(run._fault_ok("crashloop:bogus"))
+        self.assertTrue(run._fault_on_new(run._fault_new("p999", {"fault": "crashloop:new", "form": "start"})))
+        self.assertTrue(run._fault_before_push(run._fault_new("p999", {"fault": "imagepull:idle"})))
+        self.assertFalse(run._fault_on_new(run._fault_new("p999", {"fault": "crashloop:old", "form": "start"})))
+        self.assertFalse(run._fault_before_push(run._fault_new("p999", {"fault": "crashloop:canary-staging", "form": "start"})))
+
+    def test_header_ties_the_new_and_idle_breaks_to_canary_mode(self):
+        self.assertEqual([], self._errs(self.BASE + " fault=crashloop:new form=start during=canary-failed verb=rollback terminal=RolledBack"))
+        self.assertEqual([], self._errs(self.BASE + " fault=crashloop:new form=load exitafter=10 during=canary-failed verb=rebump-fix terminal=Stable"))
+        self.assertEqual([], self._errs(self.BASE + " fault=imagepull:new during=canary-failed verb=rollback terminal=RolledBack"))
+        self.assertEqual([], self._errs(self.BASE + " fault=crashloop:idle form=start victims=3 nophase=Failed"))
+        self.assertEqual([], self._errs(self.PD + " fault=crashloop:new form=start bump=engine,decoder victimcomp=decoder during=canary-failed verb=rollback terminal=RolledBack"))
+        self.assertTrue(any("mode=canary" in e for e in self._errs(self.ROLLOUT + " fault=crashloop:new form=start")))
+        self.assertTrue(any("mode=canary" in e for e in self._errs(self.ROLLOUT + " fault=crashloop:idle form=start")))
+        self.assertTrue(any("img= does not apply" in e for e in self._errs(
+            self.BASE + " fault=crashloop:new form=start bump=engine img=example.com/canary-test/missing:none")))
+        self.assertTrue(any("victims=" in e for e in self._errs(self.BASE + " fault=crashloop:new form=start victims=2")))
+        self.assertTrue(any("exitafter=" in e for e in self._errs(self.BASE + " fault=crashloop:new form=start exitafter=10")))
+        self.assertTrue(any("exitafter=" in e for e in self._errs(self.BASE + " fault=imagepull:new exitafter=10")))
+        self.assertTrue(any("exitafter=" in e for e in self._errs(self.BASE + " exitafter=10")))
+        self.assertTrue(any("malformed header value exitafter=0" in e
+                            for e in self._errs(self.BASE + " fault=crashloop:new form=load exitafter=0")))
+        self.assertTrue(any("must be a member the push bumps" in e for e in self._errs(
+            self.PD + " fault=crashloop:new form=start bump=engine victimcomp=decoder")))
+        self.assertTrue(any("form=" in e for e in self._errs(self.BASE + " fault=crashloop:new")))
+
+    def test_runner_override_carries_the_image_or_the_env_and_drops_both(self):
+        env = [{"name": run.CRASH_EXIT_ENV, "value": "10"}]
+        self.assertEqual({"image": "x"}, run._runner_override("x", None))
+        self.assertEqual({"env": env}, run._runner_override("", env))
+        self.assertEqual({"image": "x", "env": env}, run._runner_override("x", env))
+        self.assertIsNone(run._runner_override("", None))
+        self.assertIsNone(run._runner_override(None, None))
+
+    def test_bump_arms_an_env_override_on_one_member_and_the_fix_drops_it(self):
+        seen = []
+        env = [{"name": run.CRASH_EXIT_ENV, "value": "10"}]
+        with mock.patch.object(run, "kubectl", lambda *a, **k: (seen.append(a), subprocess.CompletedProcess(a, 0, "", ""))[1]):
+            ctx = {"case_id": "p1", "pods_per_inst": {"engine": 1, "decoder": 2}}
+            run._bump_rev(ctx, {"engine", "decoder"}, env=env, image_comps={"decoder"})
+            run._bump_rev(ctx, {"engine"}, env=env)
+            run._bump_rev(ctx, {"engine", "decoder"}, val="v3", image="")
+        armed = json.loads(seen[0][-1])["spec"]
+        self.assertEqual({"name": run.MAIN_CONTAINER, "env": env}, armed["decoder"]["leader"]["runner"])
+        self.assertNotIn("runner", armed["engine"])
+        self.assertEqual({"env": env}, json.loads(seen[1][-1])["spec"]["engine"]["runner"])
+        fixed = json.loads(seen[2][-1])["spec"]
+        self.assertIsNone(fixed["engine"]["runner"])
+        self.assertIsNone(fixed["decoder"]["leader"]["runner"])
+
+    def test_what_the_push_carries_for_each_break(self):
+        load = run._fault_new("p999", {"fault": "crashloop:new", "form": "load", "exitafter": 10})
+        self.assertEqual(("", {"engine"}, [{"name": run.CRASH_EXIT_ENV, "value": "10"}]), run._new_break_arm(load, "engine"))
+        default = run._fault_new("p999", {"fault": "crashloop:new", "form": "load"})
+        self.assertEqual(str(run.CRASH_EXIT_AFTER_S), run._new_break_arm(default, "engine")[2][0]["value"])
+        start = run._fault_new("p999", {"fault": "crashloop:new", "form": "start"})
+        self.assertEqual((run._break_image("crashloop"), {"decoder"}, None), run._new_break_arm(start, "decoder"))
+        pull = run._fault_new("p999", {"fault": "imagepull:new"})
+        self.assertEqual((runtime_fixtures.UNPULLABLE_IMAGE, {"engine"}, None), run._new_break_arm(pull, "engine"))
+        run._new_break_armed(load, "engine", "", run._new_break_arm(load, "engine")[2], 5.0)
+        self.assertEqual((True, 5.0, "engine"), (load["fired"], load["fired_ts"], load["crash_comp"]))
+        self.assertIn(f"{run.CRASH_EXIT_ENV}=10", load["notes"][0])
+
+    def test_no_hook_fires_a_break_the_push_or_the_idle_service_carries(self):
+        fired = []
+        with mock.patch.object(run, "_fault_fire", lambda *a, **k: fired.append(a)):
+            for hdr in ({"fault": "crashloop:new", "form": "start"}, {"fault": "imagepull:idle"}):
+                f = run._fault_new("p999", hdr)
+                ctx = {"fault": f, "trigger_ts": 1.0, "pod_state": {}, "pods_per_inst": {}, "old_hashes": {"old"},
+                       "canary_hook": "canary-staging", "canary_step": 0}
+                run._fault_tick(ctx)
+                ctx["canary_hook"] = "canary-serving"
+                run._fault_tick(ctx)
+        self.assertEqual([], fired)
+
+    def test_the_bite_waits_for_every_victim(self):
+        f = {"crash_pod": "e3", "kills": 0, "extra_victims": [{"crash_pod": "e2", "kills": 0}]}
+        pods = {"e3": {"alive": True, "ready": True}, "e2": {"alive": True, "ready": True}}
+        self.assertFalse(run._break_bitten(f, pods))
+        pods["e3"]["ready"] = False
+        self.assertFalse(run._break_bitten(f, pods), "one victim still Ready and unkilled")
+        f["extra_victims"][0]["kills"] = 1
+        self.assertTrue(run._break_bitten(f, pods), "a killed runner counts as bitten even between crashes")
+        f["extra_victims"][0]["kills"] = 0
+        pods["e2"] = None
+        self.assertTrue(run._break_bitten(f, pods), "a victim that is gone has bitten")
+
+    def test_the_bite_of_a_broken_new_revision(self):
+        load = {"kind": "crashloop", "form": "load"}
+        pods = {"c0": {"alive": True, "ready": True}}
+        self.assertIsNone(run._new_break_bite(load, pods, [("c0", pods["c0"])], {"c0"}, "canary-serving", 0, 30.0))
+        pods["c0"]["ready"] = False
+        bite = run._new_break_bite(load, pods, [("c0", pods["c0"])], {"c0"}, "canary-serving", 0, 31.0)
+        self.assertEqual(("canary-serving", 0, 31.0), (bite["hook"], bite["step"], bite["at"]))
+        self.assertIn("was Ready and then was not", bite["what"])
+        self.assertIsNone(run._new_break_bite(load, pods, [("c0", pods["c0"])], set(), "canary-staging", 0, 5.0),
+                          "a pod that was never Ready has not crashed after Ready")
+
+        def waiting(reason):
+            return {"status": {"containerStatuses": [{"name": run.MAIN_CONTAINER, "state": {"waiting": {"reason": reason}}}]}}
+        start = {"kind": "crashloop", "form": "start"}
+        with mock.patch.object(run, "_get_pod", lambda name: waiting("ContainerCreating")):
+            self.assertIsNone(run._new_break_bite(start, pods, [("c0", pods["c0"])], set(), "canary-staging", 0, 5.0))
+        with mock.patch.object(run, "_get_pod", lambda name: waiting("CrashLoopBackOff")):
+            bite = run._new_break_bite(start, pods, [("c0", pods["c0"])], set(), "canary-staging", 0, 20.0)
+            self.assertIn("CrashLoopBackOff", bite["what"])
+            self.assertIsNone(run._new_break_bite({"kind": "imagepull"}, pods, [("c0", pods["c0"])], set(), "canary-staging", 0, 20.0),
+                              "a pull failure is not a crash at start")
+        with mock.patch.object(run, "_get_pod", lambda name: waiting("ImagePullBackOff")):
+            self.assertIn("ImagePullBackOff", run._new_break_bite({"kind": "imagepull"}, pods, [("c0", pods["c0"])], set(), "canary-staging", 0, 20.0)["what"])
+
+    def test_the_manual_gate_holds_after_a_break_at_a_hook(self):
+        f = {"kind": "crashloop", "fired": True, "fired_ts": 100.0, "param": "canary-serving@1"}
+        self.assertTrue(run._break_at_hook(f))
+        self.assertTrue(run._promote_held_after_break(f, 45, 120.0))
+        self.assertFalse(run._promote_held_after_break(f, 45, 150.0))
+        self.assertFalse(run._promote_held_after_break(dict(f, fired=False), 45, 120.0))
+        self.assertFalse(run._promote_held_after_break(dict(f, param="idle"), 45, 120.0), "a break before the push holds no gate")
+        self.assertFalse(run._promote_held_after_break(dict(f, param="new"), 45, 120.0), "a broken new revision parks on its own")
+        self.assertFalse(run._promote_held_after_break(dict(f, kind="podkill"), 45, 120.0))
+        self.assertFalse(run._promote_held_after_break(None, 45, 120.0))
+
+    def test_stable_serving_counts_whole_instances_on_the_stable_revision(self):
+        ctx = {"old_hashes": {"old"}, "pods_per_inst": {"engine": 1},
+               "pod_state": {"e0": {"alive": True, "comp": "engine", "inst": "0", "hash": "old", "ready": True, "serving": True},
+                             "e1": {"alive": True, "comp": "engine", "inst": "1", "hash": "old", "ready": True, "serving": False},
+                             "e2": {"alive": True, "comp": "engine", "inst": "2", "hash": "new", "ready": True, "serving": True},
+                             "e3": None}}
+        self.assertEqual(1, run._stable_serving(ctx, "engine"))
+        gang = {"old_hashes": {"old"}, "pods_per_inst": {"engine": 2},
+                "pod_state": {"l0": {"alive": True, "comp": "engine", "inst": "0", "hash": "old", "ready": True, "serving": True},
+                              "w0": {"alive": True, "comp": "engine", "inst": "0", "hash": "old", "ready": True, "serving": True},
+                              "l1": {"alive": True, "comp": "engine", "inst": "1", "hash": "old", "ready": True, "serving": True}}}
+        self.assertEqual(1, run._stable_serving(gang, "engine"))
+
+    def _track(self, **over):
+        track = {"bite": {"what": "c0 held", "at": 20.0, "hook": "canary-staging", "step": 0},
+                 "park": {"at": 110.0, "step": 0, "reason": "CapacityTimeout", "canary_traffic": 0,
+                          "stable_serving": 8, "crash_instances": 1},
+                 "ready_seen": set(), "uids": {"u1": 5.0, "u2": 50.0}, "peak_crash": 1,
+                 "phases_before_exit": {"Pending", "Failed"}}
+        for k, v in over.items():
+            if isinstance(v, dict) and isinstance(track.get(k), dict):
+                track[k] = dict(track[k], **v)
+            else:
+                track[k] = v
+        return track
+
+    def test_a_broken_new_revision_is_judged_on_the_operators_end_state(self):
+        ctx = {"N": {"engine": 8}}
+        f = {"kind": "crashloop", "form": "start", "crash_comp": "engine", "infra_fail": None}
+        notes, checks = [], []
+        self.assertEqual("PASS", run._new_break_checks(ctx, f, self._track(), {"Pending", "Failed", "RolledBack"}, "PASS", notes, checks))
+        self.assertEqual([], notes)
+        self.assertTrue(any("stopped at the step where the canary broke (step 0)" in c for c in checks))
+        self.assertTrue(any("failed.reason=CapacityTimeout" in c for c in checks))
+        self.assertTrue(any("2 distinct engine pod(s)" in c for c in checks))
+        self.assertEqual("PASS", run._new_break_checks(ctx, f, self._track(bite=None), set(), "PASS", [], []))
+        self.assertIn("never crashed at start", f["infra_fail"])
+        for over, words in (
+                (dict(park=None), "never parked"),
+                (dict(park={"step": 1}), "moved from step 0 to step 1"),
+                (dict(park={"reason": ""}), "carries no reason"),
+                (dict(park={"canary_traffic": 10}), "10% of traffic named the broken revision"),
+                (dict(park={"stable_serving": 6}), "served 6/8 engine Instances at the park"),
+                (dict(phases_before_exit={"Pending", "Paused", "Promoting"}), "promoted before the exit landed")):
+            notes = []
+            f = {"kind": "crashloop", "form": "load", "crash_comp": "engine", "infra_fail": None}
+            self.assertEqual("FAIL", run._new_break_checks(ctx, f, self._track(**over), {"Pending"}, "PASS", notes, []), words)
+            self.assertTrue(any(words in n for n in notes), (words, notes))
+        f = {"kind": "imagepull", "form": "", "crash_comp": "engine", "infra_fail": None}
+        checks = []
+        run._new_break_checks(ctx, f, self._track(park={"crash_instances": 3, "stable_serving": 5}), set(), "PASS", [], checks)
+        self.assertTrue(any("could not be pulled" in c for c in checks))
+        self.assertTrue(any("5/8 serving, 3 on the broken revision" in c for c in checks))
+
+
 class RetargetVerbTest(unittest.TestCase):
     """A second revision while the first canary is in flight: the runtime
     edit verb, the superseded run it must close, and traffic that must never
@@ -4475,3 +4672,127 @@ class GeneratedStoryFamiliesTest(unittest.TestCase):
                     path.parent.mkdir(exist_ok=True)
                     path.write_text(self.outputs[f"{folder}/{name}.yaml"])
                     self.assertEqual([], run.validate_case_file(path), name)
+
+
+class GeneratedCanaryFaultFamiliesTest(unittest.TestCase):
+    """The two step-times-fault families generate_cases.py mints: the stable
+    side broken at each step kind of the ladder, and the pushed revision
+    broken where it bites; every case is a story-ladder canary with the
+    operator's end state on line two, and its header validates."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.outputs, rows = generate_cases.build_outputs()
+        cls.rows = {folder: [(n, kv, m) for f, n, kv, m in rows if f == folder]
+                    for folder in ("gen-canary-fault-old", "gen-canary-fault-new")}
+
+    def _line2(self, folder, name):
+        return self.outputs[f"{folder}/{name}.yaml"].splitlines()[1]
+
+    def test_every_case_is_a_story_canary_with_an_end_state(self):
+        for folder, fam in self.rows.items():
+            self.assertTrue(fam, folder)
+            for name, kv, _m in fam:
+                self.assertEqual("canary", kv["mode"], name)
+                self.assertEqual(generate_cases.STORY_N, kv["Ne"], name)
+                self.assertIn(kv["topo"], generate_cases.STORY_TOPOS, name)
+                self.assertTrue(run._cell_ok(kv["cell"]), name)
+                self.assertEqual("engine", str(kv.get("victimcomp") or "engine"), name)
+                text = self.outputs[f"{folder}/{name}.yaml"]
+                for nc, tw in generate_cases.STORY_LADDER:
+                    self.assertIn(f'capacity: "{nc}"', text, name)
+                    self.assertIn(f"traffic: {tw}", text, name)
+                line2 = self._line2(folder, name)
+                self.assertTrue(line2.startswith("# reason: "), name)
+                self.assertIn("revision", line2, f"{name}: the end state names the revision the fleet ends on")
+                if kv.get("analysis"):
+                    self.assertIn(gen_cases.CSR_METRICS, text, f"{name}: an analysis gate needs the metrics runtime")
+                    self.assertIn("perm.test/error-rate", text, name)
+                    self.assertEqual("imagepull", kv["fault"].partition(":")[0],
+                                     f"{name}: only a pull failure breaks a metrics pod")
+                else:
+                    self.assertNotIn(gen_cases.CSR_METRICS, text, name)
+
+    def test_stable_side_breaks_cross_step_kind_fault_victims_surge_policy_and_shape(self):
+        fam = self.rows["gen-canary-fault-old"]
+        self.assertEqual(188, len(fam))
+        seen = {(m["verb"].partition("@")[2], kv["fault"].partition(":")[0], kv.get("form", "start"), kv["victims"],
+                 kv["ceil_e"] - kv["Ne"], m["rp"], kv["topo"]) for _n, kv, m in fam}
+        self.assertEqual(188, len(seen))
+        steps = {s for s, *_ in seen}
+        self.assertEqual({s for s, *_ in generate_cases.STABLE_BREAK_STEPS}, steps)
+        by_step = {s: [kv for _n, kv, m in fam if m["verb"].partition("@")[2] == s] for s in steps}
+        for step, hook, policy, gate in generate_cases.STABLE_BREAK_STEPS:
+            cases = by_step[step]
+            kinds = {(kv["fault"].partition(":")[0], kv.get("form", "start")) for kv in cases}
+            self.assertEqual(set(generate_cases.STABLE_BREAK_KINDS[gate]), kinds, step)
+            self.assertEqual(set(generate_cases.STABLE_BREAK_VICTIMS[step]), {kv["victims"] for kv in cases}, step)
+            self.assertEqual(set(generate_cases.STABLE_BREAK_SURGES[step]), {kv["ceil_e"] - kv["Ne"] for kv in cases}, step)
+            self.assertEqual({"None", "RecreateInstance"}, {m["rp"] for _n, kv, m in fam if m["verb"].partition("@")[2] == step}, step)
+            self.assertEqual({"engine", "pd"}, {kv["topo"] for kv in cases}, step)
+            for kv in cases:
+                self.assertEqual(hook, kv["fault"].partition(":")[2], step)
+                self.assertEqual(policy, kv["canary"], step)
+                self.assertEqual(gate, kv.get("analysis"), step)
+                self.assertEqual("Failed", kv["nophase"], f"{step}: the ladder must not park")
+                self.assertNotIn("floor_soft", kv, f"{step}: the floor is read with the victims allowed for, not waived")
+                if policy == "manual":
+                    self.assertEqual(generate_cases.BREAK_GATE_HOLD_S, kv["verbhold"], step)
+                else:
+                    self.assertNotIn("verbhold", kv, step)
+        prestart = by_step["prestart"]
+        self.assertTrue(all(kv["fault"].endswith(":idle") for kv in prestart))
+        for name, kv, m in fam:
+            self.assertIn("no repair is recorded for one after the push", self._line2("gen-canary-fault-old", name))
+            self.assertIn("ends on the canary revision serving", self._line2("gen-canary-fault-old", name))
+
+    def test_pushed_breaks_cross_bite_exit_surge_policy_and_shape(self):
+        fam = self.rows["gen-canary-fault-new"]
+        self.assertEqual(52, len(fam))
+        seen = {(m["verb"].rpartition(":")[2], kv["verb"], kv["ceil_e"] - kv["Ne"], m["rp"], kv["topo"], kv.get("analysis"))
+                for _n, kv, m in fam}
+        self.assertEqual(52, len(seen))
+        names = {n for n, *_ in generate_cases.NEW_BREAKS}
+        self.assertEqual(names, {b for b, *_ in seen})
+        self.assertEqual({"rollback", "rebump-fix"}, {e for _b, e, *_ in seen})
+        for name, kind, form, exit_after in generate_cases.NEW_BREAKS:
+            cases = [(kv, m) for _n, kv, m in fam if m["verb"].rpartition(":")[2] == name]
+            self.assertEqual(set(generate_cases.NEW_BREAK_SURGES[name]), {kv["ceil_e"] - kv["Ne"] for kv, _m in cases}, name)
+            self.assertEqual(set(generate_cases.NEW_BREAK_GATES[name]), {kv.get("analysis") for kv, _m in cases}, name)
+            for kv, m in cases:
+                self.assertEqual(f"{kind}:new", kv["fault"], name)
+                self.assertEqual(form, kv.get("form"), name)
+                self.assertEqual(exit_after, kv.get("exitafter"), name)
+                self.assertEqual(("canary-failed", "auto"), (kv["during"], kv["canary"]), name)
+                self.assertEqual({"rollback": "RolledBack", "rebump-fix": "Stable"}[kv["verb"]], kv["terminal"], name)
+                self.assertNotIn("img", kv, f"{name}: the fault arms the image itself")
+                self.assertNotIn("victims", kv, name)
+                self.assertNotIn("bump", kv, f"{name}: the whole group is pushed")
+                if kv.get("analysis"):
+                    self.assertEqual("rebump-fix", kv["verb"], f"{name}: under a gate only the fix exit samples")
+        for name, kv, m in fam:
+            text = self.outputs[f"gen-canary-fault-new/{name}.yaml"]
+            self.assertIn(f'readyTimeout: "{generate_cases.HELD_READY_TIMEOUT}"', text, f"{name}: the park must land inside the budget")
+            self.assertIn("stops at the step where the break bites", self._line2("gen-canary-fault-new", name))
+            self.assertIn("nothing promotes the broken revision", self._line2("gen-canary-fault-new", name))
+        self.assertLess(generate_cases.CRASH_EXIT_IN_SOAK_S, generate_cases.STORY_SOAK_S)
+        self.assertGreater(generate_cases.CRASH_EXIT_AFTER_SOAK_S, generate_cases.STORY_SOAK_S)
+
+    def test_generated_headers_validate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for folder, fam in self.rows.items():
+                for name, _kv, _m in fam:
+                    path = root / folder / f"{name}.yaml"
+                    path.parent.mkdir(exist_ok=True)
+                    path.write_text(self.outputs[f"{folder}/{name}.yaml"])
+                    self.assertEqual([], run.validate_case_file(path), name)
+
+    def test_both_families_are_canary_lanes_in_the_pipeline(self):
+        sys.path.insert(0, str(HERE.parents[2] / ".buildkite"))
+        try:
+            import generate_pipeline as gp
+        finally:
+            sys.path.pop(0)
+        self.assertTrue(gp._eval_feature_is_canary("gen-canary-fault-old"))
+        self.assertTrue(gp._eval_feature_is_canary("gen-canary-fault-new"))
