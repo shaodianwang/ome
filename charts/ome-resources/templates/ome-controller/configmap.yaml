@@ -121,6 +121,9 @@ data:
   {{- if hasKey . "scaleDownRequeueInterval" }}
   {{- $fields = append $fields (dict "scaleDownRequeueInterval" .scaleDownRequeueInterval) }}
   {{- end }}
+  {{- if hasKey . "repairBatchSize" }}
+  {{- $fields = append $fields (dict "repairBatchSize" .repairBatchSize) }}
+  {{- end }}
   {{- if hasKey . "revisionHistoryLimit" }}
   {{- $fields = append $fields (dict "revisionHistoryLimit" .revisionHistoryLimit) }}
   {{- end }}

@@ -22,13 +22,15 @@ import (
 // a whole (joined error) only after every selection has run. A repair
 // that opens a new outage is admitted like an update start; one that
 // recovers capacity already lost, or drives an open repair, is not held
-// by anything.
+// by anything. Fresh crash-loop repairs, budgeted or not, open at most
+// input.RepairBatchSize per pass; the rest wait for the next pass.
 //
-// stop=true means the pass consumed the reconcile: a repair opened or
-// held owns the wake-up, because nothing in the cluster changes while a
-// denial stands and no watch event is coming. When a Create follows in
-// the action list the pass materializes the surge-free indices itself
-// before ending, so a stalled repair does not starve a scale-up.
+// stop=true means the pass consumed the reconcile: a repair opened, held
+// or left for the next pass owns the wake-up, because nothing in the
+// cluster changes while a denial stands and no watch event is coming.
+// When a Create follows in the action list the pass materializes the
+// surge-free indices itself before ending, so a stalled repair does not
+// starve a scale-up.
 func executeRestartPass(ctx context.Context, deps types.Deps, input types.ReconcileInput, plan types.ComponentPlan, target *appsv1.ControllerRevision, restarts []RestartSelection, createFollows bool) (res ctrl.Result, stop bool, err error) {
 	anyRestarting := false
 	var restartErrs []error
@@ -37,7 +39,17 @@ func executeRestartPass(ctx context.Context, deps types.Deps, input types.Reconc
 	// still reports which layer is holding it.
 	var firstDenial *types.RolloutHold
 	var firstDeniedIndex int32
+	// Fresh crash-loop repairs opened this pass, against the repair batch;
+	// batchFull marks a selection left for the next pass.
+	opened := int32(0)
+	batchFull := false
 	for _, selection := range restarts {
+		if selection.OpensRepair && input.RepairBatchSize != nil && opened >= *input.RepairBatchSize {
+			logf.FromContext(ctx).V(1).Info("crash-loop repair waits for the next pass: repair batch full",
+				"component", plan.Component, "instance", selection.Instance.Index, "repairBatchSize", *input.RepairBatchSize)
+			batchFull = true
+			continue
+		}
 		if selection.OpensUnavailability {
 			allowed, denial := admission.admit(ctx, plan, selection.Instance.Index)
 			if !allowed {
@@ -46,6 +58,9 @@ func executeRestartPass(ctx context.Context, deps types.Deps, input types.Reconc
 				}
 				continue
 			}
+		}
+		if selection.OpensRepair {
+			opened++
 		}
 		done, restartErr := workloadops.Restart(ctx, deps, input, plan, selection.Instance, selection.Reason)
 		if restartErr != nil {
@@ -58,8 +73,9 @@ func executeRestartPass(ctx context.Context, deps types.Deps, input types.Reconc
 			anyRestarting = true
 		}
 	}
-	// A held repair consumes the pass exactly as an in-flight one does.
-	if anyRestarting || firstDenial != nil {
+	// A held repair, or one left for the next pass, consumes the pass
+	// exactly as an in-flight one does.
+	if anyRestarting || firstDenial != nil || batchFull {
 		interval := workloadops.RestartRequeueInterval(input)
 		if !anyRestarting {
 			interval = input.Requeue.Gate

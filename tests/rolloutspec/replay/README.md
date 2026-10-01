@@ -541,8 +541,9 @@ Callbacks and deps left unwired:
 - `Deps.RenderHook` — production wires it unconditionally to inject peer
   env vars. In-place eligibility diffs on env, so this is the most
   consequential omission on the list.
-- `ScaleUpPodBatchSize` / `ScaleDownPodBatchSize` — left nil, so every
-  pass is unbounded and the batch-budget branches never run.
+- `ScaleUpPodBatchSize` / `ScaleDownPodBatchSize` / `RepairBatchSize` —
+  left nil, so every pass is unbounded and the batch-budget branches
+  never run.
 - `AuthoritativePods` — no preloaded observation, so every destructive
   consumer takes the per-pass List path.
 

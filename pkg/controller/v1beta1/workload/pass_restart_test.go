@@ -2229,3 +2229,105 @@ func TestReconcile_CrashLoopInsideGrace_WakesForTheGraceLeft(t *testing.T) {
 		})
 	}
 }
+
+// restartsInFlight counts the rows under an open Restart.
+func (h *recoveryHarness) restartsInFlight() int {
+	n := 0
+	for _, s := range h.irStatuses() {
+		if s.Phase == workloadtypes.InstancePhaseRestarting {
+			n++
+		}
+	}
+	return n
+}
+
+// TestReconcile_CrashLoopRepair_OpensAtMostTheBatchPerPass is the
+// closed-loop story for lifecycle.repairBatchSize: a Component converged
+// on v1 has every Instance fall into a crash loop at once, under a budget
+// of zero so nothing but the limit paces the repairs. With a limit of
+// three, exactly three repairs open on the first pass and the next three
+// on the second, while the first three are still in flight and count for
+// nothing; the rest follow on the passes after, and every Instance ends
+// Ready on v1 at a bumped Incarnation with no pod beyond the ceiling. A
+// gang counts as one: three leader+worker gangs open on the first pass.
+// With no limit configured every Instance repairs on the first pass.
+// Both restart policies, since the limit belongs to the crash-loop
+// trigger and not to the policy.
+//
+// Cells: instance/Ready/pod.waiting[CrashLoopBackOff]/before
+func TestReconcile_CrashLoopRepair_OpensAtMostTheBatchPerPass(t *testing.T) {
+	limit := int32(3)
+	for _, tc := range []struct {
+		name     string
+		gang     bool
+		replicas int32
+		limit    *int32
+		// opensPerPass is how many repairs each pass opens, from the pass
+		// the first repair opens on until every Instance is under repair.
+		opensPerPass []int
+	}{
+		{name: "single/limit=3", replicas: 7, limit: &limit, opensPerPass: []int{3, 3, 1}},
+		{name: "gang/limit=3", gang: true, replicas: 4, limit: &limit, opensPerPass: []int{3, 1}},
+		{name: "single/no limit", replicas: 7, opensPerPass: []int{7}},
+	} {
+		for _, policy := range []workloadtypes.RestartPolicy{workloadtypes.RestartPolicyNone, workloadtypes.RestartPolicyRecreateInstance} {
+			t.Run(fmt.Sprintf("%s/%s", tc.name, policy), func(t *testing.T) {
+				h := offTargetCrashHarness(t, tc.gang, workloadtypes.UpdateStrategyRecreatePod, 0, 0, policy, tc.replicas)
+				h.repairBatchSize = tc.limit
+				for idx := int32(0); idx < tc.replicas; idx++ {
+					breakWholeInstance(t, h, idx, crashAtStart)
+				}
+				h.events = nil
+
+				if !h.run(3, func() bool { return h.restartsRecorded() > 0 }) {
+					h.dumpState("after the crash")
+					t.Fatalf("no repair opened: a dark Instance's repair is held by nothing")
+				}
+				opened := 0
+				for pass, want := range tc.opensPerPass {
+					inFlight := 0
+					if pass > 0 {
+						inFlight = h.restartsInFlight()
+						if inFlight < tc.opensPerPass[pass-1] {
+							h.dumpState("before the next batch")
+							t.Fatalf("pass %d starts with %d repairs in flight, want at least the %d the pass before opened", pass+1, inFlight, tc.opensPerPass[pass-1])
+						}
+						h.step()
+					}
+					if got := h.restartsRecorded() - opened; got != want {
+						h.dumpState("after the batch")
+						t.Fatalf("pass %d opened %d repairs with %d in flight, want %d: the limit counts the repairs a pass opens, in Instances", pass+1, got, inFlight, want)
+					}
+					opened += want
+				}
+
+				withinTheLimit := func() {
+					if ceiling := int(tc.replicas) * len(h.desired.Runners); len(h.livePods()) > ceiling {
+						t.Fatalf("%d live pods, want at most %d: a repair never surges", len(h.livePods()), ceiling)
+					}
+					if n := h.restartsRecorded(); n != int(tc.replicas) {
+						t.Fatalf("restarts recorded = %d, want one repair per Instance and no second repair: %v", n, h.events)
+					}
+				}
+				allRepaired := func() bool {
+					if !h.settledOn(h.revV1, tc.replicas) {
+						return false
+					}
+					for idx := int32(0); idx < tc.replicas; idx++ {
+						if !h.repairedAbove(idx, 1) {
+							return false
+						}
+					}
+					return true
+				}
+				if !h.runWithInvariant(40, allRepaired, withinTheLimit) {
+					h.dumpState("after the repairs")
+					t.Fatalf("not every Instance returned to serving on v1")
+				}
+				if h.sawEvent(workloadtypes.EventReasonRepairHeld) {
+					t.Fatalf("a repair waiting for the next pass is pacing, not a hold: %v", h.events)
+				}
+			})
+		}
+	}
+}

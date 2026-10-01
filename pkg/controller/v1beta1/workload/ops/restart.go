@@ -683,20 +683,27 @@ func crashLoopRepairReason(input workload.ReconcileInput, s *workload.InstanceSt
 	return reason, true
 }
 
-// RestartOpensUnavailability reports whether a restart selection for
-// inst would OPEN a fresh crash-loop repair this pass that takes serving
-// capacity offline, as opposed to driving one already in flight or
-// recovering capacity that is already gone. Only such an open is put to
-// the unavailability budget and the coordination gate: a Restart already
-// in flight must be driven to completion, the pod-loss triggers repair an
-// outage rather than causing one, and a wedged pod set that serves
-// nothing (evidence.PodSetServesNothing, the reading the update pass
-// makes for a dark row) removes no serving capacity, so its rebuild is
-// admitted and charged by neither layer.
-func RestartOpensUnavailability(input workload.ReconcileInput, inst workload.InstancePlan, instancePods []*corev1.Pod) bool {
+// RestartOpensRepair reports whether a restart selection for inst would
+// OPEN a fresh crash-loop repair this pass, as opposed to driving one
+// already in flight or recovering capacity that is already gone: a
+// Restart already in flight must be driven to completion, and the
+// pod-loss and lost-member triggers repair an outage rather than causing
+// one. Only a fresh open counts against the per-pass repair batch.
+func RestartOpensRepair(input workload.ReconcileInput, inst workload.InstancePlan, instancePods []*corev1.Pod) bool {
 	s := input.ObservedState.Instance(inst.Index)
 	_, wedged := crashLoopRepairReason(input, s, inst.TotalPods(), instancePods)
-	return wedged && !evidence.PodSetServesNothing(instancePods)
+	return wedged
+}
+
+// RestartOpensUnavailability reports whether a restart selection for
+// inst would OPEN a fresh crash-loop repair this pass that takes serving
+// capacity offline. Only such an open is put to the unavailability budget
+// and the coordination gate: a wedged pod set that serves nothing
+// (evidence.PodSetServesNothing, the reading the update pass makes for a
+// dark row) removes no serving capacity, so its rebuild is admitted and
+// charged by neither layer.
+func RestartOpensUnavailability(input workload.ReconcileInput, inst workload.InstancePlan, instancePods []*corev1.Pod) bool {
+	return RestartOpensRepair(input, inst, instancePods) && !evidence.PodSetServesNothing(instancePods)
 }
 
 // A spent repair: a Restart parked at Failed by the deadline or a wedged

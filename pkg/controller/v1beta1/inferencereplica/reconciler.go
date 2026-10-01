@@ -119,6 +119,11 @@ type Reconciler struct {
 	// active delete wave. Zero disables cadence polling; watches and configured
 	// lifecycle deadlines still schedule progress.
 	ScaleDownRequeueInterval time.Duration
+	// RepairBatchSize is the startup-validated bound on the crash-loop repairs
+	// opened per Component in one pass, in Instance units. It is immutable for
+	// the manager process lifetime; nil preserves unbounded repair when the
+	// field is absent.
+	RepairBatchSize *int32
 
 	// APIReader is the live (uncached) API reader. Used for the
 	// correctness-critical reads in revision bookkeeping and immutable topology
@@ -423,6 +428,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ct
 	input.ScaleUpPodBatchSize = r.ScaleUpPodBatchSize
 	input.ScaleDownPodBatchSize = r.ScaleDownPodBatchSize
 	input.ScaleDownRequeueInterval = r.ScaleDownRequeueInterval
+	input.RepairBatchSize = r.RepairBatchSize
 
 	// Capture the update pass's rollout-hold verdict (if any) for the
 	// deferred status write below. execHoldObserved distinguishes "the

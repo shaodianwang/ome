@@ -488,6 +488,7 @@ func startManager(ctx context.Context, restCfg *rest.Config, rec *recorder.Recor
 		ScaleUpPodBatchSize:      podBatchSizes.ScaleUp,
 		ScaleDownPodBatchSize:    podBatchSizes.ScaleDown,
 		ScaleDownRequeueInterval: podBatchSizes.ScaleDownRequeueInterval,
+		RepairBatchSize:          podBatchSizes.Repair,
 	}
 	if err := ir.SetupWithManager(mgr); err != nil {
 		return nil, fmt.Errorf("wiring InferenceReplica reconciler: %w", err)

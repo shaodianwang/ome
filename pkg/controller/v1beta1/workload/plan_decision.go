@@ -57,13 +57,18 @@ type RestartSelection struct {
 	Instance types.InstancePlan
 	Reason   string
 
-	// OpensUnavailability marks a selection that takes serving capacity
-	// offline rather than recovering capacity already lost: a fresh
-	// crash-loop repair of a pod set that still serves. The executor puts
-	// exactly those to the unavailability budget and the coordination
-	// gate before they open, so a wedge shared by the whole Component
-	// repairs at the operator's pace instead of recycling every serving
-	// Instance at once.
+	// OpensRepair marks a selection that opens a fresh crash-loop repair
+	// this pass rather than driving one already in flight or recovering
+	// capacity already lost. The executor opens at most
+	// input.RepairBatchSize of them per pass.
+	OpensRepair bool
+
+	// OpensUnavailability marks the fresh repairs that take serving
+	// capacity offline: a crash-loop repair of a pod set that still
+	// serves. The executor puts exactly those to the unavailability budget
+	// and the coordination gate before they open, so a wedge shared by the
+	// whole Component repairs at the operator's pace instead of recycling
+	// every serving Instance at once.
 	OpensUnavailability bool
 }
 
@@ -496,6 +501,7 @@ func planRestartSelections(ctx context.Context, input types.ReconcileInput, plan
 		restarts = append(restarts, RestartSelection{
 			Instance:            inst,
 			Reason:              reason,
+			OpensRepair:         workloadops.RestartOpensRepair(input, inst, liveByInstance[inst.Index]),
 			OpensUnavailability: workloadops.RestartOpensUnavailability(input, inst, liveByInstance[inst.Index]),
 		})
 	}

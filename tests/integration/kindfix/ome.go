@@ -208,6 +208,7 @@ func StandardOMESetup(opts SetupOpts) kindutil.ManagerSetup {
 				ScaleUpPodBatchSize:      podBatchSizes.ScaleUp,
 				ScaleDownPodBatchSize:    podBatchSizes.ScaleDown,
 				ScaleDownRequeueInterval: podBatchSizes.ScaleDownRequeueInterval,
+				RepairBatchSize:          podBatchSizes.Repair,
 			}).SetupWithManager(mgr)
 		}
 		return nil

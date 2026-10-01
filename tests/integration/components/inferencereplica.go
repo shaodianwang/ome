@@ -78,6 +78,7 @@ func SetupInferenceReplica(ctx context.Context, mgr ctrl.Manager, opts ...Infere
 		ScaleUpPodBatchSize:      podBatchSizes.ScaleUp,
 		ScaleDownPodBatchSize:    podBatchSizes.ScaleDown,
 		ScaleDownRequeueInterval: podBatchSizes.ScaleDownRequeueInterval,
+		RepairBatchSize:          podBatchSizes.Repair,
 		TPUSliceProvisioning:     tpuSliceConfig,
 	}
 	if err := r.SetupWithManager(mgr); err != nil {

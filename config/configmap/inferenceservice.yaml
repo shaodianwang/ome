@@ -86,8 +86,11 @@ data:
   # batch field preserves that direction's unbounded selection. The scale-down
   # requeue interval polls while destructive work remains in flight; omitting
   # it leaves progress to watched resources and exact configured lifecycle
-  # deadlines. These settings are read once at manager startup; invalid values
-  # prevent startup, and a direct ConfigMap edit requires a manager restart.
+  # deadlines. The repair batch size bounds the crash-loop repairs opened per
+  # Component in one pass, in Instances (a gang counts as one); omitting it
+  # leaves the repairs opened per pass unbounded. These settings are read once
+  # at manager startup; invalid values prevent startup, and a direct ConfigMap
+  # edit requires a manager restart.
   #
   # instanceReadyTimeout is how long a newly created Instance may take to become
   # Ready before its in-flight operation is failed; a per-Component
@@ -99,6 +102,7 @@ data:
       "scaleUpPodBatchSize": 100,
       "scaleDownPodBatchSize": 100,
       "scaleDownRequeueInterval": "5s",
+      "repairBatchSize": 10,
       "instanceReadyTimeout": "30m"
     }
 

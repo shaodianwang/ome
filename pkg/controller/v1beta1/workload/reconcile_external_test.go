@@ -1192,6 +1192,9 @@ type recoveryHarness struct {
 	// gate, when set, is the coordination UpdateGate the passes consult
 	// before a fresh start opens.
 	gate func(strategy workloadtypes.UpdateStrategyType, inFlightSurge, inFlightUnavail int32) (bool, workloadtypes.RolloutHoldGate, string)
+	// repairBatchSize is the input's RepairBatchSize: how many crash-loop
+	// repairs a pass may open. Nil leaves the pass unbounded.
+	repairBatchSize *int32
 	// crashes counts, per pod, the kubelet steps a crash image has been
 	// observed on it; lastCrash is the instant of its latest crash.
 	crashes   map[string]int
@@ -1928,6 +1931,7 @@ func (h *recoveryHarness) buildInput() workloadtypes.ReconcileInput {
 		ForceDelete:       h.forceDelete,
 		Requeue:           h.requeue,
 		Clock:             h.clk,
+		RepairBatchSize:   h.repairBatchSize,
 
 		AbandonedReplacementGrace: h.abandonGrace,
 		WarnRetryHeld: func(rev string, attempts int32, reason string) {

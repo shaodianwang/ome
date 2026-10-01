@@ -716,6 +716,7 @@ func main() {
 			ScaleUpPodBatchSize:      podBatchSizes.ScaleUp,
 			ScaleDownPodBatchSize:    podBatchSizes.ScaleDown,
 			ScaleDownRequeueInterval: podBatchSizes.ScaleDownRequeueInterval,
+			RepairBatchSize:          podBatchSizes.Repair,
 			TPUSliceProvisioning:     tpuSliceConfig,
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "Failed to create InferenceReplica controller")

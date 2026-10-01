@@ -365,6 +365,27 @@ fi
 grep -Fq '"scaleDownPodBatchSize":100' <<<"${scale_down_interval_omitted}" ||
   fail "omitting the requeue interval unexpectedly removed the scale-down Pod batch size"
 
+repair_batch_overridden="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set ome.controller.lifecycle.repairBatchSize=7 \
+  --show-only templates/ome-controller/configmap.yaml)"
+grep -Fq '"repairBatchSize":7' <<<"${repair_batch_overridden}" ||
+  fail "OMENative repair batch size override was not rendered"
+grep -Fq '"scaleDownPodBatchSize":100' <<<"${repair_batch_overridden}" ||
+  fail "repair batch size override unexpectedly changed the scale-down Pod batch size"
+grep -Fq '"repairBatchSize":10' <<<"${scale_down_batch_overridden}" ||
+  fail "default OMENative repair batch size was not rendered"
+
+repair_batch_omitted="$("${helm_bin}" template ome-resources "${chart_dir}" \
+  --namespace ome \
+  --set ome.controller.lifecycle.repairBatchSize=null \
+  --show-only templates/ome-controller/configmap.yaml)"
+if grep -Fq 'repairBatchSize' <<<"${repair_batch_omitted}"; then
+  fail "OMENative repair batch size was rendered when omitted"
+fi
+grep -Fq '"scaleDownPodBatchSize":100' <<<"${repair_batch_omitted}" ||
+  fail "omitting the repair batch size unexpectedly removed the scale-down Pod batch size"
+
 default_controller_checksum="$(grep -m1 'checksum/config:' <<<"${controller}" | awk '{print $2}')"
 scale_down_controller="$("${helm_bin}" template ome-resources "${chart_dir}" \
   --namespace ome \

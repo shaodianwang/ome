@@ -116,6 +116,17 @@ type ReconcileInput struct {
 	// polling; watched resources and exact force-delete deadlines still wake it.
 	ScaleDownRequeueInterval time.Duration
 
+	// RepairBatchSize bounds how many crash-loop repairs the restart pass
+	// OPENS in one pass, in Instance units: a gang counts as one. Every
+	// fresh crash-loop repair counts, whether or not it goes through the
+	// unavailability budget; a Restart already in flight is driven
+	// regardless and does not count, and the pod-loss and lost-member
+	// triggers that recover capacity already gone are not crash-loop
+	// repairs and do not count. Selections past the bound wait for the
+	// next pass, which the pass requeues for. A nil pointer preserves the
+	// unbounded behavior.
+	RepairBatchSize *int32
+
 	// AuthoritativePods is a live Component-wide Pod observation shared by
 	// every destructive consumer in one reconcile pass. Nil means the caller
 	// did not preload an observation; a non-nil snapshot is authoritative even
