@@ -2,6 +2,7 @@ package ops_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -33,6 +34,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
@@ -118,6 +120,38 @@ func minimalISVC(name, ns string, replicas int) *v1beta1.InferenceService {
 // pods (matches what production Render emits via ome.io/revision-hash).
 const testRevisionHash = "testrev1"
 
+// fixtureTemplate is the pod template buildTestInput renders.
+func fixtureTemplate() *corev1.PodSpec {
+	return &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "test:v1"}}}
+}
+
+// storedRevision is the ControllerRevision named name whose payload records
+// spec (and workerSpec, for a gang) as its template. A rebuild renders the
+// template of the revision it stamps, so a fixture row naming a revision
+// seeds it for the engine to read.
+func storedRevision(t *testing.T, isvc *v1beta1.InferenceService, name string, spec, workerSpec *corev1.PodSpec) *appsv1.ControllerRevision {
+	t.Helper()
+	raw, err := json.Marshal(revision.DataPayload{PodSpec: spec, WorkerPodSpec: workerSpec})
+	if err != nil {
+		t.Fatalf("marshal revision payload: %v", err)
+	}
+	return &appsv1.ControllerRevision{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            name,
+			Namespace:       isvc.Namespace,
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(isvc, v1beta1.SchemeGroupVersion.WithKind("InferenceService"))},
+		},
+		Data: runtime.RawExtension{Raw: raw},
+	}
+}
+
+// fixtureRevision is the engine revision the fixture rows name by default
+// (testRevisionHash), recording the template buildTestInput renders.
+func fixtureRevision(t *testing.T, isvc *v1beta1.InferenceService) *appsv1.ControllerRevision {
+	t.Helper()
+	return storedRevision(t, isvc, isvc.Name+"-"+string(workload.ComponentEngine)+"-"+testRevisionHash, fixtureTemplate(), nil)
+}
+
 // testPodLabels reproduces the label set workload/ops.Render stamps
 // on every emitted pod. Duplicated here because Render's helper is
 // private to ops/; tests in ops_test fabricate pods directly.
@@ -198,35 +232,17 @@ func testMutateInstance(c client.Client, isvc *v1beta1.InferenceService, compone
 				break
 			}
 		}
-		var w workload.InstanceStatus
-		if pos == -1 {
-			w = workload.InstanceStatus{Index: idx}
-		} else {
-			s := ir.Status.InstanceStatuses[pos]
-			w = workload.InstanceStatus{
-				Index:           s.Index,
-				Incarnation:     s.Incarnation,
-				Phase:           workload.InstancePhase(s.Phase),
-				RunningRevision: s.RunningRevision,
-				TargetRevision:  s.TargetRevision,
-				ActiveOrdinal:   s.ActiveOrdinal,
-				Operation:       fromV1beta1Op(s.Operation),
-				LastFailure:     fromV1beta1Termination(s.LastFailure),
-			}
+		// The production converters carry every field the engine reads
+		// and writes; a hand-listed copy that forgot one would hide a
+		// stamp the engine relies on across passes.
+		w := workload.InstanceStatus{Index: idx}
+		if pos != -1 {
+			w = v1beta1convert.InstanceStatusToWorkload(ir.Status.InstanceStatuses[pos])
 		}
 		if !mutate(&w) {
 			return nil
 		}
-		updated := v1beta1.OMENativeInstanceStatus{
-			Index:           w.Index,
-			Incarnation:     w.Incarnation,
-			Phase:           v1beta1.OMENativeInstancePhase(w.Phase),
-			RunningRevision: w.RunningRevision,
-			TargetRevision:  w.TargetRevision,
-			ActiveOrdinal:   w.ActiveOrdinal,
-			Operation:       toV1beta1Op(w.Operation),
-			LastFailure:     toV1beta1Termination(w.LastFailure),
-		}
+		updated := v1beta1convert.InstanceStatusFromWorkload(w)
 		if pos == -1 {
 			ir.Status.InstanceStatuses = append(ir.Status.InstanceStatuses, updated)
 		} else {
@@ -244,51 +260,11 @@ func testMutateInstance(c client.Client, isvc *v1beta1.InferenceService, compone
 	}
 }
 
-// fromV1beta1Op / toV1beta1Op delegate to the production converters for
-// the reason buildTestInput does: a field the reconciler writes but a
-// hand-listed helper forgets to copy is a silently-passing test.
+// fromV1beta1Op delegates to the production converter for the reason
+// buildTestInput does: a field the reconciler writes but a hand-listed
+// helper forgets to copy is a silently-passing test.
 func fromV1beta1Op(op *v1beta1.InstanceOperation) *workload.InstanceOperation {
 	return v1beta1convert.InstanceOperationToWorkload(op)
-}
-
-func toV1beta1Op(op *workload.InstanceOperation) *v1beta1.InstanceOperation {
-	return v1beta1convert.InstanceOperationFromWorkload(op)
-}
-
-func fromV1beta1Termination(t *v1beta1.InstanceTermination) *workload.InstanceTermination {
-	if t == nil {
-		return nil
-	}
-	out := &workload.InstanceTermination{
-		PodName:       t.PodName,
-		ContainerName: t.ContainerName,
-		Reason:        t.Reason,
-		Message:       t.Message,
-		Time:          t.Time,
-	}
-	if t.ExitCode != nil {
-		e := *t.ExitCode
-		out.ExitCode = &e
-	}
-	return out
-}
-
-func toV1beta1Termination(t *workload.InstanceTermination) *v1beta1.InstanceTermination {
-	if t == nil {
-		return nil
-	}
-	out := &v1beta1.InstanceTermination{
-		PodName:       t.PodName,
-		ContainerName: t.ContainerName,
-		Reason:        t.Reason,
-		Message:       t.Message,
-		Time:          t.Time,
-	}
-	if t.ExitCode != nil {
-		e := *t.ExitCode
-		out.ExitCode = &e
-	}
-	return out
 }
 
 // findInstanceStatusOnIR looks up the InstanceStatus by (component, idx) on the

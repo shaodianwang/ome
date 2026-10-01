@@ -372,13 +372,14 @@ func TestSurgeRevisionAndSpec_ReturnsGangWorkerSpec(t *testing.T) {
 	}
 
 	input := legacyTestInput(isvc, c, workload.ComponentEngine)
-	gotCR, gotLeader, gotWorker, err := surgeRevisionAndSpec(context.Background(), legacyTestDeps(c), input, 0)
+	gotCR, gotPayload, err := surgeRevisionAndSpec(context.Background(), legacyTestDeps(c), input, 0)
 	if err != nil {
 		t.Fatalf("surgeRevisionAndSpec: %v", err)
 	}
-	if gotCR == nil || gotLeader == nil {
-		t.Fatalf("expected CR + leader spec, got cr=%v leader=%v", gotCR, gotLeader)
+	if gotCR == nil || gotPayload == nil || gotPayload.PodSpec == nil {
+		t.Fatalf("expected CR + leader spec, got cr=%v payload=%+v", gotCR, gotPayload)
 	}
+	gotWorker := gotPayload.WorkerPodSpec
 	if gotWorker == nil {
 		t.Fatalf("expected a worker spec for a gang revision, got nil")
 	}

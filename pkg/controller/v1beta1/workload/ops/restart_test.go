@@ -22,6 +22,7 @@ import (
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/ops"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/podreadiness"
 	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/query"
+	"github.com/ome-projects/ome/pkg/controller/v1beta1/workload/revision"
 	workload "github.com/ome-projects/ome/pkg/controller/v1beta1/workload/types"
 )
 
@@ -243,7 +244,7 @@ func TestRestart_CreatesNewPodAtBumpedIncarnation(t *testing.T) {
 			Type: v1beta1.InstanceOperationRestart, Step: "Drain", Reason: "x",
 		},
 	}
-	c := newFakeClient(t, isvc, ir)
+	c := newFakeClient(t, isvc, ir, fixtureRevision(t, isvc))
 	input := buildTestInput(isvc, c, workload.ComponentEngine)
 	plan := buildPlanSinglePodEngineForRestart(c, isvc)
 
@@ -276,7 +277,7 @@ func TestRestart_ConvergesAcrossPasses(t *testing.T) {
 	failed := podAtIncarnation(isvc, 0, 1, true, true)
 	failed.Status.Phase = corev1.PodFailed
 	slice := sliceWithEndpoint("prod", "engine-svc-1", "llama-70b-engine-rev-"+testRevisionHash, failed, false /* drained */)
-	c := newFakeClient(t, isvc, ir, failed, slice)
+	c := newFakeClient(t, isvc, ir, failed, slice, fixtureRevision(t, isvc))
 
 	const maxPasses = 8
 	for pass := 0; pass < maxPasses; pass++ {
@@ -1510,7 +1511,7 @@ func TestRestart_PodLostAsTheRepairStampCommitsStillDrains(t *testing.T) {
 	ir.Status.InstanceStatuses[0].RunningRevision = crashLoopRevision
 	// The pod the crash-loop trigger read is gone by the time the stamp
 	// commits, so the pass sees the index with no pods at all.
-	c := newFakeClient(t, isvc, ir)
+	c := newFakeClient(t, isvc, ir, fixtureRevision(t, isvc))
 	input := buildTestInput(isvc, c, workload.ComponentEngine)
 	input.StuckPodGrace = time.Minute
 	input.ObservedState.CurrentRevision = crashLoopRevision
@@ -1838,7 +1839,7 @@ func TestRestart_DemotedRowRebuildsAtRunningRevision(t *testing.T) {
 	running := "llama-70b-engine-" + testRevisionHash
 	ir.Status.InstanceStatuses[0].Phase = v1beta1.OMENativeInstancePending
 	ir.Status.InstanceStatuses[0].RunningRevision = running
-	c := newFakeClient(t, isvc, ir)
+	c := newFakeClient(t, isvc, ir, fixtureRevision(t, isvc))
 	input := buildTestInput(isvc, c, workload.ComponentEngine)
 	input.ObservedState.UpdateRevision = "llama-70b-engine-0000target"
 	plan := buildPlanSinglePodEngineForRestart(c, isvc)
@@ -1935,5 +1936,182 @@ func TestRepairYieldsToTarget(t *testing.T) {
 				t.Fatalf("RepairYieldsToTarget = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// mintEngineRevision stores spec (and workerSpec, for a gang) as an engine
+// ControllerRevision through the production revision machinery, so the
+// name, the hash and the stored payload are what the adapter writes.
+func mintEngineRevision(t *testing.T, c client.Client, isvc *v1beta1.InferenceService, spec, workerSpec *corev1.PodSpec) *appsv1.ControllerRevision {
+	t.Helper()
+	key := revision.Key{Namespace: isvc.Namespace, Name: isvc.Name + "-" + string(workload.ComponentEngine)}
+	cr, _, err := revision.EnsureControllerRevisionWithWorker(context.Background(), c, c, isvc,
+		v1beta1.SchemeGroupVersion.WithKind("InferenceService"), key, spec, workerSpec, nil, nil, isvc.UID)
+	if err != nil {
+		t.Fatalf("mint revision: %v", err)
+	}
+	return cr
+}
+
+// restartingRow rewrites the engine Instance 0 row as an open Restart at
+// incarnation 2 running rev, with the old pods already gone: the shape
+// Phase B of the repair rebuilds from.
+func restartingRow(t *testing.T, c client.Client, isvc *v1beta1.InferenceService, rev string) {
+	t.Helper()
+	ir := &v1beta1.InferenceReplica{}
+	key := client.ObjectKey{Namespace: isvc.Namespace, Name: irName(isvc, workload.ComponentEngine)}
+	if err := c.Get(context.Background(), key, ir); err != nil {
+		t.Fatalf("get IR: %v", err)
+	}
+	ir.Status.InstanceStatuses = []v1beta1.OMENativeInstanceStatus{{
+		Index:           0,
+		Incarnation:     2,
+		Phase:           v1beta1.OMENativeInstanceRestarting,
+		RunningRevision: rev,
+		Operation:       &v1beta1.InstanceOperation{Type: v1beta1.InstanceOperationRestart, Step: "Drain", Reason: "pod count 0 below desired 1"},
+	}}
+	if err := c.Status().Update(context.Background(), ir); err != nil {
+		t.Fatalf("stamp Restarting row: %v", err)
+	}
+}
+
+// TestRestart_RendersTheStampedRevisionTemplate: the rebuild renders the
+// template the stamped revision stores, not the Component's current one.
+// The running revision was minted with one image and the desired
+// template has moved to another, so a pod rendered from the wrong source
+// is visible by its image: it must carry the running revision's image
+// under the running revision's label, for a single pod and for both
+// members of a gang.
+//
+// Cells: instance/Restart/Drain/spec.revision/before
+func TestRestart_RendersTheStampedRevisionTemplate(t *testing.T) {
+	const (
+		runningImage       = "registry.example.com/runtime:v1"
+		runningWorkerImage = "registry.example.com/runtime-worker:v1"
+		movedImage         = "registry.example.com/runtime:v2"
+		movedWorkerImage   = "registry.example.com/runtime-worker:v2"
+	)
+	cases := []struct {
+		name string
+		gang bool
+	}{
+		{name: "single pod"},
+		{name: "gang", gang: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resetExpectations(t)
+			isvc, ir := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+			c := newFakeClient(t, isvc, ir)
+			var workerSpec *corev1.PodSpec
+			if tc.gang {
+				workerSpec = &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: runningWorkerImage}}}
+			}
+			running := mintEngineRevision(t, c, isvc, &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: runningImage}}}, workerSpec)
+			restartingRow(t, c, isvc, running.Name)
+
+			input := buildTestInput(isvc, c, workload.ComponentEngine)
+			input.DesiredSpec.PodSpec = &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: movedImage}}}
+			input.ObservedState.UpdateRevision = "llama-70b-engine-0000next"
+			var plan workload.ComponentPlan
+			if tc.gang {
+				input.DesiredSpec.WorkerPodSpec = &corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: movedWorkerImage}}}
+				plan = buildPlanGangEngine(workload.RestartPolicyRecreateInstance)
+			} else {
+				plan = buildPlanSinglePodEngineForRestart(c, isvc)
+			}
+
+			done, err := ops.Restart(context.Background(), workload.Deps{Client: c}, input, plan, plan.Instances[0], "pod count 0 below desired 1")
+			if err != nil {
+				t.Fatalf("Restart: %v", err)
+			}
+			if done {
+				t.Fatalf("expected done=false while the rebuilt pods are not yet Ready")
+			}
+			pods := &corev1.PodList{}
+			if err := c.List(context.Background(), pods, client.InNamespace("prod")); err != nil {
+				t.Fatalf("list pods: %v", err)
+			}
+			want := 1
+			if tc.gang {
+				want = 2
+			}
+			if len(pods.Items) != want {
+				t.Fatalf("pods: got %d want %d", len(pods.Items), want)
+			}
+			for _, pod := range pods.Items {
+				if got := pod.Labels[query.LabelRevisionHash]; got != query.RevisionOf(running).Hash() {
+					t.Errorf("pod %s revision label = %q, want the running revision %q", pod.Name, got, query.RevisionOf(running).Hash())
+				}
+				wantImage := runningImage
+				if pod.Labels[query.LabelRunner] == "worker" {
+					wantImage = runningWorkerImage
+				}
+				if got := pod.Spec.Containers[0].Image; got != wantImage {
+					t.Errorf("pod %s image = %q, want %q: the rebuild must render the stamped revision's template, not the current one", pod.Name, got, wantImage)
+				}
+			}
+		})
+	}
+}
+
+// TestRestart_HoldsWhenTheStampedRevisionIsGone: a rebuild whose stamped
+// revision has no ControllerRevision left creates nothing rather than
+// rendering the current template under that revision's label. It says so
+// once per attempt and leaves the attempt open for its deadline.
+//
+// Cells: instance/Restart/Drain/api.notFound/before
+func TestRestart_HoldsWhenTheStampedRevisionIsGone(t *testing.T) {
+	resetExpectations(t)
+	isvc, ir := isvcReadyAtIncarnation("llama-70b", "prod", 1)
+	c := newFakeClient(t, isvc, ir)
+	const gone = "llama-70b-engine-0000gone"
+	restartingRow(t, c, isvc, gone)
+	plan := buildPlanSinglePodEngineForRestart(c, isvc)
+	rec := record.NewFakeRecorder(8)
+	deps := workload.Deps{Client: c, Recorder: rec}
+
+	for pass := 0; pass < 2; pass++ {
+		fresh := &v1beta1.InferenceService{}
+		if err := c.Get(context.Background(), client.ObjectKeyFromObject(isvc), fresh); err != nil {
+			t.Fatalf("get isvc: %v", err)
+		}
+		input := buildTestInput(fresh, c, workload.ComponentEngine)
+		done, err := ops.Restart(context.Background(), deps, input, plan, plan.Instances[0], "pod count 0 below desired 1")
+		if err != nil {
+			t.Fatalf("pass %d: Restart: %v", pass, err)
+		}
+		if done {
+			t.Fatalf("pass %d: a rebuild with no template to render from cannot be done", pass)
+		}
+	}
+	pods := &corev1.PodList{}
+	if err := c.List(context.Background(), pods, client.InNamespace("prod")); err != nil {
+		t.Fatalf("list pods: %v", err)
+	}
+	if len(pods.Items) != 0 {
+		t.Fatalf("the rebuild created %d pod(s) from the current template under the gone revision's label", len(pods.Items))
+	}
+	s := findInstanceStatusOnIR(c, isvc, workload.ComponentEngine, 0)
+	if s == nil || s.Phase != v1beta1.OMENativeInstanceRestarting || s.Operation == nil || s.RunningRevision != gone {
+		t.Fatalf("row = %+v, want the Restart left open on %s", s, gone)
+	}
+	var warnings []string
+	for {
+		select {
+		case e := <-rec.Events:
+			if strings.Contains(e, string(workload.EventReasonRepairRevisionGone)) {
+				warnings = append(warnings, e)
+			}
+			continue
+		default:
+		}
+		break
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("%s events = %v, want exactly one across two passes", workload.EventReasonRepairRevisionGone, warnings)
+	}
+	if !strings.Contains(warnings[0], gone) || !strings.HasPrefix(warnings[0], "Warning ") {
+		t.Fatalf("event %q must be a Warning naming the revision %s", warnings[0], gone)
 	}
 }

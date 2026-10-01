@@ -1,0 +1,52 @@
+# A Ready Instance under RecreateInstanceOnPodRestart loses its pod to a
+# terminal phase and the repair opens; the drained pod is still Terminating
+# when the template moves to a new revision. The open repair is driven
+# whatever the target says, and the pod it rebuilds is rendered from the
+# stored template of the revision it stamps: it runs the running revision's
+# image, not the current template's, so the label and the content agree.
+# The roll takes the row once the repair promotes it.
+scenario: restart-retarget
+arrows:
+  - T-ready-restart-podterminal
+  - T-restart-ready
+  - T-ready-surge
+cells:
+  - instance/Restart/Drain/spec.revision/before
+initial:
+  spec:
+    replicas: 1
+    strategy: SurgeThenDrain
+    restartPolicy: RecreateInstanceOnPodRestart
+    image: registry.example.com/runtime:v1
+    instanceReadyTimeout: 30m
+  config:
+    requeueOperation: 5s
+    requeueGate: 3s
+  rows:
+    - {index: 0, phase: Ready, runningRevision: current, readySince: 0s}
+  pods:
+    - {index: 0, ready: true, serving: true, routed: true}
+timeline:
+  - tick: 1
+    note: the Ready row is steady on its one serving pod
+  - tick: 2
+    note: the pod leaves rotation and reports Failed, so the repair opens a Restart and deletes it; the kubelet still holds it Terminating
+    events:
+      - endpoint.rotationOut[source]: {pod: {index: 0}}
+      - pod.servingOff[source]: {pod: {index: 0}}
+      - pod.phaseTerminal[Failed]: {pod: {index: 0}}
+  - tick: 3
+    note: the template moves to a new revision while the repair is open; the repair is driven on and waits for the old pod to clear
+    events:
+      - spec.revision: {image: registry.example.com/runtime:v2}
+  - tick: 4
+    note: the old pod is gone and the repair rebuilds the Instance from the running revision's stored template, under that revision's label
+    events:
+      - pod.deleted[source]: {pod: {index: 0}}
+  - tick: 5
+    note: the rebuilt pod reports Ready and enters rotation, and the repair promotes the row on the running revision
+    events:
+      - pod.ready[source]: {pod: {index: 0}}
+      - endpoint.rotationIn[source]: {pod: {index: 0}}
+  - tick: 6
+    note: the roll takes the repaired Instance and surges a replacement at the new revision

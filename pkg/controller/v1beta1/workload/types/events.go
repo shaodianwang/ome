@@ -192,6 +192,14 @@ const (
 	// waits on.
 	EventReasonRepairHeld EventReason = "RepairHeld"
 
+	// EventReasonRepairRevisionGone fires once per attempt when a rebuild
+	// cannot render the revision it stamps because that revision's
+	// ControllerRevision no longer exists. The pods are not recreated from
+	// the current template under the missing revision's label; the
+	// attempt runs to its deadline instead, and the event names the
+	// Instance and the revision so the hold is not silent.
+	EventReasonRepairRevisionGone EventReason = "RepairRevisionGone"
+
 	// EventReasonDrainOverdue fires once per overdue episode when a
 	// Deleting Instance's operation deadline elapses with pods still on
 	// their way out. Visibility only: the delete wave keeps the index,

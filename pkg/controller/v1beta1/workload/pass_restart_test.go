@@ -560,13 +560,18 @@ func newRestartScaleTestFixture(
 			v1beta1convert.InstanceStatusFromWorkload(status),
 		}},
 	}
+	input := minimalInput(t)
 	objects := []client.Object{isvc, ir}
+	if status.RunningRevision != "" {
+		// The row names the revision it runs; the rebuild renders that
+		// revision's stored template.
+		objects = append(objects, revisionWithPodSpec(t, status.RunningRevision, isvc.Namespace, input.DesiredSpec.PodSpec))
+	}
 	objects = append(objects, pods...)
 	c := fake.NewClientBuilder().WithScheme(scheme).
 		WithStatusSubresource(&v1beta1.InferenceService{}, &v1beta1.InferenceReplica{}).
 		WithObjects(objects...).Build()
 
-	input := minimalInput(t)
 	input.OwnerObject = isvc
 	input.EventTarget = isvc
 	input.Key.OwnerName = isvc.Name

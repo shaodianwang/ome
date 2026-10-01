@@ -429,7 +429,19 @@ func Restart(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		if !deps.ExpectationsCache().Satisfied(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, inst.Index) {
 			return false, nil
 		}
-		if _, err := createMissingPods(ctx, deps, input, plan, newInst, inst.Index, missing, revisionForInstance(input, inst.Index)); err != nil {
+		// The rebuild renders the revision it stamps. The Component's
+		// current template is that revision's only while the Instance runs
+		// the roll target; a repair under a pause, a Held target or a
+		// retarget that landed after the repair opened stamps another
+		// revision, whose template is the one its ControllerRevision stores.
+		tmpl, found, err := rebuildTemplate(ctx, deps, input, plan, inst.Index)
+		if err != nil {
+			return false, fmt.Errorf("Restart: resolve rebuild template (instance=%d): %w", inst.Index, err)
+		}
+		if !found {
+			return false, announceRevisionGone(ctx, deps, input, inst.Index, rebuildRevision(input.ObservedState.Instance(inst.Index)))
+		}
+		if _, err := createMissingPods(ctx, deps, input, plan, newInst, inst.Index, missing, tmpl); err != nil {
 			if createRejectionHandled(err) {
 				return false, nil
 			}
@@ -497,16 +509,17 @@ func firstFailedPodTermination(pods []*corev1.Pod) *workload.InstanceTermination
 	return nil
 }
 
-// revisionForInstance returns the revision to stamp on pods
-// being recreated for one Instance. Restart keeps the Instance on its
-// existing revision (rebuildRevision). Returns the zero RevisionID when
-// nothing records a revision.
-func revisionForInstance(input workload.ReconcileInput, idx int32) query.RevisionID {
+// rebuildTemplate is the template a repair of Instance idx renders:
+// the stored template of the revision it rebuilds at (rebuildRevision),
+// stamped with that revision. found is false when that revision's
+// ControllerRevision is gone. A row that records no revision is rebuilt
+// from the current template with no revision label, as it was created.
+func rebuildTemplate(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, idx int32) (podTemplate, bool, error) {
 	rev := rebuildRevision(input.ObservedState.Instance(idx))
 	if rev == "" {
-		return query.RevisionID{}
+		return desiredTemplate(input, plan, query.RevisionID{}), true, nil
 	}
-	return query.RevisionFromName(rev)
+	return storedTemplate(ctx, deps.Reader(), input, rev)
 }
 
 // rebuildRevision names the revision a repair of this row would rebuild

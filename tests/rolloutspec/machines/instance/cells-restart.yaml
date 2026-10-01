@@ -230,10 +230,10 @@ cells:
   - state: Restart/Drain
     event: spec.revision
     outcome: defer
-    guard: the recreate stamps the Instance's running revision, so the fresh pods come back on the revision the repair started from
-    note: an open repair is driven to completion whatever the target says - while the pods are gone the rebuild lands on the running revision rather than adopting the target (revisionForInstance) - and the update pass takes the row once the promote lands Ready. Only a repair that has not opened yields to the roll (RepairYieldsToTarget)
+    guard: the recreate stamps the Instance's running revision and renders that revision's stored template, so the fresh pods come back on the revision the repair started from, label and content alike
+    note: an open repair is driven to completion whatever the target says - while the pods are gone the rebuild lands on the running revision rather than adopting the target, rendered from the ControllerRevision that revision stores and never from the moved template (rebuildTemplate) - and the update pass takes the row once the promote lands Ready. Only a repair that has not opened yields to the roll (RepairYieldsToTarget). A running revision whose ControllerRevision is gone rebuilds nothing - the pass announces RepairRevisionGone once per attempt and the attempt runs to its deadline - because rendering the moved template under the old label would route, count and drain one revision while running another
     placement: perm
-    coverage: {perm: [], unit: [TestPlan_Restart_OpenRepairIsDrivenWhateverTheTarget, TestRepairYieldsToTarget, TestDetectUpdateTrigger_NewTargetAgainstACrashLoopRepair], kind: []}
+    coverage: {perm: [], unit: [TestPlan_Restart_OpenRepairIsDrivenWhateverTheTarget, TestRepairYieldsToTarget, TestDetectUpdateTrigger_NewTargetAgainstACrashLoopRepair, TestRepair_OpenRepairRendersTheRevisionItStartedFrom, TestRepair_RebuildsTheRevisionItStamps_UnderPause, TestRestart_RendersTheStampedRevisionTemplate, TestStoredTemplate_RendersTheRevisionItNames], kind: [], replay: [restart-retarget]}
     status: decided
   - state: Restart/Drain
     event: spec.annotationOnly
@@ -394,10 +394,10 @@ cells:
   - state: Restart/Drain
     event: api.notFound
     outcome: ignore
-    note: a pod delete that reports NotFound counts as drained and the pass continues; an owner that has disappeared ends the reconcile through the owner-gone sentinel
+    note: a pod delete that reports NotFound counts as drained and the pass continues; an owner that has disappeared ends the reconcile through the owner-gone sentinel; a running revision whose ControllerRevision reads NotFound leaves the rebuild with no template to render, so the pass creates nothing rather than rendering the current template under that revision's label, announces RepairRevisionGone once per attempt, and the attempt runs to its deadline, from where the roll takes the row (ops/template.go)
     placement: perm
-    coverage: {perm: [], unit: [], kind: []}
-    status: current
+    coverage: {perm: [], unit: [TestRestart_HoldsWhenTheStampedRevisionIsGone, TestRepair_HoldsWhenTheStampedRevisionIsGone, TestStoredTemplate_GoneOrEmptyRevisionIsNotTheCurrentTemplate], kind: []}
+    status: decided
   - state: Restart/Drain
     event: api.quotaDenied
     outcome: defer

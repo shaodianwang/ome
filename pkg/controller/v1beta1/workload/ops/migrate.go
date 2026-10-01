@@ -270,13 +270,14 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		// the requester can't observe the rejection within its SLA.
 		// (nil, nil) means the CR was GC'd or RunningRevision isn't set
 		// yet — defer without ownership so other ops can run.
-		_, preRevSpec, preWorkerSpec, err := surgeRevisionAndSpec(ctx, deps, input, sourceIdx)
+		_, prePayload, err := surgeRevisionAndSpec(ctx, deps, input, sourceIdx)
 		if err != nil {
 			return false, false, fmt.Errorf("Migrate: resolve surge revision: %w", err)
 		}
-		if preRevSpec == nil {
+		if prePayload == nil {
 			return false, false, nil
 		}
+		preRevSpec, preWorkerSpec := prePayload.PodSpec, prePayload.WorkerPodSpec
 		preOverlay := &workload.MigrationOverlay{
 			FromNode:        req.FromNode,
 			HintTargetNodes: req.HintTargetNodes,
@@ -464,14 +465,19 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 
 	// Migration moves placement, not template — surge runs at the source's
 	// RunningRevision (leader + worker templates for a gang).
-	surgeRev, surgeRevSpec, surgeWorkerSpec, err := surgeRevisionAndSpec(ctx, deps, input, sourceIdx)
+	surgeRev, surgePayload, err := surgeRevisionAndSpec(ctx, deps, input, sourceIdx)
 	if err != nil {
 		return false, accepted, fmt.Errorf("Migrate: resolve surge revision: %w", err)
 	}
-	if surgeRev == nil || surgeRevSpec == nil {
+	if surgeRev == nil || surgePayload == nil {
 		// Source not yet promoted with a RunningRevision — retry.
 		return false, accepted, nil
 	}
+	surgeTemplate, err := templateFromPayload(input, surgeRev.Name, surgePayload)
+	if err != nil {
+		return false, accepted, fmt.Errorf("Migrate: resolve surge template: %w", err)
+	}
+	surgeRevSpec, surgeWorkerSpec := surgeTemplate.podSpec, surgeTemplate.workerPodSpec
 
 	// The surge mirrors the source's Runner layout: a single "default"
 	// pod, or leader + workers for a gang.
@@ -575,14 +581,10 @@ func Migrate(ctx context.Context, deps workload.Deps, input workload.ReconcileIn
 		if !deps.ExpectationsCache().Satisfied(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, surgeIdx) {
 			return false, accepted, nil
 		}
-		// Render against the surge revision's leader + worker PodSpecs (not
-		// input.DesiredSpec) so renderHook + per-Component metadata stay
-		// intact. Expectations bucket on surgeIdx (not sourceIdx) so surge
-		// creates track separately from source-side deletes.
-		surgeInput := input
-		surgeInput.DesiredSpec.PodSpec = surgeRevSpec
-		surgeInput.DesiredSpec.WorkerPodSpec = surgeWorkerSpec
-		if _, cerr := createMissingPods(ctx, deps, surgeInput, plan, surgeInst, surgeIdx, missing, query.RevisionOf(surgeRev)); cerr != nil {
+		// Render the surge revision's stored template. Expectations bucket
+		// on surgeIdx (not sourceIdx) so surge creates track separately
+		// from source-side deletes.
+		if _, cerr := createMissingPods(ctx, deps, input, plan, surgeInst, surgeIdx, missing, surgeTemplate); cerr != nil {
 			rejection, classified := asPodRejection(cerr)
 			// A permanently rejected surge can never be created, so the
 			// request is closed now rather than idling to its deadline —
@@ -1332,35 +1334,35 @@ func isMultiPodInstance(plan workload.ComponentPlan, sourceIdx int32) bool {
 	return false
 }
 
-// surgeRevisionAndSpec returns the source's RunningRevision CR + leader
-// (single-pod) PodSpec + worker PodSpec. (nil, nil, nil, nil) means no
-// recorded RunningRevision yet OR the CR was deleted — caller retries.
-// workerSpec is nil for single-pod Instances; for a gang it carries the
-// worker template so the surge gang's worker pods render correctly.
+// surgeRevisionAndSpec returns the source's RunningRevision CR and its
+// stored payload: the leader (single-pod) PodSpec, the worker PodSpec
+// for a gang, the template metadata and the pairing protocol. (nil, nil,
+// nil) means no recorded RunningRevision yet OR the CR was deleted —
+// caller retries.
 //
 // Reads the source's running revision from input.ObservedState; fetches
 // the CR via deps.Reader() (live read) so a stale cache doesn't return
 // a deleted CR as still-present.
-func surgeRevisionAndSpec(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, sourceIdx int32) (*appsv1.ControllerRevision, *corev1.PodSpec, *corev1.PodSpec, error) {
+func surgeRevisionAndSpec(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, sourceIdx int32) (*appsv1.ControllerRevision, *revision.DataPayload, error) {
 	source := input.ObservedState.Instance(sourceIdx)
 	if source == nil || source.RunningRevision == "" {
-		return nil, nil, nil, nil
+		return nil, nil, nil
 	}
 	cr := &appsv1.ControllerRevision{}
 	if err := deps.Reader().Get(ctx, client.ObjectKey{Namespace: input.Key.Namespace, Name: source.RunningRevision}, cr); err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, nil, nil, nil
+			return nil, nil, nil
 		}
-		return nil, nil, nil, fmt.Errorf("get source CR %s: %w", source.RunningRevision, err)
+		return nil, nil, fmt.Errorf("get source CR %s: %w", source.RunningRevision, err)
 	}
 	var payload revision.DataPayload
 	if err := json.Unmarshal(cr.Data.Raw, &payload); err != nil {
-		return nil, nil, nil, fmt.Errorf("unmarshal source CR data: %w", err)
+		return nil, nil, fmt.Errorf("unmarshal source CR data: %w", err)
 	}
 	if payload.PodSpec == nil {
-		return nil, nil, nil, fmt.Errorf("source CR %s missing podSpec payload", source.RunningRevision)
+		return nil, nil, fmt.Errorf("source CR %s missing podSpec payload", source.RunningRevision)
 	}
-	return cr, payload.PodSpec, payload.WorkerPodSpec, nil
+	return cr, &payload, nil
 }
 
 // patchInstanceStatusMigrating stamps source Phase=Migrating; SurgeIndex

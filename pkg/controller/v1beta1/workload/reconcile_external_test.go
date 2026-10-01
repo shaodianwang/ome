@@ -4465,7 +4465,270 @@ func TestPauseFreeze_RecreatePolicyTotalLossDemotesThenRepairs(t *testing.T) {
 	if got, want := pods[0].Labels[query.LabelRevisionHash], query.RevisionFromName(running).Hash(); got != want {
 		t.Fatalf("rebuilt pod revision label = %q, want %q (the running revision, not the target minted under the freeze)", got, want)
 	}
+	if got := pods[0].Spec.Containers[0].Image; got != goodImage {
+		t.Fatalf("rebuilt pod image = %q, want %q: the rebuild renders the running revision's template, not the one minted under the freeze", got, goodImage)
+	}
 	if got := pods[0].Labels[query.LabelInstanceIncarnation]; got != strconv.FormatInt(s.Incarnation, 10) {
 		t.Fatalf("rebuilt pod incarnation label = %q, want %d", got, s.Incarnation)
+	}
+}
+
+// loseRunner deletes the live pod of runner at index idx, the way an
+// operator or a node takes one member of a gang away.
+func (h *recoveryHarness) loseRunner(idx int32, runner string) {
+	h.t.Helper()
+	for _, pod := range h.podsOf(idx) {
+		if pod.Labels[query.LabelRunner] != runner {
+			continue
+		}
+		if err := h.c.Delete(h.ctx, pod); err != nil {
+			h.t.Fatalf("delete pod %s: %v", pod.Name, err)
+		}
+		return
+	}
+	h.t.Fatalf("no pod of instance %d runner %q to lose", idx, runner)
+}
+
+// terminatingPods counts the pods the kubelet model still holds as
+// Terminating.
+func (h *recoveryHarness) terminatingPods() int {
+	h.t.Helper()
+	pods := &corev1.PodList{}
+	if err := h.c.List(h.ctx, pods, client.InNamespace(recoveryNS)); err != nil {
+		h.t.Fatalf("list pods: %v", err)
+	}
+	n := 0
+	for i := range pods.Items {
+		if pods.Items[i].DeletionTimestamp != nil {
+			n++
+		}
+	}
+	return n
+}
+
+// repairedAbove reports whether Instance idx is Ready with no operation
+// at an incarnation above incarnation, holding its full pod set.
+func (h *recoveryHarness) repairedAbove(idx int32, incarnation int64) bool {
+	s := h.instance(idx)
+	return s != nil && s.Phase == workloadtypes.InstancePhaseReady && s.Operation == nil &&
+		s.Incarnation > incarnation && len(h.podsOf(idx)) == len(h.desired.Runners)
+}
+
+// requirePodsRender asserts that every live pod of Instance idx is the
+// revision rev end to end: rev's hash on its revision label and image in
+// its runner container. A pod whose label and image name different
+// revisions is routed, counted and drained as one revision while running
+// another.
+func (h *recoveryHarness) requirePodsRender(idx int32, rev *appsv1.ControllerRevision, image string) {
+	h.t.Helper()
+	pods := h.podsOf(idx)
+	if len(pods) != len(h.desired.Runners) {
+		h.dumpState("pod set")
+		h.t.Fatalf("instance %d has %d live pod(s), want %d", idx, len(pods), len(h.desired.Runners))
+	}
+	hash := query.RevisionOf(rev).Hash()
+	for _, pod := range pods {
+		if got := pod.Labels[query.LabelRevisionHash]; got != hash {
+			h.t.Fatalf("pod %s revision label = %q, want %q", pod.Name, got, hash)
+		}
+		if got := pod.Spec.Containers[0].Image; got != image {
+			h.t.Fatalf("pod %s labeled revision %s runs image %q, want %q: the rebuild rendered a template other than the revision it stamps", pod.Name, rev.Name, got, image)
+		}
+	}
+}
+
+// TestRepair_RebuildsTheRevisionItStamps_UnderPause: a repair rebuilds
+// exactly the revision it stamps. A plain pause withholds the roll and
+// keeps repairing, so an Instance that loses a pod while the Component's
+// template has moved on is rebuilt at its own revision; the rebuilt pods
+// must be rendered from that revision's stored template, not from the
+// current one, so the revision label, the per-revision Service selecting
+// on it and the image the pod runs agree. Single pod and gang, under the
+// pod-loss trigger of RecreateInstanceOnPodRestart and the crash-loop
+// repair that belongs to every policy. Once the pause clears the roll
+// replaces the repaired Instance at the new revision as usual.
+//
+// Cells: instance/Ready/pod.deleted[source]/boundary@T-ready-restart, instance/Ready/pod.waiting[CrashLoopBackOff]/before, instance/Ready/spec.pauseTrue/before, instance/Restart/Drain/spec.revision/before
+func TestRepair_RebuildsTheRevisionItStamps_UnderPause(t *testing.T) {
+	recreate := workloadtypes.RestartPolicyRecreateInstance
+	none := workloadtypes.RestartPolicyNone
+	cases := []struct {
+		name     string
+		multiPod bool
+		policy   workloadtypes.RestartPolicy
+		induce   func(h *recoveryHarness)
+	}{
+		{"single pod lost under RecreateInstanceOnPodRestart", false, recreate, func(h *recoveryHarness) { h.losePods(0) }},
+		{"single pod crash-looping under None", false, none, func(h *recoveryHarness) { h.crashPod(0, "", crashStartImage) }},
+		{"gang worker lost under RecreateInstanceOnPodRestart", true, recreate, func(h *recoveryHarness) { h.loseRunner(0, "worker") }},
+		{"gang worker crash-looping under None", true, none, func(h *recoveryHarness) { h.crashPod(0, "worker", crashStartImage) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRecoveryHarness(t, tc.multiPod)
+			policy := tc.policy
+			h.lifecycle.RestartPolicy = &policy
+			h.driveToReadyOnV1()
+			before := h.instance(0).Incarnation
+
+			h.setTarget(h.revFixed, fixedImage)
+			h.desired.Paused = true
+			tc.induce(h)
+			if !h.run(40, func() bool { return h.repairedAbove(0, before) }) {
+				h.dumpState("repair under pause")
+				t.Fatalf("the paused Component never repaired the Instance")
+			}
+			if s := h.instance(0); s.RunningRevision != h.revV1.Name {
+				t.Fatalf("repaired row records %q, want %s: a repair never advances the roll", s.RunningRevision, h.revV1.Name)
+			}
+			h.requirePodsRender(0, h.revV1, goodImage)
+
+			h.desired.Paused = false
+			if !h.run(80, func() bool { return h.settledOn(h.revFixed, 1) }) {
+				h.dumpState("roll after the pause")
+				t.Fatalf("the roll did not replace the repaired Instance at the new revision once the pause cleared")
+			}
+		})
+	}
+}
+
+// TestRepair_RebuildsTheRevisionItStamps_HeldTarget: the roll target is
+// Held, so a healthy Instance still on the stable revision that loses its
+// pod is repaired at its own revision. The rebuild must render the stable
+// revision's template: rendering the current template would run the held
+// image under the stable revision's label, inside the stable revision's
+// Service. The partition keeps one Instance on the stable revision while
+// the other exhausts the held target's attempts.
+//
+// Cells: instance/Ready/pod.deleted[source]/boundary@T-ready-restart
+func TestRepair_RebuildsTheRevisionItStamps_HeldTarget(t *testing.T) {
+	h := newRecoveryHarness(t, false)
+	h.replicas = 2
+	policy := workloadtypes.RestartPolicyRecreateInstance
+	h.lifecycle.RestartPolicy = &policy
+	partition := int32(1)
+	h.lifecycle.UpdateStrategy = &workloadtypes.UpdateStrategy{
+		Type:          workloadtypes.UpdateStrategySurgeThenDrain,
+		RollingUpdate: &workloadtypes.RollingUpdate{Partition: &partition},
+	}
+	h.setTarget(h.revV1, goodImage)
+	if !h.run(40, func() bool { return h.settledOn(h.revV1, 2) }) {
+		h.dumpState("initial create")
+		t.Fatalf("initial create never converged on two Instances")
+	}
+	h.driveToHeld()
+	h.settle(5)
+	stable := h.instance(0)
+	if stable == nil || stable.Phase != workloadtypes.InstancePhaseReady || stable.Operation != nil || stable.RunningRevision != h.revV1.Name {
+		h.dumpState("at Held")
+		t.Fatalf("the partitioned Instance must still be Ready on the stable revision at Held, got %+v", stable)
+	}
+	before := stable.Incarnation
+
+	h.losePods(0)
+	// Stop at the first rebuilt pod as well as at the finished repair, so
+	// a rebuild rendered from the wrong template is reported as such
+	// rather than as a repair that never finished.
+	rebuilt := func() bool { return len(h.podsOf(0)) > 0 }
+	if !h.run(40, func() bool { return h.repairedAbove(0, before) || rebuilt() }) {
+		h.dumpState("repair under a Held target")
+		t.Fatalf("the stable Instance was never repaired while the target is Held")
+	}
+	h.requirePodsRender(0, h.revV1, goodImage)
+	if !h.run(40, func() bool { return h.repairedAbove(0, before) }) {
+		h.dumpState("repair under a Held target")
+		t.Fatalf("the stable Instance was never repaired while the target is Held")
+	}
+	if s := h.instance(0); s.RunningRevision != h.revV1.Name {
+		t.Fatalf("repaired row records %q, want %s", s.RunningRevision, h.revV1.Name)
+	}
+	h.requirePodsRender(0, h.revV1, goodImage)
+}
+
+// TestRepair_OpenRepairRendersTheRevisionItStartedFrom: an open repair is
+// driven to completion whatever the target says, and the pods it
+// rebuilds come back on the revision the repair started from. The
+// template moves while the drained pod is still Terminating, so the
+// rebuild runs on a pass whose current template is the new revision's;
+// it must still render the running revision's stored template. The roll
+// takes the row once the repair promotes it.
+//
+// Cells: instance/Restart/Drain/spec.revision/before
+func TestRepair_OpenRepairRendersTheRevisionItStartedFrom(t *testing.T) {
+	h := newRecoveryHarness(t, false)
+	h.podGrace = 10 * time.Minute
+	policy := workloadtypes.RestartPolicyRecreateInstance
+	h.lifecycle.RestartPolicy = &policy
+	h.driveToReadyOnV1()
+	before := h.instance(0).Incarnation
+
+	h.crashPod(0, "", crashStartImage)
+	if !h.run(10, func() bool { return h.repairInFlight() && len(h.livePods()) == 0 && h.terminatingPods() == 1 }) {
+		h.dumpState("repair opening")
+		t.Fatalf("the repair never drained the crashed pod")
+	}
+
+	h.setTarget(h.revFixed, fixedImage)
+	if !h.run(60, func() bool { return h.repairedAbove(0, before) }) {
+		h.dumpState("open repair after the retarget")
+		t.Fatalf("the open repair did not finish after the template moved")
+	}
+	if s := h.instance(0); s.RunningRevision != h.revV1.Name {
+		t.Fatalf("repaired row records %q, want %s", s.RunningRevision, h.revV1.Name)
+	}
+	h.requirePodsRender(0, h.revV1, goodImage)
+
+	if !h.run(80, func() bool { return h.settledOn(h.revFixed, 1) }) {
+		h.dumpState("roll after the repair")
+		t.Fatalf("the roll did not take the repaired Instance to the new revision")
+	}
+}
+
+// TestRepair_HoldsWhenTheStampedRevisionIsGone: a repair whose stamped
+// revision has no ControllerRevision left cannot render the revision it
+// stamps, and must not render the current template under that revision's
+// label instead. It creates nothing, says so once, and the attempt runs to
+// its deadline; from Failed the ordinary roll replaces the Instance at the
+// current revision once the pause clears.
+//
+// Cells: instance/Restart/Drain/api.notFound/before
+func TestRepair_HoldsWhenTheStampedRevisionIsGone(t *testing.T) {
+	h := newRecoveryHarness(t, false)
+	h.recorder = record.NewFakeRecorder(64)
+	policy := workloadtypes.RestartPolicyRecreateInstance
+	h.lifecycle.RestartPolicy = &policy
+	h.lifecycle.InstanceReadyTimeout = &metav1.Duration{Duration: 5 * time.Minute}
+	h.driveToReadyOnV1()
+	if err := h.c.Delete(h.ctx, h.revV1); err != nil {
+		t.Fatalf("delete the running revision: %v", err)
+	}
+
+	h.setTarget(h.revFixed, fixedImage)
+	h.desired.Paused = true
+	h.losePods(0)
+	h.settle(3)
+	if pods := h.livePods(); len(pods) != 0 {
+		t.Fatalf("the repair rendered %s under revision label %q with the revision's template gone", pods[0].Spec.Containers[0].Image, pods[0].Labels[query.LabelRevisionHash])
+	}
+	if s := h.instance(0); s == nil || s.Phase != workloadtypes.InstancePhaseRestarting {
+		t.Fatalf("row = %+v, want the repair held open", s)
+	}
+	if !h.sawEvent(workloadtypes.EventReasonRepairRevisionGone) {
+		t.Fatalf("no %s event: the held repair must say why it creates nothing; events = %v", workloadtypes.EventReasonRepairRevisionGone, h.events)
+	}
+	announced := 0
+	for _, e := range h.events {
+		if strings.Contains(e, string(workloadtypes.EventReasonRepairRevisionGone)) {
+			announced++
+		}
+	}
+	if announced != 1 {
+		t.Fatalf("%s announced %d times, want once per attempt", workloadtypes.EventReasonRepairRevisionGone, announced)
+	}
+
+	h.desired.Paused = false
+	if !h.run(80, func() bool { return h.settledOn(h.revFixed, 1) }) {
+		h.dumpState("after the deadline")
+		t.Fatalf("the Instance never reached the current revision after the held repair's deadline")
 	}
 }

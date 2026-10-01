@@ -1280,6 +1280,7 @@ func TestGangSurge_PromotedPinnedTargetRecreatesMissingPodsBeforeNewerRevision(t
 	}
 	c := legacyNewFakeClient(t,
 		gangSurgeReadyRecoveryPod(isvcName, namespace, surgeIndex, "leader", "v1hash"),
+		legacyStoredRevision(t, namespace, committedRevision, input.DesiredSpec.PodSpec, input.DesiredSpec.WorkerPodSpec),
 	)
 	ensureCalls := 0
 	deps := legacyTestDeps(c)

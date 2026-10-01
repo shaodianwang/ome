@@ -1,0 +1,38 @@
+tick=1 note the Ready row is steady on its one serving pod
+tick=1 row=0 write no-op precondition=no-change
+tick=1 pass result=none
+tick=2 note the pod leaves rotation and reports Failed, so the repair opens a Restart and deletes it; the kubelet still holds it Terminating
+tick=2 apply endpoint.rotationOut[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 apply pod.servingOff[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 apply pod.phaseTerminal[Failed] pod=svc-a-engine-0-default-0 now=t+0s
+tick=2 row=0 write incarnation=2 phase=Restarting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Restart step=Drain reason=pod svc-a-engine-0-default-0 container main failed (Failed, exit 1) started=t+0s lastProgressAt=t+0s deadline=t+30m0s} precondition=ok
+tick=2 event Warning RestartTriggered OMENative component=engine instance=0 restart triggered: pod svc-a-engine-0-default-0 container main failed (Failed, exit 1) (incarnation=2)
+tick=2 row=0 write incarnation=2 phase=Restarting runningRevision=svc-a-engine-882059bb readySince=t+0s op=op#1{type=Restart step=Drain reason=pod svc-a-engine-0-default-0 container main failed (Failed, exit 1) started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-0-default-0 reason=Failed container=main exitCode=1} precondition=ok
+tick=2 pod delete name=svc-a-engine-0-default-0 grace=default
+tick=2 pass result=after:5s
+tick=3 note the template moves to a new revision while the repair is open; the repair is driven on and waits for the old pod to clear
+tick=3 apply spec.revision image=registry.example.com/runtime:v2 generation=1 now=t+0s
+tick=3 row=0 write no-op precondition=no-change
+tick=3 pass result=after:5s
+tick=4 note the old pod is gone and the repair rebuilds the Instance from the running revision's stored template, under that revision's label
+tick=4 apply pod.deleted[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=4 row=0 write no-op precondition=no-change
+tick=4 pod create name=svc-a-engine-0-default-0 revision=882059bb incarnation=2 ordinal=0 image=registry.example.com/runtime:v1
+tick=4 pass result=after:5s
+tick=5 note the rebuilt pod reports Ready and enters rotation, and the repair promotes the row on the running revision
+tick=5 apply pod.ready[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=5 apply endpoint.rotationIn[source] pod=svc-a-engine-0-default-0 now=t+0s
+tick=5 row=0 write no-op precondition=no-change
+tick=5 pod status-patch name=svc-a-engine-0-default-0 serving=absent→True
+tick=5 row=0 write incarnation=2 phase=Ready runningRevision=svc-a-engine-882059bb readySince=t+0s op=nil lastFailure={pod=svc-a-engine-0-default-0 reason=Failed container=main exitCode=1} precondition=ok
+tick=5 event Normal RestartCompleted OMENative component=engine instance=0 restart complete (incarnation=2)
+tick=5 row=0 write no-op precondition=no-change
+tick=5 event Normal InstanceReady OMENative component=engine instance=0 is Ready (1 pod(s) serving)
+tick=5 pass result=none
+tick=6 note the roll takes the repaired Instance and surges a replacement at the new revision
+tick=6 gate consult strategy=SurgeThenDrain surge=0 unavail=0 verdict=allow
+tick=6 row=0 write incarnation=2 phase=Updating runningRevision=svc-a-engine-882059bb targetRevision=svc-a-engine-6f8b1e6c readySince=t+0s op=op#2{type=Update step=Surge target=svc-a-engine-6f8b1e6c strategy=SurgeThenDrain started=t+0s lastProgressAt=t+0s deadline=t+30m0s} lastFailure={pod=svc-a-engine-0-default-0 reason=Failed container=main exitCode=1} precondition=ok
+tick=6 event Normal RecreateUpdateStarted OMENative component=engine instance=0 surge to revision svc-a-engine-6f8b1e6c (newOrdinal=1)
+tick=6 pod create name=svc-a-engine-0-default-1 revision=6f8b1e6c incarnation=2 ordinal=1
+tick=6 hold cleared
+tick=6 pass result=after:5s

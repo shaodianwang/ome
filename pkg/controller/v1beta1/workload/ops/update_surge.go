@@ -393,7 +393,16 @@ func surgeUpdate(ctx context.Context, deps workload.Deps, input workload.Reconci
 		if !deps.ExpectationsCache().Satisfied(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, inst.Index) {
 			return false, nil
 		}
-		if _, err := createMissingPods(ctx, deps, input, plan, inst, inst.Index, targets, query.RevisionFromName(surgeTargetName)); err != nil {
+		// A pin that is the roll target renders the current template; a
+		// pin the target has moved away from renders its stored one.
+		tmpl, found, err := pinnedTemplate(ctx, deps.Reader(), input, plan, target, surgeTargetName)
+		if err != nil {
+			return false, fmt.Errorf("resolve surge template (instance=%d): %w", inst.Index, err)
+		}
+		if !found {
+			return false, announceRevisionGone(ctx, deps, input, inst.Index, surgeTargetName)
+		}
+		if _, err := createMissingPods(ctx, deps, input, plan, inst, inst.Index, targets, tmpl); err != nil {
 			if createRejectionHandled(err) {
 				return false, nil
 			}

@@ -325,6 +325,12 @@ Kubernetes event), `pod` / `podgroup` (create / patch / delete, including
 a rejected or failed one), the callback lines (`gate consult`, `hold`,
 `warn`, `condition`, `migration`), and `pass result=` closing every tick.
 
+A `pod create` line carries `image=` only when the created pod does not
+run the image the spec currently renders: a pod rebuilt from a stored
+revision after the template moved. The revision label says which revision
+the engine stamped; the image says which template it rendered, and the
+two must name the same revision.
+
 A row write after the `pass result=` line of a tick is the adapter's
 deadline park/rearm step, which runs after the dispatcher on every
 reconcile (and, when paused, once before it as well).

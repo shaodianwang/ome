@@ -269,8 +269,16 @@ func gangSurgeUpdate(ctx context.Context, deps workload.Deps, input workload.Rec
 		}
 		// Stamp the pinned in-flight rev hash (NOT the latest target) so
 		// the gang's pods match the revision this surge committed to and
-		// the per-revision drain Service selects them. See surgeTargetName.
-		if _, cerr := createMissingPods(ctx, deps, input, renderPlan, surgeInst, surgeIdx, missing, query.RevisionFromName(surgeTargetName)); cerr != nil {
+		// the per-revision drain Service selects them, and render that
+		// revision's template. See surgeTargetName.
+		tmpl, found, terr := pinnedTemplate(ctx, deps.Reader(), input, renderPlan, target, surgeTargetName)
+		if terr != nil {
+			return false, fmt.Errorf("resolve surge gang template (instance=%d): %w", surgeIdx, terr)
+		}
+		if !found {
+			return false, announceRevisionGone(ctx, deps, input, sourceIdx, surgeTargetName)
+		}
+		if _, cerr := createMissingPods(ctx, deps, input, renderPlan, surgeInst, surgeIdx, missing, tmpl); cerr != nil {
 			if createRejectionHandled(cerr) {
 				return false, nil
 			}

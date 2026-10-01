@@ -515,7 +515,7 @@ func processStartActions(
 		if !deps.ExpectationsCache().Satisfied(input.Key.Namespace, input.Key.OwnerName, input.Key.Component, action.instance.Index) {
 			continue
 		}
-		if _, err := createMissingPods(ctx, deps, input, plan, action.instance, action.instance.Index, action.missing, query.RevisionOf(target)); err != nil {
+		if _, err := createMissingPods(ctx, deps, input, plan, action.instance, action.instance.Index, action.missing, desiredTemplate(input, plan, query.RevisionOf(target))); err != nil {
 			rejection, classified := asPodRejection(err)
 			switch {
 			case classified && rejection.rejection.Class == workload.APIRejectionThrottled:
@@ -1114,16 +1114,17 @@ func activeOrdinalForInstance(input workload.ReconcileInput, idx int32) int32 {
 // createMissingPods renders and creates targets, owning the per-pod
 // ExpectCreates bookkeeping. idx is the expectations bucket — pass
 // inst.Index for steady-state Create / Restart Phase B. Callers must
-// NOT call ExpectCreates themselves. target, when non-zero, stamps
-// ome.io/revision-hash on every created pod so per-revision Services can
-// select it, and names the revision a rejection is charged against.
+// NOT call ExpectCreates themselves. tmpl pairs the template the pods
+// are rendered from with the revision they are stamped with: a non-zero
+// revision lands on ome.io/revision-hash so per-revision Services can
+// select the pod, and names the revision a rejection is charged against.
 //
 // Every create path in the engine funnels through here, so this is where
 // an apiserver rejection is READ rather than passed up opaquely. The
 // classified outcome is returned as a *podRejectionError; only an
 // unclassified (transient) rejection stays a *podCreateError, which callers
 // propagate.
-func createMissingPods(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, idx int32, targets []podTarget, target query.RevisionID) (int, error) {
+func createMissingPods(ctx context.Context, deps workload.Deps, input workload.ReconcileInput, plan workload.ComponentPlan, inst workload.InstancePlan, idx int32, targets []podTarget, tmpl podTemplate) (int, error) {
 	// A gang whose deterministic PodGroup name this owner cannot write —
 	// held by another controller, or by an object still being collected —
 	// gets no members: every pod is stamped with that name, so creating
@@ -1140,7 +1141,12 @@ func createMissingPods(ctx context.Context, deps workload.Deps, input workload.R
 		return 0, err
 	}
 	created := 0
+	target := tmpl.revision
 	revisionHash := target.Hash()
+	// The pairing protocol is part of the revision being rendered, not of
+	// the plan's current template.
+	renderPlan := plan
+	renderPlan.PairingProtocol = tmpl.pairingProtocol
 	// Prime the gang's peer-DNS host list once. It's identical for every
 	// pod in the Instance, so caching it here turns the per-pod O(gangsize)
 	// rebuild inside Render into O(gangsize) total per gang. inst is a value
@@ -1150,9 +1156,9 @@ func createMissingPods(ctx context.Context, deps workload.Deps, input workload.R
 		inst.PeerHostnames = buildInstancePeerHostnames(input.Key.OwnerName, plan.Component, inst)
 	}
 	for i, t := range targets {
-		template := input.DesiredSpec.PodSpec
-		if t.Runner.Name == workload.RunnerWorker && input.DesiredSpec.WorkerPodSpec != nil {
-			template = input.DesiredSpec.WorkerPodSpec
+		template := tmpl.podSpec
+		if t.Runner.Name == workload.RunnerWorker && tmpl.workerPodSpec != nil {
+			template = tmpl.workerPodSpec
 		}
 
 		pod, err := RenderWithRevision(
@@ -1160,8 +1166,8 @@ func createMissingPods(ctx context.Context, deps workload.Deps, input workload.R
 			input.OwnerGVK,
 			input.Key,
 			template,
-			input.DesiredSpec.PodTemplateObjectMeta,
-			plan,
+			tmpl.meta,
+			renderPlan,
 			inst,
 			t.Runner,
 			t.Ordinal,

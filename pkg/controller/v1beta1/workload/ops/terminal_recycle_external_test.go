@@ -246,7 +246,7 @@ func assertRestartRecyclesDeadPod(t *testing.T, kill func(*corev1.Pod) *corev1.P
 		},
 	}
 	dead := kill(podAtIncarnation(isvc, 0, 2, false, false))
-	c := newFakeClient(t, isvc, ir, dead)
+	c := newFakeClient(t, isvc, ir, dead, fixtureRevision(t, isvc))
 	deps := workload.Deps{Client: c}
 
 	input := buildTestInput(isvc, c, workload.ComponentEngine)
@@ -514,7 +514,7 @@ func TestRestart_RecyclesTerminalNewIncarnationPod(t *testing.T) {
 		},
 	}
 	dead := rejectedPod(podAtIncarnation(isvc, 0, 2, false, false))
-	c := newFakeClient(t, isvc, ir, dead)
+	c := newFakeClient(t, isvc, ir, dead, fixtureRevision(t, isvc))
 	deps := workload.Deps{Client: c}
 
 	input := buildTestInput(isvc, c, workload.ComponentEngine)
